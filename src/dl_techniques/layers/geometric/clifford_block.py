@@ -48,9 +48,9 @@ _GLOBAL_SHIFTS: List[int] = [1, 2]
 _GLOBAL_CLI_MODE: CliMode = "full"
 
 
-# ===========================================================================
+# ---------------------------------------------------------------------------
 # SparseRollingGeometricProduct
-# ===========================================================================
+# ---------------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
@@ -179,6 +179,7 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
         )
 
     # ------------------------------------------------------------------
+
     def build(self, input_shape: Tuple) -> None:
         """Build the projection layer.
 
@@ -199,6 +200,7 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
             self.build(config["input_shape"])
 
     # ------------------------------------------------------------------
+
     def call(
         self,
         z_det: keras.KerasTensor,
@@ -235,6 +237,7 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
         return self.proj(g_raw)
 
     # ------------------------------------------------------------------
+
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
@@ -248,6 +251,7 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
         return (*input_shape[:-1], self.channels)
 
     # ------------------------------------------------------------------
+
     def get_config(self) -> Dict[str, Any]:
         """Return serialisable configuration.
 
@@ -274,10 +278,9 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
         return config
 
 
-# ===========================================================================
+# ---------------------------------------------------------------------------
 # GatedGeometricResidual
-# ===========================================================================
-
+# ---------------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class GatedGeometricResidual(keras.layers.Layer):
@@ -385,6 +388,7 @@ class GatedGeometricResidual(keras.layers.Layer):
         )
 
     # ------------------------------------------------------------------
+
     def build(self, input_shape: Tuple) -> None:
         """Build LayerScale and the gate projection.
 
@@ -402,6 +406,7 @@ class GatedGeometricResidual(keras.layers.Layer):
         super().build(input_shape)
 
     # ------------------------------------------------------------------
+
     def call(
         self,
         h_norm: keras.KerasTensor,
@@ -431,6 +436,7 @@ class GatedGeometricResidual(keras.layers.Layer):
         return h_mix
 
     # ------------------------------------------------------------------
+
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
@@ -444,6 +450,7 @@ class GatedGeometricResidual(keras.layers.Layer):
         return (*input_shape[:-1], self.channels)
 
     # ------------------------------------------------------------------
+
     def get_config(self) -> Dict[str, Any]:
         """Return serialisable configuration.
 
@@ -465,9 +472,9 @@ class GatedGeometricResidual(keras.layers.Layer):
         return config
 
 
-# ===========================================================================
+# ---------------------------------------------------------------------------
 # CliffordNetBlock
-# ===========================================================================
+# ---------------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
@@ -679,6 +686,7 @@ class CliffordNetBlock(keras.layers.Layer):
         )
 
     # ------------------------------------------------------------------
+
     def build(self, input_shape: Tuple) -> None:
         """Build all sub-layers in dependency order.
 
@@ -723,6 +731,7 @@ class CliffordNetBlock(keras.layers.Layer):
         super().build(input_shape)
 
     # ------------------------------------------------------------------
+
     def call(
         self,
         inputs: keras.KerasTensor,
@@ -774,6 +783,7 @@ class CliffordNetBlock(keras.layers.Layer):
         return x_prev + h_mix
 
     # ------------------------------------------------------------------
+
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
@@ -787,6 +797,7 @@ class CliffordNetBlock(keras.layers.Layer):
         return input_shape
 
     # ------------------------------------------------------------------
+
     def get_config(self) -> Dict[str, Any]:
         """Return serialisable configuration.
 
@@ -813,10 +824,9 @@ class CliffordNetBlock(keras.layers.Layer):
         return config
 
 
-# ===========================================================================
+# ---------------------------------------------------------------------------
 # CausalCliffordNetBlock — sequence-safe variant for autoregressive LMs
-# ===========================================================================
-
+# ---------------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class CausalCliffordNetBlock(keras.layers.Layer):
@@ -970,6 +980,7 @@ class CausalCliffordNetBlock(keras.layers.Layer):
         )
 
     # ------------------------------------------------------------------
+
     @staticmethod
     def _causal_pad(x: keras.KerasTensor, kernel_size: int = 3) -> keras.KerasTensor:
         """Apply left-only (causal) zero-padding along the W axis.
@@ -983,6 +994,7 @@ class CausalCliffordNetBlock(keras.layers.Layer):
         return keras.ops.pad(x, [[0, 0], [0, 0], [pad_w, 0], [0, 0]])
 
     # ------------------------------------------------------------------
+
     def build(self, input_shape: Tuple) -> None:
         """Build all sub-layers."""
         spatial_shape = input_shape
@@ -1010,6 +1022,7 @@ class CausalCliffordNetBlock(keras.layers.Layer):
         super().build(input_shape)
 
     # ------------------------------------------------------------------
+
     def call(
         self,
         inputs: keras.KerasTensor,
@@ -1056,6 +1069,7 @@ class CausalCliffordNetBlock(keras.layers.Layer):
         return x_prev + h_mix
 
     # ------------------------------------------------------------------
+
     @staticmethod
     def _causal_cumulative_mean(
         x: keras.KerasTensor,
@@ -1077,12 +1091,14 @@ class CausalCliffordNetBlock(keras.layers.Layer):
         return cumsum / divisors
 
     # ------------------------------------------------------------------
+
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
         return input_shape
 
     # ------------------------------------------------------------------
+
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({
@@ -1102,9 +1118,9 @@ class CausalCliffordNetBlock(keras.layers.Layer):
         return config
 
 
-# ===========================================================================
+# ---------------------------------------------------------------------------
 # CliffordNetBlockDS — single-7x7-DW context with optional stride downsampling
-# ===========================================================================
+# ---------------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
@@ -1394,6 +1410,7 @@ class CliffordNetBlockDS(keras.layers.Layer):
         )
 
     # ------------------------------------------------------------------
+
     @staticmethod
     def _ceildiv(a: Optional[int], b: int) -> Optional[int]:
         """Ceiling division that propagates ``None`` (dynamic dim)."""
@@ -1412,6 +1429,7 @@ class CliffordNetBlockDS(keras.layers.Layer):
                 self._ceildiv(w, self.strides), d)
 
     # ------------------------------------------------------------------
+
     def build(self, input_shape: Tuple) -> None:
         """Build all sub-layers in dependency order.
 
@@ -1460,6 +1478,7 @@ class CliffordNetBlockDS(keras.layers.Layer):
         super().build(input_shape)
 
     # ------------------------------------------------------------------
+
     def call(
         self,
         inputs: keras.KerasTensor,
@@ -1522,6 +1541,7 @@ class CliffordNetBlockDS(keras.layers.Layer):
         return x_skip + h_mix
 
     # ------------------------------------------------------------------
+
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
@@ -1536,6 +1556,7 @@ class CliffordNetBlockDS(keras.layers.Layer):
         return self._pooled_shape(input_shape)
 
     # ------------------------------------------------------------------
+
     def get_config(self) -> Dict[str, Any]:
         """Return serialisable configuration.
 
@@ -1567,9 +1588,9 @@ class CliffordNetBlockDS(keras.layers.Layer):
         return config
 
 
-# ===========================================================================
+# ---------------------------------------------------------------------------
 # CliffordNetBlockDSv2 — design-space sibling for downsampling experiments
-# ===========================================================================
+# ---------------------------------------------------------------------------
 
 # Type aliases for v2 (additive — do not modify the v1 aliases above).
 SkipPoolV2 = Literal[
@@ -1666,6 +1687,8 @@ def _make_ctx_norm(
     if norm_type == "none":
         return None
     raise ValueError(f"Unknown ctx_norm_type: {norm_type!r}")
+
+# ---------------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
@@ -2048,9 +2071,9 @@ class CliffordNetBlockDSv2(keras.layers.Layer):
         return config
 
 
-# ===========================================================================
+# ---------------------------------------------------------------------------
 # CausalCliffordNetBlockDSv2 — causal sibling of CliffordNetBlockDSv2
-# ===========================================================================
+# ---------------------------------------------------------------------------
 
 
 # Type aliases scoped to the causal DSv2 surface (narrower than DSv2's).
@@ -2096,6 +2119,7 @@ def _make_causal_pool(
         f"Unknown causal pool kind: {kind!r} (expected 'avg' or 'max')."
     )
 
+# ---------------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class CausalCliffordNetBlockDSv2(keras.layers.Layer):
@@ -2537,3 +2561,5 @@ class CausalCliffordNetBlockDSv2(keras.layers.Layer):
             }
         )
         return config
+
+# ---------------------------------------------------------------------------

@@ -162,7 +162,7 @@ FastVLM processes an image in four main phases, progressively refining the featu
 │                  │ (Attention Blocks)│                           │
 │                  └────────┬──────────┘                           │
 │                           │                                      │
-│                  ┌────────▼──────────┐                           │
+│                  ┌────────▼───────────┐                          │
 │                  │ Classification Head│                          │
 │                  └────────────────────┘                          │
 └──────────────────────────────────────────────────────────────────┘

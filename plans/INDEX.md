@@ -31,3 +31,16 @@
 | plan_2026-05-11_3c3ed037 | 2026-05-11 | Two coupled deliverables in one iteration: |  |
 | plan_2026-05-11_0a5779e8 | 2026-05-11 | Refactor `src/dl_techniques/models/tree_transformer/` to mir |  |
 | plan_2026-05-11_9357982a | 2026-05-11 | Refactor `src/dl_techniques/models/bert/` to mirror the stru | iter-n/step-m |
+| plan_2026-05-11_a9e8e6f6 | 2026-05-11 | Refactor `src/dl_techniques/models/gpt2/` to follow the `res |  |
+| plan_2026-05-11_0090b0b8 | 2026-05-11 | Refactor `src/dl_techniques/models/cliffordnet/` to match th |  |
+| plan_2026-05-11_46ecfa0b | 2026-05-11 | Split `src/dl_techniques/models/tree_transformer/model.py` i |  |
+| plan_2026-05-12_f2d29729 | 2026-05-12 | Fix the train/val preprocessing divergence in `src/train/vit |  |
+| plan_2026-05-12_94b9fab5 | 2026-05-12 | Produce three deliverables for `src/dl_techniques/models/ada |  |
+| plan_2026-05-12_86f14c6e | 2026-05-12 | Fix `dl_techniques.models.adaptive_ema` per prior code revie |  |
+| plan_2026-05-12_5f0e087c | 2026-05-12 | Finish adaptive_ema: (1) I-3 vectorize `ExponentialMovingAve |  |
+| plan_2026-05-12_ebb5fac5 | 2026-05-12 | Comprehensive review of prism model — produce sibling-style  |  |
+| plan_2026-05-12_995a621a | 2026-05-12 | Make the tree encoder a participant in the DFSA reduction-sc |  |
+| plan_2026-05-12_e9584ff4 | 2026-05-12 | Add BLT-style tokenization-free byte-level language modeling | 0, 260)` (offset +4). output: plain `(b, t, 260)` logits (not dict-keyed). has dynamic entropy patcher (`entropymodel + dynamicpatcher`), `localencoder` cross-attn pooling, `globaltransformer`, `localdecoder` cross-attn back to bytes. `__init__.py` is empty. existing `src/train/blt/train_blt.py` uses synthetic data, multi-stage trainer, does not touch `train.common.nlp`. no public tests for blt. `bytetokenizer` at `dl_techniques/layers/blt_blocks.py:232` is a python-side text↔byte helper, not a tf.data pipeline. |
+| f-002 | current cliffordnetlmrouting integration surface | `findings/lm-routing-current.md` | token-id-keyed lm: `vocab_size=50261` (tiktoken gpt2 + 4 specials), `max_seq_length=512`, `channels∈{128..768}` is the feature dim d (not clifford algebraic dim). 3 embedding strategies (`hce`/`albert`/`dense`), causalcliffordnetblock×depth stack on 4-d tensors, head = `routingprobabilitieslayer(output_dim=vocab_size, mode={trainable,deterministic})` producing **probabilities** in `eps, 1-eps |
+| plan_2026-05-12_632605aa | 2026-05-12 | Create a bidirectional CliffordNet U-Net embedding model pac | "last_hidden_state" |
+| plan_2026-05-12_6a2cd5b3 | 2026-05-12 | Create `src/train/cliffordnet/wikipedia/pretrain.py` (+ `__i |  |

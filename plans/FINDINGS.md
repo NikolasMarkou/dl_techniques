@@ -34,526 +34,380 @@
 - **`current_phase` / `_global_step` counters**: `add_weight(trainable=False, dtype="float32")` — int32 fails CPU/GPU device placement.
 <!-- /COMPRESSED-SUMMARY -->
 
-## plan_2026-05-11_9357982a
+## plan_2026-05-12_6a2cd5b3
 ### Index
 
 | ID | Topic | File | Summary |
 |----|-------|------|---------|
-| F-001 | bert/ current state | `findings/bert-current-state.md` | 3 files, exports `BERT, create_bert_with_head, create_nlp_head`; no `create_bert`; `_download_weights` uses placeholder URLs; broad `except Exception` in `from_variant` (bert.py:716). |
-| F-002 | resnet + tree_transformer template | `findings/resnet-tree-transformer-template.md` | Target shape: 3-name `__init__`, module-level `create_<model>` factory, `_download_weights` raises `NotImplementedError`, narrow `(IOError, OSError, ValueError)` except in `from_variant`, 3 lock-in tests, per-step commits `[iter-N/step-M] bert: ...`. |
-| F-003 | bert/ issues (post double-check) | `findings/bert-issues.md` | I-01 HIGH silent random-init footgun; I-02 HIGH missing `create_bert` factory; I-03 MED stale `dl_techniques.nlp.heads` paths in docstring+README; I-04 MED `__init__` re-exports unused `create_nlp_head`; I-05/06 LOW (kept). |
+| F-001 | bert/wikipedia/pretrain.py structure | `findings/bert-wikipedia-pretrain.md` | Class-level `PretrainConfig`; HF streaming `datasets.load_dataset("wikipedia",...,streaming=True)` interleaved with BookCorpus; `tf.py_function` tokenize -> batch -> prefetch; `MirroredStrategy` + `mixed_float16`; `WarmupSchedule(...,CosineDecay(...))` + `AdamW(weight_decay=0.01, clipnorm=1.0, jit_compile=True)`; `ModelCheckpoint(save_freq=5000) + TensorBoard + BackupAndRestore`; single mega-epoch `steps_per_epoch=total_steps=100000`. Encoder-only saved at end. NO argparse. NO val split. BookCorpus often 401s on HF. `pretrain_english.py` adds ASCII-density english filter. |
+| F-002 | Data path trade-off | `findings/data-path-tradeoff.md` | Recommend `load_wikipedia_train_val` (Pattern B) over HF streaming (Pattern A): local cache `/media/arxwn/data0_4tb/datasets/wikipedia/wikimedia___wikipedia/` already populated, gives val split, reproducible, parallel tokenization via `num_shards>1`, matches established CliffordNet sibling trainers. Cost: no BookCorpus interleave (acceptable - restricted on HF). For MLM (one-article-per-example), use `min_article_length>=500` (LESSONS note: 0 is correct for *packed* CLM, NOT for MLM). |
+| F-003 | GPU budget + deps + horizon | `findings/gpu-budget-and-deps.md` | Empirically measured: nano=29M MLM params, mini=51M, base=275M. RTX 4090 24GB: nano @ batch=64 seq=512 comfortable; mini @ batch=32; base @ batch=16. `datasets 4.4.1` and `tiktoken 0.12.0` present in .venv. Wikipedia local cache verified. Smoke run = nano/batch=16/seq=128/max_samples=2000/total_steps=400 (~5 min). Real run = nano/batch=32/seq=512/total_steps<=50000 (multi-hour). Must run in background, single GPU, MPLBACKEND=Agg. Use `mixed_float16` for real run. |
 
 ### Key Constraints
 
-**HARD**
-- Keras 3 / TF 2.18; `@keras.saving.register_keras_serializable()`; full `get_config()` round-trip — must not break `test_config_serialization` or `test_model_save_load`.
-- All external callers of the bert package (4 train scripts + tests) import only `BERT` and `create_bert_with_head`. Public API must keep these names.
-- No `print` in library code (use `dl_techniques.utils.logger`).
-- Scope pytest to `tests/test_models/test_bert/` — never run full suite.
+### HARD
+- **Single GPU only** - GPU 0 = RTX 4090 24GB. Never run training jobs in parallel.
+- **`CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg`** prefix every training invocation.
+- **`run_in_background=True`** for real training run (multi-hour).
+- **Keras 3 / TF 2.18 idioms** - `@keras.saving.register_keras_serializable()`, `keras.ops`, `dl_techniques.utils.logger`, `get_config()` round-trip.
+- **`pad_token_id=100266`** (tiktoken cl100k_base) wired into encoder ctor - LESSONS canonical silent semantic bug.
+- **AdamW WD only** - no `kernel_regularizer=L2(...)` combined (LESSONS L72).
+- **No `make test`** as a regression check (~1.5h pre-push hook). Scope pytest to changed module.
+- **User pushes commits** - we commit locally only.
+- **Naming**: training script is `pretrain.py` under `src/train/cliffordnet/wikipedia/`, matches `bert/wikipedia/pretrain.py`. Add `__init__.py` (empty).
+- **For MLM with `load_wikipedia_train_val`, `min_article_length>=500`** - opposite of packed CLM convention.
+- **`prepare_dict_keyed_compile` NOT required** - MLM returns scalar loss via internal `compute_loss`. Verified in `train_embeddings.py`.
 
-**SOFT**
-- Match resnet template (the reference) but tree_transformer post-refactor (plan_2026-05-11_0a5779e8) is the more recent worked example for NLP encoders — prefer its idioms (3-name `__init__`, `vocab_size` convenience kwarg in factory, lock-in test class layout).
-- Commit-message style: `[iter-N/step-M] bert: <description>` (mirrors recent tree_transformer commits).
+### SOFT
+- Mirror `src/train/bert/wikipedia/pretrain.py` (data + callbacks + mega-epoch shape) + `src/train/cliffordnet/train_embeddings.py` (model + MLM + AdamW + argparse).
+- Wikipedia-only (skip BookCorpus).
+- Use `WarmupSchedule(... CosineDecay(...))` from `dl_techniques.optimization.warmup_schedule` (NOT `create_warmup_lr_schedule` which assumes epoch-shaped schedule).
+- Drop `tf.distribute.MirroredStrategy` wrapping - single GPU.
+- Save encoder-only at end via `mlm_model.encoder.save(...)`; periodic `ModelCheckpoint` during training saves full MLM model.
+- Use `BackupAndRestore` for preemption tolerance.
+- Smoke recipe: `--smoke` -> nano/batch=16/seq=128/max_train_samples=2000/total_steps=400/warmup=40/mixed_precision=False/save_freq=200/log_freq=10. Acceptance: train loss decreases.
+- Real recipe defaults: variant=nano/batch=32/seq=512/max_train_samples=None/total_steps=50000/warmup=5000/lr=5e-4/wd=0.01/mask_ratio=0.15/mixed_precision=True/save_freq=5000/log_freq=100. Acceptance: train+val loss decline; encoder saved.
+- argparse: `--gpu --variant --max-seq-length --batch-size --total-steps --warmup-steps --learning-rate --weight-decay --mask-ratio --pooling-strategy --save-dir --no-mixed-precision --max-train-samples --min-article-length --num-shards --seed --smoke`.
+- `__init__.py` empty (matches `train/bert/wikipedia/__init__.py`).
+- Verification: 1) py_compile new files; 2) import smoke; 3) `--smoke` GPU 0 run (~5 min) - assert final loss < initial; 4) real GPU 0 run (multi-hour, background) - observe train/val curves, save checkpoints.
 
-**GHOST**
-- "We might publish pretrained BERT weights soon" — no evidence in repo. URLs are `example.com` placeholders; treat as permanently unavailable for now (raise `NotImplementedError`, leave the dict in place for API parity). This unlocks the cleanest fix.
-- "`create_nlp_head` must be re-exported because some downstream consumer imports it from `bert`" — falsified by grep across `src/` and `tests/`.
+### GHOST (considered & rejected)
+- *HF streaming a la `bert/wikipedia/pretrain.py`* - REJECTED. Local cache gives val split + reproducibility + parallel tokenization. See F-002.
+- *`MirroredStrategy` for multi-GPU* - REJECTED. Single GPU constraint; heterogeneous GPUs (24GB+12GB) bottleneck.
+- *Mirror `train_embeddings.py` and just swap IMDB->Wikipedia* - PARTIALLY rejected. Yes for model/optim; NO for callbacks - need `BackupAndRestore + save_freq ModelCheckpoint` for multi-hour, not epoch-end `create_nlp_callbacks`.
+- *Include BookCorpus* - REJECTED. HF restricts; landmine. Wiki-only is honest.
+- *Add MLM smoke test inside this plan* - REJECTED. MLM<->CliffordNetEmbedding already covered by `plan_2026-05-12_632605aa` SC7 + existing test suite.
+- *Validate via existing `train_embeddings.py --smoke`* - REJECTED. New file is structurally different (single mega-epoch, save_freq, BackupAndRestore, mixed precision); smoke must run the NEW code path.
+
+### Exploration Confidence
+- **Scope: deep** - read `bert/wikipedia/{pretrain.py,pretrain_english.py}` end-to-end, `train_embeddings.py`, `datasets/nlp.py:load_wikipedia_train_val`. SYSTEM.md/LESSONS.md/just-closed FINDINGS reviewed.
+- **Solutions: constrained** - single correct shape: Pattern B data + bert/wikipedia callback set + train_embeddings.py model wiring. Variant/seq/batch empirically grounded.
+- **Risks: clear** - (a) BookCorpus 401 - avoided; (b) `tf.py_function` graph shapes - proven by `preprocess_mlm_dataset`; (c) GPU OOM - mitigated by nano-first; (d) BackupAndRestore + mixed precision - well-tested upstream; (e) multi-hour run interruption - mitigated by BackupAndRestore + frequent ModelCheckpoint.
 
 ### Corrections
-*None yet.*
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
 
-## plan_2026-05-11_0a5779e8
+## plan_2026-05-12_632605aa
 ### Index
 
 | ID | Topic | File | Summary |
 |----|-------|------|---------|
-| F-001 | Structure comparison: tree_transformer vs resnet | `findings/structure-comparison.md` | Both flat modules. Differences: tree_transformer over-exports 4 internal layer classes in `__init__.py`; lacks bare `create_tree_transformer(...)` factory analogous to `create_resnet(...)`; uses Sphinx-style docstrings vs ResNet/BERT Google-style; README is 405 LOC vs ResNet's 2486 (acceptable — domain difference). Both have `MODEL_VARIANTS`, `from_variant`, `get_config`/`from_config`. tree_transformer correctly uses `weight_transfer.load_weights_from_checkpoint` (Keras 3.8 `by_name=True` lesson); ResNet still uses the broken pattern (out of scope, 4th confirmed instance). |
-| F-002 | model.py post-iter-1 audit (bugs/issues/gaps) | `findings/model-py-audit.md` | After plan_3c3ed037's 4 fixes (B-1/B-3/B-4/B-5), module is functionally correct. Issues found: I-03 (MEDIUM) `from_variant(pretrained=True)` silently swallows `NotImplementedError` from `_download_weights` via `except Exception` — contract violation. I-09 stale docstring import path. I-10 stale `weights_dataset` docstring text. I-06 `__init__.py` over-exports. I-07 missing bare encoder factory. Several false positives ruled out. |
-| F-003 | Refactor targets aligned to resnet pattern | `findings/refactor-targets.md` | 5 in-scope changes: R-01 add `create_tree_transformer(...)` mirroring `create_resnet`; R-02 trim `__init__.py` to public API; R-03 fix I-03 silent-error contract violation; R-04/R-05 fix stale docstrings. Out of scope: Sphinx→Google docstring sweep, deep supervision, README expansion. Caller audit: only `dl_techniques.models.nam.*` and `src/train/nam/train_dfsa.py` import the internal layer classes — they import from `.model` directly, so trimming `__init__` exports is safe. |
+| F-001 | BERT encoder API + MLM contract | `findings/bert-encoder-api.md` | BERT is a pure encoder, no head. Dict in/out: `{input_ids, attention_mask, ...}` -> `{last_hidden_state (B,T,C), attention_mask}`. Required attr: `encoder.hidden_size`. Public surface = 3 names: `<Model>, create_<model>, create_<model>_with_head`. `MaskedLanguageModel` owns the MLM head and calls `encoder(inputs)["last_hidden_state"]`. Template: `MODEL_VARIANTS`, `PRETRAINED_WEIGHTS`, `_download_weights` raises `NotImplementedError`, `from_variant` with narrow `try/except (IOError, OSError, ValueError)` (plan_9357982a D-001). Pooling for embeddings: expose `pooling_strategy` ("mean"/"cls"/"max", default "mean"), compute pooled_output inside `call()`, emit dict `{last_hidden_state, pooled_output, attention_mask}`. |
+| F-002 | lmunet structure + non-causal Clifford blocks | `findings/lmunet-and-clifford-block.md` | Non-causal `CliffordNetBlock` (clifford_block.py:481) and `CliffordNetBlockDSv2` (line 1695) ALREADY EXIST with matching API. Zero changes to `clifford_block.py` needed. Surgical diff vs `lmunet.py`: swap causal classes for non-causal siblings, DELETE `_causal_upsample(x, s)` helper + its call site, REPLACE LM head with pooling head, change input to BERT-style dict, change output to embedding dict. Keep: variants ladder (nano/mini/base/large/xl), `channel_multiplier=1.5`, right-pad-to-stride + crop-back, linear DropPath schedule, channel ladder math, all invariants. `hidden_size == base_channels` (U-Net restores to top-level C0 at head). |
+| F-003 | Training pattern + objective + naming | `findings/trainer-pattern-and-objective.md` | Mirror `src/train/bert/pretrain.py` (~258 LOC) — Pattern-3 NLP MLM. Objective: MLM (BERT-style) — only self-supervised single-trainer option with existing infra (`MaskedLanguageModel`, `preprocess_mlm_dataset`). Encoder + `MaskedLanguageModel` wrapper -> `model.compile(optimizer=AdamW(...))` -> `model.fit(train_ds, validation_data=val_ds)`. Helpers in `train.common.nlp`: `create_tokenizer`, `load_text_dataset`, `preprocess_mlm_dataset`, `create_warmup_lr_schedule`, `create_nlp_callbacks`. Use tiktoken cl100k_base (vocab=100277, pad=100266, mask=100267). New file path: `src/dl_techniques/models/cliffordnet/embedding_unet.py` with class `CliffordNetEmbedding`. Trainer: `src/train/cliffordnet/train_embeddings.py`. Update `cliffordnet/__init__.py` to re-export 3 new names. |
 
 ### Key Constraints
 
-**HARD**
-- Existing tests (`tests/test_models/test_tree_transformer/test_model.py`, 744 LOC, 31 tests) must remain passing.
-- B-1/B-3/B-4/B-5 fixes from plan_3c3ed037 must remain intact (locked by `TestTreeTransformerIter1Fixes`).
-- `TreeTransformer`, `create_tree_transformer_with_head` must remain importable from `dl_techniques.models.tree_transformer` (package-level).
-- `GroupAttention, TreeMHA, PositionalEncoding, TreeTransformerBlock` must remain importable from `dl_techniques.models.tree_transformer.model` (used by nam package).
-- No commits to remote; user pushes themselves.
-- Full pytest suite is ~1.5h — only run the tree_transformer subdir test.
+### HARD
+- **Keras 3 / TF 2.18 idioms**: `@keras.saving.register_keras_serializable()` on every new class, `keras.ops` only, full `get_config()` round-trip, `dl_techniques.utils.logger` only (no `print`).
+- **MaskedLanguageModel encoder contract**: encoder must accept dict `{input_ids, attention_mask?}` and return dict with `"last_hidden_state": (B, T, hidden_size)`; must expose `self.hidden_size: int`.
+- **Public surface = 3 names** per __init__.py recipe (matches resnet/bert/tree_transformer): `<Model>, create_<model>, create_<model>_with_head`.
+- **`_download_weights` raises `NotImplementedError`** + `from_variant` narrow `try/except (IOError, OSError, ValueError)` (plan_9357982a D-001 ghost — no silent random-init fallback).
+- **`pad_token_id=100266`** wired into model config; matches tiktoken cl100k_base used by `create_tokenizer`. Mismatched pad is a silent semantic bug (LESSONS — tree_transformer pad_token_id incident).
+- **AdamW WD only — no `kernel_regularizer=L2`** combined with AdamW (LESSONS L72).
+- **Single GPU jobs only**; `MPLBACKEND=Agg` mandatory for any training-script invocation.
+- **No `make test`** as a regression check (~1.5h pre-push hook). Scope pytest to changed module only.
+- **Naming**: training script `train_embeddings.py`, NOT `train.py` (shadowing per train/CLAUDE.md). Model file `embedding_unet.py` to disambiguate from `lmunet.py` (causal LM variant).
+- **User pushes commits**; we commit locally only.
+- **Non-causal U-Net = standard symmetric upsample**: DELETE `_causal_upsample(x, stride)` from the new file's `call()` path. KEEP `pad-to-multiple-of-total_stride` + final crop (still needed for arbitrary seq_len divisibility — AccUNet lesson L102).
 
-**SOFT**
-- Mirror `resnet/` package structure as closely as the domain (NLP encoder vs vision classifier) allows.
-- Match `bert/__init__.py` style (model class + factories) for `__init__.py` exports.
-- Google-style docstrings preferred — full sweep deferred (cosmetic).
+### SOFT
+- Follow BERT pretrain.py structure: `TrainingConfig` class with class-level defaults, `create_<model>_mlm_model(config)`, `compile_model(...)`, `train(...)`, `evaluate_model(...)`, `main()` with argparse.
+- Mirror lmunet.py MODEL_VARIANTS shape (nano/mini/base/large/xl); use the SAME hyperparameters except for any block-class-specific quirks (e.g. non-causal DSv2 default `stream_pool="blur"` but we can pin to `"avg"` to match the causal baseline behavior).
+- Default `pooling_strategy="mean"` (mask-aware mean over tokens) — robust without special-token assumption. Also expose "cls" and "max".
+- Default `dataset_name="imdb_reviews"` for smoke; match BERT pretrain default.
+- Re-use the same defaults BERT uses for MLM hyperparams: `mask_ratio=0.15`, `random_token_ratio=0.1`, `unchanged_ratio=0.1`, `mlm_head_activation="gelu"`, `mlm_head_dropout=0.1`, `layer_norm_eps=1e-12`.
+- Skip `token_type_ids` entirely (single-sequence; lmunet doesn't model it). Encoder accepts dict with `{input_ids, attention_mask}`; ignore `token_type_ids` if passed.
+- For test file, mirror sibling test structure: `tests/test_models/test_cliffordnet/test_embedding_unet.py` with the standard 5-6 tests (init, forward, gradient, serialization round-trip, variants, pooling-strategy parity).
 
-**GHOST**
-- "tree_transformer should expose internal layers in `__init__`" — no caller in src/ relies on this; was an early default, not a deliberate API decision.
-- "Refactor implies a full rewrite" — bugs are already fixed; this plan is alignment + small bug-fixes.
+### GHOST (considered & rejected)
+- *"Add a `causal=False` flag to `CausalCliffordNetBlock`"* — REJECTED. Non-causal sibling already exists. Flag would bloat 2 classes for zero benefit.
+- *"Modify `lmunet.py` in place to support a `causal` flag"* — REJECTED. lmunet is the causal CLM variant locked by the existing `train_cliffordnet_nlp_unet.py` trainer + tests. Adding a flag risks regression. Pure additive new file is zero blast radius.
+- *"Use `CausalLanguageModel` wrapper instead of `MaskedLanguageModel`"* — REJECTED. The model is bidirectional; CLM is an autoregressive objective that requires causal masking.
+- *"Use the existing `lm_routing.py` head"* — REJECTED. RoutingProbabilitiesLayer is a vocab-probability head, not an embedding head.
+- *"Train via SimCSE / contrastive from scratch"* — REJECTED for iter-1. No precedent in dl_techniques; needs sentence-pair generation. MLM gives a usable embedding encoder; SimCSE/sentence-transformer fine-tune is a separate follow-up plan.
+- *"Place the embedding model under a new `cliffordnet_embedding/` subdir"* — REJECTED. User said "or a new subdir if appropriate — let exploration decide". The model is conceptually a cliffordnet variant (shares lmunet's U-Net body 95%), and the existing `cliffordnet/` package already hosts multiple model classes (CliffordNet, CliffordCLIP, CliffordNetLMRouting, CliffordNetLMUNet). Adding `CliffordNetEmbedding` to the same package matches established convention.
+
+### Exploration Confidence
+- **Scope: deep** — all 4 in-scope files read end-to-end (`bert.py` 1010 LOC, `lmunet.py` 710 LOC, `clifford_block.py` skimmed at class-header level — both causal/non-causal siblings confirmed). Sibling references: `train/bert/pretrain.py` + `finetune.py`, `train/cliffordnet/train_cliffordnet_nlp_unet.py`, `MaskedLanguageModel` source, `train.common.nlp` helper inventory. SYSTEM.md + LESSONS.md fully reviewed for ghost constraints.
+- **Solutions: constrained** — exactly one architecturally-correct approach: new file mirroring lmunet structure with non-causal swaps + pooling head + BERT-style dict I/O. MLM is the only single-trainer self-supervised objective with existing infra.
+- **Risks: clear** — main risks: (a) `MaskedLanguageModel` strictly requires `hidden_size` attr — covered, set explicitly; (b) attention_mask passthrough — covered, mirror BERT's pattern; (c) right-pad-to-stride zeroing real token embeddings — same as lmunet, already proven safe; (d) `_causal_upsample` removal — mathematically trivial since bidirectional has no causality constraint; (e) `pad_token_id` semantic bug — covered by HARD constraint above.
+
+### Synthesis
+
+Three deliverables, all additive, zero blast radius on existing code:
+
+1. **`src/dl_techniques/models/cliffordnet/embedding_unet.py`** (~600-700 LOC) — class `CliffordNetEmbedding(keras.Model)` mirroring `CliffordNetLMUNet` structure. Surgical changes: non-causal block classes, remove `_causal_upsample`, BERT-style dict I/O, pooling layer + pooled_output in output dict, expose `self.hidden_size`. Plus `create_cliffordnet_embedding(...)` factory and `create_cliffordnet_embedding_with_head(...)` (NLPTaskConfig-based). 5 variants (nano/mini/base/large/xl) using lmunet's hyperparam ladder.
+
+2. **`src/dl_techniques/models/cliffordnet/__init__.py`** — re-export 3 new names (verbatim 9-line edit).
+
+3. **`src/train/cliffordnet/train_embeddings.py`** (~260 LOC) — Pattern-3 NLP MLM mirror of `train/bert/pretrain.py`. Uses `MaskedLanguageModel` wrapper, `create_tokenizer`, `preprocess_mlm_dataset`, `create_warmup_lr_schedule`, `create_nlp_callbacks`. Smoke recipe `--variant nano --epochs 1 --max-samples 256 --batch-size 8`.
+
+4. **`tests/test_models/test_cliffordnet/test_embedding_unet.py`** (~200 LOC) — class-based test mirroring sibling tests in `test_cliffordnet/`. 6 tests: init+forward, gradient flow, save/load round-trip (`.keras`), each pooling_strategy variant, MaskedLanguageModel-integration smoke, from_variant for nano.
+
+Gate: pytest on the new test file PASS; py_compile + import smoke for the trainer; 1-epoch smoke training run on GPU 0 with synthetic config completes without error.
+
+### Corrections
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
+
+## plan_2026-05-12_e9584ff4
+### Index
+
+| ID | Topic | File | Summary |
+|----|-------|------|---------|
+| F-001 | BLT architecture inventory | `findings/blt-architecture.md` | `ByteLatentTransformer` is a complete end-to-end byte-LM (737 LOC `model.py`). Input: int32 byte-token IDs `(B, T_bytes)` in `[0, 260)` (offset +4). Output: plain `(B, T, 260)` logits (NOT dict-keyed). Has dynamic entropy patcher (`EntropyModel + DynamicPatcher`), `LocalEncoder` cross-attn pooling, `GlobalTransformer`, `LocalDecoder` cross-attn back to bytes. `__init__.py` is empty. Existing `src/train/blt/train_blt.py` uses synthetic data, multi-stage trainer, does NOT touch `train.common.nlp`. No public tests for BLT. `ByteTokenizer` at `dl_techniques/layers/blt_blocks.py:232` is a Python-side text↔byte helper, not a tf.data pipeline. |
+| F-002 | Current CliffordNetLMRouting integration surface | `findings/lm-routing-current.md` | Token-ID-keyed LM: `vocab_size=50261` (tiktoken gpt2 + 4 specials), `max_seq_length=512`, `channels∈{128..768}` is the feature dim D (NOT Clifford algebraic dim). 3 embedding strategies (`hce`/`albert`/`dense`), CausalCliffordNetBlock×depth stack on 4-D tensors, head = `RoutingProbabilitiesLayer(output_dim=vocab_size, mode={trainable,deterministic})` producing **probabilities** in `[eps, 1-eps]` summing to 1. Output dict key `"logits"` (values are probs — D-001 anchored). Loss must use `from_logits=False` (D-002 anchored). 5 variants nano/mini/base/large/xl. Three plug-in seams identified (A: full byte-vocab swap = 260 classes, d=9 decisions; B: BLT front-end + Clifford stack; C: drop CliffordNet → use BLT). |
+| F-003 | Existing training pipeline + byte scaffolding | `findings/training-pipeline.md` | 1299-LOC Pattern-3 trainer: tiktoken gpt2, `MaskedCausalLMLoss(from_logits=False)`, `AdamW + warmup-cosine + clipnorm=1.0` (no kernel reg), `prepare_dict_keyed_compile + build_clm_metrics("gpt2")`, `StepCheckpointCallback + GenerationProbeCallback + augment_probe_results hook`, data wrapper `(x, y) → (x, {"logits": y})`, `.repeat()` on train, HF Wikipedia OR TFDS sources, `data_seed = seed + initial_step` resume. **NO byte-level tf.data pipeline exists anywhere** — `train/blt/train_blt.py` uses synthetic data. `train.common.nlp` knows only tiktoken. Three deltas required for raw-byte path: (1) write `preprocess_clm_byte_dataset` (graph-mode `tf.io.decode_raw` recommended over `tf.py_function`), (2) byte-aware probe callback using `ByteTokenizer.tokens_to_text`, (3) `build_clm_metrics` adjustment (vocab=260; BitsPerToken loses meaning, BitsPerCharacter mostly preserved for ASCII). |
+
+### Key Constraints
+
+### HARD
+
+- **Keras 3 / TF 2.18 idioms**: `@keras.saving.register_keras_serializable()` on every new class, `keras.ops` only, full `get_config()` round-trip, `dl_techniques.utils.logger` only (no `print`).
+- **Output dict key MUST be `"logits"`** even when values are probabilities — required by data wrapper + `prepare_dict_keyed_compile` + `build_clm_metrics`. Anchored as `# DECISION D-001` in current `lm_routing.py`.
+- **`from_logits=False` is required** when the head is `RoutingProbabilitiesLayer` (probabilities, not logits). Anchored as `# DECISION D-002`. If replaced with plain Dense, flips to `from_logits=True`.
+- **Single GPU jobs only.** GPU 0 = RTX 4090 24GB, GPU 1 = RTX 4070 12GB. Never parallel. `MPLBACKEND=Agg` mandatory.
+- **`__init__.py` for `byte_latent_transformer/` is empty** (matches `models/CLAUDE.md`). Import from `.model` directly.
+- **`make test` is forbidden** as a regression check (~1.5h pre-push hook). Scope pytest to changed module only.
+- **AdamW double-WD footgun** — never combine `AdamW(weight_decay=W)` with `kernel_regularizer=L2(W)`.
+- **`prepare_dict_keyed_compile(model, output_key="logits")` is mandatory** for dict-output trainers (SYSTEM.md invariant).
+- **`train_<model>.py` naming** — must NOT be `train.py`. The new script must be `train_cliffordnet_nlp_routing_blt.py`.
+- **User pushes commits** — commit locally only.
+
+### SOFT
+
+- Follow Pattern-3 NLP CLM conventions: `StepCounter` first, `StepCheckpointCallback`, `GenerationProbeCallback._post_generate_hook = augment_probe_results`, AdamW + warmup-cosine, `prepare_dict_keyed_compile`, dict label wrapper, `.repeat()` on train, `data_seed = seed + initial_step` resume.
+- CLI uniformity: `--steps-per-epoch`, `--seed`, `--min-article-length`, `--shuffle-shards`, `--resume`.
+- Mirror existing `train_cliffordnet_nlp_routing.py` shape where byte-domain doesn't force divergence.
+- Prefer graph-mode `tf.strings.bytes_split → tf.io.decode_raw(uint8) → +byte_offset → concat-and-chunk` for the byte pipeline.
+- Do NOT copy the class-based multi-stage `train/blt/train_blt.py` pattern; keep Pattern-3 functional flow.
+
+### GHOST (considered & rejected unless re-validated)
+
+- *"d=8 for 256 bytes is the Clifford block algebraic dim"* — FALSE. `channels` (feature dim D = 128..768) is NOT the Clifford algebraic dim. The "d" in routing-tree language is `ceil(log2(padded_vocab))`. For 260-vocab → padded 512 → d=9; for 256-vocab → padded 256 → d=8.
+- *"Routing-tree pathologies apply identically to bytes"* — FALSE. The 16-decisions-for-50K-classes ceiling, BPE leaf-arrangement penalty, and gradient asymmetry documented in `train_cliffordnet_nlp_routing.py:42-99` **vanish** at byte vocab: d=9 ≫ info floor; byte values are a meaningful natural ordering (adjacent bytes share lower bits = mostly meaningful for ASCII).
+- *"Byte path needs new layers"* — partially false. `ByteTokenizer + EntropyModel + DynamicPatcher + LocalEncoder + GlobalTransformer + LocalDecoder` already exist in `dl_techniques/layers/blt_blocks.py`. Only the tf.data pipeline + trainer wiring are missing.
+- *"BLT vocab is 256"* — FALSE. BLT uses `vocab_size=260` (256 bytes + 4 specials at id 0..3). Byte values offset +4 before becoming token IDs.
+- *"Probe must continue to use tiktoken"* — FALSE. Bytes ARE the tokens; decode via `ByteTokenizer.tokens_to_text`, not tiktoken.
+
+### Exploration Confidence
+
+- **Scope**: deep. All three target files read end-to-end (BLT model 737 LOC; lm_routing 503 LOC; routing trainer 1299 LOC). `train.common.nlp` + `routing_probabilities.py` + `blt_blocks.py` + `train/blt/train_blt.py` sampled. Grep across `src/` for byte-level scaffolding exhausted.
+- **Solutions**: open — at least 3 architecturally distinct options (A: byte-vocab swap on CliffordNetLMRouting, B: BLT front-end + Clifford global stack, C: drop CliffordNet entirely and wrap BLT). User must choose before PLAN.
+- **Risks**: clear. Main risks: (a) tf.data byte-pipeline correctness (graph-mode vs py_function), (b) probe callback rewrite (tiktoken is hard-wired across `_generate`), (c) loss/metrics: `from_logits` flag flips depending on head; `BitsPerToken` loses meaning at byte level, (d) sequence-length budget — bytes are 4× longer than BPE tokens.
+
+### Synthesis
+
+Three coupled but independent choices PLAN cannot resolve without user input:
+
+1. **Architecture**: Option A keeps `CliffordNetLMRouting` and swaps the token vocab → bytes (smallest delta, ~1 day, ~50-100 LOC model changes). Option B uses BLT's entropy patcher + local encoder to feed the CausalCliffordNetBlock stack with patch reps (novel hybrid, largest delta). Option C abandons CliffordNet — the new file becomes a Pattern-3 trainer over `ByteLatentTransformer` (smallest LOC but maximal semantic change).
+2. **Routing-head fate**: Keep `RoutingProbabilitiesLayer(output_dim=260, mode={trainable, deterministic})` — d=9 decisions for 260 classes is well above the info floor; the original pathologies vanish — OR replace with plain `Dense(260)` softmax (simpler, but loses the routing-tree research angle the original module was built around).
+3. **Byte-data path**: Graph-mode `tf.io.decode_raw(uint8)` over `tf.strings.bytes_split` (faster, no GIL) vs `tf.py_function` wrapping `ByteTokenizer.text_to_bytes` (simpler but slower). Must be packed (concat-and-chunk) to match the existing CLM pipeline.
+
+The byte-level layer primitives already exist (`blt_blocks.py`). Missing pieces are the **tf.data byte pipeline** and the **trainer wiring**. The "Rewrite `lm_routing.py`" portion is small under Option A (~50-100 LOC); the "add `train_cliffordnet_nlp_routing_blt.py`" portion is ~700-900 LOC regardless of option (mirror of existing trainer with byte deltas).
+
+### Corrections
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
+
+## plan_2026-05-12_995a621a
+### Index
+
+| # | File | Topic | Iter |
+|---|------|-------|------|
+| F1 | findings/topic-a-readme-and-intent.md | NAM history + 5-iteration arc + iter-5 end-state (zero-param arithmetic) | 0 |
+| F2 | findings/topic-b-training-scripts.md | train_dfsa.py vs train_dfsa_ste.py mechanics | 0 |
+| F3 | findings/topic-c-data-and-eval.md | Curriculum data generator + eval harness | 0 |
+| F4 | findings/gradient-breaks.md | Census of every non-diff op in DFSA forward pass; what STE bridges and doesn't | 0 |
+| F5 | findings/tree-encoder-intent.md | What "reviving tree-transformer" can concretely mean (interpretations A/B/C) | 0 |
+
+### Key Constraints
+
+### HARD
+- **HARD**: float32 precision caps operands at ~10 digits. Architectural ceiling.
+- **HARD**: `act_steps` bounds max operators per expression (default 3-4).
+- **HARD**: Arithmetic tokenizer vocab (digits 0-9, `+-*/`, parens, space, `[RES]`, BOS/EOS/PAD). Out-of-scope = out-of-scope.
+- **HARD**: Arithmetic correctness is currently **100% with random weights** (iter-5). Any revival that regresses accuracy is a non-starter unless the user accepts the trade.
+- **HARD**: `argmax` on `op_pos_hard` and integer re-tokenization sever cross-step gradients structurally — no STE recovers this without architectural change.
+
+### SOFT
+- **SOFT**: Tree encoder (~1.5M params) currently dead in arithmetic path. `reduction_scorer` (Dense 1) declared but never called. `op_classifier` (Dense 4) only called when `use_ste=True`.
+- **SOFT**: STE path in `train_dfsa_ste.py` opens *one* gradient channel (host loss → `op_one_hot` → `op_classifier` → `x`), but learning signal is weak: `L_result = 0` on correct samples; `L_operator` supervises a trivial `token_id - 14` look-up.
+
+### GHOST
+- **GHOST**: "Tree encoder must learn PEMDAS / arithmetic mechanism." Iter-5 falsified this. The honest reframe: it should learn a **representation** grounded by some signal (correctness, span supervision, constituency).
+- **GHOST**: "Phase 3 of `train_dfsa_ste.py` is unimplemented because gradient flow is broken." Actually, gradient flow is fine (the probe at lines 277-289 confirms all relevant vars receive grads). Phase 3 is unimplemented because (i) there is no host model to integrate with, and (ii) the existing learning signal is too weak. Blocker is loss surface, not plumbing.
+
+### Corrections
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
+
+## plan_2026-05-12_ebb5fac5
+### Index
+
+| ID | Topic | File | Summary |
+|----|-------|------|---------|
+| F-001 | prism model + README review | findings/prism-model-review.md | 12 issues (3 HIGH doc bugs, 3 MEDIUM doc gaps, 6 LOW). NO model.py bugs. Tests already present. Recommend prose-only README rewrite + trainer scaffold rewrite + new export.py. |
+| F-002 | tirex -> prism trainer mapping | findings/tirex-pattern-mapping.md | Existing train_prism.py is a Pattern-2 mirror of tirex but drifts: wrong backronym in docstring, missing export_onnx hook + _export_to_onnx method, no standalone export.py, os._exit cleanup, missing preset validation. export.py recipe = near-verbatim tirex copy. PRISM emits single tensor so no --output_key needed. |
+
+### Key Constraints
+
+### HARD
+- NO model.py code edits in scope (informational review; matches LESSONS L117).
+- Sibling consistency: README mirrors adaptive_ema/tirex template; trainer is Pattern-2 (mirrors train/tirex).
+- Keras 3 idioms preserved; dl_techniques.utils.logger only; MPLBACKEND=Agg documented.
+- Existing tests at tests/test_models/test_prism/ must remain green. Scope pytest to that dir.
+- __init__.py stays empty per models/CLAUDE.md.
+- Acronym lock-in: "Partitioned Representations for Iterative Sequence Modeling". Update model.py + train_prism.py module docstrings (docstring-only, no code).
+- User pushes commits themselves; serial GPU only (memory).
+
+### SOFT
+- Do not touch predict_quantiles() self-mutation (I-8); document only.
+- ONNX export OFF by default in trainer (--no-onnx pattern).
+- Drop placeholder image entirely.
+- Surface I-1..I-12 in README Limitations section.
+
+### GHOST
+- Rewriting model.py for I-7/I-8/I-9/I-12 polish: rejected (would require regression tests; out of scope).
+- --output_key in export.py: rejected (PRISM returns single tensor).
+- Live PRISM ONNX smoke in plan: rejected (out of scope; opt-in only).
+- Replacing ops.cond in PRISMNode: rejected (touches prism_blocks.py, no test coverage for perf change).
+
+### Exploration Confidence
+- Scope: deep. Read all 6 source files end-to-end plus sibling precedents.
+- Solutions: constrained. Two deliverables with explicit line-by-line precedents.
+- Risks: clear. (a) PRISM ONNX path never tested -> opt-in only; (b) acronym lock-in must update model.py docstring too; (c) test_model.py presumed-green -> pytest as CORE gate.
+
+### Synthesis
+Three-step additive plan, zero model.py code edits (only docstring acronym fix):
+1. Rewrite README.md per adaptive_ema/tirex template; fix I-1/I-2/I-3, expand tables (I-4), add quantile mode section (I-5), drop placeholder + add Limitations folding I-1..I-12 (I-6). Sync model.py module docstring acronym.
+2. Rewrite src/train/prism/train_prism.py to byte-align tirex Pattern-2 (acronym fix, export_onnx hook, try/finally cleanup, preset validation, sync flag spellings).
+3. Create src/train/prism/export.py as near-verbatim tirex copy (CPU-only env-pin, auto-detect context_len from get_config, single-tensor verification at rtol=atol=1e-4).
+
+Gate: pytest tests/test_models/test_prism/ -x green after step 1; py_compile + import smoke for steps 2+3. No make test. No live training in plan scope.
 
 ### Corrections
 *Append [CORRECTED iter-N] entries here when earlier findings prove wrong.*
 
-## plan_2026-05-11_3c3ed037
+## plan_2026-05-12_5f0e087c
 ### Index
 
-| ID    | Topic                                              | File                              | Headline                                                                                                                  |
-|-------|----------------------------------------------------|-----------------------------------|---------------------------------------------------------------------------------------------------------------------------|
-| F-001 | tree_transformer `model.py` code review            | `findings/model-py-review.md`     | 14 issues. 1 HIGH (B-1 mixed_float16 NaN), 4 MEDIUM (B-2 fp16 sentinel, B-3 attention_mask ignored, B-4 by_name=True, B-5 fake pretrained URLs), 9 LOW/INFO. Save/load round-trip, gradient flow, basic forward all CORRECT. |
-| F-002 | README ↔ implementation cross-check                 | `findings/readme-vs-impl.md`      | 6 drifts. HIGH: §9 mixed_float16 promo is broken. MEDIUM: §8 MLM example uses `-100` ignored-index incorrectly. §5/§6 import path + missing PositionalEncoding. LOW: §9 jit_compile unverified. |
-| F-003 | `src/train/<model>/` conventions survey             | `findings/train-conventions.md`   | Pattern 3 (NLP Pretrain). Mirror `src/train/bert/{pretrain.py,finetune.py}`. `MaskedLanguageModel` wrapper accepts TreeTransformer as-is (`hidden_size` attr + `last_hidden_state` key both present, empirically verified). Trainer config MUST set `pad_token_id=100266` (tiktoken), not the model default 0. |
-| F-004 | Existing test coverage analysis                     | `findings/test-coverage.md`       | 9 test classes / 15+ tests exist at `tests/test_models/test_tree_transformer/test_model.py`. No coverage for: mixed precision, attention_mask honoring, `load_pretrained_weights`, `from_variant(pretrained=True)`, `model.fit` smoke, MLM-wrapper compatibility, pad_token_id != 0. |
+| ID | Topic | File | Summary |
+|----|-------|------|---------|
+| F-001 | EMA vectorization (I-3) | `findings/ema-vectorization.md` | `ExponentialMovingAverage.call()` Python loop in `ema_layer.py:119`. Only consumer = `AdaptiveEMASlopeFilterModel` (sibling `EMASlopeFilter` in same file is unused). `keras.ops.scan` and `keras.ops.associative_scan` both available in Keras 3.8. Recommend `ops.scan` (bit-equivalent, both modes); `associative_scan` reserved as optional perf optimization with ~1e-6 drift. Note: existing `adjust=True` branch is a CUSTOM variant (not pandas semantics) — vectorization target is the existing recurrence. No existing `tests/test_layers/test_time_series/test_ema_layer.py` — new file needed. |
+| F-002 | Polish items I-14..I-19 | `findings/polish-items.md` | I-14 add `compute_output_shape`. I-15 verify-only. I-16 docstring sentence (hard vs soft exclusivity). I-17 add References section to module docstring (LeBeau 1992, Bollinger, Koenker & Bassett 1978 — mirror README §13). I-18 raise `ValueError` when `F>1` AND head enabled (user-chosen option (a)); update README §11 with L-7, add a test. I-19 `logger.warning` when `learnable_thresholds=True` AND `quantile_head_config=None`; add caplog test. Total ~70 LOC model.py + ~25 LOC tests + ~5 LOC README. |
+| F-003 | Trainer smoke + ONNX export | `findings/trainer-and-onnx-smoke.md` | Trainer at `src/train/adaptive_ema/train_adaptive_ema.py`, never executed. Pattern-2; synthetic data via `TimeSeriesGenerator`; wrapper selects single tensor (signal_between for classification, slope_quantiles for quantile) sliced to trailing prediction_horizon. Smoke recipe: 3 epochs, batch 32, 20 steps/epoch, input_length=64, prediction_horizon=16, GPU 0, no-warmup. Run BOTH modes sequentially. ONNX via Keras 3.8 `model.export(format="onnx")`; `onnxruntime 1.23.2` confirmed installed. Vectorize EMA (F-001) BEFORE smoke + ONNX so we exercise final code path (Python-loop unrolling in tf2onnx is the biggest known ONNX risk; `keras.ops.scan` collapses to a single Scan op). |
 
 ### Key Constraints
 
 ### HARD
-- Keras 3 / TF 2.18, `keras.ops` / `keras.random.*` only.
-- `@keras.saving.register_keras_serializable()` + full `get_config()` round-trip on every Layer/Model — currently SATISFIED.
-- `dl_techniques.utils.logger` only — currently SATISFIED.
-- Save/load via `keras.models.load_model(path)` without `custom_objects` — currently SATISFIED (verified, max-abs-diff 0.0 on logits).
-- Tests must remain scoped to `tests/test_models/test_tree_transformer/` — full suite is ~1.5h, do NOT run.
-- Single GPU only; `MPLBACKEND=Agg`; never parallel jobs.
-- User pushes commits themselves; we commit locally with `[iter-N/step-M] desc` prefix.
-- `MaskedLanguageModel` requires encoder with `.hidden_size` attribute and `{"last_hidden_state": ...}` in call output — both present in TreeTransformer.
-- `pad_token_id` in TreeTransformer constructor MUST match the trainer's tokenizer pad token (default 0 vs tiktoken cl100k_base pad=100266 — mismatch silently mis-masks every input).
-- Pattern 3 mandate: use `train.common.nlp` helpers (`create_tokenizer`, `load_text_dataset`, `preprocess_mlm_dataset`, `create_warmup_lr_schedule`, `create_nlp_callbacks`). Do NOT roll local versions.
-- Trainer file naming: per `src/train/CLAUDE.md`, `train_<model>.py` is the rule, but the BERT sibling uses `pretrain.py`/`finetune.py` and is the closest precedent. Recommendation: follow BERT (`pretrain.py` + `finetune.py`).
-- 10-Line Rule + Autonomy Leash (2 fix attempts max per step).
+- **Numerical equivalence**: vectorized `ExponentialMovingAverage` must match existing Python-loop output within `atol=1e-6, rtol=1e-6` for BOTH `adjust=True` AND `adjust=False`, across `period ∈ {1, 5, 25, 100}` and `T ∈ {1, 16, 128, 512}`.
+- **Existing test suite must remain green**: `tests/test_models/test_adaptive_ema/test_model.py` (14 tests, currently passing) — `test_serialization_round_trip` is an implicit equivalence gate.
+- **Keras 3 / TF 2.18 idioms**: `@keras.saving.register_keras_serializable()`, `keras.ops`, full `get_config()` round-trip, `dl_techniques.utils.logger` only, no `print`.
+- **Test scope**: pytest scoped to `tests/test_models/test_adaptive_ema/` AND `tests/test_layers/test_time_series/test_ema_layer.py` (NEW). Never run `make test`.
+- **GPU policy**: serial training runs only; pin GPU 0 (RTX 4090) via `CUDA_VISIBLE_DEVICES=0`; `MPLBACKEND=Agg` mandatory.
+- **Commit prefix**: `[iter-N/step-M] adaptive_ema: <description>` (or `ema_layer:` for the layer step).
+- **User pushes commits themselves** — commit locally only.
+- **I-18 design choice locked by user**: option (a) — raise `ValueError` when `F>1` AND `quantile_head_config is not None`. Update README L-7. Add test.
 
 ### SOFT
-- README §11 ("comprehensive test suite") is overstated — gap visible in F-004. Closing the gap is recommended but not blocking.
-- `__init__.py` is currently 0 LOC. Sibling models split between empty and re-exporting public API. Re-exporting (`TreeTransformer`, `create_tree_transformer_with_head`, optionally layer classes) is cleaner but optional.
-- `lm_head` in the foundation model is dead weight for pure-encoder use (B-9). Removing it would be a breaking change to `get_config`/round-trip — out of scope unless user requests.
-- `keras.mixed_precision` fix: change `-1e9` magic constants to dtype-aware sentinel (`-1e4` for fp16, `-1e9` otherwise). ≤6 LOC delta total.
+- Prefer `keras.ops.scan` over `associative_scan` for bit-equivalent semantics. Document trade-off in layer docstring if relevant.
+- Reference section (I-17) — keep academic-only (LeBeau 1992, Bollinger, Koenker & Bassett 1978) mirroring README §13; do NOT fabricate URLs. A "Background reading:" line with a TradingView search URL is acceptable but optional.
+- For I-18 raise site, prefer `call()` over `build()` (Keras passes a `KerasTensor` with known static shape at first call).
+- For I-19 warning, prefer `dl_techniques.utils.logger.logger.warning` over `warnings.warn`. Test via `caplog` after confirming propagation; fall back to monkeypatching `logger.warning` if caplog doesn't catch it.
+- Smoke run uses `--no-warmup` to skip the WarmupSchedule for a faster, simpler smoke (3 epochs cannot meaningfully exercise warmup anyway).
+- ONNX export verification tolerance: `rtol=1e-4, atol=1e-4` (export.py default).
 
-### GHOST (considered and rejected)
-- "TreeTransformer needs its own MLM loss" — NO; `MaskedLanguageModel` wrapper is encoder-agnostic and works.
-- "TreeTransformer needs a custom train_step for the tree induction aux-loss" — NO; the Shen 2019 paper does NOT add an auxiliary loss; group_prob is supervised purely through the MLM gradient signal flowing back through `TreeMHA`'s multiplicative modulation. Confirmed in §4 of paper and absence of any aux-loss surface in the model code.
-- "PRETRAINED_WEIGHTS should point at real HuggingFace URLs" — NO; no public official checkpoint exists for the dl_techniques implementation. Either remove the surface or document as TBD.
-- "Refactor `_build_architecture` inline into `__init__`" — NO; cosmetic only, breaks nothing, not worth the diff.
-- "Add `LayerCKYTreeAttention` as a public layer in `dl_techniques/layers/`" — NO; the layer is tree-transformer-specific and not requested.
+### GHOST (considered & rejected)
+- *"Switch `adjust=True` semantics to pandas-canonical while we're vectorizing."* — No. The current variant has been the contract for all 14 existing tests. Changing math is out of scope. Use `ops.scan` to preserve the exact recurrence + division.
+- *"Use `associative_scan` for maximum speed."* — Defer. Bit-equivalence trumps perf for a refactor of a shared layer.
+- *"Apply I-18 head per-feature (option (b))."* — Rejected by user; option (a) is the clean contract.
+- *"Run trainer smoke before vectorizing the EMA loop."* — Rejected; we'd be smoke-testing a deprecated code path. Vectorize first, then smoke + ONNX.
 
 ### Exploration Confidence
-
-- **scope: deep** — entire `model.py` (1246 LOC) read, README (371 LOC) read, sibling BERT pretrain (258 LOC) read, MLM wrapper internals read, existing 549-LOC test suite read, empirical smoke confirmed forward/serialization/gradient/edge cases. Mixed-precision NaN reproducer is a 5-line smoke.
-- **solutions: adequate** — bug-fix shapes are all bounded (≤10 LOC each). Trainer is a Pattern-3 mirror of `bert/pretrain.py` with one constructor override.
-- **risks: clear** — primary risk is `attention_mask`-honoring change (B-3) inadvertently breaking the existing `test_padding_mask_functionality` test. Mitigation: preserve fallback derivation; only honor explicit mask when present.
+- **Scope: deep** — all 5 in-scope files read end-to-end (`ema_layer.py`, `adaptive_ema/model.py`, `adaptive_ema/__init__.py`, `adaptive_ema/README.md`, `train_adaptive_ema.py`, `export.py`); all consumers grep-confirmed; `keras.ops.scan`/`associative_scan` empirically verified; `onnxruntime` install verified.
+- **Solutions: constrained** — I-3 has 3 candidates; recommendation is `ops.scan` for bit-equivalence. All polish items (I-14..I-19) are mechanical. Trainer/ONNX smoke recipes are direct mirrors of `train/tirex/` precedents.
+- **Risks: clear** — main risks: (a) `ops.scan` carry-shape mismatch for `(B,T)` vs `(B,T,F)` (mitigated by always lifting to 3D inside scan, squeezing on return); (b) trainer crash on first end-to-end run (mitigated by tiny smoke + revert-first); (c) ONNX `model.export` complaining about the new scan op (low risk — tf2onnx supports `tf.scan` natively); (d) caplog vs `dl_techniques.utils.logger` propagation (fallback: monkeypatch).
 
 ### Synthesis
-
-The tree_transformer package is structurally sound. Save/load, get_config, gradient flow, MLM-wrapper integration are all empirically correct. The defects fall into three buckets:
-
-(a) **Two real correctness bugs** affecting documented usage paths — B-1 (`mixed_float16` NaN, contradicts README §9) and B-4 (`load_pretrained_weights` uses by_name=True, broken in Keras 3.8 per LESSONS).
-
-(b) **Two API/UX bugs** — B-3 (explicit `attention_mask` ignored, BERT-API contract gap) and B-5 (placeholder `example.com` URLs in `PRETRAINED_WEIGHTS` guarantee runtime error for anyone following the module docstring).
-
-(c) **Doc and surface gaps** — empty `__init__.py`, README §8 MLM example uses the wrong ignored-index recipe, README §11 "comprehensive tests" claim is overstated.
-
-The training pipeline is a near-trivial mirror of `src/train/bert/{pretrain.py, finetune.py}` — `MaskedLanguageModel` wraps TreeTransformer cleanly. Single biggest pitfall: trainer MUST pass `pad_token_id=<tiktoken_pad>` (100266 for cl100k_base) to `TreeTransformer(...)` or the encoder's pad mask will be all-ones (silent semantic bug).
+4-deliverable plan: (1) **I-3** vectorize `ExponentialMovingAverage` (shared layer; one direct consumer + sibling in same file). Numerical equivalence at 1e-6 is the hard gate, enforced by a new equivalence test that pastes the old loop as a reference. (2) **I-14..I-19** polish — mechanical edits to `model.py` + README + 2 new tests; ~100 LOC total. (3) **Trainer smoke** — execute BOTH modes serially on GPU 0 with a tiny 3-epoch config; fix the trainer if it crashes. (4) **ONNX numerical-match** — export the quantile-smoke checkpoint and verify via `export.py --verify --output-key slope_quantiles` within `atol=1e-4`. Ordering matters: I-3 before smoke (so we ONNX-export the vectorized path) and before polish (so polish lands on the vectorized layer). All four fit a single iteration.
 
 ### Corrections
 *Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
 
-## plan_2026-05-10_e6309bd5
+## plan_2026-05-12_86f14c6e
 ### Index
 
-| ID | Topic | File | Headline |
-|----|-------|------|----------|
-| F-001 | `model.py` (TRM) bug & gap review | `findings/model-py-review.md` | 14 issues; 2 HIGH (B-1 expand_dims tuple axis, B-5 ACT-at-inference regression vs paper), 1 HIGH (B-3 Q-learn lookahead uses training=True) |
-| F-002 | `components.py` (TRMReasoningModule, TRMInner) review | `findings/components-py-review.md` | Components clean. Composite-layer pattern correctly implemented. No critical bugs. |
-| F-003 | `__init__.py`, README, serialization, tests | `findings/api-serialization-review.md` | Save/load OK. Missing factory, missing test module, 3 README doc-vs-code drifts. |
-| F-004 | Training conventions for `train/tiny_recursive_model/` | `findings/training-conventions-survey.md` | HRM trainer is the canonical template; `hrm_loss` and `HRMMetrics` already match TRM output schema; reuse them. |
+| ID | Topic | File | Summary |
+|----|-------|------|---------|
+| F-001 | Scope from prior code review | `findings/scope-from-prior-review.md` | Enumerates I-1, I-5..I-13 fixes + I-2 head redesign (recommend option b — Conv1D featurization). |
+| F-002 | System context | `findings/system-context.md` | Files involved, current vs target ctor signature, weight inventory, round-trip risk. |
+| F-003 | Test conventions | `findings/test-conventions.md` | Mirrors `tests/test_models/test_tirex/test_model.py`; class-based, fixtures, atol=1e-5. |
 
 ### Key Constraints
 
-### HARD constraints
-- Keras 3 / TF 2.18, `keras.ops` only; `keras.random.*` only.
-- `model.save(...keras)` + `keras.models.load_model(...)` must round-trip without `compile=False` or `custom_objects` (currently passes — smoke-tested).
-- Output schema compatible with `dl_techniques.losses.hrm_loss.HRMLoss`: keys `logits`, `q_halt_logits`, `q_continue_logits`, optional `target_q_continue` (currently compatible).
-- Single GPU only; `MPLBACKEND=Agg`; no `print`; no AdamW WD + L2 kernel reg double-up.
-- Trainer file MUST be named `train_<model>.py` not `train.py` (package-shadow rule).
-- `stop_gradient` on inner carry is structural — gradient does not flow across ACT steps. Trainer cannot backprop through the whole unroll.
+### HARD
+- Serialization round-trip (`.keras` save/load) must pass.
+- Gradient flow on the 2 new learnable threshold weights (`midpoint_var`, `log_half_range_var`) must be non-zero when `learnable_thresholds=True`.
+- `train_adaptive_ema.py --mode quantile` must keep working — `slope_quantiles` output shape stays `(B, T, K)`.
+- Soft signals must be in `[0, 1]` (sigmoid outputs — guaranteed by new formula).
+- Do NOT run `make test` (1.5h pre-push hook). Scope pytest to `tests/test_models/test_adaptive_ema/` only.
+- Use `dl_techniques.utils.logger` only; no `print`.
 
-### SOFT constraints
-- HRM-style class-based trainer, no `model.fit()`. Custom `GradientTape` per-step or per-unroll.
-- `dl_techniques.optimization.optimizer_builder` / `learning_rate_schedule_builder`.
-- CLI via `train.common.create_base_argument_parser`.
-- Synthetic dataset primary; optional ARC behind a flag.
-- Test module at `tests/test_models/test_tiny_recursive_model/`.
-- Add `create_trm(...)` factory to match `create_hierarchical_reasoning_model` precedent.
-- README + CLAUDE.md updates land in same plan as the code change (LESSONS).
+### SOFT
+- Mirror `models/vit/__init__.py` `__init__.py` shape (docstring + `__all__`).
+- Mirror `tests/test_models/test_tirex/test_model.py` test class structure.
+- Keep threshold weights in `float32` even under mixed precision (I-10).
+- README + trainer doc updates land in the same plan as code changes (LESSONS).
 
-### GHOST constraints (considered and rejected)
-- "TRM needs its own loss" — NO; `HRMLoss` is API-compatible.
-- "TRM needs its own metrics" — NO; `HRMMetrics` works on the same schema.
-- "`tf.stop_gradient` is canonical (per README)" — NO; `keras.ops.stop_gradient` is.
-- "Puzzle embedding must be wired (paper fidelity) before training" — NO for this plan. Zero-pad is inert (B-11); wiring `HRMSparsePuzzleEmbedding` is a larger paper-fidelity plan. Document as a residual.
+### GHOST
+- None — prior plan_94b9fab5 was informational; no inherited stale constraints. The previous `softplus(abs(...))` parameterization was an isolated mistake, not an artifact of an obsolete constraint.
 
 ### Exploration Confidence
-- **scope**: deep (entire package read; empirical build, forward, Q-branch, save/load verified).
-- **solutions**: adequate (clear bug-fix set + HRM-template trainer blueprint).
-- **risks**: clear (4 doc/code drifts; B-1 needs a graph-mode reproducer to lock as bug-or-non-bug).
+- Scope: **deep** — all target `model.py` lines identified; all consumer files audited (trainer, README, export); no other callers.
+- Solution space: **constrained** — I-2 has a clear (a)/(b) trade-off resolved; all other items mechanical.
+- Risk visibility: **clear** — weight-rename breaks old `.keras` checkpoints, none exist in CI/user workflows; accepted in F-002.
 
 ### Synthesis
-The TRM package is structurally sound and serializes correctly. There is no foundational rewrite needed. The defects fall into three buckets: (a) two correctness bugs in the ACT loop (B-1 expand_dims tuple-axis is graph-unsafe, B-5 inference always max-steps), (b) one training-stability bug in the Q-learning lookahead (B-3 lookahead in training mode), and (c) doc/test gaps (no factory, no test module, README drift). The training script is straightforward — `hrm_loss` and `HRMMetrics` already accept TRM's exact output schema, so the trainer is essentially a thin HRM-trainer mirror with `_forward_step` replaced by the standard `model(carry, batch, training=...)` and a `keras.ops.all(carry["halted"])` finish check. Recommend bundling the bug fixes, factory function, README reconciliation, test module, and training script into a single iteration-1 plan.
+Contained, corrective fix to a single 354-LOC `model.py` plus peer-pattern packaging (factory + `__init__.py` re-exports) plus a new test file. New tests are the verification floor. Only design call needing PLAN attention is I-2: recommend option (b) — small causal `Conv1D(slope_feature_dim=16, kernel_size=5)` over the slope window before `QuantileSequenceHead`. Trainer keeps working: head output shape unchanged. README + trainer doc updates bundled into same iteration.
 
 ### Corrections
 *Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
 
-- **[CORRECTED iter-0] F-001 B-1 (`ops.expand_dims(axis=tuple)`) — FALSE POSITIVE.** Empirical reproducer (eager + `@tf.function` graph) on Keras 3.8 / TF 2.18 confirms `keras.ops.expand_dims` accepts tuple-of-int `axis` and broadcasts correctly. The textual prior from older keras-numpy compat warnings does not apply. B-1 is dropped from the bug list — no fix needed. F-001 summary table downgrades B-1 from CRITICAL to N/A.
-- **[CONFIRMED iter-0] F-001 B-5 (ACT-at-inference regression).** Empirical reproducer: with `training=False`, even sequences whose `q_halt_logits > 0` at every step never halt before `step == halt_max_steps`. This is a genuine paper regression and the primary correctness bug to fix.
-
-## plan_2026-05-10_17633038
+## plan_2026-05-12_94b9fab5
 ### Index
 
-| ID | Topic | File | Severity | Status |
-|----|-------|------|----------|--------|
-| F-000 | Seed bug report from accunet plan (user-supplied) | `findings/seed-bug-report.md` | CRITICAL | confirmed |
-| F-001 | WrappedLoss anatomy — `reduction` round-trip + closure-capture bug | `findings/wrapped-loss-anatomy.md` | CRITICAL | confirmed (static + Keras-3 source-trace) |
-| F-002 | Blast radius — callers, trainers, public API | `findings/blast-radius.md` | mixed | confirmed (grep) |
-| F-003 | Recommended fix — module-level WrappedLoss with reconstructable loss_fn | `findings/fix-design.md` | n/a | design |
-| F-004 | Sibling-loss conventions (file/class naming, decorator, exports, tests) | `findings/loss-module-conventions.md` | HARD-CONSTRAINTS | confirmed (4+ sibling reads, init/CLAUDE/README) |
+| ID | File | Topic |
+|----|------|-------|
+| F-001 | findings/code-review.md | Deep code review of `models/adaptive_ema/model.py` — 19 issues (4 critical, 6 high, 5 medium, 4 low) |
+| F-002 | findings/readme-pattern.md | Peer README pattern (PRISM canonical TOC) + adaptive-ema-specific adaptations |
+| F-003 | findings/training-pattern.md | `src/train/tirex/` template breakdown + adaptive-ema training adaptations |
 
 ### Key Constraints
 
 ### HARD
-- Keras 3 idioms — `@keras.saving.register_keras_serializable()`, full `get_config`/`from_config` round-trip.
-- `WrappedLoss` is currently defined INSIDE `create_loss_function` (closure) — must hoist to module scope for true serializability.
-- `loss_fn` is a closure-captured bound method → NOT in get_config → unrecoverable on load. Fix MUST reconstruct from a name+config, not pickle the function.
-- `LossConfig` (dataclass) must be Keras-serializable for round-trip — verify and patch if needed.
-- Public API surface (`create_loss_function`, `create_segmentation_loss_function` re-export) must remain backward-compatible.
-- Active production trainer (`src/train/accunet/train_accunet.py`) currently uses `compile=False` workaround — fix must allow removing it.
-- Existing test `test_loss_serialization_and_deserialization` swallows the exception in a `try/except` — must be updated to assert success (currently encodes the bug as a contract; see LESSONS).
-- No `print` calls, use `dl_techniques.utils.logger` only.
-- Scope pytest to `tests/test_losses/test_segmentation_loss.py` + `tests/test_models/test_accunet/` for regression.
+- **Path**: `src/dl_techniques/models/adaptive_ema/` (user prompt said `src/dl_techniques/adaptive_ema/` — typo; CLAUDE.md confirms `models/adaptive_ema/`).
+- **Keras 3 conventions**: `@keras.saving.register_keras_serializable()`, `keras.ops` only, full `get_config()` round-trip. Already satisfied by current `model.py`.
+- **Logger**: `dl_techniques.utils.logger` only, no `print` statements.
+- **MPLBACKEND=Agg** required for training-script invocations (headless).
+- **File naming**: training script must be `train_adaptive_ema.py`, not `train.py` (shadowing per train/CLAUDE.md).
+- **Single GPU jobs only** — never parallel.
+- **User pushes commits themselves** — commit locally only.
+- **No `make test`** — scope pytest to module only if running.
 
 ### SOFT
-- Three "candidate" fixes from user (a/b/c) are all incomplete because they only address `reduction`, not the deeper closure problem. EXPLORE has falsified all three as standalone fixes.
+- README style mirrors PRISM's TOC (peer time-series model, smallest scope).
+- Training script mirrors TiRex (Pattern-2 time-series/probabilistic per train/CLAUDE.md).
+- `__init__.py` is empty per `models/CLAUDE.md`, but several recent canonical packages (vit, accunet, tirex) re-export — either acceptable. Default to empty to match `models/CLAUDE.md` literal.
 
 ### GHOST
-- "WrappedLoss must stay inside the factory for parametric specialization" — no such constraint; module-level class with `loss_name` param works identically and is serializable.
-- "WrappedLoss should live inside `segmentation_loss.py`" — no such constraint; per F-004 sibling conventions, every loss is its own module. Hoisting AND extracting to a sibling module (`segmentation_wrapper_loss.py`) is the conformant choice.
-
-### HARD (added iter-0, post-revision)
-- F-004: new wrapper class lives in its own module `src/dl_techniques/losses/segmentation_wrapper_loss.py`.
-- F-004: class is `SegmentationWrapperLoss` with bare `@keras.saving.register_keras_serializable()` (no package= argument).
-- F-004: backward compat — `from dl_techniques.losses.segmentation_loss import create_loss_function, LossConfig` MUST keep working; `create_segmentation_loss_function` re-export MUST keep working.
-- F-004: new test file `tests/test_losses/test_segmentation_wrapper_loss.py` mirrors module name.
-- F-004: must update `losses/__init__.py`, `losses/CLAUDE.md`, `losses/README.md`.
+- "Top-level package at `src/dl_techniques/adaptive_ema/`" from user prompt — doesn't exist. Package lives under `models/`. Treat as typo.
 
 ### Corrections
-*None yet.*
-
-### Exploration Confidence
-- scope: deep (full WrappedLoss source read, blast radius grep'd, parent class behavior known, test contract reviewed)
-- solutions: constrained (one design path — module-level class with reconstructable loss_fn; minor open question on LossConfig serializability)
-- risks: clear (only risk is LossConfig being non-trivially nested; verifiable in 5 lines during PLAN)
-
-## plan_2026-05-10_bdb2c84d
-### Index
-
-| ID | Topic | File | Severity | Status |
-|----|-------|------|----------|--------|
-| F-001 | accunet code review (model.py + README + __init__.py) | `findings/accunet-code-review.md` | mixed | confirmed (empirical + static) |
-| F-002 | src/train/<model>/ conventions for AccUNet trainer | `findings/train-conventions.md` | n/a | reference |
-| F-003 | Dependent layers (HANCBlock/HANCLayer/ResPath/MLFCLayer/SE) | `findings/dependent-layers.md` | n/a | reference |
-
-### Key Constraints
-
-### HARD
-- Keras 3 idioms — `@keras.saving.register_keras_serializable()`, `keras.ops`, full `get_config()`.
-- Single GPU jobs only; `MPLBACKEND=Agg` for any training-script invocation.
-- AdamW vs L2 double weight decay — pick one.
-- No `print` calls — use `dl_techniques.utils.logger`.
-- Trainer file naming `train_<model>.py`, never `train.py`.
-- Trainer must use `train.common` (`setup_gpu`, `create_callbacks`, `optimizer_builder`, `learning_rate_schedule_builder`).
-- Do not run full test suite. Scope pytest to `tests/test_models/test_accunet/`.
-- Keras 3.8 `model.load_weights(by_name=True)` broken on `.keras` — use `load_weights_from_checkpoint`.
-- AccUNet input dimensions MUST be divisible by 16 in current implementation (verified empirically). Trainer must enforce on data loading until the fix lands.
-- MLFCLayer requires exactly 4 input tensors.
-- HANCBlock requires explicit `input_channels` matching the actual input.
-
-### SOFT
-- Output activation hard-coded sigmoid/softmax (could be made optional; out of scope unless user asks).
-- 5-level fixed depth (paper convention).
-- 16-pixel divisibility intrinsic to depth=5 with `padding='valid'` pooling — switching to `padding='same'` removes it.
-
-### GHOST
-- None identified.
-
-### Corrections
-*None yet.*
-
-### Exploration Confidence
-- scope: deep (target files read; sibling trainers and dependent layers read; empirical input-size sweep performed)
-- solutions: constrained (fixes localised; trainer = Pattern-4)
-- risks: clear (B1 only real user-visible bug; everything else is hygiene + new code)
-
-## plan_2026-05-10_54e6e303
-### Index
-
-| ID | Topic | Detail |
-|----|-------|--------|
-| F-001 | Inherited OPEN inventory after plan_bd098beb | inline below |
-| F-002 | EMA decay scheduling shape (warmup → asymptote) + callback wiring | inline below |
-| F-003 | `from_pretrained_encoder` weight-loading hook design | inline below |
-| F-004 | Pseudo-label + dataset pairing design | inline below |
-| F-005 | train_step refactor design (clean labeled / semi-sup branches) | inline below |
-| F-006 | StrongAugmentation #9 fix shape (per-sample factors + dynamic channels) | inline below |
-| F-007 | Multi-epoch FAL stability test recipe | inline below |
-| F-008 | Train script + README impact | inline below |
-
-### Key Constraints
-
-### Hard
-- Keras 3 / TF 2.18 idioms; full `get_config()` round-trip; `@keras.saving.register_keras_serializable()`; `keras.ops` / `keras.random.*` only; `dl_techniques.utils.logger`.
-- Preserve `# DECISION plan_2026-05-10_44694bc9/D-003` (Keras-3 train_step) and `# DECISION plan_2026-05-10_bd098beb/D-004` (save_own_variables override) anchors.
-- AdamW WD only — no `kernel_regularizer=L2`.
-- CPU verification with `CUDA_VISIBLE_DEVICES=""`. Single GPU jobs only — never parallel.
-- Per-step commit `[iter-N/step-M] desc`; user pushes.
-- 10-Line Rule + Autonomy Leash (2 fix attempts max per step).
-- Existing 8 tests in `tests/test_models/test_depth_anything/test_depth_anything.py` must continue to pass.
-- StrongAugmentation graph-mode safety: no Python-bool branches on symbolic tensors; `keras.random.*` not `keras.ops.random.*`.
-
-### Soft
-- New flag defaults backward-compatible (off / no-op when not requested).
-- TeacherEMACallback as a small standalone class in the model package, not a sub-attribute of DepthAnything.
-- Pseudo-label generation as a helper method on the model — keeps train_step locally readable.
-- Dataset pairing utility lives under `train.common.megadepth`.
-- `from_pretrained_encoder` stays a small wrapper around existing `load_weights_from_checkpoint`.
-
-### Ghost / out-of-scope
-- True DINOv2 weight loading from HuggingFace.
-- Distributed / multi-GPU.
-- `make test` (full 1.5h suite).
-- Item #5 (`tf.GradientTape`) — semi-sup path needs the explicit tape.
-
-### Exploration Confidence
-- **Problem scope: deep** — read entire `model.py` (752 LOC), `components.py` (309 LOC), `strong_augmentation.py` (258 LOC), train script (711 LOC), train README (166 LOC), model README (337 LOC), test module (178 LOC), `weight_transfer.py` API, FAL header. Reviewed all prior decisions.
-- **Solution space: constrained** — every OPEN item has a known fix shape; the EMA callback / pseudo-label / dataset-pairing pieces are small, additive surfaces.
-- **Risk visibility: clear** — main risks: (a) `update_teacher_ema` is numpy-based per-step (CPU host roundtrip); (b) pseudo-label loss must be plain L1 over 1-channel depth (no mask); (c) per-sample brightness/contrast must broadcast `(B,1,1,1)`; (d) multi-epoch test must complete <60s on CPU.
-
-### F-001 — Inherited OPEN inventory
-
-From model README "STILL OPEN" after plan_bd098beb:
-- **#5** — `tf.GradientTape` in custom train_step. Keep & document.
-- **#2-deeper** — On-step EMA decay schedule + integration with a real pretrained student.
-- **#3-deeper** — Pseudo-label depth on unlabeled stream + `((x_lab, x_unlab), y_lab)` pairing.
-- **#9** — `_apply_cutmix` channels=3 hard-coded; brightness/contrast batch-scalar.
-
-Plus user-explicit:
-- train_step refactor (clean labeled / semi-sup paths)
-- Multi-epoch FAL stability test (≥3 epochs, finite + non-increasing-on-average + teacher moves).
-
-### F-002 — EMA decay scheduling + callback wiring
-
-Existing surface: `DepthAnything.update_teacher_ema(decay)` at model.py:286-305 (numpy-based).
-
-**Schedule shape**: standard Mean-Teacher / DINO recipe:
-- cosine: `decay(t) = end - (end-start) * 0.5 * (1 + cos(pi * min(t,T)/T))`
-- linear: `decay(t) = start + (end-start) * min(t/T, 1.0)`
-- typical: start≈0.5, end≈0.999, total_steps = epochs * steps_per_epoch.
-
-**New module** `dl_techniques/models/depth_anything/teacher_ema.py`:
-- `cosine_ema_schedule(decay_start, decay_end, total_steps) -> Callable[[int], float]`
-- `linear_ema_schedule(decay_start, decay_end, total_steps) -> Callable[[int], float]`
-- `class TeacherEMACallback(keras.callbacks.Callback)` — constructor `(schedule: Callable[[int], float], warmup_steps: int = 0)`. On `on_train_batch_end`: if `step >= warmup_steps`, calls `model.update_teacher_ema(decay=schedule(step - warmup_steps))`. Increments step counter.
-
-Re-exported via package `__init__`.
-
-### F-003 — `from_pretrained_encoder` design
-
-Wrap `load_weights_from_checkpoint` against `model.encoder`. Re-sync teacher.
-
-```python
-def from_pretrained_encoder(self, weights_path, skip_prefixes=()):
-    if not self.built:
-        _ = self(keras.ops.zeros((1,)+tuple(self.image_shape)), training=False)
-    report = load_weights_from_checkpoint(
-        target=self.encoder, ckpt_path=weights_path, skip_prefixes=skip_prefixes,
-    )
-    logger.info(f"from_pretrained_encoder: loaded={report.num_loaded}")
-    if self.frozen_encoder is not None and self.use_feature_alignment:
-        self.frozen_encoder.set_weights(self.encoder.get_weights())
-```
-
-### F-004 — Pseudo-label + dataset pairing
-
-### Pseudo-label (model side)
-Helper method:
-```python
-def _pseudo_label_depth(self, x_unlab):
-    feat = self.frozen_encoder(x_unlab, training=False)
-    feat = self._features_to_spatial(feat)
-    pseudo = self.decoder(feat, training=False)
-    return ops.stop_gradient(pseudo)
-```
-
-In semi-sup train_step add a consistency term:
-```python
-y_pred_unlab = self(x_unlab, training=True)
-pseudo = self._pseudo_label_depth(x_unlab)
-consistency = ops.mean(ops.abs(y_pred_unlab - pseudo))
-loss += self.loss_weights.get('unlabeled', 0.5) * consistency
-```
-
-### Dataset pairing
-New helpers in `train.common.megadepth`:
-- `class UnlabeledImageDataset(keras.utils.PyDataset)` — small, returns batched RGB.
-- `pair_labeled_unlabeled(labeled_ds, unlabeled_ds) -> tf.data.Dataset` yielding `((x_lab, x_unlab), y_lab)` via `tf.data.Dataset.zip` + map.
-
-Train script: behind `--enable-semi-supervised` AND `--unlabeled-image-glob`, build paired dataset.
-
-### F-005 — train_step refactor
-
-Replace single mega-block with split helpers:
-```python
-def train_step(self, data):
-    x, y = data
-    if self.enable_semi_supervised and isinstance(x, (tuple, list)) and len(x) == 2:
-        return self._train_step_semi_supervised(x[0], x[1], y)
-    return self._train_step_labeled(x, y)
-```
-
-`_train_step_labeled`: short — single forward + compute_loss + apply grads + update metrics.
-`_train_step_semi_supervised`: clearly delimited — labeled forward + (optional) FAL term + (optional) consistency term.
-
-Preserve `# DECISION plan_2026-05-10_44694bc9/D-003` anchor at the `compute_loss` call.
-
-### F-006 — StrongAugmentation #9 fix
-
-In `_apply_cutmix`:
-- `ops.tile(mask, [1, 1, 3])` → `ops.tile(mask, [1, 1, ops.shape(x)[-1]])`.
-
-In `_apply_color_jitter`:
-- brightness/contrast `shape=()` → `shape=(ops.shape(x)[0], 1, 1, 1)` for per-sample factors.
-
-Per-sample factors broadcast cleanly. Graph-traceability preserved.
-
-### F-007 — Multi-epoch FAL stability test
-
-CPU pytest: build small ViT-S DepthAnything at 64x64, snapshot teacher weights, run 3 epochs * 2 steps semi-sup synthetic, assert: (a) all losses finite; (b) `losses[-1] <= 1.5 * losses[0]` (loose tolerance); (c) sum-abs-diff(teacher_after - teacher_before) > 0.
-
-### F-008 — Train script + README impact
-
-Train script CLI: add `--ema-decay-end`, `--ema-warmup-steps`, `--ema-schedule {cosine,linear,none}`, `--unlabeled-image-glob`, `--pretrained-encoder-weights`.
-
-Wire `from_pretrained_encoder`, `pair_labeled_unlabeled`, `TeacherEMACallback`.
-
-Train README: drop "labeled-only" caveat; new semi-sup recipe with EMA.
-
-Model README: move #2-deeper, #3-deeper, #5 (refactored), #9 to FIXED. Only #5 base note (custom GradientTape) remains as documented LOW. Add EMA-callback usage example.
-
-### Corrections
-*None yet.*
-
-## plan_2026-05-10_bd098beb
-### Index
-
-| ID  | Topic | Detail |
-|-----|-------|--------|
-| F-001 | Inherited issue inventory (README #1-#14 + D-005) | inline below |
-| F-002 | Real encoder availability (ViT vs DINOv2) | inline below |
-| F-003 | Decoder upsampling design | inline below |
-| F-004 | Semi-supervised pipeline + feature-alignment wiring | inline below |
-| F-005 | Train-script + README sync impact | inline below |
-
-### Key Constraints
-
-### Hard
-- Keras 3 / TF 2.18 idioms, full `get_config()` round-trip, `@keras.saving.register_keras_serializable()`, `keras.ops`, `dl_techniques.utils.logger` (no `print`).
-- Single GPU, never parallel jobs. CPU smoke (`CUDA_VISIBLE_DEVICES=""`) preferred for verification.
-- Per-step commit `[iter-N/step-M] desc`; user pushes themselves.
-- Update both READMEs (model + train) when API changes.
-- Pattern `mlm.py:309-343` is canonical Keras-3 train_step. Already applied — preserve `# DECISION plan_2026-05-10_44694bc9/D-003` anchor unless we materially change semantics.
-- AdamW WD only — never combine with `kernel_regularizer=L2`.
-- 10-Line Rule + Autonomy Leash + 3-Strike Rule.
-
-### Soft
-- Real encoder: prefer `dl_techniques.models.vit.ViT(include_top=False, pooling=None)` — `DINOv2VisionTransformer` requires three Functional inputs (image+masks+is_training), much harder to compose.
-- DPTDecoder default activation: change `'sigmoid'` → `'linear'` so AffineInvariantLoss is usable.
-- Semi-supervised: gate behind `enable_semi_supervised` flag (default OFF) for backward compatibility.
-- Feature alignment: rewire `frozen_encoder` to be a `keras.models.clone_model(encoder)` weight-share teacher; expose `update_teacher_ema(decay)`. Default OFF.
-
-### Ghost / out-of-scope
-- True DINOv2 weight loading from HuggingFace — separate plan.
-- Pseudo-label depth-on-unlabeled training (needs a real pretrained teacher) — separate plan.
-- Multi-GPU / distributed.
-- `make test` (full 1.5h suite).
-
-### Exploration Confidence
-- **Problem scope: deep** — read entire `model.py`, `components.py`, `__init__.py`, `strong_augmentation.py`, `affine_invariant_loss.py`, `feature_alignment_loss.py`, current train script, ViT and DINOv2 model surface, prior plan summary + findings + decisions.
-- **Solution space: constrained** — fixes are mechanical for #5/#6/#7/#8/#10/#11/#13/#14 + D-005; substantive for #1 (real ViT encoder), #2/#3 (semi-sup + FAL wiring). Pattern: gate behind flags; default backward-compatible.
-- **Risk visibility: clear** — main risks: (a) real ViT encoder produces sequence `(B,N,D)` while decoder expects 4D — must reshape + upsample; (b) frozen_encoder clone ordering vs build; (c) save/load round-trip with new sub-model topology. Mitigated by step ordering + per-step CPU smoke.
-
-### F-001 — Inherited issue inventory
-
-From model README Known Issues + plan_2026-05-10_44694bc9 D-005:
-
-| # | Severity | Description | Fix shape |
-|---|----------|-------------|-----------|
-| 1 | HIGH | Placeholder Conv-BN-ReLU encoder, not real ViT/DINOv2 | Wire `dl_techniques.models.vit.ViT(include_top=False, pooling=None)`; reshape (B,N,D)→(B,h,w,D); placeholder kept behind `encoder_kind='conv'` |
-| 2 | HIGH | Frozen teacher has independent random weights | `keras.models.clone_model(encoder)` + copy weights post-build; expose `update_teacher_ema(decay)` |
-| 3 | HIGH | Semi-supervised pipeline unimplemented | `enable_semi_supervised` flag (default False). When True: `train_step` accepts `((x_lab, x_unlab), y_lab)`, computes labeled loss + FAL on unlabeled feats. Pseudo-label-depth deferred. |
-| 4 | FIXED | Keras-3 train_step (prior plan) | preserve `# DECISION plan_2026-05-10_44694bc9/D-003` |
-| 5 | LOW | tf.GradientTape | Acceptable; keep — Keras 3 supports TF backend tape. Note in README. |
-| 6 | HIGH | DPTDecoder default sigmoid incompatible with AIL | Change default to `'linear'`. Update train script + README. |
-| 7 | MEDIUM | Functional encoder built in `build()` is fragile under save/load | When encoder is ViT (declared in `__init__`), the issue disappears. |
-| 8 | LOW | Dead `if X is not None` checks + `_create_fallback_decoder` | Remove. |
-| 9 | LOW | StrongAugmentation cutmix per-batch + 3-channel hardcoded | Make channels dynamic; per-sample brightness/contrast factors. + D-005 fix. |
-| 10 | MEDIUM | `encoder_type` validated but unused | Map `vit_s/vit_b/vit_l` → ViT scales `small/base/large`; `conv` = placeholder. |
-| 11 | LOW | `input_shape` shadows Layer.input_shape | Rename to `image_shape` (back-compat alias retained). |
-| 12 | MEDIUM | No tests | Add `tests/test_models/test_depth_anything/test_depth_anything.py`. |
-| 13 | LOW | `frozen_encoder.trainable = trainable` after Functional construction | Replaced by clone_model approach. |
-| 14 | LOW | `compile()` mutates dead state | Remove `self.depth_loss`/`self.feature_loss`; just `super().compile()`. |
-| D-005 | HIGH | `keras.ops.random.uniform` doesn't exist in Keras 3.8 | Replace with `keras.random.uniform` in StrongAugmentation `_apply_color_jitter` and `_apply_cutmix`. |
-
-### F-002 — Real encoder availability
-
-`src/dl_techniques/models/vit/model.py` — `ViT(keras.Model)`:
-- `ViT(input_shape=(384,384,3), scale='small'/'base'/'large', patch_size=16, include_top=False, pooling=None)` returns `(B, num_patches+1, embed_dim)`.
-- Strip CLS: `x[:, 1:, :]` → `(B, num_patches, embed_dim)`.
-- Reshape to spatial: `(B, h, w, embed_dim)` where `h=H//patch_size`, `w=W//patch_size` (statically known from constructor).
-
-`DINOv2VisionTransformer` requires three Functional inputs (`[inputs, masks_input, is_training_input]`) — too invasive. Defer.
-
-### F-003 — Decoder upsampling design
-
-ViT encoder at patch_size=16 → encoder output is H/16 × W/16 (24×24 for 384×384). Need to upsample to full resolution.
-
-Add `upsample_factor: int = 1` to `DPTDecoder.__init__`. With 4-stage `dims=[256,128,64,32]`, distribute upsampling across stages: each non-final conv block followed by 2× bilinear upsample → cumulative 16× (one per stage; last stage no upsample, output_conv at full res).
-
-`compute_output_shape` updated to multiply h,w by upsample_factor.
-
-DepthAnything passes `upsample_factor = image_size // encoder_stride`. For placeholder Conv encoder (stride 32 actually — initial stride-2 conv + 4 maxpools = 32×), placeholder mode passes 32; for ViT (patch_size=16), passes 16.
-
-### F-004 — Semi-supervised + feature-alignment wiring
-
-`train_step(data)`: detect `x = data[0]; y = data[1]`. If `x` is a 2-tuple `(x_lab, x_unlab)`, run semi-sup path; else single-batch labeled-only path (current behavior).
-
-When `enable_semi_supervised` AND `use_feature_alignment`:
-1. Forward labeled: `y_pred_lab = self(x_lab, training=True)`. Capture student feat via `feat_student = self.encoder(x_unlab, training=True)`.
-2. Teacher: `feat_teacher = self.frozen_encoder(x_unlab, training=False)`. Stop-gradient on teacher path (frozen weights, no tape track).
-3. Loss: `loss = w_lab * compute_loss(x=x_lab, y=y, y_pred=y_pred_lab) + w_feat * FeatureAlignmentLoss()(feat_teacher, feat_student)`.
-
-`feature_alignment_loss` expects `(B, feature_dim)` shape. We pool `(B, h, w, D)` to `(B, D)` via global average pool BEFORE passing to FAL. (Per-token FAL would need broadcasting; pooled is the standard distillation form.)
-
-`frozen_encoder` build: in `DepthAnything.build()`, after `self.encoder = ...`, when `use_feature_alignment`: `self.frozen_encoder = keras.models.clone_model(self.encoder); self.frozen_encoder.set_weights(self.encoder.get_weights()); self.frozen_encoder.trainable = False`.
-
-`update_teacher_ema(decay=0.999)` method copies EMA weights from student → teacher. Future plan can wire a callback to invoke this each step.
-
-Pseudo-label-depth-on-unlabeled-data path: deferred. Documented in README as residual.
-
-### F-005 — Train script + README impact
-
-`src/train/depth_anything/train_depth_anything.py`:
-- `create_model()` adds `encoder_kind`, `output_activation='linear'` (now valid via DepthEstimationLoss + AIL both), `image_shape` (renamed), `enable_semi_supervised`.
-- Add `--encoder-kind {real,placeholder}` (default `real`) and `--enable-semi-supervised` flag (default off).
-- Loss: `DepthEstimationLoss` continues to work (linear output is fine; sigmoid was a constraint, removing it is a simplification).
-
-Model README rewrite Known Issues:
-- FIXED in this plan: #1, #2(weight-shared teacher), #3(infrastructure for semi-sup; FAL wired), #6, #7, #8, #10, #11, #13, #14, D-005, partial #9 (D-005 only — per-batch/3-channel cutmix is a separate refactor).
-- STILL OPEN: #5 (LOW; documented), #2-deeper (EMA decay default + callback to invoke it), #3-deeper (pseudo-label depth on unlabeled), #9-deeper (per-sample cutmix/color factors).
-- ADDED: #12 — tests added in this plan, so REMOVED from open list.
-
-### Corrections
-*None yet.*
+*(none yet)*
+
+### Exploration confidence
+- Scope: **deep** — full source read, peer-template read, no-caller grep, dependency layers reviewed.
+- Solutions: **constrained** — clear precedents (PRISM README, TiRex training script) directly apply.
+- Risks: **clear** — main risk is scope creep into code fixes. PLAN should NOT bundle code fixes unless user asks. Review is delivered as an artifact + chat summary.
+
+### Synthesis
+adaptive_ema is a *small, single-class, untested, undocumented model* with 4 critical and 6 high-severity issues. The user's three deliverables are (a) review, (b) README, (c) training package. Review is informational + advisory; README and training script are net-new additive files at zero blast radius (no callers, no tests). PLAN: write README mirroring PRISM, write Pattern-2 training package mirroring TiRex, surface code-review findings in REFLECT, ask the user whether to spin a follow-up plan for code fixes.

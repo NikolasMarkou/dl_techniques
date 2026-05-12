@@ -103,10 +103,13 @@ References:
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple, Union
-
 import keras
 from keras import initializers, ops, regularizers
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+# ---------------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------------
 
 from dl_techniques.layers.geometric.clifford_block import (
     CausalCliffordNetBlock,
@@ -116,9 +119,10 @@ from dl_techniques.layers.geometric.clifford_block import (
     SparseRollingGeometricProduct,
 )
 from dl_techniques.layers.patch_merging import PatchMerging
-from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
+from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------------
 
 def _head_shifts_for(channels: int, requested: Optional[List[int]]) -> List[int]:
     """Return a valid non-empty list of head shifts given the channel size.
