@@ -51,6 +51,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from dl_techniques.layers.time_series.ema_layer import ExponentialMovingAverage
 from dl_techniques.layers.time_series.quantile_head_variable_io import QuantileSequenceHead
+from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
@@ -188,6 +189,19 @@ class AdaptiveEMASlopeFilterModel(keras.Model):
         if slope_feature_kernel <= 0:
             raise ValueError(
                 f"slope_feature_kernel must be > 0, got {slope_feature_kernel}"
+            )
+
+        # I-19: surface the easy-to-misconfigure case where the user asked
+        # for learnable thresholds but did NOT attach a quantile head — the
+        # model then has only 2 trainable scalars and no head to project
+        # them through, which usually indicates a misconfigured experiment.
+        if learnable_thresholds and quantile_head_config is None:
+            logger.warning(
+                "AdaptiveEMASlopeFilterModel: learnable_thresholds=True "
+                "with quantile_head_config=None gives a model with only 2 "
+                "trainable scalars (midpoint_var, log_half_range_var). "
+                "If you intended to learn a distribution over slopes, pass "
+                "quantile_head_config={'num_quantiles': K}."
             )
 
         self.ema_period = ema_period

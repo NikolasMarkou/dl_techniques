@@ -286,3 +286,46 @@ class TestAdaptiveEMASlopeFilterModel:
         out = model(ops.convert_to_tensor(x), training=False)
         assert "slope_quantiles" in out
         assert tuple(out["slope_quantiles"].shape) == (2, 16, 5)
+
+    # ------------------------------------------------------------------
+    # I-19 — learnable_thresholds=True without quantile head logs a warning.
+    # ------------------------------------------------------------------
+
+    def test_learnable_thresholds_warning(self, monkeypatch):
+        """``__init__`` warns when only 2 scalars are trainable."""
+        from dl_techniques.models.adaptive_ema import model as model_mod
+
+        captured = []
+
+        def fake_warning(msg, *args, **kwargs):
+            captured.append(msg % args if args else msg)
+
+        monkeypatch.setattr(model_mod.logger, "warning", fake_warning)
+
+        _ = AdaptiveEMASlopeFilterModel(
+            ema_period=10,
+            lookback_period=5,
+            initial_upper_threshold=1.0,
+            initial_lower_threshold=-1.0,
+            learnable_thresholds=True,
+            quantile_head_config=None,
+        )
+        assert any("only 2 trainable scalars" in m for m in captured), (
+            f"expected I-19 warning, captured={captured}"
+        )
+
+    def test_no_warning_when_head_configured(self, monkeypatch):
+        """No I-19 warning when learnable_thresholds=True + quantile head set."""
+        from dl_techniques.models.adaptive_ema import model as model_mod
+
+        captured = []
+        monkeypatch.setattr(
+            model_mod.logger, "warning", lambda m, *a, **k: captured.append(m)
+        )
+        _ = AdaptiveEMASlopeFilterModel(
+            ema_period=10,
+            lookback_period=5,
+            learnable_thresholds=True,
+            quantile_head_config={"num_quantiles": 3},
+        )
+        assert not any("only 2 trainable scalars" in m for m in captured)
