@@ -29,6 +29,15 @@ Trainable surface
   (``slope_feature_dim`` filters, kernel ``slope_feature_kernel``, GELU
   activation) precedes the ``QuantileSequenceHead`` so the head sees a learned
   representation of the slope window instead of a scalar.
+
+References
+----------
+* LeBeau, C. (1992). *Computer Analysis of the Futures Markets.* McGraw-Hill —
+  origin of the EMA-slope filtering heuristic used as the rule-based path.
+* Bollinger, J. (2001). *Bollinger on Bollinger Bands.* McGraw-Hill — slope as
+  a trend/volatility regime indicator.
+* Koenker, R. & Bassett, G. (1978). "Regression Quantiles." *Econometrica*
+  46(1): 33-50 — quantile-loss formulation used by ``QuantileSequenceHead``.
 """
 
 import math
@@ -106,6 +115,19 @@ class AdaptiveEMASlopeFilterModel(keras.Model):
     * ``training=True``: soft signals via sigmoid, all in ``[0, 1]``.
     * ``training=False`` (inference): hard 0/1 signals, partition exact
       (``above + below + between == 1``).
+
+    Hard- vs soft-mode mutual exclusivity
+    -------------------------------------
+    The two threshold modes — rule-based hard thresholds (``output_mode``
+    style ``above``/``below``/``between`` signals) and the learned soft
+    ``slope_quantiles`` head — are produced from the *same* slope tensor and
+    are mutually independent at the dict level (both can be active in one
+    forward pass). However they answer different questions and should not be
+    used together in a downstream classifier without an explicit fusion
+    policy: the hard signals are deterministic membership indicators of a
+    threshold band; ``slope_quantiles`` is a distributional forecast of the
+    slope itself. Treat them as alternatives, not as a single conditioned
+    output.
 
     :param ema_period: Period for the underlying ``ExponentialMovingAverage``.
         Must be ``>= 1``.
@@ -315,6 +337,35 @@ class AdaptiveEMASlopeFilterModel(keras.Model):
             )
 
         return outputs
+
+    def compute_output_shape(
+        self, input_shape: Tuple[Optional[int], ...]
+    ) -> Dict[str, Tuple[Optional[int], ...]]:
+        """Static-shape map of the dict output (I-14).
+
+        :param input_shape: Shape of ``inputs``, either ``(B, T)`` or
+            ``(B, T, F)``.
+        :return: Dict mirroring the keys returned by :meth:`call`.
+            ``ema``, ``slope``, and the three signal tensors take the
+            full input shape. ``upper_threshold`` and ``lower_threshold``
+            are scalars. ``slope_quantiles`` (if the head is enabled) is
+            ``(B, T, K)`` where ``K = num_quantiles``.
+        """
+        shapes: Dict[str, Tuple[Optional[int], ...]] = {
+            "ema": tuple(input_shape),
+            "slope": tuple(input_shape),
+            "signal_above": tuple(input_shape),
+            "signal_below": tuple(input_shape),
+            "signal_between": tuple(input_shape),
+            "upper_threshold": (),
+            "lower_threshold": (),
+        }
+        if self.quantile_head_config is not None:
+            B = input_shape[0]
+            T = input_shape[1] if len(input_shape) >= 2 else None
+            K = self.quantile_head_config["num_quantiles"]
+            shapes["slope_quantiles"] = (B, T, K)
+        return shapes
 
     def get_config(self) -> Dict[str, Any]:
         """Return model configuration for serialization."""
