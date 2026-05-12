@@ -209,13 +209,21 @@ class AdaptiveEMADataProcessor:
     def _target_for_context(
         self, future: np.ndarray
     ) -> np.ndarray:
-        """Build training target from the realized future segment."""
+        """Build training target from the realized future segment.
+
+        The synthetic ``TimeSeriesGenerator`` returns ``(T, 1)`` arrays, so
+        ``future`` may be 2D. Targets are 1D ``(prediction_horizon,)`` per
+        the output signature in :meth:`prepare_datasets`, so we squeeze any
+        trailing singleton feature axis defensively.
+        """
+        if future.ndim == 2 and future.shape[-1] == 1:
+            future = future.reshape(-1)
         future_slope = self._compute_future_slope(future)
         if self.config.mode == "classification":
             lo = self.config.initial_lower_threshold
             hi = self.config.initial_upper_threshold
             mask = ((future_slope >= lo) & (future_slope <= hi)).astype(np.float32)
-            return mask
+            return mask.astype(np.float32)
         # quantile mode → predict the slope itself
         return future_slope.astype(np.float32)
 
