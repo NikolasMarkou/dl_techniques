@@ -259,3 +259,30 @@ class TestAdaptiveEMASlopeFilterModel:
             f"{len(model.trainable_weights)}: "
             f"{[w.name for w in model.trainable_weights]}"
         )
+
+    # ------------------------------------------------------------------
+    # I-18 — quantile head rejects multi-feature inputs (D-002).
+    # ------------------------------------------------------------------
+
+    def test_quantile_head_rejects_multifeature_input(self):
+        """``call()`` raises ValueError on (B, T, F>1) when quantile head set."""
+        model = AdaptiveEMASlopeFilterModel(
+            ema_period=10,
+            lookback_period=5,
+            quantile_head_config={"num_quantiles": 5},
+        )
+        x = np.random.randn(2, 16, 3).astype(np.float32)
+        with pytest.raises(ValueError, match="multi-feature inputs"):
+            _ = model(ops.convert_to_tensor(x), training=False)
+
+    def test_quantile_head_accepts_single_feature_3d(self):
+        """``(B, T, 1)`` must still work with quantile head."""
+        model = AdaptiveEMASlopeFilterModel(
+            ema_period=10,
+            lookback_period=5,
+            quantile_head_config={"num_quantiles": 5},
+        )
+        x = np.random.randn(2, 16, 1).astype(np.float32)
+        out = model(ops.convert_to_tensor(x), training=False)
+        assert "slope_quantiles" in out
+        assert tuple(out["slope_quantiles"].shape) == (2, 16, 5)

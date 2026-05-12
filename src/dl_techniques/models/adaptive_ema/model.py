@@ -327,6 +327,22 @@ class AdaptiveEMASlopeFilterModel(keras.Model):
         # Optional quantile head — Conv1D causal featurization first (I-2b).
         if self.quantile_head is not None:
             ndim = len(inputs.shape)
+            # DECISION plan_2026-05-12_5f0e087c/D-002:
+            # Reject multi-feature inputs when a quantile head is attached
+            # rather than silently mixing features through the Conv1D
+            # featurizer. Documented as L-7 in README §11.
+            if (
+                ndim == 3
+                and inputs.shape[-1] is not None
+                and inputs.shape[-1] > 1
+            ):
+                raise ValueError(
+                    "AdaptiveEMASlopeFilterModel with quantile_head_config "
+                    "set does not support multi-feature inputs "
+                    f"(got inputs.shape[-1]={inputs.shape[-1]}). "
+                    "Either drop the quantile head or reduce inputs to a "
+                    "single feature channel."
+                )
             if ndim == 2:
                 slope_3d = ops.expand_dims(slope, axis=-1)
             else:
