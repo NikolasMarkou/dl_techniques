@@ -141,7 +141,21 @@ def get_cifar_preprocessing() -> Tuple[List[float], List[float]]:
 
 
 def _cifar_augment(image: tf.Tensor, label: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Standard CIFAR augmentation: random flip + pad-and-crop + small color jitter."""
+    """Standard CIFAR augmentation on [0,1]-valued float32 images.
+
+    DECISION plan_2026-05-12_f2d29729/D-007: this function operates on the
+    [0,1]-valued pre-normalization tensors. Augmentation MUST run BEFORE
+    per-channel mean/std normalization (which is applied in
+    `_cifar_normalize` via a subsequent `.map`). The previous version
+    applied augmentation AFTER numpy-level normalization and then
+    `tf.clip_by_value(image, 0.0, 1.0)`, which saturated most pixels to
+    {0,1} on normalized data (range ~[-1.99, +2.06]) and produced a
+    train/val distribution mismatch (val skipped augment). Do NOT add a
+    `clip_by_value` here; brightness ±0.1 and contrast 0.9-1.1 may
+    transiently nudge a few pixels slightly outside [0,1] but the
+    subsequent normalization is unaffected and the upstream pipelines in
+    train_resnet.py follow the same no-clip convention.
+    """
     image = tf.image.random_flip_left_right(image)
     image = tf.image.random_crop(
         tf.pad(image, [[4, 4], [4, 4], [0, 0]], mode="REFLECT"),
@@ -149,7 +163,23 @@ def _cifar_augment(image: tf.Tensor, label: tf.Tensor) -> Tuple[tf.Tensor, tf.Te
     )
     image = tf.image.random_brightness(image, max_delta=0.1)
     image = tf.image.random_contrast(image, lower=0.9, upper=1.1)
-    return tf.clip_by_value(image, 0.0, 1.0), label
+    return image, label
+
+
+def _cifar_normalize(image: tf.Tensor, label: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
+    """Per-channel CIFAR mean/std normalization.
+
+    DECISION plan_2026-05-12_f2d29729/D-007: applied as a `.map` AFTER
+    `_cifar_augment` so that both train and val pipelines see the same
+    normalized distribution. Replaces the previous numpy-level
+    normalization that was applied before augmentation (which broke
+    train/val parity — see D-006).
+    """
+    mean_vals, std_vals = get_cifar_preprocessing()
+    mean = tf.constant(mean_vals, dtype=tf.float32, shape=(1, 1, 3))
+    std = tf.constant(std_vals, dtype=tf.float32, shape=(1, 1, 3))
+    image = (image - mean) / std
+    return image, label
 
 
 def create_cifar_dataset(
@@ -173,16 +203,17 @@ def create_cifar_dataset(
     x_train = x_train.astype("float32") / 255.0
     x_test = x_test.astype("float32") / 255.0
 
-    # Normalize
-    mean, std = get_cifar_preprocessing()
-    x_train = (x_train - np.array(mean)) / np.array(std)
-    x_test = (x_test - np.array(mean)) / np.array(std)
+    # DECISION plan_2026-05-12_f2d29729/D-007: do NOT normalize here at the
+    # numpy level. Normalization runs as `_cifar_normalize` AFTER augmentation
+    # in the tf.data pipeline so that train and val see identical statistics.
+    # See D-006 for the iter-1 bug fingerprint.
 
     logger.info(f"{ds_name.upper()}: {x_train.shape[0]} train, {x_test.shape[0]} test")
 
     train_ds = tf.data.Dataset.from_tensor_slices((x_train, y_train)).shuffle(10000)
     if config.augment_data:
         train_ds = train_ds.map(_cifar_augment, num_parallel_calls=config.num_parallel_calls)
+    train_ds = train_ds.map(_cifar_normalize, num_parallel_calls=config.num_parallel_calls)
     train_ds = (
         train_ds.repeat()
         .batch(config.batch_size, drop_remainder=True)
@@ -191,6 +222,7 @@ def create_cifar_dataset(
 
     val_ds = (
         tf.data.Dataset.from_tensor_slices((x_test, y_test))
+        .map(_cifar_normalize, num_parallel_calls=config.num_parallel_calls)
         .batch(config.batch_size)
         .prefetch(config.prefetch_buffer)
     )
