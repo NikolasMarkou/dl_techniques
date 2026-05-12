@@ -6,6 +6,7 @@ The implementation supports different scales and configurations similar to the o
 through factory-based component creation.
 """
 
+import os
 import keras
 from keras import ops, layers, initializers, regularizers
 from typing import Optional, Tuple, Dict, Any, Union, Literal
@@ -15,6 +16,10 @@ from typing import Optional, Tuple, Dict, Any, Union, Literal
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
+from dl_techniques.utils.deep_supervision import (
+    create_inference_model_from_training_model,
+)
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
@@ -212,6 +217,25 @@ class ViT(keras.Model):
         "base": (768, 12, 12, 4.0),  # ViT-Base
         "large": (1024, 16, 24, 4.0),  # ViT-Large
         "huge": (1280, 16, 32, 4.0),  # ViT-Huge
+    }
+
+    # ResNet-template variant registry. Thin wrapper over SCALE_CONFIGS so
+    # callers can use `ViT.from_variant("vit_pico", ...)` exactly like
+    # `ResNet.from_variant("resnet50", ...)`.
+    MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
+        "vit_pico":  {"scale": "pico"},
+        "vit_tiny":  {"scale": "tiny"},
+        "vit_small": {"scale": "small"},
+        "vit_base":  {"scale": "base"},
+        "vit_large": {"scale": "large"},
+        "vit_huge":  {"scale": "huge"},
+    }
+
+    # Pretrained weights URLs (placeholder -- no public ViT weights are
+    # distributed for this implementation; see `_download_weights`).
+    PRETRAINED_WEIGHTS: Dict[str, Dict[str, str]] = {
+        "vit_base":  {"imagenet": "https://example.com/vit_base_imagenet.keras"},
+        "vit_large": {"imagenet": "https://example.com/vit_large_imagenet.keras"},
     }
 
     def __init__(
@@ -621,17 +645,213 @@ class ViT(keras.Model):
         img_h, img_w = self.input_shape_config[:2]
         logger.info(f"Patches per dimension: {img_h // patch_h} x {img_w // patch_w}")
 
+    # -----------------------------------------------------------------
+    # Pretrained-weights API (resnet-template parity)
+    # -----------------------------------------------------------------
+
+    def load_pretrained_weights(
+            self,
+            weights_path: str,
+            skip_mismatch: bool = True,
+    ) -> None:
+        """Load pretrained weights from a local ``.keras`` file.
+
+        # DECISION plan_2026-05-12_f2d29729/D-001
+        Diverges from the resnet template's ``self.load_weights(..., by_name=True)``
+        path because Keras 3.8 raises ``ValueError("Invalid keyword arguments:
+        {'by_name': True}")`` when ``by_name=True`` is passed to
+        ``.keras`` files (LESSONS L71). Route through
+        :func:`dl_techniques.utils.weight_transfer.load_weights_from_checkpoint`
+        which does a full-model load + layer-by-layer ``set_weights``.
+
+        Args:
+            weights_path: Path to the ``.keras`` weights file.
+            skip_mismatch: Whether to skip layers with mismatched shapes
+                (forwarded as the inverse of ``strict``).
+
+        Raises:
+            FileNotFoundError: If ``weights_path`` does not exist.
+            ValueError: If the file is not ``.keras`` or strict transfer fails.
+        """
+        if not os.path.exists(weights_path):
+            raise FileNotFoundError(f"Weights file not found: {weights_path}")
+
+        # Build the model if not already built (probe forward pass).
+        if not self.built:
+            dummy_input = keras.random.normal((1,) + tuple(self.input_shape_config))
+            self(dummy_input, training=False)
+
+        logger.info(f"Loading pretrained weights from {weights_path}")
+        report = load_weights_from_checkpoint(
+            target=self,
+            ckpt_path=weights_path,
+            skip_prefixes=("head",),
+            strict=(not skip_mismatch),
+        )
+        logger.info(f"Weight transfer report: {report}")
+
+    @staticmethod
+    def _download_weights(
+            variant: str,
+            dataset: str = "imagenet",
+            cache_dir: Optional[str] = None,
+    ) -> str:
+        """Download pretrained weights for ``variant``.
+
+        # DECISION plan_2026-05-12_f2d29729/D-002
+        Diverges from the resnet template which actually attempts to download
+        from a placeholder URL. No public ViT checkpoints in the
+        ``dl_techniques`` weight format are distributed at this time
+        (LESSONS L53). Calling this method always raises
+        :class:`NotImplementedError` so failures are loud, not silent
+        404s that produce HTML payloads masquerading as ``.keras`` files.
+
+        Args:
+            variant: Model variant (e.g. ``"vit_base"``). Unused; reserved
+                for the future signature parity with :class:`ResNet`.
+            dataset: Pretraining dataset name. Unused; same reason.
+            cache_dir: Cache directory. Unused; same reason.
+
+        Raises:
+            NotImplementedError: Always.
+        """
+        del variant, dataset, cache_dir  # silence unused-arg lint
+        raise NotImplementedError(
+            "No public ViT checkpoints are distributed for this implementation. "
+            "Pass a local .keras path to `pretrained=` to load custom weights, "
+            "e.g. `ViT.from_variant('vit_base', pretrained='/path/to/weights.keras')`."
+        )
+
+    @classmethod
+    def from_variant(
+            cls,
+            variant: str,
+            num_classes: int = 1000,
+            input_shape: Optional[Tuple[int, int, int]] = None,
+            pretrained: Union[bool, str] = False,
+            weights_dataset: str = "imagenet",
+            weights_input_shape: Optional[Tuple[int, int, int]] = None,
+            cache_dir: Optional[str] = None,
+            **kwargs: Any,
+    ) -> "ViT":
+        """Create a ViT model from a predefined variant.
+
+        # DECISION plan_2026-05-12_f2d29729/D-003
+        Resnet-template parity. The ``except (IOError, OSError, ValueError)``
+        around ``_download_weights`` is narrow on purpose so a
+        :class:`NotImplementedError` from ``_download_weights`` propagates
+        (LESSONS L53 -- silent fallbacks hide bugs). A user who sets
+        ``pretrained=True`` without providing a local checkpoint path
+        gets a clear error.
+
+        Args:
+            variant: One of the keys in :attr:`MODEL_VARIANTS`
+                (``"vit_pico".."vit_huge"``).
+            num_classes: Number of output classes for the classification head.
+            input_shape: Input image shape ``(H, W, C)``. Defaults to
+                ``(224, 224, 3)``.
+            pretrained: Either a boolean (``True`` -> attempt download, will
+                raise) or a string path to a local ``.keras`` checkpoint.
+            weights_dataset: Dataset name for pretrained weights routing.
+            weights_input_shape: Optional input shape the pretrained weights
+                were trained at. If different from ``input_shape``, mismatch
+                skipping is enabled during transfer.
+            cache_dir: Optional cache directory for downloads.
+            **kwargs: Forwarded to the :class:`ViT` constructor.
+
+        Returns:
+            Configured (and possibly weight-loaded) :class:`ViT` instance.
+
+        Raises:
+            ValueError: If ``variant`` is not recognized.
+            NotImplementedError: If ``pretrained=True`` (boolean) -- no public
+                ViT weights are hosted.
+            FileNotFoundError: If ``pretrained="/path"`` and the path is missing.
+        """
+        if variant not in cls.MODEL_VARIANTS:
+            raise ValueError(
+                f"Unknown variant '{variant}'. Available variants: "
+                f"{list(cls.MODEL_VARIANTS.keys())}"
+            )
+
+        variant_cfg = cls.MODEL_VARIANTS[variant]
+        scale = variant_cfg["scale"]
+
+        if input_shape is None:
+            input_shape = (224, 224, 3)
+
+        logger.info(f"Creating ViT model variant '{variant}' (scale='{scale}')")
+
+        # Resolve pretrained source --------------------------------------
+        load_weights_path: Optional[str] = None
+        skip_mismatch = False
+
+        if pretrained:
+            if isinstance(pretrained, str):
+                load_weights_path = pretrained
+                logger.info(f"Will load weights from local file: {load_weights_path}")
+            else:
+                # boolean True -- delegate to _download_weights, narrow except.
+                try:
+                    load_weights_path = cls._download_weights(
+                        variant=variant,
+                        dataset=weights_dataset,
+                        cache_dir=cache_dir,
+                    )
+                except (IOError, OSError, ValueError) as e:
+                    logger.warning(
+                        f"Failed to acquire pretrained weights via download: {e}. "
+                        f"Continuing with random initialization."
+                    )
+                    load_weights_path = None
+
+            # Decide whether to enable shape-mismatch skipping.
+            include_top = kwargs.get("include_top", True)
+            if include_top and num_classes != 1000:
+                skip_mismatch = True
+                logger.info(
+                    f"num_classes ({num_classes}) != pretrained head (1000); "
+                    f"head weights will be skipped."
+                )
+            if weights_input_shape and weights_input_shape != input_shape:
+                logger.info(
+                    f"Pretrained weights trained on {weights_input_shape} but "
+                    f"model uses {input_shape}; positional embeddings may differ."
+                )
+                skip_mismatch = True
+
+        # Build model ----------------------------------------------------
+        model = cls(
+            input_shape=input_shape,
+            num_classes=num_classes,
+            scale=scale,
+            **kwargs,
+        )
+
+        # Load weights if a path was resolved ----------------------------
+        if load_weights_path:
+            model.load_pretrained_weights(
+                weights_path=load_weights_path,
+                skip_mismatch=skip_mismatch,
+            )
+
+        return model
+
 
 # ---------------------------------------------------------------------
 # Factory Functions for Convenient Model Creation
 # ---------------------------------------------------------------------
 
 
-def create_vision_transformer(
-        input_shape: Tuple[int, int, int] = (224, 224, 3),
+def create_vit(
+        variant: str = "vit_base",
         num_classes: int = 1000,
-        scale: VitScale = "base",
+        input_shape: Tuple[int, int, int] = (224, 224, 3),
         patch_size: Union[int, Tuple[int, int]] = 16,
+        pretrained: Union[bool, str] = False,
+        weights_dataset: str = "imagenet",
+        weights_input_shape: Optional[Tuple[int, int, int]] = None,
+        cache_dir: Optional[str] = None,
         include_top: bool = True,
         pooling: Optional[PoolingMode] = None,
         dropout_rate: float = 0.0,
@@ -650,16 +870,17 @@ def create_vision_transformer(
     """
     Create a Vision Transformer model with specified configuration.
 
-    This factory function provides parameter validation and sensible defaults
-    for creating Vision Transformer models with different scales and configurations.
+    Resnet-template factory: ``variant`` is the canonical key and routes
+    through :meth:`ViT.from_variant` so callers get the pretrained-weights
+    + variant registry for free.
 
     Args:
-        input_shape: Input image shape (height, width, channels).
-            Must have positive dimensions and be compatible with patch_size.
+        variant: Variant key (``"vit_pico".."vit_huge"``). Defaults to
+            ``"vit_base"``.
         num_classes: Number of output classes for classification.
             Must be positive. Only used when include_top=True.
-        scale: Model scale determining architecture size.
-            Available: 'tiny', 'small', 'base', 'large', 'huge'.
+        input_shape: Input image shape (height, width, channels).
+            Must have positive dimensions and be compatible with patch_size.
         patch_size: Size of patches to extract from input images.
             If int, uses square patches. Image dimensions must be divisible by patch size.
         include_top: Whether to include the classification head.
@@ -739,11 +960,15 @@ def create_vision_transformer(
     if num_patches > 10000:  # Reasonable upper limit
         logger.warning(f"Large number of patches ({num_patches}) may cause memory issues")
 
-    # Create model instance
-    model = ViT(
-        input_shape=input_shape,
+    # Delegate to from_variant for unified pretrained-weights handling.
+    model = ViT.from_variant(
+        variant=variant,
         num_classes=num_classes,
-        scale=scale,
+        input_shape=input_shape,
+        pretrained=pretrained,
+        weights_dataset=weights_dataset,
+        weights_input_shape=weights_input_shape,
+        cache_dir=cache_dir,
         patch_size=patch_size,
         include_top=include_top,
         pooling=pooling,
@@ -758,10 +983,10 @@ def create_vision_transformer(
         normalization_position=normalization_position,
         ffn_type=ffn_type,
         activation=activation,
-        **kwargs
+        **kwargs,
     )
 
-    logger.info(f"VisionTransformer-{scale} created successfully")
+    logger.info(f"ViT variant '{variant}' created successfully")
     logger.info(f"Configuration: {num_patches} patches ({img_h // patch_h}x{img_w // patch_w}), {num_classes} classes")
     return model
 
