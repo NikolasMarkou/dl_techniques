@@ -29,6 +29,13 @@ import keras
 
 from dl_techniques.utils.logger import logger
 
+# Trigger registration of the two custom classes used by saved checkpoints.
+# Without these imports `keras.saving.load_model` cannot resolve
+# `AdaptiveEMATrainingWrapper` / `AdaptiveEMASlopeFilterModel` from the
+# `Custom>` namespace embedded in the .keras config.
+from dl_techniques.models.adaptive_ema import AdaptiveEMASlopeFilterModel  # noqa: F401
+from train.adaptive_ema.train_adaptive_ema import AdaptiveEMATrainingWrapper  # noqa: F401
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -120,14 +127,69 @@ def export_to_onnx(
     logger.info(
         f"Exporting to ONNX (opset {opset_version}): {output_path}"
     )
-    model.export(
-        output_path,
-        format="onnx",
-        input_signature=input_signature,
-        opset_version=opset_version,
-    )
+    # tf2onnx 1.16.1 cannot convert the `tf.while_loop` produced by
+    # `keras.ops.scan` (raises `wire_while_body: couldn't find scan
+    # output index for nodes`). Because we know the input length is
+    # static at export time, we monkey-patch the EMA layer's `call`
+    # with a Python-unrolled loop variant for the duration of
+    # `model.export()` only — the saved Keras model on disk and the
+    # in-memory model after export are unchanged.
+    with _ema_unrolled_for_export(input_length):
+        model.export(
+            output_path,
+            format="onnx",
+            input_signature=input_signature,
+            opset_version=opset_version,
+        )
     logger.info(f"ONNX export successful: {output_path}")
     return output_path
+
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def _ema_unrolled_for_export(input_length: int):
+    """Temporarily replace ``ExponentialMovingAverage.call`` with a
+    Python-unrolled variant so that ``tf2onnx`` sees a finite sequence
+    of elementwise ops instead of a `tf.scan` While loop it can't
+    translate.
+    """
+    from dl_techniques.layers.time_series.ema_layer import ExponentialMovingAverage
+    from keras import ops as _ops
+
+    original_call = ExponentialMovingAverage.call
+
+    def unrolled_call(self, inputs):
+        ndim = len(inputs.shape)
+        x = _ops.expand_dims(inputs, axis=-1) if ndim == 2 else inputs
+        T = x.shape[1] if x.shape[1] is not None else input_length
+        if T == 1:
+            return inputs
+        alpha = _ops.cast(self.alpha, dtype=x.dtype)
+        oma = _ops.cast(1.0 - self.alpha, dtype=x.dtype)
+        ema_prev = x[:, 0, :]
+        ema_values = [ema_prev]
+        for t in range(1, T):
+            cur = alpha * x[:, t, :] + oma * ema_prev
+            if self.adjust:
+                w = _ops.cast(
+                    1.0 - _ops.power(oma, _ops.cast(t + 1, x.dtype)),
+                    dtype=x.dtype,
+                )
+                cur = cur / _ops.maximum(w, 1e-10)
+            ema_values.append(cur)
+            ema_prev = cur
+        ema = _ops.stack(ema_values, axis=1)
+        if ndim == 2:
+            ema = _ops.squeeze(ema, axis=-1)
+        return ema
+
+    ExponentialMovingAverage.call = unrolled_call
+    try:
+        yield
+    finally:
+        ExponentialMovingAverage.call = original_call
 
 
 def _select_keras_output(
@@ -206,7 +268,14 @@ def verify_onnx(
             f"  Feeding auxiliary input '{inp.name}': shape={inp_shape}"
         )
 
-    keras_preds_raw = keras_model.predict(test_input, verbose=0)
+    # The ONNX graph encodes the Python-unrolled EMA (see
+    # `_ema_unrolled_for_export` — required because tf2onnx 1.16.1 cannot
+    # convert `tf.scan`). For an apples-to-apples comparison, run the
+    # Keras side through the SAME unrolled path; otherwise the
+    # scan-vs-unrolled float32 chaos for adjust=True (documented in
+    # plan_2026-05-12_5f0e087c/decisions.md D-003) would dominate.
+    with _ema_unrolled_for_export(input_length):
+        keras_preds_raw = keras_model.predict(test_input, verbose=0)
     keras_preds = _select_keras_output(keras_preds_raw, output_key)
     onnx_preds = ort_session.run([onnx_output_name], input_feed)[0]
 
