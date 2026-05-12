@@ -822,3 +822,41 @@ class TestTreeTransformerIter1Refactor:
         assert TreeMHA is not None
         assert PositionalEncoding is not None
         assert TreeTransformerBlock is not None
+
+
+class TestTreeTransformerComponentsSplitLockIn:
+    """Lock in the model.py/components.py split.
+
+    Reference: plan_2026-05-11_46ecfa0b — model.py contains only the
+    top-level model + factories; sub-layers live in components.py and are
+    re-exported from model.py for backward compatibility.
+    """
+
+    def test_sublayers_importable_from_components_module(self):
+        from dl_techniques.models.tree_transformer.components import (
+            GroupAttention, TreeMHA, PositionalEncoding, TreeTransformerBlock,
+        )
+        for cls in (GroupAttention, TreeMHA, PositionalEncoding, TreeTransformerBlock):
+            assert cls is not None
+
+    def test_sublayers_re_exported_from_model_module(self):
+        # Deep-import contract for nam/ and train/nam/.
+        from dl_techniques.models.tree_transformer.model import (
+            GroupAttention, TreeMHA, PositionalEncoding, TreeTransformerBlock,
+        )
+        # Same object identity — they ARE the components.py classes.
+        from dl_techniques.models.tree_transformer import components as comp
+        assert GroupAttention is comp.GroupAttention
+        assert TreeMHA is comp.TreeMHA
+        assert PositionalEncoding is comp.PositionalEncoding
+        assert TreeTransformerBlock is comp.TreeTransformerBlock
+
+    def test_model_module_has_only_top_level_class(self):
+        import dl_techniques.models.tree_transformer.model as m
+        # Top-level + factories live here.
+        assert hasattr(m, "TreeTransformer")
+        assert callable(getattr(m, "create_tree_transformer", None))
+        assert callable(getattr(m, "create_tree_transformer_with_head", None))
+        # Sub-layers are re-exports — verify they live in components, not model.
+        assert m.GroupAttention.__module__ == "dl_techniques.models.tree_transformer.components"
+        assert m.TreeTransformer.__module__ == "dl_techniques.models.tree_transformer.model"
