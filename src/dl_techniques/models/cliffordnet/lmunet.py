@@ -50,6 +50,36 @@ Architecture:
          ▼
     Logits (B, seq_len, vocab_size)
 
+Outputs (Matryoshka Representation Learning + auxiliary embedding head)
+----------------------------------------------------------------------
+The model returns a flat-keyed dict. With default ``mrl_widths=None`` the
+dict reduces to ``{"logits"}`` (back-compat with the original single-head
+behavior). When ``mrl_widths`` is supplied (or resolved via a variant
+default), the dict becomes:
+
+- ``"logits": (B, T, V)`` — the primary head at the largest width
+  (``base_channels``). Always present, name unchanged.
+- ``f"logits_w{w}": (B, T, V)`` — one extra logits tensor per smaller
+  width in ``mrl_widths[1:]``. All ``logits_*`` keys share the same labels
+  at training time; the trainer weights them via Keras's ``loss_weights``
+  dict.
+- ``f"embedding_w{w}": (B, w)`` — L2-normalized sentence embedding per
+  width (only when an embedding configuration is enabled; default is to
+  emit a single ``embedding_w{base_channels}`` only when ``mrl_widths``
+  is None — see below). Side outputs; never participate in loss.
+
+Width sequence — "Power-of-2 anchored, base preserved" (plan D-002):
+The largest width is always ``base_channels`` as-is (even when it is
+not a power of 2). Every subsequent width is a strict power of 2
+strictly less than ``base_channels``, descending, terminating at the
+floor (default 16). Example: nano (base=128) → ``[128, 64, 32, 16]``;
+mini (base=192) → ``[192, 128, 64, 32, 16]``; base (base=384) →
+``[384, 256, 128, 64, 32, 16]``.
+
+Causality of the MRL heads is structural: slicing the last axis of
+``h_top`` and projecting per-position preserves the causal order along
+W at every width.
+
 Causality rationale
 -------------------
 - Embeddings are per-token (no spatial mixing).
@@ -72,7 +102,7 @@ References:
 
 import keras
 from keras import initializers, regularizers
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
@@ -112,6 +142,44 @@ def _causal_upsample(x: keras.KerasTensor, stride: int) -> keras.KerasTensor:
     w = keras.ops.shape(x)[2]
     x = keras.ops.pad(x, [[0, 0], [0, 0], [shift, 0], [0, 0]])
     return x[:, :, :w, :]
+
+
+def _default_mrl_widths(base_channels: int, floor: int = 16) -> List[int]:
+    """Compute the default MRL width sequence for ``base_channels``.
+
+    Rule (plan_2026-05-12_13c70aed/D-002): "Power-of-2 anchored, base
+    preserved". The largest width is ``base_channels`` preserved as-is
+    (may be non-power-of-2). Every subsequent width is a strict power
+    of 2 strictly less than ``base_channels``, descending, terminating
+    at the floor (default 16).
+
+    :param base_channels: Top-of-U channel count (model's embedding dim).
+    :param floor: Smallest allowed power-of-2 width. Default 16.
+    :return: List of widths in strictly decreasing order, first element
+        equals ``base_channels``.
+
+    Examples:
+        >>> _default_mrl_widths(128)
+        [128, 64, 32, 16]
+        >>> _default_mrl_widths(192)
+        [192, 128, 64, 32, 16]
+        >>> _default_mrl_widths(384)
+        [384, 256, 128, 64, 32, 16]
+        >>> _default_mrl_widths(768)
+        [768, 512, 256, 128, 64, 32, 16]
+    """
+    if base_channels < floor:
+        return [base_channels]
+    # Largest power of 2 strictly less than base_channels.
+    p = 1
+    while p * 2 < base_channels:
+        p *= 2
+    # If base_channels is itself a power of 2, p == base_channels // 2.
+    widths: List[int] = [base_channels]
+    while p >= floor:
+        widths.append(p)
+        p //= 2
+    return widths
 
 
 @keras.saving.register_keras_serializable()
@@ -155,6 +223,26 @@ class CliffordNetLMUNet(keras.Model):
     :param bias_initializer: Bias initializer for all dense layers.
     :param kernel_regularizer: Optional kernel regularizer.
     :param bias_regularizer: Optional bias regularizer.
+    :param mrl_widths: Matryoshka representation widths. ``None`` →
+        ``[base_channels]`` (single-head back-compat). When supplied,
+        ``mrl_widths[0]`` MUST equal ``base_channels`` (preserved as-is,
+        may be non-power-of-2); every subsequent entry MUST be a strict
+        power of 2 strictly less than ``base_channels``, descending,
+        floor 16 (plan D-002 "Power-of-2 anchored, base preserved").
+    :param mrl_head_norm: If True, apply a per-width ``LayerNorm`` to
+        the sliced ``(B, T, w)`` tensor before projection. Default True.
+    :param emb_head: If True, add a learnable ``Dense(base_channels,
+        use_bias=False)`` projection on the pooled vector before L2
+        normalization. Default False (identity).
+    :param embedding_pool: Pooling rule for the sentence embedding.
+        ``"last"`` (default) → array index ``T-1``; ``"cls"`` →
+        position 0 (requires ``cls_token_id``); ``"auto"`` → per-sample
+        choose position 0 if ``input_ids[:, 0] == cls_token_id`` else
+        position ``T-1`` (requires ``cls_token_id``).
+    :param cls_token_id: Token ID used to detect a leading CLS token
+        for ``embedding_pool in {"cls","auto"}``.
+    :param l2_eps: Epsilon under the sqrt for L2 normalization of the
+        per-width embeddings. Default ``1e-12``.
 
     Example:
         .. code-block:: python
@@ -184,6 +272,8 @@ class CliffordNetLMUNet(keras.Model):
             layer_scale_init=1e-5,
             stochastic_depth_rate=0.05,
             kernel_initializer=_DEFAULT_KERNEL_INIT,
+            # MRL widths — D-002 "Power-of-2 anchored, base preserved".
+            mrl_widths=[128, 64, 32, 16],
         ),
         "mini": dict(
             base_channels=192,
@@ -197,6 +287,7 @@ class CliffordNetLMUNet(keras.Model):
             layer_scale_init=1e-5,
             stochastic_depth_rate=0.1,
             kernel_initializer=_DEFAULT_KERNEL_INIT,
+            mrl_widths=[192, 128, 64, 32, 16],
         ),
         "base": dict(
             base_channels=384,
@@ -210,6 +301,7 @@ class CliffordNetLMUNet(keras.Model):
             layer_scale_init=1e-5,
             stochastic_depth_rate=0.15,
             kernel_initializer=_DEFAULT_KERNEL_INIT,
+            mrl_widths=[384, 256, 128, 64, 32, 16],
         ),
         "large": dict(
             base_channels=512,
@@ -223,6 +315,7 @@ class CliffordNetLMUNet(keras.Model):
             layer_scale_init=1e-5,
             stochastic_depth_rate=0.2,
             kernel_initializer=_DEFAULT_KERNEL_INIT,
+            mrl_widths=[512, 256, 128, 64, 32, 16],
         ),
         "xl": dict(
             base_channels=768,
@@ -236,6 +329,7 @@ class CliffordNetLMUNet(keras.Model):
             layer_scale_init=1e-5,
             stochastic_depth_rate=0.25,
             kernel_initializer=_DEFAULT_KERNEL_INIT,
+            mrl_widths=[768, 512, 256, 128, 64, 32, 16],
         ),
     }
 
@@ -261,6 +355,12 @@ class CliffordNetLMUNet(keras.Model):
         bias_initializer: Any = "zeros",
         kernel_regularizer: Optional[Any] = None,
         bias_regularizer: Optional[Any] = None,
+        mrl_widths: Optional[List[int]] = None,
+        mrl_head_norm: bool = True,
+        emb_head: bool = False,
+        embedding_pool: Literal["last", "cls", "auto"] = "last",
+        cls_token_id: Optional[int] = None,
+        l2_eps: float = 1e-12,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -311,6 +411,65 @@ class CliffordNetLMUNet(keras.Model):
                 f"shifts or increase base_channels."
             )
 
+        # --- MRL widths resolution + validation -----------------------
+        # DECISION plan_2026-05-12_13c70aed/D-002:
+        #   Width rule is "Power-of-2 anchored, base preserved":
+        #     - widths[0] == base_channels (preserved as-is; may be non-power-of-2)
+        #     - widths[1:] are strict powers of 2 strictly less than base_channels,
+        #       descending, floor 16.
+        # Default (None) -> [base_channels] (single-head back-compat).
+        if mrl_widths is None:
+            mrl_widths_resolved: List[int] = [base_channels]
+        else:
+            mrl_widths_resolved = list(mrl_widths)
+        if len(mrl_widths_resolved) == 0:
+            raise ValueError("mrl_widths must be non-empty (or None).")
+        if any((not isinstance(w, int)) or w <= 0 for w in mrl_widths_resolved):
+            raise ValueError(
+                f"mrl_widths entries must be positive ints, got {mrl_widths_resolved!r}"
+            )
+        if any(w > base_channels for w in mrl_widths_resolved):
+            raise ValueError(
+                f"mrl_widths entries must be <= base_channels={base_channels}; "
+                f"got {mrl_widths_resolved!r}"
+            )
+        if mrl_widths_resolved[0] != base_channels:
+            raise ValueError(
+                f"mrl_widths[0] must equal base_channels={base_channels} "
+                f"(largest head preserved at base width); got {mrl_widths_resolved!r}"
+            )
+        # Strictly decreasing.
+        for a, b in zip(mrl_widths_resolved[:-1], mrl_widths_resolved[1:]):
+            if a <= b:
+                raise ValueError(
+                    f"mrl_widths must be strictly decreasing; got {mrl_widths_resolved!r}"
+                )
+        # Every subsequent element MUST be a strict power of 2 AND strictly
+        # less than base_channels (D-002).
+        for w in mrl_widths_resolved[1:]:
+            if w >= base_channels:
+                raise ValueError(
+                    f"mrl_widths[1:] entries must be strictly less than "
+                    f"base_channels={base_channels}; got {mrl_widths_resolved!r}"
+                )
+            if (w & (w - 1)) != 0:
+                raise ValueError(
+                    f"mrl_widths[1:] entries must each be a power of 2; "
+                    f"got {mrl_widths_resolved!r} (offending: {w})"
+                )
+
+        # embedding_pool validation
+        if embedding_pool not in ("last", "cls", "auto"):
+            raise ValueError(
+                f"embedding_pool must be one of {{'last','cls','auto'}}, "
+                f"got {embedding_pool!r}"
+            )
+        if embedding_pool in ("cls", "auto") and cls_token_id is None:
+            raise ValueError(
+                f"embedding_pool={embedding_pool!r} requires cls_token_id "
+                f"to be set (got None)."
+            )
+
         # --- Persisted hyperparameters ---------------------------------
         self.vocab_size = vocab_size
         self.max_seq_length = max_seq_length
@@ -332,6 +491,14 @@ class CliffordNetLMUNet(keras.Model):
         self.bias_initializer = initializers.get(bias_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
+
+        # MRL + embedding-head hyperparameters.
+        self.mrl_widths: List[int] = mrl_widths_resolved
+        self.mrl_head_norm: bool = bool(mrl_head_norm)
+        self.emb_head: bool = bool(emb_head)
+        self.embedding_pool: str = embedding_pool
+        self.cls_token_id: Optional[int] = cls_token_id
+        self.l2_eps: float = float(l2_eps)
 
         # --- Derived quantities ----------------------------------------
         self.num_levels = num_levels
@@ -514,30 +681,77 @@ class CliffordNetLMUNet(keras.Model):
             if dropout_rate > 0.0
             else None
         )
+
+        # Per-width MRL LayerNorms (operate on the sliced (B, T, w) tensor).
+        # Only built when mrl_head_norm=True. Disabling skips the per-width
+        # LayerNorm and projects the raw sliced features directly.
+        if self.mrl_head_norm:
+            self.mrl_head_norms: Optional[List[keras.layers.LayerNormalization]] = [
+                keras.layers.LayerNormalization(
+                    epsilon=self.LAYERNORM_EPSILON,
+                    name=f"mrl_head_norm_w{w}",
+                )
+                for w in self.mrl_widths
+            ]
+        else:
+            self.mrl_head_norms = None
+
+        # Tied/untied per-width LM heads.
+        # Tied path: per-width bias variables (only when use_bias). The first
+        # entry corresponds to the largest width (the primary "logits" head).
+        # The legacy ``self.output_bias`` / ``self.output_proj`` attributes are
+        # kept (set to the largest-width entry) for back-compat with any
+        # external code that introspected them — the old single-head behavior
+        # corresponds to mrl_widths == [base_channels] (length 1).
         if tie_word_embeddings:
             self.output_proj = None
-            self.output_bias = (
-                self.add_weight(
-                    name="output_bias",
-                    shape=(vocab_size,),
-                    initializer=bias_initializer,
-                    regularizer=bias_regularizer,
-                    trainable=True,
+            self.mrl_output_projs: Optional[List[keras.layers.Dense]] = None
+            if use_bias:
+                self.mrl_output_biases: Optional[List[Any]] = [
+                    self.add_weight(
+                        name=f"output_bias_w{w}",
+                        shape=(vocab_size,),
+                        initializer=bias_initializer,
+                        regularizer=bias_regularizer,
+                        trainable=True,
+                    )
+                    for w in self.mrl_widths
+                ]
+                # Legacy alias for the largest-width bias.
+                self.output_bias = self.mrl_output_biases[0]
+            else:
+                self.mrl_output_biases = None
+                self.output_bias = None
+        else:
+            self.mrl_output_biases = None
+            self.output_bias = None
+            self.mrl_output_projs = [
+                keras.layers.Dense(
+                    vocab_size,
+                    use_bias=use_bias,
+                    kernel_initializer=kernel_initializer,
+                    bias_initializer=bias_initializer,
+                    kernel_regularizer=kernel_regularizer,
+                    bias_regularizer=bias_regularizer,
+                    name=("output_proj" if i == 0 else f"output_proj_w{w}"),
                 )
-                if use_bias
-                else None
+                for i, w in enumerate(self.mrl_widths)
+            ]
+            # Legacy alias for the largest-width projection.
+            self.output_proj = self.mrl_output_projs[0]
+
+        # Optional learnable embedding projection on the pooled (B, C0)
+        # vector. Identity-by-default (None) → pooled vector is used directly.
+        if self.emb_head:
+            self.embedding_proj: Optional[keras.layers.Dense] = keras.layers.Dense(
+                base_channels,
+                use_bias=False,
+                kernel_initializer=kernel_initializer,
+                kernel_regularizer=kernel_regularizer,
+                name="embedding_proj",
             )
         else:
-            self.output_proj = keras.layers.Dense(
-                vocab_size,
-                use_bias=use_bias,
-                kernel_initializer=kernel_initializer,
-                bias_initializer=bias_initializer,
-                kernel_regularizer=kernel_regularizer,
-                bias_regularizer=bias_regularizer,
-                name="output_proj",
-            )
-            self.output_bias = None
+            self.embedding_proj = None
 
         logger.info(
             f"Created CliffordNetLMUNet (vocab_size={vocab_size}, "
@@ -550,7 +764,11 @@ class CliffordNetLMUNet(keras.Model):
             f"total_stride={self.total_stride}, shifts={self.shifts}, "
             f"cli_mode={cli_mode}, ctx_mode={ctx_mode}, "
             f"global_ctx={use_global_context}, "
-            f"tie_word_embeddings={tie_word_embeddings})"
+            f"tie_word_embeddings={tie_word_embeddings}, "
+            f"mrl_widths={self.mrl_widths}, "
+            f"mrl_head_norm={self.mrl_head_norm}, "
+            f"emb_head={self.emb_head}, "
+            f"embedding_pool={self.embedding_pool})"
         )
 
     def call(
@@ -562,7 +780,17 @@ class CliffordNetLMUNet(keras.Model):
 
         :param input_ids: Token IDs ``(B, seq_len)`` (int32).
         :param training: Whether in training mode.
-        :return: Dict with ``"logits"`` key: ``(B, seq_len, vocab_size)``.
+        :return: Dict with output tensors. Always contains:
+
+            - ``"logits": (B, seq_len, vocab_size)`` — primary head at the
+              largest width (``base_channels``).
+            - For each smaller width ``w`` in ``self.mrl_widths[1:]``:
+              ``f"logits_w{w}": (B, seq_len, vocab_size)``.
+            - For each width ``w`` in ``self.mrl_widths``:
+              ``f"embedding_w{w}": (B, w)`` — L2-normalized pooled embedding.
+
+            When ``self.mrl_widths == [base_channels]`` (default back-compat
+            path) the dict reduces to ``{"logits", f"embedding_w{base_channels}"}``.
         """
         ops = keras.ops
 
@@ -629,21 +857,79 @@ class CliffordNetLMUNet(keras.Model):
         if self.head_dropout is not None:
             x = self.head_dropout(x, training=training)
 
-        if self.tie_word_embeddings:
-            # x: (B, T, C0); embedding kernel: (V, C0); want (B, T, V).
-            emb_kernel = self.token_embedding.embeddings  # (V, C0)
-            logits = ops.matmul(x, ops.transpose(emb_kernel, (1, 0)))
-            if self.output_bias is not None:
-                logits = logits + self.output_bias
-        else:
-            logits = self.output_proj(x)
+        # h_top is the post-head-norm hidden state shared by all MRL widths
+        # and by the embedding pool. (B, T, C0).
+        h_top = x
 
-        return {"logits": logits}
+        outputs: Dict[str, keras.KerasTensor] = {}
+
+        # --- Per-width LM heads (MRL) ---------------------------------
+        if self.tie_word_embeddings:
+            emb_kernel = self.token_embedding.embeddings  # (V, C0)
+        for idx, w in enumerate(self.mrl_widths):
+            x_w = h_top[..., :w]
+            if self.mrl_head_norms is not None:
+                x_w = self.mrl_head_norms[idx](x_w)
+            if self.tie_word_embeddings:
+                # (V, w) slice; transpose to (w, V); matmul (B, T, w)x(w, V).
+                logits_w = ops.matmul(
+                    x_w, ops.transpose(emb_kernel[:, :w], (1, 0)),
+                )
+                if self.mrl_output_biases is not None:
+                    logits_w = logits_w + self.mrl_output_biases[idx]
+            else:
+                logits_w = self.mrl_output_projs[idx](x_w)
+            key = "logits" if idx == 0 else f"logits_w{w}"
+            outputs[key] = logits_w
+
+        # --- Pooled embedding head ------------------------------------
+        # Default "last" → array index T-1; "cls" → position 0;
+        # "auto" → per-sample where input_ids[:, 0] == cls_token_id then
+        # position 0 else position T-1.
+        if self.embedding_pool == "cls":
+            pooled = h_top[:, 0, :]                              # (B, C0)
+        elif self.embedding_pool == "auto":
+            cls_mask = ops.equal(
+                input_ids[:, 0:1],
+                ops.cast(self.cls_token_id, dtype=input_ids.dtype),
+            )                                                    # (B, 1)
+            cls_mask_f = ops.cast(cls_mask, dtype=h_top.dtype)   # (B, 1)
+            first_pos = h_top[:, 0, :]                           # (B, C0)
+            last_pos = h_top[:, -1, :]                           # (B, C0)
+            pooled = cls_mask_f * first_pos + (1.0 - cls_mask_f) * last_pos
+        else:  # "last"
+            pooled = h_top[:, -1, :]                             # (B, C0)
+
+        if self.embedding_proj is not None:
+            pooled = self.embedding_proj(pooled)                 # (B, C0)
+
+        # L2-normalized per-width embedding side outputs.
+        # Cast to float32 for the norm reduction to keep the unit-norm
+        # guarantee tight at fp16/bf16 compute dtypes.
+        compute_dtype = pooled.dtype
+        pooled_f32 = ops.cast(pooled, "float32")
+        for w in self.mrl_widths:
+            e_w = pooled_f32[..., :w]
+            denom = ops.sqrt(
+                ops.sum(e_w * e_w, axis=-1, keepdims=True) + self.l2_eps
+            )
+            e_norm = e_w / denom
+            outputs[f"embedding_w{w}"] = ops.cast(e_norm, compute_dtype)
+
+        return outputs
 
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...],
     ) -> Dict[str, Tuple[Optional[int], ...]]:
-        return {"logits": (input_shape[0], input_shape[1], self.vocab_size)}
+        batch_dim = input_shape[0]
+        seq_dim = input_shape[1]
+        shapes: Dict[str, Tuple[Optional[int], ...]] = {}
+        for idx, w in enumerate(self.mrl_widths):
+            key = "logits" if idx == 0 else f"logits_w{w}"
+            shapes[key] = (batch_dim, seq_dim, self.vocab_size)
+        for w in self.mrl_widths:
+            shapes[f"embedding_w{w}"] = (batch_dim, w)
+        return shapes
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
@@ -668,6 +954,12 @@ class CliffordNetLMUNet(keras.Model):
             "bias_initializer": initializers.serialize(self.bias_initializer),
             "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
             "bias_regularizer": regularizers.serialize(self.bias_regularizer),
+            "mrl_widths": list(self.mrl_widths),
+            "mrl_head_norm": self.mrl_head_norm,
+            "emb_head": self.emb_head,
+            "embedding_pool": self.embedding_pool,
+            "cls_token_id": self.cls_token_id,
+            "l2_eps": self.l2_eps,
         })
         return config
 
