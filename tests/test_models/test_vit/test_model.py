@@ -16,7 +16,7 @@ from typing import Tuple, Dict, Any, List
 
 from dl_techniques.models.vit.model import (
     ViT,
-    create_vision_transformer,
+    create_vit,
 )
 
 
@@ -536,12 +536,12 @@ class TestViTSerialization:
 class TestViTFactoryFunctions:
     """Test suite for ViT factory functions."""
 
-    def test_create_vision_transformer(self):
+    def test_create_vit(self):
         """Test the main factory function with validation."""
-        model = create_vision_transformer(
+        model = create_vit(
+            variant="vit_base",
             input_shape=(224, 224, 3),
             num_classes=1000,
-            scale="base"
         )
 
         assert isinstance(model, ViT)
@@ -552,30 +552,30 @@ class TestViTFactoryFunctions:
         """Test validation in factory functions."""
         # Invalid parameters should raise errors
         with pytest.raises(ValueError, match="num_classes must be positive"):
-            create_vision_transformer(num_classes=-1)
+            create_vit(variant="vit_base", num_classes=-1)
 
         with pytest.raises(ValueError, match="input_shape must be a 3-element"):
-            create_vision_transformer(input_shape=(224, 224))
+            create_vit(variant="vit_base", input_shape=(224, 224))
 
         with pytest.raises(ValueError, match="patch_size must be positive"):
-            create_vision_transformer(patch_size=-16)
+            create_vit(variant="vit_base", patch_size=-16)
 
         with pytest.raises(ValueError, match="Image height .* must be divisible"):
-            create_vision_transformer(input_shape=(225, 224, 3), patch_size=16)
+            create_vit(variant="vit_base", input_shape=(225, 224, 3), patch_size=16)
 
     def test_factory_function_with_advanced_options(self):
         """Test factory functions with advanced configuration options."""
-        model = create_vision_transformer(
+        model = create_vit(
+            variant="vit_small",
             input_shape=(384, 384, 3),
             num_classes=100,
-            scale="small",
             patch_size=32,
             include_top=False,
             pooling="cls",
             dropout_rate=0.1,
             normalization_type="rms_norm",
             normalization_position="pre",
-            ffn_type="swiglu"
+            ffn_type="swiglu",
         )
 
         assert model.input_shape_config == (384, 384, 3)
@@ -586,6 +586,25 @@ class TestViTFactoryFunctions:
         assert model.pooling == "cls"
         assert model.normalization_type == "rms_norm"
         assert model.ffn_type == "swiglu"
+
+    # ---------------------------------------------------------------
+    # Lock-in tests for plan_2026-05-12_f2d29729 (iter-1 refactor).
+    # ---------------------------------------------------------------
+
+    def test_from_variant_pretrained_true_raises_notimplemented(self):
+        """`ViT.from_variant(pretrained=True)` must surface the
+        ``NotImplementedError`` from ``_download_weights`` (D-002, D-003).
+        Guards against future regression where a broader except swallows it.
+        """
+        with pytest.raises(NotImplementedError):
+            ViT.from_variant("vit_base", pretrained=True)
+
+    def test_model_variants_keys(self):
+        """`ViT.MODEL_VARIANTS` must expose the 6 canonical variant keys."""
+        assert set(ViT.MODEL_VARIANTS.keys()) == {
+            "vit_pico", "vit_tiny", "vit_small",
+            "vit_base", "vit_large", "vit_huge",
+        }
 
 
 class TestViTTrainingIntegration:
