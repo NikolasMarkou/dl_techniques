@@ -1,5 +1,5 @@
 """
-PRISM: Partitioned Representation for Iterative Sequence Modeling.
+PRISM: Partitioned Representations for Iterative Sequence Modeling.
 
 This module implements the PRISM model for multivariate time series forecasting,
 combining hierarchical time-frequency decomposition with forecasting capabilities.
