@@ -387,11 +387,64 @@ feature_extractor = ViT(
 | `normalization_type` | 'layer_norm' (default), 'rms_norm', etc. |
 | `ffn_type` | 'mlp' (default), 'swiglu', etc. |
 
-### 6.2 `create_vision_transformer`
+### 6.2 `create_vit`
 
-**Purpose**: A high-level factory function for convenient and safe `ViT` model creation.
+**Purpose**: A high-level factory function for convenient and safe `ViT` model creation. Resnet-template parity: the first positional argument is the variant key (`"vit_pico".."vit_huge"`).
 
-**Location**: `dl_techniques.models.vision.vit.model.create_vision_transformer`
+**Location**: `dl_techniques.models.vit.create_vit`
+
+```python
+from dl_techniques.models.vit import create_vit
+
+# CIFAR-10 ViT-pico
+model = create_vit("vit_pico", num_classes=10, input_shape=(32, 32, 3), patch_size=4)
+
+# ImageNet ViT-base from a local pretrained checkpoint
+model = create_vit("vit_base", num_classes=1000,
+                   pretrained="/path/to/vit_base_imagenet.keras")
+```
+
+> **Note**: `create_vision_transformer` was renamed to `create_vit` in plan
+> `plan_2026-05-12_f2d29729`. The old name was removed without a back-compat
+> alias — only two in-repo callers existed (`train_vit.py` and the test
+> suite), both updated.
+
+### 6.3 `from_variant` and pretrained-weights API
+
+The `ViT` class exposes a `from_variant` classmethod and a `MODEL_VARIANTS`
+registry that mirrors `ResNet.from_variant`:
+
+```python
+from dl_techniques.models.vit import ViT
+
+# Variant registry: maps user-facing variant keys to internal scale configs.
+print(sorted(ViT.MODEL_VARIANTS.keys()))
+# ['vit_base', 'vit_huge', 'vit_large', 'vit_pico', 'vit_small', 'vit_tiny']
+
+# Build from a variant key.
+model = ViT.from_variant("vit_pico", num_classes=10, input_shape=(32, 32, 3),
+                         patch_size=4)
+
+# Pretrained from local .keras checkpoint -- works.
+model = ViT.from_variant("vit_base", pretrained="/path/to/weights.keras",
+                         num_classes=1000)
+
+# Pretrained=True -- raises NotImplementedError. No public ViT weights in the
+# dl_techniques format are hosted; this is a loud failure on purpose so that
+# silent fall-throughs to random init don't masquerade as successful loads.
+try:
+    ViT.from_variant("vit_base", pretrained=True)
+except NotImplementedError as e:
+    print(e)  # "No public ViT checkpoints are distributed for this implementation. ..."
+```
+
+**Weight loading uses `dl_techniques.utils.weight_transfer.load_weights_from_checkpoint`**
+(layer-by-layer `set_weights` after a probe forward pass) rather than
+`model.load_weights(by_name=True)`. The latter is broken in Keras 3.8+ for
+`.keras` files — see `plans/LESSONS.md` L71.
+
+> **Deep supervision** for ViT is deferred to a follow-up plan and is not
+> available in this iteration.
 
 ---
 
