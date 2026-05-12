@@ -68,26 +68,24 @@ A common observation in systematic trading is that filtering trades by the **slo
 
 **Slope.** Defined as `slope_t = EMA_t − EMA_{t−L}` where `L = lookback_period`. For the first `L` steps the lagged EMA is zero-padded, so `slope[:, :L]` should be ignored in any downstream loss / metric.
 
-**Threshold parameterization (learnable).** When `learnable_thresholds=True` the raw scalar weights are passed through a midpoint + softplus(half-range) reparameterization to enforce `lower ≤ upper`:
+**Threshold parameterization (learnable).** When `learnable_thresholds=True` the bounds are parameterized by two raw scalar weights — `midpoint_var` and `log_half_range_var` — via a strictly-positive softplus reparameterization that enforces `lower < upper` by construction:
 
 ```
-midpoint    = (U_var + L_var) / 2
-half_range  = softplus(|U_var − L_var| / 2)
-upper       = midpoint + half_range
-lower       = midpoint − half_range
+upper = midpoint_var + softplus(log_half_range_var)
+lower = midpoint_var − softplus(log_half_range_var)
 ```
 
-(See Limitations §11 for a known geometric quirk of this parameterization.)
+The mapping is injective in the raw weights and `softplus(·) > 0` for all finite inputs. Stored in `float32` (cast to the compute dtype at use) so mixed-precision training does not corrupt the learnable scalars.
 
 **Signal generation.** Inference always uses **hard** comparisons (`slope > upper`, etc.) and produces a 0/1 mask. During training **with** `learnable_thresholds=True` the signals are computed with sigmoids for gradient flow:
 
 ```
 signal_above   = σ((slope − upper) / T)
 signal_below   = σ((lower − slope) / T)
-signal_between = max(1 − signal_above − signal_below, 0)
+signal_between = σ((slope − lower) / T) · σ((upper − slope) / T)
 ```
 
-The temperature `T` is currently fixed at `1.0`.
+The temperature `T` is the ctor arg `slope_softness` (default `1.0`, must be `> 0`). Smaller `T` → harder transitions; larger `T` → smoother gating. The three soft signals each live in `[0, 1]` per timestep but **do not** partition softly — at a threshold boundary `above ≈ between ≈ 0.5`, so `above + below + between` can exceed 1 in the transition region. The hard-mode partition (`above + below + between == 1` exactly) is restored at inference.
 
 ---
 
@@ -127,12 +125,12 @@ Shape: (batch, time_steps) or (batch, time_steps, features)
     │                             │
     ▼                             ▼
 ┌───────────────────┐    ┌──────────────────────────────┐
-│ QuantileSequence  │    │    Learnable Thresholds      │
-│      Head         │    │  upper_threshold (trainable) │
-│                   │    │  lower_threshold (trainable) │
+│ Conv1D(causal) +  │    │    Learnable Thresholds      │
+│ QuantileSequence  │    │  midpoint_var (trainable)    │
+│      Head         │    │  log_half_range_var (train.) │
 │ Outputs quantiles │    │                              │
-│ of slope values   │    │  Constraint: lower ≤ upper   │
-└─────────┬─────────┘    │  via midpoint + softplus     │
+│ of slope values   │    │  upper = m + softplus(r)     │
+└─────────┬─────────┘    │  lower = m − softplus(r)     │
           │              └──────────────┬───────────────┘
           │                             │
           │              ┌──────────────┼────────────────┐
@@ -190,9 +188,12 @@ print(outputs["upper_threshold"])        # 1.5
 | `lookback_period` | `int` | `25` | Number of bars back used in the slope: `slope_t = EMA_t − EMA_{t−L}`. Must be `≥ 1`. |
 | `initial_upper_threshold` | `float` | `15.0` | Initial upper slope threshold. With `learnable_thresholds=False` this is the fixed cutoff. |
 | `initial_lower_threshold` | `float` | `-15.0` | Initial lower slope threshold. Must be `≤ initial_upper_threshold`. |
-| `learnable_thresholds` | `bool` | `False` | If `True`, the two thresholds become trainable scalars and training uses soft (sigmoid) signals. |
+| `learnable_thresholds` | `bool` | `False` | If `True`, the two raw scalars (`midpoint_var`, `log_half_range_var`) are trainable; training-time signals are soft (sigmoid). |
 | `adjust_ema` | `bool` | `True` | Pass-through to the EMA layer's `adjust` flag (Pandas-style bias-corrected EMA). |
-| `quantile_head_config` | `Optional[Dict[str, Any]]` | `None` | If provided, attaches a `QuantileSequenceHead`. Required key: `num_quantiles`. Optional: `dropout_rate`, `enforce_monotonicity`, `use_bias`. |
+| `slope_softness` | `float` | `1.0` | Temperature `T` for the sigmoid soft signals. Must be `> 0`. |
+| `quantile_head_config` | `Optional[Dict[str, Any]]` | `None` | If provided, attaches a `QuantileSequenceHead`. Required key: `num_quantiles`. Optional: `dropout_rate`, `enforce_monotonicity`, `use_bias`. The head is preceded by a causal `Conv1D` featurizer (see `slope_feature_dim` / `slope_feature_kernel`). |
+| `slope_feature_dim` | `int` | `16` | Number of filters in the causal Conv1D featurizer that precedes the quantile head. Ignored when the head is disabled. |
+| `slope_feature_kernel` | `int` | `5` | Kernel size of the causal Conv1D featurizer. Ignored when the head is disabled. |
 
 ### Output dictionary
 
@@ -230,9 +231,10 @@ model = AdaptiveEMASlopeFilterModel(
     ema_period=25, lookback_period=25,
     initial_upper_threshold=1.5, initial_lower_threshold=-1.5,
     learnable_thresholds=True,
+    slope_softness=1.0,
 )
 ```
-- **Trainable params:** 2 (`upper_threshold_var`, `lower_threshold_var`).
+- **Trainable params:** 2 (`midpoint_var`, `log_half_range_var`).
 - **Use case:** fit the cutoffs to maximize a soft-signal proxy of some downstream PnL or hit-rate target. See "Training & Best Practices."
 
 ### Mode C — Probabilistic slope head
@@ -365,13 +367,11 @@ python -m train.adaptive_ema.export \
 ### Limitations (read these before filing issues)
 
 - **L-1. Hard-signal mode is zero-gradient.** With `learnable_thresholds=False`, the three signals are `cast(bool→float)` — they have no gradient. Do **not** apply a loss to `signal_*` in this mode; train on `slope` or `slope_quantiles` instead, or flip to `learnable_thresholds=True`.
-- **L-2. The quantile head is fed a scalar slope per timestep.** `QuantileSequenceHead` is a per-timestep Dense projection. Mapping `(B, T, 1) → (B, T, K)` from a 1-D slope leaves the head with very little information to extract. Calibrated uncertainty estimates require either (a) feeding a learned representation of price history into the head, or (b) stacking lagged slopes as features. As wired today the head is best treated as a smoke test, not a production probabilistic forecaster.
+- **L-2. Quantile head sees a learned causal Conv1D featurization of the slope.** A small `Conv1D(slope_feature_dim, kernel_size=slope_feature_kernel, padding="causal", activation="gelu")` precedes the `QuantileSequenceHead`, so the head no longer projects from a scalar slope. The featurizer is still small by design (default 16 filters, kernel 5); for production-grade probabilistic forecasting prefer [`models/tirex`](../tirex/README.md), [`models/prism`](../prism/README.md), or [`models/nbeats`](../nbeats/README.md).
 - **L-3. Only 2 trainable scalars in classification mode.** Don't expect convergence behavior comparable to even a small MLP. The optimizer is searching a 2-D landscape.
 - **L-4. EMA layer is O(T) Python-loop.** The underlying `ExponentialMovingAverage` iterates over the time axis in Python. Acceptable for `T ≤ 256`; expect a slowdown / JIT failure for very long sequences. Keep `input_length` modest.
-- **L-5. Learnable-threshold parameterization is mathematically awkward.** The midpoint + `softplus(|ΔU,L|/2)` reparameterization always produces a non-zero floor band-width (`softplus(0) = ln 2 ≈ 0.693`), is non-injective in the raw weight signs, and `abs()` discards gradient signs. Acceptable for the intended toy use case; don't read too much into the learned scalars.
-- **L-6. First `lookback_period` slope values are zero-padded.** Ignore them in any loss / metric / signal aggregation.
-- **L-7. No factory function / no `__init__.py` re-exports.** Import the class directly from `dl_techniques.models.adaptive_ema.model`. (Future work — see code review.)
-- **L-8. No tests.** The package has zero coverage. A follow-up plan should add `tests/test_models/test_adaptive_ema/test_model.py` covering forward pass, serialization, gradient flow, soft-signal training.
+- **L-5. First `lookback_period` slope values are zero-padded.** Ignore them in any loss / metric / signal aggregation.
+- **L-6. Soft signals do not partition softly.** Each of `signal_above`, `signal_below`, `signal_between` is an independent sigmoid membership in `[0, 1]`; their sum can exceed 1 at threshold boundaries. The exact partition (`above + below + between == 1`) is restored only in hard / inference mode.
 
 ### Troubleshooting / FAQs
 
@@ -379,9 +379,9 @@ python -m train.adaptive_ema.export \
 
 **Q. Training loss is identical across epochs.** You are probably in `learnable_thresholds=False` mode and applying a loss to one of the signals — there is no gradient. Flip the flag, or train on `slope_quantiles`.
 
-**Q. Quantile head outputs the same quantile values regardless of input.** Expected gotcha — see L-2. The head doesn't see anything but a scalar slope per timestep.
+**Q. Quantile head outputs vary little across inputs.** The causal Conv1D featurizer (L-2) gives the head some context but is still small by design. For sharper calibration use one of the dedicated probabilistic forecasters (`tirex`, `prism`, `nbeats`).
 
-**Q. Mixed precision warnings on the threshold weights.** The weights are created with `dtype=self.dtype`, which becomes `compute_dtype` under mixed precision. A read-out cast back to `slope.dtype` happens inside `call`, so behavior is correct, but cleaner practice is to keep variables in float32. To be addressed in a future patch.
+**Q. Mixed precision on the threshold weights.** `midpoint_var` and `log_half_range_var` are explicitly created with `dtype="float32"` and cast to the compute dtype inside `call`, so mixed-precision training is safe.
 
 **Q. ONNX export fails / produces a strange output set.** The model emits a dict. `model.export(format="onnx")` exports all of them; the verifier in `train/adaptive_ema/export.py` only checks one head — pass `--output_key` to select.
 
