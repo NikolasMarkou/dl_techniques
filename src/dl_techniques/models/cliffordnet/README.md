@@ -318,3 +318,34 @@ out = model({"image": images, "text": tokens})
 #           logits_per_text, logit_scale
 # Default head_kind="learned_query_residual" -- Clifford-aware end-to-end
 ```
+
+### CliffordNet Embedding (Bidirectional U-Net)
+
+A non-causal, BERT-style packaged sibling of `CliffordNetLMUNet`. Same U-Net
+encoder/bottleneck/decoder structure, but uses the bidirectional
+`CliffordNetBlock` / `CliffordNetBlockDSv2` and drops the causal upsample
+right-shift. Returns BERT-style dict outputs and is compatible with
+`MaskedLanguageModel` and the `dl_techniques.layers.nlp_heads` task heads.
+
+```python
+from dl_techniques.models.cliffordnet import (
+    CliffordNetEmbedding,
+    create_cliffordnet_embedding,
+    create_cliffordnet_embedding_with_head,
+)
+
+model = CliffordNetEmbedding.from_variant("nano", vocab_size=100277)
+out = model({
+    "input_ids": input_ids,            # (B, T) int32
+    "attention_mask": attention_mask,  # (B, T) int32, optional
+})
+# out keys: last_hidden_state (B, T, hidden_size), pooled_output
+#          (B, hidden_size), attention_mask
+```
+
+Variants: `nano | mini | base | large | xl` (same ladder as
+`CliffordNetLMUNet` for fair head-to-head comparison). Three pooling
+strategies are exposed via `pooling_strategy={"mean", "cls", "max"}` (default
+mask-aware mean + BERT-style tanh pooler). No public pretrained weights are
+distributed; pretrain via `src/train/cliffordnet/train_embeddings.py` (MLM on
+tiktoken cl100k_base + IMDB by default).
