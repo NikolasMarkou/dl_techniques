@@ -95,6 +95,7 @@ class DifferentiableFSA(keras.Model):
         intermediate_size: int = None,
         dropout_rate: float = 0.1,
         use_ste: bool = False,
+        use_learned_residual: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -103,6 +104,15 @@ class DifferentiableFSA(keras.Model):
         self.vocab_size = vocab_size
         self.num_tree_layers = num_tree_layers
         self.use_ste = use_ste
+        self.use_learned_residual = use_learned_residual
+
+        # DECISION plan_2026-05-12_995a621a/D-001 — alpha is a non-trainable
+        # tf.Variable so it is graph-traced as a constant per @tf.function
+        # trace but can be re-assigned eagerly between steps without retracing.
+        # alpha=0 forward must be bit-identical to iter-5 (Sacred invariant).
+        self.alpha = tf.Variable(
+            0.0, trainable=False, name="residual_alpha", dtype="float32"
+        )
 
         if intermediate_size is None:
             intermediate_size = hidden_size * 2
@@ -540,6 +550,40 @@ class DifferentiableFSA(keras.Model):
         position_tiebreak = -0.01 * seq_positions
 
         scores = pemdas_scores + position_tiebreak
+
+        # --- Learned residual (gated, default OFF) ---
+        # DECISION plan_2026-05-12_995a621a/D-002 — when use_learned_residual
+        # is True, add `alpha * tanh(reduction_scorer([x, numeric_features]))`
+        # to scores. alpha defaults to 0.0 → residual term is bit-zero in
+        # float32 → forward bit-identical to iter-5 (Sacred invariant).
+        # Residual is bounded to [-5, 5] via tanh so it cannot dominate
+        # pemdas_scores (~15-100+) at small alpha. Reconstructs numeric_features
+        # locally because the second reduce_step doesn't compute it (only the
+        # dead first one does).
+        if self.use_learned_residual:
+            numeric_features = ops.stack(
+                [digit_values, is_digit, op_type, is_operator], axis=-1
+            )  # (B, L, 4)
+            scorer_in = ops.concatenate(
+                [x, numeric_features], axis=-1
+            )  # (B, L, D+4)
+            residual_raw = ops.squeeze(
+                self.reduction_scorer(scorer_in), axis=-1
+            )  # (B, L)
+            residual = 5.0 * ops.tanh(residual_raw)  # bounded
+            scores = scores + self.alpha * residual
+            residual_logits_out = residual  # for consistency loss in train_dfsa_ste
+        else:
+            residual_logits_out = ops.zeros_like(scores)
+
+        # Snapshot pemdas-only logits (operator-masked) BEFORE the padding mask
+        # is applied — used by the consistency loss in train_dfsa_ste.py.
+        pemdas_logits_op_only = (
+            pemdas_scores + position_tiebreak
+            + (1.0 - is_operator) * (-1e9)
+            + (1.0 - mask) * (-1e9)
+        )
+
         scores = scores + (1.0 - mask) * (-1e9)
         # Mask non-operator positions to -inf
         scores = scores + (1.0 - is_operator) * (-1e9)
@@ -630,6 +674,9 @@ class DifferentiableFSA(keras.Model):
             "op_pos_hard": op_pos_hard,
             "left_mask": left_mask,
             "right_mask": right_mask,
+            "pemdas_logits": pemdas_logits_op_only,
+            "residual_logits": residual_logits_out,
+            "op_mask": is_operator * mask,
         }
 
     @staticmethod
@@ -863,6 +910,7 @@ class DifferentiableFSA(keras.Model):
             "vocab_size": self.vocab_size,
             "num_tree_layers": self.num_tree_layers,
             "use_ste": self.use_ste,
+            "use_learned_residual": self.use_learned_residual,
         })
         return config
 

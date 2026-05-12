@@ -283,6 +283,11 @@ if __name__ == "__main__":
     parser.add_argument("--max-len", type=int, default=64)
     parser.add_argument("--act-steps", type=int, default=4)
     parser.add_argument("--use-ste", action="store_true")
+    parser.add_argument("--use-learned-residual", action="store_true")
+    parser.add_argument(
+        "--alpha", type=float, default=0.0,
+        help="Residual alpha (only meaningful if --use-learned-residual)",
+    )
     parser.add_argument("--gpu", type=int, default=1)
     args = parser.parse_args()
 
@@ -295,15 +300,20 @@ if __name__ == "__main__":
         num_tree_layers=args.num_tree_layers,
         num_heads=args.num_heads,
         use_ste=args.use_ste,
+        use_learned_residual=args.use_learned_residual,
     )
     tokenizer = ArithmeticTokenizer(max_len=args.max_len)
     dummy = np.zeros((1, args.max_len), dtype=np.int32)
     _ = model(tf.constant(dummy), training=False, max_steps=args.act_steps)
+    model.alpha.assign(args.alpha)
 
     if args.checkpoint:
         model.load_weights(args.checkpoint)
         print(f"Loaded: {args.checkpoint}")
+        # Re-assign alpha after load in case checkpoint had its own value.
+        model.alpha.assign(args.alpha)
     else:
         print("No checkpoint — testing random model (deterministic pipeline)")
+    print(f"use_learned_residual={args.use_learned_residual} alpha={args.alpha}")
 
     run_extreme_tests(model, tokenizer, max_steps=args.act_steps)
