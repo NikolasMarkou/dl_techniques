@@ -37,6 +37,7 @@ import os
 import csv
 import gc
 import json
+import math
 import glob
 import time
 import argparse
@@ -127,6 +128,18 @@ class TrainingConfig:
     loss_type: str = "ce"
     focal_gamma: float = 1.0
     label_smoothing: float = 0.0
+
+    # Matryoshka Representation Learning (MRL) heads.
+    # ``mrl_widths=None`` → resolved from the variant's MODEL_VARIANTS entry
+    # (single-head behaviour preserved when the variant entry is also None).
+    # Provide an explicit list (e.g. [128, 64, 32, 16]) to override.
+    mrl_widths: Optional[List[int]] = None
+    # Per-key loss weighting strategy: "uniform" or "inv-log2".
+    mrl_weights: str = "uniform"
+    # Optional sentence-embedding head + pooling.
+    emb_head: bool = False
+    mrl_head_norm: bool = True
+    embedding_pool: str = "last"  # {"last", "cls", "auto"}
 
     # Paths
     save_dir: str = "results/cliffordnet_nlp_unet"
@@ -583,6 +596,16 @@ def create_model(config: TrainingConfig) -> CliffordNetLMUNet:
     """Create and build a CliffordNetLMUNet from training configuration."""
     logger.info(f"Creating CliffordNetLMUNet-{config.variant.upper()}...")
 
+    mrl_kwargs: Dict[str, Any] = dict(
+        mrl_head_norm=config.mrl_head_norm,
+        emb_head=config.emb_head,
+        embedding_pool=config.embedding_pool,
+        cls_token_id=config.cls_token_id,
+    )
+    # Only override variant-default mrl_widths when the user supplied one.
+    if config.mrl_widths is not None:
+        mrl_kwargs["mrl_widths"] = config.mrl_widths
+
     if config.variant in CliffordNetLMUNet.MODEL_VARIANTS:
         model = CliffordNetLMUNet.from_variant(
             config.variant,
@@ -590,6 +613,7 @@ def create_model(config: TrainingConfig) -> CliffordNetLMUNet:
             max_seq_length=config.max_seq_length,
             dropout_rate=config.dropout_rate,
             tie_word_embeddings=config.tie_word_embeddings,
+            **mrl_kwargs,
         )
     else:
         # Custom variant: use explicit U-Net params from config.
@@ -608,6 +632,7 @@ def create_model(config: TrainingConfig) -> CliffordNetLMUNet:
             stochastic_depth_rate=config.stochastic_depth_rate,
             tie_word_embeddings=config.tie_word_embeddings,
             kernel_initializer=_DEFAULT_KERNEL_INIT,
+            **mrl_kwargs,
         )
 
     # Build with dummy forward pass
@@ -647,13 +672,26 @@ def create_loss_fn(config: TrainingConfig) -> keras.losses.Loss:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_lm_keys(mrl_widths: List[int]) -> List[str]:
+    """Map an MRL width list to its dict-output loss keys.
+
+    Index 0 (largest width) keeps the canonical ``"logits"`` name so the
+    primary head + generation probe + single-head trainers stay
+    bit-equivalent. Smaller widths get ``"logits_w{w}"`` keys.
+    """
+    return ["logits"] + [f"logits_w{w}" for w in mrl_widths[1:]]
+
+
 def load_train_val_datasets(
     config: TrainingConfig,
     preprocessor,
+    lm_keys: List[str],
     data_seed: int = 42,
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset, Optional[int]]:
     """Load, preprocess, and wrap train/val datasets for dict-output model.
 
+    :param lm_keys: Loss-bearing output keys. Labels are duplicated across
+        every key so each per-width head trains against the same targets.
     :return: ``(train_ds, val_ds, n_train_articles)``.
     """
     n_train_articles: Optional[int] = None
@@ -669,11 +707,14 @@ def load_train_val_datasets(
             f"Use 'tfds' or 'huggingface'."
         )
 
-    # Wrap labels for dict-output model: (x, y) -> (x, {"logits": y})
-    wrap = lambda ds: ds.map(
-        lambda x, y: (x, {"logits": y}),
-        num_parallel_calls=tf.data.AUTOTUNE,
-    )
+    # Wrap labels for dict-output model: duplicate y across every LM key.
+    # With lm_keys=["logits"] this is bit-equivalent to the single-key path.
+    keys_local = tuple(lm_keys)
+
+    def _wrap_fn(x, y):
+        return x, {k: y for k in keys_local}
+
+    wrap = lambda ds: ds.map(_wrap_fn, num_parallel_calls=tf.data.AUTOTUNE)
     return wrap(train_ds), wrap(val_ds), n_train_articles
 
 
@@ -717,31 +758,71 @@ def _load_hf_datasets(config, preprocessor, data_seed: int):
 # ---------------------------------------------------------------------------
 
 
+def _compute_mrl_loss_weights(
+    mrl_widths: List[int], strategy: str,
+) -> List[float]:
+    """Per-key loss weights for a given MRL width list.
+
+    - ``"uniform"`` → ``[1.0] * N`` (matches the matryoshka paper recipe).
+    - ``"inv-log2"`` → ``1 / max(log2(w), 1.0)`` (down-weight smaller
+      widths, mildly).
+    """
+    if strategy == "uniform":
+        return [1.0] * len(mrl_widths)
+    if strategy == "inv-log2":
+        return [1.0 / max(math.log2(w), 1.0) for w in mrl_widths]
+    raise ValueError(
+        f"Unknown mrl_weights strategy: {strategy!r}. "
+        f"Use 'uniform' or 'inv-log2'."
+    )
+
+
 def compile_model(
     model: CliffordNetLMUNet,
     config: TrainingConfig,
     steps_per_epoch: int,
 ) -> None:
-    """Compile with AdamW, warmup + cosine decay, and CLM loss."""
+    """Compile with AdamW, warmup + cosine decay, and per-width CLM losses.
+
+    For matryoshka multi-head training the loss / loss_weights dicts are
+    keyed by every ``logits*`` output of ``model.call``; metrics stay on
+    the primary ``"logits"`` head to bound logging noise + memory.
+    Bit-equivalent to the previous single-head behaviour when
+    ``model.mrl_widths == [base_channels]``.
+    """
+    mrl_widths = list(model.mrl_widths)
+    lm_keys = _resolve_lm_keys(mrl_widths)
+    weights = _compute_mrl_loss_weights(mrl_widths, config.mrl_weights)
+    loss_weights_dict = dict(zip(lm_keys, weights))
+    # Fresh loss instance per output key — avoids any shared state across
+    # the per-width heads (Keras's loss container constructs `Mean` trackers
+    # per key from the dict, but using fresh instances is the safest default).
+    loss_dict = {k: create_loss_fn(config) for k in lm_keys}
+    # Metrics only on primary head: per-key metric dicts would N-multiply
+    # the logging payload + tracker memory for diminishing diagnostic value.
+    metrics_dict = {"logits": build_clm_metrics(config.encoding_name)}
+
     lr_schedule = create_warmup_lr_schedule(
         config.learning_rate,
         config.num_epochs,
         steps_per_epoch,
         config.warmup_ratio,
     )
-    prepare_dict_keyed_compile(model)
+    prepare_dict_keyed_compile(model, output_keys=lm_keys)
     model.compile(
         optimizer=keras.optimizers.AdamW(
             learning_rate=lr_schedule,
             weight_decay=config.weight_decay,
             clipnorm=1.0,
         ),
-        loss={"logits": create_loss_fn(config)},
-        metrics={"logits": build_clm_metrics(config.encoding_name)},
+        loss=loss_dict,
+        loss_weights=loss_weights_dict,
+        metrics=metrics_dict,
     )
     logger.info(
         f"Compiled: AdamW, peak_lr={config.learning_rate}, "
-        f"wd={config.weight_decay}"
+        f"wd={config.weight_decay}, lm_keys={lm_keys}, "
+        f"loss_weights={loss_weights_dict}"
     )
 
 
@@ -791,19 +872,24 @@ def train_cliffordnet_nlp_unet(
     )
     data_seed = config.seed + initial_step
 
-    # Data
-    train_dataset, val_dataset, n_train_articles = load_train_val_datasets(
-        config, preprocessor, data_seed=data_seed,
-    )
-
-    # Model -- resume from checkpoint or create fresh
-    steps_per_epoch = _make_steps_per_epoch(config, n_train_articles)
-
+    # Model first — its resolved ``mrl_widths`` determines the label-dict
+    # key set used by the dataset wrap below. (Order swap vs. legacy:
+    # previously data preceded model; back-compat is preserved because the
+    # default single-head path emits ``lm_keys=["logits"]``.)
     if config.resume_from:
         model, initial_step = load_model_from_checkpoint(config.resume_from)
     else:
         model = create_model(config)
 
+    lm_keys = _resolve_lm_keys(list(model.mrl_widths))
+    logger.info(f"MRL lm_keys: {lm_keys}")
+
+    # Data — labels duplicated across every loss-bearing key.
+    train_dataset, val_dataset, n_train_articles = load_train_val_datasets(
+        config, preprocessor, lm_keys=lm_keys, data_seed=data_seed,
+    )
+
+    steps_per_epoch = _make_steps_per_epoch(config, n_train_articles)
     compile_model(model, config, steps_per_epoch)
 
     # Callbacks: standard NLP callbacks + step-based checkpointing
@@ -949,6 +1035,35 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--focal-gamma", type=float, default=1.0)
     p.add_argument("--label-smoothing", type=float, default=0.0)
 
+    # Matryoshka Representation Learning
+    p.add_argument(
+        "--mrl-widths", type=str, default="auto",
+        help="'auto' (use variant default), or comma-separated descending "
+             "ints starting with base_channels (e.g. '128,64,32,16').",
+    )
+    p.add_argument(
+        "--mrl-weights", type=str, default="uniform",
+        choices=["uniform", "inv-log2"],
+        help="Per-width loss-weight strategy.",
+    )
+    p.add_argument(
+        "--emb-head",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Add a Dense embedding projection before L2-normalization.",
+    )
+    p.add_argument(
+        "--mrl-head-norm",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply per-width LayerNorm before each LM projection.",
+    )
+    p.add_argument(
+        "--embedding-pool", type=str, default="last",
+        choices=["last", "cls", "auto"],
+        help="Sentence pooling for the embedding head.",
+    )
+
     # Data source
     p.add_argument(
         "--dataset-source", type=str, default="huggingface",
@@ -1005,6 +1120,12 @@ def _config_from_args(args: argparse.Namespace) -> TrainingConfig:
     shifts = [int(s) for s in args.shifts.split(",")]
     stride_per_stage = [int(s) for s in args.stride_per_stage.split(",")]
     blocks_per_stage = [int(s) for s in args.blocks_per_stage.split(",")]
+    # Parse --mrl-widths: "auto" → None (use variant default); else CSV ints.
+    mrl_widths_arg = args.mrl_widths.strip().lower()
+    if mrl_widths_arg == "auto":
+        mrl_widths: Optional[List[int]] = None
+    else:
+        mrl_widths = [int(w) for w in args.mrl_widths.split(",")]
     return TrainingConfig(
         variant=args.variant,
         channels=args.channels,
@@ -1042,6 +1163,11 @@ def _config_from_args(args: argparse.Namespace) -> TrainingConfig:
         max_checkpoints=args.max_checkpoints,
         resume_from=args.resume,
         save_dir=args.save_dir,
+        mrl_widths=mrl_widths,
+        mrl_weights=args.mrl_weights,
+        emb_head=args.emb_head,
+        mrl_head_norm=args.mrl_head_norm,
+        embedding_pool=args.embedding_pool,
     )
 
 
