@@ -1,14 +1,17 @@
 """
-Training pipeline for the PRISM forecasting framework.
+Training pipeline for the PRISM probabilistic forecasting framework.
 
-PRISM (Progressive Refinement via Integrated Segmentation and Mixing) implements
-hierarchical time-frequency decomposition with routing mechanisms. Supports both
-point forecasting (MSE) and probabilistic forecasting (Quantile Loss).
+PRISM (Partitioned Representations for Iterative Sequence Modeling) is a
+hierarchical time-series forecaster that replaces standard attention with a
+learnable binary time tree combined with Haar Wavelet frequency decomposition.
+Supports both point forecasting (MSE) and probabilistic forecasting via an
+optional quantile head with monotonicity enforcement.
 
 References:
-    Time Series Decomposition Methods in Deep Learning
-    Hierarchical Temporal Modeling with Wavelet Transforms
-    Router Networks for Mixture-of-Experts in Time Series Forecasting
+    Chen et al. (2025) - PRISM: A Hierarchical Multiscale Approach for
+        Time Series Forecasting (arXiv:2512.24898)
+    Mallat (1989) - A theory for multiresolution signal decomposition
+    Koenker & Bassett (1978) - Regression quantiles
 """
 
 import os
@@ -40,7 +43,7 @@ from dl_techniques.datasets.time_series import (
     TimeSeriesGenerator,
     TimeSeriesGeneratorConfig,
     TimeSeriesNormalizer,
-    NormalizationMethod
+    NormalizationMethod,
 )
 
 plt.style.use('default')
@@ -60,7 +63,7 @@ set_random_seeds(42)
 
 @dataclass
 class PRISMTrainingConfig:
-    """Configuration for PRISM training."""
+    """Configuration for PRISM training on multiple patterns."""
     result_dir: str = "results"
     save_results: bool = True
     experiment_name: str = "prism_forecasting"
@@ -111,7 +114,7 @@ class PRISMTrainingConfig:
     min_data_length: int = 2000
     normalize_per_instance: bool = True
 
-    # Category weights
+    # Category weights for balanced sampling
     category_weights: Dict[str, float] = field(default_factory=lambda: {
         "trend": 1.0, "seasonal": 1.0, "composite": 1.2,
         "financial": 1.5, "weather": 1.3, "biomedical": 1.2,
@@ -131,7 +134,16 @@ class PRISMTrainingConfig:
     analysis_frequency: int = 10
     analysis_start_epoch: int = 1
 
+    # ONNX export
+    export_onnx: bool = False
+    onnx_opset_version: int = 17
+
     def __post_init__(self) -> None:
+        if self.preset not in PRISMModel.PRESETS:
+            raise ValueError(
+                f"preset must be one of {list(PRISMModel.PRESETS.keys())}, "
+                f"got '{self.preset}'"
+            )
         total_ratio = self.train_ratio + self.val_ratio + self.test_ratio
         if not np.isclose(total_ratio, 1.0, atol=1e-6):
             raise ValueError(f"Data ratios must sum to 1.0, got {total_ratio}")
@@ -157,9 +169,14 @@ class PRISMDataProcessor:
     pre-computed val/test datasets, and per-instance normalization.
     """
 
-    def __init__(self, config: PRISMTrainingConfig, generator: TimeSeriesGenerator,
-                 selected_patterns: List[str], pattern_to_category: Dict[str, str],
-                 num_features: int = 1):
+    def __init__(
+            self,
+            config: PRISMTrainingConfig,
+            generator: TimeSeriesGenerator,
+            selected_patterns: List[str],
+            pattern_to_category: Dict[str, str],
+            num_features: int = 1
+    ):
         self.config = config
         self.ts_generator = generator
         self.selected_patterns = selected_patterns
@@ -181,12 +198,12 @@ class PRISMDataProcessor:
         return patterns, weights
 
     def _safe_normalize(self, series: np.ndarray) -> np.ndarray:
-        """Normalize with clipping for stability."""
+        """Clean + optionally per-instance normalize, with clipping for stability."""
         series = np.clip(series, -1e6, 1e6)
+        if np.isnan(series).any():
+            series = _fill_nans(series)
         if self.config.normalize_per_instance:
             normalizer = TimeSeriesNormalizer(method=NormalizationMethod.STANDARD)
-            if np.isnan(series).any():
-                series = _fill_nans(series)
             series = normalizer.fit_transform(series)
         series = np.clip(series, -10.0, 10.0)
         return series.astype(np.float32)
@@ -194,7 +211,7 @@ class PRISMDataProcessor:
     def _training_generator(self) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
         """Infinite generator with buffered pattern mixing."""
         patterns_to_mix, windows_per_pattern = 50, 5
-        buffer = []
+        buffer: List[Tuple[np.ndarray, np.ndarray]] = []
         total_len = self.config.context_len + self.config.forecast_len
 
         while True:
@@ -293,7 +310,7 @@ class PRISMDataProcessor:
 
 
 class PRISMPerformanceCallback(keras.callbacks.Callback):
-    """Tracks and visualizes PRISM performance."""
+    """Tracks and visualizes PRISM forecast performance."""
 
     def __init__(self, config: PRISMTrainingConfig, processor: PRISMDataProcessor,
                  save_dir: str, model_name: str = "prism"):
@@ -316,7 +333,10 @@ class PRISMPerformanceCallback(keras.callbacks.Callback):
             if len(viz_x) >= self.config.plot_top_k_patterns:
                 break
         if not viz_x:
-            return np.zeros((0, self.config.context_len, 1)), np.zeros((0, self.config.forecast_len, 1))
+            return (
+                np.zeros((0, self.config.context_len, 1), dtype=np.float32),
+                np.zeros((0, self.config.forecast_len, 1), dtype=np.float32),
+            )
         return np.array(viz_x), np.array(viz_y)
 
     def on_epoch_end(self, epoch: int, logs: Optional[Dict] = None) -> None:
@@ -363,10 +383,8 @@ class PRISMPerformanceCallback(keras.callbacks.Callback):
         num_samples = min(self.config.plot_top_k_patterns, len(context))
         n_cols, n_rows = 3, math.ceil(num_samples / 3)
 
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 4 * n_rows))
-        if n_rows == 1 and n_cols == 1:
-            axes = [axes]
-        axes = np.array(axes).flatten()
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 4 * n_rows), squeeze=False)
+        axes = axes.flatten()
 
         if self.config.use_quantile_head:
             quantiles = self.config.quantile_levels
@@ -407,7 +425,7 @@ class PRISMPerformanceCallback(keras.callbacks.Callback):
 
 
 class PRISMTrainer:
-    """Trainer for PRISM forecasting models."""
+    """Orchestrates PRISM training (point or quantile)."""
 
     def __init__(self, config: PRISMTrainingConfig,
                  generator_config: TimeSeriesGeneratorConfig) -> None:
@@ -426,7 +444,7 @@ class PRISMTrainer:
         self.processor = PRISMDataProcessor(
             config, self.generator, self.selected_patterns, self.pattern_to_category
         )
-        self.model: Optional[keras.Model] = None
+        self.model: Optional[PRISMModel] = None
         self.exp_dir: Optional[str] = None
 
     def _select_patterns(self) -> List[str]:
@@ -438,7 +456,8 @@ class PRISMTrainer:
         else:
             candidates = self.all_patterns
 
-        selected, cat_counts = [], {}
+        selected: List[str] = []
+        cat_counts: Dict[str, int] = {}
         for pattern in sorted(candidates):
             cat = self.pattern_to_category.get(pattern)
             if cat and cat_counts.get(cat, 0) < self.config.max_patterns_per_category:
@@ -451,16 +470,85 @@ class PRISMTrainer:
         logger.info(f"Selected {len(selected)} patterns for training")
         return selected
 
+    def create_model(self) -> PRISMModel:
+        """Create and compile the PRISM model."""
+        logger.info(f"Building PRISM model (preset={self.config.preset})")
+        num_features = self.processor.num_features
+
+        model_kwargs: Dict[str, Any] = {
+            "preset": self.config.preset,
+            "context_len": self.config.context_len,
+            "forecast_len": self.config.forecast_len,
+            "num_features": num_features,
+            "num_layers": self.config.num_layers,
+            "tree_depth": self.config.tree_depth,
+            "overlap_ratio": self.config.overlap_ratio,
+            "num_wavelet_levels": self.config.num_wavelet_levels,
+            "router_hidden_dim": self.config.router_hidden_dim,
+            "router_temperature": self.config.router_temperature,
+            "dropout_rate": self.config.dropout_rate,
+            "ffn_expansion": self.config.ffn_expansion,
+            "use_quantile_head": self.config.use_quantile_head,
+            "num_quantiles": len(self.config.quantile_levels) if self.config.use_quantile_head else 3,
+            "quantile_levels": self.config.quantile_levels if self.config.use_quantile_head else None,
+            "enforce_monotonicity": self.config.enforce_monotonicity,
+        }
+        if self.config.hidden_dim is not None:
+            model_kwargs["hidden_dim"] = self.config.hidden_dim
+
+        model = PRISMModel.from_preset(**model_kwargs)
+
+        if self.config.use_warmup:
+            total_steps = self.config.epochs * self.config.steps_per_epoch
+            primary_schedule = keras.optimizers.schedules.CosineDecay(
+                initial_learning_rate=self.config.learning_rate,
+                decay_steps=max(1, total_steps - self.config.warmup_steps),
+                alpha=0.01
+            )
+            lr_schedule = WarmupSchedule(
+                warmup_steps=self.config.warmup_steps,
+                warmup_start_lr=self.config.warmup_start_lr,
+                primary_schedule=primary_schedule
+            )
+            logger.info("Using Warmup + CosineDecay schedule")
+        else:
+            lr_schedule = self.config.learning_rate
+
+        optimizer = keras.optimizers.get(self.config.optimizer)
+        optimizer.learning_rate = lr_schedule
+        if self.config.gradient_clip_norm:
+            optimizer.clipnorm = self.config.gradient_clip_norm
+
+        model.build((None, self.config.context_len, num_features))
+
+        if self.config.use_quantile_head:
+            logger.info("Compiling with QuantileLoss")
+            loss = QuantileLoss(quantiles=self.config.quantile_levels)
+            metrics: List[Any] = []
+            if 0.5 in self.config.quantile_levels:
+                median_idx = self.config.quantile_levels.index(0.5)
+                def mae_of_median(y_true, y_pred):
+                    return keras.metrics.mean_absolute_error(y_true, y_pred[:, :, :, median_idx])
+                mae_of_median.__name__ = 'mae_of_median'
+                metrics.append(mae_of_median)
+        else:
+            logger.info("Compiling with MSE Loss")
+            loss = 'mse'
+            metrics = ['mae', 'mse']
+
+        model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
+        return model
+
     def run_experiment(self) -> Dict[str, Any]:
+        """Run the complete training experiment."""
         logger.info("Starting PRISM training experiment")
         self.exp_dir = self._create_experiment_dir()
         logger.info(f"Results: {self.exp_dir}")
 
         data_pipeline = self.processor.prepare_datasets()
-        num_features = 1
-        self.model = self._build_model(num_features)
+        self.model = self.create_model()
 
-        dummy_input = np.zeros((1, self.config.context_len, num_features), dtype='float32')
+        dummy_input = np.zeros((1, self.config.context_len, self.processor.num_features), dtype='float32')
         self.model(dummy_input)
         logger.info(f"Model params: {self.model.count_params():,}")
         self.model.summary(print_fn=logger.info)
@@ -483,74 +571,6 @@ class PRISMTrainer:
         )
         os.makedirs(exp_dir, exist_ok=True)
         return exp_dir
-
-    def _build_model(self, num_features: int) -> keras.Model:
-        logger.info(f"Building PRISM model (preset={self.config.preset})")
-
-        model_kwargs = {
-            "preset": self.config.preset,
-            "context_len": self.config.context_len,
-            "forecast_len": self.config.forecast_len,
-            "num_features": num_features,
-            "num_layers": self.config.num_layers,
-            "tree_depth": self.config.tree_depth,
-            "overlap_ratio": self.config.overlap_ratio,
-            "num_wavelet_levels": self.config.num_wavelet_levels,
-            "router_hidden_dim": self.config.router_hidden_dim,
-            "router_temperature": self.config.router_temperature,
-            "dropout_rate": self.config.dropout_rate,
-            "ffn_expansion": self.config.ffn_expansion,
-            "use_quantile_head": self.config.use_quantile_head,
-            "num_quantiles": len(self.config.quantile_levels) if self.config.use_quantile_head else 3,
-            "quantile_levels": self.config.quantile_levels if self.config.use_quantile_head else None,
-            "enforce_monotonicity": self.config.enforce_monotonicity
-        }
-        if self.config.hidden_dim is not None:
-            model_kwargs["hidden_dim"] = self.config.hidden_dim
-
-        model = PRISMModel.from_preset(**model_kwargs)
-
-        # Optimizer with warmup schedule
-        if self.config.use_warmup:
-            total_steps = self.config.epochs * self.config.steps_per_epoch
-            primary_schedule = keras.optimizers.schedules.CosineDecay(
-                initial_learning_rate=self.config.learning_rate,
-                decay_steps=max(1, total_steps - self.config.warmup_steps),
-                alpha=0.01
-            )
-            lr_schedule = WarmupSchedule(
-                warmup_steps=self.config.warmup_steps,
-                warmup_start_lr=self.config.warmup_start_lr,
-                primary_schedule=primary_schedule
-            )
-        else:
-            lr_schedule = self.config.learning_rate
-
-        optimizer = keras.optimizers.get(self.config.optimizer)
-        optimizer.learning_rate = lr_schedule
-        if self.config.gradient_clip_norm:
-            optimizer.clipnorm = self.config.gradient_clip_norm
-
-        model.build((None, self.config.context_len, num_features))
-
-        # Loss and metrics
-        if self.config.use_quantile_head:
-            logger.info("Compiling with QuantileLoss")
-            loss = QuantileLoss(quantiles=self.config.quantile_levels)
-            metrics = []
-            if 0.5 in self.config.quantile_levels:
-                median_idx = self.config.quantile_levels.index(0.5)
-                def mae_of_median(y_true, y_pred):
-                    return keras.metrics.mean_absolute_error(y_true, y_pred[:, :, :, median_idx])
-                mae_of_median.__name__ = 'mae_of_median'
-                metrics.append(mae_of_median)
-        else:
-            logger.info("Compiling with MSE Loss")
-            loss = 'mse'
-            metrics = ['mae', 'mse']
-
-        model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
-        return model
 
     def _train_model(self, data_pipeline: Dict[str, Any], exp_dir: str) -> Dict[str, Any]:
         viz_dir = os.path.join(exp_dir, 'visualizations')
@@ -587,25 +607,58 @@ class PRISMTrainer:
             verbose=1, return_dict=True
         )
 
+        best_model_path = os.path.join(exp_dir, 'best_model.keras')
+        onnx_path = self._export_to_onnx(best_model_path, exp_dir)
+
         return {
             'history': history.history,
-            'test_metrics': test_metrics,
-            'final_epoch': len(history.history['loss'])
+            'test_metrics': {k: float(v) for k, v in test_metrics.items()},
+            'final_epoch': len(history.history['loss']),
+            'onnx_path': onnx_path
         }
 
     def _save_results(self, results: Dict, exp_dir: str) -> None:
-        def json_convert(o):
-            if isinstance(o, (np.floating, np.integer)):
-                return float(o)
+        def json_convert(o: Any) -> Any:
+            if isinstance(o, np.floating): return float(o)
+            if isinstance(o, np.integer): return int(o)
+            if isinstance(o, np.ndarray): return o.tolist()
             return str(o)
 
         serializable = {
             'history': results['history'],
-            'test_metrics': {k: float(v) for k, v in results['test_metrics'].items()},
+            'test_metrics': results['test_metrics'],
+            'final_epoch': results['final_epoch'],
+            'onnx_path': results.get('onnx_path'),
             'config': self.config.__dict__
         }
         with open(os.path.join(exp_dir, 'results.json'), 'w') as f:
             json.dump(serializable, f, indent=4, default=json_convert)
+
+    def _export_to_onnx(self, model_path: str, exp_dir: str) -> Optional[str]:
+        """Export trained model to ONNX format. Opt-in via config.export_onnx."""
+        if not self.config.export_onnx:
+            return None
+
+        onnx_path = os.path.join(exp_dir, 'model.onnx')
+        try:
+            logger.info(f"Exporting to ONNX: {onnx_path}")
+            best_model = keras.saving.load_model(model_path, compile=False)
+            input_signature = [
+                keras.InputSpec(
+                    shape=(None, self.config.context_len, self.processor.num_features),
+                    dtype="float32"
+                )
+            ]
+            best_model.export(
+                onnx_path, format="onnx",
+                input_signature=input_signature,
+                opset_version=self.config.onnx_opset_version, verbose=True
+            )
+            logger.info(f"ONNX export successful: {onnx_path}")
+            return onnx_path
+        except Exception as e:
+            logger.error(f"ONNX export failed: {e}", exc_info=True)
+            return None
 
 
 def parse_args() -> argparse.Namespace:
@@ -640,6 +693,9 @@ def parse_args() -> argparse.Namespace:
     parser.set_defaults(perform_deep_analysis=True)
     parser.add_argument("--analysis_frequency", type=int, default=10)
     parser.add_argument("--analysis_start_epoch", type=int, default=1)
+    parser.add_argument("--no_onnx", dest="export_onnx", action="store_false")
+    parser.set_defaults(export_onnx=False)
+    parser.add_argument("--onnx_opset_version", type=int, default=17)
     parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
     return parser.parse_args()
 
@@ -674,7 +730,9 @@ def main() -> None:
         analysis_frequency=args.analysis_frequency,
         analysis_start_epoch=args.analysis_start_epoch,
         use_quantile_head=args.use_quantile_head,
-        enforce_monotonicity=args.enforce_monotonicity
+        enforce_monotonicity=args.enforce_monotonicity,
+        export_onnx=args.export_onnx,
+        onnx_opset_version=args.onnx_opset_version,
     )
 
     generator_config = TimeSeriesGeneratorConfig(
@@ -685,13 +743,13 @@ def main() -> None:
         trainer = PRISMTrainer(config, generator_config)
         results = trainer.run_experiment()
         logger.info(f"Completed. Results: {results['results_dir']}")
+    except Exception as e:
+        logger.error(f"Failed: {e}", exc_info=True)
+        sys.exit(1)
+    finally:
         keras.backend.clear_session()
         sys.stdout.flush()
         sys.stderr.flush()
-    except Exception as e:
-        logger.error(f"Failed: {e}", exc_info=True)
-
-    os._exit(0)
 
 
 if __name__ == "__main__":
