@@ -36,9 +36,14 @@ class TestCliffordNetIter1Refactor:
     def test_public_api_surface(self):
         import dl_techniques.models.cliffordnet as pkg
 
+        # Surface expanded by plan_2026-05-12_632605aa to add the
+        # CliffordNetEmbedding bidirectional U-Net embedding model + factories.
         assert set(pkg.__all__) == {
             "CliffordNet",
             "create_cliffordnet",
             "CliffordCLIP",
             "CliffordNetLMRouting",
+            "CliffordNetEmbedding",
+            "create_cliffordnet_embedding",
+            "create_cliffordnet_embedding_with_head",
         }
