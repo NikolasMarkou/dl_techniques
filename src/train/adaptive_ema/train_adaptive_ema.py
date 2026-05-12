@@ -650,23 +650,15 @@ class AdaptiveEMATrainer:
         wrapper.compile(optimizer=optimizer, loss=loss, metrics=metrics)
         return wrapper
 
-    def _create_experiment_dir(self) -> str:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        exp_dir = os.path.join(
-            self.config.result_dir,
-            f"{self.config.experiment_name}_{self.config.mode}_{timestamp}",
-        )
-        os.makedirs(exp_dir, exist_ok=True)
-        return exp_dir
+    def _build_results_prefix(self) -> str:
+        return f"{self.config.experiment_name}_{self.config.mode}"
 
     def _train_model(
-        self, data_pipeline: Dict[str, Any], exp_dir: str
+        self, data_pipeline: Dict[str, Any], prefix: str
     ) -> Dict[str, Any]:
-        viz_dir = os.path.join(exp_dir, "visualizations")
-
-        callbacks, _ = create_common_callbacks(
+        callbacks, results_dir = create_common_callbacks(
             model_name="AdaptiveEMA",
-            results_dir_prefix=exp_dir,
+            results_dir_prefix=prefix,
             monitor="val_loss",
             patience=25,
             use_lr_schedule=self.config.use_warmup,
@@ -683,6 +675,9 @@ class AdaptiveEMATrainer:
             analyzer_start_epoch=self.config.analysis_start_epoch,
             analyzer_epoch_frequency=self.config.analysis_frequency,
         )
+        self.exp_dir = results_dir
+        viz_dir = os.path.join(self.exp_dir, "visualizations")
+        os.makedirs(viz_dir, exist_ok=True)
         callbacks.append(
             AdaptiveEMAPerformanceCallback(self.config, self.processor, viz_dir)
         )
@@ -705,8 +700,8 @@ class AdaptiveEMATrainer:
             return_dict=True,
         )
 
-        best_model_path = os.path.join(exp_dir, "best_model.keras")
-        onnx_path = self._export_to_onnx(best_model_path, exp_dir)
+        best_model_path = os.path.join(self.exp_dir, "best_model.keras")
+        onnx_path = self._export_to_onnx(best_model_path, self.exp_dir)
 
         return {
             "history": history.history,
@@ -767,8 +762,7 @@ class AdaptiveEMATrainer:
 
     def run_experiment(self) -> Dict[str, Any]:
         logger.info("Starting AdaptiveEMA training experiment")
-        self.exp_dir = self._create_experiment_dir()
-        logger.info(f"Results: {self.exp_dir}")
+        prefix = self._build_results_prefix()
 
         data_pipeline = self.processor.prepare_datasets()
         self.model = self.create_model()
@@ -781,7 +775,7 @@ class AdaptiveEMATrainer:
         logger.info(f"Model params: {self.model.count_params():,}")
         self.model.summary(print_fn=logger.info)
 
-        training_results = self._train_model(data_pipeline, self.exp_dir)
+        training_results = self._train_model(data_pipeline, prefix)
         if self.config.save_results:
             self._save_results(training_results, self.exp_dir)
         return {
