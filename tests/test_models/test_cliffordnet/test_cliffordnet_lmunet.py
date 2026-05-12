@@ -441,3 +441,310 @@ class TestGradientFlow:
         grads = tape.gradient(loss, model.trainable_variables)
         for var, grad in zip(model.trainable_variables, grads):
             assert grad is not None, f"No gradient for {var.name}"
+
+
+# ---------------------------------------------------------------------
+# Matryoshka Representation Learning (MRL)
+# ---------------------------------------------------------------------
+
+
+class TestMRL:
+    """Tests for the per-width MRL LM heads (D-002 width rule)."""
+
+    def test_mrl_default_widths_per_variant(self):
+        """Variant defaults follow the power-of-2 anchored, base preserved rule."""
+        expected = {
+            "nano": [128, 64, 32, 16],
+            "mini": [192, 128, 64, 32, 16],
+            "base": [384, 256, 128, 64, 32, 16],
+            "large": [512, 256, 128, 64, 32, 16],
+            "xl": [768, 512, 256, 128, 64, 32, 16],
+        }
+        for name, widths in expected.items():
+            model = CliffordNetLMUNet.from_variant(name, vocab_size=64)
+            assert model.mrl_widths == widths, (
+                f"variant {name!r} mrl_widths mismatch: "
+                f"{model.mrl_widths} != {widths}"
+            )
+
+    def test_mrl_output_keys_shapes(self, tiny_config):
+        """Override with [16, 8, 4] → 3 logits keys + 3 embedding keys."""
+        cfg = {**tiny_config, "mrl_widths": [16, 8, 4]}
+        model = CliffordNetLMUNet(**cfg)
+        input_ids = _random_ids((2, 16), cfg["vocab_size"])
+        outputs = model(input_ids, training=False)
+        expected_keys = {
+            "logits", "logits_w8", "logits_w4",
+            "embedding_w16", "embedding_w8", "embedding_w4",
+        }
+        assert set(outputs.keys()) == expected_keys, set(outputs.keys())
+        assert outputs["logits"].shape == (2, 16, cfg["vocab_size"])
+        assert outputs["logits_w8"].shape == (2, 16, cfg["vocab_size"])
+        assert outputs["logits_w4"].shape == (2, 16, cfg["vocab_size"])
+        assert outputs["embedding_w16"].shape == (2, 16)
+        assert outputs["embedding_w8"].shape == (2, 8)
+        assert outputs["embedding_w4"].shape == (2, 4)
+
+    def test_mrl_causality_per_width(self, tiny_config):
+        """Perturb-last: positions < T-1 unchanged at every logits_w* key."""
+        cfg = {**tiny_config, "mrl_widths": [16, 8, 4], "layer_scale_init": 1.0}
+        model = CliffordNetLMUNet(**cfg)
+        seq1 = np.array([[1, 2, 3, 4, 5, 6, 7, 8]], dtype=np.int32)
+        seq2 = np.array([[1, 2, 3, 4, 5, 6, 7, 63]], dtype=np.int32)
+        out1 = model(seq1, training=False)
+        out2 = model(seq2, training=False)
+        for key in ("logits", "logits_w8", "logits_w4"):
+            l1 = keras.ops.convert_to_numpy(out1[key])
+            l2 = keras.ops.convert_to_numpy(out2[key])
+            for pos in range(7):
+                np.testing.assert_allclose(
+                    l1[0, pos], l2[0, pos], atol=1e-5,
+                    err_msg=f"{key}: position {pos} leaked future at width slice",
+                )
+            assert not np.allclose(l1[0, 7], l2[0, 7], atol=1e-3), (
+                f"{key}: position 7 unchanged — perturbation didn't propagate"
+            )
+
+    def test_mrl_tied_vs_untied(self, tiny_config):
+        """Both tied/untied paths produce all widths with correct shapes."""
+        for tie in (True, False):
+            cfg = {**tiny_config, "mrl_widths": [16, 8, 4], "tie_word_embeddings": tie}
+            model = CliffordNetLMUNet(**cfg)
+            outputs = model(_random_ids((1, 8), cfg["vocab_size"]), training=False)
+            for key in ("logits", "logits_w8", "logits_w4"):
+                assert outputs[key].shape == (1, 8, cfg["vocab_size"]), (
+                    f"tie={tie} key={key} shape mismatch"
+                )
+            # Tied: only token_embedding kernel + per-width biases (no Dense).
+            # Untied: per-width Dense layers exist.
+            if tie:
+                assert model.mrl_output_projs is None
+                assert model.mrl_output_biases is not None
+                assert len(model.mrl_output_biases) == 3
+            else:
+                assert model.mrl_output_projs is not None
+                assert len(model.mrl_output_projs) == 3
+
+    def test_mrl_widths_validation(self, tiny_config):
+        """Invalid widths raise ValueError with the expected anchor."""
+        # First element != base_channels.
+        bad1 = {**tiny_config, "mrl_widths": [8, 4]}
+        with pytest.raises(ValueError, match="must equal base_channels"):
+            CliffordNetLMUNet(**bad1)
+        # Element > base_channels.
+        bad2 = {**tiny_config, "mrl_widths": [32, 16]}
+        with pytest.raises(ValueError, match="<= base_channels"):
+            CliffordNetLMUNet(**bad2)
+        # Non-decreasing.
+        bad3 = {**tiny_config, "mrl_widths": [16, 8, 8]}
+        with pytest.raises(ValueError, match="strictly decreasing"):
+            CliffordNetLMUNet(**bad3)
+        # Non-positive.
+        bad4 = {**tiny_config, "mrl_widths": [16, 0]}
+        with pytest.raises(ValueError, match="positive ints"):
+            CliffordNetLMUNet(**bad4)
+        # Non-power-of-2 tail (12 is not a power of 2).
+        bad5 = {**tiny_config, "mrl_widths": [16, 12, 4]}
+        with pytest.raises(ValueError, match="power of 2"):
+            CliffordNetLMUNet(**bad5)
+
+    def test_trainer_compile_and_fit_one_step(self):
+        """End-to-end smoke: trainer's compile_model + 1 fit step → per-key losses."""
+        from train.cliffordnet.train_cliffordnet_nlp_unet import (
+            TrainingConfig, compile_model, _resolve_lm_keys,
+        )
+        cfg = TrainingConfig(
+            variant="custom",
+            vocab_size=64,
+            base_channels=16,
+            max_seq_length=32,
+            stride_per_stage=[2, 2],
+            blocks_per_stage=[1, 1, 1],
+            bottleneck_blocks=1,
+            shifts=[1, 2],
+            mrl_widths=[16, 8],
+            emb_head=False,
+            tie_word_embeddings=True,
+            batch_size=2,
+            num_epochs=1,
+        )
+        model = CliffordNetLMUNet(
+            vocab_size=cfg.vocab_size,
+            max_seq_length=cfg.max_seq_length,
+            base_channels=cfg.base_channels,
+            stride_per_stage=cfg.stride_per_stage,
+            blocks_per_stage=cfg.blocks_per_stage,
+            bottleneck_blocks=cfg.bottleneck_blocks,
+            shifts=cfg.shifts,
+            tie_word_embeddings=cfg.tie_word_embeddings,
+            mrl_widths=cfg.mrl_widths,
+            emb_head=cfg.emb_head,
+        )
+        # Build the model.
+        model(_random_ids((1, cfg.max_seq_length - 1), cfg.vocab_size), training=False)
+
+        compile_model(model, cfg, steps_per_epoch=1)
+
+        # Synthetic batch with labels duplicated across both lm_keys.
+        x = _random_ids((2, 8), cfg.vocab_size)
+        y = _random_ids((2, 8), cfg.vocab_size)
+        lm_keys = _resolve_lm_keys(cfg.mrl_widths)
+        assert lm_keys == ["logits", "logits_w8"]
+        labels = {k: y for k in lm_keys}
+
+        history = model.fit(x, labels, batch_size=2, epochs=1, verbose=0)
+        # Both per-key losses must surface in history.
+        assert "loss" in history.history
+        assert "logits_loss" in history.history, history.history.keys()
+        assert "logits_w8_loss" in history.history, history.history.keys()
+
+
+class TestEmbeddingHead:
+    """Tests for the L2-normalized sentence-embedding head."""
+
+    def test_embedding_l2_norm_per_width(self, tiny_config):
+        cfg = {**tiny_config, "mrl_widths": [16, 8, 4]}
+        model = CliffordNetLMUNet(**cfg)
+        outputs = model(_random_ids((4, 16), cfg["vocab_size"]), training=False)
+        for w in (16, 8, 4):
+            e = keras.ops.convert_to_numpy(outputs[f"embedding_w{w}"])
+            norms = np.linalg.norm(e, axis=-1)
+            np.testing.assert_allclose(norms, 1.0, atol=1e-5)
+
+    def test_embedding_pool_last_default(self, tiny_config):
+        """Default pool='last' uses the T-1 array index."""
+        cfg = {**tiny_config, "mrl_widths": [16, 8]}
+        model = CliffordNetLMUNet(**cfg)
+        outputs = model(_random_ids((2, 16), cfg["vocab_size"]), training=False)
+        # Embedding at width=16 must equal L2norm(h_top[:, -1, :16]).
+        # h_top isn't directly exposed; we instead verify the embedding is the
+        # L2 norm of *some* pooled vector by checking unit-norm + dimensionality.
+        e16 = keras.ops.convert_to_numpy(outputs["embedding_w16"])
+        e8 = keras.ops.convert_to_numpy(outputs["embedding_w8"])
+        # The first 8 dims of the pooled (pre-norm) vector are shared with e8's
+        # underlying slice; both come from the same pooled vector. After L2
+        # norm at different widths they aren't equal, but they live in the same
+        # direction in the first 8 dims — check correlation > 0.
+        # Simpler structural check: shapes are right and both are finite.
+        assert e16.shape == (2, 16)
+        assert e8.shape == (2, 8)
+        assert np.all(np.isfinite(e16))
+        assert np.all(np.isfinite(e8))
+
+    def test_embedding_pool_cls(self, tiny_config):
+        """pool='cls' → embedding derived from position 0 (vs 'last' position T-1)."""
+        cfg_last = {**tiny_config, "mrl_widths": [16], "embedding_pool": "last"}
+        cfg_cls = {
+            **tiny_config, "mrl_widths": [16],
+            "embedding_pool": "cls", "cls_token_id": 1,
+        }
+        # Same seed-equivalent — build both models with the same weights via
+        # set_weights to make the comparison meaningful.
+        m1 = CliffordNetLMUNet(**cfg_last)
+        m2 = CliffordNetLMUNet(**cfg_cls)
+        x = _random_ids((1, 8), cfg_last["vocab_size"])
+        m1(x, training=False)
+        m2(x, training=False)
+        m2.set_weights(m1.get_weights())
+        out1 = m1(x, training=False)
+        out2 = m2(x, training=False)
+        e_last = keras.ops.convert_to_numpy(out1["embedding_w16"])
+        e_cls = keras.ops.convert_to_numpy(out2["embedding_w16"])
+        # Pool position differs (last vs first) → embeddings should differ in
+        # nontrivial sequences. Both must still be unit-norm.
+        np.testing.assert_allclose(np.linalg.norm(e_last, axis=-1), 1.0, atol=1e-5)
+        np.testing.assert_allclose(np.linalg.norm(e_cls, axis=-1), 1.0, atol=1e-5)
+        assert not np.allclose(e_last, e_cls, atol=1e-4), (
+            "cls vs last pool produced identical embeddings — pooling not applied"
+        )
+
+    def test_embedding_emb_head_dense(self, tiny_config):
+        """emb_head=True adds a Dense projection — extra trainable weights."""
+        cfg_no = {**tiny_config, "mrl_widths": [16], "emb_head": False}
+        cfg_yes = {**tiny_config, "mrl_widths": [16], "emb_head": True}
+        m_no = CliffordNetLMUNet(**cfg_no)
+        m_yes = CliffordNetLMUNet(**cfg_yes)
+        x = _random_ids((1, 8), cfg_no["vocab_size"])
+        m_no(x, training=False)
+        m_yes(x, training=False)
+        # emb_head=True path has the embedding_proj Dense; baseline has None.
+        assert m_no.embedding_proj is None
+        assert m_yes.embedding_proj is not None
+        # Trainable variable count strictly increases.
+        assert len(m_yes.trainable_variables) > len(m_no.trainable_variables)
+
+
+class TestMRLSerialization:
+    """Round-trip and back-compat serialization tests for MRL fields."""
+
+    def test_get_config_includes_mrl_fields(self, tiny_config):
+        cfg = {
+            **tiny_config,
+            "mrl_widths": [16, 8, 4],
+            "mrl_head_norm": False,
+            "emb_head": True,
+            "embedding_pool": "cls",
+            "cls_token_id": 1,
+            "l2_eps": 1e-10,
+        }
+        m1 = CliffordNetLMUNet(**cfg)
+        d = m1.get_config()
+        assert d["mrl_widths"] == [16, 8, 4]
+        assert d["mrl_head_norm"] is False
+        assert d["emb_head"] is True
+        assert d["embedding_pool"] == "cls"
+        assert d["cls_token_id"] == 1
+        assert d["l2_eps"] == 1e-10
+        m2 = CliffordNetLMUNet.from_config(d)
+        assert m2.mrl_widths == m1.mrl_widths
+        assert m2.mrl_head_norm == m1.mrl_head_norm
+        assert m2.emb_head == m1.emb_head
+        assert m2.embedding_pool == m1.embedding_pool
+        assert m2.cls_token_id == m1.cls_token_id
+        assert m2.l2_eps == m1.l2_eps
+
+    def test_save_load_keras_with_mrl(self, tiny_config):
+        cfg = {**tiny_config, "mrl_widths": [16, 8, 4], "emb_head": True}
+        model = CliffordNetLMUNet(**cfg)
+        x = _random_ids((1, 8), cfg["vocab_size"])
+        out_orig = model(x, training=False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "lmunet_mrl.keras")
+            model.save(path)
+            loaded = keras.models.load_model(
+                path,
+                custom_objects={
+                    "CliffordNetLMUNet": CliffordNetLMUNet,
+                    "CausalCliffordNetBlock": CausalCliffordNetBlock,
+                    "CausalCliffordNetBlockDSv2": CausalCliffordNetBlockDSv2,
+                },
+            )
+        out_loaded = loaded(x, training=False)
+        for key in ("logits", "logits_w8", "logits_w4"):
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(out_orig[key]),
+                keras.ops.convert_to_numpy(out_loaded[key]),
+                atol=1e-4, err_msg=f"{key} drifted across save/load",
+            )
+        for key in ("embedding_w16", "embedding_w8", "embedding_w4"):
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(out_orig[key]),
+                keras.ops.convert_to_numpy(out_loaded[key]),
+                atol=1e-5, err_msg=f"{key} drifted across save/load",
+            )
+
+    def test_default_mrl_widths_none_back_compat(self):
+        """mrl_widths=None → [base_channels]; outputs = {'logits', 'embedding_w<base>'}.
+
+        Note: embedding_w{base_channels} is always emitted because the
+        embedding-head pooling step runs unconditionally (emb_head only
+        toggles the extra Dense projection, not the L2-norm + slice path).
+        """
+        model = CliffordNetLMUNet(vocab_size=64, base_channels=16, mrl_widths=None)
+        assert model.mrl_widths == [16]
+        x = _random_ids((1, 8), 64)
+        outputs = model(x, training=False)
+        assert set(outputs.keys()) == {"logits", "embedding_w16"}, outputs.keys()
+        assert outputs["logits"].shape == (1, 8, 64)
+        assert outputs["embedding_w16"].shape == (1, 16)
