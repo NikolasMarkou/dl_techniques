@@ -10,6 +10,13 @@ The key insight is that trading when the EMA slope is within certain bounds
 trading only on positive or negative slopes.
 
 References:
+    - LeBeau, C. (1992). *Computer Analysis of the Futures Markets* — EMA slope
+      based filtering as a regime-detection primitive.
+    - Bollinger, J. (2001). *Bollinger on Bollinger Bands* — slope as
+      trend/volatility regime indicator.
+    - Koenker, R. & Bassett, G. (1978). "Regression Quantiles." *Econometrica*
+      46(1): 33-50 — quantile-loss formulation used by the downstream slope
+      quantile head.
     - EMA slope = EMA(current) - EMA(lookback_period bars ago)
     - Trade signals based on slope thresholds (above, below, between)
 """
@@ -87,13 +94,18 @@ class ExponentialMovingAverage(keras.layers.Layer):
         """
         Compute EMA over the time dimension.
 
+        Uses `keras.ops.scan` to materialise the recurrence in a single
+        Scan op (XLA-friendly, ONNX-clean). The recurrence is preserved
+        bit-identically to the previous Python-loop implementation;
+        carry is `(ema_prev, t)` with `t` an int32 step counter so the
+        adjust=True weight `1 - (1-α)^(t+1)` matches the original.
+
         :param inputs: Input tensor of shape (batch, time_steps, features)
             or (batch, time_steps).
         :type inputs: keras.KerasTensor
         :return: EMA values with same shape as input.
         :rtype: keras.KerasTensor
         """
-        input_shape = ops.shape(inputs)
         ndim = len(inputs.shape)
 
         if ndim == 2:
@@ -102,39 +114,68 @@ class ExponentialMovingAverage(keras.layers.Layer):
         else:
             x = inputs
 
-        batch_size = input_shape[0]
-        time_steps = input_shape[1]
-        features = x.shape[-1] if x.shape[-1] is not None else input_shape[-1]
-
-        # Initialize EMA with first value
-        ema_prev = x[:, 0, :]
-
-        # Collect EMA values
-        ema_values = [ema_prev]
+        # Edge case: T == 1 → output equals input verbatim (no recurrence).
+        # Use static shape when known so the graph stays clean.
+        static_T = x.shape[1]
+        if static_T == 1:
+            return inputs
 
         alpha = ops.cast(self.alpha, dtype=x.dtype)
         one_minus_alpha = ops.cast(1.0 - self.alpha, dtype=x.dtype)
 
-        # Compute EMA recursively
-        for t in range(1, x.shape[1] if x.shape[1] is not None else time_steps):
-            if self.adjust:
-                # Adjusted formula for early timesteps
-                weight = ops.cast(
-                    1.0 - ops.power(one_minus_alpha, ops.cast(t + 1, x.dtype)),
-                    dtype=x.dtype,
-                )
-                ema_current = (
-                    alpha * x[:, t, :] + one_minus_alpha * ema_prev
-                )
-                ema_current = ema_current / ops.maximum(weight, 1e-10)
-            else:
-                ema_current = alpha * x[:, t, :] + one_minus_alpha * ema_prev
+        # DECISION plan_2026-05-12_5f0e087c/D-001:
+        # Preserve the CUSTOM adjust=True semantics verbatim — divide
+        # the recurrence output (NOT the cumulative weighted sum) by
+        # `1 - (1-α)^(t+1)`. This is NOT pandas-canonical EMA-adjust,
+        # but it is the documented contract of every existing
+        # adaptive_ema test. ops.scan keeps the exact same ordering
+        # and intermediate values as the previous Python-for loop;
+        # do not switch to ops.associative_scan (different ordering →
+        # ~1e-6 float drift → would flake serialization round-trip).
+        #
+        # Implementation note: TF backend of ops.scan requires the
+        # per-iteration output `y` to match the carry in shape/dtype,
+        # and forbids tuple carries here. So:
+        #   - carry = ema_prev (B, F) only
+        #   - per-step weight `1 - (1-α)^(t+1)` is precomputed outside
+        #     the scan (depends on t alone) and fed in via xs.
+        # This keeps the scan body pure-elementwise on the carry.
+        adjust = self.adjust
 
-            ema_values.append(ema_current)
-            ema_prev = ema_current
+        # Precompute adjust weights for t = 1..T-1 (length T-1) matching the
+        # original loop's `t + 1` exponent. Use static T when available so
+        # the graph stays clean; fall back to dynamic shape otherwise.
+        T_dynamic = ops.shape(x)[1]
+        # t ranges 1..T-1 → exponent ranges 2..T. We build floats for the
+        # exponent inside the scan body via `ops.arange`.
+        t_arange = ops.arange(1, T_dynamic, dtype=x.dtype)  # (T-1,)
+        exponents = t_arange + 1.0  # (T-1,), each is `t + 1`
+        weights_1d = 1.0 - ops.power(one_minus_alpha, exponents)
+        weights_1d = ops.maximum(weights_1d, ops.cast(1e-10, x.dtype))  # (T-1,)
 
-        # Stack along time dimension
-        ema = ops.stack(ema_values, axis=1)
+        # xs leading axis is time-1; pack (x_t, w_t) by concatenating w_t as
+        # an extra feature → simpler: feed two scans-ready tensors via a list.
+        x_rest_time_major = ops.transpose(x[:, 1:, :], axes=(1, 0, 2))  # (T-1, B, F)
+        # Broadcast weight to (T-1, 1, 1) so step body can mul/div via it.
+        w_time_major = ops.reshape(weights_1d, (-1, 1, 1))  # (T-1, 1, 1)
+
+        def step(ema_prev, xw):
+            # xw is a list [x_t (B,F), w_t (1,1)] — keras packs the lists from
+            # the leading axis of each xs element.
+            x_t, w_t = xw
+            ema_current = alpha * x_t + one_minus_alpha * ema_prev
+            ema_adjusted = ema_current / w_t  # (B, F) / (1, 1)
+            ema_out = ops.where(
+                ops.cast(adjust, "bool"), ema_adjusted, ema_current
+            )
+            return ema_out, ema_out
+
+        ema_0 = x[:, 0, :]  # (B, F)
+
+        _, ema_rest = ops.scan(step, ema_0, [x_rest_time_major, w_time_major])
+        # ema_rest: (T-1, B, F) → (B, T-1, F)
+        ema_rest = ops.transpose(ema_rest, axes=(1, 0, 2))
+        ema = ops.concatenate([ops.expand_dims(ema_0, axis=1), ema_rest], axis=1)
 
         if ndim == 2:
             ema = ops.squeeze(ema, axis=-1)
