@@ -35,7 +35,24 @@ Clifford algebra block, point cloud autoencoder, supernode pooling, and `fields/
 Multimodal fusion layer.
 
 ### Memory (`memory/`)
-Memory-augmented neural network (MANN), 2D/ND self-organizing maps (SOM), ND soft SOM.
+Single canonical home for memory-augmented and topographic-memory layers
+(merged from a previously-separate NTM subpackage). Exports four families
+via `dl_techniques.layers.memory.*`:
+
+- **NTM family** (`ntm_interface.py`, `baseline_ntm.py`) — `NTMConfig`,
+  `NTMMemory`, `NTMReadHead`, `NTMWriteHead`, `NTMController`, `NTMCell`,
+  `NeuralTuringMachine`, abstract `BaseMemory/BaseHead/BaseController/BaseNTM`,
+  `AddressingMode` enum (CONTENT + HYBRID only), state dataclasses
+  (`MemoryState`, `HeadState`, `NTMOutput`), and utility functions
+  (`cosine_similarity`, `circular_convolution`, `sharpen_weights`).
+- **MANN** (`mann.py`) — `MannLayer` standalone class (legacy entry point;
+  new callers prefer the `create_mann(...)` factory).
+- **SOM family** (`som_nd_layer.py`, `som_2d_layer.py`, `som_nd_soft_layer.py`) —
+  `SOMLayer` (N-D hard winner), `SOM2dLayer` (2D specialization),
+  `SoftSOMLayer` (differentiable / per-dim or global softmax).
+- **Factory** (`factory.py`) — uniform construction surface:
+  `create_ntm(...)`, `create_mann(...)` (returns a `NeuralTuringMachine`
+  configured to preserve the historical MANN output shape), `create_som_2d(...)`.
 
 ### Logic (`logic/`)
 Arithmetic operators, logic operators, neural circuit.
@@ -59,9 +76,6 @@ BPE tokenizer implementation.
 - `nlp_heads/` — NLP output heads with `factory.py` and `task_types.py`
 - `vision_heads/` — Vision output heads with `factory.py` and `task_types.py`
 - `vlm_heads/` — Vision-language model heads with `factory.py` and `task_types.py`
-
-### Neural Turing Machine (`ntm/`)
-`base_layers.py`, `baseline_ntm.py`, `ntm_interface.py` — NTM memory read/write layers.
 
 ### Experimental (`experimental/`)
 Experimental/unstable layers: band RMS OOD, contextual counter FFN, contextual memory, field embeddings, graph MANN, hierarchical evidence LLM, hierarchical memory system, MST correlation filter.
