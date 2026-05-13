@@ -159,9 +159,19 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             gumbel_hard: bool = False,
             entropy_coefficient: float = 0.0,
             selection_mode: str = "global",
+            exponent_clip_mode: str = "hard",
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
+
+        # D7 (plan_2026-05-13_e33114da): exponent_clip_mode='smooth' replaces
+        # the hard ops.clip with a tanh-based range squash that has non-zero
+        # gradient at the boundary. Default 'hard' preserves prior behavior.
+        if exponent_clip_mode not in ("hard", "smooth"):
+            raise ValueError(
+                f"exponent_clip_mode must be 'hard' or 'smooth', got "
+                f"{exponent_clip_mode!r}."
+            )
 
         # C3 (plan_2026-05-13_3a2f1d23): selection_mode='per_channel' creates
         # (channels, num_operations) weights so each channel selects its own
@@ -241,6 +251,7 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         self.gumbel_hard = gumbel_hard
         self.entropy_coefficient = entropy_coefficient
         self.selection_mode = selection_mode
+        self.exponent_clip_mode = exponent_clip_mode
 
         # Initialize weight attributes - these will be created in build()
         self.operation_weights = None
@@ -390,7 +401,14 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         x1_abs_safe = ops.clip(
             ops.abs(x1), self.power_clip_range[0], self.power_clip_range[1]
         )
-        x2_safe = ops.clip(x2, self.exponent_clip_range[0], self.exponent_clip_range[1])
+        if self.exponent_clip_mode == "smooth":
+            # D7: tanh-based range squash; non-zero gradient everywhere.
+            lo, hi = self.exponent_clip_range
+            mid = (lo + hi) / 2.0
+            half = (hi - lo) / 2.0
+            x2_safe = ops.add(mid, ops.multiply(half, ops.tanh(ops.divide(ops.subtract(x2, mid), half))))
+        else:
+            x2_safe = ops.clip(x2, self.exponent_clip_range[0], self.exponent_clip_range[1])
         magnitude = ops.power(x1_abs_safe, x2_safe)
         # sign component: +1 for non-negative bases, cos(pi*y) for negative.
         is_negative = ops.cast(ops.less(x1, 0.0), x1.dtype)
@@ -658,6 +676,7 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             "gumbel_hard": self.gumbel_hard,
             "entropy_coefficient": self.entropy_coefficient,
             "selection_mode": self.selection_mode,
+            "exponent_clip_mode": self.exponent_clip_mode,
         })
         return config
 

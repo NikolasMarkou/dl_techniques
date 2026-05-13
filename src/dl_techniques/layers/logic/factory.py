@@ -94,6 +94,12 @@ LOGIC_REGISTRY: Dict[str, Dict[str, Any]] = {
             "gumbel_hard": False,
             "entropy_coefficient": 0.0,
             "selection_mode": "global",
+            "exponent_clip_mode": "hard",
+        },
+        "enum_params": {
+            "safe_divide_mode": {"hard_clamp", "smooth"},
+            "selection_mode": {"global", "per_channel"},
+            "exponent_clip_mode": {"hard", "smooth"},
         },
         "use_case": (
             "Learnable elementwise arithmetic between two same-shape tensors "
@@ -122,6 +128,9 @@ LOGIC_REGISTRY: Dict[str, Dict[str, Any]] = {
             "selection_mode": "global",
             "yager_p": 2.0,
         },
+        "enum_params": {
+            "selection_mode": {"global", "per_channel"},
+        },
         "use_case": (
             "Soft logical combination of two same-shape tensors interpreted "
             "as fuzzy truth values."
@@ -149,6 +158,13 @@ LOGIC_REGISTRY: Dict[str, Dict[str, Any]] = {
             "channel_mix": None,
             "selection_mode": "global",
             "diversity_coefficient": 0.0,
+            "inner_logic_kwargs": None,
+            "inner_arithmetic_kwargs": None,
+        },
+        "enum_params": {
+            "circuit_routing": {"output_only", "classic"},
+            "selection_mode": {"global", "per_channel"},
+            "channel_mix": {None, "dense"},
         },
         "use_case": (
             "Drop-in mid-network expert ensemble that preserves tensor shape "
@@ -177,6 +193,15 @@ LOGIC_REGISTRY: Dict[str, Dict[str, Any]] = {
             "gate_entropy_coefficient": 0.0,
             "channel_mix": None,
             "selection_mode": "global",
+            "diversity_coefficient": 0.0,
+            "inner_logic_kwargs": None,
+            "inner_arithmetic_kwargs": None,
+        },
+        "enum_params": {
+            "circuit_routing": {"output_only", "classic"},
+            "apply_sigmoid_per_depth": {"first_only", "all", "none"},
+            "selection_mode": {"global", "per_channel"},
+            "channel_mix": {None, "dense"},
         },
         "use_case": (
             "Deep compositional reasoning block — shape-preserving, "
@@ -251,6 +276,17 @@ def validate_logic_config(layer_type: str, **kwargs: Any) -> None:
             value = kwargs[name]
             if value <= 0:
                 raise ValueError(f"{name} must be positive, got {value}")
+
+    # G3 (plan_2026-05-13_e33114da): enum pre-validation with helpful error.
+    # Catches typos before construction surface them through generic wrapped
+    # "Failed to create logic layer" message.
+    enum_params: Dict[str, set] = info.get("enum_params", {})
+    for name, allowed in enum_params.items():
+        if name in kwargs and kwargs[name] not in allowed:
+            raise ValueError(
+                f"{name}={kwargs[name]!r} is not a valid value. "
+                f"Allowed: {sorted(a if a is not None else 'None' for a in allowed)}"
+            )
 
 
 def create_logic_layer(

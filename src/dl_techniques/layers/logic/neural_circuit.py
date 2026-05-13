@@ -138,6 +138,8 @@ class CircuitDepthLayer(keras.layers.Layer):
             force_logic_input_clip: bool = False,
             selection_mode: str = "global",
             diversity_coefficient: float = 0.0,
+            inner_logic_kwargs: Optional[Dict[str, Any]] = None,
+            inner_arithmetic_kwargs: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -199,16 +201,45 @@ class CircuitDepthLayer(keras.layers.Layer):
         # M5: diversity regularizer coefficient.
         self.diversity_coefficient = float(diversity_coefficient)
 
+        # G1 (plan_2026-05-13_e33114da): inner_*_kwargs forwards arbitrary
+        # configuration into the inner LearnableLogicOperator and
+        # LearnableArithmeticOperator instances. Wrapper-controlled keys
+        # (listed in _WRAPPER_OWNED_*) cannot be overridden — the wrapper
+        # always wins. Collisions are warned, not errored.
+        self.inner_logic_kwargs = dict(inner_logic_kwargs) if inner_logic_kwargs else {}
+        self.inner_arithmetic_kwargs = dict(inner_arithmetic_kwargs) if inner_arithmetic_kwargs else {}
+
         # DECISION plan_2026-05-13_a2b0f17b/D-002 — children created in
-        # __init__, NOT manually pre-built in build(). Auto-build via
-        # __call__ is the Keras 3 idiomatic pattern; manual pre-build was
-        # cargo-culted and risks double-build.
-        # CircuitDepthLayer intentionally feeds inner logic ops a single
-        # tensor X (each expert sees the full input; only output fusion is
-        # gated). Opt these inner instances in to the legacy x2=x1 rebinding
-        # explicitly — M8 (plan_2026-05-13_3a2f1d23) flipped the public
-        # default to False but inside the circuit the contract has always
-        # been unary-input.
+        # __init__. Inner logic ops opt into legacy unary x2=x1 rebinding
+        # because CircuitDepthLayer feeds them a single tensor.
+        # DECISION plan_2026-05-13_e33114da/D-006 — wrapper-owned keys are
+        # popped from user dicts with a warning if collision detected.
+        logic_owned = {
+            "operation_types", "apply_sigmoid", "allow_unary_degenerate",
+            "force_clip_when_no_sigmoid", "selection_mode", "name",
+        }
+        arith_owned = {
+            "operation_types", "selection_mode", "name",
+        }
+        logic_extra = {k: v for k, v in self.inner_logic_kwargs.items() if k not in logic_owned}
+        arith_extra = {k: v for k, v in self.inner_arithmetic_kwargs.items() if k not in arith_owned}
+        collided_logic = set(self.inner_logic_kwargs) & logic_owned
+        collided_arith = set(self.inner_arithmetic_kwargs) & arith_owned
+        if collided_logic:
+            warnings.warn(
+                f"CircuitDepthLayer: inner_logic_kwargs keys {sorted(collided_logic)} "
+                f"are wrapper-controlled and will be ignored.",
+                UserWarning,
+                stacklevel=3,
+            )
+        if collided_arith:
+            warnings.warn(
+                f"CircuitDepthLayer: inner_arithmetic_kwargs keys {sorted(collided_arith)} "
+                f"are wrapper-controlled and will be ignored.",
+                UserWarning,
+                stacklevel=3,
+            )
+
         self.logic_operators = [
             LearnableLogicOperator(
                 operation_types=self.logic_op_types,
@@ -217,6 +248,7 @@ class CircuitDepthLayer(keras.layers.Layer):
                 force_clip_when_no_sigmoid=self.force_logic_input_clip,
                 selection_mode=self.selection_mode,
                 name=f"logic_op_{i}",
+                **logic_extra,
             )
             for i in range(self.num_logic_ops)
         ]
@@ -225,6 +257,7 @@ class CircuitDepthLayer(keras.layers.Layer):
                 operation_types=self.arithmetic_op_types,
                 selection_mode=self.selection_mode,
                 name=f"arithmetic_op_{i}",
+                **arith_extra,
             )
             for i in range(self.num_arithmetic_ops)
         ]
@@ -443,6 +476,8 @@ class CircuitDepthLayer(keras.layers.Layer):
             "force_logic_input_clip": self.force_logic_input_clip,
             "selection_mode": self.selection_mode,
             "diversity_coefficient": self.diversity_coefficient,
+            "inner_logic_kwargs": self.inner_logic_kwargs or None,
+            "inner_arithmetic_kwargs": self.inner_arithmetic_kwargs or None,
         })
         return config
 
@@ -485,6 +520,9 @@ class LearnableNeuralCircuit(keras.layers.Layer):
             load_balance_coefficient: Optional[float] = None,
             channel_mix: Optional[str] = None,
             selection_mode: str = "global",
+            diversity_coefficient: float = 0.0,
+            inner_logic_kwargs: Optional[Dict[str, Any]] = None,
+            inner_arithmetic_kwargs: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -514,6 +552,8 @@ class LearnableNeuralCircuit(keras.layers.Layer):
                 f"apply_sigmoid_per_depth must be 'first_only'|'all'|'none', "
                 f"got {apply_sigmoid_per_depth!r}."
             )
+        if diversity_coefficient < 0:
+            raise ValueError("diversity_coefficient must be non-negative.")
 
         self.circuit_depth = circuit_depth
         self.num_logic_ops_per_depth = num_logic_ops_per_depth
@@ -530,6 +570,14 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         self.load_balance_coefficient = resolved_coef  # deprecated alias
         self.channel_mix = channel_mix
         self.selection_mode = selection_mode
+        # B5 fix: diversity_coefficient now reachable through the wrapper.
+        self.diversity_coefficient = float(diversity_coefficient)
+        # G1 fix: inner_*_kwargs forwarded verbatim to inner ops via the
+        # child CircuitDepthLayer. Wrapper-controlled keys (operation_types,
+        # apply_sigmoid, selection_mode, force_clip_when_no_sigmoid, name)
+        # cannot be overridden — those are set by the wrapper itself.
+        self.inner_logic_kwargs = dict(inner_logic_kwargs) if inner_logic_kwargs else {}
+        self.inner_arithmetic_kwargs = dict(inner_arithmetic_kwargs) if inner_arithmetic_kwargs else {}
 
         # C4 (plan_2026-05-13_3a2f1d23): when first_only mode is on and
         # depths >= 1 inner logic ops have apply_sigmoid=False, any source of
@@ -577,6 +625,9 @@ class LearnableNeuralCircuit(keras.layers.Layer):
                     channel_mix=self.channel_mix,
                     force_logic_input_clip=risky_stack and depth >= 1,
                     selection_mode=self.selection_mode,
+                    diversity_coefficient=self.diversity_coefficient,
+                    inner_logic_kwargs=self.inner_logic_kwargs or None,
+                    inner_arithmetic_kwargs=self.inner_arithmetic_kwargs or None,
                     name=f"circuit_depth_{depth}",
                 )
             )
@@ -683,6 +734,9 @@ class LearnableNeuralCircuit(keras.layers.Layer):
             "gate_entropy_coefficient": self.gate_entropy_coefficient,
             "channel_mix": self.channel_mix,
             "selection_mode": self.selection_mode,
+            "diversity_coefficient": self.diversity_coefficient,
+            "inner_logic_kwargs": self.inner_logic_kwargs or None,
+            "inner_arithmetic_kwargs": self.inner_arithmetic_kwargs or None,
         })
         return config
 
