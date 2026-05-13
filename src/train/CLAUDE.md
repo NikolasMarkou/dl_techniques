@@ -22,8 +22,13 @@ src/train/
 ├── nbeats/              # N-BEATS time-series
 ├── bert/                # BERT pretrain/finetune
 ├── ...
+├── EMBEDDINGS_BENCHMARKS.md  # MTEB targets across the size spectrum (tiny→XL→API)
 └── CLAUDE.md
 ```
+
+## Reference Documents
+
+- **`EMBEDDINGS_BENCHMARKS.md`** — Snapshot of the MTEB leaderboard and related embedding benchmarks across 33 models grouped by parameter count (Tiny ≤50M → XL ≥7B → Proprietary API). Use this **before** kicking off an embedding-style training run to set realistic targets at your model's scale. Numbers are dated; re-pull when the leaderboard moves. Particularly relevant for the CliffordNet LM-U-Net + MRL line (`src/train/cliffordnet/train_cliffordnet_nlp_unet.py`), which exposes a Matryoshka-truncatable L2-normalized embedding head.
 
 ## File Naming
 
