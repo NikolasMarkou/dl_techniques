@@ -832,6 +832,34 @@ class TestPlanA2b0f17bCircuit:
         )
 
 
+class TestPlan3a2f1d23ToSymbolicWalker:
+    """M1: LearnableNeuralCircuit.to_symbolic walker."""
+
+    def test_to_symbolic_returns_multiline(self):
+        nc = LearnableNeuralCircuit(circuit_depth=2)
+        # Force build.
+        x = ops.convert_to_tensor(np.random.randn(2, 8).astype(np.float32))
+        _ = nc(x)
+        s = nc.to_symbolic(top_k=1)
+        assert isinstance(s, str)
+        # Two depths -> at least 2 "depth N:" lines.
+        assert s.count("depth 0:") == 1
+        assert s.count("depth 1:") == 1
+        assert "combination:" in s
+
+    def test_to_symbolic_raises_before_build(self):
+        nc = LearnableNeuralCircuit(circuit_depth=2)
+        with pytest.raises(RuntimeError, match="built"):
+            nc.to_symbolic()
+
+    def test_to_symbolic_deterministic(self):
+        nc = LearnableNeuralCircuit(circuit_depth=2)
+        x = ops.convert_to_tensor(np.random.randn(2, 8).astype(np.float32))
+        _ = nc(x)
+        outputs = {nc.to_symbolic() for _ in range(5)}
+        assert len(outputs) == 1
+
+
 class TestPlan3a2f1d23PerChannelCircuit:
     """C3: per-channel selection mode propagates through CircuitDepthLayer
     and LearnableNeuralCircuit."""

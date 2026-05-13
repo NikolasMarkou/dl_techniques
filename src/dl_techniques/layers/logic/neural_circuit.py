@@ -573,6 +573,43 @@ class LearnableNeuralCircuit(keras.layers.Layer):
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         return input_shape
 
+    def to_symbolic(self, top_k: int = 1) -> str:
+        """Walk all depths and return a multi-line symbolic summary.
+
+        M1 (plan_2026-05-13_3a2f1d23): for each depth print the dominant
+        operator per inner expert plus a combination-weight ranking. Useful
+        for post-training interpretation.
+        """
+        if not self.built:
+            raise RuntimeError(
+                "LearnableNeuralCircuit.to_symbolic() requires the layer to "
+                "be built. Call the layer on a sample input first."
+            )
+        lines: List[str] = []
+        for depth, cl in enumerate(self.circuit_layers):
+            lines.append(f"depth {depth}:")
+            for i, op in enumerate(cl.logic_operators):
+                lines.append(f"  logic_op_{i}: {op.to_symbolic(top_k=top_k)}")
+            for j, op in enumerate(cl.arithmetic_operators):
+                lines.append(f"  arithmetic_op_{j}: {op.to_symbolic(top_k=top_k)}")
+            # Combination weights ranking. Per-channel mode collapses to mean.
+            cw = ops.convert_to_numpy(
+                ops.softmax(cl.combination_weights, axis=-1)
+            )
+            if cw.ndim > 1:
+                cw = cw.mean(axis=0)
+            total = cl.num_logic_ops + cl.num_arithmetic_ops
+            names = (
+                [f"logic_op_{i}" for i in range(cl.num_logic_ops)]
+                + [f"arithmetic_op_{j}" for j in range(cl.num_arithmetic_ops)]
+            )
+            ranked = sorted(zip(names, cw.tolist()), key=lambda kv: -kv[1])[:top_k]
+            lines.append(
+                "  combination: "
+                + ", ".join(f"{n}({p:.3f})" for n, p in ranked)
+            )
+        return "\n".join(lines)
+
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({
