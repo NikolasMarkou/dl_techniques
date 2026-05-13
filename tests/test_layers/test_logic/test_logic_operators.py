@@ -719,3 +719,71 @@ class TestPlan3a2f1d23LogicC1:
         outputs = {op.to_symbolic(top_k=1) for _ in range(10)}
         assert len(outputs) == 1, f"to_symbolic() non-deterministic: {outputs}"
         assert next(iter(outputs)).startswith("xor")
+
+
+class TestPlan3a2f1d23LogicPerChannelC3:
+    """C3: per-channel selection mode on LearnableLogicOperator."""
+
+    def test_weight_shape_per_channel(self):
+        op = LearnableLogicOperator(
+            operation_types=['and', 'or', 'xor'],
+            selection_mode='per_channel',
+            allow_unary_degenerate=True,
+        )
+        op.build((None, 8))
+        assert op.operation_weights.shape == (8, 3)
+
+    def test_forward_per_channel_distinct_channel_selection(self):
+        """Channel 0 → 'and' (p*q), Channel 1 → 'or' (p+q-pq). With known
+        binary inputs, output must match the per-channel ops."""
+        op = LearnableLogicOperator(
+            operation_types=['and', 'or'],
+            apply_sigmoid=False,
+            use_temperature=False,
+        )
+        op.selection_mode = None  # placeholder
+        op2 = LearnableLogicOperator(
+            operation_types=['and', 'or'],
+            apply_sigmoid=False,
+            use_temperature=False,
+            selection_mode='per_channel',
+        )
+        op2.build([(None, 2), (None, 2)])
+        op2.operation_weights.assign(
+            np.array([[10.0, 0.0], [0.0, 10.0]], dtype=np.float32)
+        )
+        x1 = ops.convert_to_tensor(np.array([[1.0, 1.0]], dtype=np.float32))
+        x2 = ops.convert_to_tensor(np.array([[1.0, 0.0]], dtype=np.float32))
+        y = ops.convert_to_numpy(op2([x1, x2]))
+        # Channel 0 (and): 1*1=1. Channel 1 (or): 1+0-0=1.
+        np.testing.assert_allclose(y[0, 0], 1.0, atol=1e-3)
+        np.testing.assert_allclose(y[0, 1], 1.0, atol=1e-3)
+        # Try inputs that distinguish: x1=[1, 1], x2=[0, 0]
+        x1b = ops.convert_to_tensor(np.array([[1.0, 1.0]], dtype=np.float32))
+        x2b = ops.convert_to_tensor(np.array([[0.0, 0.0]], dtype=np.float32))
+        yb = ops.convert_to_numpy(op2([x1b, x2b]))
+        # Channel 0 (and): 1*0=0. Channel 1 (or): 1+0-0=1.
+        np.testing.assert_allclose(yb[0, 0], 0.0, atol=1e-3)
+        np.testing.assert_allclose(yb[0, 1], 1.0, atol=1e-3)
+
+    def test_per_channel_round_trip(self):
+        op = LearnableLogicOperator(
+            operation_types=['and', 'or'],
+            selection_mode='per_channel',
+            allow_unary_degenerate=True,
+        )
+        op.build((None, 4))
+        cfg = op.get_config()
+        assert cfg['selection_mode'] == 'per_channel'
+        op2 = LearnableLogicOperator.from_config(cfg)
+        assert op2.selection_mode == 'per_channel'
+
+    def test_per_channel_rank4(self):
+        op = LearnableLogicOperator(
+            operation_types=['and', 'or'],
+            selection_mode='per_channel',
+            allow_unary_degenerate=True,
+        )
+        x = ops.convert_to_tensor(np.random.randn(2, 4, 4, 6).astype(np.float32))
+        y = op(x)
+        assert y.shape == (2, 4, 4, 6)

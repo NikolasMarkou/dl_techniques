@@ -174,9 +174,16 @@ class LearnableLogicOperator(keras.layers.Layer):
             gumbel_hard: bool = False,
             entropy_coefficient: float = 0.0,
             allow_unary_degenerate: bool = False,
+            selection_mode: str = "global",
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
+
+        if selection_mode not in ("global", "per_channel"):
+            raise ValueError(
+                f"selection_mode must be 'global' or 'per_channel', got "
+                f"{selection_mode!r}."
+            )
 
         # Validate and set operation types
         if operation_types is None:
@@ -216,7 +223,9 @@ class LearnableLogicOperator(keras.layers.Layer):
         self.gumbel_hard = gumbel_hard
         self.entropy_coefficient = entropy_coefficient
         self.allow_unary_degenerate = allow_unary_degenerate
+        self.selection_mode = selection_mode
         self.num_operations = len(operation_types)
+        self._channels = None  # Set in build() for per_channel mode.
         self.operation_initializer = keras.initializers.get(operation_initializer)
 
         # Set default initializer if not provided or if 'constant' is specified
@@ -263,10 +272,27 @@ class LearnableLogicOperator(keras.layers.Layer):
                     f"Expected 1 or 2 inputs, got {len(input_shape)}"
                 )
 
+        # C3 (plan_2026-05-13_3a2f1d23): per-channel mode shapes the weight
+        # tensor as (channels, num_operations).
+        if self.selection_mode == "per_channel":
+            if is_list_of_shapes:
+                shape_for_channels = tuple(input_shape[0])
+            else:
+                shape_for_channels = tuple(input_shape)
+            if shape_for_channels[-1] is None:
+                raise ValueError(
+                    "selection_mode='per_channel' requires a concrete "
+                    f"last-axis dimension; got {shape_for_channels}."
+                )
+            self._channels = int(shape_for_channels[-1])
+            weight_shape = (self._channels, self.num_operations)
+        else:
+            weight_shape = (self.num_operations,)
+
         # Create learnable operation selection weights
         self.operation_weights = self.add_weight(
             name="operation_weights",
-            shape=(self.num_operations,),
+            shape=weight_shape,
             initializer=self.operation_initializer,
             trainable=True,
         )
@@ -421,9 +447,9 @@ class LearnableLogicOperator(keras.layers.Layer):
                 logits = ops.divide(noisy, temp)
             else:
                 logits = noisy
-            soft = ops.softmax(logits)
+            soft = ops.softmax(logits, axis=-1)
             if self.gumbel_hard:
-                idx = ops.argmax(soft)
+                idx = ops.argmax(soft, axis=-1)
                 hard = ops.cast(
                     ops.one_hot(idx, num_classes=self.num_operations), soft.dtype
                 )
@@ -435,7 +461,7 @@ class LearnableLogicOperator(keras.layers.Layer):
             logits = ops.divide(weights, temp)
         else:
             logits = weights
-        return ops.softmax(logits)
+        return ops.softmax(logits, axis=-1)
 
     def _maybe_add_entropy_loss(self, probs: keras.KerasTensor) -> None:
         if self.entropy_coefficient > 0:
@@ -452,9 +478,13 @@ class LearnableLogicOperator(keras.layers.Layer):
         """
         if self.operation_weights is None:
             raise RuntimeError("Layer has not been built yet.")
-        probs = ops.convert_to_numpy(
+        probs_arr = ops.convert_to_numpy(
             self._operation_probs(deterministic=deterministic)
-        ).tolist()
+        )
+        if self.selection_mode == "per_channel":
+            probs = probs_arr.mean(axis=0).tolist()
+        else:
+            probs = probs_arr.tolist()
         ranked = sorted(
             zip(self.operation_types, probs), key=lambda kv: -kv[1]
         )[:top_k]
@@ -555,10 +585,17 @@ class LearnableLogicOperator(keras.layers.Layer):
             operations.append(result)
 
         # Vectorized weighted combination.
-        stacked = ops.stack(operations, axis=0)
-        weight_shape = (self.num_operations,) + (1,) * (len(stacked.shape) - 1)
-        weights = ops.reshape(operation_probs, weight_shape)
-        output = ops.sum(ops.multiply(weights, stacked), axis=0)
+        if self.selection_mode == "per_channel":
+            stacked = ops.stack(operations, axis=-1)  # (..., C, N)
+            rank = len(stacked.shape)
+            probs_bshape = (1,) * (rank - 2) + (self._channels, self.num_operations)
+            weights = ops.reshape(operation_probs, probs_bshape)
+            output = ops.sum(ops.multiply(weights, stacked), axis=-1)
+        else:
+            stacked = ops.stack(operations, axis=0)
+            weight_shape = (self.num_operations,) + (1,) * (len(stacked.shape) - 1)
+            weights = ops.reshape(operation_probs, weight_shape)
+            output = ops.sum(ops.multiply(weights, stacked), axis=0)
         return output
 
     def compute_output_shape(
@@ -603,5 +640,6 @@ class LearnableLogicOperator(keras.layers.Layer):
             "gumbel_hard": self.gumbel_hard,
             "entropy_coefficient": self.entropy_coefficient,
             "allow_unary_degenerate": self.allow_unary_degenerate,
+            "selection_mode": self.selection_mode,
         })
         return config
