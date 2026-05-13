@@ -156,6 +156,9 @@ class LearnableLogicOperator(keras.layers.Layer):
         'lukasiewicz_and', 'lukasiewicz_or',
         'godel_and', 'godel_or',
         'implies',
+        # M4 (plan_2026-05-13_3a2f1d23):
+        'hamacher_and', 'hamacher_or',
+        'yager_and', 'yager_or',
     })
     UNARY_OPS = frozenset({'not'})
     BINARY_OPS = VALID_OPS - UNARY_OPS
@@ -175,6 +178,7 @@ class LearnableLogicOperator(keras.layers.Layer):
             entropy_coefficient: float = 0.0,
             allow_unary_degenerate: bool = False,
             selection_mode: str = "global",
+            yager_p: float = 2.0,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -184,6 +188,9 @@ class LearnableLogicOperator(keras.layers.Layer):
                 f"selection_mode must be 'global' or 'per_channel', got "
                 f"{selection_mode!r}."
             )
+        # M4: Yager p > 0 controls the t-norm sharpness.
+        if yager_p <= 0:
+            raise ValueError(f"yager_p must be > 0, got {yager_p}.")
 
         # Validate and set operation types
         if operation_types is None:
@@ -224,6 +231,7 @@ class LearnableLogicOperator(keras.layers.Layer):
         self.entropy_coefficient = entropy_coefficient
         self.allow_unary_degenerate = allow_unary_degenerate
         self.selection_mode = selection_mode
+        self.yager_p = float(yager_p)
         self.num_operations = len(operation_types)
         self._channels = None  # Set in build() for per_channel mode.
         self.operation_initializer = keras.initializers.get(operation_initializer)
@@ -413,6 +421,39 @@ class LearnableLogicOperator(keras.layers.Layer):
         """Kleene-Dienes implication: max(1 - p, q)."""
         return ops.maximum(ops.subtract(1.0, x1), x2)
 
+    # --- Hamacher / Yager t-norms (M4) -----------------------------------
+    def _hamacher_and(self, x1, x2):
+        """Hamacher product t-norm: p*q / (p + q - p*q). Robust at (0, 0)."""
+        pq = ops.multiply(x1, x2)
+        denom = ops.subtract(ops.add(x1, x2), pq)
+        # Both inputs zero -> 0/0; use eps in denom (eps small, value -> 0).
+        denom_safe = ops.add(denom, 1e-9)
+        return ops.divide(pq, denom_safe)
+
+    def _hamacher_or(self, x1, x2):
+        """Hamacher sum t-conorm: (p + q - 2 p q) / (1 - p q)."""
+        pq = ops.multiply(x1, x2)
+        num = ops.subtract(ops.add(x1, x2), ops.multiply(2.0, pq))
+        denom = ops.subtract(1.0, pq)
+        denom_safe = ops.maximum(denom, 1e-9)
+        return ops.divide(num, denom_safe)
+
+    def _yager_and(self, x1, x2):
+        """Yager t-norm: 1 - min(1, ((1-p)^w + (1-q)^w)^(1/w))."""
+        w = self.yager_p
+        a = ops.power(ops.maximum(ops.subtract(1.0, x1), 0.0), w)
+        b = ops.power(ops.maximum(ops.subtract(1.0, x2), 0.0), w)
+        s = ops.power(ops.add(a, b), 1.0 / w)
+        return ops.subtract(1.0, ops.minimum(s, 1.0))
+
+    def _yager_or(self, x1, x2):
+        """Yager t-conorm: min(1, (p^w + q^w)^(1/w))."""
+        w = self.yager_p
+        a = ops.power(ops.maximum(x1, 0.0), w)
+        b = ops.power(ops.maximum(x2, 0.0), w)
+        s = ops.power(ops.add(a, b), 1.0 / w)
+        return ops.minimum(s, 1.0)
+
     # --- DARTS-style helpers ---------------------------------------------
     def _resolve_temperature(self) -> keras.KerasTensor:
         if self.softplus_temperature:
@@ -579,6 +620,14 @@ class LearnableLogicOperator(keras.layers.Layer):
                 result = self._godel_or(x1, x2)
             elif op_type == 'implies':
                 result = self._implies(x1, x2)
+            elif op_type == 'hamacher_and':
+                result = self._hamacher_and(x1, x2)
+            elif op_type == 'hamacher_or':
+                result = self._hamacher_or(x1, x2)
+            elif op_type == 'yager_and':
+                result = self._yager_and(x1, x2)
+            elif op_type == 'yager_or':
+                result = self._yager_or(x1, x2)
             else:
                 logger.warning(f"Unknown operation type: {op_type}, using identity")
                 result = x1
@@ -641,5 +690,6 @@ class LearnableLogicOperator(keras.layers.Layer):
             "entropy_coefficient": self.entropy_coefficient,
             "allow_unary_degenerate": self.allow_unary_degenerate,
             "selection_mode": self.selection_mode,
+            "yager_p": self.yager_p,
         })
         return config

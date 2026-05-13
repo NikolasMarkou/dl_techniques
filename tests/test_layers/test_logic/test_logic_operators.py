@@ -721,6 +721,72 @@ class TestPlan3a2f1d23LogicC1:
         assert next(iter(outputs)).startswith("xor")
 
 
+class TestPlan3a2f1d23TnormsM4:
+    """M4: Hamacher + Yager t-norms truth-table corners."""
+
+    def _at_corner(self, op, p, q):
+        x1 = ops.convert_to_tensor(np.array([[p]], dtype=np.float32))
+        x2 = ops.convert_to_tensor(np.array([[q]], dtype=np.float32))
+        return float(ops.convert_to_numpy(op([x1, x2]))[0, 0])
+
+    def test_hamacher_and_corners(self):
+        op = LearnableLogicOperator(
+            operation_types=['hamacher_and'],
+            apply_sigmoid=False,
+            use_temperature=False,
+        )
+        op.build([(None, 1), (None, 1)])
+        assert abs(self._at_corner(op, 1.0, 1.0) - 1.0) < 1e-4
+        assert self._at_corner(op, 1.0, 0.0) < 1e-4
+        assert self._at_corner(op, 0.0, 0.0) < 1e-4
+
+    def test_hamacher_or_corners(self):
+        op = LearnableLogicOperator(
+            operation_types=['hamacher_or'],
+            apply_sigmoid=False,
+            use_temperature=False,
+        )
+        op.build([(None, 1), (None, 1)])
+        assert abs(self._at_corner(op, 1.0, 0.0) - 1.0) < 1e-4
+        assert abs(self._at_corner(op, 0.0, 1.0) - 1.0) < 1e-4
+        assert self._at_corner(op, 0.0, 0.0) < 1e-4
+
+    def test_yager_and_corners(self):
+        op = LearnableLogicOperator(
+            operation_types=['yager_and'],
+            apply_sigmoid=False,
+            use_temperature=False,
+            yager_p=2.0,
+        )
+        op.build([(None, 1), (None, 1)])
+        assert abs(self._at_corner(op, 1.0, 1.0) - 1.0) < 1e-4
+        assert self._at_corner(op, 1.0, 0.0) < 1e-4
+
+    def test_yager_or_corners(self):
+        op = LearnableLogicOperator(
+            operation_types=['yager_or'],
+            apply_sigmoid=False,
+            use_temperature=False,
+            yager_p=2.0,
+        )
+        op.build([(None, 1), (None, 1)])
+        assert abs(self._at_corner(op, 1.0, 1.0) - 1.0) < 1e-4
+        assert abs(self._at_corner(op, 1.0, 0.0) - 1.0) < 1e-4
+        assert self._at_corner(op, 0.0, 0.0) < 1e-4
+
+    def test_yager_p_round_trip(self):
+        op = LearnableLogicOperator(operation_types=['yager_and'], yager_p=3.5)
+        op.build([(None, 4), (None, 4)])
+        cfg = op.get_config()
+        assert cfg['yager_p'] == 3.5
+        op2 = LearnableLogicOperator.from_config(cfg)
+        assert op2.yager_p == 3.5
+
+    def test_yager_p_invalid_raises(self):
+        with pytest.raises(ValueError, match="yager_p"):
+            LearnableLogicOperator(yager_p=0.0)
+
+
 class TestPlan3a2f1d23LogicPerChannelC3:
     """C3: per-channel selection mode on LearnableLogicOperator."""
 

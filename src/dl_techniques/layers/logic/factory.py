@@ -120,6 +120,7 @@ LOGIC_REGISTRY: Dict[str, Dict[str, Any]] = {
             "entropy_coefficient": 0.0,
             "allow_unary_degenerate": False,
             "selection_mode": "global",
+            "yager_p": 2.0,
         },
         "use_case": (
             "Soft logical combination of two same-shape tensors interpreted "
