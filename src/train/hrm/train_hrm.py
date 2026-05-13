@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Dict, Tuple, Optional, Any
 
 import keras
+import tensorflow as tf
 from keras import optimizers
 
 from dl_techniques.models.hierarchical_reasoning_model.model import (
@@ -115,12 +116,11 @@ class HRMTrainer:
         }
         return inputs, targets
 
-    @keras.utils.traceback_utils.filter_traceback
     def train_step(self, batch: Dict[str, Any]) -> Dict[str, float]:
         """Single training step with ACT logic using GradientTape."""
         inputs, targets = self._prepare_batch(batch)
 
-        with keras.utils.GradientTape() as tape:
+        with tf.GradientTape() as tape:
             carry = self.model.initial_carry(inputs)
             total_loss = 0.0
             step_count = 0
@@ -160,7 +160,6 @@ class HRMTrainer:
         self.current_step += 1
         return step_metrics
 
-    @keras.utils.traceback_utils.filter_traceback
     def evaluate_step(self, batch: Dict[str, Any]) -> Dict[str, float]:
         """Single evaluation step."""
         inputs, targets = self._prepare_batch(batch)
