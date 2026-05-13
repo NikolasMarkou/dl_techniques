@@ -1,7 +1,19 @@
 """
 Self-Organizing Map (SOM) 2D layer implementation.
 
-This file should be saved as: dl_techniques/layers/som_2d_layer.py
+This module hosts the `SOM2dLayer` thin subclass of the N-D `SOMLayer`. The
+recommended construction entry point is the factory function
+``dl_techniques.layers.memory.create_som_2d(map_size, input_dim, **kwargs)``
+which delegates here — but the class form remains supported (and registered
+for Keras serialization) so that:
+
+* `isinstance(x, SOM2dLayer)` checks in downstream code continue to work,
+* the 2D-specific `get_weights_as_grid()` alias method is preserved,
+* the `map_size`-shaped (rather than `grid_shape`-shaped) get_config payload
+  preserves backward-compatibility for `.keras` files saved before factory
+  introduction.
+
+See plan_2026-05-13_8c1dc6fd decisions.md D-002 for the additive-factory rationale.
 
 A Self-Organizing Map is an unsupervised neural network that performs dimensionality
 reduction through competitive learning and topological organization. The layer maps
@@ -263,25 +275,13 @@ class SOM2dLayer(SOMLayer):
         :rtype: Dict[str, Any]
         """
         # Get the base configuration from parent SOMLayer
+        # (initializer/regularizer already canonically serialized by parent — R7).
         config = super().get_config()
 
         # Replace 'grid_shape' with 'map_size' for 2D layer compatibility
         if 'grid_shape' in config:
             config['map_size'] = self.map_size
             del config['grid_shape']
-
-        # Ensure proper serialization of initializer and regularizer
-        # The parent class already handles this robustly, but we maintain
-        # explicit serialization for clarity and debugging
-        if hasattr(self, '_weights_initializer_config'):
-            config['weights_initializer'] = keras.initializers.serialize(
-                keras.initializers.get(self._weights_initializer_config)
-            )
-
-        if hasattr(self, '_regularizer_config') and self._regularizer_config is not None:
-            config['regularizer'] = keras.regularizers.serialize(
-                keras.regularizers.get(self._regularizer_config)
-            )
 
         return config
 
