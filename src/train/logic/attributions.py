@@ -79,6 +79,12 @@ def _predict_class_prob(model: keras.Model, x: np.ndarray) -> Tuple[int, float]:
     return (1 if p >= 0.5 else 0), p
 
 
+# DECISION plan_2026-05-13_798d3a60/D-002
+# Integrated gradients replaces the originally-planned gradient×input rule.
+# gradient×input on a trained parity_k6 model gave max/min per-bit ratio
+# of 2.85x (>2x Pre-Mortem Scenario 4 threshold) because random Dense-
+# embedding weights don't marginalize at single samples. Integrated
+# gradients is symmetry-preserving and satisfies the SC6 oracle.
 def circuit_attributions(
     model: keras.Model,
     x_single: np.ndarray,
