@@ -77,6 +77,8 @@ from .logic_ffn import LogicFFN
 from .gated_mlp import GatedMLP
 from .orthoglu_ffn import OrthoGLUFFN
 from .power_mlp_layer import PowerMLPLayer
+from .kan_linear import KANLinear
+from .tversky_projection import TverskyProjectionLayer
 
 # ---------------------------------------------------------------------
 # Type definition for FFN types
@@ -88,13 +90,15 @@ FFNType = Literal[
     'gated_mlp',
     'geglu',
     'glu',
+    'kan',
     'logic',
     'mlp',
     'orthoglu',
     'power_mlp',
     'residual',
     'swiglu',
-    'swin_mlp'
+    'swin_mlp',
+    'tversky'
 ]
 
 # ---------------------------------------------------------------------
@@ -178,6 +182,25 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             'bias_regularizer': None
         },
         'use_case': 'Gated processing for improved gradient flow'
+    },
+    'kan': {
+        'class': KANLinear,
+        'description': (
+            'Kolmogorov-Arnold Network linear layer with learnable per-connection '
+            'univariate activations parameterized by B-splines. Supports N-D inputs via einsum.'
+        ),
+        'required_params': ['features'],
+        'optional_params': {
+            'grid_size': 5,
+            'spline_order': 3,
+            'grid_range': (-2.0, 2.0),
+            'activation': 'swish',
+            'base_trainable': True,
+            'spline_trainable': True,
+            'kernel_initializer': 'glorot_uniform',
+            'epsilon': 1e-7
+        },
+        'use_case': 'Learnable per-connection univariate activations via B-splines (Kolmogorov-Arnold)'
     },
     'logic': {
         'class': LogicFFN,
@@ -265,6 +288,23 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         },
         'use_case': 'Modern transformer architectures (LLaMa, Qwen, etc.)'
     },
+    'tversky': {
+        'class': TverskyProjectionLayer,
+        'description': (
+            'Asymmetric Tversky-similarity projection layer. NOTE: operates on rank-2 inputs '
+            '(batch, input_dim) only; output shape is (batch, units). Not suitable for rank-3 '
+            '(batch, time, dim) consumers.'
+        ),
+        'required_params': ['units', 'num_features'],
+        'optional_params': {
+            'intersection_reduction': 'product',
+            'difference_reduction': 'subtractmatch',
+            'prototype_initializer': 'glorot_uniform',
+            'feature_initializer': 'glorot_uniform',
+            'contrast_initializer': 'ones'
+        },
+        'use_case': 'Asymmetric, psychologically-grounded similarity-based projection alternative to Dense (rank-2 only)'
+    },
     'swin_mlp': {
         'class': SwinMLP,
         'description': 'Swin Transformer MLP with configurable activation and regularization',
@@ -338,7 +378,7 @@ def validate_ffn_config(ffn_type: str, **kwargs: Any) -> None:
         if not (0.0 <= drop_rate <= 1.0):
             raise ValueError(f"drop_rate must be between 0.0 and 1.0, got {drop_rate}")
 
-    positive_dims = ['hidden_dim', 'output_dim', 'count_dim', 'logic_dim', 'filters', 'units']
+    positive_dims = ['hidden_dim', 'output_dim', 'count_dim', 'logic_dim', 'filters', 'units', 'features', 'num_features']
     for dim_param in positive_dims:
         if dim_param in kwargs and kwargs[dim_param] is not None:
             if kwargs[dim_param] <= 0:
@@ -367,6 +407,30 @@ def validate_ffn_config(ffn_type: str, **kwargs: Any) -> None:
             k = kwargs['k']
             if not isinstance(k, int) or k <= 0:
                 raise ValueError(f"k must be a positive integer, got {k}")
+    elif ffn_type == 'kan':
+        if 'grid_size' in kwargs and (not isinstance(kwargs['grid_size'], int) or kwargs['grid_size'] <= 0):
+            raise ValueError(f"grid_size must be a positive integer, got {kwargs['grid_size']}")
+        if 'spline_order' in kwargs and (not isinstance(kwargs['spline_order'], int) or kwargs['spline_order'] < 0):
+            raise ValueError(f"spline_order must be a non-negative integer, got {kwargs['spline_order']}")
+        if 'grid_range' in kwargs:
+            gr = kwargs['grid_range']
+            if not (isinstance(gr, (tuple, list)) and len(gr) == 2 and gr[0] < gr[1]):
+                raise ValueError(f"grid_range must be a (low, high) tuple with low < high, got {gr}")
+        if 'epsilon' in kwargs and kwargs['epsilon'] <= 0:
+            raise ValueError(f"epsilon must be positive, got {kwargs['epsilon']}")
+    elif ffn_type == 'tversky':
+        valid_ir = {'product', 'min', 'mean'}
+        if 'intersection_reduction' in kwargs and kwargs['intersection_reduction'] not in valid_ir:
+            raise ValueError(
+                f"intersection_reduction must be one of {sorted(valid_ir)}, "
+                f"got '{kwargs['intersection_reduction']}'"
+            )
+        valid_dr = {'ignorematch', 'subtractmatch'}
+        if 'difference_reduction' in kwargs and kwargs['difference_reduction'] not in valid_dr:
+            raise ValueError(
+                f"difference_reduction must be one of {sorted(valid_dr)}, "
+                f"got '{kwargs['difference_reduction']}'"
+            )
 
     # Validate activation functions are valid strings
     activation_params = ['activation', 'branch_activation', 'gate_activation', 'attention_activation', 'output_activation']
