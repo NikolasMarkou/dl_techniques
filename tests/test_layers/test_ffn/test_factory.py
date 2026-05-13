@@ -671,7 +671,8 @@ class TestFFNFactory:
             'swiglu',
             'differential',
             'glu', 'geglu', 'residual', 'swin_mlp',
-            'counting', 'gated_mlp', 'power_mlp',  'orthoglu', 'logic'
+            'counting', 'gated_mlp', 'power_mlp',  'orthoglu', 'logic',
+            'kan', 'tversky'
         }
         actual_types = set(info.keys())
 
@@ -693,13 +694,16 @@ class TestFFNFactory:
             'gated_mlp': {'filters': 256},
             'power_mlp': {'units': 256},
             'orthoglu': {'hidden_dim': 256, 'output_dim': 128},
-            'logic': {'logic_dim': 256, 'output_dim': 128}
+            'logic': {'logic_dim': 256, 'output_dim': 128},
+            'kan': {'features': 128},
+            'tversky': {'units': 128, 'num_features': 64}
         }
         valid_types: List[FFNType] = ['mlp',
             'swiglu',
             'differential',
             'glu', 'geglu', 'residual', 'swin_mlp',
-            'counting', 'gated_mlp', 'power_mlp',  'orthoglu', 'logic'
+            'counting', 'gated_mlp', 'power_mlp',  'orthoglu', 'logic',
+            'kan', 'tversky'
         ]
         for ffn_type in valid_types:
             layer = create_ffn_layer(ffn_type, **configs[ffn_type])
@@ -976,3 +980,78 @@ class TestFactoryEdgeCases:
         test_input = keras.random.normal(shape=(2, 16, 256))
         output = model(test_input)
         assert output.shape == (2, 10)
+
+
+class TestKanAndTverskyFactory:
+    """Coverage for the relocated KAN/Tversky FFN factory registrations."""
+
+    # ---------- KAN ----------
+
+    @pytest.mark.parametrize(
+        "kan_kwargs,input_shape,expected_last",
+        [
+            ({'features': 16}, (2, 8), 16),
+            ({'features': 16, 'grid_size': 8, 'spline_order': 2}, (2, 8), 16),
+            # KAN supports N-D via einsum
+            ({'features': 32}, (2, 4, 8), 32),
+        ],
+    )
+    def test_kan_create_and_forward(self, kan_kwargs, input_shape, expected_last):
+        layer = create_ffn_layer('kan', **kan_kwargs)
+        x = keras.random.normal(shape=input_shape)
+        y = layer(x)
+        assert y.shape[-1] == expected_last
+        assert tuple(y.shape)[:-1] == tuple(input_shape)[:-1]
+
+    @pytest.mark.parametrize(
+        "bad_kwargs",
+        [
+            {'features': 0},
+            {'features': -3},
+            {'features': 16, 'grid_size': 0},
+            {'features': 16, 'spline_order': -1},
+            {'features': 16, 'grid_range': (2.0, -2.0)},
+            {'features': 16, 'grid_range': (1.0,)},
+            {'features': 16, 'epsilon': 0.0},
+        ],
+    )
+    def test_kan_validation_rejects_bad_config(self, bad_kwargs):
+        with pytest.raises(ValueError):
+            validate_ffn_config('kan', **bad_kwargs)
+
+    # ---------- Tversky ----------
+
+    def test_tversky_create_and_forward_rank2(self):
+        layer = create_ffn_layer('tversky', units=10, num_features=12)
+        x = keras.random.normal(shape=(2, 32))
+        y = layer(x)
+        assert tuple(y.shape) == (2, 10)
+
+    @pytest.mark.parametrize(
+        "bad_kwargs",
+        [
+            {'units': 0, 'num_features': 4},
+            {'units': 4, 'num_features': 0},
+            {'units': 4, 'num_features': 4, 'intersection_reduction': 'bogus'},
+            {'units': 4, 'num_features': 4, 'difference_reduction': 'bogus'},
+        ],
+    )
+    def test_tversky_validation_rejects_bad_config(self, bad_kwargs):
+        with pytest.raises(ValueError):
+            validate_ffn_config('tversky', **bad_kwargs)
+
+    def test_tversky_missing_required(self):
+        with pytest.raises(ValueError, match="Required parameters missing"):
+            create_ffn_layer('tversky', units=10)  # missing num_features
+
+    def test_kan_missing_required(self):
+        with pytest.raises(ValueError, match="Required parameters missing"):
+            create_ffn_layer('kan')  # missing features
+
+    def test_get_ffn_info_exposes_kan_and_tversky(self):
+        info = get_ffn_info()
+        assert 'kan' in info
+        assert 'tversky' in info
+        assert 'features' in info['kan']['required_params']
+        assert 'units' in info['tversky']['required_params']
+        assert 'num_features' in info['tversky']['required_params']
