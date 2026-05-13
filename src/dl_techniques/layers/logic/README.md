@@ -185,6 +185,18 @@ routing should pin `CircuitDepthLayer(circuit_routing='classic')`.
   approaches zero. If `divide` is in the softmax pool and inputs can be small,
   gradient explosions are possible. Either avoid `divide` in stacked use or
   guarantee features are bounded away from zero.
+- **Default `arithmetic_op_types` is numerically aggressive in deep stacks.**
+  The default set includes `power` (with learned exponents bounded only by
+  `exponent_clip_range`) and `divide`. When `LearnableNeuralCircuit` chains
+  several `CircuitDepthLayer`s with `use_residual=True`, the residual
+  compounds expert outputs across depths and `power`-magnitude amplification
+  can drive the forward pass to NaN within a handful of epochs (empirical:
+  depth=3, channels=32, K=4 parity, AdamW lr=3e-3 → NaN by epoch ~12). For
+  stacks of depth >= 3, **explicitly restrict** to bounded ops, e.g.
+  `arithmetic_op_types=['add', 'max', 'min']`, or use
+  `exponent_clip_mode='smooth'` and `safe_divide_mode='smooth'` together.
+  See `src/train/logic/train_boolean_circuit.py` for a working depth-2 K=4
+  parity recipe.
 
 ## Examples
 
