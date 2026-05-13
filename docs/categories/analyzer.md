@@ -143,7 +143,7 @@ Orchestrate a multi-faceted analysis of deep learning models.
 ### analyzer.spectral_metrics
 The mathematical core of spectral analysis for neural networks.
 
-**Functions:** `compute_eigenvalues`, `fit_powerlaw`, `calculate_matrix_entropy`, `calculate_spectral_metrics`, `calculate_gini_coefficient` (and 10 more)
+**Functions:** `compute_eigenvalues`, `fit_powerlaw`, `powerlaw_goodness_of_fit`, `compute_erg_condition`, `classify_learning_phase` (and 14 more)
 
 *📁 File: `src/dl_techniques/analyzer/spectral_metrics.py`*
 
@@ -152,7 +152,7 @@ The mathematical core of spectral analysis for neural networks.
 ### analyzer.spectral_utils
 Provide utilities to adapt Keras layer weights for spectral analysis.
 
-**Functions:** `infer_layer_type`, `get_layer_weights_and_bias`, `get_weight_matrices`, `create_weight_visualization`, `compute_weight_statistics` (and 1 more)
+**Functions:** `infer_layer_type`, `get_layer_weights_and_bias`, `get_weight_matrices`
 
 *📁 File: `src/dl_techniques/analyzer/spectral_utils.py`*
 

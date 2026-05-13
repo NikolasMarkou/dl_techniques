@@ -2,7 +2,7 @@
 
 All public components in the DL-Techniques library organized by type.
 
-## Classes (806)
+## Classes (888)
 
 ### Analyzer Classes
 
@@ -11,7 +11,7 @@ All public components in the DL-Techniques library organized by type.
 
 Configuration for all analysis types.
 
-*📁 src/dl_techniques/analyzer/config.py:15*
+*📁 src/dl_techniques/analyzer/config.py:16*
 
 #### `AnalysisResults`
 **Module:** `analyzer.data_types`
@@ -97,21 +97,21 @@ Enum for supported layer types for spectral analysis
 
 *Inherits from: `str`, `Enum`*
 
-*📁 src/dl_techniques/analyzer/constants.py:45*
+*📁 src/dl_techniques/analyzer/constants.py:52*
 
 #### `MetricNames`
 **Module:** `analyzer.constants`
 
 Class holding the standard names of metrics used in spectral analysis
 
-*📁 src/dl_techniques/analyzer/constants.py:70*
+*📁 src/dl_techniques/analyzer/constants.py:77*
 
 #### `ModelAnalyzer`
 **Module:** `analyzer.model_analyzer`
 
 Model analyzer with training dynamics and improved visualizations.
 
-*📁 src/dl_techniques/analyzer/model_analyzer.py:207*
+*📁 src/dl_techniques/analyzer/model_analyzer.py:203*
 
 #### `SmoothingMethod`
 **Module:** `analyzer.constants`
@@ -120,7 +120,7 @@ Enum for SVD smoothing methods
 
 *Inherits from: `str`, `Enum`*
 
-*📁 src/dl_techniques/analyzer/constants.py:57*
+*📁 src/dl_techniques/analyzer/constants.py:64*
 
 #### `SpectralAnalyzer`
 **Module:** `analyzer.analyzers.spectral_analyzer`
@@ -129,7 +129,7 @@ Performs spectral analysis of model weights (WeightWatcher).
 
 *Inherits from: `BaseAnalyzer`*
 
-*📁 src/dl_techniques/analyzer/analyzers/spectral_analyzer.py:104*
+*📁 src/dl_techniques/analyzer/analyzers/spectral_analyzer.py:103*
 
 #### `SpectralVisualizer`
 **Module:** `analyzer.visualizers.spectral_visualizer`
@@ -147,7 +147,7 @@ Enum for spectral analysis status codes
 
 *Inherits from: `str`, `Enum`*
 
-*📁 src/dl_techniques/analyzer/constants.py:63*
+*📁 src/dl_techniques/analyzer/constants.py:70*
 
 #### `SummaryVisualizer`
 **Module:** `analyzer.visualizers.summary_visualizer`
@@ -190,7 +190,7 @@ Analyzes weight distributions and statistics.
 
 *Inherits from: `BaseAnalyzer`*
 
-*📁 src/dl_techniques/analyzer/analyzers/weight_analyzer.py:88*
+*📁 src/dl_techniques/analyzer/analyzers/weight_analyzer.py:89*
 
 #### `WeightVisualizer`
 **Module:** `analyzer.visualizers.weight_visualizer`
@@ -255,7 +255,7 @@ Custom initializer for orthonormal vectors using QR decomposition.
 #### `A2C2fBlock`
 **Module:** `layers.yolo12_blocks`
 
-Attention-enhanced R-ELAN block with progressive feature extraction.
+Attention-enhanced ELAN block with progressive feature extraction for YOLOv12.
 
 **Constructor Arguments:**
 ```python
@@ -270,7 +270,7 @@ A2C2fBlock(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:1013*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:1018*
 
 #### `ACFMonitorCallback`
 **Module:** `layers.statistics.residual_acf`
@@ -279,7 +279,30 @@ Callback to monitor and log ACF statistics during training.
 
 *Inherits from: `keras.callbacks.Callback`*
 
-*📁 src/dl_techniques/layers/statistics/residual_acf.py:496*
+*📁 src/dl_techniques/layers/statistics/residual_acf.py:359*
+
+#### `AdaLNZeroConditionalBlock`
+**Module:** `layers.adaln_zero`
+
+Transformer block with AdaLN-zero conditioning and causal self-attention.
+
+**Constructor Arguments:**
+```python
+AdaLNZeroConditionalBlock(
+    dim: int,
+    num_heads: int,
+    dim_head: int,
+    mlp_dim: int,
+    dropout: float = 0.0,
+    use_causal_mask: bool = True,
+    eps: float = 1e-06,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/layers/adaln_zero.py:53*
 
 #### `AdaptiveBandRMS`
 **Module:** `layers.norms.adaptive_band_rms`
@@ -300,7 +323,7 @@ AdaptiveBandRMS(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/norms/adaptive_band_rms.py:41*
+*📁 src/dl_techniques/layers/norms/adaptive_band_rms.py:46*
 
 #### `AdaptiveLagAttentionLayer`
 **Module:** `layers.time_series.adaptive_lag_attention`
@@ -322,7 +345,7 @@ AdaptiveLagAttentionLayer(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/time_series/adaptive_lag_attention.py:80*
+*📁 src/dl_techniques/layers/time_series/adaptive_lag_attention.py:69*
 
 #### `AdaptiveTemperatureSoftmax`
 **Module:** `layers.activations.adaptive_softmax`
@@ -343,21 +366,21 @@ AdaptiveTemperatureSoftmax(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/activations/adaptive_softmax.py:73*
+*📁 src/dl_techniques/layers/activations/adaptive_softmax.py:71*
 
 #### `AddressingMode`
-**Module:** `layers.ntm.ntm_interface`
+**Module:** `layers.memory.ntm_interface`
 
 Enumeration of addressing mechanism types.
 
 *Inherits from: `Enum`*
 
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:36*
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:36*
 
 #### `AdvancedLaplacianFilter`
 **Module:** `layers.laplacian_filter`
 
-Advanced Laplacian filter with multiple implementation options.
+Advanced Laplacian filter with multiple implementation methods.
 
 **Constructor Arguments:**
 ```python
@@ -375,7 +398,7 @@ AdvancedLaplacianFilter(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/laplacian_filter.py:239*
+*📁 src/dl_techniques/layers/laplacian_filter.py:228*
 
 #### `AffineCouplingLayer`
 **Module:** `layers.statistics.normalizing_flow`
@@ -389,7 +412,7 @@ AffineCouplingLayer(
     context_dim: int,
     hidden_units: int = 64,
     reverse: bool = False,
-    activation: Union[str, callable] = 'relu',
+    activation: Union[str, Callable] = 'relu',
     use_tanh_stabilization: bool = True,
     **kwargs
 )
@@ -398,6 +421,28 @@ AffineCouplingLayer(
 *Inherits from: `keras.layers.Layer`*
 
 *📁 src/dl_techniques/layers/statistics/normalizing_flow.py:60*
+
+#### `AlbertFactorizedEmbedding`
+**Module:** `layers.embedding.albert_factorized_embedding`
+
+Factorized token embedding via a learnable bottleneck projection.
+
+**Constructor Arguments:**
+```python
+AlbertFactorizedEmbedding(
+    vocab_size: int,
+    bottleneck_dim: int,
+    output_dim: int,
+    embeddings_initializer: Union[str, initializers.Initializer] = 'uniform',
+    embeddings_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
+    projection_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/layers/embedding/albert_factorized_embedding.py:48*
 
 #### `AnchorAttention`
 **Module:** `layers.attention.anchor_attention`
@@ -424,12 +469,12 @@ AnchorAttention(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/attention/anchor_attention.py:61*
+*📁 src/dl_techniques/layers/attention/anchor_attention.py:44*
 
 #### `AnchorGenerator`
 **Module:** `layers.anchor_generator`
 
-Anchor generator layer for YOLOv12 object detection.
+Anchor generator layer for multi-scale object detection.
 
 **Constructor Arguments:**
 ```python
@@ -502,12 +547,12 @@ AreaAttention(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:243*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:239*
 
 #### `AttentionBlock`
 **Module:** `layers.yolo12_blocks`
 
-Attention Block with Area Attention and MLP.
+Transformer-style block with Area Attention and MLP for YOLOv12.
 
 **Constructor Arguments:**
 ```python
@@ -523,7 +568,7 @@ AttentionBlock(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:507*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:510*
 
 #### `AttentionPooling`
 **Module:** `layers.sequence_pooling`
@@ -548,6 +593,32 @@ AttentionPooling(
 
 *📁 src/dl_techniques/layers/sequence_pooling.py:108*
 
+#### `AttentionRoutingCapsule`
+**Module:** `layers.capsules_v2`
+
+Single-step attention-routing capsule layer.
+
+**Constructor Arguments:**
+```python
+AttentionRoutingCapsule(
+    num_capsules: int,
+    dim_capsules: int,
+    softmax_axis: Literal['output', 'input'] = 'output',
+    top_k: Optional[int] = None,
+    use_bias: bool = True,
+    use_load_balancing: bool = False,
+    load_balancing_weight: float = 0.01,
+    eps: float = 1e-07,
+    kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+    kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/layers/capsules_v2.py:50*
+
 #### `BPETokenizer`
 **Module:** `layers.tokenizers.bpe`
 
@@ -569,7 +640,7 @@ BPETokenizer(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/tokenizers/bpe.py:123*
+*📁 src/dl_techniques/layers/tokenizers/bpe.py:125*
 
 #### `BandLogitNorm`
 **Module:** `layers.norms.band_logit_norm`
@@ -588,7 +659,7 @@ BandLogitNorm(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/norms/band_logit_norm.py:26*
+*📁 src/dl_techniques/layers/norms/band_logit_norm.py:31*
 
 #### `BandRMS`
 **Module:** `layers.norms.band_rms`
@@ -651,10 +722,10 @@ BaseActivation(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/activations/expanded_activations.py:127*
+*📁 src/dl_techniques/layers/activations/expanded_activations.py:54*
 
 #### `BaseController`
-**Module:** `layers.ntm.ntm_interface`
+**Module:** `layers.memory.ntm_interface`
 
 Abstract base class for controller networks.
 
@@ -669,7 +740,7 @@ BaseController(
 
 *Inherits from: `keras.layers.Layer`, `ABC`*
 
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:534*
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:532*
 
 #### `BaseExpert`
 **Module:** `layers.moe.experts`
@@ -707,7 +778,7 @@ BaseGating(
 *📁 src/dl_techniques/layers/moe/gating.py:17*
 
 #### `BaseHead`
-**Module:** `layers.ntm.ntm_interface`
+**Module:** `layers.memory.ntm_interface`
 
 Abstract base class for read and write heads.
 
@@ -725,10 +796,10 @@ BaseHead(
 
 *Inherits from: `keras.layers.Layer`, `ABC`*
 
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:421*
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:419*
 
 #### `BaseMemory`
-**Module:** `layers.ntm.ntm_interface`
+**Module:** `layers.memory.ntm_interface`
 
 Abstract base class for memory modules.
 
@@ -744,7 +815,7 @@ BaseMemory(
 
 *Inherits from: `keras.layers.Layer`, `ABC`*
 
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:310*
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:308*
 
 #### `BaseNLPHead`
 **Module:** `layers.nlp_heads.factory`
@@ -777,7 +848,7 @@ BaseNLPHead(
 *📁 src/dl_techniques/layers/nlp_heads/factory.py:29*
 
 #### `BaseNTM`
-**Module:** `layers.ntm.ntm_interface`
+**Module:** `layers.memory.ntm_interface`
 
 Abstract base class for Neural Turing Machine architectures.
 
@@ -792,7 +863,7 @@ BaseNTM(
 
 *Inherits from: `keras.layers.Layer`, `ABC`*
 
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:617*
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:615*
 
 #### `BaseVLMHead`
 **Module:** `layers.vlm_heads.factory`
@@ -823,7 +894,7 @@ BaseVLMHead(
 #### `BaseVisionHead`
 **Module:** `layers.vision_heads.factory`
 
-Base class for all vision_heads task heads.
+Base class for all vision task heads.
 
 **Constructor Arguments:**
 ```python
@@ -865,12 +936,12 @@ BasicBlock(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/standard_blocks.py:843*
+*📁 src/dl_techniques/layers/standard_blocks.py:830*
 
 #### `BasisFunction`
 **Module:** `layers.activations.basis_function`
 
-Basis function layer implementing the Swish activation: b(x) = x / (1 + e^(-x)).
+Basis function layer implementing the Swish activation: ``b(x) = x / (1 + e^(-x))``.
 
 **Constructor Arguments:**
 ```python
@@ -886,7 +957,7 @@ BasisFunction(
 #### `BertEmbeddings`
 **Module:** `layers.embedding.bert_embeddings`
 
-BERT embeddings layer combining word, position, and token type embeddings.
+BERT embedding layer combining word, position, and token type embeddings.
 
 **Constructor Arguments:**
 ```python
@@ -910,7 +981,7 @@ BertEmbeddings(
 #### `BiasFreeConv1D`
 **Module:** `layers.bias_free_conv1d`
 
-Bias-free 1D convolutional layer with batch normalization and activation.
+Bias-free 1D convolutional layer with optional batch normalization and activation.
 
 **Constructor Arguments:**
 ```python
@@ -927,12 +998,12 @@ BiasFreeConv1D(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/bias_free_conv1d.py:25*
+*📁 src/dl_techniques/layers/bias_free_conv1d.py:28*
 
 #### `BiasFreeConv2D`
 **Module:** `layers.bias_free_conv2d`
 
-Bias-free 2D convolutional layer with batch normalization and activation.
+Bias-free 2D convolutional layer with optional batch normalization and activation.
 
 **Constructor Arguments:**
 ```python
@@ -949,12 +1020,12 @@ BiasFreeConv2D(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/bias_free_conv2d.py:25*
+*📁 src/dl_techniques/layers/bias_free_conv2d.py:27*
 
 #### `BiasFreeResidualBlock`
 **Module:** `layers.bias_free_conv2d`
 
-Bias-free residual block for ResNet-style architecture with 2D convolutions.
+Bias-free residual block for 2D convolutions with skip connections.
 
 **Constructor Arguments:**
 ```python
@@ -971,12 +1042,12 @@ BiasFreeResidualBlock(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/bias_free_conv2d.py:289*
+*📁 src/dl_techniques/layers/bias_free_conv2d.py:244*
 
 #### `BiasFreeResidualBlock1D`
 **Module:** `layers.bias_free_conv1d`
 
-Bias-free residual block for ResNet-style architecture with 1D convolutions.
+Bias-free residual block for 1D convolutions with skip connections.
 
 **Constructor Arguments:**
 ```python
@@ -992,7 +1063,7 @@ BiasFreeResidualBlock1D(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/bias_free_conv1d.py:269*
+*📁 src/dl_techniques/layers/bias_free_conv1d.py:239*
 
 #### `BinaryMapper`
 **Module:** `layers.transformers.free_transformer`
@@ -1041,10 +1112,28 @@ BitLinear(
 
 *📁 src/dl_techniques/layers/bitlinear_layer.py:69*
 
+#### `BlurPool2D`
+**Module:** `layers.blur_pool`
+
+Anti-aliased depthwise downsampling with a fixed binomial blur.
+
+**Constructor Arguments:**
+```python
+BlurPool2D(
+    strides: int = 2,
+    padding: str = 'same',
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/layers/blur_pool.py:31*
+
 #### `Bottleneck`
 **Module:** `layers.yolo12_blocks`
 
-Standard Bottleneck block with optional residual connection.
+Standard bottleneck block with optional residual connection for YOLOv12.
 
 **Constructor Arguments:**
 ```python
@@ -1058,12 +1147,12 @@ Bottleneck(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:684*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:687*
 
 #### `BottleneckBlock`
 **Module:** `layers.standard_blocks`
 
-Bottleneck ResNet block with 1x1 → 3x3 → 1x1 convolutions.
+Bottleneck ResNet block with 1x1, 3x3, 1x1 convolutions.
 
 **Constructor Arguments:**
 ```python
@@ -1080,7 +1169,7 @@ BottleneckBlock(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/standard_blocks.py:1084*
+*📁 src/dl_techniques/layers/standard_blocks.py:1055*
 
 #### `ByteLatentReasoningCore`
 **Module:** `layers.blt_core`
@@ -1142,7 +1231,7 @@ ByteTokenizer(
 #### `C3k2Block`
 **Module:** `layers.yolo12_blocks`
 
-CSP-like block with 2 convolutions and Bottleneck layers.
+CSP-like block with dual paths and Bottleneck layers for YOLOv12.
 
 **Constructor Arguments:**
 ```python
@@ -1157,12 +1246,12 @@ C3k2Block(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:829*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:831*
 
 #### `CBAM`
 **Module:** `layers.attention.convolutional_block_attention`
 
-Convolutional Block Attention Module for feature refinement.
+Convolutional Block Attention Module for sequential channel-spatial feature refinement.
 
 **Constructor Arguments:**
 ```python
@@ -1187,7 +1276,7 @@ CBAM(
 #### `CLAHE`
 **Module:** `layers.clahe`
 
-Contrast Limited Adaptive Histogram Equalization (CLAHE) layer.
+Trainable Contrast Limited Adaptive Histogram Equalization layer.
 
 **Constructor Arguments:**
 ```python
@@ -1209,7 +1298,7 @@ CLAHE(
 #### `Canny`
 **Module:** `layers.canny`
 
-Keras implementation of the Canny edge detection algorithm.
+Multi-stage Canny edge detection layer for single-channel images.
 
 **Constructor Arguments:**
 ```python
@@ -1230,7 +1319,7 @@ Canny(
 #### `CapsuleBlock`
 **Module:** `layers.capsules`
 
-A complete capsule block with optional dropout and normalization.
+Complete capsule block combining dynamic routing with optional regularization.
 
 **Constructor Arguments:**
 ```python
@@ -1251,7 +1340,35 @@ CapsuleBlock(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/capsules.py:660*
+*📁 src/dl_techniques/layers/capsules.py:542*
+
+#### `CapsuleBlockV2`
+**Module:** `layers.capsules_v2`
+
+Capsule block built on :class:`AttentionRoutingCapsule`.
+
+**Constructor Arguments:**
+```python
+CapsuleBlockV2(
+    num_capsules: int,
+    dim_capsules: int,
+    dropout_rate: float = 0.0,
+    direction_only_norm: bool = False,
+    softmax_axis: Literal['output', 'input'] = 'output',
+    top_k: Optional[int] = None,
+    use_bias: bool = True,
+    use_load_balancing: bool = False,
+    load_balancing_weight: float = 0.01,
+    eps: float = 1e-07,
+    kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+    kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/layers/capsules_v2.py:354*
 
 #### `CapsuleRoutingSelfAttention`
 **Module:** `layers.attention.capsule_routing_attention`
@@ -1282,12 +1399,75 @@ CapsuleRoutingSelfAttention(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/attention/capsule_routing_attention.py:77*
+*📁 src/dl_techniques/layers/attention/capsule_routing_attention.py:48*
+
+#### `CausalCliffordNetBlock`
+**Module:** `layers.geometric.clifford_block`
+
+CliffordNetBlock variant with causal (left-only) padded convolutions.
+
+**Constructor Arguments:**
+```python
+CausalCliffordNetBlock(
+    channels: int,
+    shifts: List[int],
+    cli_mode: CliMode = 'full',
+    ctx_mode: CtxMode = 'diff',
+    use_global_context: bool = False,
+    layer_scale_init: float = 1e-05,
+    drop_path_rate: float = 0.0,
+    use_bias: bool = True,
+    kernel_initializer: Any = 'glorot_uniform',
+    bias_initializer: Any = 'zeros',
+    kernel_regularizer: Optional[Any] = None,
+    bias_regularizer: Optional[Any] = None,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:832*
+
+#### `CausalCliffordNetBlockDSv2`
+**Module:** `layers.geometric.clifford_block`
+
+Causal sibling of :class:`CliffordNetBlockDSv2` for autoregressive sequence modeling.
+
+**Constructor Arguments:**
+```python
+CausalCliffordNetBlockDSv2(
+    channels: int,
+    shifts: List[int],
+    cli_mode: CliMode = 'full',
+    ctx_mode: CausalCtxModeV2 = 'diff',
+    use_global_context: bool = False,
+    kernel_size: int = 7,
+    strides: int = 1,
+    stream_pool: CausalSkipPoolV2 = 'avg',
+    skip_pool: CausalSkipPoolV2 = 'avg',
+    out_channels: Optional[int] = None,
+    ctx_norm_type: CtxNormType = 'bn',
+    ctx_activation: Optional[str] = 'silu',
+    layer_scale_init: float = 1e-05,
+    drop_path_rate: float = 0.0,
+    use_bias: bool = True,
+    kernel_initializer: Any = 'glorot_uniform',
+    bias_initializer: Any = 'zeros',
+    kernel_regularizer: Optional[Any] = None,
+    bias_regularizer: Optional[Any] = None,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:2125*
 
 #### `ChannelAttention`
 **Module:** `layers.attention.channel_attention`
 
-Channel attention module of CBAM (Convolutional Block Attention Module).
+Channel attention module from CBAM that learns per-channel importance weights.
 
 **Constructor Arguments:**
 ```python
@@ -1308,7 +1488,7 @@ ChannelAttention(
 #### `CircuitDepthLayer`
 **Module:** `layers.logic.neural_circuit`
 
-A single depth layer of the neural circuit.
+Single depth layer of a neural circuit with parallel expert operators.
 
 **Constructor Arguments:**
 ```python
@@ -1335,7 +1515,103 @@ Classification head for image-level classification.
 
 *Inherits from: `BaseVisionHead`*
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:508*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:633*
+
+#### `CliffordNetBlock`
+**Module:** `layers.geometric.clifford_block`
+
+Full isotropic CliffordNet block (no FFN).
+
+**Constructor Arguments:**
+```python
+CliffordNetBlock(
+    channels: int,
+    shifts: List[int],
+    cli_mode: CliMode = 'full',
+    ctx_mode: CtxMode = 'diff',
+    use_global_context: bool = False,
+    layer_scale_init: float = 1e-05,
+    drop_path_rate: float = 0.0,
+    use_bias: bool = True,
+    kernel_initializer: Any = 'glorot_uniform',
+    bias_initializer: Any = 'zeros',
+    kernel_regularizer: Optional[Any] = None,
+    bias_regularizer: Optional[Any] = None,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:481*
+
+#### `CliffordNetBlockDS`
+**Module:** `layers.geometric.clifford_block`
+
+CliffordNetBlock variant with single 7x7 depthwise context conv and optional stride-based downsampling.
+
+**Constructor Arguments:**
+```python
+CliffordNetBlockDS(
+    channels: int,
+    shifts: List[int],
+    cli_mode: CliMode = 'full',
+    ctx_mode: CtxMode = 'diff',
+    use_global_context: bool = False,
+    kernel_size: int = 7,
+    strides: int = 1,
+    skip_pool: SkipPool = 'avg',
+    use_ctx_bn: bool = True,
+    ctx_activation: Optional[str] = 'silu',
+    layer_scale_init: float = 1e-05,
+    drop_path_rate: float = 0.0,
+    use_bias: bool = True,
+    kernel_initializer: Any = 'glorot_uniform',
+    bias_initializer: Any = 'zeros',
+    kernel_regularizer: Optional[Any] = None,
+    bias_regularizer: Optional[Any] = None,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:1127*
+
+#### `CliffordNetBlockDSv2`
+**Module:** `layers.geometric.clifford_block`
+
+Design-space sibling of :class:`CliffordNetBlockDS` for the downsampling experiments described in ``analyses/analysis_2026-04-30_41b5e415/summary.md``.
+
+**Constructor Arguments:**
+```python
+CliffordNetBlockDSv2(
+    channels: int,
+    shifts: List[int],
+    cli_mode: CliMode = 'full',
+    ctx_mode: CtxModeV2 = 'diff',
+    use_global_context: bool = False,
+    kernel_size: int = 7,
+    strides: int = 1,
+    stream_pool: SkipPoolV2 = 'blur',
+    skip_pool: SkipPoolV2 = 'blur',
+    out_channels: Optional[int] = None,
+    ctx_norm_type: CtxNormType = 'bn',
+    ctx_activation: Optional[str] = 'silu',
+    layer_scale_init: float = 1e-05,
+    drop_path_rate: float = 0.0,
+    use_bias: bool = True,
+    kernel_initializer: Any = 'glorot_uniform',
+    bias_initializer: Any = 'zeros',
+    kernel_regularizer: Optional[Any] = None,
+    bias_regularizer: Optional[Any] = None,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:1695*
 
 #### `ClipLayer`
 **Module:** `layers.io_preparation`
@@ -1360,14 +1636,14 @@ ClipLayer(
 
 Predefined common NLP task configurations.
 
-*📁 src/dl_techniques/layers/nlp_heads/task_types.py:528*
+*📁 src/dl_techniques/layers/nlp_heads/task_types.py:564*
 
 #### `CommonTaskConfigurations`
 **Module:** `layers.vision_heads.task_types`
 
 Predefined common task configurations for convenience.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:730*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:680*
 
 #### `ComplexAveragePooling2D`
 **Module:** `layers.complex_layers`
@@ -1386,7 +1662,7 @@ ComplexAveragePooling2D(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/complex_layers.py:714*
+*📁 src/dl_techniques/layers/complex_layers.py:618*
 
 #### `ComplexConv2D`
 **Module:** `layers.complex_layers`
@@ -1406,7 +1682,7 @@ ComplexConv2D(
 
 *Inherits from: `ComplexLayer`*
 
-*📁 src/dl_techniques/layers/complex_layers.py:179*
+*📁 src/dl_techniques/layers/complex_layers.py:166*
 
 #### `ComplexDense`
 **Module:** `layers.complex_layers`
@@ -1423,7 +1699,7 @@ ComplexDense(
 
 *Inherits from: `ComplexLayer`*
 
-*📁 src/dl_techniques/layers/complex_layers.py:416*
+*📁 src/dl_techniques/layers/complex_layers.py:371*
 
 #### `ComplexDropout`
 **Module:** `layers.complex_layers`
@@ -1440,7 +1716,7 @@ ComplexDropout(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/complex_layers.py:894*
+*📁 src/dl_techniques/layers/complex_layers.py:776*
 
 #### `ComplexGlobalAveragePooling2D`
 **Module:** `layers.complex_layers`
@@ -1457,7 +1733,7 @@ ComplexGlobalAveragePooling2D(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/complex_layers.py:1024*
+*📁 src/dl_techniques/layers/complex_layers.py:884*
 
 #### `ComplexLayer`
 **Module:** `layers.complex_layers`
@@ -1492,12 +1768,12 @@ ComplexReLU(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/complex_layers.py:605*
+*📁 src/dl_techniques/layers/complex_layers.py:531*
 
 #### `ConditionalOutputLayer`
 **Module:** `layers.conditional_output_layer`
 
-A custom layer for conditional output selection based on ground truth values.
+Batch-wise conditional tensor selector for semi-supervised training.
 
 **Constructor Arguments:**
 ```python
@@ -1529,33 +1805,7 @@ ConformalQuantileHead(
 
 *Inherits from: `layers.Layer`*
 
-*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:276*
-
-#### `ConnectionLayer`
-**Module:** `layers.geometric.fields.connection_layer`
-
-Computes the gauge connection from field representations.
-
-**Constructor Arguments:**
-```python
-ConnectionLayer(
-    hidden_dim: int,
-    connection_dim: Optional[int] = None,
-    connection_type: ConnectionType = 'yang_mills',
-    num_generators: int = 8,
-    use_metric: bool = True,
-    antisymmetric: bool = True,
-    connection_regularization: float = 0.001,
-    kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-    bias_initializer: Union[str, initializers.Initializer] = 'zeros',
-    kernel_regularizer: Optional[regularizers.Regularizer] = None,
-    **kwargs
-)
-```
-
-*Inherits from: `keras.layers.Layer`*
-
-*📁 src/dl_techniques/layers/geometric/fields/connection_layer.py:36*
+*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:352*
 
 #### `ContextualCounterFFN`
 **Module:** `layers.experimental.contextual_counter_ffn`
@@ -1598,12 +1848,12 @@ ContextualMemoryBank(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/experimental/contextual_memory.py:693*
+*📁 src/dl_techniques/layers/experimental/contextual_memory.py:661*
 
 #### `ContinuousRoPE`
 **Module:** `layers.embedding.continuous_rope_embedding`
 
-Continuous Rotary Position Embedding for variable positions.
+Continuous multi-dimensional Rotary Position Embedding for spatial data.
 
 **Constructor Arguments:**
 ```python
@@ -1623,7 +1873,7 @@ ContinuousRoPE(
 #### `ContinuousSinCosEmbed`
 **Module:** `layers.embedding.continuous_sin_cos_embedding`
 
-Continuous coordinate embedding using sine and cosine functions.
+Continuous sinusoidal coordinate embedding for multi-dimensional positions.
 
 **Constructor Arguments:**
 ```python
@@ -1643,7 +1893,7 @@ ContinuousSinCosEmbed(
 #### `ConvBlock`
 **Module:** `layers.yolo12_blocks`
 
-Standard Convolution Block with BatchNorm and SiLU activation.
+Standard YOLOv12 convolution block: Conv2D, BatchNorm, SiLU.
 
 **Constructor Arguments:**
 ```python
@@ -1698,7 +1948,7 @@ ConvBlock(
 #### `ConvNextV1Block`
 **Module:** `layers.convnext_v1_block`
 
-Implementation of ConvNext block with modern best practices.
+ConvNeXt V1 block with depthwise convolution and inverted bottleneck MLP.
 
 **Constructor Arguments:**
 ```python
@@ -1723,7 +1973,7 @@ ConvNextV1Block(
 #### `ConvNextV2Block`
 **Module:** `layers.convnext_v2_block`
 
-Implementation of ConvNextV2 block with modern best practices.
+ConvNeXt V2 block with Global Response Normalization.
 
 **Constructor Arguments:**
 ```python
@@ -1750,7 +2000,7 @@ ConvNextV2Block(
 
 *Inherits from: `Enum`*
 
-*📁 src/dl_techniques/layers/conv2d_builder.py:217*
+*📁 src/dl_techniques/layers/conv2d_builder.py:216*
 
 #### `ConvolutionalStem`
 **Module:** `layers.repmixer_block`
@@ -1771,12 +2021,12 @@ ConvolutionalStem(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/repmixer_block.py:408*
+*📁 src/dl_techniques/layers/repmixer_block.py:375*
 
 #### `CorrespondenceNetwork`
 **Module:** `layers.geometric.point_cloud_autoencoder`
 
-Augmented regression network to estimate point-to-GMM correspondences.
+Correspondence network estimating point-to-GMM soft assignments.
 
 **Constructor Arguments:**
 ```python
@@ -1788,21 +2038,21 @@ CorrespondenceNetwork(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/geometric/point_cloud_autoencoder.py:295*
+*📁 src/dl_techniques/layers/geometric/point_cloud_autoencoder.py:237*
 
 #### `CosineGating`
 **Module:** `layers.moe.gating`
 
-Cosine similarity-based gating network.
+Cosine similarity-based gating network for hypersphere expert routing.
 
 *Inherits from: `BaseGating`*
 
-*📁 src/dl_techniques/layers/moe/gating.py:265*
+*📁 src/dl_techniques/layers/moe/gating.py:296*
 
 #### `CountingFFN`
 **Module:** `layers.ffn.counting_ffn`
 
-A Feed-Forward Network that learns to count events in a sequence.
+Feed-Forward Network that learns to count events in a sequence.
 
 **Constructor Arguments:**
 ```python
@@ -1827,7 +2077,7 @@ CountingFFN(
 #### `DMLPlus`
 **Module:** `layers.norms.max_logit_norm`
 
-DML+ implementation for separate focal and center models.
+DML+ layer for separate focal and center OOD detection models.
 
 **Constructor Arguments:**
 ```python
@@ -1841,7 +2091,7 @@ DMLPlus(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/norms/max_logit_norm.py:447*
+*📁 src/dl_techniques/layers/norms/max_logit_norm.py:363*
 
 #### `DecoupledMaxLogit`
 **Module:** `layers.norms.max_logit_norm`
@@ -1860,7 +2110,7 @@ DecoupledMaxLogit(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/norms/max_logit_norm.py:224*
+*📁 src/dl_techniques/layers/norms/max_logit_norm.py:179*
 
 #### `DeepARCell`
 **Module:** `layers.time_series.deepar_blocks`
@@ -1879,7 +2129,7 @@ DeepARCell(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:362*
+*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:400*
 
 #### `DeepKernelPCA`
 **Module:** `layers.statistics.deep_kernel_pca`
@@ -1927,7 +2177,7 @@ DenormalizationLayer(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/io_preparation.py:255*
+*📁 src/dl_techniques/layers/io_preparation.py:252*
 
 #### `DenseBlock`
 **Module:** `layers.standard_blocks`
@@ -1957,7 +2207,7 @@ DenseBlock(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/standard_blocks.py:403*
+*📁 src/dl_techniques/layers/standard_blocks.py:398*
 
 #### `DepthEstimationHead`
 **Module:** `layers.vision_heads.factory`
@@ -1966,7 +2216,7 @@ Depth estimation head for predicting depth maps.
 
 *Inherits from: `BaseVisionHead`*
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:389*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:482*
 
 #### `DepthwiseSeparableBlock`
 **Module:** `layers.depthwise_separable_block`
@@ -1992,7 +2242,7 @@ DepthwiseSeparableBlock(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/depthwise_separable_block.py:76*
+*📁 src/dl_techniques/layers/depthwise_separable_block.py:37*
 
 #### `DetectionHead`
 **Module:** `layers.vision_heads.factory`
@@ -2001,60 +2251,7 @@ Detection head for object detection tasks.
 
 *Inherits from: `BaseVisionHead`*
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:159*
-
-#### `DifferentiableAddressingHead`
-**Module:** `layers.ntm.base_layers`
-
-Differentiable addressing head implementing NTM-style memory addressing.
-
-**Constructor Arguments:**
-```python
-DifferentiableAddressingHead(
-    memory_size: int,
-    content_dim: int,
-    controller_dim: int | None = None,
-    num_shifts: int = 3,
-    use_content_addressing: bool = True,
-    use_location_addressing: bool = True,
-    sharpening_bias: float = 1.0,
-    kernel_initializer: str | keras.initializers.Initializer = 'glorot_uniform',
-    bias_initializer: str | keras.initializers.Initializer = 'zeros',
-    kernel_regularizer: keras.regularizers.Regularizer | None = None,
-    **kwargs
-)
-```
-
-*Inherits from: `keras.layers.Layer`*
-
-*📁 src/dl_techniques/layers/ntm/base_layers.py:37*
-
-#### `DifferentiableSelectCopy`
-**Module:** `layers.ntm.base_layers`
-
-Differentiable layer for selecting and copying values between memory positions.
-
-**Constructor Arguments:**
-```python
-DifferentiableSelectCopy(
-    memory_size: int,
-    content_dim: int,
-    controller_dim: int,
-    num_read_heads: int = 1,
-    num_write_heads: int = 1,
-    num_shifts: int = 3,
-    use_content_addressing: bool = True,
-    use_location_addressing: bool = True,
-    kernel_initializer: str | keras.initializers.Initializer = 'glorot_uniform',
-    bias_initializer: str | keras.initializers.Initializer = 'zeros',
-    kernel_regularizer: keras.regularizers.Regularizer | None = None,
-    **kwargs
-)
-```
-
-*Inherits from: `keras.layers.Layer`*
-
-*📁 src/dl_techniques/layers/ntm/base_layers.py:335*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:197*
 
 #### `DifferentiableStep`
 **Module:** `layers.activations.differentiable_step`
@@ -2075,12 +2272,12 @@ DifferentiableStep(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/activations/differentiable_step.py:66*
+*📁 src/dl_techniques/layers/activations/differentiable_step.py:64*
 
 #### `DifferentialFFN`
 **Module:** `layers.ffn.diff_ffn`
 
-Differential Feed-Forward Network layer implementing dual-pathway processing.
+Differential Feed-Forward Network with dual-pathway processing.
 
 **Constructor Arguments:**
 ```python
@@ -2128,12 +2325,12 @@ DifferentialMultiHeadAttention(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/attention/differential_attention.py:76*
+*📁 src/dl_techniques/layers/attention/differential_attention.py:35*
 
 #### `DualRotaryPositionEmbedding`
 **Module:** `layers.embedding.dual_rotary_position_embedding`
 
-Dual Rotary Position Embedding layer for Gemma3-style attention mechanisms.
+Dual-frequency Rotary Position Embedding for hybrid attention architectures.
 
 **Constructor Arguments:**
 ```python
@@ -2153,7 +2350,7 @@ DualRotaryPositionEmbedding(
 #### `DynamicConv2D`
 **Module:** `layers.dynamic_conv2d`
 
-Dynamic 2D Convolution with Attention over Convolution Kernels.
+Dynamic 2D Convolution with attention over convolution kernels.
 
 **Constructor Arguments:**
 ```python
@@ -2182,7 +2379,7 @@ DynamicConv2D(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/dynamic_conv2d.py:71*
+*📁 src/dl_techniques/layers/dynamic_conv2d.py:23*
 
 #### `DynamicPatcher`
 **Module:** `layers.blt_blocks`
@@ -2200,12 +2397,12 @@ DynamicPatcher(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/blt_blocks.py:539*
+*📁 src/dl_techniques/layers/blt_blocks.py:531*
 
 #### `DynamicTanh`
 **Module:** `layers.norms.dynamic_tanh`
 
-Dynamic Tanh (DyT) layer as described in "Transformers without Normalization".
+Dynamic Tanh (DyT) normalization layer.
 
 **Constructor Arguments:**
 ```python
@@ -2246,7 +2443,7 @@ EMASlopeFilter(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/time_series/ema_layer.py:174*
+*📁 src/dl_techniques/layers/time_series/ema_layer.py:215*
 
 #### `EluPlusOne`
 **Module:** `layers.activations.expanded_activations`
@@ -2255,19 +2452,19 @@ Enhanced ELU activation layer to ensure positive values.
 
 *Inherits from: `BaseActivation`*
 
-*📁 src/dl_techniques/layers/activations/expanded_activations.py:551*
+*📁 src/dl_techniques/layers/activations/expanded_activations.py:527*
 
 #### `EnhancementHead`
 **Module:** `layers.vision_heads.factory`
 
 *Inherits from: `BaseVisionHead`*
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:901*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:1083*
 
 #### `EntityGraphRefinement`
 **Module:** `layers.graphs.entity_graph_refinement`
 
-Entity-Graph Refinement Component for learning hierarchical relationships in embedding space.
+Entity-graph refinement layer for learning relational structure from embeddings.
 
 **Constructor Arguments:**
 ```python
@@ -2312,7 +2509,7 @@ EntropyModel(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/blt_blocks.py:347*
+*📁 src/dl_techniques/layers/blt_blocks.py:352*
 
 #### `EomtMask`
 **Module:** `layers.eomt_mask`
@@ -2349,12 +2546,12 @@ EomtMask(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/eomt_mask.py:76*
+*📁 src/dl_techniques/layers/eomt_mask.py:37*
 
 #### `EomtTransformer`
 **Module:** `layers.transformers.eomt_transformer`
 
-Configurable Encoder-only Mask Transformer layer for vision_heads segmentation.
+Configurable Encoder-only Mask Transformer layer for vision segmentation.
 
 **Constructor Arguments:**
 ```python
@@ -2434,12 +2631,12 @@ EvidenceSupportedTokenGeneration(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:618*
+*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:580*
 
 #### `ExogenousBlock`
 **Module:** `layers.time_series.nbeatsx_blocks`
 
-N-BEATSx Exogenous Block.
+N-BEATSx exogenous block incorporating external covariates.
 
 *Inherits from: `NBeatsBlock`*
 
@@ -2452,7 +2649,7 @@ Base class for expanded gating range activation functions.
 
 *Inherits from: `BaseActivation`*
 
-*📁 src/dl_techniques/layers/activations/expanded_activations.py:268*
+*📁 src/dl_techniques/layers/activations/expanded_activations.py:226*
 
 #### `ExpertConfig`
 **Module:** `layers.moe.config`
@@ -2477,21 +2674,21 @@ ExponentialMovingAverage(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/time_series/ema_layer.py:24*
+*📁 src/dl_techniques/layers/time_series/ema_layer.py:31*
 
 #### `FFNExpert`
 **Module:** `layers.moe.experts`
 
-Feed-Forward Network expert for MoE layers using dl_techniques FFN factory.
+Feed-Forward Network expert for MoE layers using the dl_techniques FFN factory.
 
 *Inherits from: `BaseExpert`*
 
-*📁 src/dl_techniques/layers/moe/experts.py:82*
+*📁 src/dl_techniques/layers/moe/experts.py:90*
 
 #### `FFTLayer`
 **Module:** `layers.fft_layers`
 
-Applies 2D Fast Fourier Transform and outputs concatenated real/imag parts.
+Apply 2D Fast Fourier Transform and output concatenated real/imaginary parts.
 
 **Constructor Arguments:**
 ```python
@@ -2502,12 +2699,12 @@ FFTLayer(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/fft_layers.py:8*
+*📁 src/dl_techniques/layers/fft_layers.py:7*
 
 #### `FNetEncoderBlock`
 **Module:** `layers.fnet_encoder_block`
 
-Complete FNet encoder block with Fourier mixing and feed-forward components using factory patterns.
+Complete FNet encoder block with Fourier mixing and feed-forward components.
 
 **Constructor Arguments:**
 ```python
@@ -2525,12 +2722,12 @@ FNetEncoderBlock(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/fnet_encoder_block.py:71*
+*📁 src/dl_techniques/layers/fnet_encoder_block.py:33*
 
 #### `FNetFourierTransform`
 **Module:** `layers.attention.fnet_fourier_transform`
 
-FNet Fourier Transform layer that replaces self-attention with parameter-free mixing.
+Parameter-free token mixing via 2D Discrete Fourier Transform.
 
 **Constructor Arguments:**
 ```python
@@ -2549,7 +2746,7 @@ FNetFourierTransform(
 #### `FermiDiracDecoder`
 **Module:** `layers.graphs.fermi_diract_decoder`
 
-Fermi-Dirac decoder for edge probability prediction using Euclidean distances.
+Fermi-Dirac decoder for edge probability prediction.
 
 **Constructor Arguments:**
 ```python
@@ -2597,53 +2794,7 @@ FiLMLayer(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/film.py:77*
-
-#### `FieldEmbedding`
-**Module:** `layers.geometric.fields.field_embedding`
-
-Field Embedding layer that maps tokens to fields with curvature.
-
-**Constructor Arguments:**
-```python
-FieldEmbedding(
-    vocab_size: int,
-    embed_dim: int,
-    curvature_dim: Optional[int] = None,
-    curvature_type: CurvatureType = 'ricci',
-    curvature_scale: float = 0.1,
-    curvature_regularization: float = 0.01,
-    embed_initializer: Union[str, initializers.Initializer] = 'uniform',
-    curvature_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-    embed_regularizer: Optional[regularizers.Regularizer] = None,
-    curvature_regularizer: Optional[regularizers.Regularizer] = None,
-    **kwargs
-)
-```
-
-*Inherits from: `keras.layers.Layer`*
-
-*📁 src/dl_techniques/layers/geometric/fields/field_embedding.py:30*
-
-#### `FieldNormalization`
-**Module:** `layers.geometric.fields.holonomic_transformer`
-
-Field-aware normalization that respects curvature.
-
-**Constructor Arguments:**
-```python
-FieldNormalization(
-    epsilon: float = 1e-06,
-    use_curvature_scaling: bool = True,
-    center: bool = True,
-    scale: bool = True,
-    **kwargs
-)
-```
-
-*Inherits from: `keras.layers.Layer`*
-
-*📁 src/dl_techniques/layers/geometric/fields/holonomic_transformer.py:38*
+*📁 src/dl_techniques/layers/film.py:25*
 
 #### `ForecastabilityGate`
 **Module:** `layers.time_series.forecasting_layers`
@@ -2664,7 +2815,7 @@ ForecastabilityGate(
 
 *Inherits from: `layers.Layer`*
 
-*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:124*
+*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:150*
 
 #### `FractalBlock`
 **Module:** `layers.fractal_block`
@@ -2683,12 +2834,12 @@ FractalBlock(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/fractal_block.py:66*
+*📁 src/dl_techniques/layers/fractal_block.py:31*
 
 #### `FreeTransformerLayer`
 **Module:** `layers.transformers.free_transformer`
 
-A Transformer layer extended with the Free Transformer C-VAE architecture.
+Transformer layer extended with the Free Transformer C-VAE architecture.
 
 **Constructor Arguments:**
 ```python
@@ -2709,7 +2860,7 @@ FreeTransformerLayer(
 
 *Inherits from: `TransformerLayer`*
 
-*📁 src/dl_techniques/layers/transformers/free_transformer.py:271*
+*📁 src/dl_techniques/layers/transformers/free_transformer.py:237*
 
 #### `FrequencyBandRouter`
 **Module:** `layers.time_series.prism_blocks`
@@ -2730,12 +2881,12 @@ FrequencyBandRouter(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:140*
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:147*
 
 #### `FrequencyBandStatistics`
 **Module:** `layers.time_series.prism_blocks`
 
-Computes summary statistics for frequency bands.
+Compute summary statistics for frequency bands.
 
 **Constructor Arguments:**
 ```python
@@ -2756,12 +2907,12 @@ Gaussian Error Linear Unit (GELU) activation function.
 
 *Inherits from: `BaseActivation`*
 
-*📁 src/dl_techniques/layers/activations/expanded_activations.py:187*
+*📁 src/dl_techniques/layers/activations/expanded_activations.py:135*
 
 #### `GLUFFN`
 **Module:** `layers.ffn.glu_ffn`
 
-Gated Linear Unit Feed Forward Network as described in "GLU Variants Improve Transformer".
+Gated Linear Unit Feed-Forward Network.
 
 **Constructor Arguments:**
 ```python
@@ -2786,7 +2937,7 @@ GLUFFN(
 #### `GatedAttention`
 **Module:** `layers.attention.gated_attention`
 
-Gated Attention layer with normalization, partial RoPE, and output gating.
+Gated multi-head attention with Zero-Centered RMSNorm, partial RoPE, and sigmoid output gating.
 
 **Constructor Arguments:**
 ```python
@@ -2813,7 +2964,7 @@ GatedAttention(
 #### `GatedDeltaNet`
 **Module:** `layers.gated_delta_net`
 
-Gated DeltaNet layer combining delta rule updates with adaptive gating mechanism. This layer is normally input length agnostic, however due to limitations of tensorflow framework we have to define a hard top limit named max_seq_len
+Gated DeltaNet layer combining delta rule updates with adaptive gating.
 
 **Constructor Arguments:**
 ```python
@@ -2843,12 +2994,35 @@ GatedDeltaNet(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/gated_delta_net.py:79*
+*📁 src/dl_techniques/layers/gated_delta_net.py:34*
+
+#### `GatedGeometricResidual`
+**Module:** `layers.geometric.clifford_block`
+
+Gated Geometric Residual (GGR) update.
+
+**Constructor Arguments:**
+```python
+GatedGeometricResidual(
+    channels: int,
+    layer_scale_init: float = 1e-05,
+    drop_path_rate: float = 0.0,
+    kernel_initializer: Any = 'glorot_uniform',
+    bias_initializer: Any = 'zeros',
+    kernel_regularizer: Optional[Any] = None,
+    bias_regularizer: Optional[Any] = None,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:286*
 
 #### `GatedMLP`
 **Module:** `layers.ffn.gated_mlp`
 
-A Gated MLP layer implementation using 1x1 convolutions.
+Gated MLP layer using 1x1 convolutions for spatial data.
 
 **Constructor Arguments:**
 ```python
@@ -2875,37 +3049,12 @@ GatedMLP(
 
 Configuration for MoE gating networks (routers).
 
-*📁 src/dl_techniques/layers/moe/config.py:99*
-
-#### `GaugeInvariantAttention`
-**Module:** `layers.geometric.fields.gauge_invariant_attention`
-
-Attention mechanism that respects gauge invariance.
-
-**Constructor Arguments:**
-```python
-GaugeInvariantAttention(
-    hidden_dim: int,
-    num_heads: int = 8,
-    key_dim: Optional[int] = None,
-    attention_metric: AttentionMetric = 'hybrid',
-    use_curvature_gating: bool = True,
-    use_parallel_transport: bool = True,
-    dropout_rate: float = 0.0,
-    kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-    kernel_regularizer: Optional[regularizers.Regularizer] = None,
-    **kwargs
-)
-```
-
-*Inherits from: `keras.layers.Layer`*
-
-*📁 src/dl_techniques/layers/geometric/fields/gauge_invariant_attention.py:35*
+*📁 src/dl_techniques/layers/moe/config.py:86*
 
 #### `GaussianFilter`
 **Module:** `layers.gaussian_filter`
 
-Applies Gaussian blur filter to input images.
+Apply Gaussian blur filter to input images via depthwise convolution.
 
 **Constructor Arguments:**
 ```python
@@ -2922,7 +3071,7 @@ GaussianFilter(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/gaussian_filter.py:61*
+*📁 src/dl_techniques/layers/gaussian_filter.py:30*
 
 #### `GaussianLikelihoodHead`
 **Module:** `layers.time_series.deepar_blocks`
@@ -2939,7 +3088,7 @@ GaussianLikelihoodHead(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:128*
+*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:135*
 
 #### `GaussianPyramid`
 **Module:** `layers.gaussian_pyramid`
@@ -2962,7 +3111,7 @@ GaussianPyramid(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/gaussian_pyramid.py:59*
+*📁 src/dl_techniques/layers/gaussian_pyramid.py:31*
 
 #### `GeGLUFFN`
 **Module:** `layers.ffn.geglu_ffn`
@@ -2992,16 +3141,16 @@ GeGLUFFN(
 #### `GenericBlock`
 **Module:** `layers.time_series.nbeats_blocks`
 
-Generic N-BEATS block with learnable linear transformations for flexible pattern modeling.
+Generic N-BEATS block with learnable linear basis functions.
 
 *Inherits from: `NBeatsBlock`*
 
-*📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:483*
+*📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:455*
 
 #### `GlobalResponseNormalization`
 **Module:** `layers.norms.global_response_norm`
 
-Global Response Normalization (GRN) layer supporting 2D, 3D, and 4D inputs.
+Global Response Normalization (GRN) layer for 2D, 3D, and 4D inputs.
 
 **Constructor Arguments:**
 ```python
@@ -3036,7 +3185,7 @@ GlobalSumPooling2D(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/global_sum_pool_2d.py:54*
+*📁 src/dl_techniques/layers/global_sum_pool_2d.py:23*
 
 #### `GlobalTransformer`
 **Module:** `layers.blt_blocks`
@@ -3057,7 +3206,7 @@ GlobalTransformer(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/blt_blocks.py:1163*
+*📁 src/dl_techniques/layers/blt_blocks.py:1107*
 
 #### `GoLU`
 **Module:** `layers.activations.golu`
@@ -3124,12 +3273,12 @@ GraphNeuralNetworkLayer(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/experimental/contextual_memory.py:259*
+*📁 src/dl_techniques/layers/experimental/contextual_memory.py:258*
 
 #### `GraphNeuralNetworkLayer`
 **Module:** `layers.graphs.graph_neural_network`
 
-Complete configurable Graph Neural Network for concept relationship modeling.
+Configurable multi-paradigm Graph Neural Network layer.
 
 **Constructor Arguments:**
 ```python
@@ -3182,7 +3331,7 @@ GroupedQueryAttention(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/attention/group_query_attention.py:63*
+*📁 src/dl_techniques/layers/attention/group_query_attention.py:43*
 
 #### `HANCBlock`
 **Module:** `layers.hanc_block`
@@ -3232,7 +3381,7 @@ HANCLayer(
 #### `HaarWaveletDecomposition`
 **Module:** `layers.haar_wavelet_decomposition`
 
-Performs Haar Discrete Wavelet Transform (DWT) decomposition.
+Perform Haar Discrete Wavelet Transform (DWT) decomposition.
 
 **Constructor Arguments:**
 ```python
@@ -3244,7 +3393,7 @@ HaarWaveletDecomposition(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/haar_wavelet_decomposition.py:15*
+*📁 src/dl_techniques/layers/haar_wavelet_decomposition.py:17*
 
 #### `HardSigmoid`
 **Module:** `layers.activations.hard_sigmoid`
@@ -3265,7 +3414,7 @@ HardSigmoid(
 #### `HardSwish`
 **Module:** `layers.activations.hard_swish`
 
-Hard-swish activation function for efficient mobile-optimized neural networks.
+Hard-swish activation function for efficient mobile-optimized networks.
 
 **Constructor Arguments:**
 ```python
@@ -3281,16 +3430,16 @@ HardSwish(
 #### `HeadConfiguration`
 **Module:** `layers.vision_heads.factory`
 
-Configuration helper for vision_heads heads.
+Configuration helper for vision heads.
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:1037*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:1195*
 
 #### `HeadState`
-**Module:** `layers.ntm.ntm_interface`
+**Module:** `layers.memory.ntm_interface`
 
 Represents the state of a read or write head.
 
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:128*
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:126*
 
 #### `HebbianReadoutLayer`
 **Module:** `layers.mothnet_blocks`
@@ -3311,7 +3460,30 @@ HebbianReadoutLayer(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/mothnet_blocks.py:571*
+*📁 src/dl_techniques/layers/mothnet_blocks.py:448*
+
+#### `HierarchicalCodebookEmbedding`
+**Module:** `layers.embedding.hierarchical_codebook_embedding`
+
+Additive multi-codebook embedding for parameter-efficient token lookup.
+
+**Constructor Arguments:**
+```python
+HierarchicalCodebookEmbedding(
+    vocab_size: int,
+    output_dim: int,
+    num_chunks: int = 2,
+    chunk_bits: Optional[int] = None,
+    use_layer_norm: bool = True,
+    embeddings_initializer: Union[str, initializers.Initializer] = 'uniform',
+    embeddings_regularizer: Optional[Union[str, regularizers.Regularizer]] = None,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/layers/embedding/hierarchical_codebook_embedding.py:113*
 
 #### `HierarchicalEvidenceAggregator`
 **Module:** `layers.experimental.hierarchical_evidence_llm`
@@ -3332,7 +3504,7 @@ HierarchicalEvidenceAggregator(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:257*
+*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:241*
 
 #### `HierarchicalMLPStem`
 **Module:** `layers.hierarchical_mlp_stem`
@@ -3390,7 +3562,7 @@ HierarchicalMemorySystem(
 #### `HierarchicalReasoningCore`
 **Module:** `layers.reasoning.hrm_reasoning_core`
 
-Stateful hierarchical reasoning core for complex multi-step reasoning tasks.
+Stateful hierarchical reasoning core for multi-step cognitive tasks.
 
 **Constructor Arguments:**
 ```python
@@ -3451,99 +3623,10 @@ HierarchicalReasoningModule(
 
 *📁 src/dl_techniques/layers/reasoning/hrm_reasoning_module.py:57*
 
-#### `HolonomicFieldProjection`
-**Module:** `layers.experimental.field_embeddings`
-
-Projects final rotation matrix state to a feature vector for downstream tasks.
-
-**Constructor Arguments:**
-```python
-HolonomicFieldProjection(
-    projection_type: str = 'reference',
-    reference_vector: Optional[Union[List[float], np.ndarray]] = None,
-    name: Optional[str] = None,
-    **kwargs
-)
-```
-
-*Inherits from: `keras.layers.Layer`*
-
-*📁 src/dl_techniques/layers/experimental/field_embeddings.py:640*
-
-#### `HolonomicPathIntegrator`
-**Module:** `layers.experimental.field_embeddings`
-
-Computes the path-ordered integral of rotation matrices along a sequence.
-
-**Constructor Arguments:**
-```python
-HolonomicPathIntegrator(
-    return_sequences: bool = True,
-    name: Optional[str] = None,
-    **kwargs
-)
-```
-
-*Inherits from: `keras.layers.Layer`*
-
-*📁 src/dl_techniques/layers/experimental/field_embeddings.py:288*
-
-#### `HolonomicTransformerLayer`
-**Module:** `layers.geometric.fields.holonomic_transformer`
-
-Complete Holonomic Transformer Layer.
-
-**Constructor Arguments:**
-```python
-HolonomicTransformerLayer(
-    hidden_dim: int,
-    num_heads: int = 8,
-    ffn_dim: Optional[int] = None,
-    curvature_type: str = 'ricci',
-    connection_type: str = 'yang_mills',
-    attention_metric: str = 'hybrid',
-    use_holonomy_features: bool = True,
-    use_anomaly_detection: bool = True,
-    dropout_rate: float = 0.1,
-    normalization_type: NormalizationType = 'field_norm',
-    activation: str = 'gelu',
-    kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-    kernel_regularizer: Optional[regularizers.Regularizer] = None,
-    **kwargs
-)
-```
-
-*Inherits from: `keras.layers.Layer`*
-
-*📁 src/dl_techniques/layers/geometric/fields/holonomic_transformer.py:167*
-
-#### `HolonomyLayer`
-**Module:** `layers.geometric.fields.holonomy_layer`
-
-Computes holonomy (path-ordered exponential around loops).
-
-**Constructor Arguments:**
-```python
-HolonomyLayer(
-    hidden_dim: int,
-    loop_sizes: List[int] = [2, 4, 8],
-    loop_type: LoopType = 'rectangular',
-    num_loops: int = 4,
-    use_trace: bool = True,
-    holonomy_regularization: float = 0.001,
-    kernel_initializer: Union[str, initializers.Initializer] = 'orthogonal',
-    **kwargs
-)
-```
-
-*Inherits from: `keras.layers.Layer`*
-
-*📁 src/dl_techniques/layers/geometric/fields/holonomy_layer.py:34*
-
 #### `HopfieldAttention`
 **Module:** `layers.attention.hopfield_attention`
 
-Modern Hopfield layer implementation as described in 'Hopfield Networks is All You Need'.
+Modern Hopfield Network with iterative attention-based pattern retrieval.
 
 **Constructor Arguments:**
 ```python
@@ -3572,7 +3655,7 @@ HopfieldAttention(
 #### `IFFTLayer`
 **Module:** `layers.fft_layers`
 
-Applies 2D Inverse FFT to concatenated real/imag parts.
+Apply 2D Inverse FFT to concatenated real/imaginary parts.
 
 **Constructor Arguments:**
 ```python
@@ -3583,7 +3666,7 @@ IFFTLayer(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/fft_layers.py:126*
+*📁 src/dl_techniques/layers/fft_layers.py:119*
 
 #### `ImageCaptioningHead`
 **Module:** `layers.vlm_heads.factory`
@@ -3605,7 +3688,7 @@ ImageCaptioningHead(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/vlm_heads/factory.py:140*
+*📁 src/dl_techniques/layers/vlm_heads/factory.py:175*
 
 #### `ImageTextMatchingHead`
 **Module:** `layers.vlm_heads.factory`
@@ -3614,7 +3697,7 @@ A projection head for contrastive image-text alignment and fine-grained matching
 
 *Inherits from: `BaseVLMHead`*
 
-*📁 src/dl_techniques/layers/vlm_heads/factory.py:464*
+*📁 src/dl_techniques/layers/vlm_heads/factory.py:590*
 
 #### `InstanceSegmentationHead`
 **Module:** `layers.vision_heads.factory`
@@ -3623,7 +3706,7 @@ Instance segmentation head combining detection and segmentation.
 
 *Inherits from: `BaseVisionHead`*
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:614*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:769*
 
 #### `InvertedResidualBlock`
 **Module:** `layers.inverted_residual_block`
@@ -3682,10 +3765,10 @@ InvertibleKernelPCADenoiser(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:657*
+*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:584*
 
 #### `KANLinear`
-**Module:** `layers.kan_linear`
+**Module:** `layers.ffn.kan_linear`
 
 Kolmogorov-Arnold Network (KAN) linear layer with learnable activation functions.
 
@@ -3707,7 +3790,7 @@ KANLinear(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/kan_linear.py:56*
+*📁 src/dl_techniques/layers/ffn/kan_linear.py:56*
 
 #### `KANvolution`
 **Module:** `layers.convolutional_kan`
@@ -3741,7 +3824,7 @@ KANvolution(
 #### `KMeansLayer`
 **Module:** `layers.kmeans`
 
-A differentiable K-means layer with momentum and centroid repulsion.
+Differentiable K-means layer with momentum and centroid repulsion.
 
 **Constructor Arguments:**
 ```python
@@ -3786,12 +3869,12 @@ KeyValueMemoryStore(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/experimental/contextual_memory.py:124*
+*📁 src/dl_techniques/layers/experimental/contextual_memory.py:122*
 
 #### `LagrangianNeuralNetworkLayer`
 **Module:** `layers.physics.lagrange_layer`
 
-Physics-informed layer modeling system dynamics through learned Lagrangian mechanics.
+Physics-informed layer modeling dynamics through learned Lagrangian mechanics.
 
 **Constructor Arguments:**
 ```python
@@ -3809,7 +3892,7 @@ LagrangianNeuralNetworkLayer(
 #### `LaplacianFilter`
 **Module:** `layers.laplacian_filter`
 
-Laplacian filter layer that detects edges by approximating the second derivative.
+Laplacian filter layer using Difference of Gaussians for edge detection.
 
 **Constructor Arguments:**
 ```python
@@ -3831,7 +3914,7 @@ LaplacianFilter(
 #### `LearnableArithmeticOperator`
 **Module:** `layers.logic.arithmetic_operators`
 
-A learnable arithmetic operator that can perform various arithmetic operations.
+Differentiable learnable arithmetic operator layer.
 
 **Constructor Arguments:**
 ```python
@@ -3858,7 +3941,7 @@ LearnableArithmeticOperator(
 #### `LearnableLogicOperator`
 **Module:** `layers.logic.logic_operators`
 
-A learnable logic operator that can perform various logical operations.
+Differentiable learnable logic operator layer using fuzzy logic.
 
 **Constructor Arguments:**
 ```python
@@ -3879,7 +3962,7 @@ LearnableLogicOperator(
 #### `LearnableMultiplier`
 **Module:** `layers.layer_scale`
 
-Layer implementing learnable element-wise multipliers for adaptive feature scaling.
+Learnable element-wise multiplier for adaptive feature scaling.
 
 **Constructor Arguments:**
 ```python
@@ -3894,12 +3977,12 @@ LearnableMultiplier(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/layer_scale.py:107*
+*📁 src/dl_techniques/layers/layer_scale.py:102*
 
 #### `LearnableNeuralCircuit`
 **Module:** `layers.logic.neural_circuit`
 
-A learnable neural circuit with configurable depth and parallel operators.
+Deep learnable neural circuit with stacked parallel operator layers.
 
 **Constructor Arguments:**
 ```python
@@ -3919,35 +4002,12 @@ LearnableNeuralCircuit(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/logic/neural_circuit.py:320*
-
-#### `LieGroupEmbedding`
-**Module:** `layers.experimental.field_embeddings`
-
-Maps token IDs to rotation matrices in SO(n) using Lie algebra exponential map.
-
-**Constructor Arguments:**
-```python
-LieGroupEmbedding(
-    vocab_size: int,
-    embed_dim: int,
-    use_expm: bool = True,
-    max_norm: Optional[float] = None,
-    kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
-    kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-    name: Optional[str] = None,
-    **kwargs
-)
-```
-
-*Inherits from: `keras.layers.Layer`*
-
-*📁 src/dl_techniques/layers/experimental/field_embeddings.py:41*
+*📁 src/dl_techniques/layers/logic/neural_circuit.py:319*
 
 #### `LightweightGNNLayer`
 **Module:** `layers.graphs.relational_graph_transformer_blocks`
 
-Lightweight Graph Convolutional Network layer for structural encoding.
+Lightweight GCN layer for structural positional encoding.
 
 **Constructor Arguments:**
 ```python
@@ -3967,7 +4027,7 @@ LightweightGNNLayer(
 #### `LinearEfficientEnsemble`
 **Module:** `layers.tabm_blocks`
 
-Efficient ensemble linear layer with separate input/output scaling.
+Efficient ensemble linear layer with rank-1 perturbations.
 
 **Constructor Arguments:**
 ```python
@@ -3987,16 +4047,16 @@ LinearEfficientEnsemble(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/tabm_blocks.py:139*
+*📁 src/dl_techniques/layers/tabm_blocks.py:163*
 
 #### `LinearGating`
 **Module:** `layers.moe.gating`
 
-Linear gating network with optional noise and top-k selection.
+Linear gating network with optional noise and top-k expert selection.
 
 *Inherits from: `BaseGating`*
 
-*📁 src/dl_techniques/layers/moe/gating.py:77*
+*📁 src/dl_techniques/layers/moe/gating.py:89*
 
 #### `LocalDecoder`
 **Module:** `layers.blt_blocks`
@@ -4019,7 +4079,7 @@ LocalDecoder(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/blt_blocks.py:1295*
+*📁 src/dl_techniques/layers/blt_blocks.py:1238*
 
 #### `LocalEncoder`
 **Module:** `layers.blt_blocks`
@@ -4045,7 +4105,7 @@ LocalEncoder(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/blt_blocks.py:978*
+*📁 src/dl_techniques/layers/blt_blocks.py:922*
 
 #### `LogicFFN`
 **Module:** `layers.ffn.logic_ffn`
@@ -4093,7 +4153,7 @@ LogitNorm(
 #### `MDNLayer`
 **Module:** `layers.statistics.mdn_layer`
 
-Mixture Density Network Layer with separated processing paths.
+Mixture Density Network layer with separated processing paths.
 
 **Constructor Arguments:**
 ```python
@@ -4143,7 +4203,7 @@ MLFCLayer(
 #### `MLPBlock`
 **Module:** `layers.tabm_blocks`
 
-MLP block with efficient ensemble support and enhanced configurability.
+MLP block with optional efficient ensemble support.
 
 **Constructor Arguments:**
 ```python
@@ -4163,7 +4223,7 @@ MLPBlock(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/tabm_blocks.py:375*
+*📁 src/dl_techniques/layers/tabm_blocks.py:468*
 
 #### `MLPBlock`
 **Module:** `layers.ffn.mlp`
@@ -4193,7 +4253,7 @@ MLPBlock(
 #### `MPSLayer`
 **Module:** `layers.mps_layer`
 
-Matrix Product State inspired layer for tensor decomposition.
+Matrix Product State (MPS) layer for efficient tensor decomposition.
 
 **Constructor Arguments:**
 ```python
@@ -4214,51 +4274,10 @@ MPSLayer(
 
 *📁 src/dl_techniques/layers/mps_layer.py:88*
 
-#### `ManifoldStressLayer`
-**Module:** `layers.geometric.fields.manifold_stress`
-
-Computes manifold stress for anomaly and adversarial detection.
-
-**Constructor Arguments:**
-```python
-ManifoldStressLayer(
-    hidden_dim: int,
-    stress_types: List[str] = ['curvature', 'connection', 'combined'],
-    stress_threshold: float = 0.5,
-    use_learnable_baseline: bool = True,
-    return_components: bool = False,
-    kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
-    **kwargs
-)
-```
-
-*Inherits from: `keras.layers.Layer`*
-
-*📁 src/dl_techniques/layers/geometric/fields/manifold_stress.py:36*
-
-#### `ManifoldStressMonitor`
-**Module:** `layers.experimental.field_embeddings`
-
-Measures geometric "stress" in semantic trajectories for anomaly detection.
-
-**Constructor Arguments:**
-```python
-ManifoldStressMonitor(
-    aggregation: str = 'mean',
-    epsilon: float = 1e-08,
-    name: Optional[str] = None,
-    **kwargs
-)
-```
-
-*Inherits from: `keras.layers.Layer`*
-
-*📁 src/dl_techniques/layers/experimental/field_embeddings.py:458*
-
 #### `MannLayer`
 **Module:** `layers.memory.mann`
 
-Memory-Augmented Neural Network (MANN) layer based on Neural Turing Machines.
+Memory-Augmented Neural Network layer based on Neural Turing Machines.
 
 **Constructor Arguments:**
 ```python
@@ -4296,27 +4315,27 @@ MaxLogitNorm(
 *📁 src/dl_techniques/layers/norms/max_logit_norm.py:42*
 
 #### `MemoryAccessType`
-**Module:** `layers.ntm.ntm_interface`
+**Module:** `layers.memory.ntm_interface`
 
 Enumeration of memory access types.
 
 *Inherits from: `Enum`*
 
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:56*
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:54*
 
 #### `MemoryBankConfig`
 **Module:** `layers.experimental.contextual_memory`
 
 Configuration for the Contextual Memory Bank.
 
-*📁 src/dl_techniques/layers/experimental/contextual_memory.py:83*
+*📁 src/dl_techniques/layers/experimental/contextual_memory.py:82*
 
 #### `MemoryState`
-**Module:** `layers.ntm.ntm_interface`
+**Module:** `layers.memory.ntm_interface`
 
 Represents the state of external memory.
 
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:76*
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:74*
 
 #### `Mish`
 **Module:** `layers.activations.mish`
@@ -4332,12 +4351,12 @@ Mish(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/activations/mish.py:123*
+*📁 src/dl_techniques/layers/activations/mish.py:121*
 
 #### `MixedSequentialBlock`
 **Module:** `layers.time_series.mixed_sequential_block`
 
-Mixed sequential block combining LSTM and self-attention mechanisms for time series processing.
+Hybrid sequential block combining LSTM and self-attention for time series.
 
 **Constructor Arguments:**
 ```python
@@ -4362,12 +4381,12 @@ MixedSequentialBlock(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/time_series/mixed_sequential_block.py:81*
+*📁 src/dl_techniques/layers/time_series/mixed_sequential_block.py:65*
 
 #### `MixtureOfExperts`
 **Module:** `layers.moe.layer`
 
-Mixture of Experts (MoE) layer for sparse neural networks using FFN experts.
+Mixture of Experts layer for sparse neural networks using FFN experts.
 
 **Constructor Arguments:**
 ```python
@@ -4379,21 +4398,21 @@ MixtureOfExperts(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/moe/layer.py:28*
+*📁 src/dl_techniques/layers/moe/layer.py:27*
 
 #### `MoEConfig`
 **Module:** `layers.moe.config`
 
 Complete configuration for Mixture of Experts models focused on FFN experts.
 
-*📁 src/dl_techniques/layers/moe/config.py:171*
+*📁 src/dl_techniques/layers/moe/config.py:164*
 
 #### `MoEOptimizerBuilder`
 **Module:** `layers.moe.integration`
 
 Builder for creating optimizers optimized for MoE training with FFN experts.
 
-*📁 src/dl_techniques/layers/moe/integration.py:74*
+*📁 src/dl_techniques/layers/moe/integration.py:90*
 
 #### `MoETrainingConfig`
 **Module:** `layers.moe.integration`
@@ -4405,7 +4424,7 @@ Training configuration specifically optimized for MoE models.
 #### `MobileMQA`
 **Module:** `layers.attention.mobile_mqa`
 
-Mobile Multi-Query Attention (MobileMQA) block.
+Mobile Multi-Query Attention block with optional spatial downsampling and learnable residual.
 
 *Inherits from: `GroupedQueryAttention`*
 
@@ -4441,7 +4460,7 @@ MobileOneBlock(
 #### `ModalityProjection`
 **Module:** `layers.modality_projection`
 
-Modality projection layer for nanoVLM.
+Modality projection layer for Vision-Language Models.
 
 **Constructor Arguments:**
 ```python
@@ -4466,7 +4485,7 @@ ModalityProjection(
 #### `ModernBertEmbeddings`
 **Module:** `layers.embedding.modern_bert_embeddings`
 
-Computes embeddings for ModernBERT from token and type IDs.
+ModernBERT embedding layer combining word and token type embeddings.
 
 **Constructor Arguments:**
 ```python
@@ -4484,7 +4503,7 @@ ModernBertEmbeddings(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/embedding/modern_bert_embeddings.py:9*
+*📁 src/dl_techniques/layers/embedding/modern_bert_embeddings.py:15*
 
 #### `MonotonicityLayer`
 **Module:** `layers.activations.monotonicity_layer`
@@ -4508,7 +4527,7 @@ MonotonicityLayer(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/activations/monotonicity_layer.py:61*
+*📁 src/dl_techniques/layers/activations/monotonicity_layer.py:56*
 
 #### `MovingStd`
 **Module:** `layers.statistics.moving_std`
@@ -4579,7 +4598,7 @@ MultiHeadCrossAttention(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/attention/multi_head_cross_attention.py:79*
+*📁 src/dl_techniques/layers/attention/multi_head_cross_attention.py:62*
 
 #### `MultiHeadLatentAttention`
 **Module:** `layers.attention.multi_head_latent_attention`
@@ -4610,14 +4629,14 @@ MultiHeadLatentAttention(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/attention/multi_head_latent_attention.py:32*
+*📁 src/dl_techniques/layers/attention/multi_head_latent_attention.py:42*
 
 #### `MultiLayerOODDetector`
 **Module:** `layers.experimental.band_rms_ood`
 
-Multi-layer OOD detector that aggregates shell distances from multiple BandRMS-OOD layers.
+Multi-layer OOD detector aggregating shell distances from multiple BandRMS-OOD layers.
 
-*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:617*
+*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:551*
 
 #### `MultiModalFusion`
 **Module:** `layers.fusion.multimodal_fusion`
@@ -4668,7 +4687,7 @@ MultiTaskHead(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:720*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:905*
 
 #### `MultiTaskNLPHead`
 **Module:** `layers.nlp_heads.factory`
@@ -4687,7 +4706,7 @@ MultiTaskNLPHead(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:1104*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:1117*
 
 #### `MultiTaskVLMHead`
 **Module:** `layers.vlm_heads.factory`
@@ -4706,7 +4725,7 @@ MultiTaskVLMHead(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/vlm_heads/factory.py:571*
+*📁 src/dl_techniques/layers/vlm_heads/factory.py:727*
 
 #### `MultipleChoiceHead`
 **Module:** `layers.nlp_heads.factory`
@@ -4715,12 +4734,12 @@ Head for multiple choice tasks.
 
 *Inherits from: `BaseNLPHead`*
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:993*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:1005*
 
 #### `MultiplierType`
 **Module:** `layers.layer_scale`
 
-Enumeration for multiplier types.
+Enumeration for multiplier types (GLOBAL or CHANNEL).
 
 *Inherits from: `Enum`*
 
@@ -4747,12 +4766,12 @@ MushroomBodyLayer(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/mothnet_blocks.py:284*
+*📁 src/dl_techniques/layers/mothnet_blocks.py:236*
 
 #### `NBeatsBlock`
 **Module:** `layers.time_series.nbeats_blocks`
 
-Enhanced N-BEATS block layer with performance optimizations and modern Keras 3 compliance.
+Base N-BEATS block with a 4-layer dense stack and dual theta projection.
 
 **Constructor Arguments:**
 ```python
@@ -4778,14 +4797,14 @@ NBeatsBlock(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:77*
+*📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:53*
 
 #### `NLPHeadConfiguration`
 **Module:** `layers.nlp_heads.factory`
 
 Configuration helper for NLP heads.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:1448*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:1443*
 
 #### `NLPTaskConfig`
 **Module:** `layers.nlp_heads.task_types`
@@ -4799,7 +4818,7 @@ Configuration for a specific NLP task.
 
 Configuration helper for managing task combinations in NLP multi-task models.
 
-*📁 src/dl_techniques/layers/nlp_heads/task_types.py:425*
+*📁 src/dl_techniques/layers/nlp_heads/task_types.py:441*
 
 #### `NLPTaskType`
 **Module:** `layers.nlp_heads.task_types`
@@ -4813,7 +4832,7 @@ Enumeration of supported NLP tasks for multi-task models.
 #### `NLinear`
 **Module:** `layers.tabm_blocks`
 
-N parallel linear layers for ensemble output with enhanced efficiency.
+N fully independent parallel linear layers using einsum.
 
 **Constructor Arguments:**
 ```python
@@ -4832,10 +4851,10 @@ NLinear(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/tabm_blocks.py:276*
+*📁 src/dl_techniques/layers/tabm_blocks.py:339*
 
 #### `NTMCell`
-**Module:** `layers.ntm.baseline_ntm`
+**Module:** `layers.memory.baseline_ntm`
 
 Core NTM Cell for processing a single timestep.
 
@@ -4852,57 +4871,57 @@ NTMCell(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:822*
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:874*
 
 #### `NTMConfig`
-**Module:** `layers.ntm.ntm_interface`
+**Module:** `layers.memory.ntm_interface`
 
 Configuration for NTM architectures.
 
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:200*
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:198*
 
 #### `NTMController`
-**Module:** `layers.ntm.baseline_ntm`
+**Module:** `layers.memory.baseline_ntm`
 
 Controller network for the Neural Turing Machine.
 
 *Inherits from: `BaseController`*
 
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:637*
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:689*
 
 #### `NTMMemory`
-**Module:** `layers.ntm.baseline_ntm`
+**Module:** `layers.memory.baseline_ntm`
 
 Standard NTM Memory Matrix.
 
 *Inherits from: `BaseMemory`*
 
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:47*
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:47*
 
 #### `NTMOutput`
-**Module:** `layers.ntm.ntm_interface`
+**Module:** `layers.memory.ntm_interface`
 
 Output structure for NTM forward pass.
 
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:167*
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:165*
 
 #### `NTMReadHead`
-**Module:** `layers.ntm.baseline_ntm`
+**Module:** `layers.memory.baseline_ntm`
 
 Standard NTM Read Head.
 
 *Inherits from: `BaseHead`*
 
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:168*
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:195*
 
 #### `NTMWriteHead`
-**Module:** `layers.ntm.baseline_ntm`
+**Module:** `layers.memory.baseline_ntm`
 
 Standard NTM Write Head.
 
 *Inherits from: `BaseHead`*
 
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:399*
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:451*
 
 #### `NaiveResidual`
 **Module:** `layers.time_series.forecasting_layers`
@@ -4920,7 +4939,7 @@ NaiveResidual(
 
 *Inherits from: `layers.Layer`*
 
-*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:27*
+*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:28*
 
 #### `NegativeBinomialLikelihoodHead`
 **Module:** `layers.time_series.deepar_blocks`
@@ -4937,21 +4956,21 @@ NegativeBinomialLikelihoodHead(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:242*
+*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:265*
 
 #### `NeuralTuringMachine`
-**Module:** `layers.ntm.baseline_ntm`
+**Module:** `layers.memory.baseline_ntm`
 
 Complete Neural Turing Machine Layer.
 
 *Inherits from: `BaseNTM`*
 
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:1193*
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:1265*
 
 #### `NeuroGrid`
 **Module:** `layers.neuro_grid`
 
-NeuroGrid: Differentiable N-Dimensional Memory Lattice with Probabilistic Addressing for Transformers.
+Differentiable N-dimensional memory lattice with probabilistic addressing.
 
 **Constructor Arguments:**
 ```python
@@ -4980,7 +4999,7 @@ NeuroGrid(
 #### `NonLocalAttention`
 **Module:** `layers.attention.non_local_attention`
 
-Non-local Self Attention Layer for computer vision_heads tasks.
+Non-local self-attention layer for capturing long-range spatial dependencies.
 
 **Constructor Arguments:**
 ```python
@@ -5005,7 +5024,7 @@ NonLocalAttention(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/attention/non_local_attention.py:65*
+*📁 src/dl_techniques/layers/attention/non_local_attention.py:26*
 
 #### `NormalizationLayer`
 **Module:** `layers.io_preparation`
@@ -5025,7 +5044,7 @@ NormalizationLayer(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/io_preparation.py:118*
+*📁 src/dl_techniques/layers/io_preparation.py:114*
 
 #### `NormalizingFlowLayer`
 **Module:** `layers.statistics.normalizing_flow`
@@ -5039,7 +5058,7 @@ NormalizingFlowLayer(
     num_flow_steps: int,
     context_dim: int,
     hidden_units_coupling: int = 64,
-    activation: Union[str, callable] = 'relu',
+    activation: Union[str, Callable] = 'relu',
     use_tanh_stabilization: bool = True,
     **kwargs
 )
@@ -5047,12 +5066,12 @@ NormalizingFlowLayer(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/statistics/normalizing_flow.py:414*
+*📁 src/dl_techniques/layers/statistics/normalizing_flow.py:341*
 
 #### `OneHotEncoding`
 **Module:** `layers.one_hot_encoding`
 
-One-hot encoding layer for categorical features with enhanced efficiency.
+One-hot encoding layer for multiple categorical features.
 
 **Constructor Arguments:**
 ```python
@@ -5069,7 +5088,7 @@ OneHotEncoding(
 #### `OrthoBlock`
 **Module:** `layers.orthoblock`
 
-Structured feature learning block with orthogonal regularization and constrained scaling.
+Structured feature learning block with orthogonal regularization and gating.
 
 **Constructor Arguments:**
 ```python
@@ -5167,7 +5186,7 @@ PRISMLayer(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:895*
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:950*
 
 #### `PRISMNode`
 **Module:** `layers.time_series.prism_blocks`
@@ -5189,7 +5208,7 @@ PRISMNode(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:318*
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:339*
 
 #### `PRISMTimeTree`
 **Module:** `layers.time_series.prism_blocks`
@@ -5213,35 +5232,12 @@ PRISMTimeTree(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:542*
-
-#### `ParallelTransportLayer`
-**Module:** `layers.geometric.fields.parallel_transport`
-
-Parallel transport of vectors along paths using the gauge connection.
-
-**Constructor Arguments:**
-```python
-ParallelTransportLayer(
-    transport_dim: int,
-    num_steps: int = 10,
-    transport_method: TransportMethod = 'iterative',
-    step_size: float = 0.1,
-    use_adaptive_steps: bool = False,
-    transport_regularization: float = 0.0,
-    kernel_initializer: Union[str, initializers.Initializer] = 'orthogonal',
-    **kwargs
-)
-```
-
-*Inherits from: `keras.layers.Layer`*
-
-*📁 src/dl_techniques/layers/geometric/fields/parallel_transport.py:33*
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:582*
 
 #### `PatchEmbedding1D`
 **Module:** `layers.embedding.patch_embedding`
 
-Patch embedding layer for time series data.
+1D patch embedding layer for time series data.
 
 **Constructor Arguments:**
 ```python
@@ -5259,12 +5255,12 @@ PatchEmbedding1D(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/embedding/patch_embedding.py:286*
+*📁 src/dl_techniques/layers/embedding/patch_embedding.py:300*
 
 #### `PatchEmbedding2D`
 **Module:** `layers.embedding.patch_embedding`
 
-2D Image to Patch Embedding Layer.
+2D image to patch embedding layer for Vision Transformers.
 
 **Constructor Arguments:**
 ```python
@@ -5288,7 +5284,7 @@ PatchEmbedding2D(
 #### `PatchMerging`
 **Module:** `layers.patch_merging`
 
-Patch merging layer for hierarchical downsampling in Swin Transformer architectures.
+Patch merging layer for hierarchical downsampling in Swin Transformers.
 
 **Constructor Arguments:**
 ```python
@@ -5318,18 +5314,19 @@ PatchPooling(
     pooling_method: str = 'attention',
     output_dim: int = 768,
     num_queries: int = 4,
+    max_patches: int = 64,
     **kwargs
 )
 ```
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/blt_blocks.py:711*
+*📁 src/dl_techniques/layers/blt_blocks.py:671*
 
 #### `PerceiverAttention`
 **Module:** `layers.attention.perceiver_attention`
 
-Cross-attention mechanism from the Perceiver architecture with robust serialization.
+Perceiver-style asymmetric cross-attention with shared projection interface.
 
 **Constructor Arguments:**
 ```python
@@ -5348,7 +5345,7 @@ PerceiverAttention(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/attention/perceiver_attention.py:78*
+*📁 src/dl_techniques/layers/attention/perceiver_attention.py:36*
 
 #### `PerceiverTransformerLayer`
 **Module:** `layers.transformers.perceiver_transformer`
@@ -5379,7 +5376,7 @@ PerceiverTransformerLayer(
 #### `PerformerAttention`
 **Module:** `layers.attention.performer_attention`
 
-Performer attention layer with linear complexity via FAVOR+ approximation.
+Performer attention with linear complexity via FAVOR+ kernel approximation.
 
 **Constructor Arguments:**
 ```python
@@ -5401,12 +5398,12 @@ PerformerAttention(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/attention/performer_attention.py:78*
+*📁 src/dl_techniques/layers/attention/performer_attention.py:29*
 
 #### `PixelShuffle`
 **Module:** `layers.pixel_shuffle`
 
-Pixel shuffle operation for reducing spatial tokens in vision_heads transformers.
+Pixel shuffle for reducing spatial tokens in vision transformers.
 
 **Constructor Arguments:**
 ```python
@@ -5421,10 +5418,33 @@ PixelShuffle(
 
 *📁 src/dl_techniques/layers/pixel_shuffle.py:59*
 
+#### `PixelUnshuffle2D`
+**Module:** `layers.pixel_unshuffle`
+
+Lossless space-to-depth downsampling with optional 1x1 projection.
+
+**Constructor Arguments:**
+```python
+PixelUnshuffle2D(
+    scale: int = 2,
+    out_channels: Optional[int] = None,
+    use_bias: bool = True,
+    kernel_initializer: Any = 'glorot_uniform',
+    bias_initializer: Any = 'zeros',
+    kernel_regularizer: Optional[Any] = None,
+    bias_regularizer: Optional[Any] = None,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/layers/pixel_unshuffle.py:37*
+
 #### `PointCloudAutoencoder`
 **Module:** `layers.geometric.point_cloud_autoencoder`
 
-Modified DGCNN-based autoencoder for point cloud feature extraction.
+DGCNN-based autoencoder for point cloud feature extraction.
 
 **Constructor Arguments:**
 ```python
@@ -5441,7 +5461,7 @@ PointCloudAutoencoder(
 #### `PositionEmbeddingSine2D`
 **Module:** `layers.embedding.positional_embedding_sine_2d`
 
-Generates 2D sinusoidal positional encodings for image-like feature maps.
+Fixed 2D sinusoidal positional encoding for image-like feature maps.
 
 **Constructor Arguments:**
 ```python
@@ -5461,7 +5481,7 @@ PositionEmbeddingSine2D(
 #### `PositionalEmbedding`
 **Module:** `layers.embedding.positional_embedding`
 
-Learned positional embedding layer with enhanced stability.
+Learned absolute positional embedding layer with dropout regularization.
 
 **Constructor Arguments:**
 ```python
@@ -5505,7 +5525,7 @@ PowerMLPLayer(
 #### `PrimaryCapsule`
 **Module:** `layers.capsules`
 
-Primary Capsule Layer implementation.
+Primary capsule layer that converts CNN features into capsule vectors.
 
 **Constructor Arguments:**
 ```python
@@ -5544,12 +5564,12 @@ ProbabilityOutput(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/activations/probability_output.py:55*
+*📁 src/dl_techniques/layers/activations/probability_output.py:54*
 
 #### `ProgressiveFocusedAttention`
 **Module:** `layers.attention.progressive_focused_attention`
 
-Progressive Focused Attention mechanism with windowed self-attention.
+Windowed self-attention with progressive focusing from previous layers.
 
 **Constructor Arguments:**
 ```python
@@ -5574,7 +5594,7 @@ ProgressiveFocusedAttention(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/attention/progressive_focused_attention.py:48*
+*📁 src/dl_techniques/layers/attention/progressive_focused_attention.py:28*
 
 #### `QuantileHead`
 **Module:** `layers.time_series.quantile_head_fixed_io`
@@ -5598,12 +5618,12 @@ QuantileHead(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/time_series/quantile_head_fixed_io.py:45*
+*📁 src/dl_techniques/layers/time_series/quantile_head_fixed_io.py:38*
 
 #### `QuantileSequenceHead`
 **Module:** `layers.time_series.quantile_head_variable_io`
 
-Sequence-wise quantile prediction head for probabilistic time series forecasting.
+Sequence-wise quantile prediction head for probabilistic forecasting.
 
 **Constructor Arguments:**
 ```python
@@ -5625,7 +5645,7 @@ QuantileSequenceHead(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/time_series/quantile_head_variable_io.py:76*
+*📁 src/dl_techniques/layers/time_series/quantile_head_variable_io.py:46*
 
 #### `QuestionAnsweringHead`
 **Module:** `layers.nlp_heads.factory`
@@ -5634,12 +5654,12 @@ Head for extractive question answering.
 
 *Inherits from: `BaseNLPHead`*
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:573*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:586*
 
 #### `RBFLayer`
 **Module:** `layers.radial_basis_function`
 
-Radial Basis Function layer with stable center repulsion mechanism.
+Radial Basis Function layer with adaptive center repulsion.
 
 **Constructor Arguments:**
 ```python
@@ -5665,7 +5685,7 @@ RBFLayer(
 #### `RELGTTokenEncoder`
 **Module:** `layers.graphs.relational_graph_transformer_blocks`
 
-Multi-element tokenization encoder for heterogeneous graph nodes.
+Multi-element tokenisation encoder for heterogeneous graph nodes.
 
 **Constructor Arguments:**
 ```python
@@ -5684,7 +5704,7 @@ RELGTTokenEncoder(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:260*
+*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:213*
 
 #### `RELGTTransformerBlock`
 **Module:** `layers.graphs.relational_graph_transformer_blocks`
@@ -5708,7 +5728,7 @@ RELGTTransformerBlock(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:611*
+*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:503*
 
 #### `RFFKernelLayer`
 **Module:** `layers.random_fourier_features`
@@ -5761,7 +5781,7 @@ RMSNorm(
 #### `RPCAttention`
 **Module:** `layers.attention.rpc_attention`
 
-Robust Principal Components Attention layer.
+Robust Principal Components Attention via PCP decomposition.
 
 **Constructor Arguments:**
 ```python
@@ -5783,12 +5803,12 @@ RPCAttention(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/attention/rpc_attention.py:70*
+*📁 src/dl_techniques/layers/attention/rpc_attention.py:25*
 
 #### `ReLUK`
 **Module:** `layers.activations.relu_k`
 
-ReLU-k activation layer implementing f(x) = max(0, x)^k.
+ReLU-k activation layer implementing ``f(x) = max(0, x)^k``.
 
 **Constructor Arguments:**
 ```python
@@ -5805,7 +5825,7 @@ ReLUK(
 #### `RepMixerBlock`
 **Module:** `layers.repmixer_block`
 
-RepMixer block for efficient feature mixing in vision_heads models.
+RepMixer block for efficient spatial and channel feature mixing.
 
 **Constructor Arguments:**
 ```python
@@ -5831,7 +5851,7 @@ RepMixerBlock(
 #### `ResPath`
 **Module:** `layers.res_path`
 
-Residual Path layer for improving skip connections in U-Net architectures.
+Residual path for bridging the semantic gap in U-Net skip connections.
 
 **Constructor Arguments:**
 ```python
@@ -5851,7 +5871,7 @@ ResPath(
 #### `ResidualACFLayer`
 **Module:** `layers.statistics.residual_acf`
 
-Residual Autocorrelation Function analysis and regularization layer for time series models.
+Residual Autocorrelation Function analysis and regularization layer.
 
 **Constructor Arguments:**
 ```python
@@ -5918,12 +5938,12 @@ ResidualDenseBlock(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/standard_blocks.py:640*
+*📁 src/dl_techniques/layers/standard_blocks.py:619*
 
 #### `RestrictedBoltzmannMachine`
 **Module:** `layers.restricted_boltzmann_machine`
 
-Restricted Boltzmann Machine (RBM) layer for unsupervised feature learning.
+Restricted Boltzmann Machine layer for unsupervised feature learning.
 
 **Constructor Arguments:**
 ```python
@@ -5948,7 +5968,7 @@ RestrictedBoltzmannMachine(
 #### `RigidSimplexLayer`
 **Module:** `layers.rigid_simplex_layer`
 
-Projects inputs onto a fixed Simplex structure with learnable rotation and scaling.
+Project inputs onto a rigid Simplex with learnable rotation and scaling.
 
 **Constructor Arguments:**
 ```python
@@ -5969,7 +5989,7 @@ RigidSimplexLayer(
 #### `RingAttention`
 **Module:** `layers.attention.ring_attention`
 
-Ring Attention layer with blockwise processing for extremely long sequences.
+Ring Attention with blockwise processing for extremely long sequences.
 
 **Constructor Arguments:**
 ```python
@@ -5989,12 +6009,12 @@ RingAttention(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/attention/ring_attention.py:77*
+*📁 src/dl_techniques/layers/attention/ring_attention.py:35*
 
 #### `RotaryPositionEmbedding`
 **Module:** `layers.embedding.rotary_position_embedding`
 
-Rotary Position Embedding layer for transformer attention mechanisms.
+Rotary Position Embedding (RoPE) layer for transformer attention.
 
 **Constructor Arguments:**
 ```python
@@ -6014,7 +6034,7 @@ RotaryPositionEmbedding(
 #### `RouterLayer`
 **Module:** `layers.router`
 
-Wraps a TransformerLayer with a Dr.LLM-style dynamic routing mechanism.
+Dynamic router wrapping a TransformerLayer for adaptive computation.
 
 **Constructor Arguments:**
 ```python
@@ -6037,7 +6057,7 @@ RouterLayer(
 #### `RoutingCapsule`
 **Module:** `layers.capsules`
 
-Capsule layer with dynamic routing between capsules.
+Capsule layer with iterative dynamic routing between capsules.
 
 **Constructor Arguments:**
 ```python
@@ -6056,14 +6076,12 @@ RoutingCapsule(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/capsules.py:324*
+*📁 src/dl_techniques/layers/capsules.py:282*
 
 #### `RoutingProbabilitiesLayer`
 **Module:** `layers.activations.routing_probabilities`
 
-Hierarchical routing layer for probabilistic classification. Supports both
-`mode="deterministic"` (parameter-free cosine basis projection) and
-`mode="trainable"` (learnable Dense projection).
+Hierarchical routing layer for probabilistic classification.
 
 **Constructor Arguments:**
 ```python
@@ -6071,18 +6089,23 @@ RoutingProbabilitiesLayer(
     output_dim: Optional[int] = None,
     axis: int = -1,
     epsilon: float = 1e-07,
-    mode: str = "deterministic",
+    mode: str = 'deterministic',
     kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
     bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
     kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+    bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+    kernel_constraint: Optional[Union[str, keras.constraints.Constraint]] = None,
+    bias_constraint: Optional[Union[str, keras.constraints.Constraint]] = None,
     use_bias: bool = True,
+    input_normalization: Optional[str] = None,
+    normalize: bool = True,
     **kwargs
 )
 ```
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/activations/routing_probabilities.py*
+*📁 src/dl_techniques/layers/activations/routing_probabilities.py:194*
 
 #### `SHGCNLayer`
 **Module:** `layers.graphs.simplified_hyperbolic_graph_convolutional_neural_layer`
@@ -6110,7 +6133,7 @@ SHGCNLayer(
 #### `SOM2dLayer`
 **Module:** `layers.memory.som_2d_layer`
 
-2D Self-Organizing Map (SOM) layer for competitive learning and topological data organization.
+2D Self-Organizing Map layer for competitive learning and topological organization.
 
 **Constructor Arguments:**
 ```python
@@ -6130,12 +6153,12 @@ SOM2dLayer(
 
 *Inherits from: `SOMLayer`*
 
-*📁 src/dl_techniques/layers/memory/som_2d_layer.py:141*
+*📁 src/dl_techniques/layers/memory/som_2d_layer.py:153*
 
 #### `SOMLayer`
 **Module:** `layers.memory.som_nd_layer`
 
-N-Dimensional Self-Organizing Map (SOM) layer implementation for Keras.
+N-Dimensional Self-Organizing Map layer for unsupervised topological learning.
 
 **Constructor Arguments:**
 ```python
@@ -6160,7 +6183,7 @@ SOMLayer(
 #### `Sampling`
 **Module:** `layers.sampling`
 
-Uses reparameterization trick to sample from a Normal distribution.
+Sample from a latent Normal distribution via the reparameterisation trick.
 
 **Constructor Arguments:**
 ```python
@@ -6190,12 +6213,12 @@ SaturatedMish(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/activations/mish.py:257*
+*📁 src/dl_techniques/layers/activations/mish.py:210*
 
 #### `ScaleEnsemble`
 **Module:** `layers.tabm_blocks`
 
-Enhanced ensemble adapter with learnable scaling weights.
+Learnable per-feature scaling for ensemble members.
 
 **Constructor Arguments:**
 ```python
@@ -6234,7 +6257,7 @@ ScaleLayer(
 #### `SeasonalityBlock`
 **Module:** `layers.time_series.nbeats_blocks`
 
-Seasonality N-BEATS block with corrected Fourier basis functions for periodic patterns.
+Seasonality N-BEATS block with Fourier basis functions for periodic patterns.
 
 *Inherits from: `NBeatsBlock`*
 
@@ -6247,12 +6270,12 @@ Segmentation head for semantic segmentation tasks.
 
 *Inherits from: `BaseVisionHead`*
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:266*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:328*
 
 #### `SelectiveGradientMask`
 **Module:** `layers.selective_gradient_mask`
 
-Layer that selectively stops gradients based on a binary mask.
+Selectively stop gradients based on a binary mask.
 
 **Constructor Arguments:**
 ```python
@@ -6270,7 +6293,7 @@ SelectiveGradientMask(
 #### `SequencePooling`
 **Module:** `layers.sequence_pooling`
 
-Highly configurable pooling layer for sequence data.
+Configurable pooling layer supporting multiple strategies for sequences.
 
 **Constructor Arguments:**
 ```python
@@ -6295,12 +6318,12 @@ SequencePooling(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/sequence_pooling.py:420*
+*📁 src/dl_techniques/layers/sequence_pooling.py:465*
 
 #### `SharedWeightsCrossAttention`
 **Module:** `layers.attention.shared_weights_cross_attention`
 
-Cross-attention between different modalities with shared weights.
+Bidirectional cross-attention between modalities with shared QKV projections.
 
 **Constructor Arguments:**
 ```python
@@ -6319,7 +6342,7 @@ SharedWeightsCrossAttention(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/attention/shared_weights_cross_attention.py:82*
+*📁 src/dl_techniques/layers/attention/shared_weights_cross_attention.py:28*
 
 #### `ShearletTransform`
 **Module:** `layers.shearlet_transform`
@@ -6348,32 +6371,7 @@ Sigmoid Linear Unit (SiLU) activation function.
 
 *Inherits from: `BaseActivation`*
 
-*📁 src/dl_techniques/layers/activations/expanded_activations.py:230*
-
-#### `SimpleSelectCopy`
-**Module:** `layers.ntm.base_layers`
-
-Simplified differentiable select-copy layer for learning input-output mappings.
-
-**Constructor Arguments:**
-```python
-SimpleSelectCopy(
-    input_size: int,
-    output_size: int,
-    content_dim: int,
-    num_copies: int = 1,
-    temperature: float = 1.0,
-    use_content_query: bool = True,
-    kernel_initializer: str | keras.initializers.Initializer = 'glorot_uniform',
-    bias_initializer: str | keras.initializers.Initializer = 'zeros',
-    kernel_regularizer: keras.regularizers.Regularizer | None = None,
-    **kwargs
-)
-```
-
-*Inherits from: `keras.layers.Layer`*
-
-*📁 src/dl_techniques/layers/ntm/base_layers.py:672*
+*📁 src/dl_techniques/layers/activations/expanded_activations.py:183*
 
 #### `SingleWindowAttention`
 **Module:** `layers.attention.single_window_attention`
@@ -6412,11 +6410,11 @@ SingleWindowAttention(
 #### `SoftMoEGating`
 **Module:** `layers.moe.gating`
 
-SoftMoE gating that creates soft input slots for experts.
+Soft Mixture-of-Experts gating via differentiable slot assignment.
 
 *Inherits from: `BaseGating`*
 
-*📁 src/dl_techniques/layers/moe/gating.py:451*
+*📁 src/dl_techniques/layers/moe/gating.py:507*
 
 #### `SoftSOMLayer`
 **Module:** `layers.memory.som_nd_soft_layer`
@@ -6433,6 +6431,7 @@ SoftSOMLayer(
     use_reconstruction_loss: bool = True,
     reconstruction_weight: float = 1.0,
     topological_weight: float = 0.1,
+    topological_sigma: float = 1.0,
     sharpness_weight: float = 0.0,
     kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
     kernel_regularizer: Optional[keras.regularizers.Regularizer] = keras.regularizers.L2(1e-05),
@@ -6477,7 +6476,7 @@ SparseAutoencoder(
 #### `SparsePuzzleEmbedding`
 **Module:** `layers.reasoning.hrm_sparse_puzzle_embedding`
 
-Sparse embedding layer optimized for large-scale puzzle identifier lookups with training efficiency.
+Sparse embedding layer optimized for large-scale puzzle identifier lookups.
 
 **Constructor Arguments:**
 ```python
@@ -6495,6 +6494,30 @@ SparsePuzzleEmbedding(
 
 *📁 src/dl_techniques/layers/reasoning/hrm_sparse_puzzle_embedding.py:45*
 
+#### `SparseRollingGeometricProduct`
+**Module:** `layers.geometric.clifford_block`
+
+Sparse rolling realisation of the Clifford geometric product.
+
+**Constructor Arguments:**
+```python
+SparseRollingGeometricProduct(
+    channels: int,
+    shifts: List[int],
+    cli_mode: CliMode = 'full',
+    use_bias: bool = True,
+    kernel_initializer: Any = 'glorot_uniform',
+    bias_initializer: Any = 'zeros',
+    kernel_regularizer: Optional[Any] = None,
+    bias_regularizer: Optional[Any] = None,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:57*
+
 #### `Sparsemax`
 **Module:** `layers.activations.sparsemax`
 
@@ -6510,12 +6533,12 @@ Sparsemax(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/activations/sparsemax.py:58*
+*📁 src/dl_techniques/layers/activations/sparsemax.py:56*
 
 #### `SpatialAttention`
 **Module:** `layers.attention.spatial_attention`
 
-Spatial attention module of CBAM (Convolutional Block Attention Module).
+Spatial attention module from CBAM that identifies informative spatial regions.
 
 **Constructor Arguments:**
 ```python
@@ -6553,7 +6576,7 @@ SpatialLayer(
 #### `SquashLayer`
 **Module:** `layers.activations.squash`
 
-Applies squashing non-linearity to vectors (capsules).
+Squashing non-linearity for Capsule Network vectors.
 
 **Constructor Arguments:**
 ```python
@@ -6594,7 +6617,7 @@ SqueezeExcitation(
 #### `StochasticDepth`
 **Module:** `layers.stochastic_depth`
 
-Implements Stochastic Depth for deep networks.
+Stochastic Depth regularization for deep networks.
 
 **Constructor Arguments:**
 ```python
@@ -6611,7 +6634,7 @@ StochasticDepth(
 #### `StochasticGradient`
 **Module:** `layers.stochastic_gradient`
 
-Implements Stochastic Gradient dropping for deep networks.
+Stochastic Gradient dropping regularization for deep networks.
 
 **Constructor Arguments:**
 ```python
@@ -6628,7 +6651,7 @@ StochasticGradient(
 #### `StrongAugmentation`
 **Module:** `layers.strong_augmentation`
 
-Strong augmentation layer for unlabeled data.
+Strong augmentation layer for consistency-based regularization.
 
 **Constructor Arguments:**
 ```python
@@ -6651,7 +6674,7 @@ Multi-Head Attention layer regularized by a SystemicGraphFilter.
 
 *Inherits from: `keras.layers.MultiHeadAttention`*
 
-*📁 src/dl_techniques/layers/experimental/mst_correlation_filter.py:379*
+*📁 src/dl_techniques/layers/experimental/mst_correlation_filter.py:362*
 
 #### `SupernodePooling`
 **Module:** `layers.geometric.supernode_pooling`
@@ -6700,7 +6723,7 @@ SupportEmbeddingLayer(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:436*
+*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:410*
 
 #### `SwiGLUFFN`
 **Module:** `layers.ffn.swiglu_ffn`
@@ -6730,7 +6753,7 @@ SwiGLUFFN(
 #### `SwinConvBlock`
 **Module:** `layers.transformers.swin_conv_block`
 
-Hybrid Swin-Conv block combining transformer and convolutional paths in parallel.
+Hybrid Swin-Conv block combining transformer and convolutional paths.
 
 **Constructor Arguments:**
 ```python
@@ -6840,7 +6863,7 @@ SystemicGraphFilter(
 #### `TabMBackbone`
 **Module:** `layers.tabm_blocks`
 
-TabM backbone MLP with ensemble support and proper layer management.
+TabM backbone MLP with optional ensemble support.
 
 **Constructor Arguments:**
 ```python
@@ -6860,14 +6883,14 @@ TabMBackbone(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/tabm_blocks.py:496*
+*📁 src/dl_techniques/layers/tabm_blocks.py:625*
 
 #### `TaskConfiguration`
 **Module:** `layers.vision_heads.task_types`
 
 Configuration helper for managing task combinations in multi-task models.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:498*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:447*
 
 #### `TaskType`
 **Module:** `layers.vision_heads.task_types`
@@ -6921,12 +6944,12 @@ TemporalContextEncoder(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/experimental/contextual_memory.py:540*
+*📁 src/dl_techniques/layers/experimental/contextual_memory.py:522*
 
 #### `TemporalConvNet`
 **Module:** `layers.time_series.temporal_convolutional_network`
 
-Temporal Convolutional Network (TCN) Encoder.
+Temporal Convolutional Network (TCN) encoder.
 
 **Constructor Arguments:**
 ```python
@@ -6942,12 +6965,12 @@ TemporalConvNet(
 
 *Inherits from: `layers.Layer`*
 
-*📁 src/dl_techniques/layers/time_series/temporal_convolutional_network.py:87*
+*📁 src/dl_techniques/layers/time_series/temporal_convolutional_network.py:160*
 
 #### `TemporalFusionLayer`
 **Module:** `layers.time_series.temporal_fusion`
 
-A layer that fuses a context-based forecast with an attention-based autoregressive forecast.
+Fuse a context-based forecast with an attention-based autoregressive forecast.
 
 **Constructor Arguments:**
 ```python
@@ -6966,12 +6989,12 @@ TemporalFusionLayer(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/time_series/temporal_fusion.py:84*
+*📁 src/dl_techniques/layers/time_series/temporal_fusion.py:78*
 
 #### `TensorPreprocessingLayer`
 **Module:** `layers.io_preparation`
 
-Composite preprocessing layer combining normalization and clipping operations.
+Composite preprocessing layer combining normalization and clipping.
 
 **Constructor Arguments:**
 ```python
@@ -6989,7 +7012,7 @@ TensorPreprocessingLayer(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/io_preparation.py:389*
+*📁 src/dl_techniques/layers/io_preparation.py:388*
 
 #### `TextClassificationHead`
 **Module:** `layers.nlp_heads.factory`
@@ -6998,12 +7021,12 @@ Head for text classification tasks.
 
 *Inherits from: `BaseNLPHead`*
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:340*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:353*
 
 #### `TextDecoder`
 **Module:** `layers.transformers.text_decoder`
 
-General-purpose configurable text decoder built upon a stack of TransformerLayers.
+General-purpose configurable text decoder built on a TransformerLayer stack.
 
 **Constructor Arguments:**
 ```python
@@ -7035,7 +7058,7 @@ TextDecoder(
 #### `TextEncoder`
 **Module:** `layers.transformers.text_encoder`
 
-General purpose configurable text encoder using factory-based components.
+General-purpose configurable text encoder using factory-based components.
 
 **Constructor Arguments:**
 ```python
@@ -7089,7 +7112,7 @@ Head for text generation tasks.
 
 *Inherits from: `BaseNLPHead`*
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:895*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:907*
 
 #### `TextSimilarityHead`
 **Module:** `layers.nlp_heads.factory`
@@ -7098,7 +7121,7 @@ Head for text similarity and semantic matching tasks.
 
 *Inherits from: `BaseNLPHead`*
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:693*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:706*
 
 #### `ThreshMax`
 **Module:** `layers.activations.thresh_max`
@@ -7130,12 +7153,12 @@ Head for token-level classification tasks.
 
 *Inherits from: `BaseNLPHead`*
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:448*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:461*
 
 #### `TokenEmbedding`
 **Module:** `layers.tokenizers.bpe`
 
-Token embedding layer that converts token IDs to dense vectors.
+Token embedding layer converting token IDs to dense vectors.
 
 **Constructor Arguments:**
 ```python
@@ -7150,7 +7173,7 @@ TokenEmbedding(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/tokenizers/bpe.py:387*
+*📁 src/dl_techniques/layers/tokenizers/bpe.py:395*
 
 #### `TransformerLayer`
 **Module:** `layers.transformers.transformer`
@@ -7196,11 +7219,11 @@ TransformerLayer(
 #### `TrendBlock`
 **Module:** `layers.time_series.nbeats_blocks`
 
-Trend N-BEATS block with polynomial basis functions for modeling trending behavior.
+Trend N-BEATS block with polynomial basis functions for modeling trends.
 
 *Inherits from: `NBeatsBlock`*
 
-*📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:614*
+*📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:598*
 
 #### `TripSE1`
 **Module:** `layers.attention.tripse_attention`
@@ -7221,7 +7244,7 @@ TripSE1(
 
 *Inherits from: `layers.Layer`*
 
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:178*
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:215*
 
 #### `TripSE2`
 **Module:** `layers.attention.tripse_attention`
@@ -7242,7 +7265,7 @@ TripSE2(
 
 *Inherits from: `layers.Layer`*
 
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:281*
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:348*
 
 #### `TripSE3`
 **Module:** `layers.attention.tripse_attention`
@@ -7263,7 +7286,7 @@ TripSE3(
 
 *Inherits from: `layers.Layer`*
 
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:410*
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:512*
 
 #### `TripSE4`
 **Module:** `layers.attention.tripse_attention`
@@ -7284,12 +7307,12 @@ TripSE4(
 
 *Inherits from: `layers.Layer`*
 
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:620*
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:793*
 
 #### `TripletAttentionBranch`
 **Module:** `layers.attention.tripse_attention`
 
-Single branch of Triplet Attention mechanism.
+Single branch of the Triplet Attention mechanism.
 
 **Constructor Arguments:**
 ```python
@@ -7305,12 +7328,12 @@ TripletAttentionBranch(
 
 *Inherits from: `layers.Layer`*
 
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:32*
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:34*
 
 #### `TverskyProjectionLayer`
-**Module:** `layers.tversky_projection`
+**Module:** `layers.ffn.tversky_projection`
 
-A projection layer based on a differentiable Tversky similarity model.
+Projection layer based on a differentiable Tversky similarity model.
 
 **Constructor Arguments:**
 ```python
@@ -7328,7 +7351,7 @@ TverskyProjectionLayer(
 
 *Inherits from: `layers.Layer`*
 
-*📁 src/dl_techniques/layers/tversky_projection.py:74*
+*📁 src/dl_techniques/layers/ffn/tversky_projection.py:74*
 
 #### `UnifiedScaler`
 **Module:** `layers.statistics.scaler`
@@ -7357,7 +7380,7 @@ UnifiedScaler(
 #### `UniversalInvertedBottleneck`
 **Module:** `layers.universal_inverted_bottleneck`
 
-Universal Inverted Bottleneck (UIB) - A highly configurable building block for efficient CNNs.
+Universal Inverted Bottleneck (UIB) for efficient CNNs.
 
 **Constructor Arguments:**
 ```python
@@ -7404,7 +7427,7 @@ Configuration for a specific VLM task.
 
 Configuration helper for managing task combinations in VLM multi-task models.
 
-*📁 src/dl_techniques/layers/vlm_heads/task_types.py:277*
+*📁 src/dl_techniques/layers/vlm_heads/task_types.py:296*
 
 #### `VLMTaskType`
 **Module:** `layers.vlm_heads.task_types`
@@ -7434,7 +7457,7 @@ VQAHead(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/vlm_heads/factory.py:279*
+*📁 src/dl_techniques/layers/vlm_heads/factory.py:345*
 
 #### `VectorQuantizer`
 **Module:** `layers.vector_quantizer`
@@ -7462,7 +7485,7 @@ VectorQuantizer(
 #### `VisionEncoder`
 **Module:** `layers.transformers.vision_encoder`
 
-General purpose configurable vision_heads encoder using factory-based components.
+General-purpose configurable vision encoder using factory-based components.
 
 **Constructor Arguments:**
 ```python
@@ -7509,12 +7532,41 @@ Head for visual grounding tasks.
 
 *Inherits from: `BaseVLMHead`*
 
-*📁 src/dl_techniques/layers/vlm_heads/factory.py:402*
+*📁 src/dl_techniques/layers/vlm_heads/factory.py:499*
+
+#### `WaveFieldAttention`
+**Module:** `layers.attention.wave_field_attention`
+
+Multi-head wave-field attention via FFT-based damped-wave convolution.
+
+**Constructor Arguments:**
+```python
+WaveFieldAttention(
+    dim: int,
+    num_heads: int = 8,
+    field_size: int = 512,
+    max_seq_len: int = 128,
+    dropout_rate: float = 0.0,
+    use_bias: bool = True,
+    gate_bias_init: float = 2.0,
+    coupling_noise_stddev: float = 0.01,
+    coupling_seed: Optional[int] = None,
+    kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+    bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+    kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+    bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/layers/attention/wave_field_attention.py:92*
 
 #### `WeightedPooling`
 **Module:** `layers.sequence_pooling`
 
-Learnable weighted pooling with position-specific weights.
+Learnable position-weighted pooling for sequences.
 
 **Constructor Arguments:**
 ```python
@@ -7530,7 +7582,7 @@ WeightedPooling(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/sequence_pooling.py:283*
+*📁 src/dl_techniques/layers/sequence_pooling.py:308*
 
 #### `WindowAttention`
 **Module:** `layers.attention.window_attention`
@@ -7588,12 +7640,12 @@ YOLOv12ClassificationHead(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/yolo12_heads.py:827*
+*📁 src/dl_techniques/layers/yolo12_heads.py:795*
 
 #### `YOLOv12DetectionHead`
 **Module:** `layers.yolo12_heads`
 
-YOLOv12 Detection Head with separate classification and regression branches.
+YOLOv12 detection head with separate classification and regression branches.
 
 **Constructor Arguments:**
 ```python
@@ -7633,7 +7685,7 @@ YOLOv12SegmentationHead(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/yolo12_heads.py:381*
+*📁 src/dl_techniques/layers/yolo12_heads.py:364*
 
 #### `ZeroCenteredBandRMSNorm`
 **Module:** `layers.norms.zero_centered_band_rms_norm`
@@ -7654,7 +7706,7 @@ ZeroCenteredBandRMSNorm(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/norms/zero_centered_band_rms_norm.py:54*
+*📁 src/dl_techniques/layers/norms/zero_centered_band_rms_norm.py:52*
 
 #### `ZeroCenteredRMSNorm`
 **Module:** `layers.norms.zero_centered_rms_norm`
@@ -7702,12 +7754,12 @@ mLSTMBlock(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:1100*
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:1242*
 
 #### `mLSTMCell`
 **Module:** `layers.time_series.xlstm_blocks`
 
-Matrix LSTM (mLSTM) Cell with matrix memory and covariance update rule.
+Matrix LSTM (mLSTM) cell with matrix memory and covariance update rule.
 
 **Constructor Arguments:**
 ```python
@@ -7728,7 +7780,7 @@ mLSTMCell(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:469*
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:494*
 
 #### `mLSTMLayer`
 **Module:** `layers.time_series.xlstm_blocks`
@@ -7759,7 +7811,7 @@ mLSTMLayer(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:757*
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:823*
 
 #### `sLSTMBlock`
 **Module:** `layers.time_series.xlstm_blocks`
@@ -7788,12 +7840,12 @@ sLSTMBlock(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:904*
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:1028*
 
 #### `sLSTMCell`
 **Module:** `layers.time_series.xlstm_blocks`
 
-Scalar LSTM (sLSTM) Cell with exponential gating and normalizer state.
+Scalar LSTM (sLSTM) cell with exponential gating and normalizer state.
 
 **Constructor Arguments:**
 ```python
@@ -7841,7 +7893,7 @@ sLSTMLayer(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:294*
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:301*
 
 #### `xATLU`
 **Module:** `layers.activations.expanded_activations`
@@ -7850,7 +7902,7 @@ Expanded ArcTan Linear Unit activation function.
 
 *Inherits from: `ExpandedActivation`*
 
-*📁 src/dl_techniques/layers/activations/expanded_activations.py:361*
+*📁 src/dl_techniques/layers/activations/expanded_activations.py:325*
 
 #### `xGELU`
 **Module:** `layers.activations.expanded_activations`
@@ -7859,7 +7911,7 @@ Expanded Gaussian Error Linear Unit (xGELU) activation function.
 
 *Inherits from: `ExpandedActivation`*
 
-*📁 src/dl_techniques/layers/activations/expanded_activations.py:415*
+*📁 src/dl_techniques/layers/activations/expanded_activations.py:387*
 
 #### `xSiLU`
 **Module:** `layers.activations.expanded_activations`
@@ -7868,7 +7920,7 @@ Expanded Sigmoid Linear Unit (xSiLU) activation function.
 
 *Inherits from: `ExpandedActivation`*
 
-*📁 src/dl_techniques/layers/activations/expanded_activations.py:469*
+*📁 src/dl_techniques/layers/activations/expanded_activations.py:449*
 
 ### Losses Classes
 
@@ -7879,7 +7931,7 @@ Loss function that optimizes accuracy.
 
 *Inherits from: `AnyLoss`*
 
-*📁 src/dl_techniques/losses/any_loss.py:384*
+*📁 src/dl_techniques/losses/any_loss.py:379*
 
 #### `AdaptiveSigLIPLoss`
 **Module:** `losses.siglip_contrastive_loss`
@@ -7906,7 +7958,7 @@ Base class for all confusion matrix-based losses in the AnyLoss framework.
 
 *Inherits from: `keras.losses.Loss`*
 
-*📁 src/dl_techniques/losses/any_loss.py:220*
+*📁 src/dl_techniques/losses/any_loss.py:215*
 
 #### `ApproximationFunction`
 **Module:** `losses.any_loss`
@@ -7923,7 +7975,7 @@ ApproximationFunction(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/losses/any_loss.py:120*
+*📁 src/dl_techniques/losses/any_loss.py:115*
 
 #### `BalancedAccuracyLoss`
 **Module:** `losses.any_loss`
@@ -7932,7 +7984,7 @@ Loss function that optimizes balanced accuracy.
 
 *Inherits from: `AnyLoss`*
 
-*📁 src/dl_techniques/losses/any_loss.py:936*
+*📁 src/dl_techniques/losses/any_loss.py:931*
 
 #### `BrierScoreLoss`
 **Module:** `losses.brier_spiegelhalters_ztest_loss`
@@ -7977,7 +8029,7 @@ Computes the Chamfer distance between two point clouds.
 
 *Inherits from: `keras.losses.Loss`*
 
-*📁 src/dl_techniques/losses/chamfer_loss.py:5*
+*📁 src/dl_techniques/losses/chamfer_loss.py:7*
 
 #### `CharbonnierLoss`
 **Module:** `losses.image_restoration_loss`
@@ -7997,6 +8049,15 @@ Internal Focal Loss for image-level classification.
 
 *📁 src/dl_techniques/losses/yolo12_multitask_loss.py:762*
 
+#### `CliffordDetectionLoss`
+**Module:** `losses.clifford_detection_loss`
+
+YOLOv12 object-detection loss with configurable strides.
+
+*Inherits from: `YOLOv12ObjectDetectionLoss`*
+
+*📁 src/dl_techniques/losses/clifford_detection_loss.py:29*
+
 #### `ClusteringLoss`
 **Module:** `losses.clustering_loss`
 
@@ -8004,14 +8065,14 @@ Custom loss function for clustering quality.
 
 *Inherits from: `keras.losses.Loss`*
 
-*📁 src/dl_techniques/losses/clustering_loss.py:109*
+*📁 src/dl_techniques/losses/clustering_loss.py:107*
 
 #### `ClusteringMetrics`
 **Module:** `losses.clustering_loss`
 
 Container for clustering quality metrics.
 
-*📁 src/dl_techniques/losses/clustering_loss.py:89*
+*📁 src/dl_techniques/losses/clustering_loss.py:87*
 
 #### `ClusteringMetricsCallback`
 **Module:** `losses.clustering_loss`
@@ -8020,7 +8081,7 @@ Callback to monitor clustering quality metrics during training.
 
 *Inherits from: `keras.callbacks.Callback`*
 
-*📁 src/dl_techniques/losses/clustering_loss.py:221*
+*📁 src/dl_techniques/losses/clustering_loss.py:219*
 
 #### `CohenKappaLoss`
 **Module:** `losses.any_loss`
@@ -8029,7 +8090,7 @@ Loss function that optimizes Cohen's Kappa statistic.
 
 *Inherits from: `AnyLoss`*
 
-*📁 src/dl_techniques/losses/any_loss.py:1313*
+*📁 src/dl_techniques/losses/any_loss.py:1308*
 
 #### `CombinedCalibrationLoss`
 **Module:** `losses.brier_spiegelhalters_ztest_loss`
@@ -8083,7 +8144,7 @@ Loss function that optimizes Dice coefficient.
 
 *Inherits from: `AnyLoss`*
 
-*📁 src/dl_techniques/losses/any_loss.py:1511*
+*📁 src/dl_techniques/losses/any_loss.py:1506*
 
 #### `DiceLossPerChannel`
 **Module:** `losses.multi_labels_loss`
@@ -8092,7 +8153,7 @@ Dice Loss applied per channel for multi-label segmentation.
 
 *Inherits from: `keras.losses.Loss`*
 
-*📁 src/dl_techniques/losses/multi_labels_loss.py:295*
+*📁 src/dl_techniques/losses/multi_labels_loss.py:297*
 
 #### `EdgeLoss`
 **Module:** `losses.image_restoration_loss`
@@ -8119,7 +8180,7 @@ Loss function that optimizes F1 score.
 
 *Inherits from: `AnyLoss`*
 
-*📁 src/dl_techniques/losses/any_loss.py:723*
+*📁 src/dl_techniques/losses/any_loss.py:718*
 
 #### `FBetaLoss`
 **Module:** `losses.any_loss`
@@ -8128,7 +8189,7 @@ Loss function that optimizes F-beta score.
 
 *Inherits from: `AnyLoss`*
 
-*📁 src/dl_techniques/losses/any_loss.py:811*
+*📁 src/dl_techniques/losses/any_loss.py:806*
 
 #### `FeatureAlignmentLoss`
 **Module:** `losses.feature_alignment_loss`
@@ -8139,6 +8200,15 @@ Feature alignment loss for semantic prior transfer.
 
 *📁 src/dl_techniques/losses/feature_alignment_loss.py:76*
 
+#### `FocalCausalLMLoss`
+**Module:** `losses.focal_causal_lm_loss`
+
+Focal cross-entropy for causal language modeling with ignore index.
+
+*Inherits from: `keras.losses.Loss`*
+
+*📁 src/dl_techniques/losses/focal_causal_lm_loss.py:65*
+
 #### `FocalTverskyLoss`
 **Module:** `losses.any_loss`
 
@@ -8146,7 +8216,7 @@ Focal Tversky Loss for hard example mining.
 
 *Inherits from: `AnyLoss`*
 
-*📁 src/dl_techniques/losses/any_loss.py:1731*
+*📁 src/dl_techniques/losses/any_loss.py:1726*
 
 #### `FocalUncertaintyLoss`
 **Module:** `losses.focal_uncertainty_loss`
@@ -8166,6 +8236,15 @@ Frequency Loss using FFT amplitude comparison.
 
 *📁 src/dl_techniques/losses/image_restoration_loss.py:168*
 
+#### `GNNUtilizationLoss`
+**Module:** `losses.utilization_loss`
+
+Encourages a Graph Neural Network to use its entity representations.
+
+*Inherits from: `keras.losses.Loss`*
+
+*📁 src/dl_techniques/losses/utilization_loss.py:117*
+
 #### `GeometricMeanLoss`
 **Module:** `losses.any_loss`
 
@@ -8173,7 +8252,7 @@ Loss function that optimizes the geometric mean of sensitivity and specificity.
 
 *Inherits from: `AnyLoss`*
 
-*📁 src/dl_techniques/losses/any_loss.py:1026*
+*📁 src/dl_techniques/losses/any_loss.py:1021*
 
 #### `GoodhartAwareLoss`
 **Module:** `losses.goodhart_loss`
@@ -8218,7 +8297,7 @@ Loss function that optimizes IoU (Intersection over Union / Jaccard Index).
 
 *Inherits from: `AnyLoss`*
 
-*📁 src/dl_techniques/losses/any_loss.py:1428*
+*📁 src/dl_techniques/losses/any_loss.py:1423*
 
 #### `KoLeoLoss`
 **Module:** `losses.dino_loss`
@@ -8227,14 +8306,23 @@ Kozachenko-Leonenko entropic regularizer for uniform distribution on unit sphere
 
 *Inherits from: `keras.losses.Loss`*
 
-*📁 src/dl_techniques/losses/dino_loss.py:453*
+*📁 src/dl_techniques/losses/dino_loss.py:455*
 
 #### `LossConfig`
 **Module:** `losses.segmentation_loss`
 
 Configuration for loss function parameters.
 
-*📁 src/dl_techniques/losses/segmentation_loss.py:31*
+*📁 src/dl_techniques/losses/segmentation_loss.py:33*
+
+#### `MANNUtilizationLoss`
+**Module:** `losses.utilization_loss`
+
+Encourages a Memory-Augmented Neural Network to use its memory.
+
+*Inherits from: `keras.losses.Loss`*
+
+*📁 src/dl_techniques/losses/utilization_loss.py:24*
 
 #### `MASELoss`
 **Module:** `losses.mase_loss`
@@ -8252,7 +8340,7 @@ Loss function that optimizes Matthews Correlation Coefficient.
 
 *Inherits from: `AnyLoss`*
 
-*📁 src/dl_techniques/losses/any_loss.py:1209*
+*📁 src/dl_techniques/losses/any_loss.py:1204*
 
 #### `MQLoss`
 **Module:** `losses.quantile_loss`
@@ -8262,6 +8350,24 @@ Mean Quantile Loss for probabilistic forecasting.
 *Inherits from: `keras.losses.Loss`*
 
 *📁 src/dl_techniques/losses/quantile_loss.py:58*
+
+#### `MaskedCausalLMLoss`
+**Module:** `losses.masked_causal_lm_loss`
+
+Token-level cross-entropy with an ignore index for masked positions.
+
+*Inherits from: `keras.losses.Loss`*
+
+*📁 src/dl_techniques/losses/masked_causal_lm_loss.py:48*
+
+#### `MultiTaskLoss`
+**Module:** `losses.multi_task_loss`
+
+Per-task weighted MSE loss for dictionary-based multi-output models.
+
+*Inherits from: `keras.losses.Loss`*
+
+*📁 src/dl_techniques/losses/multi_task_loss.py:27*
 
 #### `NanoVLMLoss`
 **Module:** `losses.nano_vlm_loss`
@@ -8288,7 +8394,16 @@ Loss function that optimizes precision.
 
 *Inherits from: `AnyLoss`*
 
-*📁 src/dl_techniques/losses/any_loss.py:470*
+*📁 src/dl_techniques/losses/any_loss.py:465*
+
+#### `PrefixMaskedCausalLMLoss`
+**Module:** `losses.masked_causal_lm_loss`
+
+Causal LM loss that also masks a variable-length prefix per sample.
+
+*Inherits from: `MaskedCausalLMLoss`*
+
+*📁 src/dl_techniques/losses/masked_causal_lm_loss.py:150*
 
 #### `QuantileLoss`
 **Module:** `losses.quantile_loss`
@@ -8306,7 +8421,7 @@ Loss function that optimizes recall (sensitivity).
 
 *Inherits from: `AnyLoss`*
 
-*📁 src/dl_techniques/losses/any_loss.py:553*
+*📁 src/dl_techniques/losses/any_loss.py:548*
 
 #### `SMAPELoss`
 **Module:** `losses.smape_loss`
@@ -8317,12 +8432,30 @@ Symmetric Mean Absolute Percentage Error (SMAPE) loss.
 
 *📁 src/dl_techniques/losses/smape_loss.py:56*
 
+#### `ScaledMseLoss`
+**Module:** `losses.scaled_mse_loss`
+
+MSE loss with automatic target resizing for multi-scale supervision.
+
+*Inherits from: `keras.losses.Loss`*
+
+*📁 src/dl_techniques/losses/scaled_mse_loss.py:31*
+
 #### `SegmentationLosses`
 **Module:** `losses.segmentation_loss`
 
 Implementation of various segmentation loss functions.
 
-*📁 src/dl_techniques/losses/segmentation_loss.py:58*
+*📁 src/dl_techniques/losses/segmentation_loss.py:85*
+
+#### `SegmentationWrapperLoss`
+**Module:** `losses.segmentation_wrapper_loss`
+
+Name-dispatched Keras `Loss` wrapping `SegmentationLosses` methods.
+
+*Inherits from: `keras.losses.Loss`*
+
+*📁 src/dl_techniques/losses/segmentation_wrapper_loss.py:95*
 
 #### `SigLIPContrastiveLoss`
 **Module:** `losses.siglip_contrastive_loss`
@@ -8349,7 +8482,7 @@ Loss function that optimizes specificity (true negative rate).
 
 *Inherits from: `AnyLoss`*
 
-*📁 src/dl_techniques/losses/any_loss.py:636*
+*📁 src/dl_techniques/losses/any_loss.py:631*
 
 #### `SpiegelhalterZLoss`
 **Module:** `losses.brier_spiegelhalters_ztest_loss`
@@ -8385,7 +8518,7 @@ Custom loss for TabM ensemble training.
 
 *Inherits from: `keras.losses.Loss`*
 
-*📁 src/dl_techniques/losses/tabm_loss.py:14*
+*📁 src/dl_techniques/losses/tabm_loss.py:15*
 
 #### `TverskyLoss`
 **Module:** `losses.any_loss`
@@ -8394,7 +8527,7 @@ Loss function that optimizes Tversky Index.
 
 *Inherits from: `AnyLoss`*
 
-*📁 src/dl_techniques/losses/any_loss.py:1597*
+*📁 src/dl_techniques/losses/any_loss.py:1592*
 
 #### `VGGLoss`
 **Module:** `losses.image_restoration_loss`
@@ -8412,7 +8545,7 @@ Wasserstein divergence loss for comparing distributions.
 
 *Inherits from: `keras.losses.Loss`*
 
-*📁 src/dl_techniques/losses/wasserstein_loss.py:432*
+*📁 src/dl_techniques/losses/wasserstein_loss.py:429*
 
 #### `WassersteinGradientPenaltyLoss`
 **Module:** `losses.wasserstein_loss`
@@ -8439,7 +8572,7 @@ Binary Focal Loss with class weighting for imbalanced segmentation.
 
 *Inherits from: `keras.losses.Loss`*
 
-*📁 src/dl_techniques/losses/multi_labels_loss.py:195*
+*📁 src/dl_techniques/losses/multi_labels_loss.py:197*
 
 #### `WeightedCrossEntropyWithAnyLoss`
 **Module:** `losses.any_loss`
@@ -8448,16 +8581,7 @@ Combines weighted binary cross-entropy with any AnyLoss-based metric.
 
 *Inherits from: `AnyLoss`*
 
-*📁 src/dl_techniques/losses/any_loss.py:1877*
-
-#### `WrappedLoss`
-**Module:** `losses.segmentation_loss`
-
-Wrapper class to make segmentation losses compatible with Keras.
-
-*Inherits from: `keras.losses.Loss`*
-
-*📁 src/dl_techniques/losses/segmentation_loss.py:554*
+*📁 src/dl_techniques/losses/any_loss.py:1872*
 
 #### `YOLOv12MultiTaskLoss`
 **Module:** `losses.yolo12_multitask_loss`
@@ -8484,7 +8608,7 @@ Loss function that optimizes Youden's J statistic.
 
 *Inherits from: `AnyLoss`*
 
-*📁 src/dl_techniques/losses/any_loss.py:1112*
+*📁 src/dl_techniques/losses/any_loss.py:1107*
 
 #### `iBOTPatchLoss`
 **Module:** `losses.dino_loss`
@@ -8493,9 +8617,54 @@ iBOT masked patch prediction loss for self-supervised learning.
 
 *Inherits from: `keras.losses.Loss`*
 
-*📁 src/dl_techniques/losses/dino_loss.py:264*
+*📁 src/dl_techniques/losses/dino_loss.py:265*
 
 ### Metrics Classes
+
+#### `AbsRelMetric`
+**Module:** `metrics.depth_metrics`
+
+Absolute Relative Error on valid (masked) pixels.
+
+*Inherits from: `keras.metrics.Metric`*
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:71*
+
+#### `BitErrorRate`
+**Module:** `metrics.sequence_metrics`
+
+Bit Error Rate (BER) metric for binary vector outputs.
+
+*Inherits from: `keras.metrics.Metric`*
+
+*📁 src/dl_techniques/metrics/sequence_metrics.py:103*
+
+#### `BitsPerCharacter`
+**Module:** `metrics.llm_metrics`
+
+Bits-per-character (== ``BitsPerToken / chars_per_token``).
+
+*Inherits from: `keras.metrics.Metric`*
+
+*📁 src/dl_techniques/metrics/llm_metrics.py:223*
+
+#### `BitsPerToken`
+**Module:** `metrics.llm_metrics`
+
+Bits-per-token (== ``log2(perplexity)``) for CLM evaluation.
+
+*Inherits from: `keras.metrics.Metric`*
+
+*📁 src/dl_techniques/metrics/llm_metrics.py:151*
+
+#### `BrierScore`
+**Module:** `metrics.brier_score`
+
+Binary or multi-label Brier Score.
+
+*Inherits from: `keras.metrics.Metric`*
+
+*📁 src/dl_techniques/metrics/brier_score.py:43*
 
 #### `CLIPAccuracy`
 **Module:** `metrics.clip_accuracy`
@@ -8522,14 +8691,32 @@ Custom accuracy metric for capsule networks based on capsule lengths.
 
 *Inherits from: `keras.metrics.Metric`*
 
-*📁 src/dl_techniques/metrics/capsule_accuracy.py:8*
+*📁 src/dl_techniques/metrics/capsule_accuracy.py:9*
+
+#### `CategoricalBrierScore`
+**Module:** `metrics.brier_score`
+
+Multi-class Brier Score with optional sparse-label fast path.
+
+*Inherits from: `keras.metrics.Metric`*
+
+*📁 src/dl_techniques/metrics/brier_score.py:139*
+
+#### `DeltaThresholdMetric`
+**Module:** `metrics.depth_metrics`
+
+Threshold accuracy for depth estimation.
+
+*Inherits from: `keras.metrics.Metric`*
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:149*
 
 #### `HRMMetrics`
 **Module:** `metrics.hrm_metrics`
 
-Metrics for Hierarchical Reasoning Model.
+Metrics aggregator for Hierarchical Reasoning Model.
 
-*📁 src/dl_techniques/metrics/hrm_metrics.py:13*
+*📁 src/dl_techniques/metrics/hrm_metrics.py:7*
 
 #### `MultiLabelMetrics`
 **Module:** `metrics.multi_label_metrics`
@@ -8549,6 +8736,24 @@ Perplexity metric for language modeling tasks.
 
 *📁 src/dl_techniques/metrics/perplexity_metric.py:165*
 
+#### `PrimaryOutputAccuracy`
+**Module:** `metrics.primary_output_metrics`
+
+Classification accuracy for the primary output of multi-output models.
+
+*Inherits from: `keras.metrics.Metric`*
+
+*📁 src/dl_techniques/metrics/primary_output_metrics.py:33*
+
+#### `PrimaryOutputTopKAccuracy`
+**Module:** `metrics.primary_output_metrics`
+
+Top-K accuracy for the primary output of multi-output models.
+
+*Inherits from: `keras.metrics.Metric`*
+
+*📁 src/dl_techniques/metrics/primary_output_metrics.py:109*
+
 #### `PsnrMetric`
 **Module:** `metrics.psnr_metric`
 
@@ -8556,7 +8761,25 @@ PSNR metric that evaluates only the primary output for multi-output models.
 
 *Inherits from: `keras.metrics.Metric`*
 
-*📁 src/dl_techniques/metrics/psnr_metric.py:7*
+*📁 src/dl_techniques/metrics/psnr_metric.py:9*
+
+#### `RMSELogMetric`
+**Module:** `metrics.depth_metrics`
+
+Root Mean Squared Logarithmic Error on valid (masked) pixels.
+
+*Inherits from: `keras.metrics.Metric`*
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:363*
+
+#### `RMSEMetric`
+**Module:** `metrics.depth_metrics`
+
+Root Mean Squared Error on valid (masked) pixels.
+
+*Inherits from: `keras.metrics.Metric`*
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:302*
 
 #### `SMAPE`
 **Module:** `metrics.time_series_metrics`
@@ -8567,7 +8790,60 @@ Symmetric Mean Absolute Percentage Error metric.
 
 *📁 src/dl_techniques/metrics/time_series_metrics.py:13*
 
+#### `SequenceAccuracy`
+**Module:** `metrics.sequence_metrics`
+
+Sequence-level accuracy metric.
+
+*Inherits from: `keras.metrics.Metric`*
+
+*📁 src/dl_techniques/metrics/sequence_metrics.py:29*
+
+#### `SqRelMetric`
+**Module:** `metrics.depth_metrics`
+
+Squared Relative Error on valid (masked) pixels.
+
+*Inherits from: `keras.metrics.Metric`*
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:233*
+
+#### `SsimMetric`
+**Module:** `metrics.ssim_metric`
+
+Structural Similarity Index Measure (SSIM) metric.
+
+*Inherits from: `keras.metrics.Metric`*
+
+*📁 src/dl_techniques/metrics/ssim_metric.py:33*
+
 ### Models Classes
+
+#### `ARPredictor`
+**Module:** `models.lewm.predictor`
+
+Autoregressive predictor with AdaLN-zero conditional Transformer stack.
+
+**Constructor Arguments:**
+```python
+ARPredictor(
+    num_frames: int,
+    depth: int,
+    num_heads: int,
+    dim_head: int,
+    mlp_dim: int,
+    input_dim: int,
+    hidden_dim: int,
+    output_dim: Optional[int] = None,
+    dropout: float = 0.0,
+    emb_dropout: float = 0.0,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/models/lewm/predictor.py:22*
 
 #### `AccUNet`
 **Module:** `models.accunet.model`
@@ -8577,6 +8853,26 @@ ACC-UNet: A Completely Convolutional UNet model for the 2020s.
 *Inherits from: `keras.Model`*
 
 *📁 src/dl_techniques/models/accunet/model.py:68*
+
+#### `ActionEmbedder`
+**Module:** `models.lewm.embedder`
+
+Embed per-timestep action vectors to the model's embedding space.
+
+**Constructor Arguments:**
+```python
+ActionEmbedder(
+    action_dim: int,
+    smoothed_dim: int,
+    emb_dim: int,
+    mlp_scale: int = 4,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/models/lewm/embedder.py:22*
 
 #### `AdaptiveDivergenceStrategy`
 **Module:** `models.ccnets.control`
@@ -8590,20 +8886,27 @@ An adaptive strategy that throttles the Reasoner if it converges significantly f
 #### `AdaptiveEMASlopeFilterModel`
 **Module:** `models.adaptive_ema.model`
 
-Model wrapper for adaptive EMA slope filtering with learnable thresholds.
+``keras.Model`` for adaptive EMA slope filtering with optional learnable thresholds and an optional probabilistic slope-quantile head.
 
 *Inherits from: `keras.Model`*
 
-*📁 src/dl_techniques/models/adaptive_ema/model.py:31*
+*📁 src/dl_techniques/models/adaptive_ema/model.py:76*
 
-#### `AttentionBlock`
+#### `ArithmeticTokenizer`
+**Module:** `models.nam.tokenizer`
+
+Tokenizer for arithmetic expressions.
+
+*📁 src/dl_techniques/models/nam/tokenizer.py:55*
+
+#### `AttentionBlockVLM`
 **Module:** `models.fastvlm.components`
 
 Attention block with vision_heads-specific adaptations.
 
 **Constructor Arguments:**
 ```python
-AttentionBlock(
+AttentionBlockVLM(
     dim: int,
     num_heads: int = 8,
     mlp_ratio: float = 4.0,
@@ -8651,7 +8954,149 @@ BERT (Bidirectional Encoder Representations from Transformers) model.
 
 *Inherits from: `keras.Model`*
 
-*📁 src/dl_techniques/models/bert/bert.py:78*
+*📁 src/dl_techniques/models/bert/bert.py:79*
+
+#### `BiasFreeClifordNetBlock`
+**Module:** `models.cliffordnet.denoiser`
+
+Bias-free CliffordNet block for denoising.
+
+**Constructor Arguments:**
+```python
+BiasFreeClifordNetBlock(
+    channels: int,
+    shifts: List[int],
+    cli_mode: CliMode = 'full',
+    ctx_mode: CtxMode = 'diff',
+    use_global_context: bool = False,
+    layer_scale_init: float = 1e-05,
+    drop_path_rate: float = 0.0,
+    kernel_initializer: Any = 'glorot_uniform',
+    kernel_regularizer: Optional[Any] = None,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/models/cliffordnet/denoiser.py:61*
+
+#### `BiasFreeConditionedCliffordBlock`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+Bias-free CliffordNet block with multi-modal conditioning.
+
+**Constructor Arguments:**
+```python
+BiasFreeConditionedCliffordBlock(
+    channels: int,
+    shifts: List[int],
+    cli_mode: CliMode = 'full',
+    ctx_mode: CtxMode = 'diff',
+    use_global_context: bool = False,
+    layer_scale_init: float = 1e-05,
+    drop_path_rate: float = 0.0,
+    enable_dense_conditioning: bool = False,
+    enable_discrete_conditioning: bool = False,
+    class_embedding_dim: int = 128,
+    kernel_initializer: Any = 'glorot_uniform',
+    kernel_regularizer: Optional[Any] = None,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:187*
+
+#### `BiasFreeConditionedGGR`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+Bias-free Gated Geometric Residual with conditioning support.
+
+**Constructor Arguments:**
+```python
+BiasFreeConditionedGGR(
+    channels: int,
+    layer_scale_init: float = 1e-05,
+    drop_path_rate: float = 0.0,
+    kernel_initializer: Any = 'glorot_uniform',
+    kernel_regularizer: Optional[Any] = None,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:78*
+
+#### `BiasFreeGatedGeometricResidual`
+**Module:** `models.cliffordnet.denoiser`
+
+Bias-free variant of GatedGeometricResidual.
+
+**Constructor Arguments:**
+```python
+BiasFreeGatedGeometricResidual(
+    channels: int,
+    layer_scale_init: float = 1e-05,
+    drop_path_rate: float = 0.0,
+    kernel_initializer: Any = 'glorot_uniform',
+    kernel_regularizer: Optional[Any] = None,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/models/cliffordnet/denoiser.py:246*
+
+#### `BiasFreeGeometricDownsample`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+Bias-free spatial downsampling via Clifford geometric product.
+
+**Constructor Arguments:**
+```python
+BiasFreeGeometricDownsample(
+    in_channels: int,
+    out_channels: int,
+    shifts: Optional[List[int]] = None,
+    cli_mode: CliMode = 'full',
+    kernel_initializer: Any = _DEFAULT_KERNEL_INIT,
+    kernel_regularizer: Optional[Any] = None,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:460*
+
+#### `BiasFreeGeometricUpsample`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+Bias-free spatial upsampling via nearest-neighbor + Clifford block.
+
+**Constructor Arguments:**
+```python
+BiasFreeGeometricUpsample(
+    in_channels: int,
+    out_channels: int,
+    shifts: Optional[List[int]] = None,
+    cli_mode: CliMode = 'full',
+    ctx_mode: CtxMode = 'diff',
+    use_global_context: bool = False,
+    layer_scale_init: float = 1e-05,
+    kernel_initializer: Any = _DEFAULT_KERNEL_INIT,
+    kernel_regularizer: Optional[Any] = None,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:628*
 
 #### `ByteLatentTransformer`
 **Module:** `models.byte_latent_transformer.model`
@@ -8751,6 +9196,15 @@ Keras-compliant Capsule Network model.
 
 *📁 src/dl_techniques/models/capsnet/model.py:38*
 
+#### `CapsNetV2`
+**Module:** `models.capsnet.model_v2`
+
+Modernised Capsule Network with attention routing.
+
+*Inherits from: `keras.Model`*
+
+*📁 src/dl_techniques/models/capsnet/model_v2.py:54*
+
 #### `CausalLanguageModel`
 **Module:** `models.masked_language_model.clm`
 
@@ -8759,6 +9213,118 @@ A model-agnostic Causal Language Modeling (CLM) pre-trainer.
 *Inherits from: `keras.Model`*
 
 *📁 src/dl_techniques/models/masked_language_model/clm.py:21*
+
+#### `CausalSelfAttnMLPBlock`
+**Module:** `models.video_jepa.predictor`
+
+Plain causal self-attention + MLP block with LayerScale-identity init.
+
+**Constructor Arguments:**
+```python
+CausalSelfAttnMLPBlock(
+    dim: int,
+    num_heads: int = 4,
+    dim_head: int = 16,
+    mlp_dim: int = 128,
+    dropout: float = 0.0,
+    layer_scale_init: float = 1e-05,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/models/video_jepa/predictor.py:63*
+
+#### `CliffordCLIP`
+**Module:** `models.cliffordnet.clip`
+
+CLIP-style dual-encoder model with Clifford geometric blocks.
+
+*Inherits from: `keras.Model`*
+
+*📁 src/dl_techniques/models/cliffordnet/clip.py:261*
+
+#### `CliffordNet`
+**Module:** `models.cliffordnet.model`
+
+Isotropic CliffordNet vision backbone.
+
+*Inherits from: `keras.Model`*
+
+*📁 src/dl_techniques/models/cliffordnet/model.py:64*
+
+#### `CliffordNetConditionalDenoiser`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+Bias-free multi-scale conditional CliffordNet denoiser.
+
+*Inherits from: `keras.Model`*
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:769*
+
+#### `CliffordNetConfidenceDenoiser`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+Bias-free conditional CliffordNet denoiser with confidence intervals.
+
+*Inherits from: `keras.Model`*
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:399*
+
+#### `CliffordNetDenoiser`
+**Module:** `models.cliffordnet.denoiser`
+
+Bias-free CliffordNet image denoiser.
+
+*Inherits from: `keras.Model`*
+
+*📁 src/dl_techniques/models/cliffordnet/denoiser.py:342*
+
+#### `CliffordNetEmbedding`
+**Module:** `models.cliffordnet.embedding_unet`
+
+CliffordNet bidirectional U-Net encoder for embedding / MLM workflows.
+
+*Inherits from: `keras.Model`*
+
+*📁 src/dl_techniques/models/cliffordnet/embedding_unet.py:80*
+
+#### `CliffordNetLM`
+**Module:** `models.cliffordnet.lm`
+
+CliffordNet language model for causal language modeling.
+
+*Inherits from: `keras.Model`*
+
+*📁 src/dl_techniques/models/cliffordnet/lm.py:62*
+
+#### `CliffordNetLMRouting`
+**Module:** `models.cliffordnet.lm_routing`
+
+CliffordNet causal language model with hierarchical routing head.
+
+*Inherits from: `keras.Model`*
+
+*📁 src/dl_techniques/models/cliffordnet/lm_routing.py:85*
+
+#### `CliffordNetLMUNet`
+**Module:** `models.cliffordnet.lmunet`
+
+CliffordNet causal U-Net language model.
+
+*Inherits from: `keras.Model`*
+
+*📁 src/dl_techniques/models/cliffordnet/lmunet.py:186*
+
+#### `CliffordNetUNet`
+**Module:** `models.cliffordnet.unet`
+
+Generic multi-head U-Net built on CliffordNet geometric-algebra blocks.
+
+*Inherits from: `keras.Model`*
+
+*📁 src/dl_techniques/models/cliffordnet/unet.py:340*
 
 #### `CoShNet`
 **Module:** `models.coshnet.model`
@@ -8842,7 +9408,7 @@ ConditionalDenoiser(
 
 *Inherits from: `layers.Layer`*
 
-*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:98*
+*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:102*
 
 #### `ConvDecoder`
 **Module:** `models.masked_autoencoder.conv_decoder`
@@ -8911,7 +9477,7 @@ ConvUNextStem(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/models/bias_free_denoisers/bfconvunext.py:58*
+*📁 src/dl_techniques/models/bias_free_denoisers/bfconvunext.py:59*
 
 #### `ConvUNextStem`
 **Module:** `models.convunext.model`
@@ -8942,6 +9508,15 @@ Abstract base class for Reasoner training control strategies.
 *Inherits from: `ABC`*
 
 *📁 src/dl_techniques/models/ccnets/control.py:5*
+
+#### `CoverageMetric`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+Empirical coverage: fraction of true values inside predicted CI.
+
+*Inherits from: `keras.metrics.Metric`*
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:227*
 
 #### `DCTPoolingLayer`
 **Module:** `models.fftnet.components`
@@ -9075,7 +9650,8 @@ DPTDecoder(
     kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
     use_bias: bool = False,
     activation: Union[str, callable] = 'relu',
-    output_activation: Union[str, callable] = 'sigmoid',
+    output_activation: Union[str, callable] = 'linear',
+    upsample_factor: int = 1,
     **kwargs
 )
 ```
@@ -9161,7 +9737,7 @@ DenseConditioningInjection(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:111*
+*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:112*
 
 #### `DepthAnything`
 **Module:** `models.depth_anything.model`
@@ -9170,7 +9746,7 @@ Depth Anything model implementation.
 
 *Inherits from: `keras.Model`*
 
-*📁 src/dl_techniques/models/depth_anything/model.py:52*
+*📁 src/dl_techniques/models/depth_anything/model.py:62*
 
 #### `DetrDecoderLayer`
 **Module:** `models.detr.model`
@@ -9280,7 +9856,7 @@ DiscreteConditioningInjection(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:238*
+*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:247*
 
 #### `DistilBERT`
 **Module:** `models.distilbert.model`
@@ -9289,7 +9865,7 @@ DistilBERT (Distilled BERT) model.
 
 *Inherits from: `keras.Model`*
 
-*📁 src/dl_techniques/models/distilbert/model.py:276*
+*📁 src/dl_techniques/models/distilbert/model.py:280*
 
 #### `DistilBertEmbeddings`
 **Module:** `models.distilbert.model`
@@ -9463,6 +10039,24 @@ FreMLP(
 
 *📁 src/dl_techniques/models/darkir/model.py:191*
 
+#### `GPT2`
+**Module:** `models.gpt2.gpt2`
+
+GPT-2 language model with weight-tied LM head.
+
+*Inherits from: `keras.Model`*
+
+*📁 src/dl_techniques/models/gpt2/gpt2.py:58*
+
+#### `GaussianNLLLoss`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+Gaussian negative log-likelihood loss for heteroscedastic regression.
+
+*Inherits from: `keras.losses.Loss`*
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:99*
+
 #### `Gemma3`
 **Module:** `models.gemma.gemma3`
 
@@ -9500,7 +10094,7 @@ Gemma3TransformerBlock(
 *📁 src/dl_techniques/models/gemma/components.py:25*
 
 #### `GroupAttention`
-**Module:** `models.tree_transformer.model`
+**Module:** `models.tree_transformer.components`
 
 Hierarchical group attention for Tree Transformer.
 
@@ -9515,7 +10109,7 @@ GroupAttention(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/models/tree_transformer/model.py:201*
+*📁 src/dl_techniques/models/tree_transformer/components.py:149*
 
 #### `HashNGramEmbedding`
 **Module:** `models.modern_bert.modern_bert_blt_hrm`
@@ -9553,7 +10147,7 @@ HashNGramEmbedding(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/models/modern_bert/components.py:90*
+*📁 src/dl_techniques/models/modern_bert/components.py:94*
 
 #### `HierarchicalReasoningModel`
 **Module:** `models.hierarchical_reasoning_model.model`
@@ -9602,6 +10196,15 @@ ImageProjectionHead(
 *Inherits from: `keras.layers.Layer`*
 
 *📁 src/dl_techniques/models/mobile_clip/components.py:19*
+
+#### `IntervalWidthMetric`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+Mean width of predicted confidence intervals.
+
+*Inherits from: `keras.metrics.Metric`*
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:319*
 
 #### `JEPAConfig`
 **Module:** `models.jepa.config`
@@ -9714,7 +10317,7 @@ JointDenoiser(
 
 *Inherits from: `layers.Layer`*
 
-*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:413*
+*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:429*
 
 #### `KAN`
 **Module:** `models.kan.model`
@@ -9757,6 +10360,42 @@ Robust Semi-Supervised Point Cloud Registration via Latent GMM.
 
 *📁 src/dl_techniques/models/latent_gmm_registration/model.py:15*
 
+#### `LeWM`
+**Module:** `models.lewm.model`
+
+LeWM — JEPA-style action-conditioned world model.
+
+*Inherits from: `keras.Model`*
+
+*📁 src/dl_techniques/models/lewm/model.py:44*
+
+#### `LeWMConfig`
+**Module:** `models.lewm.config`
+
+*📁 src/dl_techniques/models/lewm/config.py:13*
+
+#### `LongTermMemoryBank`
+**Module:** `models.memory_bank.memory_banks`
+
+Persistent long-term memory: ``S_lt`` slots of ``(K_lt, V_lt)``.
+
+**Constructor Arguments:**
+```python
+LongTermMemoryBank(
+    s_lt: int,
+    d_k: int,
+    d_v: int,
+    initializer_range: float = 0.02,
+    num_heads: int = 1,
+    multi_head_keys: bool = False,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/models/memory_bank/memory_banks.py:32*
+
 #### `LossFunction`
 **Module:** `models.ccnets.losses`
 
@@ -9774,6 +10413,26 @@ A complete Mixture Density Network model.
 *Inherits from: `keras.Model`*
 
 *📁 src/dl_techniques/models/mdn/model.py:99*
+
+#### `MLPProjector`
+**Module:** `models.lewm.projector`
+
+2-layer MLP with intermediate normalization + GELU.
+
+**Constructor Arguments:**
+```python
+MLPProjector(
+    input_dim: int,
+    hidden_dim: int,
+    output_dim: Optional[int] = None,
+    use_layer_norm: bool = True,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/models/lewm/projector.py:26*
 
 #### `Mamba`
 **Module:** `models.mamba.mamba_v1`
@@ -9846,7 +10505,7 @@ Mamba2ResidualBlock(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/models/mamba/components_v2.py:320*
+*📁 src/dl_techniques/models/mamba/components_v2.py:324*
 
 #### `MambaLayer`
 **Module:** `models.mamba.components`
@@ -9894,7 +10553,7 @@ MambaResidualBlock(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/models/mamba/components.py:550*
+*📁 src/dl_techniques/models/mamba/components.py:554*
 
 #### `MaskDecoder`
 **Module:** `models.sam.mask_decoder`
@@ -9968,6 +10627,80 @@ MemoryIntegrationLayer(
 *Inherits from: `keras.layers.Layer`*
 
 *📁 src/dl_techniques/models/qwen/qwen3_mega.py:39*
+
+#### `MemoryReadController`
+**Module:** `models.memory_bank.read_controller`
+
+Multi-head top-K STE retrieval with gated residual injection.
+
+**Constructor Arguments:**
+```python
+MemoryReadController(
+    embed_dim: int,
+    num_heads: int,
+    d_k: int,
+    d_v: int,
+    s_lt: int,
+    max_seq_len: int,
+    top_k: int = 32,
+    initializer_range: float = 0.02,
+    gate_init_bias: float = -3.0,
+    layer_norm_eps: float = 1e-05,
+    enable_gate_entropy: bool = False,
+    enable_load_balance: bool = False,
+    enable_z_loss: bool = False,
+    enable_diversity: bool = False,
+    enable_infonce: bool = False,
+    enable_v_diversity: bool = False,
+    multi_head_keys: bool = False,
+    lambda_gate_entropy: float = 0.001,
+    lambda_load_balance: float = 0.01,
+    lambda_z_loss: float = 0.001,
+    lambda_diversity: float = 0.001,
+    lambda_infonce: float = 0.005,
+    lambda_v_diversity: float = 0.001,
+    diversity_subsample: int = 1024,
+    infonce_negatives: int = 256,
+    infonce_temperature: float = 0.1,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/models/memory_bank/read_controller.py:43*
+
+#### `MemoryStats`
+**Module:** `models.memory_bank.memory_stats`
+
+Periodic memory diagnostics for WaveFieldMemoryLLM.
+
+*Inherits from: `keras.callbacks.Callback`*
+
+*📁 src/dl_techniques/models/memory_bank/memory_stats.py:27*
+
+#### `MemoryWriteController`
+**Module:** `models.memory_bank.write_controller`
+
+Project ``X_W (B, T, D)`` into right-padded ``(K_wm, V_wm)``.
+
+**Constructor Arguments:**
+```python
+MemoryWriteController(
+    d_k: int,
+    d_v: int,
+    embed_dim: int,
+    max_seq_len: int,
+    initializer_range: float = 0.02,
+    num_heads: int = 1,
+    multi_head_keys: bool = False,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/models/memory_bank/write_controller.py:29*
 
 #### `MiniVec2VecAligner`
 **Module:** `models.mini_vec2vec.model`
@@ -10102,7 +10835,7 @@ ModernBertBltEmbeddings(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/models/modern_bert/components.py:215*
+*📁 src/dl_techniques/models/modern_bert/components.py:223*
 
 #### `MothNet`
 **Module:** `models.mothnet.model`
@@ -10112,6 +10845,39 @@ Complete MothNet architecture combining AL, MB, and Hebbian readout layers.
 *Inherits from: `keras.Model`*
 
 *📁 src/dl_techniques/models/mothnet/model.py:94*
+
+#### `NAM`
+**Module:** `models.nam.model`
+
+Neural Arithmetic Module.
+
+*Inherits from: `keras.Model`*
+
+*📁 src/dl_techniques/models/nam/model.py:46*
+
+#### `NAMCell`
+**Module:** `models.nam.cell`
+
+Single reduction step of the Neural Arithmetic Module.
+
+**Constructor Arguments:**
+```python
+NAMCell(
+    config: NAMConfig,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/models/nam/cell.py:127*
+
+#### `NAMConfig`
+**Module:** `models.nam.config`
+
+Configuration for the Neural Arithmetic Module.
+
+*📁 src/dl_techniques/models/nam/config.py:12*
 
 #### `NBeatsNet`
 **Module:** `models.nbeats.nbeats`
@@ -10246,6 +11012,24 @@ PatchMasking(
 
 *📁 src/dl_techniques/models/masked_autoencoder/patch_masking.py:12*
 
+#### `PhaseScheduler`
+**Module:** `models.memory_bank.phase_scheduler`
+
+Curriculum callback flipping phase + trainable flags + aux flags.
+
+*Inherits from: `keras.callbacks.Callback`*
+
+*📁 src/dl_techniques/models/memory_bank/phase_scheduler.py:51*
+
+#### `PinballLoss`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+Pinball (quantile) loss for quantile regression.
+
+*Inherits from: `keras.losses.Loss`*
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:165*
+
 #### `PolynomialLoss`
 **Module:** `models.ccnets.losses`
 
@@ -10274,7 +11058,7 @@ PositionEmbeddingRandom(
 *📁 src/dl_techniques/models/sam/prompt_encoder.py:88*
 
 #### `PositionalEncoding`
-**Module:** `models.tree_transformer.model`
+**Module:** `models.tree_transformer.components`
 
 Injects sinusoidal positional encoding into input embeddings.
 
@@ -10290,7 +11074,7 @@ PositionalEncoding(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/models/tree_transformer/model.py:84*
+*📁 src/dl_techniques/models/tree_transformer/components.py:32*
 
 #### `PowerMLP`
 **Module:** `models.power_mlp.model`
@@ -10300,6 +11084,20 @@ PowerMLP model: Efficient alternative to Kolmogorov-Arnold Networks.
 *Inherits from: `keras.Model`*
 
 *📁 src/dl_techniques/models/power_mlp/model.py:134*
+
+#### `PowerSampler`
+**Module:** `models.cliffordnet.power_sampling`
+
+Wraps a :class:`CliffordNetLM` for power-distribution sampling.
+
+*📁 src/dl_techniques/models/cliffordnet/power_sampling.py:98*
+
+#### `PowerSamplingConfig`
+**Module:** `models.cliffordnet.power_sampling`
+
+Configuration for power sampling inference.
+
+*📁 src/dl_techniques/models/cliffordnet/power_sampling.py:57*
 
 #### `PromptEncoder`
 **Module:** `models.sam.prompt_encoder`
@@ -10367,7 +11165,7 @@ High-level Keras Model for Qwen3 Text Embedding.
 
 *Inherits from: `keras.Model`*
 
-*📁 src/dl_techniques/models/qwen/qwen3_embeddings.py:586*
+*📁 src/dl_techniques/models/qwen/qwen3_embeddings.py:623*
 
 #### `Qwen3MEGA`
 **Module:** `models.qwen.qwen3_mega`
@@ -10376,7 +11174,7 @@ Qwen3 model enhanced with Memory-Augmented Neural Networks and Graph Neural Netw
 
 *Inherits from: `keras.Model`*
 
-*📁 src/dl_techniques/models/qwen/qwen3_mega.py:237*
+*📁 src/dl_techniques/models/qwen/qwen3_mega.py:254*
 
 #### `Qwen3Next`
 **Module:** `models.qwen.qwen3_next`
@@ -10439,7 +11237,7 @@ Qwen3RerankerLayer(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/models/qwen/qwen3_embeddings.py:333*
+*📁 src/dl_techniques/models/qwen/qwen3_embeddings.py:352*
 
 #### `Qwen3RerankerModel`
 **Module:** `models.qwen.qwen3_embeddings`
@@ -10448,7 +11246,7 @@ High-level Keras Model for Qwen3 Text Reranking.
 
 *Inherits from: `keras.Model`*
 
-*📁 src/dl_techniques/models/qwen/qwen3_embeddings.py:713*
+*📁 src/dl_techniques/models/qwen/qwen3_embeddings.py:750*
 
 #### `Qwen3SOM`
 **Module:** `models.qwen.qwen3_som`
@@ -10475,7 +11273,7 @@ ReasoningByteBERT: Combining ByteBERT with Hierarchical Reasoning and ACT.
 
 *Inherits from: `keras.Model`*
 
-*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:814*
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:838*
 
 #### `ReasoningByteBertConfig`
 **Module:** `models.modern_bert.modern_bert_blt_hrm`
@@ -10499,7 +11297,7 @@ ReasoningByteCore(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:518*
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:527*
 
 #### `ReasoningByteEmbeddings`
 **Module:** `models.modern_bert.modern_bert_blt_hrm`
@@ -10516,7 +11314,7 @@ ReasoningByteEmbeddings(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:309*
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:313*
 
 #### `ResNet`
 **Module:** `models.resnet.model`
@@ -10832,6 +11630,15 @@ TabM: Deep Ensemble Architecture for High-Performance Tabular Learning.
 
 *📁 src/dl_techniques/models/tabm/model.py:222*
 
+#### `TeacherEMACallback`
+**Module:** `models.depth_anything.teacher_ema`
+
+Drive ``DepthAnything.update_teacher_ema`` once per train batch.
+
+*Inherits from: `keras.callbacks.Callback`*
+
+*📁 src/dl_techniques/models/depth_anything/teacher_ema.py:97*
+
 #### `TextDenoiser`
 **Module:** `models.nano_vlm_world_model.denoisers`
 
@@ -10849,7 +11656,7 @@ TextDenoiser(
 
 *Inherits from: `layers.Layer`*
 
-*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:340*
+*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:352*
 
 #### `TiRexCore`
 **Module:** `models.tirex.model`
@@ -10888,7 +11695,7 @@ TimestepEmbedding(
 *📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:22*
 
 #### `TreeMHA`
-**Module:** `models.tree_transformer.model`
+**Module:** `models.tree_transformer.components`
 
 Multi-Head Attention modulated by Tree Transformer group probabilities.
 
@@ -10904,7 +11711,7 @@ TreeMHA(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/models/tree_transformer/model.py:378*
+*📁 src/dl_techniques/models/tree_transformer/components.py:337*
 
 #### `TreeTransformer`
 **Module:** `models.tree_transformer.model`
@@ -10913,10 +11720,10 @@ Tree Transformer model for grammar induction and language modeling.
 
 *Inherits from: `keras.Model`*
 
-*📁 src/dl_techniques/models/tree_transformer/model.py:711*
+*📁 src/dl_techniques/models/tree_transformer/model.py:102*
 
 #### `TreeTransformerBlock`
-**Module:** `models.tree_transformer.model`
+**Module:** `models.tree_transformer.components`
 
 Single block of the Tree Transformer encoder.
 
@@ -10938,7 +11745,25 @@ TreeTransformerBlock(
 
 *Inherits from: `keras.layers.Layer`*
 
-*📁 src/dl_techniques/models/tree_transformer/model.py:528*
+*📁 src/dl_techniques/models/tree_transformer/components.py:489*
+
+#### `TubeMaskGenerator`
+**Module:** `models.video_jepa.masking`
+
+Sample a per-sample spatial tube mask.
+
+**Constructor Arguments:**
+```python
+TubeMaskGenerator(
+    mask_ratio: float,
+    patches_per_side: int,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/models/video_jepa/masking.py:38*
 
 #### `TwoWayAttentionBlock`
 **Module:** `models.sam.transformer`
@@ -11037,7 +11862,7 @@ Vision Transformer model with factory-based component creation and modern Keras 
 
 *Inherits from: `keras.Model`*
 
-*📁 src/dl_techniques/models/vit/model.py:35*
+*📁 src/dl_techniques/models/vit/model.py:40*
 
 #### `ViTBlock`
 **Module:** `models.sam.image_encoder`
@@ -11074,6 +11899,70 @@ Vision Transformer with Hierarchical MLP Stem using factory-based component crea
 
 *📁 src/dl_techniques/models/vit_hmlp/model.py:78*
 
+#### `VideoJEPA`
+**Module:** `models.video_jepa.model`
+
+Video-JEPA-Clifford top-level model (pixels-only, iter-3).
+
+*Inherits from: `keras.Model`*
+
+*📁 src/dl_techniques/models/video_jepa/model.py:53*
+
+#### `VideoJEPACliffordEncoder`
+**Module:** `models.video_jepa.encoder`
+
+Hybrid per-frame encoder: PatchEmbedding2D → sine2D PE → N × CliffordNetBlock.
+
+**Constructor Arguments:**
+```python
+VideoJEPACliffordEncoder(
+    embed_dim: int,
+    patch_size: int,
+    img_size: int,
+    img_channels: int = 3,
+    depth: int = 2,
+    shifts: Iterable[int] = (1, 2),
+    dropout: float = 0.0,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/models/video_jepa/encoder.py:49*
+
+#### `VideoJEPAConfig`
+**Module:** `models.video_jepa.config`
+
+Configuration for the Video-JEPA-Clifford model.
+
+*📁 src/dl_techniques/models/video_jepa/config.py:24*
+
+#### `VideoJEPAPredictor`
+**Module:** `models.video_jepa.predictor`
+
+Factorized spatial + causal-temporal Clifford predictor (pixels-only).
+
+**Constructor Arguments:**
+```python
+VideoJEPAPredictor(
+    embed_dim: int,
+    num_frames_max: int,
+    patches_per_side: int,
+    depth: int = 2,
+    num_heads: int = 4,
+    dim_head: int = 16,
+    mlp_dim: int = 128,
+    shifts: Iterable[int] = (1, 2),
+    dropout: float = 0.0,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/models/video_jepa/predictor.py:189*
+
 #### `VideoMaskingStrategy`
 **Module:** `models.jepa.utilities`
 
@@ -11100,7 +11989,50 @@ VisionDenoiser(
 
 *Inherits from: `layers.Layer`*
 
-*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:265*
+*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:273*
+
+#### `WaveFieldDecoderBlock`
+**Module:** `models.wave_field_llm.wave_field_llm`
+
+Pre-norm transformer decoder block with :class:`WaveFieldAttention`.
+
+**Constructor Arguments:**
+```python
+WaveFieldDecoderBlock(
+    embed_dim: int,
+    num_heads: int,
+    max_seq_len: int,
+    field_size: int,
+    ffn_intermediate_size: Optional[int] = None,
+    dropout_rate: float = 0.0,
+    attention_dropout_rate: float = 0.0,
+    layer_norm_eps: float = 1e-05,
+    initializer_range: float = 0.02,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/models/wave_field_llm/wave_field_llm.py:67*
+
+#### `WaveFieldLLM`
+**Module:** `models.wave_field_llm.wave_field_llm`
+
+Decoder-only language model with WaveFieldAttention blocks.
+
+*Inherits from: `keras.Model`*
+
+*📁 src/dl_techniques/models/wave_field_llm/wave_field_llm.py:213*
+
+#### `WaveFieldMemoryLLM`
+**Module:** `models.memory_bank.wave_field_memory_llm`
+
+Memory-augmented WaveFieldLLM with dual-tap topology.
+
+*Inherits from: `keras.Model`*
+
+*📁 src/dl_techniques/models/memory_bank/wave_field_memory_llm.py:117*
 
 #### `WindowedAttentionWithRelPos`
 **Module:** `models.sam.image_encoder`
@@ -11122,6 +12054,28 @@ WindowedAttentionWithRelPos(
 *Inherits from: `layers.Layer`*
 
 *📁 src/dl_techniques/models/sam/image_encoder.py:233*
+
+#### `WorkingMemoryBank`
+**Module:** `models.memory_bank.memory_banks`
+
+Stateless projector that maps ``X_W (B, T, D)`` to ``(K_wm, V_wm)``.
+
+**Constructor Arguments:**
+```python
+WorkingMemoryBank(
+    d_k: int,
+    d_v: int,
+    embed_dim: int,
+    initializer_range: float = 0.02,
+    num_heads: int = 1,
+    multi_head_keys: bool = False,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/models/memory_bank/memory_banks.py:183*
 
 #### `YOLOv12FeatureExtractor`
 **Module:** `models.yolo12.feature_extractor`
@@ -11283,6 +12237,25 @@ A regularizer that applies a L2 regularization penalty but also allows negative 
 
 *📁 src/dl_techniques/regularizers/l2_custom.py:57*
 
+#### `SIGRegLayer`
+**Module:** `regularizers.sigreg`
+
+Sketch Isotropic Gaussian Regularizer as a Keras Layer.
+
+**Constructor Arguments:**
+```python
+SIGRegLayer(
+    knots: int = 17,
+    num_proj: int = 1024,
+    seed: Optional[int] = None,
+    **kwargs
+)
+```
+
+*Inherits from: `keras.layers.Layer`*
+
+*📁 src/dl_techniques/regularizers/sigreg.py:45*
+
 #### `SRIPRegularizer`
 **Module:** `regularizers.srip`
 
@@ -11297,18 +12270,18 @@ Spectral Restricted Isometry Property (SRIP) regularizer.
 
 Implements soft orthogonality constraint regularization.
 
-*Inherits from: `keras.regularizers.Regularizer`*
+*Inherits from: `_SoftOrthogonalBaseRegularizer`*
 
-*📁 src/dl_techniques/regularizers/soft_orthogonal.py:115*
+*📁 src/dl_techniques/regularizers/soft_orthogonal.py:279*
 
 #### `SoftOrthonormalConstraintRegularizer`
 **Module:** `regularizers.soft_orthogonal`
 
 Implements soft orthonormality constraint regularization.
 
-*Inherits from: `keras.regularizers.Regularizer`*
+*Inherits from: `_SoftOrthogonalBaseRegularizer`*
 
-*📁 src/dl_techniques/regularizers/soft_orthogonal.py:300*
+*📁 src/dl_techniques/regularizers/soft_orthogonal.py:341*
 
 #### `TriStatePreferenceRegularizer`
 **Module:** `regularizers.tri_state_preference`
@@ -11562,12 +12535,46 @@ Dataset builder for CIFAR-10 image classification.
 
 *📁 src/dl_techniques/datasets/vision/common.py:192*
 
+#### `COCO2017MultiTaskLoader`
+**Module:** `datasets.vision.coco_multitask_local`
+
+Keras :class:`PyDataset` yielding (image, {classification, segmentation}).
+
+*Inherits from: `keras.utils.PyDataset`*
+
+*📁 src/dl_techniques/datasets/vision/coco_multitask_local.py:85*
+
 #### `COCODatasetBuilder`
 **Module:** `datasets.vision.coco`
 
 Enhanced COCO Dataset Builder with robust preprocessing pipeline.
 
 *📁 src/dl_techniques/datasets/vision/coco.py:218*
+
+#### `COCOMAPCallback`
+**Module:** `callbacks.coco_map_callback`
+
+Compute COCO mAP at each validation epoch.
+
+*Inherits from: `keras.callbacks.Callback`*
+
+*📁 src/dl_techniques/callbacks/coco_map_callback.py:45*
+
+#### `COCOMultiTaskConfig`
+**Module:** `datasets.vision.coco_multitask_local`
+
+Configuration for :class:`COCO2017MultiTaskLoader`.
+
+*📁 src/dl_techniques/datasets/vision/coco_multitask_local.py:55*
+
+#### `COCOMultiTaskPredictionGridCallback`
+**Module:** `callbacks.coco_multitask_visualization`
+
+Save RGB | GT seg | predicted seg comparison grid every *frequency* epochs.
+
+*Inherits from: `keras.callbacks.Callback`*
+
+*📁 src/dl_techniques/callbacks/coco_multitask_visualization.py:70*
 
 #### `ClassificationAggregator`
 **Module:** `datasets.patch_transforms`
@@ -11638,6 +12645,24 @@ Enumeration of available dataset types.
 
 *📁 src/dl_techniques/datasets/simple_2d.py:40*
 
+#### `DepthMetricsCurveCallback`
+**Module:** `callbacks.depth_visualization`
+
+Plot training/validation metric curves during training.
+
+*Inherits from: `keras.callbacks.Callback`*
+
+*📁 src/dl_techniques/callbacks/depth_visualization.py:196*
+
+#### `DepthPredictionGridCallback`
+**Module:** `callbacks.depth_visualization`
+
+Save RGB | GT depth | predicted depth comparison grids.
+
+*Inherits from: `keras.callbacks.Callback`*
+
+*📁 src/dl_techniques/callbacks/depth_visualization.py:40*
+
 #### `DetectionResult`
 **Module:** `datasets.patch_transforms`
 
@@ -11697,6 +12722,15 @@ Configuration for full image inference.
 Performance profiler for inference operations.
 
 *📁 src/dl_techniques/utils/inference.py:481*
+
+#### `LatentMaskOverlayCallback`
+**Module:** `callbacks.jepa_visualization`
+
+Save input frames with the tube-mask tinted over masked patches.
+
+*Inherits from: `keras.callbacks.Callback`*
+
+*📁 src/dl_techniques/callbacks/jepa_visualization.py:98*
 
 #### `LongHorizonDataset`
 **Module:** `datasets.time_series.long_horizon`
@@ -11799,6 +12833,15 @@ Predictions from a single patch.
 
 *📁 src/dl_techniques/datasets/patch_transforms.py:75*
 
+#### `PatchPredictionErrorCallback`
+**Module:** `callbacks.jepa_visualization`
+
+Save a per-patch L2-error heatmap of JEPA latent prediction.
+
+*Inherits from: `keras.callbacks.Callback`*
+
+*📁 src/dl_techniques/callbacks/jepa_visualization.py:232*
+
 #### `PipelineConfig`
 **Module:** `datasets.time_series.config`
 
@@ -11812,6 +12855,13 @@ Configuration for tf.data pipeline construction.
 Stateless utility class for Poincaré Ball hyperbolic geometry operations.
 
 *📁 src/dl_techniques/utils/geometry/poincare_math.py:31*
+
+#### `PushTHDF5Dataset`
+**Module:** `datasets.pusht_hdf5`
+
+Thin skeleton loader for PushT-style HDF5 datasets used by LeWM.
+
+*📁 src/dl_techniques/datasets/pusht_hdf5.py:100*
 
 #### `ResultAggregator`
 **Module:** `datasets.patch_transforms`
@@ -11869,14 +12919,14 @@ Configuration for Time Series Datasets.
 
 Generator for diverse time series patterns for machine learning experiments.
 
-*📁 src/dl_techniques/datasets/time_series/generator.py:287*
+*📁 src/dl_techniques/datasets/time_series/generator.py:304*
 
 #### `TimeSeriesGeneratorConfig`
 **Module:** `datasets.time_series.generator`
 
 Configuration class for time series generation.
 
-*📁 src/dl_techniques/datasets/time_series/generator.py:234*
+*📁 src/dl_techniques/datasets/time_series/generator.py:245*
 
 #### `TimeSeriesNormalizer`
 **Module:** `datasets.time_series.normalizer`
@@ -11891,6 +12941,22 @@ Normalizer for time series data with proper scaling and inverse scaling.
 Configuration class for model training parameters.
 
 *📁 src/dl_techniques/utils/train.py:17*
+
+#### `TrainingCurvesCallback`
+**Module:** `callbacks.training_curves`
+
+Save metric/loss curves as PNGs every ``frequency`` epochs.
+
+*Inherits from: `keras.callbacks.Callback`*
+
+*📁 src/dl_techniques/callbacks/training_curves.py:82*
+
+#### `TransferReport`
+**Module:** `utils.weight_transfer`
+
+Structured audit of a weight-transfer operation.
+
+*📁 src/dl_techniques/utils/weight_transfer.py:47*
 
 #### `UniversalDatasetLoader`
 **Module:** `datasets.universal_dataset_loader`
@@ -11993,7 +13059,7 @@ Base class for composite visualizations that combine multiple plots.
 
 *Inherits from: `VisualizationPlugin`*
 
-*📁 src/dl_techniques/visualization/core.py:311*
+*📁 src/dl_techniques/visualization/core.py:314*
 
 #### `ConfusionMatrixVisualization`
 **Module:** `visualization.classification`
@@ -12323,7 +13389,7 @@ Context information for visualization generation.
 
 Central manager for all visualizations.
 
-*📁 src/dl_techniques/visualization/core.py:382*
+*📁 src/dl_techniques/visualization/core.py:385*
 
 #### `VisualizationPlugin`
 **Module:** `visualization.core`
@@ -12332,7 +13398,7 @@ Abstract base class for visualization plugins.
 
 *Inherits from: `ABC`*
 
-*📁 src/dl_techniques/visualization/core.py:221*
+*📁 src/dl_techniques/visualization/core.py:224*
 
 #### `WeightData`
 **Module:** `visualization.data_nn`
@@ -12350,7 +13416,7 @@ Visualize neural network weights.
 
 *📁 src/dl_techniques/visualization/data_nn.py:908*
 
-## Functions (3274)
+## Functions (3698)
 
 ### Analyzer Functions
 
@@ -12359,14 +13425,14 @@ Visualize neural network weights.
 
 Add a field to the non-serializable set.
 
-*📁 src/dl_techniques/analyzer/data_types.py:106*
+*📁 src/dl_techniques/analyzer/data_types.py:107*
 
 #### `analyze(self, data, analysis_types)`
 **Module:** `analyzer.model_analyzer`
 
 Run comprehensive or selected analyses on models.
 
-*📁 src/dl_techniques/analyzer/model_analyzer.py:347*
+*📁 src/dl_techniques/analyzer/model_analyzer.py:343*
 
 #### `analyze(self, results, data, cache)`
 **Module:** `analyzer.analyzers.base`
@@ -12380,7 +13446,7 @@ Perform the analysis and update results.
 
 Perform comprehensive spectral analysis on all models.
 
-*📁 src/dl_techniques/analyzer/analyzers/spectral_analyzer.py:116*
+*📁 src/dl_techniques/analyzer/analyzers/spectral_analyzer.py:115*
 
 #### `analyze(self, results, data, cache)`
 **Module:** `analyzer.analyzers.training_dynamics_analyzer`
@@ -12408,56 +13474,63 @@ Analyze model confidence and calibration with consolidated metric storage.
 
 Analyze weight distributions with improved visualizations.
 
-*📁 src/dl_techniques/analyzer/analyzers/weight_analyzer.py:95*
+*📁 src/dl_techniques/analyzer/analyzers/weight_analyzer.py:96*
 
-#### `calculate_concentration_metrics(weight_matrix, num_eigenvectors)`
+#### `calculate_concentration_metrics(weight_matrix, num_eigenvectors, evals)`
 **Module:** `analyzer.spectral_metrics`
 
 Calculate comprehensive concentration metrics for a weight matrix.
 
-*📁 src/dl_techniques/analyzer/spectral_metrics.py:621*
+*📁 src/dl_techniques/analyzer/spectral_metrics.py:879*
 
 #### `calculate_dominance_ratio(evals)`
 **Module:** `analyzer.spectral_metrics`
 
 Calculate the ratio of the largest eigenvalue to the sum of all other eigenvalues.
 
-*📁 src/dl_techniques/analyzer/spectral_metrics.py:413*
+*📁 src/dl_techniques/analyzer/spectral_metrics.py:671*
 
 #### `calculate_gini_coefficient(evals)`
 **Module:** `analyzer.spectral_metrics`
 
 Calculate the Gini coefficient of the eigenvalue distribution.
 
-*📁 src/dl_techniques/analyzer/spectral_metrics.py:383*
+*📁 src/dl_techniques/analyzer/spectral_metrics.py:641*
 
 #### `calculate_glorot_normalization_factor(N, M, rf)`
 **Module:** `analyzer.spectral_metrics`
 
 Calculate the Glorot normalization factor for weight initialization.
 
-*📁 src/dl_techniques/analyzer/spectral_metrics.py:772*
+*📁 src/dl_techniques/analyzer/spectral_metrics.py:1054*
 
 #### `calculate_matrix_entropy(singular_values, N)`
 **Module:** `analyzer.spectral_metrics`
 
 Calculate the matrix entropy from singular values.
 
-*📁 src/dl_techniques/analyzer/spectral_metrics.py:287*
+*📁 src/dl_techniques/analyzer/spectral_metrics.py:531*
 
 #### `calculate_participation_ratio(vector)`
 **Module:** `analyzer.spectral_metrics`
 
 Calculate the Participation Ratio (PR) of a vector.
 
-*📁 src/dl_techniques/analyzer/spectral_metrics.py:437*
+*📁 src/dl_techniques/analyzer/spectral_metrics.py:695*
 
-#### `calculate_spectral_metrics(evals, alpha)`
+#### `calculate_spectral_metrics(evals, alpha, N)`
 **Module:** `analyzer.spectral_metrics`
 
 Calculate various spectral metrics from eigenvalues.
 
-*📁 src/dl_techniques/analyzer/spectral_metrics.py:345*
+*📁 src/dl_techniques/analyzer/spectral_metrics.py:589*
+
+#### `classify_learning_phase(alpha)`
+**Module:** `analyzer.spectral_metrics`
+
+Classify the learning phase of a layer based on its power-law exponent α.
+
+*📁 src/dl_techniques/analyzer/spectral_metrics.py:396*
 
 #### `compute_adaptive_ece(y_true, y_prob, n_bins)`
 **Module:** `analyzer.calibration_metrics`
@@ -12485,7 +13558,7 @@ Decompose the Brier Score into Reliability, Resolution, and Uncertainty.
 
 Identify the number of eigenvalues necessary to satisfy det(X) = 1.
 
-*📁 src/dl_techniques/analyzer/spectral_metrics.py:722*
+*📁 src/dl_techniques/analyzer/spectral_metrics.py:999*
 
 #### `compute_ece(y_true, y_prob, n_bins)`
 **Module:** `analyzer.calibration_metrics`
@@ -12499,7 +13572,14 @@ Compute Expected Calibration Error (ECE) using equal-width bins.
 
 Compute the eigenvalues for all weight matrices combined.
 
-*📁 src/dl_techniques/analyzer/spectral_metrics.py:90*
+*📁 src/dl_techniques/analyzer/spectral_metrics.py:93*
+
+#### `compute_erg_condition(evals, xmin)`
+**Module:** `analyzer.spectral_metrics`
+
+Compute the ERG (Exact Renormalization Group) condition from SETOL theory.
+
+*📁 src/dl_techniques/analyzer/spectral_metrics.py:340*
 
 #### `compute_mce(y_true, y_prob, n_bins)`
 **Module:** `analyzer.calibration_metrics`
@@ -12522,40 +13602,33 @@ Compute data for reliability diagram visualization.
 
 *📁 src/dl_techniques/analyzer/calibration_metrics.py:223*
 
-#### `compute_weight_statistics(model, include_layers)`
-**Module:** `analyzer.spectral_utils`
-
-Computes basic statistics for weights in model layers.
-
-*📁 src/dl_techniques/analyzer/spectral_utils.py:311*
-
 #### `convert_numpy(obj)`
 **Module:** `analyzer.model_analyzer`
 
 Recursively convert numpy types and pandas DataFrames to JSON-serializable formats.
 
-*📁 src/dl_techniques/analyzer/model_analyzer.py:658*
+*📁 src/dl_techniques/analyzer/model_analyzer.py:662*
 
 #### `create_pareto_analysis(self, save_plot)`
 **Module:** `analyzer.model_analyzer`
 
 Create Pareto front analysis for hyperparameter sweep scenarios.
 
-*📁 src/dl_techniques/analyzer/model_analyzer.py:804*
+*📁 src/dl_techniques/analyzer/model_analyzer.py:808*
 
 #### `create_smoothed_model(self, model_name, method, percent, save_path)`
 **Module:** `analyzer.model_analyzer`
 
 Create a smoothed version of a model using SVD truncation.
 
-*📁 src/dl_techniques/analyzer/model_analyzer.py:937*
+*📁 src/dl_techniques/analyzer/model_analyzer.py:941*
 
 #### `create_summary_dashboard(self)`
 **Module:** `analyzer.model_analyzer`
 
 Create summary dashboard visualization.
 
-*📁 src/dl_techniques/analyzer/model_analyzer.py:582*
+*📁 src/dl_techniques/analyzer/model_analyzer.py:586*
 
 #### `create_visualizations(self)`
 **Module:** `analyzer.visualizers.base`
@@ -12606,59 +13679,52 @@ Main entry point for generating all spectral visualizations.
 
 *📁 src/dl_techniques/analyzer/visualizers/spectral_visualizer.py:38*
 
-#### `create_weight_visualization(model, layer_index, figsize, cmap)`
-**Module:** `analyzer.spectral_utils`
+#### `detect_correlation_trap(rand_evals, N, M, c_TW)`
+**Module:** `analyzer.spectral_metrics`
 
-Creates a visualization of weight matrices for a specific layer.
+Detect correlation traps in a randomized weight matrix via Marchenko-Pastur edge + Tracy-Widom threshold.
 
-*📁 src/dl_techniques/analyzer/spectral_utils.py:233*
-
-#### `extract_conv_filters(layer, filter_indices)`
-**Module:** `analyzer.spectral_utils`
-
-Extracts convolutional filters from a convolutional layer.
-
-*📁 src/dl_techniques/analyzer/spectral_utils.py:369*
+*📁 src/dl_techniques/analyzer/spectral_metrics.py:429*
 
 #### `find_critical_weights(weight_matrix, eigenvectors, eigenvalues, threshold)`
 **Module:** `analyzer.spectral_metrics`
 
 Find individual weights that contribute most to top eigenvectors.
 
-*📁 src/dl_techniques/analyzer/spectral_metrics.py:564*
+*📁 src/dl_techniques/analyzer/spectral_metrics.py:822*
 
 #### `find_metric_in_history(history, patterns, exclude_prefixes)`
 **Module:** `analyzer.utils`
 
 Robustly find a metric in training history by checking multiple possible names.
 
-*📁 src/dl_techniques/analyzer/utils.py:255*
+*📁 src/dl_techniques/analyzer/utils.py:265*
 
 #### `find_model_metric(model_metrics, metric_keys, default)`
 **Module:** `analyzer.utils`
 
 Helper function to find a metric value from model metrics with fallback chain.
 
-*📁 src/dl_techniques/analyzer/utils.py:354*
+*📁 src/dl_techniques/analyzer/utils.py:363*
 
 #### `find_pareto_front(costs1, costs2)`
 **Module:** `analyzer.utils`
 
 Find indices of Pareto optimal points (maximizing both objectives).
 
-*📁 src/dl_techniques/analyzer/utils.py:384*
+*📁 src/dl_techniques/analyzer/utils.py:393*
 
 #### `fit_powerlaw(evals, xmin)`
 **Module:** `analyzer.spectral_metrics`
 
 Fit eigenvalues to a power-law distribution using a robust xmin search.
 
-*📁 src/dl_techniques/analyzer/spectral_metrics.py:175*
+*📁 src/dl_techniques/analyzer/spectral_metrics.py:178*
 
 #### `forward_hook(layer, inputs, outputs)`
 **Module:** `analyzer.analyzers.information_flow_analyzer`
 
-*📁 src/dl_techniques/analyzer/analyzers/information_flow_analyzer.py:114*
+*📁 src/dl_techniques/analyzer/analyzers/information_flow_analyzer.py:115*
 
 #### `from_object(cls, data)`
 **Module:** `analyzer.data_types`
@@ -12679,77 +13745,84 @@ Create from tuple.
 
 Get figure size with optional scaling.
 
-*📁 src/dl_techniques/analyzer/config.py:86*
+*📁 src/dl_techniques/analyzer/config.py:88*
 
 #### `get_layer_weights_and_bias(layer)`
 **Module:** `analyzer.spectral_utils`
 
 Extract weights and biases from a Keras layer.
 
-*📁 src/dl_techniques/analyzer/spectral_utils.py:116*
+*📁 src/dl_techniques/analyzer/spectral_utils.py:115*
 
 #### `get_serializable_dict(self)`
 **Module:** `analyzer.data_types`
 
 Get a dictionary representation excluding non-serializable fields.
 
-*📁 src/dl_techniques/analyzer/data_types.py:110*
+*📁 src/dl_techniques/analyzer/data_types.py:111*
 
 #### `get_summary_statistics(self)`
 **Module:** `analyzer.model_analyzer`
 
 Get summary statistics of the analysis.
 
-*📁 src/dl_techniques/analyzer/model_analyzer.py:717*
+*📁 src/dl_techniques/analyzer/model_analyzer.py:721*
 
 #### `get_top_eigenvectors(weight_matrix, k, method)`
 **Module:** `analyzer.spectral_metrics`
 
 Calculate the top k left singular vectors of a weight matrix.
 
-*📁 src/dl_techniques/analyzer/spectral_metrics.py:471*
+*📁 src/dl_techniques/analyzer/spectral_metrics.py:729*
 
 #### `get_weight_matrices(weights, layer_type)`
 **Module:** `analyzer.spectral_utils`
 
 Extract weight matrices from a layer's weights.
 
-*📁 src/dl_techniques/analyzer/spectral_utils.py:167*
+*📁 src/dl_techniques/analyzer/spectral_utils.py:166*
 
 #### `infer_layer_type(layer)`
 **Module:** `analyzer.spectral_utils`
 
 Determine the layer type for a given Keras layer.
 
-*📁 src/dl_techniques/analyzer/spectral_utils.py:65*
+*📁 src/dl_techniques/analyzer/spectral_utils.py:64*
 
 #### `jensen_shannon_distance(p, q)`
 **Module:** `analyzer.spectral_metrics`
 
 Calculate Jensen-Shannon distance between two distributions.
 
-*📁 src/dl_techniques/analyzer/spectral_metrics.py:673*
+*📁 src/dl_techniques/analyzer/spectral_metrics.py:950*
 
 #### `lighten_color(color, factor)`
 **Module:** `analyzer.utils`
 
 Lighten a color by interpolating towards white.
 
-*📁 src/dl_techniques/analyzer/utils.py:377*
+*📁 src/dl_techniques/analyzer/utils.py:386*
 
 #### `normalize_metric(values, higher_better)`
 **Module:** `analyzer.utils`
 
 Normalize metric values to 0-1 range.
 
-*📁 src/dl_techniques/analyzer/utils.py:412*
+*📁 src/dl_techniques/analyzer/utils.py:421*
+
+#### `powerlaw_goodness_of_fit(evals, alpha, xmin, n_bootstraps)`
+**Module:** `analyzer.spectral_metrics`
+
+Bootstrap goodness-of-fit test for power-law hypothesis (Clauset et al. 2009).
+
+*📁 src/dl_techniques/analyzer/spectral_metrics.py:291*
 
 #### `recursively_get_layers(layer_or_model)`
 **Module:** `analyzer.utils`
 
 Recursively traverses a Keras model or layer to get a flat list of all layers.
 
-*📁 src/dl_techniques/analyzer/utils.py:487*
+*📁 src/dl_techniques/analyzer/utils.py:496*
 
 #### `requires_data(self)`
 **Module:** `analyzer.analyzers.base`
@@ -12763,7 +13836,7 @@ Check if this analyzer requires input data.
 
 Spectral analysis is data-independent.
 
-*📁 src/dl_techniques/analyzer/analyzers/spectral_analyzer.py:112*
+*📁 src/dl_techniques/analyzer/analyzers/spectral_analyzer.py:111*
 
 #### `requires_data(self)`
 **Module:** `analyzer.analyzers.training_dynamics_analyzer`
@@ -12791,28 +13864,28 @@ Calibration analysis requires input data.
 
 Weight analysis doesn't require input data.
 
-*📁 src/dl_techniques/analyzer/analyzers/weight_analyzer.py:91*
+*📁 src/dl_techniques/analyzer/analyzers/weight_analyzer.py:92*
 
 #### `rescale_eigenvalues(evals)`
 **Module:** `analyzer.spectral_metrics`
 
 Rescale eigenvalues by their L2 norm to sqrt(N).
 
-*📁 src/dl_techniques/analyzer/spectral_metrics.py:707*
+*📁 src/dl_techniques/analyzer/spectral_metrics.py:984*
 
 #### `safe_set_xticklabels(ax, labels, rotation, max_labels)`
 **Module:** `analyzer.utils`
 
 Safely set x-tick labels with proper handling.
 
-*📁 src/dl_techniques/analyzer/utils.py:214*
+*📁 src/dl_techniques/analyzer/utils.py:224*
 
 #### `safe_tight_layout(fig)`
 **Module:** `analyzer.utils`
 
 Safely apply tight_layout with error handling.
 
-*📁 src/dl_techniques/analyzer/utils.py:229*
+*📁 src/dl_techniques/analyzer/utils.py:239*
 
 #### `sample(data, n_samples)`
 **Module:** `analyzer.utils`
@@ -12826,42 +13899,42 @@ Sample a subset of data from the input, handling various formats.
 
 Save analysis results to JSON file.
 
-*📁 src/dl_techniques/analyzer/model_analyzer.py:594*
+*📁 src/dl_techniques/analyzer/model_analyzer.py:598*
 
 #### `setup_plotting_style(self)`
 **Module:** `analyzer.config`
 
 Set up matplotlib style based on configuration.
 
-*📁 src/dl_techniques/analyzer/config.py:90*
+*📁 src/dl_techniques/analyzer/config.py:92*
 
 #### `smooth_curve(values, window_size)`
 **Module:** `analyzer.utils`
 
 Apply smoothing to a curve using a moving average.
 
-*📁 src/dl_techniques/analyzer/utils.py:241*
+*📁 src/dl_techniques/analyzer/utils.py:251*
 
 #### `smooth_matrix(W, n_comp)`
 **Module:** `analyzer.spectral_metrics`
 
 Apply SVD smoothing to a weight matrix by zeroing out small singular values.
 
-*📁 src/dl_techniques/analyzer/spectral_metrics.py:743*
+*📁 src/dl_techniques/analyzer/spectral_metrics.py:1025*
 
 #### `truncate_model_name(name, max_len, filler)`
 **Module:** `analyzer.utils`
 
 Truncates a string by replacing middle characters with a filler.
 
-*📁 src/dl_techniques/analyzer/utils.py:472*
+*📁 src/dl_techniques/analyzer/utils.py:481*
 
 #### `validate_training_history(history)`
 **Module:** `analyzer.utils`
 
 Validate training history and return a report of potential issues.
 
-*📁 src/dl_techniques/analyzer/utils.py:439*
+*📁 src/dl_techniques/analyzer/utils.py:448*
 
 ### Constraints Functions
 
@@ -12972,747 +14045,746 @@ Get all available task types.
 
 Analyze evidence support for generated tokens for the first item in a batch.
 
-*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:831*
+*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:779*
 
 #### `apply_shell_scaling(self, normalized_features, confidence)`
 **Module:** `layers.experimental.band_rms_ood`
 
 Apply confidence-driven shell scaling to normalized features.
 
-*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:364*
+*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:316*
 
 #### `body(i, state, outputs)`
 **Module:** `layers.gated_delta_net`
 
-*📁 src/dl_techniques/layers/gated_delta_net.py:426*
+*📁 src/dl_techniques/layers/gated_delta_net.py:432*
 
 #### `build(self, input_shape)`
 **Module:** `layers.mobile_one_block`
 
 Create weights and build sub-layers.
 
-*📁 src/dl_techniques/layers/mobile_one_block.py:260*
+*📁 src/dl_techniques/layers/mobile_one_block.py:235*
 
 #### `build(self, input_shape)`
 **Module:** `layers.depthwise_separable_block`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/depthwise_separable_block.py:284*
+*📁 src/dl_techniques/layers/depthwise_separable_block.py:192*
 
 #### `build(self, input_shape)`
 **Module:** `layers.sampling`
 
-Build the layer and validate input shapes.
+Validate input shapes and build the layer.
 
-*📁 src/dl_techniques/layers/sampling.py:154*
+*📁 src/dl_techniques/layers/sampling.py:120*
 
 #### `build(self, input_shape)`
 **Module:** `layers.hanc_layer`
 
-Build the layer and all its sub-layers.
+Build the layer and all its sub-layers in computational order.
 
-*📁 src/dl_techniques/layers/hanc_layer.py:222*
+*📁 src/dl_techniques/layers/hanc_layer.py:205*
 
 #### `build(self, input_shape)`
 **Module:** `layers.laplacian_filter`
 
 Build the layer and explicitly build the Gaussian filter.
 
-*📁 src/dl_techniques/layers/laplacian_filter.py:162*
+*📁 src/dl_techniques/layers/laplacian_filter.py:154*
 
 #### `build(self, input_shape)`
 **Module:** `layers.laplacian_filter`
 
 Build the layer and initialize components based on the selected method.
 
-*📁 src/dl_techniques/layers/laplacian_filter.py:400*
+*📁 src/dl_techniques/layers/laplacian_filter.py:387*
 
 #### `build(self, input_shape)`
 **Module:** `layers.multi_level_feature_compilation`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/multi_level_feature_compilation.py:263*
+*📁 src/dl_techniques/layers/multi_level_feature_compilation.py:249*
 
 #### `build(self, input_shape)`
 **Module:** `layers.yolo12_blocks`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:168*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:163*
 
 #### `build(self, input_shape)`
 **Module:** `layers.yolo12_blocks`
 
 Build the attention components and all sub-layers.
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:355*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:351*
 
 #### `build(self, input_shape)`
 **Module:** `layers.yolo12_blocks`
 
 Build the attention block components and all sub-layers.
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:608*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:610*
 
 #### `build(self, input_shape)`
 **Module:** `layers.yolo12_blocks`
 
 Build the bottleneck components and all sub-layers.
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:759*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:760*
 
 #### `build(self, input_shape)`
 **Module:** `layers.yolo12_blocks`
 
 Build the C3k2 block components and all sub-layers.
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:927*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:931*
 
 #### `build(self, input_shape)`
 **Module:** `layers.yolo12_blocks`
 
 Build the A2C2f block components and all sub-layers.
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:1120*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:1125*
 
 #### `build(self, input_shape)`
 **Module:** `layers.yolo12_heads`
 
 Build detection head branches for each input scale.
 
-*📁 src/dl_techniques/layers/yolo12_heads.py:177*
+*📁 src/dl_techniques/layers/yolo12_heads.py:166*
 
 #### `build(self, input_shape)`
 **Module:** `layers.yolo12_heads`
 
 Build segmentation head with progressive upsampling to full resolution.
 
-*📁 src/dl_techniques/layers/yolo12_heads.py:514*
+*📁 src/dl_techniques/layers/yolo12_heads.py:487*
 
 #### `build(self, input_shape)`
 **Module:** `layers.yolo12_heads`
 
 Build classification head.
 
-*📁 src/dl_techniques/layers/yolo12_heads.py:968*
+*📁 src/dl_techniques/layers/yolo12_heads.py:929*
 
 #### `build(self, input_shape)`
 **Module:** `layers.radial_basis_function`
 
-Create layer weights.
+Create layer weights (centers and raw gamma values).
 
-*📁 src/dl_techniques/layers/radial_basis_function.py:139*
+*📁 src/dl_techniques/layers/radial_basis_function.py:167*
+
+#### `build(self, input_shape)`
+**Module:** `layers.pixel_unshuffle`
+
+*📁 src/dl_techniques/layers/pixel_unshuffle.py:124*
 
 #### `build(self, input_shape)`
 **Module:** `layers.spatial_layer`
 
-Creates the normalized coordinate grid during layer building.
+Create the normalized coordinate grid during layer building.
 
-*📁 src/dl_techniques/layers/spatial_layer.py:182*
+*📁 src/dl_techniques/layers/spatial_layer.py:127*
 
 #### `build(self, input_shape)`
 **Module:** `layers.one_hot_encoding`
 
-Build the layer by computing cumulative cardinalities for efficient indexing.
+Build the layer by pre-computing cumulative cardinalities.
 
-*📁 src/dl_techniques/layers/one_hot_encoding.py:75*
+*📁 src/dl_techniques/layers/one_hot_encoding.py:117*
 
 #### `build(self, input_shape)`
 **Module:** `layers.neuro_grid`
 
-Create the grid weights, temperature parameter, and build projection layers.
+Create grid weights, temperature parameter, and build projections.
 
-*📁 src/dl_techniques/layers/neuro_grid.py:550*
+*📁 src/dl_techniques/layers/neuro_grid.py:250*
 
 #### `build(self, input_shape)`
 **Module:** `layers.gaussian_filter`
 
 Build the Gaussian kernel weights based on input shape.
 
-*📁 src/dl_techniques/layers/gaussian_filter.py:154*
+*📁 src/dl_techniques/layers/gaussian_filter.py:126*
 
 #### `build(self, input_shape)`
 **Module:** `layers.dynamic_conv2d`
 
 Build the layer by creating all sub-layers.
 
-*📁 src/dl_techniques/layers/dynamic_conv2d.py:297*
+*📁 src/dl_techniques/layers/dynamic_conv2d.py:216*
 
 #### `build(self, input_shape)`
 **Module:** `layers.shearlet_transform`
 
 Build the layer and create shearlet filter bank.
 
-*📁 src/dl_techniques/layers/shearlet_transform.py:153*
+*📁 src/dl_techniques/layers/shearlet_transform.py:152*
 
 #### `build(self, input_shape)`
 **Module:** `layers.squeeze_excitation`
 
 Build the layer and create all sub-layers.
 
-*📁 src/dl_techniques/layers/squeeze_excitation.py:214*
+*📁 src/dl_techniques/layers/squeeze_excitation.py:171*
+
+#### `build(self, input_shape)`
+**Module:** `layers.blur_pool`
+
+*📁 src/dl_techniques/layers/blur_pool.py:76*
 
 #### `build(self, input_shape)`
 **Module:** `layers.standard_blocks`
 
 Build sub-layers explicitly for proper serialization.
 
-*📁 src/dl_techniques/layers/standard_blocks.py:327*
+*📁 src/dl_techniques/layers/standard_blocks.py:322*
 
 #### `build(self, input_shape)`
 **Module:** `layers.standard_blocks`
 
 Build sub-layers explicitly for proper serialization.
 
-*📁 src/dl_techniques/layers/standard_blocks.py:565*
+*📁 src/dl_techniques/layers/standard_blocks.py:544*
 
 #### `build(self, input_shape)`
 **Module:** `layers.standard_blocks`
 
 Build sub-layers with input-dependent configuration.
 
-*📁 src/dl_techniques/layers/standard_blocks.py:729*
+*📁 src/dl_techniques/layers/standard_blocks.py:716*
 
 #### `build(self, input_shape)`
 **Module:** `layers.standard_blocks`
 
 Build sub-layers explicitly for proper serialization.
 
-*📁 src/dl_techniques/layers/standard_blocks.py:997*
+*📁 src/dl_techniques/layers/standard_blocks.py:968*
 
 #### `build(self, input_shape)`
 **Module:** `layers.standard_blocks`
 
 Build sub-layers explicitly for proper serialization.
 
-*📁 src/dl_techniques/layers/standard_blocks.py:1269*
+*📁 src/dl_techniques/layers/standard_blocks.py:1217*
 
 #### `build(self, input_shape)`
 **Module:** `layers.sequence_pooling`
 
 Build attention layers based on input shape.
 
-*📁 src/dl_techniques/layers/sequence_pooling.py:191*
+*📁 src/dl_techniques/layers/sequence_pooling.py:196*
 
 #### `build(self, input_shape)`
 **Module:** `layers.sequence_pooling`
 
-Build position weights.
+Build learnable position weights.
 
-*📁 src/dl_techniques/layers/sequence_pooling.py:349*
+*📁 src/dl_techniques/layers/sequence_pooling.py:374*
 
 #### `build(self, input_shape)`
 **Module:** `layers.sequence_pooling`
 
-Build the layer and all sub-layers.
+Build the layer and all learnable sub-layers.
 
-*📁 src/dl_techniques/layers/sequence_pooling.py:560*
+*📁 src/dl_techniques/layers/sequence_pooling.py:597*
 
 #### `build(self, input_shape)`
 **Module:** `layers.blt_core`
 
 Build the model components.
 
-*📁 src/dl_techniques/layers/blt_core.py:216*
+*📁 src/dl_techniques/layers/blt_core.py:283*
+
+#### `build(self, input_shape)`
+**Module:** `layers.adaln_zero`
+
+Build sublayers explicitly for robust serialization.
+
+*📁 src/dl_techniques/layers/adaln_zero.py:137*
 
 #### `build(self, input_shape)`
 **Module:** `layers.fnet_encoder_block`
 
 Build encoder block and all sub-layers with proper shape inference.
 
-*📁 src/dl_techniques/layers/fnet_encoder_block.py:183*
+*📁 src/dl_techniques/layers/fnet_encoder_block.py:132*
 
 #### `build(self, input_shape)`
 **Module:** `layers.complex_layers`
 
 Create the layer's weights.
 
-*📁 src/dl_techniques/layers/complex_layers.py:290*
+*📁 src/dl_techniques/layers/complex_layers.py:251*
 
 #### `build(self, input_shape)`
 **Module:** `layers.complex_layers`
 
 Create the layer's weights.
 
-*📁 src/dl_techniques/layers/complex_layers.py:512*
+*📁 src/dl_techniques/layers/complex_layers.py:444*
 
 #### `build(self, input_shape)`
 **Module:** `layers.anchor_generator`
 
 Create the layer's anchor and stride weights.
 
-*📁 src/dl_techniques/layers/anchor_generator.py:187*
+*📁 src/dl_techniques/layers/anchor_generator.py:189*
 
 #### `build(self, input_shape)`
 **Module:** `layers.haar_wavelet_decomposition`
 
 Build the layer by determining input dimensionality.
 
-*📁 src/dl_techniques/layers/haar_wavelet_decomposition.py:100*
+*📁 src/dl_techniques/layers/haar_wavelet_decomposition.py:80*
 
 #### `build(self, input_shape)`
 **Module:** `layers.tabm_blocks`
 
 Build the scaling weights with proper initialization.
 
-*📁 src/dl_techniques/layers/tabm_blocks.py:98*
+*📁 src/dl_techniques/layers/tabm_blocks.py:122*
 
 #### `build(self, input_shape)`
 **Module:** `layers.tabm_blocks`
 
 Build the ensemble linear layer weights.
 
-*📁 src/dl_techniques/layers/tabm_blocks.py:182*
+*📁 src/dl_techniques/layers/tabm_blocks.py:245*
 
 #### `build(self, input_shape)`
 **Module:** `layers.tabm_blocks`
 
 Build the parallel linear layer weights.
 
-*📁 src/dl_techniques/layers/tabm_blocks.py:316*
+*📁 src/dl_techniques/layers/tabm_blocks.py:409*
 
 #### `build(self, input_shape)`
 **Module:** `layers.tabm_blocks`
 
 Build the MLP block layers.
 
-*📁 src/dl_techniques/layers/tabm_blocks.py:422*
+*📁 src/dl_techniques/layers/tabm_blocks.py:550*
 
 #### `build(self, input_shape)`
 **Module:** `layers.tabm_blocks`
 
 Build the backbone MLP blocks.
 
-*📁 src/dl_techniques/layers/tabm_blocks.py:542*
-
-#### `build(self, input_shape)`
-**Module:** `layers.kan_linear`
-
-Create layer weights and B-spline grid based on input shape.
-
-*📁 src/dl_techniques/layers/kan_linear.py:200*
+*📁 src/dl_techniques/layers/tabm_blocks.py:704*
 
 #### `build(self, input_shape)`
 **Module:** `layers.convnext_v2_block`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/convnext_v2_block.py:341*
+*📁 src/dl_techniques/layers/convnext_v2_block.py:308*
 
 #### `build(self, input_shape)`
 **Module:** `layers.io_preparation`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/io_preparation.py:500*
+*📁 src/dl_techniques/layers/io_preparation.py:480*
 
 #### `build(self, input_shape)`
 **Module:** `layers.convnext_v1_block`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/convnext_v1_block.py:318*
+*📁 src/dl_techniques/layers/convnext_v1_block.py:291*
 
 #### `build(self, input_shape)`
 **Module:** `layers.orthoblock`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/orthoblock.py:275*
+*📁 src/dl_techniques/layers/orthoblock.py:218*
 
 #### `build(self, input_shape)`
 **Module:** `layers.pixel_shuffle`
 
 Validate input shape and build the layer.
 
-*📁 src/dl_techniques/layers/pixel_shuffle.py:129*
+*📁 src/dl_techniques/layers/pixel_shuffle.py:140*
 
 #### `build(self, input_shape)`
 **Module:** `layers.res_path`
 
-Build the residual blocks and all sub-layers.
+Build all residual sub-layers.
 
-*📁 src/dl_techniques/layers/res_path.py:188*
+*📁 src/dl_techniques/layers/res_path.py:193*
 
 #### `build(self, input_shape)`
 **Module:** `layers.mps_layer`
 
 Build the layer weights based on input shape.
 
-*📁 src/dl_techniques/layers/mps_layer.py:249*
+*📁 src/dl_techniques/layers/mps_layer.py:194*
 
 #### `build(self, input_shape)`
 **Module:** `layers.film`
 
 Build the layer's weights and sub-layers.
 
-*📁 src/dl_techniques/layers/film.py:261*
+*📁 src/dl_techniques/layers/film.py:199*
 
 #### `build(self, input_shape)`
 **Module:** `layers.hanc_block`
 
-Build the layer and all its sub-layers.
+Build the layer and all its sub-layers in computational order.
 
-*📁 src/dl_techniques/layers/hanc_block.py:272*
+*📁 src/dl_techniques/layers/hanc_block.py:273*
 
 #### `build(self, input_shape)`
 **Module:** `layers.repmixer_block`
 
 Build the layer and all sub-layers.
 
-*📁 src/dl_techniques/layers/repmixer_block.py:327*
+*📁 src/dl_techniques/layers/repmixer_block.py:276*
 
 #### `build(self, input_shape)`
 **Module:** `layers.repmixer_block`
 
 Build all stem blocks.
 
-*📁 src/dl_techniques/layers/repmixer_block.py:547*
+*📁 src/dl_techniques/layers/repmixer_block.py:486*
 
 #### `build(self, input_shape)`
 **Module:** `layers.bitlinear_layer`
 
 Build the layer weights based on input shape.
 
-*📁 src/dl_techniques/layers/bitlinear_layer.py:391*
+*📁 src/dl_techniques/layers/bitlinear_layer.py:390*
 
 #### `build(self, input_shape)`
 **Module:** `layers.gaussian_pyramid`
 
 Build all Gaussian filters with appropriate input shapes.
 
-*📁 src/dl_techniques/layers/gaussian_pyramid.py:205*
+*📁 src/dl_techniques/layers/gaussian_pyramid.py:164*
 
 #### `build(self, input_shape)`
 **Module:** `layers.bias_free_conv1d`
 
-Build the layer and all its sub-layers.
+Build the layer and all sub-layers.
 
-*📁 src/dl_techniques/layers/bias_free_conv1d.py:162*
+*📁 src/dl_techniques/layers/bias_free_conv1d.py:144*
 
 #### `build(self, input_shape)`
 **Module:** `layers.bias_free_conv1d`
 
 Build the residual block components.
 
-*📁 src/dl_techniques/layers/bias_free_conv1d.py:407*
+*📁 src/dl_techniques/layers/bias_free_conv1d.py:361*
 
 #### `build(self, input_shape)`
 **Module:** `layers.vector_quantizer`
 
 Create the embedding codebook and EMA variables if needed.
 
-*📁 src/dl_techniques/layers/vector_quantizer.py:160*
+*📁 src/dl_techniques/layers/vector_quantizer.py:121*
 
 #### `build(self, input_shape)`
 **Module:** `layers.restricted_boltzmann_machine`
 
-Create RBM weight variables based on input shape.
+Create weight matrix and bias vectors.
 
-*📁 src/dl_techniques/layers/restricted_boltzmann_machine.py:217*
+*📁 src/dl_techniques/layers/restricted_boltzmann_machine.py:195*
 
 #### `build(self, input_shape)`
 **Module:** `layers.convolutional_kan`
 
 Create the layer's weights including B-spline control points and combination weights.
 
-*📁 src/dl_techniques/layers/convolutional_kan.py:274*
+*📁 src/dl_techniques/layers/convolutional_kan.py:238*
 
 #### `build(self, input_shape)`
 **Module:** `layers.kmeans`
 
 Build the layer weights.
 
-*📁 src/dl_techniques/layers/kmeans.py:280*
+*📁 src/dl_techniques/layers/kmeans.py:277*
 
 #### `build(self, input_shape)`
 **Module:** `layers.capsules`
 
 Build the layer based on input shape.
 
-*📁 src/dl_techniques/layers/capsules.py:214*
+*📁 src/dl_techniques/layers/capsules.py:173*
 
 #### `build(self, input_shape)`
 **Module:** `layers.capsules`
 
 Build layer weights based on input shape.
 
-*📁 src/dl_techniques/layers/capsules.py:503*
+*📁 src/dl_techniques/layers/capsules.py:386*
 
 #### `build(self, input_shape)`
 **Module:** `layers.capsules`
 
 Build the layer based on input shape.
 
-*📁 src/dl_techniques/layers/capsules.py:840*
+*📁 src/dl_techniques/layers/capsules.py:668*
 
 #### `build(self, input_shape)`
 **Module:** `layers.gated_delta_net`
 
 Build the layer and all sub-layers.
 
-*📁 src/dl_techniques/layers/gated_delta_net.py:355*
+*📁 src/dl_techniques/layers/gated_delta_net.py:341*
 
 #### `build(self, input_shape)`
 **Module:** `layers.bias_free_conv2d`
 
-Build the layer and all its sub-layers.
+Build the layer and all sub-layers.
 
-*📁 src/dl_techniques/layers/bias_free_conv2d.py:182*
+*📁 src/dl_techniques/layers/bias_free_conv2d.py:149*
 
 #### `build(self, input_shape)`
 **Module:** `layers.bias_free_conv2d`
 
 Build the residual block components.
 
-*📁 src/dl_techniques/layers/bias_free_conv2d.py:447*
+*📁 src/dl_techniques/layers/bias_free_conv2d.py:374*
 
 #### `build(self, input_shape)`
 **Module:** `layers.mothnet_blocks`
 
 Create layer weights for excitatory connections.
 
-*📁 src/dl_techniques/layers/mothnet_blocks.py:170*
+*📁 src/dl_techniques/layers/mothnet_blocks.py:142*
 
 #### `build(self, input_shape)`
 **Module:** `layers.mothnet_blocks`
 
 Create sparse random projection matrix.
 
-*📁 src/dl_techniques/layers/mothnet_blocks.py:426*
+*📁 src/dl_techniques/layers/mothnet_blocks.py:324*
 
 #### `build(self, input_shape)`
 **Module:** `layers.mothnet_blocks`
 
 Create readout weights.
 
-*📁 src/dl_techniques/layers/mothnet_blocks.py:711*
+*📁 src/dl_techniques/layers/mothnet_blocks.py:512*
 
 #### `build(self, input_shape)`
 **Module:** `layers.selective_gradient_mask`
 
 Build the layer by validating input shapes.
 
-*📁 src/dl_techniques/layers/selective_gradient_mask.py:128*
+*📁 src/dl_techniques/layers/selective_gradient_mask.py:123*
+
+#### `build(self, input_shape)`
+**Module:** `layers.capsules_v2`
+
+*📁 src/dl_techniques/layers/capsules_v2.py:167*
+
+#### `build(self, input_shape)`
+**Module:** `layers.capsules_v2`
+
+*📁 src/dl_techniques/layers/capsules_v2.py:435*
 
 #### `build(self, input_shape)`
 **Module:** `layers.clahe`
 
 Create the layer's trainable weights.
 
-*📁 src/dl_techniques/layers/clahe.py:184*
-
-#### `build(self, input_shape)`
-**Module:** `layers.tversky_projection`
-
-Create the layer's weights: prototypes, features, and contrast params.
-
-*📁 src/dl_techniques/layers/tversky_projection.py:180*
+*📁 src/dl_techniques/layers/clahe.py:151*
 
 #### `build(self, input_shape)`
 **Module:** `layers.hierarchical_mlp_stem`
 
 Build the layer and all its sub-layers dynamically.
 
-*📁 src/dl_techniques/layers/hierarchical_mlp_stem.py:214*
+*📁 src/dl_techniques/layers/hierarchical_mlp_stem.py:249*
 
 #### `build(self, input_shape)`
 **Module:** `layers.layer_scale`
 
 Create the layer's trainable multiplier weights.
 
-*📁 src/dl_techniques/layers/layer_scale.py:219*
+*📁 src/dl_techniques/layers/layer_scale.py:167*
 
 #### `build(self, input_shape)`
 **Module:** `layers.blt_blocks`
 
 Build the entropy model layers.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:443*
+*📁 src/dl_techniques/layers/blt_blocks.py:439*
 
 #### `build(self, input_shape)`
 **Module:** `layers.blt_blocks`
 
 Build pooling layers.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:781*
+*📁 src/dl_techniques/layers/blt_blocks.py:721*
 
 #### `build(self, input_shape)`
 **Module:** `layers.blt_blocks`
 
 Build local encoder layers.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:1076*
+*📁 src/dl_techniques/layers/blt_blocks.py:1022*
 
 #### `build(self, input_shape)`
 **Module:** `layers.blt_blocks`
 
 Build global transformer layers.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:1232*
+*📁 src/dl_techniques/layers/blt_blocks.py:1177*
 
 #### `build(self, input_shape)`
 **Module:** `layers.blt_blocks`
 
 Build local decoder layers.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:1412*
+*📁 src/dl_techniques/layers/blt_blocks.py:1356*
 
 #### `build(self, input_shape)`
 **Module:** `layers.random_fourier_features`
 
-Create the layer's weights including random features and output projection.
+Create random features and build the output projection.
 
-*📁 src/dl_techniques/layers/random_fourier_features.py:264*
+*📁 src/dl_techniques/layers/random_fourier_features.py:220*
 
 #### `build(self, input_shape)`
 **Module:** `layers.modality_projection`
 
 Build the modality projection components.
 
-*📁 src/dl_techniques/layers/modality_projection.py:188*
+*📁 src/dl_techniques/layers/modality_projection.py:217*
 
 #### `build(self, input_shape)`
 **Module:** `layers.sparse_autoencoder`
 
 Build the layer weights.
 
-*📁 src/dl_techniques/layers/sparse_autoencoder.py:235*
+*📁 src/dl_techniques/layers/sparse_autoencoder.py:188*
 
 #### `build(self, input_shape)`
 **Module:** `layers.eomt_mask`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/eomt_mask.py:389*
+*📁 src/dl_techniques/layers/eomt_mask.py:312*
 
 #### `build(self, input_shape)`
 **Module:** `layers.canny`
 
 Create the layer's non-trainable weights (kernels).
 
-*📁 src/dl_techniques/layers/canny.py:179*
+*📁 src/dl_techniques/layers/canny.py:161*
 
 #### `build(self, input_shape)`
 **Module:** `layers.universal_inverted_bottleneck`
 
 Build the layer's weights and sub-layers.
 
-*📁 src/dl_techniques/layers/universal_inverted_bottleneck.py:424*
+*📁 src/dl_techniques/layers/universal_inverted_bottleneck.py:386*
 
 #### `build(self, input_shape)`
 **Module:** `layers.fractal_block`
 
 Build the FractalBlock and all its sub-layers.
 
-*📁 src/dl_techniques/layers/fractal_block.py:294*
+*📁 src/dl_techniques/layers/fractal_block.py:157*
 
 #### `build(self, input_shape)`
 **Module:** `layers.rigid_simplex_layer`
 
-Create the layer's weights.
+Create Simplex, rotation kernel, and scale weights.
 
-*📁 src/dl_techniques/layers/rigid_simplex_layer.py:278*
+*📁 src/dl_techniques/layers/rigid_simplex_layer.py:272*
 
 #### `build(self, input_shape)`
 **Module:** `layers.router`
 
-Build the layer and all its sub-layers.
+Build the layer and all sub-layers.
 
-*📁 src/dl_techniques/layers/router.py:234*
+*📁 src/dl_techniques/layers/router.py:193*
 
 #### `build(self, input_shape)`
 **Module:** `layers.transformers.progressive_focused_transformer`
 
-Build layer components.
+Build all sub-layers with correct shapes.
 
-*📁 src/dl_techniques/layers/transformers/progressive_focused_transformer.py:398*
+*📁 src/dl_techniques/layers/transformers/progressive_focused_transformer.py:237*
 
 #### `build(self, input_shape)`
 **Module:** `layers.transformers.text_encoder`
 
-Build the text encoder and all its sub-layers.
+Build the text encoder and all sub-layers.
 
-*📁 src/dl_techniques/layers/transformers/text_encoder.py:642*
+*📁 src/dl_techniques/layers/transformers/text_encoder.py:520*
 
 #### `build(self, input_shape)`
 **Module:** `layers.transformers.text_decoder`
 
 Build the layer and all sub-layers.
 
-*📁 src/dl_techniques/layers/transformers/text_decoder.py:362*
+*📁 src/dl_techniques/layers/transformers/text_decoder.py:318*
 
 #### `build(self, input_shape)`
 **Module:** `layers.transformers.eomt_transformer`
 
-Build the layer and all its sub-layers.
+Build the layer and all sub-layers.
 
-*📁 src/dl_techniques/layers/transformers/eomt_transformer.py:316*
+*📁 src/dl_techniques/layers/transformers/eomt_transformer.py:272*
 
 #### `build(self, input_shape)`
 **Module:** `layers.transformers.swin_transformer_block`
 
-Build the layer and all its sub-layers.
+Build the layer and all sub-layers for serialization safety.
 
-*📁 src/dl_techniques/layers/transformers/swin_transformer_block.py:429*
+*📁 src/dl_techniques/layers/transformers/swin_transformer_block.py:370*
 
 #### `build(self, input_shape)`
 **Module:** `layers.transformers.free_transformer`
 
 Build all sub-layers including encoder components if enabled.
 
-*📁 src/dl_techniques/layers/transformers/free_transformer.py:557*
+*📁 src/dl_techniques/layers/transformers/free_transformer.py:365*
 
 #### `build(self, input_shape)`
 **Module:** `layers.transformers.perceiver_transformer`
 
-Build the layer and all its sub-layers.
+Build the layer and all sub-layers for serialization safety.
 
-*📁 src/dl_techniques/layers/transformers/perceiver_transformer.py:247*
+*📁 src/dl_techniques/layers/transformers/perceiver_transformer.py:233*
 
 #### `build(self, input_shape)`
 **Module:** `layers.transformers.swin_conv_block`
 
-Build the layer and all its sub-layers.
+Build the layer and all sub-layers for serialization safety.
 
-*📁 src/dl_techniques/layers/transformers/swin_conv_block.py:520*
+*📁 src/dl_techniques/layers/transformers/swin_conv_block.py:270*
 
 #### `build(self, input_shape)`
 **Module:** `layers.transformers.vision_encoder`
 
-Build the vision_heads encoder and all its sub-layers.
+Build the vision encoder and all sub-layers.
 
-*📁 src/dl_techniques/layers/transformers/vision_encoder.py:592*
+*📁 src/dl_techniques/layers/transformers/vision_encoder.py:493*
 
 #### `build(self, input_shape)`
 **Module:** `layers.transformers.transformer`
 
 Build all sub-layers with appropriate shapes.
 
-*📁 src/dl_techniques/layers/transformers/transformer.py:527*
+*📁 src/dl_techniques/layers/transformers/transformer.py:479*
 
 #### `build(self, input_shape)`
 **Module:** `layers.experimental.hierarchical_memory_system`
 
 Build the hierarchical memory system by building all SOM layers.
 
-*📁 src/dl_techniques/layers/experimental/hierarchical_memory_system.py:249*
-
-#### `build(self, input_shape)`
-**Module:** `layers.experimental.field_embeddings`
-
-Create the Lie algebra weight variables.
-
-*📁 src/dl_techniques/layers/experimental/field_embeddings.py:137*
-
-#### `build(self, input_shape)`
-**Module:** `layers.experimental.field_embeddings`
-
-Create reference vector variable if needed.
-
-*📁 src/dl_techniques/layers/experimental/field_embeddings.py:724*
+*📁 src/dl_techniques/layers/experimental/hierarchical_memory_system.py:231*
 
 #### `build(self, input_shape)`
 **Module:** `layers.experimental.contextual_memory`
@@ -13726,521 +14798,553 @@ Build the memory store weights.
 
 Build GNN layers.
 
-*📁 src/dl_techniques/layers/experimental/contextual_memory.py:413*
+*📁 src/dl_techniques/layers/experimental/contextual_memory.py:396*
 
 #### `build(self, input_shape)`
 **Module:** `layers.experimental.contextual_memory`
 
 Build temporal encoder layers.
 
-*📁 src/dl_techniques/layers/experimental/contextual_memory.py:633*
+*📁 src/dl_techniques/layers/experimental/contextual_memory.py:602*
 
 #### `build(self, input_shape)`
 **Module:** `layers.experimental.contextual_memory`
 
 Build all components of the memory bank.
 
-*📁 src/dl_techniques/layers/experimental/contextual_memory.py:793*
+*📁 src/dl_techniques/layers/experimental/contextual_memory.py:744*
 
 #### `build(self, input_shape)`
 **Module:** `layers.experimental.mst_correlation_filter`
 
 Build the layer and create trainable weights.
 
-*📁 src/dl_techniques/layers/experimental/mst_correlation_filter.py:146*
+*📁 src/dl_techniques/layers/experimental/mst_correlation_filter.py:153*
 
 #### `build(self, query_shape, value_shape, key_shape)`
 **Module:** `layers.experimental.mst_correlation_filter`
 
 Build the layer and initialize sublayers.
 
-*📁 src/dl_techniques/layers/experimental/mst_correlation_filter.py:446*
+*📁 src/dl_techniques/layers/experimental/mst_correlation_filter.py:423*
 
 #### `build(self, input_shape)`
 **Module:** `layers.experimental.band_rms_ood`
 
 Build the layer and create weight variables.
 
-*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:189*
+*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:160*
 
 #### `build(self, input_shape)`
 **Module:** `layers.experimental.contextual_counter_ffn`
 
-Build the layer and all sub-layers with proper shape inference.
+Build the layer and all sub-layers.
 
-*📁 src/dl_techniques/layers/experimental/contextual_counter_ffn.py:235*
+*📁 src/dl_techniques/layers/experimental/contextual_counter_ffn.py:188*
 
 #### `build(self, input_shape)`
 **Module:** `layers.experimental.graph_mann`
 
 Create the layer's weights and build sub-layers.
 
-*📁 src/dl_techniques/layers/experimental/graph_mann.py:176*
+*📁 src/dl_techniques/layers/experimental/graph_mann.py:149*
 
 #### `build(self, input_shape)`
 **Module:** `layers.nlp_heads.factory`
 
 Build the layer and its sub-layers.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:231*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:244*
 
 #### `build(self, input_shape)`
 **Module:** `layers.nlp_heads.factory`
 
 Build the layer and its sub-layers.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:364*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:377*
 
 #### `build(self, input_shape)`
 **Module:** `layers.nlp_heads.factory`
 
 Build the layer and its sub-layers.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:482*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:495*
 
 #### `build(self, input_shape)`
 **Module:** `layers.nlp_heads.factory`
 
 Build the layer and its sub-layers.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:603*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:616*
 
 #### `build(self, input_shape)`
 **Module:** `layers.nlp_heads.factory`
 
 Build the layer and its sub-layers.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:733*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:746*
 
 #### `build(self, input_shape)`
 **Module:** `layers.nlp_heads.factory`
 
 Build the layer and its sub-layers.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:920*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:932*
 
 #### `build(self, input_shape)`
 **Module:** `layers.nlp_heads.factory`
 
 Build the layer and its sub-layers.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:1013*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:1025*
 
 #### `build(self, input_shape)`
 **Module:** `layers.nlp_heads.factory`
 
 Build the layer and its sub-layers.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:1154*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:1169*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.ema_layer`
 
 Build the layer.
 
-*📁 src/dl_techniques/layers/time_series/ema_layer.py:301*
+*📁 src/dl_techniques/layers/time_series/ema_layer.py:342*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.nbeats_blocks`
 
 Build the layer weights and explicitly build all sub-layers.
 
-*📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:324*
+*📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:288*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.nbeats_blocks`
 
-Build the generic block and its sub-layers.
+Build the generic block and its basis sub-layers.
 
-*📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:558*
-
-#### `build(self, input_shape)`
-**Module:** `layers.time_series.nbeats_blocks`
-
-Build the trend block with corrected basis functions.
-
-*📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:674*
+*📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:539*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.nbeats_blocks`
 
-Build the seasonality block with corrected basis functions.
+Build the trend block with polynomial basis matrices.
 
-*📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:864*
+*📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:668*
+
+#### `build(self, input_shape)`
+**Module:** `layers.time_series.nbeats_blocks`
+
+Build the seasonality block with Fourier basis matrices.
+
+*📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:880*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.adaptive_lag_attention`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/time_series/adaptive_lag_attention.py:241*
+*📁 src/dl_techniques/layers/time_series/adaptive_lag_attention.py:210*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.quantile_head_fixed_io`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/time_series/quantile_head_fixed_io.py:151*
+*📁 src/dl_techniques/layers/time_series/quantile_head_fixed_io.py:168*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.deepar_blocks`
 
 Build the layer by explicitly building sub-layers.
 
-*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:196*
+*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:202*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.deepar_blocks`
 
 Build the layer by explicitly building sub-layers.
 
-*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:315*
+*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:336*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.deepar_blocks`
 
 Build the cell by building the LSTM sub-layer.
 
-*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:438*
+*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:476*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.quantile_head_variable_io`
 
 Build the layer and initialize all sub-layer weights.
 
-*📁 src/dl_techniques/layers/time_series/quantile_head_variable_io.py:242*
+*📁 src/dl_techniques/layers/time_series/quantile_head_variable_io.py:190*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.xlstm_blocks`
 
 Build the cell's weight matrices.
 
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:167*
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:164*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.xlstm_blocks`
 
 Build the RNN layer.
 
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:407*
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:412*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.xlstm_blocks`
 
 Build the cell's weight matrices.
 
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:578*
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:624*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.xlstm_blocks`
 
 Build the RNN layer.
 
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:850*
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:943*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.xlstm_blocks`
 
 Build all sub-layers.
 
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:1035*
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:1155*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.xlstm_blocks`
 
 Build all sub-layers.
 
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:1251*
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:1401*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.nbeatsx_blocks`
 
-*📁 src/dl_techniques/layers/time_series/nbeatsx_blocks.py:89*
+Build the exogenous block and its encoder.
+
+*📁 src/dl_techniques/layers/time_series/nbeatsx_blocks.py:129*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.forecasting_layers`
 
 Build the complexity analyzer sub-network.
 
-*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:188*
+*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:252*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.forecasting_layers`
 
 Build the projection layer and calibration score.
 
-*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:359*
+*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:457*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.temporal_fusion`
 
 Build the layer weights and sublayers based on input shape.
 
-*📁 src/dl_techniques/layers/time_series/temporal_fusion.py:278*
+*📁 src/dl_techniques/layers/time_series/temporal_fusion.py:277*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.mixed_sequential_block`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/time_series/mixed_sequential_block.py:441*
+*📁 src/dl_techniques/layers/time_series/mixed_sequential_block.py:365*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.prism_blocks`
 
-Build the layer.
+Build the layer and initialize sub-layer weights.
 
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:223*
-
-#### `build(self, input_shape)`
-**Module:** `layers.time_series.prism_blocks`
-
-Build the layer.
-
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:395*
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:244*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.prism_blocks`
 
-Build all PRISM nodes.
+Build the layer and initialize sub-layer weights.
 
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:641*
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:435*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.prism_blocks`
 
-Build the layer.
+Build all PRISM nodes with appropriate segment shapes.
 
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:1001*
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:696*
+
+#### `build(self, input_shape)`
+**Module:** `layers.time_series.prism_blocks`
+
+Build the layer and initialize sub-layer weights.
+
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:1075*
 
 #### `build(self, input_shape)`
 **Module:** `layers.time_series.temporal_convolutional_network`
 
-*📁 src/dl_techniques/layers/time_series/temporal_convolutional_network.py:57*
+Build the layer, creating a 1x1 projection if input channels differ from filters.
+
+*📁 src/dl_techniques/layers/time_series/temporal_convolutional_network.py:108*
 
 #### `build(self, input_shape)`
 **Module:** `layers.physics.approximate_lagrange_layer`
 
 Build all internal MLP sub-layers with proper output dimensions.
 
-*📁 src/dl_techniques/layers/physics/approximate_lagrange_layer.py:176*
+*📁 src/dl_techniques/layers/physics/approximate_lagrange_layer.py:122*
 
 #### `build(self, input_shape)`
 **Module:** `layers.physics.lagrange_layer`
 
 Build the internal MLP sub-layer with explicit shape information.
 
-*📁 src/dl_techniques/layers/physics/lagrange_layer.py:140*
+*📁 src/dl_techniques/layers/physics/lagrange_layer.py:89*
 
 #### `build(self, input_shape)`
 **Module:** `layers.activations.thresh_max`
 
 Create the layer weights if trainable_slope is True.
 
-*📁 src/dl_techniques/layers/activations/thresh_max.py:117*
+*📁 src/dl_techniques/layers/activations/thresh_max.py:174*
 
 #### `build(self, input_shape)`
 **Module:** `layers.activations.differentiable_step`
 
-Create the layer's trainable weights based on the `axis` configuration.
+Create the layer's trainable weights based on the ``axis`` configuration.
 
-*📁 src/dl_techniques/layers/activations/differentiable_step.py:175*
+*📁 src/dl_techniques/layers/activations/differentiable_step.py:160*
 
 #### `build(self, input_shape)`
 **Module:** `layers.activations.expanded_activations`
 
-Create the trainable parameter `alpha` for the expanded activation.
+Create the trainable parameter ``alpha`` for the expanded activation.
 
-*📁 src/dl_techniques/layers/activations/expanded_activations.py:318*
+*📁 src/dl_techniques/layers/activations/expanded_activations.py:286*
 
 #### `build(self, input_shape)`
 **Module:** `layers.activations.probability_output`
 
 Build the internal strategy layer.
 
-*📁 src/dl_techniques/layers/activations/probability_output.py:237*
+*📁 src/dl_techniques/layers/activations/probability_output.py:211*
 
 #### `build(self, input_shape)`
 **Module:** `layers.activations.routing_probabilities`
 
-Build the layer by computing output dimensions and weight patterns.
+Build the layer: compute tree dims and create projection state.
 
-*📁 src/dl_techniques/layers/activations/routing_probabilities.py:282*
+*📁 src/dl_techniques/layers/activations/routing_probabilities.py:499*
 
 #### `build(self, input_shape)`
 **Module:** `layers.activations.adaptive_softmax`
 
-Build the layer - validates input shape.
+Build the layer by validating input shape.
 
-*📁 src/dl_techniques/layers/activations/adaptive_softmax.py:183*
+*📁 src/dl_techniques/layers/activations/adaptive_softmax.py:192*
 
 #### `build(self, input_shape)`
 **Module:** `layers.activations.monotonicity_layer`
 
 Build the layer.
 
-*📁 src/dl_techniques/layers/activations/monotonicity_layer.py:258*
+*📁 src/dl_techniques/layers/activations/monotonicity_layer.py:242*
 
 #### `build(self, input_shape)`
 **Module:** `layers.memory.mann`
 
 Create the layer's own weights and build sub-layers.
 
-*📁 src/dl_techniques/layers/memory/mann.py:270*
+*📁 src/dl_techniques/layers/memory/mann.py:232*
+
+#### `build(self, input_shape)`
+**Module:** `layers.memory.baseline_ntm`
+
+Build sub-layers explicitly.
+
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:309*
+
+#### `build(self, input_shape)`
+**Module:** `layers.memory.baseline_ntm`
+
+Build sub-layers explicitly.
+
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:557*
+
+#### `build(self, input_shape)`
+**Module:** `layers.memory.baseline_ntm`
+
+Build the core layer.
+
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:755*
+
+#### `build(self, input_shape)`
+**Module:** `layers.memory.baseline_ntm`
+
+Build controller and heads with correct shapes.
+
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:1006*
+
+#### `build(self, input_shape)`
+**Module:** `layers.memory.baseline_ntm`
+
+Build sub-layers.
+
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:1334*
 
 #### `build(self, input_shape)`
 **Module:** `layers.memory.som_nd_soft_layer`
 
 Build the Soft SOM layer by creating trainable weight parameters.
 
-*📁 src/dl_techniques/layers/memory/som_nd_soft_layer.py:472*
+*📁 src/dl_techniques/layers/memory/som_nd_soft_layer.py:436*
 
 #### `build(self, input_shape)`
 **Module:** `layers.memory.som_nd_layer`
 
 Build the SOM layer by initializing the weight vectors.
 
-*📁 src/dl_techniques/layers/memory/som_nd_layer.py:301*
+*📁 src/dl_techniques/layers/memory/som_nd_layer.py:278*
 
 #### `build(self, input_shape)`
 **Module:** `layers.vision_heads.factory`
 
 Build the layer.
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:133*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:171*
 
 #### `build(self, input_shape)`
 **Module:** `layers.vlm_heads.factory`
 
 Builds the layer.
 
-*📁 src/dl_techniques/layers/vlm_heads/factory.py:111*
+*📁 src/dl_techniques/layers/vlm_heads/factory.py:146*
 
 #### `build(self, input_shape)`
 **Module:** `layers.geometric.point_cloud_autoencoder`
 
-Build the layer by creating shape-dependent sub-layers.
+Build shape-dependent sub-layers.
 
-*📁 src/dl_techniques/layers/geometric/point_cloud_autoencoder.py:147*
+*📁 src/dl_techniques/layers/geometric/point_cloud_autoencoder.py:89*
 
 #### `build(self, input_shape)`
 **Module:** `layers.geometric.point_cloud_autoencoder`
 
 Build the MLP with the correct input dimension.
 
-*📁 src/dl_techniques/layers/geometric/point_cloud_autoencoder.py:395*
+*📁 src/dl_techniques/layers/geometric/point_cloud_autoencoder.py:296*
 
 #### `build(self, input_shape)`
 **Module:** `layers.geometric.supernode_pooling`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/geometric/supernode_pooling.py:216*
+*📁 src/dl_techniques/layers/geometric/supernode_pooling.py:200*
 
 #### `build(self, input_shape)`
-**Module:** `layers.geometric.fields.parallel_transport`
+**Module:** `layers.geometric.clifford_block`
 
-Build the layer weights.
+Build the projection layer.
 
-*📁 src/dl_techniques/layers/geometric/fields/parallel_transport.py:101*
-
-#### `build(self, input_shape)`
-**Module:** `layers.geometric.fields.holonomy_layer`
-
-Build the layer weights.
-
-*📁 src/dl_techniques/layers/geometric/fields/holonomy_layer.py:116*
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:183*
 
 #### `build(self, input_shape)`
-**Module:** `layers.geometric.fields.gauge_invariant_attention`
+**Module:** `layers.geometric.clifford_block`
 
-Build the layer weights.
+Build LayerScale and the gate projection.
 
-*📁 src/dl_techniques/layers/geometric/fields/gauge_invariant_attention.py:116*
-
-#### `build(self, input_shape)`
-**Module:** `layers.geometric.fields.connection_layer`
-
-Build the layer weights.
-
-*📁 src/dl_techniques/layers/geometric/fields/connection_layer.py:123*
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:392*
 
 #### `build(self, input_shape)`
-**Module:** `layers.geometric.fields.manifold_stress`
+**Module:** `layers.geometric.clifford_block`
 
-Build the layer weights.
+Build all sub-layers in dependency order.
 
-*📁 src/dl_techniques/layers/geometric/fields/manifold_stress.py:111*
-
-#### `build(self, input_shape)`
-**Module:** `layers.geometric.fields.holonomic_transformer`
-
-Build the layer weights.
-
-*📁 src/dl_techniques/layers/geometric/fields/holonomic_transformer.py:69*
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:690*
 
 #### `build(self, input_shape)`
-**Module:** `layers.geometric.fields.holonomic_transformer`
+**Module:** `layers.geometric.clifford_block`
 
-Build the layer.
+Build all sub-layers.
 
-*📁 src/dl_techniques/layers/geometric/fields/holonomic_transformer.py:360*
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:998*
 
 #### `build(self, input_shape)`
-**Module:** `layers.geometric.fields.field_embedding`
+**Module:** `layers.geometric.clifford_block`
 
-Build the layer weights.
+Build all sub-layers in dependency order.
 
-*📁 src/dl_techniques/layers/geometric/fields/field_embedding.py:138*
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:1433*
+
+#### `build(self, input_shape)`
+**Module:** `layers.geometric.clifford_block`
+
+Explicitly build every sub-layer in dependency order.
+
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:1907*
+
+#### `build(self, input_shape)`
+**Module:** `layers.geometric.clifford_block`
+
+Explicitly build every sub-layer in dependency order.
+
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:2421*
 
 #### `build(self, input_shape)`
 **Module:** `layers.norms.zero_centered_rms_norm`
 
 Create the layer's own weights.
 
-*📁 src/dl_techniques/layers/norms/zero_centered_rms_norm.py:284*
+*📁 src/dl_techniques/layers/norms/zero_centered_rms_norm.py:185*
 
 #### `build(self, input_shape)`
 **Module:** `layers.norms.adaptive_band_rms`
 
 Build the layer and create sub-layers with proper parameter sizing.
 
-*📁 src/dl_techniques/layers/norms/adaptive_band_rms.py:278*
+*📁 src/dl_techniques/layers/norms/adaptive_band_rms.py:257*
 
 #### `build(self, input_shape)`
 **Module:** `layers.norms.band_rms`
 
 Create the layer's own weights.
 
-*📁 src/dl_techniques/layers/norms/band_rms.py:212*
+*📁 src/dl_techniques/layers/norms/band_rms.py:196*
 
 #### `build(self, input_shape)`
 **Module:** `layers.norms.global_response_norm`
 
 Create the layer's weights, adapted for 2D, 3D, or 4D inputs.
 
-*📁 src/dl_techniques/layers/norms/global_response_norm.py:179*
+*📁 src/dl_techniques/layers/norms/global_response_norm.py:176*
 
 #### `build(self, input_shape)`
 **Module:** `layers.norms.band_logit_norm`
 
 Build the layer by initializing the LayerNormalization sublayer.
 
-*📁 src/dl_techniques/layers/norms/band_logit_norm.py:99*
+*📁 src/dl_techniques/layers/norms/band_logit_norm.py:144*
 
 #### `build(self, input_shape)`
 **Module:** `layers.norms.rms_norm`
 
 Create the layer's own weights.
 
-*📁 src/dl_techniques/layers/norms/rms_norm.py:251*
+*📁 src/dl_techniques/layers/norms/rms_norm.py:172*
 
 #### `build(self, input_shape)`
 **Module:** `layers.norms.zero_centered_band_rms_norm`
 
 Create the layer's own weights.
 
-*📁 src/dl_techniques/layers/norms/zero_centered_band_rms_norm.py:327*
+*📁 src/dl_techniques/layers/norms/zero_centered_band_rms_norm.py:228*
 
 #### `build(self, input_shape)`
 **Module:** `layers.norms.dynamic_tanh`
@@ -14254,543 +15358,516 @@ Create the layer's learnable parameters.
 
 Build the layer weights.
 
-*📁 src/dl_techniques/layers/logic/arithmetic_operators.py:232*
+*📁 src/dl_techniques/layers/logic/arithmetic_operators.py:221*
 
 #### `build(self, input_shape)`
 **Module:** `layers.logic.logic_operators`
 
 Build the layer weights.
 
-*📁 src/dl_techniques/layers/logic/logic_operators.py:210*
+*📁 src/dl_techniques/layers/logic/logic_operators.py:200*
 
 #### `build(self, input_shape)`
 **Module:** `layers.logic.neural_circuit`
 
 Build the layer components.
 
-*📁 src/dl_techniques/layers/logic/neural_circuit.py:175*
+*📁 src/dl_techniques/layers/logic/neural_circuit.py:172*
 
 #### `build(self, input_shape)`
 **Module:** `layers.logic.neural_circuit`
 
 Build the neural circuit layers.
 
-*📁 src/dl_techniques/layers/logic/neural_circuit.py:422*
+*📁 src/dl_techniques/layers/logic/neural_circuit.py:425*
 
 #### `build(self, input_shape)`
 **Module:** `layers.moe.layer`
 
 Build the MoE layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/moe/layer.py:184*
+*📁 src/dl_techniques/layers/moe/layer.py:125*
 
 #### `build(self, input_shape)`
 **Module:** `layers.moe.experts`
 
-Build the FFN expert using the factory system.
+BUILD the FFN expert sub-layers explicitly.
 
-*📁 src/dl_techniques/layers/moe/experts.py:157*
+*📁 src/dl_techniques/layers/moe/experts.py:150*
 
 #### `build(self, input_shape)`
 **Module:** `layers.moe.gating`
 
 Build the linear gating layers.
 
-*📁 src/dl_techniques/layers/moe/gating.py:164*
+*📁 src/dl_techniques/layers/moe/gating.py:183*
 
 #### `build(self, input_shape)`
 **Module:** `layers.moe.gating`
 
 Build the cosine gating layers.
 
-*📁 src/dl_techniques/layers/moe/gating.py:339*
+*📁 src/dl_techniques/layers/moe/gating.py:385*
 
 #### `build(self, input_shape)`
 **Module:** `layers.moe.gating`
 
 Build the SoftMoE gating layers.
 
-*📁 src/dl_techniques/layers/moe/gating.py:508*
+*📁 src/dl_techniques/layers/moe/gating.py:576*
 
 #### `build(self, input_shape)`
 **Module:** `layers.fusion.multimodal_fusion`
 
 Create and build all sublayers based on input shapes.
 
-*📁 src/dl_techniques/layers/fusion/multimodal_fusion.py:204*
+*📁 src/dl_techniques/layers/fusion/multimodal_fusion.py:240*
 
 #### `build(self, input_shape)`
 **Module:** `layers.statistics.moving_std`
 
 Build the layer and its internal average pooling component.
 
-*📁 src/dl_techniques/layers/statistics/moving_std.py:225*
+*📁 src/dl_techniques/layers/statistics/moving_std.py:157*
 
 #### `build(self, input_shape)`
 **Module:** `layers.statistics.residual_acf`
 
 Build the layer and validate input shapes.
 
-*📁 src/dl_techniques/layers/statistics/residual_acf.py:248*
+*📁 src/dl_techniques/layers/statistics/residual_acf.py:150*
 
 #### `build(self, input_shapes)`
 **Module:** `layers.statistics.normalizing_flow`
 
 Build the layer and its transformation network.
 
-*📁 src/dl_techniques/layers/statistics/normalizing_flow.py:235*
+*📁 src/dl_techniques/layers/statistics/normalizing_flow.py:174*
 
 #### `build(self, input_shapes)`
 **Module:** `layers.statistics.normalizing_flow`
 
 Build the layer and all coupling layers.
 
-*📁 src/dl_techniques/layers/statistics/normalizing_flow.py:623*
+*📁 src/dl_techniques/layers/statistics/normalizing_flow.py:449*
 
 #### `build(self, input_shape)`
 **Module:** `layers.statistics.invertible_kernel_pca`
 
 Create Random Fourier Features and PCA projection weights.
 
-*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:266*
+*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:209*
 
 #### `build(self, input_shape)`
 **Module:** `layers.statistics.invertible_kernel_pca`
 
 Build the denoising layer.
 
-*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:729*
+*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:672*
 
 #### `build(self, input_shape)`
 **Module:** `layers.statistics.scaler`
 
 Create the layer's weights and validate input shape.
 
-*📁 src/dl_techniques/layers/statistics/scaler.py:314*
+*📁 src/dl_techniques/layers/statistics/scaler.py:202*
 
 #### `build(self, input_shape)`
 **Module:** `layers.statistics.deep_kernel_pca`
 
 Create weights for multi-level kernel PCA.
 
-*📁 src/dl_techniques/layers/statistics/deep_kernel_pca.py:255*
+*📁 src/dl_techniques/layers/statistics/deep_kernel_pca.py:212*
 
 #### `build(self, input_shape)`
 **Module:** `layers.statistics.mdn_layer`
 
 Build the layer's weights and sub-layers.
 
-*📁 src/dl_techniques/layers/statistics/mdn_layer.py:238*
+*📁 src/dl_techniques/layers/statistics/mdn_layer.py:221*
 
 #### `build(self, input_shape)`
 **Module:** `layers.graphs.simplified_hyperbolic_graph_convolutional_neural_layer`
 
 Create layer weights based on input shape.
 
-*📁 src/dl_techniques/layers/graphs/simplified_hyperbolic_graph_convolutional_neural_layer.py:175*
+*📁 src/dl_techniques/layers/graphs/simplified_hyperbolic_graph_convolutional_neural_layer.py:138*
 
 #### `build(self, input_shape)`
 **Module:** `layers.graphs.graph_neural_network`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/graphs/graph_neural_network.py:385*
+*📁 src/dl_techniques/layers/graphs/graph_neural_network.py:354*
 
 #### `build(self, input_shape)`
 **Module:** `layers.graphs.entity_graph_refinement`
 
-Build all sublayers and weights for the entity-graph refinement component.
+Build all sublayers and weights.
 
-*📁 src/dl_techniques/layers/graphs/entity_graph_refinement.py:324*
+*📁 src/dl_techniques/layers/graphs/entity_graph_refinement.py:270*
 
 #### `build(self, input_shape)`
 **Module:** `layers.graphs.relational_graph_transformer_blocks`
 
 Create the layer's learnable weights.
 
-*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:156*
+*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:113*
 
 #### `build(self, input_shape)`
 **Module:** `layers.graphs.relational_graph_transformer_blocks`
 
 Build all sub-layers.
 
-*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:479*
+*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:374*
 
 #### `build(self, input_shape)`
 **Module:** `layers.graphs.relational_graph_transformer_blocks`
 
 Build sub-layers and create global centroid weights.
 
-*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:847*
+*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:656*
 
 #### `build(self, input_shape)`
 **Module:** `layers.graphs.fermi_diract_decoder`
 
 Create learnable parameters.
 
-*📁 src/dl_techniques/layers/graphs/fermi_diract_decoder.py:137*
+*📁 src/dl_techniques/layers/graphs/fermi_diract_decoder.py:83*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.channel_attention`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/attention/channel_attention.py:201*
+*📁 src/dl_techniques/layers/attention/channel_attention.py:181*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.tripse_attention`
 
-Build the branch layers.
+Build sub-layers with shapes derived from the permutation pattern.
 
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:87*
-
-#### `build(self, input_shape)`
-**Module:** `layers.attention.tripse_attention`
-
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:245*
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:120*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.tripse_attention`
 
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:335*
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:312*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.tripse_attention`
 
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:470*
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:437*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.tripse_attention`
 
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:567*
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:609*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.tripse_attention`
 
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:687*
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:740*
+
+#### `build(self, input_shape)`
+**Module:** `layers.attention.tripse_attention`
+
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:897*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.rpc_attention`
 
 Build the layer and its sub-layers.
 
-*📁 src/dl_techniques/layers/attention/rpc_attention.py:294*
+*📁 src/dl_techniques/layers/attention/rpc_attention.py:193*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.multi_head_attention`
 
 Build the layer by creating weight variables and building sub-layers.
 
-*📁 src/dl_techniques/layers/attention/multi_head_attention.py:190*
+*📁 src/dl_techniques/layers/attention/multi_head_attention.py:175*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.shared_weights_cross_attention`
 
-Build the layer and all its sub-layers.
+Build the layer and all sub-layers for robust serialization.
 
-*📁 src/dl_techniques/layers/attention/shared_weights_cross_attention.py:232*
+*📁 src/dl_techniques/layers/attention/shared_weights_cross_attention.py:168*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.single_window_attention`
 
-Build the layer's weights.
+Build the layer weights including the relative position bias table.
 
-*📁 src/dl_techniques/layers/attention/single_window_attention.py:166*
+*📁 src/dl_techniques/layers/attention/single_window_attention.py:259*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.ring_attention`
 
-Build the layer and all its sub-layers.
+Build the layer and all sub-layers for robust serialization.
 
-*📁 src/dl_techniques/layers/attention/ring_attention.py:361*
+*📁 src/dl_techniques/layers/attention/ring_attention.py:237*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.perceiver_attention`
 
 Build the layer by creating weight variables and building sub-layers.
 
-*📁 src/dl_techniques/layers/attention/perceiver_attention.py:238*
+*📁 src/dl_techniques/layers/attention/perceiver_attention.py:152*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.gated_attention`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/attention/gated_attention.py:392*
+*📁 src/dl_techniques/layers/attention/gated_attention.py:366*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.spatial_attention`
 
 Build the layer and its sub-layers.
 
-*📁 src/dl_techniques/layers/attention/spatial_attention.py:165*
+*📁 src/dl_techniques/layers/attention/spatial_attention.py:154*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.performer_attention`
 
 Build the layer and its sub-layers.
 
-*📁 src/dl_techniques/layers/attention/performer_attention.py:288*
+*📁 src/dl_techniques/layers/attention/performer_attention.py:184*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.multi_head_cross_attention`
 
 Build the layer by creating weight variables and building sub-layers.
 
-*📁 src/dl_techniques/layers/attention/multi_head_cross_attention.py:330*
+*📁 src/dl_techniques/layers/attention/multi_head_cross_attention.py:290*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.fnet_fourier_transform`
 
 Create and cache DFT matrices for efficient computation.
 
-*📁 src/dl_techniques/layers/attention/fnet_fourier_transform.py:146*
+*📁 src/dl_techniques/layers/attention/fnet_fourier_transform.py:147*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.window_attention`
 
-Build layer and precompute zigzag indices if needed.
+Build the layer and precompute zigzag indices if needed.
 
-*📁 src/dl_techniques/layers/attention/window_attention.py:321*
+*📁 src/dl_techniques/layers/attention/window_attention.py:358*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.capsule_routing_attention`
 
 Build the layer and create all sub-components.
 
-*📁 src/dl_techniques/layers/attention/capsule_routing_attention.py:296*
+*📁 src/dl_techniques/layers/attention/capsule_routing_attention.py:227*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.anchor_attention`
 
 Build the layer and all sub-layers.
 
-*📁 src/dl_techniques/layers/attention/anchor_attention.py:381*
+*📁 src/dl_techniques/layers/attention/anchor_attention.py:282*
+
+#### `build(self, input_shape)`
+**Module:** `layers.attention.wave_field_attention`
+
+*📁 src/dl_techniques/layers/attention/wave_field_attention.py:264*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.differential_attention`
 
 Build the layer and create the lambda parameter weight.
 
-*📁 src/dl_techniques/layers/attention/differential_attention.py:269*
+*📁 src/dl_techniques/layers/attention/differential_attention.py:221*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.hopfield_attention`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/attention/hopfield_attention.py:279*
+*📁 src/dl_techniques/layers/attention/hopfield_attention.py:284*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.multi_head_latent_attention`
 
 Build the layer and all sub-layers.
 
-*📁 src/dl_techniques/layers/attention/multi_head_latent_attention.py:411*
+*📁 src/dl_techniques/layers/attention/multi_head_latent_attention.py:307*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.group_query_attention`
 
-Build the layer and all its sub-layers. Explicitly builds sub-layers for robust serialization.
+Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/attention/group_query_attention.py:255*
+*📁 src/dl_techniques/layers/attention/group_query_attention.py:279*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.mobile_mqa`
 
-Build the layer. Calls super().build() for GQA weights, then adds MobileMQA-specific components (downsample, lambda).
+Build the layer including GQA weights and MobileMQA-specific components.
 
-*📁 src/dl_techniques/layers/attention/mobile_mqa.py:116*
+*📁 src/dl_techniques/layers/attention/mobile_mqa.py:142*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.convolutional_block_attention`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/attention/convolutional_block_attention.py:220*
+*📁 src/dl_techniques/layers/attention/convolutional_block_attention.py:187*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.non_local_attention`
 
-Build the layer and all its sub-layers.
+Build the layer and all sub-layers for robust serialization.
 
-*📁 src/dl_techniques/layers/attention/non_local_attention.py:364*
+*📁 src/dl_techniques/layers/attention/non_local_attention.py:278*
 
 #### `build(self, input_shape)`
 **Module:** `layers.attention.progressive_focused_attention`
 
 Build layer weights and sub-layers.
 
-*📁 src/dl_techniques/layers/attention/progressive_focused_attention.py:324*
-
-#### `build(self, input_shape)`
-**Module:** `layers.ntm.baseline_ntm`
-
-Build sub-layers explicitly.
-
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:257*
-
-#### `build(self, input_shape)`
-**Module:** `layers.ntm.baseline_ntm`
-
-Build sub-layers explicitly.
-
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:505*
-
-#### `build(self, input_shape)`
-**Module:** `layers.ntm.baseline_ntm`
-
-Build the core layer.
-
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:703*
-
-#### `build(self, input_shape)`
-**Module:** `layers.ntm.baseline_ntm`
-
-Build controller and heads with correct shapes.
-
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:951*
-
-#### `build(self, input_shape)`
-**Module:** `layers.ntm.baseline_ntm`
-
-Build sub-layers.
-
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:1262*
-
-#### `build(self, input_shape)`
-**Module:** `layers.ntm.base_layers`
-
-Build the addressing head components.
-
-*📁 src/dl_techniques/layers/ntm/base_layers.py:186*
-
-#### `build(self, input_shape)`
-**Module:** `layers.ntm.base_layers`
-
-Build read and write heads.
-
-*📁 src/dl_techniques/layers/ntm/base_layers.py:474*
-
-#### `build(self, input_shape)`
-**Module:** `layers.ntm.base_layers`
-
-Build selection and placement mechanisms.
-
-*📁 src/dl_techniques/layers/ntm/base_layers.py:786*
+*📁 src/dl_techniques/layers/attention/progressive_focused_attention.py:240*
 
 #### `build(self, input_shape)`
 **Module:** `layers.ffn.residual_block`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/ffn/residual_block.py:246*
+*📁 src/dl_techniques/layers/ffn/residual_block.py:236*
 
 #### `build(self, input_shape)`
 **Module:** `layers.ffn.counting_ffn`
 
 Build the Counting FFN and all its sub-layers.
 
-*📁 src/dl_techniques/layers/ffn/counting_ffn.py:289*
+*📁 src/dl_techniques/layers/ffn/counting_ffn.py:269*
 
 #### `build(self, input_shape)`
 **Module:** `layers.ffn.power_mlp_layer`
 
 Build the layer weights and initialize sublayers.
 
-*📁 src/dl_techniques/layers/ffn/power_mlp_layer.py:262*
+*📁 src/dl_techniques/layers/ffn/power_mlp_layer.py:254*
 
 #### `build(self, input_shape)`
 **Module:** `layers.ffn.diff_ffn`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/ffn/diff_ffn.py:342*
+*📁 src/dl_techniques/layers/ffn/diff_ffn.py:318*
+
+#### `build(self, input_shape)`
+**Module:** `layers.ffn.kan_linear`
+
+Create layer weights and B-spline grid based on input shape.
+
+*📁 src/dl_techniques/layers/ffn/kan_linear.py:169*
 
 #### `build(self, input_shape)`
 **Module:** `layers.ffn.gated_mlp`
 
 Build the GatedMLP layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/ffn/gated_mlp.py:293*
+*📁 src/dl_techniques/layers/ffn/gated_mlp.py:281*
 
 #### `build(self, input_shape)`
 **Module:** `layers.ffn.swiglu_ffn`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/ffn/swiglu_ffn.py:315*
+*📁 src/dl_techniques/layers/ffn/swiglu_ffn.py:304*
 
 #### `build(self, input_shape)`
 **Module:** `layers.ffn.swin_mlp`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/ffn/swin_mlp.py:240*
+*📁 src/dl_techniques/layers/ffn/swin_mlp.py:218*
 
 #### `build(self, input_shape)`
 **Module:** `layers.ffn.mlp`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/ffn/mlp.py:248*
+*📁 src/dl_techniques/layers/ffn/mlp.py:249*
 
 #### `build(self, input_shape)`
 **Module:** `layers.ffn.glu_ffn`
 
 Build the layer and all its sub-layers for robust serialization.
 
-*📁 src/dl_techniques/layers/ffn/glu_ffn.py:304*
+*📁 src/dl_techniques/layers/ffn/glu_ffn.py:246*
+
+#### `build(self, input_shape)`
+**Module:** `layers.ffn.tversky_projection`
+
+Create the layer's weights: prototypes, features, and contrast params.
+
+*📁 src/dl_techniques/layers/ffn/tversky_projection.py:170*
 
 #### `build(self, input_shape)`
 **Module:** `layers.ffn.orthoglu_ffn`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/ffn/orthoglu_ffn.py:221*
+*📁 src/dl_techniques/layers/ffn/orthoglu_ffn.py:225*
 
 #### `build(self, input_shape)`
 **Module:** `layers.ffn.geglu_ffn`
 
 Create weights for all sub-layers.
 
-*📁 src/dl_techniques/layers/ffn/geglu_ffn.py:276*
+*📁 src/dl_techniques/layers/ffn/geglu_ffn.py:242*
 
 #### `build(self, input_shape)`
 **Module:** `layers.ffn.logic_ffn`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/ffn/logic_ffn.py:242*
+*📁 src/dl_techniques/layers/ffn/logic_ffn.py:248*
 
 #### `build(self, input_shape)`
 **Module:** `layers.embedding.patch_embedding`
 
 Build the layer and its sub-layers.
 
-*📁 src/dl_techniques/layers/embedding/patch_embedding.py:182*
+*📁 src/dl_techniques/layers/embedding/patch_embedding.py:193*
 
 #### `build(self, input_shape)`
 **Module:** `layers.embedding.patch_embedding`
 
 Build the layer and its sub-layers.
 
-*📁 src/dl_techniques/layers/embedding/patch_embedding.py:383*
+*📁 src/dl_techniques/layers/embedding/patch_embedding.py:405*
+
+#### `build(self, input_shape)`
+**Module:** `layers.embedding.hierarchical_codebook_embedding`
+
+*📁 src/dl_techniques/layers/embedding/hierarchical_codebook_embedding.py:227*
 
 #### `build(self, input_shape)`
 **Module:** `layers.embedding.continuous_rope_embedding`
 
-Create the layer's frequency weights.
+Create the layer's fixed frequency weights.
 
-*📁 src/dl_techniques/layers/embedding/continuous_rope_embedding.py:176*
+*📁 src/dl_techniques/layers/embedding/continuous_rope_embedding.py:173*
+
+#### `build(self, input_shape)`
+**Module:** `layers.embedding.albert_factorized_embedding`
+
+*📁 src/dl_techniques/layers/embedding/albert_factorized_embedding.py:139*
 
 #### `build(self, input_shape)`
 **Module:** `layers.embedding.modern_bert_embeddings`
 
-Creates the weights for the embedding, norm, and dropout layers.
+Create weights for the embedding, norm, and dropout sub-layers.
 
-*📁 src/dl_techniques/layers/embedding/modern_bert_embeddings.py:109*
+*📁 src/dl_techniques/layers/embedding/modern_bert_embeddings.py:122*
 
 #### `build(self, input_shape)`
 **Module:** `layers.embedding.positional_embedding`
@@ -14804,147 +15881,166 @@ Build the layer by creating weights and building sub-layers.
 
 Build the embeddings layer by explicitly building all sub-layers.
 
-*📁 src/dl_techniques/layers/embedding/bert_embeddings.py:257*
+*📁 src/dl_techniques/layers/embedding/bert_embeddings.py:267*
 
 #### `build(self, input_shape)`
 **Module:** `layers.embedding.continuous_sin_cos_embedding`
 
-Create the layer's frequency weights.
+Create the layer's fixed frequency weights.
 
-*📁 src/dl_techniques/layers/embedding/continuous_sin_cos_embedding.py:197*
+*📁 src/dl_techniques/layers/embedding/continuous_sin_cos_embedding.py:186*
 
 #### `build(self, input_shape)`
 **Module:** `layers.embedding.dual_rotary_position_embedding`
 
-Create cos/sin lookup tables for both global and local RoPE configurations.
+Create cos/sin lookup tables for both global and local RoPE.
 
-*📁 src/dl_techniques/layers/embedding/dual_rotary_position_embedding.py:223*
+*📁 src/dl_techniques/layers/embedding/dual_rotary_position_embedding.py:175*
 
 #### `build(self, input_shape)`
 **Module:** `layers.embedding.rotary_position_embedding`
 
-Create the layer's cos/sin lookup tables.
+Create the cos/sin lookup tables for RoPE computation.
 
-*📁 src/dl_techniques/layers/embedding/rotary_position_embedding.py:218*
+*📁 src/dl_techniques/layers/embedding/rotary_position_embedding.py:186*
 
 #### `build(self, input_shape)`
 **Module:** `layers.reasoning.hrm_reasoning_module`
 
 Build the module and all its internal TransformerLayer sub-layers.
 
-*📁 src/dl_techniques/layers/reasoning/hrm_reasoning_module.py:160*
+*📁 src/dl_techniques/layers/reasoning/hrm_reasoning_module.py:191*
 
 #### `build(self, input_shape)`
 **Module:** `layers.reasoning.hrm_sparse_puzzle_embedding`
 
 Create the embedding weights and caching variables.
 
-*📁 src/dl_techniques/layers/reasoning/hrm_sparse_puzzle_embedding.py:174*
+*📁 src/dl_techniques/layers/reasoning/hrm_sparse_puzzle_embedding.py:124*
 
 #### `build(self, input_shape)`
 **Module:** `layers.reasoning.hrm_reasoning_core`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/layers/reasoning/hrm_reasoning_core.py:439*
+*📁 src/dl_techniques/layers/reasoning/hrm_reasoning_core.py:351*
 
 #### `build_from_config(self, config)`
 **Module:** `layers.modality_projection`
 
 Build the layer from a config created with get_build_config.
 
-*📁 src/dl_techniques/layers/modality_projection.py:307*
+*📁 src/dl_techniques/layers/modality_projection.py:327*
+
+#### `build_from_config(self, config)`
+**Module:** `layers.activations.routing_probabilities`
+
+Rebuild from a saved build config produced by ``get_build_config``.
+
+*📁 src/dl_techniques/layers/activations/routing_probabilities.py:887*
 
 #### `build_from_config(self, config)`
 **Module:** `layers.memory.som_nd_layer`
 
 Build the layer from a configuration.
 
-*📁 src/dl_techniques/layers/memory/som_nd_layer.py:571*
+*📁 src/dl_techniques/layers/memory/som_nd_layer.py:516*
+
+#### `build_from_config(self, config)`
+**Module:** `layers.geometric.clifford_block`
+
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:198*
+
+#### `build_from_config(self, config)`
+**Module:** `layers.moe.layer`
+
+Build layer from saved configuration.
+
+*📁 src/dl_techniques/layers/moe/layer.py:444*
 
 #### `build_from_config(self, config)`
 **Module:** `layers.moe.experts`
 
 Build the expert from configuration.
 
-*📁 src/dl_techniques/layers/moe/experts.py:75*
+*📁 src/dl_techniques/layers/moe/experts.py:83*
 
-#### `build_holonomic_field_model(vocab_size, embed_dim, seq_len, num_classes, use_stress_loss, stress_weight, use_expm, projection_type, name)`
-**Module:** `layers.experimental.field_embeddings`
+#### `build_from_config(self, config)`
+**Module:** `layers.attention.multi_head_cross_attention`
 
-Build a complete holonomic field embedding model for sequence classification.
+Restore build state, including lazy-built routing child.
 
-*📁 src/dl_techniques/layers/experimental/field_embeddings.py:848*
+*📁 src/dl_techniques/layers/attention/multi_head_cross_attention.py:590*
 
 #### `build_moe_optimizer(self, model, config)`
 **Module:** `layers.moe.integration`
 
 Build an optimizer optimized for MoE training with FFN experts.
 
-*📁 src/dl_techniques/layers/moe/integration.py:96*
+*📁 src/dl_techniques/layers/moe/integration.py:119*
 
 #### `calibrate(self, calibration_scores, alpha)`
 **Module:** `layers.time_series.forecasting_layers`
 
 Update the conformal calibration score Q based on calibration data.
 
-*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:418*
+*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:517*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.mobile_one_block`
 
 Forward pass through the block.
 
-*📁 src/dl_techniques/layers/mobile_one_block.py:287*
+*📁 src/dl_techniques/layers/mobile_one_block.py:266*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.depthwise_separable_block`
 
 Forward pass through the depthwise separable block.
 
-*📁 src/dl_techniques/layers/depthwise_separable_block.py:336*
+*📁 src/dl_techniques/layers/depthwise_separable_block.py:241*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.sampling`
 
-Apply reparameterization trick to sample from Normal distribution.
+Apply the reparameterisation trick to sample ``z``.
 
-*📁 src/dl_techniques/layers/sampling.py:198*
+*📁 src/dl_techniques/layers/sampling.py:159*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.hanc_layer`
 
 Forward pass computation.
 
-*📁 src/dl_techniques/layers/hanc_layer.py:261*
+*📁 src/dl_techniques/layers/hanc_layer.py:244*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.laplacian_filter`
 
 Apply the Laplacian filter to the input tensor.
 
-*📁 src/dl_techniques/layers/laplacian_filter.py:175*
+*📁 src/dl_techniques/layers/laplacian_filter.py:167*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.laplacian_filter`
 
 Apply the Laplacian filter to the input tensor.
 
-*📁 src/dl_techniques/layers/laplacian_filter.py:427*
+*📁 src/dl_techniques/layers/laplacian_filter.py:414*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.multi_level_feature_compilation`
 
-Forward pass computation.
+Forward pass performing iterative cross-level feature compilation.
 
-*📁 src/dl_techniques/layers/multi_level_feature_compilation.py:320*
+*📁 src/dl_techniques/layers/multi_level_feature_compilation.py:300*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.yolo12_blocks`
 
 Forward pass through the convolution block.
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:187*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:182*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.yolo12_blocks`
@@ -14958,378 +16054,388 @@ Forward pass through area attention.
 
 Forward pass through attention block.
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:625*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:627*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.yolo12_blocks`
 
 Forward pass through bottleneck.
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:775*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:776*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.yolo12_blocks`
 
 Forward pass through C3k2 block.
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:955*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:959*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.yolo12_blocks`
 
 Forward pass through A2C2f block.
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:1153*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:1158*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.yolo12_heads`
 
 Forward pass through detection head.
 
-*📁 src/dl_techniques/layers/yolo12_heads.py:290*
+*📁 src/dl_techniques/layers/yolo12_heads.py:276*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.yolo12_heads`
 
 Forward pass through segmentation head.
 
-*📁 src/dl_techniques/layers/yolo12_heads.py:706*
+*📁 src/dl_techniques/layers/yolo12_heads.py:676*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.yolo12_heads`
 
 Forward pass through classification head.
 
-*📁 src/dl_techniques/layers/yolo12_heads.py:1058*
+*📁 src/dl_techniques/layers/yolo12_heads.py:1016*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.radial_basis_function`
 
-Forward pass of the RBF Layer.
+Forward pass computing Gaussian RBF activations.
 
-*📁 src/dl_techniques/layers/radial_basis_function.py:243*
+*📁 src/dl_techniques/layers/radial_basis_function.py:262*
+
+#### `call(self, inputs, training)`
+**Module:** `layers.pixel_unshuffle`
+
+*📁 src/dl_techniques/layers/pixel_unshuffle.py:142*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.spatial_layer`
 
-Forward pass that dynamically resizes coordinate grid to match input dimensions.
+Dynamically resize coordinate grid to match input dimensions.
 
-*📁 src/dl_techniques/layers/spatial_layer.py:230*
+*📁 src/dl_techniques/layers/spatial_layer.py:169*
 
 #### `call(self, inputs)`
 **Module:** `layers.one_hot_encoding`
 
 Apply one-hot encoding to categorical inputs.
 
-*📁 src/dl_techniques/layers/one_hot_encoding.py:84*
+*📁 src/dl_techniques/layers/one_hot_encoding.py:129*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.neuro_grid`
 
-Forward pass: project input to probabilities and perform soft lookup.
+Forward pass: project, compute joint probability, and soft lookup.
 
-*📁 src/dl_techniques/layers/neuro_grid.py:599*
+*📁 src/dl_techniques/layers/neuro_grid.py:302*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.gaussian_filter`
 
 Apply the Gaussian filter to the input tensor.
 
-*📁 src/dl_techniques/layers/gaussian_filter.py:191*
+*📁 src/dl_techniques/layers/gaussian_filter.py:167*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.dynamic_conv2d`
 
 Forward pass with dynamic kernel aggregation.
 
-*📁 src/dl_techniques/layers/dynamic_conv2d.py:393*
+*📁 src/dl_techniques/layers/dynamic_conv2d.py:311*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.shearlet_transform`
 
 Apply shearlet transform to input images using Keras Ops.
 
-*📁 src/dl_techniques/layers/shearlet_transform.py:322*
+*📁 src/dl_techniques/layers/shearlet_transform.py:321*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.squeeze_excitation`
 
 Forward pass of the SE block.
 
-*📁 src/dl_techniques/layers/squeeze_excitation.py:302*
+*📁 src/dl_techniques/layers/squeeze_excitation.py:251*
+
+#### `call(self, inputs, training)`
+**Module:** `layers.blur_pool`
+
+*📁 src/dl_techniques/layers/blur_pool.py:107*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.standard_blocks`
 
 Forward pass through the convolutional block.
 
-*📁 src/dl_techniques/layers/standard_blocks.py:350*
+*📁 src/dl_techniques/layers/standard_blocks.py:345*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.standard_blocks`
 
 Forward pass through the dense block.
 
-*📁 src/dl_techniques/layers/standard_blocks.py:588*
+*📁 src/dl_techniques/layers/standard_blocks.py:567*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.standard_blocks`
 
 Forward pass through the residual dense block.
 
-*📁 src/dl_techniques/layers/standard_blocks.py:795*
+*📁 src/dl_techniques/layers/standard_blocks.py:782*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.standard_blocks`
 
 Forward pass of the basic block.
 
-*📁 src/dl_techniques/layers/standard_blocks.py:1033*
+*📁 src/dl_techniques/layers/standard_blocks.py:1004*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.standard_blocks`
 
 Forward pass of the bottleneck block.
 
-*📁 src/dl_techniques/layers/standard_blocks.py:1313*
+*📁 src/dl_techniques/layers/standard_blocks.py:1261*
 
 #### `call(self, inputs, mask, training)`
 **Module:** `layers.sequence_pooling`
 
 Apply attention-based pooling.
 
-*📁 src/dl_techniques/layers/sequence_pooling.py:215*
+*📁 src/dl_techniques/layers/sequence_pooling.py:223*
 
 #### `call(self, inputs, mask, training)`
 **Module:** `layers.sequence_pooling`
 
-Apply weighted pooling.
+Apply position-weighted pooling.
 
-*📁 src/dl_techniques/layers/sequence_pooling.py:368*
+*📁 src/dl_techniques/layers/sequence_pooling.py:396*
 
 #### `call(self, inputs, mask, training)`
 **Module:** `layers.sequence_pooling`
 
-Apply pooling strategy to inputs.
+Apply the configured pooling strategies.
 
-*📁 src/dl_techniques/layers/sequence_pooling.py:757*
+*📁 src/dl_techniques/layers/sequence_pooling.py:815*
 
 #### `call(self, carry, inputs, training)`
 **Module:** `layers.blt_core`
 
 Forward pass through the byte latent hierarchical reasoning core.
 
-*📁 src/dl_techniques/layers/blt_core.py:466*
+*📁 src/dl_techniques/layers/blt_core.py:533*
+
+#### `call(self, inputs, training)`
+**Module:** `layers.adaln_zero`
+
+Forward pass.
+
+*📁 src/dl_techniques/layers/adaln_zero.py:181*
 
 #### `call(self, inputs, attention_mask, training)`
 **Module:** `layers.fnet_encoder_block`
 
 Forward pass through complete FNet encoder block.
 
-*📁 src/dl_techniques/layers/fnet_encoder_block.py:252*
+*📁 src/dl_techniques/layers/fnet_encoder_block.py:206*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.conditional_output_layer`
 
 Forward pass of the layer.
 
-*📁 src/dl_techniques/layers/conditional_output_layer.py:137*
+*📁 src/dl_techniques/layers/conditional_output_layer.py:120*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.complex_layers`
 
 Apply complex convolution to input tensor.
 
-*📁 src/dl_techniques/layers/complex_layers.py:325*
+*📁 src/dl_techniques/layers/complex_layers.py:285*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.complex_layers`
 
 Apply complex dense transformation.
 
-*📁 src/dl_techniques/layers/complex_layers.py:542*
+*📁 src/dl_techniques/layers/complex_layers.py:473*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.complex_layers`
 
 Apply complex ReLU activation.
 
-*📁 src/dl_techniques/layers/complex_layers.py:670*
+*📁 src/dl_techniques/layers/complex_layers.py:579*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.complex_layers`
 
 Apply complex average pooling.
 
-*📁 src/dl_techniques/layers/complex_layers.py:808*
+*📁 src/dl_techniques/layers/complex_layers.py:695*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.complex_layers`
 
 Apply complex dropout.
 
-*📁 src/dl_techniques/layers/complex_layers.py:970*
+*📁 src/dl_techniques/layers/complex_layers.py:835*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.complex_layers`
 
 Apply complex global average pooling.
 
-*📁 src/dl_techniques/layers/complex_layers.py:1092*
+*📁 src/dl_techniques/layers/complex_layers.py:929*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.anchor_generator`
 
-Forward pass returning batch-tiled anchors and strides.
+Return batch-tiled anchors and strides.
 
-*📁 src/dl_techniques/layers/anchor_generator.py:215*
+*📁 src/dl_techniques/layers/anchor_generator.py:220*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.haar_wavelet_decomposition`
 
 Apply Haar DWT decomposition.
 
-*📁 src/dl_techniques/layers/haar_wavelet_decomposition.py:127*
+*📁 src/dl_techniques/layers/haar_wavelet_decomposition.py:106*
 
 #### `call(self, inputs)`
 **Module:** `layers.tabm_blocks`
 
 Apply ensemble scaling to inputs.
 
-*📁 src/dl_techniques/layers/tabm_blocks.py:109*
+*📁 src/dl_techniques/layers/tabm_blocks.py:133*
 
 #### `call(self, inputs)`
 **Module:** `layers.tabm_blocks`
 
 Forward pass through efficient ensemble layer.
 
-*📁 src/dl_techniques/layers/tabm_blocks.py:225*
+*📁 src/dl_techniques/layers/tabm_blocks.py:288*
 
 #### `call(self, inputs)`
 **Module:** `layers.tabm_blocks`
 
 Forward pass through N parallel linear layers.
 
-*📁 src/dl_techniques/layers/tabm_blocks.py:337*
+*📁 src/dl_techniques/layers/tabm_blocks.py:430*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.tabm_blocks`
 
 Forward pass through MLP block.
 
-*📁 src/dl_techniques/layers/tabm_blocks.py:453*
+*📁 src/dl_techniques/layers/tabm_blocks.py:581*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.tabm_blocks`
 
 Forward pass through backbone MLP.
 
-*📁 src/dl_techniques/layers/tabm_blocks.py:562*
-
-#### `call(self, inputs, training)`
-**Module:** `layers.kan_linear`
-
-Forward pass: compute output using learned activation functions.
-
-*📁 src/dl_techniques/layers/kan_linear.py:357*
+*📁 src/dl_techniques/layers/tabm_blocks.py:724*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.convnext_v2_block`
 
 Forward pass of the ConvNextV2 block.
 
-*📁 src/dl_techniques/layers/convnext_v2_block.py:394*
+*📁 src/dl_techniques/layers/convnext_v2_block.py:360*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.io_preparation`
 
 Apply clipping to input tensor.
 
-*📁 src/dl_techniques/layers/io_preparation.py:91*
+*📁 src/dl_techniques/layers/io_preparation.py:69*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.io_preparation`
 
 Apply normalization to input tensor.
 
-*📁 src/dl_techniques/layers/io_preparation.py:219*
+*📁 src/dl_techniques/layers/io_preparation.py:198*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.io_preparation`
 
 Apply denormalization to input tensor.
 
-*📁 src/dl_techniques/layers/io_preparation.py:353*
+*📁 src/dl_techniques/layers/io_preparation.py:334*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.io_preparation`
 
 Forward pass through sub-layers.
 
-*📁 src/dl_techniques/layers/io_preparation.py:516*
+*📁 src/dl_techniques/layers/io_preparation.py:496*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.convnext_v1_block`
 
 Forward pass of the ConvNext block.
 
-*📁 src/dl_techniques/layers/convnext_v1_block.py:368*
+*📁 src/dl_techniques/layers/convnext_v1_block.py:340*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.patch_merging`
 
-Forward pass of patch merging operation.
+Forward pass of the patch merging operation.
 
-*📁 src/dl_techniques/layers/patch_merging.py:180*
+*📁 src/dl_techniques/layers/patch_merging.py:152*
 
 #### `call(self, inputs)`
 **Module:** `layers.fft_layers`
 
 Apply 2D FFT to input tensor.
 
-*📁 src/dl_techniques/layers/fft_layers.py:62*
+*📁 src/dl_techniques/layers/fft_layers.py:60*
 
 #### `call(self, inputs)`
 **Module:** `layers.fft_layers`
 
 Apply 2D IFFT to input tensor and extract real part.
 
-*📁 src/dl_techniques/layers/fft_layers.py:178*
+*📁 src/dl_techniques/layers/fft_layers.py:168*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.orthoblock`
 
 Forward computation through the orthogonal block pipeline.
 
-*📁 src/dl_techniques/layers/orthoblock.py:301*
+*📁 src/dl_techniques/layers/orthoblock.py:239*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.pixel_shuffle`
 
-Apply pixel shuffle operation.
+Apply the pixel shuffle (space-to-depth) operation.
 
-*📁 src/dl_techniques/layers/pixel_shuffle.py:177*
+*📁 src/dl_techniques/layers/pixel_shuffle.py:181*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.res_path`
 
 Forward pass through the series of residual blocks.
 
-*📁 src/dl_techniques/layers/res_path.py:207*
+*📁 src/dl_techniques/layers/res_path.py:211*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.mps_layer`
 
 Forward pass implementing MPS tensor contraction.
 
-*📁 src/dl_techniques/layers/mps_layer.py:311*
+*📁 src/dl_techniques/layers/mps_layer.py:249*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.film`
 
 Apply the configurable FiLM transformation.
 
-*📁 src/dl_techniques/layers/film.py:357*
+*📁 src/dl_techniques/layers/film.py:294*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.hanc_block`
@@ -15341,443 +16447,418 @@ Forward pass computation.
 #### `call(self, inputs, training)`
 **Module:** `layers.repmixer_block`
 
-Forward pass through RepMixer block.
+Forward pass through the RepMixer block.
 
-*📁 src/dl_techniques/layers/repmixer_block.py:355*
+*📁 src/dl_techniques/layers/repmixer_block.py:307*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.repmixer_block`
 
-Forward pass through stem blocks.
+Forward pass through the stem blocks.
 
-*📁 src/dl_techniques/layers/repmixer_block.py:557*
+*📁 src/dl_techniques/layers/repmixer_block.py:499*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.bitlinear_layer`
 
 Perform quantized linear transformation.
 
-*📁 src/dl_techniques/layers/bitlinear_layer.py:442*
+*📁 src/dl_techniques/layers/bitlinear_layer.py:438*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.stochastic_gradient`
 
 Forward pass of the layer.
 
-*📁 src/dl_techniques/layers/stochastic_gradient.py:129*
+*📁 src/dl_techniques/layers/stochastic_gradient.py:116*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.gaussian_pyramid`
 
 Apply Gaussian pyramid decomposition.
 
-*📁 src/dl_techniques/layers/gaussian_pyramid.py:275*
+*📁 src/dl_techniques/layers/gaussian_pyramid.py:229*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.bias_free_conv1d`
 
 Forward computation through the bias-free 1D convolution layer.
 
-*📁 src/dl_techniques/layers/bias_free_conv1d.py:199*
+*📁 src/dl_techniques/layers/bias_free_conv1d.py:177*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.bias_free_conv1d`
 
 Forward pass through the residual block.
 
-*📁 src/dl_techniques/layers/bias_free_conv1d.py:457*
+*📁 src/dl_techniques/layers/bias_free_conv1d.py:407*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.vector_quantizer`
 
 Quantize inputs using nearest neighbor lookup in embedding space.
 
-*📁 src/dl_techniques/layers/vector_quantizer.py:205*
+*📁 src/dl_techniques/layers/vector_quantizer.py:163*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.restricted_boltzmann_machine`
 
-Forward pass: compute hidden representation given visible units.
+Compute hidden unit probabilities given visible units.
 
-*📁 src/dl_techniques/layers/restricted_boltzmann_machine.py:261*
+*📁 src/dl_techniques/layers/restricted_boltzmann_machine.py:231*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.convolutional_kan`
 
 Forward pass applying KAN transformation followed by convolution.
 
-*📁 src/dl_techniques/layers/convolutional_kan.py:378*
+*📁 src/dl_techniques/layers/convolutional_kan.py:336*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.kmeans`
 
-Forward pass of the layer.
+Forward pass performing differentiable K-means clustering.
 
-*📁 src/dl_techniques/layers/kmeans.py:596*
+*📁 src/dl_techniques/layers/kmeans.py:579*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.capsules`
 
 Forward pass for primary capsule layer.
 
-*📁 src/dl_techniques/layers/capsules.py:245*
+*📁 src/dl_techniques/layers/capsules.py:204*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.capsules`
 
 Forward pass implementing dynamic routing between capsules.
 
-*📁 src/dl_techniques/layers/capsules.py:546*
+*📁 src/dl_techniques/layers/capsules.py:429*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.capsules`
 
 Forward pass through the capsule block.
 
-*📁 src/dl_techniques/layers/capsules.py:863*
+*📁 src/dl_techniques/layers/capsules.py:696*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.gated_delta_net`
 
 Forward pass through the Gated DeltaNet layer.
 
-*📁 src/dl_techniques/layers/gated_delta_net.py:455*
+*📁 src/dl_techniques/layers/gated_delta_net.py:461*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.bias_free_conv2d`
 
 Forward computation through the bias-free 2D convolution layer.
 
-*📁 src/dl_techniques/layers/bias_free_conv2d.py:219*
+*📁 src/dl_techniques/layers/bias_free_conv2d.py:182*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.bias_free_conv2d`
 
 Forward pass through the residual block.
 
-*📁 src/dl_techniques/layers/bias_free_conv2d.py:497*
+*📁 src/dl_techniques/layers/bias_free_conv2d.py:420*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.mothnet_blocks`
 
 Apply competitive inhibition to inputs.
 
-*📁 src/dl_techniques/layers/mothnet_blocks.py:204*
+*📁 src/dl_techniques/layers/mothnet_blocks.py:171*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.mothnet_blocks`
 
 Apply sparse high-dimensional projection with winner-take-all.
 
-*📁 src/dl_techniques/layers/mothnet_blocks.py:470*
+*📁 src/dl_techniques/layers/mothnet_blocks.py:363*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.mothnet_blocks`
 
 Compute readout activations (forward pass).
 
-*📁 src/dl_techniques/layers/mothnet_blocks.py:744*
+*📁 src/dl_techniques/layers/mothnet_blocks.py:540*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.selective_gradient_mask`
 
 Apply selective gradient masking.
 
-*📁 src/dl_techniques/layers/selective_gradient_mask.py:165*
+*📁 src/dl_techniques/layers/selective_gradient_mask.py:155*
+
+#### `call(self, inputs, training)`
+**Module:** `layers.capsules_v2`
+
+*📁 src/dl_techniques/layers/capsules_v2.py:261*
+
+#### `call(self, inputs, training)`
+**Module:** `layers.capsules_v2`
+
+*📁 src/dl_techniques/layers/capsules_v2.py:444*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.strong_augmentation`
 
 Apply strong augmentations to input images.
 
-*📁 src/dl_techniques/layers/strong_augmentation.py:88*
+*📁 src/dl_techniques/layers/strong_augmentation.py:120*
 
 #### `call(self, inputs)`
 **Module:** `layers.clahe`
 
 Apply CLAHE to the input tensor.
 
-*📁 src/dl_techniques/layers/clahe.py:233*
-
-#### `call(self, inputs)`
-**Module:** `layers.tversky_projection`
-
-Forward pass computation of Tversky similarity.
-
-*📁 src/dl_techniques/layers/tversky_projection.py:218*
+*📁 src/dl_techniques/layers/clahe.py:210*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.stochastic_depth`
 
 Forward pass of the layer.
 
-*📁 src/dl_techniques/layers/stochastic_depth.py:138*
+*📁 src/dl_techniques/layers/stochastic_depth.py:124*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.hierarchical_mlp_stem`
 
 Apply hierarchical MLP stem to input images.
 
-*📁 src/dl_techniques/layers/hierarchical_mlp_stem.py:234*
+*📁 src/dl_techniques/layers/hierarchical_mlp_stem.py:273*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.layer_scale`
 
 Apply the learnable multipliers to inputs.
 
-*📁 src/dl_techniques/layers/layer_scale.py:259*
+*📁 src/dl_techniques/layers/layer_scale.py:204*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.blt_blocks`
 
 Forward pass of the entropy model.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:467*
+*📁 src/dl_techniques/layers/blt_blocks.py:463*
 
 #### `call(self, entropy, training)`
 **Module:** `layers.blt_blocks`
 
 Create patch lengths from entropy values.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:593*
+*📁 src/dl_techniques/layers/blt_blocks.py:576*
 
 #### `call(self, byte_hiddens, patch_ids, training)`
 **Module:** `layers.blt_blocks`
 
 Pool byte representations into patch representations.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:811*
+*📁 src/dl_techniques/layers/blt_blocks.py:756*
 
 #### `call(self, byte_tokens, patch_ids, training)`
 **Module:** `layers.blt_blocks`
 
 Forward pass of local encoder.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:1103*
+*📁 src/dl_techniques/layers/blt_blocks.py:1049*
 
 #### `call(self, patch_representations, training)`
 **Module:** `layers.blt_blocks`
 
 Forward pass of global transformer.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:1249*
+*📁 src/dl_techniques/layers/blt_blocks.py:1194*
 
 #### `call(self, byte_tokens, global_context, patch_ids, training)`
 **Module:** `layers.blt_blocks`
 
 Forward pass of local decoder.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:1455*
+*📁 src/dl_techniques/layers/blt_blocks.py:1398*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.random_fourier_features`
 
-Apply Random Fourier Features transformation.
+Apply the Random Fourier Features transformation.
 
-*📁 src/dl_techniques/layers/random_fourier_features.py:323*
+*📁 src/dl_techniques/layers/random_fourier_features.py:274*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.modality_projection`
 
 Apply modality projection.
 
-*📁 src/dl_techniques/layers/modality_projection.py:224*
+*📁 src/dl_techniques/layers/modality_projection.py:250*
 
 #### `call(self, inputs, training, return_latents)`
 **Module:** `layers.sparse_autoencoder`
 
 Forward pass through the Sparse Autoencoder.
 
-*📁 src/dl_techniques/layers/sparse_autoencoder.py:759*
+*📁 src/dl_techniques/layers/sparse_autoencoder.py:649*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.eomt_mask`
 
 Forward pass through the mask module.
 
-*📁 src/dl_techniques/layers/eomt_mask.py:421*
+*📁 src/dl_techniques/layers/eomt_mask.py:348*
 
 #### `call(self, inputs)`
 **Module:** `layers.canny`
 
 Perform Canny edge detection on the input image tensor.
 
-*📁 src/dl_techniques/layers/canny.py:213*
+*📁 src/dl_techniques/layers/canny.py:199*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.universal_inverted_bottleneck`
 
 Forward pass of the UIB block.
 
-*📁 src/dl_techniques/layers/universal_inverted_bottleneck.py:506*
+*📁 src/dl_techniques/layers/universal_inverted_bottleneck.py:468*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.global_sum_pool_2d`
 
 Forward pass computation.
 
-*📁 src/dl_techniques/layers/global_sum_pool_2d.py:149*
+*📁 src/dl_techniques/layers/global_sum_pool_2d.py:84*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.fractal_block`
 
 Forward pass through the FractalBlock.
 
-*📁 src/dl_techniques/layers/fractal_block.py:332*
+*📁 src/dl_techniques/layers/fractal_block.py:194*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.rigid_simplex_layer`
 
-Forward pass computation.
+Forward pass: rotate, project onto Simplex, and scale.
 
-*📁 src/dl_techniques/layers/rigid_simplex_layer.py:330*
+*📁 src/dl_techniques/layers/rigid_simplex_layer.py:314*
 
 #### `call(self, inputs, attention_mask, layer_idx, layer_decision, training)`
 **Module:** `layers.router`
 
-Forward pass of the RouterLayer.
+Forward pass: route input through skip, execute, or repeat.
 
-*📁 src/dl_techniques/layers/router.py:260*
+*📁 src/dl_techniques/layers/router.py:217*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.transformers.progressive_focused_transformer`
 
-Forward pass of PFT block.
+Forward pass of the PFT block.
 
-*📁 src/dl_techniques/layers/transformers/progressive_focused_transformer.py:642*
+*📁 src/dl_techniques/layers/transformers/progressive_focused_transformer.py:431*
 
 #### `call(self, inputs, token_type_ids, attention_mask, training)`
 **Module:** `layers.transformers.text_encoder`
 
 Forward pass through the text encoder.
 
-*📁 src/dl_techniques/layers/transformers/text_encoder.py:724*
+*📁 src/dl_techniques/layers/transformers/text_encoder.py:593*
 
 #### `call(self, input_ids, attention_mask, training)`
 **Module:** `layers.transformers.text_decoder`
 
 Forward pass through the text decoder.
 
-*📁 src/dl_techniques/layers/transformers/text_decoder.py:405*
+*📁 src/dl_techniques/layers/transformers/text_decoder.py:361*
 
 #### `call(self, inputs, mask, training)`
 **Module:** `layers.transformers.eomt_transformer`
 
 Forward pass through the EoMT transformer layer.
 
-*📁 src/dl_techniques/layers/transformers/eomt_transformer.py:437*
+*📁 src/dl_techniques/layers/transformers/eomt_transformer.py:402*
 
 #### `call(self, x, training)`
 **Module:** `layers.transformers.swin_transformer_block`
 
-Forward pass of the SwinTransformerBlock layer.
+Forward pass of the SwinTransformerBlock.
 
-*📁 src/dl_techniques/layers/transformers/swin_transformer_block.py:481*
+*📁 src/dl_techniques/layers/transformers/swin_transformer_block.py:414*
 
 #### `call(self, bit_logits, training)`
 **Module:** `layers.transformers.free_transformer`
 
 Forward pass: sample one-hot vectors from bit logits.
 
-*📁 src/dl_techniques/layers/transformers/free_transformer.py:171*
+*📁 src/dl_techniques/layers/transformers/free_transformer.py:139*
 
 #### `call(self, inputs, attention_mask, layer_idx, training)`
 **Module:** `layers.transformers.free_transformer`
 
 Forward pass of the Free Transformer layer.
 
-*📁 src/dl_techniques/layers/transformers/free_transformer.py:698*
+*📁 src/dl_techniques/layers/transformers/free_transformer.py:505*
 
 #### `call(self, query_input, kv_input, training)`
 **Module:** `layers.transformers.perceiver_transformer`
 
-Apply Perceiver block processing.
+Forward pass through the Perceiver block.
 
-*📁 src/dl_techniques/layers/transformers/perceiver_transformer.py:301*
+*📁 src/dl_techniques/layers/transformers/perceiver_transformer.py:288*
 
 #### `call(self, x, training)`
 **Module:** `layers.transformers.swin_conv_block`
 
-Forward pass implementing the split-transform-merge paradigm with residuals.
+Forward pass: split-transform-merge with main residual.
 
-*📁 src/dl_techniques/layers/transformers/swin_conv_block.py:585*
+*📁 src/dl_techniques/layers/transformers/swin_conv_block.py:318*
 
 #### `call(self, inputs, attention_mask, training)`
 **Module:** `layers.transformers.vision_encoder`
 
-Forward pass through the vision_heads encoder.
+Forward pass through the vision encoder.
 
-*📁 src/dl_techniques/layers/transformers/vision_encoder.py:662*
+*📁 src/dl_techniques/layers/transformers/vision_encoder.py:557*
 
 #### `call(self, inputs, attention_mask, layer_idx, training)`
 **Module:** `layers.transformers.transformer`
 
 Forward pass of the transformer layer.
 
-*📁 src/dl_techniques/layers/transformers/transformer.py:563*
+*📁 src/dl_techniques/layers/transformers/transformer.py:507*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.experimental.hierarchical_evidence_llm`
 
 Encode evidence at multiple levels.
 
-*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:134*
+*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:118*
 
 #### `call(self, evidence, training)`
 **Module:** `layers.experimental.hierarchical_evidence_llm`
 
 Aggregate evidence hierarchically.
 
-*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:366*
+*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:340*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.experimental.hierarchical_evidence_llm`
 
 Generate support embeddings for token generation.
 
-*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:558*
+*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:520*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.experimental.hierarchical_evidence_llm`
 
 Generate tokens with hierarchical evidence support.
 
-*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:758*
+*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:706*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.experimental.hierarchical_memory_system`
 
 Forward pass through the hierarchical memory system.
 
-*📁 src/dl_techniques/layers/experimental/hierarchical_memory_system.py:272*
-
-#### `call(self, inputs, training)`
-**Module:** `layers.experimental.field_embeddings`
-
-Transform token indices to rotation matrices via exponential map.
-
-*📁 src/dl_techniques/layers/experimental/field_embeddings.py:158*
-
-#### `call(self, inputs, training)`
-**Module:** `layers.experimental.field_embeddings`
-
-Compute path-ordered integral of rotation matrices.
-
-*📁 src/dl_techniques/layers/experimental/field_embeddings.py:363*
-
-#### `call(self, inputs, training)`
-**Module:** `layers.experimental.field_embeddings`
-
-Compute manifold stress for rotation matrix trajectories.
-
-*📁 src/dl_techniques/layers/experimental/field_embeddings.py:544*
-
-#### `call(self, inputs, training)`
-**Module:** `layers.experimental.field_embeddings`
-
-Project rotation matrix to feature vector.
-
-*📁 src/dl_techniques/layers/experimental/field_embeddings.py:761*
+*📁 src/dl_techniques/layers/experimental/hierarchical_memory_system.py:253*
 
 #### `call(self, query, training)`
 **Module:** `layers.experimental.contextual_memory`
@@ -15791,133 +16872,133 @@ Retrieve memories based on query.
 
 Process concept graph.
 
-*📁 src/dl_techniques/layers/experimental/contextual_memory.py:439*
+*📁 src/dl_techniques/layers/experimental/contextual_memory.py:422*
 
 #### `call(self, sequence, training)`
 **Module:** `layers.experimental.contextual_memory`
 
 Encode temporal sequence.
 
-*📁 src/dl_techniques/layers/experimental/contextual_memory.py:645*
+*📁 src/dl_techniques/layers/experimental/contextual_memory.py:614*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.experimental.contextual_memory`
 
 Process inputs through the contextual memory bank.
 
-*📁 src/dl_techniques/layers/experimental/contextual_memory.py:818*
+*📁 src/dl_techniques/layers/experimental/contextual_memory.py:769*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.experimental.mst_correlation_filter`
 
 Execute forward pass of the layer.
 
-*📁 src/dl_techniques/layers/experimental/mst_correlation_filter.py:309*
+*📁 src/dl_techniques/layers/experimental/mst_correlation_filter.py:300*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.experimental.band_rms_ood`
 
 Forward pass with confidence-driven shell scaling.
 
-*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:399*
+*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:350*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.experimental.contextual_counter_ffn`
 
 Forward pass implementing sense-aggregate-transform-modulate protocol.
 
-*📁 src/dl_techniques/layers/experimental/contextual_counter_ffn.py:288*
+*📁 src/dl_techniques/layers/experimental/contextual_counter_ffn.py:234*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.experimental.graph_mann`
 
 Forward pass computation over a sequence.
 
-*📁 src/dl_techniques/layers/experimental/graph_mann.py:260*
+*📁 src/dl_techniques/layers/experimental/graph_mann.py:233*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.nlp_heads.factory`
 
 Forward pass through classification head.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:393*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:406*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.nlp_heads.factory`
 
 Forward pass through token classification head.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:521*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:534*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.nlp_heads.factory`
 
 Forward pass through QA head.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:639*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:652*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.nlp_heads.factory`
 
 Forward pass through similarity head.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:786*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:799*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.nlp_heads.factory`
 
 Forward pass through generation head.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:952*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:964*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.nlp_heads.factory`
 
 Forward pass through multiple choice head.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:1043*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:1055*
 
 #### `call(self, inputs, task_name, training)`
 **Module:** `layers.nlp_heads.factory`
 
 Forward pass through multi-task head.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:1213*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:1228*
 
 #### `call(self, inputs)`
 **Module:** `layers.time_series.ema_layer`
 
 Compute EMA over the time dimension.
 
-*📁 src/dl_techniques/layers/time_series/ema_layer.py:86*
+*📁 src/dl_techniques/layers/time_series/ema_layer.py:93*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.time_series.ema_layer`
 
 Compute EMA, slope, and trading signals.
 
-*📁 src/dl_techniques/layers/time_series/ema_layer.py:311*
+*📁 src/dl_techniques/layers/time_series/ema_layer.py:352*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.time_series.nbeats_blocks`
 
-Forward pass with performance optimizations.
+Forward pass through the dense stack and theta projection.
 
-*📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:344*
+*📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:315*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.time_series.adaptive_lag_attention`
 
 Forward pass of the layer.
 
-*📁 src/dl_techniques/layers/time_series/adaptive_lag_attention.py:283*
+*📁 src/dl_techniques/layers/time_series/adaptive_lag_attention.py:250*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.time_series.quantile_head_fixed_io`
 
 Predict quantiles from the input feature vector.
 
-*📁 src/dl_techniques/layers/time_series/quantile_head_fixed_io.py:189*
+*📁 src/dl_techniques/layers/time_series/quantile_head_fixed_io.py:211*
 
 #### `call(self, inputs, scale, inverse)`
 **Module:** `layers.time_series.deepar_blocks`
@@ -15929,1736 +17010,1751 @@ Apply scaling or inverse scaling.
 #### `call(self, inputs)`
 **Module:** `layers.time_series.deepar_blocks`
 
-Compute Gaussian parameters.
+Compute Gaussian distribution parameters from hidden states.
 
-*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:202*
+*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:213*
 
 #### `call(self, inputs)`
 **Module:** `layers.time_series.deepar_blocks`
 
-Compute Negative Binomial parameters.
+Compute Negative Binomial distribution parameters from hidden states.
 
-*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:321*
+*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:347*
 
 #### `call(self, inputs, states, training)`
 **Module:** `layers.time_series.deepar_blocks`
 
-Process one time step.
+Process one time step through the LSTM cell.
 
-*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:443*
+*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:486*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.time_series.quantile_head_variable_io`
 
 Predict quantiles for each time step in the input sequence.
 
-*📁 src/dl_techniques/layers/time_series/quantile_head_variable_io.py:285*
+*📁 src/dl_techniques/layers/time_series/quantile_head_variable_io.py:231*
 
 #### `call(self, inputs, states, training)`
 **Module:** `layers.time_series.xlstm_blocks`
 
 Forward pass for a single timestep.
 
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:202*
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:206*
 
 #### `call(self, inputs, mask, training, initial_state)`
 **Module:** `layers.time_series.xlstm_blocks`
 
-Forward pass through the RNN layer.
+Forward pass through the sLSTM RNN layer.
 
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:412*
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:422*
 
 #### `call(self, inputs, states, training)`
 **Module:** `layers.time_series.xlstm_blocks`
 
 Forward pass for a single timestep.
 
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:620*
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:673*
 
 #### `call(self, inputs, mask, training, initial_state)`
 **Module:** `layers.time_series.xlstm_blocks`
 
-Forward pass through the RNN layer.
+Forward pass through the mLSTM RNN layer.
 
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:855*
-
-#### `call(self, inputs, training, mask)`
-**Module:** `layers.time_series.xlstm_blocks`
-
-Forward pass through the block.
-
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:1050*
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:953*
 
 #### `call(self, inputs, training, mask)`
 **Module:** `layers.time_series.xlstm_blocks`
 
-Forward pass through the block.
+Forward pass through the sLSTM residual block.
 
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:1273*
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:1175*
+
+#### `call(self, inputs, training, mask)`
+**Module:** `layers.time_series.xlstm_blocks`
+
+Forward pass through the mLSTM residual block.
+
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:1428*
 
 #### `call(self, inputs, training, exogenous_inputs)`
 **Module:** `layers.time_series.nbeatsx_blocks`
 
-Forward pass for Exogenous Block.
+Forward pass incorporating exogenous variables.
 
-*📁 src/dl_techniques/layers/time_series/nbeatsx_blocks.py:100*
+*📁 src/dl_techniques/layers/time_series/nbeatsx_blocks.py:146*
 
 #### `call(self, inputs, network_output)`
 **Module:** `layers.time_series.forecasting_layers`
 
 Combine network prediction with naive baseline.
 
-*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:81*
+*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:101*
 
 #### `call(self, inputs, deep_forecast, naive_forecast, training)`
 **Module:** `layers.time_series.forecasting_layers`
 
 Compute gated combination of deep and naive forecasts.
 
-*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:224*
+*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:289*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.time_series.forecasting_layers`
 
 Project inputs to quantile predictions.
 
-*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:388*
+*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:486*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.time_series.temporal_fusion`
 
 Forward pass through the temporal fusion mechanism.
 
-*📁 src/dl_techniques/layers/time_series/temporal_fusion.py:329*
+*📁 src/dl_techniques/layers/time_series/temporal_fusion.py:328*
 
 #### `call(self, inputs, training, mask)`
 **Module:** `layers.time_series.mixed_sequential_block`
 
 Forward pass dispatching to the correct block type.
 
-*📁 src/dl_techniques/layers/time_series/mixed_sequential_block.py:556*
+*📁 src/dl_techniques/layers/time_series/mixed_sequential_block.py:514*
 
 #### `call(self, inputs, training, mask)`
 **Module:** `layers.time_series.prism_blocks`
 
 Compute statistics for the input frequency band.
 
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:65*
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:72*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.time_series.prism_blocks`
 
 Compute importance weights for frequency bands.
 
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:248*
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:269*
 
 #### `call(self, inputs, training, mask)`
 **Module:** `layers.time_series.prism_blocks`
 
 Process input through wavelet decomposition and weighted reconstruction.
 
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:465*
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:505*
 
 #### `call(self, inputs, training, mask)`
 **Module:** `layers.time_series.prism_blocks`
 
 Process input through the hierarchical time tree.
 
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:809*
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:864*
 
 #### `call(self, inputs, training, mask)`
 **Module:** `layers.time_series.prism_blocks`
 
-Apply PRISM processing.
+Apply PRISM processing to the input sequence.
 
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:1012*
-
-#### `call(self, inputs, training)`
-**Module:** `layers.time_series.temporal_convolutional_network`
-
-*📁 src/dl_techniques/layers/time_series/temporal_convolutional_network.py:64*
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:1086*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.time_series.temporal_convolutional_network`
 
-*📁 src/dl_techniques/layers/time_series/temporal_convolutional_network.py:123*
+Forward pass through the temporal block.
+
+*📁 src/dl_techniques/layers/time_series/temporal_convolutional_network.py:121*
+
+#### `call(self, inputs, training)`
+**Module:** `layers.time_series.temporal_convolutional_network`
+
+Forward pass through the stacked temporal blocks.
+
+*📁 src/dl_techniques/layers/time_series/temporal_convolutional_network.py:237*
 
 #### `call(self, inputs)`
 **Module:** `layers.physics.approximate_lagrange_layer`
 
 Forward pass computing accelerations from approximated components.
 
-*📁 src/dl_techniques/layers/physics/approximate_lagrange_layer.py:232*
+*📁 src/dl_techniques/layers/physics/approximate_lagrange_layer.py:171*
 
 #### `call(self, inputs)`
 **Module:** `layers.physics.lagrange_layer`
 
 Forward pass computing accelerations from learned Lagrangian.
 
-*📁 src/dl_techniques/layers/physics/lagrange_layer.py:179*
+*📁 src/dl_techniques/layers/physics/lagrange_layer.py:122*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.activations.relu_k`
 
-Forward pass of the ReLU-k activation.
+Apply the ReLU-k activation: ``f(x) = max(0, x)^k``.
 
-*📁 src/dl_techniques/layers/activations/relu_k.py:178*
+*📁 src/dl_techniques/layers/activations/relu_k.py:146*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.activations.hard_sigmoid`
 
-Apply hard-sigmoid activation to inputs.
+Apply hard-sigmoid activation: ``ReLU6(x + 3) / 6``.
 
-*📁 src/dl_techniques/layers/activations/hard_sigmoid.py:148*
+*📁 src/dl_techniques/layers/activations/hard_sigmoid.py:104*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.activations.thresh_max`
 
 Apply ThreshMax activation to inputs.
 
-*📁 src/dl_techniques/layers/activations/thresh_max.py:212*
+*📁 src/dl_techniques/layers/activations/thresh_max.py:266*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.activations.basis_function`
 
-Forward pass of the basis function activation.
+Apply the basis function activation: ``b(x) = x / (1 + e^(-x))``.
 
-*📁 src/dl_techniques/layers/activations/basis_function.py:168*
+*📁 src/dl_techniques/layers/activations/basis_function.py:118*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.activations.differentiable_step`
 
-Forward pass computation applying the soft step function. Broadcasting handles both scalar and per-axis cases automatically.
+Apply the soft step function to inputs.
 
-*📁 src/dl_techniques/layers/activations/differentiable_step.py:228*
+*📁 src/dl_techniques/layers/activations/differentiable_step.py:216*
 
 #### `call(self, inputs)`
 **Module:** `layers.activations.expanded_activations`
 
 Apply the GELU activation function to the inputs.
 
-*📁 src/dl_techniques/layers/activations/expanded_activations.py:209*
+*📁 src/dl_techniques/layers/activations/expanded_activations.py:167*
 
 #### `call(self, inputs)`
 **Module:** `layers.activations.expanded_activations`
 
 Apply the SiLU activation function to the inputs.
 
-*📁 src/dl_techniques/layers/activations/expanded_activations.py:247*
+*📁 src/dl_techniques/layers/activations/expanded_activations.py:210*
 
 #### `call(self, inputs)`
 **Module:** `layers.activations.expanded_activations`
 
 Apply the xATLU activation function to the inputs.
 
-*📁 src/dl_techniques/layers/activations/expanded_activations.py:393*
+*📁 src/dl_techniques/layers/activations/expanded_activations.py:370*
 
 #### `call(self, inputs)`
 **Module:** `layers.activations.expanded_activations`
 
 Apply the xGELU activation function to the inputs.
 
-*📁 src/dl_techniques/layers/activations/expanded_activations.py:447*
+*📁 src/dl_techniques/layers/activations/expanded_activations.py:432*
 
 #### `call(self, inputs)`
 **Module:** `layers.activations.expanded_activations`
 
 Apply the xSiLU activation function to the inputs.
 
-*📁 src/dl_techniques/layers/activations/expanded_activations.py:501*
+*📁 src/dl_techniques/layers/activations/expanded_activations.py:493*
 
 #### `call(self, inputs)`
 **Module:** `layers.activations.expanded_activations`
 
-Apply the ELU+1+ε activation function to the inputs.
+Apply the ELU+1+epsilon activation function to the inputs.
 
-*📁 src/dl_techniques/layers/activations/expanded_activations.py:568*
+*📁 src/dl_techniques/layers/activations/expanded_activations.py:556*
 
 #### `call(self, inputs, training, mask)`
 **Module:** `layers.activations.probability_output`
 
 Forward pass delegating to the selected strategy.
 
-*📁 src/dl_techniques/layers/activations/probability_output.py:250*
+*📁 src/dl_techniques/layers/activations/probability_output.py:221*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.activations.routing_probabilities`
 
-Define the forward pass logic of the layer.
+Apply hierarchical routing to produce class probabilities.
 
-*📁 src/dl_techniques/layers/activations/routing_probabilities.py:396*
+*📁 src/dl_techniques/layers/activations/routing_probabilities.py:648*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.activations.adaptive_softmax`
 
 Apply adaptive temperature softmax to input logits.
 
-*📁 src/dl_techniques/layers/activations/adaptive_softmax.py:285*
+*📁 src/dl_techniques/layers/activations/adaptive_softmax.py:292*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.activations.monotonicity_layer`
 
 Apply monotonicity constraint to inputs.
 
-*📁 src/dl_techniques/layers/activations/monotonicity_layer.py:291*
+*📁 src/dl_techniques/layers/activations/monotonicity_layer.py:273*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.activations.mish`
 
-Forward pass computation.
+Apply the Mish activation function: ``f(x) = x * tanh(softplus(x))``.
 
-*📁 src/dl_techniques/layers/activations/mish.py:199*
+*📁 src/dl_techniques/layers/activations/mish.py:162*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.activations.mish`
 
-Forward pass computation.
+Apply the SaturatedMish activation function with smooth transition.
 
-*📁 src/dl_techniques/layers/activations/mish.py:367*
+*📁 src/dl_techniques/layers/activations/mish.py:290*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.activations.sparsemax`
 
 Apply sparsemax activation to input logits.
 
-*📁 src/dl_techniques/layers/activations/sparsemax.py:86*
+*📁 src/dl_techniques/layers/activations/sparsemax.py:131*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.activations.squash`
 
 Apply squashing non-linearity to input vectors.
 
-*📁 src/dl_techniques/layers/activations/squash.py:160*
+*📁 src/dl_techniques/layers/activations/squash.py:145*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.activations.hard_swish`
 
-Apply hard-swish activation to inputs.
+Apply hard-swish activation: ``x * ReLU6(x + 3) / 6``.
 
-*📁 src/dl_techniques/layers/activations/hard_swish.py:175*
+*📁 src/dl_techniques/layers/activations/hard_swish.py:106*
 
 #### `call(self, inputs)`
 **Module:** `layers.activations.golu`
 
-Forward pass computation for the GoLU activation.
+Apply the GoLU activation: ``x * alpha * exp(-beta * exp(-gamma * x))``.
 
-*📁 src/dl_techniques/layers/activations/golu.py:158*
+*📁 src/dl_techniques/layers/activations/golu.py:134*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.memory.mann`
 
 Forward pass computation over a sequence.
 
-*📁 src/dl_techniques/layers/memory/mann.py:342*
+*📁 src/dl_techniques/layers/memory/mann.py:293*
+
+#### `call(self, inputs)`
+**Module:** `layers.memory.baseline_ntm`
+
+Forward pass (placeholder for layer compatibility).
+
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:395*
+
+#### `call(self, inputs, state, training)`
+**Module:** `layers.memory.baseline_ntm`
+
+Process inputs through the controller.
+
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:789*
+
+#### `call(self, inputs, states, training)`
+**Module:** `layers.memory.baseline_ntm`
+
+Process one timestep of the NTM.
+
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:1038*
+
+#### `call(self, inputs, initial_state, training)`
+**Module:** `layers.memory.baseline_ntm`
+
+Process input sequence through NTM.
+
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:1396*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.memory.som_nd_soft_layer`
 
 Forward pass implementing soft competitive learning.
 
-*📁 src/dl_techniques/layers/memory/som_nd_soft_layer.py:539*
+*📁 src/dl_techniques/layers/memory/som_nd_soft_layer.py:492*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.memory.som_nd_layer`
 
 Forward pass for the SOM layer.
 
-*📁 src/dl_techniques/layers/memory/som_nd_layer.py:379*
+*📁 src/dl_techniques/layers/memory/som_nd_layer.py:346*
+
+#### `call(self, inputs, state, training)`
+**Module:** `layers.memory.ntm_interface`
+
+Process inputs through the controller.
+
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:578*
+
+#### `call(self, inputs, initial_state, training, return_sequences, return_state)`
+**Module:** `layers.memory.ntm_interface`
+
+Process a sequence through the NTM.
+
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:726*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.vision_heads.factory`
 
 Forward pass through detection head.
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:223*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:285*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.vision_heads.factory`
 
 Forward pass through segmentation head.
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:335*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:428*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.vision_heads.factory`
 
 Forward pass through depth head.
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:453*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:578*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.vision_heads.factory`
 
 Forward pass through classification head.
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:567*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:722*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.vision_heads.factory`
 
 Forward pass through instance segmentation head.
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:673*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:858*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.vision_heads.factory`
 
 Forward pass through all task heads.
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:772*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:980*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.vision_heads.factory`
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:934*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:1116*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.vlm_heads.factory`
 
-*📁 src/dl_techniques/layers/vlm_heads/factory.py:226*
+*📁 src/dl_techniques/layers/vlm_heads/factory.py:292*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.vlm_heads.factory`
 
-*📁 src/dl_techniques/layers/vlm_heads/factory.py:347*
+*📁 src/dl_techniques/layers/vlm_heads/factory.py:444*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.vlm_heads.factory`
 
-*📁 src/dl_techniques/layers/vlm_heads/factory.py:415*
+*📁 src/dl_techniques/layers/vlm_heads/factory.py:541*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.vlm_heads.factory`
 
-*📁 src/dl_techniques/layers/vlm_heads/factory.py:512*
+*📁 src/dl_techniques/layers/vlm_heads/factory.py:668*
 
 #### `call(self, inputs, task_name, training)`
 **Module:** `layers.vlm_heads.factory`
 
-*📁 src/dl_techniques/layers/vlm_heads/factory.py:609*
+*📁 src/dl_techniques/layers/vlm_heads/factory.py:791*
 
 #### `call(self, inputs)`
 **Module:** `layers.geometric.point_cloud_autoencoder`
 
 Forward pass through the autoencoder for both point clouds.
 
-*📁 src/dl_techniques/layers/geometric/point_cloud_autoencoder.py:256*
+*📁 src/dl_techniques/layers/geometric/point_cloud_autoencoder.py:180*
 
 #### `call(self, inputs)`
 **Module:** `layers.geometric.point_cloud_autoencoder`
 
 Compute soft point-to-GMM component assignments.
 
-*📁 src/dl_techniques/layers/geometric/point_cloud_autoencoder.py:416*
+*📁 src/dl_techniques/layers/geometric/point_cloud_autoencoder.py:313*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.geometric.supernode_pooling`
 
 Apply supernode pooling with message passing.
 
-*📁 src/dl_techniques/layers/geometric/supernode_pooling.py:264*
+*📁 src/dl_techniques/layers/geometric/supernode_pooling.py:248*
 
-#### `call(self, inputs, training, tangent)`
-**Module:** `layers.geometric.fields.parallel_transport`
+#### `call(self, z_det, z_ctx)`
+**Module:** `layers.geometric.clifford_block`
 
-Perform parallel transport of vectors.
+Compute sparse geometric product and project.
 
-*📁 src/dl_techniques/layers/geometric/fields/parallel_transport.py:268*
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:204*
 
-#### `call(self, inputs, training)`
-**Module:** `layers.geometric.fields.holonomy_layer`
+#### `call(self, h_norm, g_feat, training)`
+**Module:** `layers.geometric.clifford_block`
 
-Compute holonomy features for the input field.
+Apply GGR update.
 
-*📁 src/dl_techniques/layers/geometric/fields/holonomy_layer.py:323*
-
-#### `call(self, inputs, training, attention_mask)`
-**Module:** `layers.geometric.fields.gauge_invariant_attention`
-
-Compute gauge-invariant attention.
-
-*📁 src/dl_techniques/layers/geometric/fields/gauge_invariant_attention.py:395*
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:410*
 
 #### `call(self, inputs, training)`
-**Module:** `layers.geometric.fields.connection_layer`
+**Module:** `layers.geometric.clifford_block`
 
-Compute the connection from input field.
+Forward pass.
 
-*📁 src/dl_techniques/layers/geometric/fields/connection_layer.py:333*
-
-#### `call(self, inputs, training)`
-**Module:** `layers.geometric.fields.manifold_stress`
-
-Compute manifold stress and anomaly mask.
-
-*📁 src/dl_techniques/layers/geometric/fields/manifold_stress.py:360*
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:735*
 
 #### `call(self, inputs, training)`
-**Module:** `layers.geometric.fields.holonomic_transformer`
+**Module:** `layers.geometric.clifford_block`
 
-Apply field-aware normalization.
+Forward pass with causal convolutions.
 
-*📁 src/dl_techniques/layers/geometric/fields/holonomic_transformer.py:102*
-
-#### `call(self, inputs, training, attention_mask, return_attention_weights)`
-**Module:** `layers.geometric.fields.holonomic_transformer`
-
-Forward pass through the holonomic transformer layer.
-
-*📁 src/dl_techniques/layers/geometric/fields/holonomic_transformer.py:399*
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:1026*
 
 #### `call(self, inputs, training)`
-**Module:** `layers.geometric.fields.field_embedding`
+**Module:** `layers.geometric.clifford_block`
 
-Forward pass: embed tokens as fields with curvature.
+Forward pass.
 
-*📁 src/dl_techniques/layers/geometric/fields/field_embedding.py:274*
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:1482*
+
+#### `call(self, inputs, training)`
+**Module:** `layers.geometric.clifford_block`
+
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:1968*
+
+#### `call(self, inputs, training)`
+**Module:** `layers.geometric.clifford_block`
+
+Forward pass with strict causal mixing along W.
+
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:2472*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.norms.zero_centered_rms_norm`
 
 Apply Zero-Centered RMS normalization to inputs.
 
-*📁 src/dl_techniques/layers/norms/zero_centered_rms_norm.py:334*
+*📁 src/dl_techniques/layers/norms/zero_centered_rms_norm.py:233*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.norms.adaptive_band_rms`
 
 Apply adaptive RMS normalization with log-transformed statistics.
 
-*📁 src/dl_techniques/layers/norms/adaptive_band_rms.py:368*
+*📁 src/dl_techniques/layers/norms/adaptive_band_rms.py:349*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.norms.logit_norm`
 
 Apply logit normalization to inputs.
 
-*📁 src/dl_techniques/layers/norms/logit_norm.py:218*
+*📁 src/dl_techniques/layers/norms/logit_norm.py:154*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.norms.band_rms`
 
 Apply constrained RMS normalization.
 
-*📁 src/dl_techniques/layers/norms/band_rms.py:237*
+*📁 src/dl_techniques/layers/norms/band_rms.py:221*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.norms.global_response_norm`
 
 Apply global response normalization to the input tensor.
 
-*📁 src/dl_techniques/layers/norms/global_response_norm.py:224*
+*📁 src/dl_techniques/layers/norms/global_response_norm.py:219*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.norms.band_logit_norm`
 
 Apply constrained RMS normalization.
 
-*📁 src/dl_techniques/layers/norms/band_logit_norm.py:122*
+*📁 src/dl_techniques/layers/norms/band_logit_norm.py:166*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.norms.max_logit_norm`
 
 Apply MaxLogit normalization.
 
-*📁 src/dl_techniques/layers/norms/max_logit_norm.py:165*
+*📁 src/dl_techniques/layers/norms/max_logit_norm.py:125*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.norms.max_logit_norm`
 
 Apply decoupled MaxLogit normalization.
 
-*📁 src/dl_techniques/layers/norms/max_logit_norm.py:363*
+*📁 src/dl_techniques/layers/norms/max_logit_norm.py:287*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.norms.max_logit_norm`
 
 Apply DML+ normalization based on model type.
 
-*📁 src/dl_techniques/layers/norms/max_logit_norm.py:587*
+*📁 src/dl_techniques/layers/norms/max_logit_norm.py:459*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.norms.rms_norm`
 
 Apply RMS normalization to inputs.
 
-*📁 src/dl_techniques/layers/norms/rms_norm.py:301*
+*📁 src/dl_techniques/layers/norms/rms_norm.py:220*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.norms.zero_centered_band_rms_norm`
 
 Apply Zero-Centered Band RMS normalization to inputs.
 
-*📁 src/dl_techniques/layers/norms/zero_centered_band_rms_norm.py:353*
+*📁 src/dl_techniques/layers/norms/zero_centered_band_rms_norm.py:254*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.norms.dynamic_tanh`
 
-Forward computation: weight * tanh(alpha * inputs) + bias.
+Apply dynamic tanh transformation: weight * tanh(alpha * inputs) + bias.
 
-*📁 src/dl_techniques/layers/norms/dynamic_tanh.py:191*
+*📁 src/dl_techniques/layers/norms/dynamic_tanh.py:194*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.logic.arithmetic_operators`
 
 Forward pass through the arithmetic operator.
 
-*📁 src/dl_techniques/layers/logic/arithmetic_operators.py:342*
+*📁 src/dl_techniques/layers/logic/arithmetic_operators.py:332*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.logic.logic_operators`
 
 Forward pass through the logic operator.
 
-*📁 src/dl_techniques/layers/logic/logic_operators.py:330*
+*📁 src/dl_techniques/layers/logic/logic_operators.py:325*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.logic.neural_circuit`
 
 Forward pass through the circuit depth layer.
 
-*📁 src/dl_techniques/layers/logic/neural_circuit.py:226*
+*📁 src/dl_techniques/layers/logic/neural_circuit.py:224*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.logic.neural_circuit`
 
 Forward pass through the neural circuit.
 
-*📁 src/dl_techniques/layers/logic/neural_circuit.py:462*
+*📁 src/dl_techniques/layers/logic/neural_circuit.py:466*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.moe.layer`
 
 Forward pass through the MoE layer.
 
-*📁 src/dl_techniques/layers/moe/layer.py:251*
+*📁 src/dl_techniques/layers/moe/layer.py:163*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.moe.experts`
 
 Forward computation for the expert.
 
-*📁 src/dl_techniques/layers/moe/experts.py:45*
+*📁 src/dl_techniques/layers/moe/experts.py:54*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.moe.experts`
 
 Forward pass through the FFN expert.
 
-*📁 src/dl_techniques/layers/moe/experts.py:178*
+*📁 src/dl_techniques/layers/moe/experts.py:158*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.moe.gating`
 
 Compute gating scores and routing information.
 
-*📁 src/dl_techniques/layers/moe/gating.py:47*
+*📁 src/dl_techniques/layers/moe/gating.py:62*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.moe.gating`
 
 Forward pass through the linear gating network.
 
-*📁 src/dl_techniques/layers/moe/gating.py:174*
+*📁 src/dl_techniques/layers/moe/gating.py:193*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.moe.gating`
 
 Forward pass through the cosine gating network.
 
-*📁 src/dl_techniques/layers/moe/gating.py:362*
+*📁 src/dl_techniques/layers/moe/gating.py:408*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.moe.gating`
 
 Forward pass through the SoftMoE gating network.
 
-*📁 src/dl_techniques/layers/moe/gating.py:527*
+*📁 src/dl_techniques/layers/moe/gating.py:587*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.fusion.multimodal_fusion`
 
 Apply the fusion strategy to combine multiple modalities.
 
-*📁 src/dl_techniques/layers/fusion/multimodal_fusion.py:596*
+*📁 src/dl_techniques/layers/fusion/multimodal_fusion.py:629*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.statistics.moving_std`
 
 Apply the moving standard deviation filter to the input tensor.
 
-*📁 src/dl_techniques/layers/statistics/moving_std.py:253*
+*📁 src/dl_techniques/layers/statistics/moving_std.py:181*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.statistics.residual_acf`
 
-Forward pass: compute ACF statistics and optional regularization loss.
+Forward pass computing ACF statistics and optional regularization.
 
-*📁 src/dl_techniques/layers/statistics/residual_acf.py:339*
+*📁 src/dl_techniques/layers/statistics/residual_acf.py:230*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.statistics.normalizing_flow`
 
-Inverse transformation y → z for likelihood computation during training.
+Inverse transformation y to z for likelihood computation.
 
-*📁 src/dl_techniques/layers/statistics/normalizing_flow.py:643*
+*📁 src/dl_techniques/layers/statistics/normalizing_flow.py:465*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.statistics.invertible_kernel_pca`
 
-Forward pass: transform inputs to principal components.
+Forward pass transforming inputs to principal components.
 
-*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:466*
+*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:406*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.statistics.invertible_kernel_pca`
 
 Denoise inputs using ikPCA.
 
-*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:783*
+*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:728*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.statistics.scaler`
 
 Apply normalization to inputs.
 
-*📁 src/dl_techniques/layers/statistics/scaler.py:413*
+*📁 src/dl_techniques/layers/statistics/scaler.py:297*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.statistics.deep_kernel_pca`
 
 Forward pass through hierarchical kernel PCA levels with coupled optimization.
 
-*📁 src/dl_techniques/layers/statistics/deep_kernel_pca.py:534*
+*📁 src/dl_techniques/layers/statistics/deep_kernel_pca.py:491*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.statistics.mdn_layer`
 
-Forward pass of the layer with separate processing paths.
+Forward pass through three parallel processing paths for mu, sigma, and pi.
 
-*📁 src/dl_techniques/layers/statistics/mdn_layer.py:267*
+*📁 src/dl_techniques/layers/statistics/mdn_layer.py:250*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.graphs.simplified_hyperbolic_graph_convolutional_neural_layer`
 
 Forward pass implementing Equation 14.
 
-*📁 src/dl_techniques/layers/graphs/simplified_hyperbolic_graph_convolutional_neural_layer.py:238*
+*📁 src/dl_techniques/layers/graphs/simplified_hyperbolic_graph_convolutional_neural_layer.py:197*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.graphs.graph_neural_network`
 
 Process concept graph through GNN layers.
 
-*📁 src/dl_techniques/layers/graphs/graph_neural_network.py:435*
+*📁 src/dl_techniques/layers/graphs/graph_neural_network.py:404*
 
 #### `call(self, embeddings, training)`
 **Module:** `layers.graphs.entity_graph_refinement`
 
-Forward pass through the complete entity-graph refinement pipeline.
+Forward pass through the entity-graph refinement pipeline.
 
-*📁 src/dl_techniques/layers/graphs/entity_graph_refinement.py:687*
+*📁 src/dl_techniques/layers/graphs/entity_graph_refinement.py:586*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.graphs.relational_graph_transformer_blocks`
 
 Forward pass of the GNN layer.
 
-*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:179*
+*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:135*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.graphs.relational_graph_transformer_blocks`
 
-Forward pass for multi-element tokenization.
+Forward pass for multi-element tokenisation.
 
-*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:512*
+*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:406*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.graphs.relational_graph_transformer_blocks`
 
 Forward pass for hybrid local-global processing.
 
-*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:895*
+*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:703*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.graphs.fermi_diract_decoder`
 
 Compute edge probabilities from embedding pairs.
 
-*📁 src/dl_techniques/layers/graphs/fermi_diract_decoder.py:180*
+*📁 src/dl_techniques/layers/graphs/fermi_diract_decoder.py:120*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.attention.channel_attention`
 
-Apply channel attention to input tensor.
+Apply channel attention to the input tensor.
 
-*📁 src/dl_techniques/layers/attention/channel_attention.py:241*
-
-#### `call(self, inputs, training)`
-**Module:** `layers.attention.tripse_attention`
-
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:119*
+*📁 src/dl_techniques/layers/attention/channel_attention.py:220*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.attention.tripse_attention`
 
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:252*
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:156*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.attention.tripse_attention`
 
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:356*
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:319*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.attention.tripse_attention`
 
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:484*
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:458*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.attention.tripse_attention`
 
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:596*
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:623*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.attention.tripse_attention`
 
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:703*
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:769*
+
+#### `call(self, inputs, training)`
+**Module:** `layers.attention.tripse_attention`
+
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:913*
 
 #### `call(self, inputs, mask, training, return_attention_scores)`
 **Module:** `layers.attention.rpc_attention`
 
 Apply RPC attention to inputs.
 
-*📁 src/dl_techniques/layers/attention/rpc_attention.py:485*
+*📁 src/dl_techniques/layers/attention/rpc_attention.py:375*
 
 #### `call(self, inputs, attention_mask, training)`
 **Module:** `layers.attention.multi_head_attention`
 
 Forward pass through self-attention mechanism.
 
-*📁 src/dl_techniques/layers/attention/multi_head_attention.py:216*
+*📁 src/dl_techniques/layers/attention/multi_head_attention.py:205*
 
 #### `call(self, inputs, split_sizes, attention_mask, training)`
 **Module:** `layers.attention.shared_weights_cross_attention`
 
-Apply shared weights cross-attention.
+Apply shared-weights bidirectional cross-attention.
 
-*📁 src/dl_techniques/layers/attention/shared_weights_cross_attention.py:257*
+*📁 src/dl_techniques/layers/attention/shared_weights_cross_attention.py:193*
 
 #### `call(self, inputs, attention_mask, training)`
 **Module:** `layers.attention.single_window_attention`
 
 Forward pass for the unified single window attention.
 
-*📁 src/dl_techniques/layers/attention/single_window_attention.py:209*
+*📁 src/dl_techniques/layers/attention/single_window_attention.py:306*
 
 #### `call(self, inputs, training, attention_mask, return_attention_weights)`
 **Module:** `layers.attention.ring_attention`
 
 Apply ring attention with blockwise processing.
 
-*📁 src/dl_techniques/layers/attention/ring_attention.py:386*
+*📁 src/dl_techniques/layers/attention/ring_attention.py:258*
 
 #### `call(self, query_input, kv_input, attention_mask, training)`
 **Module:** `layers.attention.perceiver_attention`
 
 Apply Perceiver cross-attention.
 
-*📁 src/dl_techniques/layers/attention/perceiver_attention.py:279*
+*📁 src/dl_techniques/layers/attention/perceiver_attention.py:188*
 
 #### `call(self, inputs, attention_mask, training)`
 **Module:** `layers.attention.gated_attention`
 
 Forward pass through the gated attention layer.
 
-*📁 src/dl_techniques/layers/attention/gated_attention.py:513*
+*📁 src/dl_techniques/layers/attention/gated_attention.py:494*
 
 #### `call(self, inputs, attention_mask, training)`
 **Module:** `layers.attention.spatial_attention`
 
-Apply spatial attention to input tensor.
+Apply spatial attention to the input tensor.
 
-*📁 src/dl_techniques/layers/attention/spatial_attention.py:185*
+*📁 src/dl_techniques/layers/attention/spatial_attention.py:174*
 
 #### `call(self, inputs, training, return_attention_scores)`
 **Module:** `layers.attention.performer_attention`
 
 Apply Performer attention to inputs.
 
-*📁 src/dl_techniques/layers/attention/performer_attention.py:449*
+*📁 src/dl_techniques/layers/attention/performer_attention.py:343*
 
 #### `call(self, query_input, kv_input, attention_mask, training)`
 **Module:** `layers.attention.multi_head_cross_attention`
 
-Forward pass through multi-head attention with optional masking and adaptive softmax or hierarchical routing.
+Forward pass through multi-head attention with optional masking and adaptive softmax.
 
-*📁 src/dl_techniques/layers/attention/multi_head_cross_attention.py:424*
+*📁 src/dl_techniques/layers/attention/multi_head_cross_attention.py:388*
 
 #### `call(self, inputs, attention_mask, training)`
 **Module:** `layers.attention.fnet_fourier_transform`
 
 Apply 2D Fourier Transform for token mixing.
 
-*📁 src/dl_techniques/layers/attention/fnet_fourier_transform.py:228*
+*📁 src/dl_techniques/layers/attention/fnet_fourier_transform.py:264*
 
 #### `call(self, inputs, attention_mask, training)`
 **Module:** `layers.attention.window_attention`
 
-*📁 src/dl_techniques/layers/attention/window_attention.py:358*
+*📁 src/dl_techniques/layers/attention/window_attention.py:399*
 
 #### `call(self, inputs, attention_mask, training)`
 **Module:** `layers.attention.capsule_routing_attention`
 
 Forward pass of capsule routing self-attention.
 
-*📁 src/dl_techniques/layers/attention/capsule_routing_attention.py:412*
+*📁 src/dl_techniques/layers/attention/capsule_routing_attention.py:343*
 
 #### `call(self, x, num_anchor_tokens, training)`
 **Module:** `layers.attention.anchor_attention`
 
 Apply anchor-based attention to input tensor.
 
-*📁 src/dl_techniques/layers/attention/anchor_attention.py:423*
+*📁 src/dl_techniques/layers/attention/anchor_attention.py:323*
+
+#### `call(self, inputs, attention_mask, training)`
+**Module:** `layers.attention.wave_field_attention`
+
+Forward pass through the wave-field attention mechanism.
+
+*📁 src/dl_techniques/layers/attention/wave_field_attention.py:463*
 
 #### `call(self, inputs, attention_mask, layer_idx, training)`
 **Module:** `layers.attention.differential_attention`
 
 Apply differential attention mechanism.
 
-*📁 src/dl_techniques/layers/attention/differential_attention.py:343*
+*📁 src/dl_techniques/layers/attention/differential_attention.py:295*
 
 #### `call(self, inputs, attention_mask, return_attention_scores, training)`
 **Module:** `layers.attention.hopfield_attention`
 
 Forward pass of the Hopfield attention layer.
 
-*📁 src/dl_techniques/layers/attention/hopfield_attention.py:402*
+*📁 src/dl_techniques/layers/attention/hopfield_attention.py:414*
 
 #### `call(self, query_input, kv_input, attention_mask, training)`
 **Module:** `layers.attention.multi_head_latent_attention`
 
 Forward pass through the Multi-Head Latent Attention layer.
 
-*📁 src/dl_techniques/layers/attention/multi_head_latent_attention.py:506*
+*📁 src/dl_techniques/layers/attention/multi_head_latent_attention.py:370*
 
 #### `call(self, inputs, training, attention_mask, return_attention_weights)`
 **Module:** `layers.attention.group_query_attention`
 
-Apply grouped query attention. Supports 3D (B, S, D) and 4D (B, H, W, D) inputs.
+Apply grouped query attention.
 
-*📁 src/dl_techniques/layers/attention/group_query_attention.py:287*
+*📁 src/dl_techniques/layers/attention/group_query_attention.py:315*
 
 #### `call(self, inputs, training, attention_mask, return_attention_weights)`
 **Module:** `layers.attention.mobile_mqa`
 
-Forward pass of MobileMQA.
+Forward pass of MobileMQA with optional downsampling and lambda-residual.
 
-*📁 src/dl_techniques/layers/attention/mobile_mqa.py:147*
+*📁 src/dl_techniques/layers/attention/mobile_mqa.py:175*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.attention.convolutional_block_attention`
 
-Apply CBAM attention to input tensor.
+Apply sequential channel-then-spatial CBAM attention to the input tensor.
 
-*📁 src/dl_techniques/layers/attention/convolutional_block_attention.py:238*
+*📁 src/dl_techniques/layers/attention/convolutional_block_attention.py:205*
 
 #### `call(self, inputs, attention_mask, training)`
 **Module:** `layers.attention.non_local_attention`
 
 Apply non-local attention to input features.
 
-*📁 src/dl_techniques/layers/attention/non_local_attention.py:423*
+*📁 src/dl_techniques/layers/attention/non_local_attention.py:333*
 
 #### `call(self, x, prev_attn_map, training)`
 **Module:** `layers.attention.progressive_focused_attention`
 
 Forward pass of Progressive Focused Attention.
 
-*📁 src/dl_techniques/layers/attention/progressive_focused_attention.py:762*
+*📁 src/dl_techniques/layers/attention/progressive_focused_attention.py:556*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.tokenizers.bpe`
 
-Forward pass placeholder - not implemented for string processing.
+Forward pass placeholder (not implemented for string processing).
 
-*📁 src/dl_techniques/layers/tokenizers/bpe.py:296*
+*📁 src/dl_techniques/layers/tokenizers/bpe.py:313*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.tokenizers.bpe`
 
 Forward pass of the embedding layer.
 
-*📁 src/dl_techniques/layers/tokenizers/bpe.py:426*
-
-#### `call(self, inputs)`
-**Module:** `layers.ntm.baseline_ntm`
-
-Forward pass (placeholder for layer compatibility).
-
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:343*
-
-#### `call(self, inputs, state, training)`
-**Module:** `layers.ntm.baseline_ntm`
-
-Process inputs through the controller.
-
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:737*
-
-#### `call(self, inputs, states, training)`
-**Module:** `layers.ntm.baseline_ntm`
-
-Process one timestep of the NTM.
-
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:974*
-
-#### `call(self, inputs, initial_state, training)`
-**Module:** `layers.ntm.baseline_ntm`
-
-Process input sequence through NTM.
-
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:1325*
-
-#### `call(self, inputs, state, training)`
-**Module:** `layers.ntm.ntm_interface`
-
-Process inputs through the controller.
-
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:580*
-
-#### `call(self, inputs, initial_state, training, return_sequences, return_state)`
-**Module:** `layers.ntm.ntm_interface`
-
-Process a sequence through the NTM.
-
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:698*
-
-#### `call(self, memory, controller_state, previous_weights, training)`
-**Module:** `layers.ntm.base_layers`
-
-Compute addressing weights over memory.
-
-*📁 src/dl_techniques/layers/ntm/base_layers.py:220*
-
-#### `call(self, memory, controller_state, previous_read_weights, previous_write_weights, training)`
-**Module:** `layers.ntm.base_layers`
-
-Perform read and write operations on memory.
-
-*📁 src/dl_techniques/layers/ntm/base_layers.py:537*
-
-#### `call(self, inputs, training)`
-**Module:** `layers.ntm.base_layers`
-
-Perform select-copy operations.
-
-*📁 src/dl_techniques/layers/ntm/base_layers.py:832*
+*📁 src/dl_techniques/layers/tokenizers/bpe.py:454*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.ffn.residual_block`
 
 Forward pass with residual connection.
 
-*📁 src/dl_techniques/layers/ffn/residual_block.py:277*
+*📁 src/dl_techniques/layers/ffn/residual_block.py:266*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.ffn.counting_ffn`
 
 Forward pass computation.
 
-*📁 src/dl_techniques/layers/ffn/counting_ffn.py:337*
+*📁 src/dl_techniques/layers/ffn/counting_ffn.py:320*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.ffn.power_mlp_layer`
 
 Forward pass implementing the dual-branch PowerMLP architecture.
 
-*📁 src/dl_techniques/layers/ffn/power_mlp_layer.py:288*
+*📁 src/dl_techniques/layers/ffn/power_mlp_layer.py:281*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.ffn.diff_ffn`
 
 Forward pass through the Differential FFN layer.
 
-*📁 src/dl_techniques/layers/ffn/diff_ffn.py:370*
+*📁 src/dl_techniques/layers/ffn/diff_ffn.py:349*
+
+#### `call(self, inputs, training)`
+**Module:** `layers.ffn.kan_linear`
+
+Forward pass using learned activation functions.
+
+*📁 src/dl_techniques/layers/ffn/kan_linear.py:325*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.ffn.gated_mlp`
 
 Forward pass for the GatedMLP layer.
 
-*📁 src/dl_techniques/layers/ffn/gated_mlp.py:320*
+*📁 src/dl_techniques/layers/ffn/gated_mlp.py:308*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.ffn.swiglu_ffn`
 
 Apply SwiGLU feed-forward transformation.
 
-*📁 src/dl_techniques/layers/ffn/swiglu_ffn.py:340*
+*📁 src/dl_techniques/layers/ffn/swiglu_ffn.py:329*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.ffn.swin_mlp`
 
 Forward pass of the SwinMLP layer.
 
-*📁 src/dl_techniques/layers/ffn/swin_mlp.py:291*
+*📁 src/dl_techniques/layers/ffn/swin_mlp.py:269*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.ffn.mlp`
 
 Apply the MLP block to input tensors.
 
-*📁 src/dl_techniques/layers/ffn/mlp.py:276*
+*📁 src/dl_techniques/layers/ffn/mlp.py:277*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.ffn.glu_ffn`
 
 Forward pass implementing the GLU gating mechanism.
 
-*📁 src/dl_techniques/layers/ffn/glu_ffn.py:334*
+*📁 src/dl_techniques/layers/ffn/glu_ffn.py:275*
+
+#### `call(self, inputs)`
+**Module:** `layers.ffn.tversky_projection`
+
+Forward pass computation of Tversky similarity.
+
+*📁 src/dl_techniques/layers/ffn/tversky_projection.py:208*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.ffn.orthoglu_ffn`
 
 Forward pass for the OrthoGLU FFN.
 
-*📁 src/dl_techniques/layers/ffn/orthoglu_ffn.py:241*
+*📁 src/dl_techniques/layers/ffn/orthoglu_ffn.py:247*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.ffn.geglu_ffn`
 
 Forward pass for the GeGLU FFN.
 
-*📁 src/dl_techniques/layers/ffn/geglu_ffn.py:300*
+*📁 src/dl_techniques/layers/ffn/geglu_ffn.py:269*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.ffn.logic_ffn`
 
 Forward pass through the logic FFN.
 
-*📁 src/dl_techniques/layers/ffn/logic_ffn.py:288*
+*📁 src/dl_techniques/layers/ffn/logic_ffn.py:292*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.embedding.patch_embedding`
 
-Forward pass of the layer.
+Project image patches into embedding vectors.
 
-*📁 src/dl_techniques/layers/embedding/patch_embedding.py:210*
+*📁 src/dl_techniques/layers/embedding/patch_embedding.py:222*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.embedding.patch_embedding`
 
 Convert inputs to patches and embed them.
 
-*📁 src/dl_techniques/layers/embedding/patch_embedding.py:402*
+*📁 src/dl_techniques/layers/embedding/patch_embedding.py:425*
+
+#### `call(self, inputs, training)`
+**Module:** `layers.embedding.hierarchical_codebook_embedding`
+
+*📁 src/dl_techniques/layers/embedding/hierarchical_codebook_embedding.py:243*
 
 #### `call(self, coords, training)`
 **Module:** `layers.embedding.continuous_rope_embedding`
 
-Generate continuous RoPE frequencies.
+Generate continuous RoPE phase angles from spatial coordinates.
 
-*📁 src/dl_techniques/layers/embedding/continuous_rope_embedding.py:214*
+*📁 src/dl_techniques/layers/embedding/continuous_rope_embedding.py:206*
+
+#### `call(self, inputs, training)`
+**Module:** `layers.embedding.albert_factorized_embedding`
+
+*📁 src/dl_techniques/layers/embedding/albert_factorized_embedding.py:147*
 
 #### `call(self, input_ids, token_type_ids, training)`
 **Module:** `layers.embedding.modern_bert_embeddings`
 
-Computes the final embedding vectors.
+Compute the final embedding vectors from token and segment IDs.
 
-*📁 src/dl_techniques/layers/embedding/modern_bert_embeddings.py:122*
+*📁 src/dl_techniques/layers/embedding/modern_bert_embeddings.py:140*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.embedding.positional_embedding`
 
 Add positional embeddings to input tensor.
 
-*📁 src/dl_techniques/layers/embedding/positional_embedding.py:214*
+*📁 src/dl_techniques/layers/embedding/positional_embedding.py:215*
 
 #### `call(self, input_ids, token_type_ids, position_ids, training)`
 **Module:** `layers.embedding.bert_embeddings`
 
-Apply embeddings to input tokens.
+Compute composite embeddings from token, position, and segment IDs.
 
-*📁 src/dl_techniques/layers/embedding/bert_embeddings.py:293*
+*📁 src/dl_techniques/layers/embedding/bert_embeddings.py:298*
 
 #### `call(self, coords, training)`
 **Module:** `layers.embedding.continuous_sin_cos_embedding`
 
-Forward computation with sinusoidal embedding.
+Embed continuous coordinates using sinusoidal functions.
 
-*📁 src/dl_techniques/layers/embedding/continuous_sin_cos_embedding.py:235*
+*📁 src/dl_techniques/layers/embedding/continuous_sin_cos_embedding.py:219*
 
 #### `call(self, inputs, rope_type, training)`
 **Module:** `layers.embedding.dual_rotary_position_embedding`
 
 Apply dual rotary position embedding to input tensor.
 
-*📁 src/dl_techniques/layers/embedding/dual_rotary_position_embedding.py:328*
+*📁 src/dl_techniques/layers/embedding/dual_rotary_position_embedding.py:277*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.embedding.rotary_position_embedding`
 
-Apply rotary position embedding to input tensor.
+Apply rotary position embedding to the input tensor.
 
-*📁 src/dl_techniques/layers/embedding/rotary_position_embedding.py:313*
+*📁 src/dl_techniques/layers/embedding/rotary_position_embedding.py:277*
 
 #### `call(self, inputs, mask)`
 **Module:** `layers.embedding.positional_embedding_sine_2d`
 
-Forward pass to generate positional encodings.
+Generate 2D sinusoidal positional encodings for the input feature map.
 
-*📁 src/dl_techniques/layers/embedding/positional_embedding_sine_2d.py:165*
+*📁 src/dl_techniques/layers/embedding/positional_embedding_sine_2d.py:143*
 
-#### `call(self, inputs, mask, training)`
+#### `call(self, inputs, attention_mask, training)`
 **Module:** `layers.reasoning.hrm_reasoning_module`
 
 Forward pass with input injection and sequential refinement.
 
-*📁 src/dl_techniques/layers/reasoning/hrm_reasoning_module.py:178*
+*📁 src/dl_techniques/layers/reasoning/hrm_reasoning_module.py:209*
 
 #### `call(self, inputs, training)`
 **Module:** `layers.reasoning.hrm_sparse_puzzle_embedding`
 
 Forward pass through sparse embedding with mode-dependent behavior.
 
-*📁 src/dl_techniques/layers/reasoning/hrm_sparse_puzzle_embedding.py:218*
+*📁 src/dl_techniques/layers/reasoning/hrm_sparse_puzzle_embedding.py:163*
 
 #### `call(self, carry, inputs, training)`
 **Module:** `layers.reasoning.hrm_reasoning_core`
 
 Forward pass through the hierarchical reasoning core.
 
-*📁 src/dl_techniques/layers/reasoning/hrm_reasoning_core.py:587*
+*📁 src/dl_techniques/layers/reasoning/hrm_reasoning_core.py:499*
 
 #### `center_positions(self)`
 **Module:** `layers.radial_basis_function`
 
 Get current positions of RBF centers.
 
-*📁 src/dl_techniques/layers/radial_basis_function.py:329*
+*📁 src/dl_techniques/layers/radial_basis_function.py:341*
 
 #### `check_component_diversity(model, x_data, mdn_layer)`
 **Module:** `layers.statistics.mdn_layer`
 
-Analyzes the diversity of mixture components for trained MDN.
+Analyze mixture component diversity to diagnose collapse.
 
-*📁 src/dl_techniques/layers/statistics/mdn_layer.py:571*
+*📁 src/dl_techniques/layers/statistics/mdn_layer.py:553*
 
 #### `circular_convolution(weights, shift)`
-**Module:** `layers.ntm.ntm_interface`
+**Module:** `layers.memory.ntm_interface`
 
 Perform circular convolution for location-based addressing.
 
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:874*
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:902*
 
 #### `clone(self)`
-**Module:** `layers.ntm.ntm_interface`
+**Module:** `layers.memory.ntm_interface`
 
 Create a shallow copy of the memory state.
 
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:109*
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:107*
 
 #### `cluster_centers(self)`
 **Module:** `layers.kmeans`
 
 Get current cluster centers.
 
-*📁 src/dl_techniques/layers/kmeans.py:667*
+*📁 src/dl_techniques/layers/kmeans.py:642*
 
 #### `compute_acf(self, residuals)`
 **Module:** `layers.statistics.residual_acf`
 
-Compute autocorrelation function of residuals using efficient Keras operations.
+Compute autocorrelation function of residuals.
 
-*📁 src/dl_techniques/layers/statistics/residual_acf.py:272*
+*📁 src/dl_techniques/layers/statistics/residual_acf.py:170*
 
 #### `compute_addressing(self, controller_output, memory_state, prev_weights)`
-**Module:** `layers.ntm.baseline_ntm`
+**Module:** `layers.memory.baseline_ntm`
 
 Compute attention weights using the full addressing mechanism.
 
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:292*
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:344*
 
 #### `compute_addressing(self, controller_output, memory_state, prev_weights)`
-**Module:** `layers.ntm.baseline_ntm`
+**Module:** `layers.memory.baseline_ntm`
 
 Compute attention weights and write vectors.
 
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:542*
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:594*
 
 #### `compute_addressing(self, controller_output, memory_state, prev_weights)`
-**Module:** `layers.ntm.ntm_interface`
+**Module:** `layers.memory.ntm_interface`
 
 Compute attention weights using the addressing mechanism.
 
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:473*
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:471*
 
 #### `compute_auxiliary_loss(expert_weights, gate_probs, num_experts, aux_loss_weight)`
 **Module:** `layers.moe.gating`
 
 Compute auxiliary load balancing loss for MoE training.
 
-*📁 src/dl_techniques/layers/moe/gating.py:591*
+*📁 src/dl_techniques/layers/moe/gating.py:661*
 
 #### `compute_entropy(self, logits)`
 **Module:** `layers.blt_blocks`
 
 Compute Shannon entropy from logits.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:498*
+*📁 src/dl_techniques/layers/blt_blocks.py:492*
 
 #### `compute_free_bits_kl_loss(bit_logits, num_bits, kappa, reduction)`
 **Module:** `layers.transformers.free_transformer`
 
 Compute KL divergence loss with free bits thresholding.
 
-*📁 src/dl_techniques/layers/transformers/free_transformer.py:1077*
+*📁 src/dl_techniques/layers/transformers/free_transformer.py:846*
 
 #### `compute_input_quality(self, inputs)`
 **Module:** `layers.neuro_grid`
 
-Compute comprehensive quality measures for input data based on probabilistic addressing behavior.
+Compute quality measures for inputs based on addressing behaviour.
 
-*📁 src/dl_techniques/layers/neuro_grid.py:1005*
+*📁 src/dl_techniques/layers/neuro_grid.py:638*
 
 #### `compute_kernel_matrix(self, x, level)`
 **Module:** `layers.statistics.deep_kernel_pca`
 
 Compute kernel matrix for a given level with numerical stability.
 
-*📁 src/dl_techniques/layers/statistics/deep_kernel_pca.py:408*
+*📁 src/dl_techniques/layers/statistics/deep_kernel_pca.py:364*
 
 #### `compute_kl_divergence_uniform_prior(bit_logits, num_bits, axis)`
 **Module:** `layers.transformers.free_transformer`
 
 Compute KL divergence between encoder posterior Q(Z|S) and uniform prior P(Z).
 
-*📁 src/dl_techniques/layers/transformers/free_transformer.py:985*
+*📁 src/dl_techniques/layers/transformers/free_transformer.py:771*
 
 #### `compute_mask(self, inputs, mask)`
 **Module:** `layers.fnet_encoder_block`
 
 Propagate the input mask unchanged.
 
-*📁 src/dl_techniques/layers/fnet_encoder_block.py:286*
+*📁 src/dl_techniques/layers/fnet_encoder_block.py:239*
 
 #### `compute_mask(self, inputs, mask)`
 **Module:** `layers.attention.fnet_fourier_transform`
 
 Propagate the input mask.
 
-*📁 src/dl_techniques/layers/attention/fnet_fourier_transform.py:263*
+*📁 src/dl_techniques/layers/attention/fnet_fourier_transform.py:312*
 
 #### `compute_ood_scores(self, data)`
 **Module:** `layers.experimental.band_rms_ood`
 
 Compute OOD scores for input data.
 
-*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:700*
+*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:643*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.mobile_one_block`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/mobile_one_block.py:317*
+*📁 src/dl_techniques/layers/mobile_one_block.py:304*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.depthwise_separable_block`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/depthwise_separable_block.py:364*
+*📁 src/dl_techniques/layers/depthwise_separable_block.py:267*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.sampling`
 
-Compute the output shape of the layer.
+Compute the output shape (same as ``z_mean``).
 
-*📁 src/dl_techniques/layers/sampling.py:242*
+*📁 src/dl_techniques/layers/sampling.py:196*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.hanc_layer`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/hanc_layer.py:318*
+*📁 src/dl_techniques/layers/hanc_layer.py:300*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.laplacian_filter`
 
 Compute the output shape.
 
-*📁 src/dl_techniques/layers/laplacian_filter.py:204*
+*📁 src/dl_techniques/layers/laplacian_filter.py:196*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.laplacian_filter`
 
 Compute the output shape.
 
-*📁 src/dl_techniques/layers/laplacian_filter.py:458*
+*📁 src/dl_techniques/layers/laplacian_filter.py:445*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.multi_level_feature_compilation`
 
 Compute output shapes.
 
-*📁 src/dl_techniques/layers/multi_level_feature_compilation.py:405*
+*📁 src/dl_techniques/layers/multi_level_feature_compilation.py:379*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.yolo12_blocks`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:207*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:203*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.yolo12_blocks`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:474*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:477*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.yolo12_blocks`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:650*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:653*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.yolo12_blocks`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:797*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:799*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.yolo12_blocks`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:980*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:985*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.yolo12_blocks`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:1182*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:1188*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.yolo12_heads`
 
 Compute output shape of the layer.
 
-*📁 src/dl_techniques/layers/yolo12_heads.py:336*
+*📁 src/dl_techniques/layers/yolo12_heads.py:319*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.yolo12_heads`
 
 Compute output shape of the layer.
 
-*📁 src/dl_techniques/layers/yolo12_heads.py:778*
+*📁 src/dl_techniques/layers/yolo12_heads.py:746*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.yolo12_heads`
 
 Compute output shape of the layer.
 
-*📁 src/dl_techniques/layers/yolo12_heads.py:1107*
+*📁 src/dl_techniques/layers/yolo12_heads.py:1063*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.radial_basis_function`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/radial_basis_function.py:287*
+*📁 src/dl_techniques/layers/radial_basis_function.py:304*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.pixel_unshuffle`
+
+*📁 src/dl_techniques/layers/pixel_unshuffle.py:158*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.spatial_layer`
 
-Computes the output shape of the layer.
+Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/spatial_layer.py:273*
+*📁 src/dl_techniques/layers/spatial_layer.py:212*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.one_hot_encoding`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/one_hot_encoding.py:120*
+*📁 src/dl_techniques/layers/one_hot_encoding.py:165*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.neuro_grid`
 
-Compute output shape for both 2D and 3D inputs.
+Compute output shape for 2-D or 3-D inputs.
 
-*📁 src/dl_techniques/layers/neuro_grid.py:760*
+*📁 src/dl_techniques/layers/neuro_grid.py:445*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.dynamic_conv2d`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/dynamic_conv2d.py:458*
+*📁 src/dl_techniques/layers/dynamic_conv2d.py:375*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.shearlet_transform`
 
-Compute output shape.
+Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/shearlet_transform.py:411*
+*📁 src/dl_techniques/layers/shearlet_transform.py:410*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.squeeze_excitation`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/squeeze_excitation.py:370*
+*📁 src/dl_techniques/layers/squeeze_excitation.py:311*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.blur_pool`
+
+*📁 src/dl_techniques/layers/blur_pool.py:116*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.standard_blocks`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/standard_blocks.py:368*
+*📁 src/dl_techniques/layers/standard_blocks.py:363*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.standard_blocks`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/standard_blocks.py:606*
+*📁 src/dl_techniques/layers/standard_blocks.py:585*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.standard_blocks`
 
 Compute output shape (same as input for residual connection).
 
-*📁 src/dl_techniques/layers/standard_blocks.py:815*
+*📁 src/dl_techniques/layers/standard_blocks.py:802*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.standard_blocks`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/standard_blocks.py:1060*
+*📁 src/dl_techniques/layers/standard_blocks.py:1031*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.standard_blocks`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/standard_blocks.py:1344*
+*📁 src/dl_techniques/layers/standard_blocks.py:1292*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.sequence_pooling`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/sequence_pooling.py:262*
+*📁 src/dl_techniques/layers/sequence_pooling.py:279*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.sequence_pooling`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/sequence_pooling.py:398*
+*📁 src/dl_techniques/layers/sequence_pooling.py:435*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.sequence_pooling`
 
 Compute output shape based on pooling strategy.
 
-*📁 src/dl_techniques/layers/sequence_pooling.py:812*
+*📁 src/dl_techniques/layers/sequence_pooling.py:869*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.blt_core`
 
 Compute output shapes.
 
-*📁 src/dl_techniques/layers/blt_core.py:564*
+*📁 src/dl_techniques/layers/blt_core.py:629*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.adaln_zero`
+
+Output shape matches x's shape.
+
+*📁 src/dl_techniques/layers/adaln_zero.py:229*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.fnet_encoder_block`
 
 Encoder block preserves input shape.
 
-*📁 src/dl_techniques/layers/fnet_encoder_block.py:294*
+*📁 src/dl_techniques/layers/fnet_encoder_block.py:255*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.conditional_output_layer`
 
 Compute the layer's output shape.
 
-*📁 src/dl_techniques/layers/conditional_output_layer.py:195*
+*📁 src/dl_techniques/layers/conditional_output_layer.py:174*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.complex_layers`
 
 Compute the output shape of the convolution.
 
-*📁 src/dl_techniques/layers/complex_layers.py:370*
+*📁 src/dl_techniques/layers/complex_layers.py:328*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.complex_layers`
 
 Compute the output shape of the dense layer.
 
-*📁 src/dl_techniques/layers/complex_layers.py:575*
+*📁 src/dl_techniques/layers/complex_layers.py:504*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.complex_layers`
 
 Compute the output shape (same as input for activation).
 
-*📁 src/dl_techniques/layers/complex_layers.py:690*
+*📁 src/dl_techniques/layers/complex_layers.py:597*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.complex_layers`
 
 Compute the output shape of the pooling layer.
 
-*📁 src/dl_techniques/layers/complex_layers.py:848*
+*📁 src/dl_techniques/layers/complex_layers.py:733*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.complex_layers`
 
 Compute the output shape (same as input for dropout).
 
-*📁 src/dl_techniques/layers/complex_layers.py:996*
+*📁 src/dl_techniques/layers/complex_layers.py:859*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.complex_layers`
 
 Compute the output shape of the global pooling layer.
 
-*📁 src/dl_techniques/layers/complex_layers.py:1119*
+*📁 src/dl_techniques/layers/complex_layers.py:954*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.anchor_generator`
 
 Compute output shapes for anchors and strides tensors.
 
-*📁 src/dl_techniques/layers/anchor_generator.py:243*
+*📁 src/dl_techniques/layers/anchor_generator.py:248*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.haar_wavelet_decomposition`
 
 Compute output shapes for all frequency bands.
 
-*📁 src/dl_techniques/layers/haar_wavelet_decomposition.py:339*
+*📁 src/dl_techniques/layers/haar_wavelet_decomposition.py:314*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.tabm_blocks`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/tabm_blocks.py:121*
+*📁 src/dl_techniques/layers/tabm_blocks.py:145*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.tabm_blocks`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/tabm_blocks.py:254*
+*📁 src/dl_techniques/layers/tabm_blocks.py:317*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.tabm_blocks`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/tabm_blocks.py:354*
+*📁 src/dl_techniques/layers/tabm_blocks.py:447*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.tabm_blocks`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/tabm_blocks.py:471*
+*📁 src/dl_techniques/layers/tabm_blocks.py:600*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.tabm_blocks`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/tabm_blocks.py:577*
-
-#### `compute_output_shape(self, input_shape)`
-**Module:** `layers.kan_linear`
-
-Compute output shape from input shape.
-
-*📁 src/dl_techniques/layers/kan_linear.py:451*
+*📁 src/dl_techniques/layers/tabm_blocks.py:740*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.convnext_v2_block`
 
 Compute the output shape of the ConvNextV2 block.
 
-*📁 src/dl_techniques/layers/convnext_v2_block.py:436*
+*📁 src/dl_techniques/layers/convnext_v2_block.py:400*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.io_preparation`
 
-Output shape is identical to input shape.
+Compute output shape (identical to input).
 
-*📁 src/dl_techniques/layers/io_preparation.py:99*
-
-#### `compute_output_shape(self, input_shape)`
-**Module:** `layers.io_preparation`
-
-Output shape is identical to input shape.
-
-*📁 src/dl_techniques/layers/io_preparation.py:234*
+*📁 src/dl_techniques/layers/io_preparation.py:85*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.io_preparation`
 
-Output shape is identical to input shape.
+Compute output shape (identical to input).
 
-*📁 src/dl_techniques/layers/io_preparation.py:368*
+*📁 src/dl_techniques/layers/io_preparation.py:221*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.io_preparation`
 
-Output shape is identical to input shape.
+Compute output shape (identical to input).
 
-*📁 src/dl_techniques/layers/io_preparation.py:529*
+*📁 src/dl_techniques/layers/io_preparation.py:357*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.io_preparation`
+
+Compute output shape (identical to input).
+
+*📁 src/dl_techniques/layers/io_preparation.py:517*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.convnext_v1_block`
 
 Compute the output shape of the ConvNext block.
 
-*📁 src/dl_techniques/layers/convnext_v1_block.py:407*
+*📁 src/dl_techniques/layers/convnext_v1_block.py:377*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.patch_merging`
 
 Compute output shape for shape inference.
 
-*📁 src/dl_techniques/layers/patch_merging.py:219*
+*📁 src/dl_techniques/layers/patch_merging.py:189*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.fft_layers`
 
 Compute output shape (channels are doubled).
 
-*📁 src/dl_techniques/layers/fft_layers.py:93*
+*📁 src/dl_techniques/layers/fft_layers.py:89*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.fft_layers`
 
 Compute output shape (channels are halved).
 
-*📁 src/dl_techniques/layers/fft_layers.py:204*
+*📁 src/dl_techniques/layers/fft_layers.py:193*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.orthoblock`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/orthoblock.py:338*
+*📁 src/dl_techniques/layers/orthoblock.py:269*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.pixel_shuffle`
@@ -17670,2242 +18766,2291 @@ Compute the output shape of the layer.
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.res_path`
 
-Compute the output shape of the layer.
+Compute the output shape (same as input).
 
-*📁 src/dl_techniques/layers/res_path.py:231*
+*📁 src/dl_techniques/layers/res_path.py:242*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.mps_layer`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/mps_layer.py:381*
+*📁 src/dl_techniques/layers/mps_layer.py:302*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.film`
 
 Compute output shape (same as content tensor).
 
-*📁 src/dl_techniques/layers/film.py:421*
+*📁 src/dl_techniques/layers/film.py:357*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.hanc_block`
 
 Compute output shape of the layer.
 
-*📁 src/dl_techniques/layers/hanc_block.py:367*
+*📁 src/dl_techniques/layers/hanc_block.py:366*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.repmixer_block`
 
-Output shape is identical to input shape.
+Compute output shape (identical to input).
 
-*📁 src/dl_techniques/layers/repmixer_block.py:381*
+*📁 src/dl_techniques/layers/repmixer_block.py:340*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.repmixer_block`
 
 Compute output shape through all blocks.
 
-*📁 src/dl_techniques/layers/repmixer_block.py:584*
+*📁 src/dl_techniques/layers/repmixer_block.py:536*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.bitlinear_layer`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/bitlinear_layer.py:494*
+*📁 src/dl_techniques/layers/bitlinear_layer.py:490*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.stochastic_gradient`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/stochastic_gradient.py:163*
+*📁 src/dl_techniques/layers/stochastic_gradient.py:147*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.gaussian_pyramid`
 
 Compute the output shapes for all pyramid levels.
 
-*📁 src/dl_techniques/layers/gaussian_pyramid.py:305*
+*📁 src/dl_techniques/layers/gaussian_pyramid.py:257*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.bias_free_conv1d`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/bias_free_conv1d.py:229*
+*📁 src/dl_techniques/layers/bias_free_conv1d.py:204*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.bias_free_conv1d`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/bias_free_conv1d.py:492*
+*📁 src/dl_techniques/layers/bias_free_conv1d.py:440*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.vector_quantizer`
 
 Compute output shape (same as input shape).
 
-*📁 src/dl_techniques/layers/vector_quantizer.py:451*
+*📁 src/dl_techniques/layers/vector_quantizer.py:356*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.restricted_boltzmann_machine`
 
-Compute output shape for forward pass.
+Compute the output shape of the forward pass.
 
-*📁 src/dl_techniques/layers/restricted_boltzmann_machine.py:604*
+*📁 src/dl_techniques/layers/restricted_boltzmann_machine.py:495*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.convolutional_kan`
 
 Compute output shape based on input shape and layer parameters.
 
-*📁 src/dl_techniques/layers/convolutional_kan.py:425*
+*📁 src/dl_techniques/layers/convolutional_kan.py:381*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.kmeans`
 
 Compute shape of layer output.
 
-*📁 src/dl_techniques/layers/kmeans.py:401*
+*📁 src/dl_techniques/layers/kmeans.py:388*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.capsules`
 
 Compute output shape based on input shape.
 
-*📁 src/dl_techniques/layers/capsules.py:278*
+*📁 src/dl_techniques/layers/capsules.py:237*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.capsules`
 
 Compute output shape based on input shape.
 
-*📁 src/dl_techniques/layers/capsules.py:626*
+*📁 src/dl_techniques/layers/capsules.py:509*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.capsules`
 
 Compute output shape based on input shape.
 
-*📁 src/dl_techniques/layers/capsules.py:889*
+*📁 src/dl_techniques/layers/capsules.py:737*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.gated_delta_net`
 
 Compute the output shape given input shape.
 
-*📁 src/dl_techniques/layers/gated_delta_net.py:497*
+*📁 src/dl_techniques/layers/gated_delta_net.py:511*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.bias_free_conv2d`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/bias_free_conv2d.py:249*
+*📁 src/dl_techniques/layers/bias_free_conv2d.py:209*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.bias_free_conv2d`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/bias_free_conv2d.py:532*
+*📁 src/dl_techniques/layers/bias_free_conv2d.py:453*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.mothnet_blocks`
 
 Compute output shape for this layer.
 
-*📁 src/dl_techniques/layers/mothnet_blocks.py:242*
+*📁 src/dl_techniques/layers/mothnet_blocks.py:203*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.mothnet_blocks`
 
 Compute output shape for this layer.
 
-*📁 src/dl_techniques/layers/mothnet_blocks.py:529*
+*📁 src/dl_techniques/layers/mothnet_blocks.py:415*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.mothnet_blocks`
 
 Compute output shape for this layer.
 
-*📁 src/dl_techniques/layers/mothnet_blocks.py:808*
+*📁 src/dl_techniques/layers/mothnet_blocks.py:586*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.selective_gradient_mask`
 
-Compute the output shape.
+Compute the output shape (same as signal shape).
 
-*📁 src/dl_techniques/layers/selective_gradient_mask.py:223*
+*📁 src/dl_techniques/layers/selective_gradient_mask.py:202*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.capsules_v2`
+
+*📁 src/dl_techniques/layers/capsules_v2.py:328*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.capsules_v2`
+
+*📁 src/dl_techniques/layers/capsules_v2.py:468*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.clahe`
 
-The output shape is the same as the input shape.
+Compute the output shape (same as input).
 
-*📁 src/dl_techniques/layers/clahe.py:283*
-
-#### `compute_output_shape(self, input_shape)`
-**Module:** `layers.tversky_projection`
-
-Compute the output shape of the layer.
-
-*📁 src/dl_techniques/layers/tversky_projection.py:291*
+*📁 src/dl_techniques/layers/clahe.py:268*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.stochastic_depth`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/stochastic_depth.py:193*
+*📁 src/dl_techniques/layers/stochastic_depth.py:173*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.hierarchical_mlp_stem`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/hierarchical_mlp_stem.py:254*
+*📁 src/dl_techniques/layers/hierarchical_mlp_stem.py:301*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.layer_scale`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/layer_scale.py:281*
+*📁 src/dl_techniques/layers/layer_scale.py:223*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.blt_blocks`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:519*
+*📁 src/dl_techniques/layers/blt_blocks.py:322*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.blt_blocks`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:695*
+*📁 src/dl_techniques/layers/blt_blocks.py:511*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.blt_blocks`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:959*
+*📁 src/dl_techniques/layers/blt_blocks.py:655*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.blt_blocks`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:1138*
+*📁 src/dl_techniques/layers/blt_blocks.py:902*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.blt_blocks`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:1276*
+*📁 src/dl_techniques/layers/blt_blocks.py:1082*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.blt_blocks`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:1556*
+*📁 src/dl_techniques/layers/blt_blocks.py:1219*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.blt_blocks`
+
+Compute output shape.
+
+*📁 src/dl_techniques/layers/blt_blocks.py:1484*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.random_fourier_features`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/random_fourier_features.py:361*
+*📁 src/dl_techniques/layers/random_fourier_features.py:305*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.modality_projection`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/modality_projection.py:257*
+*📁 src/dl_techniques/layers/modality_projection.py:280*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.sparse_autoencoder`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/sparse_autoencoder.py:880*
+*📁 src/dl_techniques/layers/sparse_autoencoder.py:756*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.eomt_mask`
 
 Compute output shapes.
 
-*📁 src/dl_techniques/layers/eomt_mask.py:497*
+*📁 src/dl_techniques/layers/eomt_mask.py:425*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.canny`
 
-The output shape is the same as the input shape.
+Compute the output shape (same as input).
 
-*📁 src/dl_techniques/layers/canny.py:330*
+*📁 src/dl_techniques/layers/canny.py:352*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.universal_inverted_bottleneck`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/universal_inverted_bottleneck.py:554*
+*📁 src/dl_techniques/layers/universal_inverted_bottleneck.py:516*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.global_sum_pool_2d`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/global_sum_pool_2d.py:175*
+*📁 src/dl_techniques/layers/global_sum_pool_2d.py:110*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.fractal_block`
 
 Compute output shape of the FractalBlock.
 
-*📁 src/dl_techniques/layers/fractal_block.py:371*
+*📁 src/dl_techniques/layers/fractal_block.py:229*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.rigid_simplex_layer`
 
 Compute output shape from input shape.
 
-*📁 src/dl_techniques/layers/rigid_simplex_layer.py:369*
+*📁 src/dl_techniques/layers/rigid_simplex_layer.py:348*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.router`
 
-Computes the output shape of the layer.
+Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/router.py:340*
+*📁 src/dl_techniques/layers/router.py:310*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.transformers.progressive_focused_transformer`
 
-Compute output shape of the layer.
+Compute output shapes for feature tensor and attention map.
 
-*📁 src/dl_techniques/layers/transformers/progressive_focused_transformer.py:866*
+*📁 src/dl_techniques/layers/transformers/progressive_focused_transformer.py:539*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.transformers.text_encoder`
 
-Compute output shape given input shape.
+Compute the output shape.
 
-*📁 src/dl_techniques/layers/transformers/text_encoder.py:900*
+*📁 src/dl_techniques/layers/transformers/text_encoder.py:769*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.transformers.text_decoder`
 
 Compute output shape given input shape.
 
-*📁 src/dl_techniques/layers/transformers/text_decoder.py:487*
+*📁 src/dl_techniques/layers/transformers/text_decoder.py:448*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.transformers.eomt_transformer`
 
-Compute output shape (same as input).
+Compute the output shape (same as input).
 
-*📁 src/dl_techniques/layers/transformers/eomt_transformer.py:474*
+*📁 src/dl_techniques/layers/transformers/eomt_transformer.py:440*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.transformers.swin_transformer_block`
 
-Compute the output shape of the layer.
+Compute the output shape (same as input).
 
-*📁 src/dl_techniques/layers/transformers/swin_transformer_block.py:587*
+*📁 src/dl_techniques/layers/transformers/swin_transformer_block.py:511*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.transformers.free_transformer`
 
 Compute output shape: replace last dimension with 2^num_bits.
 
-*📁 src/dl_techniques/layers/transformers/free_transformer.py:243*
+*📁 src/dl_techniques/layers/transformers/free_transformer.py:206*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.transformers.free_transformer`
 
 Compute output shape(s) of the layer.
 
-*📁 src/dl_techniques/layers/transformers/free_transformer.py:932*
+*📁 src/dl_techniques/layers/transformers/free_transformer.py:724*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.transformers.perceiver_transformer`
 
-Compute the output shape of the layer.
+Compute the output shape (same as query input shape).
 
-*📁 src/dl_techniques/layers/transformers/perceiver_transformer.py:350*
+*📁 src/dl_techniques/layers/transformers/perceiver_transformer.py:338*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.transformers.swin_conv_block`
 
-Compute the output shape of the layer.
+Compute the output shape (same as input).
 
-*📁 src/dl_techniques/layers/transformers/swin_conv_block.py:681*
+*📁 src/dl_techniques/layers/transformers/swin_conv_block.py:391*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.transformers.vision_encoder`
 
-Compute output shape given input shape.
+Compute the output shape.
 
-*📁 src/dl_techniques/layers/transformers/vision_encoder.py:756*
+*📁 src/dl_techniques/layers/transformers/vision_encoder.py:646*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.transformers.transformer`
 
-Compute the output shape of the layer.
+Compute the output shape (same as input).
 
-*📁 src/dl_techniques/layers/transformers/transformer.py:635*
+*📁 src/dl_techniques/layers/transformers/transformer.py:577*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.experimental.hierarchical_memory_system`
 
 Compute the output shape of the hierarchical memory system.
 
-*📁 src/dl_techniques/layers/experimental/hierarchical_memory_system.py:341*
-
-#### `compute_output_shape(self, input_shape)`
-**Module:** `layers.experimental.field_embeddings`
-
-Compute output shape given input shape.
-
-*📁 src/dl_techniques/layers/experimental/field_embeddings.py:220*
-
-#### `compute_output_shape(self, input_shape)`
-**Module:** `layers.experimental.field_embeddings`
-
-Compute output shape given input shape.
-
-*📁 src/dl_techniques/layers/experimental/field_embeddings.py:421*
-
-#### `compute_output_shape(self, input_shape)`
-**Module:** `layers.experimental.field_embeddings`
-
-Compute output shape given input shape.
-
-*📁 src/dl_techniques/layers/experimental/field_embeddings.py:606*
-
-#### `compute_output_shape(self, input_shape)`
-**Module:** `layers.experimental.field_embeddings`
-
-Compute output shape given input shape.
-
-*📁 src/dl_techniques/layers/experimental/field_embeddings.py:806*
+*📁 src/dl_techniques/layers/experimental/hierarchical_memory_system.py:320*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.experimental.contextual_memory`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/experimental/contextual_memory.py:238*
+*📁 src/dl_techniques/layers/experimental/contextual_memory.py:237*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.experimental.contextual_memory`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/experimental/contextual_memory.py:513*
+*📁 src/dl_techniques/layers/experimental/contextual_memory.py:495*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.experimental.contextual_memory`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/experimental/contextual_memory.py:672*
+*📁 src/dl_techniques/layers/experimental/contextual_memory.py:640*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.experimental.contextual_memory`
 
 Compute output shapes.
 
-*📁 src/dl_techniques/layers/experimental/contextual_memory.py:890*
+*📁 src/dl_techniques/layers/experimental/contextual_memory.py:840*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.experimental.mst_correlation_filter`
 
 Compute output shape of the layer.
 
-*📁 src/dl_techniques/layers/experimental/mst_correlation_filter.py:359*
+*📁 src/dl_techniques/layers/experimental/mst_correlation_filter.py:346*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.experimental.band_rms_ood`
 
 Compute output shape (unchanged from input).
 
-*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:435*
+*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:385*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.experimental.contextual_counter_ffn`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/experimental/contextual_counter_ffn.py:368*
+*📁 src/dl_techniques/layers/experimental/contextual_counter_ffn.py:313*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.experimental.graph_mann`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/experimental/graph_mann.py:412*
+*📁 src/dl_techniques/layers/experimental/graph_mann.py:385*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.nlp_heads.factory`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:272*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:285*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.nlp_heads.factory`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:381*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:394*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.nlp_heads.factory`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:503*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:516*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.nlp_heads.factory`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:625*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:638*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.nlp_heads.factory`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:762*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:775*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.nlp_heads.factory`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:941*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:953*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.nlp_heads.factory`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:1028*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:1040*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.nlp_heads.factory`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:1188*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:1203*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.time_series.ema_layer`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/time_series/ema_layer.py:144*
+*📁 src/dl_techniques/layers/time_series/ema_layer.py:185*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.time_series.ema_layer`
 
 Compute output shape(s).
 
-*📁 src/dl_techniques/layers/time_series/ema_layer.py:392*
+*📁 src/dl_techniques/layers/time_series/ema_layer.py:433*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.time_series.nbeats_blocks`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:430*
+*📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:401*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.time_series.adaptive_lag_attention`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/time_series/adaptive_lag_attention.py:338*
+*📁 src/dl_techniques/layers/time_series/adaptive_lag_attention.py:302*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.time_series.quantile_head_fixed_io`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/time_series/quantile_head_fixed_io.py:254*
+*📁 src/dl_techniques/layers/time_series/quantile_head_fixed_io.py:278*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.time_series.deepar_blocks`
 
 Compute output shapes for both mu and sigma.
 
-*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:223*
+*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:233*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.time_series.deepar_blocks`
 
 Compute output shapes for both mu and alpha.
 
-*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:343*
+*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:368*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.time_series.quantile_head_variable_io`
 
-Compute the output shape of the layer given an input shape.
+Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/time_series/quantile_head_variable_io.py:352*
-
-#### `compute_output_shape(self, input_shape)`
-**Module:** `layers.time_series.xlstm_blocks`
-
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:438*
+*📁 src/dl_techniques/layers/time_series/quantile_head_variable_io.py:293*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.time_series.xlstm_blocks`
 
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:870*
+Compute the output shape of the layer.
+
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:450*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.time_series.xlstm_blocks`
+
+Compute the output shape of the layer.
+
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:981*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.time_series.temporal_fusion`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/time_series/temporal_fusion.py:380*
+*📁 src/dl_techniques/layers/time_series/temporal_fusion.py:381*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.time_series.mixed_sequential_block`
 
-Output shape is the same as the input shape.
+Compute the output shape, which is identical to the input shape.
 
-*📁 src/dl_techniques/layers/time_series/mixed_sequential_block.py:573*
-
-#### `compute_output_shape(self, input_shape)`
-**Module:** `layers.time_series.prism_blocks`
-
-Compute output shape.
-
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:110*
+*📁 src/dl_techniques/layers/time_series/mixed_sequential_block.py:544*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.time_series.prism_blocks`
 
-Compute output shape.
+Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:283*
-
-#### `compute_output_shape(self, input_shape)`
-**Module:** `layers.time_series.prism_blocks`
-
-Compute output shape.
-
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:509*
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:117*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.time_series.prism_blocks`
 
-Compute output shape.
+Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:860*
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:304*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.time_series.prism_blocks`
 
-Compute output shape.
+Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:1046*
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:549*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.time_series.prism_blocks`
+
+Compute the output shape of the layer.
+
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:915*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.time_series.prism_blocks`
+
+Compute the output shape of the layer.
+
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:1120*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.physics.approximate_lagrange_layer`
 
 Compute output shape for accelerations.
 
-*📁 src/dl_techniques/layers/physics/approximate_lagrange_layer.py:293*
+*📁 src/dl_techniques/layers/physics/approximate_lagrange_layer.py:224*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.physics.lagrange_layer`
 
 Compute output shape for accelerations.
 
-*📁 src/dl_techniques/layers/physics/lagrange_layer.py:252*
+*📁 src/dl_techniques/layers/physics/lagrange_layer.py:188*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.activations.relu_k`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/activations/relu_k.py:208*
+*📁 src/dl_techniques/layers/activations/relu_k.py:172*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.activations.hard_sigmoid`
 
 Compute output shape given input shape.
 
-*📁 src/dl_techniques/layers/activations/hard_sigmoid.py:169*
+*📁 src/dl_techniques/layers/activations/hard_sigmoid.py:123*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.activations.thresh_max`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/activations/thresh_max.py:228*
+*📁 src/dl_techniques/layers/activations/thresh_max.py:282*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.activations.basis_function`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/activations/basis_function.py:196*
+*📁 src/dl_techniques/layers/activations/basis_function.py:144*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.activations.differentiable_step`
 
-Compute the output shape of the layer. Since this is an element-wise operation, the output shape is identical to the input shape.
+Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/activations/differentiable_step.py:240*
+*📁 src/dl_techniques/layers/activations/differentiable_step.py:234*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.activations.expanded_activations`
+
+Compute output shape -- element-wise activation preserves shape.
+
+*📁 src/dl_techniques/layers/activations/expanded_activations.py:106*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.activations.probability_output`
 
 Compute output shape based on strategy.
 
-*📁 src/dl_techniques/layers/activations/probability_output.py:275*
+*📁 src/dl_techniques/layers/activations/probability_output.py:247*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.activations.routing_probabilities`
 
-Compute the output shape of the layer.
+Output shape: input shape with `axis` replaced by `output_dim`.
 
-*📁 src/dl_techniques/layers/activations/routing_probabilities.py:691*
+*📁 src/dl_techniques/layers/activations/routing_probabilities.py:802*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.activations.adaptive_softmax`
 
 Compute output shape of the layer.
 
-*📁 src/dl_techniques/layers/activations/adaptive_softmax.py:319*
+*📁 src/dl_techniques/layers/activations/adaptive_softmax.py:326*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.activations.monotonicity_layer`
 
-Output shape is the same as input shape.
+Compute output shape (same as input shape).
 
-*📁 src/dl_techniques/layers/activations/monotonicity_layer.py:570*
-
-#### `compute_output_shape(self, input_shape)`
-**Module:** `layers.activations.mish`
-
-Compute the output shape of the layer.
-
-*📁 src/dl_techniques/layers/activations/mish.py:220*
+*📁 src/dl_techniques/layers/activations/monotonicity_layer.py:544*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.activations.mish`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/activations/mish.py:393*
+*📁 src/dl_techniques/layers/activations/mish.py:179*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.activations.mish`
+
+Compute the output shape of the layer.
+
+*📁 src/dl_techniques/layers/activations/mish.py:312*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.activations.sparsemax`
 
 Compute output shape (same as input shape).
 
-*📁 src/dl_techniques/layers/activations/sparsemax.py:238*
+*📁 src/dl_techniques/layers/activations/sparsemax.py:282*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.activations.squash`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/activations/squash.py:203*
+*📁 src/dl_techniques/layers/activations/squash.py:187*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.activations.hard_swish`
 
 Compute output shape given input shape.
 
-*📁 src/dl_techniques/layers/activations/hard_swish.py:202*
+*📁 src/dl_techniques/layers/activations/hard_swish.py:126*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.activations.golu`
 
-Returns the output shape, which is identical to the input shape.
+Return the output shape, which is identical to the input shape.
 
-*📁 src/dl_techniques/layers/activations/golu.py:172*
+*📁 src/dl_techniques/layers/activations/golu.py:149*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.memory.mann`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/memory/mann.py:455*
+*📁 src/dl_techniques/layers/memory/mann.py:406*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.memory.baseline_ntm`
+
+Compute output shape.
+
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:411*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.memory.baseline_ntm`
+
+Compute output shape.
+
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:649*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.memory.baseline_ntm`
+
+Compute output shape.
+
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:823*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.memory.baseline_ntm`
+
+Compute output shape.
+
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:1212*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.memory.baseline_ntm`
+
+Compute output shape.
+
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:1454*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.memory.som_nd_soft_layer`
 
-Compute output tensor shape.
+Compute output tensor shape (same as input for reconstruction).
 
-*📁 src/dl_techniques/layers/memory/som_nd_soft_layer.py:853*
+*📁 src/dl_techniques/layers/memory/som_nd_soft_layer.py:752*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.memory.som_nd_layer`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/memory/som_nd_layer.py:512*
+*📁 src/dl_techniques/layers/memory/som_nd_layer.py:459*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.memory.ntm_interface`
+
+Compute output shape of the NTM layer.
+
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:808*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.geometric.point_cloud_autoencoder`
+
+Compute output shape.
+
+*📁 src/dl_techniques/layers/geometric/point_cloud_autoencoder.py:205*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.geometric.point_cloud_autoencoder`
+
+Compute output shape.
+
+*📁 src/dl_techniques/layers/geometric/point_cloud_autoencoder.py:348*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.geometric.supernode_pooling`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/geometric/supernode_pooling.py:424*
+*📁 src/dl_techniques/layers/geometric/supernode_pooling.py:408*
 
 #### `compute_output_shape(self, input_shape)`
-**Module:** `layers.geometric.fields.parallel_transport`
+**Module:** `layers.geometric.clifford_block`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/geometric/fields/parallel_transport.py:327*
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:241*
 
 #### `compute_output_shape(self, input_shape)`
-**Module:** `layers.geometric.fields.holonomy_layer`
+**Module:** `layers.geometric.clifford_block`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/geometric/fields/holonomy_layer.py:405*
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:440*
 
 #### `compute_output_shape(self, input_shape)`
-**Module:** `layers.geometric.fields.gauge_invariant_attention`
+**Module:** `layers.geometric.clifford_block`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/geometric/fields/gauge_invariant_attention.py:522*
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:787*
 
 #### `compute_output_shape(self, input_shape)`
-**Module:** `layers.geometric.fields.connection_layer`
+**Module:** `layers.geometric.clifford_block`
 
-Compute the output shape.
-
-*📁 src/dl_techniques/layers/geometric/fields/connection_layer.py:401*
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:1095*
 
 #### `compute_output_shape(self, input_shape)`
-**Module:** `layers.geometric.fields.manifold_stress`
-
-Compute output shapes.
-
-*📁 src/dl_techniques/layers/geometric/fields/manifold_stress.py:443*
-
-#### `compute_output_shape(self, input_shape)`
-**Module:** `layers.geometric.fields.holonomic_transformer`
+**Module:** `layers.geometric.clifford_block`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/geometric/fields/holonomic_transformer.py:484*
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:1545*
 
 #### `compute_output_shape(self, input_shape)`
-**Module:** `layers.geometric.fields.field_embedding`
+**Module:** `layers.geometric.clifford_block`
 
-Compute the output shapes.
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:2026*
 
-*📁 src/dl_techniques/layers/geometric/fields/field_embedding.py:304*
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.geometric.clifford_block`
+
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:2519*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.norms.zero_centered_rms_norm`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/norms/zero_centered_rms_norm.py:391*
+*📁 src/dl_techniques/layers/norms/zero_centered_rms_norm.py:286*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.norms.adaptive_band_rms`
 
 Compute output shape (same as input).
 
-*📁 src/dl_techniques/layers/norms/adaptive_band_rms.py:423*
+*📁 src/dl_techniques/layers/norms/adaptive_band_rms.py:404*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.norms.logit_norm`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/norms/logit_norm.py:248*
+*📁 src/dl_techniques/layers/norms/logit_norm.py:182*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.norms.band_rms`
 
 Compute the shape of output tensor.
 
-*📁 src/dl_techniques/layers/norms/band_rms.py:293*
+*📁 src/dl_techniques/layers/norms/band_rms.py:277*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.norms.global_response_norm`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/norms/global_response_norm.py:264*
+*📁 src/dl_techniques/layers/norms/global_response_norm.py:259*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.norms.band_logit_norm`
 
 Compute the shape of the output tensor.
 
-*📁 src/dl_techniques/layers/norms/band_logit_norm.py:167*
+*📁 src/dl_techniques/layers/norms/band_logit_norm.py:211*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.norms.max_logit_norm`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/norms/max_logit_norm.py:193*
+*📁 src/dl_techniques/layers/norms/max_logit_norm.py:153*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.norms.max_logit_norm`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/norms/max_logit_norm.py:404*
+*📁 src/dl_techniques/layers/norms/max_logit_norm.py:325*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.norms.max_logit_norm`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/norms/max_logit_norm.py:623*
+*📁 src/dl_techniques/layers/norms/max_logit_norm.py:495*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.norms.rms_norm`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/norms/rms_norm.py:348*
+*📁 src/dl_techniques/layers/norms/rms_norm.py:264*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.norms.zero_centered_band_rms_norm`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/norms/zero_centered_band_rms_norm.py:424*
+*📁 src/dl_techniques/layers/norms/zero_centered_band_rms_norm.py:322*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.norms.dynamic_tanh`
 
 Compute output shape (same as input shape).
 
-*📁 src/dl_techniques/layers/norms/dynamic_tanh.py:232*
+*📁 src/dl_techniques/layers/norms/dynamic_tanh.py:237*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.logic.arithmetic_operators`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/logic/arithmetic_operators.py:422*
+*📁 src/dl_techniques/layers/logic/arithmetic_operators.py:410*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.logic.logic_operators`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/logic/logic_operators.py:406*
+*📁 src/dl_techniques/layers/logic/logic_operators.py:399*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.logic.neural_circuit`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/logic/neural_circuit.py:287*
+*📁 src/dl_techniques/layers/logic/neural_circuit.py:285*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.logic.neural_circuit`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/logic/neural_circuit.py:490*
+*📁 src/dl_techniques/layers/logic/neural_circuit.py:494*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.moe.layer`
 
 Compute the output shape of the MoE layer.
 
-*📁 src/dl_techniques/layers/moe/layer.py:484*
+*📁 src/dl_techniques/layers/moe/layer.py:392*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.moe.experts`
 
 Compute the output shape of the expert.
 
-*📁 src/dl_techniques/layers/moe/experts.py:59*
+*📁 src/dl_techniques/layers/moe/experts.py:68*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.moe.experts`
 
 Compute output shape by delegating to the FFN block.
 
-*📁 src/dl_techniques/layers/moe/experts.py:182*
+*📁 src/dl_techniques/layers/moe/experts.py:162*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.moe.gating`
+
+Compute output shapes for (expert_weights, expert_indices, aux_info).
+
+*📁 src/dl_techniques/layers/moe/gating.py:268*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.moe.gating`
+
+Compute output shapes for (expert_weights, expert_indices, aux_info).
+
+*📁 src/dl_techniques/layers/moe/gating.py:482*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.moe.gating`
+
+Compute output shapes for (expert_weights, expert_indices, aux_info).
+
+*📁 src/dl_techniques/layers/moe/gating.py:640*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.fusion.multimodal_fusion`
 
 Compute the output shape for given input shapes.
 
-*📁 src/dl_techniques/layers/fusion/multimodal_fusion.py:938*
+*📁 src/dl_techniques/layers/fusion/multimodal_fusion.py:978*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.statistics.moving_std`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/statistics/moving_std.py:289*
+*📁 src/dl_techniques/layers/statistics/moving_std.py:213*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.statistics.residual_acf`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/statistics/residual_acf.py:458*
+*📁 src/dl_techniques/layers/statistics/residual_acf.py:325*
 
 #### `compute_output_shape(self, input_shapes)`
 **Module:** `layers.statistics.normalizing_flow`
 
 Compute output shape (same as data input shape).
 
-*📁 src/dl_techniques/layers/statistics/normalizing_flow.py:375*
+*📁 src/dl_techniques/layers/statistics/normalizing_flow.py:305*
 
 #### `compute_output_shape(self, input_shapes)`
 **Module:** `layers.statistics.normalizing_flow`
 
-Compute output shapes for the tuple (z, log_det_jacobian).
+Compute output shapes for ``(z, log_det_jacobian)``.
 
-*📁 src/dl_techniques/layers/statistics/normalizing_flow.py:771*
+*📁 src/dl_techniques/layers/statistics/normalizing_flow.py:571*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.statistics.invertible_kernel_pca`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:631*
+*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:558*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.statistics.scaler`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/statistics/scaler.py:609*
+*📁 src/dl_techniques/layers/statistics/scaler.py:405*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.statistics.deep_kernel_pca`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/statistics/deep_kernel_pca.py:647*
+*📁 src/dl_techniques/layers/statistics/deep_kernel_pca.py:603*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.statistics.mdn_layer`
 
-Computes the output shape of the layer.
+Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/statistics/mdn_layer.py:332*
+*📁 src/dl_techniques/layers/statistics/mdn_layer.py:320*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.graphs.simplified_hyperbolic_graph_convolutional_neural_layer`
 
 Compute output shape given input shape.
 
-*📁 src/dl_techniques/layers/graphs/simplified_hyperbolic_graph_convolutional_neural_layer.py:301*
+*📁 src/dl_techniques/layers/graphs/simplified_hyperbolic_graph_convolutional_neural_layer.py:257*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.graphs.graph_neural_network`
 
 Compute output shape based on aggregation type.
 
-*📁 src/dl_techniques/layers/graphs/graph_neural_network.py:537*
+*📁 src/dl_techniques/layers/graphs/graph_neural_network.py:503*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.graphs.entity_graph_refinement`
 
 Compute output tensor shapes for the three returned tensors.
 
-*📁 src/dl_techniques/layers/graphs/entity_graph_refinement.py:777*
+*📁 src/dl_techniques/layers/graphs/entity_graph_refinement.py:665*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.graphs.relational_graph_transformer_blocks`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:228*
+*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:183*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.graphs.relational_graph_transformer_blocks`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:575*
+*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:469*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.graphs.relational_graph_transformer_blocks`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:952*
+*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:759*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.graphs.fermi_diract_decoder`
 
 Compute output shape given input shapes.
 
-*📁 src/dl_techniques/layers/graphs/fermi_diract_decoder.py:216*
+*📁 src/dl_techniques/layers/graphs/fermi_diract_decoder.py:154*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.attention.channel_attention`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/attention/channel_attention.py:287*
+*📁 src/dl_techniques/layers/attention/channel_attention.py:267*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.attention.tripse_attention`
 
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:161*
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:198*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.attention.tripse_attention`
 
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:264*
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:331*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.attention.rpc_attention`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/attention/rpc_attention.py:555*
+*📁 src/dl_techniques/layers/attention/rpc_attention.py:449*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.attention.multi_head_attention`
 
-Compute output shape - same as input shape for self-attention.
+Compute output shape, same as input shape for self-attention.
 
-*📁 src/dl_techniques/layers/attention/multi_head_attention.py:235*
+*📁 src/dl_techniques/layers/attention/multi_head_attention.py:236*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.attention.shared_weights_cross_attention`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/attention/shared_weights_cross_attention.py:415*
+*📁 src/dl_techniques/layers/attention/shared_weights_cross_attention.py:388*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.attention.ring_attention`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/attention/ring_attention.py:589*
+*📁 src/dl_techniques/layers/attention/ring_attention.py:457*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.attention.perceiver_attention`
 
-Compute the output shape - same as query input shape.
+Compute the output shape (same as query input shape).
 
-*📁 src/dl_techniques/layers/attention/perceiver_attention.py:311*
+*📁 src/dl_techniques/layers/attention/perceiver_attention.py:218*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.attention.gated_attention`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/attention/gated_attention.py:579*
+*📁 src/dl_techniques/layers/attention/gated_attention.py:562*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.attention.spatial_attention`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/attention/spatial_attention.py:221*
+*📁 src/dl_techniques/layers/attention/spatial_attention.py:207*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.attention.performer_attention`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/attention/performer_attention.py:521*
+*📁 src/dl_techniques/layers/attention/performer_attention.py:416*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.attention.multi_head_cross_attention`
 
-Compute output shape - returns query input shape.
+Compute output shape, returns query input shape.
 
-*📁 src/dl_techniques/layers/attention/multi_head_cross_attention.py:579*
+*📁 src/dl_techniques/layers/attention/multi_head_cross_attention.py:552*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.attention.fnet_fourier_transform`
 
-Fourier transform preserves input shape.
+Compute the output shape (preserved from input).
 
-*📁 src/dl_techniques/layers/attention/fnet_fourier_transform.py:271*
+*📁 src/dl_techniques/layers/attention/fnet_fourier_transform.py:329*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.attention.window_attention`
 
-Compute the output shape, which is identical to the input shape.
+Compute the output shape (identical to the input shape).
 
-*📁 src/dl_techniques/layers/attention/window_attention.py:480*
+*📁 src/dl_techniques/layers/attention/window_attention.py:541*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.attention.capsule_routing_attention`
 
-Compute the output shape of the layer.
+Compute output shape, identical to input shape.
 
-*📁 src/dl_techniques/layers/attention/capsule_routing_attention.py:701*
+*📁 src/dl_techniques/layers/attention/capsule_routing_attention.py:637*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.attention.anchor_attention`
 
-Compute the output shape of the layer.
+Compute output shape, identical to input shape.
 
-*📁 src/dl_techniques/layers/attention/anchor_attention.py:607*
+*📁 src/dl_techniques/layers/attention/anchor_attention.py:509*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.attention.wave_field_attention`
+
+*📁 src/dl_techniques/layers/attention/wave_field_attention.py:571*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.attention.differential_attention`
 
-Compute the output shape of the layer.
+Compute output shape, same as input shape for attention layers.
 
-*📁 src/dl_techniques/layers/attention/differential_attention.py:402*
+*📁 src/dl_techniques/layers/attention/differential_attention.py:357*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.attention.hopfield_attention`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/attention/hopfield_attention.py:520*
+*📁 src/dl_techniques/layers/attention/hopfield_attention.py:538*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.attention.multi_head_latent_attention`
 
-Compute the output shape of the layer.
+Compute output shape of the layer.
 
-*📁 src/dl_techniques/layers/attention/multi_head_latent_attention.py:762*
+*📁 src/dl_techniques/layers/attention/multi_head_latent_attention.py:548*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.attention.group_query_attention`
 
-*📁 src/dl_techniques/layers/attention/group_query_attention.py:386*
+Compute output shape, same as input shape.
+
+*📁 src/dl_techniques/layers/attention/group_query_attention.py:437*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.attention.convolutional_block_attention`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/attention/convolutional_block_attention.py:274*
+*📁 src/dl_techniques/layers/attention/convolutional_block_attention.py:239*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.attention.non_local_attention`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/attention/non_local_attention.py:486*
+*📁 src/dl_techniques/layers/attention/non_local_attention.py:397*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.attention.progressive_focused_attention`
 
 Compute output shape of the layer.
 
-*📁 src/dl_techniques/layers/attention/progressive_focused_attention.py:1049*
+*📁 src/dl_techniques/layers/attention/progressive_focused_attention.py:798*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.tokenizers.bpe`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/tokenizers/bpe.py:354*
+*📁 src/dl_techniques/layers/tokenizers/bpe.py:365*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.tokenizers.bpe`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/tokenizers/bpe.py:440*
-
-#### `compute_output_shape(self, input_shape)`
-**Module:** `layers.ntm.baseline_ntm`
-
-Compute output shape.
-
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:359*
-
-#### `compute_output_shape(self, input_shape)`
-**Module:** `layers.ntm.baseline_ntm`
-
-Compute output shape.
-
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:597*
-
-#### `compute_output_shape(self, input_shape)`
-**Module:** `layers.ntm.baseline_ntm`
-
-Compute output shape.
-
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:771*
-
-#### `compute_output_shape(self, input_shape)`
-**Module:** `layers.ntm.baseline_ntm`
-
-Compute output shape.
-
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:1140*
-
-#### `compute_output_shape(self, input_shape)`
-**Module:** `layers.ntm.baseline_ntm`
-
-Compute output shape.
-
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:1376*
-
-#### `compute_output_shape(self, input_shape)`
-**Module:** `layers.ntm.ntm_interface`
-
-Compute output shape of the NTM layer.
-
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:780*
-
-#### `compute_output_shape(self, input_shape)`
-**Module:** `layers.ntm.base_layers`
-
-Compute output shape.
-
-*📁 src/dl_techniques/layers/ntm/base_layers.py:284*
-
-#### `compute_output_shape(self, input_shape)`
-**Module:** `layers.ntm.base_layers`
-
-Compute output shapes.
-
-*📁 src/dl_techniques/layers/ntm/base_layers.py:609*
-
-#### `compute_output_shape(self, input_shape)`
-**Module:** `layers.ntm.base_layers`
-
-Compute output shape.
-
-*📁 src/dl_techniques/layers/ntm/base_layers.py:906*
+*📁 src/dl_techniques/layers/tokenizers/bpe.py:466*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.ffn.residual_block`
 
 Compute output shape.
 
-*📁 src/dl_techniques/layers/ffn/residual_block.py:306*
+*📁 src/dl_techniques/layers/ffn/residual_block.py:295*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.ffn.counting_ffn`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/ffn/counting_ffn.py:402*
+*📁 src/dl_techniques/layers/ffn/counting_ffn.py:385*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.ffn.power_mlp_layer`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/ffn/power_mlp_layer.py:321*
+*📁 src/dl_techniques/layers/ffn/power_mlp_layer.py:312*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.ffn.diff_ffn`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/ffn/diff_ffn.py:416*
+*📁 src/dl_techniques/layers/ffn/diff_ffn.py:395*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.ffn.kan_linear`
+
+Compute output shape from input shape.
+
+*📁 src/dl_techniques/layers/ffn/kan_linear.py:412*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.ffn.gated_mlp`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/ffn/gated_mlp.py:358*
+*📁 src/dl_techniques/layers/ffn/gated_mlp.py:341*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.ffn.swiglu_ffn`
 
 Compute output shape (same as input shape for FFN).
 
-*📁 src/dl_techniques/layers/ffn/swiglu_ffn.py:384*
+*📁 src/dl_techniques/layers/ffn/swiglu_ffn.py:368*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.ffn.swin_mlp`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/ffn/swin_mlp.py:327*
+*📁 src/dl_techniques/layers/ffn/swin_mlp.py:304*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.ffn.mlp`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/ffn/mlp.py:307*
+*📁 src/dl_techniques/layers/ffn/mlp.py:308*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.ffn.glu_ffn`
 
 Compute output shape transformation.
 
-*📁 src/dl_techniques/layers/ffn/glu_ffn.py:365*
+*📁 src/dl_techniques/layers/ffn/glu_ffn.py:305*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.ffn.tversky_projection`
+
+Compute the output shape of the layer.
+
+*📁 src/dl_techniques/layers/ffn/tversky_projection.py:281*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.ffn.orthoglu_ffn`
 
-Computes the output shape of the layer.
+Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/ffn/orthoglu_ffn.py:259*
+*📁 src/dl_techniques/layers/ffn/orthoglu_ffn.py:274*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.ffn.geglu_ffn`
 
-Computes the output shape of the layer.
+Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/ffn/geglu_ffn.py:331*
+*📁 src/dl_techniques/layers/ffn/geglu_ffn.py:300*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.ffn.logic_ffn`
 
 Compute output shape given input shape.
 
-*📁 src/dl_techniques/layers/ffn/logic_ffn.py:344*
+*📁 src/dl_techniques/layers/ffn/logic_ffn.py:348*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.embedding.patch_embedding`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/embedding/patch_embedding.py:237*
+*📁 src/dl_techniques/layers/embedding/patch_embedding.py:251*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.embedding.patch_embedding`
 
 Compute output shape after patch embedding.
 
-*📁 src/dl_techniques/layers/embedding/patch_embedding.py:421*
+*📁 src/dl_techniques/layers/embedding/patch_embedding.py:446*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.embedding.hierarchical_codebook_embedding`
+
+*📁 src/dl_techniques/layers/embedding/hierarchical_codebook_embedding.py:266*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.embedding.continuous_rope_embedding`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/embedding/continuous_rope_embedding.py:271*
+*📁 src/dl_techniques/layers/embedding/continuous_rope_embedding.py:262*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.embedding.albert_factorized_embedding`
+
+*📁 src/dl_techniques/layers/embedding/albert_factorized_embedding.py:152*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `layers.embedding.modern_bert_embeddings`
+
+Compute output shape: ``(batch_size, sequence_length, hidden_size)``.
+
+*📁 src/dl_techniques/layers/embedding/modern_bert_embeddings.py:175*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.embedding.positional_embedding`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/embedding/positional_embedding.py:248*
+*📁 src/dl_techniques/layers/embedding/positional_embedding.py:250*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.embedding.bert_embeddings`
 
 Compute output shape given input shape.
 
-*📁 src/dl_techniques/layers/embedding/bert_embeddings.py:343*
+*📁 src/dl_techniques/layers/embedding/bert_embeddings.py:350*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.embedding.continuous_sin_cos_embedding`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/embedding/continuous_sin_cos_embedding.py:299*
+*📁 src/dl_techniques/layers/embedding/continuous_sin_cos_embedding.py:282*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.embedding.dual_rotary_position_embedding`
 
-Compute output shape - identical to input shape.
+Compute output shape (identical to input shape).
 
-*📁 src/dl_techniques/layers/embedding/dual_rotary_position_embedding.py:411*
+*📁 src/dl_techniques/layers/embedding/dual_rotary_position_embedding.py:364*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.embedding.rotary_position_embedding`
 
-Compute output shape - identical to input shape.
+Compute output shape (identical to input shape).
 
-*📁 src/dl_techniques/layers/embedding/rotary_position_embedding.py:410*
+*📁 src/dl_techniques/layers/embedding/rotary_position_embedding.py:375*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.embedding.positional_embedding_sine_2d`
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/layers/embedding/positional_embedding_sine_2d.py:201*
+*📁 src/dl_techniques/layers/embedding/positional_embedding_sine_2d.py:189*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.reasoning.hrm_reasoning_module`
 
 Compute output shape, which is the shape of the `hidden_states` input.
 
-*📁 src/dl_techniques/layers/reasoning/hrm_reasoning_module.py:206*
+*📁 src/dl_techniques/layers/reasoning/hrm_reasoning_module.py:238*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.reasoning.hrm_sparse_puzzle_embedding`
 
 Compute output shape by appending embedding dimension.
 
-*📁 src/dl_techniques/layers/reasoning/hrm_sparse_puzzle_embedding.py:259*
+*📁 src/dl_techniques/layers/reasoning/hrm_sparse_puzzle_embedding.py:202*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `layers.reasoning.hrm_reasoning_core`
 
 Compute output shapes for new_carry and outputs.
 
-*📁 src/dl_techniques/layers/reasoning/hrm_reasoning_core.py:651*
+*📁 src/dl_techniques/layers/reasoning/hrm_reasoning_core.py:565*
+
+#### `compute_output_spec(self, inputs)`
+**Module:** `layers.activations.routing_probabilities`
+
+Override the symbolic output dtype for D-005.
+
+*📁 src/dl_techniques/layers/activations/routing_probabilities.py:847*
 
 #### `compute_patch_ids(self, patch_lengths)`
 **Module:** `layers.blt_blocks`
 
 Convert patch lengths to patch IDs for each position.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:651*
+*📁 src/dl_techniques/layers/blt_blocks.py:618*
 
 #### `compute_random_features(self, inputs)`
 **Module:** `layers.statistics.invertible_kernel_pca`
 
 Compute Random Fourier Features for the input.
 
-*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:392*
+*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:334*
 
 #### `compute_reconstruction_error(self, inputs)`
 **Module:** `layers.statistics.invertible_kernel_pca`
 
 Compute reconstruction error for the inputs.
 
-*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:607*
+*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:536*
 
 #### `compute_separation_loss(self, confidence_threshold)`
 **Module:** `layers.experimental.band_rms_ood`
 
-Compute separation loss to encourage separation between high/low confidence samples.
+Compute separation loss between high/low confidence samples.
 
-*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:508*
+*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:448*
 
 #### `compute_shell_preference_loss(self, confidence_threshold)`
 **Module:** `layers.experimental.band_rms_ood`
 
-Compute shell preference loss to encourage high-confidence samples to outer shell.
+Compute shell preference loss for high-confidence samples.
 
-*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:477*
+*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:419*
 
 #### `compute_z_loss(gate_logits, z_loss_weight)`
 **Module:** `layers.moe.gating`
 
 Compute router z-loss for entropy regularization.
 
-*📁 src/dl_techniques/layers/moe/gating.py:630*
+*📁 src/dl_techniques/layers/moe/gating.py:704*
 
 #### `condition(i, state, outputs)`
 **Module:** `layers.gated_delta_net`
 
-*📁 src/dl_techniques/layers/gated_delta_net.py:423*
+*📁 src/dl_techniques/layers/gated_delta_net.py:429*
 
 #### `content_addressing(self, key, beta, memory)`
-**Module:** `layers.ntm.baseline_ntm`
+**Module:** `layers.memory.baseline_ntm`
 
 Compute content-based attention weights.
 
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:271*
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:323*
 
 #### `content_addressing(self, key, beta, memory)`
-**Module:** `layers.ntm.baseline_ntm`
+**Module:** `layers.memory.baseline_ntm`
 
 Compute content-based attention weights.
 
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:521*
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:573*
 
 #### `content_addressing(self, key, beta, memory)`
-**Module:** `layers.ntm.ntm_interface`
+**Module:** `layers.memory.ntm_interface`
 
 Compute content-based attention weights.
 
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:494*
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:492*
 
 #### `contrastive_divergence(self, visible_data)`
 **Module:** `layers.restricted_boltzmann_machine`
 
-Train RBM using Contrastive Divergence algorithm.
+Train the RBM using CD-k and update weights in-place.
 
-*📁 src/dl_techniques/layers/restricted_boltzmann_machine.py:443*
+*📁 src/dl_techniques/layers/restricted_boltzmann_machine.py:368*
 
 #### `conv2d_wrapper(input_layer, conv_params, bn_params, ln_params, dropout_params, dropout_2d_params, conv_type)`
 **Module:** `layers.conv2d_builder`
 
 Creates a wrapped convolution layer with optional normalization, activation, and regularization.
 
-*📁 src/dl_techniques/layers/conv2d_builder.py:247*
+*📁 src/dl_techniques/layers/conv2d_builder.py:246*
 
 #### `conv_output_length(input_length, kernel_size, padding, stride, dilation)`
 **Module:** `layers.dynamic_conv2d`
 
 Calculate output length for convolution dimension.
 
-*📁 src/dl_techniques/layers/dynamic_conv2d.py:479*
+*📁 src/dl_techniques/layers/dynamic_conv2d.py:394*
 
 #### `cosine_similarity(query, keys, epsilon)`
-**Module:** `layers.ntm.ntm_interface`
+**Module:** `layers.memory.ntm_interface`
 
 Compute cosine similarity between query and keys.
 
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:836*
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:864*
 
 #### `create_activation_from_config(config)`
 **Module:** `layers.activations.factory`
 
 Create an activation layer from a configuration dictionary.
 
-*📁 src/dl_techniques/layers/activations/factory.py:563*
+*📁 src/dl_techniques/layers/activations/factory.py:543*
 
 #### `create_activation_layer(activation_type, name)`
 **Module:** `layers.activations.factory`
 
 Factory function for creating activation layers with a unified interface.
 
-*📁 src/dl_techniques/layers/activations/factory.py:458*
+*📁 src/dl_techniques/layers/activations/factory.py:457*
 
 #### `create_adaptive_softmax_window_attention(dim, window_size, num_heads, partition_mode)`
 **Module:** `layers.attention.window_attention`
 
 Creates a window attention layer with adaptive temperature softmax.
 
-*📁 src/dl_techniques/layers/attention/window_attention.py:677*
+*📁 src/dl_techniques/layers/attention/window_attention.py:754*
 
 #### `create_attention_from_config(config)`
 **Module:** `layers.attention.factory`
 
 Create an attention layer from a configuration dictionary.
 
-*📁 src/dl_techniques/layers/attention/factory.py:999*
+*📁 src/dl_techniques/layers/attention/factory.py:898*
 
 #### `create_attention_layer(attention_type, name)`
 **Module:** `layers.attention.factory`
 
 Factory function for creating attention layers with unified interface and validation.
 
-*📁 src/dl_techniques/layers/attention/factory.py:872*
+*📁 src/dl_techniques/layers/attention/factory.py:820*
 
 #### `create_bert_encoder(vocab_size, embed_dim, depth, num_heads, max_seq_len)`
 **Module:** `layers.transformers.text_encoder`
 
 Create BERT-style encoder configuration.
 
-*📁 src/dl_techniques/layers/transformers/text_encoder.py:1078*
+*📁 src/dl_techniques/layers/transformers/text_encoder.py:926*
 
 #### `create_bpe_pipeline(texts, vocab_size, embedding_dim, max_length, do_lower_case, min_frequency)`
 **Module:** `layers.tokenizers.bpe`
 
 Create a complete BPE tokenization and embedding pipeline.
 
-*📁 src/dl_techniques/layers/tokenizers/bpe.py:469*
+*📁 src/dl_techniques/layers/tokenizers/bpe.py:492*
 
 #### `create_contextual_memory_model(config, include_downstream_modules)`
 **Module:** `layers.experimental.contextual_memory`
 
 Create a complete model with Contextual Memory Bank.
 
-*📁 src/dl_techniques/layers/experimental/contextual_memory.py:936*
+*📁 src/dl_techniques/layers/experimental/contextual_memory.py:886*
 
 #### `create_efficient_encoder(vocab_size, embed_dim, depth, num_heads, max_seq_len)`
 **Module:** `layers.transformers.text_encoder`
 
 Create efficient encoder for resource-constrained environments.
 
-*📁 src/dl_techniques/layers/transformers/text_encoder.py:1165*
+*📁 src/dl_techniques/layers/transformers/text_encoder.py:1013*
 
 #### `create_embedding_from_config(config)`
 **Module:** `layers.embedding.factory`
 
 Create an embedding layer from a configuration dictionary.
 
-*📁 src/dl_techniques/layers/embedding/factory.py:371*
+*📁 src/dl_techniques/layers/embedding/factory.py:325*
 
 #### `create_embedding_layer(embedding_type, name)`
 **Module:** `layers.embedding.factory`
 
 Factory function for creating embedding layers with a unified interface.
 
-*📁 src/dl_techniques/layers/embedding/factory.py:269*
+*📁 src/dl_techniques/layers/embedding/factory.py:246*
 
 #### `create_enhancement_head(task_type)`
 **Module:** `layers.vision_heads.factory`
 
 Create enhancement-specific heads (denoising, super-resolution, etc.).
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:890*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:1072*
 
 #### `create_evidence_supported_language_model(vocab_size, embed_dim, max_seq_len)`
 **Module:** `layers.experimental.hierarchical_evidence_llm`
 
 Create a complete evidence-supported language model.
 
-*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:902*
+*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:849*
 
 #### `create_expert(expert_type)`
 **Module:** `layers.moe.experts`
 
 Factory function to create FFN expert networks.
 
-*📁 src/dl_techniques/layers/moe/experts.py:210*
+*📁 src/dl_techniques/layers/moe/experts.py:190*
 
 #### `create_ffn_from_config(config)`
 **Module:** `layers.ffn.factory`
 
 Create FFN layer from configuration dictionary.
 
-*📁 src/dl_techniques/layers/ffn/factory.py:532*
+*📁 src/dl_techniques/layers/ffn/factory.py:549*
 
 #### `create_ffn_layer(ffn_type, name)`
 **Module:** `layers.ffn.factory`
 
 Factory function for creating FFN layers with unified interface.
 
-*📁 src/dl_techniques/layers/ffn/factory.py:420*
+*📁 src/dl_techniques/layers/ffn/factory.py:458*
 
 #### `create_ffn_moe(num_experts, ffn_config, top_k, gating_type, aux_loss_weight)`
 **Module:** `layers.moe.layer`
 
 Convenience function to create FFN-based MoE layers.
 
-*📁 src/dl_techniques/layers/moe/layer.py:533*
-
-#### `create_field_layer(layer_type, name)`
-**Module:** `layers.geometric.fields`
-
-Factory function to create field-based layers.
-
-*📁 src/dl_techniques/layers/geometric/fields/__init__.py:185*
-
-#### `create_field_layer_from_config(config)`
-**Module:** `layers.geometric.fields`
-
-Create a field layer from a configuration dictionary.
-
-*📁 src/dl_techniques/layers/geometric/fields/__init__.py:260*
+*📁 src/dl_techniques/layers/moe/layer.py:451*
 
 #### `create_gating(gating_type, num_experts)`
 **Module:** `layers.moe.gating`
 
 Factory function to create gating networks.
 
-*📁 src/dl_techniques/layers/moe/gating.py:657*
+*📁 src/dl_techniques/layers/moe/gating.py:731*
 
 #### `create_grid_window_attention(dim, window_size, num_heads)`
 **Module:** `layers.attention.window_attention`
 
 Creates a standard spatial window attention layer (Swin-style).
 
-*📁 src/dl_techniques/layers/attention/window_attention.py:560*
+*📁 src/dl_techniques/layers/attention/window_attention.py:637*
 
 #### `create_kan_key_window_attention(dim, window_size, num_heads, partition_mode)`
 **Module:** `layers.attention.window_attention`
 
 Creates a window attention layer with a non-linear KAN Key projection.
 
-*📁 src/dl_techniques/layers/attention/window_attention.py:635*
+*📁 src/dl_techniques/layers/attention/window_attention.py:712*
 
 #### `create_logic_ffn_regularized(output_dim, logic_dim, l2_reg)`
 **Module:** `layers.ffn.logic_ffn`
 
 Create a LogicFFN layer with L2 regularization.
 
-*📁 src/dl_techniques/layers/ffn/logic_ffn.py:404*
+*📁 src/dl_techniques/layers/ffn/logic_ffn.py:407*
 
 #### `create_logic_ffn_standard(output_dim, logic_dim)`
 **Module:** `layers.ffn.logic_ffn`
 
 Create a standard LogicFFN layer with recommended settings.
 
-*📁 src/dl_techniques/layers/ffn/logic_ffn.py:386*
+*📁 src/dl_techniques/layers/ffn/logic_ffn.py:389*
+
+#### `create_mann(memory_locations, memory_dim, controller_units, num_read_heads, num_write_heads, controller_type, shift_range, return_sequences, return_state)`
+**Module:** `layers.memory.factory`
+
+Construct a Memory-Augmented Neural Network as a configured `NeuralTuringMachine`.
+
+*📁 src/dl_techniques/layers/memory/factory.py:39*
 
 #### `create_manokhin_compliant_model(input_shape, forecast_length, hidden_units, gate_hidden_units, gate_activation)`
 **Module:** `layers.time_series.forecasting_layers`
 
 Create a model that structurally enforces Manokhin's forecasting principles.
 
-*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:514*
+*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:603*
 
 #### `create_modern_encoder(vocab_size, embed_dim, depth, num_heads, max_seq_len)`
 **Module:** `layers.transformers.text_encoder`
 
 Create modern encoder with advanced components.
 
-*📁 src/dl_techniques/layers/transformers/text_encoder.py:1136*
+*📁 src/dl_techniques/layers/transformers/text_encoder.py:984*
 
 #### `create_multi_task_head(task_configuration)`
 **Module:** `layers.vision_heads.factory`
 
 Create a multi-task head from task configuration.
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:961*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:1143*
 
 #### `create_multi_task_nlp_head(task_configs, input_dim)`
 **Module:** `layers.nlp_heads.factory`
 
 Create a multi-task NLP head from task configurations.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:1407*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:1412*
 
 #### `create_multi_task_vlm_head(task_configs)`
 **Module:** `layers.vlm_heads.factory`
 
-Creates a multi-task VLM head from task configurations.
+Create a multi-task VLM head from task configurations.
 
-*📁 src/dl_techniques/layers/vlm_heads/factory.py:679*
+*📁 src/dl_techniques/layers/vlm_heads/factory.py:867*
 
 #### `create_nlp_head(task_config, input_dim)`
 **Module:** `layers.nlp_heads.factory`
 
 Factory function to create NLP task heads.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:1358*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:1381*
 
 #### `create_normalization_from_config(config)`
 **Module:** `layers.norms.factory`
 
 Create a normalization layer from a configuration dictionary.
 
-*📁 src/dl_techniques/layers/norms/factory.py:465*
+*📁 src/dl_techniques/layers/norms/factory.py:337*
 
 #### `create_normalization_layer(normalization_type, name, epsilon)`
 **Module:** `layers.norms.factory`
 
 Create a normalization layer based on the specified type with customizable parameters.
 
-*📁 src/dl_techniques/layers/norms/factory.py:43*
+*📁 src/dl_techniques/layers/norms/factory.py:45*
 
 #### `create_ntm(memory_size, memory_dim, output_dim, controller_dim, controller_type, num_read_heads, num_write_heads, shift_range, return_sequences, return_state)`
-**Module:** `layers.ntm.baseline_ntm`
+**Module:** `layers.memory.baseline_ntm`
 
 Factory function to create a Neural Turing Machine layer.
 
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:1434*
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:1512*
 
 #### `create_roberta_encoder(vocab_size, embed_dim, depth, num_heads, max_seq_len)`
 **Module:** `layers.transformers.text_encoder`
 
 Create RoBERTa-style encoder configuration.
 
-*📁 src/dl_techniques/layers/transformers/text_encoder.py:1107*
+*📁 src/dl_techniques/layers/transformers/text_encoder.py:955*
 
 #### `create_siglip_encoder(img_size, patch_size, embed_dim, depth, num_heads)`
 **Module:** `layers.transformers.vision_encoder`
 
 Create SigLIP-style encoder configuration.
 
-*📁 src/dl_techniques/layers/transformers/vision_encoder.py:947*
+*📁 src/dl_techniques/layers/transformers/vision_encoder.py:819*
+
+#### `create_som_2d(map_size, input_dim)`
+**Module:** `layers.memory.factory`
+
+Construct a 2D Self-Organizing Map layer.
+
+*📁 src/dl_techniques/layers/memory/factory.py:102*
 
 #### `create_sparse_autoencoder(d_input, d_latent, variant, expansion_factor)`
 **Module:** `layers.sparse_autoencoder`
 
 Factory function to create Sparse Autoencoder with common configurations.
 
-*📁 src/dl_techniques/layers/sparse_autoencoder.py:959*
+*📁 src/dl_techniques/layers/sparse_autoencoder.py:823*
 
 #### `create_text_encoder(vocab_size, embed_dim, depth, num_heads, max_seq_len, embedding_type, positional_type, attention_type, normalization_type, normalization_position, ffn_type)`
 **Module:** `layers.transformers.text_encoder`
 
 Factory function to create a TextEncoder with validated parameters.
 
-*📁 src/dl_techniques/layers/transformers/text_encoder.py:981*
+*📁 src/dl_techniques/layers/transformers/text_encoder.py:845*
 
 #### `create_vision_encoder(img_size, patch_size, embed_dim, depth, num_heads, mlp_ratio, patch_embed_type, attention_type, normalization_type, normalization_position, ffn_type, use_cls_token, output_mode, dropout)`
 **Module:** `layers.transformers.vision_encoder`
 
 Factory function to create a VisionEncoder with validated parameters.
 
-*📁 src/dl_techniques/layers/transformers/vision_encoder.py:819*
+*📁 src/dl_techniques/layers/transformers/vision_encoder.py:704*
 
 #### `create_vision_head(task_type)`
 **Module:** `layers.vision_heads.factory`
 
-Factory function to create vision_heads task heads.
+Factory function to create vision task heads.
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:809*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:1017*
 
 #### `create_vit_encoder(img_size, patch_size, embed_dim, depth, num_heads)`
 **Module:** `layers.transformers.vision_encoder`
 
 Create standard ViT encoder configuration.
 
-*📁 src/dl_techniques/layers/transformers/vision_encoder.py:922*
+*📁 src/dl_techniques/layers/transformers/vision_encoder.py:794*
 
 #### `create_vlm_head(task_config)`
 **Module:** `layers.vlm_heads.factory`
 
 Factory function to create VLM task heads.
 
-*📁 src/dl_techniques/layers/vlm_heads/factory.py:658*
+*📁 src/dl_techniques/layers/vlm_heads/factory.py:847*
 
 #### `create_zigzag_window_attention(dim, window_size, num_heads)`
 **Module:** `layers.attention.window_attention`
 
 Creates a window attention layer with zigzag partitioning.
 
-*📁 src/dl_techniques/layers/attention/window_attention.py:597*
+*📁 src/dl_techniques/layers/attention/window_attention.py:674*
 
 #### `curvature(self)`
 **Module:** `layers.graphs.simplified_hyperbolic_graph_convolutional_neural_layer`
 
 Get current curvature value c > 0.
 
-*📁 src/dl_techniques/layers/graphs/simplified_hyperbolic_graph_convolutional_neural_layer.py:229*
+*📁 src/dl_techniques/layers/graphs/simplified_hyperbolic_graph_convolutional_neural_layer.py:189*
 
 #### `decode(self, latents)`
 **Module:** `layers.sparse_autoencoder`
 
 Decode sparse latents back to input space.
 
-*📁 src/dl_techniques/layers/sparse_autoencoder.py:657*
+*📁 src/dl_techniques/layers/sparse_autoencoder.py:557*
 
 #### `decode_tokens(self, token_ids)`
 **Module:** `layers.tokenizers.bpe`
 
 Decode token IDs back to text.
 
-*📁 src/dl_techniques/layers/tokenizers/bpe.py:329*
+*📁 src/dl_techniques/layers/tokenizers/bpe.py:342*
 
 #### `delta_rule_update(self, q, k, v, alpha, beta, training)`
 **Module:** `layers.gated_delta_net`
 
-Apply gated delta rule update using `keras.ops.while_loop`.
+Apply gated delta rule update using ``keras.ops.while_loop``.
 
-*📁 src/dl_techniques/layers/gated_delta_net.py:403*
+*📁 src/dl_techniques/layers/gated_delta_net.py:393*
 
 #### `denormalize(self, scaled_inputs)`
 **Module:** `layers.statistics.scaler`
 
 Apply denormalization (alias for inverse_transform).
 
-*📁 src/dl_techniques/layers/statistics/scaler.py:520*
+*📁 src/dl_techniques/layers/statistics/scaler.py:371*
 
 #### `do_interpolate()`
 **Module:** `layers.time_series.prism_blocks`
 
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:428*
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:468*
 
 #### `downsample(input_layer, downsample_type, conv_params, bn_params, ln_params)`
 **Module:** `layers.downsample`
 
-Applies downsampling operation to the input layer based on specified strategy.
+Apply downsampling operation to the input layer based on specified strategy.
 
-*📁 src/dl_techniques/layers/downsample.py:53*
+*📁 src/dl_techniques/layers/downsample.py:40*
 
 #### `elu_plus_one_plus_epsilon(x)`
 **Module:** `layers.activations.expanded_activations`
 
 Enhanced ELU activation to ensure positive values for rate parameters.
 
-*📁 src/dl_techniques/layers/activations/expanded_activations.py:522*
+*📁 src/dl_techniques/layers/activations/expanded_activations.py:509*
 
 #### `empty_carry(self, batch_size)`
 **Module:** `layers.blt_core`
 
 Create empty carry state for byte-level reasoning.
 
-*📁 src/dl_techniques/layers/blt_core.py:423*
+*📁 src/dl_techniques/layers/blt_core.py:490*
 
 #### `empty_carry(self, batch_size)`
 **Module:** `layers.reasoning.hrm_reasoning_core`
 
 Create empty carry state for initialization.
 
-*📁 src/dl_techniques/layers/reasoning/hrm_reasoning_core.py:537*
+*📁 src/dl_techniques/layers/reasoning/hrm_reasoning_core.py:450*
 
 #### `encode(self, inputs, training)`
 **Module:** `layers.sparse_autoencoder`
 
 Encode inputs to pre-activation latent space.
 
-*📁 src/dl_techniques/layers/sparse_autoencoder.py:362*
+*📁 src/dl_techniques/layers/sparse_autoencoder.py:306*
 
 #### `estimate_confidence(self, features, training)`
 **Module:** `layers.experimental.band_rms_ood`
 
 Estimate confidence based on the specified method.
 
-*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:234*
+*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:199*
 
 #### `estimate_noise_level(self, inputs)`
 **Module:** `layers.statistics.invertible_kernel_pca`
 
 Estimate noise level in the input.
 
-*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:755*
+*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:702*
 
 #### `evaluate_detection(self, id_data, ood_data)`
 **Module:** `layers.experimental.band_rms_ood`
 
 Evaluate OOD detection performance.
 
-*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:818*
+*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:758*
 
 #### `extract_components(self, kernel_matrix, projection_matrix, eigenvalues, num_components, training)`
 **Module:** `layers.statistics.deep_kernel_pca`
 
 Extract principal components using kernel PCA with eigendecomposition.
 
-*📁 src/dl_techniques/layers/statistics/deep_kernel_pca.py:489*
+*📁 src/dl_techniques/layers/statistics/deep_kernel_pca.py:444*
 
 #### `extract_hierarchies(graph, entity_mask, threshold)`
 **Module:** `layers.graphs.entity_graph_refinement`
 
 Extract hierarchical relationships from the learned entity graph.
 
-*📁 src/dl_techniques/layers/graphs/entity_graph_refinement.py:893*
+*📁 src/dl_techniques/layers/graphs/entity_graph_refinement.py:766*
 
 #### `filter_by_quality_threshold(self, inputs, quality_threshold, quality_measure)`
 **Module:** `layers.neuro_grid`
 
-Intelligently filter and partition input data based on configurable quality thresholds.
+Partition inputs into high- and low-quality subsets by threshold.
 
-*📁 src/dl_techniques/layers/neuro_grid.py:1403*
+*📁 src/dl_techniques/layers/neuro_grid.py:814*
 
 #### `find_best_matching_units(self, inputs)`
 **Module:** `layers.neuro_grid`
 
-Find Best Matching Units (BMUs) for given inputs in SOM terminology.
+Find Best Matching Units (BMUs) for given inputs.
 
-*📁 src/dl_techniques/layers/neuro_grid.py:927*
+*📁 src/dl_techniques/layers/neuro_grid.py:578*
 
 #### `fit_threshold(self, id_data, fpr_target, batch_size)`
 **Module:** `layers.experimental.band_rms_ood`
 
 Fit detection threshold based on in-distribution data.
 
-*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:754*
+*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:696*
 
 #### `fit_transform(self, inputs)`
 **Module:** `layers.statistics.invertible_kernel_pca`
 
 Fit the model and transform inputs in one step.
 
-*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:588*
+*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:519*
 
 #### `forward(self, z, context)`
 **Module:** `layers.statistics.normalizing_flow`
 
-Forward transformation z → y for sampling.
+Forward transformation z to y for sampling.
 
-*📁 src/dl_techniques/layers/statistics/normalizing_flow.py:302*
+*📁 src/dl_techniques/layers/statistics/normalizing_flow.py:236*
 
 #### `from_config(cls, config)`
 **Module:** `layers.fnet_encoder_block`
 
 Create layer from configuration dictionary.
 
-*📁 src/dl_techniques/layers/fnet_encoder_block.py:313*
+*📁 src/dl_techniques/layers/fnet_encoder_block.py:284*
 
 #### `from_config(cls, config)`
 **Module:** `layers.haar_wavelet_decomposition`
 
 Create layer from configuration dictionary.
 
-*📁 src/dl_techniques/layers/haar_wavelet_decomposition.py:486*
+*📁 src/dl_techniques/layers/haar_wavelet_decomposition.py:477*
 
 #### `from_config(cls, config)`
 **Module:** `layers.convnext_v2_block`
 
 Create layer from configuration dictionary.
 
-*📁 src/dl_techniques/layers/convnext_v2_block.py:487*
+*📁 src/dl_techniques/layers/convnext_v2_block.py:446*
 
 #### `from_config(cls, config)`
 **Module:** `layers.convnext_v1_block`
 
 Create layer from configuration dictionary.
 
-*📁 src/dl_techniques/layers/convnext_v1_block.py:458*
+*📁 src/dl_techniques/layers/convnext_v1_block.py:423*
 
 #### `from_config(cls, config)`
 **Module:** `layers.bitlinear_layer`
 
 Create layer instance from configuration.
 
-*📁 src/dl_techniques/layers/bitlinear_layer.py:538*
+*📁 src/dl_techniques/layers/bitlinear_layer.py:533*
 
 #### `from_config(cls, config)`
 **Module:** `layers.selective_gradient_mask`
 
-Create layer from configuration dictionary.
+Create layer from a configuration dictionary.
 
-*📁 src/dl_techniques/layers/selective_gradient_mask.py:267*
+*📁 src/dl_techniques/layers/selective_gradient_mask.py:238*
 
 #### `from_config(cls, config)`
 **Module:** `layers.sparse_autoencoder`
 
 Create layer from configuration dictionary.
 
-*📁 src/dl_techniques/layers/sparse_autoencoder.py:928*
+*📁 src/dl_techniques/layers/sparse_autoencoder.py:797*
 
 #### `from_config(cls, config)`
 **Module:** `layers.rigid_simplex_layer`
 
-Create layer from configuration.
+Create a layer instance from a configuration dictionary.
 
-*📁 src/dl_techniques/layers/rigid_simplex_layer.py:404*
+*📁 src/dl_techniques/layers/rigid_simplex_layer.py:378*
 
 #### `from_config(cls, config)`
 **Module:** `layers.router`
 
-Creates a layer from its config, properly deserializing sub-layers.
+Create a layer from its config, deserialising sub-layers.
 
-*📁 src/dl_techniques/layers/router.py:364*
+*📁 src/dl_techniques/layers/router.py:342*
 
 #### `from_config(cls, config)`
 **Module:** `layers.transformers.progressive_focused_transformer`
 
-Create layer from configuration dictionary.
+Create layer from a configuration dictionary.
 
-*📁 src/dl_techniques/layers/transformers/progressive_focused_transformer.py:846*
-
-#### `from_config(cls, config)`
-**Module:** `layers.experimental.field_embeddings`
-
-Create layer from configuration dictionary.
-
-*📁 src/dl_techniques/layers/experimental/field_embeddings.py:261*
+*📁 src/dl_techniques/layers/transformers/progressive_focused_transformer.py:529*
 
 #### `from_config(cls, config)`
 **Module:** `layers.experimental.contextual_memory`
 
 Create layer from configuration.
 
-*📁 src/dl_techniques/layers/experimental/contextual_memory.py:929*
+*📁 src/dl_techniques/layers/experimental/contextual_memory.py:879*
 
 #### `from_config(cls, config)`
 **Module:** `layers.nlp_heads.factory`
 
 Create layer from configuration.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:315*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:328*
 
 #### `from_config(cls, config)`
 **Module:** `layers.nlp_heads.factory`
 
 Create layer from configuration.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:1287*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:1303*
 
 #### `from_config(cls, config)`
 **Module:** `layers.activations.probability_output`
 
 Reconstruct the layer from configuration.
 
-*📁 src/dl_techniques/layers/activations/probability_output.py:302*
+*📁 src/dl_techniques/layers/activations/probability_output.py:273*
 
 #### `from_config(cls, config)`
 **Module:** `layers.memory.som_2d_layer`
 
 Create layer instance from configuration dictionary.
 
-*📁 src/dl_techniques/layers/memory/som_2d_layer.py:399*
+*📁 src/dl_techniques/layers/memory/som_2d_layer.py:289*
+
+#### `from_config(cls, config)`
+**Module:** `layers.memory.baseline_ntm`
+
+Create layer from configuration.
+
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:1247*
+
+#### `from_config(cls, config)`
+**Module:** `layers.memory.baseline_ntm`
+
+Create layer from configuration.
+
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:1495*
 
 #### `from_config(cls, config)`
 **Module:** `layers.memory.som_nd_layer`
 
 Create a layer from its configuration.
 
-*📁 src/dl_techniques/layers/memory/som_nd_layer.py:584*
+*📁 src/dl_techniques/layers/memory/som_nd_layer.py:527*
+
+#### `from_config(cls, config)`
+**Module:** `layers.memory.ntm_interface`
+
+Create layer from configuration.
+
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:843*
 
 #### `from_config(cls, config)`
 **Module:** `layers.norms.band_logit_norm`
 
 Create a layer instance from its configuration.
 
-*📁 src/dl_techniques/layers/norms/band_logit_norm.py:194*
+*📁 src/dl_techniques/layers/norms/band_logit_norm.py:237*
 
 #### `from_config(cls, config)`
 **Module:** `layers.moe.layer`
 
 Create layer from configuration.
 
-*📁 src/dl_techniques/layers/moe/layer.py:526*
+*📁 src/dl_techniques/layers/moe/layer.py:434*
 
 #### `from_config(cls, config)`
 **Module:** `layers.fusion.multimodal_fusion`
 
 Create layer from configuration.
 
-*📁 src/dl_techniques/layers/fusion/multimodal_fusion.py:988*
+*📁 src/dl_techniques/layers/fusion/multimodal_fusion.py:1028*
 
 #### `from_config(cls, config)`
 **Module:** `layers.attention.window_attention`
 
-Create a layer from its configuration.
+Create a layer from its configuration dictionary.
 
-*📁 src/dl_techniques/layers/attention/window_attention.py:523*
+*📁 src/dl_techniques/layers/attention/window_attention.py:594*
 
 #### `from_config(cls, config)`
 **Module:** `layers.attention.progressive_focused_attention`
 
 Create layer from configuration dictionary.
 
-*📁 src/dl_techniques/layers/attention/progressive_focused_attention.py:1025*
+*📁 src/dl_techniques/layers/attention/progressive_focused_attention.py:779*
 
 #### `from_config(cls, config)`
-**Module:** `layers.ntm.baseline_ntm`
+**Module:** `layers.embedding.hierarchical_codebook_embedding`
 
-Create layer from configuration.
-
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:1175*
+*📁 src/dl_techniques/layers/embedding/hierarchical_codebook_embedding.py:289*
 
 #### `from_config(cls, config)`
-**Module:** `layers.ntm.baseline_ntm`
+**Module:** `layers.embedding.albert_factorized_embedding`
 
-Create layer from configuration.
-
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:1417*
-
-#### `from_config(cls, config)`
-**Module:** `layers.ntm.ntm_interface`
-
-Create layer from configuration.
-
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:815*
+*📁 src/dl_techniques/layers/embedding/albert_factorized_embedding.py:176*
 
 #### `from_config(cls, config)`
 **Module:** `layers.embedding.bert_embeddings`
 
 Create layer from configuration.
 
-*📁 src/dl_techniques/layers/embedding/bert_embeddings.py:363*
+*📁 src/dl_techniques/layers/embedding/bert_embeddings.py:380*
+
+#### `from_dict(cls, config_dict)`
+**Module:** `layers.memory.ntm_interface`
+
+Create configuration from dictionary.
+
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:288*
 
 #### `from_dict(cls, config_dict, validate_compatibility)`
 **Module:** `layers.vision_heads.task_types`
 
 Create TaskConfiguration from dictionary.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:660*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:621*
 
 #### `from_dict(cls, config_dict)`
 **Module:** `layers.moe.config`
 
-Create configuration from dictionary.
+Create configuration from dictionary (does not mutate input).
 
-*📁 src/dl_techniques/layers/moe/config.py:263*
-
-#### `from_dict(cls, config_dict)`
-**Module:** `layers.ntm.ntm_interface`
-
-Create configuration from dictionary.
-
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:290*
+*📁 src/dl_techniques/layers/moe/config.py:257*
 
 #### `from_string(type_str)`
 **Module:** `layers.layer_scale`
@@ -19917,7 +21062,7 @@ Convert string to MultiplierType enum.
 #### `from_string(type_str)`
 **Module:** `layers.conv2d_builder`
 
-*📁 src/dl_techniques/layers/conv2d_builder.py:227*
+*📁 src/dl_techniques/layers/conv2d_builder.py:226*
 
 #### `from_string(cls, task_str)`
 **Module:** `layers.nlp_heads.task_types`
@@ -19931,7 +21076,7 @@ Create NLPTaskType from string value.
 
 Create TaskType from string value.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:386*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:365*
 
 #### `from_string(cls, task_str)`
 **Module:** `layers.vlm_heads.task_types`
@@ -19945,126 +21090,152 @@ Create VLMTaskType from string value.
 
 Create list of TaskTypes from list of strings.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:415*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:387*
 
 #### `from_strings(cls, task_strings, validate_compatibility)`
 **Module:** `layers.vision_heads.task_types`
 
 Create TaskConfiguration from list of task name strings.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:689*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:642*
 
 #### `gamma(self)`
 **Module:** `layers.radial_basis_function`
 
 Effective positive gamma values via softplus transformation.
 
-*📁 src/dl_techniques/layers/radial_basis_function.py:186*
+*📁 src/dl_techniques/layers/radial_basis_function.py:212*
 
 #### `gaussian_pyramid(inputs, levels, kernel_size, sigma, scale_factor, padding, data_format, name)`
 **Module:** `layers.gaussian_pyramid`
 
 Functional interface for Gaussian pyramid decomposition.
 
-*📁 src/dl_techniques/layers/gaussian_pyramid.py:347*
+*📁 src/dl_techniques/layers/gaussian_pyramid.py:296*
 
 #### `get_acf_summary(self)`
 **Module:** `layers.statistics.residual_acf`
 
-Get comprehensive summary statistics of the most recent ACF computation.
+Get summary statistics of the most recent ACF computation.
 
-*📁 src/dl_techniques/layers/statistics/residual_acf.py:407*
+*📁 src/dl_techniques/layers/statistics/residual_acf.py:293*
 
 #### `get_activation(activation_name)`
 **Module:** `layers.activations.expanded_activations`
 
 Factory function to create an activation layer by name.
 
-*📁 src/dl_techniques/layers/activations/expanded_activations.py:588*
+*📁 src/dl_techniques/layers/activations/expanded_activations.py:571*
 
 #### `get_activation_info()`
 **Module:** `layers.activations.factory`
 
 Get comprehensive information about all available activation layer types.
 
-*📁 src/dl_techniques/layers/activations/factory.py:315*
+*📁 src/dl_techniques/layers/activations/factory.py:319*
 
 #### `get_addressing_probabilities(self, inputs)`
 **Module:** `layers.neuro_grid`
 
-Get the addressing probabilities for analysis and interpretation.
+Get addressing probabilities for analysis and interpretation.
 
-*📁 src/dl_techniques/layers/neuro_grid.py:816*
+*📁 src/dl_techniques/layers/neuro_grid.py:494*
 
 #### `get_all_configurations(cls)`
 **Module:** `layers.vision_heads.task_types`
 
 Get all predefined configurations.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:802*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:752*
 
 #### `get_all_weights(self)`
 **Module:** `layers.experimental.hierarchical_memory_system`
 
 Get weight maps for all hierarchy levels.
 
-*📁 src/dl_techniques/layers/experimental/hierarchical_memory_system.py:323*
+*📁 src/dl_techniques/layers/experimental/hierarchical_memory_system.py:302*
 
 #### `get_attention_info()`
 **Module:** `layers.attention.factory`
 
 Retrieve comprehensive information about all available attention layer types.
 
-*📁 src/dl_techniques/layers/attention/factory.py:724*
+*📁 src/dl_techniques/layers/attention/factory.py:714*
 
 #### `get_attention_requirements(attention_type)`
 **Module:** `layers.attention.factory`
 
 Get parameter requirements for a specific attention layer type.
 
-*📁 src/dl_techniques/layers/attention/factory.py:1096*
+*📁 src/dl_techniques/layers/attention/factory.py:946*
 
 #### `get_build_config(self)`
 **Module:** `layers.modality_projection`
 
 Get the config needed to build the layer from a config.
 
-*📁 src/dl_techniques/layers/modality_projection.py:295*
+*📁 src/dl_techniques/layers/modality_projection.py:317*
+
+#### `get_build_config(self)`
+**Module:** `layers.activations.routing_probabilities`
+
+Return the input shape so the layer can rebuild on load.
+
+*📁 src/dl_techniques/layers/activations/routing_probabilities.py:875*
 
 #### `get_build_config(self)`
 **Module:** `layers.memory.som_nd_layer`
 
 Get build configuration for the layer.
 
-*📁 src/dl_techniques/layers/memory/som_nd_layer.py:558*
+*📁 src/dl_techniques/layers/memory/som_nd_layer.py:505*
+
+#### `get_build_config(self)`
+**Module:** `layers.geometric.clifford_block`
+
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:193*
+
+#### `get_build_config(self)`
+**Module:** `layers.moe.layer`
+
+Get build configuration for weight restoration.
+
+*📁 src/dl_techniques/layers/moe/layer.py:440*
 
 #### `get_build_config(self)`
 **Module:** `layers.moe.experts`
 
 Get build configuration for serialization.
 
-*📁 src/dl_techniques/layers/moe/experts.py:71*
+*📁 src/dl_techniques/layers/moe/experts.py:79*
+
+#### `get_build_config(self)`
+**Module:** `layers.attention.multi_head_cross_attention`
+
+Capture build state of lazy-built children for save/load.
+
+*📁 src/dl_techniques/layers/attention/multi_head_cross_attention.py:573*
 
 #### `get_category(self)`
 **Module:** `layers.vision_heads.task_types`
 
 Get the category this task belongs to.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:453*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:411*
 
 #### `get_cls_features(self, inputs, training)`
 **Module:** `layers.transformers.vision_encoder`
 
-Extract CLS token features for classification tasks.
+Extract CLS token features for classification.
 
-*📁 src/dl_techniques/layers/transformers/vision_encoder.py:685*
+*📁 src/dl_techniques/layers/transformers/vision_encoder.py:580*
 
 #### `get_codebook_indices(self, inputs)`
 **Module:** `layers.vector_quantizer`
 
 Get discrete codebook indices for given inputs.
 
-*📁 src/dl_techniques/layers/vector_quantizer.py:342*
+*📁 src/dl_techniques/layers/vector_quantizer.py:279*
 
 #### `get_compatible_tasks(cls, task)`
 **Module:** `layers.nlp_heads.task_types`
@@ -20078,2141 +21249,2123 @@ Get tasks that are commonly combined with the given task.
 
 Get tasks that are commonly combined with the given task.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:232*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:222*
 
 #### `get_confidences(self)`
 **Module:** `layers.experimental.band_rms_ood`
 
 Get current confidence estimates.
 
-*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:457*
+*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:403*
 
 #### `get_config(self)`
 **Module:** `layers.mobile_one_block`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/mobile_one_block.py:337*
+*📁 src/dl_techniques/layers/mobile_one_block.py:330*
 
 #### `get_config(self)`
 **Module:** `layers.depthwise_separable_block`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/depthwise_separable_block.py:395*
+*📁 src/dl_techniques/layers/depthwise_separable_block.py:296*
 
 #### `get_config(self)`
 **Module:** `layers.sampling`
 
-Returns the layer configuration for serialization.
+Return layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/sampling.py:258*
+*📁 src/dl_techniques/layers/sampling.py:209*
 
 #### `get_config(self)`
 **Module:** `layers.hanc_layer`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/hanc_layer.py:325*
+*📁 src/dl_techniques/layers/hanc_layer.py:313*
 
 #### `get_config(self)`
 **Module:** `layers.laplacian_filter`
 
 Return the config dictionary for the layer.
 
-*📁 src/dl_techniques/layers/laplacian_filter.py:215*
+*📁 src/dl_techniques/layers/laplacian_filter.py:206*
 
 #### `get_config(self)`
 **Module:** `layers.laplacian_filter`
 
 Return the config dictionary for the layer.
 
-*📁 src/dl_techniques/layers/laplacian_filter.py:475*
+*📁 src/dl_techniques/layers/laplacian_filter.py:461*
 
 #### `get_config(self)`
 **Module:** `layers.multi_level_feature_compilation`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/multi_level_feature_compilation.py:421*
+*📁 src/dl_techniques/layers/multi_level_feature_compilation.py:392*
 
 #### `get_config(self)`
 **Module:** `layers.yolo12_blocks`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:218*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:214*
 
 #### `get_config(self)`
 **Module:** `layers.yolo12_blocks`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:487*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:490*
 
 #### `get_config(self)`
 **Module:** `layers.yolo12_blocks`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:663*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:666*
 
 #### `get_config(self)`
 **Module:** `layers.yolo12_blocks`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:810*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:812*
 
 #### `get_config(self)`
 **Module:** `layers.yolo12_blocks`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:993*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:998*
 
 #### `get_config(self)`
 **Module:** `layers.yolo12_blocks`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/yolo12_blocks.py:1195*
+*📁 src/dl_techniques/layers/yolo12_blocks.py:1201*
 
 #### `get_config(self)`
 **Module:** `layers.yolo12_heads`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/yolo12_heads.py:359*
+*📁 src/dl_techniques/layers/yolo12_heads.py:342*
 
 #### `get_config(self)`
 **Module:** `layers.yolo12_heads`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/yolo12_heads.py:804*
+*📁 src/dl_techniques/layers/yolo12_heads.py:772*
 
 #### `get_config(self)`
 **Module:** `layers.yolo12_heads`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/yolo12_heads.py:1122*
+*📁 src/dl_techniques/layers/yolo12_heads.py:1078*
 
 #### `get_config(self)`
 **Module:** `layers.radial_basis_function`
 
-Returns the config of the layer.
+Return layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/radial_basis_function.py:304*
+*📁 src/dl_techniques/layers/radial_basis_function.py:318*
+
+#### `get_config(self)`
+**Module:** `layers.pixel_unshuffle`
+
+*📁 src/dl_techniques/layers/pixel_unshuffle.py:167*
 
 #### `get_config(self)`
 **Module:** `layers.spatial_layer`
 
-Returns the configuration dictionary for serialization.
+Return the configuration dictionary for serialization.
 
-*📁 src/dl_techniques/layers/spatial_layer.py:289*
+*📁 src/dl_techniques/layers/spatial_layer.py:227*
 
 #### `get_config(self)`
 **Module:** `layers.one_hot_encoding`
 
-Get layer configuration for serialization.
+Return layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/one_hot_encoding.py:124*
+*📁 src/dl_techniques/layers/one_hot_encoding.py:174*
 
 #### `get_config(self)`
 **Module:** `layers.neuro_grid`
 
-Return configuration for serialization.
+Return layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/neuro_grid.py:781*
+*📁 src/dl_techniques/layers/neuro_grid.py:461*
 
 #### `get_config(self)`
 **Module:** `layers.gaussian_filter`
 
 Return the configuration for serialization.
 
-*📁 src/dl_techniques/layers/gaussian_filter.py:214*
+*📁 src/dl_techniques/layers/gaussian_filter.py:188*
 
 #### `get_config(self)`
 **Module:** `layers.dynamic_conv2d`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/dynamic_conv2d.py:500*
+*📁 src/dl_techniques/layers/dynamic_conv2d.py:415*
 
 #### `get_config(self)`
 **Module:** `layers.shearlet_transform`
 
 Serialization configuration.
 
-*📁 src/dl_techniques/layers/shearlet_transform.py:433*
+*📁 src/dl_techniques/layers/shearlet_transform.py:432*
 
 #### `get_config(self)`
 **Module:** `layers.squeeze_excitation`
 
 Return layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/squeeze_excitation.py:382*
+*📁 src/dl_techniques/layers/squeeze_excitation.py:322*
+
+#### `get_config(self)`
+**Module:** `layers.blur_pool`
+
+*📁 src/dl_techniques/layers/blur_pool.py:127*
 
 #### `get_config(self)`
 **Module:** `layers.standard_blocks`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/standard_blocks.py:377*
+*📁 src/dl_techniques/layers/standard_blocks.py:372*
 
 #### `get_config(self)`
 **Module:** `layers.standard_blocks`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/standard_blocks.py:612*
+*📁 src/dl_techniques/layers/standard_blocks.py:591*
 
 #### `get_config(self)`
 **Module:** `layers.standard_blocks`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/standard_blocks.py:821*
+*📁 src/dl_techniques/layers/standard_blocks.py:808*
 
 #### `get_config(self)`
 **Module:** `layers.standard_blocks`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/standard_blocks.py:1068*
+*📁 src/dl_techniques/layers/standard_blocks.py:1039*
 
 #### `get_config(self)`
 **Module:** `layers.standard_blocks`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/standard_blocks.py:1353*
+*📁 src/dl_techniques/layers/standard_blocks.py:1301*
 
 #### `get_config(self)`
 **Module:** `layers.sequence_pooling`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/sequence_pooling.py:266*
+*📁 src/dl_techniques/layers/sequence_pooling.py:288*
 
 #### `get_config(self)`
 **Module:** `layers.sequence_pooling`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/sequence_pooling.py:402*
+*📁 src/dl_techniques/layers/sequence_pooling.py:444*
 
 #### `get_config(self)`
 **Module:** `layers.sequence_pooling`
 
-Get layer configuration for serialization.
+Return layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/sequence_pooling.py:850*
+*📁 src/dl_techniques/layers/sequence_pooling.py:912*
 
 #### `get_config(self)`
 **Module:** `layers.blt_core`
 
 Get layer configuration.
 
-*📁 src/dl_techniques/layers/blt_core.py:575*
+*📁 src/dl_techniques/layers/blt_core.py:640*
+
+#### `get_config(self)`
+**Module:** `layers.adaln_zero`
+
+*📁 src/dl_techniques/layers/adaln_zero.py:237*
 
 #### `get_config(self)`
 **Module:** `layers.fnet_encoder_block`
 
 Return complete configuration for serialization.
 
-*📁 src/dl_techniques/layers/fnet_encoder_block.py:298*
+*📁 src/dl_techniques/layers/fnet_encoder_block.py:265*
 
 #### `get_config(self)`
 **Module:** `layers.conditional_output_layer`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/conditional_output_layer.py:227*
+*📁 src/dl_techniques/layers/conditional_output_layer.py:202*
 
 #### `get_config(self)`
 **Module:** `layers.complex_layers`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/complex_layers.py:160*
+*📁 src/dl_techniques/layers/complex_layers.py:148*
 
 #### `get_config(self)`
 **Module:** `layers.complex_layers`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/complex_layers.py:397*
+*📁 src/dl_techniques/layers/complex_layers.py:353*
 
 #### `get_config(self)`
 **Module:** `layers.complex_layers`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/complex_layers.py:589*
+*📁 src/dl_techniques/layers/complex_layers.py:516*
 
 #### `get_config(self)`
 **Module:** `layers.complex_layers`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/complex_layers.py:702*
+*📁 src/dl_techniques/layers/complex_layers.py:607*
 
 #### `get_config(self)`
 **Module:** `layers.complex_layers`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/complex_layers.py:876*
+*📁 src/dl_techniques/layers/complex_layers.py:759*
 
 #### `get_config(self)`
 **Module:** `layers.complex_layers`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/complex_layers.py:1008*
+*📁 src/dl_techniques/layers/complex_layers.py:869*
 
 #### `get_config(self)`
 **Module:** `layers.complex_layers`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/complex_layers.py:1137*
+*📁 src/dl_techniques/layers/complex_layers.py:970*
 
 #### `get_config(self)`
 **Module:** `layers.anchor_generator`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/anchor_generator.py:268*
+*📁 src/dl_techniques/layers/anchor_generator.py:283*
 
 #### `get_config(self)`
 **Module:** `layers.haar_wavelet_decomposition`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/haar_wavelet_decomposition.py:472*
+*📁 src/dl_techniques/layers/haar_wavelet_decomposition.py:464*
 
 #### `get_config(self)`
 **Module:** `layers.tabm_blocks`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/tabm_blocks.py:125*
+*📁 src/dl_techniques/layers/tabm_blocks.py:149*
 
 #### `get_config(self)`
 **Module:** `layers.tabm_blocks`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/tabm_blocks.py:258*
+*📁 src/dl_techniques/layers/tabm_blocks.py:321*
 
 #### `get_config(self)`
 **Module:** `layers.tabm_blocks`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/tabm_blocks.py:358*
+*📁 src/dl_techniques/layers/tabm_blocks.py:451*
 
 #### `get_config(self)`
 **Module:** `layers.tabm_blocks`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/tabm_blocks.py:478*
+*📁 src/dl_techniques/layers/tabm_blocks.py:607*
 
 #### `get_config(self)`
 **Module:** `layers.tabm_blocks`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/tabm_blocks.py:584*
+*📁 src/dl_techniques/layers/tabm_blocks.py:747*
 
 #### `get_config(self)`
 **Module:** `layers.inverted_residual_block`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/inverted_residual_block.py:134*
-
-#### `get_config(self)`
-**Module:** `layers.kan_linear`
-
-Return configuration dictionary for serialization.
-
-*📁 src/dl_techniques/layers/kan_linear.py:459*
+*📁 src/dl_techniques/layers/inverted_residual_block.py:121*
 
 #### `get_config(self)`
 **Module:** `layers.convnext_v2_block`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/convnext_v2_block.py:463*
+*📁 src/dl_techniques/layers/convnext_v2_block.py:423*
 
 #### `get_config(self)`
 **Module:** `layers.io_preparation`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/io_preparation.py:106*
+*📁 src/dl_techniques/layers/io_preparation.py:98*
 
 #### `get_config(self)`
 **Module:** `layers.io_preparation`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/io_preparation.py:241*
+*📁 src/dl_techniques/layers/io_preparation.py:234*
 
 #### `get_config(self)`
 **Module:** `layers.io_preparation`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/io_preparation.py:375*
+*📁 src/dl_techniques/layers/io_preparation.py:370*
 
 #### `get_config(self)`
 **Module:** `layers.io_preparation`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/io_preparation.py:536*
+*📁 src/dl_techniques/layers/io_preparation.py:530*
 
 #### `get_config(self)`
 **Module:** `layers.convnext_v1_block`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/convnext_v1_block.py:434*
+*📁 src/dl_techniques/layers/convnext_v1_block.py:400*
 
 #### `get_config(self)`
 **Module:** `layers.patch_merging`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/patch_merging.py:230*
+*📁 src/dl_techniques/layers/patch_merging.py:205*
 
 #### `get_config(self)`
 **Module:** `layers.fft_layers`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/fft_layers.py:113*
+*📁 src/dl_techniques/layers/fft_layers.py:107*
 
 #### `get_config(self)`
 **Module:** `layers.fft_layers`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/fft_layers.py:228*
+*📁 src/dl_techniques/layers/fft_layers.py:215*
 
 #### `get_config(self)`
 **Module:** `layers.orthoblock`
 
-Return the layer's configuration for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/orthoblock.py:356*
+*📁 src/dl_techniques/layers/orthoblock.py:284*
 
 #### `get_config(self)`
 **Module:** `layers.pixel_shuffle`
 
-Get layer configuration for serialization.
+Return layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/pixel_shuffle.py:265*
+*📁 src/dl_techniques/layers/pixel_shuffle.py:262*
 
 #### `get_config(self)`
 **Module:** `layers.res_path`
 
-Returns the layer configuration for serialization.
+Return layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/res_path.py:235*
+*📁 src/dl_techniques/layers/res_path.py:251*
 
 #### `get_config(self)`
 **Module:** `layers.mps_layer`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/mps_layer.py:399*
+*📁 src/dl_techniques/layers/mps_layer.py:318*
 
 #### `get_config(self)`
 **Module:** `layers.film`
 
 Get the configuration dictionary for layer serialization.
 
-*📁 src/dl_techniques/layers/film.py:429*
+*📁 src/dl_techniques/layers/film.py:371*
 
 #### `get_config(self)`
 **Module:** `layers.hanc_block`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/hanc_block.py:374*
+*📁 src/dl_techniques/layers/hanc_block.py:379*
 
 #### `get_config(self)`
 **Module:** `layers.repmixer_block`
 
-Get layer configuration for serialization.
+Return layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/repmixer_block.py:388*
+*📁 src/dl_techniques/layers/repmixer_block.py:352*
 
 #### `get_config(self)`
 **Module:** `layers.repmixer_block`
 
-Get layer configuration for serialization.
+Return layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/repmixer_block.py:594*
+*📁 src/dl_techniques/layers/repmixer_block.py:551*
 
 #### `get_config(self)`
 **Module:** `layers.bitlinear_layer`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/bitlinear_layer.py:510*
+*📁 src/dl_techniques/layers/bitlinear_layer.py:505*
 
 #### `get_config(self)`
 **Module:** `layers.stochastic_gradient`
 
 Return the config dictionary for layer serialization.
 
-*📁 src/dl_techniques/layers/stochastic_gradient.py:178*
+*📁 src/dl_techniques/layers/stochastic_gradient.py:161*
 
 #### `get_config(self)`
 **Module:** `layers.gaussian_pyramid`
 
 Return the configuration for serialization.
 
-*📁 src/dl_techniques/layers/gaussian_pyramid.py:324*
+*📁 src/dl_techniques/layers/gaussian_pyramid.py:275*
 
 #### `get_config(self)`
 **Module:** `layers.bias_free_conv1d`
 
-Returns the layer configuration for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/bias_free_conv1d.py:243*
+*📁 src/dl_techniques/layers/bias_free_conv1d.py:215*
 
 #### `get_config(self)`
 **Module:** `layers.bias_free_conv1d`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/bias_free_conv1d.py:506*
+*📁 src/dl_techniques/layers/bias_free_conv1d.py:452*
 
 #### `get_config(self)`
 **Module:** `layers.vector_quantizer`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/vector_quantizer.py:466*
+*📁 src/dl_techniques/layers/vector_quantizer.py:370*
 
 #### `get_config(self)`
 **Module:** `layers.restricted_boltzmann_machine`
 
 Return layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/restricted_boltzmann_machine.py:621*
+*📁 src/dl_techniques/layers/restricted_boltzmann_machine.py:509*
 
 #### `get_config(self)`
 **Module:** `layers.convolutional_kan`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/convolutional_kan.py:466*
+*📁 src/dl_techniques/layers/convolutional_kan.py:420*
 
 #### `get_config(self)`
 **Module:** `layers.kmeans`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/kmeans.py:642*
+*📁 src/dl_techniques/layers/kmeans.py:618*
 
 #### `get_config(self)`
 **Module:** `layers.capsules`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/capsules.py:299*
+*📁 src/dl_techniques/layers/capsules.py:257*
 
 #### `get_config(self)`
 **Module:** `layers.capsules`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/capsules.py:637*
+*📁 src/dl_techniques/layers/capsules.py:519*
 
 #### `get_config(self)`
 **Module:** `layers.capsules`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/capsules.py:900*
+*📁 src/dl_techniques/layers/capsules.py:747*
 
 #### `get_config(self)`
 **Module:** `layers.gated_delta_net`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/gated_delta_net.py:503*
+*📁 src/dl_techniques/layers/gated_delta_net.py:523*
 
 #### `get_config(self)`
 **Module:** `layers.bias_free_conv2d`
 
-Returns the layer configuration for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/bias_free_conv2d.py:263*
+*📁 src/dl_techniques/layers/bias_free_conv2d.py:220*
 
 #### `get_config(self)`
 **Module:** `layers.bias_free_conv2d`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/bias_free_conv2d.py:546*
+*📁 src/dl_techniques/layers/bias_free_conv2d.py:465*
 
 #### `get_config(self)`
 **Module:** `layers.mothnet_blocks`
 
 Return layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/mothnet_blocks.py:260*
+*📁 src/dl_techniques/layers/mothnet_blocks.py:215*
 
 #### `get_config(self)`
 **Module:** `layers.mothnet_blocks`
 
 Return layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/mothnet_blocks.py:547*
+*📁 src/dl_techniques/layers/mothnet_blocks.py:427*
 
 #### `get_config(self)`
 **Module:** `layers.mothnet_blocks`
 
 Return layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/mothnet_blocks.py:826*
+*📁 src/dl_techniques/layers/mothnet_blocks.py:598*
 
 #### `get_config(self)`
 **Module:** `layers.selective_gradient_mask`
 
-Get layer configuration for serialization.
+Return layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/selective_gradient_mask.py:255*
+*📁 src/dl_techniques/layers/selective_gradient_mask.py:228*
+
+#### `get_config(self)`
+**Module:** `layers.capsules_v2`
+
+*📁 src/dl_techniques/layers/capsules_v2.py:331*
+
+#### `get_config(self)`
+**Module:** `layers.capsules_v2`
+
+*📁 src/dl_techniques/layers/capsules_v2.py:471*
 
 #### `get_config(self)`
 **Module:** `layers.strong_augmentation`
 
 Get layer configuration.
 
-*📁 src/dl_techniques/layers/strong_augmentation.py:216*
+*📁 src/dl_techniques/layers/strong_augmentation.py:254*
 
 #### `get_config(self)`
 **Module:** `layers.clahe`
 
 Return the configuration of the layer for serialization.
 
-*📁 src/dl_techniques/layers/clahe.py:270*
-
-#### `get_config(self)`
-**Module:** `layers.tversky_projection`
-
-Return the configuration of the layer for serialization.
-
-*📁 src/dl_techniques/layers/tversky_projection.py:297*
+*📁 src/dl_techniques/layers/clahe.py:251*
 
 #### `get_config(self)`
 **Module:** `layers.stochastic_depth`
 
 Return the config dictionary for layer serialization.
 
-*📁 src/dl_techniques/layers/stochastic_depth.py:208*
+*📁 src/dl_techniques/layers/stochastic_depth.py:187*
 
 #### `get_config(self)`
 **Module:** `layers.hierarchical_mlp_stem`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/hierarchical_mlp_stem.py:262*
+*📁 src/dl_techniques/layers/hierarchical_mlp_stem.py:315*
 
 #### `get_config(self)`
 **Module:** `layers.layer_scale`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/layer_scale.py:293*
+*📁 src/dl_techniques/layers/layer_scale.py:233*
 
 #### `get_config(self)`
 **Module:** `layers.blt_blocks`
 
 Return layer configuration.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:335*
+*📁 src/dl_techniques/layers/blt_blocks.py:340*
 
 #### `get_config(self)`
 **Module:** `layers.blt_blocks`
 
 Return layer configuration.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:523*
+*📁 src/dl_techniques/layers/blt_blocks.py:515*
 
 #### `get_config(self)`
 **Module:** `layers.blt_blocks`
 
 Return layer configuration.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:699*
+*📁 src/dl_techniques/layers/blt_blocks.py:659*
 
 #### `get_config(self)`
 **Module:** `layers.blt_blocks`
 
 Return layer configuration.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:964*
+*📁 src/dl_techniques/layers/blt_blocks.py:907*
 
 #### `get_config(self)`
 **Module:** `layers.blt_blocks`
 
 Return layer configuration.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:1143*
+*📁 src/dl_techniques/layers/blt_blocks.py:1087*
 
 #### `get_config(self)`
 **Module:** `layers.blt_blocks`
 
 Return layer configuration.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:1280*
+*📁 src/dl_techniques/layers/blt_blocks.py:1223*
 
 #### `get_config(self)`
 **Module:** `layers.blt_blocks`
 
 Return layer configuration.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:1567*
+*📁 src/dl_techniques/layers/blt_blocks.py:1495*
 
 #### `get_config(self)`
 **Module:** `layers.random_fourier_features`
 
-Return the configuration of the layer for serialization.
+Return layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/random_fourier_features.py:375*
+*📁 src/dl_techniques/layers/random_fourier_features.py:316*
 
 #### `get_config(self)`
 **Module:** `layers.modality_projection`
 
-Returns the layer configuration for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/modality_projection.py:275*
+*📁 src/dl_techniques/layers/modality_projection.py:297*
 
 #### `get_config(self)`
 **Module:** `layers.sparse_autoencoder`
 
 Return the configuration of the layer.
 
-*📁 src/dl_techniques/layers/sparse_autoencoder.py:899*
+*📁 src/dl_techniques/layers/sparse_autoencoder.py:770*
 
 #### `get_config(self)`
 **Module:** `layers.eomt_mask`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/eomt_mask.py:518*
+*📁 src/dl_techniques/layers/eomt_mask.py:452*
 
 #### `get_config(self)`
 **Module:** `layers.canny`
 
 Return the configuration of the layer for serialization.
 
-*📁 src/dl_techniques/layers/canny.py:318*
+*📁 src/dl_techniques/layers/canny.py:336*
 
 #### `get_config(self)`
 **Module:** `layers.universal_inverted_bottleneck`
 
 Return the layer's configuration for serialization.
 
-*📁 src/dl_techniques/layers/universal_inverted_bottleneck.py:570*
+*📁 src/dl_techniques/layers/universal_inverted_bottleneck.py:532*
 
 #### `get_config(self)`
 **Module:** `layers.global_sum_pool_2d`
 
 Get the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/global_sum_pool_2d.py:209*
+*📁 src/dl_techniques/layers/global_sum_pool_2d.py:143*
 
 #### `get_config(self)`
 **Module:** `layers.fractal_block`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/fractal_block.py:394*
+*📁 src/dl_techniques/layers/fractal_block.py:247*
 
 #### `get_config(self)`
 **Module:** `layers.rigid_simplex_layer`
 
-Return configuration for serialization.
+Return layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/rigid_simplex_layer.py:386*
+*📁 src/dl_techniques/layers/rigid_simplex_layer.py:362*
 
 #### `get_config(self)`
 **Module:** `layers.router`
 
-Returns the configuration of the layer for serialization.
+Return layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/router.py:349*
+*📁 src/dl_techniques/layers/router.py:324*
 
 #### `get_config(self)`
 **Module:** `layers.transformers.progressive_focused_transformer`
 
-Return layer configuration for serialization.
+Return configuration dictionary for serialization.
 
-*📁 src/dl_techniques/layers/transformers/progressive_focused_transformer.py:810*
+*📁 src/dl_techniques/layers/transformers/progressive_focused_transformer.py:502*
 
 #### `get_config(self)`
 **Module:** `layers.transformers.text_encoder`
 
-Get layer configuration for serialization.
+Return configuration dictionary for serialization.
 
-*📁 src/dl_techniques/layers/transformers/text_encoder.py:927*
+*📁 src/dl_techniques/layers/transformers/text_encoder.py:794*
 
 #### `get_config(self)`
 **Module:** `layers.transformers.text_decoder`
 
 Return configuration dictionary for serialization.
 
-*📁 src/dl_techniques/layers/transformers/text_decoder.py:491*
+*📁 src/dl_techniques/layers/transformers/text_decoder.py:452*
 
 #### `get_config(self)`
 **Module:** `layers.transformers.eomt_transformer`
 
-Return configuration for serialization.
+Return configuration dictionary for serialization.
 
-*📁 src/dl_techniques/layers/transformers/eomt_transformer.py:483*
+*📁 src/dl_techniques/layers/transformers/eomt_transformer.py:455*
 
 #### `get_config(self)`
 **Module:** `layers.transformers.swin_transformer_block`
 
-Return configuration for serialization.
+Return configuration dictionary for serialization.
 
-*📁 src/dl_techniques/layers/transformers/swin_transformer_block.py:606*
+*📁 src/dl_techniques/layers/transformers/swin_transformer_block.py:524*
 
 #### `get_config(self)`
 **Module:** `layers.transformers.free_transformer`
 
-Serialize layer configuration.
+Return configuration dictionary for serialization.
 
-*📁 src/dl_techniques/layers/transformers/free_transformer.py:258*
+*📁 src/dl_techniques/layers/transformers/free_transformer.py:220*
 
 #### `get_config(self)`
 **Module:** `layers.transformers.free_transformer`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/transformers/free_transformer.py:960*
+*📁 src/dl_techniques/layers/transformers/free_transformer.py:746*
 
 #### `get_config(self)`
 **Module:** `layers.transformers.perceiver_transformer`
 
-Return configuration for serialization.
+Return configuration dictionary for serialization.
 
-*📁 src/dl_techniques/layers/transformers/perceiver_transformer.py:360*
+*📁 src/dl_techniques/layers/transformers/perceiver_transformer.py:354*
 
 #### `get_config(self)`
 **Module:** `layers.transformers.swin_conv_block`
 
 Return configuration dictionary for serialization.
 
-*📁 src/dl_techniques/layers/transformers/swin_conv_block.py:701*
+*📁 src/dl_techniques/layers/transformers/swin_conv_block.py:404*
 
 #### `get_config(self)`
 **Module:** `layers.transformers.vision_encoder`
 
-Get layer configuration for serialization.
+Return configuration dictionary for serialization.
 
-*📁 src/dl_techniques/layers/transformers/vision_encoder.py:772*
+*📁 src/dl_techniques/layers/transformers/vision_encoder.py:660*
 
 #### `get_config(self)`
 **Module:** `layers.transformers.transformer`
 
-Return configuration for serialization.
+Return configuration dictionary for serialization.
 
-*📁 src/dl_techniques/layers/transformers/transformer.py:650*
-
-#### `get_config(self)`
-**Module:** `layers.experimental.hierarchical_evidence_llm`
-
-*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:244*
+*📁 src/dl_techniques/layers/transformers/transformer.py:590*
 
 #### `get_config(self)`
 **Module:** `layers.experimental.hierarchical_evidence_llm`
 
-*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:423*
+*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:228*
 
 #### `get_config(self)`
 **Module:** `layers.experimental.hierarchical_evidence_llm`
 
-*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:605*
+*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:397*
 
 #### `get_config(self)`
 **Module:** `layers.experimental.hierarchical_evidence_llm`
 
-*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:814*
+*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:567*
+
+#### `get_config(self)`
+**Module:** `layers.experimental.hierarchical_evidence_llm`
+
+*📁 src/dl_techniques/layers/experimental/hierarchical_evidence_llm.py:762*
 
 #### `get_config(self)`
 **Module:** `layers.experimental.hierarchical_memory_system`
 
 Get configuration for the hierarchical memory system.
 
-*📁 src/dl_techniques/layers/experimental/hierarchical_memory_system.py:372*
-
-#### `get_config(self)`
-**Module:** `layers.experimental.field_embeddings`
-
-Return configuration dictionary for serialization.
-
-*📁 src/dl_techniques/layers/experimental/field_embeddings.py:236*
-
-#### `get_config(self)`
-**Module:** `layers.experimental.field_embeddings`
-
-Return configuration dictionary for serialization.
-
-*📁 src/dl_techniques/layers/experimental/field_embeddings.py:441*
-
-#### `get_config(self)`
-**Module:** `layers.experimental.field_embeddings`
-
-Return configuration dictionary for serialization.
-
-*📁 src/dl_techniques/layers/experimental/field_embeddings.py:622*
-
-#### `get_config(self)`
-**Module:** `layers.experimental.field_embeddings`
-
-Return configuration dictionary for serialization.
-
-*📁 src/dl_techniques/layers/experimental/field_embeddings.py:827*
+*📁 src/dl_techniques/layers/experimental/hierarchical_memory_system.py:350*
 
 #### `get_config(self)`
 **Module:** `layers.experimental.contextual_memory`
 
 Get layer configuration.
 
-*📁 src/dl_techniques/layers/experimental/contextual_memory.py:242*
+*📁 src/dl_techniques/layers/experimental/contextual_memory.py:241*
 
 #### `get_config(self)`
 **Module:** `layers.experimental.contextual_memory`
 
 Get layer configuration.
 
-*📁 src/dl_techniques/layers/experimental/contextual_memory.py:520*
+*📁 src/dl_techniques/layers/experimental/contextual_memory.py:502*
 
 #### `get_config(self)`
 **Module:** `layers.experimental.contextual_memory`
 
 Get layer configuration.
 
-*📁 src/dl_techniques/layers/experimental/contextual_memory.py:676*
+*📁 src/dl_techniques/layers/experimental/contextual_memory.py:644*
 
 #### `get_config(self)`
 **Module:** `layers.experimental.contextual_memory`
 
 Get layer configuration.
 
-*📁 src/dl_techniques/layers/experimental/contextual_memory.py:903*
+*📁 src/dl_techniques/layers/experimental/contextual_memory.py:853*
 
 #### `get_config(self)`
 **Module:** `layers.experimental.mst_correlation_filter`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/experimental/mst_correlation_filter.py:169*
+*📁 src/dl_techniques/layers/experimental/mst_correlation_filter.py:174*
 
 #### `get_config(self)`
 **Module:** `layers.experimental.mst_correlation_filter`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/experimental/mst_correlation_filter.py:550*
+*📁 src/dl_techniques/layers/experimental/mst_correlation_filter.py:521*
 
 #### `get_config(self)`
 **Module:** `layers.experimental.band_rms_ood`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:592*
+*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:528*
 
 #### `get_config(self)`
 **Module:** `layers.experimental.contextual_counter_ffn`
 
 Return layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/experimental/contextual_counter_ffn.py:383*
+*📁 src/dl_techniques/layers/experimental/contextual_counter_ffn.py:326*
 
 #### `get_config(self)`
 **Module:** `layers.experimental.graph_mann`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/experimental/graph_mann.py:422*
+*📁 src/dl_techniques/layers/experimental/graph_mann.py:395*
 
 #### `get_config(self)`
 **Module:** `layers.nlp_heads.factory`
 
 Get layer configuration.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:282*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:295*
 
 #### `get_config(self)`
 **Module:** `layers.nlp_heads.factory`
 
 Get layer configuration.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:880*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:892*
 
 #### `get_config(self)`
 **Module:** `layers.nlp_heads.factory`
 
 Get layer configuration.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:1266*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:1282*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.ema_layer`
 
 Return layer configuration.
 
-*📁 src/dl_techniques/layers/time_series/ema_layer.py:157*
+*📁 src/dl_techniques/layers/time_series/ema_layer.py:198*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.ema_layer`
 
 Return layer configuration.
 
-*📁 src/dl_techniques/layers/time_series/ema_layer.py:422*
+*📁 src/dl_techniques/layers/time_series/ema_layer.py:463*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.nbeats_blocks`
 
-Get layer configuration for serialization.
+Return configuration dictionary for serialization.
 
-*📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:451*
-
-#### `get_config(self)`
-**Module:** `layers.time_series.nbeats_blocks`
-
-Get layer configuration for serialization.
-
-*📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:595*
+*📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:423*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.nbeats_blocks`
 
-Get layer configuration for serialization.
+Return configuration dictionary for serialization.
+
+*📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:579*
+
+#### `get_config(self)`
+**Module:** `layers.time_series.nbeats_blocks`
+
+Return configuration dictionary for serialization.
 
 *📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:794*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.nbeats_blocks`
 
-Get layer configuration for serialization.
+Return configuration dictionary for serialization.
 
-*📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:1019*
+*📁 src/dl_techniques/layers/time_series/nbeats_blocks.py:1042*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.adaptive_lag_attention`
 
-Returns the layer configuration for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/time_series/adaptive_lag_attention.py:366*
+*📁 src/dl_techniques/layers/time_series/adaptive_lag_attention.py:327*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.quantile_head_fixed_io`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/time_series/quantile_head_fixed_io.py:259*
+*📁 src/dl_techniques/layers/time_series/quantile_head_fixed_io.py:290*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.deepar_blocks`
 
-*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:118*
+Return the layer configuration for serialization.
+
+*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:119*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.deepar_blocks`
 
-*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:233*
+Return the layer configuration for serialization.
+
+*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:250*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.deepar_blocks`
 
-*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:353*
+Return the layer configuration for serialization.
+
+*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:385*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.deepar_blocks`
 
-*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:470*
+Return the layer configuration for serialization.
+
+*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:521*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.quantile_head_variable_io`
 
-Return configuration dictionary for serialization.
+Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/time_series/quantile_head_variable_io.py:381*
-
-#### `get_config(self)`
-**Module:** `layers.time_series.xlstm_blocks`
-
-Return the configuration of the cell.
-
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:276*
+*📁 src/dl_techniques/layers/time_series/quantile_head_variable_io.py:315*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.xlstm_blocks`
 
-Return the configuration of the layer.
+Return the configuration of the cell for serialization.
 
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:441*
-
-#### `get_config(self)`
-**Module:** `layers.time_series.xlstm_blocks`
-
-Return the configuration of the cell.
-
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:738*
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:278*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.xlstm_blocks`
 
-Return the configuration of the layer.
+Return the configuration of the layer for serialization.
 
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:873*
-
-#### `get_config(self)`
-**Module:** `layers.time_series.xlstm_blocks`
-
-Return the configuration of the layer.
-
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:1071*
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:461*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.xlstm_blocks`
 
-Return the configuration of the layer.
+Return the configuration of the cell for serialization.
 
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:1303*
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:799*
+
+#### `get_config(self)`
+**Module:** `layers.time_series.xlstm_blocks`
+
+Return the configuration of the layer for serialization.
+
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:992*
+
+#### `get_config(self)`
+**Module:** `layers.time_series.xlstm_blocks`
+
+Return the configuration of the layer for serialization.
+
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:1207*
+
+#### `get_config(self)`
+**Module:** `layers.time_series.xlstm_blocks`
+
+Return the configuration of the layer for serialization.
+
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:1469*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.nbeatsx_blocks`
 
-*📁 src/dl_techniques/layers/time_series/nbeatsx_blocks.py:189*
+Return configuration dictionary for serialization.
+
+*📁 src/dl_techniques/layers/time_series/nbeatsx_blocks.py:244*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.forecasting_layers`
 
-Serialization configuration.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:113*
-
-#### `get_config(self)`
-**Module:** `layers.time_series.forecasting_layers`
-
-Serialization configuration.
-
-*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:262*
+*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:134*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.forecasting_layers`
 
-Serialization configuration.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:501*
+*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:333*
+
+#### `get_config(self)`
+**Module:** `layers.time_series.forecasting_layers`
+
+Return the layer configuration for serialization.
+
+*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:585*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.temporal_fusion`
 
-Returns the layer configuration for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/time_series/temporal_fusion.py:403*
+*📁 src/dl_techniques/layers/time_series/temporal_fusion.py:406*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.mixed_sequential_block`
 
-Return configuration for serialization.
+Return configuration dictionary for serialization.
 
-*📁 src/dl_techniques/layers/time_series/mixed_sequential_block.py:577*
-
-#### `get_config(self)`
-**Module:** `layers.time_series.prism_blocks`
-
-Return configuration for serialization.
-
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:126*
+*📁 src/dl_techniques/layers/time_series/mixed_sequential_block.py:555*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.prism_blocks`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:300*
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:133*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.prism_blocks`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:523*
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:321*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.prism_blocks`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:874*
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:563*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.prism_blocks`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:1060*
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:929*
+
+#### `get_config(self)`
+**Module:** `layers.time_series.prism_blocks`
+
+Return configuration for serialization.
+
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:1134*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.temporal_convolutional_network`
 
-*📁 src/dl_techniques/layers/time_series/temporal_convolutional_network.py:73*
+Return the layer configuration for serialization.
+
+*📁 src/dl_techniques/layers/time_series/temporal_convolutional_network.py:140*
 
 #### `get_config(self)`
 **Module:** `layers.time_series.temporal_convolutional_network`
 
-*📁 src/dl_techniques/layers/time_series/temporal_convolutional_network.py:129*
+Return the layer configuration for serialization.
+
+*📁 src/dl_techniques/layers/time_series/temporal_convolutional_network.py:253*
 
 #### `get_config(self)`
 **Module:** `layers.physics.approximate_lagrange_layer`
 
 Return layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/physics/approximate_lagrange_layer.py:309*
+*📁 src/dl_techniques/layers/physics/approximate_lagrange_layer.py:239*
 
 #### `get_config(self)`
 **Module:** `layers.physics.lagrange_layer`
 
 Return layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/physics/lagrange_layer.py:268*
+*📁 src/dl_techniques/layers/physics/lagrange_layer.py:203*
 
 #### `get_config(self)`
 **Module:** `layers.activations.relu_k`
 
-Get the layer configuration for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/activations/relu_k.py:225*
+*📁 src/dl_techniques/layers/activations/relu_k.py:185*
 
 #### `get_config(self)`
 **Module:** `layers.activations.hard_sigmoid`
 
-Return configuration for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/activations/hard_sigmoid.py:186*
+*📁 src/dl_techniques/layers/activations/hard_sigmoid.py:136*
 
 #### `get_config(self)`
 **Module:** `layers.activations.thresh_max`
 
-Get layer configuration for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/activations/thresh_max.py:242*
+*📁 src/dl_techniques/layers/activations/thresh_max.py:295*
 
 #### `get_config(self)`
 **Module:** `layers.activations.basis_function`
 
 Get the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/activations/basis_function.py:215*
+*📁 src/dl_techniques/layers/activations/basis_function.py:158*
 
 #### `get_config(self)`
 **Module:** `layers.activations.differentiable_step`
 
 Return the layer's configuration for serialization.
 
-*📁 src/dl_techniques/layers/activations/differentiable_step.py:248*
+*📁 src/dl_techniques/layers/activations/differentiable_step.py:245*
 
 #### `get_config(self)`
 **Module:** `layers.activations.expanded_activations`
 
-Returns the configuration of the layer.
+Return the configuration of the layer for serialization.
 
-*📁 src/dl_techniques/layers/activations/expanded_activations.py:167*
+*📁 src/dl_techniques/layers/activations/expanded_activations.py:120*
 
 #### `get_config(self)`
 **Module:** `layers.activations.expanded_activations`
 
-Returns the configuration of the expanded activation layer.
+Return the configuration of the expanded activation layer.
 
-*📁 src/dl_techniques/layers/activations/expanded_activations.py:338*
+*📁 src/dl_techniques/layers/activations/expanded_activations.py:304*
 
 #### `get_config(self)`
 **Module:** `layers.activations.probability_output`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/activations/probability_output.py:287*
+*📁 src/dl_techniques/layers/activations/probability_output.py:258*
 
 #### `get_config(self)`
 **Module:** `layers.activations.routing_probabilities`
 
-Return the configuration of the layer for serialization.
+Serialize all parameters (both modes) for round-trip stability.
 
-*📁 src/dl_techniques/layers/activations/routing_probabilities.py:722*
+*📁 src/dl_techniques/layers/activations/routing_probabilities.py:892*
 
 #### `get_config(self)`
 **Module:** `layers.activations.adaptive_softmax`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/activations/adaptive_softmax.py:331*
+*📁 src/dl_techniques/layers/activations/adaptive_softmax.py:337*
 
 #### `get_config(self)`
 **Module:** `layers.activations.monotonicity_layer`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/activations/monotonicity_layer.py:582*
+*📁 src/dl_techniques/layers/activations/monotonicity_layer.py:555*
 
 #### `get_config(self)`
 **Module:** `layers.activations.mish`
 
-Get layer configuration for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/activations/mish.py:236*
+*📁 src/dl_techniques/layers/activations/mish.py:192*
 
 #### `get_config(self)`
 **Module:** `layers.activations.mish`
 
-Get layer configuration for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/activations/mish.py:409*
+*📁 src/dl_techniques/layers/activations/mish.py:325*
 
 #### `get_config(self)`
 **Module:** `layers.activations.sparsemax`
 
-Get layer configuration for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/activations/sparsemax.py:253*
+*📁 src/dl_techniques/layers/activations/sparsemax.py:295*
 
 #### `get_config(self)`
 **Module:** `layers.activations.squash`
 
-Get the layer configuration for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/activations/squash.py:220*
+*📁 src/dl_techniques/layers/activations/squash.py:200*
 
 #### `get_config(self)`
 **Module:** `layers.activations.hard_swish`
 
-Return configuration for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/activations/hard_swish.py:220*
+*📁 src/dl_techniques/layers/activations/hard_swish.py:139*
 
 #### `get_config(self)`
 **Module:** `layers.activations.golu`
 
-Returns the configuration of the layer for serialization.
+Return the configuration of the layer for serialization.
 
-*📁 src/dl_techniques/layers/activations/golu.py:176*
+*📁 src/dl_techniques/layers/activations/golu.py:159*
 
 #### `get_config(self)`
 **Module:** `layers.memory.mann`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/memory/mann.py:463*
+*📁 src/dl_techniques/layers/memory/mann.py:414*
 
 #### `get_config(self)`
 **Module:** `layers.memory.som_2d_layer`
 
-Return layer configuration for serialization and model saving.
+Return layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/memory/som_2d_layer.py:353*
+*📁 src/dl_techniques/layers/memory/som_2d_layer.py:267*
+
+#### `get_config(self)`
+**Module:** `layers.memory.baseline_ntm`
+
+Get layer configuration.
+
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:179*
+
+#### `get_config(self)`
+**Module:** `layers.memory.baseline_ntm`
+
+Get layer configuration.
+
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:425*
+
+#### `get_config(self)`
+**Module:** `layers.memory.baseline_ntm`
+
+Get layer configuration.
+
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:663*
+
+#### `get_config(self)`
+**Module:** `layers.memory.baseline_ntm`
+
+Get layer configuration.
+
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:848*
+
+#### `get_config(self)`
+**Module:** `layers.memory.baseline_ntm`
+
+Get layer configuration.
+
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:1226*
+
+#### `get_config(self)`
+**Module:** `layers.memory.baseline_ntm`
+
+Get layer configuration.
+
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:1473*
 
 #### `get_config(self)`
 **Module:** `layers.memory.som_nd_soft_layer`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/memory/som_nd_soft_layer.py:867*
+*📁 src/dl_techniques/layers/memory/som_nd_soft_layer.py:763*
 
 #### `get_config(self)`
 **Module:** `layers.memory.som_nd_layer`
 
 Get configuration for the layer.
 
-*📁 src/dl_techniques/layers/memory/som_nd_layer.py:537*
+*📁 src/dl_techniques/layers/memory/som_nd_layer.py:477*
+
+#### `get_config(self)`
+**Module:** `layers.memory.ntm_interface`
+
+Get layer configuration.
+
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:401*
+
+#### `get_config(self)`
+**Module:** `layers.memory.ntm_interface`
+
+Get layer configuration.
+
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:512*
+
+#### `get_config(self)`
+**Module:** `layers.memory.ntm_interface`
+
+Get layer configuration.
+
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:598*
+
+#### `get_config(self)`
+**Module:** `layers.memory.ntm_interface`
+
+Get layer configuration.
+
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:826*
 
 #### `get_config(self)`
 **Module:** `layers.vision_heads.factory`
 
 Get layer configuration.
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:137*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:175*
 
 #### `get_config(self)`
 **Module:** `layers.vision_heads.factory`
 
 Get layer configuration.
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:250*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:312*
 
 #### `get_config(self)`
 **Module:** `layers.vision_heads.factory`
 
 Get layer configuration.
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:373*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:466*
 
 #### `get_config(self)`
 **Module:** `layers.vision_heads.factory`
 
 Get layer configuration.
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:491*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:616*
 
 #### `get_config(self)`
 **Module:** `layers.vision_heads.factory`
 
 Get layer configuration.
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:598*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:753*
 
 #### `get_config(self)`
 **Module:** `layers.vision_heads.factory`
 
 Get layer configuration.
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:704*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:889*
 
 #### `get_config(self)`
 **Module:** `layers.vision_heads.factory`
 
 Get layer configuration.
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:794*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:1002*
 
 #### `get_config(self)`
 **Module:** `layers.vision_heads.factory`
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:947*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:1129*
 
 #### `get_config(self)`
 **Module:** `layers.vlm_heads.factory`
 
 Gets layer configuration.
 
-*📁 src/dl_techniques/layers/vlm_heads/factory.py:115*
+*📁 src/dl_techniques/layers/vlm_heads/factory.py:150*
 
 #### `get_config(self)`
 **Module:** `layers.vlm_heads.factory`
 
-*📁 src/dl_techniques/layers/vlm_heads/factory.py:258*
+*📁 src/dl_techniques/layers/vlm_heads/factory.py:324*
 
 #### `get_config(self)`
 **Module:** `layers.vlm_heads.factory`
 
-*📁 src/dl_techniques/layers/vlm_heads/factory.py:382*
+*📁 src/dl_techniques/layers/vlm_heads/factory.py:479*
 
 #### `get_config(self)`
 **Module:** `layers.vlm_heads.factory`
 
-*📁 src/dl_techniques/layers/vlm_heads/factory.py:554*
+*📁 src/dl_techniques/layers/vlm_heads/factory.py:710*
 
 #### `get_config(self)`
 **Module:** `layers.vlm_heads.factory`
 
-*📁 src/dl_techniques/layers/vlm_heads/factory.py:625*
+*📁 src/dl_techniques/layers/vlm_heads/factory.py:807*
 
 #### `get_config(self)`
 **Module:** `layers.geometric.point_cloud_autoencoder`
 
-*📁 src/dl_techniques/layers/geometric/point_cloud_autoencoder.py:288*
+*📁 src/dl_techniques/layers/geometric/point_cloud_autoencoder.py:230*
 
 #### `get_config(self)`
 **Module:** `layers.geometric.point_cloud_autoencoder`
 
-*📁 src/dl_techniques/layers/geometric/point_cloud_autoencoder.py:459*
+*📁 src/dl_techniques/layers/geometric/point_cloud_autoencoder.py:363*
 
 #### `get_config(self)`
 **Module:** `layers.geometric.supernode_pooling`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/geometric/supernode_pooling.py:433*
+*📁 src/dl_techniques/layers/geometric/supernode_pooling.py:417*
 
 #### `get_config(self)`
-**Module:** `layers.geometric.fields.parallel_transport`
+**Module:** `layers.geometric.clifford_block`
 
-Return configuration for serialization.
+Return serialisable configuration.
 
-*📁 src/dl_techniques/layers/geometric/fields/parallel_transport.py:343*
-
-#### `get_config(self)`
-**Module:** `layers.geometric.fields.holonomy_layer`
-
-Return configuration for serialization.
-
-*📁 src/dl_techniques/layers/geometric/fields/holonomy_layer.py:424*
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:255*
 
 #### `get_config(self)`
-**Module:** `layers.geometric.fields.gauge_invariant_attention`
+**Module:** `layers.geometric.clifford_block`
 
-Return configuration for serialization.
+Return serialisable configuration.
 
-*📁 src/dl_techniques/layers/geometric/fields/gauge_invariant_attention.py:545*
-
-#### `get_config(self)`
-**Module:** `layers.geometric.fields.connection_layer`
-
-Return configuration for serialization.
-
-*📁 src/dl_techniques/layers/geometric/fields/connection_layer.py:424*
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:454*
 
 #### `get_config(self)`
-**Module:** `layers.geometric.fields.manifold_stress`
+**Module:** `layers.geometric.clifford_block`
 
-Return configuration for serialization.
+Return serialisable configuration.
 
-*📁 src/dl_techniques/layers/geometric/fields/manifold_stress.py:473*
-
-#### `get_config(self)`
-**Module:** `layers.geometric.fields.holonomic_transformer`
-
-Return configuration for serialization.
-
-*📁 src/dl_techniques/layers/geometric/fields/holonomic_transformer.py:154*
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:801*
 
 #### `get_config(self)`
-**Module:** `layers.geometric.fields.holonomic_transformer`
+**Module:** `layers.geometric.clifford_block`
 
-Return configuration for serialization.
-
-*📁 src/dl_techniques/layers/geometric/fields/holonomic_transformer.py:504*
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:1102*
 
 #### `get_config(self)`
-**Module:** `layers.geometric.fields.field_embedding`
+**Module:** `layers.geometric.clifford_block`
 
-Return configuration for serialization.
+Return serialisable configuration.
 
-*📁 src/dl_techniques/layers/geometric/fields/field_embedding.py:333*
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:1560*
+
+#### `get_config(self)`
+**Module:** `layers.geometric.clifford_block`
+
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:2038*
+
+#### `get_config(self)`
+**Module:** `layers.geometric.clifford_block`
+
+*📁 src/dl_techniques/layers/geometric/clifford_block.py:2530*
 
 #### `get_config(self)`
 **Module:** `layers.norms.zero_centered_rms_norm`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/norms/zero_centered_rms_norm.py:403*
+*📁 src/dl_techniques/layers/norms/zero_centered_rms_norm.py:297*
 
 #### `get_config(self)`
 **Module:** `layers.norms.adaptive_band_rms`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/norms/adaptive_band_rms.py:430*
+*📁 src/dl_techniques/layers/norms/adaptive_band_rms.py:418*
 
 #### `get_config(self)`
 **Module:** `layers.norms.logit_norm`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/norms/logit_norm.py:260*
+*📁 src/dl_techniques/layers/norms/logit_norm.py:193*
 
 #### `get_config(self)`
 **Module:** `layers.norms.band_rms`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/norms/band_rms.py:305*
+*📁 src/dl_techniques/layers/norms/band_rms.py:288*
 
 #### `get_config(self)`
 **Module:** `layers.norms.global_response_norm`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/norms/global_response_norm.py:276*
+*📁 src/dl_techniques/layers/norms/global_response_norm.py:270*
 
 #### `get_config(self)`
 **Module:** `layers.norms.band_logit_norm`
 
 Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/norms/band_logit_norm.py:178*
+*📁 src/dl_techniques/layers/norms/band_logit_norm.py:222*
 
 #### `get_config(self)`
 **Module:** `layers.norms.max_logit_norm`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/norms/max_logit_norm.py:205*
+*📁 src/dl_techniques/layers/norms/max_logit_norm.py:164*
 
 #### `get_config(self)`
 **Module:** `layers.norms.max_logit_norm`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/norms/max_logit_norm.py:427*
+*📁 src/dl_techniques/layers/norms/max_logit_norm.py:347*
 
 #### `get_config(self)`
 **Module:** `layers.norms.max_logit_norm`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/norms/max_logit_norm.py:649*
+*📁 src/dl_techniques/layers/norms/max_logit_norm.py:520*
 
 #### `get_config(self)`
 **Module:** `layers.norms.rms_norm`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/norms/rms_norm.py:360*
+*📁 src/dl_techniques/layers/norms/rms_norm.py:275*
 
 #### `get_config(self)`
 **Module:** `layers.norms.zero_centered_band_rms_norm`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/norms/zero_centered_band_rms_norm.py:436*
+*📁 src/dl_techniques/layers/norms/zero_centered_band_rms_norm.py:333*
 
 #### `get_config(self)`
 **Module:** `layers.norms.dynamic_tanh`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/norms/dynamic_tanh.py:239*
+*📁 src/dl_techniques/layers/norms/dynamic_tanh.py:251*
 
 #### `get_config(self)`
 **Module:** `layers.logic.arithmetic_operators`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/logic/arithmetic_operators.py:439*
+*📁 src/dl_techniques/layers/logic/arithmetic_operators.py:427*
 
 #### `get_config(self)`
 **Module:** `layers.logic.logic_operators`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/logic/logic_operators.py:428*
+*📁 src/dl_techniques/layers/logic/logic_operators.py:421*
 
 #### `get_config(self)`
 **Module:** `layers.logic.neural_circuit`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/logic/neural_circuit.py:298*
+*📁 src/dl_techniques/layers/logic/neural_circuit.py:296*
 
 #### `get_config(self)`
 **Module:** `layers.logic.neural_circuit`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/logic/neural_circuit.py:501*
+*📁 src/dl_techniques/layers/logic/neural_circuit.py:505*
 
 #### `get_config(self)`
 **Module:** `layers.moe.layer`
 
 Get configuration for serialization.
 
-*📁 src/dl_techniques/layers/moe/layer.py:517*
+*📁 src/dl_techniques/layers/moe/layer.py:425*
 
 #### `get_config(self)`
 **Module:** `layers.moe.experts`
 
 Get configuration for serialization.
 
-*📁 src/dl_techniques/layers/moe/experts.py:201*
+*📁 src/dl_techniques/layers/moe/experts.py:181*
 
 #### `get_config(self)`
 **Module:** `layers.moe.gating`
 
 Get configuration for serialization.
 
-*📁 src/dl_techniques/layers/moe/gating.py:67*
+*📁 src/dl_techniques/layers/moe/gating.py:79*
 
 #### `get_config(self)`
 **Module:** `layers.moe.gating`
 
 Get configuration for serialization.
 
-*📁 src/dl_techniques/layers/moe/gating.py:249*
+*📁 src/dl_techniques/layers/moe/gating.py:280*
 
 #### `get_config(self)`
 **Module:** `layers.moe.gating`
 
 Get configuration for serialization.
 
-*📁 src/dl_techniques/layers/moe/gating.py:436*
+*📁 src/dl_techniques/layers/moe/gating.py:492*
 
 #### `get_config(self)`
 **Module:** `layers.moe.gating`
 
 Get configuration for serialization.
 
-*📁 src/dl_techniques/layers/moe/gating.py:580*
+*📁 src/dl_techniques/layers/moe/gating.py:650*
 
 #### `get_config(self)`
 **Module:** `layers.fusion.multimodal_fusion`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/fusion/multimodal_fusion.py:960*
+*📁 src/dl_techniques/layers/fusion/multimodal_fusion.py:1000*
 
 #### `get_config(self)`
 **Module:** `layers.statistics.moving_std`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/statistics/moving_std.py:318*
+*📁 src/dl_techniques/layers/statistics/moving_std.py:239*
 
 #### `get_config(self)`
 **Module:** `layers.statistics.residual_acf`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/statistics/residual_acf.py:474*
+*📁 src/dl_techniques/layers/statistics/residual_acf.py:339*
 
 #### `get_config(self)`
 **Module:** `layers.statistics.normalizing_flow`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/statistics/normalizing_flow.py:391*
+*📁 src/dl_techniques/layers/statistics/normalizing_flow.py:319*
 
 #### `get_config(self)`
 **Module:** `layers.statistics.normalizing_flow`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/statistics/normalizing_flow.py:789*
+*📁 src/dl_techniques/layers/statistics/normalizing_flow.py:587*
 
 #### `get_config(self)`
 **Module:** `layers.statistics.invertible_kernel_pca`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:636*
+*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:563*
 
 #### `get_config(self)`
 **Module:** `layers.statistics.invertible_kernel_pca`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:815*
+*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:759*
 
 #### `get_config(self)`
 **Module:** `layers.statistics.scaler`
 
 Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/statistics/scaler.py:624*
+*📁 src/dl_techniques/layers/statistics/scaler.py:418*
 
 #### `get_config(self)`
 **Module:** `layers.statistics.deep_kernel_pca`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/statistics/deep_kernel_pca.py:669*
+*📁 src/dl_techniques/layers/statistics/deep_kernel_pca.py:624*
 
 #### `get_config(self)`
 **Module:** `layers.statistics.mdn_layer`
 
-Returns the layer configuration for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/statistics/mdn_layer.py:414*
+*📁 src/dl_techniques/layers/statistics/mdn_layer.py:421*
 
 #### `get_config(self)`
 **Module:** `layers.graphs.simplified_hyperbolic_graph_convolutional_neural_layer`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/graphs/simplified_hyperbolic_graph_convolutional_neural_layer.py:317*
+*📁 src/dl_techniques/layers/graphs/simplified_hyperbolic_graph_convolutional_neural_layer.py:271*
 
 #### `get_config(self)`
 **Module:** `layers.graphs.graph_neural_network`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/graphs/graph_neural_network.py:551*
+*📁 src/dl_techniques/layers/graphs/graph_neural_network.py:523*
 
 #### `get_config(self)`
 **Module:** `layers.graphs.entity_graph_refinement`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/graphs/entity_graph_refinement.py:796*
+*📁 src/dl_techniques/layers/graphs/entity_graph_refinement.py:682*
 
 #### `get_config(self)`
 **Module:** `layers.graphs.relational_graph_transformer_blocks`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:244*
+*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:197*
 
 #### `get_config(self)`
 **Module:** `layers.graphs.relational_graph_transformer_blocks`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:591*
+*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:483*
 
 #### `get_config(self)`
 **Module:** `layers.graphs.relational_graph_transformer_blocks`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:969*
+*📁 src/dl_techniques/layers/graphs/relational_graph_transformer_blocks.py:774*
 
 #### `get_config(self)`
 **Module:** `layers.graphs.fermi_diract_decoder`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/graphs/fermi_diract_decoder.py:232*
+*📁 src/dl_techniques/layers/graphs/fermi_diract_decoder.py:168*
 
 #### `get_config(self)`
 **Module:** `layers.attention.channel_attention`
 
-Returns the layer configuration for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/attention/channel_attention.py:302*
-
-#### `get_config(self)`
-**Module:** `layers.attention.tripse_attention`
-
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:164*
+*📁 src/dl_techniques/layers/attention/channel_attention.py:281*
 
 #### `get_config(self)`
 **Module:** `layers.attention.tripse_attention`
 
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:267*
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:201*
 
 #### `get_config(self)`
 **Module:** `layers.attention.tripse_attention`
 
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:396*
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:334*
 
 #### `get_config(self)`
 **Module:** `layers.attention.tripse_attention`
 
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:524*
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:498*
 
 #### `get_config(self)`
 **Module:** `layers.attention.tripse_attention`
 
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:606*
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:663*
 
 #### `get_config(self)`
 **Module:** `layers.attention.tripse_attention`
 
-*📁 src/dl_techniques/layers/attention/tripse_attention.py:753*
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:779*
+
+#### `get_config(self)`
+**Module:** `layers.attention.tripse_attention`
+
+*📁 src/dl_techniques/layers/attention/tripse_attention.py:963*
 
 #### `get_config(self)`
 **Module:** `layers.attention.rpc_attention`
 
 Return the configuration of the layer for serialization.
 
-*📁 src/dl_techniques/layers/attention/rpc_attention.py:567*
+*📁 src/dl_techniques/layers/attention/rpc_attention.py:460*
 
 #### `get_config(self)`
 **Module:** `layers.attention.multi_head_attention`
 
-Return configuration for serialization - includes ALL constructor parameters.
+Return configuration for serialization, includes all constructor parameters.
 
-*📁 src/dl_techniques/layers/attention/multi_head_attention.py:242*
+*📁 src/dl_techniques/layers/attention/multi_head_attention.py:249*
 
 #### `get_config(self)`
 **Module:** `layers.attention.shared_weights_cross_attention`
 
-Returns the layer configuration for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/attention/shared_weights_cross_attention.py:419*
+*📁 src/dl_techniques/layers/attention/shared_weights_cross_attention.py:399*
 
 #### `get_config(self)`
 **Module:** `layers.attention.single_window_attention`
 
-Serialize the layer's configuration.
+Serialize the layer configuration.
 
-*📁 src/dl_techniques/layers/attention/single_window_attention.py:311*
+*📁 src/dl_techniques/layers/attention/single_window_attention.py:419*
 
 #### `get_config(self)`
 **Module:** `layers.attention.ring_attention`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/attention/ring_attention.py:601*
+*📁 src/dl_techniques/layers/attention/ring_attention.py:468*
 
 #### `get_config(self)`
 **Module:** `layers.attention.perceiver_attention`
 
-Return configuration for serialization - includes ALL constructor parameters.
+Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/attention/perceiver_attention.py:329*
+*📁 src/dl_techniques/layers/attention/perceiver_attention.py:235*
 
 #### `get_config(self)`
 **Module:** `layers.attention.gated_attention`
 
-Get layer configuration for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/attention/gated_attention.py:591*
+*📁 src/dl_techniques/layers/attention/gated_attention.py:573*
 
 #### `get_config(self)`
 **Module:** `layers.attention.spatial_attention`
 
-Returns the layer configuration for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/attention/spatial_attention.py:240*
+*📁 src/dl_techniques/layers/attention/spatial_attention.py:224*
 
 #### `get_config(self)`
 **Module:** `layers.attention.performer_attention`
 
 Return the configuration of the layer for serialization.
 
-*📁 src/dl_techniques/layers/attention/performer_attention.py:533*
+*📁 src/dl_techniques/layers/attention/performer_attention.py:427*
 
 #### `get_config(self)`
 **Module:** `layers.attention.multi_head_cross_attention`
 
-Return configuration for serialization - includes ALL constructor parameters.
+Return configuration for serialization, includes all constructor parameters.
 
-*📁 src/dl_techniques/layers/attention/multi_head_cross_attention.py:594*
+*📁 src/dl_techniques/layers/attention/multi_head_cross_attention.py:598*
 
 #### `get_config(self)`
 **Module:** `layers.attention.fnet_fourier_transform`
 
-Return configuration for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/attention/fnet_fourier_transform.py:275*
+*📁 src/dl_techniques/layers/attention/fnet_fourier_transform.py:340*
 
 #### `get_config(self)`
 **Module:** `layers.attention.window_attention`
 
-Serialize the layer's configuration.
+Serialize the layer configuration.
 
-*📁 src/dl_techniques/layers/attention/window_attention.py:486*
+*📁 src/dl_techniques/layers/attention/window_attention.py:553*
 
 #### `get_config(self)`
 **Module:** `layers.attention.capsule_routing_attention`
 
-Return configuration dictionary for serialization.
+Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/attention/capsule_routing_attention.py:718*
+*📁 src/dl_techniques/layers/attention/capsule_routing_attention.py:649*
 
 #### `get_config(self)`
 **Module:** `layers.attention.anchor_attention`
 
-Return the configuration of the layer for serialization.
+Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/attention/anchor_attention.py:622*
+*📁 src/dl_techniques/layers/attention/anchor_attention.py:522*
+
+#### `get_config(self)`
+**Module:** `layers.attention.wave_field_attention`
+
+*📁 src/dl_techniques/layers/attention/wave_field_attention.py:85*
+
+#### `get_config(self)`
+**Module:** `layers.attention.wave_field_attention`
+
+*📁 src/dl_techniques/layers/attention/wave_field_attention.py:575*
 
 #### `get_config(self)`
 **Module:** `layers.attention.differential_attention`
 
-Get layer configuration for serialization.
+Return configuration for serialization, includes all constructor parameters.
 
-*📁 src/dl_techniques/layers/attention/differential_attention.py:415*
+*📁 src/dl_techniques/layers/attention/differential_attention.py:368*
 
 #### `get_config(self)`
 **Module:** `layers.attention.hopfield_attention`
 
-Return the configuration of the layer for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/attention/hopfield_attention.py:546*
+*📁 src/dl_techniques/layers/attention/hopfield_attention.py:563*
 
 #### `get_config(self)`
 **Module:** `layers.attention.multi_head_latent_attention`
 
-Return the configuration of the layer for serialization.
+Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/attention/multi_head_latent_attention.py:789*
+*📁 src/dl_techniques/layers/attention/multi_head_latent_attention.py:573*
 
 #### `get_config(self)`
 **Module:** `layers.attention.group_query_attention`
 
-*📁 src/dl_techniques/layers/attention/group_query_attention.py:389*
+Return configuration for serialization.
+
+*📁 src/dl_techniques/layers/attention/group_query_attention.py:447*
 
 #### `get_config(self)`
 **Module:** `layers.attention.mobile_mqa`
 
-Return config with MobileMQA specific parameters.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/attention/mobile_mqa.py:229*
+*📁 src/dl_techniques/layers/attention/mobile_mqa.py:270*
 
 #### `get_config(self)`
 **Module:** `layers.attention.convolutional_block_attention`
 
-Return configuration for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/attention/convolutional_block_attention.py:286*
+*📁 src/dl_techniques/layers/attention/convolutional_block_attention.py:250*
 
 #### `get_config(self)`
 **Module:** `layers.attention.non_local_attention`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/attention/non_local_attention.py:501*
+*📁 src/dl_techniques/layers/attention/non_local_attention.py:411*
 
 #### `get_config(self)`
 **Module:** `layers.attention.progressive_focused_attention`
 
 Return layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/attention/progressive_focused_attention.py:991*
+*📁 src/dl_techniques/layers/attention/progressive_focused_attention.py:748*
 
 #### `get_config(self)`
 **Module:** `layers.tokenizers.bpe`
 
-Returns the layer configuration for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/tokenizers/bpe.py:366*
+*📁 src/dl_techniques/layers/tokenizers/bpe.py:375*
 
 #### `get_config(self)`
 **Module:** `layers.tokenizers.bpe`
 
-Returns the layer configuration for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/tokenizers/bpe.py:452*
-
-#### `get_config(self)`
-**Module:** `layers.ntm.baseline_ntm`
-
-Get layer configuration.
-
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:152*
-
-#### `get_config(self)`
-**Module:** `layers.ntm.baseline_ntm`
-
-Get layer configuration.
-
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:373*
-
-#### `get_config(self)`
-**Module:** `layers.ntm.baseline_ntm`
-
-Get layer configuration.
-
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:611*
-
-#### `get_config(self)`
-**Module:** `layers.ntm.baseline_ntm`
-
-Get layer configuration.
-
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:796*
-
-#### `get_config(self)`
-**Module:** `layers.ntm.baseline_ntm`
-
-Get layer configuration.
-
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:1154*
-
-#### `get_config(self)`
-**Module:** `layers.ntm.baseline_ntm`
-
-Get layer configuration.
-
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:1395*
-
-#### `get_config(self)`
-**Module:** `layers.ntm.ntm_interface`
-
-Get layer configuration.
-
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:403*
-
-#### `get_config(self)`
-**Module:** `layers.ntm.ntm_interface`
-
-Get layer configuration.
-
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:514*
-
-#### `get_config(self)`
-**Module:** `layers.ntm.ntm_interface`
-
-Get layer configuration.
-
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:600*
-
-#### `get_config(self)`
-**Module:** `layers.ntm.ntm_interface`
-
-Get layer configuration.
-
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:798*
-
-#### `get_config(self)`
-**Module:** `layers.ntm.base_layers`
-
-Return layer configuration for serialization.
-
-*📁 src/dl_techniques/layers/ntm/base_layers.py:300*
-
-#### `get_config(self)`
-**Module:** `layers.ntm.base_layers`
-
-Return layer configuration for serialization.
-
-*📁 src/dl_techniques/layers/ntm/base_layers.py:636*
-
-#### `get_config(self)`
-**Module:** `layers.ntm.base_layers`
-
-Return layer configuration for serialization.
-
-*📁 src/dl_techniques/layers/ntm/base_layers.py:932*
+*📁 src/dl_techniques/layers/tokenizers/bpe.py:476*
 
 #### `get_config(self)`
 **Module:** `layers.ffn.residual_block`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/ffn/residual_block.py:320*
+*📁 src/dl_techniques/layers/ffn/residual_block.py:308*
 
 #### `get_config(self)`
 **Module:** `layers.ffn.counting_ffn`
 
-Returns the layer configuration for serialization.
+Return the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/ffn/counting_ffn.py:414*
+*📁 src/dl_techniques/layers/ffn/counting_ffn.py:396*
 
 #### `get_config(self)`
 **Module:** `layers.ffn.power_mlp_layer`
 
 Get the layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/ffn/power_mlp_layer.py:342*
+*📁 src/dl_techniques/layers/ffn/power_mlp_layer.py:333*
 
 #### `get_config(self)`
 **Module:** `layers.ffn.diff_ffn`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/ffn/diff_ffn.py:430*
+*📁 src/dl_techniques/layers/ffn/diff_ffn.py:408*
+
+#### `get_config(self)`
+**Module:** `layers.ffn.kan_linear`
+
+Return configuration dictionary for serialization.
+
+*📁 src/dl_techniques/layers/ffn/kan_linear.py:426*
 
 #### `get_config(self)`
 **Module:** `layers.ffn.gated_mlp`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/ffn/gated_mlp.py:375*
+*📁 src/dl_techniques/layers/ffn/gated_mlp.py:357*
 
 #### `get_config(self)`
 **Module:** `layers.ffn.swiglu_ffn`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/ffn/swiglu_ffn.py:396*
+*📁 src/dl_techniques/layers/ffn/swiglu_ffn.py:379*
 
 #### `get_config(self)`
 **Module:** `layers.ffn.swin_mlp`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/ffn/swin_mlp.py:347*
+*📁 src/dl_techniques/layers/ffn/swin_mlp.py:323*
 
 #### `get_config(self)`
 **Module:** `layers.ffn.mlp`
@@ -22226,154 +23379,171 @@ Get layer configuration for serialization.
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/ffn/glu_ffn.py:379*
+*📁 src/dl_techniques/layers/ffn/glu_ffn.py:318*
+
+#### `get_config(self)`
+**Module:** `layers.ffn.tversky_projection`
+
+Return the configuration of the layer for serialization.
+
+*📁 src/dl_techniques/layers/ffn/tversky_projection.py:287*
 
 #### `get_config(self)`
 **Module:** `layers.ffn.orthoglu_ffn`
 
-Returns the layer's configuration for serialization.
+Return the layer's configuration for serialization.
 
-*📁 src/dl_techniques/layers/ffn/orthoglu_ffn.py:267*
+*📁 src/dl_techniques/layers/ffn/orthoglu_ffn.py:289*
 
 #### `get_config(self)`
 **Module:** `layers.ffn.geglu_ffn`
 
-Returns the layer's configuration for serialization.
+Return the layer's configuration for serialization.
 
-*📁 src/dl_techniques/layers/ffn/geglu_ffn.py:345*
+*📁 src/dl_techniques/layers/ffn/geglu_ffn.py:313*
 
 #### `get_config(self)`
 **Module:** `layers.ffn.logic_ffn`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/ffn/logic_ffn.py:359*
+*📁 src/dl_techniques/layers/ffn/logic_ffn.py:362*
 
 #### `get_config(self)`
 **Module:** `layers.embedding.patch_embedding`
 
 Return the configuration of the layer for serialization.
 
-*📁 src/dl_techniques/layers/embedding/patch_embedding.py:262*
+*📁 src/dl_techniques/layers/embedding/patch_embedding.py:275*
 
 #### `get_config(self)`
 **Module:** `layers.embedding.patch_embedding`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/embedding/patch_embedding.py:448*
+*📁 src/dl_techniques/layers/embedding/patch_embedding.py:472*
+
+#### `get_config(self)`
+**Module:** `layers.embedding.hierarchical_codebook_embedding`
+
+*📁 src/dl_techniques/layers/embedding/hierarchical_codebook_embedding.py:271*
 
 #### `get_config(self)`
 **Module:** `layers.embedding.continuous_rope_embedding`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/embedding/continuous_rope_embedding.py:284*
+*📁 src/dl_techniques/layers/embedding/continuous_rope_embedding.py:273*
+
+#### `get_config(self)`
+**Module:** `layers.embedding.albert_factorized_embedding`
+
+*📁 src/dl_techniques/layers/embedding/albert_factorized_embedding.py:157*
 
 #### `get_config(self)`
 **Module:** `layers.embedding.modern_bert_embeddings`
 
-Returns the layer's configuration for serialization.
+Return the layer's configuration for serialization.
 
-*📁 src/dl_techniques/layers/embedding/modern_bert_embeddings.py:154*
+*📁 src/dl_techniques/layers/embedding/modern_bert_embeddings.py:187*
 
 #### `get_config(self)`
 **Module:** `layers.embedding.positional_embedding`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/embedding/positional_embedding.py:259*
+*📁 src/dl_techniques/layers/embedding/positional_embedding.py:260*
 
 #### `get_config(self)`
 **Module:** `layers.embedding.bert_embeddings`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/layers/embedding/bert_embeddings.py:347*
+*📁 src/dl_techniques/layers/embedding/bert_embeddings.py:360*
 
 #### `get_config(self)`
 **Module:** `layers.embedding.continuous_sin_cos_embedding`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/embedding/continuous_sin_cos_embedding.py:312*
+*📁 src/dl_techniques/layers/embedding/continuous_sin_cos_embedding.py:293*
 
 #### `get_config(self)`
 **Module:** `layers.embedding.dual_rotary_position_embedding`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/embedding/dual_rotary_position_embedding.py:423*
+*📁 src/dl_techniques/layers/embedding/dual_rotary_position_embedding.py:375*
 
 #### `get_config(self)`
 **Module:** `layers.embedding.rotary_position_embedding`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/embedding/rotary_position_embedding.py:422*
+*📁 src/dl_techniques/layers/embedding/rotary_position_embedding.py:386*
 
 #### `get_config(self)`
 **Module:** `layers.embedding.positional_embedding_sine_2d`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/embedding/positional_embedding_sine_2d.py:206*
+*📁 src/dl_techniques/layers/embedding/positional_embedding_sine_2d.py:201*
 
 #### `get_config(self)`
 **Module:** `layers.reasoning.hrm_reasoning_module`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/reasoning/hrm_reasoning_module.py:210*
+*📁 src/dl_techniques/layers/reasoning/hrm_reasoning_module.py:242*
 
 #### `get_config(self)`
 **Module:** `layers.reasoning.hrm_sparse_puzzle_embedding`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/reasoning/hrm_sparse_puzzle_embedding.py:271*
+*📁 src/dl_techniques/layers/reasoning/hrm_sparse_puzzle_embedding.py:213*
 
 #### `get_config(self)`
 **Module:** `layers.reasoning.hrm_reasoning_core`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/layers/reasoning/hrm_reasoning_core.py:681*
+*📁 src/dl_techniques/layers/reasoning/hrm_reasoning_core.py:594*
 
 #### `get_configurations_by_complexity(cls)`
 **Module:** `layers.vision_heads.task_types`
 
 Get configurations organized by complexity level.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:847*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:797*
 
 #### `get_current_temperature(self)`
 **Module:** `layers.neuro_grid`
 
 Get the current temperature value.
 
-*📁 src/dl_techniques/layers/neuro_grid.py:990*
+*📁 src/dl_techniques/layers/neuro_grid.py:628*
 
 #### `get_default_config(task_type)`
 **Module:** `layers.nlp_heads.factory`
 
 Get default configuration for a task type.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:1452*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:1447*
 
 #### `get_default_config(task_type)`
 **Module:** `layers.vision_heads.factory`
 
 Get default configuration for a task type.
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:1045*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:1204*
 
 #### `get_efficient_config(task_type)`
 **Module:** `layers.vision_heads.factory`
 
 Get efficient (lightweight) configuration.
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:1102*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:1261*
 
 #### `get_embedding_info()`
 **Module:** `layers.embedding.factory`
@@ -22387,112 +23557,105 @@ Get comprehensive information about all available embedding layer types.
 
 Get list of enabled tasks in a consistent order.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:611*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:572*
 
 #### `get_expert_utilization(self)`
 **Module:** `layers.moe.layer`
 
 Get statistics about expert utilization and configuration.
 
-*📁 src/dl_techniques/layers/moe/layer.py:496*
+*📁 src/dl_techniques/layers/moe/layer.py:406*
 
 #### `get_explained_variance_ratio(self)`
 **Module:** `layers.statistics.deep_kernel_pca`
 
 Get the explained variance ratio for each level.
 
-*📁 src/dl_techniques/layers/statistics/deep_kernel_pca.py:653*
+*📁 src/dl_techniques/layers/statistics/deep_kernel_pca.py:609*
 
 #### `get_ffn_info()`
 **Module:** `layers.ffn.factory`
 
 Get comprehensive information about all available FFN types.
 
-*📁 src/dl_techniques/layers/ffn/factory.py:292*
-
-#### `get_field_layer_info()`
-**Module:** `layers.geometric.fields`
-
-Get information about all available field layer types.
-
-*📁 src/dl_techniques/layers/geometric/fields/__init__.py:284*
+*📁 src/dl_techniques/layers/ffn/factory.py:332*
 
 #### `get_graph_statistics(entities, graph, entity_mask, threshold)`
 **Module:** `layers.graphs.entity_graph_refinement`
 
 Compute comprehensive statistics for an extracted entity graph.
 
-*📁 src/dl_techniques/layers/graphs/entity_graph_refinement.py:827*
+*📁 src/dl_techniques/layers/graphs/entity_graph_refinement.py:710*
 
 #### `get_grid_shapes(self)`
 **Module:** `layers.experimental.hierarchical_memory_system`
 
 Get the grid shapes for all hierarchy levels.
 
-*📁 src/dl_techniques/layers/experimental/hierarchical_memory_system.py:332*
+*📁 src/dl_techniques/layers/experimental/hierarchical_memory_system.py:311*
 
 #### `get_grid_utilization(self, inputs)`
 **Module:** `layers.neuro_grid`
 
-Compute grid utilization statistics for understanding memory usage patterns.
+Compute grid utilisation statistics.
 
-*📁 src/dl_techniques/layers/neuro_grid.py:881*
+*📁 src/dl_techniques/layers/neuro_grid.py:540*
 
 #### `get_grid_weights(self)`
 **Module:** `layers.neuro_grid`
 
-Get the current grid weights for analysis or visualization.
+Get the current grid weights for analysis or visualisation.
 
-*📁 src/dl_techniques/layers/neuro_grid.py:802*
+*📁 src/dl_techniques/layers/neuro_grid.py:485*
 
 #### `get_head_class(task_type)`
 **Module:** `layers.nlp_heads.factory`
 
 Get the appropriate head class for a task type.
 
-*📁 src/dl_techniques/layers/nlp_heads/factory.py:1311*
+*📁 src/dl_techniques/layers/nlp_heads/factory.py:1327*
 
 #### `get_head_class(task_type)`
 **Module:** `layers.vlm_heads.factory`
 
-Gets the appropriate head class for a VLM task type.
+Get the appropriate head class for a VLM task type.
 
-*📁 src/dl_techniques/layers/vlm_heads/factory.py:645*
+*📁 src/dl_techniques/layers/vlm_heads/factory.py:827*
 
 #### `get_high_performance_config(task_type)`
 **Module:** `layers.vision_heads.factory`
 
 Get high-performance configuration.
 
-*📁 src/dl_techniques/layers/vision_heads/factory.py:1117*
+*📁 src/dl_techniques/layers/vision_heads/factory.py:1276*
 
 #### `get_initial_state(self, batch_size)`
 **Module:** `layers.time_series.deepar_blocks`
 
 Get initial state for the cell.
 
-*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:463*
+*📁 src/dl_techniques/layers/time_series/deepar_blocks.py:507*
 
 #### `get_initial_state(self, batch_size)`
 **Module:** `layers.time_series.xlstm_blocks`
 
 Get initial states for the cell.
 
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:256*
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:259*
 
 #### `get_initial_state(self, batch_size)`
 **Module:** `layers.time_series.xlstm_blocks`
 
 Get initial states for the cell.
 
-*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:727*
+*📁 src/dl_techniques/layers/time_series/xlstm_blocks.py:781*
 
 #### `get_initial_state(self, inputs, batch_size, dtype)`
-**Module:** `layers.ntm.baseline_ntm`
+**Module:** `layers.memory.baseline_ntm`
 
 Initialize all states to zero/initial values.
 
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:1087*
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:1151*
 
 #### `get_input_requirements(cls, task)`
 **Module:** `layers.nlp_heads.task_types`
@@ -22506,63 +23669,63 @@ Get input requirements for a task.
 
 Compute the lambda value with layer-dependent adaptation.
 
-*📁 src/dl_techniques/layers/attention/differential_attention.py:312*
+*📁 src/dl_techniques/layers/attention/differential_attention.py:265*
 
 #### `get_level_weights(self, level)`
 **Module:** `layers.experimental.hierarchical_memory_system`
 
 Get the weight map for a specific hierarchy level.
 
-*📁 src/dl_techniques/layers/experimental/hierarchical_memory_system.py:305*
+*📁 src/dl_techniques/layers/experimental/hierarchical_memory_system.py:285*
 
 #### `get_max_sequence_length(self)`
 **Module:** `layers.nlp_heads.task_types`
 
 Get the maximum sequence length required across all tasks.
 
-*📁 src/dl_techniques/layers/nlp_heads/task_types.py:503*
+*📁 src/dl_techniques/layers/nlp_heads/task_types.py:539*
 
 #### `get_memory_state(self)`
 **Module:** `layers.experimental.contextual_memory`
 
 Get current memory state for analysis or visualization.
 
-*📁 src/dl_techniques/layers/experimental/contextual_memory.py:879*
+*📁 src/dl_techniques/layers/experimental/contextual_memory.py:829*
 
 #### `get_memory_state(self)`
-**Module:** `layers.ntm.baseline_ntm`
+**Module:** `layers.memory.baseline_ntm`
 
-Get the current memory state (not available in wrapped mode).
+Always raises NotImplementedError.
 
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:1358*
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:1429*
 
 #### `get_memory_state(self)`
-**Module:** `layers.ntm.ntm_interface`
+**Module:** `layers.memory.ntm_interface`
 
 Get the current memory state.
 
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:761*
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:789*
 
 #### `get_normalization_info()`
 **Module:** `layers.norms.factory`
 
 Get information about all supported normalization types and their parameters.
 
-*📁 src/dl_techniques/layers/norms/factory.py:281*
+*📁 src/dl_techniques/layers/norms/factory.py:181*
 
 #### `get_ood_detection_stats(self)`
 **Module:** `layers.experimental.band_rms_ood`
 
 Get comprehensive statistics for OOD detection analysis.
 
-*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:555*
+*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:493*
 
 #### `get_output_specifications(self)`
 **Module:** `layers.vision_heads.task_types`
 
 Get output specifications for all enabled tasks.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:638*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:599*
 
 #### `get_output_types(cls, task)`
 **Module:** `layers.nlp_heads.task_types`
@@ -22576,84 +23739,84 @@ Get the expected output types for a given task.
 
 Get the expected output types for a given task.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:300*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:285*
 
 #### `get_patch_features(self, inputs, training)`
 **Module:** `layers.transformers.vision_encoder`
 
-Extract patch token features for dense prediction tasks.
+Extract patch token features for dense prediction.
 
-*📁 src/dl_techniques/layers/transformers/vision_encoder.py:709*
+*📁 src/dl_techniques/layers/transformers/vision_encoder.py:601*
 
 #### `get_point_estimate(model, x_data, mdn_layer)`
 **Module:** `layers.statistics.mdn_layer`
 
-Calculate point estimates from MDN outputs as the weighted average of means.
+Calculate point estimates as ``E[y|x] = sum_i pi_i(x) mu_i(x)``.
 
-*📁 src/dl_techniques/layers/statistics/mdn_layer.py:439*
+*📁 src/dl_techniques/layers/statistics/mdn_layer.py:450*
 
 #### `get_pooled_features(self, inputs, pooling_mode, token_type_ids, attention_mask, training)`
 **Module:** `layers.transformers.text_encoder`
 
-Get pooled features with specified pooling strategy.
+Get pooled features with a specified pooling strategy.
 
-*📁 src/dl_techniques/layers/transformers/text_encoder.py:863*
+*📁 src/dl_techniques/layers/transformers/text_encoder.py:730*
 
 #### `get_prediction_intervals(point_estimates, total_variance, confidence_level)`
 **Module:** `layers.statistics.mdn_layer`
 
-Calculate prediction intervals from MDN outputs.
+Calculate Gaussian prediction intervals ``mu +/- z * sigma``.
 
-*📁 src/dl_techniques/layers/statistics/mdn_layer.py:529*
+*📁 src/dl_techniques/layers/statistics/mdn_layer.py:522*
 
 #### `get_quality_statistics(self, inputs)`
 **Module:** `layers.neuro_grid`
 
-Compute comprehensive batch-level statistical summaries for all input quality measures.
+Compute batch-level statistical summaries for all quality measures.
 
-*📁 src/dl_techniques/layers/neuro_grid.py:1249*
+*📁 src/dl_techniques/layers/neuro_grid.py:746*
 
 #### `get_sequence_features(self, inputs, token_type_ids, attention_mask, training)`
 **Module:** `layers.transformers.text_encoder`
 
 Get full sequence features regardless of output_mode.
 
-*📁 src/dl_techniques/layers/transformers/text_encoder.py:828*
+*📁 src/dl_techniques/layers/transformers/text_encoder.py:694*
 
 #### `get_shell_distance(self)`
 **Module:** `layers.experimental.band_rms_ood`
 
 Get current shell distances for OOD detection.
 
-*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:447*
+*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:395*
 
 #### `get_shell_radii(self)`
 **Module:** `layers.experimental.band_rms_ood`
 
 Get current shell radii.
 
-*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:467*
+*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:411*
 
 #### `get_soft_assignments(self, inputs)`
 **Module:** `layers.memory.som_nd_soft_layer`
 
 Get soft assignment probabilities for given inputs.
 
-*📁 src/dl_techniques/layers/memory/som_nd_soft_layer.py:837*
+*📁 src/dl_techniques/layers/memory/som_nd_soft_layer.py:740*
 
 #### `get_spatial_features(self, inputs, training)`
 **Module:** `layers.transformers.vision_encoder`
 
-Get spatial features reshaped for dense prediction tasks.
+Get spatial features reshaped for dense prediction.
 
-*📁 src/dl_techniques/layers/transformers/vision_encoder.py:730*
+*📁 src/dl_techniques/layers/transformers/vision_encoder.py:621*
 
 #### `get_stats(self)`
 **Module:** `layers.statistics.scaler`
 
 Get the currently stored persistent statistics.
 
-*📁 src/dl_techniques/layers/statistics/scaler.py:579*
+*📁 src/dl_techniques/layers/statistics/scaler.py:393*
 
 #### `get_task_categories(cls)`
 **Module:** `layers.nlp_heads.task_types`
@@ -22667,7 +23830,7 @@ Get tasks organized by categories.
 
 Get tasks organized by categories.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:155*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:150*
 
 #### `get_task_categories(cls)`
 **Module:** `layers.vlm_heads.task_types`
@@ -22681,284 +23844,284 @@ Get tasks organized by categories.
 
 Get list of enabled task names as strings.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:617*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:578*
 
 #### `get_task_suggestions(base_task, max_suggestions)`
 **Module:** `layers.vision_heads.task_types`
 
 Get task suggestions that work well with a base task.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:921*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:864*
 
 #### `get_tasks_by_category(self)`
 **Module:** `layers.vision_heads.task_types`
 
 Get enabled tasks organized by category.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:621*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:582*
 
 #### `get_uncertainty(model, x_data, mdn_layer, point_estimates)`
 **Module:** `layers.statistics.mdn_layer`
 
-Calculate and decompose predictive uncertainty from an MDN.
+Decompose predictive uncertainty via the law of total variance.
 
-*📁 src/dl_techniques/layers/statistics/mdn_layer.py:476*
+*📁 src/dl_techniques/layers/statistics/mdn_layer.py:480*
 
 #### `get_weights_as_grid(self)`
 **Module:** `layers.memory.som_2d_layer`
 
 Get the current neuron weights organized as a 2D grid for visualization.
 
-*📁 src/dl_techniques/layers/memory/som_2d_layer.py:313*
+*📁 src/dl_techniques/layers/memory/som_2d_layer.py:255*
 
 #### `get_weights_map(self)`
 **Module:** `layers.memory.som_nd_soft_layer`
 
 Get the learned prototype weight map.
 
-*📁 src/dl_techniques/layers/memory/som_nd_soft_layer.py:822*
+*📁 src/dl_techniques/layers/memory/som_nd_soft_layer.py:728*
 
 #### `get_weights_map(self)`
 **Module:** `layers.memory.som_nd_layer`
 
 Get the current weights organized as an N-dimensional map.
 
-*📁 src/dl_techniques/layers/memory/som_nd_layer.py:500*
+*📁 src/dl_techniques/layers/memory/som_nd_layer.py:450*
 
 #### `gibbs_sampling_step(self, visible)`
 **Module:** `layers.restricted_boltzmann_machine`
 
-Perform one step of Gibbs sampling: v -> h -> v'.
+Perform one Gibbs sampling step: ``v -> h -> v'``.
 
-*📁 src/dl_techniques/layers/restricted_boltzmann_machine.py:412*
+*📁 src/dl_techniques/layers/restricted_boltzmann_machine.py:347*
 
 #### `has_classification(self)`
 **Module:** `layers.vision_heads.task_types`
 
 Check if classification task is enabled.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:572*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:533*
 
 #### `has_denoising(self)`
 **Module:** `layers.vision_heads.task_types`
 
 Check if denoising task is enabled.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:595*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:556*
 
 #### `has_depth_estimation(self)`
 **Module:** `layers.vision_heads.task_types`
 
 Check if depth estimation task is enabled.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:577*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:538*
 
 #### `has_detection(self)`
 **Module:** `layers.vision_heads.task_types`
 
 Check if detection task is enabled.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:564*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:525*
 
 #### `has_instance_segmentation(self)`
 **Module:** `layers.vision_heads.task_types`
 
 Check if instance segmentation task is enabled.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:586*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:547*
 
 #### `has_panoptic_segmentation(self)`
 **Module:** `layers.vision_heads.task_types`
 
 Check if panoptic segmentation task is enabled.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:590*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:551*
 
 #### `has_segmentation(self)`
 **Module:** `layers.vision_heads.task_types`
 
 Check if segmentation task is enabled.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:568*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:529*
 
 #### `has_super_resolution(self)`
 **Module:** `layers.vision_heads.task_types`
 
 Check if super resolution task is enabled.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:599*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:560*
 
 #### `has_surface_normals(self)`
 **Module:** `layers.vision_heads.task_types`
 
 Check if surface normals estimation task is enabled.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:581*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:542*
 
 #### `has_task(self, task)`
 **Module:** `layers.nlp_heads.task_types`
 
 Check if a specific task is enabled.
 
-*📁 src/dl_techniques/layers/nlp_heads/task_types.py:468*
+*📁 src/dl_techniques/layers/nlp_heads/task_types.py:504*
 
 #### `has_task(self, task)`
 **Module:** `layers.vision_heads.task_types`
 
 Check if a specific task is enabled.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:559*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:520*
 
 #### `has_task(self, task)`
 **Module:** `layers.vlm_heads.task_types`
 
 Check if a specific task is enabled.
 
-*📁 src/dl_techniques/layers/vlm_heads/task_types.py:295*
+*📁 src/dl_techniques/layers/vlm_heads/task_types.py:327*
 
 #### `hebbian_update(self, pre_synaptic, post_synaptic)`
 **Module:** `layers.mothnet_blocks`
 
-Apply Hebbian weight update rule: ΔW = α · (x^T · y) / batch_size.
+Apply Hebbian weight update rule: ``dW = alpha * (x^T * y) / batch_size``.
 
-*📁 src/dl_techniques/layers/mothnet_blocks.py:771*
+*📁 src/dl_techniques/layers/mothnet_blocks.py:561*
 
 #### `initialize_state(self, batch_size)`
-**Module:** `layers.ntm.baseline_ntm`
+**Module:** `layers.memory.baseline_ntm`
 
 Initialize memory state for a new sequence.
 
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:77*
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:95*
 
 #### `initialize_state(self, batch_size)`
-**Module:** `layers.ntm.baseline_ntm`
+**Module:** `layers.memory.baseline_ntm`
 
 Initialize controller state for a new sequence.
 
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:719*
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:771*
 
 #### `initialize_state(self, batch_size)`
-**Module:** `layers.ntm.baseline_ntm`
+**Module:** `layers.memory.baseline_ntm`
 
-Initialize all states (placeholder implementation).
+Always raises NotImplementedError.
 
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:1280*
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:1352*
 
 #### `initialize_state(self, batch_size)`
-**Module:** `layers.ntm.ntm_interface`
+**Module:** `layers.memory.ntm_interface`
 
 Initialize memory state for a new sequence.
 
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:350*
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:348*
 
 #### `initialize_state(self, batch_size)`
-**Module:** `layers.ntm.ntm_interface`
+**Module:** `layers.memory.ntm_interface`
 
 Initialize controller state for a new sequence.
 
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:568*
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:566*
 
 #### `initialize_state(self, batch_size)`
-**Module:** `layers.ntm.ntm_interface`
+**Module:** `layers.memory.ntm_interface`
 
 Initialize all states for a new sequence.
 
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:657*
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:685*
 
 #### `inverse(self, y, context)`
 **Module:** `layers.statistics.normalizing_flow`
 
-Inverse transformation y → z with log-determinant for likelihood computation.
+Inverse transformation y to z with log-determinant for likelihood.
 
-*📁 src/dl_techniques/layers/statistics/normalizing_flow.py:336*
+*📁 src/dl_techniques/layers/statistics/normalizing_flow.py:269*
 
 #### `inverse_transform(self, components)`
 **Module:** `layers.statistics.invertible_kernel_pca`
 
 Reconstruct original data from principal components.
 
-*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:517*
+*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:454*
 
 #### `inverse_transform(self, scaled_inputs)`
 **Module:** `layers.statistics.scaler`
 
 Transform normalized data back to original scale.
 
-*📁 src/dl_techniques/layers/statistics/scaler.py:470*
+*📁 src/dl_techniques/layers/statistics/scaler.py:346*
 
 #### `is_compatible_with(self, other)`
 **Module:** `layers.vision_heads.task_types`
 
 Check if this task is compatible with another task.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:470*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:424*
 
 #### `is_multi_task(self)`
 **Module:** `layers.vision_heads.task_types`
 
 Check if multiple tasks are enabled.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:607*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:568*
 
 #### `is_single_task(self)`
 **Module:** `layers.vision_heads.task_types`
 
 Check if only one task is enabled.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:603*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:564*
 
 #### `list_attention_types()`
 **Module:** `layers.attention.factory`
 
 Get a list of all supported attention layer types.
 
-*📁 src/dl_techniques/layers/attention/factory.py:1069*
+*📁 src/dl_techniques/layers/attention/factory.py:936*
 
 #### `loop_body(current, has_changed)`
 **Module:** `layers.canny`
 
-*📁 src/dl_techniques/layers/canny.py:301*
+*📁 src/dl_techniques/layers/canny.py:319*
 
 #### `loop_cond(current, has_changed)`
 **Module:** `layers.canny`
 
-*📁 src/dl_techniques/layers/canny.py:298*
+*📁 src/dl_techniques/layers/canny.py:316*
 
 #### `loss_func(self, y_true, y_pred)`
 **Module:** `layers.statistics.normalizing_flow`
 
-Compute negative log-likelihood loss for maximum likelihood training.
+Compute exact negative log-likelihood loss.
 
-*📁 src/dl_techniques/layers/statistics/normalizing_flow.py:685*
+*📁 src/dl_techniques/layers/statistics/normalizing_flow.py:496*
 
 #### `loss_func(self, y_true, y_pred)`
 **Module:** `layers.statistics.mdn_layer`
 
-MDN loss function using negative log-likelihood.
+Compute MDN negative log-likelihood loss ``L = -log(sum_i pi_i N(y | mu_i, sigma_i))``.
 
 *📁 src/dl_techniques/layers/statistics/mdn_layer.py:358*
 
 #### `mish(inputs)`
 **Module:** `layers.activations.mish`
 
-Compute the Mish activation function.
+Compute the Mish activation function: ``f(x) = x * tanh(softplus(x))``.
 
 *📁 src/dl_techniques/layers/activations/mish.py:69*
 
 #### `multiscale_fn(n)`
 **Module:** `layers.conv2d_builder`
 
-*📁 src/dl_techniques/layers/conv2d_builder.py:160*
+*📁 src/dl_techniques/layers/conv2d_builder.py:159*
 
 #### `multiscales_generator_fn(shape, no_scales, kernel_size, use_max_pool, clip_values, round_values, normalize_values, concrete_functions, jit_compile)`
 **Module:** `layers.conv2d_builder`
 
-*📁 src/dl_techniques/layers/conv2d_builder.py:150*
+*📁 src/dl_techniques/layers/conv2d_builder.py:149*
 
 #### `no_interpolate()`
 **Module:** `layers.time_series.prism_blocks`
 
-*📁 src/dl_techniques/layers/time_series/prism_blocks.py:456*
+*📁 src/dl_techniques/layers/time_series/prism_blocks.py:496*
 
 #### `normalize_adjacency_matrix(adjacency, normalization)`
 **Module:** `layers.experimental.contextual_memory`
@@ -22972,379 +24135,377 @@ Normalize adjacency matrix for stable GNN training.
 
 Get the total number of parameters in the layer.
 
-*📁 src/dl_techniques/layers/ffn/swiglu_ffn.py:419*
+*📁 src/dl_techniques/layers/ffn/swiglu_ffn.py:402*
 
 #### `on_train_batch_end(self, batch, logs)`
 **Module:** `layers.statistics.residual_acf`
 
 Log ACF statistics at specified intervals during training.
 
-*📁 src/dl_techniques/layers/statistics/residual_acf.py:542*
+*📁 src/dl_techniques/layers/statistics/residual_acf.py:401*
 
 #### `output_size(self)`
-**Module:** `layers.ntm.baseline_ntm`
+**Module:** `layers.memory.baseline_ntm`
 
 Return output size for RNN compatibility.
 
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:920*
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:975*
 
 #### `parse_task_list(tasks, validate_compatibility)`
 **Module:** `layers.vision_heads.task_types`
 
 Parse various task input formats into TaskConfiguration.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:879*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:829*
 
 #### `predict_intervals(self, inputs)`
 **Module:** `layers.time_series.forecasting_layers`
 
 Compute calibrated prediction intervals during inference.
 
-*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:462*
+*📁 src/dl_techniques/layers/time_series/forecasting_layers.py:552*
 
 #### `predict_ood(self, data)`
 **Module:** `layers.experimental.band_rms_ood`
 
 Predict OOD for input data.
 
-*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:799*
+*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:740*
 
 #### `probability_type(self)`
 **Module:** `layers.activations.probability_output`
 
 Return the configured probability type.
 
-*📁 src/dl_techniques/layers/activations/probability_output.py:315*
+*📁 src/dl_techniques/layers/activations/probability_output.py:285*
 
 #### `quantize_from_indices(self, indices)`
 **Module:** `layers.vector_quantizer`
 
 Convert discrete indices back to continuous embeddings.
 
-*📁 src/dl_techniques/layers/vector_quantizer.py:396*
+*📁 src/dl_techniques/layers/vector_quantizer.py:317*
 
 #### `read(self, memory_state, read_weights)`
-**Module:** `layers.ntm.baseline_ntm`
+**Module:** `layers.memory.baseline_ntm`
 
 Read from memory using attention weights.
 
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:90*
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:117*
 
 #### `read(self, memory_state, read_weights)`
-**Module:** `layers.ntm.ntm_interface`
+**Module:** `layers.memory.ntm_interface`
 
 Read from memory using attention weights.
 
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:362*
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:360*
 
 #### `reconstruct(self, visible, n_steps)`
 **Module:** `layers.restricted_boltzmann_machine`
 
-Reconstruct visible units through Gibbs sampling.
+Reconstruct visible units via Gibbs sampling.
 
-*📁 src/dl_techniques/layers/restricted_boltzmann_machine.py:581*
+*📁 src/dl_techniques/layers/restricted_boltzmann_machine.py:477*
 
 #### `reparameterize(self)`
 **Module:** `layers.repmixer_block`
 
 Reparameterize all blocks in the stem for efficient inference.
 
-*📁 src/dl_techniques/layers/repmixer_block.py:568*
+*📁 src/dl_techniques/layers/repmixer_block.py:517*
 
 #### `requires_generation(self)`
 **Module:** `layers.nlp_heads.task_types`
 
 Check if any task requires generation capabilities.
 
-*📁 src/dl_techniques/layers/nlp_heads/task_types.py:493*
+*📁 src/dl_techniques/layers/nlp_heads/task_types.py:529*
 
 #### `requires_generation(self)`
 **Module:** `layers.vlm_heads.task_types`
 
 Check if any task requires text generation capabilities.
 
-*📁 src/dl_techniques/layers/vlm_heads/task_types.py:299*
+*📁 src/dl_techniques/layers/vlm_heads/task_types.py:331*
 
 #### `requires_sequence_pair(self)`
 **Module:** `layers.nlp_heads.task_types`
 
 Check if any task requires sequence pair inputs.
 
-*📁 src/dl_techniques/layers/nlp_heads/task_types.py:483*
+*📁 src/dl_techniques/layers/nlp_heads/task_types.py:519*
 
 #### `requires_token_level(self)`
 **Module:** `layers.nlp_heads.task_types`
 
 Check if any task requires token-level processing.
 
-*📁 src/dl_techniques/layers/nlp_heads/task_types.py:472*
+*📁 src/dl_techniques/layers/nlp_heads/task_types.py:508*
 
 #### `reset_carry(self, reset_flag, carry)`
 **Module:** `layers.blt_core`
 
 Reset carry state for halted sequences.
 
-*📁 src/dl_techniques/layers/blt_core.py:432*
+*📁 src/dl_techniques/layers/blt_core.py:499*
 
 #### `reset_carry(self, reset_flag, carry)`
 **Module:** `layers.reasoning.hrm_reasoning_core`
 
 Reset carry state for halted sequences.
 
-*📁 src/dl_techniques/layers/reasoning/hrm_reasoning_core.py:552*
+*📁 src/dl_techniques/layers/reasoning/hrm_reasoning_core.py:464*
 
 #### `reset_centroids(self, new_centroids)`
 **Module:** `layers.kmeans`
 
 Reset centroids to new values or reinitialize.
 
-*📁 src/dl_techniques/layers/kmeans.py:676*
+*📁 src/dl_techniques/layers/kmeans.py:650*
 
 #### `reset_memory(self, batch_size)`
-**Module:** `layers.ntm.baseline_ntm`
+**Module:** `layers.memory.baseline_ntm`
 
 Reset memory (no-op in wrapped mode).
 
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:1367*
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:1445*
 
 #### `reset_memory(self, batch_size)`
-**Module:** `layers.ntm.ntm_interface`
+**Module:** `layers.memory.ntm_interface`
 
 Reset memory to initial state.
 
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:771*
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:799*
 
 #### `reset_reparameterization(self)`
 **Module:** `layers.repmixer_block`
 
 Reset all blocks to training mode.
 
-*📁 src/dl_techniques/layers/repmixer_block.py:578*
+*📁 src/dl_techniques/layers/repmixer_block.py:530*
 
 #### `reset_stats(self)`
 **Module:** `layers.statistics.scaler`
 
 Reset all stored statistics to initial values.
 
-*📁 src/dl_techniques/layers/statistics/scaler.py:547*
+*📁 src/dl_techniques/layers/statistics/scaler.py:381*
 
 #### `sample(self, num_samples, context)`
 **Module:** `layers.statistics.normalizing_flow`
 
 Generate samples from the learned conditional distribution.
 
-*📁 src/dl_techniques/layers/statistics/normalizing_flow.py:718*
+*📁 src/dl_techniques/layers/statistics/normalizing_flow.py:525*
 
 #### `sample(self, y_pred, temperature)`
 **Module:** `layers.statistics.mdn_layer`
 
-Samples from the predicted mixture distribution.
+Sample from the predicted mixture distribution via ancestral sampling.
 
-*📁 src/dl_techniques/layers/statistics/mdn_layer.py:386*
+*📁 src/dl_techniques/layers/statistics/mdn_layer.py:389*
 
 #### `sample_hidden_given_visible(self, visible, sample)`
 **Module:** `layers.restricted_boltzmann_machine`
 
-Sample or compute hidden unit activations given visible units.
+Compute or sample hidden activations given visible units.
 
-*📁 src/dl_techniques/layers/restricted_boltzmann_machine.py:354*
+*📁 src/dl_techniques/layers/restricted_boltzmann_machine.py:300*
 
 #### `sample_visible_given_hidden(self, hidden, sample)`
 **Module:** `layers.restricted_boltzmann_machine`
 
-Sample or compute visible unit activations given hidden units.
+Compute or sample visible activations given hidden units.
 
-*📁 src/dl_techniques/layers/restricted_boltzmann_machine.py:378*
+*📁 src/dl_techniques/layers/restricted_boltzmann_machine.py:318*
 
 #### `saturated_mish(inputs, alpha, beta, mish_at_alpha)`
 **Module:** `layers.activations.mish`
 
 Compute the Saturated Mish activation function.
 
-*📁 src/dl_techniques/layers/activations/mish.py:89*
+*📁 src/dl_techniques/layers/activations/mish.py:85*
 
 #### `scaled_dot_product_attention(self, q, k, v, attention_mask, training)`
 **Module:** `layers.attention.gated_attention`
 
 Compute scaled dot-product attention.
 
-*📁 src/dl_techniques/layers/attention/gated_attention.py:447*
+*📁 src/dl_techniques/layers/attention/gated_attention.py:421*
 
 #### `set_external_confidence(self, confidence)`
 **Module:** `layers.experimental.band_rms_ood`
 
 Set external confidence signal for prediction-based confidence.
 
-*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:225*
+*📁 src/dl_techniques/layers/experimental/band_rms_ood.py:191*
 
 #### `set_temperature(self, new_temperature)`
 **Module:** `layers.neuro_grid`
 
-Update the temperature parameter for dynamic control during training.
+Update the temperature parameter.
 
-*📁 src/dl_techniques/layers/neuro_grid.py:972*
+*📁 src/dl_techniques/layers/neuro_grid.py:615*
 
 #### `sharpen_weights(weights, gamma, epsilon)`
-**Module:** `layers.ntm.ntm_interface`
+**Module:** `layers.memory.ntm_interface`
 
 Sharpen attention weights using gamma parameter.
 
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:920*
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:948*
 
 #### `smooth_transition(t)`
 **Module:** `layers.shearlet_transform`
 
-*📁 src/dl_techniques/layers/shearlet_transform.py:273*
+*📁 src/dl_techniques/layers/shearlet_transform.py:272*
 
 #### `split_mixture_params(self, y_pred)`
 **Module:** `layers.statistics.mdn_layer`
 
-Splits the concatenated network output into parameter tensors.
+Split the concatenated network output into parameter tensors.
 
-*📁 src/dl_techniques/layers/statistics/mdn_layer.py:340*
+*📁 src/dl_techniques/layers/statistics/mdn_layer.py:334*
 
 #### `state_size(self)`
-**Module:** `layers.ntm.baseline_ntm`
+**Module:** `layers.memory.baseline_ntm`
 
 Return state sizes for RNN compatibility.
 
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:915*
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:970*
 
-#### `step(state, current_rotation)`
-**Module:** `layers.experimental.field_embeddings`
+#### `step(ema_prev, xw)`
+**Module:** `layers.time_series.ema_layer`
 
-Apply current rotation to accumulated state via matrix multiplication.
-
-*📁 src/dl_techniques/layers/experimental/field_embeddings.py:396*
+*📁 src/dl_techniques/layers/time_series/ema_layer.py:162*
 
 #### `step(self, inputs, memory_state, head_states, controller_state, training)`
-**Module:** `layers.ntm.baseline_ntm`
+**Module:** `layers.memory.baseline_ntm`
 
-Single step (not used - RNN handles internally).
+Always raises NotImplementedError.
 
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:1294*
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:1372*
 
 #### `step(self, inputs, memory_state, head_states, controller_state, training)`
-**Module:** `layers.ntm.ntm_interface`
+**Module:** `layers.memory.ntm_interface`
 
 Perform a single timestep of the NTM.
 
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:672*
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:700*
 
 #### `tasks(self)`
 **Module:** `layers.nlp_heads.task_types`
 
 Get the set of enabled tasks.
 
-*📁 src/dl_techniques/layers/nlp_heads/task_types.py:464*
+*📁 src/dl_techniques/layers/nlp_heads/task_types.py:500*
 
 #### `tasks(self)`
 **Module:** `layers.vision_heads.task_types`
 
 Get the set of enabled tasks.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:555*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:516*
 
 #### `tasks(self)`
 **Module:** `layers.vlm_heads.task_types`
 
 Get the set of enabled tasks.
 
-*📁 src/dl_techniques/layers/vlm_heads/task_types.py:291*
+*📁 src/dl_techniques/layers/vlm_heads/task_types.py:323*
 
 #### `text_to_bytes(self, text, add_bos, add_eos)`
 **Module:** `layers.blt_blocks`
 
 Convert text string to byte token sequence.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:285*
+*📁 src/dl_techniques/layers/blt_blocks.py:276*
 
 #### `thresh_max(x, axis, slope, epsilon)`
 **Module:** `layers.activations.thresh_max`
 
 Functional interface for ThreshMax activation.
 
-*📁 src/dl_techniques/layers/activations/thresh_max.py:276*
+*📁 src/dl_techniques/layers/activations/thresh_max.py:329*
 
 #### `to_dict(self)`
 **Module:** `layers.nlp_heads.task_types`
 
 Convert configuration to dictionary for serialization.
 
-*📁 src/dl_techniques/layers/nlp_heads/task_types.py:515*
+*📁 src/dl_techniques/layers/nlp_heads/task_types.py:551*
+
+#### `to_dict(self)`
+**Module:** `layers.memory.ntm_interface`
+
+Convert configuration to dictionary for serialization.
+
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:266*
 
 #### `to_dict(self)`
 **Module:** `layers.vision_heads.task_types`
 
 Convert configuration to dictionary for serialization.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:647*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:608*
 
 #### `to_dict(self)`
 **Module:** `layers.vlm_heads.task_types`
 
 Convert configuration to dictionary for serialization.
 
-*📁 src/dl_techniques/layers/vlm_heads/task_types.py:312*
+*📁 src/dl_techniques/layers/vlm_heads/task_types.py:344*
 
 #### `to_dict(self)`
 **Module:** `layers.moe.config`
 
 Convert configuration to dictionary for serialization.
 
-*📁 src/dl_techniques/layers/moe/config.py:248*
-
-#### `to_dict(self)`
-**Module:** `layers.ntm.ntm_interface`
-
-Convert configuration to dictionary for serialization.
-
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:268*
+*📁 src/dl_techniques/layers/moe/config.py:232*
 
 #### `to_string(self)`
 **Module:** `layers.layer_scale`
 
 Convert enum to string representation.
 
-*📁 src/dl_techniques/layers/layer_scale.py:93*
+*📁 src/dl_techniques/layers/layer_scale.py:89*
 
 #### `to_string(self)`
 **Module:** `layers.conv2d_builder`
 
-*📁 src/dl_techniques/layers/conv2d_builder.py:240*
+*📁 src/dl_techniques/layers/conv2d_builder.py:239*
 
 #### `to_strings(cls, tasks)`
 **Module:** `layers.vision_heads.task_types`
 
 Convert list of TaskTypes to list of strings.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:436*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:400*
 
 #### `tokenize_texts(self, texts)`
 **Module:** `layers.tokenizers.bpe`
 
-Tokenize a list of text strings (preprocessing method).
+Tokenize a list of text strings.
 
-*📁 src/dl_techniques/layers/tokenizers/bpe.py:317*
+*📁 src/dl_techniques/layers/tokenizers/bpe.py:332*
 
 #### `tokens_to_text(self, tokens)`
 **Module:** `layers.blt_blocks`
 
 Convert byte token sequence back to text.
 
-*📁 src/dl_techniques/layers/blt_blocks.py:311*
+*📁 src/dl_techniques/layers/blt_blocks.py:300*
 
 #### `total_anchor_points(self)`
 **Module:** `layers.anchor_generator`
 
 Calculate total number of anchor points across all stride levels.
 
-*📁 src/dl_techniques/layers/anchor_generator.py:257*
+*📁 src/dl_techniques/layers/anchor_generator.py:268*
 
 #### `train_bpe(texts, vocab_size, min_frequency, do_lower_case, handle_punctuation)`
 **Module:** `layers.tokenizers.bpe`
 
-Train BPE tokenizer on a corpus of texts with optimized performance.
+Train BPE tokenizer on a corpus of texts.
 
 *📁 src/dl_techniques/layers/tokenizers/bpe.py:23*
 
@@ -23353,33 +24514,33 @@ Train BPE tokenizer on a corpus of texts with optimized performance.
 
 Transform inputs to principal components (alias for call).
 
-*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:502*
+*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:441*
 
 #### `type_config(self)`
 **Module:** `layers.activations.probability_output`
 
 Return the type-specific configuration.
 
-*📁 src/dl_techniques/layers/activations/probability_output.py:320*
+*📁 src/dl_techniques/layers/activations/probability_output.py:290*
 
 #### `update_grid_from_samples(self, x)`
-**Module:** `layers.kan_linear`
+**Module:** `layers.ffn.kan_linear`
 
 Update B-spline grid based on input data statistics.
 
-*📁 src/dl_techniques/layers/kan_linear.py:404*
+*📁 src/dl_techniques/layers/ffn/kan_linear.py:371*
 
 #### `update_pca_components(self, rff_features, training)`
 **Module:** `layers.statistics.invertible_kernel_pca`
 
 Update PCA components using eigendecomposition of RFF features.
 
-*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:420*
+*📁 src/dl_techniques/layers/statistics/invertible_kernel_pca.py:360*
 
 #### `upsample(input_layer, upsample_type, conv_params, bn_params, ln_params)`
 **Module:** `layers.upsample`
 
-Applies upsampling operation to the input layer based on specified strategy.
+Apply upsampling operation to the input layer based on specified strategy.
 
 *📁 src/dl_techniques/layers/upsample.py:102*
 
@@ -23388,84 +24549,63 @@ Applies upsampling operation to the input layer based on specified strategy.
 
 Validate activation layer configuration parameters.
 
-*📁 src/dl_techniques/layers/activations/factory.py:331*
+*📁 src/dl_techniques/layers/activations/factory.py:332*
 
 #### `validate_attention_config(attention_type)`
 **Module:** `layers.attention.factory`
 
 Validate attention layer configuration parameters against type requirements.
 
-*📁 src/dl_techniques/layers/attention/factory.py:760*
+*📁 src/dl_techniques/layers/attention/factory.py:732*
 
 #### `validate_embedding_config(embedding_type)`
 **Module:** `layers.embedding.factory`
 
 Validate embedding configuration parameters.
 
-*📁 src/dl_techniques/layers/embedding/factory.py:165*
+*📁 src/dl_techniques/layers/embedding/factory.py:153*
 
 #### `validate_ffn_config(ffn_type)`
 **Module:** `layers.ffn.factory`
 
 Validate FFN configuration parameters.
 
-*📁 src/dl_techniques/layers/ffn/factory.py:317*
-
-#### `validate_field_config(layer_type)`
-**Module:** `layers.geometric.fields`
-
-Validate configuration for a field layer type.
-
-*📁 src/dl_techniques/layers/geometric/fields/__init__.py:156*
+*📁 src/dl_techniques/layers/ffn/factory.py:343*
 
 #### `validate_normalization_config(normalization_type)`
 **Module:** `layers.norms.factory`
 
 Validate normalization configuration parameters.
 
-*📁 src/dl_techniques/layers/norms/factory.py:378*
+*📁 src/dl_techniques/layers/norms/factory.py:270*
 
 #### `validate_task_combination(tasks)`
 **Module:** `layers.vision_heads.task_types`
 
 Validate if a combination of tasks is reasonable.
 
-*📁 src/dl_techniques/layers/vision_heads/task_types.py:940*
-
-#### `verify_rotation_matrix(rotation, tolerance)`
-**Module:** `layers.experimental.field_embeddings`
-
-Verify that a matrix is a valid rotation (orthogonal with det=1).
-
-*📁 src/dl_techniques/layers/experimental/field_embeddings.py:988*
-
-#### `visualize_stress_trajectory(stress_values, threshold)`
-**Module:** `layers.experimental.field_embeddings`
-
-Visualize stress values over a batch to identify anomalies.
-
-*📁 src/dl_techniques/layers/experimental/field_embeddings.py:1035*
+*📁 src/dl_techniques/layers/vision_heads/task_types.py:879*
 
 #### `width_values(self)`
 **Module:** `layers.radial_basis_function`
 
 Get current effective width (gamma) values.
 
-*📁 src/dl_techniques/layers/radial_basis_function.py:334*
+*📁 src/dl_techniques/layers/radial_basis_function.py:349*
 
 #### `write(self, memory_state, write_weights, erase_vector, add_vector)`
-**Module:** `layers.ntm.baseline_ntm`
+**Module:** `layers.memory.baseline_ntm`
 
 Write to memory using erase-then-add mechanism.
 
-*📁 src/dl_techniques/layers/ntm/baseline_ntm.py:109*
+*📁 src/dl_techniques/layers/memory/baseline_ntm.py:136*
 
 #### `write(self, memory_state, write_weights, erase_vector, add_vector)`
-**Module:** `layers.ntm.ntm_interface`
+**Module:** `layers.memory.ntm_interface`
 
 Write to memory using erase and add operations.
 
-*📁 src/dl_techniques/layers/ntm/ntm_interface.py:380*
+*📁 src/dl_techniques/layers/memory/ntm_interface.py:378*
 
 ### Losses Functions
 
@@ -23502,14 +24642,21 @@ Analyzes individual components of the CapsuleMarginLoss for debugging.
 
 Approximate distance transform using morphological operations.
 
-*📁 src/dl_techniques/losses/segmentation_loss.py:486*
+*📁 src/dl_techniques/losses/segmentation_loss.py:515*
 
 #### `boundary_loss(self, y_true, y_pred)`
 **Module:** `losses.segmentation_loss`
 
 Implement Boundary loss.
 
-*📁 src/dl_techniques/losses/segmentation_loss.py:406*
+*📁 src/dl_techniques/losses/segmentation_loss.py:435*
+
+#### `call(self, y_true, y_pred)`
+**Module:** `losses.multi_task_loss`
+
+Compute weighted sum of per-task MSE losses.
+
+*📁 src/dl_techniques/losses/multi_task_loss.py:50*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.brier_spiegelhalters_ztest_loss`
@@ -23544,7 +24691,7 @@ Compute stable max cross entropy loss.
 
 Compute combined HRM loss.
 
-*📁 src/dl_techniques/losses/hrm_loss.py:161*
+*📁 src/dl_techniques/losses/hrm_loss.py:158*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.goodhart_loss`
@@ -23561,6 +24708,13 @@ Computes the margin loss for capsule networks.
 *📁 src/dl_techniques/losses/capsule_margin_loss.py:188*
 
 #### `call(self, y_true, y_pred)`
+**Module:** `losses.masked_causal_lm_loss`
+
+Compute masked causal LM loss.
+
+*📁 src/dl_techniques/losses/masked_causal_lm_loss.py:94*
+
+#### `call(self, y_true, y_pred)`
 **Module:** `losses.affine_invariant_loss`
 
 Compute affine-invariant depth loss.
@@ -23573,6 +24727,20 @@ Compute affine-invariant depth loss.
 Compute the decoupled information-theoretic loss for a batch.
 
 *📁 src/dl_techniques/losses/decoupled_information_loss.py:184*
+
+#### `call(self, y_true, y_pred)`
+**Module:** `losses.segmentation_wrapper_loss`
+
+Forward `(y_true, y_pred)` to the selected `SegmentationLosses` method.
+
+*📁 src/dl_techniques/losses/segmentation_wrapper_loss.py:146*
+
+#### `call(self, y_true, y_pred)`
+**Module:** `losses.scaled_mse_loss`
+
+Compute MSE after resizing y_true to match y_pred spatial dims.
+
+*📁 src/dl_techniques/losses/scaled_mse_loss.py:58*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.huber_loss`
@@ -23663,126 +24831,133 @@ Compute the focal loss with uncertainty regularization.
 
 Apply the approximation function to transform probabilities to near-binary values.
 
-*📁 src/dl_techniques/losses/any_loss.py:171*
+*📁 src/dl_techniques/losses/any_loss.py:166*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.any_loss`
 
 Abstract method that should be implemented by subclasses.
 
-*📁 src/dl_techniques/losses/any_loss.py:340*
+*📁 src/dl_techniques/losses/any_loss.py:335*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.any_loss`
 
 Compute the accuracy loss.
 
-*📁 src/dl_techniques/losses/any_loss.py:447*
+*📁 src/dl_techniques/losses/any_loss.py:442*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.any_loss`
 
 Compute the precision loss.
 
-*📁 src/dl_techniques/losses/any_loss.py:531*
+*📁 src/dl_techniques/losses/any_loss.py:526*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.any_loss`
 
 Compute the recall loss.
 
-*📁 src/dl_techniques/losses/any_loss.py:614*
+*📁 src/dl_techniques/losses/any_loss.py:609*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.any_loss`
 
 Compute the specificity loss.
 
-*📁 src/dl_techniques/losses/any_loss.py:697*
+*📁 src/dl_techniques/losses/any_loss.py:692*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.any_loss`
 
 Compute the F1 loss.
 
-*📁 src/dl_techniques/losses/any_loss.py:787*
+*📁 src/dl_techniques/losses/any_loss.py:782*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.any_loss`
 
 Compute the F-beta loss.
 
-*📁 src/dl_techniques/losses/any_loss.py:893*
+*📁 src/dl_techniques/losses/any_loss.py:888*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.any_loss`
 
 Compute the balanced accuracy loss.
 
-*📁 src/dl_techniques/losses/any_loss.py:1000*
+*📁 src/dl_techniques/losses/any_loss.py:995*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.any_loss`
 
 Compute the geometric mean loss.
 
-*📁 src/dl_techniques/losses/any_loss.py:1086*
+*📁 src/dl_techniques/losses/any_loss.py:1081*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.any_loss`
 
 Compute the Youden's J loss.
 
-*📁 src/dl_techniques/losses/any_loss.py:1174*
+*📁 src/dl_techniques/losses/any_loss.py:1169*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.any_loss`
 
 Compute the MCC loss.
 
-*📁 src/dl_techniques/losses/any_loss.py:1273*
+*📁 src/dl_techniques/losses/any_loss.py:1268*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.any_loss`
 
 Compute the Cohen's Kappa loss.
 
-*📁 src/dl_techniques/losses/any_loss.py:1379*
+*📁 src/dl_techniques/losses/any_loss.py:1374*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.any_loss`
 
 Compute the IoU loss.
 
-*📁 src/dl_techniques/losses/any_loss.py:1488*
+*📁 src/dl_techniques/losses/any_loss.py:1483*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.any_loss`
 
 Compute the Dice loss.
 
-*📁 src/dl_techniques/losses/any_loss.py:1571*
+*📁 src/dl_techniques/losses/any_loss.py:1566*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.any_loss`
 
 Compute the Tversky loss.
 
-*📁 src/dl_techniques/losses/any_loss.py:1688*
+*📁 src/dl_techniques/losses/any_loss.py:1683*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.any_loss`
 
 Compute the Focal Tversky loss.
 
-*📁 src/dl_techniques/losses/any_loss.py:1824*
+*📁 src/dl_techniques/losses/any_loss.py:1819*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.any_loss`
 
 Compute the combined loss.
 
-*📁 src/dl_techniques/losses/any_loss.py:1984*
+*📁 src/dl_techniques/losses/any_loss.py:1979*
+
+#### `call(self, y_true, y_pred)`
+**Module:** `losses.focal_causal_lm_loss`
+
+Compute focal causal LM loss.
+
+*📁 src/dl_techniques/losses/focal_causal_lm_loss.py:110*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.mase_loss`
@@ -23803,14 +24978,28 @@ Compute SMAPE loss.
 
 Compute loss for TabM ensemble predictions.
 
-*📁 src/dl_techniques/losses/tabm_loss.py:34*
+*📁 src/dl_techniques/losses/tabm_loss.py:35*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.clustering_loss`
 
 Compute the clustering loss.
 
-*📁 src/dl_techniques/losses/clustering_loss.py:168*
+*📁 src/dl_techniques/losses/clustering_loss.py:166*
+
+#### `call(self, y_true, y_pred)`
+**Module:** `losses.utilization_loss`
+
+Compute MANN utilization loss.
+
+*📁 src/dl_techniques/losses/utilization_loss.py:62*
+
+#### `call(self, y_true, y_pred)`
+**Module:** `losses.utilization_loss`
+
+Compute GNN utilization loss.
+
+*📁 src/dl_techniques/losses/utilization_loss.py:153*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.wasserstein_loss`
@@ -23831,14 +25020,14 @@ Compute the Wasserstein loss with gradient penalty.
 
 Compute the Wasserstein divergence.
 
-*📁 src/dl_techniques/losses/wasserstein_loss.py:459*
+*📁 src/dl_techniques/losses/wasserstein_loss.py:456*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.sparsemax_loss`
 
 Compute sparsemax loss per sample.
 
-*📁 src/dl_techniques/losses/sparsemax_loss.py:226*
+*📁 src/dl_techniques/losses/sparsemax_loss.py:227*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.dino_loss`
@@ -23852,28 +25041,21 @@ Compute DINO loss between teacher and student outputs.
 
 Compute iBOT loss on masked patches only.
 
-*📁 src/dl_techniques/losses/dino_loss.py:377*
+*📁 src/dl_techniques/losses/dino_loss.py:378*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.dino_loss`
 
 Compute KoLeo regularization loss.
 
-*📁 src/dl_techniques/losses/dino_loss.py:542*
-
-#### `call(self, y_true, y_pred)`
-**Module:** `losses.segmentation_loss`
-
-Call the wrapped loss function.
-
-*📁 src/dl_techniques/losses/segmentation_loss.py:567*
+*📁 src/dl_techniques/losses/dino_loss.py:544*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.nano_vlm_loss`
 
 Compute the autoregressive language modeling loss.
 
-*📁 src/dl_techniques/losses/nano_vlm_loss.py:151*
+*📁 src/dl_techniques/losses/nano_vlm_loss.py:152*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.multi_labels_loss`
@@ -23887,21 +25069,21 @@ Compute loss independently per channel with adaptive weighting.
 
 Compute focal loss element-wise.
 
-*📁 src/dl_techniques/losses/multi_labels_loss.py:238*
+*📁 src/dl_techniques/losses/multi_labels_loss.py:240*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.multi_labels_loss`
 
 Compute Dice loss.
 
-*📁 src/dl_techniques/losses/multi_labels_loss.py:329*
+*📁 src/dl_techniques/losses/multi_labels_loss.py:331*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.chamfer_loss`
 
 Computes the Chamfer distance between two point clouds.
 
-*📁 src/dl_techniques/losses/chamfer_loss.py:39*
+*📁 src/dl_techniques/losses/chamfer_loss.py:41*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `losses.feature_alignment_loss`
@@ -23950,7 +25132,7 @@ Compute quantile loss.
 
 Compute vectorized quantile loss.
 
-*📁 src/dl_techniques/losses/quantile_loss.py:136*
+*📁 src/dl_techniques/losses/quantile_loss.py:159*
 
 #### `capsule_margin_loss(y_pred, y_true, downweight, positive_margin, negative_margin)`
 **Module:** `losses.capsule_margin_loss`
@@ -23962,14 +25144,14 @@ Compute vectorized quantile loss.
 
 Implement Combo loss (combination of Dice and Cross-Entropy).
 
-*📁 src/dl_techniques/losses/segmentation_loss.py:379*
+*📁 src/dl_techniques/losses/segmentation_loss.py:408*
 
 #### `compute_boundary_map(mask)`
 **Module:** `losses.segmentation_loss`
 
 Compute boundary map using difference-based edge detection.
 
-*📁 src/dl_techniques/losses/segmentation_loss.py:431*
+*📁 src/dl_techniques/losses/segmentation_loss.py:460*
 
 #### `compute_box_and_dfl_only()`
 **Module:** `losses.yolo12_multitask_loss`
@@ -23983,14 +25165,14 @@ A nested function to compute losses that only apply to foreground anchors. This 
 
 Compute various clustering quality metrics.
 
-*📁 src/dl_techniques/losses/clustering_loss.py:369*
+*📁 src/dl_techniques/losses/clustering_loss.py:368*
 
 #### `compute_confusion_matrix(self, y_true, y_pred)`
 **Module:** `losses.any_loss`
 
 Compute differentiable confusion matrix entries.
 
-*📁 src/dl_techniques/losses/any_loss.py:298*
+*📁 src/dl_techniques/losses/any_loss.py:293*
 
 #### `compute_gradient_penalty(critic, real_samples, fake_samples, lambda_gp)`
 **Module:** `losses.wasserstein_loss`
@@ -24018,63 +25200,70 @@ Compute the output shape of the loss.
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/losses/any_loss.py:190*
+*📁 src/dl_techniques/losses/any_loss.py:185*
 
 #### `create_adaptive_siglip_loss(initial_temperature, target_entropy)`
 **Module:** `losses.siglip_contrastive_loss`
 
 Create adaptive SigLIP loss with dynamic temperature.
 
-*📁 src/dl_techniques/losses/siglip_contrastive_loss.py:390*
+*📁 src/dl_techniques/losses/siglip_contrastive_loss.py:396*
 
 #### `create_hrm_loss(lm_loss_type, q_loss_weight, ignore_index)`
 **Module:** `losses.hrm_loss`
 
 Create HRM loss function.
 
-*📁 src/dl_techniques/losses/hrm_loss.py:233*
+*📁 src/dl_techniques/losses/hrm_loss.py:230*
 
 #### `create_hybrid_loss(siglip_weight, score_weight)`
 **Module:** `losses.siglip_contrastive_loss`
 
 Create hybrid loss combining SigLIP with score matching.
 
-*📁 src/dl_techniques/losses/siglip_contrastive_loss.py:403*
+*📁 src/dl_techniques/losses/siglip_contrastive_loss.py:409*
 
 #### `create_loss_function(loss_name, config)`
 **Module:** `losses.segmentation_loss`
 
 Create a Keras loss function from the specified loss.
 
-*📁 src/dl_techniques/losses/segmentation_loss.py:525*
+*📁 src/dl_techniques/losses/segmentation_loss.py:554*
 
 #### `create_multilabel_segmentation_loss(loss_type, alpha, gamma, channel_weights, smooth)`
 **Module:** `losses.multi_labels_loss`
 
 Factory function to create appropriate loss for multi-label segmentation.
 
-*📁 src/dl_techniques/losses/multi_labels_loss.py:381*
+*📁 src/dl_techniques/losses/multi_labels_loss.py:383*
+
+#### `create_segmentation_wrapper_loss(loss_name, config)`
+**Module:** `losses.segmentation_wrapper_loss`
+
+Convenience factory mirroring `create_hrm_loss` / `create_siglip_loss`.
+
+*📁 src/dl_techniques/losses/segmentation_wrapper_loss.py:196*
 
 #### `create_siglip_loss(temperature, use_learnable_temperature)`
 **Module:** `losses.siglip_contrastive_loss`
 
 Create standard SigLIP contrastive loss.
 
-*📁 src/dl_techniques/losses/siglip_contrastive_loss.py:377*
+*📁 src/dl_techniques/losses/siglip_contrastive_loss.py:383*
 
 #### `create_wgan_gp_losses(lambda_gp)`
 **Module:** `losses.wasserstein_loss`
 
 Create critic and generator losses for WGAN-GP.
 
-*📁 src/dl_techniques/losses/wasserstein_loss.py:524*
+*📁 src/dl_techniques/losses/wasserstein_loss.py:521*
 
 #### `create_wgan_losses(lambda_gp)`
 **Module:** `losses.wasserstein_loss`
 
 Create critic and generator losses for WGAN.
 
-*📁 src/dl_techniques/losses/wasserstein_loss.py:502*
+*📁 src/dl_techniques/losses/wasserstein_loss.py:499*
 
 #### `create_yolov12_coco_loss(input_shape)`
 **Module:** `losses.yolo12_multitask_loss`
@@ -24102,28 +25291,40 @@ Factory function to create the YOLOv12MultiTaskLoss instance.
 
 Implement weighted cross-entropy loss.
 
-*📁 src/dl_techniques/losses/segmentation_loss.py:136*
+*📁 src/dl_techniques/losses/segmentation_loss.py:163*
 
 #### `dice_loss(self, y_true, y_pred)`
 **Module:** `losses.segmentation_loss`
 
 Implement Dice loss.
 
-*📁 src/dl_techniques/losses/segmentation_loss.py:170*
+*📁 src/dl_techniques/losses/segmentation_loss.py:197*
 
 #### `focal_loss(self, y_true, y_pred)`
 **Module:** `losses.segmentation_loss`
 
 Implement Focal loss.
 
-*📁 src/dl_techniques/losses/segmentation_loss.py:204*
+*📁 src/dl_techniques/losses/segmentation_loss.py:231*
 
 #### `focal_tversky_loss(self, y_true, y_pred)`
 **Module:** `losses.segmentation_loss`
 
 Implement Focal Tversky loss.
 
-*📁 src/dl_techniques/losses/segmentation_loss.py:274*
+*📁 src/dl_techniques/losses/segmentation_loss.py:301*
+
+#### `from_config(cls, config)`
+**Module:** `losses.clifford_detection_loss`
+
+*📁 src/dl_techniques/losses/clifford_detection_loss.py:126*
+
+#### `from_config(cls, config)`
+**Module:** `losses.segmentation_wrapper_loss`
+
+Reconstruct a `SegmentationWrapperLoss` from its config dict.
+
+*📁 src/dl_techniques/losses/segmentation_wrapper_loss.py:178*
 
 #### `from_config(cls, config)`
 **Module:** `losses.focal_uncertainty_loss`
@@ -24137,19 +25338,26 @@ Create a FocalUncertaintyLoss instance from a configuration dictionary.
 
 Create an instance from config dictionary.
 
-*📁 src/dl_techniques/losses/any_loss.py:2026*
+*📁 src/dl_techniques/losses/any_loss.py:2021*
+
+#### `from_config(cls, config)`
+**Module:** `losses.segmentation_loss`
+
+Reconstruct a LossConfig from its serialized dict.
+
+*📁 src/dl_techniques/losses/segmentation_loss.py:73*
 
 #### `from_config(cls, config)`
 **Module:** `losses.nano_vlm_loss`
 
 Create loss function from configuration.
 
-*📁 src/dl_techniques/losses/nano_vlm_loss.py:264*
+*📁 src/dl_techniques/losses/nano_vlm_loss.py:279*
 
 #### `from_config(cls, config)`
 **Module:** `losses.multi_labels_loss`
 
-*📁 src/dl_techniques/losses/multi_labels_loss.py:186*
+*📁 src/dl_techniques/losses/multi_labels_loss.py:188*
 
 #### `from_config(cls, config)`
 **Module:** `losses.yolo12_multitask_loss`
@@ -24157,6 +25365,11 @@ Create loss function from configuration.
 Creates a loss instance from its config.
 
 *📁 src/dl_techniques/losses/yolo12_multitask_loss.py:1128*
+
+#### `get_config(self)`
+**Module:** `losses.multi_task_loss`
+
+*📁 src/dl_techniques/losses/multi_task_loss.py:73*
 
 #### `get_config(self)`
 **Module:** `losses.brier_spiegelhalters_ztest_loss`
@@ -24205,7 +25418,7 @@ Get loss configuration.
 
 Get loss configuration.
 
-*📁 src/dl_techniques/losses/hrm_loss.py:221*
+*📁 src/dl_techniques/losses/hrm_loss.py:218*
 
 #### `get_config(self)`
 **Module:** `losses.goodhart_loss`
@@ -24215,11 +25428,23 @@ Returns the configuration dictionary for serialization.
 *📁 src/dl_techniques/losses/goodhart_loss.py:266*
 
 #### `get_config(self)`
+**Module:** `losses.clifford_detection_loss`
+
+*📁 src/dl_techniques/losses/clifford_detection_loss.py:120*
+
+#### `get_config(self)`
 **Module:** `losses.capsule_margin_loss`
 
 Returns the configuration dictionary for serialization.
 
 *📁 src/dl_techniques/losses/capsule_margin_loss.py:214*
+
+#### `get_config(self)`
+**Module:** `losses.masked_causal_lm_loss`
+
+Get loss configuration for serialization.
+
+*📁 src/dl_techniques/losses/masked_causal_lm_loss.py:138*
 
 #### `get_config(self)`
 **Module:** `losses.affine_invariant_loss`
@@ -24234,6 +25459,18 @@ Returns the configuration of the loss function.
 Return the configuration dictionary for serialization.
 
 *📁 src/dl_techniques/losses/decoupled_information_loss.py:281*
+
+#### `get_config(self)`
+**Module:** `losses.segmentation_wrapper_loss`
+
+Return a fully serializable config dict.
+
+*📁 src/dl_techniques/losses/segmentation_wrapper_loss.py:159*
+
+#### `get_config(self)`
+**Module:** `losses.scaled_mse_loss`
+
+*📁 src/dl_techniques/losses/scaled_mse_loss.py:81*
 
 #### `get_config(self)`
 **Module:** `losses.huber_loss`
@@ -24289,7 +25526,7 @@ Return configuration for serialization.
 
 Return configuration dictionary for serialization.
 
-*📁 src/dl_techniques/losses/clip_contrastive_loss.py:633*
+*📁 src/dl_techniques/losses/clip_contrastive_loss.py:652*
 
 #### `get_config(self)`
 **Module:** `losses.siglip_contrastive_loss`
@@ -24304,7 +25541,7 @@ Return configuration dictionary for serialization.
 #### `get_config(self)`
 **Module:** `losses.siglip_contrastive_loss`
 
-*📁 src/dl_techniques/losses/siglip_contrastive_loss.py:364*
+*📁 src/dl_techniques/losses/siglip_contrastive_loss.py:370*
 
 #### `get_config(self)`
 **Module:** `losses.focal_uncertainty_loss`
@@ -24318,42 +25555,49 @@ Return the configuration dictionary for serialization.
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/losses/any_loss.py:205*
+*📁 src/dl_techniques/losses/any_loss.py:200*
 
 #### `get_config(self)`
 **Module:** `losses.any_loss`
 
 Get loss configuration for serialization.
 
-*📁 src/dl_techniques/losses/any_loss.py:362*
+*📁 src/dl_techniques/losses/any_loss.py:357*
 
 #### `get_config(self)`
 **Module:** `losses.any_loss`
 
 Get loss configuration for serialization.
 
-*📁 src/dl_techniques/losses/any_loss.py:917*
+*📁 src/dl_techniques/losses/any_loss.py:912*
 
 #### `get_config(self)`
 **Module:** `losses.any_loss`
 
 Get loss configuration for serialization.
 
-*📁 src/dl_techniques/losses/any_loss.py:1716*
+*📁 src/dl_techniques/losses/any_loss.py:1711*
 
 #### `get_config(self)`
 **Module:** `losses.any_loss`
 
 Get loss configuration for serialization.
 
-*📁 src/dl_techniques/losses/any_loss.py:1854*
+*📁 src/dl_techniques/losses/any_loss.py:1849*
 
 #### `get_config(self)`
 **Module:** `losses.any_loss`
 
 Get loss configuration for serialization.
 
-*📁 src/dl_techniques/losses/any_loss.py:2010*
+*📁 src/dl_techniques/losses/any_loss.py:2005*
+
+#### `get_config(self)`
+**Module:** `losses.focal_causal_lm_loss`
+
+Get loss configuration for serialization.
+
+*📁 src/dl_techniques/losses/focal_causal_lm_loss.py:164*
 
 #### `get_config(self)`
 **Module:** `losses.mase_loss`
@@ -24372,14 +25616,24 @@ Get loss configuration.
 #### `get_config(self)`
 **Module:** `losses.tabm_loss`
 
-*📁 src/dl_techniques/losses/tabm_loss.py:60*
+*📁 src/dl_techniques/losses/tabm_loss.py:58*
 
 #### `get_config(self)`
 **Module:** `losses.clustering_loss`
 
 Get the configuration of the loss function.
 
-*📁 src/dl_techniques/losses/clustering_loss.py:205*
+*📁 src/dl_techniques/losses/clustering_loss.py:203*
+
+#### `get_config(self)`
+**Module:** `losses.utilization_loss`
+
+*📁 src/dl_techniques/losses/utilization_loss.py:106*
+
+#### `get_config(self)`
+**Module:** `losses.utilization_loss`
+
+*📁 src/dl_techniques/losses/utilization_loss.py:196*
 
 #### `get_config(self)`
 **Module:** `losses.wasserstein_loss`
@@ -24400,64 +25654,64 @@ Get the configuration of the loss.
 
 Get the configuration of the loss.
 
-*📁 src/dl_techniques/losses/wasserstein_loss.py:486*
+*📁 src/dl_techniques/losses/wasserstein_loss.py:483*
 
 #### `get_config(self)`
 **Module:** `losses.sparsemax_loss`
 
 Get loss configuration for serialization.
 
-*📁 src/dl_techniques/losses/sparsemax_loss.py:271*
+*📁 src/dl_techniques/losses/sparsemax_loss.py:269*
 
 #### `get_config(self)`
 **Module:** `losses.dino_loss`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/losses/dino_loss.py:250*
+*📁 src/dl_techniques/losses/dino_loss.py:251*
 
 #### `get_config(self)`
 **Module:** `losses.dino_loss`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/losses/dino_loss.py:439*
+*📁 src/dl_techniques/losses/dino_loss.py:441*
 
 #### `get_config(self)`
 **Module:** `losses.dino_loss`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/losses/dino_loss.py:584*
+*📁 src/dl_techniques/losses/dino_loss.py:586*
 
 #### `get_config(self)`
 **Module:** `losses.segmentation_loss`
 
-Get configuration for serialization.
+Return a JSON-friendly dict of all dataclass fields.
 
-*📁 src/dl_techniques/losses/segmentation_loss.py:579*
+*📁 src/dl_techniques/losses/segmentation_loss.py:64*
 
 #### `get_config(self)`
 **Module:** `losses.nano_vlm_loss`
 
 Get the loss function configuration.
 
-*📁 src/dl_techniques/losses/nano_vlm_loss.py:249*
+*📁 src/dl_techniques/losses/nano_vlm_loss.py:264*
 
 #### `get_config(self)`
 **Module:** `losses.multi_labels_loss`
 
-*📁 src/dl_techniques/losses/multi_labels_loss.py:170*
+*📁 src/dl_techniques/losses/multi_labels_loss.py:172*
 
 #### `get_config(self)`
 **Module:** `losses.multi_labels_loss`
 
-*📁 src/dl_techniques/losses/multi_labels_loss.py:283*
+*📁 src/dl_techniques/losses/multi_labels_loss.py:285*
 
 #### `get_config(self)`
 **Module:** `losses.multi_labels_loss`
 
-*📁 src/dl_techniques/losses/multi_labels_loss.py:374*
+*📁 src/dl_techniques/losses/multi_labels_loss.py:376*
 
 #### `get_config(self)`
 **Module:** `losses.feature_alignment_loss`
@@ -24506,7 +25760,7 @@ Get loss configuration.
 
 Get loss configuration for serialization.
 
-*📁 src/dl_techniques/losses/quantile_loss.py:170*
+*📁 src/dl_techniques/losses/quantile_loss.py:205*
 
 #### `get_individual_losses(self)`
 **Module:** `losses.yolo12_multitask_loss`
@@ -24520,7 +25774,7 @@ Provides API compatibility for the callback.
 
 Factory function to get a loss by name.
 
-*📁 src/dl_techniques/losses/any_loss.py:2160*
+*📁 src/dl_techniques/losses/any_loss.py:2155*
 
 #### `get_task_weights(self)`
 **Module:** `losses.yolo12_multitask_loss`
@@ -24534,21 +25788,21 @@ Returns the current weights for each task, for callback logging.
 
 Implement an approximation of Hausdorff Distance loss.
 
-*📁 src/dl_techniques/losses/segmentation_loss.py:462*
+*📁 src/dl_techniques/losses/segmentation_loss.py:491*
 
 #### `lovasz_grad(gt_sorted)`
 **Module:** `losses.segmentation_loss`
 
 Compute Lovász gradient.
 
-*📁 src/dl_techniques/losses/segmentation_loss.py:336*
+*📁 src/dl_techniques/losses/segmentation_loss.py:363*
 
 #### `lovasz_softmax_loss(self, y_true, y_pred)`
 **Module:** `losses.segmentation_loss`
 
 Implement Lovász-Softmax loss.
 
-*📁 src/dl_techniques/losses/segmentation_loss.py:314*
+*📁 src/dl_techniques/losses/segmentation_loss.py:341*
 
 #### `mase_metric(seasonal_periods)`
 **Module:** `losses.mase_loss`
@@ -24569,7 +25823,7 @@ Computes the Mean Absolute Scaled Error metric.
 
 Compute metrics at the end of each epoch.
 
-*📁 src/dl_techniques/losses/clustering_loss.py:263*
+*📁 src/dl_techniques/losses/clustering_loss.py:261*
 
 #### `reset_state(self)`
 **Module:** `losses.brier_spiegelhalters_ztest_loss`
@@ -24611,14 +25865,14 @@ SMAPE metric function for use with `model.compile()`.
 
 Get the current temperature parameter value.
 
-*📁 src/dl_techniques/losses/clip_contrastive_loss.py:691*
+*📁 src/dl_techniques/losses/clip_contrastive_loss.py:710*
 
 #### `tversky_loss(self, y_true, y_pred)`
 **Module:** `losses.segmentation_loss`
 
 Implement Tversky loss.
 
-*📁 src/dl_techniques/losses/segmentation_loss.py:236*
+*📁 src/dl_techniques/losses/segmentation_loss.py:263*
 
 #### `update_center(self, teacher_logits)`
 **Module:** `losses.dino_loss`
@@ -24632,7 +25886,7 @@ Update center vector using exponential moving average of teacher logits.
 
 Update center using all teacher patch tokens.
 
-*📁 src/dl_techniques/losses/dino_loss.py:416*
+*📁 src/dl_techniques/losses/dino_loss.py:417*
 
 #### `update_state(self, y_true, y_pred, sample_weight)`
 **Module:** `losses.brier_spiegelhalters_ztest_loss`
@@ -24653,42 +25907,97 @@ Update the metric state.
 
 Update the temperature parameter dynamically during training.
 
-*📁 src/dl_techniques/losses/clip_contrastive_loss.py:710*
+*📁 src/dl_techniques/losses/clip_contrastive_loss.py:729*
 
 #### `weighted_bce_fn(y_true, y_pred)`
 **Module:** `losses.multi_labels_loss`
 
-*📁 src/dl_techniques/losses/multi_labels_loss.py:430*
+*📁 src/dl_techniques/losses/multi_labels_loss.py:432*
 
 ### Metrics Functions
+
+#### `aggregate_probe_metrics(results)`
+**Module:** `metrics.llm_metrics`
+
+In-place augment a generation-probe ``results`` dict with diversity and aggregate-throughput metrics.
+
+*📁 src/dl_techniques/metrics/llm_metrics.py:378*
 
 #### `calculate_comprehensive_metrics(y_true, y_pred, backcast)`
 **Module:** `metrics.time_series_metrics`
 
 Calculate comprehensive time series forecasting metrics.
 
-*📁 src/dl_techniques/metrics/time_series_metrics.py:88*
+*📁 src/dl_techniques/metrics/time_series_metrics.py:82*
 
 #### `compute_f1(self)`
 **Module:** `metrics.multi_label_metrics`
 
 Compute per-class F1 score.
 
-*📁 src/dl_techniques/metrics/multi_label_metrics.py:146*
+*📁 src/dl_techniques/metrics/multi_label_metrics.py:149*
 
 #### `compute_precision(self)`
 **Module:** `metrics.multi_label_metrics`
 
 Compute per-class precision.
 
-*📁 src/dl_techniques/metrics/multi_label_metrics.py:124*
+*📁 src/dl_techniques/metrics/multi_label_metrics.py:127*
 
 #### `compute_recall(self)`
 **Module:** `metrics.multi_label_metrics`
 
 Compute per-class recall.
 
-*📁 src/dl_techniques/metrics/multi_label_metrics.py:135*
+*📁 src/dl_techniques/metrics/multi_label_metrics.py:138*
+
+#### `distinct_n(texts, n)`
+**Module:** `metrics.llm_metrics`
+
+Distinct-n diversity over the concatenated probe outputs.
+
+*📁 src/dl_techniques/metrics/llm_metrics.py:355*
+
+#### `get_config(self)`
+**Module:** `metrics.sequence_metrics`
+
+*📁 src/dl_techniques/metrics/sequence_metrics.py:96*
+
+#### `get_config(self)`
+**Module:** `metrics.sequence_metrics`
+
+*📁 src/dl_techniques/metrics/sequence_metrics.py:153*
+
+#### `get_config(self)`
+**Module:** `metrics.capsule_accuracy`
+
+Return configuration dictionary for serialization.
+
+*📁 src/dl_techniques/metrics/capsule_accuracy.py:60*
+
+#### `get_config(self)`
+**Module:** `metrics.psnr_metric`
+
+Return configuration dictionary for serialization.
+
+*📁 src/dl_techniques/metrics/psnr_metric.py:84*
+
+#### `get_config(self)`
+**Module:** `metrics.hrm_metrics`
+
+Return configuration dictionary.
+
+*📁 src/dl_techniques/metrics/hrm_metrics.py:121*
+
+#### `get_config(self)`
+**Module:** `metrics.primary_output_metrics`
+
+*📁 src/dl_techniques/metrics/primary_output_metrics.py:104*
+
+#### `get_config(self)`
+**Module:** `metrics.primary_output_metrics`
+
+*📁 src/dl_techniques/metrics/primary_output_metrics.py:188*
 
 #### `get_config(self)`
 **Module:** `metrics.clip_accuracy`
@@ -24705,11 +26014,68 @@ Return configuration dictionary for serialization.
 *📁 src/dl_techniques/metrics/clip_accuracy.py:688*
 
 #### `get_config(self)`
+**Module:** `metrics.ssim_metric`
+
+*📁 src/dl_techniques/metrics/ssim_metric.py:86*
+
+#### `get_config(self)`
+**Module:** `metrics.brier_score`
+
+*📁 src/dl_techniques/metrics/brier_score.py:127*
+
+#### `get_config(self)`
+**Module:** `metrics.brier_score`
+
+*📁 src/dl_techniques/metrics/brier_score.py:244*
+
+#### `get_config(self)`
 **Module:** `metrics.multi_label_metrics`
 
 Return configuration dictionary for serialization.
 
-*📁 src/dl_techniques/metrics/multi_label_metrics.py:174*
+*📁 src/dl_techniques/metrics/multi_label_metrics.py:177*
+
+#### `get_config(self)`
+**Module:** `metrics.time_series_metrics`
+
+Return configuration dictionary for serialization.
+
+*📁 src/dl_techniques/metrics/time_series_metrics.py:72*
+
+#### `get_config(self)`
+**Module:** `metrics.llm_metrics`
+
+*📁 src/dl_techniques/metrics/llm_metrics.py:209*
+
+#### `get_config(self)`
+**Module:** `metrics.llm_metrics`
+
+*📁 src/dl_techniques/metrics/llm_metrics.py:287*
+
+#### `get_config(self)`
+**Module:** `metrics.depth_metrics`
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:137*
+
+#### `get_config(self)`
+**Module:** `metrics.depth_metrics`
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:221*
+
+#### `get_config(self)`
+**Module:** `metrics.depth_metrics`
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:290*
+
+#### `get_config(self)`
+**Module:** `metrics.depth_metrics`
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:353*
+
+#### `get_config(self)`
+**Module:** `metrics.depth_metrics`
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:422*
 
 #### `get_config(self)`
 **Module:** `metrics.perplexity_metric`
@@ -24726,23 +26092,43 @@ Functional interface for computing perplexity.
 *📁 src/dl_techniques/metrics/perplexity_metric.py:295*
 
 #### `reset_state(self)`
+**Module:** `metrics.sequence_metrics`
+
+*📁 src/dl_techniques/metrics/sequence_metrics.py:92*
+
+#### `reset_state(self)`
+**Module:** `metrics.sequence_metrics`
+
+*📁 src/dl_techniques/metrics/sequence_metrics.py:149*
+
+#### `reset_state(self)`
 **Module:** `metrics.capsule_accuracy`
 
-*📁 src/dl_techniques/metrics/capsule_accuracy.py:44*
+*📁 src/dl_techniques/metrics/capsule_accuracy.py:56*
 
 #### `reset_state(self)`
 **Module:** `metrics.psnr_metric`
 
 Reset metric state for new epoch or evaluation period.
 
-*📁 src/dl_techniques/metrics/psnr_metric.py:63*
+*📁 src/dl_techniques/metrics/psnr_metric.py:79*
 
 #### `reset_state(self)`
 **Module:** `metrics.hrm_metrics`
 
 Reset all metrics.
 
-*📁 src/dl_techniques/metrics/hrm_metrics.py:97*
+*📁 src/dl_techniques/metrics/hrm_metrics.py:111*
+
+#### `reset_state(self)`
+**Module:** `metrics.primary_output_metrics`
+
+*📁 src/dl_techniques/metrics/primary_output_metrics.py:100*
+
+#### `reset_state(self)`
+**Module:** `metrics.primary_output_metrics`
+
+*📁 src/dl_techniques/metrics/primary_output_metrics.py:184*
 
 #### `reset_state(self)`
 **Module:** `metrics.clip_accuracy`
@@ -24759,18 +26145,70 @@ Reset metric state for new epoch or evaluation.
 *📁 src/dl_techniques/metrics/clip_accuracy.py:678*
 
 #### `reset_state(self)`
+**Module:** `metrics.ssim_metric`
+
+Reset metric state for new epoch.
+
+*📁 src/dl_techniques/metrics/ssim_metric.py:81*
+
+#### `reset_state(self)`
+**Module:** `metrics.brier_score`
+
+*📁 src/dl_techniques/metrics/brier_score.py:123*
+
+#### `reset_state(self)`
+**Module:** `metrics.brier_score`
+
+*📁 src/dl_techniques/metrics/brier_score.py:240*
+
+#### `reset_state(self)`
 **Module:** `metrics.multi_label_metrics`
 
 Reset all accumulated statistics to zero.
 
-*📁 src/dl_techniques/metrics/multi_label_metrics.py:166*
+*📁 src/dl_techniques/metrics/multi_label_metrics.py:169*
 
 #### `reset_state(self)`
 **Module:** `metrics.time_series_metrics`
 
 Reset the metric state.
 
-*📁 src/dl_techniques/metrics/time_series_metrics.py:77*
+*📁 src/dl_techniques/metrics/time_series_metrics.py:67*
+
+#### `reset_state(self)`
+**Module:** `metrics.llm_metrics`
+
+*📁 src/dl_techniques/metrics/llm_metrics.py:205*
+
+#### `reset_state(self)`
+**Module:** `metrics.llm_metrics`
+
+*📁 src/dl_techniques/metrics/llm_metrics.py:283*
+
+#### `reset_state(self)`
+**Module:** `metrics.depth_metrics`
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:133*
+
+#### `reset_state(self)`
+**Module:** `metrics.depth_metrics`
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:217*
+
+#### `reset_state(self)`
+**Module:** `metrics.depth_metrics`
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:286*
+
+#### `reset_state(self)`
+**Module:** `metrics.depth_metrics`
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:349*
+
+#### `reset_state(self)`
+**Module:** `metrics.depth_metrics`
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:418*
 
 #### `reset_state(self)`
 **Module:** `metrics.perplexity_metric`
@@ -24780,23 +26218,51 @@ Resets all metric state variables.
 *📁 src/dl_techniques/metrics/perplexity_metric.py:278*
 
 #### `result(self)`
+**Module:** `metrics.sequence_metrics`
+
+Compute final sequence accuracy.
+
+*📁 src/dl_techniques/metrics/sequence_metrics.py:88*
+
+#### `result(self)`
+**Module:** `metrics.sequence_metrics`
+
+Compute bit error rate.
+
+*📁 src/dl_techniques/metrics/sequence_metrics.py:145*
+
+#### `result(self)`
 **Module:** `metrics.capsule_accuracy`
 
-*📁 src/dl_techniques/metrics/capsule_accuracy.py:41*
+*📁 src/dl_techniques/metrics/capsule_accuracy.py:53*
 
 #### `result(self)`
 **Module:** `metrics.psnr_metric`
 
 Compute the mean PSNR across all processed samples.
 
-*📁 src/dl_techniques/metrics/psnr_metric.py:59*
+*📁 src/dl_techniques/metrics/psnr_metric.py:75*
 
 #### `result(self)`
 **Module:** `metrics.hrm_metrics`
 
 Get current metric results.
 
-*📁 src/dl_techniques/metrics/hrm_metrics.py:88*
+*📁 src/dl_techniques/metrics/hrm_metrics.py:98*
+
+#### `result(self)`
+**Module:** `metrics.primary_output_metrics`
+
+Compute the mean accuracy.
+
+*📁 src/dl_techniques/metrics/primary_output_metrics.py:96*
+
+#### `result(self)`
+**Module:** `metrics.primary_output_metrics`
+
+Compute the mean top-K accuracy.
+
+*📁 src/dl_techniques/metrics/primary_output_metrics.py:180*
 
 #### `result(self)`
 **Module:** `metrics.clip_accuracy`
@@ -24813,18 +26279,74 @@ Compute current recall@k value.
 *📁 src/dl_techniques/metrics/clip_accuracy.py:666*
 
 #### `result(self)`
+**Module:** `metrics.ssim_metric`
+
+Compute the mean SSIM across all processed samples.
+
+*📁 src/dl_techniques/metrics/ssim_metric.py:77*
+
+#### `result(self)`
+**Module:** `metrics.brier_score`
+
+*📁 src/dl_techniques/metrics/brier_score.py:120*
+
+#### `result(self)`
+**Module:** `metrics.brier_score`
+
+*📁 src/dl_techniques/metrics/brier_score.py:237*
+
+#### `result(self)`
 **Module:** `metrics.multi_label_metrics`
 
 Compute macro-averaged F1 score.
 
-*📁 src/dl_techniques/metrics/multi_label_metrics.py:157*
+*📁 src/dl_techniques/metrics/multi_label_metrics.py:160*
 
 #### `result(self)`
 **Module:** `metrics.time_series_metrics`
 
 Compute the current metric value.
 
-*📁 src/dl_techniques/metrics/time_series_metrics.py:67*
+*📁 src/dl_techniques/metrics/time_series_metrics.py:59*
+
+#### `result(self)`
+**Module:** `metrics.llm_metrics`
+
+*📁 src/dl_techniques/metrics/llm_metrics.py:199*
+
+#### `result(self)`
+**Module:** `metrics.llm_metrics`
+
+*📁 src/dl_techniques/metrics/llm_metrics.py:277*
+
+#### `result(self)`
+**Module:** `metrics.depth_metrics`
+
+Return mean absolute relative error.
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:129*
+
+#### `result(self)`
+**Module:** `metrics.depth_metrics`
+
+Return fraction of pixels within the threshold.
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:213*
+
+#### `result(self)`
+**Module:** `metrics.depth_metrics`
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:283*
+
+#### `result(self)`
+**Module:** `metrics.depth_metrics`
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:346*
+
+#### `result(self)`
+**Module:** `metrics.depth_metrics`
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:415*
 
 #### `result(self)`
 **Module:** `metrics.perplexity_metric`
@@ -24833,26 +26355,61 @@ Computes and returns the metric result.
 
 *📁 src/dl_techniques/metrics/perplexity_metric.py:265*
 
+#### `self_bleu(texts, n)`
+**Module:** `metrics.llm_metrics`
+
+Mean self-BLEU(n) over a small list of probe outputs.
+
+*📁 src/dl_techniques/metrics/llm_metrics.py:315*
+
+#### `update_state(self, y_true, y_pred, sample_weight)`
+**Module:** `metrics.sequence_metrics`
+
+Update metric state with new predictions.
+
+*📁 src/dl_techniques/metrics/sequence_metrics.py:54*
+
+#### `update_state(self, y_true, y_pred, sample_weight)`
+**Module:** `metrics.sequence_metrics`
+
+Update metric state.
+
+*📁 src/dl_techniques/metrics/sequence_metrics.py:126*
+
 #### `update_state(self, y_true, y_pred, sample_weight)`
 **Module:** `metrics.capsule_accuracy`
 
 Update accuracy state based on capsule lengths.
 
-*📁 src/dl_techniques/metrics/capsule_accuracy.py:16*
+*📁 src/dl_techniques/metrics/capsule_accuracy.py:22*
 
 #### `update_state(self, y_true, y_pred, sample_weight)`
 **Module:** `metrics.psnr_metric`
 
 Update PSNR state using only the primary output.
 
-*📁 src/dl_techniques/metrics/psnr_metric.py:28*
+*📁 src/dl_techniques/metrics/psnr_metric.py:35*
 
 #### `update_state(self, y_true, y_pred)`
 **Module:** `metrics.hrm_metrics`
 
 Update metric states.
 
-*📁 src/dl_techniques/metrics/hrm_metrics.py:32*
+*📁 src/dl_techniques/metrics/hrm_metrics.py:30*
+
+#### `update_state(self, y_true, y_pred, sample_weight)`
+**Module:** `metrics.primary_output_metrics`
+
+Update accuracy state.
+
+*📁 src/dl_techniques/metrics/primary_output_metrics.py:54*
+
+#### `update_state(self, y_true, y_pred, sample_weight)`
+**Module:** `metrics.primary_output_metrics`
+
+Update top-K accuracy state.
+
+*📁 src/dl_techniques/metrics/primary_output_metrics.py:132*
 
 #### `update_state(self, y_true, y_pred, sample_weight)`
 **Module:** `metrics.clip_accuracy`
@@ -24869,6 +26426,23 @@ Update metric state with batch predictions.
 *📁 src/dl_techniques/metrics/clip_accuracy.py:577*
 
 #### `update_state(self, y_true, y_pred, sample_weight)`
+**Module:** `metrics.ssim_metric`
+
+Update SSIM state with a batch of images.
+
+*📁 src/dl_techniques/metrics/ssim_metric.py:56*
+
+#### `update_state(self, y_true, y_pred, sample_weight)`
+**Module:** `metrics.brier_score`
+
+*📁 src/dl_techniques/metrics/brier_score.py:89*
+
+#### `update_state(self, y_true, y_pred, sample_weight)`
+**Module:** `metrics.brier_score`
+
+*📁 src/dl_techniques/metrics/brier_score.py:195*
+
+#### `update_state(self, y_true, y_pred, sample_weight)`
 **Module:** `metrics.multi_label_metrics`
 
 Accumulate confusion matrix statistics.
@@ -24880,7 +26454,52 @@ Accumulate confusion matrix statistics.
 
 Update the metric state with new predictions.
 
-*📁 src/dl_techniques/metrics/time_series_metrics.py:34*
+*📁 src/dl_techniques/metrics/time_series_metrics.py:31*
+
+#### `update_state(self, y_true, y_pred, sample_weight)`
+**Module:** `metrics.llm_metrics`
+
+*📁 src/dl_techniques/metrics/llm_metrics.py:187*
+
+#### `update_state(self, y_true, y_pred, sample_weight)`
+**Module:** `metrics.llm_metrics`
+
+*📁 src/dl_techniques/metrics/llm_metrics.py:265*
+
+#### `update_state(self, y_true_and_mask, y_pred, sample_weight)`
+**Module:** `metrics.depth_metrics`
+
+Accumulate absolute relative error over valid pixels.
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:102*
+
+#### `update_state(self, y_true_and_mask, y_pred, sample_weight)`
+**Module:** `metrics.depth_metrics`
+
+Accumulate threshold accuracy over valid pixels.
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:185*
+
+#### `update_state(self, y_true_and_mask, y_pred, sample_weight)`
+**Module:** `metrics.depth_metrics`
+
+Accumulate squared relative error over valid pixels.
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:258*
+
+#### `update_state(self, y_true_and_mask, y_pred, sample_weight)`
+**Module:** `metrics.depth_metrics`
+
+Accumulate squared error over valid pixels.
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:324*
+
+#### `update_state(self, y_true_and_mask, y_pred, sample_weight)`
+**Module:** `metrics.depth_metrics`
+
+Accumulate squared log error over valid pixels.
+
+*📁 src/dl_techniques/metrics/depth_metrics.py:388*
 
 #### `update_state(self, y_true, y_pred, sample_weight)`
 **Module:** `metrics.perplexity_metric`
@@ -24929,6 +26548,34 @@ Process images with hMLP stem then apply masking.
 
 *📁 src/dl_techniques/models/dino/dino_v2.py:614*
 
+#### `assign_keys_from_kmeans(self, centroids)`
+**Module:** `models.memory_bank.memory_banks`
+
+Replace ``K_lt`` with offline KMeans centroids.
+
+*📁 src/dl_techniques/models/memory_bank/memory_banks.py:128*
+
+#### `base(cls, in_channels)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+Base variant: 4 levels, ~12.5M params.
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:1373*
+
+#### `base(cls, in_channels)`
+**Module:** `models.cliffordnet.denoiser`
+
+CliffordNetDenoiser-Base: channels=128, depth=12, shifts=[1,2,4,8].
+
+*📁 src/dl_techniques/models/cliffordnet/denoiser.py:673*
+
+#### `base(cls, in_channels)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+Base variant: 4 levels, ~12M params.
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:1574*
+
 #### `body(t, h, ys)`
 **Module:** `models.mamba.components_v2`
 
@@ -24953,14 +26600,14 @@ Build the NanoVLM and all its sub-layers.
 
 Build the model components.
 
-*📁 src/dl_techniques/models/depth_anything/model.py:165*
+*📁 src/dl_techniques/models/depth_anything/model.py:215*
 
 #### `build(self, input_shape)`
 **Module:** `models.depth_anything.components`
 
 Build decoder layers based on input shape.
 
-*📁 src/dl_techniques/models/depth_anything/components.py:121*
+*📁 src/dl_techniques/models/depth_anything/components.py:149*
 
 #### `build(self, input_shape)`
 **Module:** `models.nano_vlm_world_model.model`
@@ -24974,21 +26621,21 @@ Build all components.
 
 Build layer based on input shapes.
 
-*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:150*
+*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:151*
 
 #### `build(self, input_shape)`
 **Module:** `models.bias_free_denoisers.bfunet_conditional_unified`
 
 Build layer based on input shapes.
 
-*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:276*
+*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:285*
 
 #### `build(self, input_shape)`
 **Module:** `models.bias_free_denoisers.bfconvunext`
 
 Build the stem layers.
 
-*📁 src/dl_techniques/models/bias_free_denoisers/bfconvunext.py:92*
+*📁 src/dl_techniques/models/bias_free_denoisers/bfconvunext.py:93*
 
 #### `build(self, input_shape)`
 **Module:** `models.mdn.model`
@@ -25000,9 +26647,9 @@ Build the model with the given input shape.
 #### `build(self, input_shape)`
 **Module:** `models.adaptive_ema.model`
 
-Build the model and create threshold variables.
+Create the two threshold scalars; sub-layers self-build on first call.
 
-*📁 src/dl_techniques/models/adaptive_ema/model.py:200*
+*📁 src/dl_techniques/models/adaptive_ema/model.py:256*
 
 #### `build(self, input_shape)`
 **Module:** `models.mamba.components_v2`
@@ -25021,7 +26668,7 @@ Create layer weights and build sub-layers.
 
 Build sub-layers.
 
-*📁 src/dl_techniques/models/mamba/components.py:660*
+*📁 src/dl_techniques/models/mamba/components.py:664*
 
 #### `build(self, input_shape)`
 **Module:** `models.byte_latent_transformer.model`
@@ -25057,6 +26704,16 @@ Build encoder and decoder layers.
 Build all sub-layers.
 
 *📁 src/dl_techniques/models/detr/model.py:364*
+
+#### `build(self, input_shape)`
+**Module:** `models.nam.cell`
+
+*📁 src/dl_techniques/models/nam/cell.py:258*
+
+#### `build(self, input_shape)`
+**Module:** `models.nam.model`
+
+*📁 src/dl_techniques/models/nam/model.py:159*
 
 #### `build(self, input_shape)`
 **Module:** `models.fftnet.model`
@@ -25164,6 +26821,23 @@ Build all model components.
 *📁 src/dl_techniques/models/prism/model.py:342*
 
 #### `build(self, input_shape)`
+**Module:** `models.lewm.embedder`
+
+*📁 src/dl_techniques/models/lewm/embedder.py:60*
+
+#### `build(self, input_shape)`
+**Module:** `models.lewm.predictor`
+
+Build sublayers. `input_shape` is `[x_shape, c_shape]`.
+
+*📁 src/dl_techniques/models/lewm/predictor.py:102*
+
+#### `build(self, input_shape)`
+**Module:** `models.lewm.projector`
+
+*📁 src/dl_techniques/models/lewm/projector.py:65*
+
+#### `build(self, input_shape)`
 **Module:** `models.masked_language_model.clm`
 
 Builds the model and initializes the output head/weight tying.
@@ -25175,7 +26849,7 @@ Builds the model and initializes the output head/weight tying.
 
 Build the model and its inner layer.
 
-*📁 src/dl_techniques/models/tiny_recursive_model/model.py:181*
+*📁 src/dl_techniques/models/tiny_recursive_model/model.py:197*
 
 #### `build(self, input_shape)`
 **Module:** `models.tiny_recursive_model.components`
@@ -25274,6 +26948,95 @@ Build the model by initializing the SOM layer.
 *📁 src/dl_techniques/models/som/model.py:301*
 
 #### `build(self, input_shape)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+Build all sublayers via symbolic forward pass.
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:837*
+
+#### `build(self, input_shape)`
+**Module:** `models.cliffordnet.denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/denoiser.py:171*
+
+#### `build(self, input_shape)`
+**Module:** `models.cliffordnet.denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/denoiser.py:294*
+
+#### `build(self, input_shape)`
+**Module:** `models.cliffordnet.denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/denoiser.py:494*
+
+#### `build(self, input_shape)`
+**Module:** `models.cliffordnet.clip`
+
+*📁 src/dl_techniques/models/cliffordnet/clip.py:175*
+
+#### `build(self, input_shape)`
+**Module:** `models.cliffordnet.clip`
+
+*📁 src/dl_techniques/models/cliffordnet/clip.py:220*
+
+#### `build(self, input_shape)`
+**Module:** `models.cliffordnet.clip`
+
+Create weights and build sub-layers.
+
+*📁 src/dl_techniques/models/cliffordnet/clip.py:1023*
+
+#### `build(self, input_shape)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:125*
+
+#### `build(self, input_shape)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:331*
+
+#### `build(self, input_shape)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+Build model via symbolic forward pass.
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:1181*
+
+#### `build(self, input_shape)`
+**Module:** `models.cliffordnet.model`
+
+Build the model via a symbolic forward pass.
+
+*📁 src/dl_techniques/models/cliffordnet/model.py:313*
+
+#### `build(self, input_shape)`
+**Module:** `models.cliffordnet.unet`
+
+*📁 src/dl_techniques/models/cliffordnet/unet.py:786*
+
+#### `build(self, input_shape)`
+**Module:** `models.video_jepa.encoder`
+
+Build sub-layers in dependency order.
+
+*📁 src/dl_techniques/models/video_jepa/encoder.py:130*
+
+#### `build(self, input_shape)`
+**Module:** `models.video_jepa.predictor`
+
+Build sub-layers with shape ``(B, T, D)``.
+
+*📁 src/dl_techniques/models/video_jepa/predictor.py:123*
+
+#### `build(self, input_shape)`
+**Module:** `models.video_jepa.predictor`
+
+Build sub-layers.
+
+*📁 src/dl_techniques/models/video_jepa/predictor.py:278*
+
+#### `build(self, input_shape)`
 **Module:** `models.clip.model`
 
 Create the model's own weights.
@@ -25281,32 +27044,52 @@ Create the model's own weights.
 *📁 src/dl_techniques/models/clip/model.py:450*
 
 #### `build(self, input_shape)`
-**Module:** `models.tree_transformer.model`
+**Module:** `models.tree_transformer.components`
 
 Creates the non-trainable positional encoding matrix.
 
-*📁 src/dl_techniques/models/tree_transformer/model.py:159*
+*📁 src/dl_techniques/models/tree_transformer/components.py:107*
 
 #### `build(self, input_shape)`
-**Module:** `models.tree_transformer.model`
+**Module:** `models.tree_transformer.components`
 
 Builds the sub-layers, which is critical for serialization.
 
-*📁 src/dl_techniques/models/tree_transformer/model.py:277*
+*📁 src/dl_techniques/models/tree_transformer/components.py:225*
 
 #### `build(self, input_shape)`
-**Module:** `models.tree_transformer.model`
+**Module:** `models.tree_transformer.components`
 
 Builds all sub-layers for robust serialization.
 
-*📁 src/dl_techniques/models/tree_transformer/model.py:454*
+*📁 src/dl_techniques/models/tree_transformer/components.py:413*
 
 #### `build(self, input_shape)`
-**Module:** `models.tree_transformer.model`
+**Module:** `models.tree_transformer.components`
 
 Builds all sub-layers explicitly for robust serialization.
 
-*📁 src/dl_techniques/models/tree_transformer/model.py:639*
+*📁 src/dl_techniques/models/tree_transformer/components.py:600*
+
+#### `build(self, input_shape)`
+**Module:** `models.memory_bank.write_controller`
+
+*📁 src/dl_techniques/models/memory_bank/write_controller.py:79*
+
+#### `build(self, input_shape)`
+**Module:** `models.memory_bank.read_controller`
+
+*📁 src/dl_techniques/models/memory_bank/read_controller.py:225*
+
+#### `build(self, input_shape)`
+**Module:** `models.memory_bank.memory_banks`
+
+*📁 src/dl_techniques/models/memory_bank/memory_banks.py:96*
+
+#### `build(self, input_shape)`
+**Module:** `models.memory_bank.memory_banks`
+
+*📁 src/dl_techniques/models/memory_bank/memory_banks.py:261*
 
 #### `build(self, input_shape)`
 **Module:** `models.yolo12.feature_extractor`
@@ -25356,6 +27139,11 @@ Build layer by creating weights for sub-layers.
 Build model by creating weights for all sub-layers.
 
 *📁 src/dl_techniques/models/convunext/model.py:746*
+
+#### `build(self, input_shape)`
+**Module:** `models.wave_field_llm.wave_field_llm`
+
+*📁 src/dl_techniques/models/wave_field_llm/wave_field_llm.py:156*
 
 #### `build(self, input_shape)`
 **Module:** `models.capsnet.model`
@@ -25437,35 +27225,35 @@ Build hash embedding tables.
 
 Build all embedding sublayers.
 
-*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:354*
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:358*
 
 #### `build(self, input_shape)`
 **Module:** `models.modern_bert.modern_bert_blt_hrm`
 
 Build all reasoning components.
 
-*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:558*
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:567*
 
 #### `build(self, input_shape)`
 **Module:** `models.modern_bert.modern_bert_blt_hrm`
 
 Build the complete ReasoningByteBERT model.
 
-*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:850*
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:874*
 
 #### `build(self, input_shape)`
 **Module:** `models.modern_bert.components`
 
 Build the layer and all its sub-layers.
 
-*📁 src/dl_techniques/models/modern_bert/components.py:156*
+*📁 src/dl_techniques/models/modern_bert/components.py:160*
 
 #### `build(self, input_shape)`
 **Module:** `models.modern_bert.components`
 
 Build the layer and all its sub-layers for robust serialization.
 
-*📁 src/dl_techniques/models/modern_bert/components.py:335*
+*📁 src/dl_techniques/models/modern_bert/components.py:343*
 
 #### `build(self, input_shape)`
 **Module:** `models.vit_hmlp.model`
@@ -25493,7 +27281,7 @@ Build all sub-layers with proper shapes.
 
 Build all sub-layers with proper shapes.
 
-*📁 src/dl_techniques/models/qwen/qwen3_embeddings.py:475*
+*📁 src/dl_techniques/models/qwen/qwen3_embeddings.py:494*
 
 #### `build(self, input_shape)`
 **Module:** `models.qwen.qwen3_mega`
@@ -25542,7 +27330,7 @@ Create weights and build all sub-layers.
 
 Build the model and all its sub-layers.
 
-*📁 src/dl_techniques/models/vit/model.py:401*
+*📁 src/dl_techniques/models/vit/model.py:425*
 
 #### `build(self, input_shape)`
 **Module:** `models.squeezenet.squeezenet_v2`
@@ -25563,7 +27351,7 @@ Build the Fire module by building all sub-layers.
 
 Build layer from configuration.
 
-*📁 src/dl_techniques/models/depth_anything/components.py:252*
+*📁 src/dl_techniques/models/depth_anything/components.py:300*
 
 #### `build_from_config(self, config)`
 **Module:** `models.mdn.model`
@@ -25571,6 +27359,31 @@ Build layer from configuration.
 Build the model from a build configuration.
 
 *📁 src/dl_techniques/models/mdn/model.py:682*
+
+#### `build_from_config(self, config)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:880*
+
+#### `build_from_config(self, config)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:142*
+
+#### `build_from_config(self, config)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:360*
+
+#### `build_from_config(self, config)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:1224*
+
+#### `build_from_config(self, config)`
+**Module:** `models.cliffordnet.unet`
+
+*📁 src/dl_techniques/models/cliffordnet/unet.py:813*
 
 #### `build_from_config(self, config)`
 **Module:** `models.yolo12.feature_extractor`
@@ -25605,28 +27418,28 @@ Forward pass of the MobileNetV4 model.
 
 Forward pass of the MobileNetV2 model.
 
-*📁 src/dl_techniques/models/mobilenet/mobilenet_v2.py:264*
+*📁 src/dl_techniques/models/mobilenet/mobilenet_v2.py:268*
 
 #### `call(self, x, training)`
 **Module:** `models.mobilenet.mobilenet_v3`
 
 Forward pass through the model.
 
-*📁 src/dl_techniques/models/mobilenet/mobilenet_v3.py:289*
+*📁 src/dl_techniques/models/mobilenet/mobilenet_v3.py:295*
 
 #### `call(self, inputs, training)`
 **Module:** `models.depth_anything.model`
 
 Forward pass through the model.
 
-*📁 src/dl_techniques/models/depth_anything/model.py:329*
+*📁 src/dl_techniques/models/depth_anything/model.py:458*
 
 #### `call(self, inputs, training)`
 **Module:** `models.depth_anything.components`
 
 Forward pass through decoder.
 
-*📁 src/dl_techniques/models/depth_anything/components.py:174*
+*📁 src/dl_techniques/models/depth_anything/components.py:212*
 
 #### `call(self, y_true, y_pred)`
 **Module:** `models.nano_vlm_world_model.train`
@@ -25654,28 +27467,28 @@ Compute sinusoidal timestep embeddings.
 
 Denoise data conditioned on context and timestep.
 
-*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:185*
+*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:189*
 
 #### `call(self, noisy_vision, text_features, timesteps, training)`
 **Module:** `models.nano_vlm_world_model.denoisers`
 
 Denoise vision features conditioned on text.
 
-*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:308*
+*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:316*
 
 #### `call(self, noisy_text, vision_features, timesteps, training)`
 **Module:** `models.nano_vlm_world_model.denoisers`
 
 Denoise text embeddings conditioned on vision.
 
-*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:381*
+*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:393*
 
 #### `call(self, noisy_vision, noisy_text, timesteps, training)`
 **Module:** `models.nano_vlm_world_model.denoisers`
 
 Jointly denoise vision and text features.
 
-*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:496*
+*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:512*
 
 #### `call(self, inputs, training)`
 **Module:** `models.nano_vlm_world_model.model`
@@ -25696,21 +27509,21 @@ Forward pass through the TabM model implementing ensemble computation.
 
 Inject conditioning features.
 
-*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:181*
+*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:182*
 
 #### `call(self, inputs)`
 **Module:** `models.bias_free_denoisers.bfunet_conditional_unified`
 
 Inject discrete conditioning.
 
-*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:299*
+*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:308*
 
 #### `call(self, inputs, training)`
 **Module:** `models.bias_free_denoisers.bfconvunext`
 
 Forward pass.
 
-*📁 src/dl_techniques/models/bias_free_denoisers/bfconvunext.py:110*
+*📁 src/dl_techniques/models/bias_free_denoisers/bfconvunext.py:111*
 
 #### `call(self, inputs, training)`
 **Module:** `models.mdn.model`
@@ -25722,9 +27535,9 @@ Forward pass of the model.
 #### `call(self, inputs, training)`
 **Module:** `models.adaptive_ema.model`
 
-Compute EMA, slope, and trading signals with potentially learnable thresholds.
+Compute EMA, slope, threshold signals, and optionally slope quantiles.
 
-*📁 src/dl_techniques/models/adaptive_ema/model.py:238*
+*📁 src/dl_techniques/models/adaptive_ema/model.py:286*
 
 #### `call(self, hidden_states, training)`
 **Module:** `models.mamba.components_v2`
@@ -25734,7 +27547,7 @@ Compute EMA, slope, and trading signals with potentially learnable thresholds.
 #### `call(self, hidden_states, residual, training)`
 **Module:** `models.mamba.components_v2`
 
-*📁 src/dl_techniques/models/mamba/components_v2.py:364*
+*📁 src/dl_techniques/models/mamba/components_v2.py:368*
 
 #### `call(self, inputs, training)`
 **Module:** `models.mamba.mamba_v2`
@@ -25760,14 +27573,14 @@ Forward pass through the Mamba layer.
 
 Forward pass through the residual block.
 
-*📁 src/dl_techniques/models/mamba/components.py:673*
+*📁 src/dl_techniques/models/mamba/components.py:677*
 
 #### `call(self, inputs, training)`
 **Module:** `models.byte_latent_transformer.model`
 
 Forward pass of the BLT model.
 
-*📁 src/dl_techniques/models/byte_latent_transformer/model.py:321*
+*📁 src/dl_techniques/models/byte_latent_transformer/model.py:327*
 
 #### `call(self, inputs, training)`
 **Module:** `models.jepa.encoder`
@@ -25825,6 +27638,20 @@ Forward pass through DETR model.
 
 *📁 src/dl_techniques/models/detr/model.py:552*
 
+#### `call(self, inputs, training)`
+**Module:** `models.nam.cell`
+
+Execute one reduction step.
+
+*📁 src/dl_techniques/models/nam/cell.py:324*
+
+#### `call(self, carry, batch, training)`
+**Module:** `models.nam.model`
+
+Execute one ACT step (one sub-expression reduction).
+
+*📁 src/dl_techniques/models/nam/model.py:268*
+
 #### `call(self, inputs, attention_mask, token_type_ids, position_ids, training)`
 **Module:** `models.fnet.model`
 
@@ -25844,14 +27671,14 @@ Forward pass of the model.
 
 Forward pass through the TiRex model.
 
-*📁 src/dl_techniques/models/tirex/model.py:284*
+*📁 src/dl_techniques/models/tirex/model.py:289*
 
 #### `call(self, inputs, training)`
 **Module:** `models.tirex.model_extended`
 
 Forward pass with Query Token appending.
 
-*📁 src/dl_techniques/models/tirex/model_extended.py:147*
+*📁 src/dl_techniques/models/tirex/model_extended.py:155*
 
 #### `call(self, inputs, training)`
 **Module:** `models.fftnet.model`
@@ -25993,6 +27820,28 @@ Generate forecasts from context window.
 
 *📁 src/dl_techniques/models/prism/model.py:377*
 
+#### `call(self, x, training)`
+**Module:** `models.lewm.embedder`
+
+*📁 src/dl_techniques/models/lewm/embedder.py:74*
+
+#### `call(self, inputs, training)`
+**Module:** `models.lewm.model`
+
+Training forward pass.
+
+*📁 src/dl_techniques/models/lewm/model.py:157*
+
+#### `call(self, inputs, training)`
+**Module:** `models.lewm.predictor`
+
+*📁 src/dl_techniques/models/lewm/predictor.py:144*
+
+#### `call(self, x, training)`
+**Module:** `models.lewm.projector`
+
+*📁 src/dl_techniques/models/lewm/projector.py:74*
+
 #### `call(self, inputs, training)`
 **Module:** `models.masked_language_model.mlm`
 
@@ -26012,7 +27861,7 @@ Forward pass for prediction/generation.
 
 Perform one step of the ACT reasoning process.
 
-*📁 src/dl_techniques/models/tiny_recursive_model/model.py:236*
+*📁 src/dl_techniques/models/tiny_recursive_model/model.py:252*
 
 #### `call(self, hidden_states, input_injection, training)`
 **Module:** `models.tiny_recursive_model.components`
@@ -26124,12 +27973,197 @@ Forward pass computing Best Matching Units and quantization errors.
 
 *📁 src/dl_techniques/models/som/model.py:320*
 
+#### `call(self, input_ids, training)`
+**Module:** `models.cliffordnet.lm`
+
+Forward pass.
+
+*📁 src/dl_techniques/models/cliffordnet/lm.py:290*
+
+#### `call(self, y_true, y_pred)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+Compute Gaussian NLL.
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:125*
+
+#### `call(self, y_true, y_pred)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+Compute pinball loss across all quantiles.
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:189*
+
+#### `call(self, inputs, training)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+Forward pass producing mean + uncertainty estimate.
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:921*
+
+#### `call(self, inputs, training)`
+**Module:** `models.cliffordnet.denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/denoiser.py:187*
+
+#### `call(self, h_norm, g_feat, training)`
+**Module:** `models.cliffordnet.denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/denoiser.py:305*
+
+#### `call(self, inputs, training)`
+**Module:** `models.cliffordnet.denoiser`
+
+Forward pass: learns noise residual, adds back to input.
+
+*📁 src/dl_techniques/models/cliffordnet/denoiser.py:507*
+
+#### `call(self, x)`
+**Module:** `models.cliffordnet.clip`
+
+*📁 src/dl_techniques/models/cliffordnet/clip.py:184*
+
+#### `call(self, features, mask)`
+**Module:** `models.cliffordnet.clip`
+
+*📁 src/dl_techniques/models/cliffordnet/clip.py:229*
+
+#### `call(self, inputs, training)`
+**Module:** `models.cliffordnet.clip`
+
+Forward pass.
+
+*📁 src/dl_techniques/models/cliffordnet/clip.py:1259*
+
+#### `call(self, input_ids, training)`
+**Module:** `models.cliffordnet.lmunet`
+
+Forward pass.
+
+*📁 src/dl_techniques/models/cliffordnet/lmunet.py:774*
+
+#### `call(self, inputs, training)`
+**Module:** `models.cliffordnet.embedding_unet`
+
+Forward pass.
+
+*📁 src/dl_techniques/models/cliffordnet/embedding_unet.py:511*
+
+#### `call(self, h_norm, g_feat, training)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:146*
+
+#### `call(self, inputs, dense_cond, discrete_cond, training)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+Forward pass with optional conditioning.
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:364*
+
+#### `call(self, x, training)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+Downsample via geometric product.
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:567*
+
+#### `call(self, x, training)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+Upsample via nearest-neighbor + Clifford refinement.
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:713*
+
+#### `call(self, inputs, training)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+Forward pass: learns conditional noise residual.
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:1270*
+
+#### `call(self, inputs, training)`
+**Module:** `models.cliffordnet.model`
+
+Forward pass.
+
+*📁 src/dl_techniques/models/cliffordnet/model.py:355*
+
+#### `call(self, x, training)`
+**Module:** `models.cliffordnet.unet`
+
+*📁 src/dl_techniques/models/cliffordnet/unet.py:148*
+
+#### `call(self, x, training)`
+**Module:** `models.cliffordnet.unet`
+
+*📁 src/dl_techniques/models/cliffordnet/unet.py:234*
+
+#### `call(self, inputs, training)`
+**Module:** `models.cliffordnet.unet`
+
+*📁 src/dl_techniques/models/cliffordnet/unet.py:311*
+
+#### `call(self, inputs, training)`
+**Module:** `models.cliffordnet.unet`
+
+Forward: RGB → per-head outputs.
+
+*📁 src/dl_techniques/models/cliffordnet/unet.py:826*
+
+#### `call(self, input_ids, training)`
+**Module:** `models.cliffordnet.lm_routing`
+
+Forward pass.
+
+*📁 src/dl_techniques/models/cliffordnet/lm_routing.py:382*
+
 #### `call(self, inputs, training)`
 **Module:** `models.hierarchical_reasoning_model.model`
 
 Forward pass through the model.
 
 *📁 src/dl_techniques/models/hierarchical_reasoning_model/model.py:555*
+
+#### `call(self, inputs, attention_mask, training)`
+**Module:** `models.gpt2.gpt2`
+
+Forward pass of GPT-2.
+
+*📁 src/dl_techniques/models/gpt2/gpt2.py:272*
+
+#### `call(self, batch_size, training)`
+**Module:** `models.video_jepa.masking`
+
+Sample a fresh tube mask.
+
+*📁 src/dl_techniques/models/video_jepa/masking.py:102*
+
+#### `call(self, pixels_flat, training)`
+**Module:** `models.video_jepa.encoder`
+
+Encode a flat pixel batch to a 4D patch grid.
+
+*📁 src/dl_techniques/models/video_jepa/encoder.py:162*
+
+#### `call(self, inputs, training)`
+**Module:** `models.video_jepa.model`
+
+Training forward pass.
+
+*📁 src/dl_techniques/models/video_jepa/model.py:172*
+
+#### `call(self, x, training)`
+**Module:** `models.video_jepa.predictor`
+
+*📁 src/dl_techniques/models/video_jepa/predictor.py:154*
+
+#### `call(self, z, training)`
+**Module:** `models.video_jepa.predictor`
+
+Forward pass.
+
+*📁 src/dl_techniques/models/video_jepa/predictor.py:318*
 
 #### `call(self, inputs, training)`
 **Module:** `models.clip.model`
@@ -26138,40 +28172,73 @@ Forward pass of the CLIP model.
 
 *📁 src/dl_techniques/models/clip/model.py:615*
 
-#### `call(self, x, training)`
-**Module:** `models.tree_transformer.model`
-
-Adds positional encodings to the input tensor.
-
-*📁 src/dl_techniques/models/tree_transformer/model.py:179*
-
-#### `call(self, inputs, training)`
-**Module:** `models.tree_transformer.model`
-
-Computes group attention probabilities.
-
-*📁 src/dl_techniques/models/tree_transformer/model.py:285*
-
-#### `call(self, inputs, training)`
-**Module:** `models.tree_transformer.model`
-
-Forward pass for tree-modulated multi-head attention.
-
-*📁 src/dl_techniques/models/tree_transformer/model.py:470*
-
-#### `call(self, inputs, training)`
-**Module:** `models.tree_transformer.model`
-
-Forward pass for the Tree Transformer block.
-
-*📁 src/dl_techniques/models/tree_transformer/model.py:656*
-
 #### `call(self, inputs, training)`
 **Module:** `models.tree_transformer.model`
 
 Forward pass of the TreeTransformer model.
 
-*📁 src/dl_techniques/models/tree_transformer/model.py:963*
+*📁 src/dl_techniques/models/tree_transformer/model.py:351*
+
+#### `call(self, x, training)`
+**Module:** `models.tree_transformer.components`
+
+Adds positional encodings to the input tensor.
+
+*📁 src/dl_techniques/models/tree_transformer/components.py:127*
+
+#### `call(self, inputs, training)`
+**Module:** `models.tree_transformer.components`
+
+Computes group attention probabilities.
+
+*📁 src/dl_techniques/models/tree_transformer/components.py:233*
+
+#### `call(self, inputs, training)`
+**Module:** `models.tree_transformer.components`
+
+Forward pass for tree-modulated multi-head attention.
+
+*📁 src/dl_techniques/models/tree_transformer/components.py:429*
+
+#### `call(self, inputs, training)`
+**Module:** `models.tree_transformer.components`
+
+Forward pass for the Tree Transformer block.
+
+*📁 src/dl_techniques/models/tree_transformer/components.py:617*
+
+#### `call(self, x_w, training)`
+**Module:** `models.memory_bank.write_controller`
+
+Project and right-pad to ``max_seq_len``.
+
+*📁 src/dl_techniques/models/memory_bank/write_controller.py:83*
+
+#### `call(self, x_r, k_lt, v_lt, k_wm, v_wm, wm_padding_mask, training)`
+**Module:** `models.memory_bank.read_controller`
+
+Run retrieval and return ``g * V_proj`` (gated injection).
+
+*📁 src/dl_techniques/models/memory_bank/read_controller.py:254*
+
+#### `call(self, inputs, attention_mask, training)`
+**Module:** `models.memory_bank.wave_field_memory_llm`
+
+*📁 src/dl_techniques/models/memory_bank/wave_field_memory_llm.py:429*
+
+#### `call(self, inputs)`
+**Module:** `models.memory_bank.memory_banks`
+
+Return ``(K_lt, V_lt)`` tensors. Input is ignored.
+
+*📁 src/dl_techniques/models/memory_bank/memory_banks.py:119*
+
+#### `call(self, x_w, training)`
+**Module:** `models.memory_bank.memory_banks`
+
+Project ``X_W`` to ``(K_wm, V_wm)``.
+
+*📁 src/dl_techniques/models/memory_bank/memory_banks.py:267*
 
 #### `call(self, inputs, training)`
 **Module:** `models.yolo12.feature_extractor`
@@ -26213,7 +28280,7 @@ Forward pass of the embeddings layer.
 
 Forward pass of the DistilBERT foundation model.
 
-*📁 src/dl_techniques/models/distilbert/model.py:635*
+*📁 src/dl_techniques/models/distilbert/model.py:639*
 
 #### `call(self, inputs, training)`
 **Module:** `models.pft_sr.model`
@@ -26271,6 +28338,16 @@ Forward pass through the complete RELGT model.
 
 *📁 src/dl_techniques/models/relgt/model.py:194*
 
+#### `call(self, inputs, attention_mask, training)`
+**Module:** `models.wave_field_llm.wave_field_llm`
+
+*📁 src/dl_techniques/models/wave_field_llm/wave_field_llm.py:168*
+
+#### `call(self, inputs, attention_mask, training)`
+**Module:** `models.wave_field_llm.wave_field_llm`
+
+*📁 src/dl_techniques/models/wave_field_llm/wave_field_llm.py:460*
+
 #### `call(self, inputs, training)`
 **Module:** `models.vq_vae.model`
 
@@ -26290,7 +28367,14 @@ Forward pass of the model.
 
 Forward pass of the BERT foundation model.
 
-*📁 src/dl_techniques/models/bert/bert.py:464*
+*📁 src/dl_techniques/models/bert/bert.py:465*
+
+#### `call(self, inputs, training)`
+**Module:** `models.capsnet.model_v2`
+
+Forward pass returning the per-class capsule lengths.
+
+*📁 src/dl_techniques/models/capsnet/model_v2.py:320*
 
 #### `call(self, inputs, training, mask)`
 **Module:** `models.capsnet.model`
@@ -26381,7 +28465,7 @@ Forward pass through DeepAR.
 
 Forward pass computation.
 
-*📁 src/dl_techniques/models/accunet/model.py:368*
+*📁 src/dl_techniques/models/accunet/model.py:383*
 
 #### `call(self, inputs, training)`
 **Module:** `models.cbam.model`
@@ -26416,21 +28500,21 @@ Compute hash n-gram embeddings for byte sequence.
 
 Create combined embeddings from tokens and puzzle context.
 
-*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:446*
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:450*
 
 #### `call(self, carry, embeddings, byte_tokens, training)`
 **Module:** `models.modern_bert.modern_bert_blt_hrm`
 
 Perform hierarchical reasoning on byte-level representations.
 
-*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:717*
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:726*
 
 #### `call(self, inputs, training, return_dict)`
 **Module:** `models.modern_bert.modern_bert_blt_hrm`
 
 Forward pass through ReasoningByteBERT.
 
-*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:899*
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:923*
 
 #### `call(self, inputs, attention_mask, token_type_ids, training)`
 **Module:** `models.modern_bert.modern_bert`
@@ -26451,12 +28535,12 @@ Forward pass of the ModernBertBLT model.
 
 Sum the embeddings from all specified n-gram sizes.
 
-*📁 src/dl_techniques/models/modern_bert/components.py:193*
+*📁 src/dl_techniques/models/modern_bert/components.py:197*
 
 #### `call(self, input_ids, position_ids, training)`
 **Module:** `models.modern_bert.components`
 
-*📁 src/dl_techniques/models/modern_bert/components.py:358*
+*📁 src/dl_techniques/models/modern_bert/components.py:366*
 
 #### `call(self, inputs, training)`
 **Module:** `models.vit_hmlp.model`
@@ -26491,21 +28575,21 @@ Forward pass to compute embeddings.
 
 Forward pass to compute relevance scores.
 
-*📁 src/dl_techniques/models/qwen/qwen3_embeddings.py:503*
+*📁 src/dl_techniques/models/qwen/qwen3_embeddings.py:522*
 
 #### `call(self, inputs, training)`
 **Module:** `models.qwen.qwen3_embeddings`
 
 The base forward pass expects tokenized inputs.
 
-*📁 src/dl_techniques/models/qwen/qwen3_embeddings.py:683*
+*📁 src/dl_techniques/models/qwen/qwen3_embeddings.py:720*
 
 #### `call(self, inputs, training)`
 **Module:** `models.qwen.qwen3_embeddings`
 
 The base forward pass expects tokenized, pre-formatted inputs.
 
-*📁 src/dl_techniques/models/qwen/qwen3_embeddings.py:809*
+*📁 src/dl_techniques/models/qwen/qwen3_embeddings.py:846*
 
 #### `call(self, inputs, attention_mask, training, return_dict)`
 **Module:** `models.qwen.qwen3`
@@ -26526,7 +28610,7 @@ Integrate memory and entity information with hidden states.
 
 Forward pass of Qwen3-MEGA model.
 
-*📁 src/dl_techniques/models/qwen/qwen3_mega.py:626*
+*📁 src/dl_techniques/models/qwen/qwen3_mega.py:643*
 
 #### `call(self, inputs, attention_mask, training, return_dict)`
 **Module:** `models.qwen.qwen3_next`
@@ -26582,7 +28666,7 @@ Forward pass for text encoding.
 
 Forward pass through the Vision Transformer.
 
-*📁 src/dl_techniques/models/vit/model.py:452*
+*📁 src/dl_techniques/models/vit/model.py:476*
 
 #### `call(self, inputs, training)`
 **Module:** `models.squeezenet.squeezenet_v2`
@@ -26603,7 +28687,7 @@ Forward pass through the Fire module.
 
 Configure the model for training.
 
-*📁 src/dl_techniques/models/depth_anything/model.py:366*
+*📁 src/dl_techniques/models/depth_anything/model.py:499*
 
 #### `compile(self, optimizer, metrics)`
 **Module:** `models.mdn.model`
@@ -26611,6 +28695,13 @@ Configure the model for training.
 Configure the model for training.
 
 *📁 src/dl_techniques/models/mdn/model.py:588*
+
+#### `compile(self, backbone_optimizer, memory_optimizer)`
+**Module:** `models.memory_bank.wave_field_memory_llm`
+
+Register the backbone optimizer with Keras and store the memory optimizer for manual application inside :meth:`train_step`.
+
+*📁 src/dl_techniques/models/memory_bank/wave_field_memory_llm.py:515*
 
 #### `compute_gmm_params(points, gamma)`
 **Module:** `models.latent_gmm_registration.model`
@@ -26671,14 +28762,70 @@ Compute output shape given input shape.
 
 Compute the output shape of the layer.
 
-*📁 src/dl_techniques/models/depth_anything/components.py:206*
+*📁 src/dl_techniques/models/depth_anything/components.py:247*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.nano_vlm_world_model.scheduler`
+
+Scheduler utility methods preserve input data shape.
+
+*📁 src/dl_techniques/models/nano_vlm_world_model/scheduler.py:359*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.nano_vlm_world_model.denoisers`
+
+Output shape: (batch,) -> (batch, embedding_dim).
+
+*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:88*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.nano_vlm_world_model.denoisers`
+
+Output shape matches noisy_data input shape.
+
+*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:254*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.nano_vlm_world_model.denoisers`
+
+Output shape matches noisy_vision input shape.
+
+*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:337*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.nano_vlm_world_model.denoisers`
+
+Output shape matches noisy_text input shape.
+
+*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:414*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.nano_vlm_world_model.denoisers`
+
+Returns tuple of (vision_shape, text_shape) matching inputs.
+
+*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:580*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.bias_free_denoisers.bfunet_conditional_unified`
+
+Compute output shape based on injection method.
+
+*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:224*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.bias_free_denoisers.bfunet_conditional_unified`
+
+Compute output shape based on injection method.
+
+*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:355*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `models.bias_free_denoisers.bfconvunext`
 
 Compute output shape.
 
-*📁 src/dl_techniques/models/bias_free_denoisers/bfconvunext.py:117*
+*📁 src/dl_techniques/models/bias_free_denoisers/bfconvunext.py:118*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `models.mdn.model`
@@ -26686,6 +28833,41 @@ Compute output shape.
 Compute the output shape of the model.
 
 *📁 src/dl_techniques/models/mdn/model.py:753*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.adaptive_ema.model`
+
+Static-shape map of the dict output (I-14).
+
+*📁 src/dl_techniques/models/adaptive_ema/model.py:371*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.mamba.components_v2`
+
+Output shape: (batch, seq_len, d_model).
+
+*📁 src/dl_techniques/models/mamba/components_v2.py:303*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.mamba.components_v2`
+
+Returns tuple of (hidden_states, residual), both (batch, seq_len, d_model).
+
+*📁 src/dl_techniques/models/mamba/components_v2.py:379*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.mamba.components`
+
+Output shape: (batch, seq_len, d_model).
+
+*📁 src/dl_techniques/models/mamba/components.py:523*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.mamba.components`
+
+Returns tuple of (hidden_states, residual), both (batch, seq_len, d_model).
+
+*📁 src/dl_techniques/models/mamba/components.py:708*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `models.jepa.encoder`
@@ -26793,6 +28975,13 @@ Output shape is identical to input shape.
 *📁 src/dl_techniques/models/fftnet/components.py:1058*
 
 #### `compute_output_shape(self, input_shape)`
+**Module:** `models.gemma.components`
+
+Output shape equals input shape (residual connections preserve dimensions).
+
+*📁 src/dl_techniques/models/gemma/components.py:252*
+
+#### `compute_output_shape(self, input_shape)`
 **Module:** `models.dino.dino_v2`
 
 Compute the output shape of the layer.
@@ -26812,6 +29001,21 @@ Compute output shape.
 Compute output shape based on configuration.
 
 *📁 src/dl_techniques/models/prism/model.py:513*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.lewm.embedder`
+
+*📁 src/dl_techniques/models/lewm/embedder.py:82*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.lewm.predictor`
+
+*📁 src/dl_techniques/models/lewm/predictor.py:170*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.lewm.projector`
+
+*📁 src/dl_techniques/models/lewm/projector.py:82*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `models.tiny_recursive_model.components`
@@ -26884,11 +29088,155 @@ Compute output shapes for all model outputs.
 *📁 src/dl_techniques/models/masked_autoencoder/mae.py:130*
 
 #### `compute_output_shape(self, input_shape)`
+**Module:** `models.masked_autoencoder.patch_masking`
+
+Masked images have the same spatial dimensions as input.
+
+*📁 src/dl_techniques/models/masked_autoencoder/patch_masking.py:138*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.masked_autoencoder.conv_decoder`
+
+Compute output shape: each decoder block upsamples 2x spatially.
+
+*📁 src/dl_techniques/models/masked_autoencoder/conv_decoder.py:203*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.cliffordnet.lm`
+
+*📁 src/dl_techniques/models/cliffordnet/lm.py:334*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:1139*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.cliffordnet.denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/denoiser.py:219*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.cliffordnet.denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/denoiser.py:319*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.cliffordnet.denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/denoiser.py:537*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.cliffordnet.clip`
+
+*📁 src/dl_techniques/models/cliffordnet/clip.py:1302*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.cliffordnet.lmunet`
+
+*📁 src/dl_techniques/models/cliffordnet/lmunet.py:921*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.cliffordnet.embedding_unet`
+
+*📁 src/dl_techniques/models/cliffordnet/embedding_unet.py:632*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:160*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:426*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:597*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:735*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:1403*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.cliffordnet.model`
+
+Compute output shape.
+
+*📁 src/dl_techniques/models/cliffordnet/model.py:384*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.cliffordnet.unet`
+
+*📁 src/dl_techniques/models/cliffordnet/unet.py:902*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.cliffordnet.lm_routing`
+
+*📁 src/dl_techniques/models/cliffordnet/lm_routing.py:426*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.gpt2.gpt2`
+
+Compute output shapes given input shape.
+
+*📁 src/dl_techniques/models/gpt2/gpt2.py:324*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.video_jepa.encoder`
+
+``(B_total, H_p, W_p, D)``.
+
+*📁 src/dl_techniques/models/video_jepa/encoder.py:201*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.video_jepa.predictor`
+
+*📁 src/dl_techniques/models/video_jepa/predictor.py:170*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.video_jepa.predictor`
+
+Output matches ``z_shape``.
+
+*📁 src/dl_techniques/models/video_jepa/predictor.py:379*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.clip.model`
+
+Compute output shape for given input shape.
+
+*📁 src/dl_techniques/models/clip/model.py:680*
+
+#### `compute_output_shape(self, input_shape)`
 **Module:** `models.tree_transformer.model`
 
 Computes the output shape of the layer.
 
-*📁 src/dl_techniques/models/tree_transformer/model.py:950*
+*📁 src/dl_techniques/models/tree_transformer/model.py:338*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.memory_bank.write_controller`
+
+*📁 src/dl_techniques/models/memory_bank/write_controller.py:163*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.memory_bank.wave_field_memory_llm`
+
+*📁 src/dl_techniques/models/memory_bank/wave_field_memory_llm.py:503*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.memory_bank.memory_banks`
+
+*📁 src/dl_techniques/models/memory_bank/memory_banks.py:290*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `models.yolo12.feature_extractor`
@@ -26896,6 +29244,13 @@ Computes the output shape of the layer.
 Compute output shapes for the three feature maps.
 
 *📁 src/dl_techniques/models/yolo12/feature_extractor.py:311*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.distilbert.model`
+
+Compute output shape: (batch_size, seq_length) -> (batch_size, seq_length, hidden_size).
+
+*📁 src/dl_techniques/models/distilbert/model.py:259*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `models.pw_fnet.model`
@@ -26931,6 +29286,16 @@ Compute output shape for given input shape.
 Compute output shape(s) for the model.
 
 *📁 src/dl_techniques/models/convunext/model.py:836*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.wave_field_llm.wave_field_llm`
+
+*📁 src/dl_techniques/models/wave_field_llm/wave_field_llm.py:188*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.wave_field_llm.wave_field_llm`
+
+*📁 src/dl_techniques/models/wave_field_llm/wave_field_llm.py:505*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `models.power_mlp.model`
@@ -26996,6 +29361,48 @@ Compute output shapes for forecast and residual.
 *📁 src/dl_techniques/models/nbeats/nbeats.py:530*
 
 #### `compute_output_shape(self, input_shape)`
+**Module:** `models.modern_bert.modern_bert_blt_hrm`
+
+Output shape: (batch_size, seq_len) -> (batch_size, seq_len, embed_dim).
+
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:296*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.modern_bert.modern_bert_blt_hrm`
+
+Output shape: (batch_size, seq_len) -> (batch_size, total_seq_len, embed_dim).
+
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:514*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.modern_bert.modern_bert_blt_hrm`
+
+Output shape for carry dict and outputs dict.
+
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:815*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.modern_bert.components`
+
+ByteTokenizer is a utility layer; output shape equals input shape.
+
+*📁 src/dl_techniques/models/modern_bert/components.py:76*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.modern_bert.components`
+
+Output shape: (batch_size, seq_len) -> (batch_size, seq_len, embed_dim).
+
+*📁 src/dl_techniques/models/modern_bert/components.py:204*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.modern_bert.components`
+
+Output shape: (batch_size, seq_len) -> (batch_size, seq_len, hidden_size).
+
+*📁 src/dl_techniques/models/modern_bert/components.py:412*
+
+#### `compute_output_shape(self, input_shape)`
 **Module:** `models.vit_hmlp.model`
 
 Compute output shape.
@@ -27008,6 +29415,27 @@ Compute output shape.
 Output shape is identical to input shape.
 
 *📁 src/dl_techniques/models/fastvlm/components.py:236*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.qwen.qwen3_embeddings`
+
+Compute output shape.
+
+*📁 src/dl_techniques/models/qwen/qwen3_embeddings.py:311*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.qwen.qwen3_embeddings`
+
+Compute output shape.
+
+*📁 src/dl_techniques/models/qwen/qwen3_embeddings.py:583*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `models.qwen.qwen3_mega`
+
+Compute output shape.
+
+*📁 src/dl_techniques/models/qwen/qwen3_mega.py:220*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `models.qwen.components`
@@ -27035,7 +29463,7 @@ Compute the output shape.
 
 Compute output shape.
 
-*📁 src/dl_techniques/models/vit/model.py:511*
+*📁 src/dl_techniques/models/vit/model.py:535*
 
 #### `compute_output_shape(self, input_shape)`
 **Module:** `models.squeezenet.squeezenet_v2`
@@ -27110,6 +29538,13 @@ Loop condition: continue while t < seq_len.
 
 *📁 src/dl_techniques/models/mamba/components.py:395*
 
+#### `cosine_ema_schedule(decay_start, decay_end, total_steps)`
+**Module:** `models.depth_anything.teacher_ema`
+
+Return a callable ``step -> decay`` implementing a cosine ramp.
+
+*📁 src/dl_techniques/models/depth_anything/teacher_ema.py:45*
+
 #### `counterfactual_generation(self, x_reference, y_target)`
 **Module:** `models.ccnets.orchestrators`
 
@@ -27122,28 +29557,42 @@ Generate counterfactual observations.
 
 Create ACC-UNet model with functional API.
 
-*📁 src/dl_techniques/models/accunet/model.py:461*
+*📁 src/dl_techniques/models/accunet/model.py:477*
 
 #### `create_acc_unet_binary(input_channels, input_shape, base_filters, mlfc_iterations)`
 **Module:** `models.accunet.model`
 
 Create ACC-UNet model for binary segmentation.
 
-*📁 src/dl_techniques/models/accunet/model.py:524*
+*📁 src/dl_techniques/models/accunet/model.py:540*
 
 #### `create_acc_unet_multiclass(input_channels, num_classes, input_shape, base_filters, mlfc_iterations)`
 **Module:** `models.accunet.model`
 
 Create ACC-UNet model for multi-class segmentation.
 
-*📁 src/dl_techniques/models/accunet/model.py:571*
+*📁 src/dl_techniques/models/accunet/model.py:587*
+
+#### `create_adaptive_ema_slope_filter(ema_period, lookback_period, initial_upper_threshold, initial_lower_threshold, learnable_thresholds, adjust_ema, slope_softness, quantile_head_config, slope_feature_dim, slope_feature_kernel)`
+**Module:** `models.adaptive_ema.model`
+
+Factory function for :class:`AdaptiveEMASlopeFilterModel`.
+
+*📁 src/dl_techniques/models/adaptive_ema/model.py:421*
+
+#### `create_bert(variant, vocab_size, pretrained, weights_dataset, cache_dir)`
+**Module:** `models.bert.bert`
+
+Convenience factory that mirrors ``create_resnet`` / ``create_tree_transformer``.
+
+*📁 src/dl_techniques/models/bert/bert.py:829*
 
 #### `create_bert_with_head(bert_variant, task_config, pretrained, weights_dataset, cache_dir, bert_config_overrides, head_config_overrides)`
 **Module:** `models.bert.bert`
 
 Factory function to create a BERT model with a task-specific head.
 
-*📁 src/dl_techniques/models/bert/bert.py:846*
+*📁 src/dl_techniques/models/bert/bert.py:894*
 
 #### `create_bfcnn_denoiser(input_shape, num_blocks, filters, initial_kernel_size, kernel_size, activation, final_activation, kernel_initializer, kernel_regularizer, model_name)`
 **Module:** `models.bias_free_denoisers.bfcnn`
@@ -27178,7 +29627,7 @@ Create a bias-free U-Net model with a specific variant configuration.
 
 Create a BLT model with the specified variant and configuration.
 
-*📁 src/dl_techniques/models/byte_latent_transformer/model.py:688*
+*📁 src/dl_techniques/models/byte_latent_transformer/model.py:694*
 
 #### `create_capsnet(num_classes, input_shape, optimizer, learning_rate)`
 **Module:** `models.capsnet.model`
@@ -27186,6 +29635,20 @@ Create a BLT model with the specified variant and configuration.
 Create and compile a CapsNet model.
 
 *📁 src/dl_techniques/models/capsnet/model.py:572*
+
+#### `create_capsnet_v2(num_classes, input_shape, stem, stem_pretrained)`
+**Module:** `models.capsnet.model_v2`
+
+Create and compile a :class:`CapsNetV2` with the modern training recipe.
+
+*📁 src/dl_techniques/models/capsnet/model_v2.py:493*
+
+#### `create_capsnet_v2_pretrained(backbone, num_classes, input_shape, pretrained)`
+**Module:** `models.capsnet.model_v2`
+
+Convenience wrapper: capsule head on a pretrained ResNet backbone (Stage 2).
+
+*📁 src/dl_techniques/models/capsnet/model_v2.py:595*
 
 #### `create_cbam_net(variant, num_classes, input_shape, pretrained)`
 **Module:** `models.cbam.model`
@@ -27199,21 +29662,49 @@ Convenience function to create a CBAMNet model.
 
 Create bias-free U-Net for class-conditional image generation/denoising.
 
-*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:845*
+*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:861*
+
+#### `create_cliffordnet(variant, num_classes, pretrained, weights_dataset, cache_dir)`
+**Module:** `models.cliffordnet.model`
+
+Convenience function to create CliffordNet models.
+
+*📁 src/dl_techniques/models/cliffordnet/model.py:723*
+
+#### `create_cliffordnet_depth(variant, in_channels, out_channels, enable_deep_supervision, head_hidden_dim)`
+**Module:** `models.cliffordnet.unet`
+
+Create a CliffordNet U-Net configured for monocular depth estimation.
+
+*📁 src/dl_techniques/models/cliffordnet/unet.py:1105*
+
+#### `create_cliffordnet_embedding(variant, vocab_size, max_seq_length, pretrained)`
+**Module:** `models.cliffordnet.embedding_unet`
+
+Factory for :class:`CliffordNetEmbedding`.
+
+*📁 src/dl_techniques/models/cliffordnet/embedding_unet.py:772*
+
+#### `create_cliffordnet_embedding_with_head(variant, task_config, vocab_size, max_seq_length, pretrained, encoder_config_overrides, head_config_overrides)`
+**Module:** `models.cliffordnet.embedding_unet`
+
+Build a :class:`CliffordNetEmbedding` encoder + NLP task head.
+
+*📁 src/dl_techniques/models/cliffordnet/embedding_unet.py:799*
 
 #### `create_clip_model()`
 **Module:** `models.clip.model`
 
 Convenience function to create a CLIP model.
 
-*📁 src/dl_techniques/models/clip/model.py:772*
+*📁 src/dl_techniques/models/clip/model.py:810*
 
 #### `create_clip_variant(variant)`
 **Module:** `models.clip.model`
 
 Convenience function to create a CLIP model from a predefined variant.
 
-*📁 src/dl_techniques/models/clip/model.py:801*
+*📁 src/dl_techniques/models/clip/model.py:839*
 
 #### `create_conditional_bfunet_denoiser(input_shape, num_classes, depth, initial_filters, filter_multiplier, blocks_per_level, kernel_size, initial_kernel_size, activation, final_activation, kernel_initializer, kernel_regularizer, use_residual_blocks, enable_deep_supervision, class_embedding_dim, class_injection_method, enable_cfg_training, model_name)`
 **Module:** `models.bias_free_denoisers.bfunet_conditional`
@@ -27248,14 +29739,14 @@ Convenience function to create ConvNeXt V2 models.
 
 Create a ConvUNext model using existing ConvNeXt V1/V2 blocks with bias-free configuration.
 
-*📁 src/dl_techniques/models/bias_free_denoisers/bfconvunext.py:183*
+*📁 src/dl_techniques/models/bias_free_denoisers/bfconvunext.py:184*
 
 #### `create_convunext_variant(variant, input_shape, enable_deep_supervision)`
 **Module:** `models.bias_free_denoisers.bfconvunext`
 
 Create a ConvUNext model with a specific variant configuration.
 
-*📁 src/dl_techniques/models/bias_free_denoisers/bfconvunext.py:576*
+*📁 src/dl_techniques/models/bias_free_denoisers/bfconvunext.py:577*
 
 #### `create_convunext_variant(variant, input_shape, include_top, enable_deep_supervision, output_channels, use_bias)`
 **Module:** `models.convunext.model`
@@ -27292,19 +29783,19 @@ Create multi-scale feature encoder for dense conditioning signals.
 
 *📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:41*
 
-#### `create_depth_anything(encoder_type, input_shape, decoder_dims, output_channels, kernel_initializer, kernel_regularizer, loss_weights, cutmix_prob, color_jitter_strength, use_feature_alignment)`
+#### `create_depth_anything(encoder_type, image_shape, decoder_dims, output_channels, kernel_initializer, kernel_regularizer, loss_weights, cutmix_prob, color_jitter_strength, use_feature_alignment, encoder_kind, enable_semi_supervised, input_shape)`
 **Module:** `models.depth_anything.model`
 
 Create and build Depth Anything model instance.
 
-*📁 src/dl_techniques/models/depth_anything/model.py:474*
+*📁 src/dl_techniques/models/depth_anything/model.py:761*
 
 #### `create_depth_estimation_bfunet(depth_shape, rgb_shape)`
 **Module:** `models.bias_free_denoisers.bfunet_conditional_unified`
 
 Create bias-free U-Net for monocular depth estimation.
 
-*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:809*
+*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:825*
 
 #### `create_detr(num_classes, num_queries, backbone_name, backbone_trainable, hidden_dim, num_heads, num_encoder_layers, num_decoder_layers, ffn_dim, dropout, aux_loss, activation, normalization_type, ffn_type)`
 **Module:** `models.detr.model`
@@ -27346,14 +29837,14 @@ A factory function to create DINOv3 models.
 
 Factory function to create a DistilBERT model with a task-specific head.
 
-*📁 src/dl_techniques/models/distilbert/model.py:1015*
+*📁 src/dl_techniques/models/distilbert/model.py:1019*
 
 #### `create_fast_reasoning_byte_bert()`
 **Module:** `models.modern_bert.modern_bert_blt_hrm`
 
 Create fast ReasoningByteBERT configuration for quick inference.
 
-*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:1134*
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:1158*
 
 #### `create_fftnet(variant, image_size, patch_size)`
 **Module:** `models.fftnet.model`
@@ -27411,6 +29902,13 @@ Creates a Gemma3 model for text generation tasks.
 
 *📁 src/dl_techniques/models/gemma/gemma3.py:407*
 
+#### `create_gpt2(variant, vocab_size, pretrained)`
+**Module:** `models.gpt2.gpt2`
+
+Convenience factory that mirrors ``create_bert`` / ``create_resnet`` / ``create_tree_transformer``.
+
+*📁 src/dl_techniques/models/gpt2/gpt2.py:458*
+
 #### `create_hierarchical_reasoning_model(vocab_size, seq_len, embed_dim, num_puzzle_identifiers, variant, optimizer, learning_rate)`
 **Module:** `models.hierarchical_reasoning_model.model`
 
@@ -27418,33 +29916,12 @@ Create and optionally compile a Hierarchical Reasoning Model.
 
 *📁 src/dl_techniques/models/hierarchical_reasoning_model/model.py:860*
 
-#### `create_inference_model_from_training_model(training_model)`
-**Module:** `models.bias_free_denoisers.bfconvunext`
-
-Create a single-output inference model from a multi-output training model.
-
-*📁 src/dl_techniques/models/bias_free_denoisers/bfconvunext.py:684*
-
-#### `create_inference_model_from_training_model(training_model)`
-**Module:** `models.bias_free_denoisers.bfunet`
-
-Create a single-output inference model from a multi-output training model.
-
-*📁 src/dl_techniques/models/bias_free_denoisers/bfunet.py:780*
-
 #### `create_inference_model_from_training_model(training_model, disable_deep_supervision)`
 **Module:** `models.convunext.model`
 
 Create inference model from training model.
 
 *📁 src/dl_techniques/models/convunext/model.py:1296*
-
-#### `create_inference_model_from_training_model(training_model)`
-**Module:** `models.resnet.model`
-
-Create a single-output inference model from a multi-output training model.
-
-*📁 src/dl_techniques/models/resnet/model.py:731*
 
 #### `create_inputs_with_masking(batch_size, image_size, patch_size, mask_ratio)`
 **Module:** `models.vit_hmlp.model`
@@ -27495,33 +29972,33 @@ Convenience function to create Mobile CLIP models.
 
 *📁 src/dl_techniques/models/mobile_clip/mobile_clip_v1.py:367*
 
-#### `create_mobilenetv1(variant, num_classes, input_shape, pretrained)`
+#### `create_mobilenetv1(variant, num_classes, input_shape, width_multiplier, pretrained)`
 **Module:** `models.mobilenet.mobilenet_v1`
 
 Convenience function to create MobileNetV1 models.
 
-*📁 src/dl_techniques/models/mobilenet/mobilenet_v1.py:341*
+*📁 src/dl_techniques/models/mobilenet/mobilenet_v1.py:342*
 
-#### `create_mobilenetv2(variant, num_classes, input_shape, pretrained)`
+#### `create_mobilenetv2(variant, num_classes, input_shape, width_multiplier, pretrained)`
 **Module:** `models.mobilenet.mobilenet_v2`
 
 Convenience function to create MobileNetV2 models.
 
-*📁 src/dl_techniques/models/mobilenet/mobilenet_v2.py:348*
+*📁 src/dl_techniques/models/mobilenet/mobilenet_v2.py:365*
 
 #### `create_mobilenetv3(variant, num_classes, input_shape, width_multiplier, pretrained)`
 **Module:** `models.mobilenet.mobilenet_v3`
 
 Convenience function to create MobileNetV3 models.
 
-*📁 src/dl_techniques/models/mobilenet/mobilenet_v3.py:392*
+*📁 src/dl_techniques/models/mobilenet/mobilenet_v3.py:402*
 
 #### `create_mobilenetv4(variant, num_classes, input_shape, width_multiplier, pretrained)`
 **Module:** `models.mobilenet.mobilenet_v4`
 
 Convenience function to create MobileNetV4 models.
 
-*📁 src/dl_techniques/models/mobilenet/mobilenet_v4.py:497*
+*📁 src/dl_techniques/models/mobilenet/mobilenet_v4.py:495*
 
 #### `create_modern_bert_blt_with_head(bert_variant, task_config, bert_config_overrides, head_config_overrides)`
 **Module:** `models.modern_bert.modern_bert_blt`
@@ -27626,7 +30103,7 @@ Create a Qwen3 model optimized for text generation tasks.
 
 Factory function to create Qwen3-MEGA models with preset configurations.
 
-*📁 src/dl_techniques/models/qwen/qwen3_mega.py:770*
+*📁 src/dl_techniques/models/qwen/qwen3_mega.py:787*
 
 #### `create_qwen3_next(config_or_variant, task_type)`
 **Module:** `models.qwen.qwen3_next`
@@ -27675,21 +30152,21 @@ Create a Qwen3-SOM model optimized for text generation tasks.
 
 Create base ReasoningByteBERT configuration.
 
-*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:1074*
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:1098*
 
 #### `create_reasoning_byte_bert_for_reasoning_tasks(config, num_puzzle_types)`
 **Module:** `models.modern_bert.modern_bert_blt_hrm`
 
 Create ReasoningByteBERT optimized for reasoning tasks.
 
-*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:1107*
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:1131*
 
 #### `create_reasoning_byte_bert_large()`
 **Module:** `models.modern_bert.modern_bert_blt_hrm`
 
 Create large ReasoningByteBERT configuration.
 
-*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:1090*
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:1114*
 
 #### `create_relgt_model(output_dim, problem_type, model_size)`
 **Module:** `models.relgt.model`
@@ -27703,7 +30180,7 @@ Factory function to create RELGT models with predefined configurations.
 
 Convenience function to create ResNet models.
 
-*📁 src/dl_techniques/models/resnet/model.py:771*
+*📁 src/dl_techniques/models/resnet/model.py:702*
 
 #### `create_score_based_nanovlm(variant, mode, vocab_size)`
 **Module:** `models.nano_vlm_world_model.model`
@@ -27717,7 +30194,7 @@ Create a score-based nanoVLM with predefined configurations.
 
 Create bias-free U-Net for semantic-aware depth estimation.
 
-*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:885*
+*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:901*
 
 #### `create_siglip_vision_transformer(input_shape, num_classes, scale, patch_size, include_top, pooling, dropout_rate, attention_dropout_rate, pos_dropout_rate, kernel_initializer, kernel_regularizer, bias_initializer, bias_regularizer, normalization_type, normalization_position, ffn_type, activation)`
 **Module:** `models.vit_siglip.model`
@@ -27787,35 +30264,49 @@ Create a plain MLP baseline without ensembling.
 
 Convenience function to create TiRex models from predefined variants.
 
-*📁 src/dl_techniques/models/tirex/model.py:613*
+*📁 src/dl_techniques/models/tirex/model.py:641*
 
 #### `create_tirex_extended(variant, input_length, prediction_length, quantile_levels)`
 **Module:** `models.tirex.model_extended`
 
 Convenience function to create TiRex models from predefined variants.
 
-*📁 src/dl_techniques/models/tirex/model_extended.py:249*
+*📁 src/dl_techniques/models/tirex/model_extended.py:263*
 
 #### `create_tirex_model(input_length, prediction_length, patch_size, embed_dim, num_blocks, num_heads, quantile_levels, block_types)`
 **Module:** `models.tirex.model`
 
 Create a TiRex model with specified configuration.
 
-*📁 src/dl_techniques/models/tirex/model.py:562*
+*📁 src/dl_techniques/models/tirex/model.py:590*
+
+#### `create_tree_transformer(variant, vocab_size, pretrained, weights_dataset, cache_dir)`
+**Module:** `models.tree_transformer.model`
+
+Convenience function to create Tree Transformer encoder models.
+
+*📁 src/dl_techniques/models/tree_transformer/model.py:597*
 
 #### `create_tree_transformer_with_head(tree_transformer_variant, task_config, pretrained, weights_dataset, cache_dir, encoder_config_overrides, head_config_overrides)`
 **Module:** `models.tree_transformer.model`
 
 Factory function to create a Tree Transformer model with a task-specific head.
 
-*📁 src/dl_techniques/models/tree_transformer/model.py:1175*
+*📁 src/dl_techniques/models/tree_transformer/model.py:657*
+
+#### `create_trm(vocab_size, hidden_size, num_heads, expansion, seq_len, puzzle_emb_len, h_layers, l_layers, halt_max_steps, halt_exploration_prob, no_act_continue, rope_theta, attention_type, ffn_type, normalization_type, normalization_position, dropout_rate, attention_dropout_rate, name)`
+**Module:** `models.tiny_recursive_model.model`
+
+Factory for constructing a built TRM model.
+
+*📁 src/dl_techniques/models/tiny_recursive_model/model.py:429*
 
 #### `create_unified_conditional_bfunet(target_shape, dense_conditioning_shape, num_classes, depth, initial_filters, filter_multiplier, blocks_per_level, kernel_size, activation, final_activation, kernel_initializer, kernel_regularizer, use_residual_blocks, use_batch_norm, dense_conditioning_encoder_filters, dense_injection_method, class_embedding_dim, discrete_injection_method, enable_cfg_training, enable_deep_supervision, model_name)`
 **Module:** `models.bias_free_denoisers.bfunet_conditional_unified`
 
 Create unified conditional bias-free U-Net supporting multiple conditioning modalities.
 
-*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:366*
+*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:382*
 
 #### `create_vae(input_shape, latent_dim, variant, optimizer, learning_rate)`
 **Module:** `models.vae.model`
@@ -27831,12 +30322,12 @@ Create VAE from configuration dictionary.
 
 *📁 src/dl_techniques/models/vae/model.py:956*
 
-#### `create_vision_transformer(input_shape, num_classes, scale, patch_size, include_top, pooling, dropout_rate, attention_dropout_rate, pos_dropout_rate, kernel_initializer, kernel_regularizer, bias_initializer, bias_regularizer, normalization_type, normalization_position, ffn_type, activation)`
+#### `create_vit(variant, num_classes, input_shape, patch_size, pretrained, weights_dataset, weights_input_shape, cache_dir, include_top, pooling, dropout_rate, attention_dropout_rate, pos_dropout_rate, kernel_initializer, kernel_regularizer, bias_initializer, bias_regularizer, normalization_type, normalization_position, ffn_type, activation)`
 **Module:** `models.vit.model`
 
 Create a Vision Transformer model with specified configuration.
 
-*📁 src/dl_techniques/models/vit/model.py:630*
+*📁 src/dl_techniques/models/vit/model.py:846*
 
 #### `create_vit_hmlp(input_shape, num_classes, scale, patch_size, include_top, pooling, dropout_rate, attention_dropout_rate, pos_dropout_rate, stem_norm_layer, kernel_initializer, kernel_regularizer, bias_initializer, bias_regularizer, normalization_type, normalization_position, ffn_type, activation, use_stochastic_depth, stochastic_depth_rate)`
 **Module:** `models.vit_hmlp.model`
@@ -27858,6 +30349,13 @@ Create a YOLOv12 feature extractor with specified configuration.
 Create YOLOv12 multi-task model with specified tasks and class counts.
 
 *📁 src/dl_techniques/models/yolo12/multitask.py:417*
+
+#### `decode(self, token_ids)`
+**Module:** `models.nam.tokenizer`
+
+Decode token IDs back to an expression string.
+
+*📁 src/dl_techniques/models/nam/tokenizer.py:104*
 
 #### `decode(self, latents)`
 **Module:** `models.vq_vae.model`
@@ -27885,7 +30383,7 @@ Decode discrete codebook indices to reconstructed outputs.
 
 Decode byte tokens back to text.
 
-*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:1051*
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:1075*
 
 #### `decode_tokens(self, token_ids)`
 **Module:** `models.modern_bert.modern_bert_blt`
@@ -27899,7 +30397,7 @@ Decodes a tensor of byte token IDs back into a string.
 
 Convenience method to decode token IDs from this layer.
 
-*📁 src/dl_techniques/models/modern_bert/components.py:398*
+*📁 src/dl_techniques/models/modern_bert/components.py:406*
 
 #### `disentangle_causes(self, x_input)`
 **Module:** `models.ccnets.orchestrators`
@@ -27913,7 +30411,14 @@ Disentangle the explicit and latent causes of an observation.
 
 Create empty carry state for reasoning.
 
-*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:685*
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:694*
+
+#### `encode(self, expression)`
+**Module:** `models.nam.tokenizer`
+
+Encode an expression string to a padded token ID list.
+
+*📁 src/dl_techniques/models/nam/tokenizer.py:80*
 
 #### `encode(self, inputs)`
 **Module:** `models.vq_vae.model`
@@ -27929,6 +30434,34 @@ Encode inputs to latent parameters.
 
 *📁 src/dl_techniques/models/vae/model.py:612*
 
+#### `encode_actions(self, action)`
+**Module:** `models.lewm.model`
+
+Embed action batch `(B, T_a, A)` -> `(B, T_a, D)`.
+
+*📁 src/dl_techniques/models/lewm/model.py:134*
+
+#### `encode_batch(self, expressions)`
+**Module:** `models.nam.tokenizer`
+
+Encode a batch of expressions.
+
+*📁 src/dl_techniques/models/nam/tokenizer.py:120*
+
+#### `encode_frames(self, pixels)`
+**Module:** `models.video_jepa.model`
+
+Encode a pixel tensor ``(B, T, H, W, C) → (B, T, H_p, W_p, D)``.
+
+*📁 src/dl_techniques/models/video_jepa/model.py:154*
+
+#### `encode_image(self, images, training, normalize)`
+**Module:** `models.cliffordnet.clip`
+
+Encode a batch of images to the shared embedding space.
+
+*📁 src/dl_techniques/models/cliffordnet/clip.py:1126*
+
 #### `encode_image(self, images, training)`
 **Module:** `models.clip.model`
 
@@ -27943,6 +30476,20 @@ Encode images to embedding vectors.
 
 *📁 src/dl_techniques/models/mobile_clip/mobile_clip_v1.py:257*
 
+#### `encode_pixels(self, pixels)`
+**Module:** `models.lewm.model`
+
+Encode pixel batch `(B, T, H, W, C)` -> embedding `(B, T, D)`.
+
+*📁 src/dl_techniques/models/lewm/model.py:123*
+
+#### `encode_text(self, input_ids, training, normalize)`
+**Module:** `models.cliffordnet.clip`
+
+Encode a batch of tokenized text to the shared embedding space.
+
+*📁 src/dl_techniques/models/cliffordnet/clip.py:1168*
+
 #### `encode_text(self, text_ids, training)`
 **Module:** `models.clip.model`
 
@@ -27955,7 +30502,7 @@ Encode text to the shared embedding space.
 
 Encode text to byte tokens.
 
-*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:1034*
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:1058*
 
 #### `encode_text(self, text, max_length, add_special_tokens)`
 **Module:** `models.modern_bert.modern_bert_blt`
@@ -27969,7 +30516,7 @@ Encodes a string of text into byte token IDs.
 
 Convenience method to tokenize text for this layer.
 
-*📁 src/dl_techniques/models/modern_bert/components.py:382*
+*📁 src/dl_techniques/models/modern_bert/components.py:390*
 
 #### `encode_text(self, text, normalize, training)`
 **Module:** `models.mobile_clip.mobile_clip_v1`
@@ -28086,21 +30633,21 @@ Create model from configuration dictionary.
 
 Create model from configuration.
 
-*📁 src/dl_techniques/models/mobilenet/mobilenet_v1.py:306*
+*📁 src/dl_techniques/models/mobilenet/mobilenet_v1.py:307*
 
 #### `from_config(cls, config)`
 **Module:** `models.mobilenet.mobilenet_v4`
 
 Create model from configuration.
 
-*📁 src/dl_techniques/models/mobilenet/mobilenet_v4.py:452*
+*📁 src/dl_techniques/models/mobilenet/mobilenet_v4.py:450*
 
 #### `from_config(cls, config)`
 **Module:** `models.depth_anything.model`
 
 Create model from configuration.
 
-*📁 src/dl_techniques/models/depth_anything/model.py:461*
+*📁 src/dl_techniques/models/depth_anything/model.py:673*
 
 #### `from_config(cls, config)`
 **Module:** `models.tabm.model`
@@ -28128,7 +30675,7 @@ Create model instance from configuration.
 
 Create model from configuration dictionary.
 
-*📁 src/dl_techniques/models/byte_latent_transformer/model.py:656*
+*📁 src/dl_techniques/models/byte_latent_transformer/model.py:662*
 
 #### `from_config(cls, config)`
 **Module:** `models.fractalnet.model`
@@ -28159,6 +30706,16 @@ Deserialize model from configuration.
 *📁 src/dl_techniques/models/detr/model.py:631*
 
 #### `from_config(cls, config)`
+**Module:** `models.nam.cell`
+
+*📁 src/dl_techniques/models/nam/cell.py:550*
+
+#### `from_config(cls, config)`
+**Module:** `models.nam.model`
+
+*📁 src/dl_techniques/models/nam/model.py:426*
+
+#### `from_config(cls, config)`
 **Module:** `models.fnet.model`
 
 Create a model instance from its configuration.
@@ -28177,7 +30734,7 @@ Create model from configuration.
 
 Create model from configuration.
 
-*📁 src/dl_techniques/models/tirex/model.py:553*
+*📁 src/dl_techniques/models/tirex/model.py:581*
 
 #### `from_config(cls, config)`
 **Module:** `models.fftnet.model`
@@ -28206,6 +30763,11 @@ Create model from configuration.
 Create model from configuration.
 
 *📁 src/dl_techniques/models/prism/model.py:574*
+
+#### `from_config(cls, config, custom_objects)`
+**Module:** `models.lewm.model`
+
+*📁 src/dl_techniques/models/lewm/model.py:291*
 
 #### `from_config(cls, config)`
 **Module:** `models.masked_language_model.mlm`
@@ -28246,18 +30808,75 @@ Create model instance from configuration dictionary.
 *📁 src/dl_techniques/models/som/model.py:1227*
 
 #### `from_config(cls, config)`
+**Module:** `models.cliffordnet.lm`
+
+*📁 src/dl_techniques/models/cliffordnet/lm.py:363*
+
+#### `from_config(cls, config)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:1189*
+
+#### `from_config(cls, config)`
+**Module:** `models.cliffordnet.denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/denoiser.py:564*
+
+#### `from_config(cls, config)`
+**Module:** `models.cliffordnet.clip`
+
+*📁 src/dl_techniques/models/cliffordnet/clip.py:1379*
+
+#### `from_config(cls, config)`
+**Module:** `models.cliffordnet.lmunet`
+
+*📁 src/dl_techniques/models/cliffordnet/lmunet.py:967*
+
+#### `from_config(cls, config)`
+**Module:** `models.cliffordnet.embedding_unet`
+
+*📁 src/dl_techniques/models/cliffordnet/embedding_unet.py:679*
+
+#### `from_config(cls, config)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:1446*
+
+#### `from_config(cls, config)`
+**Module:** `models.cliffordnet.model`
+
+Reconstruct model from configuration dict.
+
+*📁 src/dl_techniques/models/cliffordnet/model.py:503*
+
+#### `from_config(cls, config)`
+**Module:** `models.cliffordnet.unet`
+
+*📁 src/dl_techniques/models/cliffordnet/unet.py:970*
+
+#### `from_config(cls, config)`
+**Module:** `models.cliffordnet.lm_routing`
+
+*📁 src/dl_techniques/models/cliffordnet/lm_routing.py:459*
+
+#### `from_config(cls, config)`
 **Module:** `models.hierarchical_reasoning_model.model`
 
 Create model from configuration.
 
 *📁 src/dl_techniques/models/hierarchical_reasoning_model/model.py:795*
 
+#### `from_config(cls, config, custom_objects)`
+**Module:** `models.video_jepa.model`
+
+*📁 src/dl_techniques/models/video_jepa/model.py:339*
+
 #### `from_config(cls, config)`
 **Module:** `models.clip.model`
 
 Create model from configuration.
 
-*📁 src/dl_techniques/models/clip/model.py:711*
+*📁 src/dl_techniques/models/clip/model.py:749*
 
 #### `from_config(cls, config)`
 **Module:** `models.kan.model`
@@ -28269,7 +30888,7 @@ Create model from configuration.
 
 Creates a model instance from its configuration.
 
-*📁 src/dl_techniques/models/tree_transformer/model.py:1148*
+*📁 src/dl_techniques/models/tree_transformer/model.py:575*
 
 #### `from_config(cls, config)`
 **Module:** `models.yolo12.feature_extractor`
@@ -28290,7 +30909,7 @@ Create model from configuration.
 
 Create a model instance from its configuration.
 
-*📁 src/dl_techniques/models/distilbert/model.py:963*
+*📁 src/dl_techniques/models/distilbert/model.py:967*
 
 #### `from_config(cls, config)`
 **Module:** `models.convunext.model`
@@ -28332,7 +30951,12 @@ Create model from configuration.
 
 Create a model instance from its configuration.
 
-*📁 src/dl_techniques/models/bert/bert.py:798*
+*📁 src/dl_techniques/models/bert/bert.py:781*
+
+#### `from_config(cls, config)`
+**Module:** `models.capsnet.model_v2`
+
+*📁 src/dl_techniques/models/capsnet/model_v2.py:434*
 
 #### `from_config(cls, config)`
 **Module:** `models.capsnet.model`
@@ -28388,7 +31012,7 @@ Create model from configuration dictionary.
 
 Create model from configuration.
 
-*📁 src/dl_techniques/models/accunet/model.py:453*
+*📁 src/dl_techniques/models/accunet/model.py:469*
 
 #### `from_config(cls, config)`
 **Module:** `models.cbam.model`
@@ -28437,7 +31061,7 @@ Create model from configuration.
 
 Create model from configuration.
 
-*📁 src/dl_techniques/models/qwen/qwen3_mega.py:761*
+*📁 src/dl_techniques/models/qwen/qwen3_mega.py:778*
 
 #### `from_config(cls, config)`
 **Module:** `models.qwen.qwen3_next`
@@ -28481,6 +31105,23 @@ Create configuration from dictionary.
 
 *📁 src/dl_techniques/models/jepa/config.py:266*
 
+#### `from_dict(cls, d)`
+**Module:** `models.nam.config`
+
+*📁 src/dl_techniques/models/nam/config.py:74*
+
+#### `from_dict(cls, d)`
+**Module:** `models.lewm.config`
+
+*📁 src/dl_techniques/models/lewm/config.py:53*
+
+#### `from_dict(cls, d)`
+**Module:** `models.video_jepa.config`
+
+Construct a config from a dict produced by :meth:`to_dict`.
+
+*📁 src/dl_techniques/models/video_jepa/config.py:180*
+
 #### `from_dict(cls, config_dict)`
 **Module:** `models.modern_bert.modern_bert_blt_hrm`
 
@@ -28509,6 +31150,13 @@ Create model from a predefined preset ('tiny', 'small', 'base', 'large').
 
 *📁 src/dl_techniques/models/prism/model.py:524*
 
+#### `from_pretrained_encoder(self, weights_path, skip_prefixes)`
+**Module:** `models.depth_anything.model`
+
+Load encoder weights from a saved ``.keras`` checkpoint and re-sync teacher.
+
+*📁 src/dl_techniques/models/depth_anything/model.py:308*
+
 #### `from_variant(cls, variant, num_classes, input_shape)`
 **Module:** `models.coshnet.model`
 
@@ -28516,7 +31164,7 @@ Create a CoShNet model from a predefined variant.
 
 *📁 src/dl_techniques/models/coshnet/model.py:507*
 
-#### `from_variant(cls, variant, num_classes, input_shape)`
+#### `from_variant(cls, variant, num_classes, input_shape, width_multiplier)`
 **Module:** `models.mobilenet.mobilenet_v1`
 
 Create a MobileNetV1 model from a predefined variant.
@@ -28530,19 +31178,19 @@ Create a MobileNetV4 model from a predefined variant.
 
 *📁 src/dl_techniques/models/mobilenet/mobilenet_v4.py:368*
 
-#### `from_variant(cls, variant, num_classes, input_shape)`
+#### `from_variant(cls, variant, num_classes, input_shape, width_multiplier)`
 **Module:** `models.mobilenet.mobilenet_v2`
 
-Create a MobileNetV2 model from a predefined variant string.
+Create a MobileNetV2 model from a predefined variant.
 
-*📁 src/dl_techniques/models/mobilenet/mobilenet_v2.py:286*
+*📁 src/dl_techniques/models/mobilenet/mobilenet_v2.py:290*
 
 #### `from_variant(cls, variant, num_classes, input_shape, width_multiplier)`
 **Module:** `models.mobilenet.mobilenet_v3`
 
 Create a MobileNetV3 model from a predefined variant.
 
-*📁 src/dl_techniques/models/mobilenet/mobilenet_v3.py:316*
+*📁 src/dl_techniques/models/mobilenet/mobilenet_v3.py:322*
 
 #### `from_variant(cls, variant, n_num_features, cat_cardinalities, n_classes)`
 **Module:** `models.tabm.model`
@@ -28568,7 +31216,7 @@ Create a Mamba model from a predefined variant.
 
 Create a BLT model from a predefined variant configuration.
 
-*📁 src/dl_techniques/models/byte_latent_transformer/model.py:573*
+*📁 src/dl_techniques/models/byte_latent_transformer/model.py:579*
 
 #### `from_variant(cls, variant, num_classes, input_shape)`
 **Module:** `models.fractalnet.model`
@@ -28591,6 +31239,13 @@ Create a ConvNeXt model from a predefined variant.
 
 *📁 src/dl_techniques/models/convnext/convnext_v1.py:485*
 
+#### `from_variant(cls, variant)`
+**Module:** `models.nam.model`
+
+Create a NAM model from a preset variant.
+
+*📁 src/dl_techniques/models/nam/model.py:397*
+
 #### `from_variant(cls, variant, pretrained, weights_dataset, cache_dir)`
 **Module:** `models.fnet.model`
 
@@ -28603,7 +31258,7 @@ Create an FNet model from a predefined variant.
 
 Create a TiRex model from a predefined variant.
 
-*📁 src/dl_techniques/models/tirex/model.py:486*
+*📁 src/dl_techniques/models/tirex/model.py:513*
 
 #### `from_variant(cls, variant)`
 **Module:** `models.fftnet.model`
@@ -28654,6 +31309,76 @@ Create a SAM model from a predefined variant configuration.
 
 *📁 src/dl_techniques/models/sam/model.py:435*
 
+#### `from_variant(cls, variant, vocab_size, max_seq_length)`
+**Module:** `models.cliffordnet.lm`
+
+Create a CliffordNetLM from a predefined variant.
+
+*📁 src/dl_techniques/models/cliffordnet/lm.py:370*
+
+#### `from_variant(cls, variant, in_channels, uncertainty_mode, quantiles, confidence_level, enable_dense_conditioning, dense_cond_channels, enable_discrete_conditioning, num_classes, class_embedding_dim)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+Create from a predefined variant.
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:1305*
+
+#### `from_variant(cls, variant, in_channels)`
+**Module:** `models.cliffordnet.denoiser`
+
+Create a denoiser from a predefined variant.
+
+*📁 src/dl_techniques/models/cliffordnet/denoiser.py:639*
+
+#### `from_variant(cls, variant, vocab_size, image_size, context_length)`
+**Module:** `models.cliffordnet.clip`
+
+Construct a CliffordCLIP from a predefined variant.
+
+*📁 src/dl_techniques/models/cliffordnet/clip.py:1390*
+
+#### `from_variant(cls, variant, vocab_size, max_seq_length)`
+**Module:** `models.cliffordnet.lmunet`
+
+Create a CliffordNetLMUNet from a predefined variant.
+
+*📁 src/dl_techniques/models/cliffordnet/lmunet.py:974*
+
+#### `from_variant(cls, variant, vocab_size, max_seq_length, pretrained, weights_dataset, cache_dir)`
+**Module:** `models.cliffordnet.embedding_unet`
+
+Create a CliffordNetEmbedding from a predefined variant.
+
+*📁 src/dl_techniques/models/cliffordnet/embedding_unet.py:705*
+
+#### `from_variant(cls, variant, in_channels, enable_dense_conditioning, dense_cond_channels, enable_discrete_conditioning, num_classes, class_embedding_dim)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+Create from a predefined variant.
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:1516*
+
+#### `from_variant(cls, variant, num_classes, pretrained, weights_dataset, cache_dir)`
+**Module:** `models.cliffordnet.model`
+
+Create a :class:`CliffordNet` from a predefined variant.
+
+*📁 src/dl_techniques/models/cliffordnet/model.py:584*
+
+#### `from_variant(cls, variant, in_channels, head_configs)`
+**Module:** `models.cliffordnet.unet`
+
+Create a :class:`CliffordNetUNet` from a named variant.
+
+*📁 src/dl_techniques/models/cliffordnet/unet.py:1076*
+
+#### `from_variant(cls, variant, vocab_size, max_seq_length, routing_mode)`
+**Module:** `models.cliffordnet.lm_routing`
+
+Create a CliffordNetLMRouting from a predefined variant.
+
+*📁 src/dl_techniques/models/cliffordnet/lm_routing.py:469*
+
 #### `from_variant(cls, variant, vocab_size, seq_len, num_puzzle_identifiers)`
 **Module:** `models.hierarchical_reasoning_model.model`
 
@@ -28661,12 +31386,19 @@ Create a Hierarchical Reasoning Model from a predefined variant.
 
 *📁 src/dl_techniques/models/hierarchical_reasoning_model/model.py:708*
 
+#### `from_variant(cls, variant, pretrained)`
+**Module:** `models.gpt2.gpt2`
+
+Create a GPT-2 model from a predefined variant.
+
+*📁 src/dl_techniques/models/gpt2/gpt2.py:388*
+
 #### `from_variant(cls, variant)`
 **Module:** `models.clip.model`
 
 Create a CLIP model from a predefined variant.
 
-*📁 src/dl_techniques/models/clip/model.py:724*
+*📁 src/dl_techniques/models/clip/model.py:762*
 
 #### `from_variant(cls, variant, input_features, output_features, output_activation, pretrained, weights_dataset, weights_input_features, cache_dir, override_config)`
 **Module:** `models.kan.model`
@@ -28680,14 +31412,19 @@ Factory method to create KAN models from standard presets.
 
 Creates a TreeTransformer model from a predefined variant.
 
-*📁 src/dl_techniques/models/tree_transformer/model.py:1070*
+*📁 src/dl_techniques/models/tree_transformer/model.py:465*
+
+#### `from_variant(cls, variant)`
+**Module:** `models.memory_bank.wave_field_memory_llm`
+
+*📁 src/dl_techniques/models/memory_bank/wave_field_memory_llm.py:791*
 
 #### `from_variant(cls, variant, pretrained, weights_dataset, cache_dir)`
 **Module:** `models.distilbert.model`
 
 Create a DistilBERT model from a predefined variant.
 
-*📁 src/dl_techniques/models/distilbert/model.py:812*
+*📁 src/dl_techniques/models/distilbert/model.py:816*
 
 #### `from_variant(cls, variant, input_shape, include_top, enable_deep_supervision, output_channels, use_bias)`
 **Module:** `models.convunext.model`
@@ -28695,6 +31432,13 @@ Create a DistilBERT model from a predefined variant.
 Create model from predefined variant configuration.
 
 *📁 src/dl_techniques/models/convunext/model.py:1131*
+
+#### `from_variant(cls, variant, pretrained)`
+**Module:** `models.wave_field_llm.wave_field_llm`
+
+Instantiate from a named variant in :data:`MODEL_VARIANTS`.
+
+*📁 src/dl_techniques/models/wave_field_llm/wave_field_llm.py:531*
 
 #### `from_variant(cls, variant, num_classes, input_shape, pretrained, weights_dataset, weights_input_shape, cache_dir)`
 **Module:** `models.resnet.model`
@@ -28708,7 +31452,7 @@ Create a ResNet model from a predefined variant.
 
 Create a BERT model from a predefined variant.
 
-*📁 src/dl_techniques/models/bert/bert.py:644*
+*📁 src/dl_techniques/models/bert/bert.py:622*
 
 #### `from_variant(cls, variant, num_classes, input_dim)`
 **Module:** `models.power_mlp.model`
@@ -28792,6 +31536,13 @@ Create a Mobile CLIP model from a predefined variant.
 
 *📁 src/dl_techniques/models/mobile_clip/mobile_clip_v1.py:312*
 
+#### `from_variant(cls, variant, num_classes, input_shape, pretrained, weights_dataset, weights_input_shape, cache_dir)`
+**Module:** `models.vit.model`
+
+Create a ViT model from a predefined variant.
+
+*📁 src/dl_techniques/models/vit/model.py:726*
+
 #### `from_variant(cls, variant, num_classes, input_shape)`
 **Module:** `models.squeezenet.squeezenet_v2`
 
@@ -28825,7 +31576,7 @@ Generate text autoregressively given images and prompt.
 
 Generate text autoregressively using the BLT model.
 
-*📁 src/dl_techniques/models/byte_latent_transformer/model.py:446*
+*📁 src/dl_techniques/models/byte_latent_transformer/model.py:452*
 
 #### `generate_audio_masks(self, batch_size)`
 **Module:** `models.jepa.utilities`
@@ -28855,12 +31606,26 @@ Generate context and target masks for a batch.
 
 *📁 src/dl_techniques/models/jepa/utilities.py:282*
 
+#### `generate_standard(self, prompt, temperature, top_p, max_tokens, repetition_penalty)`
+**Module:** `models.cliffordnet.power_sampling`
+
+Standard nucleus sampling (baseline for comparison).
+
+*📁 src/dl_techniques/models/cliffordnet/power_sampling.py:548*
+
 #### `generate_synthetic_data(n_samples, n_eval, embed_dim, seed)`
 **Module:** `models.mini_vec2vec.example_alignment`
 
 Generate synthetic aligned embedding spaces for testing.
 
 *📁 src/dl_techniques/models/mini_vec2vec/example_alignment.py:23*
+
+#### `generate_text(self, prompt, method)`
+**Module:** `models.cliffordnet.power_sampling`
+
+Generate text with the specified method.
+
+*📁 src/dl_techniques/models/cliffordnet/power_sampling.py:601*
 
 #### `generate_video_masks(self, batch_size)`
 **Module:** `models.jepa.utilities`
@@ -28881,7 +31646,7 @@ Returns a formatted string summarizing the KAN architecture details.
 
 Get build configuration for serialization.
 
-*📁 src/dl_techniques/models/depth_anything/components.py:242*
+*📁 src/dl_techniques/models/depth_anything/components.py:290*
 
 #### `get_build_config(self)`
 **Module:** `models.mdn.model`
@@ -28891,11 +31656,43 @@ Get the build configuration for serialization.
 *📁 src/dl_techniques/models/mdn/model.py:668*
 
 #### `get_build_config(self)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:872*
+
+#### `get_build_config(self)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:137*
+
+#### `get_build_config(self)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:355*
+
+#### `get_build_config(self)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:1215*
+
+#### `get_build_config(self)`
+**Module:** `models.cliffordnet.unet`
+
+*📁 src/dl_techniques/models/cliffordnet/unet.py:805*
+
+#### `get_build_config(self)`
 **Module:** `models.yolo12.feature_extractor`
 
 Get build configuration for serialization.
 
 *📁 src/dl_techniques/models/yolo12/feature_extractor.py:345*
+
+#### `get_capsules(self, inputs, training)`
+**Module:** `models.capsnet.model_v2`
+
+Forward pass returning the raw digit capsule pose vectors.
+
+*📁 src/dl_techniques/models/capsnet/model_v2.py:343*
 
 #### `get_class_counts(self)`
 **Module:** `models.yolo12.multitask`
@@ -28930,49 +31727,49 @@ Get model configuration for serialization.
 
 Get model configuration for serialization.
 
-*📁 src/dl_techniques/models/mobilenet/mobilenet_v1.py:291*
+*📁 src/dl_techniques/models/mobilenet/mobilenet_v1.py:292*
 
 #### `get_config(self)`
 **Module:** `models.mobilenet.mobilenet_v4`
 
 Get model configuration for serialization.
 
-*📁 src/dl_techniques/models/mobilenet/mobilenet_v4.py:426*
+*📁 src/dl_techniques/models/mobilenet/mobilenet_v4.py:424*
 
 #### `get_config(self)`
 **Module:** `models.mobilenet.mobilenet_v2`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/models/mobilenet/mobilenet_v2.py:307*
+*📁 src/dl_techniques/models/mobilenet/mobilenet_v2.py:324*
 
 #### `get_config(self)`
 **Module:** `models.mobilenet.mobilenet_v3`
 
 Get model configuration for serialization.
 
-*📁 src/dl_techniques/models/mobilenet/mobilenet_v3.py:352*
+*📁 src/dl_techniques/models/mobilenet/mobilenet_v3.py:362*
 
 #### `get_config(self)`
 **Module:** `models.depth_anything.model`
 
 Get model configuration for serialization.
 
-*📁 src/dl_techniques/models/depth_anything/model.py:439*
+*📁 src/dl_techniques/models/depth_anything/model.py:641*
 
 #### `get_config(self)`
 **Module:** `models.depth_anything.components`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/models/depth_anything/components.py:224*
+*📁 src/dl_techniques/models/depth_anything/components.py:271*
 
 #### `get_config(self)`
 **Module:** `models.nano_vlm_world_model.scheduler`
 
 Get layer configuration.
 
-*📁 src/dl_techniques/models/nano_vlm_world_model/scheduler.py:359*
+*📁 src/dl_techniques/models/nano_vlm_world_model/scheduler.py:363*
 
 #### `get_config(self)`
 **Module:** `models.nano_vlm_world_model.train`
@@ -28987,27 +31784,27 @@ Get layer configuration.
 #### `get_config(self)`
 **Module:** `models.nano_vlm_world_model.denoisers`
 
-*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:88*
+*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:92*
 
 #### `get_config(self)`
 **Module:** `models.nano_vlm_world_model.denoisers`
 
-*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:250*
+*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:258*
 
 #### `get_config(self)`
 **Module:** `models.nano_vlm_world_model.denoisers`
 
-*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:329*
+*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:341*
 
 #### `get_config(self)`
 **Module:** `models.nano_vlm_world_model.denoisers`
 
-*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:402*
+*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:418*
 
 #### `get_config(self)`
 **Module:** `models.nano_vlm_world_model.denoisers`
 
-*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:564*
+*📁 src/dl_techniques/models/nano_vlm_world_model/denoisers.py:584*
 
 #### `get_config(self)`
 **Module:** `models.nano_vlm_world_model.model`
@@ -29028,21 +31825,21 @@ Get model configuration for serialization.
 
 Get layer configuration.
 
-*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:223*
+*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:231*
 
 #### `get_config(self)`
 **Module:** `models.bias_free_denoisers.bfunet_conditional_unified`
 
 Get layer configuration.
 
-*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:346*
+*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:362*
 
 #### `get_config(self)`
 **Module:** `models.bias_free_denoisers.bfconvunext`
 
 Get layer configuration.
 
-*📁 src/dl_techniques/models/bias_free_denoisers/bfconvunext.py:121*
+*📁 src/dl_techniques/models/bias_free_denoisers/bfconvunext.py:122*
 
 #### `get_config(self)`
 **Module:** `models.mdn.model`
@@ -29054,19 +31851,19 @@ Get model configuration for serialization.
 #### `get_config(self)`
 **Module:** `models.adaptive_ema.model`
 
-Return model configuration.
+Return model configuration for serialization.
 
-*📁 src/dl_techniques/models/adaptive_ema/model.py:334*
-
-#### `get_config(self)`
-**Module:** `models.mamba.components_v2`
-
-*📁 src/dl_techniques/models/mamba/components_v2.py:303*
+*📁 src/dl_techniques/models/adaptive_ema/model.py:400*
 
 #### `get_config(self)`
 **Module:** `models.mamba.components_v2`
 
-*📁 src/dl_techniques/models/mamba/components_v2.py:375*
+*📁 src/dl_techniques/models/mamba/components_v2.py:307*
+
+#### `get_config(self)`
+**Module:** `models.mamba.components_v2`
+
+*📁 src/dl_techniques/models/mamba/components_v2.py:384*
 
 #### `get_config(self)`
 **Module:** `models.mamba.mamba_v2`
@@ -29085,21 +31882,21 @@ Return model configuration for serialization.
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/models/mamba/components.py:523*
+*📁 src/dl_techniques/models/mamba/components.py:527*
 
 #### `get_config(self)`
 **Module:** `models.mamba.components`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/models/mamba/components.py:704*
+*📁 src/dl_techniques/models/mamba/components.py:713*
 
 #### `get_config(self)`
 **Module:** `models.byte_latent_transformer.model`
 
 Get model configuration for serialization.
 
-*📁 src/dl_techniques/models/byte_latent_transformer/model.py:629*
+*📁 src/dl_techniques/models/byte_latent_transformer/model.py:635*
 
 #### `get_config(self)`
 **Module:** `models.jepa.encoder`
@@ -29159,6 +31956,16 @@ Get model configuration for serialization.
 *📁 src/dl_techniques/models/detr/model.py:618*
 
 #### `get_config(self)`
+**Module:** `models.nam.cell`
+
+*📁 src/dl_techniques/models/nam/cell.py:544*
+
+#### `get_config(self)`
+**Module:** `models.nam.model`
+
+*📁 src/dl_techniques/models/nam/model.py:420*
+
+#### `get_config(self)`
 **Module:** `models.fnet.model`
 
 Return the model's configuration for serialization.
@@ -29177,14 +31984,14 @@ Return configuration for serialization.
 
 Get model configuration for serialization.
 
-*📁 src/dl_techniques/models/tirex/model.py:533*
+*📁 src/dl_techniques/models/tirex/model.py:560*
 
 #### `get_config(self)`
 **Module:** `models.tirex.model_extended`
 
 Return config for serialization.
 
-*📁 src/dl_techniques/models/tirex/model_extended.py:235*
+*📁 src/dl_techniques/models/tirex/model_extended.py:249*
 
 #### `get_config(self)`
 **Module:** `models.fftnet.model`
@@ -29282,7 +32089,7 @@ Return configuration for serialization.
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/models/gemma/components.py:252*
+*📁 src/dl_techniques/models/gemma/components.py:256*
 
 #### `get_config(self)`
 **Module:** `models.mini_vec2vec.model`
@@ -29355,6 +32162,26 @@ Return configuration for serialization.
 *📁 src/dl_techniques/models/prism/model.py:548*
 
 #### `get_config(self)`
+**Module:** `models.lewm.embedder`
+
+*📁 src/dl_techniques/models/lewm/embedder.py:85*
+
+#### `get_config(self)`
+**Module:** `models.lewm.model`
+
+*📁 src/dl_techniques/models/lewm/model.py:285*
+
+#### `get_config(self)`
+**Module:** `models.lewm.predictor`
+
+*📁 src/dl_techniques/models/lewm/predictor.py:174*
+
+#### `get_config(self)`
+**Module:** `models.lewm.projector`
+
+*📁 src/dl_techniques/models/lewm/projector.py:85*
+
+#### `get_config(self)`
 **Module:** `models.masked_language_model.mlm`
 
 Returns the configuration of the model for serialization.
@@ -29371,7 +32198,7 @@ Returns the configuration of the model for serialization.
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/models/tiny_recursive_model/model.py:358*
+*📁 src/dl_techniques/models/tiny_recursive_model/model.py:394*
 
 #### `get_config(self)`
 **Module:** `models.tiny_recursive_model.components`
@@ -29465,14 +32292,14 @@ Returns the configuration of the layer for serialization.
 #### `get_config(self)`
 **Module:** `models.masked_autoencoder.patch_masking`
 
-*📁 src/dl_techniques/models/masked_autoencoder/patch_masking.py:138*
+*📁 src/dl_techniques/models/masked_autoencoder/patch_masking.py:142*
 
 #### `get_config(self)`
 **Module:** `models.masked_autoencoder.conv_decoder`
 
 Get layer configuration for serialization.
 
-*📁 src/dl_techniques/models/masked_autoencoder/conv_decoder.py:203*
+*📁 src/dl_techniques/models/masked_autoencoder/conv_decoder.py:213*
 
 #### `get_config(self)`
 **Module:** `models.som.model`
@@ -29482,6 +32309,133 @@ Return configuration dictionary for model serialization.
 *📁 src/dl_techniques/models/som/model.py:1191*
 
 #### `get_config(self)`
+**Module:** `models.cliffordnet.lm`
+
+*📁 src/dl_techniques/models/cliffordnet/lm.py:339*
+
+#### `get_config(self)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:155*
+
+#### `get_config(self)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:212*
+
+#### `get_config(self)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:307*
+
+#### `get_config(self)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:383*
+
+#### `get_config(self)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:1156*
+
+#### `get_config(self)`
+**Module:** `models.cliffordnet.denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/denoiser.py:224*
+
+#### `get_config(self)`
+**Module:** `models.cliffordnet.denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/denoiser.py:324*
+
+#### `get_config(self)`
+**Module:** `models.cliffordnet.denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/denoiser.py:546*
+
+#### `get_config(self)`
+**Module:** `models.cliffordnet.clip`
+
+*📁 src/dl_techniques/models/cliffordnet/clip.py:187*
+
+#### `get_config(self)`
+**Module:** `models.cliffordnet.clip`
+
+*📁 src/dl_techniques/models/cliffordnet/clip.py:242*
+
+#### `get_config(self)`
+**Module:** `models.cliffordnet.clip`
+
+*📁 src/dl_techniques/models/cliffordnet/clip.py:1327*
+
+#### `get_config(self)`
+**Module:** `models.cliffordnet.lmunet`
+
+*📁 src/dl_techniques/models/cliffordnet/lmunet.py:934*
+
+#### `get_config(self)`
+**Module:** `models.cliffordnet.embedding_unet`
+
+*📁 src/dl_techniques/models/cliffordnet/embedding_unet.py:651*
+
+#### `get_config(self)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:165*
+
+#### `get_config(self)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:431*
+
+#### `get_config(self)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:605*
+
+#### `get_config(self)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:743*
+
+#### `get_config(self)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:1414*
+
+#### `get_config(self)`
+**Module:** `models.cliffordnet.model`
+
+Return serialisable configuration.
+
+*📁 src/dl_techniques/models/cliffordnet/model.py:466*
+
+#### `get_config(self)`
+**Module:** `models.cliffordnet.unet`
+
+*📁 src/dl_techniques/models/cliffordnet/unet.py:157*
+
+#### `get_config(self)`
+**Module:** `models.cliffordnet.unet`
+
+*📁 src/dl_techniques/models/cliffordnet/unet.py:240*
+
+#### `get_config(self)`
+**Module:** `models.cliffordnet.unet`
+
+*📁 src/dl_techniques/models/cliffordnet/unet.py:321*
+
+#### `get_config(self)`
+**Module:** `models.cliffordnet.unet`
+
+*📁 src/dl_techniques/models/cliffordnet/unet.py:948*
+
+#### `get_config(self)`
+**Module:** `models.cliffordnet.lm_routing`
+
+*📁 src/dl_techniques/models/cliffordnet/lm_routing.py:431*
+
+#### `get_config(self)`
 **Module:** `models.hierarchical_reasoning_model.model`
 
 Get model configuration for serialization.
@@ -29489,11 +32443,43 @@ Get model configuration for serialization.
 *📁 src/dl_techniques/models/hierarchical_reasoning_model/model.py:761*
 
 #### `get_config(self)`
+**Module:** `models.gpt2.gpt2`
+
+Return configuration dictionary for serialization.
+
+*📁 src/dl_techniques/models/gpt2/gpt2.py:337*
+
+#### `get_config(self)`
+**Module:** `models.video_jepa.masking`
+
+*📁 src/dl_techniques/models/video_jepa/masking.py:149*
+
+#### `get_config(self)`
+**Module:** `models.video_jepa.encoder`
+
+*📁 src/dl_techniques/models/video_jepa/encoder.py:210*
+
+#### `get_config(self)`
+**Module:** `models.video_jepa.model`
+
+*📁 src/dl_techniques/models/video_jepa/model.py:333*
+
+#### `get_config(self)`
+**Module:** `models.video_jepa.predictor`
+
+*📁 src/dl_techniques/models/video_jepa/predictor.py:175*
+
+#### `get_config(self)`
+**Module:** `models.video_jepa.predictor`
+
+*📁 src/dl_techniques/models/video_jepa/predictor.py:386*
+
+#### `get_config(self)`
 **Module:** `models.clip.model`
 
 Get model configuration for serialization.
 
-*📁 src/dl_techniques/models/clip/model.py:680*
+*📁 src/dl_techniques/models/clip/model.py:718*
 
 #### `get_config(self)`
 **Module:** `models.kan.model`
@@ -29503,37 +32489,67 @@ Get model configuration for serialization.
 #### `get_config(self)`
 **Module:** `models.tree_transformer.model`
 
-Returns the layer's configuration for serialization.
-
-*📁 src/dl_techniques/models/tree_transformer/model.py:187*
-
-#### `get_config(self)`
-**Module:** `models.tree_transformer.model`
-
-Returns the layer's configuration for serialization.
-
-*📁 src/dl_techniques/models/tree_transformer/model.py:365*
-
-#### `get_config(self)`
-**Module:** `models.tree_transformer.model`
-
-Returns the layer's configuration for serialization.
-
-*📁 src/dl_techniques/models/tree_transformer/model.py:514*
-
-#### `get_config(self)`
-**Module:** `models.tree_transformer.model`
-
-Returns the layer's configuration for serialization.
-
-*📁 src/dl_techniques/models/tree_transformer/model.py:686*
-
-#### `get_config(self)`
-**Module:** `models.tree_transformer.model`
-
 Returns the model's configuration for serialization.
 
-*📁 src/dl_techniques/models/tree_transformer/model.py:1125*
+*📁 src/dl_techniques/models/tree_transformer/model.py:552*
+
+#### `get_config(self)`
+**Module:** `models.tree_transformer.components`
+
+Returns the layer's configuration for serialization.
+
+*📁 src/dl_techniques/models/tree_transformer/components.py:135*
+
+#### `get_config(self)`
+**Module:** `models.tree_transformer.components`
+
+Returns the layer's configuration for serialization.
+
+*📁 src/dl_techniques/models/tree_transformer/components.py:324*
+
+#### `get_config(self)`
+**Module:** `models.tree_transformer.components`
+
+Returns the layer's configuration for serialization.
+
+*📁 src/dl_techniques/models/tree_transformer/components.py:475*
+
+#### `get_config(self)`
+**Module:** `models.tree_transformer.components`
+
+Returns the layer's configuration for serialization.
+
+*📁 src/dl_techniques/models/tree_transformer/components.py:647*
+
+#### `get_config(self)`
+**Module:** `models.memory_bank.write_controller`
+
+*📁 src/dl_techniques/models/memory_bank/write_controller.py:179*
+
+#### `get_config(self)`
+**Module:** `models.memory_bank.phase_scheduler`
+
+*📁 src/dl_techniques/models/memory_bank/phase_scheduler.py:288*
+
+#### `get_config(self)`
+**Module:** `models.memory_bank.read_controller`
+
+*📁 src/dl_techniques/models/memory_bank/read_controller.py:610*
+
+#### `get_config(self)`
+**Module:** `models.memory_bank.wave_field_memory_llm`
+
+*📁 src/dl_techniques/models/memory_bank/wave_field_memory_llm.py:757*
+
+#### `get_config(self)`
+**Module:** `models.memory_bank.memory_banks`
+
+*📁 src/dl_techniques/models/memory_bank/memory_banks.py:166*
+
+#### `get_config(self)`
+**Module:** `models.memory_bank.memory_banks`
+
+*📁 src/dl_techniques/models/memory_bank/memory_banks.py:301*
 
 #### `get_config(self)`
 **Module:** `models.yolo12.feature_extractor`
@@ -29575,14 +32591,14 @@ Get model configuration for serialization.
 
 Return layer configuration for serialization.
 
-*📁 src/dl_techniques/models/distilbert/model.py:259*
+*📁 src/dl_techniques/models/distilbert/model.py:263*
 
 #### `get_config(self)`
 **Module:** `models.distilbert.model`
 
 Return the model's configuration for serialization.
 
-*📁 src/dl_techniques/models/distilbert/model.py:932*
+*📁 src/dl_techniques/models/distilbert/model.py:936*
 
 #### `get_config(self)`
 **Module:** `models.pft_sr.model`
@@ -29641,6 +32657,16 @@ Get model configuration for serialization.
 *📁 src/dl_techniques/models/relgt/model.py:234*
 
 #### `get_config(self)`
+**Module:** `models.wave_field_llm.wave_field_llm`
+
+*📁 src/dl_techniques/models/wave_field_llm/wave_field_llm.py:193*
+
+#### `get_config(self)`
+**Module:** `models.wave_field_llm.wave_field_llm`
+
+*📁 src/dl_techniques/models/wave_field_llm/wave_field_llm.py:513*
+
+#### `get_config(self)`
 **Module:** `models.vq_vae.model`
 
 Get model configuration for serialization.
@@ -29659,7 +32685,12 @@ Get model configuration for serialization.
 
 Return the model's configuration for serialization.
 
-*📁 src/dl_techniques/models/bert/bert.py:765*
+*📁 src/dl_techniques/models/bert/bert.py:748*
+
+#### `get_config(self)`
+**Module:** `models.capsnet.model_v2`
+
+*📁 src/dl_techniques/models/capsnet/model_v2.py:397*
 
 #### `get_config(self)`
 **Module:** `models.capsnet.model`
@@ -29755,7 +32786,7 @@ Return configuration for serialization.
 
 Get model configuration for serialization.
 
-*📁 src/dl_techniques/models/accunet/model.py:432*
+*📁 src/dl_techniques/models/accunet/model.py:450*
 
 #### `get_config(self)`
 **Module:** `models.cbam.model`
@@ -29788,28 +32819,28 @@ Get model configuration for serialization.
 
 Get layer configuration.
 
-*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:296*
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:300*
 
 #### `get_config(self)`
 **Module:** `models.modern_bert.modern_bert_blt_hrm`
 
 Get layer configuration.
 
-*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:510*
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:519*
 
 #### `get_config(self)`
 **Module:** `models.modern_bert.modern_bert_blt_hrm`
 
 Get layer configuration.
 
-*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:806*
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:830*
 
 #### `get_config(self)`
 **Module:** `models.modern_bert.modern_bert_blt_hrm`
 
 Get model configuration.
 
-*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:1063*
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:1087*
 
 #### `get_config(self)`
 **Module:** `models.modern_bert.modern_bert`
@@ -29828,19 +32859,19 @@ Serializes the model's configuration for saving.
 #### `get_config(self)`
 **Module:** `models.modern_bert.components`
 
-*📁 src/dl_techniques/models/modern_bert/components.py:76*
+*📁 src/dl_techniques/models/modern_bert/components.py:80*
 
 #### `get_config(self)`
 **Module:** `models.modern_bert.components`
 
-*📁 src/dl_techniques/models/modern_bert/components.py:200*
+*📁 src/dl_techniques/models/modern_bert/components.py:208*
 
 #### `get_config(self)`
 **Module:** `models.modern_bert.components`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/models/modern_bert/components.py:404*
+*📁 src/dl_techniques/models/modern_bert/components.py:416*
 
 #### `get_config(self)`
 **Module:** `models.vit_hmlp.model`
@@ -29868,28 +32899,28 @@ Get layer configuration for serialization.
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/models/qwen/qwen3_embeddings.py:311*
+*📁 src/dl_techniques/models/qwen/qwen3_embeddings.py:330*
 
 #### `get_config(self)`
 **Module:** `models.qwen.qwen3_embeddings`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/models/qwen/qwen3_embeddings.py:564*
+*📁 src/dl_techniques/models/qwen/qwen3_embeddings.py:601*
 
 #### `get_config(self)`
 **Module:** `models.qwen.qwen3_embeddings`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/models/qwen/qwen3_embeddings.py:691*
+*📁 src/dl_techniques/models/qwen/qwen3_embeddings.py:728*
 
 #### `get_config(self)`
 **Module:** `models.qwen.qwen3_embeddings`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/models/qwen/qwen3_embeddings.py:817*
+*📁 src/dl_techniques/models/qwen/qwen3_embeddings.py:854*
 
 #### `get_config(self)`
 **Module:** `models.qwen.qwen3`
@@ -29903,14 +32934,14 @@ Return configuration for serialization.
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/models/qwen/qwen3_mega.py:220*
+*📁 src/dl_techniques/models/qwen/qwen3_mega.py:237*
 
 #### `get_config(self)`
 **Module:** `models.qwen.qwen3_mega`
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/models/qwen/qwen3_mega.py:725*
+*📁 src/dl_techniques/models/qwen/qwen3_mega.py:742*
 
 #### `get_config(self)`
 **Module:** `models.qwen.qwen3_next`
@@ -29966,7 +32997,7 @@ Return configuration for serialization.
 
 Return configuration for serialization.
 
-*📁 src/dl_techniques/models/vit/model.py:534*
+*📁 src/dl_techniques/models/vit/model.py:558*
 
 #### `get_config(self)`
 **Module:** `models.squeezenet.squeezenet_v2`
@@ -30055,7 +33086,7 @@ Get a feature extractor version of this model.
 
 Get a feature extractor version of this model.
 
-*📁 src/dl_techniques/models/vit/model.py:562*
+*📁 src/dl_techniques/models/vit/model.py:586*
 
 #### `get_last_selfattention(self, inputs)`
 **Module:** `models.dino.dino_v3`
@@ -30071,12 +33102,26 @@ Get attention weights from the last transformer layer.
 
 *📁 src/dl_techniques/models/dino/dino_v1.py:624*
 
+#### `get_loss(self)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+Return the appropriate loss for this model's uncertainty mode.
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:1229*
+
 #### `get_mask_statistics(self, context_mask, target_mask)`
 **Module:** `models.jepa.utilities`
 
 Compute masking statistics for monitoring.
 
 *📁 src/dl_techniques/models/jepa/utilities.py:363*
+
+#### `get_metrics(self)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+Return uncertainty-aware metrics for this model.
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:1246*
 
 #### `get_model_for_inference(self)`
 **Module:** `models.nano_vlm_world_model.train`
@@ -30085,26 +33130,19 @@ Get model for inference (EMA if available).
 
 *📁 src/dl_techniques/models/nano_vlm_world_model/train.py:350*
 
-#### `get_model_output_info(model)`
-**Module:** `models.bias_free_denoisers.bfconvunext`
+#### `get_number_mask(self, token_ids)`
+**Module:** `models.nam.tokenizer`
 
-Get information about model outputs for deep supervision models.
+Create a boolean mask indicating digit/dot positions.
 
-*📁 src/dl_techniques/models/bias_free_denoisers/bfconvunext.py:645*
+*📁 src/dl_techniques/models/nam/tokenizer.py:148*
 
-#### `get_model_output_info(model)`
-**Module:** `models.bias_free_denoisers.bfunet`
+#### `get_operator_mask(self, token_ids)`
+**Module:** `models.nam.tokenizer`
 
-Get information about model outputs for deep supervision models.
+Create a boolean mask indicating operator positions.
 
-*📁 src/dl_techniques/models/bias_free_denoisers/bfunet.py:743*
-
-#### `get_model_output_info(model)`
-**Module:** `models.resnet.model`
-
-Get information about model outputs for deep supervision models.
-
-*📁 src/dl_techniques/models/resnet/model.py:694*
+*📁 src/dl_techniques/models/nam/tokenizer.py:134*
 
 #### `get_patch_tokens(self, features)`
 **Module:** `models.vit_siglip.model`
@@ -30153,7 +33191,7 @@ Compute velocity prediction v_t for the v-prediction objective.
 
 Get vocabulary size from ByteTokenizer.
 
-*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:506*
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:510*
 
 #### `has_task(self, task)`
 **Module:** `models.yolo12.multitask`
@@ -30180,11 +33218,18 @@ Return x unchanged.
 *📁 src/dl_techniques/models/dino/dino_v2.py:809*
 
 #### `initial_carry(self, batch)`
+**Module:** `models.nam.model`
+
+Create initial carry state for a batch.
+
+*📁 src/dl_techniques/models/nam/model.py:182*
+
+#### `initial_carry(self, batch)`
 **Module:** `models.tiny_recursive_model.model`
 
 Create the initial state for the ACT loop.
 
-*📁 src/dl_techniques/models/tiny_recursive_model/model.py:198*
+*📁 src/dl_techniques/models/tiny_recursive_model/model.py:214*
 
 #### `initial_carry(self, batch)`
 **Module:** `models.hierarchical_reasoning_model.model`
@@ -30198,7 +33243,14 @@ Initialize carry state for a batch.
 
 Initialize carry state for a batch.
 
-*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:883*
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:907*
+
+#### `initialize_carry(self, batch_size)`
+**Module:** `models.nam.cell`
+
+Create initial carry state for a new expression.
+
+*📁 src/dl_techniques/models/nam/cell.py:294*
 
 #### `inject_class_conditioning(x, class_emb, level, stage)`
 **Module:** `models.bias_free_denoisers.bfunet_conditional`
@@ -30212,7 +33264,19 @@ Inject class conditioning into feature maps.
 
 Inject all available conditioning signals into features.
 
-*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:535*
+*📁 src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py:551*
+
+#### `input_image_shape(self)`
+**Module:** `models.lewm.config`
+
+*📁 src/dl_techniques/models/lewm/config.py:57*
+
+#### `input_image_shape(self)`
+**Module:** `models.video_jepa.config`
+
+``(H, W, C)``.
+
+*📁 src/dl_techniques/models/video_jepa/config.py:163*
 
 #### `insert_register_tokens(args)`
 **Module:** `models.dino.dino_v2`
@@ -30223,6 +33287,41 @@ Inject all available conditioning signals into features.
 **Module:** `models.dino.dino_v2`
 
 *📁 src/dl_techniques/models/dino/dino_v2.py:688*
+
+#### `large(cls, in_channels)`
+**Module:** `models.cliffordnet.denoiser`
+
+CliffordNetDenoiser-Large: channels=128, depth=16, shifts=[1,2,4,8,16].
+
+*📁 src/dl_techniques/models/cliffordnet/denoiser.py:678*
+
+#### `linear_ema_schedule(decay_start, decay_end, total_steps)`
+**Module:** `models.depth_anything.teacher_ema`
+
+Return a callable ``step -> decay`` implementing a linear ramp.
+
+*📁 src/dl_techniques/models/depth_anything/teacher_ema.py:72*
+
+#### `linear_top_k_anneal(start, end, end_step)`
+**Module:** `models.memory_bank.wave_field_memory_llm`
+
+O7 helper: linear anneal of `top_k` from `start` to `end` over the first `end_step` training steps. After `end_step`, returns `end`. Returns a callable suitable for `WaveFieldMemoryLLM(top_k_schedule=...)`.
+
+*📁 src/dl_techniques/models/memory_bank/wave_field_memory_llm.py:64*
+
+#### `lite(cls, num_classes)`
+**Module:** `models.cliffordnet.model`
+
+CliffordNet-Lite: ~2.6 M params.
+
+*📁 src/dl_techniques/models/cliffordnet/model.py:698*
+
+#### `lite_g(cls, num_classes)`
+**Module:** `models.cliffordnet.model`
+
+CliffordNet-Lite + gFFN-G: ~3.4 M params.
+
+*📁 src/dl_techniques/models/cliffordnet/model.py:711*
 
 #### `load_model(cls, filepath)`
 **Module:** `models.capsnet.model`
@@ -30244,6 +33343,13 @@ Load a saved PowerMLP model.
 Load all three models from disk.
 
 *📁 src/dl_techniques/models/ccnets/orchestrators.py:398*
+
+#### `load_own_variables(self, store)`
+**Module:** `models.depth_anything.model`
+
+Restore all of DepthAnything's variables from the flat store.
+
+*📁 src/dl_techniques/models/depth_anything/model.py:732*
 
 #### `load_pretrained_weights(self, weights_path, skip_mismatch, by_name)`
 **Module:** `models.convnext.convnext_v2`
@@ -30267,25 +33373,32 @@ Load pretrained weights into the model.
 *📁 src/dl_techniques/models/fnet/model.py:442*
 
 #### `load_pretrained_weights(self, weights_path, skip_mismatch, by_name)`
+**Module:** `models.cliffordnet.model`
+
+Load pretrained weights into the model.
+
+*📁 src/dl_techniques/models/cliffordnet/model.py:398*
+
+#### `load_pretrained_weights(self, weights_path, skip_mismatch, by_name)`
 **Module:** `models.kan.model`
 
 Load pretrained weights into the model.
 
 *📁 src/dl_techniques/models/kan/model.py:210*
 
-#### `load_pretrained_weights(self, weights_path, skip_mismatch, by_name)`
+#### `load_pretrained_weights(self, weights_path, skip_prefixes, strict)`
 **Module:** `models.tree_transformer.model`
 
-Loads pretrained weights into the model.
+Loads pretrained weights into the model from a ``.keras`` checkpoint.
 
-*📁 src/dl_techniques/models/tree_transformer/model.py:1010*
+*📁 src/dl_techniques/models/tree_transformer/model.py:407*
 
 #### `load_pretrained_weights(self, weights_path, skip_mismatch, by_name)`
 **Module:** `models.distilbert.model`
 
 Load pretrained weights into the model.
 
-*📁 src/dl_techniques/models/distilbert/model.py:693*
+*📁 src/dl_techniques/models/distilbert/model.py:697*
 
 #### `load_pretrained_weights(self, weights_path, skip_mismatch, by_name)`
 **Module:** `models.resnet.model`
@@ -30299,7 +33412,7 @@ Load pretrained weights into the model.
 
 Load pretrained weights into the model.
 
-*📁 src/dl_techniques/models/bert/bert.py:525*
+*📁 src/dl_techniques/models/bert/bert.py:526*
 
 #### `load_pretrained_weights(self, weights_path, skip_mismatch, by_name)`
 **Module:** `models.modern_bert.modern_bert`
@@ -30307,6 +33420,13 @@ Load pretrained weights into the model.
 Load pretrained weights into the model.
 
 *📁 src/dl_techniques/models/modern_bert/modern_bert.py:440*
+
+#### `load_pretrained_weights(self, weights_path, skip_mismatch)`
+**Module:** `models.vit.model`
+
+Load pretrained weights from a local ``.keras`` file.
+
+*📁 src/dl_techniques/models/vit/model.py:652*
 
 #### `load_pretrained_weights_into_model(model, weights_path, skip_mismatch, by_name)`
 **Module:** `models.bias_free_denoisers.bfunet`
@@ -30320,12 +33440,33 @@ Load pretrained weights into a BFUNet model.
 
 Make value divisible by divisor.
 
-*📁 src/dl_techniques/models/mobilenet/mobilenet_v3.py:193*
+*📁 src/dl_techniques/models/mobilenet/mobilenet_v3.py:199*
 
 #### `make_zero_grads()`
 **Module:** `models.ccnets.orchestrators`
 
 *📁 src/dl_techniques/models/ccnets/orchestrators.py:254*
+
+#### `max_swap(self, prompt, temperature, mcmc_steps, max_tokens, block_num)`
+**Module:** `models.cliffordnet.power_sampling`
+
+Generate text using deterministic max-swap power sampling.
+
+*📁 src/dl_techniques/models/cliffordnet/power_sampling.py:448*
+
+#### `mcmc_power_sample(self, prompt, temperature, mcmc_steps, max_tokens, block_num)`
+**Module:** `models.cliffordnet.power_sampling`
+
+Generate text using MCMC power sampling.
+
+*📁 src/dl_techniques/models/cliffordnet/power_sampling.py:337*
+
+#### `memory_llm_custom_objects()`
+**Module:** `models.memory_bank.wave_field_memory_llm`
+
+Return the ``custom_objects`` dict needed by ``keras.models.load_model`` to deserialize a saved :class:`WaveFieldMemoryLLM`.
+
+*📁 src/dl_techniques/models/memory_bank/wave_field_memory_llm.py:810*
 
 #### `metrics(self)`
 **Module:** `models.masked_language_model.mlm`
@@ -30345,6 +33486,13 @@ List of metrics for Keras to track.
 *📁 src/dl_techniques/models/masked_autoencoder/mae.py:311*
 
 #### `metrics(self)`
+**Module:** `models.video_jepa.model`
+
+Per-loss trackers so fit() logs ``next_frame_loss`` + ``mask_loss`` (+ ``sigreg_loss``) alongside the aggregated ``loss`` column.
+
+*📁 src/dl_techniques/models/video_jepa/model.py:133*
+
+#### `metrics(self)`
 **Module:** `models.vq_vae.model`
 
 List of metrics tracked by the model.
@@ -30357,6 +33505,20 @@ List of metrics tracked by the model.
 Return metrics tracked by the model.
 
 *📁 src/dl_techniques/models/vae/model.py:604*
+
+#### `naive_temp_generate(self, context, temperature, num_tokens)`
+**Module:** `models.cliffordnet.power_sampling`
+
+Generate tokens autoregressively at the given temperature.
+
+*📁 src/dl_techniques/models/cliffordnet/power_sampling.py:238*
+
+#### `nano(cls, num_classes)`
+**Module:** `models.cliffordnet.model`
+
+CliffordNet-Nano: ~1.4 M params.
+
+*📁 src/dl_techniques/models/cliffordnet/model.py:685*
 
 #### `navigate_semantic_space(self, start_vision, start_text, target_text, num_steps, step_size)`
 **Module:** `models.nano_vlm_world_model.model`
@@ -30371,6 +33533,54 @@ Navigate from one point to another in semantic space (Protocol 3).
 Negative Binomial negative log-likelihood loss.
 
 *📁 src/dl_techniques/models/deepar/model.py:535*
+
+#### `num_masked(self)`
+**Module:** `models.video_jepa.masking`
+
+Exact number of positions masked per sample, ``K``.
+
+*📁 src/dl_techniques/models/video_jepa/masking.py:90*
+
+#### `num_patches(self)`
+**Module:** `models.video_jepa.masking`
+
+``H_p * W_p`` — static grid size.
+
+*📁 src/dl_techniques/models/video_jepa/masking.py:95*
+
+#### `num_patches(self)`
+**Module:** `models.video_jepa.config`
+
+``N = H_p * W_p``.
+
+*📁 src/dl_techniques/models/video_jepa/config.py:158*
+
+#### `on_train_batch_begin(self, batch, logs)`
+**Module:** `models.memory_bank.phase_scheduler`
+
+*📁 src/dl_techniques/models/memory_bank/phase_scheduler.py:243*
+
+#### `on_train_batch_end(self, batch, logs)`
+**Module:** `models.depth_anything.teacher_ema`
+
+*📁 src/dl_techniques/models/depth_anything/teacher_ema.py:135*
+
+#### `on_train_batch_end(self, batch, logs)`
+**Module:** `models.memory_bank.memory_stats`
+
+*📁 src/dl_techniques/models/memory_bank/memory_stats.py:193*
+
+#### `on_train_begin(self, logs)`
+**Module:** `models.memory_bank.phase_scheduler`
+
+*📁 src/dl_techniques/models/memory_bank/phase_scheduler.py:235*
+
+#### `patches_per_side(self)`
+**Module:** `models.video_jepa.config`
+
+``H_p = W_p = img_size // patch_size``.
+
+*📁 src/dl_techniques/models/video_jepa/config.py:153*
 
 #### `postprocess_masks(self, masks, input_size, original_size)`
 **Module:** `models.sam.model`
@@ -30393,12 +33603,19 @@ Generate mask predictions and IoU estimates.
 
 *📁 src/dl_techniques/models/sam/mask_decoder.py:388*
 
+#### `predict_next(self, emb, act_emb, training)`
+**Module:** `models.lewm.model`
+
+Predict embeddings via ARPredictor + pred_proj.
+
+*📁 src/dl_techniques/models/lewm/model.py:138*
+
 #### `predict_quantiles(self, context, quantile_levels, batch_size)`
 **Module:** `models.tirex.model`
 
 Generate specific quantile and point forecasts for time series data.
 
-*📁 src/dl_techniques/models/tirex/model.py:358*
+*📁 src/dl_techniques/models/tirex/model.py:385*
 
 #### `predict_quantiles(self, context, quantile_levels, batch_size)`
 **Module:** `models.prism.model`
@@ -30421,6 +33638,13 @@ Override predict_step to use sampling mode.
 
 *📁 src/dl_techniques/models/deepar/model.py:503*
 
+#### `predict_with_intervals(self, inputs, confidence_level)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+Run inference and return structured confidence intervals.
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:1062*
+
 #### `predict_with_uncertainty(self, inputs, confidence_level)`
 **Module:** `models.mdn.model`
 
@@ -30442,17 +33666,31 @@ Quantize continuous latents to discrete representations.
 
 *📁 src/dl_techniques/models/vq_vae/model.py:429*
 
+#### `reconstruct(self, inputs, mask)`
+**Module:** `models.capsnet.model_v2`
+
+Reconstruct ``inputs`` via the decoder (when enabled).
+
+*📁 src/dl_techniques/models/capsnet/model_v2.py:358*
+
 #### `reset_carry(self, reset_flag, carry)`
 **Module:** `models.modern_bert.modern_bert_blt_hrm`
 
 Reset carry state for halted sequences.
 
-*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:692*
+*📁 src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:701*
 
 #### `reset_counter()`
 **Module:** `models.ccnets.control`
 
 *📁 src/dl_techniques/models/ccnets/control.py:99*
+
+#### `reset_memory(self, seed)`
+**Module:** `models.memory_bank.wave_field_memory_llm`
+
+Re-initialize ``K_lt`` and ``V_lt`` from ``RandomNormal(stddev=initializer_range)``, set ``current_phase`` to ``PHASE_WARMUP`` and ``_global_step`` to zero. Useful for restarting curriculum or running ablations without rebuilding the model.
+
+*📁 src/dl_techniques/models/memory_bank/wave_field_memory_llm.py:722*
 
 #### `reset_metrics(self)`
 **Module:** `models.nano_vlm_world_model.train`
@@ -30461,6 +33699,16 @@ Reset all metrics.
 
 *📁 src/dl_techniques/models/nano_vlm_world_model/train.py:344*
 
+#### `reset_state(self)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:303*
+
+#### `reset_state(self)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:379*
+
 #### `resize_fn()`
 **Module:** `models.convunext.model`
 
@@ -30468,12 +33716,29 @@ Resize x to match skip dimensions.
 
 *📁 src/dl_techniques/models/convunext/model.py:990*
 
+#### `result(self)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:300*
+
+#### `result(self)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:376*
+
 #### `reverse_sequence(self, sequence)`
 **Module:** `models.ccnets.orchestrators`
 
 Reverse a sequence along the time dimension (axis 1).
 
 *📁 src/dl_techniques/models/ccnets/orchestrators.py:425*
+
+#### `rollout(self, pixels_history, action_sequence)`
+**Module:** `models.lewm.model`
+
+Autoregressive rollout from a history of pixel observations.
+
+*📁 src/dl_techniques/models/lewm/model.py:208*
 
 #### `run_alignment_example(n_samples, n_eval, embed_dim, approx_clusters, approx_runs, approx_neighbors, refine1_iterations, refine1_sample_size, refine1_neighbors, refine2_clusters, smoothing_alpha, seed)`
 **Module:** `models.mini_vec2vec.example_alignment`
@@ -30536,6 +33801,18 @@ Save all three models to disk.
 
 *📁 src/dl_techniques/models/ccnets/orchestrators.py:392*
 
+#### `save_own_variables(self, store)`
+**Module:** `models.depth_anything.model`
+
+Persist all of DepthAnything's variables in one flat store.
+
+*📁 src/dl_techniques/models/depth_anything/model.py:716*
+
+#### `schedule(step)`
+**Module:** `models.memory_bank.wave_field_memory_llm`
+
+*📁 src/dl_techniques/models/memory_bank/wave_field_memory_llm.py:74*
+
 #### `set_curriculum_stage(self, stage)`
 **Module:** `models.jepa.utilities`
 
@@ -30571,10 +33848,45 @@ Decision logic written with pure TensorFlow ops to be graph-compatible.
 
 *📁 src/dl_techniques/models/ccnets/control.py:82*
 
+#### `small(cls, in_channels)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+Small variant: 3 levels, ~5.3M params.
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:1366*
+
+#### `small(cls, in_channels)`
+**Module:** `models.cliffordnet.denoiser`
+
+CliffordNetDenoiser-Small: channels=96, depth=8, shifts=[1,2,4].
+
+*📁 src/dl_techniques/models/cliffordnet/denoiser.py:668*
+
+#### `small(cls, in_channels)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+Small variant: 3 levels, ~5M params.
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:1567*
+
 #### `split_outputs(args)`
 **Module:** `models.dino.dino_v2`
 
 *📁 src/dl_techniques/models/dino/dino_v2.py:785*
+
+#### `split_trainable_by_prefix(variables, memory_prefixes)`
+**Module:** `models.memory_bank.wave_field_memory_llm`
+
+Partition ``variables`` into ``(memory_vars, backbone_vars)`` by matching the **leading path component** of each variable's ``.name`` against ``memory_prefixes``.
+
+*📁 src/dl_techniques/models/memory_bank/wave_field_memory_llm.py:83*
+
+#### `step(self)`
+**Module:** `models.depth_anything.teacher_ema`
+
+Total batches seen (pre + post warmup).
+
+*📁 src/dl_techniques/models/depth_anything/teacher_ema.py:131*
 
 #### `step(self, model_output, timestep, sample, generator)`
 **Module:** `models.nano_vlm_world_model.scheduler`
@@ -30582,6 +33894,20 @@ Decision logic written with pure TensorFlow ops to be graph-compatible.
 Reverse diffusion step: predict x_{t-1} from x_t and model output.
 
 *📁 src/dl_techniques/models/nano_vlm_world_model/scheduler.py:248*
+
+#### `stream_reset(self, B)`
+**Module:** `models.video_jepa.model`
+
+Reset the internal rolling-buffer (``_stream_buf := None``).
+
+*📁 src/dl_techniques/models/video_jepa/model.py:283*
+
+#### `stream_step(self, frame)`
+**Module:** `models.video_jepa.model`
+
+Advance the stream by one frame and return its patch prediction.
+
+*📁 src/dl_techniques/models/video_jepa/model.py:293*
 
 #### `style_transfer(self, x_content, x_style)`
 **Module:** `models.ccnets.orchestrators`
@@ -30602,28 +33928,28 @@ Print model summary with additional CoShNet-specific information.
 
 Print model summary with additional information.
 
-*📁 src/dl_techniques/models/mobilenet/mobilenet_v1.py:315*
+*📁 src/dl_techniques/models/mobilenet/mobilenet_v1.py:316*
 
 #### `summary(self)`
 **Module:** `models.mobilenet.mobilenet_v4`
 
 Print model summary with additional information.
 
-*📁 src/dl_techniques/models/mobilenet/mobilenet_v4.py:463*
+*📁 src/dl_techniques/models/mobilenet/mobilenet_v4.py:461*
 
 #### `summary(self)`
 **Module:** `models.mobilenet.mobilenet_v2`
 
 Print model summary with additional information.
 
-*📁 src/dl_techniques/models/mobilenet/mobilenet_v2.py:321*
+*📁 src/dl_techniques/models/mobilenet/mobilenet_v2.py:338*
 
 #### `summary(self)`
 **Module:** `models.mobilenet.mobilenet_v3`
 
 Print model summary with additional information.
 
-*📁 src/dl_techniques/models/mobilenet/mobilenet_v3.py:367*
+*📁 src/dl_techniques/models/mobilenet/mobilenet_v3.py:377*
 
 #### `summary(self)`
 **Module:** `models.tabm.model`
@@ -30644,7 +33970,7 @@ Print model summary with Mamba-specific information.
 
 Print model summary with BLT-specific information.
 
-*📁 src/dl_techniques/models/byte_latent_transformer/model.py:668*
+*📁 src/dl_techniques/models/byte_latent_transformer/model.py:674*
 
 #### `summary(self)`
 **Module:** `models.fractalnet.model`
@@ -30703,6 +34029,33 @@ Print model summary with additional information.
 *📁 src/dl_techniques/models/dino/dino_v2.py:1132*
 
 #### `summary(self)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:1201*
+
+#### `summary(self)`
+**Module:** `models.cliffordnet.denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/denoiser.py:574*
+
+#### `summary(self)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:1458*
+
+#### `summary(self)`
+**Module:** `models.cliffordnet.model`
+
+Print model summary with additional architecture information.
+
+*📁 src/dl_techniques/models/cliffordnet/model.py:519*
+
+#### `summary(self)`
+**Module:** `models.cliffordnet.unet`
+
+*📁 src/dl_techniques/models/cliffordnet/unet.py:989*
+
+#### `summary(self)`
 **Module:** `models.hierarchical_reasoning_model.model`
 
 Print model summary with additional HRM information.
@@ -30719,21 +34072,21 @@ Print model summary with additional HRM information.
 
 Prints the model summary with additional configuration details.
 
-*📁 src/dl_techniques/models/tree_transformer/model.py:1152*
+*📁 src/dl_techniques/models/tree_transformer/model.py:579*
 
 #### `summary(self)`
 **Module:** `models.distilbert.model`
 
 Print the model summary with additional DistilBERT-specific information.
 
-*📁 src/dl_techniques/models/distilbert/model.py:973*
+*📁 src/dl_techniques/models/distilbert/model.py:977*
 
 #### `summary(self)`
 **Module:** `models.bert.bert`
 
 Print the model summary with additional BERT-specific information.
 
-*📁 src/dl_techniques/models/bert/bert.py:808*
+*📁 src/dl_techniques/models/bert/bert.py:791*
 
 #### `summary(self)`
 **Module:** `models.capsnet.model`
@@ -30824,7 +34177,7 @@ Print detailed model summary with architecture information.
 
 Print detailed model summary with architecture information.
 
-*📁 src/dl_techniques/models/vit/model.py:593*
+*📁 src/dl_techniques/models/vit/model.py:617*
 
 #### `summary_with_details(self)`
 **Module:** `models.squeezenet.squeezenet_v2`
@@ -30899,6 +34252,27 @@ Converts a string to a list of byte token IDs.
 
 *📁 src/dl_techniques/models/modern_bert/components.py:54*
 
+#### `tiny(cls, in_channels)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+Tiny variant: 3 levels, ~2.1M params.
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:1359*
+
+#### `tiny(cls, in_channels)`
+**Module:** `models.cliffordnet.denoiser`
+
+CliffordNetDenoiser-Tiny: channels=64, depth=6, shifts=[1,2].
+
+*📁 src/dl_techniques/models/cliffordnet/denoiser.py:663*
+
+#### `tiny(cls, in_channels)`
+**Module:** `models.cliffordnet.conditional_denoiser`
+
+Tiny variant: 3 levels, ~2M params.
+
+*📁 src/dl_techniques/models/cliffordnet/conditional_denoiser.py:1560*
+
 #### `to_dict(self)`
 **Module:** `models.ccnets.base`
 
@@ -30919,6 +34293,23 @@ Convert errors to dictionary of scalars.
 Convert configuration to dictionary.
 
 *📁 src/dl_techniques/models/jepa/config.py:258*
+
+#### `to_dict(self)`
+**Module:** `models.nam.config`
+
+*📁 src/dl_techniques/models/nam/config.py:70*
+
+#### `to_dict(self)`
+**Module:** `models.lewm.config`
+
+*📁 src/dl_techniques/models/lewm/config.py:49*
+
+#### `to_dict(self)`
+**Module:** `models.video_jepa.config`
+
+Return config as a plain dict (tuples stay tuples via asdict).
+
+*📁 src/dl_techniques/models/video_jepa/config.py:170*
 
 #### `to_dict(self)`
 **Module:** `models.modern_bert.modern_bert_blt_hrm`
@@ -30967,7 +34358,7 @@ Main training loop for Score-Based nanoVLM.
 
 Execute one training step.
 
-*📁 src/dl_techniques/models/depth_anything/model.py:402*
+*📁 src/dl_techniques/models/depth_anything/model.py:613*
 
 #### `train_step(self, images, text_tokens)`
 **Module:** `models.nano_vlm_world_model.train`
@@ -30988,7 +34379,7 @@ Perform a single training step with causal credit assignment. This implementatio
 
 Custom training step for BLT.
 
-*📁 src/dl_techniques/models/byte_latent_transformer/model.py:372*
+*📁 src/dl_techniques/models/byte_latent_transformer/model.py:378*
 
 #### `train_step(self, data)`
 **Module:** `models.latent_gmm_registration.model`
@@ -31013,6 +34404,11 @@ Custom training step for MLM with dynamic masking.
 **Module:** `models.masked_autoencoder.mae`
 
 *📁 src/dl_techniques/models/masked_autoencoder/mae.py:272*
+
+#### `train_step(self, data)`
+**Module:** `models.memory_bank.wave_field_memory_llm`
+
+*📁 src/dl_techniques/models/memory_bank/wave_field_memory_llm.py:531*
 
 #### `train_step(self, data)`
 **Module:** `models.vq_vae.model`
@@ -31079,6 +34475,23 @@ This strategy is stateless and does not require updates.
 Update the EMAs. This method should be called from an EAGER context (e.g., the Python training loop in the Trainer).
 
 *📁 src/dl_techniques/models/ccnets/control.py:72*
+
+#### `update_state(self, y_true, y_pred, sample_weight)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:273*
+
+#### `update_state(self, y_true, y_pred, sample_weight)`
+**Module:** `models.cliffordnet.confidence_denoiser`
+
+*📁 src/dl_techniques/models/cliffordnet/confidence_denoiser.py:356*
+
+#### `update_teacher_ema(self, decay)`
+**Module:** `models.depth_anything.model`
+
+Update the frozen teacher encoder via EMA over the student weights.
+
+*📁 src/dl_techniques/models/depth_anything/model.py:287*
 
 #### `validate(self)`
 **Module:** `models.modern_bert.modern_bert_blt_hrm`
@@ -31163,6 +34576,13 @@ Visualize SOM assignments for given inputs.
 Visualize the Unified Distance Matrix (U-Matrix) revealing cluster boundaries.
 
 *📁 src/dl_techniques/models/som/model.py:858*
+
+#### `warmup_memory_keys(self, dataset, num_batches)`
+**Module:** `models.memory_bank.wave_field_memory_llm`
+
+Seed ``K_lt`` from offline ``MiniBatchKMeans`` on hidden states.
+
+*📁 src/dl_techniques/models/memory_bank/wave_field_memory_llm.py:599*
 
 #### `wrap_keras_model(model)`
 **Module:** `models.ccnets.utils`
@@ -31440,26 +34860,47 @@ Apply a single optimization step.
 
 ### Regularizers Functions
 
+#### `build(self, input_shape)`
+**Module:** `regularizers.sigreg`
+
+Validate input shape.
+
+*📁 src/dl_techniques/regularizers/sigreg.py:107*
+
+#### `call(self, proj, training)`
+**Module:** `regularizers.sigreg`
+
+Compute the SIGReg statistic.
+
+*📁 src/dl_techniques/regularizers/sigreg.py:120*
+
+#### `compute_output_shape(self, input_shape)`
+**Module:** `regularizers.sigreg`
+
+Output is a scalar.
+
+*📁 src/dl_techniques/regularizers/sigreg.py:166*
+
 #### `create_binary_preference_regularizer(multiplier, scale)`
 **Module:** `regularizers.binary_preference`
 
 Factory function to create binary preference regularizers.
 
-*📁 src/dl_techniques/regularizers/binary_preference.py:249*
+*📁 src/dl_techniques/regularizers/binary_preference.py:247*
 
 #### `create_entropy_regularizer(strength, target_entropy, mode)`
 **Module:** `regularizers.entropy_regularizer`
 
 Factory function to create entropy regularizers with common configurations.
 
-*📁 src/dl_techniques/regularizers/entropy_regularizer.py:287*
+*📁 src/dl_techniques/regularizers/entropy_regularizer.py:285*
 
 #### `create_srip_regularizer(lambda_init, power_iterations, epsilon, lambda_schedule)`
 **Module:** `regularizers.srip`
 
 Factory function to create a SRIP regularizer instance.
 
-*📁 src/dl_techniques/regularizers/srip.py:382*
+*📁 src/dl_techniques/regularizers/srip.py:384*
 
 #### `current_lambda(self)`
 **Module:** `regularizers.srip`
@@ -31473,14 +34914,7 @@ Current regularization strength.
 
 Create regularizer instance from configuration dictionary.
 
-*📁 src/dl_techniques/regularizers/srip.py:353*
-
-#### `from_config(cls, config)`
-**Module:** `regularizers.tri_state_preference`
-
-Create a regularizer instance from configuration dictionary.
-
-*📁 src/dl_techniques/regularizers/tri_state_preference.py:162*
+*📁 src/dl_techniques/regularizers/srip.py:355*
 
 #### `get_config(self)`
 **Module:** `regularizers.l2_custom`
@@ -31492,21 +34926,19 @@ Create a regularizer instance from configuration dictionary.
 
 Return the configuration of the regularizer.
 
-*📁 src/dl_techniques/regularizers/srip.py:339*
+*📁 src/dl_techniques/regularizers/srip.py:341*
 
 #### `get_config(self)`
 **Module:** `regularizers.soft_orthogonal`
 
 Get regularizer configuration for serialization.
 
-*📁 src/dl_techniques/regularizers/soft_orthogonal.py:273*
+*📁 src/dl_techniques/regularizers/soft_orthogonal.py:260*
 
 #### `get_config(self)`
-**Module:** `regularizers.soft_orthogonal`
+**Module:** `regularizers.sigreg`
 
-Get regularizer configuration for serialization.
-
-*📁 src/dl_techniques/regularizers/soft_orthogonal.py:455*
+*📁 src/dl_techniques/regularizers/sigreg.py:170*
 
 #### `get_config(self)`
 **Module:** `regularizers.tri_state_preference`
@@ -31534,7 +34966,7 @@ Return the configuration of the regularizer for serialization.
 
 Update lambda value based on current epoch.
 
-*📁 src/dl_techniques/regularizers/srip.py:321*
+*📁 src/dl_techniques/regularizers/srip.py:323*
 
 #### `validate_float_arg(value, name)`
 **Module:** `regularizers.l2_custom`
@@ -31719,6 +35151,13 @@ Apply shot noise (Poisson-like noise) corruption.
 
 *📁 src/dl_techniques/datasets/sut.py:75*
 
+#### `as_tf_dataset(self)`
+**Module:** `datasets.pusht_hdf5`
+
+Build a `tf.data.Dataset` from the HDF5 file.
+
+*📁 src/dl_techniques/datasets/pusht_hdf5.py:185*
+
 #### `assess_forecastability(time_series, season_length, auto_pe)`
 **Module:** `utils.forecastability_analyzer`
 
@@ -31731,7 +35170,7 @@ Complete forecastability assessment pipeline.
 
 Apply a sequence of augmentations to a time series.
 
-*📁 src/dl_techniques/datasets/time_series/generator.py:1113*
+*📁 src/dl_techniques/datasets/time_series/generator.py:1178*
 
 #### `augment_task(self, task, config)`
 **Module:** `datasets.arc.arc_converters`
@@ -31782,6 +35221,13 @@ Perform Non-Maximum Suppression (NMS) on bounding boxes.
 
 *📁 src/dl_techniques/utils/bounding_box.py:413*
 
+#### `bdd100k_video_dataset(videos_root, batch_size, T, img_size, num_steps, seed, max_resample_attempts, split, val_fraction)`
+**Module:** `datasets.bdd100k_video`
+
+Build a tf.data.Dataset of BDD100K video clips.
+
+*📁 src/dl_techniques/datasets/bdd100k_video.py:127*
+
 #### `body(i, current_canvas)`
 **Module:** `datasets.vision.coco`
 
@@ -31829,82 +35275,12 @@ Build the layer.
 
 *📁 src/dl_techniques/datasets/arc/arc_keras.py:434*
 
-#### `build_3d_scene_understanding()`
-**Module:** `applications.geometric.examples`
+#### `build_coco_multitask_datasets(coco_root, image_size, batch_size, max_train_images, max_val_images, workers, augment_train, seed)`
+**Module:** `datasets.vision.coco_multitask_local`
 
-3D Scene Understanding with object detection and relationships.
+Create matched train / val :class:`COCO2017MultiTaskLoader` instances.
 
-*📁 src/dl_techniques/applications/geometric/examples.py:84*
-
-#### `build_climate_model()`
-**Module:** `applications.geometric.examples`
-
-Climate/Weather Prediction Model with spatial transformers.
-
-*📁 src/dl_techniques/applications/geometric/examples.py:471*
-
-#### `build_manipulation_planner()`
-**Module:** `applications.geometric.examples`
-
-Robot Manipulation Planning with spatial reasoning.
-
-*📁 src/dl_techniques/applications/geometric/examples.py:348*
-
-#### `build_molecular_property_predictor()`
-**Module:** `applications.geometric.examples`
-
-Molecular Property Prediction using spatial molecular graphs.
-
-*📁 src/dl_techniques/applications/geometric/examples.py:293*
-
-#### `build_multi_sensor_fusion()`
-**Module:** `applications.geometric.examples`
-
-Multi-Sensor Fusion for Autonomous Systems.
-
-*📁 src/dl_techniques/applications/geometric/examples.py:181*
-
-#### `build_physics_simulator(grid_size)`
-**Module:** `applications.geometric.examples`
-
-Physics Simulation Network (CFD, Weather, Molecular Dynamics).
-
-*📁 src/dl_techniques/applications/geometric/examples.py:243*
-
-#### `build_point_cloud_classifier(num_points, num_classes)`
-**Module:** `applications.geometric.examples`
-
-Point Cloud Classification (like ModelNet40).
-
-*📁 src/dl_techniques/applications/geometric/examples.py:24*
-
-#### `build_point_cloud_segmentation(num_points, num_classes)`
-**Module:** `applications.geometric.examples`
-
-Point Cloud Segmentation (like ShapeNet parts).
-
-*📁 src/dl_techniques/applications/geometric/examples.py:56*
-
-#### `build_procedural_world_generator()`
-**Module:** `applications.geometric.examples`
-
-Procedural World Generation for games and simulations.
-
-*📁 src/dl_techniques/applications/geometric/examples.py:533*
-
-#### `build_slam_system()`
-**Module:** `applications.geometric.examples`
-
-Simultaneous Localization and Mapping with spatial transformers.
-
-*📁 src/dl_techniques/applications/geometric/examples.py:408*
-
-#### `build_vision_language_model(max_text_len, image_patches)`
-**Module:** `applications.geometric.examples`
-
-Vision-Language Model (like CLIP but with spatial reasoning).
-
-*📁 src/dl_techniques/applications/geometric/examples.py:137*
+*📁 src/dl_techniques/datasets/vision/coco_multitask_local.py:339*
 
 #### `calculate_naive_baselines(time_series, season_length, n_folds, horizon)`
 **Module:** `utils.forecastability_analyzer`
@@ -32226,6 +35602,13 @@ Create inference engine from saved model.
 
 *📁 src/dl_techniques/utils/inference.py:584*
 
+#### `create_inference_model_from_training_model(training_model)`
+**Module:** `utils.deep_supervision`
+
+Build a single-output inference model from a deep-supervised training model.
+
+*📁 src/dl_techniques/utils/deep_supervision.py:39*
+
 #### `create_instance_separation_mask(mask_predictions, separation_threshold, dtype)`
 **Module:** `utils.masking.factory`
 
@@ -32380,12 +35763,19 @@ Decode token IDs back to text.
 
 *📁 src/dl_techniques/utils/tokenizer.py:447*
 
-#### `demonstrate_applications()`
-**Module:** `applications.geometric.examples`
+#### `decode_dfl_logits(reg_logits, reg_max)`
+**Module:** `utils.yolo_decode`
 
-Demonstrate building and using these applications.
+Convert DFL regression logits to per-edge distances (in stride units).
 
-*📁 src/dl_techniques/applications/geometric/examples.py:598*
+*📁 src/dl_techniques/utils/yolo_decode.py:89*
+
+#### `decode_predictions(y_pred, anchors, strides, reg_max, num_classes, score_threshold)`
+**Module:** `utils.yolo_decode`
+
+Decode a batch of raw YOLOv12 predictions to per-image detections.
+
+*📁 src/dl_techniques/utils/yolo_decode.py:132*
 
 #### `denormalize_bbox(normalized_bbox, image_width, image_height)`
 **Module:** `datasets.patch_transforms`
@@ -32407,6 +35797,13 @@ Create a depthwise Gaussian kernel.
 8 dihedral symmetries by rotate, flip and mirror
 
 *📁 src/dl_techniques/datasets/arc/arc_converters.py:67*
+
+#### `dist_to_xyxy(distances, anchor_centers)`
+**Module:** `utils.yolo_decode`
+
+Convert (left, top, right, bottom) distances + anchor centers to xyxy.
+
+*📁 src/dl_techniques/utils/yolo_decode.py:110*
 
 #### `download(self)`
 **Module:** `datasets.time_series.base`
@@ -32508,6 +35905,25 @@ Evaluate empirical coverage probability.
 Exponential map at the origin: Tangent space (Euclidean) → Manifold (Hyperbolic).
 
 *📁 src/dl_techniques/utils/geometry/poincare_math.py:141*
+
+#### `export_keras_model_to_onnx(model, model_path, output_path, opset_version, input_signature, custom_objects, validate_output, optimization_level)`
+**Module:** `utils.export.onnx`
+
+Export a Keras 3 model to ONNX format.
+
+*📁 src/dl_techniques/utils/export/onnx.py:43*
+
+#### `export_tirex_to_tflite(model_variant, input_length, features, prediction_length, output_path)`
+**Module:** `utils.export.tflite`
+
+*📁 src/dl_techniques/utils/export/tflite.py:12*
+
+#### `export_with_dynamic_batch(model, output_path, opset_version, batch_dim_name)`
+**Module:** `utils.export.onnx`
+
+Export a Keras model to ONNX with dynamic batch size.
+
+*📁 src/dl_techniques/utils/export/onnx.py:296*
 
 #### `extract_file(filepath, directory, remove_archive)`
 **Module:** `datasets.time_series.utils`
@@ -32625,6 +36041,21 @@ Compute Gaussian probability density using Keras operations.
 *📁 src/dl_techniques/utils/tensors.py:431*
 
 #### `gen()`
+**Module:** `datasets.synthetic_drone_video`
+
+*📁 src/dl_techniques/datasets/synthetic_drone_video.py:108*
+
+#### `gen()`
+**Module:** `datasets.pusht_hdf5`
+
+*📁 src/dl_techniques/datasets/pusht_hdf5.py:74*
+
+#### `gen()`
+**Module:** `datasets.pusht_hdf5`
+
+*📁 src/dl_techniques/datasets/pusht_hdf5.py:189*
+
+#### `gen()`
 **Module:** `datasets.time_series.pipeline`
 
 *📁 src/dl_techniques/datasets/time_series/pipeline.py:227*
@@ -32634,7 +36065,7 @@ Compute Gaussian probability density using Keras operations.
 
 Generate all available time series patterns.
 
-*📁 src/dl_techniques/datasets/time_series/generator.py:1023*
+*📁 src/dl_techniques/datasets/time_series/generator.py:1087*
 
 #### `generate_centers()`
 **Module:** `datasets.sut`
@@ -32667,7 +36098,7 @@ Generate Gaussian clusters dataset.
 
 Generate a custom time series pattern with specified parameters.
 
-*📁 src/dl_techniques/datasets/time_series/generator.py:1064*
+*📁 src/dl_techniques/datasets/time_series/generator.py:1128*
 
 #### `generate_dataset(dataset_type, n_samples, noise_level, random_state, return_centers)`
 **Module:** `datasets.simple_2d`
@@ -32709,7 +36140,7 @@ Generate list of patch locations covering the full image.
 
 Generate a random time series pattern, optionally from a specific category.
 
-*📁 src/dl_techniques/datasets/time_series/generator.py:1038*
+*📁 src/dl_techniques/datasets/time_series/generator.py:1102*
 
 #### `generate_spiral(n_samples, noise_level, random_state)`
 **Module:** `datasets.simple_2d`
@@ -32723,7 +36154,7 @@ Generate intertwined spirals dataset.
 
 Generate time series data for a specific task.
 
-*📁 src/dl_techniques/datasets/time_series/generator.py:1003*
+*📁 src/dl_techniques/datasets/time_series/generator.py:1067*
 
 #### `generate_xor(n_samples, noise_level, random_state)`
 **Module:** `datasets.simple_2d`
@@ -32731,6 +36162,16 @@ Generate time series data for a specific task.
 Generate an XOR-like dataset (points in opposite quadrants belong to the same class).
 
 *📁 src/dl_techniques/datasets/simple_2d.py:285*
+
+#### `generator()`
+**Module:** `datasets.nlp`
+
+*📁 src/dl_techniques/datasets/nlp.py:172*
+
+#### `generator()`
+**Module:** `datasets.nlp`
+
+*📁 src/dl_techniques/datasets/nlp.py:242*
 
 #### `generator()`
 **Module:** `datasets.vision.coco`
@@ -32903,12 +36344,26 @@ Get information about all available mask types.
 
 *📁 src/dl_techniques/utils/masking/factory.py:929*
 
+#### `get_model_output_info(model)`
+**Module:** `utils.deep_supervision`
+
+Return output metadata for a (possibly deep-supervised) model.
+
+*📁 src/dl_techniques/utils/deep_supervision.py:15*
+
 #### `get_naive2_forecasts(self, group)`
 **Module:** `datasets.time_series.m4`
 
 Get Naive2 baseline forecasts for comparison.
 
 *📁 src/dl_techniques/datasets/time_series/m4.py:425*
+
+#### `get_onnx_model_info(onnx_path)`
+**Module:** `utils.export.onnx`
+
+Get information about an ONNX model.
+
+*📁 src/dl_techniques/utils/export/onnx.py:355*
 
 #### `get_save_path(self, name, subdir)`
 **Module:** `utils.visualization_manager`
@@ -32957,21 +36412,21 @@ Get list of supported metrics.
 
 Get list of all task categories.
 
-*📁 src/dl_techniques/datasets/time_series/generator.py:981*
+*📁 src/dl_techniques/datasets/time_series/generator.py:1045*
 
 #### `get_task_names(self)`
 **Module:** `datasets.time_series.generator`
 
 Get list of all available task names.
 
-*📁 src/dl_techniques/datasets/time_series/generator.py:973*
+*📁 src/dl_techniques/datasets/time_series/generator.py:1037*
 
 #### `get_tasks_by_category(self, category)`
 **Module:** `datasets.time_series.generator`
 
 Get all task names belonging to a specific category.
 
-*📁 src/dl_techniques/datasets/time_series/generator.py:989*
+*📁 src/dl_techniques/datasets/time_series/generator.py:1053*
 
 #### `get_test_data(self)`
 **Module:** `datasets.vision.common`
@@ -33072,6 +36527,13 @@ Compute length of capsule vectors.
 
 *📁 src/dl_techniques/utils/tensors.py:463*
 
+#### `linear_drop_path_rates(num_blocks, max_rate)`
+**Module:** `utils.drop_path`
+
+Return linearly spaced drop-path rates from 0 to ``max_rate``.
+
+*📁 src/dl_techniques/utils/drop_path.py:6*
+
 #### `list_groups(self)`
 **Module:** `datasets.time_series.base`
 
@@ -33148,6 +36610,13 @@ Convenience function to load Favorita data.
 Load features from disk.
 
 *📁 src/dl_techniques/utils/alignment/utils.py:300*
+
+#### `load_hf_text_dataset(path, name, split, text_field, cache_dir, min_length, max_samples, streaming)`
+**Module:** `datasets.nlp`
+
+Load a text dataset from HuggingFace Hub as a ``tf.data.Dataset``.
+
+*📁 src/dl_techniques/datasets/nlp.py:200*
 
 #### `load_identifiers_map(self)`
 **Module:** `datasets.arc.arc_utilities`
@@ -33231,12 +36700,33 @@ Load Weather dataset.
 
 *📁 src/dl_techniques/datasets/time_series/long_horizon.py:505*
 
+#### `load_weights_from_checkpoint(target, ckpt_path, skip_prefixes, strict, custom_objects)`
+**Module:** `utils.weight_transfer`
+
+Copy weights layer-by-layer from a saved ``.keras`` checkpoint into *target*.
+
+*📁 src/dl_techniques/utils/weight_transfer.py:100*
+
+#### `load_wikipedia_train_val(cache_dir, config_name, min_article_length, val_fraction, max_val_samples, max_train_samples, seed, return_counts, num_shards)`
+**Module:** `datasets.nlp`
+
+Load Wikipedia with a proper random holdout train/val split.
+
+*📁 src/dl_techniques/datasets/nlp.py:22*
+
 #### `log_map_0(self, y, c)`
 **Module:** `utils.geometry.poincare_math`
 
 Logarithmic map at the origin: Manifold (Hyperbolic) → Tangent space (Euclidean).
 
 *📁 src/dl_techniques/utils/geometry/poincare_math.py:180*
+
+#### `make_anchors_np(input_shape, strides, grid_cell_offset)`
+**Module:** `utils.yolo_decode`
+
+Generate anchor centers + per-anchor stride tensor in **pixel** coords.
+
+*📁 src/dl_techniques/utils/yolo_decode.py:37*
 
 #### `make_tf_dataset(df, window_size, horizon, batch_size, shuffle, target_col, id_col, time_col, feature_cols, pipeline_config)`
 **Module:** `datasets.time_series.pipeline`
@@ -33273,12 +36763,26 @@ Möbius addition: Hyperbolic equivalent of vector addition in Euclidean space.
 
 *📁 src/dl_techniques/utils/geometry/poincare_math.py:222*
 
+#### `model_func()`
+**Module:** `utils.export.onnx`
+
+Wrapper function for model inference.
+
+*📁 src/dl_techniques/utils/export/onnx.py:131*
+
 #### `mutual_knn(feats_a, feats_b, topk)`
 **Module:** `utils.alignment.metrics`
 
 Mutual KNN: Intersection of nearest neighbors from both representations.
 
 *📁 src/dl_techniques/utils/alignment/metrics.py:108*
+
+#### `nms_per_class(boxes, scores, classes, iou_threshold, max_per_class, max_total)`
+**Module:** `utils.yolo_decode`
+
+Per-class greedy NMS.
+
+*📁 src/dl_techniques/utils/yolo_decode.py:207*
 
 #### `no_avoidance_zones()`
 **Module:** `datasets.sut`
@@ -33340,6 +36844,16 @@ Get number of classes.
 
 *📁 src/dl_techniques/datasets/vision/coco.py:106*
 
+#### `num_loaded(self)`
+**Module:** `utils.weight_transfer`
+
+*📁 src/dl_techniques/utils/weight_transfer.py:66*
+
+#### `num_shape_mismatch(self)`
+**Module:** `utils.weight_transfer`
+
+*📁 src/dl_techniques/utils/weight_transfer.py:70*
+
 #### `on_epoch_end(self, epoch, logs)`
 **Module:** `callbacks.analyzer_callback`
 
@@ -33347,12 +36861,52 @@ Runs the model analysis at the end of an epoch.
 
 *📁 src/dl_techniques/callbacks/analyzer_callback.py:89*
 
+#### `on_epoch_end(self, epoch, logs)`
+**Module:** `callbacks.jepa_visualization`
+
+*📁 src/dl_techniques/callbacks/jepa_visualization.py:152*
+
+#### `on_epoch_end(self, epoch, logs)`
+**Module:** `callbacks.jepa_visualization`
+
+*📁 src/dl_techniques/callbacks/jepa_visualization.py:286*
+
+#### `on_epoch_end(self, epoch, logs)`
+**Module:** `callbacks.depth_visualization`
+
+*📁 src/dl_techniques/callbacks/depth_visualization.py:85*
+
+#### `on_epoch_end(self, epoch, logs)`
+**Module:** `callbacks.depth_visualization`
+
+*📁 src/dl_techniques/callbacks/depth_visualization.py:237*
+
+#### `on_epoch_end(self, epoch, logs)`
+**Module:** `callbacks.training_curves`
+
+*📁 src/dl_techniques/callbacks/training_curves.py:117*
+
+#### `on_epoch_end(self, epoch, logs)`
+**Module:** `callbacks.coco_map_callback`
+
+*📁 src/dl_techniques/callbacks/coco_map_callback.py:134*
+
+#### `on_epoch_end(self, epoch, logs)`
+**Module:** `callbacks.coco_multitask_visualization`
+
+*📁 src/dl_techniques/callbacks/coco_multitask_visualization.py:270*
+
 #### `on_epoch_end(self)`
 **Module:** `datasets.vqa_dataset`
 
 Shuffle indices at the end of each epoch if shuffle is enabled.
 
 *📁 src/dl_techniques/datasets/vqa_dataset.py:484*
+
+#### `on_epoch_end(self)`
+**Module:** `datasets.vision.coco_multitask_local`
+
+*📁 src/dl_techniques/datasets/vision/coco_multitask_local.py:300*
 
 #### `on_epoch_end(self)`
 **Module:** `datasets.arc.arc_keras`
@@ -33367,6 +36921,16 @@ Shuffle indices at the end of each epoch.
 Compute and log alignment score.
 
 *📁 src/dl_techniques/utils/alignment/alignment.py:404*
+
+#### `on_train_begin(self, logs)`
+**Module:** `callbacks.jepa_visualization`
+
+*📁 src/dl_techniques/callbacks/jepa_visualization.py:138*
+
+#### `on_train_begin(self, logs)`
+**Module:** `callbacks.jepa_visualization`
+
+*📁 src/dl_techniques/callbacks/jepa_visualization.py:268*
 
 #### `patch_to_full_image_bbox(patch_bbox, patch_info)`
 **Module:** `datasets.patch_transforms`
@@ -33507,6 +37071,13 @@ Preprocess image for nanoVLM input.
 Preprocess text for training or inference.
 
 *📁 src/dl_techniques/datasets/vqa_dataset.py:246*
+
+#### `probe(self)`
+**Module:** `datasets.vision.coco_multitask_local`
+
+Load one batch and return summary statistics (shape, class histogram).
+
+*📁 src/dl_techniques/datasets/vision/coco_multitask_local.py:308*
 
 #### `process_bboxes()`
 **Module:** `datasets.sut`
@@ -33740,6 +37311,13 @@ Stitch segmentation patches into full image mask.
 
 *📁 src/dl_techniques/datasets/patch_transforms.py:360*
 
+#### `summary_string(self)`
+**Module:** `utils.weight_transfer`
+
+Human-readable single-block summary suitable for logging.
+
+*📁 src/dl_techniques/utils/weight_transfer.py:73*
+
 #### `supports_perfect_inverse(self)`
 **Module:** `datasets.time_series.normalizer`
 
@@ -33753,6 +37331,20 @@ Check if current method supports perfect reconstruction.
 Singular Vector Canonical Correlation Analysis (SVCCA).
 
 *📁 src/dl_techniques/utils/alignment/metrics.py:260*
+
+#### `synthetic_drone_video_dataset(batch_size, num_batches, T, img_size, img_channels, seed)`
+**Module:** `datasets.synthetic_drone_video`
+
+Yield synthetic drone-video batches for VideoJEPA training.
+
+*📁 src/dl_techniques/datasets/synthetic_drone_video.py:75*
+
+#### `synthetic_lewm_dataset(num_episodes, num_steps, img_size, action_dim, batch_size, history_size, num_preds, seed)`
+**Module:** `datasets.pusht_hdf5`
+
+Yield synthetic batches matching the LeWM training schema.
+
+*📁 src/dl_techniques/datasets/pusht_hdf5.py:49*
 
 #### `task_to_hrm_format(self, task, augmentation_config)`
 **Module:** `datasets.arc.arc_converters`
@@ -33807,13 +37399,6 @@ Convert the dataset to a TensorFlow Dataset yielding tuples.
 Train a Keras model with configurable parameters and callbacks.
 
 *📁 src/dl_techniques/utils/train.py:44*
-
-#### `training_tips()`
-**Module:** `applications.geometric.examples`
-
-Tips for training models with spatial layers.
-
-*📁 src/dl_techniques/applications/geometric/examples.py:648*
 
 #### `transform(self, X)`
 **Module:** `datasets.tabular`
@@ -33897,6 +37482,13 @@ Validate a specific dataset split.
 
 *📁 src/dl_techniques/datasets/arc/arc_utilities.py:750*
 
+#### `verify_tflite(tflite_path, input_length, features)`
+**Module:** `utils.export.tflite`
+
+Simple verification to ensure the TFLite model runs.
+
+*📁 src/dl_techniques/utils/export/tflite.py:60*
+
 #### `visualize_dataset(X, y, title, filename, show, centers)`
 **Module:** `datasets.simple_2d`
 
@@ -33956,14 +37548,14 @@ Compute normalized Gram matrix (W^T * W) with improved numerical stability.
 
 Add a subplot to this composite visualization.
 
-*📁 src/dl_techniques/visualization/core.py:318*
+*📁 src/dl_techniques/visualization/core.py:321*
 
 #### `adjust_lightness(color, amount)`
 **Module:** `visualization.core`
 
 Adjust the lightness of a color.
 
-*📁 src/dl_techniques/visualization/core.py:646*
+*📁 src/dl_techniques/visualization/core.py:656*
 
 #### `can_handle(self, data)`
 **Module:** `visualization.time_series`
@@ -34000,7 +37592,7 @@ Adjust the lightness of a color.
 
 Check if this plugin can handle the given data.
 
-*📁 src/dl_techniques/visualization/core.py:248*
+*📁 src/dl_techniques/visualization/core.py:251*
 
 #### `can_handle(self, data)`
 **Module:** `visualization.training_performance`
@@ -34119,14 +37711,14 @@ Check if this plugin can handle the given data.
 
 Create a color palette with n colors.
 
-*📁 src/dl_techniques/visualization/core.py:641*
+*📁 src/dl_techniques/visualization/core.py:651*
 
 #### `create_dashboard(self, data, layout, save, show)`
 **Module:** `visualization.core`
 
 Create a dashboard with multiple visualizations.
 
-*📁 src/dl_techniques/visualization/core.py:505*
+*📁 src/dl_techniques/visualization/core.py:515*
 
 #### `create_gradient_heatmap(self, gradients, title, cmap, figsize, show_colorbar, log_scale, save_path)`
 **Module:** `visualization.data_nn`
@@ -34140,7 +37732,7 @@ Create a heatmap visualization of gradient topology.
 
 Create a plugin instance from a template.
 
-*📁 src/dl_techniques/visualization/core.py:429*
+*📁 src/dl_techniques/visualization/core.py:439*
 
 #### `create_visualization(self, data, ax, num_samples, plot_type)`
 **Module:** `visualization.time_series`
@@ -34189,14 +37781,14 @@ Overridden to add a metrics table to the dashboard.
 
 Create the visualization.
 
-*📁 src/dl_techniques/visualization/core.py:261*
+*📁 src/dl_techniques/visualization/core.py:264*
 
 #### `create_visualization(self, data, ax, layout, default_cols)`
 **Module:** `visualization.core`
 
 Create a composite visualization with multiple subplots.
 
-*📁 src/dl_techniques/visualization/core.py:322*
+*📁 src/dl_techniques/visualization/core.py:325*
 
 #### `create_visualization(self, data, metrics_to_plot, smooth_factor, show_best_epoch)`
 **Module:** `visualization.training_performance`
@@ -34373,7 +37965,7 @@ Create a side-by-side comparison of images.
 
 Return a description of this visualization plugin.
 
-*📁 src/dl_techniques/visualization/core.py:243*
+*📁 src/dl_techniques/visualization/core.py:246*
 
 #### `description(self)`
 **Module:** `visualization.training_performance`
@@ -34490,14 +38082,14 @@ Return a description of this visualization plugin.
 
 Get list of available plugin names.
 
-*📁 src/dl_techniques/visualization/core.py:611*
+*📁 src/dl_techniques/visualization/core.py:621*
 
 #### `get_available_templates(self)`
 **Module:** `visualization.core`
 
 Get list of available template names.
 
-*📁 src/dl_techniques/visualization/core.py:615*
+*📁 src/dl_techniques/visualization/core.py:625*
 
 #### `get_model_color(self, model_name, index)`
 **Module:** `visualization.core`
@@ -34562,7 +38154,7 @@ Get matplotlib rcParams for the configured style.
 
 Return the name of this visualization plugin.
 
-*📁 src/dl_techniques/visualization/core.py:237*
+*📁 src/dl_techniques/visualization/core.py:240*
 
 #### `name(self)`
 **Module:** `visualization.training_performance`
@@ -34679,35 +38271,35 @@ Return the name of this visualization plugin.
 
 Register a visualization plugin.
 
-*📁 src/dl_techniques/visualization/core.py:419*
+*📁 src/dl_techniques/visualization/core.py:429*
 
 #### `register_template(self, name, template_class)`
 **Module:** `visualization.core`
 
 Register a visualization template class.
 
-*📁 src/dl_techniques/visualization/core.py:424*
+*📁 src/dl_techniques/visualization/core.py:434*
 
 #### `save_figure(self, fig, name, subdir)`
 **Module:** `visualization.core`
 
 Save a figure with proper configuration.
 
-*📁 src/dl_techniques/visualization/core.py:280*
+*📁 src/dl_techniques/visualization/core.py:283*
 
 #### `save_metadata(self, metadata)`
 **Module:** `visualization.core`
 
 Save metadata about the visualizations.
 
-*📁 src/dl_techniques/visualization/core.py:619*
+*📁 src/dl_techniques/visualization/core.py:629*
 
 #### `setup_logging(level)`
 **Module:** `visualization.core`
 
 Setup logging configuration.
 
-*📁 src/dl_techniques/visualization/core.py:632*
+*📁 src/dl_techniques/visualization/core.py:642*
 
 #### `style_context(self)`
 **Module:** `visualization.core`
@@ -34721,11 +38313,11 @@ Context manager for temporarily applying style settings.
 
 Context manager for applying this manager's style settings.
 
-*📁 src/dl_techniques/visualization/core.py:438*
+*📁 src/dl_techniques/visualization/core.py:448*
 
 #### `visualize(self, data, plugin_name, save, show, filename)`
 **Module:** `visualization.core`
 
 Create a visualization for the given data.
 
-*📁 src/dl_techniques/visualization/core.py:443*
+*📁 src/dl_techniques/visualization/core.py:453*

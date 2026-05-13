@@ -2,7 +2,7 @@
 
 Loss functions for different tasks
 
-**27 modules in this category**
+**34 modules in this category**
 
 ## Affine_Invariant_Loss
 
@@ -89,6 +89,18 @@ Margin loss for training Capsule Networks.
 
 *📁 File: `src/dl_techniques/losses/chamfer_loss.py`*
 
+## Clifford_Detection_Loss
+
+### losses.clifford_detection_loss
+Stride-configurable YOLOv12 object detection loss for CliffordNet U-Net.
+
+**Classes:**
+- `CliffordDetectionLoss`
+
+**Functions:** `get_config`, `from_config`
+
+*📁 File: `src/dl_techniques/losses/clifford_detection_loss.py`*
+
 ## Clip_Contrastive_Loss
 
 ### losses.clip_contrastive_loss
@@ -159,6 +171,18 @@ A margin-based cosine similarity loss for feature alignment.
 **Functions:** `call`, `get_config`
 
 *📁 File: `src/dl_techniques/losses/feature_alignment_loss.py`*
+
+## Focal_Causal_Lm_Loss
+
+### losses.focal_causal_lm_loss
+Focal Causal Language Modeling Loss.
+
+**Classes:**
+- `FocalCausalLMLoss`
+
+**Functions:** `call`, `get_config`
+
+*📁 File: `src/dl_techniques/losses/focal_causal_lm_loss.py`*
 
 ## Focal_Uncertainty_Loss
 
@@ -238,6 +262,19 @@ Mean Absolute Scaled Error (MASE), a scale-free loss metric.
 
 *📁 File: `src/dl_techniques/losses/mase_loss.py`*
 
+## Masked_Causal_Lm_Loss
+
+### losses.masked_causal_lm_loss
+Masked Causal Language Modeling Loss.
+
+**Classes:**
+- `MaskedCausalLMLoss`
+- `PrefixMaskedCausalLMLoss`
+
+**Functions:** `call`, `get_config`
+
+*📁 File: `src/dl_techniques/losses/masked_causal_lm_loss.py`*
+
 ## Multi_Labels_Loss
 
 ### losses.multi_labels_loss
@@ -251,6 +288,18 @@ Per-Channel Loss Wrapper for Multi-Label Segmentation
 **Functions:** `create_multilabel_segmentation_loss`, `call`, `get_config`, `from_config`, `call` (and 4 more)
 
 *📁 File: `src/dl_techniques/losses/multi_labels_loss.py`*
+
+## Multi_Task_Loss
+
+### losses.multi_task_loss
+Multi-Task Loss
+
+**Classes:**
+- `MultiTaskLoss`
+
+**Functions:** `call`, `get_config`
+
+*📁 File: `src/dl_techniques/losses/multi_task_loss.py`*
 
 ## Nano_Vlm_Loss
 
@@ -277,6 +326,18 @@ Quantile loss, also known as the pinball loss.
 
 *📁 File: `src/dl_techniques/losses/quantile_loss.py`*
 
+## Scaled_Mse_Loss
+
+### losses.scaled_mse_loss
+Scaled MSE Loss
+
+**Classes:**
+- `ScaledMseLoss`
+
+**Functions:** `call`, `get_config`
+
+*📁 File: `src/dl_techniques/losses/scaled_mse_loss.py`*
+
 ## Segmentation_Loss
 
 ### losses.segmentation_loss
@@ -285,11 +346,22 @@ Segmentation Loss Functions Module.
 **Classes:**
 - `LossConfig`
 - `SegmentationLosses`
-- `WrappedLoss`
 
-**Functions:** `create_loss_function`, `cross_entropy_loss`, `dice_loss`, `focal_loss`, `tversky_loss` (and 10 more)
+**Functions:** `create_loss_function`, `get_config`, `from_config`, `cross_entropy_loss`, `dice_loss` (and 10 more)
 
 *📁 File: `src/dl_techniques/losses/segmentation_loss.py`*
+
+## Segmentation_Wrapper_Loss
+
+### losses.segmentation_wrapper_loss
+Segmentation Wrapper Loss — a serializable name-dispatched Keras Loss.
+
+**Classes:**
+- `SegmentationWrapperLoss`
+
+**Functions:** `create_segmentation_wrapper_loss`, `call`, `get_config`, `from_config`
+
+*📁 File: `src/dl_techniques/losses/segmentation_wrapper_loss.py`*
 
 ## Siglip_Contrastive_Loss
 
@@ -339,6 +411,19 @@ Fenchel-Young loss tailored for Sparsemax activation.
 **Functions:** `call`, `get_config`
 
 *📁 File: `src/dl_techniques/losses/tabm_loss.py`*
+
+## Utilization_Loss
+
+### losses.utilization_loss
+Component Utilization Losses
+
+**Classes:**
+- `MANNUtilizationLoss`
+- `GNNUtilizationLoss`
+
+**Functions:** `call`, `get_config`, `call`, `get_config`
+
+*📁 File: `src/dl_techniques/losses/utilization_loss.py`*
 
 ## Wasserstein_Loss
 

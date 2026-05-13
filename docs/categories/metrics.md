@@ -2,7 +2,20 @@
 
 Evaluation metrics
 
-**8 modules in this category**
+**14 modules in this category**
+
+## Brier_Score
+
+### metrics.brier_score
+Brier Score metrics for Keras 3.
+
+**Classes:**
+- `BrierScore`
+- `CategoricalBrierScore`
+
+**Functions:** `update_state`, `result`, `reset_state`, `get_config`, `update_state` (and 3 more)
+
+*📁 File: `src/dl_techniques/metrics/brier_score.py`*
 
 ## Capsule_Accuracy
 
@@ -11,7 +24,7 @@ Evaluation metrics
 **Classes:**
 - `CapsuleAccuracy`
 
-**Functions:** `update_state`, `result`, `reset_state`
+**Functions:** `update_state`, `result`, `reset_state`, `get_config`
 
 *📁 File: `src/dl_techniques/metrics/capsule_accuracy.py`*
 
@@ -34,6 +47,22 @@ CLIP Contrastive Learning Metrics Implementation
 
 *📁 File: `src/dl_techniques/metrics/__init__.py`*
 
+## Depth_Metrics
+
+### metrics.depth_metrics
+Monocular depth estimation evaluation metrics.
+
+**Classes:**
+- `AbsRelMetric`
+- `DeltaThresholdMetric`
+- `SqRelMetric`
+- `RMSEMetric`
+- `RMSELogMetric`
+
+**Functions:** `update_state`, `result`, `reset_state`, `get_config`, `update_state` (and 15 more)
+
+*📁 File: `src/dl_techniques/metrics/depth_metrics.py`*
+
 ## Hrm_Metrics
 
 ### metrics.hrm_metrics
@@ -41,9 +70,22 @@ CLIP Contrastive Learning Metrics Implementation
 **Classes:**
 - `HRMMetrics`
 
-**Functions:** `update_state`, `result`, `reset_state`
+**Functions:** `update_state`, `result`, `reset_state`, `get_config`
 
 *📁 File: `src/dl_techniques/metrics/hrm_metrics.py`*
+
+## Llm_Metrics
+
+### metrics.llm_metrics
+LLM-oriented evaluation metrics for causal language modeling pipelines.
+
+**Classes:**
+- `BitsPerToken`
+- `BitsPerCharacter`
+
+**Functions:** `self_bleu`, `distinct_n`, `aggregate_probe_metrics`, `update_state`, `result` (and 6 more)
+
+*📁 File: `src/dl_techniques/metrics/llm_metrics.py`*
 
 ## Multi_Label_Metrics
 
@@ -68,6 +110,19 @@ Perplexity Metric Implementation for Language Modeling and Sequence Prediction T
 
 *📁 File: `src/dl_techniques/metrics/perplexity_metric.py`*
 
+## Primary_Output_Metrics
+
+### metrics.primary_output_metrics
+Primary Output Metrics
+
+**Classes:**
+- `PrimaryOutputAccuracy`
+- `PrimaryOutputTopKAccuracy`
+
+**Functions:** `update_state`, `result`, `reset_state`, `get_config`, `update_state` (and 3 more)
+
+*📁 File: `src/dl_techniques/metrics/primary_output_metrics.py`*
+
 ## Psnr_Metric
 
 ### metrics.psnr_metric
@@ -75,9 +130,34 @@ Perplexity Metric Implementation for Language Modeling and Sequence Prediction T
 **Classes:**
 - `PsnrMetric`
 
-**Functions:** `update_state`, `result`, `reset_state`
+**Functions:** `update_state`, `result`, `reset_state`, `get_config`
 
 *📁 File: `src/dl_techniques/metrics/psnr_metric.py`*
+
+## Sequence_Metrics
+
+### metrics.sequence_metrics
+Sequence Metrics
+
+**Classes:**
+- `SequenceAccuracy`
+- `BitErrorRate`
+
+**Functions:** `update_state`, `result`, `reset_state`, `get_config`, `update_state` (and 3 more)
+
+*📁 File: `src/dl_techniques/metrics/sequence_metrics.py`*
+
+## Ssim_Metric
+
+### metrics.ssim_metric
+SSIM Metric
+
+**Classes:**
+- `SsimMetric`
+
+**Functions:** `update_state`, `result`, `reset_state`, `get_config`
+
+*📁 File: `src/dl_techniques/metrics/ssim_metric.py`*
 
 ## Time_Series_Metrics
 
@@ -86,6 +166,6 @@ Perplexity Metric Implementation for Language Modeling and Sequence Prediction T
 **Classes:**
 - `SMAPE`
 
-**Functions:** `calculate_comprehensive_metrics`, `update_state`, `result`, `reset_state`
+**Functions:** `calculate_comprehensive_metrics`, `update_state`, `result`, `reset_state`, `get_config`
 
 *📁 File: `src/dl_techniques/metrics/time_series_metrics.py`*

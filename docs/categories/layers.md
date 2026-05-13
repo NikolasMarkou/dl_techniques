@@ -2,7 +2,7 @@
 
 Individual neural network layers and building blocks
 
-**252 modules in this category**
+**249 modules in this category**
 
 ## Activations
 
@@ -31,7 +31,7 @@ Swish activation function, used as a non-linear basis.
 **Classes:**
 
 - `BasisFunction` - Keras Layer
-  Basis function layer implementing the Swish activation: b(x) = x / (1 + e^(-x)).
+  Basis function layer implementing the Swish activation: ``b(x) = x / (1 + e^(-x))``.
   ```python
   BasisFunction(**kwargs)
   ```
@@ -56,7 +56,7 @@ A learnable, differentiable approximation of a step function.
 *📁 File: `src/dl_techniques/layers/activations/differentiable_step.py`*
 
 ### layers.activations.expanded_activations
-==========================================
+Expanded Gating Range Activation Functions.
 
 **Classes:**
 
@@ -73,7 +73,7 @@ A learnable, differentiable approximation of a step function.
 - `xSiLU`
 - `EluPlusOne`
 
-**Functions:** `elu_plus_one_plus_epsilon`, `get_activation`, `get_config`, `call`, `call` (and 6 more)
+**Functions:** `elu_plus_one_plus_epsilon`, `get_activation`, `compute_output_shape`, `get_config`, `call` (and 7 more)
 
 *📁 File: `src/dl_techniques/layers/activations/expanded_activations.py`*
 
@@ -120,7 +120,7 @@ HardSwish activation, a computationally efficient Swish variant.
 **Classes:**
 
 - `HardSwish` - Keras Layer
-  Hard-swish activation function for efficient mobile-optimized neural networks.
+  Hard-swish activation function for efficient mobile-optimized networks.
   ```python
   HardSwish(**kwargs)
   ```
@@ -181,12 +181,12 @@ Unified Probability Output Layer.
 *📁 File: `src/dl_techniques/layers/activations/probability_output.py`*
 
 ### layers.activations.relu_k
-A powered ReLU activation function, `f(x) = max(0, x)^k`.
+A powered ReLU activation function, ``f(x) = max(0, x)^k``.
 
 **Classes:**
 
 - `ReLUK` - Keras Layer
-  ReLU-k activation layer implementing f(x) = max(0, x)^k.
+  ReLU-k activation layer implementing ``f(x) = max(0, x)^k``.
   ```python
   ReLUK(k: int = 3, **kwargs)
   ```
@@ -201,13 +201,12 @@ Hierarchical routing tree for classification (deterministic or trainable).
 **Classes:**
 
 - `RoutingProbabilitiesLayer` - Keras Layer
-  Hierarchical routing layer supporting both `mode="deterministic"` (parameter-free
-  cosine basis) and `mode="trainable"` (learnable Dense projection).
+  Hierarchical routing layer for probabilistic classification.
   ```python
-  RoutingProbabilitiesLayer(output_dim: Optional[int] = None, axis: int = -1, epsilon: float = 1e-07, mode: str = "deterministic", ...)
+  RoutingProbabilitiesLayer(output_dim: Optional[int] = None, axis: int = -1, epsilon: float = 1e-07, ...)
   ```
 
-**Functions:** `build`, `call`, `compute_output_shape`, `get_config`
+**Functions:** `build`, `call`, `compute_output_shape`, `compute_output_spec`, `get_build_config` (and 2 more)
 
 *📁 File: `src/dl_techniques/layers/activations/routing_probabilities.py`*
 
@@ -232,7 +231,7 @@ Vector squashing non-linearity for Capsule Networks.
 **Classes:**
 
 - `SquashLayer` - Keras Layer
-  Applies squashing non-linearity to vectors (capsules).
+  Squashing non-linearity for Capsule Network vectors.
   ```python
   SquashLayer(axis: int = -1, epsilon: Optional[float] = None, **kwargs)
   ```
@@ -256,6 +255,23 @@ A sparse softmax variant using differentiable confidence thresholding.
 
 *📁 File: `src/dl_techniques/layers/activations/thresh_max.py`*
 
+## Adaln_Zero
+
+### layers.adaln_zero
+AdaLN-zero Conditional Transformer Block.
+
+**Classes:**
+
+- `AdaLNZeroConditionalBlock` - Keras Layer
+  Transformer block with AdaLN-zero conditioning and causal self-attention.
+  ```python
+  AdaLNZeroConditionalBlock(dim: int, num_heads: int, dim_head: int, ...)
+  ```
+
+**Functions:** `build`, `call`, `compute_output_shape`, `get_config`
+
+*📁 File: `src/dl_techniques/layers/adaln_zero.py`*
+
 ## Anchor_Generator
 
 ### layers.anchor_generator
@@ -264,7 +280,7 @@ Generate a multi-scale grid of anchor points for object detection.
 **Classes:**
 
 - `AnchorGenerator` - Keras Layer
-  Anchor generator layer for YOLOv12 object detection.
+  Anchor generator layer for multi-scale object detection.
   ```python
   AnchorGenerator(input_image_shape: Tuple[int, int], strides_config: Optional[List[int]] = None, **kwargs)
   ```
@@ -296,7 +312,7 @@ A hierarchical, memory-efficient anchor-based attention layer.
 *📁 File: `src/dl_techniques/layers/attention/anchor_attention.py`*
 
 ### layers.attention.capsule_routing_attention
-Capsule-based dynamic routing mechanism.
+Capsule-based dynamic routing mechanism for attention.
 
 **Classes:**
 
@@ -316,7 +332,7 @@ Channel-wise attention weights for convolutional feature maps.
 **Classes:**
 
 - `ChannelAttention` - Keras Layer
-  Channel attention module of CBAM (Convolutional Block Attention Module).
+  Channel attention module from CBAM that learns per-channel importance weights.
   ```python
   ChannelAttention(channels: int, ratio: int = 8, kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform', ...)
   ```
@@ -331,7 +347,7 @@ Convolutional Block Attention Module (CBAM), a lightweight and
 **Classes:**
 
 - `CBAM` - Keras Layer
-  Convolutional Block Attention Module for feature refinement.
+  Convolutional Block Attention Module for sequential channel-spatial feature refinement.
   ```python
   CBAM(channels: int, ratio: int = 8, kernel_size: int = 7, ...)
   ```
@@ -341,7 +357,7 @@ Convolutional Block Attention Module (CBAM), a lightweight and
 *📁 File: `src/dl_techniques/layers/attention/convolutional_block_attention.py`*
 
 ### layers.attention.differential_attention
-Differential Multi-Head Attention Implementation
+Differential Multi-Head Attention Implementation.
 
 **Classes:**
 
@@ -368,7 +384,7 @@ Mix tokens using a parameter-free 2D Discrete Fourier Transform.
 **Classes:**
 
 - `FNetFourierTransform` - Keras Layer
-  FNet Fourier Transform layer that replaces self-attention with parameter-free mixing.
+  Parameter-free token mixing via 2D Discrete Fourier Transform.
   ```python
   FNetFourierTransform(implementation: Literal['matrix', 'fft'] = 'matrix', normalize_dft: bool = True, epsilon: float = 1e-12, ...)
   ```
@@ -383,7 +399,7 @@ A gated multi-head attention with rotary position embeddings.
 **Classes:**
 
 - `GatedAttention` - Keras Layer
-  Gated Attention layer with normalization, partial RoPE, and output gating.
+  Gated multi-head attention with Zero-Centered RMSNorm, partial RoPE, and sigmoid output gating.
   ```python
   GatedAttention(dim: int, num_heads: int, head_dim: Optional[int] = None, ...)
   ```
@@ -393,7 +409,7 @@ A gated multi-head attention with rotary position embeddings.
 *📁 File: `src/dl_techniques/layers/attention/gated_attention.py`*
 
 ### layers.attention.group_query_attention
-Grouped Query Attention (GQA) Implementation with Rotary Position Embeddings
+Grouped Query Attention (GQA) Implementation with Rotary Position Embeddings.
 
 **Classes:**
 
@@ -413,7 +429,7 @@ Modern Hopfield Network Layer with Iterative Updates.
 **Classes:**
 
 - `HopfieldAttention` - Keras Layer
-  Modern Hopfield layer implementation as described in 'Hopfield Networks is All You Need'.
+  Modern Hopfield Network with iterative attention-based pattern retrieval.
   ```python
   HopfieldAttention(num_heads: int, key_dim: int, value_dim: Optional[int] = None, ...)
   ```
@@ -448,7 +464,7 @@ Pairwise relationships between elements in a sequence.
 *📁 File: `src/dl_techniques/layers/attention/multi_head_attention.py`*
 
 ### layers.attention.multi_head_cross_attention
-A unified multi-head attention with adaptive temperature and optional hierarchical routing
+A unified multi-head attention with adaptive temperature and optional hierarchical routing.
 
 **Classes:**
 
@@ -458,7 +474,7 @@ A unified multi-head attention with adaptive temperature and optional hierarchic
   MultiHeadCrossAttention(dim: int, num_heads: int = 8, dropout_rate: float = 0.0, ...)
   ```
 
-**Functions:** `build`, `call`, `compute_output_shape`, `get_config`
+**Functions:** `build`, `call`, `compute_output_shape`, `get_build_config`, `build_from_config` (and 1 more)
 
 *📁 File: `src/dl_techniques/layers/attention/multi_head_cross_attention.py`*
 
@@ -478,12 +494,12 @@ Multi-Head Latent Attention (MLA) Layer.
 *📁 File: `src/dl_techniques/layers/attention/multi_head_latent_attention.py`*
 
 ### layers.attention.non_local_attention
-A self-attention mechanism for computer vision_heads tasks,
+A self-attention mechanism for computer vision tasks,
 
 **Classes:**
 
 - `NonLocalAttention` - Keras Layer
-  Non-local Self Attention Layer for computer vision_heads tasks.
+  Non-local self-attention layer for capturing long-range spatial dependencies.
   ```python
   NonLocalAttention(attention_channels: int, kernel_size: Union[int, Tuple[int, int]] = (7, 7), use_bias: bool = False, ...)
   ```
@@ -498,7 +514,7 @@ Asymmetric cross-attention from the Perceiver architecture.
 **Classes:**
 
 - `PerceiverAttention` - Keras Layer
-  Cross-attention mechanism from the Perceiver architecture with robust serialization.
+  Perceiver-style asymmetric cross-attention with shared projection interface.
   ```python
   PerceiverAttention(dim: int, num_heads: int = 8, dropout_rate: float = 0.0, ...)
   ```
@@ -513,7 +529,7 @@ Approximates softmax attention with linear complexity using random features.
 **Classes:**
 
 - `PerformerAttention` - Keras Layer
-  Performer attention layer with linear complexity via FAVOR+ approximation.
+  Performer attention with linear complexity via FAVOR+ kernel approximation.
   ```python
   PerformerAttention(dim: int, num_heads: int = 8, nb_features: int = 256, ...)
   ```
@@ -528,7 +544,7 @@ Progressive Focused Attention (PFA) Module for PFT-SR.
 **Classes:**
 
 - `ProgressiveFocusedAttention` - Keras Layer
-  Progressive Focused Attention mechanism with windowed self-attention.
+  Windowed self-attention with progressive focusing from previous layers.
   ```python
   ProgressiveFocusedAttention(dim: int, num_heads: int, window_size: int = 8, ...)
   ```
@@ -543,7 +559,7 @@ Exact attention for long sequences via blockwise processing.
 **Classes:**
 
 - `RingAttention` - Keras Layer
-  Ring Attention layer with blockwise processing for extremely long sequences.
+  Ring Attention with blockwise processing for extremely long sequences.
   ```python
   RingAttention(dim: int, num_heads: int = 8, block_size: int = 512, ...)
   ```
@@ -558,7 +574,7 @@ A robust attention mechanism via Principal Component Pursuit.
 **Classes:**
 
 - `RPCAttention` - Keras Layer
-  Robust Principal Components Attention layer.
+  Robust Principal Components Attention via PCP decomposition.
   ```python
   RPCAttention(dim: int, num_heads: int = 8, lambda_sparse: float = 0.1, ...)
   ```
@@ -573,7 +589,7 @@ A parameter-efficient, bidirectional cross-attention mechanism.
 **Classes:**
 
 - `SharedWeightsCrossAttention` - Keras Layer
-  Cross-attention between different modalities with shared weights.
+  Bidirectional cross-attention between modalities with shared QKV projections.
   ```python
   SharedWeightsCrossAttention(dim: int, num_heads: int = 8, dropout_rate: float = 0.0, ...)
   ```
@@ -602,7 +618,7 @@ A spatial attention map for convolutional feature maps.
 **Classes:**
 
 - `SpatialAttention` - Keras Layer
-  Spatial attention module of CBAM (Convolutional Block Attention Module).
+  Spatial attention module from CBAM that identifies informative spatial regions.
   ```python
   SpatialAttention(kernel_size: int = 7, kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform', kernel_regularizer: Optional[keras.regularizers.Regularizer] = None, ...)
   ```
@@ -617,7 +633,7 @@ TripSE: Triplet Squeeze and Excitation Attention Block.
 **Classes:**
 
 - `TripletAttentionBranch` - Keras Layer
-  Single branch of Triplet Attention mechanism.
+  Single branch of the Triplet Attention mechanism.
   ```python
   TripletAttentionBranch(kernel_size: int = 7, permute_pattern: Tuple[int, int, int] = (0, 1, 2), use_bias: bool = False, ...)
   ```
@@ -650,6 +666,21 @@ TripSE: Triplet Squeeze and Excitation Attention Block.
 
 *📁 File: `src/dl_techniques/layers/attention/tripse_attention.py`*
 
+### layers.attention.wave_field_attention
+Wave Field Attention - Keras 3 Implementation (V3.6)
+
+**Classes:**
+
+- `WaveFieldAttention` - Keras Layer
+  Multi-head wave-field attention via FFT-based damped-wave convolution.
+  ```python
+  WaveFieldAttention(dim: int, num_heads: int = 8, field_size: int = 512, ...)
+  ```
+
+**Functions:** `get_config`, `build`, `call`, `compute_output_shape`, `get_config`
+
+*📁 File: `src/dl_techniques/layers/attention/wave_field_attention.py`*
+
 ### layers.attention.window_attention
 Unified windowed multi-head self-attention for sequence processing.
 
@@ -668,18 +699,18 @@ Unified windowed multi-head self-attention for sequence processing.
 ## Bias_Free_Conv1D
 
 ### layers.bias_free_conv1d
-Bias-Free 1D Convolutional Layer
+Bias-free 1D convolutional building block for scaling-invariant networks.
 
 **Classes:**
 
 - `BiasFreeConv1D` - Keras Layer
-  Bias-free 1D convolutional layer with batch normalization and activation.
+  Bias-free 1D convolutional layer with optional batch normalization and activation.
   ```python
   BiasFreeConv1D(filters: int, kernel_size: int = 3, activation: Union[str, callable] = 'relu', ...)
   ```
 
 - `BiasFreeResidualBlock1D` - Keras Layer
-  Bias-free residual block for ResNet-style architecture with 1D convolutions.
+  Bias-free residual block for 1D convolutions with skip connections.
   ```python
   BiasFreeResidualBlock1D(filters: int, kernel_size: int = 3, activation: Union[str, callable] = 'relu', ...)
   ```
@@ -691,18 +722,18 @@ Bias-Free 1D Convolutional Layer
 ## Bias_Free_Conv2D
 
 ### layers.bias_free_conv2d
-Bias-Free 2D Convolutional Layer
+Bias-free 2D convolutional building block for scaling-invariant networks.
 
 **Classes:**
 
 - `BiasFreeConv2D` - Keras Layer
-  Bias-free 2D convolutional layer with batch normalization and activation.
+  Bias-free 2D convolutional layer with optional batch normalization and activation.
   ```python
   BiasFreeConv2D(filters: int, kernel_size: Union[int, Tuple[int, int]] = 3, activation: Union[str, callable] = 'relu', ...)
   ```
 
 - `BiasFreeResidualBlock` - Keras Layer
-  Bias-free residual block for ResNet-style architecture with 2D convolutions.
+  Bias-free residual block for 2D convolutions with skip connections.
   ```python
   BiasFreeResidualBlock(filters: int, kernel_size: Union[int, Tuple[int, int]] = 3, activation: Union[str, callable] = 'relu', ...)
   ```
@@ -777,7 +808,7 @@ Byte Latent Transformer (BLT) Core Layer Components
   LocalDecoder(vocab_size: int = 260, local_dim: int = 512, global_dim: int = 768, ...)
   ```
 
-**Functions:** `text_to_bytes`, `tokens_to_text`, `get_config`, `build`, `call` (and 23 more)
+**Functions:** `text_to_bytes`, `tokens_to_text`, `compute_output_shape`, `get_config`, `build` (and 24 more)
 
 *📁 File: `src/dl_techniques/layers/blt_blocks.py`*
 
@@ -798,6 +829,23 @@ Fuse entropy-based byte processing with iterative hierarchical reasoning.
 
 *📁 File: `src/dl_techniques/layers/blt_core.py`*
 
+## Blur_Pool
+
+### layers.blur_pool
+2D anti-aliased downsampling via a fixed binomial blur (BlurPool).
+
+**Classes:**
+
+- `BlurPool2D` - Keras Layer
+  Anti-aliased depthwise downsampling with a fixed binomial blur.
+  ```python
+  BlurPool2D(strides: int = 2, padding: str = 'same', **kwargs)
+  ```
+
+**Functions:** `build`, `call`, `compute_output_shape`, `get_config`
+
+*📁 File: `src/dl_techniques/layers/blur_pool.py`*
+
 ## Canny
 
 ### layers.canny
@@ -805,7 +853,7 @@ Fuse entropy-based byte processing with iterative hierarchical reasoning.
 **Classes:**
 
 - `Canny` - Keras Layer
-  Keras implementation of the Canny edge detection algorithm.
+  Multi-stage Canny edge detection layer for single-channel images.
   ```python
   Canny(sigma: float = 0.8, threshold_min: int = 50, threshold_max: int = 80, ...)
   ```
@@ -822,19 +870,19 @@ Fuse entropy-based byte processing with iterative hierarchical reasoning.
 **Classes:**
 
 - `PrimaryCapsule` - Keras Layer
-  Primary Capsule Layer implementation.
+  Primary capsule layer that converts CNN features into capsule vectors.
   ```python
   PrimaryCapsule(num_capsules: int, dim_capsules: int, kernel_size: Union[int, Tuple[int, int]], ...)
   ```
 
 - `RoutingCapsule` - Keras Layer
-  Capsule layer with dynamic routing between capsules.
+  Capsule layer with iterative dynamic routing between capsules.
   ```python
   RoutingCapsule(num_capsules: int, dim_capsules: int, routing_iterations: int = 3, ...)
   ```
 
 - `CapsuleBlock` - Keras Layer
-  A complete capsule block with optional dropout and normalization.
+  Complete capsule block combining dynamic routing with optional regularization.
   ```python
   CapsuleBlock(num_capsules: int, dim_capsules: int, routing_iterations: int = 3, ...)
   ```
@@ -842,6 +890,29 @@ Fuse entropy-based byte processing with iterative hierarchical reasoning.
 **Functions:** `build`, `call`, `compute_output_shape`, `get_config`, `build` (and 7 more)
 
 *📁 File: `src/dl_techniques/layers/capsules.py`*
+
+## Capsules_V2
+
+### layers.capsules_v2
+Capsule layers V2 — single-step attention routing with decoupled length & probability.
+
+**Classes:**
+
+- `AttentionRoutingCapsule` - Keras Layer
+  Single-step attention-routing capsule layer.
+  ```python
+  AttentionRoutingCapsule(num_capsules: int, dim_capsules: int, softmax_axis: Literal['output', 'input'] = 'output', ...)
+  ```
+
+- `CapsuleBlockV2` - Keras Layer
+  Capsule block built on :class:`AttentionRoutingCapsule`.
+  ```python
+  CapsuleBlockV2(num_capsules: int, dim_capsules: int, dropout_rate: float = 0.0, ...)
+  ```
+
+**Functions:** `build`, `call`, `compute_output_shape`, `get_config`, `build` (and 3 more)
+
+*📁 File: `src/dl_techniques/layers/capsules_v2.py`*
 
 ## Clahe
 
@@ -851,7 +922,7 @@ local image contrast using a trainable CLAHE algorithm.
 **Classes:**
 
 - `CLAHE` - Keras Layer
-  Contrast Limited Adaptive Histogram Equalization (CLAHE) layer.
+  Trainable Contrast Limited Adaptive Histogram Equalization layer.
   ```python
   CLAHE(clip_limit: float = 4.0, n_bins: int = 256, tile_size: int = 16, ...)
   ```
@@ -921,7 +992,7 @@ Selectively route tensors for conditional training or data imputation.
 **Classes:**
 
 - `ConditionalOutputLayer` - Keras Layer
-  A custom layer for conditional output selection based on ground truth values.
+  Batch-wise conditional tensor selector for semi-supervised training.
   ```python
   ConditionalOutputLayer(**kwargs)
   ```
@@ -950,7 +1021,7 @@ ConvNext Block Implementation
 **Classes:**
 
 - `ConvNextV1Block` - Keras Layer
-  Implementation of ConvNext block with modern best practices.
+  ConvNeXt V1 block with depthwise convolution and inverted bottleneck MLP.
   ```python
   ConvNextV1Block(kernel_size: Union[int, Tuple[int, int]], filters: int, activation: Union[str, keras.layers.Activation] = 'gelu', ...)
   ```
@@ -967,7 +1038,7 @@ ConvNextV2 Block Implementation
 **Classes:**
 
 - `ConvNextV2Block` - Keras Layer
-  Implementation of ConvNextV2 block with modern best practices.
+  ConvNeXt V2 block with Global Response Normalization.
   ```python
   ConvNextV2Block(kernel_size: Union[int, Tuple[int, int]], filters: int, activation: Union[str, keras.layers.Activation] = 'gelu', ...)
   ```
@@ -1002,7 +1073,7 @@ Convolutional Kolmogorov-Arnold Networks Implementation
 ## Depthwise_Separable_Block
 
 ### layers.depthwise_separable_block
-Depthwise separable convolution block, a core of MobileNet.
+Depthwise separable convolution block, a core building block of MobileNet.
 
 **Classes:**
 
@@ -1019,7 +1090,7 @@ Depthwise separable convolution block, a core of MobileNet.
 ## Downsample
 
 ### layers.downsample
-Downsampling Module for Neural Networks.
+Downsampling module for neural networks.
 
 **Functions:** `downsample`
 
@@ -1033,7 +1104,7 @@ Downsampling Module for Neural Networks.
 **Classes:**
 
 - `DynamicConv2D` - Keras Layer
-  Dynamic 2D Convolution with Attention over Convolution Kernels.
+  Dynamic 2D Convolution with attention over convolution kernels.
   ```python
   DynamicConv2D(filters: int, kernel_size: Union[int, Tuple[int, int]], num_kernels: int = 4, ...)
   ```
@@ -1048,13 +1119,28 @@ Downsampling Module for Neural Networks.
 
 *📁 File: `src/dl_techniques/layers/embedding/__init__.py`*
 
+### layers.embedding.albert_factorized_embedding
+ALBERT-style factorized token embedding.
+
+**Classes:**
+
+- `AlbertFactorizedEmbedding` - Keras Layer
+  Factorized token embedding via a learnable bottleneck projection.
+  ```python
+  AlbertFactorizedEmbedding(vocab_size: int, bottleneck_dim: int, output_dim: int, ...)
+  ```
+
+**Functions:** `build`, `call`, `compute_output_shape`, `get_config`, `from_config`
+
+*📁 File: `src/dl_techniques/layers/embedding/albert_factorized_embedding.py`*
+
 ### layers.embedding.bert_embeddings
 Construct the composite input embeddings for BERT-style models.
 
 **Classes:**
 
 - `BertEmbeddings` - Keras Layer
-  BERT embeddings layer combining word, position, and token type embeddings.
+  BERT embedding layer combining word, position, and token type embeddings.
   ```python
   BertEmbeddings(vocab_size: int, hidden_size: int, max_position_embeddings: int, ...)
   ```
@@ -1069,7 +1155,7 @@ Continuous, multi-dimensional rotary position embeddings (RoPE).
 **Classes:**
 
 - `ContinuousRoPE` - Keras Layer
-  Continuous Rotary Position Embedding for variable positions.
+  Continuous multi-dimensional Rotary Position Embedding for spatial data.
   ```python
   ContinuousRoPE(dim: int, ndim: int, max_wavelength: float = 10000.0, ...)
   ```
@@ -1084,7 +1170,7 @@ Generates continuous, multi-dimensional positional embeddings using sinusoids.
 **Classes:**
 
 - `ContinuousSinCosEmbed` - Keras Layer
-  Continuous coordinate embedding using sine and cosine functions.
+  Continuous sinusoidal coordinate embedding for multi-dimensional positions.
   ```python
   ContinuousSinCosEmbed(dim: int, ndim: int, max_wavelength: float = 10000.0, ...)
   ```
@@ -1099,7 +1185,7 @@ A dual-configuration Rotary Position Embedding (RoPE).
 **Classes:**
 
 - `DualRotaryPositionEmbedding` - Keras Layer
-  Dual Rotary Position Embedding layer for Gemma3-style attention mechanisms.
+  Dual-frequency Rotary Position Embedding for hybrid attention architectures.
   ```python
   DualRotaryPositionEmbedding(head_dim: int, max_seq_len: int, global_theta_base: float = 1000000.0, ...)
   ```
@@ -1115,17 +1201,32 @@ Embedding Layer Factory for dl_techniques Framework
 
 *📁 File: `src/dl_techniques/layers/embedding/factory.py`*
 
+### layers.embedding.hierarchical_codebook_embedding
+Hierarchical Codebook Embedding (HCE).
+
+**Classes:**
+
+- `HierarchicalCodebookEmbedding` - Keras Layer
+  Additive multi-codebook embedding for parameter-efficient token lookup.
+  ```python
+  HierarchicalCodebookEmbedding(vocab_size: int, output_dim: int, num_chunks: int = 2, ...)
+  ```
+
+**Functions:** `build`, `call`, `compute_output_shape`, `get_config`, `from_config`
+
+*📁 File: `src/dl_techniques/layers/embedding/hierarchical_codebook_embedding.py`*
+
 ### layers.embedding.modern_bert_embeddings
 
 **Classes:**
 
 - `ModernBertEmbeddings` - Keras Layer
-  Computes embeddings for ModernBERT from token and type IDs.
+  ModernBERT embedding layer combining word and token type embeddings.
   ```python
   ModernBertEmbeddings(vocab_size: int, hidden_size: int, type_vocab_size: int, ...)
   ```
 
-**Functions:** `build`, `call`, `get_config`
+**Functions:** `build`, `call`, `compute_output_shape`, `get_config`
 
 *📁 File: `src/dl_techniques/layers/embedding/modern_bert_embeddings.py`*
 
@@ -1135,13 +1236,13 @@ Convert a 2D image into a sequence of flattened patch embeddings.
 **Classes:**
 
 - `PatchEmbedding2D` - Keras Layer
-  2D Image to Patch Embedding Layer.
+  2D image to patch embedding layer for Vision Transformers.
   ```python
   PatchEmbedding2D(patch_size: Union[int, Tuple[int, int]], embed_dim: int, kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_normal', ...)
   ```
 
 - `PatchEmbedding1D` - Keras Layer
-  Patch embedding layer for time series data.
+  1D patch embedding layer for time series data.
   ```python
   PatchEmbedding1D(patch_size: int, embed_dim: int, stride: Optional[int] = None, ...)
   ```
@@ -1156,7 +1257,7 @@ Inject positional information into a sequence using learnable embeddings.
 **Classes:**
 
 - `PositionalEmbedding` - Keras Layer
-  Learned positional embedding layer with enhanced stability.
+  Learned absolute positional embedding layer with dropout regularization.
   ```python
   PositionalEmbedding(max_seq_len: int, dim: int, dropout_rate: float = 0.0, ...)
   ```
@@ -1171,7 +1272,7 @@ Generate 2D sinusoidal positional encodings for image-like inputs.
 **Classes:**
 
 - `PositionEmbeddingSine2D` - Keras Layer
-  Generates 2D sinusoidal positional encodings for image-like feature maps.
+  Fixed 2D sinusoidal positional encoding for image-like feature maps.
   ```python
   PositionEmbeddingSine2D(num_pos_feats: int = 64, temperature: float = 10000.0, normalize: bool = True, ...)
   ```
@@ -1186,7 +1287,7 @@ Applies rotary embeddings to inject relative positional information.
 **Classes:**
 
 - `RotaryPositionEmbedding` - Keras Layer
-  Rotary Position Embedding layer for transformer attention mechanisms.
+  Rotary Position Embedding (RoPE) layer for transformer attention.
   ```python
   RotaryPositionEmbedding(head_dim: int, max_seq_len: int, rope_theta: float = 10000.0, ...)
   ```
@@ -1282,39 +1383,6 @@ Contextual Memory Bank Implementation for Keras 3.x
 
 *📁 File: `src/dl_techniques/layers/experimental/contextual_memory.py`*
 
-### layers.experimental.field_embeddings
-Holonomic Field Embeddings - Geometric Safety Through Lie Group Theory.
-
-**Classes:**
-
-- `LieGroupEmbedding` - Keras Layer
-  Maps token IDs to rotation matrices in SO(n) using Lie algebra exponential map.
-  ```python
-  LieGroupEmbedding(vocab_size: int, embed_dim: int, use_expm: bool = True, ...)
-  ```
-
-- `HolonomicPathIntegrator` - Keras Layer
-  Computes the path-ordered integral of rotation matrices along a sequence.
-  ```python
-  HolonomicPathIntegrator(return_sequences: bool = True, name: Optional[str] = None, **kwargs)
-  ```
-
-- `ManifoldStressMonitor` - Keras Layer
-  Measures geometric "stress" in semantic trajectories for anomaly detection.
-  ```python
-  ManifoldStressMonitor(aggregation: str = 'mean', epsilon: float = 1e-08, name: Optional[str] = None, ...)
-  ```
-
-- `HolonomicFieldProjection` - Keras Layer
-  Projects final rotation matrix state to a feature vector for downstream tasks.
-  ```python
-  HolonomicFieldProjection(projection_type: str = 'reference', reference_vector: Optional[Union[List[float], np.ndarray]] = None, name: Optional[str] = None, ...)
-  ```
-
-**Functions:** `build_holonomic_field_model`, `verify_rotation_matrix`, `visualize_stress_trajectory`, `build`, `call` (and 14 more)
-
-*📁 File: `src/dl_techniques/layers/experimental/field_embeddings.py`*
-
 ### layers.experimental.graph_mann
 
 **Classes:**
@@ -1405,7 +1473,7 @@ A Feed-Forward Network that learns to count features in a sequence.
 **Classes:**
 
 - `CountingFFN` - Keras Layer
-  A Feed-Forward Network that learns to count events in a sequence.
+  Feed-Forward Network that learns to count events in a sequence.
   ```python
   CountingFFN(output_dim: int, count_dim: int, counting_scope: Literal['global', 'local', 'causal'] = 'local', ...)
   ```
@@ -1420,7 +1488,7 @@ A dual-pathway feed-forward network for differential processing.
 **Classes:**
 
 - `DifferentialFFN` - Keras Layer
-  Differential Feed-Forward Network layer implementing dual-pathway processing.
+  Differential Feed-Forward Network with dual-pathway processing.
   ```python
   DifferentialFFN(hidden_dim: int, output_dim: int, branch_activation: Union[str, Callable[[keras.KerasTensor], keras.KerasTensor]] = 'gelu', ...)
   ```
@@ -1442,7 +1510,7 @@ A spatially-gated MLP block as an alternative to self-attention.
 **Classes:**
 
 - `GatedMLP` - Keras Layer
-  A Gated MLP layer implementation using 1x1 convolutions.
+  Gated MLP layer using 1x1 convolutions for spatial data.
   ```python
   GatedMLP(filters: int, use_bias: bool = True, kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform', ...)
   ```
@@ -1472,7 +1540,7 @@ A Gated Linear Unit feed-forward network.
 **Classes:**
 
 - `GLUFFN` - Keras Layer
-  Gated Linear Unit Feed Forward Network as described in "GLU Variants Improve Transformer".
+  Gated Linear Unit Feed-Forward Network.
   ```python
   GLUFFN(hidden_dim: int, output_dim: int, activation: Union[str, Callable[[keras.KerasTensor], keras.KerasTensor]] = 'swish', ...)
   ```
@@ -1480,6 +1548,21 @@ A Gated Linear Unit feed-forward network.
 **Functions:** `build`, `call`, `compute_output_shape`, `get_config`
 
 *📁 File: `src/dl_techniques/layers/ffn/glu_ffn.py`*
+
+### layers.ffn.kan_linear
+Kolmogorov-Arnold Network (KAN) linear layer.
+
+**Classes:**
+
+- `KANLinear` - Keras Layer
+  Kolmogorov-Arnold Network (KAN) linear layer with learnable activation functions.
+  ```python
+  KANLinear(features: int, grid_size: int = 5, spline_order: int = 3, ...)
+  ```
+
+**Functions:** `build`, `call`, `update_grid_from_samples`, `compute_output_shape`, `get_config`
+
+*📁 File: `src/dl_techniques/layers/ffn/kan_linear.py`*
 
 ### layers.ffn.logic_ffn
 A feed-forward network that performs soft logical reasoning.
@@ -1586,6 +1669,21 @@ The MLP block from the Swin Transformer architecture.
 
 *📁 File: `src/dl_techniques/layers/ffn/swin_mlp.py`*
 
+### layers.ffn.tversky_projection
+A projection layer based on Tversky's contrast model of similarity.
+
+**Classes:**
+
+- `TverskyProjectionLayer` - Keras Layer
+  Projection layer based on a differentiable Tversky similarity model.
+  ```python
+  TverskyProjectionLayer(units: int, num_features: int, intersection_reduction: Literal['product', 'min', 'mean'] = 'product', ...)
+  ```
+
+**Functions:** `build`, `call`, `compute_output_shape`, `get_config`
+
+*📁 File: `src/dl_techniques/layers/ffn/tversky_projection.py`*
+
 ## Fft_Layers
 
 ### layers.fft_layers
@@ -1593,13 +1691,13 @@ The MLP block from the Swin Transformer architecture.
 **Classes:**
 
 - `FFTLayer` - Keras Layer
-  Applies 2D Fast Fourier Transform and outputs concatenated real/imag parts.
+  Apply 2D Fast Fourier Transform and output concatenated real/imaginary parts.
   ```python
   FFTLayer(**kwargs)
   ```
 
 - `IFFTLayer` - Keras Layer
-  Applies 2D Inverse FFT to concatenated real/imag parts.
+  Apply 2D Inverse FFT to concatenated real/imaginary parts.
   ```python
   IFFTLayer(**kwargs)
   ```
@@ -1611,7 +1709,7 @@ The MLP block from the Swin Transformer architecture.
 ## Film
 
 ### layers.film
-Feature-wise Linear Modulation (FiLM) Layer
+Feature-wise Linear Modulation (FiLM) Layer.
 
 **Classes:**
 
@@ -1633,7 +1731,7 @@ An FNet block using Fourier Transforms for token mixing.
 **Classes:**
 
 - `FNetEncoderBlock` - Keras Layer
-  Complete FNet encoder block with Fourier mixing and feed-forward components using factory patterns.
+  Complete FNet encoder block with Fourier mixing and feed-forward components.
   ```python
   FNetEncoderBlock(intermediate_dim: Optional[int] = None, dropout_rate: float = 0.1, fourier_config: Optional[Dict[str, Any]] = None, ...)
   ```
@@ -1688,7 +1786,7 @@ A Gated Delta Network, a linear-time transformer variant.
 **Classes:**
 
 - `GatedDeltaNet` - Keras Layer
-  Gated DeltaNet layer combining delta rule updates with adaptive gating mechanism.
+  Gated DeltaNet layer combining delta rule updates with adaptive gating.
   ```python
   GatedDeltaNet(dim: int, num_heads: int, max_seq_len: int, ...)
   ```
@@ -1705,7 +1803,7 @@ A Gated Delta Network, a linear-time transformer variant.
 **Classes:**
 
 - `GaussianFilter` - Keras Layer
-  Applies Gaussian blur filter to input images.
+  Apply Gaussian blur filter to input images via depthwise convolution.
   ```python
   GaussianFilter(kernel_size: Tuple[int, int] = (5, 5), strides: Union[Tuple[int, int], List[int]] = (1, 1), sigma: Union[float, Tuple[float, float]] = -1, ...)
   ```
@@ -1737,141 +1835,74 @@ Construct a multi-scale Gaussian pyramid representation of an image.
 
 *📁 File: `src/dl_techniques/layers/geometric/__init__.py`*
 
-### layers.geometric.fields
-Holonomic Field Layers for Deep Learning.
-
-**Functions:** `validate_field_config`, `create_field_layer`, `create_field_layer_from_config`, `get_field_layer_info`
-
-*📁 File: `src/dl_techniques/layers/geometric/fields/__init__.py`*
-
-### layers.geometric.fields.connection_layer
-Connection Layer.
+### layers.geometric.clifford_block
+CliffordNet block and constituent primitives.
 
 **Classes:**
 
-- `ConnectionLayer` - Keras Layer
-  Computes the gauge connection from field representations.
+- `SparseRollingGeometricProduct` - Keras Layer
+  Sparse rolling realisation of the Clifford geometric product.
   ```python
-  ConnectionLayer(hidden_dim: int, connection_dim: Optional[int] = None, connection_type: ConnectionType = 'yang_mills', ...)
+  SparseRollingGeometricProduct(channels: int, shifts: List[int], cli_mode: CliMode = 'full', ...)
   ```
 
-**Functions:** `build`, `call`, `compute_output_shape`, `get_config`
-
-*📁 File: `src/dl_techniques/layers/geometric/fields/connection_layer.py`*
-
-### layers.geometric.fields.field_embedding
-Field Embedding Layer.
-
-**Classes:**
-
-- `FieldEmbedding` - Keras Layer
-  Field Embedding layer that maps tokens to fields with curvature.
+- `GatedGeometricResidual` - Keras Layer
+  Gated Geometric Residual (GGR) update.
   ```python
-  FieldEmbedding(vocab_size: int, embed_dim: int, curvature_dim: Optional[int] = None, ...)
+  GatedGeometricResidual(channels: int, layer_scale_init: float = 1e-05, drop_path_rate: float = 0.0, ...)
   ```
 
-**Functions:** `build`, `call`, `compute_output_shape`, `get_config`
-
-*📁 File: `src/dl_techniques/layers/geometric/fields/field_embedding.py`*
-
-### layers.geometric.fields.gauge_invariant_attention
-Gauge-Invariant Attention Layer.
-
-**Classes:**
-
-- `GaugeInvariantAttention` - Keras Layer
-  Attention mechanism that respects gauge invariance.
+- `CliffordNetBlock` - Keras Layer
+  Full isotropic CliffordNet block (no FFN).
   ```python
-  GaugeInvariantAttention(hidden_dim: int, num_heads: int = 8, key_dim: Optional[int] = None, ...)
+  CliffordNetBlock(channels: int, shifts: List[int], cli_mode: CliMode = 'full', ...)
   ```
 
-**Functions:** `build`, `call`, `compute_output_shape`, `get_config`
-
-*📁 File: `src/dl_techniques/layers/geometric/fields/gauge_invariant_attention.py`*
-
-### layers.geometric.fields.holonomic_transformer
-Holonomic Transformer Layer.
-
-**Classes:**
-
-- `FieldNormalization` - Keras Layer
-  Field-aware normalization that respects curvature.
+- `CausalCliffordNetBlock` - Keras Layer
+  CliffordNetBlock variant with causal (left-only) padded convolutions.
   ```python
-  FieldNormalization(epsilon: float = 1e-06, use_curvature_scaling: bool = True, center: bool = True, ...)
+  CausalCliffordNetBlock(channels: int, shifts: List[int], cli_mode: CliMode = 'full', ...)
   ```
 
-- `HolonomicTransformerLayer` - Keras Layer
-  Complete Holonomic Transformer Layer.
+- `CliffordNetBlockDS` - Keras Layer
+  CliffordNetBlock variant with single 7x7 depthwise context conv and
   ```python
-  HolonomicTransformerLayer(hidden_dim: int, num_heads: int = 8, ffn_dim: Optional[int] = None, ...)
+  CliffordNetBlockDS(channels: int, shifts: List[int], cli_mode: CliMode = 'full', ...)
   ```
 
-**Functions:** `build`, `call`, `get_config`, `build`, `call` (and 2 more)
-
-*📁 File: `src/dl_techniques/layers/geometric/fields/holonomic_transformer.py`*
-
-### layers.geometric.fields.holonomy_layer
-Holonomy Layer
-
-**Classes:**
-
-- `HolonomyLayer` - Keras Layer
-  Computes holonomy (path-ordered exponential around loops).
+- `CliffordNetBlockDSv2` - Keras Layer
+  Design-space sibling of :class:`CliffordNetBlockDS` for the
   ```python
-  HolonomyLayer(hidden_dim: int, loop_sizes: List[int] = [2, 4, 8], loop_type: LoopType = 'rectangular', ...)
+  CliffordNetBlockDSv2(channels: int, shifts: List[int], cli_mode: CliMode = 'full', ...)
   ```
 
-**Functions:** `build`, `call`, `compute_output_shape`, `get_config`
-
-*📁 File: `src/dl_techniques/layers/geometric/fields/holonomy_layer.py`*
-
-### layers.geometric.fields.manifold_stress
-Manifold Stress Layer
-
-**Classes:**
-
-- `ManifoldStressLayer` - Keras Layer
-  Computes manifold stress for anomaly and adversarial detection.
+- `CausalCliffordNetBlockDSv2` - Keras Layer
+  Causal sibling of :class:`CliffordNetBlockDSv2` for autoregressive
   ```python
-  ManifoldStressLayer(hidden_dim: int, stress_types: List[str] = ['curvature', 'connection', 'combined'], stress_threshold: float = 0.5, ...)
+  CausalCliffordNetBlockDSv2(channels: int, shifts: List[int], cli_mode: CliMode = 'full', ...)
   ```
 
-**Functions:** `build`, `call`, `compute_output_shape`, `get_config`
+**Functions:** `build`, `get_build_config`, `build_from_config`, `call`, `compute_output_shape` (and 25 more)
 
-*📁 File: `src/dl_techniques/layers/geometric/fields/manifold_stress.py`*
-
-### layers.geometric.fields.parallel_transport
-Parallel Transport Layer
-
-**Classes:**
-
-- `ParallelTransportLayer` - Keras Layer
-  Parallel transport of vectors along paths using the gauge connection.
-  ```python
-  ParallelTransportLayer(transport_dim: int, num_steps: int = 10, transport_method: TransportMethod = 'iterative', ...)
-  ```
-
-**Functions:** `build`, `call`, `compute_output_shape`, `get_config`
-
-*📁 File: `src/dl_techniques/layers/geometric/fields/parallel_transport.py`*
+*📁 File: `src/dl_techniques/layers/geometric/clifford_block.py`*
 
 ### layers.geometric.point_cloud_autoencoder
 
 **Classes:**
 
 - `PointCloudAutoencoder` - Keras Layer
-  Modified DGCNN-based autoencoder for point cloud feature extraction.
+  DGCNN-based autoencoder for point cloud feature extraction.
   ```python
   PointCloudAutoencoder(k_neighbors: int = 20, **kwargs)
   ```
 
 - `CorrespondenceNetwork` - Keras Layer
-  Augmented regression network to estimate point-to-GMM correspondences.
+  Correspondence network estimating point-to-GMM soft assignments.
   ```python
   CorrespondenceNetwork(num_gaussians: int, **kwargs)
   ```
 
-**Functions:** `build`, `call`, `get_config`, `build`, `call` (and 1 more)
+**Functions:** `build`, `call`, `compute_output_shape`, `get_config`, `build` (and 3 more)
 
 *📁 File: `src/dl_techniques/layers/geometric/point_cloud_autoencoder.py`*
 
@@ -1918,7 +1949,7 @@ Learn a dynamic, sparse, directed graph of entity relationships.
 **Classes:**
 
 - `EntityGraphRefinement` - Keras Layer
-  Entity-Graph Refinement Component for learning hierarchical relationships in embedding space.
+  Entity-graph refinement layer for learning relational structure from embeddings.
   ```python
   EntityGraphRefinement(max_entities: int, entity_dim: int, num_refinement_steps: int = 3, ...)
   ```
@@ -1933,7 +1964,7 @@ Fermi-Dirac Decoder for Link Prediction.
 **Classes:**
 
 - `FermiDiracDecoder` - Keras Layer
-  Fermi-Dirac decoder for edge probability prediction using Euclidean distances.
+  Fermi-Dirac decoder for edge probability prediction.
   ```python
   FermiDiracDecoder(r_initializer: Union[str, keras.initializers.Initializer] = None, t_initializer: Union[str, keras.initializers.Initializer] = None, **kwargs)
   ```
@@ -1948,7 +1979,7 @@ A configurable multi-paradigm Graph Neural Network.
 **Classes:**
 
 - `GraphNeuralNetworkLayer` - Keras Layer
-  Complete configurable Graph Neural Network for concept relationship modeling.
+  Configurable multi-paradigm Graph Neural Network layer.
   ```python
   GraphNeuralNetworkLayer(concept_dim: int, num_layers: int = 3, message_passing: Literal['gcn', 'graphsage', 'gat', 'gin'] = 'gcn', ...)
   ```
@@ -1963,13 +1994,13 @@ Relational Graph Transformer (RELGT) Building Blocks.
 **Classes:**
 
 - `LightweightGNNLayer` - Keras Layer
-  Lightweight Graph Convolutional Network layer for structural encoding.
+  Lightweight GCN layer for structural positional encoding.
   ```python
   LightweightGNNLayer(units: int, activation: Optional[Union[str, Callable]] = 'relu', kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform', ...)
   ```
 
 - `RELGTTokenEncoder` - Keras Layer
-  Multi-element tokenization encoder for heterogeneous graph nodes.
+  Multi-element tokenisation encoder for heterogeneous graph nodes.
   ```python
   RELGTTokenEncoder(embedding_dim: int, num_node_types: int, max_hops: int = 2, ...)
   ```
@@ -2007,7 +2038,7 @@ Haar Wavelet Decomposition Layer supporting multi-dimensional inputs.
 **Classes:**
 
 - `HaarWaveletDecomposition` - Keras Layer
-  Performs Haar Discrete Wavelet Transform (DWT) decomposition.
+  Perform Haar Discrete Wavelet Transform (DWT) decomposition.
   ```python
   HaarWaveletDecomposition(num_levels: int = 3, **kwargs)
   ```
@@ -2104,7 +2135,7 @@ Tensor normalization and clipping layers.
   ```
 
 - `TensorPreprocessingLayer` - Keras Layer
-  Composite preprocessing layer combining normalization and clipping operations.
+  Composite preprocessing layer combining normalization and clipping.
   ```python
   TensorPreprocessingLayer(source_min: float = 0.0, source_max: float = 255.0, target_min: float = -0.5, ...)
   ```
@@ -2112,23 +2143,6 @@ Tensor normalization and clipping layers.
 **Functions:** `call`, `compute_output_shape`, `get_config`, `call`, `compute_output_shape` (and 8 more)
 
 *📁 File: `src/dl_techniques/layers/io_preparation.py`*
-
-## Kan_Linear
-
-### layers.kan_linear
-Kolmogorov-Arnold Network (KAN) linear layer.
-
-**Classes:**
-
-- `KANLinear` - Keras Layer
-  Kolmogorov-Arnold Network (KAN) linear layer with learnable activation functions.
-  ```python
-  KANLinear(features: int, grid_size: int = 5, spline_order: int = 3, ...)
-  ```
-
-**Functions:** `build`, `call`, `update_grid_from_samples`, `compute_output_shape`, `get_config`
-
-*📁 File: `src/dl_techniques/layers/kan_linear.py`*
 
 ## Kmeans
 
@@ -2138,7 +2152,7 @@ A differentiable K-means clustering layer for deep networks.
 **Classes:**
 
 - `KMeansLayer` - Keras Layer
-  A differentiable K-means layer with momentum and centroid repulsion.
+  Differentiable K-means layer with momentum and centroid repulsion.
   ```python
   KMeansLayer(n_clusters: int, temperature: float = 0.1, momentum: float = 0.9, ...)
   ```
@@ -2155,13 +2169,13 @@ This module provides Keras layers for applying Laplacian filters to image data,
 **Classes:**
 
 - `LaplacianFilter` - Keras Layer
-  Laplacian filter layer that detects edges by approximating the second derivative.
+  Laplacian filter layer using Difference of Gaussians for edge detection.
   ```python
   LaplacianFilter(kernel_size: Tuple[int, int] = (5, 5), strides: Union[Tuple[int, int], List[int]] = (1, 1), sigma: Optional[Union[float, Tuple[float, float]]] = 1.0, ...)
   ```
 
 - `AdvancedLaplacianFilter` - Keras Layer
-  Advanced Laplacian filter with multiple implementation options.
+  Advanced Laplacian filter with multiple implementation methods.
   ```python
   AdvancedLaplacianFilter(method: Literal['dog', 'log', 'kernel'] = 'dog', kernel_size: Tuple[int, int] = (5, 5), strides: Union[Tuple[int, int], List[int]] = (1, 1), ...)
   ```
@@ -2179,7 +2193,7 @@ This module provides a specialized Keras layer, `LearnableMultiplier`, for imple
 - `MultiplierType`
 
 - `LearnableMultiplier` - Keras Layer
-  Layer implementing learnable element-wise multipliers for adaptive feature scaling.
+  Learnable element-wise multiplier for adaptive feature scaling.
   ```python
   LearnableMultiplier(multiplier_type: Union[MultiplierType, str] = MultiplierType.CHANNEL, initializer: Union[str, keras.initializers.Initializer] = 'ones', regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None, ...)
   ```
@@ -2200,7 +2214,7 @@ A differentiable, learnable arithmetic operator.
 **Classes:**
 
 - `LearnableArithmeticOperator` - Keras Layer
-  A learnable arithmetic operator that can perform various arithmetic operations.
+  Differentiable learnable arithmetic operator layer.
   ```python
   LearnableArithmeticOperator(operation_types: Optional[List[str]] = None, use_temperature: bool = True, temperature_init: float = 1.0, ...)
   ```
@@ -2215,7 +2229,7 @@ A differentiable operator that learns logical functions.
 **Classes:**
 
 - `LearnableLogicOperator` - Keras Layer
-  A learnable logic operator that can perform various logical operations.
+  Differentiable learnable logic operator layer using fuzzy logic.
   ```python
   LearnableLogicOperator(operation_types: Optional[List[str]] = None, use_temperature: bool = True, temperature_init: float = 1.0, ...)
   ```
@@ -2230,13 +2244,13 @@ A parallelized, learnable computational block for a neural circuit.
 **Classes:**
 
 - `CircuitDepthLayer` - Keras Layer
-  A single depth layer of the neural circuit.
+  Single depth layer of a neural circuit with parallel expert operators.
   ```python
   CircuitDepthLayer(num_logic_ops: int = 2, num_arithmetic_ops: int = 2, use_residual: bool = True, ...)
   ```
 
 - `LearnableNeuralCircuit` - Keras Layer
-  A learnable neural circuit with configurable depth and parallel operators.
+  Deep learnable neural circuit with stacked parallel operator layers.
   ```python
   LearnableNeuralCircuit(circuit_depth: int = 3, num_logic_ops_per_depth: int = 2, num_arithmetic_ops_per_depth: int = 2, ...)
   ```
@@ -2248,8 +2262,36 @@ A parallelized, learnable computational block for a neural circuit.
 ## Memory
 
 ### layers.memory
+Memory-Augmented Neural Networks Package.
 
 *📁 File: `src/dl_techniques/layers/memory/__init__.py`*
+
+### layers.memory.baseline_ntm
+Baseline Neural Turing Machine Implementation.
+
+**Classes:**
+- `NTMMemory`
+- `NTMReadHead`
+- `NTMWriteHead`
+- `NTMController`
+
+- `NTMCell` - Keras Layer
+  Core NTM Cell for processing a single timestep.
+  ```python
+  NTMCell(config: NTMConfig | dict[str, Any], kernel_initializer: str | keras.initializers.Initializer = 'glorot_uniform', bias_initializer: str | keras.initializers.Initializer = 'zeros', ...)
+  ```
+- `NeuralTuringMachine`
+
+**Functions:** `create_ntm`, `initialize_state`, `read`, `write`, `get_config` (and 33 more)
+
+*📁 File: `src/dl_techniques/layers/memory/baseline_ntm.py`*
+
+### layers.memory.factory
+Factory functions for the `dl_techniques.layers.memory` package.
+
+**Functions:** `create_mann`, `create_som_2d`
+
+*📁 File: `src/dl_techniques/layers/memory/factory.py`*
 
 ### layers.memory.mann
 Memory-Augmented Neural Network (MANN) based on
@@ -2257,7 +2299,7 @@ Memory-Augmented Neural Network (MANN) based on
 **Classes:**
 
 - `MannLayer` - Keras Layer
-  Memory-Augmented Neural Network (MANN) layer based on Neural Turing Machines.
+  Memory-Augmented Neural Network layer based on Neural Turing Machines.
   ```python
   MannLayer(memory_locations: int, memory_dim: int, controller_units: int, ...)
   ```
@@ -2266,13 +2308,52 @@ Memory-Augmented Neural Network (MANN) based on
 
 *📁 File: `src/dl_techniques/layers/memory/mann.py`*
 
+### layers.memory.ntm_interface
+Neural Turing Machine (NTM) Interface Module.
+
+**Classes:**
+- `AddressingMode`
+- `MemoryAccessType`
+- `MemoryState`
+- `HeadState`
+- `NTMOutput`
+- `NTMConfig`
+
+- `BaseMemory` - Keras Layer
+  Abstract base class for memory modules.
+  ```python
+  BaseMemory(memory_size: int, memory_dim: int, epsilon: float = 1e-06, ...)
+  ```
+
+- `BaseHead` - Keras Layer
+  Abstract base class for read and write heads.
+  ```python
+  BaseHead(memory_size: int, memory_dim: int, addressing_mode: AddressingMode = AddressingMode.HYBRID, ...)
+  ```
+
+- `BaseController` - Keras Layer
+  Abstract base class for controller networks.
+  ```python
+  BaseController(controller_dim: int, controller_type: Literal['lstm', 'gru', 'feedforward'] = 'lstm', **kwargs)
+  ```
+
+- `BaseNTM` - Keras Layer
+  Abstract base class for Neural Turing Machine architectures.
+  ```python
+  BaseNTM(config: NTMConfig, output_dim: int | None = None, **kwargs)
+  ```
+
+**Functions:** `cosine_similarity`, `circular_convolution`, `sharpen_weights`, `clone`, `to_dict` (and 19 more)
+
+*📁 File: `src/dl_techniques/layers/memory/ntm_interface.py`*
+
 ### layers.memory.som_2d_layer
 Self-Organizing Map (SOM) 2D layer implementation.
 
 **Classes:**
 
 - `SOM2dLayer` - Keras Layer
-  2D Self-Organizing Map (SOM) layer for competitive learning and topological data organization.
+  2D Self-Organizing Map layer for competitive learning and topological organization.
   ```python
   SOM2dLayer(map_size: Tuple[int, int], input_dim: int, initial_learning_rate: float = 0.1, ...)
   ```
@@ -2287,7 +2368,7 @@ N-Dimensional Self-Organizing Map (SOM) layer implementation for Keras.
 **Classes:**
 
 - `SOMLayer` - Keras Layer
-  N-Dimensional Self-Organizing Map (SOM) layer implementation for Keras.
+  N-Dimensional Self-Organizing Map layer for unsupervised topological learning.
   ```python
   SOMLayer(grid_shape: Tuple[int, ...], input_dim: int, initial_learning_rate: float = 0.1, ...)
   ```
@@ -2336,7 +2417,7 @@ Projects visual features into a language model's embedding space.
 **Classes:**
 
 - `ModalityProjection` - Keras Layer
-  Modality projection layer for nanoVLM.
+  Modality projection layer for Vision-Language Models.
   ```python
   ModalityProjection(input_dim: int, output_dim: int, scale_factor: int = 2, ...)
   ```
@@ -2393,7 +2474,7 @@ Gating network implementations for Mixture of Experts (MoE) models.
 - `CosineGating`
 - `SoftMoEGating`
 
-**Functions:** `compute_auxiliary_loss`, `compute_z_loss`, `create_gating`, `call`, `get_config` (and 9 more)
+**Functions:** `compute_auxiliary_loss`, `compute_z_loss`, `create_gating`, `call`, `get_config` (and 12 more)
 
 *📁 File: `src/dl_techniques/layers/moe/gating.py`*
 
@@ -2414,12 +2495,12 @@ Main Mixture of Experts (MoE) layer implementation.
 **Classes:**
 
 - `MixtureOfExperts` - Keras Layer
-  Mixture of Experts (MoE) layer for sparse neural networks using FFN experts.
+  Mixture of Experts layer for sparse neural networks using FFN experts.
   ```python
   MixtureOfExperts(config: MoEConfig, **kwargs)
   ```
 
-**Functions:** `create_ffn_moe`, `build`, `call`, `compute_output_shape`, `get_expert_utilization` (and 2 more)
+**Functions:** `create_ffn_moe`, `build`, `call`, `compute_output_shape`, `get_expert_utilization` (and 4 more)
 
 *📁 File: `src/dl_techniques/layers/moe/layer.py`*
 
@@ -2460,7 +2541,7 @@ A layer based on the Matrix Product State tensor network.
 **Classes:**
 
 - `MPSLayer` - Keras Layer
-  Matrix Product State inspired layer for tensor decomposition.
+  Matrix Product State (MPS) layer for efficient tensor decomposition.
   ```python
   MPSLayer(output_dim: int, bond_dim: int = 16, use_bias: bool = True, ...)
   ```
@@ -2494,7 +2575,7 @@ Implements a differentiable, n-dimensional memory with probabilistic addressing.
 **Classes:**
 
 - `NeuroGrid` - Keras Layer
-  NeuroGrid: Differentiable N-Dimensional Memory Lattice with Probabilistic Addressing for Transformers.
+  Differentiable N-dimensional memory lattice with probabilistic addressing.
   ```python
   NeuroGrid(grid_shape: Union[List[int], Tuple[int, ...]], latent_dim: int, use_bias: bool = False, ...)
   ```
@@ -2607,7 +2688,7 @@ Dynamic Tanh (DyT) Layer Implementation for Keras 3.x
 **Classes:**
 
 - `DynamicTanh` - Keras Layer
-  Dynamic Tanh (DyT) layer as described in "Transformers without Normalization".
+  Dynamic Tanh (DyT) normalization layer.
   ```python
   DynamicTanh(axis: Union[int, List[int]] = -1, alpha_init_value: float = 0.5, kernel_initializer: Union[str, initializers.Initializer] = 'ones', ...)
   ```
@@ -2629,7 +2710,7 @@ Global Response Normalization (GRN) Layer Implementation
 **Classes:**
 
 - `GlobalResponseNormalization` - Keras Layer
-  Global Response Normalization (GRN) layer supporting 2D, 3D, and 4D inputs.
+  Global Response Normalization (GRN) layer for 2D, 3D, and 4D inputs.
   ```python
   GlobalResponseNormalization(eps: float = 1e-06, gamma_initializer: Union[str, keras.initializers.Initializer] = 'ones', beta_initializer: Union[str, keras.initializers.Initializer] = 'zeros', ...)
   ```
@@ -2671,7 +2752,7 @@ MaxLogit Normalization Implementations for Out-of-Distribution Detection.
   ```
 
 - `DMLPlus` - Keras Layer
-  DML+ implementation for separate focal and center models.
+  DML+ layer for separate focal and center OOD detection models.
   ```python
   DMLPlus(model_type: Literal['focal', 'center'], axis: int = -1, epsilon: float = 1e-07, ...)
   ```
@@ -2725,99 +2806,6 @@ Zero-Centered Root Mean Square Normalization Layer for Deep Neural Networks
 
 *📁 File: `src/dl_techniques/layers/norms/zero_centered_rms_norm.py`*
 
-## Ntm
-
-### layers.ntm
-Neural Turing Machine (NTM) Package.
-
-*📁 File: `src/dl_techniques/layers/ntm/__init__.py`*
-
-### layers.ntm.base_layers
-Differentiable Addressing and Memory Layers for Neural Turing Machines.
-
-**Classes:**
-
-- `DifferentiableAddressingHead` - Keras Layer
-  Differentiable addressing head implementing NTM-style memory addressing.
-  ```python
-  DifferentiableAddressingHead(memory_size: int, content_dim: int, controller_dim: int | None = None, ...)
-  ```
-
-- `DifferentiableSelectCopy` - Keras Layer
-  Differentiable layer for selecting and copying values between memory positions.
-  ```python
-  DifferentiableSelectCopy(memory_size: int, content_dim: int, controller_dim: int, ...)
-  ```
-
-- `SimpleSelectCopy` - Keras Layer
-  Simplified differentiable select-copy layer for learning input-output mappings.
-  ```python
-  SimpleSelectCopy(input_size: int, output_size: int, content_dim: int, ...)
-  ```
-
-**Functions:** `build`, `call`, `compute_output_shape`, `get_config`, `build` (and 7 more)
-
-*📁 File: `src/dl_techniques/layers/ntm/base_layers.py`*
-
-### layers.ntm.baseline_ntm
-Baseline Neural Turing Machine Implementation.
-
-**Classes:**
-- `NTMMemory`
-- `NTMReadHead`
-- `NTMWriteHead`
-- `NTMController`
-
-- `NTMCell` - Keras Layer
-  Core NTM Cell for processing a single timestep.
-  ```python
-  NTMCell(config: NTMConfig | dict[str, Any], kernel_initializer: str | keras.initializers.Initializer = 'glorot_uniform', bias_initializer: str | keras.initializers.Initializer = 'zeros', ...)
-  ```
-- `NeuralTuringMachine`
-
-**Functions:** `create_ntm`, `initialize_state`, `read`, `write`, `get_config` (and 33 more)
-
-*📁 File: `src/dl_techniques/layers/ntm/baseline_ntm.py`*
-
-### layers.ntm.ntm_interface
-Neural Turing Machine (NTM) Interface Module.
-
-**Classes:**
-- `AddressingMode`
-- `MemoryAccessType`
-- `MemoryState`
-- `HeadState`
-- `NTMOutput`
-- `NTMConfig`
-
-- `BaseMemory` - Keras Layer
-  Abstract base class for memory modules.
-  ```python
-  BaseMemory(memory_size: int, memory_dim: int, epsilon: float = 1e-06, ...)
-  ```
-
-- `BaseHead` - Keras Layer
-  Abstract base class for read and write heads.
-  ```python
-  BaseHead(memory_size: int, memory_dim: int, addressing_mode: AddressingMode = AddressingMode.HYBRID, ...)
-  ```
-
-- `BaseController` - Keras Layer
-  Abstract base class for controller networks.
-  ```python
-  BaseController(controller_dim: int, controller_type: Literal['lstm', 'gru', 'feedforward'] = 'lstm', **kwargs)
-  ```
-
-- `BaseNTM` - Keras Layer
-  Abstract base class for Neural Turing Machine architectures.
-  ```python
-  BaseNTM(config: NTMConfig, output_dim: int | None = None, **kwargs)
-  ```
-
-**Functions:** `cosine_similarity`, `circular_convolution`, `sharpen_weights`, `clone`, `to_dict` (and 19 more)
-
-*📁 File: `src/dl_techniques/layers/ntm/ntm_interface.py`*
-
 ## One_Hot_Encoding
 
 ### layers.one_hot_encoding
@@ -2826,7 +2814,7 @@ This module provides a `OneHotEncoding` layer, a custom Keras layer that perform
 **Classes:**
 
 - `OneHotEncoding` - Keras Layer
-  One-hot encoding layer for categorical features with enhanced efficiency.
+  One-hot encoding layer for multiple categorical features.
   ```python
   OneHotEncoding(cardinalities: List[int], **kwargs)
   ```
@@ -2843,7 +2831,7 @@ Learn decorrelated and gated features through a structured pipeline.
 **Classes:**
 
 - `OrthoBlock` - Keras Layer
-  Structured feature learning block with orthogonal regularization and constrained scaling.
+  Structured feature learning block with orthogonal regularization and gating.
   ```python
   OrthoBlock(units: int, activation: Optional[Union[str, Callable[[keras.KerasTensor], keras.KerasTensor]]] = None, use_bias: bool = True, ...)
   ```
@@ -2860,7 +2848,7 @@ Downsample feature maps by merging patches to create a hierarchical representati
 **Classes:**
 
 - `PatchMerging` - Keras Layer
-  Patch merging layer for hierarchical downsampling in Swin Transformer architectures.
+  Patch merging layer for hierarchical downsampling in Swin Transformers.
   ```python
   PatchMerging(dim: int, use_bias: bool = False, kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform', ...)
   ```
@@ -2894,7 +2882,7 @@ Downsample feature maps by merging patches to create a hierarchical representati
 **Classes:**
 
 - `LagrangianNeuralNetworkLayer` - Keras Layer
-  Physics-informed layer modeling system dynamics through learned Lagrangian mechanics.
+  Physics-informed layer modeling dynamics through learned Lagrangian mechanics.
   ```python
   LagrangianNeuralNetworkLayer(hidden_dims: List[int], activation: str = 'softplus', **kwargs)
   ```
@@ -2911,7 +2899,7 @@ Pixel Shuffle Layer Implementation for Vision Transformers.
 **Classes:**
 
 - `PixelShuffle` - Keras Layer
-  Pixel shuffle operation for reducing spatial tokens in vision_heads transformers.
+  Pixel shuffle for reducing spatial tokens in vision transformers.
   ```python
   PixelShuffle(scale_factor: int = 2, validate_spatial_dims: bool = True, **kwargs)
   ```
@@ -2919,6 +2907,23 @@ Pixel Shuffle Layer Implementation for Vision Transformers.
 **Functions:** `build`, `call`, `compute_output_shape`, `get_config`
 
 *📁 File: `src/dl_techniques/layers/pixel_shuffle.py`*
+
+## Pixel_Unshuffle
+
+### layers.pixel_unshuffle
+Lossless 4D spatial-to-depth downsampling (pixel-unshuffle) with optional projection.
+
+**Classes:**
+
+- `PixelUnshuffle2D` - Keras Layer
+  Lossless space-to-depth downsampling with optional 1x1 projection.
+  ```python
+  PixelUnshuffle2D(scale: int = 2, out_channels: Optional[int] = None, use_bias: bool = True, ...)
+  ```
+
+**Functions:** `build`, `call`, `compute_output_shape`, `get_config`
+
+*📁 File: `src/dl_techniques/layers/pixel_unshuffle.py`*
 
 ## Radial_Basis_Function
 
@@ -2928,7 +2933,7 @@ A Radial Basis Function (RBF) layer with center repulsion.
 **Classes:**
 
 - `RBFLayer` - Keras Layer
-  Radial Basis Function layer with stable center repulsion mechanism.
+  Radial Basis Function layer with adaptive center repulsion.
   ```python
   RBFLayer(units: int, gamma_init: float = 1.0, repulsion_strength: float = 0.1, ...)
   ```
@@ -2966,7 +2971,7 @@ A stateful, recurrent engine for the Hierarchical Reasoning Model (HRM).
 **Classes:**
 
 - `HierarchicalReasoningCore` - Keras Layer
-  Stateful hierarchical reasoning core for complex multi-step reasoning tasks.
+  Stateful hierarchical reasoning core for multi-step cognitive tasks.
   ```python
   HierarchicalReasoningCore(vocab_size: int, seq_len: int, embed_dim: int, ...)
   ```
@@ -2996,7 +3001,7 @@ This module defines the SparsePuzzleEmbedding layer.
 **Classes:**
 
 - `SparsePuzzleEmbedding` - Keras Layer
-  Sparse embedding layer optimized for large-scale puzzle identifier lookups with training efficiency.
+  Sparse embedding layer optimized for large-scale puzzle identifier lookups.
   ```python
   SparsePuzzleEmbedding(num_embeddings: int, embedding_dim: int, batch_size: int, ...)
   ```
@@ -3013,7 +3018,7 @@ A RepMixer block, an efficient feature-mixing architecture.
 **Classes:**
 
 - `RepMixerBlock` - Keras Layer
-  RepMixer block for efficient feature mixing in vision_heads models.
+  RepMixer block for efficient spatial and channel feature mixing.
   ```python
   RepMixerBlock(dim: int, kernel_size: int = 3, expansion_ratio: float = 4.0, ...)
   ```
@@ -3036,7 +3041,7 @@ A residual path to bridge the semantic gap in U-Net skip connections.
 **Classes:**
 
 - `ResPath` - Keras Layer
-  Residual Path layer for improving skip connections in U-Net architectures.
+  Residual path for bridging the semantic gap in U-Net skip connections.
   ```python
   ResPath(channels: int, num_blocks: int, kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform', ...)
   ```
@@ -3053,7 +3058,7 @@ Restricted Boltzmann Machine (RBM).
 **Classes:**
 
 - `RestrictedBoltzmannMachine` - Keras Layer
-  Restricted Boltzmann Machine (RBM) layer for unsupervised feature learning.
+  Restricted Boltzmann Machine layer for unsupervised feature learning.
   ```python
   RestrictedBoltzmannMachine(n_hidden: int, learning_rate: float = 0.01, n_gibbs_steps: int = 1, ...)
   ```
@@ -3070,7 +3075,7 @@ Rigid Simplex Layer with learnable rotation and bounded scaling.
 **Classes:**
 
 - `RigidSimplexLayer` - Keras Layer
-  Projects inputs onto a fixed Simplex structure with learnable rotation and scaling.
+  Project inputs onto a rigid Simplex with learnable rotation and scaling.
   ```python
   RigidSimplexLayer(units: int, scale_min: float = 0.5, scale_max: float = 2.0, ...)
   ```
@@ -3087,7 +3092,7 @@ A dynamic routing mechanism for conditional computation.
 **Classes:**
 
 - `RouterLayer` - Keras Layer
-  Wraps a TransformerLayer with a Dr.LLM-style dynamic routing mechanism.
+  Dynamic router wrapping a TransformerLayer for adaptive computation.
   ```python
   RouterLayer(transformer_layer: TransformerLayer, router_bottleneck_dim: int = 128, num_windows: int = 8, ...)
   ```
@@ -3104,7 +3109,7 @@ Sample from a latent Normal distribution using the reparameterization trick.
 **Classes:**
 
 - `Sampling` - Keras Layer
-  Uses reparameterization trick to sample from a Normal distribution.
+  Sample from a latent Normal distribution via the reparameterisation trick.
   ```python
   Sampling(seed: Optional[int] = None, **kwargs)
   ```
@@ -3121,7 +3126,7 @@ Selectively mask gradients during backpropagation without altering the forward p
 **Classes:**
 
 - `SelectiveGradientMask` - Keras Layer
-  Layer that selectively stops gradients based on a binary mask.
+  Selectively stop gradients based on a binary mask.
   ```python
   SelectiveGradientMask(name: Optional[str] = None, dtype: Optional[str] = None, **kwargs)
   ```
@@ -3144,13 +3149,13 @@ A unified and configurable pooling layer for sequence data.
   ```
 
 - `WeightedPooling` - Keras Layer
-  Learnable weighted pooling with position-specific weights.
+  Learnable position-weighted pooling for sequences.
   ```python
   WeightedPooling(max_seq_len: int = 512, dropout_rate: float = 0.0, temperature: float = 1.0, ...)
   ```
 
 - `SequencePooling` - Keras Layer
-  Highly configurable pooling layer for sequence data.
+  Configurable pooling layer supporting multiple strategies for sequences.
   ```python
   SequencePooling(strategy: Union[PoolingStrategy, List[PoolingStrategy]] = 'mean', exclude_positions: Optional[List[int]] = None, aggregation_method: AggregationMethod = 'concat', ...)
   ```
@@ -3259,7 +3264,7 @@ Configurable Building Blocks for Deep Learning Architectures.
   ```
 
 - `BottleneckBlock` - Keras Layer
-  Bottleneck ResNet block with 1x1 → 3x3 → 1x1 convolutions.
+  Bottleneck ResNet block with 1x1, 3x3, 1x1 convolutions.
   ```python
   BottleneckBlock(filters: int, stride: int = 1, use_projection: bool = False, ...)
   ```
@@ -3316,7 +3321,7 @@ Mixture Density Network (MDN) Layer with Intermediate Processing
 **Classes:**
 
 - `MDNLayer` - Keras Layer
-  Mixture Density Network Layer with separated processing paths.
+  Mixture Density Network layer with separated processing paths.
   ```python
   MDNLayer(output_dimension: int, num_mixtures: int, use_bias: bool = True, ...)
   ```
@@ -3367,7 +3372,7 @@ Residual Autocorrelation Function (ACF) analysis and regularization layer.
 **Classes:**
 
 - `ResidualACFLayer` - Keras Layer
-  Residual Autocorrelation Function analysis and regularization layer for time series models.
+  Residual Autocorrelation Function analysis and regularization layer.
   ```python
   ResidualACFLayer(max_lag: int = 40, regularization_weight: Optional[float] = None, target_lags: Optional[List[int]] = None, ...)
   ```
@@ -3400,7 +3405,7 @@ Stochastic Depth is a regularization method primarily used in very deep neural n
 **Classes:**
 
 - `StochasticDepth` - Keras Layer
-  Implements Stochastic Depth for deep networks.
+  Stochastic Depth regularization for deep networks.
   ```python
   StochasticDepth(drop_path_rate: float = 0.5, **kwargs)
   ```
@@ -3417,7 +3422,7 @@ This module implements the Stochastic Gradient regularization technique.
 **Classes:**
 
 - `StochasticGradient` - Keras Layer
-  Implements Stochastic Gradient dropping for deep networks.
+  Stochastic Gradient dropping regularization for deep networks.
   ```python
   StochasticGradient(drop_path_rate: float = 0.5, **kwargs)
   ```
@@ -3434,7 +3439,7 @@ Apply strong data augmentations for consistency-based regularization.
 **Classes:**
 
 - `StrongAugmentation` - Keras Layer
-  Strong augmentation layer for unlabeled data.
+  Strong augmentation layer for consistency-based regularization.
   ```python
   StrongAugmentation(cutmix_prob: float = 0.5, cutmix_ratio_range: Tuple[float, float] = (0.1, 0.5), color_jitter_strength: float = 0.2, ...)
   ```
@@ -3451,31 +3456,31 @@ Deep Ensembling is a powerful technique for improving model robustness, accuracy
 **Classes:**
 
 - `ScaleEnsemble` - Keras Layer
-  Enhanced ensemble adapter with learnable scaling weights.
+  Learnable per-feature scaling for ensemble members.
   ```python
   ScaleEnsemble(k: int, input_dim: int, init_distribution: Literal['normal', 'random-signs'] = 'normal', ...)
   ```
 
 - `LinearEfficientEnsemble` - Keras Layer
-  Efficient ensemble linear layer with separate input/output scaling.
+  Efficient ensemble linear layer with rank-1 perturbations.
   ```python
   LinearEfficientEnsemble(units: int, k: int, use_bias: bool = True, ...)
   ```
 
 - `NLinear` - Keras Layer
-  N parallel linear layers for ensemble output with enhanced efficiency.
+  N fully independent parallel linear layers using einsum.
   ```python
   NLinear(n: int, input_dim: int, output_dim: int, ...)
   ```
 
 - `MLPBlock` - Keras Layer
-  MLP block with efficient ensemble support and enhanced configurability.
+  MLP block with optional efficient ensemble support.
   ```python
   MLPBlock(units: int, k: Optional[int] = None, activation: str = 'relu', ...)
   ```
 
 - `TabMBackbone` - Keras Layer
-  TabM backbone MLP with ensemble support and proper layer management.
+  TabM backbone MLP with optional ensemble support.
   ```python
   TabMBackbone(hidden_dims: List[int], k: Optional[int] = None, activation: str = 'relu', ...)
   ```
@@ -3492,7 +3497,7 @@ Time Series Layers Module.
 *📁 File: `src/dl_techniques/layers/time_series/__init__.py`*
 
 ### layers.time_series.adaptive_lag_attention
-A context-aware, gated attention mechanism for autoregression.
+Context-aware, gated attention mechanism for autoregression.
 
 **Classes:**
 
@@ -3556,7 +3561,7 @@ Adaptive EMA Slope Filter Layer.
   EMASlopeFilter(ema_period: int = 25, lookback_period: int = 25, upper_threshold: float = 15.0, ...)
   ```
 
-**Functions:** `call`, `compute_output_shape`, `get_config`, `build`, `call` (and 2 more)
+**Functions:** `call`, `compute_output_shape`, `get_config`, `build`, `call` (and 3 more)
 
 *📁 File: `src/dl_techniques/layers/time_series/ema_layer.py`*
 
@@ -3593,7 +3598,7 @@ A hybrid sequential block combining recurrent and attention mechanisms.
 **Classes:**
 
 - `MixedSequentialBlock` - Keras Layer
-  Mixed sequential block combining LSTM and self-attention mechanisms for time series processing.
+  Hybrid sequential block combining LSTM and self-attention for time series.
   ```python
   MixedSequentialBlock(embed_dim: int, num_heads: int = 8, lstm_units: Optional[int] = None, ...)
   ```
@@ -3603,12 +3608,12 @@ A hybrid sequential block combining recurrent and attention mechanisms.
 *📁 File: `src/dl_techniques/layers/time_series/mixed_sequential_block.py`*
 
 ### layers.time_series.nbeats_blocks
-The foundational block of the N-BEATS architecture.
+Foundational blocks of the N-BEATS architecture.
 
 **Classes:**
 
 - `NBeatsBlock` - Keras Layer
-  Enhanced N-BEATS block layer with performance optimizations and modern Keras 3 compliance.
+  Base N-BEATS block with a 4-layer dense stack and dual theta projection.
   ```python
   NBeatsBlock(units: int, thetas_dim: int, backcast_length: int, ...)
   ```
@@ -3635,7 +3640,7 @@ PRISM: Partitioned Representations for Iterative Sequence Modeling.
 **Classes:**
 
 - `FrequencyBandStatistics` - Keras Layer
-  Computes summary statistics for frequency bands.
+  Compute summary statistics for frequency bands.
   ```python
   FrequencyBandStatistics(epsilon: float = 1e-06, **kwargs)
   ```
@@ -3669,7 +3674,7 @@ PRISM: Partitioned Representations for Iterative Sequence Modeling.
 *📁 File: `src/dl_techniques/layers/time_series/prism_blocks.py`*
 
 ### layers.time_series.quantile_head_fixed_io
-A quantile prediction head for probabilistic forecasting.
+Quantile prediction head for probabilistic forecasting with fixed I/O.
 
 **Classes:**
 
@@ -3684,12 +3689,12 @@ A quantile prediction head for probabilistic forecasting.
 *📁 File: `src/dl_techniques/layers/time_series/quantile_head_fixed_io.py`*
 
 ### layers.time_series.quantile_head_variable_io
-A sequence-to-sequence quantile prediction head for probabilistic forecasting.
+Sequence-to-sequence quantile prediction head for probabilistic forecasting.
 
 **Classes:**
 
 - `QuantileSequenceHead` - Keras Layer
-  Sequence-wise quantile prediction head for probabilistic time series forecasting.
+  Sequence-wise quantile prediction head for probabilistic forecasting.
   ```python
   QuantileSequenceHead(num_quantiles: int, dropout_rate: float = 0.1, use_bias: bool = True, ...)
   ```
@@ -3709,7 +3714,7 @@ A sequence-to-sequence quantile prediction head for probabilistic forecasting.
   ```
 
 - `TemporalConvNet` - Keras Layer
-  Temporal Convolutional Network (TCN) Encoder.
+  Temporal Convolutional Network (TCN) encoder.
   ```python
   TemporalConvNet(filters: int, kernel_size: int = 2, num_levels: int = 4, ...)
   ```
@@ -3724,7 +3729,7 @@ Fuse contextual and autoregressive forecasts with a dynamic gating mechanism.
 **Classes:**
 
 - `TemporalFusionLayer` - Keras Layer
-  A layer that fuses a context-based forecast with an attention-based autoregressive forecast.
+  Fuse a context-based forecast with an attention-based autoregressive forecast.
   ```python
   TemporalFusionLayer(output_dim: int, num_lags: int, project_lags: bool = False, ...)
   ```
@@ -3734,12 +3739,12 @@ Fuse contextual and autoregressive forecasts with a dynamic gating mechanism.
 *📁 File: `src/dl_techniques/layers/time_series/temporal_fusion.py`*
 
 ### layers.time_series.xlstm_blocks
-xLSTM (Extended Long Short-Term Memory) Implementation.
+xLSTM (Extended Long Short-Term Memory) implementation.
 
 **Classes:**
 
 - `sLSTMCell` - Keras Layer
-  Scalar LSTM (sLSTM) Cell with exponential gating and normalizer state.
+  Scalar LSTM (sLSTM) cell with exponential gating and normalizer state.
   ```python
   sLSTMCell(units: int, forget_gate_activation: Literal['sigmoid', 'exp'] = 'sigmoid', kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform', ...)
   ```
@@ -3751,7 +3756,7 @@ xLSTM (Extended Long Short-Term Memory) Implementation.
   ```
 
 - `mLSTMCell` - Keras Layer
-  Matrix LSTM (mLSTM) Cell with matrix memory and covariance update rule.
+  Matrix LSTM (mLSTM) cell with matrix memory and covariance update rule.
   ```python
   mLSTMCell(units: int, num_heads: int = 1, key_dim: Optional[int] = None, ...)
   ```
@@ -3796,7 +3801,7 @@ Custom Byte-Pair Encoding (BPE) Tokenizer implementation for Keras 3.x.
   ```
 
 - `TokenEmbedding` - Keras Layer
-  Token embedding layer that converts token IDs to dense vectors.
+  Token embedding layer converting token IDs to dense vectors.
   ```python
   TokenEmbedding(vocab_size: int, embedding_dim: int, mask_zero: bool = True, ...)
   ```
@@ -3818,7 +3823,7 @@ A Transformer encoder layer for joint patch-query processing.
 **Classes:**
 
 - `EomtTransformer` - Keras Layer
-  Configurable Encoder-only Mask Transformer layer for vision_heads segmentation.
+  Configurable Encoder-only Mask Transformer layer for vision segmentation.
   ```python
   EomtTransformer(hidden_size: int, num_heads: int = 8, intermediate_size: Optional[int] = None, ...)
   ```
@@ -3839,7 +3844,7 @@ Free Transformer Layer with integrated Variational Autoencoder components.
   ```
 
 - `FreeTransformerLayer` - Keras Layer
-  A Transformer layer extended with the Free Transformer C-VAE architecture.
+  Transformer layer extended with the Free Transformer C-VAE architecture.
   ```python
   FreeTransformerLayer(hidden_size: int, num_heads: int, intermediate_size: int, ...)
   ```
@@ -3884,7 +3889,7 @@ SwinConvBlock: A hybrid Keras layer that synergistically combines the strengths
 **Classes:**
 
 - `SwinConvBlock` - Keras Layer
-  Hybrid Swin-Conv block combining transformer and convolutional paths in parallel.
+  Hybrid Swin-Conv block combining transformer and convolutional paths.
   ```python
   SwinConvBlock(conv_dim: int, trans_dim: int, head_dim: int = 32, ...)
   ```
@@ -3914,7 +3919,7 @@ A configurable, Transformer-based text decoder stack.
 **Classes:**
 
 - `TextDecoder` - Keras Layer
-  General-purpose configurable text decoder built upon a stack of TransformerLayers.
+  General-purpose configurable text decoder built on a TransformerLayer stack.
   ```python
   TextDecoder(vocab_size: int, embed_dim: int, depth: int, ...)
   ```
@@ -3929,7 +3934,7 @@ A highly configurable, Transformer-based text encoder.
 **Classes:**
 
 - `TextEncoder` - Keras Layer
-  General purpose configurable text encoder using factory-based components.
+  General-purpose configurable text encoder using factory-based components.
   ```python
   TextEncoder(vocab_size: int, embed_dim: int, depth: int = 12, ...)
   ```
@@ -3959,7 +3964,7 @@ A configurable, general-purpose Vision Transformer encoder.
 **Classes:**
 
 - `VisionEncoder` - Keras Layer
-  General purpose configurable vision_heads encoder using factory-based components.
+  General-purpose configurable vision encoder using factory-based components.
   ```python
   VisionEncoder(img_size: int = 224, patch_size: int = 16, embed_dim: int = 768, ...)
   ```
@@ -3967,23 +3972,6 @@ A configurable, general-purpose Vision Transformer encoder.
 **Functions:** `create_vision_encoder`, `create_vit_encoder`, `create_siglip_encoder`, `build`, `call` (and 5 more)
 
 *📁 File: `src/dl_techniques/layers/transformers/vision_encoder.py`*
-
-## Tversky_Projection
-
-### layers.tversky_projection
-A projection layer based on Tversky's contrast model of similarity.
-
-**Classes:**
-
-- `TverskyProjectionLayer` - Keras Layer
-  A projection layer based on a differentiable Tversky similarity model.
-  ```python
-  TverskyProjectionLayer(units: int, num_features: int, intersection_reduction: Literal['product', 'min', 'mean'] = 'product', ...)
-  ```
-
-**Functions:** `build`, `call`, `compute_output_shape`, `get_config`
-
-*📁 File: `src/dl_techniques/layers/tversky_projection.py`*
 
 ## Universal_Inverted_Bottleneck
 
@@ -3993,7 +3981,7 @@ A `Universal Inverted Bottleneck` (UIB), a highly flexible
 **Classes:**
 
 - `UniversalInvertedBottleneck` - Keras Layer
-  Universal Inverted Bottleneck (UIB) - A highly configurable building block for efficient CNNs.
+  Universal Inverted Bottleneck (UIB) for efficient CNNs.
   ```python
   UniversalInvertedBottleneck(filters: int, expansion_factor: int = 4, expanded_channels: Optional[int] = None, ...)
   ```
@@ -4039,7 +4027,7 @@ Vision Task Head Network Factory
 **Classes:**
 
 - `BaseVisionHead` - Keras Layer
-  Base class for all vision_heads task heads.
+  Base class for all vision task heads.
   ```python
   BaseVisionHead(hidden_dim: int = 256, normalization_type: NormalizationType = 'layer_norm', activation_type: ActivationType = 'gelu', ...)
   ```
@@ -4133,7 +4121,7 @@ YOLOv12 Core Building Blocks.
 **Classes:**
 
 - `ConvBlock` - Keras Layer
-  Standard Convolution Block with BatchNorm and SiLU activation.
+  Standard YOLOv12 convolution block: Conv2D, BatchNorm, SiLU.
   ```python
   ConvBlock(filters: int, kernel_size: int = 3, strides: int = 1, ...)
   ```
@@ -4145,25 +4133,25 @@ YOLOv12 Core Building Blocks.
   ```
 
 - `AttentionBlock` - Keras Layer
-  Attention Block with Area Attention and MLP.
+  Transformer-style block with Area Attention and MLP for YOLOv12.
   ```python
   AttentionBlock(dim: int, num_heads: int = 8, mlp_ratio: float = 1.2, ...)
   ```
 
 - `Bottleneck` - Keras Layer
-  Standard Bottleneck block with optional residual connection.
+  Standard bottleneck block with optional residual connection for YOLOv12.
   ```python
   Bottleneck(filters: int, shortcut: bool = True, kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal', ...)
   ```
 
 - `C3k2Block` - Keras Layer
-  CSP-like block with 2 convolutions and Bottleneck layers.
+  CSP-like block with dual paths and Bottleneck layers for YOLOv12.
   ```python
   C3k2Block(filters: int, n: int = 1, shortcut: bool = True, ...)
   ```
 
 - `A2C2fBlock` - Keras Layer
-  Attention-enhanced R-ELAN block with progressive feature extraction.
+  Attention-enhanced ELAN block with progressive feature extraction for YOLOv12.
   ```python
   A2C2fBlock(filters: int, n: int = 1, area: int = 1, ...)
   ```
@@ -4180,7 +4168,7 @@ YOLOv12 Task-Specific Heads for Multi-Task Learning.
 **Classes:**
 
 - `YOLOv12DetectionHead` - Keras Layer
-  YOLOv12 Detection Head with separate classification and regression branches.
+  YOLOv12 detection head with separate classification and regression branches.
   ```python
   YOLOv12DetectionHead(num_classes: int = 80, reg_max: int = 16, bbox_channels: Optional[List[int]] = None, ...)
   ```

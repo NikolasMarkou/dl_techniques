@@ -2,11 +2,12 @@
 
 Complete model architectures ready for training
 
-**183 modules in this category**
+**226 modules in this category**
 
 ## Accunet
 
 ### models.accunet
+AccUNet — public API re-exports.
 
 *📁 File: `src/dl_techniques/models/accunet/__init__.py`*
 
@@ -23,16 +24,17 @@ ACC-UNet: A Completely Convolutional UNet model for the 2020s.
 ## Adaptive_Ema
 
 ### models.adaptive_ema
+Adaptive EMA slope-filter model package.
 
 *📁 File: `src/dl_techniques/models/adaptive_ema/__init__.py`*
 
 ### models.adaptive_ema.model
-Adaptive EMA Slope Filter Layer.
+Adaptive EMA Slope Filter Model.
 
 **Classes:**
 - `AdaptiveEMASlopeFilterModel`
 
-**Functions:** `build`, `call`, `get_config`
+**Functions:** `create_adaptive_ema_slope_filter`, `build`, `call`, `compute_output_shape`, `get_config`
 
 *📁 File: `src/dl_techniques/models/adaptive_ema/model.py`*
 
@@ -48,7 +50,7 @@ BERT Model Implementation with Pretrained Support
 **Classes:**
 - `BERT`
 
-**Functions:** `create_bert_with_head`, `call`, `load_pretrained_weights`, `from_variant`, `get_config` (and 2 more)
+**Functions:** `create_bert`, `create_bert_with_head`, `call`, `load_pretrained_weights`, `from_variant` (and 3 more)
 
 *📁 File: `src/dl_techniques/models/bert/bert.py`*
 
@@ -76,14 +78,14 @@ ConvUNext: Modern Bias-Free U-Net with ConvNeXt-Inspired Architecture
   ConvUNextStem(filters: int, kernel_size: Union[int, Tuple[int, int]] = 7, kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal', ...)
   ```
 
-**Functions:** `create_convunext_denoiser`, `create_convunext_variant`, `get_model_output_info`, `create_inference_model_from_training_model`, `build` (and 3 more)
+**Functions:** `create_convunext_denoiser`, `create_convunext_variant`, `build`, `call`, `compute_output_shape` (and 1 more)
 
 *📁 File: `src/dl_techniques/models/bias_free_denoisers/bfconvunext.py`*
 
 ### models.bias_free_denoisers.bfunet
 Bias-Free U-Net Model with Deep Supervision and Variants
 
-**Functions:** `create_bfunet_denoiser`, `load_pretrained_weights_into_model`, `create_bfunet_variant`, `get_model_output_info`, `create_inference_model_from_training_model`
+**Functions:** `create_bfunet_denoiser`, `load_pretrained_weights_into_model`, `create_bfunet_variant`
 
 *📁 File: `src/dl_techniques/models/bias_free_denoisers/bfunet.py`*
 
@@ -111,7 +113,7 @@ Unified Conditional Bias-Free U-Net Model
   DiscreteConditioningInjection(method: str = 'spatial_broadcast', projected_channels: Optional[int] = None, kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal', ...)
   ```
 
-**Functions:** `create_dense_conditioning_encoder`, `create_unified_conditional_bfunet`, `create_depth_estimation_bfunet`, `create_class_conditional_bfunet`, `create_semantic_depth_bfunet` (and 7 more)
+**Functions:** `create_dense_conditioning_encoder`, `create_unified_conditional_bfunet`, `create_depth_estimation_bfunet`, `create_class_conditional_bfunet`, `create_semantic_depth_bfunet` (and 9 more)
 
 *📁 File: `src/dl_techniques/models/bias_free_denoisers/bfunet_conditional_unified.py`*
 
@@ -146,6 +148,16 @@ Implementation of the Capsule Network
 **Functions:** `create_capsnet`, `build`, `call`, `train_step`, `test_step` (and 5 more)
 
 *📁 File: `src/dl_techniques/models/capsnet/model.py`*
+
+### models.capsnet.model_v2
+CapsNet V2 — modernised capsule network with attention routing.
+
+**Classes:**
+- `CapsNetV2`
+
+**Functions:** `create_capsnet_v2`, `create_capsnet_v2_pretrained`, `call`, `get_capsules`, `reconstruct` (and 2 more)
+
+*📁 File: `src/dl_techniques/models/capsnet/model_v2.py`*
 
 ## Cbam
 
@@ -232,6 +244,163 @@ CBAMNet Model Implementation with Pretrained Support
 
 *📁 File: `src/dl_techniques/models/ccnets/utils.py`*
 
+## Cliffordnet
+
+### models.cliffordnet
+
+*📁 File: `src/dl_techniques/models/cliffordnet/__init__.py`*
+
+### models.cliffordnet.clip
+CliffordCLIP — CLIP-style contrastive model with Clifford geometric blocks.
+
+**Classes:**
+- `CliffordCLIP`
+
+**Functions:** `build`, `call`, `get_config`, `build`, `call` (and 9 more)
+
+*📁 File: `src/dl_techniques/models/cliffordnet/clip.py`*
+
+### models.cliffordnet.conditional_denoiser
+CliffordNet conditional denoiser with Miyasawa's theorem compliance.
+
+**Classes:**
+
+- `BiasFreeConditionedGGR` - Keras Layer
+  Bias-free Gated Geometric Residual with conditioning support.
+  ```python
+  BiasFreeConditionedGGR(channels: int, layer_scale_init: float = 1e-05, drop_path_rate: float = 0.0, ...)
+  ```
+
+- `BiasFreeConditionedCliffordBlock` - Keras Layer
+  Bias-free CliffordNet block with multi-modal conditioning.
+  ```python
+  BiasFreeConditionedCliffordBlock(channels: int, shifts: List[int], cli_mode: CliMode = 'full', ...)
+  ```
+
+- `BiasFreeGeometricDownsample` - Keras Layer
+  Bias-free spatial downsampling via Clifford geometric product.
+  ```python
+  BiasFreeGeometricDownsample(in_channels: int, out_channels: int, shifts: Optional[List[int]] = None, ...)
+  ```
+
+- `BiasFreeGeometricUpsample` - Keras Layer
+  Bias-free spatial upsampling via nearest-neighbor + Clifford block.
+  ```python
+  BiasFreeGeometricUpsample(in_channels: int, out_channels: int, shifts: Optional[List[int]] = None, ...)
+  ```
+- `CliffordNetConditionalDenoiser`
+
+**Functions:** `build`, `get_build_config`, `build_from_config`, `call`, `compute_output_shape` (and 25 more)
+
+*📁 File: `src/dl_techniques/models/cliffordnet/conditional_denoiser.py`*
+
+### models.cliffordnet.confidence_denoiser
+CliffordNet confidence-interval denoiser with Miyasawa's theorem compliance.
+
+**Classes:**
+- `GaussianNLLLoss`
+- `PinballLoss`
+- `CoverageMetric`
+- `IntervalWidthMetric`
+- `CliffordNetConfidenceDenoiser`
+
+**Functions:** `call`, `get_config`, `call`, `get_config`, `update_state` (and 22 more)
+
+*📁 File: `src/dl_techniques/models/cliffordnet/confidence_denoiser.py`*
+
+### models.cliffordnet.denoiser
+CliffordNet bias-free image denoiser.
+
+**Classes:**
+
+- `BiasFreeClifordNetBlock` - Keras Layer
+  Bias-free CliffordNet block for denoising.
+  ```python
+  BiasFreeClifordNetBlock(channels: int, shifts: List[int], cli_mode: CliMode = 'full', ...)
+  ```
+
+- `BiasFreeGatedGeometricResidual` - Keras Layer
+  Bias-free variant of GatedGeometricResidual.
+  ```python
+  BiasFreeGatedGeometricResidual(channels: int, layer_scale_init: float = 1e-05, drop_path_rate: float = 0.0, ...)
+  ```
+- `CliffordNetDenoiser`
+
+**Functions:** `build`, `call`, `compute_output_shape`, `get_config`, `build` (and 14 more)
+
+*📁 File: `src/dl_techniques/models/cliffordnet/denoiser.py`*
+
+### models.cliffordnet.embedding_unet
+CliffordNet bidirectional U-Net embedding model (BERT-style packaging).
+
+**Classes:**
+- `CliffordNetEmbedding`
+
+**Functions:** `create_cliffordnet_embedding`, `create_cliffordnet_embedding_with_head`, `call`, `compute_output_shape`, `get_config` (and 2 more)
+
+*📁 File: `src/dl_techniques/models/cliffordnet/embedding_unet.py`*
+
+### models.cliffordnet.lm
+CliffordNet causal language model.
+
+**Classes:**
+- `CliffordNetLM`
+
+**Functions:** `call`, `compute_output_shape`, `get_config`, `from_config`, `from_variant`
+
+*📁 File: `src/dl_techniques/models/cliffordnet/lm.py`*
+
+### models.cliffordnet.lm_routing
+CliffordNet causal language model with hierarchical routing head.
+
+**Classes:**
+- `CliffordNetLMRouting`
+
+**Functions:** `call`, `compute_output_shape`, `get_config`, `from_config`, `from_variant`
+
+*📁 File: `src/dl_techniques/models/cliffordnet/lm_routing.py`*
+
+### models.cliffordnet.lmunet
+CliffordNet causal U-Net language model.
+
+**Classes:**
+- `CliffordNetLMUNet`
+
+**Functions:** `call`, `compute_output_shape`, `get_config`, `from_config`, `from_variant`
+
+*📁 File: `src/dl_techniques/models/cliffordnet/lmunet.py`*
+
+### models.cliffordnet.model
+CliffordNet isotropic vision model.
+
+**Classes:**
+- `CliffordNet`
+
+**Functions:** `create_cliffordnet`, `build`, `call`, `compute_output_shape`, `load_pretrained_weights` (and 7 more)
+
+*📁 File: `src/dl_techniques/models/cliffordnet/model.py`*
+
+### models.cliffordnet.power_sampling
+Power sampling for CliffordNet causal language models.
+
+**Classes:**
+- `PowerSamplingConfig`
+- `PowerSampler`
+
+**Functions:** `naive_temp_generate`, `mcmc_power_sample`, `max_swap`, `generate_standard`, `generate_text`
+
+*📁 File: `src/dl_techniques/models/cliffordnet/power_sampling.py`*
+
+### models.cliffordnet.unet
+CliffordNetUNet — generic multi-head U-Net built on CliffordNet geometric-algebra blocks.
+
+**Classes:**
+- `CliffordNetUNet`
+
+**Functions:** `create_cliffordnet_depth`, `call`, `get_config`, `call`, `get_config` (and 11 more)
+
+*📁 File: `src/dl_techniques/models/cliffordnet/unet.py`*
+
 ## Clip
 
 ### models.clip
@@ -244,7 +413,7 @@ CLIP (Contrastive Language-Image Pre-training) Model Implementation.
 **Classes:**
 - `CLIP`
 
-**Functions:** `create_clip_model`, `create_clip_variant`, `build`, `encode_image`, `encode_text` (and 4 more)
+**Functions:** `create_clip_model`, `create_clip_variant`, `build`, `encode_image`, `encode_text` (and 5 more)
 
 *📁 File: `src/dl_techniques/models/clip/model.py`*
 
@@ -382,6 +551,7 @@ DeepAR Probabilistic Forecasting Model.
 ## Depth_Anything
 
 ### models.depth_anything
+Depth Anything model package — public API.
 
 *📁 File: `src/dl_techniques/models/depth_anything/__init__.py`*
 
@@ -406,9 +576,19 @@ Depth Anything Implementation in Keras.
 **Classes:**
 - `DepthAnything`
 
-**Functions:** `create_depth_anything`, `build`, `call`, `compile`, `train_step` (and 2 more)
+**Functions:** `create_depth_anything`, `build`, `update_teacher_ema`, `from_pretrained_encoder`, `call` (and 6 more)
 
 *📁 File: `src/dl_techniques/models/depth_anything/model.py`*
+
+### models.depth_anything.teacher_ema
+Teacher EMA decay schedules + Keras callback for DepthAnything.
+
+**Classes:**
+- `TeacherEMACallback`
+
+**Functions:** `cosine_ema_schedule`, `linear_ema_schedule`, `step`, `on_train_batch_end`
+
+*📁 File: `src/dl_techniques/models/depth_anything/teacher_ema.py`*
 
 ## Detr
 
@@ -505,7 +685,7 @@ DistilBERT Model Implementation with Pretrained Support
   ```
 - `DistilBERT`
 
-**Functions:** `create_distilbert_with_head`, `call`, `get_config`, `call`, `load_pretrained_weights` (and 4 more)
+**Functions:** `create_distilbert_with_head`, `call`, `compute_output_shape`, `get_config`, `call` (and 5 more)
 
 *📁 File: `src/dl_techniques/models/distilbert/model.py`*
 
@@ -519,10 +699,10 @@ DistilBERT Model Implementation with Pretrained Support
 
 **Classes:**
 
-- `AttentionBlock` - Keras Layer
+- `AttentionBlockVLM` - Keras Layer
   Attention block with vision_heads-specific adaptations.
   ```python
-  AttentionBlock(dim: int, num_heads: int = 8, mlp_ratio: float = 4.0, ...)
+  AttentionBlockVLM(dim: int, num_heads: int = 8, mlp_ratio: float = 4.0, ...)
   ```
 
 **Functions:** `build`, `call`, `compute_output_shape`, `get_config`
@@ -679,7 +859,7 @@ This module implements the Gemma 3 Transformer Block, a fundamental component of
   Gemma3TransformerBlock(hidden_size: int, num_attention_heads: int, num_key_value_heads: int, ...)
   ```
 
-**Functions:** `build`, `compute_output_spec`, `call`, `get_config`
+**Functions:** `build`, `compute_output_spec`, `call`, `compute_output_shape`, `get_config`
 
 *📁 File: `src/dl_techniques/models/gemma/components.py`*
 
@@ -692,6 +872,22 @@ A complete implementation of the Gemma 3 architecture following Modern Keras 3
 **Functions:** `create_gemma3_generation`, `create_gemma3_classification`, `create_gemma3`, `call`, `from_variant` (and 1 more)
 
 *📁 File: `src/dl_techniques/models/gemma/gemma3.py`*
+
+## Gpt2
+
+### models.gpt2
+
+*📁 File: `src/dl_techniques/models/gpt2/__init__.py`*
+
+### models.gpt2.gpt2
+GPT-2 (Generative Pre-trained Transformer 2) model.
+
+**Classes:**
+- `GPT2`
+
+**Functions:** `create_gpt2`, `call`, `compute_output_shape`, `get_config`, `from_variant`
+
+*📁 File: `src/dl_techniques/models/gpt2/gpt2.py`*
 
 ## Hierarchical_Reasoning_Model
 
@@ -795,6 +991,77 @@ Kolmogorov-Arnold Network (KAN)
 
 *📁 File: `src/dl_techniques/models/latent_gmm_registration/model.py`*
 
+## Lewm
+
+### models.lewm
+
+*📁 File: `src/dl_techniques/models/lewm/__init__.py`*
+
+### models.lewm.config
+LeWM configuration dataclass.
+
+**Classes:**
+- `LeWMConfig`
+
+**Functions:** `to_dict`, `from_dict`, `input_image_shape`
+
+*📁 File: `src/dl_techniques/models/lewm/config.py`*
+
+### models.lewm.embedder
+ActionEmbedder — maps per-timestep action vectors to the model's embedding space.
+
+**Classes:**
+
+- `ActionEmbedder` - Keras Layer
+  Embed per-timestep action vectors to the model's embedding space.
+  ```python
+  ActionEmbedder(action_dim: int, smoothed_dim: int, emb_dim: int, ...)
+  ```
+
+**Functions:** `build`, `call`, `compute_output_shape`, `get_config`
+
+*📁 File: `src/dl_techniques/models/lewm/embedder.py`*
+
+### models.lewm.model
+LeWM — Learning the World with Minimal Supervision, Keras 3 port.
+
+**Classes:**
+- `LeWM`
+
+**Functions:** `encode_pixels`, `encode_actions`, `predict_next`, `call`, `rollout` (and 2 more)
+
+*📁 File: `src/dl_techniques/models/lewm/model.py`*
+
+### models.lewm.predictor
+ARPredictor — autoregressive next-state predictor for LeWM.
+
+**Classes:**
+
+- `ARPredictor` - Keras Layer
+  Autoregressive predictor with AdaLN-zero conditional Transformer stack.
+  ```python
+  ARPredictor(num_frames: int, depth: int, num_heads: int, ...)
+  ```
+
+**Functions:** `build`, `call`, `compute_output_shape`, `get_config`
+
+*📁 File: `src/dl_techniques/models/lewm/predictor.py`*
+
+### models.lewm.projector
+MLPProjector — 2-layer MLP used by LeWM for the projector and pred_proj.
+
+**Classes:**
+
+- `MLPProjector` - Keras Layer
+  2-layer MLP with intermediate normalization + GELU.
+  ```python
+  MLPProjector(input_dim: int, hidden_dim: int, output_dim: Optional[int] = None, ...)
+  ```
+
+**Functions:** `build`, `call`, `compute_output_shape`, `get_config`
+
+*📁 File: `src/dl_techniques/models/lewm/projector.py`*
+
 ## Mamba
 
 ### models.mamba
@@ -817,7 +1084,7 @@ Kolmogorov-Arnold Network (KAN)
   MambaResidualBlock(d_model: int, norm_epsilon: float = 1e-05, mamba_kwargs: Optional[Dict[str, Any]] = None, ...)
   ```
 
-**Functions:** `build`, `call`, `get_config`, `build`, `call` (and 3 more)
+**Functions:** `build`, `call`, `compute_output_shape`, `get_config`, `build` (and 5 more)
 
 *📁 File: `src/dl_techniques/models/mamba/components.py`*
 
@@ -837,7 +1104,7 @@ Kolmogorov-Arnold Network (KAN)
   Mamba2ResidualBlock(d_model: int, d_state: int, d_conv: int, ...)
   ```
 
-**Functions:** `build`, `call`, `get_config`, `call`, `get_config` (and 2 more)
+**Functions:** `build`, `call`, `compute_output_shape`, `get_config`, `call` (and 4 more)
 
 *📁 File: `src/dl_techniques/models/mamba/components_v2.py`*
 
@@ -877,7 +1144,7 @@ A lightweight convolutional decoder for image reconstruction.
   ConvDecoder(decoder_dims: List[int] = [512, 256, 128, 64], output_channels: int = 3, kernel_size: int = 3, ...)
   ```
 
-**Functions:** `build`, `call`, `get_config`
+**Functions:** `build`, `call`, `compute_output_shape`, `get_config`
 
 *📁 File: `src/dl_techniques/models/masked_autoencoder/conv_decoder.py`*
 
@@ -902,7 +1169,7 @@ A patch-based random masking strategy for self-supervised learning.
   PatchMasking(patch_size: int = 16, mask_ratio: float = 0.75, mask_value: Union[str, float] = 'learnable', ...)
   ```
 
-**Functions:** `build`, `call`, `get_config`
+**Functions:** `build`, `call`, `compute_output_shape`, `get_config`
 
 *📁 File: `src/dl_techniques/models/masked_autoencoder/patch_masking.py`*
 
@@ -959,6 +1226,94 @@ Mixture Density Network (MDN) Model.
 **Functions:** `build`, `call`, `sample`, `predict_with_uncertainty`, `compile` (and 6 more)
 
 *📁 File: `src/dl_techniques/models/mdn/model.py`*
+
+## Memory_Bank
+
+### models.memory_bank
+Memory bank package for dual-tap neural memory-augmented transformers.
+
+*📁 File: `src/dl_techniques/models/memory_bank/__init__.py`*
+
+### models.memory_bank.memory_banks
+Memory banks for dual-tap memory-augmented transformer.
+
+**Classes:**
+
+- `LongTermMemoryBank` - Keras Layer
+  Persistent long-term memory: ``S_lt`` slots of ``(K_lt, V_lt)``.
+  ```python
+  LongTermMemoryBank(s_lt: int, d_k: int, d_v: int, ...)
+  ```
+
+- `WorkingMemoryBank` - Keras Layer
+  Stateless projector that maps ``X_W (B, T, D)`` to ``(K_wm, V_wm)``.
+  ```python
+  WorkingMemoryBank(d_k: int, d_v: int, embed_dim: int, ...)
+  ```
+
+**Functions:** `build`, `call`, `assign_keys_from_kmeans`, `get_config`, `build` (and 3 more)
+
+*📁 File: `src/dl_techniques/models/memory_bank/memory_banks.py`*
+
+### models.memory_bank.memory_stats
+MemoryStats callback for WaveFieldMemoryLLM.
+
+**Classes:**
+- `MemoryStats`
+
+**Functions:** `on_train_batch_end`
+
+*📁 File: `src/dl_techniques/models/memory_bank/memory_stats.py`*
+
+### models.memory_bank.phase_scheduler
+4-phase curriculum scheduler for WaveFieldMemoryLLM.
+
+**Classes:**
+- `PhaseScheduler`
+
+**Functions:** `on_train_begin`, `on_train_batch_begin`, `get_config`
+
+*📁 File: `src/dl_techniques/models/memory_bank/phase_scheduler.py`*
+
+### models.memory_bank.read_controller
+Memory read controller — top-K STE retrieval + gated injection.
+
+**Classes:**
+
+- `MemoryReadController` - Keras Layer
+  Multi-head top-K STE retrieval with gated residual injection.
+  ```python
+  MemoryReadController(embed_dim: int, num_heads: int, d_k: int, ...)
+  ```
+
+**Functions:** `build`, `call`, `get_config`
+
+*📁 File: `src/dl_techniques/models/memory_bank/read_controller.py`*
+
+### models.memory_bank.wave_field_memory_llm
+WaveFieldMemoryLLM — sibling-stack memory-augmented LM.
+
+**Classes:**
+- `WaveFieldMemoryLLM`
+
+**Functions:** `linear_top_k_anneal`, `split_trainable_by_prefix`, `memory_llm_custom_objects`, `schedule`, `call` (and 7 more)
+
+*📁 File: `src/dl_techniques/models/memory_bank/wave_field_memory_llm.py`*
+
+### models.memory_bank.write_controller
+Memory write controller — projects pre-block hidden state into M_WM.
+
+**Classes:**
+
+- `MemoryWriteController` - Keras Layer
+  Project ``X_W (B, T, D)`` into right-padded ``(K_wm, V_wm)``.
+  ```python
+  MemoryWriteController(d_k: int, d_v: int, embed_dim: int, ...)
+  ```
+
+**Functions:** `build`, `call`, `compute_output_shape`, `get_config`
+
+*📁 File: `src/dl_techniques/models/memory_bank/write_controller.py`*
 
 ## Mini_Vec2Vec
 
@@ -1098,7 +1453,7 @@ MobileNetV4: Universal and Efficient Neural Networks for Mobile Applications
   ModernBertBltEmbeddings(vocab_size: int, hidden_size: int, max_position_embeddings: int, ...)
   ```
 
-**Functions:** `text_to_bytes`, `tokens_to_text`, `get_config`, `build`, `call` (and 6 more)
+**Functions:** `text_to_bytes`, `tokens_to_text`, `compute_output_shape`, `get_config`, `build` (and 9 more)
 
 *📁 File: `src/dl_techniques/models/modern_bert/components.py`*
 
@@ -1147,7 +1502,7 @@ ReasoningByteBERT: Combining ByteBERT with Hierarchical Reasoning
   ```
 - `ReasoningByteBERT`
 
-**Functions:** `create_reasoning_byte_bert_base`, `create_reasoning_byte_bert_large`, `create_reasoning_byte_bert_for_reasoning_tasks`, `create_fast_reasoning_byte_bert`, `validate` (and 20 more)
+**Functions:** `create_reasoning_byte_bert_base`, `create_reasoning_byte_bert_large`, `create_reasoning_byte_bert_for_reasoning_tasks`, `create_fast_reasoning_byte_bert`, `validate` (and 23 more)
 
 *📁 File: `src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py`*
 
@@ -1166,6 +1521,57 @@ MothNet: Bio-Mimetic Feature Generation for Few-Shot Learning.
 **Functions:** `create_cyborg_features`, `build`, `call`, `extract_features`, `extract_mb_features` (and 3 more)
 
 *📁 File: `src/dl_techniques/models/mothnet/model.py`*
+
+## Nam
+
+### models.nam
+
+*📁 File: `src/dl_techniques/models/nam/__init__.py`*
+
+### models.nam.cell
+Neural Arithmetic Module Cell — single reduction step.
+
+**Classes:**
+
+- `NAMCell` - Keras Layer
+  Single reduction step of the Neural Arithmetic Module.
+  ```python
+  NAMCell(config: NAMConfig, **kwargs)
+  ```
+
+**Functions:** `build`, `initialize_carry`, `call`, `get_config`, `from_config`
+
+*📁 File: `src/dl_techniques/models/nam/cell.py`*
+
+### models.nam.config
+Configuration for the Neural Arithmetic Module (NAM).
+
+**Classes:**
+- `NAMConfig`
+
+**Functions:** `to_dict`, `from_dict`
+
+*📁 File: `src/dl_techniques/models/nam/config.py`*
+
+### models.nam.model
+Neural Arithmetic Module (NAM) — full model.
+
+**Classes:**
+- `NAM`
+
+**Functions:** `build`, `initial_carry`, `call`, `from_variant`, `get_config` (and 1 more)
+
+*📁 File: `src/dl_techniques/models/nam/model.py`*
+
+### models.nam.tokenizer
+Character-level tokenizer for arithmetic expressions.
+
+**Classes:**
+- `ArithmeticTokenizer`
+
+**Functions:** `encode`, `decode`, `encode_batch`, `get_operator_mask`, `get_number_mask`
+
+*📁 File: `src/dl_techniques/models/nam/tokenizer.py`*
 
 ## Nano_Vlm
 
@@ -1224,7 +1630,7 @@ Denoiser Networks for Score-Based nanoVLM
   JointDenoiser(vision_dim: int, text_dim: int, hidden_dim: int = 1024, ...)
   ```
 
-**Functions:** `call`, `get_config`, `call`, `get_config`, `call` (and 5 more)
+**Functions:** `call`, `compute_output_shape`, `get_config`, `call`, `compute_output_shape` (and 10 more)
 
 *📁 File: `src/dl_techniques/models/nano_vlm_world_model/denoisers.py`*
 
@@ -1249,7 +1655,7 @@ Diffusion Schedulers for Score-Based nanoVLM
   DiffusionScheduler(num_timesteps: int = 1000, beta_schedule: Literal['linear', 'cosine', 'quadratic'] = 'linear', beta_start: float = 0.0001, ...)
   ```
 
-**Functions:** `add_noise`, `get_velocity`, `predict_start_from_noise`, `get_score_from_noise`, `step` (and 1 more)
+**Functions:** `add_noise`, `get_velocity`, `predict_start_from_noise`, `get_score_from_noise`, `step` (and 2 more)
 
 *📁 File: `src/dl_techniques/models/nano_vlm_world_model/scheduler.py`*
 
@@ -1355,7 +1761,7 @@ PowerMLP Model: Efficient Alternative to Kolmogorov-Arnold Networks
 *📁 File: `src/dl_techniques/models/prism/__init__.py`*
 
 ### models.prism.model
-PRISM: Partitioned Representation for Iterative Sequence Modeling.
+PRISM: Partitioned Representations for Iterative Sequence Modeling.
 
 **Classes:**
 - `PRISMModel`
@@ -1448,7 +1854,7 @@ Qwen3 text embedding and reranking.
 - `Qwen3EmbeddingModel`
 - `Qwen3RerankerModel`
 
-**Functions:** `build`, `call`, `get_config`, `build`, `call` (and 5 more)
+**Functions:** `build`, `call`, `compute_output_shape`, `get_config`, `build` (and 7 more)
 
 *📁 File: `src/dl_techniques/models/qwen/qwen3_embeddings.py`*
 
@@ -1464,7 +1870,7 @@ Qwen3-MEGA: Memory-Enhanced Graph-Augmented Language Model
   ```
 - `Qwen3MEGA`
 
-**Functions:** `create_qwen3_mega`, `build`, `call`, `get_config`, `call` (and 2 more)
+**Functions:** `create_qwen3_mega`, `build`, `call`, `compute_output_shape`, `get_config` (and 3 more)
 
 *📁 File: `src/dl_techniques/models/qwen/qwen3_mega.py`*
 
@@ -1520,7 +1926,7 @@ ResNet Model Implementation with Pretrained Support and Deep Supervision
 **Classes:**
 - `ResNet`
 
-**Functions:** `get_model_output_info`, `create_inference_model_from_training_model`, `create_resnet`, `call`, `load_pretrained_weights` (and 3 more)
+**Functions:** `create_resnet`, `call`, `load_pretrained_weights`, `from_variant`, `get_config` (and 1 more)
 
 *📁 File: `src/dl_techniques/models/resnet/model.py`*
 
@@ -1777,7 +2183,7 @@ Tiny Recursive Model (TRM) with Adaptive Computation Time (ACT).
 **Classes:**
 - `TRM`
 
-**Functions:** `build`, `initial_carry`, `call`, `get_config`
+**Functions:** `create_trm`, `build`, `initial_carry`, `call`, `get_config`
 
 *📁 File: `src/dl_techniques/models/tiny_recursive_model/model.py`*
 
@@ -1813,8 +2219,8 @@ TiRex hybrid architecture for probabilistic time series forecasting,
 
 *📁 File: `src/dl_techniques/models/tree_transformer/__init__.py`*
 
-### models.tree_transformer.model
-Tree Transformer: Grammar Induction with Hierarchical Attention
+### models.tree_transformer.components
+Tree Transformer sub-layer components.
 
 **Classes:**
 
@@ -1841,9 +2247,18 @@ Tree Transformer: Grammar Induction with Hierarchical Attention
   ```python
   TreeTransformerBlock(hidden_size: int, num_heads: int, intermediate_size: int, ...)
   ```
+
+**Functions:** `build`, `call`, `get_config`, `build`, `call` (and 7 more)
+
+*📁 File: `src/dl_techniques/models/tree_transformer/components.py`*
+
+### models.tree_transformer.model
+Tree Transformer: Grammar Induction with Hierarchical Attention
+
+**Classes:**
 - `TreeTransformer`
 
-**Functions:** `create_tree_transformer_with_head`, `build`, `call`, `get_config`, `build` (and 15 more)
+**Functions:** `create_tree_transformer`, `create_tree_transformer_with_head`, `compute_output_shape`, `call`, `load_pretrained_weights` (and 4 more)
 
 *📁 File: `src/dl_techniques/models/tree_transformer/model.py`*
 
@@ -1863,9 +2278,88 @@ Variational Autoencoder (VAE) Model Implementation
 
 *📁 File: `src/dl_techniques/models/vae/model.py`*
 
+## Video_Jepa
+
+### models.video_jepa
+Video-JEPA-Clifford model package.
+
+*📁 File: `src/dl_techniques/models/video_jepa/__init__.py`*
+
+### models.video_jepa.config
+Video-JEPA-Clifford configuration dataclass.
+
+**Classes:**
+- `VideoJEPAConfig`
+
+**Functions:** `patches_per_side`, `num_patches`, `input_image_shape`, `to_dict`, `from_dict`
+
+*📁 File: `src/dl_techniques/models/video_jepa/config.py`*
+
+### models.video_jepa.encoder
+Hybrid Video-JEPA-Clifford encoder (D-001).
+
+**Classes:**
+
+- `VideoJEPACliffordEncoder` - Keras Layer
+  Hybrid per-frame encoder: PatchEmbedding2D → sine2D PE → N × CliffordNetBlock.
+  ```python
+  VideoJEPACliffordEncoder(embed_dim: int, patch_size: int, img_size: int, ...)
+  ```
+
+**Functions:** `build`, `call`, `compute_output_shape`, `get_config`
+
+*📁 File: `src/dl_techniques/models/video_jepa/encoder.py`*
+
+### models.video_jepa.masking
+Tube mask generator for V-JEPA-style masked latent prediction (iter-2).
+
+**Classes:**
+
+- `TubeMaskGenerator` - Keras Layer
+  Sample a per-sample spatial tube mask.
+  ```python
+  TubeMaskGenerator(mask_ratio: float, patches_per_side: int, **kwargs)
+  ```
+
+**Functions:** `num_masked`, `num_patches`, `call`, `get_config`
+
+*📁 File: `src/dl_techniques/models/video_jepa/masking.py`*
+
+### models.video_jepa.model
+Top-level Video-JEPA-Clifford model.
+
+**Classes:**
+- `VideoJEPA`
+
+**Functions:** `metrics`, `encode_frames`, `call`, `stream_reset`, `stream_step` (and 2 more)
+
+*📁 File: `src/dl_techniques/models/video_jepa/model.py`*
+
+### models.video_jepa.predictor
+Video-JEPA-Clifford predictor (D-002, D-013).
+
+**Classes:**
+
+- `CausalSelfAttnMLPBlock` - Keras Layer
+  Plain causal self-attention + MLP block with LayerScale-identity init.
+  ```python
+  CausalSelfAttnMLPBlock(dim: int, num_heads: int = 4, dim_head: int = 16, ...)
+  ```
+
+- `VideoJEPAPredictor` - Keras Layer
+  Factorized spatial + causal-temporal Clifford predictor (pixels-only).
+  ```python
+  VideoJEPAPredictor(embed_dim: int, num_frames_max: int, patches_per_side: int, ...)
+  ```
+
+**Functions:** `build`, `call`, `compute_output_shape`, `get_config`, `build` (and 3 more)
+
+*📁 File: `src/dl_techniques/models/video_jepa/predictor.py`*
+
 ## Vit
 
 ### models.vit
+Vision Transformer (ViT) public API.
 
 *📁 File: `src/dl_techniques/models/vit/__init__.py`*
 
@@ -1875,7 +2369,7 @@ Vision Transformer (ViT) Model Implementation
 **Classes:**
 - `ViT`
 
-**Functions:** `create_vision_transformer`, `build`, `call`, `compute_output_shape`, `get_config` (and 2 more)
+**Functions:** `create_vit`, `build`, `call`, `compute_output_shape`, `get_config` (and 4 more)
 
 *📁 File: `src/dl_techniques/models/vit/model.py`*
 
@@ -1926,6 +2420,28 @@ Vector Quantised Variational AutoEncoder (VQ-VAE) Implementation.
 **Functions:** `call`, `train_step`, `test_step`, `metrics`, `encode` (and 6 more)
 
 *📁 File: `src/dl_techniques/models/vq_vae/model.py`*
+
+## Wave_Field_Llm
+
+### models.wave_field_llm
+
+*📁 File: `src/dl_techniques/models/wave_field_llm/__init__.py`*
+
+### models.wave_field_llm.wave_field_llm
+WaveFieldLLM — decoder-only LM with WaveFieldAttention.
+
+**Classes:**
+
+- `WaveFieldDecoderBlock` - Keras Layer
+  Pre-norm transformer decoder block with :class:`WaveFieldAttention`.
+  ```python
+  WaveFieldDecoderBlock(embed_dim: int, num_heads: int, max_seq_len: int, ...)
+  ```
+- `WaveFieldLLM`
+
+**Functions:** `build`, `call`, `compute_output_shape`, `get_config`, `call` (and 3 more)
+
+*📁 File: `src/dl_techniques/models/wave_field_llm/wave_field_llm.py`*
 
 ## Xlstm
 

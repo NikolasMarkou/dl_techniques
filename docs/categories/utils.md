@@ -2,7 +2,7 @@
 
 Utility functions and helpers
 
-**59 modules in this category**
+**72 modules in this category**
 
 ## Alignment
 
@@ -117,11 +117,14 @@ This module provides a comprehensive, object-oriented toolkit for loading, analy
 
 *📁 File: `src/dl_techniques/datasets/arc/arc_utilities.py`*
 
-## Bias_Free_Denoiser
+## Bdd100K_Video
 
-### applications.bias_free_denoiser
+### datasets.bdd100k_video
+BDD100K video clip dataset for Video-JEPA-Clifford training.
 
-*📁 File: `src/dl_techniques/applications/bias_free_denoiser/__init__.py`*
+**Functions:** `bdd100k_video_dataset`
+
+*📁 File: `src/dl_techniques/datasets/bdd100k_video.py`*
 
 ## Bounding_Box
 
@@ -131,6 +134,30 @@ Object Detection IoU Utility Module
 **Functions:** `bbox_iou`, `bbox_nms`
 
 *📁 File: `src/dl_techniques/utils/bounding_box.py`*
+
+## Coco_Map_Callback
+
+### callbacks.coco_map_callback
+COCO mAP evaluation callback for CliffordNet multi-task detection.
+
+**Classes:**
+- `COCOMAPCallback`
+
+**Functions:** `on_epoch_end`
+
+*📁 File: `src/dl_techniques/callbacks/coco_map_callback.py`*
+
+## Coco_Multitask_Visualization
+
+### callbacks.coco_multitask_visualization
+COCO multi-task visualization callback.
+
+**Classes:**
+- `COCOMultiTaskPredictionGridCallback`
+
+**Functions:** `on_epoch_end`
+
+*📁 File: `src/dl_techniques/callbacks/coco_multitask_visualization.py`*
 
 ## Conformal_Forecaster
 
@@ -164,10 +191,6 @@ Conformal Prediction for Time Series Forecasting.
 
 *📁 File: `src/dl_techniques/__init__.py`*
 
-### applications
-
-*📁 File: `src/dl_techniques/applications/__init__.py`*
-
 ### callbacks
 
 *📁 File: `src/dl_techniques/callbacks/__init__.py`*
@@ -193,6 +216,56 @@ Keras-only implementation of image corruption functions with severity enum.
 
 *📁 File: `src/dl_techniques/utils/corruption.py`*
 
+## Deep_Supervision
+
+### utils.deep_supervision
+Deep-supervision plumbing helpers.
+
+**Functions:** `get_model_output_info`, `create_inference_model_from_training_model`
+
+*📁 File: `src/dl_techniques/utils/deep_supervision.py`*
+
+## Depth_Visualization
+
+### callbacks.depth_visualization
+Depth estimation visualization callbacks.
+
+**Classes:**
+- `DepthPredictionGridCallback`
+- `DepthMetricsCurveCallback`
+
+**Functions:** `on_epoch_end`, `on_epoch_end`
+
+*📁 File: `src/dl_techniques/callbacks/depth_visualization.py`*
+
+## Drop_Path
+
+### utils.drop_path
+Drop-path (stochastic depth) rate schedules.
+
+**Functions:** `linear_drop_path_rates`
+
+*📁 File: `src/dl_techniques/utils/drop_path.py`*
+
+## Export
+
+### utils.export
+
+*📁 File: `src/dl_techniques/utils/export/__init__.py`*
+
+### utils.export.onnx
+ONNX Export Utility for Keras 3 Models
+
+**Functions:** `export_keras_model_to_onnx`, `export_with_dynamic_batch`, `get_onnx_model_info`, `model_func`
+
+*📁 File: `src/dl_techniques/utils/export/onnx.py`*
+
+### utils.export.tflite
+
+**Functions:** `export_tirex_to_tflite`, `verify_tflite`
+
+*📁 File: `src/dl_techniques/utils/export/tflite.py`*
+
 ## Filesystem
 
 ### utils.filesystem
@@ -212,19 +285,6 @@ Forecastability Assessment Framework.
 **Functions:** `permutation_entropy`, `auto_permutation_entropy`, `calculate_naive_baselines`, `forecast_value_added`, `assess_forecastability`
 
 *📁 File: `src/dl_techniques/utils/forecastability_analyzer.py`*
-
-## Geometric
-
-### applications.geometric
-
-*📁 File: `src/dl_techniques/applications/geometric/__init__.py`*
-
-### applications.geometric.examples
-Comprehensive examples of what you can build with the spatial layers.
-
-**Functions:** `build_point_cloud_classifier`, `build_point_cloud_segmentation`, `build_3d_scene_understanding`, `build_vision_language_model`, `build_multi_sensor_fusion` (and 8 more)
-
-*📁 File: `src/dl_techniques/applications/geometric/examples.py`*
 
 ## Geometry
 
@@ -265,6 +325,19 @@ Full Image Inference Utilities for YOLOv12 Multi-task Model.
 
 *📁 File: `src/dl_techniques/utils/inference.py`*
 
+## Jepa_Visualization
+
+### callbacks.jepa_visualization
+JEPA latent-masking visualization callbacks.
+
+**Classes:**
+- `LatentMaskOverlayCallback`
+- `PatchPredictionErrorCallback`
+
+**Functions:** `on_train_begin`, `on_epoch_end`, `on_train_begin`, `on_epoch_end`
+
+*📁 File: `src/dl_techniques/callbacks/jepa_visualization.py`*
+
 ## Logger
 
 ### utils.logger
@@ -296,6 +369,15 @@ Advanced Masking and Corruption Strategies
 
 *📁 File: `src/dl_techniques/utils/masking/strategies.py`*
 
+## Nlp
+
+### datasets.nlp
+NLP dataset loaders for text-based training pipelines.
+
+**Functions:** `load_wikipedia_train_val`, `load_hf_text_dataset`, `generator`, `generator`
+
+*📁 File: `src/dl_techniques/datasets/nlp.py`*
+
 ## Patch_Transforms
 
 ### datasets.patch_transforms
@@ -315,6 +397,18 @@ Coordinate Transformation Utilities for Patch-based Multi-task Learning.
 **Functions:** `create_patch_grid`, `aggregate_patch_results`, `width`, `height`, `center_x` (and 13 more)
 
 *📁 File: `src/dl_techniques/datasets/patch_transforms.py`*
+
+## Pusht_Hdf5
+
+### datasets.pusht_hdf5
+PushT HDF5 dataset loader + synthetic LeWM dataset generator.
+
+**Classes:**
+- `PushTHDF5Dataset`
+
+**Functions:** `synthetic_lewm_dataset`, `gen`, `as_tf_dataset`, `gen`
+
+*📁 File: `src/dl_techniques/datasets/pusht_hdf5.py`*
 
 ## Random
 
@@ -359,6 +453,15 @@ TensorFlow-Native SUT-Crack Dataset Patch-based Loader - Optimized Version.
 **Functions:** `create_sut_crack_dataset`, `width`, `height`, `center_x`, `center_y` (and 34 more)
 
 *📁 File: `src/dl_techniques/datasets/sut.py`*
+
+## Synthetic_Drone_Video
+
+### datasets.synthetic_drone_video
+Synthetic drone-video dataset generator for Video-JEPA-Clifford smoke training.
+
+**Functions:** `synthetic_drone_video_dataset`, `gen`
+
+*📁 File: `src/dl_techniques/datasets/synthetic_drone_video.py`*
 
 ## Tabular
 
@@ -497,6 +600,18 @@ Tiktoken Preprocessor for BERT-style Inputs.
 
 *📁 File: `src/dl_techniques/utils/train.py`*
 
+## Training_Curves
+
+### callbacks.training_curves
+Training curves callback — save per-epoch metric curves as PNGs.
+
+**Classes:**
+- `TrainingCurvesCallback`
+
+**Functions:** `on_epoch_end`
+
+*📁 File: `src/dl_techniques/callbacks/training_curves.py`*
+
 ## Universal_Dataset_Loader
 
 ### datasets.universal_dataset_loader
@@ -526,6 +641,17 @@ COCO Dataset Preprocessor for YOLOv12 Pre-training.
 **Functions:** `create_dummy_coco_dataset`, `create_coco_dataset`, `num_classes`, `from_class_names`, `coco_default` (and 8 more)
 
 *📁 File: `src/dl_techniques/datasets/vision/coco.py`*
+
+### datasets.vision.coco_multitask_local
+Local COCO 2017 multi-task loader — image classification + semantic segmentation.
+
+**Classes:**
+- `COCOMultiTaskConfig`
+- `COCO2017MultiTaskLoader`
+
+**Functions:** `build_coco_multitask_datasets`, `on_epoch_end`, `probe`
+
+*📁 File: `src/dl_techniques/datasets/vision/coco_multitask_local.py`*
 
 ### datasets.vision.common
 Reusable dataset builders for common vision datasets.
@@ -582,3 +708,24 @@ Vision Question Answering (VQA) Data Processor for nanoVLM Training.
 **Functions:** `create_vqa_dataset`, `load_cauldron_sample`, `load_cauldron_from_json`, `encode`, `decode` (and 5 more)
 
 *📁 File: `src/dl_techniques/datasets/vqa_dataset.py`*
+
+## Weight_Transfer
+
+### utils.weight_transfer
+Generic layer-by-layer weight transfer for Keras 3 models.
+
+**Classes:**
+- `TransferReport`
+
+**Functions:** `load_weights_from_checkpoint`, `num_loaded`, `num_shape_mismatch`, `summary_string`
+
+*📁 File: `src/dl_techniques/utils/weight_transfer.py`*
+
+## Yolo_Decode
+
+### utils.yolo_decode
+YOLOv12 prediction decoder — standalone utilities for inference / mAP eval.
+
+**Functions:** `make_anchors_np`, `decode_dfl_logits`, `dist_to_xyxy`, `decode_predictions`, `nms_per_class`
+
+*📁 File: `src/dl_techniques/utils/yolo_decode.py`*

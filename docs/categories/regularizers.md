@@ -2,7 +2,7 @@
 
 Regularization techniques
 
-**7 modules in this category**
+**8 modules in this category**
 
 ## Binary_Preference
 
@@ -47,6 +47,23 @@ A generalized L2 regularization penalty supporting weight decay or growth.
 
 *📁 File: `src/dl_techniques/regularizers/l2_custom.py`*
 
+## Sigreg
+
+### regularizers.sigreg
+SIGReg — Sketch Isotropic Gaussian Regularizer.
+
+**Classes:**
+
+- `SIGRegLayer` - Keras Layer
+  Sketch Isotropic Gaussian Regularizer as a Keras Layer.
+  ```python
+  SIGRegLayer(knots: int = 17, num_proj: int = 1024, seed: Optional[int] = None, ...)
+  ```
+
+**Functions:** `build`, `call`, `compute_output_shape`, `get_config`
+
+*📁 File: `src/dl_techniques/regularizers/sigreg.py`*
+
 ## Soft_Orthogonal
 
 ### regularizers.soft_orthogonal
@@ -56,7 +73,7 @@ Theory and Implementation of Soft Orthogonality and Orthonormality Constraints
 - `SoftOrthogonalConstraintRegularizer`
 - `SoftOrthonormalConstraintRegularizer`
 
-**Functions:** `get_config`, `get_config`
+**Functions:** `get_config`
 
 *📁 File: `src/dl_techniques/regularizers/soft_orthogonal.py`*
 
@@ -80,6 +97,6 @@ Encourage network weights to adopt ternary values (-1, 0, or 1).
 **Classes:**
 - `TriStatePreferenceRegularizer`
 
-**Functions:** `get_config`, `from_config`
+**Functions:** `get_config`
 
 *📁 File: `src/dl_techniques/regularizers/tri_state_preference.py`*
