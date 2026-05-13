@@ -1,0 +1,12 @@
+task,model,params,epochs_used,wall_s,soft_test_acc,exact_acc,hard_test_acc,hard_exact_acc,roundtrip_diff
+parity_k6,circuit,513,23,28.54,1.0,1.0,1.0,1.0,0.0
+parity_k6,mlp_matched,533,27,13.22,1.0,1.0,,,0.0
+parity_k6,mlp_large,1313,25,11.38,1.0,1.0,,,0.0
+majority_k6,circuit,513,21,25.12,1.0,1.0,1.0,1.0,0.0
+majority_k6,mlp_matched,533,22,10.85,1.0,1.0,,,0.0
+majority_k6,mlp_large,1313,21,11.21,1.0,1.0,,,0.0
+multiplexer_6,circuit,513,22,27.65,1.0,1.0,1.0,1.0,0.0
+multiplexer_6,mlp_matched,533,22,10.16,1.0,1.0,,,0.0
+multiplexer_6,mlp_large,1313,21,9.72,1.0,1.0,,,0.0
+shift_xor_k8,circuit,2172,22,26.66,0.9637,0.9697,0.9567,0.9619,0.0
+shift_xor_k8,mlp_large,1608,22,11.83,0.9919,0.9912,,,0.0
