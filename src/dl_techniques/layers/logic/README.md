@@ -171,12 +171,15 @@ routing should pin `CircuitDepthLayer(circuit_routing='classic')`.
   fully supported.
 - **No internal projection.** Output channel count equals input channel
   count. Pair with a `Dense` / `Conv` if you need dimensionality change.
-- **Stacking `LearnableLogicOperator` re-squashes via sigmoid every layer.**
-  By default each call applies `sigmoid` to both inputs, so the output of one
-  logic layer fed into the next collapses toward `0.5` within 2-3 layers
-  (empirical: input std `1.76 -> 0.06 -> 0.003 -> 0.0` across three default
-  layers). For stacked use, pass `apply_sigmoid=False` to all but the first
-  layer (and feed it inputs already in `[0, 1]`).
+- **Stacking `LearnableLogicOperator` re-squashes via sigmoid every layer
+  WHEN `apply_sigmoid_per_depth='all'`.** With the default
+  `apply_sigmoid_per_depth='first_only'` (set on `LearnableNeuralCircuit`)
+  only the first depth applies sigmoid; subsequent depths receive `[0, 1]`
+  values from the prior fuzzy output, optionally force-clipped (see
+  `force_logic_input_clip`). The empirical collapse `1.76 -> 0.06 -> 0.003`
+  was measured under the legacy `'all'` mode. For stacked use, prefer
+  `'first_only'` or pass `apply_sigmoid=False` directly to all but the
+  first inner op.
 - **`divide` op has unbounded gradients near zero.** `_safe_divide` clamps the
   forward output (so no NaN/Inf), but `d(x1/x2)/dx2 -> -x1/eps^2` as `|x2|`
   approaches zero. If `divide` is in the softmax pool and inputs can be small,
@@ -286,6 +289,40 @@ New callback:
 - `dl_techniques.callbacks.temperature_annealing.TemperatureAnnealingCallback`
   — anneals `temperature` across epochs with cosine / linear / exp schedule.
   Honors `softplus_temperature=True` by setting raw = `log(expm1(t))`.
+
+## Changes in plan_2026-05-13_e33114da
+
+Post-rewrite review fixes. All changes are back-compatible by default; new
+flags opt-in. See `plans/plan_2026-05-13_e33114da/summary.md` for details.
+
+| Change | Class / API | Default | Notes |
+|---|---|---|---|
+| **Bug fix**: `hamacher_or(1,1) → 1` (was 0) and `hamacher_and(0,0) → 0` | `LearnableLogicOperator` | — | Unified eps strategy via `ops.where` at singular corners. |
+| **Bug fix**: Gumbel-softmax is deterministic at inference | `_operation_probs(training=...)` | — | `training is True` injects noise; `False`/`None` skips. |
+| **Bug fix**: per-channel `gate_entropy_coefficient` aux loss properly penalizes per-channel peakiness | `CircuitDepthLayer` | — | Was averaged-then-L2 (let channel-wise peakiness escape); now per-channel L2 then mean. |
+| **Bug fix**: `risky_stack` widened to include `use_residual=True` | `LearnableNeuralCircuit` | — | Force-clip on depth>=1 inner logic ops when first_only mode + residual or arithmetic experts. |
+| `diversity_coefficient` reachable through wrapper + factory | `LearnableNeuralCircuit(diversity_coefficient=..)` | `0.0` | Was only on `CircuitDepthLayer`; silently dropped by factory before. |
+| `inner_logic_kwargs` / `inner_arithmetic_kwargs` | `CircuitDepthLayer`, `LearnableNeuralCircuit` | `None` | Dict forwarded to inner ops (e.g., `temperature_init`, `gumbel_softmax`, `yager_p`). Wrapper-owned keys win; collisions warned. |
+| `to_symbolic()` on `CircuitDepthLayer` | new method | — | Standalone summary; wrapper delegates per depth. |
+| Łukasiewicz / Reichenbach / Goguen implications | new VALID_OPS | not in defaults | `lukasiewicz_implies`, `reichenbach_implies`, `goguen_implies`. |
+| Factory enum pre-validation | `validate_logic_config` | — | `selection_mode`, `circuit_routing`, `safe_divide_mode`, `apply_sigmoid_per_depth`, `channel_mix`, `exponent_clip_mode` validated upfront. |
+| Vectorized diversity loss | `CircuitDepthLayer._maybe_diversity_loss` | — | Per-arity Gram matrix; no Python pair loop. |
+| Sign-preserving `scaling_factor` | `LearnableArithmeticOperator` | — | Magnitude clamped to `>= 1e-7`; sign now learnable (was `abs()`-clamped). |
+| `exponent_clip_mode='smooth'` | `LearnableArithmeticOperator(exponent_clip_mode=..)` | `'hard'` | Tanh-based range squash; non-zero gradient at the boundary. |
+| `compute_output_shape` validates binary-input shape consistency | both operators | — | Raises on mismatch (was only checked in `build`). |
+
+**`entropy_coefficient` semantics clarification** (no code change): the
+loss is `coef * H(probs)`. Because total loss is minimized, this *sharpens*
+the operator selection (penalizes high entropy). This is opposite of the
+NAS convention where entropy regularization encourages exploration. The
+current direction is appropriate paired with `zeros` initializer — set
+`entropy_coefficient > 0` if you want faster symmetry-breaking; leave at
+`0.0` for the default soft mixture.
+
+**`scaling_factor` is magnitude-clamped** (no code change to the contract):
+the absolute value is clamped to `>= 1e-7`; the sign is preserved from
+the learned weight. Initialization must still be positive (`scaling_init`
+validation enforces this), but training can drive the sign to negative.
 
 ## References
 

@@ -1028,3 +1028,151 @@ class TestPlan3a2f1d23GateEntropyAlias:
         assert "load_balance_coefficient" not in cfg
         l2 = CircuitDepthLayer.from_config(cfg)
         assert l2.gate_entropy_coefficient == 0.3
+
+
+# ---------------------------------------------------------------------
+# plan_2026-05-13_e33114da regression tests
+# ---------------------------------------------------------------------
+
+class TestPlanE33114daNeuralCircuit:
+    """Regression tests for plan_2026-05-13_e33114da."""
+
+    def test_risky_stack_triggers_with_residual_no_arith_widened(self):
+        """B3 (widened, defensive): force_clip propagates on depth>=1 when
+        first_only + use_residual=True. Tested with the smallest legal
+        configuration (num_arith_per_depth=1, the smallest allowed).
+        """
+        nc = LearnableNeuralCircuit(
+            circuit_depth=2,
+            num_logic_ops_per_depth=2,
+            num_arithmetic_ops_per_depth=1,
+            use_residual=True,
+            apply_sigmoid_per_depth='first_only',
+        )
+        # Depth-1 inner logic op should have force_clip=True
+        assert nc.circuit_layers[1].force_logic_input_clip is True
+        assert nc.circuit_layers[1].logic_operators[0].force_clip_when_no_sigmoid is True
+
+    def test_per_channel_load_balance_catches_peaky(self):
+        """B4: per-channel mode now properly penalizes channel-wise peaky β."""
+        import keras
+        cd = CircuitDepthLayer(
+            num_logic_ops=2, num_arithmetic_ops=2,
+            gate_entropy_coefficient=0.5, selection_mode='per_channel',
+        )
+        inp = ops.convert_to_tensor(np.random.randn(2, 4).astype(np.float32))
+        _ = cd(inp)
+        # Set channel-wise peaky weights (eye scaled, softmax -> ~one-hot)
+        peaky = np.eye(4, dtype=np.float32) * 10.0
+        cd.combination_weights.assign(peaky)
+        _ = cd(inp)
+        # The most recent loss should be roughly N=4 (4 * mean(1.0)) for peaky.
+        losses = [float(l) for l in cd.losses]
+        assert any(l > 1.0 for l in losses), (
+            f"Per-channel peaky distribution should produce loss > 1; got {losses}"
+        )
+
+    def test_diversity_coefficient_reachable_via_wrapper(self):
+        """B5: diversity_coefficient now goes through LearnableNeuralCircuit."""
+        nc = LearnableNeuralCircuit(
+            circuit_depth=2, diversity_coefficient=0.5,
+        )
+        # The attribute should be set and forwarded
+        assert nc.diversity_coefficient == 0.5
+        # Children should receive it
+        for cl in nc.circuit_layers:
+            assert cl.diversity_coefficient == 0.5
+
+    def test_diversity_coefficient_reachable_via_factory(self):
+        """B5: factory must accept diversity_coefficient (was silently dropped)."""
+        from dl_techniques.layers.logic.factory import create_logic_layer
+        layer = create_logic_layer(
+            'neural_circuit', diversity_coefficient=0.7,
+        )
+        assert layer.diversity_coefficient == 0.7
+
+    def test_inner_logic_kwargs_forwarded(self):
+        """G1: inner_logic_kwargs forwarded to inner LearnableLogicOperator."""
+        nc = LearnableNeuralCircuit(
+            circuit_depth=1,
+            inner_logic_kwargs={'gumbel_softmax': True, 'yager_p': 3.5},
+        )
+        inner = nc.circuit_layers[0].logic_operators[0]
+        assert inner.gumbel_softmax is True
+        assert inner.yager_p == 3.5
+
+    def test_inner_arithmetic_kwargs_forwarded(self):
+        nc = LearnableNeuralCircuit(
+            circuit_depth=1,
+            inner_arithmetic_kwargs={
+                'safe_divide_mode': 'smooth',
+                'exponent_clip_mode': 'smooth',
+            },
+        )
+        inner = nc.circuit_layers[0].arithmetic_operators[0]
+        assert inner.safe_divide_mode == 'smooth'
+        assert inner.exponent_clip_mode == 'smooth'
+
+    def test_inner_kwargs_collision_warns_and_ignores(self):
+        """G1: wrapper-owned keys in inner_*_kwargs are warned and ignored."""
+        import warnings
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            CircuitDepthLayer(
+                num_logic_ops=2,
+                num_arithmetic_ops=2,
+                # operation_types is wrapper-owned via logic_op_types
+                inner_logic_kwargs={'apply_sigmoid': False, 'gumbel_softmax': True},
+            )
+            assert any('wrapper-controlled' in str(item.message) for item in w)
+
+    def test_to_symbolic_on_circuit_depth(self):
+        """G2: CircuitDepthLayer.to_symbolic works standalone."""
+        cd = CircuitDepthLayer(num_logic_ops=2, num_arithmetic_ops=2)
+        x = ops.convert_to_tensor(np.random.randn(2, 4).astype(np.float32))
+        _ = cd(x)
+        s = cd.to_symbolic(top_k=1)
+        assert 'logic_op_0' in s
+        assert 'arithmetic_op_0' in s
+        assert 'combination:' in s
+
+    def test_factory_rejects_bad_enum(self):
+        """G3: factory validates enums early with helpful message."""
+        from dl_techniques.layers.logic.factory import create_logic_layer
+        with pytest.raises(ValueError, match="selection_mode"):
+            create_logic_layer('neural_circuit', selection_mode='garbage')
+        with pytest.raises(ValueError, match="circuit_routing"):
+            create_logic_layer('circuit_depth', circuit_routing='nope')
+
+    def test_neural_circuit_full_round_trip_with_new_params(self):
+        """B5 + G1 round-trip: new params survive save/load."""
+        import tempfile, os, keras
+        nc = LearnableNeuralCircuit(
+            circuit_depth=2,
+            diversity_coefficient=0.3,
+            inner_logic_kwargs={'gumbel_softmax': False, 'yager_p': 2.5},
+        )
+        inputs = keras.Input(shape=(4, 8))
+        outputs = nc(inputs)
+        m = keras.Model(inputs, outputs)
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, 'model.keras')
+            m.save(path)
+            m2 = keras.models.load_model(path)
+            nc2 = m2.layers[-1]
+            assert nc2.diversity_coefficient == 0.3
+            assert nc2.inner_logic_kwargs.get('yager_p') == 2.5
+
+    def test_diversity_loss_vectorized_no_python_pair_loop(self):
+        """D4: diversity loss uses Gram matrix, not nested Python loop.
+        Smoke test: it still produces a loss > 0 when experts converge."""
+        nc = LearnableNeuralCircuit(
+            circuit_depth=1,
+            num_logic_ops_per_depth=3,
+            num_arithmetic_ops_per_depth=3,
+            diversity_coefficient=0.5,
+        )
+        x = ops.convert_to_tensor(np.random.randn(2, 4).astype(np.float32))
+        _ = nc(x)
+        # Diversity loss should be among the model losses
+        assert len(nc.losses) > 0

@@ -690,3 +690,81 @@ class TestPlan3a2f1d23ArithmeticPerChannelC3:
     def test_invalid_selection_mode_raises(self):
         with pytest.raises(ValueError, match="selection_mode"):
             LearnableArithmeticOperator(selection_mode='bogus')
+
+
+# ---------------------------------------------------------------------
+# plan_2026-05-13_e33114da regression tests
+# ---------------------------------------------------------------------
+
+class TestPlanE33114daArithmetic:
+    """Regression tests for plan_2026-05-13_e33114da."""
+
+    def test_gumbel_deterministic_at_inference(self):
+        """B2: arithmetic Gumbel is deterministic at training=False."""
+        keras.utils.set_random_seed(0)
+        op = LearnableArithmeticOperator(
+            gumbel_softmax=True, operation_types=['add', 'multiply', 'subtract'],
+        )
+        x = ops.convert_to_tensor(np.random.randn(2, 4).astype(np.float32))
+        op.build(x.shape)
+        o1 = ops.convert_to_numpy(op([x, x], training=False))
+        o2 = ops.convert_to_numpy(op([x, x], training=False))
+        np.testing.assert_allclose(o1, o2, atol=1e-7)
+
+    def test_scaling_factor_sign_preserved(self):
+        """D5: negative scaling_factor produces sign-flipped output."""
+        op = LearnableArithmeticOperator(
+            operation_types=['add'], use_scaling=True, scaling_init=1.0,
+        )
+        x = ops.convert_to_tensor(np.array([[1.0, 2.0]], dtype=np.float32))
+        op([x, x])  # build
+        # Set scale to negative
+        op.scaling_factor.assign(np.array(-2.0, dtype=np.float32))
+        y = ops.convert_to_numpy(op([x, x]))
+        # add(x, x) = 2x = [[2, 4]]; * -2 = [[-4, -8]]
+        np.testing.assert_allclose(y, [[-4.0, -8.0]], atol=1e-5)
+
+    def test_exponent_clip_mode_smooth_gradient(self):
+        """D7: smooth exponent_clip has non-zero gradient even outside range."""
+        import tensorflow as tf
+        op = LearnableArithmeticOperator(
+            operation_types=['power'],
+            exponent_clip_mode='smooth',
+            exponent_clip_range=(-2.0, 2.0),
+            use_scaling=False,
+        )
+        base = tf.constant([[2.0]], dtype=tf.float32)
+        # exponent OUTSIDE the clip range -> hard mode would have zero gradient
+        exp_val = tf.Variable(3.0, dtype=tf.float32)
+        with tf.GradientTape() as tape:
+            x2 = tf.reshape(exp_val, (1, 1))
+            y = op([base, x2])
+        grad = tape.gradient(y, exp_val)
+        assert grad is not None and abs(float(grad.numpy())) > 1e-7, (
+            f"Smooth mode gradient should be non-zero outside clip range; got {grad}"
+        )
+
+    def test_exponent_clip_mode_hard_default(self):
+        """D7: default exponent_clip_mode is 'hard' (back-compat)."""
+        op = LearnableArithmeticOperator(operation_types=['power'])
+        assert op.exponent_clip_mode == 'hard'
+
+    def test_exponent_clip_mode_round_trip(self):
+        """D7: exponent_clip_mode survives get_config / from_config."""
+        op = LearnableArithmeticOperator(
+            operation_types=['power'], exponent_clip_mode='smooth'
+        )
+        cfg = op.get_config()
+        assert cfg['exponent_clip_mode'] == 'smooth'
+        op2 = LearnableArithmeticOperator.from_config(cfg)
+        assert op2.exponent_clip_mode == 'smooth'
+
+    def test_compute_output_shape_rejects_mismatched_binary(self):
+        """D9: compute_output_shape raises on shape mismatch."""
+        op = LearnableArithmeticOperator(operation_types=['add'])
+        with pytest.raises(ValueError, match="same shape"):
+            op.compute_output_shape([(None, 32), (None, 16)])
+
+    def test_invalid_exponent_clip_mode_raises(self):
+        with pytest.raises(ValueError, match="exponent_clip_mode"):
+            LearnableArithmeticOperator(exponent_clip_mode='bogus')

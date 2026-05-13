@@ -853,3 +853,96 @@ class TestPlan3a2f1d23LogicPerChannelC3:
         x = ops.convert_to_tensor(np.random.randn(2, 4, 4, 6).astype(np.float32))
         y = op(x)
         assert y.shape == (2, 4, 4, 6)
+
+
+# ---------------------------------------------------------------------
+# plan_2026-05-13_e33114da regression tests
+# ---------------------------------------------------------------------
+
+class TestPlanE33114daLogic:
+    """Regression tests for plan_2026-05-13_e33114da (post-rewrite review)."""
+
+    def test_hamacher_or_boundary_one_one(self):
+        """B1: Hamacher OR at (1, 1) must equal 1 (was 0)."""
+        op = LearnableLogicOperator(
+            operation_types=['hamacher_or'], allow_unary_degenerate=True
+        )
+        x_one = ops.convert_to_tensor(np.array([[1.0, 1.0, 1.0]], dtype=np.float32))
+        # Bypass sigmoid by going via the private method directly
+        op.build((None, 3))
+        result = ops.convert_to_numpy(op._hamacher_or(x_one, x_one))
+        np.testing.assert_allclose(result, 1.0, atol=1e-5)
+
+    def test_hamacher_and_boundary_zero_zero(self):
+        """B1: Hamacher AND at (0, 0) must equal 0."""
+        op = LearnableLogicOperator(
+            operation_types=['hamacher_and'], allow_unary_degenerate=True
+        )
+        x_zero = ops.convert_to_tensor(np.array([[0.0, 0.0]], dtype=np.float32))
+        op.build((None, 2))
+        result = ops.convert_to_numpy(op._hamacher_and(x_zero, x_zero))
+        np.testing.assert_allclose(result, 0.0, atol=1e-5)
+
+    def test_hamacher_or_continuity_near_one(self):
+        """Hamacher OR should be continuous near (1,1) corner."""
+        op = LearnableLogicOperator(
+            operation_types=['hamacher_or'], allow_unary_degenerate=True
+        )
+        op.build((None, 1))
+        x_near = ops.convert_to_tensor(np.array([[0.999]], dtype=np.float32))
+        x_one = ops.convert_to_tensor(np.array([[1.0]], dtype=np.float32))
+        near = float(ops.convert_to_numpy(op._hamacher_or(x_near, x_near)))
+        at = float(ops.convert_to_numpy(op._hamacher_or(x_one, x_one)))
+        # Both should be ~1.0; the prior bug had near=0.9995 then at=0
+        assert abs(near - at) < 1e-3
+
+    def test_gumbel_deterministic_at_inference(self):
+        """B2: gumbel_softmax=True at training=False yields identical outputs."""
+        keras.utils.set_random_seed(42)
+        op = LearnableLogicOperator(
+            gumbel_softmax=True, operation_types=['and', 'or', 'xor'],
+            allow_unary_degenerate=True,
+        )
+        x = ops.convert_to_tensor(np.random.randn(2, 4).astype(np.float32))
+        op.build(x.shape)
+        o1 = ops.convert_to_numpy(op(x, training=False))
+        o2 = ops.convert_to_numpy(op(x, training=False))
+        o3 = ops.convert_to_numpy(op(x))  # training=None
+        np.testing.assert_allclose(o1, o2, atol=1e-7)
+        np.testing.assert_allclose(o1, o3, atol=1e-7)
+
+    def test_gumbel_stochastic_at_training(self):
+        """B2: gumbel_softmax=True at training=True is stochastic."""
+        keras.utils.set_random_seed(0)
+        op = LearnableLogicOperator(
+            gumbel_softmax=True,
+            operation_types=['and', 'or', 'xor', 'not', 'nand', 'nor'],
+            allow_unary_degenerate=True,
+        )
+        x = ops.convert_to_tensor(np.random.randn(2, 8).astype(np.float32))
+        op.build(x.shape)
+        o1 = ops.convert_to_numpy(op(x, training=True))
+        o2 = ops.convert_to_numpy(op(x, training=True))
+        # Outputs should differ due to fresh Gumbel sampling.
+        assert not np.allclose(o1, o2, atol=1e-5)
+
+    def test_new_implications_in_unit_interval(self):
+        """G4: lukasiewicz_implies, reichenbach_implies, goguen_implies."""
+        for op_name in ['lukasiewicz_implies', 'reichenbach_implies', 'goguen_implies']:
+            op = LearnableLogicOperator(operation_types=[op_name])
+            # Skip sigmoid: pass values already in [0, 1].
+            op2 = LearnableLogicOperator(
+                operation_types=[op_name], apply_sigmoid=False,
+            )
+            x1 = ops.convert_to_tensor(np.array([[0.0, 0.5, 1.0, 0.7]], dtype=np.float32))
+            x2 = ops.convert_to_tensor(np.array([[0.5, 0.5, 0.5, 0.3]], dtype=np.float32))
+            y = ops.convert_to_numpy(op2([x1, x2]))
+            assert (y >= -1e-5).all() and (y <= 1.0 + 1e-5).all(), (
+                f"{op_name} produced out-of-[0,1] value: {y}"
+            )
+
+    def test_compute_output_shape_rejects_mismatched_binary(self):
+        """D9: compute_output_shape raises on shape mismatch."""
+        op = LearnableLogicOperator(operation_types=['and', 'or'])
+        with pytest.raises(ValueError, match="same shape"):
+            op.compute_output_shape([(None, 32), (None, 16)])

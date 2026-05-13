@@ -42,12 +42,17 @@ from keras import ops
 from typing import List, Optional, Union, Any, Dict, Tuple
 
 
-# DECISION plan_2026-05-13_3a2f1d23/D-002
-# H6: ``load_balance_coefficient`` was a misnomer — the loss it controls is
-# actually the Shazeer (2017) gate-entropy regularizer, not load-balance.
-# The new canonical name is ``gate_entropy_coefficient``. The old name is
-# kept as a deprecated alias with a one-time DeprecationWarning to avoid
-# silently breaking external callers.
+# DECISION plan_2026-05-13_3a2f1d23/D-002 (rationale corrected in
+# plan_2026-05-13_e33114da/D-007)
+# The H6 rename swapped ``load_balance_coefficient`` for the canonical name
+# ``gate_entropy_coefficient``. The implementation computes
+# ``coef * N * mean(sum(beta^2, axis=-1))`` which is the **Shazeer (2017)
+# importance regularizer** — algebraically equivalent (up to constant) to
+# the CV^2 of importance values when N is fixed — and is **L2 of the gate
+# probability vector**, NOT entropy. Both forms are convex measures of
+# peakiness and have the same optimum (uniform β), but the *name* is a
+# misnomer in the strict sense. We keep the canonical name for back-compat
+# (anchored in saved models) and document the math accurately here.
 def _resolve_gate_entropy_coefficient(
     gate_entropy_coefficient: Optional[float],
     load_balance_coefficient: Optional[float],
