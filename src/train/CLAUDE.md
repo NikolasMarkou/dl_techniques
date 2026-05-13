@@ -25,7 +25,8 @@ src/train/
 ├── benchmarks/          # External SOTA reference targets (snapshot-dated)
 │   ├── EMBEDDINGS_BENCHMARKS.md  # MTEB across the size spectrum (tiny→XL→API)
 │   ├── LLM_BENCHMARKS.md         # MMLU/GPQA/HumanEval/MATH/Arena across model tiers
-│   └── VISION_BENCHMARKS.md      # IN-1K, COCO, ADE20K, MMMU, depth, video benchmarks
+│   ├── VISION_BENCHMARKS.md      # IN-1K, COCO, ADE20K, depth, video benchmarks
+│   └── VLM_BENCHMARKS.md         # MMMU/MMBench/DocVQA/Video-MME across VLM tiers + CLIP
 └── CLAUDE.md
 ```
 
@@ -35,7 +36,8 @@ The `benchmarks/` directory holds external SOTA snapshots. Consult them **before
 
 - **`benchmarks/EMBEDDINGS_BENCHMARKS.md`** — MTEB leaderboard across 33+ models grouped by parameter count (Tiny ≤50M → XL ≥7B → Proprietary API). Per-task columns (Retrieval / STS / Classif), MRL/instruct flags, license. Use for any embedding / dense-retrieval / MRL training run.
 - **`benchmarks/LLM_BENCHMARKS.md`** — Causal-LM reference targets across 6 tiers (Tiny ≤2B → XL/MoE ≥100B → Proprietary). Columns: MMLU, GPQA Diamond, HumanEval, MATH, Arena ELO, context length. Includes a separate SWE-bench Verified table for agentic eval. Use for pretraining, instruction tuning, and reasoning-model runs.
-- **`benchmarks/VISION_BENCHMARKS.md`** — Multi-task vision targets: ImageNet-1K classification (5 param tiers), COCO detection (mAP@50:95), ADE20K / Cityscapes semantic seg (mIoU), COCO instance seg (mask AP), monocular depth (NYU / KITTI AbsRel), VLM benchmarks (MMMU / MMBench / DocVQA / ChartQA), zero-shot CLIP, and video understanding (Kinetics-400/600, SSv2). Use for classification, detection, seg, depth, VLM, and video runs alike.
+- **`benchmarks/VISION_BENCHMARKS.md`** — Pure-vision targets: ImageNet-1K classification (5 param tiers), COCO detection (mAP@50:95), ADE20K / Cityscapes semantic seg (mIoU), COCO instance seg (mask AP), monocular depth (NYU / KITTI AbsRel), and video understanding (Kinetics-400/600, SSv2). Use for classification, detection, seg, depth, and pure-video runs.
+- **`benchmarks/VLM_BENCHMARKS.md`** — Vision-language model targets across 5 size tiers (Tiny ≤4B → XL ≥40B → Proprietary). Capability families: general reasoning (MMMU / MMStar / MMBench / MathVista), document & OCR (DocVQA / ChartQA / OCRBench), hallucination (POPE / HallusionBench), grounding (RefCOCO), video VLM (Video-MME / MVBench / EgoSchema / LongVideoBench), agentic/GUI (ScreenSpot-Pro / OSWorld), and a separate CLIP-style dual-encoder table (zero-shot IN-1K, COCO/Flickr retrieval). Use for any LLaVA/Qwen-VL/InternVL-class instruction-tuned VLM or CLIP-family pretraining run.
 
 ## File Naming
 
