@@ -6,8 +6,8 @@ from typing import Any, Dict, List, Tuple, Union
 # Local Imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.ntm.ntm_interface import NTMConfig
-from dl_techniques.layers.ntm.baseline_ntm import NeuralTuringMachine
+from dl_techniques.layers.memory.ntm_interface import NTMConfig
+from dl_techniques.layers.memory.baseline_ntm import NeuralTuringMachine
 
 # ---------------------------------------------------------------------
 

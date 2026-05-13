@@ -17,7 +17,7 @@ import tensorflow as tf
 import tempfile
 import os
 
-from dl_techniques.layers.ntm.ntm_interface import NTMConfig
+from dl_techniques.layers.memory.ntm_interface import NTMConfig
 from dl_techniques.models.ntm.model import NTMModel, create_ntm_variant
 
 

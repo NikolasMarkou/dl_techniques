@@ -27,7 +27,7 @@ from typing import Tuple, Dict, Any
 # Local Imports
 # ---------------------------------------------------------------------
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.ntm.ntm_interface import NTMConfig
+from dl_techniques.layers.memory.ntm_interface import NTMConfig
 from dl_techniques.models.ntm.model_multitask import NTMMultiTask
 
 from .data_generators import (

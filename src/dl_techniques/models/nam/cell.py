@@ -18,12 +18,12 @@ import keras
 from keras import ops
 from typing import Any, Dict, Optional, Tuple
 
-from dl_techniques.layers.ntm.baseline_ntm import (
+from dl_techniques.layers.memory.baseline_ntm import (
     NTMMemory,
     NTMReadHead,
     NTMWriteHead,
 )
-from dl_techniques.layers.ntm.ntm_interface import (
+from dl_techniques.layers.memory.ntm_interface import (
     AddressingMode,
     MemoryState,
 )

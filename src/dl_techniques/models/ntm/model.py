@@ -24,7 +24,7 @@ from typing import Optional, Union, Tuple, Dict, Any
 # Local Imports
 # ---------------------------------------------------------------------
 
-from dl_techniques.layers.ntm import NTMCell, NTMConfig
+from dl_techniques.layers.memory import NTMCell, NTMConfig
 
 # ---------------------------------------------------------------------
 # NTM Model

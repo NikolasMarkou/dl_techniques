@@ -6,7 +6,7 @@ from typing import Dict, Tuple
 from dataclasses import dataclass, field
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.ntm.ntm_interface import NTMConfig
+from dl_techniques.layers.memory.ntm_interface import NTMConfig
 from dl_techniques.models.ntm.model_multitask import NTMMultiTask
 from train.common import setup_gpu, create_base_argument_parser, create_callbacks
 

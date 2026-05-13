@@ -12,7 +12,7 @@ import keras
 from keras import ops
 import tensorflow as tf
 
-from dl_techniques.layers.ntm.base_layers import (
+from dl_techniques.layers.memory.base_layers import (
     DifferentiableAddressingHead,
     DifferentiableSelectCopy,
     SimpleSelectCopy,

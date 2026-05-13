@@ -5,7 +5,7 @@ import numpy as np
 
 from train.common import setup_gpu, create_base_argument_parser, create_callbacks
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.ntm import create_ntm
+from dl_techniques.layers.memory import create_ntm
 from . import CopyTaskGenerator, CopyTaskConfig
 
 

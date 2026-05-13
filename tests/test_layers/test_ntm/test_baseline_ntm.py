@@ -16,13 +16,13 @@ import keras
 from keras import ops
 import tensorflow as tf
 
-from dl_techniques.layers.ntm.ntm_interface import (
+from dl_techniques.layers.memory.ntm_interface import (
     AddressingMode,
     MemoryState,
     HeadState,
     NTMConfig,
 )
-from dl_techniques.layers.ntm.baseline_ntm import (
+from dl_techniques.layers.memory.baseline_ntm import (
     NTMMemory,
     NTMReadHead,
     NTMWriteHead,
