@@ -13,7 +13,7 @@ from dl_techniques.losses.tabm_loss import TabMLoss
 from dl_techniques.models.tabm import (
     create_tabm_model, create_tabm_ensemble, TabMModel
 )
-from dl_techniques.datasets import TabularDataProcessor
+from dl_techniques.datasets.tabular import TabularDataProcessor
 from dl_techniques.utils.logger import logger
 
 from train.common import setup_gpu
