@@ -30,6 +30,29 @@
 - Anchor at impact site (not at decision definition). One anchor per impact site, even if shared with sibling decision.
 <!-- /COMPRESSED-SUMMARY -->
 
+## plan_2026-05-13_3a2f1d23
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-13_3a2f1d23/D-NNN` anchor exists in source)
+-->
+
+### D-001 | EXPLORE → PLAN | 2026-05-13
+**Context**: Reviewer surfaced 5 critical + 10 high + 10 medium claims against logic/. Empirical verification of all 5 critical: C1 (Gumbel form) confirmed differential statistical effect; C2 (smooth-divide dipole) is the LESSONS L44 / D-001-anchored design choice — reviewer's math is right but classification as bug is wrong; C3 (1-D selection) confirmed by code inspection; C4 (sigmoid-stacking unsoundness) confirmed by tracing call graph; C5 (to_symbolic gumbel leak) confirmed.
+**Decision**: Phase changes by risk into A (LOW-risk correctness fixes + default flips), B (MED-risk feature additions: alias, force-clip), C (HIGH-risk arch: per-channel selection mode), D (NET-NEW features: t-norms, walker, callback, diversity). Present two scope options to user (Quick Wins = Phase A only; Full Scope = all). Reject reviewer H9 (remove explicit child.build) — LESSONS L42 empirically reversed this earlier.
+**Trade-off**: comprehensive implementation **at the cost of** ~1100 LOC, 16 commits, and a non-trivial architectural addition (per-channel mode) that doubles the weight count for selection in the new mode.
+**Reasoning**: User asked MAXIMUM EFFORT. Phasing by risk lets the user revert mid-plan if Phase C/D goes sideways without losing the correctness wins. LESSONS L42 takes precedence over reviewer H9 because we have a documented empirical reversal anchor.
+**Anchor-Refs**: `findings/critical-claims-verification.md`, `findings/scope-and-risk-assessment.md`, `src/dl_techniques/layers/logic/arithmetic_operators.py:442`, `src/dl_techniques/layers/logic/logic_operators.py:467`
+
+### D-002 | EXECUTE step-7 | 2026-05-13
+**Context**: H6 review claim — `load_balance_coefficient` is a misnomer; the loss it gates is the Shazeer (2017) gate-entropy regularizer (mean over batch of -p·log(p)), not a load-balance loss. External callers (only `src/train/latent_reasoning_vision/circuit.py`) currently pass `load_balance_coefficient`.
+**Decision**: Add `gate_entropy_coefficient` as the canonical kwarg on `CircuitDepthLayer` + `LearnableNeuralCircuit`. Keep `load_balance_coefficient` as a deprecated alias that emits a one-time `DeprecationWarning` and resolves to the same internal `_gate_entropy_coef`. `get_config()` emits the new name.
+**Trade-off**: API clarity **at the cost of** carrying a deprecated alias indefinitely (cannot remove without breaking external consumer).
+**Reasoning**: Renaming silently would break the external consumer. Adding the canonical name with an alias preserves bit-exact behavior for existing callers while letting new code use the correct term. Aligns with library convention that misnamed APIs get aliased, not replaced.
+**Anchor-Refs**: `src/dl_techniques/layers/logic/neural_circuit.py:45`
+
 ## plan_2026-05-13_a2b0f17b
 ### D-001 | EXPLORE → PLAN | 2026-05-13
 **Context**: Prior plan `plan_2026-05-13_e52a5ac8` already empirically verified this exact review and deferred most fixes for documented reasons (consumer break, `.keras` round-trip break, "documented footgun not bug" per LESSONS L38). User has explicitly overridden these conclusions and selected "Everything including B, E, F, G (full rewrite)" via AskUserQuestion.
@@ -166,24 +189,3 @@ None yet — iter-1 will create `cp-000-iter1.md` at first EXECUTE step (per pro
 **Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
 **Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-13_8e866056/D-NNN` anchor exists in source)
 -->
-
-## plan_2026-05-13_16ac1621
-### D-001 | EXPLORE → PLAN | YYYY-MM-DD
-**Context**: <one-paragraph background — what was discovered in EXPLORE>
-**Decision**: <chosen approach in one sentence>
-**Trade-off**: <X> **at the cost of** <Y>
-**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-13_16ac1621/D-NNN` anchor exists in source)
--->
-
-### D-001 | EXPLORE -> PLAN | 2026-05-13
-**Context**: Five previous documentation tasks in this session built sibling benchmark files via a single research agent. The same pattern fits here: METRICS.md is a single greenfield doc with a well-defined inventory of 16 task families. Iterative-planner protocol followed for rigor since user explicitly invoked the skill.
-**Decision**: Single research agent writes METRICS.md in one pass, with the task-metric inventory and style template as the brief. Update CLAUDE.md in a second step. No parallel split unless agent output is shallow.
-**Trade-off**: simpler dispatch and a single coherent voice across the doc, **at the cost of** longer single-agent turn and risk of context exhaustion on the agent side.
-**Reasoning**: The four prior benchmark files each fit in one agent without truncation. Pre-mortem covers the truncation scenario with a clear STOP trigger. Splitting into 2-3 agents would produce stylistic seams and double the verification surface for no clear gain.
-
-### D-002 | PLAN | 2026-05-13
-**Context**: Math notation choice for the doc.
-**Decision**: Use plain-text math (`AbsRel = (1/N) sum |d - d_hat| / d`, multi-line in fenced code blocks) instead of LaTeX `$...$`.
-**Trade-off**: universal readability in any markdown viewer, **at the cost of** less typographic polish.
-**Reasoning**: The repo's IDE setups vary (PyCharm without KaTeX plugin, GitHub web, plain code editors). The sibling benchmark files avoid LaTeX. Plain-text math is the lowest-common-denominator that still encodes the formula unambiguously.

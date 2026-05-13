@@ -34,6 +34,43 @@
 - **`current_phase` / `_global_step` counters**: `add_weight(trainable=False, dtype="float32")` — int32 fails CPU/GPU device placement.
 <!-- /COMPRESSED-SUMMARY -->
 
+## plan_2026-05-13_3a2f1d23
+### Index
+
+| # | Topic | File | Confidence |
+|---|-------|------|------------|
+| F-001 | C1..C5 + H6/H9 empirical verification | `findings/critical-claims-verification.md` | High (empirical) |
+| F-002 | Scope, risk, package definitions | `findings/scope-and-risk-assessment.md` | High |
+
+### Key Constraints
+
+**HARD**
+- Keras 3 / TF 2.18, `keras.ops` only.
+- `@keras.saving.register_keras_serializable()` on every layer.
+- Full `get_config()` round-trip.
+- Tests scoped to `tests/test_layers/test_logic/` ONLY — full suite is 1.5h.
+- User pushes themselves (no `git push`).
+- Bare decorator → DO NOT relocate classes between modules.
+- LESSONS L42: explicit `child.build(input_shape)` in parent's `build()` IS REQUIRED for Keras 3 serialization — rejects reviewer's H9.
+- LESSONS L44: `_safe_divide` smooth mode dipole behavior IS the documented design (D-001 anchor of plan_a2b0f17b).
+
+**SOFT**
+- Python 3.11+, Google-style docstrings, `dl_techniques.utils.logger`.
+- Sole external consumer `src/train/latent_reasoning_vision/circuit.py` uses only stable kwargs — backward-compatible changes are safe.
+- Tests that lock current defaults: only `test_unary_input_allowed_when_default` (logic, line 555) breaks if `allow_unary_degenerate` default flips.
+
+**GHOST**
+- Reviewer's H9 ("explicit child.build is cargo-cult") — already empirically reversed (LESSONS L42 / plan_a2b0f17b D-003).
+- Reviewer's C2 "non-monotone bug" classification — dipole IS by design (LESSONS L44 / D-001). Math claim is correct but it's not a bug.
+
+### Exploration Confidence
+- Scope: **deep** (every critical claim empirically verified; full test inventory; consumer audit done).
+- Solutions: **constrained** (per-finding fix shape known; phased plan groups by risk).
+- Risks: **clear** (default flips identify the one breaking test; C3 is the only HIGH-risk arch change).
+
+### Corrections
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
+
 ## plan_2026-05-13_a2b0f17b
 ### Index
 - [prior-work-audit](plan_2026-05-13_a2b0f17b/findings/prior-work-audit.md) — `plan_2026-05-13_e52a5ac8` already double-checked the same review; 6 fixes shipped (commit `b562bd0`); most other items deferred for empirical reasons. Genuinely new items enumerated.
@@ -246,24 +283,6 @@ None.
 
 ### Key Constraints
 *To be populated during EXPLORE.*
-
-### Corrections
-*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
-
-## plan_2026-05-13_16ac1621
-### Index
-1. `findings/style-template.md` - prior benchmark files set the conventions (snapshot date, no emojis, no em-dashes, tables, sources). METRICS.md diverges by requiring math + per-metric prose, no leaderboard tables.
-2. `findings/task-metric-inventory.md` - target coverage: 16 task families spanning ~80 distinct metrics. Defines depth required (formula + 2-6 sentence prose + edge cases) and resolves open questions (plain-text math, length ~700-900 lines, include subjective metrics + loss-as-metric briefly).
-3. `findings/repo-implementations.md` - existing `dl_techniques/metrics/` modules. METRICS.md should cross-reference them so training scripts can find existing Keras implementations.
-
-### Key Constraints
-- **HARD**: File must live at `src/train/benchmarks/METRICS.md` (user-specified path).
-- **HARD**: For every metric: computation formula + 2-6 sentence description + edge cases (user-specified).
-- **HARD**: Web search required (user-specified, ensures up-to-date conventions and authoritative formulas).
-- **HARD**: Style must match the other four benchmark files (no emojis, no em-dashes, snapshot date, sources section).
-- **SOFT**: Tone and structure consistent with sibling files - prior pattern is "What X measures -> tables -> themes -> sources"; METRICS.md adapts to "What X is -> per-metric definitions grouped by task -> cross-cutting pitfalls -> sources".
-- **SOFT**: Cross-reference existing `dl_techniques/metrics/` modules when relevant.
-- **GHOST**: None identified - this is greenfield documentation.
 
 ### Corrections
 *Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*

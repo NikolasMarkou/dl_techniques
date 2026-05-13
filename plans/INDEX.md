@@ -54,3 +54,4 @@
 | plan_2026-05-13_2aaad563 | 2026-05-13 | Deep comprehensive review of `src/dl_techniques/layers/logic |  |
 | plan_2026-05-13_e52a5ac8 | 2026-05-13 | Double-check the prior `layers/logic/` review and apply only |  |
 | plan_2026-05-13_a2b0f17b | 2026-05-13 | Implement every actionable item from the latest deep review, | prior-work-audit |
+| plan_2026-05-13_3a2f1d23 | 2026-05-13 | Address the residual epistemic review of `src/dl_techniques/ |  |
