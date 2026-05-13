@@ -310,6 +310,14 @@ class LearnableArithmeticOperator(keras.layers.Layer):
           ``|x2| >> epsilon``; bounded gradient ``|d/dx2| <= |x1| / (2 * epsilon)``
           everywhere, including at ``x2 == 0``.
 
+        **C2 clarification (plan_2026-05-13_3a2f1d23):** In ``'smooth'`` mode,
+        ``f(x1, 0) = 0`` by design (not the mathematical limit of x1/x2). This
+        is a deliberate trade-off — see LESSONS L44 and the D-001 anchor of
+        plan_2026-05-13_a2b0f17b on line 318 — that exchanges exact-divide
+        semantics near zero for a globally bounded gradient that makes the
+        operator trainable end-to-end. If you need exact divide semantics,
+        use ``safe_divide_mode='hard_clamp'``.
+
         :param x1: Numerator tensor.
         :param x2: Denominator tensor.
         :return: Result of the safe division.

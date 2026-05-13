@@ -191,6 +191,11 @@ class CircuitDepthLayer(keras.layers.Layer):
         )
 
         # Children must be built by the parent's build() per Keras 3 contract.
+        # H9 (plan_2026-05-13_3a2f1d23): keep these explicit child.build()
+        # calls — removing them was attempted in plan_a2b0f17b and reversed
+        # because Keras 3 does NOT auto-build sub-layers that aren't called
+        # via __call__ in the parent's call(); .keras save/load round-trip
+        # then fails. See LESSONS L42 and plan_a2b0f17b D-003.
         for op in self.logic_operators:
             op.build(input_shape)
         for op in self.arithmetic_operators:
