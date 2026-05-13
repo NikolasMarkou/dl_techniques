@@ -832,6 +832,54 @@ class TestPlanA2b0f17bCircuit:
         )
 
 
+class TestPlan3a2f1d23ForceClip:
+    """C4: stacked logic-after-arithmetic must clip inputs to [0, 1] when
+    apply_sigmoid=False on depths >= 1."""
+
+    def test_force_clip_auto_enabled_for_risky_stack(self, caplog):
+        import logging
+        caplog.set_level(logging.WARNING)
+        nc = LearnableNeuralCircuit(
+            circuit_depth=3,
+            num_arithmetic_ops_per_depth=2,
+            apply_sigmoid_per_depth='first_only',
+        )
+        # Depths >= 1 have apply_sigmoid=False and must force_logic_input_clip.
+        assert nc.circuit_layers[0].force_logic_input_clip is False
+        assert nc.circuit_layers[1].force_logic_input_clip is True
+        assert nc.circuit_layers[2].force_logic_input_clip is True
+        # Inner LearnableLogicOperator instances inherit it.
+        assert nc.circuit_layers[1].logic_operators[0].force_clip_when_no_sigmoid is True
+        # Warning emitted.
+        assert any("force_logic_input_clip" in r.getMessage() for r in caplog.records)
+
+    def test_no_force_clip_when_all_sigmoid(self):
+        nc = LearnableNeuralCircuit(
+            circuit_depth=3,
+            num_arithmetic_ops_per_depth=2,
+            apply_sigmoid_per_depth='all',
+        )
+        for cl in nc.circuit_layers:
+            assert cl.force_logic_input_clip is False
+
+    def test_force_clip_keeps_inputs_in_unit_interval(self):
+        """When force_clip is on, the logic op tolerates arbitrary inputs."""
+        op = LearnableLogicOperator_for_test_import = None  # noqa
+        from dl_techniques.layers.logic.logic_operators import LearnableLogicOperator
+        op = LearnableLogicOperator(
+            operation_types=['and', 'or'],
+            apply_sigmoid=False,
+            allow_unary_degenerate=True,
+            force_clip_when_no_sigmoid=True,
+        )
+        x = ops.convert_to_tensor(
+            np.array([[-5.0, -1.0, 0.0, 0.5, 1.0, 5.0]], dtype=np.float32)
+        )
+        y = op(x)
+        y_np = ops.convert_to_numpy(y)
+        assert np.all(y_np >= 0.0) and np.all(y_np <= 1.0)
+
+
 class TestPlan3a2f1d23GateEntropyAlias:
     """H6: gate_entropy_coefficient is canonical; load_balance_coefficient is
     a deprecated alias that emits DeprecationWarning."""

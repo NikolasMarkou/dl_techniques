@@ -135,6 +135,7 @@ class CircuitDepthLayer(keras.layers.Layer):
             gate_entropy_coefficient: Optional[float] = None,
             load_balance_coefficient: Optional[float] = None,
             channel_mix: Optional[str] = None,
+            force_logic_input_clip: bool = False,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -178,6 +179,8 @@ class CircuitDepthLayer(keras.layers.Layer):
         self.gate_entropy_coefficient = resolved_coef
         self.load_balance_coefficient = resolved_coef  # deprecated alias
         self.channel_mix = channel_mix
+        # C4: forwards force_clip to inner LearnableLogicOperator instances.
+        self.force_logic_input_clip = force_logic_input_clip
 
         # DECISION plan_2026-05-13_a2b0f17b/D-002 — children created in
         # __init__, NOT manually pre-built in build(). Auto-build via
@@ -194,6 +197,7 @@ class CircuitDepthLayer(keras.layers.Layer):
                 operation_types=self.logic_op_types,
                 apply_sigmoid=self.apply_sigmoid,
                 allow_unary_degenerate=True,
+                force_clip_when_no_sigmoid=self.force_logic_input_clip,
                 name=f"logic_op_{i}",
             )
             for i in range(self.num_logic_ops)
@@ -348,6 +352,7 @@ class CircuitDepthLayer(keras.layers.Layer):
             # round-trip works because __init__ accepts both names.
             "gate_entropy_coefficient": self.gate_entropy_coefficient,
             "channel_mix": self.channel_mix,
+            "force_logic_input_clip": self.force_logic_input_clip,
         })
         return config
 
@@ -428,6 +433,26 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         self.load_balance_coefficient = resolved_coef  # deprecated alias
         self.channel_mix = channel_mix
 
+        # C4 (plan_2026-05-13_3a2f1d23): when first_only + arithmetic experts,
+        # depths >= 1 receive an apply_sigmoid=False LearnableLogicOperator
+        # whose input is the previous depth's fused output. Arithmetic experts
+        # are unbounded so the input can leave [0, 1]. Force-clip those inner
+        # logic ops as a defensive measure; also warn the user once.
+        risky_stack = (
+            self.apply_sigmoid_per_depth == "first_only"
+            and self.num_arithmetic_ops_per_depth > 0
+            and self.circuit_depth >= 2
+        )
+        if risky_stack:
+            logger.warning(
+                "LearnableNeuralCircuit: apply_sigmoid_per_depth='first_only' "
+                "with arithmetic experts and depth>=2 — auto-enabling "
+                "force_logic_input_clip on depths >= 1 to guarantee logic-op "
+                "inputs in [0, 1] (C4, plan_2026-05-13_3a2f1d23). Set "
+                "apply_sigmoid_per_depth='all' or num_arithmetic_ops_per_depth=0 "
+                "to silence."
+            )
+
         # DECISION plan_2026-05-13_a2b0f17b/D-002 — sublayers created in
         # __init__, build lazily via __call__.
         self.circuit_layers: List[CircuitDepthLayer] = []
@@ -446,6 +471,7 @@ class LearnableNeuralCircuit(keras.layers.Layer):
                     apply_sigmoid=apply_sigmoid,
                     gate_entropy_coefficient=self.gate_entropy_coefficient,
                     channel_mix=self.channel_mix,
+                    force_logic_input_clip=risky_stack and depth >= 1,
                     name=f"circuit_depth_{depth}",
                 )
             )

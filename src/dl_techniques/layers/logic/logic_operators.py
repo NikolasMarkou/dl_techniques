@@ -168,6 +168,7 @@ class LearnableLogicOperator(keras.layers.Layer):
             operation_initializer: Union[str, keras.initializers.Initializer] = "zeros",
             temperature_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
             apply_sigmoid: bool = True,
+            force_clip_when_no_sigmoid: bool = False,
             softplus_temperature: bool = True,
             gumbel_softmax: bool = False,
             gumbel_hard: bool = False,
@@ -205,6 +206,11 @@ class LearnableLogicOperator(keras.layers.Layer):
         # intended path for stacking. Default True preserves legacy behavior
         # (inputs interpreted as raw logits, mapped to [0,1] before fuzzy ops).
         self.apply_sigmoid = apply_sigmoid
+        # C4 (plan_2026-05-13_3a2f1d23): when apply_sigmoid=False the layer
+        # assumes inputs already lie in [0, 1]. Stacking arithmetic experts
+        # upstream violates that. force_clip_when_no_sigmoid=True applies
+        # ops.clip(x, 0, 1) defensively.
+        self.force_clip_when_no_sigmoid = force_clip_when_no_sigmoid
         self.softplus_temperature = softplus_temperature
         self.gumbel_softmax = gumbel_softmax
         self.gumbel_hard = gumbel_hard
@@ -508,6 +514,11 @@ class LearnableLogicOperator(keras.layers.Layer):
         if self.apply_sigmoid:
             x1 = ops.sigmoid(x1)
             x2 = ops.sigmoid(x2)
+        elif self.force_clip_when_no_sigmoid:
+            # C4: defensive clipping when upstream may produce unbounded
+            # outputs (e.g. an arithmetic expert above a logic expert).
+            x1 = ops.clip(x1, 0.0, 1.0)
+            x2 = ops.clip(x2, 0.0, 1.0)
 
         # Compute operation selection probabilities
         operation_probs = self._operation_probs()
@@ -586,6 +597,7 @@ class LearnableLogicOperator(keras.layers.Layer):
             "operation_initializer": keras.initializers.serialize(self.operation_initializer),
             "temperature_initializer": keras.initializers.serialize(self.temperature_initializer),
             "apply_sigmoid": self.apply_sigmoid,
+            "force_clip_when_no_sigmoid": self.force_clip_when_no_sigmoid,
             "softplus_temperature": self.softplus_temperature,
             "gumbel_softmax": self.gumbel_softmax,
             "gumbel_hard": self.gumbel_hard,
