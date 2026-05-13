@@ -146,6 +146,17 @@ it in like a residual block.
   fully supported.
 - **No internal projection.** Output channel count equals input channel
   count. Pair with a `Dense` / `Conv` if you need dimensionality change.
+- **Stacking `LearnableLogicOperator` re-squashes via sigmoid every layer.**
+  By default each call applies `sigmoid` to both inputs, so the output of one
+  logic layer fed into the next collapses toward `0.5` within 2-3 layers
+  (empirical: input std `1.76 -> 0.06 -> 0.003 -> 0.0` across three default
+  layers). For stacked use, pass `apply_sigmoid=False` to all but the first
+  layer (and feed it inputs already in `[0, 1]`).
+- **`divide` op has unbounded gradients near zero.** `_safe_divide` clamps the
+  forward output (so no NaN/Inf), but `d(x1/x2)/dx2 -> -x1/eps^2` as `|x2|`
+  approaches zero. If `divide` is in the softmax pool and inputs can be small,
+  gradient explosions are possible. Either avoid `divide` in stacked use or
+  guarantee features are bounded away from zero.
 
 ## Examples
 

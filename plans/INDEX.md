@@ -45,3 +45,10 @@
 | plan_2026-05-12_632605aa | 2026-05-12 | Create a bidirectional CliffordNet U-Net embedding model pac | "last_hidden_state" |
 | plan_2026-05-12_6a2cd5b3 | 2026-05-12 | Create `src/train/cliffordnet/wikipedia/pretrain.py` (+ `__i |  |
 | plan_2026-05-12_13c70aed | 2026-05-12 | Add Matryoshka Representation Learning (MRL) to the LM head  | :, :w, "logits", "logits_w128", ... |
+| plan_2026-05-13_03176394 | 2026-05-13 | Move `tversky_projection.py` and `kan_linear.py` into `src/d |  |
+| plan_2026-05-13_16ac1621 | 2026-05-13 | Compile exhaustive per-task ML metrics reference (`src/train |  |
+| plan_2026-05-13_8e866056 | 2026-05-13 | Fix what can be fixed, delete the rest, among broken src/tra |  |
+| plan_2026-05-13_a1c9a52d | 2026-05-13 | Merge `src/dl_techniques/layers/memory/` and `src/dl_techniq |  |
+| plan_2026-05-13_a40908e7 | 2026-05-13 | Deep review of src/dl_techniques/layers/memory/ — analysis o |  |
+| plan_2026-05-13_8c1dc6fd | 2026-05-13 | Fix all bug-grade and high-value low-risk issues from the de |  |
+| plan_2026-05-13_2aaad563 | 2026-05-13 | Deep comprehensive review of `src/dl_techniques/layers/logic |  |

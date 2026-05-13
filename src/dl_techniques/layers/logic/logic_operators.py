@@ -155,6 +155,7 @@ class LearnableLogicOperator(keras.layers.Layer):
             temperature_init: float = 1.0,
             operation_initializer: Union[str, keras.initializers.Initializer] = "random_uniform",
             temperature_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
+            apply_sigmoid: bool = True,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -179,6 +180,10 @@ class LearnableLogicOperator(keras.layers.Layer):
         self.operation_types = operation_types
         self.use_temperature = use_temperature
         self.temperature_init = temperature_init
+        # DECISION plan_2026-05-13_e52a5ac8/D-001 — apply_sigmoid=False is the
+        # intended path for stacking. Default True preserves legacy behavior
+        # (inputs interpreted as raw logits, mapped to [0,1] before fuzzy ops).
+        self.apply_sigmoid = apply_sigmoid
         self.num_operations = len(operation_types)
         self.operation_initializer = keras.initializers.get(operation_initializer)
 
@@ -192,7 +197,7 @@ class LearnableLogicOperator(keras.layers.Layer):
         self.operation_weights = None
         self.temperature = None
 
-        logger.info(
+        logger.debug(
             f"LearnableLogicOperator initialized with operations: {operation_types}, "
             f"use_temperature: {use_temperature}, temperature_init: {temperature_init}"
         )
@@ -350,9 +355,11 @@ class LearnableLogicOperator(keras.layers.Layer):
             x1 = inputs
             x2 = inputs
 
-        # Normalize inputs to [0, 1] range using sigmoid
-        x1 = ops.sigmoid(x1)
-        x2 = ops.sigmoid(x2)
+        # Normalize inputs to [0, 1] range using sigmoid (skip when caller
+        # already provides values in [0, 1] — e.g. stacked logic layers).
+        if self.apply_sigmoid:
+            x1 = ops.sigmoid(x1)
+            x2 = ops.sigmoid(x2)
 
         # Compute operation selection probabilities
         if self.use_temperature:
@@ -414,9 +421,8 @@ class LearnableLogicOperator(keras.layers.Layer):
             and not isinstance(input_shape[0], (int, type(None)))
         )
         if is_list_of_shapes:
-            return input_shape[0]
-        else:
-            return input_shape
+            return tuple(input_shape[0])
+        return tuple(input_shape) if isinstance(input_shape, list) else input_shape
 
     def get_config(self) -> Dict[str, Any]:
         """
@@ -432,5 +438,6 @@ class LearnableLogicOperator(keras.layers.Layer):
             "temperature_init": self.temperature_init,
             "operation_initializer": keras.initializers.serialize(self.operation_initializer),
             "temperature_initializer": keras.initializers.serialize(self.temperature_initializer),
+            "apply_sigmoid": self.apply_sigmoid,
         })
         return config

@@ -164,7 +164,7 @@ class CircuitDepthLayer(keras.layers.Layer):
         self.routing_weights = None
         self.combination_weights = None
 
-        logger.info(
+        logger.debug(
             f"CircuitDepthLayer initialized with {num_logic_ops} logic ops, "
             f"{num_arithmetic_ops} arithmetic ops, use_residual: {use_residual}"
         )
@@ -386,7 +386,7 @@ class LearnableNeuralCircuit(keras.layers.Layer):
             circuit_depth: int = 3,
             num_logic_ops_per_depth: int = 2,
             num_arithmetic_ops_per_depth: int = 2,
-            use_residual: bool = False,
+            use_residual: bool = True,  # DECISION plan_2026-05-13_e52a5ac8/D-001 — default flipped from False; docstring promised residuals "stabilize gradient flow"; default-False shrank signal to 0.38x at init.
             use_layer_norm: bool = False,
             logic_op_types: Optional[List[str]] = None,
             arithmetic_op_types: Optional[List[str]] = None,
@@ -419,7 +419,7 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         self.circuit_layers = []
         self.layer_norms = []
 
-        logger.info(
+        logger.debug(
             f"LearnableNeuralCircuit initialized with depth {circuit_depth}, "
             f"{num_logic_ops_per_depth} logic ops per depth, "
             f"{num_arithmetic_ops_per_depth} arithmetic ops per depth, "
@@ -443,7 +443,7 @@ class LearnableNeuralCircuit(keras.layers.Layer):
                 f"got shape with {len(input_shape)} dimensions: {input_shape}"
             )
 
-        logger.info(f"Building LearnableNeuralCircuit with depth {self.circuit_depth}")
+        logger.debug(f"Building LearnableNeuralCircuit with depth {self.circuit_depth}")
 
         # Create circuit depth layers and explicitly build them
         for depth in range(self.circuit_depth):

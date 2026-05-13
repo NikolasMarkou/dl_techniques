@@ -39,6 +39,7 @@ References
 - Zadeh (1965). "Fuzzy sets". Information and Control.
 """
 
+import copy
 import keras
 from typing import Any, Dict, Literal, Optional
 
@@ -106,6 +107,7 @@ LOGIC_REGISTRY: Dict[str, Dict[str, Any]] = {
             "temperature_init": 1.0,
             "operation_initializer": "random_uniform",
             "temperature_initializer": None,
+            "apply_sigmoid": True,
         },
         "use_case": (
             "Soft logical combination of two same-shape tensors interpreted "
@@ -145,7 +147,7 @@ LOGIC_REGISTRY: Dict[str, Dict[str, Any]] = {
             "circuit_depth": 3,
             "num_logic_ops_per_depth": 2,
             "num_arithmetic_ops_per_depth": 2,
-            "use_residual": False,
+            "use_residual": True,
             "use_layer_norm": False,
             "logic_op_types": None,
             "arithmetic_op_types": None,
@@ -172,7 +174,7 @@ def get_logic_info() -> Dict[str, Dict[str, Any]]:
         (description, required_params, optional_params, use_case).
     :rtype: Dict[str, Dict[str, Any]]
     """
-    return {k: v.copy() for k, v in LOGIC_REGISTRY.items()}
+    return copy.deepcopy(LOGIC_REGISTRY)
 
 
 def validate_logic_config(layer_type: str, **kwargs: Any) -> None:
@@ -212,7 +214,8 @@ def validate_logic_config(layer_type: str, **kwargs: Any) -> None:
     for name in positive_ints:
         if name in kwargs and kwargs[name] is not None:
             value = kwargs[name]
-            if not isinstance(value, int) or value <= 0:
+            # bool is a subclass of int — reject it explicitly.
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(
                     f"{name} must be a positive integer, got {value!r}"
                 )
@@ -263,9 +266,9 @@ def create_logic_layer(
         if name is not None:
             final_params["name"] = name
 
-        logger.info(f"Creating logic layer '{layer_type}' ({cls.__name__}):")
+        logger.debug(f"Creating logic layer '{layer_type}' ({cls.__name__}):")
         for k in sorted(final_params.keys()):
-            logger.info(f"  {k}: {final_params[k]!r}")
+            logger.debug(f"  {k}: {final_params[k]!r}")
 
         layer = cls(**final_params)
         logger.debug(f"Created {layer_type} layer: {layer.name}")

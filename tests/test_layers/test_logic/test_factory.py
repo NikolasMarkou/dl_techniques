@@ -166,3 +166,39 @@ class TestForwardRoundTrip:
             y2 = reloaded(x)
 
         np.testing.assert_allclose(ops.convert_to_numpy(y1), ops.convert_to_numpy(y2), atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Regression tests added in plan_2026-05-13_e52a5ac8
+# ---------------------------------------------------------------------------
+
+import pytest as _pytest
+
+class TestPlanE52a5ac8Factory:
+    def test_validate_rejects_bool_as_int(self):
+        """H10: bool is a Python int subclass; validator must reject it."""
+        from dl_techniques.layers.logic.factory import validate_logic_config
+        with _pytest.raises(ValueError, match="must be a positive integer"):
+            validate_logic_config("circuit_depth", num_logic_ops=True)
+        with _pytest.raises(ValueError, match="must be a positive integer"):
+            validate_logic_config("neural_circuit", circuit_depth=False)
+
+    def test_get_logic_info_returns_deepcopy(self):
+        """H9: mutating returned dict must not affect the registry."""
+        from dl_techniques.layers.logic.factory import get_logic_info
+        info1 = get_logic_info()
+        # Mutate nested
+        info1["arithmetic"]["optional_params"]["use_temperature"] = "MUTATED"
+        info1["arithmetic"]["description"] = "MUTATED"
+        # Re-read fresh
+        info2 = get_logic_info()
+        assert info2["arithmetic"]["optional_params"]["use_temperature"] is True
+        assert info2["arithmetic"]["description"] != "MUTATED"
+
+    def test_factory_passes_apply_sigmoid(self):
+        """C3 factory wiring: create_logic_layer must accept apply_sigmoid."""
+        from dl_techniques.layers.logic.factory import create_logic_layer
+        layer = create_logic_layer("logic", apply_sigmoid=False)
+        assert layer.apply_sigmoid is False
+        layer_default = create_logic_layer("logic")
+        assert layer_default.apply_sigmoid is True

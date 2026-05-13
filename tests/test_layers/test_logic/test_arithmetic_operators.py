@@ -376,3 +376,22 @@ class TestLearnableArithmeticOperator:
             rtol=1e-6, atol=1e-6,
             err_msg="Outputs should be identical with same random seed"
         )
+
+# ---------------------------------------------------------------------------
+# Regression tests added in plan_2026-05-13_e52a5ac8
+# ---------------------------------------------------------------------------
+
+class TestPlanE52a5ac8Arithmetic:
+    def test_compute_output_shape_accepts_list_form(self):
+        """M2: previously returned None for list-form single shapes."""
+        layer = LearnableArithmeticOperator()
+        out_list = layer.compute_output_shape([None, 32])
+        out_tuple = layer.compute_output_shape((None, 32))
+        assert tuple(out_list) == (None, 32)
+        assert tuple(out_tuple) == (None, 32)
+        # Rank-3 list form
+        out3 = layer.compute_output_shape([None, 16, 32])
+        assert tuple(out3) == (None, 16, 32)
+        # List-of-shapes (binary inputs) still works
+        out_binary = layer.compute_output_shape([(None, 32), (None, 32)])
+        assert tuple(out_binary) == (None, 32)

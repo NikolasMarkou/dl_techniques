@@ -434,3 +434,56 @@ class TestLearnableLogicOperator:
             assert np.all(output_np >= 0.0) and np.all(output_np <= 1.0)
 
 # Run tests with: pytest test_logic_operator.py -v
+
+# ---------------------------------------------------------------------------
+# Regression tests added in plan_2026-05-13_e52a5ac8
+# ---------------------------------------------------------------------------
+
+class TestPlanE52a5ac8Logic:
+    def test_compute_output_shape_accepts_list_form(self):
+        layer = LearnableLogicOperator()
+        out_list = layer.compute_output_shape([None, 32])
+        assert tuple(out_list) == (None, 32)
+        out_binary = layer.compute_output_shape([(None, 32), (None, 32)])
+        assert tuple(out_binary) == (None, 32)
+
+    def test_apply_sigmoid_flag_default_true(self):
+        """C3: default preserves legacy sigmoid pre-normalization."""
+        layer = LearnableLogicOperator()
+        assert layer.apply_sigmoid is True
+
+    def test_apply_sigmoid_false_preserves_dynamic_range(self):
+        """C3: with binary [0,1] inputs, skipping sigmoid widens output range.
+
+        The flag is intended for stacking / callers who already provide
+        values in [0,1]. Default `apply_sigmoid=True` re-maps [0,1] to
+        [0.5, 0.731], collapsing dynamic range. With apply_sigmoid=False the
+        layer operates on the original [0,1] values directly.
+
+        NOTE on unary degeneracy (LESSONS L38): single-tensor inputs collapse
+        binary ops to fixed functions of x — supply two distinct inputs.
+        """
+        keras.utils.set_random_seed(0)
+        x1 = ops.convert_to_tensor(np.random.uniform(0.0, 1.0, (64, 16)).astype(np.float32))
+        x2 = ops.convert_to_tensor(np.random.uniform(0.0, 1.0, (64, 16)).astype(np.float32))
+        layer_with = LearnableLogicOperator()  # apply_sigmoid=True (default)
+        layer_no = LearnableLogicOperator(apply_sigmoid=False)
+        y_with = layer_with([x1, x2])
+        y_no = layer_no([x1, x2])
+        std_with = float(ops.std(y_with))
+        std_no = float(ops.std(y_no))
+        assert std_no > std_with, (
+            f"apply_sigmoid=False did not preserve dynamic range: "
+            f"std_with={std_with:.4f}, std_no={std_no:.4f}"
+        )
+        # Both outputs must remain in [0, 1].
+        assert float(ops.min(y_with)) >= 0.0 and float(ops.max(y_with)) <= 1.0 + 1e-6
+        assert float(ops.min(y_no)) >= 0.0 and float(ops.max(y_no)) <= 1.0 + 1e-6
+
+    def test_apply_sigmoid_roundtrip(self):
+        """C3: get_config / from_config round-trip preserves apply_sigmoid."""
+        layer = LearnableLogicOperator(apply_sigmoid=False)
+        cfg = layer.get_config()
+        assert cfg["apply_sigmoid"] is False
+        restored = LearnableLogicOperator.from_config(cfg)
+        assert restored.apply_sigmoid is False

@@ -655,3 +655,47 @@ class TestRankRelaxation:
             reloaded = keras.models.load_model(path)
             y2 = reloaded(x)
         np.testing.assert_allclose(ops.convert_to_numpy(y1), ops.convert_to_numpy(y2), atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Regression tests added in plan_2026-05-13_e52a5ac8
+# ---------------------------------------------------------------------------
+
+class TestPlanE52a5ac8Regressions:
+    """Lock in fixes from plan_2026-05-13_e52a5ac8."""
+
+    def test_default_use_residual_is_true(self):
+        """C1: LearnableNeuralCircuit() default must use residuals.
+
+        Original default was False, contradicting the layer docstring which
+        promised residuals would "stabilize gradient flow in deeply stacked
+        circuits." Default-False shrank ||y||/||x|| to ~0.38 at init.
+        """
+        layer = LearnableNeuralCircuit()
+        assert layer.use_residual is True
+        # Inner CircuitDepthLayer instances inherit the value.
+        x = ops.convert_to_tensor(np.random.normal(0, 1, (2, 8)).astype(np.float32))
+        _ = layer(x)
+        for circuit_layer in layer.circuit_layers:
+            assert circuit_layer.use_residual is True
+
+    def test_signal_preserved_with_default_config(self):
+        """C1 regression: default LearnableNeuralCircuit preserves signal magnitude."""
+        keras.utils.set_random_seed(0)
+        layer = LearnableNeuralCircuit()
+        x = ops.convert_to_tensor(np.random.normal(0, 1, (4, 16)).astype(np.float32))
+        y = layer(x)
+        ratio = float(ops.norm(y)) / float(ops.norm(x))
+        # With residual, init output should be at least ~0.5x input norm.
+        # Pre-fix value was 0.38; with residual, observed ~1.7.
+        assert ratio > 0.5, f"signal collapsed at init: ||y||/||x|| = {ratio:.3f}"
+
+    def test_compute_output_shape_accepts_list_form(self):
+        """M2: compute_output_shape must handle list-form single shapes."""
+        layer = CircuitDepthLayer()
+        # Single shape deserialized as list — previously returned None.
+        out_list = layer.compute_output_shape([None, 32])
+        out_tuple = layer.compute_output_shape((None, 32))
+        # CircuitDepthLayer is shape-preserving and was already correct;
+        # this just confirms no regression.
+        assert tuple(out_list) == tuple(out_tuple) == (None, 32)

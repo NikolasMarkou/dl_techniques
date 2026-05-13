@@ -212,7 +212,7 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         self.temperature = None
         self.scaling_factor = None
 
-        logger.info(
+        logger.debug(
             f"LearnableArithmeticOperator initialized with operations: {operation_types}, "
             f"use_temperature: {use_temperature}, temperature_init: {temperature_init}, "
             f"use_scaling: {use_scaling}, scaling_init: {scaling_init}"
@@ -419,10 +419,16 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         :return: Output shape tuple.
         :rtype: Tuple[Optional[int], ...]
         """
-        if isinstance(input_shape, list):
-            return input_shape[0]
-        else:
-            return input_shape
+        # Distinguish [(s1,), (s2,)] (list of two shapes) from [None, 32] (one
+        # shape deserialized as a list). Single shapes have int/None elements.
+        is_list_of_shapes = (
+            isinstance(input_shape, list)
+            and input_shape
+            and not isinstance(input_shape[0], (int, type(None)))
+        )
+        if is_list_of_shapes:
+            return tuple(input_shape[0])
+        return tuple(input_shape) if isinstance(input_shape, list) else input_shape
 
     def get_config(self) -> Dict[str, Any]:
         """
