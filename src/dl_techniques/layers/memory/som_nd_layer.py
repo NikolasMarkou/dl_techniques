@@ -247,11 +247,17 @@ class SOMLayer(keras.layers.Layer):
         self._weights_initializer_config = weights_initializer
         self._regularizer_config = regularizer
 
-        # Handle special string initializers vs. Keras standard initializers
+        # Handle special string initializers vs. Keras standard initializers.
+        # NOTE: 'sample' (data-sample init) was historically advertised but never
+        # implemented — it silently fell back to seeded RandomUniform. We now
+        # raise loudly so callers can pick a real initializer.
         if isinstance(weights_initializer, str) and weights_initializer == 'sample':
-            self.weights_initializer = None  # Use custom logic in build
-        else:
-            self.weights_initializer = keras.initializers.get(weights_initializer)
+            raise NotImplementedError(
+                "'sample' initializer (data-sample init) is not implemented; pass "
+                "a Keras initializer instance or a standard string such as "
+                "'random_uniform' instead."
+            )
+        self.weights_initializer = keras.initializers.get(weights_initializer)
         self.regularizer = keras.regularizers.get(regularizer)
 
         # Define custom decay function if none provided
@@ -306,14 +312,9 @@ class SOMLayer(keras.layers.Layer):
             trainable=False
         )
 
-        # Handle weight initialization
-        if self.weights_initializer is None:
-            # Handle special strings 'sample'.
-            # 'sample' requires input data, which isn't available here, so it
-            # falls back to random uniform, matching original behavior.
-            initializer = keras.initializers.RandomUniform(minval=0.0, maxval=1.0, seed=42)
-        else:
-            initializer = self.weights_initializer
+        # Handle weight initialization (dead 'sample' fallback removed — raises
+        # NotImplementedError at __init__ time now).
+        initializer = self.weights_initializer
 
         self.weights_map = self.add_weight(
             name="som_weights",
