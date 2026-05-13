@@ -1,0 +1,3 @@
+dataset,model,params,band_low,band_high,band_acc,band_epoch,band_entered,epochs_used,wall_s,soft_acc,hard_acc,delta_hard,roundtrip_diff,final_val_acc
+mnist,circuit,1514,0.7,0.95,0.7006000280380249,27,True,28,168.23486471176147,0.7006,0.7014,0.0008,0.0,0.7006000280380249
+mnist,cnn_matched,1474,0.7,0.95,,,False,50,200.91911554336548,0.6057,,,0.0,0.6057000160217285
