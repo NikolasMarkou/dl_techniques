@@ -35,9 +35,46 @@ Optional features (all opt-in, default off):
     sigmoid-of-sigmoid range collapse), ``'all'`` (legacy), or ``'none'``.
 """
 
+import warnings
+
 import keras
 from keras import ops
 from typing import List, Optional, Union, Any, Dict, Tuple
+
+
+# DECISION plan_2026-05-13_3a2f1d23/D-002
+# H6: ``load_balance_coefficient`` was a misnomer — the loss it controls is
+# actually the Shazeer (2017) gate-entropy regularizer, not load-balance.
+# The new canonical name is ``gate_entropy_coefficient``. The old name is
+# kept as a deprecated alias with a one-time DeprecationWarning to avoid
+# silently breaking external callers.
+def _resolve_gate_entropy_coefficient(
+    gate_entropy_coefficient: Optional[float],
+    load_balance_coefficient: Optional[float],
+    cls_name: str,
+) -> float:
+    """Resolve the gate-entropy coefficient honoring back-compat aliasing.
+
+    If only the deprecated ``load_balance_coefficient`` is passed, emit a
+    DeprecationWarning and use its value. If both are passed, the new name
+    wins. Returns the resolved float (default 0.0).
+    """
+    if (
+        load_balance_coefficient is not None
+        and load_balance_coefficient != 0.0
+        and gate_entropy_coefficient is None
+    ):
+        warnings.warn(
+            f"{cls_name}: 'load_balance_coefficient' is deprecated; rename "
+            f"to 'gate_entropy_coefficient' (plan_2026-05-13_3a2f1d23 H6). "
+            f"The old name continues to work for now.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        return float(load_balance_coefficient)
+    if gate_entropy_coefficient is not None:
+        return float(gate_entropy_coefficient)
+    return float(load_balance_coefficient or 0.0)
 
 # ---------------------------------------------------------------------
 # local imports
@@ -95,11 +132,19 @@ class CircuitDepthLayer(keras.layers.Layer):
             combination_initializer: Union[str, keras.initializers.Initializer] = "zeros",
             circuit_routing: str = "output_only",
             apply_sigmoid: bool = True,
-            load_balance_coefficient: float = 0.0,
+            gate_entropy_coefficient: Optional[float] = None,
+            load_balance_coefficient: Optional[float] = None,
             channel_mix: Optional[str] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
+
+        # H6: resolve canonical name + deprecated alias.
+        resolved_coef = _resolve_gate_entropy_coefficient(
+            gate_entropy_coefficient,
+            load_balance_coefficient,
+            self.__class__.__name__,
+        )
 
         # Validate parameters
         if num_logic_ops <= 0:
@@ -111,8 +156,8 @@ class CircuitDepthLayer(keras.layers.Layer):
                 f"circuit_routing must be 'output_only' or 'classic', got "
                 f"{circuit_routing!r}."
             )
-        if load_balance_coefficient < 0:
-            raise ValueError("load_balance_coefficient must be non-negative.")
+        if resolved_coef < 0:
+            raise ValueError("gate_entropy_coefficient must be non-negative.")
         if channel_mix not in (None, "dense"):
             raise ValueError(
                 f"channel_mix must be None or 'dense', got {channel_mix!r}."
@@ -128,7 +173,10 @@ class CircuitDepthLayer(keras.layers.Layer):
         self.combination_initializer = keras.initializers.get(combination_initializer)
         self.circuit_routing = circuit_routing
         self.apply_sigmoid = apply_sigmoid
-        self.load_balance_coefficient = load_balance_coefficient
+        # H6: canonical name is gate_entropy_coefficient. The attribute
+        # load_balance_coefficient remains as a read-only alias for back-compat.
+        self.gate_entropy_coefficient = resolved_coef
+        self.load_balance_coefficient = resolved_coef  # deprecated alias
         self.channel_mix = channel_mix
 
         # DECISION plan_2026-05-13_a2b0f17b/D-002 — children created in
@@ -168,7 +216,7 @@ class CircuitDepthLayer(keras.layers.Layer):
         logger.debug(
             f"CircuitDepthLayer: routing={circuit_routing}, "
             f"{num_logic_ops}+{num_arithmetic_ops} ops, residual={use_residual}, "
-            f"load_balance={load_balance_coefficient}, channel_mix={channel_mix}"
+            f"gate_entropy={resolved_coef}, channel_mix={channel_mix}"
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -296,7 +344,9 @@ class CircuitDepthLayer(keras.layers.Layer):
             "combination_initializer": keras.initializers.serialize(self.combination_initializer),
             "circuit_routing": self.circuit_routing,
             "apply_sigmoid": self.apply_sigmoid,
-            "load_balance_coefficient": self.load_balance_coefficient,
+            # H6: emit canonical name. Old key omitted to keep config clean;
+            # round-trip works because __init__ accepts both names.
+            "gate_entropy_coefficient": self.gate_entropy_coefficient,
             "channel_mix": self.channel_mix,
         })
         return config
@@ -336,11 +386,19 @@ class LearnableNeuralCircuit(keras.layers.Layer):
             combination_initializer: Union[str, keras.initializers.Initializer] = "zeros",
             circuit_routing: str = "output_only",
             apply_sigmoid_per_depth: str = "first_only",
-            load_balance_coefficient: float = 0.0,
+            gate_entropy_coefficient: Optional[float] = None,
+            load_balance_coefficient: Optional[float] = None,
             channel_mix: Optional[str] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
+
+        # H6: resolve canonical name + deprecated alias.
+        resolved_coef = _resolve_gate_entropy_coefficient(
+            gate_entropy_coefficient,
+            load_balance_coefficient,
+            self.__class__.__name__,
+        )
 
         # Validate
         if circuit_depth <= 0:
@@ -366,7 +424,8 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         self.combination_initializer = keras.initializers.get(combination_initializer)
         self.circuit_routing = circuit_routing
         self.apply_sigmoid_per_depth = apply_sigmoid_per_depth
-        self.load_balance_coefficient = load_balance_coefficient
+        self.gate_entropy_coefficient = resolved_coef
+        self.load_balance_coefficient = resolved_coef  # deprecated alias
         self.channel_mix = channel_mix
 
         # DECISION plan_2026-05-13_a2b0f17b/D-002 — sublayers created in
@@ -385,7 +444,7 @@ class LearnableNeuralCircuit(keras.layers.Layer):
                     combination_initializer=self.combination_initializer,
                     circuit_routing=self.circuit_routing,
                     apply_sigmoid=apply_sigmoid,
-                    load_balance_coefficient=self.load_balance_coefficient,
+                    gate_entropy_coefficient=self.gate_entropy_coefficient,
                     channel_mix=self.channel_mix,
                     name=f"circuit_depth_{depth}",
                 )
@@ -453,7 +512,7 @@ class LearnableNeuralCircuit(keras.layers.Layer):
             "combination_initializer": keras.initializers.serialize(self.combination_initializer),
             "circuit_routing": self.circuit_routing,
             "apply_sigmoid_per_depth": self.apply_sigmoid_per_depth,
-            "load_balance_coefficient": self.load_balance_coefficient,
+            "gate_entropy_coefficient": self.gate_entropy_coefficient,
             "channel_mix": self.channel_mix,
         })
         return config

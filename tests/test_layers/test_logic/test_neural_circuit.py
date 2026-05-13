@@ -780,8 +780,9 @@ class TestPlanA2b0f17bCircuit:
             CircuitDepthLayer(channel_mix='conv7x7')
 
     def test_negative_load_balance_raises(self):
-        with pytest.raises(ValueError, match="load_balance"):
-            CircuitDepthLayer(load_balance_coefficient=-0.1)
+        # After H6 (plan_3a2f1d23), the message names the canonical key.
+        with pytest.raises(ValueError, match="gate_entropy_coefficient"):
+            CircuitDepthLayer(gate_entropy_coefficient=-0.1)
 
     def test_neural_circuit_apply_sigmoid_first_only(self):
         """C2: with first_only mode, only depth 0 gets apply_sigmoid=True."""
@@ -829,3 +830,39 @@ class TestPlanA2b0f17bCircuit:
             ops.convert_to_numpy(m2(sample)),
             atol=1e-5,
         )
+
+
+class TestPlan3a2f1d23GateEntropyAlias:
+    """H6: gate_entropy_coefficient is canonical; load_balance_coefficient is
+    a deprecated alias that emits DeprecationWarning."""
+
+    def test_canonical_name_accepted_on_depth(self):
+        l = CircuitDepthLayer(gate_entropy_coefficient=0.1)
+        assert l.gate_entropy_coefficient == 0.1
+        assert l.load_balance_coefficient == 0.1  # legacy attribute alias
+
+    def test_deprecated_name_warns_on_depth(self):
+        with pytest.warns(DeprecationWarning, match="load_balance_coefficient"):
+            l = CircuitDepthLayer(load_balance_coefficient=0.2)
+        assert l.gate_entropy_coefficient == 0.2
+
+    def test_canonical_name_accepted_on_circuit(self):
+        c = LearnableNeuralCircuit(
+            circuit_depth=2, gate_entropy_coefficient=0.15
+        )
+        assert c.gate_entropy_coefficient == 0.15
+
+    def test_deprecated_name_warns_on_circuit(self):
+        with pytest.warns(DeprecationWarning, match="load_balance_coefficient"):
+            c = LearnableNeuralCircuit(
+                circuit_depth=2, load_balance_coefficient=0.25
+            )
+        assert c.gate_entropy_coefficient == 0.25
+
+    def test_round_trip_uses_canonical_name(self):
+        l = CircuitDepthLayer(gate_entropy_coefficient=0.3)
+        cfg = l.get_config()
+        assert cfg["gate_entropy_coefficient"] == 0.3
+        assert "load_balance_coefficient" not in cfg
+        l2 = CircuitDepthLayer.from_config(cfg)
+        assert l2.gate_entropy_coefficient == 0.3

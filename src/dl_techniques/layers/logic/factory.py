@@ -142,7 +142,7 @@ LOGIC_REGISTRY: Dict[str, Dict[str, Any]] = {
             "combination_initializer": "zeros",
             "circuit_routing": "output_only",
             "apply_sigmoid": True,
-            "load_balance_coefficient": 0.0,
+            "gate_entropy_coefficient": 0.0,
             "channel_mix": None,
         },
         "use_case": (
@@ -169,7 +169,7 @@ LOGIC_REGISTRY: Dict[str, Dict[str, Any]] = {
             "combination_initializer": "zeros",
             "circuit_routing": "output_only",
             "apply_sigmoid_per_depth": "first_only",
-            "load_balance_coefficient": 0.0,
+            "gate_entropy_coefficient": 0.0,
             "channel_mix": None,
         },
         "use_case": (
