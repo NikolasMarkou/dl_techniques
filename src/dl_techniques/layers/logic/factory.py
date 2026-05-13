@@ -93,6 +93,7 @@ LOGIC_REGISTRY: Dict[str, Dict[str, Any]] = {
             "gumbel_softmax": False,
             "gumbel_hard": False,
             "entropy_coefficient": 0.0,
+            "selection_mode": "global",
         },
         "use_case": (
             "Learnable elementwise arithmetic between two same-shape tensors "
@@ -118,6 +119,7 @@ LOGIC_REGISTRY: Dict[str, Dict[str, Any]] = {
             "gumbel_hard": False,
             "entropy_coefficient": 0.0,
             "allow_unary_degenerate": False,
+            "selection_mode": "global",
         },
         "use_case": (
             "Soft logical combination of two same-shape tensors interpreted "
@@ -144,6 +146,7 @@ LOGIC_REGISTRY: Dict[str, Dict[str, Any]] = {
             "apply_sigmoid": True,
             "gate_entropy_coefficient": 0.0,
             "channel_mix": None,
+            "selection_mode": "global",
         },
         "use_case": (
             "Drop-in mid-network expert ensemble that preserves tensor shape "
@@ -171,6 +174,7 @@ LOGIC_REGISTRY: Dict[str, Dict[str, Any]] = {
             "apply_sigmoid_per_depth": "first_only",
             "gate_entropy_coefficient": 0.0,
             "channel_mix": None,
+            "selection_mode": "global",
         },
         "use_case": (
             "Deep compositional reasoning block — shape-preserving, "

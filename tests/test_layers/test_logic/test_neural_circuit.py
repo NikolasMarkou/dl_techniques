@@ -832,6 +832,63 @@ class TestPlanA2b0f17bCircuit:
         )
 
 
+class TestPlan3a2f1d23PerChannelCircuit:
+    """C3: per-channel selection mode propagates through CircuitDepthLayer
+    and LearnableNeuralCircuit."""
+
+    def test_circuit_depth_per_channel_weight_shape(self):
+        l = CircuitDepthLayer(
+            num_logic_ops=2, num_arithmetic_ops=2,
+            selection_mode='per_channel',
+        )
+        l.build((None, 8))
+        # 4 total operators, 8 channels.
+        assert l.combination_weights.shape == (8, 4)
+        # Inner experts also per-channel.
+        assert l.logic_operators[0].selection_mode == 'per_channel'
+        assert l.arithmetic_operators[0].selection_mode == 'per_channel'
+
+    def test_circuit_depth_per_channel_forward_preserves_shape(self):
+        l = CircuitDepthLayer(
+            num_logic_ops=2, num_arithmetic_ops=2,
+            selection_mode='per_channel',
+        )
+        x = ops.convert_to_tensor(np.random.randn(2, 6).astype(np.float32))
+        y = l(x)
+        assert y.shape == (2, 6)
+        assert bool(ops.all(ops.isfinite(y)))
+
+    def test_neural_circuit_per_channel_round_trip(self):
+        nc = LearnableNeuralCircuit(
+            circuit_depth=2, selection_mode='per_channel'
+        )
+        x = ops.convert_to_tensor(np.random.randn(2, 8).astype(np.float32))
+        y1 = ops.convert_to_numpy(nc(x))
+        cfg = nc.get_config()
+        assert cfg['selection_mode'] == 'per_channel'
+        # Build a fresh layer and check forward shape works.
+        nc2 = LearnableNeuralCircuit.from_config(cfg)
+        y2 = nc2(x)
+        assert y2.shape == y1.shape
+
+    def test_neural_circuit_per_channel_keras_save_load(self):
+        inp = keras.Input(shape=(8,))
+        out = LearnableNeuralCircuit(
+            circuit_depth=2, selection_mode='per_channel'
+        )(inp)
+        m = keras.Model(inp, out)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'm.keras')
+            m.save(path)
+            m2 = keras.models.load_model(path)
+        sample = np.random.randn(2, 8).astype(np.float32)
+        np.testing.assert_allclose(
+            ops.convert_to_numpy(m(sample)),
+            ops.convert_to_numpy(m2(sample)),
+            atol=1e-5,
+        )
+
+
 class TestPlan3a2f1d23ForceClip:
     """C4: stacked logic-after-arithmetic must clip inputs to [0, 1] when
     apply_sigmoid=False on depths >= 1."""

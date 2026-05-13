@@ -136,6 +136,7 @@ class CircuitDepthLayer(keras.layers.Layer):
             load_balance_coefficient: Optional[float] = None,
             channel_mix: Optional[str] = None,
             force_logic_input_clip: bool = False,
+            selection_mode: str = "global",
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -146,6 +147,12 @@ class CircuitDepthLayer(keras.layers.Layer):
             load_balance_coefficient,
             self.__class__.__name__,
         )
+
+        if selection_mode not in ("global", "per_channel"):
+            raise ValueError(
+                f"selection_mode must be 'global' or 'per_channel', got "
+                f"{selection_mode!r}."
+            )
 
         # Validate parameters
         if num_logic_ops <= 0:
@@ -181,6 +188,10 @@ class CircuitDepthLayer(keras.layers.Layer):
         self.channel_mix = channel_mix
         # C4: forwards force_clip to inner LearnableLogicOperator instances.
         self.force_logic_input_clip = force_logic_input_clip
+        # C3: selection_mode forwarded to inner experts AND used for own
+        # combination weights shape.
+        self.selection_mode = selection_mode
+        self._channels = None  # set in build() for per_channel mode
 
         # DECISION plan_2026-05-13_a2b0f17b/D-002 — children created in
         # __init__, NOT manually pre-built in build(). Auto-build via
@@ -198,6 +209,7 @@ class CircuitDepthLayer(keras.layers.Layer):
                 apply_sigmoid=self.apply_sigmoid,
                 allow_unary_degenerate=True,
                 force_clip_when_no_sigmoid=self.force_logic_input_clip,
+                selection_mode=self.selection_mode,
                 name=f"logic_op_{i}",
             )
             for i in range(self.num_logic_ops)
@@ -205,6 +217,7 @@ class CircuitDepthLayer(keras.layers.Layer):
         self.arithmetic_operators = [
             LearnableArithmeticOperator(
                 operation_types=self.arithmetic_op_types,
+                selection_mode=self.selection_mode,
                 name=f"arithmetic_op_{i}",
             )
             for i in range(self.num_arithmetic_ops)
@@ -234,6 +247,20 @@ class CircuitDepthLayer(keras.layers.Layer):
 
         total_operators = self.num_logic_ops + self.num_arithmetic_ops
 
+        # C3: per-channel selection shapes combination weights as
+        # (channels, total_operators). Routing weights stay 1-D since
+        # 'classic' mode predates per-channel and we don't expand that API.
+        if self.selection_mode == "per_channel":
+            if input_shape[-1] is None:
+                raise ValueError(
+                    "selection_mode='per_channel' requires a concrete "
+                    f"last-axis dimension; got {input_shape}."
+                )
+            self._channels = int(input_shape[-1])
+            combination_shape = (self._channels, total_operators)
+        else:
+            combination_shape = (total_operators,)
+
         # Routing weights still created in 'output_only' for serialization
         # compatibility (zero-cost; only consulted in 'classic' mode).
         self.routing_weights = self.add_weight(
@@ -244,7 +271,7 @@ class CircuitDepthLayer(keras.layers.Layer):
         )
         self.combination_weights = self.add_weight(
             name="combination_weights",
-            shape=(total_operators,),
+            shape=combination_shape,
             initializer=self.combination_initializer,
             trainable=True,
         )
@@ -293,8 +320,13 @@ class CircuitDepthLayer(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """Forward pass through the depth layer."""
-        combination_probs = ops.softmax(self.combination_weights)
-        self._maybe_load_balance_loss(combination_probs)
+        combination_probs = ops.softmax(self.combination_weights, axis=-1)
+        # _maybe_load_balance_loss expects a 1-D combination_probs; under
+        # per_channel it's (C, N). Reduce by mean over channels for the aux.
+        if self.selection_mode == "per_channel":
+            self._maybe_load_balance_loss(ops.mean(combination_probs, axis=0))
+        else:
+            self._maybe_load_balance_loss(combination_probs)
 
         all_outputs: List[keras.KerasTensor] = []
 
@@ -319,11 +351,18 @@ class CircuitDepthLayer(keras.layers.Layer):
                 all_outputs.append(arithmetic_op(inputs, training=training))
 
         # Vectorized weighted fusion.
-        stacked = ops.stack(all_outputs, axis=0)
         n = self.num_logic_ops + self.num_arithmetic_ops
-        weight_shape = (n,) + (1,) * (len(stacked.shape) - 1)
-        weights = ops.reshape(combination_probs, weight_shape)
-        combined_output = ops.sum(ops.multiply(weights, stacked), axis=0)
+        if self.selection_mode == "per_channel":
+            stacked = ops.stack(all_outputs, axis=-1)  # (..., C, N)
+            rank = len(stacked.shape)
+            weight_shape = (1,) * (rank - 2) + (self._channels, n)
+            weights = ops.reshape(combination_probs, weight_shape)
+            combined_output = ops.sum(ops.multiply(weights, stacked), axis=-1)
+        else:
+            stacked = ops.stack(all_outputs, axis=0)
+            weight_shape = (n,) + (1,) * (len(stacked.shape) - 1)
+            weights = ops.reshape(combination_probs, weight_shape)
+            combined_output = ops.sum(ops.multiply(weights, stacked), axis=0)
 
         if self._channel_mix_layer is not None:
             combined_output = self._channel_mix_layer(combined_output)
@@ -353,6 +392,7 @@ class CircuitDepthLayer(keras.layers.Layer):
             "gate_entropy_coefficient": self.gate_entropy_coefficient,
             "channel_mix": self.channel_mix,
             "force_logic_input_clip": self.force_logic_input_clip,
+            "selection_mode": self.selection_mode,
         })
         return config
 
@@ -394,6 +434,7 @@ class LearnableNeuralCircuit(keras.layers.Layer):
             gate_entropy_coefficient: Optional[float] = None,
             load_balance_coefficient: Optional[float] = None,
             channel_mix: Optional[str] = None,
+            selection_mode: str = "global",
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -404,6 +445,12 @@ class LearnableNeuralCircuit(keras.layers.Layer):
             load_balance_coefficient,
             self.__class__.__name__,
         )
+
+        if selection_mode not in ("global", "per_channel"):
+            raise ValueError(
+                f"selection_mode must be 'global' or 'per_channel', got "
+                f"{selection_mode!r}."
+            )
 
         # Validate
         if circuit_depth <= 0:
@@ -432,6 +479,7 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         self.gate_entropy_coefficient = resolved_coef
         self.load_balance_coefficient = resolved_coef  # deprecated alias
         self.channel_mix = channel_mix
+        self.selection_mode = selection_mode
 
         # C4 (plan_2026-05-13_3a2f1d23): when first_only + arithmetic experts,
         # depths >= 1 receive an apply_sigmoid=False LearnableLogicOperator
@@ -472,6 +520,7 @@ class LearnableNeuralCircuit(keras.layers.Layer):
                     gate_entropy_coefficient=self.gate_entropy_coefficient,
                     channel_mix=self.channel_mix,
                     force_logic_input_clip=risky_stack and depth >= 1,
+                    selection_mode=self.selection_mode,
                     name=f"circuit_depth_{depth}",
                 )
             )
@@ -540,6 +589,7 @@ class LearnableNeuralCircuit(keras.layers.Layer):
             "apply_sigmoid_per_depth": self.apply_sigmoid_per_depth,
             "gate_entropy_coefficient": self.gate_entropy_coefficient,
             "channel_mix": self.channel_mix,
+            "selection_mode": self.selection_mode,
         })
         return config
 
