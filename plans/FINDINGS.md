@@ -34,6 +34,64 @@
 - **`current_phase` / `_global_step` counters**: `add_weight(trainable=False, dtype="float32")` — int32 fails CPU/GPU device placement.
 <!-- /COMPRESSED-SUMMARY -->
 
+## plan_2026-05-12_13c70aed
+### Index
+
+| ID | Topic | File | Summary |
+|----|-------|------|---------|
+| F-001 | CliffordNetLMUNet MRL integration surface | `findings/lmunet-mrl-integration.md` | MRL plugs in at the post-`head_norm`, post-squeeze `h_top: (B, T, C0)` tensor in `call()`. The existing `"logits"` head is just the slice at `w_0 = base_channels`. Tied mode reuses `token_embedding.embeddings[:, :w]`; untied mode adds per-width `Dense(V)`. Output dict shape: flat keys `{"logits": ..., "logits_w{w}": ..., "embedding_w{w}": ...}` rather than nested — keeps `prepare_dict_keyed_compile` simple and `compute_output_shape` clean. Width sequence: halve from base_channels down to a floor of 16. Causality preserved (head is per-position). Memory acceptable. |
+| F-002 | Auxiliary L2-normalized embedding head — design | `findings/embedding-head-design.md` | Pool at last array position by default (causal model — last position has seen all real tokens). Expose `pool ∈ {last, cls, auto}`; default `last`. Default to identity projection (slice+norm); `--emb-head` flag enables a single learnable `Dense(C0, use_bias=False)` shared across widths. L2-norm per width independently. Numerical safety: epsilon `1e-12` under sqrt; cast to fp32 inside the norm op (LESSONS L34/L100). Embedding output: flat keys `{f"embedding_w{w}": (B, w)}` — side output, never participates in loss. Trainer-side `output_names` excludes embedding keys. |
+| F-003 | Trainer + loss wiring | `findings/trainer-and-loss-wiring.md` | `prepare_dict_keyed_compile` gets a new `output_keys=None` parameter (backwards compatible); trainer passes `output_keys=["logits", "logits_w128", ...]`. Loss dict uses N `MaskedCausalLMLoss` instances (one per width). `loss_weights` dict: `uniform` default; `inv-log2` optional. Labels are duplicated across keys via `(x, y) -> (x, {k: y for k in lm_keys})`. CLI flags: `--mrl-widths`, `--mrl-weights`, `--emb-head`, `--mrl-head-norm`. No new `custom_objects` entries. Generation probe is unaffected — reads `"logits"`. |
+
+### Key Constraints
+
+### HARD
+- Keras 3 / TF 2.18 idioms: `@keras.saving.register_keras_serializable()`, `keras.ops`, full `get_config()` round-trip, `dl_techniques.utils.logger` only.
+- Causality (LESSONS L33, D-007 of plan_82749628) must be preserved at every slice width. Verified by test.
+- `tie_word_embeddings=True` default honored at every width: slice `token_embedding.embeddings[:, :w]` transposed; per-width learnable bias.
+- `"logits"` key is the SYSTEM.md output-key invariant. Must remain the primary (largest-width) head. Smaller widths get `f"logits_w{w}"` suffix.
+- `prepare_dict_keyed_compile` extension must be backwards compatible (existing 6 CLM trainers unaffected).
+- Numerical safety on L2-norm: epsilon `1e-12` under sqrt; fp32 cast for the norm op.
+- No new external dependencies.
+- Don't run `make test` — scope pytest to `tests/test_models/test_cliffordnet/`.
+- `MPLBACKEND=Agg`; single GPU; user pushes commits.
+- `.keras` round-trip atol = 1e-4 (LESSONS — fp32 reduction-order noise on U-Net).
+- Width floor 16; widths halve from `base_channels`. nano `[128,64,32,16]`; mini `[192,96,48,24]`; base `[384,192,96,48,24]`; large `[512,256,128,64,32,16]`; xl `[768,384,192,96,48,24]`.
+- Slice widths are static Python ints (resolved in `__init__`).
+- MRL must support both tied and untied LM head modes.
+
+### SOFT
+- Output dict flat keys (`"logits_w64"`, `"embedding_w64"`).
+- Default `--mrl-weights uniform`.
+- Default `--emb-head False`.
+- Default `--mrl-head-norm True`.
+- Default `pool="last"`.
+- Existing `"logits"` semantics unchanged.
+- Extend existing test file rather than add a parallel file.
+
+### GHOST (considered & rejected)
+- Contrastive loss for embeddings — out of scope; `emb_head=False` default avoids dead weight.
+- Nested dict output — rejected for `prepare_dict_keyed_compile` simplicity.
+- CLS-at-0 default — rejected; causal model, position 0 sees only itself.
+- Per-width Dense embedding projection — dead weight without contrastive signal.
+- MRL inside attention/blocks — out of scope.
+- Per-width perplexity metrics — adds memory for negligible signal.
+
+### Exploration Confidence
+- Scope: deep. All 4 target/relevant files read end-to-end. SYSTEM.md, LESSONS.md, prior plans plan_82749628 + plan_632605aa reviewed. No existing matryoshka utilities in the repo (grep returned only docstring references, none reusable).
+- Solutions: constrained. Single architecturally-correct approach: post-`head_norm` slicing + per-width vocab projection (tied/untied), L2-normed side-output, flat-keyed output dict.
+- Risks: clear. `loss_weights` dict on subclassed Keras models works via the same `output_names` fix; memory fits nano/mini at batch=8; `.keras` round-trip with per-width bias weights persists naturally; causality at small widths is structural.
+
+### Synthesis
+Three coupled additive changes, zero blast radius on non-MRL paths.
+1. `src/dl_techniques/models/cliffordnet/lmunet.py` (~+200 LOC) — MRL+embedding head wiring.
+2. `src/train/common/nlp.py` (~+10 LOC) — `prepare_dict_keyed_compile` accepts `output_keys`.
+3. `src/train/cliffordnet/train_cliffordnet_nlp_unet.py` (~+80 LOC) — CLI + loss/label dicts.
+4. `tests/test_models/test_cliffordnet/test_cliffordnet_lmunet.py` (~+150 LOC) — MRL/embedding/serialization tests.
+
+### Corrections
+*None yet.*
+
 ## plan_2026-05-12_6a2cd5b3
 ### Index
 
@@ -371,43 +429,3 @@ Contained, corrective fix to a single 354-LOC `model.py` plus peer-pattern packa
 
 ### Corrections
 *Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
-
-## plan_2026-05-12_94b9fab5
-### Index
-
-| ID | File | Topic |
-|----|------|-------|
-| F-001 | findings/code-review.md | Deep code review of `models/adaptive_ema/model.py` — 19 issues (4 critical, 6 high, 5 medium, 4 low) |
-| F-002 | findings/readme-pattern.md | Peer README pattern (PRISM canonical TOC) + adaptive-ema-specific adaptations |
-| F-003 | findings/training-pattern.md | `src/train/tirex/` template breakdown + adaptive-ema training adaptations |
-
-### Key Constraints
-
-### HARD
-- **Path**: `src/dl_techniques/models/adaptive_ema/` (user prompt said `src/dl_techniques/adaptive_ema/` — typo; CLAUDE.md confirms `models/adaptive_ema/`).
-- **Keras 3 conventions**: `@keras.saving.register_keras_serializable()`, `keras.ops` only, full `get_config()` round-trip. Already satisfied by current `model.py`.
-- **Logger**: `dl_techniques.utils.logger` only, no `print` statements.
-- **MPLBACKEND=Agg** required for training-script invocations (headless).
-- **File naming**: training script must be `train_adaptive_ema.py`, not `train.py` (shadowing per train/CLAUDE.md).
-- **Single GPU jobs only** — never parallel.
-- **User pushes commits themselves** — commit locally only.
-- **No `make test`** — scope pytest to module only if running.
-
-### SOFT
-- README style mirrors PRISM's TOC (peer time-series model, smallest scope).
-- Training script mirrors TiRex (Pattern-2 time-series/probabilistic per train/CLAUDE.md).
-- `__init__.py` is empty per `models/CLAUDE.md`, but several recent canonical packages (vit, accunet, tirex) re-export — either acceptable. Default to empty to match `models/CLAUDE.md` literal.
-
-### GHOST
-- "Top-level package at `src/dl_techniques/adaptive_ema/`" from user prompt — doesn't exist. Package lives under `models/`. Treat as typo.
-
-### Corrections
-*(none yet)*
-
-### Exploration confidence
-- Scope: **deep** — full source read, peer-template read, no-caller grep, dependency layers reviewed.
-- Solutions: **constrained** — clear precedents (PRISM README, TiRex training script) directly apply.
-- Risks: **clear** — main risk is scope creep into code fixes. PLAN should NOT bundle code fixes unless user asks. Review is delivered as an artifact + chat summary.
-
-### Synthesis
-adaptive_ema is a *small, single-class, untested, undocumented model* with 4 critical and 6 high-severity issues. The user's three deliverables are (a) review, (b) README, (c) training package. Review is informational + advisory; README and training script are net-new additive files at zero blast radius (no callers, no tests). PLAN: write README mirroring PRISM, write Pattern-2 training package mirroring TiRex, surface code-review findings in REFLECT, ask the user whether to spin a follow-up plan for code fixes.

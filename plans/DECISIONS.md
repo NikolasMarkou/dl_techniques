@@ -3,7 +3,7 @@
 
 <!-- COMPRESSED-SUMMARY -->
 ## Summary (compressed)
-*Auto-compressed from 635 lines on 2026-05-12. Read full content below for details on each plan's decisions.*
+*Auto-compressed from 630 lines on 2026-05-12 (refreshed after plan_2026-05-12_13c70aed close). Read full content below for details on each plan's decisions.*
 
 ### Active Constraints (anchored, do-not-break)
 - **3-name encoder public surface** (`<Model>`, `create_<model>`, `create_<model>_with_head`) — locked in tree_transformer/bert/cliffordnet; gpt2 is 2-name (LM head intrinsic); cliffordnet now hosts 4+3 names (multiple model classes).
@@ -28,6 +28,53 @@
 - 5 triggers: failure-driven, non-obvious, rejected-alternative, constraint-workaround, 3-strike.
 - Anchor at impact site (not at decision definition). One anchor per impact site, even if shared with sibling decision.
 <!-- /COMPRESSED-SUMMARY -->
+
+## plan_2026-05-12_13c70aed
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-12_13c70aed/D-NNN` anchor exists in source)
+-->
+
+### D-001 | EXPLORE → PLAN | 2026-05-12
+**Context**: User asked for MRL + auxiliary L2-normalized embedding head on `CliffordNetLMUNet`. The model is a causal U-Net language model with `"logits"` as its sole output key — a SYSTEM.md invariant for CLM trainers. The existing head ingests `h_top: (B, T, base_channels)` after `head_norm`. EXPLORE confirmed (a) no existing matryoshka utilities in `src/dl_techniques`, (b) MRL plugs in purely post-decoder (zero blast radius on the encoder/bottleneck/decoder stack), (c) generation probe reads `"logits"` only — unaffected if we keep the primary largest-width head named `"logits"`, (d) `prepare_dict_keyed_compile` is the established mechanism for routing dict-keyed loss/metrics through subclassed Keras 3 models.
+
+**Decision**: Add MRL by walking a `mrl_widths` list (default per-variant: halving from `base_channels` to floor 16) at the head; emit flat-keyed outputs `{"logits", "logits_w{w}", "embedding_w{w}"}`. Trainer wires per-key `MaskedCausalLMLoss` instances via Keras's `loss=` + `loss_weights=` dicts; `prepare_dict_keyed_compile` is extended to accept a list of output keys. Embedding head is identity-by-default (slice + L2-norm); learnable `Dense(C0)` opt-in via `--emb-head`. Embedding side outputs never participate in loss.
+
+**Trade-off**: A multi-head LM (N untied paths or N tied biases plus per-width LayerNorms) at the cost of slightly higher parameter + activation count and a wider model output dict.
+
+**Reasoning**: Pure additive change. Causality is structural (slicing + per-position projection). `"logits"` primary-head name is preserved → zero impact on the generation probe and on other CLM trainers. Reusing `MaskedCausalLMLoss` avoids new custom_objects. Halving widths down to 16 mirrors common matryoshka recipes and gives consistent semantics across non-power-of-2 base variants. The `loss_weights` dict is the cleanest plan A; a self-contained matryoshka loss class (summing CE internally) is the documented fallback if Keras's dict routing misbehaves on subclassed models (Pre-Mortem Scenario A). Alternatives rejected: nested dict outputs (complicates compile path), contrastive loss for the embedding head (out of scope), per-width Dense embedding projection (dead weight without supervision signal).
+
+**Anchor-Refs**: `src/dl_techniques/models/cliffordnet/lmunet.py` (head section to be edited at ~lines 626-641 in the existing file).
+
+### D-002 | PLAN (revision) → EXECUTE | 2026-05-12
+**Context**: PC-PLAN presentation surfaced Assumption A7 (default width sequence at non-power-of-2 `base_channels`). User explicitly chose width rule: **"Power-of-2 anchored, base preserved"** — largest width is `base_channels` preserved as-is (even when not a power of 2); remaining widths are strict powers of 2 strictly less than `base_channels`, descending, floor 16. This replaces the original "halving from base_channels" rule in plan v1.
+
+**Decision**: Apply the new rule to:
+1. Step 1 validation: first element MUST equal `base_channels` (may be non-power-of-2); every subsequent element MUST be a strict power of 2 AND strictly less than `base_channels`.
+2. Step 1b `MODEL_VARIANTS` defaults: nano `[128,64,32,16]`; mini `[192,128,64,32,16]`; base `[384,256,128,64,32,16]`; large `[512,256,128,64,32,16]`; xl `[768,512,256,128,64,32,16]`.
+3. Helper `_default_mrl_widths(base, floor=16)` computes `[base] + [2**k for k in descending powers-of-2 < base, terminating at >= floor]`.
+4. Test `test_mrl_default_widths_per_variant` updated to the new table.
+5. Loss weighting default stays `uniform` (weights `[1.0] * N`, sum=N — unchanged from plan v1).
+
+**Trade-off**: Preserves full `base_channels` capacity at the largest head at the cost of a slightly irregular descent on non-power-of-2 variants (e.g. `192 → 128` is not a halving). Compared to strict-power-of-2-only (which would drop the `base_channels` head when `base ≠ 2^k`), this keeps the primary head matching the model's actual width and keeps `"logits"` semantically identical to the existing single-head path. Compared to plan v1's halving, this gives cleaner power-of-2 representations at all sub-widths and aligns with common matryoshka recipes that prefer power-of-2 truncations for hardware efficiency.
+
+**Reasoning**: User chose to preserve base_channels capacity at largest width. Strict-power-of-2-only would silently drop capacity at the primary head for mini/base/xl (and break the SYSTEM.md `"logits"` invariant if the primary head no longer matched `base_channels`). Halving was a reasonable default but produced non-power-of-2 sub-widths (e.g. 192→96→48→24) that are less hardware-friendly and less aligned with matryoshka conventions. The "anchored" rule resolves both concerns cleanly.
+
+**Anchor-Refs**: `src/dl_techniques/models/cliffordnet/lmunet.py:415` (in-code anchor `# DECISION plan_2026-05-12_13c70aed/D-002` at the MRL widths resolution + validation block).
+
+### D-003 | EXECUTE → REFLECT | 2026-05-12
+**Context**: All 5 plan steps executed in a single pass with zero fix attempts. Full scoped pytest run: 43/43 PASS in 124.22s. SC1-SC8 all green. Diff review clean (no debug artifacts). Scope drift: zero (exactly 4 planned files modified). `validate-plan.mjs` errors are all pre-existing orphan anchors from prior plans, unrelated to this plan's edits.
+
+**Decision**: Route REFLECT → CLOSE.
+
+**Trade-off**: Closing now at the cost of not running the full ~1.5h `make test` suite. SC1-SC8 are scoped to the modules edited; SC6 demonstrates the cross-trainer mechanism is preserved; the per-edit blast-radius scoring (LOW/MED) and the manifest-vs-plan equality argue against broader breakage. Net trade-off accepted given user pre-push policy.
+
+**Reasoning**: 6 Simplification Checks pass. Pre-Mortem Scenarios A/B/C all averted via dedicated tests. Devil's advocate: only "unknown" is MRL convergence dynamics, which is explicitly out of scope and recorded in Not Verified. No regressions, no scope drift, no simplification blockers. Recommendation justified.
+
+**Anchor-Refs**: none (no new in-code anchors introduced for this plan; trigger conditions in references/decision-anchoring.md not met for slicing/L2-norm additive code).
 
 ## plan_2026-05-12_6a2cd5b3
 ### D-001 | EXPLORE -> PLAN | 2026-05-12
@@ -580,37 +627,3 @@ The alpha=0 default and tanh-bounded residual make the invariant proof trivial (
 **Trade-off**: Fewer commits, simpler diff to review **at the cost of** losing per-step git checkpoints inside `model.py` — if step 2 had failed, the rollback target would have been pre-step-1.
 **Reasoning**: The three changes are tightly coupled (factory references ctor args added in steps 1+2). Splitting into 3 commits would have required either (i) 3 successive rewrites of `model.py` or (ii) edits that leave the module in a half-rewritten state. Both options waste effort. Verification gates fired correctly at each logical step. Acceptable per skill spec which allows bundled commits when steps share a file with strict ordering.
 **Anchor-Refs**: changelog.md entries for iter-1/step-1, step-3, step-4, step-5.
-
-## plan_2026-05-12_94b9fab5
-### D-001 | EXPLORE → PLAN | YYYY-MM-DD
-**Context**: <one-paragraph background — what was discovered in EXPLORE>
-**Decision**: <chosen approach in one sentence>
-**Trade-off**: <X> **at the cost of** <Y>
-**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-12_94b9fab5/D-NNN` anchor exists in source)
--->
-
-### D-001 | PLAN | 2026-05-12
-**Decision**: Surface the 19-issue code review (findings/code-review.md) in REFLECT and ask the user whether to spin a follow-up plan for fixes. Do NOT include code edits to `models/adaptive_ema/model.py` in this plan.
-**Trade-off**: User receives the review (the deliverable they asked for) without scope-creep into 200+ LOC of model fixes that could destabilize the package and require new tests. **At the cost of**: the issues remain in the codebase until a follow-up plan acts on them.
-**Grounded by**: Goal scope (review + README + training script), F-001 (review surface already drafted), LESSONS ("Pure additive layer/class work fits a single iteration" — bundling fixes would break this).
-
-### D-002 | PLAN | 2026-05-12
-**Decision**: PRISM's TOC and length (~350 lines) is the template, not TiRex's much longer 613-line README.
-**Trade-off**: Smaller, more focused README **at the cost of** less exhaustive section coverage.
-**Grounded by**: F-002, model scope (single class, no variants).
-
-### D-003 | PLAN | 2026-05-12
-**Decision**: Mirror TiRex's file layout, dataclass, DataProcessor / Callback / Trainer triple, ONNX export hook.
-**Trade-off**: Reuses well-tested precedent **at the cost of** carrying TiRex's design choices (e.g. infinite streaming generator) which are heavier than strictly needed for a 2-parameter model.
-**Grounded by**: F-003, train/CLAUDE.md Pattern-2.
-
-### D-004 | PLAN | 2026-05-12
-**Decision**: To make `model.fit` work, wrap `AdaptiveEMASlopeFilterModel` in a minimal `keras.Model` whose `call()` returns the single tensor selected by training mode (`signal_between` or `slope_quantiles`).
-**Trade-off**: One small extra class **at the cost of** an indirection layer in the trainer. Alternative was custom `train_step`, which is heavier and harder to ONNX-export.
-**Grounded by**: F-003, A5.
-
-### D-005 | PLAN | 2026-05-12
-**Decision**: Falsification-Scenario-B mitigation: force `learnable_thresholds=True` when mode=classification unless user explicitly overrides.
-**Trade-off**: Slight CLI surprise **at the cost of** avoiding the obvious zero-gradient footgun.
-**Grounded by**: F-001 I-11, Pre-Mortem Scenario B.

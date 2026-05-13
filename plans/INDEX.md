@@ -44,3 +44,4 @@
 | f-002 | current cliffordnetlmrouting integration surface | `findings/lm-routing-current.md` | token-id-keyed lm: `vocab_size=50261` (tiktoken gpt2 + 4 specials), `max_seq_length=512`, `channels∈{128..768}` is the feature dim d (not clifford algebraic dim). 3 embedding strategies (`hce`/`albert`/`dense`), causalcliffordnetblock×depth stack on 4-d tensors, head = `routingprobabilitieslayer(output_dim=vocab_size, mode={trainable,deterministic})` producing **probabilities** in `eps, 1-eps |
 | plan_2026-05-12_632605aa | 2026-05-12 | Create a bidirectional CliffordNet U-Net embedding model pac | "last_hidden_state" |
 | plan_2026-05-12_6a2cd5b3 | 2026-05-12 | Create `src/train/cliffordnet/wikipedia/pretrain.py` (+ `__i |  |
+| plan_2026-05-12_13c70aed | 2026-05-12 | Add Matryoshka Representation Learning (MRL) to the LM head  | :, :w, "logits", "logits_w128", ... |
