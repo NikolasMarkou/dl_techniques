@@ -47,8 +47,10 @@ class TestCircuitDepthLayer:
         assert hasattr(layer, 'num_arithmetic_ops')
         assert hasattr(layer, 'use_residual')
         assert not layer.built
-        assert layer.logic_operators == []  # Empty until built
-        assert layer.arithmetic_operators == []  # Empty until built
+        # Post plan_2026-05-13_a2b0f17b/D-002: children created in __init__,
+        # built lazily on first __call__ via parent.build().
+        assert len(layer.logic_operators) == layer.num_logic_ops
+        assert len(layer.arithmetic_operators) == layer.num_arithmetic_ops
         assert layer.routing_weights is None  # Not built yet
         assert layer.combination_weights is None  # Not built yet
 
@@ -206,11 +208,14 @@ class TestCircuitDepthLayer:
 
         gradients = tape.gradient(loss, layer.trainable_variables)
 
-        assert all(g is not None for g in gradients)
-        assert len(gradients) > 0
-
-        # Should have gradients from routing, combination, and all sub-layer weights
-        assert len(gradients) >= 2  # At least routing and combination weights
+        # In default 'output_only' routing mode, `routing_weights` is created
+        # for serialization compatibility but unused at call time, so its
+        # gradient is None. All OTHER variables must have gradients.
+        for var, grad in zip(layer.trainable_variables, gradients):
+            if "routing_weights" in var.name and layer.circuit_routing == "output_only":
+                continue
+            assert grad is not None, f"None gradient for {var.name}"
+        assert len(gradients) >= 2
 
     def test_edge_cases(self):
         """Test error conditions."""
@@ -276,8 +281,10 @@ class TestLearnableNeuralCircuit:
         assert hasattr(layer, 'use_residual')
         assert hasattr(layer, 'use_layer_norm')
         assert not layer.built
-        assert layer.circuit_layers == []  # Empty until built
-        assert layer.layer_norms == []  # Empty until built
+        # Children created eagerly in __init__ post plan_2026-05-13_a2b0f17b/D-002.
+        assert len(layer.circuit_layers) == layer.circuit_depth
+        expected_norms = layer.circuit_depth if layer.use_layer_norm else 0
+        assert len(layer.layer_norms) == expected_norms
 
     def test_forward_pass_and_building(self, layer_config, sample_input_4d):
         """Test forward pass and building."""
@@ -468,7 +475,11 @@ class TestLearnableNeuralCircuit:
 
         gradients = tape.gradient(loss, layer.trainable_variables)
 
-        assert all(g is not None for g in gradients)
+        # Routing weights are unused in 'output_only' (the new default).
+        for var, grad in zip(layer.trainable_variables, gradients):
+            if "routing_weights" in var.name and layer.circuit_routing == "output_only":
+                continue
+            assert grad is not None, f"None gradient for {var.name}"
         assert len(gradients) > 0
 
     @pytest.mark.parametrize("training", [True, False, None])
@@ -699,3 +710,122 @@ class TestPlanE52a5ac8Regressions:
         # CircuitDepthLayer is shape-preserving and was already correct;
         # this just confirms no regression.
         assert tuple(out_list) == tuple(out_tuple) == (None, 32)
+
+
+# ---------------------------------------------------------------------------
+# Regression tests added in plan_2026-05-13_a2b0f17b
+# ---------------------------------------------------------------------------
+
+class TestPlanA2b0f17bCircuit:
+    """Regressions for full-rewrite plan."""
+
+    def test_default_routing_is_output_only(self):
+        layer = CircuitDepthLayer()
+        assert layer.circuit_routing == "output_only"
+
+    def test_classic_routing_preserves_attenuation(self):
+        """Classic mode should still attenuate signal (~1/N before residual)."""
+        np.random.seed(0)
+        x = ops.convert_to_tensor(np.random.randn(2, 16).astype(np.float32))
+        layer = CircuitDepthLayer(
+            num_logic_ops=2, num_arithmetic_ops=2,
+            use_residual=False, circuit_routing='classic',
+        )
+        y = layer(x)
+        ratio = float(ops.norm(y)) / float(ops.norm(x))
+        assert ratio < 0.6, f"classic mode should attenuate, got {ratio:.3f}"
+
+    def test_output_only_routing_does_not_attenuate(self):
+        """Output-only mode should preserve magnitude better than 0.6×."""
+        np.random.seed(0)
+        x = ops.convert_to_tensor(np.random.randn(2, 16).astype(np.float32))
+        layer = CircuitDepthLayer(
+            num_logic_ops=2, num_arithmetic_ops=2,
+            use_residual=False, circuit_routing='output_only',
+        )
+        y = layer(x)
+        ratio = float(ops.norm(y)) / float(ops.norm(x))
+        # Soft signal not attenuated by 1/N input gating.
+        assert ratio > 0.5, f"output-only mode unexpectedly attenuated: {ratio:.3f}"
+
+    def test_load_balance_loss_added_when_coef_positive(self):
+        layer = CircuitDepthLayer(load_balance_coefficient=0.1)
+        x = ops.convert_to_tensor(np.random.randn(2, 8).astype(np.float32))
+        _ = layer(x)
+        assert len(layer.losses) >= 1
+        assert float(layer.losses[0]) > 0
+
+    def test_load_balance_loss_absent_when_coef_zero(self):
+        layer = CircuitDepthLayer()
+        x = ops.convert_to_tensor(np.random.randn(2, 8).astype(np.float32))
+        _ = layer(x)
+        # No reg → no losses (children also have entropy_coefficient=0).
+        assert len(layer.losses) == 0
+
+    def test_channel_mix_dense_preserves_shape(self):
+        layer = CircuitDepthLayer(channel_mix='dense')
+        x = ops.convert_to_tensor(np.random.randn(2, 16).astype(np.float32))
+        y = layer(x)
+        assert y.shape == (2, 16)
+        # Channel-mix layer should add new weights.
+        assert layer._channel_mix_layer is not None
+        assert len(layer._channel_mix_layer.trainable_variables) >= 1
+
+    def test_invalid_circuit_routing_raises(self):
+        with pytest.raises(ValueError, match="circuit_routing"):
+            CircuitDepthLayer(circuit_routing='nope')
+
+    def test_invalid_channel_mix_raises(self):
+        with pytest.raises(ValueError, match="channel_mix"):
+            CircuitDepthLayer(channel_mix='conv7x7')
+
+    def test_negative_load_balance_raises(self):
+        with pytest.raises(ValueError, match="load_balance"):
+            CircuitDepthLayer(load_balance_coefficient=-0.1)
+
+    def test_neural_circuit_apply_sigmoid_first_only(self):
+        """C2: with first_only mode, only depth 0 gets apply_sigmoid=True."""
+        nc = LearnableNeuralCircuit(circuit_depth=3, apply_sigmoid_per_depth='first_only')
+        assert nc.circuit_layers[0].apply_sigmoid is True
+        assert nc.circuit_layers[1].apply_sigmoid is False
+        assert nc.circuit_layers[2].apply_sigmoid is False
+
+    def test_neural_circuit_apply_sigmoid_all(self):
+        nc = LearnableNeuralCircuit(circuit_depth=3, apply_sigmoid_per_depth='all')
+        for depth_layer in nc.circuit_layers:
+            assert depth_layer.apply_sigmoid is True
+
+    def test_neural_circuit_apply_sigmoid_none(self):
+        nc = LearnableNeuralCircuit(circuit_depth=3, apply_sigmoid_per_depth='none')
+        for depth_layer in nc.circuit_layers:
+            assert depth_layer.apply_sigmoid is False
+
+    def test_invalid_apply_sigmoid_per_depth_raises(self):
+        with pytest.raises(ValueError, match="apply_sigmoid_per_depth"):
+            LearnableNeuralCircuit(apply_sigmoid_per_depth='whenever')
+
+    def test_neural_circuit_round_trip_with_new_params(self):
+        """Full Keras serialization with the new fields."""
+        nc = LearnableNeuralCircuit(
+            circuit_depth=2,
+            num_logic_ops_per_depth=2,
+            num_arithmetic_ops_per_depth=2,
+            use_residual=True,
+            circuit_routing='output_only',
+            apply_sigmoid_per_depth='first_only',
+            load_balance_coefficient=0.05,
+            channel_mix='dense',
+        )
+        x = keras.Input(shape=(16,))
+        y = nc(x)
+        m = keras.Model(x, y)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'm.keras')
+            m.save(path)
+            m2 = keras.models.load_model(path)
+        sample = np.random.randn(2, 16).astype(np.float32)
+        np.testing.assert_allclose(
+            ops.convert_to_numpy(m(sample)),
+            ops.convert_to_numpy(m2(sample)),
+            atol=1e-5,
+        )

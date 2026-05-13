@@ -395,3 +395,134 @@ class TestPlanE52a5ac8Arithmetic:
         # List-of-shapes (binary inputs) still works
         out_binary = layer.compute_output_shape([(None, 32), (None, 32)])
         assert tuple(out_binary) == (None, 32)
+
+
+# ---------------------------------------------------------------------------
+# Regression tests added in plan_2026-05-13_a2b0f17b
+# ---------------------------------------------------------------------------
+
+class TestPlanA2b0f17bArithmetic:
+    """Regressions for full-rewrite plan."""
+
+    def test_safe_power_preserves_sign(self):
+        """C3: power(-2, 3) == -8 via Re((-|x|)^y) = cos(pi*y)*|x|^y."""
+        op = LearnableArithmeticOperator(
+            operation_types=['power'], use_scaling=False,
+            exponent_clip_range=(-3.0, 3.0),
+        )
+        op.build((None, 4))
+        x1 = ops.convert_to_tensor(np.array([[-2.0, 2.0, -3.0, 3.0]], dtype=np.float32))
+        x2 = ops.convert_to_tensor(np.array([[3.0, 3.0, 2.0, 2.0]], dtype=np.float32))
+        y = ops.convert_to_numpy(op([x1, x2]))
+        np.testing.assert_allclose(y[0], [-8.0, 8.0, 9.0, 9.0], atol=1e-5)
+
+    def test_safe_power_half_integer_negative_base_is_zero(self):
+        op = LearnableArithmeticOperator(
+            operation_types=['power'], use_scaling=False,
+            exponent_clip_range=(-1.0, 1.0),
+        )
+        op.build((None, 1))
+        x1 = ops.convert_to_tensor(np.array([[-4.0]], dtype=np.float32))
+        x2 = ops.convert_to_tensor(np.array([[0.5]], dtype=np.float32))
+        y = ops.convert_to_numpy(op([x1, x2]))
+        np.testing.assert_allclose(y, [[0.0]], atol=1e-5)
+
+    def test_smooth_divide_bounded_and_differentiable_at_zero(self):
+        """H4/C: smooth mode gives finite forward AND non-zero gradient at
+        x2=0, vs hard_clamp which gives 1/eps forward and ZERO gradient at
+        the non-differentiable point (so optimizer cannot escape x2=0).
+
+        Analytical: at x2=0, smooth |d/dx2| = |x1|/eps^2 (continuous).
+        Hard-clamp at x2=0 has |grad| = 0 (sub-gradient of |.|max(.,eps)).
+        """
+        import tensorflow as tf
+        eps = 1e-3
+        x1 = tf.Variable(np.array([[1.0, 1.0, 1.0, 1.0]], dtype=np.float32))
+        x2 = tf.Variable(np.array([[0.0, 0.0, 0.0, 0.0]], dtype=np.float32))
+        # Smooth
+        op = LearnableArithmeticOperator(
+            operation_types=['divide'], use_scaling=False,
+            safe_divide_mode='smooth', epsilon=eps,
+        )
+        op.build((None, 4))
+        with tf.GradientTape() as t:
+            y = op([x1, x2])
+            loss = tf.reduce_sum(y)
+        _, g2 = t.gradient(loss, [x1, x2])
+        smooth_max_grad = float(tf.reduce_max(tf.abs(g2)))
+        # Forward bounded (=0 at x2=0), gradient finite and non-zero.
+        np.testing.assert_allclose(y.numpy(), 0.0, atol=1e-9)
+        assert 0.5 / eps**2 <= smooth_max_grad <= 2.0 / eps**2
+        # Hard clamp comparison.
+        op_hard = LearnableArithmeticOperator(
+            operation_types=['divide'], use_scaling=False,
+            safe_divide_mode='hard_clamp', epsilon=eps,
+        )
+        op_hard.build((None, 4))
+        with tf.GradientTape() as t:
+            y_hard = op_hard([x1, x2])
+            loss = tf.reduce_sum(y_hard)
+        _, g2_hard = t.gradient(loss, [x1, x2])
+        # Hard-clamp at x2=0: sub-gradient of clamp is 0, so grad x2 = 0.
+        # Forward shoots to 1/eps (=1000) — large but finite.
+        assert float(tf.reduce_max(tf.abs(g2_hard))) < 1e-3
+        assert float(tf.reduce_max(tf.abs(y_hard))) > 100.0
+        # Smooth mode: forward zero but gradient pushes x2 off zero.
+        assert smooth_max_grad > 0
+
+    def test_softplus_temperature_round_trip(self):
+        op = LearnableArithmeticOperator(
+            softplus_temperature=True, temperature_init=2.0
+        )
+        op.build((None, 4))
+        from keras import ops as kops
+        assert abs(float(kops.softplus(op.temperature)) - 2.0) < 1e-5
+        cfg = op.get_config()
+        op2 = LearnableArithmeticOperator.from_config(cfg)
+        op2.build((None, 4))
+        assert op2.softplus_temperature is True
+
+    def test_entropy_loss_added_when_coef_positive(self):
+        op = LearnableArithmeticOperator(entropy_coefficient=0.5)
+        op.build((None, 4))
+        x = ops.convert_to_tensor(np.random.randn(2, 4).astype(np.float32))
+        _ = op([x, x])
+        assert len(op.losses) >= 1
+        assert float(op.losses[0]) > 0
+
+    def test_entropy_loss_absent_when_coef_zero(self):
+        op = LearnableArithmeticOperator(entropy_coefficient=0.0)
+        op.build((None, 4))
+        x = ops.convert_to_tensor(np.random.randn(2, 4).astype(np.float32))
+        _ = op([x, x])
+        assert len(op.losses) == 0
+
+    def test_gumbel_softmax_finite_output(self):
+        op = LearnableArithmeticOperator(
+            gumbel_softmax=True, gumbel_hard=True
+        )
+        op.build((None, 4))
+        x = ops.convert_to_tensor(np.random.randn(2, 4).astype(np.float32))
+        y = op([x, x])
+        assert bool(ops.all(ops.isfinite(y)))
+
+    def test_to_symbolic_returns_dominant_op(self):
+        op = LearnableArithmeticOperator(
+            operation_types=['add', 'multiply', 'subtract']
+        )
+        op.build((None, 4))
+        op.operation_weights.assign([0.0, 10.0, 0.0])
+        s = op.to_symbolic(top_k=1)
+        assert s.startswith("multiply")
+
+    def test_empty_operation_types_raises(self):
+        with pytest.raises(ValueError, match="non-empty"):
+            LearnableArithmeticOperator(operation_types=[])
+
+    def test_invalid_safe_divide_mode_raises(self):
+        with pytest.raises(ValueError, match="safe_divide_mode"):
+            LearnableArithmeticOperator(safe_divide_mode='nope')
+
+    def test_negative_entropy_coefficient_raises(self):
+        with pytest.raises(ValueError, match="entropy_coefficient"):
+            LearnableArithmeticOperator(entropy_coefficient=-0.1)

@@ -88,6 +88,11 @@ LOGIC_REGISTRY: Dict[str, Dict[str, Any]] = {
             "epsilon": 1e-7,
             "power_clip_range": (1e-7, 10.0),
             "exponent_clip_range": (-2.0, 2.0),
+            "softplus_temperature": False,
+            "safe_divide_mode": "hard_clamp",
+            "gumbel_softmax": False,
+            "gumbel_hard": False,
+            "entropy_coefficient": 0.0,
         },
         "use_case": (
             "Learnable elementwise arithmetic between two same-shape tensors "
@@ -108,6 +113,11 @@ LOGIC_REGISTRY: Dict[str, Dict[str, Any]] = {
             "operation_initializer": "random_uniform",
             "temperature_initializer": None,
             "apply_sigmoid": True,
+            "softplus_temperature": False,
+            "gumbel_softmax": False,
+            "gumbel_hard": False,
+            "entropy_coefficient": 0.0,
+            "allow_unary_degenerate": True,
         },
         "use_case": (
             "Soft logical combination of two same-shape tensors interpreted "
@@ -130,6 +140,10 @@ LOGIC_REGISTRY: Dict[str, Dict[str, Any]] = {
             "arithmetic_op_types": None,
             "routing_initializer": "random_uniform",
             "combination_initializer": "random_uniform",
+            "circuit_routing": "output_only",
+            "apply_sigmoid": True,
+            "load_balance_coefficient": 0.0,
+            "channel_mix": None,
         },
         "use_case": (
             "Drop-in mid-network expert ensemble that preserves tensor shape "
@@ -153,6 +167,10 @@ LOGIC_REGISTRY: Dict[str, Dict[str, Any]] = {
             "arithmetic_op_types": None,
             "routing_initializer": "random_uniform",
             "combination_initializer": "random_uniform",
+            "circuit_routing": "output_only",
+            "apply_sigmoid_per_depth": "first_only",
+            "load_balance_coefficient": 0.0,
+            "channel_mix": None,
         },
         "use_case": (
             "Deep compositional reasoning block — shape-preserving, "

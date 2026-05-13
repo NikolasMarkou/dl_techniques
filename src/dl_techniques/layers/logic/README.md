@@ -126,6 +126,31 @@ it in like a residual block.
   Without an entropy regularizer on the gate weights, the soft mixture tends
   to remain diffuse for a long time.
 
+## What's new in `plan_2026-05-13_a2b0f17b` (full-rewrite override)
+
+The deep review's findings were implemented in full — every change is opt-in
+or back-compatible by default unless noted as **BREAKING**.
+
+| Change | Flag / API | Default | Notes |
+|---|---|---|---|
+| **BREAKING**: `CircuitDepthLayer` no longer attenuates input | `circuit_routing='output_only'` | new default | Old math: `Y=Σβ_i·f_i(α_i·X)`. New: `Y=Σβ_i·f_i(X)`. Set `circuit_routing='classic'` to reproduce old. |
+| Sigmoid plumbing through circuit | `LearnableNeuralCircuit(apply_sigmoid_per_depth=...)` | `'first_only'` | Was `'all'` (legacy collapse). `'all'` and `'none'` still selectable. |
+| Sign-preserving `_safe_power` | (auto) | — | `power(-2, 3) == -8`. Real restriction `cos(πy)·\|x\|^y`. |
+| Smooth-clamp divide | `safe_divide_mode='smooth'` | `'hard_clamp'` | Bounded gradient at `x2=0`; opt-in. |
+| Softplus-parameterized temperature | `softplus_temperature=True` | `False` | Always-positive, gradient-defined-everywhere. Round-trip via `from_config`. |
+| Strict raise on single-input + binary ops | `allow_unary_degenerate=False` | `True` | Default still permits the legacy footgun. |
+| Łukasiewicz / Gödel / implication ops | `operation_types=['lukasiewicz_and', ...]` | not in defaults | New tokens: `lukasiewicz_and`, `lukasiewicz_or`, `godel_and`, `godel_or`, `implies`. |
+| Gumbel-softmax mode | `gumbel_softmax=True[, gumbel_hard=True]` | `False` | Discrete-at-inference selection. |
+| Entropy regularization | `entropy_coefficient=0.1` | `0.0` | Adds `coef · H(probs)` to layer.losses. |
+| Shazeer load-balance aux loss | `CircuitDepthLayer(load_balance_coefficient=0.1)` | `0.0` | Penalizes peaky combination distributions. |
+| Cross-channel mixing | `CircuitDepthLayer(channel_mix='dense')` | `None` | Appends per-channel `Dense(C, C)` after fusion. |
+| `to_symbolic(top_k=k)` | method | — | Returns a string of dominant ops post-training. |
+| Vectorized weighted sum | (auto) | — | Replaces Python loop with `ops.stack` + `ops.sum`. |
+
+**Migration**: existing `.keras` archives load unchanged because every new
+flag has a back-compat default. Models that depend on the old attenuated
+routing should pin `CircuitDepthLayer(circuit_routing='classic')`.
+
 ## Limitations
 
 - **Unary inputs to binary operators.** Passing a single tensor (e.g. a plain

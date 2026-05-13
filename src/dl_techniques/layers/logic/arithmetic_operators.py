@@ -61,6 +61,8 @@ References:
       Knowledge in a Neural Network".
 """
 
+import math
+
 import keras
 from keras import ops
 from typing import List, Optional, Union, Any, Dict, Tuple
@@ -151,6 +153,11 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             epsilon: float = 1e-7,
             power_clip_range: Tuple[float, float] = (1e-7, 10.0),
             exponent_clip_range: Tuple[float, float] = (-2.0, 2.0),
+            softplus_temperature: bool = False,
+            safe_divide_mode: str = "hard_clamp",
+            gumbel_softmax: bool = False,
+            gumbel_hard: bool = False,
+            entropy_coefficient: float = 0.0,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -183,6 +190,18 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         if exponent_clip_range[1] <= exponent_clip_range[0]:
             raise ValueError("exponent_clip_range must be (min, max) with min < max.")
 
+        if not operation_types:
+            raise ValueError("operation_types must be a non-empty list.")
+
+        if safe_divide_mode not in ("hard_clamp", "smooth"):
+            raise ValueError(
+                f"safe_divide_mode must be 'hard_clamp' or 'smooth', got "
+                f"{safe_divide_mode!r}."
+            )
+
+        if entropy_coefficient < 0:
+            raise ValueError("entropy_coefficient must be non-negative.")
+
         # Store ALL configuration parameters
         self.operation_types = operation_types
         self.use_temperature = use_temperature
@@ -206,6 +225,11 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         self.epsilon = epsilon
         self.power_clip_range = power_clip_range
         self.exponent_clip_range = exponent_clip_range
+        self.softplus_temperature = softplus_temperature
+        self.safe_divide_mode = safe_divide_mode
+        self.gumbel_softmax = gumbel_softmax
+        self.gumbel_hard = gumbel_hard
+        self.entropy_coefficient = entropy_coefficient
 
         # Initialize weight attributes - these will be created in build()
         self.operation_weights = None
@@ -244,12 +268,20 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             trainable=True,
         )
 
-        # Create temperature parameter if enabled
+        # Create temperature parameter if enabled. If softplus_temperature is
+        # True, the stored weight is the *raw* pre-softplus value; init the
+        # raw value so that softplus(raw) == temperature_init.
         if self.use_temperature:
+            if self.softplus_temperature:
+                # softplus_inv(y) = log(exp(y) - 1); for y >> 0, ~= y.
+                raw_init = float(math.log(math.expm1(self.temperature_init)))
+                temp_initializer = keras.initializers.Constant(raw_init)
+            else:
+                temp_initializer = self.temperature_initializer
             self.temperature = self.add_weight(
                 name="temperature",
                 shape=(),
-                initializer=self.temperature_initializer,
+                initializer=temp_initializer,
                 trainable=True,
             )
 
@@ -266,42 +298,67 @@ class LearnableArithmeticOperator(keras.layers.Layer):
 
     def _safe_divide(self, x1: keras.KerasTensor, x2: keras.KerasTensor) -> keras.KerasTensor:
         """
-        Safe division with epsilon-based numerical stability.
+        Safe division.
+
+        Two modes (selected by ``safe_divide_mode`` constructor arg):
+
+        - ``'hard_clamp'`` (default, legacy): clamp ``|x2|`` to be at least
+          ``epsilon``. Forward-bounded but produces a step in the gradient at
+          ``x2 = 0`` and grows like ``1/epsilon`` for very small denominators.
+        - ``'smooth'``: use the smooth approximation
+          ``x1 * x2 / (x2**2 + epsilon**2)``. Equivalent to ``x1/x2`` whenever
+          ``|x2| >> epsilon``; bounded gradient ``|d/dx2| <= |x1| / (2 * epsilon)``
+          everywhere, including at ``x2 == 0``.
 
         :param x1: Numerator tensor.
-        :type x1: keras.KerasTensor
         :param x2: Denominator tensor.
-        :type x2: keras.KerasTensor
         :return: Result of the safe division.
-        :rtype: keras.KerasTensor
         """
-        # Get the sign of the denominator, treating 0 as positive
+        if self.safe_divide_mode == "smooth":
+            # DECISION plan_2026-05-13_a2b0f17b/D-001 — bounded-gradient
+            # smooth division. Far from zero this is x1/x2 to within
+            # O((eps/x2)^2). At x2=0 the value is 0 and the gradient wrt x2 is
+            # bounded by |x1| / (2 * eps).
+            denom = ops.add(ops.square(x2), ops.cast(self.epsilon ** 2, x2.dtype))
+            return ops.divide(ops.multiply(x1, x2), denom)
+
+        # Legacy hard_clamp behavior — bit-exact with prior versions.
         sign_x2 = ops.sign(x2)
-        # If x2 is 0, ops.sign(x2) is 0. We want the sign to be 1 in this case
-        # so that we add epsilon.
         sign_x2 = ops.where(ops.equal(sign_x2, 0.0), ops.ones_like(sign_x2), sign_x2)
-
-        # New denominator has its magnitude clamped to be at least epsilon
         safe_x2 = sign_x2 * ops.maximum(ops.abs(x2), self.epsilon)
-
         return ops.divide(x1, safe_x2)
 
     def _safe_power(self, x1: keras.KerasTensor, x2: keras.KerasTensor) -> keras.KerasTensor:
         """
         Safe power operation with clipping for numerical stability.
 
+        Sign of the base is preserved via the standard ``sign(x1) * |x1|^x2``
+        decomposition. For non-integer exponents, ``power(negative, frac)`` is
+        complex-valued; this implementation returns the **real** restriction
+        ``sign(x1) * |x1|^x2`` which is well-defined for any real ``x2`` and
+        coincides with ``power(x1, x2)`` whenever ``x1 >= 0`` or ``x2`` is an
+        integer.
+
         :param x1: Base tensor.
-        :type x1: keras.KerasTensor
         :param x2: Exponent tensor.
-        :type x2: keras.KerasTensor
-        :return: Result of safe power operation.
-        :rtype: keras.KerasTensor
+        :return: Result of safe power operation, sign-preserving.
         """
-        # Clip base to prevent numerical issues
-        x1_safe = ops.clip(ops.abs(x1), self.power_clip_range[0], self.power_clip_range[1])
-        # Clip exponent to prevent overflow
+        # DECISION plan_2026-05-13_a2b0f17b/D-001 — real restriction of complex
+        # power: Re((-|x|)^y) = cos(pi*y) * |x|^y. Equals x^y for non-negative
+        # x; reproduces +1 for even-integer y, -1 for odd-integer y, 0 for
+        # half-integer y on negative bases. Old impl dropped sign entirely.
+        x1_abs_safe = ops.clip(
+            ops.abs(x1), self.power_clip_range[0], self.power_clip_range[1]
+        )
         x2_safe = ops.clip(x2, self.exponent_clip_range[0], self.exponent_clip_range[1])
-        return ops.power(x1_safe, x2_safe)
+        magnitude = ops.power(x1_abs_safe, x2_safe)
+        # sign component: +1 for non-negative bases, cos(pi*y) for negative.
+        is_negative = ops.cast(ops.less(x1, 0.0), x1.dtype)
+        sign_component = (
+            ops.cos(ops.multiply(math.pi, x2_safe)) * is_negative
+            + (ops.cast(1.0, x1.dtype) - is_negative)
+        )
+        return ops.multiply(sign_component, magnitude)
 
     def _soft_max(self, x1: keras.KerasTensor, x2: keras.KerasTensor) -> keras.KerasTensor:
         """
@@ -328,6 +385,68 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         return ops.minimum(x1, x2)
+
+    def _resolve_temperature(self) -> keras.KerasTensor:
+        """Return the effective positive temperature."""
+        if self.softplus_temperature:
+            # softplus(raw) is always > 0; clamp epsilon as a final guard.
+            return ops.maximum(ops.softplus(self.temperature), 1e-7)
+        return ops.maximum(self.temperature, 1e-7)
+
+    def _operation_probs(self) -> keras.KerasTensor:
+        """
+        Compute the operation-selection probability vector.
+
+        Honors ``use_temperature`` and ``gumbel_softmax`` modes.
+        """
+        if self.use_temperature:
+            temp = self._resolve_temperature()
+            logits = ops.divide(self.operation_weights, temp)
+        else:
+            logits = self.operation_weights
+
+        if self.gumbel_softmax:
+            # Gumbel(0,1) = -log(-log(U(0,1))). Manual implementation since
+            # keras.ops doesn't expose it directly.
+            uniform = keras.random.uniform(
+                shape=ops.shape(logits), minval=1e-9, maxval=1.0
+            )
+            gumbel = ops.negative(ops.log(ops.negative(ops.log(uniform))))
+            soft = ops.softmax(ops.add(logits, gumbel))
+            if self.gumbel_hard:
+                # Straight-through estimator: forward-pass uses the one-hot,
+                # backward-pass uses the soft sample.
+                idx = ops.argmax(soft)
+                hard = ops.one_hot(idx, num_classes=self.num_operations)
+                hard = ops.cast(hard, soft.dtype)
+                return ops.add(soft, ops.stop_gradient(ops.subtract(hard, soft)))
+            return soft
+        return ops.softmax(logits)
+
+    def _maybe_add_entropy_loss(
+        self, probs: keras.KerasTensor
+    ) -> None:
+        if self.entropy_coefficient > 0:
+            log_p = ops.log(ops.add(probs, 1e-12))
+            ent = ops.negative(ops.sum(ops.multiply(probs, log_p)))
+            # Penalize HIGH entropy (push toward sharp selection).
+            self.add_loss(ops.multiply(self.entropy_coefficient, ent))
+
+    def to_symbolic(self, top_k: int = 1) -> str:
+        """
+        Return a human-readable string of the dominant op(s) post-training.
+
+        :param top_k: Return the top-k operations by softmax probability.
+        :return: Comma-separated operation names ranked by probability,
+            optionally with their probabilities in parentheses.
+        """
+        if self.operation_weights is None:
+            raise RuntimeError("Layer has not been built yet.")
+        probs = ops.convert_to_numpy(self._operation_probs()).tolist()
+        ranked = sorted(
+            zip(self.operation_types, probs), key=lambda kv: -kv[1]
+        )[:top_k]
+        return ", ".join(f"{name}({p:.3f})" for name, p in ranked)
 
     def call(
             self,
@@ -358,17 +477,12 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             x2 = inputs
 
         # Compute operation selection probabilities
-        if self.use_temperature:
-            # Clamp temperature to prevent division by zero
-            temp = ops.maximum(self.temperature, 1e-7)
-            operation_probs = ops.softmax(ops.divide(self.operation_weights, temp))
-        else:
-            operation_probs = ops.softmax(self.operation_weights)
+        operation_probs = self._operation_probs()
+        self._maybe_add_entropy_loss(operation_probs)
 
         # Compute all operations
         operations = []
-
-        for i, op_type in enumerate(self.operation_types):
+        for op_type in self.operation_types:
             if op_type == 'add':
                 result = ops.add(x1, x2)
             elif op_type == 'multiply':
@@ -384,20 +498,18 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             elif op_type == 'min':
                 result = self._soft_min(x1, x2)
             else:
-                # This should not happen due to validation in __init__
                 logger.warning(f"Unknown operation type: {op_type}, using identity")
                 result = x1
-
             operations.append(result)
 
-        # Weighted combination of operations
-        output = ops.zeros_like(x1)
-        for i, op_result in enumerate(operations):
-            weight = ops.expand_dims(operation_probs[i], axis=0)
-            # Expand weight to match tensor dimensions
-            for _ in range(len(ops.shape(x1)) - 1):
-                weight = ops.expand_dims(weight, axis=-1)
-            output = ops.add(output, ops.multiply(weight, op_result))
+        # Weighted combination of operations — vectorized stack-and-sum.
+        # `stacked` has shape (N, ...x.shape...). `weights` is reshaped to
+        # broadcast against the leading op axis.
+        stacked = ops.stack(operations, axis=0)
+        n = self.num_operations
+        weight_shape = (n,) + (1,) * (len(stacked.shape) - 1)
+        weights = ops.reshape(operation_probs, weight_shape)
+        output = ops.sum(ops.multiply(weights, stacked), axis=0)
 
         # Apply scaling factor if enabled
         if self.use_scaling:
@@ -450,6 +562,11 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             "epsilon": self.epsilon,
             "power_clip_range": self.power_clip_range,
             "exponent_clip_range": self.exponent_clip_range,
+            "softplus_temperature": self.softplus_temperature,
+            "safe_divide_mode": self.safe_divide_mode,
+            "gumbel_softmax": self.gumbel_softmax,
+            "gumbel_hard": self.gumbel_hard,
+            "entropy_coefficient": self.entropy_coefficient,
         })
         return config
 

@@ -487,3 +487,134 @@ class TestPlanE52a5ac8Logic:
         assert cfg["apply_sigmoid"] is False
         restored = LearnableLogicOperator.from_config(cfg)
         assert restored.apply_sigmoid is False
+
+
+# ---------------------------------------------------------------------------
+# Regression tests added in plan_2026-05-13_a2b0f17b
+# ---------------------------------------------------------------------------
+
+class TestPlanA2b0f17bLogic:
+    """Regressions for full-rewrite plan."""
+
+    def _at_corner(self, layer, p, q):
+        x1 = ops.convert_to_tensor(np.array([[float(p)]], dtype=np.float32))
+        x2 = ops.convert_to_tensor(np.array([[float(q)]], dtype=np.float32))
+        return float(ops.convert_to_numpy(layer([x1, x2]))[0, 0])
+
+    def test_truth_table_classical_and(self):
+        op = LearnableLogicOperator(operation_types=['and'], apply_sigmoid=False, use_temperature=False)
+        op.build([(None, 1), (None, 1)])
+        assert abs(self._at_corner(op, 0, 0) - 0.0) < 1e-5
+        assert abs(self._at_corner(op, 0, 1) - 0.0) < 1e-5
+        assert abs(self._at_corner(op, 1, 0) - 0.0) < 1e-5
+        assert abs(self._at_corner(op, 1, 1) - 1.0) < 1e-5
+
+    def test_truth_table_classical_or(self):
+        op = LearnableLogicOperator(operation_types=['or'], apply_sigmoid=False, use_temperature=False)
+        op.build([(None, 1), (None, 1)])
+        assert abs(self._at_corner(op, 0, 0) - 0.0) < 1e-5
+        assert abs(self._at_corner(op, 0, 1) - 1.0) < 1e-5
+        assert abs(self._at_corner(op, 1, 0) - 1.0) < 1e-5
+        assert abs(self._at_corner(op, 1, 1) - 1.0) < 1e-5
+
+    def test_truth_table_xor(self):
+        op = LearnableLogicOperator(operation_types=['xor'], apply_sigmoid=False, use_temperature=False)
+        op.build([(None, 1), (None, 1)])
+        assert abs(self._at_corner(op, 0, 0) - 0.0) < 1e-5
+        assert abs(self._at_corner(op, 0, 1) - 1.0) < 1e-5
+        assert abs(self._at_corner(op, 1, 0) - 1.0) < 1e-5
+        assert abs(self._at_corner(op, 1, 1) - 0.0) < 1e-5
+
+    def test_truth_table_lukasiewicz_and(self):
+        op = LearnableLogicOperator(operation_types=['lukasiewicz_and'], apply_sigmoid=False, use_temperature=False)
+        op.build([(None, 1), (None, 1)])
+        assert abs(self._at_corner(op, 0.5, 0.5) - 0.0) < 1e-5
+        assert abs(self._at_corner(op, 0.7, 0.7) - 0.4) < 1e-5
+        assert abs(self._at_corner(op, 1.0, 1.0) - 1.0) < 1e-5
+
+    def test_truth_table_godel_and(self):
+        op = LearnableLogicOperator(operation_types=['godel_and'], apply_sigmoid=False, use_temperature=False)
+        op.build([(None, 1), (None, 1)])
+        assert abs(self._at_corner(op, 0.3, 0.7) - 0.3) < 1e-5
+        assert abs(self._at_corner(op, 0.9, 0.4) - 0.4) < 1e-5
+
+    def test_truth_table_implies(self):
+        op = LearnableLogicOperator(operation_types=['implies'], apply_sigmoid=False, use_temperature=False)
+        op.build([(None, 1), (None, 1)])
+        assert abs(self._at_corner(op, 1, 1) - 1.0) < 1e-5
+        assert abs(self._at_corner(op, 1, 0) - 0.0) < 1e-5
+        assert abs(self._at_corner(op, 0, 1) - 1.0) < 1e-5
+        assert abs(self._at_corner(op, 0, 0) - 1.0) < 1e-5
+
+    def test_unary_input_raises_when_strict(self):
+        op = LearnableLogicOperator(allow_unary_degenerate=False)
+        x = ops.convert_to_tensor(np.random.randn(2, 4).astype(np.float32))
+        with pytest.raises(ValueError, match="single tensor input"):
+            _ = op(x)
+
+    def test_unary_input_allowed_when_default(self):
+        op = LearnableLogicOperator()
+        x = ops.convert_to_tensor(np.random.randn(2, 4).astype(np.float32))
+        y = op(x)
+        assert y.shape == (2, 4)
+
+    def test_softplus_temperature_round_trip(self):
+        op = LearnableLogicOperator(softplus_temperature=True, temperature_init=2.0)
+        op.build((None, 4))
+        from keras import ops as kops
+        assert abs(float(kops.softplus(op.temperature)) - 2.0) < 1e-5
+        op2 = LearnableLogicOperator.from_config(op.get_config())
+        assert op2.softplus_temperature is True
+
+    def test_to_symbolic_returns_dominant_op(self):
+        op = LearnableLogicOperator(operation_types=['and', 'or', 'xor'])
+        op.build([(None, 4), (None, 4)])
+        op.operation_weights.assign([0.0, 10.0, 0.0])
+        s = op.to_symbolic(top_k=1)
+        assert s.startswith("or")
+
+    def test_entropy_loss_added(self):
+        op = LearnableLogicOperator(entropy_coefficient=0.5)
+        op.build((None, 4))
+        x = ops.convert_to_tensor(np.random.randn(2, 4).astype(np.float32))
+        _ = op(x)
+        assert len(op.losses) >= 1
+
+    def test_invalid_op_type_raises(self):
+        with pytest.raises(ValueError, match="Invalid operation types"):
+            LearnableLogicOperator(operation_types=['nonexistent'])
+
+    def test_empty_operation_types_raises(self):
+        with pytest.raises(ValueError, match="non-empty"):
+            LearnableLogicOperator(operation_types=[])
+
+    def test_new_ops_in_config(self):
+        op = LearnableLogicOperator(
+            operation_types=['lukasiewicz_and', 'godel_or', 'implies']
+        )
+        cfg = op.get_config()
+        assert set(cfg['operation_types']) == {'lukasiewicz_and', 'godel_or', 'implies'}
+
+    def test_stacked_logic_first_only_beats_all_sigmoid(self):
+        """C2: 'first_only' sigmoid plumbing materially reduces (but does
+        not fully cure) the stacked-collapse pathology vs the legacy
+        'all-sigmoid' behavior. The full cure requires entropy reg + sharper
+        init; this test asserts the directional improvement."""
+        np.random.seed(0)
+        x = ops.convert_to_tensor(np.linspace(-3, 3, 64).reshape(8, 8).astype(np.float32))
+        keras.utils.set_random_seed(0)
+        op_a = LearnableLogicOperator(apply_sigmoid=True)
+        op_b = LearnableLogicOperator(apply_sigmoid=True)
+        op_c = LearnableLogicOperator(apply_sigmoid=True)
+        all_sig = op_c(op_b(op_a(x)))
+        keras.utils.set_random_seed(0)
+        op_a2 = LearnableLogicOperator(apply_sigmoid=True)
+        op_b2 = LearnableLogicOperator(apply_sigmoid=False)
+        op_c2 = LearnableLogicOperator(apply_sigmoid=False)
+        first_only = op_c2(op_b2(op_a2(x)))
+        s_all = float(ops.std(all_sig))
+        s_first = float(ops.std(first_only))
+        # first_only should preserve at least 2× more std than legacy.
+        assert s_first > 2.0 * s_all, (
+            f"first_only std={s_first:.6f} not materially > all_sigmoid std={s_all:.6f}"
+        )

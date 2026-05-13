@@ -82,6 +82,8 @@ References:
       Learning Systems: Foundations and Applications".
 """
 
+import math
+
 import keras
 from keras import ops
 from typing import List, Optional, Union, Any, Dict, Tuple
@@ -148,6 +150,16 @@ class LearnableLogicOperator(keras.layers.Layer):
     :type kwargs: Any
     """
 
+    # Set of all valid op tokens. Binary unless listed in UNARY_OPS.
+    VALID_OPS = frozenset({
+        'and', 'or', 'xor', 'not', 'nand', 'nor',
+        'lukasiewicz_and', 'lukasiewicz_or',
+        'godel_and', 'godel_or',
+        'implies',
+    })
+    UNARY_OPS = frozenset({'not'})
+    BINARY_OPS = VALID_OPS - UNARY_OPS
+
     def __init__(
             self,
             operation_types: Optional[List[str]] = None,
@@ -156,6 +168,11 @@ class LearnableLogicOperator(keras.layers.Layer):
             operation_initializer: Union[str, keras.initializers.Initializer] = "random_uniform",
             temperature_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
             apply_sigmoid: bool = True,
+            softplus_temperature: bool = False,
+            gumbel_softmax: bool = False,
+            gumbel_hard: bool = False,
+            entropy_coefficient: float = 0.0,
+            allow_unary_degenerate: bool = True,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -164,17 +181,21 @@ class LearnableLogicOperator(keras.layers.Layer):
         if operation_types is None:
             operation_types = ['and', 'or', 'xor', 'not', 'nand', 'nor']
 
-        valid_operations = {'and', 'or', 'xor', 'not', 'nand', 'nor'}
-        invalid_ops = set(operation_types) - valid_operations
+        if not operation_types:
+            raise ValueError("operation_types must be a non-empty list.")
+
+        invalid_ops = set(operation_types) - self.VALID_OPS
         if invalid_ops:
             raise ValueError(
                 f"Invalid operation types: {invalid_ops}. "
-                f"Valid operations are: {valid_operations}"
+                f"Valid operations are: {sorted(self.VALID_OPS)}"
             )
 
         # Validate temperature initialization
         if temperature_init <= 0:
             raise ValueError("temperature_init must be positive.")
+        if entropy_coefficient < 0:
+            raise ValueError("entropy_coefficient must be non-negative.")
 
         # Store ALL configuration parameters
         self.operation_types = operation_types
@@ -184,6 +205,11 @@ class LearnableLogicOperator(keras.layers.Layer):
         # intended path for stacking. Default True preserves legacy behavior
         # (inputs interpreted as raw logits, mapped to [0,1] before fuzzy ops).
         self.apply_sigmoid = apply_sigmoid
+        self.softplus_temperature = softplus_temperature
+        self.gumbel_softmax = gumbel_softmax
+        self.gumbel_hard = gumbel_hard
+        self.entropy_coefficient = entropy_coefficient
+        self.allow_unary_degenerate = allow_unary_degenerate
         self.num_operations = len(operation_types)
         self.operation_initializer = keras.initializers.get(operation_initializer)
 
@@ -241,10 +267,15 @@ class LearnableLogicOperator(keras.layers.Layer):
 
         # Create temperature parameter if enabled
         if self.use_temperature:
+            if self.softplus_temperature:
+                raw_init = float(math.log(math.expm1(self.temperature_init)))
+                temp_initializer = keras.initializers.Constant(raw_init)
+            else:
+                temp_initializer = self.temperature_initializer
             self.temperature = self.add_weight(
                 name="temperature",
                 shape=(),
-                initializer=self.temperature_initializer,
+                initializer=temp_initializer,
                 trainable=True,
             )
 
@@ -327,6 +358,72 @@ class LearnableLogicOperator(keras.layers.Layer):
         or_result = ops.add(ops.add(x1, x2), ops.negative(ops.multiply(x1, x2)))
         return ops.subtract(1.0, or_result)
 
+    # --- Łukasiewicz t-norm / t-conorm -----------------------------------
+    def _luk_and(self, x1, x2):
+        """Łukasiewicz AND: max(0, p + q - 1)."""
+        return ops.maximum(0.0, ops.subtract(ops.add(x1, x2), 1.0))
+
+    def _luk_or(self, x1, x2):
+        """Łukasiewicz OR: min(1, p + q)."""
+        return ops.minimum(1.0, ops.add(x1, x2))
+
+    # --- Gödel t-norm / t-conorm -----------------------------------------
+    def _godel_and(self, x1, x2):
+        """Gödel AND: min(p, q)."""
+        return ops.minimum(x1, x2)
+
+    def _godel_or(self, x1, x2):
+        """Gödel OR: max(p, q)."""
+        return ops.maximum(x1, x2)
+
+    # --- Implication (Kleene-Dienes) -------------------------------------
+    def _implies(self, x1, x2):
+        """Kleene-Dienes implication: max(1 - p, q)."""
+        return ops.maximum(ops.subtract(1.0, x1), x2)
+
+    # --- DARTS-style helpers ---------------------------------------------
+    def _resolve_temperature(self) -> keras.KerasTensor:
+        if self.softplus_temperature:
+            return ops.maximum(ops.softplus(self.temperature), 1e-7)
+        return ops.maximum(self.temperature, 1e-7)
+
+    def _operation_probs(self) -> keras.KerasTensor:
+        if self.use_temperature:
+            temp = self._resolve_temperature()
+            logits = ops.divide(self.operation_weights, temp)
+        else:
+            logits = self.operation_weights
+        if self.gumbel_softmax:
+            uniform = keras.random.uniform(
+                shape=ops.shape(logits), minval=1e-9, maxval=1.0
+            )
+            gumbel = ops.negative(ops.log(ops.negative(ops.log(uniform))))
+            soft = ops.softmax(ops.add(logits, gumbel))
+            if self.gumbel_hard:
+                idx = ops.argmax(soft)
+                hard = ops.cast(
+                    ops.one_hot(idx, num_classes=self.num_operations), soft.dtype
+                )
+                return ops.add(soft, ops.stop_gradient(ops.subtract(hard, soft)))
+            return soft
+        return ops.softmax(logits)
+
+    def _maybe_add_entropy_loss(self, probs: keras.KerasTensor) -> None:
+        if self.entropy_coefficient > 0:
+            log_p = ops.log(ops.add(probs, 1e-12))
+            ent = ops.negative(ops.sum(ops.multiply(probs, log_p)))
+            self.add_loss(ops.multiply(self.entropy_coefficient, ent))
+
+    def to_symbolic(self, top_k: int = 1) -> str:
+        """Return a string of the dominant op(s) by selection probability."""
+        if self.operation_weights is None:
+            raise RuntimeError("Layer has not been built yet.")
+        probs = ops.convert_to_numpy(self._operation_probs()).tolist()
+        ranked = sorted(
+            zip(self.operation_types, probs), key=lambda kv: -kv[1]
+        )[:top_k]
+        return ", ".join(f"{name}({p:.3f})" for name, p in ranked)
+
     def call(
             self,
             inputs: Union[keras.KerasTensor, List[keras.KerasTensor]],
@@ -342,18 +439,39 @@ class LearnableLogicOperator(keras.layers.Layer):
         :return: Output tensor after applying learnable logic operations.
         :rtype: keras.KerasTensor
         """
-        # Handle input parsing
+        # Input parsing — distinguish unary, single-tensor-supplied-as-list,
+        # and binary inputs.
+        unary_input = False
         if isinstance(inputs, list):
             if len(inputs) == 2:
                 x1, x2 = inputs
             elif len(inputs) == 1:
                 x1 = inputs[0]
-                x2 = inputs[0]  # Use same input for unary operations
+                x2 = inputs[0]
+                unary_input = True
             else:
                 raise ValueError(f"Expected 1 or 2 inputs, got {len(inputs)}")
         else:
             x1 = inputs
             x2 = inputs
+            unary_input = True
+
+        # DECISION plan_2026-05-13_a2b0f17b/D-001 — strict guard against the
+        # unary-input footgun (LESSONS L38). When allow_unary_degenerate is
+        # False, raise rather than silently rebinding x2 = x1, which makes
+        # binary ops like XOR collapse to nonsense (XOR(p,p) should be 0).
+        if (
+            unary_input
+            and not self.allow_unary_degenerate
+            and any(op in self.BINARY_OPS for op in self.operation_types)
+        ):
+            raise ValueError(
+                "LearnableLogicOperator received a single tensor input but "
+                f"operation_types contains binary ops {sorted(set(self.operation_types) & self.BINARY_OPS)}. "
+                "Pass two tensors as a list `[x1, x2]`, or set "
+                "allow_unary_degenerate=True to opt into legacy x2=x1 "
+                "rebinding (mathematically incorrect for binary ops)."
+            )
 
         # Normalize inputs to [0, 1] range using sigmoid (skip when caller
         # already provides values in [0, 1] — e.g. stacked logic layers).
@@ -362,17 +480,12 @@ class LearnableLogicOperator(keras.layers.Layer):
             x2 = ops.sigmoid(x2)
 
         # Compute operation selection probabilities
-        if self.use_temperature:
-            # Clamp temperature to prevent division by zero
-            temp = ops.maximum(self.temperature, 1e-7)
-            operation_probs = ops.softmax(ops.divide(self.operation_weights, temp))
-        else:
-            operation_probs = ops.softmax(self.operation_weights)
+        operation_probs = self._operation_probs()
+        self._maybe_add_entropy_loss(operation_probs)
 
         # Compute all operations
         operations = []
-
-        for i, op_type in enumerate(self.operation_types):
+        for op_type in self.operation_types:
             if op_type == 'and':
                 result = self._soft_logic_and(x1, x2)
             elif op_type == 'or':
@@ -385,22 +498,26 @@ class LearnableLogicOperator(keras.layers.Layer):
                 result = self._soft_logic_nand(x1, x2)
             elif op_type == 'nor':
                 result = self._soft_logic_nor(x1, x2)
+            elif op_type == 'lukasiewicz_and':
+                result = self._luk_and(x1, x2)
+            elif op_type == 'lukasiewicz_or':
+                result = self._luk_or(x1, x2)
+            elif op_type == 'godel_and':
+                result = self._godel_and(x1, x2)
+            elif op_type == 'godel_or':
+                result = self._godel_or(x1, x2)
+            elif op_type == 'implies':
+                result = self._implies(x1, x2)
             else:
-                # This should not happen due to validation in __init__
                 logger.warning(f"Unknown operation type: {op_type}, using identity")
                 result = x1
-
             operations.append(result)
 
-        # Weighted combination of operations
-        output = ops.zeros_like(x1)
-        for i, op_result in enumerate(operations):
-            weight = ops.expand_dims(operation_probs[i], axis=0)
-            # Expand weight to match tensor dimensions
-            for _ in range(len(ops.shape(x1)) - 1):
-                weight = ops.expand_dims(weight, axis=-1)
-            output = ops.add(output, ops.multiply(weight, op_result))
-
+        # Vectorized weighted combination.
+        stacked = ops.stack(operations, axis=0)
+        weight_shape = (self.num_operations,) + (1,) * (len(stacked.shape) - 1)
+        weights = ops.reshape(operation_probs, weight_shape)
+        output = ops.sum(ops.multiply(weights, stacked), axis=0)
         return output
 
     def compute_output_shape(
@@ -439,5 +556,10 @@ class LearnableLogicOperator(keras.layers.Layer):
             "operation_initializer": keras.initializers.serialize(self.operation_initializer),
             "temperature_initializer": keras.initializers.serialize(self.temperature_initializer),
             "apply_sigmoid": self.apply_sigmoid,
+            "softplus_temperature": self.softplus_temperature,
+            "gumbel_softmax": self.gumbel_softmax,
+            "gumbel_hard": self.gumbel_hard,
+            "entropy_coefficient": self.entropy_coefficient,
+            "allow_unary_degenerate": self.allow_unary_degenerate,
         })
         return config
