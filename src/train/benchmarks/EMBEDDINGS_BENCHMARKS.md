@@ -84,19 +84,6 @@ MTEB has since been extended to **MMTEB** (multilingual, 250+ languages), **MTEB
 | Voyage voyage-3 | n/a | 1024 | 32K | 65.40 | ? | ? | ? | No | No | 2024 | Proprietary |
 | Voyage voyage-3-large | n/a | 2048 (-> 256) | 32K | 67.10 | 60.50 | ? | ? | Yes (MRL + int8/binary) | No | 2025 | Proprietary |
 
-## What's Achievable at Our Scale (~10M params)
-
-The cliffordnet causal U-Net LM nano variant is **10.26M params**, trained on 2048-context Wikipedia CLM with an MRL head producing widths [128, 64, 32, 16]. Calibrating against the tables above:
-
-- We are roughly **half the size of paraphrase-MiniLM-L3-v2** (17M) and **less than half of all-MiniLM-L6-v2** (23M), and those are the smallest open MTEB entries.
-- Realistic floor for our nano model on MTEB English Average: **~50** (well below MiniLM-L6's 56.26, since we are smaller and not contrastively fine-tuned on retrieval pairs).
-- The hardest leg will be **Retrieval**: MiniLM-L6 scores 41.95 on retrieval despite being purely contrastive on 1B sentence pairs. A CLM with only Wikipedia next-token pretraining and an L2-normalized last-hidden mean has no query/passage asymmetry training signal, so expect retrieval scores in the **20-35 range** for the nano model unless a contrastive fine-tune stage is added on top.
-- **STS** is the leg where CLM features tend to do least badly. A floor of ~70 STS on the 128-dim head is plausible (vs MiniLM-L6 at 78.9), since semantic similarity benefits from broad pretraining and is less brittle to the absence of paired contrastive signal.
-- **Classification** is the easiest leg for a CLM model; well-pooled hidden states are linearly separable. Targeting **60-65** on classification is reasonable.
-- The MRL widths 128/64/32/16 should follow the pattern observed in nomic-embed-text-v1.5 (62.28 -> 56.10 going from 768 to 64). Expect ~2-5 MTEB Avg points lost from 128 down to 16.
-
-To beat MiniLM-L6 with a 10M-param model, a contrastive post-training stage on retrieval-style pairs (MS MARCO / NLI triplets / Reddit pairs) is essentially mandatory. CLM pretraining alone will not get there.
-
 ## 2026 SOTA Themes Captured in the Numbers
 
 - **Decoder-LLM foundations dominate above 1B params.** NV-Embed-v2 (72.31), gte-Qwen2-7B-instruct (70.24), and Linq-Embed-Mistral (68.20) all use 7B+ decoder bases fine-tuned with instruction prompts and synthetic GPT-4 data. The encoder-only BERT-family caps out around 65 even at 335M-570M params.
