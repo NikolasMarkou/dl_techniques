@@ -158,9 +158,19 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             gumbel_softmax: bool = False,
             gumbel_hard: bool = False,
             entropy_coefficient: float = 0.0,
+            selection_mode: str = "global",
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
+
+        # C3 (plan_2026-05-13_3a2f1d23): selection_mode='per_channel' creates
+        # (channels, num_operations) weights so each channel selects its own
+        # operator. 'global' (default) preserves legacy single (num_operations,).
+        if selection_mode not in ("global", "per_channel"):
+            raise ValueError(
+                f"selection_mode must be 'global' or 'per_channel', got "
+                f"{selection_mode!r}."
+            )
 
         # Validate and set operation types
         if operation_types is None:
@@ -230,6 +240,7 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         self.gumbel_softmax = gumbel_softmax
         self.gumbel_hard = gumbel_hard
         self.entropy_coefficient = entropy_coefficient
+        self.selection_mode = selection_mode
 
         # Initialize weight attributes - these will be created in build()
         self.operation_weights = None
@@ -260,10 +271,31 @@ class LearnableArithmeticOperator(keras.layers.Layer):
                         f"Got shapes: {input_shape[0]} and {input_shape[1]}"
                     )
 
-        # Create learnable operation selection weights
+        # Create learnable operation selection weights.
+        # C3: per-channel mode stores (channels, num_operations) so each
+        # channel independently selects its operator. Global mode keeps
+        # the legacy (num_operations,) shape.
+        if self.selection_mode == "per_channel":
+            # Resolve channel size from input_shape[-1]. For binary inputs
+            # passed as a list, use the first shape (validated equal above).
+            if isinstance(input_shape, list) and len(input_shape) >= 1 and hasattr(input_shape[0], '__iter__'):
+                shape_for_channels = tuple(input_shape[0])
+            else:
+                shape_for_channels = tuple(input_shape)
+            if shape_for_channels[-1] is None:
+                raise ValueError(
+                    "selection_mode='per_channel' requires a concrete "
+                    f"last-axis dimension; got {shape_for_channels}."
+                )
+            self._channels = int(shape_for_channels[-1])
+            weight_shape = (self._channels, self.num_operations)
+        else:
+            self._channels = None
+            weight_shape = (self.num_operations,)
+
         self.operation_weights = self.add_weight(
             name="operation_weights",
-            shape=(self.num_operations,),
+            shape=weight_shape,
             initializer=self.operation_initializer,
             trainable=True,
         )
@@ -434,11 +466,11 @@ class LearnableArithmeticOperator(keras.layers.Layer):
                 logits = ops.divide(noisy, temp)
             else:
                 logits = noisy
-            soft = ops.softmax(logits)
+            soft = ops.softmax(logits, axis=-1)
             if self.gumbel_hard:
                 # Straight-through estimator: forward-pass uses the one-hot,
                 # backward-pass uses the soft sample.
-                idx = ops.argmax(soft)
+                idx = ops.argmax(soft, axis=-1)
                 hard = ops.one_hot(idx, num_classes=self.num_operations)
                 hard = ops.cast(hard, soft.dtype)
                 return ops.add(soft, ops.stop_gradient(ops.subtract(hard, soft)))
@@ -450,7 +482,7 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             logits = ops.divide(weights, temp)
         else:
             logits = weights
-        return ops.softmax(logits)
+        return ops.softmax(logits, axis=-1)
 
     def _maybe_add_entropy_loss(
         self, probs: keras.KerasTensor
@@ -475,9 +507,16 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         """
         if self.operation_weights is None:
             raise RuntimeError("Layer has not been built yet.")
-        probs = ops.convert_to_numpy(
+        probs_arr = ops.convert_to_numpy(
             self._operation_probs(deterministic=deterministic)
-        ).tolist()
+        )
+        if self.selection_mode == "per_channel":
+            # Reduce per-channel selection to a single summary by averaging
+            # over channels — useful for top-k ranking but lossy. Callers
+            # wanting per-channel detail should read operation_weights.
+            probs = probs_arr.mean(axis=0).tolist()
+        else:
+            probs = probs_arr.tolist()
         ranked = sorted(
             zip(self.operation_types, probs), key=lambda kv: -kv[1]
         )[:top_k]
@@ -538,13 +577,23 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             operations.append(result)
 
         # Weighted combination of operations — vectorized stack-and-sum.
-        # `stacked` has shape (N, ...x.shape...). `weights` is reshaped to
-        # broadcast against the leading op axis.
-        stacked = ops.stack(operations, axis=0)
-        n = self.num_operations
-        weight_shape = (n,) + (1,) * (len(stacked.shape) - 1)
-        weights = ops.reshape(operation_probs, weight_shape)
-        output = ops.sum(ops.multiply(weights, stacked), axis=0)
+        if self.selection_mode == "per_channel":
+            # C3: operation_probs has shape (C, N). Stack ops on a new last
+            # axis to match: stacked shape becomes (...x.shape, N), then
+            # multiply by probs broadcast (1,...,1,C,N) and sum on axis=-1.
+            stacked = ops.stack(operations, axis=-1)  # (..., C, N)
+            rank = len(stacked.shape)
+            # probs shape (C, N) -> (1,)*(rank-2) + (C, N).
+            probs_bshape = (1,) * (rank - 2) + (self._channels, self.num_operations)
+            weights = ops.reshape(operation_probs, probs_bshape)
+            output = ops.sum(ops.multiply(weights, stacked), axis=-1)
+        else:
+            # Global: legacy path.
+            stacked = ops.stack(operations, axis=0)
+            n = self.num_operations
+            weight_shape = (n,) + (1,) * (len(stacked.shape) - 1)
+            weights = ops.reshape(operation_probs, weight_shape)
+            output = ops.sum(ops.multiply(weights, stacked), axis=0)
 
         # Apply scaling factor if enabled
         if self.use_scaling:
@@ -602,6 +651,7 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             "gumbel_softmax": self.gumbel_softmax,
             "gumbel_hard": self.gumbel_hard,
             "entropy_coefficient": self.entropy_coefficient,
+            "selection_mode": self.selection_mode,
         })
         return config
 

@@ -611,3 +611,82 @@ class TestPlan3a2f1d23ArithmeticC1:
         outputs = {op.to_symbolic(top_k=1) for _ in range(10)}
         assert len(outputs) == 1, f"to_symbolic() non-deterministic: {outputs}"
         assert next(iter(outputs)).startswith("multiply")
+
+
+class TestPlan3a2f1d23ArithmeticPerChannelC3:
+    """C3: per-channel selection mode on LearnableArithmeticOperator."""
+
+    def test_weight_shape_per_channel(self):
+        op = LearnableArithmeticOperator(
+            operation_types=['add', 'multiply', 'subtract'],
+            selection_mode='per_channel',
+        )
+        op.build((None, 8))
+        assert op.operation_weights.shape == (8, 3)
+
+    def test_weight_shape_global(self):
+        op = LearnableArithmeticOperator(
+            operation_types=['add', 'multiply', 'subtract'],
+        )
+        op.build((None, 8))
+        assert op.operation_weights.shape == (3,)
+
+    def test_forward_per_channel_rank2(self):
+        op = LearnableArithmeticOperator(
+            operation_types=['add', 'multiply'],
+            selection_mode='per_channel',
+            use_scaling=False,
+        )
+        x = ops.convert_to_tensor(np.random.randn(2, 4).astype(np.float32))
+        y = op([x, x])
+        assert y.shape == (2, 4)
+        assert bool(ops.all(ops.isfinite(y)))
+
+    def test_forward_per_channel_rank4(self):
+        op = LearnableArithmeticOperator(
+            operation_types=['add', 'multiply'],
+            selection_mode='per_channel',
+            use_scaling=False,
+        )
+        x = ops.convert_to_tensor(np.random.randn(2, 5, 5, 6).astype(np.float32))
+        y = op([x, x])
+        assert y.shape == (2, 5, 5, 6)
+
+    def test_per_channel_distinct_channel_selection(self):
+        """Each channel selects its own operator: with weights biasing channel
+        0 toward 'add' and channel 1 toward 'multiply', outputs should
+        reflect that."""
+        op = LearnableArithmeticOperator(
+            operation_types=['add', 'multiply'],
+            selection_mode='per_channel',
+            use_temperature=False,
+            use_scaling=False,
+        )
+        op.build((None, 2))
+        op.operation_weights.assign(np.array([[10.0, 0.0], [0.0, 10.0]], dtype=np.float32))
+        x1 = ops.convert_to_tensor(np.array([[2.0, 3.0]], dtype=np.float32))
+        x2 = ops.convert_to_tensor(np.array([[5.0, 7.0]], dtype=np.float32))
+        y = ops.convert_to_numpy(op([x1, x2]))
+        # Channel 0 picks add: 2+5=7. Channel 1 picks multiply: 3*7=21.
+        np.testing.assert_allclose(y[0, 0], 7.0, atol=1e-3)
+        np.testing.assert_allclose(y[0, 1], 21.0, atol=1e-3)
+
+    def test_per_channel_round_trip(self):
+        op = LearnableArithmeticOperator(
+            operation_types=['add', 'multiply'],
+            selection_mode='per_channel',
+        )
+        op.build((None, 4))
+        cfg = op.get_config()
+        assert cfg['selection_mode'] == 'per_channel'
+        op2 = LearnableArithmeticOperator.from_config(cfg)
+        assert op2.selection_mode == 'per_channel'
+
+    def test_per_channel_requires_concrete_channel_dim(self):
+        op = LearnableArithmeticOperator(selection_mode='per_channel')
+        with pytest.raises(ValueError, match="last-axis"):
+            op.build((None, None))
+
+    def test_invalid_selection_mode_raises(self):
+        with pytest.raises(ValueError, match="selection_mode"):
+            LearnableArithmeticOperator(selection_mode='bogus')
