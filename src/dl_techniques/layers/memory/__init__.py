@@ -96,6 +96,12 @@ from .som_nd_layer import SOMLayer
 from .som_2d_layer import SOM2dLayer
 from .som_nd_soft_layer import SoftSOMLayer
 
+# ---------------------------------------------------------------------------
+# Factory (recommended construction surface)
+# ---------------------------------------------------------------------------
+
+from .factory import create_mann, create_som_2d  # noqa: E402  (after class imports)
+
 
 __all__ = [
     # NTM — enumerations
@@ -129,6 +135,9 @@ __all__ = [
     "SOMLayer",
     "SOM2dLayer",
     "SoftSOMLayer",
+    # Factory functions
+    "create_mann",
+    "create_som_2d",
 ]
 
 __version__ = "1.0.0"
