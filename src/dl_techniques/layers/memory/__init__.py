@@ -6,7 +6,7 @@ that were previously split across `layers/ntm/` and `layers/memory/`. It provide
 
 * **NTM family** — Neural Turing Machine (Graves et al., 2014): differentiable
   external memory with content + location addressing. Re-exported from
-  `ntm_interface`, `base_layers`, `baseline_ntm`.
+  `ntm_interface` and `baseline_ntm`.
 * **MANN** — Memory-Augmented Neural Network (Santoro et al., 2016) style
   standalone layer built on the NTM idea. Defined in `mann.py`.
 * **SOM family** — Self-Organizing Maps (Kohonen, 1982): 2D, ND, and soft
@@ -14,7 +14,6 @@ that were previously split across `layers/ntm/` and `layers/memory/`. It provide
 
 Modules:
     ntm_interface: Abstract base classes, dataclasses, enums, and utilities.
-    base_layers: Differentiable addressing mechanisms.
     baseline_ntm: Production-ready NTM implementation + factory.
     mann: Standalone Memory-Augmented Neural Network layer.
     som_nd_layer: N-dimensional Self-Organizing Map layer (hard winner).
@@ -28,8 +27,6 @@ NTM Classes:
         - MemoryState, HeadState, NTMOutput, NTMConfig
     Enumerations:
         - AddressingMode, MemoryAccessType
-    Base Layers:
-        - DifferentiableAddressingHead, DifferentiableSelectCopy, SimpleSelectCopy
     Baseline Implementation:
         - NTMMemory, NTMReadHead, NTMWriteHead, NTMController, NTMCell,
           NeuralTuringMachine
@@ -75,12 +72,6 @@ from .ntm_interface import (
     sharpen_weights,
 )
 
-from .base_layers import (
-    DifferentiableAddressingHead,
-    DifferentiableSelectCopy,
-    SimpleSelectCopy,
-)
-
 from .baseline_ntm import (
     NTMMemory,
     NTMReadHead,
@@ -124,10 +115,6 @@ __all__ = [
     "cosine_similarity",
     "circular_convolution",
     "sharpen_weights",
-    # NTM — base layers
-    "DifferentiableAddressingHead",
-    "DifferentiableSelectCopy",
-    "SimpleSelectCopy",
     # NTM — baseline implementation
     "NTMMemory",
     "NTMReadHead",

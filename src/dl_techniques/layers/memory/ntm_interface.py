@@ -37,20 +37,18 @@ class AddressingMode(Enum):
     """
     Enumeration of addressing mechanism types.
 
+    Only the values actually consumed by `NTMConfig` / `NTMReadHead` / `NTMWriteHead`
+    are retained: `CONTENT` (content-only) and `HYBRID` (content + location, the
+    original NTM). Speculative values for future variants (LOCATION-only, SPARSE,
+    TEMPORAL, LEARNED) were pruned in plan_2026-05-13_8c1dc6fd step 9 (R12) as
+    they had zero call sites in src/ or tests/.
+
     :cvar CONTENT: Content-based addressing using similarity measures.
-    :cvar LOCATION: Location-based addressing using shifts and interpolation.
     :cvar HYBRID: Combined content and location addressing (original NTM).
-    :cvar SPARSE: Sparse attention-based addressing (SANTM).
-    :cvar TEMPORAL: Temporal link-based addressing (DNC).
-    :cvar LEARNED: Fully learned addressing (Titans).
     """
 
     CONTENT = auto()
-    LOCATION = auto()
     HYBRID = auto()
-    SPARSE = auto()
-    TEMPORAL = auto()
-    LEARNED = auto()
 
 
 class MemoryAccessType(Enum):
