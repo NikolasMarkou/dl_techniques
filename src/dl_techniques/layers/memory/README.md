@@ -115,7 +115,7 @@ y = mann(x)
 ```python
 from dl_techniques.layers.memory import SOMLayer
 
-som = SOMLayer(map_size=(10, 10), input_dim=128)
+som = SOMLayer(grid_shape=(10, 10), input_dim=128)
 codes = som(x)
 ```
 
@@ -124,7 +124,7 @@ codes = som(x)
 ```python
 from dl_techniques.layers.memory import SoftSOMLayer
 
-soft_som = SoftSOMLayer(map_size=(10, 10), input_dim=128, temperature=0.5)
+soft_som = SoftSOMLayer(grid_shape=(10, 10), input_dim=128, temperature=0.5)
 codes = soft_som(x)
 ```
 
