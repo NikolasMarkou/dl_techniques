@@ -422,21 +422,33 @@ class LearnableLogicOperator(keras.layers.Layer):
         return ops.maximum(ops.subtract(1.0, x1), x2)
 
     # --- Hamacher / Yager t-norms (M4) -----------------------------------
+    # DECISION plan_2026-05-13_e33114da/D-002 — Both Hamacher t-norms have a
+    # 0/0 singularity at one corner: AND at (0,0), OR at (1,1). The limit by
+    # continuity is 0 for AND and 1 for OR. Prior implementation used
+    # asymmetric eps strategies (additive for AND, max-clamp for OR) which
+    # gave wrong limits — most visibly, OR(1,1) returned 0 instead of 1.
+    # Unified with ops.where: when denom is near-singular, return the
+    # mathematical limit; otherwise return the standard ratio.
+    _HAMACHER_SINGULAR_EPS = 1e-7
+
     def _hamacher_and(self, x1, x2):
-        """Hamacher product t-norm: p*q / (p + q - p*q). Robust at (0, 0)."""
+        """Hamacher product t-norm: p*q / (p + q - p*q). Limit at (0,0) = 0."""
         pq = ops.multiply(x1, x2)
         denom = ops.subtract(ops.add(x1, x2), pq)
-        # Both inputs zero -> 0/0; use eps in denom (eps small, value -> 0).
-        denom_safe = ops.add(denom, 1e-9)
-        return ops.divide(pq, denom_safe)
+        denom_safe = ops.maximum(denom, 1e-9)
+        singular = ops.less(denom, self._HAMACHER_SINGULAR_EPS)
+        ratio = ops.divide(pq, denom_safe)
+        return ops.where(singular, ops.zeros_like(ratio), ratio)
 
     def _hamacher_or(self, x1, x2):
-        """Hamacher sum t-conorm: (p + q - 2 p q) / (1 - p q)."""
+        """Hamacher sum t-conorm: (p + q - 2 p q) / (1 - p q). Limit at (1,1) = 1."""
         pq = ops.multiply(x1, x2)
         num = ops.subtract(ops.add(x1, x2), ops.multiply(2.0, pq))
         denom = ops.subtract(1.0, pq)
         denom_safe = ops.maximum(denom, 1e-9)
-        return ops.divide(num, denom_safe)
+        singular = ops.less(denom, self._HAMACHER_SINGULAR_EPS)
+        ratio = ops.divide(num, denom_safe)
+        return ops.where(singular, ops.ones_like(ratio), ratio)
 
     def _yager_and(self, x1, x2):
         """Yager t-norm: 1 - min(1, ((1-p)^w + (1-q)^w)^(1/w))."""
