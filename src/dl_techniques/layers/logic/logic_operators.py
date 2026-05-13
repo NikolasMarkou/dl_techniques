@@ -168,7 +168,7 @@ class LearnableLogicOperator(keras.layers.Layer):
             operation_initializer: Union[str, keras.initializers.Initializer] = "random_uniform",
             temperature_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
             apply_sigmoid: bool = True,
-            softplus_temperature: bool = False,
+            softplus_temperature: bool = True,
             gumbel_softmax: bool = False,
             gumbel_hard: bool = False,
             entropy_coefficient: float = 0.0,

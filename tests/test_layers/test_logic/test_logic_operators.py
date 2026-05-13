@@ -668,6 +668,11 @@ class TestPlan3a2f1d23LogicC1:
         p2 = ops.convert_to_numpy(op._operation_probs(deterministic=True))
         np.testing.assert_allclose(p1, p2, atol=1e-7)
 
+    def test_softplus_temperature_default_True_H1(self):
+        """H1: softplus_temperature default flipped True (plan_3a2f1d23)."""
+        op = LearnableLogicOperator()
+        assert op.softplus_temperature is True
+
     def test_to_symbolic_deterministic_under_gumbel_C5(self):
         op = LearnableLogicOperator(
             operation_types=['and', 'or', 'xor'],

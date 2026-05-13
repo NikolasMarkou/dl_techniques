@@ -153,7 +153,7 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             epsilon: float = 1e-7,
             power_clip_range: Tuple[float, float] = (1e-7, 10.0),
             exponent_clip_range: Tuple[float, float] = (-2.0, 2.0),
-            softplus_temperature: bool = False,
+            softplus_temperature: bool = True,
             safe_divide_mode: str = "hard_clamp",
             gumbel_softmax: bool = False,
             gumbel_hard: bool = False,
