@@ -226,7 +226,6 @@ class MannLayer(keras.layers.Layer):
         self.param_generator = layers.Dense(self.total_params_size, name="param_generator")
 
         # Initialize weight attributes - created in build()
-        self.memory_matrix = None
         # This weight is used for initializing the memory matrix at the start of each sequence
         self.initial_memory_vector = None
 
@@ -236,16 +235,9 @@ class MannLayer(keras.layers.Layer):
 
         This is called automatically when the layer first processes input.
         """
-        # Create layer's own weights: the persistent memory matrix.
-        # Although it's modified in call(), it's a learnable component.
-        self.memory_matrix = self.add_weight(
-            name='memory_matrix',
-            shape=(self.memory_locations, self.memory_dim),
-            initializer='glorot_uniform',
-            trainable=True,
-        )
-
         # A learnable initial state for the memory matrix
+        # (NOTE: prior versions also created a dead `memory_matrix` add_weight here
+        #  that was never read in call(); removed in plan_2026-05-13_8c1dc6fd step 3.)
         self.initial_memory_vector = self.add_weight(
             name="initial_memory_vector",
             shape=(self.memory_locations, self.memory_dim),
