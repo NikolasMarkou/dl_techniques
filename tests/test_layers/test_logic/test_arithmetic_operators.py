@@ -594,6 +594,11 @@ class TestPlan3a2f1d23ArithmeticC1:
         op = LearnableArithmeticOperator()
         assert op.softplus_temperature is True
 
+    def test_operation_initializer_default_zeros_H2(self):
+        """H2: operation_initializer default flipped to 'zeros' (plan_3a2f1d23)."""
+        op = LearnableArithmeticOperator()
+        assert op.operation_initializer.__class__.__name__ == 'Zeros'
+
     def test_to_symbolic_deterministic_under_gumbel_C5(self):
         """C5: to_symbolic() must be deterministic regardless of gumbel mode."""
         op = LearnableArithmeticOperator(

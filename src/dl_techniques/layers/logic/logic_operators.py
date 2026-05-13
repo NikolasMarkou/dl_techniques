@@ -165,7 +165,7 @@ class LearnableLogicOperator(keras.layers.Layer):
             operation_types: Optional[List[str]] = None,
             use_temperature: bool = True,
             temperature_init: float = 1.0,
-            operation_initializer: Union[str, keras.initializers.Initializer] = "random_uniform",
+            operation_initializer: Union[str, keras.initializers.Initializer] = "zeros",
             temperature_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
             apply_sigmoid: bool = True,
             softplus_temperature: bool = True,

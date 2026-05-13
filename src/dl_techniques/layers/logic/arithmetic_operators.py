@@ -147,7 +147,7 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             temperature_init: float = 1.0,
             use_scaling: bool = True,
             scaling_init: float = 1.0,
-            operation_initializer: Union[str, keras.initializers.Initializer] = "random_uniform",
+            operation_initializer: Union[str, keras.initializers.Initializer] = "zeros",
             temperature_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
             scaling_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
             epsilon: float = 1e-7,
