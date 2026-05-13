@@ -524,23 +524,29 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         self.channel_mix = channel_mix
         self.selection_mode = selection_mode
 
-        # C4 (plan_2026-05-13_3a2f1d23): when first_only + arithmetic experts,
-        # depths >= 1 receive an apply_sigmoid=False LearnableLogicOperator
-        # whose input is the previous depth's fused output. Arithmetic experts
-        # are unbounded so the input can leave [0, 1]. Force-clip those inner
-        # logic ops as a defensive measure; also warn the user once.
+        # C4 (plan_2026-05-13_3a2f1d23): when first_only mode is on and
+        # depths >= 1 inner logic ops have apply_sigmoid=False, any source of
+        # out-of-[0,1] values feeding into them breaks fuzzy semantics. Two
+        # sources: (a) arithmetic experts at depth 0 (unbounded outputs);
+        # (b) use_residual=True propagates the raw input X to depth 1.
+        # DECISION plan_2026-05-13_e33114da/D-004 — risky_stack now triggers
+        # on EITHER source. B3 widened the prior guard which only caught (a).
         risky_stack = (
             self.apply_sigmoid_per_depth == "first_only"
-            and self.num_arithmetic_ops_per_depth > 0
             and self.circuit_depth >= 2
+            and (
+                self.num_arithmetic_ops_per_depth > 0
+                or self.use_residual
+            )
         )
         if risky_stack:
             logger.warning(
                 "LearnableNeuralCircuit: apply_sigmoid_per_depth='first_only' "
-                "with arithmetic experts and depth>=2 — auto-enabling "
-                "force_logic_input_clip on depths >= 1 to guarantee logic-op "
-                "inputs in [0, 1] (C4, plan_2026-05-13_3a2f1d23). Set "
-                "apply_sigmoid_per_depth='all' or num_arithmetic_ops_per_depth=0 "
+                "with depth>=2 and (arithmetic experts OR use_residual=True) — "
+                "auto-enabling force_logic_input_clip on depths >= 1 to "
+                "guarantee logic-op inputs in [0, 1] "
+                "(plan_2026-05-13_e33114da/D-004). Set apply_sigmoid_per_depth="
+                "'all', use_residual=False with num_arithmetic_ops_per_depth=0 "
                 "to silence."
             )
 
