@@ -361,6 +361,11 @@ class SoftSOMLayer(keras.layers.Layer):
     :param topological_weight: Weight for topological preservation loss.
         Defaults to 0.1.
     :type topological_weight: float
+    :param topological_sigma: Length-scale (sigma) of the exponential
+        neighborhood kernel used inside the topological preservation loss:
+        ``h(d) = exp(-d / sigma)``. Larger values produce broader neighborhoods.
+        Default ``1.0`` preserves the previous fixed-scale behavior numerically.
+    :type topological_sigma: float
     :param sharpness_weight: Weight for entropy-based sharpness loss.
         Defaults to 0.0 (disabled).
     :type sharpness_weight: float
@@ -383,6 +388,7 @@ class SoftSOMLayer(keras.layers.Layer):
         use_reconstruction_loss: bool = True,
         reconstruction_weight: float = 1.0,
         topological_weight: float = 0.1,
+        topological_sigma: float = 1.0,
         sharpness_weight: float = 0.0,
         kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = keras.regularizers.L2(1e-5),
@@ -402,6 +408,8 @@ class SoftSOMLayer(keras.layers.Layer):
             raise ValueError("reconstruction_weight must be non-negative.")
         if topological_weight < 0:
             raise ValueError("topological_weight must be non-negative.")
+        if topological_sigma <= 0:
+            raise ValueError("topological_sigma must be positive.")
         if sharpness_weight < 0:
             raise ValueError("sharpness_weight must be non-negative.")
 
@@ -414,6 +422,7 @@ class SoftSOMLayer(keras.layers.Layer):
         self.use_reconstruction_loss = use_reconstruction_loss
         self.reconstruction_weight = reconstruction_weight
         self.topological_weight = topological_weight
+        self.topological_sigma = topological_sigma
         self.sharpness_weight = sharpness_weight
 
         # Store initializers and regularizers for serialization
@@ -670,8 +679,10 @@ class SoftSOMLayer(keras.layers.Layer):
         position_diff = ops.expand_dims(flat_positions, axis=1) - ops.expand_dims(flat_positions, axis=0)
         position_distances = ops.sqrt(ops.sum(ops.square(position_diff), axis=-1) + 1e-8)
 
-        # Create neighborhood weights (exponential decay with distance)
-        neighborhood_weights = ops.exp(-position_distances)
+        # Create neighborhood weights (exponential decay with distance).
+        # NOTE: scaling controlled by `topological_sigma` (default 1.0 preserves
+        # legacy `exp(-d)` behavior numerically).
+        neighborhood_weights = ops.exp(-position_distances / self.topological_sigma)
 
         # Compute activation correlations between neurons across batch
         normalized_assignments = flat_assignments - ops.mean(flat_assignments, axis=0, keepdims=True)
@@ -765,6 +776,7 @@ class SoftSOMLayer(keras.layers.Layer):
             'use_reconstruction_loss': self.use_reconstruction_loss,
             'reconstruction_weight': self.reconstruction_weight,
             'topological_weight': self.topological_weight,
+            'topological_sigma': self.topological_sigma,
             'sharpness_weight': self.sharpness_weight,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
