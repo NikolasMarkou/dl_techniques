@@ -22,13 +22,20 @@ src/train/
 ├── nbeats/              # N-BEATS time-series
 ├── bert/                # BERT pretrain/finetune
 ├── ...
-├── EMBEDDINGS_BENCHMARKS.md  # MTEB targets across the size spectrum (tiny→XL→API)
+├── benchmarks/          # External SOTA reference targets (snapshot-dated)
+│   ├── EMBEDDINGS_BENCHMARKS.md  # MTEB across the size spectrum (tiny→XL→API)
+│   ├── LLM_BENCHMARKS.md         # MMLU/GPQA/HumanEval/MATH/Arena across model tiers
+│   └── VISION_BENCHMARKS.md      # IN-1K, COCO, ADE20K, MMMU, depth, video benchmarks
 └── CLAUDE.md
 ```
 
 ## Reference Documents
 
-- **`EMBEDDINGS_BENCHMARKS.md`** — Snapshot of the MTEB leaderboard and related embedding benchmarks across 33 models grouped by parameter count (Tiny ≤50M → XL ≥7B → Proprietary API). Use this **before** kicking off an embedding-style training run to set realistic targets at your model's scale. Numbers are dated; re-pull when the leaderboard moves.
+The `benchmarks/` directory holds external SOTA snapshots. Consult them **before** kicking off a training run at the relevant scale so you set realistic targets instead of celebrating a number that's already 10 points below open weights. Each file is dated at the top; re-pull when leaderboards move.
+
+- **`benchmarks/EMBEDDINGS_BENCHMARKS.md`** — MTEB leaderboard across 33+ models grouped by parameter count (Tiny ≤50M → XL ≥7B → Proprietary API). Per-task columns (Retrieval / STS / Classif), MRL/instruct flags, license. Use for any embedding / dense-retrieval / MRL training run.
+- **`benchmarks/LLM_BENCHMARKS.md`** — Causal-LM reference targets across 6 tiers (Tiny ≤2B → XL/MoE ≥100B → Proprietary). Columns: MMLU, GPQA Diamond, HumanEval, MATH, Arena ELO, context length. Includes a separate SWE-bench Verified table for agentic eval. Use for pretraining, instruction tuning, and reasoning-model runs.
+- **`benchmarks/VISION_BENCHMARKS.md`** — Multi-task vision targets: ImageNet-1K classification (5 param tiers), COCO detection (mAP@50:95), ADE20K / Cityscapes semantic seg (mIoU), COCO instance seg (mask AP), monocular depth (NYU / KITTI AbsRel), VLM benchmarks (MMMU / MMBench / DocVQA / ChartQA), zero-shot CLIP, and video understanding (Kinetics-400/600, SSv2). Use for classification, detection, seg, depth, VLM, and video runs alike.
 
 ## File Naming
 
