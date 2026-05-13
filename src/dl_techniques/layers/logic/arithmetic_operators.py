@@ -453,17 +453,23 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             # Penalize HIGH entropy (push toward sharp selection).
             self.add_loss(ops.multiply(self.entropy_coefficient, ent))
 
-    def to_symbolic(self, top_k: int = 1) -> str:
+    def to_symbolic(self, top_k: int = 1, deterministic: bool = True) -> str:
         """
         Return a human-readable string of the dominant op(s) post-training.
 
         :param top_k: Return the top-k operations by softmax probability.
+        :param deterministic: If True (default), skip Gumbel noise so the
+            output is reproducible regardless of ``self.gumbel_softmax``.
+            Set False only if you explicitly want sample variability.
+            Fixes issue C5 (plan_2026-05-13_3a2f1d23).
         :return: Comma-separated operation names ranked by probability,
             optionally with their probabilities in parentheses.
         """
         if self.operation_weights is None:
             raise RuntimeError("Layer has not been built yet.")
-        probs = ops.convert_to_numpy(self._operation_probs()).tolist()
+        probs = ops.convert_to_numpy(
+            self._operation_probs(deterministic=deterministic)
+        ).tolist()
         ranked = sorted(
             zip(self.operation_types, probs), key=lambda kv: -kv[1]
         )[:top_k]

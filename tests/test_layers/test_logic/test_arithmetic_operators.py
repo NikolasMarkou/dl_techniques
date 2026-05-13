@@ -588,3 +588,16 @@ class TestPlan3a2f1d23ArithmeticC1:
         p1 = ops.convert_to_numpy(op._operation_probs(deterministic=True))
         p2 = ops.convert_to_numpy(op._operation_probs(deterministic=True))
         np.testing.assert_allclose(p1, p2, atol=1e-7)
+
+    def test_to_symbolic_deterministic_under_gumbel_C5(self):
+        """C5: to_symbolic() must be deterministic regardless of gumbel mode."""
+        op = LearnableArithmeticOperator(
+            operation_types=['add', 'subtract', 'multiply'],
+            gumbel_softmax=True,
+            gumbel_hard=False,
+        )
+        op.build((None, 4))
+        op.operation_weights.assign([0.0, 0.0, 5.0])
+        outputs = {op.to_symbolic(top_k=1) for _ in range(10)}
+        assert len(outputs) == 1, f"to_symbolic() non-deterministic: {outputs}"
+        assert next(iter(outputs)).startswith("multiply")
