@@ -1354,14 +1354,20 @@ class NeuralTuringMachine(BaseNTM):
         batch_size: int,
     ) -> tuple[MemoryState, list[HeadState], Any | None]:
         """
-        Initialize all states (placeholder implementation).
+        Always raises NotImplementedError.
 
-        :param batch_size: Number of sequences in the batch.
-        :type batch_size: int
-        :return: Empty placeholder states.
-        :rtype: tuple
+        `NeuralTuringMachine` wraps `NTMCell` inside a `keras.layers.RNN`, which
+        owns state initialization through `NTMCell.get_initial_state(...)`. The
+        `BaseNTM` step/state APIs are only meaningful for direct (non-wrapped)
+        `BaseNTM` subclasses. Use the cell's API instead.
+
+        :raises NotImplementedError: Always.
         """
-        return MemoryState(memory=None), [], None
+        raise NotImplementedError(
+            "NeuralTuringMachine.initialize_state is not implemented; this layer "
+            "uses keras.layers.RNN(NTMCell) and state is initialized by the wrapped "
+            "cell. Use NTMCell.get_initial_state(...) for the BaseNTM step API."
+        )
 
     def step(
         self,
@@ -1372,26 +1378,19 @@ class NeuralTuringMachine(BaseNTM):
         training: bool | None = None,
     ) -> NTMOutput:
         """
-        Single step (not used - RNN handles internally).
+        Always raises NotImplementedError.
 
-        :param inputs: Input tensor.
-        :type inputs: Any
-        :param memory_state: Current memory state.
-        :type memory_state: MemoryState
-        :param head_states: Current head states.
-        :type head_states: list[HeadState]
-        :param controller_state: Current controller state.
-        :type controller_state: Any | None
-        :param training: Training mode flag.
-        :type training: bool | None
-        :return: Empty NTMOutput (not used).
-        :rtype: NTMOutput
+        `NeuralTuringMachine` does not implement the BaseNTM single-step API;
+        sequence stepping is handled internally by `keras.layers.RNN(NTMCell)`.
+        Call this layer directly on a `(batch, seq_len, input_dim)` tensor
+        instead of invoking `step(...)` manually.
+
+        :raises NotImplementedError: Always.
         """
-        return NTMOutput(
-            output=inputs,
-            memory_state=memory_state,
-            head_states=head_states,
-            read_vectors=None,
+        raise NotImplementedError(
+            "NeuralTuringMachine.step is not implemented; the wrapped RNN(NTMCell) "
+            "performs stepping internally. Call the layer directly on a "
+            "(batch, seq_len, input_dim) tensor."
         )
 
     def call(
@@ -1429,12 +1428,19 @@ class NeuralTuringMachine(BaseNTM):
 
     def get_memory_state(self) -> MemoryState | None:
         """
-        Get the current memory state (not available in wrapped mode).
+        Always raises NotImplementedError.
 
-        :return: None
-        :rtype: MemoryState | None
+        Wrapped-RNN mode does not expose a single accessible memory state — the
+        memory tensor lives inside the per-step RNN state owned by `NTMCell`.
+        Inspect intermediate states via the `return_state=True` call path.
+
+        :raises NotImplementedError: Always.
         """
-        return None
+        raise NotImplementedError(
+            "NeuralTuringMachine.get_memory_state is not implemented; the memory "
+            "tensor lives inside NTMCell's per-step RNN state. Construct the layer "
+            "with return_state=True and inspect the final RNN states."
+        )
 
     def reset_memory(self, batch_size: int) -> None:
         """
