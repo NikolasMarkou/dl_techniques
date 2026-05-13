@@ -95,7 +95,7 @@ class CircuitDepthLayer(keras.layers.Layer):
         ┌──────────────────────────────────────────────┐
         │           CircuitDepthLayer                  │
         │                                              │
-        │  Input(batch, H, W, C)                       │
+        │  Input(batch, ...features...)  [rank >= 2]   │
         │         │                                    │
         │         ▼                                    │
         │  Routing: alpha = softmax(w_r)               │
@@ -109,7 +109,7 @@ class CircuitDepthLayer(keras.layers.Layer):
         │         │                                    │
         │         ├──► + Input (residual, optional)    │
         │         ▼                                    │
-        │  Output(batch, H, W, C)                      │
+        │  Output (same shape as input)                │
         └──────────────────────────────────────────────┘
 
     :param num_logic_ops: Number of logic operators to run in parallel.
@@ -173,13 +173,16 @@ class CircuitDepthLayer(keras.layers.Layer):
         """
         Build the layer components.
 
-        :param input_shape: Shape of the input tensor. Must be a 4D shape.
+        :param input_shape: Shape of the input tensor. Must be rank >= 2
+            (batch + at least one feature axis). The math is rank-agnostic:
+            common shapes are ``(B, D)``, ``(B, T, D)``, or ``(B, H, W, C)``.
         :type input_shape: Tuple[Optional[int], ...]
         """
-        # Validate input shape
-        if len(input_shape) != 4:
+        # Validate input shape — rank-agnostic; only require batch + feature.
+        if len(input_shape) < 2:
             raise ValueError(
-                f"CircuitDepthLayer expects 4D input (batch, height, width, channels), "
+                f"CircuitDepthLayer expects rank >= 2 input "
+                f"(batch + at least one feature axis), "
                 f"got shape with {len(input_shape)} dimensions: {input_shape}"
             )
 
@@ -229,7 +232,8 @@ class CircuitDepthLayer(keras.layers.Layer):
         """
         Forward pass through the circuit depth layer.
 
-        :param inputs: Input tensor of shape ``[batch, height, width, features]``.
+        :param inputs: Input tensor of rank >= 2 (e.g. ``(B, D)``,
+            ``(B, T, D)``, or ``(B, H, W, C)``).
         :type inputs: keras.KerasTensor
         :param training: Whether the layer is in training mode.
         :type training: Optional[bool]
@@ -333,7 +337,7 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         ┌──────────────────────────────────────────┐
         │        LearnableNeuralCircuit            │
         │                                          │
-        │  Input(batch, H, W, C)                   │
+        │  Input(batch, ...features...) [rank>=2]  │
         │         │                                │
         │         ▼                                │
         │  ┌─────────────────────┐                 │
@@ -352,7 +356,7 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         │  │ CircuitDepthLayer_D │                 │
         │  └─────────┬───────────┘                 │
         │            ▼                             │
-        │  Output(batch, H, W, C)                  │
+        │  Output (same shape as input)            │
         └──────────────────────────────────────────┘
 
     :param circuit_depth: Number of depth levels in the circuit.
@@ -426,13 +430,16 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         """
         Build the neural circuit layers.
 
-        :param input_shape: Shape of the input tensor. Must be a 4D shape.
+        :param input_shape: Shape of the input tensor. Must be rank >= 2
+            (batch + at least one feature axis). Common: ``(B, D)``,
+            ``(B, T, D)``, ``(B, H, W, C)``.
         :type input_shape: Tuple[Optional[int], ...]
         """
-        # Validate input shape
-        if len(input_shape) != 4:
+        # Validate input shape — rank-agnostic; only require batch + feature.
+        if len(input_shape) < 2:
             raise ValueError(
-                f"LearnableNeuralCircuit expects 4D input (batch, height, width, channels), "
+                f"LearnableNeuralCircuit expects rank >= 2 input "
+                f"(batch + at least one feature axis), "
                 f"got shape with {len(input_shape)} dimensions: {input_shape}"
             )
 
@@ -471,7 +478,7 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         """
         Forward pass through the neural circuit.
 
-        :param inputs: Input tensor of shape ``[batch, height, width, features]``.
+        :param inputs: Input tensor of rank >= 2 (shape preserved end-to-end).
         :type inputs: keras.KerasTensor
         :param training: Whether the layer is in training mode.
         :type training: Optional[bool]

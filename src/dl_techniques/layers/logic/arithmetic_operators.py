@@ -4,7 +4,7 @@
 This layer provides a mechanism for a neural network to learn the optimal
 arithmetic combination of its inputs, moving beyond fixed operations like
 addition or concatenation. It is inspired by techniques in Neural
-_   Architecture Search (NAS), where the choice of operation is made a
+Architecture Search (NAS), where the choice of operation is made a
 learnable part of the network itself.
 
 Architecture:

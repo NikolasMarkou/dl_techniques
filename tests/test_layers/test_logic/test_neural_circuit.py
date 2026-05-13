@@ -222,12 +222,12 @@ class TestCircuitDepthLayer:
         with pytest.raises(ValueError, match="num_arithmetic_ops must be positive"):
             CircuitDepthLayer(num_logic_ops=1, num_arithmetic_ops=0)
 
-        # Non-4D input
+        # Rank < 2 input rejected (rank-relaxed contract: rank >= 2 allowed).
         layer = CircuitDepthLayer(num_logic_ops=1, num_arithmetic_ops=1)
-        invalid_input_3d = (None, 32, 16)  # Only 3D
+        invalid_input_1d = (16,)
 
-        with pytest.raises(ValueError, match="CircuitDepthLayer expects 4D input"):
-            layer.build(invalid_input_3d)
+        with pytest.raises(ValueError, match="rank >= 2"):
+            layer.build(invalid_input_1d)
 
     def test_compute_output_shape(self, layer_config):
         """Test output shape computation."""
@@ -493,12 +493,12 @@ class TestLearnableNeuralCircuit:
         with pytest.raises(ValueError, match="num_arithmetic_ops_per_depth must be positive"):
             LearnableNeuralCircuit(num_arithmetic_ops_per_depth=0)
 
-        # Non-4D input
+        # Rank < 2 input rejected (rank-relaxed contract: rank >= 2 allowed).
         layer = LearnableNeuralCircuit(circuit_depth=1)
-        invalid_input_3d = (None, 32, 16)  # Only 3D
+        invalid_input_1d = (16,)
 
-        with pytest.raises(ValueError, match="LearnableNeuralCircuit expects 4D input"):
-            layer.build(invalid_input_3d)
+        with pytest.raises(ValueError, match="rank >= 2"):
+            layer.build(invalid_input_1d)
 
     def test_compute_output_shape(self, layer_config):
         """Test output shape computation."""
@@ -586,3 +586,72 @@ class TestLearnableNeuralCircuit:
         for circuit_layer in layer.circuit_layers:
             assert isinstance(circuit_layer.routing_initializer, keras.initializers.HeNormal)
             assert isinstance(circuit_layer.combination_initializer, keras.initializers.GlorotNormal)
+
+
+# ---------------------------------------------------------------------
+# Rank-relaxation tests (rank >= 2 supported after iter-1).
+# ---------------------------------------------------------------------
+
+
+class TestRankRelaxation:
+    """Verify CircuitDepthLayer / LearnableNeuralCircuit accept rank-2 and rank-3 inputs."""
+
+    @pytest.mark.parametrize("layer_cls", [CircuitDepthLayer, LearnableNeuralCircuit])
+    def test_rank2_input_forward_and_shape(self, layer_cls):
+        x = ops.convert_to_tensor(np.random.normal(0, 1, (3, 16)).astype(np.float32))
+        if layer_cls is CircuitDepthLayer:
+            layer = layer_cls(num_logic_ops=2, num_arithmetic_ops=2, use_residual=True)
+        else:
+            layer = layer_cls(circuit_depth=2, num_logic_ops_per_depth=2, num_arithmetic_ops_per_depth=2)
+        y = layer(x)
+        assert tuple(y.shape) == (3, 16)
+
+    @pytest.mark.parametrize("layer_cls", [CircuitDepthLayer, LearnableNeuralCircuit])
+    def test_rank3_input_forward_and_shape(self, layer_cls):
+        x = ops.convert_to_tensor(np.random.normal(0, 1, (2, 7, 16)).astype(np.float32))
+        if layer_cls is CircuitDepthLayer:
+            layer = layer_cls(num_logic_ops=2, num_arithmetic_ops=2, use_residual=True)
+        else:
+            layer = layer_cls(circuit_depth=2, num_logic_ops_per_depth=2, num_arithmetic_ops_per_depth=2)
+        y = layer(x)
+        assert tuple(y.shape) == (2, 7, 16)
+
+    @pytest.mark.parametrize("layer_cls", [CircuitDepthLayer, LearnableNeuralCircuit])
+    def test_rank1_input_rejected(self, layer_cls):
+        # rank < 2 must still raise
+        if layer_cls is CircuitDepthLayer:
+            layer = layer_cls(num_logic_ops=1, num_arithmetic_ops=1)
+        else:
+            layer = layer_cls(circuit_depth=1, num_logic_ops_per_depth=1, num_arithmetic_ops_per_depth=1)
+        with pytest.raises(ValueError, match="rank >= 2"):
+            layer.build((16,))
+
+    def test_rank2_circuit_depth_save_load(self):
+        layer = CircuitDepthLayer(num_logic_ops=2, num_arithmetic_ops=2, use_residual=True)
+        inp = keras.Input(shape=(16,))
+        out = layer(inp)
+        model = keras.Model(inp, out)
+
+        x = ops.convert_to_tensor(np.random.normal(0, 1, (3, 16)).astype(np.float32))
+        y1 = model(x)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "m.keras")
+            model.save(path)
+            reloaded = keras.models.load_model(path)
+            y2 = reloaded(x)
+        np.testing.assert_allclose(ops.convert_to_numpy(y1), ops.convert_to_numpy(y2), atol=1e-6)
+
+    def test_rank3_neural_circuit_save_load(self):
+        layer = LearnableNeuralCircuit(circuit_depth=2)
+        inp = keras.Input(shape=(7, 16))
+        out = layer(inp)
+        model = keras.Model(inp, out)
+
+        x = ops.convert_to_tensor(np.random.normal(0, 1, (2, 7, 16)).astype(np.float32))
+        y1 = model(x)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "m.keras")
+            model.save(path)
+            reloaded = keras.models.load_model(path)
+            y2 = reloaded(x)
+        np.testing.assert_allclose(ops.convert_to_numpy(y1), ops.convert_to_numpy(y2), atol=1e-6)
