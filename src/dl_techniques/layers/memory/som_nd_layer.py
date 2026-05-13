@@ -489,8 +489,16 @@ class SOMLayer(keras.layers.Layer):
             'decay_function': self._decay_function_config,
             'sigma': self.sigma,
             'neighborhood_function': self.neighborhood_function,
-            'weights_initializer': self._weights_initializer_config,
-            'regularizer': self._regularizer_config,
+            'weights_initializer': keras.initializers.serialize(
+                keras.initializers.get(self._weights_initializer_config)
+            ),
+            'regularizer': (
+                keras.regularizers.serialize(
+                    keras.regularizers.get(self._regularizer_config)
+                )
+                if self._regularizer_config is not None
+                else None
+            ),
         })
         return config
 
