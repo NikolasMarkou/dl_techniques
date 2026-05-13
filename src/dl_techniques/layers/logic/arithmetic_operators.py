@@ -433,7 +433,11 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             return ops.maximum(ops.softplus(self.temperature), 1e-7)
         return ops.maximum(self.temperature, 1e-7)
 
-    def _operation_probs(self, deterministic: bool = False) -> keras.KerasTensor:
+    def _operation_probs(
+        self,
+        training: Optional[bool] = None,
+        deterministic: bool = False,
+    ) -> keras.KerasTensor:
         """
         Compute the operation-selection probability vector.
 
@@ -441,18 +445,20 @@ class LearnableArithmeticOperator(keras.layers.Layer):
 
         # DECISION plan_2026-05-13_3a2f1d23/D-001
         # Canonical Jang (2017) Gumbel-softmax form: softmax((w + g) / T).
-        # Previously the implementation computed softmax((w/T) + g), which
-        # over-weights the noise term at low temperatures and breaks the
-        # Concrete distribution semantics (issue C1 in the residual review).
+
+        # DECISION plan_2026-05-13_e33114da/D-003
+        # Gumbel noise is injected ONLY when ``training is True``. Inference
+        # (training=False or None) is deterministic. Fixes B2.
 
         Args:
-            deterministic: If True, skip Gumbel noise injection regardless of
-                ``self.gumbel_softmax``. Used by ``to_symbolic()`` so that the
-                printed operator selection is reproducible during training.
+            training: Keras training flag. Gumbel noise only when True.
+            deterministic: Force-skip Gumbel noise regardless of training.
+                Used by ``to_symbolic()`` for reproducible printed selection.
         """
         weights = self.operation_weights
+        skip_gumbel = deterministic or (training is not True)
 
-        if self.gumbel_softmax and not deterministic:
+        if self.gumbel_softmax and not skip_gumbel:
             # Gumbel(0,1) = -log(-log(U(0,1))). Manual implementation since
             # keras.ops doesn't expose it directly.
             uniform = keras.random.uniform(
@@ -551,7 +557,7 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             x2 = inputs
 
         # Compute operation selection probabilities
-        operation_probs = self._operation_probs()
+        operation_probs = self._operation_probs(training=training)
         self._maybe_add_entropy_loss(operation_probs)
 
         # Compute all operations

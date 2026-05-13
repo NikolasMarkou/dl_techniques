@@ -472,7 +472,11 @@ class LearnableLogicOperator(keras.layers.Layer):
             return ops.maximum(ops.softplus(self.temperature), 1e-7)
         return ops.maximum(self.temperature, 1e-7)
 
-    def _operation_probs(self, deterministic: bool = False) -> keras.KerasTensor:
+    def _operation_probs(
+        self,
+        training: Optional[bool] = None,
+        deterministic: bool = False,
+    ) -> keras.KerasTensor:
         """
         Compute the operation-selection probability vector.
 
@@ -482,14 +486,24 @@ class LearnableLogicOperator(keras.layers.Layer):
         # over-weights the noise term at low temperatures and breaks the
         # Concrete distribution semantics (issue C1 in the residual review).
 
+        # DECISION plan_2026-05-13_e33114da/D-003
+        # Gumbel noise is injected ONLY when ``training is True`` (or
+        # explicitly via ``deterministic=False`` from a training-path caller).
+        # ``model.predict(...)``/``training=False``/``training=None`` skip
+        # noise — fixes B2 (non-deterministic inference with gumbel_softmax).
+
         Args:
-            deterministic: If True, skip Gumbel noise injection regardless of
-                ``self.gumbel_softmax``. Used by ``to_symbolic()`` so the
-                printed operator selection is reproducible during training.
+            training: Keras training flag. Gumbel noise is injected only when
+                ``training is True``. ``None`` and ``False`` are treated as
+                inference and skip noise.
+            deterministic: Force-skip Gumbel noise regardless of training.
+                Used by ``to_symbolic()`` so the printed selection is
+                reproducible.
         """
         weights = self.operation_weights
+        skip_gumbel = deterministic or (training is not True)
 
-        if self.gumbel_softmax and not deterministic:
+        if self.gumbel_softmax and not skip_gumbel:
             uniform = keras.random.uniform(
                 shape=ops.shape(weights), minval=1e-9, maxval=1.0
             )
@@ -604,7 +618,7 @@ class LearnableLogicOperator(keras.layers.Layer):
             x2 = ops.clip(x2, 0.0, 1.0)
 
         # Compute operation selection probabilities
-        operation_probs = self._operation_probs()
+        operation_probs = self._operation_probs(training=training)
         self._maybe_add_entropy_loss(operation_probs)
 
         # Compute all operations
