@@ -4,7 +4,7 @@ The `dl_techniques.layers.ffn` module provides a comprehensive collection of fee
 
 ## Overview
 
-This module includes twelve different FFN layer types and a factory system for standardized creation and parameter validation. All layers are designed for modern Keras 3.x compatibility with full serialization support.
+This module includes fourteen different FFN layer types and a factory system for standardized creation and parameter validation. All layers are designed for modern Keras 3.x compatibility with full serialization support.
 
 ## Available FFN Types
 
@@ -17,6 +17,7 @@ The following layers are supported by the factory system with automated paramete
 | `gated_mlp` | `GatedMLP` | Spatially-gated MLP using 1x1 convolutions | Vision models, efficient attention alternative |
 | `geglu` | `GeGLUFFN` | GELU-based Gated Linear Unit | GELU-based gated processing in transformers |
 | `glu` | `GLUFFN` | Gated Linear Unit with configurable activation | Gated processing for improved gradient flow |
+| `kan` | `KANLinear` | Kolmogorov-Arnold linear layer with B-spline learnable activations | Expressive per-connection nonlinearities; supports N-D inputs |
 | `logic` | `LogicFFN` | FFN with learnable soft logic operations | Tasks requiring symbolic-like reasoning |
 | `mlp` | `MLPBlock` | Standard MLP with intermediate expansion | General purpose feed-forward processing |
 | `orthoglu` | `OrthoGLUFFN` | Orthogonally-regularized GLU FFN | Deep networks needing stable training dynamics |
@@ -24,6 +25,7 @@ The following layers are supported by the factory system with automated paramete
 | `residual` | `ResidualBlock` | Residual block with skip connections | Deep networks requiring gradient flow |
 | `swiglu` | `SwiGLUFFN` | SwiGLU with gating mechanism | Modern transformer architectures (LLaMa, Qwen) |
 | `swin_mlp` | `SwinMLP` | Swin Transformer MLP variant | Vision models and windowed attention |
+| `tversky` | `TverskyProjectionLayer` | Asymmetric Tversky-similarity projection (rank-2 inputs only) | Similarity-based Dense alternative; psychologically-grounded |
 
 ## Factory Interface
 
@@ -248,6 +250,38 @@ power_mlp = create_ffn_layer(
     units=512,
     k=2,
     kernel_initializer='he_normal'
+)
+```
+
+### KANLinear
+**Required:** `features`
+**Optional:** `grid_size` (default: 5), `spline_order` (default: 3), `grid_range` (default: `(-2.0, 2.0)`), `activation` (default: 'swish'), `base_trainable` (default: True), `spline_trainable` (default: True), `epsilon` (default: 1e-7)
+
+Kolmogorov-Arnold linear layer using B-spline parameterized learnable univariate activations. Forward kernel supports N-D inputs (e.g. `(batch, time, dim)`) via einsum.
+
+```python
+kan = create_ffn_layer(
+    'kan',
+    features=128,
+    grid_size=8,
+    spline_order=3,
+    activation='swish'
+)
+```
+
+### TverskyProjectionLayer
+**Required:** `units`, `num_features`
+**Optional:** `intersection_reduction` (default: 'product', one of `{'product','min','mean'}`), `difference_reduction` (default: 'subtractmatch', one of `{'ignorematch','subtractmatch'}`), `prototype_initializer`, `feature_initializer`, `contrast_initializer`
+
+Asymmetric similarity-based projection layer. **Operates on rank-2 inputs `(batch, input_dim)` only. Output shape is `(batch, units)`.** Not suitable as a drop-in for rank-3 transformer FFNs.
+
+```python
+tversky = create_ffn_layer(
+    'tversky',
+    units=256,
+    num_features=64,
+    intersection_reduction='product',
+    difference_reduction='subtractmatch'
 )
 ```
 
@@ -552,7 +586,7 @@ Get comprehensive information about all available FFN types.
 ### Types
 
 #### `FFNType`
-Literal type defining valid FFN type strings: `'counting'`, `'differential'`, `'gated_mlp'`, `'geglu'`, `'glu'`, `'logic'`, `'mlp'`, `'orthoglu'`, `'power_mlp'`, `'residual'`, `'swiglu'`, `'swin_mlp'`.
+Literal type defining valid FFN type strings: `'counting'`, `'differential'`, `'gated_mlp'`, `'geglu'`, `'glu'`, `'kan'`, `'logic'`, `'mlp'`, `'orthoglu'`, `'power_mlp'`, `'residual'`, `'swiglu'`, `'swin_mlp'`, `'tversky'`.
 
 ## Migration Guide
 
