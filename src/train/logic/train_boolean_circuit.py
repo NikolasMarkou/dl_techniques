@@ -110,6 +110,8 @@ def build_model(
     gate_entropy_coef: float = 0.0,
     diversity_coef: float = 0.0,
     learning_rate: float = 3e-3,
+    logic_op_types: Any = None,
+    arithmetic_op_types: Any = None,
 ) -> keras.Model:
     """Bit-vector classifier with a LearnableNeuralCircuit middle.
 
@@ -130,6 +132,8 @@ def build_model(
         use_layer_norm=True,
         gate_entropy_coefficient=gate_entropy_coef,
         diversity_coefficient=diversity_coef,
+        logic_op_types=logic_op_types,
+        arithmetic_op_types=arithmetic_op_types,
         name="neural_circuit",
     )(x)
     outputs = keras.layers.Dense(1, activation="sigmoid", name="head")(x)
@@ -191,6 +195,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--gpu", type=int, default=None)
     p.add_argument("--gate-entropy-coef", type=float, default=0.0)
     p.add_argument("--diversity-coef", type=float, default=0.0)
+    p.add_argument(
+        "--logic-op-types", type=str, default=None,
+        help="Comma-separated logic op tokens (e.g. 'xor,and,or'). Default: all.",
+    )
+    p.add_argument(
+        "--arith-op-types", type=str, default=None,
+        help="Comma-separated arithmetic op tokens (e.g. 'add,max,min'). "
+             "Default: all. Drop 'power','divide' for numerical stability when "
+             "stacked deeply.",
+    )
     p.add_argument("--results-dir-prefix", type=str, default="logic")
     return p.parse_args()
 
@@ -229,6 +243,8 @@ def main() -> None:
         f"train positives: {y_train.mean():.3f}; test positives: {y_test.mean():.3f}"
     )
 
+    logic_ops = args.logic_op_types.split(",") if args.logic_op_types else None
+    arith_ops = args.arith_op_types.split(",") if args.arith_op_types else None
     model = build_model(
         num_bits=args.num_bits,
         channels=args.channels,
@@ -238,6 +254,8 @@ def main() -> None:
         gate_entropy_coef=args.gate_entropy_coef,
         diversity_coef=args.diversity_coef,
         learning_rate=args.lr,
+        logic_op_types=logic_ops,
+        arithmetic_op_types=arith_ops,
     )
     model.summary(print_fn=logger.info)
 
