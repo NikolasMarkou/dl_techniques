@@ -296,10 +296,22 @@ class SoftSOMLayer(keras.layers.Layer):
     Differentiable Soft Self-Organizing Map layer for end-to-end training.
 
     Implements a soft, differentiable SOM variant trainable via backpropagation.
-    Instead of hard competitive learning, soft assignments are computed as
-    ``a_{i,j} = softmax(-||x - w_{i,j}||^2 / tau)`` using either per-dimension
-    or global softmax. The output is a soft reconstruction
-    ``y = sum_{i,j} a_{i,j} * w_{i,j}`` which serves as a differentiable
+    Two softmax paths are supported:
+
+    * **Global path** (``use_per_dimension_softmax=False``): a single softmax
+      over all ``prod(grid_shape)`` neurons,
+      ``a_i = softmax(-||x - w_i||^2 / tau)``.
+    * **Per-dimension path** (``use_per_dimension_softmax=True``, default): an
+      **independent** softmax is applied along each grid axis of the distance
+      tensor, then the per-axis marginals are combined via the outer
+      (element-wise) product across axes and renormalized — i.e. the joint
+      assignment is **factorized** as
+      ``a_{i_1,...,i_d} ~ prod_k softmax_axis_k(-||x - w||^2 / tau)``.
+      This is *not* equivalent to a joint softmax; it biases the assignment
+      toward axis-aligned (separable) prototypes.
+
+    The output is a soft reconstruction
+    ``y = sum_i a_i * w_i`` which serves as a differentiable
     approximation through the learned prototype codebook. Optional regularization
     losses (reconstruction MSE + topological preservation + sharpness entropy)
     guide the training process.
