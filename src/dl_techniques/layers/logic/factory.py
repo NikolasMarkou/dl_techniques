@@ -117,7 +117,7 @@ LOGIC_REGISTRY: Dict[str, Dict[str, Any]] = {
             "gumbel_softmax": False,
             "gumbel_hard": False,
             "entropy_coefficient": 0.0,
-            "allow_unary_degenerate": True,
+            "allow_unary_degenerate": False,
         },
         "use_case": (
             "Soft logical combination of two same-shape tensors interpreted "

@@ -135,10 +135,17 @@ class CircuitDepthLayer(keras.layers.Layer):
         # __init__, NOT manually pre-built in build(). Auto-build via
         # __call__ is the Keras 3 idiomatic pattern; manual pre-build was
         # cargo-culted and risks double-build.
+        # CircuitDepthLayer intentionally feeds inner logic ops a single
+        # tensor X (each expert sees the full input; only output fusion is
+        # gated). Opt these inner instances in to the legacy x2=x1 rebinding
+        # explicitly — M8 (plan_2026-05-13_3a2f1d23) flipped the public
+        # default to False but inside the circuit the contract has always
+        # been unary-input.
         self.logic_operators = [
             LearnableLogicOperator(
                 operation_types=self.logic_op_types,
                 apply_sigmoid=self.apply_sigmoid,
+                allow_unary_degenerate=True,
                 name=f"logic_op_{i}",
             )
             for i in range(self.num_logic_ops)

@@ -147,7 +147,7 @@ class TestForwardRoundTrip:
         "layer_type,kwargs",
         [
             ("arithmetic", {"operation_types": ["add", "multiply"]}),
-            ("logic", {"operation_types": ["and", "or"]}),
+            ("logic", {"operation_types": ["and", "or"], "allow_unary_degenerate": True}),
             ("circuit_depth", {"num_logic_ops": 2, "num_arithmetic_ops": 2}),
             ("neural_circuit", {"circuit_depth": 2}),
         ],

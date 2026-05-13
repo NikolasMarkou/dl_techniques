@@ -172,7 +172,7 @@ class LearnableLogicOperator(keras.layers.Layer):
             gumbel_softmax: bool = False,
             gumbel_hard: bool = False,
             entropy_coefficient: float = 0.0,
-            allow_unary_degenerate: bool = True,
+            allow_unary_degenerate: bool = False,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)

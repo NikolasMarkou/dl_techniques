@@ -14,18 +14,24 @@ class TestLearnableLogicOperator:
 
     @pytest.fixture
     def layer_config(self) -> Dict[str, Any]:
-        """Standard configuration for testing."""
+        """Standard configuration for testing.
+
+        Opts in to allow_unary_degenerate=True so legacy single-input tests
+        still pass after M8 (plan_2026-05-13_3a2f1d23) flipped the default.
+        """
         return {
             'operation_types': ['and', 'or', 'not'],
             'use_temperature': True,
-            'temperature_init': 1.0
+            'temperature_init': 1.0,
+            'allow_unary_degenerate': True,
         }
 
     @pytest.fixture
     def minimal_config(self) -> Dict[str, Any]:
         """Minimal configuration for testing."""
         return {
-            'operation_types': ['and', 'or']
+            'operation_types': ['and', 'or'],
+            'allow_unary_degenerate': True,
         }
 
     @pytest.fixture
@@ -248,7 +254,9 @@ class TestLearnableLogicOperator:
         ]
 
         for ops_set in operation_sets:
-            layer = LearnableLogicOperator(operation_types=ops_set)
+            layer = LearnableLogicOperator(
+                operation_types=ops_set, allow_unary_degenerate=True
+            )
             output = layer(sample_input)
             assert output.shape == sample_input.shape
 
@@ -260,7 +268,8 @@ class TestLearnableLogicOperator:
         """Test layer without temperature scaling."""
         layer = LearnableLogicOperator(
             operation_types=['and', 'or'],
-            use_temperature=False
+            use_temperature=False,
+            allow_unary_degenerate=True,
         )
 
         output = layer(sample_input)
@@ -305,7 +314,9 @@ class TestLearnableLogicOperator:
             np.array([[-100.0, -10.0, 0.0, 10.0, 100.0]], dtype=np.float32)
         )
 
-        layer = LearnableLogicOperator(operation_types=['and'])
+        layer = LearnableLogicOperator(
+            operation_types=['and'], allow_unary_degenerate=True
+        )
         output = layer(extreme_input)
 
         # Output should still be in [0, 1] range
@@ -366,7 +377,8 @@ class TestLearnableLogicOperator:
         layer = LearnableLogicOperator(
             operation_types=['and', 'or'],
             operation_initializer='he_normal',
-            temperature_initializer='constant'
+            temperature_initializer='constant',
+            allow_unary_degenerate=True,
         )
 
         output = layer(sample_input)
@@ -381,12 +393,16 @@ class TestLearnableLogicOperator:
         """Test deterministic behavior with fixed random seed."""
         keras.utils.set_random_seed(42)
 
-        layer1 = LearnableLogicOperator(operation_types=['and', 'or'])
+        layer1 = LearnableLogicOperator(
+            operation_types=['and', 'or'], allow_unary_degenerate=True
+        )
         output1 = layer1(sample_input)
 
         keras.utils.set_random_seed(42)
 
-        layer2 = LearnableLogicOperator(operation_types=['and', 'or'])
+        layer2 = LearnableLogicOperator(
+            operation_types=['and', 'or'], allow_unary_degenerate=True
+        )
         output2 = layer2(sample_input)
 
         # Should be identical with same seed
@@ -402,13 +418,15 @@ class TestLearnableLogicOperator:
         # High temperature should give more uniform operation selection
         layer_high_temp = LearnableLogicOperator(
             operation_types=['and', 'or'],
-            temperature_init=10.0
+            temperature_init=10.0,
+            allow_unary_degenerate=True,
         )
 
         # Low temperature should give sharper operation selection
         layer_low_temp = LearnableLogicOperator(
             operation_types=['and', 'or'],
-            temperature_init=0.1
+            temperature_init=0.1,
+            allow_unary_degenerate=True,
         )
 
         output_high = layer_high_temp(sample_input)
@@ -426,7 +444,9 @@ class TestLearnableLogicOperator:
     def test_single_operation_type(self, sample_input):
         """Test with single operation type."""
         for op in ['and', 'or', 'xor', 'not', 'nand', 'nor']:
-            layer = LearnableLogicOperator(operation_types=[op])
+            layer = LearnableLogicOperator(
+                operation_types=[op], allow_unary_degenerate=True
+            )
             output = layer(sample_input)
 
             assert output.shape == sample_input.shape
@@ -552,8 +572,16 @@ class TestPlanA2b0f17bLogic:
         with pytest.raises(ValueError, match="single tensor input"):
             _ = op(x)
 
-    def test_unary_input_allowed_when_default(self):
+    def test_unary_input_blocked_when_default_M8(self):
+        """M8: allow_unary_degenerate default flipped False (plan_3a2f1d23)."""
         op = LearnableLogicOperator()
+        assert op.allow_unary_degenerate is False
+        x = ops.convert_to_tensor(np.random.randn(2, 4).astype(np.float32))
+        with pytest.raises(ValueError, match="single tensor input"):
+            _ = op(x)
+
+    def test_unary_input_allowed_when_opt_in(self):
+        op = LearnableLogicOperator(allow_unary_degenerate=True)
         x = ops.convert_to_tensor(np.random.randn(2, 4).astype(np.float32))
         y = op(x)
         assert y.shape == (2, 4)
@@ -574,7 +602,9 @@ class TestPlanA2b0f17bLogic:
         assert s.startswith("or")
 
     def test_entropy_loss_added(self):
-        op = LearnableLogicOperator(entropy_coefficient=0.5)
+        op = LearnableLogicOperator(
+            entropy_coefficient=0.5, allow_unary_degenerate=True
+        )
         op.build((None, 4))
         x = ops.convert_to_tensor(np.random.randn(2, 4).astype(np.float32))
         _ = op(x)
@@ -603,14 +633,14 @@ class TestPlanA2b0f17bLogic:
         np.random.seed(0)
         x = ops.convert_to_tensor(np.linspace(-3, 3, 64).reshape(8, 8).astype(np.float32))
         keras.utils.set_random_seed(0)
-        op_a = LearnableLogicOperator(apply_sigmoid=True)
-        op_b = LearnableLogicOperator(apply_sigmoid=True)
-        op_c = LearnableLogicOperator(apply_sigmoid=True)
+        op_a = LearnableLogicOperator(apply_sigmoid=True, allow_unary_degenerate=True)
+        op_b = LearnableLogicOperator(apply_sigmoid=True, allow_unary_degenerate=True)
+        op_c = LearnableLogicOperator(apply_sigmoid=True, allow_unary_degenerate=True)
         all_sig = op_c(op_b(op_a(x)))
         keras.utils.set_random_seed(0)
-        op_a2 = LearnableLogicOperator(apply_sigmoid=True)
-        op_b2 = LearnableLogicOperator(apply_sigmoid=False)
-        op_c2 = LearnableLogicOperator(apply_sigmoid=False)
+        op_a2 = LearnableLogicOperator(apply_sigmoid=True, allow_unary_degenerate=True)
+        op_b2 = LearnableLogicOperator(apply_sigmoid=False, allow_unary_degenerate=True)
+        op_c2 = LearnableLogicOperator(apply_sigmoid=False, allow_unary_degenerate=True)
         first_only = op_c2(op_b2(op_a2(x)))
         s_all = float(ops.std(all_sig))
         s_first = float(ops.std(first_only))
