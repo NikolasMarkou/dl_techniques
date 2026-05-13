@@ -79,38 +79,48 @@ def _predict_class_prob(model: keras.Model, x: np.ndarray) -> Tuple[int, float]:
     return (1 if p >= 0.5 else 0), p
 
 
-def circuit_attributions(model: keras.Model, x_single: np.ndarray) -> np.ndarray:
-    """In-model gradient-times-input attribution for the circuit head.
+def circuit_attributions(
+    model: keras.Model,
+    x_single: np.ndarray,
+    baseline: float = 0.5,
+    n_steps: int = 32,
+) -> np.ndarray:
+    """Integrated-gradient attribution for the circuit head.
 
-    Parameters
-    ----------
-    model : keras.Model
-        End-to-end model with a scalar (sigmoid) head; the
-        ``LearnableNeuralCircuit`` lives somewhere inside.
-    x_single : np.ndarray
-        A single input of shape ``(num_input_bits,)`` or
-        ``(1, num_input_bits)``. Must be a rank-2 boolean / float
-        feature vector (this is the E3 path; the E1 image path does NOT
-        use this function).
+    The circuit is differentiable end-to-end, so we use integrated
+    gradients along a straight path from ``baseline`` (default 0.5 — the
+    "uninformative" mid-point between 0 and 1) to the input. Integrated
+    gradients (Sundararajan et al. 2017) satisfy two properties relevant
+    here:
 
-    Returns
-    -------
-    np.ndarray of shape ``(num_input_bits,)``: signed attribution.
-    Positive entries push the prediction toward the predicted class.
+      - **Symmetry-preserving**: if the model is invariant under a
+        permutation of input dimensions (as a converged parity model is),
+        the attribution vector inherits that invariance after averaging
+        over inputs. This is exactly the SC6 oracle.
+      - **Completeness**: the per-bit attributions sum to
+        ``f(x) - f(baseline)`` for the predicted class — useful for
+        ranking but not strictly required here.
+
+    Returned shape: ``(num_input_bits,)``. Positive entries push the
+    prediction toward the predicted class.
     """
     x = _ensure_2d_input(x_single)
-    x_tf = tf.constant(x)
+    x_t = tf.constant(x, dtype=tf.float32)
+    b_t = tf.constant(np.full_like(x, baseline, dtype=np.float32))
+    # Build the path from baseline to x in n_steps points (exclusive of
+    # the baseline so 1..n_steps).
+    alphas = tf.reshape(tf.linspace(1.0 / n_steps, 1.0, n_steps), (n_steps, 1, 1))
+    path = b_t[None, ...] + alphas * (x_t[None, ...] - b_t[None, ...])
+    path = tf.reshape(path, (n_steps, x.shape[1]))
     with tf.GradientTape() as tape:
-        tape.watch(x_tf)
-        out = model(x_tf, training=False)
-        # Scalar reduction: take the predicted class direction. For binary
-        # sigmoid this is just the single logit/prob.
+        tape.watch(path)
+        out = model(path, training=False)
         scalar = tf.reduce_sum(out)
-    grad = tape.gradient(scalar, x_tf)
-    grad_np = grad.numpy()[0].astype(np.float32)
-    attribution = grad_np * x[0]
+    grads = tape.gradient(scalar, path)
+    avg_grad = tf.reduce_mean(grads, axis=0).numpy().astype(np.float32)
+    attribution = avg_grad * (x[0] - baseline)
     # Align sign so positive = evidence for predicted class.
-    cls, prob = _predict_class_prob(model, x)
+    cls, _ = _predict_class_prob(model, x)
     if cls == 0:
         attribution = -attribution
     return attribution
