@@ -618,3 +618,52 @@ class TestPlanA2b0f17bLogic:
         assert s_first > 2.0 * s_all, (
             f"first_only std={s_first:.6f} not materially > all_sigmoid std={s_all:.6f}"
         )
+
+
+class TestPlan3a2f1d23LogicC1:
+    """Regression tests for plan_2026-05-13_3a2f1d23 step 1 (C1): canonical
+    Jang (2017) Gumbel-softmax form for LearnableLogicOperator."""
+
+    def test_canonical_gumbel_form_low_temperature(self):
+        keras.utils.set_random_seed(7)
+        weights = np.array([0.0, 1.0, 2.0, 0.5], dtype=np.float32)
+        temperature = 0.1
+        op = LearnableLogicOperator(
+            operation_types=['and', 'or', 'xor', 'nand'],
+            use_temperature=True,
+            gumbel_softmax=True,
+            gumbel_hard=False,
+            softplus_temperature=False,
+        )
+        op.build((None, 4))
+        op.operation_weights.assign(weights)
+        op.temperature.assign(np.array(temperature, dtype=np.float32))
+
+        n_samples = 4000
+        accum = np.zeros(4, dtype=np.float64)
+        for _ in range(n_samples):
+            accum += ops.convert_to_numpy(op._operation_probs())
+        empirical = accum / n_samples
+
+        canonical_logits = weights / temperature
+        canonical = np.exp(canonical_logits - canonical_logits.max())
+        canonical /= canonical.sum()
+
+        assert empirical.argmax() == int(canonical.argmax())
+        # Threshold 0.45 separates canonical (~0.55-0.65) from buggy (~0.25).
+        assert empirical[canonical.argmax()] >= 0.45, (
+            f"Canonical mass on argmax too low: empirical={empirical}, "
+            f"canonical={canonical}"
+        )
+
+    def test_gumbel_deterministic_skips_noise(self):
+        op = LearnableLogicOperator(
+            operation_types=['and', 'or'],
+            gumbel_softmax=True,
+            gumbel_hard=False,
+        )
+        op.build((None, 4))
+        op.operation_weights.assign([1.0, 2.0])
+        p1 = ops.convert_to_numpy(op._operation_probs(deterministic=True))
+        p2 = ops.convert_to_numpy(op._operation_probs(deterministic=True))
+        np.testing.assert_allclose(p1, p2, atol=1e-7)

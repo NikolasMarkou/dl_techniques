@@ -30,6 +30,54 @@
 - Anchor at impact site (not at decision definition). One anchor per impact site, even if shared with sibling decision.
 <!-- /COMPRESSED-SUMMARY -->
 
+## plan_2026-05-13_a2b0f17b
+### D-001 | EXPLORE → PLAN | 2026-05-13
+**Context**: Prior plan `plan_2026-05-13_e52a5ac8` already empirically verified this exact review and deferred most fixes for documented reasons (consumer break, `.keras` round-trip break, "documented footgun not bug" per LESSONS L38). User has explicitly overridden these conclusions and selected "Everything including B, E, F, G (full rewrite)" via AskUserQuestion.
+**Decision**: Implement all overrides A-G plus the 5 truly-new safe items in a single multi-phase plan, with **opt-in flags preserving back-compat** for every behavior-changing change to maximize chance of passing existing 118 tests.
+**Trade-off**: Comprehensive coverage of every review item **at the cost of** API surface explosion (≈8 new optional params on `LearnableLogicOperator` alone) and a guaranteed need to update the consumer `circuit.py`. Justified because user explicitly selected the maximum-scope option after being shown the alternative.
+**Reasoning**: Previously rejected items (softplus reparam, smooth divide, routing rewrite, MoE aux losses) are real engineering improvements; the prior plan rejected them on prudence grounds (don't fix what consumers depend on). User has now overridden prudence with eyes open. The opt-in default scheme (`circuit_routing='output_only'` new default but `'classic'` preserves old; `softplus_temperature=False` default; `safe_divide_mode='hard_clamp'` default) is the right balance: new code gets fixed behavior, archive load still works.
+**Alternatives rejected**:
+- Full rewrite with no back-compat shims: would invalidate 118 tests + every saved `.keras` → too brittle.
+- Implement only safe items: ignores user's explicit override.
+- Decompose into 3-4 separate plans: matches LESSONS guidance for >iter-5 work, but user wanted single-pass; we'll decompose if iter-3 hits.
+**Anchor-Refs**: pending — will anchor at the actual code sites in EXECUTE.
+
+### D-002 | PLAN | 2026-05-13
+**Context**: Plan v1 has 18 steps across 4 phases touching 10 files. Step 12 (routing rewrite) is the highest-blast-radius change because it alters the math the consumer was trained against.
+**Decision**: Make `circuit_routing` a `Literal['classic','output_only']` with new default `'output_only'`. Pin consumer `circuit.py` to `'classic'` only if its smoke test fails on the new default.
+**Trade-off**: Honest default that fixes the math **at the cost of** breaking any external trained `.keras` files that depend on the old attenuated forward pass.
+**Reasoning**: The user's override extends to consumer changes. If a deployed model was trained against the broken routing, retraining is the honest fix; backward-compat as opt-in is sufficient.
+**Anchor-Refs**: `src/dl_techniques/layers/logic/neural_circuit.py` (CircuitDepthLayer ctor + call), `src/dl_techniques/layers/logic/arithmetic_operators.py` (sign-preserving power, smooth divide), `src/dl_techniques/layers/logic/logic_operators.py` (allow_unary_degenerate raise).
+**Outcome**: Consumer `train/latent_reasoning_vision/circuit.py` smoke-tested with new default (1033690 params, finite forward) — no consumer patch needed.
+
+### D-003 | EXECUTE | 2026-05-13
+**Context**: After moving sublayer creation to __init__ (intending lazy build via __call__), `test_factory_layer_round_trip[circuit_depth-kwargs2]` failed with "Layer 'arithmetic_op_0' was never built and thus it doesn't have any variables. However the weights file lists 3 variables for this layer." The Keras 3 saving contract requires that the parent's `build()` method explicitly create state of all children, not rely on later `__call__` to do it.
+**Decision**: Restore explicit `child.build(input_shape)` calls in `CircuitDepthLayer.build()` and `LearnableNeuralCircuit.build()` for every sublayer. Children are still constructed in `__init__` (for serialization-config matching), but their state is created in the parent's `build()`.
+**Trade-off**: Two-stage child management (construct in __init__, build in parent.build) **at the cost of** non-idiomatic Keras 3 pattern (the docs encourage lazy build). Reversed-the-prior-judgment: prior plan's "cargo-cult manual build" call was actually correct.
+**Reasoning**: Keras 3 round-trip requires the saved weights file to map cleanly to a built layer hierarchy on load. Without manual build, the loader sees variables for children that haven't been built and raises. Documented for future readers.
+
+## plan_2026-05-13_e52a5ac8
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-13_e52a5ac8/D-NNN` anchor exists in source)
+-->
+
+### D-001 | EXPLORE → PLAN | 2026-05-13
+**Context**: Prior review (assistant turn) flagged ~30 issues in `layers/logic/`. Per LESSONS L20, every claim was empirically verified via `findings/verify_claims.py`. 6 claims confirmed actionable + low-risk; others either overstated (H4), false positive (L4), inherent-to-math (C5), or already documented per LESSONS L38 (C6). Cross-plan context: predecessor plan_2aaad563 already aligned this package's surface and deliberately deferred unary degeneracy to README.
+**Decision**: Apply only the 6 empirically-confirmed, additive, low-risk fixes (C1, M2, H10, H9, C3, L2); defer high-risk semantic changes (C2, C4, C5) and design opportunities (H1-H8, O1-O10).
+**Trade-off**: Safety and zero-regression risk **at the cost of** leaving real but invasive issues unaddressed (input-side routing pathology C2, temperature reparam C4, division gradient hazard C5 — documented as README warnings instead).
+**Reasoning**:
+- C2 (output-side routing) is a semantic break with high blast radius; user has working consumer (`train/latent_reasoning_vision/circuit.py`) depending on current behavior — defer until concrete demand.
+- C4 (softplus temperature) changes `.keras` archive semantics — temperature_init=1.0 would no longer mean temperature=1.0; breaks existing saved configs (LESSONS L94/L118 risk).
+- C5 (safe_divide) — huge gradients near zero are inherent to division; current `_safe_divide` is arguably correct; smoother alternatives (`x1*x2/(x2²+ε²)`) change function semantics significantly. Document hazard instead.
+- C6 (NOT-in-binary-pool) — explicitly classified as documented footgun by LESSONS L38.
+- H4 (zeros init) — empirically 1.4% softmax spread; cosmetic, not functional. Skip.
+- L4 (initializer round-trip) — false positive; works correctly.
+**Anchor-Refs**: TBD at EXECUTE step boundaries (only C1 + C3 fixes warrant `# DECISION` anchors per the 5-trigger rule in `references/decision-anchoring.md` — they encode "do NOT revert to false default" and "apply_sigmoid=False is intentional for stacked use").
+
 ## plan_2026-05-13_2aaad563
 ### iter-1 PLAN — recommended approach
 **Chosen**: minimal-additive refactor: add `factory.py` + populate `__init__.py` + rank-relax + small fixes + write `README.md` + scope-add tests. **At the cost of**: not addressing the unary `subtract`/`divide` footgun in code (documented in README only) — fixing it in code would either change semantics (potential test break) or require new ctor flag (over-scope).
@@ -139,78 +187,3 @@ None yet — iter-1 will create `cp-000-iter1.md` at first EXECUTE step (per pro
 **Decision**: Use plain-text math (`AbsRel = (1/N) sum |d - d_hat| / d`, multi-line in fenced code blocks) instead of LaTeX `$...$`.
 **Trade-off**: universal readability in any markdown viewer, **at the cost of** less typographic polish.
 **Reasoning**: The repo's IDE setups vary (PyCharm without KaTeX plugin, GitHub web, plain code editors). The sibling benchmark files avoid LaTeX. Plain-text math is the lowest-common-denominator that still encodes the formula unambiguously.
-
-## plan_2026-05-13_03176394
-### D-001 | EXPLORE → PLAN | 2026-05-13
-**Context**: `tversky_projection.py` and `kan_linear.py` are top-level layer files but conceptually are alternative projection / FFN-style linear layers. The user wants them integrated into the `ffn/` factory.
-**Decision**: Move both files into `layers/ffn/` and register both in the factory; do NOT modify either layer's `call()` body (per user constraint).
-**Trade-off**: Factory inclusion of Tversky at the cost of factory consumers receiving a layer whose `call()` is rank-2-only — must be advertised in description + README.
-**Reasoning**: Modifying `call()` to be rank-generic is out of scope. The 2D-only limitation is real but acceptable as a documented quirk; consumers building rank-3 transformers will simply not pick `'tversky'`.
-
-### D-002 | PLAN | 2026-05-13
-**Context**: Existing KAN consumers import via deep path `dl_techniques.layers.kan_linear`. After the move that path no longer exists.
-**Decision**: Update all 7 consumer sites to the new deep path `dl_techniques.layers.ffn.kan_linear`. Do NOT add a shim re-export at the old path.
-**Trade-off**: Explicit breakage of stale imports at the cost of one-time edit churn across 7 files.
-**Reasoning**: A shim accumulates as technical debt; with only 7 sites the explicit update is cleaner and matches LESSONS file-split refactor pattern (`plan_2026-05-11_46ecfa0b`).
-
-### D-003 | REFLECT iter-1 | 2026-05-13
-**Context**: All 9 plan steps completed single-pass. Scoped pytest (492 tests across `test_ffn/`, `test_kan/`, `test_window_attention.py`) green in 130s. All 8 success criteria PASS.
-**Decision**: Recommend CLOSE — no regressions, no scope drift, no simplification blockers, no new orphan decision anchors introduced.
-**Simplification check (6 checks)**:
-1. Necessity: every change is required by the goal (relocation + factory wiring). PASS.
-2. Smallest change: file moves via `git mv`, additive registry entries, surgical edits. No new abstractions. PASS.
-3. No premature generalization: did not add a shim/alias module. PASS.
-4. No dead code: every added symbol referenced by tests or factory. PASS.
-5. Forbidden patterns: none (no wrappers, no config toggles, no exception swallowing). PASS.
-6. Complexity budget: files +1 (Tversky test) / 3 budget, abstractions 0/2, lines ~+225 (test code dominates — non-runtime). PASS.
-**Devil's advocate**: One thing that could still be wrong — README's "fourteen different FFN layer types" count is now correct (12 → 14), but the registry actually had 12 before this plan and now has 14; verified by `len(get_ffn_info())` returning 14 via the updated `test_layer_count_in_info` test. Risk: nil.
-**Validator pre-existing errors**: 26 `anchor-orphan` / `anchor-unknown-plan` ERRORs are all in unrelated source files (routing_probabilities.py, clifford_block.py, train_cliffordnet_nlp.py, gpt2/*, nam/*, depth_anything/*, common/nlp.py). None introduced by this plan. Pre-existing repo hygiene debt — not a CLOSE blocker for this plan.
-**Trade-off**: Accept "1.5h full suite not run" at the cost of scoped-only verification; mitigated by scoped suite covering every touched module + cascade (single_window_attention via ffn.kan_linear).
-**Anchor-Refs**: none — this plan introduces no `# DECISION` anchors (no trigger conditions applied to the relocation).
-
-## plan_2026-05-12_13c70aed
-### D-001 | EXPLORE → PLAN | YYYY-MM-DD
-**Context**: <one-paragraph background — what was discovered in EXPLORE>
-**Decision**: <chosen approach in one sentence>
-**Trade-off**: <X> **at the cost of** <Y>
-**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-12_13c70aed/D-NNN` anchor exists in source)
--->
-
-### D-001 | EXPLORE → PLAN | 2026-05-12
-**Context**: User asked for MRL + auxiliary L2-normalized embedding head on `CliffordNetLMUNet`. The model is a causal U-Net language model with `"logits"` as its sole output key — a SYSTEM.md invariant for CLM trainers. The existing head ingests `h_top: (B, T, base_channels)` after `head_norm`. EXPLORE confirmed (a) no existing matryoshka utilities in `src/dl_techniques`, (b) MRL plugs in purely post-decoder (zero blast radius on the encoder/bottleneck/decoder stack), (c) generation probe reads `"logits"` only — unaffected if we keep the primary largest-width head named `"logits"`, (d) `prepare_dict_keyed_compile` is the established mechanism for routing dict-keyed loss/metrics through subclassed Keras 3 models.
-
-**Decision**: Add MRL by walking a `mrl_widths` list (default per-variant: halving from `base_channels` to floor 16) at the head; emit flat-keyed outputs `{"logits", "logits_w{w}", "embedding_w{w}"}`. Trainer wires per-key `MaskedCausalLMLoss` instances via Keras's `loss=` + `loss_weights=` dicts; `prepare_dict_keyed_compile` is extended to accept a list of output keys. Embedding head is identity-by-default (slice + L2-norm); learnable `Dense(C0)` opt-in via `--emb-head`. Embedding side outputs never participate in loss.
-
-**Trade-off**: A multi-head LM (N untied paths or N tied biases plus per-width LayerNorms) at the cost of slightly higher parameter + activation count and a wider model output dict.
-
-**Reasoning**: Pure additive change. Causality is structural (slicing + per-position projection). `"logits"` primary-head name is preserved → zero impact on the generation probe and on other CLM trainers. Reusing `MaskedCausalLMLoss` avoids new custom_objects. Halving widths down to 16 mirrors common matryoshka recipes and gives consistent semantics across non-power-of-2 base variants. The `loss_weights` dict is the cleanest plan A; a self-contained matryoshka loss class (summing CE internally) is the documented fallback if Keras's dict routing misbehaves on subclassed models (Pre-Mortem Scenario A). Alternatives rejected: nested dict outputs (complicates compile path), contrastive loss for the embedding head (out of scope), per-width Dense embedding projection (dead weight without supervision signal).
-
-**Anchor-Refs**: `src/dl_techniques/models/cliffordnet/lmunet.py` (head section to be edited at ~lines 626-641 in the existing file).
-
-### D-002 | PLAN (revision) → EXECUTE | 2026-05-12
-**Context**: PC-PLAN presentation surfaced Assumption A7 (default width sequence at non-power-of-2 `base_channels`). User explicitly chose width rule: **"Power-of-2 anchored, base preserved"** — largest width is `base_channels` preserved as-is (even when not a power of 2); remaining widths are strict powers of 2 strictly less than `base_channels`, descending, floor 16. This replaces the original "halving from base_channels" rule in plan v1.
-
-**Decision**: Apply the new rule to:
-1. Step 1 validation: first element MUST equal `base_channels` (may be non-power-of-2); every subsequent element MUST be a strict power of 2 AND strictly less than `base_channels`.
-2. Step 1b `MODEL_VARIANTS` defaults: nano `[128,64,32,16]`; mini `[192,128,64,32,16]`; base `[384,256,128,64,32,16]`; large `[512,256,128,64,32,16]`; xl `[768,512,256,128,64,32,16]`.
-3. Helper `_default_mrl_widths(base, floor=16)` computes `[base] + [2**k for k in descending powers-of-2 < base, terminating at >= floor]`.
-4. Test `test_mrl_default_widths_per_variant` updated to the new table.
-5. Loss weighting default stays `uniform` (weights `[1.0] * N`, sum=N — unchanged from plan v1).
-
-**Trade-off**: Preserves full `base_channels` capacity at the largest head at the cost of a slightly irregular descent on non-power-of-2 variants (e.g. `192 → 128` is not a halving). Compared to strict-power-of-2-only (which would drop the `base_channels` head when `base ≠ 2^k`), this keeps the primary head matching the model's actual width and keeps `"logits"` semantically identical to the existing single-head path. Compared to plan v1's halving, this gives cleaner power-of-2 representations at all sub-widths and aligns with common matryoshka recipes that prefer power-of-2 truncations for hardware efficiency.
-
-**Reasoning**: User chose to preserve base_channels capacity at largest width. Strict-power-of-2-only would silently drop capacity at the primary head for mini/base/xl (and break the SYSTEM.md `"logits"` invariant if the primary head no longer matched `base_channels`). Halving was a reasonable default but produced non-power-of-2 sub-widths (e.g. 192→96→48→24) that are less hardware-friendly and less aligned with matryoshka conventions. The "anchored" rule resolves both concerns cleanly.
-
-**Anchor-Refs**: `src/dl_techniques/models/cliffordnet/lmunet.py:415` (in-code anchor `# DECISION plan_2026-05-12_13c70aed/D-002` at the MRL widths resolution + validation block).
-
-### D-003 | EXECUTE → REFLECT | 2026-05-12
-**Context**: All 5 plan steps executed in a single pass with zero fix attempts. Full scoped pytest run: 43/43 PASS in 124.22s. SC1-SC8 all green. Diff review clean (no debug artifacts). Scope drift: zero (exactly 4 planned files modified). `validate-plan.mjs` errors are all pre-existing orphan anchors from prior plans, unrelated to this plan's edits.
-
-**Decision**: Route REFLECT → CLOSE.
-
-**Trade-off**: Closing now at the cost of not running the full ~1.5h `make test` suite. SC1-SC8 are scoped to the modules edited; SC6 demonstrates the cross-trainer mechanism is preserved; the per-edit blast-radius scoring (LOW/MED) and the manifest-vs-plan equality argue against broader breakage. Net trade-off accepted given user pre-push policy.
-
-**Reasoning**: 6 Simplification Checks pass. Pre-Mortem Scenarios A/B/C all averted via dedicated tests. Devil's advocate: only "unknown" is MRL convergence dynamics, which is explicitly out of scope and recorded in Not Verified. No regressions, no scope drift, no simplification blockers. Recommendation justified.
-
-**Anchor-Refs**: none (no new in-code anchors introduced for this plan; trigger conditions in references/decision-anchoring.md not met for slicing/L2-norm additive code).

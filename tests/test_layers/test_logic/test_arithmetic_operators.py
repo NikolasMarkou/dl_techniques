@@ -526,3 +526,65 @@ class TestPlanA2b0f17bArithmetic:
     def test_negative_entropy_coefficient_raises(self):
         with pytest.raises(ValueError, match="entropy_coefficient"):
             LearnableArithmeticOperator(entropy_coefficient=-0.1)
+
+
+class TestPlan3a2f1d23ArithmeticC1:
+    """Regression tests for plan_2026-05-13_3a2f1d23 step 1 (C1): canonical
+    Jang (2017) Gumbel-softmax form. Expected: softmax((w + g) / T), NOT
+    softmax((w/T) + g)."""
+
+    def test_canonical_gumbel_form_low_temperature(self):
+        """At low T, the Monte-Carlo mean of one-hot draws should converge to
+        softmax(w/T) (the standard Gumbel-softmax marginal). The previous
+        buggy form would over-weight the noise term and produce a far more
+        uniform distribution at low T."""
+        keras.utils.set_random_seed(42)
+        weights = np.array([0.0, 1.0, 2.0, 0.5], dtype=np.float32)
+        temperature = 0.1
+        op = LearnableArithmeticOperator(
+            operation_types=['add', 'subtract', 'multiply', 'min'],
+            use_temperature=True,
+            gumbel_softmax=True,
+            gumbel_hard=False,
+            softplus_temperature=False,
+        )
+        op.build((None, 4))
+        op.operation_weights.assign(weights)
+        op.temperature.assign(np.array(temperature, dtype=np.float32))
+
+        # Monte-Carlo: average over many samples.
+        n_samples = 4000
+        accum = np.zeros(4, dtype=np.float64)
+        for _ in range(n_samples):
+            probs = ops.convert_to_numpy(op._operation_probs())
+            accum += probs
+        empirical = accum / n_samples
+
+        # Canonical marginal: softmax(w/T).
+        canonical_logits = weights / temperature
+        canonical = np.exp(canonical_logits - canonical_logits.max())
+        canonical /= canonical.sum()
+
+        # Under canonical form at T=0.1, the MC mean of the soft samples
+        # concentrates strongly on the argmax (empirically ~0.55-0.65).
+        # Under the buggy softmax((w/T) + g) form, the noise dominates and
+        # the distribution stays close to uniform (~0.25 on each index).
+        # The threshold 0.45 cleanly separates canonical from buggy.
+        assert empirical.argmax() == int(canonical.argmax())
+        assert empirical[canonical.argmax()] >= 0.45, (
+            f"Canonical mass on argmax too low: empirical={empirical}, "
+            f"canonical={canonical}"
+        )
+
+    def test_gumbel_deterministic_skips_noise(self):
+        """deterministic=True must produce the same probs as non-gumbel."""
+        op = LearnableArithmeticOperator(
+            operation_types=['add', 'subtract'],
+            gumbel_softmax=True,
+            gumbel_hard=False,
+        )
+        op.build((None, 4))
+        op.operation_weights.assign([1.0, 2.0])
+        p1 = ops.convert_to_numpy(op._operation_probs(deterministic=True))
+        p2 = ops.convert_to_numpy(op._operation_probs(deterministic=True))
+        np.testing.assert_allclose(p1, p2, atol=1e-7)

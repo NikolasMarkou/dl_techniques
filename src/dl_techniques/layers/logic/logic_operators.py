@@ -387,18 +387,35 @@ class LearnableLogicOperator(keras.layers.Layer):
             return ops.maximum(ops.softplus(self.temperature), 1e-7)
         return ops.maximum(self.temperature, 1e-7)
 
-    def _operation_probs(self) -> keras.KerasTensor:
-        if self.use_temperature:
-            temp = self._resolve_temperature()
-            logits = ops.divide(self.operation_weights, temp)
-        else:
-            logits = self.operation_weights
-        if self.gumbel_softmax:
+    def _operation_probs(self, deterministic: bool = False) -> keras.KerasTensor:
+        """
+        Compute the operation-selection probability vector.
+
+        # DECISION plan_2026-05-13_3a2f1d23/D-001
+        # Canonical Jang (2017) Gumbel-softmax form: softmax((w + g) / T).
+        # Previously the implementation computed softmax((w/T) + g), which
+        # over-weights the noise term at low temperatures and breaks the
+        # Concrete distribution semantics (issue C1 in the residual review).
+
+        Args:
+            deterministic: If True, skip Gumbel noise injection regardless of
+                ``self.gumbel_softmax``. Used by ``to_symbolic()`` so the
+                printed operator selection is reproducible during training.
+        """
+        weights = self.operation_weights
+
+        if self.gumbel_softmax and not deterministic:
             uniform = keras.random.uniform(
-                shape=ops.shape(logits), minval=1e-9, maxval=1.0
+                shape=ops.shape(weights), minval=1e-9, maxval=1.0
             )
             gumbel = ops.negative(ops.log(ops.negative(ops.log(uniform))))
-            soft = ops.softmax(ops.add(logits, gumbel))
+            noisy = ops.add(weights, gumbel)
+            if self.use_temperature:
+                temp = self._resolve_temperature()
+                logits = ops.divide(noisy, temp)
+            else:
+                logits = noisy
+            soft = ops.softmax(logits)
             if self.gumbel_hard:
                 idx = ops.argmax(soft)
                 hard = ops.cast(
@@ -406,6 +423,12 @@ class LearnableLogicOperator(keras.layers.Layer):
                 )
                 return ops.add(soft, ops.stop_gradient(ops.subtract(hard, soft)))
             return soft
+
+        if self.use_temperature:
+            temp = self._resolve_temperature()
+            logits = ops.divide(weights, temp)
+        else:
+            logits = weights
         return ops.softmax(logits)
 
     def _maybe_add_entropy_loss(self, probs: keras.KerasTensor) -> None:

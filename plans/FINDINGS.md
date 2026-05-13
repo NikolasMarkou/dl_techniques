@@ -34,6 +34,71 @@
 - **`current_phase` / `_global_step` counters**: `add_weight(trainable=False, dtype="float32")` — int32 fails CPU/GPU device placement.
 <!-- /COMPRESSED-SUMMARY -->
 
+## plan_2026-05-13_a2b0f17b
+### Index
+- [prior-work-audit](plan_2026-05-13_a2b0f17b/findings/prior-work-audit.md) — `plan_2026-05-13_e52a5ac8` already double-checked the same review; 6 fixes shipped (commit `b562bd0`); most other items deferred for empirical reasons. Genuinely new items enumerated.
+
+### Key Constraints
+- **HARD**: Do not break consumer `src/train/latent_reasoning_vision/circuit.py:122` (depends on current `LearnableNeuralCircuit` shape contract + post-training `operation_weights` access).
+- **HARD**: Do not break `.keras` deserialization for already-saved models — rules out `softplus(temperature)` reparam (LESSONS L94/L118).
+- **SOFT**: Match prior plan's discipline — empirical verification BEFORE implementation; defaults preserve back-compat.
+- **GHOST**: User's emphatic "implement everything MAXIMUM EFFORT" reads as overriding prior empirical conclusions, but those conclusions are still load-bearing — no new evidence has invalidated them. Need explicit override before re-litigating.
+
+### Corrections
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
+
+## plan_2026-05-13_e52a5ac8
+### Index
+
+- **F-001 Empirical verification of prior-review claims** — `findings/verify_claims.py` script + output below.
+- **F-002 Test sensitivity scan for proposed fixes** — which tests would break for each candidate fix.
+- **F-003 Cross-plan precedent** — prior plan_2aaad563 already addressed same package; LESSONS L38 explicitly rules unary degeneracy out-of-scope.
+
+### F-001: Empirical results (one per prior-review claim)
+
+| Claim | Verdict | Evidence |
+|---|---|---|
+| **C1** `LearnableNeuralCircuit` default `use_residual=False` while `CircuitDepthLayer` default is `True` | **CONFIRMED** | `inspect.signature` shows mismatch; default-config ‖y‖/‖x‖ = 0.38, with `use_residual=True` = 1.69. |
+| **C2** Input-side routing shrinks signal | **CONFIRMED, MILDER than claimed** | Ratio 0.38 (not 1/N²). Real but recoverable with residual. |
+| **C3** Stacked `LearnableLogicOperator` collapses to constant | **CONFIRMED, SEVERE** | std: 1.759 → 0.056 → 0.003 → 0.000 across 3 layers. Unusable as building block. |
+| **C4** Temperature gradient is exactly 0 when raw value < 1e-7 | **CONFIRMED** | At temp=-0.5, ∂L/∂T = 0.0 exactly. At temp=+0.5, ∂L/∂T = 0.31. |
+| **C5** `_safe_divide` gradient blow-up near zero | **CONFIRMED but partially expected** | At x2=0, d/dx2 = 0 (discontinuity); at x2=1e-3, d/dx2 = -1e6. Huge gradients near zero are inherent to division — current behavior is *arguably correct*. Documentation/awareness fix more appropriate than code change. |
+| **C6** `NOT` competes in same softmax as binary ops, silently drops x2 | **CONFIRMED — already documented** | Per LESSONS L38: "documented footgun, not a bug to fix in code". Defer. |
+| **H4** `random_uniform` arch-init biases selection | **OVERSTATED** | 7-way softmax probs from `random_uniform(-0.05, 0.05)` init: max-min = 0.0137 (≈1.4% spread). Essentially uniform. Not worth changing. |
+| **H10** `validate_logic_config` accepts `bool` as positive int | **CONFIRMED** | `validate_logic_config("circuit_depth", num_logic_ops=True)` passes silently. |
+| **M2** `compute_output_shape` returns `None` for list-deserialized shape | **CONFIRMED** | `compute_output_shape([None, 32])` returns `None`; `(None, 32)` returns `(None, 32)`. Same in `LearnableArithmeticOperator` and `LearnableLogicOperator`. |
+| **L4** Initializer round-trip broken | **FALSE POSITIVE** | `keras.initializers.get(serialized_dict)` handles dict form; `GlorotNormal` round-trips correctly. |
+
+### F-002: Test sensitivity for proposed fixes
+
+| Fix | Touches | Test impact |
+|---|---|---|
+| **C1** flip `LearnableNeuralCircuit.use_residual=True` default | `neural_circuit.py:389` | None — no test asserts default value; `test_with_residual_connections` passes both explicit values. |
+| **M2** disambiguate list-shape in `compute_output_shape` | `arithmetic_operators.py:422`, `logic_operators.py:411` | None — no test currently calls `compute_output_shape([None, D])` directly. |
+| **H10** reject `bool` in validator | `factory.py:215` | None — no test passes bool. |
+| **H9** deepcopy `get_logic_info()` | `factory.py:175` | None — no test mutates the returned dict. |
+| **C3** add `apply_sigmoid=True` flag | `logic_operators.py` (new ctor param) | None — default `True` preserves all existing behavior incl. `test_sigmoid_input_normalization`. |
+| **L2** `logger.info` → `logger.debug` for noisy init logs | All four files | None — no test asserts on log content. |
+
+### F-003: Cross-plan precedent
+
+- **plan_2026-05-13_2aaad563** (the predecessor) already aligned this package: added `factory.py`, populated `__init__.py`, relaxed 4-D ghost constraint, documented unary footgun in README. Chose to NOT fix unary degeneracy in code.
+- **LESSONS L38** (codified outcome): "Unary-input degeneracy in DARTS-style 'softmax over primitives' layers ... is a documented footgun, not a bug to fix in code."
+- **LESSONS L20** (governing principle): "Verify reviewer claims empirically before applying fixes from a 'deep review'. Reviews contain false positives."
+- **LESSONS L21**: "A correctly-flagged bug can mask a worse adjacent bug. Sweep the category."
+
+### Key Constraints
+
+- **HARD**: 107 PASS baseline must remain green (`tests/test_layers/test_logic/`).
+- **HARD**: `src/train/latent_reasoning_vision/circuit.py` import path locked.
+- **HARD**: bare `@register_keras_serializable()` — no module relocation (LESSONS L94/L118).
+- **HARD**: `.keras` archive compatibility for existing checkpoints — any change to parameter semantics (e.g. softplus reparam of `temperature`) breaks reload. Defer such changes.
+- **SOFT**: prefer additive over destructive — new ctor flags with backward-compatible defaults.
+
+### Corrections
+
+None.
+
 ## plan_2026-05-13_2aaad563
 ### Index
 - F-001 Package structure & public surface
@@ -202,82 +267,3 @@
 
 ### Corrections
 *Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
-
-## plan_2026-05-13_03176394
-### Index
-
-| ID | Topic | File |
-|----|-------|------|
-| F-001 | Source files structure and ctor signatures | findings/F-001-source-files.md |
-| F-002 | All consumers / deep imports / test locations | findings/F-002-consumers.md |
-| F-003 | FFN factory integration shape (registry, validation, exports) | findings/F-003-factory-integration.md |
-
-### Key Constraints
-
-- **HARD**: All consumer imports of `dl_techniques.layers.kan_linear` must be updated to the new path; otherwise `models/kan/`, `train/kan`, `train/coshkan`, `layers/attention/single_window_attention.py`, and existing tests break. (F-002)
-- **HARD**: Both layers carry bare `@keras.saving.register_keras_serializable()` — moving changes `__module__`. No public .keras checkpoints reference these classes in-repo; safe to move. (F-001)
-- **HARD**: `TverskyProjectionLayer.call()` is rank-2-only despite rank-generic `compute_output_shape`. Goal forbids modifying `call()` — document the 2D-only limitation in factory description + README; test only rank-2. (F-001, F-003)
-- **SOFT**: Add `features` and `num_features` to factory `positive_dims` whitelist for validation consistency. (F-003)
-- **SOFT**: docs/ generated files reference old paths; regenerated via `make docs`. Out of scope.
-- **GHOST**: None identified — pure relocation + factory wiring.
-
-### Corrections
-*(none yet)*
-
-## plan_2026-05-12_13c70aed
-### Index
-
-| ID | Topic | File | Summary |
-|----|-------|------|---------|
-| F-001 | CliffordNetLMUNet MRL integration surface | `findings/lmunet-mrl-integration.md` | MRL plugs in at the post-`head_norm`, post-squeeze `h_top: (B, T, C0)` tensor in `call()`. The existing `"logits"` head is just the slice at `w_0 = base_channels`. Tied mode reuses `token_embedding.embeddings[:, :w]`; untied mode adds per-width `Dense(V)`. Output dict shape: flat keys `{"logits": ..., "logits_w{w}": ..., "embedding_w{w}": ...}` rather than nested — keeps `prepare_dict_keyed_compile` simple and `compute_output_shape` clean. Width sequence: halve from base_channels down to a floor of 16. Causality preserved (head is per-position). Memory acceptable. |
-| F-002 | Auxiliary L2-normalized embedding head — design | `findings/embedding-head-design.md` | Pool at last array position by default (causal model — last position has seen all real tokens). Expose `pool ∈ {last, cls, auto}`; default `last`. Default to identity projection (slice+norm); `--emb-head` flag enables a single learnable `Dense(C0, use_bias=False)` shared across widths. L2-norm per width independently. Numerical safety: epsilon `1e-12` under sqrt; cast to fp32 inside the norm op (LESSONS L34/L100). Embedding output: flat keys `{f"embedding_w{w}": (B, w)}` — side output, never participates in loss. Trainer-side `output_names` excludes embedding keys. |
-| F-003 | Trainer + loss wiring | `findings/trainer-and-loss-wiring.md` | `prepare_dict_keyed_compile` gets a new `output_keys=None` parameter (backwards compatible); trainer passes `output_keys=["logits", "logits_w128", ...]`. Loss dict uses N `MaskedCausalLMLoss` instances (one per width). `loss_weights` dict: `uniform` default; `inv-log2` optional. Labels are duplicated across keys via `(x, y) -> (x, {k: y for k in lm_keys})`. CLI flags: `--mrl-widths`, `--mrl-weights`, `--emb-head`, `--mrl-head-norm`. No new `custom_objects` entries. Generation probe is unaffected — reads `"logits"`. |
-
-### Key Constraints
-
-### HARD
-- Keras 3 / TF 2.18 idioms: `@keras.saving.register_keras_serializable()`, `keras.ops`, full `get_config()` round-trip, `dl_techniques.utils.logger` only.
-- Causality (LESSONS L33, D-007 of plan_82749628) must be preserved at every slice width. Verified by test.
-- `tie_word_embeddings=True` default honored at every width: slice `token_embedding.embeddings[:, :w]` transposed; per-width learnable bias.
-- `"logits"` key is the SYSTEM.md output-key invariant. Must remain the primary (largest-width) head. Smaller widths get `f"logits_w{w}"` suffix.
-- `prepare_dict_keyed_compile` extension must be backwards compatible (existing 6 CLM trainers unaffected).
-- Numerical safety on L2-norm: epsilon `1e-12` under sqrt; fp32 cast for the norm op.
-- No new external dependencies.
-- Don't run `make test` — scope pytest to `tests/test_models/test_cliffordnet/`.
-- `MPLBACKEND=Agg`; single GPU; user pushes commits.
-- `.keras` round-trip atol = 1e-4 (LESSONS — fp32 reduction-order noise on U-Net).
-- Width floor 16; widths halve from `base_channels`. nano `[128,64,32,16]`; mini `[192,96,48,24]`; base `[384,192,96,48,24]`; large `[512,256,128,64,32,16]`; xl `[768,384,192,96,48,24]`.
-- Slice widths are static Python ints (resolved in `__init__`).
-- MRL must support both tied and untied LM head modes.
-
-### SOFT
-- Output dict flat keys (`"logits_w64"`, `"embedding_w64"`).
-- Default `--mrl-weights uniform`.
-- Default `--emb-head False`.
-- Default `--mrl-head-norm True`.
-- Default `pool="last"`.
-- Existing `"logits"` semantics unchanged.
-- Extend existing test file rather than add a parallel file.
-
-### GHOST (considered & rejected)
-- Contrastive loss for embeddings — out of scope; `emb_head=False` default avoids dead weight.
-- Nested dict output — rejected for `prepare_dict_keyed_compile` simplicity.
-- CLS-at-0 default — rejected; causal model, position 0 sees only itself.
-- Per-width Dense embedding projection — dead weight without contrastive signal.
-- MRL inside attention/blocks — out of scope.
-- Per-width perplexity metrics — adds memory for negligible signal.
-
-### Exploration Confidence
-- Scope: deep. All 4 target/relevant files read end-to-end. SYSTEM.md, LESSONS.md, prior plans plan_82749628 + plan_632605aa reviewed. No existing matryoshka utilities in the repo (grep returned only docstring references, none reusable).
-- Solutions: constrained. Single architecturally-correct approach: post-`head_norm` slicing + per-width vocab projection (tied/untied), L2-normed side-output, flat-keyed output dict.
-- Risks: clear. `loss_weights` dict on subclassed Keras models works via the same `output_names` fix; memory fits nano/mini at batch=8; `.keras` round-trip with per-width bias weights persists naturally; causality at small widths is structural.
-
-### Synthesis
-Three coupled additive changes, zero blast radius on non-MRL paths.
-1. `src/dl_techniques/models/cliffordnet/lmunet.py` (~+200 LOC) — MRL+embedding head wiring.
-2. `src/train/common/nlp.py` (~+10 LOC) — `prepare_dict_keyed_compile` accepts `output_keys`.
-3. `src/train/cliffordnet/train_cliffordnet_nlp_unet.py` (~+80 LOC) — CLI + loss/label dicts.
-4. `tests/test_models/test_cliffordnet/test_cliffordnet_lmunet.py` (~+150 LOC) — MRL/embedding/serialization tests.
-
-### Corrections
-*None yet.*

@@ -393,26 +393,40 @@ class LearnableArithmeticOperator(keras.layers.Layer):
             return ops.maximum(ops.softplus(self.temperature), 1e-7)
         return ops.maximum(self.temperature, 1e-7)
 
-    def _operation_probs(self) -> keras.KerasTensor:
+    def _operation_probs(self, deterministic: bool = False) -> keras.KerasTensor:
         """
         Compute the operation-selection probability vector.
 
         Honors ``use_temperature`` and ``gumbel_softmax`` modes.
-        """
-        if self.use_temperature:
-            temp = self._resolve_temperature()
-            logits = ops.divide(self.operation_weights, temp)
-        else:
-            logits = self.operation_weights
 
-        if self.gumbel_softmax:
+        # DECISION plan_2026-05-13_3a2f1d23/D-001
+        # Canonical Jang (2017) Gumbel-softmax form: softmax((w + g) / T).
+        # Previously the implementation computed softmax((w/T) + g), which
+        # over-weights the noise term at low temperatures and breaks the
+        # Concrete distribution semantics (issue C1 in the residual review).
+
+        Args:
+            deterministic: If True, skip Gumbel noise injection regardless of
+                ``self.gumbel_softmax``. Used by ``to_symbolic()`` so that the
+                printed operator selection is reproducible during training.
+        """
+        weights = self.operation_weights
+
+        if self.gumbel_softmax and not deterministic:
             # Gumbel(0,1) = -log(-log(U(0,1))). Manual implementation since
             # keras.ops doesn't expose it directly.
             uniform = keras.random.uniform(
-                shape=ops.shape(logits), minval=1e-9, maxval=1.0
+                shape=ops.shape(weights), minval=1e-9, maxval=1.0
             )
             gumbel = ops.negative(ops.log(ops.negative(ops.log(uniform))))
-            soft = ops.softmax(ops.add(logits, gumbel))
+            # Canonical form: (w + g) / T then softmax (NOT softmax(w/T) + g).
+            noisy = ops.add(weights, gumbel)
+            if self.use_temperature:
+                temp = self._resolve_temperature()
+                logits = ops.divide(noisy, temp)
+            else:
+                logits = noisy
+            soft = ops.softmax(logits)
             if self.gumbel_hard:
                 # Straight-through estimator: forward-pass uses the one-hot,
                 # backward-pass uses the soft sample.
@@ -421,6 +435,13 @@ class LearnableArithmeticOperator(keras.layers.Layer):
                 hard = ops.cast(hard, soft.dtype)
                 return ops.add(soft, ops.stop_gradient(ops.subtract(hard, soft)))
             return soft
+
+        # No gumbel (or deterministic=True): plain temperature-scaled softmax.
+        if self.use_temperature:
+            temp = self._resolve_temperature()
+            logits = ops.divide(weights, temp)
+        else:
+            logits = weights
         return ops.softmax(logits)
 
     def _maybe_add_entropy_loss(
