@@ -308,17 +308,27 @@ class CircuitDepthLayer(keras.layers.Layer):
         self, combination_probs: keras.KerasTensor
     ) -> None:
         """
-        Shazeer (2017) load-balancing aux loss.
+        Shazeer (2017)-style importance regularizer aux loss.
 
-        For a single-example setting (no batch routing decisions), we use
-        ``coef * N * sum(beta^2)`` which penalizes peaky combination
-        distributions and rewards uniform utilization. This is a degenerate
-        but standard variant when there is no per-token routing.
+        Implementation: ``coef * N * mean_over_extra_axes(sum_op(beta^2))``.
+        Equivalent (up to constant) to the CV² importance loss when N is
+        fixed — penalizes peaky combination distributions. Note: this is
+        L2 of the gate vector, NOT entropy, despite the
+        ``gate_entropy_coefficient`` field name (kept for back-compat).
+
+        # DECISION plan_2026-05-13_e33114da/D-005 — per_channel mode
+        # previously averaged probs across channels BEFORE the L2, which let
+        # per-channel-peaky distributions that average to uniform escape the
+        # regularizer (B4). Fixed by per-channel L2 then mean.
         """
-        if self.load_balance_coefficient > 0:
-            n = float(self.num_logic_ops + self.num_arithmetic_ops)
-            l2 = ops.sum(ops.square(combination_probs))
-            self.add_loss(self.load_balance_coefficient * n * l2)
+        if self.load_balance_coefficient <= 0:
+            return
+        n = float(self.num_logic_ops + self.num_arithmetic_ops)
+        # Per-row L2 (axis=-1 = op axis). For 1-D global (N,), this is just
+        # sum(beta^2); for per-channel (C, N), it's per-channel L2 then mean.
+        per_row_l2 = ops.sum(ops.square(combination_probs), axis=-1)
+        aux = ops.mean(per_row_l2) if len(combination_probs.shape) > 1 else per_row_l2
+        self.add_loss(self.load_balance_coefficient * n * aux)
 
     def _maybe_diversity_loss(self) -> None:
         """M5: pairwise cosine-similarity penalty over inner ops' operation
@@ -361,12 +371,9 @@ class CircuitDepthLayer(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass through the depth layer."""
         combination_probs = ops.softmax(self.combination_weights, axis=-1)
-        # _maybe_load_balance_loss expects a 1-D combination_probs; under
-        # per_channel it's (C, N). Reduce by mean over channels for the aux.
-        if self.selection_mode == "per_channel":
-            self._maybe_load_balance_loss(ops.mean(combination_probs, axis=0))
-        else:
-            self._maybe_load_balance_loss(combination_probs)
+        # _maybe_load_balance_loss now handles both (N,) and (C, N) shapes
+        # natively — per-channel L2 then mean (B4 fix, D-005).
+        self._maybe_load_balance_loss(combination_probs)
         # M5: diversity regularizer.
         self._maybe_diversity_loss()
 
