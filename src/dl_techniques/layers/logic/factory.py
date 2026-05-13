@@ -148,6 +148,7 @@ LOGIC_REGISTRY: Dict[str, Dict[str, Any]] = {
             "gate_entropy_coefficient": 0.0,
             "channel_mix": None,
             "selection_mode": "global",
+            "diversity_coefficient": 0.0,
         },
         "use_case": (
             "Drop-in mid-network expert ensemble that preserves tensor shape "

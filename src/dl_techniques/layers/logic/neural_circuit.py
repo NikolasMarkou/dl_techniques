@@ -137,6 +137,7 @@ class CircuitDepthLayer(keras.layers.Layer):
             channel_mix: Optional[str] = None,
             force_logic_input_clip: bool = False,
             selection_mode: str = "global",
+            diversity_coefficient: float = 0.0,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -147,6 +148,9 @@ class CircuitDepthLayer(keras.layers.Layer):
             load_balance_coefficient,
             self.__class__.__name__,
         )
+
+        if diversity_coefficient < 0:
+            raise ValueError("diversity_coefficient must be non-negative.")
 
         if selection_mode not in ("global", "per_channel"):
             raise ValueError(
@@ -192,6 +196,8 @@ class CircuitDepthLayer(keras.layers.Layer):
         # combination weights shape.
         self.selection_mode = selection_mode
         self._channels = None  # set in build() for per_channel mode
+        # M5: diversity regularizer coefficient.
+        self.diversity_coefficient = float(diversity_coefficient)
 
         # DECISION plan_2026-05-13_a2b0f17b/D-002 — children created in
         # __init__, NOT manually pre-built in build(). Auto-build via
@@ -314,6 +320,40 @@ class CircuitDepthLayer(keras.layers.Layer):
             l2 = ops.sum(ops.square(combination_probs))
             self.add_loss(self.load_balance_coefficient * n * l2)
 
+    def _maybe_diversity_loss(self) -> None:
+        """M5: pairwise cosine-similarity penalty over inner ops' operation
+        probability vectors. Encourages experts to specialize on distinct
+        operators rather than collapsing onto the same one."""
+        if self.diversity_coefficient <= 0:
+            return
+        inner = list(self.logic_operators) + list(self.arithmetic_operators)
+        # Each inner op's operation_probs has shape (N,) (global) or (C, N)
+        # (per_channel). Reduce to a single vector per expert by mean over
+        # the first axis when rank > 1.
+        vecs = []
+        for op in inner:
+            p = op._operation_probs(deterministic=True)
+            if len(p.shape) > 1:
+                p = ops.mean(p, axis=0)
+            # L2-normalize.
+            p = ops.divide(p, ops.add(ops.norm(p), 1e-12))
+            vecs.append(p)
+        # Note: experts may have different num_operations (logic vs arith),
+        # so we cannot stack directly. Compute pairwise cos-sim only between
+        # same-arity pairs.
+        sim_sum = 0.0
+        pair_count = 0
+        for i in range(len(vecs)):
+            for j in range(i + 1, len(vecs)):
+                if vecs[i].shape == vecs[j].shape:
+                    sim_sum = ops.add(sim_sum, ops.sum(ops.multiply(vecs[i], vecs[j])))
+                    pair_count += 1
+        if pair_count == 0:
+            return
+        # Mean similarity in [-1, 1]; aux loss is coef * mean(sim).
+        mean_sim = ops.divide(sim_sum, float(pair_count))
+        self.add_loss(ops.multiply(self.diversity_coefficient, mean_sim))
+
     def call(
             self,
             inputs: keras.KerasTensor,
@@ -327,6 +367,8 @@ class CircuitDepthLayer(keras.layers.Layer):
             self._maybe_load_balance_loss(ops.mean(combination_probs, axis=0))
         else:
             self._maybe_load_balance_loss(combination_probs)
+        # M5: diversity regularizer.
+        self._maybe_diversity_loss()
 
         all_outputs: List[keras.KerasTensor] = []
 
@@ -393,6 +435,7 @@ class CircuitDepthLayer(keras.layers.Layer):
             "channel_mix": self.channel_mix,
             "force_logic_input_clip": self.force_logic_input_clip,
             "selection_mode": self.selection_mode,
+            "diversity_coefficient": self.diversity_coefficient,
         })
         return config
 

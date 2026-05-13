@@ -832,6 +832,35 @@ class TestPlanA2b0f17bCircuit:
         )
 
 
+class TestPlan3a2f1d23DiversityRegularizer:
+    """M5: diversity regularizer adds an aux loss when coefficient > 0."""
+
+    def test_diversity_active_adds_loss(self):
+        l = CircuitDepthLayer(diversity_coefficient=0.1)
+        x = ops.convert_to_tensor(np.random.randn(2, 4).astype(np.float32))
+        _ = l(x)
+        # combination_probs loss alone would NOT add when coef=0; expect at
+        # least the diversity loss term.
+        assert len(l.losses) >= 1
+
+    def test_diversity_inactive_no_loss(self):
+        l = CircuitDepthLayer(diversity_coefficient=0.0)
+        x = ops.convert_to_tensor(np.random.randn(2, 4).astype(np.float32))
+        _ = l(x)
+        assert len(l.losses) == 0
+
+    def test_diversity_round_trip(self):
+        l = CircuitDepthLayer(diversity_coefficient=0.05)
+        cfg = l.get_config()
+        assert cfg['diversity_coefficient'] == 0.05
+        l2 = CircuitDepthLayer.from_config(cfg)
+        assert l2.diversity_coefficient == 0.05
+
+    def test_diversity_negative_raises(self):
+        with pytest.raises(ValueError, match="diversity_coefficient"):
+            CircuitDepthLayer(diversity_coefficient=-0.1)
+
+
 class TestPlan3a2f1d23ToSymbolicWalker:
     """M1: LearnableNeuralCircuit.to_symbolic walker."""
 
