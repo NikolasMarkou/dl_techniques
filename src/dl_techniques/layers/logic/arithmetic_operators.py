@@ -271,25 +271,28 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         :param input_shape: Shape of the input tensor(s).
         :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
         """
+        # B6 (plan_2026-05-13_e33114da): use the same list-of-shapes
+        # detection as compute_output_shape and logic_operators.py.
+        is_list_of_shapes = (
+            isinstance(input_shape, list)
+            and input_shape
+            and not isinstance(input_shape[0], (int, type(None)))
+        )
+
         # Validate input shapes for binary operations
-        if isinstance(input_shape, list):
-            # To distinguish a list of shapes from a single shape deserialized as a list (e.g., [None, 32]),
-            # we check if the first element is iterable (like a tuple, list, or TensorShape).
-            if len(input_shape) == 2 and input_shape[0] is not None and hasattr(input_shape[0], '__iter__'):
-                if list(input_shape[0]) != list(input_shape[1]):
-                    raise ValueError(
-                        f"Input tensors must have the same shape for binary operations. "
-                        f"Got shapes: {input_shape[0]} and {input_shape[1]}"
-                    )
+        if is_list_of_shapes and len(input_shape) == 2:
+            if list(input_shape[0]) != list(input_shape[1]):
+                raise ValueError(
+                    f"Input tensors must have the same shape for binary operations. "
+                    f"Got shapes: {input_shape[0]} and {input_shape[1]}"
+                )
 
         # Create learnable operation selection weights.
         # C3: per-channel mode stores (channels, num_operations) so each
         # channel independently selects its operator. Global mode keeps
         # the legacy (num_operations,) shape.
         if self.selection_mode == "per_channel":
-            # Resolve channel size from input_shape[-1]. For binary inputs
-            # passed as a list, use the first shape (validated equal above).
-            if isinstance(input_shape, list) and len(input_shape) >= 1 and hasattr(input_shape[0], '__iter__'):
+            if is_list_of_shapes:
                 shape_for_channels = tuple(input_shape[0])
             else:
                 shape_for_channels = tuple(input_shape)
@@ -621,8 +624,13 @@ class LearnableArithmeticOperator(keras.layers.Layer):
 
         # Apply scaling factor if enabled
         if self.use_scaling:
-            # Clamp scaling factor to prevent numerical issues
-            scale = ops.maximum(ops.abs(self.scaling_factor), 1e-7)
+            # D5 (plan_2026-05-13_e33114da): sign-preserving magnitude clamp.
+            # Prior code used ops.abs which made negative scale unreachable;
+            # now magnitude is clamped to >= 1e-7 but sign is preserved.
+            abs_s = ops.maximum(ops.abs(self.scaling_factor), 1e-7)
+            sign_s = ops.sign(self.scaling_factor)
+            sign_s = ops.where(ops.equal(sign_s, 0.0), ops.ones_like(sign_s), sign_s)
+            scale = ops.multiply(sign_s, abs_s)
             output = ops.multiply(output, scale)
 
         return output
@@ -639,14 +647,18 @@ class LearnableArithmeticOperator(keras.layers.Layer):
         :return: Output shape tuple.
         :rtype: Tuple[Optional[int], ...]
         """
-        # Distinguish [(s1,), (s2,)] (list of two shapes) from [None, 32] (one
-        # shape deserialized as a list). Single shapes have int/None elements.
         is_list_of_shapes = (
             isinstance(input_shape, list)
             and input_shape
             and not isinstance(input_shape[0], (int, type(None)))
         )
         if is_list_of_shapes:
+            # D9: validate shape consistency for binary inputs.
+            if len(input_shape) == 2 and list(input_shape[0]) != list(input_shape[1]):
+                raise ValueError(
+                    f"Input tensors must have the same shape for binary operations. "
+                    f"Got shapes: {input_shape[0]} and {input_shape[1]}"
+                )
             return tuple(input_shape[0])
         return tuple(input_shape) if isinstance(input_shape, list) else input_shape
 

@@ -159,6 +159,8 @@ class LearnableLogicOperator(keras.layers.Layer):
         # M4 (plan_2026-05-13_3a2f1d23):
         'hamacher_and', 'hamacher_or',
         'yager_and', 'yager_or',
+        # G4 (plan_2026-05-13_e33114da): additional implications.
+        'lukasiewicz_implies', 'reichenbach_implies', 'goguen_implies',
     })
     UNARY_OPS = frozenset({'not'})
     BINARY_OPS = VALID_OPS - UNARY_OPS
@@ -416,10 +418,25 @@ class LearnableLogicOperator(keras.layers.Layer):
         """Gödel OR: max(p, q)."""
         return ops.maximum(x1, x2)
 
-    # --- Implication (Kleene-Dienes) -------------------------------------
+    # --- Implication family ----------------------------------------------
     def _implies(self, x1, x2):
         """Kleene-Dienes implication: max(1 - p, q)."""
         return ops.maximum(ops.subtract(1.0, x1), x2)
+
+    def _lukasiewicz_implies(self, x1, x2):
+        """Łukasiewicz implication: min(1, 1 - p + q)."""
+        return ops.minimum(1.0, ops.add(ops.subtract(1.0, x1), x2))
+
+    def _reichenbach_implies(self, x1, x2):
+        """Reichenbach (probabilistic) implication: 1 - p + p*q."""
+        return ops.add(ops.subtract(1.0, x1), ops.multiply(x1, x2))
+
+    def _goguen_implies(self, x1, x2):
+        """Goguen implication: min(1, q / max(p, eps)). Identity when p<=q."""
+        # eps prevents 0/0 at p=0 (where formal value should be 1 because
+        # ⊥→anything is vacuously true). Clamp p, take ratio, clip to <=1.
+        p_safe = ops.maximum(x1, 1e-9)
+        return ops.minimum(1.0, ops.divide(x2, p_safe))
 
     # --- Hamacher / Yager t-norms (M4) -----------------------------------
     # DECISION plan_2026-05-13_e33114da/D-002 — Both Hamacher t-norms have a
@@ -646,6 +663,12 @@ class LearnableLogicOperator(keras.layers.Layer):
                 result = self._godel_or(x1, x2)
             elif op_type == 'implies':
                 result = self._implies(x1, x2)
+            elif op_type == 'lukasiewicz_implies':
+                result = self._lukasiewicz_implies(x1, x2)
+            elif op_type == 'reichenbach_implies':
+                result = self._reichenbach_implies(x1, x2)
+            elif op_type == 'goguen_implies':
+                result = self._goguen_implies(x1, x2)
             elif op_type == 'hamacher_and':
                 result = self._hamacher_and(x1, x2)
             elif op_type == 'hamacher_or':
@@ -691,6 +714,12 @@ class LearnableLogicOperator(keras.layers.Layer):
             and not isinstance(input_shape[0], (int, type(None)))
         )
         if is_list_of_shapes:
+            # D9: validate shape consistency for binary inputs.
+            if len(input_shape) == 2 and list(input_shape[0]) != list(input_shape[1]):
+                raise ValueError(
+                    f"Input tensors must have the same shape for binary operations. "
+                    f"Got shapes: {input_shape[0]} and {input_shape[1]}"
+                )
             return tuple(input_shape[0])
         return tuple(input_shape) if isinstance(input_shape, list) else input_shape
 

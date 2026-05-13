@@ -366,35 +366,51 @@ class CircuitDepthLayer(keras.layers.Layer):
     def _maybe_diversity_loss(self) -> None:
         """M5: pairwise cosine-similarity penalty over inner ops' operation
         probability vectors. Encourages experts to specialize on distinct
-        operators rather than collapsing onto the same one."""
+        operators rather than collapsing onto the same one.
+
+        D4 (plan_2026-05-13_e33114da): vectorized via per-arity Gram matrix.
+        Cross-arity pairs (logic vs arithmetic) have different op-space
+        dimensionality so are kept separate (matches prior behavior).
+        """
         if self.diversity_coefficient <= 0:
             return
-        inner = list(self.logic_operators) + list(self.arithmetic_operators)
-        # Each inner op's operation_probs has shape (N,) (global) or (C, N)
-        # (per_channel). Reduce to a single vector per expert by mean over
-        # the first axis when rank > 1.
-        vecs = []
-        for op in inner:
-            p = op._operation_probs(deterministic=True)
-            if len(p.shape) > 1:
-                p = ops.mean(p, axis=0)
-            # L2-normalize.
-            p = ops.divide(p, ops.add(ops.norm(p), 1e-12))
-            vecs.append(p)
-        # Note: experts may have different num_operations (logic vs arith),
-        # so we cannot stack directly. Compute pairwise cos-sim only between
-        # same-arity pairs.
-        sim_sum = 0.0
-        pair_count = 0
-        for i in range(len(vecs)):
-            for j in range(i + 1, len(vecs)):
-                if vecs[i].shape == vecs[j].shape:
-                    sim_sum = ops.add(sim_sum, ops.sum(ops.multiply(vecs[i], vecs[j])))
-                    pair_count += 1
-        if pair_count == 0:
+
+        def _group_sim(ops_group: List[Any]) -> Tuple[Optional[keras.KerasTensor], int]:
+            """Compute mean pairwise cosine similarity for a same-arity group.
+            Returns (sim_tensor, pair_count) or (None, 0) if <2 experts."""
+            if len(ops_group) < 2:
+                return None, 0
+            vecs = []
+            for op in ops_group:
+                p = op._operation_probs(deterministic=True)
+                if len(p.shape) > 1:
+                    p = ops.mean(p, axis=0)
+                vecs.append(p)
+            stacked = ops.stack(vecs, axis=0)  # (K, M)
+            norms = ops.add(ops.norm(stacked, axis=-1, keepdims=True), 1e-12)
+            stacked = ops.divide(stacked, norms)
+            gram = ops.matmul(stacked, ops.transpose(stacked))
+            # Upper triangle sum excluding diagonal = (sum(gram) - trace) / 2.
+            diag = ops.sum(ops.multiply(gram, ops.eye(len(ops_group), dtype=gram.dtype)))
+            upper_sum = ops.divide(ops.subtract(ops.sum(gram), diag), 2.0)
+            k = len(ops_group)
+            pair_count = k * (k - 1) // 2
+            return upper_sum, pair_count
+
+        logic_sum, logic_pairs = _group_sim(self.logic_operators)
+        arith_sum, arith_pairs = _group_sim(self.arithmetic_operators)
+
+        total_pairs = logic_pairs + arith_pairs
+        if total_pairs == 0:
             return
-        # Mean similarity in [-1, 1]; aux loss is coef * mean(sim).
-        mean_sim = ops.divide(sim_sum, float(pair_count))
+
+        total_sim: Optional[keras.KerasTensor] = None
+        if logic_sum is not None:
+            total_sim = logic_sum
+        if arith_sum is not None:
+            total_sim = arith_sum if total_sim is None else ops.add(total_sim, arith_sum)
+
+        mean_sim = ops.divide(total_sim, float(total_pairs))
         self.add_loss(ops.multiply(self.diversity_coefficient, mean_sim))
 
     def call(
@@ -456,6 +472,34 @@ class CircuitDepthLayer(keras.layers.Layer):
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         return input_shape
+
+    def to_symbolic(self, top_k: int = 1) -> str:
+        """Return a symbolic summary of this depth layer.
+
+        G2 (plan_2026-05-13_e33114da): standalone depth-level to_symbolic
+        mirroring the per-depth body of LearnableNeuralCircuit.to_symbolic.
+        Useful when CircuitDepthLayer is used outside a LearnableNeuralCircuit.
+        """
+        if not self.built:
+            raise RuntimeError(
+                "CircuitDepthLayer.to_symbolic() requires the layer to be "
+                "built. Call the layer on a sample input first."
+            )
+        lines: List[str] = []
+        for i, op in enumerate(self.logic_operators):
+            lines.append(f"logic_op_{i}: {op.to_symbolic(top_k=top_k)}")
+        for j, op in enumerate(self.arithmetic_operators):
+            lines.append(f"arithmetic_op_{j}: {op.to_symbolic(top_k=top_k)}")
+        cw = ops.convert_to_numpy(ops.softmax(self.combination_weights, axis=-1))
+        if cw.ndim > 1:
+            cw = cw.mean(axis=0)
+        names = (
+            [f"logic_op_{i}" for i in range(self.num_logic_ops)]
+            + [f"arithmetic_op_{j}" for j in range(self.num_arithmetic_ops)]
+        )
+        ranked = sorted(zip(names, cw.tolist()), key=lambda kv: -kv[1])[:top_k]
+        lines.append("combination: " + ", ".join(f"{n}({p:.3f})" for n, p in ranked))
+        return "\n".join(lines)
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
@@ -684,8 +728,9 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         """Walk all depths and return a multi-line symbolic summary.
 
         M1 (plan_2026-05-13_3a2f1d23): for each depth print the dominant
-        operator per inner expert plus a combination-weight ranking. Useful
-        for post-training interpretation.
+        operator per inner expert plus a combination-weight ranking.
+        Delegates to CircuitDepthLayer.to_symbolic per depth (G2,
+        plan_2026-05-13_e33114da).
         """
         if not self.built:
             raise RuntimeError(
@@ -695,26 +740,8 @@ class LearnableNeuralCircuit(keras.layers.Layer):
         lines: List[str] = []
         for depth, cl in enumerate(self.circuit_layers):
             lines.append(f"depth {depth}:")
-            for i, op in enumerate(cl.logic_operators):
-                lines.append(f"  logic_op_{i}: {op.to_symbolic(top_k=top_k)}")
-            for j, op in enumerate(cl.arithmetic_operators):
-                lines.append(f"  arithmetic_op_{j}: {op.to_symbolic(top_k=top_k)}")
-            # Combination weights ranking. Per-channel mode collapses to mean.
-            cw = ops.convert_to_numpy(
-                ops.softmax(cl.combination_weights, axis=-1)
-            )
-            if cw.ndim > 1:
-                cw = cw.mean(axis=0)
-            total = cl.num_logic_ops + cl.num_arithmetic_ops
-            names = (
-                [f"logic_op_{i}" for i in range(cl.num_logic_ops)]
-                + [f"arithmetic_op_{j}" for j in range(cl.num_arithmetic_ops)]
-            )
-            ranked = sorted(zip(names, cw.tolist()), key=lambda kv: -kv[1])[:top_k]
-            lines.append(
-                "  combination: "
-                + ", ".join(f"{n}({p:.3f})" for n, p in ranked)
-            )
+            for line in cl.to_symbolic(top_k=top_k).split("\n"):
+                lines.append(f"  {line}")
         return "\n".join(lines)
 
     def get_config(self) -> Dict[str, Any]:
