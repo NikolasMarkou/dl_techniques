@@ -233,6 +233,60 @@ fused = LearnableArithmeticOperator(
 model = keras.Model([a, b], fused)
 ```
 
+## Changes in plan_2026-05-13_3a2f1d23
+
+Material defaults flipped to best-practice (BREAKING for callers relying on
+prior defaults; opt-out with explicit keyword args):
+
+| Param                     | Old default       | New default | Class                            |
+|---------------------------|-------------------|-------------|----------------------------------|
+| `softplus_temperature`    | `False`           | `True`      | logic + arithmetic ops           |
+| `operation_initializer`   | `"random_uniform"`| `"zeros"`   | logic + arithmetic ops           |
+| `routing_initializer`     | `"random_uniform"`| `"zeros"`   | CircuitDepthLayer + NeuralCircuit|
+| `combination_initializer` | `"random_uniform"`| `"zeros"`   | CircuitDepthLayer + NeuralCircuit|
+| `allow_unary_degenerate`  | `True`            | `False`     | LearnableLogicOperator           |
+
+New parameters:
+
+- **`selection_mode: 'global' | 'per_channel'`** (default `'global'`) — on all
+  four classes. Per-channel stores `(channels, num_operations)` weights so
+  each channel independently selects its operator. Requires a concrete
+  last-axis dim at build time.
+- **`gate_entropy_coefficient: float`** — canonical replacement for
+  `load_balance_coefficient`. The old name remains a deprecated alias and
+  emits a `DeprecationWarning`. The serialized config uses the new name.
+- **`force_clip_when_no_sigmoid: bool`** (LearnableLogicOperator) — when
+  `apply_sigmoid=False`, defensively clips inputs to `[0, 1]`. Auto-enabled
+  on depths ≥ 1 inside `LearnableNeuralCircuit` when
+  `apply_sigmoid_per_depth='first_only'` with arithmetic experts.
+- **`yager_p: float`** (default 2.0) — sharpness parameter for the new
+  Yager t-norm operations. Round-trips.
+- **`diversity_coefficient: float`** (CircuitDepthLayer) — when > 0, adds
+  a pairwise cosine-similarity aux loss between same-arity inner experts.
+
+New operations on `LearnableLogicOperator.VALID_OPS`:
+
+- `hamacher_and`, `hamacher_or`
+- `yager_and`, `yager_or` (parameterized by `yager_p`)
+
+Correctness fixes:
+
+- **C1 (Gumbel canonical form)**: `_operation_probs` now computes
+  `softmax((w + g) / T)` per Jang (2017) Concrete distribution, not the
+  previous `softmax((w / T) + g)`.
+- **C5 (deterministic `to_symbolic`)**: `to_symbolic()` has a
+  `deterministic: bool = True` param that skips Gumbel noise so the printed
+  selection is reproducible during training. Default is `True`.
+- **M1 (`to_symbolic` walker)**: `LearnableNeuralCircuit.to_symbolic()` now
+  walks all depths and prints a multi-line summary including per-depth
+  combination weights.
+
+New callback:
+
+- `dl_techniques.callbacks.temperature_annealing.TemperatureAnnealingCallback`
+  — anneals `temperature` across epochs with cosine / linear / exp schedule.
+  Honors `softplus_temperature=True` by setting raw = `log(expm1(t))`.
+
 ## References
 
 - Liu, H., Simonyan, K., Yang, Y. (2018). *DARTS: Differentiable Architecture
