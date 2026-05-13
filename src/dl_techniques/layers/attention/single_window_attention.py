@@ -1,7 +1,7 @@
 import keras
 from typing import Any, Dict, Optional, Tuple, Union
 
-from ..kan_linear import KANLinear
+from ..ffn.kan_linear import KANLinear
 from ..activations.adaptive_softmax import AdaptiveTemperatureSoftmax
 from ..activations.routing_probabilities import RoutingProbabilitiesLayer
 

@@ -421,7 +421,7 @@ plt.show()
 You can use `KANLinear` as a drop-in replacement for `Dense` in any Keras model.
 
 ```python
-from dl_techniques.layers.kan_linear import KANLinear
+from dl_techniques.layers.ffn.kan_linear import KANLinear
 
 inputs = keras.Input(shape=(28, 28, 1))
 x = keras.layers.Conv2D(32, 3, activation="relu")(inputs)

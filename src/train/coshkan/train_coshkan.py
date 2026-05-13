@@ -12,7 +12,7 @@ from typing import Dict, Any
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.shearlet_transform import ShearletTransform
 from dl_techniques.layers.complex_layers import ComplexDense, ComplexConv2D, ComplexReLU
-from dl_techniques.layers.kan_linear import KANLinear
+from dl_techniques.layers.ffn.kan_linear import KANLinear
 from dl_techniques.models.coshkan.model import CoshKan, create_coshkan, create_coshkan_variant
 
 from train.common import (

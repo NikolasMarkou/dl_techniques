@@ -18,7 +18,7 @@ from typing import Tuple, Optional, List
 from dataclasses import dataclass
 
 from dl_techniques.models.kan.model import create_kan_model
-from dl_techniques.layers.kan_linear import KANLinear
+from dl_techniques.layers.ffn.kan_linear import KANLinear
 from dl_techniques.utils.logger import logger
 from dl_techniques.visualization import (
     VisualizationManager,

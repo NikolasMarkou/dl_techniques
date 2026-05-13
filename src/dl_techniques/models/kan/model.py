@@ -34,7 +34,7 @@ import numpy as np
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.kan_linear import KANLinear
+from dl_techniques.layers.ffn.kan_linear import KANLinear
 
 # ---------------------------------------------------------------------
 
