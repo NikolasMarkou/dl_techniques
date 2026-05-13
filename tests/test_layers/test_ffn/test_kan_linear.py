@@ -27,7 +27,7 @@ import keras
 from keras import ops, layers
 import tensorflow as tf
 
-from dl_techniques.layers.kan_linear import KANLinear
+from dl_techniques.layers.ffn.kan_linear import KANLinear
 
 
 class TestKANLinear:
