@@ -30,6 +30,22 @@
 - Anchor at impact site (not at decision definition). One anchor per impact site, even if shared with sibling decision.
 <!-- /COMPRESSED-SUMMARY -->
 
+## plan_2026-05-14_c95e848c
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-14_c95e848c/D-NNN` anchor exists in source)
+-->
+
+### D-001 | EXPLORE → PLAN | 2026-05-14
+**Context**: E5 (CLEVR-Hans3) needs a vision pipeline with a `LearnableNeuralCircuit` head. Dataset is MIT-licensed and headless-downloadable (~2.4 GB). `keras.applications.ResNet50` is the only live pretrained Keras CNN; in-house ResNet18 has placeholder weights. NS-CL paper-reproduction is 2-3 days — out of 16h budget.
+**Decision**: Three-way comparison: ResNet50-frozen+circuit vs ResNet50-frozen+MLP (param-matched) vs perfect-perception oracle (scene-graph JSON → circuit). Wall-clock leashes: download 2h, per-model 6h, total 16h. Honest-negative branch if download fails.
+**Trade-off**: Substitute ResNet-18 with ResNet50 **at the cost of** strictly param-matched comparison to the analysis summary's original spec.
+**Reasoning**: ResNet50 is the only live pretrained Keras CNN. NS-CL replaced with oracle because (i) it isolates the reasoning-head question from perception quality, (ii) ships within budget. Follows `train_e1_image.py` (LESSONS L51 circuit defaults).
+**Anchor-Refs**: pending — add `# DECISION plan_2026-05-14_c95e848c/D-001` to `src/train/logic/train_e5_clevr_hans.py` at model-factory site during EXECUTE.
+
 ## plan_2026-05-14_e26eede2
 ### D-001 | EXPLORE → PLAN | 2026-05-14
 **Context**: `to_symbolic()` returns a multi-line human-readable string, not an executable AST (F1). Parsing it back into a categorical-domain predicate is brittle and crosses an unnecessary abstraction layer.
@@ -254,25 +270,3 @@
 **Decision**: Restore explicit `child.build(input_shape)` calls in `CircuitDepthLayer.build()` and `LearnableNeuralCircuit.build()` for every sublayer. Children are still constructed in `__init__` (for serialization-config matching), but their state is created in the parent's `build()`.
 **Trade-off**: Two-stage child management (construct in __init__, build in parent.build) **at the cost of** non-idiomatic Keras 3 pattern (the docs encourage lazy build). Reversed-the-prior-judgment: prior plan's "cargo-cult manual build" call was actually correct.
 **Reasoning**: Keras 3 round-trip requires the saved weights file to map cleanly to a built layer hierarchy on load. Without manual build, the loader sees variables for children that haven't been built and raises. Documented for future readers.
-
-## plan_2026-05-13_e52a5ac8
-### D-001 | EXPLORE → PLAN | YYYY-MM-DD
-**Context**: <one-paragraph background — what was discovered in EXPLORE>
-**Decision**: <chosen approach in one sentence>
-**Trade-off**: <X> **at the cost of** <Y>
-**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-13_e52a5ac8/D-NNN` anchor exists in source)
--->
-
-### D-001 | EXPLORE → PLAN | 2026-05-13
-**Context**: Prior review (assistant turn) flagged ~30 issues in `layers/logic/`. Per LESSONS L20, every claim was empirically verified via `findings/verify_claims.py`. 6 claims confirmed actionable + low-risk; others either overstated (H4), false positive (L4), inherent-to-math (C5), or already documented per LESSONS L38 (C6). Cross-plan context: predecessor plan_2aaad563 already aligned this package's surface and deliberately deferred unary degeneracy to README.
-**Decision**: Apply only the 6 empirically-confirmed, additive, low-risk fixes (C1, M2, H10, H9, C3, L2); defer high-risk semantic changes (C2, C4, C5) and design opportunities (H1-H8, O1-O10).
-**Trade-off**: Safety and zero-regression risk **at the cost of** leaving real but invasive issues unaddressed (input-side routing pathology C2, temperature reparam C4, division gradient hazard C5 — documented as README warnings instead).
-**Reasoning**:
-- C2 (output-side routing) is a semantic break with high blast radius; user has working consumer (`train/latent_reasoning_vision/circuit.py`) depending on current behavior — defer until concrete demand.
-- C4 (softplus temperature) changes `.keras` archive semantics — temperature_init=1.0 would no longer mean temperature=1.0; breaks existing saved configs (LESSONS L94/L118 risk).
-- C5 (safe_divide) — huge gradients near zero are inherent to division; current `_safe_divide` is arguably correct; smoother alternatives (`x1*x2/(x2²+ε²)`) change function semantics significantly. Document hazard instead.
-- C6 (NOT-in-binary-pool) — explicitly classified as documented footgun by LESSONS L38.
-- H4 (zeros init) — empirically 1.4% softmax spread; cosmetic, not functional. Skip.
-- L4 (initializer round-trip) — false positive; works correctly.
-**Anchor-Refs**: TBD at EXECUTE step boundaries (only C1 + C3 fixes warrant `# DECISION` anchors per the 5-trigger rule in `references/decision-anchoring.md` — they encode "do NOT revert to false default" and "apply_sigmoid=False is intentional for stacked use").

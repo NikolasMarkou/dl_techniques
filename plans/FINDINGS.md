@@ -34,6 +34,48 @@
 - **`current_phase` / `_global_step` counters**: `add_weight(trainable=False, dtype="float32")` — int32 fails CPU/GPU device placement.
 <!-- /COMPRESSED-SUMMARY -->
 
+## plan_2026-05-14_c95e848c
+### Index
+
+| Topic | File | One-line takeaway |
+|-------|------|-------------------|
+| CLEVR-Hans3 dataset reality | `findings/clevr_hans3_dataset.md` | MIT-licensed, 2.4GB headless download verified live; "clean" = official test split, "confounded" = val split; 26GB free disk is tight but feasible; perfect-perception oracle (scene-graph JSON) replaces infeasible NS-CL baseline. |
+| Pretrained backbone options | `findings/keras_backbone_options.md` | In-house ResNet18 has no pretrained weights (placeholder URL); `keras.applications.ResNet50(weights="imagenet")` is the only live ImageNet backbone. Use ResNet50 at 128x128, frozen, GAP-then-Dense(64)-embed -> circuit. |
+| Repo precedent for image-circuit pipeline | `findings/repo_precedent_image_circuit.md` | Pattern-1 trainer template + `latent_reasoning_vision` + `train_e1_image.py` are the precedents; new `train_e5_clevr_hans.py` will define the keras.applications+circuit pattern. circuit depth=2, arith=['add','max','min'] per LESSONS L51. |
+
+### Key Constraints
+
+### HARD (non-negotiable)
+- **Disk: 26 GB free on `/media/arxwn/data_fast` (89% full).** Dataset zip 2.4 GB + extracted ~5-8 GB. Must delete zip after extract.
+- **GPU 0 (RTX 4090, 24GB) ONLY** for image-resolution training. GPU 1 OK for oracle baseline.
+- **Library frozen**: `src/dl_techniques/layers/logic/` and existing `src/train/logic/*.py`.
+- **Single GPU jobs**, `CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg`.
+- **Hard wall-clock leashes** (orchestrator override): download 2h, per-model 6h, total 16h.
+- **No `keras.applications.ResNet18`** — use ResNet50 (real ImageNet weights) instead of in-house ResNet18 (placeholder URL).
+- **Circuit defaults** (LESSONS L51): `circuit_depth=2`, `arithmetic_op_types=['add','max','min']`, `apply_sigmoid_per_depth='first_only'`.
+- **AdamW WD only** (LESSONS L72). **`dl_techniques.utils.logger`** — no `print`.
+
+### SOFT
+- ResNet50 at 128x128 input frozen. Fallback 96x96 if OOM.
+- `Dense(64)` embed before circuit (LESSONS L52 family).
+- `tf.data` with `.cache().shuffle().batch().prefetch(AUTOTUNE)`.
+
+### GHOST
+- "ResNet-18 from torchvision" — no Keras-native pretrained ResNet18 exists; ResNet50 substitutes cleanly (already pre-flagged in goal).
+- "NS-CL reproduction" — out of budget; perfect-perception oracle better isolates the reasoning-head question.
+
+### Exploration confidence
+- Scope: **deep** (3 indexed findings cover all 5 KEY UNKNOWNS in the goal).
+- Solutions: **adequate** (3-way comparison; graceful fallback to 2-way on dataset failure).
+- Risks: **clear** (disk pressure, dataset flakiness, ResNet50 substitution, NS-CL skipped — all mitigated).
+
+### Synthesis paragraph
+
+E5 is runnable within the 16h cap. Download is verified live (HTTP 200, range requests work, zip-magic confirmed). The "ResNet-18" specification in the analysis summary is suggestive; `keras.applications.ResNet50` is the only Keras-native pretrained CNN in this stack, used frozen at 128x128. Shortcut-gap metric: `val_acc - test_acc` — val keeps the training-distribution confounders, test is the clean (non-confounded) split per README. NS-CL is replaced by a **perfect-perception oracle** trained directly on the scene-graph JSON attributes, isolating the reasoning-head question from perception. Plan ships `clevr_hans_data.py` (download + loader + symbolic encoder), `train_e5_clevr_hans.py` (3 configs), unit tests, and an honest-negative branch that ships code + tests even if download fails.
+
+### Corrections
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong.*
+
 ## plan_2026-05-14_e26eede2
 ### Index
 
@@ -222,55 +264,3 @@ The detailed review is in `analyses/analysis_2026-05-13_62e26431/summary.md` (th
 
 ### Corrections
 *Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
-
-## plan_2026-05-13_e52a5ac8
-### Index
-
-- **F-001 Empirical verification of prior-review claims** — `findings/verify_claims.py` script + output below.
-- **F-002 Test sensitivity scan for proposed fixes** — which tests would break for each candidate fix.
-- **F-003 Cross-plan precedent** — prior plan_2aaad563 already addressed same package; LESSONS L38 explicitly rules unary degeneracy out-of-scope.
-
-### F-001: Empirical results (one per prior-review claim)
-
-| Claim | Verdict | Evidence |
-|---|---|---|
-| **C1** `LearnableNeuralCircuit` default `use_residual=False` while `CircuitDepthLayer` default is `True` | **CONFIRMED** | `inspect.signature` shows mismatch; default-config ‖y‖/‖x‖ = 0.38, with `use_residual=True` = 1.69. |
-| **C2** Input-side routing shrinks signal | **CONFIRMED, MILDER than claimed** | Ratio 0.38 (not 1/N²). Real but recoverable with residual. |
-| **C3** Stacked `LearnableLogicOperator` collapses to constant | **CONFIRMED, SEVERE** | std: 1.759 → 0.056 → 0.003 → 0.000 across 3 layers. Unusable as building block. |
-| **C4** Temperature gradient is exactly 0 when raw value < 1e-7 | **CONFIRMED** | At temp=-0.5, ∂L/∂T = 0.0 exactly. At temp=+0.5, ∂L/∂T = 0.31. |
-| **C5** `_safe_divide` gradient blow-up near zero | **CONFIRMED but partially expected** | At x2=0, d/dx2 = 0 (discontinuity); at x2=1e-3, d/dx2 = -1e6. Huge gradients near zero are inherent to division — current behavior is *arguably correct*. Documentation/awareness fix more appropriate than code change. |
-| **C6** `NOT` competes in same softmax as binary ops, silently drops x2 | **CONFIRMED — already documented** | Per LESSONS L38: "documented footgun, not a bug to fix in code". Defer. |
-| **H4** `random_uniform` arch-init biases selection | **OVERSTATED** | 7-way softmax probs from `random_uniform(-0.05, 0.05)` init: max-min = 0.0137 (≈1.4% spread). Essentially uniform. Not worth changing. |
-| **H10** `validate_logic_config` accepts `bool` as positive int | **CONFIRMED** | `validate_logic_config("circuit_depth", num_logic_ops=True)` passes silently. |
-| **M2** `compute_output_shape` returns `None` for list-deserialized shape | **CONFIRMED** | `compute_output_shape([None, 32])` returns `None`; `(None, 32)` returns `(None, 32)`. Same in `LearnableArithmeticOperator` and `LearnableLogicOperator`. |
-| **L4** Initializer round-trip broken | **FALSE POSITIVE** | `keras.initializers.get(serialized_dict)` handles dict form; `GlorotNormal` round-trips correctly. |
-
-### F-002: Test sensitivity for proposed fixes
-
-| Fix | Touches | Test impact |
-|---|---|---|
-| **C1** flip `LearnableNeuralCircuit.use_residual=True` default | `neural_circuit.py:389` | None — no test asserts default value; `test_with_residual_connections` passes both explicit values. |
-| **M2** disambiguate list-shape in `compute_output_shape` | `arithmetic_operators.py:422`, `logic_operators.py:411` | None — no test currently calls `compute_output_shape([None, D])` directly. |
-| **H10** reject `bool` in validator | `factory.py:215` | None — no test passes bool. |
-| **H9** deepcopy `get_logic_info()` | `factory.py:175` | None — no test mutates the returned dict. |
-| **C3** add `apply_sigmoid=True` flag | `logic_operators.py` (new ctor param) | None — default `True` preserves all existing behavior incl. `test_sigmoid_input_normalization`. |
-| **L2** `logger.info` → `logger.debug` for noisy init logs | All four files | None — no test asserts on log content. |
-
-### F-003: Cross-plan precedent
-
-- **plan_2026-05-13_2aaad563** (the predecessor) already aligned this package: added `factory.py`, populated `__init__.py`, relaxed 4-D ghost constraint, documented unary footgun in README. Chose to NOT fix unary degeneracy in code.
-- **LESSONS L38** (codified outcome): "Unary-input degeneracy in DARTS-style 'softmax over primitives' layers ... is a documented footgun, not a bug to fix in code."
-- **LESSONS L20** (governing principle): "Verify reviewer claims empirically before applying fixes from a 'deep review'. Reviews contain false positives."
-- **LESSONS L21**: "A correctly-flagged bug can mask a worse adjacent bug. Sweep the category."
-
-### Key Constraints
-
-- **HARD**: 107 PASS baseline must remain green (`tests/test_layers/test_logic/`).
-- **HARD**: `src/train/latent_reasoning_vision/circuit.py` import path locked.
-- **HARD**: bare `@register_keras_serializable()` — no module relocation (LESSONS L94/L118).
-- **HARD**: `.keras` archive compatibility for existing checkpoints — any change to parameter semantics (e.g. softplus reparam of `temperature`) breaks reload. Defer such changes.
-- **SOFT**: prefer additive over destructive — new ctor flags with backward-compatible defaults.
-
-### Corrections
-
-None.
