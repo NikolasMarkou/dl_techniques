@@ -205,21 +205,30 @@ def find_splits(data_dir: str) -> Dict[str, Dict[str, str]]:
 
     out: Dict[str, Dict[str, str]] = {}
     for split in ("train", "val", "test"):
-        images_dir = os.path.join(root, "images", split)
-        # Common scene-JSON naming variants.
-        candidates = [
+        # Actual upstream layout (verified 2026-05-14):
+        #   <root>/<split>/images/*.png
+        #   <root>/<split>/CLEVR_HANS_scenes_<split>.json
+        # Also tolerate the "flat" convention some CLEVR releases use:
+        #   <root>/images/<split>/*.png
+        #   <root>/scenes/CLEVR_Hans3_<split>_scenes.json
+        images_dir_candidates = [
+            os.path.join(root, split, "images"),
+            os.path.join(root, "images", split),
+        ]
+        scenes_json_candidates = [
+            os.path.join(root, split, f"CLEVR_HANS_scenes_{split}.json"),
             os.path.join(root, "scenes", f"CLEVR_Hans3_{split}_scenes.json"),
             os.path.join(root, "scenes", f"CLEVR-Hans3_{split}_scenes.json"),
             os.path.join(root, "scenes", f"{split}_scenes.json"),
         ]
-        scenes_json = next((p for p in candidates if os.path.isfile(p)), None)
-        if os.path.isdir(images_dir) and scenes_json is not None:
+        images_dir = next((p for p in images_dir_candidates if os.path.isdir(p)), None)
+        scenes_json = next((p for p in scenes_json_candidates if os.path.isfile(p)), None)
+        if images_dir is not None and scenes_json is not None:
             out[split] = {"images_dir": images_dir, "scenes_json": scenes_json}
         else:
             logger.warning(
                 f"find_splits: split '{split}' missing "
-                f"(images_dir={os.path.isdir(images_dir)}, "
-                f"scenes_json={scenes_json is not None})."
+                f"(images_dir={images_dir}, scenes_json={scenes_json})."
             )
     return out
 
