@@ -30,6 +30,43 @@
 - Anchor at impact site (not at decision definition). One anchor per impact site, even if shared with sibling decision.
 <!-- /COMPRESSED-SUMMARY -->
 
+## plan_2026-05-14_9c6387a3
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-14_9c6387a3/D-NNN` anchor exists in source)
+-->
+
+### D-001 | EXPLORE → PLAN | 2026-05-14
+**Context**: EXPLORE found that all three training scripts (`train_e1_image.py`, `train_e3_faithfulness.py`, `train_e5_clevr_hans.py`) already accept `--seed` and call `keras.utils.set_random_seed(args.seed)` in `main()` before any dataset shuffling or model construction. This is the canonical Keras 3 multi-source seed primitive (seeds Python `random`, `np.random`, `tf.random.set_seed`, and Keras backend RNG simultaneously).
+**Decision**: Drive each script via subprocess from a new `multiseed_sweep.py`; do not edit library or training scripts.
+**Trade-off**: Process-startup overhead per seed (~3-5s for TF init) **at the cost of** preserving the FROZEN invariant on training scripts and avoiding any cross-seed state leakage (every TF session is fresh).
+**Reasoning**: Subprocess driver is preferred (per goal text). Each seed gets a clean TF/Keras initialization, eliminating cross-seed state contamination. The ~3-5s overhead × 5 seeds × 4 experiments = ~80s total — negligible against ~90min total run. Alternative (in-process import + `keras.backend.clear_session()` between runs) is brittle and conflates state.
+**Anchor-Refs**: none (no source edits).
+
+### D-002 | PLAN | 2026-05-14
+**Context**: E5 specifies a paired permutation test for circuit-vs-MLP shortcut-gap difference. With n=5 paired samples, parametric tests (Welch t) are statistically dubious. Permutation tests are exact and non-parametric in small n.
+**Decision**: Use paired sign-flip permutation test (B=10000, two-sided) on per-seed `(circuit_shortcut_gap - mlp_shortcut_gap)` differences, with a deterministic RNG (`np.random.default_rng(20260514)`).
+**Trade-off**: Conservatism on small-n (worst-case p-value resolution = 1/2^5 = 0.03125 if all sign flips enumerated) **at the cost of** zero distributional assumptions.
+**Reasoning**: At n=5, only 2^5=32 unique sign-flip patterns exist. Sampling B=10000 is essentially complete enumeration (with replacement). p-value resolution is exact for the chosen sample. Welch t would require normality assumption that 5 paired samples cannot validate; permutation is the textbook choice (Efron 1979, Phipson & Smyth 2010).
+**Anchor-Refs**: none (new module).
+
+### D-003 | PLAN | 2026-05-14
+**Context**: E3 attribution sweep uses LIME and SHAP. Default hyperparams (`--lime-num-samples 2000 --shap-nsamples 128 --num-attr-samples 32`) make a single E3 run take ~30 min. With 5 seeds, this is 2.5h on E3 alone — still inside the 4h leash but using most of it for marginal statistical benefit.
+**Decision**: Pass reduced hyperparams `--num-attr-samples 8 --lime-num-samples 200 --shap-nsamples 32` to the E3 subprocess invocations (matching the LESSONS L67 reduced run that completed E3 in 6 min total).
+**Trade-off**: Lower attribution-stability resolution per seed (LIME/SHAP variance is dominated by `lime_num_samples`) **at the cost of** total wall-clock budget headroom.
+**Reasoning**: The headline metrics for the multi-seed sweep are mean and std across seeds, not within-seed attribution stability. The seed-to-seed variance from `keras.utils.set_random_seed` is much larger than the LIME/SHAP sampling variance at these hyperparams. The prior 6-min E3 run produced usable circuit_suff_auc / lime_suff_auc / shap_suff_auc numbers; we replicate that recipe.
+**Anchor-Refs**: none.
+
+### D-004 | PLAN | 2026-05-14
+**Context**: Some metrics may saturate (E5 oracle val_acc=1.000 across all seeds; E3 parity_k8 hard_acc near 1.000) yielding std=0. Bootstrap CI on zero-variance data has width 0; permutation test on identical paired data has p=1.0.
+**Decision**: Stats module handles zero-variance cases explicitly: `bootstrap_ci` returns `(value, value)` when all data identical; `paired_permutation_test` returns `(0.0, 1.0)` when all paired diffs are zero. Both behaviors are unit-tested.
+**Trade-off**: Slight branching in pure functions **at the cost of** robust degenerate-case behavior (no NaN propagation, no divide-by-zero).
+**Reasoning**: Saturation is an expected real outcome of these benchmarks (LESSONS L61). Refusing to handle it cleanly is a footgun. The unit tests pin the contract.
+**Anchor-Refs**: none.
+
 ## plan_2026-05-14_c95e848c
 ### D-001 | EXPLORE → PLAN | YYYY-MM-DD
 **Context**: <one-paragraph background — what was discovered in EXPLORE>
@@ -244,29 +281,3 @@
 **Trade-off**: API clarity **at the cost of** carrying a deprecated alias indefinitely (cannot remove without breaking external consumer).
 **Reasoning**: Renaming silently would break the external consumer. Adding the canonical name with an alias preserves bit-exact behavior for existing callers while letting new code use the correct term. Aligns with library convention that misnamed APIs get aliased, not replaced.
 **Anchor-Refs**: `src/dl_techniques/layers/logic/neural_circuit.py:45`
-
-## plan_2026-05-13_a2b0f17b
-### D-001 | EXPLORE → PLAN | 2026-05-13
-**Context**: Prior plan `plan_2026-05-13_e52a5ac8` already empirically verified this exact review and deferred most fixes for documented reasons (consumer break, `.keras` round-trip break, "documented footgun not bug" per LESSONS L38). User has explicitly overridden these conclusions and selected "Everything including B, E, F, G (full rewrite)" via AskUserQuestion.
-**Decision**: Implement all overrides A-G plus the 5 truly-new safe items in a single multi-phase plan, with **opt-in flags preserving back-compat** for every behavior-changing change to maximize chance of passing existing 118 tests.
-**Trade-off**: Comprehensive coverage of every review item **at the cost of** API surface explosion (≈8 new optional params on `LearnableLogicOperator` alone) and a guaranteed need to update the consumer `circuit.py`. Justified because user explicitly selected the maximum-scope option after being shown the alternative.
-**Reasoning**: Previously rejected items (softplus reparam, smooth divide, routing rewrite, MoE aux losses) are real engineering improvements; the prior plan rejected them on prudence grounds (don't fix what consumers depend on). User has now overridden prudence with eyes open. The opt-in default scheme (`circuit_routing='output_only'` new default but `'classic'` preserves old; `softplus_temperature=False` default; `safe_divide_mode='hard_clamp'` default) is the right balance: new code gets fixed behavior, archive load still works.
-**Alternatives rejected**:
-- Full rewrite with no back-compat shims: would invalidate 118 tests + every saved `.keras` → too brittle.
-- Implement only safe items: ignores user's explicit override.
-- Decompose into 3-4 separate plans: matches LESSONS guidance for >iter-5 work, but user wanted single-pass; we'll decompose if iter-3 hits.
-**Anchor-Refs**: pending — will anchor at the actual code sites in EXECUTE.
-
-### D-002 | PLAN | 2026-05-13
-**Context**: Plan v1 has 18 steps across 4 phases touching 10 files. Step 12 (routing rewrite) is the highest-blast-radius change because it alters the math the consumer was trained against.
-**Decision**: Make `circuit_routing` a `Literal['classic','output_only']` with new default `'output_only'`. Pin consumer `circuit.py` to `'classic'` only if its smoke test fails on the new default.
-**Trade-off**: Honest default that fixes the math **at the cost of** breaking any external trained `.keras` files that depend on the old attenuated forward pass.
-**Reasoning**: The user's override extends to consumer changes. If a deployed model was trained against the broken routing, retraining is the honest fix; backward-compat as opt-in is sufficient.
-**Anchor-Refs**: `src/dl_techniques/layers/logic/neural_circuit.py` (CircuitDepthLayer ctor + call), `src/dl_techniques/layers/logic/arithmetic_operators.py` (sign-preserving power, smooth divide), `src/dl_techniques/layers/logic/logic_operators.py` (allow_unary_degenerate raise).
-**Outcome**: Consumer `train/latent_reasoning_vision/circuit.py` smoke-tested with new default (1033690 params, finite forward) — no consumer patch needed.
-
-### D-003 | EXECUTE | 2026-05-13
-**Context**: After moving sublayer creation to __init__ (intending lazy build via __call__), `test_factory_layer_round_trip[circuit_depth-kwargs2]` failed with "Layer 'arithmetic_op_0' was never built and thus it doesn't have any variables. However the weights file lists 3 variables for this layer." The Keras 3 saving contract requires that the parent's `build()` method explicitly create state of all children, not rely on later `__call__` to do it.
-**Decision**: Restore explicit `child.build(input_shape)` calls in `CircuitDepthLayer.build()` and `LearnableNeuralCircuit.build()` for every sublayer. Children are still constructed in `__init__` (for serialization-config matching), but their state is created in the parent's `build()`.
-**Trade-off**: Two-stage child management (construct in __init__, build in parent.build) **at the cost of** non-idiomatic Keras 3 pattern (the docs encourage lazy build). Reversed-the-prior-judgment: prior plan's "cargo-cult manual build" call was actually correct.
-**Reasoning**: Keras 3 round-trip requires the saved weights file to map cleanly to a built layer hierarchy on load. Without manual build, the loader sees variables for children that haven't been built and raises. Documented for future readers.

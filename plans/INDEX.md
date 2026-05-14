@@ -61,3 +61,4 @@
 | plan_2026-05-13_798d3a60 | 2026-05-13 | Implement E1 (Petersen-DLGN-style replication on MNIST + CIF |  |
 | plan_2026-05-14_e26eede2 | 2026-05-14 | Implement E4 (UCI Monks-1/2/3 rule recovery) + low-data 11-b |  |
 | plan_2026-05-14_c95e848c | 2026-05-14 | Implement E5 (CLEVR-Hans3 visual reasoning) for `LearnableNe | 'add','max','min' |
+| plan_2026-05-14_9c6387a3 | 2026-05-14 | Multi-seed robustness sweep over E1 (MNIST+CIFAR-10), E3 (3  |  |

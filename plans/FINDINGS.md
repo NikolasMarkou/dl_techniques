@@ -34,6 +34,54 @@
 - **`current_phase` / `_global_step` counters**: `add_weight(trainable=False, dtype="float32")` — int32 fails CPU/GPU device placement.
 <!-- /COMPRESSED-SUMMARY -->
 
+## plan_2026-05-14_9c6387a3
+### Index
+
+| # | Topic | File | Confidence |
+|---|-------|------|------------|
+| F1 | **Seed propagation already correct** — all three scripts call `keras.utils.set_random_seed(args.seed)` in `main()`. No library/script edits required. | `findings/seed-propagation-audit.md` | High (source-verified, line-cited) |
+| F2 | **CSV schemas + aggregation surface** — E1/E3 write `benchmark_results.csv`, E5 writes `results.csv`. Aggregation keys: E1 `(dataset, model)`, E3 `(task,)`, E5 `(model,)`. No `seed` column — inject at aggregation. | `findings/csv-schemas-and-aggregation.md` | High (verified against actual CSVs) |
+| F3 | **Wall-clock budget** — total estimated 5-seed run is ~90 min, well under 12h global cap. Per-experiment leashes generous. | `findings/wallclock-and-orchestration.md` | High (extrapolated from existing wall_s numbers) |
+
+### Key Constraints
+
+### HARD (non-negotiable)
+- **All three scripts already accept `--seed` and call `keras.utils.set_random_seed(args.seed)`.** Library code (`src/dl_techniques/layers/logic/`) and existing training scripts stay FROZEN. **No script edits.**
+- **`MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=0`** prefix on every subprocess (LESSONS).
+- **Serial GPU only** — never parallel (user memory, LESSONS L80).
+- **CIFAR-10 band override required**: `--band-low 0.50 --band-high 0.80` (default is MNIST-tuned 0.70/0.95).
+- **E5 dataset pre-check**: must verify `data/clevr_hans3/` exists before launching E5; pass `--skip-download`.
+- **Hard wall-clock leashes** (from goal): E1 6h, E3 4h, E5 2h, global 12h. Realistic estimate ~1.5h total, so massive headroom.
+- **2-attempt autonomy leash per step**. Honest-negative on partial seed failures.
+- **No `make test`** (1.5h pre-push hook). Scope pytest to `tests/test_train/test_logic/test_multiseed_stats.py`.
+- **n=1 regression check** (REFLECT): existing seed=42 runs (`logic_e1_mnist_20260514_012632`, `logic_e1_cifar10_20260514_013356`, `logic_e3_20260514_013937`, `logic_e5_run`) define the prior n=1 values that must fall within new mean ± 2*std.
+- **E3 attribution-sweep hyperparams reduced** (LESSONS L67): `--num-attr-samples 8 --lime-num-samples 200 --shap-nsamples 32` to keep per-seed runtime at ~6 min.
+- **High-variance retract/qualify rule**: any metric where std > |mean| flagged at REFLECT.
+
+### SOFT
+- **Two new files** (`multiseed_sweep.py`, `multiseed_stats.py`) + one test file. Coupling at N=2 — do not pre-extract shared utilities (LESSONS L11).
+- **Subprocess driver**, not in-process import — gives each seed a clean TF/Keras initialization, matches the goal's "runs the underlying scripts via subprocess or imports their main()" preference (a).
+- **pandas + numpy + scipy for stats** — pandas already in deps; scipy used elsewhere for similar tests.
+- **Permutation test (E5)** — paired by seed index between `resnet50_circuit` and `resnet50_mlp` on `shortcut_gap`. B=10000, two-sided. Independent fixed RNG (e.g. `np.random.default_rng(20260514)`) so the p-value is reproducible.
+- **Bootstrap CI (B=2000)** for the headline gap metric per (model, dataset). Same fixed RNG.
+
+### GHOST (constraints that no longer apply)
+- **"Maybe we need to add `set_global_seed`"** — superseded. The scripts already have correct propagation. Adding a shim would be dead code.
+- **"E3 has 3 model configs"** (goal wording) — actually 3 tasks × 1 model (circuit), with 3 attribution methods as columns. Aggregation key is `(task,)`. Resolved at finding F2.
+- **"Determinism flags for cuDNN"** — explicitly NOT required: the whole point of n=5 with mean±std is to characterize stochastic variation; forcing bit-exactness would slow runs without changing the statistics.
+
+### Exploration Confidence
+- **Scope: deep.** All three scripts source-verified, line-cited. All four prior n=1 CSVs read for schema confirmation. Wall-clock predictions derived from actual `wall_s` columns.
+- **Solutions: constrained.** Aggregator pattern is fully specified (subprocess + glob + pandas group-by). Stats module is pure-function and easy to unit-test.
+- **Risks: clear.** Three real risks: (a) E5 dataset absence — pre-check + honest negative, (b) attribution-sweep slowness on E3 — pre-reduce hyperparams per LESSONS L67, (c) saturation/zero-variance metrics — stats module must handle degenerate cases (all-same data → CI width 0, mean = data, std = 0).
+
+### Synthesis paragraph
+
+No script edits are needed — every training script already wires `--seed` through `keras.utils.set_random_seed`, which is the canonical Keras 3 multi-source seed primitive (Python random + NumPy + TF + Keras backend). The plan reduces to two new files: a subprocess-driven sweep orchestrator (`multiseed_sweep.py`) and a pure-stats module (`multiseed_stats.py`) with unit tests. CSV schemas are stable across runs and have stable aggregation keys per experiment (E1: `(dataset, model)`, E3: `(task,)`, E5: `(model,)`). Realistic wall-clock for 5 seeds × 3 experiments is ~90 min — orders of magnitude inside the 12h global cap. Regression check at REFLECT compares each prior seed=42 value against the new n=5 mean ± 2*std, with high-variance (std > |mean|) flagged for retraction. E5's circuit-vs-MLP shortcut_gap is the only test that needs a real significance test (paired permutation, B=10000, two-sided, deterministic RNG).
+
+### Corrections
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
+
 ## plan_2026-05-14_c95e848c
 ### Index
 
@@ -248,19 +296,6 @@ The detailed review is in `analyses/analysis_2026-05-13_62e26431/summary.md` (th
 - Scope: **deep** (every critical claim empirically verified; full test inventory; consumer audit done).
 - Solutions: **constrained** (per-finding fix shape known; phased plan groups by risk).
 - Risks: **clear** (default flips identify the one breaking test; C3 is the only HIGH-risk arch change).
-
-### Corrections
-*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
-
-## plan_2026-05-13_a2b0f17b
-### Index
-- [prior-work-audit](plan_2026-05-13_a2b0f17b/findings/prior-work-audit.md) — `plan_2026-05-13_e52a5ac8` already double-checked the same review; 6 fixes shipped (commit `b562bd0`); most other items deferred for empirical reasons. Genuinely new items enumerated.
-
-### Key Constraints
-- **HARD**: Do not break consumer `src/train/latent_reasoning_vision/circuit.py:122` (depends on current `LearnableNeuralCircuit` shape contract + post-training `operation_weights` access).
-- **HARD**: Do not break `.keras` deserialization for already-saved models — rules out `softplus(temperature)` reparam (LESSONS L94/L118).
-- **SOFT**: Match prior plan's discipline — empirical verification BEFORE implementation; defaults preserve back-compat.
-- **GHOST**: User's emphatic "implement everything MAXIMUM EFFORT" reads as overriding prior empirical conclusions, but those conclusions are still load-bearing — no new evidence has invalidated them. Need explicit override before re-litigating.
 
 ### Corrections
 *Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
