@@ -1,0 +1,16 @@
+model,status,params,epochs_used,wall_s,val_acc,test_acc,shortcut_gap,error,seed
+resnet50_circuit,complete,23719363,16,128.8,0.852889,0.697778,0.155111,,0
+resnet50_mlp,complete,23723203,12,82.4,0.844889,0.644,0.200889,,0
+symbolic_circuit_oracle,complete,12099,6,20.3,1.0,1.0,0.0,,0
+resnet50_circuit,complete,23719363,11,103.0,0.850222,0.7,0.150222,,1
+resnet50_mlp,complete,23723203,12,81.7,0.853333,0.657333,0.196,,1
+symbolic_circuit_oracle,complete,12099,6,20.3,1.0,0.996444,0.003556,,1
+resnet50_circuit,complete,23719363,17,131.6,0.851556,0.666667,0.184889,,2
+resnet50_mlp,complete,23723203,18,110.8,0.850222,0.671111,0.179111,,2
+symbolic_circuit_oracle,complete,12099,6,20.3,1.0,0.999556,0.000444,,2
+resnet50_circuit,complete,23719363,11,101.8,0.844444,0.647556,0.196889,,3
+resnet50_mlp,complete,23723203,18,112.2,0.852,0.676889,0.175111,,3
+symbolic_circuit_oracle,complete,12099,6,19.8,1.0,0.999111,0.000889,,3
+resnet50_circuit,complete,23719363,15,123.0,0.852444,0.674222,0.178222,,4
+resnet50_mlp,complete,23723203,15,96.3,0.850667,0.664889,0.185778,,4
+symbolic_circuit_oracle,complete,12099,7,20.4,1.0,0.999111,0.000889,,4
