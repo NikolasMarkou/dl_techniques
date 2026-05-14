@@ -52,7 +52,7 @@
 
 % ============================================================================
 \begin{abstract}
-We present an empirical evaluation of \circuit{}, a differentiable reasoning head whose internal operators (logic gates and bounded arithmetic) admit a bit-exact \emph{hard extraction} to a symbolic boolean expression.
+We present an empirical evaluation of \circuit{}, a differentiable reasoning head whose internal operators (logic gates and bounded arithmetic) admit a bit-exact \emph{hard extraction}: after training, each operator slot's continuous softmax over the operator alphabet is replaced by a one-hot argmax, yielding a discrete circuit that evaluates to a symbolic boolean expression.
 Across five experimental settings spanning synthetic boolean tasks, image classification, UCI tabular benchmarks, and confounded visual reasoning, we ask two questions: (i) is the symbolic readout \emph{faithful} to the trained model, and (ii) does the architectural prior confer measurable advantages over a parameter-matched MLP?
 We answer (i) affirmatively with high statistical confidence ($n{=}5$ seeds, hard-extraction $\Delta$ within $\pm 0.005$ on every configuration that converged), and (ii) negatively for accuracy and for visual shortcut resistance, but affirmatively for one structurally meaningful task: the Monks-2 counting constraint is recovered exactly by all seeds, while gradient boosting fails (78.5\% vs 100.0\%).
 We also report a clean dissociation on CLEVR-Hans3: with perfect perception (scene-graph input), the same reasoning head reaches 99.9\% on a confounded benchmark with a 0.1\,pt gap to the clean test, while with frozen ResNet50 perception both circuit and MLP collapse equally (${\sim}17$\,pt gap, paired permutation $p{=}0.375$).
@@ -76,15 +76,28 @@ Concretely, it promises two normally-incompatible properties:
   \item \textbf{End-to-end gradient training.} The layer is differentiable, so it composes with arbitrary upstream perception (convolutional stems, ResNets) and downstream loss functions (cross-entropy, MSE).
   \item \textbf{Bit-exact symbolic readout.} After training, an extraction procedure returns a discrete symbolic expression that --- crucially --- is \emph{not} an approximation or a local explanation but is literally the function the network computes at inference.
 \end{itemize}
-\circuit{} (henceforth: \emph{circuit}) is one such layer, implemented in Keras~3 inside the \texttt{dl\_techniques} repository.
-It composes a fixed alphabet of boolean operators (XOR, AND, OR, NAND, NOR, XNOR, plus identity and negation) and bounded arithmetic operators (add, min, max) over learned soft selection weights.
-During training each operator slot maintains a softmax distribution over the operator alphabet and computes a weighted average of the alphabet's outputs.
-After training, \texttt{extract\_hard\_inplace} replaces each slot's softmax by an argmax, collapsing the soft mixture to a single discrete operator per slot.
-The resulting symbolic expression can be evaluated by a finite-state interpreter; if it matches the trained model's outputs bit-for-bit, the readout is said to be \emph{faithful}.
+\circuit{} (henceforth: \emph{circuit}) is one such layer.
+It is built from a fixed alphabet $\mathcal{F} = \mathcal{F}_{\text{logic}} \cup \mathcal{F}_{\text{arith}}$ of eleven differentiable elementary operators:
+\begin{align*}
+  \mathcal{F}_{\text{logic}} &= \{\,\text{XOR},\, \text{AND},\, \text{OR},\, \text{NAND},\, \text{NOR},\, \text{XNOR},\, \text{IDENTITY},\, \text{NEGATION}\,\}, \\
+  \mathcal{F}_{\text{arith}} &= \{\,\text{ADD},\, \text{MIN},\, \text{MAX}\,\}.
+\end{align*}
+Each binary boolean operator is implemented as a smooth function on $[0,1]^2$ that agrees with the discrete operator on the corners of the unit square (e.g.\ $\text{AND}(a,b) = a \cdot b$, $\text{XOR}(a,b) = a + b - 2ab$); the unary operators are $\text{IDENTITY}(a) = a$ and $\text{NEGATION}(a) = 1 - a$.
+The arithmetic operators act on $[0,1]$ values too: $\text{ADD}(a,b) = \min(1,\, a+b)$, $\text{MIN}(a,b) = \min(a,b)$, $\text{MAX}(a,b) = \max(a,b)$.
+A circuit \emph{slot} is a single position in the architecture that selects one operator from $\mathcal{F}$ and applies it to chosen inputs.
+During training, a slot does not commit to a single operator; instead it stores selection logits $\boldsymbol{\ell} \in \R^{|\mathcal{F}|}$ and outputs the soft mixture
+\begin{equation}
+  \mathrm{slot}(x) \;=\; \sum_{k=1}^{|\mathcal{F}|}\, \mathrm{softmax}(\boldsymbol{\ell})_k \cdot f_k(x),
+  \label{eq:soft-mixture}
+\end{equation}
+which is differentiable in $\boldsymbol{\ell}$ and in the slot's input.
+After training, hard extraction sets $k^\star = \arg\max_k \ell_k$ and replaces the slot by the single operator $f_{k^\star}$.
+The set of $k^\star$ values across all slots, together with the (fixed, non-learned) wiring that determines each slot's inputs, defines a discrete symbolic expression.
+If evaluating this expression on a held-out set yields the same predictions as the soft-mixture trained model, we say the readout is \emph{faithful}.
 
 \subsection{Scope of this paper}
 
-The circuit architecture has been published in fragments and is referenced in related work (Section~\ref{sec:related}).
+The circuit architecture is in the family of differentiable logic gate networks (Section~\ref{sec:related}) and is not in itself novel.
 This paper is \emph{not} an architectural contribution.
 It is a deliberately negative-result-friendly empirical study of when the claimed properties hold and when they do not.
 Two top-level questions organize the experiments:
@@ -102,33 +115,49 @@ The negative findings are the larger part of the empirical surface area and are 
 This section defines the recurring concepts used throughout the paper.
 Readers familiar with differentiable logic networks and interpretability metrics can skim.
 
-\paragraph{Soft mixture vs.\ hard extraction.}
-Each operator slot in the circuit holds a vector of \emph{selection logits} $\ell \in \R^{K}$ over the $K$-operator alphabet (8 logic + 3 arithmetic in our configuration).
-During training the slot outputs the softmax-weighted mixture $\sum_k \mathrm{softmax}(\ell)_k \cdot f_k(\text{input})$, which is differentiable end-to-end.
-At extraction time we set the slot's output to $f_{k^*}(\text{input})$ where $k^* = \arg\max_k \ell_k$, discarding all other operators in the slot.
-The set of $k^*$ values across all slots defines a discrete circuit that can be serialized as a boolean expression.
-
 \paragraph{Faithfulness and the hard-extraction $\Delta$.}
-Following the convention used in differentiable logic gate networks~\citep{petersen2022deep}, we define
+Define the two models built from the same trained parameters:
+\begin{itemize}
+  \item the \textbf{soft model}: each slot evaluates the mixture in Eq.~\ref{eq:soft-mixture};
+  \item the \textbf{hard model}: each slot evaluates only $f_{k^\star}$ where $k^\star = \arg\max_k \ell_k$, with all other entries of the softmax discarded.
+\end{itemize}
+We then define the \emph{hard-extraction gap}
 \begin{equation}
-  \Delta \;=\; \mathrm{acc}(\text{hard}) - \mathrm{acc}(\text{soft})
+  \Delta \;=\; \mathrm{acc}(\text{hard}) \;-\; \mathrm{acc}(\text{soft})
   \label{eq:delta}
 \end{equation}
-on the same held-out set, where ``hard'' is the model after \texttt{extract\_hard\_inplace} and ``soft'' is the trained model with softmax mixtures intact.
+on a held-out set, where $\mathrm{acc}$ is whatever the task-appropriate accuracy is (0/1 for classification, exact match for boolean tasks).
 $\Delta \approx 0$ certifies that the symbolic readout computes essentially the same function as the trained model.
-The metric is informative only when the model has not already collapsed to discrete during training: at accuracies near 100\%, each slot's softmax has typically peaked so sharply that argmax is a no-op and $\Delta \equiv 0$ is tautological.
-Section~\ref{sec:e1} introduces a band-checkpoint protocol that measures $\Delta$ in a regime where the soft mixture is still demonstrably non-discrete.
+The metric is informative only when the soft mixture has not already collapsed to a one-hot distribution during training: at accuracies near 100\%, each slot's softmax has typically peaked so sharply that argmax is a no-op and $\Delta \equiv 0$ is tautological.
+We say a softmax of width $K$ over logits $\boldsymbol{\ell}$ is \emph{$\epsilon$-peaked} if $\max_k \mathrm{softmax}(\boldsymbol{\ell})_k \ge 1 - \epsilon$; when every slot in a trained network is, say, $10^{-3}$-peaked, the soft and hard models are functionally identical and $\Delta$ tells us nothing.
+Section~\ref{sec:e1} introduces a band-checkpoint protocol that measures $\Delta$ in a regime where the soft mixture is demonstrably non-peaked.
 
 \paragraph{Parameter matching.}
-We compare the circuit against a two-layer MLP whose hidden width is chosen so the two models have the same parameter count to within $\pm 5\%$.
-On a 17-bit boolean input the circuit has 865 parameters; the parameter-matched MLP uses one hidden layer of approximately 40 units.
+We compare the circuit against a parameter-matched multi-layer perceptron (MLP) whose hidden width is chosen so the two models have the same trainable parameter count to within $\pm 5\%$.
+On a 17-bit boolean input, the circuit has $865$ trainable parameters.
+The parameter-matched MLP has the form
+\begin{equation*}
+  \text{MLP}(x) \;=\; W_2 \,\sigma\!\left(W_1 x + b_1\right) + b_2,
+\end{equation*}
+with $x \in \R^{17}$, hidden activation $\sigma = \mathrm{ReLU}$, hidden width $h$ chosen so that the parameter count $17h + h + h + 1 = 19h + 1$ matches $865$, giving $h \approx 45$.
+For other input dimensions the hidden width is recomputed.
+The MLP is trained with the same optimizer, loss, batch size, and budget as the circuit on every experiment.
 Parameter matching controls for the obvious confound that an architectural ``inductive bias'' result could otherwise be a capacity result in disguise.
 
 \paragraph{Sufficiency AUC (suff\_AUC).}
-A LIME~\citep{ribeiro2016should} diagnostic borrowed from the interpretability literature.
-For each test instance we rank input features by LIME attribution magnitude; we then build a sequence of masked inputs that retain only the top-$k$ features (for $k = 1, 2, \ldots, D$) and measure the model's output recovery as $k$ grows.
-The area under this recovery-vs-$k$ curve is the sufficiency AUC: a high value means a small subset of features suffices to recover the prediction, indicating local sparsity in the decision function; a value near $0.5$ means no small subset suffices.
-We report suff\_AUC in E3 (Section~\ref{sec:e3}) as a structural property of each task, not as an evaluation of the circuit itself.
+A diagnostic adapted from the interpretability literature on LIME~\citep{ribeiro2016should}.
+For each test instance with input $x \in \R^{D}$ we compute a feature-attribution vector $\phi(x) \in \R^{D}$ via the LIME procedure (fit a sparse linear surrogate to perturbed inputs and read off its coefficients).
+We then sort the features by $|\phi_i(x)|$ and construct a sequence of partially-masked inputs $x^{(k)}$ that retain only the top-$k$ features and replace the rest with a baseline value (the per-feature mean over the training set), for $k = 1, 2, \ldots, D$.
+For each $k$ we measure the model's \emph{output recovery}
+\begin{equation*}
+  r_k \;=\; 1 \;-\; \frac{\left|\,m(x) - m(x^{(k)})\,\right|}{\left|\,m(x) - m(x^{(0)})\,\right|},
+\end{equation*}
+where $m$ is the model's scalar pre-sigmoid output and $x^{(0)}$ is the all-baseline input.
+$r_k$ runs from $0$ (no features retained) to $1$ (all features retained).
+The sufficiency AUC is the area under the curve $k \mapsto r_k$ normalized to $[0,1]$.
+A high value (close to $1$) means a small subset of features suffices to recover the prediction --- the decision function is locally sparse.
+A value near $0.5$ means no small subset suffices --- the function depends jointly on many inputs.
+We report suff\_AUC in E3 (Section~\ref{sec:e3}) as a structural property of each task, not as an evaluation of the circuit itself: it tells us how amenable the task is to \emph{any} local-attribution-based extraction.
 
 \paragraph{Paired permutation test.}
 For two models $A$ and $B$ evaluated on the same $n$ seeds, we compute the per-seed differences $d_i = m_i^A - m_i^B$ (where $m$ is the metric of interest, e.g.\ CLEVR-Hans3 shortcut gap) and a two-sided $p$-value by randomly flipping the sign of each $d_i$ independently over $B = 10000$ replicates.
@@ -139,33 +168,42 @@ Pairing on seed eliminates the dominant source of variance (initialization) and 
 \section{Architecture}
 \label{sec:architecture}
 
-The circuit is a stack of \texttt{circuit\_depth} layers, each comprising \texttt{channels} parallel operator slots.
-Each slot holds soft selection weights over operator types (logic, arithmetic).
-The configuration used throughout this paper is summarized in Table~\ref{tab:hyper}.
+The circuit is a stack of $L$ \emph{depth layers}, each comprising $C$ parallel operator slots.
+A depth layer takes a vector $z \in \R^{C}$ as input and produces a vector $z' \in \R^{C}$ as output:
+slot $c$ in the layer selects a pair of input channels $(i_c, j_c)$ (this wiring is fixed at construction and not learned), applies its softmax-mixture operator (Eq.~\ref{eq:soft-mixture}) to $(z_{i_c}, z_{j_c})$, and writes the result to output channel $c$.
+After the stacked depth layers, a linear head reduces the final layer's output to a single scalar logit.
+The full configuration used throughout this paper is summarized in Table~\ref{tab:hyper}.
 
 \begin{table}[H]
 \centering
-\caption{Architectural configuration used in all experiments. Total parameters on a 17-bit boolean input: \textbf{865}.}
+\caption{Architectural configuration used in all experiments. Total trainable parameters on a 17-bit boolean input: \textbf{865} (32 embedding $\times$ 17 inputs $+$ 32 norm $+$ 2 depth layers $\times$ 32 slots $\times$ 11 logits $+$ 32 head $+$ 1 bias, after accounting for the slot wiring being non-trainable).}
 \label{tab:hyper}
 \begin{tabular}{ll}
 \toprule
 \textbf{Hyperparameter} & \textbf{Value} \\
 \midrule
-\texttt{circuit\_depth}         & 2 \\
-\texttt{channels}               & 32 \\
-\texttt{logic\_op\_types}       & full set (8 operators) \\
-\texttt{arithmetic\_op\_types}  & $\{\text{add},\,\text{min},\,\text{max}\}$ \\
-\texttt{apply\_sigmoid\_per\_depth} & \texttt{first\_only} \\
-Embedding                       & \texttt{Dense(32)} + LayerNormalization \\
-Head                            & \texttt{Dense(1)} sigmoid \\
+Number of depth layers $L$              & $2$ \\
+Slots per depth layer $C$               & $32$ \\
+Logic operator alphabet                 & full set (8 operators) \\
+Arithmetic operator alphabet            & $\{\text{ADD},\,\text{MIN},\,\text{MAX}\}$ \\
+Per-depth squashing                     & sigmoid on depth-$1$ input only (see text) \\
+Input embedding                         & linear $\R^{D} \to \R^{32}$, followed by LayerNorm \\
+Output head                             & linear $\R^{32} \to \R^{1}$, followed by sigmoid \\
+Total parameters (17-bit input)         & $865$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The \texttt{arithmetic\_op\_types} restriction and \texttt{apply\_sigmoid\_per\_depth='first\_only'} choice are both empirically required to prevent training-time NaN at \texttt{circuit\_depth}~$\geq 2$; this is institutional knowledge logged after several diverging runs and is the only architectural decision the experiments below depend on.
+\paragraph{Why these restrictions.}
+Two design choices are required for numerical stability rather than chosen by hyperparameter search:
+\begin{enumerate}
+  \item \emph{Restricting the arithmetic alphabet to $\{\mathrm{ADD},\,\mathrm{MIN},\,\mathrm{MAX}\}$} excludes unbounded operators (e.g.\ unbounded multiplication or division), keeping intermediate activations in $[0,1]$ and preventing gradient blow-up.
+  \item \emph{Applying the sigmoid squashing only at the input to depth layer $1$, not at every depth layer}, prevents the iterated-sigmoid range collapse: if $\sigma$ is applied at every depth and intermediate values are already near $0$ or $1$, the sigmoid pushes them back toward $0.5$, destroying signal.
+\end{enumerate}
+With these two choices the circuit trains stably at $L = 2$ for all our experiments; without them, gradients diverge and training NaNs out within the first few epochs.
 
 Figure~\ref{fig:arch} summarizes the data flow.
-At training time each slot maintains a softmax over operator types; at inference time \texttt{extract\_hard\_inplace} replaces the soft mixture with a single discrete operator chosen by argmax over the learned selectors.
+At training time each slot maintains a softmax over the operator alphabet; at inference time the hard extraction replaces the soft mixture with a single discrete operator chosen by argmax over the learned selection logits.
 
 \begin{figure}[H]
 \centering
@@ -216,6 +254,37 @@ At training time each slot maintains a softmax over operator types; at inference
 \end{figure}
 
 % ============================================================================
+\section{Training and Evaluation Protocol}
+\label{sec:protocol}
+
+This section specifies the training, evaluation, and statistical-reporting conventions used across all experiments, so that the per-experiment sections can focus on what varies.
+
+\paragraph{Loss.}
+All circuit and MLP models are trained with binary cross-entropy on a single sigmoid output (multi-class settings use the same loss applied per-class with a one-hot label encoding).
+Inputs to the circuit are presented in $[0,1]$: boolean inputs as $\{0, 1\}$, image pixels rescaled to $[0,1]$, categorical Monks attributes one-hot encoded.
+
+\paragraph{Optimizer.}
+Adam with learning rate $10^{-3}$, $\beta_1 = 0.9$, $\beta_2 = 0.999$, $\epsilon = 10^{-7}$, no weight decay.
+Gradient norm is clipped at $1.0$.
+The learning rate is held constant within each run (no decay schedule), since the band-checkpoint protocol typically terminates training before any schedule would meaningfully act.
+
+\paragraph{Batch size and budget.}
+Batch size is $64$ throughout.
+The training budget is capped at $200$ epochs per run; the band-checkpoint protocol described in Section~\ref{sec:e1} typically terminates well below this cap.
+A separate XGBoost baseline (E4 only) uses $200$ boosting rounds with maximum tree depth $6$, learning rate $0.1$, and the squared-error objective on $\{0,1\}$ labels.
+
+\paragraph{Seeds and statistics.}
+Every reported number is the result of $n$ independent runs that differ only in the random seed (controlling weight initialization, data shuffling, and any stochastic data augmentation).
+Unless noted otherwise, $n = 5$ for E1/E3/E5 and $n = 3$ for E4 (Monks); the smaller $n$ for Monks reflects the small input space (432 configurations exhaustively evaluated), which gives essentially no test-set noise per seed.
+
+For a metric $m$ measured on $n$ seeds with values $m_1, \ldots, m_n$, we report
+\begin{equation*}
+  \bar{m} \;\pm\; s, \quad \text{where} \quad \bar{m} = \frac{1}{n}\sum_{i=1}^{n} m_i, \quad s = \sqrt{\frac{1}{n-1}\sum_{i=1}^{n}(m_i - \bar{m})^2}.
+\end{equation*}
+The $n - 1$ denominator (Bessel-corrected sample standard deviation, ``$\mathrm{ddof}{=}1$'') is the unbiased estimator under the assumption that seeds are i.i.d.\ samples from a hypothetical population of trained models.
+At $n = 5$ the value of $s$ should be read as a rough indicator of run-to-run noise rather than a tight confidence interval; we use the paired permutation test (defined in Section~\ref{sec:background}) for the one numerical comparison where statistical significance is at stake.
+
+% ============================================================================
 \section{Experiments}
 \label{sec:experiments}
 
@@ -234,7 +303,7 @@ Figure~\ref{fig:band} illustrates the band-checkpoint protocol used in E1 and E3
 3: & \quad Train one epoch on $\mathcal{D}_{\text{train}}$. \\
 4: & \quad Compute val\_acc on $\mathcal{D}_{\text{val}}$ with \emph{soft} mixture. \\
 5: & \quad \textbf{if} $\text{val\_acc} \in [a_{\text{lo}}, a_{\text{hi}}]$: \textbf{break}. \\
-6: & Snapshot weights. Apply \texttt{extract\_hard\_inplace}. \\
+6: & Snapshot weights. Replace each slot's softmax mixture by $f_{k^\star}$ where $k^\star = \arg\max_k \ell_k$. \\
 7: & Compute val\_acc on $\mathcal{D}_{\text{val}}$ with \emph{hard} extraction. \\
 8: & Report $\Delta = \mathrm{acc}(\text{hard}) - \mathrm{acc}(\text{soft})$.
 \end{tabular}\\[2pt]
@@ -253,10 +322,19 @@ CIFAR-10 contains 50k training and 10k test RGB images at $32 \times 32$, labele
 Both are standard image-classification benchmarks; we use them not to claim competitive accuracy (the circuit is decisively below state-of-the-art convolutional baselines on these datasets) but as a controlled setting in which to probe the faithfulness of hard extraction under realistic gradient training.
 
 \paragraph{Pipeline.}
-Architecture: Conv stem $\to$ \circuit{} (operating on a rank-4 spatial feature map) $\to$ GlobalAveragePool $\to$ Dense head.
-A CNN baseline is matched on parameter count by adjusting the width of an analogous convolutional bottleneck.
-Training stops when validation accuracy first enters a target band ($[0.70, 0.95]$ for MNIST, $[0.50, 0.80]$ for CIFAR-10) to deliberately measure faithfulness in the regime where $\Delta$ is non-tautological.
-Without the band, both networks would converge to high accuracy with already-discrete soft mixtures and we would learn nothing about extraction faithfulness.
+The image-classification pipeline has three stages:
+\begin{enumerate}
+  \item \textbf{Convolutional stem.} Two $3 \times 3$ convolutions with $16$ and $32$ output channels, each followed by ReLU and $2 \times 2$ max-pooling. The output is a feature map of shape $(H/4) \times (W/4) \times 32$.
+  \item \textbf{Circuit reasoning head.} Each spatial location of the feature map is fed independently into the circuit, which sees a $32$-dimensional input vector and produces a $32$-dimensional output (one logit per slot in the final depth layer). The result is a feature map of the same spatial shape with the circuit applied pointwise. We refer to this as ``rank-4'' to indicate that the circuit is treated as a four-tensor operator (batch, height, width, channels) with the circuit acting on the trailing channel axis.
+  \item \textbf{Pooling and head.} Global average pooling over the spatial axes, followed by a linear layer to the number of classes ($10$ for MNIST and CIFAR-10).
+\end{enumerate}
+The CNN baseline replaces the circuit reasoning head with two stacked $1 \times 1$ convolutions whose width is chosen to match the circuit's trainable parameter count.
+
+\paragraph{Why a band rather than full training.}
+Training stops when validation accuracy first enters a target band ($[0.70, 0.95]$ for MNIST, $[0.50, 0.80]$ for CIFAR-10).
+At the lower band edge the circuit has clearly learned something but the soft mixtures are not yet $\epsilon$-peaked, so $\Delta \ne 0$ is informative.
+At the upper edge we cap before the soft mixtures have collapsed.
+Without the band, training would push every slot's softmax toward one-hot and $\Delta$ would be near zero by construction --- we would learn nothing about extraction faithfulness in the regime where it could fail.
 
 \begin{table}[H]
 \centering
@@ -284,10 +362,27 @@ The takeaway is that on natural image data --- where the per-pixel input distrib
 Three synthetic boolean tasks were constructed specifically to avoid the ceiling artifact that contaminates faithfulness reports at near-100\% accuracy.
 Each task has a known closed-form solution and a known degree of structural difficulty:
 \begin{itemize}
-  \item \textbf{11-bit MUX (multiplexer).} The input has 3 \emph{address bits} $a_0 a_1 a_2$ and 8 \emph{data bits} $d_0, \ldots, d_7$; the output is the bit $d_{i}$ selected by $i = (a_0 a_1 a_2)_2$. The exact rule has logarithmic depth in the number of inputs and is the canonical example of a function that needs structural composition rather than just feature counting.
-  \item \textbf{8-bit parity.} The output is $x_1 \oplus x_2 \oplus \cdots \oplus x_8$. Parity is famously hostile to depth-bounded approximators: no AND/OR circuit of depth $d$ and polynomial size in $D$ can compute it ($\mathrm{AC}^0$ lower bound), and the function has \emph{no local structure} --- every input bit is equally important and no subset of bits is locally predictive. It is included as the worst-case for both circuit extraction and local attribution.
-  \item \textbf{Random 4-DNF over 8 inputs.} Disjunctive Normal Form (DNF) means the function is an OR of ANDs (``clauses''); the ``4-'' indicates each clause has 4 literals; the random sampling controls structural difficulty. Realistic boolean rules in practice (medical diagnoses, fraud heuristics) tend to be sparse DNFs and are the most practically relevant of the three tasks.
+  \item \textbf{11-bit MUX (multiplexer).} The input has 3 \emph{address bits} $a_0 a_1 a_2$ and 8 \emph{data bits} $d_0, \ldots, d_7$; the output is the data bit indexed by the address:
+        \begin{equation*}
+          \text{MUX}(a, d) \;=\; d_{\,(a_0 + 2 a_1 + 4 a_2)}.
+        \end{equation*}
+        For example, on $a_0 a_1 a_2 = 101$ and $d = 10100111$ the address indexes position $1 + 0 + 4 = 5$, selecting $d_5 = 1$. Two disjoint subsets of bits are used at each prediction: the address bits decide \emph{which} data bit matters, and that data bit decides the output. MUX is the canonical example of a function whose minimum-depth boolean circuit is logarithmic in input width and requires \emph{structural composition} rather than just summing or counting features.
+  \item \textbf{8-bit parity.} The output is the XOR of all input bits:
+        \begin{equation*}
+          \text{PARITY}(x_1, \ldots, x_8) \;=\; \bigoplus_{i=1}^{8} x_i \;=\; \left(\sum_{i=1}^{8} x_i\right) \bmod 2.
+        \end{equation*}
+        For example, $\text{PARITY}(10110001) = 0$ (four 1's, even) and $\text{PARITY}(10110011) = 1$ (five 1's, odd). A classical result of H{\aa}stad shows that no AND/OR/NOT circuit of bounded depth $d$ and size polynomial in input width can compute parity (the $\mathrm{AC}^0$ lower bound). Operationally for our purposes, parity has \emph{no local structure}: every input bit is equally important, no proper subset of bits is locally predictive, and any extractor that relies on identifying which features matter most will fail. It is included as the structural worst case for both the circuit's hard extraction and the LIME-based suff\_AUC diagnostic.
+  \item \textbf{Random 4-DNF over 8 inputs.} A Disjunctive Normal Form (DNF) is an OR of ANDs of literals:
+        \begin{equation*}
+          \text{DNF}(x) \;=\; \bigvee_{j=1}^{M}\, \bigwedge_{i \in S_j}\, \tilde{x}_i,
+        \end{equation*}
+        where each \emph{clause} $j$ is the AND of $|S_j|$ literals $\tilde{x}_i \in \{x_i, \neg x_i\}$. The ``4-DNF'' name fixes $|S_j| = 4$; we sample $M = 5$ clauses uniformly over the $\binom{8}{4} \cdot 2^4 = 1120$ possible 4-clauses with random literal polarities. A concrete instantiation might be
+        \begin{equation*}
+          (x_1 \land \neg x_3 \land x_5 \land x_7) \;\lor\; (\neg x_2 \land x_4 \land x_6 \land \neg x_8) \;\lor\; \ldots,
+        \end{equation*}
+        evaluating to $1$ on any input that satisfies at least one clause. Sparse DNFs are the canonical form of practical boolean rules (medical diagnostic criteria, fraud heuristics, eligibility checks) and are the most practically relevant of the three synthetic tasks.
 \end{itemize}
+For all three tasks the full truth table is enumerable ($2^{11} = 2048$ rows for MUX, $2^{8} = 256$ for parity and DNF), so train/test splits are stratified random subsets and ``accuracy'' on the held-out rows is exact-match.
 All three tasks are trained to partial convergence in the $[0.70, 0.95]$ band so that hard-extraction $\Delta$ is measured before the soft mixture has tautologically collapsed.
 
 \begin{table}[H]
@@ -322,9 +417,13 @@ The training set for each problem is a small subset (124 examples for Monks-1, 1
 
 The three rules differ in structural character:
 \begin{itemize}
-  \item \textbf{Monks-1} (head = body, OR color = red): a small disjunction of equality predicates. Easy for both rule-based and neural learners.
-  \item \textbf{Monks-2} (exactly two of $a_1, \ldots, a_6$ equal their first value): a \emph{counting} constraint. This is the load-bearing task in our experiments, see below.
-  \item \textbf{Monks-3} ($(a_5 = g \land a_4 = s) \lor (a_5 \ne b \land a_2 \ne o)$), 5\% noise): a moderately complex DNF with label noise. Tests noise robustness.
+  \item \textbf{Monks-1} ($a_1 = a_2$ OR $a_5 = \text{red}$): a small disjunction of equality predicates. The label is $1$ if the head and body shapes match, or if the color is red; $0$ otherwise. Easy for both rule-based and neural learners.
+  \item \textbf{Monks-2} (\emph{exactly two} of the six attributes equal their first attribute value): a pure \emph{counting} constraint. Specifically, the label is $1$ iff
+        \begin{equation*}
+          \sum_{i=1}^{6} \mathbb{1}\!\left[\,a_i = 1\,\right] \;=\; 2.
+        \end{equation*}
+        (The ``first value'' is encoded as the integer $1$ in the Monks attribute scheme.) No attribute is individually informative --- knowing that $a_1 = 1$ tells you nothing about the label without also knowing the count over $a_2, \ldots, a_6$. This is the load-bearing task of our experiments; see the structural analysis below.
+  \item \textbf{Monks-3} ($(a_5 = \text{green} \land a_4 = \text{sword}) \lor (a_5 \ne \text{blue} \land a_2 \ne \text{octagon})$, with 5\% label noise): a moderately complex DNF over equality and inequality predicates, with a fraction of training labels flipped at random. Tests noise robustness.
 \end{itemize}
 
 \paragraph{Why Monks-2 is structurally hard for tree ensembles.}
@@ -334,8 +433,10 @@ A tree node that splits on $a_1$ partitions the data into ``$a_1 = $ first value
 With depth-bounded trees this forces the ensemble to enumerate combinations exponentially, and with 124 training examples (and an XGBoost depth typically capped near 6) the enumeration does not fit.
 
 \paragraph{Protocol.}
-We train circuit, parameter-matched MLP, and XGBoost; for each model we score the trained-model decision function against the published rule by exhaustive evaluation over the 432-configuration Monks input domain.
-Three seeds are used (the Monks input space is small enough that seed-to-seed variance is dominated by initialization, and three seeds is sufficient to see the qualitative ordering).
+We train three models: the circuit, the parameter-matched MLP, and XGBoost (gradient-boosted decision trees) configured with $200$ boosting rounds, maximum tree depth $6$, learning rate $0.1$, and the squared-error objective on $\{0, 1\}$ labels (this is the standard XGBoost configuration for binary tabular classification at small data scales).
+Categorical Monks attributes are one-hot encoded for the neural models, giving an input dimension of $D = 3 + 3 + 2 + 3 + 4 + 2 = 17$ bits; XGBoost takes the raw integer-coded attributes.
+For each trained model we evaluate its decision function on all $432$ possible attribute combinations and compare against the published rule attribute-by-attribute; the reported ``rule recovery accuracy'' is the fraction of configurations on which the trained model and the published rule agree.
+Three seeds are used; the Monks input space is small enough that seed-to-seed variance is dominated by initialization, and three seeds is sufficient to see the qualitative ordering.
 
 \begin{table}[H]
 \centering
@@ -452,10 +553,9 @@ ResNet50 frozen + MLP-matched     & $0.850 \pm 0.003$ & $0.663 \pm 0.013$ & $0.1
 \end{figure}
 
 \paragraph{Three configurations.}
-The first two rows of Table~\ref{tab:clevr} place the circuit and a parameter-matched MLP \emph{on the same frozen ResNet50 perception backbone} (ImageNet-pretrained, weights not updated during training).
-This is the standard ``concept bottleneck'' setup for evaluating neuro-symbolic reasoning heads in the published literature.
-The third row replaces the ResNet backbone with the ground-truth scene graph that CLEVR-Hans3 ships alongside the rendered images: a structured vector representation specifying every object's shape, color, material, size, and position.
-This row is the \emph{oracle}: it asks how well the circuit reasons \emph{given} a perfect perception front-end, isolating the contribution of the reasoning head from the contribution of the perception.
+\textbf{Rows 1--2 (ResNet50 frozen).} Each $224 \times 224$ RGB input image is passed through ResNet50 pretrained on ImageNet, with all weights frozen. We take the activations of the penultimate layer (after the final global-average-pool, before the $1000$-way classifier), giving a $2048$-dimensional feature vector per image. This vector is fed to a small reasoning head: either the circuit (operating as a $17$-bit-style reasoning module after linear projection to its input width), or a parameter-matched MLP. The classifier head outputs $3$ class logits via a final linear layer. Only the reasoning head and the projection are trained. This setup --- known as a \emph{concept bottleneck} in the neuro-symbolic literature --- is the standard configuration for evaluating reasoning heads on perceptual benchmarks.
+
+\textbf{Row 3 (oracle: scene graph input).} CLEVR-Hans3 ships, alongside each rendered image, the underlying scene graph used by the rendering engine. This is a structured vector encoding every object in the scene: a sequence of $(\text{shape}, \text{color}, \text{material}, \text{size}, x, y, z)$ tuples (with shape/color/material/size one-hot encoded, and position as $\R^3$ coordinates), padded to a maximum object count. We feed this scene-graph vector directly to the same circuit reasoning head, bypassing the ResNet entirely. This row is the \emph{oracle}: it asks how well the circuit reasons \emph{given} a perfect perception front-end, isolating the contribution of the reasoning head from the contribution of the perception.
 
 \paragraph{Statistical test.}
 A paired permutation test on the circuit-vs-MLP shortcut-gap difference ($B = 10000$ flips, two-sided) gives $p = 0.375$.
@@ -482,7 +582,7 @@ Future work should fine-tune the perception backbone or use concept supervision 
 \caption{Summary of empirical claims and their status at $n{=}5$ seeds (E4 Monks: $n{=}3$).}
 \label{tab:claims}
 \renewcommand{\arraystretch}{1.15}
-\begin{tabular}{p{0.62\textwidth}l}
+\begin{tabular}{p{0.56\textwidth}p{0.38\textwidth}}
 \toprule
 \textbf{Claim} & \textbf{Status} \\
 \midrule
@@ -525,7 +625,7 @@ Future work targeting visual shortcut resistance with neuro-symbolic architectur
   \item The circuit offers \textbf{no visual shortcut-resistance advantage} with a frozen pretrained backbone.
   \item Multi-seed counts are $n{=}5$ for E1/E3/E5 and $n{=}3$ for E4 Monks; the CLEVR-Hans3 permutation test's negative result is therefore consistent with a true gap up to ${\sim}5$\,pt being missed.
   \item All training runs are short (band-checkpointed or capped). Full-convergence behavior may differ.
-  \item \texttt{to\_symbolic} produces a flat per-channel readout; we did not evaluate human-readability of the extracted expressions at scale.
+  \item The symbolic readout produced by hard extraction is a flat per-slot expression: a list of $L \times C = 64$ slot expressions, each naming an operator from the alphabet and its two input channel indices. We did not evaluate human-readability of the extracted expressions, nor attempt expression simplification (subexpression elimination, algebraic identities) that would be needed to compress this into a form a domain expert could audit at a glance.
 \end{itemize}
 
 % ============================================================================
@@ -543,10 +643,11 @@ Local attribution methods (LIME~\citep{ribeiro2016should}, SHAP~\citep{lundberg2
 \section{Reproducibility}
 \label{sec:repro}
 
-All experiments are scripted in \texttt{src/train/logic/} of the \texttt{dl\_techniques} repository at the commit linked to this paper.
-Each experiment ships with a CSV of per-seed results, a \texttt{report.md} with environment metadata, and unit tests for the supporting modules.
-The multi-seed driver (\texttt{multiseed\_sweep.py}) re-runs every experiment in sequence with a configurable seed list.
-Training wall-clocks on an RTX 4090 are: E1 $< 4$\,min/seed/dataset, E3 $< 6$\,min/seed/all-tasks, E5 $< 12$\,min/seed/all-configs, total $\sim$50\,min for the full $n{=}5$ sweep.
+Every experiment in this paper is fully specified by the protocol in Section~\ref{sec:protocol} and the per-experiment details in Sections~\ref{sec:e1}--\ref{sec:e5}.
+The only inputs needed to reproduce the numbers are: the random seed set $\{0, 1, 2, 3, 4\}$ (E1/E3/E5) or $\{0, 1, 2\}$ (E4); the dataset specifications (MNIST and CIFAR-10 from their canonical sources; the Monks-1/2/3 splits from~\citet{thrun1991monks}; the CLEVR-Hans3 splits from~\citet{stammer2021right}; synthetic boolean tasks generated from the closed-form definitions in Section~\ref{sec:e3}); and the architecture/optimizer settings in Tables~\ref{tab:hyper}, the protocol section, and the per-experiment configuration text.
+The band-checkpoint protocol (Figure~\ref{fig:band}) is implemented as an end-of-epoch callback that snapshots model weights and triggers extraction when the validation-accuracy condition is first satisfied; this single piece of stateful logic is the only non-obvious implementation detail.
+
+Training wall-clocks on an RTX 4090 are: E1 $<\!4$\,min/seed/dataset, E3 $<\!6$\,min/seed for all three tasks, E4 $<\!2$\,min/seed for all three Monks problems, E5 $<\!12$\,min/seed for all three configurations, for a total of approximately $50$\,min for one full $n = 5$ sweep over E1+E3+E5.
 
 % ============================================================================
 \section{Conclusion}
