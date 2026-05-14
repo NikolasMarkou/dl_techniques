@@ -1,0 +1,4 @@
+model,status,params,epochs_used,wall_s,val_acc,test_acc,shortcut_gap,error
+resnet50_circuit,complete,23719363,17,132.7,0.854667,0.674222,0.180444,
+resnet50_mlp,complete,23723203,18,112.1,0.853333,0.685778,0.167556,
+symbolic_circuit_oracle,complete,12099,6,20.2,1.0,0.997778,0.002222,
