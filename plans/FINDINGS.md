@@ -34,6 +34,145 @@
 - **`current_phase` / `_global_step` counters**: `add_weight(trainable=False, dtype="float32")` — int32 fails CPU/GPU device placement.
 <!-- /COMPRESSED-SUMMARY -->
 
+## plan_2026-05-14_e26eede2
+### Index
+
+| # | Topic | File | Confidence |
+|---|-------|------|------------|
+| F1 | `to_symbolic` output format — multi-line string, NOT executable AST. Score by evaluating hard-extracted Keras model on enumerated 432-config Monks domain. | `findings/f1-to-symbolic-format.md` | High (source-read) |
+| F2 | OpenML Monks loader — `openml` package NOT installed (Step 1 must install). 17-bit one-hot encoding (3+3+2+3+4+2). 432-config canonical enumeration. UCI direct-download fallback. | `findings/f2-openml-monks-loader.md` | High (verified) |
+| F3 | Reusable helpers from FROZEN `train_benchmark.py` / `train_e3_faithfulness.py` — `build_circuit`, `build_mlp`, `find_mlp_hidden_for_param_budget`, `extract_hard_inplace`, `restore_soft_weights`, `roundtrip_check`, `gen_mux_11bit`. xgboost NOT installed. Wall-clock budget ~20 min. | `findings/f3-reusable-helpers.md` | High |
+
+### Key Constraints
+
+### HARD
+- **`openml` + `xgboost` NOT installed.** Step 1 of EXECUTE: `.venv/bin/pip install openml xgboost`. Verified by `ModuleNotFoundError`.
+- **`circuit_depth=2`, `arithmetic_op_types=['add','max','min']`, `apply_sigmoid_per_depth='first_only'`** (LESSONS L51/L60). Already baked into `build_circuit` factory in FROZEN `train_benchmark.py`.
+- **Library code (`src/dl_techniques/layers/logic/*`) is FROZEN.** All work is training-side.
+- **`train_benchmark.py`, `train_e1_image.py`, `train_e3_faithfulness.py` are FROZEN.** New scripts must IMPORT helpers, not modify the frozen scripts.
+- **`.venv/bin/python`, `MPLBACKEND=Agg`, `CUDA_VISIBLE_DEVICES=0`, single GPU serial.** No `make test`.
+- **254 existing tests stay green.** New tests in new files only (`tests/test_train/test_logic/test_rule_recovery.py`, `test_e4_monks.py`).
+- **Rule-recovery scorer is the LOAD-BEARING component.** Must unit-test against round-trips of the published Monks rules themselves before claiming any rule-recovery result.
+- **Wall-clock leashes**: each Monks training run <30 min; total MUX learning curve <1 h. Two consecutive overruns → kill and proceed honest-negative.
+- **FULL AUTONOMY**: no PC-PLAN / PC-REFLECT user gates; conservative-default decisions logged to `decisions.md`; honest-negative CLOSE allowed.
+
+### SOFT
+- Prefer truth-table equivalence (enumerate 432 configs) over z3/BDD — Monks domain is tiny, this is the cheapest defensible approach (per F1).
+- Use OpenML by package; UCI direct-download is fallback if `openml` install or fetch flakes.
+- 3 random seeds per (task, model) to get a meaningful mean ± std (Monks-1/2/3 has 124-169 train samples — high variance is expected).
+- Architecture A only: circuit on raw one-hot input via `build_circuit(num_bits=17, num_outputs=1)`. No tweaking of architectures unless a falsification signal fires.
+- One new `rule_recovery.py` module + two new train scripts + tests. No shared util extraction (N≤4 sibling files, LESSONS L11).
+
+### GHOST
+- The temptation to parse `to_symbolic` into an executable AST. F1 establishes the scorer evaluates the hard-extracted Keras model directly; `to_symbolic` is diagnostic-only.
+- "Need an extension to circuit for categorical inputs" — false; raw one-hot fed through `Dense(channels, relu)` embed works the same way as for the synthetic boolean tasks.
+
+### Exploration Confidence
+- Scope: **deep** (source-verified to_symbolic format, reusable helpers, install status; published Monks rules locked).
+- Solutions: **constrained** (rule-recovery scorer methodology pinned; baseline triad locked).
+- Risks: **clear** (load-bearing scorer is the only real risk → mitigated by self-round-trip unit tests; install-time deps verified missing → Step 1 installs).
+
+### Corrections
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
+
+## plan_2026-05-13_798d3a60
+### Index
+
+| # | Topic | File | Confidence |
+|---|-------|------|------------|
+| F1 | Current logic layer state — shapes, ops, `to_symbolic`, `extract_hard_inplace`, depth ceiling, rank assumptions | `findings/f1-logic-layer-state.md` | High (verified by source reading + LESSONS cross-check) |
+| F2 | Existing benchmark machinery — what's reusable from `train_benchmark.py`/tests for E1/E3 | `findings/f2-benchmark-machinery.md` | High |
+| F3 | Image-input pathway options for E1 (MNIST / CIFAR-10) | `findings/f3-image-pathway.md` | High (precedent at `train/latent_reasoning_vision/circuit.py:121-129`) |
+| F4 | E3 specifics — partial-convergence training, LIME/SHAP, attribution metrics, **lime+shap NOT installed** | `findings/f4-e3-specifics.md` | High (empirically verified pip status) |
+
+### Key Constraints
+
+### HARD
+- **LIME and SHAP NOT installed in `.venv`** — confirmed `ModuleNotFoundError`. Step 1 of plan must `pip install lime shap` before any E3 work.
+- **GPU**: GPU 1 (RTX 4070 12GB) preferred; GPU 0 (RTX 4090) available; serial only — never parallel jobs (memory + LESSONS).
+- **`.venv` Python + `MPLBACKEND=Agg`** prefix for every training invocation (headless server).
+- **`circuit_depth >= 3` + default arithmetic ops → NaN** (LESSONS L51, plan_d256b568). Pin `circuit_depth=2` and `arithmetic_op_types=['add','max','min']` for E1 + E3.
+- **`LearnableNeuralCircuit` accepts rank-4 already** — no library code change for E1. Library code is FROZEN for this plan; all work is training-side.
+- **Existing 254 PASS tests in `tests/test_layers/test_logic/` + `tests/test_train/test_logic/` MUST stay green.** Do not modify `train_benchmark.py` schema — append new train scripts as siblings.
+- **No `git push --no-verify` without explicit user direction** — user pushes themselves (LESSONS, user memory).
+- **Hard-extraction Δ at non-saturation (val_acc ∈ [0.7, 0.95]) is the HEADLINE METRIC** (pinned by user: value prop = differentiable rule extraction). All E1+E3 success criteria must be framed around this number.
+- **Do NOT run `make test`** (1.5h pre-push hook). Scope pytest to `tests/test_train/test_logic/` only.
+- **MNIST + CIFAR-10 training runs are long (1h + 6h)** — mark plan steps "USER RUNS" and proceed past them with the most recent saved checkpoint.
+
+### SOFT
+- **Ship 2 new training files** (`train_e1_image.py`, `train_e3_faithfulness.py`) + 2 new test files mirroring `tests/test_train/test_logic/` pattern. Share helpers via import from existing `train_benchmark.py`. Do NOT extract a shared util module — N=2 sibling files, the coupling crossover is at N>=4 (LESSONS L11).
+- Use `train.common.load_dataset` for MNIST/CIFAR-10 (Pattern-1 trainer template).
+- Architecture A (Conv-stem circuit) for E1; defer architecture B (patch-flatten) unless A fails.
+- Honest negative reporting expected — record bands that yield no data, tasks that saturate, etc. (LESSONS — plan_25774a34 honest-negative precedent).
+
+### GHOST
+- Reviewer claim "extending `LearnableNeuralCircuit` to spatial inputs" in summary §E1 — **already supported, NOT a code change**. The rank-4 path was opened by plan_2aaad563. Don't waste budget on it.
+- "Need extension of the circuit for E1" — same as above. Architectural delta is ZERO; only training-side code (Conv stem builder) is new.
+
+### Corrections
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
+
+## plan_2026-05-13_25774a34
+### Index
+- F1: Circuit is ~3× smaller than the obvious MLP (401 vs 1313 params at default K=6, depth=2). Need 2 MLP baselines for honest comparison. (`findings/f1-param-budget.md`)
+- F2: `selection_mode='per_channel'` + multi-output head works end-to-end on rank-2 input (verified by 2-epoch smoke). Enables the bitwise-shift-XOR task as a unique exerciser of the per-channel feature. (`findings/f2-per-channel-multi-output.md`)
+- F3: Task design — pick tasks that span (a) linearly inseparable (parity), (b) linearly separable (majority), (c) conditional / non-uniform (multiplexer), (d) multi-output per-channel (shift_xor). Multiplexer is famously hard for small MLPs. (`findings/f3-tasks.md`)
+- F4: Hard-extraction methodology — freeze each inner op to its argmax (set `operation_weights = LARGE * one_hot(argmax)`) and re-evaluate. Accuracy delta = how much the soft mixture matters. (`findings/f4-hard-extraction.md`)
+
+### Key Constraints
+- **HARD**: `.venv` Python; GPU 1 (RTX 4070) free; no parallel GPU jobs.
+- **HARD**: depth >= 3 with default arith ops → NaN (LESSONS, prior plan d256b568). Stay at depth=2 or restrict to `add,max,min`.
+- **HARD**: Dense embed (channels >= 16) required for raw bit-vector inputs.
+- **HARD**: existing test suite (241/241 from prior plans) must remain green.
+- **HARD**: report negative results HONESTLY if MLP beats circuit. "Did it work" matters more than "did it win".
+- **SOFT**: prefer single new file under `src/train/logic/` (`train_benchmark.py`). The existing `train_boolean_circuit.py` stays as single-task convenience entry.
+- **SOFT**: wall-clock target < 20 min for full benchmark.
+- **SOFT**: write a markdown report alongside the CSV — humans want narrative.
+
+### Corrections
+*(none yet)*
+
+## plan_2026-05-13_d256b568
+### Index
+- F1: Functional smoke test confirms LearnableNeuralCircuit composes as a mid-network block on rank-2 input. Trains under standard `model.fit`, `to_symbolic` reports per-depth dominant ops. (`findings/f1-functional-smoke.md`)
+- F2: Existing `src/train/latent_reasoning_vision/circuit.py` is the closest precedent — vision classifier built around LearnableNeuralCircuit. We want something simpler (purely synthetic, no images) so the validation is unambiguous. (`findings/f2-existing-precedent.md`)
+- F3: Best demonstration task = N-bit boolean function recovery. Parity is the gold-standard hardest-easy task — linearly inseparable, needs XOR. If `to_symbolic` returns "xor" after training, that's a slam-dunk proof. (`findings/f3-task-choice.md`)
+
+### Key Constraints
+- **HARD**: Use `.venv` Python. Use `MPLBACKEND=Agg` if any plotting. GPU 1 (RTX 4070, 12GB) is fine — small models.
+- **HARD**: No parallel GPU jobs (memory).
+- **HARD**: Don't claim success on the trivial task only — confirm with verification (held-out test set + per-task accuracy + symbolic readout that matches ground truth).
+- **HARD**: Save+load round-trip must work for the trained model (regression check for the prior plan's serialization work).
+- **SOFT**: Single-file script preferred over splitting model/train across files — keeps blast radius small. Follow the train Pattern-2 (synthetic data, local argparse) since we're not using `load_dataset()`.
+- **SOFT**: Don't pull `make test` (1.5h pre-push); run only logic + new train test.
+
+### Corrections
+[CORRECTED iter-1, S5] **F3 default op set is unstable for stacked circuits.** First parity attempt (channels=32, depth=3, default arith ops including `power` + `divide`) blew up to NaN by epoch ~12 — loss went to nan, accuracy stuck at 0.5. Diagnosis: `power` with learned exponents can produce arbitrarily large magnitudes; the residual connection then compounds these through depth. Recovery (attempt 1/2): restrict arithmetic ops to `add,max,min` (bounded), reduce circuit_depth from 3 to 2, drop LR to 1e-3. Result: test acc = 1.000, exact enumeration = 1.000, XOR emerges as the dominant depth-1 logic op (62% combined or+xor). **Lesson for future tasks**: default `arithmetic_op_types` is a footgun for deep stacks. The README should recommend `['add', 'max', 'min']` (or at least flag `power` as numerically aggressive) when using depth >= 3. (This is a follow-up doc opportunity, not in scope for this plan.)
+
+## plan_2026-05-13_e33114da
+### Source
+The detailed review is in `analyses/analysis_2026-05-13_62e26431/summary.md` (the epistemic-deconstructor session that preceded this plan). Re-verified each finding before listing here.
+
+### Index
+- [F1: Hamacher OR boundary bug](plan_2026-05-13_e33114da/findings/f1-hamacher-or-boundary.md) — confirmed numerically; `_hamacher_or(1.0, 1.0) → 0` (correct: 1)
+- [F2: Gumbel softmax leaks into inference](plan_2026-05-13_e33114da/findings/f2-gumbel-inference-leak.md) — confirmed via grep; `_operation_probs` ignores `training` flag
+- [F3: risky_stack guard misses residual-only case](plan_2026-05-13_e33114da/findings/f3-risky-stack-residual.md) — confirmed by tracing `+X` residual through stack
+- [F4: Per-channel load-balance averages-then-L2](plan_2026-05-13_e33114da/findings/f4-percent-channel-loadbalance.md) — confirmed by re-reading neural_circuit.py:366-369
+- [F5: `diversity_coefficient` unreachable through wrapper/factory](plan_2026-05-13_e33114da/findings/f5-diversity-unreachable.md) — confirmed; not in factory registry, not in `LearnableNeuralCircuit.__init__`
+- [F6: Inconsistent shape detection in arithmetic_operators.py](plan_2026-05-13_e33114da/findings/f6-shape-detection.md) — confirmed; `build()` vs `compute_output_shape()` use different heuristics
+- [F7: Inner-op knobs not forwarded by circuit wrappers](plan_2026-05-13_e33114da/findings/f7-knob-forwarding.md) — confirmed; ~10 params unreachable through circuit
+- [F8: Smaller items](plan_2026-05-13_e33114da/findings/f8-smaller-items.md) — G2-G4, D1-D9, DOC
+
+### Key Constraints
+- **HARD**: Keras 3 / TF 2.18; round-trip serialization through `.keras` archives must continue working. Existing tests must pass.
+- **HARD**: prior comments reference plan IDs (`plan_2026-05-13_a2b0f17b`, `plan_2026-05-13_3a2f1d23`). Anchors must coexist; do not rewrite history.
+- **HARD**: every new flag must default to the OLD behavior — implementation MUST be backwards-compatible for existing saved models.
+- **SOFT**: prefer minimal additive changes (no breaking API). Where a fix changes math (e.g. Hamacher boundary), gate behind an opt-out flag if the change is observable.
+- **GHOST**: assumption that "names = math" was carried by the H6 rename (`load_balance → gate_entropy`) — the math stayed L2, the name claims entropy. Don't compound by renaming again; just document.
+
+### Corrections
+[CORRECTED iter-1, S4] **F3 / B3 risky_stack residual leak: partial false positive.** The constructor validates `num_arithmetic_ops_per_depth > 0` (neural_circuit.py:503-504), so the "pure logic stack with residual" scenario I posited cannot occur with current validation. The original `risky_stack` condition `num_arith > 0` was effectively always-true for any valid construction, so the practical bug was masked by the validation. Widening the condition (S4) is kept as defensive future-proofing — if `num_arith >= 0` is ever allowed, the condition still catches the residual case. The widened wording is also more semantically honest about why force-clip is needed. Cost: 0 (extra OR term in a constructor-time condition).
+
 ## plan_2026-05-13_3a2f1d23
 ### Index
 
@@ -135,154 +274,3 @@
 ### Corrections
 
 None.
-
-## plan_2026-05-13_2aaad563
-### Index
-- F-001 Package structure & public surface
-- F-002 Design intent & sibling-pattern alignment
-- F-003 Code-quality / correctness issues
-- F-004 Integration consumers
-- F-005 Test coverage baseline
-
-### F-001 Package structure
-- `src/dl_techniques/layers/logic/` 4 files, ~1409 LOC src code:
-  - `arithmetic_operators.py` (449) — `LearnableArithmeticOperator` (DARTS-style softmax over {add, multiply, subtract, divide, power, max, min}).
-  - `logic_operators.py` (435) — `LearnableLogicOperator` (sigmoid-normalize then softmax over {and, or, xor, not, nand, nor} fuzzy-logic gates).
-  - `neural_circuit.py` (525) — `CircuitDepthLayer` (MoE over logic+arithmetic experts with soft routing + soft combination), `LearnableNeuralCircuit` (D-deep stack of CircuitDepthLayer + optional LayerNorm).
-  - `__init__.py` (0 bytes / empty).
-- All 3 classes use bare `@keras.saving.register_keras_serializable()` (no package= arg).
-
-### F-002 Design intent & sibling alignment
-- The 3 layers share the same mathematical core: a softmax over learnable weights selects (or convex-combines) a primitive op from a discrete set. This is DARTS continuous relaxation.
-- Sibling factory-bearing packages (`ffn/`, `norms/`, `embedding/`, `activations/`, `attention/`, `memory/`, `nlp_heads/`, `vision_heads/`, `vlm_heads/`) all expose `factory.py` + populated `__init__.py`. `logic/` is the only package with ≥3 homogeneous related classes lacking these conventions.
-- `dl_techniques.layers.ffn.logic_ffn.LogicFFN` is *different*: a Dense-projection FFN that internally uses soft AND/OR/XOR. Not a duplicate. Distinguish in README.
-
-### F-003 Code-quality / correctness issues
-- **Unary footgun**: `LearnableArithmeticOperator.call(inputs=x)` sets `x2 = inputs = x`. For `subtract` → identically 0; for `divide` → identically 1. The softmax mixes these with other ops; the result is silently corrupted. Same shape in `LearnableLogicOperator` (`x2=x` ⇒ AND/OR/XOR all degenerate). Fix: raise on unary inputs when non-self-canceling ops are present, or document in README + `__init__` validation as a warning.
-- **Strict 4-D constraint** in `CircuitDepthLayer.build()` and `LearnableNeuralCircuit.build()`: `if len(input_shape) != 4`. The actual `call()` body is rank-agnostic (uses `expand_dims` based on `ops.shape(inputs)`). The strict check is artificial and blocks NLP/seq use. Fix: relax to `len(input_shape) >= 2`.
-- **Stray underscore** in `arithmetic_operators.py` line 7 docstring (`_   Architecture Search`).
-- **Initializer round-trip asymmetry**: `get_config()` calls `keras.initializers.serialize(...)` but `__init__` uses `keras.initializers.get(...)`. `get` handles serialized dicts so round-trip works, but explicit `deserialize` in `from_config` would match memory/norms sibling conventions. Cheap.
-- **`logger.info` in `__init__`** is fine per repo convention but noisy when the circuit is stacked deep — `logger.debug` would be more appropriate. Not blocking.
-- **Manual sub-layer build inside parent build()** (`logic_op.build(input_shape)` inside `CircuitDepthLayer.build`) is verbose but safe in Keras 3. Keep.
-
-### F-004 Integration consumers
-- `src/train/latent_reasoning_vision/circuit.py` — only non-test consumer; imports `LearnableNeuralCircuit` via fully-qualified path. Will keep working under any non-relocation refactor.
-- No model in `src/dl_techniques/models/` imports `layers.logic.*`.
-- Library has no `create_logic_layer` factory; consumers must direct-import.
-
-### F-005 Test coverage baseline
-- `.venv/bin/python -m pytest tests/test_layers/test_logic/ -q` → **78 PASS / 0 FAIL** in 17.3s.
-- Files: `test_arithmetic_operators.py` (377 LOC), `test_logic_operators.py` (435 LOC), `test_neural_circuit.py` (588 LOC). Each covers init, forward pass, training mode, serialization round-trip, and edge cases.
-- No factory tests (no factory exists). No rank-relaxed shape tests (currently impossible — code rejects).
-
-### Key Constraints
-
-### HARD
-- 78 PASS baseline must remain green.
-- Bare `@register_keras_serializable` ties registered key to `__module__`. **Do not relocate classes between modules** — would invalidate any pre-existing `.keras` archives.
-- External consumer path `dl_techniques.layers.logic.neural_circuit.LearnableNeuralCircuit` must remain valid.
-- Repo convention (layers/CLAUDE.md): packages WITH `factory.py` populate `__init__.py`; packages WITHOUT factory keep `__init__.py` empty.
-
-### SOFT
-- Unary semantics of `subtract`/`divide` (degenerate to 0/1) — fix or document.
-- Strict 4-D check artificial; relax to rank ≥ 2.
-- Initializer round-trip explicit `deserialize`.
-- Stray underscore in docstring.
-
-### GHOST
-- "Manual sub-layer build in parent build()" was needed pre-Keras-3.0. Now belt-and-suspenders. Keep as-is to avoid test churn.
-- "4-D only" inherited from author's vision use case, not a math constraint.
-
-### Exploration Confidence
-- **scope**: deep — all 4 src files end-to-end, related FFN logic_ffn, sole external consumer, all 3 test modules, layers/CLAUDE.md, train/CLAUDE.md.
-- **solutions**: constrained — repo conventions tightly lock surface; minimal vs. opportunistic options enumerated.
-- **risks**: clear — relocation forbidden, public API unchanged, behavior changes scoped to rank relaxation + new factory + unary-input docstring/validation.
-
-### Synthesis
-`logic/` is functionally complete and well-tested (78 PASS) but underintegrated relative to its sibling layer packages. All three classes share an identical DARTS-style mathematical core, making them a textbook factory candidate. The integration improvement is: (1) add `factory.py` with `create_logic_layer(layer_type, **kwargs)` over `{'arithmetic', 'logic', 'circuit_depth', 'neural_circuit'}`; (2) populate `__init__.py` to re-export the four classes + factory (consistent with FFN/memory/norms); (3) relax the artificial strict 4-D check in `CircuitDepthLayer`/`LearnableNeuralCircuit` to `rank >= 2` (unblocks NLP/seq use without touching math); (4) fix small correctness/cosmetic issues (stray underscore, unary-divide/subtract footgun — at minimum documented in README, ideally a warning); (5) write `src/dl_techniques/layers/logic/README.md` describing math, classes, factory, integration patterns, and the documented limitation. No class relocation. No public API removal. Tests added incrementally for factory + rank-relaxation. Single-iteration scope per LESSONS line 28 (audit-driven full-coverage with file:line references + design notes per fix).
-
-## plan_2026-05-13_8c1dc6fd
-### Index
-
-| # | Topic | File | Coverage |
-|---|-------|------|----------|
-| F1 | Review summary + triage | findings/review-summary.md | Bug list (B1/B2/I8/I13), medium fixes, refactor triage |
-| F2 | Source state at flagged lines | findings/source-state.md | Verified line-refs in README, mann, baseline_ntm, som_nd, som_nd_soft |
-| F3 | Tests + stale docs | findings/test-and-doc-state.md | Test paths, scoped pytest sets, doc regen plan |
-
-### Key Constraints
-
-**HARD**
-- Keras 3 / TF 2.18 conventions: `@keras.saving.register_keras_serializable`, `keras.ops`, full `get_config()`.
-- Use `.venv`. Never run `make test` (1.5h). Scope pytest to touched modules.
-- User pushes commits themselves.
-- B1, B2, I13 (dead memory_matrix), I8 (LSP) MUST be fixed (user requirement).
-- Centralized logger; no prints.
-
-**SOFT**
-- Match repo convention for serialization in get_config (`serialize` always).
-- Prefer minimal, surgical edits. Avoid breaking class signatures unless user approves.
-- Default-do list: R1 (README typos), R3 (doc regen + CLAUDE.md), R5 (LSP loud-fail), R6 (SoftSOM docstring), R13 (topological_sigma), I13 fix (dead weight), I18 fix ('sample' loud-fail).
-- Defer: R4, R8, R9, R10, R11, R12 (structural / API-breaking).
-
-**GHOST**
-- "MannLayer must keep memory_matrix for checkpoint BC" — weight is unused; only caller is qwen3_mega.py.
-- "Can't fix map_size in README without API change" — API is already `grid_shape=`; doc is wrong, not API.
-
-### Corrections
-*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
-
-## plan_2026-05-13_a40908e7
-### Index
-*To be populated during EXPLORE.*
-
-### Key Constraints
-*To be populated during EXPLORE.*
-
-### Corrections
-*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
-
-## plan_2026-05-13_a1c9a52d
-### Index
-
-| ID | Topic | File |
-|----|-------|------|
-| F-001 | Source files inventory (memory/ + ntm/) | findings/F-001-source-files.md |
-| F-002 | Consumers / import sites (12 memory + 9 ntm) | findings/F-002-consumers.md |
-| F-003 | Merge strategy options + recommendation | findings/F-003-merge-strategy.md |
-
-### Key Constraints
-
-### HARD
-- **No breaking imports.** All 21 current call sites must keep working unchanged:
-  - 12 `from dl_techniques.layers.memory.<submodule> import ...` callers (deep-submodule).
-  - 7 `from dl_techniques.layers.ntm.<submodule> import ...` callers (deep-submodule).
-  - 2 `from dl_techniques.layers.ntm import ...` callers (top-level public API).
-- **Keras 3 / TF 2.18 idioms** — `@register_keras_serializable()` preserved on every moved class; full `get_config()` round-trip; `dl_techniques.utils.logger` only.
-- **`@register_keras_serializable()` keys are `__module__`-based** when `package=` is omitted (LESSONS L118). Moving files mutates `__module__`. Mitigated: zero in-repo `.keras` fixtures reference NTM classes (verified — all `.keras` files live under `results/`, which is gitignored).
-- **Tests must pass** — scope to `tests/test_layers/test_ntm/` + `tests/test_layers/test_som_*.py` + `tests/test_models/test_ntm/` + `tests/test_models/test_som/`. Never `make test` (1.5h hook).
-- **Per `layers/CLAUDE.md`** — sibling packages may keep populated `__init__.py` when they export a public API; deep-submodule imports are the canonical pattern.
-
-### SOFT
-- **Recommendation: Option A** (flat siblings inside `memory/`). 3 file moves + a 3-file shim package at `layers/ntm/`.
-- **Populate `memory/__init__.py`** as the canonical public surface going forward (the empty `__init__.py` is legacy state, not a hard constraint).
-- **README** at `src/dl_techniques/layers/memory/README.md` covering family overview, class taxonomy (MANN / NTM / SOM), public surface, usage examples, references.
-- **SOM tests stay flat** at `tests/test_layers/test_som_*.py` (out of scope to relocate).
-
-### GHOST (considered & rejected)
-- *Unify `MannLayer` and `NeuralTuringMachine` under one base class* — REJECTED. Independent implementations; `mann.py` does NOT use `BaseNTM`. Would change runtime semantics.
-- *Move tests into `tests/test_layers/test_memory/`* — REJECTED. Renames 7 test files for zero API benefit.
-- *Use `package=` on `@register_keras_serializable()` to stabilize registration keys across the move* — REJECTED. Would itself change semantics; no in-repo `.keras` consumers, so the move is safe as-is.
-
-### Corrections
-*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
-
-## plan_2026-05-13_8e866056
-### Index
-*To be populated during EXPLORE.*
-
-### Key Constraints
-*To be populated during EXPLORE.*
-
-### Corrections
-*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*

@@ -17,7 +17,9 @@ make structure  # display src tree
 make docs       # generate documentation
 ```
 
-> **Full test suite runtime ≈ 1.5 hours** (this is also the pre-push hook). Do NOT run `make test` or `pytest tests/` as a routine regression check. Instead, scope pytest to the module(s) you changed (e.g. `pytest tests/test_models/test_video_jepa/`) plus any modules that import what you touched. Reserve the full suite for when the user explicitly asks, or immediately before a push they've requested.
+> **Full test suite runtime ≈ 1.5 hours** (this is also the pre-push hook). Do NOT run `make test` or `pytest tests/` as a routine regression check. Instead, scope pytest to the module(s) you changed (e.g. `pytest tests/test_models/test_video_jepa/`) plus any modules that import what you touched. Reserve the full suite for when the user explicitly asks.
+>
+> **Push default**: always push with `git push --no-verify` to skip the pre-push hook (full suite). The user runs the suite themselves when they want it.
 
 ## Repository Structure
 

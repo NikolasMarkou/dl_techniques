@@ -55,3 +55,8 @@
 | plan_2026-05-13_e52a5ac8 | 2026-05-13 | Double-check the prior `layers/logic/` review and apply only |  |
 | plan_2026-05-13_a2b0f17b | 2026-05-13 | Implement every actionable item from the latest deep review, | prior-work-audit |
 | plan_2026-05-13_3a2f1d23 | 2026-05-13 | Address the residual epistemic review of `src/dl_techniques/ |  |
+| plan_2026-05-13_e33114da | 2026-05-13 | Implement the post-rewrite review fixes for `src/dl_techniqu | f1: hamacher or boundary bug, f2: gumbel softmax leaks into inference, f3: risky_stack guard misses residual-only case |
+| plan_2026-05-13_d256b568 | 2026-05-13 | Create a model + training script under `src/train/logic/` th |  |
+| plan_2026-05-13_25774a34 | 2026-05-13 | Run a real benchmark + interpretability study on `LearnableN |  |
+| plan_2026-05-13_798d3a60 | 2026-05-13 | Implement E1 (Petersen-DLGN-style replication on MNIST + CIF |  |
+| plan_2026-05-14_e26eede2 | 2026-05-14 | Implement E4 (UCI Monks-1/2/3 rule recovery) + low-data 11-b |  |

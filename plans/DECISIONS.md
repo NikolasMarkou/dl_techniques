@@ -30,6 +30,182 @@
 - Anchor at impact site (not at decision definition). One anchor per impact site, even if shared with sibling decision.
 <!-- /COMPRESSED-SUMMARY -->
 
+## plan_2026-05-14_e26eede2
+### D-001 | EXPLORE → PLAN | 2026-05-14
+**Context**: `to_symbolic()` returns a multi-line human-readable string, not an executable AST (F1). Parsing it back into a categorical-domain predicate is brittle and crosses an unnecessary abstraction layer.
+**Decision**: Score rule recovery by evaluating the **hard-extracted Keras model** directly on the enumerated 432-config one-hot encoded categorical domain. Compare predictions vs published-rule ground truth on those 432 configs.
+**Trade-off**: Conceptual clarity + bit-exact correctness **at the cost of** not producing a SymPy/z3-style symbolic-equivalence certificate (the score is empirical, not algebraic). Acceptable because Monks attribute domain is exhaustively enumerable (432 configs) so empirical = algebraic here.
+**Reasoning**: Truth-table equivalence on a finite domain IS algebraic equivalence. Rejected: (a) parsing to_symbolic (brittle, ambiguous), (b) z3/sympy SMT (overkill for 432 rows, install cost).
+
+### D-002 | EXECUTE/step-1 smoke | 2026-05-14
+**Context**: OpenML returns combined (124 train + 432 test concat, but ORDER not contractually guaranteed); UCI direct-download (`https://archive.ics.uci.edu/ml/machine-learning-databases/monks-problems/monks-N.{train,test}`) returns Thrun's canonical splits in standard format `class a1..a6 id`.
+**Decision**: Use UCI direct-download as PRIMARY path. `openml` install is kept as a soft dep but the loader does not depend on it. UCI files are cached on first download under `~/.cache/dl_techniques/monks/`.
+**Trade-off**: Loader is simpler + matches canonical splits exactly **at the cost of** depending on the UCI mirror staying up. Acceptable: UCI is the canonical source; files are tiny (~5KB each) so caching is trivial.
+**Reasoning**: Smoke-test in step 1 showed all 6 UCI files download in ~2s with no auth/throttling; OpenML combined-row encoding requires inferring split order (non-canonical).
+
+### D-003 | PLAN | 2026-05-14
+**Context**: User-supplied "FULL AUTONOMY" override: skip PC-PLAN/PC-REFLECT user gates, do not pause on AskUserQuestion, run honest-negative CLOSE if criteria fail unrecoverably.
+**Decision**: Proceed directly from PLAN to EXECUTE without user approval. Log every conservative-default decision here. On Pre-Mortem trigger or autonomy-leash hit, follow the plan-specified action (REFLECT and honest-negative CLOSE) without pausing.
+**Trade-off**: Speed + the user's stated minimum-interaction preference **at the cost of** giving up the gate-check protection that would normally catch a malformed plan before EXECUTE.
+**Reasoning**: User explicit override. Plan is grounded in 3 deep findings + frozen-helper inventory; PC-PLAN gate would be a no-op here.
+
+### D-004 | REFLECT | 2026-05-14
+**Context**: All 8 SC PASS. The >5pt-on-≥2-of-3 paper-hook claim from `analyses/analysis_2026-05-13_9c535f78` §E4 is REFUTED on Monks (mlp_matched ties or slightly beats circuit on all three tasks; xgboost is the weak baseline). The rule-recovery capability claim is CONFIRMED (circuit hits 0.995 / 1.000 / 0.965). The MUX learning curve shows circuit/MLP/XGBoost converge together — no unique low-data inductive bias for circuit.
+**Decision**: Honest-negative CLOSE on the comparative claim, honest-positive CLOSE on the rule-recovery claim. Do NOT re-tune the circuit to chase the >5pt criterion; that would be p-hacking against the falsification signal that just fired (Pre-Mortem Scenario B / D variants).
+**Trade-off**: Scientific integrity + the explicit honest-negative protocol from this plan + LESSONS L62/L67 (honest-negative precedent) **at the cost of** a less-glamorous paper-hook framing.
+**Reasoning**: User said "honest opinion ... no need to celebrate trivial results." Two negatives + one positive is more useful than tweaking until a different verdict appears.
+
+<!-- Schema example — DO NOT REMOVE. Real entries follow this shape.
+     See references/file-formats.md "Entry Schema by Type" for required fields per entry type.
+     In-code anchors carry the plan-id prefix: `# DECISION plan_2026-05-14_e26eede2/D-NNN` (see references/decision-anchoring.md).
+
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-14_e26eede2/D-NNN` anchor exists in source)
+-->
+
+## plan_2026-05-13_798d3a60
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-13_798d3a60/D-NNN` anchor exists in source)
+-->
+
+### D-001 | EXPLORE → PLAN | 2026-05-14
+**Context**: EXPLORE produced 4 findings (F1–F4) confirming: (a) `LearnableNeuralCircuit` already accepts rank-4 input (no library change for E1, ghost constraint), (b) `extract_hard_inplace`/`_iter_inner_ops`/`roundtrip_check`/CSV writers are reusable from `train_benchmark.py`, (c) `lime` + `shap` are NOT installed in `.venv` (HARD BLOCKER, first plan step), (d) `circuit_depth=2` + `arithmetic_op_types=['add','max','min']` + `apply_sigmoid_per_depth='first_only'` are NaN-safe pins (LESSONS L51). E1 = Conv-stem + circuit + GlobalPool + Dense on MNIST/CIFAR-10. E3 = 3 new boolean tasks (`mux_11bit`, `parity_k8`, `random_dnf_8input_4term`) with `StopOnAccuracyBand` partial-convergence + circuit/LIME/SHAP attribution faithfulness comparison. Headline metric is hard-extraction Δ at non-saturation.
+**Decision**: Ship 2 new sibling training scripts (`train_e1_image.py`, `train_e3_faithfulness.py`) plus 2 small helper modules (`callbacks_band.py`, `attributions.py`) under `src/train/logic/`. Library code and `train_benchmark.py` are FROZEN.
+**Trade-off**: ~1960 LOC of new code (4 source + 4 tests) **at the cost of** some duplication between E1 and E3 trainers (band-checkpoint helper, hard-extraction wrapper) that could in principle live in a shared util module.
+**Reasoning**: N=2 sibling files is below the LESSONS L11 coupling-crossover (N≥4). Pre-extracting a shared util would inflate abstraction count (5/4 budget) and create a 3-file change boundary for any future tweak. If REFLECT shows >40 LOC of true duplication, factor then. Alternative considered & rejected: extend `train_benchmark.py` in place — rejected because it's anchored as the boolean benchmark (plan_25774a34 D-001 coherent unit) and would break SC7 (existing 254 tests + schema). Alternative considered & rejected: extend the circuit layer — rejected because rank-4 already works (ghost constraint, F1 + plan_2aaad563 precedent).
+**Anchor-Refs**: pending — will add `# DECISION plan_2026-05-13_798d3a60/D-001` at top of `src/train/logic/train_e1_image.py` and `src/train/logic/train_e3_faithfulness.py` once those files are created in Steps 6 and 10.
+
+### D-002 | EXECUTE step-5 fix-attempt-2 | 2026-05-14
+**Context**: Step 5 SC6 test failed on gradient×input attribution: per-bit normalized mass on a trained parity_k6 model had a max/min ratio of 2.85x (>2x falsification threshold from Pre-Mortem Scenario 4). The random Dense embedding's per-bit weights don't marginalize when grad×input is evaluated on a single sample, even averaged over inputs.
+**Decision**: Replace `circuit_attributions` with integrated gradients (Sundararajan et al. 2017) on a baseline=0.5 → x path with n_steps=32. Test now passes with ratio < 2.0.
+**Trade-off**: Modest 32× compute overhead per attribution **at the cost of** symmetry-preserving, completeness-axiom-satisfying attributions that align with the SC6 oracle.
+**Reasoning**: Integrated gradients is the standard differentiable-saliency method and is mathematically guaranteed to preserve task symmetries. The compute overhead is acceptable: ~32 forward+backward passes per sample, dwarfed by LIME (5000 samples) and SHAP (256 samples). The plan's original wording ("combination probabilities × involved input indices") was design speculation; the integrated-gradient implementation is the same "circuit-native differentiable" idea executed correctly. Pre-Mortem Scenario 4 is therefore not a falsification of the experiment design — it correctly flagged a flawed first attempt at the rule.
+**Anchor-Refs**: `src/train/logic/attributions.py:81-86` (in-code `# DECISION plan_2026-05-13_798d3a60/D-002` block immediately above `circuit_attributions`).
+
+### REFLECT Verdict | 2026-05-14
+**Phase 1 Gate-In**: read state.md, plan.md, progress.md, verification.md, findings.md, checkpoints/, decisions.md, changelog.md.
+
+**Phase 2 Evaluate**:
+- All 8 success criteria PASS (see verification.md).
+- 231 pre-existing layer logic tests still pass (no regression).
+- 53 new train logic tests pass.
+- No scope drift: exactly the 8 planned files created; one in-scope D-002 anchor block added in attributions.py during REFLECT to address validate-plan anchor-refs-stale warning.
+- Changelog scan: one MED-radius edit (attributions.py at step-5) anchored to D-002 with clear reason; no thin reasons.
+- Validate plan script: 28 ERRORs are all orphan anchors from OTHER plans (pre-existing codebase debt), 1 transition-format WARN is cosmetic — none introduced by this plan.
+- 6 Simplification Checks: no blockers (no wrapper cascades, no copy-paste, no exception swallowing, no type escapes, no adapters, no "temporary" workarounds introduced).
+- Headline result: **hard-extraction Δ FAITHFUL on every band-entry checkpoint across all 5 task/dataset configurations** (MNIST, CIFAR-10, mux_11bit, parity_k8, random_dnf). Pre-Mortem Scenario 3 STRONG-POSITIVE outcome confirmed.
+- D-002 (Pre-Mortem Scenario 4 fired at step-5) was correctly resolved within autonomy leash by switching to integrated gradients — not a plan failure, just a rule refinement.
+
+**Root-cause analysis**: not applicable; all criteria pass on first iteration.
+
+**Recommendation**: CLOSE. Per the user's pre-approval (sleeping), proceed directly to CLOSE without blocking.
+
+## plan_2026-05-13_25774a34
+### D-001 | EXPLORE to PLAN | 2026-05-14
+**Context**: User asked for "something more elaborate / train and test it". Previous plan (`plan_2026-05-13_d256b568`) trivially proved the layer trains on K=4 parity. The natural escalation is a multi-task benchmark + comparison + faithfulness study.
+
+**Decision**: One new file `src/train/logic/train_benchmark.py` containing 4 tasks × 3 models grid plus an in-place hard-extraction faithfulness test, dumping CSV + markdown report.
+
+**Trade-off**: A single fat file (~500 LOC) **at the cost of** test/refactor coupling — if any one component (task generator, model factory, extraction) breaks, the whole file is touched. Accepted because: (a) keeps within the 2/3 files budget; (b) entire benchmark is a coherent unit; (c) follows the precedent set in `train_boolean_circuit.py` (also a single file).
+
+**Reasoning**:
+- Rejected: split into `tasks.py` + `models.py` + `extraction.py` + `runner.py` — would be 4 files, well over budget; the coupling is real but not painful at this scale.
+- Rejected: extend `train_boolean_circuit.py` in place — that file is the "single-task convenience" entry per prior plan; keeping benchmark vs single-task separate preserves both use cases.
+- Rejected: a Keras `Callback`-based extraction probe — too clever; in-place weight swap + restore is simpler and bypasses callback ordering issues.
+
+**Anchor-Refs**: D-002 will anchor at the extract_hard_inplace function in S1; D-003 if any test-locked-in invariant emerges during S2.
+
+## plan_2026-05-13_d256b568
+### D-001 | EXPLORE to PLAN | 2026-05-14
+**Context**: User asked to "create a model and a train file so we can see for real if this thing works". The "thing" is `LearnableNeuralCircuit` from the prior plan. Done well, the validation is an empirical proof that the layer's symbolic readout reflects what it actually learned.
+
+**Decision**: Single-file train script `src/train/logic/train_boolean_circuit.py`. Task = synthetic boolean function recovery (parity, majority, random k-DNF). Architecture = Dense embed → LearnableNeuralCircuit → Dense head. Eval = held-out accuracy + `to_symbolic()` printout + save/load round-trip.
+
+**Trade-off**: Synthetic data **at the cost of** less "realism" than image / NLP. Acceptable because: (a) the goal is to validate the layer, not to set a benchmark; (b) ground-truth boolean functions give an interpretable target the symbolic readout can be checked against; (c) tiny fast-iterating models.
+
+**Reasoning**:
+- Rejected: vision classifier (would confound circuit-vs-CNN); precedent at `src/train/latent_reasoning_vision/circuit.py` is 1200 LOC of vision pipeline noise.
+- Rejected: NLP classification (token embeddings, batching complexity not needed).
+- Rejected: only majority (linearly separable; doesn't prove non-linear capacity).
+- Picked: parity + majority + random-DNF as a small task triad — each tests a different property.
+
+**Anchor-Refs**: any DECISIONS anchored in code will be added in S2/S3.
+
+## plan_2026-05-13_e33114da
+### D-001 | EXPLORE to PLAN | 2026-05-13
+**Context**: Prior epistemic-deconstructor review (session `analysis_2026-05-13_62e26431`) produced a punch-list: 6 BUGs, 4 GAPs, ~8 DESIGN, 3 DOC. User asked for double-check + implement-everything. Each finding re-verified by re-reading source and (for B1) numerical check.
+
+**Decision**: Implement everything in one plan with 17 granular steps; commit per step. No new abstractions beyond `inner_*_kwargs` dict params (1/2 budget). All math/API changes default to legacy behavior; new flags opt-in.
+
+**Trade-off**: 17 commits and ~200 net LOC **at the cost of** churn in `neural_circuit.py` and `logic_operators.py`. Acceptable because every fix is independently small and reversible by reverting that one commit.
+
+**Reasoning**:
+- Rejected "single mega-commit": too hard to bisect if a regression surfaces later.
+- Rejected "fix bugs only, skip design": user explicitly said "implement everything, MAXIMUM EFFORT".
+- Rejected "rename `entropy_coefficient` / `gate_entropy_coefficient`": the names were chosen deliberately last iteration; better to fix wording in comments/docs than ping-pong on names.
+
+**Anchor-Refs**: anchors will be added in S2 (Hamacher), S3 (Gumbel training), S4 (risky_stack), S8 (inner_kwargs forwarding rule), S11 (vectorized diversity).
+
+### D-002 | S2 B1 Hamacher boundary | 2026-05-13
+**Context**: `_hamacher_or(1,1)` returned 0 (cliff discontinuity from `max(denom, 1e-9)`); mathematical limit is 1. `_hamacher_and(0,0)` returned 0 via additive eps — coincidentally correct but with different eps strategy.
+
+**Decision**: Unified both Hamacher t-norms with `ops.where(denom < eps, fill, num/denom_safe)`. Fill = 0 for AND (limit at (0,0)) and 1 for OR (limit at (1,1)). Eps `1e-7` set as class constant `_HAMACHER_SINGULAR_EPS`.
+
+**Trade-off**: One extra `where` op per Hamacher call **at the cost of** preventing silently wrong outputs at sigmoid-saturated corners (fp16 or upstream clipped to [0,1]).
+
+**Anchor-Refs**: `src/dl_techniques/layers/logic/logic_operators.py:442`
+
+### D-003 | S3 B2 Gumbel inference | 2026-05-13
+**Context**: `_operation_probs` had `deterministic: bool = False` but `call()` never passed `training`. `model.predict()` re-sampled Gumbel noise on every call → non-deterministic inference.
+
+**Decision**: Add `training: Optional[bool] = None` to `_operation_probs`. Gumbel noise injected only when `training is True`. Treat `None` and `False` as inference (skip noise). Match standard Keras dropout/BN convention.
+
+**Trade-off**: Slightly stricter behavior than DARTS literature (some implementations sample at inference) **at the cost of** matching Keras-user expectations that `model.predict()` is deterministic. Users who explicitly want stochastic inference can call `layer(x, training=True)`.
+
+**Anchor-Refs**: `src/dl_techniques/layers/logic/logic_operators.py:506`, `src/dl_techniques/layers/logic/arithmetic_operators.py:470`
+
+### D-004 | S4 B3 widened risky_stack | 2026-05-13
+**Context**: B3 finding posited a residual-leak case with `num_arith=0` that turned out to be impossible because the constructor validates `num_arith >= 1`. Original `risky_stack` condition was effectively always-true for valid constructions. False positive partially.
+
+**Decision**: Widen condition to `(num_arith > 0 OR use_residual)` regardless — defensive future-proofing, and clearer semantic statement of *why* force-clip is needed (out-of-[0,1] inputs from either arithmetic experts or residual). If the validation is ever relaxed, the guard still works.
+
+**Trade-off**: Slightly more verbose condition + warning message **at the cost of** zero functional regression (default config still warns; logic is just better-stated).
+
+**Anchor-Refs**: `src/dl_techniques/layers/logic/neural_circuit.py:636`
+
+### D-005 | S5 B4 per-channel load balance | 2026-05-13
+**Context**: `_maybe_load_balance_loss` was called with `mean(combination_probs, axis=0)` for per-channel mode, then L2'd. Channel-wise peakiness averaged out → invisible to regularizer.
+
+**Decision**: Inline per-row L2 (`sum(beta^2, axis=-1)`) then mean. Unified handling for both `(N,)` global and `(C, N)` per-channel shapes.
+
+**Trade-off**: One extra `mean` call per forward pass when per-channel **at the cost of** properly penalizing channel-wise peakiness as intended.
+
+**Anchor-Refs**: `src/dl_techniques/layers/logic/neural_circuit.py:357`
+
+### D-006 | S6 S8 G1 inner_kwargs collision rule | 2026-05-13
+**Context**: `inner_logic_kwargs` and `inner_arithmetic_kwargs` allow forwarding arbitrary config into inner ops. Some keys (`operation_types`, `apply_sigmoid`, `selection_mode`, `force_clip_when_no_sigmoid`, `allow_unary_degenerate`, `name`) are wrapper-controlled — overriding them through the dict would silently violate wrapper invariants.
+
+**Decision**: Wrapper-owned keys always win. User-passed values for those keys are stripped from the dict and a `UserWarning` is emitted naming the collided keys.
+
+**Trade-off**: Slightly opinionated (could just raise) **at the cost of** zero breakage for users who copy-paste a kwargs dict from one context to another. Warning makes the override visible without blocking.
+
+**Anchor-Refs**: `src/dl_techniques/layers/logic/neural_circuit.py:220`
+
+### D-007 | S15 H6 rationale comment correction | 2026-05-13
+**Context**: The plan_2026-05-13_3a2f1d23/D-002 rationale claimed the H6 rename `load_balance_coefficient → gate_entropy_coefficient` reflected the loss being "Shazeer gate-entropy regularizer, not load-balance". Math review: implementation is `coef * N * mean(sum(beta^2))` — L2 of probs, not entropy. Both are convex measures of peakiness with the same uniform optimum, but they're not the same function.
+
+**Decision**: Correct the rationale comment in place; preserve the name (renaming again would be churn for users with saved configs). Document the actual semantics in README.
+
+**Trade-off**: Misleading name persists **at the cost of** zero migration churn.
+
 ## plan_2026-05-13_3a2f1d23
 ### D-001 | EXPLORE → PLAN | YYYY-MM-DD
 **Context**: <one-paragraph background — what was discovered in EXPLORE>
@@ -100,92 +276,3 @@
 - H4 (zeros init) — empirically 1.4% softmax spread; cosmetic, not functional. Skip.
 - L4 (initializer round-trip) — false positive; works correctly.
 **Anchor-Refs**: TBD at EXECUTE step boundaries (only C1 + C3 fixes warrant `# DECISION` anchors per the 5-trigger rule in `references/decision-anchoring.md` — they encode "do NOT revert to false default" and "apply_sigmoid=False is intentional for stacked use").
-
-## plan_2026-05-13_2aaad563
-### iter-1 PLAN — recommended approach
-**Chosen**: minimal-additive refactor: add `factory.py` + populate `__init__.py` + rank-relax + small fixes + write `README.md` + scope-add tests. **At the cost of**: not addressing the unary `subtract`/`divide` footgun in code (documented in README only) — fixing it in code would either change semantics (potential test break) or require new ctor flag (over-scope).
-
-Why this over alternatives:
-- **Alt A (full rewrite, unified `LearnableOperator` base class)**: high blast radius, no consumer demand, would require relocating logic between modules → breaks `.keras` archive serialization keys per LESSONS L94/L118. Rejected.
-- **Alt B (deprecate `LearnableArithmeticOperator`+`LearnableLogicOperator`, keep only `LearnableNeuralCircuit`)**: removes user surface that exists in tests + sole consumer's analyze path. Rejected.
-- **Alt C (relocate classes into one file)**: same `.keras` archive break risk. Rejected.
-
-Constraint inputs:
-- HARD: bare `@register_keras_serializable()` ties registered key to `__module__` — keep current module homes (LESSONS L94/L118).
-- HARD: 78 PASS baseline must remain green.
-- HARD: external consumer `train/latent_reasoning_vision/circuit.py` import path locked.
-- SOFT: repo convention "package with factory.py → populated __init__.py" (FFN/memory/norms precedent in layers/CLAUDE.md).
-
-### Available checkpoints
-None yet — iter-1 will create `cp-000-iter1.md` at first EXECUTE step (per protocol).
-
-## plan_2026-05-13_8c1dc6fd
-### D-001 | EXPLORE → PLAN | YYYY-MM-DD
-**Context**: <one-paragraph background — what was discovered in EXPLORE>
-**Decision**: <chosen approach in one sentence>
-**Trade-off**: <X> **at the cost of** <Y>
-**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-13_8c1dc6fd/D-NNN` anchor exists in source)
--->
-
-### D-001 | EXPLORE → PLAN | 2026-05-13
-**Context**: review.md identified 4 bug-grade defects (B1, B2, I13, I8 LSP) plus medium/low issues and 13 refactor recommendations. Source state verified at every flagged line. Only in-repo callers of `MannLayer` and `SOMLayer*` are research/experimental code.
-**Decision**: Do all 4 must-fix bugs + R1/R3/R5/R6/R13/I18 (small, local, low-risk). Defer R4/R8/R9/R10/R11/R12 (structural / public API change).
-**Trade-off**: A clean correctness pass and stable public API **at the cost of** carrying duplicate NTM addressing implementations (DifferentiableAddressingHead vs NTMReadHead vs MannLayer._calculate_head_addressing) until the user approves a structural pass.
-**Reasoning**: Structural merges (R8/R10) break public surface (970+ LOC removed, deprecation cycles) and require a separate explicit approval. Doing them silently here would violate the "minimal surgical edits" preference. The duplication is inert (not a correctness issue) and can be fixed in a follow-up plan.
-**Anchor-Refs**: pending (no code anchors required for this plan — all fixes are surgical and self-explanatory at the call site).
-
-### D-002 | PLAN (v2) | 2026-05-13
-**Context**: User authorized maximum-effort expansion ("YES LETS GO, MAXIMUM EFFORT"): pull in deferred R4, R7, R8, R9, R10, R11, R12. For R10 (MannLayer rewrite), instructions said "pick lower-risk path between LSTMCell rewrite (R4) and collapse-to-factory-over-NTM, justify".
-**Decision**: Lower-risk path is **additive** factory: introduce `create_mann()` in new `factory.py` that returns a `NeuralTuringMachine` configured with MANN-equivalent knobs; **keep `MannLayer` class as-is** (with I13 fix from step 3). Do NOT delete or rewrite MannLayer's internals — that would either (a) silently change numerical behavior of `qwen3_mega.py` (semantics differ between MannLayer.call's concat-output and NTM's `Dense(output_dim)` projection of cell state), or (b) trigger user-visible test failures and the autonomy leash. Same additive philosophy for R9: `SOM2dLayer` becomes a registered subclass alias (`_SOM2dLayerImpl`) returned by the `create_som_2d` factory — preserves `isinstance(x, SOM2dLayer)`, ctor signature, `get_weights_as_grid` method, and the 6 tests in `tests/test_models/test_som/test_model.py`. The user's caveat "do not fight irrecoverable breaks" governs.
-**Trade-off**: A clean public-surface refactor (R7-R12 done) and clean dead-code removal (R8) **at the cost of** keeping `MannLayer` class (and `SOM2dLayer` alias) in the public surface as legacy entry points alongside the new factory. The duplication is small and inert.
-**Reasoning**: The user explicitly invited the autonomy leash to fire on irrecoverable structural breaks. The factory-as-additive-layer pattern lets every consumer pick: legacy class (MannLayer / SOM2dLayer) or factory (create_mann / create_som_2d). For R4: by using `create_mann()` callers automatically get the LSTM**Cell**-based RNN that `NeuralTuringMachine` already uses internally — R4's perf benefit is captured for new callers without rewriting `MannLayer.call`. R8 deletes 970 LOC of `base_layers.py` outright (no in-src callers, only `test_base_layers.py` consumes it — both go). R12 prunes enum values that no caller uses (`LOCATION/SPARSE/TEMPORAL/LEARNED`) — only `HYBRID` and `CONTENT` kept, matching usage.
-**Anchor-Refs**: pending (will add `# DECISION plan_2026-05-13_8c1dc6fd/D-002` anchor in `factory.py` create_mann body documenting the BC contract).
-
-## plan_2026-05-13_a40908e7
-### D-001 | EXPLORE → PLAN | YYYY-MM-DD
-**Context**: <one-paragraph background — what was discovered in EXPLORE>
-**Decision**: <chosen approach in one sentence>
-**Trade-off**: <X> **at the cost of** <Y>
-**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-13_a40908e7/D-NNN` anchor exists in source)
--->
-
-## plan_2026-05-13_a1c9a52d
-### D-001 | EXPLORE → PLAN | YYYY-MM-DD
-**Context**: <one-paragraph background — what was discovered in EXPLORE>
-**Decision**: <chosen approach in one sentence>
-**Trade-off**: <X> **at the cost of** <Y>
-**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-13_a1c9a52d/D-NNN` anchor exists in source)
--->
-
-### D-001 | EXPLORE → PLAN | 2026-05-13
-**Context**: `layers/memory/` (4 files: MannLayer + 3 SOMs, empty `__init__.py`) and `layers/ntm/` (4 files: interfaces + base layers + baseline NTM, populated `__init__.py` with 29-name public API) are sibling layer subpackages. 21 known call sites split across 12 deep-submodule `layers.memory.*` imports + 9 `layers.ntm.*` imports (2 top-level, 7 submodule).
-**Decision**: Adopt Option A — flat-siblings layout. `git mv` the 3 NTM files into `memory/`, then create a 4-file shim package at `layers/ntm/` (rewritten `__init__.py` + 3 thin submodule shims) that re-exports from `dl_techniques.layers.memory`. Populate `memory/__init__.py` as the canonical public surface (NTM names + MANN + 3 SOM classes).
-**Trade-off**: zero-blast-radius backward compatibility (3 shim files + 1 rewritten `__init__.py`) **at the cost of** keeping a grab-bag flat namespace under `memory/` (NTM files sit alongside SOM files; no internal subpackage grouping).
-**Reasoning**: Option A is 3 `git mv` + 4 shim files + 0 source modifications across the 21 call sites. Option B (subpackages `memory/ntm/`, `memory/som/`) would require rewriting intra-package relative imports across 4 files and forces an uglier 2-level path `dl_techniques.layers.memory.ntm.baseline_ntm`. Option C (no merge) does not satisfy the goal. Serialization key risk (`__module__`-keyed `@register_keras_serializable` registration changes when files move — LESSONS L118) is mitigated by verifying that all in-repo `.keras` files live under `results/` (gitignored runtime output, not fixtures).
-**Anchor-Refs**: (no in-source anchors required — pure relocation, no behavioral decision baked into call())
-
-### D-002 | PLAN → PLAN (user revision) | 2026-05-13
-**Context**: User rejected the shim approach in D-001. Backward-compat shim package at `layers/ntm/` is unwanted technical debt; user prefers a clean break and explicit caller rewrites.
-**Decision**: Drop all shim creation. `git mv` the 3 NTM files into `memory/`, rewrite all 9 `layers.ntm.*` caller import statements to use `layers.memory.*`, then `git rm` the `layers/ntm/` directory entirely. Populate `memory/__init__.py` as the canonical public surface and add README.md.
-**Trade-off**: clean single-package layout with zero legacy shims **at the cost of** touching 9 caller files (broader edit blast radius) and a hard break for any out-of-tree caller that imports `dl_techniques.layers.ntm` (none known, but the grep guarantee is repo-scoped).
-**Reasoning**: User explicitly prefers atomic cutover over compatibility cruft. The 9 caller edits are mechanical, all enumerated in F-002, and reviewable as a single diff. Top-level callers (`models/ntm/model.py:27`, `train/ntm/train_ntm.py:8`) now import from `dl_techniques.layers.memory` directly (`NTMCell`, `NTMConfig`, `create_ntm` re-exported from `memory/__init__.py`). Serialization risk unchanged from D-001 (no in-repo `.keras` fixtures).
-**Anchor-Refs**: (none — pure relocation + import rewrites)
-
-### D-003 | REFLECT → CLOSE recommendation | 2026-05-13
-**Context**: All 7 plan steps executed cleanly. Zero fix attempts. 287/287 scoped tests pass after `make clean`. All 7 SCs PASS. Diff review found no debug artifacts, no print(), no TODOs. Scope drift: none. Simplification checks: all 6 clear. Falsification signals A, B, C: none fired.
-**Decision**: Recommend CLOSE.
-**Trade-off**: closing now **at the cost of** not running the full repo test suite (out of scope per plan; user-instructed to avoid `make test` routinely; scoped suite covers all touched code).
-**Reasoning**: Verification is complete against the documented criteria. The merge was structural (relocation + import rewrites + new README) with mechanical execution. No behavioral changes. Top-level public API re-exports all NTM names and verified by SC5 smoke. Devil's advocate: the only failure mode untested is downstream/notebook consumers importing `dl_techniques.layers.ntm` — A5 explicitly accepted by user as hard break. No further verification value at this iteration.
-**Anchor-Refs**: (none)
-
-## plan_2026-05-13_8e866056
-### D-001 | EXPLORE → PLAN | YYYY-MM-DD
-**Context**: <one-paragraph background — what was discovered in EXPLORE>
-**Decision**: <chosen approach in one sentence>
-**Trade-off**: <X> **at the cost of** <Y>
-**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-13_8e866056/D-NNN` anchor exists in source)
--->
