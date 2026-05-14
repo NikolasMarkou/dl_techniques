@@ -1,3 +1,0 @@
-dataset,model,params,band_low,band_high,band_acc,band_epoch,band_entered,epochs_used,wall_s,soft_acc,hard_acc,delta_hard,roundtrip_diff,final_val_acc
-cifar10,circuit,98538,0.5,0.8,0.5551999807357788,1,True,2,32.20925688743591,0.5551,0.5542,-0.0009,0.0,0.5551999807357788
-cifar10,cnn_matched,96845,0.5,0.8,0.520799994468689,2,True,3,24.499293088912964,0.5208,,,0.0,0.520799994468689
