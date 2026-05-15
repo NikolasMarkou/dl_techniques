@@ -56,42 +56,52 @@
 
 % ============================================================================
 \begin{abstract}
-We empirically evaluate three increasingly elaborate variants of \rms{} normalization --- \bandrms{} (output magnitude constrained to a learnable band $[1-\alpha,\,1]$), \zcrms{} (mean subtracted before RMS rescaling), and \zcband{} (both modifications combined) --- against vanilla \rms{} across five settings: ViT-pico on CIFAR-10, ResNet-18 on CIFAR-100, a 4-layer pre-norm transformer on IMDb, a 24-block deep residual stack under mixed precision, and a layer-level synthetic microbenchmark.
-We run $n{=}5$ random seeds per cell and report mean~$\pm$ std, 95\% bootstrap CI, and a paired sign-flip permutation $p$-value (B${=}10{,}000$, Phipson-Smyth corrected) against the \rms{} baseline.
-Four mechanistic probe callbacks log per-epoch activation mean, per-sample RMS distribution, weight $L_2$ trajectory, and gradient norm at every normalization layer, directly testing each variant's specific theoretical claim.
+We empirically evaluate three variants of \rms{} normalization --- \bandrms{} (output magnitude constrained to a learnable band $[1-\alpha,\,1]$), \zcrms{} (mean subtracted before RMS rescaling), and \zcband{} (both modifications combined) --- against vanilla \rms{} across five settings: ViT-pico on CIFAR-10, ResNet-18 on CIFAR-100, a 4-layer pre-norm transformer on IMDb, a 24-block deep residual stack under mixed precision, and a layer-level synthetic microbenchmark.
+We run $n{=}5$ random seeds per cell and report mean~$\pm$ std, 95\% bootstrap CI, and a paired sign-flip permutation $p$-value ($B{=}10{,}000$, Phipson--Smyth corrected) against the \rms{} baseline.
+Four probes log per-epoch activation mean, per-sample RMS distribution, internal scale state, and gradient norm at every normalization layer, testing each variant's specific theoretical claim independently of accuracy.
 Three findings emerge.
-First, \textbf{the band constraint by itself produces no measurable benefit on any task we tested}: \bandrms{} mechanistically confines output RMS to $[0.9, 1.0]$ as advertised, but yields zero accuracy or loss improvement over \rms{} across all five experiments and ten parameter-matched cells.
+First, \textbf{the band constraint by itself produces no measurable benefit on any task we tested}: \bandrms{} mechanistically confines output RMS to $[0.9, 1.0]$ as advertised, but yields zero accuracy or loss improvement over \rms{} across all five experiments.
 Second, \textbf{zero-centering is the operative innovation}: \zcrms{} produces near-zero output mean ($|\E[x]|$ reduced 30--500$\times$) and translates this into a decisive $+41.8$\,pp swing on ResNet/CIFAR-100 (random $\to$ learning), a $-28\%$ validation-loss reduction with $2.8\times$ lower seed variance on the deep-fp16 stack, and modest lifts elsewhere.
 Third, \textbf{combining both gives the tightest variance} ($62\%$ lower std on ViT/CIFAR-10) and the best accuracy on the two vision tasks, but the band's tightness slightly hurts on the 24-block deep stack.
-We further document a cross-experiment dissociation: shallow pre-norm transformers are mechanistically insensitive to norm-variant choice (E3 universal null within $\pm 0.1$\,pp), while post-norm-like or deep regimes are where residual-stream DC drift dominates and zero-centering becomes critical.
+We document a cross-experiment dissociation: shallow pre-norm transformers are mechanistically insensitive to norm-variant choice (E3 universal null within $\pm 0.1$\,pp), while deep or post-norm-like regimes are where residual-stream DC drift dominates and zero-centering becomes critical.
 \end{abstract}
 
 % ============================================================================
 \section{Introduction}
 \label{sec:intro}
 
-The default normalization layer in modern transformers is \layernorm{}~\citep{ba2016layer}: $x \mapsto \gamma \odot (x - \mu(x)) / \sigma(x) + \beta$.
-\rms{}~\citep{zhang2019root} drops the mean subtraction and the bias, computing only $x \mapsto \gamma \odot x / \sqrt{\E[x^2] + \epsilon}$ --- about $1.5$--$2\times$ faster, and the dominant choice in LLaMA, Mistral, Qwen, and most contemporary large language models.
+The default normalization layer in modern transformers is \layernorm{}~\citep{ba2016layer}:
+$$x \;\mapsto\; \gamma \odot \frac{x - \mu(x)}{\sigma(x)} \;+\; \beta,$$
+where $\mu(x)$ and $\sigma(x)$ are the mean and standard deviation along a designated axis and $\gamma, \beta$ are learnable per-feature gain and bias.
+\rms{}~\citep{zhang2019root} drops the mean subtraction and the bias, computing only
+$$x \;\mapsto\; \gamma \odot \frac{x}{\sqrt{\E[x^2] + \epsilon}}$$
+--- about $1.5$--$2\times$ faster in practice, and the dominant choice in LLaMA, Mistral, Qwen, and most contemporary large language models.
 
-Two extensions have been proposed in the codebase under study:
+We study three extensions to \rms{}:
 \begin{itemize}
-  \item \bandrms{}~\citep{bandrms-impl} constrains the output magnitude to a learnable band $[1-\alpha,\,1]$ via a single scalar parameter, on the theory that a ``thick spherical shell'' gives more representational flexibility than the rigid unit sphere.
-  \item \zcrms{}~\citep{zcrms-impl} re-introduces the mean subtraction of \layernorm{} while keeping the per-feature $\gamma$ scale of \rms{}, on the theory that DC drift in residual streams forces $\gamma$ to grow compensatorily; removing the DC prevents this.
-  \item \zcband{} combines both: mean subtraction followed by RMS rescaling followed by band-constrained scalar scaling.
+  \item \textbf{\bandrms{}} (proposed here) replaces the per-feature gain $\gamma \in \R^d$ with a single learnable scalar $\beta \in \R$ whose effective scale is constrained to a band $[1-\alpha, 1]$ via a sigmoid. The motivation is that the rigid unit sphere of \rms{} may be unnecessarily restrictive; a ``thick spherical shell'' (a learnable $(1{-}\alpha)$-thick neighborhood of the unit sphere) was hypothesized to give richer representations.
+  \item \textbf{\zcrms{}}, recently introduced as a design choice in Qwen3-Next~\citep{qwen3next2025}, re-introduces the mean subtraction of \layernorm{} while keeping the per-feature gain of \rms{}. The motivation is that in deep residual networks the residual stream accumulates a DC component (a non-zero mean) across layers, forcing $\gamma$ to grow compensatorily; subtracting the mean before normalization removes this driver.
+  \item \textbf{\zcband{}} (proposed here) composes the two: subtract mean, rescale by RMS of the centered tensor, multiply by the band-constrained scalar scale.
 \end{itemize}
 
-These additions add nontrivial cost compared to baseline \rms{}: \zcrms{} loses the speed advantage over \layernorm{}; \bandrms{} adds a sigmoid and a learnable scalar; \zcband{} adds both.
+\bandrms{} and \zcband{} are our own design.
+\zcrms{} is reproduced from the Qwen3-Next technical report.
+None of the three has, to our knowledge, been subjected to a multi-seed multi-architecture empirical evaluation against the \rms{} baseline; that is the gap this paper is intended to fill, including for the two variants of our own design --- our own designs are first-party but the empirical question is still: \emph{do they pay off?}
+
+These modifications add nontrivial compute compared to baseline \rms{}: \zcrms{} loses the speed advantage over \layernorm{} (it does the same mean subtraction); \bandrms{} adds a sigmoid and a learnable scalar; \zcband{} adds both.
 This paper asks --- and answers --- whether the additions pay off.
 
 \subsection{What this paper is (and is not)}
 
-This is an empirical study, not an architectural contribution.
-The three variants are pre-existing in the library; we did not design them.
-What we contribute is:
+The architectural contributions of this paper are the two variants of our own design --- \bandrms{} and \zcband{} --- which are described in Section~\ref{sec:variants} but are not in themselves the main scientific claim of the paper.
+The main contribution is empirical: a $160$-cell multi-seed sweep that asks whether any of the three RMSNorm extensions (the two we designed, plus \zcrms{} from Qwen3-Next) is worth its added cost relative to baseline \rms{}.
+We are deliberately willing for the answer to be ``no'' for our own designs.
+
+Specifically, what we contribute is:
 \begin{enumerate}
-  \item A 5-experiment matrix that exercises each variant's specific theoretical claim under at least one favorable regime.
-  \item Four \textbf{mechanistic probe callbacks} that record per-epoch the quantities each variant is supposed to affect (output mean, per-sample RMS distribution, internal scale state, gradient norm), making the verification non-tautological: we check both whether the mechanism happens and whether it translates to accuracy.
-  \item A full multi-seed sweep (160 cells, $n{=}5$ each), reported with mean $\pm$ std, 95\% bootstrap CI, and a paired permutation $p$-value against the \rms{} baseline.
+  \item A 5-experiment matrix that exercises each variant's specific theoretical claim under at least one regime where the claim should pay off if true.
+  \item Four \textbf{mechanistic probes} that record per-epoch the quantities each variant is supposed to affect (output mean, per-sample RMS distribution, internal scale state, gradient norm), making verification non-tautological: we check both whether the mechanism happens and whether it translates to accuracy.
+  \item A full multi-seed sweep ($160$ training runs, $n{=}5$ per cell), reported with mean $\pm$ std, $95\%$ bootstrap confidence interval, and a paired permutation $p$-value against the \rms{} baseline.
   \item An honest verdict per variant, with the negative findings reported as prominently as the positive ones.
 \end{enumerate}
 
@@ -103,8 +113,8 @@ This is the strongest empirical separation in the study and the central result.
 \section{The Four Variants}
 \label{sec:variants}
 
-We fix a normalization axis (the last one, in the default configuration) and let $x \in \R^d$ denote a single sample's activations along that axis.
-Let $\epsilon$ be a small numerical-stability constant ($10^{-6}$ throughout).
+Fix a normalization axis $A$ (the last one, in all experiments below) and let $x \in \R^d$ denote the slice of a single sample's activations along that axis.
+Let $\E[\cdot]$ denote the empirical mean along $A$ and $\epsilon = 10^{-6}$ a small constant for numerical stability.
 
 \paragraph{\rms{} (baseline).}
 \begin{equation}
@@ -112,15 +122,18 @@ Let $\epsilon$ be a small numerical-stability constant ($10^{-6}$ throughout).
   \qquad \gamma \in \R^d.
   \label{eq:rmsnorm}
 \end{equation}
-Trainable parameters per norm layer: $d$ (one $\gamma$ entry per feature). When \texttt{use\_scale=False} this drops to $0$.
+Trainable parameters per norm layer: $d$ (one $\gamma$ entry per feature). The optional gain can be disabled, dropping trainable parameter count to $0$ and the operation to a pure normalization.
 
 \paragraph{\bandrms{}.}
 \begin{equation}
   \bandrms(x) \;=\; s(\beta) \cdot \frac{x}{\sqrt{\E[x^2] + \epsilon}},
-  \qquad s(\beta) = (1-\alpha) + \alpha \cdot \sigma(5\beta), \quad \beta \in \R.
+  \qquad s(\beta) = (1-\alpha) + \alpha \cdot \sigma(5\beta), \quad \beta \in \R,
   \label{eq:bandrms}
 \end{equation}
-Trainable parameters per norm layer: $1$ (the scalar $\beta$). The output per-sample RMS is bounded in $[1-\alpha, 1]$ for any $\beta$. We use $\alpha = 0.1$ throughout, giving the band $[0.9, 1.0]$.
+where $\sigma$ is the logistic sigmoid.
+Trainable parameters per norm layer: $1$ (the scalar $\beta$). The factor of $5$ inside the sigmoid sharpens the mapping so $\beta \approx -1$ and $\beta \approx +1$ already saturate near the band endpoints.
+The output per-sample RMS lies in $[1-\alpha, 1]$ for any $\beta \in \R$ since $\sigma(5\beta) \in (0, 1)$.
+We use $\alpha = 0.1$ throughout, giving the band $[0.9, 1.0]$.
 
 \paragraph{\zcrms{}.}
 \begin{equation}
@@ -128,7 +141,8 @@ Trainable parameters per norm layer: $1$ (the scalar $\beta$). The output per-sa
   \qquad \gamma \in \R^d.
   \label{eq:zcrms}
 \end{equation}
-Same parameter count as \rms{}. Mathematically this is \layernorm{} without the additive $\beta$ bias.
+Same parameter count as \rms{}. Mathematically this is \layernorm{} with the additive bias $\beta$ omitted.
+The denominator is the standard deviation of the centered input rather than the RMS of the raw input; for a zero-mean input the two coincide.
 
 \paragraph{\zcband{}.}
 \begin{equation}
@@ -137,23 +151,25 @@ Same parameter count as \rms{}. Mathematically this is \layernorm{} without the 
   \label{eq:zcband}
 \end{equation}
 Same parameter count as \bandrms{} ($1$ scalar).
+This is a pure sequential composition of zero-centering and band-constrained rescaling; the architecture does not introduce any interaction term between the two modifications, so any synergy beyond what each component contributes individually must come from training dynamics, not architecture.
 
-\paragraph{Parameter asymmetry.}
+\paragraph{Parameter asymmetry and the parameter-matched contrast.}
 At any feature dimension $d > 1$, $\rms{}$ and $\zcrms{}$ carry $d$ trainable parameters per norm layer while $\bandrms{}$ and $\zcband{}$ carry exactly $1$.
-This is a real confound for accuracy comparisons.
-We address it by running every experiment that supports it (E3/E4/E5) in two modes:
+At $d = 768$ (a representative transformer hidden size), the difference is three orders of magnitude per layer, multiplied by tens of norm layers per model.
+This is a real confound: any accuracy gap between, say, $\rms{}$ and $\bandrms{}$ could be attributed either to band-vs-no-band or to $d$-vs-$1$ parameter count.
+We address it by running every experiment that supports it (E3, E4, E5) in two modes:
 \begin{itemize}
-  \item \textbf{OOB} (out-of-the-box defaults): $\gamma$-bearing variants run with \texttt{use\_scale=True}.
-  \item \textbf{PARAM\_MATCHED}: $\gamma$-bearing variants run with \texttt{use\_scale=False}, dropping their parameter count to $0$ and reducing the comparison to band-vs-no-band at $\leq 1$ parameter per norm.
+  \item \textbf{OOB} (out-of-the-box defaults): $\gamma$-bearing variants run with the per-feature gain enabled. Parameter counts are asymmetric.
+  \item \textbf{PARAM\_MATCHED}: $\gamma$-bearing variants run with the per-feature gain disabled (frozen identity), dropping their parameter count to $0$. Comparison becomes band-vs-no-band at $\leq 1$ trainable parameter per norm.
 \end{itemize}
-ViT and ResNet (E1/E2) do not currently expose the kwarg plumbing to disable $\gamma$ at the factory call site, so they run OOB only.
+The two vision experiments (E1, E2) used a model factory that did not expose a hook to disable the per-feature gain, so they run only in OOB mode; the parameter-matched contrast is preserved on the three remaining experiments.
 
 % ============================================================================
 \section{Mechanistic Probes}
 \label{sec:probes}
 
-Four callbacks log per-epoch summaries at every normalization layer in the model.
-This is the central methodological choice of the paper: accuracy alone cannot tell us \emph{why} a variant wins or loses, and at $n{=}5$ accuracy comparisons frequently land in the inconclusive zone.
+We collect four per-epoch summaries at every normalization layer in each model.
+This is the central methodological choice of the paper: accuracy alone cannot tell us \emph{why} a variant wins or loses, and at $n{=}5$ accuracy comparisons frequently land in the inconclusive zone of the paired-permutation test (Section~\ref{sec:protocol}).
 The probes verify whether the variant's specific mechanism is actually happening in the trained model.
 
 \begin{figure}[H]
@@ -182,13 +198,13 @@ The probes verify whether the variant's specific mechanism is actually happening
 
   % --- four probe boxes in a row, chained with right= to guarantee no overlap ---
   \node[probebox, below=1.5cm of model, xshift=-5.8cm] (p1)
-    {\textbf{NormLayerActivation}\\$|\E[x_\ell]|$, per-sample RMS};
+    {\textbf{Activation stats}\\$|\E[x_\ell]|$, per-sample RMS};
   \node[probebox, right=of p1] (p2)
-    {\textbf{NormInternalStats}\\$\|\gamma_\ell\|_2$, $\beta_\ell$, $s(\beta_\ell)$};
+    {\textbf{Internal scale}\\$\|\gamma_\ell\|_2$, $\beta_\ell$, $s(\beta_\ell)$};
   \node[probebox, right=of p2] (p3)
-    {\textbf{GradientNorm}\\$\|\nabla_\theta \mathcal{L}\|_2$, $\max\|\nabla\|$};
+    {\textbf{Gradient norm}\\$\|\nabla_\theta \mathcal{L}\|_2$, $\max\|\nabla\|$};
   \node[probebox, right=of p3] (p4)
-    {\textbf{WeightNormTrajectory}\\$\|W_\ell\|_2$ over epochs};
+    {\textbf{Weight trajectory}\\$\|W_\ell\|_2$ over epochs};
 
   % --- bus fan-out to probe boxes ---
   \draw[dashedarr] (bus) -- (p1.north);
@@ -199,40 +215,43 @@ The probes verify whether the variant's specific mechanism is actually happening
   % --- CSV sink centered below all four probe boxes ---
   \node[box, fill=green!10, font=\scriptsize] (csv)
     at ($(p2.south)!0.5!(p3.south) + (0,-1.0cm)$)
-    {Per-epoch CSV per probe};
+    {Per-epoch log per probe};
   \draw[arr, gray] (p1.south) -- (csv.north west);
   \draw[arr, gray] (p2.south) -- (csv.north);
   \draw[arr, gray] (p3.south) -- (csv.north);
   \draw[arr, gray] (p4.south) -- (csv.north east);
 \end{tikzpicture}%
 }
-\caption{The four probe callbacks. \texttt{NormLayerActivationCallback} taps each target norm-layer's forward output on a fixed calibration batch and records $|\E[x]|$ and the per-sample RMS distribution; this directly tests the zero-mean claim of \zcrms{} (output mean should drop) and the band claim of \bandrms{} (per-sample $\sqrt{\E[x^2]}$ should lie in $[1-\alpha,1]$). \texttt{NormInternalStatsCallback} records $\|\gamma_\ell\|_2$ for $\gamma$-bearing variants and the raw $\beta_\ell$ + post-sigmoid scale $s(\beta_\ell)$ for band variants; tests the $\gamma$-growth-suppression claim. \texttt{GradientNormCallback} computes the global gradient $L_2$ on a fixed probe batch each epoch; surfaces gradient collapse or explosion. \texttt{WeightNormTrajectoryCallback} records the $L_2$ of every norm-layer weight over training.}
+\caption{The four mechanistic probes. \textbf{Activation stats} taps each target norm-layer's forward output on a fixed calibration batch and records $|\E[x_\ell]|$ (the absolute output mean, expected to drop for zero-centered variants) and the distribution of per-sample $\sqrt{\E[x_\ell^2]}$ values (expected to lie in $[1-\alpha,1]$ for band variants). \textbf{Internal scale} records $\|\gamma_\ell\|_2$ for $\gamma$-bearing variants and the raw $\beta_\ell$ parameter together with its post-sigmoid effective scale $s(\beta_\ell) = (1-\alpha) + \alpha\,\sigma(5\beta_\ell)$ for band variants. \textbf{Gradient norm} computes the global gradient $L_2$ on a fixed probe batch each epoch; this surfaces gradient collapse or explosion that would otherwise be invisible in the loss curve alone. \textbf{Weight trajectory} records the $L_2$ of every norm-layer weight tensor across training. All four hook into the standard per-epoch callback machinery; no model-side changes are required.}
 \label{fig:probes}
 \end{figure}
 
-The intermediate-model probe is non-trivial under Keras 3: for Functional models we build a \texttt{keras.Model} mapping the original input to each target norm-layer's output, but for subclassed models (ViT, ResNet) the sub-layers have no \texttt{.output} attribute until lazily built.
-The fallback path temporarily wraps each target norm-layer's \texttt{call} method to stash its output to a thread-local, runs one forward through the full model on the calibration batch, then restores.
-This is invasive but correct, and we unit-test that it does not modify any trainable variable.
+The activation probe is the technically delicate one.
+For models defined as static computation graphs, it is straightforward to construct an auxiliary forward path that exposes the intermediate activations at each target norm layer; we use this when available.
+For models defined as imperative (subclassed) modules where intermediates are not directly addressable, we temporarily wrap each target norm layer's forward function to stash its output to a side channel, run one forward pass on the calibration batch, then restore the original forward.
+We unit-test that this wrapping does not modify any trainable parameter and produces the same downstream output as the un-wrapped model.
+The calibration batch is fixed (drawn deterministically at the start of training) and small ($16$--$64$ samples); the probe overhead is negligible relative to a training epoch.
 
 % ============================================================================
 \section{Experimental Protocol}
 \label{sec:protocol}
 
 \paragraph{Seeds and statistics.}
-Every cell is $n{=}5$ independent runs with seeds $\{0,1,2,3,4\}$, each invoking \texttt{keras.utils.set\_random\_seed} which propagates to Python \texttt{random}, NumPy, TensorFlow, and the Keras backend.
-For each (experiment, norm, mode) group we report:
+Every cell of the sweep is $n{=}5$ independent runs with seeds $\{0,1,2,3,4\}$.
+A single seed value is fed to a multi-source RNG primitive that seeds Python's \texttt{random}, NumPy, the deep-learning backend's global RNG, and the framework's layer-initialization RNG; we verify (Section~\ref{sec:repro}) that paired-by-seed comparisons across norms are reproducible to bit-equality on baseline cells.
+For each (experiment, norm, mode) group of $5$ seeds we report:
 \begin{itemize}
   \item $\bar m \pm s$ with Bessel-corrected sample std ($\text{ddof} = 1$).
-  \item 95\% bootstrap percentile CI on the mean, $B = 2000$ resamples, deterministic NumPy \texttt{default\_rng(seed=20260515)}.
-  \item Paired sign-flip permutation $p$-value against the \rms{}/oob baseline (same seed paired across norms), $B = 10{,}000$ samples with Phipson--Smyth $(b+1)/(B+1)$ correction~\citep{phipson2010permutation}.
+  \item 95\% bootstrap percentile CI on the mean, $B = 2{,}000$ resamples, drawn from a deterministic pseudorandom generator seeded with a fixed integer.
+  \item Paired sign-flip permutation $p$-value against the \rms{}/OOB baseline (same seed paired across norms), $B = 10{,}000$ Monte Carlo samples with the Phipson--Smyth $(b+1)/(B+1)$ correction~\citep{phipson2010permutation} to ensure $p > 0$.
 \end{itemize}
 
 \paragraph{The $n{=}5$ paired-permutation ceiling.}
 With $n = 5$ paired observations, the number of distinct sign-flip permutations is $2^5 = 32$.
-After the Phipson--Smyth $(b+1)/(B+1)$ correction, the minimum achievable $p$-value (all five paired differences having the same sign, the most extreme of the 32 permutations) is approximately $1/32 \approx 0.031$.
-With a large Monte Carlo sample size $B$, in practice this rises to $\approx 0.06$.
+The most extreme permutation (all five paired differences having the same sign) gives an exact two-sided $p$-value of $2/32 = 0.0625$.
+After the $(b+1)/(B+1)$ correction, the minimum achievable $p$ in practice is approximately $0.06$.
 \textbf{No comparison in this study can land below $p \approx 0.06$ at $n = 5$}, irrespective of effect magnitude.
-Readers who see a string of $p \in \{0.06, 0.18, 0.24\}$ values should interpret them as the n-ceiling, not as weak evidence; effect-size-to-noise ratios are reported alongside to give the actual signal strength.
+Readers who see a string of $p \in \{0.06, 0.18, 0.24\}$ values should interpret them as the n-ceiling, not as weak evidence; effect-size-to-noise ratios are reported alongside to convey the actual signal strength.
 
 \paragraph{Decision rule for verdicts.}
 We adopt the following decision rule per (variant, experiment, mode) cell:
@@ -244,24 +263,29 @@ We adopt the following decision rule per (variant, experiment, mode) cell:
 Per-variant aggregate verdicts require PASS in $\geq 2$ cells and no FAIL.
 Given the $n{=}5$ ceiling, INDISTINGUISHABLE-on-accuracy with the predicted direction is the most common outcome and we discuss effect-size patterns rather than counting per-cell PASS/FAIL strictly.
 
+\paragraph{Compute environment.}
+All training runs were executed sequentially on a single NVIDIA RTX 4090 (24\,GB).
+The full sweep of $160$ cells completed in $10$\,h $42$\,min wall-clock with $0$ failed cells.
+Each cell is launched as a fresh process to eliminate cross-cell state contamination; per-cell startup overhead is negligible ($\sim$3-5\,s) relative to training time.
+
 \paragraph{Experiments.}
-The five experiments are summarized in Table~\ref{tab:matrix} and detailed in subsequent sections.
-Each experiment was chosen to exercise a specific putative advantage of one or more variants under a regime where it should be visible.
+The five experiments are summarized in Table~\ref{tab:matrix} and detailed in Sections~\ref{sec:e1}--\ref{sec:e5}.
+Each was chosen to exercise a specific putative advantage of one or more variants in a regime where it should be visible.
 
 \begin{table}[H]
 \centering
-\caption{Experiment matrix. \textit{Norms} is the number of normalization layers in the model whose type the \texttt{--norm-type} flag swaps. \textit{Modes} indicates whether the PARAM\_MATCHED contrast is available; per D-003 the ViT and ResNet factories do not currently plumb \texttt{normalization\_kwargs}.}
+\caption{Experiment matrix. \textit{Norms} is the number of normalization layers in the model whose type is swapped between the four candidate variants in each cell. \textit{Modes} indicates whether the PARAM\_MATCHED contrast is available; see Section~\ref{sec:variants} for details.}
 \label{tab:matrix}
 \renewcommand{\arraystretch}{1.15}
 \begin{tabular}{lllllc}
 \toprule
 \textbf{ID} & \textbf{Model} & \textbf{Task} & \textbf{Regime} & \textbf{Norms} & \textbf{Modes} \\
 \midrule
-E1 & ViT-pico (192/6/3) & CIFAR-10        & fp32, AdamW, cosine, 50ep & 13 & oob only \\
-E2 & ResNet-18          & CIFAR-100       & fp32, AdamW, cosine, 80ep & 20 & oob only \\
-E3 & TinyTF (4L/128/4h) & IMDb (seq=128)  & fp32, AdamW, 20ep, pre-norm & 9 & both \\
-E4 & DeepRes (24 blk)   & Synthetic poly  & \textbf{mixed\_fp16, batch=16}, 60ep & 25 & both \\
-E5 & MicroBench (16 blk)& Synthetic Gauss & fp32, batch=128, 30ep & 16 & both \\
+E1 & ViT-pico ($d{=}192$, $L{=}6$, $H{=}3$) & CIFAR-10        & fp32, AdamW, cosine, 50ep & 13 & oob only \\
+E2 & ResNet-18                              & CIFAR-100       & fp32, AdamW, cosine, 80ep & 20 & oob only \\
+E3 & 4-layer pre-norm transformer            & IMDb (seq=128)  & fp32, AdamW, 20ep         & 9  & both \\
+E4 & 24-block residual stack                 & Synthetic poly  & \textbf{mixed-fp16, batch=16}, 60ep & 25 & both \\
+E5 & 16-block normalization-only stack       & Synthetic Gauss & fp32, batch=128, 30ep     & 16 & both \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -273,12 +297,27 @@ E5 & MicroBench (16 blk)& Synthetic Gauss & fp32, batch=128, 30ep & 16 & both \\
 \subsection{E1 --- ViT-pico on CIFAR-10}
 \label{sec:e1}
 
-ViT-pico ($d{=}192$, $6$ transformer blocks, $3$ heads, patch size $4 \times 4$) trained on CIFAR-10 for $50$ epochs with batch $128$, AdamW weight decay $0.05$, cosine schedule with $5$-epoch warmup.
-Thirteen norm layers (one before attention and one before FFN in each of the $6$ blocks, plus one final norm before the classification head) all swapped to the chosen variant.
+\paragraph{Model.}
+A Vision Transformer in the ``pico'' size class: hidden dimension $d{=}192$, $L{=}6$ transformer blocks, $H{=}3$ attention heads of dimension $64$ each, MLP expansion ratio $4.0$ (FFN hidden dimension $768$).
+Input images of shape $32 \times 32 \times 3$ are split into $8 \times 8 = 64$ non-overlapping patches of size $4 \times 4 \times 3$; each patch is flattened to a $48$-dimensional vector and linearly projected to $d$.
+A learnable classification (CLS) token is prepended and a learned position embedding of length $65$ is added.
+Each transformer block applies the pattern $x \to x + \text{MHA}(\text{norm}_1(x))$ followed by $x \to x + \text{MLP}(\text{norm}_2(x))$ (pre-norm placement).
+The classification head is $\text{norm}_{\text{final}} \to \text{CLS-select} \to \text{Dense}(10)$.
+This gives $13$ normalization layers total: $2$ per block $\times 6$ blocks $+ 1$ final.
+All $13$ are simultaneously swapped to whichever of the four candidate norms the cell tests.
+
+\paragraph{Data.}
+CIFAR-10 standard $50{,}000$ train / $10{,}000$ test split, pixel values rescaled to $[0, 1]$, no data augmentation.
+
+\paragraph{Training.}
+$50$ epochs at batch size $128$, AdamW with learning rate $3 \times 10^{-4}$, weight decay $0.05$, $\beta_1 = 0.9$, $\beta_2 = 0.999$, $\epsilon_{\text{opt}} = 10^{-7}$.
+Cosine learning-rate schedule with $5$-epoch linear warmup and final-LR floor at $1\%$ of peak.
+Dropout rate $0.1$ on MHA outputs and FFN; attention-dropout and positional-dropout disabled.
+Loss is sparse categorical cross-entropy on the raw logits.
 
 \begin{table}[H]
 \centering
-\caption{E1 best validation accuracy on CIFAR-10. $n{=}5$ seeds, OOB mode (factory does not plumb norm kwargs to ViT).}
+\caption{E1 best validation accuracy on CIFAR-10. $n{=}5$ seeds, OOB mode.}
 \label{tab:e1}
 \renewcommand{\arraystretch}{1.15}
 \begin{tabular}{lcccccc}
@@ -293,8 +332,9 @@ Thirteen norm layers (one before attention and one before FFN in each of the $6$
 \end{tabular}
 \end{table}
 
-Both zero-centered variants beat baseline by $0.6$--$0.7$\,pp. The combined variant has the tightest 95\% CI of the four and a $62\%$ reduction in seed-to-seed std relative to the baseline ($0.0051$ vs.\ $0.0134$).
-The probe table for E1 (Table~\ref{tab:e1probe}) confirms the two mechanistic claims hold: $|\E[x]|$ drops to $\sim 3 \times 10^{-4}$ for zero-centered variants (vs.\ $0.016$ for the baseline), and the post-sigmoid scale $s(\beta)$ for band variants settles at $\sim 0.94$ (well inside the predicted $[0.9, 1.0]$ band).
+Both zero-centered variants beat baseline by $0.6$--$0.7$\,pp.
+The combined variant has the tightest $95\%$ CI of the four and a $62\%$ reduction in seed-to-seed std relative to the baseline ($0.0051$ vs.\ $0.0134$).
+The probe table (Table~\ref{tab:e1probe}) confirms both mechanistic claims hold: $|\E[x]|$ drops to $\sim 3 \times 10^{-4}$ for zero-centered variants vs.\ $0.016$ for the baseline, and the post-sigmoid scale $s(\beta)$ for band variants settles at $\sim 0.94$ (well inside the predicted $[0.9, 1.0]$ band).
 
 \begin{table}[H]
 \centering
@@ -316,8 +356,21 @@ The probe table for E1 (Table~\ref{tab:e1probe}) confirms the two mechanistic cl
 \subsection{E2 --- ResNet-18 on CIFAR-100}
 \label{sec:e2}
 
-ResNet-18 on CIFAR-100, $80$ epochs, batch $128$, AdamW weight decay $5{\times}10^{-4}$, cosine schedule with $5$-epoch warmup.
-This is the unique experiment in which the candidate norm replaces \batchnorm{} rather than \layernorm{}: every BN layer in the ResNet (one in the stem plus two per residual block, $20$ total) is swapped for the chosen variant.
+\paragraph{Model.}
+A standard ResNet-18 adapted for CIFAR input: a $3 \times 3$ convolutional stem with stride $1$ (no aggressive downsampling), followed by $4$ stages of $2$ BasicBlocks each with channel counts $\{64, 128, 256, 512\}$.
+A BasicBlock is $\text{conv}_{3{\times}3} \to \text{norm} \to \text{ReLU} \to \text{conv}_{3{\times}3} \to \text{norm}$ with a residual addition and a final ReLU; downsampling between stages uses a $1{\times}1$ stride-$2$ convolution on the shortcut.
+The classifier is global-average-pool followed by a $\text{Dense}(100)$ logit head.
+This gives $20$ normalization layers (one in the stem, two per BasicBlock $\times 8$ blocks, plus three on the downsampling shortcuts).
+In the baseline (\batchnorm{}) configuration this would be a standard ResNet-18; here all $20$ \batchnorm{} layers are simultaneously swapped to the candidate norm.
+\textbf{This is the unique experiment in which the candidate norm replaces \batchnorm{} rather than \layernorm{}.}
+
+\paragraph{Data.}
+CIFAR-100 standard $50{,}000$ train / $10{,}000$ test split, pixel values rescaled to $[0, 1]$, no data augmentation.
+
+\paragraph{Training.}
+$80$ epochs at batch size $128$, AdamW with learning rate $10^{-3}$, weight decay $5 \times 10^{-4}$, $\beta_1 = 0.9$, $\beta_2 = 0.999$.
+Cosine learning-rate schedule with $5$-epoch linear warmup and final-LR floor at $1\%$ of peak.
+Loss is sparse categorical cross-entropy on the raw logits.
 
 \begin{table}[H]
 \centering
@@ -343,7 +396,7 @@ The $p$-values of $0.064$ and $0.067$ are at the $n{=}5$ paired-permutation floo
 The probe table (Table~\ref{tab:e2probe}) explains the dissociation.
 For non-centered variants the gradient norm $\|\nabla_\theta \mathcal{L}\|_2$ collapses to $0.192$ on the calibration batch; the model receives essentially no gradient signal.
 For the two centered variants, $\|\nabla\|$ is restored to $21$--$24$, a $\sim 130\times$ improvement.
-The mechanism: ResNet's residual structure accumulates DC drift across blocks; without zero-centering, the per-feature RMSNorm rescales the drift-corrupted signal without removing the drift, the residual stream's variance is dominated by the DC component, and the effective gradient signal vanishes.
+The mechanism: ResNet's residual structure accumulates DC drift across blocks; without zero-centering, the per-feature RMSNorm rescales the drift-corrupted signal without removing the drift, so the residual stream's variance is dominated by the DC component and the effective gradient signal vanishes.
 
 \begin{table}[H]
 \centering
@@ -365,13 +418,27 @@ The mechanism: ResNet's residual structure accumulates DC drift across blocks; w
 Two caveats are worth stating clearly.
 First, \textbf{this result is specific to the drop-in BN-replacement setting at standard AdamW hyperparameters}: NF-ResNet variants~\citep{brock2021high} are known to train without BN by adding scaled weight standardization, and a sufficiently low learning rate or alternative initialization might also rescue the non-centered variants.
 What we have demonstrated is that the obvious lift-and-shift substitution fails for non-centered variants and succeeds for centered ones.
-Second, even the successful variants reach only $42$--$44\%$ accuracy, well below the $\sim 70$--$75\%$ that a vanilla BN ResNet-18 achieves on CIFAR-100; this is an architecture-vs-norm interaction question, not a claim that \zcrms{} \emph{matches} BatchNorm.
+Second, even the successful variants reach only $42$--$44\%$ accuracy, well below the $\sim 70$--$75\%$ that a vanilla BN ResNet-18 achieves on CIFAR-100 in the same setting; this is an architecture-vs-norm interaction question, not a claim that \zcrms{} \emph{matches} BatchNorm.
 
 \subsection{E3 --- TinyTransformer on IMDb}
 \label{sec:e3}
 
-A $4$-layer pre-norm transformer with $d{=}128$, $4$ attention heads, sequence length $128$, vocab $20{,}000$, trained on IMDb binary sentiment classification for $20$ epochs with batch $64$.
-Nine norm layers: two per block (pre-MHA and pre-FFN) and one final norm before the global-average-pool and the head.
+\paragraph{Model.}
+A $4$-layer pre-norm transformer with hidden dimension $d{=}128$, $4$ attention heads of dimension $32$ each, MLP expansion ratio $4.0$ (FFN hidden dimension $512$), and dropout rate $0.1$.
+Input tokens are embedded by a learnable $|V| \to d$ embedding (vocabulary size $|V| = 20{,}000$, padding-token-aware), summed with a learnable position embedding of length $\ell_{\text{seq}}{=}128$, and dropout applied.
+Each block is the same pre-norm pattern as E1: $x \to x + \text{MHA}(\text{norm}_1(x))$ then $x \to x + \text{MLP}(\text{norm}_2(x))$.
+A final norm precedes a global-average-pool over the sequence dimension and a $\text{Dense}(1)$ logit head.
+This gives $9$ normalization layers total ($2 \times 4 + 1$).
+
+\paragraph{Data.}
+IMDb binary sentiment classification, standard $25{,}000$ train / $25{,}000$ test split.
+We use the canonical pre-tokenized integer encoding restricted to the top $20{,}000$ most frequent words.
+Reviews are post-padded or truncated to length $128$; the padding token is index $0$.
+
+\paragraph{Training.}
+$20$ epochs at batch size $64$, AdamW with learning rate $3 \times 10^{-4}$, weight decay $10^{-2}$, $\beta_1 = 0.9$, $\beta_2 = 0.999$.
+Cosine learning-rate schedule with $2$-epoch linear warmup and final-LR floor at $1\%$ of peak.
+Loss is binary cross-entropy on the raw logit.
 
 \begin{table}[H]
 \centering
@@ -395,16 +462,39 @@ Nine norm layers: two per block (pre-MHA and pre-FFN) and one final norm before 
 \end{table}
 
 The probes still confirm both mechanisms (rms\_max $\sim 0.96$ for band variants; $|\E[x]| < 10^{-4}$ for centered) --- but the accuracy is mechanistically insensitive to norm choice.
-The PARAM\_MATCHED contrast is especially clean here: dropping the per-feature $\gamma$ scale entirely (setting it to zero parameters per norm layer) yields identical performance to the OOB mode (Table~\ref{tab:e3}, rows 1--2 for \rms{}, 5--6 for \zcrms{}).
-At this depth ($4$ pre-norm blocks) the residual stream is short enough that no DC drift accumulates and the per-feature $\gamma$ is doing essentially no work.
+The PARAM\_MATCHED contrast is especially clean here: dropping the per-feature gain entirely (setting it to zero parameters per norm layer) yields identical performance to the OOB mode (Table~\ref{tab:e3}, rows 1--2 for \rms{}, $5$--$6$ for \zcrms{}).
+At this depth ($4$ pre-norm blocks) the residual stream is short enough that no DC drift accumulates and the per-feature gain is doing essentially no work.
 
 This is a useful negative-data finding: \textbf{the headline E2 result is not a universal ``zero-centering always helps'' claim}. On a shallow pre-norm transformer trained on a clean NLP task, no variant of \rms{} matters within $\pm 0.001$ accuracy.
 
 \subsection{E4 --- 24-block deep residual stack under mixed precision}
 \label{sec:e4}
 
-A $24$-block residual stack of \texttt{Dense(256) $\to$ Norm $\to$ ReLU + residual}, trained on a synthetic polynomial regression target under \texttt{mixed\_float16} global policy with batch size $16$ and $60$ epochs.
-This was deliberately constructed as an adversarial regime for norm choice: deep residual stream + low precision + small batch all amplify any DC drift or numerical noise.
+\paragraph{Synthetic data.}
+We generate a regression task designed to be sensitive to DC drift in the residual stream.
+Fix $d{=}256$.
+Draw two fixed random projections $a \in \R^d$ and $B \in \R^{d \times d}$ once per seed from $\mathcal{N}(0, I)$ and $\mathcal{N}(0, (0.1)^2 I)$ respectively.
+For each sample, draw inputs from a \emph{shifted} Gaussian:
+$$x \;\sim\; \mathcal{N}(\mu \cdot \mathbf{1}_d,\; I_d), \qquad \mu = 2.0.$$
+The constant mean shift $\mu \mathbf{1}_d$ injects a DC component that the network must either tolerate or remove.
+The target is
+$$y \;=\; \sin(x^\top a) \;+\; 0.1 \cdot \sum_{i=1}^{d} x_i (Bx)_i,$$
+i.e.\ a sinusoidal projection plus a bilinear cross-term.
+We then z-score $y$ so the target distribution has mean zero and unit variance across the dataset.
+We use $n_{\text{train}} = 8{,}192$ training samples and $n_{\text{val}} = 1{,}024$ held-out validation samples.
+
+\paragraph{Model.}
+$24$ residual blocks of the form
+$$\text{Block}_i: \quad x \;\mapsto\; x + \text{ReLU}\bigl(\text{norm}_i(\text{Dense}_i(x))\bigr),$$
+where each $\text{Dense}_i$ is a $d \to d$ linear map.
+The full network is $x \to \text{Dense}_{\text{in}}(x) \to \text{Block}_1 \to \cdots \to \text{Block}_{24} \to \text{norm}_{\text{final}} \to \text{Dense}_{\text{out}}(\cdot, 1)$, where $\text{Dense}_{\text{out}}$ is explicitly kept in fp32 dtype for numerical safety of the final loss.
+Total normalization layers: $25$ ($24$ block-internal $+ 1$ final).
+
+\paragraph{Training.}
+$60$ epochs at batch size $16$ (deliberately small), under the framework's mixed-precision policy (variables and forward-pass intermediates in fp16; loss in fp32) with a dynamic loss scaler.
+AdamW with learning rate $3 \times 10^{-4}$, weight decay $10^{-2}$, $\beta_1 = 0.9$, $\beta_2 = 0.999$.
+Constant learning rate (no warmup, no decay) so all variation in the loss curve is attributable to the norm choice.
+Loss is mean squared error.
 
 \begin{table}[H]
 \centering
@@ -439,9 +529,23 @@ Once the DC component is removed, the per-feature scale can do its proper rescal
 \subsection{E5 --- Norm-layer microbenchmark}
 \label{sec:e5}
 
-A controlled layer-level setup: $16$-block stack of \texttt{Dense(64) $\to$ Norm $\to$ GELU} (no residuals) on a biased Gaussian regression task (inputs $\mathcal{N}(\mu = 3, I) \in \R^{64}$, target a polynomial of the input).
-The bias deliberately injects mean drift; the deep stack amplifies it.
-Used during development as the gating smoke for the entire probe-callback chain, and reported here as the layer-level baseline.
+\paragraph{Synthetic data.}
+A controlled layer-level setup mirroring E4 but without residual connections.
+Fix $d{=}64$.
+Draw two fixed random projections $a, b \in \R^d$ once per seed from $\mathcal{N}(0, I)$.
+Inputs are shifted Gaussian:
+$$x \;\sim\; \mathcal{N}(\mu \cdot \mathbf{1}_d,\; I_d), \qquad \mu = 3.0,$$
+and the target is
+$$y \;=\; \sin(x^\top a) \;+\; 0.1 \cdot (x^\top b)^2,$$
+z-scored across the dataset.
+We use $n_{\text{train}} = 4{,}096$, $n_{\text{val}} = 512$.
+
+\paragraph{Model.}
+$16$-block stack of $[\text{Dense}_i(d, d) \to \text{norm}_i \to \text{GELU}]$ with no residual connections, followed by a $\text{Dense}(1)$ head.
+Total normalization layers: $16$.
+
+\paragraph{Training.}
+$30$ epochs at batch size $128$, AdamW with learning rate $3 \times 10^{-4}$, weight decay $10^{-2}$. Constant learning rate. Loss is mean squared error.
 
 \begin{table}[H]
 \centering
@@ -466,7 +570,7 @@ Used during development as the gating smoke for the entire probe-callback chain,
 
 The two zero-centered variants tie at approximately $14\%$ relative loss reduction (OOB).
 \bandrms{} is again essentially indistinguishable from baseline.
-At the layer level, with no residual stream, the win from zero-centering is modest but consistent, confirming the deeper experiments' pattern.
+At the layer level, with no residual stream, the win from zero-centering is modest but consistent, confirming the deeper experiments' pattern: it is the DC subtraction, not the band constraint, that pays off.
 
 % ============================================================================
 \section{Summary of Empirical Claims}
@@ -576,7 +680,7 @@ The common factor: either deep residual streams (E1, E4), residual streams witho
 \bandrms{} alone is in the null bucket here too: the band constraint without zero-centering does not rescue regime-B failure modes.
 
 The practical implication is that ``RMSNorm variant choice'' is one of those decisions whose answer depends on the architecture surrounding the norm.
-For modern LLMs, which use pre-norm transformers of $\geq 12$ blocks: this study's coverage is partial (E1 at 6 blocks, E3 at 4 blocks).
+For modern LLMs, which use pre-norm transformers of $\geq 12$ blocks: this study's coverage is partial (E1 at $6$ blocks, E3 at $4$ blocks).
 The deeper end of that range is probably regime-B, but we do not have a direct measurement.
 
 % ============================================================================
@@ -591,19 +695,18 @@ What we provide is a documented partition of the empirical space:
 zero-centering pays off in deep / post-norm-like / low-precision settings, has near-zero effect in shallow pre-norm transformers, and is the difference between learning and not in a drop-in BN-replacement scenario.
 The band constraint pays off nowhere we measured.
 
-\paragraph{A probe-callback methodology.}
+\paragraph{A probe methodology.}
 The four mechanistic probes (Figure~\ref{fig:probes}) make verification non-tautological: every claim a variant makes about its own behavior is independently logged and checked against the trained model.
 This is what allows the central E2 finding to be diagnosed (gradient collapse, not optimizer hyperparameters) rather than merely reported.
-The probe code is publicly available and is one of the deliverables of the study.
 
 % ============================================================================
 \section{Limitations and What Does Not Work}
 \label{sec:limitations}
 
 \begin{itemize}
-  \item \textbf{$n{=}5$ seeds is the floor for paired-permutation inference.} Several effect sizes have $p \approx 0.06$ that would clear $p < 0.05$ at $n \geq 6$. We did not run $n{=}10$ for budget reasons (one full sweep takes $\sim 10.7$ hours on an RTX 4090); rerunning the headline cells at $n{=}10$--$15$ is the most useful follow-up.
-  \item \textbf{The PARAM\_MATCHED contrast is not available on E1 and E2.} The ViT and ResNet factories in the codebase under study do not currently plumb \texttt{normalization\_kwargs} through to \texttt{create\_normalization\_layer}. This is a $\sim 5$-line additive change per factory and is suggested follow-up work. The contrast is preserved on E3, E4, E5.
-  \item \textbf{Architectural coverage is partial.} The study covers vision (E1, E2), small-NLP (E3), and synthetic deep stacks (E4, E5), but does not include large-scale language modeling (where LayerNorm $\to$ RMSNorm $\to$ ZCRMSNorm is the active design choice in production) nor multimodal architectures.
+  \item \textbf{$n{=}5$ seeds is the floor for paired-permutation inference.} Several effect sizes have $p \approx 0.06$ that would clear $p < 0.05$ at $n \geq 6$. We did not run $n{=}10$ for budget reasons (one full sweep takes $\sim 10.7$ hours on a single RTX 4090); rerunning the borderline cells at $n{=}10$--$15$ is the most useful follow-up.
+  \item \textbf{The PARAM\_MATCHED contrast is not available on E1 and E2.} The vision model factories we used do not currently expose a hook to disable the per-feature gain inside each transformer or BasicBlock. This contrast is preserved on E3, E4, E5.
+  \item \textbf{Architectural coverage is partial.} The study covers vision (E1, E2), small-NLP (E3), and synthetic deep stacks (E4, E5), but does not include large-scale language modeling (where \layernorm{} $\to$ \rms{} $\to$ \zcrms{} is the active design choice in production) nor multimodal architectures.
   \item \textbf{E2's negative result depends on standard AdamW hyperparameters.} NF-ResNet variants~\citep{brock2021high} are known to train without BatchNorm given scaled weight standardization; lower learning rates or alternative initialization might also rescue the non-centered variants on the BN-replacement task. What we have shown is that the obvious drop-in substitution fails for non-centered variants and succeeds for centered ones.
   \item \textbf{The mechanistic probes operate on a fixed calibration batch.} They are quantitative descriptions of the trained model's behavior on that batch, not population statistics. Per-epoch within-batch variance is not separately decomposed.
   \item \textbf{We did not measure inference wall-clock.} \zcrms{} loses the original speed advantage of \rms{} over \layernorm{}; quantifying that cost on production hardware is out of scope.
@@ -616,42 +719,52 @@ The probe code is publicly available and is one of the deliverables of the study
 \rms{}~\citep{zhang2019root} simplifies \layernorm{}~\citep{ba2016layer} by dropping the mean-subtraction and bias steps, retaining only RMS-based rescaling and a learnable per-feature scale.
 The simplification became standard in large LLMs (LLaMA~\citep{touvron2023llama}, Mistral~\citep{jiang2023mistral}, Qwen) primarily on speed grounds.
 
-The question of whether the dropped mean subtraction matters has been raised in production model design --- \zcrms{} reintroduces it explicitly as a design choice in Qwen3-Next~\citep{qwen3next2025}.
-Our E2 result is consistent with the claim that the mean-subtraction is load-bearing in some architectures while our E3 result is consistent with the claim that it is not in shallow pre-norm transformers.
+The question of whether the dropped mean subtraction matters has been raised in production model design --- the \zcrms{} variant that we study (but did not originate) was adopted explicitly as a design choice in Qwen3-Next~\citep{qwen3next2025}, motivated by observations about residual-stream DC drift in deep transformers.
+Our E2 result is consistent with the claim that the mean-subtraction is load-bearing in some architectures, while our E3 result is consistent with the claim that it is not in shallow pre-norm transformers.
 
-NF-Net~\citep{brock2021high} demonstrated that ResNets can train without \batchnorm{} given scaled weight standardization and a specific initialization scheme; their result is complementary to our E2 finding that vanilla RMSNorm-as-drop-in-BN substitute fails but zero-centered variants succeed at $42$--$44\%$ rather than the $\sim 75\%$ achievable with BN.
+NF-Net~\citep{brock2021high} demonstrated that ResNets can train without \batchnorm{} given scaled weight standardization and a specific initialization scheme; their result is complementary to our E2 finding that vanilla \rms{}-as-drop-in-BN substitute fails but zero-centered variants succeed at $42$--$44\%$ accuracy rather than the $\sim 75\%$ achievable with BN.
 
-The band-constraint idea in \bandrms{}~\citep{bandrms-impl} appears to be local to the library under study; we are not aware of a published analog.
-Our negative finding for this variant should not be over-generalized to other ``shell-constrained'' normalization schemes that have richer parameterization than a single scalar.
+\bandrms{} and \zcband{}, the two variants of our own design, do not have a published external analog that we are aware of.
+The motivation behind \bandrms{} --- a learnable scalar gain confined to a thin shell around the unit sphere --- is reminiscent of weight-norm-style spherical reparametrizations but applied at the activation rather than the weight tensor.
+Our negative finding for these two variants applies specifically to the single-scalar-band design we chose; we make no claim about richer ``shell-constrained'' parameterizations.
 
 % ============================================================================
 \section{Reproducibility}
 \label{sec:repro}
 
-Every cell of the multi-seed sweep is fully specified by the protocol in Section~\ref{sec:protocol} plus the per-experiment training-script CLI flags.
-The full sweep is one command:
-\begin{verbatim}
-CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg python -m \
-    train.rms_variants_train.sweep \
-    --experiments e1,e2,e3,e4,e5 \
-    --norms rms_norm,band_rms,zero_centered_rms_norm,zero_centered_band_rms_norm \
-    --seeds 0,1,2,3,4 --modes oob,param_matched \
-    --out-dir results/full --global-cap-s 57600
-\end{verbatim}
-which subprocess-launches one cell at a time (clean TF/Keras init per cell), aggregates per-cell CSVs into a single \texttt{all\_runs.csv}, and invokes \texttt{report.py} for the mean/std/CI/permutation-$p$ summary.
-Total wall-clock for the sweep reported in this paper: $10$\,h $42$\,min on an RTX 4090.
+Every cell of the multi-seed sweep is fully specified by the protocol in Section~\ref{sec:protocol} and the per-experiment training configuration in Sections~\ref{sec:e1}--\ref{sec:e5}.
+The orchestrating procedure is:
 
-The four probe callbacks are independent of the trainer scripts; they hook into the standard Keras callback machinery and require no model-side changes.
-All statistical inference (mean/std with Bessel correction, bootstrap CI, paired sign-flip permutation with Phipson--Smyth correction) is delegated to a small pure-function NumPy module pinned by $30$ unit tests against known-value oracle cases.
+\paragraph{Sweep procedure (pseudocode).}
+\begin{itemize}
+\setlength{\itemsep}{0.2em}
+  \item \textbf{Inputs}: experiment set $E$, norm-variant set $N$, mode set $M = \{\text{oob}, \text{param\_matched}\}$, seed set $S = \{0, 1, 2, 3, 4\}$, output directory $O$.
+  \item \textbf{For} each tuple $(e, \nu, \mu, s) \in E \times N \times M \times S$:
+  \begin{itemize}
+    \item If $\mu \notin \text{modes}(e)$ (per Table~\ref{tab:matrix}): \textbf{skip} (logs ``mode not supported'').
+    \item Seed all RNG sources with $s$ via a single-call multi-source primitive (covers Python's \texttt{random}, NumPy, deep-learning-backend RNG, and layer-initialization RNG).
+    \item Build model $f_{e,\nu,\mu}$ as specified in Sections~\ref{sec:e1}--\ref{sec:e5}, with every normalization layer set to variant $\nu$, configured for mode $\mu$.
+    \item Train under the protocol of Section~\ref{sec:protocol} using $e$'s training configuration.
+    \item Log per-epoch probes (Section~\ref{sec:probes}) and final metrics under $O/e/\nu/\mu/s/$.
+  \end{itemize}
+  \item \textbf{Aggregate}: concatenate all per-cell logs into a single frame. For each $(e, \nu, \mu)$ group of $5$ seeds, compute mean $\pm$ std, $95\%$ bootstrap CI, and paired permutation $p$ versus the $\rms{}$/OOB baseline.
+\end{itemize}
+
+Each cell is launched as a fresh process so its random-number-generator state is isolated and cross-cell contamination is impossible.
+The statistical inference module (mean/std with Bessel correction, $B = 2{,}000$ bootstrap CI, $B = 10{,}000$ paired sign-flip permutation with Phipson--Smyth correction) is pure-function NumPy and pinned by unit tests against known-value oracle cases.
+Total wall-clock for the sweep reported in this paper: $10$\,h $42$\,min on a single NVIDIA RTX 4090.
 
 % ============================================================================
 \section{Conclusion}
 \label{sec:conclusion}
 
-Of the three variants studied, one is empirically inert (\bandrms{}: mechanically delivers what it advertises, translates to no measurable benefit), one is regime-dependent (\zcrms{}: critical in some settings, irrelevant in others), and one is a small refinement of the second (\zcband{}: best variance, sometimes best accuracy, occasionally worse than \zcrms{} alone).
+Of the three variants studied, one (\bandrms{}, our own design) is empirically inert: it mechanically delivers what it advertises but translates to no measurable benefit.
+A second (\zcrms{}, from Qwen3-Next) is regime-dependent: critical in some settings, irrelevant in others.
+The third (\zcband{}, our own design, composing the first two) is a small refinement of the second: best variance, sometimes best accuracy, occasionally worse than \zcrms{} alone.
+We report the negative result for our own \bandrms{} design with the same prominence as the positive result for the \zcrms{} variant we did not author.
 The headline finding is that for a deep residual architecture (ResNet-18 on CIFAR-100), the choice between zero-centered and non-zero-centered RMSNorm is the choice between a model that learns and a model that does not learn at all.
 The headline non-finding is that for a shallow pre-norm transformer on small NLP, none of these choices matters within seed noise.
-The most useful follow-ups are (a) rerunning the borderline-significance cells at $n{=}10$--$15$ to resolve the paired-permutation ceiling, (b) extending the ViT and ResNet model factories to plumb \texttt{normalization\_kwargs} so the PARAM\_MATCHED contrast becomes available on vision, and (c) evaluating these variants on a large-scale pre-norm transformer at $\geq 12$ blocks where production LLM design choices actually live.
+The most useful follow-ups are (a) rerunning the borderline-significance cells at $n{=}10$--$15$ to resolve the paired-permutation ceiling, (b) running the parameter-matched contrast on the vision experiments by extending the model factories to expose the per-feature-gain switch, and (c) evaluating these variants on a large-scale pre-norm transformer at $\geq 12$ blocks where production LLM design choices actually live.
 
 % ============================================================================
 \bibliographystyle{plainnat}
@@ -662,12 +775,6 @@ The most useful follow-ups are (a) rerunning the borderline-significance cells a
 Ba, J.~L., Kiros, J.~R., \& Hinton, G.~E. (2016).
 \newblock Layer normalization.
 \newblock \emph{arXiv preprint arXiv:1607.06450}.
-
-\bibitem[dl\_techniques BandRMS source(2025)]{bandrms-impl}
-\bandrms{} implementation.
-\newblock \texttt{src/dl\_techniques/layers/norms/band\_rms.py} in the
-codebase under study (\texttt{dl\_techniques}).
-No published external reference; band-constraint mechanism appears local to the library.
 
 \bibitem[Brock et al.(2021)]{brock2021high}
 Brock, A., De, S., Smith, S.~L., \& Simonyan, K. (2021).
@@ -696,12 +803,6 @@ language models.
 Touvron, H., et al. (2023).
 \newblock LLaMA: Open and efficient foundation language models.
 \newblock \emph{arXiv preprint arXiv:2302.13971}.
-
-\bibitem[dl\_techniques ZCRMSNorm source(2025)]{zcrms-impl}
-\zcrms{} implementation.
-\newblock \texttt{src/dl\_techniques/layers/norms/zero\_centered\_rms\_norm.py}
-in the codebase under study (\texttt{dl\_techniques}).
-Cites Qwen3-Next as design inspiration in the source docstring.
 
 \bibitem[Zhang \& Sennrich(2019)]{zhang2019root}
 Zhang, B. \& Sennrich, R. (2019).
