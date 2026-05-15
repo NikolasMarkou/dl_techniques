@@ -185,6 +185,8 @@ class CliffordNetLM(keras.Model):
         bias_initializer: Any = "zeros",
         kernel_regularizer: Optional[Any] = None,
         bias_regularizer: Optional[Any] = None,
+        normalization_type: str = "zero_centered_rms_norm",
+        normalization_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -206,6 +208,8 @@ class CliffordNetLM(keras.Model):
         self.bias_initializer = initializers.get(bias_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.normalization_type = normalization_type
+        self.normalization_kwargs = dict(normalization_kwargs or {})
 
         # --- Embeddings ---
         self.token_embedding = keras.layers.Embedding(
@@ -235,6 +239,8 @@ class CliffordNetLM(keras.Model):
             bias_initializer=bias_initializer,
             kernel_regularizer=kernel_regularizer,
             bias_regularizer=bias_regularizer,
+            normalization_type=self.normalization_type,
+            normalization_kwargs=dict(self.normalization_kwargs),
         )
         self.clifford_blocks = [
             CausalCliffordNetBlock(
@@ -356,6 +362,8 @@ class CliffordNetLM(keras.Model):
             "bias_initializer": initializers.serialize(self.bias_initializer),
             "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
             "bias_regularizer": regularizers.serialize(self.bias_regularizer),
+            "normalization_type": self.normalization_type,
+            "normalization_kwargs": dict(self.normalization_kwargs),
         })
         return config
 
