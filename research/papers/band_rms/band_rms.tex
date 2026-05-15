@@ -64,7 +64,6 @@ First, \textbf{the band constraint by itself produces no measurable benefit on a
 Second, \textbf{zero-centering is the operative innovation}: \zcrms{} produces near-zero output mean ($|\E[x]|$ reduced 30--500$\times$) and translates this into a decisive $+41.8$\,pp swing on ResNet/CIFAR-100 (random $\to$ learning), a $-28\%$ validation-loss reduction with $2.8\times$ lower seed variance on the deep-fp16 stack, and modest lifts elsewhere.
 Third, \textbf{combining both gives the tightest variance} ($62\%$ lower std on ViT/CIFAR-10) and the best accuracy on the two vision tasks, but the band's tightness slightly hurts on the 24-block deep stack.
 We further document a cross-experiment dissociation: shallow pre-norm transformers are mechanistically insensitive to norm-variant choice (E3 universal null within $\pm 0.1$\,pp), while post-norm-like or deep regimes are where residual-stream DC drift dominates and zero-centering becomes critical.
-A 1-line fp16 cast bug in the original \bandrms{} and \zcband{} implementations is reported and fixed; without it, mixed-precision input crashes the multiply against the fp32 normalized tensor.
 \end{abstract}
 
 % ============================================================================
@@ -94,7 +93,6 @@ What we contribute is:
   \item Four \textbf{mechanistic probe callbacks} that record per-epoch the quantities each variant is supposed to affect (output mean, per-sample RMS distribution, internal scale state, gradient norm), making the verification non-tautological: we check both whether the mechanism happens and whether it translates to accuracy.
   \item A full multi-seed sweep (160 cells, $n{=}5$ each), reported with mean $\pm$ std, 95\% bootstrap CI, and a paired permutation $p$-value against the \rms{} baseline.
   \item An honest verdict per variant, with the negative findings reported as prominently as the positive ones.
-  \item A 1-line mixed-precision bug fix in the original \bandrms{} / \zcband{} implementations that was caught during test development and would have silently broken the E4 (fp16) experiment otherwise.
 \end{enumerate}
 
 The single most striking empirical finding is that \textbf{ResNet-18 on CIFAR-100 splits cleanly along the zero-centering axis}: with vanilla \rms{} or \bandrms{} as a drop-in \batchnorm{} replacement, the model stays at $1/100 = 0.01$ accuracy across all $5$ seeds (random initialization), while adding zero-centering recovers $42$--$44\%$ accuracy.
@@ -163,36 +161,52 @@ The probes verify whether the variant's specific mechanism is actually happening
 \resizebox{\textwidth}{!}{%
 \begin{tikzpicture}[
   font=\small,
+  node distance=0.7cm and 0.5cm,
   box/.style={draw, rounded corners=2pt, minimum width=2.4cm, minimum height=0.9cm, align=center, fill=blue!5},
-  probebox/.style={draw, rounded corners=2pt, minimum width=2.6cm, minimum height=0.7cm, align=center, fill=orange!10, font=\scriptsize},
+  probebox/.style={draw, rounded corners=2pt, minimum width=3.2cm, minimum height=1.1cm, align=center, fill=orange!10, font=\scriptsize, inner sep=3pt},
+  busnode/.style={circle, draw, inner sep=1pt, minimum size=4pt, fill=black},
   arr/.style={-{Latex[length=2mm]}, thick},
   dashedarr/.style={-{Latex[length=2mm]}, thick, dashed, gray},
   ]
+  % --- top row: input -> model -> loss ---
   \node[box] (in)    {input batch};
-  \node[box, right=0.7cm of in]  (model) {Model with $K$ \\ norm layers};
-  \node[box, right=0.7cm of model] (loss) {Loss\\\& backward};
+  \node[box, right=of in]  (model) {Model with $K$\\norm layers};
+  \node[box, right=of model] (loss) {Loss\\\& backward};
   \draw[arr] (in) -- (model);
   \draw[arr] (model) -- (loss);
 
-  \node[probebox, below=0.35cm of model, xshift=-3.2cm] (p1) {Per-norm-layer \\ $\E[x_\ell]$, RMS distribution};
-  \node[probebox, below=0.35cm of model, xshift=-0.7cm] (p2) {Per-norm-layer \\ $\|\gamma_\ell\|_2$, $\beta_\ell$ raw + $s(\beta_\ell)$};
-  \node[probebox, below=0.35cm of model, xshift=2.0cm] (p3) {Global $\|\nabla_\theta \mathcal{L}\|_2$, $\max_\theta \|\nabla\|_2$};
-  \node[probebox, below=0.35cm of model, xshift=4.6cm] (p4) {Weight $L_2$ \\ trajectory};
+  % --- bus node directly below model ---
+  \node[busnode, below=0.55cm of model] (bus) {};
+  \node[font=\scriptsize, right=0.05cm of bus, anchor=west] {epoch hook};
+  \draw[dashedarr] (model.south) -- (bus);
 
-  \draw[dashedarr] (model.south) -- node[left=0.1cm, font=\scriptsize]{epoch hook} ($(model.south) + (0,-0.3)$);
-  \draw[dashedarr] ($(model.south) + (0,-0.3)$) -- (p1.north);
-  \draw[dashedarr] ($(model.south) + (0,-0.3)$) -- (p2.north);
-  \draw[dashedarr] ($(model.south) + (0,-0.3)$) -- (p3.north);
-  \draw[dashedarr] ($(model.south) + (0,-0.3)$) -- (p4.north);
+  % --- four probe boxes in a row, chained with right= to guarantee no overlap ---
+  \node[probebox, below=1.5cm of model, xshift=-5.8cm] (p1)
+    {\textbf{NormLayerActivation}\\$|\E[x_\ell]|$, per-sample RMS};
+  \node[probebox, right=of p1] (p2)
+    {\textbf{NormInternalStats}\\$\|\gamma_\ell\|_2$, $\beta_\ell$, $s(\beta_\ell)$};
+  \node[probebox, right=of p2] (p3)
+    {\textbf{GradientNorm}\\$\|\nabla_\theta \mathcal{L}\|_2$, $\max\|\nabla\|$};
+  \node[probebox, right=of p3] (p4)
+    {\textbf{WeightNormTrajectory}\\$\|W_\ell\|_2$ over epochs};
 
-  \node[box, below=0.4cm of p2, fill=green!10, font=\scriptsize, xshift=1.5cm] (csv) {Per-epoch CSV per probe};
-  \draw[arr, gray] (p1) -- (csv);
-  \draw[arr, gray] (p2) -- (csv);
-  \draw[arr, gray] (p3) -- (csv);
-  \draw[arr, gray] (p4) -- (csv);
+  % --- bus fan-out to probe boxes ---
+  \draw[dashedarr] (bus) -- (p1.north);
+  \draw[dashedarr] (bus) -- (p2.north);
+  \draw[dashedarr] (bus) -- (p3.north);
+  \draw[dashedarr] (bus) -- (p4.north);
+
+  % --- CSV sink centered below all four probe boxes ---
+  \node[box, fill=green!10, font=\scriptsize] (csv)
+    at ($(p2.south)!0.5!(p3.south) + (0,-1.0cm)$)
+    {Per-epoch CSV per probe};
+  \draw[arr, gray] (p1.south) -- (csv.north west);
+  \draw[arr, gray] (p2.south) -- (csv.north);
+  \draw[arr, gray] (p3.south) -- (csv.north);
+  \draw[arr, gray] (p4.south) -- (csv.north east);
 \end{tikzpicture}%
 }
-\caption{The four probe callbacks. \texttt{NormLayerActivationCallback} taps each target norm-layer's forward output on a fixed calibration batch and records $|\E[x]|$ and the per-sample RMS distribution; this directly tests the zero-mean claim of \zcrms{} (output mean should drop) and the band claim of \bandrms{} (per-sample $\sqrt{\E[x^2]}$ should lie in $[1-\alpha,1]$). \texttt{NormInternalStatsCallback} records $\|\gamma\|_2$ for $\gamma$-bearing variants and the raw $\beta$ + post-sigmoid scale $s(\beta)$ for band variants; tests the $\gamma$-growth-suppression claim. \texttt{GradientNormCallback} computes the global gradient $L_2$ on a fixed probe batch each epoch; surfaces gradient collapse or explosion. \texttt{WeightNormTrajectoryCallback} records the $L_2$ of every norm-layer weight over training.}
+\caption{The four probe callbacks. \texttt{NormLayerActivationCallback} taps each target norm-layer's forward output on a fixed calibration batch and records $|\E[x]|$ and the per-sample RMS distribution; this directly tests the zero-mean claim of \zcrms{} (output mean should drop) and the band claim of \bandrms{} (per-sample $\sqrt{\E[x^2]}$ should lie in $[1-\alpha,1]$). \texttt{NormInternalStatsCallback} records $\|\gamma_\ell\|_2$ for $\gamma$-bearing variants and the raw $\beta_\ell$ + post-sigmoid scale $s(\beta_\ell)$ for band variants; tests the $\gamma$-growth-suppression claim. \texttt{GradientNormCallback} computes the global gradient $L_2$ on a fixed probe batch each epoch; surfaces gradient collapse or explosion. \texttt{WeightNormTrajectoryCallback} records the $L_2$ of every norm-layer weight over training.}
 \label{fig:probes}
 \end{figure}
 
@@ -427,7 +441,7 @@ Once the DC component is removed, the per-feature scale can do its proper rescal
 
 A controlled layer-level setup: $16$-block stack of \texttt{Dense(64) $\to$ Norm $\to$ GELU} (no residuals) on a biased Gaussian regression task (inputs $\mathcal{N}(\mu = 3, I) \in \R^{64}$, target a polynomial of the input).
 The bias deliberately injects mean drift; the deep stack amplifies it.
-Used during development as the gating smoke for the entire probe-callback chain (the central STOP-IF gate from the development plan~\citep{plan-iter-1}), and reported here as the layer-level baseline.
+Used during development as the gating smoke for the entire probe-callback chain, and reported here as the layer-level baseline.
 
 \begin{table}[H]
 \centering
@@ -453,30 +467,6 @@ Used during development as the gating smoke for the entire probe-callback chain 
 The two zero-centered variants tie at approximately $14\%$ relative loss reduction (OOB).
 \bandrms{} is again essentially indistinguishable from baseline.
 At the layer level, with no residual stream, the win from zero-centering is modest but consistent, confirming the deeper experiments' pattern.
-
-% ============================================================================
-\section{The fp16 cast bug}
-\label{sec:fp16bug}
-
-During test development for \zcband{} (which had zero unit-test coverage prior to this study) we discovered a latent mixed-precision bug present in both \bandrms{} and \zcband{}.
-Under \texttt{mixed\_float16} global policy, the scalar $\beta$ parameter is auto-cast to fp16 when read (the documented Keras 3 AMP behavior).
-The original code computed
-\begin{verbatim}
-    band_activation = ops.sigmoid(5.0 * self.band_param)
-    scale = (1 - alpha) + alpha * band_activation
-    output = normalized * scale
-\end{verbatim}
-where \texttt{normalized} is fp32 (the layer internally casts inputs to fp32 for numerical safety) but \texttt{scale} ends up fp16 because $5.0 \cdot \text{fp16} = \text{fp16}$.
-The multiply fails with \texttt{InvalidArgumentError: cannot compute Mul as input \#1 was expected to be a float tensor but is a half tensor}.
-
-The fix is one line: cast $\beta$ to fp32 explicitly before the sigmoid:
-\begin{verbatim}
-    band_param_fp32 = ops.cast(self.band_param, "float32")
-    band_activation = ops.sigmoid(5.0 * band_param_fp32)
-\end{verbatim}
-We applied identical patches to both \bandrms{} and \zcband{}, anchored with in-source decision comments.
-Without this fix, the E4 experiment (the central adversarial regime for normalization) would have crashed for both band variants at the first fp16 batch.
-The bug is exactly the kind that documentation never catches: both layers' docstrings claim mixed-precision safety, and indeed the rest of their math is correctly fp32-promoted; only the band-parameter read was out of sync.
 
 % ============================================================================
 \section{Summary of Empirical Claims}
@@ -606,10 +596,6 @@ The four mechanistic probes (Figure~\ref{fig:probes}) make verification non-taut
 This is what allows the central E2 finding to be diagnosed (gradient collapse, not optimizer hyperparameters) rather than merely reported.
 The probe code is publicly available and is one of the deliverables of the study.
 
-\paragraph{A fixed fp16 bug.}
-We identified and fixed a 1-line mixed-precision bug in both \bandrms{} and \zcband{} that would have silently crashed any real fp16 training.
-Both layers now have full unit-test coverage including a mixed-precision smoke test that exercises the fixed code path.
-
 % ============================================================================
 \section{Limitations and What Does Not Work}
 \label{sec:limitations}
@@ -698,10 +684,6 @@ Phipson, B. \& Smyth, G.~K. (2010).
 \newblock Permutation P-values should never be zero: calculating exact
 P-values when permutations are randomly drawn.
 \newblock \emph{Statistical Applications in Genetics and Molecular Biology}, 9(1), Article 39.
-
-\bibitem[Iterative planning record(2026)]{plan-iter-1}
-Iterative planning record for the present study,
-\texttt{plans/plan\_2026-05-14\_3764496e}, in the codebase under study.
 
 \bibitem[Qwen Team(2025)]{qwen3next2025}
 Qwen Team. (2025).
