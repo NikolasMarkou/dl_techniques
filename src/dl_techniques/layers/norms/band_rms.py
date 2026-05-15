@@ -260,7 +260,11 @@ class BandRMS(keras.layers.Layer):
         # Step 2: Apply learnable scaling within [1-α, 1] band
         # Use sigmoid to map the band_param to [0, 1]
         # with 5x multiplier, sigmoid(-5) ~ 0, sigmoid(+5) ~ 1
-        band_activation = ops.sigmoid(5.0 * self.band_param)
+        # DECISION plan_2026-05-14_3764496e/D-002: cast band_param to fp32 explicitly.
+        # Under mixed_float16, variables auto-cast on read (LESSONS L136); without
+        # this cast, the subsequent multiply against fp32 `normalized` crashes.
+        band_param_fp32 = ops.cast(self.band_param, "float32")
+        band_activation = ops.sigmoid(5.0 * band_param_fp32)
 
         # Scale the activation to be within [1-max_band_width, 1]
         # When band_activation = 0: scale = 1 - max_band_width
