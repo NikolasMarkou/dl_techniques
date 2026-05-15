@@ -209,6 +209,8 @@ class CliffordNetLMRouting(keras.Model):
         embedding_bottleneck_dim: Optional[int] = None,
         hce_num_chunks: int = 2,
         hce_chunk_bits: Optional[int] = None,
+        normalization_type: str = "zero_centered_rms_norm",
+        normalization_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -245,6 +247,8 @@ class CliffordNetLMRouting(keras.Model):
         self.embedding_bottleneck_dim = embedding_bottleneck_dim
         self.hce_num_chunks = hce_num_chunks
         self.hce_chunk_bits = hce_chunk_bits
+        self.normalization_type = normalization_type
+        self.normalization_kwargs = dict(normalization_kwargs or {})
 
         # --- Embeddings ---
         # Token embedding strategy. The token embedding is the single
@@ -292,6 +296,8 @@ class CliffordNetLMRouting(keras.Model):
             bias_initializer=bias_initializer,
             kernel_regularizer=kernel_regularizer,
             bias_regularizer=bias_regularizer,
+            normalization_type=self.normalization_type,
+            normalization_kwargs=dict(self.normalization_kwargs),
         )
         self.clifford_blocks = [
             CausalCliffordNetBlock(
@@ -452,6 +458,8 @@ class CliffordNetLMRouting(keras.Model):
             "embedding_bottleneck_dim": self.embedding_bottleneck_dim,
             "hce_num_chunks": self.hce_num_chunks,
             "hce_chunk_bits": self.hce_chunk_bits,
+            "normalization_type": self.normalization_type,
+            "normalization_kwargs": dict(self.normalization_kwargs),
         })
         return config
 
