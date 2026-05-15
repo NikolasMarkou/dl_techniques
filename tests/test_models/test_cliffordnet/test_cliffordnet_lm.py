@@ -323,3 +323,39 @@ class TestCliffordNetLMGradientFlow:
         updated_weights = [w.numpy() for w in model.trainable_weights[:2]]
         for w_init, w_updated in zip(initial_weights, updated_weights):
             assert not np.allclose(w_init, w_updated), "Weights did not update"
+
+
+# ---------------------------------------------------------------------
+# TestNormalizationTypePassthrough — block ctx-norm propagation
+# ---------------------------------------------------------------------
+
+
+class TestNormalizationTypePassthrough:
+    """Verify ``normalization_type`` propagates from CliffordNetLM into the
+    inner CausalCliffordNetBlock instances, and that ``get_config`` /
+    ``from_config`` round-trip preserves the value.
+    """
+
+    def test_normalization_type_passthrough(self, tiny_config):
+        cfg = dict(tiny_config)
+        cfg["normalization_type"] = "layer_norm"
+        model = CliffordNetLM(**cfg)
+        block = model.clifford_blocks[0]
+        assert block.normalization_type == "layer_norm"
+        assert isinstance(block.ctx_norm, keras.layers.LayerNormalization)
+
+    def test_normalization_type_default_is_zero_centered_rms(self, tiny_config):
+        model = CliffordNetLM(**tiny_config)
+        block = model.clifford_blocks[0]
+        assert block.normalization_type == "zero_centered_rms_norm"
+        assert type(block.ctx_norm).__name__ == "ZeroCenteredRMSNorm"
+
+    def test_normalization_type_config_round_trip(self, tiny_config):
+        cfg = dict(tiny_config)
+        cfg["normalization_type"] = "rms_norm"
+        model = CliffordNetLM(**cfg)
+        config = model.get_config()
+        assert config["normalization_type"] == "rms_norm"
+        restored = CliffordNetLM.from_config(config)
+        assert restored.normalization_type == "rms_norm"
+        assert restored.clifford_blocks[0].normalization_type == "rms_norm"
