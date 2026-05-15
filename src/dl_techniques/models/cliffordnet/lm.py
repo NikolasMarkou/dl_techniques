@@ -176,6 +176,7 @@ class CliffordNetLM(keras.Model):
         cli_mode: CliMode = "full",
         ctx_mode: CtxMode = "diff",
         use_global_context: bool = False,
+        global_context_period: Optional[int] = None,
         layer_scale_init: float = 1e-5,
         stochastic_depth_rate: float = 0.1,
         dropout_rate: float = 0.0,
@@ -199,6 +200,24 @@ class CliffordNetLM(keras.Model):
         self.cli_mode = cli_mode
         self.ctx_mode = ctx_mode
         self.use_global_context = use_global_context
+        # Normalize global_context_period: -1 is sentinel for "disabled" (=> None).
+        # Validate: must be None, -1, or int >= 1. Other values raise.
+        if global_context_period is None or global_context_period == -1:
+            self.global_context_period = None
+        elif isinstance(global_context_period, bool) or not isinstance(
+            global_context_period, int
+        ):
+            raise ValueError(
+                f"global_context_period must be None, -1, or an int >= 1; "
+                f"got {global_context_period!r}"
+            )
+        elif global_context_period < 1:
+            raise ValueError(
+                f"global_context_period must be None, -1, or an int >= 1; "
+                f"got {global_context_period}"
+            )
+        else:
+            self.global_context_period = global_context_period
         self.layer_scale_init = layer_scale_init
         self.stochastic_depth_rate = stochastic_depth_rate
         self.dropout_rate = dropout_rate
@@ -232,7 +251,6 @@ class CliffordNetLM(keras.Model):
             shifts=self.shifts,
             cli_mode=cli_mode,
             ctx_mode=ctx_mode,
-            use_global_context=use_global_context,
             layer_scale_init=layer_scale_init,
             use_bias=use_bias,
             kernel_initializer=kernel_initializer,
@@ -242,10 +260,24 @@ class CliffordNetLM(keras.Model):
             normalization_type=self.normalization_type,
             normalization_kwargs=dict(self.normalization_kwargs),
         )
+
+        def _block_uses_global_ctx(idx: int) -> bool:
+            # DECISION plan_2026-05-15_fe237831/D-001: when global_context_period
+            # is set, periodic positions (1-indexed n, 2n, ...) force True
+            # regardless of model-level use_global_context. Non-periodic positions
+            # respect the model-level flag. -1 is normalized to None at __init__.
+            if (
+                self.global_context_period is not None
+                and (idx + 1) % self.global_context_period == 0
+            ):
+                return True
+            return use_global_context
+
         self.clifford_blocks = [
             CausalCliffordNetBlock(
                 drop_path_rate=drop_rates[i],
                 name=f"clifford_block_{i}",
+                use_global_context=_block_uses_global_ctx(i),
                 **_block_kw,
             )
             for i in range(depth)
@@ -290,6 +322,7 @@ class CliffordNetLM(keras.Model):
             f"max_seq_length={max_seq_length}, channels={channels}, "
             f"depth={depth}, shifts={self.shifts}, cli_mode={cli_mode}, "
             f"ctx_mode={ctx_mode}, global_ctx={use_global_context}, "
+            f"global_context_period={self.global_context_period}, "
             f"tie_word_embeddings={tie_word_embeddings})"
         )
 
@@ -353,6 +386,7 @@ class CliffordNetLM(keras.Model):
             "cli_mode": self.cli_mode,
             "ctx_mode": self.ctx_mode,
             "use_global_context": self.use_global_context,
+            "global_context_period": self.global_context_period,
             "layer_scale_init": self.layer_scale_init,
             "stochastic_depth_rate": self.stochastic_depth_rate,
             "dropout_rate": self.dropout_rate,
