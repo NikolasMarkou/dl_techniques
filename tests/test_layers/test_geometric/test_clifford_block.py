@@ -458,7 +458,7 @@ class TestCliffordNetBlock:
         assert layer_instance.input_norm.built is True
         assert layer_instance.linear_det.built is True
         assert layer_instance.dw_conv.built is True
-        assert layer_instance.ctx_bn.built is True
+        assert layer_instance.ctx_norm.built is True
         assert layer_instance.local_geo_prod.built is True
         assert layer_instance.ggr.built is True
 
@@ -714,7 +714,7 @@ class TestCausalCliffordNetBlock:
         assert layer_instance.linear_det.built is True
         assert layer_instance.dw_conv.built is True
         assert layer_instance.dw_conv2.built is True
-        assert layer_instance.ctx_bn.built is True
+        assert layer_instance.ctx_norm.built is True
         assert layer_instance.local_geo_prod.built is True
         assert layer_instance.ggr.built is True
 
