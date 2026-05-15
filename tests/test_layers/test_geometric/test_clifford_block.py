@@ -2083,5 +2083,107 @@ class TestCausalCliffordNetBlockDSv2:
         assert not np.any(np.isnan(x.numpy()))
 
 
+# ===========================================================================
+# TestCliffordNetBlockConfigurableNorm — ctx-norm factory routing
+# ===========================================================================
+
+
+class TestCliffordNetBlockConfigurableNorm:
+    """Verify that the context-stream normalization layer of
+    :class:`CliffordNetBlock` and :class:`CausalCliffordNetBlock` is built
+    through ``create_normalization_layer`` and is configurable via the new
+    ``normalization_type`` / ``normalization_kwargs`` parameters.
+    """
+
+    @pytest.fixture
+    def channels(self) -> int:
+        return 16
+
+    @pytest.fixture
+    def shifts(self):
+        return [1, 2]
+
+    # --- CliffordNetBlock ------------------------------------------------
+
+    def test_clifford_default_norm_is_zero_centered_rms(self, channels, shifts):
+        block = CliffordNetBlock(channels=channels, shifts=shifts)
+        block.build((None, 8, 8, channels))
+        assert type(block.ctx_norm).__name__ == "ZeroCenteredRMSNorm"
+        assert block.normalization_type == "zero_centered_rms_norm"
+
+    def test_clifford_alternative_norm_selectable(self, channels, shifts):
+        block = CliffordNetBlock(
+            channels=channels, shifts=shifts, normalization_type="layer_norm",
+        )
+        block.build((None, 8, 8, channels))
+        assert isinstance(block.ctx_norm, keras.layers.LayerNormalization)
+        # smoke forward
+        x = tf.random.normal([2, 8, 8, channels])
+        y = block(x, training=False)
+        assert y.shape == x.shape
+        assert not np.any(np.isnan(y.numpy()))
+
+    def test_clifford_serialization_round_trip(self, channels, shifts):
+        block = CliffordNetBlock(
+            channels=channels, shifts=shifts, normalization_type="rms_norm",
+        )
+        block.build((None, 8, 8, channels))
+        # Drive once so weights exist.
+        _ = block(tf.random.normal([1, 8, 8, channels]), training=False)
+        inputs = keras.Input(shape=(8, 8, channels))
+        outputs = block(inputs)
+        model = keras.Model(inputs, outputs)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "block.keras")
+            model.save(path)
+            restored = keras.models.load_model(path)
+        # The restored block is a sub-layer of the model.
+        restored_block = None
+        for layer in restored.layers:
+            if isinstance(layer, CliffordNetBlock):
+                restored_block = layer
+                break
+        assert restored_block is not None
+        assert restored_block.normalization_type == "rms_norm"
+
+    # --- CausalCliffordNetBlock -----------------------------------------
+
+    def test_causal_default_norm_is_zero_centered_rms(self, channels, shifts):
+        block = CausalCliffordNetBlock(channels=channels, shifts=shifts)
+        block.build((None, 1, 16, channels))
+        assert type(block.ctx_norm).__name__ == "ZeroCenteredRMSNorm"
+        assert block.normalization_type == "zero_centered_rms_norm"
+
+    def test_causal_alternative_norm_selectable(self, channels, shifts):
+        block = CausalCliffordNetBlock(
+            channels=channels, shifts=shifts, normalization_type="layer_norm",
+        )
+        block.build((None, 1, 16, channels))
+        assert isinstance(block.ctx_norm, keras.layers.LayerNormalization)
+        x = tf.random.normal([2, 1, 16, channels])
+        y = block(x, training=False)
+        assert y.shape == x.shape
+        assert not np.any(np.isnan(y.numpy()))
+
+    def test_causal_serialization_round_trip(self, channels, shifts):
+        block = CausalCliffordNetBlock(
+            channels=channels, shifts=shifts, normalization_type="rms_norm",
+        )
+        inputs = keras.Input(shape=(1, 16, channels))
+        outputs = block(inputs)
+        model = keras.Model(inputs, outputs)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "causal_block.keras")
+            model.save(path)
+            restored = keras.models.load_model(path)
+        restored_block = None
+        for layer in restored.layers:
+            if isinstance(layer, CausalCliffordNetBlock):
+                restored_block = layer
+                break
+        assert restored_block is not None
+        assert restored_block.normalization_type == "rms_norm"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
