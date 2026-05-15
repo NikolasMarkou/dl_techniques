@@ -600,6 +600,87 @@ Drop-in BN $\to$ RMS substitution works without zero-centering & \textcolor{fail
 \end{table}
 
 % ============================================================================
+\section{Parameter Budget}
+\label{sec:params}
+
+The four variants differ in their per-norm-layer trainable parameter count: \rms{} and \zcrms{} carry $d$ parameters (the per-feature gain $\gamma$); \bandrms{} and \zcband{} carry exactly $1$ scalar.
+At fixed $d$ and fixed total norm-layer count $K$, the model-level overhead of the per-feature gain is therefore $K \cdot (d - 1)$ parameters --- which can be small in absolute terms but is the entire numerical difference between OOB and PARAM\_MATCHED modes for the $\gamma$-bearing variants.
+Table~\ref{tab:params} reports the total trainable parameter count and the normalization-layer subtotal for every cell, measured by direct enumeration of \texttt{trainable\_weights} on an instantiated and built model.
+
+\begin{table}[H]
+\centering
+\caption{Trainable parameter counts per (experiment, norm, mode) cell. ``Norm'' counts only the trainable parameters that belong to normalization layers; ``Norm \%'' is that quantity as a fraction of the model total. The ``$\Delta$ vs base'' column shows the absolute difference in total parameter count relative to $\rms{}$/OOB for the same experiment.}
+\label{tab:params}
+\renewcommand{\arraystretch}{1.05}
+\begin{tabular}{llrrrr}
+\toprule
+\textbf{Exp} & \textbf{Norm / mode} & \textbf{Total} & \textbf{Norm} & \textbf{Norm \%} & \textbf{$\Delta$ vs base} \\
+\midrule
+\multicolumn{6}{l}{\textit{E1 --- ViT-pico on CIFAR-10 ($d{=}192$, $K{=}13$ norm layers, OOB only)}}\\
+E1 & \rms{} (baseline)              & 2{,}691{,}082 & 2{,}496 & 0.09\% & --- \\
+E1 & \bandrms{}                     & 2{,}688{,}599 & 13      & 0.00\% & $-2{,}483$ \\
+E1 & \zcrms{}                       & 2{,}691{,}082 & 2{,}496 & 0.09\% & $0$ \\
+E1 & \zcband{}                      & 2{,}688{,}599 & 13      & 0.00\% & $-2{,}483$ \\
+\midrule
+\multicolumn{6}{l}{\textit{E2 --- ResNet-18 on CIFAR-100 ($K{=}20$ norm layers replacing \batchnorm{}, OOB only)}}\\
+E2 & \rms{} (baseline)              & 11{,}223{,}012 & 4{,}800 & 0.04\% & --- \\
+E2 & \bandrms{}                     & 11{,}218{,}232 & 20      & 0.00\% & $-4{,}780$ \\
+E2 & \zcrms{}                       & 11{,}223{,}012 & 4{,}800 & 0.04\% & $0$ \\
+E2 & \zcband{}                      & 11{,}218{,}232 & 20      & 0.00\% & $-4{,}780$ \\
+\midrule
+\multicolumn{6}{l}{\textit{E3 --- TinyTransformer on IMDb ($d{=}128$, $K{=}9$ norm layers)}}\\
+E3 & \rms{}/oob (baseline)          & 3{,}352{,}321 & 1{,}152 & 0.03\% & --- \\
+E3 & \rms{}/param\_matched          & 3{,}351{,}169 & 0       & 0.00\% & $-1{,}152$ \\
+E3 & \bandrms{}/oob                 & 3{,}351{,}178 & 9       & 0.00\% & $-1{,}143$ \\
+E3 & \bandrms{}/param\_matched      & 3{,}351{,}178 & 9       & 0.00\% & $-1{,}143$ \\
+E3 & \zcrms{}/oob                   & 3{,}352{,}321 & 1{,}152 & 0.03\% & $0$ \\
+E3 & \zcrms{}/param\_matched        & 3{,}351{,}169 & 0       & 0.00\% & $-1{,}152$ \\
+E3 & \zcband{}/oob                  & 3{,}351{,}178 & 9       & 0.00\% & $-1{,}143$ \\
+E3 & \zcband{}/param\_matched       & 3{,}351{,}178 & 9       & 0.00\% & $-1{,}143$ \\
+\midrule
+\multicolumn{6}{l}{\textit{E4 --- 24-block deep residual ($d{=}256$, $K{=}25$ norm layers)}}\\
+E4 & \rms{}/oob (baseline)          & 1{,}651{,}457 & 6{,}400 & 0.39\% & --- \\
+E4 & \rms{}/param\_matched          & 1{,}645{,}057 & 0       & 0.00\% & $-6{,}400$ \\
+E4 & \bandrms{}/oob                 & 1{,}645{,}082 & 25      & 0.00\% & $-6{,}375$ \\
+E4 & \bandrms{}/param\_matched      & 1{,}645{,}082 & 25      & 0.00\% & $-6{,}375$ \\
+E4 & \zcrms{}/oob                   & 1{,}651{,}457 & 6{,}400 & 0.39\% & $0$ \\
+E4 & \zcrms{}/param\_matched        & 1{,}645{,}057 & 0       & 0.00\% & $-6{,}400$ \\
+E4 & \zcband{}/oob                  & 1{,}645{,}082 & 25      & 0.00\% & $-6{,}375$ \\
+E4 & \zcband{}/param\_matched       & 1{,}645{,}082 & 25      & 0.00\% & $-6{,}375$ \\
+\midrule
+\multicolumn{6}{l}{\textit{E5 --- 16-block microbenchmark ($d{=}64$, $K{=}16$ norm layers)}}\\
+E5 & \rms{}/oob (baseline)          & 67{,}649 & 1{,}024 & \textbf{1.51\%} & --- \\
+E5 & \rms{}/param\_matched          & 66{,}625 & 0       & 0.00\% & $-1{,}024$ \\
+E5 & \bandrms{}/oob                 & 66{,}641 & 16      & 0.02\% & $-1{,}008$ \\
+E5 & \bandrms{}/param\_matched      & 66{,}641 & 16      & 0.02\% & $-1{,}008$ \\
+E5 & \zcrms{}/oob                   & 67{,}649 & 1{,}024 & \textbf{1.51\%} & $0$ \\
+E5 & \zcrms{}/param\_matched        & 66{,}625 & 0       & 0.00\% & $-1{,}024$ \\
+E5 & \zcband{}/oob                  & 66{,}641 & 16      & 0.02\% & $-1{,}008$ \\
+E5 & \zcband{}/param\_matched       & 66{,}641 & 16      & 0.02\% & $-1{,}008$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Reading the table.}
+Three things stand out.
+
+First, \textbf{the per-norm-layer parameter difference between $\gamma$-bearing variants and band variants is essentially negligible at the model level for every realistic-size model in the study}.
+On the largest models (E2 ResNet-18, $\sim 11$\,M params) the gap is $4{,}780$ parameters or $0.043\%$ of the total --- well below the precision of any reasonable comparison.
+On the smallest model (E5 microbench, $\sim 67$\,k params) the gap rises to $1{,}008$ parameters or $1.5\%$ of the total, which is large enough to matter in principle but still small enough that we would not expect it to dominate the accuracy comparison.
+The parameter-asymmetry argument we used to justify the PARAM\_MATCHED mode (Section~\ref{sec:variants}) is therefore mostly conservative: in practice, $\rms{}$ vs $\bandrms{}$ is an essentially equal-budget comparison, and any accuracy gap we observe is properly attributable to the band-constraint mechanism, not to extra capacity.
+
+Second, \textbf{the PARAM\_MATCHED rows for $\gamma$-bearing variants are not the same as the band-variant rows}.
+PARAM\_MATCHED on $\rms{}$/$\zcrms{}$ drops the gain entirely, giving a normalization layer with \emph{zero} trainable parameters (a pure rescaling).
+The band variants retain one scalar per layer.
+At equal total parameter count to a fraction of a percent, the band variants therefore have \emph{strictly more} per-norm trainable capacity than PARAM\_MATCHED $\rms{}$.
+This is the cleanest setting in which to read the band-vs-no-band contrast (E3, E4, E5 lines $4$--$8$ of Tables~\ref{tab:e3}, \ref{tab:e4}, \ref{tab:e5}) and the answer there is that the extra scalar does nothing or marginally hurts.
+
+Third, \textbf{the model-level Norm \% column is informative for understanding where the $\gamma$ parameter is doing work}.
+On the deep residual stack of E4, $\rms{}$ devotes $0.39\%$ of total trainable parameters to normalization gains; on the layer-only microbench of E5 it is $1.5\%$.
+On the transformer setting of E3 it is only $0.03\%$ --- and indeed E3 is the experiment where dropping the gain entirely (PARAM\_MATCHED) is exactly indistinguishable from keeping it (OOB) in the headline metric (Table~\ref{tab:e3}, $\Delta = -0.0001$).
+The fraction of capacity spent on $\gamma$ tracks how much it actually matters.
+
+% ============================================================================
 \section{Variance reduction story}
 \label{sec:variance}
 
