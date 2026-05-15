@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 import keras
 from keras import initializers, regularizers
 
+from ..norms.factory import create_normalization_layer
 from ..stochastic_depth import StochasticDepth
 from ...utils.logger import logger
 
@@ -576,6 +577,8 @@ class CliffordNetBlock(keras.layers.Layer):
         bias_initializer: Any = "zeros",
         kernel_regularizer: Optional[Any] = None,
         bias_regularizer: Optional[Any] = None,
+        normalization_type: str = "zero_centered_rms_norm",
+        normalization_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -606,6 +609,8 @@ class CliffordNetBlock(keras.layers.Layer):
         self.bias_initializer = initializers.get(bias_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.normalization_type = normalization_type
+        self.normalization_kwargs = dict(normalization_kwargs or {})
 
         _dense_kwargs: Dict[str, Any] = dict(
             use_bias=use_bias,
@@ -627,7 +632,9 @@ class CliffordNetBlock(keras.layers.Layer):
 
         # --- Step 2b: Context stream ---
         # Two stacked 3×3 depthwise convolutions (effective 7×7 RF),
-        # one BatchNormalization after both, then SiLU in call().
+        # one configurable normalization layer after both, then SiLU in call().
+        # Default normalization_type is "zero_centered_rms_norm"; legacy
+        # batch-norm behavior is recovered with normalization_type="batch_norm".
         self.dw_conv = keras.layers.DepthwiseConv2D(
             kernel_size=3,
             padding="same",
@@ -640,7 +647,11 @@ class CliffordNetBlock(keras.layers.Layer):
             use_bias=False,
             name="dw_conv2",
         )
-        self.ctx_bn = keras.layers.BatchNormalization(name="ctx_bn")
+        self.ctx_norm = create_normalization_layer(
+            self.normalization_type,
+            name="ctx_bn",
+            **self.normalization_kwargs,
+        )
 
         # --- Step 3: Local sparse rolling product ---
         self.local_geo_prod = SparseRollingGeometricProduct(
@@ -716,7 +727,7 @@ class CliffordNetBlock(keras.layers.Layer):
         dw1_out = self.dw_conv.compute_output_shape(spatial_shape)
         self.dw_conv2.build(dw1_out)
         dw2_out = self.dw_conv2.compute_output_shape(dw1_out)
-        self.ctx_bn.build(dw2_out)
+        self.ctx_norm.build(dw2_out)
 
         # Step 3: local product
         self.local_geo_prod.build(stream_shape)
@@ -754,10 +765,10 @@ class CliffordNetBlock(keras.layers.Layer):
         # --- Step 2: Dual-stream generation ---
         z_det = self.linear_det(x_norm)
 
-        # Two stacked depthwise convolutions -> single BN -> SiLU
+        # Two stacked depthwise convolutions -> configurable norm -> SiLU
         z_ctx = self.dw_conv(x_norm)
         z_ctx = self.dw_conv2(z_ctx)
-        z_ctx = keras.activations.silu(self.ctx_bn(z_ctx, training=training))
+        z_ctx = keras.activations.silu(self.ctx_norm(z_ctx, training=training))
 
         if self.ctx_mode == "diff":
             z_ctx = z_ctx - z_det  # discrete Laplacian approximation
@@ -819,6 +830,8 @@ class CliffordNetBlock(keras.layers.Layer):
                 "bias_initializer": initializers.serialize(self.bias_initializer),
                 "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
                 "bias_regularizer": regularizers.serialize(self.bias_regularizer),
+                "normalization_type": self.normalization_type,
+                "normalization_kwargs": dict(self.normalization_kwargs),
             }
         )
         return config
@@ -872,6 +885,8 @@ class CausalCliffordNetBlock(keras.layers.Layer):
         bias_initializer: Any = "zeros",
         kernel_regularizer: Optional[Any] = None,
         bias_regularizer: Optional[Any] = None,
+        normalization_type: str = "zero_centered_rms_norm",
+        normalization_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -899,6 +914,8 @@ class CausalCliffordNetBlock(keras.layers.Layer):
         self.bias_initializer = initializers.get(bias_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.normalization_type = normalization_type
+        self.normalization_kwargs = dict(normalization_kwargs or {})
 
         _dense_kwargs: Dict[str, Any] = dict(
             use_bias=use_bias,
@@ -923,6 +940,9 @@ class CausalCliffordNetBlock(keras.layers.Layer):
         # left-only padding is applied along W in call() so position i sees
         # only positions <= i.  H dimension uses kernel=1 (no spatial mixing
         # along H, which is 1 for sequences reshaped to (B, 1, seq_len, D)).
+        # Context norm is configurable via normalization_type; default is
+        # "zero_centered_rms_norm". Pass normalization_type="batch_norm" to
+        # recover the legacy block.
         self._ctx_kernel_w = 3
         self.dw_conv = keras.layers.DepthwiseConv2D(
             kernel_size=(1, self._ctx_kernel_w),
@@ -936,7 +956,11 @@ class CausalCliffordNetBlock(keras.layers.Layer):
             use_bias=False,
             name="dw_conv2",
         )
-        self.ctx_bn = keras.layers.BatchNormalization(name="ctx_bn")
+        self.ctx_norm = create_normalization_layer(
+            self.normalization_type,
+            name="ctx_bn",
+            **self.normalization_kwargs,
+        )
 
         # --- Step 3: Local sparse rolling product ---
         self.local_geo_prod = SparseRollingGeometricProduct(
@@ -1012,7 +1036,7 @@ class CausalCliffordNetBlock(keras.layers.Layer):
         padded_shape2 = (*dw1_out[:2],
                          (dw1_out[2] or 0) + 2, dw1_out[3])
         self.dw_conv2.build(padded_shape2)
-        self.ctx_bn.build(dw1_out)
+        self.ctx_norm.build(dw1_out)
 
         self.local_geo_prod.build(stream_shape)
         if self.global_geo_prod is not None:
@@ -1042,12 +1066,12 @@ class CausalCliffordNetBlock(keras.layers.Layer):
         # --- Step 2: Dual-stream generation ---
         z_det = self.linear_det(x_norm)
 
-        # Causal context stream: left-pad then valid conv (×2) -> BN -> SiLU
+        # Causal context stream: left-pad then valid conv (×2) -> configurable norm -> SiLU
         z_ctx = self._causal_pad(x_norm)
         z_ctx = self.dw_conv(z_ctx)
         z_ctx = self._causal_pad(z_ctx)
         z_ctx = self.dw_conv2(z_ctx)
-        z_ctx = keras.activations.silu(self.ctx_bn(z_ctx, training=training))
+        z_ctx = keras.activations.silu(self.ctx_norm(z_ctx, training=training))
 
         if self.ctx_mode == "diff":
             z_ctx = z_ctx - z_det
@@ -1114,6 +1138,8 @@ class CausalCliffordNetBlock(keras.layers.Layer):
             "bias_initializer": initializers.serialize(self.bias_initializer),
             "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
             "bias_regularizer": regularizers.serialize(self.bias_regularizer),
+            "normalization_type": self.normalization_type,
+            "normalization_kwargs": dict(self.normalization_kwargs),
         })
         return config
 
