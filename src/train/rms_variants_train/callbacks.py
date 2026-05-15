@@ -296,18 +296,47 @@ class NormLayerActivationCallback(keras.callbacks.Callback):
             f"[NormLayerActivationCallback] tracking "
             f"{len(self._target_layers)} norm layers"
         )
-        # Try Functional intermediate-model construction; if the model is
-        # subclassed (no ``model.input``) we fall back to direct hooks.
+        # Try Functional intermediate-model construction first (works on
+        # Functional models like the E5 microbench). Subclassed models
+        # (ViT, ResNet) fall back to a monkey-patched call() tap.
         try:
             outputs = [layer.output for layer in self._target_layers]
             self._probe_model = keras.Model(self.model.input, outputs)
         except (AttributeError, ValueError) as e:
-            logger.warning(
-                f"[NormLayerActivationCallback] cannot build intermediate "
-                f"Functional model ({e}); falling back to per-layer forward."
+            logger.info(
+                f"[NormLayerActivationCallback] Functional probe model "
+                f"unavailable ({type(e).__name__}); using call-tap fallback."
             )
             self._probe_model = None
         self._initialized = True
+
+    def _capture_via_call_tap(self) -> List[np.ndarray]:
+        """Forward through the full model with each target layer's ``call``
+        wrapped to stash its output. Restores original ``call`` on exit.
+        """
+        originals = []
+        captured: List[Optional[np.ndarray]] = [None] * len(self._target_layers)
+        for i, layer in enumerate(self._target_layers):
+            originals.append((layer, layer.call))
+
+            def _make_wrapper(idx: int, orig: callable):
+                def _wrapper(inputs, *args, **kwargs):
+                    out = orig(inputs, *args, **kwargs)
+                    try:
+                        captured[idx] = keras.ops.convert_to_numpy(out)
+                    except (TypeError, ValueError):
+                        captured[idx] = None
+                    return out
+                return _wrapper
+
+            layer.call = _make_wrapper(i, layer.call)
+        try:
+            _ = self.model(self._x, training=False)
+        finally:
+            for layer, orig in originals:
+                layer.call = orig
+        # Replace any None entries with a (1,)-shape sentinel.
+        return [c if c is not None else np.zeros((1,), dtype=np.float32) for c in captured]
 
     @staticmethod
     def _activation_stats(act: np.ndarray) -> Tuple[float, float, float, float, float]:
@@ -335,16 +364,10 @@ class NormLayerActivationCallback(keras.callbacks.Callback):
                 outs = [outs]
             acts = [keras.ops.convert_to_numpy(o) for o in outs]
         else:
-            # Subclassed-model fallback: forward through the whole model
-            # and pull each norm-layer's last output via Keras layer accessor.
-            _ = self.model(self._x, training=False)
-            acts = []
-            for layer in self._target_layers:
-                last = getattr(layer, "output", None)
-                if last is None:
-                    acts.append(np.zeros((1,), dtype=np.float32))
-                else:
-                    acts.append(keras.ops.convert_to_numpy(last))
+            # Subclassed-model fallback: temporarily wrap each target
+            # norm-layer's ``call`` to stash its output, run a forward
+            # through the full model, then restore.
+            acts = self._capture_via_call_tap()
         rows: List[Tuple] = []
         for layer, act in zip(self._target_layers, acts):
             mean, rms_std, rms_mean, rms_min, rms_max = self._activation_stats(act)
