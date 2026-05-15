@@ -361,6 +361,8 @@ class CliffordNetLMUNet(keras.Model):
         embedding_pool: Literal["last", "cls", "auto"] = "last",
         cls_token_id: Optional[int] = None,
         l2_eps: float = 1e-12,
+        normalization_type: str = "zero_centered_rms_norm",
+        normalization_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -491,6 +493,8 @@ class CliffordNetLMUNet(keras.Model):
         self.bias_initializer = initializers.get(bias_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.normalization_type = normalization_type
+        self.normalization_kwargs = dict(normalization_kwargs or {})
 
         # MRL + embedding-head hyperparameters.
         self.mrl_widths: List[int] = mrl_widths_resolved
@@ -546,6 +550,8 @@ class CliffordNetLMUNet(keras.Model):
             bias_initializer=bias_initializer,
             kernel_regularizer=kernel_regularizer,
             bias_regularizer=bias_regularizer,
+            normalization_type=self.normalization_type,
+            normalization_kwargs=dict(self.normalization_kwargs),
         )
 
         # Encoder: per-level blocks + downsampler (except the last level).
@@ -960,6 +966,8 @@ class CliffordNetLMUNet(keras.Model):
             "embedding_pool": self.embedding_pool,
             "cls_token_id": self.cls_token_id,
             "l2_eps": self.l2_eps,
+            "normalization_type": self.normalization_type,
+            "normalization_kwargs": dict(self.normalization_kwargs),
         })
         return config
 
