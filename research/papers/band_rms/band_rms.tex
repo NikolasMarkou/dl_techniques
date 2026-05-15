@@ -27,8 +27,8 @@
 \newcommand{\E}{\mathbb{E}}
 \newcommand{\rms}{\textsc{RMSNorm}}
 \newcommand{\bandrms}{\textsc{BandRMS}}
-\newcommand{\zcrms}{\textsc{ZeroCenteredRMSNorm}}
-\newcommand{\zcband}{\textsc{ZeroCenteredBandRMSNorm}}
+\newcommand{\zcrms}{\textsc{ZeroCentered}\-\textsc{RMSNorm}}
+\newcommand{\zcband}{\textsc{ZeroCentered}\-\textsc{BandRMSNorm}}
 \newcommand{\layernorm}{\textsc{LayerNorm}}
 \newcommand{\batchnorm}{\textsc{BatchNorm}}
 
@@ -88,7 +88,7 @@ We study three extensions to \rms{}:
 \zcrms{} is reproduced from the Qwen3-Next technical report.
 None of the three has, to our knowledge, been subjected to a multi-seed multi-architecture empirical evaluation against the \rms{} baseline; that is the gap this paper is intended to fill, including for the two variants of our own design --- our own designs are first-party but the empirical question is still: \emph{do they pay off?}
 
-These modifications add nontrivial compute compared to baseline \rms{}: \zcrms{} loses the speed advantage over \layernorm{} (it does the same mean subtraction); \bandrms{} adds a sigmoid and a learnable scalar; \zcband{} adds both.
+These modifications add nontrivial compute relative to baseline \rms{}: \zcrms{} loses the speed advantage over \layernorm{} (it does the same mean subtraction); \bandrms{} adds a sigmoid plus a learnable scalar; \zcband{} adds both.
 This paper asks --- and answers --- whether the additions pay off.
 
 \subsection{What this paper is (and is not)}
@@ -261,7 +261,7 @@ We adopt the following decision rule per (variant, experiment, mode) cell:
   \item \textbf{INDISTINGUISHABLE}: neither.
 \end{itemize}
 Per-variant aggregate verdicts require PASS in $\geq 2$ cells and no FAIL.
-Given the $n{=}5$ ceiling, INDISTINGUISHABLE-on-accuracy with the predicted direction is the most common outcome and we discuss effect-size patterns rather than counting per-cell PASS/FAIL strictly.
+Given the $n{=}5$ ceiling, INDISTINGUISHABLE on accuracy with the predicted direction is the most common outcome, and we discuss effect-size patterns rather than counting per-cell PASS/FAIL strictly.
 
 \paragraph{Compute environment.}
 All training runs were executed sequentially on a single NVIDIA RTX 4090 (24\,GB).
@@ -277,6 +277,7 @@ Each was chosen to exercise a specific putative advantage of one or more variant
 \caption{Experiment matrix. \textit{Norms} is the number of normalization layers in the model whose type is swapped between the four candidate variants in each cell. \textit{Modes} indicates whether the PARAM\_MATCHED contrast is available; see Section~\ref{sec:variants} for details.}
 \label{tab:matrix}
 \renewcommand{\arraystretch}{1.15}
+\resizebox{\textwidth}{!}{%
 \begin{tabular}{lllllc}
 \toprule
 \textbf{ID} & \textbf{Model} & \textbf{Task} & \textbf{Regime} & \textbf{Norms} & \textbf{Modes} \\
@@ -287,7 +288,8 @@ E3 & 4-layer pre-norm transformer            & IMDb (seq=128)  & fp32, AdamW, 20
 E4 & 24-block residual stack                 & Synthetic poly  & \textbf{mixed-fp16, batch=16}, 60ep & 25 & both \\
 E5 & 16-block normalization-only stack       & Synthetic Gauss & fp32, batch=128, 30ep     & 16 & both \\
 \bottomrule
-\end{tabular}
+\end{tabular}%
+}
 \end{table}
 
 % ============================================================================
@@ -612,6 +614,7 @@ Table~\ref{tab:params} reports the total trainable parameter count and the norma
 \caption{Trainable parameter counts per (experiment, norm, mode) cell. ``Norm'' counts only the trainable parameters that belong to normalization layers; ``Norm \%'' is that quantity as a fraction of the model total. The ``$\Delta$ vs base'' column shows the absolute difference in total parameter count relative to $\rms{}$/OOB for the same experiment.}
 \label{tab:params}
 \renewcommand{\arraystretch}{1.05}
+\resizebox{\textwidth}{!}{%
 \begin{tabular}{llrrrr}
 \toprule
 \textbf{Exp} & \textbf{Norm / mode} & \textbf{Total} & \textbf{Norm} & \textbf{Norm \%} & \textbf{$\Delta$ vs base} \\
@@ -658,7 +661,8 @@ E5 & \zcrms{}/param\_matched        & 66{,}625 & 0       & 0.00\% & $-1{,}024$ \
 E5 & \zcband{}/oob                  & 66{,}641 & 16      & 0.02\% & $-1{,}008$ \\
 E5 & \zcband{}/param\_matched       & 66{,}641 & 16      & 0.02\% & $-1{,}008$ \\
 \bottomrule
-\end{tabular}
+\end{tabular}%
+}
 \end{table}
 
 \paragraph{Reading the table.}
@@ -711,7 +715,7 @@ Figure~\ref{fig:variance} visualizes this on the two experiments where the effec
 \addplot coordinates {(rms,0.0134) (band,0.0118) (zc-rms,0.0077) (zc-band,0.0051)};
 \end{axis}
 \end{tikzpicture}
-\caption{E1 (ViT/CIFAR-10): seed std of best val accuracy.}
+\caption{E1 (ViT / CIFAR-10): std of best val acc.}
 \end{subfigure}
 \hfill
 \begin{subfigure}[t]{0.46\textwidth}
@@ -736,9 +740,9 @@ Figure~\ref{fig:variance} visualizes this on the two experiments where the effec
 \addplot coordinates {(rms,0.0914) (band,0.1013) (zc-rms,0.0331) (zc-band,0.0584)};
 \end{axis}
 \end{tikzpicture}
-\caption{E4 (DeepRes+fp16): seed std of final val loss.}
+\caption{E4 (DeepRes / fp16): std of final val loss.}
 \end{subfigure}
-\caption{Seed-to-seed standard deviation across $n{=}5$ runs on E1 and E4. Zero-centered variants achieve $42\%$--$64\%$ lower std on these experiments. \zcband{} attains the lowest std on E1; pure \zcrms{} attains the lowest on E4.}
+\caption{Seed-to-seed standard deviation across $n{=}5$ runs on E1 and E4. Zero-centered variants achieve $42\%$--$64\%$ lower std. The combined variant attains the lowest std on E1; pure \zcrms{} attains the lowest on E4.}
 \label{fig:variance}
 \end{figure}
 
