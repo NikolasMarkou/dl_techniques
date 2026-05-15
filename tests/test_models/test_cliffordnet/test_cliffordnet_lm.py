@@ -359,3 +359,114 @@ class TestNormalizationTypePassthrough:
         restored = CliffordNetLM.from_config(config)
         assert restored.normalization_type == "rms_norm"
         assert restored.clifford_blocks[0].normalization_type == "rms_norm"
+
+
+# ---------------------------------------------------------------------
+# TestGlobalContextPeriod — periodic global-context plumbing
+# ---------------------------------------------------------------------
+
+
+@pytest.fixture
+def periodic_config():
+    """Config with depth=10 so periodicity is testable."""
+    return {
+        "vocab_size": 256,
+        "max_seq_length": 32,
+        "channels": 64,
+        "depth": 10,
+        "shifts": [1, 2],
+        "dropout_rate": 0.0,
+        "stochastic_depth_rate": 0.0,
+    }
+
+
+class TestGlobalContextPeriod:
+    """Verify periodic global-context behavior. Default (None) preserves byte-
+    identical BC; positive int forces ``use_global_context=True`` at 1-indexed
+    positions n, 2n, ...; ``-1`` is normalized to ``None``; invalid values
+    raise; full ``get_config`` / ``from_config`` round-trip preserves the
+    per-block pattern.
+    """
+
+    def test_default_is_none(self, tiny_config):
+        model = CliffordNetLM(**tiny_config)
+        assert model.global_context_period is None
+        # All blocks reflect the model-level flag (default False).
+        for block in model.clifford_blocks:
+            assert block.use_global_context is False
+
+    def test_periodic_positions_global(self, periodic_config):
+        cfg = dict(periodic_config)
+        cfg["use_global_context"] = False
+        cfg["global_context_period"] = 5
+        model = CliffordNetLM(**cfg)
+        flags = [b.use_global_context for b in model.clifford_blocks]
+        # depth=10, period=5: positions (i+1) % 5 == 0 => i=4, i=9 are True.
+        expected = [False, False, False, False, True,
+                    False, False, False, False, True]
+        assert flags == expected
+
+    def test_non_periodic_blocks_respect_model_flag(self, periodic_config):
+        cfg = dict(periodic_config)
+        cfg["use_global_context"] = True
+        cfg["global_context_period"] = 5
+        model = CliffordNetLM(**cfg)
+        flags = [b.use_global_context for b in model.clifford_blocks]
+        # All True: periodic positions forced True, non-periodic from model flag.
+        assert flags == [True] * 10
+
+    def test_period_one_makes_all_global(self):
+        model = CliffordNetLM(
+            vocab_size=256, max_seq_length=32, channels=64, depth=4,
+            stochastic_depth_rate=0.0, use_global_context=False,
+            global_context_period=1,
+        )
+        flags = [b.use_global_context for b in model.clifford_blocks]
+        assert flags == [True, True, True, True]
+
+    def test_period_greater_than_depth(self):
+        model = CliffordNetLM(
+            vocab_size=256, max_seq_length=32, channels=64, depth=4,
+            stochastic_depth_rate=0.0, use_global_context=False,
+            global_context_period=99,
+        )
+        flags = [b.use_global_context for b in model.clifford_blocks]
+        assert flags == [False, False, False, False]
+
+    def test_sentinel_minus_one_disables(self, periodic_config):
+        cfg = dict(periodic_config)
+        cfg["use_global_context"] = False
+        cfg["global_context_period"] = -1
+        model = CliffordNetLM(**cfg)
+        assert model.global_context_period is None
+        for block in model.clifford_blocks:
+            assert block.use_global_context is False
+
+    def test_invalid_period_raises(self, periodic_config):
+        cfg = dict(periodic_config)
+        for bad in (0, -2, -100, 1.5, "5"):
+            cfg_bad = dict(cfg)
+            cfg_bad["global_context_period"] = bad
+            with pytest.raises(ValueError):
+                CliffordNetLM(**cfg_bad)
+
+    def test_config_round_trip(self, periodic_config):
+        cfg = dict(periodic_config)
+        cfg["use_global_context"] = False
+        cfg["global_context_period"] = 5
+        model = CliffordNetLM(**cfg)
+        config = model.get_config()
+        assert config["global_context_period"] == 5
+        restored = CliffordNetLM.from_config(config)
+        assert restored.global_context_period == 5
+        flags = [b.use_global_context for b in restored.clifford_blocks]
+        expected = [False, False, False, False, True,
+                    False, False, False, False, True]
+        assert flags == expected
+
+    def test_default_round_trip_preserves_none(self, tiny_config):
+        model = CliffordNetLM(**tiny_config)
+        config = model.get_config()
+        assert config["global_context_period"] is None
+        restored = CliffordNetLM.from_config(config)
+        assert restored.global_context_period is None
