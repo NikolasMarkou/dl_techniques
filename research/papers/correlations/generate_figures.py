@@ -144,7 +144,12 @@ def fig_correlation_grid():
 
 # -------------------------------------------------------------------- 4. Distance correlation
 def _dcor(x, y):
-    """U-statistic distance correlation estimator (biased version, simple)."""
+    """Empirical distance correlation (V-statistic / biased estimator, Szekely-Rizzo 2007).
+
+    V-statistics are biased by construction. The bias-corrected U-statistic
+    version (Szekely-Rizzo 2014) uses U-centering and is preferred for
+    hypothesis tests; this simple V-statistic form is fine for plotting.
+    """
     x = np.asarray(x, dtype=float).reshape(-1, 1)
     y = np.asarray(y, dtype=float).reshape(-1, 1)
     n = x.shape[0]
@@ -189,11 +194,14 @@ def fig_distance_correlation():
 
 # -------------------------------------------------------------------- 5. Chatterjee xi
 def _chatterjee_xi(x, y):
+    """Chatterjee's xi (no-ties formula, Chatterjee 2021 eq. 1.1) applied with averaged
+    ranks. Continuous noisy inputs make ties vanishingly rare; for true tie handling
+    the formula is 1 - n * sum|r_{i+1}-r_i| / (2 * sum l_i*(n - l_i)) where
+    l_i = #{j : y_j >= y_i}."""
     x = np.asarray(x); y = np.asarray(y)
     n = len(x)
     order = np.argsort(x, kind="mergesort")
     y_sorted = y[order]
-    # rank y, breaking ties by averaging (use scipy rankdata)
     from scipy.stats import rankdata
     r = rankdata(y_sorted, method="average")
     num = np.sum(np.abs(np.diff(r)))
@@ -263,7 +271,10 @@ def fig_shap_summary():
         import shap
         explainer = shap.TreeExplainer(model)
         sv = explainer.shap_values(X)
-        # beeswarm-style: for each feature, plot SHAP values colored by feature value
+        # Illustrative beeswarm: for each feature, plot SHAP values colored by feature value
+        # using uniform jitter for vertical spread. The canonical SHAP beeswarm
+        # (shap.plots.beeswarm) uses density-based jitter to reveal regions of mass;
+        # we use uniform jitter here for code simplicity.
         order = np.argsort(np.mean(np.abs(sv), axis=0))
         fig, ax = plt.subplots(figsize=(6.5, 4.5))
         for i, j in enumerate(order):
