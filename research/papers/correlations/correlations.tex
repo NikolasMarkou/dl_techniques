@@ -916,7 +916,7 @@ the calculation.
 Pearson}\label{24-relationship-to-pearson}
 
 For jointly normal \((X, Y)\) with population correlation \(\rho\), \[
-\rho_S = \frac{6}{\pi} \arcsin\!\left(\frac{\rho}{2}\right) \approx 0.92\,\rho \text{ for moderate } |\rho|.
+\rho_S = \frac{6}{\pi} \arcsin\!\left(\frac{\rho}{2}\right) \approx 0.95\,\rho \text{ for moderate } |\rho|.
 \] For monotonic but non-linear relations (e.g. \(Y = \tanh(X)\) +
 noise), Spearman exceeds Pearson --- sometimes substantially. This gap
 is a useful diagnostic: a large \(\rho_S - r\) signals non-linear
@@ -926,8 +926,12 @@ monotonicity.
 
 For \(n \gtrsim 10\), \[
 t_S = \rho_S \sqrt{\frac{n - 2}{1 - \rho_S^2}} \overset{H_0}{\approx} t_{n-2}.
-\] Exact tables exist for small \(n\) (Olds 1938); permutation tests are
-exact and the default for heavy ties.
+\] This form is borrowed from Pearson and is only asymptotic for
+Spearman; under \(H_0\), \(\mathrm{Var}(\rho_S) = 1/(n-1)\) so the
+simpler exact null statistic is \(\sqrt{n-1}\,\rho_S \to \mathcal{N}(0,1)\).
+SciPy's \texttt{spearmanr} uses the \(t\)-approximation; the difference
+matters only for small \(n\). Exact tables exist for small \(n\)
+(Olds 1938); permutation tests are exact and the default for heavy ties.
 
 \subsubsection{2.6 Tie handling}\label{26-tie-handling}
 
@@ -962,7 +966,10 @@ Ranks of \(x\): \(1, 2, 3, 4, 5\). Ranks of \(y\): \(1, 2.5, 4, 2.5, 5\)
 (the two 4\textquotesingle s tied at midrank 2.5). Without tie
 correction: \(d = (0, -0.5, -1, 1.5, 0)\),
 \(\sum d^2 = 0 + 0.25 + 1 + 2.25 + 0 = 3.5\).
-\(\rho_S \approx 1 - 6(3.5)/(5 \cdot 24) = 1 - 21/120 = 0.825\).
+\(\rho_S \approx 1 - 6(3.5)/(5 \cdot 24) = 1 - 21/120 = 0.825\). The
+tie-corrected value (which SciPy reports) is slightly different
+because of the midrank at \(y = 4\); for tied data, prefer
+\texttt{spearmanr} over the shortcut formula.
 
 \subsubsection{2.9 Pitfalls}\label{29-pitfalls}
 
@@ -1033,16 +1040,18 @@ Pearson}\label{34-relationship-to-spearman-and-pearson}
 Under bivariate normality: \[
 \tau = \frac{2}{\pi} \arcsin(\rho), \qquad \rho_S = \frac{6}{\pi} \arcsin\!\left(\frac{\rho}{2}\right).
 \] Empirically \(\rho_S / \tau \approx 1.5\) across most of the range,
-and \(\tau\) is roughly \(\tfrac{2}{3} \rho_S\).
+and \(\tau\) is roughly \(\tfrac{2}{3} \rho_S\) in the \emph{small-\(\rho\)} regime
+(the ratio \(\rho_S/\tau \to 3/2\) as \(\rho \to 0\)); for moderate to large \(\rho\)
+the ratio drops toward \(\sim 1.25\) (e.g.\ \(\rho = 0.9\) gives \(\tau \approx 0.71\),
+\(\rho_S \approx 0.89\)).
 
 \subsubsection{3.5 Inference}\label{35-inference}
 
 Under \(H_0\) of independence, \(\mathbb{E}[\tau] = 0\) and
-\(\mathrm{Var}(\tau) = 2(2n + 5)/(9n(n-1))\);
-\(\sqrt{n}\,\tau \to_d \mathcal{N}(0, 4/9 \cdot \mathrm{const})\) ---
-more precisely
+\(\mathrm{Var}(\tau) = 2(2n + 5)/(9n(n-1))\); standardising,
 \(\sqrt{(9n(n-1))/(2(2n+5))} \cdot \tau \to_d \mathcal{N}(0, 1)\). Exact
-null distributions are tabulated for \(n < 50\).
+null distributions are tabulated for \(n \lesssim 50\) and used by
+\texttt{scipy.stats.kendalltau(method="exact")} when \(n\) is small.
 
 \subsubsection{3.6 Code}\label{36-code}
 
@@ -1133,10 +1142,15 @@ formula directly to the 0/1 coded variable.
 \subsubsection{4.2 Derivation}\label{42-derivation}
 
 With \(X \in \{0, 1\}\) coded, \(\bar{x} = n_1 / n\),
-\(\sum_i (x_i - \bar{x})^2 = n_1 (n_0/n)^2 + n_0 (n_1/n)^2 = n_1 n_0 / n\),
-so \(s_x = \sqrt{n_1 n_0 / (n(n-1))}\). The numerator
+\(\sum_i (x_i - \bar{x})^2 = n_1 (n_0/n)^2 + n_0 (n_1/n)^2 = n_1 n_0 / n\).
+Using the population-SD convention (denominator \(n\), as in
+\texttt{scipy.stats.pointbiserialr}), \(s_x = \sqrt{n_1 n_0}/n\) and
+similarly for \(s_y\). The numerator
 \(\sum_i (x_i - \bar{x})(y_i - \bar{y}) = (n_1 n_0 / n)(\bar{y}_1 - \bar{y}_0)\).
-Substituting and simplifying gives the formula above.
+Substituting into \(r = \mathrm{Cov}(X,Y)/(s_x s_y)\) gives the formula
+above. (Switching to the sample-SD convention with denominator \(n-1\)
+replaces \(\sqrt{n_1 n_0/n^2}\) by \(\sqrt{n_1 n_0/(n(n-1))}\); the
+identity to scipy is preserved by using the same convention for \(s_y\).)
 
 \subsubsection{\texorpdfstring{4.3 Relation to the two-sample
 \(t\)-test}{4.3 Relation to the two-sample t-test}}\label{43-relation-to-the-two-sample-t-test}
@@ -1170,14 +1184,26 @@ Use \(r_{pb}\) when the binary variable is genuinely binary; use \(r_b\)
 only if you have substantive reason to believe a latent continuous
 variable was thresholded.
 
-\subsubsection{\texorpdfstring{4.5 Bound on
-\(|r_{pb}|\)}{4.5 Bound on \textbar r\_\{pb\}\textbar{}}}\label{45-bound-on-r_pb}
+\subsubsection{\texorpdfstring{4.5 The role of group balance, and a
+common false bound}{4.5 The role of group balance, and a common false bound}}\label{45-bound-on-r_pb}
 
-\(|r_{pb}| \leq \sqrt{n_1 n_0 / n^2}\), which is at most \(1/2\) when
-\(n_1 = n_0\) and tends to zero as groups become imbalanced. A 99/1
-split caps \(|r_{pb}|\) at \(\sqrt{0.99 \cdot 0.01} \approx 0.099\) even
-when the means are wildly different --- a major reason to also report
-effect sizes like Cohen\textquotesingle s \(d\).
+As a Pearson correlation, \(|r_{pb}| \leq 1\) universally
+(Cauchy--Schwarz). It is sometimes claimed that
+\(|r_{pb}| \leq \sqrt{n_1 n_0 / n^2}\); this is \emph{wrong}. The factor
+\(\sqrt{n_1 n_0 / n^2}\) appearing in the formula is bounded by \(1/2\)
+and tends to zero as groups become imbalanced, but it bounds only the
+multiplier, not \(r_{pb}\) itself: the ANOVA identity
+\(s_y^2 \geq (n_1 n_0 / n^2)(\bar{y}_1 - \bar{y}_0)^2\) precisely
+cancels the factor and yields \(r_{pb}^2 \leq 1\). Zero within-group
+variance gives \(r_{pb} = \pm 1\) at any split.
+
+What \emph{does} happen with extreme imbalance is a loss of
+\textbf{statistical power}: tiny groups make the standard error of
+\(\bar{y}_1 - \bar{y}_0\) explode, so the same true effect produces
+much smaller \(t\)-statistics and wider confidence intervals on
+\(r_{pb}\). For this reason it is standard to also report a
+sample-size-aware effect size such as Cohen\textquotesingle s \(d\)
+alongside \(r_{pb}\).
 
 \subsubsection{4.6 Code}\label{46-code}
 
@@ -1244,7 +1270,8 @@ pathology}\label{53-bounds-and-marginal-dependence-pathology}
 depends on the marginals. If \(a + b \neq a + c\) (i.e., row and column
 marginals are unequal), \(|\phi|_{\max} < 1\). The \textbf{maximum} is
 \[
-\phi_{\max} = \sqrt{\frac{p_{1+} q_{+1}}{q_{1+} p_{+1}}}
+\phi_{\max} = \sqrt{\frac{p_{1+} q_{+1}}{q_{1+} p_{+1}}} \qquad
+(\text{assuming } p_{1+} \leq p_{+1}; \text{ swap rows otherwise})
 \] where \(p_{i+}, p_{+j}\) are marginal probabilities --- useful to
 know when comparing \(\phi\) across tables with different marginals.
 
@@ -1320,7 +1347,7 @@ normalises \(V\) to \([0, 1]\).
 
 For small \(n\) or sparse tables, \(V\) is upward biased. The
 bias-corrected: \[
-\tilde{V} = \sqrt{\max\!\left(0, \frac{\chi^2/n - (r-1)(c-1)/(n-1)}{\min(\tilde{r}-1, \tilde{c}-1)}\right)}, \quad \tilde{k} = k - \frac{(k-1)^2}{n-1}.
+\tilde{V} = \sqrt{\max\!\left(0, \frac{\chi^2/n - (r-1)(c-1)/(n-1)}{\min(\tilde{r}-1, \tilde{c}-1)}\right)}, \quad \tilde{k} = k - \frac{(k-1)^2}{n-1} \text{ for } k \in \{r, c\}.
 \] Strongly recommended when \(n\) is small or any cell count is below
 \textasciitilde10.
 
@@ -1566,10 +1593,12 @@ For discrete \(X, Y\) with empirical joint \(\hat{p}_{xy} = n_{xy}/n\):
 \] \textbf{Bias}:
 \(\mathbb{E}[\hat{I}_{\text{plug}}] - I \approx \frac{(K_{XY} - K_X - K_Y + 1)}{2n}\)
 where \(K\)\textquotesingle s are the cardinalities of the supports
-(Miller--Madow correction, 1955). For small \(n\) and large alphabets
-the bias dominates; for \(n \gg K_{XY}\) it is negligible. Improved
-estimators (Chao--Shen, Grassberger, NSB, James--Stein) reduce bias
-further at the cost of complexity.
+(Miller--Madow correction, 1955); note the sign --- the plug-in
+estimator is biased \emph{upward}, so naive plug-in MI \emph{over}-estimates
+dependence and Miller--Madow subtracts the estimated bias.
+For small \(n\) and large alphabets the bias dominates; for \(n \gg K_{XY}\)
+it is negligible. Improved estimators (Chao--Shen, Grassberger, NSB,
+James--Stein) reduce bias further at the cost of complexity.
 
 \paragraph{Continuous: binning}\label{continuous-binning}
 
@@ -1622,8 +1651,14 @@ neural network to maximise a lower bound on MI:
   \(I(X; Y) \geq \mathbb{E}_{p_{XY}}[T] - \log \mathbb{E}_{p_X p_Y}[e^T]\).
 \item
   \textbf{InfoNCE} (Oord et al. 2018):
-  \(I(X; Y) \geq \log K - L_{\text{NCE}}\), where \(K\) is batch size
-  --- bounded above by \(\log K\), which often dominates the bias.
+  \(I(X; Y) \geq \log K - L_{\text{NCE}}\), where \(K\) is batch size.
+  Because the estimator itself cannot exceed \(\log K\), InfoNCE is
+  \emph{incapable} of detecting \(I > \log K\) --- a hard ceiling that
+  saturates at modest values of \(I\). Detecting \(I = b\) nats
+  faithfully therefore requires batch size at least \(e^b\), which is
+  exponential in the quantity being estimated (McAllester \&
+  Stratos 2020 establish this as a fundamental limit of any
+  distribution-free high-confidence lower bound on MI).
 \item
   \textbf{NWJ} (Nguyen--Wainwright--Jordan 2010):
   \(I(X; Y) \geq \mathbb{E}[T] - e^{-1}\mathbb{E}[e^T]\).
@@ -1649,7 +1684,7 @@ y = x ** 2 + 0.05 * rng.normal(size=n)  # quadratic
 r, _ = pearsonr(x, y)
 mi = mutual_info_regression(x.reshape(-1, 1), y, n_neighbors=3, random_state=0)[0]
 print(f"Pearson r: {r:.4f}    MI (KSG): {mi:.4f}")
-# Pearson ~ 0; MI ~ 1.5+ nats.
+# Pearson ~ 0; MI (KSG, k=3) typically lands in ~1.0-1.4 nats here.
 \end{lstlisting}
 
 \subsubsection{8.6 Pitfalls}\label{86-pitfalls}
@@ -1768,7 +1803,7 @@ n = 1000
 x = rng.uniform(0, 1, n)
 y = np.sin(20 * x) + 0.2 * rng.normal(size=n)
 
-mine = MINE(alpha=0.6, c=15)
+mine = MINE(alpha=0.6, c=15)  # alpha: B(n)=n^alpha cap; c: clump factor for grid search
 mine.compute_score(x, y)
 print(f"MIC = {mine.mic():.3f}")
 \end{lstlisting}
@@ -1844,10 +1879,15 @@ Two important variants in this context:
 \tightlist
 \item
   \textbf{Adjusted Mutual Information (AMI)}: subtracts the
-  \emph{expected} NMI under random labellings, analogous to the Adjusted
-  Rand Index. NMI rewards finer partitions (more clusters → higher
-  entropy → easier to be informative); AMI corrects this. Vinh et al.
-  (2010) is the canonical reference.
+  \emph{expected} MI under random labellings (analogous to the Adjusted
+  Rand Index) before normalising. Concretely,
+  \[
+  \mathrm{AMI}(U, V) = \frac{I(U;V) - \mathbb{E}[I(U;V)]}{\mathrm{avg}(H(U), H(V)) - \mathbb{E}[I(U;V)]},
+  \]
+  where the expectation is over a hypergeometric model preserving the
+  cluster-size marginals. NMI rewards finer partitions (more clusters
+  $\to$ higher entropy $\to$ easier to be informative); AMI corrects this.
+  Vinh et al.\ (2010) is the canonical reference.
 \item
   \textbf{Adjusted Rand Index (ARI)}: pair-counting analogue, sometimes
   preferred for partition comparison; AMI for information-theoretic, ARI
@@ -1925,9 +1965,11 @@ causality}\label{113-relation-to-granger-causality}
 For jointly Gaussian, linear, stationary \((X_t, Y_t)\) processes,
 transfer entropy is monotonically related to the Granger causality
 \(F\)-statistic. Barnett, Barrett \& Seth (2009) showed: \[
-\mathrm{TE}_{X \to Y} = \tfrac{1}{2} \log \frac{\mathrm{Var}(Y_{t+1} \mid Y_t^{(k)})}{\mathrm{Var}(Y_{t+1} \mid Y_t^{(k)}, X_t^{(l)})} = \tfrac{1}{2} \log F + \text{const},
-\] i.e., TE is the \emph{nonlinear, non-parametric generalisation} of
-Granger causality.
+\mathrm{TE}_{X \to Y} = \tfrac{1}{2} \log \frac{\mathrm{Var}(Y_{t+1} \mid Y_t^{(k)})}{\mathrm{Var}(Y_{t+1} \mid Y_t^{(k)}, X_t^{(l)})} = \tfrac{1}{2}\, \mathrm{GC}_{X \to Y},
+\] where \(\mathrm{GC}_{X \to Y} := \log \frac{\mathrm{Var}(Y_{t+1} \mid Y_t^{(k)})}{\mathrm{Var}(Y_{t+1} \mid Y_t^{(k)}, X_t^{(l)})}\)
+is the (population) Granger-causality statistic; the sample F-statistic
+used to \emph{test} \(\mathrm{GC} = 0\) is a separate object. So TE is the
+\emph{nonlinear, non-parametric generalisation} of Granger causality.
 
 \subsubsection{11.4 Properties}\label{114-properties}
 
@@ -1990,8 +2032,13 @@ print(f"TE X->Y: {te_x_to_y:.4f}    TE Y->X: {te_y_to_x:.4f}")
   Common: select by minimising AIC of the conditional density estimate,
   or use the Ragwitz criterion. Cross-validate where possible.
 \item
-  \textbf{Stationarity} is assumed; non-stationary series should be
-  detrended or pre-processed (e.g. differencing).
+  \textbf{Stationarity and ergodicity} are both required. Stationarity
+  alone is not enough: TE estimators replace ensemble averages by
+  time averages along a single trajectory, which is only valid under
+  ergodicity. Non-ergodic stationary processes (e.g.\ regime-switching
+  systems that never mix) produce TE estimates that depend on which
+  trajectory was sampled. Non-stationary series should be detrended
+  or differenced before estimation.
 \item
   \textbf{TE is not causality} in the interventional sense ---
   confounders can produce spurious TE. The terminology "directional
@@ -2042,10 +2089,11 @@ effect of \(Z\), CMI removes the \emph{full} statistical effect of
 \item
   \textbf{Non-monotonicity in \(Z\)}: \(I(X; Y \mid Z)\) can be
   \emph{larger} or \emph{smaller} than \(I(X; Y)\) --- conditioning
-  sometimes increases dependence (the "explaining away" effect, or
-  Berkson\textquotesingle s paradox). Example: \(X, Y\) independent
-  Bernoulli(1/2), \(Z = X \oplus Y\); then \(I(X; Y) = 0\) but
-  \(I(X; Y \mid Z) > 0\).
+  on a collider (the "v-structure" \(X \to Z \leftarrow Y\); the
+  resulting bias when sampling on \(Z\) is sometimes also called
+  Berkson's paradox) introduces dependence between independent
+  parents. Example: \(X, Y\) independent Bernoulli(1/2),
+  \(Z = X \oplus Y\); then \(I(X; Y) = 0\) but \(I(X; Y \mid Z) > 0\).
 \end{itemize}
 
 \subsubsection{12.4 Estimation}\label{124-estimation}
@@ -2054,8 +2102,12 @@ effect of \(Z\), CMI removes the \emph{full} statistical effect of
 \tightlist
 \item
   \textbf{kNN (Frenzel--Pompe 2007)}: extends KSG to the conditional
-  case. Use Chebyshev neighbours in \((X, Y, Z)\) space; estimate from
-  digamma functions of marginal counts.
+  case. With \(k\) the chosen neighbour order, Chebyshev distances in
+  \((X, Y, Z)\) space, and \(n_{xz}(i), n_{yz}(i), n_z(i)\) the counts
+  of points within the marginal slabs at point \(i\),
+  \[
+  \widehat{I}(X; Y \mid Z) = \psi(k) - \frac{1}{n}\sum_i \big[\psi(n_{xz}(i)+1) + \psi(n_{yz}(i)+1) - \psi(n_z(i)+1)\big].
+  \]
 \item
   \textbf{Copula-based}: estimate the conditional copula and integrate.
 \item
@@ -2076,12 +2128,14 @@ CI tests based on CMI (or its kernel proxies) are the workhorse of
 \textbf{constraint-based causal discovery} (PC, FCI algorithms): learn
 the skeleton of the underlying DAG by removing edges \((X, Y)\) for
 which \(\exists S\) with \(X \perp Y \mid S\). Faithfulness assumption:
-the only CIs in the data reflect those entailed by the DAG.
+\emph{every} conditional independence in the distribution is entailed
+by d-separation in the DAG --- i.e., no two paths' effects cancel by
+coincidence (the Markov assumption supplies the converse direction).
 
 \subsubsection{12.6 Code}\label{126-code}
 
 \begin{lstlisting}[language=Python]
-# pip install npeet — Non-Parametric Entropy Estimation Toolkit (Ver Steeg)
+# Install: pip install git+https://github.com/gregversteeg/NPEET.git  (not on PyPI)
 import numpy as np
 from npeet import entropy_estimators as ee
 
