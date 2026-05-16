@@ -3604,7 +3604,7 @@ from sklearn.model_selection import train_test_split
 Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.3, random_state=0)
 model = RandomForestRegressor(n_estimators=500, random_state=0).fit(Xtr, ytr)
 
-# Permute on a held-out set, NOT on the training data (see §19.3).
+# Permute on a held-out set, NOT on the training data (see section 19.3).
 result = permutation_importance(model, Xte, yte, n_repeats=20, random_state=0)
 for i in range(Xte.shape[1]):
     print(f"feature {i}: MDA-equiv = {result.importances_mean[i]:+.4f}")
@@ -4838,7 +4838,7 @@ beta = lasso[-1].coef_
 print(f"\n{'feature':12s}  {'LASSO β (std)':>14s}")
 for fname, b in zip(aug_names, beta):
     print(f"{fname:12s}  {b:>+14.3f}")
-print(f"Chosen alpha (λ): {lasso[-1].alpha_:.4f}")
+print(f"Chosen alpha (lambda): {lasso[-1].alpha_:.4f}")
 \end{lstlisting}
 
 Without the engineered features, LASSO finds only \texttt{lin},
