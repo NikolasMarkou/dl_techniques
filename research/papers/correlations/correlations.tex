@@ -30,6 +30,47 @@
 \fvset{fontsize=\small,frame=single,framerule=0pt,xleftmargin=0pt}
 \RecustomVerbatimEnvironment{verbatim}{Verbatim}{fontsize=\small,frame=lines,framerule=0.4pt,framesep=4pt,xleftmargin=0pt}
 
+% --- Python syntax highlighting via listings ---
+\usepackage{listings}
+\definecolor{pyBg}{rgb}{0.97,0.97,0.97}
+\definecolor{pyKw}{rgb}{0.00,0.00,0.70}
+\definecolor{pyStr}{rgb}{0.80,0.20,0.10}
+\definecolor{pyCom}{rgb}{0.10,0.55,0.10}
+\definecolor{pyNum}{rgb}{0.50,0.10,0.60}
+\definecolor{pyFrame}{rgb}{0.75,0.75,0.75}
+\lstdefinestyle{pythonstyle}{
+  language=Python,
+  backgroundcolor=\color{pyBg},
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{pyKw}\bfseries,
+  stringstyle=\color{pyStr},
+  commentstyle=\color{pyCom}\itshape,
+  numberstyle=\color{pyNum},
+  identifierstyle=\color{black},
+  showstringspaces=false,
+  breaklines=true,
+  breakatwhitespace=true,
+  columns=fullflexible,
+  keepspaces=true,
+  tabsize=4,
+  frame=single,
+  rulecolor=\color{pyFrame},
+  framesep=4pt,
+  framerule=0.4pt,
+  xleftmargin=4pt,
+  xrightmargin=4pt,
+  extendedchars=true,
+  inputencoding=utf8,
+  literate=%
+    {~}{{$\sim$}}1
+    {±}{{$\pm$}}1
+    {²}{{${}^2$}}1
+    {β}{{$\beta$}}1
+    {—}{{---}}1,
+  upquote=true,
+}
+\lstset{style=pythonstyle}
+
 % --- Unicode passthrough for text-mode glyphs that appear in tables/prose ---
 \DeclareUnicodeCharacter{2713}{\ensuremath{\checkmark}}
 \DeclareUnicodeCharacter{2717}{\ensuremath{\times}}
@@ -622,6 +663,20 @@ into a mathematical discipline.
 Correlation
 \(r\)}{1. Pearson\textquotesingle s Product--Moment Correlation r}}\label{1-pearsons-productmoment-correlation-r}
 
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/anscombe.png}
+\caption{Anscombe's quartet: four datasets that share the same Pearson correlation ($r \approx 0.816$), means, variances, and regression line, but have radically different shapes. A single summary statistic is never a substitute for looking at the data.}
+\label{fig:anscombe}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/correlation_grid.png}
+\caption{Pearson $r$ across nine joint distributions. The top row varies the underlying linear coefficient; the bottom row shows distinctly non-linear (but strongly dependent) patterns whose Pearson $r$ is near zero. $r = 0$ does \emph{not} imply independence.}
+\label{fig:correlation-grid}
+\end{figure}
+
 \subsubsection{1.1 Definition}\label{11-definition}
 
 For random variables \(X, Y\) with finite second moments, \[
@@ -730,7 +785,7 @@ motivates the entirety of Parts II and III.
 
 \subsubsection{1.7 Code}\label{17-code}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 import numpy as np
 from scipy import stats
 
@@ -747,7 +802,7 @@ z = np.arctanh(r)
 se = 1.0 / np.sqrt(n - 3)
 lo, hi = np.tanh(z - 1.96 * se), np.tanh(z + 1.96 * se)
 print(f"95% CI: [{lo:.3f}, {hi:.3f}]")
-\end{verbatim}
+\end{lstlisting}
 
 \subsubsection{1.8 Worked tiny example}\label{18-worked-tiny-example}
 
@@ -790,6 +845,13 @@ For monotonic but non-linear relationships use
 \subsection{\texorpdfstring{2. Spearman\textquotesingle s Rank
 Correlation
 \(\rho\)}{2. Spearman\textquotesingle s Rank Correlation \textbackslash rho}}\label{2-spearmans-rank-correlation-rho}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/pearson_vs_rank.png}
+\caption{Pearson vs.\ Spearman on three relationships. Left: linear data, both high. Middle: a monotonic squashing $y = \tanh(2x)$ where Spearman stays at $1$ while Pearson drops. Right: $y = x^3$, where Spearman is $\approx 1$ but Pearson is markedly lower. Spearman captures monotonicity; Pearson captures linearity.}
+\label{fig:pearson-vs-rank}
+\end{figure}
 
 \subsubsection{2.1 Definition}\label{21-definition}
 
@@ -853,7 +915,7 @@ handles ties more gracefully.
 
 \subsubsection{2.7 Code}\label{27-code}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 from scipy import stats
 import numpy as np
 
@@ -866,7 +928,7 @@ rho_spearman, _ = stats.spearmanr(x, y)
 print(f"Pearson r  = {r_pearson:.3f}")
 print(f"Spearman rho = {rho_spearman:.3f}")
 # Spearman is materially larger because the relationship is monotonic-NL
-\end{verbatim}
+\end{lstlisting}
 
 \subsubsection{2.8 Worked tiny example}\label{28-worked-tiny-example}
 
@@ -960,7 +1022,7 @@ null distributions are tabulated for \(n < 50\).
 
 \subsubsection{3.6 Code}\label{36-code}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 from scipy import stats
 import numpy as np
 
@@ -970,7 +1032,7 @@ y = x + rng.normal(size=100) * 0.5
 
 tau, p = stats.kendalltau(x, y)
 print(f"Kendall tau_b = {tau:.3f}, p = {p:.3g}")
-\end{verbatim}
+\end{lstlisting}
 
 \subsubsection{3.7 Worked tiny example}\label{37-worked-tiny-example}
 
@@ -1095,7 +1157,7 @@ effect sizes like Cohen\textquotesingle s \(d\).
 
 \subsubsection{4.6 Code}\label{46-code}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 from scipy import stats
 import numpy as np
 
@@ -1105,7 +1167,7 @@ score = group * 0.8 + rng.normal(size=200)
 
 r_pb, p = stats.pointbiserialr(group, score)
 print(f"r_pb = {r_pb:.3f}, p = {p:.3g}")
-\end{verbatim}
+\end{lstlisting}
 
 \subsubsection{4.7 When to use / when
 not}\label{47-when-to-use--when-not}
@@ -1176,7 +1238,7 @@ A useful rule: report \textbf{both} for \(2 \times 2\) analyses ---
 
 \subsubsection{5.5 Code}\label{55-code}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 import numpy as np
 from scipy.stats import chi2_contingency
 
@@ -1187,7 +1249,7 @@ chi2, p, dof, expected = chi2_contingency(table, correction=False)
 n = table.sum()
 phi = np.sqrt(chi2 / n) * np.sign(table[0, 0] * table[1, 1] - table[0, 1] * table[1, 0])
 print(f"phi = {phi:.3f}, chi2 = {chi2:.2f}, p = {p:.3g}")
-\end{verbatim}
+\end{lstlisting}
 
 \subsubsection{5.6 When to use}\label{56-when-to-use}
 
@@ -1240,7 +1302,7 @@ bias-corrected: \[
 
 \subsubsection{6.5 Code}\label{65-code}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 import numpy as np
 from scipy.stats import chi2_contingency
 
@@ -1261,7 +1323,7 @@ table = np.array([[50, 20, 10],
                   [10, 40, 50]])
 print(f"V = {cramers_v(table, bias_correction=False):.3f}")
 print(f"V (bias-corrected) = {cramers_v(table, bias_correction=True):.3f}")
-\end{verbatim}
+\end{lstlisting}
 
 \subsubsection{6.6 Pitfalls}\label{66-pitfalls}
 
@@ -1369,7 +1431,7 @@ pitfalls}\label{75-assumptions-and-pitfalls}
 
 \subsubsection{7.6 Code}\label{76-code}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 # Requires factor_analyzer
 from factor_analyzer.utils import polychoric_correlation
 import numpy as np
@@ -1388,7 +1450,7 @@ r_pearson = np.corrcoef(x_ord, y_ord)[0, 1]
 rho_poly = polychoric_correlation(x_ord, y_ord)
 print(f"Pearson r on codes: {r_pearson:.3f}")
 print(f"Polychoric rho     : {rho_poly:.3f}  (true 0.60)")
-\end{verbatim}
+\end{lstlisting}
 
 \subsubsection{7.7 When to use}\label{77-when-to-use}
 
@@ -1415,6 +1477,13 @@ and \(Y\) are dependent, but never \emph{what direction} (positive or
 negative association) or \emph{what shape}.
 
 \subsection{8. Mutual Information (MI)}\label{8-mutual-information-mi}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/mi_vs_pearson.png}
+\caption{Mutual information vs.\ Pearson on a linear relationship (both informative) and a quadratic relationship (Pearson collapses to $\approx 0$, MI remains high). MI characterises any form of statistical dependence, not just linear association.}
+\label{fig:mi-vs-pearson}
+\end{figure}
 
 \subsubsection{8.1 Definitions}\label{81-definitions}
 
@@ -1543,7 +1612,7 @@ variational MI bounds have either large bias, large variance, or both
 \subsubsection{8.5 The canonical "MI sees what Pearson misses"
 example}\label{85-the-canonical-mi-sees-what-pearson-misses-example}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 import numpy as np
 from sklearn.feature_selection import mutual_info_regression
 from scipy.stats import pearsonr
@@ -1557,7 +1626,7 @@ r, _ = pearsonr(x, y)
 mi = mutual_info_regression(x.reshape(-1, 1), y, n_neighbors=3, random_state=0)[0]
 print(f"Pearson r: {r:.4f}    MI (KSG): {mi:.4f}")
 # Pearson ~ 0; MI ~ 1.5+ nats.
-\end{verbatim}
+\end{lstlisting}
 
 \subsubsection{8.6 Pitfalls}\label{86-pitfalls}
 
@@ -1665,7 +1734,7 @@ performance}\label{94-properties-and-performance}
 
 \subsubsection{9.5 Code}\label{95-code}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 # pip install minepy
 from minepy import MINE
 import numpy as np
@@ -1678,7 +1747,7 @@ y = np.sin(20 * x) + 0.2 * rng.normal(size=n)
 mine = MINE(alpha=0.6, c=15)
 mine.compute_score(x, y)
 print(f"MIC = {mine.mic():.3f}")
-\end{verbatim}
+\end{lstlisting}
 
 \subsubsection{9.6 Pitfalls}\label{96-pitfalls}
 
@@ -1763,7 +1832,7 @@ Two important variants in this context:
 
 \subsubsection{10.4 Code}\label{104-code}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 from sklearn.metrics import (
     normalized_mutual_info_score,
     adjusted_mutual_info_score,
@@ -1776,7 +1845,7 @@ print(f"NMI (am):  {normalized_mutual_info_score(labels_true, labels_pred, avera
 print(f"NMI (gm):  {normalized_mutual_info_score(labels_true, labels_pred, average_method='geometric'):.3f}")
 print(f"AMI:       {adjusted_mutual_info_score(labels_true, labels_pred):.3f}")
 print(f"ARI:       {adjusted_rand_score(labels_true, labels_pred):.3f}")
-\end{verbatim}
+\end{lstlisting}
 
 \subsubsection{10.5 Pitfalls}\label{105-pitfalls}
 
@@ -1871,7 +1940,7 @@ Granger causality.
 
 \subsubsection{11.6 Code}\label{116-code}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 # pip install PyInform
 from pyinform.transferentropy import transfer_entropy
 import numpy as np
@@ -1886,7 +1955,7 @@ te_x_to_y = transfer_entropy(x, y, k=1)
 te_y_to_x = transfer_entropy(y, x, k=1)
 print(f"TE X->Y: {te_x_to_y:.4f}    TE Y->X: {te_y_to_x:.4f}")
 # X->Y should be much larger
-\end{verbatim}
+\end{lstlisting}
 
 \subsubsection{11.7 Pitfalls}\label{117-pitfalls}
 
@@ -1987,7 +2056,7 @@ the only CIs in the data reflect those entailed by the DAG.
 
 \subsubsection{12.6 Code}\label{126-code}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 # pip install npeet — Non-Parametric Entropy Estimation Toolkit (Ver Steeg)
 import numpy as np
 from npeet import entropy_estimators as ee
@@ -2003,7 +2072,7 @@ mi_xy = ee.mi(x, y, k=5)
 cmi_xy_given_z = ee.cmi(x, y, z, k=5)
 print(f"I(X; Y)       = {mi_xy:.4f} (expect > 0)")
 print(f"I(X; Y | Z)   = {cmi_xy_given_z:.4f} (expect ~ 0)")
-\end{verbatim}
+\end{lstlisting}
 
 \subsubsection{12.7 Pitfalls}\label{127-pitfalls}
 
@@ -2046,6 +2115,13 @@ MI.
 
 \subsection{13. Distance Correlation
 (dCor)}\label{13-distance-correlation-dcor}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/distance_correlation.png}
+\caption{Distance correlation (dCor) vs.\ Pearson on three relationships. dCor remains positive in the quadratic and sine settings where Pearson drops to $\approx 0$. dCor is zero \emph{iff} the variables are independent, making it a true test of dependence.}
+\label{fig:distance-correlation}
+\end{figure}
 
 \subsubsection{13.1 Definition (sample)}\label{131-definition-sample}
 
@@ -2160,7 +2236,7 @@ tests} are the practical standard. A gamma approximation is often used.
 
 \subsubsection{13.8 Code}\label{138-code}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 # pip install dcor
 import numpy as np
 import dcor
@@ -2176,7 +2252,7 @@ for name, y in [("linear", y_lin), ("quadratic", y_quad), ("independent", y_inde
     dc = dcor.distance_correlation(x, y)
     test = dcor.independence.distance_covariance_test(x, y, num_resamples=999, random_state=0)
     print(f"{name:12s}  dCor = {dc:.3f}  p = {test.pvalue:.3g}")
-\end{verbatim}
+\end{lstlisting}
 
 For the quadratic case, dCor will be substantially positive while
 Pearson\textquotesingle s \(r\) is \textasciitilde0.
@@ -2313,7 +2389,7 @@ or \textbf{random Fourier feature} approximations.
 
 \subsubsection{15.5 Code}\label{155-code}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 # pip install mvlearn
 from mvlearn.embed import KCCA
 import numpy as np
@@ -2329,7 +2405,7 @@ embeddings = kcca.fit_transform([X, Y])
 # Correlation between the two leading components
 import numpy as np
 print(f"KCCA component 1 corr: {np.corrcoef(embeddings[0][:, 0], embeddings[1][:, 0])[0, 1]:.3f}")
-\end{verbatim}
+\end{lstlisting}
 
 \subsubsection{15.6 Deep CCA}\label{156-deep-cca}
 
@@ -2428,7 +2504,7 @@ are the most common practical approach.
 
 \subsubsection{16.7 Code}\label{167-code}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 # pip install hyppo
 import numpy as np
 from hyppo.independence import Hsic, Dcorr
@@ -2442,7 +2518,7 @@ hsic_stat, hsic_p = Hsic().test(x, y, reps=999, workers=-1)
 dcor_stat, dcor_p = Dcorr().test(x, y, reps=999, workers=-1)
 print(f"HSIC = {hsic_stat:.4f}  p = {hsic_p:.3g}")
 print(f"dCor = {dcor_stat:.4f}  p = {dcor_p:.3g}")
-\end{verbatim}
+\end{lstlisting}
 
 \subsubsection{16.8 Kernel bandwidth
 selection}\label{168-kernel-bandwidth-selection}
@@ -2483,6 +2559,13 @@ learning; anywhere you would reach for dCor.
 \subsection{\texorpdfstring{17. Chatterjee\textquotesingle s Rank
 Correlation
 \(\xi\)}{17. Chatterjee\textquotesingle s Rank Correlation \textbackslash xi}}\label{17-chatterjees-rank-correlation-xi}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/chatterjee_xi.png}
+\caption{Chatterjee's $\xi$ on two cases. Left: a noisy linear trend; Pearson, Spearman, and $\xi$ all positive. Right: $y = \sin(4\pi x)$, where Pearson and Spearman both vanish but $\xi$ approaches its upper bound, signaling that $Y$ is a (deterministic) function of $X$.}
+\label{fig:chatterjee-xi}
+\end{figure}
 
 \subsubsection{17.1 Definition}\label{171-definition}
 
@@ -2579,7 +2662,7 @@ extensions}\label{176-variants-and-extensions}
 
 \subsubsection{17.7 Code}\label{177-code}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 # pip install xicor
 from xicor.xicor import Xi
 import numpy as np
@@ -2596,7 +2679,7 @@ xi_rev = Xi(y_func, x); print(f"  xi(Y,X) = {xi_rev.correlation:.3f}  (asymmetri
 
 print("\nIndependent:")
 xi = Xi(x, y_indep); print(f"  xi(X,Y) = {xi.correlation:.3f}  p = {xi.pval_asymptotic(ties=False):.3g}")
-\end{verbatim}
+\end{lstlisting}
 
 \subsubsection{17.8 Pitfalls}\label{178-pitfalls}
 
@@ -2644,6 +2727,13 @@ always in mind.
 
 \subsection{18. SHAP (SHapley Additive
 exPlanations)}\label{18-shap-shapley-additive-explanations}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/shap_summary.png}
+\caption{SHAP beeswarm summary for a Gradient Boosting regressor on the Friedman~1 dataset. Each dot is one observation's SHAP value for a given feature; horizontal position is the impact on the prediction; color encodes the (normalised) feature value. Features are ordered by mean $|{\rm SHAP}|$.}
+\label{fig:shap-summary}
+\end{figure}
 
 \subsubsection{18.1 Setup}\label{181-setup}
 
@@ -2751,7 +2841,7 @@ importance:
 
 \subsubsection{18.6 Code}\label{186-code}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 # pip install shap xgboost
 import shap
 import xgboost as xgb
@@ -2777,7 +2867,7 @@ print(f"  prediction    = {model.predict(X[:1])[0]:.3f}")
 global_importance = np.abs(shap_values).mean(axis=0)
 for i, imp in enumerate(global_importance):
     print(f"  feature {i}: {imp:.4f}")
-\end{verbatim}
+\end{lstlisting}
 
 \subsubsection{18.7 Pitfalls}\label{187-pitfalls}
 
@@ -2910,7 +3000,7 @@ space; bad extrapolations cost score; PFI is inflated. Hooker et al.
 
 \subsubsection{19.6 Code}\label{196-code}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.inspection import permutation_importance
@@ -2929,7 +3019,7 @@ model = RandomForestRegressor(n_estimators=200, random_state=0).fit(Xtr, ytr)
 result = permutation_importance(model, Xte, yte, n_repeats=30, random_state=0)
 for i in range(p):
     print(f"feature {i}: PFI = {result.importances_mean[i]:.4f} ± {result.importances_std[i]:.4f}")
-\end{verbatim}
+\end{lstlisting}
 
 \subsubsection{19.7 Pitfalls}\label{197-pitfalls}
 
@@ -3019,7 +3109,7 @@ designed for human readability.
 
 \subsubsection{20.4 Code}\label{204-code}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 # pip install lime scikit-learn
 from lime.lime_tabular import LimeTabularExplainer
 import numpy as np
@@ -3035,7 +3125,7 @@ explainer = LimeTabularExplainer(X, feature_names=data.feature_names,
 exp = explainer.explain_instance(X[0], model.predict_proba, num_features=5)
 for feat, weight in exp.as_list():
     print(f"  {feat}: {weight:+.4f}")
-\end{verbatim}
+\end{lstlisting}
 
 \subsubsection{20.5 Properties}\label{205-properties}
 
@@ -3095,6 +3185,13 @@ SHAP is computationally prohibitive for the model.
 Expectation
 (ICE)}\label{21-partial-dependence-pdp-and-individual-conditional-expectation-ice}
 
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\linewidth]{figures/pdp_ice.png}
+\caption{Partial Dependence (red) and Individual Conditional Expectation lines (light blue) for feature $x_4$ of a Gradient Boosting regressor on Friedman~1. The PDP is the average over all ICE curves; large ICE dispersion would signal feature interactions hidden by the PDP.}
+\label{fig:pdp-ice}
+\end{figure}
+
 \subsubsection{21.1 Partial dependence}\label{211-partial-dependence}
 
 Friedman (Annals of Statistics 2001). For a feature (or feature subset)
@@ -3140,7 +3237,7 @@ queries the model at off-manifold points.
 
 \subsubsection{21.4 Code}\label{214-code}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.inspection import PartialDependenceDisplay
@@ -3158,7 +3255,7 @@ fig, ax = plt.subplots(figsize=(6, 4))
 PartialDependenceDisplay.from_estimator(model, X, features=[0], kind="both", ax=ax)
 plt.tight_layout()
 # For ALE use the PyALE package: ale_plot(model, X, features=[0])
-\end{verbatim}
+\end{lstlisting}
 
 \subsubsection{21.5 Properties}\label{215-properties}
 
@@ -3270,7 +3367,7 @@ reasons}\label{223-why-mdi-is-biased--three-reasons}
 \subsubsection{22.4 Empirical demonstration of cardinality
 bias}\label{224-empirical-demonstration-of-cardinality-bias}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 
@@ -3289,7 +3386,7 @@ print("Pure noise features; ideal MDI would be ~equal (or zero):")
 for i, imp in enumerate(model.feature_importances_):
     print(f"  feature {i}: MDI = {imp:.4f}")
 # The continuous feature will dominate, despite all being equally uninformative.
-\end{verbatim}
+\end{lstlisting}
 
 \subsubsection{22.5 Unbiased
 alternatives}\label{225-unbiased-alternatives}
@@ -3361,7 +3458,7 @@ private test set.
 
 \subsubsection{23.4 Code}\label{234-code}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.datasets import make_regression
@@ -3377,7 +3474,7 @@ model = RandomForestRegressor(n_estimators=500, oob_score=True, random_state=0).
 result = permutation_importance(model, X, y, n_repeats=20, random_state=0)
 for i in range(X.shape[1]):
     print(f"feature {i}: MDA-equiv = {result.importances_mean[i]:+.4f}")
-\end{verbatim}
+\end{lstlisting}
 
 \subsubsection{23.5 When to use}\label{235-when-to-use}
 
@@ -3453,7 +3550,7 @@ Both are closer to PFI than to gain.
 
 \subsubsection{24.4 Code}\label{244-code}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 # pip install xgboost
 import xgboost as xgb
 import numpy as np
@@ -3470,7 +3567,7 @@ for itype in ["gain", "weight", "cover", "total_gain", "total_cover"]:
     print(f"\n{itype}:")
     for k, v in sorted(scores.items(), key=lambda kv: -kv[1]):
         print(f"  {k}: {v:.4f}")
-\end{verbatim}
+\end{lstlisting}
 
 \subsubsection{24.5 When to use}\label{245-when-to-use}
 
@@ -3593,7 +3690,7 @@ ignore the selection step). Two principled solutions:
 
 \subsubsection{25.7 Code}\label{257-code}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 import numpy as np
 from sklearn.linear_model import LassoCV, RidgeCV, ElasticNetCV
 from sklearn.preprocessing import StandardScaler
@@ -3616,7 +3713,7 @@ for i, b in enumerate(beta):
         print(f"  beta[{i}] = {b:+.3f}{marker}")
 print(f"\nNumber of selected features: {(np.abs(beta) > 1e-6).sum()}")
 print(f"Chosen lambda: {lasso[-1].alpha_:.4f}")
-\end{verbatim}
+\end{lstlisting}
 
 \subsubsection{25.8 Other uses}\label{258-other-uses}
 
@@ -4407,7 +4504,7 @@ Six features, varying relationships to a target. Designed so each
 measure has at least one "win" --- a relationship it detects that some
 other measure misses.
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 import numpy as np
 import pandas as pd
 
@@ -4436,11 +4533,11 @@ feature_names = ["lin", "mono", "quad", "sin", "corr_lin", "noise"]
 df = pd.DataFrame(X, columns=feature_names)
 df["y"] = y
 print(df.head())
-\end{verbatim}
+\end{lstlisting}
 
 \subsection{B.2 Classical correlations}\label{b2-classical-correlations}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 from scipy import stats
 
 print(f"{'feature':10s}  {'Pearson':>9s}  {'Spearman':>9s}  {'Kendall':>9s}")
@@ -4449,7 +4546,7 @@ for fname in feature_names:
     rho, _ = stats.spearmanr(df[fname], df["y"])
     tau, _ = stats.kendalltau(df[fname], df["y"])
     print(f"{fname:10s}  {r:>9.3f}  {rho:>9.3f}  {tau:>9.3f}")
-\end{verbatim}
+\end{lstlisting}
 
 Expected pattern: \texttt{lin} and \texttt{mono} show high values in all
 three; \texttt{quad} and \texttt{sin} show \textasciitilde0 (Pearson
@@ -4459,14 +4556,14 @@ blind to non-monotone); \texttt{corr\_lin} close to \texttt{lin};
 \subsection{B.3 Mutual information
 (KSG)}\label{b3-mutual-information-ksg}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 from sklearn.feature_selection import mutual_info_regression
 
 mi = mutual_info_regression(X, y, n_neighbors=5, random_state=0)
 print(f"\n{'feature':10s}  {'MI (nats)':>10s}")
 for fname, m in zip(feature_names, mi):
     print(f"{fname:10s}  {m:>10.3f}")
-\end{verbatim}
+\end{lstlisting}
 
 \texttt{quad} and \texttt{sin} will now have substantial MI despite zero
 correlation --- the canonical demonstration of why MI exists.
@@ -4474,7 +4571,7 @@ correlation --- the canonical demonstration of why MI exists.
 \subsection{B.4 Distance correlation and
 HSIC}\label{b4-distance-correlation-and-hsic}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 import dcor
 from hyppo.independence import Hsic
 
@@ -4486,7 +4583,7 @@ for fname in feature_names:
         reps=199, workers=-1, random_state=0,
     )
     print(f"{fname:10s}  {dc:>9.3f}  {hs_stat:>10.4f}  {hs_p:>8.3g}")
-\end{verbatim}
+\end{lstlisting}
 
 dCor and HSIC will detect \texttt{quad} and \texttt{sin} cleanly;
 \texttt{noise} should be small with a non-significant \(p\).
@@ -4494,7 +4591,7 @@ dCor and HSIC will detect \texttt{quad} and \texttt{sin} cleanly;
 \subsection{\texorpdfstring{B.5 Chatterjee\textquotesingle s
 \(\xi\)}{B.5 Chatterjee\textquotesingle s \textbackslash xi}}\label{b5-chatterjees-xi}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 from xicor.xicor import Xi
 
 print(f"\n{'feature':10s}  {'xi(X,Y)':>9s}  {'xi(Y,X)':>9s}  {'p':>8s}")
@@ -4502,7 +4599,7 @@ for fname in feature_names:
     xi_xy = Xi(df[fname].values, y)
     xi_yx = Xi(y, df[fname].values)
     print(f"{fname:10s}  {xi_xy.correlation:>9.3f}  {xi_yx.correlation:>9.3f}  {xi_xy.pval_asymptotic(ties=False):>8.3g}")
-\end{verbatim}
+\end{lstlisting}
 
 Note the asymmetry: \(\xi(X, Y)\) and \(\xi(Y, X)\) differ ---
 informative when one is closer to 1 than the other.
@@ -4510,7 +4607,7 @@ informative when one is closer to 1 than the other.
 \subsection{B.6 Permutation feature
 importance}\label{b6-permutation-feature-importance}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.inspection import permutation_importance
@@ -4523,7 +4620,7 @@ result = permutation_importance(model, Xte, yte, n_repeats=30, random_state=0, n
 print(f"\n{'feature':10s}  {'PFI mean':>9s}  {'PFI std':>9s}")
 for fname, m, s in zip(feature_names, result.importances_mean, result.importances_std):
     print(f"{fname:10s}  {m:>9.4f}  {s:>9.4f}")
-\end{verbatim}
+\end{lstlisting}
 
 \texttt{lin} and \texttt{corr\_lin} will share importance
 (correlated-feature instability); \texttt{noise} should be
@@ -4531,7 +4628,7 @@ for fname, m, s in zip(feature_names, result.importances_mean, result.importance
 
 \subsection{B.7 SHAP (TreeSHAP)}\label{b7-shap-treeshap}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 import shap
 
 explainer = shap.TreeExplainer(model, feature_perturbation="interventional", data=Xtr[:500])
@@ -4547,12 +4644,12 @@ i = 0
 print(f"\nFor row {i}:")
 print(f"  baseline + sum(SHAP) = {explainer.expected_value + shap_values[i].sum():.4f}")
 print(f"  model.predict()      = {model.predict(Xte[i:i+1])[0]:.4f}")
-\end{verbatim}
+\end{lstlisting}
 
 \subsection{\texorpdfstring{B.8 LASSO with cross-validated
 \(\lambda\)}{B.8 LASSO with cross-validated \textbackslash lambda}}\label{b8-lasso-with-cross-validated-lambda}
 
-\begin{verbatim}
+\begin{lstlisting}[language=Python]
 from sklearn.linear_model import LassoCV
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
@@ -4568,7 +4665,7 @@ print(f"\n{'feature':12s}  {'LASSO β':>10s}")
 for fname, b in zip(aug_names, beta):
     print(f"{fname:12s}  {b:>+10.3f}")
 print(f"Chosen lambda: {lasso[-1].alpha_:.4f}")
-\end{verbatim}
+\end{lstlisting}
 
 Without the engineered features, LASSO finds only \texttt{lin},
 \texttt{mono}, and \texttt{corr\_lin}; with the engineered
