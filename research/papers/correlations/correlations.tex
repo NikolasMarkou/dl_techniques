@@ -2261,10 +2261,16 @@ estimator}\label{134-bias-corrected-estimator}
 The V-statistic above has positive bias under independence. Székely \&
 Rizzo (2014) introduced the \textbf{U-statistic dCov}: \[
 U_n = \frac{1}{n(n-3)} \sum_{i \neq j} \tilde{A}_{ij} \tilde{B}_{ij},
-\] where \(\tilde{A}_{ij}\) uses a modified centring (with \(n-2\),
-\(n-1\), \(n\) in denominators instead of \(n\), \(n\), \(n\)). \(U_n\)
-has expectation zero under independence and is the recommended statistic
-for hypothesis testing.
+\] where the \emph{U-centred} distance matrix \(\tilde{A}_{ij}\) is
+\[
+\tilde{A}_{ij} = a_{ij} - \frac{1}{n-2}\sum_{k} a_{ik} - \frac{1}{n-2}\sum_{k} a_{kj} + \frac{1}{(n-1)(n-2)}\sum_{k,l} a_{kl}
+\]
+(denominators \(n-2,\ n-2,\ (n-1)(n-2)\)), and similarly for
+\(\tilde{B}_{ij}\). \(U_n\) has expectation zero under independence
+and is the recommended statistic for hypothesis testing. Note that
+because \(U_n\) is centred at zero, the bias-corrected sample dCov
+can be \emph{negative} for finite samples even though the population
+dCov is non-negative.
 
 \subsubsection{13.5 Properties}\label{135-properties}
 
@@ -2517,10 +2523,12 @@ kernels \(k_X, k_Y\) with feature maps \(\phi_X, \phi_Y\) into RKHSs
 
 With kernel matrices \(K, L\) (each \(n \times n\)) and centring matrix
 \(H = I - \tfrac{1}{n}\mathbf{1}\mathbf{1}^\top\): \[
-\widehat{\mathrm{HSIC}} = \frac{1}{(n - 1)^2}\, \mathrm{tr}(K H L H) = \frac{1}{(n - 1)^2}\, \mathrm{tr}(\tilde{K} \tilde{L}),
-\] where \(\tilde{K} = HKH\) is the centred kernel matrix. The bias is
-\(O(1/n)\); the unbiased \(V\)-statistic version (Song et al. 2012) is
-preferred for hypothesis testing.
+\widehat{\mathrm{HSIC}}_{\mathrm{V}} = \frac{1}{(n - 1)^2}\, \mathrm{tr}(K H L H) = \frac{1}{(n - 1)^2}\, \mathrm{tr}(\tilde{K} \tilde{L}),
+\] where \(\tilde{K} = HKH\) is the centred kernel matrix. This is the
+biased \(V\)-statistic estimator with bias \(O(1/n)\); the
+\emph{unbiased \(U\)-statistic} version (Song, Smola, Gretton et al.\
+2012) --- which can take negative values under independence ---
+is preferred for hypothesis testing.
 
 \subsubsection{16.3 Why it characterises
 independence}\label{163-why-it-characterises-independence}
@@ -2545,12 +2553,17 @@ measures.
 \subsubsection{16.5 Asymptotic null
 distribution}\label{165-asymptotic-null-distribution}
 
-Under \(H_0\) of independence, \[
-n \cdot \widehat{\mathrm{HSIC}} \to_d \sum_{j} \lambda_j (Z_j^2 - 1),
-\] a centred infinite sum of weighted \(\chi^2_1\). \textbf{Gamma
-approximation}:
-\(n \cdot \widehat{\mathrm{HSIC}} \sim \mathrm{Gamma}(\alpha, \beta)\)
-with shape and rate matched to the moments of the null. Fast and
+Under \(H_0\) of independence the U-statistic estimator satisfies
+\[
+n \cdot \widehat{\mathrm{HSIC}}_{\mathrm{U}} \to_d \sum_{j} \lambda_j (Z_j^2 - 1),
+\]
+a centred infinite sum of weighted \(\chi^2_1\); the biased V-statistic
+above has the un-centred limit \(\sum_j \lambda_j Z_j^2\) (i.e.\
+shifted by the trace of the integral operator). \textbf{Gamma
+approximation}: \(n \cdot \widehat{\mathrm{HSIC}}_{\mathrm{V}} \sim \mathrm{Gamma}(\alpha, \beta)\)
+with the moment match \(\alpha = (\mathbb{E}\widehat{\mathrm{HSIC}})^2 / \mathrm{Var}(\widehat{\mathrm{HSIC}})\),
+\(\beta = \mathrm{Var}(\widehat{\mathrm{HSIC}}) / \mathbb{E}\widehat{\mathrm{HSIC}}\)
+(Gretton, Fukumizu, Teo, Song, Schölkopf, Smola 2008). Fast and
 reasonably accurate for \(n \gtrsim 200\). \textbf{Permutation tests}
 are the most common practical approach.
 
@@ -2709,8 +2722,10 @@ suitable as a screening tool in causal discovery.
 \begin{itemize}
 \tightlist
 \item
-  Range: \([-1/2, 1]\) in finite samples (population: \([0, 1]\));
-  negative values are noise.
+  Range: population \(\xi \in [0, 1]\); the asymptotic finite-sample
+  range is \([-1/2 + o(1),\ 1]\) (Chatterjee 2020 / 2021). Negative
+  values reflect sampling noise around zero under independence and are
+  not interpreted as anti-correlation.
 \item
   Invariant under strictly increasing transformations of \(X\) or \(Y\)
   separately.
