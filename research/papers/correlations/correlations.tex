@@ -254,13 +254,14 @@ density / mass function (PDF/PMF) of \(X\). \\
 \(H(X)\) & Shannon entropy of \(X\) (differential entropy if \(X\) is
 continuous). \\
 \(I(X;Y)\) & Mutual information between \(X\) and \(Y\). \\
-\(D_{\mathrm{KL}}(p \,|\, q)\) & Kullback--Leibler divergence of \(q\)
-from \(p\). \\
+\(D_{\mathrm{KL}}(p \,\|\, q)\) & Kullback--Leibler divergence of \(p\)
+relative to \(q\) (\(= \mathbb{E}_p[\log p/q]\)). \\
 \(R_i, Q_i\) & Ranks of \(x_i\) and \(y_i\) (smallest = rank 1; ties
 handled by average rank unless noted). \\
 \(\mathbb{1}[\cdot]\) & Indicator function. \\
-\(|\cdot|\) & Euclidean norm on \(\mathbb{R}^d\) (or RKHS norm
-\(|\cdot|_\mathcal{H}\) where specified). \\
+\(\|\cdot\|\) & Euclidean norm on \(\mathbb{R}^d\) (or RKHS norm
+\(\|\cdot\|_\mathcal{H}\) where specified). Single bars \(|\cdot|\) denote
+absolute value or set cardinality. \\
 \(\mathcal{H}, k\) & A reproducing kernel Hilbert space and its kernel
 function. \\
 \(f, \hat{f}\) & A model (function) and its empirical fit. \\
@@ -339,8 +340,11 @@ interpreting MI estimates.
 \(H(X, Y) = H(X) + H(Y \mid X)\).
 
 \textbf{Kullback--Leibler divergence} (relative entropy) between two
-distributions \(p, q\) on the same support: \[
-D_{\mathrm{KL}}(p \,\|\, q) = \sum_x p(x) \log \frac{p(x)}{q(x)}.
+distributions \(p, q\) with \(p \ll q\) (i.e., \(p\) absolutely continuous w.r.t.
+\(q\); equivalently \(\mathrm{supp}(p) \subseteq \mathrm{supp}(q)\)): \[
+D_{\mathrm{KL}}(p \,\|\, q) = \sum_x p(x) \log \frac{p(x)}{q(x)} \quad \text{(discrete)},
+\qquad
+D_{\mathrm{KL}}(p \,\|\, q) = \int p(x) \log \frac{p(x)}{q(x)}\,dx \quad \text{(continuous)}.
 \] Asymmetric (\(D_{\mathrm{KL}}(p\|q) \neq D_{\mathrm{KL}}(q\|p)\)),
 non-negative, zero iff \(p = q\) almost everywhere. KL is \emph{not} a
 metric (no triangle inequality, no symmetry) but is the canonical
@@ -349,7 +353,10 @@ metric (no triangle inequality, no symmetry) but is the canonical
 \textbf{Mutual information} is the KL divergence between the joint and
 the product of marginals: \[
 I(X; Y) = D_{\mathrm{KL}}\big(p_{XY} \,\|\, p_X p_Y\big) = H(X) + H(Y) - H(X, Y).
-\]
+\] The decomposition \(I = H(X) + H(Y) - H(X,Y)\) is exact for discrete
+variables. For continuous variables each differential-entropy term can be
+infinite while \(I\) itself remains finite and well-defined --- the KL
+form is the more fundamental quantity.
 
 \subsection{P3. Characteristic
 functions}\label{p3-characteristic-functions}
@@ -418,9 +425,14 @@ The bias-corrected distance covariance estimator (Part III, §13) is a
 U-statistic; the original 2007 estimator is a V-statistic.
 
 Hoeffding\textquotesingle s central limit theorem: under mild
-conditions, \(\sqrt{n}(U_n - \theta) \to_d \mathcal{N}(0, k^2 \zeta_1)\)
+conditions and \emph{non-degeneracy} (\(\zeta_1 > 0\)),
+\(\sqrt{n}(U_n - \theta) \to_d \mathcal{N}(0, k^2 \zeta_1)\)
 where \(\zeta_1\) is the variance of the first conditional projection.
-This is the engine behind asymptotic distributions for dCor and HSIC.
+When the kernel is \emph{degenerate} (\(\zeta_1 = 0\)) the limit is instead
+a weighted sum of \(\chi^2_1\) variables at rate \(n\) rather than \(\sqrt{n}\).
+This degenerate regime is precisely what arises under the null \(H_0: X \perp Y\)
+for dCor and HSIC --- so the actual engine for those null distributions (Part III)
+is the \emph{degenerate} U-statistic limit, not the classical Hoeffding CLT above.
 
 \subsection{P6. Bootstrap, permutation,
 jackknife}\label{p6-bootstrap-permutation-jackknife}
@@ -437,10 +449,13 @@ Three resampling tools:
   (percentile, BCa, basic).
 \item
   \textbf{Permutation}: shuffle one variable\textquotesingle s values
-  across rows, recompute the statistic. Under \(H_0: X \perp Y\), all
-  permutations are equally likely; the empirical distribution of
-  permuted statistics is the exact null distribution. Used for
-  \textbf{hypothesis tests}.
+  across rows, recompute the statistic. Under \(H_0: X \perp Y\) the joint
+  sample is \emph{exchangeable}, so all permutations of the labels are
+  equally likely and the empirical distribution of permuted statistics
+  is the exact null distribution. Exchangeability --- not just marginal
+  correctness --- is the load-bearing assumption; it fails for dependent
+  observations (time series, repeated measures), where block permutation
+  or stationary bootstrap is required instead. Used for \textbf{hypothesis tests}.
 \item
   \textbf{Jackknife}: leave-one-out replicates; recompute the statistic
   on each \(n-1\) subset. Older and less powerful than the bootstrap;
@@ -548,8 +563,12 @@ glance. For a candidate measure \(D(X, Y)\):
   \textbf{Invariance.} Under what transformations is \(D\) unchanged?
   Pearson under affine transforms; Spearman/Kendall/\(\xi\) under
   strictly monotonic transforms of \(X\) and \(Y\) separately; MI under
-  any \emph{invertible} transform; dCor and HSIC under orthogonal
-  transforms (kernel-choice dependent).
+  any componentwise \emph{measurable bijection} of \(X\) and \(Y\)
+  (diffeomorphisms in the continuous case); dCor under separate
+  translation, orthogonal rotation, and global scaling per component
+  (Sz\'ekely--Rizzo 2007); HSIC's invariance is entirely \emph{kernel-driven}
+  --- translation-invariant kernels give translation invariance, rotation-invariant
+  kernels (e.g. Gaussian RBF) give orthogonal invariance, and so on.
 \item
   \textbf{Symmetry.} Is \(D(X, Y) = D(Y, X)\)? All classical measures
   are symmetric. Chatterjee\textquotesingle s \(\xi\) is \emph{not} ---
@@ -732,7 +751,9 @@ z = \frac{1}{2} \ln \left( \frac{1 + r}{1 - r} \right) = \operatorname{arctanh}(
 to construct CIs and to compare two correlations from independent
 samples. The variance-stabilising property follows from a Taylor
 expansion: \(\mathrm{Var}(r) \approx (1 - \rho^2)^2 / n\), and the
-derivative \(z'(r) = 1/(1 - r^2)\) exactly cancels the factor.
+derivative \(z'(r) = 1/(1 - r^2)\) exactly cancels the factor, giving
+\(\mathrm{Var}(z) \approx 1/n\); Fisher's \(1/(n-3)\) is the small-sample
+correction (Fisher 1921).
 
 \subsubsection{1.4 Properties}\label{14-properties}
 
