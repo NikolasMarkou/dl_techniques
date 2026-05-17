@@ -51,11 +51,37 @@ Training is split into two phases controlled by a single boolean flag
         TSTCausalLMLoss (rank-2 path / canary):
             ≡ MaskedCausalLMLoss (bit-equivalent up to floating-point order)
 
-The phase flip is a one-shot mutation of ``state.phase_active`` (and only that
-flag — invariant 6). Crucially: ``TSTEmbedding.call`` dispatches on **input
-rank**, not on the phase flag (decision D-002 below). The dataset transform
-controls which rank reaches the layer, making the dataset the single source of
-truth for "what phase are we in".
+The phase flip is implemented at the **dataset level** by using **two distinct
+dataset transforms** — one per phase — and TWO ``model.fit(...)`` calls
+(DECISION plan_2026-05-17_413eae7d/D-007; see D-005 fallback and D-006). Each
+transform has a single, statically-determined output rank, so there is no
+``tf.cond`` in the data graph and no shape-inference hazard. ``TSTEmbedding``
+still dispatches on **input rank**, not on a phase flag (decision D-002 below).
+This makes the dataset the source of truth for "what phase are we in" and
+makes the boundary explicit in the user's training script.
+
+``TSTState.phase_active`` exists for **observability only** — the callback
+flips it at the boundary so users can hook into the transition for logging or
+metric splits, but neither dataset transform reads it. ``state.global_step``
+is bumped per-batch for the same reason. Invariant 6 is therefore preserved
+trivially: no trainable weight or optimizer slot is touched by the flip.
+
+Canonical user pattern::
+
+    state, callbacks, phase1_fn, phase2_fn = apply_tst(config, total_steps=T)
+    # Phase 1 — bagged training
+    model.fit(
+        phase1_fn(raw_ds),
+        epochs=phase1_epochs,
+        callbacks=user_callbacks + callbacks,
+    )
+    # Phase 2 — vanilla NTP fine-tune; use initial_epoch= for clean resume
+    model.fit(
+        phase2_fn(raw_ds),
+        epochs=total_epochs,
+        initial_epoch=phase1_epochs,
+        callbacks=user_callbacks + callbacks,
+    )
 
 bag_size=1 canary
 -----------------
@@ -109,11 +135,15 @@ The five plan-level decisions are anchored at their point of impact with
    enforced loudly at transform construction time (``ValueError``).
    Anchored at ``tst_dataset_transform``.
 5. **D-005 (HEDGED) Single-dataset state-read vs two-dataset swap**. The
-   first attempt uses one ``tf.data.Dataset`` with ``tf.cond`` on
-   ``state.phase_active``. If trace fails to unify the rank-3 (Phase 1)
-   and rank-2 (Phase 2) branches (Falsification C), the user is notified
-   to switch to the two-dataset fallback explicitly — no silent fallback.
-   Anchored at ``tst_dataset_transform``.
+   first attempt was a single ``tf.data.Dataset`` with ``tf.cond`` on
+   ``state.phase_active``. Falsification C fired (soft form): no trace
+   error, but a one-batch shape lag because ``tf.data`` advances one batch
+   ahead of the captured ``tf.Variable`` read. See D-006 in
+   ``plans/plan_2026-05-17_413eae7d/decisions.md``.
+6. **D-006 / D-007 Two-transform fallback chosen**. ``apply_tst`` returns
+   ``(state, callbacks, phase1_transform, phase2_transform)``. Each
+   transform has a single static output rank. No ``tf.cond`` in the data
+   graph. ``state.phase_active`` becomes advisory.
 
 References
 ----------
@@ -191,13 +221,21 @@ class TSTConfig:
 
 
 class TSTState:
-    """Mutable training-loop state shared between callback and dataset.
+    """Training-loop observability state (advisory after D-007).
 
     Holds two ``tf.Variable``s (``phase_active``, ``global_step``) and a
     constant ``bag_size``. The variables are deliberately non-trainable and
     untracked by Keras — they are training-loop scaffolding, not model
     parameters (invariant 6: the phase flip must not touch any trainable
     weight or optimizer slot).
+
+    **Role after D-007 (Falsification C resolution).** ``phase_active`` is
+    now **advisory only**: neither ``tst_phase1_transform`` nor
+    ``tst_phase2_transform`` reads it. The two-transform fallback (D-006 /
+    D-007) makes the phase boundary explicit in the user's training script.
+    ``TSTPhaseCallback`` still flips ``phase_active`` at the boundary so
+    user code can hook into the transition for logging or metric splits.
+    ``global_step`` is bumped per-batch for the same reason.
 
     :param bag_size: The TST ``bag_size`` (``s``). Stored for downstream
         consumers (the dataset transform, callbacks) so they don't need to
@@ -531,6 +569,285 @@ class TSTCausalLMLoss(keras.losses.Loss):
 
 
 # ---------------------------------------------------------------------
-# Step 5..6 will populate this module further.
-#   TSTPhaseCallback, tst_dataset_transform, apply_tst
+# TSTPhaseCallback — advisory phase-boundary logger + global-step counter
 # ---------------------------------------------------------------------
+
+
+class TSTPhaseCallback(keras.callbacks.Callback):
+    """Logs the Phase 1 → Phase 2 boundary and bumps ``state.global_step``.
+
+    **Role after D-007.** The phase boundary is now controlled by the user via
+    two separate ``model.fit(...)`` calls (one per phase transform). This
+    callback no longer governs *which dataset shape is fed* — it only:
+
+    1. Bumps ``state.global_step`` once per train batch (observability).
+    2. Flips ``state.phase_active`` to ``False`` exactly once when
+       ``state.global_step >= flip_step``, where ``flip_step =
+       floor(total_steps * phase1_step_ratio)``. The flip is advisory:
+       neither dataset transform reads ``phase_active``. The flag exists
+       so user code (custom metrics, loggers, learning-rate schedules) can
+       hook into the transition. Documented in the module banner.
+
+    The callback is safe to attach to BOTH phase fits — the flip-once guard
+    (``_already_flipped``) is idempotent across multiple ``.fit(...)`` calls.
+
+    :param state: The ``TSTState`` to mutate.
+    :param total_steps: Total number of training steps across both phases.
+    :param phase1_step_ratio: Fraction of ``total_steps`` spent in Phase 1.
+    """
+
+    def __init__(
+        self,
+        state: "TSTState",
+        total_steps: int,
+        phase1_step_ratio: float,
+    ) -> None:
+        super().__init__()
+        if state is None:
+            raise ValueError("TSTPhaseCallback requires a TSTState (got None).")
+        if total_steps < 1:
+            raise ValueError(
+                f"total_steps must be >= 1, got {total_steps!r}."
+            )
+        if not (0.0 <= phase1_step_ratio <= 1.0):
+            raise ValueError(
+                "phase1_step_ratio must be in [0.0, 1.0], got "
+                f"{phase1_step_ratio!r}."
+            )
+        self._state = state
+        self._total_steps = int(total_steps)
+        self._phase1_step_ratio = float(phase1_step_ratio)
+        self._flip_step = int(self._total_steps * self._phase1_step_ratio)
+        self._already_flipped = False
+        logger.info(
+            "TSTPhaseCallback: total_steps=%d, phase1_step_ratio=%.3f → "
+            "flip_step=%d (advisory boundary; phase_active is observational).",
+            self._total_steps,
+            self._phase1_step_ratio,
+            self._flip_step,
+        )
+
+    @property
+    def flip_step(self) -> int:
+        """Public read of the computed flip step (for tests / introspection)."""
+        return self._flip_step
+
+    @property
+    def already_flipped(self) -> bool:
+        """Whether the one-shot flip has fired."""
+        return self._already_flipped
+
+    def on_train_batch_end(self, batch, logs=None):  # noqa: D401, ARG002
+        # Increment first so global_step counts batches actually completed.
+        self._state.global_step.assign_add(1)
+        if self._already_flipped:
+            return
+        if int(self._state.global_step.numpy()) >= self._flip_step:
+            if bool(self._state.phase_active.numpy()):
+                self._state.phase_active.assign(False)
+            self._already_flipped = True
+            logger.info(
+                "TSTPhaseCallback: phase boundary reached at global_step=%d "
+                "(flip_step=%d). phase_active flipped to False (advisory).",
+                int(self._state.global_step.numpy()),
+                self._flip_step,
+            )
+
+
+# ---------------------------------------------------------------------
+# Dataset transforms — TWO named callables, one per phase (D-007).
+#
+# DECISION plan_2026-05-17_413eae7d/D-007 (resolving D-005 fallback after
+# Falsification C soft trigger; see D-006 for the trace):
+#   Each transform has a single statically-determined output rank — no
+#   tf.cond in the data graph, no shape-inference hazard, no tf.Variable-
+#   read race between tf.data and the rest of the training loop. The
+#   phase boundary is explicit in the user's training script (two .fit()
+#   calls with `initial_epoch=` for resume).
+# ---------------------------------------------------------------------
+
+
+def _validate_phase1_divisibility(n: int, bag_size: int) -> None:
+    """User Rule R1 + D-004: raise loudly if ``N % bag_size != 0``."""
+    if bag_size < 1:
+        raise ValueError(f"bag_size must be >= 1, got {bag_size!r}.")
+    if n % bag_size != 0:
+        raise ValueError(
+            f"tst_phase1_transform: label length N={n} is not divisible by "
+            f"bag_size={bag_size}. TST requires N % bag_size == 0 so that "
+            f"each latent position covers exactly s tokens (see D-004). "
+            f"Adjust upstream chunk_length so that chunk_length - 1 is a "
+            f"multiple of bag_size."
+        )
+
+
+def tst_phase1_transform(
+    ds: tf.data.Dataset,
+    bag_size: int,
+    drop_remainder: bool = True,
+) -> tf.data.Dataset:
+    """Phase 1 transform: bagged inputs + bagged labels (rank-3 / rank-3).
+
+    Input contract: ``ds`` yields ``(input_ids, labels)`` with shape
+    ``(B, N)`` int (the standard output of ``preprocess_clm_packed_dataset``).
+
+    Output: ``(input_ids_lat, labels_lat)`` where both are
+    ``(B, N/bag_size, bag_size)`` int. Validates ``N % bag_size == 0`` at
+    build time (user rule R1; see D-004).
+
+    No ``tf.Variable`` reads inside the graph — the output rank is statically
+    determined by this function's arguments (D-007).
+
+    :param ds: Input dataset yielding ``(input_ids, labels)``.
+    :param bag_size: TST bag size ``s``.
+    :param drop_remainder: Reserved for future batch-padding behaviour; the
+        current implementation requires that ``ds`` be pre-batched and that
+        ``N % bag_size == 0``. Kept on the signature for API parity with
+        :func:`tst_phase2_transform`.
+    :raises ValueError: if ``bag_size < 1``, the dataset element-spec does
+        not look like ``(input_ids, labels)`` of rank 2, or the static
+        last-axis is known and not divisible by ``bag_size``.
+    """
+    del drop_remainder  # not used in the reshape path
+
+    if bag_size < 1:
+        raise ValueError(f"bag_size must be >= 1, got {bag_size!r}.")
+
+    # Build-time static shape check (user rule R1 + D-004).
+    spec = ds.element_spec
+    if not (isinstance(spec, tuple) and len(spec) == 2):
+        raise ValueError(
+            "tst_phase1_transform expects a dataset yielding "
+            "(input_ids, labels); got element_spec="
+            f"{spec!r}."
+        )
+    inp_spec, lab_spec = spec
+    static_n = None
+    for s in (inp_spec, lab_spec):
+        last = s.shape[-1] if s.shape.rank is not None else None
+        if last is not None:
+            if static_n is None:
+                static_n = int(last)
+            elif int(last) != static_n:
+                raise ValueError(
+                    "tst_phase1_transform: input_ids and labels must share "
+                    f"the same last-axis length; got {static_n} vs {int(last)}."
+                )
+    if static_n is not None:
+        _validate_phase1_divisibility(static_n, bag_size)
+
+    def _reshape(input_ids, labels):
+        # Dynamic shape at trace time — N and B are inferred. Output rank is
+        # statically 3 in both element-spec slots (D-007).
+        n = tf.shape(input_ids)[-1]
+        new_n_lat = n // bag_size
+        inputs_lat = tf.reshape(
+            input_ids, tf.concat([tf.shape(input_ids)[:-1], [new_n_lat, bag_size]], axis=0)
+        )
+        labels_lat = tf.reshape(
+            labels, tf.concat([tf.shape(labels)[:-1], [new_n_lat, bag_size]], axis=0)
+        )
+        return inputs_lat, labels_lat
+
+    return ds.map(_reshape, num_parallel_calls=tf.data.AUTOTUNE)
+
+
+def tst_phase2_transform(
+    ds: tf.data.Dataset,
+    drop_remainder: bool = True,
+) -> tf.data.Dataset:
+    """Phase 2 transform: pass-through NTP shapes (rank-2 / rank-2).
+
+    Input contract: identical to :func:`tst_phase1_transform`. Output is the
+    dataset unchanged — ``TSTEmbedding`` takes the plain-lookup path on
+    rank-2 inputs, and ``TSTCausalLMLoss`` takes the NTP path on rank-2
+    labels. The transform is provided as a separate callable (rather than
+    "use the raw dataset") so users can compose Phase 1 / Phase 2 the same
+    way in their training scripts (D-007 API symmetry).
+
+    :param ds: Input dataset yielding ``(input_ids, labels)``.
+    :param drop_remainder: Currently a no-op; kept for API parity with
+        :func:`tst_phase1_transform`.
+    """
+    del drop_remainder
+    spec = ds.element_spec
+    if not (isinstance(spec, tuple) and len(spec) == 2):
+        raise ValueError(
+            "tst_phase2_transform expects a dataset yielding "
+            "(input_ids, labels); got element_spec="
+            f"{spec!r}."
+        )
+    return ds
+
+
+# ---------------------------------------------------------------------
+# apply_tst — bundle state + callbacks + the two phase transforms
+# ---------------------------------------------------------------------
+
+
+def apply_tst(
+    config: "TSTConfig",
+    total_steps: int,
+) -> Tuple[
+    "TSTState",
+    List[keras.callbacks.Callback],
+    Callable[[tf.data.Dataset], tf.data.Dataset],
+    Callable[[tf.data.Dataset], tf.data.Dataset],
+]:
+    """Bundle TST plumbing for the canonical two-``model.fit(...)`` pattern.
+
+    DECISION plan_2026-05-17_413eae7d/D-007: returns FOUR values, not three.
+    The phase boundary is the user's responsibility — they run two
+    ``model.fit(...)`` calls, one with ``phase1_transform(raw_ds)`` and one
+    with ``phase2_transform(raw_ds)``. This explicit pattern is the resolution
+    of Falsification C (see D-006 in decisions.md for the trace).
+
+    :param config: A :class:`TSTConfig` with ``bag_size`` and
+        ``phase1_step_ratio``.
+    :param total_steps: Total training steps across both phases. Used to
+        size ``TSTPhaseCallback._flip_step`` for observability logging.
+
+    :returns: 4-tuple ``(state, callbacks, phase1_transform, phase2_transform)``:
+
+        * **state** (:class:`TSTState`): Holds ``phase_active`` and
+          ``global_step`` ``tf.Variable``s. Advisory only (D-007).
+        * **callbacks** (``list[keras.callbacks.Callback]``): Contains a
+          single :class:`TSTPhaseCallback`. Attach to BOTH ``.fit(...)``
+          calls; the flip-once guard makes it idempotent.
+        * **phase1_transform** (``Callable[[tf.data.Dataset], tf.data.Dataset]``):
+          Bagged transform — yields rank-3 inputs and rank-3 labels.
+        * **phase2_transform** (``Callable[[tf.data.Dataset], tf.data.Dataset]``):
+          Pass-through transform — yields rank-2 inputs and rank-2 labels.
+
+    Canonical usage::
+
+        state, callbacks, phase1_fn, phase2_fn = apply_tst(
+            TSTConfig(bag_size=6, phase1_step_ratio=0.25),
+            total_steps=100_000,
+        )
+        # Phase 1
+        model.fit(
+            phase1_fn(raw_ds),
+            epochs=phase1_epochs,
+            callbacks=user_cbs + callbacks,
+        )
+        # Phase 2 — initial_epoch= for clean resume / TensorBoard alignment
+        model.fit(
+            phase2_fn(raw_ds),
+            epochs=total_epochs,
+            initial_epoch=phase1_epochs,
+            callbacks=user_cbs + callbacks,
+        )
+    """
+    if total_steps < 1:
+        raise ValueError(f"total_steps must be >= 1, got {total_steps!r}.")
+
+    state = TSTState(bag_size=config.bag_size, phase_active_init=True)
+    callback = TSTPhaseCallback(
+        state=state,
+        total_steps=total_steps,
+        phase1_step_ratio=config.phase1_step_ratio,
+    )
+    phase1_fn = functools.partial(tst_phase1_transform, bag_size=config.bag_size)
+    phase2_fn = functools.partial(tst_phase2_transform)
+    return state, [callback], phase1_fn, phase2_fn

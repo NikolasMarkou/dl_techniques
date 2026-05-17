@@ -17,6 +17,10 @@ from dl_techniques.training.token_superposition import (
     TSTState,
     TSTEmbedding,
     TSTCausalLMLoss,
+    TSTPhaseCallback,
+    tst_phase1_transform,
+    tst_phase2_transform,
+    apply_tst,
 )
 from dl_techniques.losses.masked_causal_lm_loss import MaskedCausalLMLoss
 
@@ -362,3 +366,222 @@ class TestTSTCausalLMLoss:
     def test_invalid_alpha(self):
         with pytest.raises(ValueError, match="within_bag_alpha"):
             TSTCausalLMLoss(within_bag_alpha=0.0)
+
+
+# =====================================================================
+# Step 5 — TSTPhaseCallback + two phase transforms + apply_tst (D-007)
+#
+# Regression canaries: the phase1/phase2 transforms produce
+# statically-determined ranks INDEPENDENT of state.phase_active. The
+# previously-failing mid-iteration toggle test (Falsification C soft
+# trigger) is replaced by these invariants — D-006 / D-007.
+# =====================================================================
+
+
+def _make_synthetic_ntp_ds(
+    batch_size: int = 4,
+    seq_len: int = 24,
+    vocab: int = 64,
+    num_batches: int = 3,
+    seed: int = 0,
+) -> tf.data.Dataset:
+    """Synthetic ``(input_ids, labels)`` dataset matching
+    ``preprocess_clm_packed_dataset`` shape contract."""
+    rng = np.random.default_rng(seed)
+    inputs = rng.integers(0, vocab, size=(num_batches, batch_size, seq_len)).astype(np.int32)
+    labels = rng.integers(0, vocab, size=(num_batches, batch_size, seq_len)).astype(np.int32)
+    return tf.data.Dataset.from_tensor_slices((inputs, labels))
+
+
+class TestTSTPhase1Transform:
+    """Regression canary — phase1_transform ALWAYS yields rank-3 / rank-3."""
+
+    def test_yields_rank3_inputs_and_labels(self):
+        ds = _make_synthetic_ntp_ds(batch_size=4, seq_len=24)
+        bag = 6
+        out = tst_phase1_transform(ds, bag_size=bag)
+        for inp, lab in out.take(3):
+            assert inp.shape.rank == 3, f"Phase1 inputs must be rank-3, got {inp.shape}"
+            assert lab.shape.rank == 3, f"Phase1 labels must be rank-3, got {lab.shape}"
+            assert int(inp.shape[-1]) == bag
+            assert int(lab.shape[-1]) == bag
+            assert int(inp.shape[-2]) == 24 // bag
+            assert int(lab.shape[-2]) == 24 // bag
+
+    def test_rank_is_independent_of_state_phase_active(self):
+        """Canary for D-007: even if a TSTState exists and is toggled, the
+        phase1 transform's output rank is determined entirely by which
+        function the user called — NOT by any tf.Variable read."""
+        ds = _make_synthetic_ntp_ds(batch_size=4, seq_len=24)
+        state = TSTState(bag_size=6, phase_active_init=True)
+        out = tst_phase1_transform(ds, bag_size=6)
+        # Toggle the state mid-iteration — must not affect output rank.
+        it = iter(out)
+        first_inp, first_lab = next(it)
+        assert first_inp.shape.rank == 3
+        state.phase_active.assign(False)
+        second_inp, second_lab = next(it)
+        assert second_inp.shape.rank == 3
+        assert second_lab.shape.rank == 3
+        state.phase_active.assign(True)
+        third_inp, third_lab = next(it)
+        assert third_inp.shape.rank == 3
+
+    def test_validator_n_not_divisible_by_bag(self):
+        """User Rule R1: raise loudly when N % bag_size != 0."""
+        ds = _make_synthetic_ntp_ds(batch_size=4, seq_len=25)  # 25 % 6 != 0
+        with pytest.raises(ValueError, match="bag_size"):
+            tst_phase1_transform(ds, bag_size=6)
+
+    def test_validator_bag_size_zero(self):
+        ds = _make_synthetic_ntp_ds(batch_size=4, seq_len=24)
+        with pytest.raises(ValueError, match="bag_size"):
+            tst_phase1_transform(ds, bag_size=0)
+
+    def test_rejects_non_pair_dataset(self):
+        ds = tf.data.Dataset.from_tensor_slices(np.zeros((3, 4, 24), dtype=np.int32))
+        with pytest.raises(ValueError, match="input_ids, labels"):
+            tst_phase1_transform(ds, bag_size=6)
+
+
+class TestTSTPhase2Transform:
+    """Regression canary — phase2_transform ALWAYS yields rank-2 / rank-2."""
+
+    def test_yields_rank2_inputs_and_labels(self):
+        ds = _make_synthetic_ntp_ds(batch_size=4, seq_len=24)
+        out = tst_phase2_transform(ds)
+        for inp, lab in out.take(3):
+            assert inp.shape.rank == 2, f"Phase2 inputs must be rank-2, got {inp.shape}"
+            assert lab.shape.rank == 2, f"Phase2 labels must be rank-2, got {lab.shape}"
+
+    def test_rank_is_independent_of_state_phase_active(self):
+        """Canary for D-007 (mirror of TestTSTPhase1Transform's rank canary)."""
+        ds = _make_synthetic_ntp_ds(batch_size=4, seq_len=24)
+        state = TSTState(bag_size=6, phase_active_init=False)
+        out = tst_phase2_transform(ds)
+        it = iter(out)
+        a_inp, a_lab = next(it)
+        assert a_inp.shape.rank == 2 and a_lab.shape.rank == 2
+        state.phase_active.assign(True)
+        b_inp, b_lab = next(it)
+        assert b_inp.shape.rank == 2 and b_lab.shape.rank == 2
+
+    def test_rejects_non_pair_dataset(self):
+        ds = tf.data.Dataset.from_tensor_slices(np.zeros((3, 4, 24), dtype=np.int32))
+        with pytest.raises(ValueError, match="input_ids, labels"):
+            tst_phase2_transform(ds)
+
+
+class TestTSTPhaseCallback:
+    def test_flip_step_computation(self):
+        state = TSTState(bag_size=6)
+        cb = TSTPhaseCallback(state, total_steps=100, phase1_step_ratio=0.25)
+        assert cb.flip_step == 25
+        assert cb.already_flipped is False
+
+    def test_flips_at_boundary(self):
+        state = TSTState(bag_size=6, phase_active_init=True)
+        cb = TSTPhaseCallback(state, total_steps=10, phase1_step_ratio=0.5)
+        assert cb.flip_step == 5
+        # Simulate 5 batches: at end of batch 5, global_step becomes 5 → flips.
+        for i in range(5):
+            cb.on_train_batch_end(batch=i)
+        assert int(state.global_step.numpy()) == 5
+        assert bool(state.phase_active.numpy()) is False
+        assert cb.already_flipped is True
+
+    def test_does_not_flip_before_boundary(self):
+        state = TSTState(bag_size=6, phase_active_init=True)
+        cb = TSTPhaseCallback(state, total_steps=10, phase1_step_ratio=0.5)
+        for i in range(4):
+            cb.on_train_batch_end(batch=i)
+        assert bool(state.phase_active.numpy()) is True
+        assert cb.already_flipped is False
+
+    def test_flip_is_idempotent_across_many_batches(self):
+        """Safe to attach to BOTH phase fits (D-007)."""
+        state = TSTState(bag_size=6, phase_active_init=True)
+        cb = TSTPhaseCallback(state, total_steps=10, phase1_step_ratio=0.5)
+        for i in range(20):
+            cb.on_train_batch_end(batch=i)
+        assert cb.already_flipped is True
+        assert bool(state.phase_active.numpy()) is False
+        assert int(state.global_step.numpy()) == 20
+
+    def test_validates_inputs(self):
+        state = TSTState(bag_size=6)
+        with pytest.raises(ValueError, match="TSTState"):
+            TSTPhaseCallback(None, total_steps=10, phase1_step_ratio=0.5)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="total_steps"):
+            TSTPhaseCallback(state, total_steps=0, phase1_step_ratio=0.5)
+        with pytest.raises(ValueError, match="phase1_step_ratio"):
+            TSTPhaseCallback(state, total_steps=10, phase1_step_ratio=1.5)
+
+
+class TestApplyTST:
+    def test_returns_four_tuple(self):
+        """D-007: apply_tst returns (state, callbacks, phase1_fn, phase2_fn)."""
+        cfg = TSTConfig(bag_size=4, phase1_step_ratio=0.5)
+        result = apply_tst(cfg, total_steps=20)
+        assert len(result) == 4
+        state, callbacks, phase1_fn, phase2_fn = result
+        assert isinstance(state, TSTState)
+        assert isinstance(callbacks, list) and len(callbacks) == 1
+        assert isinstance(callbacks[0], TSTPhaseCallback)
+        assert callable(phase1_fn)
+        assert callable(phase2_fn)
+
+    def test_phase_fns_produce_correct_ranks(self):
+        cfg = TSTConfig(bag_size=4, phase1_step_ratio=0.5)
+        _state, _cbs, phase1_fn, phase2_fn = apply_tst(cfg, total_steps=20)
+        ds = _make_synthetic_ntp_ds(batch_size=2, seq_len=16)
+        p1 = phase1_fn(ds)
+        p2 = phase2_fn(ds)
+        for inp, lab in p1.take(1):
+            assert inp.shape.rank == 3 and lab.shape.rank == 3
+            assert int(inp.shape[-1]) == 4
+        for inp, lab in p2.take(1):
+            assert inp.shape.rank == 2 and lab.shape.rank == 2
+
+    def test_callback_flip_step_matches_config(self):
+        cfg = TSTConfig(bag_size=4, phase1_step_ratio=0.3)
+        _state, callbacks, _p1, _p2 = apply_tst(cfg, total_steps=100)
+        assert callbacks[0].flip_step == 30
+
+    def test_invalid_total_steps(self):
+        cfg = TSTConfig(bag_size=4)
+        with pytest.raises(ValueError, match="total_steps"):
+            apply_tst(cfg, total_steps=0)
+
+
+class TestTwoPhaseRankComposesWithLayerAndLoss:
+    """End-to-end rank wiring: phase1 ds → TSTEmbedding rank-3 → loss rank-3;
+    phase2 ds → TSTEmbedding rank-2 → loss rank-2. No mid-graph flip.
+    """
+
+    def test_phase1_rank_flows_through_layer_and_loss(self):
+        ds = _make_synthetic_ntp_ds(batch_size=2, seq_len=12, vocab=32, num_batches=1, seed=1)
+        p1 = tst_phase1_transform(ds, bag_size=4)
+        emb = TSTEmbedding(vocab_size=32, output_dim=8, bag_size=4)
+        loss_fn = TSTCausalLMLoss(bag_size=4, ignore_index=-1, from_logits=True)
+        for inp, lab in p1.take(1):
+            assert inp.shape.rank == 3
+            e = emb(inp)
+            assert e.shape.rank == 3  # (B, N_lat, d)
+            # Fake logits at the latent positions.
+            logits = keras.random.normal((int(e.shape[0]), int(e.shape[1]), 32))
+            value = float(loss_fn(lab, logits))
+            assert np.isfinite(value)
+
+    def test_phase2_rank_flows_through_layer_and_loss(self):
+        ds = _make_synthetic_ntp_ds(batch_size=2, seq_len=12, vocab=32, num_batches=1, seed=2)
+        p2 = tst_phase2_transform(ds)
+        emb = TSTEmbedding(vocab_size=32, output_dim=8, bag_size=4)
+        loss_fn = TSTCausalLMLoss(bag_size=4, ignore_index=-1, from_logits=True)
+        for inp, lab in p2.take(1):
+            assert inp.shape.rank == 2
+            e = emb(inp)
+            assert e.shape.rank == 3  # (B, N, d) — Embedding adds the d axis
+            logits = keras.random.normal((int(e.shape[0]), int(e.shape[1]), 32))
+            value = float(loss_fn(lab, logits))
+            assert np.isfinite(value)
