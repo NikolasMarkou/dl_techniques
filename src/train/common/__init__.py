@@ -56,3 +56,13 @@ from train.common.tfrecord import (
     read_tfrecord_dataset,
     make_image_text_tf_dataset_from_tfrecord,
 )
+from train.common.token_superposition import (
+    TSTConfig,
+    TSTState,
+    TSTEmbedding,
+    TSTCausalLMLoss,
+    TSTPhaseCallback,
+    tst_phase1_transform,
+    tst_phase2_transform,
+    apply_tst,
+)

@@ -93,7 +93,7 @@ If those fail, **do not proceed** — every other claim depends on them.
 
 What the tests in this module verify
 ------------------------------------
-Validated by ``tests/test_training/test_token_superposition.py``:
+Validated by ``tests/test_train/test_common_token_superposition.py``:
 
 1. TSTEmbedding ``bag_size=1`` ≡ plain Embedding (canary).
 2. TSTCausalLMLoss ``bag_size=1`` ≡ MaskedCausalLMLoss (canary).

@@ -1,4 +1,4 @@
-"""Tests for ``dl_techniques.training.token_superposition`` (TST).
+"""Tests for ``train.common.token_superposition`` (TST).
 
 Covers the seven correctness invariants from the plan plus a small
 integration smoke test. Test names mirror the plan's success-criterion IDs
@@ -12,7 +12,7 @@ import numpy as np
 import keras
 import tensorflow as tf
 
-from dl_techniques.training.token_superposition import (
+from train.common.token_superposition import (
     TSTConfig,
     TSTState,
     TSTEmbedding,
