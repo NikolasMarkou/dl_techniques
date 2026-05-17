@@ -497,7 +497,10 @@ class LighthouseAttention(keras.layers.Layer):
         joint = ops.maximum(s_qk_pyr, s_kq_pyr)  # (B, S_pyr, H)
         s_shared = ops.max(joint, axis=-1)       # (B, S_pyr)
 
-        # DECISION D-003: always-keep coarsest-level entries via +1e9 boost.
+        # DECISION plan_2026-05-17_8babb636/D-003
+        # Always-keep coarsest-level entries via +1e9 score boost — replaces
+        # the paper's chunked-bitonic stratified guarantee. Finer-level holes
+        # fall back to the (always-present) coarsest contribution only.
         coarsest_boost_np = np.zeros((self._S_pyr,), dtype=np.float32)
         coarsest_boost_np[self._coarsest_indices] = 1.0e9
         coarsest_boost = ops.convert_to_tensor(coarsest_boost_np)
