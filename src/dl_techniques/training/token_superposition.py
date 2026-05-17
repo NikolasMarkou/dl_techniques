@@ -359,6 +359,178 @@ class TSTEmbedding(keras.layers.Layer):
 
 
 # ---------------------------------------------------------------------
-# Step 4..6 will populate this module further.
-#   TSTCausalLMLoss, TSTPhaseCallback, tst_dataset_transform, apply_tst
+# TSTCausalLMLoss — rank-dispatched CE: vanilla NTP (rank-2) or sum-of-CE (rank-3)
+# ---------------------------------------------------------------------
+
+
+@keras.saving.register_keras_serializable()
+class TSTCausalLMLoss(keras.losses.Loss):
+    """Drop-in replacement for ``MaskedCausalLMLoss`` with rank-3 bagged path.
+
+    Dispatches on ``y_true`` rank:
+
+    - **rank-2** (``y_true`` shape ``(B, N)``): canary path. Bit-equivalent
+      (atol 1e-6) to ``MaskedCausalLMLoss`` — masked sparse CE with the same
+      ``ignore_index`` and ``label_smoothing`` semantics.
+    - **rank-3** (``y_true`` shape ``(B, N_lat, s)``): bagged path. Sum-of-CE
+      implementation per DECISION plan_2026-05-17_413eae7d/D-003: for each
+      ``j ∈ [0, bag_size)`` compute ``CE(logits, y_true[..., j])`` and
+      accumulate with weight ``w_j``. Mask: a latent position is "real" iff
+      at least one bag-target at that position is non-ignored.
+
+    ``y_pred`` may be a plain logits tensor of shape ``(B, N, V)`` /
+    ``(B, N_lat, V)`` OR a dict ``{"logits": ...}`` (the latter is unwrapped
+    defensively to match ``prepare_dict_keyed_compile``).
+
+    :param bag_size: TST bag size ``s``. Determines the loop length on the
+        rank-3 path. Has no effect on the rank-2 path.
+    :param within_bag_weighting: ``"uniform"`` (``w_j = 1/s``) or
+        ``"power_law"`` (``w_j ∝ (j+1)^(-alpha)``, normalised).
+    :param within_bag_alpha: Exponent for the power-law scheme.
+    :param label_smoothing: Optional smoothing ``α ∈ [0, 1)`` applied per
+        bag-term on the rank-3 path and per token on the rank-2 path.
+    :param ignore_index: Label value treated as masked. Default ``-1``.
+    :param from_logits: Whether ``y_pred`` is logits (True) or probabilities.
+    :param name: Loss instance name.
+    """
+
+    def __init__(
+        self,
+        bag_size: int = 6,
+        within_bag_weighting: Literal["uniform", "power_law"] = "uniform",
+        within_bag_alpha: float = 0.6,
+        label_smoothing: float = 0.0,
+        ignore_index: int = -1,
+        from_logits: bool = True,
+        name: str = "tst_causal_lm_loss",
+        **kwargs,
+    ):
+        super().__init__(name=name, **kwargs)
+        if bag_size < 1:
+            raise ValueError(f"bag_size must be >= 1, got {bag_size!r}.")
+        if within_bag_weighting not in ("uniform", "power_law"):
+            raise ValueError(
+                f"within_bag_weighting must be 'uniform' or 'power_law', "
+                f"got {within_bag_weighting!r}."
+            )
+        if within_bag_alpha <= 0.0:
+            raise ValueError(
+                f"within_bag_alpha must be > 0, got {within_bag_alpha!r}."
+            )
+        self.bag_size = int(bag_size)
+        self.within_bag_weighting = within_bag_weighting
+        self.within_bag_alpha = float(within_bag_alpha)
+        self.label_smoothing = float(label_smoothing)
+        self.ignore_index = int(ignore_index)
+        self.from_logits = bool(from_logits)
+
+        # Precompute within-bag weights (sum to 1).
+        if within_bag_weighting == "uniform":
+            w = np.ones((self.bag_size,), dtype=np.float64) / float(self.bag_size)
+        else:
+            w = np.arange(1, self.bag_size + 1, dtype=np.float64) ** (
+                -self.within_bag_alpha
+            )
+            w = w / w.sum()
+        self._w_j = w.astype(np.float32)
+
+        self._base_ce = keras.losses.SparseCategoricalCrossentropy(
+            from_logits=self.from_logits,
+            reduction="none",
+        )
+
+    # -- helpers ---------------------------------------------------------
+
+    def _per_token_smoothing(self, y_pred):
+        """Compute the smoothing-only per-token loss term (rank-2 path semantics)."""
+        if self.from_logits:
+            log_probs = y_pred - ops.logsumexp(y_pred, axis=-1, keepdims=True)
+            return -ops.mean(log_probs, axis=-1)
+        return -ops.mean(ops.log(y_pred + 1e-8), axis=-1)
+
+    def _rank2_call(self, y_true, y_pred):
+        """Vanilla masked CE — bit-equivalent to MaskedCausalLMLoss."""
+        mask = ops.cast(y_true != self.ignore_index, "float32")
+        safe_labels = ops.maximum(y_true, 0)
+        per_token = self._base_ce(safe_labels, y_pred)
+        if self.label_smoothing > 0.0:
+            smooth = self._per_token_smoothing(y_pred)
+            per_token = (
+                (1.0 - self.label_smoothing) * per_token
+                + self.label_smoothing * smooth
+            )
+        numerator = ops.sum(per_token * mask)
+        denominator = ops.sum(mask) + 1e-8
+        return numerator / denominator
+
+    def _rank3_call(self, y_true, y_pred):
+        """Sum-of-CE over a bag of ``s`` targets.
+
+        DECISION plan_2026-05-17_413eae7d/D-003: Python `for j in range(s)` loop.
+        Paper Appendix B identity; ``s`` is small (4..16) so the loop unrolls
+        at trace time with negligible perf cost.
+        """
+        # Mask per latent position: "real" if at least one bag-target is real.
+        real_per_j = ops.cast(y_true != self.ignore_index, "float32")
+        mask = ops.cast(ops.sum(real_per_j, axis=-1) > 0, "float32")  # (B, N_lat)
+
+        # Accumulate weighted per-position CE.
+        loss = ops.zeros_like(mask)
+        for j in range(self.bag_size):
+            targets_j = y_true[..., j]
+            mask_j = ops.cast(targets_j != self.ignore_index, "float32")
+            safe_j = ops.maximum(targets_j, 0)
+            ce_j = self._base_ce(safe_j, y_pred)  # (B, N_lat)
+            if self.label_smoothing > 0.0:
+                smooth = self._per_token_smoothing(y_pred)
+                ce_j = (
+                    (1.0 - self.label_smoothing) * ce_j
+                    + self.label_smoothing * smooth
+                )
+            loss = loss + float(self._w_j[j]) * ce_j * mask_j
+
+        numerator = ops.sum(loss)
+        denominator = ops.sum(mask) + 1e-8
+        return numerator / denominator
+
+    # -- main ------------------------------------------------------------
+
+    def call(self, y_true, y_pred):
+        # Defensive unwrap for dict-output models (SYSTEM: prepare_dict_keyed_compile).
+        if isinstance(y_pred, dict):
+            y_pred = y_pred["logits"]
+
+        rank = len(y_true.shape)
+        if rank == 2:
+            return self._rank2_call(y_true, y_pred)
+        if rank == 3:
+            # Validate static last-axis when known.
+            static_s = y_true.shape[-1]
+            if static_s is not None and static_s != self.bag_size:
+                raise ValueError(
+                    f"TSTCausalLMLoss rank-3 y_true last-axis ({static_s}) "
+                    f"must equal bag_size ({self.bag_size})."
+                )
+            return self._rank3_call(y_true, y_pred)
+        raise ValueError(
+            f"TSTCausalLMLoss expects rank-2 or rank-3 y_true, got rank={rank} "
+            f"(shape={y_true.shape})."
+        )
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "bag_size": self.bag_size,
+            "within_bag_weighting": self.within_bag_weighting,
+            "within_bag_alpha": self.within_bag_alpha,
+            "label_smoothing": self.label_smoothing,
+            "ignore_index": self.ignore_index,
+            "from_logits": self.from_logits,
+        })
+        return config
+
+
+# ---------------------------------------------------------------------
+# Step 5..6 will populate this module further.
+#   TSTPhaseCallback, tst_dataset_transform, apply_tst
 # ---------------------------------------------------------------------
