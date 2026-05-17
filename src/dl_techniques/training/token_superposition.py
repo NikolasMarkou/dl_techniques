@@ -232,7 +232,133 @@ class TSTState:
 
 
 # ---------------------------------------------------------------------
-# Step 3..6 will populate this module further.
-#   TSTEmbedding, TSTCausalLMLoss, TSTPhaseCallback,
-#   tst_dataset_transform, apply_tst
+# TSTEmbedding — rank-dispatched drop-in replacement for keras.layers.Embedding
+# ---------------------------------------------------------------------
+
+
+@keras.saving.register_keras_serializable()
+class TSTEmbedding(keras.layers.Layer):
+    """Drop-in replacement for ``keras.layers.Embedding`` with rank-3 bagged path.
+
+    The layer wraps an inner ``keras.layers.Embedding`` and dispatches on
+    **input rank** (DECISION plan_2026-05-17_413eae7d/D-002):
+
+    - ``rank == 2``: plain lookup. Returns ``inner(x)`` of shape ``(B, N, d)``.
+      Also the path taken when ``bag_size == 1`` regardless of rank (canary).
+    - ``rank == 3``: bagged lookup. Input ``(B, N/s, s)`` → ``inner(x)`` of
+      shape ``(B, N/s, s, d)`` → mean over the bag axis → ``(B, N/s, d)``.
+
+    The user wires this in at **construction time** (DECISION
+    plan_2026-05-17_413eae7d/D-001) — ``apply_tst`` does not introspect or
+    mutate the model. To preserve tied-LM heads, the inner embedding's
+    ``embeddings`` variable is exposed via ``self.embeddings``.
+
+    :param vocab_size: Vocabulary size ``V``.
+    :param output_dim: Embedding dimension ``d``.
+    :param bag_size: Bag size ``s``. When ``bag_size == 1`` the rank-3 path
+        is skipped even if a rank-3 input is given (canary semantics).
+    :param embeddings_initializer: Forwarded to the inner Embedding.
+    :param name: Layer name.
+    """
+
+    def __init__(
+        self,
+        vocab_size: int,
+        output_dim: int,
+        bag_size: int = 6,
+        embeddings_initializer: str = "uniform",
+        name: str = None,
+        **kwargs,
+    ):
+        super().__init__(name=name, **kwargs)
+        if vocab_size <= 0:
+            raise ValueError(f"vocab_size must be > 0, got {vocab_size!r}.")
+        if output_dim <= 0:
+            raise ValueError(f"output_dim must be > 0, got {output_dim!r}.")
+        if bag_size < 1:
+            raise ValueError(f"bag_size must be >= 1, got {bag_size!r}.")
+        self.vocab_size = int(vocab_size)
+        self.output_dim = int(output_dim)
+        self.bag_size = int(bag_size)
+        self.embeddings_initializer = embeddings_initializer
+        self._inner: keras.layers.Embedding = None  # built lazily
+
+    def build(self, input_shape):
+        # Build the inner Embedding manually (LESSONS L-pattern: explicit
+        # child.build avoids fragile lazy-build behavior under tf.function).
+        self._inner = keras.layers.Embedding(
+            input_dim=self.vocab_size,
+            output_dim=self.output_dim,
+            embeddings_initializer=self.embeddings_initializer,
+            name="inner_embedding",
+        )
+        # Embedding builds on any int shape — pass (None, None) for generic
+        # 2D and rely on call() to handle rank-3 inputs by lookup.
+        self._inner.build((None, None))
+        super().build(input_shape)
+
+    @property
+    def embeddings(self) -> keras.Variable:
+        """Tied-LM-head passthrough: returns the inner Embedding's variable.
+
+        Models like ``CliffordNetLM`` and ``NAM`` re-use this variable via
+        ``matmul(x, transpose(self.token_embedding.embeddings))`` to tie the
+        LM head to the input embedding. Preserving this attribute is the
+        load-bearing reason ``TSTEmbedding`` is a wrapper rather than a
+        subclass of ``Embedding``.
+        """
+        if self._inner is None:
+            # Force-build with a generic shape so ``layer.embeddings`` works
+            # before the first call (used by tied heads at model build time).
+            self.build((None, None))
+        return self._inner.embeddings
+
+    def call(self, inputs):
+        # DECISION plan_2026-05-17_413eae7d/D-002: dispatch on static input
+        # rank, not on a phase flag. Avoids LESSONS L23 (keras.ops.cond
+        # traces both branches under tf.function on TF backend).
+        rank = len(inputs.shape)
+        if rank == 2 or self.bag_size == 1:
+            # Plain lookup (Phase 2 / canary path).
+            return self._inner(inputs)
+        if rank == 3:
+            # Bagged lookup (Phase 1 path): inputs is (B, N_lat, s).
+            static_s = inputs.shape[-1]
+            if static_s is not None and static_s != self.bag_size:
+                raise ValueError(
+                    f"TSTEmbedding rank-3 input last-axis ({static_s}) must "
+                    f"equal bag_size ({self.bag_size})."
+                )
+            emb = self._inner(inputs)  # (B, N_lat, s, d)
+            return ops.mean(emb, axis=-2)  # (B, N_lat, d)
+        raise ValueError(
+            f"TSTEmbedding expects rank-2 or rank-3 input, got rank={rank} "
+            f"(shape={inputs.shape})."
+        )
+
+    def compute_output_shape(self, input_shape):
+        rank = len(input_shape)
+        if rank == 2 or self.bag_size == 1:
+            return tuple(input_shape) + (self.output_dim,)
+        if rank == 3:
+            # Drop the bag axis.
+            return tuple(input_shape[:-1]) + (self.output_dim,)
+        raise ValueError(
+            f"TSTEmbedding expects rank-2 or rank-3 input shape, got {input_shape!r}."
+        )
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "vocab_size": self.vocab_size,
+            "output_dim": self.output_dim,
+            "bag_size": self.bag_size,
+            "embeddings_initializer": self.embeddings_initializer,
+        })
+        return config
+
+
+# ---------------------------------------------------------------------
+# Step 4..6 will populate this module further.
+#   TSTCausalLMLoss, TSTPhaseCallback, tst_dataset_transform, apply_tst
 # ---------------------------------------------------------------------
