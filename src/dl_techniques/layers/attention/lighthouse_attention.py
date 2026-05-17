@@ -348,4 +348,134 @@ class LighthouseAttention(keras.layers.Layer):
     ) -> Tuple[Optional[int], ...]:
         return (input_shape[0], input_shape[1], self.dim)
 
+    # ------------------------------------------------------------------
+    # build()
+    # ------------------------------------------------------------------
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build all sub-layers and precompute static pyramid buffers.
+
+        Numpy buffers (level sizes, base-window-starts, scatter targets,
+        coarsest indices) are stored on ``self`` as plain numpy arrays —
+        they are pure functions of ``(N, num_levels, pooling_factor)`` and
+        are re-derived in a fresh ``build()`` after ``from_config()``
+        restoration. See LESSONS: frozen tensor state must NOT live in
+        plain ``ops.*`` tensors created in ``build()``.
+
+        :param input_shape: ``(B, N, dim)``.
+        :raises ValueError: 2D input or static ``N`` not divisible by
+            ``pooling_factor ** (num_levels - 1)``.
+        """
+        if len(input_shape) != 3:
+            raise ValueError(
+                f"Expected 3D input shape (batch, seq_len, dim), got {input_shape}"
+            )
+        n_static = input_shape[1]
+
+        if n_static is not None:
+            if n_static % self._p_pow_max != 0:
+                raise ValueError(
+                    f"seq_len N={n_static} must be divisible by "
+                    f"pooling_factor ** (num_levels - 1) = {self._p_pow_max}. "
+                    f"Either pad inputs or adjust (num_levels, pooling_factor)."
+                )
+            self._populate_pyramid_buffers(int(n_static))
+        # else: deferred to call-time once N is concrete.
+
+        # Build sub-layers explicitly (mandatory for .keras save/load).
+        self.wq.build(input_shape)
+        self.wk.build(input_shape)
+        self.wv.build(input_shape)
+        # q_norm / k_norm apply per-head (last axis = head_dim).
+        head_shape = (input_shape[0], input_shape[1], self.num_heads, self.head_dim)
+        self.q_norm.build(head_shape)
+        self.k_norm.build(head_shape)
+        # Output projection consumes (B, N, H*D).
+        self.wo.build((input_shape[0], input_shape[1], self.num_heads * self.head_dim))
+
+        super().build(input_shape)
+
+    def _populate_pyramid_buffers(self, n: int) -> None:
+        """Compute and store static numpy buffers for a given N.
+
+        Idempotent — safe to recompute if ``N`` changes between calls (though
+        Keras layers are typically built once with a fixed N).
+        """
+        L, p = self.num_levels, self.pooling_factor
+        sizes = _compute_level_sizes(n, L, p)
+        self._level_sizes = sizes
+        self._level_offsets = np.concatenate([[0], np.cumsum(sizes)]).astype(np.int64)
+        self._base_starts = _compute_base_starts(n, L, p)
+        targets, valid = _compute_scatter_targets(n, L, p)
+        self._scatter_targets = targets
+        self._scatter_valid_mask = valid
+        self._coarsest_indices = _compute_coarsest_indices(n, L, p)
+        self._S_pyr = int(sizes.sum())
+        self._N_static = n
+
+    # ------------------------------------------------------------------
+    # Pyramid pool + norm scorer (private helpers — Step 2)
+    # ------------------------------------------------------------------
+    def _pyramid_pool(self, x_heads: keras.KerasTensor) -> keras.KerasTensor:
+        """Mean-pool a (B, N, H, D) tensor into a (B, S_pyr, H, D) pyramid.
+
+        Level 0 = identity copy (N entries). Each successive level l reshapes
+        the base sequence into ``(B, N/p^l, p^l, H, D)`` and reduces over
+        the window axis with ``ops.mean``. All levels are concatenated along
+        the sequence axis in coarse-order from level 0 -> L-1.
+        """
+        B = ops.shape(x_heads)[0]
+        N = ops.shape(x_heads)[1]
+        H = self.num_heads
+        D = self.head_dim
+        parts: List[keras.KerasTensor] = []
+        for l in range(self.num_levels):
+            fanout = self.pooling_factor ** l
+            if l == 0:
+                parts.append(x_heads)
+            else:
+                # (B, N, H, D) -> (B, N/p^l, p^l, H, D) -> mean over axis=2
+                reshaped = ops.reshape(x_heads, (B, N // fanout, fanout, H, D))
+                pooled = ops.mean(reshaped, axis=2)
+                parts.append(pooled)
+        return ops.concatenate(parts, axis=1)  # (B, S_pyr, H, D)
+
+    def _norm_scorer(
+        self,
+        q_heads: keras.KerasTensor,
+        k_heads: keras.KerasTensor,
+    ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
+        """Per-head L2-norm scorer with max-pool over coarser levels.
+
+        Paper §3 stage (ii): norms are computed once on level-0 projections
+        and *max-pooled* up the pyramid — NOT recomputed on mean-pooled
+        projections. Returns ``(s_qk_pyr, s_kq_pyr)`` each shape
+        ``(B, S_pyr, H)``.
+
+        For Lighthouse, ``s_qk = ||Q||`` and ``s_kq = ||K||`` are the two
+        terms whose per-entry max gives the joint scorer.
+        """
+        # Level-0 norms over the head_dim axis.
+        s_q0 = ops.norm(q_heads, axis=-1)  # (B, N, H)
+        s_k0 = ops.norm(k_heads, axis=-1)  # (B, N, H)
+
+        B = ops.shape(q_heads)[0]
+        N = ops.shape(q_heads)[1]
+        H = self.num_heads
+
+        q_parts: List[keras.KerasTensor] = []
+        k_parts: List[keras.KerasTensor] = []
+        for l in range(self.num_levels):
+            fanout = self.pooling_factor ** l
+            if l == 0:
+                q_parts.append(s_q0)
+                k_parts.append(s_k0)
+            else:
+                q_resh = ops.reshape(s_q0, (B, N // fanout, fanout, H))
+                k_resh = ops.reshape(s_k0, (B, N // fanout, fanout, H))
+                q_parts.append(ops.max(q_resh, axis=2))
+                k_parts.append(ops.max(k_resh, axis=2))
+        s_qk_pyr = ops.concatenate(q_parts, axis=1)  # (B, S_pyr, H)
+        s_kq_pyr = ops.concatenate(k_parts, axis=1)  # (B, S_pyr, H)
+        return s_qk_pyr, s_kq_pyr
+
 # ---------------------------------------------------------------------
