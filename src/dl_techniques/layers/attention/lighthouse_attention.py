@@ -478,4 +478,162 @@ class LighthouseAttention(keras.layers.Layer):
         s_kq_pyr = ops.concatenate(k_parts, axis=1)  # (B, S_pyr, H)
         return s_qk_pyr, s_kq_pyr
 
+    # ------------------------------------------------------------------
+    # Step 3 — selection + sub-attention + scatter-back
+    # ------------------------------------------------------------------
+    # DECISION plan_2026-05-17_8babb636/D-002
+    # Top-K is shared across heads (single (B, K) index set, not per-head)
+    # — port simplification. Coarsest-level always retained via a +1e9 score
+    # boost (DECISION D-003). Indices are sorted by base position before
+    # SDPA so that `is_causal=True` on the gathered sub-sequence preserves
+    # the original temporal ordering.
+    def _select_topk(
+        self,
+        s_qk_pyr: keras.KerasTensor,
+        s_kq_pyr: keras.KerasTensor,
+    ) -> keras.KerasTensor:
+        """Pick top-K pyramid entries per batch element, causally sorted."""
+        # Per-entry max across QK / KQ, then reduce over heads -> (B, S_pyr).
+        joint = ops.maximum(s_qk_pyr, s_kq_pyr)  # (B, S_pyr, H)
+        s_shared = ops.max(joint, axis=-1)       # (B, S_pyr)
+
+        # DECISION D-003: always-keep coarsest-level entries via +1e9 boost.
+        coarsest_boost_np = np.zeros((self._S_pyr,), dtype=np.float32)
+        coarsest_boost_np[self._coarsest_indices] = 1.0e9
+        coarsest_boost = ops.convert_to_tensor(coarsest_boost_np)
+        coarsest_boost = ops.cast(coarsest_boost, s_shared.dtype)
+        s_shared = s_shared + coarsest_boost[None, :]  # broadcast over batch
+
+        effective_k = min(self.top_k, self._S_pyr)
+        _, top_idx = ops.top_k(s_shared, k=effective_k)  # (B, K) int32
+
+        # Sort selected indices by base position for causal SDPA ordering.
+        base_starts_t = ops.convert_to_tensor(self._base_starts.astype(np.int32))
+        base_pos_of_selected = ops.take(base_starts_t, top_idx, axis=0)  # (B, K)
+        order = ops.argsort(base_pos_of_selected, axis=-1)
+        top_idx = ops.take_along_axis(top_idx, order, axis=-1)
+        return top_idx
+
+    def _gather_and_attend(
+        self,
+        q_pyr: keras.KerasTensor,
+        k_pyr: keras.KerasTensor,
+        v_pyr: keras.KerasTensor,
+        top_idx: keras.KerasTensor,
+    ) -> keras.KerasTensor:
+        """Gather pyramid entries at ``top_idx`` and run causal SDPA."""
+        # top_idx: (B, K). Expand to (B, K, 1, 1) for gather along axis=1.
+        idx_exp = top_idx[:, :, None, None]
+        q_g = ops.take_along_axis(q_pyr, idx_exp, axis=1)  # (B, K, H, D)
+        k_g = ops.take_along_axis(k_pyr, idx_exp, axis=1)
+        v_g = ops.take_along_axis(v_pyr, idx_exp, axis=1)
+        # Causal SDPA on the (sorted) sub-sequence.
+        out_g = ops.dot_product_attention(q_g, k_g, v_g, is_causal=True)
+        return out_g  # (B, K, H, D)
+
+    # DECISION plan_2026-05-17_8babb636/D-004
+    # Scatter-back via flat segment_sum: encode (batch, target) as a single
+    # segment id (`b * (N+1) + target`) so a single 1-D segment_sum covers
+    # all batches deterministically. Target N is the sentinel for "drop"
+    # (invalid / out-of-range positions); the trailing slice removes it.
+    def _scatter_back(
+        self,
+        out_g: keras.KerasTensor,
+        top_idx: keras.KerasTensor,
+        batch_size: keras.KerasTensor,
+        n: int,
+    ) -> keras.KerasTensor:
+        """Scatter (B, K, H, D) sub-attention output back to (B, N, H, D)."""
+        K_eff = ops.shape(top_idx)[1]
+        H, D = self.num_heads, self.head_dim
+        max_fanout = self._max_fanout
+
+        # Gather scatter targets + validity for the selected entries.
+        targets_t = ops.convert_to_tensor(self._scatter_targets.astype(np.int32))
+        valid_t = ops.convert_to_tensor(self._scatter_valid_mask.astype("float32"))
+        targets_g = ops.take(targets_t, top_idx, axis=0)   # (B, K, F)
+        valid_g = ops.take(valid_t, top_idx, axis=0)       # (B, K, F)
+
+        # Tile output along fanout: (B, K, F, H, D)
+        out_tiled = ops.repeat(out_g[:, :, None, :, :], max_fanout, axis=2)
+        out_tiled = out_tiled * valid_g[..., None, None]
+
+        # Flatten (K, F) -> K*F per batch.
+        out_flat = ops.reshape(out_tiled, (batch_size, K_eff * max_fanout, H, D))
+        targets_flat = ops.reshape(targets_g, (batch_size, K_eff * max_fanout))
+
+        # Encode (batch, target) into a single int segment id using sentinel
+        # row index (N+1 slots per batch); N is the sentinel for "drop".
+        batch_offset = ops.arange(batch_size, dtype="int32") * (n + 1)
+        flat_segments = (
+            ops.cast(targets_flat, "int32") + batch_offset[:, None]
+        )  # (B, K*F)
+        flat_segments_1d = ops.reshape(flat_segments, (-1,))                # (B*K*F,)
+        flat_updates = ops.reshape(out_flat, (-1, H, D))                     # (B*K*F, H, D)
+
+        num_segments = batch_size * (n + 1)
+        scattered = ops.segment_sum(
+            flat_updates, flat_segments_1d, num_segments=num_segments
+        )  # (B*(N+1), H, D)
+        scattered = ops.reshape(scattered, (batch_size, n + 1, H, D))
+        # Drop the trailing sentinel row.
+        return scattered[:, :n, :, :]
+
+    # ------------------------------------------------------------------
+    # call()
+    # ------------------------------------------------------------------
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
+        """Forward pass.
+
+        :param inputs: ``(B, N, dim)``.
+        :param training: Unused at the moment — reserved for forward-compat
+            dropout support inside ``ops.dot_product_attention``.
+        :return: ``(B, N, dim)``.
+        """
+        del training  # not used in 3.8 SDPA
+        batch_size = ops.shape(inputs)[0]
+        # Resolve N: prefer static, fall back to dynamic.
+        if self._N_static is not None:
+            n = self._N_static
+        else:
+            # Dynamic-N path: deferred buffer population.
+            # Practically all training configs are static-N; raise for now
+            # since dynamic-N pyramid construction is build-time-only.
+            raise RuntimeError(
+                "LighthouseAttention requires a statically known sequence "
+                "length. Build the layer with a concrete N."
+            )
+
+        H, D = self.num_heads, self.head_dim
+
+        # Project Q, K, V -> (B, N, H, D)
+        q = ops.reshape(self.wq(inputs), (batch_size, n, H, D))
+        k = ops.reshape(self.wk(inputs), (batch_size, n, H, D))
+        v = ops.reshape(self.wv(inputs), (batch_size, n, H, D))
+
+        # QK-norm: apply pre-SDPA norm to Q, K heads.
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+
+        if self.full_attention:
+            # Stage-2 SDPA-resume path: plain causal MHA on the full seq.
+            out = ops.dot_product_attention(q, k, v, is_causal=True)
+            out = ops.reshape(out, (batch_size, n, H * D))
+            return self.wo(out)
+
+        # Lighthouse pyramid path.
+        q_pyr = self._pyramid_pool(q)  # (B, S_pyr, H, D)
+        k_pyr = self._pyramid_pool(k)
+        v_pyr = self._pyramid_pool(v)
+        s_qk_pyr, s_kq_pyr = self._norm_scorer(q, k)
+        top_idx = self._select_topk(s_qk_pyr, s_kq_pyr)               # (B, K)
+        out_g = self._gather_and_attend(q_pyr, k_pyr, v_pyr, top_idx)  # (B, K, H, D)
+        out_base = self._scatter_back(out_g, top_idx, batch_size, n)   # (B, N, H, D)
+        out_flat = ops.reshape(out_base, (batch_size, n, H * D))
+        return self.wo(out_flat)
+
 # ---------------------------------------------------------------------
