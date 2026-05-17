@@ -355,20 +355,40 @@ class TSTEmbedding(keras.layers.Layer):
         # DECISION plan_2026-05-17_413eae7d/D-002: dispatch on static input
         # rank, not on a phase flag. Avoids LESSONS L23 (keras.ops.cond
         # traces both branches under tf.function on TF backend).
-        rank = len(inputs.shape)
-        if rank == 2 or self.bag_size == 1:
-            # Plain lookup (Phase 2 / canary path).
+        #
+        # Robust rank detection — keras.ops.ndim returns -1 for tensors with
+        # unknown static rank (which happens when Keras strips dataset
+        # element_specs inside model.fit). When we get -1, we LOOK UP first
+        # (works on any rank) and dispatch on the result's rank.
+        if self.bag_size == 1:
+            return self._inner(inputs)
+        rank = ops.ndim(inputs)
+        if rank == 2:
             return self._inner(inputs)
         if rank == 3:
-            # Bagged lookup (Phase 1 path): inputs is (B, N_lat, s).
             static_s = inputs.shape[-1]
             if static_s is not None and static_s != self.bag_size:
                 raise ValueError(
                     f"TSTEmbedding rank-3 input last-axis ({static_s}) must "
                     f"equal bag_size ({self.bag_size})."
                 )
-            emb = self._inner(inputs)  # (B, N_lat, s, d)
-            return ops.mean(emb, axis=-2)  # (B, N_lat, d)
+            emb = self._inner(inputs)
+            return ops.mean(emb, axis=-2)
+        if rank == -1:
+            # Unknown rank — defer to runtime. Look up then dispatch on
+            # the result's static rank (inner Embedding may preserve rank).
+            emb = self._inner(inputs)
+            emb_rank = ops.ndim(emb)
+            if emb_rank == 4:
+                # rank-3 input (B, N_lat, s) → lookup → (B, N_lat, s, d).
+                return ops.mean(emb, axis=-2)
+            if emb_rank == 3:
+                # rank-2 input (B, N) → lookup → (B, N, d).
+                return emb
+            raise ValueError(
+                f"TSTEmbedding: unknown-rank input produced lookup of "
+                f"unexpected rank {emb_rank} (shape={emb.shape})."
+            )
         raise ValueError(
             f"TSTEmbedding expects rank-2 or rank-3 input, got rank={rank} "
             f"(shape={inputs.shape})."
@@ -538,11 +558,10 @@ class TSTCausalLMLoss(keras.losses.Loss):
         if isinstance(y_pred, dict):
             y_pred = y_pred["logits"]
 
-        rank = len(y_true.shape)
+        rank = ops.ndim(y_true)
         if rank == 2:
             return self._rank2_call(y_true, y_pred)
         if rank == 3:
-            # Validate static last-axis when known.
             static_s = y_true.shape[-1]
             if static_s is not None and static_s != self.bag_size:
                 raise ValueError(
@@ -550,6 +569,18 @@ class TSTCausalLMLoss(keras.losses.Loss):
                     f"must equal bag_size ({self.bag_size})."
                 )
             return self._rank3_call(y_true, y_pred)
+        if rank == -1:
+            # Unknown static rank — dispatch on y_pred's rank instead. y_pred
+            # is always (B, N or N_lat, V); y_true rank matches model output
+            # mode. If y_pred has the same time-axis length as y_true would
+            # have in rank-2, we use rank-2; otherwise rank-3 with bag_size.
+            # Practical heuristic: rank-2 ⇔ y_pred rank-3 with y_true having
+            # same first-2 dims; rank-3 y_true has an extra bag axis.
+            # Use the last static dim of y_true if available.
+            last = y_true.shape[-1]
+            if last is not None and int(last) == self.bag_size and self.bag_size > 1:
+                return self._rank3_call(y_true, y_pred)
+            return self._rank2_call(y_true, y_pred)
         raise ValueError(
             f"TSTCausalLMLoss expects rank-2 or rank-3 y_true, got rank={rank} "
             f"(shape={y_true.shape})."
@@ -736,17 +767,32 @@ def tst_phase1_transform(
     if static_n is not None:
         _validate_phase1_divisibility(static_n, bag_size)
 
+    # Compute static N_lat when known so the output element_spec carries a
+    # known rank (Keras model.fit downstream needs static rank on inputs).
+    n_lat_static = (static_n // bag_size) if static_n is not None else None
+
     def _reshape(input_ids, labels):
-        # Dynamic shape at trace time — N and B are inferred. Output rank is
-        # statically 3 in both element-spec slots (D-007).
-        n = tf.shape(input_ids)[-1]
-        new_n_lat = n // bag_size
+        # Dynamic-shape reshape; we then set_shape so the static rank is
+        # known to downstream consumers (Keras model.fit / TSTEmbedding.call).
+        dyn_n = tf.shape(input_ids)[-1]
+        new_n_lat = dyn_n // bag_size
+        leading_inp = tf.shape(input_ids)[:-1]
+        leading_lab = tf.shape(labels)[:-1]
         inputs_lat = tf.reshape(
-            input_ids, tf.concat([tf.shape(input_ids)[:-1], [new_n_lat, bag_size]], axis=0)
+            input_ids, tf.concat([leading_inp, [new_n_lat, bag_size]], axis=0)
         )
         labels_lat = tf.reshape(
-            labels, tf.concat([tf.shape(labels)[:-1], [new_n_lat, bag_size]], axis=0)
+            labels, tf.concat([leading_lab, [new_n_lat, bag_size]], axis=0)
         )
+        # Set static shapes so the output rank is known (D-007 canary).
+        inp_rank = input_ids.shape.rank
+        lab_rank = labels.shape.rank
+        if inp_rank is not None:
+            leading_static = input_ids.shape[:-1].as_list()
+            inputs_lat.set_shape(leading_static + [n_lat_static, bag_size])
+        if lab_rank is not None:
+            leading_static = labels.shape[:-1].as_list()
+            labels_lat.set_shape(leading_static + [n_lat_static, bag_size])
         return inputs_lat, labels_lat
 
     return ds.map(_reshape, num_parallel_calls=tf.data.AUTOTUNE)

@@ -585,3 +585,155 @@ class TestTwoPhaseRankComposesWithLayerAndLoss:
             logits = keras.random.normal((int(e.shape[0]), int(e.shape[1]), 32))
             value = float(loss_fn(lab, logits))
             assert np.isfinite(value)
+
+
+# =====================================================================
+# Step 6 — Integration smoke test (R2: tied LM head via TSTEmbedding.embeddings)
+#
+# Builds a TinyLM whose LM head is **tied** to TSTEmbedding.embeddings,
+# matching the CliffordNetLM / NAM / CLIP pattern. Runs both phases
+# (two model.fit calls per D-007) for 50 total steps.
+# =====================================================================
+
+
+def _build_tiny_lm_two_phase(vocab: int, d: int, bag_size: int, seq_len: int):
+    """Build TWO functional models sharing the same TSTEmbedding + trunk weights.
+
+    Functional API is used so the input's static rank is known — Keras 3
+    subclass-model + tf.data can produce ``shape=<unknown>`` for the input
+    to TSTEmbedding, which trips its rank dispatch. Functional API with an
+    explicit ``keras.Input`` avoids this.
+
+    Returns ``(phase1_model, phase2_model, token_embedding)`` — the two
+    models share the same layer instances (Keras semantics), so training
+    one updates the other's weights.
+    """
+    token_embedding = TSTEmbedding(
+        vocab_size=vocab, output_dim=d, bag_size=bag_size, name="token_embedding"
+    )
+    h1 = keras.layers.Dense(d, activation="gelu", name="h1")
+    h2 = keras.layers.Dense(d, activation="gelu", name="h2")
+
+    def _make(input_shape):
+        inp = keras.Input(shape=input_shape, dtype="int32")
+        x = token_embedding(inp)
+        x = h1(x)
+        x = h2(x)
+        emb_var = token_embedding.embeddings  # (V, d) — R2 tied head.
+        logits = keras.layers.Lambda(
+            lambda t: keras.ops.matmul(t, keras.ops.transpose(emb_var)),
+            name="tied_lm_head",
+        )(x)
+        return keras.Model(inputs=inp, outputs=logits)
+
+    phase1_model = _make((seq_len // bag_size, bag_size))  # rank-3
+    phase2_model = _make((seq_len,))  # rank-2
+    return phase1_model, phase2_model, token_embedding
+
+
+class TestIntegrationSmoke:
+    def test_50_steps_two_phase_fit_with_tied_head(self):
+        """End-to-end: 25 steps Phase 1 + 25 steps Phase 2, tied LM head."""
+        bag = 6
+        vocab = 64
+        seq_len = 24  # N % bag_size == 0
+        batch_size = 4
+        phase1_steps = 25
+        phase2_steps = 25
+        total_steps = phase1_steps + phase2_steps
+
+        # Synthetic dataset — repeat-forever, batched.
+        rng = np.random.default_rng(42)
+        raw_inputs = rng.integers(0, vocab, size=(200, seq_len)).astype(np.int32)
+        raw_labels = rng.integers(0, vocab, size=(200, seq_len)).astype(np.int32)
+        raw_ds = (
+            tf.data.Dataset.from_tensor_slices((raw_inputs, raw_labels))
+            .batch(batch_size, drop_remainder=True)
+            .repeat()
+        )
+
+        cfg = TSTConfig(bag_size=bag, phase1_step_ratio=0.5)
+        state, callbacks, phase1_fn, phase2_fn = apply_tst(cfg, total_steps=total_steps)
+
+        phase1_model, phase2_model, tst_emb = _build_tiny_lm_two_phase(
+            vocab=vocab, d=16, bag_size=bag, seq_len=seq_len
+        )
+        loss_fn_p1 = TSTCausalLMLoss(bag_size=bag, from_logits=True)
+        loss_fn_p2 = TSTCausalLMLoss(bag_size=bag, from_logits=True)
+        opt = keras.optimizers.Adam(1e-3)
+        phase1_model.compile(optimizer=opt, loss=loss_fn_p1)
+        phase2_model.compile(optimizer=opt, loss=loss_fn_p2)
+
+        # Phase 1 — bagged
+        h1 = phase1_model.fit(
+            phase1_fn(raw_ds),
+            epochs=1,
+            steps_per_epoch=phase1_steps,
+            callbacks=callbacks,
+            verbose=0,
+        )
+        # Phase 2 — vanilla NTP (rank-2). Same TSTEmbedding instance is
+        # shared with phase1_model (Keras functional layer reuse), so
+        # weights carry over without explicit copy.
+        h2 = phase2_model.fit(
+            phase2_fn(raw_ds),
+            epochs=2,
+            initial_epoch=1,
+            steps_per_epoch=phase2_steps,
+            callbacks=callbacks,
+            verbose=0,
+        )
+
+        # Assertions
+        # 1. All losses finite.
+        for h in (h1, h2):
+            for v in h.history.get("loss", []):
+                assert np.isfinite(v), f"non-finite loss: {v}"
+        # 2. Phase boundary observed by the advisory callback.
+        assert bool(state.phase_active.numpy()) is False
+        assert callbacks[0].already_flipped is True
+        # 3. Global step bumped by every batch in both fits.
+        assert int(state.global_step.numpy()) == phase1_steps + phase2_steps
+        # 4. R2 — tied LM head: the LM-head matmul reads exactly
+        #    TSTEmbedding.embeddings (load-bearing for CliffordNetLM / NAM).
+        assert tst_emb.embeddings is tst_emb._inner.embeddings
+
+    def test_bag_size_1_control_run(self):
+        """Canary control: bag_size=1, the model runs through Phase 2 only
+        (NTP throughout). Smoke check that the canary path is untouched."""
+        vocab = 64
+        seq_len = 16
+        batch_size = 4
+        steps = 20
+
+        rng = np.random.default_rng(7)
+        inputs = rng.integers(0, vocab, size=(80, seq_len)).astype(np.int32)
+        labels = rng.integers(0, vocab, size=(80, seq_len)).astype(np.int32)
+        raw_ds = (
+            tf.data.Dataset.from_tensor_slices((inputs, labels))
+            .batch(batch_size, drop_remainder=True)
+            .repeat()
+        )
+
+        cfg = TSTConfig(bag_size=1, phase1_step_ratio=0.0)  # straight to Phase 2
+        state, callbacks, _phase1_fn, phase2_fn = apply_tst(cfg, total_steps=steps)
+
+        # bag_size=1 → only the rank-2 model is exercised.
+        _p1_model, model, _emb = _build_tiny_lm_two_phase(
+            vocab=vocab, d=16, bag_size=1, seq_len=seq_len
+        )
+        loss_fn = TSTCausalLMLoss(bag_size=1, from_logits=True)
+        model.compile(optimizer=keras.optimizers.Adam(1e-3), loss=loss_fn)
+
+        h = model.fit(
+            phase2_fn(raw_ds),
+            epochs=1,
+            steps_per_epoch=steps,
+            callbacks=callbacks,
+            verbose=0,
+        )
+        for v in h.history.get("loss", []):
+            assert np.isfinite(v)
+        # phase1_step_ratio=0.0 → flip at step 0 → advisory flip should fire on first batch.
+        assert callbacks[0].already_flipped is True
+        assert int(state.global_step.numpy()) == steps
