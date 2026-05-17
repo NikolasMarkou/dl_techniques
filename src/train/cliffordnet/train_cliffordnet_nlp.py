@@ -266,7 +266,13 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         if logs is None:
             return
         row = {"step": self._global_step, **logs}
-        if self._csv_writer is None:
+        os.makedirs(os.path.dirname(self._csv_path), exist_ok=True)
+        if self._csv_writer is None or not os.path.exists(self._csv_path):
+            if self._csv_file is not None:
+                try:
+                    self._csv_file.close()
+                except Exception:
+                    pass
             self._csv_file = open(self._csv_path, "a", newline="")
             self._csv_writer = csv.DictWriter(
                 self._csv_file, fieldnames=list(row.keys()),
@@ -277,6 +283,10 @@ class StepCheckpointCallback(keras.callbacks.Callback):
         self._csv_file.flush()
 
     def _save_checkpoint(self):
+        # DECISION plan_2026-05-17_7ed2d007/D-001: re-create dir on every save.
+        # A concurrent `git stash -u` (or any other external rm of the parent)
+        # would otherwise crash the next save with FileNotFoundError mid-run.
+        os.makedirs(self._ckpt_dir, exist_ok=True)
         path = os.path.join(
             self._ckpt_dir, f"step_{self._global_step:07d}.keras"
         )
@@ -299,6 +309,7 @@ class StepCheckpointCallback(keras.callbacks.Callback):
             logger.info(f"Removed old checkpoint: {old}")
 
     def _run_analysis(self):
+        os.makedirs(self._analysis_dir, exist_ok=True)
         step_dir = os.path.join(
             self._analysis_dir, f"step_{self._global_step:07d}"
         )
@@ -446,6 +457,7 @@ class GenerationProbeCallback(keras.callbacks.Callback):
         self._post_generate_hook(probe_results)
 
         if self._log_path:
+            os.makedirs(os.path.dirname(self._log_path), exist_ok=True)
             with open(self._log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(probe_results, ensure_ascii=False) + "\n")
 
