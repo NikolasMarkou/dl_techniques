@@ -135,8 +135,104 @@ from keras import ops
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
-# Step 2..6 will populate this module.
-# Names planned for this module (in order of definition):
-#   TSTConfig, TSTState, TSTEmbedding, TSTCausalLMLoss,
-#   TSTPhaseCallback, tst_dataset_transform, apply_tst
+# TSTConfig — frozen hyperparameter container
+# ---------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True)
+class TSTConfig:
+    """Hyperparameters for Token Superposition Training.
+
+    :param bag_size: Number of tokens superposed per latent position. ``s`` in
+        the paper. ``bag_size=1`` is the canary configuration (equivalent to
+        vanilla next-token prediction). Must be ``>= 1``.
+    :param phase1_step_ratio: Fraction of total training steps spent in Phase
+        1 (bagged). The phase callback flips ``state.phase_active`` to False
+        at step ``floor(total_steps * phase1_step_ratio)``. Must lie in
+        ``[0.0, 1.0]``.
+    :param within_bag_weighting: How to weight within-bag CE terms in the
+        sum-of-CE form. ``"uniform"`` gives each ``j ∈ [0, bag_size)`` weight
+        ``1/bag_size``. ``"power_law"`` uses
+        ``w_j ∝ (j+1)^(-within_bag_alpha)`` then normalises to sum 1.
+    :param within_bag_alpha: Exponent for the power-law weighting scheme. Must
+        be ``> 0``. Ignored when ``within_bag_weighting == "uniform"``.
+    """
+
+    bag_size: int = 6
+    phase1_step_ratio: float = 0.25
+    within_bag_weighting: Literal["uniform", "power_law"] = "uniform"
+    within_bag_alpha: float = 0.6
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.bag_size, int) or self.bag_size < 1:
+            raise ValueError(
+                f"TSTConfig.bag_size must be a positive int, got {self.bag_size!r}."
+            )
+        if not (0.0 <= self.phase1_step_ratio <= 1.0):
+            raise ValueError(
+                "TSTConfig.phase1_step_ratio must be in [0.0, 1.0], got "
+                f"{self.phase1_step_ratio!r}."
+            )
+        if self.within_bag_weighting not in ("uniform", "power_law"):
+            raise ValueError(
+                "TSTConfig.within_bag_weighting must be 'uniform' or 'power_law', "
+                f"got {self.within_bag_weighting!r}."
+            )
+        if self.within_bag_alpha <= 0.0:
+            raise ValueError(
+                "TSTConfig.within_bag_alpha must be > 0, got "
+                f"{self.within_bag_alpha!r}."
+            )
+
+
+# ---------------------------------------------------------------------
+# TSTState — single source of truth for the phase flag + global step
+# ---------------------------------------------------------------------
+
+
+class TSTState:
+    """Mutable training-loop state shared between callback and dataset.
+
+    Holds two ``tf.Variable``s (``phase_active``, ``global_step``) and a
+    constant ``bag_size``. The variables are deliberately non-trainable and
+    untracked by Keras — they are training-loop scaffolding, not model
+    parameters (invariant 6: the phase flip must not touch any trainable
+    weight or optimizer slot).
+
+    :param bag_size: The TST ``bag_size`` (``s``). Stored for downstream
+        consumers (the dataset transform, callbacks) so they don't need to
+        carry it separately.
+    :param phase_active_init: Initial value of ``phase_active``. Default
+        ``True`` so a fresh state starts in Phase 1.
+    """
+
+    def __init__(self, bag_size: int, phase_active_init: bool = True) -> None:
+        if not isinstance(bag_size, int) or bag_size < 1:
+            raise ValueError(
+                f"TSTState.bag_size must be a positive int, got {bag_size!r}."
+            )
+        self.bag_size = bag_size
+        self.phase_active = tf.Variable(
+            bool(phase_active_init),
+            dtype=tf.bool,
+            trainable=False,
+            name="tst_phase_active",
+        )
+        self.global_step = tf.Variable(
+            0,
+            dtype=tf.int64,
+            trainable=False,
+            name="tst_global_step",
+        )
+
+    def reset(self, phase_active: bool = True) -> None:
+        """Reset state to a freshly-initialised configuration. Test helper."""
+        self.phase_active.assign(bool(phase_active))
+        self.global_step.assign(0)
+
+
+# ---------------------------------------------------------------------
+# Step 3..6 will populate this module further.
+#   TSTEmbedding, TSTCausalLMLoss, TSTPhaseCallback,
+#   tst_dataset_transform, apply_tst
 # ---------------------------------------------------------------------
