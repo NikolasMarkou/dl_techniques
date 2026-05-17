@@ -1,6 +1,28 @@
 """dl_techniques.training — model-agnostic training utilities.
 
-Public API is re-exported at Step 7. Until then, prefer the fully-qualified
-import path ``dl_techniques.training.token_superposition`` to avoid coupling
-to a still-evolving package surface.
+Public API surface for Token Superposition Training (TST). See
+``dl_techniques.training.token_superposition`` module docstring for the
+canonical user pattern (two-``model.fit(...)`` invocation per D-007).
 """
+
+from dl_techniques.training.token_superposition import (
+    TSTConfig,
+    TSTState,
+    TSTEmbedding,
+    TSTCausalLMLoss,
+    TSTPhaseCallback,
+    tst_phase1_transform,
+    tst_phase2_transform,
+    apply_tst,
+)
+
+__all__ = [
+    "TSTConfig",
+    "TSTState",
+    "TSTEmbedding",
+    "TSTCausalLMLoss",
+    "TSTPhaseCallback",
+    "tst_phase1_transform",
+    "tst_phase2_transform",
+    "apply_tst",
+]

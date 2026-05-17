@@ -308,6 +308,9 @@ class TSTEmbedding(keras.layers.Layer):
         name: str = None,
         **kwargs,
     ):
+        # DECISION plan_2026-05-17_413eae7d/D-001: construction-time wiring.
+        # User instantiates TSTEmbedding in the model factory; apply_tst()
+        # does NOT mutate a built model.
         super().__init__(name=name, **kwargs)
         if vocab_size <= 0:
             raise ValueError(f"vocab_size must be > 0, got {vocab_size!r}.")
@@ -522,12 +525,9 @@ class TSTCausalLMLoss(keras.losses.Loss):
         return numerator / denominator
 
     def _rank3_call(self, y_true, y_pred):
-        """Sum-of-CE over a bag of ``s`` targets.
-
-        DECISION plan_2026-05-17_413eae7d/D-003: Python `for j in range(s)` loop.
-        Paper Appendix B identity; ``s`` is small (4..16) so the loop unrolls
-        at trace time with negligible perf cost.
-        """
+        # DECISION plan_2026-05-17_413eae7d/D-003: sum-of-CE via Python `for
+        # j in range(s)` loop. Paper Appendix B identity; s ∈ [4,16] so the
+        # loop unrolls at trace time with negligible perf cost.
         # Mask per latent position: "real" if at least one bag-target is real.
         real_per_j = ops.cast(y_true != self.ignore_index, "float32")
         mask = ops.cast(ops.sum(real_per_j, axis=-1) > 0, "float32")  # (B, N_lat)
@@ -699,7 +699,9 @@ class TSTPhaseCallback(keras.callbacks.Callback):
 
 
 def _validate_phase1_divisibility(n: int, bag_size: int) -> None:
-    """User Rule R1 + D-004: raise loudly if ``N % bag_size != 0``."""
+    # DECISION plan_2026-05-17_413eae7d/D-004 + R1: reuse upstream
+    # (input_ids, labels) pair; reshape labels to (B, N/s, s) for Phase 1.
+    # Constraint N % s == 0 raised loudly here.
     if bag_size < 1:
         raise ValueError(f"bag_size must be >= 1, got {bag_size!r}.")
     if n % bag_size != 0:
@@ -895,5 +897,4 @@ def apply_tst(
         phase1_step_ratio=config.phase1_step_ratio,
     )
     phase1_fn = functools.partial(tst_phase1_transform, bag_size=config.bag_size)
-    phase2_fn = functools.partial(tst_phase2_transform)
-    return state, [callback], phase1_fn, phase2_fn
+    return state, [callback], phase1_fn, tst_phase2_transform
