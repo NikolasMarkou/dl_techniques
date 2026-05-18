@@ -44,6 +44,11 @@ HEADLINE_METRIC = {
     "e3": ("best_val_acc", "higher_is_better"),
     "e4": ("final_val_loss", "lower_is_better"),
     "e5": ("final_val_loss", "lower_is_better"),
+    # E6 (causal LM × Wikipedia 10k) — added at step 9 of
+    # plan_2026-05-18_6776f8ba. Headline is val perplexity (the standard
+    # LM evaluation metric); a lower-is-better signal that maps cleanly into
+    # the existing PASS/FAIL paired-permutation framework.
+    "e6": ("final_val_perplexity", "lower_is_better"),
 }
 
 BASELINE_NORM = "rms_norm"

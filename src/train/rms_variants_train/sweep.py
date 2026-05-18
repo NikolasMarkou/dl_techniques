@@ -57,6 +57,10 @@ EXPERIMENT_REGISTRY = {
     "e3": ("train.rms_variants_train.experiments.e3_tinytransformer_imdb", 2400),
     "e4": ("train.rms_variants_train.experiments.e4_deep_residual_reg", 2400),
     "e5": ("train.rms_variants_train.experiments.e5_norm_layer_microbench", 600),
+    # E6 added at step 9 of plan_2026-05-18_6776f8ba. 14400s (4h) per-cell
+    # timeout reflects the full Phase 3 v3 budget for the 4-epoch Wikipedia
+    # 10k training; smoke runs MUST override via --cell-timeout-s.
+    "e6": ("train.rms_variants_train.experiments.e6_clm_wiki", 14400),
 }
 
 # Modes each experiment supports. ViT/ResNet (E1/E2) do not plumb norm
@@ -68,6 +72,11 @@ EXPERIMENT_MODES = {
     "e3": ("oob", "param_matched"),
     "e4": ("oob", "param_matched"),
     "e5": ("oob", "param_matched"),
+    # E6 plumbs norm kwargs through TransformerLayer (Pattern-3); supports
+    # both modes (OOB + param_matched). E6 has no scale-toggle confound for
+    # RMSNorm variants but param_matched is still meaningful for the
+    # use_scale=False ablation on rms_norm / zero_centered_rms_norm.
+    "e6": ("oob", "param_matched"),
 }
 
 # Per-experiment regime support. Mirrors each trainer's `_REGIME_MAP` keys.
@@ -81,6 +90,9 @@ EXPERIMENT_REGIMES: dict = {
     "e3": ("default", "mp_fp16"),
     "e4": ("default", "depth_12", "depth_48"),
     "e5": ("default", "bs_32", "bs_256", "lr_low", "lr_high"),
+    # E6 supports default/mp_fp16/lr_extreme/wd_zero — mirrors E3's set,
+    # minus bs_4 (tiny CLM batches <8 destabilise gradient estimates).
+    "e6": ("default", "mp_fp16", "lr_extreme", "wd_zero"),
 }
 
 

@@ -216,4 +216,16 @@ class ExperimentConfig:
         )
 
 
-__all__ = ["ExperimentConfig", "NORM_VARIANTS", "build_norm_kwargs"]
+# Wikipedia subset constant for the E6 causal-LM trainer. Centralised here so
+# the sweep driver, the trainer, and downstream tooling agree on the article
+# count. Re-exported by e6_clm_wiki.py for backward compatibility.
+# DECISION plan_2026-05-18_6776f8ba/D-004: 10k articles is the smoke-budget
+# sweet spot (~30min/cell on 4090, ~4h full 8-norm × 4-epoch run); raising it
+# requires a paired update to PHASE3_PLAN.md v3's wall-clock table.
+WIKI_ARTICLES_DEFAULT = 10_000
+
+
+__all__ = [
+    "ExperimentConfig", "NORM_VARIANTS", "build_norm_kwargs",
+    "WIKI_ARTICLES_DEFAULT",
+]

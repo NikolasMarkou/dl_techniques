@@ -165,3 +165,78 @@ class TestE6OneStepSmoke:
             cfg = _make_cfg(tmp)
             _ = e6.run(cfg, **_SMOKE_KWARGS)
             assert os.path.exists(os.path.join(tmp, "history.csv"))
+
+
+# ---------------------------------------------------------------------
+# Step-9 wiring: sweep + report integration
+# ---------------------------------------------------------------------
+
+
+class TestE6SweepWiring:
+    """Step 9 — verify E6 is wired into the sweep + report machinery.
+
+    Real-subprocess sweep smoke is deferred to SC13 (user-launched per HC12 /
+    Pre-Mortem Scenario 1) — the HF Wikipedia load exceeds the 5-min CPU
+    budget for in-band testing. These tests exercise the wiring directly.
+    """
+
+    def test_e6_in_experiment_registry(self):
+        from train.rms_variants_train.sweep import EXPERIMENT_REGISTRY
+        assert "e6" in EXPERIMENT_REGISTRY, (
+            "E6 missing from sweep EXPERIMENT_REGISTRY — sweep.py step-9 wiring"
+        )
+        module, timeout = EXPERIMENT_REGISTRY["e6"]
+        assert module == "train.rms_variants_train.experiments.e6_clm_wiki"
+        assert timeout >= 600, f"E6 cell-timeout {timeout}s implausibly low"
+
+    def test_e6_in_experiment_modes_and_regimes(self):
+        from train.rms_variants_train.sweep import (
+            EXPERIMENT_MODES, EXPERIMENT_REGIMES,
+        )
+        assert "e6" in EXPERIMENT_MODES
+        assert "e6" in EXPERIMENT_REGIMES
+        assert set(EXPERIMENT_REGIMES["e6"]).issubset({
+            "default", "mp_fp16", "lr_extreme", "wd_zero", "bs_4",
+        })
+        # E6's regimes MUST be a subset of the trainer's _REGIME_MAP.
+        for r in EXPERIMENT_REGIMES["e6"]:
+            assert r in e6._REGIME_MAP, (
+                f"sweep advertises regime {r!r} for e6 but trainer's "
+                f"_REGIME_MAP only has {list(e6._REGIME_MAP)}"
+            )
+
+    def test_build_run_specs_emits_e6_cells(self):
+        from train.rms_variants_train.sweep import build_run_specs
+        specs = build_run_specs(
+            experiments=["e6"],
+            norms=["rms_norm"],
+            modes=["oob"],
+            seeds=[0],
+            sweep_root="/tmp/e6sweep_wiring_test",
+            epochs_override=1,
+            regimes=("default",),
+            max_cells=5,
+        )
+        assert len(specs) == 1, f"expected 1 e6 cell, got {len(specs)}: {specs}"
+        spec = specs[0]
+        assert spec.experiment == "e6"
+        assert spec.module == "train.rms_variants_train.experiments.e6_clm_wiki"
+        assert "--norm-type" in spec.extra_args
+        assert "--regime" in spec.extra_args
+        assert "--out-dir" in spec.extra_args
+        assert "--epochs" in spec.extra_args
+
+    def test_e6_in_headline_metric(self):
+        from train.rms_variants_train.report import HEADLINE_METRIC
+        assert "e6" in HEADLINE_METRIC, (
+            "E6 missing from report.HEADLINE_METRIC — report.py step-9 wiring"
+        )
+        metric, direction = HEADLINE_METRIC["e6"]
+        assert metric == "final_val_perplexity"
+        assert direction == "lower_is_better"
+
+    def test_wiki_articles_default_exported(self):
+        from train.rms_variants_train.config import WIKI_ARTICLES_DEFAULT
+        assert WIKI_ARTICLES_DEFAULT == 10_000
+        # And the trainer module re-exports the same constant.
+        assert e6.WIKI_ARTICLES_DEFAULT == WIKI_ARTICLES_DEFAULT
