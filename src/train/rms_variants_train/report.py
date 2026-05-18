@@ -25,6 +25,10 @@ import pandas as pd
 
 from dl_techniques.utils.logger import logger
 from train.rms_variants_train.config import NORM_VARIANTS
+from train.rms_variants_train.hypotheses import (
+    VARIANT_HYPOTHESES,
+    evaluate_all as evaluate_all_hypotheses,
+)
 from train.rms_variants_train.stats import (
     bootstrap_ci,
     format_mean_std,
@@ -625,6 +629,100 @@ def _compute_regime_delta(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(out, columns=cols)
 
 
+# ---------------------------------------------------------------------
+# Hypothesis verdicts (plan_e1f12eab Step 2 — additive to VARIANT_CRITERIA)
+# ---------------------------------------------------------------------
+
+
+def _compute_hypothesis_verdicts(
+    df: pd.DataFrame, probes_long: pd.DataFrame,
+) -> pd.DataFrame:
+    """Per-cell hypothesis verdicts via ``hypotheses.evaluate_all``.
+
+    Merges the per-seed probe snapshot (``probes_long``) into the merged
+    headline frame (``df``) on ``(experiment, norm_type, mode, seed)`` so
+    every cell has access to both headline columns (``best_val_acc``,
+    ``final_val_loss``, ``generalization_gap``) and probe-aggregated columns
+    (``act_per_sample_rms_max_max``, ``act_mean_abs``, ``grad_norm_global``).
+
+    Returns the frame produced by ``evaluate_all_hypotheses`` (one row per
+    ``(experiment, norm_type, mode)`` cell). Empty frame if ``df`` is empty.
+    """
+    if df.empty:
+        return pd.DataFrame(columns=[
+            "experiment", "norm_type", "mode",
+            "hypothesis_verdict", "hypothesis_metric",
+            "hypothesis_threshold", "hypothesis_observed",
+        ])
+    merged = df.copy()
+    if not probes_long.empty:
+        key_cols = ["experiment", "norm_type", "mode", "seed"]
+        # Only merge probe columns the hypotheses actually reference, to
+        # keep the merged frame tight.
+        referenced = {spec.metric_column for spec in VARIANT_HYPOTHESES.values()}
+        probe_cols = [c for c in probes_long.columns
+                      if c in referenced and c not in merged.columns]
+        if probe_cols:
+            merged = merged.merge(
+                probes_long[key_cols + probe_cols],
+                on=key_cols, how="left",
+            )
+    try:
+        return evaluate_all_hypotheses(merged)
+    except (KeyError, ValueError) as e:
+        logger.warning(f"[report] hypothesis evaluation failed: {e}")
+        return pd.DataFrame(columns=[
+            "experiment", "norm_type", "mode",
+            "hypothesis_verdict", "hypothesis_metric",
+            "hypothesis_threshold", "hypothesis_observed",
+        ])
+
+
+def _md_hypothesis_verdict_block(hyp: pd.DataFrame) -> str:
+    """Render the hypothesis verdict block for ``summary.md``."""
+    if hyp.empty:
+        return "*(no hypothesis verdicts — sweep frame or registry empty)*\n"
+    out: List[str] = []
+    out.append(
+        "*Verdicts derived from the falsifiable `VARIANT_HYPOTHESES` "
+        "registry (cf. `train.rms_variants_train.hypotheses`). Each row: one "
+        "`(experiment, norm_type, mode)` cell; the `observed` value is "
+        "compared to the layer's design-claim threshold.*\n"
+    )
+    out.append(
+        "| Experiment | Norm | Mode | Verdict | Metric | Observed | "
+        "Threshold |"
+    )
+    out.append("|---|---|---|---|---|---|---|")
+    for _, r in hyp.iterrows():
+        observed = r["hypothesis_observed"]
+        threshold = r["hypothesis_threshold"]
+        obs_s = "—" if pd.isna(observed) else f"{float(observed):.4f}"
+        thr_s = "—" if pd.isna(threshold) else f"{float(threshold):.4f}"
+        out.append(
+            f"| {r['experiment']} | {r['norm_type']} | {r['mode']} | "
+            f"**{r['hypothesis_verdict']}** | {r.get('hypothesis_metric', '')} "
+            f"| {obs_s} | {thr_s} |"
+        )
+    # Per-variant rollup.
+    out.append("")
+    out.append("### Per-variant rollup")
+    for variant in NORM_VARIANTS:
+        sub = hyp[hyp["norm_type"] == variant]
+        if sub.empty:
+            continue
+        confirmed = (sub["hypothesis_verdict"] == "CONFIRMED").sum()
+        rejected = (sub["hypothesis_verdict"] == "REJECTED").sum()
+        incon = (sub["hypothesis_verdict"] == "INCONCLUSIVE").sum()
+        na = (sub["hypothesis_verdict"] == "N/A").sum()
+        out.append(
+            f"- `{variant}`: CONFIRMED={int(confirmed)} "
+            f"REJECTED={int(rejected)} INCONCLUSIVE={int(incon)} "
+            f"N/A={int(na)} (n={len(sub)} cells)"
+        )
+    return "\n".join(out) + "\n"
+
+
 def write_report(df: pd.DataFrame, *, out_dir: str) -> None:
     """Write ``summary.md`` aggregating ``df`` (the merged ``all_runs.csv``)."""
     headline = _aggregate_headline(df)
@@ -668,6 +766,17 @@ def write_report(df: pd.DataFrame, *, out_dir: str) -> None:
     else:
         headline["late_stability_var"] = float("nan")
 
+    # Hypothesis verdicts (plan_e1f12eab Step 2 — additive to PASS/FAIL).
+    hyp = _compute_hypothesis_verdicts(df, probes_long)
+    if not hyp.empty:
+        agg_keys = ["experiment", "norm_type", "mode"]
+        headline = headline.merge(
+            hyp[agg_keys + ["hypothesis_verdict"]],
+            on=agg_keys, how="left",
+        )
+    else:
+        headline["hypothesis_verdict"] = "N/A"
+
     md_lines: List[str] = []
     md_lines.append("# RMSNorm Variants — Sweep Summary\n")
     md_lines.append(f"*Output dir: `{out_dir}`*\n")
@@ -686,6 +795,8 @@ def write_report(df: pd.DataFrame, *, out_dir: str) -> None:
         "INDISTINGUISHABLE. Per-variant aggregate PASS requires ≥2 cells with "
         "no FAIL.*\n"
     )
+    md_lines.append("## Hypothesis verdicts (falsifiable design-claim checks)\n")
+    md_lines.append(_md_hypothesis_verdict_block(hyp))
 
     summary_path = os.path.join(out_dir, "summary.md")
     with open(summary_path, "w") as f:
@@ -697,6 +808,7 @@ def write_report(df: pd.DataFrame, *, out_dir: str) -> None:
     # Phase 3 derivation CSVs (always emitted — empty frames retain schema).
     convergence.to_csv(os.path.join(out_dir, "convergence_summary.csv"), index=False)
     regime_delta.to_csv(os.path.join(out_dir, "regime_delta_summary.csv"), index=False)
+    hyp.to_csv(os.path.join(out_dir, "hypothesis_verdicts.csv"), index=False)
     logger.info(f"[report] wrote {summary_path}")
 
 

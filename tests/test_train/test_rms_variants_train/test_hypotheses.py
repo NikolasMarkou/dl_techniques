@@ -290,3 +290,105 @@ class TestThresholdProvenance:
         for variant in ("rms_norm", "dynamic_tanh"):
             spec = VARIANT_HYPOTHESES[variant]
             assert spec.threshold > 0 and np.isfinite(spec.threshold)
+
+
+# ---------------------------------------------------------------------
+# Step 2 wiring — report.py integration (synthetic fixture)
+# ---------------------------------------------------------------------
+
+class TestReportWiring:
+    """End-to-end test: build a synthetic all_runs.csv frame, call
+    ``report.write_report``, and assert the hypothesis_verdict column lands
+    on ``headline_summary.csv`` and the hypothesis block lands in
+    ``summary.md``.
+
+    Note: write_report walks per-cell directories for probe CSVs (which
+    don't exist in this synthetic test); the probe-snapshot frame will be
+    empty and hypotheses that depend on probe columns will yield
+    INCONCLUSIVE. The headline-driven hypotheses (band_logit_norm uses
+    generalization_gap which IS on the synthetic frame) yield real verdicts.
+    """
+
+    def test_write_report_emits_hypothesis_verdict_column(self, tmp_path):
+        from train.rms_variants_train.report import write_report
+
+        # Build a minimal synthetic frame mimicking the merged all_runs.csv.
+        rows = []
+        for exp in ("e1", "e3"):
+            for variant in ("rms_norm", "band_logit_norm"):
+                for seed in range(3):
+                    rows.append({
+                        "experiment": exp,
+                        "norm_type": variant,
+                        "mode": "oob",
+                        "seed": seed,
+                        "best_val_acc": 0.85 + seed * 0.01,
+                        "final_val_loss": 0.5 - seed * 0.01,
+                        "generalization_gap": 0.05 + seed * 0.01,
+                    })
+        df = pd.DataFrame(rows)
+
+        write_report(df, out_dir=str(tmp_path))
+
+        # 1. headline_summary.csv has the hypothesis_verdict column.
+        headline_path = tmp_path / "headline_summary.csv"
+        assert headline_path.exists(), "headline_summary.csv not written"
+        headline = pd.read_csv(headline_path)
+        assert "hypothesis_verdict" in headline.columns, (
+            f"hypothesis_verdict missing from headline_summary.csv "
+            f"(columns={list(headline.columns)})"
+        )
+
+        # 2. hypothesis_verdicts.csv is emitted.
+        hyp_path = tmp_path / "hypothesis_verdicts.csv"
+        assert hyp_path.exists(), "hypothesis_verdicts.csv not written"
+        hyp = pd.read_csv(hyp_path)
+        assert "hypothesis_verdict" in hyp.columns
+        # band_logit_norm hypothesis uses generalization_gap (which IS in the
+        # synthetic frame) — so it should give a real verdict (not
+        # INCONCLUSIVE). Gap values are small (0.05-0.07) < threshold 0.20
+        # so CONFIRMED.
+        blog = hyp[hyp["norm_type"] == "band_logit_norm"]
+        assert not blog.empty
+        assert (blog["hypothesis_verdict"] == "CONFIRMED").all(), (
+            f"Expected band_logit_norm CONFIRMED on small gap; got "
+            f"{blog['hypothesis_verdict'].tolist()}"
+        )
+
+        # 3. summary.md contains the hypothesis verdict section header.
+        summary_path = tmp_path / "summary.md"
+        assert summary_path.exists()
+        content = summary_path.read_text()
+        assert "Hypothesis verdicts" in content, (
+            "summary.md missing 'Hypothesis verdicts' section header"
+        )
+        assert "VARIANT_HYPOTHESES" in content, (
+            "summary.md missing reference to VARIANT_HYPOTHESES registry"
+        )
+
+    def test_write_report_preserves_existing_verdict_column(self, tmp_path):
+        """I4 invariant: the existing PASS/FAIL/INDISTINGUISHABLE verdict
+        column remains intact (we're additive, not replacing)."""
+        from train.rms_variants_train.report import write_report
+
+        rows = []
+        for variant in ("rms_norm", "band_logit_norm"):
+            for seed in range(3):
+                rows.append({
+                    "experiment": "e1",
+                    "norm_type": variant,
+                    "mode": "oob",
+                    "seed": seed,
+                    "best_val_acc": 0.85,
+                    "generalization_gap": 0.05,
+                })
+        df = pd.DataFrame(rows)
+        write_report(df, out_dir=str(tmp_path))
+
+        headline = pd.read_csv(tmp_path / "headline_summary.csv")
+        assert "verdict" in headline.columns, (
+            "Existing 'verdict' column dropped — violates I4 invariant"
+        )
+        assert "hypothesis_verdict" in headline.columns, (
+            "New 'hypothesis_verdict' column not added"
+        )
