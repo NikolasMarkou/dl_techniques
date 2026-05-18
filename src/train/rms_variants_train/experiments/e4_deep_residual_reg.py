@@ -221,20 +221,31 @@ def run(cfg: ExperimentConfig, *, depth: int, hidden_dim: int, bias: float,
         final_mae = float(history.history.get("mae", [float("nan")])[-1])
         final_val_mae = float(history.history.get("val_mae", [float("nan")])[-1])
 
+        # Per-epoch history.csv — consumed by report.py post-hoc derivations.
+        hist_csv = os.path.join(cfg.out_dir, "history.csv")
+        _hist = history.history
+        _hist_keys = list(_hist.keys())
+        with open(hist_csv, "w", newline="") as f:
+            w_h = csv.writer(f)
+            w_h.writerow(["epoch"] + _hist_keys)
+            for i in range(len(_hist[_hist_keys[0]])):
+                w_h.writerow([i] + [_hist[k][i] for k in _hist_keys])
+
         results_csv = os.path.join(cfg.out_dir, "results.csv")
         write_header = not os.path.exists(results_csv)
         with open(results_csv, "a", newline="") as f:
             w = csv.writer(f)
             if write_header:
                 w.writerow([
-                    "experiment", "norm_type", "mode", "seed", "epochs",
+                    "experiment", "norm_type", "mode", "seed", "regime", "epochs",
                     "trainable_params",
                     "final_loss", "final_val_loss",
                     "final_mae", "final_val_mae",
                     "mixed_precision", "wall_s",
                 ])
             w.writerow([
-                "e4", cfg.norm_type, cfg.mode, cfg.seed, cfg.epochs,
+                "e4", cfg.norm_type, cfg.mode, cfg.seed,
+                cfg.extras.get("regime", "default"), cfg.epochs,
                 n_params,
                 final_loss, final_val_loss,
                 final_mae, final_val_mae,

@@ -458,6 +458,173 @@ def _verdict_block(headline: pd.DataFrame) -> str:
     return "\n".join(out) if out else "*(no non-baseline variants in sweep)*\n"
 
 
+def _load_per_epoch_frame(out_dir: str, df: pd.DataFrame) -> pd.DataFrame:
+    """Best-effort: walk per-cell directories, read ``history.csv``, stack.
+
+    Returns a long-format DataFrame with columns
+    ``[experiment, norm_type, mode, seed, regime, epoch, <metric columns>]``.
+    Returns an empty frame if no cell directory has a ``history.csv``.
+    """
+    rows: List[pd.DataFrame] = []
+    root = Path(out_dir)
+    # Use df to enumerate (experiment, norm, mode, seed[, regime]) combinations.
+    if df.empty:
+        return pd.DataFrame()
+    has_regime = "regime" in df.columns
+    keys = ["experiment", "norm_type", "mode", "seed"]
+    for _, r in df.drop_duplicates(subset=keys + (["regime"] if has_regime else [])).iterrows():
+        # Cell-dir convention: out_dir/<exp>/<norm>/<mode>/seed_<seed>
+        cell_dir = root / r["experiment"] / r["norm_type"] / r["mode"] / f"seed_{int(r['seed'])}"
+        hist_path = cell_dir / "history.csv"
+        if not hist_path.exists():
+            continue
+        try:
+            h = pd.read_csv(hist_path)
+        except (pd.errors.EmptyDataError, FileNotFoundError):
+            continue
+        if h.empty:
+            continue
+        h["experiment"] = r["experiment"]
+        h["norm_type"] = r["norm_type"]
+        h["mode"] = r["mode"]
+        h["seed"] = int(r["seed"])
+        h["regime"] = r["regime"] if has_regime else "default"
+        rows.append(h)
+    if not rows:
+        return pd.DataFrame()
+    return pd.concat(rows, ignore_index=True)
+
+
+def _compute_convergence_speed(
+    df_per_epoch: pd.DataFrame,
+    *,
+    thresholds: Tuple[float, ...] = (0.5, 0.7, 0.9),
+) -> pd.DataFrame:
+    """Epochs-to-threshold per (experiment, norm_type, mode, seed, regime).
+
+    Uses ``val_accuracy`` when present (classification). Falls back to
+    normalized-improvement ``1 - val_loss / val_loss_initial`` (regression).
+    Emits one row per (cell, threshold). Threshold not reached → epoch = -1.
+
+    Schema: ``experiment, norm_type, mode, seed, regime, threshold, epoch``.
+    """
+    if df_per_epoch.empty:
+        return pd.DataFrame(columns=[
+            "experiment", "norm_type", "mode", "seed", "regime",
+            "threshold", "epoch",
+        ])
+    has_val_acc = "val_accuracy" in df_per_epoch.columns
+    has_val_loss = "val_loss" in df_per_epoch.columns
+    keys = ["experiment", "norm_type", "mode", "seed", "regime"]
+    out: List[dict] = []
+    for key_tuple, sub in df_per_epoch.groupby(keys, sort=False):
+        sub = sub.sort_values("epoch").reset_index(drop=True)
+        if has_val_acc and sub["val_accuracy"].notna().any():
+            series = sub["val_accuracy"].to_numpy(dtype=float)
+        elif has_val_loss and sub["val_loss"].notna().any():
+            v0 = float(sub["val_loss"].iloc[0])
+            if v0 <= 0:
+                continue
+            series = 1.0 - sub["val_loss"].to_numpy(dtype=float) / v0
+        else:
+            continue
+        for thr in thresholds:
+            ok = np.where(series >= thr)[0]
+            epoch_hit = int(ok[0]) if ok.size > 0 else -1
+            row = dict(zip(keys, key_tuple))
+            row["threshold"] = float(thr)
+            row["epoch"] = epoch_hit
+            out.append(row)
+    return pd.DataFrame(out)
+
+
+def _compute_late_stability(
+    df_per_epoch: pd.DataFrame,
+    *,
+    last_frac: float = 0.25,
+) -> pd.DataFrame:
+    """Variance of ``val_loss`` over the last ``last_frac`` of epochs per cell.
+
+    Schema: ``experiment, norm_type, mode, seed, regime,
+    late_stability_var, n_epochs_used``.
+    """
+    cols = [
+        "experiment", "norm_type", "mode", "seed", "regime",
+        "late_stability_var", "n_epochs_used",
+    ]
+    if df_per_epoch.empty or "val_loss" not in df_per_epoch.columns:
+        return pd.DataFrame(columns=cols)
+    keys = ["experiment", "norm_type", "mode", "seed", "regime"]
+    out: List[dict] = []
+    for key_tuple, sub in df_per_epoch.groupby(keys, sort=False):
+        sub = sub.sort_values("epoch")
+        n = len(sub)
+        if n < 2:
+            continue
+        k = max(2, int(round(n * last_frac)))
+        tail = sub["val_loss"].to_numpy(dtype=float)[-k:]
+        tail = tail[np.isfinite(tail)]
+        if tail.size < 2:
+            continue
+        row = dict(zip(keys, key_tuple))
+        row["late_stability_var"] = float(tail.var(ddof=1))
+        row["n_epochs_used"] = int(tail.size)
+        out.append(row)
+    return pd.DataFrame(out, columns=cols)
+
+
+def _compute_regime_delta(df: pd.DataFrame) -> pd.DataFrame:
+    """Δ(metric) vs ``regime='default'`` for each (experiment, norm_type, metric).
+
+    Operates on the merged ``all_runs.csv`` (final-epoch headline rows).
+    Aggregates over seeds within each (experiment, norm_type, mode, regime)
+    cell using the mean. Emits one row per non-default regime, only when the
+    ``default`` regime is present for that (experiment, norm_type, mode).
+
+    Schema: ``experiment, norm_type, mode, regime, metric,
+    default_mean, regime_mean, delta``.
+    """
+    cols = [
+        "experiment", "norm_type", "mode", "regime", "metric",
+        "default_mean", "regime_mean", "delta",
+    ]
+    if df.empty or "regime" not in df.columns:
+        return pd.DataFrame(columns=cols)
+    metric_candidates = [
+        "best_val_acc", "final_val_acc", "final_val_loss", "final_val_mae",
+    ]
+    metrics = [m for m in metric_candidates if m in df.columns]
+    if not metrics:
+        return pd.DataFrame(columns=cols)
+    out: List[dict] = []
+    group_keys = ["experiment", "norm_type", "mode", "regime"]
+    agg = df.groupby(group_keys, sort=False)[metrics].mean().reset_index()
+    for (exp, norm, mode), sub in agg.groupby(
+        ["experiment", "norm_type", "mode"], sort=False
+    ):
+        default_row = sub[sub["regime"] == "default"]
+        if default_row.empty:
+            continue
+        d = default_row.iloc[0]
+        for _, r in sub.iterrows():
+            if r["regime"] == "default":
+                continue
+            for m in metrics:
+                if pd.isna(r[m]) or pd.isna(d[m]):
+                    continue
+                out.append({
+                    "experiment": exp,
+                    "norm_type": norm,
+                    "mode": mode,
+                    "regime": r["regime"],
+                    "metric": m,
+                    "default_mean": float(d[m]),
+                    "regime_mean": float(r[m]),
+                    "delta": float(r[m]) - float(d[m]),
+                })
+    return pd.DataFrame(out, columns=cols)
+
+
 def write_report(df: pd.DataFrame, *, out_dir: str) -> None:
     """Write ``summary.md`` aggregating ``df`` (the merged ``all_runs.csv``)."""
     headline = _aggregate_headline(df)
@@ -466,6 +633,40 @@ def write_report(df: pd.DataFrame, *, out_dir: str) -> None:
 
     probes_long = _final_probe_snapshot(out_dir, df)
     probes = _probes_summary(probes_long)
+
+    # Phase 3 post-hoc derivations (best-effort; empty frames if data missing).
+    try:
+        df_per_epoch = _load_per_epoch_frame(out_dir, df)
+    except (FileNotFoundError, pd.errors.EmptyDataError) as e:
+        logger.warning(f"[report] per-epoch frame load failed: {e}")
+        df_per_epoch = pd.DataFrame()
+    try:
+        convergence = _compute_convergence_speed(df_per_epoch)
+    except (KeyError, ValueError) as e:
+        logger.warning(f"[report] convergence-speed derivation failed: {e}")
+        convergence = pd.DataFrame()
+    try:
+        late_stab = _compute_late_stability(df_per_epoch)
+    except (KeyError, ValueError) as e:
+        logger.warning(f"[report] late-stability derivation failed: {e}")
+        late_stab = pd.DataFrame()
+    try:
+        regime_delta = _compute_regime_delta(df)
+    except (KeyError, ValueError) as e:
+        logger.warning(f"[report] regime-delta derivation failed: {e}")
+        regime_delta = pd.DataFrame()
+
+    # Merge late-stability into headline (extend headline_summary.csv).
+    if not late_stab.empty:
+        agg_keys = ["experiment", "norm_type", "mode"]
+        ls_agg = (
+            late_stab.groupby(agg_keys, sort=False)["late_stability_var"]
+            .mean()
+            .reset_index()
+        )
+        headline = headline.merge(ls_agg, on=agg_keys, how="left")
+    else:
+        headline["late_stability_var"] = float("nan")
 
     md_lines: List[str] = []
     md_lines.append("# RMSNorm Variants — Sweep Summary\n")
@@ -493,6 +694,9 @@ def write_report(df: pd.DataFrame, *, out_dir: str) -> None:
     # Also persist the headline frame as CSV for downstream tooling.
     headline.to_csv(os.path.join(out_dir, "headline_summary.csv"), index=False)
     probes.to_csv(os.path.join(out_dir, "probes_summary.csv"), index=False)
+    # Phase 3 derivation CSVs (always emitted — empty frames retain schema).
+    convergence.to_csv(os.path.join(out_dir, "convergence_summary.csv"), index=False)
+    regime_delta.to_csv(os.path.join(out_dir, "regime_delta_summary.csv"), index=False)
     logger.info(f"[report] wrote {summary_path}")
 
 

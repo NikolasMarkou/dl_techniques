@@ -145,20 +145,31 @@ def run(cfg: ExperimentConfig, *, variant: str, warmup_epochs: int) -> dict:
     final_loss = float(history.history["loss"][-1])
     final_val_loss = float(history.history["val_loss"][-1])
 
+    # Per-epoch history.csv — consumed by report.py post-hoc derivations.
+    hist_csv = os.path.join(cfg.out_dir, "history.csv")
+    _hist = history.history
+    _hist_keys = list(_hist.keys())
+    with open(hist_csv, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["epoch"] + _hist_keys)
+        for i in range(len(_hist[_hist_keys[0]])):
+            w.writerow([i] + [_hist[k][i] for k in _hist_keys])
+
     results_csv = os.path.join(cfg.out_dir, "results.csv")
     write_header = not os.path.exists(results_csv)
     with open(results_csv, "a", newline="") as f:
         w = csv.writer(f)
         if write_header:
             w.writerow([
-                "experiment", "norm_type", "mode", "seed", "epochs",
+                "experiment", "norm_type", "mode", "seed", "regime", "epochs",
                 "trainable_params",
                 "final_loss", "final_val_loss",
                 "final_acc", "final_val_acc", "best_val_acc",
                 "wall_s",
             ])
         w.writerow([
-            "e2", cfg.norm_type, cfg.mode, cfg.seed, cfg.epochs,
+            "e2", cfg.norm_type, cfg.mode, cfg.seed,
+            cfg.extras.get("regime", "default"), cfg.epochs,
             n_params,
             final_loss, final_val_loss,
             final_acc, final_val_acc, best_val_acc,
