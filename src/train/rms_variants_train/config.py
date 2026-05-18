@@ -17,14 +17,21 @@ from typing import Any, Dict, Optional, Tuple
 # Norm variants under study
 # ---------------------------------------------------------------------
 
-# Canonical ordering: RMSNorm = baseline; the three variants follow.
+# Canonical ordering: RMSNorm = baseline; six variants follow.
 # Strings are the factory keys consumed by
 # ``dl_techniques.layers.norms.factory.create_normalization_layer(<key>)``.
-NORM_VARIANTS: Tuple[str, str, str, str] = (
+#
+# DECISION plan_2026-05-18_74a935a2/D-001: this 7-tuple is the campaign's
+# variant universe. Reordering it invalidates RESULTS.md tables (columns are
+# indexed by position). Append-only on extension; never insert in the middle.
+NORM_VARIANTS: Tuple[str, str, str, str, str, str, str] = (
     "rms_norm",
     "band_rms",
     "zero_centered_rms_norm",
     "zero_centered_band_rms_norm",
+    "adaptive_band_rms",
+    "band_logit_norm",
+    "dynamic_tanh",
 )
 
 
@@ -82,6 +89,37 @@ def build_norm_kwargs(
             import keras
             kwargs["band_regularizer"] = keras.regularizers.L2(band_regularizer_l2)
         return kwargs
+    if norm_type == "adaptive_band_rms":
+        # AdaptiveBandRMS: ``use_scale`` is not accepted (no per-feature scale
+        # toggle — the per-sample log-RMS-driven inner Dense replaces it).
+        # ``band_regularizer`` IS accepted by the layer but the campaign
+        # disables the silent in-source default (matching the band_rms knob).
+        kwargs = {
+            "epsilon": epsilon,
+            "max_band_width": max_band_width,
+        }
+        if band_regularizer_l2 is None:
+            kwargs["band_regularizer"] = None
+        else:
+            import keras
+            kwargs["band_regularizer"] = keras.regularizers.L2(band_regularizer_l2)
+        return kwargs
+    if norm_type == "band_logit_norm":
+        # BandLogitNorm: no ``use_scale``, no ``band_regularizer``. The variant
+        # uses an inner LayerNormalization whose gamma/beta are the only
+        # trainable weights, and exposes only ``max_band_width`` / ``epsilon``.
+        return {
+            "epsilon": epsilon,
+            "max_band_width": max_band_width,
+        }
+    if norm_type == "dynamic_tanh":
+        # DynamicTanh: no ``epsilon`` (the factory strips it explicitly), no
+        # ``use_scale``. Expose only ``axis`` and ``alpha_init_value``. The
+        # campaign uses the layer's default ``alpha_init_value=0.5``.
+        return {
+            "axis": -1,
+            "alpha_init_value": 0.5,
+        }
     # Conservative fallback for ``layer_norm`` / other factory keys.
     return {"epsilon": epsilon}
 

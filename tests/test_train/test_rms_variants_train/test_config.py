@@ -29,13 +29,21 @@ from dl_techniques.layers.norms.factory import create_normalization_layer
 
 
 def test_norm_variants_tuple_shape() -> None:
-    assert len(NORM_VARIANTS) == 4
+    # Phase 2 extends the 4-variant Phase 1 set to 7 variants.
+    assert len(NORM_VARIANTS) == 7
     assert NORM_VARIANTS[0] == "rms_norm"  # baseline must be first
-    assert set(NORM_VARIANTS) == {
+    # First 4 entries preserved verbatim (RESULTS.md Phase 1 invariant).
+    assert NORM_VARIANTS[:4] == (
         "rms_norm",
         "band_rms",
         "zero_centered_rms_norm",
         "zero_centered_band_rms_norm",
+    )
+    # Phase 2 extension: the 3 new variants must all be present.
+    assert set(NORM_VARIANTS[4:]) == {
+        "adaptive_band_rms",
+        "band_logit_norm",
+        "dynamic_tanh",
     }
 
 
@@ -169,6 +177,78 @@ def test_experiment_config_norm_kwargs_param_matched_doesnt_touch_band() -> None
     # Band variants have 1 scalar always; mode doesn't affect their config.
     assert "use_scale" not in kw
     assert kw["max_band_width"] == 0.1
+
+
+# ---------------------------------------------------------------------
+# Phase 2 — kwargs for the 3 new variants
+# ---------------------------------------------------------------------
+
+
+def test_build_kwargs_adaptive_band_rms_default() -> None:
+    kw = build_norm_kwargs("adaptive_band_rms")
+    assert kw["max_band_width"] == 0.1
+    assert kw["epsilon"] == 1e-6
+    # No per-feature scale toggle on this variant.
+    assert "use_scale" not in kw
+    # Default L2 silently disabled (matches band_rms knob).
+    assert "band_regularizer" in kw
+    assert kw["band_regularizer"] is None
+
+
+def test_build_kwargs_adaptive_band_rms_with_explicit_regularizer() -> None:
+    kw = build_norm_kwargs("adaptive_band_rms", band_regularizer_l2=1e-4)
+    assert kw["band_regularizer"] is not None
+    assert isinstance(kw["band_regularizer"], keras.regularizers.L2)
+
+
+def test_build_kwargs_band_logit_norm_default() -> None:
+    kw = build_norm_kwargs("band_logit_norm")
+    assert kw["max_band_width"] == 0.1
+    assert kw["epsilon"] == 1e-6
+    # band_logit_norm exposes no use_scale and no band_regularizer.
+    assert "use_scale" not in kw
+    assert "band_regularizer" not in kw
+
+
+def test_build_kwargs_dynamic_tanh_default() -> None:
+    kw = build_norm_kwargs("dynamic_tanh")
+    # DyT does NOT accept epsilon — the factory strips it explicitly.
+    assert "epsilon" not in kw
+    assert "use_scale" not in kw
+    assert kw["axis"] == -1
+    assert kw["alpha_init_value"] == 0.5
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ["adaptive_band_rms", "band_logit_norm", "dynamic_tanh"],
+)
+def test_new_variants_construct_via_factory(variant: str) -> None:
+    """Round-trip: kwargs from ``build_norm_kwargs`` build a valid layer."""
+    kw = build_norm_kwargs(variant)
+    layer = create_normalization_layer(variant, **kw)
+    out = layer(keras.ops.zeros((2, 64)))
+    assert tuple(out.shape) == (2, 64)
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ["adaptive_band_rms", "band_logit_norm", "dynamic_tanh"],
+)
+def test_new_variants_param_matched_mode_is_noop(variant: str) -> None:
+    """
+    None of the 3 new variants expose ``use_scale``. The sweep driver skips
+    param_matched cells for them (Step 5). Here we assert that even if a
+    caller forces ``mode="param_matched"``, the resulting kwargs do not
+    include a ``use_scale`` key.
+    """
+    cfg = ExperimentConfig(
+        experiment_name="e5",
+        norm_type=variant,
+        mode="param_matched",
+    )
+    kw = cfg.norm_kwargs()
+    assert "use_scale" not in kw
 
 
 if __name__ == "__main__":
