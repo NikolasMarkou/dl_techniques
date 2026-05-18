@@ -277,5 +277,129 @@ def test_internal_stats_param_matched_rms_scale_l2_zero(tmp_path) -> None:
     assert float(body[0][3]) == 0.0
 
 
+# ---------------------------------------------------------------------
+# Phase 2: 3 new norm classes are detected and produce the expected `kind`
+# ---------------------------------------------------------------------
+
+
+def test_norm_layer_classes_tuple_extended() -> None:
+    """Tuple is the 7-variant Phase 2 universe (4 originals + 3 new)."""
+    assert len(NORM_LAYER_CLASSES) == 7
+    names = {cls.__name__ for cls in NORM_LAYER_CLASSES}
+    assert {
+        "RMSNorm",
+        "BandRMS",
+        "ZeroCenteredRMSNorm",
+        "ZeroCenteredBandRMSNorm",
+        "AdaptiveBandRMS",
+        "BandLogitNorm",
+        "DynamicTanh",
+    } == names
+
+
+def _build_new_variants_model(d: int = 16) -> keras.Model:
+    """Dummy: x → Dense → AdaptiveBandRMS → Dense → BandLogitNorm → Dense → DynamicTanh → Dense(1)."""
+    inputs = keras.Input(shape=(d,))
+    x = keras.layers.Dense(d, name="dense1")(inputs)
+    x = create_normalization_layer(
+        "adaptive_band_rms",
+        epsilon=1e-6,
+        max_band_width=0.1,
+        band_regularizer=None,
+        name="adaptive",
+    )(x)
+    x = keras.layers.Dense(d, name="dense2")(x)
+    x = create_normalization_layer(
+        "band_logit_norm",
+        epsilon=1e-6,
+        max_band_width=0.1,
+        name="blogit",
+    )(x)
+    x = keras.layers.Dense(d, name="dense3")(x)
+    x = create_normalization_layer(
+        "dynamic_tanh",
+        axis=-1,
+        alpha_init_value=0.5,
+        name="dyt",
+    )(x)
+    outputs = keras.layers.Dense(1, name="out")(x)
+    model = keras.Model(inputs, outputs)
+    model.compile(optimizer="adam", loss="mse")
+    return model
+
+
+def test_find_norm_layers_detects_three_new_variants(dummy_data) -> None:
+    """`_find_norm_layers` returns each of the 3 new outer classes exactly once."""
+    model = _build_new_variants_model()
+    _ = model(tf.convert_to_tensor(dummy_data[0]))
+    found = _find_norm_layers(model)
+    found_names = {layer.name for layer in found}
+    # The OUTER 3 norm layers — and crucially NOT the inner LayerNormalization
+    # sublayer of BandLogitNorm (its name is "blogit_layer_norm", and the
+    # vanilla `keras.layers.LayerNormalization` is not in NORM_LAYER_CLASSES).
+    assert {"adaptive", "blogit", "dyt"}.issubset(found_names)
+    assert "blogit_layer_norm" not in found_names
+
+
+def test_internal_stats_kinds_for_new_variants(tmp_path, dummy_data) -> None:
+    model = _build_new_variants_model()
+    _ = model(tf.convert_to_tensor(dummy_data[0]))
+    cb = NormInternalStatsCallback(out_dir=str(tmp_path))
+    cb.set_model(model)
+    cb.on_epoch_end(0)
+    with open(os.path.join(str(tmp_path), "norm_internal.csv")) as f:
+        rows = list(csv.reader(f))
+    body = rows[1:]
+    kind_by_layer = {r[1]: r[2] for r in body}
+    assert kind_by_layer["adaptive"] == "adaptive_band_family"
+    assert kind_by_layer["blogit"] == "band_logit_family"
+    assert kind_by_layer["dyt"] == "dyt_family"
+
+    # adaptive_band_family: scale_l2 ≥ 0 (Dense kernel L2 is real-valued);
+    # post in [1-α, 1]
+    adaptive_row = next(r for r in body if r[1] == "adaptive")
+    adaptive_l2 = float(adaptive_row[3])
+    adaptive_post = float(adaptive_row[4])
+    assert adaptive_l2 >= 0.0
+    assert 0.9 - 1e-4 <= adaptive_post <= 1.0 + 1e-4
+
+    # band_logit_family: gamma L2 ≥ 0; post_sigmoid_scale is NaN by design
+    blogit_row = next(r for r in body if r[1] == "blogit")
+    assert float(blogit_row[3]) >= 0.0
+    assert blogit_row[4].lower() == "nan"
+
+    # dyt_family: raw alpha == 0.5 (default); post NaN
+    dyt_row = next(r for r in body if r[1] == "dyt")
+    np.testing.assert_allclose(float(dyt_row[3]), 0.5, atol=1e-6)
+    assert dyt_row[4].lower() == "nan"
+
+
+def test_weight_norm_callback_tracks_new_variants(tmp_path, dummy_data) -> None:
+    """WeightNormTrajectoryCallback auto-detects the 3 new classes via NORM_LAYER_CLASSES."""
+    model = _build_new_variants_model()
+    _ = model(tf.convert_to_tensor(dummy_data[0]))
+    cb = WeightNormTrajectoryCallback(out_dir=str(tmp_path))
+    cb.set_model(model)
+    cb.on_epoch_end(0)
+    with open(os.path.join(str(tmp_path), "weight_norm.csv")) as f:
+        rows = list(csv.reader(f))
+    layer_names = {r[1] for r in rows[1:]}
+    assert {"adaptive", "blogit", "dyt"}.issubset(layer_names)
+
+
+def test_activation_callback_tracks_new_variants(tmp_path, dummy_data) -> None:
+    """NormLayerActivationCallback records one row per outer norm layer."""
+    model = _build_new_variants_model()
+    x = tf.convert_to_tensor(dummy_data[0])
+    cb = NormLayerActivationCallback(calibration_data=x, out_dir=str(tmp_path))
+    cb.set_model(model)
+    cb.on_epoch_end(0)
+    with open(os.path.join(str(tmp_path), "activation_stats.csv")) as f:
+        rows = list(csv.reader(f))
+    body = rows[1:]
+    layer_names = {r[1] for r in body}
+    assert {"adaptive", "blogit", "dyt"}.issubset(layer_names)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

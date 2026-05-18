@@ -38,7 +38,10 @@ import numpy as np
 import tensorflow as tf
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.norms.adaptive_band_rms import AdaptiveBandRMS
+from dl_techniques.layers.norms.band_logit_norm import BandLogitNorm
 from dl_techniques.layers.norms.band_rms import BandRMS
+from dl_techniques.layers.norms.dynamic_tanh import DynamicTanh
 from dl_techniques.layers.norms.rms_norm import RMSNorm
 from dl_techniques.layers.norms.zero_centered_band_rms_norm import (
     ZeroCenteredBandRMSNorm,
@@ -51,6 +54,9 @@ NORM_LAYER_CLASSES: Tuple[type, ...] = (
     BandRMS,
     ZeroCenteredRMSNorm,
     ZeroCenteredBandRMSNorm,
+    AdaptiveBandRMS,
+    BandLogitNorm,
+    DynamicTanh,
 )
 
 
@@ -456,6 +462,68 @@ class NormInternalStatsCallback(keras.callbacks.Callback):
                     raw = float("nan")
                     post = float("nan")
                 rows.append((epoch, layer.name, "band_family", raw, post))
+            elif isinstance(layer, AdaptiveBandRMS):
+                # AdaptiveBandRMS: scaling comes from an inner Dense(kernel, bias)
+                # projecting per-sample log(RMS) to a per-feature scale logit.
+                # Record:
+                #   scale_l2_or_raw = L2(kernel)
+                #   post_sigmoid_scale = (1-α) + α·σ(5·mean(bias))  — the
+                #     scale produced by the layer when log_rms=0 (i.e. for an
+                #     input whose aggregate RMS already equals 1 after the
+                #     internal normalize step). This is a stable summary
+                #     statistic across batches; the per-sample scale itself
+                #     is data-dependent and is captured by
+                #     NormLayerActivationCallback (act_per_sample_rms_*).
+                dense = getattr(layer, "dense_layer", None)
+                if (
+                    dense is not None
+                    and getattr(dense, "kernel", None) is not None
+                    and getattr(dense, "bias", None) is not None
+                ):
+                    kernel = keras.ops.convert_to_numpy(dense.kernel).astype(np.float64)
+                    bias = keras.ops.convert_to_numpy(dense.bias).astype(np.float64)
+                    kernel_l2 = float(np.sqrt((kernel ** 2).sum()))
+                    alpha = float(layer.max_band_width)
+                    sig = 1.0 / (1.0 + np.exp(-5.0 * float(bias.mean())))
+                    post = (1.0 - alpha) + alpha * sig
+                else:
+                    kernel_l2 = float("nan")
+                    post = float("nan")
+                rows.append(
+                    (epoch, layer.name, "adaptive_band_family", kernel_l2, post)
+                )
+            elif isinstance(layer, BandLogitNorm):
+                # BandLogitNorm: scaling comes from the inner LayerNormalization's
+                # γ/β applied to the per-sample L2 scalar, then `tanh(4·…)`,
+                # then mapped to [1-α, 1]. Record:
+                #   scale_l2_or_raw = L2(gamma) of the inner LN
+                #   post_sigmoid_scale = NaN  — the variant uses tanh, not sigmoid;
+                #     the post-tanh saturation profile is data-dependent and is
+                #     captured row-wise by NormLayerActivationCallback.
+                inner_ln = getattr(layer, "norm", None)
+                gamma = getattr(inner_ln, "gamma", None) if inner_ln is not None else None
+                if gamma is not None:
+                    g = keras.ops.convert_to_numpy(gamma).astype(np.float64)
+                    gamma_l2 = float(np.sqrt((g ** 2).sum()))
+                else:
+                    gamma_l2 = float("nan")
+                rows.append(
+                    (epoch, layer.name, "band_logit_family", gamma_l2, float("nan"))
+                )
+            elif isinstance(layer, DynamicTanh):
+                # DynamicTanh: output = weight * tanh(alpha * x) + bias.
+                # Record:
+                #   scale_l2_or_raw = float(alpha)  — the scalar gain on the tanh.
+                #   post_sigmoid_scale = NaN  — no sigmoid mechanism.
+                # weight/bias trajectories are picked up by
+                # WeightNormTrajectoryCallback (which iterates layer.weights).
+                if getattr(layer, "alpha", None) is not None:
+                    alpha_raw = float(keras.ops.convert_to_numpy(layer.alpha))
+                else:
+                    alpha_raw = float("nan")
+                rows.append(
+                    (epoch, layer.name, "dyt_family", alpha_raw, float("nan"))
+                )
         with open(self._csv_path, "a", newline="") as f:
             csv.writer(f).writerows(rows)
 
