@@ -16,13 +16,16 @@ References:
       ICML 2019, https://arxiv.org/abs/1904.11486
 """
 
-from typing import Any, Dict, Optional
-
 import keras
 import numpy as np
 from keras import ops
+from typing import Any, Dict, Optional
 
-from ..utils.logger import logger
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
