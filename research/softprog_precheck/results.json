@@ -1,0 +1,56 @@
+{
+  "modes": {
+    "root": {
+      "paraphrase_n": 877,
+      "non_para_n": 1123,
+      "paraphrase_mean_jaccard": 0.8391106043329535,
+      "non_para_mean_jaccard": 0.8183140397744144,
+      "paraphrase_exact_match_rate": 0.6168757126567845,
+      "non_para_exact_match_rate": 0.5565449688334817,
+      "ratio_mean_jaccard": 1.0254139163544989,
+      "ratio_exact_match": 1.1084022805017106,
+      "random_pair_mean_jaccard": 0.03538333333333335,
+      "ratio_para_vs_random": 23.714854573705693
+    },
+    "pas": {
+      "paraphrase_n": 877,
+      "non_para_n": 1123,
+      "paraphrase_mean_jaccard": 0.6500416282058242,
+      "non_para_mean_jaccard": 0.5270936691684687,
+      "paraphrase_exact_match_rate": 0.4047890535917902,
+      "non_para_exact_match_rate": 0.27248441674087265,
+      "ratio_mean_jaccard": 1.233256375913821,
+      "ratio_exact_match": 1.4855493698809816,
+      "random_pair_mean_jaccard": 0.030333333333333334,
+      "ratio_para_vs_random": 21.429943787005193
+    },
+    "full": {
+      "paraphrase_n": 877,
+      "non_para_n": 1123,
+      "paraphrase_mean_jaccard": 0.6495665236828292,
+      "non_para_mean_jaccard": 0.5256095492515794,
+      "paraphrase_exact_match_rate": 0.4047890535917902,
+      "non_para_exact_match_rate": 0.27070347284060553,
+      "ratio_mean_jaccard": 1.235834707736481,
+      "ratio_exact_match": 1.4953227209986195,
+      "random_pair_mean_jaccard": 0.030333333333333334,
+      "ratio_para_vs_random": 21.41428100053283
+    }
+  },
+  "config": {
+    "n_pairs": 2000,
+    "seed": 0
+  },
+  "content_lemma_baseline": {
+    "paraphrase_mean_jaccard": 0.8933316963539355,
+    "non_para_mean_jaccard": 0.8919790500599796,
+    "random_pair_mean_jaccard": 0.003906276423780123,
+    "ratio_para_vs_nonpara": 1.0015164552282534,
+    "ratio_para_vs_random": 228.69136728666373
+  },
+  "coverage": {
+    "sentences_with_any_pas_tuple": 2569,
+    "total_unique_sentences": 3122,
+    "coverage_rate": 0.8228699551569507
+  }
+}
