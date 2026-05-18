@@ -91,7 +91,7 @@ class PatchMerging(keras.layers.Layer):
                          │
                          ▼
         ┌───────────────────────────────────┐
-        │  Output [batch, H/2, W/2, 2*C]   │
+        │  Output [batch, H/2, W/2, 2*C]    │
         └───────────────────────────────────┘
 
     :param dim: Number of input channels. Must be positive.
