@@ -499,3 +499,92 @@ outputs = eomt_layer(inputs={'inputs': inputs, 'mask': masks}, training=True)
 | `mask_probability`       | `float` | The probability of applying the mask during a training step.                   | `1.0`        |
 | `mask_annealing_steps`   | `int`   | Linearly anneals the mask probability from 0 to its target value over these steps. | `0`          |
 | `...`                    |         | Inherits all other arguments from `TransformerLayer` (e.g., `ffn_type`).       |              |
+
+## AdaLNZeroConditionalBlock
+
+DiT-style adaptive layer-normalization "zero" conditional transformer block, adopted from Peebles & Xie 2023 and adapted in Sobal et al.'s LeWM. Two inputs per call: content `x` of shape `(B, T, D)` and conditioning `c` broadcastable to `x`. The conditioning drives six modulation streams (shift / scale / gate for attention and FFN sub-blocks) through a single SiLU-Linear projection whose final Dense is zero-initialized — so at initialization the block is the identity map in `x`. The four sublayer groups (norms, attention, FFN, AdaLN modulation activation) are factory-configurable; leaving every factory kwarg at default reproduces the original DiT/LeWM construction bit-exactly.
+
+### Architecture
+
+```text
+x -----> Norm (no affine) --> modulate(shift_msa, scale_msa)
+                                                   |
+                                                   v
+                         causal MultiHeadAttention (self-attn)
+                                                   |
+                                          gate_msa * (.)
+                                                   |
+x = x + gate_msa * attn(...)  <-------------------+
+
+x -----> Norm (no affine) --> modulate(shift_mlp, scale_mlp)
+                                                   |
+                                                   v
+                                      FFN (e.g. MLP)
+                                                   |
+                                          gate_mlp * (.)
+                                                   |
+x = x + gate_mlp * mlp(...)   <-------------------+
+```
+
+`modulate(h, shift, scale) = h * (1 + scale) + shift`. The six modulation tensors come from one Dense(6*dim) layer with zero-initialized kernel **and** bias.
+
+### Usage (default — bit-exact DiT/LeWM)
+
+```python
+import keras
+from dl_techniques.layers.transformers import AdaLNZeroConditionalBlock
+
+dim, num_heads, dim_head, mlp_dim = 256, 4, 64, 1024
+
+x_in = keras.Input(shape=(seq_len, dim), name="x")
+c_in = keras.Input(shape=(seq_len, dim), name="c")
+y = AdaLNZeroConditionalBlock(
+    dim=dim, num_heads=num_heads, dim_head=dim_head, mlp_dim=mlp_dim,
+    dropout=0.1, use_causal_mask=True, eps=1e-6,
+)([x_in, c_in])
+model = keras.Model([x_in, c_in], y)
+```
+
+### Usage (factory-swapped sublayers)
+
+```python
+# Swap LayerNorm for RMSNorm (must disable affine via use_scale=False).
+block = AdaLNZeroConditionalBlock(
+    dim=256, num_heads=4, dim_head=64, mlp_dim=1024,
+    normalization_type="rms_norm",
+    normalization_args={"use_scale": False, "epsilon": 1e-6},
+)
+
+# Swap MLP FFN for SwiGLU.
+block = AdaLNZeroConditionalBlock(
+    dim=256, num_heads=4, dim_head=64, mlp_dim=1024,
+    ffn_type="swiglu",
+    ffn_args={"output_dim": 256, "ffn_expansion_factor": 4, "ffn_multiple_of": 16},
+)
+```
+
+**AdaLN-Zero affine invariant** (HARD requirement): the two normalization layers MUST have no learnable affine parameters — AdaLN's gate/shift/scale provides all per-channel modulation. The default `normalization_type=None` path enforces this with `center=False, scale=False`. For any custom `normalization_type` you MUST disable affine in `normalization_args` (e.g. RMSNorm: `use_scale=False`). The block does NOT silently override your args.
+
+**Factory attention contract**: when `attention_type` is set, the chosen attention layer is invoked as `self.attn(h, training=...)` — no Q/K/V split and `use_causal_mask` is **not** forwarded (attention APIs vary). If you need causal masking via a factory-swapped attention, pass `use_causal_mask` via `attention_args` or pick an attention type whose internal masking semantics fit your task.
+
+### Arguments
+
+| Argument                  | Type             | Description                                                                                  | Default |
+| ------------------------- | ---------------- | -------------------------------------------------------------------------------------------- | ------- |
+| `dim`                     | `int`            | **Required.** Model (hidden) dimension.                                                      |         |
+| `num_heads`               | `int`            | **Required.** Number of attention heads.                                                     |         |
+| `dim_head`                | `int`            | **Required.** Per-head dimension for the default MultiHeadAttention.                         |         |
+| `mlp_dim`                 | `int`            | **Required.** Hidden dimension of the FFN sub-block.                                         |         |
+| `dropout`                 | `float`          | Dropout rate (default-path attention + FFN).                                                 | `0.0`   |
+| `use_causal_mask`         | `bool`           | Apply causal self-attention mask in the default attention path.                              | `True`  |
+| `eps`                     | `float`          | Norm epsilon (default `layer_norm` path).                                                    | `1e-6`  |
+| `normalization_type`      | `Optional[str]`  | Factory normalization key (e.g. `"rms_norm"`). `None` → default `layer_norm` no-affine.      | `None`  |
+| `normalization_args`      | `Optional[Dict]` | Kwargs forwarded to `create_normalization_layer` — must disable affine yourself if needed.   | `None`  |
+| `attention_type`          | `Optional[str]`  | Factory attention key. `None` → default `keras.layers.MultiHeadAttention` (bit-exact).       | `None`  |
+| `attention_args`          | `Optional[Dict]` | Kwargs forwarded to `create_attention_layer`.                                                | `None`  |
+| `ffn_type`                | `Optional[str]`  | Factory FFN key (e.g. `"swiglu"`). `None` → default `mlp` via `MLPBlock`.                    | `None`  |
+| `ffn_args`                | `Optional[Dict]` | Kwargs forwarded to `create_ffn_layer`.                                                      | `None`  |
+| `adaln_activation_type`   | `Optional[str]`  | Activation identifier for the AdaLN modulation activation. `None` → `Activation("silu")`.    | `None`  |
+| `adaln_activation_args`   | `Optional[Dict]` | Kwargs forwarded to `resolve_activation_layer`.                                              | `None`  |
+
+References: Peebles & Xie, "Scalable Diffusion Models with Transformers" (DiT), 2023; Sobal et al., "Learning the World with Minimal Supervision" (LeWM), 2024.
