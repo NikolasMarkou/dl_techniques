@@ -69,6 +69,56 @@ class ZeroCenteredAdaptiveBandRMS(keras.layers.Layer):
     6. ``scale = (1 - alpha) + alpha * sigmoid(5 * Dense(log_rms))``
     7. ``y = x_hat * scale``
 
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        Input: x (batch, ..., features)
+                │
+                ▼
+        ┌───────────────────────────────────┐
+        │  μ = mean(x, axis, keepdims=True) │
+        └──────────────┬────────────────────┘
+                       │
+                       ▼
+        ┌───────────────────────────────────┐
+        │  x_centered = x - μ               │
+        └──────────────┬────────────────────┘
+                       │
+                       ▼
+        ┌───────────────────────────────────┐
+        │  RMS = max(√(mean(x_c²)+ε), ε)    │
+        └──────────┬────────────────────────┘
+                   │
+                   ├──────────────────────┐
+                   ▼                      ▼
+        ┌──────────────────┐   ┌──────────────────────┐
+        │ x_norm =         │   │ Aggregate RMS stats  │
+        │   x_centered/RMS │   │ to [batch, 1]        │
+        └────────┬─────────┘   └──────────┬───────────┘
+                 │                        ▼
+                 │             ┌──────────────────────┐
+                 │             │ log_rms = log(stats) │
+                 │             └──────────┬───────────┘
+                 │                        ▼
+                 │             ┌──────────────────────┐
+                 │             │ Dense → band_logits  │
+                 │             └──────────┬───────────┘
+                 │                        ▼
+                 │             ┌──────────────────────┐
+                 │             │ σ = sigmoid(5×logits)│
+                 │             │ scale = (1-α)+α×σ    │
+                 │             │ scale ∈ [1-α, 1]     │
+                 │             └──────────┬───────────┘
+                 │                        │
+                 ▼                        ▼
+        ┌───────────────────────────────────┐
+        │  output = x_norm × scale          │
+        └──────────────┬────────────────────┘
+                       │
+                       ▼
+        Output: (batch, ..., features), zero-mean, scaled into adaptive band
+
     :param max_band_width: Maximum allowed deviation from unit normalization
         (0 < alpha < 1). Controls the thickness of the adaptive spherical shell.
     :type max_band_width: float
