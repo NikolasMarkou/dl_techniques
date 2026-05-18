@@ -34,6 +34,7 @@ from keras import ops, layers, initializers, regularizers
 
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
+from ..activations import ProbabilityOutput
 
 # ---------------------------------------------------------------------
 
@@ -72,7 +73,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         │              │                                       │              │
         │              ▼                                       ▼              │
         │      ┌───────────────┐                       ┌───────────────┐      │
-        │      │ Down-Project  │ (optional)             │ Down-Project │      │
+        │      │ Down-Project  │ (optional)            │ Down-Project  │      │
         │      │   D ──► c_q   │                       │   D ──► c_kv  │      │
         │      └───────┬───────┘                       └───────┬───────┘      │
         │              │                                       │              │
@@ -142,9 +143,20 @@ class MultiHeadLatentAttention(keras.layers.Layer):
     :type rope_theta: float
     :param rope_percentage: Percentage of dimensions to apply RoPE. Defaults to 1.0.
     :type rope_percentage: float
-    :param normalization_type: Type of normalization for latent vectors.
-        Defaults to 'rms_norm'.
-    :type normalization_type: str
+    :param qk_norm_type: Type of normalization for latent vectors (Q and KV).
+        Forwarded to ``create_normalization_layer``. Defaults to 'rms_norm'.
+    :type qk_norm_type: str
+    :param qk_norm_kwargs: Optional extra keyword arguments forwarded to the
+        normalization factory for both ``q_norm`` and ``kv_norm``. Defaults to None.
+    :type qk_norm_kwargs: Optional[Dict[str, Any]]
+    :param probability_type: Strategy used to normalize attention scores into a
+        probability distribution. Forwarded to :class:`ProbabilityOutput`.
+        Defaults to ``"softmax"``. Routing/hierarchical variants are not
+        supported in this layer.
+    :type probability_type: str
+    :param probability_config: Optional configuration dict forwarded to
+        :class:`ProbabilityOutput` as ``type_config``. Defaults to None.
+    :type probability_config: Optional[Dict[str, Any]]
     :param kernel_initializer: Initializer for dense layer kernels.
         Defaults to 'glorot_uniform'.
     :type kernel_initializer: Union[str, initializers.Initializer]
@@ -171,9 +183,12 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         max_seq_len: int = 4096,
         rope_theta: float = 10000.0,
         rope_percentage: float = 1.0,
-        normalization_type: str = "rms_norm",
+        qk_norm_type: str = "rms_norm",
         kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
         kernel_regularizer: Optional[regularizers.Regularizer] = None,
+        qk_norm_kwargs: Optional[Dict[str, Any]] = None,
+        probability_type: str = "softmax",
+        probability_config: Optional[Dict[str, Any]] = None,
         **kwargs: Any
     ) -> None:
         """Initialize the Multi-Head Latent Attention layer."""
@@ -190,6 +205,17 @@ class MultiHeadLatentAttention(keras.layers.Layer):
             raise ValueError(
                 f"dropout_rate must be between 0 and 1, got {dropout_rate}"
             )
+        if probability_type in (
+            "routing",
+            "deterministic_routing",
+            "hierarchical",
+            "hierarchical_routing",
+        ):
+            raise ValueError(
+                f"probability_type '{probability_type}' is not supported by "
+                "MultiHeadLatentAttention (routing/hierarchical variants are "
+                "incompatible with the (B, H, S_q, S_kv) score shape)."
+            )
 
         # Store configuration
         self.dim = dim
@@ -204,7 +230,10 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         self.max_seq_len = max_seq_len
         self.rope_theta = rope_theta
         self.rope_percentage = rope_percentage
-        self.normalization_type = normalization_type
+        self.qk_norm_type = qk_norm_type
+        self.qk_norm_kwargs = qk_norm_kwargs
+        self.probability_type = probability_type
+        self.probability_config = probability_config
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
 
@@ -227,8 +256,9 @@ class MultiHeadLatentAttention(keras.layers.Layer):
                 name="q_down_proj"
             )
             self.q_norm = create_normalization_layer(
-                normalization_type,
-                name="q_norm"
+                qk_norm_type,
+                name="q_norm",
+                **(self.qk_norm_kwargs or {})
             )
             self.q_up_proj = layers.Dense(
                 num_heads * (qk_nope_head_dim + qk_rope_head_dim),
@@ -256,8 +286,9 @@ class MultiHeadLatentAttention(keras.layers.Layer):
             name="kv_down_proj"
         )
         self.kv_norm = create_normalization_layer(
-            normalization_type,
-            name="kv_norm"
+            qk_norm_type,
+            name="kv_norm",
+            **(self.qk_norm_kwargs or {})
         )
 
         # 3. KV Up-Projection: Generates K_nope and V from latent
@@ -298,7 +329,14 @@ class MultiHeadLatentAttention(keras.layers.Layer):
             name="output_proj"
         )
 
-        # 7. Optional Dropout on attention weights
+        # 7. Attention probability layer (replaces direct softmax)
+        self.attn_prob = ProbabilityOutput(
+            probability_type=self.probability_type,
+            type_config=self.probability_config,
+            name="attn_prob",
+        )
+
+        # 8. Optional Dropout on attention weights
         if dropout_rate > 0.0:
             self.dropout_layer = layers.Dropout(dropout_rate, name="attn_dropout")
         else:
@@ -360,9 +398,12 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         )
         self.output_proj.build(output_input_shape)
 
+        # Build attention probability layer with score shape
+        attn_shape = (q_shape[0], self.num_heads, q_shape[1], kv_shape[1])
+        self.attn_prob.build(attn_shape)
+
         # Build dropout if present
         if self.dropout_layer is not None:
-            attn_shape = (q_shape[0], self.num_heads, q_shape[1], kv_shape[1])
             self.dropout_layer.build(attn_shape)
 
         super().build(input_shape)
@@ -487,7 +528,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         if attention_mask is not None:
             scores = self._apply_attention_mask(scores, attention_mask)
 
-        attn_weights = ops.softmax(scores, axis=-1)
+        attn_weights = self.attn_prob(scores)
 
         if self.dropout_layer is not None:
             attn_weights = self.dropout_layer(attn_weights, training=training)
@@ -590,7 +631,10 @@ class MultiHeadLatentAttention(keras.layers.Layer):
             "max_seq_len": self.max_seq_len,
             "rope_theta": self.rope_theta,
             "rope_percentage": self.rope_percentage,
-            "normalization_type": self.normalization_type,
+            "qk_norm_type": self.qk_norm_type,
+            "qk_norm_kwargs": self.qk_norm_kwargs,
+            "probability_type": self.probability_type,
+            "probability_config": self.probability_config,
             "kernel_initializer": initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
         })

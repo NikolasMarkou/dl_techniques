@@ -76,6 +76,7 @@ from typing import Optional, Union, Tuple, Dict, Any
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
+from ..activations import ProbabilityOutput
 
 # ---------------------------------------------------------------------
 
@@ -187,6 +188,10 @@ class GatedAttention(keras.layers.Layer):
             bias_initializer: Union[str, initializers.Initializer] = 'zeros',
             kernel_regularizer: Optional[regularizers.Regularizer] = None,
             bias_regularizer: Optional[regularizers.Regularizer] = None,
+            probability_type: str = "softmax",
+            probability_config: Optional[Dict[str, Any]] = None,
+            qk_norm_type: str = "zero_centered_rms_norm",
+            qk_norm_kwargs: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -194,6 +199,21 @@ class GatedAttention(keras.layers.Layer):
         # Validate parameters
         self._validate_inputs(dim, num_heads, head_dim, max_seq_len,
                             rope_percentage, dropout_rate)
+
+        # Validate probability_type: routing/hierarchical variants are not
+        # compatible with attention-score normalization (they alter shape /
+        # semantics in ways gated_attention does not support).
+        _disallowed_prob_types = (
+            "routing",
+            "deterministic_routing",
+            "hierarchical",
+            "hierarchical_routing",
+        )
+        if probability_type in _disallowed_prob_types:
+            raise ValueError(
+                f"probability_type='{probability_type}' is not supported for "
+                f"GatedAttention. Disallowed types: {_disallowed_prob_types}."
+            )
 
         # Store ALL configuration parameters for serialization
         self.dim = dim
@@ -207,6 +227,10 @@ class GatedAttention(keras.layers.Layer):
         self.bias_initializer = initializers.get(bias_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.probability_type = probability_type
+        self.probability_config = probability_config
+        self.qk_norm_type = qk_norm_type
+        self.qk_norm_kwargs = qk_norm_kwargs
 
         # TRICKY POINT: When using custom head_dim, attention_dim may not equal dim
         # This requires an additional projection layer to match dimensions
@@ -255,18 +279,16 @@ class GatedAttention(keras.layers.Layer):
             name="v_linear"
         )
 
-        # Zero-Centered RMS Normalization layers
+        # Q/K normalization layers (parameterized via qk_norm_type)
         self.q_norm = create_normalization_layer(
-            'zero_centered_rms_norm',
-            epsilon=1e-6,
-            use_scale=True,
-            name='q_norm'
+            self.qk_norm_type,
+            name="q_norm",
+            **(self.qk_norm_kwargs or {}),
         )
         self.k_norm = create_normalization_layer(
-            'zero_centered_rms_norm',
-            epsilon=1e-6,
-            use_scale=True,
-            name='k_norm'
+            self.qk_norm_type,
+            name="k_norm",
+            **(self.qk_norm_kwargs or {}),
         )
         self.v_norm = create_normalization_layer(
             'zero_centered_rms_norm',
@@ -315,6 +337,13 @@ class GatedAttention(keras.layers.Layer):
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             name="output_gate_linear"
+        )
+
+        # Parameterized attention-probability layer (replaces hardcoded softmax)
+        self.attn_prob = ProbabilityOutput(
+            probability_type=self.probability_type,
+            type_config=self.probability_config,
+            name="attn_prob",
         )
 
         logger.info(f"GatedAttention initialized: dim={dim}, "
@@ -415,6 +444,12 @@ class GatedAttention(keras.layers.Layer):
         # Build output gate
         self.output_gate_linear.build((batch_size, seq_len, self.dim))
 
+        # Build the attention-probability layer with shape
+        # (batch, num_heads, seq_len, seq_len).
+        self.attn_prob.build(
+            (batch_size, self.num_heads, seq_len, seq_len)
+        )
+
         # Always call parent build at the end
         super().build(input_shape)
 
@@ -476,8 +511,8 @@ class GatedAttention(keras.layers.Layer):
             additive_mask = (1.0 - ops.cast(mask, scaled_attention_logits.dtype)) * -1e9
             scaled_attention_logits = scaled_attention_logits + additive_mask
 
-        # Softmax over the last axis (key dimension)
-        attention_weights = ops.softmax(scaled_attention_logits, axis=-1)
+        # Parameterized attention-probability transform over the key dimension
+        attention_weights = self.attn_prob(scaled_attention_logits)
 
         # Apply dropout during training
         if training and self.dropout is not None:
@@ -590,6 +625,10 @@ class GatedAttention(keras.layers.Layer):
             'bias_initializer': initializers.serialize(self.bias_initializer),
             'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
             'bias_regularizer': regularizers.serialize(self.bias_regularizer),
+            'probability_type': self.probability_type,
+            'probability_config': self.probability_config,
+            'qk_norm_type': self.qk_norm_type,
+            'qk_norm_kwargs': self.qk_norm_kwargs,
         })
         return config
 

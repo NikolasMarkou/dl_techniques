@@ -60,6 +60,8 @@ from typing import Optional, Tuple, Union, Any, List, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from ..activations import ProbabilityOutput
+from ..norms.factory import create_normalization_layer
 
 # ---------------------------------------------------------------------
 
@@ -145,9 +147,24 @@ class HopfieldAttention(keras.layers.Layer):
     :type bias_regularizer: keras.regularizers.Regularizer or None
     :param activity_regularizer: Optional regularizer for layer output.
     :type activity_regularizer: keras.regularizers.Regularizer or None
-    :param normalize_patterns: Whether to apply layer normalization to
-        projected query and key patterns. Defaults to ``True``.
-    :type normalize_patterns: bool
+    :param probability_type: Probability distribution type for attention
+        weights. Forwarded to ``ProbabilityOutput``. Defaults to
+        ``"softmax"``. Must not be one of ``"routing"``,
+        ``"deterministic_routing"``, ``"hierarchical"``, or
+        ``"hierarchical_routing"``.
+    :type probability_type: str
+    :param probability_config: Optional configuration dictionary forwarded
+        to ``ProbabilityOutput`` as ``type_config``. Defaults to ``None``.
+    :type probability_config: dict or None
+    :param qk_norm_type: Optional normalization type applied to projected
+        query and key patterns. Forwarded to ``create_normalization_layer``.
+        Defaults to ``"layer_norm"``. Pass ``None`` to disable Q/K
+        normalization.
+    :type qk_norm_type: str or None
+    :param qk_norm_kwargs: Optional keyword arguments forwarded to
+        ``create_normalization_layer`` when building the Q/K norm layers.
+        Defaults to ``None``.
+    :type qk_norm_kwargs: dict or None
     :param update_steps_max: Maximum number of iterative Hopfield update
         steps. 0 means single-step (standard attention). Must be
         non-negative. Defaults to 0.
@@ -176,9 +193,12 @@ class HopfieldAttention(keras.layers.Layer):
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         activity_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
-        normalize_patterns: bool = True,
         update_steps_max: int = 0,
         update_steps_eps: float = 1e-4,
+        probability_type: str = "softmax",
+        probability_config: Optional[Dict[str, Any]] = None,
+        qk_norm_type: Optional[str] = "layer_norm",
+        qk_norm_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -194,6 +214,17 @@ class HopfieldAttention(keras.layers.Layer):
             raise ValueError(f"update_steps_max must be non-negative, got {update_steps_max}")
         if update_steps_eps <= 0:
             raise ValueError(f"update_steps_eps must be positive, got {update_steps_eps}")
+        if probability_type in (
+            "routing",
+            "deterministic_routing",
+            "hierarchical",
+            "hierarchical_routing",
+        ):
+            raise ValueError(
+                f"probability_type={probability_type!r} is not supported for "
+                f"HopfieldAttention; routing/hierarchical variants require "
+                f"context not available here."
+            )
 
         # Store ALL configuration parameters
         self.num_heads = num_heads
@@ -206,9 +237,12 @@ class HopfieldAttention(keras.layers.Layer):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.activity_regularizer = keras.regularizers.get(activity_regularizer)
-        self.normalize_patterns = normalize_patterns
         self.update_steps_max = update_steps_max
         self.update_steps_eps = update_steps_eps
+        self.probability_type = probability_type
+        self.probability_config = probability_config
+        self.qk_norm_type = qk_norm_type
+        self.qk_norm_kwargs = qk_norm_kwargs
 
         # CREATE all sub-layers in __init__ (they are unbuilt at this point)
         # Following Pattern 2: Composite Layer from the Modern Keras 3 guide
@@ -269,14 +303,24 @@ class HopfieldAttention(keras.layers.Layer):
         else:
             self.dropout_layer = None
 
-        # Layer normalization (conditional creation)
-        if self.normalize_patterns:
-            self.layernorm = keras.layers.LayerNormalization(
-                epsilon=1e-5,
-                name="pattern_norm"
+        # Q/K normalization (conditional creation via factory)
+        if self.qk_norm_type is not None:
+            self.q_norm = create_normalization_layer(
+                self.qk_norm_type, name="q_norm", **(self.qk_norm_kwargs or {})
+            )
+            self.k_norm = create_normalization_layer(
+                self.qk_norm_type, name="k_norm", **(self.qk_norm_kwargs or {})
             )
         else:
-            self.layernorm = None
+            self.q_norm = None
+            self.k_norm = None
+
+        # Probability output for attention weights
+        self.attn_prob = ProbabilityOutput(
+            probability_type=self.probability_type,
+            type_config=self.probability_config,
+            name="attn_prob",
+        )
 
         logger.info(f"Initialized HopfieldAttention with {num_heads} heads, "
                    f"key_dim={key_dim}, value_dim={self.value_dim}")
@@ -339,11 +383,17 @@ class HopfieldAttention(keras.layers.Layer):
             # Dropout layer doesn't need explicit build as it doesn't have weights
             pass
 
-        if self.layernorm is not None:
-            # Build layer norm with the shape it will receive
-            # LayerNorm will receive (batch, num_heads, seq_len, head_dim)
-            norm_shape = (None, None, None, self.key_dim)
-            self.layernorm.build(norm_shape)
+        # Build Q/K norm layers (each receives (batch, num_heads, seq_len, key_dim))
+        norm_shape = (None, None, None, self.key_dim)
+        if self.q_norm is not None:
+            self.q_norm.build(norm_shape)
+        if self.k_norm is not None:
+            self.k_norm.build(norm_shape)
+
+        # Build attention probability layer with score shape
+        # Scores have shape (batch, num_heads, seq_len_q, seq_len_k)
+        score_shape = (None, self.num_heads, None, None)
+        self.attn_prob.build(score_shape)
 
         # Always call parent build at the end
         super().build(input_shape)
@@ -402,7 +452,7 @@ class HopfieldAttention(keras.layers.Layer):
             # Add large negative values to masked positions
             attention_scores = attention_scores + (1.0 - mask_tensor) * -1e9
 
-        attention_weights = ops.softmax(attention_scores, axis=-1)
+        attention_weights = self.attn_prob(attention_scores, training=training)
 
         # Apply dropout if configured
         if self.dropout_layer is not None:
@@ -481,10 +531,11 @@ class HopfieldAttention(keras.layers.Layer):
         key_proj = ops.transpose(key_proj, [0, 2, 1, 3])
         value_proj = ops.transpose(value_proj, [0, 2, 1, 3])
 
-        # Apply layer normalization if enabled
-        if self.layernorm is not None:
-            query_proj = self.layernorm(query_proj, training=training)
-            key_proj = self.layernorm(key_proj, training=training)
+        # Apply Q/K normalization if enabled
+        if self.q_norm is not None:
+            query_proj = self.q_norm(query_proj, training=training)
+        if self.k_norm is not None:
+            key_proj = self.k_norm(key_proj, training=training)
 
         # Initialize Hopfield update loop
         current_query = query_proj
@@ -579,9 +630,12 @@ class HopfieldAttention(keras.layers.Layer):
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
             "activity_regularizer": keras.regularizers.serialize(self.activity_regularizer),
-            "normalize_patterns": self.normalize_patterns,
             "update_steps_max": self.update_steps_max,
             "update_steps_eps": self.update_steps_eps,
+            "probability_type": self.probability_type,
+            "probability_config": self.probability_config,
+            "qk_norm_type": self.qk_norm_type,
+            "qk_norm_kwargs": self.qk_norm_kwargs,
         })
         return config
 
