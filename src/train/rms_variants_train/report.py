@@ -723,6 +723,239 @@ def _md_hypothesis_verdict_block(hyp: pd.DataFrame) -> str:
     return "\n".join(out) + "\n"
 
 
+# ---------------------------------------------------------------------
+# Overall recommendation (Refinement B — plan_2026-05-18_6776f8ba step 3)
+# ---------------------------------------------------------------------
+
+# DECISION plan_2026-05-18_6776f8ba/D-002: pre-registered overall-recommendation
+# rules. The 4-slot taxonomy (RECOMMENDED_DEFAULT / RECOMMENDED_NICHE / NULL /
+# AVOID) and the thresholds below are FROZEN at plan-approval time. Any change
+# to OVERALL_RULES after this plan is approved requires a new PIVOT entry in
+# decisions.md — NOT a silent edit. Rationale: locking the rules pre-sweep
+# eliminates curation bias (the temptation to tweak thresholds until the data
+# tells the story we wanted). See plan.md Pre-Mortem scenario 3 for the
+# falsification trigger (rules collapse / rules never recommend AVOID).
+OVERALL_RULES: Dict[str, Any] = {
+    # Headline-PASS over baseline at p < 0.05 with correct direction.
+    "headline_pass_required_for_recommend": True,
+    # Hypothesis registry CONFIRMED required for RECOMMENDED_DEFAULT.
+    "hypothesis_confirm_required_for_default": True,
+    # Compute overhead vs rms_norm — strict ceiling for RECOMMENDED_*.
+    "overhead_ceiling_step_time_ratio": 1.5,
+    # Robustness CRITERIA: calibration ECE delta vs rms_norm baseline must
+    # NOT regress by more than this (positive = worse calibration).
+    "calibration_ece_delta_max": 0.02,
+    # Robustness CRITERIA: distribution-shift accuracy delta — recommended
+    # variants must NOT lose more than this many points on shifted data.
+    "robustness_shift_acc_delta_min": -0.05,
+    # AVOID trigger: headline FAIL OR hypothesis REJECTED on a non-off-label
+    # cell.
+    "avoid_on_headline_fail": True,
+    "avoid_on_hypothesis_rejected": True,
+}
+
+
+def compute_overall_recommendation(
+    headline_df: pd.DataFrame,
+    hypothesis_df: pd.DataFrame,
+    calibration_df: Optional[pd.DataFrame] = None,
+    robustness_df: Optional[pd.DataFrame] = None,
+    overhead_df: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """Produce a frozen-rule overall recommendation per ``norm_type``.
+
+    Inputs (any may be empty / None — degrades to NULL gracefully):
+    - ``headline_df``: rows from ``_aggregate_headline`` (with the ``verdict``
+      column added). Columns: ``experiment, norm_type, mode, verdict``.
+    - ``hypothesis_df``: rows from ``_compute_hypothesis_verdicts``. Columns:
+      ``experiment, norm_type, mode, hypothesis_verdict``.
+    - ``calibration_df``: optional. Columns: ``norm_type, ece_delta_vs_baseline``.
+    - ``robustness_df``: optional. Columns: ``norm_type, shift_acc_delta_vs_baseline``.
+    - ``overhead_df``: optional. From ``norm_overhead_bench``. Columns:
+      ``norm, params, mean_step_ms_fp32`` (and others). The baseline is
+      ``rms_norm``; ratio = norm_step / baseline_step.
+
+    Returns a DataFrame indexed by ``norm_type`` with columns:
+        norm_type, recommendation, reason
+    where ``recommendation`` is one of:
+        - ``RECOMMENDED_DEFAULT``: passes every gate including hypothesis CONFIRMED.
+        - ``RECOMMENDED_NICHE``: passes headline + overhead, but hypothesis is
+          INCONCLUSIVE (mechanism not confirmed; still a viable substitute).
+        - ``NULL``: indistinguishable from baseline; no harm, no gain.
+        - ``AVOID``: headline FAIL on any non-off-label cell, OR hypothesis
+          REJECTED on any cell, OR overhead > ceiling without redeeming PASS.
+
+    The function is pure: no I/O, no side effects.
+    """
+    rules = OVERALL_RULES
+    norms_seen = set()
+    if not headline_df.empty:
+        norms_seen.update(headline_df["norm_type"].unique().tolist())
+    if not hypothesis_df.empty:
+        norms_seen.update(hypothesis_df["norm_type"].unique().tolist())
+    for df in (calibration_df, robustness_df):
+        if df is not None and not df.empty and "norm_type" in df.columns:
+            norms_seen.update(df["norm_type"].unique().tolist())
+    if overhead_df is not None and not overhead_df.empty and "norm" in overhead_df.columns:
+        norms_seen.update(overhead_df["norm"].unique().tolist())
+
+    # Baseline step time (overhead_df is keyed on `norm`, not `norm_type`).
+    baseline_step = None
+    if (
+        overhead_df is not None
+        and not overhead_df.empty
+        and "norm" in overhead_df.columns
+        and "mean_step_ms_fp32" in overhead_df.columns
+    ):
+        base_rows = overhead_df[overhead_df["norm"] == BASELINE_NORM]
+        if not base_rows.empty:
+            v = float(base_rows.iloc[0]["mean_step_ms_fp32"])
+            if np.isfinite(v) and v > 0:
+                baseline_step = v
+
+    out: List[Dict[str, Any]] = []
+    for norm in sorted(norms_seen):
+        if norm == BASELINE_NORM:
+            # Baseline is itself the reference — emit NULL with a clear reason.
+            out.append({
+                "norm_type": norm,
+                "recommendation": "NULL",
+                "reason": "baseline reference; not self-recommending",
+            })
+            continue
+
+        reasons: List[str] = []
+
+        # --- headline checks ---
+        h_rows = headline_df[headline_df["norm_type"] == norm] if not headline_df.empty else pd.DataFrame()
+        # Eligible (non-off-label) cells only.
+        if not h_rows.empty:
+            eligible = h_rows[h_rows["verdict"] != "n/a (off-label)"]
+            n_pass = int((eligible["verdict"] == "pass").sum())
+            n_fail = int((eligible["verdict"] == "fail").sum())
+            n_indis = int((eligible["verdict"] == "indistinguishable").sum())
+        else:
+            n_pass = n_fail = n_indis = 0
+
+        if rules["avoid_on_headline_fail"] and n_fail > 0:
+            out.append({
+                "norm_type": norm,
+                "recommendation": "AVOID",
+                "reason": f"headline FAIL in {n_fail} non-off-label cell(s)",
+            })
+            continue
+
+        # --- hypothesis check ---
+        hyp_rows = hypothesis_df[hypothesis_df["norm_type"] == norm] if not hypothesis_df.empty else pd.DataFrame()
+        n_rejected = int((hyp_rows["hypothesis_verdict"] == "REJECTED").sum()) if not hyp_rows.empty else 0
+        n_confirmed = int((hyp_rows["hypothesis_verdict"] == "CONFIRMED").sum()) if not hyp_rows.empty else 0
+
+        if rules["avoid_on_hypothesis_rejected"] and n_rejected > 0:
+            out.append({
+                "norm_type": norm,
+                "recommendation": "AVOID",
+                "reason": f"hypothesis REJECTED in {n_rejected} cell(s)",
+            })
+            continue
+
+        # --- overhead check ---
+        overhead_ratio: Optional[float] = None
+        if baseline_step is not None and overhead_df is not None and not overhead_df.empty:
+            n_rows = overhead_df[overhead_df["norm"] == norm]
+            if not n_rows.empty:
+                v = float(n_rows.iloc[0]["mean_step_ms_fp32"])
+                if np.isfinite(v) and v > 0:
+                    overhead_ratio = v / baseline_step
+        if (
+            overhead_ratio is not None
+            and overhead_ratio > rules["overhead_ceiling_step_time_ratio"]
+        ):
+            # Overhead too high. If headline still PASSes, we accept NULL
+            # (the gain doesn't justify the cost); if no PASS, AVOID.
+            if n_pass > 0:
+                out.append({
+                    "norm_type": norm,
+                    "recommendation": "NULL",
+                    "reason": (
+                        f"overhead ratio {overhead_ratio:.2f}x exceeds ceiling "
+                        f"{rules['overhead_ceiling_step_time_ratio']}x; "
+                        f"headline gain insufficient to justify cost"
+                    ),
+                })
+            else:
+                out.append({
+                    "norm_type": norm,
+                    "recommendation": "AVOID",
+                    "reason": (
+                        f"overhead ratio {overhead_ratio:.2f}x exceeds ceiling "
+                        f"and no headline PASS observed"
+                    ),
+                })
+            continue
+
+        # --- calibration / robustness regressions block recommendation ---
+        cal_delta: Optional[float] = None
+        if calibration_df is not None and not calibration_df.empty:
+            r = calibration_df[calibration_df["norm_type"] == norm]
+            if not r.empty and "ece_delta_vs_baseline" in r.columns:
+                v = float(r.iloc[0]["ece_delta_vs_baseline"])
+                if np.isfinite(v):
+                    cal_delta = v
+        if cal_delta is not None and cal_delta > rules["calibration_ece_delta_max"]:
+            out.append({
+                "norm_type": norm,
+                "recommendation": "NULL",
+                "reason": f"calibration ECE delta {cal_delta:+.4f} exceeds {rules['calibration_ece_delta_max']}",
+            })
+            continue
+
+        rob_delta: Optional[float] = None
+        if robustness_df is not None and not robustness_df.empty:
+            r = robustness_df[robustness_df["norm_type"] == norm]
+            if not r.empty and "shift_acc_delta_vs_baseline" in r.columns:
+                v = float(r.iloc[0]["shift_acc_delta_vs_baseline"])
+                if np.isfinite(v):
+                    rob_delta = v
+        if rob_delta is not None and rob_delta < rules["robustness_shift_acc_delta_min"]:
+            out.append({
+                "norm_type": norm,
+                "recommendation": "NULL",
+                "reason": f"robustness shift acc delta {rob_delta:+.4f} below floor {rules['robustness_shift_acc_delta_min']}",
+            })
+            continue
+
+        # --- final recommendation slot ---
+        if n_pass >= 2 and (not rules["hypothesis_confirm_required_for_default"] or n_confirmed >= 1):
+            out.append({
+                "norm_type": norm,
+                "recommendation": "RECOMMENDED_DEFAULT",
+                "reason": (
+                    f"headline PASS in {n_pass} cells; hypothesis CONFIRMED "
+                    f"in {n_confirmed}; overhead within ceiling"
+                ),
+            })
+        elif n_pass >= 1:
+            out.append({
+                "norm_type": norm,
+                "recommendation": "RECOMMENDED_NICHE",
+                "reason": (
+                    f"headline PASS in {n_pass} cell(s); hypothesis not "
+                    f"CONFIRMED (n_confirmed={n_confirmed})"
+                ),
+            })
+        else:
+            out.append({
+                "norm_type": norm,
+                "recommendation": "NULL",
+                "reason": (
+                    f"no headline PASS (indis={n_indis}, fail={n_fail}); "
+                    f"behaves like baseline"
+                ),
+            })
+
+    return pd.DataFrame(out, columns=["norm_type", "recommendation", "reason"])
+
+
 def write_report(df: pd.DataFrame, *, out_dir: str) -> None:
     """Write ``summary.md`` aggregating ``df`` (the merged ``all_runs.csv``)."""
     headline = _aggregate_headline(df)
@@ -809,6 +1042,30 @@ def write_report(df: pd.DataFrame, *, out_dir: str) -> None:
     convergence.to_csv(os.path.join(out_dir, "convergence_summary.csv"), index=False)
     regime_delta.to_csv(os.path.join(out_dir, "regime_delta_summary.csv"), index=False)
     hyp.to_csv(os.path.join(out_dir, "hypothesis_verdicts.csv"), index=False)
+
+    # Refinement B: overall recommendation (frozen rules, D-002 anchor).
+    # Best-effort: load overhead.csv / calibration_summary.csv / robustness_summary.csv
+    # from out_dir if present; otherwise pass None and rules degrade gracefully.
+    def _maybe_read(name: str) -> Optional[pd.DataFrame]:
+        path = os.path.join(out_dir, name)
+        if not os.path.exists(path):
+            return None
+        try:
+            return pd.read_csv(path)
+        except (pd.errors.EmptyDataError, FileNotFoundError):
+            return None
+
+    overhead_df = _maybe_read("overhead.csv")
+    calibration_df = _maybe_read("calibration_summary.csv")
+    robustness_df = _maybe_read("robustness_summary.csv")
+    try:
+        overall = compute_overall_recommendation(
+            headline, hyp, calibration_df, robustness_df, overhead_df
+        )
+    except (KeyError, ValueError) as e:
+        logger.warning(f"[report] compute_overall_recommendation failed: {e}")
+        overall = pd.DataFrame(columns=["norm_type", "recommendation", "reason"])
+    overall.to_csv(os.path.join(out_dir, "overall_recommendation.csv"), index=False)
     logger.info(f"[report] wrote {summary_path}")
 
 
