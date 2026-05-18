@@ -120,7 +120,10 @@ class TestMultiHeadLatentAttention:
         assert layer.max_seq_len == 4096
         assert layer.rope_theta == 10000.0
         assert layer.rope_percentage == 1.0
-        assert layer.normalization_type == "rms_norm"
+        assert layer.qk_norm_type == "rms_norm"
+        assert layer.qk_norm_kwargs is None
+        assert layer.probability_type == "softmax"
+        assert layer.probability_config is None
         assert layer.kernel_regularizer is None
 
     def test_initialization_with_q_compression(self):
@@ -167,7 +170,7 @@ class TestMultiHeadLatentAttention:
             max_seq_len=8192,
             rope_theta=50000.0,
             rope_percentage=0.5,
-            normalization_type="rms_norm",
+            qk_norm_type="rms_norm",
             kernel_initializer="glorot_uniform",
             kernel_regularizer=custom_regularizer
         )
@@ -495,7 +498,7 @@ class TestMultiHeadLatentAttention:
             max_seq_len=8192,
             rope_theta=50000.0,
             rope_percentage=0.5,
-            normalization_type="rms_norm",
+            qk_norm_type="rms_norm",
             kernel_initializer="glorot_uniform",
             kernel_regularizer=keras.regularizers.L2(1e-4)
         )
@@ -507,7 +510,8 @@ class TestMultiHeadLatentAttention:
             "dim", "num_heads", "kv_latent_dim", "q_latent_dim",
             "qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim",
             "dropout_rate", "use_bias", "max_seq_len", "rope_theta",
-            "rope_percentage", "normalization_type",
+            "rope_percentage", "qk_norm_type", "qk_norm_kwargs",
+            "probability_type", "probability_config",
             "kernel_initializer", "kernel_regularizer"
         ]
         for key in required_keys:
@@ -879,7 +883,7 @@ class TestMultiHeadLatentAttention:
         for norm_type in ["rms_norm", "layer_norm"]:
             layer = MultiHeadLatentAttention(
                 dim=256, num_heads=8, kv_latent_dim=64,
-                normalization_type=norm_type
+                qk_norm_type=norm_type
             )
 
             output = layer(input_tensor)

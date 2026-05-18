@@ -49,7 +49,8 @@ class TestLighthouseAttention:
         assert layer.top_k == 1536
         assert layer.scorer == "norm"
         assert layer.full_attention is False
-        assert layer.normalization_type == "rms_norm"
+        assert layer.qk_norm_type == "rms_norm"
+        assert layer.probability_type == "softmax"
 
     def test_invalid_args(self):
         with pytest.raises(ValueError):
@@ -200,7 +201,8 @@ class TestLighthouseAttention:
             pooling_factor=4,
             top_k=20,
             full_attention=False,
-            normalization_type="rms_norm",
+            qk_norm_type="rms_norm",
+            probability_type="softmax",
             dropout_rate=0.0,
         )
         config = layer.get_config()
@@ -216,7 +218,8 @@ class TestLighthouseAttention:
             "top_k",
             "scorer",
             "full_attention",
-            "normalization_type",
+            "qk_norm_type",
+            "probability_type",
             "use_bias",
             "dropout_rate",
         ):

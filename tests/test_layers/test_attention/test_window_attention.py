@@ -33,18 +33,20 @@ def build_transformer_block(inputs, dim, window_size, num_heads, **kwargs):
 # Shared configurations for forward pass tests
 common_configs = [
     # Grid mode variations
-    {"partition_mode": "grid", "attention_mode": "linear", "normalization": "softmax",
+    {"partition_mode": "grid", "attention_mode": "linear", "probability_type": "softmax",
      "use_relative_position_bias": True},
-    {"partition_mode": "grid", "attention_mode": "kan_key", "normalization": "softmax",
+    {"partition_mode": "grid", "attention_mode": "kan_key", "probability_type": "softmax",
      "use_relative_position_bias": True},
-    {"partition_mode": "grid", "attention_mode": "linear", "normalization": "adaptive_softmax",
+    {"partition_mode": "grid", "attention_mode": "linear", "probability_type": "adaptive",
      "use_relative_position_bias": False},
     # Zigzag mode variations
-    {"partition_mode": "zigzag", "attention_mode": "linear", "normalization": "softmax",
+    {"partition_mode": "zigzag", "attention_mode": "linear", "probability_type": "softmax",
      "use_relative_position_bias": False},
-    {"partition_mode": "zigzag", "attention_mode": "kan_key", "normalization": "hierarchical_routing",
+    # hierarchical_routing is disallowed at score level; substitute sparsemax for
+    # generic alt-to-softmax coverage.
+    {"partition_mode": "zigzag", "attention_mode": "kan_key", "probability_type": "sparsemax",
      "use_relative_position_bias": False},
-    {"partition_mode": "zigzag", "attention_mode": "linear", "normalization": "softmax",
+    {"partition_mode": "zigzag", "attention_mode": "linear", "probability_type": "softmax",
      "use_relative_position_bias": True},
 ]
 
@@ -68,7 +70,7 @@ class TestWindowAttention:
         inner_attn = layer.attention
         assert isinstance(inner_attn, SingleWindowAttention)
         assert inner_attn.attention_mode == "linear"
-        assert inner_attn.normalization == "softmax"
+        assert inner_attn.probability_type == "softmax"
         assert inner_attn.use_relative_position_bias is True
         assert hasattr(inner_attn, "qkv")
         assert not hasattr(inner_attn, "query")
@@ -91,16 +93,20 @@ class TestWindowAttention:
         assert not hasattr(inner_attn, "qkv")
         assert inner_attn.kan_grid_size == 5  # Default value
 
-    @pytest.mark.parametrize("norm_mode", ["adaptive_softmax", "hierarchical_routing"])
-    def test_initialization_advanced_normalization(self, norm_mode):
-        """Test initialization with advanced normalization schemes."""
-        layer = WindowAttention(dim=96, window_size=7, num_heads=4, normalization=norm_mode)
+    @pytest.mark.parametrize("prob_type", ["adaptive", "sparsemax"])
+    def test_initialization_advanced_probability(self, prob_type):
+        """Test initialization with advanced probability normalization schemes."""
+        layer = WindowAttention(dim=96, window_size=7, num_heads=4, probability_type=prob_type)
         inner_attn = layer.attention
-        assert inner_attn.normalization == norm_mode
-        if norm_mode == "adaptive_softmax":
-            assert hasattr(inner_attn, "adaptive_softmax")
-        elif norm_mode == "hierarchical_routing":
-            assert hasattr(inner_attn, "hierarchical_routing")
+        assert inner_attn.probability_type == prob_type
+        assert hasattr(inner_attn, "attn_prob")
+
+    @pytest.mark.parametrize("prob_type", ["hierarchical_routing", "routing",
+                                            "deterministic_routing", "hierarchical"])
+    def test_initialization_rejects_score_level_routing(self, prob_type):
+        """Score-level routing variants are structurally incompatible with windowed scores."""
+        with pytest.raises(ValueError):
+            WindowAttention(dim=96, window_size=7, num_heads=4, probability_type=prob_type)
 
     def test_initialization_no_relative_bias(self):
         """Test explicit disabling of relative position bias."""
@@ -219,8 +225,8 @@ class TestWindowAttention:
         [
             {"attention_mode": "linear", "use_relative_position_bias": True},
             {"attention_mode": "kan_key", "use_relative_position_bias": False},
-            {"normalization": "adaptive_softmax"},
-            {"normalization": "hierarchical_routing"},
+            {"probability_type": "adaptive"},
+            {"probability_type": "sparsemax"},
         ]
     )
     @pytest.mark.parametrize("window_size", [3, 4])
@@ -252,9 +258,9 @@ class TestWindowAttention:
             },
             # Zigzag mode with adaptive softmax and different window size
             {
-                "partition_mode": "zigzag", "normalization": "adaptive_softmax", "window_size": 5,
+                "partition_mode": "zigzag", "probability_type": "adaptive", "window_size": 5,
                 "use_relative_position_bias": False,
-                "adaptive_softmax_config": {"min_temp": 0.1}
+                "probability_config": {"min_temp": 0.1}
             },
             # Standard default config with a non-default window size
             {"window_size": 6},
@@ -282,7 +288,7 @@ class TestWindowAttention:
             {"partition_mode": "grid", "name": "grid_attn", "window_size": 7, "num_heads": 3},
             {"partition_mode": "zigzag", "attention_mode": "kan_key", "name": "zigzag_kan_attn", "window_size": 5,
              "num_heads": 4},
-            {"partition_mode": "grid", "normalization": "adaptive_softmax", "name": "grid_adaptive",
+            {"partition_mode": "grid", "probability_type": "adaptive", "name": "grid_adaptive",
              "window_size": 4, "num_heads": 2}
         ]
     )
@@ -350,11 +356,11 @@ class TestWindowAttention:
         """Test the adaptive softmax attention factory function and kwarg passthrough."""
         config = {"min_temp": 0.5}
         layer = create_adaptive_softmax_window_attention(
-            dim=96, window_size=7, num_heads=4, adaptive_softmax_config=config
+            dim=96, window_size=7, num_heads=4, probability_config=config
         )
-        assert layer.attention.normalization == "adaptive_softmax"
+        assert layer.attention.probability_type == "adaptive"
         assert layer.partition_mode == "grid"  # Default partition mode
-        assert layer.adaptive_softmax_config == config
+        assert layer.probability_config == config
 
 
 if __name__ == "__main__":

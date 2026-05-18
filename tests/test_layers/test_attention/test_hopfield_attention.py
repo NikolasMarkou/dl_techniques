@@ -39,7 +39,8 @@ class TestHopfieldAttentionInitialization:
         assert layer.kernel_regularizer is None
         assert layer.bias_regularizer is None
         assert layer.activity_regularizer is None
-        assert layer.normalize_patterns is True
+        assert layer.qk_norm_type == "layer_norm"
+        assert layer.probability_type == "softmax"
         assert layer.update_steps_max == 0
         assert layer.update_steps_eps == 1e-4
 
@@ -56,7 +57,7 @@ class TestHopfieldAttentionInitialization:
             kernel_regularizer="l2",
             bias_regularizer="l1",
             activity_regularizer="l2",
-            normalize_patterns=False,
+            qk_norm_type=None,
             update_steps_max=3,
             update_steps_eps=1e-3
         )
@@ -71,7 +72,7 @@ class TestHopfieldAttentionInitialization:
         assert isinstance(layer.kernel_regularizer, keras.regularizers.L2)
         assert isinstance(layer.bias_regularizer, keras.regularizers.L1)
         assert isinstance(layer.activity_regularizer, keras.regularizers.L2)
-        assert layer.normalize_patterns is False
+        assert layer.qk_norm_type is None
         assert layer.update_steps_max == 3
         assert layer.update_steps_eps == 1e-3
 
@@ -129,7 +130,8 @@ class TestHopfieldAttentionBuild:
         assert layer.key_dense is not None
         assert layer.value_dense is not None
         assert layer.output_dense is not None
-        assert layer.layernorm is not None  # normalize_patterns=True by default
+        assert layer.q_norm is not None  # qk_norm_type='layer_norm' by default
+        assert layer.k_norm is not None
         assert layer.dropout_layer is None  # dropout=0.0 by default
 
         # Check sublayer configurations
@@ -165,10 +167,11 @@ class TestHopfieldAttentionBuild:
 
     def test_build_without_layer_norm(self):
         """Test building without layer normalization."""
-        layer = HopfieldAttention(num_heads=8, key_dim=64, normalize_patterns=False)
+        layer = HopfieldAttention(num_heads=8, key_dim=64, qk_norm_type=None)
         layer.build((None, 32, 512))
 
-        assert layer.layernorm is None
+        assert layer.q_norm is None
+        assert layer.k_norm is None
 
     def test_build_input_shape_storage(self):
         """Test that build input shape is stored for serialization."""
@@ -337,7 +340,7 @@ class TestHopfieldAttentionSerialization:
             value_dim=48,
             dropout_rate=0.1,
             use_bias=False,
-            normalize_patterns=False,
+            qk_norm_type=None,
             update_steps_max=3,
             update_steps_eps=1e-3
         )
@@ -350,9 +353,13 @@ class TestHopfieldAttentionSerialization:
         assert config["value_dim"] == 48
         assert config["dropout_rate"] == 0.1
         assert config["use_bias"] is False
-        assert config["normalize_patterns"] is False
+        assert config["qk_norm_type"] is None
+        assert config["probability_type"] == "softmax"
+        assert "qk_norm_kwargs" in config
+        assert "probability_config" in config
         assert config["update_steps_max"] == 3
         assert config["update_steps_eps"] == 1e-3
+        assert "normalize_patterns" not in config
 
         # Check serialized initializers/regularizers
         assert "kernel_initializer" in config
@@ -368,7 +375,7 @@ class TestHopfieldAttentionSerialization:
             key_dim=32,
             value_dim=48,
             dropout_rate=0.1,
-            normalize_patterns=False
+            qk_norm_type=None
         )
 
         config = original_layer.get_config()
@@ -379,7 +386,8 @@ class TestHopfieldAttentionSerialization:
         assert new_layer.key_dim == original_layer.key_dim
         assert new_layer.value_dim == original_layer.value_dim
         assert new_layer.dropout_rate == original_layer.dropout_rate
-        assert new_layer.normalize_patterns == original_layer.normalize_patterns
+        assert new_layer.qk_norm_type == original_layer.qk_norm_type
+        assert new_layer.probability_type == original_layer.probability_type
 
     def test_build_config_serialization(self):
         """Test build configuration serialization."""
@@ -407,7 +415,7 @@ class TestHopfieldAttentionSerialization:
             num_heads=4,
             key_dim=32,
             dropout_rate=0.1,
-            normalize_patterns=True
+            qk_norm_type='layer_norm'
         )
 
         # Build layer
@@ -512,14 +520,14 @@ class TestHopfieldAttentionAdvancedFeatures:
         layer_with_norm = HopfieldAttention(
             num_heads=4,
             key_dim=32,
-            normalize_patterns=True
+            qk_norm_type='layer_norm'
         )
 
         # Layer without normalization
         layer_without_norm = HopfieldAttention(
             num_heads=4,
             key_dim=32,
-            normalize_patterns=False
+            qk_norm_type=None
         )
 
         inputs = keras.random.normal((2, 16, 256))

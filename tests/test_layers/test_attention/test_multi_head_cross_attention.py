@@ -2,8 +2,9 @@
 
 This module contains comprehensive tests for both the MultiHeadCrossAttention layer
 and the RoutingProbabilitiesLayer, validating their functionality independently and
-in integration, including cross-attention, self-attention, masking, adaptive softmax,
-hierarchical routing, and serialization.
+in integration, including cross-attention, self-attention, masking, the unified
+``probability_type`` API (softmax / sparsemax / threshmax / adaptive), and
+serialization.
 """
 
 import pytest
@@ -527,11 +528,12 @@ class TestMultiHeadCrossAttention:
         assert layer.dropout_rate == 0.0
         assert layer.shared_qk_projections is False
         assert layer.use_bias is True
-        assert layer.use_adaptive_softmax is False
-        assert layer.use_hierarchical_routing is False
+        assert layer.probability_type == "softmax"
+        assert layer.probability_config is None
+        assert layer.qk_norm_type is None
+        assert layer.qk_norm_kwargs is None
         assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
-        assert layer.adaptive_softmax is None
-        assert layer.hierarchical_routing is None
+        assert layer.attn_prob is not None
 
     def test_initialization_custom(self):
         """Test initialization with custom parameters."""
@@ -545,30 +547,40 @@ class TestMultiHeadCrossAttention:
             kernel_initializer="he_normal",
             kernel_regularizer=custom_regularizer,
             use_bias=False,
-            use_adaptive_softmax=True,
-            adaptive_softmax_config=adaptive_config
+            probability_type="adaptive",
+            probability_config=adaptive_config,
         )
 
         assert layer.dim == 128
         assert layer.num_heads == 16
         assert layer.dropout_rate == 0.1
         assert layer.use_bias is False
-        assert layer.use_adaptive_softmax is True
+        assert layer.probability_type == "adaptive"
+        assert layer.probability_config == adaptive_config
         assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
         assert layer.kernel_regularizer == custom_regularizer
-        assert layer.adaptive_softmax is not None
+        assert layer.attn_prob is not None
 
-    def test_initialization_hierarchical_routing(self):
-        """Test initialization with hierarchical routing enabled."""
-        layer = MultiHeadCrossAttention(
-            dim=64,
-            num_heads=8,
-            use_hierarchical_routing=True
-        )
+    def test_initialization_hierarchical_routing_rejected(self):
+        """``probability_type='hierarchical'`` must be rejected.
 
-        assert layer.use_hierarchical_routing is True
-        assert layer.hierarchical_routing is not None
-        assert isinstance(layer.hierarchical_routing, RoutingProbabilitiesLayer)
+        Routing/hierarchical strategies consume FEATURES and require a fixed
+        ``output_dim``; they cannot operate on attention-score logits whose
+        last dimension is the dynamic kv sequence length.
+        """
+        with pytest.raises(ValueError, match="not supported"):
+            MultiHeadCrossAttention(
+                dim=64,
+                num_heads=8,
+                probability_type="hierarchical",
+            )
+
+        with pytest.raises(ValueError, match="not supported"):
+            MultiHeadCrossAttention(
+                dim=64,
+                num_heads=8,
+                probability_type="routing",
+            )
 
     def test_invalid_dim_not_divisible(self):
         """Test that invalid dim raises ValueError."""
@@ -581,28 +593,20 @@ class TestMultiHeadCrossAttention:
             MultiHeadCrossAttention(
                 dim=64,
                 num_heads=8,
-                use_adaptive_softmax=True,
-                adaptive_softmax_config={"min_temp": 0}
+                probability_type="adaptive",
+                probability_config={"min_temp": 0},
             )
 
-    def test_mutually_exclusive_normalization(self):
-        """Test that both adaptive softmax and hierarchical routing can be used."""
-        # Both should be allowed independently
-        layer1 = MultiHeadCrossAttention(
-            dim=64,
-            num_heads=8,
-            use_adaptive_softmax=True
-        )
-        assert layer1.use_adaptive_softmax is True
-        assert layer1.use_hierarchical_routing is False
-
-        layer2 = MultiHeadCrossAttention(
-            dim=64,
-            num_heads=8,
-            use_hierarchical_routing=True
-        )
-        assert layer2.use_adaptive_softmax is False
-        assert layer2.use_hierarchical_routing is True
+    def test_alternative_probability_types(self):
+        """Test alternative (non-softmax) probability types are accepted."""
+        for ptype in ("softmax", "sparsemax", "threshmax", "adaptive"):
+            layer = MultiHeadCrossAttention(
+                dim=64,
+                num_heads=8,
+                probability_type=ptype,
+            )
+            assert layer.probability_type == ptype
+            assert layer.attn_prob is not None
 
     # ==================== Build Process Tests ====================
 
@@ -623,17 +627,17 @@ class TestMultiHeadCrossAttention:
         assert layer.qkv_dense is not None and layer.qkv_dense.built
         assert layer.q_dense is None and layer.kv_dense is None
 
-    def test_build_hierarchical_routing(self, query_input, kv_input):
-        """Test build process with hierarchical routing."""
+    def test_build_alternative_probability(self, query_input, kv_input):
+        """Test build process with an alternative (sparsemax) probability type."""
         layer = MultiHeadCrossAttention(
             dim=64,
             num_heads=8,
-            use_hierarchical_routing=True
+            probability_type="sparsemax",
         )
         output = layer(query_input, kv_input)
 
-        # After calling the layer, hierarchical routing should be built
-        assert layer.hierarchical_routing.built is True
+        # After calling the layer, attn_prob should be built
+        assert layer.attn_prob.built is True
         # Check output shape is correct
         assert output.shape == query_input.shape
 
@@ -653,13 +657,27 @@ class TestMultiHeadCrossAttention:
 
     # ==================== Forward Pass Tests ====================
 
-    def test_forward_pass_hierarchical_routing(self, query_input, kv_input):
-        """Test forward pass with hierarchical routing."""
+    def test_forward_pass_sparsemax(self, query_input, kv_input):
+        """Test forward pass with sparsemax probability type."""
         layer = MultiHeadCrossAttention(
             dim=64,
             num_heads=8,
-            use_hierarchical_routing=True,
-            dropout_rate=0.0
+            probability_type="sparsemax",
+            dropout_rate=0.0,
+        )
+        output = layer(query_input, kv_input, training=False)
+
+        assert output.shape == query_input.shape
+        assert not tf.reduce_any(tf.math.is_nan(output))
+        assert not tf.reduce_any(tf.math.is_inf(output))
+
+    def test_forward_pass_threshmax(self, query_input, kv_input):
+        """Test forward pass with threshmax probability type."""
+        layer = MultiHeadCrossAttention(
+            dim=64,
+            num_heads=8,
+            probability_type="threshmax",
+            dropout_rate=0.0,
         )
         output = layer(query_input, kv_input, training=False)
 
@@ -672,7 +690,7 @@ class TestMultiHeadCrossAttention:
         layer = MultiHeadCrossAttention(
             dim=64,
             num_heads=8,
-            use_adaptive_softmax=True
+            probability_type="adaptive",
         )
         output = layer(query_input, kv_input)
 
@@ -696,17 +714,17 @@ class TestMultiHeadCrossAttention:
         output_standard = layer_standard(query_input, kv_input, training=False)
 
         tf.random.set_seed(42)
-        layer_routing = MultiHeadCrossAttention(
+        layer_alt = MultiHeadCrossAttention(
             dim=64,
             num_heads=8,
-            use_hierarchical_routing=True,
-            dropout_rate=0.0
+            probability_type="sparsemax",
+            dropout_rate=0.0,
         )
-        output_routing = layer_routing(query_input, kv_input, training=False)
+        output_alt = layer_alt(query_input, kv_input, training=False)
 
         # Outputs should be different
         assert not tf.reduce_all(
-            tf.abs(output_standard - output_routing) < 1e-6
+            tf.abs(output_standard - output_alt) < 1e-6
         ), "Different attention mechanisms should produce different outputs"
 
     def test_shared_projections_with_kv_input_fails(self, query_input, kv_input):
@@ -717,13 +735,13 @@ class TestMultiHeadCrossAttention:
 
     # ==================== Attention Mask Tests ====================
 
-    def test_padding_mask_with_routing(self, query_input, kv_input):
-        """Test padding mask with hierarchical routing."""
+    def test_padding_mask_with_sparsemax(self, query_input, kv_input):
+        """Test padding mask with sparsemax probability type."""
         layer = MultiHeadCrossAttention(
             dim=64,
             num_heads=8,
-            use_hierarchical_routing=True,
-            dropout_rate=0.0
+            probability_type="sparsemax",
+            dropout_rate=0.0,
         )
 
         mask = tf.ones((kv_input.shape[0], kv_input.shape[1]))
@@ -749,30 +767,30 @@ class TestMultiHeadCrossAttention:
 
     # ==================== Serialization Tests ====================
 
-    def test_serialization_hierarchical_routing(self):
-        """Test serialization with hierarchical routing."""
+    def test_serialization_sparsemax(self):
+        """Test serialization round-trip with sparsemax probability type."""
         layer = MultiHeadCrossAttention(
             dim=128,
             num_heads=8,
-            use_hierarchical_routing=True
+            probability_type="sparsemax",
         )
 
         config = layer.get_config()
-        assert "use_hierarchical_routing" in config
-        assert config["use_hierarchical_routing"] is True
+        assert "probability_type" in config
+        assert config["probability_type"] == "sparsemax"
 
         recreated_layer = MultiHeadCrossAttention.from_config(config)
-        assert recreated_layer.use_hierarchical_routing is True
-        assert recreated_layer.hierarchical_routing is not None
+        assert recreated_layer.probability_type == "sparsemax"
+        assert recreated_layer.attn_prob is not None
 
     def test_serialization_all_features(self):
-        """Test serialization with all features enabled."""
+        """Test serialization with adaptive probability type and config."""
         layer = MultiHeadCrossAttention(
             dim=256,
             num_heads=16,
             dropout_rate=0.2,
-            use_adaptive_softmax=True,
-            adaptive_softmax_config={"min_temp": 0.1, "max_temp": 2.0}
+            probability_type="adaptive",
+            probability_config={"min_temp": 0.1, "max_temp": 2.0},
         )
 
         config = layer.get_config()
@@ -780,19 +798,20 @@ class TestMultiHeadCrossAttention:
 
         assert recreated_layer.dim == 256
         assert recreated_layer.num_heads == 16
-        assert recreated_layer.use_adaptive_softmax is True
+        assert recreated_layer.probability_type == "adaptive"
+        assert recreated_layer.probability_config == {"min_temp": 0.1, "max_temp": 2.0}
 
     # ==================== Model Integration Tests ====================
 
-    def test_model_with_hierarchical_routing(self, query_input, kv_input):
-        """Test model integration with hierarchical routing."""
+    def test_model_with_sparsemax(self, query_input, kv_input):
+        """Test model integration with sparsemax probability type."""
         query = keras.Input(shape=query_input.shape[1:])
         kv = keras.Input(shape=kv_input.shape[1:])
         x = MultiHeadCrossAttention(
             dim=64,
             num_heads=8,
-            use_hierarchical_routing=True,
-            name="routing_attention"
+            probability_type="sparsemax",
+            name="sparsemax_attention",
         )(query, kv)
         x = keras.layers.GlobalAveragePooling1D()(x)
         outputs = keras.layers.Dense(10)(x)
@@ -804,15 +823,15 @@ class TestMultiHeadCrossAttention:
         assert y_pred.shape == (query_input.shape[0], 10)
         assert not tf.reduce_any(tf.math.is_nan(y_pred))
 
-    def test_model_save_load_with_routing(self, query_input, kv_input):
-        """Test saving and loading model with hierarchical routing."""
+    def test_model_save_load_with_sparsemax(self, query_input, kv_input):
+        """Test saving and loading a model that uses sparsemax attention."""
         query = keras.Input(shape=query_input.shape[1:])
         kv = keras.Input(shape=kv_input.shape[1:])
         x = MultiHeadCrossAttention(
             dim=64,
             num_heads=8,
-            use_hierarchical_routing=True,
-            name="routing_attention"
+            probability_type="sparsemax",
+            name="sparsemax_attention",
         )(query, kv)
         outputs = keras.layers.GlobalAveragePooling1D()(x)
 
@@ -841,12 +860,12 @@ class TestMultiHeadCrossAttention:
 
     # ==================== Gradient Flow Tests ====================
 
-    def test_gradient_flow_hierarchical_routing(self, query_input, kv_input):
-        """Test gradient flow with hierarchical routing."""
+    def test_gradient_flow_sparsemax(self, query_input, kv_input):
+        """Test gradient flow with sparsemax probability type."""
         layer = MultiHeadCrossAttention(
             dim=64,
             num_heads=8,
-            use_hierarchical_routing=True
+            probability_type="sparsemax",
         )
 
         with tf.GradientTape() as tape:
@@ -860,12 +879,12 @@ class TestMultiHeadCrossAttention:
 
     # ==================== Edge Case Tests ====================
 
-    def test_numerical_stability_routing(self):
-        """Test numerical stability with routing and extreme values."""
+    def test_numerical_stability_sparsemax(self):
+        """Test numerical stability with sparsemax and extreme values."""
         layer = MultiHeadCrossAttention(
             dim=64,
             num_heads=8,
-            use_hierarchical_routing=True
+            probability_type="sparsemax",
         )
 
         test_cases = [
@@ -927,17 +946,17 @@ class TestRoutingIntegration:
         kv = tf.random.normal([2, 20, 64])
 
         attn_standard = MultiHeadCrossAttention(dim=64, num_heads=8, dropout_rate=0.0)
-        attn_routing = MultiHeadCrossAttention(
+        attn_alt = MultiHeadCrossAttention(
             dim=64,
             num_heads=8,
-            use_hierarchical_routing=True,
-            dropout_rate=0.0
+            probability_type="sparsemax",
+            dropout_rate=0.0,
         )
 
         out_standard = attn_standard(query, kv, training=False)
-        out_routing = attn_routing(query, kv, training=False)
+        out_alt = attn_alt(query, kv, training=False)
 
-        assert out_standard.shape == out_routing.shape
+        assert out_standard.shape == out_alt.shape
 
 
 if __name__ == "__main__":

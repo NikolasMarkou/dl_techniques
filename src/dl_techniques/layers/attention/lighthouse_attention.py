@@ -625,9 +625,10 @@ class LighthouseAttention(keras.layers.Layer):
         k_g = ops.take_along_axis(k_pyr, idx_exp, axis=1)
         v_g = ops.take_along_axis(v_pyr, idx_exp, axis=1)
         # Manual scaled dot-product attention with customisable score
-        # normalization via self.attn_prob. The gathered keys are already
-        # causal-only (top_idx is sorted by base position and the per-entry
-        # support is past-only), so no additional causal mask is needed.
+        # normalization via self.attn_prob. top_idx is sorted by base position,
+        # so a standard lower-triangular causal mask on the gathered (K, K)
+        # scores reproduces the is_causal=True semantics of the original
+        # ops.dot_product_attention call.
         # Transpose (B, K, H, D) -> (B, H, K, D) for matmul.
         q_t = ops.transpose(q_g, (0, 2, 1, 3))
         k_t = ops.transpose(k_g, (0, 2, 1, 3))
@@ -636,6 +637,12 @@ class LighthouseAttention(keras.layers.Layer):
             1.0 / ops.sqrt(ops.cast(self.head_dim, q_t.dtype)), q_t.dtype
         )
         scores = ops.matmul(q_t, ops.transpose(k_t, (0, 1, 3, 2))) * scale
+        # Lower-triangular causal mask on (K, K)
+        k_len = ops.shape(scores)[-1]
+        i = ops.arange(k_len)
+        causal = ops.expand_dims(i, 1) >= ops.expand_dims(i, 0)  # (K, K) bool
+        neg_inf = ops.cast(-1e9, scores.dtype)
+        scores = ops.where(causal, scores, neg_inf)
         attn = self.attn_prob(scores)
         out_t = ops.matmul(attn, v_t)  # (B, H, K, D)
         out_g = ops.transpose(out_t, (0, 2, 1, 3))  # (B, K, H, D)

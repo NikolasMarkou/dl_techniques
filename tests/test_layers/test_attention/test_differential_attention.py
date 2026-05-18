@@ -84,15 +84,14 @@ class TestDifferentialMultiHeadAttention:
         assert not layer.built
         assert layer.lambda_param is None
 
-        # Verify sub-layers created in __init__
-        assert layer.attention1 is not None
-        assert layer.attention2 is not None
+        # Verify sub-layers created in __init__ (manual SDPA)
         assert layer.proj is not None
         assert layer.dropout_layer is not None
-        assert isinstance(layer.attention1, keras.layers.MultiHeadAttention)
-        assert isinstance(layer.attention2, keras.layers.MultiHeadAttention)
         assert isinstance(layer.proj, keras.layers.Dense)
         assert isinstance(layer.dropout_layer, keras.layers.Dropout)
+        # Per-stream ProbabilityOutput instances (replaces keras.layers.MultiHeadAttention)
+        assert layer.attn_prob_1 is not None
+        assert layer.attn_prob_2 is not None
 
     def test_initialization_with_regularization(self):
         """Test initialization with regularization parameters."""
