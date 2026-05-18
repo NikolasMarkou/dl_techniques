@@ -22,7 +22,14 @@ References:
 
 import keras
 from keras import ops
-from typing import Any, List, Union, Tuple, Optional
+from typing import Any, List, Union, Tuple, Optional, Dict
+
+# ---------------------------------------------------------------------
+# Local imports
+# ---------------------------------------------------------------------
+
+from ..activations import ProbabilityOutput
+from ..norms.factory import create_normalization_layer
 
 # ---------------------------------------------------------------------
 
@@ -112,6 +119,10 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
             bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            probability_type: str = "softmax",
+            probability_config: Optional[Dict[str, Any]] = None,
+            qk_norm_type: Optional[str] = None,
+            qk_norm_kwargs: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -125,6 +136,16 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
             raise ValueError(f"dim ({dim}) must be divisible by num_heads ({num_heads})")
         if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
+        if probability_type in (
+            "routing",
+            "deterministic_routing",
+            "hierarchical",
+            "hierarchical_routing",
+        ):
+            raise ValueError(
+                f"probability_type '{probability_type}' is not supported for "
+                f"SharedWeightsCrossAttention"
+            )
 
         # Store all configuration
         self.dim = dim
@@ -136,6 +157,10 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
+        self.probability_type = probability_type
+        self.probability_config = probability_config
+        self.qk_norm_type = qk_norm_type
+        self.qk_norm_kwargs = qk_norm_kwargs
 
         # Scale factor for attention scores
         self.scale = 1.0 / ops.sqrt(float(self.head_dim))
@@ -167,6 +192,32 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         else:
             self.dropout_layer = None
 
+        # Shared probability activation reused across all five attention sites.
+        # The call() of ProbabilityOutput is purely functional on the score
+        # tensor, so reusing a single instance is safe.
+        self.attn_prob = ProbabilityOutput(
+            probability_type=self.probability_type,
+            type_config=self.probability_config,
+            name="attn_prob",
+        )
+
+        # Optional Q/K normalization layers. Shared across both streams to
+        # match the "shared weights" theme of this layer.
+        if self.qk_norm_type is not None:
+            self.q_norm = create_normalization_layer(
+                self.qk_norm_type,
+                name="q_norm",
+                **(self.qk_norm_kwargs or {}),
+            )
+            self.k_norm = create_normalization_layer(
+                self.qk_norm_type,
+                name="k_norm",
+                **(self.qk_norm_kwargs or {}),
+            )
+        else:
+            self.q_norm = None
+            self.k_norm = None
+
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer and all sub-layers for robust serialization.
 
@@ -188,6 +239,21 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
             # Dropout layer needs to be built with attention weights shape
             # For simplicity, we'll let it build automatically during call
             pass
+
+        # Build probability layer with a representative per-stream attention
+        # score shape: (batch, num_heads, q_len, k_len). Concrete lengths vary
+        # by call (and split_sizes), so we use the symbolic seq length here.
+        batch_size = input_shape[0]
+        seq_len = input_shape[1]
+        score_shape = (batch_size, self.num_heads, seq_len, seq_len)
+        self.attn_prob.build(score_shape)
+
+        # Build Q/K norms with the per-head Q/K shape:
+        # (batch, num_heads, seq_len, head_dim).
+        if self.q_norm is not None:
+            qk_shape = (batch_size, self.num_heads, seq_len, self.head_dim)
+            self.q_norm.build(qk_shape)
+            self.k_norm.build(qk_shape)
 
         # Always call parent build at the end
         super().build(input_shape)
@@ -237,6 +303,11 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
 
         q, k, v = qkv[0], qkv[1], qkv[2]
 
+        # Optional Q/K normalization (shared norms applied to both streams).
+        if self.q_norm is not None:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+
         if len(split_sizes) == 2:
             # Two modalities: A and B cross-attend
             return self._two_modality_attention(q, k, v, split_sizes, training)
@@ -284,7 +355,7 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
 
             # Compute attention
             scores = ops.matmul(q_combined, ops.transpose(k_swapped, (0, 1, 3, 2))) * self.scale
-            attn_weights = ops.softmax(scores, axis=-1)
+            attn_weights = self.attn_prob(scores)
 
             if self.dropout_layer is not None:
                 attn_weights = self.dropout_layer(attn_weights, training=training)
@@ -298,14 +369,14 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
             # General case for different sizes
             # Modality A attends to Modality B
             scores_a = ops.matmul(q_splits[0], ops.transpose(k_splits[1], (0, 1, 3, 2))) * self.scale
-            attn_weights_a = ops.softmax(scores_a, axis=-1)
+            attn_weights_a = self.attn_prob(scores_a)
             if self.dropout_layer is not None:
                 attn_weights_a = self.dropout_layer(attn_weights_a, training=training)
             attn_out_a = ops.matmul(attn_weights_a, v_splits[1])
 
             # Modality B attends to Modality A
             scores_b = ops.matmul(q_splits[1], ops.transpose(k_splits[0], (0, 1, 3, 2))) * self.scale
-            attn_weights_b = ops.softmax(scores_b, axis=-1)
+            attn_weights_b = self.attn_prob(scores_b)
             if self.dropout_layer is not None:
                 attn_weights_b = self.dropout_layer(attn_weights_b, training=training)
             attn_out_b = ops.matmul(attn_weights_b, v_splits[0])
@@ -364,14 +435,14 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
 
         # Modality A (anchors + queries) attends to Modality B anchors
         scores_a = ops.matmul(q_mod_a, ops.transpose(k_mod_b_anchor, (0, 1, 3, 2))) * self.scale
-        attn_weights_a = ops.softmax(scores_a, axis=-1)
+        attn_weights_a = self.attn_prob(scores_a)
         if self.dropout_layer is not None:
             attn_weights_a = self.dropout_layer(attn_weights_a, training=training)
         attn_out_a = ops.matmul(attn_weights_a, v_mod_b_anchor)
 
         # Modality B (anchors + queries) attends to Modality A anchors
         scores_b = ops.matmul(q_mod_b, ops.transpose(k_mod_a_anchor, (0, 1, 3, 2))) * self.scale
-        attn_weights_b = ops.softmax(scores_b, axis=-1)
+        attn_weights_b = self.attn_prob(scores_b)
         if self.dropout_layer is not None:
             attn_weights_b = self.dropout_layer(attn_weights_b, training=training)
         attn_out_b = ops.matmul(attn_weights_b, v_mod_a_anchor)
@@ -414,6 +485,10 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
+            "probability_type": self.probability_type,
+            "probability_config": self.probability_config,
+            "qk_norm_type": self.qk_norm_type,
+            "qk_norm_kwargs": self.qk_norm_kwargs,
         })
         return config
 

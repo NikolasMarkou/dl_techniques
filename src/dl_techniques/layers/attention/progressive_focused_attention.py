@@ -18,6 +18,13 @@ import keras
 from typing import Optional, Tuple, Union, Dict, Any, Literal
 
 # ---------------------------------------------------------------------
+# Local imports
+# ---------------------------------------------------------------------
+
+from ..activations import ProbabilityOutput
+from ..norms.factory import create_normalization_layer
+
+# ---------------------------------------------------------------------
 # Type definitions
 # ---------------------------------------------------------------------
 
@@ -153,6 +160,10 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
             lepe_kernel_size: int = 3,
             kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
             bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
+            probability_type: str = "softmax",
+            probability_config: Optional[Dict[str, Any]] = None,
+            qk_norm_type: Optional[str] = None,
+            qk_norm_kwargs: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
         """Initialize ProgressiveFocusedAttention layer."""
@@ -173,14 +184,61 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         self._lepe_kernel_size = lepe_kernel_size
         self._kernel_initializer = keras.initializers.get(kernel_initializer)
         self._bias_initializer = keras.initializers.get(bias_initializer)
+        self.probability_type = probability_type
+        self.probability_config = probability_config
+        self.qk_norm_type = qk_norm_type
+        self.qk_norm_kwargs = qk_norm_kwargs
 
         # Validate configuration before proceeding
         self._validate_config()
+
+        # Reject probability types that produce non-standard output shapes
+        # (e.g., routing variants return tuples or have different shape semantics).
+        if self.probability_type in (
+                "routing",
+                "deterministic_routing",
+                "hierarchical",
+                "hierarchical_routing",
+        ):
+            raise ValueError(
+                f"probability_type '{self.probability_type}' is not supported "
+                f"by ProgressiveFocusedAttention (routing/hierarchical variants "
+                f"alter output shape)."
+            )
 
         # Compute derived attributes
         self._head_dim = dim // num_heads  # Dimension per attention head
         self._scale = self._head_dim ** -0.5  # Scaling factor for dot-product attention
         self._window_area = window_size * window_size  # Number of tokens per window
+
+        # ---------------------------------------------------------------------
+        # Probability activation (replaces raw softmax). Functional call,
+        # so a single shared instance is sufficient even if used at multiple
+        # progressive levels.
+        # ---------------------------------------------------------------------
+        self.attn_prob = ProbabilityOutput(
+            probability_type=self.probability_type,
+            type_config=self.probability_config,
+            name="attn_prob",
+        )
+
+        # ---------------------------------------------------------------------
+        # Optional QK normalization layers
+        # ---------------------------------------------------------------------
+        if self.qk_norm_type is not None:
+            self.q_norm = create_normalization_layer(
+                self.qk_norm_type,
+                name="q_norm",
+                **(self.qk_norm_kwargs or {}),
+            )
+            self.k_norm = create_normalization_layer(
+                self.qk_norm_type,
+                name="k_norm",
+                **(self.qk_norm_kwargs or {}),
+            )
+        else:
+            self.q_norm = None
+            self.k_norm = None
 
     def _validate_config(self) -> None:
         """Validate layer configuration parameters.
@@ -328,6 +386,29 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
             self._attn_mask = self._compute_attention_mask()
         else:
             self._attn_mask = None
+
+        # ============ Build Probability Activation ============
+        # Attention scores have shape (B*nW, num_heads, window_area, window_area).
+        score_shape = (
+            None,
+            self._num_heads,
+            self._window_area,
+            self._window_area,
+        )
+        self.attn_prob.build(score_shape)
+
+        # ============ Build QK Normalization Layers (Optional) ============
+        # Q and K are normalized after reshape into per-head format with shape
+        # (B*nW, num_heads, window_area, head_dim).
+        if self.q_norm is not None:
+            qk_shape = (
+                None,
+                self._num_heads,
+                self._window_area,
+                self._head_dim,
+            )
+            self.q_norm.build(qk_shape)
+            self.k_norm.build(qk_shape)
 
         super().build(input_shape)
 
@@ -634,6 +715,12 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         # Each has shape: (B*nW, num_heads, ws*ws, head_dim)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
+        # ============ Optional QK Normalization ============
+        # Stabilizes attention scores by normalizing Q and K independently.
+        if self.q_norm is not None:
+            q = self.q_norm(q, training=training)
+            k = self.k_norm(k, training=training)
+
         # ============ LePE (Locally-Enhanced Positional Encoding) ============
         if self._lepe is not None:
             # Reshape V back to spatial format for depthwise convolution
@@ -694,9 +781,10 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         # Optionally mask out low-importance connections
         attn_scores = self._apply_sparsity(attn_scores, prev_attn_map)
 
-        # ============ Softmax Normalization ============
-        # Convert scores to probabilities
-        attn_weights = keras.ops.softmax(attn_scores, axis=-1)
+        # ============ Probability Normalization ============
+        # Convert scores to probabilities via the configured ProbabilityOutput
+        # (softmax by default; supports sparsemax, adaptive, etc.).
+        attn_weights = self.attn_prob(attn_scores)
 
         # ============ Attention Dropout ============
         # Randomly drop some attention connections during training
@@ -774,6 +862,10 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
             "bias_initializer": keras.initializers.serialize(
                 self._bias_initializer
             ),
+            "probability_type": self.probability_type,
+            "probability_config": self.probability_config,
+            "qk_norm_type": self.qk_norm_type,
+            "qk_norm_kwargs": self.qk_norm_kwargs,
         })
         return config
 

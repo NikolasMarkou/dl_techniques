@@ -35,7 +35,9 @@ from typing import Optional, Union, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from ..activations import ProbabilityOutput
 from ..embedding.rotary_position_embedding import RotaryPositionEmbedding
+from ..norms.factory import create_normalization_layer
 
 # ---------------------------------------------------------------------
 
@@ -145,6 +147,10 @@ class GroupedQueryAttention(keras.layers.Layer):
         bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        probability_type: str = "softmax",
+        probability_config: Optional[Dict[str, Any]] = None,
+        qk_norm_type: Optional[str] = None,
+        qk_norm_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -152,6 +158,20 @@ class GroupedQueryAttention(keras.layers.Layer):
         # Validate inputs
         self._validate_inputs(dim, num_heads, num_kv_heads, max_seq_len,
                             dropout_rate, rope_percentage, rope_theta)
+
+        # Validate probability_type — GQA expects logits, not features.
+        _invalid_prob_types = (
+            "routing",
+            "deterministic_routing",
+            "hierarchical",
+            "hierarchical_routing",
+        )
+        if probability_type in _invalid_prob_types:
+            raise ValueError(
+                f"probability_type='{probability_type}' is not supported by "
+                f"GroupedQueryAttention; these expect features not logits. "
+                f"Use one of: 'softmax', 'sparsemax', 'adaptive', etc."
+            )
 
         # Store ALL configuration parameters
         self.dim = dim
@@ -166,6 +186,10 @@ class GroupedQueryAttention(keras.layers.Layer):
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
+        self.probability_type = probability_type
+        self.probability_config = probability_config
+        self.qk_norm_type = qk_norm_type
+        self.qk_norm_kwargs = qk_norm_kwargs
 
         # Derived parameters
         self.head_dim = self.dim // self.num_heads
@@ -226,6 +250,25 @@ class GroupedQueryAttention(keras.layers.Layer):
             )
         else:
             self.rope = None
+
+        # Probability activation for attention scores
+        self.attn_prob = ProbabilityOutput(
+            probability_type=self.probability_type,
+            type_config=self.probability_config,
+            name="attn_prob",
+        )
+
+        # Optional QK normalization layers
+        if self.qk_norm_type is not None:
+            self.q_norm = create_normalization_layer(
+                self.qk_norm_type, name="q_norm", **(self.qk_norm_kwargs or {})
+            )
+            self.k_norm = create_normalization_layer(
+                self.qk_norm_type, name="k_norm", **(self.qk_norm_kwargs or {})
+            )
+        else:
+            self.q_norm = None
+            self.k_norm = None
 
         logger.info(f"GroupedQueryAttention initialized: dim={dim}, "
                    f"num_heads={num_heads}, num_kv_heads={num_kv_heads}, groups={self.num_groups}")
@@ -310,6 +353,27 @@ class GroupedQueryAttention(keras.layers.Layer):
             rope_input_shape = (batch_size, self.num_heads, seq_len, self.head_dim)
             self.rope.build(rope_input_shape)
 
+        # Estimate seq_len for sub-layer build shapes
+        batch_size = input_shape[0] if input_shape[0] is not None else 1
+        if len(input_shape) == 4:
+            h = input_shape[1] if input_shape[1] is not None else self.max_seq_len
+            w = input_shape[2] if input_shape[2] is not None else 1
+            seq_len = h * w
+        else:
+            seq_len = input_shape[1] if input_shape[1] is not None else self.max_seq_len
+
+        # Build attention probability layer with score shape (B, num_heads, seq, seq)
+        score_shape = (batch_size, self.num_heads, seq_len, seq_len)
+        self.attn_prob.build(score_shape)
+
+        # Build QK normalization layers if present.
+        # Q has num_heads, K has num_kv_heads (group-query attention).
+        if self.q_norm is not None:
+            q_norm_shape = (batch_size, self.num_heads, seq_len, self.head_dim)
+            k_norm_shape = (batch_size, self.num_kv_heads, seq_len, self.head_dim)
+            self.q_norm.build(q_norm_shape)
+            self.k_norm.build(k_norm_shape)
+
         super().build(input_shape)
 
     def call(
@@ -373,6 +437,12 @@ class GroupedQueryAttention(keras.layers.Layer):
             q = self.rope(q, training=training)
             k = self.rope(k, training=training)
 
+        # 4b. Optional QK normalization (applied per-head before scoring).
+        # K is normalized in its native num_kv_heads shape, prior to grouping.
+        if self.q_norm is not None:
+            q = self.q_norm(q, training=training)
+            k = self.k_norm(k, training=training)
+
         # 5. Grouping: Repeat K, V to match Q head count
         if self.num_groups > 1:
             k = ops.repeat(k, self.num_groups, axis=1)
@@ -386,7 +456,7 @@ class GroupedQueryAttention(keras.layers.Layer):
         if attention_mask is not None:
             scores = self._apply_mask(scores, attention_mask)
 
-        attention_weights = ops.softmax(scores, axis=-1)
+        attention_weights = self.attn_prob(scores)
         attention_weights = self.dropout(attention_weights, training=training)
 
         # 7. Apply weights to Values
@@ -464,6 +534,10 @@ class GroupedQueryAttention(keras.layers.Layer):
             'bias_initializer': keras.initializers.serialize(self.bias_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
             'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
+            'probability_type': self.probability_type,
+            'probability_config': self.probability_config,
+            'qk_norm_type': self.qk_norm_type,
+            'qk_norm_kwargs': self.qk_norm_kwargs,
         })
         return config
 

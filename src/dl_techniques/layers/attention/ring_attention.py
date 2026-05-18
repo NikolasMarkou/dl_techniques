@@ -27,6 +27,7 @@ from typing import Optional, Union, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from ..norms.factory import create_normalization_layer
 
 
 # ---------------------------------------------------------------------
@@ -134,6 +135,8 @@ class RingAttention(keras.layers.Layer):
             bias_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            qk_norm_type: Optional[str] = None,
+            qk_norm_kwargs: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -151,6 +154,8 @@ class RingAttention(keras.layers.Layer):
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
+        self.qk_norm_type = qk_norm_type
+        self.qk_norm_kwargs = qk_norm_kwargs
 
         # Derived parameters
         self.head_dim = self.dim // self.num_heads
@@ -199,6 +204,18 @@ class RingAttention(keras.layers.Layer):
 
         # Attention dropout layer
         self.dropout = keras.layers.Dropout(self.dropout_rate, name='attention_dropout')
+
+        # Optional QK-normalization sub-layers
+        if self.qk_norm_type is not None:
+            self.q_norm = create_normalization_layer(
+                self.qk_norm_type, name="q_norm", **(self.qk_norm_kwargs or {})
+            )
+            self.k_norm = create_normalization_layer(
+                self.qk_norm_type, name="k_norm", **(self.qk_norm_kwargs or {})
+            )
+        else:
+            self.q_norm = None
+            self.k_norm = None
 
         logger.info(f"RingAttention initialized: dim={dim}, "
                     f"num_heads={num_heads}, block_size={block_size}")
@@ -252,6 +269,13 @@ class RingAttention(keras.layers.Layer):
         # Dropout doesn't need explicit building as it has no weights
         self.dropout.build(input_shape)
 
+        # Build QK-norm sub-layers on the per-head Q/K shape:
+        # (batch, num_heads, seq_len, head_dim).
+        if self.q_norm is not None:
+            qk_shape = (input_shape[0], self.num_heads, input_shape[1], self.head_dim)
+            self.q_norm.build(qk_shape)
+            self.k_norm.build(qk_shape)
+
         # Always call parent build at the end
         super().build(input_shape)
 
@@ -297,6 +321,12 @@ class RingAttention(keras.layers.Layer):
         q = ops.transpose(q, (0, 2, 1, 3))
         k = ops.transpose(k, (0, 2, 1, 3))
         v = ops.transpose(v, (0, 2, 1, 3))
+
+        # Optional QK-normalization (applied once before the blockwise loop;
+        # subsequent block slices reuse the normalized Q/K).
+        if self.q_norm is not None:
+            q = self.q_norm(q, training=training)
+            k = self.k_norm(k, training=training)
 
         # Apply scaling
         q = q * self.scale
@@ -349,6 +379,12 @@ class RingAttention(keras.layers.Layer):
 
         # Calculate number of blocks
         num_blocks = (seq_len + self.block_size - 1) // self.block_size
+
+        # NOTE: A `probability_type` customization hook is intentionally NOT
+        # exposed on this layer. The online/blockwise softmax below maintains
+        # running max/sum statistics that are mathematically tied to the
+        # exponential normalizer; alternatives like sparsemax or threshmax do
+        # not admit an equivalent streaming form and would break exactness.
 
         # Initialize output tensor
         outputs = ops.zeros_like(queries)
@@ -482,6 +518,8 @@ class RingAttention(keras.layers.Layer):
             'bias_initializer': keras.initializers.serialize(self.bias_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
             'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
+            'qk_norm_type': self.qk_norm_type,
+            'qk_norm_kwargs': self.qk_norm_kwargs,
         })
         return config
 

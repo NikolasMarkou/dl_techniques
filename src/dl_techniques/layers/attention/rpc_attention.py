@@ -22,6 +22,13 @@ from typing import Optional, Union, Tuple, Any, Dict
 from keras import ops, layers, initializers, regularizers
 
 # ---------------------------------------------------------------------
+# Local imports
+# ---------------------------------------------------------------------
+
+from ..activations import ProbabilityOutput
+from ..norms.factory import create_normalization_layer
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class RPCAttention(keras.layers.Layer):
@@ -126,6 +133,10 @@ class RPCAttention(keras.layers.Layer):
             bias_initializer: Union[str, initializers.Initializer] = 'zeros',
             kernel_regularizer: Optional[regularizers.Regularizer] = None,
             bias_regularizer: Optional[regularizers.Regularizer] = None,
+            probability_type: str = "softmax",
+            probability_config: Optional[Dict[str, Any]] = None,
+            qk_norm_type: Optional[str] = None,
+            qk_norm_kwargs: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -145,6 +156,16 @@ class RPCAttention(keras.layers.Layer):
             raise ValueError(f"svd_threshold must be positive, got {svd_threshold}")
         if not 0.0 <= dropout_rate <= 1.0:
             raise ValueError(f"dropout_rate must be between 0 and 1, got {dropout_rate}")
+        if probability_type in (
+            "routing",
+            "deterministic_routing",
+            "hierarchical",
+            "hierarchical_routing",
+        ):
+            raise ValueError(
+                f"probability_type '{probability_type}' is not supported by "
+                f"RPCAttention. Use a non-routing probability type."
+            )
 
         # Store configuration
         self.dim = dim
@@ -158,6 +179,10 @@ class RPCAttention(keras.layers.Layer):
         self.bias_initializer = initializers.get(bias_initializer)
         self.kernel_regularizer = kernel_regularizer
         self.bias_regularizer = bias_regularizer
+        self.probability_type = probability_type
+        self.probability_config = probability_config
+        self.qk_norm_type = qk_norm_type
+        self.qk_norm_kwargs = qk_norm_kwargs
 
         # Computed attributes
         self.head_dim = dim // num_heads
@@ -192,6 +217,30 @@ class RPCAttention(keras.layers.Layer):
         else:
             self.dropout = None
 
+        # Probability activation (shared between standard scoring and
+        # the robust attention iteration / return_attention_scores path).
+        self.attn_prob = ProbabilityOutput(
+            probability_type=self.probability_type,
+            type_config=self.probability_config,
+            name="attn_prob",
+        )
+
+        # Optional Q/K normalization layers
+        if self.qk_norm_type is not None:
+            self.q_norm = create_normalization_layer(
+                self.qk_norm_type,
+                name="q_norm",
+                **(self.qk_norm_kwargs or {}),
+            )
+            self.k_norm = create_normalization_layer(
+                self.qk_norm_type,
+                name="k_norm",
+                **(self.qk_norm_kwargs or {}),
+            )
+        else:
+            self.q_norm = None
+            self.k_norm = None
+
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer and its sub-layers.
 
@@ -209,6 +258,18 @@ class RPCAttention(keras.layers.Layer):
         # Build sub-layers
         self.to_qkv.build(input_shape)
         self.to_out.build(input_shape)
+
+        # Build attention-score probability activation.
+        batch_size = input_shape[0]
+        seq_len = input_shape[1]
+        score_shape = (batch_size, self.num_heads, seq_len, seq_len)
+        self.attn_prob.build(score_shape)
+
+        # Build Q/K normalization layers if configured.
+        if self.q_norm is not None:
+            qk_shape = (batch_size, self.num_heads, seq_len, self.head_dim)
+            self.q_norm.build(qk_shape)
+            self.k_norm.build(qk_shape)
 
         super().build(input_shape)
 
@@ -365,8 +426,8 @@ class RPCAttention(keras.layers.Layer):
         # Combine low-rank and sparse components
         robust_attention_scores = L + S
 
-        # Apply softmax to get attention weights
-        attention_weights = ops.softmax(robust_attention_scores, axis=-1)
+        # Apply probability activation to get attention weights
+        attention_weights = self.attn_prob(robust_attention_scores)
 
         # Apply attention weights to values
         # Shape: (batch, num_heads, seq_len, head_dim)
@@ -420,6 +481,11 @@ class RPCAttention(keras.layers.Layer):
         v = ops.reshape(v, (batch_size, seq_len, self.num_heads, self.head_dim))
         v = ops.transpose(v, (0, 2, 1, 3))
 
+        # Optional Q/K normalization (applied BEFORE the robust scoring loop).
+        if self.q_norm is not None:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
+
         # Compute robust attention with PCP decomposition
         attention_output = self._compute_attention(q, k, v, mask)
 
@@ -430,7 +496,7 @@ class RPCAttention(keras.layers.Layer):
             attention_scores = ops.matmul(q, ops.transpose(k, axes=[0, 1, 3, 2]))
             attention_scores = attention_scores * self.attention_scale
             L, S = self._pcp_decomposition(attention_scores)
-            attention_weights = ops.softmax(L + S, axis=-1)
+            attention_weights = self.attn_prob(L + S)
 
         # Reshape back to (batch, seq_len, dim)
         attention_output = ops.transpose(attention_output, (0, 2, 1, 3))
@@ -478,6 +544,10 @@ class RPCAttention(keras.layers.Layer):
             'bias_initializer': initializers.serialize(self.bias_initializer),
             'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
             'bias_regularizer': regularizers.serialize(self.bias_regularizer),
+            'probability_type': self.probability_type,
+            'probability_config': self.probability_config,
+            'qk_norm_type': self.qk_norm_type,
+            'qk_norm_kwargs': self.qk_norm_kwargs,
         })
         return config
 
