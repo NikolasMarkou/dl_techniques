@@ -41,6 +41,57 @@ If any of G_COMPOSE / G_SUBSTITUTE / G_INSPECT fails, the spec retains its techn
 
 ---
 
+## 0.5. Build Path: MV-SoftProg → Full SoftProg
+
+**Honesty about complexity.** The full architecture in §2-§15 is the *destination*, not the *starting point*. It has ~10 greenfield components, 8 gates, a 5-term loss, a 4-level RVQ stack, two indices, multi-source SRL data, and an 8B-parameter backbone with LoRA. Joint pass rate at P(each gate)=0.75 is ~10%. For a solo researcher on a 4090+4070, building the full system from day 1 is a high-variance bet.
+
+**The core hypothesis is H1** (codes can be made paraphrase-invariant via contrastive + predicate-argument decoding). Everything else is downstream consumption of H1. If H1 fails, none of the architecture matters; if H1 succeeds, complexity is added one component at a time, each justified by a measurement.
+
+### 0.5.1 MV-SoftProg (2 weeks, single 4090, tests H1 only)
+
+| Layer | MV-SoftProg | Full spec (§2-§15) |
+|---|---|---|
+| Parse | spaCy out-of-the-box | Tree Transformer + biaffine relation head + dual-head NER |
+| Subtree composer | mean-pool over subtree node embeddings | Label-aware TreeGRU |
+| VQ | single 4096-code rotation-trick VQ | 4-level Hierarchical-Residual VQ (4×1024) |
+| Decoder | predict 3 lemma slots: `(predicate_lemma, ARG0_lemma, ARG1_lemma)` from VOCAB, no class clustering | 5-head typed-class decoder (predicate type, 3 argument classes, modifier set) |
+| Training data | PropBank gold (~50k) + 1M ParaNMT pairs | + AMR-3.0 + UD + UniversalPropositions + silver-LLaMA-AMR Wikipedia (3M) + Europarl (200k×3 langs) |
+| Loss | `L_PA_recon + 1.0·L_paraphrase_contrastive + 0.25·L_commit` | 6 terms (adds crosslingual contrastive, structural probe, entropy regularizer) |
+| Memory index | FAISS HNSW dense only | FAISS HNSW-PQ + RocksDB type-signature inverted |
+| Fusion | **none** — measure code properties on the encoder side only | Perceiver-IO + LoRA injected at LLM layer N/2 |
+| LLM backbone | **none** for the core gate; frozen Gemma-3-2B for one optional downstream sanity check | Gemma-3-8B or Qwen-3-8B + LoRA rank 8 on N/2..N |
+| Gates | **G2.1 only** (paraphrase code-tuple overlap ≥ 3× random on held-out paraphrase generator) | G2.1, G2.2, G2.3, G2.4, G_PPL, G_FAITH, G_UPDATE, G_LATENCY, G_COMPOSE, G_SUBSTITUTE, G_INSPECT |
+| Timeline | 2 weeks | 8 weeks |
+| Compute | single 4090 | 4090 + 4070, sequential GPU per repo convention |
+
+### 0.5.2 MV-SoftProg pass/fail decision tree
+
+- **G2.1 passes (overlap ≥ 3× random)** → unlock the next addition. Pick the next gate that addresses the next-highest-risk hypothesis (see §16 hypothesis table). Add components incrementally, never in bulk.
+- **G2.1 marginal (1.5×–3×)** → tune `λ_paraphrase` up, add hard-negative mining, retry. One week of tuning before declaring marginal-fail.
+- **G2.1 fails (≤ 1.5×)** → the bottleneck did not learn an abstract language. The whole research program is dead. Two weeks spent. Total saving vs. full spec: 6 weeks + reputation.
+
+### 0.5.3 Incremental expansion rule
+
+After MV passes G2.1, add components in this order, each justified by the gate it addresses:
+
+1. **Add G2.2** (deprel-from-code probe ≥ 80%). Adds: `L_structural_probe`. No new training data. ~3 days.
+2. **Add G2.4** (cross-lingual overlap ≥ 2× random). Adds: Europarl pairs + `L_crosslingual_contrastive`. ~1 week.
+3. **Add the type-signature inverted index** and `G_INSPECT`. Replaces lemma-slot decoder with typed-class decoder (filler classes). Earns the right to write `caused(raise_rates[Bank_of_England], inflation_target)` rendering. ~1 week.
+4. **Add fusion + frozen Gemma-3-2B** for `G_PPL` against a MEMORY-VQ baseline on a 1M-sentence Simple Wikipedia memory. Smaller than 8B, smaller than 80M. ~1 week.
+5. **Add `G_UPDATE`** vs ROME on Simple Wikipedia facts. ~3 days.
+6. **Scale to Gemma-3-8B + 80M sentences + RVQ + RocksDB + chunked retrieval** only after steps 1-5 succeed. This is what the full spec describes.
+
+### 0.5.4 What this discipline buys
+
+- **Bounded loss on failure**: each step is killable independently. The 2-week MV pilot risks 2 weeks, not 8.
+- **Measurement-driven complexity**: every added component points at a passing/failing gate, not at an aesthetic.
+- **Compound risk drops sharply**: P(MV passes) × P(step 1 | MV passes) × … is a chain of conditional probabilities you actively maintain, not a flat product.
+- **Honest deliverable at any stop point**: failing at step 4 still gives you a paper on "paraphrase-invariant predicate-argument codes" (steps 1-3), which is a contribution in its own right.
+
+The rest of this spec (§1-§16) describes the destination. Treat it as architecture, not as a checklist for week 1.
+
+---
+
 ## 1. Design Principles (binding)
 
 1. **The objective specifies the abstraction.** No "hope it emerges." Paraphrase-invariance is a contrastive *loss term* from step 1, not a probing diagnostic.
