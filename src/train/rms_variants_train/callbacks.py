@@ -560,10 +560,218 @@ class NormInternalStatsCallback(keras.callbacks.Callback):
             csv.writer(f).writerows(rows)
 
 
+# ---------------------------------------------------------------------
+# 5. CalibrationCallback + 6. RobustnessProbe
+# ---------------------------------------------------------------------
+#
+# DECISION plan_2026-05-18_63121227/D-003: two end-of-training-only probes
+# (CalibrationCallback, RobustnessProbe) at the cost of ~150 LOC in this
+# file. Run at ``on_train_end`` only — single inference pass each —
+# keeping per-cell wall-clock overhead in the seconds range. Both wrap
+# their core in try/except so a probe failure does NOT poison the cell's
+# headline metric (LESSONS L74 robustness pattern).
+
+
+class CalibrationCallback(keras.callbacks.Callback):
+    """Compute classification calibration metrics at end of training.
+
+    Two metrics over the validation set:
+    - **ECE-15** (Expected Calibration Error, 15 equal-width bins on the
+      max-softmax confidence): weighted sum over bins of ``|acc - conf|``.
+    - **Brier score** (multi-class): mean over samples of
+      ``sum((p_i - y_onehot_i)^2)``.
+
+    Output: one-row CSV ``calibration.csv`` with columns
+    ``ece_15, brier_score, n_samples, n_classes, n_bins``.
+
+    Classification only. Gated on ``num_classes >= 2`` and on a label-shape
+    rank that can be reduced to integer class IDs (rank-1 sparse, or rank-2
+    one-hot/probability).
+
+    :param val_data: ``(x, y)`` validation tuple. ``x`` can be any tensor
+        the model accepts; ``y`` is rank-1 sparse OR rank-2 one-hot.
+    :param num_classes: Number of classes (>= 2).
+    :param out_dir: Output directory.
+    :param n_bins: Number of equal-width bins for ECE. Default 15.
+    """
+
+    def __init__(
+        self,
+        val_data: Tuple[tf.Tensor, tf.Tensor],
+        num_classes: int,
+        out_dir: str,
+        n_bins: int = 15,
+    ) -> None:
+        super().__init__()
+        self._x, self._y = val_data
+        self._num_classes = int(num_classes)
+        self._out_dir = out_dir
+        self._n_bins = int(n_bins)
+        self._csv_path = os.path.join(out_dir, "calibration.csv")
+
+    @staticmethod
+    def _to_class_ids(y: np.ndarray, num_classes: int) -> Optional[np.ndarray]:
+        """Reduce ``y`` to a rank-1 integer class-id array, or None on ambiguity."""
+        if y.ndim == 1:
+            return y.astype(np.int64)
+        if y.ndim == 2 and y.shape[1] == num_classes:
+            return np.argmax(y, axis=1).astype(np.int64)
+        return None
+
+    def _compute(self, probs: np.ndarray, labels: np.ndarray) -> Tuple[float, float]:
+        """Return (ECE-15, Brier). ``probs`` is (N, C), ``labels`` is (N,)."""
+        n, c = probs.shape
+        # ECE
+        confidences = probs.max(axis=1)
+        predictions = probs.argmax(axis=1)
+        correct = (predictions == labels).astype(np.float64)
+        bin_edges = np.linspace(0.0, 1.0, self._n_bins + 1)
+        ece = 0.0
+        for i in range(self._n_bins):
+            lo, hi = bin_edges[i], bin_edges[i + 1]
+            if i == self._n_bins - 1:
+                mask = (confidences >= lo) & (confidences <= hi)
+            else:
+                mask = (confidences >= lo) & (confidences < hi)
+            if mask.sum() == 0:
+                continue
+            bin_acc = correct[mask].mean()
+            bin_conf = confidences[mask].mean()
+            ece += (mask.sum() / n) * abs(bin_acc - bin_conf)
+        # Brier (multi-class)
+        onehot = np.zeros((n, c), dtype=np.float64)
+        onehot[np.arange(n), labels] = 1.0
+        brier = float(((probs - onehot) ** 2).sum(axis=1).mean())
+        return float(ece), brier
+
+    def on_train_end(self, logs: Optional[dict] = None) -> None:
+        try:
+            if self._num_classes < 2:
+                logger.warning(
+                    f"[CalibrationCallback] num_classes={self._num_classes} < 2; "
+                    f"skipping (not a classification task)."
+                )
+                return
+            _ensure_dir(self._out_dir)
+            preds = self.model.predict(self._x, verbose=0)
+            if isinstance(preds, dict):
+                preds = next(iter(preds.values()))
+            probs = keras.ops.convert_to_numpy(preds).astype(np.float64)
+            if probs.ndim != 2 or probs.shape[1] != self._num_classes:
+                logger.warning(
+                    f"[CalibrationCallback] unexpected pred shape {probs.shape}; "
+                    f"expected (N, {self._num_classes}). Skipping."
+                )
+                return
+            # If outputs are logits (not in [0, 1] summing to 1), apply softmax.
+            row_sums = probs.sum(axis=1)
+            if not np.allclose(row_sums, 1.0, atol=1e-3):
+                shift = probs - probs.max(axis=1, keepdims=True)
+                exp = np.exp(shift)
+                probs = exp / exp.sum(axis=1, keepdims=True)
+            y_arr = keras.ops.convert_to_numpy(self._y)
+            labels = self._to_class_ids(y_arr, self._num_classes)
+            if labels is None:
+                logger.warning(
+                    f"[CalibrationCallback] ambiguous label shape {y_arr.shape}; "
+                    f"emitting nan."
+                )
+                ece, brier = float("nan"), float("nan")
+            else:
+                ece, brier = self._compute(probs, labels)
+            with open(self._csv_path, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["ece_15", "brier_score", "n_samples", "n_classes", "n_bins"])
+                w.writerow([ece, brier, int(probs.shape[0]), self._num_classes, self._n_bins])
+        except (RuntimeError, ValueError) as e:
+            logger.error(f"[CalibrationCallback] failed: {type(e).__name__}: {e}")
+
+
+class RobustnessProbe(keras.callbacks.Callback):
+    """Measure input-perturbation robustness at end of training.
+
+    For each ``sigma`` in ``sigmas`` (Gaussian standard deviation), evaluate
+    the model on ``val_data + Normal(0, sigma)`` noise and record validation
+    accuracy. The clean (sigma=0) baseline is included automatically as the
+    first row for delta computation downstream.
+
+    Output: ``robustness.csv`` with columns ``sigma, val_acc, n_samples``.
+
+    Classification only — relies on ``model.predict`` returning a (N, C)
+    logit/prob tensor and on ``y`` being reducible to integer class IDs.
+
+    :param val_data: ``(x, y)`` validation tuple.
+    :param out_dir: Output directory.
+    :param sigmas: Tuple of noise std-devs. Default ``(0.01, 0.05, 0.1, 0.2)``.
+    """
+
+    def __init__(
+        self,
+        val_data: Tuple[tf.Tensor, tf.Tensor],
+        out_dir: str,
+        sigmas: Tuple[float, ...] = (0.01, 0.05, 0.1, 0.2),
+    ) -> None:
+        super().__init__()
+        self._x, self._y = val_data
+        self._out_dir = out_dir
+        self._sigmas = tuple(float(s) for s in sigmas)
+        self._csv_path = os.path.join(out_dir, "robustness.csv")
+
+    @staticmethod
+    def _accuracy(preds: np.ndarray, y: np.ndarray) -> Optional[float]:
+        if preds.ndim != 2:
+            return None
+        pred_ids = preds.argmax(axis=1)
+        if y.ndim == 1:
+            labels = y.astype(np.int64)
+        elif y.ndim == 2:
+            labels = np.argmax(y, axis=1).astype(np.int64)
+        else:
+            return None
+        return float((pred_ids == labels).mean())
+
+    def on_train_end(self, logs: Optional[dict] = None) -> None:
+        try:
+            _ensure_dir(self._out_dir)
+            x_np = keras.ops.convert_to_numpy(self._x).astype(np.float32)
+            y_np = keras.ops.convert_to_numpy(self._y)
+            rng = np.random.default_rng(seed=0)
+            rows: List[Tuple[float, float, int]] = []
+            # Include clean baseline at sigma=0.0
+            sigmas_full = (0.0,) + self._sigmas
+            for sigma in sigmas_full:
+                if sigma == 0.0:
+                    x_noisy = x_np
+                else:
+                    noise = rng.normal(loc=0.0, scale=sigma, size=x_np.shape).astype(np.float32)
+                    x_noisy = x_np + noise
+                preds = self.model.predict(x_noisy, verbose=0)
+                if isinstance(preds, dict):
+                    preds = next(iter(preds.values()))
+                preds_np = keras.ops.convert_to_numpy(preds)
+                acc = self._accuracy(preds_np, y_np)
+                if acc is None:
+                    logger.warning(
+                        f"[RobustnessProbe] could not compute accuracy "
+                        f"(pred shape {preds_np.shape}, y shape {y_np.shape}); "
+                        f"skipping sigma={sigma}."
+                    )
+                    continue
+                rows.append((float(sigma), float(acc), int(x_np.shape[0])))
+            with open(self._csv_path, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["sigma", "val_acc", "n_samples"])
+                w.writerows(rows)
+        except (RuntimeError, ValueError) as e:
+            logger.error(f"[RobustnessProbe] failed: {type(e).__name__}: {e}")
+
+
 __all__ = [
     "GradientNormCallback",
     "WeightNormTrajectoryCallback",
     "NormLayerActivationCallback",
     "NormInternalStatsCallback",
+    "CalibrationCallback",
+    "RobustnessProbe",
     "NORM_LAYER_CLASSES",
 ]
