@@ -113,19 +113,34 @@ via `train.rms_variants_train.stats`):
 ```
 src/train/rms_variants_train/
 ├── __init__.py
-├── config.py                 ExperimentConfig + build_norm_kwargs + NORM_VARIANTS
+├── config.py                 ExperimentConfig + build_norm_kwargs + NORM_VARIANTS (8-tuple as of Phase 3)
 ├── seed_utils.py             set_seeds(seed)
 ├── stats.py                  re-export from train.logic.multiseed_stats
-├── callbacks.py              4 probe callbacks
-├── sweep.py                  subprocess sweep driver
-├── report.py                 summary.md writer
+├── callbacks.py              6 callbacks: 4 probes + CalibrationCallback + RobustnessProbe (Phase 3)
+├── sweep.py                  subprocess sweep driver (Phase 3: --gpu CLI hard-sets CUDA_VISIBLE_DEVICES)
+├── report.py                 summary.md writer + 3 Phase 3 post-hoc derivations
 ├── README.md                 this file
-├── RESULTS.md                populated post-sweep
+├── RESULTS.md                Phase 1 verdict (published) + Phase 3 design appendix
+├── PHASE3_PLAN.md            Phase 3 operational plan (per-chunk commands + falsification signals)
 └── experiments/
-    ├── __init__.py
+    ├── __init__.py           (each trainer accepts a --regime sub-experiment flag as of Phase 3)
     ├── e1_vit_cifar10.py
     ├── e2_resnet_cifar100.py
     ├── e3_tinytransformer_imdb.py
     ├── e4_deep_residual_reg.py
     └── e5_norm_layer_microbench.py
 ```
+
+## Phase 3 additions
+
+Phase 3 (plan `plan_2026-05-18_63121227`) extends the 7-norm harness to 8
+by integrating `zero_centered_adaptive_band_rms_norm` (the 8th library
+variant). It also broadens the metrics suite (calibration ECE-15 + Brier;
+input-perturbation robustness over 4 Gaussian sigmas; epochs-to-threshold
+convergence; late-training stability) and parameterises four new
+sub-experiment axes (LR / batch / mixed-precision / depth) through a
+`--regime` argparse flag on each trainer. The Phase 2 GPU env propagation
+bug is fixed: `sweep.py` now exposes a `--gpu` CLI that hard-sets
+`CUDA_VISIBLE_DEVICES` for each cell subprocess (the parent shell's value
+can no longer leak through). See `PHASE3_PLAN.md` for the operational
+sweep recipe.

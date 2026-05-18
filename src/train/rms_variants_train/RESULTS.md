@@ -207,3 +207,71 @@ Under `results/rms_variants_train/full/`:
 ## Plan reference
 
 `plans/plan_2026-05-14_3764496e/{plan.md, summary.md, decisions.md, verification.md}` — design, anchored decisions (D-001 harness shape, D-002 fp16 fix on BandRMS + ZeroCenteredBandRMSNorm, D-003 OOB-only on ViT/ResNet).
+
+---
+
+## Phase 3 — Full 8-Variant Campaign (DESIGN — sweep pending)
+
+*Plan: plan_2026-05-18_63121227. Awaiting user execution on RTX 4090 (GPU 0).*
+
+The Phase 1 4-norm campaign above is **published and frozen**. Phase 3 extends
+the harness to the 8th library variant (`ZeroCenteredAdaptiveBandRMS`),
+broadens the metrics suite (calibration / robustness / convergence speed /
+late-training stability), and parameterises four new sub-experiment axes
+(LR / batch / mixed-precision / depth) through a `--regime` CLI.
+
+### Variants under test (8)
+
+| # | Factory key | Claim | Phase |
+|---|-------------|-------|-------|
+| 1 | `rms_norm` | Baseline | 1 |
+| 2 | `band_rms` | Thick-shell RMS bound | 1 |
+| 3 | `zero_centered_rms_norm` | Zero-mean output, suppress γ-growth | 1 |
+| 4 | `zero_centered_band_rms_norm` | Both claims of 2 & 3 | 1 |
+| 5 | `adaptive_band_rms` | Per-sample data-dependent band scaling | 2 |
+| 6 | `band_logit_norm` | Logit-stream banding | 2 |
+| 7 | `dynamic_tanh` | Differentiable saturating clamp | 2 |
+| 8 | `zero_centered_adaptive_band_rms_norm` | Zero-mean + adaptive band | 3 (NEW) |
+
+Append-only — the column order in every CSV preserves Phase 1's positions
+1-4 byte-identical.
+
+### New metrics suite
+
+| Metric | Where computed | Cost per cell |
+|--------|----------------|---------------|
+| ECE-15 + Brier (calibration) | `CalibrationCallback` at `on_train_end` | ~5s |
+| Val-acc under Gaussian noise σ ∈ {0.01, 0.05, 0.1, 0.2} | `RobustnessProbe` at `on_train_end` | ~20s |
+| Epochs-to-threshold (0.5 / 0.7 / 0.9) | `report._compute_convergence_speed` post-hoc | 0s |
+| Variance of `val_loss` over last 25% of epochs | `report._compute_late_stability` post-hoc | 0s |
+
+All four are additive to the existing 4 probe callbacks (grad/weight/activation/internal).
+
+### Regime sweep axes
+
+| Trainer | Regime choices | Maps to |
+|---------|----------------|---------|
+| E1 (ViT × CIFAR-10) | default / lr_low / lr_high / mp_fp16 | (lr, mp) |
+| E2 (ResNet × CIFAR-100) | default | (stub — uniform CLI) |
+| E3 (TinyTransformer × IMDb) | default / mp_fp16 | (mp) |
+| E4 (DeepResidual fp16 reg) | default / depth_12 / depth_48 | (depth_override) |
+| E5 (norm-layer microbench) | default / bs_32 / bs_256 / lr_low / lr_high | (lr, batch) |
+
+Total Phase 3 cell budget: 8 norms × {5 base experiments × 5 seeds} + 400 regime cells = ~660 cells, decomposed across 3 overnight chunks ≤ 18h each + 1 analysis day. See `PHASE3_PLAN.md` for the per-chunk command sequences and falsification signals.
+
+### Bug fix carried into Phase 3
+
+`sweep.py` no longer uses `env.setdefault("CUDA_VISIBLE_DEVICES", ...)` — the silent no-op that killed Phase 2's sweep. Replaced with a hard-set sourced from the new `--gpu` CLI flag (default 0). `cell.log` now records the effective env on its first lines. See LESSONS L93 + plan_2026-05-18_63121227 D-002.
+
+### Results
+
+**TO BE FILLED IN** by `report.py` after sweep completion. Auto-emitted CSVs:
+
+- `headline_summary.csv` — extended with `late_stability_var` column.
+- `convergence_summary.csv` — epochs-to-threshold per cell.
+- `regime_delta_summary.csv` — Δ vs `default` per (experiment, variant, mode, metric).
+- Per-cell `calibration.csv` + `robustness.csv` + `history.csv`.
+
+### Plan reference
+
+`plans/plan_2026-05-18_63121227/{plan.md, decisions.md, verification.md, summary.md, PHASE3_PLAN.md}` — anchored decisions D-001 (8-tuple append), D-002 (GPU env hard-set), D-003 (calibration + robustness probes).
