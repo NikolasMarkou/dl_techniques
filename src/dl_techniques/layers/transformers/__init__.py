@@ -28,6 +28,9 @@ Specialized and Hybrid Blocks:
   cross-attention for handling very large input sequences.
 - EomtTransformer: A specialized layer for instance segmentation that
   uses masked self-attention with object queries.
+- AdaLNZeroConditionalBlock: DiT-style adaptive layer-norm zero-initialized
+  conditional transformer block; norms/attention/FFN/AdaLN activation are
+  factory-configurable.
 
 Factory Functions and Type Aliases:
 - A set of `create_*_encoder` functions for convenient model instantiation.
@@ -82,6 +85,7 @@ from .swin_transformer_block import SwinTransformerBlock
 from .swin_conv_block import SwinConvBlock
 from .perceiver_transformer import PerceiverTransformerLayer
 from .eomt_transformer import EomtTransformer
+from .adaln_zero import AdaLNZeroConditionalBlock
 
 # ---------------------------------------------------------------------
 # Public API
@@ -111,6 +115,7 @@ __all__ = [
     "SwinConvBlock",
     "PerceiverTransformerLayer",
     "EomtTransformer",
+    "AdaLNZeroConditionalBlock",
 
     # Type Aliases
     "AttentionType",
