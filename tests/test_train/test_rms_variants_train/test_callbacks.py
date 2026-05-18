@@ -647,6 +647,59 @@ class TestDistributionShiftProbe:
         from train.rms_variants_train import callbacks
         assert "DistributionShiftProbe" in callbacks.__all__
 
+    def test_e2_wires_cifar100_corrupted_template(self):
+        """plan_2026-05-18_6776f8ba step 7: E2 trainer must instantiate
+        `DistributionShiftProbe` with the CIFAR-100-C template. The probe
+        is wired even though `cifar100_corrupted` is NOT in the installed
+        TFDS namespace at PLAN time — the existing soft-fail branch
+        (plan_e1f12eab D-002) emits per-corruption `reason` rows when the
+        dataset lookup fails, preserving the falsification signal."""
+        # Read the E2 trainer's source and assert the wiring is present.
+        import inspect
+        from train.rms_variants_train.experiments import e2_resnet_cifar100
+        src = inspect.getsource(e2_resnet_cifar100)
+        assert "DistributionShiftProbe(" in src, "E2 must instantiate the probe"
+        assert "cifar100_corrupted/{corruption}_{severity}" in src, (
+            "E2 must use the CIFAR-100-C template (not CIFAR-10-C)."
+        )
+
+    def test_e2_dist_shift_soft_fail_branch_e2(self, tmp_path):
+        """Step 7 gate (E2): instantiating the probe with the
+        cifar100_corrupted template against a TFDS namespace lacking that
+        builder produces a populated dist_shift.csv with all rows soft-failed.
+        This is the failure mode at PLAN time on 2026-05-18 — the gate
+        confirms the probe never raises."""
+        from train.rms_variants_train.callbacks import DistributionShiftProbe
+
+        inputs = keras.Input(shape=(32, 32, 3))
+        flat = keras.layers.Flatten()(inputs)
+        outputs = keras.layers.Dense(100)(flat)
+        model = keras.Model(inputs, outputs)
+        model.compile(optimizer="adam", loss="sparse_categorical_crossentropy")
+
+        probe = DistributionShiftProbe(
+            out_dir=str(tmp_path),
+            dataset_name_template="cifar100_corrupted/{corruption}_{severity}",
+            corruptions=("gaussian_noise", "defocus_blur"),
+            severity=3,
+        )
+        probe.set_model(model)
+        probe.on_train_end()  # must NOT raise
+
+        csv_path = tmp_path / "dist_shift.csv"
+        assert csv_path.exists()
+        with open(csv_path, newline="") as f:
+            rows = list(csv.reader(f))
+        assert rows[0] == ["corruption", "severity", "val_acc", "n_samples", "reason"]
+        # 2 corruptions attempted -> 2 data rows expected; if TFDS itself
+        # rejects the dataset family on import, we may get 1 import-failure
+        # row instead. Either path is valid soft-fail behavior — both
+        # satisfy "never poisons the cell".
+        assert len(rows) >= 2
+        # Every non-header row carries a non-empty `reason`.
+        for r in rows[1:]:
+            assert r[4], f"Soft-fail row missing reason: {r}"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

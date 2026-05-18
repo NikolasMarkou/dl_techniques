@@ -33,6 +33,7 @@ from dl_techniques.models.resnet.model import create_resnet
 from dl_techniques.utils.logger import logger
 
 from train.rms_variants_train.callbacks import (
+    DistributionShiftProbe,
     GradientNormCallback,
     NormInternalStatsCallback,
     NormLayerActivationCallback,
@@ -133,6 +134,13 @@ def run(cfg: ExperimentConfig, *, variant: str, warmup_epochs: int) -> dict:
 
     cal_x = tf.convert_to_tensor(x_val[:32])
     cal_y = tf.convert_to_tensor(y_val[:32])
+
+    # CIFAR-100 train pipeline normalizes images by /255.0 — apply the same
+    # to the CIFAR-100-C tensors the probe will pull from TFDS so
+    # model.predict sees in-distribution magnitudes (mirrors E1 wiring).
+    def _cifar100c_preprocess(x: np.ndarray, y: np.ndarray):
+        return x.astype(np.float32) / 255.0, y
+
     callbacks_ = [
         GradientNormCallback(
             calibration_data=(cal_x, cal_y), out_dir=cfg.out_dir,
@@ -141,6 +149,24 @@ def run(cfg: ExperimentConfig, *, variant: str, warmup_epochs: int) -> dict:
         WeightNormTrajectoryCallback(out_dir=cfg.out_dir),
         NormLayerActivationCallback(calibration_data=cal_x, out_dir=cfg.out_dir),
         NormInternalStatsCallback(out_dir=cfg.out_dir),
+        # CIFAR-100-C distribution-shift probe
+        # (plan_2026-05-18_6776f8ba step 7). Pre-condition check at PLAN
+        # time on 2026-05-18 showed `cifar100_corrupted` is NOT registered
+        # in the installed `tensorflow_datasets` namespace (Falsification
+        # Scenario 4 in plan.md fires). Wiring the probe anyway because
+        # the existing soft-fail branch (plan_e1f12eab D-002, callbacks.py
+        # line 874-879) will emit a populated `dist_shift.csv` with
+        # `reason='dataset_missing:DatasetNotFoundError'` rows per
+        # corruption — informational signal preserved, cell never poisoned.
+        # If the user later installs a TFDS build with CIFAR-100-C, this
+        # wire activates automatically without further code changes.
+        DistributionShiftProbe(
+            out_dir=cfg.out_dir,
+            dataset_name_template="cifar100_corrupted/{corruption}_{severity}",
+            severity=3,
+            max_samples_per_corruption=500,
+            preprocess_fn=_cifar100c_preprocess,
+        ),
     ]
 
     t0 = time.time()
