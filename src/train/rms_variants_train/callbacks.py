@@ -46,6 +46,9 @@ from dl_techniques.layers.norms.rms_norm import RMSNorm
 from dl_techniques.layers.norms.zero_centered_band_rms_norm import (
     ZeroCenteredBandRMSNorm,
 )
+from dl_techniques.layers.norms.zero_centered_adaptive_band_rms_norm import (
+    ZeroCenteredAdaptiveBandRMS,
+)
 from dl_techniques.layers.norms.zero_centered_rms_norm import ZeroCenteredRMSNorm
 
 
@@ -57,6 +60,7 @@ NORM_LAYER_CLASSES: Tuple[type, ...] = (
     AdaptiveBandRMS,
     BandLogitNorm,
     DynamicTanh,
+    ZeroCenteredAdaptiveBandRMS,
 )
 
 
@@ -491,6 +495,34 @@ class NormInternalStatsCallback(keras.callbacks.Callback):
                     post = float("nan")
                 rows.append(
                     (epoch, layer.name, "adaptive_band_family", kernel_l2, post)
+                )
+            elif isinstance(layer, ZeroCenteredAdaptiveBandRMS):
+                # ZeroCenteredAdaptiveBandRMS: mirrors AdaptiveBandRMS — an
+                # inner Dense(kernel, bias) projects per-sample log(RMS) to a
+                # per-feature scale logit. The zero-centered branch first
+                # subtracts the mean, otherwise the wiring is identical.
+                # Record:
+                #   scale_l2_or_raw = L2(kernel)
+                #   post_sigmoid_scale = (1-α) + α·σ(5·mean(bias))
+                # ``kind="zc_adaptive_band_family"`` distinguishes this from
+                # the non-zero-centered cousin in downstream reports.
+                dense = getattr(layer, "dense_layer", None)
+                if (
+                    dense is not None
+                    and getattr(dense, "kernel", None) is not None
+                    and getattr(dense, "bias", None) is not None
+                ):
+                    kernel = keras.ops.convert_to_numpy(dense.kernel).astype(np.float64)
+                    bias = keras.ops.convert_to_numpy(dense.bias).astype(np.float64)
+                    kernel_l2 = float(np.sqrt((kernel ** 2).sum()))
+                    alpha = float(layer.max_band_width)
+                    sig = 1.0 / (1.0 + np.exp(-5.0 * float(bias.mean())))
+                    post = (1.0 - alpha) + alpha * sig
+                else:
+                    kernel_l2 = float("nan")
+                    post = float("nan")
+                rows.append(
+                    (epoch, layer.name, "zc_adaptive_band_family", kernel_l2, post)
                 )
             elif isinstance(layer, BandLogitNorm):
                 # BandLogitNorm: scaling comes from the inner LayerNormalization's
