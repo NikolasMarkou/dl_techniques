@@ -29,8 +29,8 @@ from dl_techniques.layers.norms.factory import create_normalization_layer
 
 
 def test_norm_variants_tuple_shape() -> None:
-    # Phase 2 extends the 4-variant Phase 1 set to 7 variants.
-    assert len(NORM_VARIANTS) == 7
+    # Phase 3 extends the 7-variant Phase 2 set to 8 variants.
+    assert len(NORM_VARIANTS) == 8
     assert NORM_VARIANTS[0] == "rms_norm"  # baseline must be first
     # First 4 entries preserved verbatim (RESULTS.md Phase 1 invariant).
     assert NORM_VARIANTS[:4] == (
@@ -39,12 +39,57 @@ def test_norm_variants_tuple_shape() -> None:
         "zero_centered_rms_norm",
         "zero_centered_band_rms_norm",
     )
-    # Phase 2 extension: the 3 new variants must all be present.
+    # Phase 2 + Phase 3 extensions: the 4 new variants must all be present.
     assert set(NORM_VARIANTS[4:]) == {
         "adaptive_band_rms",
         "band_logit_norm",
         "dynamic_tanh",
+        "zero_centered_adaptive_band_rms_norm",
     }
+    # Phase 3 invariant: the 8th entry MUST be at position 7 (0-indexed).
+    assert NORM_VARIANTS[7] == "zero_centered_adaptive_band_rms_norm"
+
+
+def test_build_kwargs_zero_centered_adaptive_band_rms_norm_default() -> None:
+    # SC-2: dispatcher returns kwargs compatible with the factory entry.
+    kw = build_norm_kwargs(
+        "zero_centered_adaptive_band_rms_norm",
+        epsilon=1e-6,
+        max_band_width=0.1,
+    )
+    assert kw == {
+        "epsilon": 1e-6,
+        "max_band_width": 0.1,
+        "band_regularizer": None,
+    }
+
+
+def test_build_kwargs_zero_centered_adaptive_band_rms_norm_with_l2() -> None:
+    # Mirror the explicit-regularizer test for adaptive_band_rms.
+    kw = build_norm_kwargs(
+        "zero_centered_adaptive_band_rms_norm",
+        band_regularizer_l2=1e-4,
+    )
+    assert kw["band_regularizer"] is not None
+    # band_regularizer should be a keras L2 regularizer instance.
+    assert hasattr(kw["band_regularizer"], "l2") or hasattr(
+        kw["band_regularizer"], "get_config"
+    )
+
+
+def test_build_kwargs_zero_centered_adaptive_band_rms_norm_factory_roundtrip() -> None:
+    # Round-trip: dispatcher kwargs MUST be accepted by the factory and
+    # construct a ZeroCenteredAdaptiveBandRMS instance (Phase 3 SC-2 deep).
+    from dl_techniques.layers.norms.zero_centered_adaptive_band_rms_norm import (
+        ZeroCenteredAdaptiveBandRMS,
+    )
+    kw = build_norm_kwargs(
+        "zero_centered_adaptive_band_rms_norm", epsilon=1e-6, max_band_width=0.1
+    )
+    layer = create_normalization_layer(
+        "zero_centered_adaptive_band_rms_norm", **kw
+    )
+    assert isinstance(layer, ZeroCenteredAdaptiveBandRMS)
 
 
 # ---------------------------------------------------------------------

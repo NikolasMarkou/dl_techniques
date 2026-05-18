@@ -283,8 +283,8 @@ def test_internal_stats_param_matched_rms_scale_l2_zero(tmp_path) -> None:
 
 
 def test_norm_layer_classes_tuple_extended() -> None:
-    """Tuple is the 7-variant Phase 2 universe (4 originals + 3 new)."""
-    assert len(NORM_LAYER_CLASSES) == 7
+    """Tuple is the 8-variant Phase 3 universe (4 originals + 4 new)."""
+    assert len(NORM_LAYER_CLASSES) == 8
     names = {cls.__name__ for cls in NORM_LAYER_CLASSES}
     assert {
         "RMSNorm",
@@ -294,7 +294,13 @@ def test_norm_layer_classes_tuple_extended() -> None:
         "AdaptiveBandRMS",
         "BandLogitNorm",
         "DynamicTanh",
+        "ZeroCenteredAdaptiveBandRMS",
     } == names
+
+
+def test_norm_layer_classes_count() -> None:
+    """SC-3: NORM_LAYER_CLASSES length is 8."""
+    assert len(NORM_LAYER_CLASSES) == 8
 
 
 def _build_new_variants_model(d: int = 16) -> keras.Model:
@@ -399,6 +405,138 @@ def test_activation_callback_tracks_new_variants(tmp_path, dummy_data) -> None:
     body = rows[1:]
     layer_names = {r[1] for r in body}
     assert {"adaptive", "blogit", "dyt"}.issubset(layer_names)
+
+
+# ---------------------------------------------------------------------
+# Phase 3: ZeroCenteredAdaptiveBandRMS isinstance branch (SC-4)
+# ---------------------------------------------------------------------
+
+
+def _build_zc_adaptive_model(d: int = 16) -> keras.Model:
+    """Dummy model wrapping ZeroCenteredAdaptiveBandRMS (8th variant)."""
+    inputs = keras.Input(shape=(d,))
+    x = keras.layers.Dense(d, name="dense1")(inputs)
+    x = create_normalization_layer(
+        "zero_centered_adaptive_band_rms_norm",
+        epsilon=1e-6,
+        max_band_width=0.1,
+        band_regularizer=None,
+        name="zc_adaptive",
+    )(x)
+    outputs = keras.layers.Dense(1, name="out")(x)
+    model = keras.Model(inputs, outputs)
+    model.compile(optimizer="adam", loss="mse")
+    return model
+
+
+def test_zc_adaptive_band_family_branch(tmp_path, dummy_data) -> None:
+    """SC-4: NormInternalStatsCallback emits kind='zc_adaptive_band_family' row."""
+    model = _build_zc_adaptive_model()
+    _ = model(tf.convert_to_tensor(dummy_data[0]))
+    cb = NormInternalStatsCallback(out_dir=str(tmp_path))
+    cb.set_model(model)
+    cb.on_epoch_end(0)
+    with open(os.path.join(str(tmp_path), "norm_internal.csv")) as f:
+        rows = list(csv.reader(f))
+    body = rows[1:]
+    kind_by_layer = {r[1]: r[2] for r in body}
+    assert kind_by_layer["zc_adaptive"] == "zc_adaptive_band_family"
+    zc_row = next(r for r in body if r[1] == "zc_adaptive")
+    # kernel L2 ≥ 0, post in [1-α, 1]
+    assert float(zc_row[3]) >= 0.0
+    post = float(zc_row[4])
+    assert 0.9 - 1e-4 <= post <= 1.0 + 1e-4
+
+
+# ---------------------------------------------------------------------
+# Phase 3: CalibrationCallback + RobustnessProbe schema tests (SC-6)
+# ---------------------------------------------------------------------
+
+
+class TestCalibrationCallback:
+    def _model_and_data(self, n: int = 32, d: int = 8, c: int = 3):
+        inp = keras.Input(shape=(d,))
+        out = keras.layers.Dense(c)(inp)
+        model = keras.Model(inp, out)
+        model.compile(
+            optimizer="adam",
+            loss="sparse_categorical_crossentropy",
+            metrics=["accuracy"],
+        )
+        rng = np.random.RandomState(0)
+        x = rng.randn(n, d).astype("float32")
+        y = rng.randint(0, c, n).astype("int64")
+        return model, x, y, c
+
+    def test_sparse_labels_writes_expected_schema(self, tmp_path) -> None:
+        from train.rms_variants_train.callbacks import CalibrationCallback
+        model, x, y, c = self._model_and_data()
+        cb = CalibrationCallback(
+            val_data=(x, y), num_classes=c, out_dir=str(tmp_path)
+        )
+        model.fit(x, y, epochs=1, batch_size=8, verbose=0, callbacks=[cb])
+        path = os.path.join(str(tmp_path), "calibration.csv")
+        assert os.path.exists(path)
+        with open(path) as f:
+            rows = list(csv.reader(f))
+        assert rows[0] == [
+            "ece_15", "brier_score", "n_samples", "n_classes", "n_bins",
+        ]
+        assert len(rows) == 2
+        ece = float(rows[1][0])
+        brier = float(rows[1][1])
+        assert 0.0 <= ece <= 1.0
+        assert brier >= 0.0
+        assert int(rows[1][3]) == c
+        assert int(rows[1][4]) == 15
+
+    def test_skips_when_num_classes_lt_2(self, tmp_path) -> None:
+        from train.rms_variants_train.callbacks import CalibrationCallback
+        model, x, y, _ = self._model_and_data()
+        cb = CalibrationCallback(
+            val_data=(x, y), num_classes=1, out_dir=str(tmp_path)
+        )
+        model.fit(x, y, epochs=1, batch_size=8, verbose=0, callbacks=[cb])
+        # Gate triggered → no CSV emitted.
+        assert not os.path.exists(os.path.join(str(tmp_path), "calibration.csv"))
+
+
+class TestRobustnessProbe:
+    def _model_and_data(self, n: int = 32, d: int = 8, c: int = 3):
+        inp = keras.Input(shape=(d,))
+        out = keras.layers.Dense(c)(inp)
+        model = keras.Model(inp, out)
+        model.compile(
+            optimizer="adam",
+            loss="sparse_categorical_crossentropy",
+            metrics=["accuracy"],
+        )
+        rng = np.random.RandomState(0)
+        x = rng.randn(n, d).astype("float32")
+        y = rng.randint(0, c, n).astype("int64")
+        return model, x, y
+
+    def test_writes_one_row_per_sigma_plus_clean(self, tmp_path) -> None:
+        from train.rms_variants_train.callbacks import RobustnessProbe
+        model, x, y = self._model_and_data()
+        sigmas = (0.05, 0.1)
+        cb = RobustnessProbe(
+            val_data=(x, y), out_dir=str(tmp_path), sigmas=sigmas
+        )
+        model.fit(x, y, epochs=1, batch_size=8, verbose=0, callbacks=[cb])
+        path = os.path.join(str(tmp_path), "robustness.csv")
+        assert os.path.exists(path)
+        with open(path) as f:
+            rows = list(csv.reader(f))
+        assert rows[0] == ["sigma", "val_acc", "n_samples"]
+        # 1 header + clean baseline + len(sigmas) noisy rows
+        assert len(rows) == 1 + 1 + len(sigmas)
+        # First data row is the clean baseline (sigma = 0).
+        assert float(rows[1][0]) == 0.0
+        # Each row's val_acc is in [0, 1].
+        for r in rows[1:]:
+            acc = float(r[1])
+            assert 0.0 <= acc <= 1.0
 
 
 if __name__ == "__main__":
