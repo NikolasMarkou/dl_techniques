@@ -17,6 +17,7 @@ The following layers are supported by the factory system with automated paramete
 | `rms_norm` | `RMSNorm` | Root Mean Square normalization without centering for efficiency. | Transformers, especially for faster training and inference. | Arbitrary |
 | `zero_centered_rms_norm`| `ZeroCenteredRMSNorm` | Combines RMSNorm efficiency with LayerNorm's zero-mean stability. | Large language models (LLMs) requiring enhanced training stability. | Arbitrary |
 | `zero_centered_band_rms_norm`| `ZeroCenteredBandRMSNorm` | Adds a learnable band constraint to Zero-Centered RMSNorm. | Advanced LLMs for maximum stability and controlled flexibility. | Arbitrary |
+| `zero_centered_adaptive_band_rms_norm`| `ZeroCenteredAdaptiveBandRMS` | Zero-centered RMS with adaptive (log-RMS dense-projected) per-feature scaling. | Advanced LLMs needing zero-mean stability + input-adaptive flexibility. | Arbitrary |
 | `band_rms` | `BandRMS` | RMS normalization with a learnable, bounded magnitude constraint. | Imposing "thick spherical shell" constraints for stable training. | Arbitrary |
 | `adaptive_band_rms` | `AdaptiveBandRMS` | Adaptive RMS with scaling based on log-transformed RMS statistics. | Advanced training stability with input-adaptive scaling. | Arbitrary |
 | `band_logit_norm` | `BandLogitNorm` | L2 normalization with a learned scaling factor bounded in a band. | Classification tasks with constrained logit magnitude. | Arbitrary |
@@ -146,6 +147,23 @@ norm = create_normalization_layer(
     'zero_centered_band_rms_norm',
     max_band_width=0.08,
     epsilon=1e-6
+)
+```
+
+### `zero_centered_adaptive_band_rms_norm`
+**Optional:** `max_band_width` (default: 0.1), `axis` (default: -1), `epsilon` (default: 1e-7), `band_initializer` (default: 'zeros'), `band_regularizer` (default: None)
+
+Combines zero-centering (mean subtraction along the normalization axis) with
+adaptive per-feature scaling. The scaling factor is computed by passing the
+log of the aggregated RMS through a small dense projection followed by a
+sigmoid, producing an input-adaptive "thick spherical shell" constraint
+in the zero-mean RMS-normalized space.
+
+```python
+norm = create_normalization_layer(
+    'zero_centered_adaptive_band_rms_norm',
+    max_band_width=0.1,
+    axis=-1
 )
 ```
 

@@ -3,6 +3,7 @@ from .band_logit_norm import BandLogitNorm
 from .logit_norm import LogitNorm
 from .rms_norm import RMSNorm
 from .max_logit_norm import MaxLogitNorm, DecoupledMaxLogit, DMLPlus
+from .zero_centered_adaptive_band_rms_norm import ZeroCenteredAdaptiveBandRMS
 from .factory import create_normalization_layer,create_normalization_from_config, NormalizationType
 
 __all__ = [
@@ -13,6 +14,7 @@ __all__ = [
     MaxLogitNorm,
     DecoupledMaxLogit,
     DMLPlus,
+    ZeroCenteredAdaptiveBandRMS,
     create_normalization_layer,
     create_normalization_from_config,
     NormalizationType

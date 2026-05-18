@@ -27,12 +27,14 @@ from .max_logit_norm import MaxLogitNorm, DecoupledMaxLogit, DMLPlus
 from .dynamic_tanh import DynamicTanh
 from .zero_centered_rms_norm import ZeroCenteredRMSNorm
 from .zero_centered_band_rms_norm import ZeroCenteredBandRMSNorm
+from .zero_centered_adaptive_band_rms_norm import ZeroCenteredAdaptiveBandRMS
 
 # ---------------------------------------------------------------------
 
 NormalizationType = Literal[
     'layer_norm', 'batch_norm', 'rms_norm', 'zero_centered_rms_norm',
-    'zero_centered_band_rms_norm', 'band_rms', 'adaptive_band_rms',
+    'zero_centered_band_rms_norm', 'zero_centered_adaptive_band_rms_norm',
+    'band_rms', 'adaptive_band_rms',
     'band_logit_norm', 'global_response_norm', 'logit_norm', 'max_logit_norm',
     'decoupled_max_logit', 'dml_plus_focal', 'dml_plus_center', 'dynamic_tanh'
 ]
@@ -104,6 +106,11 @@ def create_normalization_layer(
         layer_kwargs.setdefault('epsilon', epsilon)
         return ZeroCenteredBandRMSNorm(**layer_kwargs)
 
+    elif normalization_type == 'zero_centered_adaptive_band_rms_norm':
+        # Zero-centered adaptive RMS with log-transformed scaling
+        layer_kwargs.setdefault('epsilon', epsilon)
+        return ZeroCenteredAdaptiveBandRMS(**layer_kwargs)
+
     elif normalization_type == 'band_rms':
         # RMS normalization with bounded constraints
         layer_kwargs.setdefault('epsilon', epsilon)
@@ -162,7 +169,9 @@ def create_normalization_layer(
     else:
         supported_types = [
             'layer_norm', 'batch_norm', 'rms_norm', 'zero_centered_rms_norm',
-            'zero_centered_band_rms_norm', 'band_rms', 'adaptive_band_rms',
+            'zero_centered_band_rms_norm',
+            'zero_centered_adaptive_band_rms_norm',
+            'band_rms', 'adaptive_band_rms',
             'band_logit_norm', 'global_response_norm', 'logit_norm',
             'max_logit_norm', 'decoupled_max_logit', 'dml_plus_focal',
             'dml_plus_center', 'dynamic_tanh'
@@ -209,6 +218,11 @@ def get_normalization_info() -> Dict[str, Dict[str, Any]]:
             'description': 'Combines zero-centering, RMS, and band constraints for maximum stability',
             'parameters': ['max_band_width', 'axis', 'epsilon', 'band_initializer', 'band_regularizer'],
             'use_case': 'Advanced transformer and LLM architectures for ultimate stability and flexibility'
+        },
+        'zero_centered_adaptive_band_rms_norm': {
+            'description': 'Zero-centered RMS with adaptive log-transformed RMS-based scaling',
+            'parameters': ['max_band_width', 'axis', 'epsilon', 'band_initializer', 'band_regularizer'],
+            'use_case': 'Advanced training stability combining zero-centering with input-adaptive scaling'
         },
         'band_rms': {
             'description': 'RMS normalization with bounded magnitude constraints',
@@ -296,7 +310,7 @@ def validate_normalization_config(
         )
 
     # Type-specific validations
-    if normalization_type in ['band_rms', 'adaptive_band_rms', 'band_logit_norm', 'zero_centered_band_rms_norm']:
+    if normalization_type in ['band_rms', 'adaptive_band_rms', 'band_logit_norm', 'zero_centered_band_rms_norm', 'zero_centered_adaptive_band_rms_norm']:
         if 'max_band_width' in kwargs:
             max_band_width = kwargs['max_band_width']
             if not isinstance(max_band_width, (int, float)) or max_band_width <= 0:
