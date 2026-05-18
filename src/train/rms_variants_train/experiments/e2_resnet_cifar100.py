@@ -4,9 +4,13 @@ Image classification on a deeper conv stack. The `--norm-type` flag swaps
 the BatchNormalization layers (used in every conv block + the stem) for one
 of the four RMSNorm-family variants via ResNet's `normalization_type` kwarg.
 
-**Mode constraint**: per D-003, ResNet's factory does not plumb
-`normalization_kwargs`, so this experiment runs in **OOB mode only**.
-PARAM_MATCHED contrast is preserved on E3/E4/E5.
+**Mode constraint** (superseded by plan_2026-05-18_6776f8ba D-003):
+ResNet's factory NOW forwards `normalization_kwargs` (Step 4 of the
+plan_2026-05-18_6776f8ba refinement), so `--mode param_matched` is
+supported here. In `param_matched` mode the trainer threads
+`normalization_kwargs={'use_scale': False}` to the stem norm AND to
+every BasicBlock/BottleneckBlock internal norm (bn1/bn2/bn3 +
+shortcut_bn), eliminating their per-channel scale parameters.
 
 Run:
     CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg .venv/bin/python -m \\
@@ -66,8 +70,11 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="E2 ResNet-18 × CIFAR-100")
     p.add_argument("--norm-type", type=str, default="rms_norm", choices=list(NORM_VARIANTS))
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--mode", type=str, default="oob", choices=["oob"],
-                   help="ResNet factory does not plumb norm_kwargs (D-003).")
+    p.add_argument("--mode", type=str, default="oob", choices=["oob", "param_matched"],
+                   help="oob: default ResNet. param_matched: thread "
+                        "use_scale=False through ResNet into stem + every "
+                        "BasicBlock/BottleneckBlock norm "
+                        "(plan_2026-05-18_6776f8ba D-003).")
     p.add_argument("--regime", type=str, default="default",
                    choices=list(_REGIME_MAP.keys()),
                    help="Phase 3 stub — E2 only supports 'default'.")
@@ -91,11 +98,15 @@ def run(cfg: ExperimentConfig, *, variant: str, warmup_epochs: int) -> dict:
     train_ds = _to_tf_dataset(x_tr, y_tr, batch_size=cfg.batch_size, shuffle=True, seed=cfg.seed)
     val_ds = _to_tf_dataset(x_val, y_val, batch_size=cfg.batch_size, shuffle=False, seed=cfg.seed)
 
+    # DECISION plan_2026-05-18_6776f8ba/D-003 (Step 5)
+    # `cfg.norm_kwargs()` resolves to `{'use_scale': False, ...}` only
+    # for RMSNorm-family variants in param_matched mode.
     model = create_resnet(
         variant=variant,
         num_classes=100,
         input_shape=(32, 32, 3),
         normalization_type=cfg.norm_type,
+        normalization_kwargs=dict(cfg.norm_kwargs()),
     )
 
     steps_per_epoch = max(1, len(x_tr) // cfg.batch_size)

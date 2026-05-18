@@ -5,11 +5,16 @@ The `--norm-type` CLI flag swaps the normalization layer across the entire
 ViT stack (every TransformerLayer attention/FFN norm + the final norm before
 the head).
 
-**Mode constraint**: per plan_2026-05-14_3764496e D-003, ViT's factory does
-not forward `normalization_kwargs`, so this experiment runs in **OOB mode
-only**. ZeroCenteredRMSNorm and RMSNorm both get d-many params from their
-default `use_scale=True`. The 1-vs-d-param confound is documented; the
-PARAM_MATCHED contrast is preserved on E3/E4/E5.
+**Mode constraint** (superseded by plan_2026-05-18_6776f8ba D-003):
+the ViT factory NOW forwards `normalization_kwargs` (Step 4 of the
+plan_2026-05-18_6776f8ba refinement), so `--mode param_matched` is
+supported here. In `param_matched` mode the trainer threads
+`normalization_kwargs={'use_scale': False}` to every RMSNorm-family
+norm inside ViT (final norm + every TransformerLayer's
+attention_norm/output_norm), eliminating the per-feature scale
+parameter and matching the 1-scalar param count of the BandRMS
+variants. The d-vs-1 confound on the headline E1 contrast is
+thereby resolved.
 
 Run:
     CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg .venv/bin/python -m \\
@@ -92,8 +97,11 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="E1 ViT-pico × CIFAR-10")
     p.add_argument("--norm-type", type=str, default="rms_norm", choices=list(NORM_VARIANTS))
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--mode", type=str, default="oob", choices=["oob"],
-                   help="ViT factory does not plumb norm_kwargs (D-003).")
+    p.add_argument("--mode", type=str, default="oob", choices=["oob", "param_matched"],
+                   help="oob: default ViT (RMSNorm.use_scale=True). "
+                        "param_matched: thread use_scale=False through ViT into "
+                        "every TransformerLayer norm + final norm "
+                        "(plan_2026-05-18_6776f8ba D-003).")
     p.add_argument("--regime", type=str, default="default",
                    choices=list(_REGIME_MAP.keys()),
                    help="Phase 3 regime sub-experiment selector.")
@@ -125,6 +133,17 @@ def run(cfg: ExperimentConfig, *, variant: str, patch_size: int, dropout_rate: f
     train_ds = _to_tf_dataset(x_tr, y_tr, batch_size=cfg.batch_size, shuffle=True, seed=cfg.seed)
     val_ds = _to_tf_dataset(x_val, y_val, batch_size=cfg.batch_size, shuffle=False, seed=cfg.seed)
 
+    # DECISION plan_2026-05-18_6776f8ba/D-003 (Step 5)
+    # `cfg.norm_kwargs()` resolves to `{'use_scale': False, ...}` only
+    # for RMSNorm-family variants in param_matched mode (see
+    # `build_norm_kwargs`). For OOB mode it returns the same kwargs as
+    # before with `use_scale=True`. We strip `epsilon` from the dict
+    # because ViT consumers do not currently inject an explicit epsilon
+    # override — the factory default is fine and passing `epsilon` here
+    # would shadow the factory default if `epsilon` were ever introduced
+    # to the factory's positional signature.
+    _nkw = dict(cfg.norm_kwargs())
+    # Keep all kwargs that the underlying norm layer accepts.
     model = create_vit(
         variant=variant,
         num_classes=10,
@@ -135,6 +154,7 @@ def run(cfg: ExperimentConfig, *, variant: str, patch_size: int, dropout_rate: f
         attention_dropout_rate=0.0,
         pos_dropout_rate=0.0,
         normalization_type=cfg.norm_type,
+        normalization_kwargs=_nkw,
         normalization_position="post",
         ffn_type="mlp",
     )
