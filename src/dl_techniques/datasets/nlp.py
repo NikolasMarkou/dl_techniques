@@ -77,21 +77,12 @@ def load_wikipedia_train_val(
         f"(val_fraction={val_fraction}, seed={seed})"
     )
 
-    try:
-        hf_dataset = datasets.load_dataset(
-            "wikimedia/wikipedia",
-            config_name,
-            split="train",
-            cache_dir=cache_dir,
-            trust_remote_code=True,
-        )
-    except TypeError:
-        hf_dataset = datasets.load_dataset(
-            "wikimedia/wikipedia",
-            config_name,
-            split="train",
-            cache_dir=cache_dir,
-        )
+    hf_dataset = datasets.load_dataset(
+        "wikimedia/wikipedia",
+        config_name,
+        split="train",
+        cache_dir=cache_dir,
+    )
 
     total = len(hf_dataset)
     logger.info(f"Wikipedia loaded: {total:,} articles (memory-mapped)")
@@ -227,16 +218,10 @@ def load_hf_text_dataset(
         f"streaming={streaming}, cache_dir={cache_dir}"
     )
 
-    try:
-        hf_dataset = datasets.load_dataset(
-            path, name, split=split, streaming=streaming,
-            cache_dir=cache_dir, trust_remote_code=True,
-        )
-    except TypeError:
-        hf_dataset = datasets.load_dataset(
-            path, name, split=split, streaming=streaming,
-            cache_dir=cache_dir,
-        )
+    hf_dataset = datasets.load_dataset(
+        path, name, split=split, streaming=streaming,
+        cache_dir=cache_dir,
+    )
 
     if streaming:
         def generator():
