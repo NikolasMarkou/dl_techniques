@@ -70,6 +70,22 @@ EXPERIMENT_MODES = {
     "e5": ("oob", "param_matched"),
 }
 
+# Variants that meaningfully respond to PARAM_MATCHED mode (drop their
+# per-feature scale). RMSNorm-family variants support a real `use_scale=False`
+# toggle. BandRMS-family variants treat PARAM_MATCHED as a no-op (they always
+# carry exactly 1 scalar), kept in this set for Phase 1 back-compat — the
+# resulting cell duplicates the OOB cell but with mode="param_matched" label.
+#
+# The 3 Phase 2 variants (adaptive_band_rms, band_logit_norm, dynamic_tanh)
+# do NOT expose `use_scale`. Listing them as PARAM_MATCHED-supported would
+# produce duplicate cells with no scientific meaning. Excluded from this set.
+VARIANT_SUPPORTS_PARAM_MATCHED: frozenset = frozenset({
+    "rms_norm",
+    "zero_centered_rms_norm",
+    "band_rms",
+    "zero_centered_band_rms_norm",
+})
+
 
 @dataclass(frozen=True)
 class RunSpec:
@@ -114,6 +130,18 @@ def build_run_specs(
                     logger.info(
                         f"[sweep] skip {exp}/{norm}/{mode}/* "
                         f"(experiment supports only {supported_modes})"
+                    )
+                    continue
+                if (
+                    mode == "param_matched"
+                    and norm not in VARIANT_SUPPORTS_PARAM_MATCHED
+                ):
+                    # The variant has no `use_scale` toggle (Phase 2 norms).
+                    # Skip with a one-line log per (exp, norm) pair.
+                    logger.info(
+                        f"[sweep] skip {exp}/{norm}/param_matched/* "
+                        f"(variant has no use_scale toggle; PM cells are "
+                        f"not meaningful for this norm)"
                     )
                     continue
                 for seed in seeds:
@@ -244,7 +272,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--experiments", type=_csv_list, required=True,
                    help="Comma-separated subset of e1,e2,e3,e4,e5")
     p.add_argument("--norms", type=_csv_list, default=list(NORM_VARIANTS),
-                   help=f"Default: all 4 — {','.join(NORM_VARIANTS)}")
+                   help=f"Default: all 7 — {','.join(NORM_VARIANTS)}")
     p.add_argument("--modes", type=_csv_list, default=["oob"],
                    help="Subset of {oob, param_matched}")
     p.add_argument("--seeds", type=_int_csv, default=[0, 1, 2, 3, 4])
