@@ -150,7 +150,63 @@ class LighthouseAttention(keras.layers.Layer):
 
     Set ``full_attention=True`` (or call ``set_full_attention(True)``
     at runtime) to bypass the pyramid path entirely and run plain causal
-    MHA — used for Stage-2 SDPA-resume training.
+    MHA, used for Stage-2 SDPA-resume training.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌───────────────────────────────────────────────────────────────┐
+        │                  LighthouseAttention                          │
+        │                                                               │
+        │   Input [B, N, dim]                                           │
+        │          │                                                    │
+        │          ▼                                                    │
+        │   ┌─────────────────────────────────────────────────────┐     │
+        │   │  Wq / Wk / Wv ──► (B, N, H, D)                      │     │
+        │   │       │                                             │     │
+        │   │       ▼                                             │     │
+        │   │  q_norm(Q),  k_norm(K)         [QK-norm]            │     │
+        │   └─────────────────────────────────────────────────────┘     │
+        │          │                                                    │
+        │          ├──────────── full_attention=True ──────────┐        │
+        │          │                                           │        │
+        │          ▼                                           ▼        │
+        │   ┌──────────────────────────────────┐    ┌───────────────┐   │
+        │   │     Pyramid path (default)       │    │ Stage-2 SDPA  │   │
+        │   │                                  │    │ resume:       │   │
+        │   │  (i) Mean-pool Q/K/V across L    │    │ causal SDPA   │   │
+        │   │      levels with branch p:       │    │ over full N   │   │
+        │   │       (B, S_pyr, H, D)           │    │               │   │
+        │   │                                  │    └───────┬───────┘   │
+        │   │  (ii) Norm scorer on level-0     │            │           │
+        │   │       ||Q||, ||K||  max-pooled   │            │           │
+        │   │       up the pyramid             │            │           │
+        │   │       s = max(||Q||, ||K||)      │            │           │
+        │   │                                  │            │           │
+        │   │  (iii) Reduce-over-heads → (B,S) │            │           │
+        │   │       + coarsest-level boost     │            │           │
+        │   │         (always-keep, +1e9)      │            │           │
+        │   │                                  │            │           │
+        │   │  (iv) top_k → (B, K)             │            │           │
+        │   │       argsort by base position   │            │           │
+        │   │       (causal ordering)          │            │           │
+        │   │                                  │            │           │
+        │   │  (v) Gather (Q,K,V)_pyr at K     │            │           │
+        │   │      → (B, K, H, D)              │            │           │
+        │   │      causal SDPA on sub-seq      │            │           │
+        │   │                                  │            │           │
+        │   │  (vi) Scatter-back via           │            │           │
+        │   │       segment_sum to (B,N,H,D)   │            │           │
+        │   │       causal shift  p^l - 1      │            │           │
+        │   └──────────────────┬───────────────┘            │           │
+        │                      │                            │           │
+        │                      └────────────┬───────────────┘           │
+        │                                   ▼                           │
+        │                          Wo  ──► Output                       │
+        │                                                               │
+        │   Output [B, N, dim]                                          │
+        └───────────────────────────────────────────────────────────────┘
 
     :param dim: Model dimension (hidden size). Must be positive.
     :param num_heads: Number of attention heads. Must be positive and
