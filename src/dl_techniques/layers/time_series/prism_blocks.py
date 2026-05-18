@@ -46,9 +46,9 @@ class FrequencyBandStatistics(keras.layers.Layer):
                         │
                         ▼
                ┌────────────────────────────────┐
-               │  Compute per-channel statistics │
-               │  mean, std, min, max            │
-               │  diff_mean, diff_std            │
+               │  Compute per-channel statistics│
+               │  mean, std, min, max           │
+               │  diff_mean, diff_std           │
                └────────────────┬───────────────┘
                                 │
                                 ▼
@@ -353,8 +353,8 @@ class PRISMNode(keras.layers.Layer):
                         │
                         ▼
         ┌───────────────────────────────────┐
-        │  HaarWaveletDecomposition          │
-        │  ─► [approx, detail_1, ..., det_K] │
+        │  HaarWaveletDecomposition         │
+        │  ─► [approx, detail_1, ..., det_K]│
         └───────────────┬───────────────────┘
                         │
                 ┌───────┴───────┐
@@ -602,7 +602,7 @@ class PRISMTimeTree(keras.layers.Layer):
                        │
                        ▼
         ┌──────────────────────────────────┐
-        │  Level 1: Split ─► 2 segments   │
+        │  Level 1: Split ─► 2 segments    │
         │    ├─► PRISMNode (left half)     │
         │    └─► PRISMNode (right half)    │
         │    Stitch with cross-fade        │
@@ -610,7 +610,7 @@ class PRISMTimeTree(keras.layers.Layer):
                        │
                        ▼
         ┌──────────────────────────────────┐
-        │  Level 2: Split ─► 4 segments   │
+        │  Level 2: Split ─► 4 segments    │
         │    ├─► PRISMNode x4              │
         │    Stitch with cross-fade        │
         └──────────────┬───────────────────┘
@@ -1147,3 +1147,5 @@ class PRISMLayer(keras.layers.Layer):
             "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------
