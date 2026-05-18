@@ -882,6 +882,7 @@ class BasicBlock(keras.layers.Layer):
             use_projection: bool = False,
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             normalization_type: str = "batch_norm",
+            normalization_kwargs: Optional[Dict[str, Any]] = None,
             activation_type: str = "relu",
             **kwargs: Any
     ) -> None:
@@ -900,6 +901,12 @@ class BasicBlock(keras.layers.Layer):
         self.use_projection = use_projection
         self.kernel_regularizer = kernel_regularizer
         self.normalization_type = normalization_type
+        # DECISION plan_2026-05-18_6776f8ba/D-003
+        # Optional, additive `normalization_kwargs` -> `create_normalization_layer`.
+        # Default `None` -> `{}` is byte-identical to the pre-plumbing factory call,
+        # preserving bit-exactness for every existing ResNet/BasicBlock checkpoint
+        # (multi-flag-plumbing pattern, LESSONS L72).
+        self.normalization_kwargs = dict(normalization_kwargs) if normalization_kwargs else {}
         self.activation_type = activation_type
 
         # Create sub-layers in __init__
@@ -916,7 +923,8 @@ class BasicBlock(keras.layers.Layer):
         )
         self.bn1 = create_normalization_layer(
             normalization_type,
-            name=f"{self.name}_bn1"
+            name=f"{self.name}_bn1",
+            **self.normalization_kwargs,
         )
         self.act1 = create_activation_layer(
             activation_type,
@@ -936,7 +944,8 @@ class BasicBlock(keras.layers.Layer):
         )
         self.bn2 = create_normalization_layer(
             normalization_type,
-            name=f"{self.name}_bn2"
+            name=f"{self.name}_bn2",
+            **self.normalization_kwargs,
         )
 
         # Shortcut projection if needed
@@ -953,7 +962,8 @@ class BasicBlock(keras.layers.Layer):
             )
             self.shortcut_bn = create_normalization_layer(
                 normalization_type,
-                name=f"{self.name}_shortcut_bn"
+                name=f"{self.name}_shortcut_bn",
+                **self.normalization_kwargs,
             )
         else:
             self.shortcut_conv = None
@@ -1046,6 +1056,7 @@ class BasicBlock(keras.layers.Layer):
             "kernel_regularizer": keras.regularizers.serialize(
                 self.kernel_regularizer) if self.kernel_regularizer else None,
             "normalization_type": self.normalization_type,
+            "normalization_kwargs": dict(self.normalization_kwargs),
             "activation_type": self.activation_type,
         })
         return config
@@ -1110,6 +1121,7 @@ class BottleneckBlock(keras.layers.Layer):
             use_projection: bool = False,
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             normalization_type: str = "batch_norm",
+            normalization_kwargs: Optional[Dict[str, Any]] = None,
             activation_type: str = "relu",
             **kwargs: Any
     ) -> None:
@@ -1128,6 +1140,8 @@ class BottleneckBlock(keras.layers.Layer):
         self.use_projection = use_projection
         self.kernel_regularizer = kernel_regularizer
         self.normalization_type = normalization_type
+        # DECISION plan_2026-05-18_6776f8ba/D-003 (parallel to BasicBlock above).
+        self.normalization_kwargs = dict(normalization_kwargs) if normalization_kwargs else {}
         self.activation_type = activation_type
         self.expansion = 4  # Bottleneck expansion factor
 
@@ -1145,7 +1159,8 @@ class BottleneckBlock(keras.layers.Layer):
         )
         self.bn1 = create_normalization_layer(
             normalization_type,
-            name=f"{self.name}_bn1"
+            name=f"{self.name}_bn1",
+            **self.normalization_kwargs,
         )
         self.act1 = create_activation_layer(
             activation_type,
@@ -1165,7 +1180,8 @@ class BottleneckBlock(keras.layers.Layer):
         )
         self.bn2 = create_normalization_layer(
             normalization_type,
-            name=f"{self.name}_bn2"
+            name=f"{self.name}_bn2",
+            **self.normalization_kwargs,
         )
         self.act2 = create_activation_layer(
             activation_type,
@@ -1185,7 +1201,8 @@ class BottleneckBlock(keras.layers.Layer):
         )
         self.bn3 = create_normalization_layer(
             normalization_type,
-            name=f"{self.name}_bn3"
+            name=f"{self.name}_bn3",
+            **self.normalization_kwargs,
         )
 
         # Shortcut projection if needed
@@ -1202,7 +1219,8 @@ class BottleneckBlock(keras.layers.Layer):
             )
             self.shortcut_bn = create_normalization_layer(
                 normalization_type,
-                name=f"{self.name}_shortcut_bn"
+                name=f"{self.name}_shortcut_bn",
+                **self.normalization_kwargs,
             )
         else:
             self.shortcut_conv = None
@@ -1308,6 +1326,7 @@ class BottleneckBlock(keras.layers.Layer):
             "kernel_regularizer": keras.regularizers.serialize(
                 self.kernel_regularizer) if self.kernel_regularizer else None,
             "normalization_type": self.normalization_type,
+            "normalization_kwargs": dict(self.normalization_kwargs),
             "activation_type": self.activation_type,
         })
         return config

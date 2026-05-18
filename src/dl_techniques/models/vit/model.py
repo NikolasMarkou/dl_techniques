@@ -254,6 +254,7 @@ class ViT(keras.Model):
             bias_initializer: Union[str, initializers.Initializer] = "zeros",
             bias_regularizer: Optional[regularizers.Regularizer] = None,
             normalization_type: NormalizationType = "layer_norm",
+            normalization_kwargs: Optional[Dict[str, Any]] = None,
             normalization_position: Literal['pre', 'post'] = "post",
             ffn_type: FFNType = "mlp",
             activation: Union[str, callable] = "gelu",
@@ -327,6 +328,16 @@ class ViT(keras.Model):
         self.bias_initializer = initializers.get(bias_initializer)
         self.bias_regularizer = bias_regularizer
         self.normalization_type = str(normalization_type)
+        # DECISION plan_2026-05-18_6776f8ba/D-003
+        # Optional, additive `normalization_kwargs` plumbed into both the final
+        # `self.norm` factory call and every TransformerLayer (as
+        # `attention_norm_args` + `ffn_norm_args`). Default `None` -> `{}` -> the
+        # factory call is byte-identical to the pre-plumbing version, preserving
+        # bit-exactness for ALL existing serialized ViT checkpoints. This is the
+        # multi-flag-plumbing pattern from LESSONS L72; the ViT path here mirrors
+        # the ResNet path in `dl_techniques/models/resnet/model.py` for the
+        # rms_variants_train Phase 3 `param_matched` mode (use_scale=False).
+        self.normalization_kwargs = dict(normalization_kwargs) if normalization_kwargs else {}
         self.normalization_position = str(normalization_position)
         self.ffn_type = str(ffn_type)
         self.activation = activation
@@ -372,6 +383,8 @@ class ViT(keras.Model):
                 intermediate_size=self.intermediate_size,
                 attention_type="multi_head",
                 normalization_type=self.normalization_type,
+                attention_norm_args=dict(self.normalization_kwargs),
+                ffn_norm_args=dict(self.normalization_kwargs),
                 normalization_position=self.normalization_position,
                 ffn_type=self.ffn_type,
                 dropout_rate=self.dropout_rate,
@@ -389,7 +402,8 @@ class ViT(keras.Model):
         # Final normalization using factory
         self.norm = create_normalization_layer(
             self.normalization_type,
-            name="norm"
+            name="norm",
+            **self.normalization_kwargs,
         )
 
         # Classification components (if include_top)
@@ -577,6 +591,7 @@ class ViT(keras.Model):
             "bias_initializer": initializers.serialize(self.bias_initializer),
             "bias_regularizer": regularizers.serialize(self.bias_regularizer),
             "normalization_type": self.normalization_type,
+            "normalization_kwargs": dict(self.normalization_kwargs),
             "normalization_position": self.normalization_position,
             "ffn_type": self.ffn_type,
             "activation": self.activation,
@@ -608,6 +623,7 @@ class ViT(keras.Model):
             bias_initializer=self.bias_initializer,
             bias_regularizer=self.bias_regularizer,
             normalization_type=self.normalization_type,
+            normalization_kwargs=dict(self.normalization_kwargs),
             normalization_position=self.normalization_position,
             ffn_type=self.ffn_type,
             activation=self.activation,
@@ -862,6 +878,7 @@ def create_vit(
         bias_initializer: Union[str, initializers.Initializer] = "zeros",
         bias_regularizer: Optional[regularizers.Regularizer] = None,
         normalization_type: NormalizationType = "layer_norm",
+        normalization_kwargs: Optional[Dict[str, Any]] = None,
         normalization_position: Literal['pre', 'post'] = "post",
         ffn_type: FFNType = "mlp",
         activation: Union[str, callable] = "gelu",
@@ -980,6 +997,7 @@ def create_vit(
         bias_initializer=bias_initializer,
         bias_regularizer=bias_regularizer,
         normalization_type=normalization_type,
+        normalization_kwargs=normalization_kwargs,
         normalization_position=normalization_position,
         ffn_type=ffn_type,
         activation=activation,

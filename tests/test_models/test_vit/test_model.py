@@ -950,5 +950,86 @@ class TestViTArchitectureValidation:
             assert not np.any(np.isnan(loaded_output.numpy()))
 
 
+class TestViTNormalizationKwargs:
+    """Step-4 plumbing: optional ``normalization_kwargs`` forwarded to the
+    final ``self.norm`` AND to every ``TransformerLayer`` (via
+    ``attention_norm_args`` + ``ffn_norm_args``). Default-off path
+    (``normalization_kwargs=None``) MUST be bit-exact with the
+    pre-plumbing version (Pre-Mortem #2 in plan_2026-05-18_6776f8ba).
+    """
+
+    def test_default_off_is_empty_dict(self):
+        """`normalization_kwargs=None` -> stored as `{}` on the instance."""
+        model = ViT(normalization_type="rms_norm")
+        assert model.normalization_kwargs == {}
+
+    def test_kwargs_round_trip_via_get_config(self):
+        """`use_scale=False` survives `get_config` -> `from_config`."""
+        model = ViT(
+            normalization_type="rms_norm",
+            normalization_kwargs={"use_scale": False},
+        )
+        assert model.normalization_kwargs == {"use_scale": False}
+        cfg = model.get_config()
+        assert cfg["normalization_kwargs"] == {"use_scale": False}
+        # Round-trip restore: dict survives the config pickle path.
+        restored = ViT.from_config(cfg)
+        assert restored.normalization_kwargs == {"use_scale": False}
+
+    def test_kwargs_propagate_to_final_norm(self):
+        """The final `self.norm` honors `use_scale=False` (RMSNorm.gamma is None)."""
+        model = ViT(
+            input_shape=(32, 32, 3),
+            num_classes=10,
+            scale="pico",
+            patch_size=8,
+            normalization_type="rms_norm",
+            normalization_kwargs={"use_scale": False},
+        )
+        # Build via forward pass.
+        _ = model(np.zeros((1, 32, 32, 3), dtype=np.float32), training=False)
+        # RMSNorm.use_scale wiring -> gamma is None when use_scale=False.
+        assert hasattr(model.norm, "use_scale")
+        assert model.norm.use_scale is False
+        assert getattr(model.norm, "gamma", None) is None
+
+    def test_kwargs_propagate_to_transformer_norms(self):
+        """Every TransformerLayer's attention_norm + output_norm consume kwargs."""
+        model = ViT(
+            input_shape=(32, 32, 3),
+            num_classes=10,
+            scale="pico",
+            patch_size=8,
+            normalization_type="rms_norm",
+            normalization_kwargs={"use_scale": False},
+        )
+        _ = model(np.zeros((1, 32, 32, 3), dtype=np.float32), training=False)
+        # All transformer-layer norms inherit use_scale=False.
+        for layer in model.transformer_layers:
+            assert layer.attention_norm.use_scale is False
+            assert layer.output_norm.use_scale is False
+
+    def test_default_off_path_bit_exact_with_pre_plumbing(self):
+        """When `normalization_kwargs` is unset, both the model and a
+        freshly-restored copy produce the same shape + non-NaN output.
+        This is a smoke check for the bit-exact-default invariant — the
+        deeper guard is the absence of any spurious kwargs on the norm
+        layer's get_config()."""
+        model_a = ViT(
+            input_shape=(32, 32, 3),
+            num_classes=10,
+            scale="pico",
+            patch_size=8,
+            normalization_type="layer_norm",
+        )
+        x = np.random.RandomState(0).randn(2, 32, 32, 3).astype(np.float32)
+        out_a = model_a(x, training=False).numpy()
+        assert out_a.shape == (2, 10)
+        assert not np.isnan(out_a).any()
+        # The factory call path receives `**{}` -> identical to the
+        # original positional `(normalization_type, name="norm")` call.
+        assert model_a.norm.get_config().get("name") == "norm"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

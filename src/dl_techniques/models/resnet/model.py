@@ -175,6 +175,7 @@ class ResNet(keras.Model):
             block_type: Literal["basic", "bottleneck"] = "bottleneck",
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             normalization_type: str = "batch_norm",
+            normalization_kwargs: Optional[Dict[str, Any]] = None,
             activation_type: str = "relu",
             include_top: bool = True,
             enable_deep_supervision: bool = False,
@@ -202,6 +203,17 @@ class ResNet(keras.Model):
         self.block_type = block_type
         self.kernel_regularizer = kernel_regularizer
         self.normalization_type = normalization_type
+        # DECISION plan_2026-05-18_6776f8ba/D-003
+        # Optional `normalization_kwargs` forwarded to every
+        # `create_normalization_layer` call inside the stem AND inside every
+        # BasicBlock/BottleneckBlock. Default `None` -> `{}` -> all factory
+        # calls byte-identical to the pre-plumbing version, preserving
+        # bit-exactness for every existing ResNet checkpoint. Used by
+        # `src/train/rms_variants_train/experiments/e2_resnet_cifar100.py`
+        # in `--mode param_matched` to pass `use_scale=False` so the
+        # gamma-removal contrast in the headline E2 result becomes a
+        # pure 1-vs-d parameter-count confound rather than a norm choice.
+        self.normalization_kwargs = dict(normalization_kwargs) if normalization_kwargs else {}
         self.activation_type = activation_type
         self.include_top = include_top
         self.enable_deep_supervision = enable_deep_supervision
@@ -256,7 +268,8 @@ class ResNet(keras.Model):
         )
         self.stem_bn = create_normalization_layer(
             self.normalization_type,
-            name="stem_bn"
+            name="stem_bn",
+            **self.normalization_kwargs,
         )
         self.stem_act = create_activation_layer(
             self.activation_type,
@@ -310,6 +323,7 @@ class ResNet(keras.Model):
                 use_projection=use_projection,
                 kernel_regularizer=self.kernel_regularizer,
                 normalization_type=self.normalization_type,
+                normalization_kwargs=dict(self.normalization_kwargs),
                 activation_type=self.activation_type,
                 name=f"stage{stage_idx+1}_block{block_idx+1}"
             )
@@ -661,6 +675,7 @@ class ResNet(keras.Model):
             "kernel_regularizer": keras.regularizers.serialize(
                 self.kernel_regularizer) if self.kernel_regularizer else None,
             "normalization_type": self.normalization_type,
+            "normalization_kwargs": dict(self.normalization_kwargs),
             "activation_type": self.activation_type,
             "include_top": self.include_top,
             "enable_deep_supervision": self.enable_deep_supervision,
