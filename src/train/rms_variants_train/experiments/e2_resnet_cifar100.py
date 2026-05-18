@@ -149,25 +149,16 @@ def run(cfg: ExperimentConfig, *, variant: str, warmup_epochs: int) -> dict:
         WeightNormTrajectoryCallback(out_dir=cfg.out_dir),
         NormLayerActivationCallback(calibration_data=cal_x, out_dir=cfg.out_dir),
         NormInternalStatsCallback(out_dir=cfg.out_dir),
-        # CIFAR-100-C distribution-shift probe
-        # (plan_2026-05-18_6776f8ba step 7). Pre-condition check at PLAN
-        # time on 2026-05-18 showed `cifar100_corrupted` is NOT registered
-        # in the installed `tensorflow_datasets` namespace (Falsification
-        # Scenario 4 in plan.md fires). Wiring the probe anyway because
-        # the existing soft-fail branch (plan_e1f12eab D-002, callbacks.py
-        # line 874-879) will emit a populated `dist_shift.csv` with
-        # `reason='dataset_missing:DatasetNotFoundError'` rows per
-        # corruption — informational signal preserved, cell never poisoned.
-        # If the user later installs a TFDS build with CIFAR-100-C, this
-        # wire activates automatically without further code changes.
-        DistributionShiftProbe(
-            out_dir=cfg.out_dir,
-            dataset_name_template="cifar100_corrupted/{corruption}_{severity}",
-            severity=3,
-            max_samples_per_corruption=500,
-            preprocess_fn=_cifar100c_preprocess,
-        ),
     ]
+    # CIFAR-100-C probe invoked AFTER fit (Keras 3 resets History on predict);
+    # soft-fails if `cifar100_corrupted` is unregistered in the TFDS namespace.
+    dist_shift_probe = DistributionShiftProbe(
+        out_dir=cfg.out_dir,
+        dataset_name_template="cifar100_corrupted/{corruption}_{severity}",
+        severity=3,
+        max_samples_per_corruption=500,
+        preprocess_fn=_cifar100c_preprocess,
+    )
 
     t0 = time.time()
     history = model.fit(
@@ -176,11 +167,16 @@ def run(cfg: ExperimentConfig, *, variant: str, warmup_epochs: int) -> dict:
     )
     wall_s = time.time() - t0
 
-    final_acc = float(history.history["accuracy"][-1])
-    final_val_acc = float(history.history["val_accuracy"][-1])
-    best_val_acc = float(max(history.history["val_accuracy"]))
-    final_loss = float(history.history["loss"][-1])
-    final_val_loss = float(history.history["val_loss"][-1])
+    hist_dict = dict(history.history)
+
+    final_acc = float(hist_dict["accuracy"][-1])
+    final_val_acc = float(hist_dict["val_accuracy"][-1])
+    best_val_acc = float(max(hist_dict["val_accuracy"]))
+    final_loss = float(hist_dict["loss"][-1])
+    final_val_loss = float(hist_dict["val_loss"][-1])
+
+    dist_shift_probe.set_model(model)
+    dist_shift_probe.on_train_end()
     # Classification generalization gap (plan_e1f12eab Step 3; NaN-tolerant per EC1).
     try:
         generalization_gap = final_acc - final_val_acc
@@ -189,7 +185,7 @@ def run(cfg: ExperimentConfig, *, variant: str, warmup_epochs: int) -> dict:
 
     # Per-epoch history.csv — consumed by report.py post-hoc derivations.
     hist_csv = os.path.join(cfg.out_dir, "history.csv")
-    _hist = history.history
+    _hist = hist_dict
     _hist_keys = list(_hist.keys())
     with open(hist_csv, "w", newline="") as f:
         w = csv.writer(f)

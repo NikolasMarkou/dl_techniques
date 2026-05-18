@@ -210,16 +210,16 @@ def run(cfg: ExperimentConfig, *, variant: str, patch_size: int, dropout_rate: f
         WeightNormTrajectoryCallback(out_dir=cfg.out_dir),
         NormLayerActivationCallback(calibration_data=cal_x, out_dir=cfg.out_dir),
         NormInternalStatsCallback(out_dir=cfg.out_dir),
-        # CIFAR-10-C distribution-shift probe (plan_e1f12eab Step 4 / D-002).
-        # Soft-fails on missing TFDS dataset — never poisons the cell.
-        DistributionShiftProbe(
-            out_dir=cfg.out_dir,
-            dataset_name_template="cifar10_corrupted/{corruption}_{severity}",
-            severity=3,
-            max_samples_per_corruption=500,
-            preprocess_fn=_cifar10c_preprocess,
-        ),
     ]
+    # CIFAR-10-C probe is invoked AFTER fit so its internal model.predict()
+    # does not wipe model.history.history (Keras 3 resets History on predict).
+    dist_shift_probe = DistributionShiftProbe(
+        out_dir=cfg.out_dir,
+        dataset_name_template="cifar10_corrupted/{corruption}_{severity}",
+        severity=3,
+        max_samples_per_corruption=500,
+        preprocess_fn=_cifar10c_preprocess,
+    )
 
     t0 = time.time()
     history = model.fit(
@@ -228,11 +228,18 @@ def run(cfg: ExperimentConfig, *, variant: str, patch_size: int, dropout_rate: f
     )
     wall_s = time.time() - t0
 
-    final_loss = float(history.history["loss"][-1])
-    final_val_loss = float(history.history["val_loss"][-1])
-    final_acc = float(history.history["accuracy"][-1])
-    final_val_acc = float(history.history["val_accuracy"][-1])
-    best_val_acc = float(max(history.history["val_accuracy"]))
+    # Snapshot history dict before any further model.predict / model.evaluate.
+    hist_dict = dict(history.history)
+
+    final_loss = float(hist_dict["loss"][-1])
+    final_val_loss = float(hist_dict["val_loss"][-1])
+    final_acc = float(hist_dict["accuracy"][-1])
+    final_val_acc = float(hist_dict["val_accuracy"][-1])
+    best_val_acc = float(max(hist_dict["val_accuracy"]))
+
+    # Run the distribution-shift probe now that history is captured.
+    dist_shift_probe.set_model(model)
+    dist_shift_probe.on_train_end()
     # Classification generalization gap (positive = overfitting).
     # Per plan_e1f12eab Step 3 / EC1: NaN-tolerant.
     try:
@@ -243,7 +250,7 @@ def run(cfg: ExperimentConfig, *, variant: str, patch_size: int, dropout_rate: f
     # Per-epoch history.csv — consumed by report.py post-hoc derivations
     # (convergence-speed, late-training stability).
     hist_csv = os.path.join(cfg.out_dir, "history.csv")
-    _hist = history.history
+    _hist = hist_dict
     _hist_keys = list(_hist.keys())
     with open(hist_csv, "w", newline="") as f:
         w = csv.writer(f)
