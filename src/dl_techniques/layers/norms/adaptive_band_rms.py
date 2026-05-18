@@ -34,8 +34,13 @@ import keras
 from keras import ops
 from typing import Any, Dict, Optional, Union, Tuple, List
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class AdaptiveBandRMS(keras.layers.Layer):
@@ -159,8 +164,10 @@ class AdaptiveBandRMS(keras.layers.Layer):
         self.dense_layer = None
 
         logger.debug(
-            f"Initialized AdaptiveBandRMS: max_band_width={max_band_width}, "
-            f"axis={axis}, epsilon={epsilon}"
+            f"Initialized AdaptiveBandRMS: "
+            f"max_band_width={max_band_width}, "
+            f"axis={axis}, "
+            f"epsilon={epsilon}"
         )
 
     def _validate_inputs(self, max_band_width: float, epsilon: float) -> None:
@@ -427,3 +434,5 @@ class AdaptiveBandRMS(keras.layers.Layer):
             "band_regularizer": keras.regularizers.serialize(self.band_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

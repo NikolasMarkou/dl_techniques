@@ -19,6 +19,12 @@ import keras
 from keras import ops
 from typing import Any, Dict, Optional
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
+
 
 # ---------------------------------------------------------------------
 
@@ -118,6 +124,13 @@ class BandLogitNorm(keras.layers.Layer):
 
         # Initialize normalization layer (will be properly configured in build())
         self.norm = None
+
+        logger.debug(
+            f"Initialized BandLogitNorm with "
+            f"axis={axis}, "
+            f"epsilon={epsilon}, "
+            f"max_band_width={max_band_width}, "
+        )
 
     def _validate_inputs(self, max_band_width: float, epsilon: float) -> None:
         """Validate initialization parameters.

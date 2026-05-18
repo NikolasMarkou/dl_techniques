@@ -190,8 +190,10 @@ class ZeroCenteredBandRMSNorm(keras.layers.Layer):
         self.band_param = None
 
         logger.debug(
-            f"Initialized ZeroCenteredBandRMSNorm with max_band_width={max_band_width}, "
-            f"axis={axis}, epsilon={epsilon}"
+            f"Initialized ZeroCenteredBandRMSNorm with "
+            f"max_band_width={max_band_width}, "
+            f"axis={axis}, "
+            f"epsilon={epsilon}"
         )
 
     def _validate_inputs(

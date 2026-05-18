@@ -22,6 +22,12 @@ from typing import Optional, Union, Dict, Any, List, Tuple
 from keras import ops, constraints, initializers, regularizers
 
 # ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
+
+# ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
@@ -129,6 +135,12 @@ class DynamicTanh(keras.layers.Layer):
 
         # Enable masking support
         self.supports_masking = True
+
+        logger.debug(
+            f"Initialized DynamicTanh with "
+            f"axis={axis}, "
+            f"alpha_init_value={alpha_init_value}"
+        )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Create the layer's learnable parameters.

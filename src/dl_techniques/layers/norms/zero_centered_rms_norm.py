@@ -159,7 +159,12 @@ class ZeroCenteredRMSNorm(keras.layers.Layer):
         # Initialize weight attributes - created in build()
         self.scale = None
 
-        logger.debug(f"Initialized ZeroCenteredRMSNorm with axis={axis}, epsilon={epsilon}, use_scale={use_scale}")
+        logger.debug(
+            f"Initialized ZeroCenteredRMSNorm with "
+            f"axis={axis}, "
+            f"epsilon={epsilon}, "
+            f"use_scale={use_scale}"
+        )
 
     def _validate_inputs(self, axis: Union[int, Tuple[int, ...]], epsilon: float) -> None:
         """
