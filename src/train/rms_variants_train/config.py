@@ -21,10 +21,14 @@ from typing import Any, Dict, Optional, Tuple
 # Strings are the factory keys consumed by
 # ``dl_techniques.layers.norms.factory.create_normalization_layer(<key>)``.
 #
-# DECISION plan_2026-05-18_74a935a2/D-001: this 7-tuple is the campaign's
+# DECISION plan_2026-05-18_74a935a2/D-001: this tuple is the campaign's
 # variant universe. Reordering it invalidates RESULTS.md tables (columns are
 # indexed by position). Append-only on extension; never insert in the middle.
-NORM_VARIANTS: Tuple[str, str, str, str, str, str, str] = (
+# DECISION plan_2026-05-18_63121227/D-001: extended to 8-tuple by appending
+# `zero_centered_adaptive_band_rms_norm` (the 8th library variant from
+# plan_c7f1947d). Phase 1 column ordering preserved byte-identical; the new
+# variant is the right-most column in all RESULTS.md tables.
+NORM_VARIANTS: Tuple[str, str, str, str, str, str, str, str] = (
     "rms_norm",
     "band_rms",
     "zero_centered_rms_norm",
@@ -32,6 +36,7 @@ NORM_VARIANTS: Tuple[str, str, str, str, str, str, str] = (
     "adaptive_band_rms",
     "band_logit_norm",
     "dynamic_tanh",
+    "zero_centered_adaptive_band_rms_norm",
 )
 
 
@@ -94,6 +99,21 @@ def build_norm_kwargs(
         # toggle — the per-sample log-RMS-driven inner Dense replaces it).
         # ``band_regularizer`` IS accepted by the layer but the campaign
         # disables the silent in-source default (matching the band_rms knob).
+        kwargs = {
+            "epsilon": epsilon,
+            "max_band_width": max_band_width,
+        }
+        if band_regularizer_l2 is None:
+            kwargs["band_regularizer"] = None
+        else:
+            import keras
+            kwargs["band_regularizer"] = keras.regularizers.L2(band_regularizer_l2)
+        return kwargs
+    if norm_type == "zero_centered_adaptive_band_rms_norm":
+        # ZeroCenteredAdaptiveBandRMS: same shape as ``adaptive_band_rms`` —
+        # no ``use_scale``, accepts ``epsilon`` / ``max_band_width`` /
+        # ``band_regularizer``. The source default epsilon is 1e-7; the
+        # campaign passes ``epsilon=1e-6`` explicitly for matrix consistency.
         kwargs = {
             "epsilon": epsilon,
             "max_band_width": max_band_width,
