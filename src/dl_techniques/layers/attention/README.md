@@ -40,6 +40,29 @@ The following layers are supported by the factory system with automated paramete
 | `window` | `WindowAttention` | Windowed Multi-Head Attention from Swin Transformer, using grid-based partitioning for efficient local attention. | Vision transformers (e.g., Swin) for efficient local attention. | `(batch, seq_len, dim)` |
 | `window_zigzag` | `WindowAttention` | Windowed attention with zigzag partitioning to group frequency-proximate tokens. Induces a frequency-based locality bias. | Vision models where frequency-domain relationships are important. | `(batch, seq_len, dim)` |
 
+## Customization Hooks
+
+Most softmax-based attention layers expose two unified customization hooks (defaults preserve standard behavior):
+
+- `probability_type` / `probability_config` — selects the attention-score normalization via `ProbabilityOutput` (from `dl_techniques.layers.activations.probability_output`). Supported types include `softmax` (default), `sparsemax`, `threshmax`, `adaptive` (entropy-adaptive softmax). Routing/hierarchical modes are rejected (they consume features, not logits).
+- `qk_norm_type` / `qk_norm_kwargs` — optional Q/K normalization routed through `create_normalization_layer` (from `dl_techniques.layers.norms.factory`). Set to one of `rms_norm`, `layer_norm`, `zero_centered_rms_norm`, etc., or `None` (default for most layers) for no normalization.
+
+```python
+mha = create_attention_layer(
+    'multi_head', dim=256, num_heads=8,
+    probability_type='sparsemax',          # sparse attention
+    qk_norm_type='rms_norm',               # QK-norm for training stability
+)
+```
+
+Layer-specific notes:
+- `gated_attention`: `qk_norm_type` defaults to `'zero_centered_rms_norm'` (cannot be `None`).
+- `multi_head_latent_attention` and `lighthouse_attention`: `qk_norm_type` defaults to `'rms_norm'`.
+- `hopfield_attention`: `qk_norm_type` defaults to `'layer_norm'` (use `None` for no pattern normalization).
+- `ring_attention`: only `qk_norm_type` is exposed; the online-softmax algorithm is mathematically tied to exponential normalization and does not support custom `probability_type`.
+- `non_local_attention`: also exposes `output_norm_type` / `output_norm_kwargs` for the spatial output normalization (default `'batch_norm'`).
+- Out-of-scope (no hooks): `channel`, `spatial`, `cbam`, `tripse*`, `fnet`, `performer`, `wave_field` — these layers do not use softmax over Q@K^T scores.
+
 ## Factory Interface
 
 ### Basic Usage
