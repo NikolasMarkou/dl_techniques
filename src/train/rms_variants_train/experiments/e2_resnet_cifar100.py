@@ -144,6 +144,11 @@ def run(cfg: ExperimentConfig, *, variant: str, warmup_epochs: int) -> dict:
     best_val_acc = float(max(history.history["val_accuracy"]))
     final_loss = float(history.history["loss"][-1])
     final_val_loss = float(history.history["val_loss"][-1])
+    # Classification generalization gap (plan_e1f12eab Step 3; NaN-tolerant per EC1).
+    try:
+        generalization_gap = final_acc - final_val_acc
+    except (TypeError, ValueError):
+        generalization_gap = float("nan")
 
     # Per-epoch history.csv — consumed by report.py post-hoc derivations.
     hist_csv = os.path.join(cfg.out_dir, "history.csv")
@@ -165,6 +170,7 @@ def run(cfg: ExperimentConfig, *, variant: str, warmup_epochs: int) -> dict:
                 "trainable_params",
                 "final_loss", "final_val_loss",
                 "final_acc", "final_val_acc", "best_val_acc",
+                "generalization_gap",
                 "wall_s",
             ])
         w.writerow([
@@ -173,6 +179,7 @@ def run(cfg: ExperimentConfig, *, variant: str, warmup_epochs: int) -> dict:
             n_params,
             final_loss, final_val_loss,
             final_acc, final_val_acc, best_val_acc,
+            generalization_gap,
             wall_s,
         ])
 

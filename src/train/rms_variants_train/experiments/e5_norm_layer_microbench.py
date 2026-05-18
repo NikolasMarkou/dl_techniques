@@ -188,6 +188,12 @@ def run(cfg: ExperimentConfig, *, depth: int, hidden_dim: int, bias: float) -> d
     final_val_loss = float(history.history["val_loss"][-1])
     final_mae = float(history.history.get("mae", [float("nan")])[-1])
     final_val_mae = float(history.history.get("val_mae", [float("nan")])[-1])
+    # Regression generalization gap: val_loss - train_loss
+    # (positive = worse generalization). plan_e1f12eab Step 3 / EC1.
+    try:
+        generalization_gap = final_val_loss - final_loss
+    except (TypeError, ValueError):
+        generalization_gap = float("nan")
 
     # Per-epoch history.csv — consumed by report.py post-hoc derivations.
     hist_csv = os.path.join(cfg.out_dir, "history.csv")
@@ -217,6 +223,7 @@ def run(cfg: ExperimentConfig, *, depth: int, hidden_dim: int, bias: float) -> d
                     "final_val_loss",
                     "final_mae",
                     "final_val_mae",
+                    "generalization_gap",
                     "wall_s",
                 ]
             )
@@ -233,6 +240,7 @@ def run(cfg: ExperimentConfig, *, depth: int, hidden_dim: int, bias: float) -> d
                 final_val_loss,
                 final_mae,
                 final_val_mae,
+                generalization_gap,
                 wall_s,
             ]
         )

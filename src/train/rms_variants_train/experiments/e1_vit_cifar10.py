@@ -188,6 +188,12 @@ def run(cfg: ExperimentConfig, *, variant: str, patch_size: int, dropout_rate: f
     final_acc = float(history.history["accuracy"][-1])
     final_val_acc = float(history.history["val_accuracy"][-1])
     best_val_acc = float(max(history.history["val_accuracy"]))
+    # Classification generalization gap (positive = overfitting).
+    # Per plan_e1f12eab Step 3 / EC1: NaN-tolerant.
+    try:
+        generalization_gap = final_acc - final_val_acc
+    except (TypeError, ValueError):
+        generalization_gap = float("nan")
 
     # Per-epoch history.csv — consumed by report.py post-hoc derivations
     # (convergence-speed, late-training stability).
@@ -210,6 +216,7 @@ def run(cfg: ExperimentConfig, *, variant: str, patch_size: int, dropout_rate: f
                 "trainable_params",
                 "final_loss", "final_val_loss",
                 "final_acc", "final_val_acc", "best_val_acc",
+                "generalization_gap",
                 "wall_s",
             ])
         w.writerow([
@@ -218,6 +225,7 @@ def run(cfg: ExperimentConfig, *, variant: str, patch_size: int, dropout_rate: f
             n_params,
             final_loss, final_val_loss,
             final_acc, final_val_acc, best_val_acc,
+            generalization_gap,
             wall_s,
         ])
 
