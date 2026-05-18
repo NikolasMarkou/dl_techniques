@@ -144,3 +144,75 @@ bug is fixed: `sweep.py` now exposes a `--gpu` CLI that hard-sets
 `CUDA_VISIBLE_DEVICES` for each cell subprocess (the parent shell's value
 can no longer leak through). See `PHASE3_PLAN.md` for the operational
 sweep recipe.
+
+## Phase 3 refinements (plan `plan_2026-05-18_e1f12eab`)
+
+The harness is refined with four falsifiability-oriented features. None
+modify the Phase 1 RESULTS.md verdict block (I2 invariant), the
+`VARIANT_CRITERIA` PASS/FAIL rule (I4), or the GPU `--gpu` hard-set contract.
+Everything below is additive.
+
+### Hypothesis Registry
+
+`train.rms_variants_train.hypotheses.VARIANT_HYPOTHESES` is a dict mapping each
+of the 8 norm variants to a single falsifiable claim with a numerical STOP-IF
+threshold on a metric column the harness already collects. Each entry is a
+`HypothesisSpec(claim, metric_column, comparator, threshold, applicable_experiments, applicable_modes, min_samples, reduction, notes)`.
+
+`evaluate_hypothesis(variant, df, experiment=..., mode=...) -> Verdict` returns
+one of `CONFIRMED` / `REJECTED` / `INCONCLUSIVE` / `N/A`. `evaluate_all(df)`
+groups by `(experiment, norm_type, mode)` and emits a per-cell verdict frame.
+
+`report.write_report` consumes `evaluate_all`, attaches a `hypothesis_verdict`
+column to `headline_summary.csv`, writes `hypothesis_verdicts.csv` (per-cell
+observed vs threshold), and renders a "Hypothesis verdicts" block in
+`summary.md` alongside the existing PASS/FAIL block. Thresholds are stated
+from each layer's documented design claim — not tuned post-hoc to match
+observed Phase 1 data.
+
+### Distribution-Shift Probe
+
+`callbacks.DistributionShiftProbe` evaluates val accuracy on
+**CIFAR-10-C** (Hendrycks & Dietterich 2019) corruptions via
+`tensorflow_datasets` `cifar10_corrupted/{corruption}_{severity}`. Wired into
+E1 by default (severity 3, 5 corruption-type subset: gaussian_noise,
+defocus_blur, brightness, contrast, jpeg_compression; max 500 samples per
+corruption). E2 wiring (CIFAR-100-C) is identical and is a one-line addition
+when needed.
+
+**Hard contract — never raises.** On missing TFDS dataset, missing
+`tensorflow_datasets` package, or any load error, the probe writes a
+`dist_shift.csv` with a `reason` column populated and logs a WARNING. No
+cell is poisoned by probe failure. This is anchored at
+`DECISION plan_2026-05-18_e1f12eab/D-002`.
+
+### Sweep `--regimes`
+
+`sweep.py --regimes <csv>` makes the regime axis a first-class sweep dimension
+instead of a shell loop. Cells multiply by the regime count. Unsupported
+(experiment, regime) pairs are filtered with a one-line log via the
+`EXPERIMENT_REGIMES` table (mirroring each trainer's `_REGIME_MAP`).
+
+A hard `--max-cells` build-time guard (default 1000) refuses oversized
+builds **before any subprocess is launched** — prevents the
+partial-sweep / inconsistent-results-dir failure mode. Anchored at
+`DECISION plan_2026-05-18_e1f12eab/D-003`. Bump `--max-cells` explicitly
+for full-Cartesian-product sweeps; the default flags any > 1000-cell build
+as a smell to chunk instead.
+
+Non-default regimes get a `regime_<name>` segment in the out-dir path so
+the default-regime layout (under which Phase 1 RESULTS.md was generated)
+remains byte-identical (I2 invariant).
+
+### Generalization Gap Metric
+
+Every trainer's `results.csv` now includes a `generalization_gap` column:
+
+- **Classification (E1/E2/E3)**: `final_acc - final_val_acc` — positive value
+  indicates overfitting.
+- **Regression (E4/E5)**: `final_val_loss - final_loss` — positive value
+  indicates worse generalization.
+
+NaN-tolerant (any computation error → NaN). Consumed by the
+`band_logit_norm` hypothesis registry entry (claim: classification
+generalization gap ≤ 0.20) and reported in `headline_summary.csv`.
