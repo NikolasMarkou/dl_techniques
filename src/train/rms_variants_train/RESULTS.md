@@ -275,3 +275,69 @@ Total Phase 3 cell budget: 8 norms × {5 base experiments × 5 seeds} + 400 regi
 ### Plan reference
 
 `plans/plan_2026-05-18_63121227/{plan.md, decisions.md, verification.md, summary.md, PHASE3_PLAN.md}` — anchored decisions D-001 (8-tuple append), D-002 (GPU env hard-set), D-003 (calibration + robustness probes).
+
+---
+
+## Phase 3 v3 (refined) — falsifiable + pre-registered + multi-architecture
+
+*Plan: `plan_2026-05-18_6776f8ba`. PHASE3_PLAN.md v3 supersedes v2 in-place.*
+
+Phase 3 v3 keeps the v2 cell tally + falsification skeleton and adds nine leverage-ranked refinements (seven shipped, two deferred to follow-up). The single biggest delivery: **the post-sweep recommendation is now mechanically produced from rules locked at plan-approval time**, eliminating the curation pass that drove Phase 1's TL;DR narrative.
+
+### Refinements (shipped in this plan)
+
+| ID | Refinement | Effect |
+|----|------------|--------|
+| A | `norm_overhead_bench.py` | Per-norm step-time + params + peak-mem (fp32/fp16); enforces the 1.5× ratio gate in `OVERALL_RULES` |
+| B | `OVERALL_RULES` + `compute_overall_recommendation` | Frozen 4-slot taxonomy (RECOMMENDED_DEFAULT / RECOMMENDED_NICHE / NULL / AVOID); changing rules post-approval requires PIVOT |
+| C | E6 — 4-layer causal-LM × Wikipedia 10k | First LM data point; headline `final_val_perplexity`, lower-is-better; closes the largest architecture gap in v2 |
+| D | Stress regimes (`lr_extreme`, `wd_zero`, `bs_4`, `mp_fp16_lowloss`) | Test whether norm choice helps GRACEFULLY at the edges or only at standard hyperparams |
+| E | Pure-function `stats.py` | NaN-tolerant `mean_std` + deterministic `bootstrap_ci` + two-sided `paired_permutation_test`; replaces the 22-line shim |
+| G | ViT + ResNet `normalization_kwargs` plumbing | Removes the d-vs-1 parameter confound on E1/E2 PM mode (deferred 3 plans, now resolved) |
+| I | Decision anchors uplifted to plan-id-prefixed form | `# DECISION plan_2026-05-18_6776f8ba/D-NNN` resolvable after consolidated-file trim |
+
+### Frozen pre-registered rules (`OVERALL_RULES`, D-002)
+
+| Rule | Value |
+|------|-------|
+| `headline_pass_required_for_recommend` | `True` |
+| `hypothesis_confirm_required_for_default` | `True` |
+| `overhead_ceiling_step_time_ratio` | `1.5` |
+| `calibration_ece_delta_max` | `0.02` |
+| `robustness_shift_acc_delta_min` | `-0.05` |
+| `avoid_on_headline_fail` | `True` |
+| `avoid_on_hypothesis_rejected` | `True` |
+
+The 4-slot taxonomy is verbatim in `PHASE3_PLAN.md` v3 §"Pre-registered analysis rules" and codified in `report.py:OVERALL_RULES`. Any post-approval edit requires a new PIVOT entry in `decisions.md` per D-002.
+
+### New falsification signals (additive to v2)
+
+| ID | Signal | STOP IF | Action |
+|----|--------|---------|--------|
+| G | Overhead bench shows > 1.5× step-time at no headline gain | `overhead.csv` ratio > 1.5 AND `verdict != PASS` | force AVOID; document in `summary.md` |
+| H | E6 perplexity diverges under stress regimes for ALL 8 norms | every E6+stress cell records `final_val_perplexity = NaN` | sweep-design failure; halve lr_extreme multiplier OR drop E6 stress |
+| I | CIFAR-100-C unavailable (confirmed at plan_6776f8ba step 7) | `tfds.builder('cifar100_corrupted')` raises | E2 `dist_shift.csv` soft-fails with `reason='dataset_missing:...'` per-corruption rows; deferred until user installs the TFDS build |
+
+### Wall-clock budget v3
+
+| Chunk | Cells | Wall-clock |
+|-------|-------|------------|
+| Smoke | 40 | ≤ 5 min |
+| 1 (OOB) | 200 | 14-17h |
+| 2 (PM on E1-E5) | 100 | ~5h |
+| 3a (E5 × 7 regimes) | 280 | ~7h |
+| 3b (E1 × 8 regimes) | 320 | ~14h |
+| 4 (E6) | 24 | ~12h |
+| Overhead bench | 0 (1-time) | ~3 min |
+| Analysis | -- | ~1h |
+
+Total realistic: 5-6 overnight chunks ≤ 18h + 1 analysis day.
+
+### Operational note (HC12 / LESSONS L111)
+
+This plan delivers DESIGN + SCAFFOLD + UNIT TESTS. The sweep itself and the SC13 smoke gate remain USER-launched per the documented operational-follow-up pattern. `PHASE3_PLAN.md` v3 ships the runnable commands with explicit pre-warm TFDS + tee logging mitigations for LESSONS L110/L114.
+
+### Plan reference
+
+`plans/plan_2026-05-18_6776f8ba/{plan.md, decisions.md, verification.md, summary.md}` — anchored decisions D-001 (overhead bench), D-002 (OVERALL_RULES frozen), D-003 (ViT/ResNet kwargs plumbing), D-004 (E6 norm placement), D-005 (stress regimes additive), D-006 (sweep + smoke USER-launched).
+

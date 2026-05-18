@@ -216,3 +216,17 @@ Every trainer's `results.csv` now includes a `generalization_gap` column:
 NaN-tolerant (any computation error → NaN). Consumed by the
 `band_logit_norm` hypothesis registry entry (claim: classification
 generalization gap ≤ 0.20) and reported in `headline_summary.csv`.
+
+## Phase 3 v3 (refined) — runnable plan + frozen rules
+
+`PHASE3_PLAN.md` v3 supersedes v2 in-place. v3 adds:
+
+- **Pre-registered analysis rules** — `report.py:OVERALL_RULES` + `compute_overall_recommendation` produce `overall_recommendation.csv` (4-slot taxonomy: RECOMMENDED_DEFAULT / RECOMMENDED_NICHE / NULL / AVOID). Rules locked at plan-approval; changing them post-approval requires a PIVOT (D-002).
+- **Per-norm compute-overhead bench** — `norm_overhead_bench.py` standalone CLI emits `overhead.csv` (step-time fp32/fp16, params, peak GPU mem). Enforces the `1.5×` step-time ceiling in OVERALL_RULES (D-001).
+- **E6 causal-LM trainer** — `experiments/e6_clm_wiki.py`: 4-layer / d=192 transformer trained on Wikipedia 10k via packed CLM (tiktoken cl100k_base). Headline `final_val_perplexity`. Norm applied at all three positions (block-input, block-output, final pre-logits) per D-004.
+- **Stress regimes** — `lr_extreme`, `wd_zero`, `bs_4`, `mp_fp16_lowloss` on E1/E3/E4/E5/E6. Some norm × regime cells are EXPECTED to fail — that's the SIGNAL of robustness, not a sweep failure.
+- **ViT + ResNet `normalization_kwargs` plumbing** — additive, default-off bit-exact (D-003). E1/E2 PM mode is now legitimately param-matched.
+
+Operational note (HC12 / LESSONS L111): the sweep itself and the SC13 smoke gate remain USER-launched. `PHASE3_PLAN.md` v3 ships the runnable commands with explicit pre-warm TFDS + HF Wikipedia recipe + `tee` logging mitigations (LESSONS L110, L114).
+
+Plan: `plans/plan_2026-05-18_6776f8ba/{plan.md, decisions.md, summary.md, verification.md}`.
