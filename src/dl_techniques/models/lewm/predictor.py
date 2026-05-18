@@ -15,7 +15,7 @@ import keras
 from keras import ops
 from typing import Any, Dict, Optional, Tuple
 
-from dl_techniques.layers.adaln_zero import AdaLNZeroConditionalBlock
+from dl_techniques.layers.transformers.adaln_zero import AdaLNZeroConditionalBlock
 
 
 @keras.saving.register_keras_serializable()

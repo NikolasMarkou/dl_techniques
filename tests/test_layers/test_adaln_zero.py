@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 from keras import ops
 
-from dl_techniques.layers.adaln_zero import AdaLNZeroConditionalBlock
+from dl_techniques.layers.transformers.adaln_zero import AdaLNZeroConditionalBlock
 
 
 DIM = 16
