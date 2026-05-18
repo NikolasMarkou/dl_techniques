@@ -766,6 +766,169 @@ class RobustnessProbe(keras.callbacks.Callback):
             logger.error(f"[RobustnessProbe] failed: {type(e).__name__}: {e}")
 
 
+class DistributionShiftProbe(keras.callbacks.Callback):
+    """Measure out-of-distribution accuracy via CIFAR-10-C / CIFAR-100-C.
+
+    At end-of-training, loads a held-out **corrupted** test slice via
+    ``tensorflow_datasets`` (the canonical Hendrycks & Dietterich 2019
+    distribution-shift benchmark) and evaluates accuracy per corruption type
+    at the configured severity. Soft-fails on missing dataset: emits an empty
+    ``dist_shift.csv`` with a ``reason`` row and logs a WARNING — never raises
+    (per plan_e1f12eab EC2; falsification scenario B covers the pivot path).
+
+    Output: ``dist_shift.csv`` with columns ``corruption, severity, val_acc,
+    n_samples, reason`` (``reason`` is empty on success, populated on
+    soft-fail).
+
+    Classification only — relies on ``model.predict`` returning a (N, C)
+    logit/prob tensor and on integer-class labels.
+
+    :param dataset_name_template: TFDS dataset name template with `{corruption}`
+        placeholder, e.g. ``"cifar10_corrupted/{corruption}_{severity}"``.
+        Default targets CIFAR-10-C.
+    :param corruptions: Subset of corruption type strings to evaluate. Default
+        is a 5-type subset of the 15 standard corruptions (covers blur, noise,
+        weather, digital, geometric) — keeps wall-clock under 30s.
+    :param severity: Integer severity 1-5. Default 3 (mid-strength).
+    :param out_dir: Output directory.
+    :param max_samples_per_corruption: Cap on validation sample count per
+        corruption to bound wall-clock. Default 1000.
+    :param preprocess_fn: Optional callable applied to (image, label) tuples
+        post-TFDS-load. Typically the same normalization the training pipeline
+        uses (e.g. divide-by-255). Default: identity.
+    """
+
+    # DECISION plan_2026-05-18_e1f12eab/D-002: soft-fail branch — never raise
+    # on TFDS dataset-missing or environment errors. The probe is an
+    # informational signal; a hard crash here would poison the cell and
+    # invalidate the cell's headline metric verdict for no good reason. The
+    # `reason` column on dist_shift.csv preserves the failure mode for
+    # downstream visibility.
+
+    _DEFAULT_CORRUPTIONS: Tuple[str, ...] = (
+        "gaussian_noise",
+        "defocus_blur",
+        "brightness",
+        "contrast",
+        "jpeg_compression",
+    )
+
+    def __init__(
+        self,
+        out_dir: str,
+        *,
+        dataset_name_template: str = "cifar10_corrupted/{corruption}_{severity}",
+        corruptions: Optional[Tuple[str, ...]] = None,
+        severity: int = 3,
+        max_samples_per_corruption: int = 1000,
+        preprocess_fn: Optional[callable] = None,
+    ) -> None:
+        super().__init__()
+        self._out_dir = out_dir
+        self._template = dataset_name_template
+        self._corruptions = tuple(corruptions) if corruptions else self._DEFAULT_CORRUPTIONS
+        self._severity = int(severity)
+        self._max_samples = int(max_samples_per_corruption)
+        self._preprocess_fn = preprocess_fn
+        self._csv_path = os.path.join(out_dir, "dist_shift.csv")
+
+    def _soft_fail(self, reason: str) -> None:
+        """Write an empty CSV with a single `reason` row and log WARNING."""
+        try:
+            _ensure_dir(self._out_dir)
+            with open(self._csv_path, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["corruption", "severity", "val_acc", "n_samples", "reason"])
+                w.writerow(["", self._severity, float("nan"), 0, reason])
+            logger.warning(f"[DistributionShiftProbe] soft-fail: {reason}")
+        except OSError as e:
+            logger.error(f"[DistributionShiftProbe] could not write soft-fail CSV: {e}")
+
+    def on_train_end(self, logs: Optional[dict] = None) -> None:
+        # Soft-fail wrapper around the whole evaluation — never raise.
+        try:
+            import tensorflow_datasets as tfds  # noqa: WPS433  (lazy import)
+        except ImportError as e:
+            self._soft_fail(f"tensorflow_datasets unavailable: {e}")
+            return
+
+        rows: List[Tuple[str, int, float, int, str]] = []
+        for corruption in self._corruptions:
+            dataset_name = self._template.format(
+                corruption=corruption, severity=self._severity,
+            )
+            try:
+                ds = tfds.load(
+                    dataset_name, split="test", as_supervised=True,
+                    download=True, try_gcs=False,
+                )
+            except Exception as e:  # noqa: BLE001  (intentional broad catch)
+                # Catch-all for dataset-name errors, network failures, TFDS
+                # internal errors, etc. The whole point of this probe is to
+                # be soft-fail per plan_e1f12eab D-002 / EC2 — never poison
+                # the cell. Concrete TFDS error classes (e.g.
+                # `tfds.core.registered.DatasetNotFoundError`) cannot be
+                # named in the except clause because doing so re-triggers
+                # the tfds module attribute access, which itself raises
+                # ImportError if tfds is missing.
+                logger.warning(
+                    f"[DistributionShiftProbe] {dataset_name} unavailable "
+                    f"({type(e).__name__}: {e}) — skipping corruption."
+                )
+                rows.append((corruption, self._severity, float("nan"), 0,
+                             f"dataset_missing:{type(e).__name__}"))
+                continue
+
+            try:
+                # Collect up to max_samples_per_corruption images + labels.
+                xs: List[np.ndarray] = []
+                ys: List[np.ndarray] = []
+                count = 0
+                for x, y in tfds.as_numpy(ds):
+                    if self._preprocess_fn is not None:
+                        x, y = self._preprocess_fn(x, y)
+                    xs.append(np.asarray(x))
+                    ys.append(np.asarray(y))
+                    count += 1
+                    if count >= self._max_samples:
+                        break
+                if count == 0:
+                    rows.append((corruption, self._severity, float("nan"), 0,
+                                 "empty_split"))
+                    continue
+                x_arr = np.stack(xs, axis=0).astype(np.float32)
+                y_arr = np.stack(ys, axis=0)
+                preds = self.model.predict(x_arr, verbose=0)
+                if isinstance(preds, dict):
+                    preds = next(iter(preds.values()))
+                preds_np = keras.ops.convert_to_numpy(preds)
+                acc = RobustnessProbe._accuracy(preds_np, y_arr)
+                if acc is None:
+                    rows.append((corruption, self._severity, float("nan"),
+                                 count, "accuracy_shape_mismatch"))
+                else:
+                    rows.append((corruption, self._severity, float(acc),
+                                 int(count), ""))
+            except (RuntimeError, ValueError) as e:
+                logger.warning(
+                    f"[DistributionShiftProbe] {corruption} eval failed: "
+                    f"{type(e).__name__}: {e}"
+                )
+                rows.append((corruption, self._severity, float("nan"), 0,
+                             f"eval_error:{type(e).__name__}"))
+
+        # Write CSV (always, even if all rows are soft-failed — the reason
+        # column is the visibility mechanism).
+        try:
+            _ensure_dir(self._out_dir)
+            with open(self._csv_path, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["corruption", "severity", "val_acc", "n_samples", "reason"])
+                w.writerows(rows)
+        except OSError as e:
+            logger.error(f"[DistributionShiftProbe] CSV write failed: {e}")
+
+
 __all__ = [
     "GradientNormCallback",
     "WeightNormTrajectoryCallback",
@@ -773,5 +936,6 @@ __all__ = [
     "NormInternalStatsCallback",
     "CalibrationCallback",
     "RobustnessProbe",
+    "DistributionShiftProbe",
     "NORM_LAYER_CLASSES",
 ]

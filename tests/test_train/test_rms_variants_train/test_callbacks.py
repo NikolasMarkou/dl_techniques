@@ -539,5 +539,114 @@ class TestRobustnessProbe:
             assert 0.0 <= acc <= 1.0
 
 
+# ---------------------------------------------------------------------
+# DistributionShiftProbe (plan_e1f12eab Step 4)
+# ---------------------------------------------------------------------
+
+
+class TestDistributionShiftProbe:
+    """Tests for the CIFAR-10-C-style distribution-shift probe.
+
+    Two soft-fail paths are exercised here without touching TFDS:
+    (a) missing dataset name → reason='dataset_missing:...';
+    (b) ctor / CSV schema verification.
+    Network-dependent end-to-end coverage is left to the Step 9 smoke gate.
+    """
+
+    def test_constructor_does_not_crash(self):
+        from train.rms_variants_train.callbacks import DistributionShiftProbe
+        probe = DistributionShiftProbe(
+            out_dir="/tmp/_dist_shift_ctor_test",
+            corruptions=("gaussian_noise",),
+            severity=3,
+        )
+        assert probe._severity == 3
+        assert probe._corruptions == ("gaussian_noise",)
+        assert probe._csv_path.endswith("dist_shift.csv")
+
+    def test_soft_fail_on_nonexistent_dataset_template(self, tmp_path):
+        """A nonsense dataset_name_template that TFDS cannot resolve → the
+        probe must emit dist_shift.csv with `reason` populated, NOT raise."""
+        from train.rms_variants_train.callbacks import DistributionShiftProbe
+
+        # Build a trivial model so .predict won't run if a row makes it that
+        # far (the dataset load should fail first).
+        inputs = keras.Input(shape=(4,))
+        outputs = keras.layers.Dense(2)(inputs)
+        model = keras.Model(inputs, outputs)
+        model.compile(optimizer="adam", loss="sparse_categorical_crossentropy")
+
+        probe = DistributionShiftProbe(
+            out_dir=str(tmp_path),
+            dataset_name_template="totally_fake_corrupted_dataset_xyz/{corruption}_{severity}",
+            corruptions=("gaussian_noise", "defocus_blur"),
+            severity=3,
+        )
+        probe.set_model(model)
+        # Must NOT raise.
+        probe.on_train_end()
+        csv_path = tmp_path / "dist_shift.csv"
+        assert csv_path.exists(), "dist_shift.csv not written on soft-fail"
+        with open(csv_path, newline="") as f:
+            rows = list(csv.reader(f))
+        # Header + 2 rows (one per corruption attempted).
+        assert rows[0] == ["corruption", "severity", "val_acc", "n_samples", "reason"]
+        assert len(rows) == 3, f"Expected 3 rows (header + 2 corruptions); got {len(rows)}"
+        # Each row's reason field should be non-empty.
+        for r in rows[1:]:
+            reason = r[4]
+            assert reason, f"Soft-fail row missing reason: {r}"
+
+    def test_soft_fail_on_missing_tfds_dependency(self, tmp_path, monkeypatch):
+        """Simulate `import tensorflow_datasets` raising ImportError → the
+        probe must emit a single soft-fail row, not raise."""
+        from train.rms_variants_train.callbacks import DistributionShiftProbe
+
+        # Force the lazy `import tensorflow_datasets` inside on_train_end to
+        # raise. We do this by injecting a sentinel into sys.modules.
+        import sys
+        # Save real module if loaded.
+        real = sys.modules.pop("tensorflow_datasets", None)
+
+        class _RaisingModule:
+            def __getattr__(self, name):
+                raise ImportError("simulated missing tfds for test")
+
+        sys.modules["tensorflow_datasets"] = _RaisingModule()
+        try:
+            inputs = keras.Input(shape=(4,))
+            outputs = keras.layers.Dense(2)(inputs)
+            model = keras.Model(inputs, outputs)
+            model.compile(optimizer="adam", loss="sparse_categorical_crossentropy")
+
+            probe = DistributionShiftProbe(out_dir=str(tmp_path))
+            probe.set_model(model)
+            probe.on_train_end()
+
+            csv_path = tmp_path / "dist_shift.csv"
+            assert csv_path.exists()
+            with open(csv_path, newline="") as f:
+                rows = list(csv.reader(f))
+            # Header + 1 soft-fail row with the import-error reason OR a
+            # broken-import path. In either case dist_shift.csv exists with
+            # a non-empty reason.
+            assert rows[0] == ["corruption", "severity", "val_acc", "n_samples", "reason"]
+            # The probe may either hit the ImportError soft-fail path
+            # (single row) or, depending on how the sentinel interacts with
+            # tfds.core.registered access, fall through to per-corruption
+            # soft-fails. Either way the CSV must contain at least one row
+            # with a non-empty `reason`.
+            assert len(rows) >= 2, "Expected at least one data row"
+            assert all(r[4] for r in rows[1:]), "All data rows must have a reason"
+        finally:
+            sys.modules.pop("tensorflow_datasets", None)
+            if real is not None:
+                sys.modules["tensorflow_datasets"] = real
+
+    def test_appears_in__all__(self):
+        from train.rms_variants_train import callbacks
+        assert "DistributionShiftProbe" in callbacks.__all__
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

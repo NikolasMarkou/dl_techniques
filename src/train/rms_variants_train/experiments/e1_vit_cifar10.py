@@ -32,6 +32,7 @@ from dl_techniques.models.vit.model import create_vit
 from dl_techniques.utils.logger import logger
 
 from train.rms_variants_train.callbacks import (
+    DistributionShiftProbe,
     GradientNormCallback,
     NormInternalStatsCallback,
     NormLayerActivationCallback,
@@ -166,6 +167,12 @@ def run(cfg: ExperimentConfig, *, variant: str, patch_size: int, dropout_rate: f
     cal_x = tf.convert_to_tensor(x_val[:32])
     cal_y = tf.convert_to_tensor(y_val[:32])
 
+    # CIFAR-10 train pipeline normalizes images by /255.0 — apply the same
+    # to the CIFAR-10-C tensors the probe will pull from TFDS so model.predict
+    # sees in-distribution magnitudes.
+    def _cifar10c_preprocess(x: np.ndarray, y: np.ndarray):
+        return x.astype(np.float32) / 255.0, y
+
     callbacks_ = [
         GradientNormCallback(
             calibration_data=(cal_x, cal_y), out_dir=cfg.out_dir,
@@ -174,6 +181,15 @@ def run(cfg: ExperimentConfig, *, variant: str, patch_size: int, dropout_rate: f
         WeightNormTrajectoryCallback(out_dir=cfg.out_dir),
         NormLayerActivationCallback(calibration_data=cal_x, out_dir=cfg.out_dir),
         NormInternalStatsCallback(out_dir=cfg.out_dir),
+        # CIFAR-10-C distribution-shift probe (plan_e1f12eab Step 4 / D-002).
+        # Soft-fails on missing TFDS dataset — never poisons the cell.
+        DistributionShiftProbe(
+            out_dir=cfg.out_dir,
+            dataset_name_template="cifar10_corrupted/{corruption}_{severity}",
+            severity=3,
+            max_samples_per_corruption=500,
+            preprocess_fn=_cifar10c_preprocess,
+        ),
     ]
 
     t0 = time.time()
