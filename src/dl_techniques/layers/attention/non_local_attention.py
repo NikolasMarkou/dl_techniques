@@ -12,6 +12,14 @@ complex scenes and objects.
 It functions as a self-attention block tailored for 4D image-like tensors
 (batch, height, width, channels).
 
+Score-to-probability conversion is delegated to :class:`ProbabilityOutput`
+via ``probability_type`` / ``probability_config``. Optional QK-normalization
+(``qk_norm_type``) applies a normalization layer independently to the query
+and key projections before computing attention scores. The optional output
+spatial normalization (``output_norm_type``) is created via
+:func:`create_normalization_layer` and accepts the full set of registered
+normalization types.
+
 References:
     - Wang, X., Girshick, R., Gupta, A., & He, K. (2018). "Non-local Neural
       Networks". (https://arxiv.org/abs/1711.07971)
@@ -23,6 +31,9 @@ import keras
 from keras import ops
 from typing import Any, Dict, Tuple, Optional, Literal, Union
 
+from ..activations import ProbabilityOutput
+from ..norms.factory import create_normalization_layer
+
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
@@ -33,12 +44,16 @@ class NonLocalAttention(keras.layers.Layer):
     (Wang et al., 2018) that enables convolutional networks to capture global
     spatial dependencies by computing attention between all spatial positions in
     a 4D feature map. The input is first spatially pre-processed with an optional
-    depthwise convolution and normalization, then projected into query, key, and
-    value representations via 1x1 convolutions. The spatial dimensions are flattened
-    into sequences for attention computation: ``A = Attention(Q, K, V)`` using either
-    scaled dot-product (``score = Q K^T / sqrt(d_k)``) or Gaussian mode (with reduced
-    key/value channels ``d_kv = d_attn / 8``). The attended output is reshaped back to
-    spatial format and projected to the desired output channels.
+    depthwise convolution and (optional) output spatial normalization, then projected
+    into query, key, and value representations via 1x1 convolutions. The spatial
+    dimensions are flattened into sequences for attention computation:
+    ``score = Q K^T`` followed by ``attn = ProbabilityOutput(score)``, then
+    ``out = attn @ V``. In ``'dot_product'`` mode, scores are scaled by
+    ``1/sqrt(d_k)`` (matching the previous behavior of ``use_scale=True``); in
+    ``'gaussian'`` mode no scaling is applied (matching the previous
+    ``use_scale=False``) and the key/value channels are reduced to ``d_attn / 8``
+    as in the original paper. The attended output is reshaped back to spatial
+    format and projected to the desired output channels.
 
     **Architecture Overview:**
 
@@ -50,7 +65,7 @@ class NonLocalAttention(keras.layers.Layer):
                       ▼
         ┌─────────────────────────────┐
         │ DepthwiseConv2D(kernel_size)│
-        │ + Normalization (optional)  │
+        │ + OutputNorm (optional)     │
         └─────────────┬───────────────┘
                       ▼
         ┌─────────────────────────────┐
@@ -67,7 +82,10 @@ class NonLocalAttention(keras.layers.Layer):
         └─────────────┬──────────────┘
                       ▼
         ┌─────────────────────────────┐
-        │ Attention(Q, V, K)          │
+        │ (optional) q_norm / k_norm  │
+        │ scores = Q K^T (/ sqrt(d_k))│
+        │ attn = ProbabilityOutput(.) │
+        │ out  = attn @ V             │
         │ → [B, H*W, d_kv]            │
         └─────────────┬───────────────┘
                       ▼
@@ -91,8 +109,30 @@ class NonLocalAttention(keras.layers.Layer):
     :type kernel_size: Union[int, Tuple[int, int]]
     :param use_bias: Whether to use bias in convolution layers.
     :type use_bias: bool
-    :param normalization: Type of normalization (``'batch'``, ``'layer'``, or ``None``).
-    :type normalization: Optional[Literal['batch', 'layer']]
+    :param probability_type: Probability strategy identifier forwarded to
+        :class:`ProbabilityOutput` for converting attention scores into
+        probabilities. Score-level routing strategies are rejected because the
+        attention probabilities must sum to 1 over the key axis.
+    :type probability_type: str
+    :param probability_config: Optional configuration dictionary forwarded
+        to :class:`ProbabilityOutput` as its ``type_config`` argument.
+    :type probability_config: Optional[Dict[str, Any]]
+    :param qk_norm_type: Optional normalization type applied independently
+        to the query and key projections before score computation, instantiated
+        via :func:`create_normalization_layer`. Defaults to ``None``.
+    :type qk_norm_type: Optional[str]
+    :param qk_norm_kwargs: Optional keyword arguments forwarded to
+        :func:`create_normalization_layer` when ``qk_norm_type`` is set.
+    :type qk_norm_kwargs: Optional[Dict[str, Any]]
+    :param output_norm_type: Type of spatial normalization applied to the
+        depthwise pre-processed features, instantiated via
+        :func:`create_normalization_layer`. Defaults to ``'batch_norm'`` to
+        preserve the previous default behavior (``normalization='batch'``).
+        Pass ``None`` to disable.
+    :type output_norm_type: Optional[str]
+    :param output_norm_kwargs: Optional keyword arguments forwarded to
+        :func:`create_normalization_layer` when ``output_norm_type`` is set.
+    :type output_norm_kwargs: Optional[Dict[str, Any]]
     :param intermediate_activation: Activation function for intermediate layers.
     :type intermediate_activation: Union[str, callable]
     :param output_activation: Activation function for the output projection.
@@ -102,6 +142,8 @@ class NonLocalAttention(keras.layers.Layer):
     :param dropout_rate: Dropout rate between 0.0 and 1.0.
     :type dropout_rate: float
     :param attention_mode: Attention type (``'gaussian'`` or ``'dot_product'``).
+        ``'dot_product'`` scales scores by ``1/sqrt(d_k)``; ``'gaussian'`` does
+        not scale and uses reduced key/value channels.
     :type attention_mode: Literal['gaussian', 'dot_product']
     :param kernel_initializer: Initializer for kernel weights.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
@@ -116,10 +158,12 @@ class NonLocalAttention(keras.layers.Layer):
     :param kwargs: Additional keyword arguments for the Layer parent class.
     :type kwargs: Any
 
-    :raises ValueError: If attention_channels <= 0.
-    :raises ValueError: If dropout_rate not in [0, 1).
-    :raises ValueError: If normalization not in ['batch', 'layer', None].
-    :raises ValueError: If attention_mode not in ['gaussian', 'dot_product'].
+    :raises ValueError: If ``attention_channels <= 0``.
+    :raises ValueError: If ``dropout_rate`` not in ``[0, 1)``.
+    :raises ValueError: If ``attention_mode`` not in ``['gaussian', 'dot_product']``.
+    :raises ValueError: If ``probability_type`` is a score-level routing strategy
+        (``'routing'``, ``'deterministic_routing'``, ``'hierarchical'``,
+        ``'hierarchical_routing'``).
     """
 
     def __init__(
@@ -127,7 +171,12 @@ class NonLocalAttention(keras.layers.Layer):
         attention_channels: int,
         kernel_size: Union[int, Tuple[int, int]] = (7, 7),
         use_bias: bool = False,
-        normalization: Optional[Literal['batch', 'layer']] = 'batch',
+        probability_type: str = "softmax",
+        probability_config: Optional[Dict[str, Any]] = None,
+        qk_norm_type: Optional[str] = None,
+        qk_norm_kwargs: Optional[Dict[str, Any]] = None,
+        output_norm_type: Optional[str] = "batch_norm",
+        output_norm_kwargs: Optional[Dict[str, Any]] = None,
         intermediate_activation: Union[str, callable] = 'relu',
         output_activation: Union[str, callable] = 'linear',
         output_channels: int = -1,
@@ -143,13 +192,20 @@ class NonLocalAttention(keras.layers.Layer):
         super().__init__(**kwargs)
 
         # Validate parameters
-        self._validate_inputs(attention_channels, dropout_rate, normalization, attention_mode)
+        self._validate_inputs(
+            attention_channels, dropout_rate, attention_mode, probability_type
+        )
 
         # Store ALL configuration parameters
         self.attention_channels = attention_channels
         self.kernel_size = kernel_size if isinstance(kernel_size, tuple) else (kernel_size, kernel_size)
         self.use_bias = use_bias
-        self.normalization = normalization
+        self.probability_type = probability_type
+        self.probability_config = probability_config
+        self.qk_norm_type = qk_norm_type
+        self.qk_norm_kwargs = qk_norm_kwargs
+        self.output_norm_type = output_norm_type
+        self.output_norm_kwargs = output_norm_kwargs
         self.intermediate_activation = intermediate_activation
         self.output_activation = output_activation
         self.output_channels = output_channels
@@ -190,20 +246,15 @@ class NonLocalAttention(keras.layers.Layer):
             name='depthwise_conv'
         )
 
-        # Create normalization layer if specified
-        if self.normalization == 'batch':
-            self.normalization_layer = keras.layers.BatchNormalization(
-                momentum=0.9,
-                epsilon=1e-5,
-                name='batch_norm'
-            )
-        elif self.normalization == 'layer':
-            self.normalization_layer = keras.layers.LayerNormalization(
-                epsilon=1e-5,
-                name='layer_norm'
+        # Create spatial output normalization layer if specified
+        if self.output_norm_type is not None:
+            self.output_norm = create_normalization_layer(
+                self.output_norm_type,
+                name='output_norm',
+                **(self.output_norm_kwargs or {}),
             )
         else:
-            self.normalization_layer = None
+            self.output_norm = None
 
         # Create Query, Key, Value projection layers
         self.query_conv = keras.layers.Conv2D(
@@ -212,8 +263,8 @@ class NonLocalAttention(keras.layers.Layer):
             **self._conv_params
         )
 
-        # Adjust key/value channels based on attention mode
-        # Gaussian mode uses fewer channels as per original paper
+        # Adjust key/value channels based on attention mode.
+        # Gaussian mode uses fewer channels as per original paper.
         self.key_value_channels = (
             self.attention_channels
             if self.attention_mode == 'dot_product'
@@ -233,18 +284,39 @@ class NonLocalAttention(keras.layers.Layer):
             **self._conv_params
         )
 
-        # Create attention mechanism
-        self.attention = keras.layers.Attention(
-            use_scale=self.attention_mode == 'dot_product',
-            score_mode='dot',
-            dropout=self.dropout_rate if self.dropout_rate > 0 else None,
-            name='attention'
+        # Probability layer for converting attention scores to weights
+        self.attn_prob = ProbabilityOutput(
+            probability_type=self.probability_type,
+            type_config=self.probability_config,
+            name='attn_prob',
         )
 
-        # Create dropout layer if specified
-        if self.dropout_rate > 0:
-            self.dropout = keras.layers.Dropout(self.dropout_rate, name='dropout')
+        # Optional QK-normalization layers
+        if self.qk_norm_type is not None:
+            self.q_norm = create_normalization_layer(
+                self.qk_norm_type,
+                name='q_norm',
+                **(self.qk_norm_kwargs or {}),
+            )
+            self.k_norm = create_normalization_layer(
+                self.qk_norm_type,
+                name='k_norm',
+                **(self.qk_norm_kwargs or {}),
+            )
         else:
+            self.q_norm = None
+            self.k_norm = None
+
+        # Attention dropout (applied to attention probabilities)
+        if self.dropout_rate > 0:
+            self.attn_dropout = keras.layers.Dropout(
+                self.dropout_rate, name='attn_dropout'
+            )
+            self.dropout = keras.layers.Dropout(
+                self.dropout_rate, name='dropout'
+            )
+        else:
+            self.attn_dropout = None
             self.dropout = None
 
         # Note: output_conv will be created in build() since we need input channels
@@ -253,19 +325,10 @@ class NonLocalAttention(keras.layers.Layer):
         self,
         attention_channels: int,
         dropout_rate: float,
-        normalization: Optional[str],
-        attention_mode: str
+        attention_mode: str,
+        probability_type: str,
     ) -> None:
         """Validate initialization parameters.
-
-        :param attention_channels: Number of attention channels to validate.
-        :type attention_channels: int
-        :param dropout_rate: Dropout rate to validate.
-        :type dropout_rate: float
-        :param normalization: Normalization type to validate.
-        :type normalization: Optional[str]
-        :param attention_mode: Attention mode to validate.
-        :type attention_mode: str
 
         :raises ValueError: If any parameter is invalid.
         """
@@ -273,17 +336,21 @@ class NonLocalAttention(keras.layers.Layer):
             raise ValueError(f"attention_channels must be positive, got {attention_channels}")
         if not 0.0 <= dropout_rate < 1.0:
             raise ValueError(f"dropout_rate must be in [0, 1), got {dropout_rate}")
-        if normalization not in ['batch', 'layer', None]:
-            raise ValueError(f"normalization must be 'batch', 'layer', or None, got {normalization}")
         if attention_mode not in ['gaussian', 'dot_product']:
             raise ValueError(f"attention_mode must be 'gaussian' or 'dot_product', got {attention_mode}")
+        invalid_prob_types = {
+            "routing", "deterministic_routing",
+            "hierarchical", "hierarchical_routing",
+        }
+        if probability_type in invalid_prob_types:
+            raise ValueError(
+                f"Invalid probability_type '{probability_type}'. Score-level "
+                f"routing strategies are not compatible with attention "
+                f"probabilities that must sum to 1 over the key axis."
+            )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer and all sub-layers for robust serialization.
-
-        :param input_shape: Shape tuple of the input tensor.
-        :type input_shape: Tuple[Optional[int], ...]
-        """
+        """Build the layer and all sub-layers for robust serialization."""
         channels = input_shape[-1]
         actual_output_channels = (
             channels if self.output_channels <= 0
@@ -298,39 +365,44 @@ class NonLocalAttention(keras.layers.Layer):
             **self._conv_params
         )
 
-        # Build all sub-layers in computational order for serialization robustness
+        # Build sub-layers in computational order for serialization robustness
         self.depthwise_conv.build(input_shape)
 
-        # Depthwise conv doesn't change shape, so normalization uses same shape
-        if self.normalization_layer is not None:
-            self.normalization_layer.build(input_shape)
+        # Depthwise conv doesn't change shape, so output_norm uses same shape
+        if self.output_norm is not None:
+            self.output_norm.build(input_shape)
 
         # Query, Key, Value projections all use the same input shape
         self.query_conv.build(input_shape)
         self.key_conv.build(input_shape)
         self.value_conv.build(input_shape)
 
-        # Attention layer build - it doesn't have explicit weights but we build for consistency
-        # The attention expects [query, value, key] inputs as sequences
         batch_size = input_shape[0] if input_shape[0] is not None else 1
         height = input_shape[1] if input_shape[1] is not None else 32
         width = input_shape[2] if input_shape[2] is not None else 32
-        seq_len = height * width
+        seq_len = height * width if (input_shape[1] is not None and input_shape[2] is not None) else None
 
-        query_seq_shape = (batch_size, seq_len, self.attention_channels)
-        key_value_seq_shape = (batch_size, seq_len, self.key_value_channels)
+        q_seq_shape = (input_shape[0], seq_len, self.attention_channels)
+        kv_seq_shape = (input_shape[0], seq_len, self.key_value_channels)
 
-        self.attention.build([query_seq_shape, key_value_seq_shape, key_value_seq_shape])
+        if self.q_norm is not None:
+            self.q_norm.build(q_seq_shape)
+            self.k_norm.build(kv_seq_shape)
+
+        # Attention scores shape: (B, N_q, N_k)
+        attn_scores_shape = (input_shape[0], seq_len, seq_len)
+        self.attn_prob.build(attn_scores_shape)
+
+        if self.attn_dropout is not None:
+            self.attn_dropout.build(attn_scores_shape)
 
         # Output conv processes the attention output
-        attention_output_shape = (batch_size, height, width, self.key_value_channels)
+        attention_output_shape = (input_shape[0], input_shape[1], input_shape[2], self.key_value_channels)
         self.output_conv.build(attention_output_shape)
 
-        # Dropout doesn't need explicit building but we do it for consistency
         if self.dropout is not None:
             self.dropout.build(attention_output_shape)
 
-        # Always call parent build at the end
         super().build(input_shape)
 
     def call(
@@ -343,24 +415,20 @@ class NonLocalAttention(keras.layers.Layer):
         """Apply non-local attention to input features.
 
         :param inputs: Input tensor of shape ``(batch_size, height, width, channels)``.
-        :type inputs: keras.KerasTensor
-        :param attention_mask: Optional attention mask tensor.
-        :type attention_mask: Optional[keras.KerasTensor]
+        :param attention_mask: Optional additive attention mask broadcastable to
+            attention scores of shape ``(B, N_q, N_k)``. A value of ``0`` keeps a
+            position; a large negative value masks it out.
         :param training: Whether in training mode. Affects dropout and normalization.
-        :type training: Optional[bool]
-        :param kwargs: Additional arguments (unused, kept for compatibility).
-        :type kwargs: Any
 
         :return: Tensor of shape ``(batch_size, height, width, output_channels)``
             with spatially attended features incorporating long-range dependencies.
-        :rtype: keras.KerasTensor
         """
         # Apply depthwise convolution for spatial processing
         x = self.depthwise_conv(inputs, training=training)
 
-        # Apply normalization if specified
-        if self.normalization_layer is not None:
-            x = self.normalization_layer(x, training=training)
+        # Apply spatial output normalization if specified
+        if self.output_norm is not None:
+            x = self.output_norm(x, training=training)
 
         # Generate query, key, value projections
         query = self.query_conv(x, training=training)
@@ -371,16 +439,36 @@ class NonLocalAttention(keras.layers.Layer):
         shape = ops.shape(query)
         batch_size, height, width = shape[0], shape[1], shape[2]
 
-        query_reshaped = ops.reshape(query, [batch_size, -1, self.attention_channels])
-        key_reshaped = ops.reshape(key, [batch_size, -1, self.key_value_channels])
-        value_reshaped = ops.reshape(value, [batch_size, -1, self.key_value_channels])
+        q = ops.reshape(query, [batch_size, -1, self.attention_channels])
+        k = ops.reshape(key, [batch_size, -1, self.key_value_channels])
+        v = ops.reshape(value, [batch_size, -1, self.key_value_channels])
 
-        # Apply attention mechanism: [query, value, key] format for keras.layers.Attention
-        attention_output = self.attention(
-            [query_reshaped, value_reshaped, key_reshaped],
-            mask=attention_mask,
-            training=training
-        )
+        # Optional QK-normalization
+        if self.q_norm is not None:
+            q = self.q_norm(q, training=training)
+            k = self.k_norm(k, training=training)
+
+        # Scaled dot-product attention scores: (B, N_q, N_k)
+        scores = ops.matmul(q, ops.transpose(k, axes=[0, 2, 1]))
+        if self.attention_mode == 'dot_product':
+            # Match previous behavior of keras.layers.Attention(use_scale=True)
+            d_k = ops.cast(self.attention_channels, scores.dtype)
+            scores = scores / ops.sqrt(d_k)
+        # In 'gaussian' mode, no scaling (matches previous use_scale=False)
+
+        # Optional additive attention mask
+        if attention_mask is not None:
+            scores = scores + ops.cast(attention_mask, scores.dtype)
+
+        # Convert scores to attention probabilities
+        attn = self.attn_prob(scores, training=training)
+
+        # Optional dropout on attention probabilities
+        if self.attn_dropout is not None:
+            attn = self.attn_dropout(attn, training=training)
+
+        # Aggregate values: (B, N_q, N_k) @ (B, N_k, d_kv) -> (B, N_q, d_kv)
+        attention_output = ops.matmul(attn, v)
 
         # Reshape back to spatial dimensions: (B, H*W, C) -> (B, H, W, C)
         attention_output = ops.reshape(
@@ -391,38 +479,32 @@ class NonLocalAttention(keras.layers.Layer):
         # Apply output projection
         output = self.output_conv(attention_output, training=training)
 
-        # Apply dropout if specified and in training mode
+        # Apply output dropout if specified
         if self.dropout is not None:
             output = self.dropout(output, training=training)
 
         return output
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer.
-
-        :param input_shape: Shape tuple of the input tensor.
-        :type input_shape: Tuple[Optional[int], ...]
-
-        :return: Output shape tuple with spatial dimensions preserved.
-        :rtype: Tuple[Optional[int], ...]
-        """
+        """Compute the output shape of the layer."""
         output_shape = list(input_shape)
         if self.output_channels > 0:
             output_shape[-1] = self.output_channels
         return tuple(output_shape)
 
     def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration for serialization.
-
-        :return: Dictionary containing all parameters required to recreate this layer.
-        :rtype: Dict[str, Any]
-        """
+        """Get layer configuration for serialization."""
         config = super().get_config()
         config.update({
             'attention_channels': self.attention_channels,
             'kernel_size': self.kernel_size,
             'use_bias': self.use_bias,
-            'normalization': self.normalization,
+            'probability_type': self.probability_type,
+            'probability_config': self.probability_config,
+            'qk_norm_type': self.qk_norm_type,
+            'qk_norm_kwargs': self.qk_norm_kwargs,
+            'output_norm_type': self.output_norm_type,
+            'output_norm_kwargs': self.output_norm_kwargs,
             'intermediate_activation': self.intermediate_activation,
             'output_activation': self.output_activation,
             'output_channels': self.output_channels,

@@ -43,6 +43,7 @@ from keras import ops, layers, initializers, regularizers
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.layers.activations import ProbabilityOutput
 from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
@@ -220,10 +221,15 @@ class LighthouseAttention(keras.layers.Layer):
     :param scorer: Scorer type. Only ``"norm"`` supported (port compromise).
     :param full_attention: If ``True``, bypass pyramid path → plain causal
         SDPA over the full sequence. Defaults to ``False``.
-    :param normalization_type: Norm layer type for Q, K projections (QK-norm
+    :param qk_norm_type: Norm layer type for Q, K projections (QK-norm
         convention). Defaults to ``"rms_norm"``.
-    :param normalization_kwargs: Optional kwargs forwarded to the norm
+    :param qk_norm_kwargs: Optional kwargs forwarded to the norm
         factory. Defaults to ``None``.
+    :param probability_type: Score-normalization strategy applied to the
+        attention logits via :class:`ProbabilityOutput`. Defaults to
+        ``"softmax"``. Routing / hierarchical types are not supported.
+    :param probability_config: Optional kwargs forwarded to
+        :class:`ProbabilityOutput`. Defaults to ``None``.
     :param use_bias: Use bias in Dense projections. Defaults to ``False``.
     :param kernel_initializer: Initializer for Dense kernels.
         Defaults to ``"glorot_uniform"``.
@@ -247,8 +253,10 @@ class LighthouseAttention(keras.layers.Layer):
         top_k: int = 1536,
         scorer: str = "norm",
         full_attention: bool = False,
-        normalization_type: str = "rms_norm",
-        normalization_kwargs: Optional[Dict[str, Any]] = None,
+        qk_norm_type: str = "rms_norm",
+        qk_norm_kwargs: Optional[Dict[str, Any]] = None,
+        probability_type: str = "softmax",
+        probability_config: Optional[Dict[str, Any]] = None,
         use_bias: bool = False,
         kernel_initializer: Union[str, initializers.Initializer] = "glorot_uniform",
         bias_initializer: Union[str, initializers.Initializer] = "zeros",
@@ -286,6 +294,16 @@ class LighthouseAttention(keras.layers.Layer):
             raise ValueError(
                 f"dropout_rate must be in [0, 1], got {dropout_rate}"
             )
+        if probability_type in (
+            "routing",
+            "deterministic_routing",
+            "hierarchical",
+            "hierarchical_routing",
+        ):
+            raise ValueError(
+                f"probability_type={probability_type!r} is not supported for "
+                f"LighthouseAttention score normalization."
+            )
 
         # ---- store config ----
         self.dim = dim
@@ -296,8 +314,10 @@ class LighthouseAttention(keras.layers.Layer):
         self.top_k = top_k
         self.scorer = scorer
         self.full_attention = bool(full_attention)
-        self.normalization_type = normalization_type
-        self.normalization_kwargs = normalization_kwargs
+        self.qk_norm_type = qk_norm_type
+        self.qk_norm_kwargs = qk_norm_kwargs
+        self.probability_type = probability_type
+        self.probability_config = probability_config
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
@@ -310,7 +330,7 @@ class LighthouseAttention(keras.layers.Layer):
 
         # ---- sub-layers (built in build()) ----
         proj_units = num_heads * head_dim
-        norm_kwargs = dict(normalization_kwargs or {})
+        norm_kwargs = dict(qk_norm_kwargs or {})
 
         self.wq = layers.Dense(
             proj_units,
@@ -345,10 +365,15 @@ class LighthouseAttention(keras.layers.Layer):
             name="wo",
         )
         self.q_norm = create_normalization_layer(
-            normalization_type, name="q_norm", **norm_kwargs
+            qk_norm_type, name="q_norm", **norm_kwargs
         )
         self.k_norm = create_normalization_layer(
-            normalization_type, name="k_norm", **norm_kwargs
+            qk_norm_type, name="k_norm", **norm_kwargs
+        )
+        self.attn_prob = ProbabilityOutput(
+            probability_type=self.probability_type,
+            type_config=self.probability_config,
+            name="attn_prob",
         )
 
         # Numpy buffers populated in build().
@@ -388,8 +413,10 @@ class LighthouseAttention(keras.layers.Layer):
                 "top_k": self.top_k,
                 "scorer": self.scorer,
                 "full_attention": self.full_attention,
-                "normalization_type": self.normalization_type,
-                "normalization_kwargs": self.normalization_kwargs,
+                "qk_norm_type": self.qk_norm_type,
+                "qk_norm_kwargs": self.qk_norm_kwargs,
+                "probability_type": self.probability_type,
+                "probability_config": self.probability_config,
                 "use_bias": self.use_bias,
                 "kernel_initializer": initializers.serialize(self.kernel_initializer),
                 "bias_initializer": initializers.serialize(self.bias_initializer),
@@ -447,6 +474,17 @@ class LighthouseAttention(keras.layers.Layer):
         self.k_norm.build(head_shape)
         # Output projection consumes (B, N, H*D).
         self.wo.build((input_shape[0], input_shape[1], self.num_heads * self.head_dim))
+
+        # Build ProbabilityOutput with a representative score shape
+        # (B, H, S_q, S_k). Softmax/sparsemax/threshmax operate along the
+        # last axis and are shape-agnostic in practice.
+        score_shape = (
+            input_shape[0],
+            self.num_heads,
+            input_shape[1],
+            input_shape[1],
+        )
+        self.attn_prob.build(score_shape)
 
         super().build(input_shape)
 
@@ -586,9 +624,22 @@ class LighthouseAttention(keras.layers.Layer):
         q_g = ops.take_along_axis(q_pyr, idx_exp, axis=1)  # (B, K, H, D)
         k_g = ops.take_along_axis(k_pyr, idx_exp, axis=1)
         v_g = ops.take_along_axis(v_pyr, idx_exp, axis=1)
-        # Causal SDPA on the (sorted) sub-sequence.
-        out_g = ops.dot_product_attention(q_g, k_g, v_g, is_causal=True)
-        return out_g  # (B, K, H, D)
+        # Manual scaled dot-product attention with customisable score
+        # normalization via self.attn_prob. The gathered keys are already
+        # causal-only (top_idx is sorted by base position and the per-entry
+        # support is past-only), so no additional causal mask is needed.
+        # Transpose (B, K, H, D) -> (B, H, K, D) for matmul.
+        q_t = ops.transpose(q_g, (0, 2, 1, 3))
+        k_t = ops.transpose(k_g, (0, 2, 1, 3))
+        v_t = ops.transpose(v_g, (0, 2, 1, 3))
+        scale = ops.cast(
+            1.0 / ops.sqrt(ops.cast(self.head_dim, q_t.dtype)), q_t.dtype
+        )
+        scores = ops.matmul(q_t, ops.transpose(k_t, (0, 1, 3, 2))) * scale
+        attn = self.attn_prob(scores)
+        out_t = ops.matmul(attn, v_t)  # (B, H, K, D)
+        out_g = ops.transpose(out_t, (0, 2, 1, 3))  # (B, K, H, D)
+        return out_g
 
     # DECISION plan_2026-05-17_8babb636/D-004
     # Scatter-back via flat segment_sum: encode (batch, target) as a single
@@ -680,7 +731,26 @@ class LighthouseAttention(keras.layers.Layer):
 
         if self.full_attention:
             # Stage-2 SDPA-resume path: plain causal MHA on the full seq.
-            out = ops.dot_product_attention(q, k, v, is_causal=True)
+            # Manual scaled dot-product attention so self.attn_prob handles
+            # score normalization. Causal masking is preserved via an
+            # explicit additive -inf mask above the diagonal.
+            # (B, N, H, D) -> (B, H, N, D)
+            q_t = ops.transpose(q, (0, 2, 1, 3))
+            k_t = ops.transpose(k, (0, 2, 1, 3))
+            v_t = ops.transpose(v, (0, 2, 1, 3))
+            scale = ops.cast(
+                1.0 / ops.sqrt(ops.cast(D, q_t.dtype)), q_t.dtype
+            )
+            scores = ops.matmul(q_t, ops.transpose(k_t, (0, 1, 3, 2))) * scale
+            # Causal mask: positions j > i are masked.
+            i = ops.arange(ops.shape(scores)[-2])
+            j = ops.arange(ops.shape(scores)[-1])
+            causal_mask = ops.expand_dims(j, 0) > ops.expand_dims(i, -1)
+            neg_inf = ops.cast(ops.convert_to_tensor(-1e9), scores.dtype)
+            scores = ops.where(causal_mask, neg_inf, scores)
+            attn = self.attn_prob(scores)
+            out_t = ops.matmul(attn, v_t)  # (B, H, N, D)
+            out = ops.transpose(out_t, (0, 2, 1, 3))  # (B, N, H, D)
             out = ops.reshape(out, (batch_size, n, H * D))
             return self.wo(out)
 

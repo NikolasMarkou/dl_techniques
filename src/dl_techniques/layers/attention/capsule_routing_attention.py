@@ -42,6 +42,29 @@ import keras
 from typing import Optional, Union, Tuple, Dict, Any
 from keras import ops, layers, initializers, regularizers
 
+from ..activations.probability_output import ProbabilityOutput
+from ..norms.factory import create_normalization_layer
+
+# ---------------------------------------------------------------------
+
+# Probability types that cannot be used as drop-in replacements for the
+# attention/coupling softmaxes in this layer (they consume features, not
+# logits, and reshape the output).
+_DISALLOWED_PROB_TYPES: Tuple[str, ...] = (
+    "routing",
+    "deterministic_routing",
+    "hierarchical",
+    "hierarchical_routing",
+)
+
+# Probability types whose underlying implementation does not honor a
+# user-supplied ``axis`` argument. For these we have to fall back to
+# axis=-1 routing semantics when the routing math requires a different axis.
+_AXIS_AGNOSTIC_PROB_TYPES: Tuple[str, ...] = (
+    "adaptive",
+    "adaptive_softmax",
+)
+
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
@@ -177,6 +200,10 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         use_horizontal_routing: bool = True,
         use_positional_routing: bool = True,
         epsilon: float = 1e-8,
+        probability_type: str = "softmax",
+        probability_config: Optional[Dict[str, Any]] = None,
+        qk_norm_type: Optional[str] = None,
+        qk_norm_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs: Any
     ) -> None:
         super().__init__(activity_regularizer=activity_regularizer, **kwargs)
@@ -195,6 +222,18 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         if epsilon <= 0:
             raise ValueError(f"epsilon must be positive, got {epsilon}")
 
+        # Validate probability_type early. The "routing"/"hierarchical" families
+        # consume features and emit a class distribution; they are incompatible
+        # with the logit-to-coupling-coefficient role required by the three
+        # softmax sites in this layer.
+        if probability_type.lower() in _DISALLOWED_PROB_TYPES:
+            raise ValueError(
+                f"probability_type='{probability_type}' is not supported by "
+                f"CapsuleRoutingSelfAttention. The routing/hierarchical types "
+                f"consume features (not logits) and replace a Dense layer; "
+                f"they cannot stand in for the attention/coupling softmaxes."
+            )
+
         # Store ALL configuration parameters for complete serialization
         self.num_heads = num_heads
         self.key_dim = key_dim
@@ -210,6 +249,50 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         self.use_horizontal_routing = use_horizontal_routing
         self.use_positional_routing = use_positional_routing
         self.epsilon = epsilon
+        self.probability_type = probability_type
+        self.probability_config = probability_config
+        self.qk_norm_type = qk_norm_type
+        self.qk_norm_kwargs = qk_norm_kwargs
+
+        # Resolve per-site axis-config compositions. Each of the three
+        # probability sites operates on a fixed routing axis; the math
+        # depends on this axis, so the routing axis is always enforced and
+        # any user-supplied "axis" in probability_config is overridden.
+        def _site_config(axis: int) -> Dict[str, Any]:
+            cfg = dict(self.probability_config or {})
+            if self.probability_type.lower() in _AXIS_AGNOSTIC_PROB_TYPES:
+                # Adaptive softmax does not honor a custom axis, so we
+                # silently drop it here. Callers needing non-default axes
+                # must use softmax/sparsemax/threshmax.
+                cfg.pop("axis", None)
+            else:
+                cfg["axis"] = axis
+            return cfg
+
+        # Site 1: final attention weights (axis=-1, normalize over keys).
+        self.attn_prob_attention = ProbabilityOutput(
+            probability_type=self.probability_type,
+            type_config=_site_config(-1),
+            name="attn_prob_attention",
+        )
+        # Site 2: dynamic-routing coupling coefficients (axis=-2, normalize
+        # over input capsules). Shared between _vertical_routing and
+        # _horizontal_routing calls into _dynamic_routing.
+        self.attn_prob_routing = ProbabilityOutput(
+            probability_type=self.probability_type,
+            type_config=_site_config(-2),
+            name="attn_prob_routing",
+        )
+        # Site 3: vertical-aggregation importance weights (axis=-1).
+        self.attn_prob_aggregation = ProbabilityOutput(
+            probability_type=self.probability_type,
+            type_config=_site_config(-1),
+            name="attn_prob_aggregation",
+        )
+
+        # QK-norm sub-layers (optional). Built lazily in build().
+        self.q_norm: Optional[keras.layers.Layer] = None
+        self.k_norm: Optional[keras.layers.Layer] = None
 
         # These will be set in build() based on input shape
         self.embed_dim = None
@@ -313,6 +396,43 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         dropout_input_shape = (batch_size, self.num_heads, seq_len, seq_len)
         self.dropout_layer.build(dropout_input_shape)
 
+        # Build the three probability sub-layers with their characteristic
+        # tensor shapes.
+        # Site 1: final attention logits -> weights, axis=-1.
+        attn_shape = (batch_size, self.num_heads, seq_len, seq_len)
+        self.attn_prob_attention.build(attn_shape)
+        # Site 2: routing coupling tensor inside _dynamic_routing.
+        # Vertical routing produces logits of shape
+        # (batch, seq_len_q, num_heads_in, num_heads_out); axis=-2.
+        # The same sub-layer is reused for horizontal routing where the
+        # exact rank can differ, but Softmax/Sparsemax/ThreshMax are
+        # shape-agnostic at the layer level (they only care about the
+        # ``axis`` argument), so a representative shape here is sufficient
+        # for serialization purposes.
+        routing_shape = (batch_size, seq_len, self.num_heads, self.num_heads)
+        self.attn_prob_routing.build(routing_shape)
+        # Site 3: vertical-aggregation importance, applied after a transpose
+        # to shape (batch, seq_len_q, seq_len_k, num_heads); axis=-1.
+        aggregation_shape = (batch_size, seq_len, seq_len, self.num_heads)
+        self.attn_prob_aggregation.build(aggregation_shape)
+
+        # Optional QK normalization layers applied to per-head Q and K
+        # tensors of shape (batch, num_heads, seq_len, key_dim).
+        if self.qk_norm_type is not None:
+            self.q_norm = create_normalization_layer(
+                self.qk_norm_type,
+                name="q_norm",
+                **(self.qk_norm_kwargs or {}),
+            )
+            self.k_norm = create_normalization_layer(
+                self.qk_norm_type,
+                name="k_norm",
+                **(self.qk_norm_kwargs or {}),
+            )
+            qk_norm_shape = (batch_size, self.num_heads, seq_len, self.actual_key_dim)
+            self.q_norm.build(qk_norm_shape)
+            self.k_norm.build(qk_norm_shape)
+
         # Create vertical routing parameters if enabled
         if self.use_vertical_routing:
             self.vertical_aggregation_weights = self.add_weight(
@@ -379,6 +499,12 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         key = ops.transpose(key, [0, 2, 1, 3])
         value = ops.transpose(value, [0, 2, 1, 3])
 
+        # Optional QK normalization (applied per-head before the dot product).
+        if self.q_norm is not None:
+            query = self.q_norm(query, training=training)
+        if self.k_norm is not None:
+            key = self.k_norm(key, training=training)
+
         # Compute scaled dot-product attention logits
         attention_logits = ops.matmul(query, ops.transpose(key, [0, 1, 3, 2]))
         attention_logits = attention_logits / ops.sqrt(
@@ -401,7 +527,7 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
             routing_output = self._apply_attention_mask(routing_output, attention_mask)
 
         # Convert to attention weights and apply dropout
-        attention_weights = ops.softmax(routing_output, axis=-1)
+        attention_weights = self.attn_prob_attention(routing_output, training=training)
         attention_weights = self.dropout_layer(attention_weights, training=training)
 
         # Apply attention to values
@@ -503,8 +629,9 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
 
         # Iterative routing algorithm
         for iteration in range(self.routing_iterations):
-            # Compute coupling coefficients via softmax over input capsules
-            routing_weights = ops.softmax(routing_logits, axis=-2)
+            # Compute coupling coefficients via the configured probability
+            # function over input capsules (axis=-2).
+            routing_weights = self.attn_prob_routing(routing_logits)
 
             # Expand routing weights for broadcasting with vote vectors
             routing_weights_expanded = ops.expand_dims(routing_weights, axis=-1)
@@ -564,8 +691,9 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
             if self.vertical_aggregation_bias is not None:
                 aggregated = aggregated + self.vertical_aggregation_bias
 
-            # Apply softmax to get importance weights
-            importance_weights = ops.softmax(aggregated, axis=-1)
+            # Apply the configured probability function to get importance
+            # weights (axis=-1 over heads).
+            importance_weights = self.attn_prob_aggregation(aggregated)
 
             # Weight the output capsules and transpose back
             weighted_output = importance_weights * output_transposed
@@ -668,6 +796,10 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
             'use_horizontal_routing': self.use_horizontal_routing,
             'use_positional_routing': self.use_positional_routing,
             'epsilon': self.epsilon,
+            'probability_type': self.probability_type,
+            'probability_config': self.probability_config,
+            'qk_norm_type': self.qk_norm_type,
+            'qk_norm_kwargs': self.qk_norm_kwargs,
         })
         return config
 
