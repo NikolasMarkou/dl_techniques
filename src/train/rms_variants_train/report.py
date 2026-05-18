@@ -18,7 +18,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -44,6 +44,70 @@ HEADLINE_METRIC = {
 
 BASELINE_NORM = "rms_norm"
 RNG_SEED = 20260515
+
+
+# DECISION plan_2026-05-18_74a935a2/D-002: per-variant verdict-rule
+# parameterization. DyT does not normalize by RMS → act_mean_abs /
+# per_sample_rms_* are mechanism-irrelevant. band_logit_norm normalizes by L2
+# (not RMS) → per_sample_rms_* are irrelevant; additionally it is designed
+# for classification logits, so residual-stream contexts (E2/E3/E4) are
+# off-label and must NOT be compared head-to-head against the rms_norm
+# baseline's headline metric.
+#
+# `applicable_probes` is an *informational* contract — it says which probe
+# columns are meaningful for this variant's mechanism. The headline
+# PASS/FAIL/INDISTINGUISHABLE rule on the `final_val_loss` / `best_val_acc`
+# metric is unchanged for non-off-label cells (a fair head-to-head test).
+#
+# `off_label_contexts` is a *gating* contract — for any (variant,
+# experiment) pair listed, the verdict is forced to "n/a (off-label)"
+# regardless of the headline metric.
+VARIANT_CRITERIA: Dict[str, Dict[str, Any]] = {
+    "rms_norm": {
+        "applicable_probes": ("grad_norm",),
+        "off_label_contexts": frozenset(),
+    },
+    "band_rms": {
+        "applicable_probes": ("grad_norm", "act_per_sample_rms_max"),
+        "off_label_contexts": frozenset(),
+    },
+    "zero_centered_rms_norm": {
+        "applicable_probes": ("grad_norm", "act_mean_abs"),
+        "off_label_contexts": frozenset(),
+    },
+    "zero_centered_band_rms_norm": {
+        "applicable_probes": (
+            "grad_norm",
+            "act_mean_abs",
+            "act_per_sample_rms_max",
+        ),
+        "off_label_contexts": frozenset(),
+    },
+    "adaptive_band_rms": {
+        "applicable_probes": ("grad_norm", "act_per_sample_rms_max"),
+        "off_label_contexts": frozenset(),
+    },
+    "band_logit_norm": {
+        "applicable_probes": ("grad_norm",),
+        # Off-label on every residual-stream context. E1 (ViT) and E5
+        # (microbench) are still scored — E1 includes a classification head
+        # where band_logit can be argued to apply if used appropriately, and
+        # E5 is the pure-mechanism microbenchmark.
+        "off_label_contexts": frozenset({"e2", "e3", "e4"}),
+    },
+    "dynamic_tanh": {
+        "applicable_probes": ("grad_norm",),
+        "off_label_contexts": frozenset(),
+    },
+}
+
+
+def _off_label_contexts(norm_type: str) -> FrozenSet[str]:
+    """Return the set of experiment ids on which ``norm_type`` is off-label."""
+    entry = VARIANT_CRITERIA.get(norm_type)
+    if entry is None:
+        return frozenset()
+    return entry.get("off_label_contexts", frozenset())
 
 
 # ---------------------------------------------------------------------
@@ -119,9 +183,19 @@ def _add_paired_p(headline: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _verdict(row: pd.Series) -> str:
-    """PASS / FAIL / INDISTINGUISHABLE rule per (norm, exp, mode)."""
+    """PASS / FAIL / INDISTINGUISHABLE rule per (norm, exp, mode).
+
+    Off-label cells (variant × experiment listed in
+    ``VARIANT_CRITERIA[norm_type]['off_label_contexts']``) short-circuit to
+    ``n/a (off-label)`` regardless of the headline metric. This prevents
+    misleading FAIL/PASS verdicts when the variant's design context does not
+    apply to the experiment (e.g. ``band_logit_norm`` on a residual stream).
+    """
     if row["norm_type"] == BASELINE_NORM:
         return "baseline"
+    # D-002 off-label gate.
+    if row["experiment"] in _off_label_contexts(row["norm_type"]):
+        return "n/a (off-label)"
     p = row["p_vs_baseline"]
     diff = row["diff_vs_baseline"]
     direction = row["direction"]
@@ -308,6 +382,22 @@ def _verdict_block(headline: pd.DataFrame) -> str:
     if headline.empty:
         return "*(no verdicts — sweep empty)*\n"
     out: List[str] = []
+    # Footnote for variants with non-empty off_label_contexts (D-002).
+    off_label_summary: List[str] = []
+    for v, criteria in VARIANT_CRITERIA.items():
+        ctx = criteria.get("off_label_contexts", frozenset())
+        if ctx:
+            off_label_summary.append(
+                f"`{v}` is treated as **off-label** on "
+                f"{{ {', '.join(sorted(ctx))} }}: its design context does "
+                f"not include those experiments, so the headline metric is "
+                f"not a fair head-to-head test there."
+            )
+    if off_label_summary:
+        out.append("> **Off-label notes** (D-002):")
+        for line in off_label_summary:
+            out.append(f"> - {line}")
+        out.append("")
     for variant in NORM_VARIANTS:
         if variant == BASELINE_NORM:
             continue
@@ -317,11 +407,22 @@ def _verdict_block(headline: pd.DataFrame) -> str:
         passes = (rows["verdict"] == "pass").sum()
         fails = (rows["verdict"] == "fail").sum()
         indis = (rows["verdict"] == "indistinguishable").sum()
+        offlabel = (rows["verdict"] == "n/a (off-label)").sum()
+        # Cells that are off-label do NOT count toward the rollup denominator.
+        eligible = len(rows) - int(offlabel)
         out.append(f"### `{variant}`")
-        out.append(
-            f"- PASS in {int(passes)} cells, FAIL in {int(fails)}, "
-            f"INDISTINGUISHABLE in {int(indis)} (n={len(rows)} cells total)."
-        )
+        if offlabel:
+            out.append(
+                f"- PASS in {int(passes)} cells, FAIL in {int(fails)}, "
+                f"INDISTINGUISHABLE in {int(indis)}, OFF-LABEL in "
+                f"{int(offlabel)} (n={len(rows)} cells; {eligible} eligible "
+                f"for verdict)."
+            )
+        else:
+            out.append(
+                f"- PASS in {int(passes)} cells, FAIL in {int(fails)}, "
+                f"INDISTINGUISHABLE in {int(indis)} (n={len(rows)} cells total)."
+            )
         if fails:
             details = rows[rows["verdict"] == "fail"][
                 ["experiment", "mode", "diff_vs_baseline", "p_vs_baseline"]
@@ -332,7 +433,11 @@ def _verdict_block(headline: pd.DataFrame) -> str:
                     f"  - {r['experiment']}/{r['mode']}: "
                     f"diff={r['diff_vs_baseline']:+.4f}, p={r['p_vs_baseline']:.3f}"
                 )
-        if passes >= 2 and fails == 0:
+        if eligible == 0:
+            out.append(
+                "- **Overall**: N/A — all cells off-label for this variant."
+            )
+        elif passes >= 2 and fails == 0:
             out.append(f"- **Overall**: PASS — beats baseline in ≥2 cells with no failures.")
         elif fails > 0:
             out.append(f"- **Overall**: FAIL — direction opposite to claim in {int(fails)} cell(s).")
