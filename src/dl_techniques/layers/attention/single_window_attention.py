@@ -4,27 +4,30 @@ Unified single-window multi-head self-attention.
 This layer implements multi-head self-attention restricted to a single square
 window of side ``window_size`` (i.e. ``window_size ** 2`` tokens). It merges
 several attention variants into one configurable layer: standard linear QKV
-projection or a non-linear KAN-based Key projection, combined with selectable
-score normalization (standard softmax, adaptive-temperature softmax, or
-hierarchical routing probabilities). Internal padding ensures every window
-reaches ``window_size ** 2`` tokens before attention is computed, and the
-padded positions are stripped from the output.
+projection or a non-linear KAN-based Key projection, combined with a unified
+probability output strategy applied to the attention scores. Internal padding
+ensures every window reaches ``window_size ** 2`` tokens before attention is
+computed, and the padded positions are stripped from the output.
 
 Architecturally, the layer follows the scaled dot-product attention formula
-``Attention(Q, K, V) = norm(Q K^T / sqrt(d_k) + bias) V``, where ``norm`` is
-the configurable normalization function and ``bias`` is an optional learnable
-relative position bias indexed by intra-window 2D coordinates. The relative
-position bias table follows the Swin Transformer convention.
+``Attention(Q, K, V) = prob(Q K^T / sqrt(d_k) + bias) V``, where ``prob`` is
+a configurable :class:`ProbabilityOutput` strategy and ``bias`` is an optional
+learnable relative position bias indexed by intra-window 2D coordinates. The
+relative position bias table follows the Swin Transformer convention.
 
 The layer supports two projection modes:
 -   **linear**: a single fused dense layer produces ``Q``, ``K``, ``V``.
 -   **kan_key**: separate dense layers produce ``Q`` and ``V``, while ``K``
     is produced by a KAN linear layer to inject a non-linear key projection.
 
-And three normalization modes:
--   **softmax**: standard softmax over the last axis.
--   **adaptive_softmax**: temperature-adaptive softmax for sharper attention.
--   **hierarchical_routing**: routing probabilities for soft hierarchical mixing.
+Score-to-probability conversion is delegated to :class:`ProbabilityOutput`
+via ``probability_type`` / ``probability_config``. Score-level routing
+strategies (``routing``, ``deterministic_routing``, ``hierarchical``,
+``hierarchical_routing``) are rejected at construction time, as they are
+not appropriate normalizations for raw attention scores in this layer.
+
+Optional QK-normalization (``qk_norm_type``) applies a normalization layer
+to ``Q`` and ``K`` before the score matmul, stabilising attention logits.
 
 References:
     - Liu et al., 2021. Swin Transformer: Hierarchical Vision Transformer
@@ -42,8 +45,8 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from ..ffn.kan_linear import KANLinear
-from ..activations.adaptive_softmax import AdaptiveTemperatureSoftmax
-from ..activations.routing_probabilities import RoutingProbabilitiesLayer
+from ..activations import ProbabilityOutput
+from ..norms.factory import create_normalization_layer
 
 # ---------------------------------------------------------------------
 
@@ -55,15 +58,15 @@ class SingleWindowAttention(keras.layers.Layer):
 
     Merges multiple attention mechanisms into a single configurable layer
     supporting standard linear QKV projection or non-linear KAN-based Key
-    projection, with selectable normalization: standard softmax, adaptive
-    temperature softmax, or hierarchical routing probabilities. Internal
-    padding ensures every window reaches ``window_size ** 2`` tokens before
+    projection, with a unified probability output strategy applied to
+    attention scores (via :class:`ProbabilityOutput`). Internal padding
+    ensures every window reaches ``window_size ** 2`` tokens before
     attention is computed, then strips padding from the output.
 
     The scaled dot-product attention is computed as
-    ``Attention(Q, K, V) = norm(Q K^T / sqrt(d_k) + bias) V``, where ``norm``
-    is one of the configurable normalization functions and ``bias`` is an
-    optional learnable relative position bias table indexed by intra-window
+    ``Attention(Q, K, V) = prob(Q K^T / sqrt(d_k) + bias) V``, where ``prob``
+    is the configurable :class:`ProbabilityOutput` strategy and ``bias`` is
+    an optional learnable relative position bias table indexed by intra-window
     2D coordinates (Swin convention).
 
     **Architecture Overview:**
@@ -98,9 +101,8 @@ class SingleWindowAttention(keras.layers.Layer):
         │   │      [clip(scores, -30, 30)]                │     │
         │   │                  │                          │     │
         │   │                  ▼                          │     │
-        │   │     norm ∈ {softmax,                        │     │
-        │   │             adaptive_softmax,               │     │
-        │   │             hierarchical_routing}           │     │
+        │   │     prob = ProbabilityOutput(               │     │
+        │   │              probability_type, config)      │     │
         │   │                  │                          │     │
         │   │                  ▼                          │     │
         │   │        dropout ──► weights @ V              │     │
@@ -130,10 +132,23 @@ class SingleWindowAttention(keras.layers.Layer):
         dense QKV or ``'kan_key'`` for a KAN-based Key projection.
         Defaults to ``'linear'``.
     :type attention_mode: str
-    :param normalization: Score normalization. One of ``'softmax'``,
-        ``'adaptive_softmax'``, or ``'hierarchical_routing'``.
-        Defaults to ``'softmax'``.
-    :type normalization: str
+    :param probability_type: Probability strategy identifier forwarded to
+        :class:`ProbabilityOutput` for converting attention scores into
+        attention weights. Defaults to ``'softmax'``. Score-level routing
+        strategies (``'routing'``, ``'deterministic_routing'``,
+        ``'hierarchical'``, ``'hierarchical_routing'``) are not allowed.
+    :type probability_type: str
+    :param probability_config: Optional configuration dictionary forwarded
+        to :class:`ProbabilityOutput` as its ``type_config`` argument.
+    :type probability_config: Optional[Dict[str, Any]]
+    :param qk_norm_type: Optional normalization type applied independently
+        to ``Q`` and ``K`` before computing attention scores. When provided,
+        normalization layers are constructed via
+        :func:`create_normalization_layer`. Defaults to ``None`` (no QK-norm).
+    :type qk_norm_type: Optional[str]
+    :param qk_norm_kwargs: Optional keyword arguments forwarded to
+        :func:`create_normalization_layer` when ``qk_norm_type`` is set.
+    :type qk_norm_kwargs: Optional[Dict[str, Any]]
     :param use_relative_position_bias: Whether to add a learnable relative
         position bias to attention scores. Defaults to ``True``.
     :type use_relative_position_bias: bool
@@ -158,9 +173,6 @@ class SingleWindowAttention(keras.layers.Layer):
     :param kan_activation: Activation for the KAN layer.
         Defaults to ``'swish'``.
     :type kan_activation: str
-    :param adaptive_softmax_config: Config dict forwarded to
-        ``AdaptiveTemperatureSoftmax`` when that normalization is selected.
-    :type adaptive_softmax_config: Optional[Dict[str, Any]]
     :param kernel_initializer: Initializer for kernel weights.
         Defaults to ``'glorot_uniform'``.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
@@ -174,8 +186,9 @@ class SingleWindowAttention(keras.layers.Layer):
     :param kwargs: Additional keyword arguments forwarded to the base Layer.
 
     :raises ValueError: If ``attention_mode`` is not one of
-        ``{'linear', 'kan_key'}`` or ``normalization`` is not one of
-        ``{'softmax', 'adaptive_softmax', 'hierarchical_routing'}``.
+        ``{'linear', 'kan_key'}`` or if ``probability_type`` is a score-level
+        routing strategy (``'routing'``, ``'deterministic_routing'``,
+        ``'hierarchical'``, ``'hierarchical_routing'``).
     """
 
     def __init__(
@@ -184,7 +197,6 @@ class SingleWindowAttention(keras.layers.Layer):
             window_size: int,
             num_heads: int,
             attention_mode: str = "linear",
-            normalization: str = "softmax",
             use_relative_position_bias: bool = True,
             qkv_bias: bool = True,
             qk_scale: Optional[float] = None,
@@ -193,7 +205,10 @@ class SingleWindowAttention(keras.layers.Layer):
             kan_grid_size: int = 5,
             kan_spline_order: int = 3,
             kan_activation: str = "swish",
-            adaptive_softmax_config: Optional[Dict[str, Any]] = None,
+            probability_type: str = "softmax",
+            probability_config: Optional[Dict[str, Any]] = None,
+            qk_norm_type: Optional[str] = None,
+            qk_norm_kwargs: Optional[Dict[str, Any]] = None,
             kernel_initializer: Union[
                 str, keras.initializers.Initializer
             ] = "glorot_uniform",
@@ -217,11 +232,17 @@ class SingleWindowAttention(keras.layers.Layer):
                 f"Invalid attention_mode. Expected one of {valid_modes}, "
                 f"got '{attention_mode}'"
             )
-        valid_norms = {"softmax", "adaptive_softmax", "hierarchical_routing"}
-        if normalization not in valid_norms:
+        invalid_prob_types = {
+            "routing",
+            "deterministic_routing",
+            "hierarchical",
+            "hierarchical_routing",
+        }
+        if probability_type in invalid_prob_types:
             raise ValueError(
-                f"Invalid normalization. Expected one of {valid_norms}, "
-                f"got '{normalization}'"
+                f"Invalid probability_type '{probability_type}'. Score-level "
+                f"routing strategies {invalid_prob_types} are not allowed for "
+                f"SingleWindowAttention."
             )
 
         # Store ALL configuration parameters
@@ -233,7 +254,6 @@ class SingleWindowAttention(keras.layers.Layer):
             qk_scale if qk_scale is not None else self.head_dim ** -0.5
         )
         self.attention_mode = attention_mode
-        self.normalization = normalization
         self.use_relative_position_bias = use_relative_position_bias
         self.qkv_bias = qkv_bias
         self.qk_scale = qk_scale
@@ -242,7 +262,10 @@ class SingleWindowAttention(keras.layers.Layer):
         self.kan_grid_size = kan_grid_size
         self.kan_spline_order = kan_spline_order
         self.kan_activation = kan_activation
-        self.adaptive_softmax_config = adaptive_softmax_config
+        self.probability_type = probability_type
+        self.probability_config = probability_config
+        self.qk_norm_type = qk_norm_type
+        self.qk_norm_kwargs = qk_norm_kwargs
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
@@ -289,14 +312,26 @@ class SingleWindowAttention(keras.layers.Layer):
             else None
         )
 
-        if self.normalization == "adaptive_softmax":
-            self.adaptive_softmax = AdaptiveTemperatureSoftmax(
-                name="adaptive_softmax", **(self.adaptive_softmax_config or {})
+        self.attn_prob = ProbabilityOutput(
+            probability_type=self.probability_type,
+            type_config=self.probability_config,
+            name="attn_prob",
+        )
+
+        if self.qk_norm_type is not None:
+            self.q_norm = create_normalization_layer(
+                self.qk_norm_type,
+                name="q_norm",
+                **(self.qk_norm_kwargs or {}),
             )
-        elif self.normalization == "hierarchical_routing":
-            self.hierarchical_routing = RoutingProbabilitiesLayer(
-                axis=-1, name="routing_probs"
+            self.k_norm = create_normalization_layer(
+                self.qk_norm_type,
+                name="k_norm",
+                **(self.qk_norm_kwargs or {}),
             )
+        else:
+            self.q_norm = None
+            self.k_norm = None
 
         # Precompute the static relative-position index table (Swin convention).
         if self.use_relative_position_bias:
@@ -373,10 +408,17 @@ class SingleWindowAttention(keras.layers.Layer):
             num_tokens_in_window,
         )
 
-        if self.normalization == "adaptive_softmax":
-            self.adaptive_softmax.build(attention_scores_shape)
-        elif self.normalization == "hierarchical_routing":
-            self.hierarchical_routing.build(attention_scores_shape)
+        self.attn_prob.build(attention_scores_shape)
+
+        if self.q_norm is not None:
+            qk_shape = (
+                input_shape[0],
+                self.num_heads,
+                num_tokens_in_window,
+                self.head_dim,
+            )
+            self.q_norm.build(qk_shape)
+            self.k_norm.build(qk_shape)
 
         # Always call parent build at the end
         super().build(input_shape)
@@ -460,6 +502,10 @@ class SingleWindowAttention(keras.layers.Layer):
                 (0, 2, 1, 3),
             )
 
+        if self.q_norm is not None:
+            q = self.q_norm(q, training=training)
+            k = self.k_norm(k, training=training)
+
         q = q * self.scale
         attn = keras.ops.matmul(q, keras.ops.transpose(k, (0, 1, 3, 2)))
 
@@ -486,12 +532,7 @@ class SingleWindowAttention(keras.layers.Layer):
 
         attn = keras.ops.clip(attn, -30.0, 30.0)
 
-        if self.normalization == "adaptive_softmax":
-            attn = self.adaptive_softmax(attn, training=training)
-        elif self.normalization == "hierarchical_routing":
-            attn = self.hierarchical_routing(attn, training=training)
-        else:
-            attn = keras.ops.softmax(attn, axis=-1)
+        attn = self.attn_prob(attn, training=training)
 
         if self.attn_dropout is not None:
             attn = self.attn_dropout(attn, training=training)
@@ -529,7 +570,6 @@ class SingleWindowAttention(keras.layers.Layer):
                 "window_size": self.window_size,
                 "num_heads": self.num_heads,
                 "attention_mode": self.attention_mode,
-                "normalization": self.normalization,
                 "use_relative_position_bias": self.use_relative_position_bias,
                 "qkv_bias": self.qkv_bias,
                 "qk_scale": self.qk_scale,
@@ -538,7 +578,10 @@ class SingleWindowAttention(keras.layers.Layer):
                 "kan_grid_size": self.kan_grid_size,
                 "kan_spline_order": self.kan_spline_order,
                 "kan_activation": self.kan_activation,
-                "adaptive_softmax_config": self.adaptive_softmax_config,
+                "probability_type": self.probability_type,
+                "probability_config": self.probability_config,
+                "qk_norm_type": self.qk_norm_type,
+                "qk_norm_kwargs": self.qk_norm_kwargs,
                 "kernel_initializer": keras.initializers.serialize(
                     self.kernel_initializer
                 ),

@@ -136,6 +136,10 @@ class MultiHeadAttention(keras.layers.Layer):
         kernel_initializer: Union[str, keras.initializers.Initializer] = "he_normal",
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         use_bias: bool = False,
+        probability_type: str = "softmax",
+        probability_config: Optional[Dict[str, Any]] = None,
+        qk_norm_type: Optional[str] = None,
+        qk_norm_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -157,6 +161,10 @@ class MultiHeadAttention(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.use_bias = use_bias
+        self.probability_type = probability_type
+        self.probability_config = probability_config
+        self.qk_norm_type = qk_norm_type
+        self.qk_norm_kwargs = qk_norm_kwargs
 
         # CREATE the underlying MultiHeadCrossAttention layer
         # Use shared_qk_projections=True for efficient self-attention
@@ -169,6 +177,10 @@ class MultiHeadAttention(keras.layers.Layer):
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             bias_initializer="zeros",  # Use default bias initializer
+            probability_type=self.probability_type,
+            probability_config=self.probability_config,
+            qk_norm_type=self.qk_norm_type,
+            qk_norm_kwargs=self.qk_norm_kwargs,
             name="cross_attention"
         )
 
@@ -260,6 +272,10 @@ class MultiHeadAttention(keras.layers.Layer):
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "use_bias": self.use_bias,
+            "probability_type": self.probability_type,
+            "probability_config": self.probability_config,
+            "qk_norm_type": self.qk_norm_type,
+            "qk_norm_kwargs": self.qk_norm_kwargs,
         })
         return config
 

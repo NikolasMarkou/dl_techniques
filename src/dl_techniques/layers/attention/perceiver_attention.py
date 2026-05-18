@@ -110,6 +110,10 @@ class PerceiverAttention(keras.layers.Layer):
             bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
+            probability_type: str = "softmax",
+            probability_config: Optional[Dict[str, Any]] = None,
+            qk_norm_type: Optional[str] = None,
+            qk_norm_kwargs: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -133,6 +137,10 @@ class PerceiverAttention(keras.layers.Layer):
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
+        self.probability_type = probability_type
+        self.probability_config = probability_config
+        self.qk_norm_type = qk_norm_type
+        self.qk_norm_kwargs = qk_norm_kwargs
 
         # CREATE the underlying MultiHeadCrossAttention layer
         # Use shared_qk_projections=False for flexible cross-attention with separate projections
@@ -146,6 +154,10 @@ class PerceiverAttention(keras.layers.Layer):
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
+            probability_type=self.probability_type,
+            probability_config=self.probability_config,
+            qk_norm_type=self.qk_norm_type,
+            qk_norm_kwargs=self.qk_norm_kwargs,
             name="cross_attention"
         )
 
@@ -248,6 +260,10 @@ class PerceiverAttention(keras.layers.Layer):
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
+            "probability_type": self.probability_type,
+            "probability_config": self.probability_config,
+            "qk_norm_type": self.qk_norm_type,
+            "qk_norm_kwargs": self.qk_norm_kwargs,
         })
         return config
 

@@ -52,8 +52,8 @@ from typing import Optional, Any, Dict, Tuple, Union, List
 # local imports
 # ---------------------------------------------------------------------
 
-from ..activations.adaptive_softmax import AdaptiveTemperatureSoftmax
-from ..activations.routing_probabilities import RoutingProbabilitiesLayer
+from ..activations import ProbabilityOutput
+from ..norms.factory import create_normalization_layer
 
 # ---------------------------------------------------------------------
 
@@ -153,17 +153,26 @@ class MultiHeadCrossAttention(keras.layers.Layer):
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param bias_regularizer: Optional regularizer for bias weights.
     :type bias_regularizer: Optional[keras.regularizers.Regularizer]
-    :param use_hierarchical_routing: Boolean, if True, uses hierarchical routing probability
-        instead of standard softmax for attention normalization. Defaults to False.
-    :type use_hierarchical_routing: bool
-    :param use_adaptive_softmax: Boolean, if True, uses AdaptiveTemperatureSoftmax
-        instead of standard softmax for attention normalization. Defaults to False.
-    :type use_adaptive_softmax: bool
-    :param adaptive_softmax_config: Optional dictionary of arguments for
-        AdaptiveTemperatureSoftmax. Used only when ``use_adaptive_softmax=True``.
-        Expected keys: ``min_temp`` (float), ``max_temp`` (float),
-        ``entropy_threshold`` (float), ``polynomial_coeffs`` (list[float]).
-    :type adaptive_softmax_config: Optional[Dict[str, Any]]
+    :param probability_type: String identifier for the attention-score normalization
+        strategy. Forwarded to :class:`ProbabilityOutput`. One of ``"softmax"``,
+        ``"sparsemax"``, ``"threshmax"``, ``"adaptive"`` (and their aliases).
+        Defaults to ``"softmax"`` (standard scaled dot-product attention).
+        ``"routing"`` and ``"hierarchical"`` are rejected with a ``ValueError``
+        because they require a fixed ``output_dim`` and consume features rather
+        than logits.
+    :type probability_type: str
+    :param probability_config: Optional dictionary of arguments forwarded to the
+        underlying :class:`ProbabilityOutput` strategy. For ``"adaptive"`` accepts
+        keys such as ``min_temp``, ``max_temp``, ``entropy_threshold``,
+        ``polynomial_coeffs``.
+    :type probability_config: Optional[Dict[str, Any]]
+    :param qk_norm_type: Optional normalization type applied to Q and K projections
+        before computing attention scores (QK-norm). Forwarded to
+        :func:`create_normalization_layer`. ``None`` disables QK-norm.
+    :type qk_norm_type: Optional[str]
+    :param qk_norm_kwargs: Optional keyword arguments forwarded to
+        :func:`create_normalization_layer` when constructing Q/K norms.
+    :type qk_norm_kwargs: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the Layer base class.
 
     :raises ValueError: If ``dim`` is not divisible by ``num_heads``, or if
@@ -182,9 +191,10 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            use_hierarchical_routing: bool = False,
-            use_adaptive_softmax: bool = False,
-            adaptive_softmax_config: Optional[Dict[str, Any]] = None,
+            probability_type: str = "softmax",
+            probability_config: Optional[Dict[str, Any]] = None,
+            qk_norm_type: Optional[str] = None,
+            qk_norm_kwargs: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -210,41 +220,10 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
-        self.use_hierarchical_routing = use_hierarchical_routing
-        self.use_adaptive_softmax = use_adaptive_softmax
-        self.adaptive_softmax_config = adaptive_softmax_config
-
-        # only one of the 2 can be enabled
-        if self.use_adaptive_softmax and self.use_hierarchical_routing:
-            raise ValueError(
-                "Only one of `use_adaptive_softmax` or `use_hierarchical_routing` "
-                "can be set to True."
-            )
-
-        # Adaptive temperature softmax configuration and validation
-        if self.use_adaptive_softmax:
-            if self.adaptive_softmax_config is None:
-                self.adaptive_softmax_config = {}
-
-            # Extract parameters with defaults for validation
-            min_temp = self.adaptive_softmax_config.get("min_temp", 0.1)
-            max_temp = self.adaptive_softmax_config.get("max_temp", 1.0)
-            entropy_threshold = self.adaptive_softmax_config.get("entropy_threshold", 0.5)
-
-            # Store resolved defaults back into the config for serialization
-            self.adaptive_softmax_config["min_temp"] = min_temp
-            self.adaptive_softmax_config["max_temp"] = max_temp
-            self.adaptive_softmax_config["entropy_threshold"] = entropy_threshold
-
-            # Validate the parameters
-            if min_temp <= 0:
-                raise ValueError(f"min_temp must be positive, got {min_temp}")
-            if max_temp <= min_temp:
-                raise ValueError(f"max_temp ({max_temp}) must be greater than min_temp ({min_temp})")
-            if not (0.0 <= entropy_threshold <= 1.0):
-                raise ValueError(f"entropy_threshold must be between 0 and 1, got {entropy_threshold}")
-        else:
-            self.adaptive_softmax_config = None
+        self.probability_type = probability_type
+        self.probability_config = probability_config
+        self.qk_norm_type = qk_norm_type
+        self.qk_norm_kwargs = qk_norm_kwargs
 
         # Scale factor for attention scores
         self.scale = 1.0 / ops.sqrt(float(self.head_dim))
@@ -273,19 +252,48 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             self.dropout_rate, name="dropout"
         ) if self.dropout_rate > 0.0 else None
 
-        if self.use_hierarchical_routing:
-            self.hierarchical_routing = RoutingProbabilitiesLayer(axis=-1)
-        else:
-            self.hierarchical_routing = None
+        # Reject routing/hierarchical probability types: they require an
+        # ``output_dim`` (and perform their own projection on FEATURES), which
+        # is incompatible with operating on attention scores whose last
+        # dimension is the dynamic kv sequence length.
+        _ptype_lower = self.probability_type.lower()
+        if _ptype_lower in (
+                "routing",
+                "deterministic_routing",
+                "hierarchical",
+                "hierarchical_routing",
+        ):
+            raise ValueError(
+                f"probability_type='{self.probability_type}' is not supported "
+                "in MultiHeadCrossAttention: routing/hierarchical strategies "
+                "require a fixed output_dim and consume features rather than "
+                "score logits. Use one of: 'softmax', 'sparsemax', 'threshmax', "
+                "'adaptive'."
+            )
 
-        # CREATE adaptive temperature softmax layer if enabled
-        if self.use_adaptive_softmax:
-            self.adaptive_softmax = AdaptiveTemperatureSoftmax(
-                name="adaptive_softmax",
-                **self.adaptive_softmax_config
+        # CREATE unified probability output layer for attention-score normalization.
+        # ProbabilityOutput validates probability_type internally.
+        self.attn_prob = ProbabilityOutput(
+            probability_type=self.probability_type,
+            type_config=self.probability_config,
+            name="attn_prob",
+        )
+
+        # CREATE optional QK-norm layers (applied to Q and K projections).
+        if self.qk_norm_type is not None:
+            self.q_norm = create_normalization_layer(
+                self.qk_norm_type,
+                name="q_norm",
+                **(self.qk_norm_kwargs or {}),
+            )
+            self.k_norm = create_normalization_layer(
+                self.qk_norm_type,
+                name="k_norm",
+                **(self.qk_norm_kwargs or {}),
             )
         else:
-            self.adaptive_softmax = None
+            self.q_norm = None
+            self.k_norm = None
 
     def build(
             self,
@@ -339,19 +347,21 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             attn_shape = (query_shape[0], self.num_heads, query_shape[1], kv_shape[1])
             self.dropout_layer.build(attn_shape)
 
-        # Hierarchical routing layer is built lazily on first call (the
-        # attention-weight last dim is kv_seq_len, which is known here only
-        # if kv_shape[1] is concrete and matches runtime — it often does not,
-        # since kv_len varies at runtime). Save/load of models that include
-        # routing as a child of MHA is therefore not supported via the
-        # standard config flow; use full model.save() with the model in a
-        # built state, or build the routing layer explicitly before save.
+        # Build the unified probability output layer with the attention score
+        # shape (B, H, Q_seq, KV_seq). Note: for routing/hierarchical strategies
+        # the last-dim may vary at runtime; rebuild semantics follow
+        # ProbabilityOutput's behavior.
+        attn_shape = (query_shape[0], self.num_heads, query_shape[1], kv_shape[1])
+        self.attn_prob.build(attn_shape)
 
-        # Build adaptive softmax layer if exists
-        if self.adaptive_softmax is not None:
-            # AdaptiveTemperatureSoftmax can handle any shape, use attention weight shape
-            attn_shape = (query_shape[0], self.num_heads, query_shape[1], kv_shape[1])
-            self.adaptive_softmax.build(attn_shape)
+        # Build QK-norm layers (operate on per-head Q/K projections of shape
+        # (B, H, seq, D_h)).
+        if self.q_norm is not None:
+            q_norm_shape = (query_shape[0], self.num_heads, query_shape[1], self.head_dim)
+            self.q_norm.build(q_norm_shape)
+        if self.k_norm is not None:
+            k_norm_shape = (query_shape[0], self.num_heads, kv_shape[1], self.head_dim)
+            self.k_norm.build(k_norm_shape)
 
         # Always call parent build at the end
         super().build(input_shape)
@@ -452,6 +462,12 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             # Each tensor shape: (B, H, Q_seq, D_h)
             q, k, v = qkv[0], qkv[1], qkv[2]
 
+            # Optional QK-norm on per-head Q and K.
+            if self.q_norm is not None:
+                q = self.q_norm(q, training=training)
+            if self.k_norm is not None:
+                k = self.k_norm(k, training=training)
+
         else:
             # --- 2b. Separate Projections (Cross-Attention or Self-Attention) ---
             # This is the more general case. If `kv_input` is provided, we perform
@@ -485,6 +501,12 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             # Each tensor shape: (B, H, KV_seq, D_h)
             k, v = kv[0], kv[1]
 
+            # Optional QK-norm on per-head Q and K.
+            if self.q_norm is not None:
+                q = self.q_norm(q, training=training)
+            if self.k_norm is not None:
+                k = self.k_norm(k, training=training)
+
         # --- 3. Scaled Dot-Product Attention ---
         # Now that we have Q, K, and V, we compute the attention scores.
         # This involves a matrix multiplication between Q and K^T, followed by scaling.
@@ -508,15 +530,10 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             scores = self._apply_attention_mask(scores, attention_mask)
 
         # --- 5. Normalize Scores to get Attention Weights ---
-        # We convert the raw scores into a probability distribution (attention weights)
-        # using either a standard softmax, our adaptive softmax, or hierarchical routing.
-        # attn_weights shape will be the same as scores: (B, H, Q_seq, KV_seq)
-        if self.use_adaptive_softmax and self.adaptive_softmax is not None:
-            attn_weights = self.adaptive_softmax(scores)
-        elif self.use_hierarchical_routing and self.hierarchical_routing is not None:
-            attn_weights = self.hierarchical_routing(scores)
-        else:
-            attn_weights = ops.softmax(scores, axis=-1)
+        # Delegate to the unified ProbabilityOutput layer (softmax / sparsemax /
+        # threshmax / adaptive / routing / hierarchical).
+        # attn_weights shape: (B, H, Q_seq, KV_seq)
+        attn_weights = self.attn_prob(scores, training=training)
 
         # --- 6. Apply Dropout to Attention Weights (Optional) ---
         # During training, dropout is applied to the attention weights to prevent
@@ -570,31 +587,6 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             return input_shape[0]
         return input_shape
 
-    def get_build_config(self) -> Dict[str, Any]:
-        """Capture build state of lazy-built children for save/load.
-
-        The hierarchical_routing child is built lazily on first call() with
-        a shape that depends on runtime kv_seq_len. The standard build path
-        cannot reconstruct it from the parent's input_shape alone, so we
-        explicitly record the routing layer's build shape here and replay
-        it in build_from_config().
-        """
-        config = super().get_build_config() or {}
-        if (self.hierarchical_routing is not None
-                and self.hierarchical_routing.built):
-            config["hierarchical_routing_build_config"] = (
-                self.hierarchical_routing.get_build_config()
-            )
-        return config
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        """Restore build state, including lazy-built routing child."""
-        routing_cfg = config.pop("hierarchical_routing_build_config", None) \
-            if config else None
-        super().build_from_config(config)
-        if routing_cfg and self.hierarchical_routing is not None:
-            self.hierarchical_routing.build_from_config(routing_cfg)
-
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization, includes all constructor parameters.
 
@@ -612,9 +604,10 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
-            "use_adaptive_softmax": self.use_adaptive_softmax,
-            "adaptive_softmax_config": self.adaptive_softmax_config,
-            "use_hierarchical_routing": self.use_hierarchical_routing,
+            "probability_type": self.probability_type,
+            "probability_config": self.probability_config,
+            "qk_norm_type": self.qk_norm_type,
+            "qk_norm_kwargs": self.qk_norm_kwargs,
         })
         return config
 

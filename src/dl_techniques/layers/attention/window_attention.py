@@ -107,6 +107,18 @@ from typing import Any, Dict, Literal, Optional, Tuple, Union
 from .single_window_attention import SingleWindowAttention
 
 # ---------------------------------------------------------------------
+# Probability types not supported in window attention (score-level routing
+# is structurally incompatible with windowed score tensors).
+# ---------------------------------------------------------------------
+
+_DISALLOWED_PROB_TYPES = (
+    "routing",
+    "deterministic_routing",
+    "hierarchical",
+    "hierarchical_routing",
+)
+
+# ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
@@ -164,10 +176,28 @@ class WindowAttention(keras.layers.Layer):
     :param attention_mode: The type of attention projection in each window. One
         of `'linear'` or `'kan_key'`. Default: 'linear'.
     :type attention_mode: Literal["linear", "kan_key"]
-    :param normalization: The normalization method for attention scores. One of
-        `'softmax'`, `'adaptive_softmax'`, or `'hierarchical_routing'`.
-        Default: 'softmax'.
-    :type normalization: Literal["softmax", "adaptive_softmax", "hierarchical_routing"]
+    :param probability_type: Identifier for the attention probability
+        distribution produced from raw scores. Forwarded to
+        :class:`ProbabilityOutput`. Common values include ``'softmax'``,
+        ``'adaptive'`` (a.k.a. ``'adaptive_softmax'``), ``'sparsemax'``, and
+        ``'threshmax'``. Score-level routing variants
+        (``'routing'`` / ``'deterministic_routing'`` /
+        ``'hierarchical'`` / ``'hierarchical_routing'``) are not supported by
+        windowed attention and will raise ``ValueError``. Default: 'softmax'.
+    :type probability_type: str
+    :param probability_config: Optional config dict forwarded to
+        :class:`ProbabilityOutput` (e.g. adaptive softmax temperature
+        parameters). Default: None.
+    :type probability_config: Optional[Dict[str, Any]]
+    :param qk_norm_type: Optional normalization type applied to Q and K prior
+        to the attention dot product. If ``None``, no Q/K normalization is
+        applied. See ``dl_techniques.layers.norms.factory`` for valid types.
+        Default: None.
+    :type qk_norm_type: Optional[str]
+    :param qk_norm_kwargs: Optional kwargs forwarded to
+        :func:`create_normalization_layer` for the Q/K normalization layers.
+        Default: None.
+    :type qk_norm_kwargs: Optional[Dict[str, Any]]
     :param use_relative_position_bias: If True, add a learnable relative
         position bias to the attention scores. Recommended for `'grid'` mode.
         For `'zigzag'` mode, this is often set to `False` as the spatial
@@ -193,9 +223,6 @@ class WindowAttention(keras.layers.Layer):
     :param kan_activation: Activation for the KAN layer. Only used when
         `attention_mode` is `'kan_key'`. Default: 'swish'.
     :type kan_activation: str
-    :param adaptive_softmax_config: Configuration for adaptive softmax. Only
-        used when `normalization` is `'adaptive_softmax'`. Default: None.
-    :type adaptive_softmax_config: Optional[Dict[str, Any]]
     :param kernel_initializer: Initializer for kernel weights.
         Default: 'glorot_uniform'.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
@@ -216,9 +243,6 @@ class WindowAttention(keras.layers.Layer):
         num_heads: int,
         partition_mode: Literal["grid", "zigzag"] = "grid",
         attention_mode: Literal["linear", "kan_key"] = "linear",
-        normalization: Literal[
-            "softmax", "adaptive_softmax", "hierarchical_routing"
-        ] = "softmax",
         use_relative_position_bias: bool = True,
         qkv_bias: bool = True,
         qk_scale: Optional[float] = None,
@@ -227,7 +251,10 @@ class WindowAttention(keras.layers.Layer):
         kan_grid_size: int = 5,
         kan_spline_order: int = 3,
         kan_activation: str = "swish",
-        adaptive_softmax_config: Optional[Dict[str, Any]] = None,
+        probability_type: str = "softmax",
+        probability_config: Optional[Dict[str, Any]] = None,
+        qk_norm_type: Optional[str] = None,
+        qk_norm_kwargs: Optional[Dict[str, Any]] = None,
         kernel_initializer: Union[
             str, keras.initializers.Initializer
         ] = "glorot_uniform",
@@ -244,13 +271,22 @@ class WindowAttention(keras.layers.Layer):
     ):
         super().__init__(**kwargs)
 
+        # Validate probability_type: score-level routing variants are not
+        # supported because window partitioning fragments the score tensor.
+        if probability_type in _DISALLOWED_PROB_TYPES:
+            raise ValueError(
+                f"probability_type='{probability_type}' is not supported for "
+                "WindowAttention: score-level routing is incompatible with "
+                "windowed score tensors. Use 'softmax', 'adaptive', "
+                "'sparsemax', or 'threshmax'."
+            )
+
         # Store all parameters for get_config()
         self.dim = dim
         self.window_size = window_size
         self.num_heads = num_heads
         self.partition_mode = partition_mode
         self.attention_mode = attention_mode
-        self.normalization = normalization
         self.use_relative_position_bias = use_relative_position_bias
         self.qkv_bias = qkv_bias
         self.qk_scale = qk_scale
@@ -259,20 +295,28 @@ class WindowAttention(keras.layers.Layer):
         self.kan_grid_size = kan_grid_size
         self.kan_spline_order = kan_spline_order
         self.kan_activation = kan_activation
-        self.adaptive_softmax_config = adaptive_softmax_config
+        self.probability_type = probability_type
+        self.probability_config = probability_config
+        self.qk_norm_type = qk_norm_type
+        self.qk_norm_kwargs = qk_norm_kwargs
         self.kernel_initializer = kernel_initializer
         self.bias_initializer = bias_initializer
         self.kernel_regularizer = kernel_regularizer
         self.bias_regularizer = bias_regularizer
         # placeholder
         self._call_internal = None
-        # Create the core attention layer that operates on a single window
+
+        # Create the core attention layer that operates on a single window.
+        # ``WindowAttention`` is a partitioning wrapper: the actual Q/K
+        # projection, score computation, probability distribution
+        # (``attn_prob``) and Q/K normalization all live in
+        # ``SingleWindowAttention``. We forward the canonical Group-C
+        # parameters straight through.
         self.attention = SingleWindowAttention(
             dim=dim,
             window_size=window_size,
             num_heads=num_heads,
             attention_mode=attention_mode,
-            normalization=normalization,
             use_relative_position_bias=use_relative_position_bias,
             qkv_bias=qkv_bias,
             qk_scale=qk_scale,
@@ -281,7 +325,10 @@ class WindowAttention(keras.layers.Layer):
             kan_grid_size=kan_grid_size,
             kan_spline_order=kan_spline_order,
             kan_activation=kan_activation,
-            adaptive_softmax_config=adaptive_softmax_config,
+            probability_type=probability_type,
+            probability_config=probability_config,
+            qk_norm_type=qk_norm_type,
+            qk_norm_kwargs=qk_norm_kwargs,
             kernel_initializer=kernel_initializer,
             bias_initializer=bias_initializer,
             kernel_regularizer=kernel_regularizer,
@@ -573,7 +620,6 @@ class WindowAttention(keras.layers.Layer):
                 "num_heads": self.num_heads,
                 "partition_mode": self.partition_mode,
                 "attention_mode": self.attention_mode,
-                "normalization": self.normalization,
                 "use_relative_position_bias": self.use_relative_position_bias,
                 "qkv_bias": self.qkv_bias,
                 "qk_scale": self.qk_scale,
@@ -582,7 +628,10 @@ class WindowAttention(keras.layers.Layer):
                 "kan_grid_size": self.kan_grid_size,
                 "kan_spline_order": self.kan_spline_order,
                 "kan_activation": self.kan_activation,
-                "adaptive_softmax_config": self.adaptive_softmax_config,
+                "probability_type": self.probability_type,
+                "probability_config": self.probability_config,
+                "qk_norm_type": self.qk_norm_type,
+                "qk_norm_kwargs": self.qk_norm_kwargs,
                 "kernel_initializer": keras.initializers.serialize(
                     keras.initializers.get(self.kernel_initializer)
                 ),
@@ -785,7 +834,8 @@ def create_adaptive_softmax_window_attention(
         Default: 'grid'.
     :type partition_mode: Literal["grid", "zigzag"]
     :param kwargs: Additional keyword arguments to pass to `WindowAttention`,
-        especially `adaptive_softmax_config`.
+        especially `probability_config` for adaptive-softmax temperature
+        parameters.
     :type kwargs: Any
     :return: A `WindowAttention` layer with adaptive softmax normalization.
     :rtype: WindowAttention
@@ -795,7 +845,7 @@ def create_adaptive_softmax_window_attention(
         window_size=window_size,
         num_heads=num_heads,
         partition_mode=partition_mode,
-        normalization="adaptive_softmax",
+        probability_type="adaptive",
         **kwargs,
     )
 
