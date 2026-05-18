@@ -70,6 +70,20 @@ EXPERIMENT_MODES = {
     "e5": ("oob", "param_matched"),
 }
 
+# Per-experiment regime support. Mirrors each trainer's `_REGIME_MAP` keys.
+# A regime not in an experiment's tuple is skipped (with a one-line log)
+# during build_run_specs — this keeps `--regimes` builds tight by dropping
+# combinations the trainer would reject anyway. Update this dict whenever a
+# trainer's `_REGIME_MAP` is extended.
+EXPERIMENT_REGIMES: dict = {
+    "e1": ("default", "lr_low", "lr_high", "mp_fp16"),
+    "e2": ("default",),
+    "e3": ("default", "mp_fp16"),
+    "e4": ("default", "depth_12", "depth_48"),
+    "e5": ("default", "bs_32", "bs_256", "lr_low", "lr_high"),
+}
+
+
 # Variants that meaningfully respond to PARAM_MATCHED mode (drop their
 # per-feature scale). RMSNorm-family variants support a real `use_scale=False`
 # toggle. BandRMS-family variants treat PARAM_MATCHED as a no-op (they always
@@ -89,7 +103,11 @@ VARIANT_SUPPORTS_PARAM_MATCHED: frozenset = frozenset({
 
 @dataclass(frozen=True)
 class RunSpec:
-    """Specification for one (experiment, norm, mode, seed) cell."""
+    """Specification for one (experiment, norm, mode, regime, seed) cell.
+
+    The ``regime`` field defaults to ``"default"`` for backward compatibility
+    with pre-plan_e1f12eab sweep invocations that did not pass ``--regimes``.
+    """
 
     experiment: str
     norm_type: str
@@ -98,6 +116,7 @@ class RunSpec:
     module: str
     extra_args: Tuple[str, ...]
     out_dir: str
+    regime: str = "default"
     csv_filename: str = "results.csv"
 
 
@@ -109,11 +128,25 @@ def build_run_specs(
     seeds: Sequence[int],
     sweep_root: str,
     epochs_override: Optional[int],
+    regimes: Sequence[str] = ("default",),
+    max_cells: int = 1000,
 ) -> List[RunSpec]:
     """Enumerate every subprocess we plan to launch.
 
     Filters out (experiment, mode) pairs not supported per
-    :data:`EXPERIMENT_MODES` and logs a one-line skip notice per filtered cell.
+    :data:`EXPERIMENT_MODES`, (experiment, regime) pairs not supported per
+    :data:`EXPERIMENT_REGIMES`, and (PM, no-use_scale) combinations. Logs a
+    one-line skip notice per filtered cell.
+
+    Per plan_e1f12eab D-003 (anchored): raises ``ValueError`` at build time
+    if the constructed cell count exceeds ``max_cells``. The error message
+    includes the dimensions to help the user trim the build.
+
+    :param regimes: Iterable of regime names. Cells are emitted for the
+        Cartesian product of regimes × (other dims). Default ``("default",)``
+        preserves pre-plan_e1f12eab behaviour.
+    :param max_cells: Cell-count safety guard. Raises ``ValueError`` before
+        any subprocess is launched if the build exceeds this. Default 1000.
     """
     specs: List[RunSpec] = []
     for exp in experiments:
@@ -124,6 +157,7 @@ def build_run_specs(
             )
         module, _ = EXPERIMENT_REGISTRY[exp]
         supported_modes = EXPERIMENT_MODES[exp]
+        supported_regimes = EXPERIMENT_REGIMES.get(exp, ("default",))
         for norm in norms:
             for mode in modes:
                 if mode not in supported_modes:
@@ -144,27 +178,61 @@ def build_run_specs(
                         f"not meaningful for this norm)"
                     )
                     continue
-                for seed in seeds:
-                    out_dir = os.path.join(
-                        sweep_root, exp, norm, mode, f"seed_{seed}"
-                    )
-                    extra: List[str] = [
-                        "--norm-type", norm,
-                        "--seed", str(seed),
-                        "--mode", mode,
-                        "--out-dir", out_dir,
-                    ]
-                    if epochs_override is not None:
-                        extra += ["--epochs", str(epochs_override)]
-                    specs.append(RunSpec(
-                        experiment=exp,
-                        norm_type=norm,
-                        mode=mode,
-                        seed=seed,
-                        module=module,
-                        extra_args=tuple(extra),
-                        out_dir=out_dir,
-                    ))
+                for regime in regimes:
+                    if regime not in supported_regimes:
+                        logger.info(
+                            f"[sweep] skip {exp}/{norm}/{mode}/{regime}/* "
+                            f"(experiment supports only "
+                            f"regimes={supported_regimes})"
+                        )
+                        continue
+                    for seed in seeds:
+                        # Out-dir naming: include regime in the leaf path
+                        # ONLY when a non-default regime is in play, to
+                        # preserve the pre-plan_e1f12eab default layout
+                        # (and keep RESULTS.md Phase 1 verdict-block paths
+                        # stable — I2 invariant).
+                        if regime == "default":
+                            out_dir = os.path.join(
+                                sweep_root, exp, norm, mode, f"seed_{seed}",
+                            )
+                        else:
+                            out_dir = os.path.join(
+                                sweep_root, exp, norm, mode,
+                                f"regime_{regime}", f"seed_{seed}",
+                            )
+                        extra: List[str] = [
+                            "--norm-type", norm,
+                            "--seed", str(seed),
+                            "--mode", mode,
+                            "--regime", regime,
+                            "--out-dir", out_dir,
+                        ]
+                        if epochs_override is not None:
+                            extra += ["--epochs", str(epochs_override)]
+                        specs.append(RunSpec(
+                            experiment=exp,
+                            norm_type=norm,
+                            mode=mode,
+                            seed=seed,
+                            module=module,
+                            extra_args=tuple(extra),
+                            out_dir=out_dir,
+                            regime=regime,
+                        ))
+
+    # DECISION plan_2026-05-18_e1f12eab/D-003: --max-cells guard.
+    # Reject oversized builds BEFORE any subprocess is launched, to prevent
+    # the partial-sweep / inconsistent-results-dir failure mode (EC3 /
+    # falsification scenario C). Raised at build time, not at run time.
+    if len(specs) > max_cells:
+        raise ValueError(
+            f"Cell count {len(specs)} exceeds --max-cells={max_cells}. "
+            f"Dimensions: {len(experiments)} experiments × {len(norms)} norms "
+            f"× {len(modes)} modes × {len(regimes)} regimes × {len(seeds)} "
+            f"seeds. Trim a dimension (e.g. fewer norms or seeds), bump "
+            f"--max-cells, or chunk the sweep into multiple invocations."
+        )
     return specs
 
 
@@ -310,6 +378,17 @@ def _parse_args() -> argparse.Namespace:
                         "the parent shell (LESSONS L93 / D-002). Default 0.")
     p.add_argument("--no-report", action="store_true",
                    help="Skip the report.py invocation at the end.")
+    # Plan plan_e1f12eab Step 5 / D-003 additions.
+    p.add_argument("--regimes", type=_csv_list, default=["default"],
+                   help="Comma-separated regime names (per-trainer _REGIME_MAP "
+                        "keys). Default: 'default'. Unsupported (exp, regime) "
+                        "pairs are skipped with a log line. Cells multiply by "
+                        "this dimension — combine with --max-cells.")
+    p.add_argument("--max-cells", type=int, default=1000,
+                   help="Hard cap on planned cell count. Raises an error "
+                        "BEFORE any subprocess launches if exceeded (D-003 "
+                        "guard against silent multi-hour partial sweeps). "
+                        "Default 1000.")
     return p.parse_args()
 
 
@@ -329,6 +408,8 @@ def main() -> int:
         seeds=args.seeds,
         sweep_root=args.out_dir,
         epochs_override=args.epochs,
+        regimes=args.regimes,
+        max_cells=args.max_cells,
     )
     logger.info(f"[sweep] {len(specs)} cells planned")
     if not specs:
