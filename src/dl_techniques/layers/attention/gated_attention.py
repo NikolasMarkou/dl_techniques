@@ -592,3 +592,5 @@ class GatedAttention(keras.layers.Layer):
             'bias_regularizer': regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

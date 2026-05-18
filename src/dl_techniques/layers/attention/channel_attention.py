@@ -59,9 +59,10 @@ References:
       Computer Vision (ECCV).
 """
 
+# ---------------------------------------------------------------------
+
 import keras
 from typing import Optional, Union, Dict, Any, Tuple
-
 
 # ---------------------------------------------------------------------
 
@@ -80,33 +81,37 @@ class ChannelAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        Input [B, H, W, C]
-              │
-              ├──────────────────────┐
-              ▼                      ▼
-        ┌───────────────┐   ┌───────────────┐
-        │ Global AvgPool│   │ Global MaxPool│
-        │  (H,W) → (1,1)│   │  (H,W) → (1,1)│
-        └───────┬───────┘   └────────┬──────┘
-                ▼                    ▼
-          [B, C] (flat)        [B, C] (flat)
-                │                   │
-                ├────── Shared ─────┤
-                ▼       MLP         ▼
-        ┌───────────────┐   ┌───────────────┐
-        │ Dense(C//r)   │   │ Dense(C//r)   │
-        │ + ReLU        │   │ + ReLU        │
-        ├───────────────┤   ├───────────────┤
-        │ Dense(C)      │   │ Dense(C)      │
-        └───────┬───────┘   └───────┬───────┘
-                │                   │
-                └────── Add ────────┘
-                         ▼
-                    ┌─────────┐
-                    │ Sigmoid │
-                    └────┬────┘
-                         ▼
-                  [B, 1, 1, C] weights
+        ┌─────────────────────────────────────────────────────────┐
+        │                  ChannelAttention (CBAM)                │
+        │                                                         │
+        │   Input [B, H, W, C]                                    │
+        │          │                                              │
+        │          ├──────────────────────┐                       │
+        │          ▼                      ▼                       │
+        │   ┌───────────────┐    ┌───────────────┐                │
+        │   │ Global AvgPool│    │ Global MaxPool│                │
+        │   │ (H,W) → (1,1) │    │ (H,W) → (1,1) │                │
+        │   └───────┬───────┘    └───────┬───────┘                │
+        │           ▼                    ▼                        │
+        │      [B, C] (flat)        [B, C] (flat)                 │
+        │           │                    │                        │
+        │           ├──── Shared MLP ────┤                        │
+        │           ▼                    ▼                        │
+        │   ┌───────────────┐    ┌───────────────┐                │
+        │   │ Dense(C//r)   │    │ Dense(C//r)   │                │
+        │   │ + ReLU        │    │ + ReLU        │                │
+        │   ├───────────────┤    ├───────────────┤                │
+        │   │ Dense(C)      │    │ Dense(C)      │                │
+        │   └───────┬───────┘    └───────┬───────┘                │
+        │           │                    │                        │
+        │           └──────── Add ───────┘                        │
+        │                    │                                    │
+        │                    ▼                                    │
+        │                 Sigmoid                                 │
+        │                    │                                    │
+        │                    ▼                                    │
+        │          Output [B, 1, 1, C] weights                    │
+        └─────────────────────────────────────────────────────────┘
 
     :param channels: Number of input channels. Must be positive and
         divisible by ``ratio``.
@@ -294,3 +299,5 @@ class ChannelAttention(keras.layers.Layer):
             "use_bias": self.use_bias,
         })
         return config
+
+# ---------------------------------------------------------------------

@@ -39,7 +39,17 @@ Causality:
 
 Complexity:
     O(N*D + G*log(G)*H*D_h)
+
+References:
+    - Vaswani et al., 2017. Attention Is All You Need.
+      (https://arxiv.org/abs/1706.03762)
+    - Cooley, J. W., & Tukey, J. W. (1965). "An Algorithm for the Machine
+      Calculation of Complex Fourier Series".
+    - Gu, A., Goel, K., & Re, C. (2022). "Efficiently Modeling Long Sequences
+      with Structured State Spaces". (https://arxiv.org/abs/2111.00396)
 """
+
+# ---------------------------------------------------------------------
 
 import math
 import keras
@@ -590,3 +600,5 @@ class WaveFieldAttention(keras.layers.Layer):
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------

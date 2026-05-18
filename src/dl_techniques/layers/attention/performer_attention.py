@@ -18,6 +18,8 @@ References:
       "Rethinking Attention with Performers".
 """
 
+# ---------------------------------------------------------------------
+
 import keras
 import numpy as np
 from typing import Optional, Union, Tuple, Any, Dict

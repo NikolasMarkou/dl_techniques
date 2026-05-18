@@ -85,7 +85,16 @@ Partitioning   O(N)           Linear reshape/reorder
 Attention      O(N × k²)      k = window_size, N = seq_len
 Total          O(N × k²)      Linear in sequence length
 ============== ============== =================================
+
+References:
+    - Liu, Z., et al. (2021). "Swin Transformer: Hierarchical Vision
+      Transformer using Shifted Windows". ICCV.
+      (https://arxiv.org/abs/2103.14030)
+    - Vaswani et al., 2017. Attention Is All You Need.
+      (https://arxiv.org/abs/1706.03762)
 """
+
+# ---------------------------------------------------------------------
 
 import math
 import keras

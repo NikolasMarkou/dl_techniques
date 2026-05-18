@@ -14,6 +14,8 @@ References:
       Principal Component Analysis?". Journal of the ACM.
 """
 
+# ---------------------------------------------------------------------
+
 import keras
 import numpy as np
 from typing import Optional, Union, Tuple, Any, Dict

@@ -57,6 +57,8 @@ References:
       Computer Vision (ECCV).
 """
 
+# ---------------------------------------------------------------------
+
 import keras
 from typing import Optional, Union, Dict, Any, Tuple
 
@@ -79,26 +81,31 @@ class SpatialAttention(keras.layers.Layer):
 
     .. code-block:: text
 
-        Input [B, H, W, C]
-              │
-              ├────────────────────┐
-              ▼                    ▼
-        ┌──────────────┐   ┌──────────────┐
-        │ AvgPool      │   │ MaxPool      │
-        │ axis=C       │   │ axis=C       │
-        │ → [B,H,W,1]  │   │ → [B,H,W,1]  │
-        └──────┬───────┘   └───────┬──────┘
-               │                   │
-               └──── Concat ───────┘
-                       ▼
-                 [B, H, W, 2]
-                       ▼
-               ┌───────────────┐
-               │ Conv2D(k×k,1) │
-               │ + Sigmoid     │
-               └───────┬───────┘
-                       ▼
-                 [B, H, W, 1]
+        ┌───────────────────────────────────────────────────────┐
+        │                  SpatialAttention                     │
+        │                                                       │
+        │   Input [B, H, W, C]                                  │
+        │          │                                            │
+        │          ├──────────────┬────────────────┐            │
+        │          ▼              ▼                             │
+        │   ┌─────────────┐  ┌─────────────┐                    │
+        │   │ AvgPool     │  │ MaxPool     │                    │
+        │   │ axis=C      │  │ axis=C      │                    │
+        │   │ → [B,H,W,1] │  │ → [B,H,W,1] │                    │
+        │   └──────┬──────┘  └──────┬──────┘                    │
+        │          │                │                           │
+        │          └─── Concat ─────┘                           │
+        │                  │                                    │
+        │                  ▼                                    │
+        │          [B, H, W, 2]                                 │
+        │                  │                                    │
+        │                  ▼                                    │
+        │   ┌─────────────────────────────────────────────┐     │
+        │   │ Conv2D(kernel=k×k, filters=1) + Sigmoid     │     │
+        │   └─────────────────────┬───────────────────────┘     │
+        │                         ▼                             │
+        │   Output [B, H, W, 1]  (attention map ∈ [0, 1])       │
+        └───────────────────────────────────────────────────────┘
 
     :param kernel_size: Size of the convolution kernel. Must be odd and
         positive. Defaults to 7 following the original CBAM paper.

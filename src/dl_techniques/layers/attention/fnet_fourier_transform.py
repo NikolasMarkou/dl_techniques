@@ -70,27 +70,34 @@ class FNetFourierTransform(keras.layers.Layer):
 
     .. code-block:: text
 
-        Input [B, S, D]
-              │
-              ▼
-        ┌─────────────────────────┐
-        │ DFT along seq dim (S)   │
-        │ Complex[B, S, D]        │
-        └────────────┬────────────┘
-                     ▼
-        ┌─────────────────────────┐
-        │ DFT along hidden dim (D)│
-        │ Complex[B, S, D]        │
-        └────────────┬────────────┘
-                     ▼
-        ┌─────────────────────────┐
-        │ Extract real part: Re() │
-        └────────────┬────────────┘
-                     ▼
-          (if masked) zero out
-              padded positions
-                     ▼
-              Output [B, S, D]
+        ┌─────────────────────────────────────────────────────────┐
+        │                  FNetFourierTransform                   │
+        │                                                         │
+        │   Input [B, S, D] (real)                                │
+        │          │                                              │
+        │          ▼                                              │
+        │   Lift to complex: stack(x, 0) -> [B, S, D, 2]          │
+        │          │                                              │
+        │          ▼                                              │
+        │   ┌─────────────────────────────────────────────┐       │
+        │   │ DFT along sequence dim (S)                  │       │
+        │   │ X' = F_S @ X    (complex matmul)            │       │
+        │   └──────────────────────┬──────────────────────┘       │
+        │                          ▼                              │
+        │   ┌─────────────────────────────────────────────┐       │
+        │   │ DFT along hidden dim (D)                    │       │
+        │   │ X'' = X' @ F_D  (complex matmul)            │       │
+        │   └──────────────────────┬──────────────────────┘       │
+        │                          ▼                              │
+        │   ┌─────────────────────────────────────────────┐       │
+        │   │ Extract real part: Re(X'')                  │       │
+        │   └──────────────────────┬──────────────────────┘       │
+        │                          ▼                              │
+        │       [if mask] zero out padded positions               │
+        │                          │                              │
+        │                          ▼                              │
+        │   Output [B, S, D]                                      │
+        └─────────────────────────────────────────────────────────┘
 
     :param implementation: Strategy for computing DFT. ``'matrix'`` uses
         cached DFT matrix multiplication (default, most compatible);

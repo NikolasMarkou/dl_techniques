@@ -15,7 +15,17 @@ Four variants are provided:
 - **TripSE3**: SE blocks embedded within branches (Parallel SE).
 - **TripSE4**: Hybrid with affine combination of spatial and channel
   descriptors (3D Attention).
+
+References:
+    - Alhazmi, A., & Altahhan, A. (2025). "Achieving 3D Attention via Triplet
+      Squeeze and Excitation Block". (https://arxiv.org/abs/2505.05943)
+    - Misra, D., et al. (2021). "Rotate to Attend: Convolutional Triplet
+      Attention Module". WACV.
+    - Hu, J., Shen, L., & Sun, G. (2018). "Squeeze-and-Excitation Networks".
+      CVPR.
 """
+
+# ---------------------------------------------------------------------
 
 import keras
 from keras import ops, layers, initializers, regularizers

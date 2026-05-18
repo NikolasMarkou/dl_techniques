@@ -12,9 +12,12 @@ complex scenes and objects.
 It functions as a self-attention block tailored for 4D image-like tensors
 (batch, height, width, channels).
 
-Reference:
--   "Non-local Neural Networks" (https://arxiv.org/abs/1711.07971)
+References:
+    - Wang, X., Girshick, R., Gupta, A., & He, K. (2018). "Non-local Neural
+      Networks". (https://arxiv.org/abs/1711.07971)
 """
+
+# ---------------------------------------------------------------------
 
 import keras
 from keras import ops

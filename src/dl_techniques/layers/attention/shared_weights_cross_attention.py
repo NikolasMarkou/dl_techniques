@@ -18,6 +18,8 @@ References:
       Long-Document Transformer".
 """
 
+# ---------------------------------------------------------------------
+
 import keras
 from keras import ops
 from typing import Any, List, Union, Tuple, Optional

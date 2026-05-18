@@ -474,10 +474,14 @@ class TestRoutingProbabilitiesLayer:
         layer.build((None, 20))
 
         assert len(layer.trainable_variables) == 0, "Layer should have no trainable variables"
-        # Three non-trainable weights: cosine basis + leaf validity masks
-        # (mask_mul, mask_add) used to zero invalid leaves for non-pow2 N.
-        assert len(layer.non_trainable_variables) == 3, \
-            "Deterministic mode should have three non-trainable weights"
+        # One non-trainable weight: the cosine basis. Per DECISION D-006 in
+        # routing_probabilities.py, the leaf-validity masks (mask_mul,
+        # mask_add) are deterministic functions of (output_dim,
+        # padded_output_dim) and are stored as numpy arrays — NOT as
+        # add_weight — to avoid checkpoint bloat. They are recomputed in
+        # build() on every load and converted to backend tensors inside call().
+        assert len(layer.non_trainable_variables) == 1, \
+            "Deterministic mode should have one non-trainable weight (cosine basis)"
 
     # ==================== Comparison Tests ====================
 
