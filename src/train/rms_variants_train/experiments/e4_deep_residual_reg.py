@@ -20,7 +20,7 @@ import argparse
 import csv
 import os
 import time
-from typing import Tuple
+from typing import Dict, Optional, Tuple
 
 import keras
 import numpy as np
@@ -125,11 +125,23 @@ def _build_model(
 # ---------------------------------------------------------------------
 
 
+# Regime axis (Phase 3). Maps to ``(lr, batch, mp, depth_override)``.
+# ``depth_override`` replaces ``args.depth`` when set.
+_REGIME_MAP: Dict[str, Tuple[Optional[float], Optional[int], Optional[bool], Optional[int]]] = {
+    "default":  (None, None, None, None),
+    "depth_12": (None, None, None, 12),
+    "depth_48": (None, None, None, 48),
+}
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="E4 DeepResidual+fp16 regression")
     p.add_argument("--norm-type", type=str, default="rms_norm", choices=list(NORM_VARIANTS))
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--mode", type=str, default="oob", choices=["oob", "param_matched"])
+    p.add_argument("--regime", type=str, default="default",
+                   choices=list(_REGIME_MAP.keys()),
+                   help="Phase 3 regime sub-experiment selector (depth axis).")
     p.add_argument("--epochs", type=int, default=60)
     p.add_argument("--batch-size", type=int, default=16, help="Small batch is adversarial")
     p.add_argument("--learning-rate", type=float, default=3e-4)
@@ -243,6 +255,16 @@ def run(cfg: ExperimentConfig, *, depth: int, hidden_dim: int, bias: float,
 
 def main() -> None:
     args = _parse_args()
+    # Apply regime override (Phase 3 depth axis).
+    lr_o, bs_o, mp_o, depth_o = _REGIME_MAP[args.regime]
+    if lr_o is not None:
+        args.learning_rate = lr_o
+    if bs_o is not None:
+        args.batch_size = bs_o
+    if mp_o is not None:
+        args.mixed_precision = bool(mp_o)
+    if depth_o is not None:
+        args.depth = depth_o
     cfg = ExperimentConfig(
         experiment_name="e4",
         norm_type=args.norm_type,
@@ -256,6 +278,7 @@ def main() -> None:
         mixed_precision=args.mixed_precision,
         max_band_width=args.max_band_width,
         out_dir=args.out_dir,
+        extras={"regime": args.regime, "depth_override": depth_o},
     )
     run(
         cfg,

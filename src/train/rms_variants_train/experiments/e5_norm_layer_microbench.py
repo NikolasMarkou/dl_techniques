@@ -35,7 +35,7 @@ import argparse
 import csv
 import os
 import time
-from typing import Tuple
+from typing import Dict, Optional, Tuple
 
 import keras
 import numpy as np
@@ -101,11 +101,24 @@ def _build_model(d: int, depth: int, norm_type: str, norm_kwargs: dict) -> keras
 # ---------------------------------------------------------------------
 
 
+# Regime axis (Phase 3). Maps to ``(lr, batch, mp, depth_override)``.
+_REGIME_MAP: Dict[str, Tuple[Optional[float], Optional[int], Optional[bool], Optional[int]]] = {
+    "default": (None, None, None, None),
+    "bs_32":   (None, 32, None, None),
+    "bs_256":  (None, 256, None, None),
+    "lr_low":  (1e-4, None, None, None),
+    "lr_high": (1e-3, None, None, None),
+}
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="E5 norm-layer microbench")
     p.add_argument("--norm-type", type=str, default="rms_norm", choices=list(NORM_VARIANTS))
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--mode", type=str, default="oob", choices=["oob", "param_matched"])
+    p.add_argument("--regime", type=str, default="default",
+                   choices=list(_REGIME_MAP.keys()),
+                   help="Phase 3 regime sub-experiment selector (LR/BS axis).")
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--depth", type=int, default=16)
@@ -224,6 +237,12 @@ def run(cfg: ExperimentConfig, *, depth: int, hidden_dim: int, bias: float) -> d
 
 def main() -> None:
     args = _parse_args()
+    # Apply regime override (Phase 3 LR/BS axis).
+    lr_o, bs_o, _, _ = _REGIME_MAP[args.regime]
+    if lr_o is not None:
+        args.learning_rate = lr_o
+    if bs_o is not None:
+        args.batch_size = bs_o
     cfg = ExperimentConfig(
         experiment_name="e5",
         norm_type=args.norm_type,
@@ -236,6 +255,7 @@ def main() -> None:
         max_band_width=args.max_band_width,
         epsilon=args.epsilon,
         out_dir=args.out_dir,
+        extras={"regime": args.regime},
     )
     run(cfg, depth=args.depth, hidden_dim=args.hidden_dim, bias=args.bias)
 

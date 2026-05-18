@@ -21,7 +21,7 @@ import argparse
 import csv
 import os
 import time
-from typing import Tuple
+from typing import Dict, Optional, Tuple
 
 import keras
 import numpy as np
@@ -116,11 +116,21 @@ def _build_model(
 # ---------------------------------------------------------------------
 
 
+# Regime axis (Phase 3). Maps to ``(lr, batch, mp, depth_override)``.
+_REGIME_MAP: Dict[str, Tuple[Optional[float], Optional[int], Optional[bool], Optional[int]]] = {
+    "default": (None, None, None, None),
+    "mp_fp16": (None, None, True, None),
+}
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="E3 TinyTransformer × IMDb")
     p.add_argument("--norm-type", type=str, default="rms_norm", choices=list(NORM_VARIANTS))
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--mode", type=str, default="oob", choices=["oob", "param_matched"])
+    p.add_argument("--regime", type=str, default="default",
+                   choices=list(_REGIME_MAP.keys()),
+                   help="Phase 3 regime sub-experiment selector.")
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--learning-rate", type=float, default=3e-4)
@@ -237,7 +247,16 @@ def run(cfg: ExperimentConfig, *, vocab_size: int, max_len: int, d_model: int,
 
 
 def main() -> None:
+    import keras as _keras  # local — avoid TF policy side-effects at import time
     args = _parse_args()
+    # Apply regime override (Phase 3).
+    lr_o, bs_o, mp_o, _ = _REGIME_MAP[args.regime]
+    if lr_o is not None:
+        args.learning_rate = lr_o
+    if bs_o is not None:
+        args.batch_size = bs_o
+    if mp_o is True:
+        _keras.mixed_precision.set_global_policy("mixed_float16")
     cfg = ExperimentConfig(
         experiment_name="e3",
         norm_type=args.norm_type,
@@ -249,8 +268,10 @@ def main() -> None:
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         warmup_epochs=args.warmup_epochs,
+        mixed_precision=bool(mp_o),
         max_band_width=args.max_band_width,
         out_dir=args.out_dir,
+        extras={"regime": args.regime},
     )
     run(
         cfg,

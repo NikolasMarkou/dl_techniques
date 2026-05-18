@@ -19,7 +19,7 @@ import argparse
 import csv
 import os
 import time
-from typing import Tuple
+from typing import Dict, Optional, Tuple
 
 import keras
 import numpy as np
@@ -55,12 +55,22 @@ def _to_tf_dataset(x, y, *, batch_size, shuffle, seed) -> tf.data.Dataset:
     return ds
 
 
+# Regime axis (Phase 3). E2 only accepts the ``default`` choice — it is NOT
+# in the Phase 3 regime sweep (kept for CLI uniformity across all 5 trainers).
+_REGIME_MAP: Dict[str, Tuple[Optional[float], Optional[int], Optional[bool], Optional[int]]] = {
+    "default": (None, None, None, None),
+}
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="E2 ResNet-18 × CIFAR-100")
     p.add_argument("--norm-type", type=str, default="rms_norm", choices=list(NORM_VARIANTS))
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--mode", type=str, default="oob", choices=["oob"],
                    help="ResNet factory does not plumb norm_kwargs (D-003).")
+    p.add_argument("--regime", type=str, default="default",
+                   choices=list(_REGIME_MAP.keys()),
+                   help="Phase 3 stub — E2 only supports 'default'.")
     p.add_argument("--variant", type=str, default="resnet18")
     p.add_argument("--epochs", type=int, default=80)
     p.add_argument("--batch-size", type=int, default=128)
@@ -164,6 +174,8 @@ def run(cfg: ExperimentConfig, *, variant: str, warmup_epochs: int) -> dict:
 
 def main() -> None:
     args = _parse_args()
+    # Apply regime override (Phase 3). E2 only supports 'default' — no-op.
+    _ = _REGIME_MAP[args.regime]
     cfg = ExperimentConfig(
         experiment_name="e2",
         norm_type=args.norm_type,
@@ -177,6 +189,7 @@ def main() -> None:
         weight_decay=args.weight_decay,
         warmup_epochs=args.warmup_epochs,
         out_dir=args.out_dir,
+        extras={"regime": args.regime},
     )
     run(cfg, variant=args.variant, warmup_epochs=args.warmup_epochs)
 

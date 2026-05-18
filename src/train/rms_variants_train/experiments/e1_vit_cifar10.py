@@ -22,7 +22,7 @@ import argparse
 import csv
 import os
 import time
-from typing import Tuple
+from typing import Dict, Optional, Tuple
 
 import keras
 import numpy as np
@@ -76,12 +76,26 @@ def _to_tf_dataset(
 # ---------------------------------------------------------------------
 
 
+# Regime axis (Phase 3). Each entry maps to a 4-tuple
+# ``(lr, batch, mp, depth_override)`` where ``None`` means "do not override".
+# ``mp`` is a bool; ``depth_override`` is ignored on E1 (depth fixed by variant).
+_REGIME_MAP: Dict[str, Tuple[Optional[float], Optional[int], Optional[bool], Optional[int]]] = {
+    "default": (None, None, None, None),
+    "lr_low":  (1e-4, None, None, None),
+    "lr_high": (1e-3, None, None, None),
+    "mp_fp16": (None, None, True, None),
+}
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="E1 ViT-pico × CIFAR-10")
     p.add_argument("--norm-type", type=str, default="rms_norm", choices=list(NORM_VARIANTS))
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--mode", type=str, default="oob", choices=["oob"],
                    help="ViT factory does not plumb norm_kwargs (D-003).")
+    p.add_argument("--regime", type=str, default="default",
+                   choices=list(_REGIME_MAP.keys()),
+                   help="Phase 3 regime sub-experiment selector.")
     p.add_argument("--variant", type=str, default="vit_pico")
     p.add_argument("--patch-size", type=int, default=4)
     p.add_argument("--epochs", type=int, default=50)
@@ -204,6 +218,14 @@ def run(cfg: ExperimentConfig, *, variant: str, patch_size: int, dropout_rate: f
 
 def main() -> None:
     args = _parse_args()
+    # Apply regime override (Phase 3 sub-experiment axis).
+    lr_o, bs_o, mp_o, _ = _REGIME_MAP[args.regime]
+    if lr_o is not None:
+        args.learning_rate = lr_o
+    if bs_o is not None:
+        args.batch_size = bs_o
+    if mp_o is True:
+        keras.mixed_precision.set_global_policy("mixed_float16")
     cfg = ExperimentConfig(
         experiment_name="e1",
         norm_type=args.norm_type,
@@ -216,7 +238,9 @@ def main() -> None:
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         warmup_epochs=args.warmup_epochs,
+        mixed_precision=bool(mp_o),
         out_dir=args.out_dir,
+        extras={"regime": args.regime},
     )
     run(
         cfg,
