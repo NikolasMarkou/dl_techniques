@@ -179,8 +179,16 @@ def run_one(
     python_exe: str,
     cell_timeout_s: int,
     deadline_s: float,
+    gpu_id: int,
 ) -> Tuple[bool, str]:
-    """Launch one subprocess. Returns (success, stderr_tail)."""
+    """Launch one subprocess. Returns (success, stderr_tail).
+
+    The ``gpu_id`` argument is the single source of truth for the subprocess
+    ``CUDA_VISIBLE_DEVICES`` value. It is **hard-set** (not ``setdefault``)
+    so the parent shell's CVD value cannot leak through and silently re-bind
+    the cell to the wrong GPU (the bug that killed plan_74a935a2's sweep,
+    LESSONS L93).
+    """
     now = time.time()
     remaining = deadline_s - now
     if remaining <= 0:
@@ -191,12 +199,21 @@ def run_one(
     log_path = os.path.join(spec.out_dir, "cell.log")
     cmd = [python_exe, "-m", spec.module, *spec.extra_args]
     env = os.environ.copy()
-    env.setdefault("MPLBACKEND", "Agg")
-    env.setdefault("CUDA_VISIBLE_DEVICES", "0")
+    # DECISION plan_2026-05-18_63121227/D-002: hard-set both env vars below
+    # (was ``setdefault``, which silently honoured the parent shell). The
+    # ``--gpu`` CLI flag is the canonical source of truth; parent CVD is
+    # explicitly overridden. See LESSONS L93 for the failure mode.
+    env["MPLBACKEND"] = "Agg"
+    env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
     t0 = time.time()
     with open(log_path, "w") as log_f:
-        log_f.write(f"# cmd: {' '.join(cmd)}\n# timeout: {timeout}s\n\n")
+        log_f.write(
+            f"# cmd: {' '.join(cmd)}\n"
+            f"# CUDA_VISIBLE_DEVICES={env['CUDA_VISIBLE_DEVICES']}\n"
+            f"# MPLBACKEND={env['MPLBACKEND']}\n"
+            f"# timeout: {timeout}s\n\n"
+        )
         log_f.flush()
         try:
             res = subprocess.run(
@@ -272,7 +289,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--experiments", type=_csv_list, required=True,
                    help="Comma-separated subset of e1,e2,e3,e4,e5")
     p.add_argument("--norms", type=_csv_list, default=list(NORM_VARIANTS),
-                   help=f"Default: all 7 — {','.join(NORM_VARIANTS)}")
+                   help=f"Default: all 8 — {','.join(NORM_VARIANTS)}")
     p.add_argument("--modes", type=_csv_list, default=["oob"],
                    help="Subset of {oob, param_matched}")
     p.add_argument("--seeds", type=_int_csv, default=[0, 1, 2, 3, 4])
@@ -287,6 +304,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--global-cap-s", type=int, default=12 * 3600,
                    help="Total wall-clock cap (default 12h)")
     p.add_argument("--python-exe", type=str, default=sys.executable)
+    p.add_argument("--gpu", type=int, default=0,
+                   help="GPU index. Hard-sets CUDA_VISIBLE_DEVICES for each "
+                        "cell subprocess, overriding any value inherited from "
+                        "the parent shell (LESSONS L93 / D-002). Default 0.")
     p.add_argument("--no-report", action="store_true",
                    help="Skip the report.py invocation at the end.")
     return p.parse_args()
@@ -324,6 +345,7 @@ def main() -> int:
             python_exe=args.python_exe,
             cell_timeout_s=cell_timeout,
             deadline_s=deadline,
+            gpu_id=args.gpu,
         )
         if ok:
             successes += 1
