@@ -233,6 +233,12 @@ class MobileMQA(GroupedQueryAttention):
         k = ops.transpose(k, (0, 2, 1, 3))  # (B, 1, S_kv, D)
         v = ops.transpose(v, (0, 2, 1, 3))  # (B, 1, S_kv, D)
 
+        # Optional q/k normalization (inherited from GroupedQueryAttention).
+        if self.q_norm is not None:
+            q = self.q_norm(q)
+        if self.k_norm is not None:
+            k = self.k_norm(k)
+
         # 5. Broadcast K/V to match Q heads (Grouped Broadcast)
         # Since num_kv_heads=1, num_groups == num_heads
         k = ops.repeat(k, self.num_heads, axis=1)
@@ -247,7 +253,7 @@ class MobileMQA(GroupedQueryAttention):
         # but if passed, would need careful handling due to downsampling.
         # We omit mask logic here to strictly match the vision use-case or GQA super if needed.
 
-        attn_weights = ops.softmax(scores, axis=-1)
+        attn_weights = self.attn_prob(scores)
         attn_weights = self.dropout(attn_weights, training=training)
 
         # 7. Weighted Sum
