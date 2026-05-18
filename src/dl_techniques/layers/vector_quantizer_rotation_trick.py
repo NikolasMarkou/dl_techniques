@@ -8,77 +8,65 @@ from the discrete codebook lookup back through the quantization step. Forward
 values are identical to a standard VQ (nearest codebook entry); only the
 gradient path differs.
 
-Architecture
-------------
+**Architecture Overview:**
 
-::
+.. code-block:: text
 
-    Input x : (B, ..., D)
-        |
-        v
-    +--------------------------------------------------+
-    |  reshape -> (N, D)     N = B * prod(spatial)     |
-    +--------------------------------------------------+
-        |
-        v   split channels into num_heads, D_h = D / H
-    +--------------------------------------------------+
-    |  flat : (N, H, D_h)                              |
-    +--------------------------------------------------+
-        |
-        v
-    +--------------------------------------------------+
-    |  Codebook lookup        E : (H, K, D_h)          |
-    |    'euclidean' : argmin ||x - e||                |
-    |    'cosine'    : argmax <x_hat, e_hat>           |
-    +--------------------------------------------------+
-        |                                              |
-        | indices (N, H)                               | q_lookup (N,H,D_h)
-        |                                              |
-        |                  +---------------------------+
-        |                  |
-        |                  v
-        |   +-----------------------------------------+
-        |   |  Gradient transform                     |
-        |   |   'ste'           : x + sg(q - x)       |
-        |   |   'rotation'      : R(x) * scale        |
-        |   |   'reflection'    : Ref(x) * scale      |
-        |   |   'no_grad_scale' : R(x), scale w/ grad |
-        |   +-----------------------------------------+
-        |                  |
-        |                  v   q_out (N, H, D_h)
-        |                  |
-        |   +-----------------------------------------+
-        |   |  Aux losses (training only)             |
-        |   |    commitment : ||x - sg(q)||^2         |
-        |   |    codebook   : ||sg(x) - q||^2         |
-        |   |                (skipped when use_ema)   |
-        |   |    diversity  : -H(p_avg)               |
-        |   |    orthogonal : ||E E^T - I||^2         |
-        |   +-----------------------------------------+
-        |                  |
-        |                  v
-        |   +-----------------------------------------+
-        |   |  EMA + dead-code (training, optional)   |
-        |   |    cluster_size  <- decay-EMA           |
-        |   |    embed_avg     <- decay-EMA           |
-        |   |    reinit codes with hit < tau          |
-        |   +-----------------------------------------+
-        |                  |
-        v                  v
-    indices (B, ...)   reshape -> (B, ..., D)   output
+    ┌────────────────────────────────────────┐
+    │  Input z_e [B, ..., D]                 │
+    └──────────────┬─────────────────────────┘
+                   ▼
+    ┌────────────────────────────────────────┐
+    │  Reshape → [N, D]  → split into heads  │
+    │  flat: [N, H, D_h]   D_h = D / H       │
+    └──────────────┬─────────────────────────┘
+                   ▼
+    ┌────────────────────────────────────────┐
+    │  Codebook lookup  E: [H, K, D_h]       │
+    │    'euclidean': k* = argmin ||z - e||  │
+    │    'cosine'   : k* = argmax <ẑ, ê>     │
+    └──────────────┬─────────────────────────┘
+                   ▼
+    ┌────────────────────────────────────────┐
+    │  Gradient transform                    │
+    │    'ste'          : z_e + sg(z_q - z_e)│
+    │    'rotation'     : R(z_e) * scale     │
+    │    'reflection'   : Ref(z_e) * scale   │
+    │    'no_grad_scale': R(z_e)             │
+    └──────────────┬─────────────────────────┘
+                   ▼
+    ┌────────────────────────────────────────┐
+    │  Aux losses (training only)            │
+    │    commitment : ||z_e - sg(z_q)||²     │
+    │    codebook   : ||sg(z_e) - z_q||²     │
+    │                  (skipped if use_ema)  │
+    │    diversity  : -H(p_avg)              │
+    │    orthogonal : ||E Eᵀ - I||²          │
+    └──────────────┬─────────────────────────┘
+                   ▼
+    ┌────────────────────────────────────────┐
+    │  EMA + dead-code (training, optional)  │
+    │    cluster_size ← decay·EMA            │
+    │    embed_avg    ← decay·EMA            │
+    │    reinit codes with hits < τ          │
+    └──────────────┬─────────────────────────┘
+                   ▼
+    ┌────────────────────────────────────────┐
+    │  Reshape to [B, ..., D]                │
+    └────────────────────────────────────────┘
 
 ``sg`` denotes ``stop_gradient``. Very-efficient rotation form:
 
-::
+.. code-block:: text
 
-    u_x = sg(x / ||x||);  u_q = sg(q / ||q||)
-    w   = sg((u_x + u_q) / ||u_x + u_q||)
-    R(x) = x - 2 (x . w) w + 2 (x . u_x) u_q
-    scale = sg(||q|| / ||x||)         # 'rotation' mode
-    quantized = R(x) * scale
+    û_x = sg(z_e / ||z_e||);    û_q = sg(z_q / ||z_q||)
+    w   = sg((û_x + û_q) / ||û_x + û_q||)
+    R(z_e) = z_e - 2 (z_e · w) w + 2 (z_e · û_x) û_q
+    scale  = sg(||z_q|| / ||z_e||)            # 'rotation' mode
+    quantized = R(z_e) * scale
 
-``'reflection'`` drops the ``+2(x . u_x) u_q`` term. ``'no_grad_scale'`` keeps
-``scale`` differentiable.
+``'reflection'`` drops the ``+ 2 (z_e · û_x) û_q`` term.
+``'no_grad_scale'`` keeps ``scale`` differentiable.
 
 Beyond the rotation gradient, this implementation is a strict superset of the
 existing ``VectorQuantizer`` adding:

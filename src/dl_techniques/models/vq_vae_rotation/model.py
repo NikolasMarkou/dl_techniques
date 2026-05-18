@@ -12,69 +12,50 @@ encoder/decoder. Two construction paths:
    the chosen norm type, hidden channel width, downsample factor, and residual
    block count.
 
-Architecture
-------------
+**Architecture Overview:**
 
-::
+.. code-block:: text
 
-    Input image x : (B, H, W, C_in)
-        |
-        v
-    +----------------------------------------------------------+
-    |  Encoder  (BYO model  OR  auto-built Conv stack)         |
-    |                                                          |
-    |    auto-build path (n_down = log2(downsample_factor)):   |
-    |                                                          |
-    |    +---- Conv2D(hidden, 4, stride=2) ----+               |
-    |    |  x n_down                           |               |
-    |    |  Norm  <- create_normalization_layer(norm_type)     |
-    |    |  Activation(swish)                  |               |
-    |    +-------------------------------------+               |
-    |                                                          |
-    |    +---- ResBlock x num_res_blocks ----+                 |
-    |    |  Conv -> Norm -> swish ->         |                 |
-    |    |  Conv -> Norm -> + skip           |                 |
-    |    +-----------------------------------+                 |
-    |                                                          |
-    |    Conv2D(embedding_dim, 1, 1)        (to codebook dim)  |
-    +----------------------------------------------------------+
-        |
-        v   z_e : (B, H/f, W/f, embedding_dim)
-    +----------------------------------------------------------+
-    |  VectorQuantizerRotationTrick                            |
-    |    gradient_mode in                                      |
-    |        { 'rotation', 'reflection',                       |
-    |          'no_grad_scale', 'ste' }                        |
-    |    distance_mode in { 'euclidean', 'cosine' }            |
-    |    num_heads, use_ema, kmeans_init, dead_code_reinit,    |
-    |    diversity / orthogonal regularisers                   |
-    |    -> aux losses added via add_loss()                    |
-    +----------------------------------------------------------+
-        |
-        v   z_q : (B, H/f, W/f, embedding_dim)
-    +----------------------------------------------------------+
-    |  Decoder  (BYO model  OR  auto-built Conv stack)         |
-    |                                                          |
-    |    auto-build path (mirror of encoder):                  |
-    |                                                          |
-    |    Conv2D(hidden, 1, 1)                                  |
-    |    ResBlock x num_res_blocks                             |
-    |    +---- Conv2DTranspose(hidden, 4, s=2) --+             |
-    |    |  x n_down                             |             |
-    |    |  Norm  <- create_normalization_layer  |             |
-    |    |  Activation(swish)                    |             |
-    |    +---------------------------------------+             |
-    |    Conv2D(C_in, 3, 1, padding=same)                      |
-    +----------------------------------------------------------+
-        |
-        v
-    Output x_rec : (B, H, W, C_in)
-
-Training step combines:
-
-::
-
-    total_loss = reconstruction_loss(x, x_rec) + sum(layer.losses)
+    ┌────────────────────────────────────────┐
+    │  Input image x [B, H, W, C_in]         │
+    └──────────────┬─────────────────────────┘
+                   ▼
+    ┌────────────────────────────────────────┐
+    │  Encoder  (BYO  OR  auto-built)        │
+    │  ─ Conv2D(hidden, 4, s=2) × n_down     │
+    │    + Norm (create_normalization_layer) │
+    │    + swish                             │
+    │  ─ ResBlock × num_res_blocks           │
+    │  ─ Conv2D(embedding_dim, 1, 1)         │
+    └──────────────┬─────────────────────────┘
+                   ▼  z_e [B, H/f, W/f, D]
+    ┌────────────────────────────────────────┐
+    │  VectorQuantizerRotationTrick          │
+    │    gradient_mode ∈                     │
+    │      {rotation, reflection,            │
+    │       no_grad_scale, ste}              │
+    │    distance_mode ∈ {euclidean, cosine} │
+    │    num_heads / use_ema / kmeans_init / │
+    │    dead_code_reinit / diversity / orth │
+    │    → aux losses via add_loss()         │
+    └──────────────┬─────────────────────────┘
+                   ▼  z_q [B, H/f, W/f, D]
+    ┌────────────────────────────────────────┐
+    │  Decoder  (BYO  OR  auto-built)        │
+    │  ─ Conv2D(hidden, 1, 1)                │
+    │  ─ ResBlock × num_res_blocks           │
+    │  ─ Conv2DTranspose(hidden, 4, s=2)     │
+    │    × n_down                            │
+    │    + Norm (create_normalization_layer) │
+    │    + swish                             │
+    │  ─ Conv2D(C_in, 3, 1, padding=same)    │
+    └──────────────┬─────────────────────────┘
+                   ▼
+    ┌────────────────────────────────────────┐
+    │  Output x_rec [B, H, W, C_in]          │
+    │  total_loss = recon(x, x_rec)          │
+    │               + sum(layer.losses)      │
+    └────────────────────────────────────────┘
 
 References:
     - Fifty, C., Junkins, R., Duan, D., et al. (2025). Restructuring Vector
