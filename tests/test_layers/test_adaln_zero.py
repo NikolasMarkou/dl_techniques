@@ -118,3 +118,40 @@ class TestAdaLNZero:
             f"Causal mask violation: earlier tokens changed by {diff} when "
             f"last token was perturbed."
         )
+
+
+class TestFactorySwap:
+    """Verify that factory-swapped sublayers build and forward-pass correctly."""
+
+    def test_swap_normalization_to_rms_norm(self, xc):
+        x, c = xc
+        block = AdaLNZeroConditionalBlock(
+            dim=DIM, num_heads=HEADS, dim_head=DIM_HEAD, mlp_dim=MLP_DIM,
+            normalization_type="rms_norm",
+            normalization_args={"use_scale": False, "epsilon": 1e-6},
+        )
+        y = block([x, c], training=False)
+        assert tuple(y.shape) == (B, T, DIM)
+        # Identity-at-init still holds with swapped norm (AdaLN zero-init is
+        # what enforces identity; the norm choice is irrelevant as long as
+        # affine is disabled).
+        y_np = ops.convert_to_numpy(y)
+        diff = np.max(np.abs(y_np - x))
+        assert diff < 1e-5, (
+            f"AdaLN-zero identity-at-init violated with rms_norm swap: "
+            f"max|y - x| = {diff}"
+        )
+
+    def test_swap_ffn_to_swiglu(self, xc):
+        x, c = xc
+        block = AdaLNZeroConditionalBlock(
+            dim=DIM, num_heads=HEADS, dim_head=DIM_HEAD, mlp_dim=MLP_DIM,
+            ffn_type="swiglu",
+            ffn_args={
+                "output_dim": DIM,
+                "ffn_expansion_factor": 2,
+                "ffn_multiple_of": 16,
+            },
+        )
+        y = block([x, c], training=False)
+        assert tuple(y.shape) == (B, T, DIM)
