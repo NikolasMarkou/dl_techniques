@@ -39,6 +39,7 @@ from .anchor_attention import AnchorAttention
 from .capsule_routing_attention import CapsuleRoutingSelfAttention
 from .fnet_fourier_transform import FNetFourierTransform
 from .hopfield_attention import HopfieldAttention
+from .lighthouse_attention import LighthouseAttention
 from .perceiver_attention import PerceiverAttention
 
 # Layers available for direct instantiation (not yet in factory registry)
@@ -79,6 +80,7 @@ __all__ = [
     "CapsuleRoutingSelfAttention",
     "FNetFourierTransform",
     "HopfieldAttention",
+    "LighthouseAttention",
     "PerceiverAttention",
 
     # Direct Instantiation Only

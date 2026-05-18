@@ -6,7 +6,7 @@ with unified interfaces, type safety, parameter validation, and detailed documen
 This factory enables seamless integration and experimentation with different attention
 types across vision_heads, NLP, and multi-modal architectures.
 
-The factory supports twenty-two different attention mechanisms, from standard multi-head attention
+The factory supports twenty-three different attention mechanisms, from standard multi-head attention
 to specialized variants like differential attention, mobile-optimized MQA, and hierarchical
 anchor attention. Each layer is fully documented with use cases, parameter requirements,
 and architectural considerations.
@@ -37,6 +37,7 @@ from .differential_attention import DifferentialMultiHeadAttention
 from .fnet_fourier_transform import FNetFourierTransform
 from .group_query_attention import GroupedQueryAttention
 from .hopfield_attention import HopfieldAttention
+from .lighthouse_attention import LighthouseAttention
 from .mobile_mqa import MobileMQA
 from .multi_head_attention import MultiHeadAttention
 from .multi_head_cross_attention import MultiHeadCrossAttention
@@ -64,6 +65,7 @@ AttentionType = Literal[
     'fnet',
     'group_query',
     'hopfield',
+    'lighthouse',
     'mobile_mqa',
     'multi_head',
     'multi_head_cross',
@@ -313,6 +315,44 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         ),
         'complexity': 'O(n²) per update step, configurable iteration count',
         'paper': 'Hopfield Networks is All You Need'
+    },
+
+    'lighthouse': {
+        'class': LighthouseAttention,
+        'description': (
+            'Coarse-to-fine pyramid attention with top-K causal SDPA. Builds a '
+            'multi-level mean-pooled Q/K/V pyramid (branch factor p, L levels), '
+            'scores entries with a per-head L2-norm scorer (joint QK/KQ max), '
+            'selects top-K pyramid entries per batch (always retaining the '
+            'coarsest level), runs a single causal SDPA over the gathered '
+            'sub-sequence, and scatters results back via deterministic '
+            'segment_sum. A full_attention toggle bypasses the pyramid for '
+            'Stage-2 SDPA-resume training.'
+        ),
+        'required_params': ['dim', 'num_heads'],
+        'optional_params': {
+            'head_dim': None,
+            'num_levels': 3,
+            'pooling_factor': 4,
+            'top_k': 1536,
+            'scorer': 'norm',
+            'full_attention': False,
+            'normalization_type': 'rms_norm',
+            'normalization_kwargs': None,
+            'use_bias': False,
+            'kernel_initializer': 'glorot_uniform',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'dropout_rate': 0.0,
+        },
+        'use_case': (
+            'Long-context causal language modeling where dense O(N^2) attention '
+            'is too expensive but exact attention is preferred over linearized '
+            'approximations. Requires statically known sequence length N '
+            'divisible by pooling_factor ** (num_levels - 1).'
+        ),
+        'complexity': 'O(N + K log K) per batch element with K << N',
+        'paper': 'Lighthouse Attention (arXiv:2605.06554v1)'
     },
 
     'mobile_mqa': {

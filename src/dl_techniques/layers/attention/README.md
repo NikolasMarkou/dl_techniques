@@ -4,7 +4,7 @@ The `dl_techniques.layers.attention` module provides a comprehensive collection 
 
 ## Overview
 
-This module includes twenty-six different attention layer types, ranging from standard multi-head attention to specialized variants for vision, efficiency, and advanced modeling. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these attention mechanisms into your models.
+This module includes twenty-seven different attention layer types, ranging from standard multi-head attention to specialized variants for vision, efficiency, and advanced modeling. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these attention mechanisms into your models.
 
 ## Available Attention Types
 
@@ -21,6 +21,7 @@ The following layers are supported by the factory system with automated paramete
 | `gated` | `GatedAttention` | Attention with normalization, partial RoPE, and output gating. | High-performance transformers requiring stability and expressiveness. | `(batch, seq_len, dim)` |
 | `group_query` | `GroupedQueryAttention` | GQA with shared K/V heads for efficiency. | Large language models where K/V cache size is a bottleneck. | `(batch, seq_len, dim)` |
 | `hopfield` | `HopfieldAttention` | Modern Hopfield Network for pattern retrieval. | Associative memory tasks; mimics standard attention with `update_steps_max=0`. | `(batch, seq_len, dim)` or `[query, key, value]` |
+| `lighthouse` | `LighthouseAttention` | Coarse-to-fine pyramid + top-K causal SDPA with scatter-back via segment_sum. | Long-context causal language modeling needing exact attention with sub-quadratic cost. | `(batch, seq_len, dim)` |
 | `mobile_mqa` | `MobileMQA` | Mobile-optimized Multi-Query Attention for vision. | Efficient attention in vision models for mobile and edge devices. | `(batch, H, W, dim)` |
 | `multi_head` | `MultiHeadAttention` | Standard Multi-Head Self-Attention (wrapper for cross-attention). | General-purpose self-attention in vision and sequence models. | `(batch, seq_len, dim)` |
 | `multi_head_cross` | `MultiHeadCrossAttention` | Unified layer for self- and cross-attention with adaptive softmax. | Core component for encoder-decoders or advanced custom attention. | `query: (batch, q_len, dim)`, `kv: (batch, kv_len, dim)` |
@@ -212,6 +213,29 @@ attn = create_attention_layer(
     num_heads=8,
     key_dim=64,
     update_steps_max=3
+)
+```
+
+### `lighthouse`
+**Required:** `dim`, `num_heads`
+**Optional:** `head_dim` (default: None), `num_levels` (default: 3), `pooling_factor` (default: 4), `top_k` (default: 1536), `full_attention` (default: False), `normalization_type` (default: 'rms_norm')
+```python
+# Pyramid path: 3 levels, branch factor 4, top-1536 entries
+attn = create_attention_layer(
+    'lighthouse',
+    dim=768,
+    num_heads=12,
+    num_levels=3,
+    pooling_factor=4,
+    top_k=1536
+)
+
+# Stage-2 SDPA-resume: bypasses pyramid for plain causal MHA
+attn_full = create_attention_layer(
+    'lighthouse',
+    dim=768,
+    num_heads=12,
+    full_attention=True
 )
 ```
 
