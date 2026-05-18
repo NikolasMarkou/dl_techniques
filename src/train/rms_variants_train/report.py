@@ -99,6 +99,17 @@ VARIANT_CRITERIA: Dict[str, Dict[str, Any]] = {
         "applicable_probes": ("grad_norm",),
         "off_label_contexts": frozenset(),
     },
+    "zero_centered_adaptive_band_rms_norm": {
+        # Combines the zero-mean-output claim (zero_centered_*) with the
+        # per-sample adaptive band-scaling claim (adaptive_band_rms). All
+        # three relevant probes apply.
+        "applicable_probes": (
+            "grad_norm",
+            "act_mean_abs",
+            "act_per_sample_rms_max",
+        ),
+        "off_label_contexts": frozenset(),
+    },
 }
 
 
