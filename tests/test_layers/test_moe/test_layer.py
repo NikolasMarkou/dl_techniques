@@ -572,20 +572,6 @@ class TestMixtureOfExperts:
         # Gating network should be built
         assert layer.gating_network.built
 
-    def test_config_capacity_factors(self, base_moe_config, sample_input_2d):
-        """Test that capacity factor config values are stored correctly."""
-        config = MoEConfig(**base_moe_config)
-        config.train_capacity_factor = 2.0
-        config.eval_capacity_factor = 1.0
-        layer = MixtureOfExperts(config=config)
-
-        # Build layer
-        _ = layer(sample_input_2d)
-
-        # Check config values are accessible
-        assert layer.config.train_capacity_factor == 2.0
-        assert layer.config.eval_capacity_factor == 1.0
-
     def test_weight_shape_consistency(self, base_moe_config, sample_input_2d):
         """Test that weight shapes are consistent across experts."""
         config = MoEConfig(**base_moe_config)
@@ -636,17 +622,6 @@ class TestMoEConfigurations:
         assert config.capacity_factor == 1.25
         assert config.add_noise is True
         assert config.aux_loss_weight == 0.01
-
-    def test_moe_config_derived_parameters(self):
-        """Test MoEConfig derived parameter computation."""
-        config = MoEConfig(
-            num_experts=8,
-            gating_config=GatingConfig(capacity_factor=2.0)
-        )
-
-        # Should compute derived parameters
-        assert config.train_capacity_factor == 2.0  # Should match gating capacity
-        assert config.eval_capacity_factor == 1.6  # Should be 0.8 * capacity_factor
 
     def test_config_serialization(self):
         """Test configuration serialization and deserialization."""
@@ -873,11 +848,24 @@ class TestGatingNetworks:
 
         # Check SoftMoE-specific info
         assert 'expert_inputs' in info
-        assert 'phi_weights' in info
+        assert 'dispatch_weights' in info
+        assert 'combine_weights' in info
         assert 'soft_slots' in info
 
         expert_inputs = info['expert_inputs']
         assert expert_inputs.shape == (4, 6, 4 * 256)  # (batch, experts, slots * hidden)
+
+        # Dispatch weights sum to 1 over the sequence axis for each (expert, slot).
+        dispatch_sum = ops.convert_to_numpy(ops.sum(info['dispatch_weights'], axis=1))
+        np.testing.assert_allclose(dispatch_sum, np.ones_like(dispatch_sum), atol=1e-5)
+
+        # Combine weights sum to 1 over (experts * slots) for each token.
+        combine_sum = ops.convert_to_numpy(ops.sum(info['combine_weights'], axis=(-2, -1)))
+        np.testing.assert_allclose(combine_sum, np.ones_like(combine_sum), atol=1e-5)
+
+        # Marginalized expert_weights are now non-uniform (no longer 1/N).
+        ew = ops.convert_to_numpy(weights)
+        assert ew.std() > 1e-4, "Expected non-uniform per-expert weights after A2 fix"
 
     def test_gating_factory(self, sample_input):
         """Test gating factory function."""
@@ -1079,28 +1067,6 @@ class TestMoEPerformance:
             err_msg="Expected deterministic inference behavior"
         )
 
-    def test_config_capacity_factors_stored(self):
-        """Test that capacity factor config values are stored correctly."""
-        config = MoEConfig(
-            num_experts=2,
-            expert_config=ExpertConfig(
-                ffn_config={'type': 'mlp', 'hidden_dim': 64, 'output_dim': 32}
-            ),
-            gating_config=GatingConfig(top_k=1, capacity_factor=1.0),
-            train_capacity_factor=2.0,
-            eval_capacity_factor=1.0
-        )
-
-        layer = MixtureOfExperts(config=config)
-        sample_input = keras.random.normal(shape=(8, 64))
-
-        # Build layer
-        _ = layer(sample_input)
-
-        # Check config round-trip
-        assert layer.config.train_capacity_factor == 2.0
-        assert layer.config.eval_capacity_factor == 1.0
-
     def test_gradient_flow_through_routing(self):
         """Test that gradients flow through the routing mechanism."""
         config = MoEConfig(
@@ -1177,6 +1143,134 @@ def test_moe_debug_helper():
     sample_input = keras.random.normal(shape=(4, 64))
 
     debug_moe_serialization(config, sample_input)
+
+
+class TestReviewFixes:
+    """Tests covering the May-2026 MoE review fixes (A1-A5, B2, B4)."""
+
+    def test_cosine_temperature_divides_softmax(self):
+        """Larger ``temperature`` should produce a flatter softmax (A3)."""
+        rng = np.random.default_rng(0)
+        x = ops.convert_to_tensor(rng.standard_normal((32, 64)).astype(np.float32))
+
+        # Same kernel init seeds so the only varying factor is temperature.
+        keras.utils.set_random_seed(123)
+        low_t = CosineGating(num_experts=8, embedding_dim=32, top_k=8,
+                              temperature=0.5, learnable_temperature=False)
+        keras.utils.set_random_seed(123)
+        high_t = CosineGating(num_experts=8, embedding_dim=32, top_k=8,
+                               temperature=4.0, learnable_temperature=False)
+
+        w_low, _, _ = low_t(x, training=False)
+        w_high, _, _ = high_t(x, training=False)
+
+        # Entropy of weights: higher temperature -> flatter -> larger entropy.
+        def entropy(p):
+            p = ops.convert_to_numpy(p)
+            p = np.clip(p, 1e-12, 1.0)
+            return float((-p * np.log(p)).sum(axis=-1).mean())
+
+        assert entropy(w_high) > entropy(w_low) + 1e-3, (
+            f"Expected higher temperature -> larger entropy "
+            f"(low_t={entropy(w_low):.4f}, high_t={entropy(w_high):.4f})"
+        )
+
+    def test_softmoe_dispatch_and_combine_separate(self):
+        """Dispatch and combine softmaxes operate over different axes (A1)."""
+        x = keras.random.normal(shape=(2, 12, 32))
+        gating = SoftMoEGating(num_experts=4, num_slots=3)
+        _, _, info = gating(x, training=False)
+
+        dispatch = ops.convert_to_numpy(info['dispatch_weights'])  # [b, s, e, l]
+        combine = ops.convert_to_numpy(info['combine_weights'])    # [b, s, e, l]
+
+        # Dispatch sums to 1 over seq axis (axis=1) for each (expert, slot).
+        np.testing.assert_allclose(dispatch.sum(axis=1),
+                                    np.ones((2, 4, 3)), atol=1e-5)
+        # Combine sums to 1 over (experts * slots) for each token.
+        np.testing.assert_allclose(combine.sum(axis=(-2, -1)),
+                                    np.ones((2, 12)), atol=1e-5)
+        # Distinct tensors: with random init, the two softmaxes shouldn't match.
+        assert not np.allclose(dispatch, combine, atol=1e-4)
+
+    def test_capacity_factor_fields_removed_from_config(self):
+        """B4: train/eval_capacity_factor are gone; from_dict ignores them."""
+        cfg = MoEConfig(num_experts=2)
+        assert not hasattr(cfg, 'train_capacity_factor')
+        assert not hasattr(cfg, 'eval_capacity_factor')
+
+        # Round-trip with legacy keys still works (they're silently dropped).
+        legacy = cfg.to_dict()
+        legacy['train_capacity_factor'] = 2.0
+        legacy['eval_capacity_factor'] = 1.0
+        restored = MoEConfig.from_dict(legacy)
+        assert restored.num_experts == 2
+
+    def test_gating_pre_norm_via_factory(self):
+        """B2: GatingConfig.norm_type wires pre-gating norm via the factory."""
+        cfg = MoEConfig(
+            num_experts=2,
+            expert_config=ExpertConfig(
+                ffn_config={'type': 'mlp', 'hidden_dim': 32, 'output_dim': 16}
+            ),
+            gating_config=GatingConfig(
+                top_k=1, gating_type='linear',
+                norm_type='rms_norm', norm_config={'epsilon': 1e-5},
+            ),
+        )
+        layer = MixtureOfExperts(config=cfg)
+        x = keras.random.normal(shape=(4, 16))
+        y = layer(x, training=False)
+        assert y.shape == (4, 16)
+        assert layer.gating_network.pre_norm is not None
+
+    def test_expert_pre_norm_via_factory(self):
+        """B2: ExpertConfig.norm_type wires per-expert pre-norm via the factory."""
+        cfg = MoEConfig(
+            num_experts=2,
+            expert_config=ExpertConfig(
+                ffn_config={'type': 'mlp', 'hidden_dim': 32, 'output_dim': 16},
+                norm_type='layer_norm',
+                pre_norm=True,
+                post_norm=False,
+            ),
+            gating_config=GatingConfig(top_k=1),
+        )
+        layer = MixtureOfExperts(config=cfg)
+        x = keras.random.normal(shape=(4, 16))
+        _ = layer(x, training=False)
+        for expert in layer.experts:
+            assert expert.pre_norm is not None
+            assert expert.post_norm is None
+
+    def test_norm_factory_serialization_roundtrip(self):
+        """Save/load round-trip with pre-gating + per-expert norms (B2)."""
+        cfg = MoEConfig(
+            num_experts=2,
+            expert_config=ExpertConfig(
+                ffn_config={'type': 'mlp', 'hidden_dim': 32, 'output_dim': 16},
+                norm_type='rms_norm',
+            ),
+            gating_config=GatingConfig(top_k=1, norm_type='layer_norm'),
+        )
+        inputs = keras.Input(shape=(16,))
+        outputs = MixtureOfExperts(config=cfg)(inputs)
+        model = keras.Model(inputs, outputs)
+
+        x = keras.random.normal(shape=(4, 16))
+        y_ref = model(x, training=False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'moe_norms.keras')
+            model.save(path)
+            restored = keras.models.load_model(path)
+
+        y_new = restored(x, training=False)
+        np.testing.assert_allclose(
+            ops.convert_to_numpy(y_ref),
+            ops.convert_to_numpy(y_new),
+            atol=1e-5,
+        )
 
 
 # Run tests with: pytest test_mixture_of_experts.py -v

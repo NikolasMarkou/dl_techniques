@@ -16,6 +16,7 @@ from typing import Optional, Tuple, Any, Dict
 
 from dl_techniques.utils.logger import logger
 from ..ffn import create_ffn_from_config, validate_ffn_config
+from ..norms import create_normalization_layer
 
 # ---------------------------------------------------------------------
 
@@ -112,15 +113,39 @@ class FFNExpert(BaseExpert):
         ``create_ffn_from_config()``. Must include ``'type'`` and appropriate
         parameters for the specified FFN type.
     :type ffn_config: Dict[str, Any]
+    :param norm_type: Optional normalization type to apply pre- and/or
+        post-FFN, instantiated through ``create_normalization_layer``. If
+        ``None`` (default), no extra norms are added.
+    :type norm_type: Optional[str]
+    :param norm_config: Extra kwargs forwarded to ``create_normalization_layer``.
+    :type norm_config: Optional[Dict[str, Any]]
+    :param pre_norm: If True (default when ``norm_type`` is set), wrap the FFN
+        with a pre-normalization layer.
+    :type pre_norm: bool
+    :param post_norm: If True, append a post-normalization layer after the FFN.
+        Defaults to False. Only valid when the FFN preserves the last-dim size.
+    :type post_norm: bool
     :param kwargs: Additional keyword arguments for the base Layer class.
     :type kwargs: Any
     """
 
-    def __init__(self, ffn_config: Dict[str, Any], **kwargs: Any) -> None:
+    def __init__(
+            self,
+            ffn_config: Dict[str, Any],
+            norm_type: Optional[str] = None,
+            norm_config: Optional[Dict[str, Any]] = None,
+            pre_norm: bool = True,
+            post_norm: bool = False,
+            **kwargs: Any,
+    ) -> None:
         """Initialize the FFN expert using the FFN factory system."""
         super().__init__(**kwargs)
 
         self.ffn_config = ffn_config
+        self.norm_type = norm_type
+        self.norm_config = dict(norm_config) if norm_config else {}
+        self.pre_norm_flag = pre_norm
+        self.post_norm_flag = post_norm
 
         # Validate FFN configuration using the factory system
         if 'type' not in ffn_config:
@@ -147,42 +172,61 @@ class FFNExpert(BaseExpert):
                 f"Error: {e}"
             )
 
+        # Optional pre/post normalization via factory.
+        if self.norm_type is not None and self.pre_norm_flag:
+            self.pre_norm = create_normalization_layer(
+                self.norm_type, name='pre_norm', **self.norm_config
+            )
+        else:
+            self.pre_norm = None
+
+        if self.norm_type is not None and self.post_norm_flag:
+            self.post_norm = create_normalization_layer(
+                self.norm_type, name='post_norm', **self.norm_config
+            )
+        else:
+            self.post_norm = None
+
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """BUILD the FFN expert sub-layers explicitly."""
         self._built_input_shape = input_shape
 
+        if self.pre_norm is not None:
+            self.pre_norm.build(input_shape)
+
         # BUILD the FFN block (sub-layer created in __init__)
         self.ffn_block.build(input_shape)
+
+        if self.post_norm is not None:
+            ffn_out_shape = self.ffn_block.compute_output_shape(input_shape)
+            self.post_norm.build(ffn_out_shape)
+
         super().build(input_shape)
 
     def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
         """Forward pass through the FFN expert."""
-        return self.ffn_block(inputs, training=training)
+        x = inputs
+        if self.pre_norm is not None:
+            x = self.pre_norm(x, training=training)
+        x = self.ffn_block(x, training=training)
+        if self.post_norm is not None:
+            x = self.post_norm(x, training=training)
+        return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape by delegating to the FFN block."""
-        if self.ffn_block is None:
-            # If not built yet, estimate based on common FFN patterns
-            if 'output_dim' in self.ffn_config:
-                output_shape = list(input_shape)
-                output_shape[-1] = self.ffn_config['output_dim']
-                return tuple(output_shape)
-            elif 'd_model' in self.ffn_config:
-                # SwiGLU case
-                output_shape = list(input_shape)
-                output_shape[-1] = self.ffn_config['d_model']
-                return tuple(output_shape)
-            else:
-                # Default: same as input
-                return input_shape
-
+        assert self.ffn_block is not None, "compute_output_shape called before build/init"
         return self.ffn_block.compute_output_shape(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
         """Get configuration for serialization."""
         config = super().get_config()
         config.update({
-            'ffn_config': self.ffn_config
+            'ffn_config': self.ffn_config,
+            'norm_type': self.norm_type,
+            'norm_config': self.norm_config,
+            'pre_norm': self.pre_norm_flag,
+            'post_norm': self.post_norm_flag,
         })
         return config
 

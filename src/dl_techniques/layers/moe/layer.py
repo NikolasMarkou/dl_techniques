@@ -30,9 +30,16 @@ class MixtureOfExperts(keras.layers.Layer):
 
     Implements a complete MoE mechanism that routes inputs to a subset of FFN
     expert networks based on learned gating functions. The MoE layer replaces
-    dense FFN blocks with a sparse alternative where only top-k experts are
-    activated per token, giving ``O(k/N)`` computational cost relative to running
-    all *N* experts while maintaining full model capacity.
+    dense FFN blocks with an expert-conditioned alternative where only top-k
+    experts have non-zero contribution per token.
+
+    .. important::
+       **Computation model.** The current hard-routing kernel runs *all*
+       experts on *all* tokens and masks contributions using the top-k routing
+       weights. This is O(N) in FLOPs (not O(k/N)) and is chosen for
+       graph-mode friendliness — no scatter/gather. The sparsity is realized
+       in the *gradient pattern* and *expert specialization*, not in FLOPs.
+       A capacity-based sparse dispatch is planned as a follow-up.
 
     **Architecture Overview:**
 
@@ -94,12 +101,19 @@ class MixtureOfExperts(keras.layers.Layer):
         for i in range(self.num_experts):
             expert = FFNExpert(
                 ffn_config=self.expert_config.ffn_config.copy(),
+                norm_type=self.expert_config.norm_type,
+                norm_config=dict(self.expert_config.norm_config),
+                pre_norm=self.expert_config.pre_norm,
+                post_norm=self.expert_config.post_norm,
                 name=f'expert_{i}'
             )
             self.experts.append(expert)
 
         # Create gating network using factory — only pass gating-relevant keys
-        gating_kwargs = {}
+        gating_kwargs: Dict[str, Any] = {
+            'norm_type': self.gating_config.norm_type,
+            'norm_config': dict(self.gating_config.norm_config),
+        }
         gating_type = self.gating_config.gating_type
 
         if gating_type == 'linear':
@@ -220,7 +234,7 @@ class MixtureOfExperts(keras.layers.Layer):
             outputs = self._process_softmoe(
                 inputs=inputs,
                 expert_inputs=gating_info['expert_inputs'],
-                phi_weights=gating_info['phi_weights'],
+                combine_weights=gating_info['combine_weights'],
                 training=training
             )
         else:
@@ -312,14 +326,10 @@ class MixtureOfExperts(keras.layers.Layer):
         # Sum outputs from all experts
         outputs = ops.sum(ops.stack(expert_outputs, axis=0), axis=0)
 
-        # Apply residual connection for unrouted tokens if configured
-        if self.use_residual_connection and self.drop_tokens:
-            # Tokens with zero total weight get the residual input
-            total_weight = ops.sum(weights_flat * expert_assignment, axis=-1, keepdims=True)
-            unrouted_mask = ops.cast(total_weight < 1e-6, outputs.dtype)
-            # Only apply residual if output_dim matches input_dim
-            if output_dim is None or (inputs_flat.shape[-1] is not None and output_dim == inputs_flat.shape[-1]):
-                outputs = outputs + unrouted_mask * inputs_flat
+        # NOTE: residual-for-dropped-tokens is intentionally not applied. The
+        # current kernel is dense (all experts process all tokens) so no
+        # tokens are ever dropped. ``drop_tokens`` and ``use_residual_connection``
+        # are reserved for a future capacity-based sparse dispatch.
 
         # Reshape back to original structure
         if input_ndim == 2:
@@ -334,36 +344,31 @@ class MixtureOfExperts(keras.layers.Layer):
             self,
             inputs: keras.KerasTensor,
             expert_inputs: keras.KerasTensor,
-            phi_weights: keras.KerasTensor,
+            combine_weights: keras.KerasTensor,
             training: bool
     ) -> keras.KerasTensor:
         """Process inputs through FFN experts using SoftMoE routing.
 
-        SoftMoE creates soft slots via weighted combinations of input tokens,
-        processes each slot through an expert independently, then combines
-        expert outputs back to the original sequence positions using dispatch
-        weights.
+        Per Puigcerver et al. (2023), SoftMoE uses two softmaxes from the same
+        logits: dispatch weights (softmax over the token axis) build soft
+        slots, and combine weights (softmax over the experts*slots axis per
+        token) combine expert outputs back to token positions.
 
-        expert_inputs shape: [batch, num_experts, num_slots * hidden_dim]
-        phi_weights shape:   [batch, seq_len, num_experts, num_slots]
+        expert_inputs shape:    [batch, num_experts, num_slots * hidden_dim]
+        combine_weights shape:  [batch, seq_len, num_experts, num_slots]
         """
         batch_size = ops.shape(inputs)[0]
-        seq_len = ops.shape(inputs)[1]
         hidden_dim = ops.shape(inputs)[-1]
         num_slots = self.gating_config.num_slots
 
-        # Process each expert on its slots independently
-        # Each expert receives individual slot vectors, not the concatenated version
-        expert_slot_outputs = []  # Will collect [batch, num_slots, output_dim] per expert
+        # Process each expert on its slots independently.
+        expert_slot_outputs = []  # collects [batch, num_slots, output_dim] per expert
 
         for expert_id in range(self.num_experts):
-            # Get this expert's concatenated slot input: [batch, num_slots * hidden_dim]
+            # This expert's concatenated slot input: [batch, num_slots * hidden_dim]
             expert_input = expert_inputs[:, expert_id, :]
-            # Reshape to individual slots: [batch * num_slots, hidden_dim]
             expert_input = ops.reshape(expert_input, (batch_size * num_slots, hidden_dim))
-            # Process through expert
             expert_output = self.experts[expert_id](expert_input, training=training)
-            # Reshape back: [batch, num_slots, output_dim]
             output_dim = ops.shape(expert_output)[-1]
             expert_output = ops.reshape(expert_output, (batch_size, num_slots, output_dim))
             expert_slot_outputs.append(expert_output)
@@ -371,21 +376,14 @@ class MixtureOfExperts(keras.layers.Layer):
         # Stack: [batch, num_experts, num_slots, output_dim]
         all_expert_outputs = ops.stack(expert_slot_outputs, axis=1)
 
-        # Combine expert slot outputs back to sequence positions using dispatch weights
-        # phi_weights: [batch, seq_len, num_experts, num_slots]
-        # all_expert_outputs: [batch, num_experts, num_slots, output_dim]
-
-        # Expand phi_weights for matmul: [batch, seq_len, num_experts, num_slots, 1]
-        phi_expanded = ops.expand_dims(phi_weights, axis=-1)
-
-        # Expand expert outputs: [batch, 1, num_experts, num_slots, output_dim]
-        outputs_expanded = ops.expand_dims(all_expert_outputs, axis=1)
-
-        # Weighted combination: [batch, seq_len, num_experts, num_slots, output_dim]
-        weighted = phi_expanded * outputs_expanded
-
-        # Sum over experts and slots: [batch, seq_len, output_dim]
-        outputs = ops.sum(weighted, axis=(2, 3))
+        # Combine expert-slot outputs back to token positions using
+        # combine_weights (softmax over experts*slots per token).
+        # combine_weights:    [b, s, e, l]
+        # all_expert_outputs: [b,    e, l, h']
+        combine_expanded = ops.expand_dims(combine_weights, axis=-1)  # [b, s, e, l, 1]
+        outputs_expanded = ops.expand_dims(all_expert_outputs, axis=1)  # [b, 1, e, l, h']
+        weighted = combine_expanded * outputs_expanded                  # [b, s, e, l, h']
+        outputs = ops.sum(weighted, axis=(2, 3))                        # [b, s, h']
 
         return outputs
 
@@ -476,26 +474,42 @@ def create_ffn_moe(
     """
 
     # Create expert configuration using FFN factory
-    expert_config = ExpertConfig(ffn_config=ffn_config)
+    expert_kwargs = {
+        k: v
+        for k, v in kwargs.items()
+        if k in {'norm_type', 'norm_config', 'pre_norm', 'post_norm'}
+    }
+    # When forwarded under the expert namespace, rename to avoid collision with
+    # gating's norm_type/norm_config (callers can use ``expert_norm_type`` for
+    # the per-expert norm explicitly).
+    if 'expert_norm_type' in kwargs:
+        expert_kwargs['norm_type'] = kwargs['expert_norm_type']
+    if 'expert_norm_config' in kwargs:
+        expert_kwargs['norm_config'] = kwargs['expert_norm_config']
+    expert_config = ExpertConfig(ffn_config=ffn_config, **expert_kwargs)
 
     # Create gating configuration
     gating_keys = {
         'capacity_factor', 'add_noise', 'noise_std', 'temperature',
         'use_bias', 'embedding_dim', 'learnable_temperature', 'num_slots',
-        'z_loss_weight'
+        'z_loss_weight',
     }
+    gating_init = {k: v for k, v in kwargs.items() if k in gating_keys}
+    # Optional pre-gating norm via dedicated keys to disambiguate from expert norm.
+    if 'gating_norm_type' in kwargs:
+        gating_init['norm_type'] = kwargs['gating_norm_type']
+    if 'gating_norm_config' in kwargs:
+        gating_init['norm_config'] = kwargs['gating_norm_config']
+
     gating_config = GatingConfig(
         gating_type=gating_type,
         top_k=top_k,
         aux_loss_weight=aux_loss_weight,
-        **{k: v for k, v in kwargs.items() if k in gating_keys}
+        **gating_init,
     )
 
     # Create complete MoE configuration
-    moe_keys = {
-        'jitter_noise', 'drop_tokens', 'use_residual_connection',
-        'train_capacity_factor', 'eval_capacity_factor', 'routing_dtype'
-    }
+    moe_keys = {'jitter_noise', 'drop_tokens', 'use_residual_connection', 'routing_dtype'}
     moe_config = MoEConfig(
         num_experts=num_experts,
         expert_config=expert_config,

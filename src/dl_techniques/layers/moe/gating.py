@@ -11,6 +11,16 @@ from abc import ABC, abstractmethod
 from keras import ops, layers, initializers
 from typing import Optional, Union, Tuple, Any, Dict
 
+from ..norms import create_normalization_layer
+
+
+def _mask_neg_inf(dtype: Any) -> float:
+    """Return a dtype-appropriate large-negative value for softmax masking."""
+    dtype_str = str(dtype)
+    if 'float16' in dtype_str or 'bfloat16' in dtype_str:
+        return -1e4
+    return -1e9
+
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
@@ -46,6 +56,8 @@ class BaseGating(layers.Layer, ABC):
     def __init__(
             self,
             num_experts: int,
+            norm_type: Optional[str] = None,
+            norm_config: Optional[Dict[str, Any]] = None,
             name: Optional[str] = None,
             **kwargs: Any
     ) -> None:
@@ -57,6 +69,16 @@ class BaseGating(layers.Layer, ABC):
             raise ValueError(f"num_experts must be positive, got {num_experts}")
 
         self.num_experts = num_experts
+        self.norm_type = norm_type
+        self.norm_config = dict(norm_config) if norm_config else {}
+
+        # Optional pre-gating normalization layer via factory
+        if self.norm_type is not None:
+            self.pre_norm = create_normalization_layer(
+                self.norm_type, name='pre_gate_norm', **self.norm_config
+            )
+        else:
+            self.pre_norm = None
 
     @abstractmethod
     def call(
@@ -81,6 +103,8 @@ class BaseGating(layers.Layer, ABC):
         config = super().get_config()
         config.update({
             'num_experts': self.num_experts,
+            'norm_type': self.norm_type,
+            'norm_config': self.norm_config,
         })
         return config
 
@@ -183,6 +207,9 @@ class LinearGating(BaseGating):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the linear gating layers."""
         # BUILD all sublayers explicitly
+        if self.pre_norm is not None:
+            self.pre_norm.build(input_shape)
+
         self.gate_dense.build(input_shape)
 
         if self.noise_dense is not None:
@@ -197,6 +224,10 @@ class LinearGating(BaseGating):
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor, Dict[str, keras.KerasTensor]]:
         """Forward pass through the linear gating network."""
         original_shape = ops.shape(inputs)
+
+        # Optional pre-gating normalization (operates on full-rank input)
+        if self.pre_norm is not None:
+            inputs = self.pre_norm(inputs, training=training)
 
         # Reshape to 2D for processing if needed
         if len(original_shape) > 2:
@@ -228,11 +259,12 @@ class LinearGating(BaseGating):
             top_k_one_hot = ops.one_hot(top_k_indices, self.num_experts, dtype=gate_logits.dtype)
             mask = ops.sum(top_k_one_hot, axis=-2)
 
-            # Apply mask to logits (set non-selected to -inf)
+            # Apply mask to logits (set non-selected to large-negative)
+            neg_inf = _mask_neg_inf(gate_logits.dtype)
             masked_logits = ops.where(
                 mask > 0,
                 gate_logits,
-                ops.full_like(gate_logits, -1e9)
+                ops.full_like(gate_logits, neg_inf)
             )
             expert_weights = ops.softmax(masked_logits, axis=-1)
             expert_indices = top_k_indices
@@ -268,7 +300,11 @@ class LinearGating(BaseGating):
     def compute_output_shape(
             self,
             input_shape: Tuple[Optional[int], ...]
-    ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...], Dict]:
+    ) -> Tuple[
+        Tuple[Optional[int], ...],
+        Tuple[Optional[int], ...],
+        Dict[str, Tuple[Optional[int], ...]],
+    ]:
         """Compute output shapes for (expert_weights, expert_indices, aux_info)."""
         # expert_weights: same leading dims + num_experts
         weights_shape = tuple(list(input_shape[:-1]) + [self.num_experts])
@@ -300,9 +336,16 @@ class CosineGating(BaseGating):
     Operates in a normalized embedding space, computing cosine similarity
     ``cos(theta) = (x_proj / ||x_proj||) . (e_k / ||e_k||)`` between input
     representations and learnable expert embeddings. The similarity scores
-    are scaled by a (optionally learnable) temperature ``tau`` before top-k
-    selection and softmax normalization. This can provide better domain
-    generalization compared to linear gating.
+    are divided by a (optionally learnable) temperature ``tau`` before top-k
+    selection and softmax normalization (standard softmax-temperature
+    semantics: larger ``tau`` -> flatter distribution). This can provide
+    better domain generalization compared to linear gating.
+
+    .. note::
+       Behavior changed: prior implementations multiplied by ``tau`` (acting
+       as an inverse temperature). The current implementation divides, so
+       checkpoints/configs with the same numeric ``temperature`` will now
+       produce flatter (not sharper) routing distributions.
 
     **Architecture Overview:**
 
@@ -401,6 +444,8 @@ class CosineGating(BaseGating):
             )
 
         # BUILD sublayers explicitly
+        if self.pre_norm is not None:
+            self.pre_norm.build(input_shape)
         self.linear_projection.build(input_shape)
 
         super().build(input_shape)
@@ -411,6 +456,10 @@ class CosineGating(BaseGating):
             training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor, Dict[str, keras.KerasTensor]]:
         """Forward pass through the cosine gating network."""
+        # Optional pre-gating normalization (operates on full-rank input)
+        if self.pre_norm is not None:
+            inputs = self.pre_norm(inputs, training=training)
+
         original_shape = ops.shape(inputs)
 
         # Reshape to 2D for processing if needed
@@ -429,9 +478,10 @@ class CosineGating(BaseGating):
         # Compute cosine similarities
         cosine_similarities = ops.matmul(projected_inputs_norm, expert_embeddings_norm)
 
-        # Apply temperature
+        # Apply temperature (standard softmax-temperature semantics: divide).
+        # Larger ``temperature`` -> flatter distribution.
         temperature_value = self.temperature_param if self.learnable_temperature else self.temperature
-        gate_logits = cosine_similarities * temperature_value
+        gate_logits = cosine_similarities / temperature_value
 
         # Top-k selection
         if self.top_k < self.num_experts:
@@ -442,10 +492,11 @@ class CosineGating(BaseGating):
             mask = ops.sum(top_k_one_hot, axis=-2)
 
             # Apply mask to logits
+            neg_inf = _mask_neg_inf(gate_logits.dtype)
             masked_logits = ops.where(
                 mask > 0,
                 gate_logits,
-                ops.full_like(gate_logits, -1e9)
+                ops.full_like(gate_logits, neg_inf)
             )
             expert_weights = ops.softmax(masked_logits, axis=-1)
             expert_indices = top_k_indices
@@ -482,7 +533,11 @@ class CosineGating(BaseGating):
     def compute_output_shape(
             self,
             input_shape: Tuple[Optional[int], ...]
-    ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...], Dict]:
+    ) -> Tuple[
+        Tuple[Optional[int], ...],
+        Tuple[Optional[int], ...],
+        Dict[str, Tuple[Optional[int], ...]],
+    ]:
         """Compute output shapes for (expert_weights, expert_indices, aux_info)."""
         weights_shape = tuple(list(input_shape[:-1]) + [self.num_experts])
         k = self.top_k if self.top_k < self.num_experts else self.num_experts
@@ -509,11 +564,18 @@ class SoftMoEGating(BaseGating):
     Soft Mixture-of-Experts gating via differentiable slot assignment.
 
     Unlike traditional hard routing, SoftMoE computes weighted combinations
-    of all input tokens to create ``num_slots`` "soft slots" per expert via
-    ``phi_weights = softmax(Dense(x), axis=seq)`` followed by a weighted sum
-    ``slot_k = sum_t(phi_t,k * x_t)``. This avoids token dropping and load
-    balancing issues at the cost of increased computation proportional to
-    ``seq_len * num_experts * num_slots``.
+    of all input tokens to create ``num_slots`` "soft slots" per expert. Per
+    Puigcerver et al. (2023), two softmaxes are computed from the same logit
+    tensor ``L`` of shape ``[batch, seq, num_experts, num_slots]``:
+
+    - **Dispatch weights** ``D = softmax(L, axis=seq)`` are used to build
+      soft slots: ``slot_{e,s} = sum_t D_{t,e,s} * x_t``.
+    - **Combine weights** ``C = softmax(L_reshaped_to_(e*s), axis=-1)`` are
+      used to combine expert-slot outputs back to token positions:
+      ``y_t = sum_{e,s} C_{t,e,s} * f_e(slot_{e,s})``.
+
+    This avoids token dropping and load balancing issues at the cost of
+    increased computation proportional to ``seq_len * num_experts * num_slots``.
 
     **Architecture Overview:**
 
@@ -580,6 +642,8 @@ class SoftMoEGating(BaseGating):
             raise ValueError("Hidden dimension must be known for SoftMoE")
 
         # BUILD sublayers explicitly
+        if self.pre_norm is not None:
+            self.pre_norm.build(input_shape)
         self.phi_dense.build(input_shape)
 
         super().build(input_shape)
@@ -590,49 +654,66 @@ class SoftMoEGating(BaseGating):
             training: Optional[bool] = None
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor, Dict[str, keras.KerasTensor]]:
         """Forward pass through the SoftMoE gating network."""
+        if self.pre_norm is not None:
+            inputs = self.pre_norm(inputs, training=training)
+
         batch_size = ops.shape(inputs)[0]
         seq_len = ops.shape(inputs)[1]
         hidden_dim = ops.shape(inputs)[-1]
 
-        # Compute attention weights for slot assignment
+        # Compute logits for slot assignment
         phi_logits = self.phi_dense(inputs)  # [batch, seq_len, num_experts * num_slots]
-        phi_logits = ops.reshape(phi_logits, (batch_size, seq_len, self.num_experts, self.num_slots))
+        phi_logits = ops.reshape(
+            phi_logits, (batch_size, seq_len, self.num_experts, self.num_slots)
+        )
 
-        # Softmax over sequence dimension for each expert-slot combination
-        phi_weights = ops.softmax(phi_logits, axis=1)  # [batch, seq_len, num_experts, num_slots]
+        # Dispatch: softmax over sequence dimension -> used to build soft slots
+        dispatch_weights = ops.softmax(phi_logits, axis=1)  # [b, s, e, l]
 
-        # Compute soft input slots for each expert
+        # Combine: softmax over (experts * slots) per token -> used to combine
+        # expert outputs back to token positions.
+        phi_logits_flat = ops.reshape(
+            phi_logits, (batch_size, seq_len, self.num_experts * self.num_slots)
+        )
+        combine_weights_flat = ops.softmax(phi_logits_flat, axis=-1)
+        combine_weights = ops.reshape(
+            combine_weights_flat,
+            (batch_size, seq_len, self.num_experts, self.num_slots),
+        )
+
+        # Compute soft input slots for each expert using dispatch weights
         inputs_expanded = ops.expand_dims(ops.expand_dims(inputs, axis=2), axis=3)  # [b, s, 1, 1, h]
-        phi_weights_expanded = ops.expand_dims(phi_weights, axis=-1)  # [b, s, e, l, 1]
+        dispatch_expanded = ops.expand_dims(dispatch_weights, axis=-1)  # [b, s, e, l, 1]
 
-        # Weighted sum to create slots
         soft_slots = ops.sum(
-            inputs_expanded * phi_weights_expanded,  # Broadcasts to [b, s, e, l, h]
-            axis=1
-        )  # Sum over s -> [b, e, l, h]
+            inputs_expanded * dispatch_expanded,  # Broadcasts to [b, s, e, l, h]
+            axis=1,
+        )  # Sum over seq -> [b, e, l, h]
 
         # Flatten slots for expert processing
         expert_inputs = ops.reshape(
             soft_slots,
-            (batch_size, self.num_experts, self.num_slots * hidden_dim)
+            (batch_size, self.num_experts, self.num_slots * hidden_dim),
         )
 
-        # For SoftMoE, all experts are used with equal weight
-        expert_weights = ops.ones((batch_size, seq_len, self.num_experts), dtype=inputs.dtype) / self.num_experts
+        # Per-token, per-expert routing weight = marginal of combine_weights over slots.
+        # Shape: [batch, seq_len, num_experts].
+        expert_weights = ops.sum(combine_weights, axis=-1)
         expert_indices = ops.arange(self.num_experts, dtype='int32')
         expert_indices = ops.broadcast_to(
             expert_indices[None, None, :],
-            (batch_size, seq_len, self.num_experts)
+            (batch_size, seq_len, self.num_experts),
         )
 
         # Prepare auxiliary information
         auxiliary_info = {
-            'phi_weights': phi_weights,
+            'dispatch_weights': dispatch_weights,
+            'combine_weights': combine_weights,
             'soft_slots': soft_slots,
             'expert_inputs': expert_inputs,
             'expert_weights': expert_weights,
             'gate_logits': phi_logits,  # For z-loss computation
-            'raw_gate_probs': ops.softmax(phi_logits, axis=-1)
+            'raw_gate_probs': ops.softmax(phi_logits, axis=-1),
         }
 
         return expert_weights, expert_indices, auxiliary_info
@@ -640,7 +721,11 @@ class SoftMoEGating(BaseGating):
     def compute_output_shape(
             self,
             input_shape: Tuple[Optional[int], ...]
-    ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...], Dict]:
+    ) -> Tuple[
+        Tuple[Optional[int], ...],
+        Tuple[Optional[int], ...],
+        Dict[str, Tuple[Optional[int], ...]],
+    ]:
         """Compute output shapes for (expert_weights, expert_indices, aux_info)."""
         # SoftMoE: expert_weights shape = (batch, seq_len, num_experts)
         weights_shape = tuple(list(input_shape[:-1]) + [self.num_experts])
@@ -742,20 +827,24 @@ def create_gating(gating_type: str, num_experts: int, **kwargs) -> BaseGating:
     :rtype: BaseGating
     :raises ValueError: If gating_type is not supported.
     """
+    # Shared keys forwarded to every BaseGating subclass.
+    shared_keys = ['norm_type', 'norm_config']
+    shared_kwargs = {k: v for k, v in kwargs.items() if k in shared_keys}
+
     if gating_type == 'linear':
         linear_keys = ['top_k', 'use_bias', 'add_noise', 'noise_std',
                        'kernel_initializer', 'bias_initializer']
         linear_kwargs = {k: v for k, v in kwargs.items() if k in linear_keys}
-        return LinearGating(num_experts=num_experts, **linear_kwargs)
+        return LinearGating(num_experts=num_experts, **shared_kwargs, **linear_kwargs)
     elif gating_type == 'cosine':
         cosine_keys = ['embedding_dim', 'top_k', 'temperature',
                        'learnable_temperature', 'kernel_initializer']
         cosine_kwargs = {k: v for k, v in kwargs.items() if k in cosine_keys}
-        return CosineGating(num_experts=num_experts, **cosine_kwargs)
+        return CosineGating(num_experts=num_experts, **shared_kwargs, **cosine_kwargs)
     elif gating_type == 'softmoe':
         softmoe_keys = ['num_slots', 'kernel_initializer']
         softmoe_kwargs = {k: v for k, v in kwargs.items() if k in softmoe_keys}
-        return SoftMoEGating(num_experts=num_experts, **softmoe_kwargs)
+        return SoftMoEGating(num_experts=num_experts, **shared_kwargs, **softmoe_kwargs)
     else:
         raise ValueError(
             f"Unsupported gating type: {gating_type}. "

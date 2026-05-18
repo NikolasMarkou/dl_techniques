@@ -68,6 +68,14 @@ class ExpertConfig:
     kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None
     bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None
 
+    # Optional normalization for experts (instantiated via the norms factory).
+    # When ``norm_type`` is set, ``pre_norm`` defaults to True and ``post_norm``
+    # to False. Both can be toggled independently.
+    norm_type: Optional[str] = None
+    norm_config: Dict[str, Any] = field(default_factory=dict)
+    pre_norm: bool = True
+    post_norm: bool = False
+
     def __post_init__(self):
         """Validate FFN configuration after dataclass creation."""
         if not self.ffn_config:
@@ -158,6 +166,10 @@ class GatingConfig:
     aux_loss_weight: float = 0.01
     z_loss_weight: float = 1e-3
 
+    # Optional pre-gating normalization via the norms factory.
+    norm_type: Optional[str] = None
+    norm_config: Dict[str, Any] = field(default_factory=dict)
+
 # ---------------------------------------------------------------------
 
 @dataclass
@@ -192,16 +204,18 @@ class MoEConfig:
     :type expert_config: ExpertConfig
     :param gating_config: Configuration for the gating network.
     :type gating_config: GatingConfig
-    :param jitter_noise: Standard deviation for expert capacity jittering.
+    :param jitter_noise: Standard deviation for uniform noise added to the
+        gating input during training. Note: ``LinearGating`` also injects
+        learned-scale Gaussian noise to the gating *logits* when
+        ``add_noise=True``; the two sources stack. Set ``jitter_noise=0`` to
+        rely solely on the gating-level noise.
     :type jitter_noise: float
-    :param drop_tokens: Whether to drop tokens when expert capacity is exceeded.
+    :param drop_tokens: Reserved for future capacity-based dispatch (the
+        current hard-routing kernel is dense and does not drop tokens).
     :type drop_tokens: bool
-    :param use_residual_connection: Whether to add residual connection for dropped tokens.
+    :param use_residual_connection: Reserved for future capacity-based
+        dispatch. Has no effect in the current dense kernel.
     :type use_residual_connection: bool
-    :param train_capacity_factor: Capacity factor during training.
-    :type train_capacity_factor: Optional[float]
-    :param eval_capacity_factor: Capacity factor during evaluation.
-    :type eval_capacity_factor: Optional[float]
     :param routing_dtype: Data type for routing computations.
     :type routing_dtype: str
     """
@@ -214,20 +228,8 @@ class MoEConfig:
     drop_tokens: bool = True
     use_residual_connection: bool = True
 
-    # Training parameters
-    train_capacity_factor: Optional[float] = None
-    eval_capacity_factor: Optional[float] = None
-
     # Advanced features
     routing_dtype: str = 'float32'
-
-    def __post_init__(self):
-        """Initialize derived parameters after dataclass creation."""
-        if self.train_capacity_factor is None:
-            self.train_capacity_factor = self.gating_config.capacity_factor
-
-        if self.eval_capacity_factor is None:
-            self.eval_capacity_factor = max(1.0, self.gating_config.capacity_factor * 0.8)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary for serialization."""
@@ -248,15 +250,17 @@ class MoEConfig:
             'jitter_noise': self.jitter_noise,
             'drop_tokens': self.drop_tokens,
             'use_residual_connection': self.use_residual_connection,
-            'train_capacity_factor': self.train_capacity_factor,
-            'eval_capacity_factor': self.eval_capacity_factor,
-            'routing_dtype': self.routing_dtype
+            'routing_dtype': self.routing_dtype,
         }
 
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> 'MoEConfig':
         """Create configuration from dictionary (does not mutate input)."""
         config_dict = dict(config_dict)  # shallow copy to avoid mutating caller's dict
+
+        # Drop legacy keys that were removed (kept for backward-compat reads).
+        for legacy_key in ('train_capacity_factor', 'eval_capacity_factor'):
+            config_dict.pop(legacy_key, None)
 
         # Deserialize ExpertConfig, handling serialized Keras objects
         expert_raw = config_dict.pop('expert_config', {})

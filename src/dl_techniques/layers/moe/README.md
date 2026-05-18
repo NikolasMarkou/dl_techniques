@@ -21,30 +21,37 @@ A production-ready Mixture of Experts implementation for the dl_techniques frame
 
 ## Overview
 
-The MoE module implements sparse neural networks where each input is routed to a subset of expert networks, enabling:
+The MoE module implements expert-conditioned neural networks where each input is routed to a subset of expert networks, enabling:
 
-- **Computational Efficiency**: Only selected experts are activated per input.
 - **Model Specialization**: Experts learn to handle specific input patterns.
-- **Scalable Architecture**: Add capacity without proportional compute increase.
-- **Load Balancing**: Auxiliary losses prevent expert collapse.
+- **Scalable Architecture**: Add capacity in the *parameter* dimension while keeping per-token activation patterns sparse.
+- **Load Balancing**: Auxiliary and z-losses prevent expert collapse.
 
 ### Key Components
 
-- **Expert Networks**: FFN-based specialists using the `dl_techniques` FFN factory.
-- **Gating Networks**: Routing mechanisms (linear, cosine similarity, SoftMoE).
+- **Expert Networks**: FFN-based specialists using the `dl_techniques` FFN factory; optional pre/post normalization via the norms factory.
+- **Gating Networks**: Routing mechanisms (linear, cosine similarity, SoftMoE); optional pre-gating normalization via the norms factory.
 - **Load Balancing**: Auxiliary and z-losses for uniform expert utilization.
-- **Capacity Management**: Token dropping and residual connections for overloaded experts.
+
+### Known Limitations
+
+- **Hard-routing kernel is dense, not sparse in FLOPs.** The current implementation runs *all* experts on *all* tokens and masks contributions by the top-k routing weights. This is O(N) in FLOPs (not the textbook O(k/N)) and is chosen for graph-mode friendliness — no scatter/gather. The sparsity manifests in the gradient pattern and expert specialization, not in compute. A capacity-based sparse dispatch (with token permutation and batched experts) is planned as a follow-up.
+- **`drop_tokens` and `use_residual_connection` are reserved.** These `MoEConfig` flags are placeholders for the future sparse dispatch; they have no effect on the current dense kernel.
+- **`CosineGating.temperature` semantics changed.** As of the May-2026 review, cosine gating now *divides* logits by `temperature` (standard softmax-temperature semantics: larger `temperature` → flatter distribution). Earlier versions multiplied; checkpoints/configs using the old behavior will route more diffusely under the new code.
+- **SoftMoE auxiliary info keys changed.** `phi_weights` is replaced by `dispatch_weights` (softmax over the sequence axis) and `combine_weights` (softmax over experts × slots per token), matching Puigcerver et al. (2023). Callers reading `phi_weights` from `gating_info` must migrate.
 
 ## Architecture
 
 ### MoE Layer Structure
 
 ```
-Input → Gating Network → Expert Selection → Expert Processing → Output
+Input → Gating Network → Routing Weights → All Experts (run on all tokens) → Weighted Combination → Output
          ↓                ↓                  ↓
-         Router           Top-K Selection    Weighted Combination
-         Logits           Expert Indices     Final Output
+         Router           Top-K Mask         Per-token mask × expert output
+         Logits           (zeros otherwise)  Sum over experts
 ```
+
+(See "Known Limitations" above re: dense vs. sparse compute.)
 
 ### Expert Types
 
