@@ -85,11 +85,20 @@ def _to_tf_dataset(
 # Regime axis (Phase 3). Each entry maps to a 4-tuple
 # ``(lr, batch, mp, depth_override)`` where ``None`` means "do not override".
 # ``mp`` is a bool; ``depth_override`` is ignored on E1 (depth fixed by variant).
-_REGIME_MAP: Dict[str, Tuple[Optional[float], Optional[int], Optional[bool], Optional[int]]] = {
-    "default": (None, None, None, None),
-    "lr_low":  (1e-4, None, None, None),
-    "lr_high": (1e-3, None, None, None),
-    "mp_fp16": (None, None, True, None),
+# Tuple shape: ``(lr, batch, mp, depth_override, wd_override)``. ``None``
+# in any slot means "do not override". The 5th slot was added at step 6
+# of plan_2026-05-18_6776f8ba (Phase 3 v3) to support the ``wd_zero``
+# stress regime without overloading the lr slot.
+_REGIME_MAP: Dict[str, Tuple[Optional[float], Optional[int], Optional[bool], Optional[int], Optional[float]]] = {
+    "default":          (None, None, None, None, None),
+    "lr_low":           (1e-4, None, None, None, None),
+    "lr_high":          (1e-3, None, None, None, None),
+    "mp_fp16":          (None, None, True, None, None),
+    # Phase 3 v3 stress regimes — EXPECTED to break some norms (E3 in plan.md):
+    "lr_extreme":       (3e-3, None, None, None, None),  # ~10× the trainer default 3e-4
+    "wd_zero":          (None, None, None, None, 0.0),
+    "bs_4":             (None, 4,    None, None, None),  # tiny-batch stress
+    "mp_fp16_lowloss":  (1e-4, None, True, None, None),  # fp16 at the edge of stability
 }
 
 
@@ -275,13 +284,15 @@ def run(cfg: ExperimentConfig, *, variant: str, patch_size: int, dropout_rate: f
 def main() -> None:
     args = _parse_args()
     # Apply regime override (Phase 3 sub-experiment axis).
-    lr_o, bs_o, mp_o, _ = _REGIME_MAP[args.regime]
+    lr_o, bs_o, mp_o, _, wd_o = _REGIME_MAP[args.regime]
     if lr_o is not None:
         args.learning_rate = lr_o
     if bs_o is not None:
         args.batch_size = bs_o
     if mp_o is True:
         keras.mixed_precision.set_global_policy("mixed_float16")
+    if wd_o is not None:
+        args.weight_decay = wd_o
     cfg = ExperimentConfig(
         experiment_name="e1",
         norm_type=args.norm_type,

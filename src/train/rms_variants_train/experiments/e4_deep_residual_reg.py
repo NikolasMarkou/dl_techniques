@@ -125,12 +125,16 @@ def _build_model(
 # ---------------------------------------------------------------------
 
 
-# Regime axis (Phase 3). Maps to ``(lr, batch, mp, depth_override)``.
+# Regime axis (Phase 3). Maps to ``(lr, batch, mp, depth_override, wd_override)``.
 # ``depth_override`` replaces ``args.depth`` when set.
-_REGIME_MAP: Dict[str, Tuple[Optional[float], Optional[int], Optional[bool], Optional[int]]] = {
-    "default":  (None, None, None, None),
-    "depth_12": (None, None, None, 12),
-    "depth_48": (None, None, None, 48),
+# The 5th slot was added at step 6 of plan_2026-05-18_6776f8ba (Phase 3 v3).
+_REGIME_MAP: Dict[str, Tuple[Optional[float], Optional[int], Optional[bool], Optional[int], Optional[float]]] = {
+    "default":          (None, None, None, None, None),
+    "depth_12":         (None, None, None, 12,   None),
+    "depth_48":         (None, None, None, 48,   None),
+    # Phase 3 v3 stress regimes:
+    "wd_zero":          (None, None, None, None, 0.0),
+    "mp_fp16_lowloss":  (1e-4, None, True, None, None),  # fp16 at the edge of stability
 }
 
 
@@ -275,7 +279,7 @@ def run(cfg: ExperimentConfig, *, depth: int, hidden_dim: int, bias: float,
 def main() -> None:
     args = _parse_args()
     # Apply regime override (Phase 3 depth axis).
-    lr_o, bs_o, mp_o, depth_o = _REGIME_MAP[args.regime]
+    lr_o, bs_o, mp_o, depth_o, wd_o = _REGIME_MAP[args.regime]
     if lr_o is not None:
         args.learning_rate = lr_o
     if bs_o is not None:
@@ -284,6 +288,8 @@ def main() -> None:
         args.mixed_precision = bool(mp_o)
     if depth_o is not None:
         args.depth = depth_o
+    if wd_o is not None:
+        args.weight_decay = wd_o
     cfg = ExperimentConfig(
         experiment_name="e4",
         norm_type=args.norm_type,

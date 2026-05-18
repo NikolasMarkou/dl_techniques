@@ -101,13 +101,17 @@ def _build_model(d: int, depth: int, norm_type: str, norm_kwargs: dict) -> keras
 # ---------------------------------------------------------------------
 
 
-# Regime axis (Phase 3). Maps to ``(lr, batch, mp, depth_override)``.
-_REGIME_MAP: Dict[str, Tuple[Optional[float], Optional[int], Optional[bool], Optional[int]]] = {
-    "default": (None, None, None, None),
-    "bs_32":   (None, 32, None, None),
-    "bs_256":  (None, 256, None, None),
-    "lr_low":  (1e-4, None, None, None),
-    "lr_high": (1e-3, None, None, None),
+# Regime axis (Phase 3). Maps to ``(lr, batch, mp, depth_override, wd_override)``.
+# The 5th slot was added at step 6 of plan_2026-05-18_6776f8ba (Phase 3 v3).
+_REGIME_MAP: Dict[str, Tuple[Optional[float], Optional[int], Optional[bool], Optional[int], Optional[float]]] = {
+    "default":    (None, None, None, None, None),
+    "bs_32":      (None, 32,   None, None, None),
+    "bs_256":     (None, 256,  None, None, None),
+    "lr_low":     (1e-4, None, None, None, None),
+    "lr_high":    (1e-3, None, None, None, None),
+    # Phase 3 v3 stress regimes:
+    "lr_extreme": (3e-3, None, None, None, None),  # ~10× the trainer default 3e-4
+    "wd_zero":    (None, None, None, None, 0.0),
 }
 
 
@@ -258,11 +262,13 @@ def run(cfg: ExperimentConfig, *, depth: int, hidden_dim: int, bias: float) -> d
 def main() -> None:
     args = _parse_args()
     # Apply regime override (Phase 3 LR/BS axis).
-    lr_o, bs_o, _, _ = _REGIME_MAP[args.regime]
+    lr_o, bs_o, _, _, wd_o = _REGIME_MAP[args.regime]
     if lr_o is not None:
         args.learning_rate = lr_o
     if bs_o is not None:
         args.batch_size = bs_o
+    if wd_o is not None:
+        args.weight_decay = wd_o
     cfg = ExperimentConfig(
         experiment_name="e5",
         norm_type=args.norm_type,
