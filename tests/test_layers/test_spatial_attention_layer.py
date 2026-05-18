@@ -77,7 +77,7 @@ class TestSpatialAttention:
         assert layer.conv is not None
         assert isinstance(layer.conv, keras.layers.Conv2D)
         assert layer.conv.filters == 1  # Should output single attention channel
-        assert layer.conv.activation.__name__ == 'sigmoid'
+        assert layer.gate_activation_type == 'sigmoid'
         assert layer.conv.padding == 'same'
 
     def test_parameter_validation(self) -> None:
@@ -621,7 +621,7 @@ class TestSpatialAttention:
 
         assert layer.kernel_size == 7, "Default kernel size should be 7 (CBAM paper)"
         assert layer.conv.filters == 1, "Should output single attention channel"
-        assert layer.conv.activation.__name__ == 'sigmoid', "Should use sigmoid activation"
+        assert layer.gate_activation_type == 'sigmoid', "Should use sigmoid activation"
         assert layer.conv.padding == 'same', "Should use 'same' padding"
 
         # Test with paper-like input dimensions

@@ -540,6 +540,38 @@ def create_activation_layer(
 
 # ---------------------------------------------------------------------
 
+def resolve_activation_layer(
+    activation_type: str,
+    name: Optional[str] = None,
+    **kwargs: Any
+) -> keras.layers.Layer:
+    """
+    Create an activation layer from the factory, falling back to ``keras.layers.Activation``
+    for standard Keras activation strings (e.g. ``'sigmoid'``, ``'tanh'``, ``'linear'``,
+    ``'softmax'``) that are not part of the dl_techniques activation registry.
+
+    Use this when a layer wants to accept either a dl_techniques factory type
+    (e.g. ``'mish'``, ``'gelu'``, ``'sparsemax'``, ``'hard_sigmoid'``) or a plain
+    Keras activation string (e.g. ``'sigmoid'``).
+
+    :param activation_type: Activation identifier. Either a key in
+        ``ACTIVATION_REGISTRY`` or any string accepted by
+        ``keras.activations.get``.
+    :type activation_type: str
+    :param name: Optional layer name.
+    :type name: Optional[str]
+    :param kwargs: Forwarded to ``create_activation_layer`` when the type is
+        a factory entry. Ignored for plain Keras activations.
+    :return: A configured activation layer instance.
+    :rtype: keras.layers.Layer
+    """
+    if activation_type in ACTIVATION_REGISTRY:
+        return create_activation_layer(activation_type, name=name, **kwargs)
+    return keras.layers.Activation(activation_type, name=name)
+
+
+# ---------------------------------------------------------------------
+
 def create_activation_from_config(config: Dict[str, Any]) -> keras.layers.Layer:
     """
     Create an activation layer from a configuration dictionary.

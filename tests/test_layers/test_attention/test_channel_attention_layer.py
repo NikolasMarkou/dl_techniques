@@ -83,7 +83,7 @@ class TestChannelAttention:
 
         # Verify MLP structure
         assert layer.dense1.units == layer_config['channels'] // layer_config['ratio']
-        assert layer.dense1.activation.__name__ == 'relu'
+        assert layer.intermediate_activation is not None
         assert layer.dense2.units == layer_config['channels']
         # Final layer should have linear activation (default when None specified)
         assert layer.dense2.activation.__name__ == 'linear'
@@ -683,7 +683,7 @@ class TestChannelAttention:
 
         # Verify MLP structure matches CBAM specifications
         assert layer.dense1.units == channels // ratio, "Bottleneck dimension incorrect"
-        assert layer.dense1.activation.__name__ == 'relu', "Should use ReLU in intermediate layer"
+        assert layer.intermediate_activation is not None, "Should use ReLU in intermediate layer"
         assert layer.dense2.units == channels, "Output dimension should match input channels"
         # Final layer should have linear activation (sigmoid applied after in call method)
         assert layer.dense2.activation.__name__ == 'linear', "Final layer should have linear activation"
@@ -731,11 +731,13 @@ class TestChannelAttention:
         # Build the layer first
         _ = layer(inputs)
 
-        # Process both through the same Dense layers (shared MLP)
-        avg_out1 = layer.dense1(avg_flat)
+        # Process both through the same Dense layers (shared MLP).
+        # ReLU is applied via a separate intermediate_activation layer between
+        # dense1 and dense2.
+        avg_out1 = layer.intermediate_activation(layer.dense1(avg_flat))
         avg_out2 = layer.dense2(avg_out1)
 
-        max_out1 = layer.dense1(max_flat)  # Same dense1 layer
+        max_out1 = layer.intermediate_activation(layer.dense1(max_flat))  # Same dense1 layer
         max_out2 = layer.dense2(max_out1)  # Same dense2 layer
 
         # Verify intermediate shapes

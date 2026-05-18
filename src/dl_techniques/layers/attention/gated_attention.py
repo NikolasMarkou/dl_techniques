@@ -76,7 +76,7 @@ from typing import Optional, Union, Tuple, Dict, Any
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
-from ..activations import ProbabilityOutput
+from ..activations import ProbabilityOutput, resolve_activation_layer
 
 # ---------------------------------------------------------------------
 
@@ -192,6 +192,8 @@ class GatedAttention(keras.layers.Layer):
             probability_config: Optional[Dict[str, Any]] = None,
             qk_norm_type: str = "zero_centered_rms_norm",
             qk_norm_kwargs: Optional[Dict[str, Any]] = None,
+            gate_activation_type: str = "sigmoid",
+            gate_activation_args: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -231,6 +233,8 @@ class GatedAttention(keras.layers.Layer):
         self.probability_config = probability_config
         self.qk_norm_type = qk_norm_type
         self.qk_norm_kwargs = qk_norm_kwargs
+        self.gate_activation_type = gate_activation_type
+        self.gate_activation_args = gate_activation_args
 
         # TRICKY POINT: When using custom head_dim, attention_dim may not equal dim
         # This requires an additional projection layer to match dimensions
@@ -346,6 +350,13 @@ class GatedAttention(keras.layers.Layer):
             name="attn_prob",
         )
 
+        # Parameterized output-gate activation (defaults to sigmoid)
+        self.gate_activation = resolve_activation_layer(
+            self.gate_activation_type,
+            name="gate_activation",
+            **(self.gate_activation_args or {}),
+        )
+
         logger.info(f"GatedAttention initialized: dim={dim}, "
                    f"num_heads={num_heads}, head_dim={self.head_dim}, "
                    f"attention_dim={self.attention_dim}")
@@ -449,6 +460,10 @@ class GatedAttention(keras.layers.Layer):
         self.attn_prob.build(
             (batch_size, self.num_heads, seq_len, seq_len)
         )
+
+        # Build the gate activation (applied on output_gate_linear output of shape
+        # (batch, seq_len, dim))
+        self.gate_activation.build((batch_size, seq_len, self.dim))
 
         # Always call parent build at the end
         super().build(input_shape)
@@ -588,8 +603,9 @@ class GatedAttention(keras.layers.Layer):
         if self.output_proj is not None:
             attention_output = self.output_proj(attention_output, training=training)
 
-        # Output gating mechanism
-        gate = ops.sigmoid(self.output_gate_linear(attention_output, training=training))
+        # Output gating mechanism (parameterized activation, defaults to sigmoid)
+        gate_logits = self.output_gate_linear(attention_output, training=training)
+        gate = self.gate_activation(gate_logits, training=training)
         gated_output = gate * attention_output
 
         return gated_output
@@ -629,6 +645,8 @@ class GatedAttention(keras.layers.Layer):
             'probability_config': self.probability_config,
             'qk_norm_type': self.qk_norm_type,
             'qk_norm_kwargs': self.qk_norm_kwargs,
+            'gate_activation_type': self.gate_activation_type,
+            'gate_activation_args': self.gate_activation_args,
         })
         return config
 

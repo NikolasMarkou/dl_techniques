@@ -332,7 +332,7 @@ class SwinTransformerBlock(keras.layers.Layer):
             kernel_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             partition_mode="grid",
-            normalization="softmax",
+            probability_type="softmax",
             attention_mode="linear",
             name="attn"
         )

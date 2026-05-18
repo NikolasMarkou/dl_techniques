@@ -62,6 +62,8 @@ References:
 import keras
 from typing import Optional, Union, Dict, Any, Tuple
 
+from ..activations import resolve_activation_layer
+
 # ---------------------------------------------------------------------
 
 
@@ -130,6 +132,8 @@ class SpatialAttention(keras.layers.Layer):
             kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             use_bias: bool = True,
+            gate_activation_type: str = 'sigmoid',
+            gate_activation_args: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -145,17 +149,24 @@ class SpatialAttention(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.use_bias = use_bias
+        self.gate_activation_type = gate_activation_type
+        self.gate_activation_args = gate_activation_args
 
         # CREATE sub-layer in __init__ following modern Keras 3 pattern
         self.conv = keras.layers.Conv2D(
             filters=1,
             kernel_size=self.kernel_size,
             padding='same',
-            activation='sigmoid',
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             use_bias=self.use_bias,
             name='spatial_attention_conv'
+        )
+
+        self.gate_activation = resolve_activation_layer(
+            self.gate_activation_type,
+            name='spatial_attention_gate_activation',
+            **(self.gate_activation_args or {}),
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -174,6 +185,11 @@ class SpatialAttention(keras.layers.Layer):
         conv_input_shape = list(input_shape)
         conv_input_shape[-1] = 2  # avg_pool + max_pool channels
         self.conv.build(tuple(conv_input_shape))
+
+        # Gate activation operates on the conv output (B, H, W, 1)
+        gate_input_shape = list(input_shape)
+        gate_input_shape[-1] = 1
+        self.gate_activation.build(tuple(gate_input_shape))
 
         # Always call parent build at the end
         super().build(input_shape)
@@ -206,8 +222,9 @@ class SpatialAttention(keras.layers.Layer):
         # Concatenate pooled features along channel dimension
         concat = keras.ops.concatenate([avg_pool, max_pool], axis=-1)  # (B, H, W, 2)
 
-        # Apply convolution with sigmoid activation to generate attention map
-        attention_map = self.conv(concat, training=training)  # (B, H, W, 1)
+        # Apply convolution then gate activation to generate attention map
+        attention_logits = self.conv(concat, training=training)  # (B, H, W, 1)
+        attention_map = self.gate_activation(attention_logits, training=training)
 
         return attention_map
 
@@ -241,6 +258,8 @@ class SpatialAttention(keras.layers.Layer):
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "use_bias": self.use_bias,
+            "gate_activation_type": self.gate_activation_type,
+            "gate_activation_args": self.gate_activation_args,
         })
         return config
 

@@ -31,7 +31,7 @@ import keras
 from keras import ops
 from typing import Any, Dict, Tuple, Optional, Literal, Union
 
-from ..activations import ProbabilityOutput
+from ..activations import ProbabilityOutput, resolve_activation_layer
 from ..norms.factory import create_normalization_layer
 
 # ---------------------------------------------------------------------
@@ -178,7 +178,9 @@ class NonLocalAttention(keras.layers.Layer):
         output_norm_type: Optional[str] = "batch_norm",
         output_norm_kwargs: Optional[Dict[str, Any]] = None,
         intermediate_activation: Union[str, callable] = 'relu',
+        intermediate_activation_args: Optional[Dict[str, Any]] = None,
         output_activation: Union[str, callable] = 'linear',
+        output_activation_args: Optional[Dict[str, Any]] = None,
         output_channels: int = -1,
         dropout_rate: float = 0.0,
         attention_mode: Literal['gaussian', 'dot_product'] = 'gaussian',
@@ -207,7 +209,9 @@ class NonLocalAttention(keras.layers.Layer):
         self.output_norm_type = output_norm_type
         self.output_norm_kwargs = output_norm_kwargs
         self.intermediate_activation = intermediate_activation
+        self.intermediate_activation_args = intermediate_activation_args
         self.output_activation = output_activation
+        self.output_activation_args = output_activation_args
         self.output_channels = output_channels
         self.dropout_rate = dropout_rate
         self.attention_mode = attention_mode
@@ -237,13 +241,26 @@ class NonLocalAttention(keras.layers.Layer):
             kernel_size=self.kernel_size,
             padding='same',
             use_bias=self.use_bias,
-            activation=self.intermediate_activation,
             depthwise_initializer=self.kernel_initializer,
             bias_initializer=self.bias_initializer,
             depthwise_regularizer=self.kernel_regularizer,
             bias_regularizer=self.bias_regularizer,
             activity_regularizer=self.activity_regularizer,
             name='depthwise_conv'
+        )
+
+        # Intermediate activation routed through the activation factory.
+        # Two instances since they are applied to differently-shaped tensors
+        # (depthwise output and key projection output).
+        self.depthwise_activation = resolve_activation_layer(
+            self.intermediate_activation,
+            name='depthwise_activation',
+            **(self.intermediate_activation_args or {}),
+        )
+        self.key_activation = resolve_activation_layer(
+            self.intermediate_activation,
+            name='key_activation',
+            **(self.intermediate_activation_args or {}),
         )
 
         # Create spatial output normalization layer if specified
@@ -273,7 +290,6 @@ class NonLocalAttention(keras.layers.Layer):
 
         self.key_conv = keras.layers.Conv2D(
             filters=self.key_value_channels,
-            activation=self.intermediate_activation,
             name='key_conv',
             **self._conv_params
         )
@@ -360,13 +376,19 @@ class NonLocalAttention(keras.layers.Layer):
         # Create output projection layer (needs input channels)
         self.output_conv = keras.layers.Conv2D(
             filters=actual_output_channels,
-            activation=self.output_activation,
             name='output_conv',
             **self._conv_params
+        )
+        # Output activation routed through the activation factory.
+        self.output_activation_layer = resolve_activation_layer(
+            self.output_activation,
+            name='output_activation',
+            **(self.output_activation_args or {}),
         )
 
         # Build sub-layers in computational order for serialization robustness
         self.depthwise_conv.build(input_shape)
+        self.depthwise_activation.build(input_shape)
 
         # Depthwise conv doesn't change shape, so output_norm uses same shape
         if self.output_norm is not None:
@@ -376,6 +398,10 @@ class NonLocalAttention(keras.layers.Layer):
         self.query_conv.build(input_shape)
         self.key_conv.build(input_shape)
         self.value_conv.build(input_shape)
+        key_output_shape = (
+            input_shape[0], input_shape[1], input_shape[2], self.key_value_channels
+        )
+        self.key_activation.build(key_output_shape)
 
         batch_size = input_shape[0] if input_shape[0] is not None else 1
         height = input_shape[1] if input_shape[1] is not None else 32
@@ -399,6 +425,10 @@ class NonLocalAttention(keras.layers.Layer):
         # Output conv processes the attention output
         attention_output_shape = (input_shape[0], input_shape[1], input_shape[2], self.key_value_channels)
         self.output_conv.build(attention_output_shape)
+        output_conv_shape = (
+            input_shape[0], input_shape[1], input_shape[2], actual_output_channels
+        )
+        self.output_activation_layer.build(output_conv_shape)
 
         if self.dropout is not None:
             self.dropout.build(attention_output_shape)
@@ -425,6 +455,7 @@ class NonLocalAttention(keras.layers.Layer):
         """
         # Apply depthwise convolution for spatial processing
         x = self.depthwise_conv(inputs, training=training)
+        x = self.depthwise_activation(x, training=training)
 
         # Apply spatial output normalization if specified
         if self.output_norm is not None:
@@ -433,6 +464,7 @@ class NonLocalAttention(keras.layers.Layer):
         # Generate query, key, value projections
         query = self.query_conv(x, training=training)
         key = self.key_conv(x, training=training)
+        key = self.key_activation(key, training=training)
         value = self.value_conv(x, training=training)
 
         # Reshape for attention computation: (B, H, W, C) -> (B, H*W, C)
@@ -476,8 +508,9 @@ class NonLocalAttention(keras.layers.Layer):
             [batch_size, height, width, self.key_value_channels]
         )
 
-        # Apply output projection
+        # Apply output projection + activation
         output = self.output_conv(attention_output, training=training)
+        output = self.output_activation_layer(output, training=training)
 
         # Apply output dropout if specified
         if self.dropout is not None:
@@ -506,7 +539,9 @@ class NonLocalAttention(keras.layers.Layer):
             'output_norm_type': self.output_norm_type,
             'output_norm_kwargs': self.output_norm_kwargs,
             'intermediate_activation': self.intermediate_activation,
+            'intermediate_activation_args': self.intermediate_activation_args,
             'output_activation': self.output_activation,
+            'output_activation_args': self.output_activation_args,
             'output_channels': self.output_channels,
             'dropout_rate': self.dropout_rate,
             'attention_mode': self.attention_mode,

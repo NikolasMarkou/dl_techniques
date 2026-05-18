@@ -29,13 +29,14 @@ References:
 
 import keras
 from keras import ops, layers, initializers, regularizers
-from typing import Optional, Tuple, Any, List
+from typing import Optional, Tuple, Any, Dict, List
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
 from ..squeeze_excitation import SqueezeExcitation
+from ..activations import resolve_activation_layer
 
 # ---------------------------------------------------------------------
 
@@ -104,6 +105,8 @@ class TripletAttentionBranch(layers.Layer):
         use_bias: bool = False,
         kernel_initializer: str = "glorot_uniform",
         kernel_regularizer: Optional[Any] = None,
+        gate_activation_type: str = "sigmoid",
+        gate_activation_args: Optional[Dict[str, Any]] = None,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -112,6 +115,8 @@ class TripletAttentionBranch(layers.Layer):
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.gate_activation_type = gate_activation_type
+        self.gate_activation_args = gate_activation_args
 
         # Layers defined in init, built in build
         self.conv = layers.Conv2D(
@@ -125,7 +130,11 @@ class TripletAttentionBranch(layers.Layer):
             name="conv"
         )
         self.batch_norm = layers.BatchNormalization(name="bn")
-        self.sigmoid = layers.Activation("sigmoid", name="sigmoid")
+        self.sigmoid = resolve_activation_layer(
+            self.gate_activation_type,
+            name="gate_activation",
+            **(self.gate_activation_args or {}),
+        )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build sub-layers with shapes derived from the permutation pattern.
@@ -216,6 +225,8 @@ class TripletAttentionBranch(layers.Layer):
             "use_bias": self.use_bias,
             "kernel_initializer": initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
+            "gate_activation_type": self.gate_activation_type,
+            "gate_activation_args": self.gate_activation_args,
         })
         return config
 
@@ -276,6 +287,8 @@ class TripSE1(layers.Layer):
         use_bias: bool = False,
         kernel_initializer: str = "glorot_uniform",
         kernel_regularizer: Optional[Any] = None,
+        gate_activation_type: str = "sigmoid",
+        gate_activation_args: Optional[Dict[str, Any]] = None,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -284,6 +297,13 @@ class TripSE1(layers.Layer):
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.gate_activation_type = gate_activation_type
+        self.gate_activation_args = gate_activation_args
+
+        branch_act_kwargs = {
+            "gate_activation_type": self.gate_activation_type,
+            "gate_activation_args": self.gate_activation_args,
+        }
 
         # Triplet Attention Branches
         self.branch_hw = TripletAttentionBranch(
@@ -292,7 +312,8 @@ class TripSE1(layers.Layer):
             use_bias=use_bias,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
-            name="branch_hw"
+            name="branch_hw",
+            **branch_act_kwargs,
         )
         self.branch_cw = TripletAttentionBranch(
             kernel_size=kernel_size,
@@ -300,7 +321,8 @@ class TripSE1(layers.Layer):
             use_bias=use_bias,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
-            name="branch_cw"
+            name="branch_cw",
+            **branch_act_kwargs,
         )
         self.branch_hc = TripletAttentionBranch(
             kernel_size=kernel_size,
@@ -308,9 +330,10 @@ class TripSE1(layers.Layer):
             use_bias=use_bias,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
-            name="branch_hc"
+            name="branch_hc",
+            **branch_act_kwargs,
         )
-        
+
         # SE Block (created here, built in build)
         self.se_block = SqueezeExcitation(
             reduction_ratio=reduction_ratio,
@@ -349,6 +372,8 @@ class TripSE1(layers.Layer):
             "use_bias": self.use_bias,
             "kernel_initializer": initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
+            "gate_activation_type": self.gate_activation_type,
+            "gate_activation_args": self.gate_activation_args,
         })
         return config
 
@@ -408,6 +433,8 @@ class TripSE2(layers.Layer):
         use_bias: bool = False,
         kernel_initializer: str = "glorot_uniform",
         kernel_regularizer: Optional[Any] = None,
+        gate_activation_type: str = "sigmoid",
+        gate_activation_args: Optional[Dict[str, Any]] = None,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -416,16 +443,19 @@ class TripSE2(layers.Layer):
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.gate_activation_type = gate_activation_type
+        self.gate_activation_args = gate_activation_args
 
         # We need distinct SE and Conv blocks for each branch because shapes differ
         self._patterns = [(0, 1, 2), (0, 2, 1), (2, 1, 0)]
         self._suffixes = ["hw", "cw", "hc"]
-        
+
         # Containers for sub-layers
         self.se_layers: List[SqueezeExcitation] = []
         self.conv_layers: List[layers.Conv2D] = []
         self.bn_layers: List[layers.BatchNormalization] = []
-        
+        self.gate_activations: List[keras.layers.Layer] = []
+
         for suffix in self._suffixes:
             self.se_layers.append(SqueezeExcitation(
                 reduction_ratio=reduction_ratio,
@@ -443,10 +473,15 @@ class TripSE2(layers.Layer):
                 name=f"conv_{suffix}"
             ))
             self.bn_layers.append(layers.BatchNormalization(name=f"bn_{suffix}"))
+            self.gate_activations.append(resolve_activation_layer(
+                self.gate_activation_type,
+                name=f"gate_activation_{suffix}",
+                **(self.gate_activation_args or {}),
+            ))
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         batch = input_shape[0]
-        
+
         for i, pattern in enumerate(self._patterns):
             # Calculate permuted shape
             # Pattern relative to (H,W,C) -> e.g. (0,2,1) means (H,C,W)
@@ -454,14 +489,15 @@ class TripSE2(layers.Layer):
             # Pattern indices map to [1, 2, 3]
             perm_indices = [p + 1 for p in pattern]
             permuted_shape = (batch,) + tuple(input_shape[idx] for idx in perm_indices)
-            
+
             # Build SE on permuted shape
             self.se_layers[i].build(permuted_shape)
-            
+
             # Conv input is (B, D1, D2, 2)
             d1, d2 = permuted_shape[1], permuted_shape[2]
             self.conv_layers[i].build((batch, d1, d2, 2))
             self.bn_layers[i].build((batch, d1, d2, 1))
+            self.gate_activations[i].build((batch, d1, d2, 1))
 
         super().build(input_shape)
 
@@ -486,8 +522,8 @@ class TripSE2(layers.Layer):
             
             att = self.conv_layers[i](pooled)
             att = self.bn_layers[i](att, training=training)
-            att = ops.sigmoid(att)
-            
+            att = self.gate_activations[i](att, training=training)
+
             # 4. Scale
             branch_out = ops.multiply(x_se, att)
             
@@ -513,6 +549,8 @@ class TripSE2(layers.Layer):
             "use_bias": self.use_bias,
             "kernel_initializer": initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
+            "gate_activation_type": self.gate_activation_type,
+            "gate_activation_args": self.gate_activation_args,
         })
         return config
 
@@ -574,6 +612,8 @@ class TripSE3(layers.Layer):
         use_bias: bool = False,
         kernel_initializer: str = "glorot_uniform",
         kernel_regularizer: Optional[Any] = None,
+        gate_activation_type: str = "sigmoid",
+        gate_activation_args: Optional[Dict[str, Any]] = None,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -582,22 +622,25 @@ class TripSE3(layers.Layer):
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.gate_activation_type = gate_activation_type
+        self.gate_activation_args = gate_activation_args
 
         # Initialize helper class to get weights instead of scaled input
         # Note: Since the provided SqueezeExcitation returns x*s, and we want s,
-        # we will use SqueezeExcitation but need to extract s. 
+        # we will use SqueezeExcitation but need to extract s.
         # Standard SqueezeExcitation does not expose 's'.
         # However, TripSE3 logic in source was: Output = X * (Att_spatial * Weights_SE).
         # This is equivalent to Output = (X * Weights_SE) * Att_spatial = SE(X) * Att_spatial.
         # So we can use the standard SE block output!
-        
+
         self._patterns = [(0, 1, 2), (0, 2, 1), (2, 1, 0)]
         self._suffixes = ["hw", "cw", "hc"]
-        
+
         self.se_layers: List[SqueezeExcitation] = []
         self.conv_layers: List[layers.Conv2D] = []
         self.bn_layers: List[layers.BatchNormalization] = []
-        
+        self.gate_activations: List[keras.layers.Layer] = []
+
         for suffix in self._suffixes:
             self.se_layers.append(SqueezeExcitation(
                 reduction_ratio=reduction_ratio,
@@ -615,19 +658,25 @@ class TripSE3(layers.Layer):
                 name=f"conv_{suffix}"
             ))
             self.bn_layers.append(layers.BatchNormalization(name=f"bn_{suffix}"))
+            self.gate_activations.append(resolve_activation_layer(
+                self.gate_activation_type,
+                name=f"gate_activation_{suffix}",
+                **(self.gate_activation_args or {}),
+            ))
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         batch = input_shape[0]
         for i, pattern in enumerate(self._patterns):
             perm_indices = [p + 1 for p in pattern]
             permuted_shape = (batch,) + tuple(input_shape[idx] for idx in perm_indices)
-            
+
             self.se_layers[i].build(permuted_shape)
-            
+
             d1, d2 = permuted_shape[1], permuted_shape[2]
             self.conv_layers[i].build((batch, d1, d2, 2))
             self.bn_layers[i].build((batch, d1, d2, 1))
-            
+            self.gate_activations[i].build((batch, d1, d2, 1))
+
         super().build(input_shape)
 
     def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
@@ -651,7 +700,7 @@ class TripSE3(layers.Layer):
             
             att_spatial = self.conv_layers[i](pooled)
             att_spatial = self.bn_layers[i](att_spatial, training=training)
-            att_spatial = ops.sigmoid(att_spatial)
+            att_spatial = self.gate_activations[i](att_spatial, training=training)
             
             # 4. Combine: SE_Output * Spatial_Map
             # equivalent to X * ChannelWeights * SpatialWeights
@@ -678,6 +727,8 @@ class TripSE3(layers.Layer):
             "use_bias": self.use_bias,
             "kernel_initializer": initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
+            "gate_activation_type": self.gate_activation_type,
+            "gate_activation_args": self.gate_activation_args,
         })
         return config
 
@@ -730,6 +781,7 @@ class _SEWeights(layers.Layer):
         self,
         reduction_ratio: float = 0.25,
         activation: str = 'relu',
+        activation_args: Optional[Dict[str, Any]] = None,
         use_bias: bool = False,
         kernel_initializer: str = 'glorot_uniform',
         kernel_regularizer: Optional[Any] = None,
@@ -738,12 +790,17 @@ class _SEWeights(layers.Layer):
         super().__init__(**kwargs)
         self.reduction_ratio = reduction_ratio
         self.activation = activation
+        self.activation_args = activation_args
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        
+
         self.global_pool = layers.GlobalAveragePooling2D(keepdims=True)
-        self.reduction_activation = layers.Activation(activation)
+        self.reduction_activation = resolve_activation_layer(
+            self.activation,
+            name="reduction_activation",
+            **(self.activation_args or {}),
+        )
         self.conv_reduce = None
         self.conv_restore = None
 
@@ -791,6 +848,7 @@ class _SEWeights(layers.Layer):
         config.update({
             "reduction_ratio": self.reduction_ratio,
             "activation": self.activation,
+            "activation_args": self.activation_args,
             "use_bias": self.use_bias,
             "kernel_initializer": initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
@@ -861,6 +919,10 @@ class TripSE4(layers.Layer):
         use_bias: bool = False,
         kernel_initializer: str = "glorot_uniform",
         kernel_regularizer: Optional[Any] = None,
+        gate_activation_type: str = "sigmoid",
+        gate_activation_args: Optional[Dict[str, Any]] = None,
+        se_reduction_activation_type: str = "relu",
+        se_reduction_activation_args: Optional[Dict[str, Any]] = None,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -869,19 +931,26 @@ class TripSE4(layers.Layer):
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.gate_activation_type = gate_activation_type
+        self.gate_activation_args = gate_activation_args
+        self.se_reduction_activation_type = se_reduction_activation_type
+        self.se_reduction_activation_args = se_reduction_activation_args
 
         self._patterns = [(0, 1, 2), (0, 2, 1), (2, 1, 0)]
         self._suffixes = ["hw", "cw", "hc"]
-        
+
         # Components
         self.se_logit_layers: List[_SEWeights] = []
         self.conv_layers: List[layers.Conv2D] = []
         self.bn_layers: List[layers.BatchNormalization] = []
-        
+        self.gate_activations: List[keras.layers.Layer] = []
+
         for suffix in self._suffixes:
             # Internal helper to get MLP logits
             self.se_logit_layers.append(_SEWeights(
                 reduction_ratio=reduction_ratio,
+                activation=self.se_reduction_activation_type,
+                activation_args=self.se_reduction_activation_args,
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"se_logits_{suffix}"
@@ -896,7 +965,12 @@ class TripSE4(layers.Layer):
                 name=f"conv_{suffix}"
             ))
             self.bn_layers.append(layers.BatchNormalization(name=f"bn_{suffix}"))
-            
+            self.gate_activations.append(resolve_activation_layer(
+                self.gate_activation_type,
+                name=f"gate_activation_{suffix}",
+                **(self.gate_activation_args or {}),
+            ))
+
         self.final_se = SqueezeExcitation(
             reduction_ratio=reduction_ratio,
             kernel_initializer=self.kernel_initializer,
@@ -912,11 +986,13 @@ class TripSE4(layers.Layer):
             permuted_shape = (batch,) + tuple(input_shape[idx] for idx in perm_indices)
             
             self.se_logit_layers[i].build(permuted_shape)
-            
+
             d1, d2 = permuted_shape[1], permuted_shape[2]
             self.conv_layers[i].build((batch, d1, d2, 2))
             self.bn_layers[i].build((batch, d1, d2, 1))
-        
+            # Gate activation operates on the fused 3D logits (B, D1, D2, D3)
+            self.gate_activations[i].build(permuted_shape)
+
         self.final_se.build(input_shape)
         super().build(input_shape)
 
@@ -948,7 +1024,7 @@ class TripSE4(layers.Layer):
             # (B, D1, D2, 1) + (B, 1, 1, D3) -> (B, D1, D2, D3)
             # This creates a 3D attention tensor
             fused_logits = ops.add(logits_spatial, logits_channel)
-            attention_3d = ops.sigmoid(fused_logits)
+            attention_3d = self.gate_activations[i](fused_logits, training=training)
             
             # 5. Apply
             scaled = ops.multiply(x, attention_3d)
@@ -978,6 +1054,10 @@ class TripSE4(layers.Layer):
             "use_bias": self.use_bias,
             "kernel_initializer": initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
+            "gate_activation_type": self.gate_activation_type,
+            "gate_activation_args": self.gate_activation_args,
+            "se_reduction_activation_type": self.se_reduction_activation_type,
+            "se_reduction_activation_args": self.se_reduction_activation_args,
         })
         return config
 

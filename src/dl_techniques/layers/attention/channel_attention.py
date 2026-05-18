@@ -64,6 +64,8 @@ References:
 import keras
 from typing import Optional, Union, Dict, Any, Tuple
 
+from ..activations import resolve_activation_layer
+
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
@@ -143,6 +145,10 @@ class ChannelAttention(keras.layers.Layer):
             kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
             use_bias: bool = False,
+            intermediate_activation_type: str = 'relu',
+            intermediate_activation_args: Optional[Dict[str, Any]] = None,
+            gate_activation_type: str = 'sigmoid',
+            gate_activation_args: Optional[Dict[str, Any]] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -163,16 +169,25 @@ class ChannelAttention(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.use_bias = use_bias
+        self.intermediate_activation_type = intermediate_activation_type
+        self.intermediate_activation_args = intermediate_activation_args
+        self.gate_activation_type = gate_activation_type
+        self.gate_activation_args = gate_activation_args
 
         # CREATE sub-layers in __init__ following modern Keras 3 pattern
         # These layers are unbuilt at this point
         self.dense1 = keras.layers.Dense(
             units=channels // ratio,
-            activation='relu',
             use_bias=use_bias,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name='channel_attention_dense_1'
+        )
+
+        self.intermediate_activation = resolve_activation_layer(
+            self.intermediate_activation_type,
+            name='channel_attention_intermediate_activation',
+            **(self.intermediate_activation_args or {}),
         )
 
         self.dense2 = keras.layers.Dense(
@@ -181,6 +196,12 @@ class ChannelAttention(keras.layers.Layer):
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             name='channel_attention_dense_2'
+        )
+
+        self.gate_activation = resolve_activation_layer(
+            self.gate_activation_type,
+            name='channel_attention_gate_activation',
+            **(self.gate_activation_args or {}),
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -216,8 +237,14 @@ class ChannelAttention(keras.layers.Layer):
         # Compute intermediate shape after first dense layer
         dense1_output_shape = self.dense1.compute_output_shape(mlp_input_shape)
 
+        # Build intermediate activation
+        self.intermediate_activation.build(dense1_output_shape)
+
         # Build second dense layer
         self.dense2.build(dense1_output_shape)
+
+        # Build gate activation (applied on summed dense2 outputs of shape (B, C))
+        self.gate_activation.build((input_shape[0], self.channels))
 
         # Always call parent build at the end
         super().build(input_shape)
@@ -252,14 +279,18 @@ class ChannelAttention(keras.layers.Layer):
 
         # Pass through shared MLP
         avg_out = self.dense1(avg_pool_flat, training=training)
+        avg_out = self.intermediate_activation(avg_out, training=training)
         avg_out = self.dense2(avg_out, training=training)
 
         max_out = self.dense1(max_pool_flat, training=training)
+        max_out = self.intermediate_activation(max_out, training=training)
         max_out = self.dense2(max_out, training=training)
 
-        # Combine outputs and apply sigmoid activation
+        # Combine outputs and apply gate activation (defaults to sigmoid)
         # Shape: (batch_size, channels)
-        attention_weights = keras.ops.sigmoid(avg_out + max_out)
+        attention_weights = self.gate_activation(
+            avg_out + max_out, training=training
+        )
 
         # Reshape back to spatial format for broadcasting
         # Shape: (batch_size, channels) -> (batch_size, 1, 1, channels)
@@ -297,6 +328,10 @@ class ChannelAttention(keras.layers.Layer):
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "use_bias": self.use_bias,
+            "intermediate_activation_type": self.intermediate_activation_type,
+            "intermediate_activation_args": self.intermediate_activation_args,
+            "gate_activation_type": self.gate_activation_type,
+            "gate_activation_args": self.gate_activation_args,
         })
         return config
 

@@ -61,6 +61,7 @@ from typing import Optional, Any, Dict, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from ..activations import resolve_activation_layer
 
 # ---------------------------------------------------------------------
 
@@ -205,6 +206,10 @@ class WaveFieldAttention(keras.layers.Layer):
         bias_initializer: Union[str, keras.initializers.Initializer] = "zeros",
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         bias_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        query_modulation_activation_type: str = "sigmoid",
+        query_modulation_activation_args: Optional[Dict[str, Any]] = None,
+        gate_activation_type: str = "sigmoid",
+        gate_activation_args: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -236,6 +241,10 @@ class WaveFieldAttention(keras.layers.Layer):
         self.bias_initializer = keras.initializers.get(bias_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
+        self.query_modulation_activation_type = query_modulation_activation_type
+        self.query_modulation_activation_args = query_modulation_activation_args
+        self.gate_activation_type = gate_activation_type
+        self.gate_activation_args = gate_activation_args
 
         self.scale = math.sqrt(self.head_dim)
         self._field_stride = float((field_size - 1) / max(max_seq_len - 1, 1))
@@ -267,6 +276,18 @@ class WaveFieldAttention(keras.layers.Layer):
             else None
         )
 
+        # Parameterized activations (default to sigmoid for both)
+        self.query_modulation_activation = resolve_activation_layer(
+            self.query_modulation_activation_type,
+            name="query_modulation_activation",
+            **(self.query_modulation_activation_args or {}),
+        )
+        self.gate_activation = resolve_activation_layer(
+            self.gate_activation_type,
+            name="gate_activation",
+            **(self.gate_activation_args or {}),
+        )
+
     # -----------------------------------------------------------------
     # build
     # -----------------------------------------------------------------
@@ -285,6 +306,12 @@ class WaveFieldAttention(keras.layers.Layer):
         self.output_proj.build(proj_shape)
         if self.dropout_layer is not None:
             self.dropout_layer.build(proj_shape)
+
+        # Build parameterized activations.
+        # Query modulation acts on (B, H, N, D_h); content gate acts on (B, N, D).
+        q_mod_shape = (input_shape[0], H, input_shape[1], self.head_dim)
+        self.query_modulation_activation.build(q_mod_shape)
+        self.gate_activation.build(proj_shape)
 
         # --- wave kernel parameters (per head) ---
         self.wave_frequency = self.add_weight(
@@ -550,11 +577,11 @@ class WaveFieldAttention(keras.layers.Layer):
         # 7. Query-dependent gather modulation (NEW in V3.6)
         #    Q selects which dimensions of propagated info each token reads.
         #    Distinct from the gate (which is input-based, not projection-based).
-        q_mod = ops.sigmoid(q / self.scale)  # (B, H, N, D_h)
+        q_mod = self.query_modulation_activation(q / self.scale, training=training)  # (B, H, N, D_h)
         gathered = gathered * q_mod
 
         # 8. Content-dependent gating (input-based)
-        gate = ops.sigmoid(self.gate_proj(inputs))  # (B, N, D)
+        gate = self.gate_activation(self.gate_proj(inputs), training=training)  # (B, N, D)
         gate = ops.reshape(gate, (batch_size, seq_len, H, D_h))
         gate = ops.transpose(gate, (0, 2, 1, 3))  # (B, H, N, D_h)
         output = gathered * gate
@@ -598,6 +625,10 @@ class WaveFieldAttention(keras.layers.Layer):
             "bias_initializer": keras.initializers.serialize(self.bias_initializer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
+            "query_modulation_activation_type": self.query_modulation_activation_type,
+            "query_modulation_activation_args": self.query_modulation_activation_args,
+            "gate_activation_type": self.gate_activation_type,
+            "gate_activation_args": self.gate_activation_args,
         })
         return config
 
