@@ -367,8 +367,9 @@ def _build_pair(
     n_min: int,
     workers: int,
     seed: int,
+    aux_spec: Optional[DistortionSpec] = None,
 ) -> Tuple[ImageFolderBurstDPLoader, ImageFolderBurstDPLoader]:
-    train_cfg = ImageFolderBurstDPConfig(
+    train_kwargs: Dict[str, Any] = dict(
         image_paths=train_paths,
         image_size=image_size,
         batch_size=batch_size,
@@ -378,7 +379,7 @@ def _build_pair(
         seed=seed,
         workers=workers,
     )
-    val_cfg = ImageFolderBurstDPConfig(
+    val_kwargs: Dict[str, Any] = dict(
         image_paths=val_paths,
         image_size=image_size,
         batch_size=batch_size,
@@ -388,6 +389,11 @@ def _build_pair(
         seed=seed + 1,
         workers=max(1, workers // 2),
     )
+    if aux_spec is not None:
+        train_kwargs["aux_spec"] = aux_spec
+        val_kwargs["aux_spec"] = aux_spec
+    train_cfg = ImageFolderBurstDPConfig(**train_kwargs)
+    val_cfg = ImageFolderBurstDPConfig(**val_kwargs)
     return ImageFolderBurstDPLoader(train_cfg), ImageFolderBurstDPLoader(val_cfg)
 
 
@@ -400,9 +406,17 @@ def build_div2k_burst_dp_datasets(
     max_train_images: Optional[int] = None,
     max_val_images: Optional[int] = None,
     workers: int = 4,
+    aux_spec: Optional[DistortionSpec] = None,
     seed: int = 0,
 ) -> Tuple[ImageFolderBurstDPLoader, ImageFolderBurstDPLoader]:
-    """Build (train, val) Burst-DP loaders for DIV2K."""
+    """Build (train, val) Burst-DP loaders for DIV2K.
+
+    Parameters
+    ----------
+    aux_spec : DistortionSpec, optional
+        If provided, overrides the default aux distortion spec for both
+        loaders. ``None`` keeps the current default behavior.
+    """
     train_paths, val_paths = discover_div2k_paths(div2k_root)
     train_paths = _slice(train_paths, max_train_images)
     val_paths = _slice(val_paths, max_val_images)
@@ -415,6 +429,7 @@ def build_div2k_burst_dp_datasets(
         n_min=n_min,
         workers=workers,
         seed=seed,
+        aux_spec=aux_spec,
     )
 
 
@@ -427,9 +442,17 @@ def build_vggface2_burst_dp_datasets(
     max_train_images: Optional[int] = None,
     max_val_images: Optional[int] = None,
     workers: int = 4,
+    aux_spec: Optional[DistortionSpec] = None,
     seed: int = 0,
 ) -> Tuple[ImageFolderBurstDPLoader, ImageFolderBurstDPLoader]:
-    """Build (train, val) Burst-DP loaders for VGG-Face2."""
+    """Build (train, val) Burst-DP loaders for VGG-Face2.
+
+    Parameters
+    ----------
+    aux_spec : DistortionSpec, optional
+        If provided, overrides the default aux distortion spec for both
+        loaders. ``None`` keeps the current default behavior.
+    """
     train_paths, val_paths = discover_vggface2_paths(vggface2_root)
     train_paths = _slice(train_paths, max_train_images)
     val_paths = _slice(val_paths, max_val_images)
@@ -442,4 +465,5 @@ def build_vggface2_burst_dp_datasets(
         n_min=n_min,
         workers=workers,
         seed=seed,
+        aux_spec=aux_spec,
     )
