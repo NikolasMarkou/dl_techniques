@@ -16,10 +16,15 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from dl_techniques.datasets.vision.coco_burst_dp import (
+    DistortionSpec,
+    default_aux_spec,
+)
 from dl_techniques.datasets.vision.image_folder_burst_dp import (
     ImageFolderBurstDPConfig,
     ImageFolderBurstDPLoader,
     build_div2k_burst_dp_datasets,
+    build_vggface2_burst_dp_datasets,
     discover_div2k_paths,
     discover_vggface2_paths,
 )
@@ -202,6 +207,52 @@ class TestImageFolderLoader:
                 seen.add(v)
         # Across multiple batches we should see more than one value.
         assert len(seen) >= 2, f"aux n was constant across batches: {seen}"
+
+    def test_aux_spec_propagates_div2k(self, div2k_root: Path) -> None:
+        custom = DistortionSpec(noise_sigma_range=(0.5, 0.5))
+        train, val = build_div2k_burst_dp_datasets(
+            div2k_root=str(div2k_root),
+            image_size=32,
+            batch_size=2,
+            n_max=2,
+            n_min=1,
+            max_train_images=2,
+            max_val_images=1,
+            workers=1,
+            aux_spec=custom,
+            seed=0,
+        )
+        assert train.cfg.aux_spec.noise_sigma_range == (0.5, 0.5)
+        assert val.cfg.aux_spec.noise_sigma_range == (0.5, 0.5)
+        # Sanity: passing None preserves default.
+        train2, _ = build_div2k_burst_dp_datasets(
+            div2k_root=str(div2k_root),
+            image_size=32,
+            batch_size=2,
+            n_max=2,
+            n_min=1,
+            max_train_images=2,
+            max_val_images=1,
+            workers=1,
+            aux_spec=None,
+            seed=0,
+        )
+        assert train2.cfg.aux_spec.noise_sigma_range == default_aux_spec().noise_sigma_range
+
+    def test_aux_spec_propagates_vggface2(self, vggface2_root: Path) -> None:
+        custom = DistortionSpec(noise_sigma_range=(0.5, 0.5))
+        train, val = build_vggface2_burst_dp_datasets(
+            vggface2_root=str(vggface2_root),
+            image_size=32,
+            batch_size=2,
+            n_max=2,
+            n_min=1,
+            workers=1,
+            aux_spec=custom,
+            seed=0,
+        )
+        assert train.cfg.aux_spec.noise_sigma_range == (0.5, 0.5)
+        assert val.cfg.aux_spec.noise_sigma_range == (0.5, 0.5)
 
     def test_max_train_images_slicing_via_factory(self, div2k_root: Path) -> None:
         train, val = build_div2k_burst_dp_datasets(
