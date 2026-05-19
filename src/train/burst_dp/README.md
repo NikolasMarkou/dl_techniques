@@ -35,6 +35,50 @@ MPLBACKEND=Agg .venv/bin/python -m train.burst_dp.train_burst_dp \
     --gpu 0
 ```
 
+## Datasets
+
+`--dataset {coco,div2k,vggface2}` selects the training source. Default is
+`coco` and is bit-for-bit back-compatible with the previous behavior.
+
+| Dataset    | Mode         | Source layout                                                 | Heads trained         |
+|------------|--------------|---------------------------------------------------------------|-----------------------|
+| `coco`     | multi-task   | `<coco-root>/{train2017,val2017,annotations}/...`             | `recon` + `segmentation` |
+| `div2k`    | fidelity-only| `<div2k-root>/{train,validation}/*.png` (800 / 100 images)    | `recon` (seg head zero-weighted) |
+| `vggface2` | fidelity-only| `<vggface2-root>/{train_list.txt,test_list.txt,train/,test/}` | `recon` (seg head zero-weighted) |
+
+**Fidelity-only mode**: DIV2K and VGG-Face2 lack segmentation labels.
+The `BurstDP` model is hardcoded dual-head, so we keep the segmentation
+head in the graph but zero its loss weight and drop its metrics. The
+seg head still runs forward + backward but contributes nothing to the
+total loss — a ~5-15% compute overhead in exchange for zero blast
+radius on the model / config / saved-checkpoint surface. If you set
+`--loss-seg` to a non-zero value with a fidelity-only dataset, the
+trainer logs a warning and forces it to `0.0`.
+
+Example invocations:
+
+```bash
+# DIV2K, single GPU, full 800 train images
+MPLBACKEND=Agg .venv/bin/python -m train.burst_dp.train_burst_dp \
+    --dataset div2k \
+    --div2k-root /media/arxwn/data0_4tb/datasets/div2k \
+    --preset burst_dp_small --image-size 256 --patch-size 16 \
+    --n-max 5 --n-min 1 --batch-size 4 --epochs 40 \
+    --out-dir src/results/burst_dp/div2k_run01 --gpu 0 --mixed-precision
+```
+
+```bash
+# VGG-Face2 — always cap train/val with --max-*-images
+# (3.1M training JPGs otherwise)
+MPLBACKEND=Agg .venv/bin/python -m train.burst_dp.train_burst_dp \
+    --dataset vggface2 \
+    --vggface2-root /media/arxwn/data0_4tb/datasets/VGG-Face2/data \
+    --preset burst_dp_small --image-size 256 --patch-size 16 \
+    --n-max 5 --n-min 1 --batch-size 4 --epochs 10 \
+    --max-train-images 100000 --max-val-images 5000 \
+    --out-dir src/results/burst_dp/vggface2_run01 --gpu 0 --mixed-precision
+```
+
 ## Visualizations
 
 The trainer saves a `(num_samples x 6)` recon + segmentation comparison
