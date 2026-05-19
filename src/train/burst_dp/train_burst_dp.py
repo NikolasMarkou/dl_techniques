@@ -1,0 +1,278 @@
+"""Training script for BurstDP on COCO 2017 with synthetic auxiliary views.
+
+Usage (v1, no depth supervision)::
+
+    MPLBACKEND=Agg .venv/bin/python -m train.burst_dp.train_burst_dp \\
+        --preset burst_dp_small \\
+        --image-size 256 \\
+        --batch-size 4 \\
+        --epochs 40 \\
+        --n-max 5 --n-min 1 \\
+        --coco-root /media/arxwn/data0_4tb/datasets/coco_2017 \\
+        --out-dir src/results/burst_dp/run01 \\
+        --gpu 0
+
+The training pipeline:
+    - shared ViT encoder
+    - ref-conditioned set-fusion stack
+    - 3 heads (recon, segmentation, depth — last one disabled in v1)
+
+Losses:
+    - reconstruction : Charbonnier loss vs. clean reference
+    - segmentation   : sparse categorical cross-entropy
+    - depth          : (disabled when ``--no-depth``; default is no depth)
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import time
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+import keras
+import numpy as np
+import tensorflow as tf
+
+from dl_techniques.datasets.vision.coco_multitask_local import COCO_DEFAULT_ROOT
+from dl_techniques.datasets.vision.coco_burst_dp import (
+    build_coco_burst_dp_datasets,
+    default_anchor_spec,
+    default_aux_spec,
+)
+# COCOBurstDPConfig + COCO2017BurstDPLoader were referenced by the now-removed
+# tf.data wrapper (see D-001 below). Keras 3 model.fit consumes the PyDataset
+# directly, so neither name is needed in this module anymore.
+from dl_techniques.models.burst_dp import (
+    DEFAULT_NUM_SEG_CLASSES,
+    BurstDP,
+    create_burst_dp,
+)
+from dl_techniques.utils.logger import logger
+
+# train.common helpers — local imports are kept conditional so the unit test
+# environment does not need the full training stack on PYTHONPATH.
+try:
+    from train.common.gpu import setup_gpu
+except Exception:  # pragma: no cover — fallback for editable installs
+    setup_gpu = None  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
+# Losses
+# ---------------------------------------------------------------------------
+
+
+def charbonnier_loss(epsilon: float = 1e-3):
+    """Robust L1-ish loss: sqrt((y_true - y_pred)^2 + eps^2)."""
+    def _loss(y_true, y_pred):
+        diff = y_true - y_pred
+        return tf.reduce_mean(tf.sqrt(diff * diff + epsilon * epsilon))
+    _loss.__name__ = "charbonnier_loss"
+    return _loss
+
+
+def sparse_seg_ce_loss():
+    """Sparse categorical cross-entropy from logits."""
+    cce = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
+    def _loss(y_true, y_pred):
+        # y_true: (B, H, W) int; y_pred: (B, H, W, C) logits.
+        return cce(y_true, y_pred)
+    _loss.__name__ = "sparse_seg_ce"
+    return _loss
+
+
+# DECISION plan_2026-05-19_39a6a454/D-001
+# Earlier versions of this script wrapped `COCO2017BurstDPLoader` (a
+# `keras.utils.PyDataset` with `workers=4, use_multiprocessing=True`) in
+# `tf.data.Dataset.from_generator(...)` for `model.fit`. That wrap actively
+# defeats the PyDataset's parallel worker pool (the generator runs single-
+# threaded in the main process). Keras 3 supports passing a `PyDataset`
+# directly to `model.fit(...)` and iterates with the configured workers.
+# Reuse-review proposed "switch to indefinite generator + steps_per_epoch"
+# (the video_jepa pattern). That is the right shape for *generator-based*
+# loaders without a PyDataset abstraction; for us, the cleaner fix is to
+# drop the wrap entirely. See plans/plan_2026-05-19_39a6a454/findings/
+# 03-train-script-current-state.md.
+
+
+# ---------------------------------------------------------------------------
+# Args
+# ---------------------------------------------------------------------------
+
+
+def build_argparser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Train BurstDP on COCO 2017.")
+    p.add_argument("--preset", type=str, default="burst_dp_small",
+                   choices=["burst_dp_pico", "burst_dp_tiny", "burst_dp_small", "burst_dp_base"])
+    p.add_argument("--image-size", type=int, default=256)
+    p.add_argument("--patch-size", type=int, default=16)
+    p.add_argument("--n-max", type=int, default=5)
+    p.add_argument("--n-min", type=int, default=1)
+
+    p.add_argument("--coco-root", type=str, default=COCO_DEFAULT_ROOT)
+    p.add_argument("--max-train-images", type=int, default=None)
+    p.add_argument("--max-val-images", type=int, default=None)
+
+    p.add_argument("--batch-size", type=int, default=4)
+    p.add_argument("--epochs", type=int, default=40)
+    p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--weight-decay", type=float, default=0.05)
+    p.add_argument("--warmup-epochs", type=int, default=1)
+
+    p.add_argument("--loss-recon", type=float, default=1.0)
+    p.add_argument("--loss-seg", type=float, default=1.0)
+    p.add_argument("--loss-depth", type=float, default=0.5)
+
+    p.add_argument("--no-depth", action="store_true",
+                   help="Disable depth head (v1 default: no DepthAnything teacher on disk).")
+    p.add_argument("--mixed-precision", action="store_true",
+                   help="Enable fp16 mixed precision (recommended on RTX 4090).")
+    p.add_argument("--workers", type=int, default=4)
+
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--gpu", type=int, default=0)
+    p.add_argument("--out-dir", type=str, default="src/results/burst_dp/run")
+    return p
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+
+def main(argv: Optional[list] = None) -> None:
+    args = build_argparser().parse_args(argv)
+
+    # Reproducibility
+    keras.utils.set_random_seed(args.seed)
+    np.random.seed(args.seed)
+
+    # GPU
+    if setup_gpu is not None:
+        setup_gpu(gpu_id=args.gpu)
+
+    # Mixed precision
+    if args.mixed_precision:
+        keras.mixed_precision.set_global_policy("mixed_float16")
+        logger.info("Mixed precision (fp16) enabled.")
+
+    # Resolve depth flag.
+    enable_depth = not args.no_depth
+
+    # Output directory
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Output directory: {out_dir}")
+
+    # --- Data ---
+    train_ds, val_ds = build_coco_burst_dp_datasets(
+        coco_root=args.coco_root,
+        image_size=args.image_size,
+        batch_size=args.batch_size,
+        n_max=args.n_max,
+        n_min=args.n_min,
+        max_train_images=args.max_train_images,
+        max_val_images=args.max_val_images,
+        workers=args.workers,
+        seed=args.seed,
+        emit_depth=enable_depth,
+    )
+    logger.info(f"Train probe: {train_ds.probe()}")
+
+    # --- Model ---
+    model = create_burst_dp(
+        preset=args.preset,
+        image_size=args.image_size,
+        patch_size=args.patch_size,
+        n_max=args.n_max,
+        enable_depth=enable_depth,
+    )
+
+    # --- Loss + optimizer ---
+    losses: Dict[str, Any] = {
+        "recon": charbonnier_loss(),
+        "segmentation": sparse_seg_ce_loss(),
+    }
+    loss_weights: Dict[str, float] = {
+        "recon": args.loss_recon,
+        "segmentation": args.loss_seg,
+    }
+    if enable_depth:
+        # v1: depth is wired but typically off because no teacher exists.
+        # When user provides labels, swap in AffineInvariantLoss.
+        from dl_techniques.losses.affine_invariant_loss import AffineInvariantLoss
+        losses["depth"] = AffineInvariantLoss()
+        loss_weights["depth"] = args.loss_depth
+
+    steps_per_epoch = max(1, len(train_ds))
+    total_steps = steps_per_epoch * args.epochs
+    warmup_steps = steps_per_epoch * args.warmup_epochs
+    cosine_steps = max(1, total_steps - warmup_steps)
+
+    lr_schedule = keras.optimizers.schedules.CosineDecay(
+        initial_learning_rate=args.lr,
+        decay_steps=cosine_steps,
+        warmup_target=args.lr,
+        warmup_steps=warmup_steps,
+    )
+    optimizer = keras.optimizers.AdamW(
+        learning_rate=lr_schedule,
+        weight_decay=args.weight_decay,
+    )
+
+    model.compile(optimizer=optimizer, loss=losses, loss_weights=loss_weights)
+
+    # --- Callbacks ---
+    # `TerminateOnNaN` MUST be first: the masked-softmax path in the fusion
+    # block can produce NaN if the any-valid gate breaks, and we want training
+    # to halt before any subsequent checkpoint commits a corrupted model.
+    ckpt_path = str(out_dir / "burst_dp_best.keras")
+    callbacks = [
+        keras.callbacks.TerminateOnNaN(),
+        keras.callbacks.ModelCheckpoint(
+            ckpt_path, monitor="val_loss", save_best_only=True, verbose=1
+        ),
+        keras.callbacks.TensorBoard(log_dir=str(out_dir / "tb")),
+        keras.callbacks.EarlyStopping(monitor="val_loss", patience=8, restore_best_weights=True, verbose=1),
+        keras.callbacks.CSVLogger(str(out_dir / "history.csv")),
+    ]
+
+    # Persist run config
+    run_cfg = {
+        "args": vars(args),
+        "model_config": model.config.to_dict(),
+        "anchor_spec": asdict(default_anchor_spec()),
+        "aux_spec": asdict(default_aux_spec()),
+        "steps_per_epoch": steps_per_epoch,
+        "warmup_steps": warmup_steps,
+        "cosine_steps": cosine_steps,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    with open(out_dir / "run_config.json", "w") as f:
+        json.dump(run_cfg, f, indent=2, default=str)
+
+    # --- Fit ---
+    # PyDataset passes directly to model.fit; Keras 3 iterates with the
+    # configured `workers` + `use_multiprocessing` from the loader's
+    # __init__ (see D-001 anchor at top of file).
+    history = model.fit(
+        train_ds,
+        validation_data=val_ds,
+        epochs=args.epochs,
+        callbacks=callbacks,
+        verbose=1,
+    )
+
+    # Save final model.
+    final_path = str(out_dir / "burst_dp_final.keras")
+    model.save(final_path)
+    logger.info(f"Final model saved to {final_path}")
+    logger.info("Training complete.")
+
+
+if __name__ == "__main__":
+    main()
