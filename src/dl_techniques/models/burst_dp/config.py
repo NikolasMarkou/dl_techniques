@@ -4,13 +4,9 @@ Multi-view reference-conditioned vision model. One privileged reference frame
 is fused with a variable number (1-5 in practice; 0..N_max supported) of
 auxiliary views via masked cross-attention.
 
-Three task heads are wired:
+Two task heads are wired:
     - reconstruction: clean version of the (corrupted) reference
     - segmentation:   per-pixel class indices (COCO 81-way)
-    - depth:          per-pixel scale/shift-invariant depth (opt-out via
-                      ``has_depth`` flag in the batch labels; depth head can
-                      be disabled at construction time when no teacher is
-                      available, the v1 case for this repo).
 """
 
 from __future__ import annotations
@@ -52,8 +48,6 @@ class BurstDPConfig:
         attention_dropout_rate: Dropout on attention weights specifically.
         recon_channels: Output channels for reconstruction (3 for RGB).
         num_seg_classes: Segmentation classes incl. background.
-        enable_depth: If False, the depth head is not constructed at all.
-            v1 default is False (no pseudo-depth teacher on disk yet).
         decoder_dims: DPT decoder channel sequence. Length must be at least
             ``log2(patch_size)`` so the cumulative bilinear upsample
             recovers the input resolution.
@@ -80,7 +74,6 @@ class BurstDPConfig:
     # Heads
     recon_channels: int = 3
     num_seg_classes: int = DEFAULT_NUM_SEG_CLASSES
-    enable_depth: bool = False
     decoder_dims: Tuple[int, ...] = (256, 128, 64, 32)
 
     def validate(self) -> None:
@@ -125,7 +118,6 @@ class BurstDPConfig:
             "attention_dropout_rate": self.attention_dropout_rate,
             "recon_channels": self.recon_channels,
             "num_seg_classes": self.num_seg_classes,
-            "enable_depth": self.enable_depth,
             "decoder_dims": list(self.decoder_dims),
         }
 
@@ -146,7 +138,6 @@ class BurstDPConfig:
             attention_dropout_rate=float(d.get("attention_dropout_rate", 0.0)),
             recon_channels=int(d.get("recon_channels", 3)),
             num_seg_classes=int(d.get("num_seg_classes", DEFAULT_NUM_SEG_CLASSES)),
-            enable_depth=bool(d.get("enable_depth", False)),
             decoder_dims=tuple(d.get("decoder_dims", (256, 128, 64, 32))),
         )
 

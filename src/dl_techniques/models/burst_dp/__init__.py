@@ -10,7 +10,7 @@ from .config import (
     get_preset,
 )
 from .fusion import BurstFusionBlock, BurstFusionBlockAdaLN
-from .heads import DepthHead, ReconstructionHead, SegmentationHead
+from .heads import ReconstructionHead, SegmentationHead
 from .model import BurstDP, create_burst_dp
 
 __all__ = [
@@ -25,7 +25,6 @@ __all__ = [
     "BurstFusionBlockAdaLN",
     "ReconstructionHead",
     "SegmentationHead",
-    "DepthHead",
     "BurstDP",
     "create_burst_dp",
 ]

@@ -7,8 +7,6 @@ produces three dense outputs about the reference:
     - ``recon``         : ``(B, H, W, 3)`` clean version of the (possibly
                           corrupted) reference
     - ``segmentation``  : ``(B, H, W, num_seg_classes)`` per-pixel logits
-    - ``depth``         : ``(B, H, W, 1)`` per-pixel depth (only if
-                          ``config.enable_depth=True``)
 
 Auxiliary views are aggregated by *masked* cross-attention with the reference
 patch tokens as queries, making the model permutation-invariant over the
@@ -27,7 +25,7 @@ from dl_techniques.utils.logger import logger
 
 from .config import BurstDPConfig, get_preset
 from .fusion import BurstFusionBlock, BurstFusionBlockAdaLN
-from .heads import DepthHead, ReconstructionHead, SegmentationHead
+from .heads import ReconstructionHead, SegmentationHead
 
 
 # ---------------------------------------------------------------------
@@ -155,21 +153,11 @@ class BurstDP(keras.Model):
             num_classes=config.num_seg_classes,
             name="seg_head",
         )
-        self.depth_head: Optional[DepthHead]
-        if config.enable_depth:
-            self.depth_head = DepthHead(
-                decoder_dims=config.decoder_dims,
-                patch_size=config.patch_size,
-                name="depth_head",
-            )
-        else:
-            self.depth_head = None
 
         logger.info(
             f"BurstDP({config.encoder_scale}): image={config.image_size}px, "
             f"patches={self.num_patches} ({side}x{side}), embed={self.embed_dim}, "
-            f"fusion_blocks={config.fusion_blocks} (type={config.fusion_type}), "
-            f"depth={'ON' if config.enable_depth else 'OFF'}"
+            f"fusion_blocks={config.fusion_blocks} (type={config.fusion_type})"
         )
 
     # ------------------------------------------------------------------
@@ -198,7 +186,7 @@ class BurstDP(keras.Model):
             training: Keras training flag.
 
         Returns:
-            Dict with keys ``recon``, ``segmentation``, and (if enabled) ``depth``.
+            Dict with keys ``recon`` and ``segmentation``.
         """
         ref = inputs["ref"]
         aux = inputs["aux"]
@@ -240,8 +228,6 @@ class BurstDP(keras.Model):
             "recon": self.recon_head(feat, training=training),
             "segmentation": self.seg_head(feat, training=training),
         }
-        if self.depth_head is not None:
-            outputs["depth"] = self.depth_head(feat, training=training)
 
         return outputs
 
