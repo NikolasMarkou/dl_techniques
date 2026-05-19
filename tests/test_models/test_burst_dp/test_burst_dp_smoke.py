@@ -48,7 +48,6 @@ def small_cfg() -> BurstDPConfig:
         fusion_mlp_ratio=2.0,
         recon_channels=3,
         num_seg_classes=DEFAULT_NUM_SEG_CLASSES,
-        enable_depth=False,
         decoder_dims=(48, 32, 16),
     )
 
@@ -81,7 +80,7 @@ class TestBurstDPSmoke:
         model = BurstDP(config=small_cfg)
         out = model(_batch(2, small_cfg, valid_per_sample=2))
         assert "recon" in out and "segmentation" in out
-        assert "depth" not in out  # enable_depth=False
+        assert "depth" not in out
         assert tuple(out["recon"].shape) == (2, small_cfg.image_size, small_cfg.image_size, 3)
         assert tuple(out["segmentation"].shape) == (
             2,
@@ -99,15 +98,6 @@ class TestBurstDPSmoke:
             assert np.isfinite(arr).all(), f"NaN/Inf with valid_per_sample={valid}"
             arr_s = ops.convert_to_numpy(out["segmentation"])
             assert np.isfinite(arr_s).all(), f"NaN/Inf seg with valid_per_sample={valid}"
-
-    def test_depth_head_enabled(self, small_cfg):
-        cfg = BurstDPConfig(**{**small_cfg.to_dict(), "enable_depth": True})
-        # to_dict yields list for decoder_dims; from_dict converts back to tuple.
-        cfg = BurstDPConfig.from_dict({**small_cfg.to_dict(), "enable_depth": True})
-        model = BurstDP(config=cfg)
-        out = model(_batch(2, cfg, valid_per_sample=2))
-        assert "depth" in out
-        assert tuple(out["depth"].shape) == (2, cfg.image_size, cfg.image_size, 1)
 
     def test_one_train_step(self, small_cfg):
         model = BurstDP(config=small_cfg)
@@ -164,7 +154,7 @@ class TestBurstDPSmoke:
 
     def test_factory_preset(self):
         m = create_burst_dp(preset="burst_dp_pico", image_size=64, patch_size=8, n_max=2,
-                          enable_depth=False, decoder_dims=(48, 32, 16),
+                          decoder_dims=(48, 32, 16),
                           fusion_blocks=1, fusion_heads=3)
         assert isinstance(m, BurstDP)
         assert m.config.encoder_scale == "pico"
