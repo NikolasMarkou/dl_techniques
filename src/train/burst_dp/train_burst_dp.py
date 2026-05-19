@@ -1,6 +1,6 @@
 """Training script for BurstDP on COCO 2017 with synthetic auxiliary views.
 
-Usage (v1, no depth supervision)::
+Usage::
 
     MPLBACKEND=Agg .venv/bin/python -m train.burst_dp.train_burst_dp \\
         --preset burst_dp_small \\
@@ -15,12 +15,15 @@ Usage (v1, no depth supervision)::
 The training pipeline:
     - shared ViT encoder
     - ref-conditioned set-fusion stack
-    - 3 heads (recon, segmentation, depth — last one disabled in v1)
+    - 2 heads (recon, segmentation)
 
 Losses:
     - reconstruction : Charbonnier loss vs. clean reference
     - segmentation   : sparse categorical cross-entropy
-    - depth          : (disabled when ``--no-depth``; default is no depth)
+
+Periodic visualization: every ``--viz-every-steps`` optimizer steps and / or
+every ``--viz-every-epochs`` epochs the trainer saves a recon+segmentation
+comparison grid under ``out_dir/viz/`` for a fixed val batch.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ import numpy as np
 import tensorflow as tf
 
 from dl_techniques.datasets.vision.coco_multitask_local import COCO_DEFAULT_ROOT
+from dl_techniques.callbacks.burst_dp_visualization import BurstDPVisualizationCallback
 from dl_techniques.datasets.vision.coco_burst_dp import (
     build_coco_burst_dp_datasets,
     default_anchor_spec,
@@ -127,13 +131,19 @@ def build_argparser() -> argparse.ArgumentParser:
 
     p.add_argument("--loss-recon", type=float, default=1.0)
     p.add_argument("--loss-seg", type=float, default=1.0)
-    p.add_argument("--loss-depth", type=float, default=0.5)
 
-    p.add_argument("--no-depth", action="store_true",
-                   help="Disable depth head (v1 default: no DepthAnything teacher on disk).")
     p.add_argument("--mixed-precision", action="store_true",
                    help="Enable fp16 mixed precision (recommended on RTX 4090).")
     p.add_argument("--workers", type=int, default=4)
+
+    # Periodic visualization. Either trigger > 0 enables the callback; both
+    # 0 means no visualization.
+    p.add_argument("--viz-every-steps", type=int, default=500,
+                   help="Save a recon+seg grid every N optimizer steps. 0 disables.")
+    p.add_argument("--viz-every-epochs", type=int, default=1,
+                   help="Save a recon+seg grid every M epochs. 0 disables.")
+    p.add_argument("--viz-num-samples", type=int, default=4,
+                   help="Rows in the visualization grid (capped to val batch size).")
 
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--gpu", type=int, default=0)
@@ -162,9 +172,6 @@ def main(argv: Optional[list] = None) -> None:
         keras.mixed_precision.set_global_policy("mixed_float16")
         logger.info("Mixed precision (fp16) enabled.")
 
-    # Resolve depth flag.
-    enable_depth = not args.no_depth
-
     # Output directory
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -181,7 +188,6 @@ def main(argv: Optional[list] = None) -> None:
         max_val_images=args.max_val_images,
         workers=args.workers,
         seed=args.seed,
-        emit_depth=enable_depth,
     )
     logger.info(f"Train probe: {train_ds.probe()}")
 
@@ -191,7 +197,6 @@ def main(argv: Optional[list] = None) -> None:
         image_size=args.image_size,
         patch_size=args.patch_size,
         n_max=args.n_max,
-        enable_depth=enable_depth,
     )
 
     # --- Loss + optimizer ---
@@ -203,12 +208,6 @@ def main(argv: Optional[list] = None) -> None:
         "recon": args.loss_recon,
         "segmentation": args.loss_seg,
     }
-    if enable_depth:
-        # v1: depth is wired but typically off because no teacher exists.
-        # When user provides labels, swap in AffineInvariantLoss.
-        from dl_techniques.losses.affine_invariant_loss import AffineInvariantLoss
-        losses["depth"] = AffineInvariantLoss()
-        loss_weights["depth"] = args.loss_depth
 
     steps_per_epoch = max(1, len(train_ds))
     total_steps = steps_per_epoch * args.epochs
@@ -232,9 +231,7 @@ def main(argv: Optional[list] = None) -> None:
     #                                       primary semseg metric).
     # MeanIoU(sparse_y_true=True, sparse_y_pred=False) takes argmax over
     # the logits' last axis internally, so passing the raw seg logits is
-    # correct. Depth metrics (AbsRel, delta_1) need a (depth, mask)
-    # concat that the current loader doesn't emit; wire them in when
-    # depth supervision is re-enabled.
+    # correct.
     metrics: Dict[str, Any] = {
         "recon": [PsnrMetric(max_val=1.0), SsimMetric(max_val=1.0)],
         "segmentation": [
@@ -265,10 +262,23 @@ def main(argv: Optional[list] = None) -> None:
         keras.callbacks.ModelCheckpoint(
             ckpt_path, monitor="val_loss", save_best_only=True, verbose=1
         ),
+    ]
+    if args.viz_every_steps > 0 or args.viz_every_epochs > 0:
+        callbacks.append(
+            BurstDPVisualizationCallback(
+                val_dataset=val_ds,
+                output_dir=str(out_dir),
+                every_steps=args.viz_every_steps,
+                every_epochs=args.viz_every_epochs,
+                num_samples=args.viz_num_samples,
+                seed=args.seed,
+            )
+        )
+    callbacks.extend([
         keras.callbacks.TensorBoard(log_dir=str(out_dir / "tb")),
         keras.callbacks.EarlyStopping(monitor="val_loss", patience=8, restore_best_weights=True, verbose=1),
         keras.callbacks.CSVLogger(str(out_dir / "history.csv")),
-    ]
+    ])
 
     # Persist run config
     run_cfg = {
