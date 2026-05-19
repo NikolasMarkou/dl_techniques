@@ -46,6 +46,8 @@ from dl_techniques.datasets.vision.coco_burst_dp import (
 # COCOBurstDPConfig + COCO2017BurstDPLoader were referenced by the now-removed
 # tf.data wrapper (see D-001 below). Keras 3 model.fit consumes the PyDataset
 # directly, so neither name is needed in this module anymore.
+from dl_techniques.metrics.psnr_metric import PsnrMetric
+from dl_techniques.metrics.ssim_metric import SsimMetric
 from dl_techniques.models.burst_dp import (
     DEFAULT_NUM_SEG_CLASSES,
     BurstDP,
@@ -224,7 +226,34 @@ def main(argv: Optional[list] = None) -> None:
         weight_decay=args.weight_decay,
     )
 
-    model.compile(optimizer=optimizer, loss=losses, loss_weights=loss_weights)
+    # Per-head metrics (see VISION_BENCHMARKS.md / METRICS.md):
+    #   recon        -> PSNR + SSIM        (fidelity, METRICS.md §13)
+    #   segmentation -> pixel-acc + mIoU   (METRICS.md §3; mIoU is the
+    #                                       primary semseg metric).
+    # MeanIoU(sparse_y_true=True, sparse_y_pred=False) takes argmax over
+    # the logits' last axis internally, so passing the raw seg logits is
+    # correct. Depth metrics (AbsRel, delta_1) need a (depth, mask)
+    # concat that the current loader doesn't emit; wire them in when
+    # depth supervision is re-enabled.
+    metrics: Dict[str, Any] = {
+        "recon": [PsnrMetric(max_val=1.0), SsimMetric(max_val=1.0)],
+        "segmentation": [
+            keras.metrics.SparseCategoricalAccuracy(name="pixel_acc"),
+            keras.metrics.MeanIoU(
+                num_classes=DEFAULT_NUM_SEG_CLASSES,
+                sparse_y_true=True,
+                sparse_y_pred=False,
+                name="miou",
+            ),
+        ],
+    }
+
+    model.compile(
+        optimizer=optimizer,
+        loss=losses,
+        loss_weights=loss_weights,
+        metrics=metrics,
+    )
 
     # --- Callbacks ---
     # `TerminateOnNaN` MUST be first: the masked-softmax path in the fusion
