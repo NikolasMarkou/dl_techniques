@@ -440,9 +440,19 @@ def build_coco_burst_dp_datasets(
     max_train_images: Optional[int] = None,
     max_val_images: Optional[int] = None,
     workers: int = 4,
+    aux_spec: Optional[DistortionSpec] = None,
     seed: int = 0,
 ) -> Tuple[COCO2017BurstDPLoader, COCO2017BurstDPLoader]:
-    train_cfg = COCOBurstDPConfig(
+    """Build (train, val) COCO Burst-DP loaders.
+
+    Parameters
+    ----------
+    aux_spec : DistortionSpec, optional
+        If provided, overrides the default aux distortion spec for both
+        train and val loaders. ``None`` (default) keeps the current
+        behavior (``default_aux_spec()`` via the config dataclass).
+    """
+    train_kwargs: Dict[str, Any] = dict(
         coco_root=coco_root,
         split="train2017",
         image_size=image_size,
@@ -454,7 +464,7 @@ def build_coco_burst_dp_datasets(
         seed=seed,
         workers=workers,
     )
-    val_cfg = COCOBurstDPConfig(
+    val_kwargs: Dict[str, Any] = dict(
         coco_root=coco_root,
         split="val2017",
         image_size=image_size,
@@ -466,4 +476,9 @@ def build_coco_burst_dp_datasets(
         seed=seed + 1,
         workers=max(1, workers // 2),
     )
+    if aux_spec is not None:
+        train_kwargs["aux_spec"] = aux_spec
+        val_kwargs["aux_spec"] = aux_spec
+    train_cfg = COCOBurstDPConfig(**train_kwargs)
+    val_cfg = COCOBurstDPConfig(**val_kwargs)
     return COCO2017BurstDPLoader(train_cfg), COCO2017BurstDPLoader(val_cfg)
