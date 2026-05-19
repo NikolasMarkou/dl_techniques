@@ -571,8 +571,8 @@ def main(argv: Optional[list] = None) -> None:
     run_cfg = {
         "args": vars(args),
         "model_config": model.config.to_dict(),
-        "anchor_spec": asdict(default_anchor_spec()),
-        "aux_spec": asdict(default_aux_spec()),
+        "anchor_spec": asdict(train_ds.cfg.anchor_spec),
+        "aux_spec": asdict(train_ds.cfg.aux_spec),
         "steps_per_epoch": steps_per_epoch,
         "warmup_steps": warmup_steps,
         "cosine_steps": cosine_steps,
