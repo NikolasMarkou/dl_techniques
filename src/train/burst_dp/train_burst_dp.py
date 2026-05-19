@@ -43,6 +43,7 @@ import tensorflow as tf
 from dl_techniques.datasets.vision.coco_multitask_local import COCO_DEFAULT_ROOT
 from dl_techniques.callbacks.burst_dp_visualization import BurstDPVisualizationCallback
 from dl_techniques.datasets.vision.coco_burst_dp import (
+    DistortionSpec,
     build_coco_burst_dp_datasets,
     default_anchor_spec,
     default_aux_spec,
@@ -160,7 +161,217 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--gpu", type=int, default=0)
     p.add_argument("--out-dir", type=str, default="src/results/burst_dp/run")
+
+    # ---- Aux DistortionSpec overrides (Axis A, aux-only knob-up). ----
+    # Each flag defaults to None ⇒ "do not override" (inherit default_aux_spec).
+    # Anchor spec is intentionally NOT exposed — it defines the test-time input
+    # distribution and widening it would change the deployed-model contract.
+    # See D-001 anchor in main() below for the rationale.
+    aux = p.add_argument_group(
+        "aux distortion overrides",
+        description="Per-field overrides of the aux DistortionSpec. All "
+                    "default to None (no override). Anchor spec is fixed by "
+                    "design — see DECISION D-001.",
+    )
+    # Photometric noise
+    aux.add_argument("--aux-noise-sigma-min", type=float, default=None)
+    aux.add_argument("--aux-noise-sigma-max", type=float, default=None)
+    # Brightness / contrast
+    aux.add_argument("--aux-brightness-jitter", type=float, default=None)
+    aux.add_argument("--aux-contrast-jitter", type=float, default=None)
+    # Gaussian blur
+    aux.add_argument("--aux-blur-sigma-min", type=float, default=None)
+    aux.add_argument("--aux-blur-sigma-max", type=float, default=None)
+    # Motion blur
+    aux.add_argument("--aux-motion-blur-prob", type=float, default=None)
+    aux.add_argument("--aux-motion-blur-length-min", type=int, default=None)
+    aux.add_argument("--aux-motion-blur-length-max", type=int, default=None)
+    # Occlusion
+    aux.add_argument("--aux-occlusion-prob", type=float, default=None)
+    aux.add_argument("--aux-occlusion-max-frac", type=float, default=None)
+    aux.add_argument("--aux-occlusion-num-boxes-min", type=int, default=None)
+    aux.add_argument("--aux-occlusion-num-boxes-max", type=int, default=None)
+    # Affine
+    aux.add_argument("--aux-affine-angle-min", type=float, default=None)
+    aux.add_argument("--aux-affine-angle-max", type=float, default=None)
+    aux.add_argument("--aux-affine-translate-frac-min", type=float, default=None)
+    aux.add_argument("--aux-affine-translate-frac-max", type=float, default=None)
+    aux.add_argument("--aux-affine-scale-min", type=float, default=None)
+    aux.add_argument("--aux-affine-scale-max", type=float, default=None)
+    aux.add_argument("--aux-allow-affine", type=str, default=None,
+                     choices=["true", "false"],
+                     help="Override allow_affine (true/false). Default None = "
+                          "keep default_aux_spec().allow_affine.")
     return p
+
+
+# ---------------------------------------------------------------------------
+# Aux DistortionSpec construction from CLI
+# ---------------------------------------------------------------------------
+
+
+_AUX_FLAG_NAMES = (
+    "aux_noise_sigma_min", "aux_noise_sigma_max",
+    "aux_brightness_jitter", "aux_contrast_jitter",
+    "aux_blur_sigma_min", "aux_blur_sigma_max",
+    "aux_motion_blur_prob", "aux_motion_blur_length_min", "aux_motion_blur_length_max",
+    "aux_occlusion_prob", "aux_occlusion_max_frac",
+    "aux_occlusion_num_boxes_min", "aux_occlusion_num_boxes_max",
+    "aux_affine_angle_min", "aux_affine_angle_max",
+    "aux_affine_translate_frac_min", "aux_affine_translate_frac_max",
+    "aux_affine_scale_min", "aux_affine_scale_max",
+    "aux_allow_affine",
+)
+
+
+def _resolve_range(
+    cli_min: Optional[float],
+    cli_max: Optional[float],
+    default: tuple,
+    *,
+    name: str,
+    int_cast: bool = False,
+) -> tuple:
+    """Merge a (min, max) range. Each half independently inherits the default."""
+    lo = default[0] if cli_min is None else cli_min
+    hi = default[1] if cli_max is None else cli_max
+    if int_cast:
+        lo = int(lo)
+        hi = int(hi)
+    if lo > hi:
+        raise ValueError(
+            f"--{name}-min ({lo}) must be <= --{name}-max ({hi})."
+        )
+    return (lo, hi)
+
+
+def _check_prob(val: Optional[float], name: str) -> None:
+    if val is None:
+        return
+    if not (0.0 <= val <= 1.0):
+        raise ValueError(f"--{name} must be in [0, 1]; got {val}.")
+
+
+def _build_aux_spec_from_args(args: argparse.Namespace) -> Optional[DistortionSpec]:
+    """Build an aux ``DistortionSpec`` from CLI overrides.
+
+    Returns ``None`` when no ``--aux-*`` flag was supplied (preserving the
+    legacy default-spec path). Otherwise starts from ``default_aux_spec()``
+    and overrides only the user-supplied fields.
+
+    Raises
+    ------
+    ValueError
+        On invalid ranges (min > max), out-of-domain probabilities, or
+        non-positive motion-blur lengths.
+    """
+    # "Any flag set?" detection.
+    if all(getattr(args, n, None) is None for n in _AUX_FLAG_NAMES):
+        return None
+
+    base = default_aux_spec()
+
+    # Probabilities
+    _check_prob(args.aux_motion_blur_prob, "aux-motion-blur-prob")
+    _check_prob(args.aux_occlusion_prob, "aux-occlusion-prob")
+
+    # Noise sigma must be >= 0
+    if args.aux_noise_sigma_min is not None and args.aux_noise_sigma_min < 0:
+        raise ValueError(f"--aux-noise-sigma-min must be >= 0; got {args.aux_noise_sigma_min}.")
+    if args.aux_noise_sigma_max is not None and args.aux_noise_sigma_max < 0:
+        raise ValueError(f"--aux-noise-sigma-max must be >= 0; got {args.aux_noise_sigma_max}.")
+
+    noise_range = _resolve_range(
+        args.aux_noise_sigma_min, args.aux_noise_sigma_max,
+        base.noise_sigma_range, name="aux-noise-sigma",
+    )
+    blur_range = _resolve_range(
+        args.aux_blur_sigma_min, args.aux_blur_sigma_max,
+        base.blur_sigma_range, name="aux-blur-sigma",
+    )
+    motion_len_range = _resolve_range(
+        args.aux_motion_blur_length_min, args.aux_motion_blur_length_max,
+        base.motion_blur_length_range, name="aux-motion-blur-length",
+        int_cast=True,
+    )
+    if motion_len_range[0] < 1:
+        raise ValueError(
+            f"--aux-motion-blur-length-min must be >= 1; got {motion_len_range[0]}."
+        )
+    occ_boxes_range = _resolve_range(
+        args.aux_occlusion_num_boxes_min, args.aux_occlusion_num_boxes_max,
+        base.occlusion_num_boxes_range, name="aux-occlusion-num-boxes",
+        int_cast=True,
+    )
+    if occ_boxes_range[0] < 1:
+        raise ValueError(
+            f"--aux-occlusion-num-boxes-min must be >= 1; got {occ_boxes_range[0]}."
+        )
+    affine_angle_range = _resolve_range(
+        args.aux_affine_angle_min, args.aux_affine_angle_max,
+        base.affine_angle_range_deg, name="aux-affine-angle",
+    )
+    affine_translate_range = _resolve_range(
+        args.aux_affine_translate_frac_min, args.aux_affine_translate_frac_max,
+        base.affine_translate_frac_range, name="aux-affine-translate-frac",
+    )
+    affine_scale_range = _resolve_range(
+        args.aux_affine_scale_min, args.aux_affine_scale_max,
+        base.affine_scale_range, name="aux-affine-scale",
+    )
+
+    # allow_affine override (string → bool)
+    if args.aux_allow_affine is None:
+        allow_affine = base.allow_affine
+    else:
+        allow_affine = (args.aux_allow_affine.lower() == "true")
+
+    # Brightness / contrast / occlusion-max-frac
+    brightness = base.brightness_jitter if args.aux_brightness_jitter is None else args.aux_brightness_jitter
+    contrast = base.contrast_jitter if args.aux_contrast_jitter is None else args.aux_contrast_jitter
+    motion_prob = base.motion_blur_prob if args.aux_motion_blur_prob is None else args.aux_motion_blur_prob
+    occ_prob = base.occlusion_prob if args.aux_occlusion_prob is None else args.aux_occlusion_prob
+    occ_max_frac = base.occlusion_max_frac if args.aux_occlusion_max_frac is None else args.aux_occlusion_max_frac
+
+    if brightness < 0:
+        raise ValueError(f"--aux-brightness-jitter must be >= 0; got {brightness}.")
+    if contrast < 0:
+        raise ValueError(f"--aux-contrast-jitter must be >= 0; got {contrast}.")
+    if not (0.0 <= occ_max_frac <= 1.0):
+        raise ValueError(f"--aux-occlusion-max-frac must be in [0, 1]; got {occ_max_frac}.")
+
+    spec = DistortionSpec(
+        noise_sigma_range=noise_range,
+        brightness_jitter=brightness,
+        contrast_jitter=contrast,
+        blur_sigma_range=blur_range,
+        motion_blur_prob=motion_prob,
+        motion_blur_length_range=motion_len_range,
+        occlusion_prob=occ_prob,
+        occlusion_max_frac=occ_max_frac,
+        occlusion_num_boxes_range=occ_boxes_range,
+        affine_angle_range_deg=affine_angle_range,
+        affine_translate_frac_range=affine_translate_range,
+        affine_scale_range=affine_scale_range,
+        allow_affine=allow_affine,
+    )
+
+    # Warn if affine ranges supplied but allow_affine=False.
+    if not allow_affine:
+        affine_flags_set = any(
+            getattr(args, n) is not None for n in (
+                "aux_affine_angle_min", "aux_affine_angle_max",
+                "aux_affine_translate_frac_min", "aux_affine_translate_frac_max",
+                "aux_affine_scale_min", "aux_affine_scale_max",
+            )
+        )
+        if affine_flags_set:
+            logger.warning(
+                "Aux affine range flags supplied but --aux-allow-affine=false; "
+                "affine ranges will be inert at sample time."
+            )
+
+    return spec
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +400,19 @@ def main(argv: Optional[list] = None) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Output directory: {out_dir}")
 
+    # --- Aux DistortionSpec (CLI override path) ---
+    # DECISION plan_2026-05-19_b225c8df/D-001
+    # Aux-only knob surface; anchor remains at `default_anchor_spec()` because
+    # anchor defines the test-time input distribution (Finding 04, HARD
+    # constraint). Widening anchor here would change the deployed-model
+    # contract, not just training difficulty. See
+    # plans/plan_2026-05-19_b225c8df/decisions.md D-001.
+    aux_spec_override = _build_aux_spec_from_args(args)
+    if aux_spec_override is not None:
+        logger.info(
+            f"Aux DistortionSpec overridden by CLI: {asdict(aux_spec_override)}"
+        )
+
     # --- Data ---
     if args.dataset == "coco":
         train_ds, val_ds = build_coco_burst_dp_datasets(
@@ -200,6 +424,7 @@ def main(argv: Optional[list] = None) -> None:
             max_train_images=args.max_train_images,
             max_val_images=args.max_val_images,
             workers=args.workers,
+            aux_spec=aux_spec_override,
             seed=args.seed,
         )
         fidelity_only = False
@@ -213,6 +438,7 @@ def main(argv: Optional[list] = None) -> None:
             max_train_images=args.max_train_images,
             max_val_images=args.max_val_images,
             workers=args.workers,
+            aux_spec=aux_spec_override,
             seed=args.seed,
         )
         fidelity_only = True
@@ -226,6 +452,7 @@ def main(argv: Optional[list] = None) -> None:
             max_train_images=args.max_train_images,
             max_val_images=args.max_val_images,
             workers=args.workers,
+            aux_spec=aux_spec_override,
             seed=args.seed,
         )
         fidelity_only = True
