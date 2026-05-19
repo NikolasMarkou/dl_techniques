@@ -47,6 +47,10 @@ from dl_techniques.datasets.vision.coco_burst_dp import (
     default_anchor_spec,
     default_aux_spec,
 )
+from dl_techniques.datasets.vision.image_folder_burst_dp import (
+    build_div2k_burst_dp_datasets,
+    build_vggface2_burst_dp_datasets,
+)
 # COCOBurstDPConfig + COCO2017BurstDPLoader were referenced by the now-removed
 # tf.data wrapper (see D-001 below). Keras 3 model.fit consumes the PyDataset
 # directly, so neither name is needed in this module anymore.
@@ -119,7 +123,15 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--n-max", type=int, default=5)
     p.add_argument("--n-min", type=int, default=1)
 
+    p.add_argument("--dataset", type=str, default="coco",
+                   choices=["coco", "div2k", "vggface2"],
+                   help="Training dataset. 'div2k' and 'vggface2' are fidelity-only "
+                        "(zero seg loss + seg metrics dropped).")
     p.add_argument("--coco-root", type=str, default=COCO_DEFAULT_ROOT)
+    p.add_argument("--div2k-root", type=str,
+                   default="/media/arxwn/data0_4tb/datasets/div2k")
+    p.add_argument("--vggface2-root", type=str,
+                   default="/media/arxwn/data0_4tb/datasets/VGG-Face2/data")
     p.add_argument("--max-train-images", type=int, default=None)
     p.add_argument("--max-val-images", type=int, default=None)
 
@@ -178,17 +190,48 @@ def main(argv: Optional[list] = None) -> None:
     logger.info(f"Output directory: {out_dir}")
 
     # --- Data ---
-    train_ds, val_ds = build_coco_burst_dp_datasets(
-        coco_root=args.coco_root,
-        image_size=args.image_size,
-        batch_size=args.batch_size,
-        n_max=args.n_max,
-        n_min=args.n_min,
-        max_train_images=args.max_train_images,
-        max_val_images=args.max_val_images,
-        workers=args.workers,
-        seed=args.seed,
-    )
+    if args.dataset == "coco":
+        train_ds, val_ds = build_coco_burst_dp_datasets(
+            coco_root=args.coco_root,
+            image_size=args.image_size,
+            batch_size=args.batch_size,
+            n_max=args.n_max,
+            n_min=args.n_min,
+            max_train_images=args.max_train_images,
+            max_val_images=args.max_val_images,
+            workers=args.workers,
+            seed=args.seed,
+        )
+        fidelity_only = False
+    elif args.dataset == "div2k":
+        train_ds, val_ds = build_div2k_burst_dp_datasets(
+            div2k_root=args.div2k_root,
+            image_size=args.image_size,
+            batch_size=args.batch_size,
+            n_max=args.n_max,
+            n_min=args.n_min,
+            max_train_images=args.max_train_images,
+            max_val_images=args.max_val_images,
+            workers=args.workers,
+            seed=args.seed,
+        )
+        fidelity_only = True
+    elif args.dataset == "vggface2":
+        train_ds, val_ds = build_vggface2_burst_dp_datasets(
+            vggface2_root=args.vggface2_root,
+            image_size=args.image_size,
+            batch_size=args.batch_size,
+            n_max=args.n_max,
+            n_min=args.n_min,
+            max_train_images=args.max_train_images,
+            max_val_images=args.max_val_images,
+            workers=args.workers,
+            seed=args.seed,
+        )
+        fidelity_only = True
+    else:  # pragma: no cover — argparse choices guard this
+        raise ValueError(f"Unknown --dataset: {args.dataset!r}")
+
     logger.info(f"Train probe: {train_ds.probe()}")
 
     # --- Model ---
@@ -245,6 +288,23 @@ def main(argv: Optional[list] = None) -> None:
         ],
     }
 
+    # DECISION plan_2026-05-19_64f2a17b/D-001
+    # Fidelity-only datasets (DIV2K, VGG-Face2) lack segmentation labels.
+    # The :class:`BurstDP` model is hardcoded dual-head; we keep the seg
+    # head in the graph but zero its loss weight and drop its metrics.
+    # Trade-off: ~5-15% wasted compute on the seg head at the cost of
+    # zero blast radius on `BurstDP`, `BurstDPConfig`, and existing
+    # checkpoints. Pivot fallback is Option B (add an `enable_segmentation`
+    # config flag) — see plans/plan_2026-05-19_64f2a17b/decisions.md D-001.
+    if fidelity_only:
+        if args.loss_seg != 0.0:
+            logger.warning(
+                f"--dataset {args.dataset} is fidelity-only: overriding "
+                f"--loss-seg {args.loss_seg} → 0.0 and dropping seg metrics."
+            )
+        loss_weights["segmentation"] = 0.0
+        metrics.pop("segmentation", None)
+
     model.compile(
         optimizer=optimizer,
         loss=losses,
@@ -289,6 +349,8 @@ def main(argv: Optional[list] = None) -> None:
         "steps_per_epoch": steps_per_epoch,
         "warmup_steps": warmup_steps,
         "cosine_steps": cosine_steps,
+        "fidelity_only": fidelity_only,
+        "loss_weights": loss_weights,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     with open(out_dir / "run_config.json", "w") as f:
