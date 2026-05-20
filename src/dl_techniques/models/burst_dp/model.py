@@ -97,6 +97,15 @@ class BurstDP(keras.Model):
 
         # --- Shared encoder ---
         # ViT in feature-extraction mode returns (B, 1 + P, D) sequences.
+        # DECISION plan_2026-05-20_b8f8df89/D-003
+        # `normalization_position="pre"` is REQUIRED. The ViT class defaults to
+        # `"post"`, which has no clean residual highway: across 12 layers the
+        # self-attention rank-collapse wins and patch diversity decays
+        # exponentially (probe: 0.22 -> 0.0002 by layer 11), so the encoder
+        # emits spatially-constant tokens and the whole model's gradient dies.
+        # Pre-norm keeps the residual identity path outside the norm and is the
+        # universal standard for deep ViTs. See decisions.md D-003 and
+        # plans/plan_2026-05-20_b8f8df89/findings/vit-postnorm-collapse.md.
         self.encoder = ViT(
             input_shape=(config.image_size, config.image_size, 3),
             num_classes=1,            # ignored — include_top=False
@@ -104,6 +113,7 @@ class BurstDP(keras.Model):
             patch_size=config.patch_size,
             include_top=False,
             pooling=None,
+            normalization_position="pre",
             dropout_rate=config.encoder_dropout_rate,
             attention_dropout_rate=config.encoder_attention_dropout_rate,
             name="encoder",
