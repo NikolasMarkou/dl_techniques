@@ -484,8 +484,13 @@ def main(argv: Optional[list] = None) -> None:
     warmup_steps = steps_per_epoch * args.warmup_epochs
     cosine_steps = max(1, total_steps - warmup_steps)
 
+    # DECISION plan_2026-05-20_b8f8df89/D-001
+    # `initial_learning_rate` is the START of the warmup ramp, not the post-
+    # warmup LR. It MUST be 0.0 (or near-zero) for warmup to actually ramp:
+    # setting it equal to `warmup_target` makes the "warmup" a flat plateau
+    # with no ramp-up — the cold-start protection a from-scratch ViT needs.
     lr_schedule = keras.optimizers.schedules.CosineDecay(
-        initial_learning_rate=args.lr,
+        initial_learning_rate=0.0,
         decay_steps=cosine_steps,
         warmup_target=args.lr,
         warmup_steps=warmup_steps,
