@@ -24,9 +24,25 @@ def _upsample_factor_for_patch(patch_size: int) -> int:
     return patch_size
 
 
+# DECISION plan_2026-05-20_b8f8df89/D-001
+# ReconstructionHead produces a *signed residual delta*, NOT the final image.
+# The caller (BurstDP.call) computes `recon = clip(ref + delta)`. This residual
+# parameterization is REQUIRED: without the input skip the recon path has no
+# identity gradient route and collapses to a blurry mean (overfit diagnostic:
+# gradient global-norm 17.1 -> 0.006 in 50 steps). Two consequences:
+#   - DPTDecoder output_activation MUST be `linear` (delta is signed; `sigmoid`
+#     would force a non-negative, [0,1]-bounded output — a ghost constraint from
+#     the old plain-autoencoder framing).
+#   - `residual_proj` is zero-initialized so delta == 0 at init => recon == ref
+#     (output starts at the identity-copy PSNR, ~20 dB, instead of garbage).
+# See plans/plan_2026-05-20_b8f8df89/decisions.md D-001.
 @keras.saving.register_keras_serializable()
 class ReconstructionHead(keras.layers.Layer):
-    """Per-pixel reconstruction (RGB)."""
+    """Per-pixel reconstruction residual (signed RGB delta).
+
+    Produces a signed delta to be added to the reference image by the caller
+    (`recon = clip(ref + delta)`), not the reconstructed image itself.
+    """
 
     def __init__(
         self,
@@ -42,13 +58,23 @@ class ReconstructionHead(keras.layers.Layer):
         self.decoder = DPTDecoder(
             dims=list(self.decoder_dims),
             output_channels=self.out_channels,
-            output_activation="sigmoid",
+            output_activation="linear",
             upsample_factor=_upsample_factor_for_patch(self.patch_size),
             name="recon_dpt",
         )
+        # Zero-initialized 1x1 projection: delta == 0 at init (ControlNet /
+        # AdaLN-Zero pattern). Gradient revives after the first optimizer step.
+        self.residual_proj = layers.Conv2D(
+            filters=self.out_channels,
+            kernel_size=1,
+            kernel_initializer="zeros",
+            bias_initializer="zeros",
+            name="residual_proj",
+        )
 
     def call(self, x: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
-        return self.decoder(x, training=training)
+        delta = self.decoder(x, training=training)
+        return self.residual_proj(delta)
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
