@@ -33,9 +33,14 @@ def _upsample_factor_for_patch(patch_size: int) -> int:
 #   - DPTDecoder output_activation MUST be `linear` (delta is signed; `sigmoid`
 #     would force a non-negative, [0,1]-bounded output — a ghost constraint from
 #     the old plain-autoencoder framing).
-#   - `residual_proj` is zero-initialized so delta == 0 at init => recon == ref
-#     (output starts at the identity-copy PSNR, ~20 dB, instead of garbage).
-# See plans/plan_2026-05-20_b8f8df89/decisions.md D-001.
+#   - `residual_proj` uses a SMALL-SCALE init (stddev 0.05), NOT exact zero.
+#     Exact-zero (ControlNet zero-conv) deadlocks here: the decoder is trained
+#     from scratch, so `decoder_grad = upstream * residual_proj.kernel == 0`
+#     and the kernel never grows a useful direction (overfit diag: PSNR frozen
+#     at the identity floor 19.8, gnorm 0.002). A small nonzero init breaks the
+#     deadlock — decoder learns immediately while delta stays small enough that
+#     `recon` stays in [0,1] and `clip` does not kill the gradient.
+# See plans/plan_2026-05-20_b8f8df89/decisions.md D-001, D-002.
 @keras.saving.register_keras_serializable()
 class ReconstructionHead(keras.layers.Layer):
     """Per-pixel reconstruction residual (signed RGB delta).
@@ -62,12 +67,14 @@ class ReconstructionHead(keras.layers.Layer):
             upsample_factor=_upsample_factor_for_patch(self.patch_size),
             name="recon_dpt",
         )
-        # Zero-initialized 1x1 projection: delta == 0 at init (ControlNet /
-        # AdaLN-Zero pattern). Gradient revives after the first optimizer step.
+        # Small-scale 1x1 projection: delta starts small (recon ~= ref, output
+        # in [0,1] so `clip` keeps full gradient) but NON-zero, so the
+        # from-scratch decoder receives a real gradient from step 0. Exact-zero
+        # init deadlocks (see D-002).
         self.residual_proj = layers.Conv2D(
             filters=self.out_channels,
             kernel_size=1,
-            kernel_initializer="zeros",
+            kernel_initializer=keras.initializers.RandomNormal(stddev=0.05),
             bias_initializer="zeros",
             name="residual_proj",
         )
