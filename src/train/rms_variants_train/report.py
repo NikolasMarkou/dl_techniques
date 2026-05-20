@@ -963,16 +963,34 @@ def compute_overall_recommendation(
 
 def write_report(df: pd.DataFrame, *, out_dir: str) -> None:
     """Write ``summary.md`` aggregating ``df`` (the merged ``all_runs.csv``)."""
-    headline = _aggregate_headline(df)
-    headline = _add_paired_p(headline, df)
+    # Headline + verdicts + recommendation must compare like-for-like: only
+    # the canonical ``default`` regime. Stress-regime cells (lr_high, etc.)
+    # are analysed separately in regime_delta_summary.csv; pooling them into
+    # the headline averages collapsed runs with healthy ones.
+    if "regime" in df.columns:
+        df_headline = df[df["regime"].fillna("default") == "default"].copy()
+    else:
+        df_headline = df.copy()
+    # The same (experiment, norm, mode, seed) default-regime cell can appear in
+    # more than one chunk (e.g. e1 default is run by both the core chunk and
+    # the regime chunk). Deduplicate so headline n and paired-test pairing are
+    # not inflated/broken by chunk overlap.
+    _dedupe_keys = [k for k in ("experiment", "norm_type", "mode", "seed")
+                    if k in df_headline.columns]
+    if _dedupe_keys:
+        df_headline = df_headline.drop_duplicates(
+            subset=_dedupe_keys, keep="first").reset_index(drop=True)
+
+    headline = _aggregate_headline(df_headline)
+    headline = _add_paired_p(headline, df_headline)
     headline["verdict"] = headline.apply(_verdict, axis=1)
 
-    probes_long = _final_probe_snapshot(out_dir, df)
+    probes_long = _final_probe_snapshot(out_dir, df_headline)
     probes = _probes_summary(probes_long)
 
     # Phase 3 post-hoc derivations (best-effort; empty frames if data missing).
     try:
-        df_per_epoch = _load_per_epoch_frame(out_dir, df)
+        df_per_epoch = _load_per_epoch_frame(out_dir, df_headline)
     except (FileNotFoundError, pd.errors.EmptyDataError) as e:
         logger.warning(f"[report] per-epoch frame load failed: {e}")
         df_per_epoch = pd.DataFrame()
@@ -1005,7 +1023,8 @@ def write_report(df: pd.DataFrame, *, out_dir: str) -> None:
         headline["late_stability_var"] = float("nan")
 
     # Hypothesis verdicts (plan_e1f12eab Step 2 — additive to PASS/FAIL).
-    hyp = _compute_hypothesis_verdicts(df, probes_long)
+    # Default-regime only — same like-for-like rule as the headline.
+    hyp = _compute_hypothesis_verdicts(df_headline, probes_long)
     if not hyp.empty:
         agg_keys = ["experiment", "norm_type", "mode"]
         headline = headline.merge(

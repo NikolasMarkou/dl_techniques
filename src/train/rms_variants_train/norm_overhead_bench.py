@@ -154,7 +154,9 @@ def _time_norm(
             # Touch the gradients so TF actually computes them in tf.function.
             if grads is None or len(grads) == 0:
                 return loss
-            return loss + tf.reduce_sum(grads[0]) * 0.0
+            # Cast the gradient touch-term to loss dtype: under mixed_float16
+            # `loss` is fp16 while `grads[0]` may be fp32 (AddV2 dtype clash).
+            return loss + tf.cast(tf.reduce_sum(grads[0]), loss.dtype) * 0.0
 
         # Warmup
         for _ in range(max(1, warmup)):
