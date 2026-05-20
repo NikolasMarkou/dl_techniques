@@ -258,6 +258,8 @@ class ViT(keras.Model):
             normalization_position: Literal['pre', 'post'] = "post",
             ffn_type: FFNType = "mlp",
             activation: Union[str, callable] = "gelu",
+            use_layer_scale: bool = False,
+            layer_scale_init_value: float = 1e-5,
             name: Optional[str] = None,
             **kwargs: Any
     ) -> None:
@@ -341,6 +343,8 @@ class ViT(keras.Model):
         self.normalization_position = str(normalization_position)
         self.ffn_type = str(ffn_type)
         self.activation = activation
+        self.use_layer_scale = bool(use_layer_scale)
+        self.layer_scale_init_value = float(layer_scale_init_value)
 
         # Get model configuration from scale
         self.embed_dim, self.num_heads, self.num_layers, self.mlp_ratio = self.SCALE_CONFIGS[scale]
@@ -395,6 +399,8 @@ class ViT(keras.Model):
                 bias_initializer=self.bias_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
+                use_layer_scale=self.use_layer_scale,
+                layer_scale_init_value=self.layer_scale_init_value,
                 name=f"transformer_layer_{i}"
             )
             self.transformer_layers.append(layer)
@@ -595,6 +601,8 @@ class ViT(keras.Model):
             "normalization_position": self.normalization_position,
             "ffn_type": self.ffn_type,
             "activation": self.activation,
+            "use_layer_scale": self.use_layer_scale,
+            "layer_scale_init_value": self.layer_scale_init_value,
         })
         return config
 
@@ -627,6 +635,8 @@ class ViT(keras.Model):
             normalization_position=self.normalization_position,
             ffn_type=self.ffn_type,
             activation=self.activation,
+            use_layer_scale=self.use_layer_scale,
+            layer_scale_init_value=self.layer_scale_init_value,
             name=f"{self.name}_feature_extractor"
         )
 

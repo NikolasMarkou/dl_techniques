@@ -75,6 +75,7 @@ from typing import Optional, Union, Any, Dict, Tuple, Literal, Callable
 
 from ..moe import MixtureOfExperts, MoEConfig
 from ..stochastic_depth import StochasticDepth
+from ..layer_scale import LearnableMultiplier
 from ..ffn import create_ffn_from_config, FFNType
 from ..attention import create_attention_layer, AttentionType
 from ..norms import create_normalization_layer, NormalizationType
@@ -210,6 +211,8 @@ class TransformerLayer(keras.layers.Layer):
             window_size: int = 8,
             n_kv_head: Optional[int] = None,
             lambda_init: float = 0.8,
+            use_layer_scale: bool = False,
+            layer_scale_init_value: float = 1e-5,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -254,6 +257,8 @@ class TransformerLayer(keras.layers.Layer):
         self.window_size = window_size
         self.n_kv_head = n_kv_head if n_kv_head is not None else num_heads
         self.lambda_init = lambda_init
+        self.use_layer_scale = bool(use_layer_scale)
+        self.layer_scale_init_value = float(layer_scale_init_value)
 
         # --- Handle MoE Configuration ---
         # Convert dict to MoEConfig if needed
@@ -316,6 +321,27 @@ class TransformerLayer(keras.layers.Layer):
             self.ffn_stochastic_depth = StochasticDepth(
                 drop_path_rate=self.stochastic_depth_rate,
                 name='ffn_stochastic_depth'
+            )
+
+        # LayerScale (CaiT, Touvron et al. 2021): a per-channel learnable scale
+        # applied to each residual *branch* output before the add, initialized
+        # small. It keeps the pre-norm residual stream from blowing up across
+        # deep stacks (without it a 12-layer ViT's activation std grew 2 -> 23,
+        # which the final LayerNorm then compresses, starving downstream layers).
+        self.attention_layer_scale = None
+        self.ffn_layer_scale = None
+        if self.use_layer_scale:
+            self.attention_layer_scale = LearnableMultiplier(
+                multiplier_type='CHANNEL',
+                initializer=keras.initializers.Constant(self.layer_scale_init_value),
+                constraint=None,
+                name='attention_layer_scale',
+            )
+            self.ffn_layer_scale = LearnableMultiplier(
+                multiplier_type='CHANNEL',
+                initializer=keras.initializers.Constant(self.layer_scale_init_value),
+                constraint=None,
+                name='ffn_layer_scale',
             )
 
     def _create_normalization_layer(self, name: str, layer_type: str = 'attention') -> keras.layers.Layer:
@@ -500,6 +526,10 @@ class TransformerLayer(keras.layers.Layer):
             self.attention_stochastic_depth.build(input_shape)
         if self.ffn_stochastic_depth is not None:
             self.ffn_stochastic_depth.build(input_shape)
+        if self.attention_layer_scale is not None:
+            self.attention_layer_scale.build(input_shape)
+        if self.ffn_layer_scale is not None:
+            self.ffn_layer_scale.build(input_shape)
 
         # Always call super().build() at the end
         super().build(input_shape)
@@ -536,6 +566,8 @@ class TransformerLayer(keras.layers.Layer):
                 x = self.attention(x, attention_mask=attention_mask, training=training)
             if self.attention_stochastic_depth is not None:
                 x = self.attention_stochastic_depth(x, training=training)
+            if self.attention_layer_scale is not None:
+                x = self.attention_layer_scale(x, training=training)
             attention_output = x + residual
 
             # 2. FFN block
@@ -545,6 +577,8 @@ class TransformerLayer(keras.layers.Layer):
             x = self.dropout(x, training=training)
             if self.ffn_stochastic_depth is not None:
                 x = self.ffn_stochastic_depth(x, training=training)
+            if self.ffn_layer_scale is not None:
+                x = self.ffn_layer_scale(x, training=training)
             layer_output = x + residual
         else:
             # --- Post-Normalization: SubLayer -> Add -> Normalize ---
@@ -562,6 +596,8 @@ class TransformerLayer(keras.layers.Layer):
                     training=training)
             if self.attention_stochastic_depth is not None:
                 x = self.attention_stochastic_depth(x, training=training)
+            if self.attention_layer_scale is not None:
+                x = self.attention_layer_scale(x, training=training)
             attention_output = self.attention_norm(x + residual, training=training)
 
             # 2. FFN block
@@ -570,6 +606,8 @@ class TransformerLayer(keras.layers.Layer):
             x = self.dropout(x, training=training)
             if self.ffn_stochastic_depth is not None:
                 x = self.ffn_stochastic_depth(x, training=training)
+            if self.ffn_layer_scale is not None:
+                x = self.ffn_layer_scale(x, training=training)
             layer_output = self.output_norm(x + residual, training=training)
 
         return layer_output
@@ -620,6 +658,8 @@ class TransformerLayer(keras.layers.Layer):
             'window_size': self.window_size,
             'n_kv_head': self.n_kv_head,
             'lambda_init': self.lambda_init,
+            'use_layer_scale': self.use_layer_scale,
+            'layer_scale_init_value': self.layer_scale_init_value,
         })
         return config
 

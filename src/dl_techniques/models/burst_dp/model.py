@@ -106,6 +106,15 @@ class BurstDP(keras.Model):
         # Pre-norm keeps the residual identity path outside the norm and is the
         # universal standard for deep ViTs. See decisions.md D-003 and
         # plans/plan_2026-05-20_b8f8df89/findings/vit-postnorm-collapse.md.
+        # DECISION plan_2026-05-20_b8f8df89/D-004
+        # `use_layer_scale=True` (CaiT LayerScale, per-residual-branch learnable
+        # per-channel scale, init 0.1). Pre-norm alone (D-003) fixed the token
+        # collapse but left the residual stream growing unbounded with depth
+        # (activation std 2 -> 23 over 12 layers); the ViT's final LayerNorm
+        # then compresses encoder-output patch diversity ~20x. LayerScale keeps
+        # each block's contribution small at init so the residual stream stays
+        # bounded and the final-norm no longer crushes the signal. init=0.1 is
+        # the CaiT value for ~12-layer depth (1e-5 is for 24+ layers).
         self.encoder = ViT(
             input_shape=(config.image_size, config.image_size, 3),
             num_classes=1,            # ignored — include_top=False
@@ -114,6 +123,8 @@ class BurstDP(keras.Model):
             include_top=False,
             pooling=None,
             normalization_position="pre",
+            use_layer_scale=True,
+            layer_scale_init_value=0.1,
             dropout_rate=config.encoder_dropout_rate,
             attention_dropout_rate=config.encoder_attention_dropout_rate,
             name="encoder",
