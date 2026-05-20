@@ -224,8 +224,16 @@ class BurstDP(keras.Model):
         side_h, side_w = self.feature_hw
         feat = ops.reshape(ref_tokens, (b, side_h, side_w, self.embed_dim))
 
+        # DECISION plan_2026-05-20_b8f8df89/D-001
+        # Residual reconstruction: the recon head emits a signed delta and the
+        # clean image is `ref + delta`. The `ref` skip is an identity gradient
+        # path that cannot vanish — without it the recon path collapsed to a
+        # blurry mean (gradient global-norm 17.1 -> 0.006 in 50 steps). `clip`
+        # keeps the output in [0,1] for the PSNR/SSIM metrics and Charbonnier
+        # loss. See plans/plan_2026-05-20_b8f8df89/decisions.md D-001.
+        recon_delta = self.recon_head(feat, training=training)
         outputs: Dict[str, keras.KerasTensor] = {
-            "recon": self.recon_head(feat, training=training),
+            "recon": ops.clip(ref + recon_delta, 0.0, 1.0),
             "segmentation": self.seg_head(feat, training=training),
         }
 
