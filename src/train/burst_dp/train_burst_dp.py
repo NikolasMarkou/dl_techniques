@@ -42,6 +42,7 @@ import tensorflow as tf
 
 from dl_techniques.datasets.vision.coco_multitask_local import COCO_DEFAULT_ROOT
 from dl_techniques.callbacks.burst_dp_visualization import BurstDPVisualizationCallback
+from dl_techniques.callbacks.training_curves import TrainingCurvesCallback
 from dl_techniques.datasets.vision.coco_burst_dp import (
     DistortionSpec,
     build_coco_burst_dp_datasets,
@@ -566,6 +567,14 @@ def main(argv: Optional[list] = None) -> None:
                 seed=args.seed,
             )
         )
+    # Per-epoch loss/metric curve PNGs grouped into loss / segmentation / other
+    # (train + val on each axis). Same callback used by train_coco_multitask.
+    callbacks.append(
+        TrainingCurvesCallback(
+            output_dir=str(out_dir / "training_curves"),
+            frequency=max(1, args.viz_every_epochs),
+        )
+    )
     callbacks.extend([
         keras.callbacks.TensorBoard(log_dir=str(out_dir / "tb")),
         keras.callbacks.EarlyStopping(monitor="val_loss", patience=8, restore_best_weights=True, verbose=1),

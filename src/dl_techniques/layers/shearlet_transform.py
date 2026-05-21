@@ -49,8 +49,8 @@ References:
 
 import keras
 import numpy as np
-from keras import ops, layers, initializers
-from typing import List, Tuple, Optional, Dict, Any, Union
+from keras import ops, initializers
+from typing import List, Tuple, Optional, Dict, Any
 
 # ---------------------------------------------------------------------
 
