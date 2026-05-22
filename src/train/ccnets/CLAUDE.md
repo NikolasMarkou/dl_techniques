@@ -14,6 +14,8 @@ the training-script layer.
   losses** via a `TextCCNetOrchestrator` that overrides `compute_losses`. Template for
   text / sequence tasks. (Prototype — see its module docstring for scope.)
 - `cifar100.py` — the image CCNet scaled to 32x32x3 natural images, 100 classes.
+- `cifar100_hybrid.py` — CIFAR-100 CCNet with a LeWM-inspired latent-space
+  verification term added alongside the pixel loss.
 - `baseline_comparison.py` — controlled experiment: CCNet Reasoner vs. a plain classifier.
 - `latent_sweep.py` — sweep of `explanation_dim` (the size of the latent cause `E`).
 
@@ -145,3 +147,39 @@ clear interior optimum at `dim(E) ≈ 16`:
 
 Practical rule: size `dim(E)` modestly above the `H(X|Y)`-matched optimum (16–32 for
 MNIST), keep the KL term on, and stop adding dimensions once the achieved KL stops rising.
+
+## Findings — hybrid latent-space verification (`cifar100_hybrid.py`)
+
+A LeWM-inspired variant. LeWM's defining strength is that it verifies in *latent
+space* (predicts/compares embeddings, not raw observations). `cifar100_hybrid.py`
+ports that as a hybrid: the Producer still outputs pixels (so counterfactual
+generation survives), but `HybridCCNetOrchestrator` adds a verification term that
+compares the produced and real images in a learned **feature space** — the
+Reasoner's own `image_features` backbone, used as the encoder `phi`. The term is
+added only to the Producer and Explainer errors; tape isolation (P7) keeps it out
+of `reasoner_error`, so `phi` stays anchored to the classification objective and
+cannot collapse — the JEPA "stop-gradient target" obtained for free.
+
+CIFAR-100, 40 epochs, vs. the pixel-only `cifar100.py` run:
+
+| | Pixel-only | Hybrid (+ latent verification) |
+|--|-----------|--------------------------------|
+| Reasoner top-1 / top-5 | 0.547 / 0.823 | 0.532 / 0.816 |
+| Pixel gen / recon MAE | ~0.099 | ~0.101 |
+| Latent (perceptual) MSE | — | gen 0.49, recon 0.47 (active) |
+| Reconstruction grid | smooth low-frequency **blobs** | **structured, textured** |
+
+Key finding: **at essentially identical pixel MAE (~0.10) the two produce visibly
+different images** — the pixel-only run settles on blurry colour-average blobs, the
+hybrid produces textured, roughly-structured reconstructions. Pixel L1 cannot
+distinguish a blurry solution from a structured one of equal pixel error, so it
+takes the conditional mean; the feature-space term *can* distinguish them and
+redirects the Producer. The LeWM strength transferred and changed the failure mode
+(blur → structured-but-imperfect).
+
+Limits: it does **not** close the sufficiency wall — outputs are structured but
+not photorealistic; a class label + 64-dim `E` still underdetermines a 32x32 photo.
+Latent verification changes *which* underdetermined solution you get, not the
+information available. Reasoner accuracy dipped slightly (within noise; the term
+feeds Producer/Explainer, not the Reasoner). `phi` is a moving target — healthy
+here (anchored by classification) but an EMA/frozen `phi` would be steadier.

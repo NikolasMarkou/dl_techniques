@@ -171,10 +171,18 @@ class Cifar100Reasoner(keras.Model):
         self.classifier.build(current)
         super().build(input_shape)
 
-    def call(self, x, e, training=None):
+    def image_features(self, x, training=None):
+        """E-independent image embedding (conv backbone + global pool).
+
+        Reused as the perceptual encoder phi by the hybrid latent-verification
+        orchestrator (`train/ccnets/cifar100_hybrid.py`)."""
         for block in self.conv_blocks:
             x = block(x, training=training)
-        features = keras.ops.concatenate([self.global_pool(x), e], axis=-1)
+        return self.global_pool(x)
+
+    def call(self, x, e, training=None):
+        features = keras.ops.concatenate(
+            [self.image_features(x, training=training), e], axis=-1)
         for block in self.dense_blocks:
             features = block(features, training=training)
         return self.classifier(features)
