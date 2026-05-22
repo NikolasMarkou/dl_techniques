@@ -23,7 +23,11 @@ class LeWMConfig:
     # Temporal setup
     history_size: int = 3
     num_preds: int = 1
-    num_frames: int = 3  # = history_size — upstream parameterizes pos embedding by this
+    # num_frames sizes the predictor's positional embedding. It MUST cover the
+    # training sequence length T = history_size + num_preds. Leave at the
+    # sentinel 0 (default) to have it derived in __post_init__; an explicit
+    # value is allowed only if it is >= history_size + num_preds.
+    num_frames: int = 0
 
     # Predictor transformer
     depth: int = 6
@@ -45,6 +49,22 @@ class LeWMConfig:
     sigreg_weight: float = 0.09
     sigreg_knots: int = 17
     sigreg_num_proj: int = 1024
+
+    def __post_init__(self) -> None:
+        # DECISION plan_2026-05-22_de5197c2/D-002: num_frames is a serialized
+        # field (not a @property) so to_dict/from_dict round-trips for old and
+        # new configs. Derive it from history_size + num_preds when the caller
+        # left the sentinel 0; reject an explicit value that cannot cover the
+        # training sequence length (would crash ARPredictor's pos-embedding add).
+        required = self.history_size + self.num_preds
+        if self.num_frames <= 0:
+            self.num_frames = required
+        elif self.num_frames < required:
+            raise ValueError(
+                f"num_frames={self.num_frames} is too small: it must cover the "
+                f"training sequence length history_size + num_preds = "
+                f"{self.history_size} + {self.num_preds} = {required}."
+            )
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
