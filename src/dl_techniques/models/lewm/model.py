@@ -116,6 +116,14 @@ class LeWM(keras.Model):
 
         self._sigreg_weight = cfg.sigreg_weight
 
+        # Per-component loss trackers. The training loss is the sum of an MSE
+        # prediction term and a weighted SIGReg term, both added via
+        # `add_loss`; without these trackers the CSV log shows only the summed
+        # `loss`, so a diverging or dominating term is invisible. The trackers
+        # hold the *weighted* contributions, so pred_loss + sigreg_loss == loss.
+        self.pred_loss_tracker = keras.metrics.Mean(name="pred_loss")
+        self.sigreg_loss_tracker = keras.metrics.Mean(name="sigreg_loss")
+
     # ------------------------------------------------------------------
     # Core forward helpers
     # ------------------------------------------------------------------
@@ -205,7 +213,12 @@ class LeWM(keras.Model):
         # SIGReg on the projected embeddings, shape (T, B, D) to match upstream.
         emb_tbd = ops.transpose(emb, (1, 0, 2))
         sigreg_loss = self.sigreg(emb_tbd)
-        self.add_loss(self._sigreg_weight * sigreg_loss)
+        weighted_sigreg = self._sigreg_weight * sigreg_loss
+        self.add_loss(weighted_sigreg)
+
+        # Track the two weighted components for observability.
+        self.pred_loss_tracker.update_state(pred_loss)
+        self.sigreg_loss_tracker.update_state(weighted_sigreg)
 
         return pred_emb
 
@@ -304,6 +317,17 @@ class LeWM(keras.Model):
         T_full = ops.shape(emb)[1]
         pred_rollout = ops.reshape(emb, (B, S, T_full, D))
         return {"predicted_emb": pred_rollout}
+
+    # ------------------------------------------------------------------
+    # Metrics
+    # ------------------------------------------------------------------
+
+    @property
+    def metrics(self):
+        """Expose the per-component loss trackers alongside the framework's
+        own trackers (so Keras resets all of them per epoch and the CSV log
+        carries `pred_loss` / `sigreg_loss` next to `loss`)."""
+        return [*super().metrics, self.pred_loss_tracker, self.sigreg_loss_tracker]
 
     # ------------------------------------------------------------------
     # Serialization
