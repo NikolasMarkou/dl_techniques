@@ -32,12 +32,13 @@ This tripartite architecture enables **counterfactual reasoning** - the ability 
 
 ```python
 import keras
-from ccnets import CCNetOrchestrator, CCNetConfig, wrap_keras_model
+from dl_techniques.models.ccnets import CCNetOrchestrator, CCNetConfig, wrap_keras_model
 
-# 1. Define your three models
-explainer = keras.Sequential([...])  # Your model for P(E|X)
-reasoner = keras.Sequential([...])   # Your model for P(Y|X,E)
-producer = keras.Sequential([...])   # Your model for P(X|Y,E)
+# 1. Define your three models (see CLAUDE.md for the required call signatures:
+#    explainer(x) -> (mu, log_var); reasoner(x, e) -> y_probs; producer(y, e) -> x_hat)
+explainer = ...  # Your model for P(E|X)
+reasoner = ...   # Your model for P(Y|X,E)
+producer = ...   # Your model for P(X|Y,E)
 
 # 2. Create orchestrator
 orchestrator = CCNetOrchestrator(
@@ -85,12 +86,12 @@ The framework computes three fundamental losses that measure different aspects o
 Each network receives a specialized error signal computed from the three fundamental losses. The formulation has evolved from early conceptual models to ensure stable and robust training dynamics.
 
 - **Explainer Error** = `w_inf * Inference Loss + w_gen * Generation Loss + w_kl * KL Divergence`
-- **Reasoner Error** = `w_rec * Reconstruction Loss + w_inf * Inference Loss`
+- **Reasoner Error** = `w_inf * Classification Loss (cross-entropy) + w_rec * Reconstruction Loss`
 - **Producer Error** = `w_gen * Generation Loss + w_rec * Reconstruction Loss`
 
-This unique credit assignment ensures each network learns its specific causal role:
+This credit assignment ensures each network learns its specific causal role:
 - The **Explainer** is penalized for producing a latent code `E` that is ambiguous for the Reasoner (high `Inference Loss`) or insufficient for the Producer (high `Generation Loss`). The KL term regularizes the latent space for efficiency and smoothness.
-- The **Reasoner** is penalized for both the total pipeline failure (`Reconstruction Loss`) and its specific decision-making error (`Inference Loss`), directly targeting its logical correctness.
+- The **Reasoner** is penalized by a direct categorical cross-entropy **anchor** against the ground-truth label (stable, well-conditioned classification gradients) plus the cooperative `Reconstruction Loss` (it is penalized for inferences the Producer cannot turn back into the observation). The cooperative term only carries gradient if the Producer consumes the label *differentiably* — see `CLAUDE.md`, Invariant 1.
 - The **Producer** is penalized for any failure in its ability to manifest an observation, whether from the system's own inference (`Reconstruction Loss`) or from ground-truth causes (`Generation Loss`).
 
 #### Note on the Evolution of the Error Formulation
@@ -151,12 +152,14 @@ Any neural network can be used with CCNet as long as it implements the correct i
 
 #### Explainer Requirements
 ```python
-def explainer(x: Tensor) -> Tensor:
+def explainer(x: Tensor) -> Tuple[Tensor, Tensor]:
     """
     Args:
         x: Input observation [batch, ...]
     Returns:
-        e: Latent explanation [batch, explanation_dim]
+        (mu, log_var): parameters of the latent distribution, each
+                       [batch, explanation_dim]. The orchestrator samples
+                       E = mu + eps * exp(0.5 * log_var) and applies a KL term.
     """
 ```
 
@@ -189,22 +192,28 @@ def producer(y: Tensor, e: Tensor) -> Tensor:
 ```python
 config = CCNetConfig(
     explanation_dim=128,          # Dimension of latent vector E
-    loss_type='l2',              # 'l1', 'l2', or 'huber'
-    learning_rates={             # Per-module learning rates
-        'explainer': 1e-3,
-        'reasoner': 1e-3,
-        'producer': 1e-3
+    loss_fn='l2',                 # 'l1', 'l2', 'huber', or 'polynomial'
+    loss_fn_params={},            # kwargs for the loss (e.g. {'delta': 1.0} for huber)
+    learning_rates={              # Per-module learning rates
+        'explainer': 1e-4,
+        'reasoner': 1e-4,
+        'producer': 1e-4
     },
-    gradient_clip_norm=1.0,      # Max gradient norm (None to disable)
-    use_mixed_precision=False,   # Enable mixed precision training
-    sequential_data=False,       # Enable causal masking for sequences
-    explainer_weights={...},     # Weights for explainer losses
-    reasoner_weights={...},      # Weights for reasoner losses
-    producer_weights={...},      # Weights for producer losses
-    kl_weight=0.01,              # Weight for KL divergence
-    dynamic_weighting=False      # Enable automatic loss balancing
+    gradient_clip_norm=1.0,       # Max gradient norm (None to disable)
+    use_mixed_precision=False,    # Enable mixed precision training
+    sequential_data=False,        # Use SequentialCCNetOrchestrator for sequences
+    # The KL-divergence weight lives inside explainer_weights, not as a top-level field:
+    explainer_weights={'inference': 1.0, 'generation': 1.0, 'kl_divergence': 0.01},
+    reasoner_weights={'inference': 1.0, 'reconstruction': 1.0},
+    producer_weights={'generation': 1.0, 'reconstruction': 1.0},
+    dynamic_weighting=False       # DEPRECATED — leave False (no effect; see CLAUDE.md)
 )
 ```
+
+> **Note:** loss weights are read inside the compiled `train_step`, so they are fixed at
+> graph-trace time. The KL weight is the exception — the orchestrator exposes it as a live
+> `tf.Variable` (`orchestrator.kl_weight`), which is what makes `CCNetTrainer`'s KL
+> annealing work.
 
 ### Training Workflow
 
@@ -217,7 +226,7 @@ train_dataset = train_dataset.batch(32).shuffle(1000)
 trainer = CCNetTrainer(orchestrator)
 
 # 3. Define custom callbacks
-early_stopping = EarlyStoppingCallback(patience=10, threshold=1e-4)
+early_stopping = EarlyStoppingCallback(patience=10, error_threshold=1e-4)
 
 def metrics_callback(epoch, metrics):
     print(f"Epoch {epoch}: Generation Loss = {metrics['generation_loss']:.4f}")
@@ -287,7 +296,7 @@ if is_consistent:
 For time series and text, use the specialized orchestrator:
 
 ```python
-from ccnets import SequentialCCNetOrchestrator
+from dl_techniques.models.ccnets import SequentialCCNetOrchestrator
 
 # Producer will use reverse causality via sequence reversal
 seq_orchestrator = SequentialCCNetOrchestrator(
@@ -306,7 +315,8 @@ seq_orchestrator = SequentialCCNetOrchestrator(
 
 ```python
 class CCNetOrchestrator:
-    def __init__(self, explainer, reasoner, producer, config=None)
+    def __init__(self, explainer, reasoner, producer, config=None, control_strategy=None)
+    kl_weight: tf.Variable                       # live KL weight (annealable)
     def forward_pass(self, x_input, y_truth, training=True) -> Dict
     def compute_losses(self, tensors) -> CCNetLosses
     def compute_model_errors(self, losses, tensors) -> CCNetModelErrors
@@ -326,26 +336,25 @@ class CCNetOrchestrator:
 @dataclass
 class CCNetConfig:
     explanation_dim: int = 128
-    loss_type: str = 'l2'
-    learning_rates: Dict[str, float]
+    loss_fn: str = 'l2'                  # 'l1' | 'l2' | 'huber' | 'polynomial'
+    loss_fn_params: Dict[str, Any] = {}
+    learning_rates: Dict[str, float] = {'explainer': 1e-4, 'reasoner': 1e-4, 'producer': 1e-4}
     gradient_clip_norm: Optional[float] = 1.0
     use_mixed_precision: bool = False
     sequential_data: bool = False
-    explainer_weights: Dict[str, float]
-    reasoner_weights: Dict[str, float]
-    producer_weights: Dict[str, float]
-    kl_weight: float = 0.01
-    dynamic_weighting: bool = False
+    explainer_weights: Dict[str, float] = {'inference': 1.0, 'generation': 1.0, 'kl_divergence': 0.01}
+    reasoner_weights: Dict[str, float] = {'reconstruction': 1.0, 'inference': 1.0}
+    producer_weights: Dict[str, float] = {'generation': 1.0, 'reconstruction': 1.0}
+    dynamic_weighting: bool = False      # DEPRECATED — no effect
 ```
 
 #### CCNetTrainer
 
 ```python
 class CCNetTrainer:
-    def __init__(self, orchestrator, metrics_callback=None)
+    def __init__(self, orchestrator, metrics_callback=None, kl_annealing_epochs=None)
     def train(self, train_dataset, epochs, validation_dataset=None, callbacks=None)
-    @property
-    def history(self) -> Dict[str, List[float]]
+    history: Dict[str, List[float]]      # populated during train()
 ```
 
 ### Utility Functions
@@ -357,58 +366,36 @@ def wrap_keras_model(model: keras.Model) -> CCNetModule
 
 ## Examples
 
-### MNIST Digit Generation
+### MNIST Digit Generation (reference task)
 
-Complete example for handwritten digit generation with style control:
+The implemented, runnable reference task is `src/train/ccnets/mnist.py`. It defines the
+three networks (`MNISTExplainer`, `MNISTReasoner`, `MNISTProducer`), builds and wraps them
+via `create_mnist_ccnet`, trains with `CCNetTrainer`, and emits reconstruction /
+counterfactual / latent-space visualizations.
 
-```python
-from examples.mnist_ccnet import create_mnist_ccnet, train_mnist_ccnet
-
-# Create and train CCNet for MNIST
-orchestrator, trainer = train_mnist_ccnet()
-
-# Generate a '3' in the style of a '7'
-x_3 = load_digit_3()
-x_7 = load_digit_7()
-x_3_in_style_of_7 = orchestrator.style_transfer(x_3, x_7)
+```bash
+MPLBACKEND=Agg .venv/bin/python -m train.ccnets.mnist
 ```
 
-### Text Generation with GPT
-
-Example using transformers for causal text generation:
-
 ```python
-from examples.text_ccnet import create_text_ccnet
+from train.ccnets.mnist import create_mnist_ccnet, prepare_mnist_data, ExperimentConfig
+from dl_techniques.models.ccnets import CCNetTrainer
 
-# Create CCNet with GPT-style transformers
-orchestrator = create_text_ccnet(
-    vocab_size=50000,
-    sequence_length=512,
-    explanation_dim=256
-)
+config = ExperimentConfig()
+orchestrator = create_mnist_ccnet(config)
+train_ds, val_ds = prepare_mnist_data(config.data)
+CCNetTrainer(orchestrator, kl_annealing_epochs=10).train(train_ds, epochs=50,
+                                                         validation_dataset=val_ds)
 
-# Generate text with specific style
-text_formal = "The results demonstrate..."
-text_casual = "So basically what happened was..."
-style_swapped = orchestrator.style_transfer(text_formal, text_casual)
+# Counterfactual: "what would this digit look like as a different digit, same style?"
+x_counterfactual = orchestrator.counterfactual_generation(x_reference, y_target_one_hot)
 ```
 
-### Time Series Forecasting
+See `src/train/ccnets/CLAUDE.md` for how to derive a new training script from this template.
 
-Example for causal time series analysis:
+### Other modalities
 
-```python
-from examples.timeseries_ccnet import create_timeseries_ccnet
-
-# Create CCNet for time series
-orchestrator = create_timeseries_ccnet(
-    input_features=10,
-    sequence_length=100,
-    explanation_dim=64
-)
-
-# Counterfactual forecasting: "What if the trend had been different?"
-actual_series = load_stock_prices()
-alternative_trend = create_upward_trend()
-counterfactual = orchestrator.counterfactual_generation(actual_series, alternative_trend)
-```
+The framework is modality-agnostic — text and time-series CCNets are possible by supplying
+appropriate Explainer/Reasoner/Producer networks (use `SequentialCCNetOrchestrator` for
+sequential data). No text or time-series task is implemented in the repository yet; the
+MNIST task above is the only worked example. See `CLAUDE.md` for the task-adaptation table.

@@ -85,8 +85,8 @@ These are intermediate calculations that measure the pixel-wise difference betwe
 *   **Causal Responsibility**: Reasoner and Producer (and indirectly, the Explainer).
 
 **3. Inference Loss = `|| X_reconstructed - X_generated ||`**
-*   **Purpose**: This is a brilliant piece of causal credit assignment. It isolates the error made *solely* by the Reasoner. Both `X_reconstructed` and `X_generated` were created by the same Producer using the same style vector `E`. The only difference between them was the input label (`Y_inferred` vs. `Y_truth`). Therefore, any difference between these two images is directly attributable to the Reasoner's incorrect prediction.
-*   **Causal Responsibility**: Reasoner and Explainer.
+*   **Purpose**: This is a piece of causal credit assignment. Both `X_reconstructed` and `X_generated` were created by the same Producer using the same style vector `E`. The only difference between them was the input label (`Y_inferred` vs. `Y_truth`). Any difference between these two images therefore reflects the consequence of the Reasoner's prediction. In the implemented error formulation this term feeds the **Explainer Error** — it penalizes a latent `E` that is ambiguous enough to let inference go wrong — while the Reasoner itself is trained by the direct `Classification Loss` anchor (see below).
+*   **Causal Responsibility**: Explainer (the Reasoner is anchored separately by the Classification Loss).
 
 ### **The Three Model Errors: Assigning Causal Blame**
 
@@ -95,8 +95,9 @@ The three losses are not directly backpropagated. Instead, they are combined int
 **1. Explainer Error = `w_inf * Inference Loss + w_gen * Generation Loss + w_kl * KL Divergence`**
 *   **Breakdown**: The Explainer is penalized for producing a latent explanation `E` that is either ambiguous for the Reasoner (high `Inference Loss`) or insufficient for the Producer (high `Generation Loss`). The additional KL Divergence term acts as a regularizer, forcing the latent space `E` to be smooth and information-efficient (e.g., following a standard normal distribution). The Explainer is thus incentivized to create explanations that are maximally useful and generalizable.
 
-**2. Reasoner Error = `w_rec * Reconstruction Loss + w_inf * Inference Loss`**
-*   **Breakdown**: The Reasoner is penalized directly for its inference errors, which manifest as both high `Reconstruction Loss` (the total pipeline failed) and high `Inference Loss` (the failure was specifically the inference step). This focuses the gradient pressure squarely on the module's decision-making logic.
+**2. Reasoner Error = `w_inf * Classification Loss + w_rec * Reconstruction Loss`**
+*   **Breakdown**: The Reasoner is penalized by two terms. The `Classification Loss` is the categorical cross-entropy between its inferred label and the ground-truth label — a direct, well-conditioned supervised **anchor** that keeps the Reasoner training stably even while the Producer is still weak. The `Reconstruction Loss` is the cooperative term: it penalizes inferences that the Producer cannot turn back into the original observation, which is what couples the Reasoner into the cooperative loop.
+*   **Implementation note**: for the cooperative `Reconstruction Loss` term to actually train the Reasoner, the gradient must flow `Reconstruction Loss → Producer → y_inferred → Reasoner`. This requires the **Producer to consume the label differentiably** — as a class-probability vector through a projection layer, never as an `argmax` integer index through an embedding lookup. A non-differentiable label path silently severs this gradient and reduces the Reasoner to a standalone classifier (see `FIXES.md`).
 
 **3. Producer Error = `w_gen * Generation Loss + w_rec * Reconstruction Loss`**
 *   **Breakdown**: The Producer is penalized for failures in its two core functions: generating from ground truth (`Generation Loss`) and reconstructing from the system's own inference (`Reconstruction Loss`). This ensures it becomes a high-fidelity engine for manifesting observations from their constituent causes.
