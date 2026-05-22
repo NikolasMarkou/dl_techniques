@@ -51,6 +51,7 @@ Run:
 """
 
 import os
+import textwrap
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -255,6 +256,15 @@ class SentimentExplainer(keras.Model):
         self.fc_mu = keras.layers.Dense(config.explanation_dim, name="mu")
         self.fc_log_var = keras.layers.Dense(config.explanation_dim, name="log_var")
 
+    def build(self, input_shape):
+        c = self.config
+        self.embedding.build((None, c.max_len))
+        self.encoder.build((None, c.max_len, c.embed_dim))
+        enc_dim = 2 * c.encoder_hidden
+        self.fc_mu.build((None, enc_dim))
+        self.fc_log_var.build((None, enc_dim))
+        super().build(input_shape)
+
     def call(self, x, training=None):
         h = self.encoder(self.embedding(x), training=training)
         return self.fc_mu(h), self.fc_log_var(h)
@@ -289,6 +299,16 @@ class SentimentReasoner(keras.Model):
         self.classifier = keras.layers.Dense(
             config.num_classes, activation="softmax", name="classifier"
         )
+
+    def build(self, input_shape):
+        c = self.config
+        self.embedding.build((None, c.max_len))
+        self.encoder.build((None, c.max_len, c.embed_dim))
+        combined = 2 * c.encoder_hidden + c.explanation_dim
+        self.dense.build((None, combined))
+        self.dropout.build((None, c.reasoner_dense_units))
+        self.classifier.build((None, c.reasoner_dense_units))
+        super().build(input_shape)
 
     def call(self, x, e, training=None):
         h = self.encoder(self.embedding(x), training=training)
@@ -344,6 +364,23 @@ class SentimentProducer(keras.Model):
             })
 
         self.to_logits = keras.layers.Dense(config.vocab_size, name="to_logits")
+
+    def build(self, input_shape):
+        c = self.config
+        d = c.producer_d_model
+        self.label_projection.build((None, c.num_classes))
+        self.style_projection.build((None, c.explanation_dim))
+        self.merge.build((None, d))
+        self.position_embedding.build((c.max_len,))
+        seq = (None, c.max_len, d)
+        for block in self.blocks:
+            block["attn"].build(seq, seq)
+            block["norm1"].build(seq)
+            block["ffn1"].build(seq)
+            block["ffn2"].build((None, c.max_len, c.producer_ffn_dim))
+            block["norm2"].build(seq)
+        self.to_logits.build(seq)
+        super().build(input_shape)
 
     def call(self, y, e, training=None):
         content = self.label_projection(y)        # [B, d]
@@ -422,6 +459,25 @@ class ARSentimentProducer(keras.Model):
 
     def _condition(self, y, e):
         return self.cond_merge(self.label_projection(y) + self.style_projection(e))
+
+    def build(self, input_shape):
+        c = self.config
+        d = c.producer_d_model
+        self.token_embedding.build((None, c.max_len - 1))
+        self.position_embedding.build((c.max_len,))
+        self.label_projection.build((None, c.num_classes))
+        self.style_projection.build((None, c.explanation_dim))
+        self.cond_merge.build((None, d))
+        seq = (None, c.max_len, d)
+        for block in self.blocks:
+            block["label_inject"].build((None, c.num_classes))
+            block["attn"].build(seq, seq)
+            block["norm1"].build(seq)
+            block["ffn1"].build(seq)
+            block["ffn2"].build((None, c.max_len, c.producer_ffn_dim))
+            block["norm2"].build(seq)
+        self.to_logits.build(seq)
+        super().build(input_shape)
 
     def call(self, y, e, x_target, training=None):
         cond = self._condition(y, e)               # [B, d]
@@ -641,6 +697,76 @@ def plot_history(history: Dict[str, List[float]], out_path: str) -> None:
     plt.close(fig)
 
 
+def plot_counterfactual_matrix(
+    orchestrator: TextCCNetOrchestrator,
+    x_test: np.ndarray,
+    y_test: np.ndarray,
+    config: ExperimentConfig,
+    out_path: str,
+) -> None:
+    """Render a sentiment counterfactual matrix — the text analogue of the MNIST
+    digit matrix.
+
+    Each row is a source review; each cell re-decodes that review's latent style
+    ``E`` under a different target sentiment ``Y``. The cell whose target matches
+    the review's true sentiment is outlined in green.
+    """
+    mc = config.model
+    decode = build_decoder(mc.vocab_size)
+    label_name = {0: "negative", 1: "positive"}
+    samples_per_class = 3
+
+    # Balanced set of source reviews.
+    idx: List[int] = []
+    for label in range(mc.num_classes):
+        idx.extend(np.where(y_test == label)[0][:samples_per_class].tolist())
+    sources = x_test[idx]
+    src_labels = y_test[idx]
+
+    # One batched counterfactual decode per target sentiment.
+    cf_by_target: Dict[int, np.ndarray] = {}
+    for target in range(mc.num_classes):
+        y_target = keras.utils.to_categorical(
+            [target] * len(idx), mc.num_classes).astype("float32")
+        out = keras.ops.convert_to_numpy(
+            orchestrator.counterfactual_generation(
+                tf.convert_to_tensor(sources), tf.convert_to_tensor(y_target))
+        )
+        # AR orchestrator returns token ids [N,T]; NAR returns logits [N,T,V].
+        cf_by_target[target] = np.argmax(out, axis=-1) if out.ndim == 3 else out
+
+    rows, cols = len(idx), mc.num_classes + 1
+    headers = ["Original"] + [f"-> {label_name[t]}" for t in range(mc.num_classes)]
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 3.8, rows * 2.3))
+    fig.suptitle(
+        'Sentiment Counterfactual Matrix\n'
+        '"the same review, re-decoded under each sentiment"',
+        fontsize=14, fontweight="bold",
+    )
+
+    for i in range(rows):
+        for j in range(cols):
+            ax = axes[i, j]
+            ids = sources[i] if j == 0 else cf_by_target[j - 1][i]
+            ax.text(0.03, 0.97, textwrap.fill(decode(ids)[:240], width=38),
+                    va="top", ha="left", fontsize=7, family="monospace")
+            ax.set_xticks([])
+            ax.set_yticks([])
+            if i == 0:
+                ax.set_title(headers[j], fontsize=10, fontweight="bold")
+            if j == 0:
+                ax.set_ylabel(f"src: {label_name[src_labels[i]]}", fontsize=8)
+            # Outline the cell whose target sentiment is the review's true one.
+            if j > 0 and (j - 1) == src_labels[i]:
+                for spine in ax.spines.values():
+                    spine.set_edgecolor("green")
+                    spine.set_linewidth(2.5)
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+
+
 # =====================================================================
 # RUN
 # =====================================================================
@@ -667,6 +793,9 @@ def run_experiment(config: ExperimentConfig) -> TextCCNetOrchestrator:
     orchestrator.save_models(os.path.join(config.results_dir, "sentiment_ccnet"))
 
     plot_history(trainer.history, os.path.join(config.results_dir, "training_history.png"))
+    plot_counterfactual_matrix(
+        orchestrator, x_test, y_test, config,
+        os.path.join(config.results_dir, "counterfactual_matrix.png"))
 
     report = evaluate_and_report(orchestrator, x_test, y_test, config)
     with open(os.path.join(config.results_dir, "samples.txt"), "w") as fh:
