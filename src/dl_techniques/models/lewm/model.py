@@ -120,14 +120,22 @@ class LeWM(keras.Model):
     # Core forward helpers
     # ------------------------------------------------------------------
 
-    def encode_pixels(self, pixels: keras.KerasTensor) -> keras.KerasTensor:
-        """Encode pixel batch `(B, T, H, W, C)` -> embedding `(B, T, D)`."""
+    def encode_pixels(
+        self,
+        pixels: keras.KerasTensor,
+        training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
+        """Encode pixel batch `(B, T, H, W, C)` -> embedding `(B, T, D)`.
+
+        :param training: forwarded to the encoder and projector so the
+            train/eval mode is explicit (consistent with `predict_next`).
+        """
         shape = ops.shape(pixels)
         B, T = shape[0], shape[1]
         H, W, C = self.config.img_size, self.config.img_size, self.config.img_channels
         flat = ops.reshape(pixels, (B * T, H, W, C))
-        feat = self.encoder(flat)               # (B*T, D_enc)
-        proj = self.projector(feat)             # (B*T, D)
+        feat = self.encoder(flat, training=training)     # (B*T, D_enc)
+        proj = self.projector(feat, training=training)   # (B*T, D)
         emb = ops.reshape(proj, (B, T, self.config.embed_dim))
         return emb
 
@@ -177,7 +185,7 @@ class LeWM(keras.Model):
         # DECISION D-001: target encoder is live (no EMA, no stop_gradient).
         # Upstream LeWM uses the same encoder for both context and target.
         # Gradient flows through both paths. See decisions.md.
-        emb = self.encode_pixels(pixels)                 # (B, T, D)
+        emb = self.encode_pixels(pixels, training=training)   # (B, T, D)
 
         # Pad action along time axis with zeros so act_emb has T timesteps.
         # Upstream pads before action_encoder (the "append zero action" trick).
@@ -212,15 +220,23 @@ class LeWM(keras.Model):
     ) -> Dict[str, keras.KerasTensor]:
         """Autoregressive rollout from a history of pixel observations.
 
-        :param pixels_history: `(B, S, H_hist, H, W, C)` — history_size frames
-            replicated across S action-plan samples.
+        :param pixels_history: `(B, S, HS, H, W, C)` — ``HS = history_size``
+            frames. Only the ``s = 0`` plane is encoded; all S planes are
+            assumed to share the same history (see note below).
         :param action_sequence: `(B, S, T, action_dim)` — full action sequence
-            (history + future). H_hist = self.config.history_size.
+            of horizon ``T`` (history + future), with ``T >= history_size``.
         :return: dict with
-            * ``predicted_emb``: `(B, S, T, D)` — predicted embeddings for
-              the full rollout horizon (history frames use encoder output
-              directly, future frames use predictor output).
+            * ``predicted_emb``: `(B, S, T + 1, D)`. **Note the ``T + 1``** —
+              the rollout keeps every step it produces: ``HS`` history frames
+              plus ``(T - HS) + 1`` autoregressive predictions. The first
+              ``HS`` entries along the time axis are **encoder-derived**
+              embeddings of the observed history; the remaining ``T + 1 - HS``
+              entries are **predictor-derived**. A consumer comparing
+              predictions against ground truth must score only the
+              predictor-derived tail, not the encoder-derived head.
 
+        ``pixels_history[:, 0]`` is encoded and broadcast over S — distinct
+        per-S histories are NOT supported and would be silently ignored.
         Implementation mirrors upstream `/tmp/lewm_source/jepa.py:rollout`.
         """
         cfg = self.config
@@ -231,6 +247,16 @@ class LeWM(keras.Model):
         S = ops.shape(action_sequence)[1]
         T = ops.shape(action_sequence)[2]
 
+        # rollout is an eager-only inference path (it runs a Python `for`
+        # loop), so T is a concrete value here. Guard against an action
+        # horizon shorter than the history window — otherwise n_steps below
+        # is negative and the loop is silently skipped.
+        if int(T) < HS:
+            raise ValueError(
+                f"rollout: action_sequence horizon T={int(T)} must be >= "
+                f"history_size={HS}."
+            )
+
         # Split actions into initial-history actions + future actions.
         # act_0: (B, S, HS, A); act_future: (B, S, T-HS, A).
         act_0 = action_sequence[:, :, :HS, :]
@@ -240,7 +266,7 @@ class LeWM(keras.Model):
         # replicated over S to avoid re-encoding (S copies of same frames).
         # pixels_history: (B, S, HS, H, W, C). We take s=0 then tile.
         pixels_0 = pixels_history[:, 0]     # (B, HS, H, W, C)
-        emb_0 = self.encode_pixels(pixels_0)  # (B, HS, D)
+        emb_0 = self.encode_pixels(pixels_0, training=False)  # (B, HS, D)
 
         # Broadcast over S: (B, S, HS, D) -> flatten (B*S, HS, D).
         emb = ops.broadcast_to(
@@ -272,10 +298,11 @@ class LeWM(keras.Model):
         pred_last = pred_emb_step[:, -1:]
         emb = ops.concatenate([emb, pred_last], axis=1)
 
-        # Reshape back (B*S, T_full, D) -> (B, S, T_full, D) and truncate to T.
+        # Reshape (B*S, T_full, D) -> (B, S, T_full, D). T_full = HS + n_steps
+        # + 1 = T + 1: the rollout keeps every step it produces (see the
+        # method docstring's predicted_emb note). No truncation.
         T_full = ops.shape(emb)[1]
         pred_rollout = ops.reshape(emb, (B, S, T_full, D))
-        # The upstream rollout produces HS + n_steps + 1 steps; we keep all.
         return {"predicted_emb": pred_rollout}
 
     # ------------------------------------------------------------------
