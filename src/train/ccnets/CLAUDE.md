@@ -47,3 +47,45 @@ MPLBACKEND=Agg .venv/bin/python -m train.ccnets.mnist
 `mnist.py`, 50 epochs, `explanation_dim=32`: ~0.99 accuracy, clean reconstructions, and a
 working counterfactual matrix (style `E` recombined with arbitrary labels `Y`). If a new
 task does not show all three error signals decreasing together, re-check Invariant 1.
+
+## Findings — `text_sentiment.py` Producer variants
+
+Three Producer designs were tried on IMDB sentiment (10 epochs, vocab 5000, `max_len=80`,
+`explanation_dim=32`). The observation `X` here is a discrete token sequence, so
+`TextCCNetOrchestrator` swaps the pixel-norm losses for token-space losses (masked
+cross-entropy for generation/reconstruction, masked KL for inference).
+
+| Variant | Reasoner test acc | Val generation CE | Reconstruction | Counterfactual sentiment control |
+|---|---|---|---|---|
+| Non-autoregressive | 0.761 | **5.6** (plateau) | unigram collapse (`the the <oov> <oov> …`) | none |
+| Autoregressive, prefix conditioning | 0.765 | **4.48** | structural, content-tracking | weak / none |
+| Autoregressive + per-layer `Y` injection | 0.771 | **4.48** | structural, content-tracking | **works** (clear flips) |
+
+Counterfactual evidence (per-layer variant): a negative review re-decoded as positive →
+*"this movie is a **great film** … a **great movie** that is a **great movie**"*; a
+positive review re-decoded as negative → *"… the **worst movies** i have ever seen … the
+**worst movies ever made**"*.
+
+### Lessons
+
+1. **A small latent cannot carry a long sequence in one shot.** The non-autoregressive
+   Producer must emit all `T` tokens from `(Y, E)` alone; with `E` only 32-dim it
+   collapses to the marginal (unigram) token distribution. Generation CE plateaus high.
+2. **Autoregression fixes reconstruction.** Predicting each token *with its own context*
+   (teacher-forced causal decoder) drops generation CE 5.6 → 4.48 and yields structural,
+   content-tracking text instead of collapse.
+3. **A conditioning signal needs enough surface area to compete with the context.** A
+   single `(Y, E)` prefix token is drowned out by ~80 autoregressive context tokens — the
+   decoder ignores it. Injecting `Y` into the residual stream at *every* decoder layer
+   turns sentiment into a real control knob (counterfactual flips start working) without
+   changing generation CE. Control strength and language-model fluency are separate axes.
+4. **Persistent limits.** Free greedy generation still drifts to `<oov>` runs after
+   ~20 tokens (exposure bias + a 5000-token vocab); the Reasoner overfits (train ~0.97 vs
+   test ~0.77).
+5. **The deep caveat.** A movie review is *not determined* by its sentiment — so the
+   CCNet necessity-&-sufficiency condition (`models/ccnets/PRINCIPLES_CCNETS.md`, P1/P2)
+   only partly holds. The Producer is fundamentally a conditional language model in which
+   `(Y, E)` are modulators, not the sole cause of `X`. The paradigm fits cleanly when the
+   causes genuinely determine the effect (as label + style do for an MNIST digit); for a
+   task where they do not, expect a working Reasoner and controllable-but-not-faithful
+   generation.

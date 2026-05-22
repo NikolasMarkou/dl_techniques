@@ -42,6 +42,10 @@ predicted with its own context -- but that also means ``(Y, E)`` are modulators 
 conditional language model, not the sole cause of ``X``. Sentiment classification (the
 Reasoner) is the strong, well-posed signal.
 
+A comparison of the three Producer variants tried (non-autoregressive, autoregressive,
+autoregressive + per-layer Y injection) and the lessons drawn from them is in
+``train/ccnets/CLAUDE.md`` under "Findings".
+
 Run:
     MPLBACKEND=Agg .venv/bin/python -m train.ccnets.text_sentiment
 """
@@ -375,11 +379,13 @@ class ARSentimentProducer(keras.Model):
     """Autoregressive P(X|Y,E): a causal Transformer decoder.
 
     Token ``i`` is predicted from tokens ``< i`` plus a conditioning prefix built
-    from ``(Y, E)``. Teacher-forced at training time; word-dropout on the
-    teacher-forced context stops the decoder from ignoring ``(Y, E)`` and merely
-    copying the surrounding text. The label enters through a bias-free Dense
-    projection (PRINCIPLES_CCNETS.md, P4), so reconstruction gradient still reaches
-    the Reasoner.
+    from ``(Y, E)``. The sentiment ``Y`` is *additionally* injected into the
+    residual stream at the input of every decoder layer, so the decoder cannot
+    "forget" the conditioning across depth. Teacher-forced at training time;
+    word-dropout on the teacher-forced context stops the decoder from ignoring
+    ``(Y, E)`` and merely copying the surrounding text. Every label path is a
+    bias-free / plain Dense projection of the probability vector
+    (PRINCIPLES_CCNETS.md, P4), so reconstruction gradient still reaches the Reasoner.
 
     Call signature: ``producer(y, e, x_target, training=...)``.
     """
@@ -401,6 +407,8 @@ class ARSentimentProducer(keras.Model):
         self.blocks: List[Dict[str, keras.layers.Layer]] = []
         for i in range(config.producer_layers):
             self.blocks.append({
+                # Per-layer sentiment injection (P4: differentiable label path).
+                "label_inject": keras.layers.Dense(d, name=f"label_inject_{i}"),
                 "attn": keras.layers.MultiHeadAttention(
                     num_heads=config.producer_heads, key_dim=d // config.producer_heads,
                     name=f"attn_{i}"),
@@ -435,6 +443,8 @@ class ARSentimentProducer(keras.Model):
         x = x + self.position_embedding(positions)
 
         for block in self.blocks:
+            # Re-inject the sentiment Y at every layer's residual stream.
+            x = x + keras.ops.expand_dims(block["label_inject"](y), axis=1)
             attn = block["attn"](x, x, use_causal_mask=True, training=training)
             x = block["norm1"](x + attn)
             ffn = block["ffn2"](block["ffn1"](x))
