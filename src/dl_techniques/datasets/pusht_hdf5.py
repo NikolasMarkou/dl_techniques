@@ -89,6 +89,11 @@ def synthetic_lewm_dataset(
     )
     ds = tf.data.Dataset.from_generator(gen, output_signature=output_signature)
     ds = ds.batch(batch_size, drop_remainder=True)
+    # Repeat so a `model.fit(steps_per_epoch=..., epochs=...)` whose total
+    # step budget exceeds num_episodes does not fail mid-fit with
+    # "ran out of data". The sole consumer (train_lewm.py) always passes
+    # steps_per_epoch, so an unbounded dataset is safe here.
+    ds = ds.repeat()
     ds = ds.prefetch(tf.data.AUTOTUNE)
     return ds
 
@@ -203,5 +208,10 @@ class PushTHDF5Dataset:
         )
         ds = tf.data.Dataset.from_generator(gen, output_signature=output_signature)
         ds = ds.batch(self.batch_size, drop_remainder=True)
+        # Repeat — same rationale as synthetic_lewm_dataset: train_lewm.py
+        # always drives this with steps_per_epoch, so an unbounded dataset
+        # avoids a mid-fit "ran out of data" when the step budget exceeds the
+        # number of sliceable windows.
+        ds = ds.repeat()
         ds = ds.prefetch(tf.data.AUTOTUNE)
         return ds

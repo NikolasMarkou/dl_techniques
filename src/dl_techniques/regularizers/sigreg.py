@@ -20,9 +20,12 @@ distribution of random 1-D projections of `Z` toward a standard Gaussian
 characteristic function — a sliced isotropic-Gaussian fit — in the spirit of
 sliced-Wasserstein regularization but using characteristic-function residuals.
 
-**Input convention.** The reference PyTorch implementation takes input shaped
-`(T, B, D)` and averages along axis -3 (the combined time-batch dimension).
-This Keras port follows the same convention.
+**Input convention.** Input is shaped `(..., N, D)` — typically `(T, B, D)`.
+The characteristic-function estimate is averaged over the **last-but-one axis
+`N`** (the sample axis); for a `(T, B, D)` input that is the batch axis `B`.
+One statistic is computed per leading index (per timestep when the input is
+`(T, B, D)`), and the scalar returned is the mean over all of them. The
+reference PyTorch implementation reduces the same axis.
 
 **Why a Layer and not a Regularizer.** Upstream SIGReg depends on the forward
 activations (not weights), samples a fresh random projection each call, and

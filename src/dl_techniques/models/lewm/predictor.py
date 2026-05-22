@@ -112,7 +112,10 @@ class ARPredictor(keras.layers.Layer):
         self.pos_embedding = self.add_weight(
             name="pos_embedding",
             shape=(1, self.num_frames, self.input_dim),
-            initializer=keras.initializers.RandomNormal(stddev=1.0),
+            # Small init (DiT / ViT convention) — the positional embedding is
+            # added to encoder embeddings of comparable scale; a unit-stddev
+            # init would dominate the residual stream early in training.
+            initializer=keras.initializers.RandomNormal(stddev=0.02),
             trainable=True,
         )
 
