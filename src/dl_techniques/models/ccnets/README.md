@@ -393,9 +393,19 @@ x_counterfactual = orchestrator.counterfactual_generation(x_reference, y_target_
 
 See `src/train/ccnets/CLAUDE.md` for how to derive a new training script from this template.
 
+### Sentiment-conditioned text
+
+`src/train/ccnets/text_sentiment.py` is a prototype CCNet over **discrete token
+sequences** (IMDB sentiment): `X` = a review, `Y` = sentiment, `E` = latent style.
+Because `X` is discrete, the pixel-norm losses do not apply — `TextCCNetOrchestrator`
+overrides `compute_losses` with **token-space losses** (masked cross-entropy for
+generation/reconstruction, masked KL for inference), and the Producer is a
+non-autoregressive token-logit decoder. This is the worked example for adapting the
+paradigm to a non-continuous observation.
+
 ### Other modalities
 
-The framework is modality-agnostic — text and time-series CCNets are possible by supplying
-appropriate Explainer/Reasoner/Producer networks (use `SequentialCCNetOrchestrator` for
-sequential data). No text or time-series task is implemented in the repository yet; the
-MNIST task above is the only worked example. See `CLAUDE.md` for the task-adaptation table.
+The framework is modality-agnostic — tabular, audio, and time-series CCNets follow the
+same recipe by supplying appropriate Explainer/Reasoner/Producer networks (use
+`SequentialCCNetOrchestrator` for sequential data). See `CLAUDE.md` for the
+task-adaptation table.

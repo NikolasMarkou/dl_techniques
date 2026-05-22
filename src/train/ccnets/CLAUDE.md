@@ -7,8 +7,12 @@ the training-script layer.
 
 ## Files
 
-- `mnist.py` — the reference task: MNIST digit classification + counterfactual generation.
-  Treat it as the template for any new CCNet task.
+- `mnist.py` — the reference task: MNIST digit classification + counterfactual generation
+  (continuous observation `X`, pixel-norm losses). Treat it as the template for image tasks.
+- `text_sentiment.py` — a CCNet over discrete token sequences (IMDB sentiment). Shows the
+  adaptations for a non-continuous `X`: a non-autoregressive Producer and **token-space
+  losses** via a `TextCCNetOrchestrator` that overrides `compute_losses`. Template for
+  text / sequence tasks. (Prototype — see its module docstring for scope.)
 
 ## `mnist.py` structure (the template)
 
