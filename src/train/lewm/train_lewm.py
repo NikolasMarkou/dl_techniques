@@ -212,6 +212,23 @@ def main() -> None:
     model.save(str(final_path))
     logger.info(f"Saved final model to {final_path}")
 
+    # Verify the saved model actually reloads and reproduces a forward pass.
+    # (Asserting a round-trip in a comment is not the same as checking it.)
+    try:
+        sample = next(iter(dataset))[0]
+        y_orig = keras.ops.convert_to_numpy(model(sample, training=False))
+        reloaded = keras.models.load_model(str(final_path))
+        y_reload = keras.ops.convert_to_numpy(reloaded(sample, training=False))
+        max_diff = float(np.max(np.abs(y_orig - y_reload)))
+        if max_diff < 1e-4:
+            logger.info(f"Reload check PASSED (max|delta|={max_diff:.2e}).")
+        else:
+            logger.error(
+                f"Reload check FAILED: max|delta|={max_diff:.2e} >= 1e-4."
+            )
+    except Exception as e:  # noqa: BLE001 - surface any reload failure loudly
+        logger.error(f"Reload check FAILED with exception: {e}")
+
 
 if __name__ == "__main__":
     main()
