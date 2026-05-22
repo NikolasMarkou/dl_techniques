@@ -160,6 +160,22 @@ what actually trains; `FOUNDATION.md`/`README.md` should be reconciled with the 
 - 50-epoch MNIST: train accuracy 0.994; clean reconstructions; counterfactual matrix
   recombines style and label correctly.
 
+## Follow-up — sparse embedding gradients (2026-05)
+
+Surfaced while prototyping a text CCNet (`train/ccnets/text_sentiment.py`), where the
+Reasoner contains an `Embedding` layer.
+
+**Defect.** `train_step` selects the Reasoner gradients with `tf.cond(train_reasoner,
+compute_grads, zero_grads)`. An `Embedding` produces a sparse `tf.IndexedSlices`
+gradient, while the zero branch returns dense `tf.zeros_like`. `tf.cond` requires both
+branches to return matching types and raised `TypeError: Cannot reconcile tf.cond
+outputs`. The image task never hit this because its Reasoner had no embedding.
+
+**Fix.** A `_densify` helper converts every gradient to a dense tensor (`None` → zeros,
+`IndexedSlices` → dense) immediately after each `tape.gradient` call, so the whole
+pipeline — `tf.cond` reconciliation, value clipping, global-norm — operates on uniform
+dense tensors. Pinned by `test_densify_handles_none_dense_and_indexed_slices`.
+
 ## Remaining opportunities (not bugs)
 
 - Generation fidelity is good but not sharp — a stronger Producer (residual upsampling,

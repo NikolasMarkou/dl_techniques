@@ -476,6 +476,33 @@ class TestInferenceUtilities:
 # Serialization
 # ---------------------------------------------------------------------
 
+class TestGradientDensification:
+    """Regression: embedding layers (common in text / categorical modules) emit
+    sparse `IndexedSlices` gradients. The train_step gradient pipeline must
+    densify them, or `tf.cond` cannot reconcile its branches."""
+
+    def test_densify_handles_none_dense_and_indexed_slices(self):
+        from dl_techniques.models.ccnets.orchestrators import _densify
+
+        v_dense = tf.Variable(tf.zeros((3, 4)))
+        v_embed = tf.Variable(tf.zeros((5, 2)))
+        v_unused = tf.Variable(tf.zeros((2,)))
+
+        dense_grad = tf.ones((3, 4))
+        sparse_grad = tf.IndexedSlices(
+            values=tf.ones((2, 2)),
+            indices=tf.constant([0, 3]),
+            dense_shape=tf.constant([5, 2]),
+        )
+        out = _densify([dense_grad, sparse_grad, None], [v_dense, v_embed, v_unused])
+
+        assert all(isinstance(g, tf.Tensor) for g in out)
+        assert tuple(out[0].shape) == (3, 4)
+        assert tuple(out[1].shape) == (5, 2)   # IndexedSlices -> dense
+        assert tuple(out[2].shape) == (2,)     # None -> zeros
+        assert float(tf.reduce_sum(out[2])) == 0.0
+
+
 class TestSerialization:
     def test_save_and_load_round_trip(self, orchestrator, sample_batch, tmp_path):
         # counterfactual_generation uses the deterministic mu (no sampling),

@@ -14,6 +14,23 @@ from .control import ConvergenceControlStrategy, StaticThresholdStrategy
 
 # ---------------------------------------------------------------------
 
+def _densify(grads, variables):
+    """Normalize a gradient list to dense tensors aligned with `variables`.
+
+    `tf.GradientTape.gradient` returns `None` for unconnected variables and
+    sparse `tf.IndexedSlices` for variables behind an embedding lookup. The
+    CCNet gradient pipeline (`tf.cond` branch reconciliation, per-value
+    clipping, `tf.linalg.global_norm`) requires uniform dense tensors, so each
+    gradient is converted: `None` -> zeros, `IndexedSlices` -> dense tensor.
+    """
+    return [
+        tf.zeros_like(v) if g is None else tf.convert_to_tensor(g)
+        for g, v in zip(grads, variables)
+    ]
+
+
+# ---------------------------------------------------------------------
+
 class CCNetOrchestrator:
     """
     Main orchestrator for Causal Cooperative Networks.
@@ -254,19 +271,27 @@ class CCNetOrchestrator:
         train_reasoner = self.control.should_train_reasoner(current_metrics)
 
         # --- Compute Gradients ---
+        # CORRECTED: gradients are densified immediately. Embedding layers (common
+        # in text / categorical modules) emit sparse `IndexedSlices` gradients;
+        # downstream `tf.cond` reconciliation, value clipping, and global-norm all
+        # require uniform dense tensors. `_densify` also maps None -> zeros.
         explainer_vars = self.explainer.trainable_variables
-        explainer_grads = explainer_tape.gradient(errors.explainer_error, explainer_vars)
+        explainer_grads = _densify(
+            explainer_tape.gradient(errors.explainer_error, explainer_vars), explainer_vars)
 
         producer_vars = self.producer.trainable_variables
-        producer_grads = producer_tape.gradient(errors.producer_error, producer_vars)
+        producer_grads = _densify(
+            producer_tape.gradient(errors.producer_error, producer_vars), producer_vars)
 
         reasoner_vars = self.reasoner.trainable_variables
 
         # CORRECTED: Use tf.cond for robust conditional graph execution.
         # This prevents the "variable is None" error by explicitly defining
-        # both branches of the computation for the graph compiler.
+        # both branches of the computation for the graph compiler. Both branches
+        # must return matching (dense) types — hence `_densify` on the true branch.
         def compute_reasoner_grads():
-            return reasoner_tape.gradient(errors.reasoner_error, reasoner_vars)
+            return _densify(
+                reasoner_tape.gradient(errors.reasoner_error, reasoner_vars), reasoner_vars)
 
         def make_zero_grads():
             return [tf.zeros_like(v) for v in reasoner_vars]
