@@ -47,6 +47,15 @@ class CCNetOrchestrator:
         self.config = config or CCNetConfig()
         self.control = control_strategy or StaticThresholdStrategy()
 
+        # CORRECTED (H5): the KL weight must be a tf.Variable, not a Python float.
+        # `compute_model_errors` runs inside an @tf.function; a Python float read
+        # there is baked into the traced graph as a constant, so KL annealing in
+        # CCNetTrainer was a silent no-op. A tf.Variable is read live every step.
+        self.kl_weight = tf.Variable(
+            self.config.explainer_weights.get('kl_divergence', 0.0),
+            trainable=False, dtype=tf.float32, name='kl_weight'
+        )
+
         # Initialize core components
         self._init_loss_function()
         self._init_optimizers()
@@ -110,20 +119,21 @@ class CCNetOrchestrator:
 
         e_latent_no_grad = tf.stop_gradient(e_latent)
 
-        # Step 2: Infer label probabilities (shape: [batch, 10])
+        # Step 2: Infer label probabilities (shape: [batch, num_classes])
         y_inferred_probs = self.reasoner(x_input, e_latent_no_grad, training=training)
 
-        # --- PROTOCOL ENFORCEMENT: CONVERT TO INDICES ---
-        # The Producer's Embedding layer requires integer indices, not one-hot vectors.
-        # Convert the probability distributions to class indices.
-        y_inferred_indices = keras.ops.argmax(y_inferred_probs, axis=-1)
-        y_truth_indices = keras.ops.argmax(y_truth, axis=-1)
+        # CORRECTED (H3): the Producer now consumes the probability vector directly
+        # via a differentiable label projection. The previous argmax-to-indices step
+        # was non-differentiable and severed all gradient flow from the
+        # reconstruction / inference losses back into the Reasoner, which is the
+        # heart of CCNet cooperative credit assignment.
 
-        # Step 3: Reconstruct observation using inferred indices
-        x_reconstructed = self.producer(y_inferred_indices, e_latent_no_grad, training=training)
+        # Step 3: Reconstruct observation from the Reasoner's (soft) inference.
+        # Gradient flows: reconstruction_loss -> Producer -> y_inferred_probs -> Reasoner.
+        x_reconstructed = self.producer(y_inferred_probs, e_latent_no_grad, training=training)
 
-        # Step 4: Generate observation from true indices
-        x_generated = self.producer(y_truth_indices, e_latent, training=training)
+        # Step 4: Generate observation from the ground-truth label.
+        x_generated = self.producer(y_truth, e_latent, training=training)
 
         return {
             'x_input': x_input,
@@ -174,21 +184,28 @@ class CCNetOrchestrator:
         )
 
         # --- Stable Additive Error Formulation (Per Documentation) ---
+        # KL weight is read from the live tf.Variable (H5 fix), not the config float.
         explainer_error = (
                 self.config.explainer_weights['inference'] * losses.inference_loss +
                 self.config.explainer_weights['generation'] * losses.generation_loss +
-                self.config.explainer_weights['kl_divergence'] * kl_loss
+                self.kl_weight * kl_loss
         )
 
-        # --- CORRECTED: The Reasoner error must be a direct, differentiable
-        # --- classification loss. The original formulation based on reconstruction
-        # --- was severed by the non-differentiable argmax operation, preventing
-        # --- the Reasoner from receiving any gradients and causing the tf.cond error.
+        # --- Reasoner error: cooperative, per the restored CCNet protocol (H3 fix).
+        # The differentiable label projection in the Producer means reconstruction_loss
+        # now backpropagates into the Reasoner. We keep a categorical-crossentropy
+        # anchor for stable, well-conditioned classification gradients and ADD the
+        # cooperative reconstruction term so the Reasoner is penalised for inferences
+        # that the Producer cannot turn back into the original observation.
         y_truth = tensors['y_truth']
         y_inferred = tensors['y_inferred']
-        classification_loss = keras.losses.categorical_crossentropy(y_truth, y_inferred)
-        reasoner_error = keras.ops.mean(classification_loss)
-
+        classification_loss = keras.ops.mean(
+            keras.losses.categorical_crossentropy(y_truth, y_inferred)
+        )
+        reasoner_error = (
+                self.config.reasoner_weights['inference'] * classification_loss +
+                self.config.reasoner_weights['reconstruction'] * losses.reconstruction_loss
+        )
 
         producer_error = (
                 self.config.producer_weights['generation'] * losses.generation_loss +
@@ -448,19 +465,16 @@ class SequentialCCNetOrchestrator(CCNetOrchestrator):
         # Infer label probabilities
         y_inferred_probs = self.reasoner(x_input, e_latent_no_grad, training=training)
 
-        # --- PROTOCOL ENFORCEMENT: CONVERT TO INDICES ---
-        y_inferred_indices = keras.ops.argmax(y_inferred_probs, axis=-1)
-        y_truth_indices = keras.ops.argmax(y_truth, axis=-1)
-
-        # Reverse sequences for Producer
-        y_inferred_indices_rev = self.reverse_sequence(y_inferred_indices)
-        y_truth_indices_rev = self.reverse_sequence(y_truth_indices)
+        # CORRECTED (H3): keep the differentiable probability vectors; the Producer's
+        # label projection consumes them directly. No argmax — gradient flow preserved.
+        y_inferred_rev = self.reverse_sequence(y_inferred_probs)
+        y_truth_rev = self.reverse_sequence(y_truth)
         e_latent_no_grad_rev = self.reverse_sequence(e_latent_no_grad)
         e_latent_rev = self.reverse_sequence(e_latent)
 
-        # Generate with indices
-        x_reconstructed_rev = self.producer(y_inferred_indices_rev, e_latent_no_grad_rev, training=training)
-        x_generated_rev = self.producer(y_truth_indices_rev, e_latent_rev, training=training)
+        # Generate with (soft) labels
+        x_reconstructed_rev = self.producer(y_inferred_rev, e_latent_no_grad_rev, training=training)
+        x_generated_rev = self.producer(y_truth_rev, e_latent_rev, training=training)
 
         # Reverse outputs back
         x_reconstructed = self.reverse_sequence(x_reconstructed_rev)

@@ -67,8 +67,10 @@ class CCNetTrainer:
             if self.kl_annealing_epochs is not None and self.kl_annealing_epochs > 0:
                 annealing_ratio = min(1.0, (epoch + 1) / self.kl_annealing_epochs)
                 new_kl_weight = self.initial_kl_weight * annealing_ratio
-                # CORRECTED: Update the KL weight in the new config structure
-                self.orchestrator.config.explainer_weights['kl_divergence'] = new_kl_weight
+                # CORRECTED (H5): assign to the orchestrator's tf.Variable so the
+                # change is visible inside the compiled train_step. Mutating the
+                # config dict had no effect — the float was baked at trace time.
+                self.orchestrator.kl_weight.assign(new_kl_weight)
                 logger.info(f"  KL Annealing: Current Weight = {new_kl_weight:.4f}")
 
             # Training loop

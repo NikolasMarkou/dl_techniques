@@ -517,10 +517,16 @@ class MNISTProducer(keras.Model):
             use_matrix_scaling=config.producer_use_matrix_scaling
         ) if config.producer_orthonormal_lambda > 0 else None
 
-        self.label_embedding = keras.layers.Embedding(
-            input_dim=config.num_classes,
-            output_dim=config.producer_initial_dense_units,
-            name="label_embedding"
+        # CORRECTED (H3): a differentiable label projection replaces keras Embedding.
+        # Embedding requires integer indices, which forced a non-differentiable argmax
+        # in the orchestrator and severed the Reasoner from cooperative credit
+        # assignment. A bias-free Dense on the class-probability vector is, for a
+        # one-hot input, exactly an embedding lookup — but it is differentiable for
+        # the Reasoner's soft predictions, so reconstruction_loss can train the Reasoner.
+        self.label_projection = keras.layers.Dense(
+            config.producer_initial_dense_units,
+            use_bias=False,
+            name="label_projection"
         )
 
         s, c = config.producer_initial_spatial_size, config.producer_initial_channels
@@ -541,13 +547,14 @@ class MNISTProducer(keras.Model):
         self.conv_out_2 = keras.layers.Conv2D(1, 1, padding="same", activation="sigmoid", name="conv_out_2")
 
     def build(self, input_shape):
+        # input_shape is the label tensor shape: [batch, num_classes] (probabilities).
         label_shape = input_shape
         explanation_shape = (label_shape[0], self.config.explanation_dim)
 
-        self.label_embedding.build(label_shape)
-        embedding_shape = self.label_embedding.compute_output_shape(label_shape)
-        self.fc_content.build(embedding_shape)
-        fc_shape = self.fc_content.compute_output_shape(embedding_shape)
+        self.label_projection.build(label_shape)
+        projected_shape = self.label_projection.compute_output_shape(label_shape)
+        self.fc_content.build(projected_shape)
+        fc_shape = self.fc_content.compute_output_shape(projected_shape)
         self.reshape_content.build(fc_shape)
 
         s, c = self.config.producer_initial_spatial_size, self.config.producer_initial_channels
@@ -569,12 +576,9 @@ class MNISTProducer(keras.Model):
         super().build(input_shape)
 
     def call(self, y, e, training=None):
-        if y.shape.rank > 1 and y.shape[-1] == self.config.num_classes:
-            y_indices = keras.ops.argmax(y, axis=-1)
-        else:
-            y_indices = y
-
-        c = self.label_embedding(y_indices)
+        # y is a class-probability / one-hot vector [batch, num_classes].
+        # The differentiable projection preserves gradient flow to the Reasoner.
+        c = self.label_projection(y)
         c = self.fc_content(c)
         x = self.reshape_content(c)
 
@@ -905,11 +909,11 @@ def create_mnist_ccnet(config: ExperimentConfig) -> CCNetOrchestrator:
     producer = MNISTProducer(config.model)
 
     dummy_image = keras.ops.zeros((1, 28, 28, 1))
-    dummy_label_indices = keras.ops.zeros((1,), dtype="int32")
+    dummy_label = keras.ops.zeros((1, config.model.num_classes))
     dummy_latent = keras.ops.zeros((1, config.model.explanation_dim))
 
     mu, _ = explainer(dummy_image)
-    _ = producer(dummy_label_indices, dummy_latent)
+    _ = producer(dummy_label, dummy_latent)
     _ = reasoner(dummy_image, dummy_latent)
 
     ccnet_config = CCNetConfig(
@@ -1074,7 +1078,7 @@ class CCNetExperiment:
 if __name__ == "__main__":
     config = ExperimentConfig(
         model=ModelConfig(
-            explanation_dim=4,
+            explanation_dim=32,
             explainer_l2_regularization=1e-5,
             reasoner_dropout_rate=0.25
         ),
@@ -1105,3 +1109,4 @@ if __name__ == "__main__":
     )
 
     experiment = CCNetExperiment(config)
+    experiment.run()
