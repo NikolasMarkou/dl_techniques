@@ -9,10 +9,18 @@ from images to discrete token sequences, on the IMDB sentiment corpus:
 
 What differs from the image task (``train/ccnets/mnist.py``):
 
-* **The Producer ``P(X|Y,E)`` is a non-autoregressive text decoder.** It emits the
-  full sequence of token logits ``[B, T, vocab]`` in one shot from ``(Y, E)``. This
-  keeps the differentiable label path (PRINCIPLES_CCNETS.md, P4) trivially intact --
-  no argmax, no sampled-token feedback -- at the cost of generation sharpness.
+* **The Producer ``P(X|Y,E)``.** Two variants, selected by ``ModelConfig.producer_type``:
+    - ``'autoregressive'`` (default): a causal Transformer decoder, teacher-forced on
+      ``x_input``. Token ``i`` is predicted from tokens ``< i`` plus a conditioning
+      prefix built from ``(Y, E)``. Word-dropout on the teacher-forced context stops
+      the decoder from ignoring ``(Y, E)``. Used via ``ARTextCCNetOrchestrator``, which
+      teacher-forces the Producer in ``forward_pass`` and decodes greedily for
+      counterfactuals.
+    - ``'nonautoregressive'``: emits the whole token-logit sequence in one shot from
+      ``(Y, E)``. Simpler, but a small latent cannot carry a long review, so it
+      collapses toward the unigram distribution (see PROTOTYPE SCOPE below).
+  Both keep the differentiable label path (PRINCIPLES_CCNETS.md, P4) intact -- the
+  label enters through a bias-free Dense projection, never an argmax index.
 * **Token-space losses.** ``TextCCNetOrchestrator`` overrides ``compute_losses``:
     - generation / reconstruction -> masked sparse categorical cross-entropy
       between Producer logits and the input tokens;
@@ -25,10 +33,14 @@ error, the per-module gradient tapes, the live ``kl_weight`` -- is reused unchan
 from the base ``CCNetOrchestrator``. Only ``compute_losses`` is task-specific,
 which is Principle P11 (model-agnostic, contract-based) in action.
 
-PROTOTYPE SCOPE: this demonstrates that the mechanism runs end-to-end on text --
-cooperative gradient flow, token-space losses, sentiment counterfactuals. A small
-latent + a non-autoregressive decoder will not reconstruct long reviews faithfully;
-reconstruction is a structural demo, sentiment classification is the strong signal.
+PROTOTYPE SCOPE: this demonstrates the mechanism runs end-to-end on text --
+cooperative gradient flow, token-space losses, sentiment counterfactuals. Note a deeper
+caveat: a movie review is not *determined* by its sentiment, so the CCNet
+necessity-&-sufficiency condition (PRINCIPLES_CCNETS.md, P1/P2) only partly holds for
+this task. The autoregressive Producer makes generation fluent because each token is
+predicted with its own context -- but that also means ``(Y, E)`` are modulators of a
+conditional language model, not the sole cause of ``X``. Sentiment classification (the
+Reasoner) is the strong, well-posed signal.
 
 Run:
     MPLBACKEND=Agg .venv/bin/python -m train.ccnets.text_sentiment
@@ -71,10 +83,12 @@ class ModelConfig:
     reasoner_dense_units: int = 64
     reasoner_dropout: float = 0.3
 
+    producer_type: str = 'autoregressive'   # 'autoregressive' | 'nonautoregressive'
     producer_d_model: int = 128
     producer_layers: int = 2
     producer_heads: int = 4
     producer_ffn_dim: int = 256
+    producer_word_dropout: float = 0.3       # AR only: teacher-forced-context dropout
 
 
 @dataclass
@@ -166,6 +180,55 @@ class TextCCNetOrchestrator(CCNetOrchestrator):
             reconstruction_loss=reconstruction_loss,
             inference_loss=inference_loss,
         )
+
+
+class ARTextCCNetOrchestrator(TextCCNetOrchestrator):
+    """Token-space orchestrator for an autoregressive Producer.
+
+    The autoregressive Producer needs the target sequence for teacher forcing, so
+    ``forward_pass`` is overridden to pass ``x_input`` into the Producer. Token-space
+    ``compute_losses`` is inherited from ``TextCCNetOrchestrator``.
+    """
+
+    def __init__(self, *args, max_len: int = 80, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.max_len = max_len
+
+    def forward_pass(self, x_input, y_truth, training: bool = True):
+        mu, log_var = self.explainer(x_input, training=training)
+        log_var = tf.clip_by_value(log_var, -10.0, 10.0)
+        std = keras.ops.exp(0.5 * log_var)
+        epsilon = keras.random.normal(shape=keras.ops.shape(mu))
+        e_latent = mu + epsilon * std
+        e_latent_no_grad = tf.stop_gradient(e_latent)
+
+        y_inferred_probs = self.reasoner(x_input, e_latent_no_grad, training=training)
+
+        # The autoregressive Producer is teacher-forced on x_input. The label still
+        # enters differentiably (P4), so reconstruction gradient reaches the Reasoner.
+        x_reconstructed = self.producer(
+            y_inferred_probs, e_latent_no_grad, x_input, training=training)
+        x_generated = self.producer(
+            y_truth, e_latent, x_input, training=training)
+
+        return {
+            'x_input': x_input, 'y_truth': y_truth,
+            'mu': mu, 'log_var': log_var, 'e_latent': e_latent,
+            'y_inferred': y_inferred_probs,
+            'x_reconstructed': x_reconstructed, 'x_generated': x_generated,
+        }
+
+    def counterfactual_generation(self, x_reference, y_target):
+        """Greedy autoregressive decode conditioned on (y_target, style of x_reference)."""
+        mu, _ = self.explainer(x_reference, training=False)
+        batch = int(mu.shape[0])
+        seq = np.zeros((batch, self.max_len), dtype="int32")
+        for i in range(self.max_len):
+            logits = self.producer(
+                y_target, mu, tf.convert_to_tensor(seq), training=False)
+            seq[:, i] = np.argmax(
+                keras.ops.convert_to_numpy(logits[:, i]), axis=-1)
+        return tf.convert_to_tensor(seq)
 
 
 # =====================================================================
@@ -307,16 +370,103 @@ class SentimentProducer(keras.Model):
         return cls(ModelConfig(**config.pop("config")), **config)
 
 
+@keras.saving.register_keras_serializable(package="ccnets_text")
+class ARSentimentProducer(keras.Model):
+    """Autoregressive P(X|Y,E): a causal Transformer decoder.
+
+    Token ``i`` is predicted from tokens ``< i`` plus a conditioning prefix built
+    from ``(Y, E)``. Teacher-forced at training time; word-dropout on the
+    teacher-forced context stops the decoder from ignoring ``(Y, E)`` and merely
+    copying the surrounding text. The label enters through a bias-free Dense
+    projection (PRINCIPLES_CCNETS.md, P4), so reconstruction gradient still reaches
+    the Reasoner.
+
+    Call signature: ``producer(y, e, x_target, training=...)``.
+    """
+
+    def __init__(self, config: ModelConfig, **kwargs):
+        super().__init__(**kwargs)
+        self.config = config
+        d = config.producer_d_model
+
+        self.token_embedding = keras.layers.Embedding(
+            config.vocab_size, d, name="token_embedding")
+        self.position_embedding = keras.layers.Embedding(
+            config.max_len, d, name="position_embedding")
+        # P4: differentiable label path.
+        self.label_projection = keras.layers.Dense(d, use_bias=False, name="label_projection")
+        self.style_projection = keras.layers.Dense(d, name="style_projection")
+        self.cond_merge = keras.layers.Dense(d, activation="gelu", name="cond_merge")
+
+        self.blocks: List[Dict[str, keras.layers.Layer]] = []
+        for i in range(config.producer_layers):
+            self.blocks.append({
+                "attn": keras.layers.MultiHeadAttention(
+                    num_heads=config.producer_heads, key_dim=d // config.producer_heads,
+                    name=f"attn_{i}"),
+                "norm1": keras.layers.LayerNormalization(name=f"norm1_{i}"),
+                "ffn1": keras.layers.Dense(config.producer_ffn_dim, activation="gelu",
+                                           name=f"ffn1_{i}"),
+                "ffn2": keras.layers.Dense(d, name=f"ffn2_{i}"),
+                "norm2": keras.layers.LayerNormalization(name=f"norm2_{i}"),
+            })
+        self.to_logits = keras.layers.Dense(config.vocab_size, name="to_logits")
+
+    def _condition(self, y, e):
+        return self.cond_merge(self.label_projection(y) + self.style_projection(e))
+
+    def call(self, y, e, x_target, training=None):
+        cond = self._condition(y, e)               # [B, d]
+        context_ids = x_target[:, :-1]             # [B, T-1] teacher-forcing context
+
+        # Word dropout: replace some context tokens with <oov> (id 2) so the
+        # decoder cannot ignore (Y, E) and simply copy the surrounding text.
+        if training:
+            drop = keras.random.uniform(keras.ops.shape(context_ids)) \
+                < self.config.producer_word_dropout
+            context_ids = keras.ops.where(
+                drop, keras.ops.full_like(context_ids, 2), context_ids)
+
+        context = self.token_embedding(context_ids)             # [B, T-1, d]
+        # Conditioning prefix occupies position 0; the sequence stays length T.
+        x = keras.ops.concatenate(
+            [keras.ops.expand_dims(cond, axis=1), context], axis=1)   # [B, T, d]
+        positions = keras.ops.arange(self.config.max_len)
+        x = x + self.position_embedding(positions)
+
+        for block in self.blocks:
+            attn = block["attn"](x, x, use_causal_mask=True, training=training)
+            x = block["norm1"](x + attn)
+            ffn = block["ffn2"](block["ffn1"](x))
+            x = block["norm2"](x + ffn)
+
+        return self.to_logits(x)                                 # [B, T, vocab]
+
+    def get_config(self):
+        config = super().get_config()
+        config["config"] = self.config.__dict__
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(ModelConfig(**config.pop("config")), **config)
+
+
 # =====================================================================
 # CONSTRUCTION
 # =====================================================================
 
 def create_sentiment_ccnet(config: ExperimentConfig) -> TextCCNetOrchestrator:
-    """Build the three modules, wrap them, and assemble the orchestrator."""
+    """Build the three modules, wrap them, and assemble the orchestrator.
+
+    The Producer and orchestrator class are chosen by ``model.producer_type``.
+    """
     mc = config.model
+    autoregressive = mc.producer_type == 'autoregressive'
+
     explainer = SentimentExplainer(mc)
     reasoner = SentimentReasoner(mc)
-    producer = SentimentProducer(mc)
+    producer = ARSentimentProducer(mc) if autoregressive else SentimentProducer(mc)
 
     # Build via dummy forward passes (the label dummy is a probability vector).
     dummy_x = keras.ops.zeros((1, mc.max_len), dtype="int32")
@@ -324,24 +474,30 @@ def create_sentiment_ccnet(config: ExperimentConfig) -> TextCCNetOrchestrator:
     dummy_e = keras.ops.zeros((1, mc.explanation_dim))
     explainer(dummy_x)
     reasoner(dummy_x, dummy_e)
-    producer(dummy_y, dummy_e)
+    if autoregressive:
+        producer(dummy_y, dummy_e, dummy_x)
+    else:
+        producer(dummy_y, dummy_e)
 
     ccnet_config = CCNetConfig(
         explanation_dim=mc.explanation_dim,
-        loss_fn='l2',  # unused -- TextCCNetOrchestrator overrides compute_losses
+        loss_fn='l2',  # unused -- compute_losses is overridden for token space
         learning_rates=config.training.learning_rates,
         gradient_clip_norm=config.training.gradient_clip_norm,
         explainer_weights=config.training.explainer_weights,
         reasoner_weights=config.training.reasoner_weights,
         producer_weights=config.training.producer_weights,
     )
-    return TextCCNetOrchestrator(
+    modules = dict(
         explainer=wrap_keras_model(explainer),
         reasoner=wrap_keras_model(reasoner),
         producer=wrap_keras_model(producer),
         config=ccnet_config,
         pad_token=0,
     )
+    if autoregressive:
+        return ARTextCCNetOrchestrator(max_len=mc.max_len, **modules)
+    return TextCCNetOrchestrator(**modules)
 
 
 def prepare_imdb_data(
@@ -434,8 +590,12 @@ def evaluate_and_report(
         flipped = keras.utils.to_categorical(
             [1 - true_label], mc.num_classes
         ).astype("float32")
-        cf_logits = orchestrator.counterfactual_generation(x, tf.convert_to_tensor(flipped))
-        cf_ids = np.argmax(keras.ops.convert_to_numpy(cf_logits[0]), -1)
+        cf = keras.ops.convert_to_numpy(
+            orchestrator.counterfactual_generation(x, tf.convert_to_tensor(flipped))
+        )
+        # The autoregressive orchestrator returns decoded token ids [B, T];
+        # the non-autoregressive one returns logits [B, T, vocab].
+        cf_ids = np.argmax(cf[0], axis=-1) if cf.ndim == 3 else cf[0]
 
         lines.append(f"[sample {idx}] true sentiment: {label_name[true_label]}")
         lines.append(f"  original     : {decode(x_test[idx])[:300]}")
@@ -492,13 +652,16 @@ def run_experiment(config: ExperimentConfig) -> TextCCNetOrchestrator:
     )
     trainer.train(train_ds, config.training.epochs, validation_dataset=val_ds)
 
+    # Save the trained modules immediately, before the (fallible) plotting and
+    # evaluation steps, so a reporting bug can never cost the trained model.
+    orchestrator.save_models(os.path.join(config.results_dir, "sentiment_ccnet"))
+
     plot_history(trainer.history, os.path.join(config.results_dir, "training_history.png"))
 
     report = evaluate_and_report(orchestrator, x_test, y_test, config)
     with open(os.path.join(config.results_dir, "samples.txt"), "w") as fh:
         fh.write(report + "\n")
 
-    orchestrator.save_models(os.path.join(config.results_dir, "sentiment_ccnet"))
     logger.info(f"Artifacts saved to {config.results_dir}")
     return orchestrator
 
