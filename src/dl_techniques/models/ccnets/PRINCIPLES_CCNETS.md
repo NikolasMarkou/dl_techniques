@@ -68,6 +68,14 @@ produces artifacts; the model overfits stylistic noise.
 **Enforcement.** `forward_pass` samples with the reparameterization trick (and clips
 `log_var` for numerical safety); `compute_model_errors` adds the KL term.
 
+**Empirical note — sizing `E`** (`train/ccnets/latent_sweep.py`). On MNIST, sweeping
+`dim(E)` shows no monotone scaling law: reconstruction is U-shaped with an interior
+optimum (~16 dims). Undersize starves the Producer; oversize is wasteful but *safe* —
+the KL term collapses surplus dimensions to the prior rather than letting them encode
+`Y`, so the achieved KL (effective rate) saturates regardless of `dim(E)`. Size `E` to
+where the achieved-KL curve plateaus, not to a guessed dimension. The governing quantity
+is `H(X|Y)` — the information in `X` the explicit cause does not determine.
+
 ---
 
 ## Part B — Gradient and training principles

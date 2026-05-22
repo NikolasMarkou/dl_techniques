@@ -13,6 +13,9 @@ the training-script layer.
   adaptations for a non-continuous `X`: a non-autoregressive Producer and **token-space
   losses** via a `TextCCNetOrchestrator` that overrides `compute_losses`. Template for
   text / sequence tasks. (Prototype — see its module docstring for scope.)
+- `cifar100.py` — the image CCNet scaled to 32x32x3 natural images, 100 classes.
+- `baseline_comparison.py` — controlled experiment: CCNet Reasoner vs. a plain classifier.
+- `latent_sweep.py` — sweep of `explanation_dim` (the size of the latent cause `E`).
 
 ## `mnist.py` structure (the template)
 
@@ -89,3 +92,56 @@ positive review re-decoded as negative → *"… the **worst movies** i have eve
    causes genuinely determine the effect (as label + style do for an MNIST digit); for a
    task where they do not, expect a working Reasoner and controllable-but-not-faithful
    generation.
+
+## Findings — CIFAR-100 (`cifar100.py`)
+
+The image CCNet scaled to 32x32x3 natural images, 100 fine-grained classes (40 epochs).
+
+| Signal | Result |
+|--------|--------|
+| Reasoner test accuracy | top-1 **0.547**, top-5 **0.823** |
+| Generation / reconstruction L1 (MAE) | ~0.099 |
+
+The Reasoner works — 54.7% top-1 is respectable for a small conv classifier on
+CIFAR-100. The Producer does not: reconstructions are blurry low-frequency blobs that
+capture scene colour and rough layout but no structure. This is the predicted P1/P2
+outcome — a class label plus a 64-dim latent underdetermines a natural photograph, so
+`P(X|Y,E)` collapses to the conditional mean. CIFAR-100 sits between MNIST (causes
+determine `X` → crisp) and COCO (hopeless): the discriminative half stays useful, the
+generative half degrades to blur as the sufficiency condition weakens.
+
+## Findings — CCNet Reasoner vs. plain classifier (`baseline_comparison.py`)
+
+Controlled MNIST comparison: identical `MNISTReasoner` architecture, equal compute,
+3 seeds × 3 train-set sizes. **CCNets does not beat a plain classifier.** Where its
+training succeeds it *ties* on accuracy (n=500, n=2000) or is slightly behind (n=60000),
+and it is materially *less stable* — 2 of 9 cooperative runs collapsed to chance vs 0/9
+for the baseline. Full numbers in `results/ccnets_baseline_comparison/comparison.md`.
+CCNets' value is the generative / counterfactual capability, not discriminative accuracy.
+
+## Findings — latent size `dim(E)` (`latent_sweep.py`)
+
+Sweep of `explanation_dim` ∈ {4, 8, 16, 32, 64, 128} on MNIST, 20 epochs each.
+
+| dim(E) | Recon MAE | Label-sensitivity | KL (nats) |
+|-------:|----------:|------------------:|----------:|
+| 4      | 0.080     | 0.114             | 6.4       |
+| 16     | **0.063** (best) | 0.097      | **11.6** (peak) |
+| 128    | 0.073     | 0.103             | 9.0       |
+
+There is **no "bigger is better" scaling law** — reconstruction MAE is U-shaped with a
+clear interior optimum at `dim(E) ≈ 16`:
+
+1. **Undersize (dim=4)** is capacity-starved — worst reconstruction, lowest KL. This is
+   the sufficiency floor: `E` too small to carry `H(X|Y)`.
+2. **Oversize (dim ≥ 64)** is wasteful but **not** catastrophic. The achieved KL (the
+   effective rate) peaks at dim=16 and *falls* beyond it — surplus dimensions collapse to
+   the prior and go unused. Reconstruction degrades mildly from optimisation noise.
+3. The "E absorbs Y" failure I expected did **not** appear — label-sensitivity stayed
+   ~0.10 at every dim, so the Producer kept using the label. The KL regulariser prevents
+   it: excess dimensions collapse to the prior rather than encoding `Y`.
+4. The real knob is the **achieved KL rate**, which saturates (~11 nats) regardless of
+   how many dimensions are provided.
+
+Practical rule: size `dim(E)` modestly above the `H(X|Y)`-matched optimum (16–32 for
+MNIST), keep the KL term on, and stop adding dimensions once the achieved KL stops rising.
