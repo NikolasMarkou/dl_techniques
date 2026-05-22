@@ -15,8 +15,10 @@ context). The payoff is **counterfactual generation**: hold `E` fixed, swap `Y`.
 Files: `orchestrators.py` (forward pass + train step), `trainer.py` (epoch loop, KL
 annealing), `losses.py`, `control.py` (Reasoner throttling), `base.py` (config + dataclasses),
 `utils.py` (`wrap_keras_model`, early stopping). Reference task: `src/train/ccnets/mnist.py`.
-Defect history and rationale: `FIXES.md`. `FOUNDATION.md`/`README.md` are conceptual and
-partially stale — trust the code and this file.
+
+Companion docs: `PRINCIPLES_CCNETS.md` (the design principles — *why* the paradigm works),
+`FOUNDATION.md` (the conceptual essay), `FIXES.md` (defect history and rationale),
+`README.md` (API reference). This file is the practical how-to.
 
 ---
 
