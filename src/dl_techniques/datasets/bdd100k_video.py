@@ -24,8 +24,9 @@ Typical usage (sanity run at B=4, T=8, 112×112, 200 steps):
     ds = bdd100k_video_dataset(
         videos_root="/path/to/bdd_data/train/videos",
         batch_size=4, T=8, img_size=112,
-        num_steps=200, seed=0,
+        seed=0,
     )
+    # Caller bounds per-epoch iteration via model.fit(steps_per_epoch=...).
     for x, y in ds:
         # x["pixels"].shape == (4, 8, 112, 112, 3)
         ...
@@ -84,12 +85,18 @@ def _list_video_files(videos_root: Path) -> list[Path]:
 
 def _read_clip(
     path: Path, T: int, img_size: int,
+    rng: Optional[np.random.Generator] = None,
 ) -> Optional[np.ndarray]:
     """Read T consecutive frames starting at a random offset.
 
+    :param rng: numpy Generator used for the start-frame offset. If None,
+        a per-call default Generator is used (non-deterministic). Passing
+        a Generator avoids the global ``np.random`` side effect.
     :return: ``(T, img_size, img_size, 3)`` float32 in [0, 1], or
         ``None`` if the video is too short / unreadable.
     """
+    if rng is None:
+        rng = np.random.default_rng()
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         return None
@@ -97,7 +104,7 @@ def _read_clip(
         frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         if frame_count < T:
             return None
-        start = int(np.random.randint(0, frame_count - T + 1))
+        start = int(rng.integers(0, frame_count - T + 1))
         cap.set(cv2.CAP_PROP_POS_FRAMES, start)
 
         frames = np.empty((T, img_size, img_size, 3), dtype=np.float32)
@@ -129,7 +136,6 @@ def bdd100k_video_dataset(
     batch_size: int,
     T: int,
     img_size: int,
-    num_steps: Optional[int] = None,
     seed: int = 0,
     max_resample_attempts: int = 8,
     split: str = "all",
@@ -141,8 +147,6 @@ def bdd100k_video_dataset(
     :param batch_size: batch size.
     :param T: number of frames per clip.
     :param img_size: spatial size (square). Frames are resized via INTER_AREA.
-    :param num_steps: if provided, the dataset yields exactly
-        ``num_steps`` batches per iteration (via ``.take``).
     :param seed: numpy RNG seed for shuffling + per-clip offsets. Also
         determines the train/val split when ``split != "all"``.
     :param max_resample_attempts: per-draw cap on retries when a video is
@@ -175,9 +179,12 @@ def bdd100k_video_dataset(
         f"T={T}, img_size={img_size}, B={batch_size}."
     )
 
-    # Seed numpy globally for both cv2 seek offsets and path selection.
-    # (cv2 uses np.random.randint inside _read_clip.)
-    np.random.seed(seed)
+    # DECISION plan_2026-05-23_c573e591/D-001: avoid the global
+    # ``np.random.seed(seed)`` side effect — it used to be needed because
+    # ``_read_clip`` reached into ``np.random.randint``. The loader now
+    # threads a local ``Generator`` into ``_read_clip(rng=...)`` so seeding
+    # stays scoped to this loader instance and concurrent users of
+    # ``np.random`` are not perturbed.
     rng = np.random.default_rng(seed)
 
     def _gen() -> Iterator[Tuple[np.ndarray, np.float32]]:
@@ -185,7 +192,7 @@ def bdd100k_video_dataset(
             clip: Optional[np.ndarray] = None
             for _attempt in range(max_resample_attempts):
                 idx = int(rng.integers(0, len(paths)))
-                clip = _read_clip(paths[idx], T=T, img_size=img_size)
+                clip = _read_clip(paths[idx], T=T, img_size=img_size, rng=rng)
                 if clip is not None:
                     break
             if clip is None:
@@ -208,7 +215,11 @@ def bdd100k_video_dataset(
         num_parallel_calls=tf.data.AUTOTUNE,
     )
     ds = ds.batch(batch_size, drop_remainder=True)
-    if num_steps is not None:
-        ds = ds.take(num_steps)
+    # NOTE: no ``.take(...)`` cap. Per-epoch iteration length is the
+    # caller's contract via ``steps_per_epoch`` to ``model.fit``. The
+    # underlying generator is ``while True``, so the dataset is infinite.
+    # The old ``num_steps`` kwarg was removed (plan_2026-05-23_c573e591/D-001):
+    # ``.take(num_steps)`` exhausted the dataset after epoch 1 when the
+    # trainer passed it, and there were no other external callers.
     ds = ds.prefetch(tf.data.AUTOTUNE)
     return ds
