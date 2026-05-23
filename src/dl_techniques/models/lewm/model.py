@@ -235,7 +235,9 @@ class LeWM(keras.Model):
 
         :param pixels_history: `(B, S, HS, H, W, C)` — ``HS = history_size``
             frames. Only the ``s = 0`` plane is encoded; all S planes are
-            assumed to share the same history (see note below).
+            assumed to share the same history. **S must equal 1**; pass
+            distinct per-rollout histories by tiling externally as upstream
+            does. See DECISION below.
         :param action_sequence: `(B, S, T, action_dim)` — full action sequence
             of horizon ``T`` (history + future), with ``T >= history_size``.
         :return: dict with
@@ -247,10 +249,6 @@ class LeWM(keras.Model):
               entries are **predictor-derived**. A consumer comparing
               predictions against ground truth must score only the
               predictor-derived tail, not the encoder-derived head.
-
-        ``pixels_history[:, 0]`` is encoded and broadcast over S — distinct
-        per-S histories are NOT supported and would be silently ignored.
-        Implementation mirrors upstream `/tmp/lewm_source/jepa.py:rollout`.
         """
         cfg = self.config
         HS = cfg.history_size
@@ -268,6 +266,22 @@ class LeWM(keras.Model):
             raise ValueError(
                 f"rollout: action_sequence horizon T={int(T)} must be >= "
                 f"history_size={HS}."
+            )
+
+        # DECISION plan_2026-05-23_692fd5e5/D-001: enforce S==1. The original
+        # implementation took pixels_history[:, 0] and broadcast it over S,
+        # silently dropping per-S histories (a footgun: callers passing
+        # distinct histories would see them ignored without warning). Upstream
+        # `/tmp/lewm_source/jepa.py:rollout` does the same trick because its
+        # callers tile externally; we surface the constraint instead. To
+        # rollout multiple distinct histories, call rollout once per history
+        # or tile s=0 yourself.
+        if int(S) != 1:
+            raise ValueError(
+                f"rollout: S must equal 1 (got S={int(S)}). Only "
+                f"pixels_history[:, 0] is encoded; passing distinct per-S "
+                f"histories would be silently dropped. Tile externally or "
+                f"call rollout once per history."
             )
 
         # Split actions into initial-history actions + future actions.
