@@ -95,6 +95,30 @@ def _validate_args(args: argparse.Namespace) -> None:
             f"batch_size must be >= 2 (CliffordNetBlock BatchNorm stability); "
             f"got {args.batch_size}."
         )
+    # --- predict_horizons (plan_2026-05-23_0b664700/D-001) ---
+    # Fail-fast at the CLI; otherwise VideoJEPAConfig.__post_init__ raises
+    # later with a less actionable stack trace.
+    if not args.predict_horizons:
+        raise ValueError("--predict-horizons must be non-empty.")
+    if not all(isinstance(h, int) and h > 0 for h in args.predict_horizons):
+        raise ValueError(
+            f"--predict-horizons entries must all be positive ints, got "
+            f"{args.predict_horizons}."
+        )
+    if len(set(args.predict_horizons)) != len(args.predict_horizons):
+        raise ValueError(
+            f"--predict-horizons must be unique, got {args.predict_horizons}."
+        )
+    if list(args.predict_horizons) != sorted(args.predict_horizons):
+        raise ValueError(
+            f"--predict-horizons must be sorted ascending, got "
+            f"{args.predict_horizons}."
+        )
+    if max(args.predict_horizons) >= args.T:
+        raise ValueError(
+            f"max(--predict-horizons)={max(args.predict_horizons)} must be "
+            f"strictly less than --T={args.T}."
+        )
 
 
 def _build_config(args: argparse.Namespace) -> VideoJEPAConfig:
@@ -120,6 +144,7 @@ def _build_config(args: argparse.Namespace) -> VideoJEPAConfig:
         mask_ratio=args.mask_ratio,
         lambda_next_frame=args.lambda_next_frame,
         lambda_mask=args.lambda_mask,
+        predict_horizons=tuple(args.predict_horizons),
     )
 
 
@@ -211,6 +236,8 @@ _SMOKE_OVERRIDES: Dict[str, Any] = {
     "batch_size": 2,
     "epochs": 2,
     "steps_per_epoch": 4,
+    # Smoke: short horizons that fit inside T=4.
+    "predict_horizons": [1, 2],
 }
 
 
@@ -251,9 +278,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-dir", type=str, default=None,
                    help="Results directory. Auto-timestamp if omitted.")
 
-    # --- Window + image (full-spec defaults: T=8 / 112² / patch=8 / D=128) ---
-    p.add_argument("--T", type=int, default=8,
-                   help="Frames per clip (= num_frames = history_size_k).")
+    # --- Window + image (full-spec defaults: T=24 / 112² / patch=8 / D=128) ---
+    # T raised 8→24 (plan_2026-05-23_0b664700) so multi-horizon prediction
+    # at h in {1,4,15} (~0.5s lookahead at 30fps) has room to operate.
+    p.add_argument("--T", type=int, default=24,
+                   help="Frames per clip (= num_frames = history_size_k). "
+                        "Must exceed max(--predict-horizons).")
     p.add_argument("--img-size", type=int, default=112)
     p.add_argument("--img-channels", type=int, default=3)
     p.add_argument("--patch-size", type=int, default=8)
@@ -296,6 +326,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mask-ratio", type=float, default=0.6)
     p.add_argument("--lambda-next-frame", type=float, default=1.0)
     p.add_argument("--lambda-mask", type=float, default=1.0)
+
+    # --- Multi-horizon prediction (plan_2026-05-23_0b664700/D-001) ---
+    p.add_argument(
+        "--predict-horizons", type=int, nargs="+", default=[1, 4, 15],
+        help="Strictly-positive prediction horizons (frames). Must be "
+             "sorted ascending, unique, and max(h) < --T. Default "
+             "[1, 4, 15] ~= {immediate, ~0.13s, ~0.5s} at 30fps. "
+             "--smoke overrides to [1, 2] for T=4.",
+    )
 
     # --- Validation / EarlyStopping / Viz ---
     p.add_argument("--val-steps", type=int, default=0,
