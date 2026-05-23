@@ -85,8 +85,6 @@ A patch-level latent video model that:
 - No conditioning input. `TelemetryEmbedder`, AdaLN-zero, and all
   IMU/GPS/altitude plumbing were stripped. `stream_step(frame)` and
   the model's `call({"pixels": ...})` accept pixels only.
-- No EMA target encoder — targets come from the same live encoder
-  (LeWM design choice, FW-003 still queued as an ablation).
 - No pixel decoder — outputs live in `(B, T, 14, 14, 128)` latent
   patch space.
 
@@ -143,6 +141,51 @@ causal predictor is unchanged; only `|H|` cheap linear heads
 See `plan_2026-05-23_0b664700` / `D-001` for the full design rationale
 and the rejected alternatives (horizon-conditioned predictor with
 horizon embedding; equal-split `λ_next/|H|`).
+
+### Why EMA target
+
+Multi-horizon eval on the post-multi-horizon checkpoint surfaced a
+deeper pathology: the trained model was **84-300x WORSE than the
+trivial identity predictor at every horizon**. Root cause: the
+**live** target encoder (`z_target == z_online`, single encoder
+shared between predictor input and prediction target) plus SIGReg
+co-adapted the encoder and predictor into a near-time-invariant
+feature map (`z_t ≈ z_{t+15}`). At that point the trivial identity
+predictor is the global optimum of the next-frame objective in
+latent space, and the trained model cannot beat it. SIGReg
+prevents rank-collapse (the failure mode it was designed for); it
+does not prevent time-invariance — a distinct failure mode.
+
+Fix: switched to a **V-JEPA / BYOL / DINO-style EMA target encoder**
+with `stop_gradient` on the target branch
+(`plan_2026-05-23_15151c75/D-001`). Architecture:
+
+- A second `VideoJEPACliffordEncoder` (`self.target_encoder`) with
+  identical architecture to `self.encoder`. `trainable=False` so its
+  weights are excluded from `model.trainable_variables` and the
+  optimizer never sees them.
+- Online encoder feeds predictor + SIGReg.
+- Target encoder produces `z_target` (with `ops.stop_gradient`)
+  consumed as the regression target for both `L_pred_h` and
+  `L_mask`.
+- After each `optimizer.apply_gradients`, a custom `train_step`
+  EMA-copies `target_w <- m * target_w + (1 - m) * encoder_w`.
+  Default `m = 0.996` (V-JEPA / BYOL).
+- Optional `--ema-schedule cosine` ramps `m` from `--ema-momentum`
+  to `1.0` across the run; current value is exposed as the `ema_m`
+  metric. The step counter is a non-trainable weight so cosine
+  progress survives `.keras` checkpoint reload.
+- SIGReg input was moved from `pred` (predictor output) to
+  `z_online` (encoder output), per
+  `plan_2026-05-23_15151c75/D-002` — regularization targets the
+  representation directly under the JEPA framing, and the target
+  encoder is not regularized because it carries no gradient.
+
+The EMA target reverses the explicit iter-1 D-001 (live target,
+inherited from LeWM); LeWM's single-CLS static-pool architecture did
+not face the time-invariance failure mode that the 30 fps
+frame-grid video setting surfaces. The reversal is anchored in
+source as `# DECISION plan_2026-05-23_15151c75/D-001`.
 
 ## Callbacks (what the trainer wires up)
 
@@ -226,6 +269,8 @@ its context stream and is unsafe at batch-of-1.
 | `--mask-ratio` | `0.6` | fraction of spatial patch positions masked. |
 | `--lambda-next-frame`, `--lambda-mask` | `1.0, 1.0` | loss weights; applied **per horizon** for `--lambda-next-frame`. |
 | `--predict-horizons` | `1 4 15` | strictly-positive, sorted ascending, unique; `max(h) < T`. `--smoke` overrides to `1 2`. |
+| `--ema-momentum` | `0.996` | V-JEPA / BYOL default for the EMA target encoder. Strict bound `[0.0, 1.0)`. |
+| `--ema-schedule` | `none` | `none` holds m constant; `cosine` ramps from `--ema-momentum` to `1.0` over the run. Logged as metric `ema_m`. |
 | `--T` | `24` | frames per clip; raised from `8` so multi-horizon at `h=15` (~0.5s @ 30fps) fits. |
 | `--gpu` | None | sets `CUDA_VISIBLE_DEVICES`; serial GPU use only. |
 
@@ -309,9 +354,6 @@ is still the SSL objective, not a linear-probe accuracy.
   ~865k trainable parameters (~3.3 MB fp32) but `final_model.keras`
   and `last.keras` land at ~10.7 MB each because they include the
   AdamW state.
-- **No EMA target encoder.** SIGReg is the sole collapse-prevention
-  mechanism. Works at the scale we've trained; FW-003 is queued to
-  test an EMA variant.
 - **Pixel-space masking is blocked.** Hard constraint, not a
   preference — a CliffordNet encoder requires an intact 2D patch
   grid. Encode-then-mask is the only viable path under the current
@@ -361,8 +403,11 @@ iter-2 close (`plan_2026-04-21_421088a1`):
 - **FW-002** — **Longer training**. Now partially resolved — full
   BDD runs are in place with EarlyStopping. Remaining work: ablate
   against other recipes.
-- **FW-003** — **EMA target encoder** variant as an ablation against
-  live targets + SIGReg.
+- **FW-003** — **EMA target encoder** — **DONE in `plan_2026-05-23_15151c75`**.
+  No longer an ablation: live target + SIGReg failed the multi-horizon
+  identity-baseline test (84-300x worse than identity), and the EMA
+  variant is now the default. See "Why EMA target" above and the Deep
+  Review "Fixed" entry below.
 - **FW-004** — **Predict-the-mean shortcut probe.** Verify `L_mask`
   is decreasing via per-position semantic recovery and not via a
   trivial latent-mean predictor.
@@ -442,10 +487,6 @@ the trainer + dataset loaders + model package end-to-end.
 ### Intentionally left / N/A
 
 - **Issue 3 (rollout S>1)** — N/A. video_jepa has no rollout method.
-- **EMA target encoder** — intentional divergence. README "What this
-  trains" already states no EMA target encoder; SIGReg is the sole
-  collapse-prevention mechanism. Matches LeWM D-001 (live target).
-  Do NOT add EMA.
 - **Per-patch (no CLS pool) output** — intentional. `(B,T,H_p,W_p,D)`
   is the contract.
 - **`--T` controls both `num_frames` and `history_size_k`** — by
@@ -490,6 +531,32 @@ the trainer + dataset loaders + model package end-to-end.
   integration-marked end-to-end 1-step fit + reload round-trip.
   Runtime <60s on CPU.
 - **Issue 8 (Deep Review section)**: this section.
+
+### Fixed in plan_2026-05-23_15151c75 (EMA target encoder)
+
+- **Identity-baseline pathology at every horizon.** Multi-horizon eval
+  on the post-multi-horizon checkpoint showed the trained model
+  84-300x WORSE than the trivial identity predictor at h ∈ {1, 4, 15}.
+  Root cause: the live target encoder + SIGReg co-adapted into a
+  near-time-invariant latent space (z_t ≈ z_{t+15}), making identity
+  the global optimum of the next-frame objective. SIGReg prevents
+  rank-collapse, not time-invariance. Fix: V-JEPA-style EMA target
+  encoder with stop-gradient, custom `train_step` that EMA-updates
+  the target after each `optimizer.apply_gradients`, default
+  momentum 0.996, optional cosine schedule. Online encoder feeds
+  predictor + SIGReg; target encoder produces the regression target
+  for both per-horizon next-frame loss and mask loss. Anchored as
+  `# DECISION plan_2026-05-23_15151c75/D-001` in
+  `src/dl_techniques/models/video_jepa/model.py`. New trainer flags
+  `--ema-momentum`, `--ema-schedule`; the cosine step counter is a
+  non-trainable weight so schedule progress survives `.keras` reload.
+  Also (sub-decision D-002): SIGReg input switched from `pred` to
+  `z_online` so it regularizes the representation directly under the
+  JEPA framing. Six new regression tests under
+  `tests/test_models/test_video_jepa/` cover initial sync,
+  not-trainable, EMA math after one step, no gradient through target,
+  serialization round-trip of both encoders, and cosine schedule
+  monotonicity. All 47 model tests + 20 trainer tests pass.
 
 ### Fixed in plan_2026-05-23_0b664700 (multi-horizon)
 
