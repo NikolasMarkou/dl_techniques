@@ -186,7 +186,12 @@ class VideoJEPAConfig:
                 f"predict_horizons must be sorted ascending, got "
                 f"{self.predict_horizons!r}"
             )
-        if max(self.predict_horizons) >= self.num_frames:
+        # Only enforce max(h) < num_frames when the loss can actually run.
+        # When num_frames < 2 the per-horizon loss block is skipped entirely
+        # (matches the legacy single-horizon T<2 edge case), so the
+        # max(h)<num_frames invariant is vacuous and would otherwise reject
+        # the default (1,) at num_frames=1 (the T=1 edge-case test).
+        if self.num_frames >= 2 and max(self.predict_horizons) >= self.num_frames:
             raise ValueError(
                 f"max(predict_horizons)={max(self.predict_horizons)} must be "
                 f"strictly less than num_frames={self.num_frames}."
