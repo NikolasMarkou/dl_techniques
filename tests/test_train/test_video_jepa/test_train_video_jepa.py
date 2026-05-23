@@ -64,6 +64,8 @@ def _tiny_args(**overrides) -> argparse.Namespace:
         lambda_mask=1.0,
         batch_size=2,
         predict_horizons=[1],
+        ema_momentum=0.996,
+        ema_schedule="none",
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -135,6 +137,33 @@ def test_validate_rejects_horizons_exceeding_T() -> None:
     args = _tiny_args(T=4, predict_horizons=[1, 100])
     with pytest.raises(ValueError, match="strictly less than"):
         _validate_args(args)
+
+
+# ---------------------------------------------------------------------
+# _validate_args — EMA target encoder (plan_2026-05-23_15151c75/D-001)
+# ---------------------------------------------------------------------
+
+@pytest.mark.parametrize("bad_m", [-0.01, 1.0, 1.5])
+def test_validate_rejects_bad_ema_momentum(bad_m: float) -> None:
+    """--ema-momentum must be in [0.0, 1.0); reject negative and >= 1.0."""
+    args = _tiny_args(ema_momentum=bad_m)
+    with pytest.raises(ValueError, match="ema-momentum"):
+        _validate_args(args)
+
+
+def test_validate_rejects_bad_ema_schedule() -> None:
+    """--ema-schedule must be one of {none, cosine}."""
+    args = _tiny_args(ema_schedule="linear")
+    with pytest.raises(ValueError, match="ema-schedule"):
+        _validate_args(args)
+
+
+def test_validate_accepts_default_ema_args() -> None:
+    """Default ema_momentum=0.996, ema_schedule='none' passes validation."""
+    args = _tiny_args(ema_momentum=0.996, ema_schedule="none")
+    _validate_args(args)  # no raise
+    args = _tiny_args(ema_momentum=0.99, ema_schedule="cosine")
+    _validate_args(args)  # no raise
 
 
 # ---------------------------------------------------------------------
