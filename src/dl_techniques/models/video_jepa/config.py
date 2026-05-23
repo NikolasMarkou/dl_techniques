@@ -60,6 +60,12 @@ class VideoJEPAConfig:
         prediction loss via ``add_loss`` (iter-2, D-012).
     :param lambda_mask: Scalar weight applied to the mask-prediction loss
         via ``add_loss`` (iter-2, D-012).
+    :param predict_horizons: Tuple of strictly-positive prediction horizons
+        ``(h1, h2, ...)`` in frames. For each ``h``, the model learns
+        ``MSE(pred_head_h(pred[:, :-h]), z[:, h:])``. Must be sorted ascending,
+        unique, all positive, and ``max(predict_horizons) < num_frames``.
+        Default ``(1,)`` preserves the legacy single-horizon t+1 behavior.
+        See ``plan_2026-05-23_0b664700/D-001``.
 
     .. note::
        Invariant: ``img_size % patch_size == 0``. Invariant:
@@ -103,6 +109,9 @@ class VideoJEPAConfig:
     lambda_next_frame: float = 1.0
     lambda_mask: float = 1.0
 
+    # --- Multi-horizon prediction (plan_2026-05-23_0b664700/D-001) ---
+    predict_horizons: Tuple[int, ...] = (1,)
+
     # ------------------------------------------------------------------
     # Invariants
     # ------------------------------------------------------------------
@@ -145,6 +154,43 @@ class VideoJEPAConfig:
             raise ValueError(
                 f"lambda_mask must be >= 0.0, got {self.lambda_mask}"
             )
+        # --- predict_horizons invariants (plan_2026-05-23_0b664700/D-001) ---
+        # Normalize list → tuple (tolerates JSON round-trips that arrive
+        # as lists when callers pass through to_dict/from_dict).
+        if isinstance(self.predict_horizons, list):
+            self.predict_horizons = tuple(self.predict_horizons)
+        if not isinstance(self.predict_horizons, tuple):
+            raise ValueError(
+                f"predict_horizons must be a tuple, got "
+                f"{type(self.predict_horizons).__name__}"
+            )
+        if len(self.predict_horizons) == 0:
+            raise ValueError("predict_horizons must be non-empty.")
+        if not all(isinstance(h, int) for h in self.predict_horizons):
+            raise ValueError(
+                f"predict_horizons must contain only ints, got "
+                f"{self.predict_horizons!r}"
+            )
+        if not all(h > 0 for h in self.predict_horizons):
+            raise ValueError(
+                f"predict_horizons entries must all be > 0, got "
+                f"{self.predict_horizons!r}"
+            )
+        if len(set(self.predict_horizons)) != len(self.predict_horizons):
+            raise ValueError(
+                f"predict_horizons must be unique, got "
+                f"{self.predict_horizons!r}"
+            )
+        if list(self.predict_horizons) != sorted(self.predict_horizons):
+            raise ValueError(
+                f"predict_horizons must be sorted ascending, got "
+                f"{self.predict_horizons!r}"
+            )
+        if max(self.predict_horizons) >= self.num_frames:
+            raise ValueError(
+                f"max(predict_horizons)={max(self.predict_horizons)} must be "
+                f"strictly less than num_frames={self.num_frames}."
+            )
 
     # ------------------------------------------------------------------
     # Derived properties
@@ -171,7 +217,7 @@ class VideoJEPAConfig:
         """Return config as a plain dict (tuples stay tuples via asdict)."""
         d = asdict(self)
         # Normalize tuple-typed fields to list for JSON-safety.
-        for k in ("encoder_shifts", "predictor_shifts"):
+        for k in ("encoder_shifts", "predictor_shifts", "predict_horizons"):
             if isinstance(d.get(k), tuple):
                 d[k] = list(d[k])
         return d
@@ -183,7 +229,7 @@ class VideoJEPAConfig:
         # Tolerate legacy keys dropped in iter-3 (telemetry removal).
         for legacy_key in ("cond_dim", "telemetry_dim"):
             d.pop(legacy_key, None)
-        for k in ("encoder_shifts", "predictor_shifts"):
+        for k in ("encoder_shifts", "predictor_shifts", "predict_horizons"):
             if k in d and isinstance(d[k], list):
                 d[k] = tuple(d[k])
         return cls(**d)
