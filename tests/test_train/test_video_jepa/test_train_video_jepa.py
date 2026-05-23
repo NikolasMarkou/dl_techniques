@@ -63,6 +63,7 @@ def _tiny_args(**overrides) -> argparse.Namespace:
         lambda_next_frame=1.0,
         lambda_mask=1.0,
         batch_size=2,
+        predict_horizons=[1],
     )
     base.update(overrides)
     return argparse.Namespace(**base)
@@ -107,6 +108,36 @@ def test_validate_accepts_consistent_config() -> None:
 
 
 # ---------------------------------------------------------------------
+# _validate_args — multi-horizon (plan_2026-05-23_0b664700/D-001)
+# ---------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "bad_horizons,expected_msg",
+    [
+        ([0, 1], "positive"),       # zero is invalid
+        ([1, 1], "unique"),          # duplicates
+        ([2, 1], "sorted"),          # unsorted descending
+        ([], "non-empty"),           # empty list
+    ],
+)
+def test_validate_rejects_bad_predict_horizons(
+    bad_horizons: list, expected_msg: str
+) -> None:
+    """SC1: --predict-horizons {0,1}, duplicates, unsorted, empty all reject."""
+    # Use T=16 so the max(h)<T check doesn't fire first.
+    args = _tiny_args(T=16, predict_horizons=bad_horizons)
+    with pytest.raises(ValueError, match=expected_msg):
+        _validate_args(args)
+
+
+def test_validate_rejects_horizons_exceeding_T() -> None:
+    """SC2: max(predict_horizons) must be strictly < T."""
+    args = _tiny_args(T=4, predict_horizons=[1, 100])
+    with pytest.raises(ValueError, match="strictly less than"):
+        _validate_args(args)
+
+
+# ---------------------------------------------------------------------
 # --smoke preset
 # ---------------------------------------------------------------------
 
@@ -128,6 +159,37 @@ def test_smoke_preset_does_not_override_user_flag(
     monkeypatch.setattr(sys, "argv", ["prog", "--smoke", "--batch-size", "8"])
     args = parse_args()
     assert args.batch_size == 8, "User --batch-size should beat --smoke"
+
+
+# ---------------------------------------------------------------------
+# Multi-horizon forward (plan_2026-05-23_0b664700/D-001)
+# ---------------------------------------------------------------------
+
+def test_multi_horizon_forward_produces_per_horizon_trackers() -> None:
+    """SC3: T=24 horizons=[1,4,15] → 3 per-horizon trackers + combined."""
+    keras.utils.set_random_seed(0)
+    args = _tiny_args(T=24, predict_horizons=[1, 4, 15])
+    cfg = _build_config(args)
+    model = VideoJEPA(config=cfg)
+    pixels = np.random.RandomState(0).randn(
+        2, 24, args.img_size, args.img_size, args.img_channels
+    ).astype("float32")
+    out = model({"pixels": pixels}, training=True)
+    assert out.shape == (2, 24, 2, 2, args.embed_dim)
+    metric_names = [m.name for m in model.metrics]
+    for h in (1, 4, 15):
+        assert f"next_frame_loss_h{h}" in metric_names, (
+            f"missing per-horizon tracker next_frame_loss_h{h} in "
+            f"{metric_names!r}"
+        )
+    assert "next_frame_loss" in metric_names, (
+        f"combined tracker missing: {metric_names!r}"
+    )
+    # At least 3 add_loss calls from per-horizon heads (+ sigreg).
+    assert len(model.losses) >= 4, (
+        f"expected >=4 add_loss entries (3 horizons + sigreg), "
+        f"got {len(model.losses)}"
+    )
 
 
 # ---------------------------------------------------------------------
@@ -166,3 +228,56 @@ def test_end_to_end_fit_and_reload(tmp_path: Path) -> None:
     y_reload = keras.ops.convert_to_numpy(reloaded(sample, training=False))
     max_diff = float(np.max(np.abs(y_orig - y_reload)))
     assert max_diff < 1e-4, f"Reload round-trip diff too large: {max_diff:.2e}"
+
+
+@pytest.mark.integration
+def test_multi_horizon_fit_and_reload_preserves_trackers(tmp_path: Path) -> None:
+    """SC4: 1-step fit + reload preserves all per-horizon trackers; finite."""
+    keras.utils.set_random_seed(0)
+    # Tiny dims, but T big enough for multiple horizons.
+    args = _tiny_args(T=8, predict_horizons=[1, 3, 6])
+    cfg = _build_config(args)
+    model = VideoJEPA(config=cfg)
+    ds = synthetic_drone_video_dataset(
+        batch_size=args.batch_size,
+        num_batches=2,
+        T=args.T,
+        img_size=args.img_size,
+        img_channels=args.img_channels,
+        seed=0,
+    )
+    model.compile(
+        optimizer=keras.optimizers.AdamW(learning_rate=1e-4),
+        loss=None,
+        jit_compile=False,
+    )
+    history = model.fit(ds, epochs=1, steps_per_epoch=1, verbose=0)
+
+    # All per-horizon losses logged + finite.
+    for h in (1, 3, 6):
+        key = f"next_frame_loss_h{h}"
+        assert key in history.history, (
+            f"missing {key} in history.history keys: "
+            f"{list(history.history)!r}"
+        )
+        val = history.history[key][-1]
+        assert np.isfinite(val), f"{key} not finite: {val}"
+    assert "next_frame_loss" in history.history
+    assert np.isfinite(history.history["next_frame_loss"][-1])
+
+    final_path = tmp_path / "mh_video_jepa.keras"
+    model.save(str(final_path))
+    reloaded = keras.models.load_model(str(final_path))
+    reload_metric_names = [m.name for m in reloaded.metrics]
+    for h in (1, 3, 6):
+        assert f"next_frame_loss_h{h}" in reload_metric_names, (
+            f"reloaded model missing tracker next_frame_loss_h{h}: "
+            f"{reload_metric_names!r}"
+        )
+
+    # Forward parity after reload.
+    sample = next(iter(ds))[0]
+    y_orig = keras.ops.convert_to_numpy(model(sample, training=False))
+    y_reload = keras.ops.convert_to_numpy(reloaded(sample, training=False))
+    max_diff = float(np.max(np.abs(y_orig - y_reload)))
+    assert max_diff < 1e-4, f"Multi-horizon reload diff: {max_diff:.2e}"
