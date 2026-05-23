@@ -20,6 +20,7 @@ import argparse
 import datetime as _dt
 import os
 import random
+import sys
 from pathlib import Path
 from typing import Any, Dict
 
@@ -31,7 +32,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 import keras
 import tensorflow as tf
 
-from train.common import setup_gpu
+from train.common import setup_gpu, create_base_argument_parser
 from dl_techniques.models.lewm.config import LeWMConfig
 from dl_techniques.models.lewm.model import LeWM
 from dl_techniques.datasets.pusht_hdf5 import (
@@ -49,6 +50,28 @@ def _set_seed(seed: int) -> None:
 
 
 def _build_model(args: argparse.Namespace) -> LeWM:
+    # Fail-fast validation: img/patch divisibility and embed_dim vs encoder
+    # scale. Without this a wrong combo crashes deep inside ViT/projector with
+    # an opaque shape error far from the CLI.
+    from dl_techniques.models.vit.model import ViT
+    if args.img_size % args.patch_size != 0:
+        raise ValueError(
+            f"img_size ({args.img_size}) must be divisible by patch_size "
+            f"({args.patch_size})."
+        )
+    if args.encoder_scale not in ViT.SCALE_CONFIGS:
+        raise ValueError(
+            f"encoder_scale={args.encoder_scale!r} not in ViT.SCALE_CONFIGS "
+            f"({list(ViT.SCALE_CONFIGS.keys())})."
+        )
+    expected_embed = ViT.SCALE_CONFIGS[args.encoder_scale][0]
+    if args.embed_dim != expected_embed:
+        raise ValueError(
+            f"embed_dim ({args.embed_dim}) must equal the ViT encoder output "
+            f"dim for scale={args.encoder_scale!r} ({expected_embed}). The "
+            f"projector is identity-shaped; a mismatch crashes at first matmul."
+        )
+
     cfg = LeWMConfig(
         img_size=args.img_size,
         patch_size=args.patch_size,
@@ -120,41 +143,71 @@ def _results_dir(prefix: str = "lewm") -> Path:
     return base
 
 
+# Smoke preset overrides for fast CPU iteration. Mirror with care: these are
+# applied AFTER argparse so they only override defaults the user didn't set
+# (handled by tracking which flags were explicitly passed).
+_SMOKE_OVERRIDES: Dict[str, Any] = {
+    "img_size": 56,
+    "patch_size": 14,
+    "encoder_scale": "tiny",
+    "embed_dim": 192,
+    "history_size": 2,
+    "num_preds": 1,
+    "depth": 2,
+    "heads": 4,
+    "dim_head": 48,
+    "mlp_dim": 256,
+    "sigreg_num_proj": 64,
+    "batch_size": 2,
+    "epochs": 1,
+    "steps_per_epoch": 2,
+}
+
+
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="LeWM smoke-test trainer")
-    # Data source
+    # Adopt the project's base argument parser for shared flags
+    # (--epochs, --batch-size, --learning-rate, --weight-decay, --gpu, ...).
+    # --dataset / --image-size / --lr-schedule / --patience / --show-plots are
+    # inherited but unused by this script; that drift is acceptable per
+    # train/CLAUDE.md guidance to prefer the base parser for consistency.
+    p = create_base_argument_parser(
+        description="LeWM trainer (upstream defaults; --smoke for fast CPU iteration)",
+        default_dataset="cifar10",  # ignored
+    )
+    # Override base defaults to upstream LeWM values.
+    p.set_defaults(batch_size=16, epochs=50, learning_rate=5e-5, weight_decay=1e-3)
+
+    # Smoke preset.
+    p.add_argument("--smoke", action="store_true",
+                   help="Tiny preset for fast CPU iteration. Overrides defaults: "
+                        "img=56 patch=14 depth=2 heads=4 dim_head=48 mlp_dim=256 "
+                        "history=2 sigreg_num_proj=64 batch=2 epochs=1 steps=2. "
+                        "User-provided flags still win.")
+
+    # Data source (mutually exclusive).
     src = p.add_mutually_exclusive_group(required=False)
     src.add_argument("--synthetic", action="store_true",
-                     help="Use synthetic random data (default).")
+                     help="Use synthetic random data (default fallback).")
     src.add_argument("--hdf5-path", type=str, default=None,
                      help="Path to PushT-style HDF5 replay file.")
 
-    # Basic training args
-    p.add_argument("--batch-size", type=int, default=2)
-    p.add_argument("--epochs", type=int, default=1)
-    p.add_argument("--steps-per-epoch", type=int, default=2)
-    p.add_argument("--learning-rate", type=float, default=5e-5)
-    p.add_argument("--weight-decay", type=float, default=1e-3)
+    # LeWM-specific flags not in the base parser.
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--gpu", type=int, default=None,
-                   help="GPU index (sets CUDA_VISIBLE_DEVICES). None for CPU/default.")
+    p.add_argument("--steps-per-epoch", type=int, default=200)
 
-    # Model config (defaults target tiny smoke-test; full LeWM defaults live
-    # in LeWMConfig — use --encoder-scale tiny --img-size 224 --patch-size 14
-    # for the full-spec build).
-    p.add_argument("--img-size", type=int, default=56,
-                   help="Square image edge (default 56 for CPU smoke; 224 for full).")
+    # Model config — full LeWM upstream defaults.
+    p.add_argument("--img-size", type=int, default=224)
     p.add_argument("--patch-size", type=int, default=14)
     p.add_argument("--encoder-scale", type=str, default="tiny")
     p.add_argument("--embed-dim", type=int, default=192)
 
-    p.add_argument("--history-size", type=int, default=2)
+    p.add_argument("--history-size", type=int, default=3)
     p.add_argument("--num-preds", type=int, default=1)
 
-    p.add_argument("--depth", type=int, default=2)
-    p.add_argument("--heads", type=int, default=4)
-    p.add_argument("--dim-head", type=int, default=48)
-    p.add_argument("--mlp-dim", type=int, default=256)
+    p.add_argument("--depth", type=int, default=6)
+    p.add_argument("--heads", type=int, default=16)
+    p.add_argument("--dim-head", type=int, default=64)
+    p.add_argument("--mlp-dim", type=int, default=2048)
     p.add_argument("--dropout", type=float, default=0.0)
 
     p.add_argument("--action-dim", type=int, default=2)
@@ -164,15 +217,39 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--sigreg-weight", type=float, default=0.09)
     p.add_argument("--sigreg-knots", type=int, default=17)
-    p.add_argument("--sigreg-num-proj", type=int, default=64,
-                   help="Number of random projections in SIGReg (default 64 "
-                        "for smoke; 1024 for full LeWM).")
+    p.add_argument("--sigreg-num-proj", type=int, default=1024)
 
+    # Track which flags the user explicitly set so --smoke only overrides
+    # unmodified defaults.
+    explicit = _explicitly_set_flags(p)
     args = p.parse_args()
+
+    if args.smoke:
+        for key, value in _SMOKE_OVERRIDES.items():
+            if key not in explicit:
+                setattr(args, key, value)
+
     # Default to synthetic if neither flag is set.
     if not args.synthetic and not args.hdf5_path:
         args.synthetic = True
     return args
+
+
+def _explicitly_set_flags(parser: argparse.ArgumentParser) -> set:
+    """Inspect sys.argv against parser actions to record which dest names the
+    user passed explicitly. Used so --smoke does not silently overwrite an
+    intentional --depth 12."""
+    # Build dest <- option string map.
+    dest_by_opt: Dict[str, str] = {}
+    for action in parser._actions:
+        for opt in action.option_strings:
+            dest_by_opt[opt] = action.dest
+    explicit: set = set()
+    for token in sys.argv[1:]:
+        key = token.split("=", 1)[0]
+        if key in dest_by_opt:
+            explicit.add(dest_by_opt[key])
+    return explicit
 
 
 def main() -> None:
@@ -213,7 +290,7 @@ def main() -> None:
     logger.info(f"Saved final model to {final_path}")
 
     # Verify the saved model actually reloads and reproduces a forward pass.
-    # (Asserting a round-trip in a comment is not the same as checking it.)
+    # FATAL on failure so CI catches serialization regressions.
     try:
         sample = next(iter(dataset))[0]
         y_orig = keras.ops.convert_to_numpy(model(sample, training=False))
@@ -226,8 +303,12 @@ def main() -> None:
             logger.error(
                 f"Reload check FAILED: max|delta|={max_diff:.2e} >= 1e-4."
             )
+            raise RuntimeError(
+                f"Reload check FAILED: max|delta|={max_diff:.2e} >= 1e-4."
+            )
     except Exception as e:  # noqa: BLE001 - surface any reload failure loudly
         logger.error(f"Reload check FAILED with exception: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
