@@ -36,9 +36,11 @@ The streaming path reuses the predictor on a growing (then rolling)
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Optional
 
 import keras
+import tensorflow as tf
 from keras import ops
 
 from dl_techniques.regularizers.sigreg import SIGRegLayer
@@ -79,6 +81,29 @@ class VideoJEPA(keras.Model):
             dropout=cfg.dropout,
             name="encoder",
         )
+        # DECISION plan_2026-05-23_15151c75/D-001 — EMA target encoder
+        # reverses video_jepa iter-1 D-001 (live target). Identity-baseline
+        # pathology (multi-horizon eval: trained model 84-300x WORSE than
+        # identity at every horizon) required a momentum-decoupled target.
+        # Live-target + SIGReg co-adapted the encoder/predictor into a
+        # near-time-invariant feature map; SIGReg prevents rank-collapse,
+        # not time-invariance. Same architecture as ``self.encoder``; weights
+        # synced once at first forward, then updated via EMA in ``train_step``.
+        self.target_encoder = VideoJEPACliffordEncoder(
+            embed_dim=cfg.embed_dim,
+            patch_size=cfg.patch_size,
+            img_size=cfg.img_size,
+            img_channels=cfg.img_channels,
+            depth=cfg.encoder_clifford_depth,
+            shifts=tuple(cfg.encoder_shifts),
+            dropout=cfg.dropout,
+            name="target_encoder",
+        )
+        # Freeze target — no gradient flows through this branch. Set here
+        # in __init__ (NOT after first forward) so the layer is marked
+        # non-trainable before any build / variable tracking happens; this
+        # keeps its weights out of ``self.trainable_variables`` reliably.
+        self.target_encoder.trainable = False
         self.predictor = VideoJEPAPredictor(
             embed_dim=cfg.embed_dim,
             num_frames_max=max(cfg.num_frames, cfg.history_size_k),
@@ -151,6 +176,30 @@ class VideoJEPA(keras.Model):
         # --- Streaming buffer (not a weight; reset per sequence) ---
         self._stream_buf: Optional[Any] = None
 
+        # --- EMA target encoder state (plan_2026-05-23_15151c75/D-001) ---
+        # ``_ema_step`` is a non-trainable scalar weight so cosine-schedule
+        # progress survives ``.keras`` checkpoint reload. ``_ema_total_steps``
+        # is a plain Python attribute (defaults to 1.0 to make cosine math
+        # safe even if the trainer forgets ``set_ema_total_steps``); reset
+        # on each fresh trainer invocation.
+        self._ema_step = self.add_weight(
+            name="ema_step",
+            shape=(),
+            initializer="zeros",
+            trainable=False,
+            dtype="float32",
+        )
+        self._ema_total_steps: float = 1.0
+        # Logged every train_step under "ema_m" so cosine schedules are
+        # visible in CSVLogger / history.
+        self.ema_m_tracker = keras.metrics.Mean(name="ema_m")
+        # Set True on first forward after the initial weight-sync from
+        # ``encoder`` to ``target_encoder`` runs. Python-level guard, not a
+        # weight: re-syncing reloaded checkpoints is harmless (target weights
+        # have already been saved/restored independently), and a guard weight
+        # would force re-sync logic to also serialize.
+        self._target_synced: bool = False
+
     @property
     def metrics(self) -> list:
         """Per-loss trackers so fit() logs ``next_frame_loss`` + ``mask_loss``
@@ -161,6 +210,7 @@ class VideoJEPA(keras.Model):
             *self.per_horizon_trackers,
             self.mask_loss_tracker,
             self.sigreg_loss_tracker,
+            self.ema_m_tracker,
         ]
         # Dedupe while preserving order.
         seen = set()
@@ -175,7 +225,8 @@ class VideoJEPA(keras.Model):
     # Core helpers
     # ------------------------------------------------------------------
     def encode_frames(self, pixels: keras.KerasTensor) -> keras.KerasTensor:
-        """Encode a pixel tensor ``(B, T, H, W, C) → (B, T, H_p, W_p, D)``.
+        """Encode a pixel tensor ``(B, T, H, W, C) → (B, T, H_p, W_p, D)``
+        through the **online** encoder.
 
         Mirrors :meth:`LeWM.encode_pixels` but keeps the 4D patch grid
         instead of pooling.
@@ -188,6 +239,73 @@ class VideoJEPA(keras.Model):
         feat = self.encoder(flat)  # (B*T, H_p, W_p, D)
         Hp = cfg.patches_per_side
         return ops.reshape(feat, (B, T, Hp, Hp, cfg.embed_dim))
+
+    def encode_frames_target(self, pixels: keras.KerasTensor) -> keras.KerasTensor:
+        """Encode pixels through the **EMA target** encoder (no gradient).
+
+        Always runs with ``training=False`` (target encoder is frozen);
+        caller is expected to wrap the result in ``ops.stop_gradient``.
+        """
+        cfg = self.config
+        shape = ops.shape(pixels)
+        B, T = shape[0], shape[1]
+        H, W, C = cfg.img_size, cfg.img_size, cfg.img_channels
+        flat = ops.reshape(pixels, (B * T, H, W, C))
+        feat = self.target_encoder(flat, training=False)
+        Hp = cfg.patches_per_side
+        return ops.reshape(feat, (B, T, Hp, Hp, cfg.embed_dim))
+
+    # ------------------------------------------------------------------
+    # EMA target encoder helpers (plan_2026-05-23_15151c75/D-001)
+    # ------------------------------------------------------------------
+    def set_ema_total_steps(self, n: int) -> None:
+        """Set the total step count used by the cosine EMA schedule.
+
+        Harmless for ``ema_schedule="none"``. Trainer calls this once
+        before ``fit()`` so the schedule covers the whole run.
+        """
+        self._ema_total_steps = float(max(int(n), 1))
+
+    def _sync_target_to_online(self) -> None:
+        """Bitwise copy of ``encoder.weights`` into ``target_encoder.weights``.
+
+        Called lazily on the first forward pass (once both encoders are
+        built and their weight lists are aligned in order). Safe to call
+        a second time — the assign is just an overwrite — but we gate on
+        ``self._target_synced`` to skip the redundant work after reload.
+        """
+        for t_w, e_w in zip(self.target_encoder.weights, self.encoder.weights):
+            t_w.assign(e_w)
+        self._target_synced = True
+
+    def _current_momentum(self) -> float:
+        """Return the EMA momentum for the current step.
+
+        ``"none"`` → constant ``cfg.ema_momentum``.
+        ``"cosine"`` → ramps from ``m0`` to ``1.0`` across
+        ``_ema_total_steps`` via a half-cosine:
+        ``m(t) = m0 + (1 - m0) * (1 - cos(pi * t / T)) / 2``.
+        Always clamped to ``[m0, 1.0]``.
+        """
+        cfg = self.config
+        m0 = float(cfg.ema_momentum)
+        if cfg.ema_schedule == "none":
+            return m0
+        # cosine
+        step = float(ops.convert_to_numpy(self._ema_step))
+        total = max(self._ema_total_steps, 1.0)
+        progress = min(step / total, 1.0)
+        m = m0 + (1.0 - m0) * (1.0 - math.cos(math.pi * progress)) / 2.0
+        return min(max(m, m0), 1.0)
+
+    def _ema_update(self) -> None:
+        """Apply one EMA step: ``t <- m * t + (1 - m) * e`` per weight."""
+        m = self._current_momentum()
+        one_minus_m = 1.0 - m
+        for t_w, e_w in zip(self.target_encoder.weights, self.encoder.weights):
+            t_w.assign(m * t_w + one_minus_m * e_w)
+        self._ema_step.assign(self._ema_step + 1.0)
+        self.ema_m_tracker.update_state(m)
 
     # ------------------------------------------------------------------
     # Training forward
@@ -216,7 +334,26 @@ class VideoJEPA(keras.Model):
         pixels = inputs["pixels"]
 
         cfg = self.config
-        z = self.encode_frames(pixels)                      # (B, T, H_p, W_p, D)
+        # Online (gradient-carrying) encoder — feeds the predictor and
+        # SIGReg. ``z`` retained as a local alias for downstream code that
+        # still expects the iter-1 name (predictor-input substitution).
+        z_online = self.encode_frames(pixels)               # (B, T, H_p, W_p, D)
+        z = z_online
+
+        # --- EMA target encoder (plan_2026-05-23_15151c75/D-001) ---
+        # First forward: encoder weights exist; force-build target_encoder
+        # and copy bitwise so step-0 has ``target == online``. Subsequent
+        # forwards short-circuit via ``_target_synced``.
+        if not self._target_synced:
+            # Forward once through target_encoder to build its variables
+            # with matching shapes. ``training=False`` is required because
+            # ``target_encoder.trainable=False`` makes the inner BN layers
+            # use inference statistics.
+            _ = self.encode_frames_target(pixels)
+            self._sync_target_to_online()
+        # Target features for the regression losses — gradient is stopped
+        # so the optimizer never sees target_encoder; EMA owns it.
+        z_target = ops.stop_gradient(self.encode_frames_target(pixels))
 
         # --- Iter-2: optionally substitute mask_token at masked positions ---
         # The tube mask is spatial (B, H_p, W_p); broadcasting over T keeps
@@ -267,7 +404,10 @@ class VideoJEPA(keras.Model):
             for h_idx, h in enumerate(cfg.predict_horizons):
                 pred_ctx = pred[:, :-h]                  # (B, T-h, H_p, W_p, D)
                 pred_ctx = self.pred_heads[h_idx](pred_ctx)
-                target_ctx = z[:, h:]                    # (B, T-h, H_p, W_p, D)
+                # Target from EMA encoder (plan_2026-05-23_15151c75/D-001):
+                # was ``z[:, h:]`` (live target) — switched so identity is
+                # no longer the optimal solution.
+                target_ctx = z_target[:, h:]             # (B, T-h, H_p, W_p, D)
                 sq = ops.square(pred_ctx - target_ctx)
                 if masking_on:
                     w = (1.0 - M)  # broadcasts (B,1,H_p,W_p,1) -> (B,T-h,...)
@@ -296,7 +436,10 @@ class VideoJEPA(keras.Model):
         # positions, across ALL T frames (no causal slice — the tube is
         # time-invariant so masked slots across T are symmetric targets).
         if masking_on:
-            sq_full = ops.square(pred - z)  # (B, T, H_p, W_p, D)
+            # Target from EMA encoder (plan_2026-05-23_15151c75/D-001):
+            # was ``z`` (live target) — switched so masked-position
+            # prediction has a moving but non-co-adapting target.
+            sq_full = ops.square(pred - z_target)  # (B, T, H_p, W_p, D)
             num_masked_per_clip = (
                 self.mask_gen.num_masked * cfg.num_frames * cfg.embed_dim
             )
@@ -307,17 +450,55 @@ class VideoJEPA(keras.Model):
             self.add_loss(cfg.lambda_mask * mask_loss)
             self.mask_loss_tracker.update_state(mask_loss)
 
-        # --- L3: SIGReg on (B*T, N, D) (D-005, unchanged) ---
+        # --- L3: SIGReg on (B*T, N, D) ---
+        # DECISION plan_2026-05-23_15151c75/D-002 — SIGReg input switched
+        # from ``pred`` (predictor output) to ``z_online`` (encoder output).
+        # Spec line 5: SIGReg stays on the online encoder only; the target
+        # encoder is not regularized (it carries no gradient). Conceptually
+        # this regularizes the representation directly under the JEPA
+        # framing instead of the prediction.
         Hp = cfg.patches_per_side
         N = Hp * Hp
-        pred_reshaped = ops.reshape(
-            pred, (B * T_dyn, N, cfg.embed_dim)
+        z_online_reshaped = ops.reshape(
+            z_online, (B * T_dyn, N, cfg.embed_dim)
         )
-        sigreg_loss = self.sigreg(pred_reshaped)
+        sigreg_loss = self.sigreg(z_online_reshaped)
         self.add_loss(self._sigreg_weight * sigreg_loss)
         self.sigreg_loss_tracker.update_state(sigreg_loss)
 
         return pred
+
+    # ------------------------------------------------------------------
+    # Custom train_step (plan_2026-05-23_15151c75/D-001)
+    # ------------------------------------------------------------------
+    def train_step(self, data: Any) -> Dict[str, Any]:
+        """One training step: forward, backward on encoder+predictor+heads,
+        then EMA-update the frozen target encoder.
+
+        ``data`` is the (inputs, _) tuple emitted by both the synthetic
+        and BDD100K dataset pipelines. The label is unused (losses come
+        from ``add_loss`` inside :meth:`call`).
+        """
+        x = data[0] if isinstance(data, tuple) else data
+        with tf.GradientTape() as tape:
+            _ = self(x, training=True)
+            # ``self.losses`` collects every ``add_loss`` from this
+            # forward + any regularization losses. Sum to a scalar.
+            losses = self.losses
+            if losses:
+                loss = ops.cast(losses[0], "float32")
+                for extra in losses[1:]:
+                    loss = loss + ops.cast(extra, "float32")
+            else:
+                loss = ops.convert_to_tensor(0.0, dtype="float32")
+        # trainable_variables excludes target_encoder weights because
+        # ``target_encoder.trainable = False`` in __init__.
+        grads = tape.gradient(loss, self.trainable_variables)
+        self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
+        # EMA update AFTER optimizer step — target now tracks the
+        # **post-update** encoder weights (V-JEPA / BYOL convention).
+        self._ema_update()
+        return {m.name: m.result() for m in self.metrics}
 
     # ------------------------------------------------------------------
     # Streaming inference (D-007)
