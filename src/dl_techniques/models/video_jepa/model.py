@@ -36,7 +36,7 @@ The streaming path reuses the predictor on a growing (then rolling)
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import keras
 from keras import ops
@@ -117,12 +117,34 @@ class VideoJEPA(keras.Model):
             trainable=True,
         )
 
+        # --- Multi-horizon prediction heads (plan_2026-05-23_0b664700/D-001)
+        # One linear pointwise Dense (no bias) per horizon. Kept as a list
+        # attribute so Keras 3 auto-tracks sublayers (proven path; same
+        # idiom as predictor blocks). Heads operate per-token on the
+        # predictor output and project the embedding back into z-space —
+        # they cannot break causality because they are pointwise.
+        self.pred_heads: List[keras.layers.Dense] = [
+            keras.layers.Dense(
+                cfg.embed_dim,
+                use_bias=False,
+                name=f"pred_head_h{h}",
+            )
+            for h in cfg.predict_horizons
+        ]
+
         # --- Iter-2: per-loss Mean trackers for logging (Step 5) ---
         # These surface next_frame_loss and mask_loss as separate columns
         # in CSVLogger / history. They are running means over the epoch.
+        # `next_frame_loss_tracker` retained with the same name for CSV
+        # back-compat — it now logs the *combined* (mean over horizons) loss.
         self.next_frame_loss_tracker = keras.metrics.Mean(
             name="next_frame_loss"
         )
+        # Per-horizon trackers, one per entry in cfg.predict_horizons.
+        self.per_horizon_trackers: List[keras.metrics.Mean] = [
+            keras.metrics.Mean(name=f"next_frame_loss_h{h}")
+            for h in cfg.predict_horizons
+        ]
         self.mask_loss_tracker = keras.metrics.Mean(name="mask_loss")
         self.sigreg_loss_tracker = keras.metrics.Mean(name="sigreg_loss")
 
@@ -136,6 +158,7 @@ class VideoJEPA(keras.Model):
         base = list(super().metrics)
         extras = [
             self.next_frame_loss_tracker,
+            *self.per_horizon_trackers,
             self.mask_loss_tracker,
             self.sigreg_loss_tracker,
         ]
@@ -222,32 +245,51 @@ class VideoJEPA(keras.Model):
 
         pred = self.predictor(z_masked, training=training)  # (B,T,H_p,W_p,D)
 
-        # --- L1: MSE next-frame patch loss (D-003, iter-1) ---
-        # Evaluated on **unmasked** positions only (iter-2 accounting rule:
-        # the two tasks should not double-count the same tokens).
-        # Skip entirely if T < 2 (edge case: single-frame window).
+        # --- L1: multi-horizon prediction loss
+        # (plan_2026-05-23_0b664700/D-001; supersedes single-horizon t+1) ---
+        # For each h in cfg.predict_horizons:
+        #   pred_h = pred_head_h(pred[:, :-h])          # (B, T-h, H_p, W_p, D)
+        #   target = z[:, h:]                            # (B, T-h, H_p, W_p, D)
+        #   MSE on unmasked positions; weighted by lambda_next_frame
+        # The shared causal predictor is unchanged across horizons; per-horizon
+        # heads provide an independent linear sub-objective per h, addressing
+        # the degenerate-identity pathology of single-horizon t+1 at 30fps.
+        # Skip entirely if num_frames < 2 (edge case: single-frame window).
+        # DECISION plan_2026-05-23_0b664700/D-001: per-horizon Dense heads on
+        # the shared predictor + same lambda per horizon + combined metric =
+        # mean of per-horizon losses (decouples reported magnitude from N).
         if cfg.num_frames >= 2:
-            pred_ctx = pred[:, :-1]           # (B, T-1, H_p, W_p, D)
-            target_ctx = z[:, 1:]             # (B, T-1, H_p, W_p, D)
-            sq = ops.square(pred_ctx - target_ctx)
-            if masking_on:
-                # (1 - M) broadcasts over T; slice to T-1 via broadcasting.
-                w = (1.0 - M)  # (B, 1, H_p, W_p, 1) broadcasts to (B, T-1, ...)
-                # Per-element count across a slab of (T-1) frames:
-                # unmasked_spatial * (T-1) * D.
-                unmasked_per_row = (
-                    cfg.num_patches - self.mask_gen.num_masked
-                )
-                denom = float(
-                    max(1, unmasked_per_row * (cfg.num_frames - 1) * cfg.embed_dim)
-                )
-                next_frame_loss = ops.sum(sq * w) / (
-                    float(ops.shape(pred_ctx)[0]) * denom
-                )
-            else:
-                next_frame_loss = ops.mean(sq)
-            self.add_loss(cfg.lambda_next_frame * next_frame_loss)
-            self.next_frame_loss_tracker.update_state(next_frame_loss)
+            unmasked_per_row = (
+                cfg.num_patches - self.mask_gen.num_masked
+                if masking_on else cfg.num_patches
+            )
+            per_horizon_losses = []
+            for h_idx, h in enumerate(cfg.predict_horizons):
+                pred_ctx = pred[:, :-h]                  # (B, T-h, H_p, W_p, D)
+                pred_ctx = self.pred_heads[h_idx](pred_ctx)
+                target_ctx = z[:, h:]                    # (B, T-h, H_p, W_p, D)
+                sq = ops.square(pred_ctx - target_ctx)
+                if masking_on:
+                    w = (1.0 - M)  # broadcasts (B,1,H_p,W_p,1) -> (B,T-h,...)
+                    denom = float(
+                        max(1, unmasked_per_row * (cfg.num_frames - h) * cfg.embed_dim)
+                    )
+                    h_loss = ops.sum(sq * w) / (
+                        float(ops.shape(pred_ctx)[0]) * denom
+                    )
+                else:
+                    h_loss = ops.mean(sq)
+                # Same lambda per horizon (see D-001 Rejected Alternative #2).
+                self.add_loss(cfg.lambda_next_frame * h_loss)
+                self.per_horizon_trackers[h_idx].update_state(h_loss)
+                per_horizon_losses.append(h_loss)
+            # Combined tracker = mean of per-horizon losses; decouples reported
+            # magnitude from N so dashboards stay comparable across runs.
+            combined = per_horizon_losses[0]
+            for hl in per_horizon_losses[1:]:
+                combined = combined + hl
+            combined = combined / float(len(per_horizon_losses))
+            self.next_frame_loss_tracker.update_state(combined)
 
         # --- L2: mask-prediction loss (iter-2, D-008..D-012) ---
         # MSE between predictor output and *same-encoder* target at masked
