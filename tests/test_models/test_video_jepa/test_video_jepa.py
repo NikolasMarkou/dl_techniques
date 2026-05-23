@@ -761,3 +761,188 @@ class TestSyntheticDataset:
         )
         with pytest.raises(ValueError, match="batch_size must be >= 2"):
             synthetic_drone_video_dataset(batch_size=1)
+
+
+# ============================================================================
+# TestVideoJEPAEMA — EMA target encoder regression suite
+# (plan_2026-05-23_15151c75/D-001)
+# ============================================================================
+
+
+def _ema_pixels(cfg: VideoJEPAConfig, B: int = 2, seed: int = 0):
+    rng = np.random.RandomState(seed)
+    return rng.rand(
+        B, cfg.num_frames, cfg.img_size, cfg.img_size, cfg.img_channels,
+    ).astype("float32")
+
+
+def _build_ema_model(*, ema_momentum: float = 0.996,
+                     ema_schedule: str = "none", **cfg_overrides):
+    cfg = _small_config(
+        ema_momentum=ema_momentum,
+        ema_schedule=ema_schedule,
+        mask_prediction_enabled=False,  # keep loss count simple
+        **cfg_overrides,
+    )
+    model = VideoJEPA(config=cfg)
+    pixels = _ema_pixels(cfg)
+    # First forward triggers lazy build + target sync.
+    _ = model({"pixels": pixels}, training=False)
+    return model, pixels, cfg
+
+
+class TestVideoJEPAEMA:
+    """EMA target encoder invariants (plan_2026-05-23_15151c75/D-001)."""
+
+    def test_initial_sync(self) -> None:
+        """SC1 — encoder.weights == target_encoder.weights bitwise after build."""
+        model, _, _ = _build_ema_model()
+        assert len(model.encoder.weights) == len(model.target_encoder.weights)
+        for e_w, t_w in zip(model.encoder.weights, model.target_encoder.weights):
+            assert e_w.shape == t_w.shape, (e_w.name, t_w.name, e_w.shape, t_w.shape)
+            np.testing.assert_array_equal(
+                np.asarray(t_w), np.asarray(e_w),
+                err_msg=f"target encoder weight {t_w.name} not synced to "
+                        f"encoder weight {e_w.name} at step 0",
+            )
+
+    def test_target_encoder_not_trainable(self) -> None:
+        """SC2 — target_encoder.trainable False; no target weights in
+        trainable_variables."""
+        model, _, _ = _build_ema_model()
+        assert model.target_encoder.trainable is False
+        trainable_names = [v.name for v in model.trainable_variables]
+        for name in trainable_names:
+            assert "target_encoder" not in name, (
+                f"target weight leaked into trainable_variables: {name}"
+            )
+        # And the target weights list should be non-empty (otherwise the
+        # test is vacuous).
+        assert len(model.target_encoder.weights) > 0
+
+    def test_ema_update_one_step(self) -> None:
+        """SC3 — after 1 train_step at m=0.9:
+              target_new = 0.9*target_old + 0.1*encoder_new
+        within atol=1e-6 for every paired weight."""
+        m = 0.9
+        model, pixels, cfg = _build_ema_model(ema_momentum=m)
+        model.compile(
+            optimizer=keras.optimizers.AdamW(learning_rate=1e-3),
+            loss=None, jit_compile=False,
+        )
+        # Snapshot target weights before the train step.
+        target_old = [np.asarray(w).copy() for w in model.target_encoder.weights]
+        # Wrap pixels into a tf.data.Dataset for fit().
+        import tensorflow as tf
+        ds = tf.data.Dataset.from_tensors(
+            ({"pixels": pixels}, np.float32(0.0))
+        )
+        model.fit(ds, epochs=1, steps_per_epoch=1, verbose=0)
+        # Post-step encoder weights and target weights.
+        encoder_new = [np.asarray(w) for w in model.encoder.weights]
+        target_new = [np.asarray(w) for w in model.target_encoder.weights]
+        for t_old, e_new, t_new in zip(target_old, encoder_new, target_new):
+            expected = m * t_old + (1.0 - m) * e_new
+            np.testing.assert_allclose(
+                t_new, expected, atol=1e-6, rtol=1e-6,
+                err_msg=f"EMA update violated for weight shape={t_new.shape}",
+            )
+
+    def test_no_gradient_flows_through_target(self) -> None:
+        """SC4 — gradients w.r.t. target_encoder.weights are None or zero."""
+        import tensorflow as tf
+        model, pixels, _ = _build_ema_model()
+        with tf.GradientTape() as tape:
+            _ = model({"pixels": pixels}, training=True)
+            loss = sum(model.losses)
+        grads = tape.gradient(loss, model.target_encoder.weights)
+        # Either every grad is None (Keras filters them) or every grad
+        # is exactly zero. The expected behaviour is None, but tolerate
+        # zero gradients to keep the test robust across Keras/TF versions.
+        for g, w in zip(grads, model.target_encoder.weights):
+            if g is None:
+                continue
+            arr = np.asarray(g)
+            assert np.all(arr == 0.0), (
+                f"non-zero gradient leaked into target weight {w.name}: "
+                f"max|g|={np.max(np.abs(arr))}"
+            )
+
+    def test_round_trip_preserves_both_encoders(self, tmp_path) -> None:
+        """SC5 — .keras save/load preserves both encoders bit-exact;
+        forward diff < 1e-5."""
+        model, pixels, _ = _build_ema_model()
+        # Drift the target encoder away from the online encoder by doing
+        # one train step; then the round-trip is non-trivial (the live
+        # equality at step 0 would round-trip even without saving target).
+        model.compile(
+            optimizer=keras.optimizers.AdamW(learning_rate=1e-3),
+            loss=None, jit_compile=False,
+        )
+        import tensorflow as tf
+        ds = tf.data.Dataset.from_tensors(
+            ({"pixels": pixels}, np.float32(0.0))
+        )
+        model.fit(ds, epochs=1, steps_per_epoch=1, verbose=0)
+        # Snapshot post-train weights.
+        before_enc = [np.asarray(w).copy() for w in model.encoder.weights]
+        before_tgt = [np.asarray(w).copy() for w in model.target_encoder.weights]
+        # The drift must be visible — assert they diverged.
+        any_diff = any(
+            not np.array_equal(e, t)
+            for e, t in zip(before_enc, before_tgt)
+        )
+        assert any_diff, (
+            "test precondition failed: encoder and target encoder still "
+            "identical after one train step; EMA update did not run."
+        )
+        # Forward output before saving.
+        y_before = np.asarray(model({"pixels": pixels}, training=False))
+
+        path = str(tmp_path / "vj_ema.keras")
+        model.save(path)
+        del model
+        keras.backend.clear_session()
+        reloaded = keras.models.load_model(path)
+
+        # Per-weight bit-exact for both encoders.
+        after_enc = [np.asarray(w) for w in reloaded.encoder.weights]
+        after_tgt = [np.asarray(w) for w in reloaded.target_encoder.weights]
+        for b, a in zip(before_enc, after_enc):
+            np.testing.assert_allclose(a, b, atol=1e-7, rtol=1e-7)
+        for b, a in zip(before_tgt, after_tgt):
+            np.testing.assert_allclose(a, b, atol=1e-7, rtol=1e-7)
+
+        # Forward parity.
+        y_after = np.asarray(reloaded({"pixels": pixels}, training=False))
+        np.testing.assert_allclose(y_after, y_before, atol=1e-5, rtol=1e-5)
+
+    def test_cosine_schedule_metric_monotone(self) -> None:
+        """SC6 — cosine schedule: ema_m monotone non-decreasing, in
+        [ema_momentum, 1.0]."""
+        m0 = 0.5  # exaggerated for a visible cosine ramp
+        model, pixels, _ = _build_ema_model(
+            ema_momentum=m0, ema_schedule="cosine",
+        )
+        model.set_ema_total_steps(4)
+        model.compile(
+            optimizer=keras.optimizers.AdamW(learning_rate=1e-3),
+            loss=None, jit_compile=False,
+        )
+        import tensorflow as tf
+        ds = tf.data.Dataset.from_tensors(
+            ({"pixels": pixels}, np.float32(0.0))
+        ).repeat(4)
+        history = model.fit(ds, epochs=4, steps_per_epoch=1, verbose=0)
+        ema_m_values = history.history["ema_m"]
+        assert len(ema_m_values) == 4, ema_m_values
+        # Monotone non-decreasing.
+        for i in range(1, len(ema_m_values)):
+            assert ema_m_values[i] >= ema_m_values[i - 1] - 1e-7, (
+                f"ema_m decreased at step {i}: {ema_m_values}"
+            )
+        # In [m0, 1.0].
+        for v in ema_m_values:
+            assert m0 - 1e-7 <= v <= 1.0 + 1e-7, (
+                f"ema_m={v} outside [{m0}, 1.0]"
+            )

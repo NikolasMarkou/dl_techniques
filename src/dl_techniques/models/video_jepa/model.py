@@ -193,12 +193,24 @@ class VideoJEPA(keras.Model):
         # Logged every train_step under "ema_m" so cosine schedules are
         # visible in CSVLogger / history.
         self.ema_m_tracker = keras.metrics.Mean(name="ema_m")
-        # Set True on first forward after the initial weight-sync from
-        # ``encoder`` to ``target_encoder`` runs. Python-level guard, not a
-        # weight: re-syncing reloaded checkpoints is harmless (target weights
-        # have already been saved/restored independently), and a guard weight
-        # would force re-sync logic to also serialize.
-        self._target_synced: bool = False
+
+        # --- Eager build + initial weight sync for both encoders ---
+        # Force-build encoder + target_encoder up front with a dummy zero
+        # batch so the lazy-build dance doesn't have to happen inside
+        # ``call`` (which runs under TF graph tracing during train_step).
+        # After ``set_weights(get_weights())``, target == encoder bitwise.
+        # Reload path: ``from_config`` re-runs this, but ``load_model``
+        # immediately overwrites all weights from disk, so the dummy
+        # build's effect is transient and the reloaded target weights
+        # are authoritative.
+        import numpy as _np
+        dummy = _np.zeros(
+            (1, cfg.img_size, cfg.img_size, cfg.img_channels),
+            dtype=_np.float32,
+        )
+        _ = self.encoder(dummy, training=False)
+        _ = self.target_encoder(dummy, training=False)
+        self.target_encoder.set_weights(self.encoder.get_weights())
 
     @property
     def metrics(self) -> list:
@@ -266,37 +278,40 @@ class VideoJEPA(keras.Model):
         """
         self._ema_total_steps = float(max(int(n), 1))
 
-    def _sync_target_to_online(self) -> None:
+    def sync_target_to_online(self) -> None:
         """Bitwise copy of ``encoder.weights`` into ``target_encoder.weights``.
 
-        Called lazily on the first forward pass (once both encoders are
-        built and their weight lists are aligned in order). Safe to call
-        a second time — the assign is just an overwrite — but we gate on
-        ``self._target_synced`` to skip the redundant work after reload.
+        Public helper; the constructor runs it once after a dummy build.
+        Useful for tests that want to re-sync after manual weight edits.
         """
-        for t_w, e_w in zip(self.target_encoder.weights, self.encoder.weights):
-            t_w.assign(e_w)
-        self._target_synced = True
+        self.target_encoder.set_weights(self.encoder.get_weights())
 
-    def _current_momentum(self) -> float:
-        """Return the EMA momentum for the current step.
+    def _current_momentum(self):
+        """Return the EMA momentum for the current step as a scalar tensor.
 
         ``"none"`` → constant ``cfg.ema_momentum``.
         ``"cosine"`` → ramps from ``m0`` to ``1.0`` across
         ``_ema_total_steps`` via a half-cosine:
         ``m(t) = m0 + (1 - m0) * (1 - cos(pi * t / T)) / 2``.
-        Always clamped to ``[m0, 1.0]``.
+        Always clamped to ``[m0, 1.0]``. Returned as a scalar tensor
+        so the math stays inside the TF graph during ``train_step``.
         """
         cfg = self.config
-        m0 = float(cfg.ema_momentum)
+        m0 = ops.convert_to_tensor(float(cfg.ema_momentum), dtype="float32")
         if cfg.ema_schedule == "none":
             return m0
-        # cosine
-        step = float(ops.convert_to_numpy(self._ema_step))
-        total = max(self._ema_total_steps, 1.0)
-        progress = min(step / total, 1.0)
-        m = m0 + (1.0 - m0) * (1.0 - math.cos(math.pi * progress)) / 2.0
-        return min(max(m, m0), 1.0)
+        # cosine — keep entirely in ops so train_step traces cleanly.
+        step = ops.cast(self._ema_step, "float32")
+        total = ops.convert_to_tensor(
+            max(float(self._ema_total_steps), 1.0), dtype="float32",
+        )
+        progress = ops.minimum(step / total, 1.0)
+        pi = ops.convert_to_tensor(math.pi, dtype="float32")
+        one = ops.convert_to_tensor(1.0, dtype="float32")
+        m = m0 + (one - m0) * (one - ops.cos(pi * progress)) / 2.0
+        # Clamp to [m0, 1.0].
+        m = ops.minimum(ops.maximum(m, m0), one)
+        return m
 
     def _ema_update(self) -> None:
         """Apply one EMA step: ``t <- m * t + (1 - m) * e`` per weight."""
@@ -341,16 +356,6 @@ class VideoJEPA(keras.Model):
         z = z_online
 
         # --- EMA target encoder (plan_2026-05-23_15151c75/D-001) ---
-        # First forward: encoder weights exist; force-build target_encoder
-        # and copy bitwise so step-0 has ``target == online``. Subsequent
-        # forwards short-circuit via ``_target_synced``.
-        if not self._target_synced:
-            # Forward once through target_encoder to build its variables
-            # with matching shapes. ``training=False`` is required because
-            # ``target_encoder.trainable=False`` makes the inner BN layers
-            # use inference statistics.
-            _ = self.encode_frames_target(pixels)
-            self._sync_target_to_online()
         # Target features for the regression losses — gradient is stopped
         # so the optimizer never sees target_encoder; EMA owns it.
         z_target = ops.stop_gradient(self.encode_frames_target(pixels))
