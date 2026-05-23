@@ -112,6 +112,20 @@ class VideoJEPAConfig:
     # --- Multi-horizon prediction (plan_2026-05-23_0b664700/D-001) ---
     predict_horizons: Tuple[int, ...] = (1,)
 
+    # --- EMA target encoder (plan_2026-05-23_15151c75/D-001) ---
+    # Momentum for the V-JEPA-style EMA target encoder weight update:
+    #   target_w <- m * target_w + (1 - m) * encoder_w
+    # 0.996 is the V-JEPA / BYOL default. Set 0.0 to make the target
+    # snap to the encoder every step (degenerate; equivalent to "live
+    # target", retained only as a debug knob). Strict upper bound at
+    # 1.0 keeps the target frozen-at-init only when ``ema_schedule="none"``.
+    ema_momentum: float = 0.996
+    # One of {"none", "cosine"}. "cosine" ramps momentum from
+    # ``ema_momentum`` to ``1.0`` across training; the model exposes
+    # the current value as a metric ``ema_m`` and a non-trainable
+    # step counter persists across save/load.
+    ema_schedule: str = "none"
+
     # ------------------------------------------------------------------
     # Invariants
     # ------------------------------------------------------------------
@@ -196,6 +210,18 @@ class VideoJEPAConfig:
                 f"max(predict_horizons)={max(self.predict_horizons)} must be "
                 f"strictly less than num_frames={self.num_frames}."
             )
+        # --- EMA target encoder invariants (plan_2026-05-23_15151c75/D-001) ---
+        if not (0.0 <= self.ema_momentum < 1.0):
+            raise ValueError(
+                f"ema_momentum must be in [0.0, 1.0), got {self.ema_momentum}. "
+                "Upper bound is strict: m=1.0 freezes the target forever, "
+                "which is equivalent to disabling training of the target side."
+            )
+        if self.ema_schedule not in {"none", "cosine"}:
+            raise ValueError(
+                f"ema_schedule must be one of {{'none', 'cosine'}}, got "
+                f"{self.ema_schedule!r}."
+            )
 
     # ------------------------------------------------------------------
     # Derived properties
@@ -237,4 +263,12 @@ class VideoJEPAConfig:
         for k in ("encoder_shifts", "predictor_shifts", "predict_horizons"):
             if k in d and isinstance(d[k], list):
                 d[k] = tuple(d[k])
+        # Drop any keys not recognized by the dataclass — keeps
+        # forward-compat with checkpoints written by future versions
+        # that add fields, and backward-compat is automatic via dataclass
+        # defaults for missing keys (e.g. ema_momentum / ema_schedule on
+        # pre-plan_2026-05-23_15151c75 checkpoints).
+        import dataclasses as _dc
+        valid = {f.name for f in _dc.fields(cls)}
+        d = {k: v for k, v in d.items() if k in valid}
         return cls(**d)
