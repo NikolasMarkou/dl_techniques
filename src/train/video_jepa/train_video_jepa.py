@@ -119,6 +119,16 @@ def _validate_args(args: argparse.Namespace) -> None:
             f"max(--predict-horizons)={max(args.predict_horizons)} must be "
             f"strictly less than --T={args.T}."
         )
+    # --- EMA target encoder (plan_2026-05-23_15151c75/D-001) ---
+    if not (0.0 <= args.ema_momentum < 1.0):
+        raise ValueError(
+            f"--ema-momentum must be in [0.0, 1.0), got {args.ema_momentum}."
+        )
+    if args.ema_schedule not in {"none", "cosine"}:
+        raise ValueError(
+            f"--ema-schedule must be one of {{'none', 'cosine'}}, got "
+            f"{args.ema_schedule!r}."
+        )
 
 
 def _build_config(args: argparse.Namespace) -> VideoJEPAConfig:
@@ -145,6 +155,8 @@ def _build_config(args: argparse.Namespace) -> VideoJEPAConfig:
         lambda_next_frame=args.lambda_next_frame,
         lambda_mask=args.lambda_mask,
         predict_horizons=tuple(args.predict_horizons),
+        ema_momentum=args.ema_momentum,
+        ema_schedule=args.ema_schedule,
     )
 
 
@@ -327,6 +339,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lambda-next-frame", type=float, default=1.0)
     p.add_argument("--lambda-mask", type=float, default=1.0)
 
+    # --- EMA target encoder (plan_2026-05-23_15151c75/D-001) ---
+    p.add_argument(
+        "--ema-momentum", type=float, default=0.996,
+        help="EMA momentum for the V-JEPA-style target encoder. Default "
+             "0.996 (V-JEPA / BYOL). Strict bound [0.0, 1.0).",
+    )
+    p.add_argument(
+        "--ema-schedule", type=str, default="none",
+        choices=["none", "cosine"],
+        help="EMA momentum schedule. 'none' holds m constant; 'cosine' "
+             "ramps from --ema-momentum to 1.0 over the run.",
+    )
+
     # --- Multi-horizon prediction (plan_2026-05-23_0b664700/D-001) ---
     p.add_argument(
         "--predict-horizons", type=int, nargs="+", default=[1, 4, 15],
@@ -393,6 +418,9 @@ def main() -> None:
     logger.info(f"Config: {cfg.to_dict()}")
 
     model = VideoJEPA(config=cfg)
+    # EMA cosine schedule needs the total step horizon; harmless when
+    # ema_schedule='none'. plan_2026-05-23_15151c75/D-001.
+    model.set_ema_total_steps(args.epochs * args.steps_per_epoch)
 
     val_dataset = None
     if args.dataset == "bdd100k":
