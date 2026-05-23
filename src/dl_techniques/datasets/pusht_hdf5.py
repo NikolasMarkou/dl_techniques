@@ -105,28 +105,32 @@ def synthetic_lewm_dataset(
 class PushTHDF5Dataset:
     """Thin skeleton loader for PushT-style HDF5 datasets used by LeWM.
 
+    **UNTESTED SKELETON** — included as a starting point; not validated on
+    real data.
+
     Expected layout (per upstream):
         ``/pixels`` — uint8 tensor `(N, H0, W0, 3)` stacked across episodes.
         ``/action`` — float tensor `(N, A)` — A = action_dim (2 for PushT).
         ``/episode_ends`` — int tensor marking episode boundaries (exclusive
-        ends), length = num_episodes. Optional: ``/proprio``.
+        ends), length = num_episodes.
 
-    This skeleton reads the whole file into memory (fine for the small
-    PushT replay) and slices per-episode windows of length T = history_size +
-    num_preds at `frameskip` temporal stride. Frames are resized (via
-    `tf.image.resize`) to `img_size`, ImageNet-normalized; actions with
-    NaN (episode-break markers) are replaced with 0.
+    Reads `/action` and `/episode_ends` eagerly (small), then performs
+    on-demand h5py-indexed reads of `/pixels` for each (T)-length window
+    inside the generator. Per-window indices are shuffled (seeded) before
+    iteration so the dataset is not produced in file order.
 
-    **Not validated against real data** — included as a starting point per
-    plan.md Step 7.
+    Frames are resized (via `tf.image.resize`) to `img_size`,
+    ImageNet-normalized; actions with NaN (episode-break markers) are
+    replaced with 0.
 
     :param h5_path: path to the .h5 file.
     :param img_size: target frame size (square).
+    :param action_dim: action vector dimension.
     :param history_size: context length.
     :param num_preds: prediction horizon.
     :param frameskip: stride between windows.
     :param batch_size: batch size.
-    :param proprio_key: optional dataset key for proprioceptive state.
+    :param shuffle_seed: seed for the per-epoch window-index shuffle.
     """
 
     def __init__(
@@ -138,7 +142,7 @@ class PushTHDF5Dataset:
         num_preds: int = 1,
         frameskip: int = 1,
         batch_size: int = 2,
-        proprio_key: Optional[str] = None,
+        shuffle_seed: int = 0,
     ) -> None:
         self.h5_path = h5_path
         self.img_size = img_size
@@ -147,56 +151,72 @@ class PushTHDF5Dataset:
         self.num_preds = num_preds
         self.frameskip = frameskip
         self.batch_size = batch_size
-        self.proprio_key = proprio_key
+        self.shuffle_seed = shuffle_seed
 
-    def _load_raw(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        import h5py  # local import to keep top-level import lightweight
+    def _load_metadata(self) -> Tuple[np.ndarray, np.ndarray, int]:
+        """Load small metadata (actions, episode_ends, total N) eagerly.
+        /pixels is NOT loaded here — it is indexed on demand per window."""
+        import h5py
         with h5py.File(self.h5_path, "r") as f:
-            pixels = f["pixels"][...]          # (N, H0, W0, 3), uint8
+            n_pixels = f["pixels"].shape[0]
             action = f["action"][...].astype(np.float32)
             if "episode_ends" in f:
                 ends = f["episode_ends"][...].astype(np.int64)
             else:
-                ends = np.array([pixels.shape[0]], dtype=np.int64)
-        # NaN -> 0 in actions (episode-break markers).
+                ends = np.array([n_pixels], dtype=np.int64)
         action = np.where(np.isnan(action), 0.0, action).astype(np.float32)
-        return pixels, action, ends
+        return action, ends, int(n_pixels)
 
-    def _slice_windows(
-        self, pixels: np.ndarray, action: np.ndarray, ends: np.ndarray
-    ) -> Iterator[Tuple[np.ndarray, np.ndarray]]:
+    def _window_starts(self, ends: np.ndarray) -> np.ndarray:
+        """Enumerate valid (T)-length window start indices across all episodes."""
         T = self.history_size + self.num_preds
-        start = 0
+        starts = []
+        prev_end = 0
         for end in ends:
-            # Produce (T)-length contiguous windows at stride frameskip.
-            i = start
+            i = prev_end
             while i + T <= end:
-                win_pixels = pixels[i : i + T]          # (T, H0, W0, 3)
-                win_action = action[i : i + T - 1]      # (T-1, A)
-                yield win_pixels, win_action
+                starts.append(i)
                 i += self.frameskip
-            start = int(end)
+            prev_end = int(end)
+        return np.asarray(starts, dtype=np.int64)
 
     def _preprocess_pair(
         self, pixels_u8: np.ndarray, action: np.ndarray
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Resize + ImageNet-normalize pixels; pass action through."""
-        # Resize: (T, H0, W0, 3) -> (T, img, img, 3) via tf.image.resize (CPU).
         pixels_f = pixels_u8.astype(np.float32) / 255.0
         resized = tf.image.resize(pixels_f, [self.img_size, self.img_size]).numpy()
         normalized = (resized - _IMAGENET_MEAN) / _IMAGENET_STD
         return normalized.astype(np.float32), action.astype(np.float32)
 
     def as_tf_dataset(self) -> "tf.data.Dataset":
-        """Build a `tf.data.Dataset` from the HDF5 file."""
-        pixels, action, ends = self._load_raw()
+        """Build a `tf.data.Dataset` from the HDF5 file (on-demand reads)."""
+        import h5py
+
+        action, ends, _n_pixels = self._load_metadata()
+        starts = self._window_starts(ends)
+        T = self.history_size + self.num_preds
+
+        # Index-level shuffle (deterministic via shuffle_seed). This shuffles
+        # window starts once; the generator iterates the shuffled order.
+        rng = np.random.default_rng(self.shuffle_seed)
+
+        h5_path = self.h5_path  # close over local
 
         def gen() -> Iterator[Tuple[dict, float]]:
-            for win_p, win_a in self._slice_windows(pixels, action, ends):
-                p, a = self._preprocess_pair(win_p, win_a)
-                yield ({"pixels": p, "action": a}, np.float32(0.0))
+            # Open the file once per generator instantiation; on-demand
+            # indexed reads avoid the eager full-pixels load (a larger
+            # HDF5 file would OOM the original implementation).
+            order = starts.copy()
+            rng.shuffle(order)
+            with h5py.File(h5_path, "r") as f:
+                pixels_ds = f["pixels"]
+                for i in order:
+                    win_pixels = pixels_ds[i : i + T]      # (T, H0, W0, 3)
+                    win_action = action[i : i + T - 1]
+                    p, a = self._preprocess_pair(win_pixels, win_action)
+                    yield ({"pixels": p, "action": a}, np.float32(0.0))
 
-        T = self.history_size + self.num_preds
         output_signature = (
             {
                 "pixels": tf.TensorSpec(
