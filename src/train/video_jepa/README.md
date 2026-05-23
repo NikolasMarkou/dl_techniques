@@ -358,6 +358,108 @@ Out of scope for the current trainer:
 - Ablations: SIGReg on/off, Clifford-depth sweep, spatial-only vs
   spatiotemporal tube masks.
 
+## Deep Review
+
+Audit mirroring the LeWM deep review (`plan_2026-05-23_692fd5e5`) applied
+to `src/train/video_jepa/`. Items below were the punch list from reading
+the trainer + dataset loaders + model package end-to-end.
+
+### Pattern Conformance
+
+- Trainer is **not** Pattern 1/2/3/4/5 in `src/train/CLAUDE.md`. Like
+  LeWM, it rolls its own callback list because the shared
+  `EpochAnalyzerCallback` does not understand dict inputs or
+  `add_loss`-only training. Acceptable trade-off — same reasoning.
+- Uses `setup_gpu(args.gpu)` from `train.common`.
+- Writes to `results/` at repo root (matches `feedback_results_dir`).
+- No `kernel_regularizer=L2(...)` alongside AdamW — avoids the
+  double-weight-decay foot-gun.
+
+### Issues found (before fixes)
+
+1. **No CLI arg validation.** `_build_config` performed zero CLI-side
+   validation. `embed_dim` must be EVEN (encoder asserts `D % 2 == 0`
+   for sine2D PE) and must equal `predictor_num_heads * predictor_dim_head`
+   (temporal MHA wiring) — both unenforced, fail-late deep inside build.
+2. **No reload-after-save round-trip check.** Trainer saved
+   `final_model.keras` and stopped. Any serialization regression would
+   sail past CI silently.
+3. **`rollout` silent broadcast — N/A.** Video-JEPA has no
+   `rollout(pixels_history, action_sequence)` method (no actions).
+   `stream_step(frame)` is shape-explicit `(B, H, W, C)` per call.
+   Marked N/A for this category.
+4. **Dataset code smells (BDD100K loader):**
+   - `bdd100k_video_dataset.num_steps` parameter is a footgun:
+     `.take(num_steps)` exhausted the dataset after epoch 1; the trainer
+     stopped passing it (README "What changed" section), but the
+     parameter remained on the public API.
+   - `np.random.seed(seed)` mutated the global numpy RNG process-wide,
+     just so `_read_clip` could use `np.random.randint`.
+5. **No `--smoke` preset.** Trainer defaults were smoke-sized; the
+   README's full-spec config required the user to override 8+ flags
+   manually.
+6. **`create_base_argument_parser` not adopted.** Local argparse
+   repeated `--epochs`, `--batch-size`, `--learning-rate`,
+   `--weight-decay`, `--gpu`, `--output-dir`. Drift from sibling
+   trainers and LeWM.
+7. **Zero coverage at `tests/test_train/test_video_jepa/`.** Model
+   tests at `tests/test_models/test_video_jepa/` are thorough (33+
+   tests), but the trainer script itself had no regression coverage.
+8. **README lacked Deep Review section.** Verified-behavior section
+   existed; the audit / issues / fixed trail did not.
+
+### Intentionally left / N/A
+
+- **Issue 3 (rollout S>1)** — N/A. video_jepa has no rollout method.
+- **EMA target encoder** — intentional divergence. README "What this
+  trains" already states no EMA target encoder; SIGReg is the sole
+  collapse-prevention mechanism. Matches LeWM D-001 (live target).
+  Do NOT add EMA.
+- **Per-patch (no CLS pool) output** — intentional. `(B,T,H_p,W_p,D)`
+  is the contract.
+- **`--T` controls both `num_frames` and `history_size_k`** — by
+  design. If a user wants `K > T`, they edit code; low value to add a
+  flag.
+- **`MPLBACKEND=Agg` belt-and-braces** at import time — harmless,
+  matches LeWM.
+- **`metrics` property already exposes per-loss trackers**
+  (`next_frame_loss`, `mask_loss`, `sigreg_loss`) — same shape as
+  LeWM post-iter1, nothing to change.
+
+### Fixed in plan_2026-05-23_c573e591
+
+- **Issue 1 (arg validation)**: `_validate_args(args)` called from
+  `main()` rejects `img_size % patch_size != 0`, odd `embed_dim`,
+  `embed_dim != predictor_num_heads * predictor_dim_head`, and
+  `batch_size < 2`.
+- **Issue 2 (reload check)**: trainer now reloads `final_model.keras`,
+  forward-pass-diffs against the in-memory model, raises `RuntimeError`
+  and `sys.exit(1)` on `max|delta| >= 1e-4` or any reload exception.
+- **Issue 4 (BDD100K loader)**:
+  - Removed `num_steps` parameter and the `.take(num_steps)` call.
+    Anchored as `# DECISION plan_2026-05-23_c573e591/D-001` in source.
+    Grep confirmed no external callers passed `num_steps=...`.
+  - Removed global `np.random.seed(seed)` side effect; loader now
+    threads a local `np.random.default_rng(seed)` into
+    `_read_clip(rng=...)`.
+- **Issue 5 (`--smoke` preset)**: defaults promoted to BDD full-spec
+  (`T=8, img=112, embed=128, batch=4, sigreg_num_proj=1024, epochs=100,
+  steps_per_epoch=1000`). New `--smoke` flag applies the prior
+  smoke-sized config (`synthetic, T=4, img=64, patch=8, embed=64,
+  depth=2, batch=2, epochs=2, steps_per_epoch=4, sigreg_num_proj=64`).
+  User-provided flags still win.
+- **Issue 6 (`create_base_argument_parser`)**: trainer now extends
+  the base parser; `--dataset` repurposed to
+  `{synthetic, bdd100k}`; common flags (`--epochs`, `--batch-size`,
+  `--learning-rate`, `--weight-decay`, `--gpu`) come from the base
+  parser. Video-jepa-specific flags layered on top.
+- **Issue 7 (regression tests)**: new
+  `tests/test_train/test_video_jepa/test_train_video_jepa.py` covers
+  arg validation (4 cases), `--smoke` preset application, and an
+  integration-marked end-to-end 1-step fit + reload round-trip.
+  Runtime <60s on CPU.
+- **Issue 8 (Deep Review section)**: this section.
+
 ## References
 
 - **Closed plans (this session)**:
