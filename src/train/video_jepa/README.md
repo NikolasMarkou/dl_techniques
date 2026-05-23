@@ -96,13 +96,21 @@ patch grids (O(1) amortized per frame).
 ## Loss
 
 ```
-total = λ_next · L_next_frame + λ_mask · L_mask + λ_sigreg · L_sigreg
+total = λ_next · Σ_{h∈H} L_pred_h  +  λ_mask · L_mask  +  λ_sigreg · L_sigreg
 ```
 
-Defaults: `λ_next=1.0`, `λ_mask=1.0`, `λ_sigreg=0.09`.
+Defaults: `H = predict_horizons = (1, 4, 15)`, `λ_next=1.0` per horizon,
+`λ_mask=1.0`, `λ_sigreg=0.09`, `T = num_frames = 24`.
 
-- `L_next_frame` — MSE between predicted patch latents for frame `t+1`
-  and the encoder's output on the actual `t+1` frame.
+- `L_pred_h` — **multi-horizon prediction**: for each horizon `h ∈ H`,
+  a linear pointwise `Dense(D, use_bias=False)` head named
+  `pred_head_h{h}` projects the shared causal predictor output, and
+  the loss is `MSE(pred_head_h(pred[:, :-h]), z[:, h:])` over unmasked
+  positions. The shared causal predictor is unchanged across horizons;
+  per-horizon heads provide an independent linear sub-objective per `h`.
+  The same `λ_next` weight is applied to every horizon (NOT split-equally
+  across `|H|`) — this keeps per-horizon contribution stable when the
+  horizon set changes.
 - `L_mask` — MSE on masked patch positions between predictor output
   and the same encoder's output at the masked slots. Latent-space
   masking only — pixel-space is structurally incompatible with the
@@ -111,11 +119,30 @@ Defaults: `λ_next=1.0`, `λ_mask=1.0`, `λ_sigreg=0.09`.
   reshape, averaged over projections. Default `sigreg_num_proj=64`
   for smoke; use `1024` for real training.
 
-The model exposes three `keras.metrics.Mean` trackers
-(`next_frame_loss`, `mask_loss`, `sigreg_loss`) via its `metrics`
-property, so `CSVLogger` automatically writes a per-component column
-next to the aggregated `loss`. Validation produces the same columns
-prefixed with `val_`.
+The model exposes per-horizon trackers `next_frame_loss_h{h}` (one per
+`h ∈ H`) **plus** a combined `next_frame_loss` tracker (mean across
+horizons — kept under that name for CSV back-compat with iter-2 logs),
+`mask_loss`, and `sigreg_loss` via its `metrics` property, so
+`CSVLogger` automatically writes a column per horizon next to the
+aggregated `loss`. Validation produces the same columns prefixed
+with `val_`.
+
+### Why multi-horizon
+
+Single-horizon `t+1` next-frame prediction is degenerate on dashcam
+video at 30 fps: at that frame rate, `z[t+1] ≈ z[t]`, so the trivial
+identity predictor (`pred(z) = z`) is hard to beat. In the iter-1
+single-horizon run, the identity baseline beat the trained model 46×
+in latent MSE and training was halted at epoch 23. Adding longer
+horizons (`h=4` ≈ 130 ms, `h=15` ≈ 500 ms at 30 fps) gives the
+predictor sub-objectives where identity *cannot* be the optimum, while
+keeping the easy `h=1` head as a smoothness regularizer. The shared
+causal predictor is unchanged; only `|H|` cheap linear heads
+(`~3·D²` extra params at default `|H|=3, D=128`) are added.
+
+See `plan_2026-05-23_0b664700` / `D-001` for the full design rationale
+and the rejected alternatives (horizon-conditioned predictor with
+horizon embedding; equal-split `λ_next/|H|`).
 
 ## Callbacks (what the trainer wires up)
 
@@ -159,7 +186,8 @@ MPLBACKEND=Agg .venv/bin/python -m train.video_jepa.train_video_jepa \
     --videos-root /media/arxwn/data0_4tb/datasets/bdd_data/train/videos \
     --gpu 0 \
     --epochs 1 --steps-per-epoch 200 --batch-size 4 \
-    --T 8 --img-size 112 --patch-size 8 --embed-dim 128 \
+    --T 24 --predict-horizons 1 4 15 \
+    --img-size 112 --patch-size 8 --embed-dim 128 \
     --sigreg-num-proj 1024 --seed 0 \
     --output-dir results/video_jepa_sanity_bdd100k
 ```
@@ -174,7 +202,8 @@ MPLBACKEND=Agg .venv/bin/python -m train.video_jepa.train_video_jepa \
     --epochs 100 --steps-per-epoch 1000 \
     --val-steps 100 --val-fraction 0.1 \
     --early-stopping-patience 15 \
-    --batch-size 4 --T 8 --img-size 112 --patch-size 8 --embed-dim 128 \
+    --batch-size 4 --T 24 --predict-horizons 1 4 15 \
+    --img-size 112 --patch-size 8 --embed-dim 128 \
     --sigreg-num-proj 1024 --visualization-frequency 1 --seed 0 \
     --output-dir results/video_jepa_bdd100k_run_XX
 ```
@@ -195,7 +224,9 @@ its context stream and is unsafe at batch-of-1.
 | `--sigreg-num-proj` | `64` | bump to `1024` for real training. |
 | `--mask-prediction-enabled / --no-mask-prediction-enabled` | True | iter-2 tube-masked loss. |
 | `--mask-ratio` | `0.6` | fraction of spatial patch positions masked. |
-| `--lambda-next-frame`, `--lambda-mask` | `1.0, 1.0` | loss weights; see iter-2 caveat. |
+| `--lambda-next-frame`, `--lambda-mask` | `1.0, 1.0` | loss weights; applied **per horizon** for `--lambda-next-frame`. |
+| `--predict-horizons` | `1 4 15` | strictly-positive, sorted ascending, unique; `max(h) < T`. `--smoke` overrides to `1 2`. |
+| `--T` | `24` | frames per clip; raised from `8` so multi-horizon at `h=15` (~0.5s @ 30fps) fits. |
 | `--gpu` | None | sets `CUDA_VISIBLE_DEVICES`; serial GPU use only. |
 
 ## Artifacts produced by a run
@@ -459,6 +490,25 @@ the trainer + dataset loaders + model package end-to-end.
   integration-marked end-to-end 1-step fit + reload round-trip.
   Runtime <60s on CPU.
 - **Issue 8 (Deep Review section)**: this section.
+
+### Fixed in plan_2026-05-23_0b664700 (multi-horizon)
+
+- **Single-horizon `t+1` degeneracy at 30 fps.** Identity baseline
+  beat the iter-1 trained model 46× in latent MSE (training stopped
+  at epoch 23). The objective was a degenerate target on dashcam
+  video at frame rate, not a model-capacity problem. Fix: replaced
+  with multi-horizon prediction `H = (1, 4, 15)` via per-horizon
+  linear `Dense(D, no bias)` heads on top of the **unchanged** shared
+  causal predictor. Anchored as
+  `# DECISION plan_2026-05-23_0b664700/D-001`. New trainer flag
+  `--predict-horizons`; `--T` default raised `8 → 24` so `h=15` fits.
+  Per-horizon trackers `next_frame_loss_h{h}` plus a combined
+  `next_frame_loss` (mean across horizons; kept under that name for
+  CSV back-compat). New regression tests cover arg validation,
+  multi-horizon forward (3 trackers + combined), and an
+  integration-marked fit + reload round-trip that confirms all
+  per-horizon trackers survive serialization. Encoder, SIGReg, mask
+  token, and mask loss are untouched.
 
 ## References
 
