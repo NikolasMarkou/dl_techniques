@@ -117,7 +117,17 @@ class CausalSelfAttnMLPBlock(keras.layers.Layer):
         self.ln2 = keras.layers.LayerNormalization(name="ln_mlp")
         self.mlp_hidden = keras.layers.Dense(mlp_dim, activation="gelu",
                                              name="mlp_hidden")
-        self.mlp_drop = keras.layers.Dropout(dropout, name="mlp_dropout")
+        # DECISION plan_2026-05-24_ca745a6c/D-005: mirror encoder.py:112-116 pattern.
+        # `keras.layers.Dropout.call(training=<symbolic tensor>)` raises
+        # OperatorNotAllowedInGraphError under @tf.function even at rate=0.0.
+        # At production default (dropout=0.0) the layer is identity, so we skip
+        # instantiation entirely. Residual @tf.function-with-tensor-training risk
+        # at `dropout > 0` is documented in README (sibling to D-003 mask-gate doc).
+        self.mlp_drop = (
+            keras.layers.Dropout(dropout, name="mlp_dropout")
+            if dropout > 0.0
+            else None
+        )
         self.mlp_out = keras.layers.Dense(dim, name="mlp_out")
 
     def build(self, input_shape: Any) -> None:
@@ -133,7 +143,8 @@ class CausalSelfAttnMLPBlock(keras.layers.Layer):
         self.ln2.build(input_shape)
         self.mlp_hidden.build(input_shape)
         mlp_hidden_shape = tuple(input_shape[:-1]) + (self.mlp_dim,)
-        self.mlp_drop.build(mlp_hidden_shape)
+        if self.mlp_drop is not None:
+            self.mlp_drop.build(mlp_hidden_shape)
         self.mlp_out.build(mlp_hidden_shape)
 
         # LayerScale γ vectors: per-channel, initialized to layer_scale_init.
@@ -162,7 +173,8 @@ class CausalSelfAttnMLPBlock(keras.layers.Layer):
         # --- MLP branch ---
         h = self.ln2(x)
         h = self.mlp_hidden(h)
-        h = self.mlp_drop(h, training=training)
+        if self.mlp_drop is not None:
+            h = self.mlp_drop(h, training=training)
         h = self.mlp_out(h)
         x = x + h * self.gamma_m
         return x
