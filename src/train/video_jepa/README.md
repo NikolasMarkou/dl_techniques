@@ -177,8 +177,17 @@ with `stop_gradient` on the target branch
   progress survives `.keras` checkpoint reload.
 - Note: `ema_m` logs the **EMA momentum scalar** applied at this
   step (per `ema_schedule`), NOT the divergence between online
-  and target encoders. A target-vs-online L2 divergence metric
-  would be a separate enhancement.
+  and target encoders.
+- `ema_divergence` (added by `plan_2026-05-24_aebd4cbb/D-001`) is
+  the companion metric — the weight-space L2 ratio
+  `||W_target - W_online||_2 / (||W_online||_2 + 1e-12)` over
+  the paired target/online encoder weights (BYOL/MoCo Option A).
+  Expected ranges: cold-start ≈ 0 (the constructor bitwise-syncs
+  target ← encoder); asymptotic 0.01–0.3 in healthy SSL runs;
+  sustained > 1.0 is the published collapse signal. Logged every
+  train_step, lands in `training_log.csv` and
+  `training_curves/other.png` alongside `ema_m`. Anchored in
+  source as `# DECISION plan_2026-05-24_aebd4cbb/D-001`.
 - SIGReg input was moved from `pred` (predictor output) to
   `z_online` (encoder output), per
   `plan_2026-05-23_15151c75/D-002` — regularization targets the
