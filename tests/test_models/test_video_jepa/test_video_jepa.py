@@ -838,6 +838,57 @@ class TestVideoJEPAIter2:
         assert int(out_py_true) == 1  # only Python True enables masking
         assert int(out_py_false) == 0
 
+    def test_multi_horizon_without_ema_advisory_fires(self, monkeypatch) -> None:
+        """Iter-1 Step-6 advisory (positive case): VideoJEPA.__init__ with
+        multi-horizon (len(predict_horizons) >= 2) AND weak EMA
+        (ema_momentum < 0.5) must emit a `logger.warning` containing the
+        stable substring 'head-collapse'."""
+        from dl_techniques.models.video_jepa import model as model_mod
+        captured: list = []
+
+        def fake_warning(msg, *args, **kwargs):
+            try:
+                captured.append(msg % args if args else msg)
+            except TypeError:
+                captured.append(msg)
+
+        monkeypatch.setattr(model_mod.logger, "warning", fake_warning)
+
+        cfg = _small_config(
+            mask_prediction_enabled=False,
+            predict_horizons=(1, 2),
+            ema_momentum=0.1,
+        )
+        _ = VideoJEPA(config=cfg)
+        assert any("head-collapse" in c for c in captured), (
+            f"expected advisory warning containing 'head-collapse'; "
+            f"captured={captured}"
+        )
+
+    def test_multi_horizon_with_strong_ema_no_advisory(self, monkeypatch) -> None:
+        """Symmetric negative case: with default strong EMA
+        (ema_momentum=0.996), the advisory must NOT fire."""
+        from dl_techniques.models.video_jepa import model as model_mod
+        captured: list = []
+
+        def fake_warning(msg, *args, **kwargs):
+            try:
+                captured.append(msg % args if args else msg)
+            except TypeError:
+                captured.append(msg)
+
+        monkeypatch.setattr(model_mod.logger, "warning", fake_warning)
+
+        cfg = _small_config(
+            mask_prediction_enabled=False,
+            predict_horizons=(1, 2),
+            ema_momentum=0.996,
+        )
+        _ = VideoJEPA(config=cfg)
+        assert not any("head-collapse" in c for c in captured), (
+            f"unexpected advisory warning at strong EMA; captured={captured}"
+        )
+
 
 # ============================================================================
 # TestSyntheticDataset — shape + finiteness of synthetic_drone_video_dataset
