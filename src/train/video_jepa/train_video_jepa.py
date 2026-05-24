@@ -410,6 +410,20 @@ def main() -> None:
     args = parse_args()
     _validate_args(args)
     _set_seed(args.seed)
+    # GPU advisory (Concern 3, plan_2026-05-24_aebd4cbb): setup_gpu hides a
+    # GPU selection behind --gpu N but in this trainer it must run BEFORE
+    # TF context init to take effect. If the user passes --gpu without
+    # setting CUDA_VISIBLE_DEVICES at the shell, surface the recommended
+    # invocation so they don't silently fall back to GPU 0.
+    if args.gpu is not None and "CUDA_VISIBLE_DEVICES" not in os.environ:
+        logger.warning(
+            "--gpu %d was passed without a shell-level "
+            "CUDA_VISIBLE_DEVICES; this trainer relies on env-level GPU "
+            "masking. Recommended: "
+            "`CUDA_VISIBLE_DEVICES=%d MPLBACKEND=Agg .venv/bin/python -m "
+            "train.video_jepa.train_video_jepa ...`",
+            args.gpu, args.gpu,
+        )
     setup_gpu(args.gpu)
 
     logger.info(f"Video-JEPA training — args: {vars(args)}")
@@ -496,7 +510,11 @@ def main() -> None:
         callbacks=callbacks,
         verbose=2,
     )
-    logger.info(f"Final loss history: {history.history}")
+    # Truncated end-of-run summary (Concern 3, plan_2026-05-24_aebd4cbb).
+    # The full per-epoch history is already on disk in training_log.csv;
+    # logging it again was just noise dominating the tail of run.log.
+    final_summary = {k: float(v[-1]) for k, v in history.history.items()}
+    logger.info(f"Final-epoch metrics: {final_summary}")
 
     # Save final model explicitly.
     final_path = output_dir / "final_model.keras"
