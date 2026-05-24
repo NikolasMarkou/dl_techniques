@@ -202,6 +202,12 @@ class VideoJEPA(keras.Model):
         # Logged every train_step under "ema_m" so cosine schedules are
         # visible in CSVLogger / history.
         self.ema_m_tracker = keras.metrics.Mean(name="ema_m")
+        # Weight-space L2 ratio divergence between target and online
+        # encoders (BYOL/MoCo convention). See _compute_ema_divergence
+        # for the formula and DECISION plan_2026-05-24_aebd4cbb/D-001
+        # for the rationale (Option A over per-layer cosine / feature
+        # drift). Updated inside ``_ema_update`` after the EMA assign.
+        self.ema_divergence_tracker = keras.metrics.Mean(name="ema_divergence")
 
         # Advisory: multi-horizon prediction without a strong EMA target
         # is the documented "multi-horizon head collapse" failure mode
@@ -253,6 +259,7 @@ class VideoJEPA(keras.Model):
             self.mask_loss_tracker,
             self.sigreg_loss_tracker,
             self.ema_m_tracker,
+            self.ema_divergence_tracker,
         ]
         # Dedupe while preserving order.
         seen = set()
@@ -343,6 +350,39 @@ class VideoJEPA(keras.Model):
         m = ops.minimum(ops.maximum(m, m0), one)
         return m
 
+    # DECISION plan_2026-05-24_aebd4cbb/D-001:
+    # Weight-space L2 ratio (Option A — BYOL/MoCo convention) chosen at the
+    # cost of per-layer visibility (Option B: per-layer cosine) and
+    # feature-space semantic drift on a fixed probe batch (Option C).
+    # Single scalar, in-graph, O(P) over the weights already iterated in
+    # ``_ema_update``. Cold-start property: bitwise weight sync in
+    # ``__init__`` → divergence ≈ 0 (within fp32 noise). Asymptotic range
+    # in published BYOL/MoCo runs is 0.01–0.3; sustained >1.0 indicates
+    # online/target collapse and is the actionable signal this metric
+    # exists to surface. ``+ 1e-12`` epsilon guards against the degenerate
+    # case where ``encoder.weights`` are all zero (cold init pre-build).
+    # See plans/plan_2026-05-24_aebd4cbb/decisions.md D-001.
+    def _compute_ema_divergence(self):
+        """Weight-space L2 divergence ratio between target and online.
+
+        Computes ``sqrt(sum((t_w - e_w)^2)) / (sqrt(sum(e_w^2)) + 1e-12)``
+        across all paired (target_encoder, encoder) weights as a single
+        float32 scalar. Cast to float32 before the sum so mixed-precision
+        runs (encoder dtype = float16) still produce a numerically stable
+        divergence value matching the existing tracker idiom.
+
+        :return: scalar float32 tensor.
+        """
+        diff_sq_sum = ops.convert_to_tensor(0.0, dtype="float32")
+        e_sq_sum = ops.convert_to_tensor(0.0, dtype="float32")
+        for t_w, e_w in zip(self.target_encoder.weights, self.encoder.weights):
+            t_f = ops.cast(t_w, "float32")
+            e_f = ops.cast(e_w, "float32")
+            diff_sq_sum = diff_sq_sum + ops.sum(ops.square(t_f - e_f))
+            e_sq_sum = e_sq_sum + ops.sum(ops.square(e_f))
+        eps = ops.convert_to_tensor(1e-12, dtype="float32")
+        return ops.sqrt(diff_sq_sum) / (ops.sqrt(e_sq_sum) + eps)
+
     def _ema_update(self) -> None:
         """Apply one EMA step: ``t <- m * t + (1 - m) * e`` per weight."""
         m = self._current_momentum()
@@ -351,6 +391,8 @@ class VideoJEPA(keras.Model):
             t_w.assign(m * t_w + one_minus_m * e_w)
         self._ema_step.assign(self._ema_step + 1.0)
         self.ema_m_tracker.update_state(m)
+        # Post-EMA-assign divergence snapshot (D-001).
+        self.ema_divergence_tracker.update_state(self._compute_ema_divergence())
 
     # ------------------------------------------------------------------
     # Training forward
