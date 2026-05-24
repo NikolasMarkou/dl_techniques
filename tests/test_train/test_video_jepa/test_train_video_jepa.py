@@ -391,3 +391,100 @@ def test_train_step_reports_nonzero_loss(tmp_path: Path) -> None:
         f"expected nonzero aggregate loss (F10 regression — silent loss=0 "
         f"would defeat EarlyStopping/ModelCheckpoint), got {loss_val}"
     )
+
+
+# ---------------------------------------------------------------------
+# ema_divergence tracker (D-001, plan_2026-05-24_aebd4cbb)
+# ---------------------------------------------------------------------
+
+def test_ema_divergence_in_history_after_fit(tmp_path: Path) -> None:
+    """C1 — after a 1-step fit, `ema_divergence` appears in history.history,
+    is finite, and falls in the expected [0, 2] range. Mirrors
+    `test_train_step_reports_nonzero_loss` shape.
+    """
+    keras.utils.set_random_seed(0)
+    args = _tiny_args()
+    cfg = _build_config(args)
+    model = VideoJEPA(config=cfg)
+    ds = synthetic_drone_video_dataset(
+        batch_size=args.batch_size,
+        num_batches=1,
+        T=args.T,
+        img_size=args.img_size,
+        img_channels=args.img_channels,
+        seed=0,
+    )
+    model.compile(
+        optimizer=keras.optimizers.AdamW(learning_rate=1e-4),
+        loss=None,
+        jit_compile=False,
+    )
+    history = model.fit(ds, epochs=1, steps_per_epoch=1, verbose=0)
+    assert "ema_divergence" in history.history, (
+        f"'ema_divergence' key missing from history.history: "
+        f"{list(history.history)!r}"
+    )
+    div = float(history.history["ema_divergence"][-1])
+    assert np.isfinite(div), f"ema_divergence not finite: {div}"
+    assert 0.0 <= div <= 2.0, (
+        f"ema_divergence out of expected [0, 2] range at step 1: {div}"
+    )
+
+
+def test_ema_divergence_zero_at_cold_start() -> None:
+    """C2 — immediately after __init__, target_encoder is bitwise-synced to
+    encoder via `set_weights(get_weights())`, so the weight-space L2 ratio
+    must be < 1e-5 (fp32 noise floor). Calls the helper directly to avoid
+    confounding state from a train_step.
+    """
+    keras.utils.set_random_seed(0)
+    args = _tiny_args()
+    cfg = _build_config(args)
+    model = VideoJEPA(config=cfg)
+    div = float(keras.ops.convert_to_numpy(model._compute_ema_divergence()))
+    assert np.isfinite(div), f"ema_divergence not finite at cold start: {div}"
+    assert div < 1e-5, (
+        f"expected near-zero ema_divergence at cold start (bitwise sync via "
+        f"__init__), got {div}"
+    )
+
+
+def test_ema_divergence_distinct_from_ema_m() -> None:
+    """C3 — after 2 train_steps with default ema_momentum=0.996, ema_m is a
+    near-constant ~0.996 while ema_divergence is a small positive drift
+    well below 0.5. The two columns must carry numerically distinct content
+    — defends against the F2 GHOST where ema_m had been mistaken for a
+    divergence metric.
+    """
+    keras.utils.set_random_seed(0)
+    args = _tiny_args()
+    cfg = _build_config(args)
+    model = VideoJEPA(config=cfg)
+    ds = synthetic_drone_video_dataset(
+        batch_size=args.batch_size,
+        num_batches=2,
+        T=args.T,
+        img_size=args.img_size,
+        img_channels=args.img_channels,
+        seed=0,
+    )
+    model.compile(
+        optimizer=keras.optimizers.AdamW(learning_rate=1e-4),
+        loss=None,
+        jit_compile=False,
+    )
+    history = model.fit(ds, epochs=1, steps_per_epoch=2, verbose=0)
+    ema_m_val = float(history.history["ema_m"][-1])
+    div_val = float(history.history["ema_divergence"][-1])
+    assert ema_m_val >= 0.99, (
+        f"ema_m should be near the configured momentum (>=0.99 with "
+        f"ema_momentum=0.996, ema_schedule='none'); got {ema_m_val}"
+    )
+    assert div_val < 0.5, (
+        f"ema_divergence should be small (<0.5) after only 2 train_steps; "
+        f"got {div_val}"
+    )
+    assert abs(ema_m_val - div_val) > 0.5, (
+        f"ema_m ({ema_m_val}) and ema_divergence ({div_val}) too close — "
+        f"would re-introduce the F2 GHOST (ema_m mistaken for divergence)"
+    )
