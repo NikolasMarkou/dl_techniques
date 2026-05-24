@@ -352,3 +352,42 @@ def test_end_to_end_fit_and_reload_with_masking(tmp_path: Path) -> None:
         f"Reload round-trip diff too large under masking: {max_diff:.2e} "
         f"(D-001 regression — mask substitution leaked to inference?)"
     )
+
+
+def test_train_step_reports_nonzero_loss(tmp_path: Path) -> None:
+    """F10 regression (iter-3 D-005): custom `train_step` must update the
+    explicit `self.loss_tracker` so `history.history['loss']` reflects the
+    true aggregate loss. Pre-D-005 the `loss` column was pinned at 0.0
+    because `train_step` returned `{m.name: m.result() for m in self.metrics}`
+    without ever updating loss_tracker — gradients used the real loss but the
+    metric was dead. Silent loss=0 reporting would defeat EarlyStopping,
+    ModelCheckpoint(monitor='loss'), CSVLogger, and training_curves/loss.png.
+    """
+    keras.utils.set_random_seed(0)
+    args = _tiny_args()
+    cfg = _build_config(args)
+    model = VideoJEPA(config=cfg)
+    ds = synthetic_drone_video_dataset(
+        batch_size=args.batch_size,
+        num_batches=2,
+        T=args.T,
+        img_size=args.img_size,
+        img_channels=args.img_channels,
+        seed=0,
+    )
+    model.compile(
+        optimizer=keras.optimizers.AdamW(learning_rate=1e-4),
+        loss=None,
+        jit_compile=False,
+    )
+    history = model.fit(ds, epochs=1, steps_per_epoch=2, verbose=0)
+    assert "loss" in history.history, (
+        f"'loss' key missing from history.history: "
+        f"{list(history.history)!r}"
+    )
+    loss_val = float(history.history["loss"][-1])
+    assert np.isfinite(loss_val), f"history loss not finite: {loss_val}"
+    assert loss_val > 0.0, (
+        f"expected nonzero aggregate loss (F10 regression — silent loss=0 "
+        f"would defeat EarlyStopping/ModelCheckpoint), got {loss_val}"
+    )
