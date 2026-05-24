@@ -310,3 +310,45 @@ def test_multi_horizon_fit_and_reload_preserves_trackers(tmp_path: Path) -> None
     y_reload = keras.ops.convert_to_numpy(reloaded(sample, training=False))
     max_diff = float(np.max(np.abs(y_orig - y_reload)))
     assert max_diff < 1e-4, f"Multi-horizon reload diff: {max_diff:.2e}"
+
+
+@pytest.mark.integration
+def test_end_to_end_fit_and_reload_with_masking(tmp_path: Path) -> None:
+    """DECISION plan_2026-05-24_ca745a6c/D-001: trainer-side reload-check
+    must succeed when `mask_prediction_enabled=True`. This is the exact
+    code path the production trainer's runtime reload-check executes — it
+    used to fail with `max|delta|≈8.30` because tube-mask substitution ran
+    under `training=False` with an unseeded RNG (the misdiagnosed
+    'hires reload bug'). Locks in F1 root-cause fix at trainer scope."""
+    keras.utils.set_random_seed(0)
+    args = _tiny_args(mask_prediction_enabled=True, mask_ratio=0.6)
+    cfg = _build_config(args)
+    model = VideoJEPA(config=cfg)
+    ds = synthetic_drone_video_dataset(
+        batch_size=args.batch_size,
+        num_batches=2,
+        T=args.T,
+        img_size=args.img_size,
+        img_channels=args.img_channels,
+        seed=0,
+    )
+    model.compile(
+        optimizer=keras.optimizers.AdamW(learning_rate=1e-4),
+        loss=None,
+        jit_compile=False,
+    )
+    model.fit(ds, epochs=1, steps_per_epoch=1, verbose=0)
+
+    final_path = tmp_path / "tiny_video_jepa_mask.keras"
+    model.save(str(final_path))
+    assert final_path.exists()
+
+    sample = next(iter(ds))[0]
+    y_orig = keras.ops.convert_to_numpy(model(sample, training=False))
+    reloaded = keras.models.load_model(str(final_path))
+    y_reload = keras.ops.convert_to_numpy(reloaded(sample, training=False))
+    max_diff = float(np.max(np.abs(y_orig - y_reload)))
+    assert max_diff < 1e-4, (
+        f"Reload round-trip diff too large under masking: {max_diff:.2e} "
+        f"(D-001 regression — mask substitution leaked to inference?)"
+    )
