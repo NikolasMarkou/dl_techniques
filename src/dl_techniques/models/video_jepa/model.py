@@ -395,8 +395,14 @@ class VideoJEPA(keras.Model):
         # it at inference would make `model(x, training=False)` self-non-
         # deterministic and break the trainer reload-check + downstream
         # consumers. EMA target encoder never sees masked tokens by design.
+        # DECISION plan_2026-05-24_ca745a6c/D-003: identity check `training is True`
+        # (not `bool(training)`) keeps this gate graph-safe under @tf.function.
+        # `bool(<symbolic tensor>)` raises OperatorNotAllowedInGraphError; `is True`
+        # constant-folds at trace time. Tensor-valued `training` short-circuits to
+        # False (inference behavior). Callers wanting training-time masking must
+        # pass Python True — which is what `keras.Model.fit` does. See iter-2 F5.
         masking_on = (
-            bool(training)
+            (training is True)
             and cfg.mask_prediction_enabled
             and self.mask_gen.num_masked > 0
         )
