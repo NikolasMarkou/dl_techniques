@@ -889,6 +889,58 @@ class TestVideoJEPAIter2:
             f"unexpected advisory warning at strong EMA; captured={captured}"
         )
 
+    def test_predictor_graph_mode_dropout_zero(self) -> None:
+        """F9 regression (iter-3 D-005): at production default dropout=0.0,
+        @tf.function-wrapped inference must not raise at the predictor MLP
+        Dropout site. Pre-D-005 this raised OperatorNotAllowedInGraphError at
+        predictor.py `self.mlp_drop(h, training=<symbolic tensor>)`. Post-fix
+        `self.mlp_drop` is None at dropout=0.0 so the call site short-circuits
+        and the trace succeeds for Python bool / None / tf.constant.
+
+        Sibling test to `test_graph_mode_tracing_with_tensor_training` which
+        covers the D-001/D-003 mask gate. This one covers the predictor
+        Dropout dimension of the same iter-2 "@tf.function safety" envelope.
+        """
+        import tensorflow as tf
+
+        cfg = _small_config(mask_prediction_enabled=True, mask_ratio=0.6,
+                            dropout=0.0)
+        model = VideoJEPA(config=cfg)
+        pixels = np.random.RandomState(0).randn(
+            2, cfg.num_frames, cfg.img_size, cfg.img_size, cfg.img_channels
+        ).astype("float32")
+        inputs = {"pixels": pixels}
+        _ = model(inputs, training=False)  # eager warmup
+
+        @tf.function
+        def fn(inputs, training):
+            return model(inputs, training=training)
+
+        # All three callers must succeed at dropout=0.0 with the D-005 guard:
+        # Python None, Python False, tf.constant(False).
+        y_none = fn(inputs, None)
+        y_false = fn(inputs, False)
+        y_tensor_false = fn(inputs, tf.constant(False))
+
+        assert y_none.shape[0] == 2, y_none.shape
+        # All inference paths must produce the same output (no masking,
+        # no dropout) — bit-equal up to atol=1e-6.
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(y_none),
+            keras.ops.convert_to_numpy(y_tensor_false),
+            atol=1e-6,
+            err_msg=(
+                "@tf.function with tf.constant(False) training must equal "
+                "training=None inference at predictor dropout=0.0"
+            ),
+        )
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(y_none),
+            keras.ops.convert_to_numpy(y_false),
+            atol=1e-6,
+            err_msg="training=None and training=False must match at inference",
+        )
+
 
 # ============================================================================
 # TestSyntheticDataset — shape + finiteness of synthetic_drone_video_dataset
