@@ -614,13 +614,19 @@ class TestVideoJEPAIter2:
     serialization round-trip with masking on."""
 
     def test_mask_loss_finite(self) -> None:
-        """C10 — with masking on, 3 finite losses appear via add_loss."""
+        """C10 — with masking on, 3 finite losses appear via add_loss.
+
+        NOTE: masking is a training-time augmentation
+        (DECISION plan_2026-05-24_ca745a6c/D-001), so this test must run
+        the forward pass with `training=True` to trigger the mask-prediction
+        branch and its `add_loss` call.
+        """
         cfg = _small_config(mask_prediction_enabled=True, mask_ratio=0.6)
         model = VideoJEPA(config=cfg)
         B, T = 2, cfg.num_frames
         pixels = np.random.rand(B, T, cfg.img_size, cfg.img_size,
                                 cfg.img_channels).astype("float32")
-        _ = model({"pixels": pixels}, training=False)
+        _ = model({"pixels": pixels}, training=True)
 
         assert len(model.losses) == 3, (
             f"expected 3 losses (next-frame + mask + sigreg), "

@@ -368,7 +368,17 @@ class VideoJEPA(keras.Model):
         # iter-1 semantics: no mask generation, no L2, no token substitution.
         B = ops.shape(pixels)[0]
         T_dyn = ops.shape(pixels)[1]
-        masking_on = cfg.mask_prediction_enabled and self.mask_gen.num_masked > 0
+        # DECISION plan_2026-05-24_ca745a6c/D-001: tube-mask substitution is a
+        # TRAINING augmentation only. `TubeMaskGenerator` calls unseeded
+        # `keras.random.uniform` and is non-deterministic across calls; running
+        # it at inference would make `model(x, training=False)` self-non-
+        # deterministic and break the trainer reload-check + downstream
+        # consumers. EMA target encoder never sees masked tokens by design.
+        masking_on = (
+            bool(training)
+            and cfg.mask_prediction_enabled
+            and self.mask_gen.num_masked > 0
+        )
         if masking_on:
             mask_spatial = self.mask_gen(B, training=training)  # (B, H_p, W_p)
             # Broadcast to 5D: (B, 1, H_p, W_p, 1). Stays T-invariant.
