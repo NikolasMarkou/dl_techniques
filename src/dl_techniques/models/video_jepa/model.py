@@ -173,6 +173,14 @@ class VideoJEPA(keras.Model):
         ]
         self.mask_loss_tracker = keras.metrics.Mean(name="mask_loss")
         self.sigreg_loss_tracker = keras.metrics.Mean(name="sigreg_loss")
+        # DECISION plan_2026-05-24_ca745a6c/D-005: explicit aggregate `loss`
+        # tracker. Keras 3.8 does not auto-create `self.loss_tracker` until
+        # `compile(loss=...)` is called; our `train_step` bypasses compiled
+        # loss entirely (losses come from `add_loss`). Without this explicit
+        # Mean, `history.history['loss']` is pinned at 0.0 — defeats
+        # EarlyStopping / ModelCheckpoint(monitor='loss') / training_curves.
+        # See iter-3 F10. Name="loss" matches the conventional Keras key.
+        self.loss_tracker = keras.metrics.Mean(name="loss")
 
         # --- Streaming buffer (not a weight; reset per sequence) ---
         self._stream_buf: Optional[Any] = None
@@ -239,6 +247,7 @@ class VideoJEPA(keras.Model):
         (+ ``sigreg_loss``) alongside the aggregated ``loss`` column."""
         base = list(super().metrics)
         extras = [
+            self.loss_tracker,
             self.next_frame_loss_tracker,
             *self.per_horizon_trackers,
             self.mask_loss_tracker,
@@ -540,6 +549,16 @@ class VideoJEPA(keras.Model):
         # EMA update AFTER optimizer step — target now tracks the
         # **post-update** encoder weights (V-JEPA / BYOL convention).
         self._ema_update()
+        # DECISION plan_2026-05-24_ca745a6c/D-005: update the Keras default
+        # loss_tracker so `history.history['loss']`, CSVLogger, and
+        # ModelCheckpoint(monitor='loss') observe the true aggregate loss
+        # (sum of add_loss + regularizers). `super().metrics` exposes
+        # loss_tracker but it is only auto-updated by `self.compiled_loss(...)`,
+        # which we bypass in favor of add_loss. Without this update, the
+        # `loss` column is pinned at 0.0 even though gradients use the real
+        # loss above — defeats EarlyStopping / training_curves/loss.png.
+        # See iter-3 F10.
+        self.loss_tracker.update_state(loss)
         return {m.name: m.result() for m in self.metrics}
 
     # ------------------------------------------------------------------
