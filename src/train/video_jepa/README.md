@@ -175,6 +175,10 @@ with `stop_gradient` on the target branch
   to `1.0` across the run; current value is exposed as the `ema_m`
   metric. The step counter is a non-trainable weight so cosine
   progress survives `.keras` checkpoint reload.
+- Note: `ema_m` logs the **EMA momentum scalar** applied at this
+  step (per `ema_schedule`), NOT the divergence between online
+  and target encoders. A target-vs-online L2 divergence metric
+  would be a separate enhancement.
 - SIGReg input was moved from `pred` (predictor output) to
   `z_online` (encoder output), per
   `plan_2026-05-23_15151c75/D-002` — regularization targets the
@@ -192,6 +196,30 @@ Concrete numbers from this session:
 - iter-1 (single-horizon, live target): identity baseline beat the trained model **46x** at h=1.
 - iter-2 (multi-horizon, live target): identity baseline beat the trained model **84-300x** across h in {1, 4, 15}, AND all per-horizon heads collapsed to the same value (around 0.0046).
 - iter-3 (multi-horizon + EMA, momentum=0.996): identity-baseline gap at h=15 dropped to **2.6x** by epoch 16; the trained model beats cross-encoder identity at every horizon. EMA is what made multi-horizon viable.
+
+## Graph-mode tracing
+
+`VideoJEPA` is fully usable from standard `keras.Model.fit` and from
+eager `model(...)` calls. There is one residual sharp edge when
+wrapping the model in your own `@tf.function`:
+
+- `model.fit(...)` — passes Python `True`/`False` for `training`.
+  Fully graph-safe. No action needed.
+- `@tf.function`-wrapped inference with `training=None` or Python
+  bool — OK at every configuration.
+- `@tf.function`-wrapped call with `training=tf.constant(True/False)`:
+  - At production default `dropout=0.0` — OK (the predictor's
+    `mlp_drop` is `None`; mask gate uses Python identity
+    `training is True`). Anchored as `# DECISION
+    plan_2026-05-24_ca745a6c/D-005`.
+  - At `dropout > 0` — raises `OperatorNotAllowedInGraphError`
+    inside `keras.layers.Dropout.call`. This is a generic Keras 3
+    limitation, not specific to this model. Workaround: pass a
+    Python `True`/`False` instead of a symbolic tensor — which is
+    what `keras.Model.fit` does.
+
+Sibling anchor: `# DECISION plan_2026-05-24_ca745a6c/D-003` covers
+the analogous mask-gate constraint in `model.py`.
 
 ## Callbacks (what the trainer wires up)
 
