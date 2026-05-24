@@ -54,6 +54,10 @@ metrics so they appear next to `loss` in the CSV log.
 - **D-001**: target encoder is **live** (no EMA, no `stop_gradient`).
   Gradients flow through both context and target paths, matching upstream
   LeWM (distinct from BYOL/DINO/JEPA conventions). See model.py call().
+  Note: the sibling `src/train/video_jepa/` model now diverges further
+  from LeWM by adopting an EMA target encoder with `stop_gradient`
+  (`plan_2026-05-23_15151c75/D-001`), because the patch-grid 30 fps video
+  setting hit a time-invariance failure mode that single-CLS LeWM does not.
 - **D-002**: `MLPProjector` uses **LayerNorm**, not BatchNorm. Follows
   upstream `MLP(norm_fn=nn.LayerNorm)`. Sidesteps BN-batch-of-1 failures.
 - **D-002 (config)**: `num_frames` is a serialized field with a sentinel

@@ -187,6 +187,12 @@ not face the time-invariance failure mode that the 30 fps
 frame-grid video setting surfaces. The reversal is anchored in
 source as `# DECISION plan_2026-05-23_15151c75/D-001`.
 
+Concrete numbers from this session:
+
+- iter-1 (single-horizon, live target): identity baseline beat the trained model **46x** at h=1.
+- iter-2 (multi-horizon, live target): identity baseline beat the trained model **84-300x** across h in {1, 4, 15}, AND all per-horizon heads collapsed to the same value (around 0.0046).
+- iter-3 (multi-horizon + EMA, momentum=0.996): identity-baseline gap at h=15 dropped to **2.6x** by epoch 16; the trained model beats cross-encoder identity at every horizon. EMA is what made multi-horizon viable.
+
 ## Callbacks (what the trainer wires up)
 
 Registered in `_build_callbacks()` in order:
@@ -342,8 +348,23 @@ proofs. BDD runs under the above settings give a convergence signal,
 but no downstream-task evaluation has been performed yet — `val_loss`
 is still the SSL objective, not a linear-probe accuracy.
 
+## Training results
+
+Four BDD100K runs on RTX 4090 (GPU 0), batch=4, monomic-precision.
+
+| Run | Output dir | Config | Result | Verdict |
+|---|---|---|---|---|
+| iter-1 single-horizon, no-EMA | `results/video_jepa_20260523_091820/` | T=8, embed=128, depth=2, h=1, sigreg_proj=1024, 23 epochs (stopped) | h1=0.0014 train loss; identity-baseline eval: model 46x WORSE than identity at h=1 | FAILED: predictor degenerates under live target encoder; identity unbeatable |
+| iter-2 multi-horizon, no-EMA | `results/video_jepa_20260523_144517/` | T=24, horizons=[1,4,15], 3 epochs (stopped) | All heads collapsed to same value (~0.0046); identity-baseline: 84-300x worse | FAILED: per-horizon heads have no symmetry-breaking signal when targets are too smooth |
+| iter-3 multi-horizon + EMA | `results/video_jepa_20260523_161131/` | T=24, h=[1,4,15], ema_momentum=0.996, 24 epochs (stopped) | h15=0.0025 plateau; identity-baseline at epoch 16: model 2.6x worse at h=15 (vs 84x in iter-2); model BEATS cross-encoder identity at all horizons | SUCCESS: EMA decoupling fixed the identity-baseline pathology. Real predictive signal. |
+| iter-4 hires + EMA + bigger | `results/video_jepa_20260523_234811/` | img=224, patch=16, embed=192, depths=4/4, T=24, h=[8,15], 30 epochs completed | h8=h15 approx 8.6e-4 final; mask=1.1e-3; sigreg=0.44 | TRAINED OK but reload check FAILED with max\|delta\|=8.30. See Known issues. |
+
+Headline arc: live target encoder + SIGReg is unable to produce a model that beats the trivial identity predictor on dashcam video at 30 fps. The EMA target encoder (V-JEPA / BYOL / DINO recipe) is the fix that turned the 84-300x identity-baseline gap into 2.6x at h=15. Multi-horizon heads alone do not break the symmetry; without EMA decoupling, per-horizon heads collapse to the same value because the live target shifts with the predictor.
+
 ## Known issues / caveats
 
+- **Reload-check failure at scaled config (img>=224, patch>=16, embed>=192, depth>=4).** Iter-4 trained cleanly for 30 epochs but the post-fit reload round-trip reported `max|delta|=8.30` between the in-memory model and the model reloaded from `final_model.keras`. The smaller iter-3 config (img=112, patch=8, embed=128, depth=2) passes the same reload check. Likely root cause: the EMA `target_encoder` performs an eager dummy-batch sync inside `__init__` (a deliberate divergence from spec flagged when EMA was added, anchored at `# DECISION plan_2026-05-23_15151c75/D-001`), which clobbers the just-reloaded target weights on `from_config`. At small sizes this is masked; at the scaled config the reload returns wrong weights. The 67/67 model + trainer tests pass at small sizes and did not cover this. Workaround: use the online encoder (`model.encoder`) for downstream use; the `target_encoder` values after reload are unreliable at scaled configs. Tracked here pending a real fix (defer eager sync, or skip sync when restoring from config).
+- **Multi-horizon head collapse without EMA.** Per-horizon `Dense(D, no bias)` heads on top of a shared causal predictor do NOT break time-invariance symmetry on their own. When the target encoder is live (no EMA), all heads converge to the same numerical value (iter-2: all heads at approximately 0.0046). EMA target encoder is a necessary ingredient, not an optional ablation, when training multi-horizon JEPA at 30 fps. See `plan_2026-05-23_15151c75` and "Why EMA target" above.
 - **I/O is the bottleneck on real runs.** opencv-python random-frame
   seek on BDD100K MOV files saturates 3–4 CPU cores and keeps GPU
   utilization low. At sanity scale (B=4/T=8/112²) we measured ~0.84
