@@ -737,6 +737,52 @@ class TestVideoJEPAIter2:
             f"Training loss non-finite under masking: {loss_val}"
         )
 
+    def test_inference_determinism_with_masking(self) -> None:
+        """DECISION plan_2026-05-24_ca745a6c/D-001: with mask_prediction_enabled
+        masking is gated on training=True. Two inference forwards on the same
+        input must therefore be bit-equivalent (no unseeded mask randomness)."""
+        cfg = _small_config(mask_prediction_enabled=True, mask_ratio=0.6)
+        model = VideoJEPA(config=cfg)
+        B, T = 2, cfg.num_frames
+        pixels = np.random.rand(
+            B, T, cfg.img_size, cfg.img_size, cfg.img_channels
+        ).astype("float32")
+        y1 = np.asarray(model({"pixels": pixels}, training=False))
+        y2 = np.asarray(model({"pixels": pixels}, training=False))
+        max_delta = float(np.max(np.abs(y2 - y1)))
+        assert max_delta < 1e-6, (
+            f"inference must be deterministic with masking enabled "
+            f"(D-001); got max|delta|={max_delta:.3e}"
+        )
+
+    def test_serialization_forward_parity_with_masking(
+        self, tmp_path,
+    ) -> None:
+        """DECISION plan_2026-05-24_ca745a6c/D-001: a reloaded model must
+        reproduce the original model's training=False output bit-for-bit
+        (modulo float reload error) when mask_prediction_enabled=True.
+        Locks in the trainer reload-check at unit scope."""
+        cfg = _small_config(mask_prediction_enabled=True, mask_ratio=0.6)
+        model = VideoJEPA(config=cfg)
+        B, T = 2, cfg.num_frames
+        pixels = np.random.rand(
+            B, T, cfg.img_size, cfg.img_size, cfg.img_channels
+        ).astype("float32")
+        y_orig = np.asarray(model({"pixels": pixels}, training=False))
+
+        path = str(tmp_path / "vj_reload_parity.keras")
+        model.save(path)
+        del model
+        keras.backend.clear_session()
+        reloaded = keras.models.load_model(path)
+
+        y_reload = np.asarray(reloaded({"pixels": pixels}, training=False))
+        max_delta = float(np.max(np.abs(y_reload - y_orig)))
+        assert max_delta < 1e-4, (
+            f"reload forward parity broken under masking "
+            f"(D-001); got max|delta|={max_delta:.3e}"
+        )
+
 
 # ============================================================================
 # TestSyntheticDataset — shape + finiteness of synthetic_drone_video_dataset
