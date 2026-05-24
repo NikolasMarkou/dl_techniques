@@ -44,6 +44,7 @@ import tensorflow as tf
 from keras import ops
 
 from dl_techniques.regularizers.sigreg import SIGRegLayer
+from dl_techniques.utils.logger import logger
 
 from .config import VideoJEPAConfig
 from .encoder import VideoJEPACliffordEncoder
@@ -193,6 +194,26 @@ class VideoJEPA(keras.Model):
         # Logged every train_step under "ema_m" so cosine schedules are
         # visible in CSVLogger / history.
         self.ema_m_tracker = keras.metrics.Mean(name="ema_m")
+
+        # Advisory: multi-horizon prediction without a strong EMA target
+        # is the documented "multi-horizon head collapse" failure mode
+        # (see src/train/video_jepa/README.md "Known issues / caveats").
+        # Per-horizon Dense(D, no bias) heads on a shared causal predictor
+        # do NOT break time-invariance symmetry on their own; without a
+        # momentum-decoupled target encoder the heads converge to the same
+        # numerical value. Threshold 0.5 chosen as the boundary between
+        # "near-live" and "meaningfully decoupled" targets; the trainer's
+        # default is 0.996.
+        if len(cfg.predict_horizons) >= 2 and cfg.ema_momentum < 0.5:
+            logger.warning(
+                "VideoJEPA: multi-horizon (len(predict_horizons)=%d) with "
+                "weak EMA target (ema_momentum=%.4f < 0.5) is the documented "
+                "head-collapse regime — heads converge to the same value. "
+                "Use ema_momentum >= 0.996 (default) or single horizon. "
+                "See src/train/video_jepa/README.md 'Known issues'.",
+                len(cfg.predict_horizons),
+                cfg.ema_momentum,
+            )
 
         # --- Eager build + initial weight sync for both encoders ---
         # Force-build encoder + target_encoder up front with a dummy zero
