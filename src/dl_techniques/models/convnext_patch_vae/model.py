@@ -366,6 +366,39 @@ class ConvNeXtPatchVAE(keras.Model):
         return {m.name: m.result() for m in self.metrics}
 
     # ------------------------------------------------------------------
+    # Shape inference
+    # ------------------------------------------------------------------
+    def compute_output_shape(
+        self, input_shape: Tuple[Optional[int], ...]
+    ) -> Dict[str, Tuple[Optional[int], ...]]:
+        """Return the dict-of-shapes matching :meth:`call` output.
+
+        Delegates to the encoder/decoder shape inference (guide §3.4
+        Pattern 4) so the per-patch grid math stays in one place.
+
+        Args:
+            input_shape: ``(B, H, W, C)``. ``H`` and ``W`` may be ``None``.
+
+        Returns:
+            Dict with keys ``reconstruction``, ``z``, ``mu``, ``log_var``
+            and shape tuples matching the runtime ``call`` output.
+        """
+        if len(input_shape) != 4:
+            raise ValueError(
+                f"Expected 4D input shape, got {input_shape}"
+            )
+        mu_shape, log_var_shape = self.encoder.compute_output_shape(input_shape)
+        # z has the same shape as mu (Sampling preserves shape).
+        z_shape = mu_shape
+        recon_shape = self.decoder.compute_output_shape(z_shape)
+        return {
+            "reconstruction": recon_shape,
+            "z": z_shape,
+            "mu": mu_shape,
+            "log_var": log_var_shape,
+        }
+
+    # ------------------------------------------------------------------
     # Serialization
     # ------------------------------------------------------------------
     def get_config(self) -> Dict[str, Any]:
