@@ -500,3 +500,43 @@ class ConvNeXtPatchVAE(keras.Model):
             else ConvNeXtPatchVAEConfig()
         )
         return cls(config=cfg, **config)
+
+
+# ----------------------------------------------------------------------
+# Module-level factory
+# ----------------------------------------------------------------------
+# DECISION plan_2026-05-25_8faec5b6/D-002: bare module-level factory
+# mirrors the surface of models/{bert, resnet, tree_transformer,
+# cliffordnet, vit, depth_anything, prism, lewm, gpt2}. Trades a one-line
+# parallel entry-point at the cost of mild API duplication, in exchange
+# for parity with the rest of the repo. See
+# plans/plan_2026-05-25_8faec5b6/decisions.md D-002.
+def create_convnext_patch_vae(
+    variant: str = "base",
+    *,
+    pretrained: bool = False,
+    **overrides: Any,
+) -> ConvNeXtPatchVAE:
+    """Create a :class:`ConvNeXtPatchVAE` from a named variant.
+
+    Thin module-level delegate to :meth:`ConvNeXtPatchVAE.from_variant`.
+
+    Args:
+        variant: One of :attr:`ConvNeXtPatchVAE.PRESETS` keys
+            (``"tiny"``, ``"base"``, ``"large"``).
+        pretrained: If ``True``, attempt to load published weights.
+            Currently raises :class:`NotImplementedError` (no public
+            checkpoints — see D-001).
+        **overrides: Forwarded to :class:`ConvNeXtPatchVAEConfig`,
+            taking precedence over the preset values.
+
+    Returns:
+        Unbuilt :class:`ConvNeXtPatchVAE`.
+
+    Raises:
+        ValueError: ``variant`` not in :attr:`ConvNeXtPatchVAE.PRESETS`.
+        NotImplementedError: ``pretrained=True``.
+    """
+    return ConvNeXtPatchVAE.from_variant(
+        variant, pretrained=pretrained, **overrides
+    )
