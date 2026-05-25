@@ -126,7 +126,7 @@ class TrainingConfig:
     lambda_sigreg: float = 0.1
     sigreg_knots: int = 17
     sigreg_num_proj: int = 256
-    recon_loss_type: str = "mse"
+    recon_loss_type: str = "bce"
     dropout_rate: float = 0.0
     gamma_clip: float = 1.0
 
@@ -743,7 +743,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sigreg-knots",    type=int,   default=17)
     parser.add_argument("--sigreg-num-proj", type=int,   default=256)
     parser.add_argument(
-        "--recon-loss-type", type=str, default="mse", choices=["mse", "bce"],
+        "--recon-loss-type", type=str, default="bce", choices=["mse", "bce"],
         help="Reconstruction loss family. BCE requires inputs in [0,1].",
     )
     parser.add_argument("--dropout",    type=float, default=0.0, dest="dropout_rate")

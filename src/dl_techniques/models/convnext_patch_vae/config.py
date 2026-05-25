@@ -112,7 +112,7 @@ class ConvNeXtPatchVAEConfig:
     sigreg_num_proj: int = 256
 
     # --- Reconstruction loss family ---
-    recon_loss_type: str = "mse"
+    recon_loss_type: str = "bce"
 
     # --- Regularization ---
     dropout_rate: float = 0.0
