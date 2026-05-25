@@ -95,6 +95,9 @@ class TrainingConfig:
         weight_decay: L2 weight decay for AdamW (do NOT also set
             ``kernel_regularizer_config`` — double WD footgun).
         warmup_epochs: Linear warmup before cosine decay.
+        beta_kl_start: Initial beta value at epoch 0 (annealing start).
+        beta_anneal_epochs: Epochs over which beta ramps from ``beta_kl_start``
+            to ``beta_kl``. Set to ``0`` to disable annealing.
         early_stopping_patience: EarlyStopping patience on ``val_loss``.
         success_threshold: ``val_loss <= threshold`` → convergence flag.
             Advisory only; does not block saving the model.
@@ -133,6 +136,8 @@ class TrainingConfig:
     learning_rate: float = 3e-4
     weight_decay: float = 1e-4
     warmup_epochs: int = 5
+    beta_kl_start: float = 0.0
+    beta_anneal_epochs: int = 15
     early_stopping_patience: int = 10
 
     # Output / evaluation
@@ -453,6 +458,33 @@ class ReconVisualizationCallback(keras.callbacks.Callback):
 
 
 # ---------------------------------------------------------------------------
+# Beta annealing callback
+# ---------------------------------------------------------------------------
+
+class BetaAnnealingCallback(keras.callbacks.Callback):
+    """Linearly ramps ``model._beta_kl`` from ``beta_start`` to ``beta_target``.
+
+    Mutation happens in ``on_epoch_begin`` (before any forward pass that epoch).
+    Safe because ``model._beta_kl`` is a plain Python float evaluated eagerly
+    each call — no graph tracing of this value (jit_compile=False enforced).
+    """
+
+    def __init__(self, beta_start: float, beta_target: float, anneal_epochs: int) -> None:
+        super().__init__()
+        self.beta_start = beta_start
+        self.beta_target = beta_target
+        self.anneal_epochs = anneal_epochs
+
+    def on_epoch_begin(self, epoch: int, logs=None) -> None:
+        if self.anneal_epochs <= 0:
+            return
+        progress = min(1.0, epoch / self.anneal_epochs)
+        new_beta = self.beta_start + progress * (self.beta_target - self.beta_start)
+        self.model._beta_kl = new_beta
+        logger.info(f"BetaAnnealing epoch={epoch}: beta_kl={new_beta:.4f}")
+
+
+# ---------------------------------------------------------------------------
 # Learning rate schedule
 # ---------------------------------------------------------------------------
 
@@ -475,7 +507,7 @@ def _build_lr_schedule(
 
     if warmup_steps > 0:
         return keras.optimizers.schedules.CosineDecay(
-            initial_learning_rate=config.learning_rate,
+            initial_learning_rate=0.0,  # true linear ramp from 0 → warmup_target
             decay_steps=decay_steps,
             alpha=1e-6,
             warmup_target=config.learning_rate,
@@ -550,6 +582,15 @@ def train(config: TrainingConfig, smoke: bool = False) -> None:
     curves_dir = os.path.join(results_dir, "training_curves")
     os.makedirs(curves_dir, exist_ok=True)
     callbacks.append(TrainingCurvesCallback(output_dir=curves_dir))
+
+    if config.beta_anneal_epochs > 0:
+        callbacks.append(
+            BetaAnnealingCallback(
+                beta_start=config.beta_kl_start,
+                beta_target=config.beta_kl,
+                anneal_epochs=config.beta_anneal_epochs,
+            )
+        )
 
     # Grab a fixed validation sample for reconstruction visualisation
     recon_dir = os.path.join(results_dir, "reconstructions")
@@ -711,7 +752,11 @@ def _build_parser() -> argparse.ArgumentParser:
                         default=True)
 
     # Training (extend base parser defaults)
-    parser.add_argument("--warmup-epochs",    type=int,   default=5)
+    parser.add_argument("--warmup-epochs",      type=int,   default=5)
+    parser.add_argument("--beta-kl-start",      type=float, default=0.0,
+                        help="Initial beta at epoch 0 for beta annealing.")
+    parser.add_argument("--beta-anneal-epochs", type=int,   default=15,
+                        help="Epochs to ramp beta from beta-kl-start to beta-kl. 0=disabled.")
     parser.add_argument("--success-threshold", type=float, default=0.02,
                         help="val_loss threshold for the convergence advisory.")
 
@@ -773,6 +818,8 @@ def main() -> None:
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         warmup_epochs=args.warmup_epochs,
+        beta_kl_start=args.beta_kl_start,
+        beta_anneal_epochs=args.beta_anneal_epochs,
         early_stopping_patience=args.patience,
         success_threshold=args.success_threshold,
     )
