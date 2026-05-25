@@ -87,7 +87,34 @@ hyperparameters.
 
 ---
 
-## Public API
+## Quick start (factory)
+
+```python
+import keras
+from dl_techniques.models.convnext_patch_vae.model import create_convnext_patch_vae
+
+# Named variants: "tiny" / "base" / "large". Any keyword overrides preset values.
+model = create_convnext_patch_vae("base")
+model.compile(optimizer=keras.optimizers.AdamW(3e-4))
+model.fit(x_train, epochs=50, batch_size=256)
+
+# Resolution-agnostic API (any H % patch_size == 0 works):
+mu, log_var = model.encode(x_any_resolution)
+x_hat       = model.decode(mu)                            # raw or sigmoid'd
+samples     = model.sample(num_samples=16, hp=8, wp=8)    # (16, 32, 32, 3)
+```
+
+`create_convnext_patch_vae("base", pretrained=True)` raises
+`NotImplementedError` — no public checkpoints are published for this VAE
+(repo-wide convention, see `D-001`).
+
+| Variant | embed_dim | encoder_depth | decoder_depth | latent_dim |
+|---------|-----------|---------------|---------------|------------|
+| tiny    | 64        | 2             | 2             | 8          |
+| base    | 128       | 4             | 4             | 16         |
+| large   | 192       | 6             | 6             | 32         |
+
+## Low-level API
 
 ```python
 import keras
@@ -104,11 +131,6 @@ model = ConvNeXtPatchVAE(cfg)
 model.compile(optimizer=keras.optimizers.AdamW(3e-4))
 # history.history['loss'] honors the D-001 contract (nonzero).
 model.fit(x_train, epochs=50, batch_size=256)
-
-# Resolution-agnostic API (any H % patch_size == 0 works):
-mu, log_var = model.encode(x_any_resolution)
-x_hat       = model.decode(z)                             # raw or sigmoid'd
-samples     = model.sample(num_samples=16, hp=8, wp=8)    # (16, 32, 32, 3)
 ```
 
 Full `.keras` save / `keras.models.load_model` round-trip is supported

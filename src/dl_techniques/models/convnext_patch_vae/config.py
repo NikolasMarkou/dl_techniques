@@ -21,63 +21,72 @@ from typing import Any, Dict, Optional, Tuple
 class ConvNeXtPatchVAEConfig:
     """Configuration for :class:`ConvNeXtPatchVAE`.
 
-    :param img_size: Default square input edge length in pixels. The model
-        is resolution-agnostic at inference / fit time; this value drives
-        the derived properties below and (when used) the dummy-input shape.
-    :param img_channels: Number of pixel channels (e.g. 3 for RGB, 1 for MNIST).
-    :param patch_size: Non-overlapping patch edge length. Must divide
-        ``img_size``. Sets the spatial stride of the encoder stem and the
-        decoder transposed-conv head.
-    :param embed_dim: Internal ConvNeXt block channel width. Static across
-        encoder and decoder.
-    :param encoder_depth: Number of stacked ``ConvNextV2Block`` layers in
-        the encoder, after the patchifying stem.
-    :param decoder_depth: Number of stacked ``ConvNextV2Block`` layers in
-        the decoder, before the transposed-conv head.
-    :param kernel_size: Depthwise kernel size used inside each
-        ``ConvNextV2Block``.
-    :param latent_dim: Per-patch latent channel width. The encoder emits
-        ``(B, Hp, Wp, 2 * latent_dim)`` and splits the last dim into
-        ``(mu, log_var)``.
-    :param beta_kl: Scalar weight on the per-patch KL term.
-    :param lambda_sigreg: Scalar weight on the SIGReg term. Set ``0.0`` to
-        disable SIGReg contribution to the gradient (the raw SIGReg
-        statistic is still tracked for ablation comparison — see D-003 /
-        test ``test_sigreg_off_branch``).
-    :param sigreg_knots: Integration knots for :class:`SIGRegLayer`.
-    :param sigreg_num_proj: Number of random projections for
-        :class:`SIGRegLayer`. >= 256 recommended for stable per-patch
-        estimate (F2).
-    :param recon_loss_type: One of ``{"mse", "bce"}``. ``mse`` uses
-        pixel-space MSE on the raw decoder output (suitable for RGB);
-        ``bce`` uses binary-cross-entropy with logits and a sigmoid at
-        sample time (suitable for binary / [0,1]-bounded inputs like MNIST).
-    :param dropout_rate: Per-block dropout rate inside ``ConvNextV2Block``.
-    :param spatial_dropout_rate: Per-block spatial-dropout rate inside
-        ``ConvNextV2Block``.
-    :param use_v2_block: Reserved for future use (V1 vs V2 GRN ablation —
-        T4c in the training menu). Currently ``True`` is the only
-        supported value at iter-1.
-    :param gamma_clip: Optional symmetric gradient clip ``[-gamma_clip,
-        +gamma_clip]`` applied in the custom ``train_step``. ``None``
-        disables clipping.
-    :param kernel_regularizer_config: Optional Keras-serializable config
-        dict for a ``keras.regularizers.Regularizer`` applied to all
-        ``ConvNextV2Block`` conv kernels. ``None`` => no regularizer.
+    Args:
+        img_size: Default square input edge length in pixels. The model
+            is resolution-agnostic at inference / fit time; this value
+            drives the derived properties below and (when used) the
+            dummy-input shape.
+        img_channels: Number of pixel channels (e.g. 3 for RGB, 1 for
+            MNIST).
+        patch_size: Non-overlapping patch edge length. Must divide
+            ``img_size``. Sets the spatial stride of the encoder stem
+            and the decoder transposed-conv head.
+        embed_dim: Internal ConvNeXt block channel width. Static across
+            encoder and decoder.
+        encoder_depth: Number of stacked ``ConvNextV2Block`` layers in
+            the encoder, after the patchifying stem.
+        decoder_depth: Number of stacked ``ConvNextV2Block`` layers in
+            the decoder, before the transposed-conv head.
+        kernel_size: Depthwise kernel size used inside each
+            ``ConvNextV2Block``.
+        latent_dim: Per-patch latent channel width. The encoder emits
+            ``(B, Hp, Wp, 2 * latent_dim)`` and splits the last dim
+            into ``(mu, log_var)``.
+        beta_kl: Scalar weight on the per-patch KL term.
+        lambda_sigreg: Scalar weight on the SIGReg term. Set ``0.0`` to
+            disable SIGReg contribution to the gradient (the raw SIGReg
+            statistic is still tracked for ablation comparison — see
+            D-003 / test ``test_sigreg_off_branch``).
+        sigreg_knots: Integration knots for :class:`SIGRegLayer`.
+        sigreg_num_proj: Number of random projections for
+            :class:`SIGRegLayer`. >= 256 recommended for stable
+            per-patch estimate (F2).
+        recon_loss_type: One of ``{"mse", "bce"}``. ``mse`` uses
+            pixel-space MSE on the raw decoder output (suitable for
+            RGB); ``bce`` uses binary-cross-entropy with logits and a
+            sigmoid at sample time (suitable for binary / ``[0, 1]``
+            -bounded inputs like MNIST). **When ``bce``, inputs MUST be
+            in ``[0, 1]``.** No runtime assertion (graph-mode-unsafe);
+            contract enforced by docstring.
+        dropout_rate: Per-block dropout rate inside ``ConvNextV2Block``.
+        spatial_dropout_rate: Per-block spatial-dropout rate inside
+            ``ConvNextV2Block``.
+        use_v2_block: Reserved for future use (V1 vs V2 GRN ablation —
+            T4c in the training menu). Currently ``True`` is the only
+            supported value at iter-1.
+        gamma_clip: Optional symmetric gradient clip
+            ``[-gamma_clip, +gamma_clip]`` applied in the custom
+            ``train_step``. ``None`` disables clipping.
+        kernel_regularizer_config: Optional Keras-serializable config
+            dict for a ``keras.regularizers.Regularizer`` applied to
+            all ``ConvNextV2Block`` conv kernels. ``None`` => no
+            regularizer.
 
-    .. note::
-       Invariants enforced in ``__post_init__``:
+    Note:
+        Invariants enforced in ``__post_init__``:
 
-       - ``img_size % patch_size == 0`` (so the stem produces an integer
-         patch grid).
-       - ``latent_dim >= 1`` (a zero-dim latent degenerates the VAE to a
-         deterministic AE; rejected per the plan's edge-case spec).
-       - All positive-integer fields strictly positive.
-       - ``recon_loss_type in {"mse", "bce"}``.
-       - ``0.0 <= beta_kl`` and ``0.0 <= lambda_sigreg``.
-       - ``0.0 <= dropout_rate <= 1.0`` and same for ``spatial_dropout_rate``.
-       - ``sigreg_knots >= 2`` and ``sigreg_num_proj >= 1`` (mirrors
-         :class:`SIGRegLayer` requirements).
+        - ``img_size % patch_size == 0`` (so the stem produces an
+          integer patch grid).
+        - ``latent_dim >= 1`` (a zero-dim latent degenerates the VAE
+          to a deterministic AE; rejected per the plan's edge-case
+          spec).
+        - All positive-integer fields strictly positive.
+        - ``recon_loss_type in {"mse", "bce"}``.
+        - ``0.0 <= beta_kl`` and ``0.0 <= lambda_sigreg``.
+        - ``0.0 <= dropout_rate <= 1.0`` and same for
+          ``spatial_dropout_rate``.
+        - ``sigreg_knots >= 2`` and ``sigreg_num_proj >= 1`` (mirrors
+          :class:`SIGRegLayer` requirements).
     """
 
     # --- Vision / patches ---

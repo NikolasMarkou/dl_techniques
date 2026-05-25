@@ -35,15 +35,25 @@ from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
 class ConvNeXtPatchDecoder(keras.layers.Layer):
     """Flat single-stage ConvNeXt decoder from per-patch latents to pixels.
 
-    :param patch_size: Transposed-conv kernel / stride — projects each
-        patch position back to a ``patch_size x patch_size`` pixel tile.
-    :param embed_dim: Internal ConvNeXt block width (same as encoder).
-    :param depth: Number of ``ConvNextV2Block`` layers stacked before head.
-    :param kernel_size: Depthwise kernel inside each ``ConvNextV2Block``.
-    :param img_channels: Output channel count (3 for RGB, 1 for MNIST).
-    :param dropout_rate: Per-block dropout rate.
-    :param spatial_dropout_rate: Per-block spatial dropout rate.
-    :param kernel_regularizer: Optional regularizer; deep-copied per block.
+    Args:
+        patch_size: Transposed-conv kernel / stride — projects each
+            patch position back to a ``patch_size x patch_size`` pixel
+            tile.
+        embed_dim: Internal ConvNeXt block width (same as encoder).
+        depth: Number of ``ConvNextV2Block`` layers stacked before head.
+        kernel_size: Depthwise kernel inside each ``ConvNextV2Block``.
+        img_channels: Output channel count (3 for RGB, 1 for MNIST).
+        dropout_rate: Per-block dropout rate.
+        spatial_dropout_rate: Per-block spatial dropout rate.
+        kernel_regularizer: Optional regularizer; deep-copied per block.
+
+    Input shape:
+        4D tensor with shape ``(B, Hp, Wp, latent_dim)``.
+
+    Output shape:
+        4D tensor with shape
+        ``(B, Hp * patch_size, Wp * patch_size, img_channels)``. Raw
+        logits — the owning model applies any output activation.
     """
 
     def __init__(
@@ -139,9 +149,12 @@ class ConvNeXtPatchDecoder(keras.layers.Layer):
     ) -> keras.KerasTensor:
         """Forward pass.
 
-        :param inputs: ``(B, Hp, Wp, latent_dim)`` latent grid.
-        :param training: Standard Keras training flag.
-        :return: ``(B, Hp * patch_size, Wp * patch_size, img_channels)``.
+        Args:
+            inputs: ``(B, Hp, Wp, latent_dim)`` latent grid.
+            training: Standard Keras training flag.
+
+        Returns:
+            ``(B, Hp * patch_size, Wp * patch_size, img_channels)``.
             Raw logits — the owning model applies any output activation.
         """
         x = self.proj_in(inputs)

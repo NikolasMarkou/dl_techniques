@@ -44,16 +44,28 @@ from dl_techniques.utils.logger import logger
 class ConvNeXtPatchEncoder(keras.layers.Layer):
     """Flat single-stage ConvNeXt encoder emitting per-patch ``(mu, log_var)``.
 
-    :param patch_size: Stem stride / kernel — converts pixels to patch grid.
-    :param embed_dim: Internal ConvNeXt block width.
-    :param depth: Number of ``ConvNextV2Block`` layers stacked after stem.
-    :param kernel_size: Depthwise kernel inside each ``ConvNextV2Block``.
-    :param latent_dim: Per-patch latent width. The bottleneck emits
-        ``2 * latent_dim`` channels which are split into ``(mu, log_var)``.
-    :param dropout_rate: Per-block dropout rate (forwarded to ConvNextV2Block).
-    :param spatial_dropout_rate: Per-block spatial dropout rate.
-    :param kernel_regularizer: Optional regularizer for the conv kernels
-        inside each block (deep-copied per block to avoid weight sharing).
+    Args:
+        patch_size: Stem stride / kernel — converts pixels to patch grid.
+        embed_dim: Internal ConvNeXt block width.
+        depth: Number of ``ConvNextV2Block`` layers stacked after stem.
+        kernel_size: Depthwise kernel inside each ``ConvNextV2Block``.
+        latent_dim: Per-patch latent width. The bottleneck emits
+            ``2 * latent_dim`` channels which are split into
+            ``(mu, log_var)``.
+        dropout_rate: Per-block dropout rate (forwarded to
+            ``ConvNextV2Block``).
+        spatial_dropout_rate: Per-block spatial dropout rate.
+        kernel_regularizer: Optional regularizer for the conv kernels
+            inside each block (deep-copied per block to avoid weight
+            sharing).
+
+    Input shape:
+        4D tensor with shape ``(B, H, W, C)``. ``H`` and ``W`` must be
+        divisible by ``patch_size``.
+
+    Output shape:
+        Tuple ``(mu, log_var)`` where each has shape
+        ``(B, H // patch_size, W // patch_size, latent_dim)``.
     """
 
     def __init__(
@@ -164,10 +176,14 @@ class ConvNeXtPatchEncoder(keras.layers.Layer):
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """Forward pass.
 
-        :param inputs: ``(B, H, W, C)`` with ``H % patch_size == 0`` and
-            ``W % patch_size == 0``.
-        :param training: Standard Keras training flag.
-        :return: Tuple ``(mu, log_var)``, both ``(B, Hp, Wp, latent_dim)``.
+        Args:
+            inputs: ``(B, H, W, C)`` with ``H % patch_size == 0`` and
+                ``W % patch_size == 0``.
+            training: Standard Keras training flag.
+
+        Returns:
+            Tuple ``(mu, log_var)``, both shaped
+            ``(B, Hp, Wp, latent_dim)``.
         """
         x = self.stem(inputs)
         x = self.stem_norm(x, training=training)

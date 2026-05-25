@@ -45,8 +45,18 @@ _KERAS_BASE_KEYS = {"name", "trainable", "dtype"}
 class ConvNeXtPatchVAE(keras.Model):
     """ConvNeXt patch-level VAE with SIGReg anti-patch-collapse.
 
-    :param config: :class:`ConvNeXtPatchVAEConfig`. If ``None``, defaults.
-    :param kwargs: passthrough to :class:`keras.Model`.
+    Args:
+        config: :class:`ConvNeXtPatchVAEConfig`. If ``None``, defaults
+            are used.
+        **kwargs: Passthrough to :class:`keras.Model`.
+
+    Input shape:
+        4D tensor with shape ``(B, H, W, C)`` where ``H`` and ``W`` are
+        multiples of ``config.patch_size``.
+
+    Output shape:
+        Dict with keys ``reconstruction`` ``(B, H, W, C)``, and ``z`` /
+        ``mu`` / ``log_var`` each ``(B, Hp, Wp, latent_dim)``.
     """
 
     #: Named variant presets — config overrides only. All other fields
@@ -175,9 +185,12 @@ class ConvNeXtPatchVAE(keras.Model):
     ) -> Dict[str, keras.KerasTensor]:
         """End-to-end forward with `add_loss` of the three components.
 
-        :param inputs: ``(B, H, W, C)``.
-        :param training: Standard Keras training flag.
-        :return: Dict with keys ``reconstruction``, ``z``, ``mu``,
+        Args:
+            inputs: ``(B, H, W, C)``.
+            training: Standard Keras training flag.
+
+        Returns:
+            Dict with keys ``reconstruction``, ``z``, ``mu``,
             ``log_var``. ``reconstruction`` is the pixel-space output
             after the appropriate activation (sigmoid for BCE, identity
             for MSE).
@@ -288,8 +301,12 @@ class ConvNeXtPatchVAE(keras.Model):
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """Encode pixels into per-patch ``(mu, log_var)``.
 
-        :param x: ``(B, H, W, C)`` with ``H % patch_size == 0``.
-        :return: Tuple ``(mu, log_var)``, each ``(B, Hp, Wp, latent_dim)``.
+        Args:
+            x: ``(B, H, W, C)`` with ``H % patch_size == 0``.
+
+        Returns:
+            Tuple ``(mu, log_var)``, each shaped
+            ``(B, Hp, Wp, latent_dim)``.
         """
         return self.encoder(x, training=False)
 
@@ -313,11 +330,17 @@ class ConvNeXtPatchVAE(keras.Model):
     ) -> keras.KerasTensor:
         """Sample images from the unit-Gaussian prior at any patch grid.
 
-        :param num_samples: Number of images to generate.
-        :param hp: Patch grid height. Defaults to ``config.patches_per_side``.
-        :param wp: Patch grid width. Defaults to ``config.patches_per_side``.
-        :param seed: Optional seed for reproducibility.
-        :return: ``(num_samples, hp*patch_size, wp*patch_size, img_channels)``.
+        Args:
+            num_samples: Number of images to generate.
+            hp: Patch grid height. Defaults to
+                ``config.patches_per_side``.
+            wp: Patch grid width. Defaults to
+                ``config.patches_per_side``.
+            seed: Optional seed for reproducibility.
+
+        Returns:
+            Tensor of shape
+            ``(num_samples, hp * patch_size, wp * patch_size, img_channels)``.
         """
         cfg = self.config
         hp = cfg.patches_per_side if hp is None else int(hp)
