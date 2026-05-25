@@ -2196,3 +2196,5 @@ class TimeSeriesGenerator:
             y += noise
 
         return y.reshape(-1, 1)
+
+# ---------------------------------------------------------------------

@@ -105,9 +105,9 @@ Input Layer
      ↓
 ┌────────────────┬────────────────┐
 │ System Pathway │ User Pathway   │
-│ - High priority │ - Standard     │
-│ - Privileged    │ - Sandboxed    │
-│ - Immutable     │ - Mutable      │
+│ - High priority│ - Standard     │
+│ - Privileged   │ - Sandboxed    │
+│ - Immutable    │ - Mutable      │
 └────────────────┴────────────────┘
      ↓                    ↓
 [Privilege Gate] ←—————→ [Safety Filter]

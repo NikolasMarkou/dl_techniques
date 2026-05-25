@@ -38,6 +38,10 @@ import numpy as np
 import seaborn as sns
 import tensorflow as tf
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from train.common import (
     setup_gpu,
     create_callbacks as create_common_callbacks,
@@ -52,6 +56,8 @@ from dl_techniques.datasets.time_series import (
     TimeSeriesGeneratorConfig,
 )
 from dl_techniques.analyzer import AnalysisConfig
+
+# ---------------------------------------------------------------------
 
 plt.style.use('default')
 sns.set_palette("husl")

@@ -583,3 +583,5 @@ class PRISMModel(keras.Model):
                 config["kernel_regularizer"]
             )
         return cls(**config)
+
+# ---------------------------------------------------------------------
