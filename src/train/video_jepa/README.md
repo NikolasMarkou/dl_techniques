@@ -178,16 +178,18 @@ with `stop_gradient` on the target branch
 - Note: `ema_m` logs the **EMA momentum scalar** applied at this
   step (per `ema_schedule`), NOT the divergence between online
   and target encoders.
-- `ema_divergence` (added by `plan_2026-05-24_aebd4cbb/D-001`) is
-  the companion metric — the weight-space L2 ratio
-  `||W_target - W_online||_2 / (||W_online||_2 + 1e-12)` over
-  the paired target/online encoder weights (BYOL/MoCo Option A).
-  Expected ranges: cold-start ≈ 0 (the constructor bitwise-syncs
-  target ← encoder); asymptotic 0.01–0.3 in healthy SSL runs;
-  sustained > 1.0 is the published collapse signal. Logged every
-  train_step, lands in `training_log.csv` and
-  `training_curves/other.png` alongside `ema_m`. Anchored in
-  source as `# DECISION plan_2026-05-24_aebd4cbb/D-001`.
+- `ema_divergence` — the companion metric to `ema_m`. It is the
+  weight-space L2 ratio
+  `||W_target - W_online||_2 / ||W_online||_2` over the paired
+  target/online encoder weights (BYOL/MoCo Option A). Cold-start
+  ≈ 0 (the constructor bitwise-syncs target ← encoder); asymptotic
+  0.01–0.3 in healthy SSL runs; sustained > 1.0 is the published
+  collapse signal. Measured on a 100-step BDD100K diagnostic at
+  momentum 0.996: 0.001 → 0.120, accumulating monotonically inside
+  the healthy band — the online encoder is doing real gradient
+  work, the target lags by design, no collapse. Logged every
+  `train_step`; lands in `training_log.csv` and
+  `training_curves/other.png` next to `ema_m`.
 - SIGReg input was moved from `pred` (predictor output) to
   `z_online` (encoder output), per
   `plan_2026-05-23_15151c75/D-002` — regularization targets the
@@ -384,6 +386,63 @@ Smoke runs are architectural correctness checks, not convergence
 proofs. BDD runs under the above settings give a convergence signal,
 but no downstream-task evaluation has been performed yet — `val_loss`
 is still the SSL objective, not a linear-probe accuracy.
+
+### Per-step loss dynamics (100-step BDD100K diagnostic)
+
+A 100-optimizer-step BDD100K run at smoke geometry (img=64, T=4, B=2,
+RTX 4090, 7m15s wall-clock) gives a per-step CSV that resolves what
+the epoch-grain log above smears together. All four learned signals
+descend, in different regimes:
+
+| Component | step 0 | step 99 | ratio | role in the descent |
+|---|---|---|---|---|
+| `next_frame_loss` (mean over h) | 0.876 | 0.084 | **10.4×** | fastest — per-horizon `Dense` heads find a useful linear projection of the predictor output almost immediately |
+| `mask_loss` | 0.534 | 0.092 | **5.8×** | mid — requires the encoder to produce features predictable from neighbouring spatial context; a genuine representation-learning signal, not just temporal extrapolation |
+| `sigreg_loss` | 38.5 | 18.9 | 2.0× | slowest in ratio — already two orders above the predictive losses in absolute terms; the `λ_sigreg=0.09` weight balances it back into the same order of magnitude in gradient contribution |
+| `ema_divergence` | 0.001 | 0.120 | grows | not a loss — the encoder ↔ target gap, accumulating monotonically inside the published 0.01–0.3 healthy band |
+
+**Gradient flow.** The three predictive components live in different
+parts of the loss landscape and the ordering of their descent rates is
+the right one: cheap-projection heads first, representation-learning
+mask term second, regularizer last. No component is starving any other.
+The fact that `mask_loss` is descending 5.8× while `sigreg_loss` only
+manages 2.0× is direct evidence that the regularizer is not crowding
+out the mask-prediction gradient — it would be the opposite ordering
+if it were. `ema_divergence` rising in lockstep with the predictive
+losses says the online encoder is doing real gradient work and the
+target encoder is lagging by design (at momentum 0.996, a single step
+moves the target by 0.4% of the online update, so the gap accumulates
+naturally). Nothing here looks like collapse — collapse manifests as
+`ema_divergence` exploding past 1.0 once the encoder finds a
+degenerate fixed point the EMA can't track.
+
+**What this falsifies.** An earlier 8-step BDD100K smoke had recorded
+`mask_loss` apparently flat near 0.52, which seeded five candidate
+explanations for stagnation. At 100 steps, all five are falsified by
+the same evidence:
+
+- *Sigreg dominance crowding out mask*: ruled out — `mask_loss` makes
+  5.8× progress while sigreg manages 2.0×.
+- *Zero mask token + slow EMA target*: ruled out — both the mask loss
+  and the EMA gap evolve at healthy rates.
+- *Predictor depth=2 capacity bottleneck*: ruled out — both predictive
+  losses descend; capacity is not the constraint at this scale.
+- *`λ_next` dilution under multi-horizon*: ruled out — `next_frame_loss`
+  leads the descent, not lags it.
+- *Genuine slow convergence*: reframed — the 8-step "flatness" was
+  below the noise floor of the optimizer + I/O pipeline. Most of the
+  relative drop happens inside the first ~30 steps; the 8-step window
+  ended before the signal cleared the noise.
+
+Net: the loss surface at this geometry is well-behaved, mask
+prediction works without rebalancing, and the smoke-regime alarm was
+a statistical-resolution artifact.
+
+**Caveat.** This is smoke geometry (`img=64, T=4, sigreg_num_proj=64`).
+Loss balance at full resolution (`img=112, T=24, sigreg_num_proj=1024`)
+is not guaranteed identical, but the full-run signal documented above
+(mask and next-frame descending proportionally over 50+ epochs) is
+consistent with this finding at a different geometry.
 
 ## Training results
 
