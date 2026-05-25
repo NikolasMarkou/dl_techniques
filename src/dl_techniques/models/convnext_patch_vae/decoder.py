@@ -179,6 +179,12 @@ class ConvNeXtPatchDecoder(keras.layers.Layer):
         return (B, H, W, self.img_channels)
 
     def get_config(self) -> Dict[str, Any]:
+        """Return serializable config for round-trip reconstruction.
+
+        Returns:
+            Dict containing all constructor arguments needed to recreate
+            this layer, including a serialized ``kernel_regularizer``.
+        """
         config = super().get_config()
         config.update(
             {
@@ -198,6 +204,17 @@ class ConvNeXtPatchDecoder(keras.layers.Layer):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "ConvNeXtPatchDecoder":
+        """Reconstruct decoder from ``get_config()`` output.
+
+        Deserializes ``kernel_regularizer`` from its dict representation
+        before forwarding all keys to ``__init__``.
+
+        Args:
+            config: Dict as returned by ``get_config()``.
+
+        Returns:
+            A new ``ConvNeXtPatchDecoder`` instance.
+        """
         config = dict(config)
         reg = config.get("kernel_regularizer")
         if isinstance(reg, dict):

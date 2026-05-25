@@ -117,6 +117,10 @@ class ConvNeXtPatchVAEConfig:
     # --- Regularization ---
     dropout_rate: float = 0.0
     spatial_dropout_rate: float = 0.0
+    # Reserved for T4c ablation (V1 vs V2 block). Field is validated and
+    # serialized but currently has no effect — encoder and decoder always
+    # use ConvNextV2Block. Implementing the V1 path requires adding a
+    # block-selection branch to encoder.py and decoder.py.
     use_v2_block: bool = True
     gamma_clip: Optional[float] = 1.0
     kernel_regularizer_config: Optional[Dict[str, Any]] = field(default=None)
