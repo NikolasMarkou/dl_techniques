@@ -23,7 +23,10 @@ import pytest
 from dl_techniques.models.convnext_patch_vae.config import (
     ConvNeXtPatchVAEConfig,
 )
-from dl_techniques.models.convnext_patch_vae.model import ConvNeXtPatchVAE
+from dl_techniques.models.convnext_patch_vae.model import (
+    ConvNeXtPatchVAE,
+    create_convnext_patch_vae,
+)
 
 
 def _tiny_cfg(**overrides) -> ConvNeXtPatchVAEConfig:
@@ -223,3 +226,51 @@ class TestSIGRegOff:
         assert raw_sigreg >= 0.0, (
             f"raw SIGReg statistic must be non-negative, got {raw_sigreg}"
         )
+
+
+class TestFactory:
+    """Test 9 — named-variant factory surface (PRESETS, from_variant, create_*)."""
+
+    def test_variants_build(self) -> None:
+        for variant in ConvNeXtPatchVAE.PRESETS:
+            # Force a small img_size to keep test runtime tight; preset
+            # values still drive embed_dim / depth / latent_dim.
+            m = create_convnext_patch_vae(
+                variant,
+                img_size=16,
+                patch_size=4,
+                sigreg_knots=5,
+                sigreg_num_proj=32,
+            )
+            x = np.random.RandomState(0).rand(1, 16, 16, 3).astype("float32")
+            out = m(keras.ops.convert_to_tensor(x), training=False)
+            assert "reconstruction" in out
+            assert tuple(out["reconstruction"].shape) == (1, 16, 16, 3)
+            preset = ConvNeXtPatchVAE.PRESETS[variant]
+            assert m.config.embed_dim == preset["embed_dim"]
+            assert m.config.latent_dim == preset["latent_dim"]
+
+    def test_from_variant_pretrained_raises(self) -> None:
+        with pytest.raises(NotImplementedError):
+            ConvNeXtPatchVAE.from_variant("base", pretrained=True)
+
+    def test_from_variant_unknown_raises(self) -> None:
+        with pytest.raises(ValueError):
+            ConvNeXtPatchVAE.from_variant("nonexistent")
+
+    def test_create_factory_smoke(self) -> None:
+        m = create_convnext_patch_vae(
+            "tiny",
+            img_size=8,
+            patch_size=4,
+            sigreg_knots=2,
+            sigreg_num_proj=8,
+        )
+        assert isinstance(m, ConvNeXtPatchVAE)
+        assert m.config.embed_dim == ConvNeXtPatchVAE.PRESETS["tiny"]["embed_dim"]
+        # compute_output_shape returns the 4-key dict matching call().
+        shapes = m.compute_output_shape((None, 8, 8, 3))
+        assert set(shapes.keys()) == {"reconstruction", "z", "mu", "log_var"}
+        assert shapes["reconstruction"] == (None, 8, 8, 3)
+        # 8/patch_size(4) = 2 patches per side.
+        assert shapes["mu"] == (None, 2, 2, m.config.latent_dim)
