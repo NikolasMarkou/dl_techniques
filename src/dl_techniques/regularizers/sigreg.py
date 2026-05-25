@@ -39,27 +39,94 @@ References:
     - Upstream PyTorch: `/tmp/lewm_source/module.py:SIGReg`.
 """
 
-import keras
-from keras import ops
 from typing import Any, Dict, Optional, Tuple
+
+import keras
+import numpy as np
+from keras import ops
+
+# ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
 class SIGRegLayer(keras.layers.Layer):
     """Sketch Isotropic Gaussian Regularizer as a Keras Layer.
 
-    Returns a scalar loss value (a 0-D tensor) measuring how far the sliced
-    1-D marginals of the input are from a standard Gaussian.
+    **Intent**: Push the empirical distribution of random 1-D projections of
+    an activation tensor toward a standard Gaussian, by penalizing the
+    squared residual between the empirical characteristic function (real and
+    imaginary parts evaluated on a fixed knot grid) and the target
+    :math:`\\phi(t) = \\exp(-t^2/2)`. Used as a side-loss via
+    ``model.add_loss(...)``; the layer itself returns a scalar 0-D tensor.
 
-    :param knots: number of trapezoidal-rule integration knots on [0, 3].
-        Defaults to 17 (upstream default).
-    :param num_proj: number of random slicing directions sampled per forward
-        pass. Defaults to 1024 (upstream default).
-    :param seed: optional seed for the random projection (for reproducible
-        tests). When None (default), the projection is re-sampled each call
-        using `keras.random.normal` without a fixed seed — matching upstream
-        which uses `torch.randn` with the global generator.
-    :param kwargs: passthrough to `keras.layers.Layer`.
+    **Architecture**:
+
+    ```
+    Input(..., N, D)
+           |
+           v
+    +--------------------+   (sampled per call)
+    | A ~ N(0, I)        |   shape (D, num_proj), columns L2-normalized
+    +--------------------+
+           |
+           v
+    proj @ A  --->  x  shape (..., N, num_proj)
+           |
+           v
+    outer with t (knots,)  --->  x_t shape (..., N, num_proj, knots)
+           |
+           v
+    cos_mean, sin_mean    averaged over the N (sample) axis
+           |
+           v
+    err = (cos_mean - phi)^2 + sin_mean^2     shape (..., num_proj, knots)
+           |
+           v
+    statistic = err @ weights_  ---> (..., num_proj)
+           |  (* N)
+           v
+    return  ops.mean(statistic)   shape ()
+    ```
+
+    The integration grid ``t``, the target window ``phi`` and the
+    pre-windowed trapezoidal weights ``weights_`` are stored as non-trainable
+    weights so that they are serialized with the layer and placed on the
+    correct device.
+
+    Args:
+        knots: Integer, number of trapezoidal-rule integration knots on
+            ``[0, 3]``. Must be ``>= 2``. Defaults to ``17`` (upstream
+            default).
+        num_proj: Integer, number of random slicing directions sampled per
+            forward pass. Must be ``>= 1``. Defaults to ``1024`` (upstream
+            default).
+        seed: Optional integer seed for the random projection (for
+            reproducible tests). When ``None`` (default) the projection is
+            re-sampled each call using ``keras.random.normal`` without a
+            fixed seed — matching upstream which uses ``torch.randn`` with
+            the global generator.
+        **kwargs: Passthrough to ``keras.layers.Layer``.
+
+    Input shape:
+        N-D tensor with shape ``(..., N, D)`` where ``D`` (last dimension)
+        must be statically known and ``N`` is the sample axis being averaged
+        over. Rank must be ``>= 2``. Typical use: ``(T, B, D)``.
+
+    Output shape:
+        Scalar (0-D tensor).
+
+    Example:
+        ```python
+        x = keras.Input(shape=(8, 16))           # (B, T=8, D=16)
+        sig = SIGRegLayer(knots=17, num_proj=1024, seed=0)
+        loss = sig(x)                            # scalar
+        model = keras.Model(x, loss)
+        ```
+
+    Raises:
+        ValueError: If ``knots < 2`` or ``num_proj < 1`` at construction
+            time, or if at ``build()`` the input rank is ``< 2`` or the last
+            dimension is ``None``.
     """
 
     def __init__(
@@ -74,41 +141,29 @@ class SIGRegLayer(keras.layers.Layer):
             raise ValueError(f"knots must be >= 2, got {knots}")
         if num_proj < 1:
             raise ValueError(f"num_proj must be >= 1, got {num_proj}")
+
+        # Store ALL configuration — needed for get_config() and re-creation
+        # of sub-state in build(). No weight creation here (Golden Rule).
         self.knots = knots
         self.num_proj = num_proj
         self.seed = seed
-        self._seed_gen = keras.random.SeedGenerator(seed) if seed is not None else None
+        self._seed_gen = (
+            keras.random.SeedGenerator(seed) if seed is not None else None
+        )
 
-        # Pre-compute the integration grid, window, and trapezoidal weights
-        # once — these are static across all calls.
-        import numpy as np
-        t_np = np.linspace(0.0, 3.0, knots, dtype="float32")
-        dt = 3.0 / (knots - 1)
-        weights_np = np.full((knots,), 2.0 * dt, dtype="float32")
-        weights_np[0] = dt
-        weights_np[-1] = dt
-        window_np = np.exp(-0.5 * t_np * t_np).astype("float32")
-        final_weights_np = (weights_np * window_np).astype("float32")
-
-        # Store as non-trainable weights so they serialize with the layer.
-        self.t = self.add_weight(
-            name="t", shape=(knots,), dtype="float32",
-            initializer=keras.initializers.Constant(t_np.tolist()),
-            trainable=False,
-        )
-        self.phi = self.add_weight(
-            name="phi", shape=(knots,), dtype="float32",
-            initializer=keras.initializers.Constant(window_np.tolist()),
-            trainable=False,
-        )
-        self.weights_ = self.add_weight(
-            name="weights", shape=(knots,), dtype="float32",
-            initializer=keras.initializers.Constant(final_weights_np.tolist()),
-            trainable=False,
-        )
+        # Buffer attributes created in build(); declared here for clarity.
+        self.t = None
+        self.phi = None
+        self.weights_ = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Validate input shape."""
+        """Validate input shape and create the non-trainable buffer weights.
+
+        Computes the integration grid, the Gaussian window evaluated on the
+        grid, and the pre-windowed trapezoidal weights once. These are
+        shape-independent of the input but registered here (per the Keras 3
+        Golden Rule that all ``add_weight`` calls live in ``build``).
+        """
         if len(input_shape) < 2:
             raise ValueError(
                 f"SIGRegLayer expects input with rank >= 2, got shape {input_shape}"
@@ -118,15 +173,57 @@ class SIGRegLayer(keras.layers.Layer):
                 "SIGRegLayer requires a known last dimension (D). "
                 f"Got input_shape={input_shape}."
             )
+
+        # Pre-compute the integration grid, window, and trapezoidal weights
+        # once — these are static across all calls. Computed in numpy so the
+        # values are baked into Constant initializers (identical bit-for-bit
+        # to the pre-refactor in-__init__ values).
+        t_np = np.linspace(0.0, 3.0, self.knots, dtype="float32")
+        dt = 3.0 / (self.knots - 1)
+        weights_np = np.full((self.knots,), 2.0 * dt, dtype="float32")
+        weights_np[0] = dt
+        weights_np[-1] = dt
+        window_np = np.exp(-0.5 * t_np * t_np).astype("float32")
+        final_weights_np = (weights_np * window_np).astype("float32")
+
+        # Store as non-trainable weights so they serialize with the layer.
+        self.t = self.add_weight(
+            name="t",
+            shape=(self.knots,),
+            dtype="float32",
+            initializer=keras.initializers.Constant(t_np.tolist()),
+            trainable=False,
+        )
+        self.phi = self.add_weight(
+            name="phi",
+            shape=(self.knots,),
+            dtype="float32",
+            initializer=keras.initializers.Constant(window_np.tolist()),
+            trainable=False,
+        )
+        self.weights_ = self.add_weight(
+            name="weights",
+            shape=(self.knots,),
+            dtype="float32",
+            initializer=keras.initializers.Constant(final_weights_np.tolist()),
+            trainable=False,
+        )
+
         super().build(input_shape)
 
-    def call(self, proj: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
+    def call(
+        self, proj: keras.KerasTensor, training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """Compute the SIGReg statistic.
 
-        :param proj: tensor of shape `(..., N, D)` — typically `(T, B, D)`
-            as in upstream. Averaging happens over the last-but-one axis (N).
-        :param training: unused; SIGReg runs identically in train/eval.
-        :return: scalar tensor (0-D).
+        Args:
+            proj: Tensor of shape ``(..., N, D)`` — typically ``(T, B, D)``
+                as in upstream. Averaging happens over the last-but-one axis
+                ``N``.
+            training: Unused; SIGReg runs identically in train/eval.
+
+        Returns:
+            Scalar tensor (0-D).
         """
         D = proj.shape[-1]
         if D is None:
@@ -171,10 +268,15 @@ class SIGRegLayer(keras.layers.Layer):
         return ()
 
     def get_config(self) -> Dict[str, Any]:
+        """Return all ``__init__`` parameters for serialization."""
         config = super().get_config()
-        config.update({
-            "knots": self.knots,
-            "num_proj": self.num_proj,
-            "seed": self.seed,
-        })
+        config.update(
+            {
+                "knots": self.knots,
+                "num_proj": self.num_proj,
+                "seed": self.seed,
+            }
+        )
         return config
+
+# ---------------------------------------------------------------------
