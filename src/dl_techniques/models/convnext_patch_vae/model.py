@@ -34,6 +34,12 @@ from .config import ConvNeXtPatchVAEConfig
 from .decoder import ConvNeXtPatchDecoder
 from .encoder import ConvNeXtPatchEncoder
 
+# Keys produced by ``keras.Model.get_config()`` that are forwardable
+# straight to ``keras.Model.__init__``. Used by :meth:`from_config` to
+# drop unknown super-class keys before kwargs forwarding (defensive —
+# matches the video_jepa pattern, plan_ca745a6c).
+_KERAS_BASE_KEYS = {"name", "trainable", "dtype"}
+
 
 @keras.saving.register_keras_serializable()
 class ConvNeXtPatchVAE(keras.Model):
@@ -493,13 +499,18 @@ class ConvNeXtPatchVAE(keras.Model):
     def from_config(
         cls, config: Dict[str, Any], custom_objects=None
     ) -> "ConvNeXtPatchVAE":
+        config = dict(config)
         cfg_dict = config.pop("config", None)
         cfg = (
             ConvNeXtPatchVAEConfig.from_dict(cfg_dict)
             if cfg_dict is not None
             else ConvNeXtPatchVAEConfig()
         )
-        return cls(config=cfg, **config)
+        # Defensive narrowing: forward only the keras.Model super-keys
+        # we know are safe — drops any future-added serialized field
+        # that would otherwise leak into the ctor as an unknown kwarg.
+        extra = {k: v for k, v in config.items() if k in _KERAS_BASE_KEYS}
+        return cls(config=cfg, **extra)
 
 
 # ----------------------------------------------------------------------
