@@ -384,6 +384,7 @@ class ReconVisualizationCallback(keras.callbacks.Callback):
         self.recon_loss_type = recon_loss_type
         self.cifar_mean = cifar_mean if cifar_mean is not None else _CIFAR10_MEAN
         self.cifar_std  = cifar_std  if cifar_std  is not None else _CIFAR10_STD
+        self._fixed_samples: Optional[np.ndarray] = None  # lazy-init on first epoch
         os.makedirs(save_dir, exist_ok=True)
 
     def _to_display(self, x: np.ndarray) -> np.ndarray:
@@ -392,38 +393,41 @@ class ReconVisualizationCallback(keras.callbacks.Callback):
             x = x * self.cifar_std + self.cifar_mean
         return np.clip(x, 0.0, 1.0)
 
+    def _get_fixed_samples(self, n: int) -> np.ndarray:
+        """Return cached random samples decoded from a fixed prior draw."""
+        if self._fixed_samples is None:
+            samples = self.model.sample(num_samples=n, seed=42)
+            self._fixed_samples = np.clip(np.array(samples), 0.0, 1.0)
+        return self._fixed_samples
+
+    def _save_grid(self, path: str, originals: np.ndarray, recons: np.ndarray,
+                   samples: np.ndarray, title: str) -> None:
+        n = len(originals)
+        cmap = "gray" if originals.shape[-1] == 1 else None
+        fig, axes = plt.subplots(3, n, figsize=(n * 1.4, 4.8))
+        row_labels = ["original", "recon", "sample"]
+        for row, imgs in enumerate([originals, recons, samples]):
+            for i in range(n):
+                axes[row, i].imshow(imgs[i].squeeze(), cmap=cmap)
+                axes[row, i].axis("off")
+            axes[row, 0].set_ylabel(row_labels[row], fontsize=8)
+        fig.suptitle(title, fontsize=11)
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        plt.savefig(path, dpi=120, bbox_inches="tight")
+        plt.close(fig)
+
     def on_epoch_end(self, epoch: int, logs: Optional[Dict] = None) -> None:
         if epoch % self.frequency != 0 and epoch != 0:
             return
         try:
             outputs = self.model(self.val_samples, training=False)
             originals = self._to_display(self.val_samples)
-            recons    = self._to_display(
-                np.array(outputs["reconstruction"])
-            )
-
-            n = len(originals)
-            cmap = "gray" if originals.shape[-1] == 1 else None
-            fig, axes = plt.subplots(2, n, figsize=(n * 1.4, 3.2))
-
-            for i in range(n):
-                axes[0, i].imshow(originals[i].squeeze(), cmap=cmap)
-                axes[0, i].axis("off")
-                if i == 0:
-                    axes[0, i].set_ylabel("original", fontsize=8)
-                axes[1, i].imshow(recons[i].squeeze(), cmap=cmap)
-                axes[1, i].axis("off")
-                if i == 0:
-                    axes[1, i].set_ylabel("recon", fontsize=8)
-
-            loss_val = (logs or {}).get("loss", float("nan"))
-            fig.suptitle(
-                f"Epoch {epoch + 1}  |  loss={loss_val:.4f}", fontsize=11
-            )
-            plt.tight_layout(rect=[0, 0, 1, 0.96])
+            recons    = self._to_display(np.array(outputs["reconstruction"]))
+            samples   = self._get_fixed_samples(len(originals))
+            loss_val  = (logs or {}).get("loss", float("nan"))
             path = os.path.join(self.save_dir, f"recon_epoch_{epoch + 1:04d}.png")
-            plt.savefig(path, dpi=120, bbox_inches="tight")
-            plt.close(fig)
+            self._save_grid(path, originals, recons, samples,
+                            f"Epoch {epoch + 1}  |  loss={loss_val:.4f}")
         except Exception as exc:
             logger.warning(f"ReconVisualizationCallback failed at epoch {epoch}: {exc}")
 
@@ -434,24 +438,9 @@ class ReconVisualizationCallback(keras.callbacks.Callback):
             outputs = self.model(self.val_samples, training=False)
             originals = self._to_display(self.val_samples)
             recons    = self._to_display(np.array(outputs["reconstruction"]))
-
-            n = len(originals)
-            cmap = "gray" if originals.shape[-1] == 1 else None
-            fig, axes = plt.subplots(2, n, figsize=(n * 1.4, 3.2))
-            for i in range(n):
-                axes[0, i].imshow(originals[i].squeeze(), cmap=cmap)
-                axes[0, i].axis("off")
-                if i == 0:
-                    axes[0, i].set_ylabel("original", fontsize=8)
-                axes[1, i].imshow(recons[i].squeeze(), cmap=cmap)
-                axes[1, i].axis("off")
-                if i == 0:
-                    axes[1, i].set_ylabel("recon", fontsize=8)
-            fig.suptitle("Final reconstruction", fontsize=11)
-            plt.tight_layout(rect=[0, 0, 1, 0.96])
+            samples   = self._get_fixed_samples(len(originals))
             path = os.path.join(self.save_dir, "recon_final.png")
-            plt.savefig(path, dpi=120, bbox_inches="tight")
-            plt.close(fig)
+            self._save_grid(path, originals, recons, samples, "Final reconstruction")
             logger.info(f"Final reconstruction grid saved: {path}")
         except Exception as exc:
             logger.warning(f"ReconVisualizationCallback.on_train_end failed: {exc}")
