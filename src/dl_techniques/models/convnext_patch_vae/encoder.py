@@ -12,8 +12,9 @@ A resolution-agnostic flat single-stage encoder:
         │     to the patch grid (Hp, Wp).
         ▼  LayerNormalization
         ▼  N x [residual + ConvNextV2Block(kernel_size, embed_dim)]
-        ▼  Conv2D(2 * latent_dim, kernel=1) "bottleneck"
-        ▼  split last dim -> (mu, log_var), each (B, Hp, Wp, latent_dim)
+        ▼  Conv2D(latent_dim, kernel=1, Glorot init) "mu_head"     ─┐ parallel
+        ▼  Conv2D(latent_dim, kernel=1, zeros init) "log_var_head" ─┘ heads
+        ▼  -> (mu, log_var), each (B, Hp, Wp, latent_dim)
 
 Design choices (see ``plans/plan_2026-05-25_fb57d478/findings.md``):
 
@@ -31,10 +32,10 @@ Design choices (see ``plans/plan_2026-05-25_fb57d478/findings.md``):
 from __future__ import annotations
 
 import copy
-from typing import Any, Dict, Optional, Tuple
-
 import keras
 from keras import ops
+from typing import Any, Dict, Optional, Tuple
+
 
 from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
 from dl_techniques.utils.logger import logger
@@ -129,13 +130,23 @@ class ConvNeXtPatchEncoder(keras.layers.Layer):
             )
             for i in range(depth)
         ]
-        # 1x1 conv -> (mu, log_var) channel-stacked. Split happens in call().
-        self.bottleneck = keras.layers.Conv2D(
-            filters=2 * latent_dim,
+        # DECISION plan_2026-05-25_a8325e3f/D-003: split into two 1x1 heads so
+        # log_var_head can be zero-initialized, reducing step-1 KL by ~70%.
+        self.mu_head = keras.layers.Conv2D(
+            filters=latent_dim,
             kernel_size=1,
             padding="valid",
             kernel_regularizer=copy.deepcopy(kernel_regularizer),
-            name="bottleneck",
+            name="mu_head",
+        )
+        self.log_var_head = keras.layers.Conv2D(
+            filters=latent_dim,
+            kernel_size=1,
+            padding="valid",
+            kernel_initializer="zeros",
+            bias_initializer="zeros",
+            kernel_regularizer=copy.deepcopy(kernel_regularizer),
+            name="log_var_head",
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -165,7 +176,8 @@ class ConvNeXtPatchEncoder(keras.layers.Layer):
         self.stem_norm.build(post_stem_shape)
         for blk in self.blocks:
             blk.build(post_stem_shape)
-        self.bottleneck.build(post_stem_shape)
+        self.mu_head.build(post_stem_shape)
+        self.log_var_head.build(post_stem_shape)
 
         super().build(input_shape)
 
@@ -191,10 +203,8 @@ class ConvNeXtPatchEncoder(keras.layers.Layer):
             residual = x
             x = blk(x, training=training)
             x = residual + x
-        x = self.bottleneck(x)
-        # Split last dim -> (mu, log_var).
-        mu = x[..., : self.latent_dim]
-        log_var = x[..., self.latent_dim :]
+        mu = self.mu_head(x)
+        log_var = self.log_var_head(x)
         return mu, log_var
 
     def compute_output_shape(
