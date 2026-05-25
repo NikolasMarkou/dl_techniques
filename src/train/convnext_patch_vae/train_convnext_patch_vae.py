@@ -556,9 +556,11 @@ def train(config: TrainingConfig, smoke: bool = False) -> None:
 
     try:
         reloaded = keras.models.load_model(final_path, custom_objects=CUSTOM_OBJECTS)
-        ref_out  = np.array(model(dummy, training=False)["reconstruction"])
-        new_out  = np.array(reloaded(dummy, training=False)["reconstruction"])
-        max_delta = float(np.max(np.abs(ref_out - new_out)))
+        # Compare deterministic encoder mu (not reconstruction — Sampling adds
+        # per-call noise, so two independent calls always differ by design).
+        ref_mu = np.array(model.encode(dummy)[0])
+        new_mu = np.array(reloaded.encode(dummy)[0])
+        max_delta = float(np.max(np.abs(ref_mu - new_mu)))
         if max_delta < 1e-4:
             logger.info(f"Reload check PASSED: max|delta|={max_delta:.2e}")
         else:
@@ -670,16 +672,17 @@ def main() -> None:
 
     smoke = args.smoke
     if smoke:
-        args.epochs       = 3
+        args.epochs        = 3
+        args.image_size    = 32   # override base-parser default of 224
         args.model_variant = "tiny"
-        args.embed_dim    = 16
+        args.embed_dim     = 16
         args.encoder_depth = 1
         args.decoder_depth = 1
-        args.latent_dim   = 4
-        args.sigreg_knots = 5
+        args.latent_dim    = 4
+        args.sigreg_knots  = 5
         args.sigreg_num_proj = 32
-        args.patch_size   = 4
-        logger.info("Smoke mode: tiny model, 3 epochs, synthetic data.")
+        args.patch_size    = 4
+        logger.info("Smoke mode: tiny model, 3 epochs, 32×32, synthetic data.")
 
     # GPU must be configured before any TF/Keras context is created.
     if not smoke:
