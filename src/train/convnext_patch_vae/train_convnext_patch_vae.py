@@ -147,8 +147,8 @@ class TrainingConfig:
 
     def __post_init__(self) -> None:
         if self.experiment_name is None:
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self.experiment_name = f"{self.dataset}_{ts}"
+            variant = self.model_variant or "custom"
+            self.experiment_name = f"{self.dataset}_{variant}"
         if self.img_size % self.patch_size != 0:
             raise ValueError(
                 f"img_size {self.img_size} must be divisible by "
