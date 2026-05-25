@@ -43,6 +43,16 @@ class ConvNeXtPatchVAE(keras.Model):
     :param kwargs: passthrough to :class:`keras.Model`.
     """
 
+    #: Named variant presets — config overrides only. All other fields
+    #: inherit :class:`ConvNeXtPatchVAEConfig` defaults. Mirrors the
+    #: ``models/{bert, resnet, tree_transformer, cliffordnet, vit, ...}``
+    #: ``PRESETS`` convention.
+    PRESETS: Dict[str, Dict[str, Any]] = {
+        "tiny":  {"embed_dim": 64,  "encoder_depth": 2, "decoder_depth": 2, "latent_dim": 8},
+        "base":  {"embed_dim": 128, "encoder_depth": 4, "decoder_depth": 4, "latent_dim": 16},
+        "large": {"embed_dim": 192, "encoder_depth": 6, "decoder_depth": 6, "latent_dim": 32},
+    }
+
     def __init__(
         self,
         config: Optional[ConvNeXtPatchVAEConfig] = None,
@@ -364,6 +374,79 @@ class ConvNeXtPatchVAE(keras.Model):
             loss = ops.convert_to_tensor(0.0, dtype="float32")
         self.loss_tracker.update_state(loss)
         return {m.name: m.result() for m in self.metrics}
+
+    # ------------------------------------------------------------------
+    # Named variants
+    # ------------------------------------------------------------------
+    @classmethod
+    def from_variant(
+        cls,
+        variant: str,
+        pretrained: bool = False,
+        **overrides: Any,
+    ) -> "ConvNeXtPatchVAE":
+        """Build a named variant from :attr:`PRESETS`.
+
+        Args:
+            variant: One of :attr:`PRESETS` keys (``"tiny"``, ``"base"``,
+                ``"large"``).
+            pretrained: If ``True``, attempt to load published weights via
+                :meth:`_download_weights`. No public checkpoints exist —
+                this raises :class:`NotImplementedError` (see D-001).
+            **overrides: Forwarded to :class:`ConvNeXtPatchVAEConfig`,
+                taking precedence over the preset values.
+
+        Returns:
+            Unbuilt :class:`ConvNeXtPatchVAE`. Caller must invoke the
+            model on a dummy batch (or call ``.build(...)``) before
+            ``save`` / ``load_weights``.
+
+        Raises:
+            ValueError: ``variant`` not in :attr:`PRESETS`.
+            NotImplementedError: ``pretrained=True`` (no public weights).
+        """
+        if variant not in cls.PRESETS:
+            raise ValueError(
+                f"Unknown variant '{variant}'. Available: "
+                f"{sorted(cls.PRESETS)}"
+            )
+        cfg_kwargs = {**cls.PRESETS[variant], **overrides}
+        cfg = ConvNeXtPatchVAEConfig(**cfg_kwargs)
+        model = cls(config=cfg)
+        if pretrained:
+            try:
+                weights_path = cls._download_weights(variant)
+                model.load_weights(weights_path)
+            except (IOError, OSError, ValueError) as e:
+                logger.error(
+                    "Pretrained weight load failed for variant '%s': %s",
+                    variant,
+                    e,
+                )
+                raise
+        return model
+
+    @classmethod
+    def _download_weights(cls, variant: str) -> str:
+        """Resolve a pretrained-weights path for ``variant``.
+
+        No public checkpoints are published for this VAE. Per
+        ``D-001`` (and the repo-wide convention shared by
+        ``models/{bert, resnet, tree_transformer, cliffordnet, vit, ...}``),
+        loud failure beats silent random-init.
+
+        Raises:
+            NotImplementedError: Always — no public checkpoints exist.
+        """
+        # DECISION plan_2026-05-25_8faec5b6/D-001: no public checkpoints;
+        # loud failure beats silent random-init. Mirrors bert/bert.py
+        # (plan_9357982a/D-001), tree_transformer (plan_3c3ed037),
+        # resnet, vit, cliffordnet. See
+        # plans/plan_2026-05-25_8faec5b6/decisions.md D-001.
+        raise NotImplementedError(
+            f"No pretrained weights are published for convnext_patch_vae "
+            f"variant '{variant}'."
+        )
 
     # ------------------------------------------------------------------
     # Shape inference
