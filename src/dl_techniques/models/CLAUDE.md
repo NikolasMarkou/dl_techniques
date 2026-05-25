@@ -28,6 +28,7 @@
 - `accunet/` — AccuNet
 - `fractalnet/` — FractalNet
 - `bias_free_denoisers/` — Bias-free denoiser models
+- `convnext_patch_vae/` — ConvNeXt patch-level VAE with SIGReg anti-collapse
 
 ### NLP / Language
 - `bert/` — BERT
