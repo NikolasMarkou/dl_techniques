@@ -384,7 +384,7 @@ class ReconVisualizationCallback(keras.callbacks.Callback):
         self.recon_loss_type = recon_loss_type
         self.cifar_mean = cifar_mean if cifar_mean is not None else _CIFAR10_MEAN
         self.cifar_std  = cifar_std  if cifar_std  is not None else _CIFAR10_STD
-        self._fixed_samples: Optional[np.ndarray] = None  # lazy-init on first epoch
+        self._fixed_z: Optional[np.ndarray] = None  # fixed latents, lazy-init on first epoch
         os.makedirs(save_dir, exist_ok=True)
 
     def _to_display(self, x: np.ndarray) -> np.ndarray:
@@ -394,11 +394,15 @@ class ReconVisualizationCallback(keras.callbacks.Callback):
         return np.clip(x, 0.0, 1.0)
 
     def _get_fixed_samples(self, n: int) -> np.ndarray:
-        """Return cached random samples decoded from a fixed prior draw."""
-        if self._fixed_samples is None:
-            samples = self.model.sample(num_samples=n, seed=42)
-            self._fixed_samples = np.clip(np.array(samples), 0.0, 1.0)
-        return self._fixed_samples
+        """Decode fixed latent codes through current model weights."""
+        if self._fixed_z is None:
+            cfg = self.model.config
+            hp = wp = cfg.patches_per_side
+            self._fixed_z = np.array(
+                keras.random.normal((n, hp, wp, cfg.latent_dim), seed=42)
+            )
+        decoded = self.model.decode(keras.ops.convert_to_tensor(self._fixed_z))
+        return np.clip(np.array(decoded), 0.0, 1.0)
 
     def _save_grid(self, path: str, originals: np.ndarray, recons: np.ndarray,
                    samples: np.ndarray, title: str) -> None:
