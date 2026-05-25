@@ -30,254 +30,119 @@
 - Anchor at impact site (not at decision definition). One anchor per impact site, even if shared with sibling decision.
 <!-- /COMPRESSED-SUMMARY -->
 
-## plan_2026-05-14_9c6387a3
+## plan_2026-05-25_74f0eac9
 ### D-001 | EXPLORE → PLAN | YYYY-MM-DD
 **Context**: <one-paragraph background — what was discovered in EXPLORE>
 **Decision**: <chosen approach in one sentence>
 **Trade-off**: <X> **at the cost of** <Y>
 **Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-14_9c6387a3/D-NNN` anchor exists in source)
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-25_74f0eac9/D-NNN` anchor exists in source)
 -->
 
-### D-001 | EXPLORE → PLAN | 2026-05-14
-**Context**: EXPLORE found that all three training scripts (`train_e1_image.py`, `train_e3_faithfulness.py`, `train_e5_clevr_hans.py`) already accept `--seed` and call `keras.utils.set_random_seed(args.seed)` in `main()` before any dataset shuffling or model construction. This is the canonical Keras 3 multi-source seed primitive (seeds Python `random`, `np.random`, `tf.random.set_seed`, and Keras backend RNG simultaneously).
-**Decision**: Drive each script via subprocess from a new `multiseed_sweep.py`; do not edit library or training scripts.
-**Trade-off**: Process-startup overhead per seed (~3-5s for TF init) **at the cost of** preserving the FROZEN invariant on training scripts and avoiding any cross-seed state leakage (every TF session is fresh).
-**Reasoning**: Subprocess driver is preferred (per goal text). Each seed gets a clean TF/Keras initialization, eliminating cross-seed state contamination. The ~3-5s overhead × 5 seeds × 4 experiments = ~80s total — negligible against ~90min total run. Alternative (in-process import + `keras.backend.clear_session()` between runs) is brittle and conflates state.
-**Anchor-Refs**: none (no source edits).
+### D-001 | EXPLORE → PLAN | 2026-05-25
+**Context**: Model review found 6 quality issues. 4 are low-effort genuine gaps (decoder docstrings ×2, use_v2_block dead-field comment). 2 are known repo-wide patterns with no urgency (tf.GradientTape backend coupling, optimizer.apply_gradients compat shim).
+**Decision**: Fix only the 4 low-effort gaps in this plan. Skip the 2 repo-wide patterns.
+**Trade-off**: Targeted small fix **at the cost of** leaving tf.GradientTape backend coupling unflagged in the source code.
+**Reasoning**: tf.GradientTape is used identically in video_jepa — fixing it in one file without fixing all siblings would be inconsistent and out of scope. The risk is theoretical (JAX/PyTorch backend migration, not a near-term concern). optimizer.apply_gradients still works in TF 2.18.
 
-### D-002 | PLAN | 2026-05-14
-**Context**: E5 specifies a paired permutation test for circuit-vs-MLP shortcut-gap difference. With n=5 paired samples, parametric tests (Welch t) are statistically dubious. Permutation tests are exact and non-parametric in small n.
-**Decision**: Use paired sign-flip permutation test (B=10000, two-sided) on per-seed `(circuit_shortcut_gap - mlp_shortcut_gap)` differences, with a deterministic RNG (`np.random.default_rng(20260514)`).
-**Trade-off**: Conservatism on small-n (worst-case p-value resolution = 1/2^5 = 0.03125 if all sign flips enumerated) **at the cost of** zero distributional assumptions.
-**Reasoning**: At n=5, only 2^5=32 unique sign-flip patterns exist. Sampling B=10000 is essentially complete enumeration (with replacement). p-value resolution is exact for the chosen sample. Welch t would require normality assumption that 5 paired samples cannot validate; permutation is the textbook choice (Efron 1979, Phipson & Smyth 2010).
-**Anchor-Refs**: none (new module).
+### D-002 | EXPLORE → PLAN | 2026-05-25
+**Context**: Training script must compile with `loss=None` (losses from `add_loss`). The VAE train_vae.py uses standard `compile(loss=...)` (incompatible). The video_jepa trainer has the right `loss=None` pattern but targets a very different architecture. The ViT trainer has the right CIFAR-10 dataset pipeline.
+**Decision**: Hybrid Pattern-4 (dataset, callbacks, argparse, dataclass config) + video_jepa (compile pattern, TrainingCurvesCallback, reload check).
+**Trade-off**: Hybrid approach **at the cost of** having no single verbatim reference file to copy — must synthesize from two sources.
+**Reasoning**: Both halves are well-established in the repo. The hybrid is necessary because no single trainer covers both an image dataset AND a loss=None compile pattern. Synthesis risk is low (both halves are individually tested patterns).
 
-### D-003 | PLAN | 2026-05-14
-**Context**: E3 attribution sweep uses LIME and SHAP. Default hyperparams (`--lime-num-samples 2000 --shap-nsamples 128 --num-attr-samples 32`) make a single E3 run take ~30 min. With 5 seeds, this is 2.5h on E3 alone — still inside the 4h leash but using most of it for marginal statistical benefit.
-**Decision**: Pass reduced hyperparams `--num-attr-samples 8 --lime-num-samples 200 --shap-nsamples 32` to the E3 subprocess invocations (matching the LESSONS L67 reduced run that completed E3 in 6 min total).
-**Trade-off**: Lower attribution-stability resolution per seed (LIME/SHAP variance is dominated by `lime_num_samples`) **at the cost of** total wall-clock budget headroom.
-**Reasoning**: The headline metrics for the multi-seed sweep are mean and std across seeds, not within-seed attribution stability. The seed-to-seed variance from `keras.utils.set_random_seed` is much larger than the LIME/SHAP sampling variance at these hyperparams. The prior 6-min E3 run produced usable circuit_suff_auc / lime_suff_auc / shap_suff_auc numbers; we replicate that recipe.
+### D-003 | EXPLORE → PLAN | 2026-05-25
+**Context**: CIFAR-10 with `recon_loss_type="mse"` needs mean/std normalization (produces values outside [0,1] — compatible with MSE). With `recon_loss_type="bce"` inputs must stay in [0,1] — incompatible with mean/std normalization. The script must handle both without silently corrupting the BCE loss.
+**Decision**: Default `recon_loss_type="mse"` with mean/std normalization. When `recon_loss_type="bce"`, use `/255`-only scaling (no subtract). Add explicit check in dataset builder that selects pipeline branch based on `config.recon_loss_type`.
+**Trade-off**: Two dataset pipelines **at the cost of** slightly more code in the dataset builder.
+**Reasoning**: Silent BCE corruption is worse than 10 extra LOC. The check is simple and statically deterministic at build time.
+
+### D-004 | EXPLORE → PLAN | 2026-05-25
+**Context**: Success guard in ViT trainer checks `val_accuracy >= threshold`. For an unsupervised VAE, there is no accuracy — the guard must use `val_loss`.
+**Decision**: Guard on `val_loss <= success_threshold` (lower-is-better). Default `success_threshold=0.02` for CIFAR-10 MSE (empirical heuristic from README T1a/T1b menu; not a validated floor). Document this as advisory.
+**Trade-off**: Loss-based guard **at the cost of** no validated floor (CIFAR MSE <0.02 is a heuristic, not a literature bound).
+**Reasoning**: The guard is advisory — it logs a WARNING if training appears not to have converged, but does not block use of the model. For a new architecture without published convergence floors, a heuristic default with a `--success-threshold` CLI override is the right tradeoff.
+
+## plan_2026-05-25_8faec5b6
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-25_8faec5b6/D-NNN` anchor exists in source)
+-->
+
+### D-001 | PLAN | 2026-05-25
+**Context**: Repository convention for `models/{bert, resnet, tree_transformer, cliffordnet, vit, depth_anything, prism, lewm, gpt2}` is that `from_variant(pretrained=True)` must raise `NotImplementedError` from `_download_weights()` (NOT silently random-initialize). Anchored historically in plan_3c3ed037 D-001 (tree_transformer), plan_9357982a D-001 (bert), plan_0a5779e8 D-001 (tree_transformer __init__ alignment). The current `convnext_patch_vae` package lacks this surface entirely.
+**Decision**: Add `_download_weights(variant) -> NotImplementedError` raise to `ConvNeXtPatchVAE`, surfaced via `from_variant(variant, pretrained=True)`. Anchor at the raise site with `# DECISION plan_2026-05-25_8faec5b6/D-001`.
+**Trade-off**: Loud failure on `pretrained=True` **at the cost of** explicit caller error handling (callers must catch `NotImplementedError` if they ever opt into pretrained).
+**Reasoning**: Silent random-init was identified as a footgun in plan_9357982a and locked in across the repo. Convnext_patch_vae cannot ship a divergent surface. Alternatives rejected: (a) silently load a fresh model on `pretrained=True` — invalidated by repo convention; (b) raise `ValueError` — wrong taxonomy (it's a missing implementation, not a bad value); (c) auto-download from a URL — no public checkpoints exist for this VAE.
+**Anchor-Refs**: `src/dl_techniques/models/convnext_patch_vae/model.py:470` (`_download_weights` `NotImplementedError` raise site, committed in 3505b9b3).
+
+### D-002 | PLAN | 2026-05-25
+**Context**: Guide §11.1 + repo convention require a module-level `create_<model>` factory wrapping `from_variant`. Without it, users must call `ConvNeXtPatchVAE(config=ConvNeXtPatchVAEConfig(...))` directly — a two-step import chain that is inconsistent with the bert/resnet/tree_transformer/cliffordnet surface.
+**Decision**: Add `create_convnext_patch_vae(variant="base", *, pretrained=False, **overrides) -> ConvNeXtPatchVAE` as a thin delegation to `ConvNeXtPatchVAE.from_variant`. Anchor at the function definition with `# DECISION plan_2026-05-25_8faec5b6/D-002`.
+**Trade-off**: Two parallel entry-points (factory + ctor) **at the cost of** mild API duplication.
+**Reasoning**: The duplication is documented and shallow (the factory is one line). Alternatives rejected: (a) replace `__init__(config=...)` with flat kwargs — breaks video_jepa-template parity locked in SYSTEM.md; (b) only expose `from_variant` and drop the bare factory — diverges from bert/resnet template; (c) make the factory a wrapper that also constructs the config from individual kwargs — over-engineering, the config dataclass already handles that via `ConvNeXtPatchVAEConfig(**kwargs)`.
+**Anchor-Refs**: `src/dl_techniques/models/convnext_patch_vae/model.py:542` (module-level `create_convnext_patch_vae` factory anchor, committed in 585a0801).
+
+### REFLECT | 2026-05-25
+**Context**: All 7 EXECUTE steps completed without leash hits, surprises, or pivots. Final scoped pytest 19/19 PASS in 29.07s. All 12 success criteria verified PASS. Zero scope drift. 4 fb57d478 D-anchors + 2 new 8faec5b6 D-anchors all in place at expected line numbers.
+**Decision**: Recommend transition to CLOSE.
+**Trade-off**: Closing now ships the guide-compliant surface **at the cost of** deferring training and the additional ablation tests (T1-T4 in the README training menu) to follow-up plans — already documented as out-of-scope in plan.md.
+**Reasoning**: Every plan-level invariant held; no findings were contradicted during EXECUTE; complexity budget under target (1/2 new abstractions, 0/3 new files, +306 net LOC inside the LESSONS sibling-class band). Devil's-advocate concern: SC10 came in at 29.07s — close to the 30s budget. Future additions to this test file would push over. Mitigation: 3 of the 4 new TestFactory tests use `img_size=8` or `16` to minimize wallclock; further additions should follow that pattern. Logging this for LESSONS at CLOSE.
+**Anchor-Refs**: none new.
+
+## plan_2026-05-25_fb57d478
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-25_fb57d478/D-NNN` anchor exists in source)
+-->
+
+### D-001 | EXPLORE → PLAN | 2026-05-25
+**Context**: A ConvNeXt patch-level VAE with SIGReg anti-collapse is greenfield in this repo. video_jepa offers reusable patterns (config dataclass, custom train_step, per-component Mean trackers, add_loss). SIGReg's `(..., N, D)` contract maps naturally to `(B, Hp*Wp, latent_dim)` — N = patches per image. ConvNeXtV2Block + GRN are repo primitives. `Sampling` layer accepts rank-4 latents.
+**Decision**: Build a new package `src/dl_techniques/models/convnext_patch_vae/` with `{config, encoder, decoder, model, __init__, README}`. Flat single-stage block stack (no spatial downsampling beyond the stem). Per-patch 4D latent `(B, Hp, Wp, latent_dim)`. Loss = recon + beta_kl * KL_per_patch + lambda_sigreg * SIGReg on `(B, Hp*Wp, latent_dim)` view of post-reparam `z`. No EMA target, no positional embedding, no temporal axis.
+**Trade-off**: A new 8-file package and 3 new abstractions (over default complexity budget) **at the cost of** zero blast radius on existing models. The over-budget cost is the established repo convention for new model families.
+**Reasoning**: Existing `vae/` is image-level w/ global pool (not resolution-agnostic); `masked_autoencoder/` is patch-level but deterministic. The patch-VAE niche is empty and must be built. Alternatives rejected: (a) extend `vae/` with a `resolution_agnostic=True` toggle — would double-pay the existing global-pool path's complexity; (b) reuse `video_jepa/`'s `(B, T, Hp, Wp, D)` plumbing with `T=1` — wastes temporal infrastructure and confuses the public API; (c) build under `masked_autoencoder/` — that framework's loss is masked-only recon, incompatible with VAE recon. Flat single-stage at iter-1 (not hierarchical) is the smallest experiment that falsifies the hypothesis.
+**Anchor-Refs**: (will be added at EXECUTE time at `src/dl_techniques/models/convnext_patch_vae/model.py` — train_step site and SIGReg reshape site)
+
+### D-002 | PLAN | 2026-05-25
+**Context**: Two valid SIGReg bindings exist (F2 Option A "per-image, N=patches" vs Option B "per-patch-position, N=batch"). Plus Option C ("on post-reparam z" vs "on encoder grid").
+**Decision**: Bind SIGReg on `ops.reshape(z, (B, Hp*Wp, latent_dim))` — post-reparameterization, per-image patch distribution (Option A applied to Option C).
+**Trade-off**: Targets the literal "patch-collapse" concept in one cheap pass **at the cost of** not regularizing per-position statistics (Option B) and not regularizing the pre-reparam encoder grid.
+**Reasoning**: (1) Conceptually clean — regularize the same quantity KL targets. (2) Resolution-agnostic — N scales with image size; lambda_sigreg need not be retuned per resolution. (3) Single SIGReg call per forward (cheap). Option B (per-position) discourages positional information which is undesired since we WANT spatial structure. Pre-reparam regularization would conflict with the stochastic latent.
+**Anchor-Refs**: (will be added at EXECUTE Step 4 at the reshape site in `model.py`)
+
+### D-003 | PLAN | 2026-05-25
+**Context**: Training menu must be honest about which experiment falsifies the hypothesis. User goal explicitly asks "honest opinion on which experiments are worth running first".
+**Decision**: Tier 1 = CIFAR-10 SIGReg-ON + SIGReg-OFF paired run (~1 hour total on RTX 4090). Tier 2-3 conditional on Tier 1. Do NOT recommend ImageNet, MNIST, hierarchical encoder, or 256+ resolution at iter-1.
+**Trade-off**: Smallest falsifiable experiment first **at the cost of** delayed evidence on scale (T2/T3 cover that downstream).
+**Reasoning**: CIFAR-10 32x32 patch=4 gives N=64 (above SIGReg's stability floor) with 1-hour wall-clock per run. A SIGReg-on/off pair is the exact falsification test of the claim "SIGReg on per-patch latents prevents collapse without hurting recon". Anything larger or more elaborate before this pair has run is gold-plating. MNIST is too easy — recon is trivial even with collapsed latents, so it cannot falsify.
+**Anchor-Refs**: none (training-menu decision, no code anchor).
+
+## plan_2026-05-25_853605c1
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-25_853605c1/D-NNN` anchor exists in source)
+-->
+
+### D-001 | EXPLORE → PLAN | 2026-05-25
+**Context**: `sigreg.py` violates the §1.1 Golden Rule by calling `add_weight` for 3 non-trainable buffers inside `__init__`, and imports `numpy` inside that method. Behavior is otherwise correct and consumers (`models/lewm/model.py`, 3 tests) depend on a stable public surface.
+**Decision**: Pure refactor — move buffer creation + numpy precompute into `build()`, hoist `import numpy as np` to module top, modernize class docstring to Google-style (Args / Input shape / Output shape / Architecture), keep math + signature + `get_config()` identical.
+**Trade-off**: Conformance + maintainability **at the cost of** trivial code churn (single file) and slightly later buffer materialization (on first call instead of construction).
+**Reasoning**: Smallest change that closes the conformance gap. Alternative (leaving as-is) was rejected because the user explicitly asked for guide-compliance, and the Golden Rule violation is the only material gap. Alternative (also renaming attributes / changing signature) rejected — would force changes in `models/lewm/model.py` and tests for zero correctness gain.
+**Anchor-Refs**: none — refactor introduces no decision worth anchoring in source.
+
+### D-002 | REFLECT → CLOSE | 2026-05-25
+**Context**: After Step 2, all 6 success criteria PASS (3 pytest + 3 grep). No regressions, no scope drift, no debug artifacts, no simplification blockers.
+**Decision**: Recommend CLOSE.
+**Trade-off**: Ship the refactor now **at the cost of** not adding a buffer-bit-equality snapshot test (deemed unnecessary — behavioral tests cover what matters).
+**Reasoning**: Plan executed exactly as designed. Falsification signals (AttributeError on buffers, test 2 flip, config key mismatch) all silent. The only prediction-accuracy delta is +102 LOC vs net-zero target, driven entirely by docstring expansion (Architecture diagram + Example) — not behavioral complexity. Complexity budget intent honored.
+**Devil's-advocate**: One reason this could still be wrong — the layer's buffers now materialize on first `call()` rather than at construction, so any user code that introspects `layer.weights` before a forward pass would now see an empty list. Searched consumer files (`models/lewm/model.py`, the 3 tests): none do this. Safe in this repo; would be a behavior change for any hypothetical external user.
 **Anchor-Refs**: none.
-
-### D-004 | PLAN | 2026-05-14
-**Context**: Some metrics may saturate (E5 oracle val_acc=1.000 across all seeds; E3 parity_k8 hard_acc near 1.000) yielding std=0. Bootstrap CI on zero-variance data has width 0; permutation test on identical paired data has p=1.0.
-**Decision**: Stats module handles zero-variance cases explicitly: `bootstrap_ci` returns `(value, value)` when all data identical; `paired_permutation_test` returns `(0.0, 1.0)` when all paired diffs are zero. Both behaviors are unit-tested.
-**Trade-off**: Slight branching in pure functions **at the cost of** robust degenerate-case behavior (no NaN propagation, no divide-by-zero).
-**Reasoning**: Saturation is an expected real outcome of these benchmarks (LESSONS L61). Refusing to handle it cleanly is a footgun. The unit tests pin the contract.
-**Anchor-Refs**: none.
-
-## plan_2026-05-14_c95e848c
-### D-001 | EXPLORE → PLAN | YYYY-MM-DD
-**Context**: <one-paragraph background — what was discovered in EXPLORE>
-**Decision**: <chosen approach in one sentence>
-**Trade-off**: <X> **at the cost of** <Y>
-**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-14_c95e848c/D-NNN` anchor exists in source)
--->
-
-### D-001 | EXPLORE → PLAN | 2026-05-14
-**Context**: E5 (CLEVR-Hans3) needs a vision pipeline with a `LearnableNeuralCircuit` head. Dataset is MIT-licensed and headless-downloadable (~2.4 GB). `keras.applications.ResNet50` is the only live pretrained Keras CNN; in-house ResNet18 has placeholder weights. NS-CL paper-reproduction is 2-3 days — out of 16h budget.
-**Decision**: Three-way comparison: ResNet50-frozen+circuit vs ResNet50-frozen+MLP (param-matched) vs perfect-perception oracle (scene-graph JSON → circuit). Wall-clock leashes: download 2h, per-model 6h, total 16h. Honest-negative branch if download fails.
-**Trade-off**: Substitute ResNet-18 with ResNet50 **at the cost of** strictly param-matched comparison to the analysis summary's original spec.
-**Reasoning**: ResNet50 is the only live pretrained Keras CNN. NS-CL replaced with oracle because (i) it isolates the reasoning-head question from perception quality, (ii) ships within budget. Follows `train_e1_image.py` (LESSONS L51 circuit defaults).
-**Anchor-Refs**: pending — add `# DECISION plan_2026-05-14_c95e848c/D-001` to `src/train/logic/train_e5_clevr_hans.py` at model-factory site during EXECUTE.
-
-## plan_2026-05-14_e26eede2
-### D-001 | EXPLORE → PLAN | 2026-05-14
-**Context**: `to_symbolic()` returns a multi-line human-readable string, not an executable AST (F1). Parsing it back into a categorical-domain predicate is brittle and crosses an unnecessary abstraction layer.
-**Decision**: Score rule recovery by evaluating the **hard-extracted Keras model** directly on the enumerated 432-config one-hot encoded categorical domain. Compare predictions vs published-rule ground truth on those 432 configs.
-**Trade-off**: Conceptual clarity + bit-exact correctness **at the cost of** not producing a SymPy/z3-style symbolic-equivalence certificate (the score is empirical, not algebraic). Acceptable because Monks attribute domain is exhaustively enumerable (432 configs) so empirical = algebraic here.
-**Reasoning**: Truth-table equivalence on a finite domain IS algebraic equivalence. Rejected: (a) parsing to_symbolic (brittle, ambiguous), (b) z3/sympy SMT (overkill for 432 rows, install cost).
-
-### D-002 | EXECUTE/step-1 smoke | 2026-05-14
-**Context**: OpenML returns combined (124 train + 432 test concat, but ORDER not contractually guaranteed); UCI direct-download (`https://archive.ics.uci.edu/ml/machine-learning-databases/monks-problems/monks-N.{train,test}`) returns Thrun's canonical splits in standard format `class a1..a6 id`.
-**Decision**: Use UCI direct-download as PRIMARY path. `openml` install is kept as a soft dep but the loader does not depend on it. UCI files are cached on first download under `~/.cache/dl_techniques/monks/`.
-**Trade-off**: Loader is simpler + matches canonical splits exactly **at the cost of** depending on the UCI mirror staying up. Acceptable: UCI is the canonical source; files are tiny (~5KB each) so caching is trivial.
-**Reasoning**: Smoke-test in step 1 showed all 6 UCI files download in ~2s with no auth/throttling; OpenML combined-row encoding requires inferring split order (non-canonical).
-
-### D-003 | PLAN | 2026-05-14
-**Context**: User-supplied "FULL AUTONOMY" override: skip PC-PLAN/PC-REFLECT user gates, do not pause on AskUserQuestion, run honest-negative CLOSE if criteria fail unrecoverably.
-**Decision**: Proceed directly from PLAN to EXECUTE without user approval. Log every conservative-default decision here. On Pre-Mortem trigger or autonomy-leash hit, follow the plan-specified action (REFLECT and honest-negative CLOSE) without pausing.
-**Trade-off**: Speed + the user's stated minimum-interaction preference **at the cost of** giving up the gate-check protection that would normally catch a malformed plan before EXECUTE.
-**Reasoning**: User explicit override. Plan is grounded in 3 deep findings + frozen-helper inventory; PC-PLAN gate would be a no-op here.
-
-### D-004 | REFLECT | 2026-05-14
-**Context**: All 8 SC PASS. The >5pt-on-≥2-of-3 paper-hook claim from `analyses/analysis_2026-05-13_9c535f78` §E4 is REFUTED on Monks (mlp_matched ties or slightly beats circuit on all three tasks; xgboost is the weak baseline). The rule-recovery capability claim is CONFIRMED (circuit hits 0.995 / 1.000 / 0.965). The MUX learning curve shows circuit/MLP/XGBoost converge together — no unique low-data inductive bias for circuit.
-**Decision**: Honest-negative CLOSE on the comparative claim, honest-positive CLOSE on the rule-recovery claim. Do NOT re-tune the circuit to chase the >5pt criterion; that would be p-hacking against the falsification signal that just fired (Pre-Mortem Scenario B / D variants).
-**Trade-off**: Scientific integrity + the explicit honest-negative protocol from this plan + LESSONS L62/L67 (honest-negative precedent) **at the cost of** a less-glamorous paper-hook framing.
-**Reasoning**: User said "honest opinion ... no need to celebrate trivial results." Two negatives + one positive is more useful than tweaking until a different verdict appears.
-
-<!-- Schema example — DO NOT REMOVE. Real entries follow this shape.
-     See references/file-formats.md "Entry Schema by Type" for required fields per entry type.
-     In-code anchors carry the plan-id prefix: `# DECISION plan_2026-05-14_e26eede2/D-NNN` (see references/decision-anchoring.md).
-
-### D-001 | EXPLORE → PLAN | YYYY-MM-DD
-**Context**: <one-paragraph background — what was discovered in EXPLORE>
-**Decision**: <chosen approach in one sentence>
-**Trade-off**: <X> **at the cost of** <Y>
-**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-14_e26eede2/D-NNN` anchor exists in source)
--->
-
-## plan_2026-05-13_798d3a60
-### D-001 | EXPLORE → PLAN | YYYY-MM-DD
-**Context**: <one-paragraph background — what was discovered in EXPLORE>
-**Decision**: <chosen approach in one sentence>
-**Trade-off**: <X> **at the cost of** <Y>
-**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-13_798d3a60/D-NNN` anchor exists in source)
--->
-
-### D-001 | EXPLORE → PLAN | 2026-05-14
-**Context**: EXPLORE produced 4 findings (F1–F4) confirming: (a) `LearnableNeuralCircuit` already accepts rank-4 input (no library change for E1, ghost constraint), (b) `extract_hard_inplace`/`_iter_inner_ops`/`roundtrip_check`/CSV writers are reusable from `train_benchmark.py`, (c) `lime` + `shap` are NOT installed in `.venv` (HARD BLOCKER, first plan step), (d) `circuit_depth=2` + `arithmetic_op_types=['add','max','min']` + `apply_sigmoid_per_depth='first_only'` are NaN-safe pins (LESSONS L51). E1 = Conv-stem + circuit + GlobalPool + Dense on MNIST/CIFAR-10. E3 = 3 new boolean tasks (`mux_11bit`, `parity_k8`, `random_dnf_8input_4term`) with `StopOnAccuracyBand` partial-convergence + circuit/LIME/SHAP attribution faithfulness comparison. Headline metric is hard-extraction Δ at non-saturation.
-**Decision**: Ship 2 new sibling training scripts (`train_e1_image.py`, `train_e3_faithfulness.py`) plus 2 small helper modules (`callbacks_band.py`, `attributions.py`) under `src/train/logic/`. Library code and `train_benchmark.py` are FROZEN.
-**Trade-off**: ~1960 LOC of new code (4 source + 4 tests) **at the cost of** some duplication between E1 and E3 trainers (band-checkpoint helper, hard-extraction wrapper) that could in principle live in a shared util module.
-**Reasoning**: N=2 sibling files is below the LESSONS L11 coupling-crossover (N≥4). Pre-extracting a shared util would inflate abstraction count (5/4 budget) and create a 3-file change boundary for any future tweak. If REFLECT shows >40 LOC of true duplication, factor then. Alternative considered & rejected: extend `train_benchmark.py` in place — rejected because it's anchored as the boolean benchmark (plan_25774a34 D-001 coherent unit) and would break SC7 (existing 254 tests + schema). Alternative considered & rejected: extend the circuit layer — rejected because rank-4 already works (ghost constraint, F1 + plan_2aaad563 precedent).
-**Anchor-Refs**: pending — will add `# DECISION plan_2026-05-13_798d3a60/D-001` at top of `src/train/logic/train_e1_image.py` and `src/train/logic/train_e3_faithfulness.py` once those files are created in Steps 6 and 10.
-
-### D-002 | EXECUTE step-5 fix-attempt-2 | 2026-05-14
-**Context**: Step 5 SC6 test failed on gradient×input attribution: per-bit normalized mass on a trained parity_k6 model had a max/min ratio of 2.85x (>2x falsification threshold from Pre-Mortem Scenario 4). The random Dense embedding's per-bit weights don't marginalize when grad×input is evaluated on a single sample, even averaged over inputs.
-**Decision**: Replace `circuit_attributions` with integrated gradients (Sundararajan et al. 2017) on a baseline=0.5 → x path with n_steps=32. Test now passes with ratio < 2.0.
-**Trade-off**: Modest 32× compute overhead per attribution **at the cost of** symmetry-preserving, completeness-axiom-satisfying attributions that align with the SC6 oracle.
-**Reasoning**: Integrated gradients is the standard differentiable-saliency method and is mathematically guaranteed to preserve task symmetries. The compute overhead is acceptable: ~32 forward+backward passes per sample, dwarfed by LIME (5000 samples) and SHAP (256 samples). The plan's original wording ("combination probabilities × involved input indices") was design speculation; the integrated-gradient implementation is the same "circuit-native differentiable" idea executed correctly. Pre-Mortem Scenario 4 is therefore not a falsification of the experiment design — it correctly flagged a flawed first attempt at the rule.
-**Anchor-Refs**: `src/train/logic/attributions.py:81-86` (in-code `# DECISION plan_2026-05-13_798d3a60/D-002` block immediately above `circuit_attributions`).
-
-### REFLECT Verdict | 2026-05-14
-**Phase 1 Gate-In**: read state.md, plan.md, progress.md, verification.md, findings.md, checkpoints/, decisions.md, changelog.md.
-
-**Phase 2 Evaluate**:
-- All 8 success criteria PASS (see verification.md).
-- 231 pre-existing layer logic tests still pass (no regression).
-- 53 new train logic tests pass.
-- No scope drift: exactly the 8 planned files created; one in-scope D-002 anchor block added in attributions.py during REFLECT to address validate-plan anchor-refs-stale warning.
-- Changelog scan: one MED-radius edit (attributions.py at step-5) anchored to D-002 with clear reason; no thin reasons.
-- Validate plan script: 28 ERRORs are all orphan anchors from OTHER plans (pre-existing codebase debt), 1 transition-format WARN is cosmetic — none introduced by this plan.
-- 6 Simplification Checks: no blockers (no wrapper cascades, no copy-paste, no exception swallowing, no type escapes, no adapters, no "temporary" workarounds introduced).
-- Headline result: **hard-extraction Δ FAITHFUL on every band-entry checkpoint across all 5 task/dataset configurations** (MNIST, CIFAR-10, mux_11bit, parity_k8, random_dnf). Pre-Mortem Scenario 3 STRONG-POSITIVE outcome confirmed.
-- D-002 (Pre-Mortem Scenario 4 fired at step-5) was correctly resolved within autonomy leash by switching to integrated gradients — not a plan failure, just a rule refinement.
-
-**Root-cause analysis**: not applicable; all criteria pass on first iteration.
-
-**Recommendation**: CLOSE. Per the user's pre-approval (sleeping), proceed directly to CLOSE without blocking.
-
-## plan_2026-05-13_25774a34
-### D-001 | EXPLORE to PLAN | 2026-05-14
-**Context**: User asked for "something more elaborate / train and test it". Previous plan (`plan_2026-05-13_d256b568`) trivially proved the layer trains on K=4 parity. The natural escalation is a multi-task benchmark + comparison + faithfulness study.
-
-**Decision**: One new file `src/train/logic/train_benchmark.py` containing 4 tasks × 3 models grid plus an in-place hard-extraction faithfulness test, dumping CSV + markdown report.
-
-**Trade-off**: A single fat file (~500 LOC) **at the cost of** test/refactor coupling — if any one component (task generator, model factory, extraction) breaks, the whole file is touched. Accepted because: (a) keeps within the 2/3 files budget; (b) entire benchmark is a coherent unit; (c) follows the precedent set in `train_boolean_circuit.py` (also a single file).
-
-**Reasoning**:
-- Rejected: split into `tasks.py` + `models.py` + `extraction.py` + `runner.py` — would be 4 files, well over budget; the coupling is real but not painful at this scale.
-- Rejected: extend `train_boolean_circuit.py` in place — that file is the "single-task convenience" entry per prior plan; keeping benchmark vs single-task separate preserves both use cases.
-- Rejected: a Keras `Callback`-based extraction probe — too clever; in-place weight swap + restore is simpler and bypasses callback ordering issues.
-
-**Anchor-Refs**: D-002 will anchor at the extract_hard_inplace function in S1; D-003 if any test-locked-in invariant emerges during S2.
-
-## plan_2026-05-13_d256b568
-### D-001 | EXPLORE to PLAN | 2026-05-14
-**Context**: User asked to "create a model and a train file so we can see for real if this thing works". The "thing" is `LearnableNeuralCircuit` from the prior plan. Done well, the validation is an empirical proof that the layer's symbolic readout reflects what it actually learned.
-
-**Decision**: Single-file train script `src/train/logic/train_boolean_circuit.py`. Task = synthetic boolean function recovery (parity, majority, random k-DNF). Architecture = Dense embed → LearnableNeuralCircuit → Dense head. Eval = held-out accuracy + `to_symbolic()` printout + save/load round-trip.
-
-**Trade-off**: Synthetic data **at the cost of** less "realism" than image / NLP. Acceptable because: (a) the goal is to validate the layer, not to set a benchmark; (b) ground-truth boolean functions give an interpretable target the symbolic readout can be checked against; (c) tiny fast-iterating models.
-
-**Reasoning**:
-- Rejected: vision classifier (would confound circuit-vs-CNN); precedent at `src/train/latent_reasoning_vision/circuit.py` is 1200 LOC of vision pipeline noise.
-- Rejected: NLP classification (token embeddings, batching complexity not needed).
-- Rejected: only majority (linearly separable; doesn't prove non-linear capacity).
-- Picked: parity + majority + random-DNF as a small task triad — each tests a different property.
-
-**Anchor-Refs**: any DECISIONS anchored in code will be added in S2/S3.
-
-## plan_2026-05-13_e33114da
-### D-001 | EXPLORE to PLAN | 2026-05-13
-**Context**: Prior epistemic-deconstructor review (session `analysis_2026-05-13_62e26431`) produced a punch-list: 6 BUGs, 4 GAPs, ~8 DESIGN, 3 DOC. User asked for double-check + implement-everything. Each finding re-verified by re-reading source and (for B1) numerical check.
-
-**Decision**: Implement everything in one plan with 17 granular steps; commit per step. No new abstractions beyond `inner_*_kwargs` dict params (1/2 budget). All math/API changes default to legacy behavior; new flags opt-in.
-
-**Trade-off**: 17 commits and ~200 net LOC **at the cost of** churn in `neural_circuit.py` and `logic_operators.py`. Acceptable because every fix is independently small and reversible by reverting that one commit.
-
-**Reasoning**:
-- Rejected "single mega-commit": too hard to bisect if a regression surfaces later.
-- Rejected "fix bugs only, skip design": user explicitly said "implement everything, MAXIMUM EFFORT".
-- Rejected "rename `entropy_coefficient` / `gate_entropy_coefficient`": the names were chosen deliberately last iteration; better to fix wording in comments/docs than ping-pong on names.
-
-**Anchor-Refs**: anchors will be added in S2 (Hamacher), S3 (Gumbel training), S4 (risky_stack), S8 (inner_kwargs forwarding rule), S11 (vectorized diversity).
-
-### D-002 | S2 B1 Hamacher boundary | 2026-05-13
-**Context**: `_hamacher_or(1,1)` returned 0 (cliff discontinuity from `max(denom, 1e-9)`); mathematical limit is 1. `_hamacher_and(0,0)` returned 0 via additive eps — coincidentally correct but with different eps strategy.
-
-**Decision**: Unified both Hamacher t-norms with `ops.where(denom < eps, fill, num/denom_safe)`. Fill = 0 for AND (limit at (0,0)) and 1 for OR (limit at (1,1)). Eps `1e-7` set as class constant `_HAMACHER_SINGULAR_EPS`.
-
-**Trade-off**: One extra `where` op per Hamacher call **at the cost of** preventing silently wrong outputs at sigmoid-saturated corners (fp16 or upstream clipped to [0,1]).
-
-**Anchor-Refs**: `src/dl_techniques/layers/logic/logic_operators.py:442`
-
-### D-003 | S3 B2 Gumbel inference | 2026-05-13
-**Context**: `_operation_probs` had `deterministic: bool = False` but `call()` never passed `training`. `model.predict()` re-sampled Gumbel noise on every call → non-deterministic inference.
-
-**Decision**: Add `training: Optional[bool] = None` to `_operation_probs`. Gumbel noise injected only when `training is True`. Treat `None` and `False` as inference (skip noise). Match standard Keras dropout/BN convention.
-
-**Trade-off**: Slightly stricter behavior than DARTS literature (some implementations sample at inference) **at the cost of** matching Keras-user expectations that `model.predict()` is deterministic. Users who explicitly want stochastic inference can call `layer(x, training=True)`.
-
-**Anchor-Refs**: `src/dl_techniques/layers/logic/logic_operators.py:506`, `src/dl_techniques/layers/logic/arithmetic_operators.py:470`
-
-### D-004 | S4 B3 widened risky_stack | 2026-05-13
-**Context**: B3 finding posited a residual-leak case with `num_arith=0` that turned out to be impossible because the constructor validates `num_arith >= 1`. Original `risky_stack` condition was effectively always-true for valid constructions. False positive partially.
-
-**Decision**: Widen condition to `(num_arith > 0 OR use_residual)` regardless — defensive future-proofing, and clearer semantic statement of *why* force-clip is needed (out-of-[0,1] inputs from either arithmetic experts or residual). If the validation is ever relaxed, the guard still works.
-
-**Trade-off**: Slightly more verbose condition + warning message **at the cost of** zero functional regression (default config still warns; logic is just better-stated).
-
-**Anchor-Refs**: `src/dl_techniques/layers/logic/neural_circuit.py:636`
-
-### D-005 | S5 B4 per-channel load balance | 2026-05-13
-**Context**: `_maybe_load_balance_loss` was called with `mean(combination_probs, axis=0)` for per-channel mode, then L2'd. Channel-wise peakiness averaged out → invisible to regularizer.
-
-**Decision**: Inline per-row L2 (`sum(beta^2, axis=-1)`) then mean. Unified handling for both `(N,)` global and `(C, N)` per-channel shapes.
-
-**Trade-off**: One extra `mean` call per forward pass when per-channel **at the cost of** properly penalizing channel-wise peakiness as intended.
-
-**Anchor-Refs**: `src/dl_techniques/layers/logic/neural_circuit.py:357`
-
-### D-006 | S6 S8 G1 inner_kwargs collision rule | 2026-05-13
-**Context**: `inner_logic_kwargs` and `inner_arithmetic_kwargs` allow forwarding arbitrary config into inner ops. Some keys (`operation_types`, `apply_sigmoid`, `selection_mode`, `force_clip_when_no_sigmoid`, `allow_unary_degenerate`, `name`) are wrapper-controlled — overriding them through the dict would silently violate wrapper invariants.
-
-**Decision**: Wrapper-owned keys always win. User-passed values for those keys are stripped from the dict and a `UserWarning` is emitted naming the collided keys.
-
-**Trade-off**: Slightly opinionated (could just raise) **at the cost of** zero breakage for users who copy-paste a kwargs dict from one context to another. Warning makes the override visible without blocking.
-
-**Anchor-Refs**: `src/dl_techniques/layers/logic/neural_circuit.py:220`
-
-### D-007 | S15 H6 rationale comment correction | 2026-05-13
-**Context**: The plan_2026-05-13_3a2f1d23/D-002 rationale claimed the H6 rename `load_balance_coefficient → gate_entropy_coefficient` reflected the loss being "Shazeer gate-entropy regularizer, not load-balance". Math review: implementation is `coef * N * mean(sum(beta^2))` — L2 of probs, not entropy. Both are convex measures of peakiness with the same uniform optimum, but they're not the same function.
-
-**Decision**: Correct the rationale comment in place; preserve the name (renaming again would be churn for users with saved configs). Document the actual semantics in README.
-
-**Trade-off**: Misleading name persists **at the cost of** zero migration churn.
-
-## plan_2026-05-13_3a2f1d23
-### D-001 | EXPLORE → PLAN | YYYY-MM-DD
-**Context**: <one-paragraph background — what was discovered in EXPLORE>
-**Decision**: <chosen approach in one sentence>
-**Trade-off**: <X> **at the cost of** <Y>
-**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-13_3a2f1d23/D-NNN` anchor exists in source)
--->
-
-### D-001 | EXPLORE → PLAN | 2026-05-13
-**Context**: Reviewer surfaced 5 critical + 10 high + 10 medium claims against logic/. Empirical verification of all 5 critical: C1 (Gumbel form) confirmed differential statistical effect; C2 (smooth-divide dipole) is the LESSONS L44 / D-001-anchored design choice — reviewer's math is right but classification as bug is wrong; C3 (1-D selection) confirmed by code inspection; C4 (sigmoid-stacking unsoundness) confirmed by tracing call graph; C5 (to_symbolic gumbel leak) confirmed.
-**Decision**: Phase changes by risk into A (LOW-risk correctness fixes + default flips), B (MED-risk feature additions: alias, force-clip), C (HIGH-risk arch: per-channel selection mode), D (NET-NEW features: t-norms, walker, callback, diversity). Present two scope options to user (Quick Wins = Phase A only; Full Scope = all). Reject reviewer H9 (remove explicit child.build) — LESSONS L42 empirically reversed this earlier.
-**Trade-off**: comprehensive implementation **at the cost of** ~1100 LOC, 16 commits, and a non-trivial architectural addition (per-channel mode) that doubles the weight count for selection in the new mode.
-**Reasoning**: User asked MAXIMUM EFFORT. Phasing by risk lets the user revert mid-plan if Phase C/D goes sideways without losing the correctness wins. LESSONS L42 takes precedence over reviewer H9 because we have a documented empirical reversal anchor.
-**Anchor-Refs**: `findings/critical-claims-verification.md`, `findings/scope-and-risk-assessment.md`, `src/dl_techniques/layers/logic/arithmetic_operators.py:442`, `src/dl_techniques/layers/logic/logic_operators.py:467`
-
-### D-002 | EXECUTE step-7 | 2026-05-13
-**Context**: H6 review claim — `load_balance_coefficient` is a misnomer; the loss it gates is the Shazeer (2017) gate-entropy regularizer (mean over batch of -p·log(p)), not a load-balance loss. External callers (only `src/train/latent_reasoning_vision/circuit.py`) currently pass `load_balance_coefficient`.
-**Decision**: Add `gate_entropy_coefficient` as the canonical kwarg on `CircuitDepthLayer` + `LearnableNeuralCircuit`. Keep `load_balance_coefficient` as a deprecated alias that emits a one-time `DeprecationWarning` and resolves to the same internal `_gate_entropy_coef`. `get_config()` emits the new name.
-**Trade-off**: API clarity **at the cost of** carrying a deprecated alias indefinitely (cannot remove without breaking external consumer).
-**Reasoning**: Renaming silently would break the external consumer. Adding the canonical name with an alias preserves bit-exact behavior for existing callers while letting new code use the correct term. Aligns with library convention that misnamed APIs get aliased, not replaced.
-**Anchor-Refs**: `src/dl_techniques/layers/logic/neural_circuit.py:45`

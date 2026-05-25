@@ -44,9 +44,16 @@ from train.common import setup_gpu, create_base_argument_parser, create_callback
 
 CUSTOM_OBJECTS = {"ConvNeXtPatchVAE": ConvNeXtPatchVAE}
 
-# CIFAR-10 per-channel statistics (for MSE pipeline)
-_CIFAR10_MEAN = np.array([0.4914, 0.4822, 0.4465], dtype=np.float32)
-_CIFAR10_STD  = np.array([0.2470, 0.2435, 0.2616], dtype=np.float32)
+# Per-channel statistics for MSE normalisation (mean/std per dataset)
+_CIFAR10_MEAN  = np.array([0.4914, 0.4822, 0.4465], dtype=np.float32)
+_CIFAR10_STD   = np.array([0.2470, 0.2435, 0.2616], dtype=np.float32)
+_CIFAR100_MEAN = np.array([0.5071, 0.4867, 0.4408], dtype=np.float32)
+_CIFAR100_STD  = np.array([0.2675, 0.2565, 0.2761], dtype=np.float32)
+
+_CIFAR_STATS = {
+    "cifar10":  (_CIFAR10_MEAN,  _CIFAR10_STD),
+    "cifar100": (_CIFAR100_MEAN, _CIFAR100_STD),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +65,7 @@ class TrainingConfig:
     """All hyperparameters for one training run.
 
     Attributes:
-        dataset: Dataset identifier. Supported: ``"cifar10"``.
+        dataset: Dataset identifier. Supported: ``"cifar10"``, ``"cifar100"``.
         img_size: Spatial resolution fed to the model (must be divisible
             by ``patch_size``).
         img_channels: Number of input/output channels (3 for RGB).
@@ -97,7 +104,7 @@ class TrainingConfig:
     """
 
     # Dataset
-    dataset: str = "cifar10"
+    dataset: str = "cifar100"
     img_size: int = 32
     img_channels: int = 3
     augment_data: bool = True
@@ -203,13 +210,14 @@ class TrainingConfig:
 # Dataset
 # ---------------------------------------------------------------------------
 
-def _build_cifar10_dataset(
+def _build_cifar_dataset(
     config: TrainingConfig,
 ) -> Tuple[Any, Any, int, int]:
-    """Load CIFAR-10 and build ``tf.data`` pipelines.
+    """Load CIFAR-10 or CIFAR-100 and build ``tf.data`` pipelines.
 
     Args:
-        config: Training configuration.
+        config: Training configuration. ``config.dataset`` must be one of
+            ``"cifar10"`` or ``"cifar100"``.
 
     Returns:
         Tuple of ``(train_ds, val_ds, steps_per_epoch, val_steps)``.
@@ -218,21 +226,26 @@ def _build_cifar10_dataset(
     """
     import tensorflow as tf
 
-    (x_train, _), (x_test, _) = keras.datasets.cifar10.load_data()
+    loader = (
+        keras.datasets.cifar10 if config.dataset == "cifar10"
+        else keras.datasets.cifar100
+    )
+    (x_train, _), (x_test, _) = loader.load_data()
     x_train = x_train.astype("float32")
     x_test  = x_test.astype("float32")
 
     # Select normalisation branch based on recon_loss_type.
     # BCE requires inputs in [0, 1] → /255 only.
-    # MSE works with mean/std normalisation (ImageNet-style).
+    # MSE applies per-dataset mean/std after /255 scaling.
+    mean, std = _CIFAR_STATS[config.dataset]
     if config.recon_loss_type == "bce":
         x_train /= 255.0
         x_test  /= 255.0
     else:
         x_train /= 255.0
         x_test  /= 255.0
-        x_train = (x_train - _CIFAR10_MEAN) / _CIFAR10_STD
-        x_test  = (x_test  - _CIFAR10_MEAN) / _CIFAR10_STD
+        x_train = (x_train - mean) / std
+        x_test  = (x_test  - mean) / std
 
     steps_per_epoch = max(1, len(x_train) // config.batch_size)
     val_steps       = max(1, len(x_test)  // config.batch_size)
@@ -260,7 +273,7 @@ def _build_cifar10_dataset(
         .prefetch(tf.data.AUTOTUNE)
     )
     logger.info(
-        f"CIFAR-10: {len(x_train)} train / {len(x_test)} val | "
+        f"{config.dataset.upper()}: {len(x_train)} train / {len(x_test)} val | "
         f"steps_per_epoch={steps_per_epoch} | recon={config.recon_loss_type}"
     )
     return train_ds, val_ds, steps_per_epoch, val_steps
@@ -324,12 +337,11 @@ def build_dataset(
     """
     if smoke:
         return _build_smoke_dataset(config)
-    if config.dataset == "cifar10":
-        return _build_cifar10_dataset(config)
+    if config.dataset in _CIFAR_STATS:
+        return _build_cifar_dataset(config)
     raise ValueError(
         f"Unsupported dataset '{config.dataset}'. "
-        "Supported: 'cifar10'. For imagenette, set --dataset cifar10 and "
-        "--img-size 128 with an external image_folder loader (T2 task)."
+        "Supported: 'cifar10', 'cifar100'."
     )
 
 
@@ -409,6 +421,35 @@ class ReconVisualizationCallback(keras.callbacks.Callback):
             plt.close(fig)
         except Exception as exc:
             logger.warning(f"ReconVisualizationCallback failed at epoch {epoch}: {exc}")
+
+    def on_train_end(self, logs: Optional[Dict] = None) -> None:
+        """Save a final reconstruction grid at end of training."""
+        try:
+            os.makedirs(self.save_dir, exist_ok=True)
+            outputs = self.model(self.val_samples, training=False)
+            originals = self._to_display(self.val_samples)
+            recons    = self._to_display(np.array(outputs["reconstruction"]))
+
+            n = len(originals)
+            cmap = "gray" if originals.shape[-1] == 1 else None
+            fig, axes = plt.subplots(2, n, figsize=(n * 1.4, 3.2))
+            for i in range(n):
+                axes[0, i].imshow(originals[i].squeeze(), cmap=cmap)
+                axes[0, i].axis("off")
+                if i == 0:
+                    axes[0, i].set_ylabel("original", fontsize=8)
+                axes[1, i].imshow(recons[i].squeeze(), cmap=cmap)
+                axes[1, i].axis("off")
+                if i == 0:
+                    axes[1, i].set_ylabel("recon", fontsize=8)
+            fig.suptitle("Final reconstruction", fontsize=11)
+            plt.tight_layout(rect=[0, 0, 1, 0.96])
+            path = os.path.join(self.save_dir, "recon_final.png")
+            plt.savefig(path, dpi=120, bbox_inches="tight")
+            plt.close(fig)
+            logger.info(f"Final reconstruction grid saved: {path}")
+        except Exception as exc:
+            logger.warning(f"ReconVisualizationCallback.on_train_end failed: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +553,7 @@ def train(config: TrainingConfig, smoke: bool = False) -> None:
 
     # Grab a fixed validation sample for reconstruction visualisation
     recon_dir = os.path.join(results_dir, "reconstructions")
+    _ds_mean, _ds_std = _CIFAR_STATS.get(config.dataset, (_CIFAR100_MEAN, _CIFAR100_STD))
     try:
         sample_batch = next(iter(val_ds))
         val_samples = np.array(sample_batch[0][:8])
@@ -521,6 +563,8 @@ def train(config: TrainingConfig, smoke: bool = False) -> None:
                 save_dir=recon_dir,
                 frequency=max(1, config.epochs // 10),
                 recon_loss_type=config.recon_loss_type,
+                cifar_mean=_ds_mean,
+                cifar_std=_ds_std,
             )
         )
     except Exception as exc:
@@ -595,6 +639,22 @@ def train(config: TrainingConfig, smoke: bool = False) -> None:
                 "Consider increasing --epochs or tuning --beta-kl / --lambda-sigreg."
             )
 
+    # ------------------------------------------------------------------
+    # Final metrics summary
+    # ------------------------------------------------------------------
+    h = history.history
+    def _best(key: str) -> str:
+        vals = h.get(key, [])
+        return f"{min(vals):.4f}" if vals else "n/a"
+
+    logger.info(
+        "Training summary | "
+        f"best val_loss={_best('val_loss')} | "
+        f"best val_recon_loss={_best('val_recon_loss')} | "
+        f"best val_kl_loss={_best('val_kl_loss')} | "
+        f"best val_sigreg_loss={_best('val_sigreg_loss')} | "
+        f"epochs_run={len(h.get('val_loss', []))}/{config.epochs}"
+    )
     logger.info(f"Results written to: {results_dir}")
 
 
@@ -605,8 +665,8 @@ def train(config: TrainingConfig, smoke: bool = False) -> None:
 def _build_parser() -> argparse.ArgumentParser:
     parser = create_base_argument_parser(
         description="Train ConvNeXtPatchVAE (per-patch VAE with SIGReg anti-collapse)",
-        default_dataset="cifar10",
-        dataset_choices=["cifar10"],
+        default_dataset="cifar100",
+        dataset_choices=["cifar10", "cifar100"],
     )
 
     # Smoke
@@ -662,6 +722,7 @@ def _build_parser() -> argparse.ArgumentParser:
         learning_rate=3e-4,
         weight_decay=1e-4,
         patience=10,
+        image_size=32,   # CIFAR images are 32×32; overrides base-parser default of 224
     )
     return parser
 
@@ -673,7 +734,7 @@ def main() -> None:
     smoke = args.smoke
     if smoke:
         args.epochs        = 3
-        args.image_size    = 32   # override base-parser default of 224
+        args.image_size    = 32   # smoke always uses 32×32
         args.model_variant = "tiny"
         args.embed_dim     = 16
         args.encoder_depth = 1

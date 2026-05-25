@@ -62,3 +62,29 @@
 | plan_2026-05-14_e26eede2 | 2026-05-14 | Implement E4 (UCI Monks-1/2/3 rule recovery) + low-data 11-b |  |
 | plan_2026-05-14_c95e848c | 2026-05-14 | Implement E5 (CLEVR-Hans3 visual reasoning) for `LearnableNe | 'add','max','min' |
 | plan_2026-05-14_9c6387a3 | 2026-05-14 | Multi-seed robustness sweep over E1 (MNIST+CIFAR-10), E3 (3  |  |
+| plan_2026-05-17_413eae7d | 2026-05-17 | Implement Token Superposition Training (TST) as a model-agno |  |
+| plan_2026-05-17_7ed2d007 | 2026-05-17 | Recover the deleted training output for the crashed Clifford | crash-root-cause.md |
+| plan_2026-05-18_74a935a2 | 2026-05-18 | Extend the existing `src/train/rms_variants_train/` harness  |  |
+| plan_2026-05-18_c7f1947d | 2026-05-18 | Create `ZeroCenteredAdaptiveBandRMS` layer combining zero-ce |  |
+| plan_2026-05-18_63121227 | 2026-05-18 | Design — but do not execute — a comprehensive Phase 3 of the |  |
+| plan_2026-05-18_b10fc418 | 2026-05-18 | Implement Rotation Trick VQ-VAE (Fifty et al. ICLR 2025) as  |  |
+| plan_2026-05-18_d3655b1e | 2026-05-18 | Relocate `src/dl_techniques/layers/adaln_zero.py` to `src/dl |  |
+| plan_2026-05-18_e1f12eab | 2026-05-18 | Refine the existing 8-norm RMS-variants harness at `src/trai |  |
+| plan_2026-05-18_6776f8ba | 2026-05-18 | Refine the existing 8-norm `src/train/rms_variants_train/` P |  |
+| plan_2026-05-19_39a6a454 | 2026-05-19 | Land Patches 1 + 2 from the BurstDP reuse-review. |  |
+| plan_2026-05-19_e3f21fdb | 2026-05-19 | Train BurstDP-small on COCO 2017 via `src/train/burst_dp/tra |  |
+| plan_2026-05-19_6f397a37 | 2026-05-19 | Full-purge the depth component from the `burst_dp` package + | 01-depth-touchpoints, 02-viz-callback-design, 03-constraints |
+| plan_2026-05-19_64f2a17b | 2026-05-19 | Add DIV2K and VGG-Face2 as fidelity-only training datasets t |  |
+| plan_2026-05-19_b225c8df | 2026-05-19 | Expose existing aux-distortion knobs through the burst-dp tr |  |
+| plan_2026-05-20_b8f8df89 | 2026-05-20 | Diagnose and fix BurstDP underfitting on DIV2K (recon PSNR s |  |
+| plan_2026-05-22_de5197c2 | 2026-05-22 | Implement all actionable LeWM audit findings: the two confir |  |
+| plan_2026-05-23_692fd5e5 | 2026-05-23 | Fix 8 LeWM deep-review issues in one focused pass. |  |
+| plan_2026-05-23_c573e591 | 2026-05-23 | No goal |  |
+| plan_2026-05-23_0b664700 | 2026-05-23 | Refactor Video-JEPA from degenerate single-horizon t+1 next- |  |
+| plan_2026-05-23_15151c75 | 2026-05-23 | Switch `VideoJEPA` from a live target encoder (where `z_targ |  |
+| plan_2026-05-24_ca745a6c | 2026-05-24 | Close the two remaining concerns surfaced after iter-2 CLOSE |  |
+| plan_2026-05-24_aebd4cbb | 2026-05-24 | Add video_jepa observability tooling and run ONE diagnostic  |  |
+| plan_2026-05-25_853605c1 | 2026-05-25 | Rewrite `src/dl_techniques/regularizers/sigreg.py` to follow |  |
+| plan_2026-05-25_fb57d478 | 2026-05-25 | Build a **resolution-agnostic ConvNeXt-based variational aut |  |
+| plan_2026-05-25_8faec5b6 | 2026-05-25 | Rewrite `src/dl_techniques/models/convnext_patch_vae/` to fu |  |
+| plan_2026-05-25_74f0eac9 | 2026-05-25 | Deep review of `src/dl_techniques/models/convnext_patch_vae/ |  |
