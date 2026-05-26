@@ -100,8 +100,8 @@ class TrainingConfig:
         augment_color: Whether to apply photometric augmentation
             (brightness, contrast, saturation) on top of geometric
             augmentation.  Has no effect when ``augment_data=False``.
-            Saturation is skipped for CIFAR in MSE mode (data is
-            standardised and not in ``[0, 1]``).
+            Saturation is unconditionally skipped for the CIFAR path
+            (standardised data is not in ``[0, 1]`` regardless of loss type).
         model_variant: Optional preset shorthand (``"tiny"``, ``"base"``,
             ``"large"``).  When set, overrides ``embed_dim``,
             ``encoder_depth``, ``decoder_depth``, and ``latent_dim``.
@@ -171,7 +171,7 @@ class TrainingConfig:
     learning_rate: float = 3e-4
     weight_decay: float = 1e-4
     warmup_epochs: int = 5
-    beta_kl_start: float = 0.0
+    beta_kl_start: float = 0.01
     beta_anneal_epochs: int = 15
     early_stopping_patience: int = 10
 
@@ -308,8 +308,11 @@ def _build_cifar_dataset(
     else:
         x_train /= 255.0
         x_test  /= 255.0
-        x_train = (x_train - mean) / std
-        x_test  = (x_test  - mean) / std
+        x_test = (x_test - mean) / std
+        if not config.augment_data:
+            # No augmentation map runs, so standardise at numpy level.
+            x_train = (x_train - mean) / std
+        # else: deferred into _augment so jitter operates on [0, 1] data first.
 
     steps_per_epoch = max(1, len(x_train) // config.batch_size)
     val_steps       = max(1, len(x_test)  // config.batch_size)
@@ -321,6 +324,10 @@ def _build_cifar_dataset(
         if config.augment_color:
             x = tf.image.random_brightness(x, max_delta=0.1)
             x = tf.image.random_contrast(x, lower=0.9, upper=1.1)
+        if config.recon_loss_type != "bce":
+            mean_tf = tf.constant(mean, dtype=tf.float32)
+            std_tf  = tf.constant(std,  dtype=tf.float32)
+            x = (x - mean_tf) / std_tf
         return x
 
     train_ds = (
@@ -418,8 +425,8 @@ def _make_filesystem_patch_fn(
         img = tf.cast(img, tf.float32) / 255.0
         # Upscale only when source is smaller than the requested crop size.
         shape = tf.shape(img)
-        new_h = tf.maximum(shape[0], img_size)
-        new_w = tf.maximum(shape[1], img_size)
+        new_h = tf.maximum(shape[0], img_size + 4)
+        new_w = tf.maximum(shape[1], img_size + 4)
         img = tf.image.resize(img, [new_h, new_w])
 
         def _one_patch(_):
@@ -457,6 +464,10 @@ def _make_filesystem_val_fn(img_size: int, img_channels: int):
         raw = tf.io.read_file(path)
         img = tf.image.decode_jpeg(raw, channels=img_channels)
         img = tf.cast(img, tf.float32) / 255.0
+        shape = tf.shape(img)
+        new_h = tf.maximum(shape[0], img_size)
+        new_w = tf.maximum(shape[1], img_size)
+        img = tf.image.resize(img, [new_h, new_w])
         img = tf.image.resize_with_crop_or_pad(img, img_size, img_size)
         return img
 
