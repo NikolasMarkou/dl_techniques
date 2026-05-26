@@ -1189,7 +1189,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # Training (extend base parser defaults)
     parser.add_argument("--warmup-epochs",      type=int,   default=5)
-    parser.add_argument("--beta-kl-start",      type=float, default=0.0,
+    parser.add_argument("--beta-kl-start",      type=float, default=0.01,
                         help="Initial beta at epoch 0 for beta annealing.")
     parser.add_argument("--beta-anneal-epochs", type=int,   default=15,
                         help="Epochs to ramp beta from beta-kl-start to beta-kl. 0=disabled.")
