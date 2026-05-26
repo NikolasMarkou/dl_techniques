@@ -257,10 +257,6 @@ class SIGRegLayer(keras.layers.Layer):
         # Weighted sum over knots: err @ weights_ → (..., num_proj)
         statistic = ops.matmul(err, self.weights_)
 
-        # Multiply by N (the sample count being averaged).
-        n = ops.cast(ops.shape(proj)[-2], proj.dtype)
-        statistic = statistic * n
-
         return ops.mean(statistic)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple:
