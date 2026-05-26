@@ -57,6 +57,10 @@ from dl_techniques.models.convnext_patch_vae.config import ConvNeXtPatchVAEConfi
 from dl_techniques.models.convnext_patch_vae.model import ConvNeXtPatchVAE
 from dl_techniques.callbacks.training_curves import TrainingCurvesCallback
 from train.common import setup_gpu, create_base_argument_parser, create_callbacks
+from train.convnext_patch_vae.callbacks import (
+    LatentSpaceCallback,
+    LatentInterpolationCallback,
+)
 
 CUSTOM_OBJECTS = {"ConvNeXtPatchVAE": ConvNeXtPatchVAE}
 
@@ -740,6 +744,41 @@ def train(config: TrainingConfig, smoke: bool = False) -> None:
         )
     except Exception as exc:
         logger.warning(f"Could not set up ReconVisualizationCallback: {exc}")
+
+    # Latent space PCA scatter and interpolation grids.
+    # Collect up to 128 images from the validation set for the PCA scatter;
+    # re-use the same 8 fixed images for interpolation pairs.
+    try:
+        viz_frequency = max(1, config.epochs // 10)
+        latent_dir = os.path.join(results_dir, "latent_space")
+        interp_dir = os.path.join(results_dir, "interpolations")
+
+        latent_batches = [val_samples]
+        for extra_batch in val_ds.take(15):
+            latent_batches.append(np.array(extra_batch[0][:8]))
+        latent_viz_images = np.concatenate(latent_batches, axis=0)[:128]
+
+        callbacks.append(
+            LatentSpaceCallback(
+                val_images=latent_viz_images,
+                save_dir=latent_dir,
+                frequency=viz_frequency,
+                cifar_mean=_ds_mean,
+                cifar_std=_ds_std,
+            )
+        )
+        callbacks.append(
+            LatentInterpolationCallback(
+                val_samples=val_samples,
+                save_dir=interp_dir,
+                frequency=viz_frequency,
+                num_steps=8,
+                cifar_mean=_ds_mean,
+                cifar_std=_ds_std,
+            )
+        )
+    except Exception as exc:
+        logger.warning(f"Could not set up latent visualization callbacks: {exc}")
 
     # ------------------------------------------------------------------
     # Persist config before fit (helps debug mid-run crashes)
