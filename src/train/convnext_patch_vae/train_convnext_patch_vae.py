@@ -419,8 +419,11 @@ def _make_filesystem_decode_fn(
         img = tf.image.decode_jpeg(raw, channels=img_channels)
         img = tf.cast(img, tf.float32) / 255.0
         if is_training and augment:
-            scale = img_size + 32
-            img = tf.image.resize(img, [scale, scale])
+            # Upscale only if source is smaller than img_size; otherwise crop directly.
+            shape = tf.shape(img)
+            new_h = tf.maximum(shape[0], img_size)
+            new_w = tf.maximum(shape[1], img_size)
+            img = tf.image.resize(img, [new_h, new_w])
             img = tf.image.random_crop(img, [img_size, img_size, img_channels])
             img = tf.image.random_flip_left_right(img)
             if augment_color:
