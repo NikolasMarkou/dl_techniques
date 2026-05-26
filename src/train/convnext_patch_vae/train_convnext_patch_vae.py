@@ -417,7 +417,7 @@ def _make_filesystem_decode_fn(
     def _decode_and_resize(path: tf.Tensor, is_training: bool) -> tf.Tensor:
         raw = tf.io.read_file(path)
         img = tf.image.decode_jpeg(raw, channels=img_channels)
-        img = tf.cast(img, tf.float32)
+        img = tf.cast(img, tf.float32) / 255.0
         if is_training and augment:
             scale = img_size + 32
             img = tf.image.resize(img, [scale, scale])
@@ -431,7 +431,7 @@ def _make_filesystem_decode_fn(
                 img = tf.clip_by_value(img, 0.0, 1.0)
         else:
             img = tf.image.resize_with_crop_or_pad(img, img_size, img_size)
-        return img / 255.0
+        return img
 
     return _decode_and_resize
 
@@ -732,6 +732,20 @@ class ReconVisualizationCallback(keras.callbacks.Callback):
         plt.tight_layout(rect=[0, 0, 1, 0.96])
         plt.savefig(path, dpi=120, bbox_inches="tight")
         plt.close(fig)
+
+    def on_train_begin(self, logs: Optional[Dict] = None) -> None:
+        """Save a pre-training baseline grid (epoch 0000) before any weight updates."""
+        try:
+            os.makedirs(self.save_dir, exist_ok=True)
+            outputs = self.model(self.val_samples, training=False)
+            originals = self._to_display(self.val_samples)
+            recons    = self._to_display(np.array(outputs["reconstruction"]))
+            samples   = self._get_fixed_samples(len(originals))
+            path = os.path.join(self.save_dir, "recon_epoch_0000.png")
+            self._save_grid(path, originals, recons, samples, "Epoch 0  |  pre-training baseline")
+            logger.info(f"Pre-training reconstruction grid saved: {path}")
+        except Exception as exc:
+            logger.warning(f"ReconVisualizationCallback.on_train_begin failed: {exc}")
 
     def on_epoch_end(self, epoch: int, logs: Optional[Dict] = None) -> None:
         if epoch % self.frequency != 0 and epoch != 0:
