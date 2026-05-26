@@ -86,7 +86,13 @@ class TrainingConfig:
 
     Attributes:
         dataset: Dataset identifier. Supported: ``"cifar10"``, ``"cifar100"``,
-            ``"ade20k"``, ``"coco"``.
+            ``"ade20k"``, ``"coco"``. Derived from ``datasets`` when that list
+            is provided.
+        datasets: List of dataset identifiers for multi-dataset mixing.
+            When non-empty, takes precedence over ``dataset``. Only
+            ``"ade20k"`` and ``"coco"`` may be combined (identical
+            normalisation). Single-element list behaves identically to
+            the corresponding ``dataset`` string.
         img_size: Spatial resolution fed to the model (must be divisible
             by ``patch_size``).
         img_channels: Number of input/output channels (3 for RGB).
@@ -129,6 +135,7 @@ class TrainingConfig:
 
     # Dataset
     dataset: str = "cifar100"
+    datasets: List[str] = dataclasses.field(default_factory=list)
     img_size: int = 32
     img_channels: int = 3
     augment_data: bool = True
@@ -174,6 +181,23 @@ class TrainingConfig:
     steps_per_epoch_override: Optional[int] = None
 
     def __post_init__(self) -> None:
+        # Normalize datasets/dataset: the list is canonical; the string is derived.
+        if self.datasets:
+            # Multi-dataset mode: derive composite string key for naming/checks.
+            self.dataset = "+".join(self.datasets)
+        else:
+            # Single-dataset mode: derive list from the string.
+            self.datasets = [self.dataset]
+
+        # Validate multi-dataset combinations.
+        if len(self.datasets) > 1:
+            bad = [d for d in self.datasets if d not in ("ade20k", "coco")]
+            if bad:
+                raise ValueError(
+                    f"Multi-dataset mixing only supports 'ade20k' and 'coco'. "
+                    f"Unsupported entries: {bad}."
+                )
+
         if self.experiment_name is None:
             variant = self.model_variant or "custom"
             self.experiment_name = f"{self.dataset}_{variant}"
@@ -436,6 +460,114 @@ def _build_filesystem_dataset(
     return train_ds, val_ds, steps_per_epoch, None
 
 
+def _build_mixed_filesystem_dataset(
+    config: TrainingConfig,
+) -> Tuple[Any, Any, int, None]:
+    """Build a mixed ``tf.data`` pipeline from two or more filesystem datasets.
+
+    Interleaves training images at the file-path level using size-proportional
+    sampling weights so each batch draws from all sources proportionally.
+    Validation images are concatenated into a single non-repeating dataset.
+
+    Args:
+        config: Training configuration.  ``config.datasets`` must contain two
+            or more names from ``{"ade20k", "coco"}``.
+
+    Returns:
+        Tuple of ``(train_ds, val_ds, steps_per_epoch, None)``.
+        ``val_steps`` is ``None`` — Keras exhausts the non-repeating val
+        dataset naturally.
+
+    Raises:
+        FileNotFoundError: If no files match a glob for any dataset.
+    """
+    import tensorflow as tf
+
+    _DATASET_GLOBS = {
+        "ade20k": (
+            os.path.join(config.ade20k_dir, "images", "ADE", "training", "**", "*.jpg"),
+            os.path.join(config.ade20k_dir, "images", "ADE", "validation", "**", "*.jpg"),
+        ),
+        "coco": (
+            os.path.join(config.coco_dir, "train2017", "*.jpg"),
+            os.path.join(config.coco_dir, "val2017",   "*.jpg"),
+        ),
+    }
+
+    all_train_files: List[List[str]] = []
+    all_val_files: List[str] = []
+
+    for ds_name in config.datasets:
+        train_glob, val_glob = _DATASET_GLOBS[ds_name]
+        train_files = sorted(_glob.glob(train_glob, recursive=True))
+        val_files   = sorted(_glob.glob(val_glob,   recursive=True))
+        if not train_files:
+            raise FileNotFoundError(f"No training files matched ({ds_name}): {train_glob}")
+        if not val_files:
+            raise FileNotFoundError(f"No validation files matched ({ds_name}): {val_glob}")
+        logger.info(
+            f"{ds_name}: {len(train_files)} train / {len(val_files)} val"
+        )
+        all_train_files.append(train_files)
+        all_val_files.extend(val_files)
+
+    train_counts = [len(f) for f in all_train_files]
+    total_train  = sum(train_counts)
+    total_val    = len(all_val_files)
+    weights      = [c / total_train for c in train_counts]
+    steps_per_epoch = max(1, total_train // config.batch_size)
+
+    label = "+".join(config.datasets)
+    logger.info(
+        f"{label} (mixed): {total_train} train / {total_val} val | "
+        f"steps_per_epoch={steps_per_epoch} | weights={[round(w, 3) for w in weights]}"
+    )
+
+    def _decode_and_resize(path: tf.Tensor, is_training: bool) -> tf.Tensor:
+        raw = tf.io.read_file(path)
+        img = tf.image.decode_jpeg(raw, channels=config.img_channels)
+        img = tf.cast(img, tf.float32)
+        if is_training and config.augment_data:
+            scale = config.img_size + 32
+            img = tf.image.resize(img, [scale, scale])
+            img = tf.image.random_crop(img, [config.img_size, config.img_size, config.img_channels])
+            img = tf.image.random_flip_left_right(img)
+        else:
+            img = tf.image.resize_with_crop_or_pad(img, config.img_size, config.img_size)
+        return img / 255.0
+
+    # Per-source path datasets: shuffle + repeat so they never exhaust.
+    path_datasets = [
+        tf.data.Dataset.from_tensor_slices(files)
+        .shuffle(len(files), seed=42, reshuffle_each_iteration=True)
+        .repeat()
+        for files in all_train_files
+    ]
+
+    train_ds = (
+        tf.data.Dataset.sample_from_datasets(
+            path_datasets,
+            weights=weights,
+            stop_on_empty_dataset=False,
+            seed=42,
+        )
+        .map(lambda p: _decode_and_resize(p, True),  num_parallel_calls=tf.data.AUTOTUNE)
+        .map(lambda x: (x, x),                       num_parallel_calls=tf.data.AUTOTUNE)
+        .batch(config.batch_size, drop_remainder=True)
+        .prefetch(tf.data.AUTOTUNE)
+    )
+
+    val_ds = (
+        tf.data.Dataset.from_tensor_slices(all_val_files)
+        .map(lambda p: _decode_and_resize(p, False), num_parallel_calls=tf.data.AUTOTUNE)
+        .map(lambda x: (x, x),                       num_parallel_calls=tf.data.AUTOTUNE)
+        .batch(config.batch_size, drop_remainder=False)
+        .prefetch(tf.data.AUTOTUNE)
+    )
+
+    return train_ds, val_ds, steps_per_epoch, None
+
+
 def build_dataset(
     config: TrainingConfig,
     smoke: bool = False,
@@ -454,6 +586,8 @@ def build_dataset(
     """
     if smoke:
         return _build_smoke_dataset(config)
+    if len(config.datasets) > 1:
+        return _build_mixed_filesystem_dataset(config)
     if config.dataset in _CIFAR_STATS:
         return _build_cifar_dataset(config)
     if config.dataset == "ade20k":
@@ -885,6 +1019,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run a tiny smoke test on synthetic data (CPU, <60 s). "
              "Overrides --epochs to 3 and uses a tiny model.",
     )
+    parser.add_argument(
+        "--datasets", nargs="+",
+        choices=["cifar10", "cifar100", "ade20k", "coco"],
+        metavar="DATASET",
+        help="One or more datasets to mix (e.g. --datasets ade20k coco). "
+             "Overrides --dataset when specified. Only 'ade20k' and 'coco' "
+             "may be combined. Single value behaves like --dataset.",
+    )
 
     # Model
     parser.add_argument(
@@ -977,14 +1119,19 @@ def main() -> None:
     if not smoke:
         setup_gpu(args.gpu)
 
-    if args.dataset in ("ade20k", "coco") and getattr(args, "image_size", 32) == 32:
+    # --datasets overrides --dataset when provided.
+    datasets = getattr(args, "datasets", None) or [args.dataset]
+
+    image_size = getattr(args, "image_size", 32)
+    if any(d in ("ade20k", "coco") for d in datasets) and image_size == 32:
         logger.warning(
-            f"--dataset {args.dataset} with default --image-size 32. "
+            f"--datasets {datasets} with default --image-size 32. "
             "Consider passing --image-size 128 or --image-size 256."
         )
 
     config = TrainingConfig(
-        dataset=args.dataset,
+        dataset=datasets[0],
+        datasets=datasets,
         img_size=getattr(args, "image_size", 32),
         img_channels=3,
         augment_data=args.augment_data,
