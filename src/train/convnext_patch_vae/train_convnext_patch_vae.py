@@ -15,10 +15,25 @@ Smoke test (CPU, tiny model, synthetic data, <60 s)::
 
     python -m train.convnext_patch_vae.train_convnext_patch_vae --smoke
 
-Training menu from README:
-    T1a  CIFAR-10, MSE, SIGReg ON  (default, ~30 min RTX 4090)
-    T1b  CIFAR-10, MSE, SIGReg OFF (--lambda-sigreg 0)
-    T2   imagenette 128 px, patch=8, latent=32 (~2-3 h)
+Training menu:
+    T1a  CIFAR-10,  MSE, SIGReg ON  (~30 min RTX 4090)
+    T1b  CIFAR-10,  MSE, SIGReg OFF (--lambda-sigreg 0)
+    T2   ADE20K,   BCE, 256x256, patch=8, preset=base (~4-6 h RTX 4090)
+    T3   COCO2017, BCE, 256x256, patch=8, preset=base (~8-12 h RTX 4090)
+
+ADE20K quick-start (10 steps to validate pipeline)::
+
+    CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg python -m \\
+        train.convnext_patch_vae.train_convnext_patch_vae \\
+        --dataset ade20k --image-size 256 --patch-size 8 \\
+        --preset base --batch-size 32 --epochs 1 --steps-per-epoch 10
+
+COCO 2017 quick-start::
+
+    CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg python -m \\
+        train.convnext_patch_vae.train_convnext_patch_vae \\
+        --dataset coco --image-size 256 --patch-size 8 \\
+        --preset base --batch-size 32 --epochs 1 --steps-per-epoch 10
 """
 
 # MPLBACKEND must be set before any matplotlib import — headless server guard.
@@ -26,6 +41,7 @@ import os
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 import sys
+import glob as _glob
 import json
 import dataclasses
 import argparse
@@ -65,7 +81,8 @@ class TrainingConfig:
     """All hyperparameters for one training run.
 
     Attributes:
-        dataset: Dataset identifier. Supported: ``"cifar10"``, ``"cifar100"``.
+        dataset: Dataset identifier. Supported: ``"cifar10"``, ``"cifar100"``,
+            ``"ade20k"``, ``"coco"``.
         img_size: Spatial resolution fed to the model (must be divisible
             by ``patch_size``).
         img_channels: Number of input/output channels (3 for RGB).
@@ -144,6 +161,13 @@ class TrainingConfig:
     success_threshold: float = 0.02
     output_dir: str = "results"
     experiment_name: Optional[str] = None
+
+    # Large-dataset filesystem paths (used when dataset="ade20k" or "coco")
+    ade20k_dir: str = "/media/arxwn/data0_4tb/datasets/ade20k"
+    coco_dir: str = "/media/arxwn/data0_4tb/datasets/coco_2017"
+
+    # Override computed steps_per_epoch (useful for quick pipeline validation)
+    steps_per_epoch_override: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.experiment_name is None:
@@ -324,6 +348,90 @@ def _build_smoke_dataset(
     return _make_ds(x_train, repeat=True), _make_ds(x_val), 3, 2
 
 
+def _build_filesystem_dataset(
+    train_glob: str,
+    val_glob: str,
+    img_size: int,
+    img_channels: int,
+    batch_size: int,
+    augment: bool = True,
+    seed: int = 42,
+    dataset_label: str = "filesystem",
+) -> Tuple[Any, Any, int, int]:
+    """Build ``tf.data`` pipelines from raw filesystem JPEG directories.
+
+    Args:
+        train_glob: Glob pattern for training images (supports ``**``).
+        val_glob: Glob pattern for validation images (supports ``**``).
+        img_size: Target square spatial resolution after resize/crop.
+        img_channels: Number of output channels (3 for RGB).
+        batch_size: Batch size.
+        augment: Whether to apply random crop + flip to training images.
+        seed: RNG seed for shuffle and random crop.
+        dataset_label: Name used in log messages.
+
+    Returns:
+        Tuple of ``(train_ds, val_ds, steps_per_epoch, val_steps)``.
+        Both datasets emit ``(x, x)`` self-supervised pairs.
+        ``val_steps`` is ``None`` — Keras exhausts the non-repeating val
+        dataset naturally.
+
+    Raises:
+        FileNotFoundError: If no files match ``train_glob`` or ``val_glob``.
+    """
+    import tensorflow as tf
+
+    train_files = sorted(_glob.glob(train_glob, recursive=True))
+    val_files = sorted(_glob.glob(val_glob, recursive=True))
+
+    if not train_files:
+        raise FileNotFoundError(f"No training files matched: {train_glob}")
+    if not val_files:
+        raise FileNotFoundError(f"No validation files matched: {val_glob}")
+
+    n_train = len(train_files)
+    n_val = len(val_files)
+    steps_per_epoch = max(1, n_train // batch_size)
+
+    def _decode_and_resize(path: tf.Tensor, is_training: bool) -> tf.Tensor:
+        raw = tf.io.read_file(path)
+        img = tf.image.decode_jpeg(raw, channels=img_channels)
+        img = tf.cast(img, tf.float32)
+        if is_training and augment:
+            scale = img_size + 32
+            img = tf.image.resize(img, [scale, scale])
+            img = tf.image.random_crop(img, [img_size, img_size, img_channels])
+            img = tf.image.random_flip_left_right(img)
+        else:
+            img = tf.image.resize_with_crop_or_pad(img, img_size, img_size)
+        return img / 255.0
+
+    train_ds = (
+        tf.data.Dataset.from_tensor_slices(train_files)
+        .shuffle(n_train, seed=seed, reshuffle_each_iteration=True)
+        .map(lambda p: _decode_and_resize(p, True),
+             num_parallel_calls=tf.data.AUTOTUNE)
+        .map(lambda x: (x, x), num_parallel_calls=tf.data.AUTOTUNE)
+        .repeat()
+        .batch(batch_size, drop_remainder=True)
+        .prefetch(tf.data.AUTOTUNE)
+    )
+    val_ds = (
+        tf.data.Dataset.from_tensor_slices(val_files)
+        .map(lambda p: _decode_and_resize(p, False),
+             num_parallel_calls=tf.data.AUTOTUNE)
+        .map(lambda x: (x, x), num_parallel_calls=tf.data.AUTOTUNE)
+        .batch(batch_size, drop_remainder=False)
+        .prefetch(tf.data.AUTOTUNE)
+    )
+
+    logger.info(
+        f"{dataset_label}: {n_train} train / {n_val} val | "
+        f"steps_per_epoch={steps_per_epoch} | img_size={img_size}"
+    )
+    return train_ds, val_ds, steps_per_epoch, None
+
+
 def build_dataset(
     config: TrainingConfig,
     smoke: bool = False,
@@ -344,9 +452,31 @@ def build_dataset(
         return _build_smoke_dataset(config)
     if config.dataset in _CIFAR_STATS:
         return _build_cifar_dataset(config)
+    if config.dataset == "ade20k":
+        train_glob = os.path.join(config.ade20k_dir, "images", "ADE", "training", "**", "*.jpg")
+        val_glob   = os.path.join(config.ade20k_dir, "images", "ADE", "validation", "**", "*.jpg")
+        return _build_filesystem_dataset(
+            train_glob, val_glob,
+            img_size=config.img_size,
+            img_channels=config.img_channels,
+            batch_size=config.batch_size,
+            augment=config.augment_data,
+            dataset_label="ADE20K",
+        )
+    if config.dataset == "coco":
+        train_glob = os.path.join(config.coco_dir, "train2017", "*.jpg")
+        val_glob   = os.path.join(config.coco_dir, "val2017",   "*.jpg")
+        return _build_filesystem_dataset(
+            train_glob, val_glob,
+            img_size=config.img_size,
+            img_channels=config.img_channels,
+            batch_size=config.batch_size,
+            augment=config.augment_data,
+            dataset_label="COCO2017",
+        )
     raise ValueError(
         f"Unsupported dataset '{config.dataset}'. "
-        "Supported: 'cifar10', 'cifar100'."
+        "Supported: 'cifar10', 'cifar100', 'ade20k', 'coco'."
     )
 
 
@@ -382,14 +512,14 @@ class ReconVisualizationCallback(keras.callbacks.Callback):
         self.save_dir = save_dir
         self.frequency = frequency
         self.recon_loss_type = recon_loss_type
-        self.cifar_mean = cifar_mean if cifar_mean is not None else _CIFAR10_MEAN
-        self.cifar_std  = cifar_std  if cifar_std  is not None else _CIFAR10_STD
+        self.cifar_mean = cifar_mean  # None = images already in [0,1], no denorm needed
+        self.cifar_std  = cifar_std
         self._fixed_z: Optional[np.ndarray] = None  # fixed latents, lazy-init on first epoch
         os.makedirs(save_dir, exist_ok=True)
 
     def _to_display(self, x: np.ndarray) -> np.ndarray:
         """Undo normalisation and clip to ``[0, 1]``."""
-        if self.recon_loss_type == "mse":
+        if self.recon_loss_type == "mse" and self.cifar_mean is not None:
             x = x * self.cifar_std + self.cifar_mean
         return np.clip(x, 0.0, 1.0)
 
@@ -530,6 +660,9 @@ def train(config: TrainingConfig, smoke: bool = False) -> None:
     # Dataset
     # ------------------------------------------------------------------
     train_ds, val_ds, steps_per_epoch, val_steps = build_dataset(config, smoke=smoke)
+    if config.steps_per_epoch_override is not None:
+        steps_per_epoch = config.steps_per_epoch_override
+        logger.info(f"steps_per_epoch overridden to {steps_per_epoch}")
 
     # ------------------------------------------------------------------
     # Model
@@ -587,7 +720,11 @@ def train(config: TrainingConfig, smoke: bool = False) -> None:
 
     # Grab a fixed validation sample for reconstruction visualisation
     recon_dir = os.path.join(results_dir, "reconstructions")
-    _ds_mean, _ds_std = _CIFAR_STATS.get(config.dataset, (_CIFAR100_MEAN, _CIFAR100_STD))
+    # MSE + CIFAR: apply per-channel denorm in viz callback. All other combos: pass None.
+    if config.recon_loss_type == "mse" and config.dataset in _CIFAR_STATS:
+        _ds_mean, _ds_std = _CIFAR_STATS[config.dataset]
+    else:
+        _ds_mean, _ds_std = None, None
     try:
         sample_batch = next(iter(val_ds))
         val_samples = np.array(sample_batch[0][:8])
@@ -700,7 +837,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = create_base_argument_parser(
         description="Train ConvNeXtPatchVAE (per-patch VAE with SIGReg anti-collapse)",
         default_dataset="cifar100",
-        dataset_choices=["cifar10", "cifar100"],
+        dataset_choices=["cifar10", "cifar100", "ade20k", "coco"],
     )
 
     # Smoke
@@ -753,6 +890,20 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--success-threshold", type=float, default=0.02,
                         help="val_loss threshold for the convergence advisory.")
 
+    # Large-dataset filesystem paths
+    parser.add_argument(
+        "--ade20k-dir", type=str, default="/media/arxwn/data0_4tb/datasets/ade20k",
+        help="Root directory of the ADE20K dataset (contains images/ADE/training/).",
+    )
+    parser.add_argument(
+        "--coco-dir", type=str, default="/media/arxwn/data0_4tb/datasets/coco_2017",
+        help="Root directory of the COCO 2017 dataset (contains train2017/ and val2017/).",
+    )
+    parser.add_argument(
+        "--steps-per-epoch", type=int, default=None, dest="steps_per_epoch_override",
+        help="Override computed steps_per_epoch. Useful for quick pipeline validation.",
+    )
+
     # Set script-appropriate base-parser defaults
     parser.set_defaults(
         epochs=50,
@@ -760,7 +911,7 @@ def _build_parser() -> argparse.ArgumentParser:
         learning_rate=3e-4,
         weight_decay=1e-4,
         patience=10,
-        image_size=32,   # CIFAR images are 32×32; overrides base-parser default of 224
+        image_size=32,   # CIFAR default; override to 128/256 for ade20k/coco
     )
     return parser
 
@@ -772,7 +923,7 @@ def main() -> None:
     smoke = args.smoke
     if smoke:
         args.epochs        = 3
-        args.image_size    = 32   # smoke always uses 32×32
+        args.image_size    = 32   # smoke uses synthetic data — 32×32 is sufficient
         args.model_variant = "tiny"
         args.embed_dim     = 16
         args.encoder_depth = 1
@@ -786,6 +937,12 @@ def main() -> None:
     # GPU must be configured before any TF/Keras context is created.
     if not smoke:
         setup_gpu(args.gpu)
+
+    if args.dataset in ("ade20k", "coco") and getattr(args, "image_size", 32) == 32:
+        logger.warning(
+            f"--dataset {args.dataset} with default --image-size 32. "
+            "Consider passing --image-size 128 or --image-size 256."
+        )
 
     config = TrainingConfig(
         dataset=args.dataset,
@@ -815,6 +972,9 @@ def main() -> None:
         beta_anneal_epochs=args.beta_anneal_epochs,
         early_stopping_patience=args.patience,
         success_threshold=args.success_threshold,
+        ade20k_dir=args.ade20k_dir,
+        coco_dir=args.coco_dir,
+        steps_per_epoch_override=args.steps_per_epoch_override,
     )
 
     try:
