@@ -1,5 +1,5 @@
 # System Atlas
-*Last refreshed: plan_2026-05-25_74f0eac9 | 2026-05-25 | 60 plans closed*
+*Last refreshed: plan_2026-05-26_d8c33dca | 2026-05-26 | 61 plans closed*
 *Domain-neutral system map. Rewritten by ip-archivist at CLOSE — max 300 lines. Read before PLAN/EXPLORE.*
 
 ## Identity
@@ -50,7 +50,7 @@ Keras callbacks; analyzer integration; `TemperatureAnnealingCallback`.
 
 ### Training pipelines (`src/train/`)
 - **`train/video_jepa/`** — V-JEPA pretrainer; smoke + BDD100K dataset wiring; reload-check at `train_video_jepa.py:515`.
-- **`train/convnext_patch_vae/`** — ConvNeXtPatchVAE trainer (plan_74f0eac9); `compile(loss=None, jit_compile=False)`; reload check via `encode()` mu; `--smoke` flag.
+- **`train/convnext_patch_vae/`** — ConvNeXtPatchVAE trainer (plan_74f0eac9); `compile(loss=None, jit_compile=False)`; reload check via `encode()` mu; `--smoke` flag. `callbacks.py` (plan_2026-05-26_d8c33dca): `LatentSpaceCallback` (PCA scatter of mu flattened `(B,Hp*Wp*D)`, colored by per-sample KL) + `LatentInterpolationCallback` (linear mu-space interpolation grid).
 - **`train/logic/`** — LearnableNeuralCircuit benchmark suite + `multiseed_sweep.py` subprocess driver + `multiseed_stats.py`. 30-test stats harness.
 - **`train/rms_variants_train/`** — 8-norm comparison harness; `NORM_VARIANTS` append-only invariant (D-001 `config.py:27`). 637+ PASS tests.
 

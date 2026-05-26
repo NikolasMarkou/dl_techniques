@@ -30,119 +30,78 @@
 - Anchor at impact site (not at decision definition). One anchor per impact site, even if shared with sibling decision.
 <!-- /COMPRESSED-SUMMARY -->
 
-## plan_2026-05-25_74f0eac9
+## plan_2026-05-26_d7a342f2
 ### D-001 | EXPLORE → PLAN | YYYY-MM-DD
 **Context**: <one-paragraph background — what was discovered in EXPLORE>
 **Decision**: <chosen approach in one sentence>
 **Trade-off**: <X> **at the cost of** <Y>
 **Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-25_74f0eac9/D-NNN` anchor exists in source)
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-26_d7a342f2/D-NNN` anchor exists in source)
 -->
 
+### D-001 | EXPLORE → PLAN | 2026-05-26
+**Context**: `TrainingConfig.dataset` is a single string field. ADE20K and COCO both use `_build_filesystem_dataset()` with identical `/255.0` normalization. `tf.data.Dataset.sample_from_datasets` is available in TF 2.18 and used in the codebase. The mixing approach (at file-path level vs batch level) is the main design choice.
+
+**Decision**: Mix at file-path level using `tf.data.Dataset.sample_from_datasets(path_datasets, weights=size_proportional)` before decode/resize/batch, with a new `datasets: List[str]` field on `TrainingConfig`.
+
+**Trade-off**: Finer-grained per-sample interleaving **at the cost of** a new `_build_mixed_filesystem_dataset()` function (~40 lines) and a new `datasets` field on `TrainingConfig`.
+
+**Reasoning**: File-path-level mixing ensures each batch contains samples from both sources proportionally. Batch-level mixing (sample_from_datasets on batched datasets) would mean each step draws entirely from one source — less diverse. Concatenating file lists into a single shuffled pool is even simpler but loses explicit size-proportional control. Alternative "ade20k+coco" composite sentinel rejected: doesn't scale if a third dataset is added later, and requires a new hardcoded branch for each pair. `nargs="+"` `--datasets` flag is additive, doesn't break `--dataset` (singular) for all other use patterns.
+
+## plan_2026-05-26_d8c33dca
+### D-001 | EXPLORE → PLAN | 2026-05-26 [REVISED after user correction]
+**Context**: The 4D spatial latent `(B, Hp, Wp, latent_dim)` must be reduced to `(B, D)` for PCA. Initial plan proposed mean-pooling over `(Hp, Wp)` for large images. User rejected this: mean-pooling destroys patch structure, which is the entire point of the spatial VAE design. For 128 samples × 16384 dims (256x256 case), sklearn's randomized SVD (Halko et al.) runs in O(N*D*k) ≈ 128*16384*2 ops — fast on CPU.
+**Decision**: Always flatten `(B, Hp, Wp, D)` → `(B, Hp*Wp*D)`. Use `PCA(n_components=2, svd_solver='randomized', random_state=42)`.
+**Trade-off**: Preserves full patch structure **at the cost of** slightly more memory for large images (128 × 16384 float32 ≈ 8MB — negligible).
+**Reasoning**: Mean-pooling loses exactly the information that the spatial VAE is designed to capture. Randomized SVD makes the large-dim case fast without any information loss.
+
+### D-002 | EXPLORE → PLAN | 2026-05-26
+**Context**: PCA scatter plots need a color signal that doesn't require class labels (which are not available — all datasets use `(x, x)` self-supervised pairs, not `(x, y)`). Options: (a) color by sample index (meaningless but safe), (b) color by per-sample KL divergence (diagnostic — shows which samples are far from the prior), (c) single color (simplest).
+**Decision**: Color by per-sample KL divergence: `-0.5 * mean(1 + log_var - mu^2 - exp(log_var))` averaged over `(Hp, Wp, D)`. The `encode()` call already returns `log_var`, so no extra forward pass needed.
+**Trade-off**: Informative diagnostic signal **at the cost of** slightly more computation per callback call (two arrays processed instead of one).
+**Reasoning**: KL divergence per sample is the most useful diagnostic for VAE training: it shows which samples the encoder is mapping far from the prior. A scatter colored by KL immediately reveals mode coverage, posterior collapse, and outlier samples. The computation overhead is negligible (numpy ops after the encode pass).
+
+### D-003 | EXPLORE → PLAN | 2026-05-26
+**Context**: New callbacks can live either (a) inline in `train_convnext_patch_vae.py` alongside `ReconVisualizationCallback`, or (b) in a new `src/train/convnext_patch_vae/callbacks.py`. The training script is already 991 lines; adding ~200 more lines would make it ~1200 lines.
+**Decision**: Create a separate `src/train/convnext_patch_vae/callbacks.py` file.
+**Trade-off**: Cleaner module separation **at the cost of** one additional file to maintain and an extra import line in the training script.
+**Reasoning**: 1200-line files become hard to navigate. The new callbacks are self-contained (no coupling to training logic beyond receiving val_samples at construction). A separate file follows the depth_visualization callback pattern in `src/dl_techniques/callbacks/`. The import overhead is one line.
+
+### D-004 | EXPLORE → PLAN | 2026-05-26
+**Context**: Interpolation can use (a) linear interpolation in mu space, (b) spherical linear interpolation (slerp), or (c) interpolation in the full reparameterized z space (with noise). Standard VAE interpolation practice is mu-space linear for latent exploration.
+**Decision**: Use linear interpolation between `mu_A` and `mu_B` (no slerp, no noise).
+**Trade-off**: Simple and deterministic **at the cost of** not respecting the geometry of the posterior distribution (slerp would be more geometrically correct for spherical Gaussians).
+**Reasoning**: For a spatial VAE with per-patch Gaussians, slerp is nontrivial to apply correctly across `(Hp, Wp, D)` dims simultaneously. Linear interpolation in mu-space is the standard first approach in the VAE literature. The results are interpretable and deterministic. Slerp can be added as a follow-up if desired.
+
+## plan_2026-05-26_b11b0e90
+### D-001 | EXPLORE → PLAN | 2026-05-26
+**Context**: ADE20K (25,574 train / 2,000 val JPEGs) and COCO 2017 (118,287 train / 5,000 val JPEGs) are both available as raw filesystem directories, not TFDS archives. The canonical TFDS `tfds.load()` path cannot be used directly. Two options: (a) build a custom `tf.data.Dataset.list_files()` pipeline per dataset, or (b) wrap each in a TFDS-compatible builder and register them. The model itself is fully resolution-agnostic; only the trainer's `build_dataset()` needs extension.
+**Decision**: Use raw `tf.data.Dataset.list_files()` pipeline with `decode_jpeg → resize_with_crop_or_pad → /255` normalization. One shared helper `_build_filesystem_dataset()` parameterized by glob pattern.
+**Trade-off**: Simple and zero-dependency **at the cost of** no TFDS metadata (dataset size must be inferred from `glob` count or hardcoded).
+**Reasoning**: TFDS builder registration is heavy infrastructure for two datasets we already have on disk. The list_files approach is what sibling trainers use when not on TFDS. Dataset size is needed only for `steps_per_epoch`, which can be computed from file count.
+
+### D-002 | PLAN | 2026-05-26
+**Context**: `img_size=128, patch_size=8` chosen for smoke tests (16×16 grid, 256 patches >> sigreg_knots=17). VRAM estimate: ~2GB at batch=8. `img_size=256, patch_size=8` gives 32×32=1024 patches and ~6GB — safe for production runs on RTX 4090.
+**Decision**: Default smoke config: `--image-size 128 --patch-size 8 --preset tiny --batch-size 8`. Recommend production: `--image-size 256 --patch-size 8 --preset base --batch-size 32`.
+**Trade-off**: Conservative smoke defaults catch pipeline errors quickly **at the cost of** not validating full-resolution behavior in CI.
+**Reasoning**: Smoke is a correctness gate, not a performance gate. Full-resolution training is a user decision.
+
+## plan_2026-05-25_a8325e3f
 ### D-001 | EXPLORE → PLAN | 2026-05-25
-**Context**: Model review found 6 quality issues. 4 are low-effort genuine gaps (decoder docstrings ×2, use_v2_block dead-field comment). 2 are known repo-wide patterns with no urgency (tf.GradientTape backend coupling, optimizer.apply_gradients compat shim).
-**Decision**: Fix only the 4 low-effort gaps in this plan. Skip the 2 repo-wide patterns.
-**Trade-off**: Targeted small fix **at the cost of** leaving tf.GradientTape backend coupling unflagged in the source code.
-**Reasoning**: tf.GradientTape is used identically in video_jepa — fixing it in one file without fixing all siblings would be inconsistent and out of scope. The risk is theoretical (JAX/PyTorch backend migration, not a near-term concern). optimizer.apply_gradients still works in TF 2.18.
-
-### D-002 | EXPLORE → PLAN | 2026-05-25
-**Context**: Training script must compile with `loss=None` (losses from `add_loss`). The VAE train_vae.py uses standard `compile(loss=...)` (incompatible). The video_jepa trainer has the right `loss=None` pattern but targets a very different architecture. The ViT trainer has the right CIFAR-10 dataset pipeline.
-**Decision**: Hybrid Pattern-4 (dataset, callbacks, argparse, dataclass config) + video_jepa (compile pattern, TrainingCurvesCallback, reload check).
-**Trade-off**: Hybrid approach **at the cost of** having no single verbatim reference file to copy — must synthesize from two sources.
-**Reasoning**: Both halves are well-established in the repo. The hybrid is necessary because no single trainer covers both an image dataset AND a loss=None compile pattern. Synthesis risk is low (both halves are individually tested patterns).
-
-### D-003 | EXPLORE → PLAN | 2026-05-25
-**Context**: CIFAR-10 with `recon_loss_type="mse"` needs mean/std normalization (produces values outside [0,1] — compatible with MSE). With `recon_loss_type="bce"` inputs must stay in [0,1] — incompatible with mean/std normalization. The script must handle both without silently corrupting the BCE loss.
-**Decision**: Default `recon_loss_type="mse"` with mean/std normalization. When `recon_loss_type="bce"`, use `/255`-only scaling (no subtract). Add explicit check in dataset builder that selects pipeline branch based on `config.recon_loss_type`.
-**Trade-off**: Two dataset pipelines **at the cost of** slightly more code in the dataset builder.
-**Reasoning**: Silent BCE corruption is worse than 10 extra LOC. The check is simple and statically deterministic at build time.
-
-### D-004 | EXPLORE → PLAN | 2026-05-25
-**Context**: Success guard in ViT trainer checks `val_accuracy >= threshold`. For an unsupervised VAE, there is no accuracy — the guard must use `val_loss`.
-**Decision**: Guard on `val_loss <= success_threshold` (lower-is-better). Default `success_threshold=0.02` for CIFAR-10 MSE (empirical heuristic from README T1a/T1b menu; not a validated floor). Document this as advisory.
-**Trade-off**: Loss-based guard **at the cost of** no validated floor (CIFAR MSE <0.02 is a heuristic, not a literature bound).
-**Reasoning**: The guard is advisory — it logs a WARNING if training appears not to have converged, but does not block use of the model. For a new architecture without published convergence floors, a heuristic default with a `--success-threshold` CLI override is the right tradeoff.
-
-## plan_2026-05-25_8faec5b6
-### D-001 | EXPLORE → PLAN | YYYY-MM-DD
-**Context**: <one-paragraph background — what was discovered in EXPLORE>
-**Decision**: <chosen approach in one sentence>
-**Trade-off**: <X> **at the cost of** <Y>
-**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-25_8faec5b6/D-NNN` anchor exists in source)
--->
-
-### D-001 | PLAN | 2026-05-25
-**Context**: Repository convention for `models/{bert, resnet, tree_transformer, cliffordnet, vit, depth_anything, prism, lewm, gpt2}` is that `from_variant(pretrained=True)` must raise `NotImplementedError` from `_download_weights()` (NOT silently random-initialize). Anchored historically in plan_3c3ed037 D-001 (tree_transformer), plan_9357982a D-001 (bert), plan_0a5779e8 D-001 (tree_transformer __init__ alignment). The current `convnext_patch_vae` package lacks this surface entirely.
-**Decision**: Add `_download_weights(variant) -> NotImplementedError` raise to `ConvNeXtPatchVAE`, surfaced via `from_variant(variant, pretrained=True)`. Anchor at the raise site with `# DECISION plan_2026-05-25_8faec5b6/D-001`.
-**Trade-off**: Loud failure on `pretrained=True` **at the cost of** explicit caller error handling (callers must catch `NotImplementedError` if they ever opt into pretrained).
-**Reasoning**: Silent random-init was identified as a footgun in plan_9357982a and locked in across the repo. Convnext_patch_vae cannot ship a divergent surface. Alternatives rejected: (a) silently load a fresh model on `pretrained=True` — invalidated by repo convention; (b) raise `ValueError` — wrong taxonomy (it's a missing implementation, not a bad value); (c) auto-download from a URL — no public checkpoints exist for this VAE.
-**Anchor-Refs**: `src/dl_techniques/models/convnext_patch_vae/model.py:470` (`_download_weights` `NotImplementedError` raise site, committed in 3505b9b3).
+**Context**: Analysis session analysis_2026-05-25_abe75634 identified 7 fixes ordered by priority. Fixes 1+2 (beta annealing + warmup) prevent posterior collapse. Fixes 3+4+5 (skip connections, multi-stage decoder, perceptual loss) improve reconstruction quality after collapse is resolved. Fixes 6+7 (log_var zero-init, config default) are independent housekeeping items.
+**Decision**: Implement only the non-architectural fixes in this iteration: config default, encoder log_var zero-init, trainer warmup, trainer beta annealing. Defer skip connections, multi-stage decoder, and perceptual loss to a follow-on plan.
+**Trade-off**: Faster delivery + testable collapse fix **at the cost of** leaving architectural quality improvements (skip connections, seam-free decoder) for a separate plan.
+**Reasoning**: Architectural changes (skip connections, multi-stage upsampling) require API changes to encoder/decoder/model and substantial test updates. Doing them before validating the collapse fix adds risk. The analysis explicitly says items 1+2 are sufficient to achieve non-collapsed training. Perceptual loss requires adding an external frozen model (VGG/ResNet) with no existing precedent in this repo.
 
 ### D-002 | PLAN | 2026-05-25
-**Context**: Guide §11.1 + repo convention require a module-level `create_<model>` factory wrapping `from_variant`. Without it, users must call `ConvNeXtPatchVAE(config=ConvNeXtPatchVAEConfig(...))` directly — a two-step import chain that is inconsistent with the bert/resnet/tree_transformer/cliffordnet surface.
-**Decision**: Add `create_convnext_patch_vae(variant="base", *, pretrained=False, **overrides) -> ConvNeXtPatchVAE` as a thin delegation to `ConvNeXtPatchVAE.from_variant`. Anchor at the function definition with `# DECISION plan_2026-05-25_8faec5b6/D-002`.
-**Trade-off**: Two parallel entry-points (factory + ctor) **at the cost of** mild API duplication.
-**Reasoning**: The duplication is documented and shallow (the factory is one line). Alternatives rejected: (a) replace `__init__(config=...)` with flat kwargs — breaks video_jepa-template parity locked in SYSTEM.md; (b) only expose `from_variant` and drop the bare factory — diverges from bert/resnet template; (c) make the factory a wrapper that also constructs the config from individual kwargs — over-engineering, the config dataclass already handles that via `ConvNeXtPatchVAEConfig(**kwargs)`.
-**Anchor-Refs**: `src/dl_techniques/models/convnext_patch_vae/model.py:542` (module-level `create_convnext_patch_vae` factory anchor, committed in 585a0801).
-
-### REFLECT | 2026-05-25
-**Context**: All 7 EXECUTE steps completed without leash hits, surprises, or pivots. Final scoped pytest 19/19 PASS in 29.07s. All 12 success criteria verified PASS. Zero scope drift. 4 fb57d478 D-anchors + 2 new 8faec5b6 D-anchors all in place at expected line numbers.
-**Decision**: Recommend transition to CLOSE.
-**Trade-off**: Closing now ships the guide-compliant surface **at the cost of** deferring training and the additional ablation tests (T1-T4 in the README training menu) to follow-up plans — already documented as out-of-scope in plan.md.
-**Reasoning**: Every plan-level invariant held; no findings were contradicted during EXECUTE; complexity budget under target (1/2 new abstractions, 0/3 new files, +306 net LOC inside the LESSONS sibling-class band). Devil's-advocate concern: SC10 came in at 29.07s — close to the 30s budget. Future additions to this test file would push over. Mitigation: 3 of the 4 new TestFactory tests use `img_size=8` or `16` to minimize wallclock; further additions should follow that pattern. Logging this for LESSONS at CLOSE.
-**Anchor-Refs**: none new.
-
-## plan_2026-05-25_fb57d478
-### D-001 | EXPLORE → PLAN | YYYY-MM-DD
-**Context**: <one-paragraph background — what was discovered in EXPLORE>
-**Decision**: <chosen approach in one sentence>
-**Trade-off**: <X> **at the cost of** <Y>
-**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-25_fb57d478/D-NNN` anchor exists in source)
--->
-
-### D-001 | EXPLORE → PLAN | 2026-05-25
-**Context**: A ConvNeXt patch-level VAE with SIGReg anti-collapse is greenfield in this repo. video_jepa offers reusable patterns (config dataclass, custom train_step, per-component Mean trackers, add_loss). SIGReg's `(..., N, D)` contract maps naturally to `(B, Hp*Wp, latent_dim)` — N = patches per image. ConvNeXtV2Block + GRN are repo primitives. `Sampling` layer accepts rank-4 latents.
-**Decision**: Build a new package `src/dl_techniques/models/convnext_patch_vae/` with `{config, encoder, decoder, model, __init__, README}`. Flat single-stage block stack (no spatial downsampling beyond the stem). Per-patch 4D latent `(B, Hp, Wp, latent_dim)`. Loss = recon + beta_kl * KL_per_patch + lambda_sigreg * SIGReg on `(B, Hp*Wp, latent_dim)` view of post-reparam `z`. No EMA target, no positional embedding, no temporal axis.
-**Trade-off**: A new 8-file package and 3 new abstractions (over default complexity budget) **at the cost of** zero blast radius on existing models. The over-budget cost is the established repo convention for new model families.
-**Reasoning**: Existing `vae/` is image-level w/ global pool (not resolution-agnostic); `masked_autoencoder/` is patch-level but deterministic. The patch-VAE niche is empty and must be built. Alternatives rejected: (a) extend `vae/` with a `resolution_agnostic=True` toggle — would double-pay the existing global-pool path's complexity; (b) reuse `video_jepa/`'s `(B, T, Hp, Wp, D)` plumbing with `T=1` — wastes temporal infrastructure and confuses the public API; (c) build under `masked_autoencoder/` — that framework's loss is masked-only recon, incompatible with VAE recon. Flat single-stage at iter-1 (not hierarchical) is the smallest experiment that falsifies the hypothesis.
-**Anchor-Refs**: (will be added at EXECUTE time at `src/dl_techniques/models/convnext_patch_vae/model.py` — train_step site and SIGReg reshape site)
-
-### D-002 | PLAN | 2026-05-25
-**Context**: Two valid SIGReg bindings exist (F2 Option A "per-image, N=patches" vs Option B "per-patch-position, N=batch"). Plus Option C ("on post-reparam z" vs "on encoder grid").
-**Decision**: Bind SIGReg on `ops.reshape(z, (B, Hp*Wp, latent_dim))` — post-reparameterization, per-image patch distribution (Option A applied to Option C).
-**Trade-off**: Targets the literal "patch-collapse" concept in one cheap pass **at the cost of** not regularizing per-position statistics (Option B) and not regularizing the pre-reparam encoder grid.
-**Reasoning**: (1) Conceptually clean — regularize the same quantity KL targets. (2) Resolution-agnostic — N scales with image size; lambda_sigreg need not be retuned per resolution. (3) Single SIGReg call per forward (cheap). Option B (per-position) discourages positional information which is undesired since we WANT spatial structure. Pre-reparam regularization would conflict with the stochastic latent.
-**Anchor-Refs**: (will be added at EXECUTE Step 4 at the reshape site in `model.py`)
+**Context**: `self._beta_kl` in `model.py:119` is a plain Python `float` assigned at construction. Two options for beta annealing: (a) make it a `tf.Variable`, (b) keep as Python float and mutate from callback.
+**Decision**: Keep `self._beta_kl` as a plain Python float. Mutate from `BetaAnnealingCallback.on_epoch_begin`.
+**Trade-off**: Simpler callback that avoids `tf.Variable` serialization complexity **at the cost of** not being graph-traceable (beta value is captured at trace time under `@tf.function`).
+**Reasoning**: `model.call()` is never `@tf.function`-decorated in this codebase (and `jit_compile=False` is enforced). The loss `self._beta_kl * kl_loss` is evaluated eagerly. Python float mutation from `on_epoch_begin` (before any call in that epoch) is therefore correct. No need for `tf.Variable` overhead.
 
 ### D-003 | PLAN | 2026-05-25
-**Context**: Training menu must be honest about which experiment falsifies the hypothesis. User goal explicitly asks "honest opinion on which experiments are worth running first".
-**Decision**: Tier 1 = CIFAR-10 SIGReg-ON + SIGReg-OFF paired run (~1 hour total on RTX 4090). Tier 2-3 conditional on Tier 1. Do NOT recommend ImageNet, MNIST, hierarchical encoder, or 256+ resolution at iter-1.
-**Trade-off**: Smallest falsifiable experiment first **at the cost of** delayed evidence on scale (T2/T3 cover that downstream).
-**Reasoning**: CIFAR-10 32x32 patch=4 gives N=64 (above SIGReg's stability floor) with 1-hour wall-clock per run. A SIGReg-on/off pair is the exact falsification test of the claim "SIGReg on per-patch latents prevents collapse without hurting recon". Anything larger or more elaborate before this pair has run is gold-plating. MNIST is too easy — recon is trivial even with collapsed latents, so it cannot falsify.
-**Anchor-Refs**: none (training-menu decision, no code anchor).
-
-## plan_2026-05-25_853605c1
-### D-001 | EXPLORE → PLAN | YYYY-MM-DD
-**Context**: <one-paragraph background — what was discovered in EXPLORE>
-**Decision**: <chosen approach in one sentence>
-**Trade-off**: <X> **at the cost of** <Y>
-**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-25_853605c1/D-NNN` anchor exists in source)
--->
-
-### D-001 | EXPLORE → PLAN | 2026-05-25
-**Context**: `sigreg.py` violates the §1.1 Golden Rule by calling `add_weight` for 3 non-trainable buffers inside `__init__`, and imports `numpy` inside that method. Behavior is otherwise correct and consumers (`models/lewm/model.py`, 3 tests) depend on a stable public surface.
-**Decision**: Pure refactor — move buffer creation + numpy precompute into `build()`, hoist `import numpy as np` to module top, modernize class docstring to Google-style (Args / Input shape / Output shape / Architecture), keep math + signature + `get_config()` identical.
-**Trade-off**: Conformance + maintainability **at the cost of** trivial code churn (single file) and slightly later buffer materialization (on first call instead of construction).
-**Reasoning**: Smallest change that closes the conformance gap. Alternative (leaving as-is) was rejected because the user explicitly asked for guide-compliance, and the Golden Rule violation is the only material gap. Alternative (also renaming attributes / changing signature) rejected — would force changes in `models/lewm/model.py` and tests for zero correctness gain.
-**Anchor-Refs**: none — refactor introduces no decision worth anchoring in source.
-
-### D-002 | REFLECT → CLOSE | 2026-05-25
-**Context**: After Step 2, all 6 success criteria PASS (3 pytest + 3 grep). No regressions, no scope drift, no debug artifacts, no simplification blockers.
-**Decision**: Recommend CLOSE.
-**Trade-off**: Ship the refactor now **at the cost of** not adding a buffer-bit-equality snapshot test (deemed unnecessary — behavioral tests cover what matters).
-**Reasoning**: Plan executed exactly as designed. Falsification signals (AttributeError on buffers, test 2 flip, config key mismatch) all silent. The only prediction-accuracy delta is +102 LOC vs net-zero target, driven entirely by docstring expansion (Architecture diagram + Example) — not behavioral complexity. Complexity budget intent honored.
-**Devil's-advocate**: One reason this could still be wrong — the layer's buffers now materialize on first `call()` rather than at construction, so any user code that introspects `layer.weights` before a forward pass would now see an empty list. Searched consumer files (`models/lewm/model.py`, the 3 tests): none do this. Safe in this repo; would be a behavior change for any hypothetical external user.
-**Anchor-Refs**: none.
+**Context**: Encoder bottleneck is a single `Conv2D(2*latent_dim)` layer named `"bottleneck"`. Splitting into `mu_head` + `log_var_head` changes the layer names in the serialized model.
+**Decision**: Split `bottleneck` into `mu_head` (Glorot init) + `log_var_head` (zeros init). Update `build()` and `call()` accordingly.
+**Trade-off**: Zero-init log_var (correct inductive bias, ~70% KL reduction at step 1) **at the cost of** breaking weight compatibility with existing checkpoints trained with the old `bottleneck` layout.
+**Reasoning**: No production checkpoint exists with `bottleneck` — all training runs so far produced collapsed/unusable models (that's what the analysis showed). Breaking checkpoint compatibility with collapsed-model checkpoints is zero cost. The `get_config()` serializes `latent_dim` (not layer names), so fresh save/load round-trips work correctly. Existing tests build fresh models; `TestSaveLoad` will pass with the new architecture.
+**Anchor-Refs**: `src/dl_techniques/models/convnext_patch_vae/encoder.py:133-139`

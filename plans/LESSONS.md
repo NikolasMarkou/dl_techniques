@@ -52,6 +52,11 @@
 - **`train.common.gpu.setup_gpu` is shared infrastructure across 50+ trainers — do NOT refactor it for one trainer's observability concern.**
 - **`model.save("path.keras")` on a never-called subclass Model silently warns and produces a degraded archive.** Always `model(dummy_input, training=False)` to materialize sub-layer weights before save in tests.
 - **When adding new tests to a file with a wall-clock budget, default `img_size` to `8` or `16`.** plan_8faec5b6 added 4 TestFactory tests to a 24s baseline; SC10 landed at 29.07s vs 30s budget. Keep test wall-clock under budget by shrinking spatial dims, not by skipping integration coverage.
+- **For raw-filesystem JPEG datasets, use Python `glob.glob(..., recursive=True)` to collect file lists, then `tf.data.Dataset.from_tensor_slices(files)`.** Avoids TF `list_files` `**` glob ambiguity. `decode_jpeg(channels=3)` forces RGB on grayscale/RGBA images automatically.
+- **`--steps-per-epoch` override is the clean way to validate a large-dataset pipeline without running a full epoch.** Add it to any trainer that supports large datasets — 5-10 steps is enough to catch shape, dtype, and normalization errors.
+- **`ReconVisualizationCallback` denorm guard: check `cifar_mean is not None` before applying MSE denorm.** Large-image datasets normalized to `[0,1]` need no denorm; passing `None` mean/std is the correct signal.
+- **Spatial VAE latent PCA: always flatten `(B, Hp, Wp, D)` -> `(B, Hp*Wp*D)`, never mean-pool over `(Hp, Wp)`.** Mean-pooling destroys per-patch structure, which is the entire point of a spatial VAE. Use `PCA(n_components=2, svd_solver='randomized', random_state=42)` — randomized SVD handles large dims fast (plan_2026-05-26_d8c33dca D-001).
+- **When class labels are unavailable (self-supervised `(x,x)` pairs), color diagnostic scatter plots by per-sample KL divergence.** KL = `-0.5 * mean(1 + log_var - mu^2 - exp(log_var))` over `(Hp, Wp, D)`. Immediately reveals mode coverage, posterior collapse, and outlier samples with no extra forward pass (encode already returns log_var).
 
 ## Keras 3 idioms / serialization / `training`-flag
 

@@ -88,3 +88,8 @@
 | plan_2026-05-25_fb57d478 | 2026-05-25 | Build a **resolution-agnostic ConvNeXt-based variational aut |  |
 | plan_2026-05-25_8faec5b6 | 2026-05-25 | Rewrite `src/dl_techniques/models/convnext_patch_vae/` to fu |  |
 | plan_2026-05-25_74f0eac9 | 2026-05-25 | Deep review of `src/dl_techniques/models/convnext_patch_vae/ |  |
+| plan_2026-05-25_e3a309ec | 2026-05-25 | Deep review of convnext_patch_vae model and training code; e |  |
+| plan_2026-05-25_a8325e3f | 2026-05-25 | Implement ConvNeXtPatchVAE collapse-prevention fixes from an |  |
+| plan_2026-05-26_b11b0e90 | 2026-05-26 | Extend `train_convnext_patch_vae.py` to support ADE20K and C |  |
+| plan_2026-05-26_d8c33dca | 2026-05-26 | No goal |  |
+| plan_2026-05-26_d7a342f2 | 2026-05-26 | No goal |  |

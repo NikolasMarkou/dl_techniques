@@ -34,158 +34,149 @@
 - **`current_phase` / `_global_step` counters**: `add_weight(trainable=False, dtype="float32")` — int32 fails CPU/GPU device placement.
 <!-- /COMPRESSED-SUMMARY -->
 
-## plan_2026-05-25_74f0eac9
+## plan_2026-05-26_d7a342f2
 ### Index
 
-| ID | Topic | File | One-line summary |
-|----|-------|------|------------------|
-| F1 | Model source deep review | `findings/model-source-review.md` | Architecture, loss, train_step, serialization fully documented. 6 quality issues found: use_v2_block dead code, decoder missing docstrings (2), tf.GradientTape backend coupling (repo-wide), optimizer.apply_gradients older API, SIGReg N<knots advisory-only. |
-| F2 | Canonical training pattern | `findings/training-pattern.md` | Trainer must hybrid Pattern-4 (vit/train_vit.py) + video_jepa (compile loss=None + custom train_step). CIFAR-10 pipeline with MSE. Key constraints: jit_compile=False, steps_per_epoch required, monitor=val_loss, success threshold on loss not accuracy. |
-| F3 | Tests and ConvNextV2Block interface | `findings/tests-and-blocks.md` | 9 test classes, 277 lines, all pass. ConvNextV2Block has no drop_path_rate (EXPANSION_FACTOR=4 hardcoded). No src/train/convnext_patch_vae/ exists yet. train.common exports setup_gpu, create_callbacks, create_base_argument_parser. |
+| # | Topic | File | Key Takeaway |
+|---|-------|------|--------------|
+| F-001 | Training script — dataset dispatch | findings/training-script.md | `build_dataset()` is a hard if/elif chain on `config.dataset: str`. Both ADE20K and COCO share `_build_filesystem_dataset()` with identical `/255.0` normalization. No multi-dataset path exists. `steps_per_epoch_override` already present as escape hatch. |
+| F-002 | Config, callbacks, mixing primitives | findings/callbacks-and-config.md | `TrainingConfig.dataset: str` (single). No mixer utility for images in `src/train/`. `tf.data.Dataset.sample_from_datasets` is available in TF 2.18 and used in `dl_techniques/datasets/nlp.py:184`. Callbacks are dataset-agnostic (accept any numpy batch). |
+| F-003 | Tests and TFDS availability | findings/tests-and-datasets.md | Tests use synthetic numpy only — no test changes needed. COCO/2017 available locally. ADE20K at `/media/arxwn/data0_4tb/datasets/ade20k` (filesystem glob, not TFDS). Mixing CIFAR+filesystem is incompatible (different norm spaces). |
 
 ### Key Constraints
 
 ### HARD
-- `model.compile(loss=None, jit_compile=False)` — losses exclusively from `add_loss` in `call()`. Passing compile loss causes double-counting.
-- `img_size % patch_size == 0` enforced by config `__post_init__` and `encoder.build()`.
-- File named `train_convnext_patch_vae.py` (not `train.py` — shadows train package per `src/train/CLAUDE.md`).
-- `setup_gpu(args.gpu)` before any TF context init; `MPLBACKEND=Agg` before matplotlib imports.
-- Outputs to `results/` at repo root (never `src/results/`).
-- All 9 existing tests must continue to pass unchanged.
-- `pretrained=True` raises `NotImplementedError` — no public checkpoints.
-- No `git push` — user handles pushes.
+- `TrainingConfig.dataset: str` — single string, no list field exists. Multi-dataset requires adding `datasets: List[str]`.
+- Both ADE20K and COCO use `/255.0` → [0,1] normalization — identical, safe to mix.
+- CIFAR+filesystem mixing is INVALID: CIFAR uses mean/std normalization in MSE mode, producing incompatible pixel ranges.
+- `tf.data.Dataset.sample_from_datasets` works at batch OR file level; using it at file-path level (before batch) gives finer-grained interleaving.
+- `_build_filesystem_dataset` returns batched `.repeat()` train + non-repeating val. Must keep backward compat.
+- All tests use synthetic numpy — no test changes needed for multi-dataset.
+- `val_steps=None` for all filesystem datasets (Keras exhausts naturally).
+- `MPLBACKEND=Agg`, single GPU, `results/` at repo root.
 
 ### SOFT
-- Use `TrainingCurvesCallback` from `dl_techniques.callbacks.training_curves` — auto-groups VAE metric names.
-- Use `create_callbacks()` from `train.common` for EarlyStopping + ModelCheckpoint + CSVLogger.
-- Include post-fit reload check (video_jepa pattern).
-- Include `--smoke` flag for fast CPU smoke test.
-- Include reconstruction visualization callback (adapted from `train/vae/train_vae.py:VisualizationCallback`).
-- Success guard on `val_loss <= threshold` (lower-is-better) not accuracy.
-- `recon_loss_type="mse"` default for CIFAR-10 with mean/std normalization.
+- `experiment_name` auto-generated from `config.dataset` — needs to produce `"ade20k+coco_base"` for multi-dataset runs.
+- Default `steps_per_epoch` for mixed runs = sum of individual dataset steps (proportional to combined corpus).
+- Mix weights should be size-proportional by default (COCO ~118k vs ADE20K ~20k).
+- Warning guard at line 980 should trigger when any dataset in the list is a large-image dataset and `image_size==32`.
 
 ### GHOST
-- `use_v2_block=False` V1 block path — dead code, field exists but never consumed; T4c ablation deferred.
-- EMA target encoder — not applicable (VAE recon forbids identity).
-- Learned absolute positional embedding — breaks resolution-agnostic property.
-- `model.load_weights(path, by_name=True)` — broken in Keras 3.8; not needed here (no pretrained weights).
+- "Must restructure `_build_filesystem_dataset`" — it stays unchanged; new `_build_mixed_filesystem_dataset` adds the path on top.
+- "Need architectural changes for mixed datasets" — model is fully resolution-agnostic; only the trainer's data pipeline changes.
+- "Callbacks need per-dataset awareness" — callbacks accept any numpy array, they are already dataset-agnostic.
+
+### Exploration Confidence
+- **scope**: deep — full 1029-line trainer read, all dataset builders analyzed, callbacks read, tests confirmed
+- **solutions**: constrained — targeted changes to trainer only; model untouched; 4 sites to update
+- **risks**: clear — no architectural risk; regression covered by existing synthetic tests; CIFAR+filesystem mixing validated to fail at config level
+
+### Corrections
+*None — first iteration.*
+
+## plan_2026-05-26_d8c33dca
+### Index
+
+| # | Topic | File | Key Takeaway |
+|---|-------|------|--------------|
+| F-001 | Training script and existing viz | findings/training-script-and-viz.md | Only one viz callback (ReconVisualizationCallback): 3-row grid (orig/recon/fixed-z). No latent space viz, no interpolation. |
+| F-002 | Model architecture and latent space | findings/model-architecture.md | Latent is 4D spatial `(B, Hp, Wp, latent_dim)`. encode→(mu, log_var), decode(z)→pixels. API: encode(), decode(), sample(). |
+| F-003 | Visualization patterns and callbacks | findings/viz-patterns-and-callbacks.md | Pure matplotlib + savefig. No TSNE/PCA in this module. New callbacks go inline in training script or in a new callbacks file alongside it. |
+
+### Key Constraints
+
+**HARD constraints:**
+- Latent is 4D spatial `(B, Hp, Wp, latent_dim)` — NOT flat. Must reshape/pool before PCA/t-SNE.
+- `MPLBACKEND=Agg` required — headless, no display. All plt calls must work offscreen.
+- `jit_compile=False` on compile — no XLA; encode/decode from Python callbacks is safe.
+- `model.decode(z)` applies sigmoid for BCE, identity for MSE — always call decode() not decoder directly.
+- Val samples are fixed 8 images grabbed at callback construction time.
+
+**SOFT constraints:**
+- New callbacks should follow try/except + logger.warning pattern to avoid crashing training.
+- Visualization callbacks should use `plt.close(fig)` + `gc.collect()` after every save.
+- Fixed random seeds for reproducibility (existing code uses seed=42).
+- Callbacks should produce output under `results/.../` subdirectories matching the run's results_dir.
+
+**GHOST constraints:**
+- `EpochAnalyzerCallback` was explicitly disabled (`include_analyzer=False`) — do not re-enable.
+
+### Corrections
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong.*
+
+## plan_2026-05-26_b11b0e90
+### Index
+
+| ID | Topic | File | One-line summary |
+|----|-------|------|------------------|
+| F1 | Dataset availability | `findings/dataset-availability.md` | ADE20K (scene_parse150) NOT locally available. Imagenette/320px-v2 and COCO/2017 ARE available locally. TFDS pattern: `tfds.load(..., data_dir=TFDS_DATA_DIR)` → map → batch(drop_remainder=True) → prefetch. |
+| F2 | Trainer current state | `findings/trainer-current.md` | `build_dataset()` raises ValueError for anything other than cifar10/cifar100. No --data-dir flag. `val_steps` must be None for non-repeating TFDS val. `_CIFAR_STATS` fallback in viz callback must be None-safe. `set_defaults(image_size=32)` is overrideable via CLI. |
+| F3 | Model constraints | `findings/model-constraints.md` | Only hard constraint: `img_size % patch_size == 0`. Model is fully resolution-agnostic (no hardcoded pixel values, no abs positional embeddings). At 256x256 patch_size=8: safe on RTX 4090 at batch 16-32. At 256x256 patch_size=4: marginal (~20GB). SIGReg warning if num_patches < sigreg_knots (not error). |
+
+### Key Constraints
+
+### HARD
+- `img_size % patch_size == 0` enforced at `config.py:142` and `encoder.py:160-168`
+- ADE20K (`scene_parse150`) is not locally available — needs ~3.5GB download to run
+- Imagenette (`imagenette/320px-v2`) and COCO (`coco/2017`) ARE locally available
+- `model.compile(loss=None, jit_compile=False)` — all losses via `add_loss`
+- All existing tests must pass unchanged
+- `CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg` for training; output to repo-root `results/`
+- No `git push` — user handles
+- Single GPU only
+
+### SOFT
+- For large natural image datasets: normalize to `[0, 1]` (divide by 255); use MSE not BCE
+- Warning if user selects large dataset but img_size <= 64 (accidental CIFAR default)
+- `val_steps=None` for non-repeating TFDS val pipelines
+- `--data-dir` flag defaulting to `os.environ.get("TFDS_DATA_DIR")`
+- Recommended configs for ADE20K-scale: `base` preset, `img_size=256`, `patch_size=8`
+
+### GHOST
+- "ADE20K must be the primary dataset" — Imagenette and COCO are locally available and large enough for development; ADE20K support can be added as a code path even without local data
+- "Need architectural changes to support larger images" — model is already resolution-agnostic; only the trainer's data pipeline needs extension
+
+### Exploration Confidence
+- **scope**: deep — full trainer read, all locally available TFDS datasets inventoried, model config/encoder/decoder all read, VRAM estimates computed
+- **solutions**: constrained — targeted trainer changes only; model is untouched; 3 datasets to wire (imagenette, coco, ade20k)
+- **risks**: clear — no architectural risk; main risk is VRAM at aggressive img_size/patch_size combos; CIFAR regression testable with existing pytest
+
+### Corrections
+*None — first iteration.*
+
+## plan_2026-05-25_a8325e3f
+### Index
+
+| ID | Topic | File | One-line summary |
+|----|-------|------|------------------|
+| F1 | Model files deep review | `findings/model-files.md` | config.py has "mae" default bug; encoder bottleneck is single Conv2D(2*latent_dim) with Glorot init (no zero-init); decoder has single Conv2DTranspose(patch_size) head; model._beta_kl is plain float (mutable from callback); no skip connections or multi-stage upsampling. |
+| F2 | Trainer deep review | `findings/trainer-review.md` | Warmup is flat (initial_lr == warmup_target == config.learning_rate); no beta annealing infrastructure; beta_kl is baked into model config at build time but model._beta_kl is mutable at runtime. |
+| F3 | Fix scope decision | (inline) | Fixes 1-4 from analysis (config default, warmup, beta annealing, log_var zero-init) are non-breaking. Fixes 5-7 (skip connections, multi-stage decoder, perceptual loss) require architectural API changes — deferred to next plan. |
+
+### Key Constraints
+
+### HARD
+- `model.compile(loss=None, jit_compile=False)` — all losses via `add_loss`.
+- All 11 existing tests must PASS unchanged (or with minimal updates for bottleneck rename).
+- `CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg` for any run. Output to repo-root `results/`.
+- No `git push` — user handles.
+- Single GPU only.
+- `self._beta_kl` is referenced as `self._beta_kl * kl_loss` in `call()` — mutating it from a Keras callback works (Python attribute lookup per call).
+
+### SOFT
+- `beta_anneal_epochs=15` as default ramp window (analysis recommendation: 10-15 epochs).
+- `beta_kl_start=0.0` default (start collapsed-free).
+- zero-init for log_var_head kernel AND bias.
+
+### GHOST (do NOT inherit)
+- "Need to change model API to support beta annealing" — `self._beta_kl` is a Python float, mutating it from a callback is sufficient; no tf.Variable needed.
+- "Perceptual loss required now" — needed only after collapse is confirmed resolved; no frozen VGG in repo.
+- "Skip connections must be done in same iteration" — architectural change; do after training validates collapse fix.
 
 ### Corrections
 *None — first iteration.*
 
 ### Exploration Confidence
-- **scope**: deep — all 5 model source files read via explorer agent; canonical trainers (vit, video_jepa, vae) read; callbacks, common utilities, all 9 tests documented.
-- **solutions**: constrained — clear hybrid pattern (Pattern-4 + video_jepa compile); CIFAR-10 primary; reconstruction viz callback available to adapt.
-- **risks**: clear — existing test suite verifies no model regressions; smoke flag enables fast CI verification.
-
-## plan_2026-05-25_8faec5b6
-### Index
-
-| ID | Topic | File | One-line summary |
-|----|-------|------|------------------|
-| F1 | Current files vs guide | `findings/current-files-vs-guide.md` | Per-file audit listing 13 items (G1-G13). 11 are PASS or doc-only; 2 are real additive changes: (G3) factory + presets + `from_variant`, (G1/G5) `compute_output_shape` on top-level model. Blast radius confirmed ZERO outside the package + its test. |
-
-### Key Constraints
-
-### HARD
-- Keras 3.8 / TF 2.18; `@keras.saving.register_keras_serializable()` on every custom class; `keras.ops` + `keras.random.*`; `dl_techniques.utils.logger` only.
-- Golden Rule (guide §1.1): all `add_weight` and sub-layer `.build()` calls in `build()`, never in `__init__`. Sub-layers created in `__init__`.
-- Custom `train_step` that bypasses `compile(loss=...)` MUST keep `self.loss_tracker = keras.metrics.Mean(name="loss")` explicit + `update_state(loss)` (SYSTEM.md D-005 contract, plan_ca745a6c).
-- All 8 existing test classes in `tests/test_models/test_convnext_patch_vae/test_convnext_patch_vae.py` MUST continue to pass unchanged.
-- Save/load round-trip with full `.keras` archive must remain bit-stable to current atol=1e-4 (`TestSaveLoad`).
-- SIGReg input contract `(..., N, D)` and resolution-agnostic property (no GAP, no learned absolute PE, no `Dense(latent_dim)` over flattened map) must be preserved.
-- Per-patch KL averaging (NOT sum) over `(B, Hp, Wp)` must be preserved (`TestForward.test_per_patch_kl_resolution_invariance`).
-- `# DECISION plan_2026-05-25_fb57d478/D-001` (loss_tracker) and `D-002` (SIGReg binding) anchors must remain at impact sites.
-- Test runtime: current ~24s scoped; budget <=30s after additions.
-- No training runs in this plan.
-
-### SOFT
-- Repo convention `models/{bert, resnet, tree_transformer, ...}` requires `create_<model>` factory + `from_variant(pretrained=True) -> NotImplementedError` + narrow `except (IOError, OSError, ValueError)` (SYSTEM.md "Models" section). Add this surface to convnext_patch_vae for parity.
-- `PRESETS = {"tiny", "base", "large"}` class attribute on `ConvNeXtPatchVAE` mirroring `ModelWithPresets` (guide §7.2) and `WellStructuredModel` (guide §15.2).
-- Anchor new factory decisions with `# DECISION plan_2026-05-25_8faec5b6/D-NNN` at impact sites.
-- Google-style docstrings with `Args:` / `Input shape:` / `Output shape:` sections per guide §3.1 (CLAUDE.md mandates Google-style; current files use Sphinx `:param X:` form).
-- Keep `__init__(config=...)` ctor as-is for parity with video_jepa template (SYSTEM.md flow). Factory wraps config construction.
-
-### GHOST (do NOT inherit)
-- "Expose all public names from `__init__.py`" — invalidated by `src/dl_techniques/models/CLAUDE.md` which mandates empty `__init__.py` for `models/`. Keep current behavior.
-- "Rewrite `__init__(config=...)` into flat-kwarg ctor" — video_jepa-template parity + existing tests pin the config-ctor shape. Wrap via factory instead.
-- "Add EMA target encoder, positional embedding, temporal axis, mask_token" — invalidated for VAE objective in plan_fb57d478.
-- "Validate inputs in `[0,1]` at runtime for BCE branch" — would add graph-mode-unsafe assert; use docstring contract.
-
-### Corrections
-*None — first iteration.*
-
-### Exploration Confidence
-- **scope**: deep — re-read all 5 source files, the full 3106-line guide, the 226-line test suite, ConvNextV2Block signature, and SYSTEM.md atlas entry for this model. Cross-plan LESSONS.md anchors all 8 D-NNN contracts from plan_fb57d478 + plan_ca745a6c.
-- **solutions**: constrained — single concrete delta: factory + presets + `from_variant` + `compute_output_shape` + docstring reformatting. No architectural change.
-- **risks**: clear — falsification signals testable on existing scoped pytest in <30s. Only risky surface is `from_config` interaction with `keras.Model` base keys (G6); existing save/load test catches regressions.
-
-### Synthesis
-
-The package is already ~80% guide-compliant — built from plan_fb57d478 with the guide implicitly in mind (compute_output_shape on encoder/decoder, Golden Rule, register_keras_serializable everywhere, explicit loss_tracker, get_config/from_config round-trip, keras.ops only). The remaining 20% is **additive, doc-and-surface polish**: add `create_convnext_patch_vae` factory, presets, `from_variant` classmethod, `compute_output_shape` on top-level model, and convert Sphinx docstrings to Google-style blocks. README gets updated quick-start.
-
-Total: ~+200-300 LOC additive, zero behavior deletions, zero blast radius outside the package and its test. All 8 existing tests stay green; add 2 new factory tests.
-
-## plan_2026-05-25_fb57d478
-### Index
-
-| ID | Topic | File | One-line summary |
-|----|-------|------|------------------|
-| F1 | video_jepa reusable parts | `findings/video-jepa-reuse.md` | Config dataclass + custom `train_step` + `add_loss` per-component + Mean trackers via `metrics` property are direct reuses; tube mask / EMA target / predictor are not. PatchEmbedding2D-+-PE-+-block-stack is the encoder template. |
-| F2 | SIGReg shape contract + binding | `findings/sigreg-shape-contract.md` | Input `(..., N, D)`, averages over last-but-one. For patch-VAE bind as `(B, Hp*Wp, latent_dim)` on post-reparam `z` (Option A/C). `num_proj` >= 256, `N` >= 64 for stable estimate. |
-| F3 | ConvNeXt assets present | `findings/convnext-assets.md` | `ConvNextV1Block` + `ConvNextV2Block` (with GRN) + standalone `GlobalResponseNormalization` are repo primitives. `ConvNeXtV2` model is image-classifier (global pool) — not reusable; we build a flat single-stage block stack. |
-| F4 | VAE infrastructure gap | `findings/vae-infra-inventory.md` | `Sampling` layer works on arbitrary rank >= 2 (per-patch latents OK). Existing `VAE` is image-level w/ global pool — not reusable. `MaskedAutoencoder` is patch-level but deterministic. **Gap: no patch-level continuous-Gaussian VAE.** Build new `models/convnext_patch_vae/`. |
-| F5 | Anti-collapse precedent + latent layout | `findings/collapse-precedent.md` | SIGReg is the canonical tool; DINO/VICReg/Barlow not in repo. Recommended layout: 4D latent `(B, Hp, Wp, latent_dim)`, KL averaged per-patch, SIGReg on `(B, Hp*Wp, latent_dim)` view of `z`. GHOSTs: no EMA target needed, no positional embedding needed. |
-
-### Key Constraints
-
-### HARD
-- Keras 3.8 / TF 2.18; `@keras.saving.register_keras_serializable()` on every custom class; `keras.ops` only; `keras.random.*` (NOT `keras.ops.random.*`); `dl_techniques.utils.logger` only.
-- Golden Rule: all `add_weight` in `build()`. Sub-layers created in `__init__` and explicitly `.build(shape)`-ed in parent `build()`.
-- Custom `train_step` bypassing `compile(loss=...)` MUST explicitly create `self.loss_tracker = keras.metrics.Mean(name="loss")` in `__init__` and `update_state(loss)` in `train_step` (plan_ca745a6c D-005 — Keras 3.8 does not auto-create it).
-- SIGReg input `(..., N, D)`: `D` last axis must be statically known; averaging over last-but-one (`N`).
-- Resolution-agnostic = no `GlobalAveragePooling2D`, no learned absolute positional embedding tied to a grid size, no `Dense(latent_dim)` over flattened spatial map.
-- `img_size % patch_size == 0`.
-- Single-GPU only (RTX 4090 24GB primary, RTX 4070 12GB secondary). `MPLBACKEND=Agg` for any training script. Out-dir = repo-root `results/`.
-- This session: NO training. EXPLORE → PLAN → user approval → STOP at PLAN gate.
-
-### SOFT
-- Use `ConvNextV2Block` over V1 (GRN is an additional anti-collapse defense inside the encoder).
-- Flat single-stage encoder/decoder at iter-1 (Hp = img_size/patch_size, no spatial downsampling beyond stem); move to hierarchical only if recon at 64-128px is insufficient.
-- `beta = 0.5`, `lambda_sigreg = 0.1`, `latent_dim = 16` per-patch, `num_proj = 256` as starting hyperparameters.
-- New package `src/dl_techniques/models/convnext_patch_vae/` (zero blast radius on existing models; precedent: sibling-stack additive file).
-- Anchor key decisions with `# DECISION plan_2026-05-25_fb57d478/D-NNN` at impact sites.
-
-### GHOST (do NOT inherit)
-- **"Need EMA target encoder like video_jepa"** — only required for contrastive/JEPA objectives where identity is the trivial solution. A VAE's reconstruction forbids identity. Don't add EMA — saves ~80 LOC + serialization complexity.
-- **"Need learned absolute positional embedding"** — ConvNeXt is translation-equivariant; absolute PE breaks resolution-agnostic property. Drop PE entirely.
-- **"Need temporal axis"** — borrowing video_jepa's `(B, T, Hp, Wp, D)` plumbing is overkill; patch-VAE works on `(B, H, W, C)` directly.
-- **"SIGReg alone prevents all collapse"** — invalidated in plan_15151c75 (live-target + SIGReg → time-invariance collapse). SIGReg is rank/distribution-fitting, not contrastive. KL is the primary anti-posterior-collapse defense; SIGReg is the secondary per-patch defense. Both needed.
-
-### Corrections
-*None — first exploration in this plan.*
-
-### Exploration Confidence
-- **scope**: deep — full re-read of video_jepa model.py (673 LOC), config.py (275 LOC), encoder.py (222 LOC), masking.py (158 LOC); full read of sigreg.py (281 LOC), convnext_v1_block (442 LOC), convnext_v2_block (465 LOC), GRN (285 LOC), vae model.py (998 LOC), Sampling layer (218 LOC), MAE model (349 LOC), LeWM model (360 LOC); spot-read of ConvNeXtV2 head + jepa encoder + DINO loss + VQ-VAE head; grep-verified SIGReg consumers (5 files) + anti-collapse precedent absence.
-- **solutions**: constrained — single architecture (4D-latent per-patch VAE), single backbone (ConvNeXtV2 block stack, flat), single loss stack (recon + beta*KL + lambda*SIGReg).
-- **risks**: clear — falsification signals testable on a single CIFAR-10 smoke (recon MSE, KL/patch, SIGReg loss trajectory, latent variance across patch axis). STOP-IF triggers in plan.
-
-## plan_2026-05-25_853605c1
-### Index
-| # | Topic | File | Summary |
-|---|-------|------|---------|
-| 1 | Current state of sigreg.py | `findings/sigreg-current-state.md` | 183-line single class; `add_weight` in `__init__` (Golden Rule violation); `numpy` imported inside `__init__`; otherwise compliant. |
-| 2 | Consumers + tests | `findings/consumers-and-tests.md` | Used by `models/lewm/model.py`; 3 tests in `tests/test_regularizers/test_sigreg.py`; ctor signature + get_config keys must stay. |
-| 3 | Keras guide patterns | `findings/keras-guide-patterns.md` | §1.1 Golden Rule, §2.1 imports, §3.1 simple-layer template, §8.1 serialization — concrete checklist. |
-
-### Key Constraints
-- **HARD**: Constructor signature `(knots, num_proj, seed, name, **kwargs)` unchanged — `models/lewm/model.py` and tests depend on it.
-- **HARD**: `get_config()` keys remain `{knots, num_proj, seed}` (+ base) — round-trip test asserts.
-- **HARD**: Numeric behavior of `call()` unchanged — buffer values + math identical.
-- **HARD**: All 3 tests in `tests/test_regularizers/test_sigreg.py` must continue to pass.
-- **SOFT**: Attribute names `.t / .phi / .weights_` stay (internal but stable).
-- **SOFT**: Module-level docstring (math + rationale) preserved.
-- **GHOST**: None identified.
-
-### Corrections
-*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
+- **scope**: deep — all 5 model source files reviewed via sub-agent; full trainer reviewed; test suite structure confirmed.
+- **solutions**: constrained — three targeted fixes: (a) 1-line config default, (b) encoder bottleneck split, (c) trainer warmup + beta annealing callback.
+- **risks**: clear — scoped pytest confirms no regression; bottleneck rename doesn't affect test correctness (tests explicitly pass recon_loss_type="mse" and don't inspect layer names).

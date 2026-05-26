@@ -98,7 +98,7 @@ class ConvNeXtPatchVAEConfig:
     embed_dim: int = 128
     encoder_depth: int = 4
     decoder_depth: int = 4
-    kernel_size: int = 5
+    kernel_size: int = 7
 
     # --- VAE latent ---
     latent_dim: int = 16
