@@ -167,10 +167,11 @@ class TrainingCurvesCallback(keras.callbacks.Callback):
                 v is not None for v in val_y
             ) else ([], [])
 
+            color = f"C{idx}"
             if tx:
-                ax.plot(tx, ty, "-o", label="train", markersize=3, linewidth=1.5)
+                ax.plot(tx, ty, "-", color=color, label="train", linewidth=1.8)
             if vx:
-                ax.plot(vx, vy, "-s", label="val", markersize=3, linewidth=1.5)
+                ax.plot(vx, vy, "--", color=color, label="val", linewidth=1.8, alpha=0.85)
 
             ax.set_xlabel("epoch")
             ax.set_ylabel(col)
