@@ -12,10 +12,10 @@ Decisions anchored here (see ``plans/plan_2026-05-25_fb57d478/decisions.md``):
 """
 
 from __future__ import annotations
-
-from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Optional, Tuple
+from dataclasses import asdict, dataclass, field
 
+# ------------------------------------------------------------------
 
 @dataclass
 class ConvNeXtPatchVAEConfig:
@@ -238,3 +238,5 @@ class ConvNeXtPatchVAEConfig:
         valid = {f.name for f in _dc.fields(cls)}
         d = {k: v for k, v in dict(d).items() if k in valid}
         return cls(**d)
+
+# ------------------------------------------------------------------

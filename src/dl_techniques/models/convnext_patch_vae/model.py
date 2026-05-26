@@ -20,11 +20,14 @@ Anchored decisions (see ``plans/plan_2026-05-25_fb57d478/decisions.md``):
 
 from __future__ import annotations
 
+import keras
+from keras import ops
+import tensorflow as tf
 from typing import Any, Dict, List, Optional, Tuple
 
-import keras
-import tensorflow as tf
-from keras import ops
+# ------------------------------------------------------------------
+# local imports
+# ------------------------------------------------------------------
 
 from dl_techniques.layers.sampling import Sampling
 from dl_techniques.regularizers.sigreg import SIGRegLayer
@@ -33,6 +36,8 @@ from dl_techniques.utils.logger import logger
 from .config import ConvNeXtPatchVAEConfig
 from .decoder import ConvNeXtPatchDecoder
 from .encoder import ConvNeXtPatchEncoder
+
+# ------------------------------------------------------------------
 
 # Keys produced by ``keras.Model.get_config()`` that are forwardable
 # straight to ``keras.Model.__init__``. Used by :meth:`from_config` to

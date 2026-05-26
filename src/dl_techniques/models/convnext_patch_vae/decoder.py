@@ -24,12 +24,16 @@ identity for MSE), keeping the decoder layer reusable across families.
 from __future__ import annotations
 
 import copy
+import keras
 from typing import Any, Dict, Optional, Tuple
 
-import keras
+# ------------------------------------------------------------------
+# local imports
+# ------------------------------------------------------------------
 
 from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
 
+# ------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class ConvNeXtPatchDecoder(keras.layers.Layer):
@@ -220,3 +224,5 @@ class ConvNeXtPatchDecoder(keras.layers.Layer):
         if isinstance(reg, dict):
             config["kernel_regularizer"] = keras.regularizers.deserialize(reg)
         return cls(**config)
+
+# ------------------------------------------------------------------

@@ -33,13 +33,15 @@ from __future__ import annotations
 
 import copy
 import keras
-from keras import ops
 from typing import Any, Dict, Optional, Tuple
 
+# ------------------------------------------------------------------
+# local imports
+# ------------------------------------------------------------------
 
 from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
-from dl_techniques.utils.logger import logger
 
+# ------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class ConvNeXtPatchEncoder(keras.layers.Layer):

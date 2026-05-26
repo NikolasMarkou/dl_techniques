@@ -171,7 +171,7 @@ class TrainingConfig:
     learning_rate: float = 3e-4
     weight_decay: float = 1e-4
     warmup_epochs: int = 5
-    beta_kl_start: float = 0.001
+    beta_kl_start: float = 0.0001
     beta_anneal_epochs: int = 15
     early_stopping_patience: int = 10
 
@@ -990,7 +990,7 @@ def train(config: TrainingConfig, smoke: bool = False) -> None:
             ReconVisualizationCallback(
                 val_samples=val_samples,
                 save_dir=recon_dir,
-                frequency=max(1, config.epochs // 10),
+                frequency=1,
                 recon_loss_type=config.recon_loss_type,
                 cifar_mean=_ds_mean,
                 cifar_std=_ds_std,
@@ -1003,7 +1003,7 @@ def train(config: TrainingConfig, smoke: bool = False) -> None:
     # Collect up to 128 images from the validation set for the PCA scatter;
     # re-use the same 8 fixed images for interpolation pairs.
     try:
-        viz_frequency = max(1, config.epochs // 10)
+        viz_frequency = 1
         latent_dir = os.path.join(results_dir, "latent_space")
         interp_dir = os.path.join(results_dir, "interpolations")
 
@@ -1189,7 +1189,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # Training (extend base parser defaults)
     parser.add_argument("--warmup-epochs",      type=int,   default=5)
-    parser.add_argument("--beta-kl-start",      type=float, default=0.001,
+    parser.add_argument("--beta-kl-start",      type=float, default=0.0001,
                         help="Initial beta at epoch 0 for beta annealing.")
     parser.add_argument("--beta-anneal-epochs", type=int,   default=15,
                         help="Epochs to ramp beta from beta-kl-start to beta-kl. 0=disabled.")
