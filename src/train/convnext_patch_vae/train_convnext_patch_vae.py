@@ -97,6 +97,11 @@ class TrainingConfig:
             by ``patch_size``).
         img_channels: Number of input/output channels (3 for RGB).
         augment_data: Whether to apply random horizontal flip + crop.
+        augment_color: Whether to apply photometric augmentation
+            (brightness, contrast, saturation) on top of geometric
+            augmentation.  Has no effect when ``augment_data=False``.
+            Saturation is skipped for CIFAR in MSE mode (data is
+            standardised and not in ``[0, 1]``).
         model_variant: Optional preset shorthand (``"tiny"``, ``"base"``,
             ``"large"``).  When set, overrides ``embed_dim``,
             ``encoder_depth``, ``decoder_depth``, and ``latent_dim``.
@@ -139,6 +144,7 @@ class TrainingConfig:
     img_size: int = 32
     img_channels: int = 3
     augment_data: bool = True
+    augment_color: bool = True
 
     # Model shorthand (overrides per-field dims when set)
     model_variant: Optional[str] = None
@@ -311,6 +317,9 @@ def _build_cifar_dataset(
         x = tf.image.random_flip_left_right(x)
         x = tf.pad(x, [[4, 4], [4, 4], [0, 0]])
         x = tf.image.random_crop(x, [config.img_size, config.img_size, config.img_channels])
+        if config.augment_color:
+            x = tf.image.random_brightness(x, max_delta=0.1)
+            x = tf.image.random_contrast(x, lower=0.9, upper=1.1)
         return x
 
     train_ds = (
@@ -376,6 +385,57 @@ def _build_smoke_dataset(
     return _make_ds(x_train, repeat=True), _make_ds(x_val), 3, 2
 
 
+def _make_filesystem_decode_fn(
+    img_size: int,
+    img_channels: int,
+    augment: bool,
+    augment_color: bool,
+):
+    """Return a ``(path, is_training) -> tf.Tensor`` decode+augment closure.
+
+    The returned function reads a JPEG from ``path``, decodes it, resizes it,
+    optionally applies geometric and photometric augmentation, and normalises
+    to ``[0, 1]`` by dividing by 255.
+
+    Photometric ops (brightness / contrast / saturation) run only when
+    ``is_training=True``, ``augment=True``, and ``augment_color=True``.
+    Saturation is skipped when ``img_channels != 3``.
+    A ``clip_by_value(0, 1)`` is applied after photometric ops to keep values
+    in the valid range for BCE loss.
+
+    Args:
+        img_size: Target square resolution after resize/crop.
+        img_channels: Number of output channels.
+        augment: Whether to apply geometric augmentation (crop + flip).
+        augment_color: Whether to apply photometric augmentation.
+
+    Returns:
+        Callable ``(path: tf.Tensor, is_training: bool) -> tf.Tensor``.
+    """
+    import tensorflow as tf
+
+    def _decode_and_resize(path: tf.Tensor, is_training: bool) -> tf.Tensor:
+        raw = tf.io.read_file(path)
+        img = tf.image.decode_jpeg(raw, channels=img_channels)
+        img = tf.cast(img, tf.float32)
+        if is_training and augment:
+            scale = img_size + 32
+            img = tf.image.resize(img, [scale, scale])
+            img = tf.image.random_crop(img, [img_size, img_size, img_channels])
+            img = tf.image.random_flip_left_right(img)
+            if augment_color:
+                img = tf.image.random_brightness(img, max_delta=0.2)
+                img = tf.image.random_contrast(img, lower=0.8, upper=1.2)
+                if img_channels == 3:
+                    img = tf.image.random_saturation(img, lower=0.8, upper=1.2)
+                img = tf.clip_by_value(img, 0.0, 1.0)
+        else:
+            img = tf.image.resize_with_crop_or_pad(img, img_size, img_size)
+        return img / 255.0
+
+    return _decode_and_resize
+
+
 def _build_filesystem_dataset(
     train_glob: str,
     val_glob: str,
@@ -383,6 +443,7 @@ def _build_filesystem_dataset(
     img_channels: int,
     batch_size: int,
     augment: bool = True,
+    augment_color: bool = True,
     seed: int = 42,
     dataset_label: str = "filesystem",
 ) -> Tuple[Any, Any, int, int]:
@@ -394,7 +455,9 @@ def _build_filesystem_dataset(
         img_size: Target square spatial resolution after resize/crop.
         img_channels: Number of output channels (3 for RGB).
         batch_size: Batch size.
-        augment: Whether to apply random crop + flip to training images.
+        augment: Whether to apply geometric augmentation (crop + flip).
+        augment_color: Whether to apply photometric augmentation on top of
+            geometric augmentation.  Has no effect when ``augment=False``.
         seed: RNG seed for shuffle and random crop.
         dataset_label: Name used in log messages.
 
@@ -421,23 +484,12 @@ def _build_filesystem_dataset(
     n_val = len(val_files)
     steps_per_epoch = max(1, n_train // batch_size)
 
-    def _decode_and_resize(path: tf.Tensor, is_training: bool) -> tf.Tensor:
-        raw = tf.io.read_file(path)
-        img = tf.image.decode_jpeg(raw, channels=img_channels)
-        img = tf.cast(img, tf.float32)
-        if is_training and augment:
-            scale = img_size + 32
-            img = tf.image.resize(img, [scale, scale])
-            img = tf.image.random_crop(img, [img_size, img_size, img_channels])
-            img = tf.image.random_flip_left_right(img)
-        else:
-            img = tf.image.resize_with_crop_or_pad(img, img_size, img_size)
-        return img / 255.0
+    _decode_fn = _make_filesystem_decode_fn(img_size, img_channels, augment, augment_color)
 
     train_ds = (
         tf.data.Dataset.from_tensor_slices(train_files)
         .shuffle(n_train, seed=seed, reshuffle_each_iteration=True)
-        .map(lambda p: _decode_and_resize(p, True),
+        .map(lambda p: _decode_fn(p, True),
              num_parallel_calls=tf.data.AUTOTUNE)
         .map(lambda x: (x, x), num_parallel_calls=tf.data.AUTOTUNE)
         .repeat()
@@ -446,7 +498,7 @@ def _build_filesystem_dataset(
     )
     val_ds = (
         tf.data.Dataset.from_tensor_slices(val_files)
-        .map(lambda p: _decode_and_resize(p, False),
+        .map(lambda p: _decode_fn(p, False),
              num_parallel_calls=tf.data.AUTOTUNE)
         .map(lambda x: (x, x), num_parallel_calls=tf.data.AUTOTUNE)
         .batch(batch_size, drop_remainder=False)
@@ -523,18 +575,9 @@ def _build_mixed_filesystem_dataset(
         f"steps_per_epoch={steps_per_epoch} | weights={[round(w, 3) for w in weights]}"
     )
 
-    def _decode_and_resize(path: tf.Tensor, is_training: bool) -> tf.Tensor:
-        raw = tf.io.read_file(path)
-        img = tf.image.decode_jpeg(raw, channels=config.img_channels)
-        img = tf.cast(img, tf.float32)
-        if is_training and config.augment_data:
-            scale = config.img_size + 32
-            img = tf.image.resize(img, [scale, scale])
-            img = tf.image.random_crop(img, [config.img_size, config.img_size, config.img_channels])
-            img = tf.image.random_flip_left_right(img)
-        else:
-            img = tf.image.resize_with_crop_or_pad(img, config.img_size, config.img_size)
-        return img / 255.0
+    _decode_fn = _make_filesystem_decode_fn(
+        config.img_size, config.img_channels, config.augment_data, config.augment_color
+    )
 
     # Per-source path datasets: shuffle + repeat so they never exhaust.
     path_datasets = [
@@ -551,16 +594,16 @@ def _build_mixed_filesystem_dataset(
             stop_on_empty_dataset=False,
             seed=42,
         )
-        .map(lambda p: _decode_and_resize(p, True),  num_parallel_calls=tf.data.AUTOTUNE)
-        .map(lambda x: (x, x),                       num_parallel_calls=tf.data.AUTOTUNE)
+        .map(lambda p: _decode_fn(p, True),  num_parallel_calls=tf.data.AUTOTUNE)
+        .map(lambda x: (x, x),               num_parallel_calls=tf.data.AUTOTUNE)
         .batch(config.batch_size, drop_remainder=True)
         .prefetch(tf.data.AUTOTUNE)
     )
 
     val_ds = (
         tf.data.Dataset.from_tensor_slices(all_val_files)
-        .map(lambda p: _decode_and_resize(p, False), num_parallel_calls=tf.data.AUTOTUNE)
-        .map(lambda x: (x, x),                       num_parallel_calls=tf.data.AUTOTUNE)
+        .map(lambda p: _decode_fn(p, False), num_parallel_calls=tf.data.AUTOTUNE)
+        .map(lambda x: (x, x),               num_parallel_calls=tf.data.AUTOTUNE)
         .batch(config.batch_size, drop_remainder=False)
         .prefetch(tf.data.AUTOTUNE)
     )
@@ -599,6 +642,7 @@ def build_dataset(
             img_channels=config.img_channels,
             batch_size=config.batch_size,
             augment=config.augment_data,
+            augment_color=config.augment_color,
             dataset_label="ADE20K",
         )
     if config.dataset == "coco":
@@ -610,6 +654,7 @@ def build_dataset(
             img_channels=config.img_channels,
             batch_size=config.batch_size,
             augment=config.augment_data,
+            augment_color=config.augment_color,
             dataset_label="COCO2017",
         )
     raise ValueError(
@@ -1061,6 +1106,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gamma-clip", type=float, default=1.0)
     parser.add_argument("--no-augment", action="store_false", dest="augment_data",
                         default=True)
+    parser.add_argument("--no-color-augment", action="store_false", dest="augment_color",
+                        default=True,
+                        help="Disable photometric augmentation (brightness/contrast/saturation).")
 
     # Training (extend base parser defaults)
     parser.add_argument("--warmup-epochs",      type=int,   default=5)
