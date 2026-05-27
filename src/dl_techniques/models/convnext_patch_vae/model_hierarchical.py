@@ -570,6 +570,26 @@ class HierarchicalConvNeXtPatchVAE(keras.Model):
             name="sigreg_l2",
         )
 
+        # --- Learnable conditional prior p(z_l2 | z_l1) ---
+        # When enabled, KL_L2 uses the conditional prior. Heads are
+        # zero-init so the prior emits exactly N(0, I) at step 0 (see
+        # D-001 in `_L2ConditionalPrior`).
+        if cfg.learnable_l2_prior:
+            self.l2_prior = _L2ConditionalPrior(
+                tile_factor=cfg.tile_factor,
+                latent_dim_l1=cfg.latent_dim_l1,
+                latent_dim_l2=cfg.latent_dim_l2,
+                embed_dim=cfg.prior_l2_effective_embed_dim,
+                depth=cfg.prior_l2_depth,
+                kernel_size=cfg.kernel_size,
+                dropout_rate=cfg.dropout_rate,
+                spatial_dropout_rate=cfg.spatial_dropout_rate,
+                kernel_regularizer=kreg,
+                name="l2_prior",
+            )
+        else:
+            self.l2_prior = None
+
         # Cached weights — mutated by BetaAnnealingCallback during training.
         self._beta_kl_l1 = float(cfg.beta_kl_l1)
         self._beta_kl_l2 = float(cfg.beta_kl_l2)
@@ -644,7 +664,21 @@ class HierarchicalConvNeXtPatchVAE(keras.Model):
         # Losses (all float32, mixed-precision-safe).
         recon_loss = self._compute_recon(inputs, logits)
         kl_l1_loss = self._compute_kl(mu_l1, log_var_l1)
-        kl_l2_loss = self._compute_kl(mu_l2, log_var_l2)
+        # DECISION plan_2026-05-27_c3184aea/D-002: when the learnable
+        # conditional prior is enabled, KL_L2 uses the closed-form
+        # diagonal-Gaussian KL against p(z_l2|z_l1). Both lv_q and lv_p
+        # are clipped to [-10, +10] inside _compute_kl_l2_conditional
+        # for float32 stability (mirrors the H18 clip). Gradient flows
+        # back through z_l1 into encoder_l1 (D-004) — standard NVAE /
+        # Ladder-VAE practice. When the prior is disabled, falls back
+        # to the legacy KL against N(0, I).
+        if self.l2_prior is not None:
+            mu_p_l2, log_var_p_l2 = self.l2_prior(z_l1, training=training)
+            kl_l2_loss = self._compute_kl_l2_conditional(
+                mu_l2, log_var_l2, mu_p_l2, log_var_p_l2,
+            )
+        else:
+            kl_l2_loss = self._compute_kl(mu_l2, log_var_l2)
         sigreg_l1_loss = self._compute_sigreg(z_l1, self.sigreg_l1)
         sigreg_l2_loss = self._compute_sigreg(z_l2, self.sigreg_l2)
 
@@ -708,6 +742,44 @@ class HierarchicalConvNeXtPatchVAE(keras.Model):
         lv_f = ops.clip(ops.cast(log_var, "float32"), -10.0, 10.0)
         kl_per_patch = -0.5 * ops.sum(
             1.0 + lv_f - ops.square(mu_f) - ops.exp(lv_f), axis=-1
+        )
+        return ops.mean(kl_per_patch)
+
+    def _compute_kl_l2_conditional(
+        self,
+        mu_q: keras.KerasTensor,
+        log_var_q: keras.KerasTensor,
+        mu_p: keras.KerasTensor,
+        log_var_p: keras.KerasTensor,
+    ) -> keras.KerasTensor:
+        """Closed-form KL(q(z_l2|x) || p(z_l2|z_l1)) for diagonal Gaussians.
+
+            KL(q || p) = 0.5 * sum_d [
+                lv_p - lv_q
+                + (exp(lv_q) + (mu_q - mu_p)^2) * exp(-lv_p)
+                - 1
+            ]
+
+        Average over `(B, Hp2, Wp2)` so the loss magnitude is
+        resolution-invariant (matches the per-patch averaging pattern
+        used in `_compute_kl`). Both ``log_var_q`` and ``log_var_p`` are
+        clipped to ``[-10, +10]`` for float32 stability.
+
+        Sanity check: with ``mu_p=0, log_var_p=0`` the formula reduces to
+        ``-0.5 * (1 + lv_q - mu_q^2 - exp(lv_q))``, i.e. the legacy KL
+        against N(0, I) — verified by tests at step 0 when heads are
+        zero-initialized.
+        """
+        mu_q_f = ops.cast(mu_q, "float32")
+        mu_p_f = ops.cast(mu_p, "float32")
+        lv_q_f = ops.clip(ops.cast(log_var_q, "float32"), -10.0, 10.0)
+        lv_p_f = ops.clip(ops.cast(log_var_p, "float32"), -10.0, 10.0)
+        diff_sq = ops.square(mu_q_f - mu_p_f)
+        kl_per_patch = 0.5 * ops.sum(
+            lv_p_f - lv_q_f
+            + (ops.exp(lv_q_f) + diff_sq) * ops.exp(-lv_p_f)
+            - 1.0,
+            axis=-1,
         )
         return ops.mean(kl_per_patch)
 
@@ -797,15 +869,36 @@ class HierarchicalConvNeXtPatchVAE(keras.Model):
         wp1: Optional[int] = None,
         seed: Optional[int] = None,
     ) -> keras.KerasTensor:
-        """Pure-prior sampling — WARNING: produces incoherent images.
+        """Pure-prior sampling.
 
-        The L2 decoder was trained on correlated `(z_l1, z_l2)` pairs.
-        Sampling both from independent N(0, I) priors violates that
-        training distribution. Use :meth:`sample_from` for coherent
-        variations of a real anchor, or fit an aggregate-posterior /
-        learnable prior to use pure-prior sampling properly.
+        Pipeline (when the learnable conditional prior is enabled):
 
-        Kept for plumbing tests and pure-prior baselines only.
+            z_l1 ~ N(0, I)             # standard prior on the coarse latent
+            mu_p, lv_p = self.l2_prior(z_l1)
+            z_l2 ~ N(mu_p, exp(lv_p))  # conditional prior on the fine latent
+            return self.decode(z_l1, z_l2)
+
+        This is the coherent generative path enabled by the learnable
+        conditional prior `p(z_l2|z_l1)` — `(z_l1, z_l2)` are drawn from
+        the joint generative distribution, not from independent N(0, I)
+        priors.
+
+        **Legacy fallback**: when ``learnable_l2_prior=False`` (toggle
+        off), both latents are sampled independently from N(0, I). This
+        is the OLD pure-prior path and is documented as incoherent — the
+        L2 decoder was trained on correlated `(z_l1, z_l2)` pairs from
+        the same image. Use :meth:`sample_from` for coherent variations
+        around a real anchor, regardless of the prior setting.
+
+        Args:
+            num_samples: Number of images to generate.
+            hp1: L1 patch grid height. Defaults to
+                ``config.patches_per_side_l1``.
+            wp1: L1 patch grid width.
+            seed: Optional RNG seed.
+
+        Returns:
+            ``(num_samples, hp1 * patch_size_l1, wp1 * patch_size_l1, img_channels)``.
         """
         cfg = self.config
         hp1 = cfg.patches_per_side_l1 if hp1 is None else int(hp1)
@@ -817,10 +910,24 @@ class HierarchicalConvNeXtPatchVAE(keras.Model):
         eps_l1 = keras.random.normal(
             shape=(num_samples, hp1, wp1, cfg.latent_dim_l1), seed=seed,
         )
-        eps_l2 = keras.random.normal(
-            shape=(num_samples, hp2, wp2, cfg.latent_dim_l2), seed=seed,
-        )
-        return self.decode(eps_l1, eps_l2)
+        # DECISION plan_2026-05-27_c3184aea/D-003: when the learnable
+        # conditional prior is enabled, sample z_l2 from p(z_l2|z_l1)
+        # (the prior network's output distribution). This is what makes
+        # pure-prior sampling coherent on hierarchical models. The
+        # legacy independent-N(0,I) path is retained for ablation only
+        # — see docstring.
+        if self.l2_prior is not None:
+            mu_p, lv_p = self.l2_prior(eps_l1, training=False)
+            eps_l2_unit = keras.random.normal(
+                shape=ops.shape(mu_p),
+                seed=None if seed is None else seed + 1,
+            )
+            z_l2 = mu_p + ops.exp(0.5 * ops.clip(lv_p, -10.0, 10.0)) * eps_l2_unit
+        else:
+            z_l2 = keras.random.normal(
+                shape=(num_samples, hp2, wp2, cfg.latent_dim_l2), seed=seed,
+            )
+        return self.decode(eps_l1, z_l2)
 
     # ------------------------------------------------------------------
     # Custom train_step
