@@ -201,3 +201,102 @@ reviews results. Everything below is contingent.
 .venv/bin/python -m pytest tests/test_models/test_convnext_patch_vae/ -vvv
 # 15 passed in ~24s on RTX 4090 (well under the 90s C11 budget).
 ```
+
+---
+
+## Hierarchical variant — `HierarchicalConvNeXtPatchVAE`
+
+> Plan: `plans/plan_2026-05-27_dee954c6/` (iter-1).
+> Motivation: `analyses/analysis_2026-05-26_05ccde10/summary.md` §6.
+
+The single-scale model above bottlenecks at high resolution because each
+8×8 patch must compress 192 pixel values into a 16-D latent with no
+cross-patch context. At 256×256 ADE20K/COCO this produces an effective
+12:1 compression ratio per patch and predicts posterior collapse (E1 in
+the analysis).
+
+The hierarchical variant introduces a coarse **L1** scale alongside the
+fine **L2** scale:
+
+```
+x : (B, H, W, C)
+    │                                  │
+    ▼  ConvNeXtPatchEncoder            ▼  ConvNeXtPatchEncoder
+       (patch_size_l1, big)               (patch_size_l2, small)
+    │                                  │
+   (mu_l1, log_var_l1)                (mu_l2, log_var_l2)
+    │                                  │
+    ▼  Sampling                        ▼  Sampling
+    z_l1 (B, Hp1, Wp1, latent_l1)      z_l2 (B, Hp2, Wp2, latent_l2)
+    │                                  │
+    │      ┌───────────────────────────┘
+    │      │
+    │      ▼
+    ▼  _L2ConditionedDecoder:
+       proj_in(z_l2) ─┐
+                      concat ─ cond_proj(1×1) ─ N×ConvNeXtV2Block ─ LN ─ Conv2DTranspose ─▶ x_hat
+       UpSample(z_l1)─┘   (nearest-neighbor, factor = patch_size_l1 / patch_size_l2)
+```
+
+**L1 has no pixel-recon head** — it is conditioning only.
+
+**Loss**:
+
+```
+recon
++ beta_kl_l1   * KL(z_l1)
++ beta_kl_l2   * KL(z_l2)
++ lambda_l1    * (sigreg(z_l1) * N_L1)
++ lambda_l2    * (sigreg(z_l2) * N_L2)
+```
+
+**Annealing**: trainer installs two `BetaAnnealingCallback` instances with
+staggered schedules — `_beta_kl_l1` ramps over `beta_anneal_epochs_l1`,
+`_beta_kl_l2` over `beta_anneal_epochs_l2` (intentional overlap).
+Callback gains an `attr_name` kwarg so the same class drives both.
+
+**Parameter budget** (base preset @ 256×256):
+
+| Component | Params |
+|-----------|--------|
+| L1 encoder + decoder | ~1.14M |
+| L2 encoder + L2-conditioned decoder | ~1.02M |
+| **Total** | **~2.16M** |
+
+15× below LDM/SD VAE (~34M), fits in 12 GB at batch 8.
+
+**Smoke-validated**: CIFAR-10 32×32 (2 epochs, 20 steps, 13K params) and
+ADE20K 256×256 (1 epoch, 10 steps, batch 8, 2.16M params) both run
+cleanly with bit-exact `.keras` round-trip on both `mu_l1` and `mu_l2`.
+
+### CLI
+
+```bash
+# 256x256 ADE20K, batch 8, single epoch smoke
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m \
+  train.convnext_patch_vae.train_convnext_patch_vae \
+  --hierarchical --dataset ade20k --image-size 256 \
+  --patch-size 8 --patch-size-l1 32 \
+  --latent-dim 16 --latent-dim-l1 64 \
+  --embed-dim 128 --embed-dim-l1 128 \
+  --encoder-depth 4 --encoder-depth-l1 4 \
+  --decoder-depth 4 --decoder-depth-l1 4 \
+  --batch-size 8 --epochs 50 \
+  --beta-anneal-epochs-l1 10 --beta-anneal-epochs-l2 15 \
+  --lambda-sigreg-l1 0.05 --lambda-sigreg-l2 0.1 \
+  --gpu 1
+```
+
+`--patch-size` / `--latent-dim` map to the **L2** scale. `--patch-size-l1`
+/ `--latent-dim-l1` / `--embed-dim-l1` etc. control L1. `patch_size_l1`
+must be an integer multiple of `patch_size_l2`.
+
+### Out of scope (this iteration)
+
+- Mid-training viz callbacks (Recon / LatentSpace / LatentInterpolation)
+  in hierarchical mode — they assume single-scale `encode/decode`
+  signatures and are skipped with an info log. Hierarchical viz is a
+  follow-up.
+- Spatial cross-attention conditioning (Option B in the analysis).
+- L1 stand-alone pixel-space reconstruction head.
+- L2 encoder conditioning (only the L2 decoder is conditioned).
