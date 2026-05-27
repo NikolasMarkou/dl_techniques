@@ -535,6 +535,7 @@ def _build_filesystem_dataset(
             tf.data.Dataset.from_tensor_slices(train_files)
             .shuffle(n_train, seed=seed, reshuffle_each_iteration=True)
             .flat_map(_patch_fn)
+            .shuffle(batch_size * patches_per_image, reshuffle_each_iteration=True)
             .map(lambda x: (x, x), num_parallel_calls=tf.data.AUTOTUNE)
             .repeat()
             .batch(batch_size, drop_remainder=True)
@@ -654,6 +655,7 @@ def _build_mixed_filesystem_dataset(
             seed=42,
         )
         .flat_map(_patch_fn)
+        .shuffle(config.batch_size * config.patches_per_image, reshuffle_each_iteration=True)
         .map(lambda x: (x, x),               num_parallel_calls=tf.data.AUTOTUNE)
         .batch(config.batch_size, drop_remainder=True)
         .prefetch(tf.data.AUTOTUNE)
@@ -855,6 +857,16 @@ class BetaAnnealingCallback(keras.callbacks.Callback):
         self.beta_start = beta_start
         self.beta_target = beta_target
         self.anneal_epochs = anneal_epochs
+
+    def on_train_begin(self, logs=None) -> None:
+        # Fast-forward beta to the correct value when resuming mid-anneal.
+        # initial_epoch > 0 only when model.fit is called with initial_epoch=N.
+        initial_epoch = int(self.params.get("initial_epoch", 0))
+        if self.anneal_epochs > 0 and initial_epoch > 0:
+            progress = min(1.0, initial_epoch / self.anneal_epochs)
+            self.model._beta_kl = (
+                self.beta_start + progress * (self.beta_target - self.beta_start)
+            )
 
     def on_epoch_begin(self, epoch: int, logs=None) -> None:
         if self.anneal_epochs <= 0:
@@ -1085,20 +1097,30 @@ def train(config: TrainingConfig, smoke: bool = False) -> None:
     if val_losses:
         best_val_loss = min(val_losses)
         epochs_run    = len(val_losses)
+        # Loss-type-aware threshold: BCE loss on [0,1] images floors around
+        # 0.1-0.2 for a converged model — the MSE default of 0.02 is
+        # unreachable and produces a permanent false-negative advisory (H4).
+        # Respect any explicit user override of --success-threshold.
+        _loss_thresholds = {"bce": 0.15, "mse": 0.02}
+        effective_threshold = (
+            _loss_thresholds.get(config.recon_loss_type, config.success_threshold)
+            if config.success_threshold == 0.02
+            else config.success_threshold
+        )
         converged = (
-            best_val_loss <= config.success_threshold
+            best_val_loss <= effective_threshold
             and epochs_run >= 0.5 * config.epochs
         )
         if converged:
             logger.info(
                 f"TRAINING CONVERGED: best val_loss={best_val_loss:.4f} "
-                f"<= threshold={config.success_threshold}"
+                f"<= threshold={effective_threshold}"
             )
         else:
             logger.warning(
                 f"TRAINING MAY NOT HAVE CONVERGED: "
                 f"best val_loss={best_val_loss:.4f}, "
-                f"threshold={config.success_threshold}, "
+                f"threshold={effective_threshold}, "
                 f"epochs_run={epochs_run}/{config.epochs}. "
                 "Consider increasing --epochs or tuning --beta-kl / --lambda-sigreg."
             )
