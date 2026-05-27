@@ -143,6 +143,10 @@ class ConvNeXtPatchVAE(keras.Model):
         # weighted contribution still flows into the aggregate `loss`
         # tracker via `add_loss`. Required by test_sigreg_off_branch.
         self.sigreg_loss_tracker = keras.metrics.Mean(name="sigreg_loss")
+        # Weighted variants (beta_kl * kl, lambda_sigreg * sigreg) so the
+        # actual optimizer contribution is visible alongside the raw values.
+        self.kl_loss_weighted_tracker = keras.metrics.Mean(name="kl_loss_weighted")
+        self.sigreg_loss_weighted_tracker = keras.metrics.Mean(name="sigreg_loss_weighted")
 
         # Edge-case advisory: SIGReg statistic on too-few patches.
         if cfg.num_patches < cfg.sigreg_knots:
@@ -172,6 +176,8 @@ class ConvNeXtPatchVAE(keras.Model):
             self.recon_loss_tracker,
             self.kl_loss_tracker,
             self.sigreg_loss_tracker,
+            self.kl_loss_weighted_tracker,
+            self.sigreg_loss_weighted_tracker,
         ]
         seen, out = set(), []
         for m in base + extras:
@@ -221,6 +227,9 @@ class ConvNeXtPatchVAE(keras.Model):
         self.kl_loss_tracker.update_state(kl_loss)
         # Track the RAW SIGReg statistic (see D-003 in __init__).
         self.sigreg_loss_tracker.update_state(sigreg_loss)
+        # Weighted contributions — actual optimizer signal per component.
+        self.kl_loss_weighted_tracker.update_state(self._beta_kl * kl_loss)
+        self.sigreg_loss_weighted_tracker.update_state(self._lambda_sigreg * sigreg_loss)
 
         # Pixel-space reconstruction in [0, 1] for BCE branch, raw for MSE.
         if self.config.recon_loss_type == "bce":
@@ -268,7 +277,7 @@ class ConvNeXtPatchVAE(keras.Model):
         — doubling Hp*Wp does not double the loss.
         """
         mu_f = ops.cast(mu, "float32")
-        lv_f = ops.cast(log_var, "float32")
+        lv_f = ops.clip(ops.cast(log_var, "float32"), -10.0, 10.0)
         # KL per patch position summed over latent_dim:
         #   kl = -0.5 * sum_d (1 + log_var - mu^2 - exp(log_var))
         kl_per_patch = -0.5 * ops.sum(
@@ -296,7 +305,11 @@ class ConvNeXtPatchVAE(keras.Model):
         # rejected alternatives (per-position N=batch; pre-reparam encoder
         # grid). Reshape into the (..., N, D) shape SIGRegLayer expects.
         z_patches = ops.reshape(z_f, (B, Hp * Wp, D))
-        return self.sigreg(z_patches)
+        # DECISION plan_2026-05-27_1a9e3221/D-001: multiply by N=Hp*Wp so
+        # SIGReg penalty is O(N) — matching KL's resolution-invariant design.
+        # Without this, effective SIGReg pressure collapses 16× per resolution
+        # doubling (1024× weaker at 256x256 vs CIFAR, H21).
+        return self.sigreg(z_patches) * ops.cast(Hp * Wp, "float32")
 
     # ------------------------------------------------------------------
     # Public encode / decode / sample API
