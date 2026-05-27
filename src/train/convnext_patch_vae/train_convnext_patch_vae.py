@@ -61,6 +61,7 @@ from dl_techniques.models.convnext_patch_vae.model import ConvNeXtPatchVAE
 from dl_techniques.models.convnext_patch_vae.model_hierarchical import (
     HierarchicalConvNeXtPatchVAE,
     _L2ConditionedDecoder,
+    _L2ConditionalPrior,
 )
 from dl_techniques.callbacks.training_curves import TrainingCurvesCallback
 from train.common import setup_gpu, create_base_argument_parser, create_callbacks
@@ -73,6 +74,7 @@ CUSTOM_OBJECTS = {
     "ConvNeXtPatchVAE": ConvNeXtPatchVAE,
     "HierarchicalConvNeXtPatchVAE": HierarchicalConvNeXtPatchVAE,
     "_L2ConditionedDecoder": _L2ConditionedDecoder,
+    "_L2ConditionalPrior": _L2ConditionalPrior,
 }
 
 # Per-channel statistics for MSE normalisation (mean/std per dataset)
