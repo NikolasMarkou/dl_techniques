@@ -1,6 +1,6 @@
 # Layers Package
 
-The largest package in the library — 290+ custom Keras 3 layers organized by domain. All layers follow Keras 3 conventions with full `get_config()` serialization support.
+The largest package in the library — custom Keras 3 layers organized by domain. All layers follow Keras 3 conventions with full `get_config()` serialization support.
 
 ## Structure
 

@@ -5,13 +5,16 @@ Data loading, generation, and preprocessing utilities for various domains.
 ## Structure
 
 ### Top-level Modules
-- `universal_dataset_loader.py` — Unified loader interface for multiple dataset types
+- `universal_dataset_loader.py` — Unified Hugging Face Hub streaming loader for multiple dataset types (text, image, audio)
 - `simple_2d.py` — Synthetic 2D dataset generators (classification/regression)
 - `patch_transforms.py` — Image patch extraction and transformation utilities
 - `tabular.py` — Tabular dataset utilities
 - `sut.py` — SUT-Crack dataset loader (TF-optimized, vectorized processing)
 - `vqa_dataset.py` — VQA dataset processor for nanoVLM training (supports The Cauldron format)
-- `universal_dataset_loader.py` — Hugging Face Hub streaming loader (text, image, audio)
+- `nlp.py` — Wikipedia / HF text dataset helpers (`load_wikipedia_train_val`, packed-CLM article counts, shard utilities)
+- `bdd100k_video.py` — BDD100K video dataset loader
+- `synthetic_drone_video.py` — Synthetic drone-video sequence generator
+- `pusht_hdf5.py` — PushT robotics HDF5 dataset loader
 
 ### Subpackages
 - `arc/` — ARC (Abstraction and Reasoning Corpus) dataset support:

@@ -1,6 +1,6 @@
 # Losses Package
 
-28+ specialized loss functions for diverse deep learning tasks, all implemented as serializable Keras 3 loss objects.
+Specialized loss functions for diverse deep learning tasks, all implemented as serializable Keras 3 loss objects.
 
 ## Public API
 
@@ -28,6 +28,7 @@ from dl_techniques.losses import (
 ## Modules
 
 - `any_loss.py` — AnyLoss framework: differentiable approximations of non-differentiable metrics (F1, accuracy, balanced accuracy, G-mean)
+- `clifford_detection_loss.py` — CliffordNet detection loss
 - `affine_invariant_loss.py` — Affine-invariant distance loss
 - `brier_spiegelhalters_ztest_loss.py` — Calibration losses + metrics (Brier, Spiegelhalter's Z)
 - `capsule_margin_loss.py` — Capsule network margin loss with analysis utilities
@@ -37,20 +38,25 @@ from dl_techniques.losses import (
 - `decoupled_information_loss.py` — Information-theoretic regularization
 - `dino_loss.py` — DINO/iBOT self-supervised loss
 - `feature_alignment_loss.py` — Feature alignment for knowledge distillation
+- `focal_causal_lm_loss.py` — Focal loss variant for causal LM training
 - `focal_uncertainty_loss.py` — Focal loss with uncertainty estimation
 - `goodhart_loss.py` — Goodhart's law-aware loss
 - `hrm_loss.py` — Hierarchical reasoning model loss
 - `huber_loss.py` — Robust Huber loss
 - `image_restoration_loss.py` — Multi-component image restoration loss
 - `mase_loss.py` — Mean Absolute Scaled Error
+- `masked_causal_lm_loss.py` — Masked causal LM loss (skip ignore-tokens during NTP)
 - `multi_labels_loss.py` — Multi-label classification loss
+- `multi_task_loss.py` — Multi-task loss aggregator with per-task weighting
 - `nano_vlm_loss.py` — NanoVLM vision-language loss
 - `quantile_loss.py` — Quantile regression loss
+- `scaled_mse_loss.py` — Scaled mean-squared-error loss
 - `segmentation_loss.py` — Segmentation loss (Dice, Tversky, focal)
 - `segmentation_wrapper_loss.py` — Serializable name-dispatched wrapper around `SegmentationLosses` for use as a compile/save/load-friendly Keras `Loss`
 - `smape_loss.py` — Symmetric MAPE
 - `sparsemax_loss.py` — Sparsemax loss
 - `tabm_loss.py` — TabM model loss
+- `utilization_loss.py` — Utilization / load-balancing loss (e.g. MoE routing)
 - `wasserstein_loss.py` — Wasserstein/WGAN-GP loss
 - `yolo12_multitask_loss.py` — YOLOv12 multi-task detection loss
 

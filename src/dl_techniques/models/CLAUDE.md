@@ -1,6 +1,6 @@
 # Models Package
 
-150+ complete model architectures organized as subdirectories. Each subdirectory is a self-contained model implementation.
+Complete model architectures organized as subdirectories. Each subdirectory is a self-contained model implementation.
 
 ## Model Categories
 
@@ -29,6 +29,8 @@
 - `fractalnet/` — FractalNet
 - `bias_free_denoisers/` — Bias-free denoiser models
 - `convnext_patch_vae/` — ConvNeXt patch-level VAE with SIGReg anti-collapse
+- `burst_dp/` — Burst-mode dense prediction
+- `video_jepa/` — Video JEPA (joint embedding predictive)
 
 ### NLP / Language
 - `bert/` — BERT
@@ -38,6 +40,9 @@
 - `qwen/` — Qwen LLM
 - `masked_language_model/` — MLM training
 - `byte_latent_transformer/` — Byte Latent Transformer (BLT)
+- `gpt2/` — GPT-2 architecture
+- `wave_field_llm/` — Wave-field LLM
+- `memory_bank/` — Memory-bank language model components
 
 ### Vision-Language
 - `clip/` — CLIP
@@ -72,6 +77,9 @@
 - `ntm/` — Neural Turing Machine
 - `vae/` — Variational Autoencoder
 - `vq_vae/` — VQ-VAE
+- `vq_vae_rotation/` — VQ-VAE with rotation-based codebook updates
+- `lewm/` — Latent-energy world model
+- `nam/` — Neural additive model
 - `mdn/` — Mixture Density Networks
 - `fnet/` — FNet (Fourier)
 - `fftnet/` — FFTNet

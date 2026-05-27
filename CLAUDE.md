@@ -1,6 +1,6 @@
 # dl_techniques
 
-A deep learning research library providing 150+ model architectures, 290+ custom layers, and extensive tooling for Keras 3 / TensorFlow 2.18.
+A deep learning research library providing a comprehensive set of model architectures, custom layers, and extensive tooling for Keras 3 / TensorFlow 2.18.
 
 **Author**: Nikolas Markou | **License**: GPL-3.0 | **Python**: >= 3.11
 
@@ -28,8 +28,8 @@ make docs       # generate documentation
 │   ├── dl_techniques/   # Core library — all layers, models, losses, metrics, etc.
 │   ├── applications/    # Deployable ready-made applications built on dl_techniques
 │   ├── train/           # Production-grade training scripts for models in dl_techniques/models/
-│   ├── experiments/     # Exploratory / experimental code (not production)
-│   └── results/         # Training results and outputs
+│   └── experiments/     # Exploratory / experimental code (not production)
+├── results/             # Training results and outputs (repo-root)
 ├── tests/               # Mirrors src/dl_techniques/ structure
 ├── research/            # Research notes and references
 ├── docs/                # Generated documentation

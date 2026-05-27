@@ -6,9 +6,11 @@ Optimizer builders, learning rate schedules, and training supervision utilities 
 
 ```python
 from dl_techniques.optimization import (
-    optimizer_builder,                    # Creates optimizers (Adam, AdamW, RMSprop, Adadelta)
+    optimizer_builder,                    # Creates optimizers (Adam, AdamW, RMSprop, Adadelta, Muon, SGLD)
     learning_rate_schedule_builder,       # Creates LR schedules with warmup
     deep_supervision_schedule_builder,    # Creates deep supervision weight schedules
+    Muon,                                 # Newton-Schulz orthogonalization optimizer
+    SGLD,                                 # Stochastic Gradient Langevin Dynamics
 )
 ```
 
@@ -20,7 +22,7 @@ from dl_techniques.optimization import (
 - `deep_supervision.py` — Deep supervision weight scheduling (linear low-to-high, etc.)
 - `sled_supervision.py` — SLED supervision strategy
 - `muon_optimizer.py` — `Muon` optimizer: hybrid Muon (Newton-Schulz orthogonalization) for weight matrices + AdamW for other params. 1.35x faster on Transformers
-- `sled_supervision.py` — `SledLogitsProcessor`: inference-time logit correction using earlier layer latent knowledge for improved LLM factuality
+- `sgld_optimizer.py` — `SGLD`: Stochastic Gradient Langevin Dynamics. SGD with calibrated Gaussian noise injected into the update for Bayesian / posterior-sampling training. Wired into `optimizer_builder` (type `"sgld"`)
 - `constants.py` — Optimization constants and defaults
 
 ### Subpackages

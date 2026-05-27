@@ -1,6 +1,6 @@
 # dl_techniques
 
-A comprehensive deep learning library providing 150+ model architectures, 290+ custom layers, and extensive tooling for Keras 3 / TensorFlow 2.18.
+A comprehensive deep learning library providing a broad set of model architectures, custom layers, and extensive tooling for Keras 3 / TensorFlow 2.18.
 
 **Author**: Nikolas Markou | **License**: GPL-3.0 | **Python**: >= 3.11
 
@@ -24,9 +24,9 @@ make docs       # generate documentation
 
 ```
 src/dl_techniques/
-├── models/          # 150+ architectures (vision, NLP, time series, graphs, etc.)
-├── layers/          # 290+ custom layers (attention, FFN, norms, embeddings, MoE, transformers, geometric, etc.)
-├── losses/          # 28+ loss functions (contrastive, focal, calibration, segmentation, GAN, etc.)
+├── models/          # Architectures (vision, NLP, VLM, time series, graphs, etc.)
+├── layers/          # Custom layers (attention, FFN, norms, embeddings, MoE, transformers, geometric, etc.)
+├── losses/          # Loss functions (contrastive, focal, calibration, segmentation, GAN, etc.)
 ├── metrics/         # Custom metrics (capsule, CLIP, perplexity, PSNR, time series)
 ├── optimization/    # Config-driven optimizer/LR schedule builders, Muon optimizer, deep supervision
 ├── analyzer/        # ModelAnalyzer framework (weight, spectral, calibration, training dynamics)
