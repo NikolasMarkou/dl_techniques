@@ -17,6 +17,7 @@ from dl_techniques.models.convnext_patch_vae.config import (
 )
 from dl_techniques.models.convnext_patch_vae.model_hierarchical import (
     HierarchicalConvNeXtPatchVAE,
+    _L2ConditionalPrior,
     create_hierarchical_convnext_patch_vae,
 )
 
@@ -227,6 +228,169 @@ class TestSampleAPI:
         # Override hp1=2 -> L2 grid 4 -> 4*4=16.
         s_small = m.sample(num_samples=2, hp1=2, wp1=2, seed=0)
         assert tuple(s_small.shape) == (2, 16, 16, 3)
+
+
+class TestConditionalPrior:
+    """Learnable conditional prior `p(z_l2 | z_l1)`.
+
+    Central claims (anchored as D-001/D-002/D-003 in source):
+    - Zero-init heads -> prior emits exactly N(0, I) at step 0.
+    - Step-0 conditional KL == legacy KL(q || N(0,I)) bit-exact.
+    - Pure-prior `sample()` is now coherent (uses the prior).
+    """
+
+    def test_zero_init_emits_unit_gaussian(self) -> None:
+        # Direct test on the layer itself.
+        prior = _L2ConditionalPrior(
+            tile_factor=2,
+            latent_dim_l1=8,
+            latent_dim_l2=4,
+            embed_dim=16,
+            depth=2,
+            kernel_size=3,
+        )
+        z_l1 = keras.ops.convert_to_tensor(
+            np.random.RandomState(0).randn(2, 4, 4, 8).astype("float32")
+        )
+        mu_p, lv_p = prior(z_l1, training=False)
+        # Both heads zero-init -> output is exactly zero, regardless of z_l1.
+        assert float(keras.ops.max(keras.ops.abs(mu_p))) == 0.0
+        assert float(keras.ops.max(keras.ops.abs(lv_p))) == 0.0
+        assert tuple(mu_p.shape) == (2, 8, 8, 4)
+        assert tuple(lv_p.shape) == (2, 8, 8, 4)
+
+    def test_conditional_kl_equals_legacy_at_step_zero(self) -> None:
+        # Two models, same shared-layer seeds, only the toggle differs.
+        # At step 0 the prior emits exactly N(0, I), so the conditional KL
+        # must equal the legacy KL bit-exact (modulo float reduction order;
+        # we observed exact 0 in practice but assert atol=1e-5).
+        rng = np.random.RandomState(0)
+        x = keras.ops.convert_to_tensor(
+            rng.rand(2, 32, 32, 3).astype("float32")
+        )
+        keras.utils.set_random_seed(42)
+        m_on = HierarchicalConvNeXtPatchVAE(_tiny_cfg(learnable_l2_prior=True))
+        _ = m_on(x, training=False)
+        keras.utils.set_random_seed(42)
+        m_off = HierarchicalConvNeXtPatchVAE(_tiny_cfg(learnable_l2_prior=False))
+        _ = m_off(x, training=False)
+
+        m_on.kl_l2_loss_tracker.reset_state()
+        m_off.kl_l2_loss_tracker.reset_state()
+        _ = m_on(x, training=False)
+        _ = m_off(x, training=False)
+        kl_on = float(m_on.kl_l2_loss_tracker.result())
+        kl_off = float(m_off.kl_l2_loss_tracker.result())
+        assert abs(kl_on - kl_off) < 1e-5, (
+            f"step-0 KL mismatch: with prior={kl_on}, without={kl_off}"
+        )
+        # And the toggle actually plumbs through:
+        assert m_on.l2_prior is not None
+        assert m_off.l2_prior is None
+
+    def test_kl_zero_when_q_equals_p(self) -> None:
+        # When q == p, KL = 0.
+        cfg = _tiny_cfg(learnable_l2_prior=True)
+        m = HierarchicalConvNeXtPatchVAE(cfg)
+        # Build by calling once.
+        _ = m(keras.ops.convert_to_tensor(
+            np.random.RandomState(0).rand(1, 32, 32, 3).astype("float32")
+        ), training=False)
+
+        mu = keras.ops.convert_to_tensor(
+            np.random.RandomState(1).randn(1, 8, 8, 4).astype("float32")
+        )
+        lv = keras.ops.convert_to_tensor(
+            np.random.RandomState(2).randn(1, 8, 8, 4).astype("float32") * 0.5
+        )
+        kl = float(m._compute_kl_l2_conditional(mu, lv, mu, lv))
+        assert abs(kl) < 1e-5, f"KL(q || q) should be ~0, got {kl}"
+
+    def test_sample_coherent_path_runs(self) -> None:
+        cfg = _tiny_cfg(learnable_l2_prior=True)
+        m = HierarchicalConvNeXtPatchVAE(cfg)
+        # Build first (sample needs the prior to be built).
+        _ = m(keras.ops.convert_to_tensor(
+            np.random.RandomState(0).rand(1, 32, 32, 3).astype("float32")
+        ), training=False)
+        s = m.sample(num_samples=4, seed=7)
+        s_np = np.array(s)
+        assert s_np.shape == (4, 32, 32, 3)
+        assert np.all(np.isfinite(s_np))
+
+    def test_sample_legacy_path_unchanged(self) -> None:
+        cfg = _tiny_cfg(learnable_l2_prior=False)
+        m = HierarchicalConvNeXtPatchVAE(cfg)
+        _ = m(keras.ops.convert_to_tensor(
+            np.random.RandomState(0).rand(1, 32, 32, 3).astype("float32")
+        ), training=False)
+        s = m.sample(num_samples=4, seed=7)
+        s_np = np.array(s)
+        assert s_np.shape == (4, 32, 32, 3)
+        assert np.all(np.isfinite(s_np))
+
+    def test_save_load_roundtrip_with_prior(self, tmp_path) -> None:
+        cfg = _tiny_cfg(learnable_l2_prior=True)
+        m = HierarchicalConvNeXtPatchVAE(cfg)
+        x = keras.ops.convert_to_tensor(
+            np.random.RandomState(42).rand(2, 32, 32, 3).astype("float32")
+        )
+        _ = m(x, training=False)
+        mu_l1_a, _, mu_l2_a, _ = m.encode(x)
+        path = os.path.join(str(tmp_path), "h_prior.keras")
+        m.save(path)
+        m2 = keras.models.load_model(path)
+        mu_l1_b, _, mu_l2_b, _ = m2.encode(x)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(mu_l1_a),
+            keras.ops.convert_to_numpy(mu_l1_b),
+            atol=1e-4,
+        )
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(mu_l2_a),
+            keras.ops.convert_to_numpy(mu_l2_b),
+            atol=1e-4,
+        )
+        # Prior round-trips too.
+        assert m2.l2_prior is not None
+
+    def test_one_fit_step_with_conditional_prior(self) -> None:
+        cfg = _tiny_cfg(learnable_l2_prior=True)
+        m = HierarchicalConvNeXtPatchVAE(cfg)
+        m.compile(optimizer=keras.optimizers.AdamW(1e-3), jit_compile=False)
+        x = np.random.RandomState(3).rand(4, 32, 32, 3).astype("float32")
+        hist = m.fit(x, epochs=1, steps_per_epoch=2, batch_size=2, verbose=0)
+        assert np.isfinite(hist.history["loss"][-1])
+        assert np.isfinite(hist.history["kl_L2_loss"][-1])
+        expected = {
+            "loss", "recon_loss",
+            "kl_L1_loss", "kl_L2_loss",
+            "sigreg_L1_loss", "sigreg_L2_loss",
+            "kl_L1_weighted", "kl_L2_weighted",
+            "sigreg_L1_weighted", "sigreg_L2_weighted",
+        }
+        missing = expected - set(hist.history.keys())
+        assert not missing, f"missing trackers: {missing}"
+
+    def test_resolution_invariance_kl_l2_conditional(self) -> None:
+        cfg = _tiny_cfg(learnable_l2_prior=True)
+        m = HierarchicalConvNeXtPatchVAE(cfg)
+        rng = np.random.RandomState(7)
+        x32 = rng.rand(4, 32, 32, 3).astype("float32")
+        x64 = rng.rand(4, 64, 64, 3).astype("float32")
+
+        def _kl_l2(x):
+            m.kl_l2_loss_tracker.reset_state()
+            _ = m(keras.ops.convert_to_tensor(x), training=False)
+            return float(m.kl_l2_loss_tracker.result())
+
+        kl_32 = _kl_l2(x32)
+        kl_64 = _kl_l2(x64)
+        ratio = max(kl_32, kl_64) / max(min(kl_32, kl_64), 1e-9)
+        assert ratio < 2.0, (
+            f"per-patch conditional KL_L2 not resolution-invariant: "
+            f"32x32->{kl_32}, 64x64->{kl_64}, ratio={ratio}"
+        )
 
 
 class TestSampleFrom:
