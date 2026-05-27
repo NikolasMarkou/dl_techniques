@@ -291,6 +291,53 @@ CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m \
 / `--latent-dim-l1` / `--embed-dim-l1` etc. control L1. `patch_size_l1`
 must be an integer multiple of `patch_size_l2`.
 
+### Conditional prior `p(z_l2 | z_l1)`
+
+> Plan: `plans/plan_2026-05-27_c3184aea/`.
+
+The hierarchical model ships with a learnable conditional prior on the
+fine latent. Instead of `p(z_l2) = N(0, I)`, the model learns
+`p(z_l2 | z_l1)` via a small ConvNeXtV2-style network
+(`_L2ConditionalPrior`) that consumes the upsampled L1 latent and
+predicts `(mu_p, log_var_p)` per L2 patch position.
+
+```
+z_l1 (B, Hp1, Wp1, latent_l1)
+ ▼ UpSampling2D(tile_factor, "nearest")
+ ▼ Conv2D(embed_dim_l2, 1)
+ ▼ N × ConvNeXtV2Block       (prior_l2_depth, default 2)
+ ▼ LayerNorm
+ ├─ Conv2D(latent_l2, 1, zeros-init) → mu_p
+ └─ Conv2D(latent_l2, 1, zeros-init) → lv_p
+```
+
+**Zero-init heads** are the load-bearing detail: at step 0 the prior
+emits exactly `N(0, I)` regardless of `z_l1`. This means
+- old checkpoints trained with the legacy implicit prior transfer cleanly
+  (`weight_transfer.load_weights_from_checkpoint` skips the new layer,
+  the prior network starts at random init but its heads compute zero),
+- from-scratch training bootstraps from the same operating point as the
+  old model — the prior's contribution to KL is exactly the legacy KL at
+  step 0 and gradually deviates as the prior network learns.
+
+The KL term becomes the closed-form diagonal Gaussian KL with both
+`log_var_q` and `log_var_p` clipped to `[-10, +10]`:
+
+```
+KL(q || p) = 0.5 · Σ_d [ lv_p − lv_q + (exp(lv_q) + (mu_q − mu_p)²) · exp(−lv_p) − 1 ]
+```
+
+**Toggle**: `learnable_l2_prior: bool = True` is the default. Set
+`False` to revert to `KL(q(z_l2|x) || N(0,I))` for ablation; the prior
+network is then `None`.
+
+**Hyperparameters**: `prior_l2_depth` (default 2 blocks) and
+`prior_l2_embed_dim` (sentinel `0` → `embed_dim_l2`).
+
+**Param overhead** (at the default CIFAR config): ~5K params. At the
+256×256 base config (embed_dim_l2=128): ~50K params, well under 3% of
+the existing 2.16M model.
+
 ### Generating images: `sample_from`
 
 Both `ConvNeXtPatchVAE` and `HierarchicalConvNeXtPatchVAE` expose the
@@ -310,13 +357,26 @@ img = model.sample_from(x_anchor, temperature=1.5, seed=42)
 The method reparameterizes from the encoder's posterior at the requested
 temperature: `z = mu + temperature * exp(0.5 * log_var) * eps`.
 
-**Why an anchor `x`, not pure-prior sampling?** The hierarchical model's
-L2 decoder was trained on `(z_l1, z_l2)` pairs extracted from the **same**
-image — they are correlated in the data distribution. Independent
-`N(0, I)` samples would violate that, producing global/local mismatch.
-`sample_from` keeps the two latents correlated through their shared
-anchor. The pure-prior `sample(num_samples, ...)` method is retained for
-plumbing tests and clearly documented as such.
+**Pure-prior sampling** via `model.sample(num_samples, ...)` is now the
+coherent generative path, thanks to the learnable conditional prior:
+
+```
+z_l1 ~ N(0, I)
+mu_p, lv_p = prior(z_l1)
+z_l2 ~ N(mu_p, exp(lv_p))
+return decode(z_l1, z_l2)
+```
+
+`(z_l1, z_l2)` are drawn from the joint generative distribution — no
+posterior-mismatch artifacts.
+
+Use `sample_from(x, temperature)` when you want **variations around a
+specific real image**; use `sample(num_samples)` when you want **fresh
+generations** from the prior.
+
+**Legacy behavior**: when `learnable_l2_prior=False`, `sample()` falls
+back to independent `N(0, I)` for both latents — this is the
+incoherent path retained for ablation only.
 
 For the single-scale model, pure-prior `sample()` is fine (no inter-latent
 coupling); `sample_from` is provided there for API parity.
