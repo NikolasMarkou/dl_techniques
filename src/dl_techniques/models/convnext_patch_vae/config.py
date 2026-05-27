@@ -340,6 +340,16 @@ class HierarchicalConvNeXtPatchVAEConfig:
     # --- Conditioning ---
     conditioning: Literal["tile_broadcast"] = "tile_broadcast"
 
+    # --- Learnable conditional prior p(z_l2 | z_l1) ---
+    # When True, KL_L2 = KL(q(z_l2|x) || p(z_l2|z_l1)) where p is a small
+    # ConvNeXtV2-style stack (`_L2ConditionalPrior`) that consumes the
+    # upsampled z_l1 and outputs (mu_p, log_var_p). Heads are zero-init,
+    # so at step 0 p = N(0, I) — old checkpoints transfer cleanly.
+    # When False, falls back to the legacy KL_L2 = KL(q(z_l2|x) || N(0,I)).
+    learnable_l2_prior: bool = True
+    prior_l2_depth: int = 2
+    prior_l2_embed_dim: int = 0  # 0 sentinel -> defaults to embed_dim_l2
+
     # ------------------------------------------------------------------
     # Invariants
     # ------------------------------------------------------------------
@@ -437,6 +447,15 @@ class HierarchicalConvNeXtPatchVAEConfig:
                 f"conditioning must be 'tile_broadcast' (only mechanism "
                 f"implemented at iter-1), got {self.conditioning!r}"
             )
+        if self.prior_l2_depth < 1:
+            raise ValueError(
+                f"prior_l2_depth must be >= 1, got {self.prior_l2_depth}"
+            )
+        if self.prior_l2_embed_dim < 0:
+            raise ValueError(
+                f"prior_l2_embed_dim must be >= 0 (0 = default to "
+                f"embed_dim_l2), got {self.prior_l2_embed_dim}"
+            )
 
     # ------------------------------------------------------------------
     # Derived properties
@@ -465,6 +484,14 @@ class HierarchicalConvNeXtPatchVAEConfig:
     @property
     def input_image_shape(self) -> Tuple[int, int, int]:
         return (self.img_size, self.img_size, self.img_channels)
+
+    @property
+    def prior_l2_effective_embed_dim(self) -> int:
+        """Resolved prior net width — `embed_dim_l2` when sentinel ``0``."""
+        return (
+            self.embed_dim_l2 if self.prior_l2_embed_dim == 0
+            else self.prior_l2_embed_dim
+        )
 
     # ------------------------------------------------------------------
     # Serialization
