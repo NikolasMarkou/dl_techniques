@@ -275,6 +275,202 @@ class _L2ConditionedDecoder(keras.layers.Layer):
 
 
 @keras.saving.register_keras_serializable()
+class _L2ConditionalPrior(keras.layers.Layer):
+    """Learned conditional prior ``p(z_l2 | z_l1)`` for hierarchical VAE.
+
+    Consumes the L1 latent ``z_l1`` and emits ``(mu_p, log_var_p)``
+    parameterizing a diagonal Gaussian over each L2 patch position.
+    Architecture mirrors the encoder/decoder block idiom:
+
+        z_l1 (B, Hp1, Wp1, latent_l1)
+          -> UpSampling2D(tile_factor, "nearest") -> (B, Hp2, Wp2, latent_l1)
+          -> Conv2D(embed_dim, 1)                -> (B, Hp2, Wp2, embed_dim)
+          -> N x ConvNextV2Block (external residual)
+          -> LayerNormalization
+          -> [mu_head (Conv2D 1x1, zeros-init)   ] -> mu_p
+             [log_var_head (Conv2D 1x1, zeros-init)] -> log_var_p
+
+    Both heads are zero-initialized so that at step 0, regardless of
+    z_l1, the prior emits ``mu_p = 0`` and ``log_var_p = 0`` (i.e.
+    ``N(0, I)``). This matches the legacy implicit prior exactly and
+    enables checkpoint reuse from the old hierarchical model.
+
+    Args:
+        tile_factor: Upsample factor (``patch_size_l1 // patch_size_l2``).
+        latent_dim_l1: Width of the input ``z_l1`` channel axis.
+        latent_dim_l2: Width of each output head's channel axis.
+        embed_dim: Internal ConvNeXt block width.
+        depth: Number of ``ConvNextV2Block`` layers stacked.
+        kernel_size: Depthwise kernel size inside each block.
+        dropout_rate, spatial_dropout_rate, kernel_regularizer:
+            Forwarded to each block.
+    """
+
+    def __init__(
+        self,
+        tile_factor: int,
+        latent_dim_l1: int,
+        latent_dim_l2: int,
+        embed_dim: int,
+        depth: int,
+        kernel_size: int,
+        dropout_rate: float = 0.0,
+        spatial_dropout_rate: float = 0.0,
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        if tile_factor < 2:
+            raise ValueError(
+                f"tile_factor must be >= 2, got {tile_factor}"
+            )
+        if latent_dim_l1 < 1 or latent_dim_l2 < 1 or embed_dim <= 0 or depth < 1:
+            raise ValueError(
+                "latent_dim_l1, latent_dim_l2, embed_dim must be positive "
+                "and depth must be >= 1"
+            )
+        self.tile_factor = tile_factor
+        self.latent_dim_l1 = latent_dim_l1
+        self.latent_dim_l2 = latent_dim_l2
+        self.embed_dim = embed_dim
+        self.depth = depth
+        self.kernel_size = kernel_size
+        self.dropout_rate = dropout_rate
+        self.spatial_dropout_rate = spatial_dropout_rate
+        self.kernel_regularizer = kernel_regularizer
+
+        # D-005 (plan_2026-05-27_c3184aea): this UpSampling2D is OWNED by
+        # this layer; the decoder has its own. Two zero-parameter instances
+        # keep build()/get_config() symmetric and serialization simple.
+        self.upsample = keras.layers.UpSampling2D(
+            size=tile_factor,
+            interpolation="nearest",
+            name="prior_upsample",
+        )
+        self.proj_in = keras.layers.Conv2D(
+            filters=embed_dim,
+            kernel_size=1,
+            padding="valid",
+            kernel_regularizer=copy.deepcopy(kernel_regularizer),
+            name="proj_in",
+        )
+        self.blocks = [
+            ConvNextV2Block(
+                kernel_size=kernel_size,
+                filters=embed_dim,
+                kernel_regularizer=copy.deepcopy(kernel_regularizer),
+                dropout_rate=dropout_rate,
+                spatial_dropout_rate=spatial_dropout_rate,
+                name=f"block_{i}",
+            )
+            for i in range(depth)
+        ]
+        self.pre_head_norm = keras.layers.LayerNormalization(
+            epsilon=1e-6, name="pre_head_norm"
+        )
+        # DECISION plan_2026-05-27_c3184aea/D-001: both heads zero-init so
+        # the prior emits exactly N(0, I) at step 0. This (a) makes the
+        # at-step-0 conditional KL numerically identical to the legacy KL
+        # against N(0,I), and (b) lets checkpoints trained with the old
+        # prior land in this architecture and continue training from the
+        # exact same operating point. Standard NVAE / Ladder-VAE recipe.
+        self.mu_head = keras.layers.Conv2D(
+            filters=latent_dim_l2,
+            kernel_size=1,
+            padding="valid",
+            kernel_initializer="zeros",
+            bias_initializer="zeros",
+            kernel_regularizer=copy.deepcopy(kernel_regularizer),
+            name="mu_head",
+        )
+        self.log_var_head = keras.layers.Conv2D(
+            filters=latent_dim_l2,
+            kernel_size=1,
+            padding="valid",
+            kernel_initializer="zeros",
+            bias_initializer="zeros",
+            kernel_regularizer=copy.deepcopy(kernel_regularizer),
+            name="log_var_head",
+        )
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        if len(input_shape) != 4:
+            raise ValueError(
+                f"_L2ConditionalPrior expects 4D input "
+                f"(B, Hp1, Wp1, latent_l1); got {input_shape}"
+            )
+        B, Hp1, Wp1, _ = input_shape
+        self.upsample.build(input_shape)
+        # After upsample: (B, Hp1*tf, Wp1*tf, latent_l1).
+        Hp2 = None if Hp1 is None else Hp1 * self.tile_factor
+        Wp2 = None if Wp1 is None else Wp1 * self.tile_factor
+        post_upsample_shape = (B, Hp2, Wp2, self.latent_dim_l1)
+        self.proj_in.build(post_upsample_shape)
+        block_in_shape = (B, Hp2, Wp2, self.embed_dim)
+        for blk in self.blocks:
+            blk.build(block_in_shape)
+        self.pre_head_norm.build(block_in_shape)
+        self.mu_head.build(block_in_shape)
+        self.log_var_head.build(block_in_shape)
+        super().build(input_shape)
+
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None,
+    ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
+        x = self.upsample(inputs)
+        x = self.proj_in(x)
+        for blk in self.blocks:
+            residual = x
+            x = blk(x, training=training)
+            x = residual + x
+        x = self.pre_head_norm(x, training=training)
+        mu_p = self.mu_head(x)
+        log_var_p = self.log_var_head(x)
+        return mu_p, log_var_p
+
+    def compute_output_shape(
+        self, input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]:
+        B, Hp1, Wp1, _ = input_shape
+        Hp2 = None if Hp1 is None else Hp1 * self.tile_factor
+        Wp2 = None if Wp1 is None else Wp1 * self.tile_factor
+        head_shape = (B, Hp2, Wp2, self.latent_dim_l2)
+        return head_shape, head_shape
+
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        config.update(
+            {
+                "tile_factor": self.tile_factor,
+                "latent_dim_l1": self.latent_dim_l1,
+                "latent_dim_l2": self.latent_dim_l2,
+                "embed_dim": self.embed_dim,
+                "depth": self.depth,
+                "kernel_size": self.kernel_size,
+                "dropout_rate": self.dropout_rate,
+                "spatial_dropout_rate": self.spatial_dropout_rate,
+                "kernel_regularizer": keras.regularizers.serialize(
+                    self.kernel_regularizer
+                ),
+            }
+        )
+        return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "_L2ConditionalPrior":
+        config = dict(config)
+        reg = config.get("kernel_regularizer")
+        if isinstance(reg, dict):
+            config["kernel_regularizer"] = keras.regularizers.deserialize(reg)
+        return cls(**config)
+
+
+# ------------------------------------------------------------------
+
+
+@keras.saving.register_keras_serializable()
 class HierarchicalConvNeXtPatchVAE(keras.Model):
     """Two-level hierarchical ConvNeXt patch VAE (L1 coarse + L2 fine).
 
