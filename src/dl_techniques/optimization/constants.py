@@ -58,6 +58,15 @@ DEFAULT_ADADELTA_RHO = 0.9  # Decay constant for accumulating squared gradients
 DEFAULT_ADADELTA_EPSILON = 1e-07  # Small constant added for numerical stability
 
 # ---------------------------------------------------------------------
+# SGLD Optimizer Defaults
+# ---------------------------------------------------------------------
+# SGLD (Stochastic Gradient Langevin Dynamics) augments SGD with Gaussian
+# noise to enable Bayesian posterior sampling and escape shallow minima.
+
+DEFAULT_SGLD_NOISE_SCALE = 1.0  # Multiplier on canonical Langevin noise (1.0 = temperature 1)
+DEFAULT_SGLD_SEED = None  # Optional integer seed for reproducible noise
+
+# ---------------------------------------------------------------------
 # Cosine Decay Learning Rate Schedule Defaults
 # ---------------------------------------------------------------------
 # Cosine decay provides smooth learning rate reduction following cosine curve

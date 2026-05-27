@@ -41,6 +41,7 @@ from keras.api.optimizers.schedules import LearningRateSchedule
 
 from dl_techniques.utils.logger import logger
 from .warmup_schedule import WarmupSchedule
+from .sgld_optimizer import SGLD
 from .constants import *
 
 # ---------------------------------------------------------------------
@@ -61,6 +62,7 @@ class OptimizerType(str, Enum):
     ADAMW = "adamw"
     RMSPROP = "rmsprop"
     ADADELTA = "adadelta"
+    SGLD = "sgld"
 
 
 # ---------------------------------------------------------------------
@@ -286,6 +288,8 @@ def optimizer_builder(
         optimizer = _build_adamw_optimizer(config, base_params)
     elif optimizer_type == OptimizerType.ADADELTA:
         optimizer = _build_adadelta_optimizer(config, base_params)
+    elif optimizer_type == OptimizerType.SGLD:
+        optimizer = _build_sgld_optimizer(config, base_params)
     else:
         raise ValueError(
             f"Unknown optimizer_type: [{optimizer_type}]. "
@@ -398,3 +402,38 @@ def _build_adadelta_optimizer(
     }
 
     return keras.optimizers.Adadelta(**optimizer_params)
+
+
+def _build_sgld_optimizer(
+        config: Dict[str, Any],
+        base_params: Dict[str, Any]
+) -> SGLD:
+    """Build SGLD optimizer with configuration parameters.
+
+    SGLD (Stochastic Gradient Langevin Dynamics) is the SGD update augmented
+    with isotropic Gaussian noise of standard deviation `sqrt(2 * lr)`, scaled
+    by `noise_scale`. With `noise_scale=1.0` (default) the iterates approximate
+    samples from the Bayesian posterior over the parameters as the learning
+    rate is annealed.
+
+    Args:
+        config: Configuration dictionary with SGLD-specific parameters.
+            Optional keys:
+                - noise_scale: Multiplier on Langevin noise (default 1.0).
+                - seed: Integer seed for reproducible noise (default None).
+                - weight_decay: Decoupled weight decay coefficient.
+        base_params: Base parameters common to all optimizers (learning_rate,
+            clipvalue, clipnorm, global_clipnorm).
+
+    Returns:
+        Configured SGLD optimizer instance.
+    """
+    optimizer_params = {
+        "name": "SGLD",
+        "noise_scale": config.get("noise_scale", DEFAULT_SGLD_NOISE_SCALE),
+        "seed": config.get("seed", DEFAULT_SGLD_SEED),
+        "weight_decay": config.get("weight_decay"),
+        **base_params,
+    }
+
+    return SGLD(**optimizer_params)
