@@ -1109,63 +1109,78 @@ def train(config: TrainingConfig, smoke: bool = False) -> None:
             )
         )
 
-    # Grab a fixed validation sample for reconstruction visualisation
-    recon_dir = os.path.join(results_dir, "reconstructions")
-    # MSE + CIFAR: apply per-channel denorm in viz callback. All other combos: pass None.
-    if config.recon_loss_type == "mse" and config.dataset in _CIFAR_STATS:
-        _ds_mean, _ds_std = _CIFAR_STATS[config.dataset]
+    # Viz callbacks below assume single-scale encode/decode signatures.
+    # Hierarchical model emits a 4-tuple from encode() and requires
+    # (z_l1, z_l2) for decode(). Skip mid-training PNG viz in hierarchical
+    # mode; training + reload check are unaffected. Hierarchical viz is a
+    # follow-up — out of scope for this plan.
+    if config.hierarchical:
+        logger.info(
+            "Hierarchical mode: skipping mid-training viz callbacks "
+            "(Recon / LatentSpace / LatentInterpolation). Training and "
+            "reload checks proceed normally."
+        )
     else:
-        _ds_mean, _ds_std = None, None
-    try:
-        sample_batch = next(iter(val_ds))
-        val_samples = np.array(sample_batch[0][:8])
-        callbacks.append(
-            ReconVisualizationCallback(
-                val_samples=val_samples,
-                save_dir=recon_dir,
-                frequency=1,
-                recon_loss_type=config.recon_loss_type,
-                cifar_mean=_ds_mean,
-                cifar_std=_ds_std,
+        # Grab a fixed validation sample for reconstruction visualisation.
+        recon_dir = os.path.join(results_dir, "reconstructions")
+        # MSE + CIFAR: apply per-channel denorm in viz callback. All other
+        # combos: pass None.
+        if config.recon_loss_type == "mse" and config.dataset in _CIFAR_STATS:
+            _ds_mean, _ds_std = _CIFAR_STATS[config.dataset]
+        else:
+            _ds_mean, _ds_std = None, None
+        val_samples = None
+        try:
+            sample_batch = next(iter(val_ds))
+            val_samples = np.array(sample_batch[0][:8])
+            callbacks.append(
+                ReconVisualizationCallback(
+                    val_samples=val_samples,
+                    save_dir=recon_dir,
+                    frequency=1,
+                    recon_loss_type=config.recon_loss_type,
+                    cifar_mean=_ds_mean,
+                    cifar_std=_ds_std,
+                )
             )
-        )
-    except Exception as exc:
-        logger.warning(f"Could not set up ReconVisualizationCallback: {exc}")
+        except Exception as exc:
+            logger.warning(f"Could not set up ReconVisualizationCallback: {exc}")
 
-    # Latent space PCA scatter and interpolation grids.
-    # Collect up to 128 images from the validation set for the PCA scatter;
-    # re-use the same 8 fixed images for interpolation pairs.
-    try:
-        viz_frequency = 1
-        latent_dir = os.path.join(results_dir, "latent_space")
-        interp_dir = os.path.join(results_dir, "interpolations")
+        # Latent space PCA scatter and interpolation grids. Collect up to
+        # 128 images from the validation set for the PCA scatter; re-use
+        # the same 8 fixed images for interpolation pairs.
+        if val_samples is not None:
+            try:
+                viz_frequency = 1
+                latent_dir = os.path.join(results_dir, "latent_space")
+                interp_dir = os.path.join(results_dir, "interpolations")
 
-        latent_batches = [val_samples]
-        for extra_batch in val_ds.take(15):
-            latent_batches.append(np.array(extra_batch[0][:8]))
-        latent_viz_images = np.concatenate(latent_batches, axis=0)[:128]
+                latent_batches = [val_samples]
+                for extra_batch in val_ds.take(15):
+                    latent_batches.append(np.array(extra_batch[0][:8]))
+                latent_viz_images = np.concatenate(latent_batches, axis=0)[:128]
 
-        callbacks.append(
-            LatentSpaceCallback(
-                val_images=latent_viz_images,
-                save_dir=latent_dir,
-                frequency=viz_frequency,
-                cifar_mean=_ds_mean,
-                cifar_std=_ds_std,
-            )
-        )
-        callbacks.append(
-            LatentInterpolationCallback(
-                val_samples=val_samples,
-                save_dir=interp_dir,
-                frequency=viz_frequency,
-                num_steps=8,
-                cifar_mean=_ds_mean,
-                cifar_std=_ds_std,
-            )
-        )
-    except Exception as exc:
-        logger.warning(f"Could not set up latent visualization callbacks: {exc}")
+                callbacks.append(
+                    LatentSpaceCallback(
+                        val_images=latent_viz_images,
+                        save_dir=latent_dir,
+                        frequency=viz_frequency,
+                        cifar_mean=_ds_mean,
+                        cifar_std=_ds_std,
+                    )
+                )
+                callbacks.append(
+                    LatentInterpolationCallback(
+                        val_samples=val_samples,
+                        save_dir=interp_dir,
+                        frequency=viz_frequency,
+                        num_steps=8,
+                        cifar_mean=_ds_mean,
+                        cifar_std=_ds_std,
+                    )
+                )
+            except Exception as exc:
+                logger.warning(f"Could not set up latent visualization callbacks: {exc}")
 
     # ------------------------------------------------------------------
     # Persist config before fit (helps debug mid-run crashes)
