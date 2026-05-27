@@ -190,6 +190,37 @@ class TestSampleAPI:
         assert tuple(s88.shape) == (2, 32, 32, 3)
 
 
+class TestSampleFrom:
+    """``sample_from(x, temperature)`` API parity with hierarchical model."""
+
+    def test_temperature_zero_is_deterministic_recon(self) -> None:
+        cfg = _tiny_cfg()
+        m = ConvNeXtPatchVAE(cfg)
+        rng = np.random.RandomState(0)
+        x = keras.ops.convert_to_tensor(rng.rand(2, 32, 32, 3).astype("float32"))
+        _ = m(x, training=False)  # build
+        a = np.array(m.sample_from(x, temperature=0.0, seed=1))
+        b = np.array(m.sample_from(x, temperature=0.0, seed=2))  # different seed
+        # t=0 must ignore the seed.
+        np.testing.assert_allclose(a, b, atol=1e-6)
+        # And must equal decode(mu).
+        mu, _ = m.encode(x)
+        manual = np.array(m.decode(mu))
+        np.testing.assert_allclose(a, manual, atol=1e-6)
+        assert a.shape == (2, 32, 32, 3)
+
+    def test_temperature_one_is_stochastic(self) -> None:
+        cfg = _tiny_cfg()
+        m = ConvNeXtPatchVAE(cfg)
+        rng = np.random.RandomState(0)
+        x = keras.ops.convert_to_tensor(rng.rand(2, 32, 32, 3).astype("float32"))
+        _ = m(x, training=False)
+        a = np.array(m.sample_from(x, temperature=1.0, seed=1))
+        b = np.array(m.sample_from(x, temperature=1.0, seed=2))
+        # Different seeds at t>0 must produce different outputs.
+        assert not np.allclose(a, b, atol=1e-6)
+
+
 class TestSIGRegOff:
     """Test 8 — ``lambda_sigreg=0.0`` ablation path is clean.
 

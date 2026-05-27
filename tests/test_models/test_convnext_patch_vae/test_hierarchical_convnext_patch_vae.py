@@ -229,6 +229,40 @@ class TestSampleAPI:
         assert tuple(s_small.shape) == (2, 16, 16, 3)
 
 
+class TestSampleFrom:
+    """``sample_from(x, temperature)`` coherent sampling around a real anchor.
+
+    Hierarchical motivation: pure-prior `sample()` is incoherent because
+    z_l1 and z_l2 were trained as correlated pairs. ``sample_from`` keeps
+    them correlated by reparameterizing both from the encoder posterior.
+    """
+
+    def test_temperature_zero_is_deterministic_recon(self) -> None:
+        cfg = _tiny_cfg()
+        m = HierarchicalConvNeXtPatchVAE(cfg)
+        rng = np.random.RandomState(0)
+        x = keras.ops.convert_to_tensor(rng.rand(2, 32, 32, 3).astype("float32"))
+        _ = m(x, training=False)  # build
+        a = np.array(m.sample_from(x, temperature=0.0, seed=1))
+        b = np.array(m.sample_from(x, temperature=0.0, seed=2))
+        np.testing.assert_allclose(a, b, atol=1e-6)
+        # And must equal decode(mu_l1, mu_l2).
+        mu_l1, _, mu_l2, _ = m.encode(x)
+        manual = np.array(m.decode(mu_l1, mu_l2))
+        np.testing.assert_allclose(a, manual, atol=1e-6)
+        assert a.shape == (2, 32, 32, 3)
+
+    def test_temperature_one_is_stochastic(self) -> None:
+        cfg = _tiny_cfg()
+        m = HierarchicalConvNeXtPatchVAE(cfg)
+        rng = np.random.RandomState(0)
+        x = keras.ops.convert_to_tensor(rng.rand(2, 32, 32, 3).astype("float32"))
+        _ = m(x, training=False)
+        a = np.array(m.sample_from(x, temperature=1.0, seed=1))
+        b = np.array(m.sample_from(x, temperature=1.0, seed=2))
+        assert not np.allclose(a, b, atol=1e-6)
+
+
 class TestSIGRegOff:
     """``lambda_sigreg_*=0.0`` ablation path is clean at both scales."""
 

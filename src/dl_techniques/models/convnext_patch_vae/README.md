@@ -291,6 +291,36 @@ CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m \
 / `--latent-dim-l1` / `--embed-dim-l1` etc. control L1. `patch_size_l1`
 must be an integer multiple of `patch_size_l2`.
 
+### Generating images: `sample_from`
+
+Both `ConvNeXtPatchVAE` and `HierarchicalConvNeXtPatchVAE` expose the
+same one-line sampling API:
+
+```python
+# Reconstruction (deterministic):
+img = model.sample_from(x_anchor, temperature=0.0)
+
+# Variations around x_anchor (VAE prior scale):
+img = model.sample_from(x_anchor, temperature=1.0, seed=42)
+
+# More diverse variations:
+img = model.sample_from(x_anchor, temperature=1.5, seed=42)
+```
+
+The method reparameterizes from the encoder's posterior at the requested
+temperature: `z = mu + temperature * exp(0.5 * log_var) * eps`.
+
+**Why an anchor `x`, not pure-prior sampling?** The hierarchical model's
+L2 decoder was trained on `(z_l1, z_l2)` pairs extracted from the **same**
+image — they are correlated in the data distribution. Independent
+`N(0, I)` samples would violate that, producing global/local mismatch.
+`sample_from` keeps the two latents correlated through their shared
+anchor. The pure-prior `sample(num_samples, ...)` method is retained for
+plumbing tests and clearly documented as such.
+
+For the single-scale model, pure-prior `sample()` is fine (no inter-latent
+coupling); `sample_from` is provided there for API parity.
+
 ### Out of scope (this iteration)
 
 - Mid-training viz callbacks (Recon / LatentSpace / LatentInterpolation)

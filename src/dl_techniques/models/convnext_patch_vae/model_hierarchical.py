@@ -554,6 +554,46 @@ class HierarchicalConvNeXtPatchVAE(keras.Model):
             return ops.sigmoid(logits)
         return logits
 
+    def sample_from(
+        self,
+        x: keras.KerasTensor,
+        temperature: float = 1.0,
+        seed: Optional[int] = None,
+    ) -> keras.KerasTensor:
+        """One-line coherent sampling: jitter the posterior of real anchor ``x``.
+
+        Pure-prior sampling (:meth:`sample`) gives incoherent images
+        because the L2 decoder was trained on `(z_l1, z_l2)` pairs
+        extracted from the *same* image — the two latents are NOT
+        independent in the data distribution. Sampling them
+        independently from the prior produces global/local mismatch.
+
+        This method keeps them correlated by reparameterizing both from
+        the encoder's posterior on a real image. ``temperature=0`` gives
+        deterministic reconstruction; ``temperature=1`` matches the VAE
+        prior scale; higher values produce more diverse variations.
+
+        Args:
+            x: Real anchor image batch ``(B, H, W, C)``.
+            temperature: Noise scale on the reparameterization. ``0.0``
+                yields ``decode(mu_l1, mu_l2)`` exactly.
+            seed: Optional RNG seed.
+
+        Returns:
+            Coherent reconstructions / variations of ``x``, shape
+            ``(B, H, W, C)``.
+        """
+        mu_l1, lv_l1, mu_l2, lv_l2 = self.encode(x)
+        t = float(temperature)
+        eps_l1 = keras.random.normal(ops.shape(mu_l1), seed=seed) * t
+        eps_l2 = keras.random.normal(
+            ops.shape(mu_l2),
+            seed=None if seed is None else seed + 1,
+        ) * t
+        z_l1 = mu_l1 + ops.exp(0.5 * ops.clip(lv_l1, -10.0, 10.0)) * eps_l1
+        z_l2 = mu_l2 + ops.exp(0.5 * ops.clip(lv_l2, -10.0, 10.0)) * eps_l2
+        return self.decode(z_l1, z_l2)
+
     def sample(
         self,
         num_samples: int,
@@ -561,10 +601,15 @@ class HierarchicalConvNeXtPatchVAE(keras.Model):
         wp1: Optional[int] = None,
         seed: Optional[int] = None,
     ) -> keras.KerasTensor:
-        """Sample images from both priors at any L1 patch grid.
+        """Pure-prior sampling — WARNING: produces incoherent images.
 
-        L2 grid is derived as ``(hp1 * tile_factor, wp1 * tile_factor)``
-        so the conditioning shape lines up.
+        The L2 decoder was trained on correlated `(z_l1, z_l2)` pairs.
+        Sampling both from independent N(0, I) priors violates that
+        training distribution. Use :meth:`sample_from` for coherent
+        variations of a real anchor, or fit an aggregate-posterior /
+        learnable prior to use pure-prior sampling properly.
+
+        Kept for plumbing tests and pure-prior baselines only.
         """
         cfg = self.config
         hp1 = cfg.patches_per_side_l1 if hp1 is None else int(hp1)

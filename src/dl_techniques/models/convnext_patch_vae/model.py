@@ -339,6 +339,39 @@ class ConvNeXtPatchVAE(keras.Model):
             return ops.sigmoid(logits)
         return logits
 
+    def sample_from(
+        self,
+        x: keras.KerasTensor,
+        temperature: float = 1.0,
+        seed: Optional[int] = None,
+    ) -> keras.KerasTensor:
+        """Coherent sampling around a real anchor ``x`` (one-line API).
+
+        Reparameterizes from the encoder's posterior at temperature
+        ``t``: ``z = mu + t * exp(0.5 * log_var) * eps``.
+
+        - ``temperature=0.0`` -> deterministic reconstruction (``decode(mu)``).
+        - ``temperature=1.0`` -> matches the VAE prior scale.
+        - ``temperature>1.0`` -> more diverse variations.
+
+        Mirrors :meth:`HierarchicalConvNeXtPatchVAE.sample_from` for a
+        uniform sampling API across the single-scale and hierarchical
+        variants.
+
+        Args:
+            x: Real anchor image batch ``(B, H, W, C)``.
+            temperature: Reparameterization noise scale.
+            seed: Optional RNG seed.
+
+        Returns:
+            ``(B, H, W, C)`` coherent reconstruction / variation of ``x``.
+        """
+        mu, log_var = self.encode(x)
+        t = float(temperature)
+        eps = keras.random.normal(ops.shape(mu), seed=seed) * t
+        z = mu + ops.exp(0.5 * ops.clip(log_var, -10.0, 10.0)) * eps
+        return self.decode(z)
+
     def sample(
         self,
         num_samples: int,
