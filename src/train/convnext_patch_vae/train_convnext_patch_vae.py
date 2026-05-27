@@ -1066,9 +1066,13 @@ def train(config: TrainingConfig, smoke: bool = False) -> None:
     # ------------------------------------------------------------------
     # Callbacks
     # ------------------------------------------------------------------
+    results_prefix = (
+        "hierarchical_convnext_patch_vae" if config.hierarchical
+        else "convnext_patch_vae"
+    )
     callbacks, results_dir = create_callbacks(
         model_name=config.experiment_name,
-        results_dir_prefix="convnext_patch_vae",
+        results_dir_prefix=results_prefix,
         monitor="val_loss",
         patience=config.early_stopping_patience,
         use_lr_schedule=True,
