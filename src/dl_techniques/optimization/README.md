@@ -8,7 +8,8 @@ A comprehensive guide to using the optimization module for configuring optimizer
 2. [Quick Start](#quick-start)
 3. [Optimizer Builder](#optimizer-builder)
 4. [Muon Optimizer](#muon-optimizer)
-5. [Learning Rate Schedule Builder](#learning-rate-schedule-builder)
+5. [SGLD Optimizer](#sgld-optimizer)
+6. [Learning Rate Schedule Builder](#learning-rate-schedule-builder)
 6. [Deep Supervision Schedule Builder](#deep-supervision-schedule-builder)
 7. [SLED Logits Processor](#sled-logits-processor)
 8. [Complete Integration Examples](#complete-integration-examples)
@@ -21,8 +22,9 @@ A comprehensive guide to using the optimization module for configuring optimizer
 
 The optimization module provides comprehensive components for configuring training optimization and inference:
 
-- **Optimizer Builder**: Creates and configures Keras optimizers (Adam, AdamW, RMSprop, Adadelta) with gradient clipping support
+- **Optimizer Builder**: Creates and configures Keras optimizers (Adam, AdamW, RMSprop, Adadelta, SGLD) with gradient clipping support
 - **Muon Optimizer**: MomentUm Orthogonalized by Newton-schulz optimizer for faster convergence on Transformers and ConvNets
+- **SGLD Optimizer**: Stochastic Gradient Langevin Dynamics — SGD with Gaussian noise for Bayesian posterior sampling and escape from shallow minima
 - **Learning Rate Schedule Builder**: Creates learning rate schedules with automatic warmup periods
 - **Deep Supervision Schedule Builder**: Creates weight schedules for multi-scale deep supervision training
 - **SLED Logits Processor**: Self Logits Evolution Decoding for improving factuality in LLMs
@@ -110,6 +112,7 @@ The optimizer builder creates configured Keras optimizers with gradient clipping
 - **AdamW**: Adam with decoupled weight decay (better for transformers)
 - **RMSprop**: Root mean square propagation (good for RNNs)
 - **Adadelta**: Adaptive learning rate method
+- **SGLD**: Stochastic Gradient Langevin Dynamics (SGD + calibrated Gaussian noise for Bayesian sampling)
 
 ### Basic Configuration
 
@@ -164,6 +167,16 @@ adadelta_config = {
     "type": "adadelta",
     "rho": 0.9,             # Decay rate for gradient accumulation
     "epsilon": 1e-7         # Numerical stability constant
+}
+```
+
+#### SGLD
+```python
+sgld_config = {
+    "type": "sgld",
+    "noise_scale": 1.0,     # Multiplier on canonical sqrt(2*lr) noise (1.0 = canonical)
+    "seed": 42,             # Optional int for reproducible noise (default: None)
+    "weight_decay": 1e-4    # Optional decoupled weight decay
 }
 ```
 
@@ -278,6 +291,108 @@ optimizer = Muon(
     ]
 )
 ```
+
+## SGLD Optimizer
+
+The SGLD (Stochastic Gradient Langevin Dynamics) optimizer augments the standard SGD update with calibrated Gaussian noise, bridging optimization and Bayesian sampling (Welling & Teh, 2011).
+
+### Update Rule
+
+```
+w_{t+1} = w_t  -  lr * grad(L)  +  noise_scale * sqrt(2 * lr) * eps,   eps ~ N(0, I)
+```
+
+The deterministic drift `-lr * grad` is identical to vanilla SGD; the diffusion term `noise_scale * sqrt(2*lr) * eps` turns the iterate sequence into an (approximate) sample from the Bayesian posterior `p(w | data) ∝ exp(-L(w))` as `lr → 0`.
+
+### Key Characteristics
+
+1. **Escapes shallow minima**: injected noise gives the optimizer enough energy to climb out of narrow attractors that trap pure SGD. Robust on highly non-convex landscapes (Ackley-like, rugged deep-net loss surfaces).
+2. **Bayesian posterior sampling**: as `lr → 0` and step count → ∞, the iterates approximate samples from the (mini-batch-approximated) posterior over weights — enabling uncertainty quantification, MCMC-style ensembling without re-training.
+3. **Exploration/exploitation control**: a larger `lr` or `noise_scale` favours exploration; annealing the LR "locks in" a stable mode (simulated-annealing-style exploitation).
+4. **Stateless per-variable**: no momentum, no second-moment buffers — minimal memory overhead vs. SGD.
+
+### Basic Usage
+
+```python
+from dl_techniques.optimization.sgld_optimizer import SGLD
+
+# Canonical SGLD (temperature 1, reproducible noise)
+optimizer = SGLD(
+    learning_rate=1e-3,
+    noise_scale=1.0,        # 1.0 = canonical; 0.0 collapses to pure SGD
+    weight_decay=1e-4,      # Optional decoupled weight decay
+    seed=42                 # Optional int for reproducible noise stream
+)
+
+model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy')
+model.fit(x_train, y_train, epochs=10)
+```
+
+### Configuration Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `learning_rate` | 1e-2 | Controls both drift and (via `sqrt(2*lr)`) noise magnitude. Accepts float or `LearningRateSchedule`. |
+| `noise_scale` | 1.0 | Non-negative multiplier on Langevin noise. `1.0` = canonical SGLD; `0.0` = pure SGD; `>1.0` = more exploration. |
+| `weight_decay` | None | Optional decoupled weight decay (handled by base class). |
+| `seed` | None | Optional integer seed for reproducible noise via `keras.random.SeedGenerator`. |
+| `name` | `"SGLD"` | Optimizer name. |
+
+Standard `clipnorm`, `global_clipnorm`, and `clipvalue` are supported via the base `keras.optimizers.Optimizer` class.
+
+### Posterior Sampling Recipe
+
+For Bayesian posterior sampling, anneal the learning rate so the chain converges:
+
+```python
+from dl_techniques.optimization import learning_rate_schedule_builder
+from dl_techniques.optimization.sgld_optimizer import SGLD
+
+# Polynomial/cosine decay drives lr -> 0 so iterates approximate posterior samples
+lr_schedule = learning_rate_schedule_builder({
+    "type": "cosine_decay",
+    "learning_rate": 1e-2,
+    "decay_steps": 50000,
+    "alpha": 1e-4,
+    "warmup_steps": 500,
+})
+
+optimizer = SGLD(learning_rate=lr_schedule, noise_scale=1.0, seed=2026)
+
+# After a burn-in period, snapshot weights periodically to build a posterior ensemble
+weight_samples = []
+for epoch in range(num_epochs):
+    model.fit(x_train, y_train, epochs=1, verbose=0)
+    if epoch >= burn_in:
+        weight_samples.append([keras.ops.convert_to_numpy(w) for w in model.weights])
+```
+
+### Config-Driven Usage via `optimizer_builder`
+
+```python
+from dl_techniques.optimization import optimizer_builder
+
+config = {
+    "type": "sgld",
+    "noise_scale": 1.0,
+    "seed": 42,
+    "weight_decay": 1e-4,
+    "gradient_clipping_by_norm": 1.0,   # Standard clipping still applies
+}
+optimizer = optimizer_builder(config, lr_schedule=1e-3)
+```
+
+### When to Use SGLD
+
+- Rugged, multi-modal loss landscapes where pure SGD/Adam get trapped.
+- Bayesian deep learning / uncertainty quantification (deep ensembles without re-training).
+- MCMC-style sampling from the parameter posterior.
+- Diagnostic ablations: set `noise_scale=0.0` to recover pure SGD as a baseline.
+
+### Notes
+
+- The noise coefficient `sqrt(2 * lr)` is the canonical Langevin scaling. Some reference implementations use `sqrt(lr)` (without the factor of two) — this implementation follows the standard derivation.
+- For preconditioned variants (pSGLD), implement as a subclass; SGLD itself is intentionally stateless.
 
 ## Learning Rate Schedule Builder
 
@@ -743,6 +858,12 @@ The module uses research-backed default values from the constants module:
 - **RMSprop**: `rho=0.9, momentum=0.0, epsilon=1e-7, centered=False`
 - **Adadelta**: `rho=0.9, epsilon=1e-7`
 
+#### SGLD Defaults
+- `learning_rate=1e-2`
+- `noise_scale=1.0` (canonical Langevin temperature)
+- `seed=None` (non-deterministic noise unless set)
+- `weight_decay=None`
+
 #### Muon Defaults
 - `learning_rate=0.02`
 - `momentum=0.95`
@@ -818,6 +939,7 @@ The module uses research-backed default values from the constants module:
    - **Adam**: General purpose, CNNs
    - **RMSprop**: RNNs, unstable gradients
    - **Adadelta**: When learning rate is hard to tune
+   - **SGLD**: Bayesian posterior sampling, escaping shallow minima on rugged landscapes
 
 2. **Muon Learning Rates**:
    ```python
@@ -961,7 +1083,7 @@ config = {
 #### "Unknown optimizer/schedule type"
 ```python
 # Check spelling and supported types
-supported_optimizers = ["adam", "adamw", "rmsprop", "adadelta"]
+supported_optimizers = ["adam", "adamw", "rmsprop", "adadelta", "sgld"]
 supported_schedules = ["cosine_decay", "exponential_decay", "cosine_decay_restarts"]
 supported_ds_schedules = [
     "constant_equal", "constant_low_to_high", "constant_high_to_low",
