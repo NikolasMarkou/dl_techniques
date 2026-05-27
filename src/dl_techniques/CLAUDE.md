@@ -78,6 +78,8 @@ Each package has its own `CLAUDE.md` with detailed documentation.
 
 ## Adding New Components
 
+> **Canonical guide for new models and layers**: `research/2026_keras_custom_models_instructions.md`. Read it first — it is the authoritative reference for Keras 3 custom layer/model authoring in this repo. The checklists below are a quick summary, not a substitute.
+
 ### New Layer
 1. Create file in the appropriate `layers/` subdomain
 2. Inherit from `keras.layers.Layer`, decorate with `@keras.saving.register_keras_serializable()`

@@ -2,6 +2,8 @@
 
 Complete model architectures organized as subdirectories. Each subdirectory is a self-contained model implementation.
 
+> **New models MUST follow `research/2026_keras_custom_models_instructions.md`.** Read it before creating a new model directory — it is the canonical guide for Keras 3 custom model authoring in this repo (serialization, `build`, `get_config`, factories, tests).
+
 ## Model Categories
 
 ### Vision

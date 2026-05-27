@@ -2,6 +2,8 @@
 
 The largest package in the library — custom Keras 3 layers organized by domain. All layers follow Keras 3 conventions with full `get_config()` serialization support.
 
+> **New layers MUST follow `research/2026_keras_custom_models_instructions.md`.** Read it before creating a new layer — it is the canonical guide for Keras 3 custom layer authoring in this repo (`__init__`/`build`/`call`/`get_config`, serialization, factory registration, tests).
+
 ## Structure
 
 ### Attention (`attention/`)
