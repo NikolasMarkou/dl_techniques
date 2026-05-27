@@ -118,27 +118,25 @@ class CliffordNetPatchDecoderV2(keras.layers.Layer):
             name="proj_in",
         )
 
-        # --- Stages, iterated in DECODER order (deepest first).
-        # `self.stage_blocks[k]` is the k-th *decoder* stage (k=0 deepest,
-        # k=N-1 shallowest). It corresponds to encoder stage
-        # i = N-1-k. Each stage runs at channel width stage_dims[i].
-        self.stage_blocks: List[List[CliffordNetBlock]] = []
-        # Upsampling transition AFTER decoder stage k (for k < N-1).
-        # Stored as a parallel list of (UpSampling2D, Conv2D, LayerNorm)
-        # triples — Keras Layer registration via attribute names.
+        # --- Stages, FLAT list (decoder order = deepest first).
+        # See encoder.py: list-of-lists breaks Keras save/load tracking.
+        # `self._stage_starts[k]` indexes the first block of decoder
+        # stage k (k=0 deepest, k=N-1 shallowest).
+        self.blocks: List[CliffordNetBlock] = []
+        self._stage_starts: List[int] = []
         self.up_layers: List[keras.layers.Layer] = []
         self.up_proj_layers: List[keras.layers.Layer] = []
         self.up_norm_layers: List[keras.layers.Layer] = []
 
         block_idx = 0
         for k in range(self._num_stages):
+            self._stage_starts.append(block_idx)
             i = self._last_stage - k  # encoder-order stage index
-            blocks_k: List[CliffordNetBlock] = []
             use_global = bool(
                 self.use_global_context_in_last_stage and i == self._last_stage
             )
             for j in range(self.stage_depths[i]):
-                blocks_k.append(
+                self.blocks.append(
                     CliffordNetBlock(
                         channels=self.stage_dims[i],
                         shifts=self.stage_shifts[i],
@@ -153,7 +151,6 @@ class CliffordNetPatchDecoderV2(keras.layers.Layer):
                     )
                 )
                 block_idx += 1
-            self.stage_blocks.append(blocks_k)
 
             # Upsampling transition between decoder stage k and k+1
             # (i.e. from encoder index i to i-1).
@@ -217,7 +214,9 @@ class CliffordNetPatchDecoderV2(keras.layers.Layer):
 
         for k in range(self._num_stages):
             i = self._last_stage - k
-            for blk in self.stage_blocks[k]:
+            start = self._stage_starts[k]
+            end = start + self.stage_depths[i]
+            for blk in self.blocks[start:end]:
                 blk.build(cur_shape)
             if k < self._last_stage:
                 next_i = i - 1
@@ -255,7 +254,10 @@ class CliffordNetPatchDecoderV2(keras.layers.Layer):
         # DECISION plan_2026-05-27_75849a91/D-002: CliffordNetBlock owns
         # its residual; the per-stage block loop is bare.
         for k in range(self._num_stages):
-            for blk in self.stage_blocks[k]:
+            i = self._last_stage - k
+            start = self._stage_starts[k]
+            end = start + self.stage_depths[i]
+            for blk in self.blocks[start:end]:
                 x = blk(x, training=training)
             if k < self._last_stage:
                 x = self.up_layers[k](x)

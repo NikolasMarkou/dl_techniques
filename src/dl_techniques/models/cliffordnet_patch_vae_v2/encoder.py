@@ -150,20 +150,24 @@ class CliffordNetPatchEncoderV2(keras.layers.Layer):
             epsilon=1e-6, name="stem_norm"
         )
 
-        # --- Stages: list-of-lists for blocks; parallel list for transitions.
-        # `self.stage_blocks[i][j]` is the j-th CliffordNetBlock at stage i.
-        # `self.transitions[i]` is the CliffordNetBlockDSv2 BETWEEN stage i
-        # and stage i+1; defined for i in [0, last_stage).
-        self.stage_blocks: List[List[CliffordNetBlock]] = []
+        # --- Stages: FLAT lists for both blocks and transitions.
+        # Nested list-of-lists breaks Keras's layer-tracking on save/load
+        # (verified empirically — yields ~1e-4 weight delta even with
+        # CliffordNetBlock save/load itself being bit-exact). Flat lists
+        # mirror v2's encoder.blocks pattern.
+        # `self._stage_starts[i]` is the index in `self.blocks` of the
+        # first block of stage i.
+        self.blocks: List[CliffordNetBlock] = []
         self.transitions: List[CliffordNetBlockDSv2] = []
+        self._stage_starts: List[int] = []
         block_idx = 0
         for i in range(self._num_stages):
-            blocks_i: List[CliffordNetBlock] = []
+            self._stage_starts.append(block_idx)
             use_global = bool(
                 self.use_global_context_in_last_stage and i == self._last_stage
             )
             for j in range(self.stage_depths[i]):
-                blocks_i.append(
+                self.blocks.append(
                     CliffordNetBlock(
                         channels=self.stage_dims[i],
                         shifts=self.stage_shifts[i],
@@ -173,14 +177,11 @@ class CliffordNetPatchEncoderV2(keras.layers.Layer):
                         layer_scale_init=self.layer_scale_init,
                         drop_path_rate=drop_path_rates[block_idx],
                         kernel_regularizer=kernel_regularizer,
-                        # zero_centered_rms_norm is the CliffordNetBlock
-                        # default; keep it explicit so config round-trips.
                         normalization_type="zero_centered_rms_norm",
                         name=f"stage{i}_block{j}",
                     )
                 )
                 block_idx += 1
-            self.stage_blocks.append(blocks_i)
 
             if i < self._last_stage:
                 self.transitions.append(
@@ -189,17 +190,12 @@ class CliffordNetPatchEncoderV2(keras.layers.Layer):
                         out_channels=self.stage_dims[i + 1],
                         shifts=self.stage_shifts[i],
                         cli_mode=self.cli_mode,
-                        # DSv2 supports {"diff","abs","pyramid_diff"};
-                        # plain ctx_mode passes through unchanged.
                         ctx_mode=self.ctx_mode,
                         kernel_size=self.downsample_kernel_size,
                         strides=2,
                         stream_pool=self.downsample_kind,
                         skip_pool=self.downsample_kind,
                         layer_scale_init=self.layer_scale_init,
-                        # DropPath off in transitions — they are not part of
-                        # the regular block-depth schedule and downsamplers
-                        # are typically left un-stochasticized.
                         drop_path_rate=0.0,
                         kernel_regularizer=kernel_regularizer,
                         name=f"transition_{i}_to_{i + 1}",
@@ -265,10 +261,12 @@ class CliffordNetPatchEncoderV2(keras.layers.Layer):
         post_stem_shape = (b, hp, wp, self.stage_dims[0])
         self.stem_norm.build(post_stem_shape)
 
-        # Stage builds + transitions.
+        # Stage builds + transitions (flat block list, indexed by stage).
         cur_shape = post_stem_shape
         for i in range(self._num_stages):
-            for blk in self.stage_blocks[i]:
+            start = self._stage_starts[i]
+            end = start + self.stage_depths[i]
+            for blk in self.blocks[start:end]:
                 blk.build(cur_shape)
             if i < self._last_stage:
                 trans = self.transitions[i]
@@ -328,7 +326,9 @@ class CliffordNetPatchEncoderV2(keras.layers.Layer):
         # convnext_patch_vae_v2/encoder.py:239-243 which does add one for
         # ConvNextV2Block.
         for i in range(self._num_stages):
-            for blk in self.stage_blocks[i]:
+            start = self._stage_starts[i]
+            end = start + self.stage_depths[i]
+            for blk in self.blocks[start:end]:
                 x = blk(x, training=training)
             if i < self._last_stage:
                 x = self.transitions[i](x, training=training)
