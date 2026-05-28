@@ -30,78 +30,122 @@
 - Anchor at impact site (not at decision definition). One anchor per impact site, even if shared with sibling decision.
 <!-- /COMPRESSED-SUMMARY -->
 
-## plan_2026-05-26_d7a342f2
+## plan_2026-05-27_75849a91
 ### D-001 | EXPLORE → PLAN | YYYY-MM-DD
 **Context**: <one-paragraph background — what was discovered in EXPLORE>
 **Decision**: <chosen approach in one sentence>
 **Trade-off**: <X> **at the cost of** <Y>
 **Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-26_d7a342f2/D-NNN` anchor exists in source)
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-27_75849a91/D-NNN` anchor exists in source)
 -->
 
-### D-001 | EXPLORE → PLAN | 2026-05-26
-**Context**: `TrainingConfig.dataset` is a single string field. ADE20K and COCO both use `_build_filesystem_dataset()` with identical `/255.0` normalization. `tf.data.Dataset.sample_from_datasets` is available in TF 2.18 and used in the codebase. The mixing approach (at file-path level vs batch level) is the main design choice.
+### D-001 | PLAN | 2026-05-27
+**Context**: Existing `convnext_patch_vae_v2` is flat single-scale; the user requested a cliffordnet-block version AND chose a hierarchical encoder/decoder (2-3 stages with channel doubling + spatial halving via `CliffordNetBlockDSv2`). `CliffordNetBlock` is strictly isotropic and has an internal residual via `GatedGeometricResidual`.
+**Decision**: Create a NEW sibling model package `cliffordnet_patch_vae_v2/` and a NEW sibling training package `train/cliffordnet_patch_vae_v2/`. Do not refactor v2.
+**Trade-off**: Code duplication (decoder, model wrapper, callbacks shim, train script) at the cost of zero risk to the working v2 model and trainer.
+**Reasoning**: v2 is freshly committed (commits ea19175b/278f94f3/acac27fb) and the user is currently iterating on it. Hierarchical Clifford encoder is a structurally different model, not a block swap. Refactoring v2 to be block-class-configurable would require also generalising MAE/SIGReg wiring + segmentation upsample factor, polluting v2's API for a single experiment.
+**Anchor-Refs**: (no in-code anchors yet — to be added during EXECUTE where applicable)
 
-**Decision**: Mix at file-path level using `tf.data.Dataset.sample_from_datasets(path_datasets, weights=size_proportional)` before decode/resize/batch, with a new `datasets: List[str]` field on `TrainingConfig`.
+### D-002 | PLAN | 2026-05-27
+**Context**: `CliffordNetBlock` adds its residual INTERNALLY via `GatedGeometricResidual` (clifford_block.py:794). The v2 ConvNeXt encoder loop adds the residual EXTERNALLY (`encoder.py:239-241`).
+**Decision**: New encoder/decoder loops must NOT add an outer residual when stacking `CliffordNetBlock`s.
+**Trade-off**: Departure from the v2 wiring template at the cost of correctness — adding an outer residual would double-apply the skip and break gradients.
+**Reasoning**: Documented as a HARD constraint in findings; flagged as a Pre-Mortem Scenario 3 falsification signal during PLAN.
+**Anchor-Refs**: encoder.py (to be created, Step 2 — anchor with `# DECISION plan_2026-05-27_75849a91/D-002` at the block-stack loop site)
 
-**Trade-off**: Finer-grained per-sample interleaving **at the cost of** a new `_build_mixed_filesystem_dataset()` function (~40 lines) and a new `datasets` field on `TrainingConfig`.
+### D-003 | PLAN | 2026-05-27
+**Context**: v2 `SegmentationHead` hardcodes `UpSampling2D(size=(patch_size, patch_size))`. In the hierarchical model the encoder downsamples by an additional factor of `2^(num_stages-1)` after the stem, so the head input is at `(Hp / 2^(N-1), Wp / 2^(N-1))` and the head needs an upsample of `patch_size * 2^(N-1)` to reach full image resolution.
+**Decision**: Introduce a new `CliffordSegmentationHead` with an explicit `upsample_factor: int` arg instead of reusing v2's `SegmentationHead`. `AttentionPoolClassifierHead` is reused unmodified.
+**Trade-off**: One new tiny Keras class at the cost of zero edits to v2's heads.py.
+**Reasoning**: The v2 seg head is the simpler of the two heads and the upsample factor is the only thing that changes; introducing a parallel class is cheaper than parameterising and re-validating v2.
+**Anchor-Refs**: heads.py (Step 4)
 
-**Reasoning**: File-path-level mixing ensures each batch contains samples from both sources proportionally. Batch-level mixing (sample_from_datasets on batched datasets) would mean each step draws entirely from one source — less diverse. Concatenating file lists into a single shuffled pool is even simpler but loses explicit size-proportional control. Alternative "ade20k+coco" composite sentinel rejected: doesn't scale if a third dataset is added later, and requires a new hardcoded branch for each pair. `nargs="+"` `--datasets` flag is additive, doesn't break `--dataset` (singular) for all other use patterns.
+### D-004 | EXECUTE-Step-7 | 2026-05-27
+**Context**: Step 7 save/load round-trip smoke produced ~1e-4 weight delta on 44 of 143 weights (all inside CliffordNetBlock sub-layers in the encoder/decoder block stack). v2's flat `self.blocks` pattern is bit-exact; standalone CliffordNetBlock save/load is also bit-exact. Isolated repro: storing sub-layers as nested `List[List[Layer]]` (one inner list per stage) breaks Keras's layer tracking during save/load — flat `List[Layer]` works.
+**Decision**: Refactor encoder.py and decoder.py to store all blocks in a single flat `self.blocks: List[CliffordNetBlock]`, with a parallel Python `self._stage_starts: List[int]` giving the index in `self.blocks` of the first block of each stage. Iteration in `call` slices `self.blocks[start:end]` per stage.
+**Trade-off**: ~10 lines of bookkeeping in `__init__` / `build` / `call` at the cost of correct save/load (the only correctness issue we had).
+**Reasoning**: Empirical isolation reproduced the bug with a minimal 4-block, 2-stage list-of-lists CustomLayer (8e-5 delta) vs the same 4 blocks flat (0.0 delta). Confirms Keras's nested-list Layer tracker is the culprit, not anything Clifford-specific. Same pattern that v2 uses.
+**Anchor-Refs**: encoder.py (flat `self.blocks`, `self._stage_starts`); decoder.py (same).
 
-## plan_2026-05-26_d8c33dca
-### D-001 | EXPLORE → PLAN | 2026-05-26 [REVISED after user correction]
-**Context**: The 4D spatial latent `(B, Hp, Wp, latent_dim)` must be reduced to `(B, D)` for PCA. Initial plan proposed mean-pooling over `(Hp, Wp)` for large images. User rejected this: mean-pooling destroys patch structure, which is the entire point of the spatial VAE design. For 128 samples × 16384 dims (256x256 case), sklearn's randomized SVD (Halko et al.) runs in O(N*D*k) ≈ 128*16384*2 ops — fast on CPU.
-**Decision**: Always flatten `(B, Hp, Wp, D)` → `(B, Hp*Wp*D)`. Use `PCA(n_components=2, svd_solver='randomized', random_state=42)`.
-**Trade-off**: Preserves full patch structure **at the cost of** slightly more memory for large images (128 × 16384 float32 ≈ 8MB — negligible).
-**Reasoning**: Mean-pooling loses exactly the information that the spatial VAE is designed to capture. Randomized SVD makes the large-dim case fast without any information loss.
+## plan_2026-05-27_4a444b14
+### D-001 — Chosen approach: design+scaffold in iter-1, no actual training runs
+**Decision**: Ship V2 as a complete code package (model + losses + training script + smoke tests) in iter-1. Full training runs are explicit follow-ups, gated on user approval after iter-1.
 
-### D-002 | EXPLORE → PLAN | 2026-05-26
-**Context**: PCA scatter plots need a color signal that doesn't require class labels (which are not available — all datasets use `(x, x)` self-supervised pairs, not `(x, y)`). Options: (a) color by sample index (meaningless but safe), (b) color by per-sample KL divergence (diagnostic — shows which samples are far from the prior), (c) single color (simplest).
-**Decision**: Color by per-sample KL divergence: `-0.5 * mean(1 + log_var - mu^2 - exp(log_var))` averaged over `(Hp, Wp, D)`. The `encode()` call already returns `log_var`, so no extra forward pass needed.
-**Trade-off**: Informative diagnostic signal **at the cost of** slightly more computation per callback call (two arrays processed instead of one).
-**Reasoning**: KL divergence per sample is the most useful diagnostic for VAE training: it shows which samples the encoder is mapping far from the prior. A scatter colored by KL immediately reveals mode coverage, posterior collapse, and outlier samples. The computation overhead is negligible (numpy ops after the encode pass).
+**Trade-off**: Comprehensive design+scaffold at the cost of leaving actual training (T1a-style ablation runs) unscheduled. The user gets a runnable framework but no validated training results in iter-1.
 
-### D-003 | EXPLORE → PLAN | 2026-05-26
-**Context**: New callbacks can live either (a) inline in `train_convnext_patch_vae.py` alongside `ReconVisualizationCallback`, or (b) in a new `src/train/convnext_patch_vae/callbacks.py`. The training script is already 991 lines; adding ~200 more lines would make it ~1200 lines.
-**Decision**: Create a separate `src/train/convnext_patch_vae/callbacks.py` file.
-**Trade-off**: Cleaner module separation **at the cost of** one additional file to maintain and an extra import line in the training script.
-**Reasoning**: 1200-line files become hard to navigate. The new callbacks are self-contained (no coupling to training logic beyond receiving val_samples at construction). A separate file follows the depth_visualization callback pattern in `src/dl_techniques/callbacks/`. The import overhead is one line.
+**Why**: Per LESSONS — "DESIGN+SCAFFOLD plans converge in 1 iteration when paired with an operational follow-up doc" and "Smoke != correctness". A 24h+ ADE20K training run is unjustified before unit tests pass and the user has reviewed the code.
 
-### D-004 | EXPLORE → PLAN | 2026-05-26
-**Context**: Interpolation can use (a) linear interpolation in mu space, (b) spherical linear interpolation (slerp), or (c) interpolation in the full reparameterized z space (with noise). Standard VAE interpolation practice is mu-space linear for latent exploration.
-**Decision**: Use linear interpolation between `mu_A` and `mu_B` (no slerp, no noise).
-**Trade-off**: Simple and deterministic **at the cost of** not respecting the geometry of the posterior distribution (slerp would be more geometrically correct for spherical Gaussians).
-**Reasoning**: For a spatial VAE with per-patch Gaussians, slerp is nontrivial to apply correctly across `(Hp, Wp, D)` dims simultaneously. Linear interpolation in mu-space is the standard first approach in the VAE literature. The results are interpretable and deterministic. Slerp can be added as a follow-up if desired.
+### D-002 — LPIPS uses VGG16 + lazy init, NOT FeatureAlignmentLoss
+**Decision**: Author a new `LPIPSLoss` in `losses/lpips_loss.py` rather than reusing the existing `FeatureAlignmentLoss` (margin-cosine for distillation) or extending `VGGLoss` (image_restoration_loss.py).
 
-## plan_2026-05-26_b11b0e90
-### D-001 | EXPLORE → PLAN | 2026-05-26
-**Context**: ADE20K (25,574 train / 2,000 val JPEGs) and COCO 2017 (118,287 train / 5,000 val JPEGs) are both available as raw filesystem directories, not TFDS archives. The canonical TFDS `tfds.load()` path cannot be used directly. Two options: (a) build a custom `tf.data.Dataset.list_files()` pipeline per dataset, or (b) wrap each in a TFDS-compatible builder and register them. The model itself is fully resolution-agnostic; only the trainer's `build_dataset()` needs extension.
-**Decision**: Use raw `tf.data.Dataset.list_files()` pipeline with `decode_jpeg → resize_with_crop_or_pad → /255` normalization. One shared helper `_build_filesystem_dataset()` parameterized by glob pattern.
-**Trade-off**: Simple and zero-dependency **at the cost of** no TFDS metadata (dataset size must be inferred from `glob` count or hardcoded).
-**Reasoning**: TFDS builder registration is heavy infrastructure for two datasets we already have on disk. The list_files approach is what sibling trainers use when not on TFDS. Dataset size is needed only for `steps_per_epoch`, which can be computed from file count.
+**Trade-off**: A new loss class at the cost of a small overlap with `VGGLoss`. Gained: layer-weighted per-channel L2-normalized distance (LPIPS-flavored) with explicit per-block weights and input-range awareness — semantically different from MSE-on-VGG-features.
 
-### D-002 | PLAN | 2026-05-26
-**Context**: `img_size=128, patch_size=8` chosen for smoke tests (16×16 grid, 256 patches >> sigreg_knots=17). VRAM estimate: ~2GB at batch=8. `img_size=256, patch_size=8` gives 32×32=1024 patches and ~6GB — safe for production runs on RTX 4090.
-**Decision**: Default smoke config: `--image-size 128 --patch-size 8 --preset tiny --batch-size 8`. Recommend production: `--image-size 256 --patch-size 8 --preset base --batch-size 32`.
-**Trade-off**: Conservative smoke defaults catch pipeline errors quickly **at the cost of** not validating full-resolution behavior in CI.
-**Reasoning**: Smoke is a correctness gate, not a performance gate. Full-resolution training is a user decision.
+**Why**: LPIPS-flavored perceptual loss is the canonical add for VAE training (SD-VAE, Kandinsky, etc.). `VGGLoss` is closer to "perceptual MSE"; LPIPS uses normalized features + learned (or chosen) per-channel weights. We ship a clean "LPIPS-lite" without the official LPIPS weight download.
 
-## plan_2026-05-25_a8325e3f
-### D-001 | EXPLORE → PLAN | 2026-05-25
-**Context**: Analysis session analysis_2026-05-25_abe75634 identified 7 fixes ordered by priority. Fixes 1+2 (beta annealing + warmup) prevent posterior collapse. Fixes 3+4+5 (skip connections, multi-stage decoder, perceptual loss) improve reconstruction quality after collapse is resolved. Fixes 6+7 (log_var zero-init, config default) are independent housekeeping items.
-**Decision**: Implement only the non-architectural fixes in this iteration: config default, encoder log_var zero-init, trainer warmup, trainer beta annealing. Defer skip connections, multi-stage decoder, and perceptual loss to a follow-on plan.
-**Trade-off**: Faster delivery + testable collapse fix **at the cost of** leaving architectural quality improvements (skip connections, seam-free decoder) for a separate plan.
-**Reasoning**: Architectural changes (skip connections, multi-stage upsampling) require API changes to encoder/decoder/model and substantial test updates. Doing them before validating the collapse fix adds risk. The analysis explicitly says items 1+2 are sufficient to achieve non-collapsed training. Perceptual loss requires adding an external frozen model (VGG/ResNet) with no existing precedent in this repo.
+### D-003 — SimMIM-style MAE masking (not canonical MAE)
+**Decision**: Implement MAE-style pretext as **SimMIM-style** (mask ratio applied post-stem, mask token replaces masked patches, full grid passes through ConvNeXt blocks) NOT canonical MAE (variable-length sequence of visible patches only).
 
-### D-002 | PLAN | 2026-05-25
-**Context**: `self._beta_kl` in `model.py:119` is a plain Python `float` assigned at construction. Two options for beta annealing: (a) make it a `tf.Variable`, (b) keep as Python float and mutate from callback.
-**Decision**: Keep `self._beta_kl` as a plain Python float. Mutate from `BetaAnnealingCallback.on_epoch_begin`.
-**Trade-off**: Simpler callback that avoids `tf.Variable` serialization complexity **at the cost of** not being graph-traceable (beta value is captured at trace time under `@tf.function`).
-**Reasoning**: `model.call()` is never `@tf.function`-decorated in this codebase (and `jit_compile=False` is enforced). The loss `self._beta_kl * kl_loss` is evaluated eagerly. Python float mutation from `on_epoch_begin` (before any call in that epoch) is therefore correct. No need for `tf.Variable` overhead.
+**Trade-off**: Less compute savings than canonical MAE at the cost of preserving ConvNeXt's grid-based assumption. ConvNeXt blocks rely on full spatial grid for 7×7 depthwise convs to operate — canonical MAE would require a major surgery.
 
-### D-003 | PLAN | 2026-05-25
-**Context**: Encoder bottleneck is a single `Conv2D(2*latent_dim)` layer named `"bottleneck"`. Splitting into `mu_head` + `log_var_head` changes the layer names in the serialized model.
-**Decision**: Split `bottleneck` into `mu_head` (Glorot init) + `log_var_head` (zeros init). Update `build()` and `call()` accordingly.
-**Trade-off**: Zero-init log_var (correct inductive bias, ~70% KL reduction at step 1) **at the cost of** breaking weight compatibility with existing checkpoints trained with the old `bottleneck` layout.
-**Reasoning**: No production checkpoint exists with `bottleneck` — all training runs so far produced collapsed/unusable models (that's what the analysis showed). Breaking checkpoint compatibility with collapsed-model checkpoints is zero cost. The `get_config()` serializes `latent_dim` (not layer names), so fresh save/load round-trips work correctly. Existing tests build fresh models; `TestSaveLoad` will pass with the new architecture.
-**Anchor-Refs**: `src/dl_techniques/models/convnext_patch_vae/encoder.py:133-139`
+**Why**: ConvNeXt-V2's FCMAE paper uses exactly this recipe. Matches our backbone family. Anchored at the mask application site in encoder.py.
+
+### D-004 — V2 is a separate package, V1 untouched
+**Decision**: New package `models/convnext_patch_vae_v2/` and `train/convnext_patch_vae_v2/`. V1 (`models/convnext_patch_vae/` and `train/convnext_patch_vae/`) is unchanged.
+
+**Trade-off**: Some code duplication (decoder re-export, viz callback ports) at the cost of preserving V1's test contract and avoiding any risk to V1 consumers.
+
+**Why**: V1 ships a documented contract (32-line README intro, 8-test suite passing). A breaking change to V1's encoder.call signature (returning 3-tuple instead of 2-tuple) would surface in 50+ V1 tests + downstream training scripts. Isolation is cheap (re-exports), regression risk avoided.
+
+### D-005 — iter-1 scope explicitly excludes hierarchical V2, xxl preset, distillation head, GAN loss, CLIP head, DINO loss
+**Decision**: iter-1 lands single-scale V2 with VAE+LPIPS+MAE+cls+seg + xl preset. Hierarchical V2 and xxl are explicit follow-ups.
+
+**Trade-off**: Smaller scope at the cost of not delivering the full 5-head + 2-scale + 5-variant matrix in one plan. The plan-time line count is already ~3000 LOC; a hierarchical V2 + xxl would push us through the "STOP IF >4500" trigger.
+
+**Why**: Per LESSONS line-count multiplier (greenfield × multi-head 2.3×), iter-1's scope is already at the upper bound. Decomposing into iter-1 (single-scale, all heads) + iter-2 (hierarchical V2 inheriting iter-1 patterns) is cleaner than one mega-plan with high iteration-5 risk.
+
+### D-006 — Multi-task data: cls only on CIFAR, seg head unit-tested only in iter-1
+**Decision**: iter-1's training script wires CIFAR labels for the cls head. The seg head is implemented and unit-tested (synthetic labels) but not wired to real ADE20K seg masks. ADE20K-seg data loader integration is an explicit follow-up.
+
+**Trade-off**: Defers real seg training at the cost of not validating end-to-end on real seg labels.
+
+**Why**: ADE20K seg requires a separate label loader (annotation files, palette decoding, label format). Scope cost vs. benefit: the seg head architecture is the interesting part; the data loader is mechanical and uncoupled from the architecture decisions. Keep iter-1 lean; document the missing piece.
+
+## plan_2026-05-27_84f6180d
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-27_84f6180d/D-NNN` anchor exists in source)
+-->
+
+### D-001 | EXPLORE → PLAN | 2026-05-27
+**Context**: 17 CLAUDE.md files; only `src/train/CLAUDE.md` (451) breaks the 400-line cap. Inflated count claims (150+ models / 290+ layers) appear in 4 root-ward docs while actual counts are ~75 models / 231 layer files. Several subpackage docs are missing recently added modules (notably `sgld_optimizer.py` from commits b23f769e/9342eaec/70deb5e9).
+**Decision**: Audit-and-correct in place. Edit the 9 inconsistent CLAUDE.md files; leave the 9 accurate ones (analyzer, callbacks, constraints, initializers, metrics, regularizers, visualization, models/ccnets, train/ccnets) untouched.
+**Trade-off**: surgical accuracy edits **at the cost of** not normalizing prose style across all docs.
+**Reasoning**: Touching the accurate docs would risk introducing new drift while solving nothing. Scope is bounded by the user's two explicit requirements (consistency + 400-line cap).
+
+### D-002 | PLAN → EXECUTE | 2026-05-27
+**Context**: User reviewed plan v1 and selected (a) drop inflated counts entirely instead of replacing with real numbers, (b) skip step 9 (trimming `src/train/CLAUDE.md` from 451 → ≤400).
+**Decision**: Execute steps 1-8 only. Replace "150+ models / 290+ layers" wording with neutral phrasing ("a comprehensive set of architectures and custom layers"). Leave `src/train/CLAUDE.md` at 451 lines per explicit user choice.
+**Trade-off**: User-respected scope **at the cost of** leaving one file over the 400-line cap. The cap was a user-stated requirement that the user themselves elected to waive for this one file.
+**Reasoning**: Dropping numbers prevents future drift from re-counting. The user is the requirement source; explicit deferral on step 9 overrides the global cap.
+
+## plan_2026-05-27_68c7fcd6
+### D-001 | EXPLORE → PLAN | 2026-05-27
+**Context**: Mirror Muon's pattern; SGLD is much simpler (stateless). Reference PyTorch snippet uses `sqrt(lr)` but canonical SGLD (Welling & Teh 2011) and the article's stated formula specify `sqrt(2·lr)`.
+**Decision**: Implement canonical SGLD with `sqrt(2·lr)·noise_scale·ε`. Document deviation from snippet.
+**Trade-off**: Mathematical correctness **at the cost of** byte-for-byte equivalence with prompt's snippet.
+**Reasoning**: Snippet contradicts its own article; we follow the published formula.
+
+### D-002 | PLAN | 2026-05-27
+**Context**: SGLD has no per-variable buffers.
+**Decision**: Override `build()` minimally (super + seed generator only).
+**Trade-off**: Minimal memory **at the cost of** no preconditioner extension hook.
+**Reasoning**: KISS; preconditioned SGLD would be a separate subclass.
+
+### D-003 | PLAN | 2026-05-27
+**Context**: `SeedGenerator` not trivially serializable.
+**Decision**: Store integer `seed` attribute; build `keras.random.SeedGenerator(self.seed)` lazily in `build()`. Include `seed` in `get_config`.
+**Trade-off**: Hyperparameter reproducibility **at the cost of** cross-restore exact sample-stream continuity.
+**Reasoning**: Standard Keras pattern (Dropout, RandomFlip). Optimizer state continuity across save is not a guarantee.

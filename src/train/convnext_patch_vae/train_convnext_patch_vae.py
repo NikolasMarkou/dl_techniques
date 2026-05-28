@@ -216,8 +216,6 @@ class TrainingConfig:
     beta_kl_l2: float = 0.5
     beta_kl_l1_start: float = 0.0001
     beta_kl_l2_start: float = 0.0001
-    beta_anneal_epochs_l1: int = 10
-    beta_anneal_epochs_l2: int = 15
     lambda_sigreg_l1: float = 0.05
     lambda_sigreg_l2: float = 0.1
 
@@ -1085,35 +1083,35 @@ def train(config: TrainingConfig, smoke: bool = False) -> None:
     os.makedirs(curves_dir, exist_ok=True)
     callbacks.append(TrainingCurvesCallback(output_dir=curves_dir))
 
-    if config.hierarchical:
-        # Two staggered annealing schedules — L1 first (global structure
-        # commits early), L2 second with intentional overlap.
-        if config.beta_anneal_epochs_l1 > 0:
+    if config.beta_anneal_epochs > 0:
+        if config.hierarchical:
+            # Shared schedule length across L1+L2; distinct targets/starts
+            # preserved because coarse vs fine KL strength is an arch choice.
+            # DECISION plan_2026-05-28_15256fe3/D-003
             callbacks.append(
                 BetaAnnealingCallback(
                     beta_start=config.beta_kl_l1_start,
                     beta_target=config.beta_kl_l1,
-                    anneal_epochs=config.beta_anneal_epochs_l1,
+                    anneal_epochs=config.beta_anneal_epochs,
                     attr_name="_beta_kl_l1",
                 )
             )
-        if config.beta_anneal_epochs_l2 > 0:
             callbacks.append(
                 BetaAnnealingCallback(
                     beta_start=config.beta_kl_l2_start,
                     beta_target=config.beta_kl_l2,
-                    anneal_epochs=config.beta_anneal_epochs_l2,
+                    anneal_epochs=config.beta_anneal_epochs,
                     attr_name="_beta_kl_l2",
                 )
             )
-    elif config.beta_anneal_epochs > 0:
-        callbacks.append(
-            BetaAnnealingCallback(
-                beta_start=config.beta_kl_start,
-                beta_target=config.beta_kl,
-                anneal_epochs=config.beta_anneal_epochs,
+        else:
+            callbacks.append(
+                BetaAnnealingCallback(
+                    beta_start=config.beta_kl_start,
+                    beta_target=config.beta_kl,
+                    anneal_epochs=config.beta_anneal_epochs,
+                )
             )
-        )
 
     # Viz callbacks below assume single-scale encode/decode signatures.
     # Hierarchical model emits a 4-tuple from encode() and requires
@@ -1396,8 +1394,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--beta-kl-l2", type=float, default=0.5)
     parser.add_argument("--beta-kl-l1-start", type=float, default=0.0001)
     parser.add_argument("--beta-kl-l2-start", type=float, default=0.0001)
-    parser.add_argument("--beta-anneal-epochs-l1", type=int, default=10)
-    parser.add_argument("--beta-anneal-epochs-l2", type=int, default=15)
     parser.add_argument("--lambda-sigreg-l1", type=float, default=0.05)
     parser.add_argument("--lambda-sigreg-l2", type=float, default=0.1)
 
@@ -1503,8 +1499,6 @@ def main() -> None:
         beta_kl_l2=args.beta_kl_l2,
         beta_kl_l1_start=args.beta_kl_l1_start,
         beta_kl_l2_start=args.beta_kl_l2_start,
-        beta_anneal_epochs_l1=args.beta_anneal_epochs_l1,
-        beta_anneal_epochs_l2=args.beta_anneal_epochs_l2,
         lambda_sigreg_l1=args.lambda_sigreg_l1,
         lambda_sigreg_l2=args.lambda_sigreg_l2,
     )

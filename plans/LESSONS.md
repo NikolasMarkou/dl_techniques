@@ -86,6 +86,7 @@
 - **`ops.pad` with dynamic paddings does not trace under XLA on TF 2.18.** Substitute `ops.concatenate([x, ops.zeros(...)])`.
 - **Bare `@register_keras_serializable()` ties key to `__module__`.** Do NOT relocate without `package="dl_techniques"` arg.
 - **Manual `child.build(input_shape)` in `parent.build()` required for Keras 3 model-save round-trip.**
+- **Nested `List[List[Layer]]` breaks Keras layer-tracking on save/load.** Storing sub-layers as a list-of-lists (e.g. one inner list per stage of a hierarchical encoder) causes silent weight divergence (~1e-4 to 1e-3 on `mu`) after `model.save` + `load_model`, even when `_layers` count, layer paths, and weight count all match between original and loaded. Isolated repro: same N blocks in a flat `List[Layer]` -> 0.0 delta; in `List[List[Layer]]` -> 8e-5 delta. Fix: store layers as a single flat `self.blocks: List[Layer]` and track stage boundaries with a parallel Python `self._stage_starts: List[int]`. Iterate per-stage via `self.blocks[start:end]` slices. v2 `ConvNeXtPatchVAEV2` uses this pattern; mirror it for any hierarchical model.
 
 ## CLM / NLP training
 

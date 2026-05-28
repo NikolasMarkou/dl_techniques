@@ -93,3 +93,12 @@
 | plan_2026-05-26_b11b0e90 | 2026-05-26 | Extend `train_convnext_patch_vae.py` to support ADE20K and C |  |
 | plan_2026-05-26_d8c33dca | 2026-05-26 | No goal |  |
 | plan_2026-05-26_d7a342f2 | 2026-05-26 | No goal |  |
+| plan_2026-05-26_5abf5af3 | 2026-05-26 | No goal |  |
+| plan_2026-05-26_0f3c5913 | 2026-05-26 | Implement critical fixes from augmentation pipeline audit (H |  |
+| plan_2026-05-27_1a9e3221 | 2026-05-27 | Fix 6 confirmed bugs in ConvNeXtPatchVAE: 3 critical (H4, H1 |  |
+| plan_2026-05-27_dee954c6 | 2026-05-27 | Implement the two-level hierarchical ConvNeXtPatchVAE archit | bug-fixes-verified.md, current-architecture.md, hierarchical-design-notes.md |
+| plan_2026-05-27_c3184aea | 2026-05-27 | Replace the implicit `p(z_l2) = N(0, I)` in `HierarchicalCon | touch-points.md, math-and-init.md, risks.md |
+| plan_2026-05-27_68c7fcd6 | 2026-05-27 | Add SGLD optimizer at `src/dl_techniques/optimization/sgld_o |  |
+| plan_2026-05-27_84f6180d | 2026-05-27 | Bring all CLAUDE.md files into consistency with the current  |  |
+| plan_2026-05-27_4a444b14 | 2026-05-27 | No goal |  |
+| plan_2026-05-27_75849a91 | 2026-05-27 | Port `src/train/convnext_patch_vae_v2/` to use cliffordnet b |  |

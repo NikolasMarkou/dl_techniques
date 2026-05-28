@@ -34,149 +34,127 @@
 - **`current_phase` / `_global_step` counters**: `add_weight(trainable=False, dtype="float32")` — int32 fails CPU/GPU device placement.
 <!-- /COMPRESSED-SUMMARY -->
 
-## plan_2026-05-26_d7a342f2
+## plan_2026-05-27_75849a91
 ### Index
-
-| # | Topic | File | Key Takeaway |
-|---|-------|------|--------------|
-| F-001 | Training script — dataset dispatch | findings/training-script.md | `build_dataset()` is a hard if/elif chain on `config.dataset: str`. Both ADE20K and COCO share `_build_filesystem_dataset()` with identical `/255.0` normalization. No multi-dataset path exists. `steps_per_epoch_override` already present as escape hatch. |
-| F-002 | Config, callbacks, mixing primitives | findings/callbacks-and-config.md | `TrainingConfig.dataset: str` (single). No mixer utility for images in `src/train/`. `tf.data.Dataset.sample_from_datasets` is available in TF 2.18 and used in `dl_techniques/datasets/nlp.py:184`. Callbacks are dataset-agnostic (accept any numpy batch). |
-| F-003 | Tests and TFDS availability | findings/tests-and-datasets.md | Tests use synthetic numpy only — no test changes needed. COCO/2017 available locally. ADE20K at `/media/arxwn/data0_4tb/datasets/ade20k` (filesystem glob, not TFDS). Mixing CIFAR+filesystem is incompatible (different norm spaces). |
+- `findings/convnext-patch-vae-v2-trainer.md` — CLI flags, dataset pipeline, losses (7 components), optimizer/clip, callbacks, custom train_step. Substitution points identified.
+- `findings/convnext-patch-vae-v2-model.md` — Flat single-scale VAE: stem → N ConvNextV2Block → mu/log_var → Sampling → M ConvNextV2Block → ConvTranspose. Constant `(B, Hp, Wp, embed_dim)`. Block I/O contract documented.
+- `findings/cliffordnet-blocks.md` — `CliffordNetBlock` (`layers/geometric/clifford_block.py:482`) is isotropic, no channel divisibility constraints, internal residual via GatedGeometricResidual + LayerScale + DropPath. `CliffordNetBlockDSv2` available for downsampling stages.
+- `findings/train-conventions-and-lpips.md` — `src/train/` package conventions, dataclass-config pattern with `to_model_config()`, `create_base_argument_parser`, `create_callbacks`, output to repo-root `results/`. LPIPSLoss API documented.
 
 ### Key Constraints
 
 ### HARD
-- `TrainingConfig.dataset: str` — single string, no list field exists. Multi-dataset requires adding `datasets: List[str]`.
-- Both ADE20K and COCO use `/255.0` → [0,1] normalization — identical, safe to mix.
-- CIFAR+filesystem mixing is INVALID: CIFAR uses mean/std normalization in MSE mode, producing incompatible pixel ranges.
-- `tf.data.Dataset.sample_from_datasets` works at batch OR file level; using it at file-path level (before batch) gives finer-grained interleaving.
-- `_build_filesystem_dataset` returns batched `.repeat()` train + non-repeating val. Must keep backward compat.
-- All tests use synthetic numpy — no test changes needed for multi-dataset.
-- `val_steps=None` for all filesystem datasets (Keras exhausts naturally).
-- `MPLBACKEND=Agg`, single GPU, `results/` at repo root.
+- Keras 3 / TF 2.18, Python 3.11+. `keras.ops` for backend-agnostic ops; `@keras.saving.register_keras_serializable()` on every custom class; full `get_config()` round-trip.
+- Block I/O contract on the swap target: `(B, Hp, Wp, embed_dim) → (B, Hp, Wp, embed_dim)`, stride=1, full spatial resolution preserved (MAE mask token application + SIGReg reshape both require the complete `(Hp, Wp)` grid).
+- **Residual semantics mismatch**: existing ConvNeXtV2 encoder loop adds the residual **externally** (`encoder.py:239-243`). `CliffordNetBlock` adds residual **internally** via `GatedGeometricResidual`. New encoder/decoder loop must NOT add an outer residual when using CliffordNetBlock — else double residual.
+- Training outputs always go to repo-root `results/`, never `src/results/` (per `feedback_results_dir` memory).
+- GPU jobs strictly serial (per `feedback_no_parallel_gpu` memory).
+- Push with `--no-verify` (user pushes themselves).
+- Centralized logger via `dl_techniques.utils.logger` — no print statements.
 
 ### SOFT
-- `experiment_name` auto-generated from `config.dataset` — needs to produce `"ade20k+coco_base"` for multi-dataset runs.
-- Default `steps_per_epoch` for mixed runs = sum of individual dataset steps (proportional to combined corpus).
-- Mix weights should be size-proportional by default (COCO ~118k vs ADE20K ~20k).
-- Warning guard at line 980 should trigger when any dataset in the list is a large-image dataset and `image_size==32`.
+- New training package should mirror v2's directory layout (`__init__.py`, `callbacks.py`, `train_<name>.py`, optional README.md). Script name must NOT be `train.py` (package shadow).
+- Dataclass config + `to_model_config()` bridge is the repo idiom.
+- Re-use existing v2 callbacks where possible (`BetaAnnealingCallback`, `MaskedReconViz`, `TrainingCurvesCallback`).
 
-### GHOST
-- "Must restructure `_build_filesystem_dataset`" — it stays unchanged; new `_build_mixed_filesystem_dataset` adds the path on top.
-- "Need architectural changes for mixed datasets" — model is fully resolution-agnostic; only the trainer's data pipeline changes.
-- "Callbacks need per-dataset awareness" — callbacks accept any numpy array, they are already dataset-agnostic.
-
-### Exploration Confidence
-- **scope**: deep — full 1029-line trainer read, all dataset builders analyzed, callbacks read, tests confirmed
-- **solutions**: constrained — targeted changes to trainer only; model untouched; 4 sites to update
-- **risks**: clear — no architectural risk; regression covered by existing synthetic tests; CIFAR+filesystem mixing validated to fail at config level
-
-### Corrections
-*None — first iteration.*
-
-## plan_2026-05-26_d8c33dca
-### Index
-
-| # | Topic | File | Key Takeaway |
-|---|-------|------|--------------|
-| F-001 | Training script and existing viz | findings/training-script-and-viz.md | Only one viz callback (ReconVisualizationCallback): 3-row grid (orig/recon/fixed-z). No latent space viz, no interpolation. |
-| F-002 | Model architecture and latent space | findings/model-architecture.md | Latent is 4D spatial `(B, Hp, Wp, latent_dim)`. encode→(mu, log_var), decode(z)→pixels. API: encode(), decode(), sample(). |
-| F-003 | Visualization patterns and callbacks | findings/viz-patterns-and-callbacks.md | Pure matplotlib + savefig. No TSNE/PCA in this module. New callbacks go inline in training script or in a new callbacks file alongside it. |
-
-### Key Constraints
-
-**HARD constraints:**
-- Latent is 4D spatial `(B, Hp, Wp, latent_dim)` — NOT flat. Must reshape/pool before PCA/t-SNE.
-- `MPLBACKEND=Agg` required — headless, no display. All plt calls must work offscreen.
-- `jit_compile=False` on compile — no XLA; encode/decode from Python callbacks is safe.
-- `model.decode(z)` applies sigmoid for BCE, identity for MSE — always call decode() not decoder directly.
-- Val samples are fixed 8 images grabbed at callback construction time.
-
-**SOFT constraints:**
-- New callbacks should follow try/except + logger.warning pattern to avoid crashing training.
-- Visualization callbacks should use `plt.close(fig)` + `gc.collect()` after every save.
-- Fixed random seeds for reproducibility (existing code uses seed=42).
-- Callbacks should produce output under `results/.../` subdirectories matching the run's results_dir.
-
-**GHOST constraints:**
-- `EpochAnalyzerCallback` was explicitly disabled (`include_analyzer=False`) — do not re-enable.
+### GHOST (worth checking)
+- None identified — CliffordNetBlock has no channel-divisibility constraint (was a concern, ruled out by exploration).
 
 ### Corrections
 *Append [CORRECTED iter-N] entries here when earlier findings prove wrong.*
 
-## plan_2026-05-26_b11b0e90
+## plan_2026-05-27_4a444b14
+### Iteration 0 (EXPLORE)
+
+- F1 [HARD constraint] **V1 architecture, APIs, and conventions** — `findings/v1-architecture.md`
+- F2 [SCAFFOLD] **Existing losses inventory + reuse map** — `findings/losses-inventory.md`
+- F3 [DESIGN] **Multi-task head + MAE masking design notes** — `findings/v2-design.md`
+- F4 [HARD constraint] **Repo conventions (training, serialization, no-EMA)** — `findings/repo-conventions.md`
+- F5 [SCOPE] **iter-1 scope boundaries and deferred work** — `findings/scope-boundaries.md`
+
+### Exploration Confidence
+- Problem scope: **deep** (V1 fully characterized in the prior epistemic deconstruction; user's "recommended path" explicit from prior conversation)
+- Solution space: **constrained** (V1 patterns + repo conventions narrow design; multi-task pretraining recipe is canonical)
+- Risk visibility: **clear** (LESSONS.md captures every footgun for this codebase + V1 specifically)
+
+### Key Constraints (HARD/SOFT/GHOST)
+- **HARD**: `compile(loss=None)` + `add_loss` pattern (V1 contract — D-001 of V1)
+- **HARD**: `jit_compile=False` (XLA breaks SIGReg)
+- **HARD**: `Sampling` is stochastic — reload checks must use deterministic `mu`
+- **HARD**: SIGReg call site MUST `× ops.cast(Hp*Wp, "float32")` for resolution-invariance
+- **HARD**: AdamW WD only — no L2 kernel_regularizer (double-WD footgun)
+- **HARD**: Resolution-agnostic invariant — no GAP, no learned PE, no Dense over flattened spatial
+- **HARD**: Losses live in `src/dl_techniques/losses/` (user instruction)
+- **HARD**: Custom train_step must explicitly create `loss_tracker` (Keras 3.8 contract)
+- **GHOST**: EMA target encoder (V1 README rejects; VAE forbids identity, no symmetry to break)
+- **GHOST**: Learned absolute positional embedding (kills resolution invariance)
+- **SOFT**: training scripts use `train.common` utilities and follow patterns 1-5
+- **SOFT**: Greenfield model packages land in +1000-1300 code-only LOC (predict accordingly)
+
+## plan_2026-05-27_84f6180d
 ### Index
 
-| ID | Topic | File | One-line summary |
-|----|-------|------|------------------|
-| F1 | Dataset availability | `findings/dataset-availability.md` | ADE20K (scene_parse150) NOT locally available. Imagenette/320px-v2 and COCO/2017 ARE available locally. TFDS pattern: `tfds.load(..., data_dir=TFDS_DATA_DIR)` → map → batch(drop_remainder=True) → prefetch. |
-| F2 | Trainer current state | `findings/trainer-current.md` | `build_dataset()` raises ValueError for anything other than cifar10/cifar100. No --data-dir flag. `val_steps` must be None for non-repeating TFDS val. `_CIFAR_STATS` fallback in viz callback must be None-safe. `set_defaults(image_size=32)` is overrideable via CLI. |
-| F3 | Model constraints | `findings/model-constraints.md` | Only hard constraint: `img_size % patch_size == 0`. Model is fully resolution-agnostic (no hardcoded pixel values, no abs positional embeddings). At 256x256 patch_size=8: safe on RTX 4090 at batch 16-32. At 256x256 patch_size=4: marginal (~20GB). SIGReg warning if num_patches < sigreg_knots (not error). |
+### F1 — CLAUDE.md inventory (17 files, 1 over 400 lines)
+- Only `src/train/CLAUDE.md` (451 lines) exceeds the 400-line cap. All others are ≤185 lines.
+- Largest others: train/ccnets (185), models/ccnets (157), models/ (105), dl_techniques/ (99), layers/ (95), CLAUDE.md root (84).
+
+### F2 — Inflated count claims (root + dl_techniques + models + layers)
+- Claim: "150+ models, 290+ layers". Actual: 75 model directories (excluding `__pycache__`), 231 layer `.py` files.
+- Affected files: `CLAUDE.md`, `src/dl_techniques/CLAUDE.md`, `src/dl_techniques/models/CLAUDE.md`, `src/dl_techniques/layers/CLAUDE.md`.
+
+### F3 — Root CLAUDE.md `src/results/` is wrong
+- Tree comment in `CLAUDE.md` lists `src/results/`; actual path is repo-root `results/` (confirmed by `ls src/` and memory entry `feedback_results_dir`).
+
+### F4 — models/CLAUDE.md missing entries
+Disk has but doc omits: `burst_dp`, `gpt2`, `lewm`, `memory_bank`, `nam`, `video_jepa`, `vq_vae_rotation`, `wave_field_llm`.
+
+### F5 — losses/CLAUDE.md missing entries and outdated count
+Doc says "28+"; actual 33 `.py` modules. Missing in doc: `clifford_detection_loss.py`, `focal_causal_lm_loss.py`, `masked_causal_lm_loss.py`, `multi_task_loss.py`, `scaled_mse_loss.py`, `utilization_loss.py`.
+
+### F6 — optimization/CLAUDE.md missing SGLD + duplicate sled line
+Recent commits added `sgld_optimizer.py` (commits b23f769e, 9342eaec, 70deb5e9). Not in doc. Also lists `sled_supervision.py` twice. Public API block doesn't expose `Muon`/`SGLD`. `train_vision/` subpackage referenced is real.
+
+### F7 — utils/CLAUDE.md missing modules
+Disk modules missing in doc: `deep_supervision.py`, `drop_path.py`, `weight_transfer.py`, `yolo_decode.py`. (`weight_transfer.py` IS used heavily in train/CLAUDE.md depth section, so its omission from utils doc is a real gap.)
+
+### F8 — datasets/CLAUDE.md drift
+Lists `universal_dataset_loader.py` twice. Missing: `bdd100k_video.py`, `nlp.py`, `pusht_hdf5.py`, `synthetic_drone_video.py`.
+
+### F9 — train/CLAUDE.md is 451 lines (over cap)
+Content largely accurate vs codebase. Trimming candidates: (a) long benchmark file descriptions in §"Reference Documents" can be condensed (each file gets 4–6 lines now); (b) Pattern 5 depth section has a long Keras-3.8 `by_name` gotcha that could move into utils/CLAUDE.md or be condensed; (c) Pattern code blocks could lose some inline comments.
+
+### F10 — Smaller CLAUDE.md files are accurate
+analyzer, callbacks, constraints, initializers, metrics, regularizers, visualization, models/ccnets, train/ccnets all consistent with current code. No edits needed.
 
 ### Key Constraints
 
-### HARD
-- `img_size % patch_size == 0` enforced at `config.py:142` and `encoder.py:160-168`
-- ADE20K (`scene_parse150`) is not locally available — needs ~3.5GB download to run
-- Imagenette (`imagenette/320px-v2`) and COCO (`coco/2017`) ARE locally available
-- `model.compile(loss=None, jit_compile=False)` — all losses via `add_loss`
-- All existing tests must pass unchanged
-- `CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg` for training; output to repo-root `results/`
-- No `git push` — user handles
-- Single GPU only
+**HARD**
+- 400-line cap (only train/CLAUDE.md violates).
+- Must remain factually consistent with current codebase (file/module listings, count claims).
 
-### SOFT
-- For large natural image datasets: normalize to `[0, 1]` (divide by 255); use MSE not BCE
-- Warning if user selects large dataset but img_size <= 64 (accidental CIFAR default)
-- `val_steps=None` for non-repeating TFDS val pipelines
-- `--data-dir` flag defaulting to `os.environ.get("TFDS_DATA_DIR")`
-- Recommended configs for ADE20K-scale: `base` preset, `img_size=256`, `patch_size=8`
+**SOFT**
+- Existing prose style and section structure should be preserved where possible (these are reference docs).
+- Don't aggressively expand small files past what's needed for accuracy.
 
-### GHOST
-- "ADE20K must be the primary dataset" — Imagenette and COCO are locally available and large enough for development; ADE20K support can be added as a code path even without local data
-- "Need architectural changes to support larger images" — model is already resolution-agnostic; only the trainer's data pipeline needs extension
-
-### Exploration Confidence
-- **scope**: deep — full trainer read, all locally available TFDS datasets inventoried, model config/encoder/decoder all read, VRAM estimates computed
-- **solutions**: constrained — targeted trainer changes only; model is untouched; 3 datasets to wire (imagenette, coco, ade20k)
-- **risks**: clear — no architectural risk; main risk is VRAM at aggressive img_size/patch_size combos; CIFAR regression testable with existing pytest
+**GHOST (suspected)**
+- "150+ / 290+" numbers may reflect an older aspirational repo state and have been blindly inherited across docs. Either bring them in line with reality or drop the count entirely.
 
 ### Corrections
-*None — first iteration.*
+*None yet.*
 
-## plan_2026-05-25_a8325e3f
+## plan_2026-05-27_68c7fcd6
 ### Index
-
-| ID | Topic | File | One-line summary |
-|----|-------|------|------------------|
-| F1 | Model files deep review | `findings/model-files.md` | config.py has "mae" default bug; encoder bottleneck is single Conv2D(2*latent_dim) with Glorot init (no zero-init); decoder has single Conv2DTranspose(patch_size) head; model._beta_kl is plain float (mutable from callback); no skip connections or multi-stage upsampling. |
-| F2 | Trainer deep review | `findings/trainer-review.md` | Warmup is flat (initial_lr == warmup_target == config.learning_rate); no beta annealing infrastructure; beta_kl is baked into model config at build time but model._beta_kl is mutable at runtime. |
-| F3 | Fix scope decision | (inline) | Fixes 1-4 from analysis (config default, warmup, beta annealing, log_var zero-init) are non-breaking. Fixes 5-7 (skip connections, multi-stage decoder, perceptual loss) require architectural API changes — deferred to next plan. |
+1. **F-001** Keras 3 optimizer template — `src/dl_techniques/optimization/muon_optimizer.py` is the canonical example: subclass `keras.optimizers.Optimizer`, `@keras.saving.register_keras_serializable()`, implement `build` / `update_step(gradient, variable, learning_rate)` / `get_config` / `from_config`. Base class handles `weight_decay`, `clipnorm`, `clipvalue`, `global_clipnorm`, LR schedules.
+2. **F-002** Optimization package conventions (`src/dl_techniques/optimization/CLAUDE.md`): config-driven builders, centralized `dl_techniques.utils.logger`, mirror test layout in `tests/test_optimization/`. SGLD does not need to be wired into `optimizer_builder` (Muon isn't either).
+3. **F-003** Test template (`tests/test_optimization/test_muon_optimizer.py`): class-based pytest, covers Instantiation / Build / Update / Serialization / Integration (model.fit + save/load) / EdgeCases.
+4. **F-004** SGLD update formula (canonical, Welling & Teh 2011): `w_{t+1} = w_t − lr·∇L(w_t) + sqrt(2·lr)·ε`, `ε ~ N(0, I)`. Reference PyTorch snippet in prompt uses `sqrt(lr)` — incorrect vs canonical formula. We follow canonical and document.
+5. **F-005** Random number generation in Keras 3: use `keras.random.SeedGenerator` + `keras.random.normal(shape, seed=self._seed_generator)` for graph-safe, reproducible, backend-agnostic noise.
 
 ### Key Constraints
-
-### HARD
-- `model.compile(loss=None, jit_compile=False)` — all losses via `add_loss`.
-- All 11 existing tests must PASS unchanged (or with minimal updates for bottleneck rename).
-- `CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg` for any run. Output to repo-root `results/`.
-- No `git push` — user handles.
-- Single GPU only.
-- `self._beta_kl` is referenced as `self._beta_kl * kl_loss` in `call()` — mutating it from a Keras callback works (Python attribute lookup per call).
-
-### SOFT
-- `beta_anneal_epochs=15` as default ramp window (analysis recommendation: 10-15 epochs).
-- `beta_kl_start=0.0` default (start collapsed-free).
-- zero-init for log_var_head kernel AND bias.
-
-### GHOST (do NOT inherit)
-- "Need to change model API to support beta annealing" — `self._beta_kl` is a Python float, mutating it from a callback is sufficient; no tf.Variable needed.
-- "Perceptual loss required now" — needed only after collapse is confirmed resolved; no frozen VGG in repo.
-- "Skip connections must be done in same iteration" — architectural change; do after training validates collapse fix.
+- **HARD**: Keras 3 / TF 2.18, `@keras.saving.register_keras_serializable()`, full round-trip `get_config`/`from_config`, `keras.ops` only, `dl_techniques.utils.logger` not `print`.
+- **HARD**: Tests under `tests/test_optimization/test_sgld_optimizer.py`, mirror Muon test classes; tolerance `1e-6`–`1e-7`.
+- **SOFT**: Default `noise_scale=1.0` (canonical SGLD); allow scaling factor (Bayesian temperature).
+- **SOFT**: SGLD is stateless — minimal `build()`.
 
 ### Corrections
-*None — first iteration.*
-
-### Exploration Confidence
-- **scope**: deep — all 5 model source files reviewed via sub-agent; full trainer reviewed; test suite structure confirmed.
-- **solutions**: constrained — three targeted fixes: (a) 1-line config default, (b) encoder bottleneck split, (c) trainer warmup + beta annealing callback.
-- **risks**: clear — scoped pytest confirms no regression; bottleneck rename doesn't affect test correctness (tests explicitly pass recon_loss_type="mse" and don't inspect layer names).
+*(none)*
