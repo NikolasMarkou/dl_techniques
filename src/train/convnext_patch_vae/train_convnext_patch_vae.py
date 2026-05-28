@@ -309,23 +309,53 @@ class TrainingConfig:
         ``embed_dim_l1`` / ``encoder_depth_l1`` / ``decoder_depth_l1``
         fields.
 
-        Returns:
-            A fully-validated :class:`HierarchicalConvNeXtPatchVAEConfig`.
+        When ``model_variant`` is set, the L1+L2 width / depth / latent
+        dims are taken from ``HierarchicalConvNeXtPatchVAE.PRESETS`` —
+        symmetric with :meth:`to_model_config` for the single-scale path.
+        Patch sizes and per-side L1/L2 KL/SIGReg weights remain governed
+        by the dataclass fields.
+        DECISION plan_2026-05-28_15256fe3/D-005
         """
+        if self.model_variant is not None:
+            presets = HierarchicalConvNeXtPatchVAE.PRESETS
+            if self.model_variant not in presets:
+                raise ValueError(
+                    f"Unknown model_variant '{self.model_variant}' for "
+                    f"hierarchical model. Choose from {list(presets.keys())}."
+                )
+            p = presets[self.model_variant]
+            embed_dim_l1 = p["embed_dim_l1"]
+            embed_dim_l2 = p["embed_dim_l2"]
+            encoder_depth_l1 = p["encoder_depth_l1"]
+            decoder_depth_l1 = p["decoder_depth_l1"]
+            encoder_depth_l2 = p["encoder_depth_l2"]
+            decoder_depth_l2 = p["decoder_depth_l2"]
+            latent_dim_l1 = p["latent_dim_l1"]
+            latent_dim_l2 = p["latent_dim_l2"]
+        else:
+            embed_dim_l1 = self.embed_dim_l1
+            embed_dim_l2 = self.embed_dim
+            encoder_depth_l1 = self.encoder_depth_l1
+            decoder_depth_l1 = self.decoder_depth_l1
+            encoder_depth_l2 = self.encoder_depth
+            decoder_depth_l2 = self.decoder_depth
+            latent_dim_l1 = self.latent_dim_l1
+            latent_dim_l2 = self.latent_dim
+
         return HierarchicalConvNeXtPatchVAEConfig(
             img_size=self.img_size,
             img_channels=self.img_channels,
             patch_size_l1=self.patch_size_l1,
             patch_size_l2=self.patch_size,
-            embed_dim_l1=self.embed_dim_l1,
-            embed_dim_l2=self.embed_dim,
-            encoder_depth_l1=self.encoder_depth_l1,
-            decoder_depth_l1=self.decoder_depth_l1,
-            encoder_depth_l2=self.encoder_depth,
-            decoder_depth_l2=self.decoder_depth,
+            embed_dim_l1=embed_dim_l1,
+            embed_dim_l2=embed_dim_l2,
+            encoder_depth_l1=encoder_depth_l1,
+            decoder_depth_l1=decoder_depth_l1,
+            encoder_depth_l2=encoder_depth_l2,
+            decoder_depth_l2=decoder_depth_l2,
             kernel_size=self.kernel_size,
-            latent_dim_l1=self.latent_dim_l1,
-            latent_dim_l2=self.latent_dim,
+            latent_dim_l1=latent_dim_l1,
+            latent_dim_l2=latent_dim_l2,
             beta_kl_l1=self.beta_kl_l1,
             beta_kl_l2=self.beta_kl_l2,
             lambda_sigreg_l1=self.lambda_sigreg_l1,
