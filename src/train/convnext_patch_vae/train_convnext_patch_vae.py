@@ -996,18 +996,11 @@ class BetaAnnealingCallback(keras.callbacks.Callback):
         self.anneal_epochs = anneal_epochs
         self.attr_name = attr_name
 
-    def on_train_begin(self, logs=None) -> None:
-        # Fast-forward beta to the correct value when resuming mid-anneal.
-        # initial_epoch > 0 only when model.fit is called with initial_epoch=N.
-        initial_epoch = int(self.params.get("initial_epoch", 0))
-        if self.anneal_epochs > 0 and initial_epoch > 0:
-            progress = min(1.0, initial_epoch / self.anneal_epochs)
-            setattr(
-                self.model,
-                self.attr_name,
-                self.beta_start + progress * (self.beta_target - self.beta_start),
-            )
-
+    # NOTE: no on_train_begin resume fast-forward. on_epoch_begin receives the
+    # ABSOLUTE epoch from Keras even when fit() resumes with initial_epoch=N, so
+    # beta is set correctly on resume without a separate hook. The removed hook
+    # was also broken: self.params does not carry 'initial_epoch'.
+    # DECISION plan_2026-05-29_f1605e5a/D-001  (O4)
     def on_epoch_begin(self, epoch: int, logs=None) -> None:
         if self.anneal_epochs <= 0:
             return
@@ -1493,7 +1486,10 @@ def main() -> None:
     if smoke:
         args.epochs        = 3
         args.image_size    = 32   # smoke uses synthetic data — 32×32 is sufficient
-        args.model_variant = "tiny"
+        # Do NOT set model_variant here: to_model_config() uses PRESETS whenever
+        # a variant is set, which would shadow the per-field tiny dims below and
+        # build preset-'tiny' (embed=64) instead of this genuinely-tiny model.
+        # DECISION plan_2026-05-29_f1605e5a/D-002  (O1)
         args.embed_dim     = 16
         args.encoder_depth = 1
         args.decoder_depth = 1
