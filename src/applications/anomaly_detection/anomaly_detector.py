@@ -1,0 +1,376 @@
+"""Patch-entropy anomaly detector built on ``HierarchicalConvNeXtPatchVAE``.
+
+The detector runs the trained VAE's **encoder only** (the decoder is never
+executed) and scores every patch by its KL divergence — the number of nats the
+encoder spends to describe that patch beyond what the prior predicts. Patches
+with high KL are "surprising" / high-entropy and flagged as anomalous.
+
+Two scales are produced on every call:
+
+* **L2** (fine, ``16x16`` for a 128px image): the *conditional* KL
+  ``KL(q(z_l2|x) || p(z_l2|z_l1))`` — exactly the objective the model was
+  trained to minimise when ``learnable_l2_prior=True`` (the trained checkpoint).
+  This is the primary anomaly signal.
+* **L1** (coarse, ``4x4``): the standard KL against ``N(0, I)``.
+
+This module deliberately has **no GUI dependency** — it stays importable and
+usable headless. The Gradio front-end lives in ``app.py``.
+
+Example::
+
+    from applications.anomaly_detection.anomaly_detector import (
+        PatchEntropyAnomalyDetector,
+    )
+
+    det = PatchEntropyAnomalyDetector.from_pretrained("results/.../best_model.keras")
+    x = det.preprocess("photo.jpg")            # (1, 128, 128, 3) in [0, 1]
+    maps = det.kl_maps(x)                       # {"l1": (4,4), "l2": (16,16)}
+    mask, thr = det.anomaly_mask(maps["l2"])    # boolean (16,16)
+    overlay = det.overlay(x[0], maps["l2"])     # uint8 (128,128,3)
+"""
+
+from typing import Any, Dict, Optional, Tuple, Union
+
+import numpy as np
+import keras
+from keras import ops
+import matplotlib
+
+from dl_techniques.utils.logger import logger
+
+ImageLike = Union[str, np.ndarray]
+
+# Mirror the training-time numerical guard: log_var is clipped to [-10, +10]
+# in every KL computation inside the model (float32 stability, H18 fix).
+_DEFAULT_LOG_VAR_CLIP = 10.0
+
+
+class PatchEntropyAnomalyDetector:
+    """Encoder-only, KL-divergence per-patch anomaly detector.
+
+    Args:
+        model: A loaded ``HierarchicalConvNeXtPatchVAE`` instance.
+        log_var_clip: Symmetric clip applied to ``log_var`` before KL math.
+            Must match the model's internal clip (default ``10.0``).
+    """
+
+    def __init__(
+        self,
+        model: keras.Model,
+        log_var_clip: float = _DEFAULT_LOG_VAR_CLIP,
+    ) -> None:
+        self.model = model
+        self.log_var_clip = float(log_var_clip)
+        self.has_l2_prior = getattr(model, "l2_prior", None) is not None
+        cfg = getattr(model, "config", None)
+        self.patch_size_l1 = int(getattr(cfg, "patch_size_l1", 32))
+        self.recon_loss_type = str(getattr(cfg, "recon_loss_type", "bce"))
+        self.default_image_size = int(getattr(cfg, "img_size", 128) or 128)
+        logger.info(
+            "PatchEntropyAnomalyDetector ready: l2_prior=%s (conditional KL=%s), "
+            "patch_size_l1=%d, recon_loss=%s",
+            self.has_l2_prior,
+            self.has_l2_prior,
+            self.patch_size_l1,
+            self.recon_loss_type,
+        )
+
+    # ------------------------------------------------------------------
+    # Construction
+    # ------------------------------------------------------------------
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_path: str,
+        log_var_clip: float = _DEFAULT_LOG_VAR_CLIP,
+    ) -> "PatchEntropyAnomalyDetector":
+        """Load a trained checkpoint and wrap it in a detector.
+
+        Args:
+            model_path: Path to the ``.keras`` checkpoint.
+            log_var_clip: See :class:`PatchEntropyAnomalyDetector`.
+
+        Returns:
+            A ready detector.
+
+        Raises:
+            Exception: re-raised after logging if ``load_model`` fails.
+        """
+        # Import so the @register_keras_serializable classes resolve by name.
+        from dl_techniques.models.convnext_patch_vae.model import (
+            ConvNeXtPatchVAE,
+        )
+        from dl_techniques.models.convnext_patch_vae.model_hierarchical import (
+            HierarchicalConvNeXtPatchVAE,
+            _L2ConditionedDecoder,
+            _L2ConditionalPrior,
+        )
+
+        custom_objects = {
+            "ConvNeXtPatchVAE": ConvNeXtPatchVAE,
+            "HierarchicalConvNeXtPatchVAE": HierarchicalConvNeXtPatchVAE,
+            "_L2ConditionedDecoder": _L2ConditionedDecoder,
+            "_L2ConditionalPrior": _L2ConditionalPrior,
+        }
+        logger.info("Loading anomaly-detection model from %s", model_path)
+        try:
+            model = keras.models.load_model(
+                model_path, custom_objects=custom_objects, compile=False
+            )
+        except Exception as exc:  # noqa: BLE001 - log then re-raise
+            logger.error("Failed to load model %s: %s", model_path, exc)
+            raise
+        return cls(model, log_var_clip=log_var_clip)
+
+    # ------------------------------------------------------------------
+    # Preprocessing
+    # ------------------------------------------------------------------
+    def preprocess(
+        self, image: ImageLike, image_size: Optional[int] = None
+    ) -> np.ndarray:
+        """Coerce any image to a model-ready ``(1, S, S, 3)`` float32 in [0, 1].
+
+        Args:
+            image: A file path or an ``HxW``/``HxWx3``/``HxWx4`` array
+                (uint8 in [0, 255] or float in [0, 1]).
+            image_size: Square side ``S`` (must be a multiple of
+                ``patch_size_l1``). Defaults to the model's training size.
+
+        Returns:
+            A ``(1, S, S, 3)`` float32 array in ``[0, 1]``.
+
+        Raises:
+            ValueError: if ``image_size`` is not divisible by ``patch_size_l1``.
+        """
+        size = int(image_size or self.default_image_size)
+        if size % self.patch_size_l1 != 0:
+            raise ValueError(
+                f"image_size={size} must be divisible by "
+                f"patch_size_l1={self.patch_size_l1}"
+            )
+
+        if isinstance(image, str):
+            img = keras.utils.img_to_array(
+                keras.utils.load_img(image, color_mode="rgb")
+            )
+        else:
+            img = np.asarray(image)
+
+        img = img.astype("float32")
+        if img.ndim == 2:  # grayscale -> RGB
+            img = np.stack([img] * 3, axis=-1)
+        if img.ndim == 3 and img.shape[-1] == 4:  # RGBA -> RGB
+            img = img[..., :3]
+        if img.ndim != 3 or img.shape[-1] != 3:
+            raise ValueError(f"Cannot interpret image of shape {img.shape}")
+
+        if img.max() > 1.0:  # uint8-range -> [0, 1]
+            img = img / 255.0
+
+        resized = ops.image.resize(img, size=(size, size), antialias=True)
+        x = ops.expand_dims(resized, axis=0)
+        return np.asarray(ops.clip(x, 0.0, 1.0), dtype="float32")
+
+    # ------------------------------------------------------------------
+    # KL math (mirrors model_hierarchical._compute_kl* exactly)
+    # ------------------------------------------------------------------
+    def _kl_standard(
+        self, mu: Any, log_var: Any
+    ) -> Any:
+        """Per-patch KL against ``N(0, I)``; sum over latent dim -> (B, Hp, Wp)."""
+        mu_f = ops.cast(mu, "float32")
+        lv = ops.clip(
+            ops.cast(log_var, "float32"), -self.log_var_clip, self.log_var_clip
+        )
+        return -0.5 * ops.sum(
+            1.0 + lv - ops.square(mu_f) - ops.exp(lv), axis=-1
+        )
+
+    def _kl_conditional(
+        self, mu_q: Any, log_var_q: Any, mu_p: Any, log_var_p: Any
+    ) -> Any:
+        """Per-patch ``KL(q || p)`` for diagonal Gaussians -> (B, Hp, Wp).
+
+        # DECISION plan_2026-05-29_8246cd14/D-001: this is the *conditional*
+        # KL against the learned prior p(z_l2|z_l1) — the objective the
+        # checkpoint was trained on (learnable_l2_prior=True). Do NOT replace
+        # with KL-vs-N(0,I) for L2: that would mis-score surprise because the
+        # prior is non-standard. Formula mirrors
+        # model_hierarchical._compute_kl_l2_conditional exactly (same [-10,10]
+        # clip). Prior is fed mu_l1 (not sampled z_l1) for deterministic maps.
+        """
+        mu_q_f = ops.cast(mu_q, "float32")
+        mu_p_f = ops.cast(mu_p, "float32")
+        lv_q = ops.clip(
+            ops.cast(log_var_q, "float32"), -self.log_var_clip, self.log_var_clip
+        )
+        lv_p = ops.clip(
+            ops.cast(log_var_p, "float32"), -self.log_var_clip, self.log_var_clip
+        )
+        diff_sq = ops.square(mu_q_f - mu_p_f)
+        return 0.5 * ops.sum(
+            lv_p - lv_q + (ops.exp(lv_q) + diff_sq) * ops.exp(-lv_p) - 1.0,
+            axis=-1,
+        )
+
+    def kl_maps(self, x: np.ndarray) -> Dict[str, np.ndarray]:
+        """Per-patch KL "surprise" maps at both scales for one image.
+
+        Args:
+            x: A ``(1, S, S, 3)`` float32 batch in ``[0, 1]`` from
+                :meth:`preprocess`.
+
+        Returns:
+            ``{"l1": (Hp1, Wp1), "l2": (Hp2, Wp2)}`` numpy float32 arrays
+            (decoder is NOT executed). L2 is the conditional KL when the
+            checkpoint has a learned ``l2_prior``; otherwise KL vs ``N(0, I)``.
+        """
+        mu_l1, log_var_l1, mu_l2, log_var_l2 = self.model.encode(x)
+
+        kl_l1 = self._kl_standard(mu_l1, log_var_l1)
+        if self.has_l2_prior:
+            mu_p, log_var_p = self.model.l2_prior(mu_l1, training=False)
+            kl_l2 = self._kl_conditional(mu_l2, log_var_l2, mu_p, log_var_p)
+        else:
+            kl_l2 = self._kl_standard(mu_l2, log_var_l2)
+
+        return {
+            "l1": np.asarray(kl_l1, dtype="float32")[0],
+            "l2": np.asarray(kl_l2, dtype="float32")[0],
+        }
+
+    # ------------------------------------------------------------------
+    # Thresholding / scoring
+    # ------------------------------------------------------------------
+    def anomaly_mask(
+        self,
+        kl_map: np.ndarray,
+        method: str = "zscore",
+        k: float = 3.0,
+        percentile: float = 95.0,
+        abs_threshold: Optional[float] = None,
+    ) -> Tuple[np.ndarray, float]:
+        """Threshold a KL map into a boolean anomaly mask.
+
+        Args:
+            kl_map: A per-patch KL map ``(Hp, Wp)``.
+            method: ``"zscore"`` (``mean + k*std``), ``"percentile"``, or
+                ``"absolute"`` (requires ``abs_threshold``).
+            k: z-score multiplier for ``"zscore"``.
+            percentile: percentile (0-100) for ``"percentile"``.
+            abs_threshold: nats cut-off for ``"absolute"``.
+
+        Returns:
+            ``(mask, threshold)`` — boolean array matching ``kl_map`` and the
+            scalar threshold used.
+
+        Raises:
+            ValueError: for an unknown method or missing ``abs_threshold``.
+        """
+        m = np.asarray(kl_map, dtype="float32")
+        if method == "zscore":
+            thr = float(m.mean() + k * m.std())
+        elif method == "percentile":
+            thr = float(np.percentile(m, percentile))
+        elif method == "absolute":
+            if abs_threshold is None:
+                raise ValueError("method='absolute' requires abs_threshold")
+            thr = float(abs_threshold)
+        else:
+            raise ValueError(f"Unknown threshold method: {method}")
+        return m > thr, thr
+
+    def score(
+        self, kl_map: np.ndarray, mask: Optional[np.ndarray] = None
+    ) -> Dict[str, float]:
+        """Scalar summaries of a KL map (and optional mask).
+
+        Args:
+            kl_map: A per-patch KL map ``(Hp, Wp)``.
+            mask: Optional boolean mask for anomalous-patch counts.
+
+        Returns:
+            Dict with ``mean_kl, max_kl, p95_kl`` and, if ``mask`` given,
+            ``n_anomalous`` and ``frac_anomalous``.
+        """
+        m = np.asarray(kl_map, dtype="float32")
+        out: Dict[str, float] = {
+            "mean_kl": float(m.mean()),
+            "max_kl": float(m.max()),
+            "p95_kl": float(np.percentile(m, 95.0)),
+        }
+        if mask is not None:
+            out["n_anomalous"] = int(np.count_nonzero(mask))
+            out["frac_anomalous"] = float(np.mean(mask))
+        return out
+
+    # ------------------------------------------------------------------
+    # Visualization helpers (matplotlib colormaps only — no pyplot/backend)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _resize_nearest(arr: np.ndarray, out_hw: Tuple[int, int]) -> np.ndarray:
+        """Nearest-neighbour upsample a 2D ``(h, w)`` array to ``(H, W)``."""
+        h, w = arr.shape[:2]
+        out_h, out_w = out_hw
+        yi = (np.arange(out_h) * h // out_h).clip(0, h - 1)
+        xi = (np.arange(out_w) * w // out_w).clip(0, w - 1)
+        return arr[yi][:, xi]
+
+    @staticmethod
+    def _as_uint8(image: np.ndarray) -> np.ndarray:
+        img = np.asarray(image, dtype="float32")
+        if img.max() > 1.0:
+            img = img / 255.0
+        return np.clip(img, 0.0, 1.0)
+
+    def overlay(
+        self,
+        image01: np.ndarray,
+        kl_map: np.ndarray,
+        cmap: str = "inferno",
+        alpha: float = 0.5,
+    ) -> np.ndarray:
+        """Alpha-blend a colormapped KL heatmap over the image.
+
+        Args:
+            image01: ``(H, W, 3)`` image (``[0, 1]`` or ``[0, 255]``).
+            kl_map: per-patch KL map ``(Hp, Wp)``.
+            cmap: matplotlib colormap name.
+            alpha: heatmap opacity in ``[0, 1]``.
+
+        Returns:
+            ``(H, W, 3)`` uint8 RGB image.
+        """
+        base = self._as_uint8(image01)
+        h, w = base.shape[:2]
+        big = self._resize_nearest(np.asarray(kl_map, "float32"), (h, w))
+        ptp = float(big.max() - big.min())
+        norm = (big - big.min()) / (ptp + 1e-8)
+        heat = matplotlib.colormaps[cmap](norm)[..., :3]
+        blended = (1.0 - alpha) * base + alpha * heat
+        return (np.clip(blended, 0.0, 1.0) * 255.0).astype("uint8")
+
+    def mask_overlay(
+        self,
+        image01: np.ndarray,
+        mask: np.ndarray,
+        color: Tuple[float, float, float] = (1.0, 0.0, 0.0),
+        alpha: float = 0.5,
+    ) -> np.ndarray:
+        """Tint anomalous patches over the image.
+
+        Args:
+            image01: ``(H, W, 3)`` image (``[0, 1]`` or ``[0, 255]``).
+            mask: boolean per-patch mask ``(Hp, Wp)``.
+            color: RGB tint in ``[0, 1]``.
+            alpha: tint opacity.
+
+        Returns:
+            ``(H, W, 3)`` uint8 RGB image.
+        """
+        base = self._as_uint8(image01).copy()
+        h, w = base.shape[:2]
+        big = self._resize_nearest(np.asarray(mask, "float32"), (h, w)) > 0.5
+        tint = np.asarray(color, dtype="float32")
+        base[big] = (1.0 - alpha) * base[big] + alpha * tint
+        return (np.clip(base, 0.0, 1.0) * 255.0).astype("uint8")
