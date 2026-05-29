@@ -30,6 +30,38 @@
 - Anchor at impact site (not at decision definition). One anchor per impact site, even if shared with sibling decision.
 <!-- /COMPRESSED-SUMMARY -->
 
+## plan_2026-05-28_15256fe3
+### D-001 | EXPLORE → PLAN | 2026-05-28
+**Context**: User invoked the task against `convnext_patch_vae_v2/` but described two V1-only symptoms (hierarchical viz missing, multi-anneal configs). V2 has no hierarchical mode and a single anneal config. Asked for clarification.
+**Decision**: Re-scope plan to `src/train/convnext_patch_vae/` (V1) per user confirmation.
+**Trade-off**: Accurate target at the cost of a small framing-correction.
+**Reasoning**: Both symptoms exclusively match V1. Touching V2 would be a no-op for the user's actual concern.
+
+### D-002 | EXPLORE → PLAN | 2026-05-28
+**Context**: Hierarchical viz callbacks need to know L1 vs single-scale at runtime. Options: (a) `isinstance(HierarchicalConvNeXtPatchVAE)` — introduces a model-package import in the callback module, (b) inspect `model.config` attrs.
+**Decision**: Detect hierarchical via `hasattr(model.config, "patches_per_side_l1")` inside callbacks.
+**Trade-off**: Loose duck-typing at the cost of a stricter import-time class check.
+**Reasoning**: Callbacks are train-side and already read `model.config` for single-scale fields; staying with config-attr inspection keeps the callback module free of new model-package dependencies.
+
+### D-003 | EXPLORE → PLAN | 2026-05-28
+**Context**: User asked to "merge" the multiple annealing configurations. Two interpretations: (i) merge schedule lengths only (one shared epochs flag, distinct targets/starts); (ii) collapse L1 and L2 ramps into a single `_beta_kl` attribute on the model.
+**Decision**: Adopt (i). Drop `--beta-anneal-epochs-l1` / `-l2`, keep distinct `beta_kl_l{1,2}` targets and `_beta_kl_l{1,2}` model attrs.
+**Trade-off**: Reduced config surface at the cost of giving up the documented "L1-first stagger" rationale (now treated as a ghost constraint).
+**Reasoning**: (ii) would require model-level changes (loss formula now reads two beta scalars) and erase a meaningful arch distinction between coarse/fine KL strength. (i) cleanly removes the redundant CLI flags without touching the model.
+
+### D-004 | EXPLORE → PLAN | 2026-05-28
+**Context**: For Recon viz "fixed-sample" generation in hierarchical mode, options are (a) hand-roll `decode(z_l1, z_l2)` with random latents, (b) call `model.sample(n, seed=42)`.
+**Decision**: Use `model.sample(n, seed=42)` cached on first invocation.
+**Trade-off**: Couples viz to the model's learnable-conditional-prior path at the cost of duplicating prior-sampling logic in the callback.
+**Reasoning**: `model.sample` already encodes the coherence rationale (joint prior via `_L2ConditionalPrior`), and the model docs explicitly warn against independent N(0, I) sampling on `(z_l1, z_l2)` (model_hierarchical.py:831-837).
+
+### D-005 | REFLECT → EXECUTE | 2026-05-28
+**Context**: User spotted a pre-existing bug during REFLECT: hierarchical "large" was producing a smaller model than single-scale "large". Root cause: `to_hierarchical_model_config()` (L304-338) constructed `HierarchicalConvNeXtPatchVAEConfig` from raw dataclass fields and never consulted `HierarchicalConvNeXtPatchVAE.PRESETS`. `--variant large` was silently ignored in hierarchical mode (got dataclass defaults ≈ base).
+**Decision**: Mirror `to_model_config`'s preset logic in `to_hierarchical_model_config`. Read PRESETS for `embed_dim_l{1,2}`, `encoder_depth_l{1,2}`, `decoder_depth_l{1,2}`, `latent_dim_l{1,2}` when `model_variant` is set; fall through to dataclass fields otherwise. Patch sizes and L1/L2 KL/SIGReg weights remain dataclass-driven (not in preset).
+**Trade-off**: Variant flag now behaves consistently across both paths at the cost of changing the size of any prior hierarchical training run that relied on `--variant tiny|base|large` (those runs were actually all near-base; only "base" exactly matched preset).
+**Reasoning**: Discoverable footgun. The hierarchical preset table exists and is correct; only the trainer wiring was missing. Symmetry with single-scale is the contract users expect from `--variant`.
+**Anchor-Refs**: `src/train/convnext_patch_vae/train_convnext_patch_vae.py:304-371`
+
 ## plan_2026-05-27_75849a91
 ### D-001 | EXPLORE → PLAN | YYYY-MM-DD
 **Context**: <one-paragraph background — what was discovered in EXPLORE>
@@ -130,22 +162,3 @@
 **Decision**: Execute steps 1-8 only. Replace "150+ models / 290+ layers" wording with neutral phrasing ("a comprehensive set of architectures and custom layers"). Leave `src/train/CLAUDE.md` at 451 lines per explicit user choice.
 **Trade-off**: User-respected scope **at the cost of** leaving one file over the 400-line cap. The cap was a user-stated requirement that the user themselves elected to waive for this one file.
 **Reasoning**: Dropping numbers prevents future drift from re-counting. The user is the requirement source; explicit deferral on step 9 overrides the global cap.
-
-## plan_2026-05-27_68c7fcd6
-### D-001 | EXPLORE → PLAN | 2026-05-27
-**Context**: Mirror Muon's pattern; SGLD is much simpler (stateless). Reference PyTorch snippet uses `sqrt(lr)` but canonical SGLD (Welling & Teh 2011) and the article's stated formula specify `sqrt(2·lr)`.
-**Decision**: Implement canonical SGLD with `sqrt(2·lr)·noise_scale·ε`. Document deviation from snippet.
-**Trade-off**: Mathematical correctness **at the cost of** byte-for-byte equivalence with prompt's snippet.
-**Reasoning**: Snippet contradicts its own article; we follow the published formula.
-
-### D-002 | PLAN | 2026-05-27
-**Context**: SGLD has no per-variable buffers.
-**Decision**: Override `build()` minimally (super + seed generator only).
-**Trade-off**: Minimal memory **at the cost of** no preconditioner extension hook.
-**Reasoning**: KISS; preconditioned SGLD would be a separate subclass.
-
-### D-003 | PLAN | 2026-05-27
-**Context**: `SeedGenerator` not trivially serializable.
-**Decision**: Store integer `seed` attribute; build `keras.random.SeedGenerator(self.seed)` lazily in `build()`. Include `seed` in `get_config`.
-**Trade-off**: Hyperparameter reproducibility **at the cost of** cross-restore exact sample-stream continuity.
-**Reasoning**: Standard Keras pattern (Dropout, RandomFlip). Optimizer state continuity across save is not a guarantee.

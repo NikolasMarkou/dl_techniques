@@ -34,6 +34,44 @@
 - **`current_phase` / `_global_step` counters**: `add_weight(trainable=False, dtype="float32")` — int32 fails CPU/GPU device placement.
 <!-- /COMPRESSED-SUMMARY -->
 
+## plan_2026-05-28_15256fe3
+### Index
+
+1. [scope-clarification.md](plan_2026-05-28_15256fe3/findings/scope-clarification.md) — Task target is V1
+   (`src/train/convnext_patch_vae/`), not V2. Both reported symptoms
+   (hierarchical viz missing, multiple anneal configs) are V1-only.
+2. [hierarchical-viz-gap.md](plan_2026-05-28_15256fe3/findings/hierarchical-viz-gap.md) — All three
+   viz callbacks (ReconVisualizationCallback, LatentSpaceCallback,
+   LatentInterpolationCallback) are explicitly skipped in hierarchical
+   mode at `train_convnext_patch_vae.py:1118-1128`. They fail because
+   hierarchical `encode()` returns a 4-tuple (single-scale: 2-tuple) and
+   `decode()` takes `(z_l1, z_l2)` (single-scale: one tensor).
+3. [annealing-config-redundancy.md](plan_2026-05-28_15256fe3/findings/annealing-config-redundancy.md)
+   — Hierarchical path spawns two `BetaAnnealingCallback`s with separate
+   `--beta-anneal-epochs-l1` / `-l2` flags. Collapsing to one shared
+   `--beta-anneal-epochs` (keeping distinct L1/L2 targets) is the
+   requested change.
+
+### Key Constraints
+
+- **HARD**: hierarchical `encode()` returns 4-tuple; `decode()` requires
+  `(z_l1, z_l2)`. Cannot reuse single-scale viz code unchanged.
+- **HARD**: hierarchical config attrs are `patches_per_side_l1/l2` and
+  `latent_dim_l1/l2` — not the single-scale `patches_per_side` /
+  `latent_dim` that callbacks currently read.
+- **HARD**: `_beta_kl_l1` / `_beta_kl_l2` are mutable model attributes
+  ramped by callbacks; the model reads them per-step. Both must keep
+  ramping — only the *schedule length* is unified.
+- **SOFT**: L1 vs L2 KL targets (`beta_kl_l1`, `beta_kl_l2`) and starts
+  remain distinct — they encode a real architectural choice (coarse vs
+  fine latent), not redundancy.
+- **GHOST**: the "L1 first, L2 with overlap" stagger story is a comment
+  rationale (L1089-1090); user has decided it's not worth the config
+  surface. Drop it.
+
+### Corrections
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong.*
+
 ## plan_2026-05-27_75849a91
 ### Index
 - `findings/convnext-patch-vae-v2-trainer.md` — CLI flags, dataset pipeline, losses (7 components), optimizer/clip, callbacks, custom train_step. Substitution points identified.
@@ -141,20 +179,3 @@ analyzer, callbacks, constraints, initializers, metrics, regularizers, visualiza
 
 ### Corrections
 *None yet.*
-
-## plan_2026-05-27_68c7fcd6
-### Index
-1. **F-001** Keras 3 optimizer template — `src/dl_techniques/optimization/muon_optimizer.py` is the canonical example: subclass `keras.optimizers.Optimizer`, `@keras.saving.register_keras_serializable()`, implement `build` / `update_step(gradient, variable, learning_rate)` / `get_config` / `from_config`. Base class handles `weight_decay`, `clipnorm`, `clipvalue`, `global_clipnorm`, LR schedules.
-2. **F-002** Optimization package conventions (`src/dl_techniques/optimization/CLAUDE.md`): config-driven builders, centralized `dl_techniques.utils.logger`, mirror test layout in `tests/test_optimization/`. SGLD does not need to be wired into `optimizer_builder` (Muon isn't either).
-3. **F-003** Test template (`tests/test_optimization/test_muon_optimizer.py`): class-based pytest, covers Instantiation / Build / Update / Serialization / Integration (model.fit + save/load) / EdgeCases.
-4. **F-004** SGLD update formula (canonical, Welling & Teh 2011): `w_{t+1} = w_t − lr·∇L(w_t) + sqrt(2·lr)·ε`, `ε ~ N(0, I)`. Reference PyTorch snippet in prompt uses `sqrt(lr)` — incorrect vs canonical formula. We follow canonical and document.
-5. **F-005** Random number generation in Keras 3: use `keras.random.SeedGenerator` + `keras.random.normal(shape, seed=self._seed_generator)` for graph-safe, reproducible, backend-agnostic noise.
-
-### Key Constraints
-- **HARD**: Keras 3 / TF 2.18, `@keras.saving.register_keras_serializable()`, full round-trip `get_config`/`from_config`, `keras.ops` only, `dl_techniques.utils.logger` not `print`.
-- **HARD**: Tests under `tests/test_optimization/test_sgld_optimizer.py`, mirror Muon test classes; tolerance `1e-6`–`1e-7`.
-- **SOFT**: Default `noise_scale=1.0` (canonical SGLD); allow scaling factor (Bayesian temperature).
-- **SOFT**: SGLD is stateless — minimal `build()`.
-
-### Corrections
-*(none)*

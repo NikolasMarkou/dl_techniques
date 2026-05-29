@@ -102,3 +102,4 @@
 | plan_2026-05-27_84f6180d | 2026-05-27 | Bring all CLAUDE.md files into consistency with the current  |  |
 | plan_2026-05-27_4a444b14 | 2026-05-27 | No goal |  |
 | plan_2026-05-27_75849a91 | 2026-05-27 | Port `src/train/convnext_patch_vae_v2/` to use cliffordnet b |  |
+| plan_2026-05-28_15256fe3 | 2026-05-28 | In `src/train/convnext_patch_vae/` (V1 — corrected from V2 i | scope-clarification.md, hierarchical-viz-gap.md, annealing-config-redundancy.md |
