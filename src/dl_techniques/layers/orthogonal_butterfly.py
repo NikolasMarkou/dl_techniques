@@ -40,6 +40,7 @@ def _butterfly_apply(
     d: int,
     num_blocks: int,
     levels: int,
+    inverse: bool = False,
 ) -> keras.KerasTensor:
     """Apply the butterfly orthogonal transform to ``x`` of shape ``(N, d)``.
 
@@ -49,12 +50,19 @@ def _butterfly_apply(
         d: feature dimension (static).
         num_blocks: number of stacked butterfly blocks (static).
         levels: ``log2(d)`` (static).
+        inverse: if True apply the inverse transform ``W^{-1} = W^T``. Since
+            ``W = R_last ... R_first`` (composition of orthogonal stages), the
+            inverse reverses the block/stage order and transposes each 2x2
+            rotation (``R(theta)^{-1} = R(-theta)``).
 
     Returns:
         ``(N, d)`` transformed tensor with ``||output|| == ||input||`` per row.
+        ``_butterfly_apply(_butterfly_apply(x, ...), ..., inverse=True) == x``.
     """
-    for block in range(num_blocks):
-        for s in range(levels):
+    block_iter = range(num_blocks - 1, -1, -1) if inverse else range(num_blocks)
+    for block in block_iter:
+        stage_iter = range(levels - 1, -1, -1) if inverse else range(levels)
+        for s in stage_iter:
             stride = 1 << s
             g = d // (2 * stride)
             xr = ops.reshape(x, (-1, g, 2, stride))  # partners are `stride` apart
@@ -63,8 +71,12 @@ def _butterfly_apply(
             theta = ops.reshape(angles[block, s, :], (g, stride))  # (g, stride)
             cos_t = ops.cos(theta)
             sin_t = ops.sin(theta)
-            a_rot = a * cos_t - b * sin_t
-            b_rot = a * sin_t + b * cos_t
+            if inverse:  # R(-theta) = transpose of the forward 2x2 rotation
+                a_rot = a * cos_t + b * sin_t
+                b_rot = -a * sin_t + b * cos_t
+            else:
+                a_rot = a * cos_t - b * sin_t
+                b_rot = a * sin_t + b * cos_t
             xr = ops.stack([a_rot, b_rot], axis=2)  # (N, g, 2, stride)
             x = ops.reshape(xr, (-1, d))
     return x
@@ -188,10 +200,18 @@ class OrthogonalButterfly(keras.layers.Layer):
         self,
         inputs: keras.KerasTensor,
         training: Optional[bool] = None,
+        inverse: bool = False,
     ) -> keras.KerasTensor:
+        """Apply the transform (``inverse=False``) or its exact inverse.
+
+        With a bias, the forward map is ``y = W x + b`` and the inverse is
+        ``x = W^T (y - b)`` (bias subtracted before the inverse rotation).
+        """
         inputs_fp32 = ops.cast(inputs, "float32")
         orig_shape = ops.shape(inputs_fp32)
         x = ops.reshape(inputs_fp32, (-1, self._dim))  # flatten leading dims
+        if inverse and self.use_bias:
+            x = ops.subtract(x, ops.cast(self.bias, "float32"))
         if self._levels > 0:
             x = _butterfly_apply(
                 x,
@@ -199,11 +219,28 @@ class OrthogonalButterfly(keras.layers.Layer):
                 self._dim,
                 self.num_blocks,
                 self._levels,
+                inverse=inverse,
             )
-        if self.use_bias:
+        if self.use_bias and not inverse:
             x = ops.add(x, ops.cast(self.bias, "float32"))
         x = ops.reshape(x, orig_shape)
         return ops.cast(x, inputs.dtype)
+
+    def inverse(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
+        """Convenience alias for ``call(inputs, inverse=True)``."""
+        return self.call(inputs, inverse=True)
+
+    def log_det_jacobian(
+        self,
+        inputs: keras.KerasTensor,
+    ) -> keras.KerasTensor:
+        """Log-determinant of the Jacobian: exactly ``0`` (orthogonal map).
+
+        Returns a tensor of zeros with shape ``inputs.shape[:-1]`` (one scalar
+        per transformed vector), the standard contribution of an orthogonal
+        flow step to a change-of-variables log-likelihood.
+        """
+        return ops.zeros(ops.shape(inputs)[:-1], dtype=inputs.dtype)
 
     def compute_output_shape(
         self,

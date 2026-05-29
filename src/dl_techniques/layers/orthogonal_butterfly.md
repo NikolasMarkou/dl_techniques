@@ -49,10 +49,27 @@ product — is orthogonal.
   preserve orthogonality on the original subspace, so it is rejected.
 - Square: output dim == input dim == `d`.
 
+## Invertibility (normalizing flows)
+
+The transform is exactly invertible — `W^{-1} = W^T` — realized by reversing the
+block/stage order and transposing each 2x2 rotation (`R(θ)^{-1} = R(-θ)`). With a
+bias, the forward map is `y = W x + b` and the inverse is `x = W^T (y - b)`.
+
+```python
+layer = OrthogonalButterfly(num_blocks=2)
+y = layer(x)                 # forward
+x_rec = layer(y, inverse=True)   # exact reconstruction (== layer.inverse(y))
+ldj = layer.log_det_jacobian(x)  # zeros, shape x.shape[:-1] — orthogonal map
+```
+
+- `call(x, inverse=True)` / `layer.inverse(x)` — the exact inverse.
+- `layer.log_det_jacobian(x)` — returns `0` (one scalar per vector): the
+  change-of-variables contribution of an orthogonal flow step.
+
 ## When to use
 
-- **Normalizing flows** — orthogonal => unit Jacobian determinant (zero log-det),
-  invertible by transposing the rotations.
+- **Normalizing flows** — orthogonal => zero log-det Jacobian and an exact,
+  cheap inverse (`inverse=True`); a free, expressive linear/rotation flow step.
 - **Orthogonal RNN recurrence** — norm-preserving recurrent maps avoid
   exploding/vanishing hidden-state norms.
 - **Lossless / invertible blocks**, structured mixing layers, or a cheap

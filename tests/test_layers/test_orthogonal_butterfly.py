@@ -133,6 +133,60 @@ class TestOrthogonalButterfly:
         np.testing.assert_allclose(before, after, rtol=1e-6, atol=1e-7)
 
 
+class TestOrthogonalButterflyInverse:
+    @pytest.mark.parametrize("d", [2, 8, 16, 64])
+    @pytest.mark.parametrize("num_blocks", [1, 3])
+    @pytest.mark.parametrize("use_bias", [False, True])
+    def test_inverse_roundtrip(self, d, num_blocks, use_bias):
+        """inverse(forward(x)) == x and forward(inverse(x)) == x."""
+        layer = OrthogonalButterfly(
+            num_blocks=num_blocks, use_bias=use_bias,
+            angle_initializer=keras.initializers.RandomUniform(-3.14, 3.14, seed=d + num_blocks),
+            bias_initializer=keras.initializers.RandomNormal(seed=1),
+        )
+        x = np.random.randn(6, d).astype("float32")
+        y = layer(x, inverse=False)
+        x_rec = ops.convert_to_numpy(layer(y, inverse=True))
+        np.testing.assert_allclose(x_rec, x, rtol=1e-5, atol=1e-5)
+        # other direction
+        z = ops.convert_to_numpy(layer(layer(x, inverse=True), inverse=False))
+        np.testing.assert_allclose(z, x, rtol=1e-5, atol=1e-5)
+
+    def test_inverse_alias(self):
+        layer = _random_angle_layer(2, seed=4)
+        x = np.random.randn(4, 16).astype("float32")
+        via_alias = ops.convert_to_numpy(layer.inverse(layer(x)))
+        np.testing.assert_allclose(via_alias, x, rtol=1e-5, atol=1e-5)
+
+    def test_inverse_3d(self):
+        layer = _random_angle_layer(2, seed=6)
+        x = np.random.randn(2, 5, 16).astype("float32")
+        x_rec = ops.convert_to_numpy(layer(layer(x), inverse=True))
+        np.testing.assert_allclose(x_rec, x, rtol=1e-5, atol=1e-5)
+
+    def test_log_det_jacobian_is_zero(self):
+        layer = _random_angle_layer(3, seed=2)
+        x = np.random.randn(7, 64).astype("float32")
+        ldj = ops.convert_to_numpy(layer.log_det_jacobian(x))
+        assert ldj.shape == (7,)
+        np.testing.assert_allclose(ldj, 0.0, atol=1e-12)
+
+    def test_inverse_after_save_load(self):
+        x = np.random.randn(4, 16).astype("float32")
+        inputs = keras.Input(shape=(16,))
+        layer = _random_angle_layer(2, seed=8)
+        model = keras.Model(inputs, layer(inputs))
+        y = ops.convert_to_numpy(model(x))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "ob.keras")
+            model.save(path)
+            loaded = keras.models.load_model(path)
+        # the loaded layer's inverse must undo the saved forward output
+        loaded_layer = loaded.layers[1]
+        x_rec = ops.convert_to_numpy(loaded_layer(y, inverse=True))
+        np.testing.assert_allclose(x_rec, x, rtol=1e-5, atol=1e-5)
+
+
 class TestOrthogonalButterflyIntegration:
     def test_small_net_fit(self):
         """SC5: a net using OrthogonalButterfly trains (finite, decreasing loss)."""
