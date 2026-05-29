@@ -17,6 +17,9 @@ Available Initializers:
     geometric separation.
 -   `HaarWaveletInitializer`: Constructs fixed 2D Haar wavelet filters for
     use in convolutional layers, enabling multi-resolution feature extraction.
+-   `PolarInitializer`: Samples in polar coordinates -- exact per-vector L2 norm
+    with a uniform-on-sphere direction (PolarQuant Lemma 2), enabling equinorm
+    initialization.
 """
 
 from .haar_wavelet_initializer import (
@@ -26,6 +29,7 @@ from .haar_wavelet_initializer import (
 from .he_orthonormal_initializer import HeOrthonormalInitializer
 from .orthonormal_initializer import OrthonormalInitializer
 from .hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
+from .polar_initializer import PolarInitializer
 
 __all__ = [
     "HaarWaveletInitializer",
@@ -33,4 +37,5 @@ __all__ = [
     "HeOrthonormalInitializer",
     "OrthonormalInitializer",
     "OrthogonalHypersphereInitializer",
+    "PolarInitializer",
 ]

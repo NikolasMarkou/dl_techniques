@@ -4,6 +4,7 @@ from .logit_norm import LogitNorm
 from .rms_norm import RMSNorm
 from .max_logit_norm import MaxLogitNorm, DecoupledMaxLogit, DMLPlus
 from .zero_centered_adaptive_band_rms_norm import ZeroCenteredAdaptiveBandRMS
+from .polar_weight_norm import PolarWeightNorm, polar_encode, polar_decode
 from .factory import create_normalization_layer,create_normalization_from_config, NormalizationType
 
 __all__ = [
@@ -15,6 +16,9 @@ __all__ = [
     DecoupledMaxLogit,
     DMLPlus,
     ZeroCenteredAdaptiveBandRMS,
+    PolarWeightNorm,
+    polar_encode,
+    polar_decode,
     create_normalization_layer,
     create_normalization_from_config,
     NormalizationType
