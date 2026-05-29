@@ -49,7 +49,9 @@ Options: `--host`, `--port`, `--share` (public link). On a headless box, either
 use `--share` or SSH-forward the port: `ssh -L 7860:127.0.0.1:7860 host`.
 
 Controls:
-- **Process size**: square side fed to the model (multiple of `patch_size_l1`).
+- **Max side px**: caps the longer side (aspect-preserving) to bound GPU memory;
+  `0` = native resolution. The image is never squashed to a square — it keeps its
+  aspect ratio and is reflect-padded to a multiple of `patch_size_l1` (32).
 - **Mask / score level**: `l2` (fine) or `l1` (coarse) drives the mask + scores.
 - **Threshold method**:
   - `zscore` — flag patches above `mean + k·std` (per-image, calibration-free; default).
@@ -62,17 +64,19 @@ Controls:
 from applications.anomaly_detection import PatchEntropyAnomalyDetector
 
 det = PatchEntropyAnomalyDetector.from_pretrained(".../best_model.keras")
-x = det.preprocess("photo.jpg")              # (1, 128, 128, 3) in [0, 1]
-maps = det.kl_maps(x)                         # {"l1": (4,4), "l2": (16,16)}
+x, (h, w) = det.preprocess("photo.jpg")       # native res, padded to /32
+maps = det.kl_maps(x, orig_hw=(h, w))         # {"l1":(ceil(h/32),..), "l2":(ceil(h/8),..)}
 mask, thr = det.anomaly_mask(maps["l2"], method="zscore", k=3.0)
 scores = det.score(maps["l2"], mask)          # mean/max/p95 KL, frac anomalous
-overlay = det.overlay(x[0], maps["l2"])       # uint8 (H, W, 3) heatmap overlay
+overlay = det.overlay(x[0][:h, :w], maps["l2"])  # uint8 (h, w, 3) heatmap overlay
 ```
 
 ## Notes & tuning
 
-- Inputs are scaled to `[0, 1]` (BCE checkpoint); a non-square image is resized
-  to a square `--process-size` (default = training size 128).
+- Inputs are scaled to `[0, 1]` (BCE checkpoint) and kept at native resolution
+  and aspect ratio — reflect-padded to a multiple of 32 (the model is
+  resolution-agnostic). KL maps are sized `ceil(H/8) x ceil(W/8)` (L2) and
+  `ceil(H/32) x ceil(W/32)` (L1); padded patches are cropped out of scoring.
 - `zscore` is relative per image — not comparable across images. For
   cross-image comparison, calibrate an `absolute` threshold on known-normal data.
 - Lighter is faster: the decoder weights load into RAM but never run; inference

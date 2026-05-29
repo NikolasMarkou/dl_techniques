@@ -33,7 +33,6 @@ _DEFAULT_MODEL = (
     "results/hierarchical_convnext_patch_vae_ade20k+coco_large_20260528_205245/"
     "best_model.keras"
 )
-_IMAGE_SIZES = [128, 256, 384, 512]
 _THRESHOLD_METHODS = ["zscore", "percentile", "absolute"]
 
 
@@ -48,14 +47,23 @@ def build_interface(detector: PatchEntropyAnomalyDetector) -> gr.Blocks:
     """
 
     def analyze(
-        image: Optional[np.ndarray], image_size: int
+        image: Optional[np.ndarray], max_side: int
     ) -> Optional[Dict[str, np.ndarray]]:
-        """Encode once; cache the [0,1] image + both KL maps in session state."""
+        """Encode once; cache the [0,1] image + both KL maps in session state.
+
+        Native resolution is preserved (padded to a multiple of patch_size_l1);
+        ``max_side`` (0 = native) caps the longer side to bound GPU memory.
+        """
         if image is None:
             return None
-        x = detector.preprocess(image, image_size=int(image_size))
-        maps = detector.kl_maps(x)  # decoder NOT executed
-        return {"image01": x[0], "l1": maps["l1"], "l2": maps["l2"]}
+        x, (h, w) = detector.preprocess(image, max_size=int(max_side) or None)
+        maps = detector.kl_maps(x, orig_hw=(h, w))  # decoder NOT executed
+        # Store the unpadded original for display/overlay alignment.
+        return {
+            "image01": x[0][:h, :w],
+            "l1": maps["l1"],
+            "l2": maps["l2"],
+        }
 
     def render(
         state: Optional[Dict[str, np.ndarray]],
@@ -100,10 +108,9 @@ def build_interface(detector: PatchEntropyAnomalyDetector) -> gr.Blocks:
         with gr.Row():
             with gr.Column(scale=1):
                 inp = gr.Image(type="numpy", label="Input image")
-                image_size = gr.Dropdown(
-                    choices=_IMAGE_SIZES,
-                    value=detector.default_image_size,
-                    label="Process size (square, multiple of patch_size_l1)",
+                max_side = gr.Slider(
+                    0, 2048, value=1024, step=64,
+                    label="Max side px (0 = native; aspect kept, padded to /32)",
                 )
                 level = gr.Radio(
                     choices=["l2", "l1"],
@@ -141,7 +148,7 @@ def build_interface(detector: PatchEntropyAnomalyDetector) -> gr.Blocks:
         ]
 
         run.click(
-            analyze, inputs=[inp, image_size], outputs=state
+            analyze, inputs=[inp, max_side], outputs=state
         ).then(render, inputs=render_inputs, outputs=outputs)
 
         # Slider/selector changes only re-threshold (cheap), no re-encode.

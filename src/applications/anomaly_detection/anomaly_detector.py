@@ -29,6 +29,7 @@ Example::
     overlay = det.overlay(x[0], maps["l2"])     # uint8 (128,128,3)
 """
 
+import math
 from typing import Any, Dict, Optional, Tuple, Union
 
 import numpy as np
@@ -64,6 +65,7 @@ class PatchEntropyAnomalyDetector:
         self.has_l2_prior = getattr(model, "l2_prior", None) is not None
         cfg = getattr(model, "config", None)
         self.patch_size_l1 = int(getattr(cfg, "patch_size_l1", 32))
+        self.patch_size_l2 = int(getattr(cfg, "patch_size", 8))
         self.recon_loss_type = str(getattr(cfg, "recon_loss_type", "bce"))
         self.default_image_size = int(getattr(cfg, "img_size", 128) or 128)
         logger.info(
@@ -126,28 +128,33 @@ class PatchEntropyAnomalyDetector:
     # Preprocessing
     # ------------------------------------------------------------------
     def preprocess(
-        self, image: ImageLike, image_size: Optional[int] = None
-    ) -> np.ndarray:
-        """Coerce any image to a model-ready ``(1, S, S, 3)`` float32 in [0, 1].
+        self,
+        image: ImageLike,
+        multiple: Optional[int] = None,
+        max_size: Optional[int] = None,
+    ) -> Tuple[np.ndarray, Tuple[int, int]]:
+        """Load an image at native resolution and pad to a model-ready batch.
+
+        The VAE is resolution-agnostic: any spatial size divisible by
+        ``patch_size_l1`` works. Rather than square-resizing (which distorts
+        aspect ratio), the image keeps its native size and is reflect-padded on
+        the bottom/right up to the next multiple of ``multiple``.
 
         Args:
             image: A file path or an ``HxW``/``HxWx3``/``HxWx4`` array
                 (uint8 in [0, 255] or float in [0, 1]).
-            image_size: Square side ``S`` (must be a multiple of
-                ``patch_size_l1``). Defaults to the model's training size.
+            multiple: Pad each side up to a multiple of this. Defaults to
+                ``patch_size_l1``.
+            max_size: If set and the longer side exceeds it, downscale
+                (aspect-preserving) before padding — caps GPU memory. ``None``
+                or ``0`` keeps native resolution.
 
         Returns:
-            A ``(1, S, S, 3)`` float32 array in ``[0, 1]``.
-
-        Raises:
-            ValueError: if ``image_size`` is not divisible by ``patch_size_l1``.
+            ``(x, (orig_h, orig_w))`` — ``x`` is a ``(1, H', W', 3)`` float32
+            batch in ``[0, 1]`` padded to multiples of ``multiple``;
+            ``(orig_h, orig_w)`` is the unpadded content size for cropping.
         """
-        size = int(image_size or self.default_image_size)
-        if size % self.patch_size_l1 != 0:
-            raise ValueError(
-                f"image_size={size} must be divisible by "
-                f"patch_size_l1={self.patch_size_l1}"
-            )
+        mult = int(multiple or self.patch_size_l1)
 
         if isinstance(image, str):
             img = keras.utils.img_to_array(
@@ -167,9 +174,28 @@ class PatchEntropyAnomalyDetector:
         if img.max() > 1.0:  # uint8-range -> [0, 1]
             img = img / 255.0
 
-        resized = ops.image.resize(img, size=(size, size), antialias=True)
-        x = ops.expand_dims(resized, axis=0)
-        return np.asarray(ops.clip(x, 0.0, 1.0), dtype="float32")
+        # Optional aspect-preserving downscale to cap memory.
+        if max_size:
+            h0, w0 = img.shape[:2]
+            longest = max(h0, w0)
+            if longest > max_size:
+                scale = float(max_size) / float(longest)
+                new_hw = (max(1, round(h0 * scale)), max(1, round(w0 * scale)))
+                img = np.asarray(
+                    ops.image.resize(img, size=new_hw, antialias=True),
+                    dtype="float32",
+                )
+
+        h, w = img.shape[:2]
+        pad_h = (-h) % mult
+        pad_w = (-w) % mult
+        if pad_h or pad_w:
+            # reflect needs pad < dim; fall back to edge for tiny images.
+            mode = "reflect" if (pad_h < h and pad_w < w) else "edge"
+            img = np.pad(img, ((0, pad_h), (0, pad_w), (0, 0)), mode=mode)
+
+        x = np.clip(img[None].astype("float32"), 0.0, 1.0)
+        return x, (h, w)
 
     # ------------------------------------------------------------------
     # KL math (mirrors model_hierarchical._compute_kl* exactly)
@@ -213,12 +239,19 @@ class PatchEntropyAnomalyDetector:
             axis=-1,
         )
 
-    def kl_maps(self, x: np.ndarray) -> Dict[str, np.ndarray]:
+    def kl_maps(
+        self, x: np.ndarray, orig_hw: Optional[Tuple[int, int]] = None
+    ) -> Dict[str, np.ndarray]:
         """Per-patch KL "surprise" maps at both scales for one image.
 
         Args:
-            x: A ``(1, S, S, 3)`` float32 batch in ``[0, 1]`` from
-                :meth:`preprocess`.
+            x: A ``(1, H', W', 3)`` float32 batch in ``[0, 1]`` from
+                :meth:`preprocess` (spatial dims multiples of
+                ``patch_size_l1``).
+            orig_hw: Optional unpadded ``(H, W)`` (from :meth:`preprocess`).
+                When given, each map is cropped to its valid patch region
+                (``ceil(dim / patch_size)``) so reflect-padded patches do not
+                pollute scores or overlays.
 
         Returns:
             ``{"l1": (Hp1, Wp1), "l2": (Hp2, Wp2)}`` numpy float32 arrays
@@ -234,10 +267,21 @@ class PatchEntropyAnomalyDetector:
         else:
             kl_l2 = self._kl_standard(mu_l2, log_var_l2)
 
-        return {
-            "l1": np.asarray(kl_l1, dtype="float32")[0],
-            "l2": np.asarray(kl_l2, dtype="float32")[0],
-        }
+        l1 = np.asarray(kl_l1, dtype="float32")[0]
+        l2 = np.asarray(kl_l2, dtype="float32")[0]
+
+        if orig_hw is not None:
+            h, w = orig_hw
+            l2 = l2[
+                : math.ceil(h / self.patch_size_l2),
+                : math.ceil(w / self.patch_size_l2),
+            ]
+            l1 = l1[
+                : math.ceil(h / self.patch_size_l1),
+                : math.ceil(w / self.patch_size_l1),
+            ]
+
+        return {"l1": l1, "l2": l2}
 
     # ------------------------------------------------------------------
     # Thresholding / scoring
