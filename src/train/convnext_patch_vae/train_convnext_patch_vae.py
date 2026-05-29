@@ -187,6 +187,7 @@ class TrainingConfig:
     beta_kl_start: float = 0.0001
     beta_anneal_epochs: int = 15
     early_stopping_patience: int = 10
+    seed: int = 42
 
     # Output / evaluation
     success_threshold: float = 0.02
@@ -435,7 +436,7 @@ def _build_cifar_dataset(
 
     train_ds = (
         tf.data.Dataset.from_tensor_slices(x_train)
-        .shuffle(10_000)
+        .shuffle(10_000, seed=config.seed)
         .map(_augment if config.augment_data else lambda x: x,
              num_parallel_calls=tf.data.AUTOTUNE)
         .map(lambda x: (x, x), num_parallel_calls=tf.data.AUTOTUNE)
@@ -752,7 +753,7 @@ def _build_mixed_filesystem_dataset(
     # Per-source path datasets: shuffle + repeat so they never exhaust.
     path_datasets = [
         tf.data.Dataset.from_tensor_slices(files)
-        .shuffle(len(files), seed=42, reshuffle_each_iteration=True)
+        .shuffle(len(files), seed=config.seed, reshuffle_each_iteration=True)
         .repeat()
         for files in all_train_files
     ]
@@ -762,7 +763,7 @@ def _build_mixed_filesystem_dataset(
             path_datasets,
             weights=weights,
             stop_on_empty_dataset=False,
-            seed=42,
+            seed=config.seed,
         )
         .flat_map(_patch_fn)
         .shuffle(config.batch_size * config.patches_per_image, reshuffle_each_iteration=True)
@@ -815,6 +816,7 @@ def build_dataset(
             augment=config.augment_data,
             augment_color=config.augment_color,
             patches_per_image=config.patches_per_image,
+            seed=config.seed,
             dataset_label="ADE20K",
         )
     if config.dataset == "coco":
@@ -828,6 +830,7 @@ def build_dataset(
             augment=config.augment_data,
             augment_color=config.augment_color,
             patches_per_image=config.patches_per_image,
+            seed=config.seed,
             dataset_label="COCO2017",
         )
     raise ValueError(
@@ -1414,6 +1417,9 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="Epochs to ramp beta from beta-kl-start to beta-kl. 0=disabled.")
     parser.add_argument("--success-threshold", type=float, default=0.02,
                         help="val_loss threshold for the convergence advisory.")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="RNG seed (python/numpy/tf/keras) for reproducible "
+                             "shuffles and weight initialisation.")
 
     # ------------------------------------------------------------------
     # Hierarchical (two-level) variant
@@ -1488,6 +1494,10 @@ def main() -> None:
     if not smoke:
         setup_gpu(args.gpu)
 
+    # Seed python/numpy/tf/keras AFTER GPU config (set_random_seed initialises
+    # TF). Makes dataset shuffle and weight initialisation reproducible.
+    keras.utils.set_random_seed(args.seed)
+
     # --datasets overrides --dataset when provided.
     datasets = getattr(args, "datasets", None) or [args.dataset]
 
@@ -1528,6 +1538,7 @@ def main() -> None:
         beta_kl_start=args.beta_kl_start,
         beta_anneal_epochs=args.beta_anneal_epochs,
         early_stopping_patience=args.patience,
+        seed=args.seed,
         success_threshold=args.success_threshold,
         ade20k_dir=args.ade20k_dir,
         coco_dir=args.coco_dir,
