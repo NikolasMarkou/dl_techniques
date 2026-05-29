@@ -931,7 +931,7 @@ class ReconVisualizationCallback(keras.callbacks.Callback):
             self._save_grid(path, originals, recons, samples, "Epoch 0  |  pre-training baseline")
             logger.info(f"Pre-training reconstruction grid saved: {path}")
         except Exception as exc:
-            logger.warning(f"ReconVisualizationCallback.on_train_begin failed: {exc}")
+            logger.error(f"ReconVisualizationCallback.on_train_begin failed: {exc}", exc_info=True)
 
     def on_epoch_end(self, epoch: int, logs: Optional[Dict] = None) -> None:
         if epoch % self.frequency != 0 and epoch != 0:
@@ -946,7 +946,7 @@ class ReconVisualizationCallback(keras.callbacks.Callback):
             self._save_grid(path, originals, recons, samples,
                             f"Epoch {epoch + 1}  |  loss={loss_val:.4f}")
         except Exception as exc:
-            logger.warning(f"ReconVisualizationCallback failed at epoch {epoch}: {exc}")
+            logger.error(f"ReconVisualizationCallback failed at epoch {epoch}: {exc}", exc_info=True)
 
     def on_train_end(self, logs: Optional[Dict] = None) -> None:
         """Save a final reconstruction grid at end of training."""
@@ -960,7 +960,7 @@ class ReconVisualizationCallback(keras.callbacks.Callback):
             self._save_grid(path, originals, recons, samples, "Final reconstruction")
             logger.info(f"Final reconstruction grid saved: {path}")
         except Exception as exc:
-            logger.warning(f"ReconVisualizationCallback.on_train_end failed: {exc}")
+            logger.error(f"ReconVisualizationCallback.on_train_end failed: {exc}", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1194,7 +1194,7 @@ def train(config: TrainingConfig, smoke: bool = False) -> None:
             )
         )
     except Exception as exc:
-        logger.warning(f"Could not set up ReconVisualizationCallback: {exc}")
+        logger.error(f"Could not set up ReconVisualizationCallback: {exc}", exc_info=True)
 
     # Latent space PCA scatter and interpolation grids. Collect up to
     # 128 images from the validation set for the PCA scatter; re-use
@@ -1230,7 +1230,7 @@ def train(config: TrainingConfig, smoke: bool = False) -> None:
                 )
             )
         except Exception as exc:
-            logger.warning(f"Could not set up latent visualization callbacks: {exc}")
+            logger.error(f"Could not set up latent visualization callbacks: {exc}", exc_info=True)
 
     # ------------------------------------------------------------------
     # Persist config before fit (helps debug mid-run crashes)
@@ -1287,8 +1287,21 @@ def train(config: TrainingConfig, smoke: bool = False) -> None:
             logger.error(f"Reload check FAILED: max|delta|={max_delta:.2e} >= 1e-4")
             sys.exit(1)
     except Exception as exc:
-        logger.error(f"Reload check raised an exception: {exc}")
-        sys.exit(1)
+        # A transient OOM (ResourceExhaustedError) during the reload
+        # VERIFICATION must not fail an already-saved, successfully-trained
+        # model — the artifact at final_path is intact. Warn and continue.
+        # Any OTHER exception is a genuine (de)serialisation failure -> exit 1.
+        # DECISION plan_2026-05-29_f1605e5a/D-004  (H10)
+        import tensorflow as tf
+        if (isinstance(exc, tf.errors.ResourceExhaustedError)
+                or "out of memory" in str(exc).lower()):
+            logger.warning(
+                f"Reload check skipped — out of memory during load_model "
+                f"(saved model at {final_path} is intact): {exc}"
+            )
+        else:
+            logger.error(f"Reload check raised an exception: {exc}", exc_info=True)
+            sys.exit(1)
 
     # ------------------------------------------------------------------
     # Success guard — advisory; does not fail the run

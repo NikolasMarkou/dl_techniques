@@ -142,7 +142,7 @@ class LatentSpaceCallback(keras.callbacks.Callback):
             path = os.path.join(self.save_dir, f"latent_epoch_{epoch + 1:04d}.png")
             self._save_scatter(path, f"Latent PCA — Epoch {epoch + 1}  |  loss={loss_val:.4f}")
         except Exception as exc:
-            logger.warning(f"LatentSpaceCallback failed at epoch {epoch}: {exc}")
+            logger.error(f"LatentSpaceCallback failed at epoch {epoch}: {exc}", exc_info=True)
 
     def on_train_end(self, logs: Optional[Dict] = None) -> None:
         try:
@@ -150,7 +150,7 @@ class LatentSpaceCallback(keras.callbacks.Callback):
             self._save_scatter(path, "Latent PCA — Final")
             logger.info(f"Final latent scatter saved: {path}")
         except Exception as exc:
-            logger.warning(f"LatentSpaceCallback.on_train_end failed: {exc}")
+            logger.error(f"LatentSpaceCallback.on_train_end failed: {exc}", exc_info=True)
 
 
 class LatentInterpolationCallback(keras.callbacks.Callback):
@@ -291,7 +291,7 @@ class LatentInterpolationCallback(keras.callbacks.Callback):
                 f"Latent Interpolations — Epoch {epoch + 1}  |  loss={loss_val:.4f}",
             )
         except Exception as exc:
-            logger.warning(f"LatentInterpolationCallback failed at epoch {epoch}: {exc}")
+            logger.error(f"LatentInterpolationCallback failed at epoch {epoch}: {exc}", exc_info=True)
 
     def on_train_end(self, logs: Optional[Dict] = None) -> None:
         try:
@@ -299,4 +299,4 @@ class LatentInterpolationCallback(keras.callbacks.Callback):
             self._save_grid(path, "Latent Interpolations — Final")
             logger.info(f"Final interpolation grid saved: {path}")
         except Exception as exc:
-            logger.warning(f"LatentInterpolationCallback.on_train_end failed: {exc}")
+            logger.error(f"LatentInterpolationCallback.on_train_end failed: {exc}", exc_info=True)
