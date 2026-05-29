@@ -43,6 +43,11 @@ dev = [
     "pylint",
     "pre-commit"
 ]
+# Web GUIs under src/applications/ (e.g. anomaly_detection). The library core
+# does not require gradio — only the application front-ends do.
+apps = [
+    "gradio>=6.0,<7.0"
+]
 
 [tool.setuptools]
 # Tells setuptools the source code is in src/
