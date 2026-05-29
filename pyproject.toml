@@ -44,9 +44,11 @@ dev = [
     "pre-commit"
 ]
 # Web GUIs under src/applications/ (e.g. anomaly_detection). The library core
-# does not require gradio — only the application front-ends do.
+# does not require these — only the application front-ends do. streamlit-webrtc
+# powers the live-webcam anomaly stream (pulls aiortc + PyAV).
 apps = [
-    "gradio>=6.0,<7.0"
+    "streamlit>=1.40,<2.0",
+    "streamlit-webrtc>=0.62,<1.0"
 ]
 
 [tool.setuptools]

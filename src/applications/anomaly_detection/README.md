@@ -27,39 +27,42 @@ the scores reflect true surprise given global context. The formula mirrors
 ## Requirements
 
 - The `dl_techniques` env (`.venv`), Keras 3 / TF 2.18.
-- `gradio` (for the GUI): `\.venv/bin/pip install gradio`.
+- GUI: `streamlit` + `streamlit-webrtc` (live webcam) —
+  `.venv/bin/pip install streamlit streamlit-webrtc`.
 - A trained checkpoint, e.g.
   `results/hierarchical_convnext_patch_vae_ade20k+coco_large_20260528_205245/best_model.keras`.
 
-The core `PatchEntropyAnomalyDetector` has **no gradio dependency** and works
-headless / programmatically; only `app.py` imports gradio.
+The core `PatchEntropyAnomalyDetector` has **no GUI dependency** and works
+headless / programmatically; only `streamlit_app.py` imports streamlit.
 
-## GUI
+## GUI (Streamlit)
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m applications.anomaly_detection.app \
-    --model results/hierarchical_convnext_patch_vae_ade20k+coco_large_20260528_205245/best_model.keras
+CUDA_VISIBLE_DEVICES=1 \
+ANOMALY_MODEL=results/hierarchical_convnext_patch_vae_ade20k+coco_large_20260528_205245/best_model.keras \
+  .venv/bin/streamlit run src/applications/anomaly_detection/streamlit_app.py \
+  --server.address 127.0.0.1 --server.port 8501
 ```
 
-Open the printed `http://127.0.0.1:7860`. Two tabs:
+Open `http://127.0.0.1:8501`. Two tabs:
 
-- **Image** — upload an image, hit **Analyze**, then move the threshold sliders;
-  they re-render instantly (the KL maps are cached; no re-encode, no decoder).
-- **Live (webcam)** — streams your webcam and overlays the live per-patch KL
-  heatmap (or anomaly mask) in real time. Each frame is a single encoder
-  forward; lower the **Max side** slider for higher FPS. Needs a browser with
-  camera access (localhost or https).
+- **Live (webcam)** — real-time webcam via `streamlit-webrtc`; each frame is one
+  encoder forward, overlaid live with the KL heatmap or anomaly mask. Click
+  **Start** and allow camera access. Lower **Max side** for higher FPS.
+- **Image** — upload a still image; shows original, L2/L1 KL overlays, anomaly
+  mask, and the score JSON.
 
-Options: `--host`, `--port`, `--share` (public link). On a headless box, either
-use `--share` or SSH-forward the port: `ssh -L 7860:127.0.0.1:7860 host`. Webcam
-streaming needs the browser to reach the camera, so run the browser on a machine
-with a camera (localhost) or use `--share` (https tunnel).
+The checkpoint path comes from the `ANOMALY_MODEL` env var (or the sidebar
+**Model checkpoint** box). On a headless box, SSH-forward the port:
+`ssh -L 8501:127.0.0.1:8501 host` (localhost is a secure context, so the browser
+grants camera access). The webcam runs in the **browser**, so the camera must be
+on the machine running the browser.
 
-Controls:
-- **Max side px**: caps the longer side (aspect-preserving) to bound GPU memory;
-  `0` = native resolution. The image is never squashed to a square — it keeps its
-  aspect ratio and is reflect-padded to a multiple of `patch_size_l1` (32).
-- **Mask / score level**: `l2` (fine) or `l1` (coarse) drives the mask + scores.
+Sidebar controls:
+- **Max side px**: caps the longer side (aspect-preserving) to bound GPU memory
+  and raise FPS; `0` = native. The image is never squashed to a square — it keeps
+  its aspect ratio and is reflect-padded to a multiple of `patch_size_l1` (32).
+- **Level**: `l2` (fine) or `l1` (coarse) drives the mask + scores.
 - **Threshold method**:
   - `zscore` — flag patches above `mean + k·std` (per-image, calibration-free; default).
   - `percentile` — flag the top `(100 − p)%` of patches.

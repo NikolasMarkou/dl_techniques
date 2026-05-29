@@ -17,4 +17,5 @@ tensorflow-datasets
 tiktoken
 datasets # hugging face datasets
 dotenv
-gradio~=6.15 # applications/anomaly_detection web GUI
+streamlit~=1.58 # applications/anomaly_detection web GUI
+streamlit-webrtc~=0.72 # live webcam streaming for anomaly_detection
