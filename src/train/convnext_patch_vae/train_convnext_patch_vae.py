@@ -422,6 +422,11 @@ def _build_cifar_dataset(
         if config.augment_color:
             x = tf.image.random_brightness(x, max_delta=0.1)
             x = tf.image.random_contrast(x, lower=0.9, upper=1.1)
+        # Clip to [0,1] before the loss-type branch. BCE requires targets in
+        # [0,1] and the jitter above can push pixels out of range; for MSE the
+        # subsequent standardisation absorbs the (now-clipped) values. Mirrors
+        # the filesystem patch path's clip.
+        x = tf.clip_by_value(x, 0.0, 1.0)
         if config.recon_loss_type != "bce":
             mean_tf = tf.constant(mean, dtype=tf.float32)
             std_tf  = tf.constant(std,  dtype=tf.float32)
@@ -623,7 +628,14 @@ def _build_filesystem_dataset(
 
     n_train = len(train_files)
     n_val = len(val_files)
-    steps_per_epoch = max(1, (n_train * patches_per_image) // batch_size)
+    # Views-per-image depends on the augment branch: the augment path flat_maps
+    # `patches_per_image` random crops per image, the no-augment path yields a
+    # single centre-crop. Counting unconditionally overcounts steps_per_epoch
+    # by `patches_per_image` on the --no-augment path, which also inflates the
+    # cosine-LR horizon in _build_lr_schedule (total/warmup steps).
+    # DECISION plan_2026-05-29_f1605e5a/D-001  (O3 + H11, single fix site)
+    n_views = n_train * patches_per_image if augment else n_train
+    steps_per_epoch = max(1, n_views // batch_size)
 
     _patch_fn = _make_filesystem_patch_fn(img_size, img_channels, patches_per_image, augment_color) if augment else None
     _val_fn   = _make_filesystem_val_fn(img_size, img_channels)
