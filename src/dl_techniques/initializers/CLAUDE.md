@@ -11,6 +11,7 @@ from dl_techniques.initializers import (
     OrthogonalHypersphereInitializer,
     HaarWaveletInitializer,
     create_haar_depthwise_conv2d,
+    PolarInitializer,
 )
 ```
 
@@ -20,6 +21,7 @@ from dl_techniques.initializers import (
 - `he_orthonormal_initializer.py` — `HeOrthonormalInitializer`: He variance scaling + orthonormalization for ReLU networks
 - `hypersphere_orthogonal_initializer.py` — `OrthogonalHypersphereInitializer`: orthogonal vectors on a hypersphere
 - `haar_wavelet_initializer.py` — `HaarWaveletInitializer`: fixed 2D Haar wavelet filters for conv layers; also provides `create_haar_depthwise_conv2d` factory
+- `polar_initializer.py` — `PolarInitializer`: exact per-vector L2 norm with a uniform-on-sphere direction ("equinorm" init); polar-coordinate sampling (PolarQuant Lemma 2)
 
 ## Conventions
 

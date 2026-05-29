@@ -33,7 +33,7 @@ src/dl_techniques/
 ├── visualization/   # Plugin-based visualization (training, classification, regression, data/NN inspection)
 ├── callbacks/       # Keras callbacks (analyzer integration during training)
 ├── regularizers/    # Advanced regularizers (binary/ternary preference, entropy, orthogonal, SRIP)
-├── initializers/    # Weight initializers (orthonormal, He-orthonormal, hypersphere, Haar wavelet)
+├── initializers/    # Weight initializers (orthonormal, He-orthonormal, hypersphere, Haar wavelet, polar)
 ├── constraints/     # Weight constraints (value range clipping)
 ├── datasets/        # Data loading (time series, vision, ARC, tabular, VQA, HuggingFace)
 └── utils/           # Shared utilities (tensors, geometry, masking, alignment, export, inference)

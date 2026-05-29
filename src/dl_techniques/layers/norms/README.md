@@ -6,6 +6,21 @@ The `dl_techniques.layers.norms` module provides a comprehensive collection of n
 
 This module includes fifteen different normalization layer types, ranging from standard Keras layers to specialized variants for stability, efficiency, and advanced modeling like out-of-distribution detection. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these normalization mechanisms into your models.
 
+## Weight Reparameterization (not factory-registered)
+
+In addition to the activation-normalization layers below, this module hosts
+**`PolarWeightNorm`** — a `Dense`-style layer whose trainable parameters are a
+per-unit radius + hierarchical polar angles (a generalization of Weight
+Normalization with exact per-unit weight norm). It reparameterizes *weights*,
+not activations, so it is **not** part of the `create_normalization_layer`
+factory; import it directly:
+
+```python
+from dl_techniques.layers.norms import PolarWeightNorm, polar_encode, polar_decode
+```
+
+See `polar_weight_norm.md` for the full design, guarantees, and usage.
+
 ## Available Normalization Types
 
 The following layers are supported by the factory system with automated parameter validation and defaults:

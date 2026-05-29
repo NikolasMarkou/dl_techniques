@@ -4,7 +4,7 @@ The `dl_techniques.initializers` module provides a collection of advanced weight
 
 ## Overview
 
-This module offers four specialized initializers that go beyond standard random distributions. They leverage principles from linear algebra and signal processing—such as orthogonality and wavelet theory—to construct weight matrices with desirable mathematical properties from the start of training. All initializers are implemented as standard Keras `Initializer` subclasses, supporting full serialization and seamless integration into any Keras model.
+This module offers five specialized initializers that go beyond standard random distributions. They leverage principles from linear algebra and signal processing—such as orthogonality, wavelet theory, and polar/hyperspherical geometry—to construct weight matrices with desirable mathematical properties from the start of training. All initializers are implemented as standard Keras `Initializer` subclasses, supporting full serialization and seamless integration into any Keras model.
 
 ## Available Initializers
 
@@ -14,6 +14,7 @@ This module offers four specialized initializers that go beyond standard random 
 | `he_orthonormal` | `HeOrthonormalInitializer`| Combines He normal seeding with QR decomposition to produce an orthonormal matrix. | Orthonormal initialization where the underlying random source is scaled for ReLU-based architectures. |
 | `hypersphere_orthogonal` | `OrthogonalHypersphereInitializer` | Creates orthogonal vectors on a hypersphere of a specified radius. Falls back to a uniform distribution if orthogonality is impossible. | Maximizing initial feature diversity for embeddings, attention heads, or mixture-of-experts models. |
 | `haar_wavelet` | `HaarWaveletInitializer` | Deterministically creates fixed 2x2 filters for 2D Haar wavelet decomposition. | Building non-trainable, engineered feature extractors for multi-resolution analysis in CNNs. |
+| `polar` | `PolarInitializer` | Sets each weight vector (along a chosen axis) to an exact L2 norm with a uniform-on-sphere direction. | Equinorm / magnitude-controlled, well-conditioned initialization where chi-distributed Gaussian norms are undesirable. |
 
 ## Orthonormal Initializer
 
@@ -140,6 +141,34 @@ haar_layer = create_haar_depthwise_conv2d(
 )
 # Input shape: (B, 256, 256, 3) -> Output shape: (B, 128, 128, 12)
 ```
+
+## Polar Initializer
+
+Samples weights "in polar coordinates": every vector along `axis` is given an
+**exact** L2 norm with a direction drawn **uniformly on the unit sphere**. By
+PolarQuant's Lemma 2, a Gaussian vector's direction is exactly uniform on the
+sphere, so this is realized by normalizing a Gaussian and rescaling to the
+target norm — for any shape, power-of-two or not.
+
+Unlike He/Glorot/Gaussian sampling (whose per-vector norms are chi-distributed),
+`PolarInitializer` gives every vector an identical, exact norm — useful for
+"equinorm" initialization and precise magnitude control.
+
+**Arguments:** `norm` (target L2 norm; `None` => `sqrt(2)`, the He-normal energy),
+`axis` (vector axis; `0` = `fan_in` for a Dense kernel), `gain`, `seed`.
+
+### Usage
+
+```python
+import keras
+from dl_techniques.initializers import PolarInitializer
+
+# Every output unit's weight vector starts with L2 norm exactly 1.0
+layer = keras.layers.Dense(128, kernel_initializer=PolarInitializer(norm=1.0, axis=0))
+```
+
+It is the companion of `PolarWeightNorm` (see
+`dl_techniques/layers/norms/polar_weight_norm.md`).
 
 ## Integration with Keras Models
 
