@@ -41,12 +41,19 @@ CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m applications.anomaly_detection.app \
     --model results/hierarchical_convnext_patch_vae_ade20k+coco_large_20260528_205245/best_model.keras
 ```
 
-Open the printed `http://127.0.0.1:7860`. Upload an image, hit **Analyze**, then
-move the threshold sliders — they re-render instantly (the KL maps are cached;
-no re-encode, no decoder).
+Open the printed `http://127.0.0.1:7860`. Two tabs:
+
+- **Image** — upload an image, hit **Analyze**, then move the threshold sliders;
+  they re-render instantly (the KL maps are cached; no re-encode, no decoder).
+- **Live (webcam)** — streams your webcam and overlays the live per-patch KL
+  heatmap (or anomaly mask) in real time. Each frame is a single encoder
+  forward; lower the **Max side** slider for higher FPS. Needs a browser with
+  camera access (localhost or https).
 
 Options: `--host`, `--port`, `--share` (public link). On a headless box, either
-use `--share` or SSH-forward the port: `ssh -L 7860:127.0.0.1:7860 host`.
+use `--share` or SSH-forward the port: `ssh -L 7860:127.0.0.1:7860 host`. Webcam
+streaming needs the browser to reach the camera, so run the browser on a machine
+with a camera (localhost) or use `--share` (https tunnel).
 
 Controls:
 - **Max side px**: caps the longer side (aspect-preserving) to bound GPU memory;
