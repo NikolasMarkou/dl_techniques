@@ -1,20 +1,17 @@
-"""Patch-entropy anomaly detector built on ``HierarchicalConvNeXtPatchVAE``.
+"""Patch-entropy anomaly detector built on ``ConvNeXtPatchVAE``.
 
 The detector runs the trained VAE's **encoder only** (the decoder is never
 executed) and scores every patch by its KL divergence — the number of nats the
 encoder spends to describe that patch beyond what the prior predicts. Patches
 with high KL are "surprising" / high-entropy and flagged as anomalous.
 
-Two scales are produced on every call:
-
-* **L2** (fine, ``16x16`` for a 128px image): the *conditional* KL
-  ``KL(q(z_l2|x) || p(z_l2|z_l1))`` — exactly the objective the model was
-  trained to minimise when ``learnable_l2_prior=True`` (the trained checkpoint).
-  This is the primary anomaly signal.
-* **L1** (coarse, ``4x4``): the standard KL against ``N(0, I)``.
+The single-scale model produces one per-patch latent grid
+``z(B, Hp, Wp, latent_dim)``; the anomaly signal is the standard per-patch KL
+against ``N(0, I)``: ``KL(q(z|x) || N(0, I))`` summed over the latent dimension
+→ an ``(Hp, Wp)`` map (e.g. ``32x32`` for a 128px image at ``patch_size=4``).
 
 This module deliberately has **no GUI dependency** — it stays importable and
-usable headless. The Gradio front-end lives in ``app.py``.
+usable headless. The Streamlit front-end lives in ``streamlit_app.py``.
 
 Example::
 
@@ -23,10 +20,10 @@ Example::
     )
 
     det = PatchEntropyAnomalyDetector.from_pretrained("results/.../best_model.keras")
-    x = det.preprocess("photo.jpg")            # (1, 128, 128, 3) in [0, 1]
-    maps = det.kl_maps(x)                       # {"l1": (4,4), "l2": (16,16)}
-    mask, thr = det.anomaly_mask(maps["l2"])    # boolean (16,16)
-    overlay = det.overlay(x[0], maps["l2"])     # uint8 (128,128,3)
+    x, (h, w) = det.preprocess("photo.jpg")        # native res, padded to /patch
+    kl = det.kl_maps(x, orig_hw=(h, w))["kl"]      # (Hp, Wp)
+    mask, thr = det.anomaly_mask(kl)               # boolean (Hp, Wp)
+    overlay = det.overlay(x[0][:h, :w], kl)        # uint8 (h, w, 3)
 """
 
 import math
@@ -50,7 +47,7 @@ class PatchEntropyAnomalyDetector:
     """Encoder-only, KL-divergence per-patch anomaly detector.
 
     Args:
-        model: A loaded ``HierarchicalConvNeXtPatchVAE`` instance.
+        model: A loaded ``ConvNeXtPatchVAE`` instance.
         log_var_clip: Symmetric clip applied to ``log_var`` before KL math.
             Must match the model's internal clip (default ``10.0``).
     """
@@ -62,19 +59,16 @@ class PatchEntropyAnomalyDetector:
     ) -> None:
         self.model = model
         self.log_var_clip = float(log_var_clip)
-        self.has_l2_prior = getattr(model, "l2_prior", None) is not None
         cfg = getattr(model, "config", None)
-        self.patch_size_l1 = int(getattr(cfg, "patch_size_l1", 32))
-        self.patch_size_l2 = int(getattr(cfg, "patch_size", 8))
+        self.patch_size = int(getattr(cfg, "patch_size", 4))
         self.recon_loss_type = str(getattr(cfg, "recon_loss_type", "bce"))
         self.default_image_size = int(getattr(cfg, "img_size", 128) or 128)
         logger.info(
-            "PatchEntropyAnomalyDetector ready: l2_prior=%s (conditional KL=%s), "
-            "patch_size_l1=%d, recon_loss=%s",
-            self.has_l2_prior,
-            self.has_l2_prior,
-            self.patch_size_l1,
+            "PatchEntropyAnomalyDetector ready: KL vs N(0, I), "
+            "patch_size=%d, recon_loss=%s, log_var_clip=%.1f",
+            self.patch_size,
             self.recon_loss_type,
+            self.log_var_clip,
         )
 
     # ------------------------------------------------------------------
@@ -102,17 +96,9 @@ class PatchEntropyAnomalyDetector:
         from dl_techniques.models.convnext_patch_vae.model import (
             ConvNeXtPatchVAE,
         )
-        from dl_techniques.models.convnext_patch_vae.model_hierarchical import (
-            HierarchicalConvNeXtPatchVAE,
-            _L2ConditionedDecoder,
-            _L2ConditionalPrior,
-        )
 
         custom_objects = {
             "ConvNeXtPatchVAE": ConvNeXtPatchVAE,
-            "HierarchicalConvNeXtPatchVAE": HierarchicalConvNeXtPatchVAE,
-            "_L2ConditionedDecoder": _L2ConditionedDecoder,
-            "_L2ConditionalPrior": _L2ConditionalPrior,
         }
         logger.info("Loading anomaly-detection model from %s", model_path)
         try:
@@ -136,7 +122,7 @@ class PatchEntropyAnomalyDetector:
         """Load an image at native resolution and pad to a model-ready batch.
 
         The VAE is resolution-agnostic: any spatial size divisible by
-        ``patch_size_l1`` works. Rather than square-resizing (which distorts
+        ``patch_size`` works. Rather than square-resizing (which distorts
         aspect ratio), the image keeps its native size and is reflect-padded on
         the bottom/right up to the next multiple of ``multiple``.
 
@@ -144,7 +130,7 @@ class PatchEntropyAnomalyDetector:
             image: A file path or an ``HxW``/``HxWx3``/``HxWx4`` array
                 (uint8 in [0, 255] or float in [0, 1]).
             multiple: Pad each side up to a multiple of this. Defaults to
-                ``patch_size_l1``.
+                ``patch_size``.
             max_size: If set and the longer side exceeds it, downscale
                 (aspect-preserving) before padding — caps GPU memory. ``None``
                 or ``0`` keeps native resolution.
@@ -154,7 +140,7 @@ class PatchEntropyAnomalyDetector:
             batch in ``[0, 1]`` padded to multiples of ``multiple``;
             ``(orig_h, orig_w)`` is the unpadded content size for cropping.
         """
-        mult = int(multiple or self.patch_size_l1)
+        mult = int(multiple or self.patch_size)
 
         if isinstance(image, str):
             img = keras.utils.img_to_array(
@@ -198,11 +184,9 @@ class PatchEntropyAnomalyDetector:
         return x, (h, w)
 
     # ------------------------------------------------------------------
-    # KL math (mirrors model_hierarchical._compute_kl* exactly)
+    # KL math (mirrors model._compute_kl exactly)
     # ------------------------------------------------------------------
-    def _kl_standard(
-        self, mu: Any, log_var: Any
-    ) -> Any:
+    def _kl_standard(self, mu: Any, log_var: Any) -> Any:
         """Per-patch KL against ``N(0, I)``; sum over latent dim -> (B, Hp, Wp)."""
         mu_f = ops.cast(mu, "float32")
         lv = ops.clip(
@@ -212,76 +196,35 @@ class PatchEntropyAnomalyDetector:
             1.0 + lv - ops.square(mu_f) - ops.exp(lv), axis=-1
         )
 
-    def _kl_conditional(
-        self, mu_q: Any, log_var_q: Any, mu_p: Any, log_var_p: Any
-    ) -> Any:
-        """Per-patch ``KL(q || p)`` for diagonal Gaussians -> (B, Hp, Wp).
-
-        # DECISION plan_2026-05-29_8246cd14/D-001: this is the *conditional*
-        # KL against the learned prior p(z_l2|z_l1) — the objective the
-        # checkpoint was trained on (learnable_l2_prior=True). Do NOT replace
-        # with KL-vs-N(0,I) for L2: that would mis-score surprise because the
-        # prior is non-standard. Formula mirrors
-        # model_hierarchical._compute_kl_l2_conditional exactly (same [-10,10]
-        # clip). Prior is fed mu_l1 (not sampled z_l1) for deterministic maps.
-        """
-        mu_q_f = ops.cast(mu_q, "float32")
-        mu_p_f = ops.cast(mu_p, "float32")
-        lv_q = ops.clip(
-            ops.cast(log_var_q, "float32"), -self.log_var_clip, self.log_var_clip
-        )
-        lv_p = ops.clip(
-            ops.cast(log_var_p, "float32"), -self.log_var_clip, self.log_var_clip
-        )
-        diff_sq = ops.square(mu_q_f - mu_p_f)
-        return 0.5 * ops.sum(
-            lv_p - lv_q + (ops.exp(lv_q) + diff_sq) * ops.exp(-lv_p) - 1.0,
-            axis=-1,
-        )
-
     def kl_maps(
         self, x: np.ndarray, orig_hw: Optional[Tuple[int, int]] = None
     ) -> Dict[str, np.ndarray]:
-        """Per-patch KL "surprise" maps at both scales for one image.
+        """Per-patch KL "surprise" map for one image.
 
         Args:
             x: A ``(1, H', W', 3)`` float32 batch in ``[0, 1]`` from
-                :meth:`preprocess` (spatial dims multiples of
-                ``patch_size_l1``).
+                :meth:`preprocess` (spatial dims multiples of ``patch_size``).
             orig_hw: Optional unpadded ``(H, W)`` (from :meth:`preprocess`).
-                When given, each map is cropped to its valid patch region
+                When given, the map is cropped to its valid patch region
                 (``ceil(dim / patch_size)``) so reflect-padded patches do not
                 pollute scores or overlays.
 
         Returns:
-            ``{"l1": (Hp1, Wp1), "l2": (Hp2, Wp2)}`` numpy float32 arrays
-            (decoder is NOT executed). L2 is the conditional KL when the
-            checkpoint has a learned ``l2_prior``; otherwise KL vs ``N(0, I)``.
+            ``{"kl": (Hp, Wp)}`` numpy float32 array — the per-patch KL against
+            ``N(0, I)`` (decoder is NOT executed).
         """
-        mu_l1, log_var_l1, mu_l2, log_var_l2 = self.model.encode(x)
-
-        kl_l1 = self._kl_standard(mu_l1, log_var_l1)
-        if self.has_l2_prior:
-            mu_p, log_var_p = self.model.l2_prior(mu_l1, training=False)
-            kl_l2 = self._kl_conditional(mu_l2, log_var_l2, mu_p, log_var_p)
-        else:
-            kl_l2 = self._kl_standard(mu_l2, log_var_l2)
-
-        l1 = np.asarray(kl_l1, dtype="float32")[0]
-        l2 = np.asarray(kl_l2, dtype="float32")[0]
+        mu, log_var = self.model.encode(x)
+        kl = self._kl_standard(mu, log_var)
+        kl_np = np.asarray(kl, dtype="float32")[0]
 
         if orig_hw is not None:
             h, w = orig_hw
-            l2 = l2[
-                : math.ceil(h / self.patch_size_l2),
-                : math.ceil(w / self.patch_size_l2),
-            ]
-            l1 = l1[
-                : math.ceil(h / self.patch_size_l1),
-                : math.ceil(w / self.patch_size_l1),
+            kl_np = kl_np[
+                : math.ceil(h / self.patch_size),
+                : math.ceil(w / self.patch_size),
             ]
 
-        return {"l1": l1, "l2": l2}
+        return {"kl": kl_np}
 
     # ------------------------------------------------------------------
     # Thresholding / scoring
