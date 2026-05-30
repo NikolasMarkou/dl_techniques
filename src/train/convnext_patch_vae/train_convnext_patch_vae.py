@@ -55,14 +55,8 @@ import keras
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.convnext_patch_vae.config import (
     ConvNeXtPatchVAEConfig,
-    HierarchicalConvNeXtPatchVAEConfig,
 )
 from dl_techniques.models.convnext_patch_vae.model import ConvNeXtPatchVAE
-from dl_techniques.models.convnext_patch_vae.model_hierarchical import (
-    HierarchicalConvNeXtPatchVAE,
-    _L2ConditionedDecoder,
-    _L2ConditionalPrior,
-)
 from dl_techniques.callbacks.training_curves import TrainingCurvesCallback
 from train.common import setup_gpu, create_base_argument_parser, create_callbacks
 from train.convnext_patch_vae.callbacks import (
@@ -72,9 +66,6 @@ from train.convnext_patch_vae.callbacks import (
 
 CUSTOM_OBJECTS = {
     "ConvNeXtPatchVAE": ConvNeXtPatchVAE,
-    "HierarchicalConvNeXtPatchVAE": HierarchicalConvNeXtPatchVAE,
-    "_L2ConditionedDecoder": _L2ConditionedDecoder,
-    "_L2ConditionalPrior": _L2ConditionalPrior,
 }
 
 # Per-channel statistics for MSE normalisation (mean/std per dataset)
@@ -201,25 +192,6 @@ class TrainingConfig:
     # Override computed steps_per_epoch (useful for quick pipeline validation)
     steps_per_epoch_override: Optional[int] = None
 
-    # ------------------------------------------------------------------
-    # Hierarchical (two-level) variant — opt-in via --hierarchical.
-    # When False, the L1-* fields are ignored and the existing single-
-    # scale architecture is used. When True, `patch_size` is the L2
-    # patch size and `patch_size_l1` is required.
-    # ------------------------------------------------------------------
-    hierarchical: bool = False
-    patch_size_l1: int = 32
-    embed_dim_l1: int = 128
-    encoder_depth_l1: int = 4
-    decoder_depth_l1: int = 4
-    latent_dim_l1: int = 64
-    beta_kl_l1: float = 0.5
-    beta_kl_l2: float = 0.5
-    beta_kl_l1_start: float = 0.0001
-    beta_kl_l2_start: float = 0.0001
-    lambda_sigreg_l1: float = 0.05
-    lambda_sigreg_l2: float = 0.1
-
     def __post_init__(self) -> None:
         # Normalize datasets/dataset: the list is canonical; the string is derived.
         if self.datasets:
@@ -301,73 +273,6 @@ class TrainingConfig:
             dropout_rate=self.dropout_rate,
             gamma_clip=self.gamma_clip,
         )
-
-    def to_hierarchical_model_config(self) -> HierarchicalConvNeXtPatchVAEConfig:
-        """Construct :class:`HierarchicalConvNeXtPatchVAEConfig` from this config.
-
-        ``patch_size`` and ``latent_dim`` map to the L2 scale; the L1
-        scale uses the dedicated ``patch_size_l1`` / ``latent_dim_l1`` /
-        ``embed_dim_l1`` / ``encoder_depth_l1`` / ``decoder_depth_l1``
-        fields.
-
-        When ``model_variant`` is set, the L1+L2 width / depth / latent
-        dims are taken from ``HierarchicalConvNeXtPatchVAE.PRESETS`` —
-        symmetric with :meth:`to_model_config` for the single-scale path.
-        Patch sizes and per-side L1/L2 KL/SIGReg weights remain governed
-        by the dataclass fields.
-        DECISION plan_2026-05-28_15256fe3/D-005
-        """
-        if self.model_variant is not None:
-            presets = HierarchicalConvNeXtPatchVAE.PRESETS
-            if self.model_variant not in presets:
-                raise ValueError(
-                    f"Unknown model_variant '{self.model_variant}' for "
-                    f"hierarchical model. Choose from {list(presets.keys())}."
-                )
-            p = presets[self.model_variant]
-            embed_dim_l1 = p["embed_dim_l1"]
-            embed_dim_l2 = p["embed_dim_l2"]
-            encoder_depth_l1 = p["encoder_depth_l1"]
-            decoder_depth_l1 = p["decoder_depth_l1"]
-            encoder_depth_l2 = p["encoder_depth_l2"]
-            decoder_depth_l2 = p["decoder_depth_l2"]
-            latent_dim_l1 = p["latent_dim_l1"]
-            latent_dim_l2 = p["latent_dim_l2"]
-        else:
-            embed_dim_l1 = self.embed_dim_l1
-            embed_dim_l2 = self.embed_dim
-            encoder_depth_l1 = self.encoder_depth_l1
-            decoder_depth_l1 = self.decoder_depth_l1
-            encoder_depth_l2 = self.encoder_depth
-            decoder_depth_l2 = self.decoder_depth
-            latent_dim_l1 = self.latent_dim_l1
-            latent_dim_l2 = self.latent_dim
-
-        return HierarchicalConvNeXtPatchVAEConfig(
-            img_size=self.img_size,
-            img_channels=self.img_channels,
-            patch_size_l1=self.patch_size_l1,
-            patch_size_l2=self.patch_size,
-            embed_dim_l1=embed_dim_l1,
-            embed_dim_l2=embed_dim_l2,
-            encoder_depth_l1=encoder_depth_l1,
-            decoder_depth_l1=decoder_depth_l1,
-            encoder_depth_l2=encoder_depth_l2,
-            decoder_depth_l2=decoder_depth_l2,
-            kernel_size=self.kernel_size,
-            latent_dim_l1=latent_dim_l1,
-            latent_dim_l2=latent_dim_l2,
-            beta_kl_l1=self.beta_kl_l1,
-            beta_kl_l2=self.beta_kl_l2,
-            lambda_sigreg_l1=self.lambda_sigreg_l1,
-            lambda_sigreg_l2=self.lambda_sigreg_l2,
-            sigreg_knots=self.sigreg_knots,
-            sigreg_num_proj=self.sigreg_num_proj,
-            recon_loss_type=self.recon_loss_type,
-            dropout_rate=self.dropout_rate,
-            gamma_clip=self.gamma_clip,
-        )
-
 
 # ---------------------------------------------------------------------------
 # Dataset
@@ -883,18 +788,8 @@ class ReconVisualizationCallback(keras.callbacks.Callback):
         return np.clip(x, 0.0, 1.0)
 
     def _get_fixed_samples(self, n: int) -> np.ndarray:
-        """Decode fixed latent codes through current model weights.
-
-        Hierarchical models use ``model.sample(n)`` which already encodes
-        the coherent joint-prior path via the learnable conditional prior
-        ``p(z_l2 | z_l1)``. Hand-rolling ``decode(z_l1, z_l2)`` with
-        independent N(0, I) is incoherent (see model_hierarchical.py docs).
-        DECISION plan_2026-05-28_15256fe3/D-004
-        """
+        """Decode fixed N(0, I) latent codes through current model weights."""
         cfg = self.model.config
-        if hasattr(cfg, "patches_per_side_l1"):
-            decoded = self.model.sample(n, seed=42)
-            return np.clip(np.array(decoded), 0.0, 1.0)
         if self._fixed_z is None:
             hp = wp = cfg.patches_per_side
             self._fixed_z = np.array(
@@ -1072,27 +967,13 @@ def train(config: TrainingConfig, smoke: bool = False) -> None:
     # ------------------------------------------------------------------
     # Model
     # ------------------------------------------------------------------
-    if config.hierarchical:
-        h_model_config = config.to_hierarchical_model_config()
-        model = HierarchicalConvNeXtPatchVAE(
-            config=h_model_config, name="hierarchical_convnext_patch_vae",
-        )
-        logger.info(
-            "Model: HIERARCHICAL | "
-            f"L1 patch={h_model_config.patch_size_l1} latent={h_model_config.latent_dim_l1} "
-            f"embed={h_model_config.embed_dim_l1} depth={h_model_config.encoder_depth_l1} | "
-            f"L2 patch={h_model_config.patch_size_l2} latent={h_model_config.latent_dim_l2} "
-            f"embed={h_model_config.embed_dim_l2} depth={h_model_config.encoder_depth_l2} | "
-            f"tile_factor={h_model_config.tile_factor}"
-        )
-    else:
-        model_config = config.to_model_config()
-        model = ConvNeXtPatchVAE(config=model_config, name="convnext_patch_vae")
-        logger.info(
-            f"Model: variant={config.model_variant or 'custom'} | "
-            f"embed={model_config.embed_dim} | depth={model_config.encoder_depth} | "
-            f"latent={model_config.latent_dim} | patch={model_config.patch_size}"
-        )
+    model_config = config.to_model_config()
+    model = ConvNeXtPatchVAE(config=model_config, name="convnext_patch_vae")
+    logger.info(
+        f"Model: variant={config.model_variant or 'custom'} | "
+        f"embed={model_config.embed_dim} | depth={model_config.encoder_depth} | "
+        f"latent={model_config.latent_dim} | patch={model_config.patch_size}"
+    )
 
     dummy = keras.ops.zeros(
         (1, config.img_size, config.img_size, config.img_channels)
@@ -1114,13 +995,9 @@ def train(config: TrainingConfig, smoke: bool = False) -> None:
     # ------------------------------------------------------------------
     # Callbacks
     # ------------------------------------------------------------------
-    results_prefix = (
-        "hierarchical_convnext_patch_vae" if config.hierarchical
-        else "convnext_patch_vae"
-    )
     callbacks, results_dir = create_callbacks(
         model_name=config.experiment_name,
-        results_dir_prefix=results_prefix,
+        results_dir_prefix="convnext_patch_vae",
         monitor="val_loss",
         patience=config.early_stopping_patience,
         use_lr_schedule=True,
@@ -1132,39 +1009,14 @@ def train(config: TrainingConfig, smoke: bool = False) -> None:
     callbacks.append(TrainingCurvesCallback(output_dir=curves_dir))
 
     if config.beta_anneal_epochs > 0:
-        if config.hierarchical:
-            # Shared schedule length across L1+L2; distinct targets/starts
-            # preserved because coarse vs fine KL strength is an arch choice.
-            # DECISION plan_2026-05-28_15256fe3/D-003
-            callbacks.append(
-                BetaAnnealingCallback(
-                    beta_start=config.beta_kl_l1_start,
-                    beta_target=config.beta_kl_l1,
-                    anneal_epochs=config.beta_anneal_epochs,
-                    attr_name="_beta_kl_l1",
-                )
+        callbacks.append(
+            BetaAnnealingCallback(
+                beta_start=config.beta_kl_start,
+                beta_target=config.beta_kl,
+                anneal_epochs=config.beta_anneal_epochs,
             )
-            callbacks.append(
-                BetaAnnealingCallback(
-                    beta_start=config.beta_kl_l2_start,
-                    beta_target=config.beta_kl_l2,
-                    anneal_epochs=config.beta_anneal_epochs,
-                    attr_name="_beta_kl_l2",
-                )
-            )
-        else:
-            callbacks.append(
-                BetaAnnealingCallback(
-                    beta_start=config.beta_kl_start,
-                    beta_target=config.beta_kl,
-                    anneal_epochs=config.beta_anneal_epochs,
-                )
-            )
+        )
 
-    # Viz callbacks work for both single-scale and hierarchical models
-    # (hierarchical branches in each callback dispatch on
-    # `model.config.patches_per_side_l1`).
-    # DECISION plan_2026-05-28_15256fe3/D-002
     recon_dir = os.path.join(results_dir, "reconstructions")
     # MSE + CIFAR: apply per-channel denorm in viz callback. All other
     # combos: pass None.
@@ -1257,23 +1109,10 @@ def train(config: TrainingConfig, smoke: bool = False) -> None:
         reloaded = keras.models.load_model(final_path, custom_objects=CUSTOM_OBJECTS)
         # Compare deterministic encoder mu (not reconstruction — Sampling adds
         # per-call noise, so two independent calls always differ by design).
-        # Hierarchical model returns (mu_l1, log_var_l1, mu_l2, log_var_l2);
-        # single-scale returns (mu, log_var). Index 0 is the leading mu in
-        # both cases; for hierarchical we additionally check mu_l2.
-        if config.hierarchical:
-            ref_mu_l1, _, ref_mu_l2, _ = model.encode(dummy)
-            new_mu_l1, _, new_mu_l2, _ = reloaded.encode(dummy)
-            delta_l1 = float(np.max(np.abs(np.array(ref_mu_l1) - np.array(new_mu_l1))))
-            delta_l2 = float(np.max(np.abs(np.array(ref_mu_l2) - np.array(new_mu_l2))))
-            max_delta = max(delta_l1, delta_l2)
-            logger.info(
-                f"Reload mu_l1 max|delta|={delta_l1:.2e}, "
-                f"mu_l2 max|delta|={delta_l2:.2e}"
-            )
-        else:
-            ref_mu = np.array(model.encode(dummy)[0])
-            new_mu = np.array(reloaded.encode(dummy)[0])
-            max_delta = float(np.max(np.abs(ref_mu - new_mu)))
+        # encode() returns (mu, log_var); index 0 is the leading mu.
+        ref_mu = np.array(model.encode(dummy)[0])
+        new_mu = np.array(reloaded.encode(dummy)[0])
+        max_delta = float(np.max(np.abs(ref_mu - new_mu)))
         if max_delta < 1e-4:
             logger.info(f"Reload check PASSED: max|delta|={max_delta:.2e}")
         else:
@@ -1427,31 +1266,6 @@ def _build_parser() -> argparse.ArgumentParser:
                         help="RNG seed (python/numpy/tf/keras) for reproducible "
                              "shuffles and weight initialisation.")
 
-    # ------------------------------------------------------------------
-    # Hierarchical (two-level) variant
-    # ------------------------------------------------------------------
-    parser.add_argument(
-        "--hierarchical", action="store_true", default=False,
-        help="Enable the two-level hierarchical variant "
-             "(HierarchicalConvNeXtPatchVAE). --patch-size and --latent-dim "
-             "become the L2 scale; --patch-size-l1 / --latent-dim-l1 / "
-             "--embed-dim-l1 control the L1 (coarse) scale.",
-    )
-    parser.add_argument("--patch-size-l1", type=int, default=32,
-                        help="L1 (coarse) patch size when --hierarchical.")
-    parser.add_argument("--embed-dim-l1", type=int, default=128,
-                        help="L1 ConvNeXt block width when --hierarchical.")
-    parser.add_argument("--encoder-depth-l1", type=int, default=4)
-    parser.add_argument("--decoder-depth-l1", type=int, default=4)
-    parser.add_argument("--latent-dim-l1", type=int, default=64,
-                        help="L1 per-patch latent dim when --hierarchical.")
-    parser.add_argument("--beta-kl-l1", type=float, default=0.5)
-    parser.add_argument("--beta-kl-l2", type=float, default=0.5)
-    parser.add_argument("--beta-kl-l1-start", type=float, default=0.0001)
-    parser.add_argument("--beta-kl-l2-start", type=float, default=0.0001)
-    parser.add_argument("--lambda-sigreg-l1", type=float, default=0.05)
-    parser.add_argument("--lambda-sigreg-l2", type=float, default=0.1)
-
     # Large-dataset filesystem paths
     parser.add_argument(
         "--ade20k-dir", type=str, default="/media/arxwn/data0_4tb/datasets/ade20k",
@@ -1552,18 +1366,6 @@ def main() -> None:
         ade20k_dir=args.ade20k_dir,
         coco_dir=args.coco_dir,
         steps_per_epoch_override=args.steps_per_epoch_override,
-        hierarchical=args.hierarchical,
-        patch_size_l1=args.patch_size_l1,
-        embed_dim_l1=args.embed_dim_l1,
-        encoder_depth_l1=args.encoder_depth_l1,
-        decoder_depth_l1=args.decoder_depth_l1,
-        latent_dim_l1=args.latent_dim_l1,
-        beta_kl_l1=args.beta_kl_l1,
-        beta_kl_l2=args.beta_kl_l2,
-        beta_kl_l1_start=args.beta_kl_l1_start,
-        beta_kl_l2_start=args.beta_kl_l2_start,
-        lambda_sigreg_l1=args.lambda_sigreg_l1,
-        lambda_sigreg_l2=args.lambda_sigreg_l2,
     )
 
     try:

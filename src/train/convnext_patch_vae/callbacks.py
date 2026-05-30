@@ -64,20 +64,11 @@ class LatentSpaceCallback(keras.callbacks.Callback):
         n = len(self._val_images)
         flats, kls = [], []
 
-        # Hierarchical model.encode() returns (mu_l1, lv_l1, mu_l2, lv_l2);
-        # PCA on L2 mu matches the model's "mu" alias and the fine-grained
-        # latent users care about.
-        # DECISION plan_2026-05-28_15256fe3/D-002
-        is_hierarchical = hasattr(self.model.config, "patches_per_side_l1")
-
         for start in range(0, n, batch_size):
             batch = keras.ops.convert_to_tensor(
                 self._val_images[start : start + batch_size], dtype="float32"
             )
-            if is_hierarchical:
-                _mu_l1, _lv_l1, mu, log_var = self.model.encode(batch)
-            else:
-                mu, log_var = self.model.encode(batch)
+            mu, log_var = self.model.encode(batch)
             mu_np = np.array(mu)       # (B, Hp, Wp, D)
             lv_np = np.array(log_var)  # (B, Hp, Wp, D)
 
@@ -198,18 +189,10 @@ class LatentInterpolationCallback(keras.callbacks.Callback):
         return np.clip(x, 0.0, 1.0)
 
     def _build_grid(self):
-        """Return ``(n_pairs, num_steps, H, W, C)`` decoded interpolations.
-
-        Hierarchical models: interpolate both ``mu_l1`` and ``mu_l2`` jointly
-        across alpha. Linked traversal preserves the coarse/fine coherence
-        that ``HierarchicalConvNeXtPatchVAE.sample_from`` relies on.
-        DECISION plan_2026-05-28_15256fe3/D-002
-        """
+        """Return ``(n_pairs, num_steps, H, W, C)`` decoded interpolations."""
         n_pairs = len(self._val_samples) // 2
         alphas = np.linspace(0.0, 1.0, self.num_steps, dtype=np.float32)
         grid = []
-
-        is_hierarchical = hasattr(self.model.config, "patches_per_side_l1")
 
         for p in range(n_pairs):
             x_a = keras.ops.convert_to_tensor(
@@ -219,32 +202,15 @@ class LatentInterpolationCallback(keras.callbacks.Callback):
                 self._val_samples[p * 2 + 1 : p * 2 + 2], dtype="float32"
             )
 
-            if is_hierarchical:
-                mu_l1_a, _, mu_l2_a, _ = self.model.encode(x_a)
-                mu_l1_b, _, mu_l2_b, _ = self.model.encode(x_b)
-                mu_l1_a, mu_l2_a = np.array(mu_l1_a), np.array(mu_l2_a)
-                mu_l1_b, mu_l2_b = np.array(mu_l1_b), np.array(mu_l2_b)
-            else:
-                mu_a = np.array(self.model.encode(x_a)[0])  # (1, Hp, Wp, D)
-                mu_b = np.array(self.model.encode(x_b)[0])
+            mu_a = np.array(self.model.encode(x_a)[0])  # (1, Hp, Wp, D)
+            mu_b = np.array(self.model.encode(x_b)[0])
 
             row = []
             for alpha in alphas:
-                if is_hierarchical:
-                    z_l1 = keras.ops.convert_to_tensor(
-                        (1.0 - alpha) * mu_l1_a + alpha * mu_l1_b,
-                        dtype="float32",
-                    )
-                    z_l2 = keras.ops.convert_to_tensor(
-                        (1.0 - alpha) * mu_l2_a + alpha * mu_l2_b,
-                        dtype="float32",
-                    )
-                    decoded = np.array(self.model.decode(z_l1, z_l2))
-                else:
-                    z = keras.ops.convert_to_tensor(
-                        (1.0 - alpha) * mu_a + alpha * mu_b, dtype="float32"
-                    )
-                    decoded = np.array(self.model.decode(z))  # (1, H, W, C)
+                z = keras.ops.convert_to_tensor(
+                    (1.0 - alpha) * mu_a + alpha * mu_b, dtype="float32"
+                )
+                decoded = np.array(self.model.decode(z))  # (1, H, W, C)
                 row.append(self._to_display(decoded[0]))
             grid.append(row)
 
