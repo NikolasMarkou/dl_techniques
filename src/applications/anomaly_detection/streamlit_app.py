@@ -1,8 +1,8 @@
 """Streamlit GUI for patch-entropy anomaly detection.
 
 Live webcam (via ``streamlit-webrtc``) and still-image modes. Each frame runs the
-``HierarchicalConvNeXtPatchVAE`` encoder once and overlays the per-patch KL
-"surprise" heatmap / anomaly mask. The decoder is never executed.
+``ConvNeXtPatchVAE`` encoder once and overlays the per-patch KL "surprise"
+heatmap / anomaly mask. The decoder is never executed.
 
 Run::
 
@@ -26,8 +26,6 @@ _SRC = os.path.abspath(os.path.join(_HERE, "..", ".."))
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-from typing import Optional
-
 import av
 import numpy as np
 import streamlit as st
@@ -39,8 +37,7 @@ from applications.anomaly_detection.anomaly_detector import (
 
 _DEFAULT_MODEL = os.environ.get(
     "ANOMALY_MODEL",
-    "results/hierarchical_convnext_patch_vae_ade20k+coco_large_20260528_205245/"
-    "best_model.keras",
+    "results/convnext_patch_vae_ade20k+coco_large_20260527_130515/best_model.keras",
 )
 _THRESHOLD_METHODS = ["zscore", "percentile", "absolute"]
 _RTC_CONFIG = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
@@ -58,7 +55,6 @@ class AnomalyProcessor(VideoProcessorBase):
     def __init__(self, detector: PatchEntropyAnomalyDetector) -> None:
         self.detector = detector
         self.view = "heatmap"
-        self.level = "l2"
         self.method = "zscore"
         self.k = 3.0
         self.percentile = 95.0
@@ -69,9 +65,8 @@ class AnomalyProcessor(VideoProcessorBase):
         x, (h, w) = self.detector.preprocess(
             rgb, max_size=int(self.max_side) or None
         )
-        maps = self.detector.kl_maps(x, orig_hw=(h, w))
+        kl_map = self.detector.kl_maps(x, orig_hw=(h, w))["kl"]
         img01 = x[0][:h, :w]
-        kl_map = maps[self.level]
         if self.view == "mask":
             mask, _ = self.detector.anomaly_mask(
                 kl_map, method=self.method, k=float(self.k),
@@ -104,9 +99,6 @@ def _sidebar_controls() -> dict:
     st.sidebar.header("Controls")
     return {
         "view": st.sidebar.radio("Overlay", ["heatmap", "mask"], index=0),
-        "level": st.sidebar.radio(
-            "Level (l2 fine / l1 coarse)", ["l2", "l1"], index=0
-        ),
         "method": st.sidebar.selectbox("Threshold method", _THRESHOLD_METHODS),
         "k": st.sidebar.slider("z-score k (mean + k·std)", 0.0, 6.0, 3.0, 0.1),
         "percentile": st.sidebar.slider("percentile", 50.0, 99.9, 95.0, 0.5),
@@ -114,7 +106,7 @@ def _sidebar_controls() -> dict:
             "absolute threshold (nats)", 0.0, 50.0, 5.0, 0.5
         ),
         "max_side": st.sidebar.slider(
-            "Max side px (0 = native; aspect kept, padded to /32)",
+            "Max side px (0 = native; aspect kept, padded to patch size)",
             0, 1024, 384, 64,
         ),
     }
@@ -124,9 +116,9 @@ def main() -> None:
     st.set_page_config(page_title="Patch-Entropy Anomaly Detection", layout="wide")
     st.title("Patch-Entropy Anomaly Detection")
     st.caption(
-        "Per-patch KL divergence from a hierarchical ConvNeXt patch-VAE encoder. "
-        "High KL = high-entropy / surprising = anomalous. L2 (fine) uses the "
-        "trained conditional prior; L1 (coarse) uses KL vs N(0, I). Decoder never runs."
+        "Per-patch KL divergence from a ConvNeXt patch-VAE encoder. "
+        "High KL = high-entropy / surprising = anomalous. KL is measured "
+        "against N(0, I). Decoder never runs."
     )
 
     model_path = st.sidebar.text_input("Model checkpoint", value=_DEFAULT_MODEL)
@@ -159,9 +151,8 @@ def main() -> None:
 
             rgb = np.array(Image.open(upload).convert("RGB"))
             x, (h, w) = detector.preprocess(rgb, max_size=int(c["max_side"]) or None)
-            maps = detector.kl_maps(x, orig_hw=(h, w))
+            kl_map = detector.kl_maps(x, orig_hw=(h, w))["kl"]
             img01 = x[0][:h, :w]
-            kl_map = maps[c["level"]]
             mask, thr = detector.anomaly_mask(
                 kl_map, method=c["method"], k=float(c["k"]),
                 percentile=float(c["percentile"]),
@@ -175,19 +166,13 @@ def main() -> None:
                 caption=f"Anomaly mask ({c['method']})",
                 use_container_width=True,
             )
-            col3, col4 = st.columns(2)
-            col3.image(
-                detector.overlay(img01, maps["l2"]),
-                caption=f"L2 KL (fine) {maps['l2'].shape}",
-                use_container_width=True,
-            )
-            col4.image(
-                detector.overlay(img01, maps["l1"]),
-                caption=f"L1 KL (coarse) {maps['l1'].shape}",
+            st.image(
+                detector.overlay(img01, kl_map),
+                caption=f"KL heatmap {kl_map.shape}",
                 use_container_width=True,
             )
             scores = detector.score(kl_map, mask)
-            scores.update({"threshold": thr, "level": c["level"], "method": c["method"]})
+            scores.update({"threshold": thr, "method": c["method"]})
             st.json(scores)
 
 
