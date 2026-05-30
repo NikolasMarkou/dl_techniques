@@ -354,9 +354,7 @@ class ConvNeXtPatchVAE(keras.Model):
         - ``temperature=1.0`` -> matches the VAE prior scale.
         - ``temperature>1.0`` -> more diverse variations.
 
-        Mirrors :meth:`HierarchicalConvNeXtPatchVAE.sample_from` for a
-        uniform sampling API across the single-scale and hierarchical
-        variants.
+        Provides a one-line sampling API on the single-scale model.
 
         Args:
             x: Real anchor image batch ``(B, H, W, C)``.
