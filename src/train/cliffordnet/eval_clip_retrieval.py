@@ -29,6 +29,69 @@ Usage::
         -m train.cliffordnet.eval_clip_retrieval \\
         --checkpoint results/.../checkpoints/final.keras \\
         --max-samples 1000 --gpu 1
+
+A/B Launch Runbook (user-launched)
+----------------------------------
+The Clifford-head A/B is a multi-day GPU campaign and is USER-LAUNCHED (a
+sub-agent's background job dies on exit; no parallel GPU jobs). The two arms
+are ``head_kind=plain`` (control) vs ``head_kind=learned_query_residual``
+(the Clifford geometric head). Keep seed / data / schedule IDENTICAL across
+arms so the only difference is the head. Run on GPU0, batch 128, bf16.
+
+Step A -- fixes already in place. This plan already shipped the code fixes
+  (text_use_global_context kwarg, logit_scale float32 under bf16,
+  --mixed-bfloat16, D-007 stagger + npz caption cache, this gamma probe).
+  Nothing to launch.
+
+Step B (optional) -- Wikipedia LM-pretrain of the text tower. Wired into
+  train_clip via ``--pretrain-lm-steps N`` (default 50000; set 0 or pass
+  ``--skip-pretrain`` to bypass). Point ``--pretrain-lm-hf-cache`` at a
+  pre-downloaded HF Wikipedia cache. This runs as the first stage of the
+  training invocation below, not as a separate command.
+
+Step C -- the two A/B training runs (identical except --head-kind). Add
+  ``text_use_global_context=True`` is NOT a CLI flag on its own; the G lever
+  is passed through ``from_variant(**kwargs)`` only if a variant exposes it
+  -- for the baseline A/B leave it default. GPU0::
+
+    # Control arm (plain head)
+    CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg .venv/bin/python \\
+        -m train.cliffordnet.train_clip \\
+        --head-kind plain \\
+        --seed 42 --batch-size 128 --mixed-bfloat16 \\
+        --gamma-probe-every-steps 500 --probe-every-steps 750
+
+    # Treatment arm (Clifford learned-query-residual head)
+    CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg .venv/bin/python \\
+        -m train.cliffordnet.train_clip \\
+        --head-kind learned_query_residual \\
+        --seed 42 --batch-size 128 --mixed-bfloat16 \\
+        --gamma-probe-every-steps 500 --probe-every-steps 750
+
+  The treatment arm's training log will carry ``[gamma-probe]`` lines; gamma
+  mean climbing above ~0.1 is the wedge-ignition signal (the geometric head
+  is contributing). The plain arm logs no gamma-probe lines (no head_scale).
+
+Step D -- evaluate each arm's checkpoint with THIS harness::
+
+    CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg .venv/bin/python \\
+        -m train.cliffordnet.eval_clip_retrieval \\
+        --checkpoint results/<run>/checkpoints/final.keras \\
+        --coco-root /media/arxwn/data0_4tb/datasets/coco_2017
+
+SIGNAL-FLOOR GATE
+  Before attributing any A/B delta to the Clifford head, the PLAIN arm MUST
+  clear COCO R@1 >= 5%. If it does not, the null result is a from-scratch
+  backbone failure (constraint C20), NOT evidence against the Clifford head.
+  Do NOT report a null A/B delta as "Clifford head adds nothing"; escalate to
+  Path D (pretrained vision backbone) and re-run the A/B on top of it.
+
+OUT-OF-SCOPE limitation (documented)
+  Only the gamma probe is implemented. The query-pool / GAP cosine probe
+  (the alternative wedge-ignition signal: cosine between the deterministic
+  ``z_det`` and the geometric ``z_ctx`` branch) needs those locals from
+  inside ``encode_image`` / ``encode_text`` and would require a forward hook
+  into the encoders. It is NOT implemented here.
 """
 
 import argparse

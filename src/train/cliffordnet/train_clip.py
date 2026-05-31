@@ -671,6 +671,91 @@ class RetrievalProbeCallback(keras.callbacks.Callback):
         )
 
 
+class GammaProbeCallback(keras.callbacks.Callback):
+    """Log the LayerScale gamma magnitude of the projection heads.
+
+    Detects the **E1 wedge-ignition transition**: in the
+    ``head_kind="learned_query_residual"`` configuration each tower mixes a
+    deterministic feature with a Clifford-geometric branch scaled by a
+    learnable per-channel ``_LayerScale1D.gamma`` (init ~1e-4). When training
+    pushes the mean of that gamma above ~0.1 the Clifford head has started
+    to contribute — i.e. the geometric branch has "ignited". Tracking the
+    gamma mean every N steps is the cheap A/B telemetry that tells whether
+    the learned-query-residual arm is actually using its extra machinery.
+
+    The ``model`` Keras attaches via ``set_model`` is the
+    :class:`ContrastiveCliffordCLIP` training wrapper; the head_scale layers
+    live on the inner :class:`CliffordCLIP` (``self.model.clip_model``).
+
+    Heads other than ``learned_query_residual`` (notably ``head_kind="plain"``)
+    have NO ``vision_head_scale`` / ``text_head_scale`` (they are ``None``),
+    so the lookup is guarded with ``getattr`` and the probe simply skips —
+    it never crashes the plain-arm run.
+
+    :param probe_every_steps: Log the gamma means every N training steps.
+        Mirrors the other persistent callbacks' step-counter pattern.
+    :param initial_step: Starting step count (for resume).
+    """
+
+    def __init__(
+        self,
+        probe_every_steps: int = 500,
+        initial_step: int = 0,
+    ) -> None:
+        super().__init__()
+        self.probe_every_steps = probe_every_steps
+        self._global_step = initial_step
+        logger.info(
+            f"GammaProbeCallback: log head-scale gamma mean every "
+            f"{probe_every_steps:,} steps (wedge-ignition probe)"
+        )
+
+    @property
+    def global_step(self) -> int:
+        return self._global_step
+
+    def _inner_clip(self) -> Optional[CliffordCLIP]:
+        # ``model`` is the ContrastiveCliffordCLIP wrapper; the heads live on
+        # the inner CliffordCLIP. Bare CliffordCLIP (no wrapper) is tolerated.
+        return getattr(self.model, "clip_model", self.model)
+
+    @staticmethod
+    def _gamma_mean(inner: Any, attr: str) -> Optional[float]:
+        # ``head_kind="plain"`` (and other non-residual heads) leave the
+        # head_scale attribute as None -> skip without crashing.
+        layer = getattr(inner, attr, None)
+        if layer is None:
+            return None
+        gamma = getattr(layer, "gamma", None)
+        if gamma is None:
+            return None
+        try:
+            return float(keras.ops.mean(keras.ops.convert_to_numpy(gamma)))
+        except Exception:
+            return None
+
+    def on_train_batch_end(self, batch: int, logs: Optional[Dict[str, Any]] = None) -> None:
+        self._global_step += 1
+        if self.probe_every_steps <= 0:
+            return
+        if self._global_step % self.probe_every_steps != 0:
+            return
+        inner = self._inner_clip()
+        if inner is None:
+            return
+        v_mean = self._gamma_mean(inner, "vision_head_scale")
+        t_mean = self._gamma_mean(inner, "text_head_scale")
+        if v_mean is None and t_mean is None:
+            # No head_scale on either tower (e.g. head_kind="plain"): skip.
+            return
+        v_str = "n/a" if v_mean is None else f"{v_mean:.5f}"
+        t_str = "n/a" if t_mean is None else f"{t_mean:.5f}"
+        logger.info(
+            f"[gamma-probe] step={self._global_step:,} "
+            f"vision_gamma_mean={v_str} text_gamma_mean={t_str}"
+        )
+
+
 # =============================================================================
 # Pretraining: independent tower pretraining (vision on CIFAR-100, text on Wikipedia)
 # =============================================================================
@@ -1412,6 +1497,10 @@ def train(args: argparse.Namespace) -> None:
         step_ckpt_cb,
         retrieval_probe_cb,
     ]
+    if args.gamma_probe_every_steps > 0:
+        persistent_callbacks.append(
+            GammaProbeCallback(probe_every_steps=args.gamma_probe_every_steps)
+        )
 
     # --- Pretraining: optional independent tower pretraining ---
     # Resolve skip flag up-front so later checks read the effective values.
@@ -1732,6 +1821,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "Compute retrieval recall@K on a small val slice every N "
             "training steps and append to retrieval_probes/probes.jsonl. "
             "0 disables."
+        ),
+    )
+    parser.add_argument(
+        "--gamma-probe-every-steps", type=int, default=500,
+        help=(
+            "Log the mean of the projection-head LayerScale gamma "
+            "(vision_head_scale / text_head_scale) every N training steps "
+            "to track the wedge-ignition transition for the "
+            "learned_query_residual head. 0 disables. No effect for "
+            "head_kind=plain (no head_scale -> probe skips)."
         ),
     )
     parser.add_argument(
