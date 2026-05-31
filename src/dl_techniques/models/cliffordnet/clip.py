@@ -291,6 +291,8 @@ class CliffordCLIP(keras.Model):
     :param text_shifts: Sparse rolling product shifts for text blocks.
     :param text_cli_mode: Clifford components for text.
     :param text_ctx_mode: Text context mode.
+    :param text_use_global_context: Add global GAP context branch to
+        text blocks (default ``False`` preserves the original text tower).
     :param text_stochastic_depth_rate: Max DropPath rate for text blocks.
     :param embed_dim: Shared projection dimension.
     :param layer_scale_init: Initial LayerScale gamma for all blocks.
@@ -389,8 +391,8 @@ class CliffordCLIP(keras.Model):
         # nano_g: nano with a global-context branch on the vision tower
         # (gFFN-G), mirroring CliffordNet.lite_g. The global-context flag
         # currently broadcasts to all stages (parking-lot decision in
-        # decisions.md). Text tower keeps use_global_context=False to
-        # match CliffordNetLM.
+        # decisions.md). Text tower defaults to text_use_global_context=False
+        # to match CliffordNetLM; pass text_use_global_context=True to enable.
         "nano_g": dict(
             vision_stage_channels=[128, 128, 256, 256],
             vision_stage_depths=[3, 3, 3, 3],
@@ -479,6 +481,7 @@ class CliffordCLIP(keras.Model):
         text_shifts: Optional[List[int]] = None,
         text_cli_mode: CliMode = "full",
         text_ctx_mode: CtxMode = "diff",
+        text_use_global_context: bool = False,
         text_stochastic_depth_rate: float = 0.1,
         # Shared
         embed_dim: int = 384,
@@ -619,6 +622,7 @@ class CliffordCLIP(keras.Model):
         )
         self.text_cli_mode = text_cli_mode
         self.text_ctx_mode = text_ctx_mode
+        self.text_use_global_context = text_use_global_context
         self.text_stochastic_depth_rate = text_stochastic_depth_rate
 
         self.embed_dim = embed_dim
@@ -903,7 +907,7 @@ class CliffordCLIP(keras.Model):
             shifts=self.text_shifts,
             cli_mode=self.text_cli_mode,
             ctx_mode=self.text_ctx_mode,
-            use_global_context=False,
+            use_global_context=self.text_use_global_context,
             layer_scale_init=self.layer_scale_init,
             use_bias=self.use_bias,
             kernel_initializer=self.kernel_initializer,
@@ -1348,6 +1352,7 @@ class CliffordCLIP(keras.Model):
                 "text_shifts": self.text_shifts,
                 "text_cli_mode": self.text_cli_mode,
                 "text_ctx_mode": self.text_ctx_mode,
+                "text_use_global_context": self.text_use_global_context,
                 "text_stochastic_depth_rate": self.text_stochastic_depth_rate,
                 "embed_dim": self.embed_dim,
                 "layer_scale_init": self.layer_scale_init,

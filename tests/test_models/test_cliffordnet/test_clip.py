@@ -198,3 +198,44 @@ def test_from_variant_serialization_round_trip(tiny_sample):
             atol=1e-5,
             err_msg=f"key {k} mismatches after round-trip",
         )
+
+
+def test_text_use_global_context_round_trip(tiny_build_shape, tiny_sample):
+    """text_use_global_context=True survives get_config + .keras round-trip
+    and produces matching outputs (mirrors vision_use_global_context)."""
+    m = _build_nano(text_use_global_context=True)
+    m.build(tiny_build_shape)
+    assert m.get_config()["text_use_global_context"] is True
+    # Text tower blocks must actually receive the global-context branch.
+    assert all(
+        getattr(block, "use_global_context", False) is True
+        for block in m.text_blocks
+    )
+
+    pre = m(tiny_sample, training=False)
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "clip_gt.keras")
+        m.save(path)
+        loaded = keras.models.load_model(path)
+        post = loaded(tiny_sample, training=False)
+
+    assert loaded.get_config()["text_use_global_context"] is True
+    for k in pre:
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(pre[k]),
+            keras.ops.convert_to_numpy(post[k]),
+            rtol=1e-5,
+            atol=1e-5,
+            err_msg=f"key {k} mismatches after round-trip",
+        )
+
+
+def test_text_use_global_context_default_false(tiny_build_shape):
+    """Default preserves prior behavior: text tower has no global-context."""
+    m = _build_nano()
+    m.build(tiny_build_shape)
+    assert m.get_config()["text_use_global_context"] is False
+    assert all(
+        getattr(block, "use_global_context", False) is False
+        for block in m.text_blocks
+    )
