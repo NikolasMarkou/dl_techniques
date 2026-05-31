@@ -1427,6 +1427,11 @@ def train(args: argparse.Namespace) -> None:
         pad_token_id=eot_token_id,
         head_kind=args.head_kind,
         head_cli_mode=args.head_cli_mode,
+        # DECISION plan_2026-05-31_42743977/D-001: thread the CLI flag through
+        # (not hardcode text_use_global_context=True, which would silently flip
+        # the shipped default; not leave it default-False, which contradicts doc
+        # lever G). A flag keeps both A/B arms identical. See decisions.md D-001.
+        text_use_global_context=args.text_use_global_context,
     )
     # Build at the configured resolution. Clifford blocks are
     # resolution-agnostic because they are fully convolutional.
@@ -1910,6 +1915,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "Default off preserves fp32 behavior. No LossScaleOptimizer is "
             "needed for bf16; logit_scale stays float32."
         ),
+    )
+    parser.add_argument(
+        "--text-use-global-context",
+        action="store_true",
+        help="Enable global-context pooling in the text tower (CliffordCLIP "
+             "text_use_global_context=True). Lifts the text receptive-field ceiling "
+             "(doc lever G). Vision tower already uses global context; this only "
+             "affects the text tower. Default off preserves prior behavior.",
     )
 
     return parser
