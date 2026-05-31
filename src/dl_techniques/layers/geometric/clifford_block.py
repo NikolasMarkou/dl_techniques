@@ -62,8 +62,8 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
     computes element-wise scalar (dot) and/or bivector (wedge) interaction
     terms between a detail stream Z_det and a context stream Z_ctx, then
     projects the concatenated result back to ``channels``. The dot component
-    is D_s[c] = SiLU(Z_det[c] * Z_ctx[(c+s) % D]) and the wedge component is
-    W_s[c] = Z_det[c] * Z_ctx[(c+s)%D] - Z_ctx[c] * Z_det[(c+s)%D].
+    is D_s[c] = SiLU(Z_det[c] * Z_ctx[(c-s) % D]) and the wedge component is
+    W_s[c] = Z_det[c] * Z_ctx[(c-s)%D] - Z_ctx[c] * Z_det[(c-s)%D].
 
     **Architecture Overview:**
 
