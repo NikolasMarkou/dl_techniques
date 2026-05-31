@@ -1041,11 +1041,16 @@ class CliffordCLIP(keras.Model):
         if self.built:
             return
 
+        # DECISION plan_2026-05-31_76981d58/D-001: pin logit_scale to float32.
+        # Do NOT drop dtype="float32" — under a bf16 global policy the learnable
+        # temperature would silently be created as bf16, drifting the contrastive
+        # logits. float32 temperature is standard CLIP practice. See decisions.md D-001.
         self.logit_scale = self.add_weight(
             name="logit_scale",
             shape=(),
             initializer=initializers.Constant(self.logit_scale_init),
             trainable=True,
+            dtype="float32",
         )
 
 

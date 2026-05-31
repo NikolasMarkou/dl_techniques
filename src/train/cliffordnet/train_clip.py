@@ -1250,6 +1250,12 @@ def train(args: argparse.Namespace) -> None:
     logger.info("Starting CliffordCLIP training")
     setup_gpu(args.gpu)
 
+    # Set the global mixed-precision policy BEFORE any layer/model is built so
+    # it applies to every weight. bf16 needs no LossScaleOptimizer (unlike fp16).
+    if args.mixed_bfloat16:
+        keras.mixed_precision.set_global_policy("mixed_bfloat16")
+        logger.info("Mixed precision enabled: global policy = mixed_bfloat16")
+
     # --- Tokenizer ---
     # Default: tiktoken gpt2 encoding (English-trained BPE, 50257 tokens).
     # cl100k_base is intentionally avoided because it is multilingual and
@@ -1797,6 +1803,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--seed", type=int, default=42,
         help="Global seed for tf/keras + dataset shuffle (D-006).",
+    )
+    parser.add_argument(
+        "--mixed-bfloat16", action="store_true",
+        help=(
+            "Enable bf16 mixed precision (global policy mixed_bfloat16). "
+            "Default off preserves fp32 behavior. No LossScaleOptimizer is "
+            "needed for bf16; logit_scale stays float32."
+        ),
     )
 
     return parser
