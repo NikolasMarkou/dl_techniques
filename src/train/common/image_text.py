@@ -323,9 +323,46 @@ def load_cc3m_local_split(
     if not os.path.isdir(img_root):
         raise FileNotFoundError(f"CC3M image dir not found: {img_root}")
 
+    # .npz tokenization cache (D-007): the JSONL scan + os.path.exists loop +
+    # tiktoken encode is an ~82 s serial pass that repeats every launch. The
+    # cache key embeds split, context_length, encoder name, max_samples, and a
+    # validation stamp of the source manifest (mtime + size); ANY change in
+    # these fields must miss so a stale cache can never return wrong tokens.
+    enc_name = getattr(encoder, "name", None) or type(encoder).__name__
+    src_mtime = os.path.getmtime(jsonl_path)
+    src_size = os.path.getsize(jsonl_path)
+    n_tag = "all" if max_samples is None else str(max_samples)
+    cache_npz = (
+        f"{jsonl_path}.tokcache.{split}.L{context_length}.{enc_name}"
+        f".n{n_tag}.npz"
+    )
+    cache_txt = cache_npz[: -len(".npz")] + ".paths.txt"
+
+    # Cache READ: guarded so any I/O error falls back to recompute, never crash.
+    try:
+        if os.path.exists(cache_npz) and os.path.exists(cache_txt):
+            with np.load(cache_npz) as data:
+                cached_mtime = float(data["src_mtime"])
+                cached_size = int(data["src_size"])
+                if cached_mtime == src_mtime and cached_size == src_size:
+                    token_ids = data["token_ids"]
+                    with open(cache_txt) as pf:
+                        paths = [ln.rstrip("\n") for ln in pf]
+                    if token_ids.shape[0] == len(paths):
+                        logger.info(
+                            f"CC3M/{split}: tokenization CACHE HIT "
+                            f"({len(paths)} pairs) from {cache_npz}"
+                        )
+                        return paths, token_ids
+    except Exception as exc:  # noqa: BLE001 - cache must never break the loader
+        logger.warning(
+            f"CC3M/{split}: tokenization cache read failed ({exc!r}); "
+            f"recomputing from {jsonl_path}."
+        )
+
     logger.info(
         f"Loading CC3M split={split} max_samples={max_samples} "
-        f"from {cc3m_root}..."
+        f"from {cc3m_root} (tokenization CACHE MISS)..."
     )
 
     paths: List[str] = []
@@ -367,6 +404,29 @@ def load_cc3m_local_split(
     logger.info(
         f"Loaded {len(paths)} (image, caption) pairs from CC3M/{split}"
     )
+
+    # Cache WRITE: guarded so an unwritable/full disk degrades to recompute.
+    try:
+        np.savez(
+            cache_npz,
+            token_ids=token_ids,
+            src_mtime=np.float64(src_mtime),
+            src_size=np.int64(src_size),
+        )
+        with open(cache_txt, "w") as pf:
+            pf.write("\n".join(paths))
+            if paths:
+                pf.write("\n")
+        logger.info(
+            f"CC3M/{split}: tokenization CACHE MISS+WRITE "
+            f"({len(paths)} pairs) -> {cache_npz}"
+        )
+    except Exception as exc:  # noqa: BLE001 - cache must never break the loader
+        logger.warning(
+            f"CC3M/{split}: tokenization cache write failed ({exc!r}); "
+            f"continuing without a cache."
+        )
+
     return paths, token_ids
 
 

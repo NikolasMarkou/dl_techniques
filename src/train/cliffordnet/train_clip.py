@@ -1727,7 +1727,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Rolling window size for step_NNNNNNN.keras files.",
     )
     parser.add_argument(
-        "--probe-every-steps", type=int, default=500,
+        "--probe-every-steps", type=int, default=750,
         help=(
             "Compute retrieval recall@K on a small val slice every N "
             "training steps and append to retrieval_probes/probes.jsonl. "
