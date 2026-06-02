@@ -18,7 +18,7 @@ from dl_techniques.models.bias_free_denoisers.bfcnn import (
     create_bfcnn_denoiser, BFCNN_CONFIGS, create_bfcnn_variant,
 )
 from dl_techniques.analyzer import DataInput
-from train.common import setup_gpu
+from train.common import setup_gpu, collect_image_paths
 from dl_techniques.metrics.psnr_metric import PsnrMetric
 
 
@@ -130,29 +130,12 @@ class DenoisingDatasetBuilder(DatasetBuilder):
         return noisy_patch, patch
 
     def _create_file_list(self, directories: List[str], limit: Optional[int] = None) -> List[str]:
-        all_files = []
-        extensions_set = {ext.lower() for ext in self.config.image_extensions}
-        extensions_set.update({ext.upper() for ext in self.config.image_extensions})
-
-        for directory in directories:
-            dir_path = Path(directory)
-            if not dir_path.is_dir():
-                logger.warning(f"Directory not found: {directory}")
-                continue
-            try:
-                for file_path in dir_path.rglob("*"):
-                    if file_path.is_file() and file_path.suffix in extensions_set:
-                        all_files.append(str(file_path))
-            except Exception as e:
-                logger.warning(f"Error scanning {directory}: {e}")
+        all_files = collect_image_paths(
+            directories, extensions=self.config.image_extensions, max_files=limit
+        )
 
         if not all_files:
             raise ValueError(f"No files found in directories: {directories}")
-
-        logger.info(f"Found {len(all_files)} files")
-        if limit and limit < len(all_files):
-            np.random.shuffle(all_files)
-            all_files = all_files[:limit]
 
         return all_files
 

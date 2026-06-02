@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from train.common import setup_gpu
+from train.common import setup_gpu, collect_image_paths
 from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.optimization.train_vision import (
     TrainingConfig,
@@ -159,31 +159,12 @@ class BFUNetDatasetBuilder(DatasetBuilder):
         return noisy_patch, patch
 
     def _create_file_list(self, directories: List[str], limit: Optional[int] = None) -> List[str]:
-        all_files = []
-        extensions_set = {ext.lower() for ext in self.config.image_extensions}
-        extensions_set.update({ext.upper() for ext in self.config.image_extensions})
-
-        for directory in directories:
-            dir_path = Path(directory)
-            if not dir_path.is_dir():
-                logger.warning(f"Directory not found: {directory}")
-                continue
-            try:
-                for file_path in dir_path.rglob("*"):
-                    if file_path.is_file() and file_path.suffix in extensions_set:
-                        all_files.append(str(file_path))
-            except Exception as e:
-                logger.warning(f"Error scanning {directory}: {e}")
-                continue
+        all_files = collect_image_paths(
+            directories, extensions=self.config.image_extensions, max_files=limit
+        )
 
         if not all_files:
             raise ValueError(f"No files found in directories: {directories}")
-
-        logger.info(f"Found {len(all_files)} files")
-
-        if limit and limit < len(all_files):
-            np.random.shuffle(all_files)
-            all_files = all_files[:limit]
 
         return all_files
 

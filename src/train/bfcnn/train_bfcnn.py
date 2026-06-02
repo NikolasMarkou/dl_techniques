@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks, generate_training_curves, save_config_json
+from train.common import setup_gpu, create_callbacks as create_common_callbacks, generate_training_curves, save_config_json, collect_image_paths
 from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.filesystem import count_available_files
@@ -161,31 +161,13 @@ def create_dataset(directories: List[str], config: TrainingConfig, is_training: 
     """Create a tf.data.Dataset of noisy/clean pairs from image directories."""
     logger.info(f"Creating {'training' if is_training else 'validation'} dataset from directories: {directories}")
 
-    all_file_paths = []
-    extensions_set = {ext.lower() for ext in config.image_extensions}
-    extensions_set.update({ext.upper() for ext in config.image_extensions})
-
-    for directory in directories:
-        dir_path = Path(directory)
-        if not dir_path.is_dir():
-            logger.warning(f"Directory not found, skipping: {directory}")
-            continue
-        try:
-            for file_path in dir_path.rglob("*"):
-                if file_path.is_file() and file_path.suffix in extensions_set:
-                    all_file_paths.append(str(file_path))
-        except Exception as e:
-            logger.warning(f"Error scanning directory {directory}: {e}")
+    limit = config.max_train_files if is_training else config.max_val_files
+    all_file_paths = collect_image_paths(
+        directories, extensions=config.image_extensions, max_files=limit
+    )
 
     if not all_file_paths:
         raise ValueError(f"No image files found in directories: {directories}")
-    logger.info(f"Found a total of {len(all_file_paths)} files.")
-
-    limit = config.max_train_files if is_training else config.max_val_files
-    if limit and limit < len(all_file_paths):
-        logger.info(f"Limiting to {limit} files as per configuration.")
-        np.random.shuffle(all_file_paths)
-        all_file_paths = all_file_paths[:limit]
 
     dataset = tf.data.Dataset.from_tensor_slices(all_file_paths)
 
