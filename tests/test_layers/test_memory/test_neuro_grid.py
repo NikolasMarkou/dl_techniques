@@ -6,7 +6,7 @@ import keras
 import tensorflow as tf
 from typing import Any, Dict
 
-from dl_techniques.layers.neuro_grid import NeuroGrid
+from dl_techniques.layers.memory.neuro_grid import NeuroGrid
 
 class TestNeuroGrid:
     """Comprehensive test suite for NeuroGrid layer following modern Keras 3 patterns."""
