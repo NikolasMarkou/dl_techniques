@@ -48,7 +48,7 @@ import tiktoken
 from keras import initializers, regularizers
 
 from train.common import setup_gpu
-from train.common import StepCheckpointCallback
+from train.common import StepCheckpointCallback, GenerationProbeCallback
 from train.common.evaluation import generate_training_curves
 from train.common.nlp import (
     create_tokenizer,
@@ -162,218 +162,33 @@ class TrainingConfig:
 
 
 # ---------------------------------------------------------------------------
-# Generation Probe Callback
+# Generation Probe forward-pass closure
 # ---------------------------------------------------------------------------
 
 
-class GenerationProbeCallback(keras.callbacks.Callback):
-    """Generate sample text before each checkpoint to track quality.
+def _make_logits_fn(model, ctx_length: int, pad_id: int):
+    """Build the next-token ``logits_fn`` closure for ``GenerationProbeCallback``.
 
-    Uses autoregressive decoding with nucleus sampling and repetition
-    penalty. Results are saved to a JSONL file.
-
-    :param probe_every_steps: Run probes every N steps.
-    :param prompts: List of prompt strings to generate from.
-    :param encoding_name: Tiktoken encoding name.
-    :param max_tokens: Maximum tokens to generate per prompt.
-    :param temperature: Sampling temperature.
-    :param top_p: Nucleus sampling threshold.
-    :param repetition_penalty: Penalty for recently generated tokens.
-    :param eot_token_id: End-of-text token used to right-pad context
-        windows and blocked from generation so probes produce
-        continuous text. Defaults to ``tiktoken.get_encoding(
-        encoding_name).eot_token``.
-    :param ctx_length: Context window length used for generation
-        (typically ``max_seq_length - 1``).
-    :param save_dir: Directory to save probe results.
-    :param initial_step: Starting step count (for resume).
+    The model-specific forward pass is lifted VERBATIM from the former local
+    ``GenerationProbeCallback._generate`` loop so behaviour is byte-identical:
+    every call right-pads the (unpadded) ``ctx`` to a fixed ``ctx_length`` with
+    ``pad_id`` (the EOT id), runs the model, and reads the next-token logits
+    from the LAST REAL position ``[0, real - 1, :]`` (NOT the last array
+    position). The fixed input shape collapses ~100 per-length traces into one
+    compiled graph, and reading ``real - 1`` keeps the output semantics
+    identical to a variable-length call. Do NOT replace this with a plain
+    ``model(ctx)[..., -1, :]`` read: the trailing PAD positions are not valid
+    next-token positions for this padded call.
     """
 
-    def __init__(
-        self,
-        probe_every_steps: int = 25000,
-        prompts: Optional[List[str]] = None,
-        encoding_name: str = "gpt2",
-        max_tokens: int = 100,
-        temperature: float = 0.85,
-        top_p: float = 0.92,
-        repetition_penalty: float = 1.3,
-        eot_token_id: Optional[int] = None,
-        ctx_length: int = 511,
-        save_dir: Optional[str] = None,
-        initial_step: int = 0,
-    ):
-        super().__init__()
-        self.probe_every_steps = probe_every_steps
-        self.prompts = prompts or [
-            "The United States of America is a",
-            "In mathematics, a prime number is",
-            "Albert Einstein was born in",
-        ]
-        self.max_tokens = max_tokens
-        self.temperature = temperature
-        self.top_p = top_p
-        self.repetition_penalty = repetition_penalty
-        self._global_step = initial_step
+    def logits_fn(ctx: np.ndarray) -> np.ndarray:
+        real = ctx.shape[1]
+        padded = list(ctx[0]) + [pad_id] * (ctx_length - real)
+        out = model(np.array([padded], dtype="int32"), training=False)
+        return out["logits"][0, real - 1, :].numpy()
 
-        self._enc = tiktoken.get_encoding(encoding_name)
-        # Right-pad every generation call to a fixed shape with the same
-        # EOT token used by the packed CLM preprocessor. Fixed shape
-        # collapses ~100 per-length traces into one compiled graph.
-        self._eot_id = int(eot_token_id if eot_token_id is not None else self._enc.eot_token)
-        self._ctx_len = ctx_length
+    return logits_fn
 
-        self._log_path = None
-        if save_dir:
-            probe_dir = os.path.join(save_dir, "generation_probes")
-            os.makedirs(probe_dir, exist_ok=True)
-            self._log_path = os.path.join(probe_dir, "probes.jsonl")
-
-        logger.info(
-            f"GenerationProbeCallback: {len(self.prompts)} prompts, "
-            f"every {probe_every_steps} steps, "
-            f"max_tokens={max_tokens}, temp={temperature}, top_p={top_p}"
-        )
-
-    def on_train_batch_end(self, batch, logs=None):
-        self._global_step += 1
-        if self._global_step % self.probe_every_steps == 0:
-            self._run_probes(logs)
-
-    def _run_probes(self, logs=None):
-        step = self._global_step
-        train_loss = logs.get("loss", 0.0) if logs else 0.0
-
-        logger.info(f"{'=' * 50}")
-        logger.info(
-            f"Generation probe @ step {step:,} (train_loss={train_loss:.4f})"
-        )
-        logger.info(f"{'=' * 50}")
-
-        probe_results = {
-            "step": step,
-            "train_loss": float(train_loss),
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "generations": [],
-        }
-
-        for prompt in self.prompts:
-            t0 = time.time()
-            text = self._generate(prompt)
-            elapsed = time.time() - t0
-            tokens_generated = (
-                len(self._enc.encode(text)) - len(self._enc.encode(prompt))
-            )
-
-            gen_entry = {
-                "prompt": prompt,
-                "output": text[:500],
-                "tokens": tokens_generated,
-                "time_s": round(elapsed, 2),
-                "tok_per_s": round(
-                    tokens_generated / max(elapsed, 0.01), 1
-                ),
-            }
-            probe_results["generations"].append(gen_entry)
-
-            logger.info(f'Prompt: "{prompt}"')
-            logger.info(f"Output: {text[:300]}")
-            logger.info(
-                f"({tokens_generated} tokens, {elapsed:.1f}s, "
-                f"{gen_entry['tok_per_s']} tok/s)"
-            )
-            logger.info("")
-
-        # Extension point for probe-time aggregate metrics (Self-BLEU,
-        # distinct-2, mean tok/s). Default is a no-op; trainers bind a
-        # concrete hook (e.g. ``augment_probe_results``) on the probe
-        # instance.
-        self._post_generate_hook(probe_results)
-
-        if self._log_path:
-            os.makedirs(os.path.dirname(self._log_path), exist_ok=True)
-            with open(self._log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(probe_results, ensure_ascii=False) + "\n")
-
-    def _post_generate_hook(self, results: dict) -> None:
-        """Override or rebind on the instance for custom probe-time
-        analysis. Receives the full ``results`` dict; may augment it in
-        place. Default: no-op.
-        """
-        return None
-
-    def _generate(self, prompt: str) -> str:
-        """Autoregressive generation with nucleus sampling.
-
-        Every forward pass uses a fixed-length right-padded context so the
-        Keras function cache only ever sees one input shape. Reading the
-        next-token logits from the last real position (not the last array
-        position) keeps the output semantics identical to a variable-length
-        call while avoiding shape-driven retraces.
-        """
-        ids = self._enc.encode(prompt)
-        # Block special tokens from sampling: tiktoken's `decode` raises on
-        # any id at or above the encoder's `n_vocab` (the base vocab end)
-        # because the 4 reserved special-token ids in this codebase
-        # (50257..50260) live outside the BPE table. Suppress them at
-        # logits time so generation is restricted to decodable tokens.
-        special_ids = [
-            i for i in range(self._enc.n_vocab, max(self._enc.n_vocab + 1, 50261))
-        ]
-        ctx_len = self._ctx_len
-        pad_id = self._eot_id
-
-        for _ in range(self.max_tokens):
-            ctx = ids[-ctx_len:]
-            real = len(ctx)
-            padded = ctx + [pad_id] * (ctx_len - real)
-            out = self.model(
-                np.array([padded], dtype="int32"), training=False,
-            )
-            logits = out["logits"][0, real - 1, :].numpy()
-
-            # Block EOT so probes produce continuous text.
-            logits[self._eot_id] = -1e9
-            for sid in special_ids:
-                if sid < logits.shape[0]:
-                    logits[sid] = -1e9
-
-            # Repetition penalty on recent context (sign-aware:
-            # divide positive logits, multiply negative ones)
-            for t in set(ids[-50:]):
-                if t == self._eot_id:
-                    continue
-                if logits[t] >= 0:
-                    logits[t] /= self.repetition_penalty
-                else:
-                    logits[t] *= self.repetition_penalty
-
-            # Temperature scaling
-            logits /= self.temperature
-
-            # Nucleus (top-p) sampling
-            sorted_idx = np.argsort(logits)[::-1]
-            sorted_logits = logits[sorted_idx]
-            probs = np.exp(sorted_logits - sorted_logits[0])
-            probs /= probs.sum()
-            cutoff = np.searchsorted(np.cumsum(probs), self.top_p) + 1
-            top_idx = sorted_idx[:cutoff]
-            top_probs = probs[:cutoff]
-            top_probs /= top_probs.sum()
-
-            next_token = top_idx[np.random.choice(len(top_idx), p=top_probs)]
-            ids.append(int(next_token))
-
-        # `errors="replace"` is a defensive backstop: if a tokenizer surprise
-        # (e.g. partial multi-byte BPE chunk at the tail) sneaks through,
-        # we want a string back, not a probe-side crash that kills training.
-        try:
-            return self._enc.decode(ids)
-        except (KeyError, UnicodeDecodeError) as e:
-            logger.warning(f"Probe decode fell back due to: {e}")
-            return self._enc.decode(
-                [t for t in ids if t < self._enc.n_vocab],
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -666,8 +481,15 @@ def train_cliffordnet_nlp(
         gc_on_save=True,
     ))
 
-    # Generation probes
+    # Generation probes. The forward pass (right-pad to ctx_length, read the
+    # last REAL position) is lifted verbatim into `_make_logits_fn`; the common
+    # callback owns the EOT/special suppression, sign-aware repetition penalty,
+    # temperature, nucleus sampling, decode, and logging.
+    _probe_ctx_length = config.max_seq_length - 1
+    _probe_eot_id = tiktoken.get_encoding(config.encoding_name).eot_token
     probe_cb = GenerationProbeCallback(
+        logits_fn=_make_logits_fn(model, _probe_ctx_length, _probe_eot_id),
+        repetition_penalty_mode="sign_aware",
         probe_every_steps=config.checkpoint_every_steps,
         prompts=config.probe_prompts,
         encoding_name=config.encoding_name,
@@ -675,7 +497,8 @@ def train_cliffordnet_nlp(
         temperature=config.probe_temperature,
         top_p=config.probe_top_p,
         repetition_penalty=config.probe_repetition_penalty,
-        ctx_length=config.max_seq_length - 1,
+        eot_token_id=_probe_eot_id,
+        ctx_length=_probe_ctx_length,
         save_dir=results_dir,
         initial_step=initial_step,
     )
