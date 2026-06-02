@@ -30,10 +30,9 @@ import numpy as np
 import seaborn as sns
 import tensorflow as tf
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks, generate_training_curves, set_seeds, json_numpy_default
+from train.common import setup_gpu, create_callbacks as create_common_callbacks, generate_training_curves, set_seeds, json_numpy_default, create_learning_rate_schedule
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.quantile_loss import QuantileLoss
-from dl_techniques.optimization.warmup_schedule import WarmupSchedule
 from dl_techniques.models.tirex.model import create_tirex_by_variant, TiRexCore
 from dl_techniques.models.tirex.model_extended import create_tirex_extended, TiRexExtended
 from dl_techniques.datasets.time_series import (
@@ -443,16 +442,12 @@ class TiRexTrainer:
         )
 
         if self.config.use_warmup:
-            total_steps = self.config.epochs * self.config.steps_per_epoch
-            primary_schedule = keras.optimizers.schedules.CosineDecay(
-                initial_learning_rate=self.config.learning_rate,
-                decay_steps=max(1, total_steps - self.config.warmup_steps),
-                alpha=0.01
-            )
-            lr_schedule = WarmupSchedule(
+            lr_schedule = create_learning_rate_schedule(
+                self.config.learning_rate, 'cosine',
+                total_epochs=self.config.epochs,
+                steps_per_epoch=self.config.steps_per_epoch,
                 warmup_steps=self.config.warmup_steps,
                 warmup_start_lr=self.config.warmup_start_lr,
-                primary_schedule=primary_schedule
             )
             logger.info("Using Warmup + CosineDecay schedule")
         else:
