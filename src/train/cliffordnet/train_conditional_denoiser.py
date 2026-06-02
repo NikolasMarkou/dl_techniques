@@ -59,6 +59,7 @@ from train.common import (
     generate_training_curves,
     load_dataset,
     save_config_json,
+    collect_image_paths,
 )
 from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.utils.logger import logger
@@ -310,26 +311,22 @@ def create_dense_dataset(
     dirs = config.train_target_dirs if is_training else config.val_target_dirs
     cond_dirs = config.train_cond_dirs if is_training else config.val_cond_dirs
 
-    extensions = {ext.lower() for ext in config.image_extensions}
-    extensions.update({ext.upper() for ext in config.image_extensions})
-
+    # Collect per directory (KEEP local pairing): the original sorted-per-dir
+    # grouping must be preserved so target_files[i] aligns with cond_files[i].
+    # collect_image_paths([d]) sorts within that single dir (sort=True default),
+    # reproducing the original per-dir `sorted(rglob)` exactly; concatenating
+    # per dir keeps the dir-grouping that a global full-path sort would break.
     target_files = []
     for d in dirs:
-        dp = Path(d)
-        if not dp.is_dir():
-            continue
-        for fp in sorted(dp.rglob("*")):
-            if fp.is_file() and fp.suffix in extensions:
-                target_files.append(str(fp))
+        target_files.extend(
+            collect_image_paths([d], extensions=config.image_extensions)
+        )
 
     cond_files = []
     for d in cond_dirs:
-        dp = Path(d)
-        if not dp.is_dir():
-            continue
-        for fp in sorted(dp.rglob("*")):
-            if fp.is_file() and fp.suffix in extensions:
-                cond_files.append(str(fp))
+        cond_files.extend(
+            collect_image_paths([d], extensions=config.image_extensions)
+        )
 
     if not target_files or not cond_files:
         raise ValueError(
@@ -389,25 +386,16 @@ def create_unconditional_dataset(
     Returns batches of (noisy_image, clean_image).
     """
     dirs = config.train_target_dirs if is_training else config.val_target_dirs
-    extensions = {ext.lower() for ext in config.image_extensions}
-    extensions.update({ext.upper() for ext in config.image_extensions})
 
-    all_files = []
-    for d in dirs:
-        dp = Path(d)
-        if not dp.is_dir():
-            continue
-        for fp in dp.rglob("*"):
-            if fp.is_file() and fp.suffix in extensions:
-                all_files.append(str(fp))
+    # Single unpaired list: collect_image_paths handles the cap-then-shuffle
+    # (shuffle ONLY when capping) exactly as the original preamble did.
+    limit = config.max_train_files if is_training else config.max_val_files
+    all_files = collect_image_paths(
+        dirs, extensions=config.image_extensions, max_files=limit
+    )
 
     if not all_files:
         raise ValueError(f"No files found in {dirs}")
-
-    limit = config.max_train_files if is_training else config.max_val_files
-    if limit and limit < len(all_files):
-        np.random.shuffle(all_files)
-        all_files = all_files[:limit]
 
     logger.info(
         f"Found {len(all_files)} files for "
