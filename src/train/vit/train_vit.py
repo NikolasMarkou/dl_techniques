@@ -36,18 +36,6 @@ from dl_techniques.optimization import (
     learning_rate_schedule_builder,
 )
 from dl_techniques.models.vit import ViT, create_vit
-from dl_techniques.visualization import (
-    VisualizationManager,
-    TrainingHistory,
-    PlotConfig,
-    PlotStyle,
-    ColorScheme,
-    TrainingCurvesVisualization,
-    ConfusionMatrixVisualization,
-    NetworkArchitectureVisualization,
-    ModelComparisonBarChart,
-    ROCPRCurves,
-)
 
 
 # =============================================================================

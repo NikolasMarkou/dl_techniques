@@ -38,19 +38,6 @@ from dl_techniques.models.resnet.model import (
     get_model_output_info,
     create_inference_model_from_training_model
 )
-from dl_techniques.visualization import (
-    VisualizationManager,
-    TrainingHistory,
-    ClassificationResults,
-    PlotConfig,
-    PlotStyle,
-    ColorScheme,
-    TrainingCurvesVisualization,
-    ConfusionMatrixVisualization,
-    NetworkArchitectureVisualization,
-    ModelComparisonBarChart,
-    ROCPRCurves
-)
 
 
 # =============================================================================
