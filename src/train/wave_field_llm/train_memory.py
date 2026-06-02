@@ -52,9 +52,8 @@ from train.common.nlp import (
     prepare_dict_keyed_compile,
     augment_probe_results,
 )
-from train.common import StepCheckpointCallback
+from train.common import StepCheckpointCallback, GenerationProbeCallback
 from train.wave_field_llm.pretrain import (
-    GenerationProbeCallback,
     _extract_step_from_checkpoint,
 )
 from dl_techniques.models.memory_bank.wave_field_memory_llm import (
@@ -412,8 +411,15 @@ def train_memory_llm(
         initial_step=initial_step,
     ))
 
+    # Common GenerationProbeCallback owns suppression/sampling/decode; the
+    # closure supplies ONLY the next-position logits vector from the unpadded
+    # ctx (dict output keyed "logits"; divide-mode rep penalty). Copy B's old
+    # `context_window=` maps to `ctx_length=`.
     probe_ctx = max(1, config.max_seq_length - 1)
     probe_cb = GenerationProbeCallback(
+        logits_fn=lambda ctx: model(ctx, training=False)["logits"][0, -1, :].numpy(),
+        repetition_penalty_mode="divide",
+        ctx_length=probe_ctx,
         probe_every_steps=config.checkpoint_every_steps,
         prompts=config.probe_prompts,
         encoding_name=config.encoding_name,
@@ -423,7 +429,6 @@ def train_memory_llm(
         repetition_penalty=config.probe_repetition_penalty,
         save_dir=results_dir,
         initial_step=initial_step,
-        context_window=probe_ctx,
     )
     probe_cb._post_generate_hook = augment_probe_results
     callbacks.append(probe_cb)

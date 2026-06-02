@@ -34,7 +34,7 @@ import tensorflow as tf
 import tiktoken
 
 from train.common import setup_gpu
-from train.common import StepCheckpointCallback
+from train.common import StepCheckpointCallback, GenerationProbeCallback
 from train.common.evaluation import generate_training_curves
 from train.common.nlp import (
     create_tokenizer,
@@ -140,202 +140,6 @@ class TrainingConfig:
     probe_temperature: float = 0.85
     probe_top_p: float = 0.92
     probe_repetition_penalty: float = 1.3
-
-
-# ---------------------------------------------------------------------
-# Generation Probe Callback
-# ---------------------------------------------------------------------
-
-
-class GenerationProbeCallback(keras.callbacks.Callback):
-    """Generate sample text and log metrics before each checkpoint.
-
-    Runs autoregressive generation with nucleus sampling and repetition
-    penalty, logs the output and timing metrics. Results are saved to a
-    JSONL file and printed to the training log.
-
-    Fully configurable: prompts, sampling params, and output format can
-    be customized. Extend ``_post_generate_hook`` for custom analysis.
-
-    :param probe_every_steps: Run probes every N steps (match checkpoint interval).
-    :param prompts: List of prompt strings to generate from.
-    :param encoding_name: Tiktoken encoding name (must match training tokenizer).
-    :param max_tokens: Maximum tokens to generate per prompt.
-    :param temperature: Sampling temperature.
-    :param top_p: Nucleus sampling threshold.
-    :param repetition_penalty: Penalty for recently generated tokens.
-    :param eot_token_id: End-of-text token used to block EOT from the
-        generated stream. Defaults to the encoder's ``eot_token``.
-    :param save_dir: Directory to save probe results.
-    :param initial_step: Starting step count (for resume).
-    """
-
-    def __init__(
-        self,
-        probe_every_steps: int = 25000,
-        prompts: Optional[List[str]] = None,
-        encoding_name: str = "gpt2",
-        max_tokens: int = 100,
-        temperature: float = 0.85,
-        top_p: float = 0.92,
-        repetition_penalty: float = 1.3,
-        eot_token_id: Optional[int] = None,
-        save_dir: Optional[str] = None,
-        initial_step: int = 0,
-    ):
-        super().__init__()
-        self.probe_every_steps = probe_every_steps
-        self.prompts = prompts or [
-            "The United States of America is a",
-            "In mathematics, a prime number is",
-            "Albert Einstein was born in",
-        ]
-        self.max_tokens = max_tokens
-        self.temperature = temperature
-        self.top_p = top_p
-        self.repetition_penalty = repetition_penalty
-        self._global_step = initial_step
-
-        self._enc = tiktoken.get_encoding(encoding_name)
-        self._eot_id = int(eot_token_id if eot_token_id is not None else self._enc.eot_token)
-
-        self._probe_log = []
-        self._log_path = None
-        if save_dir:
-            probe_dir = os.path.join(save_dir, "generation_probes")
-            os.makedirs(probe_dir, exist_ok=True)
-            self._log_path = os.path.join(probe_dir, "probes.jsonl")
-
-        logger.info(
-            f"GenerationProbeCallback: {len(self.prompts)} prompts, "
-            f"every {probe_every_steps} steps, "
-            f"max_tokens={max_tokens}, temp={temperature}, top_p={top_p}"
-        )
-
-    def on_train_batch_end(self, batch, logs=None):
-        self._global_step += 1
-        if self._global_step % self.probe_every_steps == 0:
-            self._run_probes(logs)
-
-    def _run_probes(self, logs=None):
-        """Generate text from all prompts and log results."""
-        step = self._global_step
-        train_loss = logs.get("loss", 0.0) if logs else 0.0
-
-        logger.info(f"{'=' * 50}")
-        logger.info(
-            f"Generation probe @ step {step:,} (train_loss={train_loss:.4f})"
-        )
-        logger.info(f"{'=' * 50}")
-
-        probe_results = {
-            "step": step,
-            "train_loss": float(train_loss),
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "generations": [],
-        }
-
-        for prompt in self.prompts:
-            t0 = time.time()
-            text = self._generate(prompt)
-            elapsed = time.time() - t0
-            tokens_generated = len(self._enc.encode(text)) - len(self._enc.encode(prompt))
-
-            gen_entry = {
-                "prompt": prompt,
-                "output": text[:500],
-                "tokens": tokens_generated,
-                "time_s": round(elapsed, 2),
-                "tok_per_s": round(tokens_generated / max(elapsed, 0.01), 1),
-            }
-            probe_results["generations"].append(gen_entry)
-
-            logger.info(f'Prompt: "{prompt}"')
-            logger.info(f"Output: {text[:300]}")
-            logger.info(
-                f"({tokens_generated} tokens, {elapsed:.1f}s, "
-                f"{gen_entry['tok_per_s']} tok/s)"
-            )
-            logger.info("")
-
-        # Call hook for custom analysis
-        self._post_generate_hook(probe_results)
-
-        # Save to JSONL
-        if self._log_path:
-            with open(self._log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(probe_results, ensure_ascii=False) + "\n")
-
-    def _generate(self, prompt: str) -> str:
-        """Autoregressive generation with nucleus sampling."""
-        ids = self._enc.encode(prompt)
-        # Block special tokens from sampling: tiktoken's `decode` raises on
-        # any id at or above the encoder's `n_vocab` (the base vocab end)
-        # because the 4 reserved special-token ids in this codebase
-        # (50257..50260) live outside the BPE table. Suppress them at
-        # logits time so generation is restricted to decodable tokens.
-        special_ids = [
-            i for i in range(self._enc.n_vocab, max(self._enc.n_vocab + 1, 50261))
-        ]
-
-        for _ in range(self.max_tokens):
-            ctx = ids[-511:]
-            out = self.model(
-                np.array([ctx], dtype="int32"), training=False,
-            )
-            logits = out["logits"][0, -1, :].numpy()
-
-            # Block EOT so probes produce continuous text.
-            logits[self._eot_id] = -1e9
-            for sid in special_ids:
-                if sid < logits.shape[0]:
-                    logits[sid] = -1e9
-
-            # Repetition penalty on recent context
-            for t in set(ids[-50:]):
-                if t == self._eot_id:
-                    continue
-                logits[t] /= self.repetition_penalty
-
-            # Temperature scaling
-            logits /= self.temperature
-
-            # Nucleus (top-p) sampling
-            sorted_idx = np.argsort(logits)[::-1]
-            sorted_logits = logits[sorted_idx]
-            probs = np.exp(sorted_logits - sorted_logits[0])
-            probs /= probs.sum()
-            cutoff = np.searchsorted(np.cumsum(probs), self.top_p) + 1
-            top_idx = sorted_idx[:cutoff]
-            top_probs = probs[:cutoff]
-            top_probs /= top_probs.sum()
-
-            next_token = top_idx[np.random.choice(len(top_idx), p=top_probs)]
-            ids.append(int(next_token))
-
-        # `errors="replace"` is a defensive backstop: if a tokenizer surprise
-        # (e.g. partial multi-byte BPE chunk at the tail) sneaks through,
-        # we want a string back, not a probe-side crash that kills training.
-        try:
-            return self._enc.decode(ids)
-        except (KeyError, UnicodeDecodeError) as e:
-            logger.warning(f"Probe decode fell back due to: {e}")
-            return self._enc.decode(
-                [t for t in ids if t < self._enc.n_vocab],
-            )
-
-    def _post_generate_hook(self, results: dict) -> None:
-        """Override this method in subclasses for custom analysis.
-
-        Called after all prompts are generated. ``results`` contains
-        step, loss, timestamp, and all generations.
-
-        Example uses:
-        - Compute distinct-N diversity metrics
-        - Run a coherence classifier
-        - Log to W&B / TensorBoard
-        """
-        pass
 
 
 # ---------------------------------------------------------------------
@@ -623,8 +427,15 @@ def train_gpt2(
         initial_step=initial_step,
     ))
 
-    # Generation probes — run before each checkpoint to track quality
+    # Generation probes — run before each checkpoint to track quality.
+    # Common GenerationProbeCallback owns suppression/sampling/decode; the
+    # closure supplies ONLY the next-position logits vector from the unpadded
+    # ctx (variable-length, no padding; dict output keyed "logits"; divide-mode
+    # rep penalty). ctx_length=511 matches the former hardcoded `ids[-511:]`.
     probe_cb = GenerationProbeCallback(
+        logits_fn=lambda ctx: model(ctx, training=False)["logits"][0, -1, :].numpy(),
+        repetition_penalty_mode="divide",
+        ctx_length=511,
         probe_every_steps=config.checkpoint_every_steps,
         prompts=config.probe_prompts,
         encoding_name=config.encoding_name,
