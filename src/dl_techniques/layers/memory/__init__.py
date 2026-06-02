@@ -97,6 +97,12 @@ from .som_2d_layer import SOM2dLayer
 from .som_nd_soft_layer import SoftSOMLayer
 
 # ---------------------------------------------------------------------------
+# NeuroGrid (topographic memory grid)
+# ---------------------------------------------------------------------------
+
+from .neuro_grid import NeuroGrid
+
+# ---------------------------------------------------------------------------
 # Factory (recommended construction surface)
 # ---------------------------------------------------------------------------
 
@@ -135,6 +141,8 @@ __all__ = [
     "SOMLayer",
     "SOM2dLayer",
     "SoftSOMLayer",
+    # NeuroGrid
+    "NeuroGrid",
     # Factory functions
     "create_mann",
     "create_som_2d",

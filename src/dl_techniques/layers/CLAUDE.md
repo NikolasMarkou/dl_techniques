@@ -52,6 +52,9 @@ via `dl_techniques.layers.memory.*`:
 - **SOM family** (`som_nd_layer.py`, `som_2d_layer.py`, `som_nd_soft_layer.py`) —
   `SOMLayer` (N-D hard winner), `SOM2dLayer` (2D specialization),
   `SoftSOMLayer` (differentiable / per-dim or global softmax).
+- **NeuroGrid** (`neuro_grid.py`) — `NeuroGrid` topographic memory grid
+  (differentiable soft-assignment grid; uses orthogonal hypersphere init +
+  soft-orthonormal regularization).
 - **Factory** (`factory.py`) — uniform construction surface:
   `create_ntm(...)`, `create_mann(...)` (returns a `NeuralTuringMachine`
   configured to preserve the historical MANN output shape), `create_som_2d(...)`.
@@ -83,7 +86,7 @@ BPE tokenizer implementation.
 Experimental/unstable layers: band RMS OOD, contextual counter FFN, contextual memory, field embeddings, graph MANN, hierarchical evidence LLM, hierarchical memory system, MST correlation filter.
 
 ### Standalone Layers (top-level files)
-Bias-free Conv1D/Conv2D, BitLinear, BLT blocks/core, Canny edge detection, capsules, CLAHE, complex-valued layers, conditional output, Conv2D builder, ConvNeXt v1/v2 blocks, convolutional KAN, depthwise separable, downsample/upsample, dynamic Conv2D, EoMT mask, FiLM, FNet encoder, fractal block, FFT layers, Gaussian filter/pyramid, gated delta net, global sum pool, HANC block/layer, hierarchical MLP stem, inverted residual block, IO preparation, KAN linear, K-means, Laplacian filter, layer scale, mobile-one block, modality projection, MothNet blocks, MPS layer, multi-level feature compilation, neuro grid, one-hot encoding, orthoblock, orthogonal butterfly (exactly-orthogonal Givens butterfly, invertible — `orthogonal_butterfly.md`), patch merging, pixel shuffle, radial basis function, random Fourier features, RepMixer block, res-path, restricted Boltzmann machine, rigid simplex, router, sampling, selective gradient mask, sequence pooling, shearlet transform, sparse autoencoder, spatial layer, squeeze-excitation, standard blocks, stochastic depth/gradient, strong augmentation, TabM blocks, Tversky projection, universal inverted bottleneck, vector quantizer, YOLO12 blocks/heads.
+Bias-free Conv1D/Conv2D, BitLinear, BLT blocks/core, Canny edge detection, capsules, CLAHE, complex-valued layers, conditional output, Conv2D builder, ConvNeXt v1/v2 blocks, convolutional KAN, depthwise separable, downsample/upsample, dynamic Conv2D, EoMT mask, FiLM, FNet encoder, fractal block, FFT layers, Gaussian filter/pyramid, gated delta net, global sum pool, HANC block/layer, hierarchical MLP stem, inverted residual block, IO preparation, KAN linear, K-means, Laplacian filter, layer scale, mobile-one block, modality projection, MothNet blocks, MPS layer, multi-level feature compilation, one-hot encoding, orthoblock, orthogonal butterfly (exactly-orthogonal Givens butterfly, invertible — `orthogonal_butterfly.md`), patch merging, pixel shuffle, radial basis function, random Fourier features, RepMixer block, res-path, restricted Boltzmann machine, rigid simplex, router, sampling, selective gradient mask, sequence pooling, shearlet transform, sparse autoencoder, spatial layer, squeeze-excitation, standard blocks, stochastic depth/gradient, strong augmentation, TabM blocks, Tversky projection, universal inverted bottleneck, vector quantizer, YOLO12 blocks/heads.
 
 ## Conventions
 

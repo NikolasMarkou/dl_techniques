@@ -69,10 +69,10 @@ TRM Approach:
 
 TRM is an excellent choice for tasks requiring deep reasoning where parameter efficiency is critical:
 
--   🧩 **Algorithmic Puzzles**: Solving tasks like Sudoku or mathematical reasoning problems.
+-   **Algorithmic Puzzles**: Solving tasks like Sudoku or mathematical reasoning problems.
 -   **Planning and Logic**: Performing multi-step logical deductions.
 -   **Resource-Constrained Environments**: Deploying advanced reasoning on edge devices or where memory and compute are limited.
--   🧠 **Cognitive Science Modeling**: Provides a compelling model for iterative human thought processes.
+-   **Cognitive Science Modeling**: Provides a compelling model for iterative human thought processes.
 
 ---
 

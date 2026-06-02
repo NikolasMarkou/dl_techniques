@@ -23,7 +23,7 @@ from keras import layers, callbacks, datasets
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.neuro_grid import NeuroGrid
+from dl_techniques.layers.memory.neuro_grid import NeuroGrid
 from dl_techniques.regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
 
 # ---------------------------------------------------------------------
