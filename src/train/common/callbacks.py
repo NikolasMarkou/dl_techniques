@@ -1,12 +1,15 @@
 """Common callback and learning rate schedule utilities for training scripts."""
 
 import os
+import json
 import keras
 from datetime import datetime
-from typing import Tuple, List, Optional, Any
+from typing import Tuple, List, Dict, Optional, Any
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
+from train.common.config_io import json_numpy_default
+from train.common.evaluation import generate_training_curves
 
 
 # ---------------------------------------------------------------------
@@ -165,3 +168,131 @@ def create_learning_rate_schedule(
         )
     else:  # constant
         return initial_lr
+
+
+# ---------------------------------------------------------------------
+
+# NOT @keras.saving.register_keras_serializable: callbacks are never
+# serialized as part of a model (StepCheckpointCallback precedent, SYSTEM.md).
+class EpochMetricsPlotCallback(keras.callbacks.Callback):
+    """Accumulate per-epoch metrics and emit mid-training curve PNGs.
+
+    Replaces the three near-identical hand-rolled per-epoch matplotlib
+    metrics callbacks previously local to ``resnet``, ``vit``, and ``bfunet``
+    (plan_2026-06-02_35651564, F10). Accumulates ``loss`` plus each requested
+    metric (and its ``val_`` counterpart) across epochs, then on a fixed
+    cadence delegates plotting to
+    :func:`train.common.evaluation.generate_training_curves` so no raw
+    matplotlib lives in ``common``.
+
+    The plot guard is fail-soft-but-LOUD: a plotting failure is logged at
+    WARNING with a traceback and never aborts the (multi-hour) training run.
+
+    Args:
+        viz_dir: Directory the per-epoch PNGs (and optional JSON) are written
+            into. Created with ``exist_ok=True`` at construction time.
+        metric_names: Metric keys (besides ``loss``) to accumulate and plot,
+            e.g. ``["accuracy", "top5_accuracy"]``. Each entry's ``val_``
+            counterpart is also tracked when present in the epoch logs.
+        every_n: Plot cadence. A plot is produced when
+            ``(epoch + 1) % every_n == 0`` or on the first epoch
+            (``epoch == 0``). Defaults to ``5``.
+        write_json: If ``True``, also dump the latest accumulated metrics to
+            ``viz_dir/latest_metrics.json`` (serialized via
+            :func:`train.common.config_io.json_numpy_default`). Defaults to
+            ``False``.
+    """
+
+    def __init__(
+            self,
+            viz_dir: str,
+            metric_names: List[str],
+            every_n: int = 5,
+            write_json: bool = False,
+    ) -> None:
+        super().__init__()
+        # LESSON: makedirs at the top of every save-capable component.
+        os.makedirs(viz_dir, exist_ok=True)
+
+        self.viz_dir = viz_dir
+        self.metric_names = list(metric_names)
+        self.every_n = every_n
+        self.write_json = write_json
+
+        # Accumulators: 'loss' + each metric, plus their 'val_' counterparts.
+        # val_ keys are appended only when present in a given epoch's logs.
+        self.train_metrics: Dict[str, List[float]] = {
+            "loss": [],
+            **{name: [] for name in self.metric_names},
+        }
+        self.val_metrics: Dict[str, List[float]] = {
+            "val_loss": [],
+            **{f"val_{name}": [] for name in self.metric_names},
+        }
+
+    def on_epoch_end(
+            self, epoch: int, logs: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Bucket float-coercible logs, then plot on the configured cadence."""
+        if logs is None:
+            logs = {}
+
+        for metric_name, metric_value in logs.items():
+            try:
+                val = float(metric_value)
+            except (ValueError, TypeError):
+                continue
+            if metric_name in self.train_metrics:
+                self.train_metrics[metric_name].append(val)
+            elif metric_name in self.val_metrics:
+                self.val_metrics[metric_name].append(val)
+
+        if (epoch + 1) % self.every_n == 0 or epoch == 0:
+            self._plot(epoch)
+
+    def _build_history(self) -> Dict[str, List[float]]:
+        """Assemble the dict ``generate_training_curves`` consumes.
+
+        Drops empty accumulators so a never-populated ``val_`` key does not
+        produce a zero-length series.
+        """
+        history: Dict[str, List[float]] = {}
+        for key, values in self.train_metrics.items():
+            if values:
+                history[key] = values
+        for key, values in self.val_metrics.items():
+            if values:
+                history[key] = values
+        return history
+
+    def _plot(self, epoch: int) -> None:
+        """Delegate per-epoch curve plotting; fail-soft-but-loud."""
+        # LESSON: makedirs again at save time (dir may have been removed).
+        os.makedirs(self.viz_dir, exist_ok=True)
+        try:
+            history = self._build_history()
+            if not history.get("loss"):
+                return
+
+            generate_training_curves(
+                history,
+                self.viz_dir,
+                filename=f"epoch_{epoch + 1:03d}_metrics",
+            )
+
+            if self.write_json:
+                metrics_data = {
+                    "epoch": epoch + 1,
+                    "train_metrics": self.train_metrics,
+                    "val_metrics": self.val_metrics,
+                }
+                json_path = os.path.join(self.viz_dir, "latest_metrics.json")
+                with open(json_path, "w") as f:
+                    json.dump(
+                        metrics_data, f, indent=2, default=json_numpy_default
+                    )
+        except Exception as e:
+            logger.warning(
+                f"EpochMetricsPlotCallback: failed to create metrics plots: {e}",
+                exc_info=True,
+            )
