@@ -1,26 +1,77 @@
 """Learnable exactly-orthogonal layer via a butterfly of 2x2 Givens rotations.
 
-This is the operator-valued sibling of the polar weight reparameterization
-(`layers/norms/polar_weight_norm.py`, after PolarQuant, Han et al. 2025). The
-polar transform organizes a vector's angles into a ``log2(d)``-level binary tree
-of coordinate pairs; here the *same hierarchical pairing* is used to build a
-structured **orthogonal** ``d x d`` linear map: ``log2(d)`` stages, each applying
-``d/2`` independent 2x2 rotations to coordinate pairs separated by a doubling
-stride (the Cooley-Tukey / FFT butterfly access pattern).
+A learnable, exactly-orthogonal d x d linear layer built from a log-depth
+butterfly of 2x2 Givens rotations. This is the operator-valued sibling of the
+polar weight reparameterization (layers/norms/polar_weight_norm.py, after
+PolarQuant, Han et al. 2025): the polar transform arranges a vector's angles
+into a log2(d)-level binary tree of coordinate pairs; OrthogonalButterfly uses
+the same hierarchical pairing to parameterize a structured orthogonal d x d
+linear map -- log2(d) stages, each applying d/2 independent 2x2 rotations to
+coordinate pairs separated by a doubling stride (the Cooley-Tukey / FFT
+butterfly access pattern).
 
-The map is exactly orthogonal by construction (each 2x2 rotation is orthogonal
-and the rotations in a stage act on disjoint coordinate pairs), needs no matrix
-inverse, no Cayley/expm, and no soft penalty. Cost is ``O(d log d)`` versus
-``O(d^2)`` for a dense orthogonal layer, with ``(d/2) * log2(d)`` angle
-parameters per block. With ``angle_initializer='zeros'`` the layer is the
-identity, which makes it a stable drop-in / residual building block.
+A single butterfly block spans only the FFT-structured subset of SO(d);
+num_blocks > 1 composes several blocks to recover expressivity.
 
-A single butterfly block spans only the FFT-structured subset of ``SO(d)``;
-``num_blocks > 1`` composes several blocks to recover expressivity.
+Mathematical Foundation:
+    For d = 2^L, the transform is num_blocks butterfly blocks, each of L
+    stages. Stage s uses stride = 2^s and views the flattened vector x as the
+    shape (.., d/(2*stride), 2, stride), pairing partners that are stride apart.
+    Each such pair [a; b] is rotated by its own angle θ:
 
-Note: unlike `PolarWeightNorm`, this layer requires the feature dimension to be
-a power of two and does NOT pad -- padding cannot preserve orthogonality on the
-original subspace.
+        [a; b] -> [a·cosθ - b·sinθ ; a·sinθ + b·cosθ]
+
+    so a stage performs d/2 disjoint 2x2 rotations (the Cooley-Tukey / FFT
+    access pattern). Because each 2x2 rotation is orthogonal and the rotations
+    within a stage act on disjoint coordinate pairs, every stage -- and the
+    product of all stages and blocks -- is orthogonal.
+
+Properties:
+    Exactly orthogonal for any angle values: WᵀW = I and ‖layer(x)‖ = ‖x‖
+    (verified to ~1e-7). The construction needs no matrix inverse, no
+    Cayley/expm, and no soft orthogonality penalty.
+
+    Cheap: O(d log d) compute and (d/2)·log2(d) angle parameters per block,
+    versus O(d²) for a dense orthogonal layer.
+
+    Identity at init: with angle_initializer='zeros' (the default) layer(x) = x,
+    making it a stable drop-in / residual building block.
+
+Constraints:
+    Power-of-two feature dimension only. A non-power-of-two d raises a
+    ValueError. Unlike PolarWeightNorm (which zero-pads and renormalizes),
+    padding cannot preserve orthogonality on the original subspace, so it is
+    rejected rather than padded. The map is square: output dim == input dim == d.
+
+Invertibility (Normalizing Flows):
+    The transform is exactly invertible -- W⁻¹ = Wᵀ -- realized by reversing the
+    block/stage order and transposing each 2x2 rotation (R(θ)⁻¹ = R(-θ)). With a
+    bias the forward map is y = Wx + b and the inverse is x = Wᵀ(y - b) (the bias
+    is subtracted before the inverse rotation). call(x, inverse=True) and the
+    convenience alias layer.inverse(x) compute the exact inverse;
+    log_det_jacobian(x) returns 0 (one scalar per vector) -- the
+    change-of-variables contribution of an orthogonal flow step.
+
+When to Use:
+    Normalizing flows -- orthogonality gives a zero log-det Jacobian together
+    with a cheap, exact inverse (inverse=True): a nearly free, expressive
+    linear/rotation flow step.
+
+    Orthogonal RNN recurrence -- norm-preserving recurrent maps avoid exploding
+    and vanishing hidden-state norms.
+
+    Lossless / invertible blocks, structured mixing layers, or a cheap learnable
+    replacement for a fixed orthogonal transform (e.g. a DCT/FFT-like map).
+
+References:
+    - Butterfly / Givens parameterizations of orthogonal matrices via the
+      Cooley-Tukey factorization (cf. butterfly / Kaleidoscope matrices,
+      Dao et al.).
+    - The recursive coordinate-pairing tree of PolarQuant
+      (arXiv:2502.02617); see norms/polar_weight_norm.md.
+    - Distinct from OrthoBlock (layers/orthoblock.py), which is a soft
+      orthogonally-regularized Dense, not an exact orthogonal operator.
+    - Tests: tests/test_layers/test_orthogonal_butterfly.py.
 """
 
 import keras
@@ -81,6 +132,8 @@ def _butterfly_apply(
             x = ops.reshape(xr, (-1, d))
     return x
 
+
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class OrthogonalButterfly(keras.layers.Layer):
@@ -259,3 +312,5 @@ class OrthogonalButterfly(keras.layers.Layer):
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
         })
         return config
+
+# ---------------------------------------------------------------------
