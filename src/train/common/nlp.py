@@ -13,6 +13,7 @@ import tiktoken
 from typing import List, Optional, Tuple
 
 from train.common import create_callbacks as create_common_callbacks
+from train.common.generation_probe import GenerationProbeCallback
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tokenizer import TiktokenPreprocessor
@@ -607,4 +608,5 @@ __all__ = [
     "build_clm_metrics",
     "prepare_dict_keyed_compile",
     "augment_probe_results",
+    "GenerationProbeCallback",
 ]

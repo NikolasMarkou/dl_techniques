@@ -21,6 +21,7 @@ from train.common.nlp import (
     create_warmup_lr_schedule,
     create_nlp_callbacks,
     estimate_clm_steps_per_epoch,
+    GenerationProbeCallback,
 )
 from train.common.image_text import (
     IMAGE_MEAN,
