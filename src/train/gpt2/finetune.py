@@ -37,7 +37,7 @@ from typing import Optional, Tuple
 # local imports
 # ---------------------------------------------------------------------
 
-from train.common import setup_gpu, StepPlotCallback
+from train.common import setup_gpu, StepPlotCallback, set_seeds
 from train.common.nlp import (
     create_tokenizer,
     preprocess_clm_dataset,
@@ -317,8 +317,7 @@ def finetune_gpt2(
     logger.info("GPT-2 Domain Fine-tuning (CLM)")
     logger.info("=" * 60)
 
-    tf.random.set_seed(config.seed)
-    keras.utils.set_random_seed(config.seed)
+    set_seeds(config.seed)
     os.makedirs(config.save_dir, exist_ok=True)
 
     # Tokenizer (must match pre-trained model)

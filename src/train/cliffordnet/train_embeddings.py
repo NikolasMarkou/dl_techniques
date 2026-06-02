@@ -19,7 +19,7 @@ from typing import Optional, Tuple
 import keras
 import tensorflow as tf
 
-from train.common import setup_gpu
+from train.common import setup_gpu, set_seeds
 from train.common.nlp import (
     create_nlp_callbacks,
     create_tokenizer,
@@ -170,8 +170,7 @@ def train_cliffordnet_embedding_mlm(
     logger.info("CliffordNetEmbedding MLM Pre-training with Tiktoken")
     logger.info("=" * 60)
 
-    tf.random.set_seed(42)
-    keras.utils.set_random_seed(42)
+    set_seeds(42)
     os.makedirs(config.save_dir, exist_ok=True)
 
     preprocessor = create_tokenizer(

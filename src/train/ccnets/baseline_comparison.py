@@ -42,7 +42,7 @@ import keras
 import numpy as np
 import tensorflow as tf
 
-from train.common import setup_gpu
+from train.common import setup_gpu, set_seeds
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.ccnets import CCNetTrainer
 from dl_techniques.models.ccnets.control import StaticThresholdStrategy
@@ -104,7 +104,7 @@ def _ccnet_reasoner_accuracy(orchestrator, x_test, y_test, batch=512) -> float:
 # --------------------------------------------------------------------- runs
 def run_baseline(x, y, x_test, y_test, seed: int) -> float:
     """Train MNISTReasoner standalone (X-only, cross-entropy) for STEP_BUDGET steps."""
-    keras.utils.set_random_seed(seed)
+    set_seeds(seed)
     config = ModelConfig(explanation_dim=EXPLANATION_DIM)
     reasoner = MNISTReasoner(config)
     reasoner(keras.ops.zeros((1, 28, 28, 1)), keras.ops.zeros((1, EXPLANATION_DIM)))
@@ -131,7 +131,7 @@ def run_baseline(x, y, x_test, y_test, seed: int) -> float:
 
 def run_ccnet(x, y, x_test, y_test, seed: int) -> float:
     """Train a full CCNet for ~STEP_BUDGET steps; return its Reasoner's test accuracy."""
-    keras.utils.set_random_seed(seed)
+    set_seeds(seed)
     steps_per_epoch = math.ceil(len(x) / BATCH)
     epochs = max(1, math.ceil(STEP_BUDGET / steps_per_epoch))
 

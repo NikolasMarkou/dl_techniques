@@ -46,7 +46,7 @@ import numpy as np
 
 from dl_techniques.layers.logic import LearnableNeuralCircuit
 from dl_techniques.utils.logger import logger
-from train.common import setup_gpu
+from train.common import setup_gpu, set_seeds
 from train.logic.clevr_hans_data import (
     FEATURE_WIDTH,
     build_image_dataset,
@@ -344,7 +344,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     setup_gpu(args.gpu)
-    keras.utils.set_random_seed(args.seed)
+    set_seeds(args.seed)
 
     ts = time.strftime("%Y%m%d_%H%M%S")
     out_dir = args.out_dir or os.path.join("results", f"logic_e5_{ts}")

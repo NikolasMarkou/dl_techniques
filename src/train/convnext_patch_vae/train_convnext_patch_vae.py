@@ -58,7 +58,7 @@ from dl_techniques.models.convnext_patch_vae.config import (
 )
 from dl_techniques.models.convnext_patch_vae.model import ConvNeXtPatchVAE
 from dl_techniques.callbacks.training_curves import TrainingCurvesCallback
-from train.common import setup_gpu, create_base_argument_parser, create_callbacks, save_config_json, CIFAR10_MEAN, CIFAR10_STD
+from train.common import setup_gpu, create_base_argument_parser, create_callbacks, save_config_json, CIFAR10_MEAN, CIFAR10_STD, set_seeds
 from train.convnext_patch_vae.callbacks import (
     LatentSpaceCallback,
     LatentInterpolationCallback,
@@ -1317,7 +1317,7 @@ def main() -> None:
 
     # Seed python/numpy/tf/keras AFTER GPU config (set_random_seed initialises
     # TF). Makes dataset shuffle and weight initialisation reproducible.
-    keras.utils.set_random_seed(args.seed)
+    set_seeds(args.seed)
 
     # --datasets overrides --dataset when provided.
     datasets = getattr(args, "datasets", None) or [args.dataset]

@@ -32,7 +32,7 @@ import numpy as np
 
 from dl_techniques.layers.logic import LearnableNeuralCircuit
 from dl_techniques.utils.logger import logger
-from train.common import setup_gpu, create_callbacks
+from train.common import setup_gpu, create_callbacks, set_seeds
 
 
 # ---------------------------------------------------------------------
@@ -212,7 +212,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     setup_gpu(args.gpu)
-    keras.utils.set_random_seed(args.seed)
+    set_seeds(args.seed)
     rng_train = np.random.default_rng(args.seed)
     rng_test = np.random.default_rng(args.seed + 1)
 

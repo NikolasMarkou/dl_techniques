@@ -22,7 +22,7 @@ from dl_techniques.optimization import optimizer_builder, learning_rate_schedule
 from dl_techniques.datasets.vision.coco import COCODatasetBuilder
 from dl_techniques.metrics.multi_label_metrics import MultiLabelMetrics
 from dl_techniques.losses.multi_labels_loss import create_multilabel_segmentation_loss
-from train.common import setup_gpu, create_callbacks as create_common_callbacks
+from train.common import setup_gpu, create_callbacks as create_common_callbacks, set_seeds
 
 
 def setup_environment():
@@ -503,7 +503,7 @@ def main():
     parser.add_argument("--random-seed", type=int, default=42)
 
     args = parser.parse_args()
-    keras.utils.set_random_seed(args.random_seed)
+    set_seeds(args.random_seed)
 
     if args.data_dir is None:
         args.data_dir = os.getenv("TFDS_DATA_DIR", "~/tensorflow_datasets/")

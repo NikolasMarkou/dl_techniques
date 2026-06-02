@@ -27,7 +27,7 @@ import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
 
-from train.common import setup_gpu
+from train.common import setup_gpu, set_seeds
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.ccnets import CCNetTrainer
 from train.ccnets.mnist import (
@@ -152,7 +152,7 @@ def main() -> None:
     rows: List[Dict[str, float]] = []
     for dim in LATENT_DIMS:
         logger.info(f"=== explanation_dim = {dim} ===")
-        keras.utils.set_random_seed(SEED)
+        set_seeds(SEED)
         config = ExperimentConfig(
             model=ModelConfig(explanation_dim=dim),
             training=TrainingConfig(epochs=EPOCHS, kl_annealing_epochs=EPOCHS // 3),

@@ -50,7 +50,7 @@ import numpy as np
 
 from dl_techniques.layers.logic import LearnableNeuralCircuit
 from dl_techniques.utils.logger import logger
-from train.common import setup_gpu, load_dataset
+from train.common import setup_gpu, load_dataset, set_seeds
 from train.logic.callbacks_band import StopOnAccuracyBand
 from train.logic.train_benchmark import (
     extract_hard_inplace,
@@ -379,7 +379,7 @@ def _dataset_stem(dataset: str) -> Tuple[int, ...]:
 def main() -> None:
     args = parse_args()
     setup_gpu(args.gpu)
-    keras.utils.set_random_seed(args.seed)
+    set_seeds(args.seed)
 
     ts = time.strftime("%Y%m%d_%H%M%S")
     if args.out_dir is None:

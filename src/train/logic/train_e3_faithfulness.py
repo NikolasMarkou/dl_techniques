@@ -45,7 +45,7 @@ import keras
 import numpy as np
 
 from dl_techniques.utils.logger import logger
-from train.common import setup_gpu
+from train.common import setup_gpu, set_seeds
 from train.logic.attributions import (
     circuit_attributions,
     lime_attributions,
@@ -333,7 +333,7 @@ def _resolve_tasks(tasks_arg: str) -> List[str]:
 def main() -> None:
     args = parse_args()
     setup_gpu(args.gpu)
-    keras.utils.set_random_seed(args.seed)
+    set_seeds(args.seed)
     ts = time.strftime("%Y%m%d_%H%M%S")
     if args.out_dir is None:
         out_dir = os.path.join("results", f"logic_e3_{ts}")

@@ -57,7 +57,7 @@ from dl_techniques.layers.logic import LearnableNeuralCircuit
 from dl_techniques.layers.logic.arithmetic_operators import LearnableArithmeticOperator
 from dl_techniques.layers.logic.logic_operators import LearnableLogicOperator
 from dl_techniques.utils.logger import logger
-from train.common import setup_gpu
+from train.common import setup_gpu, set_seeds
 
 
 # ---------------------------------------------------------------------
@@ -317,7 +317,7 @@ def train_one(
     num_bits = spec["num_bits"]
     num_outputs = spec["num_outputs"]
 
-    keras.utils.set_random_seed(seed)
+    set_seeds(seed)
     rng_train = np.random.default_rng(seed)
     rng_test = np.random.default_rng(seed + 1000)
     X_train, Y_train = gen(train_samples, rng_train)
