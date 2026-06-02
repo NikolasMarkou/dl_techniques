@@ -33,6 +33,7 @@ from dl_techniques.utils.logger import logger
 
 from train.common import (
     setup_gpu,
+    create_base_argument_parser,
     load_dataset,
     get_class_names,
     create_callbacks,
@@ -400,24 +401,21 @@ def train_model(args: argparse.Namespace) -> None:
 
 def main():
     """Main entry point."""
-    parser = argparse.ArgumentParser(
-        description='Train PowerMLP on image classification datasets'
+    parser = create_base_argument_parser(
+        'Train PowerMLP on image classification datasets',
+        default_dataset='mnist',
+        dataset_choices=['mnist', 'cifar10'],
     )
 
-    parser.add_argument('--dataset', type=str, default='mnist',
-                        choices=['mnist', 'cifar10'], help='Dataset to use')
+    # Preserve this script's historical defaults where they differ from the
+    # base parser (CLI defaults are intentional behavior — do not change).
+    parser.set_defaults(batch_size=128, learning_rate=0.0003, patience=15)
+
+    # Model-specific arguments (not provided by the base parser).
     parser.add_argument('--validation-split', type=float, default=0.1,
                         help='Validation split fraction')
-    parser.add_argument('--epochs', type=int, default=100,
-                        help='Number of training epochs')
-    parser.add_argument('--batch-size', type=int, default=128,
-                        help='Training batch size')
     parser.add_argument('--optimizer', type=str, default='adam',
                         help='Optimizer to use')
-    parser.add_argument('--learning-rate', type=float, default=0.0003,
-                        help='Learning rate')
-    parser.add_argument('--patience', type=int, default=15,
-                        help='Early stopping patience')
     parser.add_argument('--architecture', type=str, default='default',
                         choices=['small', 'default', 'large', 'deep'],
                         help='Model architecture size')
@@ -427,7 +425,6 @@ def main():
                         help='Dropout rate')
     parser.add_argument('--batch-normalization', action='store_true',
                         help='Enable batch normalization')
-    parser.add_argument('--gpu', type=int, default=None, help='GPU device index')
 
     args = parser.parse_args()
 

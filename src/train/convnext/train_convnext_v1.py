@@ -20,6 +20,7 @@ from dl_techniques.visualization import (
 
 from train.common import (
     setup_gpu,
+    create_base_argument_parser,
     load_dataset,
     get_class_names,
     create_callbacks,
@@ -334,13 +335,9 @@ def train_model(args: argparse.Namespace) -> None:
 
 def main():
     """Main entry point."""
-    parser = argparse.ArgumentParser(description='Train ConvNeXt V1 model with ImageNet support.')
+    parser = create_base_argument_parser('Train ConvNeXt V1 model with ImageNet support.')
 
-    parser.add_argument('--dataset', type=str, default='cifar10',
-                        choices=['mnist', 'cifar10', 'cifar100', 'imagenet'],
-                        help='Dataset to use')
-    parser.add_argument('--image-size', type=int, default=224,
-                        help='Image size for ImageNet (default: 224)')
+    # Model-specific arguments (not provided by the base parser).
     parser.add_argument('--variant', type=str, default='tiny',
                         choices=['cifar10', 'tiny', 'small', 'base', 'large', 'xlarge'],
                         help='Model variant')
@@ -348,21 +345,6 @@ def main():
                         help='Depthwise kernel size')
     parser.add_argument('--strides', type=int, default=4,
                         help='Downsampling strides')
-    parser.add_argument('--epochs', type=int, default=100,
-                        help='Number of training epochs')
-    parser.add_argument('--batch-size', type=int, default=64,
-                        help='Training batch size')
-    parser.add_argument('--learning-rate', type=float, default=1e-3,
-                        help='Initial learning rate')
-    parser.add_argument('--weight-decay', type=float, default=1e-4,
-                        help='Weight decay for optimizer')
-    parser.add_argument('--lr-schedule', type=str, default='cosine',
-                        choices=['cosine', 'exponential', 'constant'],
-                        help='Learning rate schedule')
-    parser.add_argument('--patience', type=int, default=50,
-                        help='Early stopping patience')
-    parser.add_argument('--show-plots', action='store_true', default=False,
-                        help='Show plots interactively')
 
     args = parser.parse_args()
 

@@ -27,6 +27,7 @@ from dl_techniques.analyzer import AnalysisConfig
 
 from train.common import (
     setup_gpu,
+    create_base_argument_parser,
     load_dataset,
     get_class_names,
     create_callbacks,
@@ -347,23 +348,16 @@ def train_model(args: argparse.Namespace):
 
 def main():
     """Main entry point."""
-    parser = argparse.ArgumentParser(description='Train a ConvNeXt V2 model with comprehensive visualizations.')
+    parser = create_base_argument_parser(
+        'Train a ConvNeXt V2 model with comprehensive visualizations.',
+        dataset_choices=['mnist', 'cifar10', 'cifar100'],
+    )
 
-    parser.add_argument('--dataset', type=str, default='cifar10',
-                        choices=['mnist', 'cifar10', 'cifar100'], help='Dataset to use')
+    # Model-specific arguments (not provided by the base parser).
     parser.add_argument('--variant', type=str, default='cifar10',
                         choices=['cifar10', 'tiny', 'small', 'base', 'large', 'xlarge'], help='Model variant')
     parser.add_argument('--kernel-size', type=int, default=7, help='Depthwise kernel size')
     parser.add_argument('--strides', type=int, default=4, help='Downsampling strides')
-    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
-    parser.add_argument('--batch-size', type=int, default=64, help='Training batch size')
-    parser.add_argument('--learning-rate', type=float, default=1e-3, help='Initial learning rate')
-    parser.add_argument('--weight-decay', type=float, default=1e-4, help='Weight decay for optimizer')
-    parser.add_argument('--lr-schedule', type=str, default='cosine',
-                        choices=['cosine', 'exponential', 'constant'], help='Learning rate schedule')
-    parser.add_argument('--patience', type=int, default=50, help='Early stopping patience')
-    parser.add_argument('--show-plots', action='store_true', default=False,
-                        help='Show plots interactively during execution')
 
     args = parser.parse_args()
 
