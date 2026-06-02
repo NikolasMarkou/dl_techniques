@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from train.common import setup_gpu, collect_image_paths
+from train.common import setup_gpu, collect_image_paths, augment_patch
 from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.optimization.train_vision import (
     TrainingConfig,
@@ -136,11 +136,12 @@ class BFUNetDatasetBuilder(DatasetBuilder):
             )
 
     def _augment_patch(self, patch: tf.Tensor) -> tf.Tensor:
-        patch = tf.image.random_flip_left_right(patch)
-        patch = tf.image.random_flip_up_down(patch)
-        k = tf.random.uniform([], 0, 4, dtype=tf.int32)
-        patch = tf.image.rot90(patch, k)
-        return patch
+        # DECISION plan_2026-06-02_cc4d4e14/D-005: thin method wrapper delegating
+        # to the common free function `augment_patch`. Do NOT re-inline the
+        # flip/rot90 body here — the method shell is kept only to preserve the
+        # `self._augment_patch` call surface in the tf.data .map() pipeline
+        # (smaller diff than rewiring all call-sites). See decisions.md D-005.
+        return augment_patch(patch)
 
     def _add_noise(self, patch: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
         if self.config.noise_distribution == 'uniform':

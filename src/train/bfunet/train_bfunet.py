@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks, save_config_json, collect_image_paths, EpochMetricsPlotCallback
+from train.common import setup_gpu, create_callbacks as create_common_callbacks, save_config_json, collect_image_paths, EpochMetricsPlotCallback, augment_patch
 from dl_techniques.losses import ScaledMseLoss
 from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.utils.logger import logger
@@ -159,14 +159,6 @@ def load_and_preprocess_image(image_path: tf.Tensor, config: TrainingConfig) -> 
     except tf.errors.InvalidArgumentError:
         logger.warning(f"Failed to load image: {image_path}")
         return tf.zeros([config.patch_size, config.patch_size, config.channels], dtype=tf.float32)
-
-
-def augment_patch(patch: tf.Tensor) -> tf.Tensor:
-    """Apply random flips and 90-degree rotations."""
-    patch = tf.image.random_flip_left_right(patch)
-    patch = tf.image.random_flip_up_down(patch)
-    k = tf.random.uniform([], 0, 4, dtype=tf.int32)
-    return tf.image.rot90(patch, k)
 
 
 def add_noise_to_patch(patch: tf.Tensor, config: TrainingConfig) -> Tuple[tf.Tensor, tf.Tensor]:

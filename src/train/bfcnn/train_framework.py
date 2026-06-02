@@ -18,7 +18,7 @@ from dl_techniques.models.bias_free_denoisers.bfcnn import (
     create_bfcnn_denoiser, BFCNN_CONFIGS, create_bfcnn_variant,
 )
 from dl_techniques.analyzer import DataInput
-from train.common import setup_gpu, collect_image_paths
+from train.common import setup_gpu, collect_image_paths, augment_patch
 from dl_techniques.metrics.psnr_metric import PsnrMetric
 
 
@@ -105,11 +105,12 @@ class DenoisingDatasetBuilder(DatasetBuilder):
             return tf.zeros([self.config.patch_size, self.config.patch_size, self.config.channels], dtype=tf.float32)
 
     def _augment_patch(self, patch: tf.Tensor) -> tf.Tensor:
-        patch = tf.image.random_flip_left_right(patch)
-        patch = tf.image.random_flip_up_down(patch)
-        k = tf.random.uniform([], 0, 4, dtype=tf.int32)
-        patch = tf.image.rot90(patch, k)
-        return patch
+        # DECISION plan_2026-06-02_cc4d4e14/D-005: thin method wrapper delegating
+        # to the common free function `augment_patch`. Do NOT re-inline the
+        # flip/rot90 body here — the method shell is kept only to preserve the
+        # `self._augment_patch` call surface in the tf.data .map() pipeline
+        # (smaller diff than rewiring all call-sites). See decisions.md D-005.
+        return augment_patch(patch)
 
     def _add_noise(self, patch: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
         if self.config.noise_distribution == 'uniform':

@@ -34,6 +34,7 @@ from train.common import (
     generate_training_curves,
     save_config_json,
     collect_image_paths,
+    augment_patch,
 )
 from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.utils.logger import logger
@@ -183,14 +184,6 @@ def load_and_preprocess_image(
             [config.patch_size, config.patch_size, config.channels],
             dtype=tf.float32,
         )
-
-
-def augment_patch(patch: tf.Tensor) -> tf.Tensor:
-    """Apply random flips and 90-degree rotations."""
-    patch = tf.image.random_flip_left_right(patch)
-    patch = tf.image.random_flip_up_down(patch)
-    k = tf.random.uniform([], 0, 4, dtype=tf.int32)
-    return tf.image.rot90(patch, k)
 
 
 def add_noise_to_patch(

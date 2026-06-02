@@ -68,6 +68,8 @@ from train.common import (
     load_dataset,
     save_config_json,
     collect_image_paths,
+    augment_patch,
+    augment_pair,
 )
 from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.utils.logger import logger
@@ -214,24 +216,16 @@ def _sample_noise_level(config: ConfidenceTrainingConfig) -> tf.Tensor:
 
 
 def _augment_patch(patch: tf.Tensor) -> tf.Tensor:
-    """Apply random flips and 90-degree rotations."""
-    patch = tf.image.random_flip_left_right(patch)
-    patch = tf.image.random_flip_up_down(patch)
-    k = tf.random.uniform([], 0, 4, dtype=tf.int32)
-    return tf.image.rot90(patch, k)
+    """Delegate to common ``augment_patch`` (kept as a thin local alias to
+    preserve the ``_augment_patch`` call surface in the dataset pipeline)."""
+    return augment_patch(patch)
 
 
 def _augment_pair(
     target: tf.Tensor, cond: tf.Tensor
 ) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Apply synchronized augmentations to target/conditioning pair."""
-    combined = tf.concat([target, cond], axis=-1)
-    combined = tf.image.random_flip_left_right(combined)
-    combined = tf.image.random_flip_up_down(combined)
-    k = tf.random.uniform([], 0, 4, dtype=tf.int32)
-    combined = tf.image.rot90(combined, k)
-    t_ch = target.shape[-1]
-    return combined[..., :t_ch], combined[..., t_ch:]
+    """Delegate to common ``augment_pair`` (thin local alias)."""
+    return augment_pair(target, cond)
 
 
 def create_discrete_dataset(
