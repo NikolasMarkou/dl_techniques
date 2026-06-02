@@ -501,9 +501,9 @@ def main(argv: Optional[list] = None) -> None:
         weight_decay=args.weight_decay,
     )
 
-    # Per-head metrics (see VISION_BENCHMARKS.md / METRICS.md):
-    #   recon        -> PSNR + SSIM        (fidelity, METRICS.md §13)
-    #   segmentation -> pixel-acc + mIoU   (METRICS.md §3; mIoU is the
+    # Per-head metrics (see research/benchmarks/VISION_BENCHMARKS.md / research/benchmarks/METRICS.md):
+    #   recon        -> PSNR + SSIM        (fidelity, research/benchmarks/METRICS.md §13)
+    #   segmentation -> pixel-acc + mIoU   (research/benchmarks/METRICS.md §3; mIoU is the
     #                                       primary semseg metric).
     # MeanIoU(sparse_y_true=True, sparse_y_pred=False) takes argmax over
     # the logits' last axis internally, so passing the raw seg logits is
