@@ -10,7 +10,7 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Tuple, Optional, Dict, Any, List
 
-from train.common import setup_gpu, create_base_argument_parser, create_callbacks, save_config_json
+from train.common import setup_gpu, create_base_argument_parser, create_callbacks, save_config_json, load_dataset
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.memory.som_nd_soft_layer import SoftSOMLayer
 
@@ -85,13 +85,7 @@ def load_cifar_data(config: CIFARSOMConfig) -> Tuple[
 ]:
     """Load and preprocess CIFAR dataset, normalized to [0, 1]."""
     logger.info(f"Loading {config.dataset_name}...")
-    if config.dataset_name == 'cifar10':
-        (x_train, y_train), (x_test, y_test) = keras.datasets.cifar10.load_data()
-    else:
-        (x_train, y_train), (x_test, y_test) = keras.datasets.cifar100.load_data()
-
-    x_train = x_train.astype("float32") / 255.0
-    x_test = x_test.astype("float32") / 255.0
+    (x_train, y_train), (x_test, y_test), _, _ = load_dataset(config.dataset_name)
     logger.info(f"Train: {x_train.shape[0]}, Test: {x_test.shape[0]}, Shape: {x_train.shape[1:]}")
     return (x_train, y_train), (x_test, y_test)
 

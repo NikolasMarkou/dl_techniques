@@ -29,6 +29,7 @@ import keras
 import numpy as np
 import tensorflow as tf
 
+from train.common import load_dataset
 from dl_techniques.models.resnet.model import create_resnet
 from dl_techniques.utils.logger import logger
 
@@ -44,11 +45,9 @@ from train.rms_variants_train.seed_utils import set_seeds
 
 
 def _load_cifar100(seed: int = 0) -> Tuple[Tuple[np.ndarray, np.ndarray], Tuple[np.ndarray, np.ndarray]]:
-    (x_tr, y_tr), (x_val, y_val) = keras.datasets.cifar100.load_data()
-    x_tr = x_tr.astype(np.float32) / 255.0
-    x_val = x_val.astype(np.float32) / 255.0
-    y_tr = y_tr.flatten().astype(np.int64)
-    y_val = y_val.flatten().astype(np.int64)
+    (x_tr, y_tr), (x_val, y_val), _, _ = load_dataset("cifar100")
+    y_tr = y_tr.astype(np.int64)
+    y_val = y_val.astype(np.int64)
     return (x_tr, y_tr), (x_val, y_val)
 
 

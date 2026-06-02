@@ -13,7 +13,7 @@ import tensorflow as tf
 from typing import Tuple, Dict, Any, Optional
 import matplotlib.pyplot as plt
 
-from train.common import setup_gpu, create_base_argument_parser, create_callbacks
+from train.common import setup_gpu, create_base_argument_parser, create_callbacks, load_dataset
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.metrics.psnr_metric import PsnrMetric
@@ -87,10 +87,10 @@ def load_restoration_dataset(
 
 def _create_synthetic_dataset(img_size, batch_size):
     """Create synthetic low-light data from CIFAR-10 for testing."""
-    (x_train, _), (x_test, _) = keras.datasets.cifar10.load_data()
+    (x_train, _), (x_test, _), _, _ = load_dataset("cifar10")
 
-    x_train = tf.image.resize(x_train, img_size).numpy() / 255.0
-    x_test = tf.image.resize(x_test, img_size).numpy() / 255.0
+    x_train = tf.image.resize(x_train, img_size).numpy()
+    x_test = tf.image.resize(x_test, img_size).numpy()
 
     def darken(img):
         img_dark = img ** 2.5
