@@ -30,7 +30,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks
+from train.common import setup_gpu, create_callbacks as create_common_callbacks, save_config_json, convert_keras_history_to_training_history, CIFAR10_MEAN, CIFAR10_STD
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
     optimizer_builder,
@@ -142,7 +142,7 @@ class TrainingConfig:
 
 def get_cifar_preprocessing() -> Tuple[List[float], List[float]]:
     """Return CIFAR mean/std for normalization."""
-    return [0.4914, 0.4822, 0.4465], [0.2470, 0.2435, 0.2616]
+    return CIFAR10_MEAN, CIFAR10_STD
 
 
 def _cifar_augment(image: tf.Tensor, label: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
@@ -480,26 +480,6 @@ def setup_visualization_manager(experiment_name: str, results_dir: str) -> Visua
     return viz_manager
 
 
-def convert_keras_history_to_training_history(
-        keras_history: keras.callbacks.History,
-) -> TrainingHistory:
-    history_dict = keras_history.history
-    epochs = list(range(len(history_dict["loss"])))
-    train_metrics: Dict[str, List[float]] = {}
-    val_metrics: Dict[str, List[float]] = {}
-    for key, values in history_dict.items():
-        if key.startswith("val_") and key != "val_loss":
-            val_metrics[key.replace("val_", "")] = values
-        elif not key.startswith("val_") and key != "loss":
-            train_metrics[key] = values
-    return TrainingHistory(
-        epochs=epochs,
-        train_loss=history_dict["loss"],
-        val_loss=history_dict.get("val_loss", []),
-        train_metrics=train_metrics, val_metrics=val_metrics,
-    )
-
-
 # =============================================================================
 # MAIN TRAINING
 # =============================================================================
@@ -526,8 +506,7 @@ def train_vit(
 
     output_dir = Path(config.output_dir) / config.experiment_name
     output_dir.mkdir(parents=True, exist_ok=True)
-    with open(output_dir / "config.json", "w") as f:
-        json.dump(config.__dict__, f, indent=2, default=str)
+    save_config_json(config, str(output_dir), "config.json")
 
     # ---- Datasets ----
     if config.dataset in ("cifar10", "cifar100"):

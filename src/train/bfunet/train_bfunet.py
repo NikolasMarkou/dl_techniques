@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks
+from train.common import setup_gpu, create_callbacks as create_common_callbacks, save_config_json
 from dl_techniques.losses import ScaledMseLoss
 from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.utils.logger import logger
@@ -728,8 +728,7 @@ def train_bfunet_denoiser(config: TrainingConfig) -> keras.Model:
     # Setup and save config
     output_dir = Path(config.output_dir) / config.experiment_name
     output_dir.mkdir(parents=True, exist_ok=True)
-    with open(output_dir / "config.json", 'w') as f:
-        json.dump(config.__dict__, f, indent=2, default=str)
+    save_config_json(config, str(output_dir), "config.json")
 
     # Validate directories
     for d in config.train_image_dirs:

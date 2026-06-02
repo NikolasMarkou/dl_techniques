@@ -46,6 +46,8 @@ from train.common import (
     setup_gpu,
     create_callbacks as create_common_callbacks,
     generate_training_curves,
+    set_seeds,
+    json_numpy_default,
 )
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.quantile_loss import QuantileLoss
@@ -69,10 +71,7 @@ sns.set_palette("husl")
 
 def set_random_seeds(seed: int = 42) -> None:
     """Set random seeds for Python, NumPy, Keras and TF."""
-    random.seed(seed)
-    np.random.seed(seed)
-    keras.utils.set_random_seed(seed)
-    tf.random.set_seed(seed)
+    set_seeds(seed)
 
 
 # ---------------------------------------------------------------------
@@ -719,15 +718,6 @@ class AdaptiveEMATrainer:
     def _save_results(
         self, results: Dict[str, Any], exp_dir: str
     ) -> None:
-        def json_convert(o: Any) -> Any:
-            if isinstance(o, np.floating):
-                return float(o)
-            if isinstance(o, np.integer):
-                return int(o)
-            if isinstance(o, np.ndarray):
-                return o.tolist()
-            return str(o)
-
         serializable = {
             "history": results["history"],
             "test_metrics": results["test_metrics"],
@@ -736,7 +726,7 @@ class AdaptiveEMATrainer:
             "config": self.config.__dict__,
         }
         with open(os.path.join(exp_dir, "results.json"), "w") as f:
-            json.dump(serializable, f, indent=4, default=json_convert)
+            json.dump(serializable, f, indent=4, default=json_numpy_default)
 
     def _export_to_onnx(
         self, model_path: str, exp_dir: str

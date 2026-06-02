@@ -66,6 +66,7 @@ from train.common import (
     create_callbacks as create_common_callbacks,
     generate_training_curves,
     load_dataset,
+    save_config_json,
 )
 from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.utils.logger import logger
@@ -1294,8 +1295,7 @@ def train_confidence_denoiser(
 
     output_dir = Path(config.output_dir) / config.experiment_name
     output_dir.mkdir(parents=True, exist_ok=True)
-    with open(output_dir / "config.json", "w") as f:
-        json.dump(config.__dict__, f, indent=2, default=str)
+    save_config_json(config, str(output_dir), "config.json")
 
     # Create datasets
     input_shape = None

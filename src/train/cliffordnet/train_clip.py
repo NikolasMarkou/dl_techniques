@@ -170,6 +170,7 @@ from dl_techniques.optimization import (
 from dl_techniques.utils.logger import logger
 
 from train.common import (
+    StepCheckpointCallback,
     build_synthetic_image_text_dataset,
     load_cc3m_local_split,
     load_coco2017_local_split,
@@ -427,137 +428,6 @@ def _compute_retrieval_metrics(
 # A single global step counter persists across stage 1 and stage 2 so the
 # step-interval checkpoints and retrieval probes form one coherent timeline
 # for the whole training run.
-
-
-class StepCheckpointCallback(keras.callbacks.Callback):
-    """Save checkpoints and step-level metrics at fixed step intervals.
-
-    Mirrors the CliffordNet LM step-checkpoint pattern: maintain a rolling
-    window of the ``max_checkpoints`` most recent ``step_NNNNNNN.keras``
-    files plus a ``final.keras`` on ``on_train_end``. Also writes per-step
-    metrics to ``training_log.csv`` every ``log_every_steps`` steps.
-
-    The callback does not reset its global step counter between stages —
-    pass the same instance to every ``fit()`` call so the checkpoint
-    timeline is continuous.
-
-    :param save_dir: Run directory. Creates ``checkpoints/`` and
-        ``training_log.csv`` inside it.
-    :param save_every_steps: Checkpoint interval in training steps.
-    :param max_checkpoints: Rolling window size for step-NNN files.
-    :param log_every_steps: Step-level CSV logging interval.
-    :param initial_step: Starting step count (for resume).
-    """
-
-    def __init__(
-        self,
-        save_dir: str,
-        save_every_steps: int = 500,
-        max_checkpoints: int = 3,
-        log_every_steps: int = 50,
-        initial_step: int = 0,
-    ) -> None:
-        super().__init__()
-        self.save_every_steps = save_every_steps
-        self.max_checkpoints = max_checkpoints
-        self.log_every_steps = log_every_steps
-        self._global_step = initial_step
-
-        self._ckpt_dir = os.path.join(save_dir, "checkpoints")
-        os.makedirs(self._ckpt_dir, exist_ok=True)
-
-        self._csv_path = os.path.join(save_dir, "training_log.csv")
-        self._csv_file: Optional[Any] = None
-        self._csv_writer: Optional[csv.DictWriter] = None
-
-        logger.info(
-            f"StepCheckpointCallback: save every {save_every_steps:,} steps, "
-            f"log every {log_every_steps:,} steps, "
-            f"keep max {max_checkpoints} checkpoints"
-        )
-
-    @property
-    def global_step(self) -> int:
-        return self._global_step
-
-    def on_train_batch_end(self, batch: int, logs: Optional[Dict[str, Any]] = None) -> None:
-        self._global_step += 1
-
-        if self._global_step % self.log_every_steps == 0:
-            self._log_metrics(logs)
-
-        if self._global_step % self.save_every_steps == 0:
-            self._save_checkpoint()
-
-    def on_train_end(self, logs: Optional[Dict[str, Any]] = None) -> None:
-        # Close the CSV handle and save a ``final.keras`` snapshot. Both
-        # stages call this at their end, so ``final.keras`` always reflects
-        # the most recent trained weights.
-        if self._csv_file is not None:
-            self._csv_file.flush()
-        path = os.path.join(self._ckpt_dir, "final.keras")
-        try:
-            self.model.save(path)
-            logger.info(f"Final checkpoint saved: {path}")
-        except Exception as exc:
-            logger.warning(f"Failed to write final.keras: {exc}")
-
-    def close(self) -> None:
-        if self._csv_file is not None:
-            self._csv_file.close()
-            self._csv_file = None
-            self._csv_writer = None
-
-    def _log_metrics(self, logs: Optional[Dict[str, Any]]) -> None:
-        if logs is None:
-            return
-        row = {"step": self._global_step}
-        for k, v in logs.items():
-            try:
-                row[k] = float(v)
-            except (TypeError, ValueError):
-                continue
-        if self._csv_writer is None:
-            self._csv_file = open(self._csv_path, "a", newline="")
-            self._csv_writer = csv.DictWriter(
-                self._csv_file, fieldnames=list(row.keys())
-            )
-            if self._csv_file.tell() == 0:
-                self._csv_writer.writeheader()
-        # Pad any new keys that appeared mid-run with None.
-        for k in self._csv_writer.fieldnames:
-            row.setdefault(k, None)
-        self._csv_writer.writerow(row)
-        self._csv_file.flush()
-
-    def _save_checkpoint(self) -> None:
-        path = os.path.join(
-            self._ckpt_dir, f"step_{self._global_step:07d}.keras"
-        )
-        try:
-            self.model.save(path)
-        except Exception as exc:
-            logger.warning(f"Checkpoint save failed at step {self._global_step}: {exc}")
-            return
-        # Release the transient NumPy copies Keras allocates during native
-        # .keras serialization. Same motivation as the CliffordNet LM script.
-        gc.collect()
-        logger.info(
-            f"Checkpoint saved: {path} (step {self._global_step:,})"
-        )
-        self._cleanup_old_checkpoints()
-
-    def _cleanup_old_checkpoints(self) -> None:
-        ckpts = sorted(
-            glob.glob(os.path.join(self._ckpt_dir, "step_*.keras"))
-        )
-        while len(ckpts) > self.max_checkpoints:
-            old = ckpts.pop(0)
-            try:
-                os.remove(old)
-                logger.info(f"Removed old checkpoint: {old}")
-            except OSError as exc:
-                logger.warning(f"Could not remove {old}: {exc}")
 
 
 class RetrievalProbeCallback(keras.callbacks.Callback):
@@ -1492,6 +1362,8 @@ def train(args: argparse.Namespace) -> None:
         save_every_steps=args.save_every_steps,
         max_checkpoints=args.max_checkpoints,
         log_every_steps=args.log_every_steps,
+        analyze_every_steps=0,
+        gc_on_save=True,
     )
     retrieval_probe_cb = RetrievalProbeCallback(
         clip_model=clip_model,

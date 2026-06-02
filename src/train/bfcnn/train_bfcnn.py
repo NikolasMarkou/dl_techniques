@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks, generate_training_curves
+from train.common import setup_gpu, create_callbacks as create_common_callbacks, generate_training_curves, save_config_json
 from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.filesystem import count_available_files
@@ -451,8 +451,7 @@ def train_bfcnn_denoiser(config: TrainingConfig) -> keras.Model:
 
     output_dir = Path(config.output_dir) / config.experiment_name
     output_dir.mkdir(parents=True, exist_ok=True)
-    with open(output_dir / "config.json", 'w') as f:
-        json.dump(config.__dict__, f, indent=2, default=str)
+    save_config_json(config, str(output_dir), "config.json")
 
     for d in config.train_image_dirs:
         if not Path(d).exists():

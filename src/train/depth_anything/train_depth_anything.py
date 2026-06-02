@@ -46,6 +46,8 @@ from typing import Tuple, List, Optional, Any
 from train.common import (
     setup_gpu,
     create_callbacks as create_common_callbacks,
+    set_seeds,
+    save_config_json,
 )
 from train.common.megadepth import (
     discover_megadepth_pairs,
@@ -393,11 +395,7 @@ def create_model(config: DepthAnythingTrainingConfig) -> DepthAnything:
 
 def _set_seeds(seed: int) -> None:
     """Seed Python, NumPy, TensorFlow, and Keras for reproducible init."""
-    random.seed(seed)
-    np.random.seed(seed)
-    tf.random.set_seed(seed)
-    keras.utils.set_random_seed(seed)
-    logger.info(f"Seeded random (python, numpy, tf, keras) = {seed}")
+    set_seeds(seed)
 
 
 def train_depth_anything(config: DepthAnythingTrainingConfig) -> DepthAnything:
@@ -582,8 +580,7 @@ def train_depth_anything(config: DepthAnythingTrainingConfig) -> DepthAnything:
             batch_size=config.batch_size,
         )
 
-    with open(output_dir / "config.json", "w") as f:
-        json.dump(config.__dict__, f, indent=2, default=str)
+    save_config_json(config, str(output_dir), "config.json")
 
     start_time = time.time()
 

@@ -81,6 +81,7 @@ from train.cliffordnet.train_cliffordnet import (
 from train.common import (
     create_callbacks,
     load_dataset,
+    set_seeds,
     setup_gpu,
     validate_model_loading,
 )
@@ -122,12 +123,7 @@ def _apply_seed(seed: Optional[int]) -> None:
     """
     if seed is None:
         return
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    random.seed(seed)
-    np.random.seed(seed)
-    tf.random.set_seed(seed)
-    keras.utils.set_random_seed(seed)
-    logger.info(f"Seeded Python/NumPy/TF/Keras with seed={seed}")
+    set_seeds(seed)
 
 
 # ---------------------------------------------------------------------

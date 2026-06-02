@@ -21,7 +21,7 @@ from dataclasses import dataclass, asdict
 from typing import List, Tuple, Optional, Dict, Any
 from pathlib import Path
 
-from train.common import setup_gpu
+from train.common import setup_gpu, set_seeds
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.byte_latent_transformer.model import create_blt_model
 from dl_techniques.layers.blt_blocks import ByteTokenizer, EntropyModel
@@ -292,9 +292,7 @@ class BLTTrainer:
         config.save_to_file(str(Path(self.config.output_dir) / "config.json"))
 
     def _setup_environment(self) -> None:
-        random.seed(self.config.random_seed)
-        np.random.seed(self.config.random_seed)
-        keras.utils.set_random_seed(self.config.random_seed)
+        set_seeds(self.config.random_seed)
 
         if self.config.mixed_precision:
             keras.mixed_precision.set_global_policy('mixed_float16')

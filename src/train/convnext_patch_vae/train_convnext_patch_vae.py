@@ -58,7 +58,7 @@ from dl_techniques.models.convnext_patch_vae.config import (
 )
 from dl_techniques.models.convnext_patch_vae.model import ConvNeXtPatchVAE
 from dl_techniques.callbacks.training_curves import TrainingCurvesCallback
-from train.common import setup_gpu, create_base_argument_parser, create_callbacks
+from train.common import setup_gpu, create_base_argument_parser, create_callbacks, save_config_json, CIFAR10_MEAN, CIFAR10_STD
 from train.convnext_patch_vae.callbacks import (
     LatentSpaceCallback,
     LatentInterpolationCallback,
@@ -69,8 +69,8 @@ CUSTOM_OBJECTS = {
 }
 
 # Per-channel statistics for MSE normalisation (mean/std per dataset)
-_CIFAR10_MEAN  = np.array([0.4914, 0.4822, 0.4465], dtype=np.float32)
-_CIFAR10_STD   = np.array([0.2470, 0.2435, 0.2616], dtype=np.float32)
+_CIFAR10_MEAN  = np.array(CIFAR10_MEAN, dtype=np.float32)
+_CIFAR10_STD   = np.array(CIFAR10_STD, dtype=np.float32)
 _CIFAR100_MEAN = np.array([0.5071, 0.4867, 0.4408], dtype=np.float32)
 _CIFAR100_STD  = np.array([0.2675, 0.2565, 0.2761], dtype=np.float32)
 
@@ -1080,9 +1080,7 @@ def train(config: TrainingConfig, smoke: bool = False) -> None:
     # ------------------------------------------------------------------
     # Persist config before fit (helps debug mid-run crashes)
     # ------------------------------------------------------------------
-    config_path = os.path.join(results_dir, "config.json")
-    with open(config_path, "w") as f:
-        json.dump(dataclasses.asdict(config), f, indent=2, default=str)
+    config_path = save_config_json(config, results_dir, "config.json")
     logger.info(f"Config saved to {config_path}")
 
     # ------------------------------------------------------------------

@@ -17,7 +17,7 @@ import numpy as np
 import seaborn as sns
 import tensorflow as tf
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks, generate_training_curves
+from train.common import setup_gpu, create_callbacks as create_common_callbacks, generate_training_curves, set_seeds
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.mase_loss import MASELoss
 from dl_techniques.models.nbeats import create_nbeats_model
@@ -33,10 +33,7 @@ sns.set_palette("husl")
 
 def set_random_seeds(seed: int = 42) -> None:
     """Set random seeds for reproducibility."""
-    random.seed(seed)
-    np.random.seed(seed)
-    keras.utils.set_random_seed(seed)
-    tf.random.set_seed(seed)
+    set_seeds(seed)
 
 
 set_random_seeds(42)

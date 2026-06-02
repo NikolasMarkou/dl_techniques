@@ -35,6 +35,8 @@ from train.common import (
     create_callbacks,
     validate_model_loading,
     run_model_analysis,
+    CIFAR10_MEAN,
+    CIFAR10_STD,
 )
 
 
@@ -50,8 +52,8 @@ Variant = Literal["nano", "lite", "lite_g", "custom"]
 
 _CIFAR_STATS: Dict[str, Dict[str, np.ndarray]] = {
     "cifar10": {
-        "mean": np.array([0.4914, 0.4822, 0.4465], dtype=np.float32),
-        "std": np.array([0.2470, 0.2435, 0.2616], dtype=np.float32),
+        "mean": np.array(CIFAR10_MEAN, dtype=np.float32),
+        "std": np.array(CIFAR10_STD, dtype=np.float32),
     },
     "cifar100": {
         "mean": np.array([0.5071, 0.4867, 0.4408], dtype=np.float32),

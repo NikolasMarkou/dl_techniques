@@ -27,7 +27,7 @@ import seaborn as sns
 import tensorflow as tf
 from scipy import stats
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks, generate_training_curves
+from train.common import setup_gpu, create_callbacks as create_common_callbacks, generate_training_curves, set_seeds, json_numpy_default
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.mdn import MDNModel
 from dl_techniques.datasets.time_series import (
@@ -43,10 +43,7 @@ sns.set_palette("husl")
 
 def set_random_seeds(seed: int = 42) -> None:
     """Set random seeds for reproducibility."""
-    random.seed(seed)
-    np.random.seed(seed)
-    keras.utils.set_random_seed(seed)
-    tf.random.set_seed(seed)
+    set_seeds(seed)
 
 
 set_random_seeds(42)
@@ -485,18 +482,13 @@ class MDNTrainer:
         return {'history': history.history, 'test_metrics': test_metrics}
 
     def _save_results(self, results: Dict, exp_dir: str) -> None:
-        def json_convert(o):
-            if isinstance(o, (np.floating, np.integer)):
-                return str(o)
-            return str(o)
-
         serializable = {
             'history': results['history'],
             'test_metrics': {k: float(v) for k, v in results['test_metrics'].items()},
             'config': self.config.__dict__
         }
         with open(os.path.join(exp_dir, 'results.json'), 'w') as f:
-            json.dump(serializable, f, indent=4, default=json_convert)
+            json.dump(serializable, f, indent=4, default=json_numpy_default)
 
 
 def parse_args() -> argparse.Namespace:

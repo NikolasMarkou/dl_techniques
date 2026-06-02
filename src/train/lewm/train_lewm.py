@@ -32,7 +32,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 import keras
 import tensorflow as tf
 
-from train.common import setup_gpu, create_base_argument_parser
+from train.common import setup_gpu, create_base_argument_parser, set_seeds
 from dl_techniques.models.lewm.config import LeWMConfig
 from dl_techniques.models.lewm.model import LeWM
 from dl_techniques.datasets.pusht_hdf5 import (
@@ -43,10 +43,7 @@ from dl_techniques.utils.logger import logger
 
 
 def _set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    tf.random.set_seed(seed)
-    keras.utils.set_random_seed(seed)
+    set_seeds(seed)
 
 
 def _build_model(args: argparse.Namespace) -> LeWM:

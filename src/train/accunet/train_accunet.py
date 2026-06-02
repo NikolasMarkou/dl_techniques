@@ -48,7 +48,7 @@ import numpy as np
 # dl_techniques imports
 # ---------------------------------------------------------------------
 
-from train.common import setup_gpu, create_callbacks
+from train.common import setup_gpu, create_callbacks, set_seeds
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
     optimizer_builder,
@@ -463,14 +463,7 @@ def compile_model(
 
 
 def _seed_everything(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    try:
-        import tensorflow as tf
-        tf.random.set_seed(seed)
-    except ImportError:  # pragma: no cover
-        pass
-    keras.utils.set_random_seed(seed)
+    set_seeds(seed)
 
 
 def run_training(config: AccUNetTrainingConfig) -> Tuple[keras.Model, str]:

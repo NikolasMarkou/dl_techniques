@@ -10,6 +10,18 @@ from dl_techniques.utils.logger import logger
 
 
 # ---------------------------------------------------------------------
+# CIFAR-10 per-channel normalisation constants (computed from the CIFAR-10
+# training set). These are CIFAR-10 channel mean/std and are DISTINCT from
+# the OpenAI CLIP IMAGE_MEAN/IMAGE_STD in common/image_text.py (those are
+# [0.48145466, ...]). Do not conflate the two. Kept as plain lists so each
+# call site can wrap with np.array(...) when it needs array broadcasting.
+# ---------------------------------------------------------------------
+
+CIFAR10_MEAN = [0.4914, 0.4822, 0.4465]
+CIFAR10_STD = [0.2470, 0.2435, 0.2616]
+
+
+# ---------------------------------------------------------------------
 
 def load_imagenet_dataset(
         image_size: Tuple[int, int] = (224, 224),

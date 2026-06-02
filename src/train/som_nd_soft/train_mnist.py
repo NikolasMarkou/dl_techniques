@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import Tuple, Optional, Dict, Any, List
 
-from train.common import setup_gpu, create_callbacks
+from train.common import setup_gpu, create_callbacks, save_config_json
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.memory.som_nd_soft_layer import SoftSOMLayer
 
@@ -461,8 +461,7 @@ def train_mnist_som_classifier(config: MNISTSOMConfig) -> keras.Model:
     )
     output_dir = Path(results_dir)
 
-    with open(output_dir / "config.json", 'w') as f:
-        json.dump(config.__dict__, f, indent=2, default=str)
+    save_config_json(config, str(output_dir), "config.json")
 
     # Domain-specific callback
     callbacks.append(SOMVisualizationCallback(config, x_test, y_test))

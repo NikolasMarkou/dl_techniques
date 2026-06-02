@@ -44,6 +44,8 @@ from typing import Tuple, List, Optional, Dict, Any
 from train.common import (
     setup_gpu,
     create_callbacks as create_common_callbacks,
+    set_seeds,
+    save_config_json,
 )
 from train.common.megadepth import (
     discover_megadepth_pairs,
@@ -475,11 +477,7 @@ def _set_seeds(seed: int) -> None:
     dataset shuffle ordering is not reproducible.  Model weight initialization,
     optimizer state, and any in-process RNG draws are reproducible.
     """
-    random.seed(seed)
-    np.random.seed(seed)
-    tf.random.set_seed(seed)
-    keras.utils.set_random_seed(seed)
-    logger.info(f"Seeded random (python, numpy, tf, keras) = {seed}")
+    set_seeds(seed)
 
 
 def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
@@ -675,8 +673,7 @@ def train_depth_estimation(config: DepthTrainingConfig) -> keras.Model:
     output_dir = Path(results_dir)
 
     # Save config
-    with open(output_dir / "config.json", "w") as f:
-        json.dump(config.__dict__, f, indent=2, default=str)
+    save_config_json(config, str(output_dir), "config.json")
 
     # Train
     start_time = time.time()

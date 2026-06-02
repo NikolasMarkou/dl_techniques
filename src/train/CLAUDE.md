@@ -400,6 +400,11 @@ create_callbacks(
 - `run_model_analysis(model, test_data, history, name, results_dir, config)` — full ModelAnalyzer pipeline.
 - `discover_megadepth_pairs(root)`, `MegaDepthDataset(...)` — MegaDepth RGB+depth dataset pipeline.
 - `compare_runs(run_a_dir, run_b_dir, labels, output_dir)` — side-by-side two-run comparison. CLI: `python -m train.common.compare_runs A B [--labels A B]`. Emits `comparison.md` + PNG loss/metric curves.
+- `StepCheckpointCallback(save_dir, save_every_steps, analyze_every_steps=0, max_checkpoints, model_name, initial_step, log_every_steps, plot_every_steps, step_counter=None, gc_on_save=False, csv_fields=None)` — step-indexed CSV logging + rolling `.keras` checkpoint window + optional periodic ModelAnalyzer (`analyze_every_steps=0` disables it) + step-loss plots. Pass an external `step_counter` for resume/shared-counter setups (else an internal counter is used); `gc_on_save=True` runs `gc.collect()` after each save; `csv_fields=None` uses a dynamic schema, a tuple pins a fixed schema. Use instead of a per-trainer step-checkpoint class.
+- `set_seeds(seed)` — canonical reproducible seeding (sets `PYTHONHASHSEED` + `random` + `numpy` + `keras.utils.set_random_seed`). Use instead of an inline RNG-seeding block.
+- `save_config_json(config, results_dir, filename="config.json")` — dump a dataclass / object / dict config to JSON (dataclass-aware, numpy-safe). Returns the written path.
+- `json_numpy_default` — pass as `json.dump(..., default=json_numpy_default)` to serialize numpy scalars / arrays (native numeric, not strings).
+- `CIFAR10_MEAN`, `CIFAR10_STD` — CIFAR-10 per-channel mean/std for normalization. Distinct from the OpenAI-CLIP `IMAGE_MEAN`/`IMAGE_STD` in `image_text.py` — never conflate the two.
 
 **Use from `dl_techniques` (library-level components):**
 - `dl_techniques.metrics.depth_metrics` — AbsRelMetric, DeltaThresholdMetric, SqRelMetric, RMSEMetric, RMSELogMetric.

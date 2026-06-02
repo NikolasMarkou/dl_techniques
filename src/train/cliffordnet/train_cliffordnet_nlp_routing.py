@@ -100,7 +100,6 @@ LR) would help; not currently implemented.
 """
 
 import os
-import csv
 import gc
 import json
 import glob
@@ -116,8 +115,8 @@ import tiktoken
 from keras import initializers
 
 from train.common import setup_gpu
+from train.common import StepCheckpointCallback
 from train.common.evaluation import generate_training_curves
-from train.common import plot_step_metrics
 from train.common.nlp import (
     create_tokenizer,
     load_text_dataset,
@@ -145,7 +144,6 @@ from dl_techniques.models.cliffordnet import CliffordNetLMRouting
 from dl_techniques.utils.logger import logger
 from dl_techniques.datasets.nlp import load_wikipedia_train_val
 from dl_techniques.losses import MaskedCausalLMLoss, FocalCausalLMLoss
-from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig
 
 
 _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
@@ -283,191 +281,6 @@ class StepCounter(keras.callbacks.Callback):
 
     def on_train_batch_end(self, batch, logs=None):
         self.value += 1
-
-
-# ---------------------------------------------------------------------------
-# Step-based Checkpoint & Analysis Callback
-# ---------------------------------------------------------------------------
-
-
-# Stable CSV schema — DictWriter is configured with extrasaction="ignore" and
-# restval="" so missing or extra fields never raise.
-_CSV_FIELDS = ("step", "epoch", "loss", "accuracy", "lr",
-               "val_loss", "val_accuracy")
-
-
-class StepCheckpointCallback(keras.callbacks.Callback):
-    """Save model checkpoints and run analysis at fixed step intervals."""
-
-    def __init__(
-        self,
-        save_dir: str,
-        step_counter: StepCounter,
-        save_every_steps: int = 25000,
-        analyze_every_steps: int = 0,
-        max_checkpoints: int = 3,
-        model_name: str = "cliffordnet_nlp_routing",
-        log_every_steps: int = 100,
-        plot_every_steps: int = 25000,
-    ):
-        super().__init__()
-        self._counter = step_counter
-        self.save_every_steps = save_every_steps
-        self.analyze_every_steps = analyze_every_steps
-        self.max_checkpoints = max_checkpoints
-        self.model_name = model_name
-        self._log_every_steps = log_every_steps
-        self._plot_every_steps = plot_every_steps
-        self._save_dir = save_dir
-
-        self._ckpt_dir = os.path.join(save_dir, "checkpoints")
-        self._analysis_dir = os.path.join(save_dir, "step_analysis")
-        os.makedirs(self._ckpt_dir, exist_ok=True)
-        if analyze_every_steps > 0:
-            os.makedirs(self._analysis_dir, exist_ok=True)
-            logger.warning(
-                "Step analysis runs synchronously on the training thread; "
-                "expect a multi-second stall every "
-                f"{analyze_every_steps} steps."
-            )
-
-        self._csv_path = os.path.join(save_dir, "training_log.csv")
-        self._csv_file = None
-        self._csv_writer = None
-        self._current_epoch = 0
-
-        self._analysis_config = AnalysisConfig(
-            analyze_weights=True,
-            analyze_spectral=True,
-            analyze_calibration=False,
-            analyze_information_flow=False,
-            analyze_training_dynamics=False,
-            verbose=False,
-        )
-        logger.info(
-            f"StepCheckpointCallback: save every {save_every_steps} steps, "
-            f"analyze every {analyze_every_steps} steps "
-            f"({'off' if analyze_every_steps == 0 else 'on'}), "
-            f"keep max {max_checkpoints} checkpoints, "
-            f"log every {log_every_steps} steps"
-        )
-
-    @property
-    def _global_step(self) -> int:
-        return self._counter.value
-
-    def on_epoch_begin(self, epoch, logs=None):
-        self._current_epoch = epoch
-
-    def on_train_batch_end(self, batch, logs=None):
-        step = self._global_step
-        if step > 0 and step % self._log_every_steps == 0:
-            self._log_metrics(logs, val_logs=None)
-        if step > 0 and step % self.save_every_steps == 0:
-            self._save_checkpoint()
-        if (
-            self.analyze_every_steps > 0
-            and step > 0
-            and step % self.analyze_every_steps == 0
-        ):
-            self._run_analysis()
-        if (
-            self._plot_every_steps > 0
-            and step > 0
-            and step % self._plot_every_steps == 0
-        ):
-            self._plot_metrics()
-
-    def on_epoch_end(self, epoch, logs=None):
-        # Flush a row that contains validation metrics from this epoch end.
-        # Keras puts val_* keys into `logs` only on epoch end.
-        self._log_metrics(logs, val_logs=logs)
-
-    def on_train_end(self, logs=None):
-        if self._csv_file is not None:
-            self._csv_file.close()
-            self._csv_file = None
-        path = os.path.join(self._ckpt_dir, "final.keras")
-        self.model.save(path)
-        logger.info(f"Final checkpoint saved: {path}")
-        self._plot_metrics()
-
-    def _plot_metrics(self):
-        try:
-            plot_step_metrics(self._csv_path, self._save_dir)
-        except Exception as e:
-            logger.warning(f"Step plot failed at step {self._global_step}: {e}")
-
-    def _current_lr(self) -> float:
-        opt = getattr(self.model, "optimizer", None)
-        if opt is None:
-            return 0.0
-        lr = opt.learning_rate
-        try:
-            if callable(lr):
-                return float(lr(opt.iterations))
-            return float(keras.ops.convert_to_numpy(lr))
-        except Exception:
-            return 0.0
-
-    def _log_metrics(self, logs, val_logs):
-        if self._csv_writer is None:
-            self._csv_file = open(self._csv_path, "a", newline="")
-            self._csv_writer = csv.DictWriter(
-                self._csv_file,
-                fieldnames=list(_CSV_FIELDS),
-                extrasaction="ignore",
-                restval="",
-            )
-            if self._csv_file.tell() == 0:
-                self._csv_writer.writeheader()
-        row = {
-            "step": self._global_step,
-            "epoch": self._current_epoch,
-            "lr": self._current_lr(),
-        }
-        if logs:
-            row.update(logs)
-        if val_logs:
-            row.update({k: v for k, v in val_logs.items()
-                        if k.startswith("val_")})
-        self._csv_writer.writerow(row)
-        self._csv_file.flush()
-
-    def _save_checkpoint(self):
-        path = os.path.join(
-            self._ckpt_dir, f"step_{self._global_step:07d}.keras"
-        )
-        self.model.save(path)
-        gc.collect()
-        logger.info(f"Checkpoint saved: {path} (step {self._global_step:,})")
-        self._cleanup_old_checkpoints()
-
-    def _cleanup_old_checkpoints(self):
-        ckpts = sorted(glob.glob(
-            os.path.join(self._ckpt_dir, "step_*.keras")
-        ))
-        while len(ckpts) > self.max_checkpoints:
-            old = ckpts.pop(0)
-            os.remove(old)
-            logger.info(f"Removed old checkpoint: {old}")
-
-    def _run_analysis(self):
-        step_dir = os.path.join(
-            self._analysis_dir, f"step_{self._global_step:07d}"
-        )
-        try:
-            analyzer = ModelAnalyzer(
-                models={self.model_name: self.model},
-                config=self._analysis_config,
-                output_dir=step_dir,
-            )
-            analyzer.analyze()
-            logger.info(f"Step analysis complete: step {self._global_step:,}")
-        except Exception as e:
-            logger.error(
-                f"Step analysis failed at step {self._global_step}: {e}"
-            )
 
 
 # ---------------------------------------------------------------------------
@@ -1031,6 +844,9 @@ def train_cliffordnet_nlp_routing(
         analyze_every_steps=config.analyze_every_steps,
         max_checkpoints=config.max_checkpoints,
         model_name=f"CliffordNetLMRouting-{variant_label}-{config.routing_mode}",
+        gc_on_save=True,
+        csv_fields=("step", "epoch", "loss", "accuracy", "lr",
+                    "val_loss", "val_accuracy"),
     ))
 
     probe_cb = GenerationProbeCallback(

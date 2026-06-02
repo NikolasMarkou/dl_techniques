@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks
+from train.common import setup_gpu, create_callbacks as create_common_callbacks, save_config_json, convert_keras_history_to_training_history
 from dl_techniques.metrics.primary_output_metrics import (
     PrimaryOutputAccuracy, PrimaryOutputTopKAccuracy,
 )
@@ -366,23 +366,6 @@ def setup_visualization_manager(experiment_name: str, results_dir: str) -> Visua
     return viz_manager
 
 
-def convert_keras_history_to_training_history(keras_history: keras.callbacks.History) -> TrainingHistory:
-    history_dict = keras_history.history
-    epochs = list(range(len(history_dict['loss'])))
-    train_metrics = {}
-    val_metrics = {}
-    for key, values in history_dict.items():
-        if key.startswith('val_') and key != 'val_loss':
-            val_metrics[key.replace('val_', '')] = values
-        elif not key.startswith('val_') and key != 'loss':
-            train_metrics[key] = values
-
-    return TrainingHistory(
-        epochs=epochs, train_loss=history_dict['loss'], val_loss=history_dict['val_loss'],
-        train_metrics=train_metrics, val_metrics=val_metrics
-    )
-
-
 # =============================================================================
 # MAIN TRAINING
 # =============================================================================
@@ -397,8 +380,7 @@ def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) 
     output_dir = Path(config.output_dir) / config.experiment_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    with open(output_dir / "config.json", 'w') as f:
-        json.dump(config.__dict__, f, indent=2, default=str)
+    save_config_json(config, str(output_dir), "config.json")
 
     # Datasets
     logger.info("Creating ImageNet datasets...")

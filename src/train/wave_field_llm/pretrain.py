@@ -19,7 +19,6 @@ Usage::
     python -m train.wave_field_llm.pretrain --resume results/.../checkpoints/step_0050000.keras
 """
 
-import csv
 import os
 import json
 import glob
@@ -34,8 +33,8 @@ import tensorflow as tf
 import tiktoken
 
 from train.common import setup_gpu
+from train.common import StepCheckpointCallback
 from train.common.evaluation import generate_training_curves
-from train.common import plot_step_metrics
 from train.common.nlp import (
     create_tokenizer,
     load_text_dataset,
@@ -58,7 +57,6 @@ from dl_techniques.layers.attention.wave_field_attention import (
 from dl_techniques.utils.logger import logger
 from dl_techniques.datasets.nlp import load_wikipedia_train_val
 from dl_techniques.losses import MaskedCausalLMLoss, FocalCausalLMLoss
-from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig
 
 
 # ---------------------------------------------------------------------
@@ -139,142 +137,6 @@ class TrainingConfig:
     probe_temperature: float = 0.85
     probe_top_p: float = 0.92
     probe_repetition_penalty: float = 1.3
-
-
-# ---------------------------------------------------------------------
-# Step-based Checkpoint & Analysis Callback
-# ---------------------------------------------------------------------
-
-
-class StepCheckpointCallback(keras.callbacks.Callback):
-    """Save checkpoints + run weight/spectral analysis at fixed step intervals."""
-
-    def __init__(
-        self,
-        save_dir: str,
-        save_every_steps: int = 25000,
-        analyze_every_steps: int = 50000,
-        max_checkpoints: int = 3,
-        model_name: str = "wave_field_llm",
-        initial_step: int = 0,
-        log_every_steps: int = 100,
-        plot_every_steps: int = 25000,
-    ):
-        super().__init__()
-        self.save_every_steps = save_every_steps
-        self.analyze_every_steps = analyze_every_steps
-        self.max_checkpoints = max_checkpoints
-        self.model_name = model_name
-        self._global_step = initial_step
-        self._log_every_steps = log_every_steps
-        self._plot_every_steps = plot_every_steps
-        self._save_dir = save_dir
-
-        self._ckpt_dir = os.path.join(save_dir, "checkpoints")
-        self._analysis_dir = os.path.join(save_dir, "step_analysis")
-        os.makedirs(self._ckpt_dir, exist_ok=True)
-        if analyze_every_steps > 0:
-            os.makedirs(self._analysis_dir, exist_ok=True)
-
-        self._csv_path = os.path.join(save_dir, "training_log.csv")
-        self._csv_file = None
-        self._csv_writer = None
-
-        self._analysis_config = AnalysisConfig(
-            analyze_weights=True,
-            analyze_spectral=True,
-            analyze_calibration=False,
-            analyze_information_flow=False,
-            analyze_training_dynamics=False,
-            verbose=False,
-        )
-        logger.info(
-            f"StepCheckpointCallback: save every {save_every_steps} steps, "
-            f"analyze every {analyze_every_steps} steps, "
-            f"keep max {max_checkpoints} checkpoints, "
-            f"log every {log_every_steps} steps, "
-            f"plot every {plot_every_steps} steps"
-        )
-
-    def on_train_batch_end(self, batch, logs=None):
-        self._global_step += 1
-        if self._global_step % self._log_every_steps == 0:
-            self._log_metrics(logs)
-        if self._global_step % self.save_every_steps == 0:
-            self._save_checkpoint()
-        if (
-            self.analyze_every_steps > 0
-            and self._global_step % self.analyze_every_steps == 0
-        ):
-            self._run_analysis()
-        if (
-            self._plot_every_steps > 0
-            and self._global_step % self._plot_every_steps == 0
-        ):
-            self._plot_metrics()
-
-    def on_train_end(self, logs=None):
-        if self._csv_file is not None:
-            self._csv_file.close()
-            self._csv_file = None
-        path = os.path.join(self._ckpt_dir, "final.keras")
-        self.model.save(path)
-        logger.info(f"Final checkpoint saved: {path}")
-        self._plot_metrics()
-
-    def _log_metrics(self, logs):
-        if logs is None:
-            return
-        row = {"step": self._global_step, **logs}
-        if self._csv_writer is None:
-            self._csv_file = open(self._csv_path, "a", newline="")
-            self._csv_writer = csv.DictWriter(
-                self._csv_file, fieldnames=list(row.keys()),
-            )
-            if self._csv_file.tell() == 0:
-                self._csv_writer.writeheader()
-        self._csv_writer.writerow(row)
-        self._csv_file.flush()
-
-    def _plot_metrics(self):
-        try:
-            plot_step_metrics(self._csv_path, self._save_dir)
-        except Exception as e:
-            logger.warning(f"Step plot failed at step {self._global_step}: {e}")
-
-    def _save_checkpoint(self):
-        path = os.path.join(
-            self._ckpt_dir, f"step_{self._global_step:07d}.keras"
-        )
-        self.model.save(path)
-        logger.info(f"Checkpoint saved: {path} (step {self._global_step:,})")
-        self._cleanup_old_checkpoints()
-
-    def _cleanup_old_checkpoints(self):
-        ckpts = sorted(glob.glob(
-            os.path.join(self._ckpt_dir, "step_*.keras")
-        ))
-        while len(ckpts) > self.max_checkpoints:
-            old = ckpts.pop(0)
-            os.remove(old)
-            logger.info(f"Removed old checkpoint: {old}")
-
-    def _run_analysis(self):
-        step_dir = os.path.join(
-            self._analysis_dir, f"step_{self._global_step:07d}"
-        )
-        try:
-            analyzer = ModelAnalyzer(
-                models={self.model_name: self.model},
-                config=self._analysis_config,
-                output_dir=step_dir,
-            )
-            analyzer.analyze()
-            logger.info(f"Step analysis complete: step {self._global_step:,}")
-        except Exception as e:
-            logger.error(
-                f"Step analysis failed at step {self._global_step}: {e}"
-            )
 
 
 # ---------------------------------------------------------------------

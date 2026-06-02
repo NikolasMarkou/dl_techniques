@@ -45,7 +45,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 import keras
 import tensorflow as tf
 
-from train.common import setup_gpu, create_base_argument_parser
+from train.common import setup_gpu, create_base_argument_parser, set_seeds
 from dl_techniques.models.video_jepa.config import VideoJEPAConfig
 from dl_techniques.models.video_jepa.model import VideoJEPA
 from dl_techniques.datasets.synthetic_drone_video import (
@@ -61,10 +61,7 @@ from dl_techniques.utils.logger import logger
 
 
 def _set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    tf.random.set_seed(seed)
-    keras.utils.set_random_seed(seed)
+    set_seeds(seed)
 
 
 def _validate_args(args: argparse.Namespace) -> None:

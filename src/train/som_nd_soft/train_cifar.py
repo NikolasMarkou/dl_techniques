@@ -10,7 +10,7 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Tuple, Optional, Dict, Any, List
 
-from train.common import setup_gpu, create_base_argument_parser, create_callbacks
+from train.common import setup_gpu, create_base_argument_parser, create_callbacks, save_config_json
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.memory.som_nd_soft_layer import SoftSOMLayer
 
@@ -601,8 +601,7 @@ def train_cifar_som_autoencoder(config: CIFARSOMConfig) -> keras.Model:
     config.experiment_name = Path(results_dir).name
     callbacks.append(ComprehensiveMonitoringCallback(config, x_test, y_test))
 
-    with open(Path(results_dir) / "config.json", 'w') as f:
-        json.dump(config.__dict__, f, indent=2, default=str)
+    save_config_json(config, str(results_dir), "config.json")
 
     model.fit(
         x_train_aug, x_train, batch_size=config.batch_size,

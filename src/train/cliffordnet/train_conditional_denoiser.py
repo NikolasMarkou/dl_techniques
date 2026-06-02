@@ -58,6 +58,7 @@ from train.common import (
     create_callbacks as create_common_callbacks,
     generate_training_curves,
     load_dataset,
+    save_config_json,
 )
 from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.utils.logger import logger
@@ -956,8 +957,7 @@ def train_conditional_denoiser(
     output_dir = Path(results_dir)
 
     # Save config into the unified output directory
-    with open(output_dir / "config.json", "w") as f:
-        json.dump(config.__dict__, f, indent=2, default=str)
+    save_config_json(config, str(output_dir), "config.json")
 
     start_time = time.time()
     validation_steps = config.validation_steps or max(

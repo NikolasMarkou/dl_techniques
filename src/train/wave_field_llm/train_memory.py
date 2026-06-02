@@ -52,8 +52,8 @@ from train.common.nlp import (
     prepare_dict_keyed_compile,
     augment_probe_results,
 )
+from train.common import StepCheckpointCallback
 from train.wave_field_llm.pretrain import (
-    StepCheckpointCallback,
     GenerationProbeCallback,
     _extract_step_from_checkpoint,
 )
