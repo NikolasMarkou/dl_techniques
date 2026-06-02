@@ -5,7 +5,7 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_datasets as tfds
 from pathlib import Path
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Set
 
 from dl_techniques.utils.logger import logger
 
@@ -149,6 +149,105 @@ def make_imagenet_filesystem_dataset(
     dataset = dataset.batch(batch_size, drop_remainder=drop_remainder)
     dataset = dataset.prefetch(prefetch_buffer)
     return dataset
+
+
+# ---------------------------------------------------------------------
+# Default image file extensions for the denoiser path-collection helper
+# below. This is the shared default for the byte-identical rglob +
+# extension-filter preambles previously duplicated across the denoiser
+# trainers (bfcnn / bfunet / cliffordnet) and their framework
+# ``_create_file_list`` methods. Callers may pass their own ``extensions``
+# set (e.g. ``config.image_extensions``); when they don't, this set is used.
+# Matching is case-insensitive (both lower- and upper-case suffixes match).
+# ---------------------------------------------------------------------
+
+DEFAULT_IMAGE_EXTENSIONS: Set[str] = {".jpg", ".jpeg", ".png", ".tiff", ".bmp", ".webp"}
+
+
+# ---------------------------------------------------------------------
+
+def collect_image_paths(
+        directories: List[str],
+        extensions: Optional[Set[str]] = None,
+        max_files: Optional[int] = None,
+        shuffle_seed: Optional[int] = None,
+        sort: bool = True,
+) -> List[str]:
+    """Recursively collect image file paths from a list of directories.
+
+    Shared extraction of the byte-identical ``rglob`` + extension-filter +
+    cap-then-shuffle path-collection preamble previously duplicated across the
+    denoiser trainers (``train_bfcnn.py`` / ``train_bfunet.py`` /
+    ``train_denoiser.py``) and the ``DatasetBuilder._create_file_list`` methods.
+
+    For each directory it recursively scans (``rglob("*")``) for files whose
+    suffix matches ``extensions`` (case-insensitive). A directory that does not
+    exist is skipped with a warning, and any scan error is logged as a warning
+    rather than raised (one bad directory does not abort the whole scan).
+
+    This helper does NOT raise when no files are found — it returns the
+    (possibly empty) list. Callers keep their own ``if not paths: raise
+    ValueError(...)`` guard so the error message stays caller-specific.
+
+    Args:
+        directories: Directories to scan recursively for image files.
+        extensions: Set of file suffixes to accept (e.g. ``{".jpg", ".png"}``).
+            Matching is case-insensitive — both the lower- and upper-case form
+            of each suffix is accepted. When ``None`` (the default),
+            :data:`DEFAULT_IMAGE_EXTENSIONS` is used.
+        max_files: Optional cap on the number of returned paths. When set and
+            smaller than the number of collected paths, the list is shuffled
+            (see ``shuffle_seed``) and then truncated to ``max_files``. The
+            shuffle happens ONLY when a cap is applied — this matches the
+            original preamble semantics exactly.
+        shuffle_seed: When ``max_files`` triggers a shuffle, use a seeded
+            ``np.random.RandomState(shuffle_seed)`` (deterministic) if this is
+            not ``None``; otherwise use the global ``np.random.shuffle``
+            (non-deterministic, matching the original behaviour).
+        sort: When ``True`` (the default) the collected paths are sorted before
+            the optional cap-then-shuffle step. This preserves deterministic
+            ordering for paired-path denoisers (target/condition alignment).
+
+    Returns:
+        A list of matching file paths as strings. Possibly empty.
+    """
+    if extensions is None:
+        extensions = DEFAULT_IMAGE_EXTENSIONS
+
+    # Build a case-insensitive match set (both lower- and upper-case suffixes),
+    # mirroring the original ``{ext.lower()} | {ext.upper()}`` construction.
+    extensions_set = {ext.lower() for ext in extensions}
+    extensions_set.update({ext.upper() for ext in extensions})
+
+    all_file_paths: List[str] = []
+    for directory in directories:
+        dir_path = Path(directory)
+        if not dir_path.is_dir():
+            logger.warning(f"Directory not found, skipping: {directory}")
+            continue
+        try:
+            for file_path in dir_path.rglob("*"):
+                if file_path.is_file() and file_path.suffix in extensions_set:
+                    all_file_paths.append(str(file_path))
+        except Exception as e:
+            logger.warning(f"Error scanning directory {directory}: {e}")
+
+    logger.info(f"Found a total of {len(all_file_paths)} files.")
+
+    if sort:
+        all_file_paths = sorted(all_file_paths)
+
+    # Cap-then-shuffle: shuffle ONLY when a cap is actually applied, exactly as
+    # the original denoiser preambles did.
+    if max_files is not None and max_files < len(all_file_paths):
+        logger.info(f"Limiting to {max_files} files as per configuration.")
+        if shuffle_seed is not None:
+            np.random.RandomState(shuffle_seed).shuffle(all_file_paths)
+        else:
+            np.random.shuffle(all_file_paths)
+        all_file_paths = all_file_paths[:max_files]
+
+    return all_file_paths
 
 
 # ---------------------------------------------------------------------
