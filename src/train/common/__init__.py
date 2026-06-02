@@ -4,6 +4,7 @@ from train.common.gpu import setup_gpu
 from train.common.args import create_base_argument_parser
 from train.common.datasets import load_dataset, load_imagenet_dataset, get_class_names, CIFAR10_MEAN, CIFAR10_STD, IMAGENET_MEAN, IMAGENET_STD, make_imagenet_filesystem_dataset, collect_image_paths, DEFAULT_IMAGE_EXTENSIONS
 from train.common.callbacks import create_callbacks, create_learning_rate_schedule, EpochMetricsPlotCallback
+from train.common.augment import augment_patch, augment_pair
 from train.common.evaluation import (
     validate_model_loading,
     convert_keras_history_to_training_history,
