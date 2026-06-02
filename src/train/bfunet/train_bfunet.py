@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks, save_config_json, collect_image_paths
+from train.common import setup_gpu, create_callbacks as create_common_callbacks, save_config_json, collect_image_paths, EpochMetricsPlotCallback
 from dl_techniques.losses import ScaledMseLoss
 from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.utils.logger import logger
@@ -350,131 +350,6 @@ def visualize_synthesis_process(
 # MONITORING AND CALLBACKS
 # ---------------------------------------------------------------------
 
-class MetricsVisualizationCallback(keras.callbacks.Callback):
-    """Real-time visualization of training/validation metrics for single and multi-output models."""
-
-    def __init__(self, config: TrainingConfig) -> None:
-        super().__init__()
-        self.config = config
-        self.output_dir = Path(config.output_dir) / config.experiment_name
-        self.visualization_dir = self.output_dir / "visualization_plots"
-        self.visualization_dir.mkdir(parents=True, exist_ok=True)
-
-        self.train_metrics: Dict[str, List[float]] = {
-            'loss': [], 'mae': [], 'rmse': [], 'primary_psnr': [],
-            'final_output_mae': [], 'final_output_rmse': [], 'final_output_primary_psnr': []
-        }
-        self.val_metrics: Dict[str, List[float]] = {
-            'val_loss': [], 'val_mae': [], 'val_rmse': [], 'val_primary_psnr': [],
-            'val_final_output_mae': [], 'val_final_output_rmse': [], 'val_final_output_primary_psnr': []
-        }
-        self.available_metrics: set = set()
-
-    def on_train_begin(self, logs: Optional[Dict[str, Any]] = None) -> None:
-        if logs:
-            self.available_metrics.update(logs.keys())
-
-    def on_epoch_begin(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
-        if logs:
-            self.available_metrics.update(logs.keys())
-
-    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
-        if logs is None:
-            logs = {}
-        self.available_metrics.update(logs.keys())
-
-        for metric_name, metric_value in logs.items():
-            try:
-                val = float(metric_value)
-                if metric_name in self.train_metrics:
-                    self.train_metrics[metric_name].append(val)
-                elif metric_name in self.val_metrics:
-                    self.val_metrics[metric_name].append(val)
-                elif metric_name.startswith('val_'):
-                    expected_key = metric_name
-                    if expected_key in self.val_metrics:
-                        self.val_metrics[expected_key].append(val)
-            except (ValueError, TypeError):
-                pass
-
-        if (epoch + 1) % 5 == 0 or epoch == 0:
-            self._create_metrics_plots(epoch + 1)
-
-    def _get_metric_data(self, metric_type: str, metrics_dict: Dict[str, List[float]]) -> Tuple[List[float], str]:
-        """Get metric data with fallback for multi-output naming conventions."""
-        prefixed = f'final_output_{metric_type}'
-        if prefixed in metrics_dict and metrics_dict[prefixed]:
-            return metrics_dict[prefixed], prefixed
-        if metric_type in metrics_dict and metrics_dict[metric_type]:
-            return metrics_dict[metric_type], metric_type
-        return [], f"{metric_type} (not found)"
-
-    def _create_metrics_plots(self, epoch: int) -> None:
-        try:
-            if not self.train_metrics.get('loss', []):
-                return
-
-            num_epochs = len(self.train_metrics['loss'])
-            epochs_range = range(1, num_epochs + 1)
-            fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-            fig.suptitle(f'Training and Validation Metrics - Epoch {epoch}', fontsize=16)
-
-            def safe_plot(ax, train_type, val_type, title, ylabel, train_label, val_label):
-                plots_added = False
-                train_data, train_name = self._get_metric_data(train_type, self.train_metrics)
-                if train_data and len(train_data) == num_epochs:
-                    ax.plot(epochs_range, train_data, 'b-', label=f'{train_label} ({train_name})', linewidth=2)
-                    plots_added = True
-                val_data, val_name = self._get_metric_data(val_type, self.val_metrics)
-                if val_data and len(val_data) == num_epochs:
-                    ax.plot(epochs_range, val_data, 'r-', label=f'{val_label} ({val_name})', linewidth=2)
-                    plots_added = True
-                ax.set_title(title)
-                ax.set_xlabel('Epoch')
-                ax.set_ylabel(ylabel)
-                if plots_added:
-                    ax.legend()
-                ax.grid(True, alpha=0.3)
-
-            # MSE Loss (always uses 'loss' key)
-            axes[0, 0].set_title('Mean Squared Error (MSE)')
-            axes[0, 0].set_xlabel('Epoch')
-            axes[0, 0].set_ylabel('MSE')
-            if self.train_metrics['loss'] and len(self.train_metrics['loss']) == num_epochs:
-                axes[0, 0].plot(epochs_range, self.train_metrics['loss'], 'b-', label='Training MSE', linewidth=2)
-            if self.val_metrics.get('val_loss', []) and len(self.val_metrics['val_loss']) == num_epochs:
-                axes[0, 0].plot(epochs_range, self.val_metrics['val_loss'], 'r-', label='Validation MSE', linewidth=2)
-            axes[0, 0].legend()
-            axes[0, 0].grid(True, alpha=0.3)
-
-            safe_plot(axes[0, 1], 'mae', 'val_mae', 'MAE', 'MAE', 'Training MAE', 'Validation MAE')
-            safe_plot(axes[1, 0], 'rmse', 'val_rmse', 'RMSE', 'RMSE', 'Training RMSE', 'Validation RMSE')
-            safe_plot(axes[1, 1], 'primary_psnr', 'val_primary_psnr', 'PSNR', 'PSNR (dB)', 'Training PSNR', 'Validation PSNR')
-
-            plt.tight_layout()
-            plt.savefig(self.visualization_dir / f"epoch_{epoch:03d}_metrics.png", dpi=150, bbox_inches='tight')
-            plt.close(fig)
-            plt.clf()
-            gc.collect()
-
-            metrics_data = {
-                'epoch': epoch,
-                'train_metrics': self.train_metrics,
-                'val_metrics': self.val_metrics,
-                'diagnostics': {
-                    'expected_epochs': num_epochs,
-                    'available_train_metrics': {k: len(v) for k, v in self.train_metrics.items() if v},
-                    'available_val_metrics': {k: len(v) for k, v in self.val_metrics.items() if v},
-                    'all_available_metrics': sorted(list(self.available_metrics))
-                }
-            }
-            with open(self.visualization_dir / "latest_metrics.json", 'w') as f:
-                json.dump(metrics_data, f, indent=2, default=lambda x: float(x) if hasattr(x, 'item') else x)
-
-        except Exception as e:
-            logger.warning(f"Failed to create metrics plots: {e}")
-
-
 class StreamingResultMonitor(keras.callbacks.Callback):
     """Memory-efficient monitor for denoising results and optional image synthesis."""
 
@@ -667,7 +542,14 @@ def create_callbacks(
 
     if config.enable_deep_supervision and num_outputs > 1:
         callbacks.append(DeepSupervisionWeightScheduler(config, num_outputs))
-    callbacks.append(MetricsVisualizationCallback(config))
+    viz_dir = Path(config.output_dir) / config.experiment_name / "visualization_plots"
+    callbacks.append(EpochMetricsPlotCallback(
+        str(viz_dir),
+        ["mae", "rmse", "primary_psnr",
+         "final_output_mae", "final_output_rmse", "final_output_primary_psnr"],
+        every_n=5,
+        write_json=True,
+    ))
     callbacks.append(StreamingResultMonitor(config, val_directories))
 
     return callbacks

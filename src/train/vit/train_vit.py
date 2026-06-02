@@ -26,11 +26,10 @@ import numpy as np
 import tensorflow as tf
 from pathlib import Path
 from datetime import datetime
-import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks, save_config_json, convert_keras_history_to_training_history, CIFAR10_MEAN, CIFAR10_STD, make_imagenet_filesystem_dataset
+from train.common import setup_gpu, create_callbacks as create_common_callbacks, save_config_json, convert_keras_history_to_training_history, CIFAR10_MEAN, CIFAR10_STD, make_imagenet_filesystem_dataset, EpochMetricsPlotCallback
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
     optimizer_builder,
@@ -323,74 +322,6 @@ def create_cifar_dataset(
 # CALLBACKS
 # =============================================================================
 
-class MetricsVisualizationCallback(keras.callbacks.Callback):
-    """Per-epoch metrics plotting (loss, accuracy, top-5, lr). Mirrors resnet trainer."""
-
-    def __init__(self, config: TrainingConfig) -> None:
-        super().__init__()
-        self.config = config
-        self.visualization_dir = (
-            Path(config.output_dir) / config.experiment_name / "training_metrics"
-        )
-        self.visualization_dir.mkdir(parents=True, exist_ok=True)
-        self.train_metrics: Dict[str, List[float]] = {
-            "loss": [], "accuracy": [], "top5_accuracy": [],
-        }
-        self.val_metrics: Dict[str, List[float]] = {
-            "val_loss": [], "val_accuracy": [], "val_top5_accuracy": [],
-        }
-
-    def on_epoch_end(self, epoch: int, logs=None) -> None:
-        logs = logs or {}
-        for metric_name, metric_value in logs.items():
-            try:
-                converted = float(metric_value)
-                if metric_name in self.train_metrics:
-                    self.train_metrics[metric_name].append(converted)
-                elif metric_name in self.val_metrics:
-                    self.val_metrics[metric_name].append(converted)
-            except (ValueError, TypeError):
-                pass
-
-        if (epoch + 1) % self.config.monitor_every_n_epochs == 0 or epoch == 0:
-            self._create_plots(epoch + 1)
-
-    def _create_plots(self, epoch: int) -> None:
-        try:
-            if not self.train_metrics.get("loss"):
-                return
-            num_epochs = len(self.train_metrics["loss"])
-            epochs_range = range(1, num_epochs + 1)
-            fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-            fig.suptitle(f"ViT Training Metrics - Epoch {epoch}", fontsize=16)
-
-            axes[0, 0].plot(epochs_range, self.train_metrics["loss"], "b-", label="Train", linewidth=2)
-            if self.val_metrics.get("val_loss"):
-                axes[0, 0].plot(epochs_range, self.val_metrics["val_loss"], "r-", label="Val", linewidth=2)
-            axes[0, 0].set_title("Loss"); axes[0, 0].legend(); axes[0, 0].grid(True, alpha=0.3)
-
-            if self.train_metrics.get("accuracy"):
-                axes[0, 1].plot(epochs_range, self.train_metrics["accuracy"], "b-", label="Train", linewidth=2)
-            if self.val_metrics.get("val_accuracy"):
-                axes[0, 1].plot(epochs_range, self.val_metrics["val_accuracy"], "r-", label="Val", linewidth=2)
-            axes[0, 1].set_title("Accuracy"); axes[0, 1].legend(); axes[0, 1].grid(True, alpha=0.3)
-
-            if self.train_metrics.get("top5_accuracy"):
-                axes[1, 0].plot(epochs_range, self.train_metrics["top5_accuracy"], "b-", label="Train", linewidth=2)
-            if self.val_metrics.get("val_top5_accuracy"):
-                axes[1, 0].plot(epochs_range, self.val_metrics["val_top5_accuracy"], "r-", label="Val", linewidth=2)
-            axes[1, 0].set_title("Top-5 Accuracy"); axes[1, 0].legend(); axes[1, 0].grid(True, alpha=0.3)
-
-            axes[1, 1].axis("off")
-            plt.tight_layout()
-            plt.savefig(self.visualization_dir / f"epoch_{epoch:03d}_metrics.png",
-                        dpi=150, bbox_inches="tight")
-            plt.close(fig)
-            gc.collect()
-        except Exception as e:
-            logger.warning(f"Failed to create metrics plots: {e}")
-
-
 def create_callbacks(config: TrainingConfig) -> Tuple[List[keras.callbacks.Callback], str]:
     """Common callbacks (early-stop, ckpt, CSV, analyzer) + ViT-specific metrics viz."""
     callbacks, results_dir = create_common_callbacks(
@@ -400,7 +331,12 @@ def create_callbacks(config: TrainingConfig) -> Tuple[List[keras.callbacks.Callb
         patience=config.early_stopping_patience,
         use_lr_schedule=True,
     )
-    callbacks.append(MetricsVisualizationCallback(config))
+    viz_dir = Path(config.output_dir) / config.experiment_name / "training_metrics"
+    callbacks.append(EpochMetricsPlotCallback(
+        str(viz_dir),
+        ["accuracy", "top5_accuracy"],
+        every_n=config.monitor_every_n_epochs,
+    ))
     return callbacks, results_dir
 
 
