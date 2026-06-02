@@ -116,6 +116,7 @@ from keras import initializers
 
 from train.common import setup_gpu
 from train.common import StepCheckpointCallback
+from train.common import GenerationProbeCallback
 from train.common.evaluation import generate_training_curves
 from train.common.nlp import (
     create_tokenizer,
@@ -284,212 +285,45 @@ class StepCounter(keras.callbacks.Callback):
 
 
 # ---------------------------------------------------------------------------
-# Generation Probe Callback
+# Generation Probe forward-pass closure
 # ---------------------------------------------------------------------------
 
 
-class GenerationProbeCallback(keras.callbacks.Callback):
-    """Generate sample text periodically to track quality.
+def _make_routing_logits_fn(model, ctx_length: int, pad_id: int):
+    """Build the ``logits_fn`` closure for the common GenerationProbeCallback.
 
-    Model output is *probabilities* (sum=1, in [eps, 1-eps]) rather
-    than logits, so the generation logic uses log-probs for nucleus
-    sampling.
+    This LIFTS copy E's forward pass verbatim: the model returns
+    *probabilities* under the ``"logits"`` key, so the closure pads short
+    contexts with a DISTINCT ``pad_id`` (50259, NOT EOT) up to ``ctx_length``,
+    reads the real-position vector ``[0, real-1, :]``, and applies the
+    prob->log adapter ``np.log(np.clip(probs, 1e-12, 1.0))`` BEFORE returning.
+
+    DECISION plan_2026-06-02_cc4d4e14/D-003: the prob->log conversion + the
+    distinct pad strategy live HERE in the caller closure, NOT in the common
+    class (which never reads a model-specific output key like ``"logits"``).
+    Do not move this adapter into common: routing returns probabilities, the
+    other four copies return logits — see decisions.md D-003.
     """
+    def logits_fn(ctx: np.ndarray) -> np.ndarray:
+        seq = list(ctx[0])
+        real = len(seq)
+        # Trim to actual length — model.call uses ops.shape(input_ids)[1] for
+        # positional embeddings, so it accepts variable seq length. When
+        # real == ctx_length, no padding; when real < ctx_length, pad with
+        # PAD (not EOT) so the model sees true padding.
+        if real < ctx_length:
+            padded = seq + [pad_id] * (ctx_length - real)
+            in_ids = np.asarray([padded], dtype="int32")
+        else:
+            in_ids = np.asarray([seq], dtype="int32")
+        out = model(in_ids, training=False)
+        probs = out["logits"][0, real - 1, :].numpy()
+        # Convert probabilities to log-probs (logit-equivalent). log(p) is
+        # always <= 0 after clip; multiply-mode rep penalty pushes further
+        # negative.
+        return np.log(np.clip(probs, 1e-12, 1.0))
 
-    def __init__(
-        self,
-        step_counter: StepCounter,
-        probe_every_steps: int = 25000,
-        prompts: Optional[List[str]] = None,
-        encoding_name: str = "gpt2",
-        max_tokens: int = 100,
-        temperature: float = 0.85,
-        top_p: float = 0.92,
-        repetition_penalty: float = 1.3,
-        eot_token_id: Optional[int] = None,
-        pad_token_id: Optional[int] = None,
-        ctx_length: int = 511,
-        save_dir: Optional[str] = None,
-        seed: int = 42,
-    ):
-        super().__init__()
-        self._counter = step_counter
-        self.probe_every_steps = probe_every_steps
-        self.prompts = prompts or [
-            "The United States of America is a",
-            "In mathematics, a prime number is",
-            "Albert Einstein was born in",
-        ]
-        self.max_tokens = max_tokens
-        self.temperature = temperature
-        self.top_p = top_p
-        self.repetition_penalty = repetition_penalty
-        self._rng = np.random.default_rng(seed)
-
-        self._enc = tiktoken.get_encoding(encoding_name)
-        self._eot_id = int(
-            eot_token_id if eot_token_id is not None else self._enc.eot_token
-        )
-        # Distinct from EOT so the model sees a true PAD where context is
-        # short. Defaults to EOT for back-compat.
-        self._pad_id = int(pad_token_id if pad_token_id is not None
-                           else self._eot_id)
-        self._ctx_len = ctx_length
-
-        self._log_path = None
-        if save_dir:
-            probe_dir = os.path.join(save_dir, "generation_probes")
-            os.makedirs(probe_dir, exist_ok=True)
-            self._log_path = os.path.join(probe_dir, "probes.jsonl")
-
-        logger.info(
-            f"GenerationProbeCallback: {len(self.prompts)} prompts, "
-            f"every {probe_every_steps} steps, "
-            f"max_tokens={max_tokens}, temp={temperature}, top_p={top_p}, "
-            f"pad_id={self._pad_id}, eot_id={self._eot_id}"
-        )
-
-    def on_train_batch_end(self, batch, logs=None):
-        step = self._counter.value
-        if step > 0 and step % self.probe_every_steps == 0:
-            self._run_probes(logs)
-
-    def _run_probes(self, logs=None):
-        step = self._counter.value
-        train_loss = logs.get("loss", 0.0) if logs else 0.0
-
-        logger.info(f"{'=' * 50}")
-        logger.info(
-            f"Generation probe @ step {step:,} (train_loss={train_loss:.4f})"
-        )
-        logger.info(f"{'=' * 50}")
-
-        probe_results = {
-            "step": step,
-            "train_loss": float(train_loss),
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "generations": [],
-        }
-
-        for prompt in self.prompts:
-            t0 = time.time()
-            text, tokens_generated = self._generate(prompt)
-            elapsed = time.time() - t0
-
-            gen_entry = {
-                "prompt": prompt,
-                "output": text[:500],
-                "tokens": tokens_generated,
-                "time_s": round(elapsed, 2),
-                "tok_per_s": round(
-                    tokens_generated / max(elapsed, 0.01), 1
-                ),
-            }
-            probe_results["generations"].append(gen_entry)
-
-            logger.info(f'Prompt: "{prompt}"')
-            logger.info(f"Output: {text[:300]}")
-            logger.info(
-                f"({tokens_generated} tokens, {elapsed:.1f}s, "
-                f"{gen_entry['tok_per_s']} tok/s)"
-            )
-            logger.info("")
-
-        # Extension point for probe-time aggregate metrics (Self-BLEU,
-        # distinct-2, mean tok/s). Default is a no-op; trainers bind a
-        # concrete hook (e.g. ``augment_probe_results``) on the probe
-        # instance.
-        self._post_generate_hook(probe_results)
-
-        if self._log_path:
-            with open(self._log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(probe_results, ensure_ascii=False) + "\n")
-
-        # Reclaim Python wrappers + tf-eager intermediates accumulated by
-        # the 300 autoregressive `model(...)` calls; without this, ~70 MB
-        # per probe event leaked into RSS over the run.
-        gc.collect()
-
-    def _post_generate_hook(self, results: dict) -> None:
-        """Override or rebind on the instance for custom probe-time
-        analysis. Default: no-op.
-        """
-        return None
-
-    def _generate(self, prompt: str) -> Tuple[str, int]:
-        """Autoregressive generation. Model outputs probabilities, so we
-        take ``log(p)`` and treat it as logits for the standard pipeline.
-
-        Returns ``(decoded_text, tokens_generated)``. Generation stops on
-        EOT. Context is trimmed to its actual length when shorter than
-        ``ctx_len`` so we don't waste compute on pad positions.
-        """
-        ids = self._enc.encode(prompt)
-        # Block special tokens from sampling: tiktoken's `decode` raises on
-        # any id at or above the encoder's `n_vocab` (the base vocab end)
-        # because the 4 reserved special-token ids in this codebase
-        # (50257..50260) live outside the BPE table. Suppress them at
-        # logits time so generation is restricted to decodable tokens.
-        special_ids = [
-            i for i in range(self._enc.n_vocab, max(self._enc.n_vocab + 1, 50261))
-        ]
-        len_initial = len(ids)
-        ctx_len = self._ctx_len
-
-        for _ in range(self.max_tokens):
-            ctx = ids[-ctx_len:]
-            real = len(ctx)
-            # Trim to actual length — model.call uses ops.shape(input_ids)[1]
-            # for positional embeddings, so it accepts variable seq length.
-            # When real == ctx_len, no padding; when real < ctx_len, pad
-            # with PAD (not EOT) so the model sees true padding.
-            if real < ctx_len:
-                padded = ctx + [self._pad_id] * (ctx_len - real)
-                in_ids = np.asarray([padded], dtype="int32")
-            else:
-                in_ids = np.asarray([ctx], dtype="int32")
-            out = self.model(in_ids, training=False)
-            probs = out["logits"][0, real - 1, :].numpy()
-            # Convert probabilities to log-probs (logit-equivalent).
-            # log(p) is always <= 0 after clip — repetition penalty has only
-            # one branch.
-            logits = np.log(np.clip(probs, 1e-12, 1.0))
-            for sid in special_ids:
-                if sid < logits.shape[0]:
-                    logits[sid] = -1e9
-
-            for t in set(ids[-50:]):
-                # Penalize repeats by pushing log-probs further negative.
-                logits[t] *= self.repetition_penalty
-
-            logits /= self.temperature
-
-            sorted_idx = np.argsort(logits)[::-1]
-            sorted_logits = logits[sorted_idx]
-            probs_norm = np.exp(sorted_logits - sorted_logits[0])
-            probs_norm /= probs_norm.sum()
-            cutoff = np.searchsorted(np.cumsum(probs_norm), self.top_p) + 1
-            top_idx = sorted_idx[:cutoff]
-            top_probs = probs_norm[:cutoff]
-            top_probs /= top_probs.sum()
-
-            next_token = int(top_idx[
-                self._rng.choice(len(top_idx), p=top_probs)
-            ])
-            ids.append(next_token)
-            if next_token == self._eot_id:
-                break
-
-        # `errors="replace"` is a defensive backstop: if a tokenizer surprise
-        # (e.g. partial multi-byte BPE chunk at the tail) sneaks through,
-        # we want a string back, not a probe-side crash that kills training.
-        try:
-            return self._enc.decode(ids), len(ids) - len_initial
-        except (KeyError, UnicodeDecodeError) as e:
-            logger.warning(f"Probe decode fell back due to: {e}")
-            return self._enc.decode(
-                [t for t in ids if t < self._enc.n_vocab],
-            ), len(ids) - len_initial
+    return logits_fn
 
 
 # ---------------------------------------------------------------------------
@@ -849,7 +683,11 @@ def train_cliffordnet_nlp_routing(
                     "val_loss", "val_accuracy"),
     ))
 
+    probe_ctx_length = config.max_seq_length - 1
     probe_cb = GenerationProbeCallback(
+        logits_fn=_make_routing_logits_fn(
+            model, probe_ctx_length, config.pad_token_id
+        ),
         step_counter=step_counter,
         probe_every_steps=config.checkpoint_every_steps,
         prompts=config.probe_prompts,
@@ -858,8 +696,12 @@ def train_cliffordnet_nlp_routing(
         temperature=config.probe_temperature,
         top_p=config.probe_top_p,
         repetition_penalty=config.probe_repetition_penalty,
+        repetition_penalty_mode="multiply",
+        stop_on_eot=True,
+        trigger_requires_positive_step=True,
+        gc_on_probe=True,
         pad_token_id=config.pad_token_id,
-        ctx_length=config.max_seq_length - 1,
+        ctx_length=probe_ctx_length,
         save_dir=results_dir,
         seed=config.probe_seed,
     )
