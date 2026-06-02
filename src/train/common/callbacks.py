@@ -8,6 +8,7 @@ from typing import Tuple, List, Dict, Optional, Any
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
+from dl_techniques.optimization.warmup_schedule import WarmupSchedule
 from train.common.config_io import json_numpy_default
 from train.common.evaluation import generate_training_curves
 
@@ -131,6 +132,8 @@ def create_learning_rate_schedule(
         total_epochs: int = 100,
         warmup_epochs: int = 5,
         steps_per_epoch: Optional[int] = None,
+        warmup_steps: int = 0,
+        warmup_start_lr: float = 1e-8,
 ) -> keras.optimizers.schedules.LearningRateSchedule:
     """
     Create learning rate schedule.
@@ -144,15 +147,48 @@ def create_learning_rate_schedule(
     total_epochs : int
         Total number of training epochs.
     warmup_epochs : int
-        Number of warmup epochs (reserved for future use).
+        Number of warmup epochs. RESERVED / no-op — kept only for backward
+        positional compatibility. Use ``warmup_steps`` to activate warmup.
     steps_per_epoch : Optional[int]
         Steps per epoch (for step-based schedules like ImageNet).
+    warmup_steps : int
+        Active warmup control. When ``> 0`` (cosine schedule only), the cosine
+        decay is wrapped in a :class:`WarmupSchedule` that linearly ramps from
+        ``warmup_start_lr`` to ``initial_lr`` over ``warmup_steps`` steps before
+        decaying. ``0`` (default) means NO warmup — existing callers are
+        unaffected. Requires ``steps_per_epoch`` to be set.
+    warmup_start_lr : float
+        Learning rate at the start of the warmup ramp (only used when
+        ``warmup_steps > 0``). Defaults to ``1e-8``.
 
     Returns
     -------
     Learning rate schedule or float for constant.
     """
     if schedule_type == 'cosine':
+        # DECISION plan_2026-06-02_cc4d4e14/D-004: warmup is wired ONLY through the
+        # explicit warmup_steps param (default 0 = no-op). Do NOT activate via
+        # warmup_epochs — dozens of existing callers rely on the plain cosine path
+        # and would silently gain warmup (behavior regression). warmup engages only
+        # when warmup_steps>0, reproducing the inline CosineDecay+WarmupSchedule
+        # block (alpha=0.01, max(1, total_steps-warmup_steps) guard) at the 11 C1
+        # sites. See decisions.md D-004.
+        if warmup_steps > 0:
+            if steps_per_epoch is None:
+                raise ValueError(
+                    "create_learning_rate_schedule: warmup_steps>0 requires steps_per_epoch"
+                )
+            total_steps = total_epochs * steps_per_epoch
+            primary = keras.optimizers.schedules.CosineDecay(
+                initial_learning_rate=initial_lr,
+                decay_steps=max(1, total_steps - warmup_steps),
+                alpha=0.01,
+            )
+            return WarmupSchedule(
+                warmup_steps=warmup_steps,
+                warmup_start_lr=warmup_start_lr,
+                primary_schedule=primary,
+            )
         decay_steps = total_epochs if steps_per_epoch is None else total_epochs * steps_per_epoch
         return keras.optimizers.schedules.CosineDecay(
             initial_learning_rate=initial_lr,
