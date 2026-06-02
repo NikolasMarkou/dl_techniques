@@ -12,6 +12,7 @@ from train.common.evaluation import (
     generate_training_curves,
     generate_comprehensive_visualizations,
     run_model_analysis,
+    setup_visualization_manager,
 )
 from train.common.nlp import (
     create_tokenizer as create_nlp_tokenizer,

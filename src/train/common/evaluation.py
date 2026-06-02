@@ -10,8 +10,14 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.visualization import (
     VisualizationManager,
     PlotConfig,
+    PlotStyle,
+    ColorScheme,
     TrainingHistory,
     TrainingCurvesVisualization,
+    ConfusionMatrixVisualization,
+    NetworkArchitectureVisualization,
+    ModelComparisonBarChart,
+    ROCPRCurves,
     ClassificationResults,
 )
 from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
@@ -352,3 +358,63 @@ def run_model_analysis(
         import traceback
         traceback.print_exc()
         return None
+
+
+# ---------------------------------------------------------------------
+
+def setup_visualization_manager(
+        experiment_name: str,
+        results_dir: str,
+) -> VisualizationManager:
+    """Set up and configure a publication-style visualization manager.
+
+    Creates a ``visualizations`` subdirectory under ``results_dir`` and returns
+    a :class:`VisualizationManager` pre-registered with the five standard
+    vision-classification templates (training curves, confusion matrix, network
+    architecture, model-comparison bars, ROC/PR curves).
+
+    Parameters
+    ----------
+    experiment_name : str
+        Name of the experiment, used to namespace the visualization manager.
+    results_dir : str
+        Base results directory. Plots are written under
+        ``{results_dir}/visualizations``.
+
+    Returns
+    -------
+    VisualizationManager
+        Configured manager with the five standard templates registered.
+    """
+    viz_dir = os.path.join(results_dir, "visualizations")
+    os.makedirs(viz_dir, exist_ok=True)
+
+    config = PlotConfig(
+        style=PlotStyle.PUBLICATION,
+        color_scheme=ColorScheme(
+            primary="#2E86AB",
+            secondary="#A23B72",
+            success="#06D6A0",
+            warning="#FFD166"
+        ),
+        title_fontsize=14,
+        label_fontsize=12,
+        save_format="png",
+        dpi=300,
+        fig_size=(12, 8)
+    )
+
+    viz_manager = VisualizationManager(
+        experiment_name=experiment_name,
+        output_dir=viz_dir,
+        config=config
+    )
+
+    viz_manager.register_template("training_curves", TrainingCurvesVisualization)
+    viz_manager.register_template("confusion_matrix", ConfusionMatrixVisualization)
+    viz_manager.register_template("network_architecture", NetworkArchitectureVisualization)
+    viz_manager.register_template("model_comparison_bars", ModelComparisonBarChart)
+    viz_manager.register_template("roc_pr_curves", ROCPRCurves)
+
+    logger.info(f"Visualization manager setup complete. Plots will be saved to: {viz_dir}")
+    return viz_manager
