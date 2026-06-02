@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks, save_config_json, convert_keras_history_to_training_history
+from train.common import setup_gpu, create_callbacks as create_common_callbacks, save_config_json, convert_keras_history_to_training_history, make_imagenet_filesystem_dataset
 from dl_techniques.metrics.primary_output_metrics import (
     PrimaryOutputAccuracy, PrimaryOutputTopKAccuracy,
 )
@@ -130,69 +130,11 @@ class TrainingConfig:
 # IMAGENET DATA PIPELINE
 # =============================================================================
 
-def get_imagenet_preprocessing() -> Tuple[float, float, float, float, float, float]:
-    """Get ImageNet normalization constants (mean_rgb, std_rgb)."""
-    return 0.485, 0.456, 0.406, 0.229, 0.224, 0.225
-
-
-def preprocess_image(
-    image: tf.Tensor, label: tf.Tensor, config: TrainingConfig, is_training: bool = True
-) -> Tuple[tf.Tensor, tf.Tensor]:
-    """Preprocess image for training or validation."""
-    image = tf.image.decode_jpeg(image, channels=3)
-    image = tf.cast(image, tf.float32)
-
-    if is_training and config.augment_data:
-        image = tf.image.resize(image, [config.image_size + 32, config.image_size + 32])
-        image = tf.image.random_crop(image, [config.image_size, config.image_size, 3])
-        image = tf.image.random_flip_left_right(image)
-        image = tf.image.random_brightness(image, max_delta=0.2)
-        image = tf.image.random_contrast(image, lower=0.8, upper=1.2)
-        image = tf.image.random_saturation(image, lower=0.8, upper=1.2)
-        image = tf.image.random_hue(image, max_delta=0.1)
-    else:
-        image = tf.image.resize(image, [int(config.image_size * 1.15), int(config.image_size * 1.15)])
-        image = tf.image.resize_with_crop_or_pad(image, config.image_size, config.image_size)
-
-    image = tf.clip_by_value(image, 0.0, 255.0) / 255.0
-    mean_r, mean_g, mean_b, std_r, std_g, std_b = get_imagenet_preprocessing()
-    image = (image - [mean_r, mean_g, mean_b]) / [std_r, std_g, std_b]
-    return image, label
-
-
-def create_imagenet_dataset(
-    data_dir: str, config: TrainingConfig, is_training: bool = True
-) -> tf.data.Dataset:
-    """Create ImageNet dataset pipeline."""
-    data_dir = Path(data_dir)
-    class_names = sorted([d.name for d in data_dir.iterdir() if d.is_dir()])
-    class_to_idx = {name: idx for idx, name in enumerate(class_names)}
-    logger.info(f"Found {len(class_names)} classes in {data_dir}")
-
-    image_paths = []
-    labels = []
-    for class_name in class_names:
-        class_idx = class_to_idx[class_name]
-        for img_file in (data_dir / class_name).glob("*.JPEG"):
-            image_paths.append(str(img_file))
-            labels.append(class_idx)
-
-    logger.info(f"Found {len(image_paths)} images")
-
-    dataset = tf.data.Dataset.from_tensor_slices((image_paths, labels))
-    if is_training:
-        dataset = dataset.shuffle(buffer_size=10000, reshuffle_each_iteration=True).repeat()
-
-    def load_and_preprocess(path, label):
-        image = tf.io.read_file(path)
-        return preprocess_image(image, label, config, is_training)
-
-    dataset = dataset.map(load_and_preprocess, num_parallel_calls=config.num_parallel_calls)
-    if config.cache_dataset and not is_training:
-        dataset = dataset.cache()
-    dataset = dataset.batch(config.batch_size, drop_remainder=is_training)
-    dataset = dataset.prefetch(config.prefetch_buffer)
-    return dataset
+# The ImageNet class-subdir tf.data pipeline (decode/resize/augment/normalize)
+# now lives in train.common.make_imagenet_filesystem_dataset. ResNet opts into
+# the 4 colour augmentations via augment_color=True; the IMAGENET_MEAN/STD
+# normalization and the unconditional clip_by_value(0,255) are applied inside
+# the helper. See plan_2026-06-02_35651564/D-001.
 
 
 # =============================================================================
@@ -384,8 +326,28 @@ def train_resnet_imagenet(config: TrainingConfig, gpu_id: Optional[int] = None) 
 
     # Datasets
     logger.info("Creating ImageNet datasets...")
-    train_dataset = create_imagenet_dataset(config.train_data_dir, config, is_training=True)
-    val_dataset = create_imagenet_dataset(config.val_data_dir, config, is_training=False)
+    train_dataset = make_imagenet_filesystem_dataset(
+        config.train_data_dir,
+        config.image_size,
+        config.batch_size,
+        is_training=True,
+        augment=config.augment_data,
+        augment_color=True,
+        num_parallel_calls=config.num_parallel_calls,
+        cache_val=config.cache_dataset,
+        prefetch_buffer=config.prefetch_buffer,
+    )
+    val_dataset = make_imagenet_filesystem_dataset(
+        config.val_data_dir,
+        config.image_size,
+        config.batch_size,
+        is_training=False,
+        augment=config.augment_data,
+        augment_color=True,
+        num_parallel_calls=config.num_parallel_calls,
+        cache_val=config.cache_dataset,
+        prefetch_buffer=config.prefetch_buffer,
+    )
 
     train_dir = Path(config.train_data_dir)
     num_train_images = sum(

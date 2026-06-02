@@ -30,7 +30,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks, save_config_json, convert_keras_history_to_training_history, CIFAR10_MEAN, CIFAR10_STD
+from train.common import setup_gpu, create_callbacks as create_common_callbacks, save_config_json, convert_keras_history_to_training_history, CIFAR10_MEAN, CIFAR10_STD, make_imagenet_filesystem_dataset
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
     optimizer_builder,
@@ -312,60 +312,11 @@ def create_cifar_dataset(
 # IMAGENET DATA PIPELINE
 # =============================================================================
 
-def get_imagenet_preprocessing() -> Tuple[List[float], List[float]]:
-    return [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
-
-
-def _preprocess_imagenet(
-        image: tf.Tensor, label: tf.Tensor, config: TrainingConfig, is_training: bool
-) -> Tuple[tf.Tensor, tf.Tensor]:
-    image = tf.image.decode_jpeg(image, channels=3)
-    image = tf.cast(image, tf.float32)
-    if is_training and config.augment_data:
-        image = tf.image.resize(image, [config.image_size + 32, config.image_size + 32])
-        image = tf.image.random_crop(image, [config.image_size, config.image_size, 3])
-        image = tf.image.random_flip_left_right(image)
-    else:
-        image = tf.image.resize(image, [int(config.image_size * 1.15), int(config.image_size * 1.15)])
-        image = tf.image.resize_with_crop_or_pad(image, config.image_size, config.image_size)
-    image = tf.clip_by_value(image, 0.0, 255.0) / 255.0
-    mean, std = get_imagenet_preprocessing()
-    image = (image - mean) / std
-    return image, label
-
-
-def create_imagenet_dataset(
-        data_dir: str, config: TrainingConfig, is_training: bool = True
-) -> tf.data.Dataset:
-    """Build an ImageNet-style tf.data pipeline from a class-subdir layout."""
-    data_dir = Path(data_dir)
-    class_names = sorted([d.name for d in data_dir.iterdir() if d.is_dir()])
-    class_to_idx = {name: idx for idx, name in enumerate(class_names)}
-    logger.info(f"Found {len(class_names)} classes in {data_dir}")
-
-    image_paths: List[str] = []
-    labels: List[int] = []
-    for class_name in class_names:
-        class_idx = class_to_idx[class_name]
-        for img_file in (data_dir / class_name).glob("*.JPEG"):
-            image_paths.append(str(img_file))
-            labels.append(class_idx)
-    logger.info(f"Found {len(image_paths)} images")
-
-    dataset = tf.data.Dataset.from_tensor_slices((image_paths, labels))
-    if is_training:
-        dataset = dataset.shuffle(buffer_size=10000, reshuffle_each_iteration=True).repeat()
-
-    def _load(path, label):
-        image = tf.io.read_file(path)
-        return _preprocess_imagenet(image, label, config, is_training)
-
-    dataset = dataset.map(_load, num_parallel_calls=config.num_parallel_calls)
-    if config.cache_dataset and not is_training:
-        dataset = dataset.cache()
-    dataset = dataset.batch(config.batch_size, drop_remainder=is_training)
-    dataset = dataset.prefetch(config.prefetch_buffer)
-    return dataset
+# The ImageNet class-subdir tf.data pipeline now lives in
+# train.common.make_imagenet_filesystem_dataset. ViT uses the default
+# augment_color=False (no colour augmentations); IMAGENET_MEAN/STD
+# normalization and the unconditional clip_by_value(0,255) are applied inside
+# the helper. See plan_2026-06-02_35651564/D-001.
 
 
 # =============================================================================
@@ -518,8 +469,28 @@ def train_vit(
         # invariants (file-based, no in-memory pre-normalization).
         _assert_train_val_distribution_match(train_ds, val_ds)
     elif config.dataset == "imagenet":
-        train_ds = create_imagenet_dataset(config.train_data_dir, config, is_training=True)
-        val_ds = create_imagenet_dataset(config.val_data_dir, config, is_training=False)
+        train_ds = make_imagenet_filesystem_dataset(
+            config.train_data_dir,
+            config.image_size,
+            config.batch_size,
+            is_training=True,
+            augment=config.augment_data,
+            augment_color=False,
+            num_parallel_calls=config.num_parallel_calls,
+            cache_val=config.cache_dataset,
+            prefetch_buffer=config.prefetch_buffer,
+        )
+        val_ds = make_imagenet_filesystem_dataset(
+            config.val_data_dir,
+            config.image_size,
+            config.batch_size,
+            is_training=False,
+            augment=config.augment_data,
+            augment_color=False,
+            num_parallel_calls=config.num_parallel_calls,
+            cache_val=config.cache_dataset,
+            prefetch_buffer=config.prefetch_buffer,
+        )
         train_dir = Path(config.train_data_dir)
         num_train_images = sum(
             len(list((train_dir / cd).glob("*.JPEG")))

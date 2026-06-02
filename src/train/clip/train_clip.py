@@ -18,7 +18,7 @@ import keras
 from keras import ops
 import tensorflow as tf
 
-from train.common import setup_gpu
+from train.common import setup_gpu, IMAGENET_MEAN, IMAGENET_STD
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
     optimizer_builder,
@@ -85,8 +85,14 @@ class CLIPDataLoader:
         )
 
         if self.image_normalization == 'imagenet':
-            mean = tf.constant([0.485, 0.456, 0.406], dtype=tf.float32)
-            std = tf.constant([0.229, 0.224, 0.225], dtype=tf.float32)
+            # DECISION plan_2026-06-02_35651564/D-002: reference the shared
+            # IMAGENET_MEAN/STD constants instead of re-hardcoding the literals.
+            # Pure literal swap inside the 'imagenet' branch ONLY — do NOT
+            # touch the 'clip' default branch or any other CLIPDataLoader logic
+            # (that surface is F13-excluded). Values are bit-equal to the
+            # original [0.485,0.456,0.406] / [0.229,0.224,0.225].
+            mean = tf.constant(IMAGENET_MEAN, dtype=tf.float32)
+            std = tf.constant(IMAGENET_STD, dtype=tf.float32)
             image = (image / 255.0 - mean) / std
         elif self.image_normalization == 'clip':
             image = image / 255.0
