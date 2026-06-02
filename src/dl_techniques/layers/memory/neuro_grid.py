@@ -84,8 +84,8 @@ from typing import List, Tuple, Optional, Union, Any, Dict
 # local imports
 # ---------------------------------------------------------------------
 
-from ..regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
-from ..initializers.hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
+from ...regularizers.soft_orthogonal import SoftOrthonormalConstraintRegularizer
+from ...initializers.hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
 
 
 # ---------------------------------------------------------------------
