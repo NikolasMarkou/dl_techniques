@@ -458,16 +458,16 @@ def detect_correlation_trap(
     even after destroying spatial structure.
 
     The detection protocol follows Martin & Mahoney (2021) and uses:
-    1. MP upper edge: λ+ = σ²(1 + √Q)²
-    2. TW threshold:  Δ_TW = c_TW · σ² · M^(-2/3)   (SETOL §2.3)
-    3. Spike count:   eigenvalues above λ+ + Δ_TW
+    1. MP edges:  λ± = σ²(1 ± 1/√Q)²   (Q=N/M, N=larger; WeightWatcher RMT_Util)
+    2. TW scale:  TW = (1/√Q)·λ+^(2/3)·M^(-2/3)   (WeightWatcher identify_trap_mode_indices)
+    3. Threshold: λ+ + c_TW·√TW   (c_TW multiplier, default 1.0 = WW-exact)
     4. Severity:      (λ_max - threshold) / λ+
 
     Args:
         rand_evals: Eigenvalues of the randomized weight matrix (sorted descending).
         N: Maximum dimension of the weight matrix.
         M: Minimum dimension of the weight matrix.
-        c_TW: Tracy-Widom safety factor (default 2.5).
+        c_TW: Tracy-Widom multiplier on √TW (default 1.0 = WeightWatcher-exact).
 
     Returns:
         Dictionary with trap detection results:
@@ -497,20 +497,25 @@ def detect_correlation_trap(
     if sigma_sq < SPECTRAL_EPSILON:
         return result
 
-    # Aspect ratio
+    # Aspect ratio (Q = N/M, N the LARGER dim per docstring => Q >= 1)
     Q = N / M
+    inv_sqrtQ = 1.0 / np.sqrt(Q)
 
     # Marchenko-Pastur edges
-    mp_lambda_plus = sigma_sq * (1.0 + np.sqrt(Q)) ** 2
-    mp_lambda_minus = sigma_sq * max(0.0, (1.0 - np.sqrt(Q)) ** 2)
+    # DECISION plan_2026-06-03_bc986e52/D-002: MP edge uses (1 + 1/sqrt(Q))^2 (WeightWatcher
+    # RMT_Util.calc_lambda_plus/minus), NOT (1 + sqrt(Q))^2. Q=N/M with N the LARGER dim, so
+    # 1/sqrt(Q)=sqrt(M/N)<=1. Do NOT revert to sqrt(Q) — that overestimates the edge by a factor
+    # for every rectangular layer. Authoritative: findings/ww-authoritative-reference.md A/B.
+    mp_lambda_plus = sigma_sq * (1.0 + inv_sqrtQ) ** 2
+    mp_lambda_minus = sigma_sq * max(0.0, (1.0 - inv_sqrtQ) ** 2)
 
     # Tracy-Widom fluctuation threshold
-    # DECISION plan_2026-06-03_9e82787d/D-007: scaling is O(M^(-2/3)) per SETOL
-    # §2.3 (M = min dimension), NOT N^(-1/3). Do NOT revert to N^(-1/3); the
-    # exponent/base both differ and govern trap-detection sensitivity. See
-    # findings.md D-E.
-    delta_TW = c_TW * sigma_sq * (M ** (-2.0 / 3.0))
-    threshold = mp_lambda_plus + delta_TW
+    # DECISION plan_2026-06-03_bc986e52/D-003: Tracy-Widom per WeightWatcher
+    # remove_traps.identify_trap_mode_indices: TW = (1/sqrt(Q))*bulk_max^(2/3)*M^(-2/3); the edge
+    # is raised to TW via + sqrt(TW) (NOT + TW). c_TW retained as a tunable multiplier on sqrt(TW)
+    # (default 1.0 = WW-exact); do NOT reintroduce the old c_TW*sigma^2*M^(-2/3) linear form.
+    TW = inv_sqrtQ * np.power(mp_lambda_plus, 2.0 / 3.0) * np.power(M, -2.0 / 3.0)
+    threshold = mp_lambda_plus + c_TW * np.sqrt(TW)
 
     # Detect spikes above threshold
     spikes = rand_evals[rand_evals > threshold]

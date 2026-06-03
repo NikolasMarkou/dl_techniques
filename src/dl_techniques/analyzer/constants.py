@@ -44,7 +44,7 @@ SPECTRAL_CRITICAL_WEIGHT_THRESHOLD = 0.1
 SPECTRAL_MAX_CRITICAL_WEIGHTS_REPORTED = 10
 
 # Correlation Trap Detection (Marchenko-Pastur + Tracy-Widom)
-SPECTRAL_TW_SAFETY_FACTOR = 2.5          # Tracy-Widom c_TW safety factor
+SPECTRAL_TW_SAFETY_FACTOR = 1.0          # Tracy-Widom multiplier on sqrt(TW); 1.0 = WeightWatcher-exact
 SPECTRAL_TRAP_SEVERITY_MILD = 0.1        # severity < 0.1 = no trap
 SPECTRAL_TRAP_SEVERITY_MODERATE = 0.3    # 0.1-0.3 = mild, 0.3-0.5 = moderate
 SPECTRAL_TRAP_SEVERITY_SEVERE = 0.5      # 0.5-1.0 = severe
