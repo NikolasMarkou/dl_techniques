@@ -209,7 +209,8 @@ class TestSpectralMetrics:
         assert metrics['alpha_hat'] == pytest.approx(6.0)
         # alpha_hat_normalized = 3 * log10(100/50) = 3 * log10(2) ≈ 0.903
         assert metrics['alpha_hat_normalized'] == pytest.approx(3.0 * np.log10(2.0), rel=1e-3)
-        # alpha_weighted is a deprecated alias of alpha_hat (same value)
+        # alpha_weighted is the WeightWatcher-canonical AlphaHat; alpha_hat is its
+        # SETOL-notation alias (same value).
         assert metrics['alpha_weighted'] == pytest.approx(6.0)
 
     def test_empty_evals(self):

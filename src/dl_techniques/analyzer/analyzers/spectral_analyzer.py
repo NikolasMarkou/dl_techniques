@@ -231,11 +231,13 @@ class SpectralAnalyzer(BaseAnalyzer):
                 rand_Wmats = [np.random.permutation(W.flatten()).reshape(W.shape) for W in Wmats]
                 rand_evals, rand_sv_max, _, _ = spectral_metrics.compute_eigenvalues(rand_Wmats, N, M, n_comp)
                 rand_distance = spectral_metrics.jensen_shannon_distance(evals, rand_evals)
-                ww_softrank = np.max(rand_evals) / np.max(evals) if np.max(evals) > 0 else 0
+                # Randomization singular-value ratio (NOT WW's mp_softrank, which is
+                # λ_plus/λ_max). Re-keyed off the former softrank name (D-006).
+                rand_sv_ratio = np.max(rand_evals) / np.max(evals) if np.max(evals) > 0 else 0
                 randomization_metrics = {
                     MetricNames.RAND_SV_MAX: rand_sv_max,
                     MetricNames.RAND_DISTANCE: rand_distance,
-                    MetricNames.WW_SOFTRANK: ww_softrank,
+                    MetricNames.RAND_SV_RATIO: rand_sv_ratio,
                 }
 
                 # Correlation trap detection via MP edge + Tracy-Widom threshold

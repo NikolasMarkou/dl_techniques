@@ -78,6 +78,9 @@ class StatusCode(str, Enum):
 class MetricNames:
     """Class holding the standard names of metrics used in spectral analysis"""
     ALPHA = 'alpha'
+    NORM = 'norm'
+    SPECTRAL_NORM = 'spectral_norm'
+    MATRIX_RANK = 'matrix_rank'
     STABLE_RANK = 'stable_rank'
     ENTROPY = 'entropy'
     LOG_NORM = 'log_norm'
@@ -118,11 +121,19 @@ class MetricNames:
     MP_LAMBDA_MINUS = 'mp_lambda_minus'
     TRAP_THRESHOLD = 'trap_threshold'
     RAND_DISTANCE = 'rand_distance'
-    WW_SOFTRANK = 'ww_softrank'
+    # WW's softrank metric: λ_plus / λ_max (spikes removed first). Reserved for the
+    # real WW mp_softrank implementation (Step 4). Replaces the former mis-named
+    # softrank constant, which was bound to a non-WW randomization ratio (now
+    # RAND_SV_RATIO).
+    MP_SOFTRANK = 'mp_softrank'
+    # Randomization singular-value ratio: max(rand_evals) / max(evals). NOT WW's
+    # mp_softrank — a distinct randomization diagnostic.
+    RAND_SV_RATIO = 'rand_sv_ratio'
     RAND_SV_MAX = 'rand_sv_max'
 
 SPECTRAL_DEFAULT_SUMMARY_METRICS = [
-    MetricNames.ALPHA, MetricNames.ALPHA_HAT, MetricNames.STABLE_RANK,
+    MetricNames.ALPHA, MetricNames.ALPHA_WEIGHTED, MetricNames.ALPHA_HAT,
+    MetricNames.STABLE_RANK,
     MetricNames.ENTROPY, MetricNames.LOG_SPECTRAL_NORM, MetricNames.LOG_NORM,
     MetricNames.GINI_COEFFICIENT, MetricNames.DOMINANCE_RATIO,
     MetricNames.PARTICIPATION_RATIO, MetricNames.CONCENTRATION_SCORE

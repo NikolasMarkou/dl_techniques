@@ -639,25 +639,25 @@ def calculate_spectral_metrics(evals: np.ndarray, alpha: float, N: int = 0) -> D
     norm_safe = norm if norm > SPECTRAL_EPSILON else SPECTRAL_EPSILON
     spectral_norm_safe = spectral_norm if spectral_norm > SPECTRAL_EPSILON else SPECTRAL_EPSILON
 
-    # α̂ = α · log₁₀(λ_max) on UN-normalized σ² eigenvalues — the canonical
-    # WeightWatcher convention (SETOL §2.4). SETOL §10.2 sanctions an optional
-    # 1/N normalization, but the WW convention does NOT divide by N; the WW
-    # value is the cross-architecture-comparable α̂ exposed as MetricNames.ALPHA_HAT.
-    alpha_hat = alpha * np.log10(spectral_norm_safe)
+    # alpha_weighted = α · log₁₀(λ_max) on UN-normalized σ² eigenvalues — the
+    # CANONICAL WeightWatcher AlphaHat (WW METRICS.ALPHA_WEIGHTED). WW exposes this
+    # under the single name 'alpha_weighted' and does NOT divide by N. This is the
+    # cross-architecture-comparable α̂ exposed as MetricNames.ALPHA_WEIGHTED.
+    alpha_weighted = alpha * np.log10(spectral_norm_safe)
 
-    # alpha_weighted: DEPRECATED alias of alpha_hat (kept so existing
-    # DataFrame/report consumers reading 'alpha_weighted' get the same value).
-    alpha_weighted = alpha_hat
+    # alpha_hat: SETOL-paper notation α̂ for alpha_weighted (alias; value identical).
+    alpha_hat = alpha_weighted
 
-    # α̂_normalized: the /N-normalized variant (SETOL §10.2 normalization choice),
-    # α · log₁₀(λ_max / N). Makes α̂ comparable across layers of differing dimension.
-    # N=0 → fall back to the un-normalized alpha_hat.
+    # alpha_hat_normalized: non-WeightWatcher SETOL-theory variant using the
+    # X=(1/N)WᵀW normalization, α · log₁₀(λ_max / N). NOT part of the WW metric set;
+    # retained as a SETOL extra for layers of differing dimension.
+    # N=0 → fall back to the un-normalized alpha_weighted.
     if N > 0:
         lambda_max_normalized = spectral_norm / N
         lambda_max_norm_safe = lambda_max_normalized if lambda_max_normalized > SPECTRAL_EPSILON else SPECTRAL_EPSILON
         alpha_hat_normalized = alpha * np.log10(lambda_max_norm_safe)
     else:
-        alpha_hat_normalized = alpha_hat
+        alpha_hat_normalized = alpha_weighted
 
     return {
         "norm": norm,
