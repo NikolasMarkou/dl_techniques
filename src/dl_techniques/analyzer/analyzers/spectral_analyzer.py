@@ -339,7 +339,7 @@ class SpectralAnalyzer(BaseAnalyzer):
         if 'alpha' in summary:
             mean_alpha = summary['alpha']
             if mean_alpha < 2.0:
-                recommendations.append("Model may be over-trained (low α). Consider early stopping or regularization.")
+                recommendations.append("Model may be over-regularized (low α < 2). Consider reducing the learning rate and checking for correlation traps.")
             elif mean_alpha > 6.0:
                 recommendations.append("Model may be under-trained (high α). Consider training longer or reducing regularization.")
             else:

@@ -36,9 +36,10 @@ specific mathematical principles to diagnose different aspects of a model:
     the ESD can be accurately modeled by a truncated power-law distribution,
     P(λ) ~ λ^(-α). The power-law exponent, α, serves as a powerful proxy for
     generalization quality, often without requiring test data. An α between
-    2.0 and 6.0 typically indicates a well-trained model, while α < 2.0 may
-    suggest overfitting (memorization) and α > 6.0 may suggest
-    under-training. This module also computes SVD-based metrics like stable
+    2.0 and 6.0 typically indicates a well-trained model, while α < 2.0
+    indicates over-regularization (a glassy/compensatory state, often a layer
+    over-trained to compensate for an under-trained one) per SETOL §7.2, and
+    α > 6.0 indicates under-training. This module also computes SVD-based metrics like stable
     rank and concentration scores (Gini coefficient) to measure the
     distribution of information within the weights.
 
