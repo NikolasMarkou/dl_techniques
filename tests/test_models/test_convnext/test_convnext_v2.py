@@ -260,6 +260,51 @@ class TestConvNeXtV2:
             assert outputs_train.shape == expected_shape
             assert outputs_test.shape == expected_shape
 
+    def test_stochastic_mode_round_trip(self, num_classes):
+        """Test that stochastic_mode='gradient' survives a config round-trip."""
+        original_model = ConvNeXtV2(
+            num_classes=num_classes,
+            depths=[2, 2, 4, 2],
+            dims=[32, 64, 128, 256],
+            drop_path_rate=0.1,
+            stochastic_mode='gradient'
+        )
+
+        config = original_model.get_config()
+        recreated_model = ConvNeXtV2.from_config(config)
+
+        assert recreated_model.stochastic_mode == 'gradient'
+        assert recreated_model.stochastic_mode == original_model.stochastic_mode
+
+    def test_stochastic_mode_gradient(self, num_classes):
+        """Test build/forward with stochastic_mode='gradient'."""
+        input_shape = (16, 16, 3)
+        model = ConvNeXtV2(
+            num_classes=num_classes,
+            depths=[2, 2, 4, 2],
+            dims=[32, 64, 128, 256],
+            drop_path_rate=0.2,
+            stochastic_mode='gradient',
+            input_shape=input_shape
+        )
+
+        assert model.stochastic_mode == 'gradient'
+
+        dummy_input = tf.random.uniform([2] + list(input_shape), 0, 1)
+
+        # Inference path
+        outputs = model(dummy_input, training=False)
+        assert outputs.shape == (2, num_classes)
+
+        # Stochastic (training) path — shape only, no numerical assertion
+        outputs_train = model(dummy_input, training=True)
+        assert outputs_train.shape == (2, num_classes)
+
+    def test_stochastic_mode_invalid(self, num_classes):
+        """Test that an invalid stochastic_mode raises ValueError."""
+        with pytest.raises(ValueError):
+            ConvNeXtV2(num_classes=num_classes, stochastic_mode='bogus')
+
     def test_dropout_configurations(self, num_classes, cifar_input_shape, cifar_sample_data):
         """Test different dropout configurations."""
         dropout_configs = [
@@ -400,6 +445,7 @@ class TestConvNeXtV2:
         assert recreated_model.depths == original_model.depths
         assert recreated_model.dims == original_model.dims
         assert recreated_model.drop_path_rate == original_model.drop_path_rate
+        assert recreated_model.stochastic_mode == original_model.stochastic_mode
         assert recreated_model.kernel_size == original_model.kernel_size
         assert recreated_model.activation == original_model.activation
         assert recreated_model.use_bias == original_model.use_bias
