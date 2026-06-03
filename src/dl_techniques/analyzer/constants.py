@@ -42,6 +42,8 @@ SPECTRAL_DEFAULT_DPI = 300
 SPECTRAL_HIGH_CONCENTRATION_PERCENTILE = 0.8
 SPECTRAL_CRITICAL_WEIGHT_THRESHOLD = 0.1
 SPECTRAL_MAX_CRITICAL_WEIGHTS_REPORTED = 10
+SPECTRAL_SMALL_N_CUTOFF = 20             # WeightWatcher SMALL_N_CUTOFF: tails with N < 20 use bias-corrected alpha
+SPECTRAL_SMALL_N_KMIN = 8                # WeightWatcher k_min: minimum tail size considered in small-N xmin search
 
 # Correlation Trap Detection (Marchenko-Pastur + Tracy-Widom)
 SPECTRAL_TW_SAFETY_FACTOR = 1.0          # Tracy-Widom multiplier on sqrt(TW); 1.0 = WeightWatcher-exact

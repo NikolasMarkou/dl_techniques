@@ -85,6 +85,7 @@ from dl_techniques.analyzer.constants import (
     SPECTRAL_DEFAULT_MIN_EVALS, SPECTRAL_DEFAULT_MAX_EVALS, SPECTRAL_DEFAULT_BINS,
     SPECTRAL_MAX_CRITICAL_WEIGHTS_REPORTED, SPECTRAL_CRITICAL_WEIGHT_THRESHOLD,
     SPECTRAL_TW_SAFETY_FACTOR,
+    SPECTRAL_SMALL_N_CUTOFF, SPECTRAL_SMALL_N_KMIN,
     SPECTRAL_TRAP_SEVERITY_MILD, SPECTRAL_TRAP_SEVERITY_MODERATE,
     SPECTRAL_TRAP_SEVERITY_SEVERE, SPECTRAL_TRAP_SEVERITY_CRITICAL
 )
@@ -256,16 +257,58 @@ def fit_powerlaw(
             else:
                 Ds[i] = float('inf')  # Invalid fit
 
-        # 3. Find the xmin that minimizes the KS distance D
-        best_i = np.argmin(Ds)
+        # 3. Select xmin.
+        if N < SPECTRAL_SMALL_N_CUTOFF:
+            # WeightWatcher small-N path (fit_powerlaw_smallN): bias-corrected
+            # MLE alpha_bc = 1 + (n-1)/s, with xmin chosen by the penalized objective
+            # J = D_ks - 0.868/sqrt(n_tail). Only tails with n_tail >= k_min and s > eps
+            # are considered.
+            # DECISION plan_2026-06-03_bc986e52/D-008: small-N (<20) uses the (n-1)
+            # bias correction + KS-tail-size penalty. The standard (>=20) path is
+            # UNCHANGED. Do NOT apply the penalty or the (n-1) correction for N>=20.
+            Js = np.full(N - 1, np.inf, dtype=np.float64)
+            alphas_bc = np.zeros(N - 1, dtype=np.float64)
+            for i, current_xmin in enumerate(xmins):
+                n_tail = N - i
+                if n_tail < SPECTRAL_SMALL_N_KMIN:
+                    continue
+                s = tail_sums[i] - n_tail * log_data[i]
+                if s <= SPECTRAL_EPSILON:
+                    continue
+                a_bc = 1.0 + (n_tail - 1.0) / s
+                alphas_bc[i] = a_bc
+                if a_bc <= 1.0:
+                    continue
+                tail = data[i:]
+                theoretical_cdf = 1.0 - (tail / current_xmin) ** (1.0 - a_bc)
+                empirical_cdf = np.arange(n_tail, dtype=np.float64) / n_tail
+                dks = float(np.max(np.abs(theoretical_cdf - empirical_cdf)))
+                Ds[i] = dks
+                Js[i] = dks - 0.868 / np.sqrt(n_tail)
 
-        # If all fits failed
-        if Ds[best_i] == float('inf'):
-            return alpha, optimal_xmin, D, sigma, num_pl_spikes, status, "No valid power-law fit found"
-
-        optimal_xmin = xmins[best_i]
-        alpha = alphas[best_i]
-        D = Ds[best_i]
+            if np.isfinite(Js).any():
+                best_i = int(np.nanargmin(Js))
+                if Ds[best_i] == float('inf'):
+                    return alpha, optimal_xmin, D, sigma, num_pl_spikes, status, "No valid power-law fit found"
+                optimal_xmin = xmins[best_i]
+                alpha = alphas_bc[best_i]
+                D = Ds[best_i]
+            else:
+                # No valid small-N tail; fall back to the standard KS-argmin selection.
+                best_i = int(np.argmin(Ds))
+                if Ds[best_i] == float('inf'):
+                    return alpha, optimal_xmin, D, sigma, num_pl_spikes, status, "No valid power-law fit found"
+                optimal_xmin = xmins[best_i]
+                alpha = alphas[best_i]
+                D = Ds[best_i]
+        else:
+            # Standard path (N >= 20): minimize the KS distance D — UNCHANGED.
+            best_i = np.argmin(Ds)
+            if Ds[best_i] == float('inf'):
+                return alpha, optimal_xmin, D, sigma, num_pl_spikes, status, "No valid power-law fit found"
+            optimal_xmin = xmins[best_i]
+            alpha = alphas[best_i]
+            D = Ds[best_i]
 
         # Calculate sigma (standard error) for the best fit
         n_tail_optimal = N - best_i

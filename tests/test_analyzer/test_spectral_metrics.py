@@ -89,6 +89,55 @@ class TestFitPowerlaw:
 
 
 # =====================================================================
+# Small-N (N < 20) bias-corrected alpha branch (WeightWatcher, R7)
+# =====================================================================
+
+class TestSmallNPowerlaw:
+    """Tests for the WeightWatcher small-N (N < 20) bias-corrected alpha branch.
+
+    For tails with N < SPECTRAL_SMALL_N_CUTOFF (20), fit_powerlaw uses the
+    bias-corrected MLE alpha_bc = 1 + (n-1)/s and selects xmin by the penalized
+    objective J = D_ks - 0.868/sqrt(n). The standard N >= 20 path is unchanged.
+    """
+
+    def test_small_n_branch_returns_finite_bias_corrected_alpha(self):
+        """A short power-law tail (10 <= N < 20) hits the small-N branch and
+        yields a finite, reasonable bias-corrected alpha."""
+        np.random.seed(123)
+        true_alpha = 3.0
+        xmin = 1.0
+        # 15 synthetic power-law samples via inverse-CDF.
+        u = np.random.uniform(0.0, 1.0, 15)
+        data = xmin * (1.0 - u) ** (-1.0 / (true_alpha - 1.0))
+
+        # Confirm we are genuinely in the small-N regime.
+        assert 10 <= len(data) < 20
+
+        alpha, opt_xmin, D, sigma, num_pl, status, warning = fit_powerlaw(data)
+
+        assert status == "success"
+        assert np.isfinite(alpha)
+        assert 1.0 < alpha < 10.0, f"bias-corrected alpha out of range: {alpha}"
+        assert np.isfinite(D) and D >= 0.0
+        assert num_pl > 0
+
+    def test_small_n_branch_deterministic_descending_tail(self):
+        """A hand-built descending tail of 12 values exercises the branch
+        deterministically and produces a finite alpha > 1.0."""
+        data = np.array([
+            20.0, 12.0, 8.0, 6.0, 4.5, 3.5, 2.8, 2.2, 1.8, 1.5, 1.2, 1.0
+        ], dtype=np.float64)
+        assert 10 <= len(data) < 20
+
+        alpha, opt_xmin, D, sigma, num_pl, status, warning = fit_powerlaw(data)
+
+        assert status == "success"
+        assert np.isfinite(alpha)
+        assert alpha > 1.0
+        assert 1.0 < alpha < 10.0
+
+
+# =====================================================================
 # SVD Smoothing
 # =====================================================================
 
