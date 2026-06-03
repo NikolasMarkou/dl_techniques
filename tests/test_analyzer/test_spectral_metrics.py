@@ -301,14 +301,17 @@ class TestClassifyLearningPhase:
 
     def test_ideal(self):
         assert classify_learning_phase(2.0) == "ideal"
-        assert classify_learning_phase(2.4) == "ideal"
 
     def test_good(self):
+        # Contract correction (D-C): "ideal" is now the narrow band [2.0, 2.1),
+        # so 2.4 falls into "good" (was previously asserted "ideal").
+        assert classify_learning_phase(2.4) == "good"
         assert classify_learning_phase(3.0) == "good"
         assert classify_learning_phase(3.9) == "good"
-
-    def test_fair(self):
-        assert classify_learning_phase(5.0) == "fair"
+        # "fair" (4-6) collapsed into "good" per D-003.
+        assert classify_learning_phase(5.0) == "good"
+        # Inclusive upper boundary: α==6.0 → "good"; α>6.0 → "under-trained".
+        assert classify_learning_phase(6.0) == "good"
 
     def test_under_trained(self):
         assert classify_learning_phase(7.0) == "under-trained"

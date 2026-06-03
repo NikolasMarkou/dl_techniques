@@ -81,6 +81,7 @@ from typing import Dict, List, Optional, Tuple, Union
 from dl_techniques.utils.logger import logger
 from dl_techniques.analyzer.constants import (
     SPECTRAL_EPSILON, SPECTRAL_EVALS_THRESH, SPECTRAL_OVER_TRAINED_THRESH, SPECTRAL_UNDER_TRAINED_THRESH,
+    SPECTRAL_IDEAL_ALPHA_BAND,
     SPECTRAL_DEFAULT_MIN_EVALS, SPECTRAL_DEFAULT_MAX_EVALS, SPECTRAL_DEFAULT_BINS,
     SPECTRAL_MAX_CRITICAL_WEIGHTS_REPORTED, SPECTRAL_CRITICAL_WEIGHT_THRESHOLD,
     SPECTRAL_TW_SAFETY_FACTOR,
@@ -404,12 +405,20 @@ def classify_learning_phase(alpha: float) -> str:
     """
     Classify the learning phase of a layer based on its power-law exponent α.
 
-    Based on SETOL Section 4 (Phases of Learning):
-    - α ≈ 2.0: Ideal (critical phase boundary, ERG satisfied)
-    - 2.0 < α < 4.0: Good/Typical (standard SOTA models)
-    - α < 2.0: Over-regularized/Glassy (correlation traps)
-    - α > 6.0: Under-trained (random-like, Marchenko-Pastur)
-    - 4.0 < α < 6.0: Fair (working but room for improvement)
+    Bands follow SETOL §3.2/§13 (Phases of Learning), with "ideal" treated as a
+    narrow band around the critical point α≈2 and the over/under-trained
+    boundaries pinned to SPECTRAL_OVER_TRAINED_THRESH (2.0) and
+    SPECTRAL_UNDER_TRAINED_THRESH (6.0):
+
+    - α < 0:                 "failed"           (invalid / no power-law fit)
+    - 0 ≤ α < 2.0:           "over-regularized" (glassy/compensatory, correlation traps)
+    - 2.0 ≤ α < 2.1:         "ideal"            (narrow critical-point band, SPECTRAL_IDEAL_ALPHA_BAND)
+    - 2.1 ≤ α ≤ 6.0:         "good"             (well-trained, standard SOTA regime)
+    - α > 6.0:               "under-trained"    (random-like, Marchenko-Pastur)
+
+    The upper "good" boundary is inclusive at 6.0 (α==6.0 → "good"; α>6.0 →
+    "under-trained") to stay consistent with SPECTRAL_UNDER_TRAINED_THRESH
+    semantics.
 
     Args:
         alpha: Power-law exponent.
@@ -417,16 +426,15 @@ def classify_learning_phase(alpha: float) -> str:
     Returns:
         Phase classification string.
     """
+    ideal_lo, ideal_hi = SPECTRAL_IDEAL_ALPHA_BAND
     if alpha < 0:
         return "failed"
-    elif alpha < 2.0:
+    elif alpha < ideal_lo:
         return "over-regularized"
-    elif alpha < 2.5:
+    elif alpha < ideal_hi:
         return "ideal"
-    elif alpha < 4.0:
+    elif alpha <= SPECTRAL_UNDER_TRAINED_THRESH:
         return "good"
-    elif alpha <= 6.0:
-        return "fair"
     else:
         return "under-trained"
 
