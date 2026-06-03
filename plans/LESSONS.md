@@ -9,9 +9,10 @@
 - **Doc updates belong in the same plan as the code change they describe.** Treating README/CLAUDE.md updates as out-of-scope follow-ups means the plan is "complete" while user-visible behavior is still wrong.
 - **Run the existing test suite as the FIRST step of EXPLORE when the goal is "fix issues found in a review".** All-green tests are the cheapest evidence that some review claims are wrong.
 - **A reuse-review / recommendation doc is a HYPOTHESIS, not a finding -- source-read every claim before PLAN.**
+- **Theory-spec-vs-code compliance audits: parallel EXPLORE produces HYPOTHESES; orchestrator must source-read the subtlest claims before PLAN.** Here the "ERG det=1" discrepancy was downgraded to a GHOST after reading `rescale_eigenvalues` -- trace-normalization IS the SETOL §10.2 sanctioned wscale step; only the `abs()` on Δλ_min was the real ERG bug.
 - **Pre-Mortem "STOP IF X" triggers earn their cost when they fire in 1-2 plans out of N.**
 - **Plan-time line-count predictions undershoot.** ~2x for sibling-class additions, 5-10x for dtype-semantics under mixed precision, ~1.7x for multi-layer flag-plumbing, ~2.3x for N CLI flags + validation. Greenfield model packages land in the +1000..+1300 code-only band.
-- **Pre-existing tests can encode bugs as contracts.** When a fix to a library bug causes adjacent tests to fail, read the failing assertions before assuming regression.
+- **Pre-existing tests can encode bugs as contracts.** When a fix to a library bug causes adjacent tests to fail, read the failing assertions before assuming regression. Deliberate contract rewrites (not regressions) must be flagged explicitly in decisions.md and the plan step.
 - **Verify "every site does X" with grep BEFORE PLAN, not during EXECUTE.**
 - **DESIGN+SCAFFOLD plans converge in 1 iteration when paired with an operational follow-up doc.**
 - **Audit-driven full-coverage plans close in one iteration when (a) audit doc carries file:line refs + prescribed fix shape, AND (b) EXPLORE pre-resolves all design choices in a "design notes" finding before PLAN.**
@@ -27,6 +28,7 @@
 - **Output-dict aliases do NOT fix callsites that call `model.encode()` / `model.decode()` directly.** When adding back-compat shims, grep ALL call patterns.
 - **Multi-head model = test-fixture trap when fixture hardcodes a knob the test wants to override.**
 - **`validate-plan.mjs` is repo-wide.** It ERRORs on legacy bare `D-NNN` anchors from ALL prior plans, not just the active one. A clean active plan can show 50 inherited ERRORs. Triage by file: errors in untouched files are pre-existing debt, addressed via `bootstrap.mjs retire <plan-id>` or anchor re-qualification as a SEPARATE plan. **Distinguish introduced-vs-inherited debt** -- the gate before CLOSE is zero ERRORs INTRODUCED by the current plan, not zero repo-wide.
+- **In-code anchor IDs MUST be numeric D-NNN matching decisions.md.** Finding-report IDs (D-A, D-E style) are not valid anchor IDs -- validate-plan.mjs emits ERROR [anchor-orphan] for them and blocks CLOSE. When an executor writes finding-IDs as anchors, add the corresponding D-NNN entries to decisions.md and repoint the anchors before REFLECT.
 - **When extracting a copy-pasted class, identify the MOST divergent copy first.** Build the union API to absorb it (step 1); less-divergent copies then fall out as constructor-default variations.
 - **Adopt-existing of a dead local copy is behavior-neutral AND fixes latent bugs for free.**
 - **Per-symbol body-usage grep is the source of truth for "is this still used?", not plan notes.**
@@ -34,12 +36,24 @@
 - **Dead code discovered mid-refactor: delete it, do not add an unused import to "adopt".**
 - **Independently verify any blocking-collision claim before planning around it.** An explorer can fabricate a "destination files already exist" finding; direct `ls`/`diff`/`git ls-files` is the authoritative check. Do NOT plan around an unverified collision.
 - **`git mv <dir> <newdir>` (whole-directory form) is the clean one-command history-preserving move** for a doc folder when all files move together. Prefer it over per-file `git mv` when the entire directory relocates intact.
-- **Moving a module one package level DEEPER breaks upward relative imports by exactly one dot.** `from ..x import y` (sibling-of-parent) must become `from ...x` after `layers/foo.py` → `layers/memory/foo.py`. This is the ONLY correctness-critical edit in such a move; importers and tests using absolute paths are unaffected. Verify with a `python -c "import <new.path>"` smoke test before committing.
+- **Moving a module one package level DEEPER breaks upward relative imports by exactly one dot.** `from ..x import y` (sibling-of-parent) must become `from ...x` after `layers/foo.py` -> `layers/memory/foo.py`. Verify with a `python -c "import <new.path>"` smoke test before committing.
+- **Running the experiment is part of verifying it.** Static verification (AST, --help, grep, scope guard) passes while the trained model is broken. A from_logits/head-activation mismatch only shows when you actually train: init loss ~9.5 instead of ln(10)=2.30, val_acc pinned at random.
+- **A metric naming convention choice (e.g. which of two spec-sanctioned normalizations a key exposes) is a project-intent decision requiring the user.** SETOL §10.2 sanctions both un-normalized σ² and /N; which one `MetricNames.ALPHA_HAT` exposes is not a correctness bug -- ask the user before implementing.
+- **Source-compare against a reference implementation, not only against a spec doc.** Two pre-existing bugs (R1: MP edge factor `(1+√Q)²` vs `(1+1/√Q)²` — factor-4 error for Q=4; R2: `searchsorted` on a non-monotonic `cumsum(log(...))` array → undefined result) were invisible to a spec-only review and were only caught by reading WW's `calc_lambda_plus/minus` and `detX_constraint` source verbatim.
+- **decisions.md `## D-NNN` headers MUST be exactly 3 segments: `## D-NNN | <context> | YYYY-MM-DD`.** A 4th `| <title>` segment causes the anchor validator's header regex to match zero entries → every qualified anchor in source reports "anchor-unknown-plan" (all anchors appear broken). Silent footgun; introduced by the plan-writer, fixed at REFLECT.
+- **A plan can legitimately REVERSE a closed prior plan's decisions** when a new authoritative source contradicts them. Log each reversal explicitly with `REVERSES prior D-X` in decisions.md. The test suite must deliberately rewrite the old contracts; document the rewrite as a contract-reversal (not a regression).
+- **WeightWatcher canonical facts (authoritative reference for the `analyzer/` subsystem):** `alpha_weighted` is the canonical metric name (NOT `alpha_hat`; WW has no `/N` variant). MP edge = `σ²(1+1/√Q)²` (Q=N/M, N=larger dim). TW threshold = `bulk_max + √[(1/√Q)·bulk_max^(2/3)·M^(-2/3)]`. ERG tail boundary = WW's descending-product loop `prod(evals[idx:])<1` (already in `compute_detX_constraint`; reuse it). WW phases: over-trained(<2)/good([2,6])/under-trained(>6), no "ideal" band. `rescale_eigenvalues` (Σλ→N trace-norm) is the §10.2 wscale step — det=1 is checked on the rescaled evals, NOT targeted by the rescale.
+- **In-code anchors for regions rewritten by the current plan must be re-anchored to the current plan.** If a step replaces code carrying a prior-plan anchor (e.g., `9e82787d/D-007`), replace the anchor too with the current plan's `bc986e52/D-NNN`. Do not leave a stale prior-plan anchor on new code.
+- **Architecture-first migration ordering**: when migrating model classes OUT of train scripts into a model package, migrate into the library BEFORE renaming/deleting the train scripts that import them. Renaming first leaves broken cross-imports; migrating first makes renames safe.
+- **Factory decoupling pattern**: a factory that took a train-side `ExperimentConfig` MUST be decoupled to `ModelConfig` + explicit training kwargs (defaults identical to the old `TrainingConfig`) when migrating into a model package — otherwise it creates a forbidden `models -> train` import edge. This pattern recurs every time architecture leaves a train script.
+- **Sanctioned vs forbidden train-to-train edges**: architecture/model class imports across train scripts are forbidden; data-prep, eval helpers, and training-config sibling imports are acceptable when that code is genuinely training-side (matches the convnext `run_stochastic_comparison.py` pattern). Distinguish the two before planning.
+- **Custom training loop deviation**: `train.common.create_callbacks()` cannot wrap a non-`model.fit()` loop. "Consolidate to convention" for such folders covers naming/docs/architecture-placement/CLI parity ONLY — not callback standardization.
+- **A 1000+-line train script imported by sibling scripts is an architecture smell.** Architecture is living in the wrong layer; the fix is migration into the model package, not reorganization within the train folder.
 
 ## Consolidation / refactoring safety
 
 - **Re-verify a prior plan's deferred-cluster findings against HEAD before planning -- classifications go stale.**
-- **Early-break-after-N scan sites are NOT replaceable by collect-all-then-cap.** Sites that `break` after 8-10 files (monitor/preview datasets) have fundamentally different semantics from full-walk-then-cap. Leave them local.
+- **Early-break-after-N scan sites are NOT replaceable by collect-all-then-cap.** Sites that `break` after 8-10 files have fundamentally different semantics from full-walk-then-cap. Leave them local.
 - **A "consolidation" that changes normalization constants or tokenizer is a behavior-changing bug-fix, not a dedup.**
 - **Three coexisting normalization constant pairs (CLIP / CIFAR10 / ImageNet) must have distinct names + an explicit distinct-from comment.**
 - **For padded-vs-unpadded forward-pass divergence: lift the model forward VERBATIM into a per-caller closure.** Do NOT force one position convention into shared code.
@@ -59,22 +73,6 @@
 - **Before removing a model variant class, grep for EXACT-symbol importers** across `src/applications`, `src/train`, and `tests`.
 - **Don't assert an asset is missing without globbing the actual directory.**
 
-## CLIP / CliffordCLIP specifics
-
-- **CliffordCLIP zero-shot eval is glue, not a build.**
-- **`logit_scale` (CLIP learnable temperature) MUST be `add_weight(dtype='float32')`.**
-- **CC3M loader `load_cc3m_local_split` supports an npz tokenization sidecar cache.**
-- **`ContrastiveCliffordCLIP` wraps the inner model as `self.clip_model`.** Callbacks reach head LayerScale via `inner.{vision,text}_head_scale.gamma` and MUST `getattr`-guard.
-- **Eval-harness preprocessing MUST match training exactly.**
-
-## Anomaly detection / inference reuse
-
-- **VAE per-patch KL is a clean encoder-only reuse path for anomaly detection.**
-- **When a model has a learnable conditional prior, the faithful anomaly score is the conditional KL, not KL-vs-N(0,I).**
-- **Resolution-agnostic patch models should pad to a multiple of the patch size, not square-resize.**
-- **Keep GUI dependencies out of the importable core module.**
-- **Use `mu_l1` (not sampled `z_l1`) as the `l2_prior` input at inference for reproducible, deterministic heatmaps.**
-
 ## Codebase-specific (dl_techniques)
 
 - **Do not run `make test` as a regression check.** Full suite ~1.5h. Scope pytest to changed modules only.
@@ -84,6 +82,10 @@
 - **Single GPU jobs only.** Never spawn parallel training runs.
 - **Pin GPU via shell env, not `setup_gpu(args.gpu)` alone.**
 - **`env.setdefault("CUDA_VISIBLE_DEVICES", "0")` is a silent footgun.** Hard-set: `env["CUDA_VISIBLE_DEVICES"] = str(args.gpu)`.
+- **An experiment driver that imports TF must not share the trainer's GPU.** Force it CPU-only (`CUDA_VISIBLE_DEVICES=''` at module top before the TF-triggering import) or its GPU context fragments the trainer's XLA allocator -> SIGABRT (`Check failed: h != kInvalidChunkHandle`). The driver process needs no GPU (orchestration + pandas/matplotlib only).
+- **ConvNeXt V1/V2 heads emit raw logits (bare Dense, no softmax).** Trainers must compile with `from_logits=True`. v1 had `from_logits=False` (latent bug); v2 was correct. A model can pass build/serialization/smoke tests and still be mis-compiled by its trainer.
+- **ConvNeXt 4-stage variants couple the downsample stride to the stem `--strides`.** On 32x32 CIFAR inputs, use `--strides 2` or the spatial dims collapse to negative values and crash (stride-4 stem + 4x downsamples on 32x32 -> 0 or negative).
+- **Per-epoch WeightWatcher/ModelAnalyzer is ~80s/epoch** on a 28M model. Make it throttleable for sweeps (`--no-epoch-analyzer`; `include_analyzer=False` propagated to callback); end-of-training analysis is unaffected.
 - **All training callbacks that write to `save_dir` MUST `os.makedirs(..., exist_ok=True)` at the top of every save method**.
 - **`create_base_argument_parser` sets `--image-size=224` (ImageNet default); convnext_v2 + power_mlp must pass explicit `dataset_choices`.**
 - **VAE Sampling layers are stochastic by design -- reload checks must compare deterministic encoder mu, NOT reconstruction outputs.**
@@ -104,7 +106,7 @@
 - **`--steps-per-epoch` override is the clean way to validate a large-dataset pipeline without running a full epoch.**
 - **`steps_per_epoch` miscounts silently corrupt the cosine-LR horizon.**
 - **Periodic training-side-effect callbacks must surface failures loudly.**
-- **`Dropout(noise_shape=(None,1,1,1))` is semantically equivalent to `StochasticDepth` (per-sample Bernoulli + `/keep_prob` rescale).** `StochasticGradient` is NOT drop_path: it is forward-identity and only stochastically `stop_gradient`s the path. These are distinct regularizers. Confirmed by plan_2026-06-03_943569ad.
+- **`Dropout(noise_shape=(None,1,1,1))` is semantically equivalent to `StochasticDepth` (per-sample Bernoulli + `/keep_prob` rescale).** `StochasticGradient` is NOT drop_path: it is forward-identity and only stochastically `stop_gradient`s the path. These are distinct regularizers. Confirmed: `depth` (StochasticDepth) outperforms `gradient` (StochasticGradient) as a regularizer on CIFAR-10 (gap widens with longer runs).
 - **`StochasticDepth` and `StochasticGradient` are NOT exported from `layers/__init__.py` (empty).** Import directly: `from dl_techniques.layers.stochastic_depth import StochasticDepth`.
 
 ## Keras 3 idioms / serialization / `training`-flag
@@ -143,18 +145,16 @@
 - **Aspirational count claims rot fast.** Prefer neutral phrasing or omit entirely.
 - **Subpackage CLAUDE.md docs are append-friction-prone.** Sweep periodically with `ls -la *.py` vs the doc's module list.
 - **Pointer to canonical guides must live in every doc a contributor lands in.**
-- **"Match quality like template X" is ambiguous when the template uses a different docstring dialect than the canonical instruction doc.** The instruction doc is the higher authority; "match quality" means structural completeness and polish, not dialect/idiom copy. (e.g., template uses Sphinx `:param:` but instructions mandate Google style -- keep Google style.)
-- **An explorer-flagged "violation" may be a GHOST.** Cross-check against the SOFT/optional list AND the named quality template before planning a fix. A bare flag without that cross-check is unverified. (e.g., bare `@register_keras_serializable()` looks wrong but is correct when the template also omits `package=`.)
+- **"Match quality like template X" is ambiguous when the template uses a different docstring dialect than the canonical instruction doc.** The instruction doc is the higher authority; "match quality" means structural completeness and polish, not dialect/idiom copy.
+- **An explorer-flagged "violation" may be a GHOST.** Cross-check against the SOFT/optional list AND the named quality template before planning a fix.
 - **"Refine code to pass instructions" may be VERIFY-ONLY.** When EXPLORE finds the code already satisfies all MUST rules, the real work is the docstring merge and cosmetic polish -- not a logic rewrite. Confirm compliance BEFORE planning structural changes.
 
 ## Companion .md -> module docstring merges (established pattern, 2 plans)
 
-The `orthogonal_butterfly` and `polar_weight_norm` plans both merged a companion `.md` into the module docstring and deleted the `.md`. Lessons consolidated:
-
-- **grep ALL reference sites before deleting the `.md`.** Pointer sites can live inside OTHER files' docstrings (e.g. `orthogonal_butterfly.py` cross-referenced `norms/polar_weight_norm.md`), not just CLAUDE.md/README. Run `grep -rn <filename.md> src/` and fix every hit. The pointer count is often higher than expected (butterfly=1 site; polar=4 sites).
-- **Match the target file's OWN section/divider convention.** Do NOT blind-copy the precedent file's exact divider width. If the target already uses 75-hyphen banner dividers, match them; do NOT import a second divider width. Drop redundant dividers the file already has (e.g. banner already present -> no additional `# ---` needed before the class).
-- **Two-commit pattern**: commit 1 = merge docstring + add/adjust dividers (`.py` only); commit 2 = delete `.md` + fix all pointer sites. This keeps pointer fixes atomic with the deletion.
-- **For sibling classes documented in the `.md` but living in a different file**: cross-reference, do NOT duplicate their docs. Single-source-of-truth prevents doc drift. (DRY: aspirational/duplicated docs rot.)
+- **grep ALL reference sites before deleting the `.md`.** Pointer sites can live inside OTHER files' docstrings. Run `grep -rn <filename.md> src/` and fix every hit.
+- **Match the target file's OWN section/divider convention.** Do NOT blind-copy the precedent file's exact divider width.
+- **Two-commit pattern**: commit 1 = merge docstring + add/adjust dividers (`.py` only); commit 2 = delete `.md` + fix all pointer sites.
+- **For sibling classes documented in the `.md` but living in a different file**: cross-reference, do NOT duplicate their docs.
 
 ## GPU / environment
 

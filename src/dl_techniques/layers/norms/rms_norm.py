@@ -49,7 +49,6 @@ from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
-
 @keras.saving.register_keras_serializable()
 class RMSNorm(keras.layers.Layer):
     """

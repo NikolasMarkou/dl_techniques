@@ -62,7 +62,7 @@ from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="dl_techniques")
+@keras.saving.register_keras_serializable()
 class HaarWaveletInitializer(keras.initializers.Initializer):
     """Haar wavelet initializer for convolutional layers.
 

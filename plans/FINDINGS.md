@@ -34,115 +34,156 @@
 - **`current_phase` / `_global_step` counters**: `add_weight(trainable=False, dtype="float32")` — int32 fails CPU/GPU device placement.
 <!-- /COMPRESSED-SUMMARY -->
 
-## plan_2026-06-03_943569ad
-### Index
-| # | Finding | File | Covers |
-|---|---------|------|--------|
-| 1 | ConvNeXt drop_path is `keras.layers.Dropout(noise_shape=(None,1,1,1))` applied per-block on the residual branch, with a linear rate schedule `rate*i/(N-1)`; blocks themselves have no drop_path. | findings/convnext-droppath-usage.md | problem scope, existing pattern |
-| 2 | `StochasticDepth(drop_path_rate)` is a per-sample drop+rescale layer — a TRUE drop-in for the current `Dropout(noise_shape=(None,1,1,1))`. `StochasticGradient(drop_path_rate)` is forward-identity, only stochastically `stop_gradient`s — a DIFFERENT regularizer, not drop_path. | findings/stochastic-layers-api.md | solution space, constraints |
-| 3 | Blast radius: 4 exported symbols, 3 training scripts pass `drop_path_rate`, tests assert `model.drop_path_rate` attr + config round-trip + a `test_stochastic_depth` forward-shape test. Block layers (used by 5 other models) carry NO drop_path, so block-level blast radius is zero. | findings/convnext-blast-radius.md | affected files, test gates |
-
-### Key Constraints
-- [HARD] Public kwarg name `drop_path_rate` is serialized in `get_config()` (convnext_v1.py:626, convnext_v2.py:682) and asserted by tests + passed by 3 training scripts. **Keep the kwarg name `drop_path_rate`** — only swap the internal mechanism, do not rename the public API.
-- [HARD] `StochasticDepth` rescales by `1/keep_prob` and is per-sample — semantically equivalent to the current `Dropout(noise_shape=(None,1,1,1))`. So swapping to `StochasticDepth` preserves training behavior.
-- [HARD] Current per-block `Dropout` objects are stored in a plain `list` of `dict`s (`stage_blocks`), NOT as tracked sublayer attributes. Keras may not auto-track layers in nested Python containers — the replacement should keep the same storage pattern (Dropout/StochasticDepth have no weights, so this is a tracking/naming concern, not a correctness one).
-- [SOFT] `StochasticDepth` is the established repo idiom (10+ call sites incl. swin, clifford, dino); `StochasticGradient` has exactly one usage (an experiment script), zero production-model usage.
-- [SEMANTIC] `StochasticGradient` is NOT a drop-in for drop_path: it leaves the forward pass unchanged, so it removes the forward-activation regularization that drop_path provides. Using it changes model behavior materially.
-- [GHOST] None identified.
-
-### Resolved Decision
-User chose **configurable: both available**. Add a `stochastic_mode: str = 'depth'` kwarg to both models. `'depth'` -> `StochasticDepth` (default, preserves current behavior); `'gradient'` -> `StochasticGradient`. Keep `drop_path_rate` public kwarg unchanged. Plumb `stochastic_mode` through `get_config()` and validate against `{'depth','gradient'}`.
-
-### Corrections
-*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
-
-## plan_2026-06-02_da7698bc
+## plan_2026-06-03_5c8c6d19
 ### Index
 
-| # | Finding file | Covers | Key takeaway |
-|---|--------------|--------|--------------|
-| 1 | `findings/target-files.md` | Current `polar_weight_norm.py` (348 ln) + `.md` (130 ln) | `.py` is ALREADY Keras-3 compliant (typed, `get_config` complete, `compute_output_shape`, `logger`, `keras.ops`-only `call`, Google-style class docstring w/ `**Intent**`/`**Architecture**`). `.md` carries extra content: usage example, guarantees, per-forward caveat, provenance/arXiv, AND full `PolarInitializer` docs (a *different* file). |
-| 2 | `findings/template-and-instructions.md` | RBF template + 2026 instruction doc (M1-M15) | Instruction doc = authority. Code satisfies all 15 MUST rules already. Only real divergence is docstring dialect (Google authoritative; module docstring currently has Sphinx `:func:`/`:class:` roles). RBF sets the bar for module-docstring richness (summary + math + references). |
-| 3 | `findings/butterfly-precedent.md` | `orthogonal_butterfly.py` did the IDENTICAL task (commits `836a7798`+`30b4a1dd`) | Pattern = (A) merge `.md` into module docstring + add `# ---` divider before decorator and at EOF (`.py` only, commit 1); (B) delete `.md` + fix doc pointers (commit 2). Section order: one-liner -> description -> Mathematical Foundation -> Properties -> Constraints -> When to Use -> References. |
-
-### Verified facts (this plan)
-- Code passes M1-M15 of `2026_keras_custom_models_instructions.md` already (verified line-by-line in finding 2). "Refine code to pass instructions" is largely VERIFY-ONLY + cosmetic (dialect cleanup, `# ---` dividers).
-- Exports OK: `src/dl_techniques/layers/norms/__init__.py:7` exports `PolarWeightNorm, polar_encode, polar_decode`.
-- Test file exists: `tests/test_layers/test_norms/test_polar_weight_norm.py` (8.3 KB) -> scoped-pytest verification target.
-- **4 pointer sites** reference `polar_weight_norm.md` (must fix on deletion):
-  1. `src/dl_techniques/layers/CLAUDE.md:16` — "see `norms/polar_weight_norm.md`."
-  2. `src/dl_techniques/layers/norms/README.md:22` — "See `polar_weight_norm.md` for the full design..."
-  3. `src/dl_techniques/initializers/README.md:171` — "(see `dl_techniques/layers/norms/polar_weight_norm.md`)."
-  4. `src/dl_techniques/layers/orthogonal_butterfly.py:71` — docstring cross-ref "see norms/polar_weight_norm.md."
-
-### Key Constraints
-
-- **[HARD]** `@keras.saving.register_keras_serializable()` bare (no `package=`) — LESSONS confirms the bare form is correct here; do NOT add `package=`.
-- **[HARD]** `keras.ops`-only in `call`; `logger` not `print`; full `get_config` round-trip — all already satisfied, must be PRESERVED through edits.
-- **[HARD]** Existing module docstring (lines 1-23) and class docstring (146-195) content must be PRESERVED/extended, not dropped.
-- **[HARD]** Google docstring dialect is authoritative over Sphinx (instruction doc > RBF template dialect).
-- **[SOFT]** `# ---` dividers: one before class decorator, one at EOF (butterfly precedent).
-- **[SOFT]** Merge-then-delete in TWO commits (precedent).
-- **[GHOST]** "match RBF quality" does NOT mean copy RBF's Sphinx `:param:` dialect — it means structural completeness/polish. The `.py` already exceeds RBF on Keras-3 compliance (RBF lacks `logger`).
-- **[DECISION-PENDING]** `PolarInitializer` lives in a *separate* file (`initializers/polar_initializer.py`) with its OWN rich module docstring. Default decision: CROSS-REFERENCE it from the merged docstring, do NOT duplicate its full args table/example (DRY / single-source). Surface for user approval at PC-PLAN.
-
-### Corrections
-*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
-
-## plan_2026-06-02_2a0b8192
-### Index
-
-| # | Topic | File | Key takeaway |
-|---|-------|------|--------------|
-| 1 | Current state of orthogonal_butterfly (src + doc) | findings/orthogonal-butterfly-current.md | Layer is already high-quality and instruction-compliant; only the bare decorator was flagged. `.md` (86 lines) is a richer reference than the current top docstring. Comprehensive test file exists. Not exported from `__init__` (intentional). No production importers. |
-| 2 | RBF quality template | findings/rbf-quality-template.md | RBF = quality bar: rich module docstring (bold-prose sections + unicode math + References), `# ---` 69-dash rules before/after class, complete get_config, compute_output_shape always present. NOTE: RBF uses Sphinx `:param:` docstrings, NO logger, NO `package=`. |
-| 3 | Keras custom-layer instructions checklist | findings/keras-instructions-checklist.md | HARD: register decorator, all args stored, add_weight only in build(), super().build() last, keras.ops only, compute_output_shape required, get_config complete, round-trip test. Google-style docstrings + logger. `package=` is SOFT/optional. |
+| # | Finding | File | Key facts |
+|---|---------|------|-----------|
+| 1 | CCNets train folder current state | `findings/ccnets-current-state.md` | 6 scripts + `CLAUDE.md`, no `README.md`; all 6 violate `train_<model>.py`; no argparse in 4; architectures defined inline; cross-script imports between train files |
+| 2 | Canonical train-folder conventions | `findings/train-conventions.md` | `train_<task>.py` naming; `README.md` (not subfolder `CLAUDE.md`); models imported from `dl_techniques.models.*`; `main()`+argparse via `create_base_argument_parser`; `setup_gpu(args.gpu)`/`set_seeds(args.seed)`; 12-point checklist |
+| 3 | CCNets model package vs train scripts | `findings/ccnets-models.md` | `models/ccnets/` is framework-only (orchestrator/trainer/config/losses), zero architectures; 17 classes in `mnist.py`, 7 in `cifar100.py`, text classes in `text_sentiment.py`; factories `create_mnist_ccnet`/`create_cifar100_ccnet` live in train scripts |
 
 ### Key Constraints
 
 ### HARD
-- Custom layer must keep `@keras.saving.register_keras_serializable()`, `keras.ops`-only `call()`, `add_weight` only in `build()`, `super().build()` last, complete `get_config()`, `compute_output_shape()` present, round-trip serialization test passing. **The current code already satisfies all of these.**
-- Google-style docstrings are the instruction-mandated standard (`Args:` / `Input shape:` / `Output shape:`). The current butterfly code already uses Google style.
+- CCNet framework contracts (PRINCIPLES_CCNETS.md P1-P11): three-network design `explainer(x)->(mu,log_var)`, `reasoner(x,e)->y`, `producer(y,e)->x_hat`; differentiable label projection `Dense(use_bias=False)` not `Embedding`; variational Explainer. Must be preserved byte-for-byte across any move.
+- `src/train/CLAUDE.md:42` — scripts must be named `train_<model>.py`, never bare nouns (`mnist.py` shadows package names).
+- Model architecture classes must NOT live in train scripts — belong in `dl_techniques/models/<pkg>/`.
+- `CCNetTrainer` owns a CUSTOM training loop (manual GradientTapes, per-network optimizers, KL annealing) — `model.fit()` is NOT used, so `train.common.create_callbacks()` cannot wrap it directly. This is an intrinsic deviation, not neglect.
+- `setup_gpu(args.gpu)` must receive the parsed `--gpu` arg.
 
 ### SOFT
-- `# ---` horizontal rule (69 dashes) before and after the class block (RBF convention) — not currently present in butterfly.
-- Rich module-level docstring with bold-prose section headings + References bullets (RBF convention).
-- `package=` arg in the register decorator: OPTIONAL per instructions; RBF (the named quality template) OMITS it. → keep bare.
+- Provide `README.md` (not subfolder `CLAUDE.md`) matching the convex/cliffordnet README structure.
+- Provide `main()` + argparse with at least `--gpu/--epochs/--batch-size`.
+- Call `set_seeds(args.seed)` consistently (currently only 2 of 6 scripts).
+- Use `save_config_json` / `validate_model_loading` post-training where feasible.
 
-### GHOST (constraints that look binding but are not)
-- "Bare decorator is a violation" (flagged by explorer 1) — FALSE. Instructions mark `package=` optional; RBF, the explicit quality template, omits it. Keeping it bare satisfies both authorities and avoids changing the registered serialization key (zero risk on an unused layer).
-- "Match RBF means convert to Sphinx `:param:` docstrings" — FALSE. Instructions mandate Google style; converting would VIOLATE the instructions. "Match quality" = structural completeness/polish, not docstring dialect.
-- "RBF has no logger, so strip logger from butterfly" — not required. Instructions permit logger; the 3 existing `logger.debug` calls are compliant and harmless. Keep to avoid churn.
+### GHOST
+- Subfolder-level `CLAUDE.md` — only `src/train/CLAUDE.md` should be the AI-instruction layer; no other train subfolder has its own `CLAUDE.md`. The ccnets `CLAUDE.md` content is mostly findings/results that belong in a README.
+- `dynamic_weighting` flag in `CCNetConfig` is deprecated (`base.py:76`), stays `False`.
 
-### Decision points (surfaced at PC-PLAN)
-- The `.md` will be DELETED after merging into the top-of-file docstring ("merge" = consume the source). `layers/CLAUDE.md` references `orthogonal_butterfly.md` and must be updated. The `.md` itself links to `polar_weight_norm.md` (sibling kept separate) — that sibling is unaffected.
+### Structural insight (drives the plan)
+
+Moving architectures into `dl_techniques/models/ccnets/` SOLVES the cross-script-import fragility: today `cifar100.py`<-`mnist.py`, `cifar100_hybrid.py`<-`cifar100.py`, `baseline_comparison.py`/`latent_sweep.py`<-`mnist.py`. Once classes live in the model package, every train script imports cleanly from `dl_techniques.models.ccnets.*` and renaming becomes safe. Therefore: **architecture migration must precede script renaming.**
 
 ### Corrections
 *Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
 
-- [CORRECTED iter-0] findings/orthogonal-butterfly-current.md called the bare `@register_keras_serializable()` "the only Keras 3 convention violation." Cross-checked against findings/keras-instructions-checklist.md ([SOFT] §8.1) and findings/rbf-quality-template.md ([GHOST], RBF omits it): it is NOT a violation. Reclassified as a GHOST constraint. Decorator stays bare.
-
-## plan_2026-06-02_e3da3ff9
+## plan_2026-06-03_bc986e52
 ### Index
 
-| # | Finding | Location |
-|---|---------|----------|
-| F1 | `neuro_grid.py` (41KB) currently at `src/dl_techniques/layers/neuro_grid.py`; target dir `src/dl_techniques/layers/memory/` exists with siblings som/mann/ntm. | `src/dl_techniques/layers/neuro_grid.py` |
-| F2 | `neuro_grid.py` has two upward relative imports: `from ..regularizers.soft_orthogonal` and `from ..initializers.hypersphere_orthogonal_initializer` (lines 87-88). `..` = `dl_techniques`. After moving one level deeper these MUST become `...`. | `neuro_grid.py:87-88` |
-| F3 | Only two code references import it: `tests/test_layers/test_neuro_grid.py:9` and `src/experiments/neuro_grid/mnist_reconstruction.py:26`, both `from dl_techniques.layers.neuro_grid import NeuroGrid`. | grep |
-| F4 | `neuro_grid` is NOT exported from `layers/__init__.py` (no reference). Memory siblings SOM/MANN/NTM ARE exported from `memory/__init__.py`. USER DECISION: add NeuroGrid export to `memory/__init__.py`. | `memory/__init__.py` |
-| F5 | Doc mention "neuro grid" in prose layer list at `layers/CLAUDE.md:86` (not an import). Low priority — informational list. | `layers/CLAUDE.md:86` |
-| F6 | Test convention: memory-family tests (som/mann) currently flat in `tests/test_layers/`; subdir `test_ntm/` exists with empty `__init__.py`. USER DECISION: create `tests/test_layers/test_memory/` (with empty `__init__.py`) and move test there. | `tests/test_layers/` |
-| F7 | [EXPANDED SCOPE] User: move ALL memory-package tests into `test_memory/`. Memory-package tests = test_neuro_grid.py, test_som_2d_layer.py, test_som_nd_layer.py, test_som_nd_soft_layer.py, and the `test_ntm/` dir. All use ABSOLUTE imports (no relative breakage on move). No external/CI refs to these paths. | `tests/test_layers/` |
-| F8 | [EXCLUSION] `test_hierarchical_memory_system.py` imports `dl_techniques.layers.experimental.hierarchical_memory_system` — NOT the memory package. Despite the name, EXCLUDE from the move. No test_mann.py / factory test exists. | `tests/test_layers/test_hierarchical_memory_system.py:8` |
+| # | Finding | File |
+|---|---------|------|
+| F1 | Authoritative WeightWatcher reference (verbatim formulas) | findings/ww-authoritative-reference.md |
+| F2 | Core math: MP edge, Tracy-Widom, ERG, naming, phases vs WW (orchestrator source-read) | findings/core-math-vs-ww.md |
+| F3 | ERG/detX boundary + alpha MLE vs WW (explorer) | findings/erg-alpha-vs-ww.md |
+| F4 | Metric names/values + helpers vs WW (explorer) | findings/metrics-naming-vs-ww.md |
+
+### Verified divergences from authoritative WeightWatcher (ranked)
+
+**HIGH — correctness bugs revealed by ground-truth source:**
+- **R1: MP edge uses `(1+√Q)²`, WW uses `(1+1/√Q)²`** (Q=N/M, N=larger). `spectral_metrics.py:504-505`. Factor-((1+√Q)/(1+1/√Q))² error for rectangular layers (Q=4 → 9σ² vs 2.25σ²). Both λ+ and λ−. **Pre-existing** (predates prior plan). Two-source confirmed (orchestrator + WW `calc_lambda_plus/minus`).
+- **R2: ERG boundary is computed by a BROKEN mechanism.** `compute_erg_condition` (`:378-383`) builds `cumulative_log = cumsum(log(ascending evals))` — a NON-MONOTONIC array — then `searchsorted(cumulative_log, 0.0)` (searchsorted requires sorted input → result undefined/wrong). WW's authoritative algorithm is the DESCENDING product loop `largest idx where prod(evals[idx:])<1.0`. The analyzer ALREADY has the correct loop in `compute_detX_constraint` (`:~1043`) but `compute_erg_condition` does not use it. Net: the `erg_lambda_min` (and thus Δλ_min, which prior-plan only sign-fixed) is computed on a broken boundary. Two-source confirmed.
+- **R3: Tracy-Widom threshold structure is not authoritative.** WW: `bulk_max + √[(1/√Q)·bulk_max^(2/3)·M^(-2/3)]`, no c_TW. Analyzer (`:512-513`, prior D-E): `mp_lambda_plus + c_TW·σ²·M^(-2/3)`. Prior D-E got base=M/exp=-2/3 but not the `(1/√Q)`, the `bulk_max^(2/3)`, the overall √, or the no-c_TW. Couples to R1 (uses the edge).
+
+**MED — naming/coverage divergences (value often already correct):**
+- **R4: α̂ naming inverted vs WW.** WW canonical = `alpha_weighted` (= α·log₁₀λ_max); WW has NO `alpha_hat` and NO `/N` variant. Prior plan (D-F) made `alpha_hat` canonical and labeled `alpha_weighted` "deprecated" — backwards vs WW. VALUE is correct (un-normalized) and matches WW; only the canonical-name/deprecation diverges. `alpha_hat_normalized` (/N) has zero WW basis. `spectral_metrics.py:~639`, `constants.py:84-85`.
+- **R5: MetricNames coverage gaps.** `MP_SOFTRANK` appears renamed to `WW_SOFTRANK` (dead placeholder, no impl); `MATRIX_RANK` absent; `NORM`/`SPECTRAL_NORM` bare literals not in MetricNames. `constants.py`.
+
+**LOW / enhancement:**
+- **R6: mp_softrank metric missing** (WW: λ+/λ_max). Value-add (prior plan deferred as D-J).
+- **R7: small-N (<20) bias-corrected alpha branch missing** (WW: `1+(n-1)/s`, `J=D_ks−0.868/√n`). Standard MLE applied regardless → upward-biased α on thin tails.
+- **R8: phase "ideal" band + "over-regularized" term are SETOL-only, not WW.** WW: plain over-trained(<2)/under-trained(>6), term "over-trained". Prior plan D-C ideal band [2.0,2.1) and D-D "over-regularization" are SETOL-paper choices. Surface: keep SETOL framing or revert toward WW under the "WW authoritative" instruction.
+- **R9: NORM-layer analysis gap** — recognized but `get_layer_weights_and_bias` returns nothing for NORM (`spectral_utils.py:~141`). WW supports NORM.
+- (No-action) matrix_entropy EPSILON handling differs negligibly; conv reshape `(H·W·C_in, C_out)` vs WW transpose — SVD-invariant.
+
+### Confirmed-correct (authoritative agreement — do NOT touch):
+- `rescale_eigenvalues` byte-identical to WW (re-confirms prior-plan Correction C1 ghost). 
+- Alpha MLE `1+n/(Σlog−n·log_xmin)` + KS-argmin xmin == WW.
+- `sigma=(α−1)/√N_tail` == WW. `stable_rank=Σλ/maxλ` == WW. `matrix_rank` tol == WW. norm/log_norm/log_alpha_norm == WW.
+- Δλ_min units (xmin·wscale² vs rescaled boundary) consistent; sign (prior fix) matches SETOL §7.3 — but the boundary it subtracts is R2-broken.
 
 ### Key Constraints
 
-- **HARD**: The two relative imports in `neuro_grid.py` (`..regularizers`, `..initializers`) must change to `...` after the move, or the module fails to import. Verified by package-depth math.
-- **HARD**: Both importers (`test_neuro_grid.py`, `mnist_reconstruction.py`) must update path to `dl_techniques.layers.memory.neuro_grid` or they break.
-- **HARD (convention)**: New test subdir `test_memory/` needs an empty `__init__.py` (matches `test_ntm/`).
-- **SOFT**: `memory/__init__.py` export placement should follow the existing sectioned style (NTM / MANN / SOM blocks + `__all__`).
-- **GHOST**: None — no stale constraints inherited.
+HARD:
+- Authoritative source = Martin's WeightWatcher (user-declared). Where SETOL.md and WW conflict on MECHANISM, WW wins (R1,R2,R3). Where they conflict on FRAMING/terminology (R8) it is a user choice.
+- `compute_detX_constraint` already exists and is WW-correct → R2 fix is reuse, not new code (DRY).
+- Tests: `tests/test_analyzer/test_spectral_metrics.py` only (full suite ~1.5h forbidden). Logger-only, Keras 3, MPLBACKEND=Agg.
+- Some divergences are PRE-EXISTING bugs (R1, R2) not introduced by the prior plan — fixing them is in-scope for "reconcile to authoritative" but changes long-standing behavior; trap/ERG tests may encode the old (wrong) numbers as contracts.
+
+SOFT:
+- R4 naming realignment (alpha_weighted canonical) is reversible and low-risk but touches the metric just changed last plan — confirm intent.
+- R6/R7/R9 are additions (scope-expanding); R8 is a framing reversal.
+
+GHOST:
+- "Prior-plan D-E fully fixed Tracy-Widom" — false; R3 shows it was partial. "Prior-plan Δλ_min fix made the ERG diagnostic correct" — false; R2 shows the boundary is broken underneath.
 
 ### Corrections
-*Append [CORRECTED iter-N] entries here when earlier findings prove wrong.*
+- (none yet this plan)
+
+## plan_2026-06-03_9e82787d
+### Index
+
+| # | Finding | File | Detail |
+|---|---------|------|--------|
+| F1 | Core spectral math audit (spectral_metrics.py, spectral_utils.py) vs SETOL | findings/spectral-core-math.md | Alpha/Clauset COMPLIANT; Δλ_min abs() bug; TW exponent; α̂ naming; R-transform missing |
+| F2 | Orchestration + visualization audit (spectral_analyzer.py, spectral_visualizer.py) | findings/spectral-orchestration-viz.md | Funnel plot missing; α̂ not in summary; ideal band [2,2.5); MP overlay absent |
+| F3 | Package integration audit (model_analyzer, config, constants, data_types, utils) | findings/package-integration.md | α<2 mislabeled "memorization"; α̂/α_weighted naming; summary metric omissions |
+
+### Verified Discrepancies (source-read by orchestrator, ranked)
+
+Severity HIGH:
+- **D-A: `Δλ_min` sign destroyed** — `spectral_metrics.py:383` `delta_lambda_min = float(abs(...))`. SETOL §7.3 requires SIGNED value (<0 = over-regularized). The `abs()` makes the over-regularization diagnostic impossible. Unit handling around it (`xmin*wscale²` vs rescaled `erg_lambda_min`) is otherwise correct. **HARD constraint: fix is a 1-token removal of `abs()`.**
+- **D-B: α̂ (AlphaHat) absent from model-level summary** — `constants.py:122-128` `SPECTRAL_DEFAULT_SUMMARY_METRICS` lists ALPHA + LOG_SPECTRAL_NORM but omits ALPHA_HAT. SETOL §2.4/§13 make ⟨α̂⟩ the primary model-quality metric. Computed per-layer but never aggregated.
+
+Severity MEDIUM:
+- **D-C: "ideal" phase band is [2.0, 2.5)** — `spectral_metrics.py:417-418`. SETOL §3.2/§13: Ideal = critical point α≈2, not a 0.5-wide band. classify_learning_phase thresholds (2.5/4.0/6.0) also diverge from SETOL's clean HT band (2,6) AND from this file's own docstring (which says "2.0<α<4.0 Good"). Internally inconsistent.
+- **D-D: α<2 mislabeled "overfitting/memorization"** — `model_analyzer.py:39-40` docstring. SETOL §7.2 defines α<2 as Over-Regularization (glassy, compensatory), mechanistically distinct from memorization. Interpretation error in docs.
+- **D-E: Tracy-Widom exponent** — `spectral_metrics.py:447,493` uses `N^(-1/3)`. SETOL §2.3 states Δ_TW ~ O(M^(-2/3)). Need to confirm code's `N`/`M` orientation before claiming exact exponent error; at minimum the magnitude differs → trap detection sensitivity off.
+- **D-F: α̂ field naming/convention confusion** — `spectral_metrics.py:615-625`. Two fields: `alpha_weighted`=α·log₁₀(σ²_max) (WeightWatcher convention, matches §8/§10.5 validation refs); `alpha_hat`=α·log₁₀(σ²_max/N) (SETOL theory X=(1/N)WᵀW). Per §10.2 NEITHER is strictly wrong, but the naming is misleading and which one `MetricNames.ALPHA_HAT` exports matters for downstream consumers.
+- **D-G: Funnel diagnostic (α, Δλ_min) plot missing** — `spectral_visualizer.py`. SETOL §8.2/§10.4 central diagnostic. `erg_delta_lambda_min` computed+stored but never plotted. (Depends on D-A to be meaningful.)
+- **D-H: MP bulk overlay absent from per-layer ESD plot** — `spectral_visualizer.py:338-361`. MP envelope (λ-, λ+) only drawn in trap overlay (gated on randomize), not on the standard per-layer ESD diagnostic.
+
+Severity LOW / enhancement:
+- **D-I: Free cumulants / R-transform / Layer Quality Q̄² entirely absent** — SETOL §5.4, §6. Large theory chunk; "computational R-transform Layer Quality" listed in §10.5 as a WW capability. Enhancement, not a correctness bug.
+- **D-J: MP SoftRank R_MP missing** — SETOL §2.4 metrics table. `stable_rank` exists but is a different quantity.
+- **D-K: Missing universality classes** — RandomLike, Bulk+Spikes, Rank-Collapse not in `classify_learning_phase`. SETOL §2.2 6-class table.
+- **D-L: α<2 recommendation says "early stopping/regularization"** — `spectral_analyzer.py:342`. SETOL §13 action table says "Reduce LR; check for Correlation Traps".
+
+### Key Constraints
+
+HARD:
+- Code already COMPLIANT and must stay so: Clauset MLE α (joint xmin/KS), Conv2D reshape (H·W·C_in, C_out), BN/Dropout skipping, bias exclusion, D_KS, correlation-trap randomize protocol, ERG trace-normalization (wscale) is the legit §10.2 correction.
+- `Δλ_min` fix is the single highest-value, lowest-risk change (remove `abs()`).
+- Tests live in `tests/test_analyzer/` — must scope pytest there (full suite ~1.5h forbidden as regression check).
+- No `print`; use `dl_techniques.utils.logger`. Keras 3 idioms. `MPLBACKEND=Agg` for any plot-generating code.
+
+SOFT:
+- WeightWatcher-convention vs SETOL-theory α̂ normalization is a project-preference choice (§10.2 sanctions both) — needs user intent, not unilateral change.
+- Whether to ADD missing theory (R-transform Q̄², missing phases, funnel plot, MP overlay) vs only FIX existing-but-wrong code is a scope decision for the user.
+
+GHOST:
+- "ERG must target det=1 in the rescaling step" — NOT a real constraint; trace-normalization then det-check on rescaled evals is the correct WW/SETOL pattern. (See Correction C1.)
+
+### Corrections
+
+- **[CORRECTED iter-0] C1**: findings/spectral-core-math.md ranks "ERG rescaling targets mean=1 not det=1" as severity-2 DISCREPANCY. Downgraded after orchestrator source-read of `rescale_eigenvalues` (spectral_metrics.py:984-996) + `compute_erg_condition` (340-391): the Σλ→N trace-normalization IS the `wscale` correction SETOL §10.2 explicitly sanctions ("ERG calculation applies wscale correction internally"); det=1 / Σln≈0 is then evaluated on the rescaled eigenvalues. This is the canonical WeightWatcher pattern, NOT a discrepancy. The only real ERG-path bug is D-A (the `abs()` on Δλ_min).
+
+## plan_2026-06-03_bf1e592d
+### Index
+| # | Finding | File | Key refs |
+|---|---------|------|----------|
+| F1 | ConvNeXt train-script structure + exact `stochastic_mode` plumbing points | `findings/train-scripts.md` | v1:102, v2:106, v2_mae:21-26; factory `**kwargs` chain confirmed |
+| F2 | Experiment-harness / `compare_runs` reuse patterns + CIFAR-10 choice | `findings/experiment-harness.md` | sweep.py, compare_runs.py:198, callbacks.py:85 (CSVLogger) |
+| F3 | Pre-PLAN design decisions (DN-1..DN-5): direct-kwarg plumbing, seeding, subprocess driver, snapshot-diff | `findings/design-notes.md` | DN-1..DN-5 |
+
+### Key Constraints
+- [HARD] `stochastic_mode` ∈ {`depth`,`gradient`}; constructor raises `ValueError` otherwise (`convnext_v1.py:182`, `convnext_v2.py:199`) → CLI `choices=['depth','gradient']`.
+- [HARD] V2-MAE `create_convnext_encoder` (`train_convnext_v2_mae.py:21`) has a fixed signature, no `**kwargs` → must add `stochastic_mode` param explicitly + thread it.
+- [HARD] Subprocess cells must hard-set `CUDA_VISIBLE_DEVICES` + `MPLBACKEND=Agg` (not setdefault); serial only (no parallel GPU); results under repo-root `results/`.
+- [HARD] Train scripts must keep `train_<model>.py` naming (shadowing `train` package breaks imports).
+- [SOFT] Existing scripts already emit `training_log.csv` via `create_callbacks` → `compare_runs` works directly on their dirs; no custom report writer needed.
+- [GHOST] No `--stochastic-mode` or `--seed` flag exists in any convnext script; both are net-new, convnext-local additions (do NOT widen the shared base parser).
+
+### Corrections
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*

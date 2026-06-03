@@ -2,6 +2,7 @@ import keras
 from keras import ops, layers
 from typing import List, Dict, Any, Tuple, Optional
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class ApproximatedLNNLayer(keras.layers.Layer):
@@ -249,3 +250,5 @@ class ApproximatedLNNLayer(keras.layers.Layer):
             "activation": self.activation,
         })
         return config
+
+# ---------------------------------------------------------------------

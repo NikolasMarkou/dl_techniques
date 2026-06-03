@@ -25,8 +25,13 @@ import numpy as np
 from keras import ops
 from typing import Any, Dict, Optional, Tuple, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class PolarInitializer(keras.initializers.Initializer):
@@ -110,3 +115,5 @@ class PolarInitializer(keras.initializers.Initializer):
             f"PolarInitializer(norm={self.norm}, axis={self.axis}, "
             f"gain={self.gain}, seed={self.seed})"
         )
+
+# ---------------------------------------------------------------------

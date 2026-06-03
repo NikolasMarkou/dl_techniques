@@ -65,7 +65,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="custom_layers")
+@keras.saving.register_keras_serializable()
 class SelectiveGradientMask(keras.layers.Layer):
     """Selectively stop gradients based on a binary mask.
 

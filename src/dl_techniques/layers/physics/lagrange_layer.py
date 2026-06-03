@@ -1,8 +1,9 @@
 import keras
+import tensorflow as tf
 from keras import ops, layers
 from typing import List, Dict, Any, Tuple, Optional
-import tensorflow as tf  # Using TF backend for GradientTape
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class LagrangianNeuralNetworkLayer(keras.layers.Layer):
@@ -213,3 +214,5 @@ class LagrangianNeuralNetworkLayer(keras.layers.Layer):
             "activation": self.activation,
         })
         return config
+
+# ---------------------------------------------------------------------

@@ -1,5 +1,5 @@
 # System Atlas
-*Last refreshed: plan_2026-06-03_943569ad | 2026-06-03 | 76 plans closed*
+*Last refreshed: plan_2026-06-03_5c8c6d19 | 2026-06-03 | 80 plans closed*
 *Domain-neutral system map. Rewritten by ip-archivist at CLOSE -- max 300 lines. Read before PLAN/EXPLORE.*
 
 ## Identity
@@ -41,6 +41,8 @@
   - **`CliffordCLIP`** (`clip.py`): `text_use_global_context: bool = False` ctor kwarg. `logit_scale` pinned `dtype="float32"` under bf16 global policy (`# DECISION plan_2026-05-31_76981d58/D-001` at `clip.py:1044`). `encode_image()` / `encode_text()` return L2-normalized embeddings by default. Wrapper model is `ContrastiveCliffordCLIP` (`self.clip_model`); head LayerScale at `inner.{vision,text}_head_scale.gamma` (absent for `head_kind='plain'` -- always getattr-guard).
   - **SRGP docstring**: `clifford_block.py:65-66` correctly reads `(c-s)%D`; impl `roll(shift=s)` @ line 223 is correct.
 
+- **`models/ccnets/`** -- Causal Cooperative Nets framework + migrated architectures. Framework files unchanged: `base.py`, `orchestrators.py`, `trainer.py`, `losses.py`, `control.py`, `utils.py`. Migrated: `blocks.py` (FiLMLayer/ConvBlock/DenseBlock, depend on GoLU); `architectures/{mnist,cifar100,text}.py` (task Explainer/Reasoner/Producer networks, AR+non-AR text producers, factories `create_{mnist,cifar100,text}_ccnet`, HybridCCNetOrchestrator/TextCCNetOrchestrator/ARTextCCNetOrchestrator). Package `__init__` exports 25 symbols. Invariants: variational Explainer returns `(mu, log_var)`; bias-free `Dense(use_bias=False)` label projection (never Embedding); `package=` qualified serialization keys (`ccnets_cifar100`, `ccnets_text`); `dynamic_weighting` stays `False` (deprecated). Tests: `test_orchestrator.py` + `test_architectures.py` (28). Pre-existing flaky: `test_orchestrator.py::TestTrainStep::test_training_reduces_total_error` (no seed).
+
 - **`models/{bert, gpt2, tree_transformer, depth_anything, accunet, tiny_recursive_model, prism, lewm}/`** -- each: `{Model, create_<model>}` public surface, `from_variant(pretrained=True)` raises `NotImplementedError`.
 
 ### Initializers (`src/dl_techniques/initializers/`)
@@ -51,6 +53,26 @@ Masked CLM loss, contrastive losses, `Perplexity`, `BitsPerToken`, `BitsPerChara
 
 ### Training utilities (`src/dl_techniques/training/`)
 `token_superposition.py` (TST): `TSTConfig`, `TSTState`, `TSTEmbedding`, `TSTCausalLMLoss`, `TSTPhaseCallback`. Invariant (D-007 `token_superposition.py:691`): TWO named dataset transforms, NOT a single `tf.cond`. 54 PASS tests.
+
+### Analyzer (`src/dl_techniques/analyzer/`)
+WeightWatcher/SETOL HTSR spectral analysis framework. **Authoritative reference: Charles Martin's WeightWatcher source.** Where WW and SETOL.md conflict on mechanism or terminology, WW wins (user-declared, D-001 bc986e52). Compliance doc: `src/dl_techniques/analyzer/SETOL.md`.
+
+- **`spectral_metrics.py`**: core per-layer computation. Eigenvalues default to σ² (no 1/N); 1/N is an opt-in `normalize` flag. ERG path applies `rescale_eigenvalues` wscale (Σλ→N, SETOL §10.2 sanctioned correction; byte-identical to WW). Key outputs:
+  - `alpha`: Clauset MLE power-law exponent (joint xmin/KS fit). Tail `n<20` uses bias-corrected `alpha_bc = 1+(n-1)/s` with penalized xmin `J = D_ks − 0.868/√n` (WW small-N branch, D-008 anchor at :265).
+  - `alpha_weighted` (`MetricNames.ALPHA_WEIGHTED`): WW canonical = α·log₁₀(λ_max) on σ² eigenvalues. **Primary cross-architecture quality metric.**
+  - `alpha_hat`: alias of `alpha_weighted` (same value; SETOL-paper notation).
+  - `alpha_hat_normalized`: /N variant = α·log₁₀(λ_max/N) — non-WW SETOL extra, documented as such.
+  - `mp_softrank` (`MetricNames.MP_SOFTRANK`): = λ_plus/λ_max after removing num_spikes outliers (WW R6; `compute_mp_softrank`).
+  - `rand_sv_ratio` (`MetricNames.RAND_SV_RATIO`): = max(rand_evals)/max(evals) — randomization diagnostic (distinct from mp_softrank).
+  - `erg_delta_lambda_min`: **signed** gap (SETOL §7.3). `abs()` MUST NOT be added. ERG tail boundary computed by reusing `compute_detX_constraint` (descending-product loop; D-004 anchor at :424).
+  - MP edge: `σ²(1+1/√Q)²`, `σ²(1−1/√Q)²` where Q=N/M, N=larger dim (WW-exact; D-002 anchor at :543). NOT `(1+√Q)²`.
+  - TW threshold: `bulk_max + c_TW·√[(1/√Q)·bulk_max^(2/3)·M^(-2/3)]`; `SPECTRAL_TW_SAFETY_FACTOR=1.0` (WW-exact default; D-003 anchor at :551).
+  - `classify_learning_phase`: α<0 "failed"; 0≤α<2 "over-trained"; 2≤α≤6 "good"; α>6 "under-trained" (WW labels; D-009 anchor at ~:458). No "ideal" band. No "over-regularized".
+- **`spectral_visualizer.py`**: (α, Δλ_min) funnel plot (WW-neutral phrasing; α=2 over-trained/good boundary); MP bulk envelope overlay on per-layer ESD panel.
+- **`constants.py`**: `MetricNames` enum — `ALPHA_WEIGHTED`, `ALPHA_HAT`, `MP_SOFTRANK='mp_softrank'`, `RAND_SV_RATIO='rand_sv_ratio'`, `MATRIX_RANK`, `NORM`, `SPECTRAL_NORM`; `SPECTRAL_DEFAULT_SUMMARY_METRICS` includes `ALPHA_WEIGHTED`+`ALPHA_HAT`+`LOG_SPECTRAL_NORM`; `SPECTRAL_SMALL_N_CUTOFF=20`.
+- **`spectral_utils.py`**: NORM layers are explicitly skipped with `logger.debug` ("degenerate ESD; spectral analysis skipped"); D-010 anchor at :162.
+- Conv2D layers: reshaped to (H·W·C_in, C_out). BN/Dropout/bias excluded. Correlation-trap randomize protocol preserved.
+- **α̂ normalization**: `MetricNames.ALPHA_WEIGHTED` exposes the WW un-normalized convention; `alpha_hat_normalized` (/N) is a documented non-WW extra.
 
 ### Callbacks (`src/dl_techniques/callbacks/`)
 Keras callbacks; analyzer integration; `TemperatureAnnealingCallback`.
@@ -74,6 +96,15 @@ Keras callbacks; analyzer integration; `TemperatureAnnealingCallback`.
   - **`filter_cc3m_clipscore.py`** (323 LOC) -- CC3M per-pair CLIP-score caption filter. Full 2.9M pass is user-launched.
 - **`train/logic/`** -- LearnableNeuralCircuit benchmark suite + `multiseed_sweep.py` subprocess driver + `multiseed_stats.py`. 30-test stats harness.
 - **`train/rms_variants_train/`** -- 8-norm comparison harness; `NORM_VARIANTS` append-only invariant (D-001 `config.py:27`). 637+ PASS tests.
+- **`train/convnext/`** -- 3 ConvNeXt trainers + 1 comparison driver:
+  - `train_convnext_v1.py`: CLI flags `--stochastic-mode {depth,gradient}` (default `depth`), `--seed`, `--no-epoch-analyzer`. Compile with `SparseCategoricalCrossentropy(from_logits=True)` -- the classifier head is bare Dense (no softmax; emitting logits). `set_seeds(args.seed)` called before `load_dataset`.
+  - `train_convnext_v2.py`: mirror of v1 plumbing. Already had `from_logits=True`.
+  - `train_convnext_v2_mae.py`: `--stochastic-mode` + `--seed` threaded explicitly through fixed-signature `create_convnext_encoder(stochastic_mode=...)` -> `create_convnext_v2(...)` (no `**kwargs` fallback; param must be named explicitly at every boundary).
+  - `run_stochastic_comparison.py`: serial subprocess driver. Launches each mode once, discovers the run dir via snapshot-diff of `results/` (assert exactly-one-new-dir or `SystemExit`). Driver runs **CPU-only** (`CUDA_VISIBLE_DEVICES=''` at module top before TF import) to avoid fragmenting the trainer's XLA allocator. Child subprocess gets GPU via hard-set `env['CUDA_VISIBLE_DEVICES']=str(args.gpu)`. Calls `compare_runs(depth_dir, gradient_dir, labels=('depth','gradient'), ...)` from `train.common.compare_runs`.
+  - `README.md`: documents the stochastic_mode knob, driver usage, experiment verdict (depth > gradient on CIFAR-10), and 4 gotchas (from_logits, driver CPU-only, strides coupling, epoch-analyzer cost).
+  - **Experiment verdict (CIFAR-10, seed 42)**: `depth` (StochasticDepth) outperforms `gradient` (StochasticGradient) -- +0.6pt at 30ep, +1.26pt at 100ep; gradient mode overfits more. Prefer `stochastic_mode='depth'` (default).
+
+- **`train/ccnets/`** -- Causal Cooperative Nets trainers. 4 `train_<task>.py` (mnist/cifar100/cifar100_hybrid/text_sentiment) + 2 `run_<experiment>.py` (baseline_comparison/latent_sweep). All architecture imported from `dl_techniques.models.ccnets`; thin wrappers with main/argparse/setup_gpu/set_seeds/--smoke. Uses CUSTOM `CCNetTrainer` GradientTape loop (NOT model.fit / create_callbacks) — intrinsic CCNet deviation. Sanctioned data-prep sibling edges: `run_latent_sweep`->`train_mnist` (DataConfig + prepare_mnist_data), `train_cifar100_hybrid`->`train_cifar100` (data/eval/config). `README.md` (not CLAUDE.md). Smoke train: acc=0.9504 on mnist, loss finite/decreasing.
 
 ### Training common (`src/train/common/`)
 **3-plan consolidation arc (`30721a0f` -> `35651564` -> `cc4d4e14`) is now largely complete.** Remaining duplication is intentional-divergence (7 C1 LR sites) or out-of-scope (F13 bug-fix, risky F6/seed sites).

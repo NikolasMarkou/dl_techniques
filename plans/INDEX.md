@@ -119,3 +119,7 @@
 | plan_2026-06-02_2a0b8192 | 2026-06-02 | Absorb the richer reference content from `src/dl_techniques/ |  |
 | plan_2026-06-02_da7698bc | 2026-06-02 | Merge `src/dl_techniques/layers/norms/polar_weight_norm.md`  |  |
 | plan_2026-06-03_943569ad | 2026-06-03 | Replace the hand-rolled drop_path implementation — `keras.la |  |
+| plan_2026-06-03_bf1e592d | 2026-06-03 | Make the ConvNeXt block regularizer's `stochastic_mode` (`de |  |
+| plan_2026-06-03_9e82787d | 2026-06-03 | Bring the `analyzer` spectral subsystem (`spectral_metrics.p |  |
+| plan_2026-06-03_bc986e52 | 2026-06-03 | Bring `src/dl_techniques/analyzer/` spectral code (`spectral |  |
+| plan_2026-06-03_5c8c6d19 | 2026-06-03 | Consolidate `src/train/ccnets/` so its documentation and cod |  |

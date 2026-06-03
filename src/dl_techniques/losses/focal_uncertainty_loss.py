@@ -85,7 +85,7 @@ from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="dl_techniques.losses")
+@keras.saving.register_keras_serializable()
 class FocalUncertaintyLoss(keras.losses.Loss):
     """Focal Loss with uncertainty regularization for robust classification.
 

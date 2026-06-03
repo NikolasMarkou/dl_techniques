@@ -94,7 +94,7 @@ from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable(package="dl_techniques.losses")
+@keras.saving.register_keras_serializable()
 class DecoupledInformationLoss(keras.losses.Loss):
     """A decoupled information-theoretic loss combining cross-entropy with regularization.
 

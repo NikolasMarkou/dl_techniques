@@ -106,14 +106,16 @@ References:
       with Improved VQGAN. ICLR 2022.
 """
 
-from typing import Any, Dict, Optional, Tuple, Union
-
 import keras
 import numpy as np
 from keras import initializers, layers, ops
+from typing import Any, Dict, Optional, Tuple, Union
+
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-
 
 # ---------------------------------------------------------------------
 

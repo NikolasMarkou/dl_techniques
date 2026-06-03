@@ -32,12 +32,21 @@ import numpy as np
 import seaborn as sns
 import tensorflow as tf
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks, generate_training_curves, set_seeds, create_learning_rate_schedule
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from train.common import (
+    setup_gpu,
+    create_callbacks as create_common_callbacks,
+    generate_training_curves,
+    set_seeds,
+    create_learning_rate_schedule
+)
 from dl_techniques.utils.logger import logger
 from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.models.prism.model import PRISMModel
 from dl_techniques.losses.quantile_loss import QuantileLoss
-from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
 from dl_techniques.datasets.time_series import (
     TimeSeriesGenerator,
     TimeSeriesGeneratorConfig,
@@ -56,6 +65,7 @@ def set_random_seeds(seed: int = 42) -> None:
 
 set_random_seeds(42)
 
+# ---------------------------------------------------------------------
 
 @dataclass
 class PRISMTrainingConfig:
