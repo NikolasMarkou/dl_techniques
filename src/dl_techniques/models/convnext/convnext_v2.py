@@ -48,6 +48,8 @@ from typing import List, Optional, Union, Tuple, Dict, Any
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
+from dl_techniques.layers.stochastic_depth import StochasticDepth
+from dl_techniques.layers.stochastic_gradient import StochasticGradient
 
 
 # ---------------------------------------------------------------------
@@ -162,6 +164,7 @@ class ConvNeXtV2(keras.Model):
             depths: List[int] = [3, 3, 9, 3],
             dims: List[int] = [96, 192, 384, 768],
             drop_path_rate: float = 0.0,
+            stochastic_mode: str = 'depth',
             kernel_size: Union[int, Tuple[int, int]] = 7,
             activation: str = "gelu",
             use_bias: bool = True,
@@ -193,11 +196,16 @@ class ConvNeXtV2(keras.Model):
                 f"Strides {strides} must be positive."
             )
 
+        if stochastic_mode not in ('depth', 'gradient'):
+            raise ValueError(
+                f"stochastic_mode must be 'depth' or 'gradient', got {stochastic_mode!r}"
+            )
         # Store configuration
         self.num_classes = num_classes
         self.depths = depths
         self.dims = dims
         self.drop_path_rate = drop_path_rate
+        self.stochastic_mode = stochastic_mode
         self.kernel_size = kernel_size
         self.activation = activation
         self.use_bias = use_bias
@@ -316,9 +324,16 @@ class ConvNeXtV2(keras.Model):
                 use_softorthonormal_regularizer=self.use_softorthonormal_regularizer,
                 name=f"stage_{stage_idx}_block_{block_idx}"
             )
-            drop_path = keras.layers.Dropout(
-                rate=drop_rate,
-                noise_shape=(None, 1, 1, 1),
+            # DECISION plan_2026-06-03_943569ad/D-001
+            # Use the repo's dedicated StochasticDepth/StochasticGradient layers
+            # (gated by self.stochastic_mode), NOT a hand-rolled
+            # keras.layers.Dropout(noise_shape=(None,1,1,1)). Do NOT pass rate= or
+            # noise_shape=: both layers take drop_path_rate= and compute per-sample
+            # noise internally. 'depth' is the behavior-preserving default; 'gradient'
+            # is an opt-in forward-identity grad-only regularizer. See decisions.md D-001.
+            drop_path_cls = StochasticDepth if self.stochastic_mode == 'depth' else StochasticGradient
+            drop_path = drop_path_cls(
+                drop_path_rate=drop_rate,
                 name=f"stage_{stage_idx}_block_{block_idx}_drop_path"
             ) if drop_rate > 0 else None
             stage_blocks.append({"block": block, "drop_path": drop_path})
@@ -680,6 +695,7 @@ class ConvNeXtV2(keras.Model):
             "depths": self.depths,
             "dims": self.dims,
             "drop_path_rate": self.drop_path_rate,
+            "stochastic_mode": self.stochastic_mode,
             "kernel_size": self.kernel_size,
             "activation": self.activation,
             "use_bias": self.use_bias,
