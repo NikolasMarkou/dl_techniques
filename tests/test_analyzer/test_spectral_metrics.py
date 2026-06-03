@@ -428,6 +428,22 @@ class TestComputeEigenvalues:
         evals_raw, _, _, _ = compute_eigenvalues([W], 32, 16, 16, normalize=False)
         np.testing.assert_allclose(evals_norm, evals_raw / 32, rtol=1e-5)
 
+    def test_matrix_rank_full_rank(self):
+        # Emitted MetricNames.MATRIX_RANK == len(evals) - rank_loss; a generic
+        # 64x32 Gaussian is full column rank (32).
+        np.random.seed(42)
+        W = np.random.randn(64, 32)
+        evals, _, _, rank_loss = compute_eigenvalues([W], 64, 32, 32)
+        assert int(len(evals) - rank_loss) == 32
+
+    def test_matrix_rank_rank_deficient(self):
+        # A 64x32 matrix factored through a width-10 bottleneck has rank <= 10,
+        # so the effective matrix_rank must drop below the full-rank count.
+        np.random.seed(0)
+        W = np.random.randn(64, 10) @ np.random.randn(10, 32)
+        evals, _, _, rank_loss = compute_eigenvalues([W], 64, 32, 32)
+        assert int(len(evals) - rank_loss) <= 10
+
 
 # =====================================================================
 # Utility Functions

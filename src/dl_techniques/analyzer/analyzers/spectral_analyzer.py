@@ -261,6 +261,10 @@ class SpectralAnalyzer(BaseAnalyzer):
                 MetricNames.HAS_ESD: True, MetricNames.NUM_EVALS: len(evals),
                 MetricNames.SV_MAX: sv_max, MetricNames.SV_MIN: sv_min,
                 MetricNames.RANK_LOSS: rank_loss, MetricNames.WEAK_RANK_LOSS: weak_rank_loss,
+                # WW matrix_rank: effective rank = (#evals) - rank_loss, where rank_loss was
+                # computed in compute_eigenvalues with WW's tolerance (max_sv * max(shape) * eps);
+                # consistent with WeightWatcher RMT_Util.matrix_rank summed over the layer's matrices.
+                MetricNames.MATRIX_RANK: int(len(evals) - rank_loss),
                 MetricNames.LAMBDA_MAX: np.max(evals) if len(evals) > 0 else 0,
                 MetricNames.ALPHA: alpha, MetricNames.XMIN: xmin, MetricNames.D: D,
                 MetricNames.SIGMA: sigma, MetricNames.NUM_PL_SPIKES: num_pl_spikes,
