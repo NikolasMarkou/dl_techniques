@@ -30,135 +30,118 @@
 - Anchor at impact site (not at decision definition). One anchor per impact site, even if shared with sibling decision.
 <!-- /COMPRESSED-SUMMARY -->
 
-## plan_2026-05-28_15256fe3
-### D-001 | EXPLORE → PLAN | 2026-05-28
-**Context**: User invoked the task against `convnext_patch_vae_v2/` but described two V1-only symptoms (hierarchical viz missing, multi-anneal configs). V2 has no hierarchical mode and a single anneal config. Asked for clarification.
-**Decision**: Re-scope plan to `src/train/convnext_patch_vae/` (V1) per user confirmation.
-**Trade-off**: Accurate target at the cost of a small framing-correction.
-**Reasoning**: Both symptoms exclusively match V1. Touching V2 would be a no-op for the user's actual concern.
-
-### D-002 | EXPLORE → PLAN | 2026-05-28
-**Context**: Hierarchical viz callbacks need to know L1 vs single-scale at runtime. Options: (a) `isinstance(HierarchicalConvNeXtPatchVAE)` — introduces a model-package import in the callback module, (b) inspect `model.config` attrs.
-**Decision**: Detect hierarchical via `hasattr(model.config, "patches_per_side_l1")` inside callbacks.
-**Trade-off**: Loose duck-typing at the cost of a stricter import-time class check.
-**Reasoning**: Callbacks are train-side and already read `model.config` for single-scale fields; staying with config-attr inspection keeps the callback module free of new model-package dependencies.
-
-### D-003 | EXPLORE → PLAN | 2026-05-28
-**Context**: User asked to "merge" the multiple annealing configurations. Two interpretations: (i) merge schedule lengths only (one shared epochs flag, distinct targets/starts); (ii) collapse L1 and L2 ramps into a single `_beta_kl` attribute on the model.
-**Decision**: Adopt (i). Drop `--beta-anneal-epochs-l1` / `-l2`, keep distinct `beta_kl_l{1,2}` targets and `_beta_kl_l{1,2}` model attrs.
-**Trade-off**: Reduced config surface at the cost of giving up the documented "L1-first stagger" rationale (now treated as a ghost constraint).
-**Reasoning**: (ii) would require model-level changes (loss formula now reads two beta scalars) and erase a meaningful arch distinction between coarse/fine KL strength. (i) cleanly removes the redundant CLI flags without touching the model.
-
-### D-004 | EXPLORE → PLAN | 2026-05-28
-**Context**: For Recon viz "fixed-sample" generation in hierarchical mode, options are (a) hand-roll `decode(z_l1, z_l2)` with random latents, (b) call `model.sample(n, seed=42)`.
-**Decision**: Use `model.sample(n, seed=42)` cached on first invocation.
-**Trade-off**: Couples viz to the model's learnable-conditional-prior path at the cost of duplicating prior-sampling logic in the callback.
-**Reasoning**: `model.sample` already encodes the coherence rationale (joint prior via `_L2ConditionalPrior`), and the model docs explicitly warn against independent N(0, I) sampling on `(z_l1, z_l2)` (model_hierarchical.py:831-837).
-
-### D-005 | REFLECT → EXECUTE | 2026-05-28
-**Context**: User spotted a pre-existing bug during REFLECT: hierarchical "large" was producing a smaller model than single-scale "large". Root cause: `to_hierarchical_model_config()` (L304-338) constructed `HierarchicalConvNeXtPatchVAEConfig` from raw dataclass fields and never consulted `HierarchicalConvNeXtPatchVAE.PRESETS`. `--variant large` was silently ignored in hierarchical mode (got dataclass defaults ≈ base).
-**Decision**: Mirror `to_model_config`'s preset logic in `to_hierarchical_model_config`. Read PRESETS for `embed_dim_l{1,2}`, `encoder_depth_l{1,2}`, `decoder_depth_l{1,2}`, `latent_dim_l{1,2}` when `model_variant` is set; fall through to dataclass fields otherwise. Patch sizes and L1/L2 KL/SIGReg weights remain dataclass-driven (not in preset).
-**Trade-off**: Variant flag now behaves consistently across both paths at the cost of changing the size of any prior hierarchical training run that relied on `--variant tiny|base|large` (those runs were actually all near-base; only "base" exactly matched preset).
-**Reasoning**: Discoverable footgun. The hierarchical preset table exists and is correct; only the trainer wiring was missing. Symmetry with single-scale is the contract users expect from `--variant`.
-**Anchor-Refs**: `src/train/convnext_patch_vae/train_convnext_patch_vae.py:304-371`
-
-## plan_2026-05-27_75849a91
+## plan_2026-06-03_943569ad
 ### D-001 | EXPLORE → PLAN | YYYY-MM-DD
 **Context**: <one-paragraph background — what was discovered in EXPLORE>
 **Decision**: <chosen approach in one sentence>
 **Trade-off**: <X> **at the cost of** <Y>
 **Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-27_75849a91/D-NNN` anchor exists in source)
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-06-03_943569ad/D-NNN` anchor exists in source)
 -->
 
-### D-001 | PLAN | 2026-05-27
-**Context**: Existing `convnext_patch_vae_v2` is flat single-scale; the user requested a cliffordnet-block version AND chose a hierarchical encoder/decoder (2-3 stages with channel doubling + spatial halving via `CliffordNetBlockDSv2`). `CliffordNetBlock` is strictly isotropic and has an internal residual via `GatedGeometricResidual`.
-**Decision**: Create a NEW sibling model package `cliffordnet_patch_vae_v2/` and a NEW sibling training package `train/cliffordnet_patch_vae_v2/`. Do not refactor v2.
-**Trade-off**: Code duplication (decoder, model wrapper, callbacks shim, train script) at the cost of zero risk to the working v2 model and trainer.
-**Reasoning**: v2 is freshly committed (commits ea19175b/278f94f3/acac27fb) and the user is currently iterating on it. Hierarchical Clifford encoder is a structurally different model, not a block swap. Refactoring v2 to be block-class-configurable would require also generalising MAE/SIGReg wiring + segmentation upsample factor, polluting v2's API for a single experiment.
-**Anchor-Refs**: (no in-code anchors yet — to be added during EXECUTE where applicable)
+### D-001 | EXPLORE → PLAN | 2026-06-03
+**Context**: ConvNeXt V1/V2 implement drop_path with a hand-rolled `keras.layers.Dropout(noise_shape=(None,1,1,1))` per block, bypassing the repo's dedicated `StochasticDepth` layer. EXPLORE confirmed `StochasticDepth` is a semantic drop-in (per-sample mask + `/keep_prob` rescale) while `StochasticGradient` is a different, forward-identity grad-only regularizer. The user requested BOTH be available.
+**Decision**: Add a `stochastic_mode: str = 'depth'` ctor kwarg to both models; `'depth'` -> `StochasticDepth`, `'gradient'` -> `StochasticGradient`; keep `drop_path_rate` and all surrounding schedule/guard/storage/call logic unchanged; plumb `stochastic_mode` through `get_config()` and validate against `{'depth','gradient'}`.
+**Trade-off**: A configurable, idiom-aligned, opt-in `'gradient'` regularizer **at the cost of** one extra serialized config key + a 2-site duplicated swap (v1/v2) carried as intentional duplication rather than a shared helper.
+**Reasoning**: Default `'depth'` is behavior-preserving (in distribution), so training scripts and existing tests are untouched. Exposing `'gradient'` (zero production usage, unvalidated under save/load on non-TF backends) is acceptable because it is opt-in and its blast radius is confined to that mode. Rejected alternatives: (a) silent unconditional swap to `StochasticDepth` (loses the requested gradient option); (b) renaming `drop_path_rate` (breaks serialization + 3 training scripts + tests — HARD constraint); (c) extracting a shared v1/v2 helper (earned-abstraction rule: only 2 end-of-line call sites, no payoff).
+**Anchor-Refs**: `src/dl_techniques/models/convnext/convnext_v1.py:310` (anchor), `:151,184,318-322,629` (kwarg/store/swap/get_config), `src/dl_techniques/models/convnext/convnext_v2.py:327` (anchor), `:164,319-334,682`
 
-### D-002 | PLAN | 2026-05-27
-**Context**: `CliffordNetBlock` adds its residual INTERNALLY via `GatedGeometricResidual` (clifford_block.py:794). The v2 ConvNeXt encoder loop adds the residual EXTERNALLY (`encoder.py:239-241`).
-**Decision**: New encoder/decoder loops must NOT add an outer residual when stacking `CliffordNetBlock`s.
-**Trade-off**: Departure from the v2 wiring template at the cost of correctness — adding an outer residual would double-apply the skip and break gradients.
-**Reasoning**: Documented as a HARD constraint in findings; flagged as a Pre-Mortem Scenario 3 falsification signal during PLAN.
-**Anchor-Refs**: encoder.py (to be created, Step 2 — anchor with `# DECISION plan_2026-05-27_75849a91/D-002` at the block-stack loop site)
+### D-002 | REFLECT iter-1 | 2026-06-03
+**Context**: All 3 steps shipped (commits e8656c4b, 706af37f, 013218cb). REFLECT ran the full SC battery.
+**Outcome**: 6/6 success criteria PASS. Scoped suite **138 passed** (84.69s). A2 confirmed (factories thread `**kwargs`, no factory edits); F4 cleared (`_build_stage` runs after `self.stochastic_mode` assignment in both files); A3 confirmed (only model-level Dropout was the drop_path one; remaining grep hits are comments). 0 errors introduced (both D-001 anchors plan-qualified); the 50 repo-wide validate-plan errors are inherited debt in unrelated files (gpt2/nam/nlp/convnext_patch_vae_v2).
+**Simplification checks**: no blockers — 0 files added, 0 abstractions, intentional 2-site duplication. Diff clean (no debug/TODO/dead code).
+**Not verified (accepted)**: bit-exact `'depth'`-vs-old-`Dropout` numerics (out of scope, F2); `'gradient'` training convergence (opt-in, build/forward + round-trip only).
+**Recommendation**: → CLOSE.
 
-### D-003 | PLAN | 2026-05-27
-**Context**: v2 `SegmentationHead` hardcodes `UpSampling2D(size=(patch_size, patch_size))`. In the hierarchical model the encoder downsamples by an additional factor of `2^(num_stages-1)` after the stem, so the head input is at `(Hp / 2^(N-1), Wp / 2^(N-1))` and the head needs an upsample of `patch_size * 2^(N-1)` to reach full image resolution.
-**Decision**: Introduce a new `CliffordSegmentationHead` with an explicit `upsample_factor: int` arg instead of reusing v2's `SegmentationHead`. `AttentionPoolClassifierHead` is reused unmodified.
-**Trade-off**: One new tiny Keras class at the cost of zero edits to v2's heads.py.
-**Reasoning**: The v2 seg head is the simpler of the two heads and the upsample factor is the only thing that changes; introducing a parallel class is cheaper than parameterising and re-validating v2.
-**Anchor-Refs**: heads.py (Step 4)
-
-### D-004 | EXECUTE-Step-7 | 2026-05-27
-**Context**: Step 7 save/load round-trip smoke produced ~1e-4 weight delta on 44 of 143 weights (all inside CliffordNetBlock sub-layers in the encoder/decoder block stack). v2's flat `self.blocks` pattern is bit-exact; standalone CliffordNetBlock save/load is also bit-exact. Isolated repro: storing sub-layers as nested `List[List[Layer]]` (one inner list per stage) breaks Keras's layer tracking during save/load — flat `List[Layer]` works.
-**Decision**: Refactor encoder.py and decoder.py to store all blocks in a single flat `self.blocks: List[CliffordNetBlock]`, with a parallel Python `self._stage_starts: List[int]` giving the index in `self.blocks` of the first block of each stage. Iteration in `call` slices `self.blocks[start:end]` per stage.
-**Trade-off**: ~10 lines of bookkeeping in `__init__` / `build` / `call` at the cost of correct save/load (the only correctness issue we had).
-**Reasoning**: Empirical isolation reproduced the bug with a minimal 4-block, 2-stage list-of-lists CustomLayer (8e-5 delta) vs the same 4 blocks flat (0.0 delta). Confirms Keras's nested-list Layer tracker is the culprit, not anything Clifford-specific. Same pattern that v2 uses.
-**Anchor-Refs**: encoder.py (flat `self.blocks`, `self._stage_starts`); decoder.py (same).
-
-## plan_2026-05-27_4a444b14
-### D-001 — Chosen approach: design+scaffold in iter-1, no actual training runs
-**Decision**: Ship V2 as a complete code package (model + losses + training script + smoke tests) in iter-1. Full training runs are explicit follow-ups, gated on user approval after iter-1.
-
-**Trade-off**: Comprehensive design+scaffold at the cost of leaving actual training (T1a-style ablation runs) unscheduled. The user gets a runnable framework but no validated training results in iter-1.
-
-**Why**: Per LESSONS — "DESIGN+SCAFFOLD plans converge in 1 iteration when paired with an operational follow-up doc" and "Smoke != correctness". A 24h+ ADE20K training run is unjustified before unit tests pass and the user has reviewed the code.
-
-### D-002 — LPIPS uses VGG16 + lazy init, NOT FeatureAlignmentLoss
-**Decision**: Author a new `LPIPSLoss` in `losses/lpips_loss.py` rather than reusing the existing `FeatureAlignmentLoss` (margin-cosine for distillation) or extending `VGGLoss` (image_restoration_loss.py).
-
-**Trade-off**: A new loss class at the cost of a small overlap with `VGGLoss`. Gained: layer-weighted per-channel L2-normalized distance (LPIPS-flavored) with explicit per-block weights and input-range awareness — semantically different from MSE-on-VGG-features.
-
-**Why**: LPIPS-flavored perceptual loss is the canonical add for VAE training (SD-VAE, Kandinsky, etc.). `VGGLoss` is closer to "perceptual MSE"; LPIPS uses normalized features + learned (or chosen) per-channel weights. We ship a clean "LPIPS-lite" without the official LPIPS weight download.
-
-### D-003 — SimMIM-style MAE masking (not canonical MAE)
-**Decision**: Implement MAE-style pretext as **SimMIM-style** (mask ratio applied post-stem, mask token replaces masked patches, full grid passes through ConvNeXt blocks) NOT canonical MAE (variable-length sequence of visible patches only).
-
-**Trade-off**: Less compute savings than canonical MAE at the cost of preserving ConvNeXt's grid-based assumption. ConvNeXt blocks rely on full spatial grid for 7×7 depthwise convs to operate — canonical MAE would require a major surgery.
-
-**Why**: ConvNeXt-V2's FCMAE paper uses exactly this recipe. Matches our backbone family. Anchored at the mask application site in encoder.py.
-
-### D-004 — V2 is a separate package, V1 untouched
-**Decision**: New package `models/convnext_patch_vae_v2/` and `train/convnext_patch_vae_v2/`. V1 (`models/convnext_patch_vae/` and `train/convnext_patch_vae/`) is unchanged.
-
-**Trade-off**: Some code duplication (decoder re-export, viz callback ports) at the cost of preserving V1's test contract and avoiding any risk to V1 consumers.
-
-**Why**: V1 ships a documented contract (32-line README intro, 8-test suite passing). A breaking change to V1's encoder.call signature (returning 3-tuple instead of 2-tuple) would surface in 50+ V1 tests + downstream training scripts. Isolation is cheap (re-exports), regression risk avoided.
-
-### D-005 — iter-1 scope explicitly excludes hierarchical V2, xxl preset, distillation head, GAN loss, CLIP head, DINO loss
-**Decision**: iter-1 lands single-scale V2 with VAE+LPIPS+MAE+cls+seg + xl preset. Hierarchical V2 and xxl are explicit follow-ups.
-
-**Trade-off**: Smaller scope at the cost of not delivering the full 5-head + 2-scale + 5-variant matrix in one plan. The plan-time line count is already ~3000 LOC; a hierarchical V2 + xxl would push us through the "STOP IF >4500" trigger.
-
-**Why**: Per LESSONS line-count multiplier (greenfield × multi-head 2.3×), iter-1's scope is already at the upper bound. Decomposing into iter-1 (single-scale, all heads) + iter-2 (hierarchical V2 inheriting iter-1 patterns) is cleaner than one mega-plan with high iteration-5 risk.
-
-### D-006 — Multi-task data: cls only on CIFAR, seg head unit-tested only in iter-1
-**Decision**: iter-1's training script wires CIFAR labels for the cls head. The seg head is implemented and unit-tested (synthetic labels) but not wired to real ADE20K seg masks. ADE20K-seg data loader integration is an explicit follow-up.
-
-**Trade-off**: Defers real seg training at the cost of not validating end-to-end on real seg labels.
-
-**Why**: ADE20K seg requires a separate label loader (annotation files, palette decoding, label format). Scope cost vs. benefit: the seg head architecture is the interesting part; the data loader is mechanical and uncoupled from the architecture decisions. Keep iter-1 lean; document the missing piece.
-
-## plan_2026-05-27_84f6180d
+## plan_2026-06-02_da7698bc
 ### D-001 | EXPLORE → PLAN | YYYY-MM-DD
 **Context**: <one-paragraph background — what was discovered in EXPLORE>
 **Decision**: <chosen approach in one sentence>
 **Trade-off**: <X> **at the cost of** <Y>
 **Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-05-27_84f6180d/D-NNN` anchor exists in source)
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-06-02_da7698bc/D-NNN` anchor exists in source)
 -->
 
-### D-001 | EXPLORE → PLAN | 2026-05-27
-**Context**: 17 CLAUDE.md files; only `src/train/CLAUDE.md` (451) breaks the 400-line cap. Inflated count claims (150+ models / 290+ layers) appear in 4 root-ward docs while actual counts are ~75 models / 231 layer files. Several subpackage docs are missing recently added modules (notably `sgld_optimizer.py` from commits b23f769e/9342eaec/70deb5e9).
-**Decision**: Audit-and-correct in place. Edit the 9 inconsistent CLAUDE.md files; leave the 9 accurate ones (analyzer, callbacks, constraints, initializers, metrics, regularizers, visualization, models/ccnets, train/ccnets) untouched.
-**Trade-off**: surgical accuracy edits **at the cost of** not normalizing prose style across all docs.
-**Reasoning**: Touching the accurate docs would risk introducing new drift while solving nothing. Scope is bounded by the user's two explicit requirements (consistency + 400-line cap).
+### D-001 | EXPLORE → PLAN | 2026-06-02
+**Context**: The `.md` documents BOTH `PolarWeightNorm` (this file) and `PolarInitializer`, which lives in a separate file (`initializers/polar_initializer.py`) that already carries its own rich module docstring and is pointed to from `initializers/README.md`.
+**Decision**: Merge into `polar_weight_norm.py` ONLY the content pertaining to this module (PolarWeightNorm + polar_encode/decode + shared idea/provenance). For `PolarInitializer`, include a one-line cross-reference, NOT a duplicate of its args table/example.
+**Trade-off**: Single-source-of-truth / no doc drift **at the cost of** the merged docstring not being a 1:1 superset of the `.md` (PolarInitializer's usage example moves out of view of this file's reader).
+**Reasoning**: DRY (LESSONS: aspirational/duplicated docs rot). Mirrors `orthogonal_butterfly.py` precedent, which merged only its own layer's content. Duplicating PolarInitializer's full docs into a norms-layer file would create two divergent sources for one class. Alternative (full duplication) rejected; alternative (move PolarInitializer docs into its own file's docstring) is out of scope — that file already has a rich docstring. **Surfaced for user approval at PC-PLAN.**
 
-### D-002 | PLAN → EXECUTE | 2026-05-27
-**Context**: User reviewed plan v1 and selected (a) drop inflated counts entirely instead of replacing with real numbers, (b) skip step 9 (trimming `src/train/CLAUDE.md` from 451 → ≤400).
-**Decision**: Execute steps 1-8 only. Replace "150+ models / 290+ layers" wording with neutral phrasing ("a comprehensive set of architectures and custom layers"). Leave `src/train/CLAUDE.md` at 451 lines per explicit user choice.
-**Trade-off**: User-respected scope **at the cost of** leaving one file over the 400-line cap. The cap was a user-stated requirement that the user themselves elected to waive for this one file.
-**Reasoning**: Dropping numbers prevents future drift from re-counting. The user is the requirement source; explicit deferral on step 9 overrides the global cap.
+### D-002 | PLAN | 2026-06-02
+**Context**: "Refine code to pass the 2026 instructions" — finding 2 verified the code already satisfies all 15 MUST rules (M1-M15).
+**Decision**: Scope the code refinement to cosmetic/dialect polish (RBF-style `# ---` dividers; drop Sphinx `:func:`/`:class:` roles from the module docstring) + the docstring merge. No logic/structure edit to `__init__`/`build`/`call`/`get_config`.
+**Trade-off**: Minimal, behavior-preserving diff **at the cost of** not "rewriting to look maximally like RBF" (e.g. NOT converting the already-Google class docstring to RBF's Sphinx dialect — that would be a regression per LESSONS line 144).
+**Reasoning**: Instruction doc is the authority over template dialect. The code already exceeds RBF on compliance (RBF lacks `logger`). Net risk minimized; existing test stays green.
+
+### D-003 | REFLECT (iter 1) | 2026-06-03
+**Context**: Executor added a literal `# ---` divider per plan text, but the file already had a titled banner divider (`# PolarWeightNorm layer`, 75-hyphen) immediately before the class, and an inconsistent bare `# ---` at EOF.
+**Decision**: Dropped the redundant pre-class `# ---` (banner already satisfies "divider before class") and made the EOF divider a 75-hyphen line matching the file's OWN existing convention — not butterfly's 69-hyphen literal.
+**Trade-off**: Internal file consistency **at the cost of** not byte-matching the butterfly precedent's exact divider width.
+**Reasoning**: Quality-match means consistency, not blind copy. The file's pre-existing 75-hyphen banners are the local convention; matching them reads cleaner than importing a second divider width. Folded into the step-1 commit via `--amend` (local, unpushed).
+
+### REFLECT Simplification Checks (6) — iter 1
+1. **Reuse before write**: yes — mirrored butterfly precedent; reused existing banner divider instead of adding one.
+2. **Net-negative LOC**: yes — -67 net (deleted 129-line `.md`).
+3. **Essential vs accidental complexity**: no accidental complexity added; docstring is essential documentation.
+4. **Junior-dev test**: a junior reading `polar_weight_norm.py` now has the full design self-contained; no external `.md` hunt.
+5. **No forbidden patterns**: no wrappers/toggles/copy-paste/adapters introduced.
+6. **Abstraction count**: 0 new abstractions, 0 new files. Budget respected.
+**Result**: no simplification blockers. All 5 criteria PASS. Recommend CLOSE.
+
+## plan_2026-06-02_2a0b8192
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-06-02_2a0b8192/D-NNN` anchor exists in source)
+-->
+
+### D-001 | EXPLORE → PLAN | 2026-06-03
+**Context**: The layer is already instruction-compliant on every HARD requirement; the only deltas vs the RBF template are a thinner module docstring and the absence of `# ---` class rules. The `.md` companion (87 lines) is a richer reference than the current 24-line module docstring.
+**Decision**: Merge the `.md` content into a richer top-of-file module docstring, add the two RBF `# ---` rules, delete the `.md`, fix the CLAUDE.md pointer; make ZERO logic changes.
+**Trade-off**: A single canonical doc location (the module docstring) + RBF structural parity **at the cost of** deleting the standalone browsable `.md` (surfaced as Assumption A1 — confirm at approval; user may want it kept).
+**Reasoning**: "Merge into the docstring" implies consuming the source; keeping both duplicates content and rots. Behavior-preserving so the existing 207-line test is a sufficient safety net. Alternative (keep `.md` + duplicate in docstring) rejected as drift-prone.
+
+### D-002 | EXPLORE → PLAN | 2026-06-03
+**Context**: Explorer-1 flagged the bare `@keras.saving.register_keras_serializable()` (no `package=`) as a violation; cross-check against the instructions ([SOFT] §8.1) and the named template RBF (which omits it) reclassified it as a GHOST.
+**Decision**: Keep the decorator BARE — no `package=` arg.
+**Trade-off**: Instruction + template compliance and an unchanged serialization key **at the cost of** deviating from the broader-repo `package="dl_techniques"` habit seen elsewhere.
+**Reasoning**: `package=` is optional per instructions; RBF (the explicit quality bar for this task) omits it; the layer is unused so there is nothing to gain, and adding it would change the registered key. LESSONS: bare decorator ties key to `__module__` — do not perturb without a move (and there is no move here).
+
+### D-003 | EXPLORE → PLAN | 2026-06-03
+**Context**: "Match RBF quality" is ambiguous — RBF uses Sphinx `:param:` docstrings, but the repo instructions mandate Google style.
+**Decision**: Keep Google-style docstrings everywhere; interpret "match quality" as STRUCTURAL polish (module-docstring richness, `# ---` rules), not docstring-dialect parity.
+**Trade-off**: Instruction compliance (Google `Args:`/`Input shape:`) **at the cost of** literal dialect-match with RBF's `:param:` style.
+**Reasoning**: Converting to Sphinx would VIOLATE `research/2026_keras_custom_models_instructions.md` §3.1, which is the higher authority for "passes the instructions". The 3 existing `logger.debug` calls are likewise kept (instruction-permitted; removing is needless churn) even though RBF has no logger.
+
+## plan_2026-06-02_e3da3ff9
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-06-02_e3da3ff9/D-NNN` anchor exists in source)
+-->
+
+### D-001 | EXPLORE → PLAN | 2026-06-02
+**Context**: `neuro_grid.py` lives at `layers/` root, not exported anywhere, with two upward relative imports (`..regularizers`, `..initializers`). Target `layers/memory/` exists with SOM/MANN/NTM siblings, all exported from `memory/__init__.py`. User confirmed: (a) export NeuroGrid from memory pkg, (b) relocate ALL memory-package tests into a new `tests/test_layers/test_memory/` subdir.
+**Decision**: git-mv the module + fix `..`→`...`, add NeuroGrid to `memory/__init__.py`, update the 2 importers, and git-mv all memory tests (4 files + `test_ntm/` dir) into a new `test_memory/` with an empty `__init__.py`.
+**Trade-off**: Wider blast radius (test reorg) **at the cost of** a single atomic, convention-consistent move — vs. minimal "move neuro_grid only," which would leave memory tests scattered.
+**Reasoning**: Use `git mv` to preserve history. Tests use absolute imports → no edits needed beyond neuro_grid's own. Exclude `test_hierarchical_memory_system.py` (tests `layers.experimental`, not memory pkg). Relative-import dot-count is the only correctness-critical edit; everything else mechanical.
+**Anchor-Refs**: none (mechanical move, no non-obvious code-level constraint).
+
+### D-002 | scope expansion | 2026-06-02
+**Context**: After initial plan scoping, user added "move the other memory layers test into the test_memory subdir."
+**Decision**: Expand test moves from {test_neuro_grid} to all memory-package tests: + test_som_2d_layer, test_som_nd_layer, test_som_nd_soft_layer, test_ntm/.
+**Trade-off**: 4 extra git-mv ops **at the cost of** leaving the test tree half-migrated.
+**Reasoning**: `test_hierarchical_memory_system.py` excluded (F8). No test_mann/factory tests exist.
+**Anchor-Refs**: none.
+
+### D-003 | REFLECT | 2026-06-02
+**Context**: All 8 steps executed; 7/7 success criteria PASS; 189 memory-pkg tests pass; no regressions. Simplification Checks: no bloat (net = git-mv renames + ~14 line edits + 1 required test `__init__.py`); essential-not-accidental complexity; passes junior-dev readability. `validate-plan.mjs` reports 41 ERRORs but ALL are pre-existing orphan/unknown-plan decision anchors in unrelated files (cliffordnet, lighthouse_attention, gpt2, nam, rms_variants, lewm) from older sliding-window-trimmed plans — confirmed none of this plan's touched files appear in the error set.
+**Decision**: Recommend CLOSE. Pre-existing orphan-anchor ERRORs are out of scope for a file-move task and must not be "fixed" here (would be massive scope creep; the correct remedy is `bootstrap.mjs retire <plan-id>` per-plan, separately).
+**Trade-off**: Leaving 41 unrelated validator ERRORs **at the cost of** a clean validator run — accepted because addressing them is unrelated tech debt that predates this plan.
+**Reasoning**: Scope drift = +1 file (layers/CLAUDE.md doc) justified by F5. Changelog WARNs are cosmetic (combined-step notation). No simplification blockers.
+**Anchor-Refs**: none.

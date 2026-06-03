@@ -103,3 +103,19 @@
 | plan_2026-05-27_4a444b14 | 2026-05-27 | No goal |  |
 | plan_2026-05-27_75849a91 | 2026-05-27 | Port `src/train/convnext_patch_vae_v2/` to use cliffordnet b |  |
 | plan_2026-05-28_15256fe3 | 2026-05-28 | In `src/train/convnext_patch_vae/` (V1 — corrected from V2 i | scope-clarification.md, hierarchical-viz-gap.md, annealing-config-redundancy.md |
+| plan_2026-05-29_4538aa62 | 2026-05-29 | Implement **Polar Weight Normalization** (a Keras 3 layer th |  |
+| plan_2026-05-29_8da9ba37 | 2026-05-29 | Implement `OrthogonalButterfly`: a learnable, exactly-orthog |  |
+| plan_2026-05-29_8246cd14 | 2026-05-29 | Build a lightweight anomaly-detection application under `src |  |
+| plan_2026-05-29_f1605e5a | 2026-05-29 | Fix the 8 confirmed defects from the epistemic-deconstructor |  |
+| plan_2026-05-30_979e95fa | 2026-05-30 | Fully remove the hierarchical ConvNeXtPatchVAE: delete the m |  |
+| plan_2026-05-31_76981d58 | 2026-05-31 | Deliver the CODE action items from the CliffordNet-CLIP feas |  |
+| plan_2026-05-31_3ec26e00 | 2026-05-31 | Make `node /home/arxwn/.claude/skills/iterative-planner/scri |  |
+| plan_2026-05-31_42743977 | 2026-05-31 | Execute the design in `docs/20260530_cliffordnet_clip.md` en |  |
+| plan_2026-06-02_30721a0f | 2026-06-02 | Extract copy-pasted functionality from `src/train/` trainers |  |
+| plan_2026-06-02_35651564 | 2026-06-02 | Continue the `train/common` deduplication: land the six user |  |
+| plan_2026-06-02_cc4d4e14 | 2026-06-02 | Consolidate the four largest remaining REAL code duplication |  |
+| plan_2026-06-02_8422b85d | 2026-06-02 | Move `src/train/benchmarks/` (5 markdown benchmark-reference |  |
+| plan_2026-06-02_e3da3ff9 | 2026-06-02 | Move `src/dl_techniques/layers/neuro_grid.py` into `src/dl_t |  |
+| plan_2026-06-02_2a0b8192 | 2026-06-02 | Absorb the richer reference content from `src/dl_techniques/ |  |
+| plan_2026-06-02_da7698bc | 2026-06-02 | Merge `src/dl_techniques/layers/norms/polar_weight_norm.md`  |  |
+| plan_2026-06-03_943569ad | 2026-06-03 | Replace the hand-rolled drop_path implementation — `keras.la |  |

@@ -34,148 +34,115 @@
 - **`current_phase` / `_global_step` counters**: `add_weight(trainable=False, dtype="float32")` — int32 fails CPU/GPU device placement.
 <!-- /COMPRESSED-SUMMARY -->
 
-## plan_2026-05-28_15256fe3
+## plan_2026-06-03_943569ad
+### Index
+| # | Finding | File | Covers |
+|---|---------|------|--------|
+| 1 | ConvNeXt drop_path is `keras.layers.Dropout(noise_shape=(None,1,1,1))` applied per-block on the residual branch, with a linear rate schedule `rate*i/(N-1)`; blocks themselves have no drop_path. | findings/convnext-droppath-usage.md | problem scope, existing pattern |
+| 2 | `StochasticDepth(drop_path_rate)` is a per-sample drop+rescale layer — a TRUE drop-in for the current `Dropout(noise_shape=(None,1,1,1))`. `StochasticGradient(drop_path_rate)` is forward-identity, only stochastically `stop_gradient`s — a DIFFERENT regularizer, not drop_path. | findings/stochastic-layers-api.md | solution space, constraints |
+| 3 | Blast radius: 4 exported symbols, 3 training scripts pass `drop_path_rate`, tests assert `model.drop_path_rate` attr + config round-trip + a `test_stochastic_depth` forward-shape test. Block layers (used by 5 other models) carry NO drop_path, so block-level blast radius is zero. | findings/convnext-blast-radius.md | affected files, test gates |
+
+### Key Constraints
+- [HARD] Public kwarg name `drop_path_rate` is serialized in `get_config()` (convnext_v1.py:626, convnext_v2.py:682) and asserted by tests + passed by 3 training scripts. **Keep the kwarg name `drop_path_rate`** — only swap the internal mechanism, do not rename the public API.
+- [HARD] `StochasticDepth` rescales by `1/keep_prob` and is per-sample — semantically equivalent to the current `Dropout(noise_shape=(None,1,1,1))`. So swapping to `StochasticDepth` preserves training behavior.
+- [HARD] Current per-block `Dropout` objects are stored in a plain `list` of `dict`s (`stage_blocks`), NOT as tracked sublayer attributes. Keras may not auto-track layers in nested Python containers — the replacement should keep the same storage pattern (Dropout/StochasticDepth have no weights, so this is a tracking/naming concern, not a correctness one).
+- [SOFT] `StochasticDepth` is the established repo idiom (10+ call sites incl. swin, clifford, dino); `StochasticGradient` has exactly one usage (an experiment script), zero production-model usage.
+- [SEMANTIC] `StochasticGradient` is NOT a drop-in for drop_path: it leaves the forward pass unchanged, so it removes the forward-activation regularization that drop_path provides. Using it changes model behavior materially.
+- [GHOST] None identified.
+
+### Resolved Decision
+User chose **configurable: both available**. Add a `stochastic_mode: str = 'depth'` kwarg to both models. `'depth'` -> `StochasticDepth` (default, preserves current behavior); `'gradient'` -> `StochasticGradient`. Keep `drop_path_rate` public kwarg unchanged. Plumb `stochastic_mode` through `get_config()` and validate against `{'depth','gradient'}`.
+
+### Corrections
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
+
+## plan_2026-06-02_da7698bc
 ### Index
 
-1. [scope-clarification.md](plan_2026-05-28_15256fe3/findings/scope-clarification.md) — Task target is V1
-   (`src/train/convnext_patch_vae/`), not V2. Both reported symptoms
-   (hierarchical viz missing, multiple anneal configs) are V1-only.
-2. [hierarchical-viz-gap.md](plan_2026-05-28_15256fe3/findings/hierarchical-viz-gap.md) — All three
-   viz callbacks (ReconVisualizationCallback, LatentSpaceCallback,
-   LatentInterpolationCallback) are explicitly skipped in hierarchical
-   mode at `train_convnext_patch_vae.py:1118-1128`. They fail because
-   hierarchical `encode()` returns a 4-tuple (single-scale: 2-tuple) and
-   `decode()` takes `(z_l1, z_l2)` (single-scale: one tensor).
-3. [annealing-config-redundancy.md](plan_2026-05-28_15256fe3/findings/annealing-config-redundancy.md)
-   — Hierarchical path spawns two `BetaAnnealingCallback`s with separate
-   `--beta-anneal-epochs-l1` / `-l2` flags. Collapsing to one shared
-   `--beta-anneal-epochs` (keeping distinct L1/L2 targets) is the
-   requested change.
+| # | Finding file | Covers | Key takeaway |
+|---|--------------|--------|--------------|
+| 1 | `findings/target-files.md` | Current `polar_weight_norm.py` (348 ln) + `.md` (130 ln) | `.py` is ALREADY Keras-3 compliant (typed, `get_config` complete, `compute_output_shape`, `logger`, `keras.ops`-only `call`, Google-style class docstring w/ `**Intent**`/`**Architecture**`). `.md` carries extra content: usage example, guarantees, per-forward caveat, provenance/arXiv, AND full `PolarInitializer` docs (a *different* file). |
+| 2 | `findings/template-and-instructions.md` | RBF template + 2026 instruction doc (M1-M15) | Instruction doc = authority. Code satisfies all 15 MUST rules already. Only real divergence is docstring dialect (Google authoritative; module docstring currently has Sphinx `:func:`/`:class:` roles). RBF sets the bar for module-docstring richness (summary + math + references). |
+| 3 | `findings/butterfly-precedent.md` | `orthogonal_butterfly.py` did the IDENTICAL task (commits `836a7798`+`30b4a1dd`) | Pattern = (A) merge `.md` into module docstring + add `# ---` divider before decorator and at EOF (`.py` only, commit 1); (B) delete `.md` + fix doc pointers (commit 2). Section order: one-liner -> description -> Mathematical Foundation -> Properties -> Constraints -> When to Use -> References. |
+
+### Verified facts (this plan)
+- Code passes M1-M15 of `2026_keras_custom_models_instructions.md` already (verified line-by-line in finding 2). "Refine code to pass instructions" is largely VERIFY-ONLY + cosmetic (dialect cleanup, `# ---` dividers).
+- Exports OK: `src/dl_techniques/layers/norms/__init__.py:7` exports `PolarWeightNorm, polar_encode, polar_decode`.
+- Test file exists: `tests/test_layers/test_norms/test_polar_weight_norm.py` (8.3 KB) -> scoped-pytest verification target.
+- **4 pointer sites** reference `polar_weight_norm.md` (must fix on deletion):
+  1. `src/dl_techniques/layers/CLAUDE.md:16` — "see `norms/polar_weight_norm.md`."
+  2. `src/dl_techniques/layers/norms/README.md:22` — "See `polar_weight_norm.md` for the full design..."
+  3. `src/dl_techniques/initializers/README.md:171` — "(see `dl_techniques/layers/norms/polar_weight_norm.md`)."
+  4. `src/dl_techniques/layers/orthogonal_butterfly.py:71` — docstring cross-ref "see norms/polar_weight_norm.md."
 
 ### Key Constraints
 
-- **HARD**: hierarchical `encode()` returns 4-tuple; `decode()` requires
-  `(z_l1, z_l2)`. Cannot reuse single-scale viz code unchanged.
-- **HARD**: hierarchical config attrs are `patches_per_side_l1/l2` and
-  `latent_dim_l1/l2` — not the single-scale `patches_per_side` /
-  `latent_dim` that callbacks currently read.
-- **HARD**: `_beta_kl_l1` / `_beta_kl_l2` are mutable model attributes
-  ramped by callbacks; the model reads them per-step. Both must keep
-  ramping — only the *schedule length* is unified.
-- **SOFT**: L1 vs L2 KL targets (`beta_kl_l1`, `beta_kl_l2`) and starts
-  remain distinct — they encode a real architectural choice (coarse vs
-  fine latent), not redundancy.
-- **GHOST**: the "L1 first, L2 with overlap" stagger story is a comment
-  rationale (L1089-1090); user has decided it's not worth the config
-  surface. Drop it.
+- **[HARD]** `@keras.saving.register_keras_serializable()` bare (no `package=`) — LESSONS confirms the bare form is correct here; do NOT add `package=`.
+- **[HARD]** `keras.ops`-only in `call`; `logger` not `print`; full `get_config` round-trip — all already satisfied, must be PRESERVED through edits.
+- **[HARD]** Existing module docstring (lines 1-23) and class docstring (146-195) content must be PRESERVED/extended, not dropped.
+- **[HARD]** Google docstring dialect is authoritative over Sphinx (instruction doc > RBF template dialect).
+- **[SOFT]** `# ---` dividers: one before class decorator, one at EOF (butterfly precedent).
+- **[SOFT]** Merge-then-delete in TWO commits (precedent).
+- **[GHOST]** "match RBF quality" does NOT mean copy RBF's Sphinx `:param:` dialect — it means structural completeness/polish. The `.py` already exceeds RBF on Keras-3 compliance (RBF lacks `logger`).
+- **[DECISION-PENDING]** `PolarInitializer` lives in a *separate* file (`initializers/polar_initializer.py`) with its OWN rich module docstring. Default decision: CROSS-REFERENCE it from the merged docstring, do NOT duplicate its full args table/example (DRY / single-source). Surface for user approval at PC-PLAN.
 
 ### Corrections
-*Append [CORRECTED iter-N] entries here when earlier findings prove wrong.*
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
 
-## plan_2026-05-27_75849a91
+## plan_2026-06-02_2a0b8192
 ### Index
-- `findings/convnext-patch-vae-v2-trainer.md` — CLI flags, dataset pipeline, losses (7 components), optimizer/clip, callbacks, custom train_step. Substitution points identified.
-- `findings/convnext-patch-vae-v2-model.md` — Flat single-scale VAE: stem → N ConvNextV2Block → mu/log_var → Sampling → M ConvNextV2Block → ConvTranspose. Constant `(B, Hp, Wp, embed_dim)`. Block I/O contract documented.
-- `findings/cliffordnet-blocks.md` — `CliffordNetBlock` (`layers/geometric/clifford_block.py:482`) is isotropic, no channel divisibility constraints, internal residual via GatedGeometricResidual + LayerScale + DropPath. `CliffordNetBlockDSv2` available for downsampling stages.
-- `findings/train-conventions-and-lpips.md` — `src/train/` package conventions, dataclass-config pattern with `to_model_config()`, `create_base_argument_parser`, `create_callbacks`, output to repo-root `results/`. LPIPSLoss API documented.
+
+| # | Topic | File | Key takeaway |
+|---|-------|------|--------------|
+| 1 | Current state of orthogonal_butterfly (src + doc) | findings/orthogonal-butterfly-current.md | Layer is already high-quality and instruction-compliant; only the bare decorator was flagged. `.md` (86 lines) is a richer reference than the current top docstring. Comprehensive test file exists. Not exported from `__init__` (intentional). No production importers. |
+| 2 | RBF quality template | findings/rbf-quality-template.md | RBF = quality bar: rich module docstring (bold-prose sections + unicode math + References), `# ---` 69-dash rules before/after class, complete get_config, compute_output_shape always present. NOTE: RBF uses Sphinx `:param:` docstrings, NO logger, NO `package=`. |
+| 3 | Keras custom-layer instructions checklist | findings/keras-instructions-checklist.md | HARD: register decorator, all args stored, add_weight only in build(), super().build() last, keras.ops only, compute_output_shape required, get_config complete, round-trip test. Google-style docstrings + logger. `package=` is SOFT/optional. |
 
 ### Key Constraints
 
 ### HARD
-- Keras 3 / TF 2.18, Python 3.11+. `keras.ops` for backend-agnostic ops; `@keras.saving.register_keras_serializable()` on every custom class; full `get_config()` round-trip.
-- Block I/O contract on the swap target: `(B, Hp, Wp, embed_dim) → (B, Hp, Wp, embed_dim)`, stride=1, full spatial resolution preserved (MAE mask token application + SIGReg reshape both require the complete `(Hp, Wp)` grid).
-- **Residual semantics mismatch**: existing ConvNeXtV2 encoder loop adds the residual **externally** (`encoder.py:239-243`). `CliffordNetBlock` adds residual **internally** via `GatedGeometricResidual`. New encoder/decoder loop must NOT add an outer residual when using CliffordNetBlock — else double residual.
-- Training outputs always go to repo-root `results/`, never `src/results/` (per `feedback_results_dir` memory).
-- GPU jobs strictly serial (per `feedback_no_parallel_gpu` memory).
-- Push with `--no-verify` (user pushes themselves).
-- Centralized logger via `dl_techniques.utils.logger` — no print statements.
+- Custom layer must keep `@keras.saving.register_keras_serializable()`, `keras.ops`-only `call()`, `add_weight` only in `build()`, `super().build()` last, complete `get_config()`, `compute_output_shape()` present, round-trip serialization test passing. **The current code already satisfies all of these.**
+- Google-style docstrings are the instruction-mandated standard (`Args:` / `Input shape:` / `Output shape:`). The current butterfly code already uses Google style.
 
 ### SOFT
-- New training package should mirror v2's directory layout (`__init__.py`, `callbacks.py`, `train_<name>.py`, optional README.md). Script name must NOT be `train.py` (package shadow).
-- Dataclass config + `to_model_config()` bridge is the repo idiom.
-- Re-use existing v2 callbacks where possible (`BetaAnnealingCallback`, `MaskedReconViz`, `TrainingCurvesCallback`).
+- `# ---` horizontal rule (69 dashes) before and after the class block (RBF convention) — not currently present in butterfly.
+- Rich module-level docstring with bold-prose section headings + References bullets (RBF convention).
+- `package=` arg in the register decorator: OPTIONAL per instructions; RBF (the named quality template) OMITS it. → keep bare.
 
-### GHOST (worth checking)
-- None identified — CliffordNetBlock has no channel-divisibility constraint (was a concern, ruled out by exploration).
+### GHOST (constraints that look binding but are not)
+- "Bare decorator is a violation" (flagged by explorer 1) — FALSE. Instructions mark `package=` optional; RBF, the explicit quality template, omits it. Keeping it bare satisfies both authorities and avoids changing the registered serialization key (zero risk on an unused layer).
+- "Match RBF means convert to Sphinx `:param:` docstrings" — FALSE. Instructions mandate Google style; converting would VIOLATE the instructions. "Match quality" = structural completeness/polish, not docstring dialect.
+- "RBF has no logger, so strip logger from butterfly" — not required. Instructions permit logger; the 3 existing `logger.debug` calls are compliant and harmless. Keep to avoid churn.
+
+### Decision points (surfaced at PC-PLAN)
+- The `.md` will be DELETED after merging into the top-of-file docstring ("merge" = consume the source). `layers/CLAUDE.md` references `orthogonal_butterfly.md` and must be updated. The `.md` itself links to `polar_weight_norm.md` (sibling kept separate) — that sibling is unaffected.
 
 ### Corrections
-*Append [CORRECTED iter-N] entries here when earlier findings prove wrong.*
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
 
-## plan_2026-05-27_4a444b14
-### Iteration 0 (EXPLORE)
+- [CORRECTED iter-0] findings/orthogonal-butterfly-current.md called the bare `@register_keras_serializable()` "the only Keras 3 convention violation." Cross-checked against findings/keras-instructions-checklist.md ([SOFT] §8.1) and findings/rbf-quality-template.md ([GHOST], RBF omits it): it is NOT a violation. Reclassified as a GHOST constraint. Decorator stays bare.
 
-- F1 [HARD constraint] **V1 architecture, APIs, and conventions** — `findings/v1-architecture.md`
-- F2 [SCAFFOLD] **Existing losses inventory + reuse map** — `findings/losses-inventory.md`
-- F3 [DESIGN] **Multi-task head + MAE masking design notes** — `findings/v2-design.md`
-- F4 [HARD constraint] **Repo conventions (training, serialization, no-EMA)** — `findings/repo-conventions.md`
-- F5 [SCOPE] **iter-1 scope boundaries and deferred work** — `findings/scope-boundaries.md`
-
-### Exploration Confidence
-- Problem scope: **deep** (V1 fully characterized in the prior epistemic deconstruction; user's "recommended path" explicit from prior conversation)
-- Solution space: **constrained** (V1 patterns + repo conventions narrow design; multi-task pretraining recipe is canonical)
-- Risk visibility: **clear** (LESSONS.md captures every footgun for this codebase + V1 specifically)
-
-### Key Constraints (HARD/SOFT/GHOST)
-- **HARD**: `compile(loss=None)` + `add_loss` pattern (V1 contract — D-001 of V1)
-- **HARD**: `jit_compile=False` (XLA breaks SIGReg)
-- **HARD**: `Sampling` is stochastic — reload checks must use deterministic `mu`
-- **HARD**: SIGReg call site MUST `× ops.cast(Hp*Wp, "float32")` for resolution-invariance
-- **HARD**: AdamW WD only — no L2 kernel_regularizer (double-WD footgun)
-- **HARD**: Resolution-agnostic invariant — no GAP, no learned PE, no Dense over flattened spatial
-- **HARD**: Losses live in `src/dl_techniques/losses/` (user instruction)
-- **HARD**: Custom train_step must explicitly create `loss_tracker` (Keras 3.8 contract)
-- **GHOST**: EMA target encoder (V1 README rejects; VAE forbids identity, no symmetry to break)
-- **GHOST**: Learned absolute positional embedding (kills resolution invariance)
-- **SOFT**: training scripts use `train.common` utilities and follow patterns 1-5
-- **SOFT**: Greenfield model packages land in +1000-1300 code-only LOC (predict accordingly)
-
-## plan_2026-05-27_84f6180d
+## plan_2026-06-02_e3da3ff9
 ### Index
 
-### F1 — CLAUDE.md inventory (17 files, 1 over 400 lines)
-- Only `src/train/CLAUDE.md` (451 lines) exceeds the 400-line cap. All others are ≤185 lines.
-- Largest others: train/ccnets (185), models/ccnets (157), models/ (105), dl_techniques/ (99), layers/ (95), CLAUDE.md root (84).
-
-### F2 — Inflated count claims (root + dl_techniques + models + layers)
-- Claim: "150+ models, 290+ layers". Actual: 75 model directories (excluding `__pycache__`), 231 layer `.py` files.
-- Affected files: `CLAUDE.md`, `src/dl_techniques/CLAUDE.md`, `src/dl_techniques/models/CLAUDE.md`, `src/dl_techniques/layers/CLAUDE.md`.
-
-### F3 — Root CLAUDE.md `src/results/` is wrong
-- Tree comment in `CLAUDE.md` lists `src/results/`; actual path is repo-root `results/` (confirmed by `ls src/` and memory entry `feedback_results_dir`).
-
-### F4 — models/CLAUDE.md missing entries
-Disk has but doc omits: `burst_dp`, `gpt2`, `lewm`, `memory_bank`, `nam`, `video_jepa`, `vq_vae_rotation`, `wave_field_llm`.
-
-### F5 — losses/CLAUDE.md missing entries and outdated count
-Doc says "28+"; actual 33 `.py` modules. Missing in doc: `clifford_detection_loss.py`, `focal_causal_lm_loss.py`, `masked_causal_lm_loss.py`, `multi_task_loss.py`, `scaled_mse_loss.py`, `utilization_loss.py`.
-
-### F6 — optimization/CLAUDE.md missing SGLD + duplicate sled line
-Recent commits added `sgld_optimizer.py` (commits b23f769e, 9342eaec, 70deb5e9). Not in doc. Also lists `sled_supervision.py` twice. Public API block doesn't expose `Muon`/`SGLD`. `train_vision/` subpackage referenced is real.
-
-### F7 — utils/CLAUDE.md missing modules
-Disk modules missing in doc: `deep_supervision.py`, `drop_path.py`, `weight_transfer.py`, `yolo_decode.py`. (`weight_transfer.py` IS used heavily in train/CLAUDE.md depth section, so its omission from utils doc is a real gap.)
-
-### F8 — datasets/CLAUDE.md drift
-Lists `universal_dataset_loader.py` twice. Missing: `bdd100k_video.py`, `nlp.py`, `pusht_hdf5.py`, `synthetic_drone_video.py`.
-
-### F9 — train/CLAUDE.md is 451 lines (over cap)
-Content largely accurate vs codebase. Trimming candidates: (a) long benchmark file descriptions in §"Reference Documents" can be condensed (each file gets 4–6 lines now); (b) Pattern 5 depth section has a long Keras-3.8 `by_name` gotcha that could move into utils/CLAUDE.md or be condensed; (c) Pattern code blocks could lose some inline comments.
-
-### F10 — Smaller CLAUDE.md files are accurate
-analyzer, callbacks, constraints, initializers, metrics, regularizers, visualization, models/ccnets, train/ccnets all consistent with current code. No edits needed.
+| # | Finding | Location |
+|---|---------|----------|
+| F1 | `neuro_grid.py` (41KB) currently at `src/dl_techniques/layers/neuro_grid.py`; target dir `src/dl_techniques/layers/memory/` exists with siblings som/mann/ntm. | `src/dl_techniques/layers/neuro_grid.py` |
+| F2 | `neuro_grid.py` has two upward relative imports: `from ..regularizers.soft_orthogonal` and `from ..initializers.hypersphere_orthogonal_initializer` (lines 87-88). `..` = `dl_techniques`. After moving one level deeper these MUST become `...`. | `neuro_grid.py:87-88` |
+| F3 | Only two code references import it: `tests/test_layers/test_neuro_grid.py:9` and `src/experiments/neuro_grid/mnist_reconstruction.py:26`, both `from dl_techniques.layers.neuro_grid import NeuroGrid`. | grep |
+| F4 | `neuro_grid` is NOT exported from `layers/__init__.py` (no reference). Memory siblings SOM/MANN/NTM ARE exported from `memory/__init__.py`. USER DECISION: add NeuroGrid export to `memory/__init__.py`. | `memory/__init__.py` |
+| F5 | Doc mention "neuro grid" in prose layer list at `layers/CLAUDE.md:86` (not an import). Low priority — informational list. | `layers/CLAUDE.md:86` |
+| F6 | Test convention: memory-family tests (som/mann) currently flat in `tests/test_layers/`; subdir `test_ntm/` exists with empty `__init__.py`. USER DECISION: create `tests/test_layers/test_memory/` (with empty `__init__.py`) and move test there. | `tests/test_layers/` |
+| F7 | [EXPANDED SCOPE] User: move ALL memory-package tests into `test_memory/`. Memory-package tests = test_neuro_grid.py, test_som_2d_layer.py, test_som_nd_layer.py, test_som_nd_soft_layer.py, and the `test_ntm/` dir. All use ABSOLUTE imports (no relative breakage on move). No external/CI refs to these paths. | `tests/test_layers/` |
+| F8 | [EXCLUSION] `test_hierarchical_memory_system.py` imports `dl_techniques.layers.experimental.hierarchical_memory_system` — NOT the memory package. Despite the name, EXCLUDE from the move. No test_mann.py / factory test exists. | `tests/test_layers/test_hierarchical_memory_system.py:8` |
 
 ### Key Constraints
 
-**HARD**
-- 400-line cap (only train/CLAUDE.md violates).
-- Must remain factually consistent with current codebase (file/module listings, count claims).
-
-**SOFT**
-- Existing prose style and section structure should be preserved where possible (these are reference docs).
-- Don't aggressively expand small files past what's needed for accuracy.
-
-**GHOST (suspected)**
-- "150+ / 290+" numbers may reflect an older aspirational repo state and have been blindly inherited across docs. Either bring them in line with reality or drop the count entirely.
+- **HARD**: The two relative imports in `neuro_grid.py` (`..regularizers`, `..initializers`) must change to `...` after the move, or the module fails to import. Verified by package-depth math.
+- **HARD**: Both importers (`test_neuro_grid.py`, `mnist_reconstruction.py`) must update path to `dl_techniques.layers.memory.neuro_grid` or they break.
+- **HARD (convention)**: New test subdir `test_memory/` needs an empty `__init__.py` (matches `test_ntm/`).
+- **SOFT**: `memory/__init__.py` export placement should follow the existing sectioned style (NTM / MANN / SOM blocks + `__all__`).
+- **GHOST**: None — no stale constraints inherited.
 
 ### Corrections
-*None yet.*
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong.*

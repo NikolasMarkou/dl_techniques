@@ -1,39 +1,50 @@
 # System Atlas
-*Last refreshed: plan_2026-05-27_c3184aea | 2026-05-27 | 64 plans closed*
-*Domain-neutral system map. Rewritten by ip-archivist at CLOSE — max 300 lines. Read before PLAN/EXPLORE.*
+*Last refreshed: plan_2026-06-03_943569ad | 2026-06-03 | 76 plans closed*
+*Domain-neutral system map. Rewritten by ip-archivist at CLOSE -- max 300 lines. Read before PLAN/EXPLORE.*
 
 ## Identity
-`dl_techniques` is a Keras 3 / TensorFlow 2.18 deep-learning research library — 150+ model architectures, 290+ custom layers, plus production training pipelines, applications, and experiments. **Domain: codebase.**
+`dl_techniques` is a Keras 3 / TensorFlow 2.18 deep-learning research library -- 150+ model architectures, 290+ custom layers, plus production training pipelines, applications, and experiments. **Domain: codebase.**
 
 ## Components
 
 ### Layers (`src/dl_techniques/layers/`)
-290+ custom Keras layers — geometric/Clifford, attention variants (incl. `WaveFieldAttention`), normalization, FFN, routing, logic/arithmetic.
+290+ custom Keras layers -- geometric/Clifford, attention variants (incl. `WaveFieldAttention`), normalization, FFN, routing, logic/arithmetic.
 
-- **`layers/logic/`** — DARTS-style differentiable-primitive package (4 source files): `LearnableArithmeticOperator`, `LearnableLogicOperator`, `CircuitDepthLayer`, `LearnableNeuralCircuit`. All accept `selection_mode: Literal['global','per_channel'] = 'global'`. **Defaults**: `softplus_temperature=True`, `operation_initializer='zeros'`, `allow_unary_degenerate=False`.
+- **`layers/norms/polar_weight_norm.py`** -- polar weight reparameterization. Module-level `polar_encode` / `polar_decode` / `_next_power_of_two`. `PolarWeightNorm` layer: Dense-style; trainable params `radius (units,)` + `angles (units, d-1)`, `d = next_pow2(fan_in)`; kernel reconstructed each forward via decode + slice + renorm-after-slice; exact per-unit L2 norm = |radius|. Module docstring is RBF-structured (merged from former companion `.md`, which is deleted). `PolarInitializer` lives in `initializers/polar_initializer.py` (cross-referenced, not duplicated). 28 PASS tests.
 
-- **`layers/ffn/`** — factory'd FFN sub-package: 14 registered types via `create_ffn_layer(<type>, ...)`.
+- **`layers/orthogonal_butterfly.py`** -- `OrthogonalButterfly`: standalone layer, exact-orthogonal Givens butterfly (WtW=I), O(d log d) cost, identity-at-init, invertible (`inverse=True` ctor / `.inverse()` method / `log_det_jacobian==0`). Power-of-two input dim only (no padding). Bare `@register_keras_serializable()` (key tied to `__module__`; `package=` omitted intentionally per RBF template precedent). Module docstring is RBF-structured (merged from former companion `.md`). Not exported from `layers/__init__.py` (intentional). 49 PASS tests.
 
-- **`layers/memory/`** — single canonical home for memory-augmented layers (MANN + NTM families + SOMs). **`factory.create_mann(...)`** routes to a `NeuralTuringMachine`. `MannLayer` / `SOM2dLayer` retained as BC aliases. `AddressingMode` pruned to `{CONTENT, HYBRID}`.
+- **`layers/logic/`** -- DARTS-style differentiable-primitive package (4 source files): `LearnableArithmeticOperator`, `LearnableLogicOperator`, `CircuitDepthLayer`, `LearnableNeuralCircuit`. Defaults: `softplus_temperature=True`, `operation_initializer='zeros'`, `allow_unary_degenerate=False`.
 
-- **`layers/transformers/adaln_zero.AdaLNZeroConditionalBlock`** — factory-configurable via 8 optional ctor kwargs. AdaLN-Zero affine-False norm invariant: D-005 anchor `adaln_zero.py:181`.
+- **`layers/ffn/`** -- factory'd FFN sub-package: 14 registered types via `create_ffn_layer(<type>, ...)`.
+
+- **`layers/memory/`** -- canonical home for memory-augmented layers (MANN + NTM families + SOMs). `factory.create_mann(...)` routes to a `NeuralTuringMachine`. `MannLayer` / `SOM2dLayer` retained as BC aliases. `AddressingMode` pruned to `{CONTENT, HYBRID}`.
+
+- **`layers/transformers/adaln_zero.AdaLNZeroConditionalBlock`** -- factory-configurable via 8 optional ctor kwargs. AdaLN-Zero affine-False norm invariant: D-005 anchor `adaln_zero.py:181`.
 
 ### Models (`src/dl_techniques/models/`)
 150+ architectures, one subpackage per family.
 
-- **`models/video_jepa/`** — Video JEPA pretraining model with EMA target encoder. `VideoJEPA` composes online + target encoders, `Predictor`, `TubeMaskGenerator`, multi-horizon prediction heads. **Six locked invariants**: (1) tube-mask gated on `training` (D-001 `model.py:401`); (2) gate uses `(training is True)` Python identity (D-003 `model.py:407`); (3) `CausalSelfAttnMLPBlock` guards dropout (D-005 `predictor.py:120`); (4) explicit `self.loss_tracker` + `metrics` + `update_state` (D-005 `model.py:176,552`); (5) multi-horizon advisory warning; (6) `ema_divergence` weight-space L2 metric (D-001 `model.py:207,353`, plan_aebd4cbb). Per-component metrics (`loss`, `next_frame_loss`, `mask_loss`, `sigreg_loss`, `ema_m`, `ema_divergence`) flow through history → CSV → plots. Tests: 78 PASS (~231s scoped). Trainer: `src/train/video_jepa/train_video_jepa.py`. Reload-check at `train_video_jepa.py:515`.
+- **`models/video_jepa/`** -- Video JEPA pretraining model with EMA target encoder. `VideoJEPA` composes online + target encoders, `Predictor`, `TubeMaskGenerator`, multi-horizon prediction heads. Six locked invariants: (1) tube-mask gated on `training` (D-001 `model.py:401`); (2) gate uses `(training is True)` Python identity (D-003 `model.py:407`); (3) `CausalSelfAttnMLPBlock` guards dropout (D-005 `predictor.py:120`); (4) explicit `self.loss_tracker` + `metrics` + `update_state` (D-005 `model.py:176,552`); (5) multi-horizon advisory warning; (6) `ema_divergence` weight-space L2 metric (D-001 `model.py:207,353`). Tests: 78 PASS.
 
-- **`models/convnext_patch_vae/`** — Resolution-agnostic ConvNeXt VAE on per-patch 4D latents. Public surface `{ConvNeXtPatchVAE, ConvNeXtPatchVAEConfig, ConvNeXtPatchEncoder, ConvNeXtPatchDecoder, create_convnext_patch_vae, HierarchicalConvNeXtPatchVAE, HierarchicalConvNeXtPatchVAEConfig, create_hierarchical_convnext_patch_vae}`. **Hierarchical variant** (`model_hierarchical.py`, plan_2026-05-27_dee954c6): sibling two-level model — L1 coarse global encoder (large patch, high latent_dim) + L2 fine encoder (small patch); L2 decoder is conditioned on tile-broadcast `z_l1` (nearest-neighbor UpSampling2D → Concat → 1×1 Conv → ConvNeXtV2Block stack). L1 has no pixel-recon head — conditioning-only. Two staggered `BetaAnnealingCallback` instances driven by the same class via `attr_name` kwarg. Trainer flag `--hierarchical` writes to `results/hierarchical_convnext_patch_vae_*`. Both models expose unified `sample_from(x, temperature)` API — reparameterize from encoder posterior; `temperature=0` deterministic, `temperature=1` matches prior scale. **Learnable conditional prior `p(z_l2|z_l1)`** (plan_c3184aea, `_L2ConditionalPrior` layer with zero-init heads; default `learnable_l2_prior=True`): replaces implicit N(0,I) on L2 latent; KL becomes closed-form Gaussian-Gaussian with `[-10,+10]` log_var clipping on both q and p; `sample(num_samples,...)` now coherent (z_l1 ~ N(0,I) → z_l2 ~ p(z_l2|z_l1) → decode). Zero-init heads make at-step-0 KL bit-exact equal to legacy implicit-prior KL — enables clean checkpoint transfer via `weight_transfer.load_weights_from_checkpoint`. 33 hierarchical tests + 21 single-scale tests scoped at ~116s. **Architecture**: encoder = `Conv2D(stride=patch_size)` stem → LN → N x `ConvNextV2Block` → `Conv2D(1,1,2*latent_dim)` bottleneck → split `(mu, log_var)`. Decoder = `Conv2D(1,1,embed_dim)` proj_in → N x `ConvNextV2Block` → LN → `Conv2DTranspose(kernel=stride=patch_size)` head. Latent shape `(B, Hp, Wp, latent_dim)`. **Loss**: `recon + beta_kl * KL_per_patch + lambda_sigreg * SIGReg`. KL averaged over `(B, Hp, Wp)` (resolution-invariant). SIGReg on `ops.reshape(z, (B, Hp*Wp, latent_dim))` post-reparameterization. **Public surface**: `PRESETS = {tiny: embed=64/depth=2/latent=8, base: 128/4/16, large: 192/6/32}`, `from_variant`, `_download_weights -> NotImplementedError` (D-001 `model.py:470`, plan_8faec5b6), `create_convnext_patch_vae` factory (D-002 `model.py:542`, plan_8faec5b6). **Invariants**: (i) `img_size % patch_size == 0`; (ii) no GlobalAveragePooling2D, no learned absolute PE; (iii) explicit `self.loss_tracker` in `__init__` + `update_state` in `train_step` (D-001 `model.py:124`, plan_fb57d478); (iv) four trackers `{loss, recon_loss, kl_loss, sigreg_loss}`; (v) `jit_compile=False` — XLA tracing fails on `ops.reshape` in `_compute_sigreg`. **Ghosts**: no EMA target, no PE, no temporal axis. **Trainer** (`src/train/convnext_patch_vae/train_convnext_patch_vae.py`, plan_74f0eac9): `@dataclass TrainingConfig`, CIFAR-10 pipeline (MSE default with mean/std norm; BCE with /255 only), `ReconVisualizationCallback`, `model.compile(loss=None, jit_compile=False)`, reload check via deterministic `encode()` mu (NOT stochastic reconstruction), `--smoke` flag with explicit `img_size=32` override (base parser default is 224). Success guard on `val_loss <= success_threshold`. 19 PASS tests (~30s scoped). plans: plan_fb57d478, plan_8faec5b6, plan_74f0eac9.
+- **`models/convnext/`** -- Public surface: `{ConvNeXtV1, ConvNeXtV2, create_convnext_v1, create_convnext_v2}`. Both models accept `drop_path_rate: float = 0.0` and `stochastic_mode: str = 'depth'` (kwarg plumbed through `get_config()`). `'depth'` (default, behavior-preserving) -> `StochasticDepth`; `'gradient'` (opt-in, forward-identity grad-only) -> `StochasticGradient`; other values raise `ValueError`. D-001 anchor: `convnext_v1.py:310`, `convnext_v2.py:327`. Block layers (`ConvNextV1Block`, `ConvNextV2Block`) carry NO drop_path and are reused by 5 other models (convnext_patch_vae, convnext_patch_vae_v2, convunext, bfconvunext + VAE encoder). Factories thread `**kwargs` to the model constructor. `StochasticDepth`/`StochasticGradient` not exported from `layers/__init__.py` -- import direct from module.
 
-- **`models/memory_bank/`** — backbone-agnostic memory primitives: `LongTermMemoryBank`, `WorkingMemoryBank`, `MemoryReadController`, `MemoryWriteController`, `PhaseScheduler`, `WaveFieldMemoryLLM`, `MemoryStats`.
+- **`models/convnext_patch_vae/`** -- Resolution-agnostic ConvNeXt VAE on per-patch 4D latents. Public surface: `{ConvNeXtPatchVAE, ConvNeXtPatchVAEConfig, ConvNeXtPatchEncoder, ConvNeXtPatchDecoder, create_convnext_patch_vae}`. Hierarchical variant fully removed. Architecture: encoder = `Conv2D(stride=patch_size)` stem -> LN -> N x `ConvNextV2Block` -> `Conv2D(1,1,2*latent_dim)` bottleneck -> split `(mu, log_var)`. Latent shape `(B, Hp, Wp, latent_dim)`. Loss: `recon + beta_kl * KL_per_patch + lambda_sigreg * SIGReg`. PRESETS = {tiny, base, large}. Invariants: `img_size % patch_size == 0`; no GlobalAveragePooling2D; `jit_compile=False`. Tests: 21 PASS.
 
-- **`models/burst_dp/`** — multi-view reference-conditioned vision model. `fusion_type ∈ {"custom","adaln"}`. Trainer `train_burst_dp.py`: `--dataset {coco,div2k,vggface2}`; 20 `--aux-*` CLI flags. 13 PASS tests.
+- **`models/memory_bank/`** -- `LongTermMemoryBank`, `WorkingMemoryBank`, `MemoryReadController`, `MemoryWriteController`, `PhaseScheduler`, `WaveFieldMemoryLLM`, `MemoryStats`.
 
-- **`models/vit/`** — `ViT`, `create_vit`, `create_inference_model_from_training_model`. `ViT.MODEL_VARIANTS = {vit_pico/tiny/small/base/large/huge}`. **Trainer `train_vit.py` is canonical Pattern-4 image reference**: `@dataclass TrainingConfig`, CIFAR + ImageNet builders, AdamW/SGD WD branch, `_assert_train_val_distribution_match` before `model.fit` (D-007), guarded SUCCESS log. ViT-pico CIFAR-10 → `val_acc=0.7836`.
+- **`models/burst_dp/`** -- multi-view reference-conditioned vision model. `fusion_type in {"custom","adaln"}`. Trainer `train_burst_dp.py`: `--dataset {coco,div2k,vggface2}`; 20 `--aux-*` CLI flags. 13 PASS tests.
 
-- **`models/cliffordnet/`** — public surface `{CliffordNet, create_cliffordnet, CliffordCLIP, CliffordNetLMRouting, CliffordNetLMUNet, CliffordNetEmbedding}`. `CliffordNetLMUNet` flat-keyed dict output; width-rule "Power-of-2 anchored" D-002 `lmunet.py:415`.
+- **`models/vit/`** -- `ViT`, `create_vit`, `create_inference_model_from_training_model`. `ViT.MODEL_VARIANTS = {vit_pico/tiny/small/base/large/huge}`. Trainer `train_vit.py` is canonical Pattern-4 image reference.
 
-- **`models/{bert, gpt2, tree_transformer, depth_anything, accunet, tiny_recursive_model, prism, lewm}/`** — each: `{Model, create_<model>}` public surface, `from_variant(pretrained=True)` raises `NotImplementedError` from `_download_weights`, narrow `except (IOError, OSError, ValueError)`.
+- **`models/cliffordnet/`** -- public surface `{CliffordNet, create_cliffordnet, CliffordCLIP, CliffordNetLMRouting, CliffordNetLMUNet, CliffordNetEmbedding}`. `CliffordNetLMUNet` flat-keyed dict output; width-rule "Power-of-2 anchored" D-002 `lmunet.py:415`.
+  - **`CliffordCLIP`** (`clip.py`): `text_use_global_context: bool = False` ctor kwarg. `logit_scale` pinned `dtype="float32"` under bf16 global policy (`# DECISION plan_2026-05-31_76981d58/D-001` at `clip.py:1044`). `encode_image()` / `encode_text()` return L2-normalized embeddings by default. Wrapper model is `ContrastiveCliffordCLIP` (`self.clip_model`); head LayerScale at `inner.{vision,text}_head_scale.gamma` (absent for `head_kind='plain'` -- always getattr-guard).
+  - **SRGP docstring**: `clifford_block.py:65-66` correctly reads `(c-s)%D`; impl `roll(shift=s)` @ line 223 is correct.
+
+- **`models/{bert, gpt2, tree_transformer, depth_anything, accunet, tiny_recursive_model, prism, lewm}/`** -- each: `{Model, create_<model>}` public surface, `from_variant(pretrained=True)` raises `NotImplementedError`.
+
+### Initializers (`src/dl_techniques/initializers/`)
+Orthonormal, He-orthonormal, hypersphere, Haar-wavelet, `PolarInitializer` initializers.
 
 ### Losses & Metrics (`src/dl_techniques/{losses,metrics}/`)
 Masked CLM loss, contrastive losses, `Perplexity`, `BitsPerToken`, `BitsPerCharacter`. **`SegmentationWrapperLoss`** is the canonical save/load-friendly segmentation loss.
@@ -48,11 +59,40 @@ Keras callbacks; analyzer integration; `TemperatureAnnealingCallback`.
 - `utils/`: `logger`, `weight_transfer`, GPU setup.
 - `datasets/vision/coco_burst_dp.py` + `image_folder_burst_dp.py`. 9 PASS tests.
 
+### Applications (`src/applications/`)
+
+- **`applications/bias_free_denoiser/`** -- flat 4-file layout (`__init__.py`, `samplers.py`, `main.py`, `README.md`). Conventions: logger only, type hints, Google docstrings.
+
+- **`applications/anomaly_detection/`** -- `PatchEntropyAnomalyDetector` reusing single-scale `ConvNeXtPatchVAE` encoder-only (`encode()` -> `(mu, log_var)`) for per-patch KL anomaly scoring. Entry points: `from_pretrained(path)`, `preprocess()`, `kl_maps()`, `anomaly_mask()`, `score()`, `overlay()`. GUI: `streamlit_app.py` (isolated). Invariants: `log_var` clipped `[-10, +10]`; inputs `/255.0` in `[0,1]`.
+
 ### Training pipelines (`src/train/`)
-- **`train/video_jepa/`** — V-JEPA pretrainer; smoke + BDD100K dataset wiring; reload-check at `train_video_jepa.py:515`.
-- **`train/convnext_patch_vae/`** — ConvNeXtPatchVAE trainer (plan_74f0eac9); `compile(loss=None, jit_compile=False)`; reload check via `encode()` mu; `--smoke` flag. `callbacks.py` (plan_2026-05-26_d8c33dca): `LatentSpaceCallback` (PCA scatter of mu flattened `(B,Hp*Wp*D)`, colored by per-sample KL) + `LatentInterpolationCallback` (linear mu-space interpolation grid). **Augmentation** (plan_2026-05-26_5abf5af3): `_make_filesystem_decode_fn(img_size, img_channels, augment, augment_color)` factory owns decode+augment for all filesystem datasets — geometric (resize+crop+flip) + photometric (brightness 0.2, contrast 0.8–1.2, saturation 0.8–1.2 RGB only, clip_by_value). CIFAR: brightness 0.1 + contrast 0.9–1.1 only (MSE path is standardized). `TrainingConfig.augment_color: bool = True`; `--no-color-augment` CLI flag.
-- **`train/logic/`** — LearnableNeuralCircuit benchmark suite + `multiseed_sweep.py` subprocess driver + `multiseed_stats.py`. 30-test stats harness.
-- **`train/rms_variants_train/`** — 8-norm comparison harness; `NORM_VARIANTS` append-only invariant (D-001 `config.py:27`). 637+ PASS tests.
+- **`train/video_jepa/`** -- V-JEPA pretrainer; smoke + BDD100K dataset wiring; reload-check at `train_video_jepa.py:515`.
+- **`train/convnext_patch_vae/`** -- ConvNeXtPatchVAE trainer (single-scale only). `compile(loss=None, jit_compile=False)`. Reload check via `encode()` mu. `--smoke` with explicit tiny `img_size=32` override. `TrainingConfig.augment_color: bool = True`.
+- **`train/cliffordnet/`** -- CliffordNet + CliffordCLIP trainers.
+  - **`train_clip.py`**: `--mixed-bfloat16`, `--probe-every-steps` default=750, `--gamma-probe-every-steps`; `GammaProbeCallback` logs mean `vision_head_scale.gamma` / `text_head_scale.gamma`. `IMAGENET_MEAN/STD` used for the `'imagenet'` normalization branch (`# DECISION plan_2026-06-02_35651564/D-002` at line 88).
+  - **`eval_clip_retrieval.py`** (159 LOC) -- COCO zero-shot R@1/5/10 harness.
+  - **`filter_cc3m_clipscore.py`** (323 LOC) -- CC3M per-pair CLIP-score caption filter. Full 2.9M pass is user-launched.
+- **`train/logic/`** -- LearnableNeuralCircuit benchmark suite + `multiseed_sweep.py` subprocess driver + `multiseed_stats.py`. 30-test stats harness.
+- **`train/rms_variants_train/`** -- 8-norm comparison harness; `NORM_VARIANTS` append-only invariant (D-001 `config.py:27`). 637+ PASS tests.
+
+### Training common (`src/train/common/`)
+**3-plan consolidation arc (`30721a0f` -> `35651564` -> `cc4d4e14`) is now largely complete.** Remaining duplication is intentional-divergence (7 C1 LR sites) or out-of-scope (F13 bug-fix, risky F6/seed sites).
+
+- **`generation_probe.py`** -- `GenerationProbeCallback(logits_fn, probe_every_steps, prompts, encoding_name, max_tokens, temperature, top_p, repetition_penalty, eot_token_id, pad_token_id, ctx_length, stop_on_eot, save_dir, initial_step, step_counter, seed, gc_on_probe, trigger_requires_positive_step)`. Closure contract: `logits_fn(ctx_ids[1,seq]) -> float32[vocab]` for last real position (UNPADDED input; common class always reads `[0,-1,:]`). `_post_generate_hook` overridable. Replaces 5 per-trainer copies (992 LOC). Re-exported via `nlp.py` + `__init__.py`. NOT `@register_keras_serializable`.
+- **`step_checkpoint.py`** -- `StepCheckpointCallback(keras.callbacks.Callback)` superset of 6 former per-trainer copies. Constructor: `(save_dir, save_every_steps, analyze_every_steps, max_checkpoints, model_name, initial_step, log_every_steps, plot_every_steps, step_counter=None, gc_on_save=False, csv_fields=None)`. `_global_step` persists across `fit()` calls (resume support). NOT `@register_keras_serializable`.
+- **`seed.py`** -- `set_seeds(seed)`. Sets PYTHONHASHSEED + `random.seed` + `np.random.seed` + `keras.utils.set_random_seed`. **Do NOT use at CLM-resume sites** that carry `data_seed = config.seed + initial_step` after the keras seed line.
+- **`config_io.py`** -- `save_config_json(config, results_dir, filename="config.json")`: dataclass -> `dataclasses.asdict`; else `vars(config)`; numpy-safe via `json_numpy_default`. `json_numpy_default(obj)`: `np.floating->float`, `np.integer->int`, `np.ndarray->.tolist()`; raises `TypeError` otherwise.
+- **`augment.py`** -- `augment_patch(patch: tf.Tensor) -> tf.Tensor` (flip-lr + flip-ud + rot90), `augment_pair(patch, target) -> (tf.Tensor, tf.Tensor)` (same transforms applied consistently to both). Replaces 7 denoiser copies. `bfunet/train_conditional.py` (class_label variant) stays local.
+- **`evaluation.py`** -- `setup_visualization_manager(save_dir, color_scheme) -> VisualizationManager`. Replaces the one live caller (`convnext_v2`); resnet/vit copies were dead code and were deleted.
+- **`datasets.py`** -- Three DISTINCT normalization constant pairs:
+  - `CIFAR10_MEAN = [0.4914, 0.4822, 0.4465]` / `CIFAR10_STD` (CIFAR-10 channel stats)
+  - `IMAGENET_MEAN = [0.485, 0.456, 0.406]` / `IMAGENET_STD = [0.229, 0.224, 0.225]` (ImageNet channel stats)
+  - DISTINCT from OpenAI CLIP `IMAGE_MEAN/STD` in `image_text.py` (`[0.48145466,...]`) -- never conflate.
+  - `load_dataset()` for CIFAR/ImageNet/MNIST (does `/255` only, NO per-channel normalization).
+  - `make_imagenet_filesystem_dataset(data_dir, image_size, batch_size, is_training, augment, augment_color, shuffle_buffer, num_parallel_calls, cache_val, drop_remainder, prefetch_buffer)` -- class-subdir ImageNet `*.JPEG` tf.data builder.
+  - `collect_image_paths(directories, extensions, max_files, shuffle_seed, sort) -> List[str]` -- rglob path collector. Does NOT replace early-break-after-N monitor/preview sites (fundamentally different semantics).
+- **`callbacks.py`** -- `EpochMetricsPlotCallback(viz_dir, metric_names, every_n=5, write_json=False)`. `create_learning_rate_schedule(..., warmup_steps=0, warmup_start_lr=0.0)`: warmup now wired to `WarmupSchedule` when `warmup_steps>0`; `warmup_steps=0` is a no-op (all pre-plan callers unaffected). 4 canonical sites adopted (tirex, prism, nbeats, adaptive_ema); 7 sites with divergent `alpha`/`warmup_start_lr`/`decay_steps` stay local.
+- **`image_text.py`** -- `load_coco2017_local_split`, `load_cc3m_local_split` (with npz tokenization sidecar cache), `make_image_text_tf_dataset`, `tokenize_captions`. `IMAGE_MEAN/STD` = OpenAI CLIP normalization (`[0.48145466,...]`).
 
 ## Boundaries
 **In scope**: everything under `src/`, `tests/`, `research/`. Library code follows Keras 3 conventions strictly.
@@ -62,19 +102,17 @@ Keras callbacks; analyzer integration; `TemperatureAnnealingCallback`.
 ## Invariants
 
 ### Keras 3 idioms (library-wide)
-- `@keras.saving.register_keras_serializable()` on all custom layers/models.
-- `keras.ops` (no raw TF inside library code).
+- `@keras.saving.register_keras_serializable()` on all custom layers/models (NOT on callbacks).
+- `keras.ops` (no raw TF inside library code). Random ops live under `keras.random.*`.
 - Full `get_config()` round-trip.
-- `dl_techniques.utils.logger` only — no `print`.
-- Random ops live under `keras.random.*` — `keras.ops.random.uniform` does NOT exist in 3.8.
+- `dl_techniques.utils.logger` only -- no `print`.
 - Frozen tensor state in layers MUST be `add_weight(trainable=False, ...)` or numpy on `self`.
 
 ### CLM training (library-wide)
-- **Output dict key MUST be `"logits"`** — `MaskedCausalLMLoss` and `model.compile(loss={"logits": ...})` key on it.
-- **AdamW WD only** — no `kernel_regularizer=L2(...)` combined with `AdamW(weight_decay=...)`.
+- **Output dict key MUST be `"logits"`** -- `MaskedCausalLMLoss` and `model.compile(loss={"logits": ...})` key on it.
+- **AdamW WD only** -- no `kernel_regularizer=L2(...)` combined with `AdamW(weight_decay=...)`.
 - **`prepare_dict_keyed_compile(model, output_key="logits")`** is a permanent contract for dict-output trainers.
-- **CLM compile-time metric floor**: `metrics={"logits": build_clm_metrics(config.encoding_name)}`.
-- **Pattern-3 CLI uniformity** — `--steps-per-epoch`, `--seed`, `--min-article-length`, `--shuffle-shards`, `--resume`.
+- **Pattern-3 CLI uniformity** -- `--steps-per-epoch`, `--seed`, `--min-article-length`, `--shuffle-shards`, `--resume`.
 - **`pad_token_id`** must match tokenizer (tiktoken cl100k_base = 100266); model default 0 is a silent semantic bug.
 
 ### Causality (Clifford / time-series)
@@ -83,10 +121,10 @@ Keras callbacks; analyzer integration; `TemperatureAnnealingCallback`.
 
 ### Custom `train_step` / multi-optimizer
 - **Two-optimizer differential-LR**: register ONE optimizer with `super().compile(...)`, apply the second manually.
-- **`current_phase` / `_global_step`: `add_weight(trainable=False, dtype="float32")`** — int32 caused device-placement failures.
+- **`current_phase` / `_global_step`: `add_weight(trainable=False, dtype="float32")`** -- int32 caused device-placement failures.
 - **Custom `train_step` bypassing `compile(loss=...)` (uses `add_loss`)** MUST explicitly create `self.loss_tracker` in `__init__`, expose via `metrics`, and `update_state(loss)` in `train_step`.
-- **`training` flag gates** — use `(training is True)` Python identity check under `@tf.function`.
-- **VAE compile pattern**: `model.compile(optimizer=AdamW, loss=None, jit_compile=False)`. ConvNeXtPatchVAE: `jit_compile=False` because XLA tracing fails on `ops.reshape` in `_compute_sigreg`.
+- **`training` flag gates** -- use `(training is True)` Python identity check under `@tf.function`.
+- **VAE compile pattern**: `model.compile(optimizer=AdamW, loss=None, jit_compile=False)`.
 
 ### Save / load
 - `.keras` save/load on GPU under fp32 has reduction-order noise ~5e-5 for U-Net-shaped models. Default tolerance 1e-4.
@@ -96,35 +134,37 @@ Keras callbacks; analyzer integration; `TemperatureAnnealingCallback`.
 ### Operational
 - **`results/` MUST be repo-root `results/`, never `src/results/`**.
 - **`MPLBACKEND=Agg`** required prefix for any training-script invocation.
-- **Single GPU jobs only** — never parallel training.
-- **Pin GPU via shell env** — TF initialises at `import tensorflow as tf`. Use `CUDA_VISIBLE_DEVICES=N MPLBACKEND=Agg python -m train.<...>`.
+- **Single GPU jobs only** -- never parallel training.
+- **Pin GPU via shell env** -- Use `CUDA_VISIBLE_DEVICES=N MPLBACKEND=Agg python -m train.<...>`.
 - **All training callbacks that write to `save_dir` MUST `os.makedirs(..., exist_ok=True)` at the top of every save method**.
 
 ## Flows
-- **CLM training** — `python -m train.<model>.pretrain --config small` → `TrainingConfig` → tiktoken/Wikipedia → packed token shards → `MaskedCausalLMLoss` → AdamW + warmup-cosine → `StepCheckpointCallback` + `GenerationProbeCallback`.
-- **V-JEPA pretraining** — `python -m train.video_jepa.train_video_jepa --smoke --dataset bdd100k --videos-root <...>` → online + EMA-target encoders → custom `train_step` → reload-check (bit-exact `max|delta|=0.00e+00`).
-- **Image training (canonical: `train/vit/train_vit.py`)** — `@dataclass TrainingConfig` → per-dataset builder → augment-then-normalize → `_assert_train_val_distribution_match` → AdamW/SGD → guarded SUCCESS log.
-- **ConvNeXtPatchVAE training** — `python -m train.convnext_patch_vae.train_convnext_patch_vae [--smoke]` → `TrainingConfig` → CIFAR-10 (MSE: mean/std norm; BCE: /255 only) → `compile(loss=None, jit_compile=False)` → `ReconVisualizationCallback` → reload check via `encode()` mu.
-- **Save / load round-trip** — `@register_keras_serializable()` decorator → `.keras` archive → `keras.models.load_model(path, custom_objects={...})`.
-- **Multi-seed sweep** — subprocess-per-seed driver, glob+merge, pure-stats module (mean/std, bootstrap CI, paired sign-flip permutation B=10000 Phipson-Smyth).
-- **Test scoping** — pytest only on changed module + immediate importers. `make test` reserved for explicit pre-push request (~1.5h).
-- **Plan close** — orchestrator writes `summary.md`, runs decision-anchor audit, updates `plans/LESSONS.md` (≤200 lines) and `plans/SYSTEM.md` (≤300 lines), then `bootstrap.mjs close`.
+- **CLM training** -- `python -m train.<model>.pretrain --config small` -> `TrainingConfig` -> tiktoken/Wikipedia -> packed token shards -> `MaskedCausalLMLoss` -> AdamW + warmup-cosine -> `StepCheckpointCallback` + `GenerationProbeCallback`.
+- **V-JEPA pretraining** -- `python -m train.video_jepa.train_video_jepa --smoke --dataset bdd100k --videos-root <...>` -> online + EMA-target encoders -> custom `train_step` -> reload-check (bit-exact).
+- **Image training (canonical: `train/vit/train_vit.py`)** -- `@dataclass TrainingConfig` -> `make_imagenet_filesystem_dataset` (or per-dataset builder) -> augment-then-normalize -> `_assert_train_val_distribution_match` -> AdamW/SGD -> `EpochMetricsPlotCallback` -> guarded SUCCESS log.
+- **ConvNeXtPatchVAE training** -- `python -m train.convnext_patch_vae.train_convnext_patch_vae [--smoke] [--seed N]` -> `TrainingConfig` -> CIFAR-10 -> `compile(loss=None, jit_compile=False)` -> `ReconVisualizationCallback` -> reload check via `encode()` mu.
+- **CliffordCLIP A/B training** -- `CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg python -m train.cliffordnet.train_clip --head-kind plain|learned_query_residual --mixed-bfloat16 --gamma-probe-every-steps N`. Signal-floor gate: COCO R@1 >= 5% on plain arm.
+- **CliffordCLIP zero-shot eval** -- `python -m train.cliffordnet.eval_clip_retrieval --checkpoint <ckpt.keras> --coco-root <...>` -> prints R@1/5/10.
+- **CC3M CLIP-score filter** -- `python -m train.cliffordnet.filter_cc3m_clipscore --checkpoint <ckpt.keras> --cc3m-root <...> --out-manifest <filtered.jsonl>` (full pass USER-LAUNCHED).
+- **Save / load round-trip** -- `@register_keras_serializable()` decorator -> `.keras` archive -> `keras.models.load_model(path, custom_objects={...})`.
+- **Multi-seed sweep** -- subprocess-per-seed driver, glob+merge, pure-stats module.
+- **Test scoping** -- pytest only on changed module + immediate importers. `make test` reserved for explicit pre-push request (~1.5h).
+- **Plan close** -- orchestrator writes `summary.md`, runs decision-anchor audit, updates `plans/LESSONS.md` (<=200 lines) and `plans/SYSTEM.md` (<=300 lines), then `bootstrap.mjs close`.
 
 ## Known Patterns
-- **Pattern-3 NLP CLM training script** — ~95% generic `TrainingConfig` + `StepCheckpointCallback` + `GenerationProbeCallback` + AdamW/warmup-cosine + tiktoken/Wikipedia + `MaskedCausalLMLoss`. New CLM = mirror file-by-file.
-- **Pattern-4 image trainer (canonical: `train/vit/train_vit.py`)** — `@dataclass TrainingConfig` + per-dataset builders + AdamW/SGD WD branch + `_assert_train_val_distribution_match` + `MetricsVisualizationCallback` + guarded SUCCESS log. New image trainer = mirror file-by-file.
-- **Pattern-4 VAE variant (canonical: `train/convnext_patch_vae/train_convnext_patch_vae.py`)** — hybrid Pattern-4 (dataset, argparse, dataclass config, callbacks) + video_jepa compile pattern (`loss=None, jit_compile=False`) + `ReconVisualizationCallback` + reload check via deterministic `encode()` mu + `--smoke` with explicit tiny `img_size` override. Dataset emits `(x, x)` tuples; success guard on `val_loss` not accuracy.
-- **EMA target encoder pretraining (canonical: `models/video_jepa/`)** — sibling encoder with `trainable=False`, dummy-batch eager build, custom `train_step` with EMA update, cosine momentum via `add_weight("ema_step")`. Observability: `ema_divergence` tracker. Do NOT use for VAE objectives (reconstruction forbids identity).
-- **Two-optimizer differential-LR via custom `train_step`** — register one optimizer with `super().compile(...)`, apply the second manually; variable routing via name-prefix split.
-- **Subprocess-per-seed multi-seed sweep** — clean TF/Keras init eliminates cross-seed state contamination.
-- **Sibling-stack model addition** — new layer that doesn't fit the shared factory: build self-contained inside the new model package; defer factory registration. Zero blast radius on 30+ unrelated models.
-- **Mechanical patch replication across N sibling files** — per-file repetition beats shared-helper extraction for N≤4 if extraction would cross package boundaries.
-- **Hard-extraction probe via `LARGE × one_hot(argmax)`** — clean faithfulness check for DARTS-style layers.
+- **Pattern-3 NLP CLM training script** -- ~95% generic `TrainingConfig` + `StepCheckpointCallback` + `GenerationProbeCallback` (from `train.common`) + AdamW/warmup-cosine + tiktoken/Wikipedia + `MaskedCausalLMLoss`. New CLM = mirror file-by-file.
+- **Pattern-4 image trainer (canonical: `train/vit/train_vit.py`)** -- `@dataclass TrainingConfig` + `make_imagenet_filesystem_dataset` (or per-dataset builder) + AdamW/SGD WD branch + `_assert_train_val_distribution_match` + `EpochMetricsPlotCallback` + guarded SUCCESS log. New image trainer = mirror file-by-file.
+- **Pattern-4 VAE variant (canonical: `train/convnext_patch_vae/train_convnext_patch_vae.py`)** -- hybrid Pattern-4 + compile(`loss=None, jit_compile=False`) + `ReconVisualizationCallback` + reload check via deterministic `encode()` mu.
+- **EMA target encoder pretraining (canonical: `models/video_jepa/`)** -- sibling encoder with `trainable=False`, dummy-batch eager build, custom `train_step` with EMA update, cosine momentum via `add_weight("ema_step")`. Do NOT use for VAE objectives.
+- **Two-optimizer differential-LR via custom `train_step`** -- register one optimizer with `super().compile(...)`, apply the second manually; variable routing via name-prefix split.
+- **Subprocess-per-seed multi-seed sweep** -- clean TF/Keras init eliminates cross-seed state contamination.
+- **Mechanical patch replication across N sibling files** -- per-file repetition beats shared-helper extraction for N<=4 if extraction would cross package boundaries.
+- **Eval harness = glue, not build** -- for any model with `_compute_retrieval_metrics` / `encode_*` methods, a zero-shot eval harness is ~argparse + `load_model` + 3 existing function calls; write it as a thin script, not a new class.
 
 ## Codebase Specialization
 - **Python**: >=3.11, type hints, Google-style docstrings.
 - **Venv**: always `.venv/bin/python` for invocation.
-- **Logging**: `from dl_techniques.utils.logger import logger` — never `print`.
+- **Logging**: `from dl_techniques.utils.logger import logger` -- never `print`.
 - **GPU**: GPU 0 = RTX 4090 24GB, GPU 1 = RTX 4070 12GB. Pin via `CUDA_VISIBLE_DEVICES=N MPLBACKEND=Agg python -m train....`.
 - **Test discipline**: scope pytest to touched modules; `make test` only on explicit user request immediately before push.
 - **Commit prefix**: `[iter-N/step-M] <description>` during EXECUTE; no commit on EXPLORE/PLAN/REFLECT/PIVOT.
