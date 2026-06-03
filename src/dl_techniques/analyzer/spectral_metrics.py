@@ -377,18 +377,20 @@ def compute_erg_condition(evals: np.ndarray, xmin: float) -> Dict[str, float]:
     log_evals = np.log(rescaled[rescaled > SPECTRAL_EPSILON])
     erg_log_det = float(np.sum(log_evals))
 
-    # Δλ_min: gap between xmin and the lambda_min that would satisfy ERG
-    # The ERG boundary is where cumulative log product crosses zero from above
-    sorted_ecs = np.sort(rescaled)
-    cumulative_log = np.cumsum(np.log(sorted_ecs[sorted_ecs > SPECTRAL_EPSILON]))
-    erg_boundary_idx = np.searchsorted(cumulative_log, 0.0)
-    if erg_boundary_idx < len(sorted_ecs):
-        erg_lambda_min = sorted_ecs[erg_boundary_idx]
-        # DECISION plan_2026-06-03_9e82787d/D-006: Δλ_min MUST stay signed (SETOL
-        # §7.3). Do NOT re-wrap in abs() — the sign IS the over-regularization
-        # diagnostic (<0 over-regularized, ≈0 ideal, >0 normal); abs() destroys
-        # it. See findings.md D-A.
-        delta_lambda_min = float(xmin * wscale * wscale - erg_lambda_min)
+    # ERG tail boundary via the WeightWatcher detX=1 descending-product rule
+    # (reuse compute_detX_constraint — DRY; it rescales ecs_evals internally the SAME way).
+    # DECISION plan_2026-06-03_bc986e52/D-004: do NOT use cumsum(log)+searchsorted — that array
+    # is non-monotonic so searchsorted is undefined. WW finds the largest-eigenvalue tail whose
+    # product crosses 1.0 (descending). Boundary lambda_min = sorted_asc[len - tail_count].
+    # Δλ_min MUST stay signed (prior D-006 / SETOL §7.3) — do NOT wrap in abs(); the sign IS the
+    # over-regularization diagnostic (<0 over-regularized, ≈0 ideal, >0 normal).
+    tail_count = compute_detX_constraint(ecs_evals)
+    sorted_asc = np.sort(rescaled)
+    if tail_count > 0 and tail_count <= len(sorted_asc):
+        boundary_idx = len(sorted_asc) - tail_count          # index of smallest eval IN the tail
+        boundary_idx = max(0, min(boundary_idx, len(sorted_asc) - 1))
+        erg_lambda_min = float(sorted_asc[boundary_idx])
+        delta_lambda_min = float(xmin * wscale * wscale - erg_lambda_min)   # SIGNED (keep prior D-006)
     else:
         delta_lambda_min = float('nan')
 
