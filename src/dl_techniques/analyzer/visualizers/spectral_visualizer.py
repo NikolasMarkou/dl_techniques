@@ -50,6 +50,9 @@ class SpectralVisualizer(BaseVisualizer):
         # 1. Create a high-level summary dashboard for comparing models.
         self._create_summary_dashboard()
 
+        # 1b. Create the SETOL (α, Δλ_min) funnel diagram.
+        self._plot_funnel_diagram()
+
         # 2. Create detailed diagnostic plots for each analyzed layer, saved in a subdirectory.
         if self.config.spectral_per_layer_diagnostics:
             self._create_per_layer_plots()
@@ -110,6 +113,97 @@ class SpectralVisualizer(BaseVisualizer):
         plt.tight_layout(rect=[0, 0, 0.9, 0.96])
         if self.config.save_plots:
             self._save_figure(fig, 'spectral_summary')
+        plt.close(fig)
+
+    def _plot_funnel_diagram(self) -> None:
+        """
+        Create the SETOL funnel diagram: per-layer (α, Δλ_min) → (2, 0).
+
+        Scatters each layer at (α, signed Δλ_min). The convergence target of a
+        well-trained model is the critical point α=2 with a vanishing ERG gap
+        (Δλ_min≈0), so the plot draws guide lines at α=2 and Δλ_min=0 and marks
+        the target (2, 0) (SETOL §8.2/§10.4). Points are colored by
+        ``learning_phase`` when that column is available.
+
+        Rows with NaN α or Δλ_min are skipped. If nothing is plottable the
+        method logs a warning and returns without raising.
+        """
+        df = self.results.spectral_analysis
+        if df is None or df.empty:
+            logger.info("No spectral analysis data for funnel diagram.")
+            return
+
+        alpha_col = MetricNames.ALPHA
+        dl_col = MetricNames.ERG_DELTA_LAMBDA_MIN
+        if alpha_col not in df.columns or dl_col not in df.columns:
+            logger.warning(
+                f"Funnel diagram skipped: missing column "
+                f"('{alpha_col}' and/or '{dl_col}') in spectral analysis."
+            )
+            return
+
+        # Keep only rows with both coordinates finite.
+        plot_df = df[[c for c in [alpha_col, dl_col, 'model_name',
+                                  MetricNames.LEARNING_PHASE]
+                      if c in df.columns]].copy()
+        plot_df = plot_df[
+            np.isfinite(plot_df[alpha_col].astype(float)) &
+            np.isfinite(plot_df[dl_col].astype(float))
+        ]
+        if plot_df.empty:
+            logger.warning("Funnel diagram skipped: no rows with finite (α, Δλ_min).")
+            return
+
+        fig, ax = plt.subplots(figsize=SPECTRAL_DEFAULT_FIG_SIZE)
+
+        has_phase = MetricNames.LEARNING_PHASE in plot_df.columns
+        if has_phase:
+            # Color points by learning phase; assign each phase a stable color.
+            phases = sorted(plot_df[MetricNames.LEARNING_PHASE].dropna().unique().tolist())
+            cmap = plt.get_cmap('viridis')
+            phase_colors = {
+                p: cmap(i / max(1, len(phases) - 1)) for i, p in enumerate(phases)
+            }
+            for phase in phases:
+                sub = plot_df[plot_df[MetricNames.LEARNING_PHASE] == phase]
+                ax.scatter(
+                    sub[alpha_col].astype(float), sub[dl_col].astype(float),
+                    color=phase_colors[phase], s=60, alpha=0.8,
+                    edgecolors='black', linewidth=0.5, label=str(phase)
+                )
+            # Plot any rows missing a phase label in neutral gray.
+            missing = plot_df[plot_df[MetricNames.LEARNING_PHASE].isnull()]
+            if not missing.empty:
+                ax.scatter(
+                    missing[alpha_col].astype(float), missing[dl_col].astype(float),
+                    color='#9e9e9e', s=60, alpha=0.8,
+                    edgecolors='black', linewidth=0.5, label='unknown'
+                )
+        else:
+            ax.scatter(
+                plot_df[alpha_col].astype(float), plot_df[dl_col].astype(float),
+                color='#1565c0', s=60, alpha=0.8,
+                edgecolors='black', linewidth=0.5, label='layers'
+            )
+
+        # Guide lines and convergence target (2, 0).
+        ax.axvline(2.0, color='#e91e63', linestyle='--', linewidth=2, alpha=0.7,
+                   label='α = 2 (critical)')
+        ax.axhline(0.0, color='#2e7d32', linestyle='--', linewidth=2, alpha=0.7,
+                   label='Δλ_min = 0')
+        ax.scatter([2.0], [0.0], marker='*', s=400, color='gold',
+                   edgecolors='black', linewidth=1.0, zorder=5,
+                   label='target (2, 0)')
+
+        ax.set_title('SETOL Funnel: (α, Δλ_min) → (2, 0)', fontsize=14, fontweight='bold')
+        ax.set_xlabel('α (PL exponent)')
+        ax.set_ylabel('Δλ_min (signed)')
+        ax.grid(True, linestyle='--', alpha=0.4)
+        ax.legend(loc='best', fontsize='small')
+
+        plt.tight_layout()
+        if self.config.save_plots:
+            self._save_figure(fig, 'spectral_funnel_diagram')
         plt.close(fig)
 
     def _plot_phase_histogram(self, ax: plt.Axes, metric: str, title: str) -> None:
@@ -306,7 +400,11 @@ class SpectralVisualizer(BaseVisualizer):
                 'xmax': row.get(MetricNames.LAMBDA_MAX),
                 'D': row.get(MetricNames.D),
                 'sigma': row.get(MetricNames.SIGMA),
-                'layer_name': row.get('name', f"layer_{layer_id}")
+                'layer_name': row.get('name', f"layer_{layer_id}"),
+                # MP bulk edges (D-H): only populated on the randomize path; may be
+                # absent / NaN on the standard path — the overlay guards on >0.
+                MetricNames.MP_LAMBDA_MINUS: row.get(MetricNames.MP_LAMBDA_MINUS),
+                MetricNames.MP_LAMBDA_PLUS: row.get(MetricNames.MP_LAMBDA_PLUS),
             }
 
             self._plot_detailed_layer_diagnostics(
@@ -353,6 +451,22 @@ class SpectralVisualizer(BaseVisualizer):
 
             ax_loglog.axvline(xmin, color='r', linestyle='-', alpha=0.6, label='$x_{min}$')
             ax_loglog.axvline(xmax, color='orange', linestyle='-', alpha=0.6, label='$x_{max}$')
+
+            # --- MP bulk overlay (D-H, SETOL §10.1/§10.4) ---
+            # Shade the Marchenko-Pastur bulk [λ-, λ+] on the standard per-layer ESD.
+            # These fields are only populated on the randomize path, so guard on
+            # presence AND >0 — skip silently otherwise (do NOT draw bogus lines at 0).
+            mp_minus = metrics.get(MetricNames.MP_LAMBDA_MINUS)
+            mp_plus = metrics.get(MetricNames.MP_LAMBDA_PLUS)
+            mp_minus_ok = mp_minus is not None and np.isfinite(mp_minus) and mp_minus > 0
+            mp_plus_ok = mp_plus is not None and np.isfinite(mp_plus) and mp_plus > 0
+            if mp_minus_ok and mp_plus_ok and mp_plus > mp_minus:
+                ax_loglog.axvspan(
+                    mp_minus, mp_plus, color='#1565c0', alpha=0.12, zorder=0,
+                    label=f'MP bulk [$\\lambda_-$, $\\lambda_+$] = [{mp_minus:.2g}, {mp_plus:.2g}]'
+                )
+                ax_loglog.axvline(mp_minus, color='#1565c0', linestyle=':', alpha=0.7, linewidth=1.5)
+                ax_loglog.axvline(mp_plus, color='#1565c0', linestyle=':', alpha=0.7, linewidth=1.5)
 
             ax_loglog.set_title(f"(a) Log-Log ESD for {model_name} {layer_name}")
             ax_loglog.set_ylabel('Density $P(\\lambda)$')
