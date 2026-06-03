@@ -15,6 +15,14 @@ import sys
 import argparse
 import subprocess
 
+# The driver only ORCHESTRATES training subprocesses (each gets its own GPU via
+# --gpu / a hard-set CUDA_VISIBLE_DEVICES in the child env) and runs a CPU-side
+# comparison at the end. It must NOT hold a GPU context: a second TF context on
+# the training GPU fragments/starves the trainer's XLA allocator and can SIGABRT
+# it (observed as `Check failed: h != kInvalidChunkHandle`). Force the driver
+# process CPU-only BEFORE TF is imported below; the child env re-enables the GPU.
+os.environ['CUDA_VISIBLE_DEVICES'] = ''
+
 from train.common.compare_runs import compare_runs
 from dl_techniques.utils.logger import logger
 
