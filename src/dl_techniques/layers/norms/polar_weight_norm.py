@@ -13,13 +13,72 @@ full hierarchical angular coordinate system rather than a free unit vector, and
 the magnitude (radius) is an explicit, separately-regularizable parameter that
 equals the exact per-unit weight norm.
 
-The module exposes:
+Mathematical Foundation:
+    A vector ``x`` of dimension ``d = 2^L`` has a bijective polar representation:
+    a single radius ``r = ||x||`` plus ``d - 1`` angles organized into
+    ``log2(d)`` hierarchical levels (PolarQuant Definition 1). The encode
+    transform is a balanced binary tree that repeatedly pairs adjacent
+    coordinates::
 
-- :func:`polar_encode` / :func:`polar_decode` -- the differentiable, backend
-  agnostic (``keras.ops``) recursive transform pair (paper Definition 1 /
-  Algorithm 1), operating on 2-D tensors ``(N, d)``.
-- :class:`PolarWeightNorm` -- a ``Dense``-style layer whose trainable parameters
-  are a per-unit ``radius`` and hierarchical ``angles``.
+        (a, b) -> (atan2(b, a), sqrt(a^2 + b^2))
+
+    collapsing ``d`` magnitudes to ``d / 2`` at each level until a single radius
+    remains; the angles emitted along the way form the directional code. The
+    decode transform inverts this with the symmetric expansion
+    ``(r, psi) -> (r * cos psi, r * sin psi)`` (PolarQuant Algorithm 1). Both
+    maps are smooth and backend-agnostic (``keras.ops``), operating on 2-D
+    tensors ``(N, d)``.
+
+Properties / Guarantees:
+    - Exact per-unit norm. After build and after every optimizer step,
+      ``||kernel[:, j]||_2 == |radius[j]|`` (verified to ~1e-7). Magnitude and
+      direction are independently controllable -- e.g. apply a different
+      regularizer or learning rate to ``radius`` vs ``angles``.
+    - Drop-in initialization. ``build()`` samples a seed kernel from
+      ``kernel_initializer``, encodes it, and stores the resulting
+      ``(radius, angles)``, so a freshly built layer reproduces a standard
+      ``Dense`` kernel exactly. Training then moves the polar parameters.
+    - Any ``fan_in``. A non-power-of-two ``fan_in`` is internally zero-padded to
+      the next power of two; the reconstructed direction is sliced back and
+      renormalized, preserving the exact-norm guarantee (cost: up to ~2x
+      redundant angle parameters when ``fan_in`` is not already a power of two).
+    - Angular prior (optional). An ``angle_regularizer`` that pulls level >= 2
+      angles toward ``pi / 4`` imposes a Gaussian-direction prior (PolarQuant
+      Lemma 2: higher-level angles of a random Gaussian concentrate at
+      ``pi / 4``).
+
+Performance:
+    The kernel is reconstructed (cos/sin tree) on *every* forward pass -- an
+    ``O(units * d)`` overhead, negligible relative to the matmul for research
+    use but not tuned for production inference throughput.
+
+Usage:
+    ```python
+    import keras
+    from dl_techniques.layers.norms import PolarWeightNorm
+
+    inputs = keras.Input(shape=(256,))
+    h = PolarWeightNorm(128, activation="relu")(inputs)
+    out = PolarWeightNorm(10)(h)
+    model = keras.Model(inputs, out)
+    ```
+
+    This module exposes ``polar_encode`` / ``polar_decode`` (the differentiable
+    transform pair) and the ``PolarWeightNorm`` layer. A matching initializer,
+    ``PolarInitializer`` (in ``dl_techniques/initializers/polar_initializer.py``),
+    samples weights directly in polar coordinates for exact per-vector-norm
+    control; see its own module docstring.
+
+References:
+    - PolarQuant: Quantizing KV Caches with Polar Transformation. Han, Kacham,
+      Mirrokni, Karbasi, Zandieh. arXiv:2502.02617 (2025). The paper notes the
+      transform's principles "extend beyond KV cache compression, offering
+      potential applications in LLM weight quantization"; this module realizes a
+      training-time variant of that idea.
+    - Weight Normalization: A Simple Reparameterization to Accelerate Training of
+      Deep Neural Networks. Salimans & Kingma. arXiv:1602.07868 (2016).
+    - Tests: tests/test_layers/test_norms/test_polar_weight_norm.py,
+      tests/test_initializers/test_polar_initializer.py
 """
 
 import keras
@@ -345,3 +404,6 @@ class PolarWeightNorm(keras.layers.Layer):
             "epsilon": self.epsilon,
         })
         return config
+
+
+# ---------------------------------------------------------------------------
