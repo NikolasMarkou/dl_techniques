@@ -383,10 +383,10 @@ def compute_erg_condition(evals: np.ndarray, xmin: float) -> Dict[str, float]:
     erg_boundary_idx = np.searchsorted(cumulative_log, 0.0)
     if erg_boundary_idx < len(sorted_ecs):
         erg_lambda_min = sorted_ecs[erg_boundary_idx]
-        # DECISION plan_2026-06-03_9e82787d/D-A: Δλ_min MUST stay signed (SETOL
+        # DECISION plan_2026-06-03_9e82787d/D-006: Δλ_min MUST stay signed (SETOL
         # §7.3). Do NOT re-wrap in abs() — the sign IS the over-regularization
         # diagnostic (<0 over-regularized, ≈0 ideal, >0 normal); abs() destroys
-        # it. See plans/.../findings.md D-A.
+        # it. See findings.md D-A.
         delta_lambda_min = float(xmin * wscale * wscale - erg_lambda_min)
     else:
         delta_lambda_min = float('nan')
@@ -497,10 +497,10 @@ def detect_correlation_trap(
     mp_lambda_minus = sigma_sq * max(0.0, (1.0 - np.sqrt(Q)) ** 2)
 
     # Tracy-Widom fluctuation threshold
-    # DECISION plan_2026-06-03_9e82787d/D-E: scaling is O(M^(-2/3)) per SETOL
+    # DECISION plan_2026-06-03_9e82787d/D-007: scaling is O(M^(-2/3)) per SETOL
     # §2.3 (M = min dimension), NOT N^(-1/3). Do NOT revert to N^(-1/3); the
     # exponent/base both differ and govern trap-detection sensitivity. See
-    # plans/.../findings.md D-E.
+    # findings.md D-E.
     delta_TW = c_TW * sigma_sq * (M ** (-2.0 / 3.0))
     threshold = mp_lambda_plus + delta_TW
 
