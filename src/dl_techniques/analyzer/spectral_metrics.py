@@ -602,7 +602,8 @@ def calculate_spectral_metrics(evals: np.ndarray, alpha: float, N: int = 0) -> D
         return {
             "norm": 0.0, "log_norm": 0.0, "spectral_norm": 0.0,
             "log_spectral_norm": 0.0, "alpha_weighted": 0.0,
-            "alpha_hat": 0.0, "log_alpha_norm": 0.0, "stable_rank": 0.0
+            "alpha_hat": 0.0, "alpha_hat_normalized": 0.0,
+            "log_alpha_norm": 0.0, "stable_rank": 0.0
         }
 
     norm = np.sum(evals)
@@ -612,17 +613,25 @@ def calculate_spectral_metrics(evals: np.ndarray, alpha: float, N: int = 0) -> D
     norm_safe = norm if norm > SPECTRAL_EPSILON else SPECTRAL_EPSILON
     spectral_norm_safe = spectral_norm if spectral_norm > SPECTRAL_EPSILON else SPECTRAL_EPSILON
 
-    # α̂ (alpha_weighted) uses unnormalized λ_max (legacy, for backward compatibility)
-    alpha_weighted = alpha * np.log10(spectral_norm_safe)
+    # α̂ = α · log₁₀(λ_max) on UN-normalized σ² eigenvalues — the canonical
+    # WeightWatcher convention (SETOL §2.4). SETOL §10.2 sanctions an optional
+    # 1/N normalization, but the WW convention does NOT divide by N; the WW
+    # value is the cross-architecture-comparable α̂ exposed as MetricNames.ALPHA_HAT.
+    alpha_hat = alpha * np.log10(spectral_norm_safe)
 
-    # α̂_normalized: SETOL-correct version using λ_max/N normalization
-    # This makes α̂ comparable across layers with different dimensions
+    # alpha_weighted: DEPRECATED alias of alpha_hat (kept so existing
+    # DataFrame/report consumers reading 'alpha_weighted' get the same value).
+    alpha_weighted = alpha_hat
+
+    # α̂_normalized: the /N-normalized variant (SETOL §10.2 normalization choice),
+    # α · log₁₀(λ_max / N). Makes α̂ comparable across layers of differing dimension.
+    # N=0 → fall back to the un-normalized alpha_hat.
     if N > 0:
         lambda_max_normalized = spectral_norm / N
         lambda_max_norm_safe = lambda_max_normalized if lambda_max_normalized > SPECTRAL_EPSILON else SPECTRAL_EPSILON
-        alpha_hat = alpha * np.log10(lambda_max_norm_safe)
+        alpha_hat_normalized = alpha * np.log10(lambda_max_norm_safe)
     else:
-        alpha_hat = alpha_weighted
+        alpha_hat_normalized = alpha_hat
 
     return {
         "norm": norm,
@@ -631,6 +640,7 @@ def calculate_spectral_metrics(evals: np.ndarray, alpha: float, N: int = 0) -> D
         "log_spectral_norm": np.log10(spectral_norm_safe),
         "alpha_weighted": alpha_weighted,
         "alpha_hat": alpha_hat,
+        "alpha_hat_normalized": alpha_hat_normalized,
         "log_alpha_norm": np.log10(np.sum(evals ** alpha)) if alpha > 0 else 0.0,
         "stable_rank": norm / spectral_norm_safe
     }

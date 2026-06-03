@@ -191,15 +191,26 @@ class TestSpectralMetrics:
         assert metrics['stable_rank'] == pytest.approx(1.8)
         assert 'alpha_weighted' in metrics
         assert 'alpha_hat' in metrics
+        assert 'alpha_hat_normalized' in metrics
 
     def test_alpha_hat_differs_from_alpha_weighted_with_N(self):
-        """alpha_hat should use N-normalized lambda_max."""
+        """alpha_hat is the WeightWatcher (un-normalized) convention; the /N
+        variant lives under alpha_hat_normalized.
+
+        NOTE: deliberate buggy-contract correction. The pre-fix test asserted
+        alpha_hat == 3*log10(2) (the /N value); that encoded the old convention
+        where MetricNames.ALPHA_HAT held the /N-normalized quantity. Per the
+        user-approved decision (D-F), alpha_hat now exposes the WeightWatcher
+        un-normalized value and the /N variant moves to alpha_hat_normalized.
+        """
         evals = np.array([100.0, 10.0, 1.0])
         metrics = calculate_spectral_metrics(evals, alpha=3.0, N=50)
-        # alpha_weighted = 3 * log10(100) = 6.0
+        # alpha_hat = 3 * log10(100) = 6.0 (WW, un-normalized)
+        assert metrics['alpha_hat'] == pytest.approx(6.0)
+        # alpha_hat_normalized = 3 * log10(100/50) = 3 * log10(2) ≈ 0.903
+        assert metrics['alpha_hat_normalized'] == pytest.approx(3.0 * np.log10(2.0), rel=1e-3)
+        # alpha_weighted is a deprecated alias of alpha_hat (same value)
         assert metrics['alpha_weighted'] == pytest.approx(6.0)
-        # alpha_hat = 3 * log10(100/50) = 3 * log10(2) ≈ 0.903
-        assert metrics['alpha_hat'] == pytest.approx(3.0 * np.log10(2.0), rel=1e-3)
 
     def test_empty_evals(self):
         metrics = calculate_spectral_metrics(np.array([]), alpha=3.0)

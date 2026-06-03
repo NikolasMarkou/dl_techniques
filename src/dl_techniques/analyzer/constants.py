@@ -83,6 +83,7 @@ class MetricNames:
     LOG_SPECTRAL_NORM = 'log_spectral_norm'
     ALPHA_WEIGHTED = 'alpha_weighted'
     ALPHA_HAT = 'alpha_hat'
+    ALPHA_HAT_NORMALIZED = 'alpha_hat_normalized'
     LOG_ALPHA_NORM = 'log_alpha_norm'
     NUM_EVALS = 'num_evals'
     LAMBDA_MAX = 'lambda_max'
@@ -120,8 +121,8 @@ class MetricNames:
     RAND_SV_MAX = 'rand_sv_max'
 
 SPECTRAL_DEFAULT_SUMMARY_METRICS = [
-    MetricNames.ALPHA, MetricNames.STABLE_RANK, MetricNames.ENTROPY,
-    MetricNames.LOG_SPECTRAL_NORM, MetricNames.LOG_NORM,
+    MetricNames.ALPHA, MetricNames.ALPHA_HAT, MetricNames.STABLE_RANK,
+    MetricNames.ENTROPY, MetricNames.LOG_SPECTRAL_NORM, MetricNames.LOG_NORM,
     MetricNames.GINI_COEFFICIENT, MetricNames.DOMINANCE_RATIO,
     MetricNames.PARTICIPATION_RATIO, MetricNames.CONCENTRATION_SCORE
 ]
