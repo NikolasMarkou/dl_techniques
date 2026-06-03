@@ -137,11 +137,7 @@ class StochasticDepth(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         # During inference, act as identity
-        if training is False:
-            return inputs
-
-        # During training, apply stochastic depth
-        if self.drop_path_rate == 0.0:
+        if training is False or self.drop_path_rate == 0.0:
             return inputs
 
         # Calculate noise shape dynamically: (batch_size, 1, 1, ..., 1)
@@ -155,20 +151,17 @@ class StochasticDepth(keras.layers.Layer):
 
         # Apply dropout with dynamic noise shape
         # We create a random mask and apply it manually for better control
-        if training is not False:  # training=True or training=None
-            # Generate random tensor with the noise shape
-            random_tensor = keras.random.uniform(noise_shape)
-            keep_prob = 1.0 - self.drop_path_rate
+        # Generate random tensor with the noise shape
+        random_tensor = keras.random.uniform(noise_shape)
+        keep_prob = 1.0 - self.drop_path_rate
 
-            # Create binary mask
-            binary_mask = keras.ops.cast(random_tensor < keep_prob, inputs.dtype)
+        # Create binary mask
+        binary_mask = keras.ops.cast(random_tensor < keep_prob, inputs.dtype)
 
-            # Scale and apply mask
-            output = inputs * binary_mask / keep_prob
+        # Scale and apply mask
+        output = (inputs * binary_mask) / keep_prob
 
-            return output
-        else:
-            return inputs
+        return output
 
     def compute_output_shape(
         self,
