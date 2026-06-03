@@ -137,7 +137,7 @@ def train_model(args: argparse.Namespace) -> None:
 
     model.compile(
         optimizer=optimizer,
-        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=False),
+        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
         metrics=[keras.metrics.SparseCategoricalAccuracy(name='accuracy')]
     )
 
