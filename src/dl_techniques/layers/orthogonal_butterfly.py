@@ -68,7 +68,7 @@ References:
       Cooley-Tukey factorization (cf. butterfly / Kaleidoscope matrices,
       Dao et al.).
     - The recursive coordinate-pairing tree of PolarQuant
-      (arXiv:2502.02617); see norms/polar_weight_norm.md.
+      (arXiv:2502.02617); see norms/polar_weight_norm.py.
     - Distinct from OrthoBlock (layers/orthoblock.py), which is a soft
       orthogonally-regularized Dense, not an exact orthogonal operator.
     - Tests: tests/test_layers/test_orthogonal_butterfly.py.

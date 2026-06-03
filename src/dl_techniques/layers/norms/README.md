@@ -19,7 +19,7 @@ factory; import it directly:
 from dl_techniques.layers.norms import PolarWeightNorm, polar_encode, polar_decode
 ```
 
-See `polar_weight_norm.md` for the full design, guarantees, and usage.
+See the `PolarWeightNorm` module docstring in `polar_weight_norm.py` for the full design, guarantees, and usage.
 
 ## Available Normalization Types
 

@@ -13,7 +13,7 @@ Multi-head, cross, latent, differential, group-query, ring, performer, perceiver
 MLP, SwiGLU, GeGLU, GLU, OrthoGLU, gated MLP, power MLP, counting FFN, diff FFN, logic FFN, Swin MLP, residual block. Includes `factory.py`.
 
 ### Normalization (`norms/`)
-RMS norm, zero-centered RMS, band RMS, adaptive band RMS, logit norm, max logit norm, band logit norm, dynamic tanh, global response norm. Includes `factory.py`. Also hosts `PolarWeightNorm` — a polar-coordinate *weight* reparameterization (radius + hierarchical angles, exact per-unit norm; generalizes Weight Normalization). Not factory-registered; see `norms/polar_weight_norm.md`.
+RMS norm, zero-centered RMS, band RMS, adaptive band RMS, logit norm, max logit norm, band logit norm, dynamic tanh, global response norm. Includes `factory.py`. Also hosts `PolarWeightNorm` — a polar-coordinate *weight* reparameterization (radius + hierarchical angles, exact per-unit norm; generalizes Weight Normalization). Not factory-registered; see the `PolarWeightNorm` module docstring in `norms/polar_weight_norm.py`.
 
 ### Embeddings (`embedding/`)
 Patch embedding, positional (learned, sine 2D), rotary position (RoPE), dual rotary, continuous RoPE, continuous sin/cos, BERT embeddings, ModernBERT embeddings. Includes `factory.py`.

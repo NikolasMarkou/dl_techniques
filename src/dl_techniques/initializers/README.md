@@ -167,8 +167,8 @@ from dl_techniques.initializers import PolarInitializer
 layer = keras.layers.Dense(128, kernel_initializer=PolarInitializer(norm=1.0, axis=0))
 ```
 
-It is the companion of `PolarWeightNorm` (see
-`dl_techniques/layers/norms/polar_weight_norm.md`).
+It is the companion of `PolarWeightNorm` (see the module docstring of
+`dl_techniques/layers/norms/polar_weight_norm.py`).
 
 ## Integration with Keras Models
 
