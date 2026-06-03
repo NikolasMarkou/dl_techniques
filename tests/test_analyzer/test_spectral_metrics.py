@@ -345,21 +345,28 @@ class TestERGCondition:
 # =====================================================================
 
 class TestClassifyLearningPhase:
-    """Tests for classify_learning_phase."""
+    """Tests for classify_learning_phase (WeightWatcher labels).
 
-    def test_over_regularized(self):
-        assert classify_learning_phase(1.5) == "over-regularized"
+    R8 / decisions.md D-009: deliberate contract reversal. WeightWatcher has only
+    OVER_TRAINED_THRESH=2.0 and UNDER_TRAINED_THRESH=6.0 — α<2 is "over-trained",
+    2≤α≤6 is "good", α>6 is "under-trained". This REVERSES the prior plan's
+    SETOL-only "ideal" band (D-C) and "over-regularized"/"fair" terms (D-D).
+    """
 
-    def test_ideal(self):
-        assert classify_learning_phase(2.0) == "ideal"
+    def test_over_trained(self):
+        # R8 reversal: was "over-regularized" → now "over-trained" (α < 2).
+        assert classify_learning_phase(1.5) == "over-trained"
+
+    def test_good_lower_boundary(self):
+        # R8 reversal: was "ideal" → now "good" (α == 2.0 enters the good band).
+        assert classify_learning_phase(2.0) == "good"
 
     def test_good(self):
-        # Contract correction (D-C): "ideal" is now the narrow band [2.0, 2.1),
-        # so 2.4 falls into "good" (was previously asserted "ideal").
+        # WeightWatcher "good" band is the whole [2.0, 6.0] range — no "ideal"
+        # sub-band, no "fair" split (R8 / D-009).
         assert classify_learning_phase(2.4) == "good"
         assert classify_learning_phase(3.0) == "good"
         assert classify_learning_phase(3.9) == "good"
-        # "fair" (4-6) collapsed into "good" per D-003.
         assert classify_learning_phase(5.0) == "good"
         # Inclusive upper boundary: α==6.0 → "good"; α>6.0 → "under-trained".
         assert classify_learning_phase(6.0) == "good"

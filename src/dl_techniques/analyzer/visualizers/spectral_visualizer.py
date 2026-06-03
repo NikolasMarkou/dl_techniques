@@ -93,7 +93,7 @@ class SpectralVisualizer(BaseVisualizer):
             metric=MetricNames.ALPHA,
             title='Alpha (α) per Layer',
             y_label='Power-Law Exponent (α)',
-            add_ref_lines=True  # Adds ideal range and boundaries.
+            add_ref_lines=True  # Adds the good range (2-6) and boundaries.
         )
 
         # --- Bottom-right: Stable Rank for each layer (scatter) ---
@@ -117,13 +117,13 @@ class SpectralVisualizer(BaseVisualizer):
 
     def _plot_funnel_diagram(self) -> None:
         """
-        Create the SETOL funnel diagram: per-layer (α, Δλ_min) → (2, 0).
+        Create the (α, Δλ_min) funnel diagram: per-layer (α, signed Δλ_min) → (2, 0).
 
-        Scatters each layer at (α, signed Δλ_min). The convergence target of a
-        well-trained model is the critical point α=2 with a vanishing ERG gap
-        (Δλ_min≈0), so the plot draws guide lines at α=2 and Δλ_min=0 and marks
-        the target (2, 0) (SETOL §8.2/§10.4). Points are colored by
-        ``learning_phase`` when that column is available.
+        Scatters each layer at (α, signed Δλ_min). The α=2 line is WeightWatcher's
+        over-trained↔good boundary (OVER_TRAINED_THRESH); a vanishing ERG gap
+        (Δλ_min≈0) coincides with it, so the plot draws guide lines at α=2 and
+        Δλ_min=0 and marks the (2, 0) convergence point (SETOL §8.2/§10.4). Points
+        are colored by ``learning_phase`` when that column is available.
 
         Rows with NaN α or Δλ_min are skipped. If nothing is plottable the
         method logs a warning and returns without raising.
@@ -186,16 +186,16 @@ class SpectralVisualizer(BaseVisualizer):
                 edgecolors='black', linewidth=0.5, label='layers'
             )
 
-        # Guide lines and convergence target (2, 0).
+        # Guide lines and (2, 0) convergence point.
         ax.axvline(2.0, color='#e91e63', linestyle='--', linewidth=2, alpha=0.7,
-                   label='α = 2 (critical)')
+                   label='α = 2 (over-trained↔good boundary)')
         ax.axhline(0.0, color='#2e7d32', linestyle='--', linewidth=2, alpha=0.7,
                    label='Δλ_min = 0')
         ax.scatter([2.0], [0.0], marker='*', s=400, color='gold',
                    edgecolors='black', linewidth=1.0, zorder=5,
-                   label='target (2, 0)')
+                   label='α = 2 boundary (2, 0)')
 
-        ax.set_title('SETOL Funnel: (α, Δλ_min) → (2, 0)', fontsize=14, fontweight='bold')
+        ax.set_title('Funnel: (α, Δλ_min) → (2, 0)', fontsize=14, fontweight='bold')
         ax.set_xlabel('α (PL exponent)')
         ax.set_ylabel('Δλ_min (signed)')
         ax.grid(True, linestyle='--', alpha=0.4)

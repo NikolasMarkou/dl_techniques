@@ -228,7 +228,7 @@ Keras Layer
       |-- [full spectrum]      -> stable_rank, entropy, gini, dominance
       |-- [eigenvectors]       -> participation_ratio, critical_weights
       |-- [SETOL diagnostics]  -> ERG condition, learning_phase, alpha_hat
-      '-- [randomization]      -> rand_distance, ww_softrank
+      '-- [randomization]      -> rand_distance, rand_sv_ratio, mp_softrank
 ```
 
 #### Complete Metric Reference
@@ -255,7 +255,7 @@ These metrics are the primary diagnostics but depend on a power-law fitting step
 | **alpha_hat** ($\hat{\alpha}$) | $\alpha \times \log_{10}(\lambda_{\max})$ on UN-normalized eigenvalues | Scale-weighted quality metric combining tail shape with weight magnitude. The WeightWatcher convention and the canonical SETOL AlphaHat (§2.4). | Lower = better generalization. Use for **within-model layer ranking** ("which layer is weakest?"). Do NOT compare across architectures. Inherits all of alpha's failure modes plus adds magnitude sensitivity. |
 | **alpha_hat_normalized** | $\alpha \times \log_{10}(\lambda_{\max}/N)$ | The /N theory-normalized variant (SETOL $X = (1/N)W^\top W$ per §10.2), comparable across differing layer dimensions $N$. | Lower = better generalization. Normalizing by $N$ makes it more comparable across layers of different dimensions. Can be negative for Conv2D with large receptive fields. |
 | **alpha_weighted** | $\alpha \times \log_{10}(\lambda_{\max})$ | Deprecated alias equal to `alpha_hat`. | Kept for backward compatibility. Prefer `alpha_hat`. |
-| **learning_phase** | Categorical from $\alpha$ | SETOL learning phase classification. | One of: `over-regularized` ($\alpha < 2$), `ideal` ($2 \le \alpha < 2.1$, the critical point), `good` ($2.1 \le \alpha \le 6$), `under-trained` ($\alpha > 6$), `failed` ($\alpha < 0$). Derived directly from alpha — inherits its limitations. |
+| **learning_phase** | Categorical from $\alpha$ | WeightWatcher learning-phase classification. | One of: `over-trained` ($\alpha < 2$, very heavy-tailed), `good` ($2 \le \alpha \le 6$, well-trained SOTA range), `under-trained` ($\alpha > 6$, random-like), `failed` ($\alpha < 0$). Derived directly from alpha — inherits its limitations. |
 | **dominance_ratio** | $\lambda_{\max} / \sum(\lambda_{\text{rest}})$ | How much the single largest eigenvalue dominates the entire spectrum. | Below 0.1 = no single mode dominates (healthy). Between 0.1 and 1.0 = moderate dominance (typical for trained networks). Above 1.0 = top mode contains more variance than all others combined — red flag for rank-1 spikes. **Limitation**: Very sensitive to a single outlier eigenvalue. |
 | **xmin** | Optimal KS-distance threshold | The eigenvalue threshold above which the power-law fit applies. Defines the Effective Correlation Space (ECS). | Internal to alpha fitting, but also gates the ERG condition. If xmin captures very few eigenvalues, both alpha and ERG are unreliable. |
 | **D** | KS distance at optimal xmin | Kolmogorov-Smirnov goodness-of-fit distance. | Lower = better fit. No absolute threshold — use pl_pvalue instead for formal testing. |
@@ -277,11 +277,12 @@ These metrics provide deep diagnostics but are either computationally expensive,
 | **pl_pvalue** | Bootstrap KS test (Clauset et al. 2009) | Goodness-of-fit p-value: "Is the power-law hypothesis plausible?" | Above 0.1 = power-law not rejected, alpha is meaningful. Below 0.1 = power-law is a poor fit, **downweight alpha**. Equals -1.0 when test was not run (fit failed). **Cost**: ~100x the cost of fitting alpha. Essential for important decisions, skip for quick surveys. **Resolution**: Default 100 bootstraps gives 0.01 granularity. |
 | **participation_ratio** | $(\\sum v_i^2)^2 / \\sum v_i^4$ for top-$k$ eigenvectors | Measures how many neurons contribute to the principal components (Anderson localization). | Near 1 = features localized to single neurons (fragile to pruning). Near $N$ = features spread across all neurons (robust but possibly diffuse). Reports mean PR over top-3 eigenvectors. **Cost**: Requires full SVD to extract eigenvectors — expensive for large layers. |
 | **concentration_score** | $\log(1 + \text{Gini} \times \text{dominance} / \text{PR})$ | Composite fragility index combining inequality, dominance, and localization. | Use ONLY for **relative ranking** within a model ("which layer is most fragile?"). No meaningful absolute thresholds. High = concentrated/fragile. The log-transform and three-way composition make raw values unintuitive. **Warning**: Compounds errors from its constituent metrics. |
-| **erg_log_det** | $\sum \ln(\tilde{\lambda}_i)$ for ECS eigenvalues | SETOL ERG condition: volume-preservation test from renormalization group theory. | Near 0 = layer at critical point (ideal). Much greater than 0 = ECS eigenvalues too large (overfitting). Much less than 0 = ECS eigenvalues too small (under-utilization). **Only meaningful when alpha is near 2.0.** |
-| **erg_delta_lambda_min** | Gap between xmin and ERG boundary | Measures how close the power-law boundary is to the theoretical ERG boundary. | Near 0 = boundaries coincide (ideal). Large gap = ECS definition is inconsistent. |
-| **erg_satisfied** | $\|\text{erg\_log\_det}\| < 1.0$ | Boolean: is the ERG condition approximately satisfied? | `True` + alpha near 2.0 = ideal learning (SETOL critical point). The threshold of 1.0 is a practical choice, not derived from theory. |
+| **erg_log_det** | $\sum \ln(\tilde{\lambda}_i)$ for ECS eigenvalues | SETOL ERG condition: volume-preservation test from renormalization group theory. | Near 0 = layer at the critical point. Much greater than 0 = ECS eigenvalues too large (overfitting). Much less than 0 = ECS eigenvalues too small (under-utilization). **Only meaningful when alpha is near 2.0.** |
+| **erg_delta_lambda_min** | Gap between xmin and ERG boundary | Measures how close the power-law boundary is to the theoretical ERG boundary. | Near 0 = boundaries coincide (critical point). Large gap = ECS definition is inconsistent. |
+| **erg_satisfied** | $\|\text{erg\_log\_det}\| < 1.0$ | Boolean: is the ERG condition approximately satisfied? | `True` + alpha near 2.0 = layer at the SETOL critical point. The threshold of 1.0 is a practical choice, not derived from theory. |
 | **rand_distance** | $\sqrt{\text{JSD}(\text{ESD}, \text{ESD}_{\text{random}})}$ | Jensen-Shannon distance between actual and randomly-permuted weight spectra. | Above 0.3 = significant learned structure (good). Below 0.1 = nearly indistinguishable from random (concerning). **Limitations**: Uses single permutation (no variance estimate) and 100-bin histograms (arbitrary binning). |
-| **ww_softrank** | $\max(\lambda_{\text{rand}}) / \max(\lambda_{\text{actual}})$ | Ratio of random spectral norm to actual spectral norm. | Below 1 = learned weights have larger spectral norm than random (normal). Above 1 = weights more regularized than random (unusual). |
+| **rand_sv_ratio** | $\max(\lambda_{\text{rand}}) / \max(\lambda_{\text{actual}})$ | Ratio of random spectral norm to actual spectral norm (NOT WeightWatcher's mp_softrank). | Below 1 = learned weights have larger spectral norm than random (normal). Above 1 = weights closer to random than learned (unusual). |
+| **mp_softrank** | $\lambda_+ / \lambda_{\max}$ (spikes removed first) | WeightWatcher MP soft rank: bulk-edge $\lambda_+$ over the maximum eigenvalue. | Near 1 = spectrum dominated by the random-matrix bulk (little learned structure). Near 0 = strong spectral spike(s) far above the bulk edge (heavily structured). |
 | **rank_loss** | Count of near-zero singular values | Number of singular values below machine-epsilon tolerance. | Indicates numerical rank deficiency. High rank_loss = many effectively zero dimensions. |
 | **weak_rank_loss** | Count of eigenvalues $< 10^{-6}$ | Similar to rank_loss but with a fixed (looser) threshold. | Captures dimensions that are near-zero but above machine epsilon. |
 | **lambda_max** | $\max(\lambda_i)$ | Largest eigenvalue (squared spectral norm). | Raw scale metric — NOT comparable across layers of different dimensions without normalization. The code computes $\mathbf{W}^\intercal\mathbf{W}$ without the $1/N$ normalization factor, so lambda_max scales with $N$. |
@@ -644,7 +645,7 @@ A 2x2 grid providing a holistic view of all models.
 
 A dashboard for comparing models based on their weight matrix spectral properties.
 
--   **Alpha Distribution with Phase Backgrounds**: Histogram of alpha values overlaid with color-coded phase regions (pink = over-regularized, green = ideal, yellow = under-trained). A quick visual check of how many layers fall in each phase.
+-   **Alpha Distribution with Phase Backgrounds**: Histogram of alpha values overlaid with color-coded phase regions (pink = over-trained, green = good, yellow = under-trained). A quick visual check of how many layers fall in each phase.
 -   **Concentration Score Distribution**: Comparison of information fragility across models.
 -   **Alpha per Layer**: Scatter plot showing how alpha evolves across the network depth, with reference lines at the phase boundaries (2.0, 6.0). Look for the "funnel" convergence pattern — healthy models show alpha decreasing toward 2.0 in deeper layers.
 -   **Stable Rank per Layer**: Log-scale scatter showing capacity utilization across layers.
@@ -786,7 +787,7 @@ The spectral analysis module is built on SETOL, which bridges theoretical unders
 Key theoretical components:
 - **Heavy-Tailed Self-Regularization (HTSR)**: SGD implicitly regularizes neural networks, causing weight matrix spectra to develop heavy tails. SETOL explains *why* this happens.
 - **Effective Correlation Space (ECS)**: The essential subspace where learning actually happens — eigenvalues above xmin. The bulk below xmin represents noise/memorization.
-- **ERG Condition**: The Exact Renormalization Group condition ($\ln\det(\tilde{X}) \approx 0$) identifies layers at the critical point of ideal learning, analogous to phase transitions in statistical mechanics.
+- **ERG Condition**: The Exact Renormalization Group condition ($\ln\det(\tilde{X}) \approx 0$) identifies layers at the critical point (α ≈ 2), analogous to phase transitions in statistical mechanics.
 - **Student-Teacher Framework**: SETOL extends the classical framework from vectors to matrices, using the Harish-Chandra-Itzykson-Zuber (HCIZ) integral to calculate expected generalization error.
 
 For comprehensive SETOL documentation, see `SETOL.md` in this directory.

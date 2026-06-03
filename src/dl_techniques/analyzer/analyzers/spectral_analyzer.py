@@ -346,37 +346,37 @@ class SpectralAnalyzer(BaseAnalyzer):
         if 'alpha' in summary:
             mean_alpha = summary['alpha']
             if mean_alpha < 2.0:
-                recommendations.append("Model may be over-regularized (low α < 2). Consider reducing the learning rate and checking for correlation traps.")
+                recommendations.append("Model may be over-trained (α < 2, very heavy-tailed). Consider reducing the learning rate and checking for correlation traps.")
             elif mean_alpha > 6.0:
                 recommendations.append("Model may be under-trained (high α). Consider training longer or reducing regularization.")
             else:
                 recommendations.append(f"Model training quality appears good (α = {mean_alpha:.2f}).")
 
-        # SETOL: Phase distribution analysis
+        # WeightWatcher: Phase distribution analysis (over-trained / good / under-trained)
         if 'learning_phase' in analysis_df.columns:
             phase_counts = analysis_df['learning_phase'].value_counts()
             total = len(analysis_df)
             for phase, count in phase_counts.items():
                 pct = 100 * count / total
-                if phase == 'over-regularized' and pct > 20:
+                if phase == 'over-trained' and pct > 20:
                     recommendations.append(
-                        f"{pct:.0f}% of layers are over-regularized (α < 2.0). "
+                        f"{pct:.0f}% of layers are over-trained (α < 2.0). "
                         "Reduce learning rate or check for correlation traps.")
                 elif phase == 'under-trained' and pct > 20:
                     recommendations.append(
                         f"{pct:.0f}% of layers are under-trained (α > 6.0). "
                         "Train longer or reduce regularization.")
-                elif phase == 'ideal' and pct > 50:
+                elif phase == 'good' and pct > 50:
                     recommendations.append(
-                        f"{pct:.0f}% of layers are in the ideal phase (α ≈ 2.0). Excellent training quality.")
+                        f"{pct:.0f}% of layers are in the good phase (2.0 ≤ α ≤ 6.0). Healthy training quality.")
 
-        # SETOL: ERG condition check
+        # ERG condition check
         if 'erg_satisfied' in analysis_df.columns:
             erg_satisfied = analysis_df['erg_satisfied'].sum()
             total = len(analysis_df)
             if erg_satisfied > 0:
                 recommendations.append(
-                    f"{erg_satisfied}/{total} layers satisfy the ERG condition (ideal learning).")
+                    f"{erg_satisfied}/{total} layers satisfy the ERG condition (ln det X̃ ≈ 0).")
 
         # Power-law fit quality
         if 'pl_pvalue' in analysis_df.columns:

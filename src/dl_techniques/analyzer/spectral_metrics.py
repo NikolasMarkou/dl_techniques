@@ -81,7 +81,6 @@ from typing import Dict, List, Optional, Tuple, Union
 from dl_techniques.utils.logger import logger
 from dl_techniques.analyzer.constants import (
     SPECTRAL_EPSILON, SPECTRAL_EVALS_THRESH, SPECTRAL_OVER_TRAINED_THRESH, SPECTRAL_UNDER_TRAINED_THRESH,
-    SPECTRAL_IDEAL_ALPHA_BAND,
     SPECTRAL_DEFAULT_MIN_EVALS, SPECTRAL_DEFAULT_MAX_EVALS, SPECTRAL_DEFAULT_BINS,
     SPECTRAL_MAX_CRITICAL_WEIGHTS_REPORTED, SPECTRAL_CRITICAL_WEIGHT_THRESHOLD,
     SPECTRAL_TW_SAFETY_FACTOR,
@@ -395,11 +394,11 @@ def compute_erg_condition(evals: np.ndarray, xmin: float) -> Dict[str, float]:
 
     Returns:
         Dictionary with ERG diagnostic metrics:
-        - erg_log_det: ln det of rescaled ECS eigenvalues (ideal: ≈ 0)
+        - erg_log_det: ln det of rescaled ECS eigenvalues (target ≈ 0)
         - erg_delta_lambda_min: SIGNED gap between xmin and the ERG boundary
-          (SETOL §7.3): < 0 = over-regularized (PL tail crossed below the ERG
-          tail), ≈ 0 = ideal (α ≈ 2), > 0 = normal. The sign is load-bearing —
-          do NOT wrap this quantity in abs().
+          (SETOL §7.3): < 0 (PL tail crossed below the ERG tail), ≈ 0 (α ≈ 2,
+          critical point), > 0 (normal). The sign is load-bearing — do NOT wrap
+          this quantity in abs().
         - erg_satisfied: whether |erg_log_det| < 1.0 (approximate ERG condition)
     """
     if evals is None or len(evals) == 0:
@@ -426,7 +425,7 @@ def compute_erg_condition(evals: np.ndarray, xmin: float) -> Dict[str, float]:
     # is non-monotonic so searchsorted is undefined. WW finds the largest-eigenvalue tail whose
     # product crosses 1.0 (descending). Boundary lambda_min = sorted_asc[len - tail_count].
     # Δλ_min MUST stay signed (prior D-006 / SETOL §7.3) — do NOT wrap in abs(); the sign IS the
-    # over-regularization diagnostic (<0 over-regularized, ≈0 ideal, >0 normal).
+    # ERG boundary diagnostic (<0, ≈0 at the critical point, >0 normal).
     tail_count = compute_detX_constraint(ecs_evals)
     sorted_asc = np.sort(rescaled)
     if tail_count > 0 and tail_count <= len(sorted_asc):
@@ -448,22 +447,19 @@ def compute_erg_condition(evals: np.ndarray, xmin: float) -> Dict[str, float]:
 
 def classify_learning_phase(alpha: float) -> str:
     """
-    Classify the learning phase of a layer based on its power-law exponent α.
+    Classify a layer's learning phase from its power-law exponent α, per WeightWatcher.
 
-    Bands follow SETOL §3.2/§13 (Phases of Learning), with "ideal" treated as a
-    narrow band around the critical point α≈2 and the over/under-trained
-    boundaries pinned to SPECTRAL_OVER_TRAINED_THRESH (2.0) and
-    SPECTRAL_UNDER_TRAINED_THRESH (6.0):
+    WeightWatcher thresholds (constants OVER_TRAINED_THRESH=2.0, UNDER_TRAINED_THRESH=6.0):
+    - α < 2.0       : over-trained   (very heavy-tailed; α<2 has infinite ESD variance)
+    - 2.0 ≤ α ≤ 6.0 : good           (heavy-tailed, well-trained SOTA range)
+    - α > 6.0       : under-trained   (random-like / insufficiently trained)
+    - α < 0         : failed          (no valid fit)
 
-    - α < 0:                 "failed"           (invalid / no power-law fit)
-    - 0 ≤ α < 2.0:           "over-regularized" (glassy/compensatory, correlation traps)
-    - 2.0 ≤ α < 2.1:         "ideal"            (narrow critical-point band, SPECTRAL_IDEAL_ALPHA_BAND)
-    - 2.1 ≤ α ≤ 6.0:         "good"             (well-trained, standard SOTA regime)
-    - α > 6.0:               "under-trained"    (random-like, Marchenko-Pastur)
-
-    The upper "good" boundary is inclusive at 6.0 (α==6.0 → "good"; α>6.0 →
-    "under-trained") to stay consistent with SPECTRAL_UNDER_TRAINED_THRESH
-    semantics.
+    DECISION plan_2026-06-03_bc986e52/D-009: WeightWatcher labels are authoritative
+    here. Do NOT reintroduce the prior-plan narrow critical band ([2.0,2.1)) or the
+    SETOL-only sub-range labels for α<2 / the mid-tail — those were SETOL-paper
+    choices the user reversed in favor of WW. α<2 is literally "over-trained" in WW
+    (see decisions.md D-009; this REVERSES prior D-C and D-D).
 
     Args:
         alpha: Power-law exponent.
@@ -471,13 +467,10 @@ def classify_learning_phase(alpha: float) -> str:
     Returns:
         Phase classification string.
     """
-    ideal_lo, ideal_hi = SPECTRAL_IDEAL_ALPHA_BAND
     if alpha < 0:
         return "failed"
-    elif alpha < ideal_lo:
-        return "over-regularized"
-    elif alpha < ideal_hi:
-        return "ideal"
+    elif alpha < SPECTRAL_OVER_TRAINED_THRESH:
+        return "over-trained"
     elif alpha <= SPECTRAL_UNDER_TRAINED_THRESH:
         return "good"
     else:
