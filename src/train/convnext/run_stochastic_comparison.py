@@ -45,6 +45,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
                              'crashes (only the 2-stage cifar10 variant tolerates 4).')
     parser.add_argument('--kernel-size', type=int, default=7,
                         help='Depthwise kernel size (forwarded to the trainer).')
+    parser.add_argument('--no-epoch-analyzer', dest='epoch_analyzer',
+                        action='store_false', default=True,
+                        help='Forward --no-epoch-analyzer to each trainer: disables the '
+                             'per-epoch WeightWatcher analysis (~80s/epoch) that the '
+                             'comparison never uses. Recommended for long runs. v1 only.')
     parser.add_argument('--modes', type=str, nargs=2, default=['depth', 'gradient'])
     return parser
 
@@ -77,6 +82,8 @@ def run_comparison(args: argparse.Namespace) -> None:
             '--strides', str(args.strides),
             '--kernel-size', str(args.kernel_size),
         ]
+        if not args.epoch_analyzer:
+            cmd.append('--no-epoch-analyzer')
 
         logger.info(f"Launching ConvNeXt {args.model} training for mode={mode}: {' '.join(cmd)}")
         result = subprocess.run(cmd, env=env, cwd=repo_root)

@@ -152,7 +152,8 @@ def train_model(args: argparse.Namespace) -> None:
         results_dir_prefix="convnext_v1",
         monitor='val_accuracy',
         patience=args.patience,
-        use_lr_schedule=use_lr_schedule
+        use_lr_schedule=use_lr_schedule,
+        include_analyzer=args.epoch_analyzer
     )
 
     # Initialize visualization manager
@@ -354,6 +355,11 @@ def main():
                              'depth=StochasticDepth, gradient=StochasticGradient')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed for reproducible runs')
+    parser.add_argument('--no-epoch-analyzer', dest='epoch_analyzer',
+                        action='store_false', default=True,
+                        help='Disable the per-epoch WeightWatcher EpochAnalyzerCallback '
+                             '(~80s/epoch on a 28M model; big speedup for long runs). '
+                             'End-of-training run_model_analysis still runs.')
 
     args = parser.parse_args()
 
