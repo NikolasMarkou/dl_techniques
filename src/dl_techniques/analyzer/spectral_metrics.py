@@ -352,7 +352,10 @@ def compute_erg_condition(evals: np.ndarray, xmin: float) -> Dict[str, float]:
     Returns:
         Dictionary with ERG diagnostic metrics:
         - erg_log_det: ln det of rescaled ECS eigenvalues (ideal: ≈ 0)
-        - erg_delta_lambda_min: gap between xmin and the ERG boundary (ideal: ≈ 0)
+        - erg_delta_lambda_min: SIGNED gap between xmin and the ERG boundary
+          (SETOL §7.3): < 0 = over-regularized (PL tail crossed below the ERG
+          tail), ≈ 0 = ideal (α ≈ 2), > 0 = normal. The sign is load-bearing —
+          do NOT wrap this quantity in abs().
         - erg_satisfied: whether |erg_log_det| < 1.0 (approximate ERG condition)
     """
     if evals is None or len(evals) == 0:
@@ -380,7 +383,11 @@ def compute_erg_condition(evals: np.ndarray, xmin: float) -> Dict[str, float]:
     erg_boundary_idx = np.searchsorted(cumulative_log, 0.0)
     if erg_boundary_idx < len(sorted_ecs):
         erg_lambda_min = sorted_ecs[erg_boundary_idx]
-        delta_lambda_min = float(abs(xmin * wscale * wscale - erg_lambda_min))
+        # DECISION plan_2026-06-03_9e82787d/D-A: Δλ_min MUST stay signed (SETOL
+        # §7.3). Do NOT re-wrap in abs() — the sign IS the over-regularization
+        # diagnostic (<0 over-regularized, ≈0 ideal, >0 normal); abs() destroys
+        # it. See plans/.../findings.md D-A.
+        delta_lambda_min = float(xmin * wscale * wscale - erg_lambda_min)
     else:
         delta_lambda_min = float('nan')
 
@@ -444,7 +451,7 @@ def detect_correlation_trap(
 
     The detection protocol follows Martin & Mahoney (2021) and uses:
     1. MP upper edge: λ+ = σ²(1 + √Q)²
-    2. TW threshold:  Δ_TW = c_TW · σ² · N^(-1/3)
+    2. TW threshold:  Δ_TW = c_TW · σ² · M^(-2/3)   (SETOL §2.3)
     3. Spike count:   eigenvalues above λ+ + Δ_TW
     4. Severity:      (λ_max - threshold) / λ+
 
@@ -490,7 +497,11 @@ def detect_correlation_trap(
     mp_lambda_minus = sigma_sq * max(0.0, (1.0 - np.sqrt(Q)) ** 2)
 
     # Tracy-Widom fluctuation threshold
-    delta_TW = c_TW * sigma_sq * (N ** (-1.0 / 3.0))
+    # DECISION plan_2026-06-03_9e82787d/D-E: scaling is O(M^(-2/3)) per SETOL
+    # §2.3 (M = min dimension), NOT N^(-1/3). Do NOT revert to N^(-1/3); the
+    # exponent/base both differ and govern trap-detection sensitivity. See
+    # plans/.../findings.md D-E.
+    delta_TW = c_TW * sigma_sq * (M ** (-2.0 / 3.0))
     threshold = mp_lambda_plus + delta_TW
 
     # Detect spikes above threshold
