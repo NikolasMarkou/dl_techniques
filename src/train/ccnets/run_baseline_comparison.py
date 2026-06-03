@@ -23,18 +23,22 @@ Design decisions, and why:
   * **The Reasoner throttle is disabled** (``run_ccnet``). The control strategy
     normally stops Reasoner updates once it is accurate enough; that would give
     the CCNet Reasoner fewer updates than the baseline and confound the result.
-    Disabling it isolates the question to "does the cooperative loss + latent E
-    help", at equal update counts.
   * The CCNet Reasoner additionally receives the learned latent ``E``; that extra
     input is part of "what CCNets provides", so the baseline is deliberately
     X-only ("plain classifier").
 
+Architecture (``MNISTReasoner`` + ``create_mnist_ccnet`` + ``ModelConfig``) is
+imported from ``dl_techniques.models.ccnets``; the MNIST data helper is reused from
+the sibling ``train.ccnets.train_mnist`` training script (a sanctioned data-prep
+train-to-train edge, D-002/D-007).
+
 Run:
-    MPLBACKEND=Agg .venv/bin/python -m train.ccnets.baseline_comparison
+    MPLBACKEND=Agg .venv/bin/python -m train.ccnets.run_baseline_comparison --gpu 0
 """
 
 import os
 import math
+import argparse
 import statistics
 from typing import Dict, List, Tuple
 
@@ -46,8 +50,10 @@ from train.common import setup_gpu, set_seeds
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.ccnets import CCNetTrainer
 from dl_techniques.models.ccnets.control import StaticThresholdStrategy
-from train.ccnets.mnist import (
-    ModelConfig, TrainingConfig, ExperimentConfig, MNISTReasoner, create_mnist_ccnet,
+from dl_techniques.models.ccnets.architectures.mnist import (
+    ModelConfig,
+    MNISTReasoner,
+    create_mnist_ccnet,
 )
 
 # --------------------------------------------------------------------- config
@@ -134,12 +140,9 @@ def run_ccnet(x, y, x_test, y_test, seed: int) -> float:
     set_seeds(seed)
     steps_per_epoch = math.ceil(len(x) / BATCH)
     epochs = max(1, math.ceil(STEP_BUDGET / steps_per_epoch))
+    kl_annealing_epochs = max(1, epochs // 3)
 
-    exp_config = ExperimentConfig(
-        model=ModelConfig(explanation_dim=EXPLANATION_DIM),
-        training=TrainingConfig(epochs=epochs, kl_annealing_epochs=max(1, epochs // 3)),
-    )
-    orchestrator = create_mnist_ccnet(exp_config)
+    orchestrator = create_mnist_ccnet(ModelConfig(explanation_dim=EXPLANATION_DIM))
     # Disable the Reasoner throttle: give it the same update count as the baseline
     # (threshold > 1.0 => "train the Reasoner on every step").
     orchestrator.control = StaticThresholdStrategy(threshold=1.01)
@@ -148,8 +151,7 @@ def run_ccnet(x, y, x_test, y_test, seed: int) -> float:
     ds = (tf.data.Dataset.from_tensor_slices((x, y_oh))
           .shuffle(len(x)).batch(BATCH).prefetch(tf.data.AUTOTUNE))
 
-    CCNetTrainer(orchestrator, kl_annealing_epochs=exp_config.training.kl_annealing_epochs)\
-        .train(ds, epochs)
+    CCNetTrainer(orchestrator, kl_annealing_epochs=kl_annealing_epochs).train(ds, epochs)
     return _ccnet_reasoner_accuracy(orchestrator, x_test, y_test)
 
 
@@ -222,7 +224,29 @@ def write_report(results: Dict[int, Dict[str, List[float]]], path: str) -> str:
 
 # --------------------------------------------------------------------- main
 def main() -> None:
-    setup_gpu(None)
+    parser = argparse.ArgumentParser(
+        description="Compare the CCNet Reasoner against a plain classifier on MNIST.")
+    parser.add_argument('--gpu', type=int, default=0, help="GPU device index.")
+    parser.add_argument('--epochs', type=int, default=None,
+                        help="(unused: this driver uses a fixed step budget).")
+    parser.add_argument('--batch-size', type=int, default=None, help="Batch size.")
+    parser.add_argument('--seed', type=int, default=0,
+                        help="Base seed (the sweep also iterates its own SEEDS).")
+    parser.add_argument('--smoke', action='store_true',
+                        help="Tiny CI-safe run (one small train size, one seed).")
+    args = parser.parse_args()
+
+    setup_gpu(args.gpu)
+    set_seeds(args.seed)
+
+    global TRAIN_SIZES, SEEDS, STEP_BUDGET, BATCH
+    if args.batch_size is not None:
+        BATCH = args.batch_size
+    if args.smoke:
+        TRAIN_SIZES = [500]
+        SEEDS = [0]
+        STEP_BUDGET = 30
+
     os.makedirs(RESULTS_DIR, exist_ok=True)
     x_train, y_train, x_test, y_test = load_mnist()
 
