@@ -368,22 +368,25 @@ def wrap_keras_model(model: keras.Model) -> CCNetModule
 
 ### MNIST Digit Generation (reference task)
 
-The implemented, runnable reference task is `src/train/ccnets/mnist.py`. It defines the
-three networks (`MNISTExplainer`, `MNISTReasoner`, `MNISTProducer`), builds and wraps them
-via `create_mnist_ccnet`, trains with `CCNetTrainer`, and emits reconstruction /
+The implemented, runnable reference task is `src/train/ccnets/train_mnist.py`. The three
+networks (`MNISTExplainer`, `MNISTReasoner`, `MNISTProducer`) and the `create_mnist_ccnet`
+factory now live in the model package (`dl_techniques.models.ccnets`); the train script
+supplies data prep, drives training with `CCNetTrainer`, and emits reconstruction /
 counterfactual / latent-space visualizations.
 
 ```bash
-MPLBACKEND=Agg .venv/bin/python -m train.ccnets.mnist
+MPLBACKEND=Agg .venv/bin/python -m train.ccnets.train_mnist --gpu 0 --epochs 50
 ```
 
 ```python
-from train.ccnets.mnist import create_mnist_ccnet, prepare_mnist_data, ExperimentConfig
-from dl_techniques.models.ccnets import CCNetTrainer
+from dl_techniques.models.ccnets import CCNetTrainer, create_mnist_ccnet, MNISTExplainer
+from dl_techniques.models.ccnets.architectures.mnist import ModelConfig
+from train.ccnets.train_mnist import DataConfig, prepare_mnist_data
 
-config = ExperimentConfig()
-orchestrator = create_mnist_ccnet(config)
-train_ds, val_ds = prepare_mnist_data(config.data)
+# architecture from the model package; training kwargs are explicit (no train-side
+# ExperimentConfig dependency)
+orchestrator = create_mnist_ccnet(ModelConfig(explanation_dim=32))
+train_ds, val_ds = prepare_mnist_data(DataConfig())
 CCNetTrainer(orchestrator, kl_annealing_epochs=10).train(train_ds, epochs=50,
                                                          validation_dataset=val_ds)
 
@@ -391,11 +394,11 @@ CCNetTrainer(orchestrator, kl_annealing_epochs=10).train(train_ds, epochs=50,
 x_counterfactual = orchestrator.counterfactual_generation(x_reference, y_target_one_hot)
 ```
 
-See `src/train/ccnets/CLAUDE.md` for how to derive a new training script from this template.
+See `src/train/ccnets/README.md` for how to derive a new training script from this template.
 
 ### Sentiment-conditioned text
 
-`src/train/ccnets/text_sentiment.py` is a prototype CCNet over **discrete token
+`src/train/ccnets/train_text_sentiment.py` is a prototype CCNet over **discrete token
 sequences** (IMDB sentiment): `X` = a review, `Y` = sentiment, `E` = latent style.
 Because `X` is discrete, the pixel-norm losses do not apply — `TextCCNetOrchestrator`
 overrides `compute_losses` with **token-space losses** (masked cross-entropy for
@@ -407,5 +410,5 @@ paradigm to a non-continuous observation.
 
 The framework is modality-agnostic — tabular, audio, and time-series CCNets follow the
 same recipe by supplying appropriate Explainer/Reasoner/Producer networks (use
-`SequentialCCNetOrchestrator` for sequential data). See `CLAUDE.md` for the
-task-adaptation table.
+`SequentialCCNetOrchestrator` for sequential data). See `src/dl_techniques/models/ccnets/CLAUDE.md`
+for the task-adaptation table.
