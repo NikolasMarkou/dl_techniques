@@ -227,6 +227,7 @@ class SpectralAnalyzer(BaseAnalyzer):
                     Wmats[0], evals=evals)
 
             randomization_metrics = {}
+            num_rand_spikes = 0
             if self.config.spectral_randomize and Wmats:
                 rand_Wmats = [np.random.permutation(W.flatten()).reshape(W.shape) for W in Wmats]
                 rand_evals, rand_sv_max, _, _ = spectral_metrics.compute_eigenvalues(rand_Wmats, N, M, n_comp)
@@ -242,6 +243,7 @@ class SpectralAnalyzer(BaseAnalyzer):
 
                 # Correlation trap detection via MP edge + Tracy-Widom threshold
                 trap_result = spectral_metrics.detect_correlation_trap(rand_evals, N, M)
+                num_rand_spikes = trap_result['num_rand_spikes']
                 randomization_metrics.update({
                     MetricNames.HAS_TRAP: trap_result['has_trap'],
                     MetricNames.NUM_RAND_SPIKES: trap_result['num_rand_spikes'],
@@ -264,6 +266,9 @@ class SpectralAnalyzer(BaseAnalyzer):
                 MetricNames.SIGMA: sigma, MetricNames.NUM_PL_SPIKES: num_pl_spikes,
                 MetricNames.STATUS: status, MetricNames.WARNING: warning,
                 MetricNames.ENTROPY: entropy,
+                # WW mp_softrank = λ_plus/λ_max (spikes removed); num_spikes from trap
+                # detection when randomize ran, else 0 (full-spectrum ratio = 1.0).
+                MetricNames.MP_SOFTRANK: spectral_metrics.compute_mp_softrank(evals, num_rand_spikes),
                 'learning_phase': learning_phase,
                 'pl_pvalue': pl_pvalue,
                 **erg_metrics,

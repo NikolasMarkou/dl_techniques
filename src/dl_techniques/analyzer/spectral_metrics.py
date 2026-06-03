@@ -612,6 +612,37 @@ def calculate_matrix_entropy(singular_values: np.ndarray, N: int) -> float:
 
 # ---------------------------------------------------------------------
 
+def compute_mp_softrank(evals: np.ndarray, num_spikes: int = 0) -> float:
+    """
+    Marchenko-Pastur soft rank = lambda_plus / lambda_max (WeightWatcher RMT_Util.mp_soft_rank).
+
+    With num_spikes outliers removed from the top, lambda_plus is the largest remaining
+    (bulk) eigenvalue; the ratio to lambda_max is 1.0 when no spikes, < 1.0 when spikes
+    dominate the spectrum.
+
+    Args:
+        evals: Array of eigenvalues.
+        num_spikes: Number of top (spike) eigenvalues to drop before taking lambda_plus.
+
+    Returns:
+        lambda_plus / lambda_max in (0, 1] for positive spectra; 0.0 on empty/degenerate input.
+    """
+    if evals is None or len(evals) == 0:
+        return 0.0
+    evals = np.asarray(evals, dtype=float)
+    lambda_max = float(np.max(evals))
+    if lambda_max <= SPECTRAL_EPSILON:
+        return 0.0
+    if num_spikes > 0 and num_spikes < len(evals):
+        bulk = np.sort(evals)[::-1][num_spikes:]
+        lambda_plus = float(np.max(bulk))
+    else:
+        lambda_plus = lambda_max
+    return lambda_plus / lambda_max
+
+
+# ---------------------------------------------------------------------
+
 def calculate_spectral_metrics(evals: np.ndarray, alpha: float, N: int = 0) -> Dict[str, float]:
     """
     Calculate various spectral metrics from eigenvalues.

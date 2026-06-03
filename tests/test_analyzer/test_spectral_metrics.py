@@ -25,6 +25,7 @@ from dl_techniques.analyzer.spectral_metrics import (
     compute_erg_condition,
     classify_learning_phase,
     detect_correlation_trap,
+    compute_mp_softrank,
 )
 
 
@@ -500,3 +501,33 @@ class TestDetectCorrelationTrap:
         assert result_strict['trap_threshold'] > result_loose['trap_threshold']
         # Loose should detect at least as many spikes
         assert result_loose['num_rand_spikes'] >= result_strict['num_rand_spikes']
+
+
+# =====================================================================
+# MP soft rank (WeightWatcher RMT_Util.mp_soft_rank)
+# =====================================================================
+
+class TestMpSoftrank:
+    """Tests for compute_mp_softrank = lambda_plus / lambda_max."""
+
+    def test_no_spikes_returns_one(self):
+        """With num_spikes=0, lambda_plus == lambda_max so the ratio is 1.0."""
+        evals = np.array([5.0, 4.0, 3.0, 2.0, 1.0])
+        assert compute_mp_softrank(evals, num_spikes=0) == pytest.approx(1.0)
+
+    def test_one_spike_removed(self):
+        """Dropping the top eigenvalue gives (second-largest / largest)."""
+        evals = np.array([5.0, 4.0, 3.0, 2.0, 1.0])
+        assert compute_mp_softrank(evals, num_spikes=1) == pytest.approx(0.8)
+
+    def test_empty_array_returns_zero(self):
+        """Empty input is degenerate → 0.0."""
+        assert compute_mp_softrank(np.array([]), num_spikes=0) == 0.0
+
+    def test_ratio_in_unit_interval(self):
+        """For positive eigenvalues the result is always in (0, 1]."""
+        np.random.seed(7)
+        evals = np.abs(np.random.randn(50)) + 0.1
+        for k in range(0, 5):
+            val = compute_mp_softrank(evals, num_spikes=k)
+            assert 0.0 < val <= 1.0
