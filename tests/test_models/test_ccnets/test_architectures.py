@@ -1,14 +1,19 @@
-"""Tests for the migrated CCNet task architectures and shared blocks.
+"""Tests for the migrated CCNet task architectures.
 
 Companion to ``test_orchestrator.py`` (which exercises the framework). This
 module pins the contract + serialization round-trip of the concrete networks
 relocated into ``dl_techniques.models.ccnets`` during the train->model
 consolidation (plan_2026-06-03_5c8c6d19):
 
-* shared blocks: :class:`FiLMLayer`, :class:`ConvBlock`, :class:`DenseBlock`;
 * MNIST / CIFAR-100 image networks + factories;
 * text/sentiment networks (non-AR + AR producers) + factories;
 * the package public surface (every name in ``__all__`` resolves).
+
+The shared building blocks (``FiLMLayer``, ``ConvBlock``, ``DenseBlock``) are
+the canonical library layers from ``dl_techniques.layers.film`` /
+``dl_techniques.layers.standard_blocks`` and are tested under
+``tests/test_layers/``; this suite tests the architectures that embed them, not
+the layers themselves.
 
 All dims are intentionally tiny so the suite stays within a few seconds of
 wall-clock. Save/load uses ``model.save(...)`` + ``keras.models.load_model``;
@@ -20,8 +25,6 @@ key).
 import numpy as np
 import keras
 import pytest
-
-from dl_techniques.models.ccnets.blocks import FiLMLayer, ConvBlock, DenseBlock
 
 from dl_techniques.models.ccnets.architectures.mnist import (
     MNISTExplainer, MNISTReasoner, MNISTProducer, create_mnist_ccnet,
@@ -117,88 +120,6 @@ def ar_text_config():
         producer_heads=2,
         producer_ffn_dim=16,
     )
-
-
-# =====================================================================
-# Shared blocks
-# =====================================================================
-
-class TestBlocks:
-    def test_film_layer_forward_and_shape(self):
-        layer = FiLMLayer()
-        content = keras.ops.ones((BATCH, 4, 4, 6))
-        style = keras.ops.ones((BATCH, 5))
-        out = layer([content, style])
-        assert tuple(out.shape) == (BATCH, 4, 4, 6)
-
-    def test_conv_block_forward_and_shape(self):
-        block = ConvBlock(filters=8, kernel_size=3, use_pooling=True, pool_size=2)
-        x = keras.ops.ones((BATCH, 8, 8, 3))
-        out = block(x)
-        assert out.shape.rank == 4
-        # use_pooling halves spatial dims; filters set channels.
-        assert tuple(out.shape) == (BATCH, 4, 4, 8)
-
-    def test_dense_block_forward_and_shape(self):
-        block = DenseBlock(units=12, dropout_rate=0.1)
-        x = keras.ops.ones((BATCH, 7))
-        out = block(x)
-        assert tuple(out.shape) == (BATCH, 12)
-
-    def test_conv_block_rejects_bad_filters(self):
-        with pytest.raises(ValueError, match="filters must be positive"):
-            ConvBlock(filters=0)
-
-    def test_dense_block_rejects_bad_dropout(self):
-        with pytest.raises(ValueError, match="dropout_rate must be"):
-            DenseBlock(units=4, dropout_rate=1.5)
-
-    def test_conv_block_round_trip(self, tmp_path):
-        """A Sequential wrapping a ConvBlock must round-trip through .keras."""
-        model = keras.Sequential([
-            keras.layers.Input(shape=(8, 8, 3)),
-            ConvBlock(filters=6, kernel_size=3, use_pooling=True, pool_size=2),
-        ])
-        x = np.random.default_rng(0).random((BATCH, 8, 8, 3)).astype("float32")
-        before = keras.ops.convert_to_numpy(model(x, training=False))
-
-        path = str(tmp_path / "conv_block.keras")
-        model.save(path)
-        reloaded = keras.models.load_model(path)
-        after = keras.ops.convert_to_numpy(reloaded(x, training=False))
-        np.testing.assert_allclose(before, after, atol=1e-5)
-
-    def test_dense_block_round_trip(self, tmp_path):
-        model = keras.Sequential([
-            keras.layers.Input(shape=(7,)),
-            DenseBlock(units=10, use_batch_norm=True),
-        ])
-        x = np.random.default_rng(1).random((BATCH, 7)).astype("float32")
-        before = keras.ops.convert_to_numpy(model(x, training=False))
-
-        path = str(tmp_path / "dense_block.keras")
-        model.save(path)
-        reloaded = keras.models.load_model(path)
-        after = keras.ops.convert_to_numpy(reloaded(x, training=False))
-        np.testing.assert_allclose(before, after, atol=1e-5)
-
-    def test_film_layer_round_trip(self, tmp_path):
-        """FiLM takes two inputs; wrap it in a functional Model to round-trip."""
-        content_in = keras.layers.Input(shape=(4, 4, 6))
-        style_in = keras.layers.Input(shape=(5,))
-        out = FiLMLayer()([content_in, style_in])
-        model = keras.Model([content_in, style_in], out)
-
-        rng = np.random.default_rng(2)
-        c = rng.random((BATCH, 4, 4, 6)).astype("float32")
-        s = rng.random((BATCH, 5)).astype("float32")
-        before = keras.ops.convert_to_numpy(model([c, s], training=False))
-
-        path = str(tmp_path / "film.keras")
-        model.save(path)
-        reloaded = keras.models.load_model(path)
-        after = keras.ops.convert_to_numpy(reloaded([c, s], training=False))
-        np.testing.assert_allclose(before, after, atol=1e-5)
 
 
 # =====================================================================
@@ -461,8 +382,6 @@ class TestPackageSurface:
             "CCNetConfig", "CCNetTrainer", "CCNetOrchestrator",
             "SequentialCCNetOrchestrator", "EarlyStoppingCallback",
             "wrap_keras_model",
-            # blocks
-            "FiLMLayer", "ConvBlock", "DenseBlock",
             # architectures + factories
             "MNISTExplainer", "MNISTReasoner", "MNISTProducer", "create_mnist_ccnet",
             "Cifar100Explainer", "Cifar100Reasoner", "Cifar100Producer",

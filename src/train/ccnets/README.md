@@ -42,9 +42,10 @@ CCNets is a model-agnostic, three-network cooperative design:
 | **Producer** | `P(X\|Y,E)` | `(Y, E)` -> reconstructed observation `X` |
 
 After the consolidation, the per-task architectures live in
-`dl_techniques/models/ccnets/architectures/{mnist,cifar100,text}.py`, the shared
-Keras layers (`FiLMLayer`, `ConvBlock`, `DenseBlock`) in
-`dl_techniques/models/ccnets/blocks.py`, and the framework itself
+`dl_techniques/models/ccnets/architectures/{mnist,cifar100,text}.py`. The shared
+Keras layers they reuse are the canonical library layers: `FiLMLayer` from
+`dl_techniques/layers/film.py` and `ConvBlock` / `DenseBlock` from
+`dl_techniques/layers/standard_blocks.py`. The framework itself
 (`CCNetOrchestrator`, `HybridCCNetOrchestrator`, `Text`/`ARTextCCNetOrchestrator`,
 `CCNetTrainer`, `CCNetConfig`, the `create_*_ccnet` factories, `EarlyStoppingCallback`)
 in `dl_techniques/models/ccnets/`. The training scripts import all architecture from

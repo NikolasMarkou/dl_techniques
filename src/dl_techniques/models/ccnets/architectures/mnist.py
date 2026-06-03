@@ -14,11 +14,14 @@ The three networks honor the CCNet three-network contract:
   which keeps the label projection differentiable for the Reasoner's soft
   predictions (CCNet Invariant 1).
 
-Shared building blocks (``FiLMLayer``, ``ConvBlock``, ``DenseBlock``) are
-imported from ``dl_techniques.models.ccnets.blocks``; the CCNet framework
-symbols (``CCNetConfig``, ``CCNetOrchestrator``, ``wrap_keras_model``) are
-imported absolutely from the framework submodules so this module carries no
-dependency on ``train.*``.
+Shared building blocks are reused from the canonical library layers:
+``FiLMLayer`` from ``dl_techniques.layers.film`` and ``ConvBlock`` /
+``DenseBlock`` from ``dl_techniques.layers.standard_blocks`` (configured with
+``normalization_type="batch_norm", activation_type="golu"`` to preserve the
+original Conv/Dense + BatchNorm + GoLU behavior). The CCNet framework symbols
+(``CCNetConfig``, ``CCNetOrchestrator``, ``wrap_keras_model``) are imported
+absolutely from the framework submodules so this module carries no dependency
+on ``train.*``.
 """
 
 import keras
@@ -28,7 +31,8 @@ from typing import Dict, Any, Optional, List
 from dl_techniques.models.ccnets.base import CCNetConfig
 from dl_techniques.models.ccnets.orchestrators import CCNetOrchestrator
 from dl_techniques.models.ccnets.utils import wrap_keras_model
-from dl_techniques.models.ccnets.blocks import FiLMLayer, ConvBlock, DenseBlock
+from dl_techniques.layers.film import FiLMLayer
+from dl_techniques.layers.standard_blocks import ConvBlock, DenseBlock
 from dl_techniques.layers.activations.golu import GoLU
 from dl_techniques.regularizers.soft_orthogonal import (
     SoftOrthonormalConstraintRegularizer
@@ -104,6 +108,7 @@ class MNISTExplainer(keras.Model):
             is_last = (i == len(config.explainer_conv_filters) - 1)
             self.conv_blocks.append(ConvBlock(
                 filters=filters, kernel_size=kernel,
+                normalization_type="batch_norm", activation_type="golu",
                 use_pooling=not is_last, pool_size=2, pool_type="max",
                 kernel_regularizer=self.l2_regularizer,
                 name=f"conv_block_{i + 1}"
@@ -176,6 +181,7 @@ class MNISTReasoner(keras.Model):
         )):
             self.conv_blocks.append(ConvBlock(
                 filters=filters, kernel_size=kernel,
+                normalization_type="batch_norm", activation_type="golu",
                 use_pooling=True, pool_size=2, pool_type="max",
                 kernel_regularizer=self.l2_regularizer,
                 name=f"conv_block_{i + 1}"
@@ -187,6 +193,7 @@ class MNISTReasoner(keras.Model):
         for i, units in enumerate(config.reasoner_dense_units):
             self.dense_blocks.append(DenseBlock(
                 units=units, dropout_rate=config.reasoner_dropout_rate,
+                normalization_type="batch_norm", activation_type="golu",
                 kernel_regularizer=self.l2_regularizer,
                 name=f"dense_block_{i + 1}"
             ))

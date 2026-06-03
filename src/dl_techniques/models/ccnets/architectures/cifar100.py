@@ -29,10 +29,13 @@ adds a feature-space term (computed via the Reasoner's ``image_features``
 backbone) to the Producer and Explainer errors, leaving ``reasoner_error``
 untouched so ``phi`` stays anchored by the classification objective.
 
-Shared building blocks (``FiLMLayer``, ``ConvBlock``, ``DenseBlock``) are
-imported from ``dl_techniques.models.ccnets.blocks``; the CCNet framework
-symbols are imported absolutely from the framework submodules so this module
-carries no dependency on ``train.*``.
+Shared building blocks are reused from the canonical library layers:
+``FiLMLayer`` from ``dl_techniques.layers.film`` and ``ConvBlock`` /
+``DenseBlock`` from ``dl_techniques.layers.standard_blocks`` (configured with
+``normalization_type="batch_norm", activation_type="golu"`` to preserve the
+original Conv/Dense + BatchNorm + GoLU behavior). The CCNet framework symbols
+are imported absolutely from the framework submodules so this module carries no
+dependency on ``train.*``.
 """
 
 import keras
@@ -42,7 +45,8 @@ from typing import Dict, Any, Optional, List
 from dl_techniques.models.ccnets.base import CCNetConfig, CCNetModelErrors
 from dl_techniques.models.ccnets.orchestrators import CCNetOrchestrator
 from dl_techniques.models.ccnets.utils import wrap_keras_model
-from dl_techniques.models.ccnets.blocks import FiLMLayer, ConvBlock, DenseBlock
+from dl_techniques.layers.film import FiLMLayer
+from dl_techniques.layers.standard_blocks import ConvBlock, DenseBlock
 
 
 # Weight on the latent (perceptual) verification term used by the hybrid
@@ -94,7 +98,9 @@ class Cifar100Explainer(keras.Model):
         super().__init__(**kwargs)
         self.config = config
         self.conv_blocks = [
-            ConvBlock(filters=f, kernel_size=k, use_pooling=(i < 2),
+            ConvBlock(filters=f, kernel_size=k,
+                      normalization_type="batch_norm", activation_type="golu",
+                      use_pooling=(i < 2),
                       pool_size=2, name=f"conv_block_{i}")
             for i, (f, k) in enumerate(zip(config.explainer_conv_filters,
                                            config.explainer_conv_kernels))
@@ -137,14 +143,18 @@ class Cifar100Reasoner(keras.Model):
         super().__init__(**kwargs)
         self.config = config
         self.conv_blocks = [
-            ConvBlock(filters=f, kernel_size=k, use_pooling=True,
+            ConvBlock(filters=f, kernel_size=k,
+                      normalization_type="batch_norm", activation_type="golu",
+                      use_pooling=True,
                       pool_size=2, name=f"conv_block_{i}")
             for i, (f, k) in enumerate(zip(config.reasoner_conv_filters,
                                            config.reasoner_conv_kernels))
         ]
         self.global_pool = keras.layers.GlobalMaxPooling2D(name="global_pool")
         self.dense_blocks = [
-            DenseBlock(units=u, dropout_rate=config.reasoner_dropout, name=f"dense_{i}")
+            DenseBlock(units=u, dropout_rate=config.reasoner_dropout,
+                       normalization_type="batch_norm", activation_type="golu",
+                       name=f"dense_{i}")
             for i, u in enumerate(config.reasoner_dense_units)
         ]
         self.classifier = keras.layers.Dense(
