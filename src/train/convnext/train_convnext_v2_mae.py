@@ -14,19 +14,21 @@ from dl_techniques.models.masked_autoencoder import MaskedAutoencoder, visualize
 from dl_techniques.analyzer import ModelAnalyzer, AnalysisConfig, DataInput
 from train.common import (
     setup_gpu, load_dataset, get_class_names,
-    create_base_argument_parser, create_callbacks,
+    create_base_argument_parser, create_callbacks, set_seeds,
 )
 
 
 def create_convnext_encoder(
         variant: str, input_shape: Tuple[int, int, int],
-        strides: int = 4, kernel_size: int = 7
+        strides: int = 4, kernel_size: int = 7,
+        stochastic_mode: str = 'depth'
 ) -> ConvNeXtV2:
     """Create ConvNeXtV2 encoder without classification head."""
     encoder = create_convnext_v2(
         variant=variant, num_classes=0, input_shape=input_shape,
         include_top=False, strides=strides, kernel_size=kernel_size,
         drop_path_rate=0.1, dropout_rate=0.0, use_gamma=True,
+        stochastic_mode=stochastic_mode,
         use_softorthonormal_regularizer=True
     )
     dummy_input = np.zeros((1,) + input_shape, dtype=np.float32)
@@ -234,6 +236,7 @@ def run_comprehensive_analysis(
 def train_with_mae_pretraining(args: argparse.Namespace):
     """Main training function with MAE pretraining followed by fine-tuning."""
     setup_gpu(args.gpu)
+    set_seeds(args.seed)
 
     from datetime import datetime
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -243,7 +246,7 @@ def train_with_mae_pretraining(args: argparse.Namespace):
     (x_train, y_train), (x_test, y_test), input_shape, num_classes = load_dataset(args.dataset)
     class_names = get_class_names(args.dataset, num_classes)
 
-    convnext_encoder = create_convnext_encoder(variant=args.variant, input_shape=input_shape, strides=args.strides, kernel_size=args.kernel_size)
+    convnext_encoder = create_convnext_encoder(variant=args.variant, input_shape=input_shape, strides=args.strides, kernel_size=args.kernel_size, stochastic_mode=args.stochastic_mode)
     mae = create_mae_with_convnext(encoder=convnext_encoder, input_shape=input_shape, patch_size=args.patch_size, mask_ratio=args.mask_ratio, decoder_depth=args.decoder_depth)
 
     mae, mae_history = pretrain_mae(
@@ -331,6 +334,8 @@ def main():
     parser.add_argument('--dropout-rate', type=float, default=0.1)
     parser.add_argument('--run-analysis', action='store_true', default=True)
     parser.add_argument('--no-analysis', dest='run_analysis', action='store_false')
+    parser.add_argument('--stochastic-mode', type=str, default='depth', choices=['depth', 'gradient'], help='Stochastic regularizer for ConvNeXt blocks: depth=StochasticDepth, gradient=StochasticGradient')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducible runs')
 
     args = parser.parse_args()
 

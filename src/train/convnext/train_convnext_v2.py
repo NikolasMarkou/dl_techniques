@@ -27,6 +27,7 @@ from dl_techniques.analyzer import AnalysisConfig
 
 from train.common import (
     setup_gpu,
+    set_seeds,
     create_base_argument_parser,
     load_dataset,
     get_class_names,
@@ -79,6 +80,7 @@ def train_model(args: argparse.Namespace):
     """Main training function with comprehensive visualization and analysis."""
     logger.info("Starting ConvNeXt V2 training script with comprehensive visualizations")
     setup_gpu()
+    set_seeds(args.seed)
 
     # Load dataset
     (x_train, y_train), (x_test, y_test), input_shape, num_classes = load_dataset(args.dataset)
@@ -109,6 +111,7 @@ def train_model(args: argparse.Namespace):
         input_shape=input_shape,
         strides=args.strides,
         kernel_size=args.kernel_size,
+        stochastic_mode=args.stochastic_mode,
         **{k: v for k, v in model_config.items() if k not in ['num_classes']}
     )
 
@@ -321,6 +324,12 @@ def main():
                         choices=['cifar10', 'tiny', 'small', 'base', 'large', 'xlarge'], help='Model variant')
     parser.add_argument('--kernel-size', type=int, default=7, help='Depthwise kernel size')
     parser.add_argument('--strides', type=int, default=4, help='Downsampling strides')
+    parser.add_argument('--stochastic-mode', type=str, default='depth',
+                        choices=['depth', 'gradient'],
+                        help='Stochastic regularizer for ConvNeXt blocks: '
+                             'depth=StochasticDepth, gradient=StochasticGradient')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed for reproducible runs')
 
     args = parser.parse_args()
 

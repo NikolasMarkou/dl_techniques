@@ -20,6 +20,7 @@ from dl_techniques.visualization import (
 
 from train.common import (
     setup_gpu,
+    set_seeds,
     create_base_argument_parser,
     load_dataset,
     get_class_names,
@@ -80,6 +81,7 @@ def create_model_config(
 def train_model(args: argparse.Namespace) -> None:
     """Train ConvNeXt V1 model."""
     setup_gpu()
+    set_seeds(args.seed)
 
     # Determine image size for ImageNet
     image_size = None
@@ -105,6 +107,7 @@ def train_model(args: argparse.Namespace) -> None:
         num_classes=num_classes,
         kernel_size=args.kernel_size,
         strides=args.strides,
+        stochastic_mode=args.stochastic_mode,
         **model_config
     )
 
@@ -134,7 +137,7 @@ def train_model(args: argparse.Namespace) -> None:
 
     model.compile(
         optimizer=optimizer,
-        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=False),
+        loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
         metrics=[keras.metrics.SparseCategoricalAccuracy(name='accuracy')]
     )
 
@@ -149,7 +152,8 @@ def train_model(args: argparse.Namespace) -> None:
         results_dir_prefix="convnext_v1",
         monitor='val_accuracy',
         patience=args.patience,
-        use_lr_schedule=use_lr_schedule
+        use_lr_schedule=use_lr_schedule,
+        include_analyzer=args.epoch_analyzer
     )
 
     # Initialize visualization manager
@@ -345,6 +349,17 @@ def main():
                         help='Depthwise kernel size')
     parser.add_argument('--strides', type=int, default=4,
                         help='Downsampling strides')
+    parser.add_argument('--stochastic-mode', type=str, default='depth',
+                        choices=['depth', 'gradient'],
+                        help='Stochastic regularizer for ConvNeXt blocks: '
+                             'depth=StochasticDepth, gradient=StochasticGradient')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed for reproducible runs')
+    parser.add_argument('--no-epoch-analyzer', dest='epoch_analyzer',
+                        action='store_false', default=True,
+                        help='Disable the per-epoch WeightWatcher EpochAnalyzerCallback '
+                             '(~80s/epoch on a 28M model; big speedup for long runs). '
+                             'End-of-training run_model_analysis still runs.')
 
     args = parser.parse_args()
 
