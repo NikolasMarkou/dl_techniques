@@ -38,6 +38,13 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument('--batch-size', type=int, default=64)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--gpu', type=int, default=1)
+    parser.add_argument('--strides', type=int, default=4,
+                        help='Stem + inter-stage downsample stride. Use 2 for the '
+                             '4-stage ImageNet variants (tiny/small/base/...) on '
+                             '32x32 CIFAR; the default 4 collapses spatial dims and '
+                             'crashes (only the 2-stage cifar10 variant tolerates 4).')
+    parser.add_argument('--kernel-size', type=int, default=7,
+                        help='Depthwise kernel size (forwarded to the trainer).')
     parser.add_argument('--modes', type=str, nargs=2, default=['depth', 'gradient'])
     return parser
 
@@ -67,6 +74,8 @@ def run_comparison(args: argparse.Namespace) -> None:
             '--epochs', str(args.epochs),
             '--batch-size', str(args.batch_size),
             '--variant', args.variant,
+            '--strides', str(args.strides),
+            '--kernel-size', str(args.kernel_size),
         ]
 
         logger.info(f"Launching ConvNeXt {args.model} training for mode={mode}: {' '.join(cmd)}")
