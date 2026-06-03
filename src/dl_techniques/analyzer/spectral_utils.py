@@ -158,6 +158,17 @@ def get_layer_weights_and_bias(layer: keras.layers.Layer) -> Tuple[bool, Optiona
             if len(weights_list) >= 1:
                 has_weights = True
                 weights = weights_list[0]
+        elif layer_type == LayerType.NORM:
+            # DECISION plan_2026-06-03_bc986e52/D-010
+            # Normalization layers (BatchNorm/LayerNorm/RMSNorm/etc.) carry only 1-D
+            # scale/shift (gamma/beta) vectors; their ESD is degenerate, so spectral
+            # analysis is skipped explicitly (previously a silent fall-through).
+            # WeightWatcher lists NORM as supported but performs no PL/ESD fit on 1-D params.
+            # Do NOT build a 1-D-vector ESD path here (degenerate, out of scope); keep has_weights=False.
+            logger.debug(
+                f"NORM layer '{getattr(layer, 'name', '?')}': 1-D scale params have a "
+                f"degenerate ESD; spectral analysis skipped."
+            )
 
     return has_weights, weights, has_bias, bias
 
