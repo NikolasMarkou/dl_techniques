@@ -15,11 +15,17 @@ Together these locate the usable band for dim(E): large enough to reconstruct,
 small enough that E does not swallow the explicit cause Y. See the discussion in
 ``models/ccnets/PRINCIPLES_CCNETS.md`` (P3) and the H(X|Y) argument.
 
+Architecture (``ModelConfig`` + ``create_mnist_ccnet``) is imported from
+``dl_techniques.models.ccnets``; the MNIST data helper (``prepare_mnist_data`` +
+its ``DataConfig``) is reused from the sibling ``train.ccnets.train_mnist``
+training script (a sanctioned data-prep train-to-train edge, D-002/D-007).
+
 Run:
-    MPLBACKEND=Agg .venv/bin/python -m train.ccnets.latent_sweep
+    MPLBACKEND=Agg .venv/bin/python -m train.ccnets.run_latent_sweep --gpu 0
 """
 
 import os
+import argparse
 from typing import Dict, List
 
 import keras
@@ -30,10 +36,13 @@ import matplotlib.pyplot as plt
 from train.common import setup_gpu, set_seeds
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.ccnets import CCNetTrainer
-from train.ccnets.mnist import (
-    ModelConfig, TrainingConfig, DataConfig, ExperimentConfig,
-    create_mnist_ccnet, prepare_mnist_data,
+from dl_techniques.models.ccnets.architectures.mnist import (
+    ModelConfig,
+    create_mnist_ccnet,
 )
+# Data-prep is training-side; reuse it from the sibling MNIST training script
+# (sanctioned data-prep train-to-train edge, D-002/D-007).
+from train.ccnets.train_mnist import DataConfig, prepare_mnist_data
 
 # --------------------------------------------------------------------- config
 LATENT_DIMS = [4, 8, 16, 32, 64, 128]
@@ -143,7 +152,26 @@ def write_report(dims: List[int], rows: List[Dict[str, float]], path: str) -> st
 
 # --------------------------------------------------------------------- main
 def main() -> None:
-    setup_gpu(None)
+    parser = argparse.ArgumentParser(
+        description="Sweep the CCNet latent size dim(E) on MNIST.")
+    parser.add_argument('--gpu', type=int, default=0, help="GPU device index.")
+    parser.add_argument('--epochs', type=int, default=None, help="Epochs per sweep point.")
+    parser.add_argument('--batch-size', type=int, default=128, help="Batch size.")
+    parser.add_argument('--seed', type=int, default=SEED, help="Random seed.")
+    parser.add_argument('--smoke', action='store_true',
+                        help="Tiny CI-safe run (two small dims, 1 epoch).")
+    args = parser.parse_args()
+
+    setup_gpu(args.gpu)
+
+    global LATENT_DIMS, EPOCHS
+    seed = args.seed
+    if args.epochs is not None:
+        EPOCHS = args.epochs
+    if args.smoke:
+        LATENT_DIMS = [4, 8]
+        EPOCHS = 1
+
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
     (_, _), (x_test, y_test) = keras.datasets.mnist.load_data()
@@ -152,15 +180,11 @@ def main() -> None:
     rows: List[Dict[str, float]] = []
     for dim in LATENT_DIMS:
         logger.info(f"=== explanation_dim = {dim} ===")
-        set_seeds(SEED)
-        config = ExperimentConfig(
-            model=ModelConfig(explanation_dim=dim),
-            training=TrainingConfig(epochs=EPOCHS, kl_annealing_epochs=EPOCHS // 3),
-            data=DataConfig(batch_size=128),
-        )
-        orchestrator = create_mnist_ccnet(config)
-        train_ds, _ = prepare_mnist_data(config.data)
-        CCNetTrainer(orchestrator, kl_annealing_epochs=EPOCHS // 3).train(train_ds, EPOCHS)
+        set_seeds(seed)
+        kl_annealing_epochs = max(1, EPOCHS // 3)
+        orchestrator = create_mnist_ccnet(ModelConfig(explanation_dim=dim))
+        train_ds, _ = prepare_mnist_data(DataConfig(batch_size=args.batch_size))
+        CCNetTrainer(orchestrator, kl_annealing_epochs=kl_annealing_epochs).train(train_ds, EPOCHS)
 
         metrics = evaluate(orchestrator, x_test, y_test)
         rows.append(metrics)
