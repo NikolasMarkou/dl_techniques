@@ -20,6 +20,7 @@ from dl_techniques.visualization import (
 
 from train.common import (
     setup_gpu,
+    set_seeds,
     create_base_argument_parser,
     load_dataset,
     get_class_names,
@@ -80,6 +81,7 @@ def create_model_config(
 def train_model(args: argparse.Namespace) -> None:
     """Train ConvNeXt V1 model."""
     setup_gpu()
+    set_seeds(args.seed)
 
     # Determine image size for ImageNet
     image_size = None
@@ -105,6 +107,7 @@ def train_model(args: argparse.Namespace) -> None:
         num_classes=num_classes,
         kernel_size=args.kernel_size,
         strides=args.strides,
+        stochastic_mode=args.stochastic_mode,
         **model_config
     )
 
@@ -345,6 +348,12 @@ def main():
                         help='Depthwise kernel size')
     parser.add_argument('--strides', type=int, default=4,
                         help='Downsampling strides')
+    parser.add_argument('--stochastic-mode', type=str, default='depth',
+                        choices=['depth', 'gradient'],
+                        help='Stochastic regularizer for ConvNeXt blocks: '
+                             'depth=StochasticDepth, gradient=StochasticGradient')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Random seed for reproducible runs')
 
     args = parser.parse_args()
 
