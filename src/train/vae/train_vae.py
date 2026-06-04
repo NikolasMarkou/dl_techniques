@@ -305,6 +305,7 @@ def train_model(args):
         variant="small",
         optimizer=args.optimizer,
         sampling_type=args.sampler,
+        kl_loss_weight=args.kl_loss_weight,
     )
     model.summary(print_fn=logger.info)
 
@@ -399,6 +400,9 @@ def main():
                         help='Latent sampling mode passed to create_vae(sampling_type=...)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Seed for all RNG sources (reproducible comparison arms)')
+    parser.add_argument('--kl-loss-weight', type=float, default=0.01, dest='kl_loss_weight',
+                        help='KL divergence loss weight (beta). vMF needs a much smaller value '
+                             'than gaussian/hypersphere because its KL magnitude is ~100x larger.')
     parser.add_argument('--kl-warmup-epochs', type=int, default=0, dest='kl_warmup_epochs',
                         help='If > 0, anneal the KL weight 0 -> kl_loss_weight over the first '
                              'N epochs (cures vMF posterior collapse, D-007). 0 = OFF (default; '

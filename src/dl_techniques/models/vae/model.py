@@ -722,13 +722,17 @@ class VAE(keras.Model):
         logger.info(f"Creating VAE-{variant.upper()} model")
         logger.info(f"Input shape: {input_shape}, Latent dim: {latent_dim}")
 
+        # Let an explicit caller-supplied kl_loss_weight (e.g. train_vae's
+        # --kl-loss-weight for the vMF beta-sweep) override the variant default;
+        # otherwise fall back to the variant's configured weight.
+        kwargs.setdefault("kl_loss_weight", config["kl_loss_weight"])
+
         return cls(
             latent_dim=latent_dim,
             input_shape=input_shape,
             depths=config["depths"],
             steps_per_depth=config["steps_per_depth"],
             filters=config["filters"],
-            kl_loss_weight=config["kl_loss_weight"],
             **kwargs,
         )
 
