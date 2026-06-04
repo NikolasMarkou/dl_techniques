@@ -50,7 +50,13 @@ References:
 
 """
 
+import math
 import keras
+# ``tf.math.bessel_i0e`` is the SINGLE raw-TensorFlow primitive used in this
+# module: the order-0, exponentially-scaled modified Bessel function. It is
+# stable and differentiable, and ``keras.ops`` has no Bessel function of any
+# order. Every other operation below stays on ``keras.ops``. See D-001.
+import tensorflow as tf
 from keras import ops
 from typing import Tuple, Any, Dict, Literal, Optional, Union, List
 
@@ -473,6 +479,165 @@ class HypersphereSampling(keras.layers.Layer):
             "seed": self.seed,
         })
         return config
+
+# ---------------------------------------------------------------------
+# von Mises-Fisher (vMF) KL Numerics
+# ---------------------------------------------------------------------
+#
+# Closed-form KL divergence between a vMF posterior ``vMF(mu, kappa)`` and the
+# uniform prior on the unit sphere ``S^{dim-1}`` (= vMF with ``kappa = 0``),
+# per Davidson et al. 2018 (https://arxiv.org/abs/1804.00891):
+#
+#     KL = kappa * A_{dim/2}(kappa) + log C_dim(kappa) - log C_dim(0)
+#
+# where ``A_nu(kappa) = I_nu(kappa) / I_{nu-1}(kappa)`` is a ratio of modified
+# Bessel functions of the first kind and ``C_dim`` is the vMF normalizer. The
+# KL depends only on ``kappa`` and ``dim`` (NOT on the mean direction ``mu``).
+#
+# These module-level helpers back the ``vmf`` VAE mode's analytic KL term and
+# are validated against ``scipy.special.ive`` in ``tests/test_layers/
+# test_sampling.py`` (the SC1 gate; max abserr ~6e-6).
+
+
+def _bessel_ratio_cf(
+        kappa: keras.KerasTensor,
+        order: float,
+        n_extra: int = 64,
+) -> keras.KerasTensor:
+    """Compute the Bessel ratio ``A_order(kappa) = I_order / I_{order-1}``.
+
+    Uses the continued-fraction / downward (Miller) recurrence
+
+        ``r_n = 1 / (2 * n / kappa + r_{n+1})``,  seed ``r_N = 0``,
+
+    recursing from ``N = order + n_extra`` down to ``r_order``. This is stable
+    for ALL real ``order`` (including the half-integer orders of the odd-``dim``
+    path) and all ``kappa``, and is fully differentiable in ``keras.ops``
+    arithmetic with no special-function call.
+
+    # DECISION plan_2026-06-04_6196678d/D-001: continued-fraction (downward
+    # Miller) Bessel ratio, NEVER upward recurrence (upward is unstable for
+    # nu>=kappa: relerr 1e2-1e5 + impossible negative ratios at latent_dim
+    # 16/32; verified vs scipy). Do NOT "simplify" this to an upward
+    # recurrence or a bessel_i0e/i1e ratio. See decisions.md D-001.
+
+    Args:
+        kappa: Concentration tensor, shape ``[B, 1]`` or ``[B]``, ``> 0``.
+        order: Bessel order ``nu`` of the numerator (Python float; may be
+            half-integer for odd ``dim``).
+        n_extra: Number of extra downward-recurrence steps above ``order``
+            before seeding ``r = 0``. The default of 64 gives float32
+            convergence across the trained ``kappa`` range.
+
+    Returns:
+        The ratio ``I_order(kappa) / I_{order-1}(kappa)``, same shape as
+        ``kappa``.
+    """
+    r = ops.zeros_like(kappa)
+    n = float(order) + float(n_extra)
+    while n >= float(order) - 1e-6:
+        r = 1.0 / ((2.0 * n) / kappa + r)
+        n -= 1.0
+    return r
+
+
+def _log_iv(
+        kappa: keras.KerasTensor,
+        order: float,
+) -> keras.KerasTensor:
+    """Compute ``log I_order(kappa)`` stably by telescoping CF ratios.
+
+    Starts from a base order whose log-Bessel has a closed form and telescopes
+    upward via ``log I_j = log I_{j-1} + log A_j(kappa)``:
+
+    - Integer ``order`` -> base order 0, with
+      ``log I_0(kappa) = kappa + log(bessel_i0e(kappa))``.
+    - Half-integer ``order`` (odd-``dim`` path) -> base order 1/2, with
+      ``I_{1/2}(kappa) = sqrt(2 / (pi * kappa)) * sinh(kappa)`` and a stable
+      ``log sinh(kappa) = kappa + log1p(-exp(-2 kappa)) - log 2``.
+
+    The single ``bessel_i0e`` call (integer path) is the only raw-TF primitive
+    in this module (D-001).
+
+    Args:
+        kappa: Concentration tensor, ``> 0``.
+        order: Bessel order ``nu`` (Python float; integer or half-integer).
+
+    Returns:
+        ``log I_order(kappa)``, same shape as ``kappa``.
+    """
+    is_half = abs(order - round(order)) > 1e-6
+    if not is_half:
+        # Integer order: telescope from log I_0.
+        log_i = kappa + ops.log(tf.math.bessel_i0e(kappa))
+        base = 0.0
+    else:
+        # Half-integer order: telescope from log I_{1/2}.
+        log_sinh = kappa + ops.log1p(-ops.exp(-2.0 * kappa)) - math.log(2.0)
+        log_i = 0.5 * ops.log(2.0 / (math.pi * kappa)) + log_sinh
+        base = 0.5
+
+    steps = int(round(order - base))
+    j = base + 1.0
+    for _ in range(steps):
+        log_i = log_i + ops.log(_bessel_ratio_cf(kappa, j))
+        j += 1.0
+    return log_i
+
+
+def vmf_kl_divergence(
+        kappa: keras.KerasTensor,
+        dim: int,
+) -> keras.KerasTensor:
+    """Per-row KL of ``vMF(mu, kappa)`` from the uniform sphere prior.
+
+    Computes ``KL(vMF(mu, kappa) || Uniform(S^{dim-1}))``, which depends on
+    ``kappa`` and ``dim`` only (NOT on the mean direction ``mu``):
+
+        ``KL = kappa * A_{dim/2}(kappa) + log C_dim(kappa) - log C_dim(0)``
+
+    with ``log C_dim(kappa) = (dim/2 - 1) log kappa - (dim/2) log(2 pi)
+    - log I_{dim/2 - 1}(kappa)`` and the build-time scalar
+    ``log C_dim(0) = -log 2 - (dim/2) log pi + lgamma(dim/2)``.
+
+    The Bessel terms use the stable continued-fraction ratio (D-001) and the
+    telescoping log-normalizer, supporting all ``dim`` (even AND odd) via the
+    half-integer base case in :func:`_log_iv`.
+
+    Args:
+        kappa: Concentration tensor, shape ``[B, 1]`` or ``[B]``. Values are
+            clipped to ``[1e-6, 1e4]`` for numerical safety (the ``kappa -> 0``
+            uniform limit gives ``KL -> 0``).
+        dim: Latent dimensionality ``m`` (Python int; the model passes
+            ``self.latent_dim``). Loop bounds are static so the graph unrolls
+            cleanly.
+
+    Returns:
+        Per-row KL divergence, same shape as ``kappa``.
+    """
+    m = int(dim)
+    nu = m / 2.0
+
+    # Guard log(kappa) at the uniform (kappa -> 0) limit and cap large kappa.
+    kappa_safe = ops.maximum(kappa, 1e-6)
+    kappa_safe = ops.minimum(kappa_safe, 1e4)
+
+    # A_{m/2}(kappa) = I_{m/2}(kappa) / I_{m/2 - 1}(kappa).
+    A = _bessel_ratio_cf(kappa_safe, nu)
+
+    log_Cm = (
+        (m / 2.0 - 1.0) * ops.log(kappa_safe)
+        - (m / 2.0) * math.log(2.0 * math.pi)
+        - _log_iv(kappa_safe, nu - 1.0)
+    )
+    # log C_dim(0): a build-time Python scalar.
+    log_Cm0 = (
+        -math.log(2.0)
+        - (m / 2.0) * math.log(math.pi)
+        + math.lgamma(m / 2.0)
+    )
+
+    return kappa_safe * A + log_Cm - log_Cm0
 
 # ---------------------------------------------------------------------
 # Sampling Layer Factory (inline)

@@ -22,6 +22,7 @@ from dl_techniques.layers.sampling import (
     validate_sampling_config,
     get_sampling_info,
     SAMPLING_REGISTRY,
+    vmf_kl_divergence,
 )
 
 
@@ -891,3 +892,77 @@ class TestSamplingFactory:
         """validate_sampling_config rejects an unknown type."""
         with pytest.raises(ValueError, match="Unknown sampling type"):
             validate_sampling_config("nope")
+
+
+class TestVMFNumerics:
+    """Gate tests for the vMF KL numerics helpers (SC1).
+
+    Validates ``vmf_kl_divergence`` against a ``scipy.special.ive``-based
+    reference KL across an (m, kappa) grid spanning even AND odd latent dims.
+    This is a HARD gate: it MUST pass before any vMF training.
+    """
+
+    @staticmethod
+    def _scipy_vmf_kl(m: int, k: float) -> float:
+        """Reference KL(vMF(mu, k) || Uniform(S^{m-1})) via scipy."""
+        import math as _math
+        from scipy.special import ive, gammaln
+
+        nu = m / 2.0
+        # A_{m/2}(k) = I_{m/2}(k) / I_{m/2 - 1}(k); ive is exp(-|k|)-scaled,
+        # so the scaling cancels in the ratio.
+        A = ive(nu, k) / ive(nu - 1.0, k)
+        # log I_{m/2 - 1}(k) = log(ive(nu-1, k)) + k.
+        logI = _math.log(ive(nu - 1.0, k)) + k
+        logCm = (
+            (m / 2.0 - 1.0) * _math.log(k)
+            - (m / 2.0) * _math.log(2.0 * _math.pi)
+            - logI
+        )
+        logCm0 = (
+            -_math.log(2.0)
+            - (m / 2.0) * _math.log(_math.pi)
+            + gammaln(m / 2.0)
+        )
+        return k * A + logCm - logCm0
+
+    def test_vmf_kl_vs_scipy(self):
+        """vmf_kl_divergence matches the scipy reference to < 1e-3 abserr.
+
+        Grid: m in {2,3,5,8,15,16,17,32,33} (even AND odd) x
+        kappa in {0.5, 1.0, 10.0, 50.0}. The orchestrator measured ~6e-6; the
+        1e-3 gate is a safe margin (SC1).
+        """
+        dims = [2, 3, 5, 8, 15, 16, 17, 32, 33]
+        kappas = [0.5, 1.0, 10.0, 50.0]
+
+        max_abserr = 0.0
+        worst = None
+        for m in dims:
+            for k in kappas:
+                ref = self._scipy_vmf_kl(m, k)
+                got = vmf_kl_divergence(
+                    np.array([[k]], dtype=np.float32), m
+                )
+                got_val = float(np.asarray(got).reshape(-1)[0])
+
+                # KL of any non-uniform vMF posterior must be non-negative.
+                assert got_val >= -1e-4, (
+                    f"negative KL at m={m}, kappa={k}: {got_val}"
+                )
+                assert np.isfinite(got_val), (
+                    f"non-finite KL at m={m}, kappa={k}: {got_val}"
+                )
+
+                abserr = abs(got_val - ref)
+                if abserr > max_abserr:
+                    max_abserr = abserr
+                    worst = (m, k, got_val, ref)
+
+        print(
+            f"\n[vmf_kl_vs_scipy] max abserr={max_abserr:.3e} "
+            f"(worst m,kappa,got,ref={worst})"
+        )
+        assert max_abserr < 1e-3, (
+            f"vMF KL abserr {max_abserr:.3e} exceeds 1e-3 gate; worst={worst}"
+        )
