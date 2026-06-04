@@ -315,7 +315,7 @@ def train_model(args):
     callbacks, results_dir = create_callbacks(
         model_name=f"vae_{args.dataset}_{args.sampler}",
         results_dir_prefix="vae",
-        monitor='val_total_loss',
+        monitor=args.early_stop_monitor,
         patience=args.patience,
         use_lr_schedule=False,
         include_analyzer=not args.no_epoch_analyzer,
@@ -407,6 +407,11 @@ def main():
                         help='If > 0, anneal the KL weight 0 -> kl_loss_weight over the first '
                              'N epochs (cures vMF posterior collapse, D-007). 0 = OFF (default; '
                              'no behavior change).')
+    parser.add_argument('--early-stop-monitor', type=str, default='val_total_loss',
+                        dest='early_stop_monitor',
+                        help='Metric monitored by early-stopping + best-model checkpoint. Use '
+                             'val_reconstruction_loss for KL-warmup runs (val_total_loss rises '
+                             'during warmup and causes premature stop).')
     parser.add_argument('--smoke', action='store_true', default=False,
                         help='Smoke mode: 1 epoch on a small train subset (fast end-to-end check)')
     parser.add_argument("--no-epoch-analyzer", action="store_true",
