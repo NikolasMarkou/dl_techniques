@@ -199,6 +199,43 @@ class VisualizationCallback(keras.callbacks.Callback):
                 epoch=epoch+1, dataset=self.dataset)
 
 
+class KLWarmupCallback(keras.callbacks.Callback):
+    """Ramp the model's effective KL weight 0 -> target over the first N epochs.
+
+    Cures vMF posterior collapse (D-007): with the KL term annealed in, the
+    decoder learns to USE z (recon signal) before the directional KL pulls the
+    concentration kappa toward the uniform prior. The schedule writes
+    ``model.kl_weight`` (a non-trainable tf.Variable read by the custom
+    train_step / test_step) so the update takes effect under tf.function.
+
+    Args:
+        target: The fully-warmed KL weight (the model's configured
+            ``kl_loss_weight``).
+        warmup_epochs: Number of epochs over which to ramp 0 -> target. Must be
+            > 0 (the caller only attaches this callback when warmup is enabled).
+    """
+
+    def __init__(self, target: float, warmup_epochs: int):
+        super().__init__()
+        if warmup_epochs <= 0:
+            raise ValueError(
+                f"warmup_epochs must be > 0, got {warmup_epochs}"
+            )
+        self.target = float(target)
+        self.warmup_epochs = int(warmup_epochs)
+
+    def on_epoch_begin(self, epoch, logs=None):
+        frac = min(1.0, float(epoch) / float(self.warmup_epochs))
+        value = self.target * frac
+        # model.kl_weight is the non-trainable scalar tf.Variable created in
+        # VAE.__init__; assign so the next train_step reads the ramped value.
+        self.model.kl_weight.assign(value)
+        logger.info(
+            f"[kl-warmup] epoch {epoch}: kl_weight={value:.6g} "
+            f"(target={self.target:.6g}, {epoch}/{self.warmup_epochs})"
+        )
+
+
 def plot_training_history(history, save_dir):
     """Plot VAE training loss curves.
 
@@ -289,6 +326,20 @@ def train_model(args):
         VisualizationCallback((x_test, y_test), results_dir, args.dataset, args.viz_frequency, args.batch_size),
     )
 
+    # KL warmup (D-007): default OFF (kl_warmup_epochs == 0) -> callback not
+    # attached -> model.kl_weight holds its ctor value (== kl_loss_weight) and
+    # behavior is identical to before. When ON, ramp 0 -> the model's configured
+    # kl_loss_weight over the first N epochs. target = the python-float source of
+    # truth on the model (NOT the live variable, which the callback overwrites).
+    if getattr(args, "kl_warmup_epochs", 0) and args.kl_warmup_epochs > 0:
+        logger.info(
+            f"KL warmup ENABLED: 0 -> {model.kl_loss_weight} over "
+            f"{args.kl_warmup_epochs} epochs"
+        )
+        callbacks.append(
+            KLWarmupCallback(target=model.kl_loss_weight, warmup_epochs=args.kl_warmup_epochs)
+        )
+
     # Train
     history = model.fit(
         x_train, validation_data=(x_test, None),
@@ -348,6 +399,10 @@ def main():
                         help='Latent sampling mode passed to create_vae(sampling_type=...)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Seed for all RNG sources (reproducible comparison arms)')
+    parser.add_argument('--kl-warmup-epochs', type=int, default=0, dest='kl_warmup_epochs',
+                        help='If > 0, anneal the KL weight 0 -> kl_loss_weight over the first '
+                             'N epochs (cures vMF posterior collapse, D-007). 0 = OFF (default; '
+                             'no behavior change).')
     parser.add_argument('--smoke', action='store_true', default=False,
                         help='Smoke mode: 1 epoch on a small train subset (fast end-to-end check)')
     parser.add_argument("--no-epoch-analyzer", action="store_true",

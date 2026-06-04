@@ -1053,6 +1053,95 @@ class TestVAESamplingTypes:
                 sampling_type="hypersphere_controlled",
             )
 
+    @pytest.mark.parametrize("mode", SAMPLING_MODES)
+    def test_kl_weight_variable_inits_from_kl_loss_weight(self, mode):
+        """The schedulable kl_weight tf.Variable starts == the ctor kl_loss_weight
+        (so with no warmup callback attached, behavior is identical to before)."""
+        klw = 0.007
+        vae = VAE(
+            latent_dim=self.LATENT_DIM,
+            input_shape=self.INPUT_SHAPE,
+            sampling_type=mode,
+            kl_loss_weight=klw,
+        )
+        assert vae.kl_loss_weight == klw  # python-float source of truth
+        assert float(keras.ops.convert_to_numpy(vae.kl_weight)) == pytest.approx(klw)
+
+    def test_kl_loss_weight_roundtrips_with_kl_weight_variable(self):
+        """Adding the kl_weight variable must not break get_config/from_config
+        round-trip of the python-float kl_loss_weight."""
+        klw = 0.003
+        vae = VAE(
+            latent_dim=self.LATENT_DIM,
+            input_shape=self.INPUT_SHAPE,
+            sampling_type="vmf",
+            kl_loss_weight=klw,
+        )
+        cfg = vae.get_config()
+        assert cfg["kl_loss_weight"] == klw
+        rebuilt = VAE.from_config(cfg)
+        assert rebuilt.kl_loss_weight == klw
+        # The rebuilt model's variable also re-inits from the round-tripped float.
+        assert float(keras.ops.convert_to_numpy(rebuilt.kl_weight)) == pytest.approx(klw)
+
+    def test_vmf_initial_kappa_is_high(self):
+        """vmf encoder_kappa head starts at kappa ~= softplus(12) ~= 12 (the
+        zeros-kernel + Constant(12) bias init), NOT softplus(0) ~= 0.69. This is
+        the posterior-collapse cure (D-007): z is informative from step 0."""
+        vae = VAE(
+            latent_dim=self.LATENT_DIM,
+            input_shape=(8, 8, 1),
+            sampling_type="vmf",
+        )
+        x = keras.random.normal((4, 8, 8, 1))
+        out = vae(x, training=False)
+        kappa = keras.ops.convert_to_numpy(out["z_log_var"])
+        assert kappa.shape == (4, 1)
+        # softplus(12) ~= 12.000006; the zeros kernel makes init independent of x.
+        assert float(kappa.min()) > 8.0, f"init kappa too low: {kappa.ravel()}"
+        assert float(kappa.mean()) == pytest.approx(12.0, abs=1.0)
+
+
+class TestKLWarmupCallback:
+    """The train_vae KL-warmup callback ramps model.kl_weight 0 -> target."""
+
+    def _build_model(self, kl_loss_weight=0.02):
+        return VAE(
+            latent_dim=4,
+            input_shape=(8, 8, 1),
+            sampling_type="vmf",
+            kl_loss_weight=kl_loss_weight,
+        )
+
+    def test_warmup_ramps_then_saturates(self):
+        from train.vae.train_vae import KLWarmupCallback
+
+        target = 0.02
+        N = 5
+        model = self._build_model(kl_loss_weight=target)
+        cb = KLWarmupCallback(target=target, warmup_epochs=N)
+        cb.set_model(model)
+
+        seen = []
+        for epoch in range(0, N + 3):
+            cb.on_epoch_begin(epoch)
+            seen.append(float(keras.ops.convert_to_numpy(model.kl_weight)))
+
+        # epoch 0 -> 0; linear ramp; saturates at target from epoch N onward.
+        assert seen[0] == pytest.approx(0.0)
+        assert seen[1] == pytest.approx(target * 1 / N)
+        assert seen[N - 1] == pytest.approx(target * (N - 1) / N)
+        assert seen[N] == pytest.approx(target)
+        assert seen[N + 2] == pytest.approx(target)  # clamped, no overshoot
+        # Monotone non-decreasing.
+        assert all(b >= a - 1e-9 for a, b in zip(seen, seen[1:]))
+
+    def test_warmup_rejects_nonpositive_epochs(self):
+        from train.vae.train_vae import KLWarmupCallback
+
+        with pytest.raises(ValueError):
+            KLWarmupCallback(target=0.01, warmup_epochs=0)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

@@ -285,6 +285,21 @@ class VAE(keras.Model):
         # Initialize the Model
         super().__init__(inputs=inputs, outputs=outputs, name=name or "vae", **kwargs)
 
+        # Schedulable KL weight (non-trainable scalar) read by train_step /
+        # test_step in place of the python float self.kl_loss_weight. A warmup
+        # callback (train_vae.py) can assign this under tf.function so the
+        # effective KL weight ramps 0 -> kl_loss_weight over the first N epochs
+        # (cures vmf posterior collapse; D-007). Default == kl_loss_weight, so
+        # with no callback attached behavior is identical to before. The python
+        # float self.kl_loss_weight remains the get_config source of truth.
+        self.kl_weight = self.add_weight(
+            name="kl_weight",
+            shape=(),
+            initializer=keras.initializers.Constant(float(kl_loss_weight)),
+            trainable=False,
+            dtype="float32",
+        )
+
         # Create a reusable decoder model from the main graph. This allows
         # self.decode() to reuse the trained decoder weights.
         decoder_input = self.get_layer("vae_sampling").output
@@ -403,18 +418,24 @@ class VAE(keras.Model):
         # kappa). For gaussian/hypersphere the head is a raw (possibly negative)
         # log-variance with bias Constant(-2.0) so the shell / variance starts
         # thin. For vmf the head must be STRICTLY POSITIVE (kappa > 0), so a
-        # softplus is applied AND the bias is initialized to 0.0 (softplus(0) ~=
-        # 0.69, a mild starting concentration). The same kappa tensor flows BOTH
-        # into VMFSampling AND into the vmf KL (vmf_kl_divergence) -- they must
-        # agree, so this single head is the sole source of kappa.
+        # softplus is applied. The bias is initialized HIGH (Constant(12.0)) and
+        # the kernel to zeros so kappa STARTS at softplus(12) ~= 12 (an
+        # informative concentration) and is PREDICTABLE at init (not swamped by
+        # W.h). The same kappa tensor flows BOTH into VMFSampling AND into the
+        # vmf KL (vmf_kl_divergence) -- they must agree, so this single head is
+        # the sole source of kappa. The head still learns per-sample kappa after
+        # init (the zeros kernel only fixes the t=0 value).
         if self.sampling_type == "vmf":
+            # DECISION plan_2026-06-04_6196678d/D-007: higher init kappa (~12) +
+            # zeros kernel breaks the posterior-collapse trap (z informative from
+            # step 0); see decisions.md D-006/D-007. Do NOT revert to
+            # bias="zeros" (softplus(0)~=0.69 -> uniform latent -> decoder
+            # ignores z -> kappa driven to 0 -> recon stalls at the data mean).
             kappa_raw = layers.Dense(
                 units=1,
                 use_bias=self.use_bias,
-                kernel_initializer=keras.initializers.RandomNormal(
-                    mean=0.0, stddev=0.01
-                ),
-                bias_initializer="zeros",
+                kernel_initializer="zeros",
+                bias_initializer=keras.initializers.Constant(12.0),
                 kernel_regularizer=self.kernel_regularizer,
                 name="encoder_kappa",
             )(x)
@@ -836,8 +857,9 @@ class VAE(keras.Model):
             reconstruction_loss = self._compute_reconstruction_loss(x, reconstruction)
             kl_loss = self._compute_kl_loss(outputs["z_mean"], outputs["z_log_var"])
 
-            # Total loss
-            total_loss = reconstruction_loss + self.kl_loss_weight * kl_loss
+            # Total loss (kl_weight is the schedulable warmup weight; == the
+            # ctor kl_loss_weight unless a warmup callback is ramping it).
+            total_loss = reconstruction_loss + self.kl_weight * kl_loss
 
             # Add regularization losses
             if self.losses:
@@ -887,7 +909,7 @@ class VAE(keras.Model):
         # Compute losses
         reconstruction_loss = self._compute_reconstruction_loss(x, reconstruction)
         kl_loss = self._compute_kl_loss(outputs["z_mean"], outputs["z_log_var"])
-        total_loss = reconstruction_loss + self.kl_loss_weight * kl_loss
+        total_loss = reconstruction_loss + self.kl_weight * kl_loss
 
         # Add regularization losses
         if self.losses:
