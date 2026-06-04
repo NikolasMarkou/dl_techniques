@@ -85,17 +85,38 @@ def plot_latent_space(
         return
 
     outputs = model.predict(data, batch_size=batch_size, verbose=0)
-    z_mean = outputs['z_mean']
+    z_mean = np.asarray(outputs['z_mean'])
     labels = labels.flatten() if labels.ndim > 1 else labels
 
+    # DECISION plan_2026-06-04_7ff8ea8b/D-002: for hypersphere modes the decoder
+    # consumes the ON-SPHERE latent z = radius * normalize(z_mean + eps); the raw
+    # z_mean is the UNNORMALIZED mean and can have ||z_mean|| >> 4, so the old hard
+    # [-4,4] clamp rendered a healthy direction-spread as a "collapsed point". Plot
+    # the on-sphere direction u = z_mean/||z_mean|| (the REAL latent) here, NOT raw
+    # z_mean. For gaussian, autoscale instead of clamping so a high-variance run is
+    # not clipped either. See decisions.md D-002.
+    is_sphere = str(model.sampling_type).startswith("hypersphere")
+    if is_sphere:
+        norm = np.linalg.norm(z_mean, axis=1, keepdims=True)
+        coords = z_mean / np.maximum(norm, 1e-12)
+        title_q = "on-sphere direction"
+        lim = 1.3
+    else:
+        coords = z_mean
+        title_q = "z_mean"
+        lim = None
+
     plt.figure(figsize=(12, 10))
-    scatter = plt.scatter(z_mean[:, 0], z_mean[:, 1], c=labels, cmap='viridis', s=5, alpha=0.7)
+    scatter = plt.scatter(coords[:, 0], coords[:, 1], c=labels, cmap='viridis', s=5, alpha=0.7)
     plt.colorbar(scatter, ticks=np.arange(len(np.unique(labels)))).set_label('Class', rotation=270, labelpad=15)
     plt.xlabel("Latent Dim 1")
     plt.ylabel("Latent Dim 2")
-    plt.title(f'Latent Space - Epoch {epoch}' if epoch else 'Final Latent Space', fontweight='bold')
-    plt.xlim(-4, 4)
-    plt.ylim(-4, 4)
+    base = f'Latent Space [{title_q}]'
+    plt.title(f'{base} - Epoch {epoch}' if epoch else f'Final {base}', fontweight='bold')
+    if lim is not None:
+        plt.xlim(-lim, lim)
+        plt.ylim(-lim, lim)
+        plt.gca().set_aspect('equal')
     plt.grid(True, alpha=0.3)
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()

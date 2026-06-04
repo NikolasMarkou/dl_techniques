@@ -25,6 +25,28 @@ deliberately NOT compared here. Only two signals are comparable across modes:
    0.5x and 2.0x that bandwidth. LOWER MMD = generated distribution closer to
    real = better.
 
+Mode-aware latent diagnostics (D-002)
+-------------------------------------
+For the hypersphere modes the decoder consumes the ON-SPHERE latent
+``z = radius * normalize(z_mean + eps)``; the dict ``z_mean`` is the
+UNNORMALIZED mean and can have ``||z_mean|| >> 1``, so plotting raw ``z_mean``
+on a fixed axis is misleading (a healthy direction-spread renders as a
+"collapsed point"). The honest, dimension-agnostic collapse signal is therefore
+the concentration of the per-sample UNIT direction ``u = z_mean/||z_mean||``:
+
+- ``dir_concentration`` = ``||mean(u)||`` over all test samples (0.0 = directions
+  uniformly spread = healthy latent usage; 1.0 = all directions identical =
+  collapsed). Computed for ALL modes; this is the primary collapse metric and is
+  dimension-agnostic (works for latent_dim=2 and latent_dim=16). LOWER is better.
+- ``angular_coverage`` = fraction of 36 angle-bins (latent_dim==2 only; ``nan``
+  otherwise) that hold more than ``uniform/10`` of the samples.
+- ``mean_z_mean_norm`` = mean ``||z_mean||``. For hypersphere modes this norm is
+  IRRELEVANT (only the direction matters); it is reported for context only.
+
+For latent_dim==2 the scatter PNG plots the on-sphere direction on the unit
+circle (hypersphere modes) or the raw 2D ``z_mean`` blob (gaussian, autoscaled),
+plus an angle-per-class step-histogram for the hypersphere modes.
+
 Verdict decision-rule (baked into ``print_verdict``)
 ---------------------------------------------------
 A "hypersphere WORKS" conclusion requires, for a hypersphere arm vs gaussian:
@@ -67,7 +89,6 @@ from dl_techniques.layers.sampling import Sampling, HypersphereSampling
 from train.vae.train_vae import (
     CUSTOM_OBJECTS,
     plot_reconstruction_comparison,
-    plot_latent_space,
 )
 
 ACTIVE_UNIT_VAR_THRESHOLD = 0.01  # z_mean per-dim variance floor for "active"
@@ -285,10 +306,18 @@ def mmd_to_real(
 # --------------------------------------------------------------------------- #
 
 
+N_ANGLE_BINS = 36  # angular-coverage bins (latent_dim==2)
+
+
 def latent_diagnostics(
     model: VAE, x_test: np.ndarray, save_path: str, batch_size: int = 256
-) -> Tuple[int, float, np.ndarray]:
-    """Encode the test set and report active units + ``||z_mean||`` stats.
+) -> Dict[str, float]:
+    """Encode the test set and report mode-aware latent collapse diagnostics.
+
+    The honest, dimension-agnostic collapse signal is the concentration of the
+    per-sample UNIT direction ``u = z_mean/||z_mean||`` (D-002): a hypersphere
+    decoder consumes the on-sphere latent, so ``||z_mean||`` magnitude is
+    irrelevant — only the DIRECTION matters.
 
     Args:
         model: A loaded VAE arm.
@@ -297,7 +326,9 @@ def latent_diagnostics(
         batch_size: Forward-pass batch size.
 
     Returns:
-        Tuple of (active_units, mean_latent_norm, per_dim_variance).
+        Dict with keys ``active_units``, ``mean_z_mean_norm``,
+        ``dir_concentration``, ``angular_coverage`` (``nan`` unless
+        latent_dim==2).
     """
     z_mean = model.predict(x_test, batch_size=batch_size, verbose=0)["z_mean"]
     z_mean = np.asarray(z_mean)
@@ -306,17 +337,121 @@ def latent_diagnostics(
     norms = np.linalg.norm(z_mean, axis=1)
     mean_norm = float(norms.mean())
 
+    # Per-sample UNIT direction (the REAL latent for hypersphere modes).
+    unit = z_mean / np.maximum(norms[:, None], 1e-12)
+    # dir_concentration = ||mean(u)||: 0 = directions uniformly spread (healthy),
+    # 1 = all directions identical (collapsed). Dimension-agnostic.
+    dir_concentration = float(np.linalg.norm(unit.mean(axis=0)))
+
+    if model.latent_dim == 2:
+        ang = np.arctan2(unit[:, 1], unit[:, 0])
+        occ = np.histogram(ang, bins=N_ANGLE_BINS, range=(-np.pi, np.pi))[0]
+        uniform = len(ang) / N_ANGLE_BINS
+        angular_coverage = float((occ > uniform / 10.0).mean())
+    else:
+        angular_coverage = float("nan")
+
     plt.figure(figsize=(7, 4))
     plt.hist(norms, bins=60, color="steelblue", alpha=0.85)
     plt.axvline(mean_norm, color="crimson", linestyle="--", label=f"mean={mean_norm:.3f}")
-    plt.xlabel("||z_mean|| (L2 norm per sample)")
+    plt.xlabel("||z_mean|| (L2 norm per sample) [irrelevant for hypersphere modes]")
     plt.ylabel("count")
-    plt.title(f"Latent norm distribution ({model.sampling_type})")
+    plt.title(
+        f"z_mean norm distribution ({model.sampling_type}) | "
+        f"dir_concentration={dir_concentration:.3f}"
+    )
     plt.legend()
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
     plt.close()
-    return active_units, mean_norm, per_dim_var
+    return {
+        "active_units": active_units,
+        "mean_z_mean_norm": mean_norm,
+        "dir_concentration": dir_concentration,
+        "angular_coverage": angular_coverage,
+    }
+
+
+def plot_latent_diagnostics_2d(
+    model: VAE,
+    x_test: np.ndarray,
+    y_test: np.ndarray,
+    scatter_path: str,
+    angle_path: str,
+    batch_size: int = 256,
+) -> List[str]:
+    """Mode-aware 2D latent scatter (+ angle-per-class hist for hypersphere modes).
+
+    For hypersphere modes the scatter shows the ON-SPHERE direction
+    ``u = z_mean/||z_mean||`` on the unit circle (the real latent), and an
+    angle-per-class step-histogram is also written (cf. ``/tmp/inspect_latent.py``).
+    For gaussian the raw 2D ``z_mean`` blob is shown autoscaled (no [-4,4] clamp).
+
+    Args:
+        model: A loaded VAE arm (latent_dim must be 2).
+        x_test: Test images.
+        y_test: Test labels.
+        scatter_path: PNG path for the scatter.
+        angle_path: PNG path for the angle-per-class hist (hypersphere only).
+        batch_size: Forward-pass batch size.
+
+    Returns:
+        List of PNG paths actually written.
+    """
+    z_mean = np.asarray(
+        model.predict(x_test, batch_size=batch_size, verbose=0)["z_mean"]
+    )
+    labels = y_test.flatten() if y_test.ndim > 1 else y_test
+    is_sphere = str(model.sampling_type).startswith("hypersphere")
+    written: List[str] = []
+
+    if is_sphere:
+        norms = np.linalg.norm(z_mean, axis=1, keepdims=True)
+        coords = z_mean / np.maximum(norms, 1e-12)
+        title = (
+            f"On-sphere direction (real latent) -- {model.sampling_type}\n"
+            "u = z_mean / ||z_mean|| (raw z_mean norm is irrelevant)"
+        )
+        lim = 1.3
+    else:
+        coords = z_mean
+        title = f"Raw z_mean (2D latent, autoscaled) -- {model.sampling_type}"
+        lim = None
+
+    plt.figure(figsize=(8, 7))
+    sc = plt.scatter(coords[:, 0], coords[:, 1], c=labels, cmap="tab10", s=4, alpha=0.5)
+    plt.colorbar(sc, ticks=np.arange(len(np.unique(labels)))).set_label("digit class")
+    plt.xlabel("dim 1")
+    plt.ylabel("dim 2")
+    plt.title(title, fontsize=10)
+    if lim is not None:
+        plt.xlim(-lim, lim)
+        plt.ylim(-lim, lim)
+        plt.gca().set_aspect("equal")
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(scatter_path, dpi=150)
+    plt.close()
+    written.append(scatter_path)
+
+    if is_sphere:
+        ang = np.arctan2(coords[:, 1], coords[:, 0])
+        plt.figure(figsize=(8, 5))
+        for c in range(int(labels.max()) + 1):
+            plt.hist(
+                ang[labels == c], bins=48, range=(-np.pi, np.pi),
+                histtype="step", lw=1.2, label=str(c),
+            )
+        plt.xlabel("on-sphere angle (rad)")
+        plt.ylabel("count")
+        plt.title(f"On-sphere angle per class -- {model.sampling_type}", fontsize=10)
+        plt.legend(title="class", ncol=2, fontsize=8)
+        plt.tight_layout()
+        plt.savefig(angle_path, dpi=150)
+        plt.close()
+        written.append(angle_path)
+
+    return written
 
 
 # --------------------------------------------------------------------------- #
@@ -430,9 +565,9 @@ def evaluate_arm(
     gen_pca = pca.transform(gen_flat)
     mmd = mmd_to_real(real_pca, gen_pca, seed=seed)
 
-    # Latent diagnostics + PNGs.
+    # Latent diagnostics + PNGs (mode-aware; D-002).
     hist_path = os.path.join(run_dir, "eval_latent_norm_hist.png")
-    active_units, mean_norm, _ = latent_diagnostics(model, x_test, hist_path)
+    diag = latent_diagnostics(model, x_test, hist_path)
 
     prior_path = os.path.join(run_dir, "eval_prior_samples.png")
     recon_path = os.path.join(run_dir, "eval_reconstructions.png")
@@ -447,9 +582,12 @@ def evaluate_arm(
     pngs = [hist_path, prior_path, recon_path, interp_path]
     if model.latent_dim == 2:
         scatter_path = os.path.join(run_dir, "eval_latent_scatter.png")
-        plot_latent_space(model, x_test[:5000], y_test[:5000], scatter_path)
-        if os.path.isfile(scatter_path):
-            pngs.append(scatter_path)
+        angle_path = os.path.join(run_dir, "eval_latent_angle_hist.png")
+        pngs.extend(
+            plot_latent_diagnostics_2d(
+                model, x_test[:5000], y_test[:5000], scatter_path, angle_path
+            )
+        )
 
     # Copy PNGs into the combined out dir, prefixed by sampler.
     for p in pngs:
@@ -465,8 +603,10 @@ def evaluate_arm(
         "mmd2_median": mmd["mmd2_median"],
         "mmd2_half": mmd["mmd2_half"],
         "mmd2_double": mmd["mmd2_double"],
-        "active_units": active_units,
-        "mean_latent_norm": mean_norm,
+        "active_units": diag["active_units"],
+        "dir_concentration": diag["dir_concentration"],
+        "angular_coverage": diag["angular_coverage"],
+        "mean_z_mean_norm": diag["mean_z_mean_norm"],
     }
 
 
@@ -482,7 +622,9 @@ COLUMNS = [
     "mmd2_half",
     "mmd2_double",
     "active_units",
-    "mean_latent_norm",
+    "dir_concentration",
+    "angular_coverage",
+    "mean_z_mean_norm",
 ]
 
 
@@ -501,6 +643,19 @@ def write_table(rows: List[Dict[str, float]], out_dir: str) -> None:
         f.write("|" + "|".join(["---"] * len(COLUMNS)) + "|\n")
         for r in rows:
             f.write("| " + " | ".join(_fmt(r[c]) for c in COLUMNS) + " |\n")
+        f.write(
+            "\n> **Note (D-002).** For the hypersphere modes the decoder consumes "
+            "the ON-SPHERE latent `z = radius * normalize(z_mean + eps)`, so "
+            "`mean_z_mean_norm` (the raw z_mean magnitude) is **irrelevant** — only "
+            "the direction matters. The honest, dimension-agnostic collapse signal "
+            "is `dir_concentration` = `||mean(u)||` over per-sample unit directions "
+            "`u = z_mean/||z_mean||` (0.0 = directions uniformly spread = healthy "
+            "latent usage; 1.0 = all directions identical = collapsed; LOWER is "
+            "better). `angular_coverage` (latent_dim==2 only) is the fraction of 36 "
+            "angle-bins holding > uniform/10 of samples (HIGHER = more of the circle "
+            "used). `total_loss`/`kl_loss` are NOT comparable across modes and are "
+            "deliberately omitted.\n"
+        )
 
 
 def _fmt(v) -> str:
@@ -514,8 +669,11 @@ def print_verdict(rows: List[Dict[str, float]]) -> None:
     """Print the combined table + a tentative PASS/FAIL per hypersphere arm.
 
     Decision-rule: a hypersphere arm "works" vs gaussian if recon_bce is within
-    ~10% AND mmd2_median is lower-or-comparable (<= 1.10x gaussian). Final human
-    judgment is the orchestrator's.
+    ~10% AND mmd2_median is lower-or-comparable (<= 1.10x gaussian). The
+    ``dir_concentration`` (LOWER = better latent usage; the honest, dimension-
+    agnostic collapse signal of the on-sphere DIRECTION, D-002) is reported
+    alongside recon + MMD to flag a real (vs viz-artifact) latent collapse.
+    Final human judgment is the orchestrator's.
     """
     lines = ["", "=" * 78, "FAIR VAE SAMPLER COMPARISON (recon + MMD; total_loss NOT compared)", "=" * 78]
     header = "| " + " | ".join(f"{c:>16}" for c in COLUMNS) + " |"
@@ -529,7 +687,14 @@ def print_verdict(rows: List[Dict[str, float]]) -> None:
     if gauss is None:
         lines.append("No gaussian baseline arm found -> cannot apply verdict rule.")
     else:
-        lines.append("Verdict (hypersphere arm vs gaussian baseline):")
+        lines.append(
+            "Verdict (hypersphere arm vs gaussian baseline; "
+            "dir_concentration LOWER = better latent usage):"
+        )
+        lines.append(
+            f"  {'gaussian (baseline)':>22}: "
+            f"dir_concentration {gauss['dir_concentration']:.3f}"
+        )
         for r in rows:
             if r["sampler"] == "gaussian":
                 continue
@@ -544,7 +709,8 @@ def print_verdict(rows: List[Dict[str, float]]) -> None:
             flag = "PASS" if (recon_ok and mmd_ok) else "FAIL"
             lines.append(
                 f"  {r['sampler']:>22}: recon_bce {recon_delta:+.1%} vs gauss | "
-                f"mmd2_median {mmd_delta:+.4g} ({mmd_ratio:.2f}x) | {flag}"
+                f"mmd2_median {mmd_delta:+.4g} ({mmd_ratio:.2f}x) | "
+                f"dir_concentration {r['dir_concentration']:.3f} | {flag}"
             )
     lines.append("=" * 78)
     lines.append("")
