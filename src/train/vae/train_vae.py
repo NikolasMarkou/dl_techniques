@@ -236,6 +236,7 @@ def train_model(args):
         monitor='val_total_loss',
         patience=args.patience,
         use_lr_schedule=False,
+        include_analyzer=not args.no_epoch_analyzer,
     )
 
     # Persist the run config so the comparison's config-diff sees `sampler`.
@@ -305,6 +306,8 @@ def main():
                         help='Seed for all RNG sources (reproducible comparison arms)')
     parser.add_argument('--smoke', action='store_true', default=False,
                         help='Smoke mode: 1 epoch on a small train subset (fast end-to-end check)')
+    parser.add_argument("--no-epoch-analyzer", action="store_true",
+                        help="Disable the per-epoch WeightWatcher/ModelAnalyzer callback (speeds up sweeps/comparisons).")
     parser.set_defaults(epochs=10, batch_size=128, patience=10)
     args = parser.parse_args()
 

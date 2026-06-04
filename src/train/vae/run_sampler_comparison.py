@@ -87,6 +87,7 @@ def run_comparison(args: argparse.Namespace) -> None:
             '--dataset', args.dataset,
             '--seed', str(args.seed),
             '--gpu', str(args.gpu),
+            '--no-epoch-analyzer',
         ]
         if args.smoke:
             cmd.append('--smoke')
