@@ -240,9 +240,17 @@ class HypersphereSampling(keras.layers.Layer):
     - The direction ``u`` comes from the encoder mean ``z_mean`` plus Gaussian
       noise ``epsilon ~ N(0, I)``, L2-normalized onto the unit sphere. The
       ``z_mean`` information is preserved in the *direction* of the sample.
-    - The radius ``r`` is a thin Gaussian shell centered at the constructor
-      ``radius`` with per-sample thickness ``exp(0.5 * log_var)``, where
-      ``log_var`` is a single scalar per sample (shape ``[B, 1]``).
+    - The radius ``r`` is a thin, strictly-positive shell of thickness
+      ``shell_thickness * radius`` around the constructor ``radius``,
+      per-sample modulated by ``exp(0.5 * log_var)``:
+      ``r = radius * (1 + shell_thickness * exp(0.5 * log_var) * eta)``, then
+      floored at ``radius * 0.05`` (5% of radius) so ``r`` is always positive.
+      Here ``log_var`` is a single scalar per sample (shape ``[B, 1]``) and is
+      clipped to ``[-20, 6]`` to cap ``exp`` blow-ups. This replaces the old
+      ``radius + exp(0.5 * log_var) * eta`` shell whose std collapsed to
+      ``radius`` (the radius-variance KL pulls ``log_var -> 0``), which let
+      ~10% of samples take a negative radius (antipode flip) and ~15% land
+      at/near the origin -> latents that were NOT on the sphere.
 
     The sample is ``z = r * u``. Because randomness is isolated in the
     auxiliary variables ``epsilon`` and ``eta``, gradients flow through ``z``
@@ -270,10 +278,10 @@ class HypersphereSampling(keras.layers.Layer):
         │  ~ N(0, I)   │    │  ~ N(0, 1)       │
         └──────┬───────┘    └───────┬──────────┘
                │                    │
-        ┌──────┴───────┐    ┌───────┴──────────┐
-        │ g = z_mean   │    │ r = radius +     │
-        │   + epsilon  │    │  exp(.5*lv)*eta  │
-        └──────┬───────┘    └───────┬──────────┘
+        ┌──────┴───────┐    ┌───────────────────────────────┐
+        │ g = z_mean   │    │ r = radius * (1 + thickness *  │
+        │   + epsilon  │    │   exp(.5*lv)*eta); floor 5%    │
+        └──────┬───────┘    └───────────────┬───────────────┘
                │                    │
         ┌──────┴───────┐            │
         │ u = g/||g||  │            │
@@ -299,6 +307,12 @@ class HypersphereSampling(keras.layers.Layer):
     :param radius: Positive radius of the hypersphere shell center. Must be
         ``> 0``.
     :type radius: float
+    :param shell_thickness: Positive relative thickness of the radius shell.
+        The per-sample radius is ``radius * (1 + shell_thickness *
+        exp(0.5 * log_var) * eta)`` floored at ``radius * 0.05``, so the shell
+        std at ``log_var = 0`` is ``shell_thickness * radius``. Must be ``> 0``.
+        Default ``0.1`` (a genuinely thin shell).
+    :type shell_thickness: float
     :param seed: Optional integer seed for reproducible sampling.
     :type seed: Optional[int]
     :param kwargs: Additional keyword arguments for the Layer base class.
@@ -307,6 +321,7 @@ class HypersphereSampling(keras.layers.Layer):
     def __init__(
         self,
         radius: float = 1.0,
+        shell_thickness: float = 0.1,
         seed: Optional[int] = None,
         **kwargs: Any
     ) -> None:
@@ -317,15 +332,23 @@ class HypersphereSampling(keras.layers.Layer):
         if radius <= 0:
             raise ValueError(f"radius must be > 0, got {radius}")
 
+        # Validate shell_thickness parameter
+        if shell_thickness <= 0:
+            raise ValueError(f"shell_thickness must be > 0, got {shell_thickness}")
+
         # Validate seed parameter
         if seed is not None and not isinstance(seed, int):
             raise TypeError(f"seed must be an integer or None, got {type(seed)}")
 
         # Store configuration
         self.radius = radius
+        self.shell_thickness = shell_thickness
         self.seed = seed
 
-        logger.debug(f"Initialized HypersphereSampling layer with radius={radius}, seed={seed}")
+        logger.debug(
+            f"Initialized HypersphereSampling layer with radius={radius}, "
+            f"shell_thickness={shell_thickness}, seed={seed}"
+        )
 
     def build(self, input_shape: Union[Tuple[Tuple, ...], List[Tuple]]) -> None:
         """Validate input shapes and build the layer.
@@ -412,8 +435,13 @@ class HypersphereSampling(keras.layers.Layer):
         e_0 = ops.one_hot(ops.zeros((batch,), dtype="int32"), dim)  # [B, D], 1 at col 0
         u = ops.where(norm < eps0, e_0, g / ops.maximum(norm, eps0))  # [B, D]
 
-        # Thin Gaussian shell radius centered at self.radius.
-        r = self.radius + ops.exp(0.5 * z_log_var) * eta  # [B, 1]
+        # DECISION plan_2026-06-04_7ff8ea8b/D-004: thin, strictly-positive radius shell.
+        # The old `radius + exp(0.5*lv)*eta` had shell std ~= radius (KL pulls rlv->0),
+        # giving ~10% negative radii / ~15% near-origin samples => latents off the sphere.
+        z_log_var_clipped = ops.clip(z_log_var, -20.0, 6.0)   # cap exp() blowups
+        shell = self.shell_thickness * ops.exp(0.5 * z_log_var_clipped) * eta   # [B,1]
+        r = self.radius * (1.0 + shell)
+        r = ops.maximum(r, self.radius * 0.05)   # strictly positive floor (5% of radius)
 
         # Scale the unit direction by the per-sample radius (broadcast [B,1]*[B,D]).
         z_sample = r * u  # [B, D]
@@ -441,6 +469,7 @@ class HypersphereSampling(keras.layers.Layer):
         config = super().get_config()
         config.update({
             "radius": self.radius,
+            "shell_thickness": self.shell_thickness,
             "seed": self.seed,
         })
         return config

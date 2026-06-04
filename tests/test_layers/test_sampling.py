@@ -573,14 +573,18 @@ class TestHypersphereSampling:
         layer = HypersphereSampling()
 
         assert layer.radius == 1.0
+        assert layer.shell_thickness == 0.1
         assert layer.seed is None
         assert layer.built is False
 
     def test_init_custom(self):
         """Test initialization with custom parameters."""
-        layer = HypersphereSampling(radius=2.0, seed=42, name="test_hsphere")
+        layer = HypersphereSampling(
+            radius=2.0, shell_thickness=0.25, seed=42, name="test_hsphere"
+        )
 
         assert layer.radius == 2.0
+        assert layer.shell_thickness == 0.25
         assert layer.seed == 42
         assert layer.name == "test_hsphere"
 
@@ -591,6 +595,14 @@ class TestHypersphereSampling:
 
         with pytest.raises(ValueError, match="radius must be > 0"):
             HypersphereSampling(radius=-1)
+
+    def test_invalid_shell_thickness(self):
+        """Test that non-positive shell_thickness raises ValueError."""
+        with pytest.raises(ValueError, match="shell_thickness must be > 0"):
+            HypersphereSampling(shell_thickness=0)
+
+        with pytest.raises(ValueError, match="shell_thickness must be > 0"):
+            HypersphereSampling(shell_thickness=-0.1)
 
     def test_invalid_seed(self):
         """Test that a non-int, non-None seed raises TypeError."""
@@ -626,20 +638,53 @@ class TestHypersphereSampling:
         assert computed_shape == (8, 5)
 
     def test_shell_radius(self):
-        """Thin shell -> per-sample ||z|| concentrates at radius."""
+        """Thin, strictly-positive shell -> ``||z|| > 0`` and mean ~ radius.
+
+        With the default ``shell_thickness=0.1`` and ``z_log_var=0`` the
+        per-sample radius is ``radius * (1 + 0.1 * eta)`` floored at
+        ``radius * 0.05``. The core fix is that ``||z||`` is ALWAYS strictly
+        positive (no antipode flips / no origin samples); the mean stays close
+        to ``radius`` (loose: within ``0.3 * radius``).
+        """
         radius = 2.0
-        layer = HypersphereSampling(radius=radius, seed=42)
+        layer = HypersphereSampling(radius=radius, seed=42)  # default thickness 0.1
 
         n = 2000
         latent_dim = 6
         z_mean = tf.random.normal([n, latent_dim])
-        z_log_var = tf.ones([n, 1]) * -20.0  # very thin shell
+        z_log_var = tf.zeros([n, 1])  # log_var = 0 -> shell std = 0.1 * radius
 
         output = layer([z_mean, z_log_var]).numpy()
 
         norms = np.linalg.norm(output, axis=-1)
         assert not np.any(np.isnan(output))
-        np.testing.assert_allclose(np.mean(norms), radius, atol=0.1)
+        # Core fix: strictly positive radius (no zero / negative / origin).
+        assert np.min(norms) > 0.0
+        # Mean concentrates near the configured radius (loose tolerance).
+        np.testing.assert_allclose(np.mean(norms), radius, atol=0.3 * radius)
+
+    def test_radius_strictly_positive(self):
+        """Large positive z_log_var must NOT produce zero/negative radii.
+
+        This directly locks the bug fix: under the old
+        ``radius + exp(0.5*lv)*eta`` shell a large ``log_var`` made the shell
+        std blow past the radius, flipping ~10% of samples to a negative radius
+        and dropping ~15% at/near the origin. With the thin, floored,
+        multiplicative shell ``||z||`` is always > 0 regardless of ``log_var``.
+        """
+        radius = 1.0
+        layer = HypersphereSampling(radius=radius, seed=11)
+
+        n = 2000
+        latent_dim = 8
+        z_mean = tf.random.normal([n, latent_dim])
+        z_log_var = tf.ones([n, 1]) * 5.0  # large variance -> stress the shell
+
+        output = layer([z_mean, z_log_var]).numpy()
+
+        norms = np.linalg.norm(output, axis=-1)
+        assert np.all(np.isfinite(output))
+        assert np.min(norms) > 0.0
 
     def test_degenerate_direction_e0(self):
         """Robust finiteness + norm~radius for the degenerate (zero-mean) case.
@@ -700,19 +745,23 @@ class TestHypersphereSampling:
 
     def test_serialization(self, input_shapes):
         """Test serialization and deserialization of the layer."""
-        original_layer = HypersphereSampling(radius=2.0, seed=42, name="test_hsphere")
+        original_layer = HypersphereSampling(
+            radius=2.0, shell_thickness=0.2, seed=42, name="test_hsphere"
+        )
         original_layer.build(input_shapes)
 
         config = original_layer.get_config()
         build_config = original_layer.get_build_config()
 
         assert config["radius"] == 2.0
+        assert config["shell_thickness"] == 0.2
         assert config["seed"] == 42
 
         recreated_layer = HypersphereSampling.from_config(config)
         recreated_layer.build_from_config(build_config)
 
         assert recreated_layer.radius == original_layer.radius
+        assert recreated_layer.shell_thickness == original_layer.shell_thickness
         assert recreated_layer.seed == original_layer.seed
         assert recreated_layer.name == original_layer.name
         assert recreated_layer.built == original_layer.built
