@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.vae.model import VAE, create_vae
-from dl_techniques.layers.sampling import Sampling
+from dl_techniques.layers.sampling import Sampling, HypersphereSampling
 
 from train.common import (
     setup_gpu,
@@ -28,12 +28,14 @@ from train.common import (
     create_callbacks,
     generate_training_curves,
     load_dataset,
+    set_seeds,
+    save_config_json,
 )
 
 plt.style.use('seaborn-v0_8-darkgrid')
 sns.set_palette("viridis")
 
-CUSTOM_OBJECTS = {"VAE": VAE, "Sampling": Sampling}
+CUSTOM_OBJECTS = {"VAE": VAE, "Sampling": Sampling, "HypersphereSampling": HypersphereSampling}
 
 
 # ---------------------------------------------------------------------
@@ -154,9 +156,20 @@ class VisualizationCallback(keras.callbacks.Callback):
 
 
 def plot_training_history(history, save_dir):
-    """Plot VAE training loss curves."""
+    """Plot VAE training loss curves.
+
+    ``generate_training_curves`` (train.common) hard-requires a ``'loss'``
+    history key, but the VAE tracks ``'total_loss'`` (no plain ``'loss'``).
+    Alias ``total_loss``/``val_total_loss`` to ``loss``/``val_loss`` so the
+    shared plotting util works without modifying the common helper.
+    """
+    hist = dict(history.history) if not isinstance(history, dict) else dict(history)
+    if 'loss' not in hist and 'total_loss' in hist:
+        hist['loss'] = hist['total_loss']
+    if 'val_loss' not in hist and 'val_total_loss' in hist:
+        hist['val_loss'] = hist['val_total_loss']
     generate_training_curves(
-        history=history,
+        history=hist,
         results_dir=save_dir,
         filename="training_history",
     )
@@ -171,6 +184,10 @@ def train_model(args):
     """Main training function."""
     logger.info("Starting VAE training")
     setup_gpu(gpu_id=args.gpu)
+
+    # Seed every RNG source BEFORE dataset load / model construction so
+    # comparison arms are reproducible (compare_runs reads per-run logs).
+    set_seeds(args.seed)
 
     # Load dataset — VAE keeps grayscale channel for MNIST
     if args.dataset.lower() == 'mnist':
@@ -187,6 +204,17 @@ def train_model(args):
     else:
         raise ValueError(f"Unsupported dataset: {args.dataset}")
 
+    # Smoke mode: subset the TRAIN set and force a single epoch so the full
+    # path (train -> CSVLogger -> best_model.keras -> reload) runs in seconds.
+    # Validation + create_callbacks (CSVLogger) stay INTACT so training_log.csv
+    # is still produced for compare_runs.
+    epochs = args.epochs
+    if args.smoke:
+        smoke_n = min(2000, x_train.shape[0])
+        x_train = x_train[:smoke_n]
+        epochs = 1
+        logger.info(f"[smoke] train subset={smoke_n}, epochs forced to 1")
+
     logger.info(f"Data: {x_train.shape[0]} train, {x_test.shape[0]} test, shape={input_shape}")
 
     # Create model
@@ -195,17 +223,23 @@ def train_model(args):
         latent_dim=args.latent_dim,
         variant="small",
         optimizer=args.optimizer,
+        sampling_type=args.sampler,
     )
     model.summary(print_fn=logger.info)
 
-    # Callbacks — VAE monitors val_total_loss, not val_accuracy
+    # Callbacks — VAE monitors val_total_loss, not val_accuracy.
+    # Include the sampler arm in model_name so the 3 comparison arms produce
+    # 3 distinct run dirs.
     callbacks, results_dir = create_callbacks(
-        model_name=f"vae_{args.dataset}",
+        model_name=f"vae_{args.dataset}_{args.sampler}",
         results_dir_prefix="vae",
         monitor='val_total_loss',
         patience=args.patience,
         use_lr_schedule=False,
     )
+
+    # Persist the run config so the comparison's config-diff sees `sampler`.
+    save_config_json(vars(args), results_dir)
     callbacks.append(
         VisualizationCallback((x_test, y_test), results_dir, args.dataset, args.viz_frequency, args.batch_size),
     )
@@ -213,7 +247,7 @@ def train_model(args):
     # Train
     history = model.fit(
         x_train, validation_data=(x_test, None),
-        epochs=args.epochs, batch_size=args.batch_size,
+        epochs=epochs, batch_size=args.batch_size,
         callbacks=callbacks, verbose=1,
     )
 
@@ -264,6 +298,13 @@ def main():
     parser.add_argument('--optimizer', type=str, default='adam')
     parser.add_argument('--viz-frequency', type=int, default=5, dest='viz_frequency',
                         help='Visualization frequency (epochs)')
+    parser.add_argument('--sampler', type=str, default='gaussian',
+                        choices=['gaussian', 'hypersphere_controlled', 'hypersphere_faithful'],
+                        help='Latent sampling mode passed to create_vae(sampling_type=...)')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='Seed for all RNG sources (reproducible comparison arms)')
+    parser.add_argument('--smoke', action='store_true', default=False,
+                        help='Smoke mode: 1 epoch on a small train subset (fast end-to-end check)')
     parser.set_defaults(epochs=10, batch_size=128, patience=10)
     args = parser.parse_args()
 
