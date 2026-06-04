@@ -71,7 +71,9 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.sampling import (
     Sampling,
     HypersphereSampling,
+    VMFSampling,
     create_sampling_layer,
+    vmf_kl_divergence,
 )
 
 # ---------------------------------------------------------------------
@@ -81,6 +83,7 @@ from dl_techniques.layers.sampling import (
 VALID_SAMPLING_TYPES = (
     "gaussian",
     "hypersphere",
+    "vmf",
 )
 
 # ---------------------------------------------------------------------
@@ -318,6 +321,13 @@ class VAE(keras.Model):
             z = create_sampling_layer("gaussian", name="vae_sampling")(
                 [z_mean, z_log_var]
             )
+        elif self.sampling_type == "vmf":
+            # z_log_var is the strictly-positive [B, 1] concentration kappa head
+            # (softplus). VMFSampling L2-normalizes z_mean internally onto the
+            # unit sphere -- do NOT pre-normalize z_mean here.
+            z = create_sampling_layer("vmf", name="vae_sampling")(
+                [z_mean, z_log_var]
+            )
         else:  # hypersphere
             # z_log_var is already the dedicated [B, 1] radius log-variance head.
             z = create_sampling_layer("hypersphere", name="vae_sampling")(
@@ -327,6 +337,11 @@ class VAE(keras.Model):
         # Build decoder
         reconstruction = self._build_decoder(z)
 
+        # NOTE: for sampling_type == "vmf" the "z_log_var" slot carries the
+        # strictly-positive concentration kappa[B, 1] (NOT a log-variance);
+        # for "hypersphere" it is the radius log-variance[B, 1]; for "gaussian"
+        # it is the diagonal log-variance[B, latent_dim]. The slot is reused
+        # (shape-only contract; see I7 / create_vae assertion).
         return {
             "z": z,
             "z_mean": z_mean,
@@ -382,12 +397,35 @@ class VAE(keras.Model):
             name="encoder_z_mean",
         )(x)
 
-        # The log-variance head emits the full latent_dim for the gaussian mode
+        # The second latent head emits the full latent_dim for the gaussian mode
         # (diagonal-Gaussian posterior), but a single scalar per sample [B, 1]
-        # for hypersphere, where it parameterizes the thickness of the radius
-        # shell. The bias is initialized to Constant(-2.0) in both cases so the
-        # shell / variance starts thin (mirrors the original Gaussian-mode
-        # initialization).
+        # for hypersphere (radius-shell log-variance) and vmf (vMF concentration
+        # kappa). For gaussian/hypersphere the head is a raw (possibly negative)
+        # log-variance with bias Constant(-2.0) so the shell / variance starts
+        # thin. For vmf the head must be STRICTLY POSITIVE (kappa > 0), so a
+        # softplus is applied AND the bias is initialized to 0.0 (softplus(0) ~=
+        # 0.69, a mild starting concentration). The same kappa tensor flows BOTH
+        # into VMFSampling AND into the vmf KL (vmf_kl_divergence) -- they must
+        # agree, so this single head is the sole source of kappa.
+        if self.sampling_type == "vmf":
+            kappa_raw = layers.Dense(
+                units=1,
+                use_bias=self.use_bias,
+                kernel_initializer=keras.initializers.RandomNormal(
+                    mean=0.0, stddev=0.01
+                ),
+                bias_initializer="zeros",
+                kernel_regularizer=self.kernel_regularizer,
+                name="encoder_kappa",
+            )(x)
+            # Softplus -> strictly positive concentration kappa[B, 1]. This is the
+            # value carried in the "z_log_var" output-dict slot for vmf (it is the
+            # concentration kappa, NOT a log-variance; see get_config / I7).
+            z_log_var = layers.Activation(
+                "softplus", name="encoder_kappa_softplus"
+            )(kappa_raw)
+            return z_mean, z_log_var
+
         log_var_units = 1 if self.sampling_type == "hypersphere" else self.latent_dim
         log_var_name = (
             "encoder_radius_log_var"
@@ -724,6 +762,17 @@ class VAE(keras.Model):
         if self.sampling_type == "gaussian":
             return keras.random.normal(shape=(num_samples, self.latent_dim))
 
+        if self.sampling_type == "vmf":
+            # The vMF prior (kappa = 0) IS exactly the uniform distribution on the
+            # unit sphere S^{D-1}. Marsaglia draw at radius 1.0; VMFSampling has no
+            # .radius attribute (vMF is unit-sphere by definition), so do NOT look
+            # it up here.
+            g = keras.random.normal(shape=(num_samples, self.latent_dim))
+            norm = keras.ops.sqrt(
+                keras.ops.sum(keras.ops.square(g), axis=-1, keepdims=True)
+            )
+            return g / keras.ops.maximum(norm, 1e-12)
+
         # Marsaglia/Muller: Gaussian draw, L2-normalize per row onto unit sphere,
         # scale by the layer radius. Zero-row degenerate case is floored the same
         # way HypersphereSampling.call does (ops.maximum(norm, eps)).
@@ -908,6 +957,16 @@ class VAE(keras.Model):
         # do NOT derive a full vMF S-VAE KL: this simplified regularizer is
         # user-locked scope and is float32-stable under [-20, 20] clipping. See
         # decisions.md D-003.
+        # DECISION plan_2026-06-04_6196678d/D-003: vMF closed-form KL (depends on
+        # kappa + latent_dim only); reuses the verified vmf_kl_divergence helper.
+        # z_log_var carries the strictly-positive concentration kappa[B, 1] (NOT a
+        # log-variance) -- do NOT clip/exp it or substitute the Gaussian/radius KL;
+        # vmf_kl_divergence is the orchestrator-verified analytic vMF->uniform KL
+        # (per-row >= 0). See decisions.md D-003.
+        if self.sampling_type == "vmf":
+            kl_loss = ops.mean(vmf_kl_divergence(z_log_var, self.latent_dim))
+            return kl_loss
+
         if self.sampling_type == "hypersphere":
             rlv_clip = ops.clip(z_log_var, -20.0, 20.0)
             kl_loss = ops.mean(0.5 * (ops.exp(rlv_clip) - rlv_clip - 1.0))
@@ -1062,10 +1121,11 @@ def create_vae(
         2,
         latent_dim,
     ), "z_mean shape mismatch"
-    # hypersphere emits a single scalar radius log-variance [B, 1];
-    # gaussian keeps the full [B, latent_dim] log_var.
+    # hypersphere emits a single scalar radius log-variance [B, 1] and vmf a
+    # single scalar concentration kappa [B, 1]; gaussian keeps the full
+    # [B, latent_dim] log_var.
     expected_log_var_dim = (
-        1 if model.sampling_type == "hypersphere" else latent_dim
+        1 if model.sampling_type in ("hypersphere", "vmf") else latent_dim
     )
     assert test_output["z_log_var"].shape == (
         2,

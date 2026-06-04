@@ -6,12 +6,13 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from dl_techniques.layers.sampling import Sampling, HypersphereSampling
+from dl_techniques.layers.sampling import Sampling, HypersphereSampling, VMFSampling
 from dl_techniques.models.vae.model import VAE, create_vae, create_vae_from_config
 
 SAMPLING_MODES = [
     "gaussian",
     "hypersphere",
+    "vmf",
 ]
 
 
@@ -790,7 +791,7 @@ class TestVAESamplingTypes:
     BATCH = 2
 
     def _expected_log_var_dim(self, mode: str) -> int:
-        return 1 if mode == "hypersphere" else self.LATENT_DIM
+        return 1 if mode in ("hypersphere", "vmf") else self.LATENT_DIM
 
     def test_invalid_sampling_type(self):
         """An unknown sampling_type must raise ValueError."""
@@ -888,6 +889,7 @@ class TestVAESamplingTypes:
                     "VAE": VAE,
                     "Sampling": Sampling,
                     "HypersphereSampling": HypersphereSampling,
+                    "VMFSampling": VMFSampling,
                 },
             )
 
@@ -942,6 +944,70 @@ class TestVAESamplingTypes:
         np.testing.assert_allclose(
             norms, np.full_like(norms, radius), atol=1e-4
         )
+
+    def test_sample_prior_vmf_lives_on_unit_sphere(self):
+        """vmf mode: every prior latent is uniform on the UNIT sphere (||z|| == 1).
+
+        The vMF prior (kappa = 0) is exactly the uniform distribution on
+        S^{D-1}; _sample_prior draws via Marsaglia at radius 1.0 and reads NO
+        .radius attribute (VMFSampling has none).
+        """
+        vae = VAE(
+            latent_dim=self.LATENT_DIM,
+            input_shape=self.INPUT_SHAPE,
+            sampling_type="vmf",
+        )
+        z = keras.ops.convert_to_numpy(vae._sample_prior(512))
+        assert z.shape == (512, self.LATENT_DIM)
+        norms = np.linalg.norm(z, axis=-1)
+        np.testing.assert_allclose(norms, np.ones_like(norms), atol=1e-4)
+
+    def test_vmf_save_load_roundtrip_deterministic_mu(self):
+        """vmf .save()/load_model() round-trip; deterministic encode() mu matches.
+
+        Compares the DETERMINISTIC encoder mean (NOT the stochastic VMFSampling
+        output). custom_objects must include VMFSampling (plus the gaussian /
+        hypersphere samplers) for reload to resolve the registered layers.
+        """
+        vae = VAE(
+            latent_dim=self.LATENT_DIM,
+            input_shape=self.INPUT_SHAPE,
+            sampling_type="vmf",
+        )
+        vae.compile(optimizer="adam")
+        data = np.random.rand(4, *self.INPUT_SHAPE).astype(np.float32)
+        # LESSONS: call/fit once before save so all layers are built.
+        vae.fit(data, epochs=1, verbose=0)
+
+        test_input = data[:self.BATCH]
+        original_z_mean, original_kappa = vae.encode(test_input)
+        # The vmf "z_log_var" slot is the strictly-positive concentration kappa.
+        assert original_kappa.shape == (self.BATCH, 1)
+        assert float(keras.ops.convert_to_numpy(original_kappa).min()) > 0.0
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = os.path.join(tmpdir, "vmf.keras")
+            vae.save(model_path)
+
+            loaded = keras.models.load_model(
+                model_path,
+                custom_objects={
+                    "VAE": VAE,
+                    "Sampling": Sampling,
+                    "HypersphereSampling": HypersphereSampling,
+                    "VMFSampling": VMFSampling,
+                },
+            )
+
+            assert loaded.sampling_type == "vmf"
+
+            loaded_z_mean, _ = loaded.encode(test_input)
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(original_z_mean),
+                keras.ops.convert_to_numpy(loaded_z_mean),
+                rtol=1e-4,
+                atol=1e-4,
+            )
 
     @pytest.mark.parametrize("mode", SAMPLING_MODES)
     def test_sample_decodes_prior_to_image_shape(self, mode):
