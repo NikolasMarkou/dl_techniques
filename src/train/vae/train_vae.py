@@ -6,6 +6,7 @@ per-epoch reconstructions and latent space visualizations.
 """
 
 import os
+import math
 import keras
 import argparse
 import matplotlib
@@ -298,12 +299,50 @@ def train_model(args):
 
     logger.info(f"Data: {x_train.shape[0]} train, {x_test.shape[0]} test, shape={input_shape}")
 
-    # Create model
+    # Build a REAL LR schedule into the optimizer. Previously the saved config
+    # advertised lr_schedule/learning_rate but NEITHER was consumed: create_vae
+    # built a plain adam at constant LR and use_lr_schedule=False disabled the
+    # callback path, so the LR was FLAT for the whole run. We now bake the
+    # schedule into the optimizer (NOT a callback -- see create_callbacks below).
+    # Horizon uses the ACTUAL train length here (post smoke-subset) so smoke gets
+    # the right total_steps; smoke forces epochs=1 which is fine.
+    steps_per_epoch = math.ceil(x_train.shape[0] / args.batch_size)
+    total_steps = max(1, epochs * steps_per_epoch)
+    if args.lr_schedule == 'cosine':
+        # alpha = final-LR floor = 1% of the initial LR.
+        lr = keras.optimizers.schedules.CosineDecay(
+            initial_learning_rate=args.learning_rate,
+            decay_steps=total_steps,
+            alpha=0.01,
+        )
+    else:
+        # 'constant' (or anything else): plain float -> flat LR (explicit opt-out,
+        # preserves the historical behavior).
+        lr = args.learning_rate
+    opt_name = str(args.optimizer).lower()
+    if opt_name == 'adam':
+        opt = keras.optimizers.Adam(learning_rate=lr)
+    elif opt_name == 'adamw':
+        opt = keras.optimizers.AdamW(learning_rate=lr)
+    elif opt_name == 'sgd':
+        opt = keras.optimizers.SGD(learning_rate=lr)
+    else:
+        opt = keras.optimizers.get(
+            {'class_name': args.optimizer, 'config': {'learning_rate': lr}}
+        )
+    logger.info(
+        f"LR schedule: {args.lr_schedule} (optimizer={args.optimizer}); "
+        f"initial_lr={args.learning_rate}, total_steps={total_steps} "
+        f"({epochs} epochs x {steps_per_epoch} steps/epoch)"
+    )
+
+    # Create model. Pass the optimizer INSTANCE (with the schedule baked in) so
+    # create_vae uses it as-is instead of falling back to its constant-LR default.
     model = create_vae(
         input_shape=input_shape,
         latent_dim=args.latent_dim,
         variant="small",
-        optimizer=args.optimizer,
+        optimizer=opt,
         sampling_type=args.sampler,
         kl_loss_weight=args.kl_loss_weight,
     )
@@ -317,6 +356,9 @@ def train_model(args):
         results_dir_prefix="vae",
         monitor=args.early_stop_monitor,
         patience=args.patience,
+        # LR schedule lives in the OPTIMIZER now (CosineDecay baked into `opt`
+        # above). Keep use_lr_schedule=False so we do NOT also attach a
+        # ReduceLROnPlateau callback -- that would double-schedule the LR.
         use_lr_schedule=False,
         include_analyzer=not args.no_epoch_analyzer,
     )
