@@ -14,7 +14,7 @@ import tempfile
 import os
 from typing import Tuple, List
 
-from dl_techniques.layers.sampling import Sampling
+from dl_techniques.layers.sampling import Sampling, HypersphereSampling
 
 
 class TestSampling:
@@ -541,3 +541,211 @@ class TestSampling:
             output = layer([z_mean, z_log_var])
             assert output.shape == z_mean.shape
             assert not np.any(np.isnan(output.numpy()))
+
+
+class TestHypersphereSampling:
+    """Test suite for HypersphereSampling thin-shell sampler implementation."""
+
+    @pytest.fixture
+    def input_shapes(self) -> Tuple[Tuple, Tuple]:
+        """Create test input shapes: z_mean [B, D], z_log_var [B, 1]."""
+        return ((None, 10), (None, 1))
+
+    @pytest.fixture
+    def input_tensors(self):
+        """Create test input tensors: z_mean [B, D], z_log_var [B, 1]."""
+        batch_size = 4
+        latent_dim = 10
+        z_mean = tf.random.normal([batch_size, latent_dim])
+        z_log_var = tf.random.normal([batch_size, 1])
+        return z_mean, z_log_var
+
+    def test_init_defaults(self):
+        """Test initialization with default parameters."""
+        layer = HypersphereSampling()
+
+        assert layer.radius == 1.0
+        assert layer.seed is None
+        assert layer.built is False
+
+    def test_init_custom(self):
+        """Test initialization with custom parameters."""
+        layer = HypersphereSampling(radius=2.0, seed=42, name="test_hsphere")
+
+        assert layer.radius == 2.0
+        assert layer.seed == 42
+        assert layer.name == "test_hsphere"
+
+    def test_invalid_radius(self):
+        """Test that non-positive radius raises ValueError."""
+        with pytest.raises(ValueError, match="radius must be > 0"):
+            HypersphereSampling(radius=0)
+
+        with pytest.raises(ValueError, match="radius must be > 0"):
+            HypersphereSampling(radius=-1)
+
+    def test_invalid_seed(self):
+        """Test that a non-int, non-None seed raises TypeError."""
+        with pytest.raises(TypeError, match="seed must be an integer or None"):
+            HypersphereSampling(seed=1.5)
+
+    def test_build_validation(self):
+        """Test build-time shape validation."""
+        # Wrong number of inputs
+        with pytest.raises(ValueError, match="expects exactly 2 inputs"):
+            HypersphereSampling().build(((None, 10),))
+
+        # Rank-1 inputs (not at least 2D)
+        with pytest.raises(ValueError, match="at least 2D"):
+            HypersphereSampling().build(((10,), (1,)))
+
+        # z_log_var last dim != 1
+        with pytest.raises(ValueError, match="last dimension must be exactly 1"):
+            HypersphereSampling().build(((None, 5), (None, 2)))
+
+    def test_output_shape(self):
+        """Test forward pass output shape and compute_output_shape."""
+        layer = HypersphereSampling(seed=42)
+        z_mean = tf.random.normal([8, 5])
+        z_log_var = tf.random.normal([8, 1])
+
+        output = layer([z_mean, z_log_var])
+
+        assert output.shape == (8, 5)
+        assert np.all(np.isfinite(output.numpy()))
+
+        computed_shape = layer.compute_output_shape(((8, 5), (8, 1)))
+        assert computed_shape == (8, 5)
+
+    def test_shell_radius(self):
+        """Thin shell -> per-sample ||z|| concentrates at radius."""
+        radius = 2.0
+        layer = HypersphereSampling(radius=radius, seed=42)
+
+        n = 2000
+        latent_dim = 6
+        z_mean = tf.random.normal([n, latent_dim])
+        z_log_var = tf.ones([n, 1]) * -20.0  # very thin shell
+
+        output = layer([z_mean, z_log_var]).numpy()
+
+        norms = np.linalg.norm(output, axis=-1)
+        assert not np.any(np.isnan(output))
+        np.testing.assert_allclose(np.mean(norms), radius, atol=0.1)
+
+    def test_degenerate_direction_e0(self):
+        """Robust finiteness + norm~radius for the degenerate (zero-mean) case.
+
+        The exact ``g == 0`` -> ``e_0`` branch is a measure-zero path (g =
+        z_mean + eps with eps ~ N(0, I) is a.s. non-zero) and is covered by the
+        Step-1 empirical check. Here we assert the observable robust property:
+        with ``z_mean = 0`` the output stays finite (no NaN) across many draws
+        and concentrates at ``radius`` (since normalize(eps) is a unit vector
+        and the shell is thin), exercising the same normalize-with-e_0 code path
+        without faking an exact-zero direction.
+        """
+        radius = 3.0
+        layer = HypersphereSampling(radius=radius, seed=7)
+
+        n = 1000
+        latent_dim = 4
+        z_mean = tf.zeros([n, latent_dim])
+        z_log_var = tf.ones([n, 1]) * -20.0
+
+        output = layer([z_mean, z_log_var]).numpy()
+
+        assert np.all(np.isfinite(output))
+        norms = np.linalg.norm(output, axis=-1)
+        np.testing.assert_allclose(np.mean(norms), radius, atol=0.1)
+
+    def test_deterministic_with_seed(self, input_tensors):
+        """Test that same seed produces identical output."""
+        z_mean, z_log_var = input_tensors
+
+        layer1 = HypersphereSampling(seed=42)
+        layer2 = HypersphereSampling(seed=42)
+
+        output1 = layer1([z_mean, z_log_var])
+        output2 = layer2([z_mean, z_log_var])
+
+        np.testing.assert_array_equal(output1.numpy(), output2.numpy())
+
+    def test_gradient_flow(self, input_tensors):
+        """Test gradient flow through the layer to both inputs."""
+        z_mean, z_log_var = input_tensors
+        layer = HypersphereSampling(seed=42)
+
+        with tf.GradientTape() as tape:
+            z_mean_var = tf.Variable(z_mean)
+            z_log_var_var = tf.Variable(z_log_var)
+
+            outputs = layer([z_mean_var, z_log_var_var])
+            loss = tf.reduce_sum(tf.square(outputs))
+
+        grads = tape.gradient(loss, [z_mean_var, z_log_var_var])
+
+        # Both gradients exist and are not None
+        assert all(g is not None for g in grads)
+
+        # Both gradients have values (not all zeros)
+        assert all(np.any(g.numpy() != 0) for g in grads)
+
+    def test_serialization(self, input_shapes):
+        """Test serialization and deserialization of the layer."""
+        original_layer = HypersphereSampling(radius=2.0, seed=42, name="test_hsphere")
+        original_layer.build(input_shapes)
+
+        config = original_layer.get_config()
+        build_config = original_layer.get_build_config()
+
+        assert config["radius"] == 2.0
+        assert config["seed"] == 42
+
+        recreated_layer = HypersphereSampling.from_config(config)
+        recreated_layer.build_from_config(build_config)
+
+        assert recreated_layer.radius == original_layer.radius
+        assert recreated_layer.seed == original_layer.seed
+        assert recreated_layer.name == original_layer.name
+        assert recreated_layer.built == original_layer.built
+
+    def test_model_save_load(self, tmp_path):
+        """Test saving and loading a model with the custom layer."""
+        batch_size = 4
+        latent_dim = 10
+        z_mean = tf.random.normal([batch_size, latent_dim])
+        z_log_var = tf.random.normal([batch_size, 1])
+
+        # Create a model with the custom layer
+        z_mean_input = keras.Input(shape=(latent_dim,), name="z_mean")
+        z_log_var_input = keras.Input(shape=(1,), name="z_log_var")
+
+        z_sample = HypersphereSampling(
+            radius=2.0, seed=42, name="hsphere_layer"
+        )([z_mean_input, z_log_var_input])
+        outputs = keras.layers.Dense(5, activation="linear")(z_sample)
+
+        model = keras.Model(
+            inputs=[z_mean_input, z_log_var_input],
+            outputs=outputs
+        )
+
+        original_prediction = model.predict([z_mean, z_log_var], verbose=0)
+
+        model_path = os.path.join(str(tmp_path), "model.keras")
+        model.save(model_path)
+
+        loaded_model = keras.models.load_model(
+            model_path,
+            custom_objects={"HypersphereSampling": HypersphereSampling}
+        )
+
+        loaded_prediction = loaded_model.predict([z_mean, z_log_var], verbose=0)
+
+        # With the same seed, predictions should be identical
+        np.testing.assert_array_equal(original_prediction, loaded_prediction)
+
+        hsphere_layer = loaded_model.get_layer("hsphere_layer")
+        assert isinstance(hsphere_layer, HypersphereSampling)
+        assert hsphere_layer.radius == 2.0
+        assert hsphere_layer.seed == 42
