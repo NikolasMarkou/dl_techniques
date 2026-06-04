@@ -701,8 +701,39 @@ class VAE(keras.Model):
         """
         return self.decoder(z)
 
+    def _sample_prior(self, num_samples: int) -> keras.KerasTensor:
+        """Draw latent samples from this mode's TRUE prior.
+
+        Args:
+            num_samples: Number of latent vectors to draw
+
+        Returns:
+            Latent tensor of shape ``(num_samples, latent_dim)``
+        """
+        # DECISION plan_2026-06-04_7ff8ea8b/D-001: hypersphere modes were trained
+        # with a uniform-on-sphere latent of the layer radius, so their prior is
+        # NOT N(0, I). Drawing N(0, I) here (the old behavior) decodes the wrong
+        # prior and makes the contribution look broken. Branch on sampling_type:
+        # gaussian -> N(0, I); hypersphere_* -> Marsaglia uniform-on-sphere * radius.
+        if self.sampling_type == "gaussian":
+            return keras.random.normal(shape=(num_samples, self.latent_dim))
+
+        # Marsaglia/Muller: Gaussian draw, L2-normalize per row onto unit sphere,
+        # scale by the layer radius. Zero-row degenerate case is floored the same
+        # way HypersphereSampling.call does (ops.maximum(norm, eps)).
+        radius = self.get_layer("vae_sampling").radius
+        g = keras.random.normal(shape=(num_samples, self.latent_dim))
+        norm = keras.ops.sqrt(
+            keras.ops.sum(keras.ops.square(g), axis=-1, keepdims=True)
+        )
+        u = g / keras.ops.maximum(norm, 1e-12)
+        return radius * u
+
     def sample(self, num_samples: int) -> keras.KerasTensor:
         """Generate samples from the latent space.
+
+        Decodes latents drawn from this mode's TRUE prior (N(0, I) for gaussian,
+        uniform-on-sphere of the layer radius for hypersphere modes).
 
         Args:
             num_samples: Number of samples to generate
@@ -710,7 +741,7 @@ class VAE(keras.Model):
         Returns:
             Generated samples tensor
         """
-        z = keras.random.normal(shape=(num_samples, self.latent_dim))
+        z = self._sample_prior(num_samples)
         return self.decode(z)
 
     def train_step(self, data) -> Dict[str, keras.KerasTensor]:

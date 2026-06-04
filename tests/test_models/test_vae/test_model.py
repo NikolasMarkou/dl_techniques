@@ -916,6 +916,48 @@ class TestVAESamplingTypes:
                 self._expected_log_var_dim(mode),
             )
 
+    def test_sample_prior_gaussian_is_standard_normal(self):
+        """gaussian mode: _sample_prior draws ~ N(0, I) (mean~0, std~1)."""
+        vae = VAE(
+            latent_dim=self.LATENT_DIM,
+            input_shape=self.INPUT_SHAPE,
+            sampling_type="gaussian",
+        )
+        z = keras.ops.convert_to_numpy(vae._sample_prior(20000))
+        assert z.shape == (20000, self.LATENT_DIM)
+        # Loose tolerances: a finite Monte-Carlo draw, not exact moments.
+        assert abs(float(z.mean())) < 0.05
+        assert abs(float(z.std()) - 1.0) < 0.05
+
+    @pytest.mark.parametrize(
+        "mode", ["hypersphere_controlled", "hypersphere_faithful"]
+    )
+    def test_sample_prior_hypersphere_lives_on_radius_shell(self, mode):
+        """hypersphere modes: every prior latent has L2 norm == layer radius."""
+        vae = VAE(
+            latent_dim=self.LATENT_DIM,
+            input_shape=self.INPUT_SHAPE,
+            sampling_type=mode,
+        )
+        radius = vae.get_layer("vae_sampling").radius
+        z = keras.ops.convert_to_numpy(vae._sample_prior(512))
+        assert z.shape == (512, self.LATENT_DIM)
+        norms = np.linalg.norm(z, axis=-1)
+        np.testing.assert_allclose(
+            norms, np.full_like(norms, radius), atol=1e-4
+        )
+
+    @pytest.mark.parametrize("mode", SAMPLING_MODES)
+    def test_sample_decodes_prior_to_image_shape(self, mode):
+        """sample() still returns decoded images of the input shape (all modes)."""
+        vae = VAE(
+            latent_dim=self.LATENT_DIM,
+            input_shape=self.INPUT_SHAPE,
+            sampling_type=mode,
+        )
+        samples = vae.sample(num_samples=3)
+        assert samples.shape == (3,) + self.INPUT_SHAPE
+
     @pytest.mark.parametrize("mode", SAMPLING_MODES)
     def test_create_vae_factory_assertion_branch(self, mode):
         """create_vae's internal validation passes for every mode."""
