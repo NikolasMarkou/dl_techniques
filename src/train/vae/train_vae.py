@@ -344,7 +344,7 @@ def main():
     parser.add_argument('--viz-frequency', type=int, default=5, dest='viz_frequency',
                         help='Visualization frequency (epochs)')
     parser.add_argument('--sampler', type=str, default='gaussian',
-                        choices=['gaussian', 'hypersphere_controlled', 'hypersphere_faithful'],
+                        choices=['gaussian', 'hypersphere'],
                         help='Latent sampling mode passed to create_vae(sampling_type=...)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Seed for all RNG sources (reproducible comparison arms)')

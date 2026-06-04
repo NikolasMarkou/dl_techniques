@@ -1,10 +1,10 @@
-"""Three-arm VAE sampler comparison driver (gaussian vs hypersphere modes).
+"""Two-arm VAE sampler comparison driver (gaussian vs hypersphere).
 
 Trains the production VAE trainer once per sampler mode under an identical seed
-(``gaussian``, ``hypersphere_controlled``, ``hypersphere_faithful``), then emits
-two side-by-side comparisons via ``train.common.compare_runs`` — each hypersphere
-arm against the ``gaussian`` baseline — so the sampler's effect can be read off
-``comparison.md`` + loss/metric curves.
+(``gaussian``, ``hypersphere``), then emits a side-by-side comparison via
+``train.common.compare_runs`` — the hypersphere arm against the ``gaussian``
+baseline — so the sampler's effect can be read off ``comparison.md`` +
+loss/metric curves.
 
 CPU-only driver rationale:
     This module only ORCHESTRATES training subprocesses (each child gets its own
@@ -38,15 +38,15 @@ os.environ['CUDA_VISIBLE_DEVICES'] = ''
 from train.common.compare_runs import compare_runs
 from dl_techniques.utils.logger import logger
 
-# Fixed, ordered arm list. gaussian is the baseline both hypersphere arms are
+# Fixed, ordered arm list. gaussian is the baseline the hypersphere arm is
 # compared against.
-ARMS = ["gaussian", "hypersphere_controlled", "hypersphere_faithful"]
+ARMS = ["gaussian", "hypersphere"]
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Serial 3-arm VAE sampler comparison "
-                    "(gaussian vs hypersphere_controlled vs hypersphere_faithful)."
+        description="Serial 2-arm VAE sampler comparison "
+                    "(gaussian vs hypersphere)."
     )
     parser.add_argument('--dataset', type=str, default='mnist',
                         help='Dataset for every arm (default mnist — smaller/faster '
@@ -115,21 +115,13 @@ def run_comparison(args: argparse.Namespace) -> None:
 
     base_out = os.path.join('results', f'vae_sampler_compare_{args.dataset}')
 
-    controlled_out = compare_runs(
+    hypersphere_out = compare_runs(
         run_dirs['gaussian'],
-        run_dirs['hypersphere_controlled'],
-        labels=('gaussian', 'hypersphere_controlled'),
-        output_dir=os.path.join(base_out, 'gaussian_vs_controlled'),
+        run_dirs['hypersphere'],
+        labels=('gaussian', 'hypersphere'),
+        output_dir=os.path.join(base_out, 'gaussian_vs_hypersphere'),
     )
-    logger.info(f"Comparison (gaussian vs hypersphere_controlled) written to {controlled_out}")
-
-    faithful_out = compare_runs(
-        run_dirs['gaussian'],
-        run_dirs['hypersphere_faithful'],
-        labels=('gaussian', 'hypersphere_faithful'),
-        output_dir=os.path.join(base_out, 'gaussian_vs_faithful'),
-    )
-    logger.info(f"Comparison (gaussian vs hypersphere_faithful) written to {faithful_out}")
+    logger.info(f"Comparison (gaussian vs hypersphere) written to {hypersphere_out}")
 
 
 def main() -> None:

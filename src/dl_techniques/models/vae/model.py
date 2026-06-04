@@ -80,8 +80,7 @@ from dl_techniques.layers.sampling import (
 
 VALID_SAMPLING_TYPES = (
     "gaussian",
-    "hypersphere_controlled",
-    "hypersphere_faithful",
+    "hypersphere",
 )
 
 # ---------------------------------------------------------------------
@@ -103,14 +102,14 @@ class VAE(keras.Model):
         filters: List of integers, filter counts for each depth level.
         kl_loss_weight: Float, weight for KL divergence loss term.
         sampling_type: String, the latent sampling mode. One of:
-            ``"gaussian"`` (baseline diagonal-Gaussian reparameterization),
-            ``"hypersphere_controlled"`` (unchanged Gaussian encoder/KL, but
-            the latent sample is drawn on a hypersphere shell using a
-            mean-reduced ``[B, 1]`` log-variance), or
-            ``"hypersphere_faithful"`` (a dedicated ``Dense(1)`` radius
-            log-variance head plus a radius-variance KL replacing the Gaussian
-            KL; the direction has an implicit uniform-sphere prior). The faithful
-            mode is a deliberate simplification and is NOT a full vMF S-VAE.
+            ``"gaussian"`` (baseline diagonal-Gaussian reparameterization), or
+            ``"hypersphere"`` (a dedicated ``Dense(1)`` radius log-variance head
+            plus a radius-variance KL replacing the Gaussian KL; the direction
+            has an implicit uniform-sphere prior). The hypersphere mode is a
+            deliberate simplification and is NOT a full vMF S-VAE. The legacy
+            value ``"hypersphere_faithful"`` is accepted as a deprecated alias of
+            ``"hypersphere"`` (so old configs/checkpoints still load); the
+            dropped ``"hypersphere_controlled"`` mode now raises ``ValueError``.
         kernel_initializer: String or initializer, weight initialization method.
         kernel_regularizer: Regularizer for convolutional weights.
         use_batch_norm: Boolean, whether to use batch normalization.
@@ -215,6 +214,22 @@ class VAE(keras.Model):
             )
         if len(input_shape) != 3:
             raise ValueError(f"input_shape must be 3D, got {input_shape}")
+
+        # Back-compat: map the renamed legacy value through BEFORE validation /
+        # storage so from_config()/load_model() on a legacy checkpoint (whose
+        # stored sampling_type is "hypersphere_faithful") deserializes cleanly
+        # and self.sampling_type reports the current name "hypersphere".
+        if sampling_type == "hypersphere_faithful":
+            logger.warning(
+                "sampling_type 'hypersphere_faithful' is deprecated; "
+                "use 'hypersphere'."
+            )
+            sampling_type = "hypersphere"
+        if sampling_type == "hypersphere_controlled":
+            raise ValueError(
+                "sampling_type 'hypersphere_controlled' was removed (dropped "
+                "negative-control arm). Use 'gaussian' or 'hypersphere'."
+            )
         if sampling_type not in VALID_SAMPLING_TYPES:
             raise ValueError(
                 f"sampling_type must be one of {list(VALID_SAMPLING_TYPES)}, "
@@ -294,25 +309,16 @@ class VAE(keras.Model):
         # "vae_sampling" in EVERY mode. self.decoder is extracted by this exact
         # layer name (see __init__: self.get_layer("vae_sampling").output), and
         # HypersphereSampling emits [B, latent_dim] just like Sampling, so the
-        # extraction is shape-safe for all three modes. Do NOT rename the
-        # sampler per-mode or branch the decoder-extraction line: that would add
-        # surface to the one code path the whole decode()/sample() API depends
-        # on. See decisions.md D-004.
+        # extraction is shape-safe for both modes. Do NOT rename the sampler
+        # per-mode or branch the decoder-extraction line: that would add surface
+        # to the one code path the whole decode()/sample() API depends on. See
+        # decisions.md D-004.
         if self.sampling_type == "gaussian":
             # Baseline diagonal-Gaussian reparameterization over [B, D].
             z = create_sampling_layer("gaussian", name="vae_sampling")(
                 [z_mean, z_log_var]
             )
-        elif self.sampling_type == "hypersphere_controlled":
-            # Isolate the sampler: the encoder is unchanged (z_log_var is
-            # [B, D]); reduce it to a single scalar [B, 1] for the hypersphere
-            # radius shell via a mean over the last axis. Applying keras.ops in
-            # the functional graph auto-wraps it as a serializable op-node.
-            radius_log_var = ops.mean(z_log_var, axis=-1, keepdims=True)
-            z = create_sampling_layer("hypersphere", name="vae_sampling")(
-                [z_mean, radius_log_var]
-            )
-        else:  # hypersphere_faithful
+        else:  # hypersphere
             # z_log_var is already the dedicated [B, 1] radius log-variance head.
             z = create_sampling_layer("hypersphere", name="vae_sampling")(
                 [z_mean, z_log_var]
@@ -376,16 +382,16 @@ class VAE(keras.Model):
             name="encoder_z_mean",
         )(x)
 
-        # The log-variance head emits the full latent_dim for the
-        # gaussian / hypersphere_controlled modes (diagonal-Gaussian posterior),
-        # but a single scalar per sample [B, 1] for hypersphere_faithful, where
-        # it parameterizes the thickness of the radius shell. The bias is
-        # initialized to Constant(-2.0) in both cases so the shell / variance
-        # starts thin (mirrors the original Gaussian-mode initialization).
-        log_var_units = 1 if self.sampling_type == "hypersphere_faithful" else self.latent_dim
+        # The log-variance head emits the full latent_dim for the gaussian mode
+        # (diagonal-Gaussian posterior), but a single scalar per sample [B, 1]
+        # for hypersphere, where it parameterizes the thickness of the radius
+        # shell. The bias is initialized to Constant(-2.0) in both cases so the
+        # shell / variance starts thin (mirrors the original Gaussian-mode
+        # initialization).
+        log_var_units = 1 if self.sampling_type == "hypersphere" else self.latent_dim
         log_var_name = (
             "encoder_radius_log_var"
-            if self.sampling_type == "hypersphere_faithful"
+            if self.sampling_type == "hypersphere"
             else "encoder_z_log_var"
         )
 
@@ -893,21 +899,21 @@ class VAE(keras.Model):
         Returns:
             KL divergence loss value
         """
-        # DECISION plan_2026-06-04_d4ef81f1/D-003: for hypersphere_faithful the
-        # Gaussian KL is the WRONG prior for a sphere. It is REPLACED by a
-        # simplified radius-variance KL (the 1-D Gaussian-Gaussian KL on the
-        # radius noise): kl = mean(0.5 * (exp(rlv) - rlv - 1)). There is NO
-        # direction-KL term (the direction has an implicit uniform-sphere prior;
-        # the radius mean is fixed at 1.0 by the sampler). Do NOT "restore" the
-        # Gaussian KL here and do NOT derive a full vMF S-VAE KL: this simplified
-        # regularizer is user-locked scope and is float32-stable under [-20, 20]
-        # clipping. See decisions.md D-003.
-        if self.sampling_type == "hypersphere_faithful":
+        # DECISION plan_2026-06-04_d4ef81f1/D-003: for hypersphere the Gaussian KL
+        # is the WRONG prior for a sphere. It is REPLACED by a simplified
+        # radius-variance KL (the 1-D Gaussian-Gaussian KL on the radius noise):
+        # kl = mean(0.5 * (exp(rlv) - rlv - 1)). There is NO direction-KL term
+        # (the direction has an implicit uniform-sphere prior; the radius mean is
+        # fixed at 1.0 by the sampler). Do NOT "restore" the Gaussian KL here and
+        # do NOT derive a full vMF S-VAE KL: this simplified regularizer is
+        # user-locked scope and is float32-stable under [-20, 20] clipping. See
+        # decisions.md D-003.
+        if self.sampling_type == "hypersphere":
             rlv_clip = ops.clip(z_log_var, -20.0, 20.0)
             kl_loss = ops.mean(0.5 * (ops.exp(rlv_clip) - rlv_clip - 1.0))
             return kl_loss
 
-        # gaussian / hypersphere_controlled: standard diagonal-Gaussian KL.
+        # gaussian: standard diagonal-Gaussian KL.
         # Clip log variance to prevent numerical issues
         z_log_var_clipped = ops.clip(z_log_var, -20.0, 20.0)
 
@@ -1056,10 +1062,10 @@ def create_vae(
         2,
         latent_dim,
     ), "z_mean shape mismatch"
-    # hypersphere_faithful emits a single scalar radius log-variance [B, 1];
-    # gaussian / hypersphere_controlled keep the full [B, latent_dim] log_var.
+    # hypersphere emits a single scalar radius log-variance [B, 1];
+    # gaussian keeps the full [B, latent_dim] log_var.
     expected_log_var_dim = (
-        1 if model.sampling_type == "hypersphere_faithful" else latent_dim
+        1 if model.sampling_type == "hypersphere" else latent_dim
     )
     assert test_output["z_log_var"].shape == (
         2,

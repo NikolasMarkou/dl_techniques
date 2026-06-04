@@ -11,8 +11,7 @@ from dl_techniques.models.vae.model import VAE, create_vae, create_vae_from_conf
 
 SAMPLING_MODES = [
     "gaussian",
-    "hypersphere_controlled",
-    "hypersphere_faithful",
+    "hypersphere",
 ]
 
 
@@ -784,14 +783,14 @@ class TestVAEIntegration:
 
 
 class TestVAESamplingTypes:
-    """Test the swappable ``sampling_type`` knob across all three modes."""
+    """Test the swappable ``sampling_type`` knob across both modes."""
 
     INPUT_SHAPE = (16, 16, 1)
     LATENT_DIM = 8
     BATCH = 2
 
     def _expected_log_var_dim(self, mode: str) -> int:
-        return 1 if mode == "hypersphere_faithful" else self.LATENT_DIM
+        return 1 if mode == "hypersphere" else self.LATENT_DIM
 
     def test_invalid_sampling_type(self):
         """An unknown sampling_type must raise ValueError."""
@@ -929,15 +928,12 @@ class TestVAESamplingTypes:
         assert abs(float(z.mean())) < 0.05
         assert abs(float(z.std()) - 1.0) < 0.05
 
-    @pytest.mark.parametrize(
-        "mode", ["hypersphere_controlled", "hypersphere_faithful"]
-    )
-    def test_sample_prior_hypersphere_lives_on_radius_shell(self, mode):
-        """hypersphere modes: every prior latent has L2 norm == layer radius."""
+    def test_sample_prior_hypersphere_lives_on_radius_shell(self):
+        """hypersphere mode: every prior latent has L2 norm == layer radius."""
         vae = VAE(
             latent_dim=self.LATENT_DIM,
             input_shape=self.INPUT_SHAPE,
-            sampling_type=mode,
+            sampling_type="hypersphere",
         )
         radius = vae.get_layer("vae_sampling").radius
         z = keras.ops.convert_to_numpy(vae._sample_prior(512))
@@ -968,6 +964,28 @@ class TestVAESamplingTypes:
             sampling_type=mode,
         )
         assert vae.sampling_type == mode
+
+    def test_legacy_hypersphere_faithful_alias_maps_to_hypersphere(self):
+        """Back-compat: the deprecated 'hypersphere_faithful' value constructs
+        successfully and is normalized to 'hypersphere' (so old configs /
+        checkpoints whose stored sampling_type is the legacy name still load)."""
+        vae = VAE(
+            latent_dim=self.LATENT_DIM,
+            input_shape=self.INPUT_SHAPE,
+            sampling_type="hypersphere_faithful",
+        )
+        assert vae.sampling_type == "hypersphere"
+        # The normalized value is what get_config round-trips.
+        assert vae.get_config()["sampling_type"] == "hypersphere"
+
+    def test_removed_hypersphere_controlled_raises(self):
+        """The dropped 'hypersphere_controlled' mode now raises ValueError."""
+        with pytest.raises(ValueError, match="hypersphere_controlled.*removed"):
+            VAE(
+                latent_dim=self.LATENT_DIM,
+                input_shape=self.INPUT_SHAPE,
+                sampling_type="hypersphere_controlled",
+            )
 
 
 if __name__ == "__main__":

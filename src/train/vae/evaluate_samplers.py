@@ -1,20 +1,19 @@
 """Fair, mode-agnostic evaluation of VAE latent samplers on MNIST.
 
 This script answers the question "does the hypersphere sampling contribution in
-``models/vae/`` actually work?" by comparing three trained VAE arms whose only
-difference is the latent ``sampling_type`` in
-``{gaussian, hypersphere_controlled, hypersphere_faithful}``.
+``models/vae/`` actually work?" by comparing trained VAE arms whose only
+difference is the latent ``sampling_type`` in ``{gaussian, hypersphere}``.
 
 Fairness rationale
 ------------------
 The prior 20-epoch A/B "verdict" ranked arms by ``total_loss``, which is NOT
-comparable across modes: ``hypersphere_faithful`` uses a scalar radius-variance
-KL while ``gaussian``/``hypersphere_controlled`` use a D-dimensional Gaussian KL.
-``kl_loss`` and ``total_loss`` are therefore apples-to-oranges and are
-deliberately NOT compared here. Only two signals are comparable across modes:
+comparable across modes: ``hypersphere`` uses a scalar radius-variance KL while
+``gaussian`` uses a D-dimensional Gaussian KL. ``kl_loss`` and ``total_loss`` are
+therefore apples-to-oranges and are deliberately NOT compared here. Only two
+signals are comparable across modes:
 
 1. **Reconstruction error** -- the per-pixel binary-crossentropy and MSE on the
-   held-out MNIST test set use the IDENTICAL formula in all three modes (the BCE
+   held-out MNIST test set use the IDENTICAL formula in both modes (the BCE
    matches ``VAE._compute_reconstruction_loss``: mean-over-pixels BCE per sample,
    then mean over the batch). This is the primary fair scalar.
 2. **MMD-to-real** -- a mode-agnostic generative metric. We decode ``n_gen``
@@ -61,8 +60,8 @@ CLI
     python -m train.vae.evaluate_samplers --runs DIR1 DIR2 DIR3 \
         [--out OUTDIR] [--n-gen 5000] [--seed 42]
 
-If ``--runs`` is omitted, the three most-recent ``results/vae_vae_mnist_*``
-dirs (newest ``config.json`` per distinct sampler) are auto-discovered.
+If ``--runs`` is omitted, the most-recent ``results/vae_vae_mnist_*`` dirs
+(newest ``config.json`` per distinct sampler) are auto-discovered.
 """
 
 import os
