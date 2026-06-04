@@ -6,7 +6,14 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
+from dl_techniques.layers.sampling import Sampling, HypersphereSampling
 from dl_techniques.models.vae.model import VAE, create_vae, create_vae_from_config
+
+SAMPLING_MODES = [
+    "gaussian",
+    "hypersphere_controlled",
+    "hypersphere_faithful",
+]
 
 
 class TestVAEInitialization:
@@ -774,6 +781,151 @@ class TestVAEIntegration:
             assert outputs["z"].shape == (4, latent_dim)
             assert outputs["z_mean"].shape == (4, latent_dim)
             assert outputs["z_log_var"].shape == (4, latent_dim)
+
+
+class TestVAESamplingTypes:
+    """Test the swappable ``sampling_type`` knob across all three modes."""
+
+    INPUT_SHAPE = (16, 16, 1)
+    LATENT_DIM = 8
+    BATCH = 2
+
+    def _expected_log_var_dim(self, mode: str) -> int:
+        return 1 if mode == "hypersphere_faithful" else self.LATENT_DIM
+
+    def test_invalid_sampling_type(self):
+        """An unknown sampling_type must raise ValueError."""
+        with pytest.raises(ValueError, match="sampling_type must be one of"):
+            VAE(latent_dim=self.LATENT_DIM, input_shape=self.INPUT_SHAPE,
+                sampling_type="not_a_mode")
+
+    def test_default_sampling_type_is_gaussian(self):
+        """The default mode is the unchanged gaussian baseline."""
+        vae = VAE(latent_dim=self.LATENT_DIM, input_shape=self.INPUT_SHAPE)
+        assert vae.sampling_type == "gaussian"
+
+    @pytest.mark.parametrize("mode", SAMPLING_MODES)
+    def test_build_and_forward_shapes(self, mode):
+        """Build + forward pass yields the right output dict and shapes."""
+        vae = VAE(
+            latent_dim=self.LATENT_DIM,
+            input_shape=self.INPUT_SHAPE,
+            sampling_type=mode,
+        )
+        x = keras.random.normal((self.BATCH,) + self.INPUT_SHAPE)
+        outputs = vae(x, training=False)
+
+        assert set(outputs.keys()) == {"z", "z_mean", "z_log_var", "reconstruction"}
+        assert outputs["reconstruction"].shape == x.shape
+        # z is [B, latent_dim] in ALL modes (HypersphereSampling emits [B, D]).
+        assert outputs["z"].shape == (self.BATCH, self.LATENT_DIM)
+        assert outputs["z_mean"].shape == (self.BATCH, self.LATENT_DIM)
+        assert outputs["z_log_var"].shape == (
+            self.BATCH,
+            self._expected_log_var_dim(mode),
+        )
+
+    @pytest.mark.parametrize("mode", SAMPLING_MODES)
+    def test_train_step_loss_finite(self, mode):
+        """A single train step produces a finite (non-NaN/Inf) total_loss."""
+        vae = VAE(
+            latent_dim=self.LATENT_DIM,
+            input_shape=self.INPUT_SHAPE,
+            sampling_type=mode,
+            kl_loss_weight=0.01,
+        )
+        vae.compile(optimizer="adam")
+        data = np.random.rand(4, *self.INPUT_SHAPE).astype(np.float32)
+
+        losses = vae.train_step(data)
+        total = keras.ops.convert_to_numpy(losses["total_loss"])
+        kl = keras.ops.convert_to_numpy(losses["kl_loss"])
+
+        assert np.isfinite(total), f"{mode}: total_loss not finite ({total})"
+        assert np.isfinite(kl), f"{mode}: kl_loss not finite ({kl})"
+
+    @pytest.mark.parametrize("mode", SAMPLING_MODES)
+    def test_get_config_carries_sampling_type(self, mode):
+        """get_config exposes sampling_type and from_config rebuilds it."""
+        vae = VAE(
+            latent_dim=self.LATENT_DIM,
+            input_shape=self.INPUT_SHAPE,
+            sampling_type=mode,
+        )
+        config = vae.get_config()
+        assert config["sampling_type"] == mode
+
+        rebuilt = VAE.from_config(config)
+        assert rebuilt.sampling_type == mode
+        assert rebuilt.latent_dim == self.LATENT_DIM
+
+    @pytest.mark.parametrize("mode", SAMPLING_MODES)
+    def test_save_load_roundtrip(self, mode):
+        """Full .save()/load_model() round-trip; decoder + encoder still work.
+
+        Compares the DETERMINISTIC encode() mean before/after reload (NOT the
+        stochastic reconstruction, since sampling layers are stochastic by
+        design).
+        """
+        vae = VAE(
+            latent_dim=self.LATENT_DIM,
+            input_shape=self.INPUT_SHAPE,
+            sampling_type=mode,
+        )
+        vae.compile(optimizer="adam")
+        data = np.random.rand(4, *self.INPUT_SHAPE).astype(np.float32)
+        vae.fit(data, epochs=1, verbose=0)
+
+        test_input = data[:self.BATCH]
+        original_z_mean, _ = vae.encode(test_input)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = os.path.join(tmpdir, f"{mode}.keras")
+            vae.save(model_path)
+
+            loaded = keras.models.load_model(
+                model_path,
+                custom_objects={
+                    "VAE": VAE,
+                    "Sampling": Sampling,
+                    "HypersphereSampling": HypersphereSampling,
+                },
+            )
+
+            assert loaded.sampling_type == mode
+
+            # Deterministic encoder mean must match exactly.
+            loaded_z_mean, _ = loaded.encode(test_input)
+            np.testing.assert_allclose(
+                keras.ops.convert_to_numpy(original_z_mean),
+                keras.ops.convert_to_numpy(loaded_z_mean),
+                rtol=1e-6,
+                atol=1e-6,
+            )
+
+            # Decoder is usable via the "vae_sampling" extraction.
+            z = keras.random.normal((self.BATCH, self.LATENT_DIM))
+            recon = loaded.decode(z)
+            assert recon.shape == (self.BATCH,) + self.INPUT_SHAPE
+
+            # Encoder is usable.
+            enc_mean, enc_log_var = loaded.encode(test_input)
+            assert enc_mean.shape == (self.BATCH, self.LATENT_DIM)
+            assert enc_log_var.shape == (
+                self.BATCH,
+                self._expected_log_var_dim(mode),
+            )
+
+    @pytest.mark.parametrize("mode", SAMPLING_MODES)
+    def test_create_vae_factory_assertion_branch(self, mode):
+        """create_vae's internal validation passes for every mode."""
+        vae = create_vae(
+            input_shape=self.INPUT_SHAPE,
+            latent_dim=self.LATENT_DIM,
+            variant="micro",
+            sampling_type=mode,
+        )
+        assert vae.sampling_type == mode
 
 
 if __name__ == "__main__":
