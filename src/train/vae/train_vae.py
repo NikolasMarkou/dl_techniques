@@ -80,10 +80,14 @@ def plot_latent_space(
         model: VAE, data: np.ndarray, labels: np.ndarray,
         save_path: str, epoch: Optional[int] = None, batch_size: int = 128,
 ) -> None:
-    """Plot 2D latent space colored by class labels."""
-    if model.latent_dim != 2:
-        return
+    """Plot the latent space colored by class labels (any latent_dim).
 
+    For latent_dim==2 the native 2 coordinates are used. For latent_dim>2 the
+    coordinates are projected to 2D with PCA so the plot is always produced
+    (the old `latent_dim != 2: return` guard silently emitted nothing for
+    higher-dim runs). For hypersphere modes the plotted quantity is the
+    ON-SPHERE direction (the real latent), not raw z_mean.
+    """
     outputs = model.predict(data, batch_size=batch_size, verbose=0)
     z_mean = np.asarray(outputs['z_mean'])
     labels = labels.flatten() if labels.ndim > 1 else labels
@@ -92,25 +96,35 @@ def plot_latent_space(
     # consumes the ON-SPHERE latent z = radius * normalize(z_mean + eps); the raw
     # z_mean is the UNNORMALIZED mean and can have ||z_mean|| >> 4, so the old hard
     # [-4,4] clamp rendered a healthy direction-spread as a "collapsed point". Plot
-    # the on-sphere direction u = z_mean/||z_mean|| (the REAL latent) here, NOT raw
-    # z_mean. For gaussian, autoscale instead of clamping so a high-variance run is
-    # not clipped either. See decisions.md D-002.
+    # the on-sphere direction u = z_mean/||z_mean|| (the REAL latent), NOT raw z_mean.
     is_sphere = str(model.sampling_type).startswith("hypersphere")
     if is_sphere:
         norm = np.linalg.norm(z_mean, axis=1, keepdims=True)
         coords = z_mean / np.maximum(norm, 1e-12)
         title_q = "on-sphere direction"
-        lim = 1.3
     else:
         coords = z_mean
         title_q = "z_mean"
+
+    # DECISION plan_2026-06-04_7ff8ea8b/D-007: plot ANY latent_dim. dim==2 uses the
+    # native coords (circle for hypersphere, autoscaled plane for gaussian); dim>2 is
+    # projected to 2D via PCA so latent_space_per_epoch is populated for every run.
+    if coords.shape[1] == 2:
+        coords2 = coords
+        xlabel, ylabel = "Latent Dim 1", "Latent Dim 2"
+        lim = 1.3 if is_sphere else None
+    else:
+        from sklearn.decomposition import PCA
+        coords2 = PCA(n_components=2).fit_transform(coords)
+        xlabel, ylabel = "PCA-1", "PCA-2"
+        title_q = f"{title_q}, PCA-2 of {coords.shape[1]}D"
         lim = None
 
     plt.figure(figsize=(12, 10))
-    scatter = plt.scatter(coords[:, 0], coords[:, 1], c=labels, cmap='viridis', s=5, alpha=0.7)
+    scatter = plt.scatter(coords2[:, 0], coords2[:, 1], c=labels, cmap='viridis', s=5, alpha=0.7)
     plt.colorbar(scatter, ticks=np.arange(len(np.unique(labels)))).set_label('Class', rotation=270, labelpad=15)
-    plt.xlabel("Latent Dim 1")
-    plt.ylabel("Latent Dim 2")
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
     base = f'Latent Space [{title_q}]'
     plt.title(f'{base} - Epoch {epoch}' if epoch else f'Final {base}', fontweight='bold')
     if lim is not None:
