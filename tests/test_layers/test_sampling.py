@@ -17,6 +17,7 @@ from typing import Tuple, List
 from dl_techniques.layers.sampling import (
     Sampling,
     HypersphereSampling,
+    VMFSampling,
     create_sampling_layer,
     create_sampling_from_config,
     validate_sampling_config,
@@ -868,12 +869,13 @@ class TestSamplingFactory:
             create_sampling_from_config({"radius": 2.0})
 
     def test_get_sampling_info_keys(self):
-        """get_sampling_info returns metadata for both registered types."""
+        """get_sampling_info returns metadata for all registered types."""
         info = get_sampling_info()
 
-        assert set(info.keys()) == {"gaussian", "hypersphere"}
+        assert set(info.keys()) == {"gaussian", "hypersphere", "vmf"}
         assert info["gaussian"]["class"] is Sampling
         assert info["hypersphere"]["class"] is HypersphereSampling
+        assert info["vmf"]["class"] is VMFSampling
 
     def test_get_sampling_info_is_shallow_copy(self):
         """Mutating the returned dict does NOT mutate the module registry."""
@@ -892,6 +894,211 @@ class TestSamplingFactory:
         """validate_sampling_config rejects an unknown type."""
         with pytest.raises(ValueError, match="Unknown sampling type"):
             validate_sampling_config("nope")
+
+
+class TestVMFSampling:
+    """Test suite for the VMFSampling Wood-rejection sampler (SC2/SC3)."""
+
+    @pytest.fixture
+    def input_tensors(self):
+        """Create test input tensors: z_mean [B, D], kappa [B, 1]."""
+        batch_size = 4
+        latent_dim = 8
+        z_mean = tf.random.normal([batch_size, latent_dim])
+        kappa = tf.ones([batch_size, 1]) * 10.0
+        return z_mean, kappa
+
+    def test_init_and_validation(self):
+        """Default ctor ok; bad rejection_oversample / seed types raise."""
+        layer = VMFSampling()
+        assert layer.rejection_oversample == 32
+        assert layer.seed is None
+        assert layer.built is False
+
+        layer2 = VMFSampling(rejection_oversample=16, seed=42, name="vmf")
+        assert layer2.rejection_oversample == 16
+        assert layer2.seed == 42
+        assert layer2.name == "vmf"
+
+        with pytest.raises(ValueError, match="rejection_oversample must be"):
+            VMFSampling(rejection_oversample=0)
+        with pytest.raises(ValueError, match="rejection_oversample must be"):
+            VMFSampling(rejection_oversample=-4)
+        with pytest.raises(ValueError, match="rejection_oversample must be"):
+            VMFSampling(rejection_oversample=8.0)
+        with pytest.raises(TypeError, match="seed must be an integer or None"):
+            VMFSampling(seed=1.5)
+
+    def test_build_validation(self):
+        """kappa last-dim != 1 raises; D < 2 (z_mean last-dim 1) raises."""
+        with pytest.raises(ValueError, match="expects exactly 2 inputs"):
+            VMFSampling().build(((None, 8),))
+
+        with pytest.raises(ValueError, match="last dimension must be exactly 1"):
+            VMFSampling().build(((None, 8), (None, 2)))
+
+        with pytest.raises(ValueError, match="latent_dim.*>= 2"):
+            VMFSampling().build(((None, 1), (None, 1)))
+
+    def test_output_shape(self):
+        """Output shape == z_mean shape; compute_output_shape mirrors it."""
+        layer = VMFSampling(seed=42)
+        z_mean = tf.random.normal([8, 5])
+        kappa = tf.ones([8, 1]) * 5.0
+
+        output = layer([z_mean, kappa])
+        assert output.shape == (8, 5)
+        assert np.all(np.isfinite(output.numpy()))
+
+        assert layer.compute_output_shape(((8, 5), (8, 1))) == (8, 5)
+
+    def test_unit_sphere_output(self):
+        """SC2: ||z|| within 1e-5 of 1.0 for all rows, multiple kappa and D."""
+        for D in (2, 8, 16):
+            for k in (1.0, 10.0, 100.0):
+                layer = VMFSampling(seed=123)
+                n = 256
+                z_mean = tf.random.normal([n, D])
+                kappa = tf.ones([n, 1]) * k
+                out = layer([z_mean, kappa]).numpy()
+                norms = np.linalg.norm(out, axis=-1)
+                assert np.all(np.isfinite(out)), f"non-finite at D={D}, k={k}"
+                np.testing.assert_allclose(
+                    norms, 1.0, atol=1e-5,
+                    err_msg=f"off-sphere at D={D}, k={k}",
+                )
+
+    def test_high_kappa_concentrates_near_mean(self):
+        """SC2: kappa=1000 -> mean(z . mu_hat) > 0.99."""
+        D = 8
+        n = 512
+        layer = VMFSampling(seed=7)
+        z_mean = tf.random.normal([n, D])
+        kappa = tf.ones([n, 1]) * 1000.0
+
+        out = layer([z_mean, kappa]).numpy()
+        mu_hat = z_mean.numpy()
+        mu_hat = mu_hat / np.linalg.norm(mu_hat, axis=-1, keepdims=True)
+        align = np.sum(out * mu_hat, axis=-1)
+        assert np.mean(align) > 0.99, f"mean alignment {np.mean(align):.4f}"
+
+    def test_low_kappa_spreads(self):
+        """Low kappa (~0.1) -> small mean resultant length (not concentrated)."""
+        D = 8
+        n = 2000
+        layer = VMFSampling(seed=3)
+        z_mean = tf.random.normal([n, D])
+        kappa = tf.ones([n, 1]) * 0.1
+
+        out = layer([z_mean, kappa]).numpy()
+        mu_hat = z_mean.numpy()
+        mu_hat = mu_hat / np.linalg.norm(mu_hat, axis=-1, keepdims=True)
+        align = np.sum(out * mu_hat, axis=-1)
+        # Near-uniform: mean alignment should be far from 1 (loose sanity bound).
+        assert np.mean(align) < 0.5, f"mean alignment {np.mean(align):.4f}"
+
+    def test_sampler_mean_matches_bessel_ratio(self):
+        """Strong cross-check: empirical mean(z . mu_hat) ~ A_m(k) = ratio.
+
+        Ties the sampler to the KL's Bessel ratio: for vMF(mu, k) on S^{m-1}
+        the expected resultant E[z . mu] = A_{m/2}(k) = I_{m/2}(k)/I_{m/2-1}(k),
+        which is exactly ``_bessel_ratio_cf(k, m/2)``.
+        """
+        from dl_techniques.layers.sampling import _bessel_ratio_cf
+
+        for m, k in [(2, 5.0), (4, 10.0), (8, 20.0)]:
+            n = 8000
+            layer = VMFSampling(seed=99)
+            # Fixed mu_hat = e_0.
+            z_mean = np.zeros((n, m), dtype="float32")
+            z_mean[:, 0] = 1.0
+            kappa = np.ones((n, 1), dtype="float32") * k
+            out = layer([tf.constant(z_mean), tf.constant(kappa)]).numpy()
+            emp = float(np.mean(out[:, 0]))  # z . e_0
+            ref = float(_bessel_ratio_cf(tf.constant([[k]]), m / 2.0).numpy()[0, 0])
+            assert abs(emp - ref) < 0.03, (
+                f"m={m}, k={k}: empirical {emp:.4f} vs A_m {ref:.4f}"
+            )
+
+    def test_gradient_flow(self, input_tensors):
+        """SC3: gradients to BOTH z_mean and kappa are not-None and non-zero."""
+        z_mean, kappa = input_tensors
+        layer = VMFSampling(seed=42)
+
+        with tf.GradientTape() as tape:
+            z_mean_var = tf.Variable(z_mean)
+            kappa_var = tf.Variable(kappa)
+            outputs = layer([z_mean_var, kappa_var])
+            loss = tf.reduce_sum(tf.square(outputs))
+
+        grads = tape.gradient(loss, [z_mean_var, kappa_var])
+
+        assert all(g is not None for g in grads)
+        assert all(np.any(g.numpy() != 0) for g in grads)
+
+    def test_get_config(self):
+        """get_config / from_config round-trip preserves all parameters."""
+        original = VMFSampling(
+            rejection_oversample=16, seed=42, name="vmf_test"
+        )
+        original.build(((None, 8), (None, 1)))
+
+        config = original.get_config()
+        assert config["rejection_oversample"] == 16
+        assert config["seed"] == 42
+
+        recreated = VMFSampling.from_config(config)
+        assert recreated.rejection_oversample == 16
+        assert recreated.seed == 42
+        assert recreated.name == "vmf_test"
+
+    def test_model_save_load(self, tmp_path):
+        """seed=42 determinism: saved+reloaded model gives identical output."""
+        batch_size = 4
+        latent_dim = 8
+        z_mean = tf.random.normal([batch_size, latent_dim])
+        kappa = tf.ones([batch_size, 1]) * 10.0
+
+        z_mean_input = keras.Input(shape=(latent_dim,), name="z_mean")
+        kappa_input = keras.Input(shape=(1,), name="kappa")
+
+        z_sample = VMFSampling(seed=42, name="vmf_layer")(
+            [z_mean_input, kappa_input]
+        )
+        outputs = keras.layers.Dense(5, activation="linear")(z_sample)
+
+        model = keras.Model(
+            inputs=[z_mean_input, kappa_input], outputs=outputs
+        )
+
+        original_prediction = model.predict([z_mean, kappa], verbose=0)
+
+        model_path = os.path.join(str(tmp_path), "model.keras")
+        model.save(model_path)
+
+        loaded_model = keras.models.load_model(
+            model_path, custom_objects={"VMFSampling": VMFSampling}
+        )
+        loaded_prediction = loaded_model.predict([z_mean, kappa], verbose=0)
+
+        # Stochastic by design but seed-reproducible -> identical predictions.
+        np.testing.assert_array_equal(original_prediction, loaded_prediction)
+
+        vmf_layer = loaded_model.get_layer("vmf_layer")
+        assert isinstance(vmf_layer, VMFSampling)
+        assert vmf_layer.seed == 42
+
+    def test_factory_create_vmf(self):
+        """create_sampling_layer('vmf') returns a VMFSampling layer."""
+        layer = create_sampling_layer("vmf")
+        assert isinstance(layer, VMFSampling)
+
+    def test_factory_seed_passthrough(self):
+        """seed + rejection_oversample flow through the factory."""
+        layer = create_sampling_layer("vmf", seed=42, rejection_oversample=16)
+        assert isinstance(layer, VMFSampling)
+        assert layer.seed == 42
+        assert layer.rejection_oversample == 16
 
 
 class TestVMFNumerics:

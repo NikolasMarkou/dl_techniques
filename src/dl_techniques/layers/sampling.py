@@ -640,6 +640,306 @@ def vmf_kl_divergence(
     return kappa_safe * A + log_Cm - log_Cm0
 
 # ---------------------------------------------------------------------
+# von Mises-Fisher (vMF) Reparameterized Sampler
+# ---------------------------------------------------------------------
+
+
+@keras.saving.register_keras_serializable()
+class VMFSampling(keras.layers.Layer):
+    """Sample from a von Mises-Fisher posterior on the unit hypersphere.
+
+    This stateless layer is the third sibling of :class:`Sampling` and
+    :class:`HypersphereSampling`. It draws a differentiable reparameterized
+    sample from the von Mises-Fisher distribution ``vMF(mu_hat, kappa)`` on the
+    UNIT sphere ``S^{D-1}`` (no radius scaling -- vMF is unit-sphere by
+    definition). ``mu_hat`` is the L2-normalized encoder mean ``z_mean`` and
+    ``kappa`` is a strictly-positive scalar concentration ``[B, 1]``. As
+    ``kappa -> 0`` the sample tends to the uniform distribution on the sphere;
+    as ``kappa -> inf`` it concentrates at ``mu_hat``. This is the true S-VAE
+    posterior of Davidson et al. (2018), in contrast to the thin-shell
+    :class:`HypersphereSampling` (which has no directional concentration).
+
+    **Sampling algorithm (Wood 1994 rejection + Householder).**
+
+    1. Draw an axial coordinate ``w in [-1, 1]`` (the cosine of the angle to
+       ``mu_hat``) via the Ulrich/Wood Beta-envelope rejection scheme. To avoid
+       a dynamic ``while_loop`` the layer draws ``rejection_oversample`` (K)
+       candidate ``w`` per row in one batched shot, accepts the FIRST valid
+       candidate per row, and falls back to the mode ``w = 1`` in the
+       vanishingly-rare event that all K candidates reject.
+    2. Draw a tangent direction ``v`` uniformly on ``S^{D-2}`` orthogonal to
+       the canonical pole ``e_0`` (first coordinate zeroed) and form the
+       canonical sample ``z_can = w * e_0 + sqrt(1 - w^2) * v`` (concentrated at
+       ``e_0``).
+    3. Rotate ``e_0 -> mu_hat`` by a Householder reflection so the sample
+       concentrates at the encoder direction. The degenerate ``mu_hat == e_0``
+       case is handled by the identity branch; a degenerate ``z_mean`` (norm
+       below ``eps``) falls back to ``e_0`` (the shared ``sampling.py`` idiom).
+
+    The output ``z`` is unit-norm for every row (``||z|| ~ 1`` to float32
+    precision).
+
+    **Gradient (v1 approximation).** The Naesseth et al. (2017) implicit
+    reparameterization correction is OMITTED in this v1 sampler (see
+    ``# DECISION plan_2026-06-04_6196678d/D-004``). The ``kappa`` gradient still
+    flows through the Wood envelope parameter ``b(kappa)`` inside ``w_cand``,
+    and the ``z_mean`` gradient flows through ``mu_hat`` in the Householder
+    reflection. In the VAE the dominant ``kappa`` learning signal is the
+    analytic vMF KL (:func:`vmf_kl_divergence`); the omitted correction only
+    biases the Monte-Carlo gradient of the reconstruction term and was found
+    minor for moderate ``kappa`` by Davidson et al.
+
+    **Architecture Overview:**
+
+    .. code-block:: text
+
+        ┌──────────────┐   ┌──────────────────┐
+        │  z_mean      │   │  kappa           │
+        │  [B, D]      │   │  [B, 1]  (> 0)   │
+        └──────┬───────┘   └───────┬──────────┘
+               │                   │
+        ┌──────┴───────┐    ┌──────┴───────────────────────┐
+        │ mu_hat =     │    │ Wood Beta-envelope rejection │
+        │  z_mean/||.||│    │  K candidates -> w in [-1,1] │
+        │ (zero->e_0)  │    │  (accept-first, w=1 mode FB) │
+        └──────┬───────┘    └──────────────┬───────────────┘
+               │                           │
+               │            ┌──────────────┴───────────────┐
+               │            │ z_can = w*e_0 + sqrt(1-w^2)*v │
+               │            │  v ~ U(S^{D-2}) ⊥ e_0         │
+               │            └──────────────┬───────────────┘
+               │                           │
+        ┌──────┴───────────────────────────┴───────────────┐
+        │ Householder reflect e_0 -> mu_hat  =>  z (unit)   │
+        └──────────────────────────┬───────────────────────┘
+                                   ▼
+        ┌──────────────────────────────────────────────────┐
+        │  Output [B, D],  ||z|| ~ 1                        │
+        └──────────────────────────────────────────────────┘
+
+    References:
+        - Davidson, Falorsi, De Cao, Kipf, & Tomczak, 2018. Hyperspherical
+          Variational Auto-Encoders. (https://arxiv.org/abs/1804.00891)
+        - Wood, 1994. Simulation of the von Mises Fisher distribution.
+          Communications in Statistics - Simulation and Computation, 23(1).
+        - Ulrich, 1984. Computer Generation of Distributions on the m-Sphere.
+          Applied Statistics, 33(2), 158-163.
+        - Naesseth, Ruiz, Linderman, & Blei, 2017. Reparameterization Gradients
+          through Acceptance-Rejection Sampling Algorithms. (AISTATS) -- the
+          gradient correction OMITTED in this v1.
+
+    :param rejection_oversample: Number ``K`` of candidate axial weights drawn
+        per row in one batched shot (fixed-K Wood rejection, no
+        ``while_loop``). Must be a positive integer. Default ``32`` (all-reject
+        probability ~3e-16 at the trained kappa range).
+    :type rejection_oversample: int
+    :param seed: Optional integer seed for reproducible sampling. The raw int
+        is reused across the Beta/uniform/normal draws (same convention as the
+        sibling samplers' save/load contract).
+    :type seed: Optional[int]
+    :param kwargs: Additional keyword arguments for the Layer base class.
+    :type kwargs: Any"""
+
+    def __init__(
+        self,
+        rejection_oversample: int = 32,
+        seed: Optional[int] = None,
+        **kwargs: Any
+    ) -> None:
+        """Initialise the VMFSampling layer."""
+        super().__init__(**kwargs)
+
+        # Validate rejection_oversample parameter
+        if not isinstance(rejection_oversample, int) or isinstance(
+            rejection_oversample, bool
+        ) or rejection_oversample <= 0:
+            raise ValueError(
+                f"rejection_oversample must be a positive integer, "
+                f"got {rejection_oversample!r}"
+            )
+
+        # Validate seed parameter
+        if seed is not None and not isinstance(seed, int):
+            raise TypeError(f"seed must be an integer or None, got {type(seed)}")
+
+        # Store configuration
+        self.rejection_oversample = rejection_oversample
+        self.seed = seed
+
+        logger.debug(
+            f"Initialized VMFSampling layer with "
+            f"rejection_oversample={rejection_oversample}, seed={seed}"
+        )
+
+    def build(self, input_shape: Union[Tuple[Tuple, ...], List[Tuple]]) -> None:
+        """Validate input shapes and build the layer.
+
+        :param input_shape: List of two shape tuples for ``z_mean`` ``[B, D]``
+            and ``kappa`` ``[B, 1]``.
+        :type input_shape: Union[Tuple[Tuple, ...], List[Tuple]]"""
+        # Validate input structure
+        if not isinstance(input_shape, (tuple, list)) or len(input_shape) != 2:
+            raise ValueError(
+                f"VMFSampling layer expects exactly 2 inputs (z_mean, kappa), "
+                f"but received {len(input_shape) if isinstance(input_shape, (tuple, list)) else 'invalid'} inputs."
+            )
+
+        z_mean_shape, kappa_shape = input_shape
+
+        # Validate minimum dimensions
+        if len(z_mean_shape) < 2 or len(kappa_shape) < 2:
+            raise ValueError(
+                f"Input tensors must be at least 2D (batch_size, latent_dim), "
+                f"got shapes: z_mean={z_mean_shape}, kappa={kappa_shape}"
+            )
+
+        # Validate tensor ranks match
+        if len(z_mean_shape) != len(kappa_shape):
+            raise ValueError(
+                f"z_mean and kappa must have the same number of dimensions. "
+                f"Got z_mean: {len(z_mean_shape)}, kappa: {len(kappa_shape)}"
+            )
+
+        # Validate kappa carries a single scalar concentration per sample
+        if kappa_shape[-1] != 1:
+            raise ValueError(
+                f"kappa last dimension must be exactly 1 (single scalar "
+                f"concentration per sample), got shape: {kappa_shape}"
+            )
+
+        # vMF is undefined on S^0; require latent_dim D >= 2.
+        if z_mean_shape[-1] is not None and z_mean_shape[-1] < 2:
+            raise ValueError(
+                f"z_mean last dimension (latent_dim) must be >= 2 "
+                f"(vMF is undefined on S^0), got shape: {z_mean_shape}"
+            )
+
+        logger.debug(f"Built VMFSampling layer with input shapes: {input_shape}")
+        super().build(input_shape)
+
+    def call(
+        self,
+        inputs: Union[Tuple[keras.KerasTensor, keras.KerasTensor], List[keras.KerasTensor]],
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
+        """Sample ``z`` from ``vMF(mu_hat, kappa)`` on the unit sphere.
+
+        :param inputs: Tuple of ``(z_mean, kappa)`` tensors, shaped ``[B, D]``
+            and ``[B, 1]`` respectively.
+        :type inputs: Union[Tuple, List]
+        :param training: Training flag (unused).
+        :type training: Optional[bool]
+        :return: Sampled unit-norm latent tensor with same shape as ``z_mean``.
+        :rtype: keras.KerasTensor"""
+        if not isinstance(inputs, (tuple, list)) or len(inputs) != 2:
+            raise ValueError(
+                f"VMFSampling layer call expects exactly 2 inputs, got {len(inputs) if isinstance(inputs, (tuple, list)) else 'invalid'}"
+            )
+
+        z_mean, kappa = inputs
+
+        eps0 = 1e-12
+        D = int(z_mean.shape[-1])
+        B = ops.shape(z_mean)[0]
+        K = self.rejection_oversample
+
+        # Unit mean direction mu_hat from z_mean, with the canonical e_0
+        # fallback on a degenerate (near-zero) encoder mean (shared idiom).
+        norm = ops.sqrt(ops.sum(ops.square(z_mean), axis=-1, keepdims=True))
+        e0 = ops.one_hot(ops.zeros((B,), "int32"), D)                 # [B, D]
+        mu = ops.where(norm < eps0, e0, z_mean / ops.maximum(norm, eps0))
+        kap = ops.maximum(kappa, 1e-6)   # [B, 1], keep > 0; NOT stop_gradient
+
+        # DECISION plan_2026-06-04_6196678d/D-002: fixed-K (no while_loop) Wood
+        # 1994 vMF rejection sampler. Draw K candidate axial weights per row in
+        # ONE batched shot via the Beta envelope, accept the FIRST valid
+        # candidate per row, fall back to the mode w=1 if all K reject
+        # (P~3e-16 at K=32). Do NOT replace this with a dynamic keras.ops
+        # while_loop (harder to keep differentiable + XLA-clean). See D-002.
+        # Ulrich (1984) / Wood (1994) exact acceptance form. The envelope mode
+        # is x0 = (1-b)/(1+b) and the log-acceptance offset is
+        # c = kappa*x0 + (D-1)*log(1 - x0^2); accept on
+        # kappa*w + (D-1)*log(1 - x0*w) >= c + log(u). This is the
+        # E[w] == A_{D/2}(kappa)-faithful variant (verified vs scipy's
+        # vonmises_fisher to ~2e-4); do NOT substitute the
+        # d = 4ab/(1+b) - (D-1)log(D-1) / log(1-(1-b)w) variant, which is
+        # systematically under-concentrated by ~0.05 in E[w].
+        m1 = float(D - 1)
+        s = ops.sqrt(4.0 * ops.square(kap) + m1 * m1)
+        b = (-2.0 * kap + s) / m1                                     # [B, 1]
+        x0 = (1.0 - b) / (1.0 + b)                                    # [B, 1]
+        c = kap * x0 + m1 * ops.log(ops.maximum(1.0 - x0 * x0, eps0))  # [B, 1]
+
+        # K candidate axial coords w in one batched shot. beta(shape, a, b).
+        epsb = keras.random.beta((B, K), m1 / 2.0, m1 / 2.0, seed=self.seed)  # [B,K]
+        w_cand = (1.0 - (1.0 + b) * epsb) / (1.0 - (1.0 - b) * epsb)  # [B,K]
+        uni = keras.random.uniform((B, K), seed=self.seed)            # [B,K]
+        accept = (
+            kap * w_cand + m1 * ops.log(ops.maximum(1.0 - x0 * w_cand, eps0)) - c
+        ) >= ops.log(uni)                                            # [B,K] bool
+        acc_f = ops.cast(accept, w_cand.dtype)
+        any_acc = ops.max(acc_f, axis=1, keepdims=True) > 0.0        # [B,1]
+        first = ops.argmax(acc_f, axis=1)                            # [B] first True
+        w_sel = ops.take_along_axis(
+            w_cand, ops.expand_dims(first, 1), axis=1
+        )                                                            # [B,1]
+        w = ops.where(any_acc, w_sel, ops.ones_like(w_sel))         # mode fallback
+        w = ops.clip(w, -1.0, 1.0)                                  # guard sqrt
+
+        # DECISION plan_2026-06-04_6196678d/D-004: the Naesseth-2017 implicit
+        # reparameterization correction is OMITTED in this v1. The kappa
+        # gradient flows through b(kappa) in w_cand above and the z_mean
+        # gradient through mu in the Householder reflection below; the dominant
+        # kappa signal is the analytic KL. Do NOT add the correction here
+        # without re-evaluating stability (see decisions.md D-004).
+
+        # Tangent direction v ~ uniform on S^{D-2}, orthogonal to e_0.
+        t = keras.random.normal((B, D), seed=self.seed)
+        zero_first = ops.concatenate(
+            [ops.zeros((B, 1)), ops.ones((B, D - 1))], axis=1
+        )
+        t = t * zero_first
+        v = t / ops.maximum(
+            ops.sqrt(ops.sum(ops.square(t), axis=-1, keepdims=True)), eps0
+        )                                                            # [B,D], v[...,0]=0
+        z_can = w * e0 + ops.sqrt(ops.maximum(1.0 - ops.square(w), 0.0)) * v
+
+        # Householder reflection e_0 -> mu_hat (swaps the two unit vectors):
+        # H x = x - 2 (uhat . x) uhat, uhat = (e_0 - mu) / ||e_0 - mu||.
+        uvec = e0 - mu
+        unorm = ops.sqrt(ops.sum(ops.square(uvec), axis=-1, keepdims=True))
+        uhat = uvec / ops.maximum(unorm, eps0)
+        z_ref = z_can - 2.0 * ops.sum(uhat * z_can, axis=-1, keepdims=True) * uhat
+        z = ops.where(unorm < eps0, z_can, z_ref)   # mu == e_0 -> identity
+
+        return z
+
+    def compute_output_shape(self, input_shape: Union[Tuple[Tuple, ...], List[Tuple]]) -> Tuple[Optional[int], ...]:
+        """Compute the output shape (same as ``z_mean``).
+
+        :param input_shape: List of two input shape tuples.
+        :type input_shape: Union[Tuple[Tuple, ...], List[Tuple]]
+        :return: Output shape tuple.
+        :rtype: Tuple[Optional[int], ...]"""
+        if not isinstance(input_shape, (tuple, list)) or len(input_shape) != 2:
+            raise ValueError(f"Expected 2 input shapes, got {len(input_shape) if isinstance(input_shape, (tuple, list)) else 'invalid'}")
+
+        z_mean_shape, _ = input_shape
+        return tuple(z_mean_shape)
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return layer configuration for serialization.
+
+        :return: Dictionary containing all constructor parameters.
+        :rtype: Dict[str, Any]"""
+        config = super().get_config()
+        config.update({
+            "rejection_oversample": self.rejection_oversample,
+            "seed": self.seed,
+        })
+        return config
+
+# ---------------------------------------------------------------------
 # Sampling Layer Factory (inline)
 # ---------------------------------------------------------------------
 #
@@ -661,7 +961,7 @@ def vmf_kl_divergence(
 # Type Definitions
 # ---------------------------------------------------------------------
 
-SamplingType = Literal["gaussian", "hypersphere"]
+SamplingType = Literal["gaussian", "hypersphere", "vmf"]
 """
 Type alias for supported reparameterization-sampler mechanisms.
 
@@ -700,6 +1000,22 @@ SAMPLING_REGISTRY: Dict[str, Dict[str, Any]] = {
         "use_case": (
             "hyperspherical-latent VAE; direction on unit sphere, scalar "
             "radius shell"
+        ),
+    },
+
+    "vmf": {
+        "class": VMFSampling,
+        "description": (
+            "von Mises-Fisher reparameterized sampler (Wood 1994 rejection "
+            "+ Householder; unit sphere, no radius)"
+        ),
+        "required_params": [],
+        "optional_params": {
+            "rejection_oversample": 32,
+            "seed": None,
+        },
+        "use_case": (
+            "true vMF S-VAE; directional posterior on the unit sphere"
         ),
     },
 }
