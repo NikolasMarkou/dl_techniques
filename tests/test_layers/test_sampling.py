@@ -14,7 +14,15 @@ import tempfile
 import os
 from typing import Tuple, List
 
-from dl_techniques.layers.sampling import Sampling, HypersphereSampling
+from dl_techniques.layers.sampling import (
+    Sampling,
+    HypersphereSampling,
+    create_sampling_layer,
+    create_sampling_from_config,
+    validate_sampling_config,
+    get_sampling_info,
+    SAMPLING_REGISTRY,
+)
 
 
 class TestSampling:
@@ -749,3 +757,88 @@ class TestHypersphereSampling:
         assert isinstance(hsphere_layer, HypersphereSampling)
         assert hsphere_layer.radius == 2.0
         assert hsphere_layer.seed == 42
+
+
+class TestSamplingFactory:
+    """Test suite for the inline registry-driven sampling factory."""
+
+    def test_create_gaussian(self):
+        """create_sampling_layer('gaussian') returns a Sampling layer."""
+        layer = create_sampling_layer("gaussian")
+
+        assert isinstance(layer, Sampling)
+
+    def test_create_hypersphere_with_radius(self):
+        """create_sampling_layer('hypersphere', radius=2.0) honors radius."""
+        layer = create_sampling_layer("hypersphere", radius=2.0)
+
+        assert isinstance(layer, HypersphereSampling)
+        assert layer.radius == 2.0
+
+    def test_create_unknown_type_raises(self):
+        """Unknown type raises ValueError listing the available types."""
+        with pytest.raises(ValueError) as exc_info:
+            create_sampling_layer("nope")
+
+        message = str(exc_info.value)
+        assert "gaussian" in message
+        assert "hypersphere" in message
+
+    def test_create_hypersphere_zero_radius_raises(self):
+        """radius=0 is rejected by validate_sampling_config (radius > 0)."""
+        with pytest.raises(ValueError):
+            create_sampling_layer("hypersphere", radius=0)
+
+    def test_create_gaussian_seed_passthrough(self):
+        """seed kwarg flows through to the constructed Sampling layer."""
+        layer = create_sampling_layer("gaussian", seed=42)
+
+        assert isinstance(layer, Sampling)
+        assert layer.seed == 42
+
+    def test_create_name_injection(self):
+        """name= is injected into the constructed layer."""
+        layer = create_sampling_layer("gaussian", name="my_sampler")
+
+        assert layer.name == "my_sampler"
+
+    def test_create_from_config_hypersphere(self):
+        """create_sampling_from_config builds from a dict with 'type'."""
+        layer = create_sampling_from_config(
+            {"type": "hypersphere", "radius": 3.0, "seed": 7}
+        )
+
+        assert isinstance(layer, HypersphereSampling)
+        assert layer.radius == 3.0
+        assert layer.seed == 7
+
+    def test_create_from_config_missing_type_raises(self):
+        """A config dict without a 'type' key raises ValueError."""
+        with pytest.raises(ValueError, match="'type'"):
+            create_sampling_from_config({"radius": 2.0})
+
+    def test_get_sampling_info_keys(self):
+        """get_sampling_info returns metadata for both registered types."""
+        info = get_sampling_info()
+
+        assert set(info.keys()) == {"gaussian", "hypersphere"}
+        assert info["gaussian"]["class"] is Sampling
+        assert info["hypersphere"]["class"] is HypersphereSampling
+
+    def test_get_sampling_info_is_shallow_copy(self):
+        """Mutating the returned dict does NOT mutate the module registry."""
+        info = get_sampling_info()
+        info.pop("gaussian")
+
+        # The module-level registry must be unaffected.
+        assert "gaussian" in SAMPLING_REGISTRY
+        assert "gaussian" in get_sampling_info()
+
+    def test_validate_sampling_config_ok(self):
+        """A valid config validates without raising and returns None."""
+        assert validate_sampling_config("hypersphere", radius=1.0) is None
+
+    def test_validate_sampling_config_unknown_raises(self):
+        """validate_sampling_config rejects an unknown type."""
+        with pytest.raises(ValueError, match="Unknown sampling type"):
+            validate_sampling_config("nope")

@@ -52,7 +52,7 @@ References:
 
 import keras
 from keras import ops
-from typing import Tuple, Any, Dict, Optional, Union, List
+from typing import Tuple, Any, Dict, Literal, Optional, Union, List
 
 # ---------------------------------------------------------------------
 # local imports
@@ -444,5 +444,271 @@ class HypersphereSampling(keras.layers.Layer):
             "seed": self.seed,
         })
         return config
+
+# ---------------------------------------------------------------------
+# Sampling Layer Factory (inline)
+# ---------------------------------------------------------------------
+#
+# A registry-driven factory for the two reparameterization samplers defined
+# above. It mirrors the canonical ``sequence_pooling/factory.py`` 4-function
+# surface (validate -> merge defaults -> filter to ctor params -> inject name
+# -> ``cls(**params)``; unknown-type errors name the available types).
+#
+# DECISION plan_2026-06-04_d4ef81f1/D-001: this factory is placed INLINE in
+# sampling.py and NOT promoted to a ``sampling/`` package with a sibling
+# ``factory.py``. Do NOT "tidy" it into a package: ``sampling.py`` is a
+# top-level module imported as ``from dl_techniques.layers.sampling import
+# Sampling`` by >=3 sites, and promotion would break every such caller for no
+# functional gain (the two samplers have only 1-2 ctor params each). The
+# inline placement has a repo precedent (``sparse_autoencoder.py``). See
+# decisions.md D-001.
+
+# ---------------------------------------------------------------------
+# Type Definitions
+# ---------------------------------------------------------------------
+
+SamplingType = Literal["gaussian", "hypersphere"]
+"""
+Type alias for supported reparameterization-sampler mechanisms.
+
+This literal type provides IDE autocompletion and type checking for valid
+sampler types supported by the factory.
+"""
+
+# ---------------------------------------------------------------------
+# Sampling Layer Registry
+# ---------------------------------------------------------------------
+
+SAMPLING_REGISTRY: Dict[str, Dict[str, Any]] = {
+    "gaussian": {
+        "class": Sampling,
+        "description": (
+            "Gaussian-ball reparameterization (z=mu+exp(0.5*log_var)*eps)"
+        ),
+        "required_params": [],
+        "optional_params": {
+            "seed": None,
+        },
+        "use_case": "standard VAE diagonal-Gaussian posterior",
+    },
+
+    "hypersphere": {
+        "class": HypersphereSampling,
+        "description": (
+            "Thin-shell hypersphere reparameterization "
+            "(z=r*normalize(z_mean+eps))"
+        ),
+        "required_params": [],
+        "optional_params": {
+            "radius": 1.0,
+            "seed": None,
+        },
+        "use_case": (
+            "hyperspherical-latent VAE; direction on unit sphere, scalar "
+            "radius shell"
+        ),
+    },
+}
+"""
+Registry of reparameterization-sampler implementations with metadata.
+
+Each entry contains:
+    - class: The actual layer class implementation.
+    - description: Technical description of the sampling mechanism.
+    - required_params: List of mandatory parameters for instantiation.
+    - optional_params: Dict of optional parameters with default values.
+    - use_case: Scenarios and applications where this sampler excels.
+"""
+
+
+# ---------------------------------------------------------------------
+# Public API Functions
+# ---------------------------------------------------------------------
+
+def get_sampling_info() -> Dict[str, Dict[str, Any]]:
+    """
+    Retrieve metadata for all available sampler types.
+
+    Provides per-type metadata including the technical description, parameter
+    specifications, and use cases for every supported sampling mechanism.
+
+    Returns:
+        A dictionary mapping each sampler type to its metadata (description,
+        required_params, optional_params, use_case). Each entry is a shallow
+        copy so callers cannot mutate the registry.
+    """
+    return {
+        sampling_type: info.copy()
+        for sampling_type, info in SAMPLING_REGISTRY.items()
+    }
+
+
+def validate_sampling_config(
+        sampling_type: str,
+        **kwargs: Any
+) -> None:
+    """
+    Validate sampler configuration parameters.
+
+    Performs type-existence checking, required-parameter completeness, and
+    light value-range validation on any numeric parameters that are present.
+
+    Args:
+        sampling_type: The sampler type to validate against.
+        **kwargs: Parameter dictionary to validate for the specified type.
+
+    Raises:
+        ValueError: If sampling_type is not supported, required parameters are
+            missing, or a provided parameter value violates its constraint.
+    """
+    if sampling_type not in SAMPLING_REGISTRY:
+        available_types = sorted(SAMPLING_REGISTRY.keys())
+        raise ValueError(
+            f"Unknown sampling type '{sampling_type}'. "
+            f"Available types: {available_types}"
+        )
+
+    info = SAMPLING_REGISTRY[sampling_type]
+    required = info["required_params"]
+    missing = [p for p in required if p not in kwargs]
+    if missing:
+        raise ValueError(
+            f"Required parameters for '{sampling_type}' are missing: "
+            f"{missing}. Required: {required}, Provided: "
+            f"{list(kwargs.keys())}"
+        )
+
+    # Validate positive-float parameters: a provided radius must be > 0.
+    if "radius" in kwargs and kwargs["radius"] <= 0:
+        raise ValueError(
+            f"Parameter 'radius' must be > 0, got {kwargs['radius']}"
+        )
+
+    logger.debug(
+        f"Validation successful for '{sampling_type}' with parameters: "
+        f"{kwargs}"
+    )
+
+
+def create_sampling_layer(
+        sampling_type: SamplingType,
+        name: Optional[str] = None,
+        **kwargs: Any
+) -> keras.layers.Layer:
+    """
+    Factory function for creating reparameterization-sampler layers.
+
+    Provides a centralized, type-safe way to instantiate any sampler layer in
+    this module, with parameter validation, default-value handling, and
+    detailed error reporting. Dispatch is pure registry lookup (no if/elif on
+    type).
+
+    Args:
+        sampling_type: The type of sampler to create (``'gaussian'`` or
+            ``'hypersphere'``).
+        name: Optional name for the layer instance.
+        **kwargs: Type-specific parameters for the sampler layer. See
+            ``get_sampling_info()`` for per-type parameter specs.
+
+    Returns:
+        A fully configured and instantiated sampler layer.
+
+    Raises:
+        ValueError: If sampling_type is invalid, required parameters are
+            missing, parameter values are out of range, or layer construction
+            fails.
+        TypeError: If parameter types are incompatible with the target class.
+    """
+    try:
+        # Validate configuration before proceeding
+        validate_sampling_config(sampling_type, **kwargs)
+
+        # Get layer information and class
+        info = SAMPLING_REGISTRY[sampling_type]
+        sampling_class = info["class"]
+
+        # Merge user parameters with defaults (user wins)
+        params = info["optional_params"].copy()
+        params.update(kwargs)
+
+        # Filter parameters to match the constructor signature
+        valid_param_names = set(info["required_params"]) | set(
+            info["optional_params"].keys()
+        )
+        final_params = {
+            k: v for k, v in params.items() if k in valid_param_names
+        }
+
+        # Add name if provided
+        if name:
+            final_params["name"] = name
+
+        logger.info(
+            f"Creating '{sampling_type}' sampling layer "
+            f"({sampling_class.__name__}) with parameters: {final_params}"
+        )
+
+        # Instantiate the sampler layer
+        return sampling_class(**final_params)
+
+    except (TypeError, ValueError) as e:
+        # Provide detailed error context, including the available-type hint.
+        info = SAMPLING_REGISTRY.get(sampling_type)
+        if info:
+            class_name = info["class"].__name__
+            error_msg = (
+                f"Failed to create '{sampling_type}' sampling layer "
+                f"({class_name}). "
+                f"Required parameters: {info['required_params']}. "
+                f"Provided parameters: {list(kwargs.keys())}. "
+                f"Please verify parameter compatibility. Original error: {e}"
+            )
+        else:
+            error_msg = (
+                f"Failed to create sampling layer. "
+                f"Unknown type '{sampling_type}'. "
+                f"Available types: {sorted(get_sampling_info().keys())}. "
+                f"Error: {e}"
+            )
+
+        logger.error(error_msg)
+        raise ValueError(error_msg) from e
+
+
+def create_sampling_from_config(
+        config: Dict[str, Any]
+) -> keras.layers.Layer:
+    """
+    Create a sampler layer from a configuration dictionary.
+
+    Convenience function for instantiating sampler layers from dictionary-based
+    configurations, useful for loading architectures from JSON/YAML files,
+    hyperparameter optimization, and configuration-driven model building.
+
+    Args:
+        config: Configuration dictionary containing a ``'type'`` key specifying
+            the sampler type and additional keys for layer-specific parameters.
+
+    Returns:
+        Instantiated and configured sampler layer.
+
+    Raises:
+        ValueError: If config is missing the required ``'type'`` key.
+        TypeError: If config parameter types are invalid.
+    """
+    config_copy = config.copy()
+    try:
+        sampling_type = config_copy.pop("type")
+    except KeyError as e:
+        available_keys = list(config.keys()) if config else []
+        raise ValueError(
+            f"Configuration dictionary must include a 'type' key specifying "
+            f"the sampling layer type. Available keys in config: "
+            f"{available_keys}. "
+            f"Valid types: {sorted(SAMPLING_REGISTRY.keys())}"
+        ) from e
+
+    logger.debug(f"Creating sampling layer from config: {config}")
+    return create_sampling_layer(sampling_type, **config_copy)
 
 # ---------------------------------------------------------------------
