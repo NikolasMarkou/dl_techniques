@@ -49,20 +49,29 @@ def plot_reconstruction_comparison(
 ) -> None:
     """Plot original vs reconstructed images."""
     n = min(10, len(original))
-    fig, axes = plt.subplots(2, n, figsize=(n * 1.5, 3.5))
+    fig, axes = plt.subplots(2, n, figsize=(n * 1.5, 3.8))
     cmap = 'gray' if dataset.lower() == 'mnist' else None
 
-    for i in range(n):
-        axes[0, i].imshow(original[i].squeeze(), cmap=cmap)
-        axes[0, i].set_title('Original', fontsize=8)
-        axes[0, i].axis('off')
-        axes[1, i].imshow(np.clip(reconstructed[i].squeeze(), 0, 1), cmap=cmap)
-        axes[1, i].set_title('Reconstructed', fontsize=8)
-        axes[1, i].axis('off')
+    # Label each row once on the left (set_title over every cell melds the
+    # bottom row's caption into the originals above it). Hide ticks/spines so
+    # the ylabel reads as a clean row header without drawing a frame.
+    row_labels = ('Original', 'Reconstructed')
+    for row in range(2):
+        imgs = original if row == 0 else np.clip(reconstructed, 0, 1)
+        for i in range(n):
+            ax = axes[row, i]
+            ax.imshow(imgs[i].squeeze(), cmap=cmap)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            for spine in ax.spines.values():
+                spine.set_visible(False)
+        axes[row, 0].set_ylabel(row_labels[row], fontsize=10, fontweight='bold')
 
     title = f'Reconstruction - Epoch {epoch}' if epoch else 'Final Reconstruction'
     fig.suptitle(title, fontsize=14, fontweight='bold')
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    # Explicit spacing: leave headroom for the suptitle and a real gap between
+    # the two rows so labels never overlap the images.
+    fig.subplots_adjust(top=0.88, hspace=0.15, wspace=0.05)
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
 
