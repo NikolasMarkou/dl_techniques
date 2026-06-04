@@ -123,3 +123,6 @@
 | plan_2026-06-03_9e82787d | 2026-06-03 | Bring the `analyzer` spectral subsystem (`spectral_metrics.p |  |
 | plan_2026-06-03_bc986e52 | 2026-06-03 | Bring `src/dl_techniques/analyzer/` spectral code (`spectral |  |
 | plan_2026-06-03_5c8c6d19 | 2026-06-03 | Consolidate `src/train/ccnets/` so its documentation and cod |  |
+| plan_2026-06-03_da3a2bbb | 2026-06-03 | Convert the single-file module `src/dl_techniques/layers/seq |  |
+| plan_2026-06-04_a114f829 | 2026-06-04 | Add a new Keras 3 layer class `HypersphereSampling` as a SIB |  |
+| plan_2026-06-04_d4ef81f1 | 2026-06-04 | Add a registry-driven sampling-layer factory to `layers/samp |  |

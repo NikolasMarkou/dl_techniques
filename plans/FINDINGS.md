@@ -34,6 +34,122 @@
 - **`current_phase` / `_global_step` counters**: `add_weight(trainable=False, dtype="float32")` — int32 fails CPU/GPU device placement.
 <!-- /COMPRESSED-SUMMARY -->
 
+## plan_2026-06-04_d4ef81f1
+### Index
+
+| # | Finding | File | Covers |
+|---|---------|------|--------|
+| 1 | VAE model structure, sampler site, KL loss, config, z_log_var shapes | `findings/vae-model-and-loss.md` | model + loss + the 2 blockers |
+| 2 | Canonical registry factory pattern (sequence_pooling) + inline-vs-package options | `findings/factory-pattern.md` | factory design |
+| 3 | train_vae.py gaps + comparison-driver template + compare_runs signature | `findings/vae-trainer-and-comparison.md` | trainer + comparison |
+| 4 | Locked design (resolved with user) | this file, "Design Decision" | scope/architecture |
+
+### Key Constraints
+
+### Hard
+- **Factory inline** in `layers/sampling.py` (1 precedent `sparse_autoencoder.py:823`; package promotion would break the 3 existing `from dl_techniques.layers.sampling import Sampling` sites). 2 layer types: `gaussian`->`Sampling`, `hypersphere`->`HypersphereSampling`.
+- **z_log_var shape fork**: `Sampling` needs `[B,latent_dim]`; `HypersphereSampling.build` hard-rejects last-dim != 1 (`sampling.py:360-364`). Hypersphere modes must feed `[B,1]`.
+- **KL/prior mismatch**: Gaussian KL (`-0.5·Σ(1+logvar−μ²−e^logvar)`, `model.py:786-810`) is the wrong prior for the sphere — faithful mode replaces it.
+- **Decoder graph extraction** at `model.py:242-244` uses `self.get_layer("vae_sampling").output` — ALL modes MUST keep the sampler layer name `"vae_sampling"` (output is `[B,latent_dim]` in every mode, so extraction is unaffected).
+- **`create_vae` assertion** `model.py:948` `z_log_var.shape==(2,latent_dim)` — must branch for faithful ([B,1]).
+- **`CUSTOM_OBJECTS`** `train_vae.py:36` only lists `Sampling` — add `HypersphereSampling` for the hypersphere arms' checkpoint reload.
+- **compare_runs** (`train/common/compare_runs.py:198`, `(run_a, run_b, labels, output_dir)`) is 2-arm + needs pandas + `training_log.csv` per run. For 3 arms call it pairwise vs the gaussian baseline.
+- **Driver CPU-only**: `CUDA_VISIBLE_DEVICES=''` at module top BEFORE TF import (XLA-allocator crash risk; convnext pattern). Child arm gets GPU via `env['CUDA_VISIBLE_DEVICES']=str(gpu)`. Serial subprocess; NEVER parallel.
+- **GPU1 for our runs** (`CUDA_VISIBLE_DEVICES=1`, RTX 4070). Single job at a time.
+- **Full A/B run (>2 min) MUST be launched by the MAIN thread (orchestrator), NOT a sub-agent** (LESSONS: `run_in_background` from a sub-agent dies when the sub-agent exits). ip-executor handles only the short --smoke; orchestrator runs the full comparison.
+
+### Soft
+- Mirror `sequence_pooling/factory.py` surface: `SamplingType` literal, `SAMPLING_REGISTRY`, `create_sampling_layer(type, name=None, **kwargs)`, `create_sampling_from_config(config)`, `validate_sampling_config(type, **kwargs)`, `get_sampling_info()`.
+- train_vae.py has no `--smoke`/`--seed`/`--sampler`/`config.json` today — add all four; `set_seeds(args.seed)`; `save_config_json(args, results_dir)`.
+- Monitor metric is `val_total_loss`; dataset MNIST default (28x28x1), 10 epochs / batch 128.
+
+### Design Decision (resolved with user via AskUserQuestion)
+
+**Build + RUN the full A/B now on GPU1** (serial). Three VAE `sampling_type` configs:
+
+1. **`gaussian`** (baseline) — unchanged. `Sampling([mu[B,D], log_var[B,D]])`; Gaussian KL over `[B,D]`.
+2. **`hypersphere_controlled`** — isolate the sampler. Encoder UNCHANGED (mu[B,D], log_var[B,D]). Adapter: `rlv = mean(log_var, axis=-1, keepdims=True)` -> `[B,1]`; `z = HypersphereSampling([mu, rlv])`. Loss = SAME Gaussian KL on the original `(mu, log_var[B,D])`. Only the sampling op differs. Output dict `z_log_var` stays `[B,D]`.
+3. **`hypersphere_faithful`** — geometrically-honest. Encoder: shared trunk -> `mu=Dense(latent_dim)` (direction) + `radius_log_var=Dense(1)` `[B,1]`. `z = HypersphereSampling([mu, radius_log_var])`. Loss = hyperspherical regularizer (replaces Gaussian KL): radius-variance KL `kl = mean(0.5·(exp(rlv) − rlv − 1))` (rlv clipped [-20,20]); direction has a uniform-sphere prior -> NO direction KL term (documented simplification — radius mean is fixed at 1.0 by the layer; not a full vMF S-VAE). Output dict `z_log_var = radius_log_var [B,1]`.
+
+Factory has **2 layer types** (gaussian, hypersphere); the **3rd config (faithful) is a VAE-level encoder+loss mode**, same `hypersphere` layer. All modes name the sampler `"vae_sampling"`.
+
+**Comparison**: `src/train/vae/run_sampler_comparison.py` (new), mirroring `run_stochastic_comparison.py`; 3 serial arms; `compare_runs` called pairwise vs gaussian baseline (gaussian-vs-controlled, gaussian-vs-faithful). Smoke-verify all 3 arms first, then orchestrator launches the full run on GPU1.
+
+### Corrections
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
+
+## plan_2026-06-04_a114f829
+### Index
+
+| # | Finding | File | Covers |
+|---|---------|------|--------|
+| 1 | Existing `Sampling` layer is the structural template | `src/dl_techniques/layers/sampling.py:57-218` (read inline) | existing pattern |
+| 2 | `Sampling` usage, exports, and test conventions | `findings/sampling-usage-and-tests.md` | affected files, test pattern |
+| 3 | Hypersphere math, reuse targets, canonical keras idioms | `findings/hypersphere-math-and-idioms.md` | constraints, idioms |
+| 4 | Design intent resolved by user (AskUserQuestion) | this file, "Design Decision" below | scope/interface |
+
+### Key Constraints
+
+### Hard
+- **New class is a sibling in the SAME file** `src/dl_techniques/layers/sampling.py` (file already exists with one class `Sampling`). Do NOT create a new file.
+- **5-method Keras-3 pattern mandatory** (`research/2026_keras_custom_models_instructions.md`): `__init__` (store config only), `build` (validate shapes; `super().build()` last), `call` (`keras.ops` only), `compute_output_shape`, `get_config` (`super().get_config()` + all params). `@keras.saving.register_keras_serializable()` mandatory.
+- **Random ops under `keras.random.*`** — `keras.ops.random.*` does NOT exist in Keras 3.8. Mirror sibling: `keras.random.normal(shape=..., seed=self.seed)`.
+- **`layers/__init__.py` is empty by convention** — `Sampling` is NOT exported; callers import `from dl_techniques.layers.sampling import Sampling`. New class needs no export.
+- **Logger only, no print**; Google-style docstrings; type hints.
+
+### Soft
+- **Mirror sibling idioms**: `seed: Optional[int]` ctor param, `ops.shape(...)`, accept-but-ignore `training`, `logger.debug` init line, ASCII architecture diagram in class docstring.
+- **L2 normalize idiom**: `ops.normalize(x, axis=-1)` is the dominant repo pattern. Verify zero-safety in EXECUTE; fall back to manual `x / maximum(norm, eps)` (polar_initializer.py:78-97 pattern) if `ops.normalize` is not zero-safe.
+- **Cite references** like `hypersphere_orthogonal_initializer.py` (Marsaglia 1972; Muller 1959) for the Gaussian-normalize-scale method.
+- **Tests**: extend existing `tests/test_layers/test_sampling.py` with a `TestHypersphereSampling` class mirroring `TestSampling` (init / forward / shape / gradient / `get_config`+`from_config` / model save+load with `seed=42` deterministic compare per LESSONS "stochastic by design").
+
+### Ghost (rejected)
+- **`keras.random.SeedGenerator`** — explorer flagged int-seed statelessness as a "risk", BUT the sibling `Sampling` deliberately uses raw-int `seed` and the existing `test_model_save_load` relies on it (seed=42 → reproducible). Treat SeedGenerator as a GHOST; mirror the sibling exactly. (LESSONS: "Treat sibling-template invariants as GHOSTS until proven applicable" — here the sibling invariant IS the spec.)
+
+### Design Decision (resolved with user via AskUserQuestion)
+
+New class **`HypersphereSampling`**. Inputs `call([z_mean, z_log_var])`:
+- `z_mean`: `[B, D]` — encoder direction (carries information)
+- `z_log_var`: `[B, 1]` — per-sample single scalar variance (shell thickness)
+
+Formula:
+```
+eps = N(0, I)  shape [B, D]
+eta = N(0, 1)  shape [B, 1]
+u   = normalize(z_mean + eps, axis=-1)     # direction on unit sphere
+r   = radius + exp(0.5 * z_log_var) * eta  # radius default 1.0; thin shell
+z   = r * u                                # [B, D], ||z|| = |r| ~ radius
+```
+- Direction from encoder mean + Gaussian noise; magnitude (radius) is a thin Gaussian shell centered at `radius` (ctor float, default 1.0) with per-sample variance from the encoder.
+- Always stochastic (mirror sibling; `training` accepted-but-unused). `seed` makes it reproducible for tests.
+
+### Corrections
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
+
+## plan_2026-06-03_da3a2bbb
+### Index
+
+| # | Finding | File | Key takeaway |
+|---|---------|------|--------------|
+| F1 | Source file + importers | `findings/source-file-and-importers.md` | `sequence_pooling.py` (935 LOC): 3 classes (`AttentionPooling`, `WeightedPooling`, `SequencePooling`) + 2 type aliases (`PoolingStrategy` 18 strategies, `AggregationMethod`). Bare decorators. Importers: `text_encoder.py:99`, `vision_encoder.py:87` (relative), `tests/test_layers/test_sequence_pooling.py:16` (absolute, 1001 LOC). NOT in `layers/__init__.py` (empty). RST/Sphinx docstrings (non-Google). |
+| F2 | attention/ template structure | `findings/attention-template-structure.md` | Canonical factory idiom: `Literal` type alias `<Domain>Type`, `<DOMAIN>_REGISTRY: Dict[str,Dict]` (class/required_params/optional_params/description/use_case[/complexity/paper]), `create_<domain>_layer(type, name=None, **kwargs)`, helpers `validate_*`/`create_*_from_config`/`get_*_info`, explicit `__init__.py` re-exports + string `__all__`. README=catalog, GUIDE=contributor guide. ffn/ cross-validates. |
+| F3 | Migration mechanics + serialization | `findings/migration-mechanics.md` | `git mv` into new dir; add `__init__.py` re-exporting 3 classes + `PoolingStrategy` + `AggregationMethod`. No relative imports inside the file. Two callers' `from ..sequence_pooling import ...` resolve UNCHANGED (parent still `layers/`). Test absolute import unchanged. Precedent: `neuro_grid.py`→`memory/` (708e615c). |
+
+### Key Constraints
+
+- **[HARD] Serialization keys are SAFE.** Bare `@keras.saving.register_keras_serializable()` → key `Custom>ClassName`, derived from default `package="Custom"`, **NOT from `__module__`**. Verified by orchestrator directly (see Corrections F1-correction). Moving the file does NOT change keys; existing `.keras` saves load fine as long as the class is imported (registered) before load. Re-export from `__init__.py` guarantees that.
+- **[HARD] `PoolingStrategy` and (used) symbols must be re-exported** from `sequence_pooling/__init__.py` or `text_encoder.py`/`vision_encoder.py` break at runtime (they do `from ..sequence_pooling import SequencePooling, PoolingStrategy`).
+- **[HARD] `SequencePooling.__init__` instantiates `AttentionPooling`/`WeightedPooling` directly** — if classes are split across files, intra-package imports must be wired correctly.
+- **[HARD] Factory idiom is fixed**: `create_sequence_pooling_layer(pooling_type: SequencePoolingType, name=None, **kwargs)`, registry dict, pure registry dispatch (no if/elif), explicit string `__all__` (do NOT replicate ffn's object-based `__all__` bug).
+- **[SOFT] No `__all__` in source file** — adding one clarifies public surface.
+- **[SOFT] Docstring dialect is RST/Sphinx** (`:param:`/`:type:`) not Google-style repo convention. Converting is optional scope.
+- **[SOFT] GUIDE.md** exists only in `attention/` (not ffn/norms/memory). User explicitly requested it ("GUIDE etc etc").
+- **[GHOST] "Moving deeper breaks relative imports by one dot"** — does NOT apply here: the source file has zero `from ..`/`from ...` imports, and external callers keep parent `layers/`.
+
+### Corrections
+
+- **[CORRECTED iter-0] F1 serialization-key claim was WRONG.** `findings/source-file-and-importers.md` (Summary + Constraints) and its claim that keys are "derived from `__module__`" / "silently break on move" is FALSE. Orchestrator verified directly via `keras.saving.get_registered_name()`: a bare-decorated class registers as `Custom>ClassName` regardless of `__module__` (confirmed key `Custom>SequencePooling` while `__module__`=`__main__`). `findings/migration-mechanics.md` is the correct account: **no serialization break, no `package=` pin needed.** This de-risks the migration substantially.
+
 ## plan_2026-06-03_5c8c6d19
 ### Index
 
@@ -65,125 +181,6 @@
 ### Structural insight (drives the plan)
 
 Moving architectures into `dl_techniques/models/ccnets/` SOLVES the cross-script-import fragility: today `cifar100.py`<-`mnist.py`, `cifar100_hybrid.py`<-`cifar100.py`, `baseline_comparison.py`/`latent_sweep.py`<-`mnist.py`. Once classes live in the model package, every train script imports cleanly from `dl_techniques.models.ccnets.*` and renaming becomes safe. Therefore: **architecture migration must precede script renaming.**
-
-### Corrections
-*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
-
-## plan_2026-06-03_bc986e52
-### Index
-
-| # | Finding | File |
-|---|---------|------|
-| F1 | Authoritative WeightWatcher reference (verbatim formulas) | findings/ww-authoritative-reference.md |
-| F2 | Core math: MP edge, Tracy-Widom, ERG, naming, phases vs WW (orchestrator source-read) | findings/core-math-vs-ww.md |
-| F3 | ERG/detX boundary + alpha MLE vs WW (explorer) | findings/erg-alpha-vs-ww.md |
-| F4 | Metric names/values + helpers vs WW (explorer) | findings/metrics-naming-vs-ww.md |
-
-### Verified divergences from authoritative WeightWatcher (ranked)
-
-**HIGH — correctness bugs revealed by ground-truth source:**
-- **R1: MP edge uses `(1+√Q)²`, WW uses `(1+1/√Q)²`** (Q=N/M, N=larger). `spectral_metrics.py:504-505`. Factor-((1+√Q)/(1+1/√Q))² error for rectangular layers (Q=4 → 9σ² vs 2.25σ²). Both λ+ and λ−. **Pre-existing** (predates prior plan). Two-source confirmed (orchestrator + WW `calc_lambda_plus/minus`).
-- **R2: ERG boundary is computed by a BROKEN mechanism.** `compute_erg_condition` (`:378-383`) builds `cumulative_log = cumsum(log(ascending evals))` — a NON-MONOTONIC array — then `searchsorted(cumulative_log, 0.0)` (searchsorted requires sorted input → result undefined/wrong). WW's authoritative algorithm is the DESCENDING product loop `largest idx where prod(evals[idx:])<1.0`. The analyzer ALREADY has the correct loop in `compute_detX_constraint` (`:~1043`) but `compute_erg_condition` does not use it. Net: the `erg_lambda_min` (and thus Δλ_min, which prior-plan only sign-fixed) is computed on a broken boundary. Two-source confirmed.
-- **R3: Tracy-Widom threshold structure is not authoritative.** WW: `bulk_max + √[(1/√Q)·bulk_max^(2/3)·M^(-2/3)]`, no c_TW. Analyzer (`:512-513`, prior D-E): `mp_lambda_plus + c_TW·σ²·M^(-2/3)`. Prior D-E got base=M/exp=-2/3 but not the `(1/√Q)`, the `bulk_max^(2/3)`, the overall √, or the no-c_TW. Couples to R1 (uses the edge).
-
-**MED — naming/coverage divergences (value often already correct):**
-- **R4: α̂ naming inverted vs WW.** WW canonical = `alpha_weighted` (= α·log₁₀λ_max); WW has NO `alpha_hat` and NO `/N` variant. Prior plan (D-F) made `alpha_hat` canonical and labeled `alpha_weighted` "deprecated" — backwards vs WW. VALUE is correct (un-normalized) and matches WW; only the canonical-name/deprecation diverges. `alpha_hat_normalized` (/N) has zero WW basis. `spectral_metrics.py:~639`, `constants.py:84-85`.
-- **R5: MetricNames coverage gaps.** `MP_SOFTRANK` appears renamed to `WW_SOFTRANK` (dead placeholder, no impl); `MATRIX_RANK` absent; `NORM`/`SPECTRAL_NORM` bare literals not in MetricNames. `constants.py`.
-
-**LOW / enhancement:**
-- **R6: mp_softrank metric missing** (WW: λ+/λ_max). Value-add (prior plan deferred as D-J).
-- **R7: small-N (<20) bias-corrected alpha branch missing** (WW: `1+(n-1)/s`, `J=D_ks−0.868/√n`). Standard MLE applied regardless → upward-biased α on thin tails.
-- **R8: phase "ideal" band + "over-regularized" term are SETOL-only, not WW.** WW: plain over-trained(<2)/under-trained(>6), term "over-trained". Prior plan D-C ideal band [2.0,2.1) and D-D "over-regularization" are SETOL-paper choices. Surface: keep SETOL framing or revert toward WW under the "WW authoritative" instruction.
-- **R9: NORM-layer analysis gap** — recognized but `get_layer_weights_and_bias` returns nothing for NORM (`spectral_utils.py:~141`). WW supports NORM.
-- (No-action) matrix_entropy EPSILON handling differs negligibly; conv reshape `(H·W·C_in, C_out)` vs WW transpose — SVD-invariant.
-
-### Confirmed-correct (authoritative agreement — do NOT touch):
-- `rescale_eigenvalues` byte-identical to WW (re-confirms prior-plan Correction C1 ghost). 
-- Alpha MLE `1+n/(Σlog−n·log_xmin)` + KS-argmin xmin == WW.
-- `sigma=(α−1)/√N_tail` == WW. `stable_rank=Σλ/maxλ` == WW. `matrix_rank` tol == WW. norm/log_norm/log_alpha_norm == WW.
-- Δλ_min units (xmin·wscale² vs rescaled boundary) consistent; sign (prior fix) matches SETOL §7.3 — but the boundary it subtracts is R2-broken.
-
-### Key Constraints
-
-HARD:
-- Authoritative source = Martin's WeightWatcher (user-declared). Where SETOL.md and WW conflict on MECHANISM, WW wins (R1,R2,R3). Where they conflict on FRAMING/terminology (R8) it is a user choice.
-- `compute_detX_constraint` already exists and is WW-correct → R2 fix is reuse, not new code (DRY).
-- Tests: `tests/test_analyzer/test_spectral_metrics.py` only (full suite ~1.5h forbidden). Logger-only, Keras 3, MPLBACKEND=Agg.
-- Some divergences are PRE-EXISTING bugs (R1, R2) not introduced by the prior plan — fixing them is in-scope for "reconcile to authoritative" but changes long-standing behavior; trap/ERG tests may encode the old (wrong) numbers as contracts.
-
-SOFT:
-- R4 naming realignment (alpha_weighted canonical) is reversible and low-risk but touches the metric just changed last plan — confirm intent.
-- R6/R7/R9 are additions (scope-expanding); R8 is a framing reversal.
-
-GHOST:
-- "Prior-plan D-E fully fixed Tracy-Widom" — false; R3 shows it was partial. "Prior-plan Δλ_min fix made the ERG diagnostic correct" — false; R2 shows the boundary is broken underneath.
-
-### Corrections
-- (none yet this plan)
-
-## plan_2026-06-03_9e82787d
-### Index
-
-| # | Finding | File | Detail |
-|---|---------|------|--------|
-| F1 | Core spectral math audit (spectral_metrics.py, spectral_utils.py) vs SETOL | findings/spectral-core-math.md | Alpha/Clauset COMPLIANT; Δλ_min abs() bug; TW exponent; α̂ naming; R-transform missing |
-| F2 | Orchestration + visualization audit (spectral_analyzer.py, spectral_visualizer.py) | findings/spectral-orchestration-viz.md | Funnel plot missing; α̂ not in summary; ideal band [2,2.5); MP overlay absent |
-| F3 | Package integration audit (model_analyzer, config, constants, data_types, utils) | findings/package-integration.md | α<2 mislabeled "memorization"; α̂/α_weighted naming; summary metric omissions |
-
-### Verified Discrepancies (source-read by orchestrator, ranked)
-
-Severity HIGH:
-- **D-A: `Δλ_min` sign destroyed** — `spectral_metrics.py:383` `delta_lambda_min = float(abs(...))`. SETOL §7.3 requires SIGNED value (<0 = over-regularized). The `abs()` makes the over-regularization diagnostic impossible. Unit handling around it (`xmin*wscale²` vs rescaled `erg_lambda_min`) is otherwise correct. **HARD constraint: fix is a 1-token removal of `abs()`.**
-- **D-B: α̂ (AlphaHat) absent from model-level summary** — `constants.py:122-128` `SPECTRAL_DEFAULT_SUMMARY_METRICS` lists ALPHA + LOG_SPECTRAL_NORM but omits ALPHA_HAT. SETOL §2.4/§13 make ⟨α̂⟩ the primary model-quality metric. Computed per-layer but never aggregated.
-
-Severity MEDIUM:
-- **D-C: "ideal" phase band is [2.0, 2.5)** — `spectral_metrics.py:417-418`. SETOL §3.2/§13: Ideal = critical point α≈2, not a 0.5-wide band. classify_learning_phase thresholds (2.5/4.0/6.0) also diverge from SETOL's clean HT band (2,6) AND from this file's own docstring (which says "2.0<α<4.0 Good"). Internally inconsistent.
-- **D-D: α<2 mislabeled "overfitting/memorization"** — `model_analyzer.py:39-40` docstring. SETOL §7.2 defines α<2 as Over-Regularization (glassy, compensatory), mechanistically distinct from memorization. Interpretation error in docs.
-- **D-E: Tracy-Widom exponent** — `spectral_metrics.py:447,493` uses `N^(-1/3)`. SETOL §2.3 states Δ_TW ~ O(M^(-2/3)). Need to confirm code's `N`/`M` orientation before claiming exact exponent error; at minimum the magnitude differs → trap detection sensitivity off.
-- **D-F: α̂ field naming/convention confusion** — `spectral_metrics.py:615-625`. Two fields: `alpha_weighted`=α·log₁₀(σ²_max) (WeightWatcher convention, matches §8/§10.5 validation refs); `alpha_hat`=α·log₁₀(σ²_max/N) (SETOL theory X=(1/N)WᵀW). Per §10.2 NEITHER is strictly wrong, but the naming is misleading and which one `MetricNames.ALPHA_HAT` exports matters for downstream consumers.
-- **D-G: Funnel diagnostic (α, Δλ_min) plot missing** — `spectral_visualizer.py`. SETOL §8.2/§10.4 central diagnostic. `erg_delta_lambda_min` computed+stored but never plotted. (Depends on D-A to be meaningful.)
-- **D-H: MP bulk overlay absent from per-layer ESD plot** — `spectral_visualizer.py:338-361`. MP envelope (λ-, λ+) only drawn in trap overlay (gated on randomize), not on the standard per-layer ESD diagnostic.
-
-Severity LOW / enhancement:
-- **D-I: Free cumulants / R-transform / Layer Quality Q̄² entirely absent** — SETOL §5.4, §6. Large theory chunk; "computational R-transform Layer Quality" listed in §10.5 as a WW capability. Enhancement, not a correctness bug.
-- **D-J: MP SoftRank R_MP missing** — SETOL §2.4 metrics table. `stable_rank` exists but is a different quantity.
-- **D-K: Missing universality classes** — RandomLike, Bulk+Spikes, Rank-Collapse not in `classify_learning_phase`. SETOL §2.2 6-class table.
-- **D-L: α<2 recommendation says "early stopping/regularization"** — `spectral_analyzer.py:342`. SETOL §13 action table says "Reduce LR; check for Correlation Traps".
-
-### Key Constraints
-
-HARD:
-- Code already COMPLIANT and must stay so: Clauset MLE α (joint xmin/KS), Conv2D reshape (H·W·C_in, C_out), BN/Dropout skipping, bias exclusion, D_KS, correlation-trap randomize protocol, ERG trace-normalization (wscale) is the legit §10.2 correction.
-- `Δλ_min` fix is the single highest-value, lowest-risk change (remove `abs()`).
-- Tests live in `tests/test_analyzer/` — must scope pytest there (full suite ~1.5h forbidden as regression check).
-- No `print`; use `dl_techniques.utils.logger`. Keras 3 idioms. `MPLBACKEND=Agg` for any plot-generating code.
-
-SOFT:
-- WeightWatcher-convention vs SETOL-theory α̂ normalization is a project-preference choice (§10.2 sanctions both) — needs user intent, not unilateral change.
-- Whether to ADD missing theory (R-transform Q̄², missing phases, funnel plot, MP overlay) vs only FIX existing-but-wrong code is a scope decision for the user.
-
-GHOST:
-- "ERG must target det=1 in the rescaling step" — NOT a real constraint; trace-normalization then det-check on rescaled evals is the correct WW/SETOL pattern. (See Correction C1.)
-
-### Corrections
-
-- **[CORRECTED iter-0] C1**: findings/spectral-core-math.md ranks "ERG rescaling targets mean=1 not det=1" as severity-2 DISCREPANCY. Downgraded after orchestrator source-read of `rescale_eigenvalues` (spectral_metrics.py:984-996) + `compute_erg_condition` (340-391): the Σλ→N trace-normalization IS the `wscale` correction SETOL §10.2 explicitly sanctions ("ERG calculation applies wscale correction internally"); det=1 / Σln≈0 is then evaluated on the rescaled eigenvalues. This is the canonical WeightWatcher pattern, NOT a discrepancy. The only real ERG-path bug is D-A (the `abs()` on Δλ_min).
-
-## plan_2026-06-03_bf1e592d
-### Index
-| # | Finding | File | Key refs |
-|---|---------|------|----------|
-| F1 | ConvNeXt train-script structure + exact `stochastic_mode` plumbing points | `findings/train-scripts.md` | v1:102, v2:106, v2_mae:21-26; factory `**kwargs` chain confirmed |
-| F2 | Experiment-harness / `compare_runs` reuse patterns + CIFAR-10 choice | `findings/experiment-harness.md` | sweep.py, compare_runs.py:198, callbacks.py:85 (CSVLogger) |
-| F3 | Pre-PLAN design decisions (DN-1..DN-5): direct-kwarg plumbing, seeding, subprocess driver, snapshot-diff | `findings/design-notes.md` | DN-1..DN-5 |
-
-### Key Constraints
-- [HARD] `stochastic_mode` ∈ {`depth`,`gradient`}; constructor raises `ValueError` otherwise (`convnext_v1.py:182`, `convnext_v2.py:199`) → CLI `choices=['depth','gradient']`.
-- [HARD] V2-MAE `create_convnext_encoder` (`train_convnext_v2_mae.py:21`) has a fixed signature, no `**kwargs` → must add `stochastic_mode` param explicitly + thread it.
-- [HARD] Subprocess cells must hard-set `CUDA_VISIBLE_DEVICES` + `MPLBACKEND=Agg` (not setdefault); serial only (no parallel GPU); results under repo-root `results/`.
-- [HARD] Train scripts must keep `train_<model>.py` naming (shadowing `train` package breaks imports).
-- [SOFT] Existing scripts already emit `training_log.csv` via `create_callbacks` → `compare_runs` works directly on their dirs; no custom report writer needed.
-- [GHOST] No `--stochastic-mode` or `--seed` flag exists in any convnext script; both are net-new, convnext-local additions (do NOT widen the shared base parser).
 
 ### Corrections
 *Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*

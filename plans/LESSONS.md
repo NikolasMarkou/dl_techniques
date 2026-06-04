@@ -101,6 +101,9 @@
 - **`keras.ops.random.uniform` does NOT exist in Keras 3.8.** Random ops live under `keras.random.*`.
 - **`DepthwiseConv2D` on TF GPU rejects asymmetric strides.**
 - **`train.common.gpu.setup_gpu` is shared infrastructure across 50+ trainers -- do NOT refactor it for one trainer's observability concern.**
+- **`train.common.evaluation.generate_training_curves` hard-requires a `'loss'`/`'val_loss'` history key.** Custom-loss models (e.g. VAE emits `total_loss`/`val_total_loss`) must alias locally in the trainer before calling the util -- do NOT edit the shared util (many callers). Pattern: `history_alias = {**history, 'loss': history.get('total_loss', history.get('loss')), 'val_loss': history.get('val_total_loss', history.get('val_loss'))}`.
+- **Swappable sampler / loss-mode in a custom-train_step model**: one ctor `*_type` string + branch in build + branch in the loss method + thread through `get_config`. Keep the swapped layer's NAME constant so name-based sub-model (decoder) extraction is untouched. Pattern: `create_sampling_layer('hypersphere'|'gaussian', name='vae_sampling')` -- the name is load-bearing for `model.get_layer("vae_sampling").output` decoder extraction.
+- **Controlled vs faithful A/B on hypersphere sampling**: projecting a Gaussian-reparam latent onto the sphere while keeping the Gaussian KL (`hypersphere_controlled`) mis-regularizes and underperforms the Gaussian baseline. A radius-variance KL (`hypersphere_faithful`: `kl = mean(0.5*(exp(rlv)-rlv-1))`) matches/beats the Gaussian baseline on MNIST. The KL-sampler mismatch is the dominant factor, not the sphere projection itself.
 - **`model.save("path.keras")` on a never-called subclass Model silently warns.** Always `model(dummy_input, training=False)` before save in tests.
 - **When adding new tests to a file with a wall-clock budget, default `img_size` to `8` or `16`.**
 - **`--steps-per-epoch` override is the clean way to validate a large-dataset pipeline without running a full epoch.**
@@ -108,6 +111,7 @@
 - **Periodic training-side-effect callbacks must surface failures loudly.**
 - **`Dropout(noise_shape=(None,1,1,1))` is semantically equivalent to `StochasticDepth` (per-sample Bernoulli + `/keep_prob` rescale).** `StochasticGradient` is NOT drop_path: it is forward-identity and only stochastically `stop_gradient`s the path. These are distinct regularizers. Confirmed: `depth` (StochasticDepth) outperforms `gradient` (StochasticGradient) as a regularizer on CIFAR-10 (gap widens with longer runs).
 - **`StochasticDepth` and `StochasticGradient` are NOT exported from `layers/__init__.py` (empty).** Import directly: `from dl_techniques.layers.stochastic_depth import StochasticDepth`.
+- **`ops.normalize(x, axis=-1)` (Keras 3.8) returns a SINGLE tensor and is NaN-safe, but a zero row maps to the ZERO vector (NOT a unit vector).** (Verified directly: keras 3.8.0, `[[3,4,0],[0,0,0]] -> [[.6,.8,0],[0,0,0]]`, return type `EagerTensor`, not a tuple.) So bare `ops.normalize` is fine when a zero-row->zero-vector is acceptable, but when you need a CANONICAL degenerate-direction fallback (e.g. `e_0 = [1,0,...,0]`) use the manual idiom: `norm = ops.sqrt(ops.sum(ops.square(x), axis=-1, keepdims=True)); u = ops.where(norm < eps, e_0, x / ops.maximum(norm, eps))` where `e_0 = ops.one_hot(ops.zeros(batch_dim, dtype="int32"), D)` (see `sampling.py:HypersphereSampling.call`). This mirrors the `polar_initializer.py:78-97` init-time idiom at call-time.
 
 ## Keras 3 idioms / serialization / `training`-flag
 
@@ -120,7 +124,8 @@
 - **Per-patch KL averaging (NOT sum) makes loss magnitude resolution-invariant.**
 - **`keras.ops.cond` traces BOTH branches under `@tf.function`.** Multiply-by-zero is the simpler-equivalent pattern.
 - **`ops.pad` with dynamic paddings does not trace under XLA on TF 2.18.**
-- **Bare `@register_keras_serializable()` ties key to `__module__`.** Do NOT relocate without `package="dl_techniques"` arg.
+- **Bare `@register_keras_serializable()` registers under `Custom>ClassName` (package defaults to the literal `"Custom"`), INDEPENDENT of `__module__`.** Moving a layer file across directories does NOT change its serialization key -- existing `.keras` saves still load as long as the class is imported (registered) before load. The real rule: KEEP bare decorators bare across moves. ADDING `package=`/`name=` to a previously-bare decorator is what changes the key and breaks saves. (Verified directly via `keras.saving.get_registered_name()`, plan plan_2026-06-03_da3a2bbb.)
+- **Single-file → attention-style-package migration pattern**: `git mv` the original to the facade filename FIRST (preserves R100 rename history), THEN extract sibling classes into new files. A re-exporting `__init__.py` keeps existing `from ..pkg import X` callers working with zero edits. The existing test suite passing UNCHANGED is the authoritative verbatim-logic check for an extraction (proves no forward-pass math was changed during the class-body moves).
 - **Manual `child.build(input_shape)` in `parent.build()` required for Keras 3 model-save round-trip.**
 - **Nested `List[List[Layer]]` breaks Keras layer-tracking on save/load.**
 - **Callbacks are NOT `@register_keras_serializable`.**
