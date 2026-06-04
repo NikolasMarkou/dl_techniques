@@ -27,7 +27,8 @@ The architecture uses robust **ResNet-based** encoder and decoder networks and i
 13. [Testing & Validation](#13-testing--validation)
 14. [Troubleshooting & FAQs](#14-troubleshooting--faqs)
 15. [Technical Details](#15-technical-details)
-16. [Citation](#16-citation)
+16. [Hypersphere Latent Sampling: Does It Work?](#16-hypersphere-latent-sampling-does-it-work)
+17. [Citation](#17-citation)
 
 ---
 
@@ -269,6 +270,12 @@ Dense layers for z_mean and z_log_var
 ### 4.2 Sampling Layer
 
 A simple, non-trainable layer that performs the reparameterization trick.
+
+> This model also supports an alternative **hypersphere** latent sampler
+> (`sampling_type="hypersphere"`) that places latents on a thin spherical shell
+> instead of a diagonal-Gaussian ball. It avoids posterior collapse and uses every
+> latent dimension. See [Section 16](#16-hypersphere-latent-sampling-does-it-work)
+> for the design and a fair cross-dimension empirical verdict.
 
 ### 4.3 ResNet-based Decoder
 
@@ -674,7 +681,107 @@ Maximizing the ELBO is equivalent to minimizing the VAE loss:
 
 ---
 
-## 16. Citation
+## 16. Hypersphere Latent Sampling: Does It Work?
+
+Beyond the standard diagonal-Gaussian latent, this `VAE` supports a **hypersphere**
+sampling mode (`sampling_type="hypersphere"`) — the contribution evaluated in this
+section. Instead of `z ~ N(μ, σ²)` on an unbounded ball, the encoder places each latent
+on a thin, strictly-positive **spherical shell**: it predicts a unit direction from
+`z_mean` and a single scalar radius log-variance (a dedicated `Dense(1)` head), and the
+Gaussian KL is replaced by a **radius-variance KL**. The direction carries an implicit
+uniform-on-sphere prior.
+
+```python
+from dl_techniques.models.vae.model import VAE
+
+# Baseline diagonal-Gaussian latent
+gauss = VAE.from_variant("small", input_shape=(28, 28, 1),
+                         latent_dim=16, sampling_type="gaussian")
+
+# Hypersphere (thin-shell sphere sampler + radius-variance KL)
+hyper = VAE.from_variant("small", input_shape=(28, 28, 1),
+                         latent_dim=16, sampling_type="hypersphere")
+```
+
+> The hypersphere mode is a deliberate simplification, **not** a full vMF S-VAE — there is
+> no explicit directional (von Mises–Fisher / uniform-sphere) KL on the aggregate posterior.
+> The legacy value `"hypersphere_faithful"` is accepted as a deprecated alias (old configs
+> and checkpoints still load and report as `"hypersphere"`); the dropped
+> `"hypersphere_controlled"` mode raises `ValueError`.
+
+### Verdict
+
+**YES — hypersphere sampling works, and at `latent_dim ≥ 8` it decisively beats the
+Gaussian baseline.** Its defining advantage is that it **does not suffer posterior
+collapse**: it uses *every* latent dimension, whereas the Gaussian VAE collapses to ~5–6
+active units no matter how much latent capacity it is given. This translates directly into
+much better reconstruction.
+
+*Setup: MNIST, 50 epochs, seed 42. Fair metrics only — `reconstruction_loss` (identical
+binary-crossentropy across modes) and MMD (mode-agnostic, prior-decoded samples vs real
+test, PCA-50 RBF kernel). `total_loss`/`kl_loss` are NOT comparable across modes (the two
+modes use different KL formulas) and are excluded.*
+
+| latent_dim | recon_bce (gauss) | recon_bce (hyper) | hyper vs gauss | active units gauss | active units hyper |
+|---|---|---|---|---|---|
+| 2  | **0.189** | 0.200 | +5.7% (gauss wins) | 2 | 2 |
+| 8  | 0.166 | **0.112** | **−33%** | 6 / 8 | **8 / 8** |
+| 16 | 0.168 | **0.092** | **−46%** | 5 / 16 | **16 / 16** |
+| 32 | 0.165 | **0.091** | **−45%** | 6 / 32 | **32 / 32** |
+
+- **Posterior collapse (the headline).** Gaussian active units flatline at ~5–6 regardless
+  of `latent_dim`; its reconstruction is stuck at ~0.165. The hypersphere uses **100%** of
+  dimensions (8/8, 16/16, 32/32) and reconstruction keeps improving (0.112 → 0.092 → 0.091).
+  This is exactly the theoretically-predicted benefit of a hyperspherical latent: no origin
+  to collapse toward, and the KL does not penalize latent magnitude.
+- **Reconstruction.** Hypersphere is 33–46% better at `latent_dim ≥ 8`.
+- **`latent_dim = 2`.** Hypersphere is marginally behind (+5.7%) — expected, since a 2-D
+  sphere is a 1-D circle, intrinsically more constrained than the 2-D Gaussian plane. The
+  advantage appears once there is real capacity to use.
+
+### Generative quality (MMD on prior samples) — mixed, roughly comparable
+
+| latent_dim | mmd2_median (gauss / hyper) | mmd2_half (gauss / hyper) |
+|---|---|---|
+| 8  | 0.0155 / 0.0266 (gauss) | 0.056 / 0.060 (≈) |
+| 16 | 0.0153 / 0.0187 (gauss) | 0.056 / **0.032** (hyper) |
+| 32 | 0.0155 / 0.0201 (gauss) | 0.057 / **0.032** (hyper) |
+
+On prior-sample MMD the two are close: Gaussian is slightly ahead at the median bandwidth
+(1.2–1.7×), the hypersphere is ahead at the smaller bandwidth for `dim ≥ 16`. The clear,
+robust win is on **reconstruction + dimension utilization**, not prior-sample MMD. The
+likely cause: the hypersphere has no explicit directional-KL forcing the aggregate posterior
+to match the uniform-sphere prior, leaving a small prior–posterior gap that a true S-VAE
+(vMF / uniform-sphere KL) would close.
+
+### Corrections made during the study
+
+Two real bugs and one misleading visualization were fixed before any verdict could be
+trusted:
+
+1. **`VAE.sample()` drew `N(0,I)` for all modes** → fixed to draw each mode's true prior.
+2. **The radius shell was neither thin nor strictly positive.** The original
+   `r = radius + exp(0.5·rlv)·η` had σ ≈ radius, producing ~8–13% **negative** radii and
+   ~10–18% of samples at the origin (a filled disk, not a sphere). Fixed to a thin,
+   strictly-positive shell `r = radius·(1 + 0.1·exp(0.5·clip(rlv))·η)` floored at
+   `0.05·radius`. After the fix, sampled `‖z‖` ≈ 1 with 0% off-shell.
+3. **Latent plots showed raw `z_mean` on a fixed `[-4, 4]` axis** (and produced nothing for
+   `latent_dim > 2`) → now plot the on-sphere direction and project `dim > 2` via PCA-2.
+
+An intermediate "parity" verdict, computed on the buggy off-sphere model, was **retracted**;
+the table above supersedes it.
+
+### Scope / limitations
+
+- Single dataset (MNIST), single seed, 50 epochs. The reconstruction / active-unit result is
+  large and monotonic in `latent_dim`, so it is unlikely to be noise, but multi-seed /
+  multi-dataset confirmation would strengthen it.
+- Prior-sample MMD is only comparable, not better — a directional (vMF / uniform-sphere) KL
+  is the natural next step to also win on generation.
+
+---
+
+## 17. Citation
 
 If you use VAEs in your research, please cite the original paper:
 
