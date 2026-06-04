@@ -1106,8 +1106,14 @@ def create_vae(
     else:
         optimizer_instance = optimizer
 
-    # Compile the model
-    model.compile(optimizer=optimizer_instance)
+    # DECISION plan_2026-06-04_6196678d/D-005: disable XLA jit for the vmf
+    # sampler. VMFSampling uses keras.random.beta, which lowers to
+    # StatelessRandomGammaV3 -- an op with NO XLA_GPU_JIT kernel in TF 2.18
+    # (tf2xla conversion fails under the GPU multi_step_on_iterator path). Do
+    # NOT try to make the Wood/Ulrich rejection sampler XLA-clean or globally
+    # force jit_compile=False (gaussian/hypersphere keep XLA). See decisions.md D-005.
+    jit_compile = False if getattr(model, "sampling_type", None) == "vmf" else "auto"
+    model.compile(optimizer=optimizer_instance, jit_compile=jit_compile)
 
     # Validate the model works
     test_input = keras.random.uniform((2,) + input_shape)
@@ -1174,8 +1180,9 @@ def create_vae_from_config(
     else:
         optimizer_instance = optimizer
 
-    # Compile the model
-    model.compile(optimizer=optimizer_instance)
+    # Compile the model (vmf opts out of XLA jit; see D-005 in create_vae).
+    jit_compile = False if getattr(model, "sampling_type", None) == "vmf" else "auto"
+    model.compile(optimizer=optimizer_instance, jit_compile=jit_compile)
 
     logger.info(f"Created VAE from config with latent_dim={config['latent_dim']}")
 
