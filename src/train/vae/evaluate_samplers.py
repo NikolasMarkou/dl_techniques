@@ -401,7 +401,7 @@ def plot_latent_diagnostics_2d(
         model.predict(x_test, batch_size=batch_size, verbose=0)["z_mean"]
     )
     labels = y_test.flatten() if y_test.ndim > 1 else y_test
-    is_sphere = str(model.sampling_type).startswith("hypersphere")
+    is_sphere = str(model.sampling_type) in ("hypersphere", "vmf")
     written: List[str] = []
 
     if is_sphere:
@@ -497,8 +497,10 @@ def plot_interpolation_grid(model: VAE, save_path: str, n_steps: int = 10) -> No
     z = np.asarray(keras.ops.convert_to_numpy(model._sample_prior(2)))
     z0, z1 = z[0], z[1]
     is_sphere = model.sampling_type != "gaussian"
+    _samp_layer = model.get_layer("vae_sampling")
     radius = (
-        float(model.get_layer("vae_sampling").radius) if is_sphere else None
+        (float(_samp_layer.radius) if hasattr(_samp_layer, "radius") else 1.0)
+        if is_sphere else None
     )
 
     fig, axes = plt.subplots(1, n_steps, figsize=(n_steps * 1.2, 1.6))

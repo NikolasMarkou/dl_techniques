@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.vae.model import VAE, create_vae
-from dl_techniques.layers.sampling import Sampling, HypersphereSampling
+from dl_techniques.layers.sampling import Sampling, HypersphereSampling, VMFSampling
 
 from train.common import (
     setup_gpu,
@@ -35,7 +35,7 @@ from train.common import (
 plt.style.use('seaborn-v0_8-darkgrid')
 sns.set_palette("viridis")
 
-CUSTOM_OBJECTS = {"VAE": VAE, "Sampling": Sampling, "HypersphereSampling": HypersphereSampling}
+CUSTOM_OBJECTS = {"VAE": VAE, "Sampling": Sampling, "HypersphereSampling": HypersphereSampling, "VMFSampling": VMFSampling}
 
 
 # ---------------------------------------------------------------------
@@ -97,7 +97,7 @@ def plot_latent_space(
     # z_mean is the UNNORMALIZED mean and can have ||z_mean|| >> 4, so the old hard
     # [-4,4] clamp rendered a healthy direction-spread as a "collapsed point". Plot
     # the on-sphere direction u = z_mean/||z_mean|| (the REAL latent), NOT raw z_mean.
-    is_sphere = str(model.sampling_type).startswith("hypersphere")
+    is_sphere = str(model.sampling_type) in ("hypersphere", "vmf")
     if is_sphere:
         norm = np.linalg.norm(z_mean, axis=1, keepdims=True)
         coords = z_mean / np.maximum(norm, 1e-12)
@@ -344,7 +344,7 @@ def main():
     parser.add_argument('--viz-frequency', type=int, default=5, dest='viz_frequency',
                         help='Visualization frequency (epochs)')
     parser.add_argument('--sampler', type=str, default='gaussian',
-                        choices=['gaussian', 'hypersphere'],
+                        choices=['gaussian', 'hypersphere', 'vmf'],
                         help='Latent sampling mode passed to create_vae(sampling_type=...)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Seed for all RNG sources (reproducible comparison arms)')
