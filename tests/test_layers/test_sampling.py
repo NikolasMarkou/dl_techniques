@@ -1071,7 +1071,12 @@ class TestVMFSampling:
             inputs=[z_mean_input, kappa_input], outputs=outputs
         )
 
-        original_prediction = model.predict([z_mean, kappa], verbose=0)
+        # Eager call (NOT model.predict): the vMF rejection sampler uses
+        # keras.random.beta -> StatelessRandomGammaV3, which has no XLA-GPU kernel
+        # in TF 2.18. model.predict() builds an XLA-eligible predict_function that
+        # crashes on GPU; a direct eager call exercises the realistic vmf path
+        # (jit disabled) and still validates the save/load round-trip.
+        original_prediction = np.array(model([z_mean, kappa], training=False))
 
         model_path = os.path.join(str(tmp_path), "model.keras")
         model.save(model_path)
@@ -1079,7 +1084,7 @@ class TestVMFSampling:
         loaded_model = keras.models.load_model(
             model_path, custom_objects={"VMFSampling": VMFSampling}
         )
-        loaded_prediction = loaded_model.predict([z_mean, kappa], verbose=0)
+        loaded_prediction = np.array(loaded_model([z_mean, kappa], training=False))
 
         # Stochastic by design but seed-reproducible -> identical predictions.
         np.testing.assert_array_equal(original_prediction, loaded_prediction)

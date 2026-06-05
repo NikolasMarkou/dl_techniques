@@ -689,6 +689,13 @@ class VMFSampling(keras.layers.Layer):
     biases the Monte-Carlo gradient of the reconstruction term and was found
     minor for moderate ``kappa`` by Davidson et al.
 
+    **GPU / XLA limitation.** The rejection sampler draws ``keras.random.beta``,
+    which lowers to ``StatelessRandomGammaV3`` — an op with no XLA-GPU kernel in
+    TF 2.18. A model containing ``VMFSampling`` must therefore run with XLA
+    disabled on GPU: compile with ``jit_compile=False`` (the :class:`VAE` model
+    forces this for ``sampling_type='vmf'``) or use an eager call rather than a
+    ``predict()``/``fit()`` path that XLA-compiles the beta draw.
+
     **Architecture Overview:**
 
     .. code-block:: text
