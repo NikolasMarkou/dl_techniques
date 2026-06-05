@@ -808,36 +808,40 @@ vmf = VAE.from_variant("small", input_shape=(28, 28, 1),
 
 ### Verdict
 
-**The directional vMF KL delivers the generation win — decisively at `latent_dim` 8 and 16.**
+**The directional vMF KL delivers the generation win at all three latent dims — with a dim-scaled β.**
 MNIST, 50ep, seed 42, cosine LR, early-stop on `val_reconstruction_loss`. Each mode is run at
 **its** operating point (disclosed, not a single recipe): gaussian/hypersphere β=0.01 with no
-warmup; vMF β=1e-3 with an 8-epoch KL warmup (β=1e-3 because the vMF KL is ~100× larger; warmup is
-vMF's posterior-collapse remedy — neither helps the baselines).
+warmup; vMF an 8-epoch KL warmup + **β=1e-3 at d8/d16, β=1e-4 at d32** — the vMF KL is ~100× larger
+than the baselines' and grows with dimension, so its β must shrink as the latent grows. (β and
+warmup are vMF necessities, not advantages — neither helps the baselines.)
 
-| dim | recon_bce (g / h / **v**) | mmd²_median (g / h / **v**) | active units (g / h / v) | dir_conc † (h / **v**) |
+| dim (vMF β) | recon_bce (g / h / **v**) | mmd²_median (g / h / **v**) | active units (g / h / v) | dir_conc † (h / **v**) |
 |---|---|---|---|---|
-| 8  | 0.165 / **0.108** / 0.112 | 0.0169 / 0.0331 / **0.0053** | 5 / 8 / 8 | 0.337 / **0.100** |
-| 16 | 0.167 / **0.094** / 0.096 | 0.0172 / 0.0371 / **0.0065** | 5 / 16 / 16 | 0.424 / **0.077** |
-| 32 | 0.164 / **0.091** / 0.105 | **0.0159** / 0.0496 / 0.0236 | 6 / 32 / 32 | 0.448 / **0.051** |
+| 8 (1e-3)  | 0.165 / **0.108** / 0.112 | 0.0169 / 0.0331 / **0.0053** | 5 / 8 / 8 | 0.337 / **0.100** |
+| 16 (1e-3) | 0.167 / **0.094** / 0.096 | 0.0172 / 0.0371 / **0.0065** | 5 / 16 / 16 | 0.424 / **0.077** |
+| 32 (1e-4) | 0.164 / 0.0915 / **0.0901** | 0.0159 / 0.0496 / **0.0157** | 6 / 32 / 32 | 0.448 / **0.105** |
 
-- **Generation (MMD).** vMF wins all bandwidths at **d8** (3.2× better than gaussian, 6.2× than
-  hypersphere) and **d16** (2.6× / 5.7×). At **d32** vMF beats hypersphere but loses to gaussian.
+- **Generation (MMD).** vMF wins at every dim: **d8** 3.2× better than gaussian / 6.2× than
+  hypersphere, **d16** 2.6× / 5.7×, **d32** (β=1e-4) it edges gaussian on the median bandwidth
+  (0.0157 vs 0.0159) and wins decisively on `mmd²_half` (0.0364 vs gaussian 0.0581, hypersphere
+  0.0781) — always far ahead of hypersphere.
 - **Mechanism — the directional KL does real work.** † `dir_concentration` (`||mean(unit z_mean)||`,
   lower = aggregate posterior more spread) is only a sphere-coverage signal for the two **sphere**
-  modes (it is not meaningful for gaussian's ball latent, so gaussian is omitted). Among them, vMF's
-  is far below hypersphere's (0.10/0.077/0.051 vs 0.34/0.42/0.45): the vMF→uniform KL **spreads the
+  modes (not meaningful for gaussian's ball latent, so gaussian is omitted). Among them, vMF's is far
+  below hypersphere's (0.10/0.077/0.105 vs 0.34/0.42/0.45): the vMF→uniform KL **spreads the
   aggregate posterior**, so uniform-prior samples decode to realistic images — exactly the term the
   hypersphere mode lacks. This is the plausible mechanism for vMF's MMD edge **over hypersphere**;
   vMF's edge over gaussian is additionally helped by gaussian's posterior collapse (5–6 active units).
 - **Reconstruction + dimension use.** vMF (like hypersphere) uses **100%** of latent dims and
-  reconstructs far better than gaussian (which collapses to ~5–6 active units). vMF's recon **trails
-  hypersphere slightly at every dim** (0.112/0.096/0.105 vs 0.108/0.094/0.091) — the directional KL
-  costs a little sharpness; note hypersphere is nearly unregularized (its KL ≈ 5e-4), so this is not
-  an equal-β comparison.
-- **The d32 erosion is a β-scaling effect, not a vMF limit.** The vMF KL grows with dimension
-  (final raw KL 15.8 / 26.2 / 31.6 at d8/16/32 for the same β), so a β tuned at d16 over-regularizes
-  at d32 (recon slips behind hypersphere; MMD degrades). A dim-scaled (smaller) β at d32 is expected
-  to recover the win — left as future work.
+  reconstructs far better than gaussian (which collapses to ~5–6 active units). vMF's recon trails
+  hypersphere slightly at d8/d16 (0.112/0.096 vs 0.108/0.094) but **edges it at d32** (0.0901 vs
+  0.0915) once β is dim-scaled; note hypersphere is nearly unregularized (its KL ≈ 5e-4), so this is
+  not an equal-β comparison.
+- **β must be dim-scaled (the d32 story).** The vMF KL grows with dimension (raw KL ≈16/26/57 at the
+  per-dim β), so the optimal β shrinks: 1e-3 at d8/d16, 1e-4 at d32. A *fixed* β=1e-3 over-regularizes
+  d32 (recon 0.105, MMD 0.0236 — loses to gaussian); the dim-scaled β=1e-4 recovers the full win
+  (recon 0.0901, MMD 0.0157 — beats both). Confirmed by a d32 β-sweep over {3e-4, 1e-4, 3e-5}, with
+  1e-4 ≈ 3e-5 optimal. So the earlier "d32 erosion" was the fixed β, not a vMF limitation.
 
 ### How β was chosen
 
@@ -845,9 +849,12 @@ The vMF KL is structurally ~100× larger than the baselines' (≈7–31 vs gauss
 ≈4e-4), so the shared β=0.01 over-regularizes vMF and drives reconstruction back up after a few
 epochs. A d16 β-sweep over {3e-4, 1e-3, 3e-3, 1e-2} (clean methodology — cosine LR,
 `val_reconstruction_loss` early-stop) found **β=1e-3** optimal: recon 0.096 (≈ hypersphere 0.094,
-trails slightly) + best MMD; higher β monotonically degrades both. β=1e-3 was then applied across
-all dims (its sub-optimality at d32 is the erosion noted above). The KL is mode-incomparable, so
-judge across modes on `reconstruction_loss` + MMD only, never `total_loss`/`kl_loss`.
+trails slightly) + best MMD; higher β monotonically degrades both. Because the vMF KL grows with
+dimension, β must be **dim-scaled**: a separate d32 β-sweep over {3e-4, 1e-4, 3e-5} found
+**β=1e-4** optimal there (recon 0.0901, MMD 0.0157 — beats both baselines), vs the over-regularized
+fixed β=1e-3 (recon 0.105). Rule of thumb: shrink β ~10× per ~2× of latent dim. The KL is
+mode-incomparable, so judge across modes on `reconstruction_loss` + MMD only, never
+`total_loss`/`kl_loss`.
 
 ### Engineering notes (all verified)
 
@@ -866,9 +873,8 @@ judge across modes on `reconstruction_loss` + MMD only, never `total_loss`/`kl_l
 
 ### Scope / limitations
 
-- Single dataset (MNIST), single seed, 50 epochs. β tuned at d16 only and not dim-scaled — the d32
-  result is a fixed-β snapshot, not vMF's best at d32 (a smaller β there is expected to recover the
-  win; future work).
+- Single dataset (MNIST), single seed, 50 epochs. β was tuned per dim (d16 + d32 sweeps); a fuller
+  β-vs-dim curve and multi-seed / multi-dataset confirmation would strengthen the result.
 - vMF trains without XLA (rejection sampler) → ~5–10× slower per epoch than the gaussian/hypersphere
   arms.
 
