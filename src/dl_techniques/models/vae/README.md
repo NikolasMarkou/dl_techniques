@@ -839,16 +839,38 @@ vMF's posterior-collapse remedy — neither helps the baselines).
   at d32 (recon slips behind hypersphere; MMD degrades). A dim-scaled (smaller) β at d32 is expected
   to recover the win — left as future work.
 
-### Notes (verified during the study)
+### How β was chosen
 
-- The `VMFSampling` sampler and its closed-form KL were each validated against SciPy
-  (`scipy.stats.vonmises_fisher` to ~2e-4; `scipy.special.ive` to ~6e-6). The κ-gradient is
-  **unbiased**, so the Naesseth-2017 rejection-reparameterization correction is not needed.
-- Free-learned κ initially **posterior-collapses** (κ→0, uniform latent); cured with higher init κ
-  (≈12) + KL warmup. The KL is mode-incomparable, so judge across modes on `reconstruction_loss` +
-  MMD only, never `total_loss`/`kl_loss`.
+The vMF KL is structurally ~100× larger than the baselines' (≈7–31 vs gaussian ≈5, hypersphere
+≈4e-4), so the shared β=0.01 over-regularizes vMF and drives reconstruction back up after a few
+epochs. A d16 β-sweep over {3e-4, 1e-3, 3e-3, 1e-2} (clean methodology — cosine LR,
+`val_reconstruction_loss` early-stop) found **β=1e-3** optimal: recon 0.096 (≈ hypersphere 0.094,
+trails slightly) + best MMD; higher β monotonically degrades both. β=1e-3 was then applied across
+all dims (its sub-optimality at d32 is the erosion noted above). The KL is mode-incomparable, so
+judge across modes on `reconstruction_loss` + MMD only, never `total_loss`/`kl_loss`.
 
-Full writeup: `results/VAE_VMF_REPORT.md`.
+### Engineering notes (all verified)
+
+1. **`VMFSampling` layer** — fixed-K Ulrich/Wood rejection sampler + Householder reflection. Verified
+   in isolation: on-sphere ‖z‖≈1; isotropic vMF cap (tangent-eigenvalue ratio ≈1.01); diverse μ̂ →
+   uniform coverage; E[z·μ̂]=A_m(κ) vs `scipy.stats.vonmises_fisher` to ~2e-4.
+2. **Closed-form vMF KL** — Bessel ratio `A_m(κ)=I_{m/2}/I_{m/2-1}` via a continued-fraction /
+   downward Miller recurrence (the upward recurrence is unstable — relerr up to 1e5 at d16/d32) plus
+   a telescoping log-normalizer. Verified vs `scipy.special.ive` to ~6e-6 (even and odd dims).
+3. **κ-gradient is unbiased** — `∇_κ E[w]` matches the analytic `A_m'(κ)` + finite differences, so
+   the Naesseth-2017 rejection-reparameterization correction is **not** needed (ruled out by test).
+4. **Posterior collapse cured** — free-learned κ initially collapses to ~0 (uniform latent, recon
+   stuck ~0.25). Fixed with higher init κ (≈12) + KL warmup, not a gradient change.
+5. **XLA / GPU** — vMF opts out of `jit_compile` (`keras.random.beta` → `StatelessRandomGammaV3` has
+   no XLA-GPU kernel in TF 2.18); `VAE.compile()` forces this for `sampling_type='vmf'`.
+
+### Scope / limitations
+
+- Single dataset (MNIST), single seed, 50 epochs. β tuned at d16 only and not dim-scaled — the d32
+  result is a fixed-β snapshot, not vMF's best at d32 (a smaller β there is expected to recover the
+  win; future work).
+- vMF trains without XLA (rejection sampler) → ~5–10× slower per epoch than the gaussian/hypersphere
+  arms.
 
 ---
 
