@@ -347,7 +347,7 @@ def train_model(args):
     model = create_vae(
         input_shape=input_shape,
         latent_dim=args.latent_dim,
-        variant="small",
+        variant=args.variant,
         optimizer=opt,
         sampling_type=args.sampler,
         kl_loss_weight=args.kl_loss_weight,
@@ -440,6 +440,11 @@ def main():
     )
     parser.add_argument('--latent-dim', type=int, default=2, dest='latent_dim',
                         help='Latent space dimensionality (2 for visualization)')
+    parser.add_argument('--variant', type=str, default='small',
+                        choices=['micro', 'small', 'medium', 'large', 'xlarge'],
+                        help='VAE capacity preset passed to create_vae(variant=...). '
+                             'Controls encoder/decoder depth+filters (params: micro 0.13M, '
+                             'small 0.39M, medium 1.14M, large 7.5M, xlarge 29.8M at 32x32x3, ld=32).')
     parser.add_argument('--optimizer', type=str, default='adam')
     parser.add_argument('--viz-frequency', type=int, default=5, dest='viz_frequency',
                         help='Visualization frequency (epochs)')
