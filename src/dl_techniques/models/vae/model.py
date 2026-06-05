@@ -750,14 +750,24 @@ class VAE(keras.Model):
         # Let an explicit caller-supplied kl_loss_weight (e.g. train_vae's
         # --kl-loss-weight for the vMF beta-sweep) override the variant default;
         # otherwise fall back to the variant's configured weight.
+        # Variant values are DEFAULTS — an explicit caller kwarg (e.g. train_vae's
+        # --depths / --steps-per-depth / --filters) overrides them. depths and
+        # filters must stay consistent (filters length == depths), so they move
+        # together: fall back to the variant pair only when the caller overrides
+        # NEITHER. If the caller passes depths alone, the constructor
+        # auto-generates filters = [32*2**i for i in range(depths)]; if filters
+        # alone, depths is derived from its length. (DECISION plan_2026-06-05_56b39171/D-004)
         kwargs.setdefault("kl_loss_weight", config["kl_loss_weight"])
+        kwargs.setdefault("steps_per_depth", config["steps_per_depth"])
+        if "depths" not in kwargs and "filters" not in kwargs:
+            kwargs["depths"] = config["depths"]
+            kwargs["filters"] = config["filters"]
+        elif "filters" in kwargs and "depths" not in kwargs:
+            kwargs["depths"] = len(kwargs["filters"])
 
         return cls(
             latent_dim=latent_dim,
             input_shape=input_shape,
-            depths=config["depths"],
-            steps_per_depth=config["steps_per_depth"],
-            filters=config["filters"],
             **kwargs,
         )
 

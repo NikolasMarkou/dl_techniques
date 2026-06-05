@@ -344,6 +344,14 @@ def train_model(args):
 
     # Create model. Pass the optimizer INSTANCE (with the schedule baked in) so
     # create_vae uses it as-is instead of falling back to its constant-LR default.
+    arch_overrides = {}
+    if args.depths is not None:
+        arch_overrides['depths'] = args.depths
+    if args.steps_per_depth is not None:
+        arch_overrides['steps_per_depth'] = args.steps_per_depth
+    if args.filters is not None:
+        arch_overrides['filters'] = [int(f) for f in args.filters.split(',')]
+
     model = create_vae(
         input_shape=input_shape,
         latent_dim=args.latent_dim,
@@ -351,6 +359,7 @@ def train_model(args):
         optimizer=opt,
         sampling_type=args.sampler,
         kl_loss_weight=args.kl_loss_weight,
+        **arch_overrides,
     )
     model.summary(print_fn=logger.info)
 
@@ -445,6 +454,15 @@ def main():
                         help='VAE capacity preset passed to create_vae(variant=...). '
                              'Controls encoder/decoder depth+filters (params: micro 0.13M, '
                              'small 0.39M, medium 1.14M, large 7.5M, xlarge 29.8M at 32x32x3, ld=32).')
+    parser.add_argument('--depths', type=int, default=None,
+                        help='Override encoder/decoder downsampling stages (default: variant preset). '
+                             'On 32x32 input, depths<=5 (each stage halves spatial size).')
+    parser.add_argument('--steps-per-depth', type=int, default=None, dest='steps_per_depth',
+                        help='Override residual blocks per stage (network depth, NOT downsampling). '
+                             'Default: variant preset.')
+    parser.add_argument('--filters', type=str, default=None,
+                        help='Override per-stage channel widths as a comma list, e.g. "128,256". '
+                             'Length must equal --depths. Default: variant preset.')
     parser.add_argument('--optimizer', type=str, default='adam')
     parser.add_argument('--viz-frequency', type=int, default=5, dest='viz_frequency',
                         help='Visualization frequency (epochs)')
