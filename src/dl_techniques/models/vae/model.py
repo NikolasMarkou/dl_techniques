@@ -311,6 +311,31 @@ class VAE(keras.Model):
             f"depths={depths}, filters={filters}"
         )
 
+    def compile(self, *args, **kwargs):
+        # DECISION plan_2026-06-04_6196678d/D-009: vMF's keras.random.beta ->
+        # StatelessRandomGammaV3 has NO XLA-GPU kernel (TF 2.18); force-disable
+        # XLA for vmf on EVERY compile path (direct .compile(), load_model()
+        # recompile, factory) so GPU save/load + fit don't crash. For vmf this
+        # MUST win even over an explicitly-passed jit_compile. Do NOT scope the
+        # opt-out to the factories only (the prior D-005 factory-only opt-out
+        # missed the load_model() recompile path -> GPU save/load crashed); do
+        # NOT try to make the Wood/Ulrich rejection sampler XLA-clean. Other
+        # modes (gaussian/hypersphere) keep the caller's jit_compile unchanged.
+        # Supersedes the factory-only D-005 opt-out (now redundant but harmless).
+        if getattr(self, "sampling_type", None) == "vmf":
+            kwargs["jit_compile"] = False
+        return super().compile(*args, **kwargs)
+
+    def compile_from_config(self, config):
+        # D-009: overriding compile() makes Keras route load_model()'s recompile
+        # through compile_from_config (else it warns + skips recompile, leaving a
+        # reloaded vmf model with stale jit_compile="auto" that XLA-crashes on a
+        # later GPU .fit()). Re-derive args via Keras' deserializer and funnel
+        # through our compile() so the vmf jit_compile=False opt-out survives reload.
+        config = keras.saving.deserialize_keras_object(config)
+        self.compile(**config)
+        return self
+
     def _build_model(self, inputs: keras.KerasTensor) -> Dict[str, keras.KerasTensor]:
         """Build the complete VAE model architecture.
 
