@@ -809,23 +809,31 @@ vmf = VAE.from_variant("small", input_shape=(28, 28, 1),
 ### Verdict
 
 **The directional vMF KL delivers the generation win — decisively at `latent_dim` 8 and 16.**
-MNIST, 50ep, seed 42, β=1e-3 (gaussian/hypersphere β=0.01), cosine LR:
+MNIST, 50ep, seed 42, cosine LR, early-stop on `val_reconstruction_loss`. Each mode is run at
+**its** operating point (disclosed, not a single recipe): gaussian/hypersphere β=0.01 with no
+warmup; vMF β=1e-3 with an 8-epoch KL warmup (β=1e-3 because the vMF KL is ~100× larger; warmup is
+vMF's posterior-collapse remedy — neither helps the baselines).
 
-| dim | recon_bce (g / h / **v**) | mmd²_median (g / h / **v**) | active units (g / h / v) | dir_concentration (g / h / **v**) |
+| dim | recon_bce (g / h / **v**) | mmd²_median (g / h / **v**) | active units (g / h / v) | dir_conc † (h / **v**) |
 |---|---|---|---|---|
-| 8  | 0.165 / **0.108** / 0.112 | 0.0169 / 0.0331 / **0.0053** | 5 / 8 / 8 | 0.050 / 0.337 / **0.100** |
-| 16 | 0.167 / **0.094** / 0.096 | 0.0172 / 0.0371 / **0.0065** | 5 / 16 / 16 | 0.029 / 0.424 / **0.077** |
-| 32 | 0.164 / **0.091** / 0.105 | **0.0159** / 0.0496 / 0.0236 | 6 / 32 / 32 | 0.047 / 0.448 / **0.051** |
+| 8  | 0.165 / **0.108** / 0.112 | 0.0169 / 0.0331 / **0.0053** | 5 / 8 / 8 | 0.337 / **0.100** |
+| 16 | 0.167 / **0.094** / 0.096 | 0.0172 / 0.0371 / **0.0065** | 5 / 16 / 16 | 0.424 / **0.077** |
+| 32 | 0.164 / **0.091** / 0.105 | **0.0159** / 0.0496 / 0.0236 | 6 / 32 / 32 | 0.448 / **0.051** |
 
 - **Generation (MMD).** vMF wins all bandwidths at **d8** (3.2× better than gaussian, 6.2× than
   hypersphere) and **d16** (2.6× / 5.7×). At **d32** vMF beats hypersphere but loses to gaussian.
-- **Mechanism — the directional KL does real work.** vMF's `dir_concentration` (0.10 / 0.077 /
-  0.051) is far below hypersphere's (0.34 / 0.42 / 0.45): the vMF→uniform KL **spreads the
-  aggregate posterior** over the sphere, so uniform-prior samples decode to realistic images. This
-  is exactly the term the hypersphere mode lacks.
+- **Mechanism — the directional KL does real work.** † `dir_concentration` (`||mean(unit z_mean)||`,
+  lower = aggregate posterior more spread) is only a sphere-coverage signal for the two **sphere**
+  modes (it is not meaningful for gaussian's ball latent, so gaussian is omitted). Among them, vMF's
+  is far below hypersphere's (0.10/0.077/0.051 vs 0.34/0.42/0.45): the vMF→uniform KL **spreads the
+  aggregate posterior**, so uniform-prior samples decode to realistic images — exactly the term the
+  hypersphere mode lacks. This is the plausible mechanism for vMF's MMD edge **over hypersphere**;
+  vMF's edge over gaussian is additionally helped by gaussian's posterior collapse (5–6 active units).
 - **Reconstruction + dimension use.** vMF (like hypersphere) uses **100%** of latent dims and
-  reconstructs far better than gaussian (which collapses to ~5–6 active units); its recon trails
-  hypersphere only slightly (the directional KL costs a little sharpness).
+  reconstructs far better than gaussian (which collapses to ~5–6 active units). vMF's recon **trails
+  hypersphere slightly at every dim** (0.112/0.096/0.105 vs 0.108/0.094/0.091) — the directional KL
+  costs a little sharpness; note hypersphere is nearly unregularized (its KL ≈ 5e-4), so this is not
+  an equal-β comparison.
 - **The d32 erosion is a β-scaling effect, not a vMF limit.** The vMF KL grows with dimension
   (final raw KL 15.8 / 26.2 / 31.6 at d8/16/32 for the same β), so a β tuned at d16 over-regularizes
   at d32 (recon slips behind hypersphere; MMD degrades). A dim-scaled (smaller) β at d32 is expected
