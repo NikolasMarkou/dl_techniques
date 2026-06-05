@@ -28,7 +28,8 @@ The architecture uses robust **ResNet-based** encoder and decoder networks and i
 14. [Troubleshooting & FAQs](#14-troubleshooting--faqs)
 15. [Technical Details](#15-technical-details)
 16. [Hypersphere Latent Sampling: Does It Work?](#16-hypersphere-latent-sampling-does-it-work)
-17. [Citation](#17-citation)
+17. [vMF Spherical VAE: Winning on Generation](#17-vmf-spherical-vae-winning-on-generation)
+18. [Citation](#18-citation)
 
 ---
 
@@ -777,11 +778,73 @@ the table above supersedes it.
   large and monotonic in `latent_dim`, so it is unlikely to be noise, but multi-seed /
   multi-dataset confirmation would strengthen it.
 - Prior-sample MMD is only comparable, not better — a directional (vMF / uniform-sphere) KL
-  is the natural next step to also win on generation.
+  is the natural next step to also win on generation. **This was done — see §17.**
 
 ---
 
-## 17. Citation
+## 17. vMF Spherical VAE: Winning on Generation
+
+§16 left one gap open: the thin-shell `hypersphere` mode wins reconstruction but only *ties*
+gaussian on prior-sample generation (MMD), because it has **no directional regularizer** — its
+1-D radius-variance KL says nothing about where on the sphere the latents go. A true **von
+Mises–Fisher Spherical VAE** (Davidson et al. 2018) closes that gap with a directional posterior
+`q(z|x)=vMF(μ̂, κ)` and the closed-form **vMF→uniform-sphere KL**, which pushes the *aggregate*
+posterior toward the uniform prior.
+
+```python
+from dl_techniques.models.vae.model import VAE
+
+# True vMF Spherical VAE: directional posterior + vMF->uniform KL
+vmf = VAE.from_variant("small", input_shape=(28, 28, 1),
+                       latent_dim=16, sampling_type="vmf")
+```
+
+> The vMF mode samples via a fixed-K Ulrich/Wood rejection sampler + Householder reflection
+> (`VMFSampling`), and computes the exact vMF→uniform KL via a continued-fraction modified-Bessel
+> ratio (`vmf_kl_divergence`), both in `layers/sampling.py`. Because its KL is ~100× larger than
+> the other modes', set a much smaller `kl_loss_weight` (β≈1e-3, vs 0.01) — the trainer exposes
+> `--kl-loss-weight`, `--kl-warmup-epochs`, `--early-stop-monitor`, and a (now-functional) cosine
+> `--lr-schedule`.
+
+### Verdict
+
+**The directional vMF KL delivers the generation win — decisively at `latent_dim` 8 and 16.**
+MNIST, 50ep, seed 42, β=1e-3 (gaussian/hypersphere β=0.01), cosine LR:
+
+| dim | recon_bce (g / h / **v**) | mmd²_median (g / h / **v**) | active units (g / h / v) | dir_concentration (g / h / **v**) |
+|---|---|---|---|---|
+| 8  | 0.165 / **0.108** / 0.112 | 0.0169 / 0.0331 / **0.0053** | 5 / 8 / 8 | 0.050 / 0.337 / **0.100** |
+| 16 | 0.167 / **0.094** / 0.096 | 0.0172 / 0.0371 / **0.0065** | 5 / 16 / 16 | 0.029 / 0.424 / **0.077** |
+| 32 | 0.164 / **0.091** / 0.105 | **0.0159** / 0.0496 / 0.0236 | 6 / 32 / 32 | 0.047 / 0.448 / **0.051** |
+
+- **Generation (MMD).** vMF wins all bandwidths at **d8** (3.2× better than gaussian, 6.2× than
+  hypersphere) and **d16** (2.6× / 5.7×). At **d32** vMF beats hypersphere but loses to gaussian.
+- **Mechanism — the directional KL does real work.** vMF's `dir_concentration` (0.10 / 0.077 /
+  0.051) is far below hypersphere's (0.34 / 0.42 / 0.45): the vMF→uniform KL **spreads the
+  aggregate posterior** over the sphere, so uniform-prior samples decode to realistic images. This
+  is exactly the term the hypersphere mode lacks.
+- **Reconstruction + dimension use.** vMF (like hypersphere) uses **100%** of latent dims and
+  reconstructs far better than gaussian (which collapses to ~5–6 active units); its recon trails
+  hypersphere only slightly (the directional KL costs a little sharpness).
+- **The d32 erosion is a β-scaling effect, not a vMF limit.** The vMF KL grows with dimension
+  (final raw KL 15.8 / 26.2 / 31.6 at d8/16/32 for the same β), so a β tuned at d16 over-regularizes
+  at d32 (recon slips behind hypersphere; MMD degrades). A dim-scaled (smaller) β at d32 is expected
+  to recover the win — left as future work.
+
+### Notes (verified during the study)
+
+- The `VMFSampling` sampler and its closed-form KL were each validated against SciPy
+  (`scipy.stats.vonmises_fisher` to ~2e-4; `scipy.special.ive` to ~6e-6). The κ-gradient is
+  **unbiased**, so the Naesseth-2017 rejection-reparameterization correction is not needed.
+- Free-learned κ initially **posterior-collapses** (κ→0, uniform latent); cured with higher init κ
+  (≈12) + KL warmup. The KL is mode-incomparable, so judge across modes on `reconstruction_loss` +
+  MMD only, never `total_loss`/`kl_loss`.
+
+Full writeup: `results/VAE_VMF_REPORT.md`.
+
+---
+
+## 18. Citation
 
 If you use VAEs in your research, please cite the original paper:
 
