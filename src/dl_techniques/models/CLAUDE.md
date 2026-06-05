@@ -77,7 +77,7 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 - `capsnet/` — Capsule Networks
 - `kan/` — Kolmogorov-Arnold Networks
 - `ntm/` — Neural Turing Machine
-- `vae/` — Variational Autoencoder
+- `vae/` — Variational Autoencoder (ResNet encoder/decoder; `sampling_type` ∈ {`gaussian`, `hypersphere`, `vmf`} — `vmf` is a true von Mises-Fisher Spherical VAE with the closed-form vMF→uniform-sphere KL; see the package README §16–17)
 - `vq_vae/` — VQ-VAE
 - `vq_vae_rotation/` — VQ-VAE with rotation-based codebook updates
 - `lewm/` — Latent-energy world model
