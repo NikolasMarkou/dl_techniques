@@ -283,6 +283,12 @@ def train_model(args):
         x_test = x_test.astype("float32") / 255.0
         y_train, y_test = y_train.flatten(), y_test.flatten()
         input_shape = (32, 32, 3)
+    elif args.dataset.lower() == 'cifar100':
+        (x_train, y_train), (x_test, y_test) = keras.datasets.cifar100.load_data()
+        x_train = x_train.astype("float32") / 255.0
+        x_test = x_test.astype("float32") / 255.0
+        y_train, y_test = y_train.flatten(), y_test.flatten()
+        input_shape = (32, 32, 3)
     else:
         raise ValueError(f"Unsupported dataset: {args.dataset}")
 
@@ -430,7 +436,7 @@ def train_model(args):
 def main():
     parser = create_base_argument_parser(
         description='Train VAE on image data',
-        dataset_choices=['mnist', 'cifar10'],
+        dataset_choices=['mnist', 'cifar10', 'cifar100'],
     )
     parser.add_argument('--latent-dim', type=int, default=2, dest='latent_dim',
                         help='Latent space dimensionality (2 for visualization)')
