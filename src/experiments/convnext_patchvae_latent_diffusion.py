@@ -27,8 +27,10 @@ import matplotlib.pyplot as plt
 
 from dl_techniques.utils.logger import logger
 
-CKPT = ("/media/arxwn/data_fast/repositories/dl_techniques/results/"
+CKPT = os.environ.get("CKPT",
+        "/media/arxwn/data_fast/repositories/dl_techniques/results/"
         "convnext_patch_vae_ade20k+coco_large_20260606_094857/best_model.keras")
+OUT_TAG = os.environ.get("OUT_TAG", "")
 IMG_DIR = "/media/arxwn/data0_4tb/datasets/coco_2017/val2017"
 OUT_DIR = "/media/arxwn/data_fast/repositories/dl_techniques/results/latent_prior_fix"
 os.makedirs(OUT_DIR, exist_ok=True)
@@ -208,10 +210,10 @@ def main():
         axes[r, 0].set_ylabel(lab, rotation=0, ha="right", va="center", fontsize=9)
     plt.suptitle("convnext_patch_vae vMF: F0 (uniform) vs learned diffusion prior")
     plt.tight_layout()
-    p = os.path.join(OUT_DIR, "diffusion_comparison.png")
+    p = os.path.join(OUT_DIR, f"diffusion_comparison{OUT_TAG}.png")
     plt.savefig(p, dpi=110); plt.close()
     logger.info(f"Saved -> {p}")
-    ddpm.net.save(os.path.join(OUT_DIR, "latent_ddpm.keras"))
+    ddpm.net.save(os.path.join(OUT_DIR, f"latent_ddpm{OUT_TAG}.keras"))
 
 
 if __name__ == "__main__":
