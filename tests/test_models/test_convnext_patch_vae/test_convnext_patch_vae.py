@@ -259,6 +259,103 @@ class TestSIGRegOff:
         )
 
 
+class TestVMF:
+    """Test 10 — per-patch von Mises-Fisher sampling mode.
+
+    Covers (plan_2026-06-06_38aa045e Step 4 / SC1-SC5):
+    (a) vmf forward: ``z`` per-patch unit-norm + kappa slot last-dim 1.
+    (b) vmf ``_compute_kl`` finite scalar >= 0 at latent_dim in {4, 32}.
+    (c) kappa-head output shape ``(B, Hp, Wp, 1)``.
+    (d) save/load round-trip — compare DETERMINISTIC ``encode()`` mu
+        (NOT stochastic z/recon; LESSONS "Sampling layers are stochastic").
+    (e) config validators E1 (latent_dim<2) / E2 (unknown sampling_type).
+    (f) gaussian backward-compat: the default path still passes a
+        forward/shape sanity check (one test — I1 / SC5).
+    """
+
+    def test_vmf_forward_unit_norm_and_kappa_shape(self) -> None:
+        cfg = _tiny_cfg(sampling_type="vmf", latent_dim=4)
+        m = ConvNeXtPatchVAE(cfg)
+        x = np.random.RandomState(0).rand(2, 32, 32, 3).astype("float32")
+        out = m(keras.ops.convert_to_tensor(x), training=False)
+        # mu / z spatial-latent shapes preserved (I2, 8x8 patch grid).
+        assert tuple(out["mu"].shape) == (2, 8, 8, 4)
+        assert tuple(out["z"].shape) == (2, 8, 8, 4)
+        # kappa rides the "log_var" slot with last dim == 1 (E4).
+        assert tuple(out["log_var"].shape) == (2, 8, 8, 1)
+        # Per-patch unit norm: ||z[b,i,j,:]|| ~= 1.
+        z = keras.ops.convert_to_numpy(out["z"])
+        norms = np.linalg.norm(z, axis=-1)
+        np.testing.assert_allclose(norms, np.ones_like(norms), atol=1e-5)
+
+    @pytest.mark.parametrize("latent_dim", [4, 32])
+    def test_vmf_kl_finite_nonnegative(self, latent_dim: int) -> None:
+        # latent_dim=32 exercises the large-variant dim (SC3).
+        cfg = _tiny_cfg(sampling_type="vmf", latent_dim=latent_dim)
+        m = ConvNeXtPatchVAE(cfg)
+        x = np.random.RandomState(1).rand(2, 32, 32, 3).astype("float32")
+        mu, kappa = m.encode(keras.ops.convert_to_tensor(x))
+        kl = m._compute_kl(mu, kappa)
+        kl_val = float(keras.ops.convert_to_numpy(kl))
+        assert np.isfinite(kl_val), f"vmf KL non-finite at d={latent_dim}: {kl_val}"
+        assert kl_val >= 0.0, f"vmf KL negative at d={latent_dim}: {kl_val}"
+
+    def test_vmf_kappa_head_shape(self) -> None:
+        cfg = _tiny_cfg(sampling_type="vmf", latent_dim=4)
+        m = ConvNeXtPatchVAE(cfg)
+        x = np.random.RandomState(2).rand(2, 32, 32, 3).astype("float32")
+        mu, kappa = m.encode(keras.ops.convert_to_tensor(x))
+        # Encoder kappa head emits a single strictly-positive channel.
+        assert tuple(mu.shape) == (2, 8, 8, 4)
+        assert tuple(kappa.shape) == (2, 8, 8, 1)
+        kappa_np = keras.ops.convert_to_numpy(kappa)
+        assert np.all(kappa_np > 0.0), "softplus kappa must be strictly positive"
+
+    def test_vmf_save_load_roundtrip(self, tmp_path) -> None:
+        # E3: compare deterministic encoder mu, NOT stochastic z/recon.
+        cfg = _tiny_cfg(sampling_type="vmf", latent_dim=4)
+        m = ConvNeXtPatchVAE(cfg)
+        rng = np.random.RandomState(42)
+        x = rng.rand(2, 32, 32, 3).astype("float32")
+        # Subclassed Model must be built (called once) before save (LESSONS).
+        _ = m(keras.ops.convert_to_tensor(x), training=False)
+        mu_before, _ = m.encode(keras.ops.convert_to_tensor(x))
+        mu_before_np = keras.ops.convert_to_numpy(mu_before)
+        path = os.path.join(str(tmp_path), "cpvae_vmf.keras")
+        m.save(path)
+        m2 = keras.models.load_model(path)
+        # I4: sampling_type survives the round-trip.
+        assert m2.config.sampling_type == "vmf"
+        mu_after, _ = m2.encode(keras.ops.convert_to_tensor(x))
+        mu_after_np = keras.ops.convert_to_numpy(mu_after)
+        np.testing.assert_allclose(mu_after_np, mu_before_np, atol=1e-4)
+
+    def test_vmf_latent_dim_below_two_rejected(self) -> None:
+        # E1 / I5: vMF undefined on S^0.
+        with pytest.raises(ValueError):
+            _tiny_cfg(sampling_type="vmf", latent_dim=1)
+
+    def test_unknown_sampling_type_rejected(self) -> None:
+        # E2: sampler whitelist.
+        with pytest.raises(ValueError):
+            _tiny_cfg(sampling_type="banana")
+
+    def test_gaussian_default_backward_compat(self) -> None:
+        # SC5 / I1: default (gaussian) still satisfies the forward/shape
+        # contract the existing suite relies on. One sanity test — the full
+        # gaussian suite above is the real backward-compat guard.
+        cfg = _tiny_cfg()  # sampling_type defaults to "gaussian"
+        assert cfg.sampling_type == "gaussian"
+        m = ConvNeXtPatchVAE(cfg)
+        x = np.random.RandomState(5).rand(2, 32, 32, 3).astype("float32")
+        out = m(keras.ops.convert_to_tensor(x), training=False)
+        assert tuple(out["reconstruction"].shape) == (2, 32, 32, 3)
+        assert tuple(out["mu"].shape) == (2, 8, 8, 4)
+        assert tuple(out["z"].shape) == (2, 8, 8, 4)
+        # Gaussian log_var slot keeps the full latent_dim width (not 1).
+        assert tuple(out["log_var"].shape) == (2, 8, 8, 4)
+
+
 class TestFactory:
     """Test 9 — named-variant factory surface (PRESETS, from_variant, create_*)."""
 
