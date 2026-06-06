@@ -795,9 +795,20 @@ class ReconVisualizationCallback(keras.callbacks.Callback):
         cfg = self.model.config
         if self._fixed_z is None:
             hp = wp = cfg.patches_per_side
-            self._fixed_z = np.array(
+            z = np.array(
                 keras.random.normal((n, hp, wp, cfg.latent_dim), seed=42)
             )
+            # The vmf sampler places each patch latent on the unit sphere
+            # S^{d-1}; its prior is Uniform(S^{d-1}). The decoder only ever
+            # saw unit-norm latents, so prior draws MUST be L2-normalized per
+            # patch. Decoding raw N(0,I) (norm ~ sqrt(d) ~ 5.66 at d=32) feeds
+            # off-sphere, maximally-OOD vectors and yields pure noise (this was
+            # the dominant cause of the "incoherent prior samples"). Gaussian
+            # mode keeps N(0,I) as its correct prior.
+            if getattr(cfg, "sampling_type", "gaussian") == "vmf":
+                norms = np.linalg.norm(z, axis=-1, keepdims=True)
+                z = z / np.maximum(norms, 1e-8)
+            self._fixed_z = z
         decoded = self.model.decode(keras.ops.convert_to_tensor(self._fixed_z))
         return np.clip(np.array(decoded), 0.0, 1.0)
 
