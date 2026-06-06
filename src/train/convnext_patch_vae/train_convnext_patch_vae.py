@@ -168,6 +168,7 @@ class TrainingConfig:
     recon_loss_type: str = "bce"
     dropout_rate: float = 0.0
     gamma_clip: float = 1.0
+    sampling_type: str = "gaussian"
 
     # Training
     batch_size: int = 256
@@ -255,6 +256,7 @@ class TrainingConfig:
                 recon_loss_type=self.recon_loss_type,
                 dropout_rate=self.dropout_rate,
                 gamma_clip=self.gamma_clip,
+                sampling_type=self.sampling_type,
             )
         return ConvNeXtPatchVAEConfig(
             img_size=self.img_size,
@@ -272,6 +274,7 @@ class TrainingConfig:
             recon_loss_type=self.recon_loss_type,
             dropout_rate=self.dropout_rate,
             gamma_clip=self.gamma_clip,
+            sampling_type=self.sampling_type,
         )
 
 # ---------------------------------------------------------------------------
@@ -1233,8 +1236,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="KL divergence weight (beta-VAE style).",
     )
     parser.add_argument(
-        "--lambda-sigreg", type=float, default=0.1,
-        help="SIGReg anti-collapse weight. Set 0 for T1b ablation.",
+        "--lambda-sigreg", type=float, default=None,
+        help="SIGReg anti-collapse weight. Set 0 for T1b ablation. "
+             "Default (unset): 0.1 for --sampler gaussian, 0.0 for "
+             "--sampler vmf (SIGReg targets N(0,I) and conflicts with the "
+             "uniform-sphere vMF prior). Pass an explicit value to override.",
+    )
+    parser.add_argument(
+        "--sampler", type=str, default="gaussian", dest="sampler",
+        choices=["gaussian", "vmf"],
+        help="Latent sampler. 'gaussian' (default) is the standard VAE "
+             "reparameterization. 'vmf' uses per-patch von Mises-Fisher "
+             "sampling on the unit sphere; it forces jit_compile=False "
+             "(keras.random.beta has no XLA-GPU kernel) and defaults "
+             "--lambda-sigreg to 0.",
     )
     parser.add_argument("--sigreg-knots",    type=int,   default=17)
     parser.add_argument("--sigreg-num-proj", type=int,   default=256)
@@ -1322,6 +1337,13 @@ def main() -> None:
     # --datasets overrides --dataset when provided.
     datasets = getattr(args, "datasets", None) or [args.dataset]
 
+    # Resolve the --lambda-sigreg sentinel (default=None): preserve the prior
+    # 0.1 default for gaussian, auto-zero SIGReg for vmf (its N(0,I) target
+    # conflicts with the uniform-sphere prior). An explicit --lambda-sigreg
+    # always wins. Gaussian + unset => byte-identical to the prior behaviour.
+    if args.lambda_sigreg is None:
+        args.lambda_sigreg = 0.0 if args.sampler == "vmf" else 0.1
+
     image_size = getattr(args, "image_size", 32)
     if any(d in ("ade20k", "coco") for d in datasets) and image_size == 32:
         logger.warning(
@@ -1351,6 +1373,7 @@ def main() -> None:
         recon_loss_type=args.recon_loss_type,
         dropout_rate=args.dropout_rate,
         gamma_clip=args.gamma_clip,
+        sampling_type=args.sampler,
         batch_size=args.batch_size,
         epochs=args.epochs,
         learning_rate=args.learning_rate,
