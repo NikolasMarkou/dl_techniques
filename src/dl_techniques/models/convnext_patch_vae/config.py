@@ -103,6 +103,13 @@ class ConvNeXtPatchVAEConfig:
     # --- VAE latent ---
     latent_dim: int = 16
 
+    # --- Reparameterization sampler ---
+    # DECISION plan_2026-06-06_38aa045e/D-002: default "gaussian" keeps the
+    # production path byte-identical; vmf is an opt-in per-patch spherical
+    # posterior. Every vmf change downstream is gated behind
+    # `sampling_type == "vmf"`. See decisions.md D-002.
+    sampling_type: str = "gaussian"
+
     # --- Loss weights ---
     beta_kl: float = 0.5
     lambda_sigreg: float = 0.1
@@ -199,6 +206,18 @@ class ConvNeXtPatchVAEConfig:
         if self.gamma_clip is not None and self.gamma_clip <= 0.0:
             raise ValueError(
                 f"gamma_clip must be > 0.0 or None, got {self.gamma_clip}"
+            )
+        # E2: sampler type whitelist.
+        if self.sampling_type not in {"gaussian", "vmf"}:
+            raise ValueError(
+                f"sampling_type must be one of {{'gaussian', 'vmf'}}, got "
+                f"{self.sampling_type!r}"
+            )
+        # E1 / I5: vMF is undefined on S^0 — require latent_dim >= 2 for vmf.
+        if self.sampling_type == "vmf" and self.latent_dim < 2:
+            raise ValueError(
+                f"sampling_type='vmf' requires latent_dim >= 2 (vMF is "
+                f"undefined on S^0), got latent_dim={self.latent_dim}."
             )
 
     # ------------------------------------------------------------------

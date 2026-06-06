@@ -29,7 +29,11 @@ from typing import Any, Dict, List, Optional, Tuple
 # local imports
 # ------------------------------------------------------------------
 
-from dl_techniques.layers.sampling import Sampling
+from dl_techniques.layers.sampling import (
+    Sampling,
+    create_sampling_layer,
+    vmf_kl_divergence,
+)
 from dl_techniques.regularizers.sigreg import SIGRegLayer
 from dl_techniques.utils.logger import logger
 
@@ -100,9 +104,18 @@ class ConvNeXtPatchVAE(keras.Model):
             dropout_rate=cfg.dropout_rate,
             spatial_dropout_rate=cfg.spatial_dropout_rate,
             kernel_regularizer=kreg,
+            sampling_type=cfg.sampling_type,
             name="encoder",
         )
-        self.sampling = Sampling(name="sampling")
+        # DECISION plan_2026-06-06_38aa045e/D-001: dispatch the sampler via the
+        # registry factory, keeping the layer NAME "sampling" in BOTH modes
+        # (I3 — name-based sub-model extraction stays valid). For gaussian this
+        # returns Sampling(name="sampling"), behaviorally identical to the bare
+        # construction it replaces; for vmf it returns VMFSampling. Do NOT
+        # rename the sampler per-mode. See decisions.md D-001.
+        self.sampling = create_sampling_layer(
+            cfg.sampling_type, name="sampling"
+        )
         self.decoder = ConvNeXtPatchDecoder(
             patch_size=cfg.patch_size,
             embed_dim=cfg.embed_dim,
@@ -160,6 +173,31 @@ class ConvNeXtPatchVAE(keras.Model):
             )
 
     # ------------------------------------------------------------------
+    # Compile (vmf XLA opt-out)
+    # ------------------------------------------------------------------
+    def compile(self, *args: Any, **kwargs: Any) -> None:
+        # DECISION plan_2026-06-06_38aa045e/D-001: vMF's keras.random.beta ->
+        # StatelessRandomGammaV3 has NO XLA-GPU kernel (TF 2.18); force-disable
+        # XLA for vmf on EVERY compile path (direct .compile(), load_model()
+        # recompile) so GPU save/load + fit don't crash. This MUST travel with
+        # the model so a reloaded vmf model stays jit_compile=False (mirrors
+        # vae/model.py:314-337). gaussian keeps the caller's jit_compile.
+        # See decisions.md D-001.
+        if self.config.sampling_type == "vmf":
+            kwargs["jit_compile"] = False
+        return super().compile(*args, **kwargs)
+
+    def compile_from_config(self, config: Any) -> "ConvNeXtPatchVAE":
+        # Overriding compile() makes Keras route load_model()'s recompile
+        # through compile_from_config (else it warns + skips recompile, leaving
+        # a reloaded vmf model with stale jit_compile="auto" that XLA-crashes on
+        # a later GPU .fit()). Funnel through our compile() so the vmf
+        # jit_compile=False opt-out survives reload.
+        config = keras.saving.deserialize_keras_object(config)
+        self.compile(**config)
+        return self
+
+    # ------------------------------------------------------------------
     # Metrics
     # ------------------------------------------------------------------
     @property
@@ -206,15 +244,33 @@ class ConvNeXtPatchVAE(keras.Model):
             after the appropriate activation (sigmoid for BCE, identity
             for MSE).
         """
-        mu, log_var = self.encoder(inputs, training=training)
-        z = self.sampling([mu, log_var], training=training)
+        # For gaussian, `second` is the per-patch log_var (B,Hp,Wp,latent_dim);
+        # for vmf it is the per-patch concentration kappa (B,Hp,Wp,1).
+        mu, second = self.encoder(inputs, training=training)
+        if self.config.sampling_type == "vmf":
+            # DECISION plan_2026-06-06_38aa045e/D-001: apply vMF PER PATCH —
+            # reshape the 4D spatial latent to (B*Hp*Wp, D), run VMFSampling on
+            # the flat per-patch rows, then reshape z back to (B,Hp,Wp,D). This
+            # preserves the resolution-agnostic 4D latent (I2). Do NOT global-
+            # flatten to one S^{Hp*Wp*D-1} sphere (rejected — it bakes Hp*Wp
+            # into the latent dim and breaks resolution-agnosticism). D is the
+            # static config int; the patch count uses (-1, D) for the dynamic
+            # dim. See decisions.md D-001.
+            D = self.config.latent_dim
+            mu_flat = ops.reshape(mu, (-1, D))
+            kappa_flat = ops.reshape(second, (-1, 1))
+            z_flat = self.sampling([mu_flat, kappa_flat], training=training)
+            shp = ops.shape(mu)
+            z = ops.reshape(z_flat, (shp[0], shp[1], shp[2], D))
+        else:
+            z = self.sampling([mu, second], training=training)
         logits = self.decoder(z, training=training)
 
         # Recon — both branches return per-sample-then-batch-mean scalar
         # so loss magnitude is independent of resolution.
         recon_loss = self._compute_recon(inputs, logits)
         # KL averaged over (B, Hp, Wp). Per-patch mean = resolution-invariant.
-        kl_loss = self._compute_kl(mu, log_var)
+        kl_loss = self._compute_kl(mu, second)
         # SIGReg on (B, Hp*Wp, latent_dim) view of z (D-002).
         sigreg_loss = self._compute_sigreg(z)
 
@@ -237,11 +293,14 @@ class ConvNeXtPatchVAE(keras.Model):
         else:
             recon = logits
 
+        # For vmf the "log_var" slot carries the per-patch concentration kappa
+        # (B,Hp,Wp,1), NOT a log-variance (E4). The key name is held constant
+        # for output-contract stability across modes.
         return {
             "reconstruction": recon,
             "z": z,
             "mu": mu,
-            "log_var": log_var,
+            "log_var": second,
         }
 
     # ------------------------------------------------------------------
@@ -269,13 +328,30 @@ class ConvNeXtPatchVAE(keras.Model):
     def _compute_kl(
         self,
         mu: keras.KerasTensor,
-        log_var: keras.KerasTensor,
+        second: keras.KerasTensor,
     ) -> keras.KerasTensor:
         """Per-patch KL: average over (B, Hp, Wp), sum over latent_dim.
 
         Per-patch averaging makes the loss magnitude resolution-invariant
         — doubling Hp*Wp does not double the loss.
+
+        For gaussian, ``second`` is the per-patch log_var
+        (B,Hp,Wp,latent_dim). For vmf it is the per-patch concentration kappa
+        (B,Hp,Wp,1) and the KL is the closed-form vMF->uniform-sphere
+        divergence averaged over all B*Hp*Wp patches.
         """
+        if self.config.sampling_type == "vmf":
+            # DECISION plan_2026-06-06_38aa045e/D-001: per-patch analytic vMF KL.
+            # vmf_kl_divergence depends only on (kappa, dim); flatten every
+            # patch's scalar kappa to (B*Hp*Wp, 1) and mean over all patches.
+            # Reuse the verified sampling.py helper — do NOT reimplement the
+            # Bessel KL here. See decisions.md D-001.
+            kappa_flat = ops.reshape(ops.cast(second, "float32"), (-1, 1))
+            return ops.mean(
+                vmf_kl_divergence(kappa_flat, dim=self.config.latent_dim)
+            )
+
+        log_var = second
         mu_f = ops.cast(mu, "float32")
         lv_f = ops.clip(ops.cast(log_var, "float32"), -10.0, 10.0)
         # KL per patch position summed over latent_dim:
@@ -364,8 +440,28 @@ class ConvNeXtPatchVAE(keras.Model):
         Returns:
             ``(B, H, W, C)`` coherent reconstruction / variation of ``x``.
         """
-        mu, log_var = self.encode(x)
+        mu, second = self.encode(x)
         t = float(temperature)
+        if self.config.sampling_type == "vmf":
+            # vMF posterior is on the unit sphere — there is no additive
+            # Gaussian reparameterization. Run the per-patch vMF sampler at the
+            # encoded concentration (temperature is not a Gaussian scale here;
+            # t=0 collapses to the deterministic mean direction decode(mu_hat)).
+            D = self.config.latent_dim
+            shp = ops.shape(mu)
+            if t == 0.0:
+                # Deterministic: decode the unit-normalized mean direction.
+                norm = ops.sqrt(
+                    ops.sum(ops.square(mu), axis=-1, keepdims=True)
+                )
+                z = mu / ops.maximum(norm, 1e-12)
+            else:
+                mu_flat = ops.reshape(mu, (-1, D))
+                kappa_flat = ops.reshape(second, (-1, 1))
+                z_flat = self.sampling([mu_flat, kappa_flat], training=False)
+                z = ops.reshape(z_flat, (shp[0], shp[1], shp[2], D))
+            return self.decode(z)
+        log_var = second
         eps = keras.random.normal(ops.shape(mu), seed=seed) * t
         z = mu + ops.exp(0.5 * ops.clip(log_var, -10.0, 10.0)) * eps
         return self.decode(z)
@@ -402,6 +498,13 @@ class ConvNeXtPatchVAE(keras.Model):
             shape=(num_samples, hp, wp, cfg.latent_dim),
             seed=seed,
         )
+        if cfg.sampling_type == "vmf":
+            # The vMF prior (kappa=0) IS the uniform distribution on the unit
+            # sphere S^{D-1}. Marsaglia: L2-normalize the per-patch Gaussian
+            # draw onto the unit sphere (per patch, over the last axis) — NOT
+            # an N(0,I) draw, which is the wrong prior for the spherical latent.
+            norm = ops.sqrt(ops.sum(ops.square(eps), axis=-1, keepdims=True))
+            eps = eps / ops.maximum(norm, 1e-12)
         return self.decode(eps)
 
     # ------------------------------------------------------------------

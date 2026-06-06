@@ -81,6 +81,7 @@ class ConvNeXtPatchEncoder(keras.layers.Layer):
         dropout_rate: float = 0.0,
         spatial_dropout_rate: float = 0.0,
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        sampling_type: str = "gaussian",
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -97,6 +98,11 @@ class ConvNeXtPatchEncoder(keras.layers.Layer):
             )
         if latent_dim < 1:
             raise ValueError(f"latent_dim must be >= 1, got {latent_dim}")
+        if sampling_type not in {"gaussian", "vmf"}:
+            raise ValueError(
+                f"sampling_type must be one of {{'gaussian', 'vmf'}}, got "
+                f"{sampling_type!r}"
+            )
 
         # Store config
         self.patch_size = patch_size
@@ -107,6 +113,7 @@ class ConvNeXtPatchEncoder(keras.layers.Layer):
         self.dropout_rate = dropout_rate
         self.spatial_dropout_rate = spatial_dropout_rate
         self.kernel_regularizer = kernel_regularizer
+        self.sampling_type = sampling_type
 
         # Sub-layers created in __init__ (Keras 3 Golden Rule shape).
         # The patchifying stem: kernel == stride == patch_size, padding="valid".
@@ -141,15 +148,44 @@ class ConvNeXtPatchEncoder(keras.layers.Layer):
             kernel_regularizer=copy.deepcopy(kernel_regularizer),
             name="mu_head",
         )
-        self.log_var_head = keras.layers.Conv2D(
-            filters=latent_dim,
-            kernel_size=1,
-            padding="valid",
-            kernel_initializer="zeros",
-            bias_initializer="zeros",
-            kernel_regularizer=copy.deepcopy(kernel_regularizer),
-            name="log_var_head",
-        )
+        # Second head. Gaussian: a latent_dim-wide log-variance head (zeros
+        # init, see D-003). vMF: a SINGLE-channel strictly-positive kappa head
+        # (Conv2D(1)+softplus) instead — the per-patch vMF concentration.
+        if sampling_type == "vmf":
+            # DECISION plan_2026-06-06_38aa045e/D-001: vMF replaces the per-patch
+            # log_var_head with a 1-channel kappa head. zeros kernel +
+            # bias=Constant(12.0) makes kappa START at softplus(12)~=12 (an
+            # informative concentration), breaking the kappa posterior-collapse
+            # trap (mirrors vae/model.py:459-472, LESSONS "vMF kappa collapse").
+            # Do NOT use bias="zeros" here: softplus(0)~=0.69 => near-uniform
+            # latent => decoder ignores z => kappa driven to 0 => recon stalls
+            # at the data mean. See decisions.md D-001.
+            self.kappa_head = keras.layers.Conv2D(
+                filters=1,
+                kernel_size=1,
+                padding="valid",
+                kernel_initializer="zeros",
+                bias_initializer=keras.initializers.Constant(12.0),
+                kernel_regularizer=copy.deepcopy(kernel_regularizer),
+                name="kappa_head",
+            )
+            self.kappa_softplus = keras.layers.Activation(
+                "softplus", name="kappa_softplus"
+            )
+            self.log_var_head = None
+        else:
+            # Gaussian log_var_head (zero-init per the D-003 anchor above).
+            self.kappa_head = None
+            self.kappa_softplus = None
+            self.log_var_head = keras.layers.Conv2D(
+                filters=latent_dim,
+                kernel_size=1,
+                padding="valid",
+                kernel_initializer="zeros",
+                bias_initializer="zeros",
+                kernel_regularizer=copy.deepcopy(kernel_regularizer),
+                name="log_var_head",
+            )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Explicitly build each sub-layer in computational order."""
@@ -179,7 +215,13 @@ class ConvNeXtPatchEncoder(keras.layers.Layer):
         for blk in self.blocks:
             blk.build(post_stem_shape)
         self.mu_head.build(post_stem_shape)
-        self.log_var_head.build(post_stem_shape)
+        if self.sampling_type == "vmf":
+            self.kappa_head.build(post_stem_shape)
+            # Activation has no weights; build for completeness on the
+            # 1-channel kappa map.
+            self.kappa_softplus.build((B, Hp, Wp, 1))
+        else:
+            self.log_var_head.build(post_stem_shape)
 
         super().build(input_shape)
 
@@ -206,6 +248,11 @@ class ConvNeXtPatchEncoder(keras.layers.Layer):
             x = blk(x, training=training)
             x = residual + x
         mu = self.mu_head(x)
+        if self.sampling_type == "vmf":
+            # Per-patch strictly-positive concentration kappa (B, Hp, Wp, 1).
+            # The second tuple slot carries kappa (NOT a log-variance) for vmf.
+            kappa = self.kappa_softplus(self.kappa_head(x))
+            return mu, kappa
         log_var = self.log_var_head(x)
         return mu, log_var
 
@@ -220,8 +267,12 @@ class ConvNeXtPatchEncoder(keras.layers.Layer):
         B, H, W, _ = input_shape
         Hp = None if H is None else H // self.patch_size
         Wp = None if W is None else W // self.patch_size
-        latent_shape = (B, Hp, Wp, self.latent_dim)
-        return latent_shape, latent_shape
+        mu_shape = (B, Hp, Wp, self.latent_dim)
+        if self.sampling_type == "vmf":
+            # Second slot is the per-patch scalar kappa (last dim 1), NOT a
+            # latent_dim-wide log-variance.
+            return mu_shape, (B, Hp, Wp, 1)
+        return mu_shape, mu_shape
 
     def get_config(self) -> Dict[str, Any]:
         """Return constructor kwargs for serialization."""
@@ -238,6 +289,7 @@ class ConvNeXtPatchEncoder(keras.layers.Layer):
                 "kernel_regularizer": keras.regularizers.serialize(
                     self.kernel_regularizer
                 ),
+                "sampling_type": self.sampling_type,
             }
         )
         return config
