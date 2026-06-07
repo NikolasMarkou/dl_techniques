@@ -228,13 +228,28 @@ proven insufficient). Experiments in `src/experiments/`:
   recovers ~61% (patch-16) → ~75% (patch-8/BCE) of the re-encoded structure gap,
   adjacent-patch cosine ≈ real; samples become globally-coherent, atmospheric.
 
+- `convnext_patchvae_vaegan.py` — **end-to-end** VAE-GAN: trains encoder + decoder
+  + discriminator *jointly*, with the adversarial loss applied to decoded *prior
+  samples* (so the decoder is optimized in image space to make `decode(prior)`
+  realistic). **Negative result:** it degrades reconstruction (adversarial pressure
+  fights L1 recon) and produces **checkerboard/tiled** prior samples. The principled
+  reason: the prior remains **factorized** (independent per-patch spheres), and no
+  adversarial pressure on `decode(factorized_prior)` can synthesize the *global*
+  inter-patch coherence the latent does not carry — it just makes each patch
+  individually texture-like. **Adversarial-on-a-factorized-prior cannot fix H10;
+  only a joint prior can** (which is why the two-stage diffusion prior, modeling the
+  joint, is the better result). A correct end-to-end fix would jointly train a
+  *learned joint prior* with the VAE (KL against `p_θ(z)`), a larger redesign.
+
 **Honest status:** the noise is fixed (F0); generation is substantially improved
-by the learned diffusion prior but **not photorealistic** — the remaining ceiling
-is the base autoencoder's own fidelity (MSE/BCE blur + coarse patches + low-dim
-sphere), *not* the prior. A patch-8 + BCE retrain gave only a modest base-fidelity
-gain; further realism needs a stronger decoder (perceptual/adversarial loss, larger
-latent), not prior tweaks. Work on branch `fix/convnext-patchvae-vmf-prior`;
-artifacts in `results/latent_prior_fix/`.
+by the **two-stage diffusion prior** (the best result) but **not photorealistic** —
+the remaining ceiling is the base autoencoder's own fidelity (MSE/BCE blur + coarse
+patches + low-dim sphere), *not* the prior. A patch-8 + BCE retrain gave only a
+modest base-fidelity gain; an end-to-end VAE-GAN made generation *worse*. Further
+realism needs a stronger base decoder (resize-conv to kill checkerboard, perceptual
+loss, larger latent) and/or a jointly-trained joint prior — a redesign, not a tweak.
+Work on branch `fix/convnext-patchvae-vmf-prior`; artifacts in
+`results/latent_prior_fix/` and `results/vaegan_e2e/`.
 
 ---
 
