@@ -180,6 +180,64 @@ reviews results. Everything below is contingent.
 
 ---
 
+## vMF spherical latent mode (`sampling_type`)
+
+In addition to the default Gaussian reparameterization, the model supports a
+**per-patch von Mises–Fisher (vMF)** latent via `ConvNeXtPatchVAEConfig(sampling_type="vmf")`
+(trainer flag `--sampler vmf`). Each patch latent is L2-normalized onto the unit
+sphere `S^{latent_dim-1}`; the encoder emits a per-patch concentration `kappa`
+(`Conv2D(1)` + softplus, `bias≈12` to prevent κ-collapse) instead of `log_var`,
+the KL is the closed-form vMF→uniform-sphere divergence per patch, and
+`compile()`/`compile_from_config()` force `jit_compile=False` (the Wood/Ulrich
+sampler uses `keras.random.beta`, which has no XLA-GPU kernel in TF 2.18). The
+prior is **Uniform(S^{latent_dim-1})** — `model.sample()` draws `N(0,I)` then
+L2-normalizes per patch. SIGReg targets `N(0,I)`, which conflicts with the sphere,
+so `--sampler vmf` auto-sets `lambda_sigreg=0`.
+
+### Generative-prior diagnosis & fix (vMF mode)
+
+A reverse-engineering analysis (`analyses/analysis_2026-06-06_0c7feade/`) of why
+vMF **reconstructions are sharp but unconditional prior samples were incoherent**
+found **two independent causes**:
+
+1. **Eval/sampling bug (dominant, dead simple).** The sample-grid callback decoded
+   raw `N(0,I)` latents (norm ≈ `sqrt(latent_dim)` ≈ 5.66) — *off* the unit sphere
+   the decoder was trained on → pure noise. **Fix (F0):** L2-normalize prior draws
+   per patch before decode. Verified: decoded total-variation 0.198 → 0.054 (~3.7×
+   smoother). `model.sample()` already did this correctly; only the viz callback
+   bypassed it. (Fixed in `train_convnext_patch_vae.py::_get_fixed_samples`.)
+2. **Joint aggregate-posterior mismatch (the real, residual issue).** Even with
+   correct sphere sampling, samples are coherent but **not realistic**, because the
+   factorized prior `p(z)=∏ Uniform(S^{d-1})` samples *off* the thin joint manifold
+   where the encoder placed real images. Decisive evidence: a **patch-shuffle**
+   test (each patch replaced by a *different* image's posterior latent at the same
+   position — exact per-patch marginal preserved, joint structure destroyed)
+   collapses realism to uniform-noise level, so the **joint** inter-patch structure
+   is the necessary cause (not per-patch marginals or decoder OOD — both refuted).
+   A dose-response sweep showed the needed joint context is **local (~3–4 patches)**,
+   not global. This is the textbook *aggregate-posterior hole* (Dai & Wipf 2019).
+
+**Fixes for (2)** — the prior must model the *joint* latent (per-patch fixes are
+proven insufficient). Experiments in `src/experiments/`:
+
+- `convnext_patchvae_latent_prior.py` — 2-stage conv VAE over frozen latents.
+  **Negative result:** mode-collapses to color blobs (the latents are weakly-
+  correlated but high-entropy; a compressive bottleneck discards the detail).
+- `convnext_patchvae_latent_diffusion.py` — small conv-UNet **DDPM** over the
+  `(Hp,Wp,latent_dim)` latent grid (non-compressive; the right tool). **Works:**
+  recovers ~61% (patch-16) → ~75% (patch-8/BCE) of the re-encoded structure gap,
+  adjacent-patch cosine ≈ real; samples become globally-coherent, atmospheric.
+
+**Honest status:** the noise is fixed (F0); generation is substantially improved
+by the learned diffusion prior but **not photorealistic** — the remaining ceiling
+is the base autoencoder's own fidelity (MSE/BCE blur + coarse patches + low-dim
+sphere), *not* the prior. A patch-8 + BCE retrain gave only a modest base-fidelity
+gain; further realism needs a stronger decoder (perceptual/adversarial loss, larger
+latent), not prior tweaks. Work on branch `fix/convnext-patchvae-vmf-prior`;
+artifacts in `results/latent_prior_fix/`.
+
+---
+
 ## Tests
 
 `tests/test_models/test_convnext_patch_vae/test_convnext_patch_vae.py`
