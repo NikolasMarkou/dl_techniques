@@ -1,14 +1,21 @@
-"""Patch-entropy anomaly detector built on ``ConvNeXtPatchVAE``.
+"""Reconstruction-error anomaly detector built on ``ConvNeXtPatchVAE``.
 
-The detector runs the trained VAE's **encoder only** (the decoder is never
-executed) and scores every patch by its KL divergence — the number of nats the
-encoder spends to describe that patch beyond what the prior predicts. Patches
-with high KL are "surprising" / high-entropy and flagged as anomalous.
+The detector scores every patch by how poorly the trained VAE **reconstructs**
+it: the squared error between the input and a deterministic decode, average-
+pooled to the patch grid. Patches the model reconstructs poorly are flagged as
+anomalous. This signal is sign-correct by construction (high reconstruction
+error = anomalous) and **sampler-agnostic** — it does not depend on whether the
+latent prior is Gaussian or vMF, because the only model call is a deterministic
+decode (``sample_from(x, temperature=0.0)``):
 
-The single-scale model produces one per-patch latent grid
-``z(B, Hp, Wp, latent_dim)``; the anomaly signal is the standard per-patch KL
-against ``N(0, I)``: ``KL(q(z|x) || N(0, I))`` summed over the latent dimension
-→ an ``(Hp, Wp)`` map (e.g. ``32x32`` for a 128px image at ``patch_size=4``).
+* for a ``vmf`` checkpoint, ``temperature=0.0`` decodes the unit-normalized mean
+  direction;
+* for a ``gaussian`` checkpoint, ``temperature=0.0`` decodes ``mu``.
+
+For a bce-trained checkpoint the decode is in ``[0, 1]`` (the input is also in
+``[0, 1]``), so the per-pixel MSE is well-scaled. Errors are mean-pooled over
+non-overlapping ``patch_size x patch_size`` blocks → an ``(Hp, Wp)`` map (e.g.
+``32x32`` for a 256px image at ``patch_size=8``).
 
 This module deliberately has **no GUI dependency** — it stays importable and
 usable headless. The Streamlit front-end lives in ``streamlit_app.py``.
@@ -16,18 +23,20 @@ usable headless. The Streamlit front-end lives in ``streamlit_app.py``.
 Example::
 
     from applications.anomaly_detection.anomaly_detector import (
-        PatchEntropyAnomalyDetector,
+        PatchReconstructionAnomalyDetector,
     )
 
-    det = PatchEntropyAnomalyDetector.from_pretrained("results/.../best_model.keras")
-    x, (h, w) = det.preprocess("photo.jpg")        # native res, padded to /patch
-    kl = det.kl_maps(x, orig_hw=(h, w))["kl"]      # (Hp, Wp)
-    mask, thr = det.anomaly_mask(kl)               # boolean (Hp, Wp)
-    overlay = det.overlay(x[0][:h, :w], kl)        # uint8 (h, w, 3)
+    det = PatchReconstructionAnomalyDetector.from_pretrained(
+        "results/.../best_model.keras"
+    )
+    x, (h, w) = det.preprocess("photo.jpg")             # native res, padded to /patch
+    amap = det.anomaly_maps(x, orig_hw=(h, w))["anomaly"]  # (Hp, Wp)
+    mask, thr = det.anomaly_mask(amap)                  # boolean (Hp, Wp)
+    overlay = det.overlay(x[0][:h, :w], amap)           # uint8 (h, w, 3)
 """
 
 import math
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 import numpy as np
 import keras
@@ -38,37 +47,32 @@ from dl_techniques.utils.logger import logger
 
 ImageLike = Union[str, np.ndarray]
 
-# Mirror the training-time numerical guard: log_var is clipped to [-10, +10]
-# in every KL computation inside the model (float32 stability, H18 fix).
-_DEFAULT_LOG_VAR_CLIP = 10.0
 
+class PatchReconstructionAnomalyDetector:
+    """Per-patch reconstruction-error anomaly detector.
 
-class PatchEntropyAnomalyDetector:
-    """Encoder-only, KL-divergence per-patch anomaly detector.
+    Scores each patch by the mean squared error between the input and the
+    trained VAE's deterministic decode, pooled to the ``(Hp, Wp)`` patch grid.
+    The signal is sampler-agnostic (no branch on the latent prior type).
 
     Args:
         model: A loaded ``ConvNeXtPatchVAE`` instance.
-        log_var_clip: Symmetric clip applied to ``log_var`` before KL math.
-            Must match the model's internal clip (default ``10.0``).
     """
 
     def __init__(
         self,
         model: keras.Model,
-        log_var_clip: float = _DEFAULT_LOG_VAR_CLIP,
     ) -> None:
         self.model = model
-        self.log_var_clip = float(log_var_clip)
         cfg = getattr(model, "config", None)
         self.patch_size = int(getattr(cfg, "patch_size", 4))
         self.recon_loss_type = str(getattr(cfg, "recon_loss_type", "bce"))
         self.default_image_size = int(getattr(cfg, "img_size", 128) or 128)
         logger.info(
-            "PatchEntropyAnomalyDetector ready: KL vs N(0, I), "
-            "patch_size=%d, recon_loss=%s, log_var_clip=%.1f",
+            "PatchReconstructionAnomalyDetector ready: per-patch reconstruction "
+            "error, patch_size=%d, recon_loss=%s",
             self.patch_size,
             self.recon_loss_type,
-            self.log_var_clip,
         )
 
     # ------------------------------------------------------------------
@@ -78,13 +82,11 @@ class PatchEntropyAnomalyDetector:
     def from_pretrained(
         cls,
         model_path: str,
-        log_var_clip: float = _DEFAULT_LOG_VAR_CLIP,
-    ) -> "PatchEntropyAnomalyDetector":
+    ) -> "PatchReconstructionAnomalyDetector":
         """Load a trained checkpoint and wrap it in a detector.
 
         Args:
             model_path: Path to the ``.keras`` checkpoint.
-            log_var_clip: See :class:`PatchEntropyAnomalyDetector`.
 
         Returns:
             A ready detector.
@@ -108,7 +110,7 @@ class PatchEntropyAnomalyDetector:
         except Exception as exc:  # noqa: BLE001 - log then re-raise
             logger.error("Failed to load model %s: %s", model_path, exc)
             raise
-        return cls(model, log_var_clip=log_var_clip)
+        return cls(model)
 
     # ------------------------------------------------------------------
     # Preprocessing
@@ -184,22 +186,20 @@ class PatchEntropyAnomalyDetector:
         return x, (h, w)
 
     # ------------------------------------------------------------------
-    # KL math (mirrors model._compute_kl exactly)
+    # Reconstruction-error scoring
     # ------------------------------------------------------------------
-    def _kl_standard(self, mu: Any, log_var: Any) -> Any:
-        """Per-patch KL against ``N(0, I)``; sum over latent dim -> (B, Hp, Wp)."""
-        mu_f = ops.cast(mu, "float32")
-        lv = ops.clip(
-            ops.cast(log_var, "float32"), -self.log_var_clip, self.log_var_clip
-        )
-        return -0.5 * ops.sum(
-            1.0 + lv - ops.square(mu_f) - ops.exp(lv), axis=-1
-        )
-
-    def kl_maps(
+    def anomaly_maps(
         self, x: np.ndarray, orig_hw: Optional[Tuple[int, int]] = None
     ) -> Dict[str, np.ndarray]:
-        """Per-patch KL "surprise" map for one image.
+        """Per-patch reconstruction-error anomaly map for one image.
+
+        The model is decoded deterministically (``sample_from`` at
+        ``temperature=0.0``), which is sampler-agnostic: for a ``vmf``
+        checkpoint ``t=0`` decodes the unit-normalized mean direction; for a
+        ``gaussian`` checkpoint ``t=0`` decodes ``mu``. A bce-trained decode is
+        in ``[0, 1]`` (as is the input), so the per-pixel MSE is well-scaled.
+        The pixel errors are mean-pooled over non-overlapping
+        ``patch_size x patch_size`` blocks to the patch grid.
 
         Args:
             x: A ``(1, H', W', 3)`` float32 batch in ``[0, 1]`` from
@@ -210,51 +210,65 @@ class PatchEntropyAnomalyDetector:
                 pollute scores or overlays.
 
         Returns:
-            ``{"kl": (Hp, Wp)}`` numpy float32 array — the per-patch KL against
-            ``N(0, I)`` (decoder is NOT executed).
+            ``{"anomaly": (Hp, Wp)}`` numpy float32 array — the per-patch mean
+            squared reconstruction error.
         """
-        mu, log_var = self.model.encode(x)
-        kl = self._kl_standard(mu, log_var)
-        kl_np = np.asarray(kl, dtype="float32")[0]
+        # Deterministic decode, (1, H, W, 3) in [0, 1] for a bce checkpoint.
+        recon = self.model.sample_from(x, temperature=0.0)
+        err = ops.mean(
+            ops.square(ops.cast(x, "float32") - ops.cast(recon, "float32")),
+            axis=-1,
+        )  # (1, H, W)
+
+        patch = self.patch_size
+        shape = ops.shape(err)
+        h_dim, w_dim = shape[1], shape[2]
+        hp = h_dim // patch
+        wp = w_dim // patch
+        # Average-pool over non-overlapping patch x patch blocks (keras.ops only).
+        blocks = ops.reshape(err, (1, hp, patch, wp, patch))
+        pooled = ops.mean(blocks, axis=(2, 4))  # (1, Hp, Wp)
+        amap = np.asarray(pooled, dtype="float32")[0]
 
         if orig_hw is not None:
             h, w = orig_hw
-            kl_np = kl_np[
+            amap = amap[
                 : math.ceil(h / self.patch_size),
                 : math.ceil(w / self.patch_size),
             ]
 
-        return {"kl": kl_np}
+        return {"anomaly": amap}
 
     # ------------------------------------------------------------------
     # Thresholding / scoring
     # ------------------------------------------------------------------
     def anomaly_mask(
         self,
-        kl_map: np.ndarray,
+        score_map: np.ndarray,
         method: str = "zscore",
         k: float = 3.0,
         percentile: float = 95.0,
         abs_threshold: Optional[float] = None,
     ) -> Tuple[np.ndarray, float]:
-        """Threshold a KL map into a boolean anomaly mask.
+        """Threshold a reconstruction-error map into a boolean anomaly mask.
 
         Args:
-            kl_map: A per-patch KL map ``(Hp, Wp)``.
+            score_map: A per-patch reconstruction-error map ``(Hp, Wp)``.
             method: ``"zscore"`` (``mean + k*std``), ``"percentile"``, or
                 ``"absolute"`` (requires ``abs_threshold``).
             k: z-score multiplier for ``"zscore"``.
             percentile: percentile (0-100) for ``"percentile"``.
-            abs_threshold: nats cut-off for ``"absolute"``.
+            abs_threshold: reconstruction-error (MSE units) cut-off for
+                ``"absolute"``.
 
         Returns:
-            ``(mask, threshold)`` — boolean array matching ``kl_map`` and the
+            ``(mask, threshold)`` — boolean array matching ``score_map`` and the
             scalar threshold used.
 
         Raises:
             ValueError: for an unknown method or missing ``abs_threshold``.
         """
-        m = np.asarray(kl_map, dtype="float32")
+        m = np.asarray(score_map, dtype="float32")
         if method == "zscore":
             thr = float(m.mean() + k * m.std())
         elif method == "percentile":
@@ -268,23 +282,23 @@ class PatchEntropyAnomalyDetector:
         return m > thr, thr
 
     def score(
-        self, kl_map: np.ndarray, mask: Optional[np.ndarray] = None
+        self, score_map: np.ndarray, mask: Optional[np.ndarray] = None
     ) -> Dict[str, float]:
-        """Scalar summaries of a KL map (and optional mask).
+        """Scalar summaries of a reconstruction-error map (and optional mask).
 
         Args:
-            kl_map: A per-patch KL map ``(Hp, Wp)``.
+            score_map: A per-patch reconstruction-error map ``(Hp, Wp)``.
             mask: Optional boolean mask for anomalous-patch counts.
 
         Returns:
-            Dict with ``mean_kl, max_kl, p95_kl`` and, if ``mask`` given,
-            ``n_anomalous`` and ``frac_anomalous``.
+            Dict with ``mean_score, max_score, p95_score`` and, if ``mask``
+            given, ``n_anomalous`` and ``frac_anomalous``.
         """
-        m = np.asarray(kl_map, dtype="float32")
+        m = np.asarray(score_map, dtype="float32")
         out: Dict[str, float] = {
-            "mean_kl": float(m.mean()),
-            "max_kl": float(m.max()),
-            "p95_kl": float(np.percentile(m, 95.0)),
+            "mean_score": float(m.mean()),
+            "max_score": float(m.max()),
+            "p95_score": float(np.percentile(m, 95.0)),
         }
         if mask is not None:
             out["n_anomalous"] = int(np.count_nonzero(mask))
@@ -313,15 +327,15 @@ class PatchEntropyAnomalyDetector:
     def overlay(
         self,
         image01: np.ndarray,
-        kl_map: np.ndarray,
+        score_map: np.ndarray,
         cmap: str = "inferno",
         alpha: float = 0.5,
     ) -> np.ndarray:
-        """Alpha-blend a colormapped KL heatmap over the image.
+        """Alpha-blend a colormapped reconstruction-error heatmap over the image.
 
         Args:
             image01: ``(H, W, 3)`` image (``[0, 1]`` or ``[0, 255]``).
-            kl_map: per-patch KL map ``(Hp, Wp)``.
+            score_map: per-patch reconstruction-error map ``(Hp, Wp)``.
             cmap: matplotlib colormap name.
             alpha: heatmap opacity in ``[0, 1]``.
 
@@ -330,7 +344,7 @@ class PatchEntropyAnomalyDetector:
         """
         base = self._as_uint8(image01)
         h, w = base.shape[:2]
-        big = self._resize_nearest(np.asarray(kl_map, "float32"), (h, w))
+        big = self._resize_nearest(np.asarray(score_map, "float32"), (h, w))
         ptp = float(big.max() - big.min())
         norm = (big - big.min()) / (ptp + 1e-8)
         heat = matplotlib.colormaps[cmap](norm)[..., :3]
