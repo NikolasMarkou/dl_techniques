@@ -14,7 +14,7 @@ import keras
 from keras import ops
 from typing import Dict, Any, List, Tuple, Union
 
-from dl_techniques.layers.kmeans import KMeansLayer
+from dl_techniques.layers.mixtures.kmeans import KMeansLayer
 
 
 # Test fixtures

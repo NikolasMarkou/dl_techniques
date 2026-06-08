@@ -10,7 +10,7 @@ from sklearn.datasets import make_blobs
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.kmeans import KMeansLayer
+from dl_techniques.layers.mixtures.kmeans import KMeansLayer
 
 
 # ---------------------------------------------------------------------

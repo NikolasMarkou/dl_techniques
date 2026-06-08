@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, List, Tuple
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.radial_basis_function import RBFLayer
+from dl_techniques.layers.mixtures.radial_basis_function import RBFLayer
 
 from dl_techniques.datasets.vision.common import (
     create_dataset_builder,

@@ -25,7 +25,7 @@ from keras.api.losses import SparseCategoricalCrossentropy
 
 from dl_techniques.utils.logger import logger
 
-from dl_techniques.layers.kmeans import KMeansLayer
+from dl_techniques.layers.mixtures.kmeans import KMeansLayer
 
 
 # ---------------------------------------------------------------------

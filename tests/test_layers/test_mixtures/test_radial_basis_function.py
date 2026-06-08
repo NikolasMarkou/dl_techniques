@@ -9,7 +9,7 @@ from keras import ops
 import tensorflow as tf
 
 
-from dl_techniques.layers.radial_basis_function import RBFLayer
+from dl_techniques.layers.mixtures.radial_basis_function import RBFLayer
 
 
 def generate_cluster_data(
