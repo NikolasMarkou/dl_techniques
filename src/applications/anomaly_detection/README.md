@@ -1,47 +1,50 @@
-# Patch-Entropy Anomaly Detection
+# Patch-Reconstruction Anomaly Detection
 
 A lightweight anomaly detector that reuses a trained
-**`ConvNeXtPatchVAE`** to flag *high-entropy patches* — regions the model finds
-surprising / hard to compress. It runs the **encoder only** (the decoder is
-never executed) and scores every patch by its **KL divergence**.
+**`ConvNeXtPatchVAE`** to flag *poorly reconstructed patches* — regions the
+model cannot faithfully reproduce. It scores every patch by its **reconstruction
+error**: the model deterministically reconstructs the image and the per-patch
+squared pixel error becomes the anomaly score.
 
 ## Key idea
 
-For each patch, the encoder produces a posterior `q(z|x) = N(mu, sigma^2)`. The
-KL divergence from the prior measures how many nats the model must spend to
-describe that patch beyond what the prior already predicts. **High KL = high
-entropy = anomalous.**
+The model deterministically reconstructs the input via
+`sample_from(x, temperature=0.0)` (no sampling noise). The squared pixel error
+between the input and the reconstruction is averaged over the channels and then
+average-pooled over each `patch_size x patch_size` block, producing a
+`(Hp, Wp)` anomaly map. **High value = poorly reconstructed = anomalous.**
 
-A single per-patch KL map is computed on every image:
+This signal is **sampler-agnostic** — it works identically for `gaussian` and
+`vmf` checkpoints, because it only touches the input/output pixels, never the
+posterior parameters. It is also **sign-correct by construction**: larger error
+always means more anomalous, with no monotonicity caveats.
 
-| Grid (128px) | Patch | Prior | Use |
-|--------------|-------|-------|-----|
-| `ceil(H/patch) x ceil(W/patch)` | `patch_size` (e.g. 4px) | `N(0, I)` | per-patch localization |
+A single per-patch reconstruction-error map is computed on every image:
 
-The score is the standard KL `KL(q(z|x) ‖ N(0, I))` summed over the latent
-dimension (same `[-10, +10]` log-var clip as training).
+| Grid (256px) | Patch | Signal | Use |
+|--------------|-------|--------|-----|
+| `ceil(H/patch) x ceil(W/patch)` | `patch_size` (e.g. 8px) | mean squared pixel error | per-patch localization |
 
-> **Note**: a prior version used the hierarchical model's *conditional* KL
-> `KL(q(z_l2|x) ‖ p(z_l2|z_l1))` as the primary signal. The hierarchical variant
-> was removed; single-scale KL-vs-`N(0,I)` is an off-objective, weaker signal
-> (it measures absolute encoding cost, not surprise-given-context).
+For a 256px input with `patch_size = 8` the anomaly map is `32 x 32`. Scores are
+MSE on `[0, 1]` pixels, so in-distribution values are small (≈ 0.001–0.05).
 
 ## Requirements
 
 - The `dl_techniques` env (`.venv`), Keras 3 / TF 2.18.
 - GUI: `streamlit` + `streamlit-webrtc` (live webcam) —
   `.venv/bin/pip install streamlit streamlit-webrtc`.
-- A trained single-scale checkpoint, e.g.
-  `results/convnext_patch_vae_ade20k+coco_large_20260527_130515/best_model.keras`.
+- A trained checkpoint, e.g.
+  `results/convnext_patch_vae_ade20k+coco_custom_20260606_214647/best_model.keras`
+  (vmf, `patch_size=8`, `img_size=256`, `latent_dim=32`, BCE).
 
-The core `PatchEntropyAnomalyDetector` has **no GUI dependency** and works
+The core `PatchReconstructionAnomalyDetector` has **no GUI dependency** and works
 headless / programmatically; only `streamlit_app.py` imports streamlit.
 
 ## GUI (Streamlit)
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 \
-ANOMALY_MODEL=results/convnext_patch_vae_ade20k+coco_large_20260527_130515/best_model.keras \
+ANOMALY_MODEL=results/convnext_patch_vae_ade20k+coco_custom_20260606_214647/best_model.keras \
   .venv/bin/streamlit run src/applications/anomaly_detection/streamlit_app.py \
   --server.address 127.0.0.1 --server.port 8501
 ```
@@ -49,10 +52,11 @@ ANOMALY_MODEL=results/convnext_patch_vae_ade20k+coco_large_20260527_130515/best_
 Open `http://127.0.0.1:8501`. Two tabs:
 
 - **Live (webcam)** — real-time webcam via `streamlit-webrtc`; each frame is one
-  encoder forward, overlaid live with the KL heatmap or anomaly mask. Click
-  **Start** and allow camera access. Lower **Max side** for higher FPS.
-- **Image** — upload a still image; shows original, the KL overlay, anomaly
-  mask, and the score JSON.
+  encode + deterministic decode, overlaid live with the reconstruction-error
+  heatmap or anomaly mask. Click **Start** and allow camera access. Lower
+  **Max side** for higher FPS.
+- **Image** — upload a still image; shows original, the reconstruction-error
+  overlay, anomaly mask, and the score JSON.
 
 The checkpoint path comes from the `ANOMALY_MODEL` env var (or the sidebar
 **Model checkpoint** box). On a headless box, SSH-forward the port:
@@ -67,28 +71,34 @@ Sidebar controls:
 - **Threshold method**:
   - `zscore` — flag patches above `mean + k·std` (per-image, calibration-free; default).
   - `percentile` — flag the top `(100 − p)%` of patches.
-  - `absolute` — fixed nats cut-off (use if you calibrate a value offline).
+  - `absolute` — fixed reconstruction-error (MSE) cut-off, in `[0, 1]` pixel
+    units (small values like `0.01`); use if you calibrate a value offline.
 
 ## Programmatic use
 
 ```python
-from applications.anomaly_detection import PatchEntropyAnomalyDetector
+from applications.anomaly_detection import PatchReconstructionAnomalyDetector
 
-det = PatchEntropyAnomalyDetector.from_pretrained(".../best_model.keras")
-x, (h, w) = det.preprocess("photo.jpg")       # native res, padded to /patch
-kl = det.kl_maps(x, orig_hw=(h, w))["kl"]     # (ceil(h/patch), ceil(w/patch))
-mask, thr = det.anomaly_mask(kl, method="zscore", k=3.0)
-scores = det.score(kl, mask)                  # mean/max/p95 KL, frac anomalous
-overlay = det.overlay(x[0][:h, :w], kl)       # uint8 (h, w, 3) heatmap overlay
+det = PatchReconstructionAnomalyDetector.from_pretrained(
+    "results/convnext_patch_vae_ade20k+coco_custom_20260606_214647/best_model.keras")
+x, orig_hw = det.preprocess("image.jpg", max_size=384)
+amap = det.anomaly_maps(x, orig_hw=orig_hw)["anomaly"]   # (Hp, Wp)
+mask, thr = det.anomaly_mask(amap, method="zscore", k=3.0)
+print(det.score(amap, mask))                             # mean/max/p95 score, frac anomalous
 ```
 
 ## Notes & tuning
 
 - Inputs are scaled to `[0, 1]` (BCE checkpoint) and kept at native resolution
   and aspect ratio — reflect-padded to a multiple of `patch_size` (the model is
-  resolution-agnostic). The KL map is sized `ceil(H/patch) x ceil(W/patch)`;
+  resolution-agnostic). The anomaly map is sized `ceil(H/patch) x ceil(W/patch)`;
   padded patches are cropped out of scoring.
 - `zscore` is relative per image — not comparable across images. For
-  cross-image comparison, calibrate an `absolute` threshold on known-normal data.
-- Lighter is faster: the decoder weights load into RAM but never run; inference
-  is a single encoder forward.
+  cross-image comparison, calibrate an `absolute` (MSE) threshold on
+  known-normal data.
+- The decoder runs at inference: each frame is one encode + one deterministic
+  decode. This is heavier than a single encode forward, so expect lower webcam
+  FPS than a pure-encode detector.
+- Set `MPLBACKEND=Agg` for any headless matplotlib use (avoids X11 crashes).
+  The app does **not** use Gradio (its webcam streaming is broken in 6.x); the
+  GUI is Streamlit + `streamlit-webrtc`.
