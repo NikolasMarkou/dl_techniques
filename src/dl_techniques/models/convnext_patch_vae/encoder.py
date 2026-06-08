@@ -229,17 +229,26 @@ class ConvNeXtPatchEncoder(keras.layers.Layer):
         self,
         inputs: keras.KerasTensor,
         training: Optional[bool] = None,
-    ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
+        return_features: bool = False,
+    ) -> Tuple[keras.KerasTensor, ...]:
         """Forward pass.
 
         Args:
             inputs: ``(B, H, W, C)`` with ``H % patch_size == 0`` and
                 ``W % patch_size == 0``.
             training: Standard Keras training flag.
+            return_features: Opt-in, default ``False``. When ``False`` the
+                return value is byte-identical to before — the ``(mu, second)``
+                2-tuple. When ``True``, the pre-head hidden tensor ``h``
+                (the tensor fed INTO ``mu_head``, shaped
+                ``(B, Hp, Wp, embed_dim)``) is ALSO returned as a third
+                element: ``(mu, second, h)``.
 
         Returns:
-            Tuple ``(mu, log_var)``, both shaped
-            ``(B, Hp, Wp, latent_dim)``.
+            By default the ``(mu, log_var)`` (or ``(mu, kappa)`` for vMF) tuple,
+            both shaped ``(B, Hp, Wp, latent_dim)``. When ``return_features``
+            is ``True``, additionally the pre-head hidden tensor ``h`` shaped
+            ``(B, Hp, Wp, embed_dim)`` as a third element.
         """
         x = self.stem(inputs)
         x = self.stem_norm(x, training=training)
@@ -247,14 +256,28 @@ class ConvNeXtPatchEncoder(keras.layers.Layer):
             residual = x
             x = blk(x, training=training)
             x = residual + x
+        # `x` here is the pre-head hidden tensor (B, Hp, Wp, embed_dim) fed
+        # into the latent heads below; it is the feature tap surfaced by
+        # `return_features`.
         mu = self.mu_head(x)
         if self.sampling_type == "vmf":
             # Per-patch strictly-positive concentration kappa (B, Hp, Wp, 1).
             # The second tuple slot carries kappa (NOT a log-variance) for vmf.
             kappa = self.kappa_softplus(self.kappa_head(x))
-            return mu, kappa
-        log_var = self.log_var_head(x)
-        return mu, log_var
+            second = kappa
+        else:
+            second = self.log_var_head(x)
+        # DECISION plan_2026-06-08_e3917bd5/D-005: opt-in, default-off feature
+        # tap. The default path returns the exact existing 2-tuple (same
+        # weights, same get_config, byte-identical to prior callers — SC7).
+        # Do NOT promote `return_features` to __init__/build/get_config or a
+        # named output: that would change the layer's serialized shape and
+        # break existing ConvNeXtPatchVAE checkpoints. The pool-derived z2 and
+        # the VDVAE delta both consume `h` (pre-mu-head). See decisions.md
+        # D-005.
+        if return_features:
+            return mu, second, x
+        return mu, second
 
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]

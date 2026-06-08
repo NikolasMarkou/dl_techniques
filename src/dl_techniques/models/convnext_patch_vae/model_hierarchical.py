@@ -272,3 +272,166 @@ class _L2ConditionalPrior(keras.layers.Layer):
         if isinstance(reg, dict):
             config["kernel_regularizer"] = keras.regularizers.deserialize(reg)
         return cls(**config)
+
+
+@keras.saving.register_keras_serializable()
+class _CoarseLatentHead(keras.layers.Layer):
+    """Pool-derived coarse Gaussian latent head ``q(z2 | h)``.
+
+    # DECISION plan_2026-06-08_e3917bd5/D-001: POOL-DERIVED coarse latent.
+    The coarse latent ``z2`` is NOT produced by a separate bottom-up coarse
+    encoder (the deleted fdb84888 layout). Instead it is a parameter-free
+    ``AvgPool2D`` summary of the single fine encoder's last hidden features
+    ``h (B, Hp, Wp, embed_dim)``, followed by two 1x1 conv heads for the
+    Gaussian ``(mu2, log_var2)``. Do NOT replace the pool with a strided/
+    ``Dense``/``GlobalAveragePooling`` reduction: only a parameter-free pool
+    plus 1x1 convs keeps the head resolution-agnostic. See decisions.md
+    D-001.
+
+    Architecture::
+
+        h (B, Hp, Wp, embed_dim)
+          -> AvgPool2D(pool_factor)              -> (B, Hp/p, Wp/p, embed_dim)
+          -> [mu_head      (Conv2D 1x1)]         -> mu2
+             [log_var_head (Conv2D 1x1, zeros)]  -> log_var2
+
+    The ``log_var_head`` is zero-initialized so that at step 0 the coarse
+    posterior log-variance is exactly 0 (mirrors the encoder's
+    ``log_var_head`` recipe, reducing the step-0 coarse KL).
+
+    Args:
+        latent_dim_coarse: Per-patch coarse latent width (D2).
+        pool_factor: Average-pool factor mapping the fine grid ``(Hp, Wp)``
+            to the coarse grid ``(Hp/pool, Wp/pool)`` (default 2).
+        kernel_regularizer: Optional regularizer for the conv kernels
+            (deep-copied per head to avoid weight sharing).
+
+    Input shape:
+        4D tensor ``(B, Hp, Wp, embed_dim)`` — the fine encoder's last
+        hidden features.
+
+    Output shape:
+        Tuple ``(mu2, log_var2)``, each
+        ``(B, Hp/pool, Wp/pool, latent_dim_coarse)``.
+    """
+
+    def __init__(
+        self,
+        latent_dim_coarse: int,
+        pool_factor: int = 2,
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+
+        if latent_dim_coarse < 1:
+            raise ValueError(
+                f"latent_dim_coarse must be >= 1, got {latent_dim_coarse}"
+            )
+        if pool_factor < 2:
+            raise ValueError(f"pool_factor must be >= 2, got {pool_factor}")
+
+        # Store config (for get_config round-trip).
+        self.latent_dim_coarse = latent_dim_coarse
+        self.pool_factor = pool_factor
+        self.kernel_regularizer = kernel_regularizer
+
+        # Sub-layers created in __init__ (Keras 3 Golden Rule). The pool is
+        # parameter-free and resolution-agnostic. The kernel_regularizer is
+        # deep-copied per head to avoid weight sharing (guarding None).
+        self.pool = keras.layers.AveragePooling2D(
+            pool_size=pool_factor,
+            strides=pool_factor,
+            padding="valid",
+            name="coarse_pool",
+        )
+        self.mu_head = keras.layers.Conv2D(
+            filters=latent_dim_coarse,
+            kernel_size=1,
+            padding="valid",
+            kernel_regularizer=copy.deepcopy(kernel_regularizer),
+            name="coarse_mu_head",
+        )
+        self.log_var_head = keras.layers.Conv2D(
+            filters=latent_dim_coarse,
+            kernel_size=1,
+            padding="valid",
+            kernel_initializer="zeros",
+            bias_initializer="zeros",
+            kernel_regularizer=copy.deepcopy(kernel_regularizer),
+            name="coarse_log_var_head",
+        )
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Explicitly build each child in computational order."""
+        if len(input_shape) != 4:
+            raise ValueError(
+                f"_CoarseLatentHead expects 4D input "
+                f"(B, Hp, Wp, embed_dim); got {input_shape}"
+            )
+        self.pool.build(input_shape)
+        # After pool: (B, Hp/pool, Wp/pool, embed_dim) — channel width is
+        # preserved by the average pool.
+        pooled_shape = self.pool.compute_output_shape(input_shape)
+        self.mu_head.build(pooled_shape)
+        self.log_var_head.build(pooled_shape)
+
+        super().build(input_shape)
+
+    def call(
+        self,
+        h: keras.KerasTensor,
+        training: Optional[bool] = None,
+    ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
+        """Derive the coarse Gaussian params from the fine hidden features.
+
+        Args:
+            h: ``(B, Hp, Wp, embed_dim)`` — fine encoder last hidden features.
+            training: Standard Keras training flag (pool/conv are
+                training-agnostic; accepted for signature uniformity).
+
+        Returns:
+            Tuple ``(mu2, log_var2)``, both
+            ``(B, Hp/pool, Wp/pool, latent_dim_coarse)``.
+        """
+        p = self.pool(h)
+        mu2 = self.mu_head(p)
+        log_var2 = self.log_var_head(p)
+        return mu2, log_var2
+
+    def compute_output_shape(
+        self, input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]:
+        """Return ``(mu2_shape, log_var2_shape)`` — works before build."""
+        if len(input_shape) != 4:
+            raise ValueError(
+                f"Expected 4D input shape, got {input_shape}"
+            )
+        B, H, W, _ = input_shape
+        Hc = None if H is None else H // self.pool_factor
+        Wc = None if W is None else W // self.pool_factor
+        head_shape = (B, Hc, Wc, self.latent_dim_coarse)
+        return head_shape, head_shape
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return constructor kwargs for serialization."""
+        config = super().get_config()
+        config.update(
+            {
+                "latent_dim_coarse": self.latent_dim_coarse,
+                "pool_factor": self.pool_factor,
+                "kernel_regularizer": keras.regularizers.serialize(
+                    self.kernel_regularizer
+                ),
+            }
+        )
+        return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "_CoarseLatentHead":
+        """Reconstruct, deserializing any regularizer."""
+        config = dict(config)
+        reg = config.get("kernel_regularizer")
+        if isinstance(reg, dict):
+            config["kernel_regularizer"] = keras.regularizers.deserialize(reg)
+        return cls(**config)
