@@ -14,12 +14,12 @@ from typing import Dict, List, Optional, Union, Tuple, Any
 # Local Imports
 # ---------------------------------------------------------------------
 
-from ..activations import ActivationType
-from ..attention.factory import create_attention_layer
-from ..ffn.factory import create_ffn_from_config, FFNType, create_ffn_layer
-from ..fusion.multimodal_fusion import FusionStrategy, MultiModalFusion
-from ..norms import NormalizationType
-from ..norms.factory import create_normalization_layer
+from ...activations import ActivationType
+from ...attention.factory import create_attention_layer
+from ...ffn.factory import create_ffn_from_config, FFNType, create_ffn_layer
+from ...fusion.multimodal_fusion import FusionStrategy, MultiModalFusion
+from ...norms import NormalizationType
+from ...norms.factory import create_normalization_layer
 from .task_types import VLMTaskConfig, VLMTaskType
 
 
