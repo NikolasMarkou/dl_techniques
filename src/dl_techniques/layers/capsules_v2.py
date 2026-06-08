@@ -37,11 +37,14 @@ References
 """
 
 import keras
-from keras import ops
 from typing import Optional, Union, Dict, Any, Literal
 
-from .activations.squash import SquashLayer  # noqa: F401  (kept for API parity)
-from ..utils.logger import logger
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
+from dl_techniques.utils.logger import logger
+from dl_techniques.layers.activations.squash import SquashLayer  # noqa: F401  (kept for API parity)
 
 # ---------------------------------------------------------------------
 
@@ -241,20 +244,20 @@ class AttentionRoutingCapsule(keras.layers.Layer):
             k = min(k, axis_size)
 
         if axis == 1:
-            # Move axis 1 to last for ops.top_k.
-            score_t = ops.transpose(score, (0, 2, 1))  # (B, N_out, N_in)
+            # Move axis 1 to last for keras.ops.top_k.
+            score_t = keras.ops.transpose(score, (0, 2, 1))  # (B, N_out, N_in)
         else:
             score_t = score  # (B, N_in, N_out)
-        # ops.top_k operates on the last axis.
-        topk_values, _ = ops.top_k(score_t, k=k)
+        # keras.ops.top_k operates on the last axis.
+        topk_values, _ = keras.ops.top_k(score_t, k=k)
         # The k-th value (smallest of the top-k) is the threshold per row.
         threshold = topk_values[..., -1:]
         keep = score_t >= threshold
         if axis == 1:
-            keep = ops.transpose(keep, (0, 2, 1))
+            keep = keras.ops.transpose(keep, (0, 2, 1))
         # Use a large negative number so post-softmax weight ≈ 0.
-        neg_inf = ops.cast(-1e9, score.dtype)
-        masked = ops.where(keep, score, neg_inf)
+        neg_inf = keras.ops.cast(-1e9, score.dtype)
+        masked = keras.ops.where(keep, score, neg_inf)
         return masked
 
     # ------------------------------------------------------------------
@@ -266,11 +269,11 @@ class AttentionRoutingCapsule(keras.layers.Layer):
         # inputs: (B, N_in, D_in)
         # u_hat[b, i, o, d] = sum_e W[i, o, d, e] * inputs[b, i, e]
         # einsum keeps static shapes intact under tf.function tracing.
-        u_hat = ops.einsum("iode,bie->biod", self.W, inputs)  # (B, N_in, N_out, D_out)
+        u_hat = keras.ops.einsum("iode,bie->biod", self.W, inputs)  # (B, N_in, N_out, D_out)
 
         # Score: (u_hat · q) / sqrt(D_out)
         # u_hat: (B, N_in, N_out, D_out); q: (1, 1, N_out, D_out)
-        score = ops.sum(u_hat * self.q, axis=-1)  # (B, N_in, N_out)
+        score = keras.ops.sum(u_hat * self.q, axis=-1)  # (B, N_in, N_out)
         score = score / float(self.dim_capsules) ** 0.5
 
         # Optional Top-K masking before softmax.
@@ -288,15 +291,15 @@ class AttentionRoutingCapsule(keras.layers.Layer):
 
         # Aggregate: s_j = sum_i (a_ij * u_hat_ij)
         # a: (B, N_in, N_out) -> expand to (B, N_in, N_out, 1) for broadcast.
-        a_exp = ops.expand_dims(a, axis=-1)
-        s = ops.sum(a_exp * u_hat, axis=1)  # (B, N_out, D_out)
+        a_exp = keras.ops.expand_dims(a, axis=-1)
+        s = keras.ops.sum(a_exp * u_hat, axis=1)  # (B, N_out, D_out)
 
         if self.use_bias and self.bias is not None:
             s = s + self.bias
 
         # Decoupled output: magnitude (sigmoid head) * unit direction.
         # Direction.
-        s_norm = ops.sqrt(ops.sum(ops.square(s), axis=-1, keepdims=True) + self.eps)
+        s_norm = keras.ops.sqrt(keras.ops.sum(keras.ops.square(s), axis=-1, keepdims=True) + self.eps)
         direction = s / s_norm  # (B, N_out, D_out)
 
         # Magnitude: sigmoid(prob_head(s)) — scalar per capsule.
@@ -312,14 +315,14 @@ class AttentionRoutingCapsule(keras.layers.Layer):
             # uniform usage. Mirrors Shazeer et al. (2017) "importance loss".
             if self.softmax_axis == "output":
                 # a normalised over output axis -> usage = mean over (B, N_in)
-                usage = ops.mean(a, axis=(0, 1))  # (N_out,)
+                usage = keras.ops.mean(a, axis=(0, 1))  # (N_out,)
             else:
                 # a normalised over input axis -> usage = mean over (B, N_out)
-                usage = ops.mean(a, axis=(0, 2))  # (N_in,)
+                usage = keras.ops.mean(a, axis=(0, 2))  # (N_in,)
             # Coefficient of variation squared: cv^2 = var / mean^2.
-            mean_u = ops.mean(usage) + self.eps
-            var_u = ops.mean(ops.square(usage - mean_u))
-            aux = var_u / (ops.square(mean_u) + self.eps)
+            mean_u = keras.ops.mean(usage) + self.eps
+            var_u = keras.ops.mean(keras.ops.square(usage - mean_u))
+            aux = var_u / (keras.ops.square(mean_u) + self.eps)
             self.add_loss(self.load_balancing_weight * aux)
 
         return v
@@ -454,11 +457,11 @@ class CapsuleBlockV2(keras.layers.Layer):
         if self.layer_norm is not None:
             # Length-preserving direction-only LN — same recipe as the
             # bug-fixed legacy CapsuleBlock.
-            mag = ops.sqrt(ops.sum(ops.square(x), axis=-1, keepdims=True) + self.eps)
+            mag = keras.ops.sqrt(keras.ops.sum(keras.ops.square(x), axis=-1, keepdims=True) + self.eps)
             direction = x / mag
             direction_normed = self.layer_norm(direction, training=training)
-            dir_mag = ops.sqrt(
-                ops.sum(ops.square(direction_normed), axis=-1, keepdims=True) + self.eps
+            dir_mag = keras.ops.sqrt(
+                keras.ops.sum(keras.ops.square(direction_normed), axis=-1, keepdims=True) + self.eps
             )
             direction_unit = direction_normed / dir_mag
             x = mag * direction_unit

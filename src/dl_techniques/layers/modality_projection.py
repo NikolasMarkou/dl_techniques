@@ -110,7 +110,7 @@ class ModalityProjection(keras.layers.Layer):
                          │
                          ▼
         ┌────────────────────────────────────┐
-        │  LayerNormalization (optional)      │
+        │  LayerNormalization (optional)     │
         └────────────────┬───────────────────┘
                          │
                          ▼

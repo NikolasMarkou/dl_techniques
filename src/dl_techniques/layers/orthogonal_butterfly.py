@@ -1,4 +1,5 @@
-"""Learnable exactly-orthogonal layer via a butterfly of 2x2 Givens rotations.
+"""
+Learnable exactly-orthogonal layer via a butterfly of 2x2 Givens rotations.
 
 A learnable, exactly-orthogonal d x d linear layer built from a log-depth
 butterfly of 2x2 Givens rotations. This is the operator-valued sibling of the
@@ -78,8 +79,13 @@ import keras
 from keras import ops
 from typing import Any, Dict, Optional, Tuple, Union
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from dl_techniques.utils.logger import logger
 
+# ---------------------------------------------------------------------
 
 def _is_power_of_two(n: int) -> bool:
     return n >= 1 and (n & (n - 1)) == 0

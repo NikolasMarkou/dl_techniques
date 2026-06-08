@@ -382,9 +382,6 @@ class EntropyModel(keras.layers.Layer):
         :param max_seq_len: Maximum sequence length.
         :param dropout_rate: Dropout rate.
             **kwargs: Additional layer arguments.
-
-
-
     """
 
     def __init__(
@@ -558,9 +555,6 @@ class DynamicPatcher(keras.layers.Layer):
         :param entropy_threshold: Threshold for creating patch boundaries.
         :param max_patches: Maximum number of patches to create.
             **kwargs: Additional layer arguments.
-
-
-
     """
 
     def __init__(
@@ -695,9 +689,6 @@ class PatchPooling(keras.layers.Layer):
         :param output_dim: Output dimension for patch representations.
         :param num_queries: Number of query vectors for attention pooling.
             **kwargs: Additional layer arguments.
-
-
-
     """
 
     def __init__(

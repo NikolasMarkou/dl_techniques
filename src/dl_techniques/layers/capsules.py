@@ -4,22 +4,6 @@
 A comprehensive Keras-based implementation of Capsule Networks as proposed by
 Sabour et al. in "Dynamic Routing Between Capsules" (2017).
 
-## Architecture Overview
-
-```
-Input --> Conv Layers --> Primary Capsule --> CapsuleBlock
-                                               |
-                                               +--> RoutingCapsule
-                                               |      |
-                                               |      +--> Dynamic Routing
-                                               |
-                                               +--> (Optional)
-                                                      |
-                                                      +--> Dropout
-                                                      |
-                                                      +--> LayerNorm
-```
-
 ## Core Components
 
 ### 1. Primary Capsule Layer
@@ -43,15 +27,14 @@ In Advances in Neural Information Processing Systems (pp. 3856-3866).
 """
 
 import keras
-from keras import ops
 from typing import Optional, Tuple, Union, Dict, Any
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
-from ..utils.logger import logger
-from .activations.squash import SquashLayer
+from dl_techniques.utils.logger import logger
+from dl_techniques.layers.activations.squash import SquashLayer
 
 # ---------------------------------------------------------------------
 
@@ -215,18 +198,18 @@ class PrimaryCapsule(keras.layers.Layer):
         :return: Output tensor of shape ``(B, total_capsules, dim_capsules)``.
         :rtype: keras.KerasTensor
         """
-        batch_size = ops.shape(inputs)[0]
+        batch_size = keras.ops.shape(inputs)[0]
 
         # Apply convolution
         conv_output = self.conv(inputs, training=training)
 
         # Reshape to capsule format
         # Calculate dimensions based on the output of the convolutional layer
-        h, w = ops.shape(conv_output)[1], ops.shape(conv_output)[2]
+        h, w = keras.ops.shape(conv_output)[1], keras.ops.shape(conv_output)[2]
         num_spatial_capsules = h * w
 
         # Reshape to [batch_size, num_spatial_capsules * num_capsules, dim_capsules]
-        capsules = ops.reshape(
+        capsules = keras.ops.reshape(
             conv_output,
             [batch_size, num_spatial_capsules * self.num_capsules, self.dim_capsules]
         )
@@ -440,17 +423,17 @@ class RoutingCapsule(keras.layers.Layer):
         :return: Output tensor of shape ``(B, num_capsules, dim_capsules)``.
         :rtype: keras.KerasTensor
         """
-        batch_size = ops.shape(inputs)[0]
+        batch_size = keras.ops.shape(inputs)[0]
 
         # Prepare inputs by expanding dimensions for matrix multiplication
         # [batch_size, num_input_capsules, input_dim_capsules] ->
         # [batch_size, num_input_capsules, 1, 1, input_dim_capsules]
-        inputs_expanded = ops.expand_dims(ops.expand_dims(inputs, axis=-1), axis=2)
+        inputs_expanded = keras.ops.expand_dims(keras.ops.expand_dims(inputs, axis=-1), axis=2)
 
         # Tile inputs for efficient broadcasting with weights
         # [batch_size, num_input_capsules, 1, 1, input_dim_capsules] ->
         # [batch_size, num_input_capsules, num_capsules, 1, input_dim_capsules]
-        inputs_tiled = ops.tile(
+        inputs_tiled = keras.ops.tile(
             inputs_expanded,
             [1, 1, self.num_capsules, 1, 1]
         )
@@ -459,10 +442,10 @@ class RoutingCapsule(keras.layers.Layer):
         # [1, num_input_capsules, num_capsules, dim_capsules, input_dim_capsules] *
         # [batch_size, num_input_capsules, num_capsules, 1, input_dim_capsules] ->
         # [batch_size, num_input_capsules, num_capsules, dim_capsules, 1]
-        u_hat = ops.matmul(self.W, inputs_tiled)
+        u_hat = keras.ops.matmul(self.W, inputs_tiled)
 
         # Initialize routing logits (b) to zero
-        b = ops.zeros([batch_size, self.num_input_capsules, self.num_capsules, 1, 1])
+        b = keras.ops.zeros([batch_size, self.num_input_capsules, self.num_capsules, 1, 1])
 
         # Perform iterative dynamic routing
         for i in range(self.routing_iterations):
@@ -474,7 +457,7 @@ class RoutingCapsule(keras.layers.Layer):
             # [batch_size, num_input_capsules, num_capsules, dim_capsules, 1] *
             # [batch_size, num_input_capsules, num_capsules, 1, 1] ->
             # [batch_size, 1, num_capsules, dim_capsules, 1]
-            s = ops.sum(c * u_hat, axis=1, keepdims=True)
+            s = keras.ops.sum(c * u_hat, axis=1, keepdims=True)
 
             # Add bias if requested
             if self.use_bias and self.bias is not None:
@@ -488,13 +471,13 @@ class RoutingCapsule(keras.layers.Layer):
                 # Tile output capsules to match input capsules for agreement calculation
                 # [batch_size, 1, num_capsules, dim_capsules, 1] ->
                 # [batch_size, num_input_capsules, num_capsules, dim_capsules, 1]
-                v_tiled = ops.tile(v, [1, self.num_input_capsules, 1, 1, 1])
+                v_tiled = keras.ops.tile(v, [1, self.num_input_capsules, 1, 1, 1])
 
                 # Calculate agreement between predictions and outputs
                 # [batch_size, num_input_capsules, num_capsules, dim_capsules, 1] *
                 # [batch_size, num_input_capsules, num_capsules, dim_capsules, 1] ->
                 # [batch_size, num_input_capsules, num_capsules, 1, 1]
-                agreement = ops.sum(
+                agreement = keras.ops.sum(
                     u_hat * v_tiled,
                     axis=-2,
                     keepdims=True
@@ -504,7 +487,7 @@ class RoutingCapsule(keras.layers.Layer):
                 b += agreement
 
         # Final output: shape [batch_size, num_capsules, dim_capsules]
-        return ops.reshape(v, (batch_size, self.num_capsules, self.dim_capsules))
+        return keras.ops.reshape(v, (batch_size, self.num_capsules, self.dim_capsules))
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape based on input shape.
@@ -720,13 +703,13 @@ class CapsuleBlock(keras.layers.Layer):
             # original magnitude back. Preserves ||x|| (= detection probability)
             # while still giving the routing-to-routing pose subspace the
             # benefit of LN's training stability.
-            mag = ops.sqrt(
-                ops.sum(ops.square(x), axis=-1, keepdims=True) + self._ln_eps
+            mag = keras.ops.sqrt(
+                keras.ops.sum(keras.ops.square(x), axis=-1, keepdims=True) + self._ln_eps
             )
             direction = x / mag
             direction_normed = self.layer_norm(direction, training=training)
-            dir_mag = ops.sqrt(
-                ops.sum(ops.square(direction_normed), axis=-1, keepdims=True)
+            dir_mag = keras.ops.sqrt(
+                keras.ops.sum(keras.ops.square(direction_normed), axis=-1, keepdims=True)
                 + self._ln_eps
             )
             direction_unit = direction_normed / dir_mag

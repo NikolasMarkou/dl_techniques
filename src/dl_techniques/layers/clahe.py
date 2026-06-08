@@ -1,5 +1,5 @@
 """
-local image contrast using a trainable CLAHE algorithm.
+Local image contrast using a trainable CLAHE algorithm.
 
 This layer implements Contrast Limited Adaptive Histogram Equalization (CLAHE),
 an advanced image enhancement technique designed to improve local contrast and

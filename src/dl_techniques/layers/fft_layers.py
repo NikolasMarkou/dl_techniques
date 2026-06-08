@@ -134,25 +134,25 @@ class IFFTLayer(keras.layers.Layer):
         └──────────────────┬──────────────────────┘
                            ▼
         ┌─────────────────────────────────────────┐
-        │  Split into (real, imag) along channels  │
+        │  Split into (real, imag) along channels │
         └──────────────────┬──────────────────────┘
                            ▼
         ┌─────────────────────────────────────────┐
-        │  Transpose both: [batch, C, H, W]        │
+        │  Transpose both: [batch, C, H, W]       │
         └──────────────────┬──────────────────────┘
                            ▼
         ┌─────────────────────────────────────────┐
-        │  IFFT2D on (real, imag) tuple            │
+        │  IFFT2D on (real, imag) tuple           │
         │  ──▶ (ifft_real, ifft_imag)             │
         └──────────────────┬──────────────────────┘
                            ▼
         ┌─────────────────────────────────────────┐
-        │  Take ifft_real, transpose back          │
-        │  [batch, H, W, C]                        │
+        │  Take ifft_real, transpose back         │
+        │  [batch, H, W, C]                       │
         └──────────────────┬──────────────────────┘
                            ▼
         ┌─────────────────────────────────────────┐
-        │  Output [batch, H, W, C] (float32)       │
+        │  Output [batch, H, W, C] (float32)      │
         └─────────────────────────────────────────┘
 
     :param kwargs: Additional keyword arguments for the Layer base class.

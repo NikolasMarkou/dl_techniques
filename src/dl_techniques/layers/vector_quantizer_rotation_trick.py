@@ -65,7 +65,7 @@ gradient path differs.
     scale  = sg(||z_q|| / ||z_e||)            # 'rotation' mode
     quantized = R(z_e) * scale
 
-``'reflection'`` drops the ``+ 2 (z_e · û_x) û_q`` term.
+``'reflection'`` drkeras.ops the ``+ 2 (z_e · û_x) û_q`` term.
 ``'no_grad_scale'`` keeps ``scale`` differentiable.
 
 Beyond the rotation gradient, this implementation is a strict superset of the
@@ -92,7 +92,7 @@ Mathematical formulation (very-efficient rotation form per the paper):
     quantized = R(x) \\cdot scale
 
 with ``stop_gradient`` applied to ``w``, ``\\hat{u}_x``, ``\\hat{u}_q`` and
-(depending on mode) ``scale``. The reflection variant drops the
+(depending on mode) ``scale``. The reflection variant drkeras.ops the
 ``+2(x \\cdot \\hat{u}_x)\\hat{u}_q`` term.
 
 References:
@@ -108,7 +108,6 @@ References:
 
 import keras
 import numpy as np
-from keras import initializers, layers, ops
 from typing import Any, Dict, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -121,7 +120,7 @@ from dl_techniques.utils.logger import logger
 
 
 @keras.saving.register_keras_serializable()
-class VectorQuantizerRotationTrick(layers.Layer):
+class VectorQuantizerRotationTrick(keras.layers.Layer):
     """Vector Quantizer with Rotation Trick gradient + multi-head codebook.
 
     A strict superset of ``VectorQuantizer``. Setting ``gradient_mode='ste'``
@@ -159,7 +158,7 @@ class VectorQuantizerRotationTrick(layers.Layer):
             commitment_cost: float = 0.25,
             gradient_mode: str = "rotation",
             distance_mode: str = "euclidean",
-            initializer: Union[str, initializers.Initializer] = "uniform",
+            initializer: Union[str, keras.initializers.Initializer] = "uniform",
             use_ema: bool = False,
             ema_decay: float = 0.99,
             epsilon: float = 1e-5,
@@ -233,7 +232,7 @@ class VectorQuantizerRotationTrick(layers.Layer):
         self.orthogonal_reg_coefficient = orthogonal_reg_coefficient
 
         if isinstance(initializer, str):
-            self.initializer = initializers.get(initializer)
+            self.initializer = keras.initializers.get(initializer)
         else:
             self.initializer = initializer
 
@@ -321,7 +320,7 @@ class VectorQuantizerRotationTrick(layers.Layer):
                 "commitment_cost": self.commitment_cost,
                 "gradient_mode": self.gradient_mode,
                 "distance_mode": self.distance_mode,
-                "initializer": initializers.serialize(self.initializer),
+                "initializer": keras.initializers.serialize(self.initializer),
                 "use_ema": self.use_ema,
                 "ema_decay": self.ema_decay,
                 "epsilon": self.epsilon,
@@ -345,21 +344,21 @@ class VectorQuantizerRotationTrick(layers.Layer):
             inputs: keras.KerasTensor,
             training: Optional[bool] = None,
     ) -> keras.KerasTensor:
-        input_shape = ops.shape(inputs)
+        input_shape = keras.ops.shape(inputs)
 
         # Flatten everything but channels: (..., D) -> (N, D)
-        flat_inputs = ops.reshape(inputs, (-1, self.embedding_dim))
+        flat_inputs = keras.ops.reshape(inputs, (-1, self.embedding_dim))
 
         # K-means warm start (Python side; one-shot)
         if (
                 self.kmeans_init
                 and training is True
-                and float(ops.convert_to_numpy(self.kmeans_init_done)) < 0.5
+                and float(keras.ops.convert_to_numpy(self.kmeans_init_done)) < 0.5
         ):
             self._maybe_kmeans_init(flat_inputs)
 
         # Reshape to (N, H, head_dim)
-        flat_heads = ops.reshape(flat_inputs, (-1, self.num_heads, self.head_dim))
+        flat_heads = keras.ops.reshape(flat_inputs, (-1, self.num_heads, self.head_dim))
 
         # Per-head argmin / argmax
         encoding_indices, quantized_heads = self._lookup(flat_heads)
@@ -375,14 +374,14 @@ class VectorQuantizerRotationTrick(layers.Layer):
 
         # Auxiliary losses (training-gated for diversity/ortho; commitment/codebook always)
         # Reshape quantized back to (N, D)
-        quantized_flat = ops.reshape(quantized_heads, (-1, self.embedding_dim))
+        quantized_flat = keras.ops.reshape(quantized_heads, (-1, self.embedding_dim))
 
         # Codebook + commitment losses
-        codebook_loss = ops.mean(
-            ops.square(ops.stop_gradient(flat_inputs) - quantized_flat)
+        codebook_loss = keras.ops.mean(
+            keras.ops.square(keras.ops.stop_gradient(flat_inputs) - quantized_flat)
         )
-        commitment_loss = self.commitment_cost * ops.mean(
-            ops.square(flat_inputs - ops.stop_gradient(quantized_flat))
+        commitment_loss = self.commitment_cost * keras.ops.mean(
+            keras.ops.square(flat_inputs - keras.ops.stop_gradient(quantized_flat))
         )
         self.add_loss(codebook_loss)
         self.add_loss(commitment_loss)
@@ -397,7 +396,7 @@ class VectorQuantizerRotationTrick(layers.Layer):
         transformed_flat = self._apply_gradient_transform(flat_inputs, quantized_flat)
 
         # Restore shape
-        output = ops.reshape(transformed_flat, input_shape)
+        output = keras.ops.reshape(transformed_flat, input_shape)
         return output
 
     # ------------------------------------------------------------------
@@ -418,40 +417,40 @@ class VectorQuantizerRotationTrick(layers.Layer):
         if self.distance_mode == "euclidean":
             # Squared distance per head:
             # ||x||^2 (N,H,1) + ||e||^2 (H,1,K) - 2 x.e (N,H,K)
-            x_sq = ops.sum(ops.square(flat_heads), axis=-1, keepdims=True)  # (N,H,1)
-            e_sq = ops.sum(ops.square(codebook), axis=-1)  # (H,K)
-            e_sq = ops.expand_dims(e_sq, axis=0)  # (1,H,K)
+            x_sq = keras.ops.sum(keras.ops.square(flat_heads), axis=-1, keepdims=True)  # (N,H,1)
+            e_sq = keras.ops.sum(keras.ops.square(codebook), axis=-1)  # (H,K)
+            e_sq = keras.ops.expand_dims(e_sq, axis=0)  # (1,H,K)
             # x . e: einsum over head_dim
             # flat_heads (N,H,D) x codebook (H,K,D) -> (N,H,K)
-            xe = ops.einsum("nhd,hkd->nhk", flat_heads, codebook)
+            xe = keras.ops.einsum("nhd,hkd->nhk", flat_heads, codebook)
             distances = x_sq + e_sq - 2.0 * xe
-            indices = ops.argmin(distances, axis=-1)  # (N,H)
+            indices = keras.ops.argmin(distances, axis=-1)  # (N,H)
         else:  # cosine
             # L2-normalise both
-            x_norm = ops.sqrt(
-                ops.sum(ops.square(flat_heads), axis=-1, keepdims=True) + self.epsilon
+            x_norm = keras.ops.sqrt(
+                keras.ops.sum(keras.ops.square(flat_heads), axis=-1, keepdims=True) + self.epsilon
             )
             unit_x = flat_heads / x_norm  # (N,H,D)
-            e_norm = ops.sqrt(
-                ops.sum(ops.square(codebook), axis=-1, keepdims=True) + self.epsilon
+            e_norm = keras.ops.sqrt(
+                keras.ops.sum(keras.ops.square(codebook), axis=-1, keepdims=True) + self.epsilon
             )
             unit_e = codebook / e_norm  # (H,K,D)
-            sim = ops.einsum("nhd,hkd->nhk", unit_x, unit_e)
-            indices = ops.argmax(sim, axis=-1)  # (N,H)
+            sim = keras.ops.einsum("nhd,hkd->nhk", unit_x, unit_e)
+            indices = keras.ops.argmax(sim, axis=-1)  # (N,H)
 
         # Gather quantized vectors per head.
         # one_hot indices to (N,H,K), then matmul against codebook (H,K,D)
-        encodings = ops.one_hot(indices, self.num_embeddings)  # (N,H,K)
+        encodings = keras.ops.one_hot(indices, self.num_embeddings)  # (N,H,K)
         # quantized = sum_k encodings * codebook[h,k] -> (N,H,D)
-        quantized = ops.einsum("nhk,hkd->nhd", encodings, codebook)
+        quantized = keras.ops.einsum("nhk,hkd->nhd", encodings, codebook)
 
         if self.distance_mode == "cosine":
             # Restore magnitude
-            x_mag = ops.sqrt(
-                ops.sum(ops.square(flat_heads), axis=-1, keepdims=True) + self.epsilon
+            x_mag = keras.ops.sqrt(
+                keras.ops.sum(keras.ops.square(flat_heads), axis=-1, keepdims=True) + self.epsilon
             )
-            q_mag = ops.sqrt(
-                ops.sum(ops.square(quantized), axis=-1, keepdims=True) + self.epsilon
+            q_mag = keras.ops.sqrt(
+                keras.ops.sum(keras.ops.square(quantized), axis=-1, keepdims=True) + self.epsilon
             )
             quantized = quantized * (x_mag / q_mag)
 
@@ -468,12 +467,12 @@ class VectorQuantizerRotationTrick(layers.Layer):
         mode = self.gradient_mode
 
         if mode == "ste":
-            return x + ops.stop_gradient(q - x)
+            return x + keras.ops.stop_gradient(q - x)
 
         # Promote to fp32 for norms.
         x_dtype = x.dtype
-        x32 = ops.cast(x, "float32")
-        q32 = ops.cast(q, "float32")
+        x32 = keras.ops.cast(x, "float32")
+        q32 = keras.ops.cast(q, "float32")
 
         eps = self.epsilon
 
@@ -482,19 +481,19 @@ class VectorQuantizerRotationTrick(layers.Layer):
         # matrix R becomes a *constant* w.r.t. backprop. The gradient w.r.t. x
         # then flows through R @ x as a constant linear transform — preserving
         # the curvature/direction information that pure STE discards.
-        x_norm = ops.sqrt(ops.sum(ops.square(x32), axis=-1, keepdims=True) + eps)
-        q_norm = ops.sqrt(ops.sum(ops.square(q32), axis=-1, keepdims=True) + eps)
+        x_norm = keras.ops.sqrt(keras.ops.sum(keras.ops.square(x32), axis=-1, keepdims=True) + eps)
+        q_norm = keras.ops.sqrt(keras.ops.sum(keras.ops.square(q32), axis=-1, keepdims=True) + eps)
 
         # Detached unit vectors and w direction.
-        unit_x_sg = ops.stop_gradient(x32 / x_norm)
-        unit_q_sg = ops.stop_gradient(q32 / q_norm)
+        unit_x_sg = keras.ops.stop_gradient(x32 / x_norm)
+        unit_q_sg = keras.ops.stop_gradient(q32 / q_norm)
         w_unnorm = unit_x_sg + unit_q_sg
-        w_norm = ops.sqrt(ops.sum(ops.square(w_unnorm), axis=-1, keepdims=True) + eps)
-        w_sg = ops.stop_gradient(w_unnorm / w_norm)
+        w_norm = keras.ops.sqrt(keras.ops.sum(keras.ops.square(w_unnorm), axis=-1, keepdims=True) + eps)
+        w_sg = keras.ops.stop_gradient(w_unnorm / w_norm)
 
         # x · w and x · unit_x — gradient WILL flow through x here (the whole point).
-        x_dot_w = ops.sum(x32 * w_sg, axis=-1, keepdims=True)
-        x_dot_ux = ops.sum(x32 * unit_x_sg, axis=-1, keepdims=True)
+        x_dot_w = keras.ops.sum(x32 * w_sg, axis=-1, keepdims=True)
+        x_dot_ux = keras.ops.sum(x32 * unit_x_sg, axis=-1, keepdims=True)
 
         if mode == "rotation":
             rotated = x32 - 2.0 * x_dot_w * w_sg + 2.0 * x_dot_ux * unit_q_sg
@@ -510,10 +509,10 @@ class VectorQuantizerRotationTrick(layers.Layer):
         if mode == "no_grad_scale":
             scale_eff = q_norm / x_norm
         else:
-            scale_eff = ops.stop_gradient(q_norm / x_norm)
+            scale_eff = keras.ops.stop_gradient(q_norm / x_norm)
 
         out32 = rotated * scale_eff
-        return ops.cast(out32, x_dtype)
+        return keras.ops.cast(out32, x_dtype)
 
     # ------------------------------------------------------------------
     # EMA
@@ -529,11 +528,11 @@ class VectorQuantizerRotationTrick(layers.Layer):
         :param flat_heads: ``(N, H, head_dim)``.
         :param indices: ``(N, H)`` int.
         """
-        encodings = ops.one_hot(indices, self.num_embeddings)  # (N,H,K)
+        encodings = keras.ops.one_hot(indices, self.num_embeddings)  # (N,H,K)
         # cluster_size: per (H,K) -> sum over N
-        cluster_size = ops.sum(encodings, axis=0)  # (H,K)
+        cluster_size = keras.ops.sum(encodings, axis=0)  # (H,K)
         # embed sums: (H,K,D) = sum_n encodings[n,h,k] * flat_heads[n,h,d]
-        embed_sums = ops.einsum("nhk,nhd->hkd", encodings, flat_heads)
+        embed_sums = keras.ops.einsum("nhk,nhd->hkd", encodings, flat_heads)
 
         new_cluster = (
                 self.ema_decay * self.ema_cluster_size
@@ -547,7 +546,7 @@ class VectorQuantizerRotationTrick(layers.Layer):
         )
         self.ema_embeddings.assign(new_embed)
 
-        normalised = self.ema_embeddings / ops.expand_dims(
+        normalised = self.ema_embeddings / keras.ops.expand_dims(
             self.ema_cluster_size + self.epsilon, axis=-1
         )
         self.embeddings.assign(normalised)
@@ -562,8 +561,8 @@ class VectorQuantizerRotationTrick(layers.Layer):
             indices: keras.KerasTensor,
     ) -> None:
         """Track unused codes and re-init expired ones from current batch."""
-        encodings = ops.one_hot(indices, self.num_embeddings)  # (N,H,K)
-        used_this_call = ops.cast(ops.sum(encodings, axis=0) > 0, "float32")  # (H,K)
+        encodings = keras.ops.one_hot(indices, self.num_embeddings)  # (N,H,K)
+        used_this_call = keras.ops.cast(keras.ops.sum(encodings, axis=0) > 0, "float32")  # (H,K)
 
         # Increment unused counter for codes not used; reset for codes used.
         new_unused = (1.0 - used_this_call) * (self.dead_code_unused + 1.0)
@@ -571,37 +570,37 @@ class VectorQuantizerRotationTrick(layers.Layer):
 
         # Find dead codes: unused > threshold.
         # We then replace each dead code with a random encoder vector from this batch
-        # (per head). For correctness in pure Keras ops we sample via shuffle.
-        dead_mask = ops.cast(
+        # (per head). For correctness in pure Keras keras.ops we sample via shuffle.
+        dead_mask = keras.ops.cast(
             self.dead_code_unused > float(self.dead_code_threshold), "float32"
         )  # (H, K)
 
         # Sample replacement vectors per head from flat_heads (N, H, head_dim).
-        n = ops.shape(flat_heads)[0]
+        n = keras.ops.shape(flat_heads)[0]
         # Random indices in [0, N), shape (H, K) — pick one batch vector per dead slot.
         rand_uniform = keras.random.uniform(
             shape=(self.num_heads, self.num_embeddings),
             minval=0.0,
             maxval=1.0,
         )
-        rand_idx = ops.cast(rand_uniform * ops.cast(n, "float32"), "int32")
-        rand_idx = ops.clip(rand_idx, 0, n - 1)  # (H, K)
+        rand_idx = keras.ops.cast(rand_uniform * keras.ops.cast(n, "float32"), "int32")
+        rand_idx = keras.ops.clip(rand_idx, 0, n - 1)  # (H, K)
 
         # Gather: replacements[h, k, :] = flat_heads[rand_idx[h, k], h, :]
         # flat_heads is (N, H, D); we want (H, K, D).
         # Build with take + per-head indexing via vectorisation.
         # take along axis=0 with indices (H,K) -> result (H,K,H,D); we need diagonal in H.
         # Simpler: transpose flat_heads to (H, N, D) then gather along axis=1 per head.
-        heads_first = ops.transpose(flat_heads, (1, 0, 2))  # (H, N, D)
+        heads_first = keras.ops.transpose(flat_heads, (1, 0, 2))  # (H, N, D)
         # gather indices rand_idx (H, K) along axis=1.
-        replacements = ops.take_along_axis(
+        replacements = keras.ops.take_along_axis(
             heads_first,
-            ops.expand_dims(rand_idx, axis=-1),  # (H,K,1)
+            keras.ops.expand_dims(rand_idx, axis=-1),  # (H,K,1)
             axis=1,
-        )  # (H, K, D)  -- ops.take_along_axis broadcasts the last dim
+        )  # (H, K, D)  -- keras.ops.take_along_axis broadcasts the last dim
 
         # Blend: new_codebook = dead_mask * replacements + (1 - dead_mask) * embeddings
-        dead_mask_exp = ops.expand_dims(dead_mask, axis=-1)  # (H,K,1)
+        dead_mask_exp = keras.ops.expand_dims(dead_mask, axis=-1)  # (H,K,1)
         new_codebook = (
                 dead_mask_exp * replacements + (1.0 - dead_mask_exp) * self.embeddings
         )
@@ -626,7 +625,7 @@ class VectorQuantizerRotationTrick(layers.Layer):
 
         # Accumulate this batch's encoder vectors as a numpy array.
         # flat_inputs shape (N, D); reshape per head to (N*H, head_dim).
-        np_inputs = np.asarray(ops.convert_to_numpy(flat_inputs))
+        np_inputs = np.asarray(keras.ops.convert_to_numpy(flat_inputs))
         np_heads = np_inputs.reshape(-1, self.num_heads, self.head_dim)
         self._kmeans_accum.append(np_heads)
 
@@ -655,7 +654,7 @@ class VectorQuantizerRotationTrick(layers.Layer):
                 centroids = km.cluster_centers_
                 # pad with existing codebook entries
                 existing = np.asarray(
-                    ops.convert_to_numpy(self.embeddings)
+                    keras.ops.convert_to_numpy(self.embeddings)
                 )[h]  # (K, D_h)
                 pad = self.num_embeddings - centroids.shape[0]
                 centroids = np.concatenate([centroids, existing[-pad:]], axis=0)
@@ -684,22 +683,22 @@ class VectorQuantizerRotationTrick(layers.Layer):
     def _diversity_loss(self) -> keras.KerasTensor:
         """Penalise mean off-diagonal of unit-codebook gram matrix per head."""
         e = self.embeddings  # (H, K, D)
-        norm = ops.sqrt(ops.sum(ops.square(e), axis=-1, keepdims=True) + self.epsilon)
+        norm = keras.ops.sqrt(keras.ops.sum(keras.ops.square(e), axis=-1, keepdims=True) + self.epsilon)
         unit = e / norm  # (H, K, D)
-        gram = ops.einsum("hkd,hjd->hkj", unit, unit)  # (H, K, K)
-        eye = ops.eye(self.num_embeddings)
-        eye = ops.expand_dims(eye, axis=0)  # (1, K, K)
+        gram = keras.ops.einsum("hkd,hjd->hkj", unit, unit)  # (H, K, K)
+        eye = keras.ops.eye(self.num_embeddings)
+        eye = keras.ops.expand_dims(eye, axis=0)  # (1, K, K)
         off_diag = gram - eye
-        loss = ops.mean(ops.square(off_diag))
+        loss = keras.ops.mean(keras.ops.square(off_diag))
         return loss
 
     def _orthogonal_loss(self) -> keras.KerasTensor:
         """SRIP-style ``||E E^T - I||_F^2`` summed across heads."""
         e = self.embeddings  # (H, K, D)
-        gram = ops.einsum("hkd,hjd->hkj", e, e)
-        eye = ops.expand_dims(ops.eye(self.num_embeddings), axis=0)
+        gram = keras.ops.einsum("hkd,hjd->hkj", e, e)
+        eye = keras.ops.expand_dims(keras.ops.eye(self.num_embeddings), axis=0)
         diff = gram - eye
-        return ops.mean(ops.sum(ops.square(diff), axis=(-1, -2)))
+        return keras.ops.mean(keras.ops.sum(keras.ops.square(diff), axis=(-1, -2)))
 
     # ------------------------------------------------------------------
     # public API parity with VectorQuantizer
@@ -718,22 +717,22 @@ class VectorQuantizerRotationTrick(layers.Layer):
         if not self.built:
             self.build(inputs.shape)
 
-        input_shape = ops.shape(inputs)
+        input_shape = keras.ops.shape(inputs)
         spatial_shape = input_shape[:-1]
 
-        flat = ops.reshape(inputs, (-1, self.embedding_dim))
-        flat_heads = ops.reshape(flat, (-1, self.num_heads, self.head_dim))
+        flat = keras.ops.reshape(inputs, (-1, self.embedding_dim))
+        flat_heads = keras.ops.reshape(flat, (-1, self.num_heads, self.head_dim))
         indices, _ = self._lookup(flat_heads)  # (N, H)
 
         if self.num_heads == 1:
-            indices_out = ops.reshape(indices[:, 0], spatial_shape)
+            indices_out = keras.ops.reshape(indices[:, 0], spatial_shape)
             return indices_out
 
         # Reshape (N, H) back to (B, ..., H).
-        spatial_shape_i32 = ops.cast(spatial_shape, "int32")
-        h_tensor = ops.convert_to_tensor([self.num_heads], dtype="int32")
-        out_shape = ops.concatenate([spatial_shape_i32, h_tensor], axis=0)
-        return ops.reshape(indices, out_shape)
+        spatial_shape_i32 = keras.ops.cast(spatial_shape, "int32")
+        h_tensor = keras.ops.convert_to_tensor([self.num_heads], dtype="int32")
+        out_shape = keras.ops.concatenate([spatial_shape_i32, h_tensor], axis=0)
+        return keras.ops.reshape(indices, out_shape)
 
     def quantize_from_indices(
             self, indices: keras.KerasTensor
@@ -746,21 +745,21 @@ class VectorQuantizerRotationTrick(layers.Layer):
         if not self.built:
             raise ValueError("Layer must be built before calling quantize_from_indices")
 
-        idx_shape = ops.shape(indices)
+        idx_shape = keras.ops.shape(indices)
 
         if self.num_heads == 1:
-            flat_indices = ops.reshape(indices, (-1,))  # (N,)
-            flat_indices = ops.expand_dims(flat_indices, axis=-1)  # (N, 1)
-            spatial_shape_i32 = ops.cast(idx_shape, "int32")
+            flat_indices = keras.ops.reshape(indices, (-1,))  # (N,)
+            flat_indices = keras.ops.expand_dims(flat_indices, axis=-1)  # (N, 1)
+            spatial_shape_i32 = keras.ops.cast(idx_shape, "int32")
         else:
-            flat_indices = ops.reshape(indices, (-1, self.num_heads))  # (N, H)
+            flat_indices = keras.ops.reshape(indices, (-1, self.num_heads))  # (N, H)
             # Spatial shape is idx_shape[:-1] (the last axis is heads).
-            spatial_shape_i32 = ops.cast(idx_shape[:-1], "int32")
+            spatial_shape_i32 = keras.ops.cast(idx_shape[:-1], "int32")
 
-        encodings = ops.one_hot(flat_indices, self.num_embeddings)  # (N, H, K)
-        quantized = ops.einsum("nhk,hkd->nhd", encodings, self.embeddings)  # (N,H,D)
-        flat_q = ops.reshape(quantized, (-1, self.embedding_dim))  # (N, D)
+        encodings = keras.ops.one_hot(flat_indices, self.num_embeddings)  # (N, H, K)
+        quantized = keras.ops.einsum("nhk,hkd->nhd", encodings, self.embeddings)  # (N,H,D)
+        flat_q = keras.ops.reshape(quantized, (-1, self.embedding_dim))  # (N, D)
 
-        d_tensor = ops.convert_to_tensor([self.embedding_dim], dtype="int32")
-        out_shape = ops.concatenate([spatial_shape_i32, d_tensor], axis=0)
-        return ops.reshape(flat_q, out_shape)
+        d_tensor = keras.ops.convert_to_tensor([self.embedding_dim], dtype="int32")
+        out_shape = keras.ops.concatenate([spatial_shape_i32, d_tensor], axis=0)
+        return keras.ops.reshape(flat_q, out_shape)

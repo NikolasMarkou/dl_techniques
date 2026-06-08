@@ -1,6 +1,6 @@
 import keras
-import tensorflow as tf
 import numpy as np
+import tensorflow as tf
 from typing import Optional, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------

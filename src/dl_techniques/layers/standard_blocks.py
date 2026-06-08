@@ -6,13 +6,6 @@ blocks for constructing modern deep learning architectures. Each block is design
 with flexibility, composability, and best practices in mind, supporting various
 normalization techniques, activation functions, and architectural patterns.
 
-**Design Philosophy**:
-    - **Composability**: Blocks can be easily combined to build complex architectures
-    - **Configurability**: Factory patterns enable flexible selection of components
-    - **Robustness**: Full Keras 3 serialization support with explicit build patterns
-    - **Best Practices**: Type hints, comprehensive validation, and detailed documentation
-    - **Performance**: Efficient implementations following modern deep learning patterns
-
 **Available Blocks**:
 
 1. **ConvBlock**: Flexible 2D convolutional block with configurable normalization,
@@ -29,93 +22,6 @@ normalization techniques, activation functions, and architectural patterns.
 
 5. **BottleneckBlock**: Three-layer bottleneck block (1x1→3x3→1x1) with residual
    connection, used in ResNet-50, ResNet-101, and ResNet-152 architectures.
-
-**Key Features**:
-
-- **Factory Pattern Integration**: Uses `create_normalization_layer()` and
-  `create_activation_layer()` factories for consistent component selection
-
-- **Regularization Support**: All blocks support kernel regularizers, dropout,
-  and various other regularization techniques
-
-- **Flexible Initialization**: Customizable weight initializers for all layers
-
-- **Complete Serialization**: All blocks are properly registered with Keras and
-  support full save/load cycles
-
-- **Explicit Building**: Follows modern Keras 3 patterns with explicit sub-layer
-  building for robust serialization
-
-**Usage Examples**:
-
-    Basic convolutional block for image classification:
-
-    >>> from dl_techniques.layers.standard_blocks import BasicBlock, BottleneckBlock, ConvBlock
-    >>> 
-    >>> # Create a standard conv block
-    >>> conv = ConvBlock(
-    ...     filters=64,
-    ...     kernel_size=3,
-    ...     normalization_type='batch_norm',
-    ...     activation_type='relu',
-    ...     use_pooling=True
-    ... )
-    >>> 
-    >>> # Use in a model
-    >>> inputs = keras.Input(shape=(224, 224, 3))
-    >>> x = conv(inputs)
-    >>> model = keras.Model(inputs, x)
-
-    Building a ResNet-style architecture:
-
-    >>> from dl_techniques.layers.standard_blocks import BasicBlock, BottleneckBlock
-    >>> 
-    >>> # ResNet-18 style block
-    >>> inputs = keras.Input(shape=(56, 56, 64))
-    >>> x = BasicBlock(64, stride=1)(inputs)
-    >>> x = BasicBlock(64, stride=1)(x)
-    >>> 
-    >>> # ResNet-50 style block  
-    >>> x = BottleneckBlock(64, stride=2, use_projection=True)(x)
-    >>> x = BottleneckBlock(64, stride=1)(x)
-
-    Creating a deep MLP with residual connections:
-
-    >>> from dl_techniques.layers.standard_blocks import BasicBlock, BottleneckBlock
-    >>> 
-    >>> # Build a deep feedforward network
-    >>> inputs = keras.Input(shape=(784,))
-    >>> x = DenseBlock(512, normalization_type='layer_norm', activation_type='gelu')(inputs)
-    >>> x = ResidualDenseBlock(normalization_type='rms_norm', dropout_rate=0.1)(x)
-    >>> x = ResidualDenseBlock(normalization_type='rms_norm', dropout_rate=0.1)(x)
-    >>> x = DenseBlock(10, normalization_type=None, activation_type='softmax')(x)
-    >>> model = keras.Model(inputs, x)
-
-**Normalization Options**:
-    All blocks support flexible normalization through factory functions:
-    - 'batch_norm': Batch Normalization
-    - 'layer_norm': Layer Normalization
-    - 'rms_norm': RMS Normalization
-    - 'zero_centered_rms_norm': Zero-Centered RMS Normalization
-    - Additional custom normalizations can be added via factory
-
-**Activation Options**:
-    All blocks support flexible activations through factory functions:
-    - 'relu': Rectified Linear Unit
-    - 'gelu': Gaussian Error Linear Unit
-    - 'mish': Mish activation
-    - 'swish' / 'silu': Swish/SiLU activation
-    - 'hard_swish': Hard Swish activation
-    - Additional custom activations can be added via factory
-
-**Serialization Support**:
-    All blocks are properly registered with Keras and support full serialization:
-
-    >>> # Save model with custom blocks
-    >>> model.save('my_model.keras')
-    >>> 
-    >>> # Load model (blocks automatically registered)
-    >>> loaded_model = keras.models.load_model('my_model.keras')
 
 **Architecture Patterns**:
 
@@ -633,13 +539,13 @@ class ResidualDenseBlock(keras.layers.Layer):
         └──────┬───────────────┬───────┘
                ▼               │ (skip)
         ┌──────────────┐       │
-        │  Dense(units) │       │
+        │  Dense(units)│       │
         ├──────────────┤       │
-        │  Opt. Norm    │       │
+        │  Opt. Norm   │       │
         ├──────────────┤       │
-        │  Activation   │       │
+        │  Activation  │       │
         ├──────────────┤       │
-        │  Opt. Dropout │       │
+        │  Opt. Dropout│       │
         └──────┬───────┘       │
                ▼               ▼
         ┌──────────────────────────────┐
@@ -1061,6 +967,7 @@ class BasicBlock(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class BottleneckBlock(keras.layers.Layer):

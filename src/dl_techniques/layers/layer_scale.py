@@ -1,9 +1,4 @@
 """
-This module provides a specialized Keras layer, `LearnableMultiplier`, for implementing
-learnable, element-wise scaling operations. It allows a network to adaptively scale
-feature maps, either globally or on a per-channel basis, providing a flexible
-building block for modern neural network architectures.
-
 The primary purpose of this layer is to introduce a simple, data-driven scaling
 factor into a model's computation graph. Instead of using a fixed scalar or a
 complex transformation (like a `Dense` layer), this layer learns a parameter `gamma`

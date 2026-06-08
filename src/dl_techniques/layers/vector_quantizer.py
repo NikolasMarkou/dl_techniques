@@ -1,12 +1,11 @@
 import keras
-from keras import ops, layers, initializers
 from typing import Optional, Tuple, Dict, Any, Union
 
 
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class VectorQuantizer(layers.Layer):
+class VectorQuantizer(keras.layers.Layer):
     """
     Vector Quantization layer for discrete latent representations.
 
@@ -56,7 +55,7 @@ class VectorQuantizer(layers.Layer):
     :param commitment_cost: Weight for commitment loss (beta). Defaults to 0.25.
     :type commitment_cost: float
     :param initializer: Initializer for embedding vectors. Defaults to ``'uniform'``.
-    :type initializer: str or keras.initializers.Initializer
+    :type initializer: str or keras.keras.initializers.Initializer
     :param use_ema: Whether to use EMA for codebook updates. Defaults to False.
     :type use_ema: bool
     :param ema_decay: Decay rate for EMA updates. Defaults to 0.99.
@@ -72,7 +71,7 @@ class VectorQuantizer(layers.Layer):
             num_embeddings: int,
             embedding_dim: int,
             commitment_cost: float = 0.25,
-            initializer: Union[str, initializers.Initializer] = "uniform",
+            initializer: Union[str, keras.initializers.Initializer] = "uniform",
             use_ema: bool = False,
             ema_decay: float = 0.99,
             epsilon: float = 1e-5,
@@ -109,7 +108,7 @@ class VectorQuantizer(layers.Layer):
 
         # Store initializer for serialization
         if isinstance(initializer, str):
-            self.initializer = initializers.get(initializer)
+            self.initializer = keras.initializers.get(initializer)
         else:
             self.initializer = initializer
 
@@ -176,31 +175,31 @@ class VectorQuantizer(layers.Layer):
         :rtype: keras.KerasTensor
         """
         # Get input shape for later reshaping
-        input_shape = ops.shape(inputs)
+        input_shape = keras.ops.shape(inputs)
 
         # Flatten spatial dimensions: (batch, height, width, dim) -> (batch*height*width, dim)
-        flat_inputs = ops.reshape(inputs, (-1, self.embedding_dim))
+        flat_inputs = keras.ops.reshape(inputs, (-1, self.embedding_dim))
 
         # Compute L2 distances to all embeddings
         # ||z_e - e_j||² = ||z_e||² + ||e_j||² - 2*z_e·e_j
         distances = (
-                ops.sum(flat_inputs ** 2, axis=1, keepdims=True)  # ||z_e||²
-                + ops.sum(self.embeddings ** 2, axis=1)  # ||e_j||²
-                - 2 * ops.matmul(flat_inputs, ops.transpose(self.embeddings))  # 2*z_e·e_j
+                keras.ops.sum(flat_inputs ** 2, axis=1, keepdims=True)  # ||z_e||²
+                + keras.ops.sum(self.embeddings ** 2, axis=1)  # ||e_j||²
+                - 2 * keras.ops.matmul(flat_inputs, keras.ops.transpose(self.embeddings))  # 2*z_e·e_j
         )
 
         # Find nearest embedding indices: k* = argmin_j ||z_e - e_j||²
-        encoding_indices = ops.argmin(distances, axis=1)
+        encoding_indices = keras.ops.argmin(distances, axis=1)
 
         # Convert indices to one-hot for gathering
-        encodings = ops.one_hot(
+        encodings = keras.ops.one_hot(
             encoding_indices,
             self.num_embeddings,
         )
 
         # Quantize: z_q = e_k*
-        quantized = ops.matmul(encodings, self.embeddings)
-        quantized = ops.reshape(quantized, input_shape)
+        quantized = keras.ops.matmul(encodings, self.embeddings)
+        quantized = keras.ops.reshape(quantized, input_shape)
 
         # Update embeddings with EMA if enabled and training
         if self.use_ema and training:
@@ -208,13 +207,13 @@ class VectorQuantizer(layers.Layer):
 
         # Compute losses
         # Codebook loss: ||sg[z_e(x)] - e||² (updates embeddings only)
-        codebook_loss = ops.mean(
-            (ops.stop_gradient(inputs) - quantized) ** 2
+        codebook_loss = keras.ops.mean(
+            (keras.ops.stop_gradient(inputs) - quantized) ** 2
         )
 
         # Commitment loss: β||z_e(x) - sg[e]||² (updates encoder only)
-        commitment_loss = self.commitment_cost * ops.mean(
-            (inputs - ops.stop_gradient(quantized)) ** 2
+        commitment_loss = self.commitment_cost * keras.ops.mean(
+            (inputs - keras.ops.stop_gradient(quantized)) ** 2
         )
 
         # Add losses to layer
@@ -224,7 +223,7 @@ class VectorQuantizer(layers.Layer):
         # Straight-through estimator: copy gradients from quantized to inputs
         # Forward: use quantized values
         # Backward: gradients flow through as if quantized = inputs
-        quantized = inputs + ops.stop_gradient(quantized - inputs)
+        quantized = inputs + keras.ops.stop_gradient(quantized - inputs)
 
         return quantized
 
@@ -244,11 +243,11 @@ class VectorQuantizer(layers.Layer):
         :type encodings: keras.KerasTensor
         """
         # Count how many vectors were assigned to each embedding in this batch
-        cluster_size = ops.sum(encodings, axis=0)  # (num_embeddings,)
+        cluster_size = keras.ops.sum(encodings, axis=0)  # (num_embeddings,)
 
         # Sum of all encoder outputs assigned to each embedding
-        embed_sums = ops.matmul(
-            ops.transpose(encodings),  # (num_embeddings, batch*spatial)
+        embed_sums = keras.ops.matmul(
+            keras.ops.transpose(encodings),  # (num_embeddings, batch*spatial)
             flat_inputs  # (batch*spatial, embedding_dim)
         )  # (num_embeddings, embedding_dim)
 
@@ -272,7 +271,7 @@ class VectorQuantizer(layers.Layer):
         # Add epsilon for numerical stability
         normalized_embeddings = (
                 self.ema_embeddings
-                / ops.reshape(self.ema_cluster_size + self.epsilon, (-1, 1))
+                / keras.ops.reshape(self.ema_cluster_size + self.epsilon, (-1, 1))
         )
         self.embeddings.assign(normalized_embeddings)
 
@@ -290,27 +289,27 @@ class VectorQuantizer(layers.Layer):
         """
         # Ensure layer is built if called directly without prior build
         if not self.built:
-            self.build(ops.shape(inputs))
+            self.build(keras.ops.shape(inputs))
 
         # Get spatial shape
-        input_shape = ops.shape(inputs)
+        input_shape = keras.ops.shape(inputs)
         spatial_shape = input_shape[:-1]
 
         # Flatten spatial dimensions
-        flat_inputs = ops.reshape(inputs, (-1, self.embedding_dim))
+        flat_inputs = keras.ops.reshape(inputs, (-1, self.embedding_dim))
 
         # Compute distances to all embeddings
         distances = (
-                ops.sum(flat_inputs ** 2, axis=1, keepdims=True)
-                + ops.sum(self.embeddings ** 2, axis=1)
-                - 2 * ops.matmul(flat_inputs, ops.transpose(self.embeddings))
+                keras.ops.sum(flat_inputs ** 2, axis=1, keepdims=True)
+                + keras.ops.sum(self.embeddings ** 2, axis=1)
+                - 2 * keras.ops.matmul(flat_inputs, keras.ops.transpose(self.embeddings))
         )
 
         # Find nearest embedding indices
-        encoding_indices = ops.argmin(distances, axis=1)
+        encoding_indices = keras.ops.argmin(distances, axis=1)
 
         # Reshape back to spatial dimensions
-        encoding_indices = ops.reshape(encoding_indices, spatial_shape)
+        encoding_indices = keras.ops.reshape(encoding_indices, spatial_shape)
 
         return encoding_indices
 
@@ -331,25 +330,25 @@ class VectorQuantizer(layers.Layer):
             raise ValueError("Layer must be built before calling quantize_from_indices")
 
         # Get spatial shape
-        spatial_shape = ops.shape(indices)
+        spatial_shape = keras.ops.shape(indices)
 
         # Flatten indices
-        flat_indices = ops.reshape(indices, (-1,))
+        flat_indices = keras.ops.reshape(indices, (-1,))
 
         # One-hot encode
-        encodings = ops.one_hot(flat_indices, self.num_embeddings)
+        encodings = keras.ops.one_hot(flat_indices, self.num_embeddings)
 
         # Look up embeddings
-        quantized = ops.matmul(encodings, self.embeddings)
+        quantized = keras.ops.matmul(encodings, self.embeddings)
 
         # Reshape to include spatial dimensions and embedding dimension
         # Convert dim to tensor to avoid list/tuple issues in concatenate
-        dim_tensor = ops.convert_to_tensor([self.embedding_dim], dtype="int32")
+        dim_tensor = keras.ops.convert_to_tensor([self.embedding_dim], dtype="int32")
         # Ensure spatial_shape is compatible (usually int32/int64 depending on backend)
-        spatial_shape = ops.cast(spatial_shape, "int32")
+        spatial_shape = keras.ops.cast(spatial_shape, "int32")
 
-        output_shape = ops.concatenate([spatial_shape, dim_tensor], axis=0)
-        quantized = ops.reshape(quantized, output_shape)
+        output_shape = keras.ops.concatenate([spatial_shape, dim_tensor], axis=0)
+        quantized = keras.ops.reshape(quantized, output_shape)
 
         return quantized
 
@@ -379,7 +378,7 @@ class VectorQuantizer(layers.Layer):
             "num_embeddings": self.num_embeddings,
             "embedding_dim": self.embedding_dim,
             "commitment_cost": self.commitment_cost,
-            "initializer": initializers.serialize(self.initializer),
+            "initializer": keras.initializers.serialize(self.initializer),
             "use_ema": self.use_ema,
             "ema_decay": self.ema_decay,
             "epsilon": self.epsilon,
