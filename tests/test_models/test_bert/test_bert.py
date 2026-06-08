@@ -21,7 +21,7 @@ import os
 from typing import Dict, Any
 
 from dl_techniques.models.bert.bert import BERT, create_bert_with_head
-from dl_techniques.layers.nlp_heads import NLPTaskConfig, NLPTaskType
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 
 class TestBERTModelInitialization:
@@ -464,7 +464,7 @@ class TestBERTIter1Refactor:
         }
         assert not hasattr(pkg, "create_nlp_head"), (
             "create_nlp_head must no longer be re-exported from the bert "
-            "package; import it from dl_techniques.layers.nlp_heads instead."
+            "package; import it from dl_techniques.layers.heads.nlp instead."
         )
 
         # BERT must remain importable from the .bert submodule path

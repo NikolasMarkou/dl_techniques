@@ -115,7 +115,7 @@ from typing import Optional, Union, Any, Dict
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.nlp_heads import NLPTaskConfig, create_nlp_head
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, create_nlp_head
 from .components import MambaResidualBlock
 
 
@@ -582,7 +582,7 @@ def create_mamba_with_head(
     Example:
         .. code-block:: python
 
-            from dl_techniques.layers.nlp_heads import NLPTaskType
+            from dl_techniques.layers.heads.nlp import NLPTaskType
 
             # Define a task for sequence classification
             seq_cls_task = NLPTaskConfig(

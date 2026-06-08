@@ -25,7 +25,7 @@ from dl_techniques.models.tree_transformer.model import (
     create_tree_transformer,
     create_tree_transformer_with_head,
 )
-from dl_techniques.layers.nlp_heads import NLPTaskConfig, NLPTaskType
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 
 class TestTreeTransformerModelInitialization:

@@ -20,8 +20,8 @@ Usage Examples:
 .. code-block:: python
 
     import keras
-    from dl_techniques.layers.nlp_heads import create_nlp_head, NLPTaskConfig
-    from dl_techniques.layers.nlp_heads import NLPTaskType
+    from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig
+    from dl_techniques.layers.heads.nlp import NLPTaskType
 
     # 1. Load Tree Transformer from a local weights file
     #    (no public Tree Transformer weights are hosted — `pretrained=True`
@@ -75,7 +75,7 @@ from dl_techniques.layers.norms import (
     create_normalization_layer,
     NormalizationType,
 )
-from dl_techniques.layers.nlp_heads import create_nlp_head, NLPTaskConfig
+from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig
 
 # ---------------------------------------------------------------------
 # Sub-layer re-exports

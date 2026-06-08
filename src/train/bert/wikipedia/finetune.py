@@ -22,7 +22,7 @@ from typing import Dict, Tuple
 from dl_techniques.models.bert import BERT
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tokenizer import TiktokenPreprocessor
-from dl_techniques.layers.nlp_heads import NLPTaskConfig, NLPTaskType, create_nlp_head
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType, create_nlp_head
 
 
 # ---------------------------------------------------------------------

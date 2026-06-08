@@ -812,7 +812,7 @@ def create_cliffordnet_embedding_with_head(
     and outputs are the NLP task head outputs.
 
     :param variant: Model size variant.
-    :param task_config: ``NLPTaskConfig`` from ``dl_techniques.layers.nlp_heads``.
+    :param task_config: ``NLPTaskConfig`` from ``dl_techniques.layers.heads.nlp``.
     :param vocab_size: Vocabulary size — required.
     :param max_seq_length: Maximum sequence length.
     :param pretrained: ``True`` / path / ``False``.
@@ -820,7 +820,7 @@ def create_cliffordnet_embedding_with_head(
     :param head_config_overrides: Head hyperparameter overrides.
     :return: A ``keras.Model`` wrapping encoder + head.
     """
-    from dl_techniques.layers.nlp_heads import create_nlp_head
+    from dl_techniques.layers.heads.nlp import create_nlp_head
 
     if vocab_size is None:
         raise ValueError("vocab_size is required.")
