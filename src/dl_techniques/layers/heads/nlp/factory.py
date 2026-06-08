@@ -393,8 +393,8 @@ class TextClassificationHead(BaseNLPHead):
             classifier_input_dim = self.input_dim
 
         # Classifier receives features after processing
-        batch_size = input_shape[0] if isinstance(input_shape, tuple) else \
-            input_shape.get('hidden_states', (None,))[0]
+        batch_size = input_shape.get('hidden_states', (None,))[0] \
+            if isinstance(input_shape, dict) else input_shape[0]
         classifier_input_shape = (batch_size, classifier_input_dim)
         self.classifier.build(classifier_input_shape)
 
