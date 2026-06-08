@@ -202,7 +202,13 @@ class GMMLayer(keras.layers.Layer):
         self.variance_floor = variance_floor
         self.output_mode = output_mode
         self.cluster_axis = [cluster_axis] if isinstance(cluster_axis, int) else list(cluster_axis)
-        self.mean_initializer = keras.initializers.get(mean_initializer)
+        # 'orthonormal' is not a registered keras alias; keep it as a string and
+        # let build() resolve it (build handles both the string and an Initializer
+        # instance). Resolving eagerly here would raise. See D-001/D-002.
+        if isinstance(mean_initializer, str) and mean_initializer.lower() == 'orthonormal':
+            self.mean_initializer = mean_initializer
+        else:
+            self.mean_initializer = keras.initializers.get(mean_initializer)
         self.log_variance_initializer = keras.initializers.get(log_variance_initializer)
         self.mean_regularizer = keras.regularizers.get(mean_regularizer)
         self.random_seed = random_seed
@@ -581,7 +587,10 @@ class GMMLayer(keras.layers.Layer):
             "variance_floor": self.variance_floor,
             "output_mode": self.output_mode,
             "cluster_axis": self.cluster_axis,
-            "mean_initializer": keras.initializers.serialize(self.mean_initializer),
+            "mean_initializer": (
+                self.mean_initializer if isinstance(self.mean_initializer, str)
+                else keras.initializers.serialize(self.mean_initializer)
+            ),
             "log_variance_initializer": keras.initializers.serialize(self.log_variance_initializer),
             "mean_regularizer": keras.regularizers.serialize(self.mean_regularizer),
             "random_seed": self.random_seed
@@ -598,7 +607,7 @@ class GMMLayer(keras.layers.Layer):
         :rtype: GMMLayer
         """
         config = dict(config)
-        if "mean_initializer" in config:
+        if "mean_initializer" in config and not isinstance(config["mean_initializer"], str):
             config["mean_initializer"] = keras.initializers.deserialize(config["mean_initializer"])
         if "log_variance_initializer" in config:
             config["log_variance_initializer"] = keras.initializers.deserialize(

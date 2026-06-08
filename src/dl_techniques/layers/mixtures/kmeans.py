@@ -217,7 +217,13 @@ class KMeansLayer(keras.layers.Layer):
         self.min_distance = min_distance
         self.output_mode = output_mode
         self.cluster_axis = [cluster_axis] if isinstance(cluster_axis, int) else cluster_axis
-        self.centroid_initializer = keras.initializers.get(centroid_initializer)
+        # 'orthonormal' is not a registered keras alias; keep it as a string and
+        # let build() resolve it (build handles both the string and an Initializer
+        # instance). Resolving eagerly here would raise. See D-001/D-002.
+        if isinstance(centroid_initializer, str) and centroid_initializer.lower() == 'orthonormal':
+            self.centroid_initializer = centroid_initializer
+        else:
+            self.centroid_initializer = keras.initializers.get(centroid_initializer)
         self.centroid_regularizer = centroid_regularizer
         self.random_seed = random_seed
 
@@ -631,7 +637,10 @@ class KMeansLayer(keras.layers.Layer):
             "min_distance": self.min_distance,
             "output_mode": self.output_mode,
             "cluster_axis": self.cluster_axis,
-            "centroid_initializer": keras.initializers.serialize(self.centroid_initializer),
+            "centroid_initializer": (
+                self.centroid_initializer if isinstance(self.centroid_initializer, str)
+                else keras.initializers.serialize(self.centroid_initializer)
+            ),
             "centroid_regularizer": (keras.regularizers.serialize(self.centroid_regularizer)
                                    if self.centroid_regularizer else None),
             "random_seed": self.random_seed
