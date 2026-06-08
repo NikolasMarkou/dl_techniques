@@ -217,9 +217,11 @@ class KMeansLayer(keras.layers.Layer):
         self.min_distance = min_distance
         self.output_mode = output_mode
         self.cluster_axis = [cluster_axis] if isinstance(cluster_axis, int) else cluster_axis
-        # 'orthonormal' is not a registered keras alias; keep it as a string and
-        # let build() resolve it (build handles both the string and an Initializer
-        # instance). Resolving eagerly here would raise. See D-001/D-002.
+        # DECISION plan_2026-06-08_57a975d1/D-002: do NOT replace this with a bare
+        # keras.initializers.get(centroid_initializer). 'orthonormal' is not a registered
+        # keras alias (OrthonormalInitializer registers as Custom>OrthonormalInitializer),
+        # so get('orthonormal') raises. Keep the string and let build() resolve it
+        # (build handles both the string and an Initializer instance). See D-001.
         if isinstance(centroid_initializer, str) and centroid_initializer.lower() == 'orthonormal':
             self.centroid_initializer = centroid_initializer
         else:
