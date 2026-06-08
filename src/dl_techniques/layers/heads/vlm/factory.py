@@ -694,7 +694,14 @@ class ImageTextMatchingHead(BaseVLMHead):
         logits = similarity_matrix / self.temperature
 
         # 2. Fine-grained Matching Score part
-        fused = self.fusion([vision_pooled, text_pooled], training=training)
+        # MultiModalFusion (concatenation) requires 3-D (B, S, D) inputs, but the
+        # pooled features are 2-D (B, D). Expand to (B, 1, D) for fusion, then
+        # squeeze the (B, 1, F) output back to (B, F) for the 2-D post-fusion
+        # norm / FFN / similarity head (D-001 scope expansion).
+        vision_pooled_3d = ops.expand_dims(vision_pooled, axis=1)
+        text_pooled_3d = ops.expand_dims(text_pooled, axis=1)
+        fused = self.fusion([vision_pooled_3d, text_pooled_3d], training=training)
+        fused = ops.squeeze(fused, axis=1)
         processed = self.post_fusion_norm(fused, training=training)
         if self.use_post_fusion_ffn:
             processed = self.post_fusion_ffn(processed, training=training)
