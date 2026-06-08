@@ -1,12 +1,13 @@
-"""Streamlit GUI for patch-entropy anomaly detection.
+"""Streamlit GUI for patch-reconstruction anomaly detection.
 
 Live webcam (via ``streamlit-webrtc``) and still-image modes. Each frame runs the
-``ConvNeXtPatchVAE`` encoder once and overlays the per-patch KL "surprise"
-heatmap / anomaly mask. The decoder is never executed.
+``ConvNeXtPatchVAE`` deterministic decode and overlays the per-patch
+reconstruction-error heatmap / anomaly mask. The decoder runs every frame
+(reconstruction-error scoring).
 
 Run::
 
-    CUDA_VISIBLE_DEVICES=1 ANOMALY_MODEL=results/.../best_model.keras \\
+    CUDA_VISIBLE_DEVICES=1 ANOMALY_MODEL=results/convnext_patch_vae_ade20k+coco_custom_20260606_214647/best_model.keras \\
         .venv/bin/streamlit run src/applications/anomaly_detection/streamlit_app.py \\
         --server.address 127.0.0.1 --server.port 8501
 
@@ -32,49 +33,49 @@ import streamlit as st
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, VideoProcessorBase
 
 from applications.anomaly_detection.anomaly_detector import (
-    PatchEntropyAnomalyDetector,
+    PatchReconstructionAnomalyDetector,
 )
 
 _DEFAULT_MODEL = os.environ.get(
     "ANOMALY_MODEL",
-    "results/convnext_patch_vae_ade20k+coco_large_20260527_130515/best_model.keras",
+    "results/convnext_patch_vae_ade20k+coco_custom_20260606_214647/best_model.keras",
 )
 _THRESHOLD_METHODS = ["zscore", "percentile", "absolute"]
 _RTC_CONFIG = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 
 
 @st.cache_resource(show_spinner="Loading anomaly-detection model...")
-def load_detector(model_path: str) -> PatchEntropyAnomalyDetector:
+def load_detector(model_path: str) -> PatchReconstructionAnomalyDetector:
     """Load the detector once per model path (cached across reruns/sessions)."""
-    return PatchEntropyAnomalyDetector.from_pretrained(model_path)
+    return PatchReconstructionAnomalyDetector.from_pretrained(model_path)
 
 
 class AnomalyProcessor(VideoProcessorBase):
     """Per-frame webrtc processor; tunables are pushed in from the main thread."""
 
-    def __init__(self, detector: PatchEntropyAnomalyDetector) -> None:
+    def __init__(self, detector: PatchReconstructionAnomalyDetector) -> None:
         self.detector = detector
         self.view = "heatmap"
         self.method = "zscore"
         self.k = 3.0
         self.percentile = 95.0
-        self.abs_threshold = 5.0
+        self.abs_threshold = 0.01
         self.max_side = 384
 
     def _overlay(self, rgb: np.ndarray) -> np.ndarray:
         x, (h, w) = self.detector.preprocess(
             rgb, max_size=int(self.max_side) or None
         )
-        kl_map = self.detector.kl_maps(x, orig_hw=(h, w))["kl"]
+        score_map = self.detector.anomaly_maps(x, orig_hw=(h, w))["anomaly"]
         img01 = x[0][:h, :w]
         if self.view == "mask":
             mask, _ = self.detector.anomaly_mask(
-                kl_map, method=self.method, k=float(self.k),
+                score_map, method=self.method, k=float(self.k),
                 percentile=float(self.percentile),
                 abs_threshold=float(self.abs_threshold),
             )
             return self.detector.mask_overlay(img01, mask)
-        return self.detector.overlay(img01, kl_map)
+        return self.detector.overlay(img01, score_map)
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         rgb = frame.to_ndarray(format="rgb24")
@@ -103,7 +104,7 @@ def _sidebar_controls() -> dict:
         "k": st.sidebar.slider("z-score k (mean + k·std)", 0.0, 6.0, 3.0, 0.1),
         "percentile": st.sidebar.slider("percentile", 50.0, 99.9, 95.0, 0.5),
         "abs_threshold": st.sidebar.slider(
-            "absolute threshold (nats)", 0.0, 50.0, 5.0, 0.5
+            "absolute threshold (MSE units)", 0.0, 0.2, 0.01, 0.005
         ),
         "max_side": st.sidebar.slider(
             "Max side px (0 = native; aspect kept, padded to patch size)",
@@ -113,12 +114,14 @@ def _sidebar_controls() -> dict:
 
 
 def main() -> None:
-    st.set_page_config(page_title="Patch-Entropy Anomaly Detection", layout="wide")
-    st.title("Patch-Entropy Anomaly Detection")
+    st.set_page_config(
+        page_title="Patch-Reconstruction Anomaly Detection", layout="wide"
+    )
+    st.title("Patch-Reconstruction Anomaly Detection")
     st.caption(
-        "Per-patch KL divergence from a ConvNeXt patch-VAE encoder. "
-        "High KL = high-entropy / surprising = anomalous. KL is measured "
-        "against N(0, I). Decoder never runs."
+        "Per-patch reconstruction error from a ConvNeXt patch-VAE. "
+        "High reconstruction error = poorly decoded = anomalous. Error is the "
+        "per-patch MSE between the input and the deterministic decode."
     )
 
     model_path = st.sidebar.text_input("Model checkpoint", value=_DEFAULT_MODEL)
@@ -151,10 +154,10 @@ def main() -> None:
 
             rgb = np.array(Image.open(upload).convert("RGB"))
             x, (h, w) = detector.preprocess(rgb, max_size=int(c["max_side"]) or None)
-            kl_map = detector.kl_maps(x, orig_hw=(h, w))["kl"]
+            score_map = detector.anomaly_maps(x, orig_hw=(h, w))["anomaly"]
             img01 = x[0][:h, :w]
             mask, thr = detector.anomaly_mask(
-                kl_map, method=c["method"], k=float(c["k"]),
+                score_map, method=c["method"], k=float(c["k"]),
                 percentile=float(c["percentile"]),
                 abs_threshold=float(c["abs_threshold"]),
             )
@@ -167,11 +170,11 @@ def main() -> None:
                 use_container_width=True,
             )
             st.image(
-                detector.overlay(img01, kl_map),
-                caption=f"KL heatmap {kl_map.shape}",
+                detector.overlay(img01, score_map),
+                caption=f"Anomaly heatmap {score_map.shape}",
                 use_container_width=True,
             )
-            scores = detector.score(kl_map, mask)
+            scores = detector.score(score_map, mask)
             scores.update({"threshold": thr, "method": c["method"]})
             st.json(scores)
 
