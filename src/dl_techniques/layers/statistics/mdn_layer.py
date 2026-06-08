@@ -45,7 +45,6 @@ from typing import Dict, Optional, Tuple, Union, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.tensors import gaussian_probability
 
 # ---------------------------------------------------------------------
 # Constants
@@ -208,9 +207,15 @@ class MDNLayer(keras.layers.Layer):
             kernel_regularizer=self.kernel_regularizer, bias_regularizer=self.bias_regularizer,
             name='mdn_sigmas'
         )
+        # DECISION plan_2026-06-08_a5f40f4f/D-004: mdn_pi emits RAW LOGITS (linear, no
+        # activation). Do NOT re-add softplus/softmax here. Every pi consumer
+        # (loss_func, sample, get_point_estimate, get_uncertainty,
+        # check_component_diversity, experiments/mdn/forecasting.py) applies a
+        # single softmax/log_softmax to this slice. A softplus here caused a
+        # double-activation (softmax(softplus(z)) != softmax(z)) that compressed
+        # the mixture logits and degraded the weights. See decisions.md D-004.
         self.mdn_pi = keras.layers.Dense(
             self.num_mix, use_bias=self.use_bias,
-            activation=lambda x: keras.activations.softplus(x),
             kernel_initializer=self.kernel_initializer, bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer, bias_regularizer=self.bias_regularizer,
             name='mdn_pi'
@@ -283,14 +288,17 @@ class MDNLayer(keras.layers.Layer):
         pi_output = self.mdn_pi(pi_intermediate, training=training)
 
         # === Diversity Regularization ===
-        if self.diversity_regularizer_strength > 0.0 and training:
+        if self.diversity_regularizer_strength > 0.0 and training is True:
             diversity_loss = self._compute_diversity_loss(mu_output)
             self.add_loss(diversity_loss)
 
         # === Concatenate Output ===
-        return keras.layers.concatenate(
+        # ops.concatenate (not keras.layers.concatenate): the layer-fn creates a
+        # new graph node per call. Layout stays [mu, sigma, pi] on axis -1 so
+        # split_mixture_params / compute_output_shape remain unchanged.
+        return ops.concatenate(
             [mu_output, sigma_output, pi_output],
-            name='mdn_outputs'
+            axis=-1
         )
 
     def _compute_diversity_loss(
@@ -372,17 +380,26 @@ class MDNLayer(keras.layers.Layer):
         y_true = ops.reshape(y_true, [-1, self.output_dim])
         out_mu, out_sigma, out_pi = self.split_mixture_params(y_pred)
 
-        mix_weights = keras.activations.softmax(out_pi, axis=-1)
-        y_true_expanded = ops.expand_dims(y_true, 1)
+        # Floor sigma (the sigma Dense already applies softplus + min_sigma, but
+        # keep a defensive floor for caller-supplied raw params).
+        out_sigma = ops.maximum(out_sigma, self.min_sigma)
 
-        component_probs = gaussian_probability(
-            y_true_expanded, out_mu, out_sigma
-        )
-        component_probs = ops.prod(component_probs, axis=-1)
-        weighted_probs = mix_weights * component_probs
-        total_prob = ops.sum(weighted_probs, axis=-1)
-        total_prob = ops.maximum(total_prob, keras.backend.epsilon())
-        loss = -ops.mean(ops.log(total_prob))
+        # === NLL in LOG-SPACE (no prob-space prod/sum -> no underflow at high
+        # output_dim, no epsilon-clamp hack). out_pi is treated as LOGITS. ===
+        # log mixture weights via log_softmax(pi_logits)
+        log_mix_weights = keras.activations.log_softmax(out_pi, axis=-1)  # [B, M]
+
+        y_true_expanded = ops.expand_dims(y_true, 1)  # [B, 1, D]
+        # log N(y|mu,sigma) = -0.5*log(2pi) - log(sigma) - 0.5*((y-mu)/sigma)^2
+        log_2pi = ops.log(ops.cast(2.0 * np.pi, out_mu.dtype))
+        z = (y_true_expanded - out_mu) / out_sigma
+        log_component = -0.5 * log_2pi - ops.log(out_sigma) - 0.5 * ops.square(z)
+        # sum over output dims (independent Gaussians)
+        log_component = ops.sum(log_component, axis=-1)  # [B, M]
+
+        # combine weights + component log-probs, reduce mixtures with logsumexp
+        log_prob = ops.logsumexp(log_mix_weights + log_component, axis=-1)  # [B]
+        loss = -ops.mean(log_prob)
 
         return loss
 
