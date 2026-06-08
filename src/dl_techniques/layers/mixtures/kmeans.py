@@ -83,8 +83,8 @@ from typing import Optional, Union, Literal, List, Any, Tuple, Dict
 # local imports
 # ---------------------------------------------------------------------
 
-from ..utils.logger import logger
-from ..initializers.orthonormal_initializer import OrthonormalInitializer
+from ...utils.logger import logger
+from ...initializers.orthonormal_initializer import OrthonormalInitializer
 
 # ---------------------------------------------------------------------
 
