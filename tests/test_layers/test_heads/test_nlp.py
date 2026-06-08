@@ -179,6 +179,26 @@ class TestNLPFactoryAndRoundtrip:
         )
         assert isinstance(head, TextClassificationHead)
 
+    def test_functional_api_list_input_shape_build(self) -> None:
+        """SC2 / Bug-3 regression lock. The Keras functional API hands ``build``
+        a LIST/TensorShape ``input_shape`` (not a tuple/dict). The inverted
+        ternary in ``TextClassificationHead.build`` used to index it wrong and
+        raise; this asserts the fixed path builds and emits ``(None, num_classes)``
+        logits."""
+        num_classes = 5
+        head = create_nlp_head(
+            task_config=NLPTaskConfig(
+                name="cls",
+                task_type=NLPTaskType.TEXT_CLASSIFICATION,
+                num_classes=num_classes,
+            ),
+            input_dim=D,
+            pooling_type="mean",
+        )
+        inp = keras.Input(shape=(S, D))  # functional API -> list input_shape
+        out = head(inp)  # must not raise AttributeError / index error
+        assert tuple(out["logits"].shape) == (None, num_classes)
+
     def test_model_save_load_roundtrip(self, fixed_input) -> None:
         # NOTE: the head's own ``build`` only handles tuple/dict input_shape
         # (a pre-existing fragility in the merged code: the Keras functional API
