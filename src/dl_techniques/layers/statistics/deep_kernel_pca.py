@@ -138,6 +138,28 @@ class DeepKernelPCA(keras.layers.Layer):
         Defaults to ``False``.
     :type trainable_kernels: bool
     :param kwargs: Additional arguments for Layer base class.
+
+    .. note:: **Working-bar limitations (documented approximations).** This is
+        an idiosyncratic "deep" KPCA variant, NOT a textbook eigendecomposition
+        kernel PCA. Specifically:
+
+        * The per-level projection does **not** perform a true
+          eigendecomposition (``eigh``) of the centered Gram matrix. During
+          training it only L2-normalizes the learnable projection columns; the
+          principal-component coefficients are learned by gradient descent.
+        * ``extract_components`` reuses the leading ``batch_size`` rows of each
+          ``(feature_dim, num_components)`` projection weight as the per-sample
+          coefficients (because the sample axis is dynamic and cannot be a
+          weight dimension). This **requires ``feature_dim >= batch_size`` at
+          every level** (i.e. the layer's input dim and each level's component
+          count must be at least the batch size); it is a learned approximation,
+          not a Nystrom/analytic projection.
+        * ``eigenvalues`` are tracked but not fitted from data; the
+          explained-variance ratios are nominal.
+
+        These approximations are intentional and out of scope to "fix" into
+        canonical kernel PCA; the layer's contract is a non-crashing,
+        gradient-trainable, round-trip-serializable hierarchical transform.
     """
 
     def __init__(
@@ -169,6 +191,10 @@ class DeepKernelPCA(keras.layers.Layer):
         # Store configuration
         self.num_levels = num_levels
         self.components_per_level = components_per_level
+        # Preserve the raw constructor argument so get_config() serializes the
+        # PRE-build value (None triggers the adaptive golden-ratio path in
+        # build()); self.components_per_level is mutated in-place there.
+        self._components_per_level_init = components_per_level
         self.regularization_lambda = regularization_lambda
         self.coupling_strength = coupling_strength
         self.use_backward_coupling = use_backward_coupling
@@ -177,6 +203,12 @@ class DeepKernelPCA(keras.layers.Layer):
         self.projection_regularizer = projection_regularizer
         self.coupling_regularizer = coupling_regularizer
         self.trainable_kernels = trainable_kernels
+
+        # Preserve original constructor args for serialization (build does not
+        # mutate these, but get_config reconstructs a single-vs-list form from
+        # the expanded per-level attrs which can lose the original intent).
+        self._kernel_type_init = kernel_type
+        self._kernel_params_init = kernel_params
 
         # Process kernel configuration
         if isinstance(kernel_type, str):
@@ -196,7 +228,9 @@ class DeepKernelPCA(keras.layers.Layer):
         if kernel_params is None:
             self.kernel_params = [{}] * num_levels
         elif isinstance(kernel_params, dict):
-            self.kernel_params = [kernel_params.copy()] * num_levels
+            # One independent copy per level (a shared `* num_levels` reference
+            # would alias one dict across all levels).
+            self.kernel_params = [kernel_params.copy() for _ in range(num_levels)]
         else:
             if len(kernel_params) != num_levels:
                 raise ValueError(f"kernel_params list length must match num_levels")
@@ -207,7 +241,8 @@ class DeepKernelPCA(keras.layers.Layer):
         self.projection_matrices = []
         self.eigenvalues = []
         self.coupling_weights_forward = []
-        self.coupling_weights_backward = []
+        # NOTE: the backward coupling pass (see call()) reuses the TRANSPOSE of
+        # coupling_weights_forward[level+1]; no separate backward weights exist.
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Create weights for multi-level kernel PCA.
@@ -215,6 +250,14 @@ class DeepKernelPCA(keras.layers.Layer):
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: tuple[int | None, ...]
         """
+        # Functional API may pass a LIST OF SHAPES for multi-input layers; this
+        # is single-input, so unwrap only a true nested list-of-shapes. A plain
+        # shape serialized as a list (e.g. [None, 8]) must NOT be unwrapped —
+        # its first element is an int/None, not a shape.
+        if isinstance(input_shape, (list, tuple)) and len(input_shape) > 0 \
+                and isinstance(input_shape[0], (list, tuple)):
+            input_shape = input_shape[0]
+
         input_dim = input_shape[-1]
         if input_dim is None:
             raise ValueError("Last dimension of input must be defined")
@@ -341,20 +384,8 @@ class DeepKernelPCA(keras.layers.Layer):
             else:
                 self.coupling_weights_forward.append(None)
 
-            # Backward coupling weights (from current level to previous)
-            if level < self.num_levels - 1 and self.use_backward_coupling and self.coupling_strength > 0:
-                # Will be properly sized when we know next level dimensions
-                self.coupling_weights_backward.append(
-                    self.add_weight(
-                        name=f'coupling_backward_level_{level}',
-                        shape=(num_components, num_components),  # Will be reshaped dynamically
-                        initializer=initializers.RandomNormal(stddev=0.01 * self.coupling_strength),
-                        trainable=True,
-                        regularizer=self.coupling_regularizer
-                    )
-                )
-            else:
-                self.coupling_weights_backward.append(None)
+            # (Backward coupling reuses transpose(coupling_weights_forward[level+1])
+            #  in call(); no dedicated backward weights are allocated.)
 
             # Update input dimension for next level
             current_input_dim = num_components
@@ -464,23 +495,42 @@ class DeepKernelPCA(keras.layers.Layer):
         :return: Principal components of shape ``(batch_size, num_components)``.
         :rtype: keras.KerasTensor
         """
+        # Dynamic (graph-safe) batch size of the kernel matrix.
         batch_size = ops.shape(kernel_matrix)[0]
 
-        # Add regularization to diagonal for numerical stability
+        # Add regularization to diagonal for numerical stability.
+        # ops.eye accepts the symbolic batch size under TF graph mode (verified).
         kernel_matrix_reg = kernel_matrix + self.regularization_lambda * ops.eye(batch_size)
 
-        # During training, update projection via eigendecomposition (approximation)
-        if training:
-            # Compute eigendecomposition of regularized kernel matrix
-            # Note: In practice, we use the projection matrix as an approximation
-            # Full eigendecomposition would be: eigvals, eigvecs = ops.linalg.eigh(kernel_matrix_reg)
-            # But for efficiency, we use iterative approximation through gradient descent
+        # During training, normalize the projection columns to keep them on the
+        # unit sphere (an orthogonality-maintaining approximation of the true
+        # eigendecomposition update). NOTE (working-bar limitation): this is the
+        # idiosyncratic "deep" KPCA approximation, NOT a textbook eigh-based
+        # KPCA update. Use `training is True` so a symbolic/None flag under
+        # graph tracing does not silently take the training branch.
+        if training is True:
+            # ops.nn.l2_normalize does not exist in this Keras build; the
+            # canonical column-wise L2 normalization is ops.normalize(x, axis=0).
+            projection_matrix = ops.normalize(projection_matrix, axis=0)
 
-            # Normalize projection matrix to maintain orthogonality
-            projection_matrix = ops.nn.l2_normalize(projection_matrix, axis=0)
-
-        # Project kernel matrix to get components
-        # This approximates K @ eigenvectors[:, :num_components]
+        # Project the regularized kernel matrix onto the learned coefficients.
+        # The kernel matrix is (batch, batch); to yield (batch, num_components)
+        # we right-multiply by a coefficient block whose first axis is the
+        # sample axis. The projection weight is allocated as
+        # (feature_dim, num_components) because batch is dynamic and cannot be a
+        # weight dimension; its first `batch_size` rows are used as the
+        # per-sample coefficients.
+        #
+        # DECISION plan_2026-06-08_a5f40f4f/D-005: this dynamic slice
+        # `projection_matrix[:batch_size, :]` is KEPT (NOT replaced by the whole
+        # matrix). It is graph-safe under TF (slicing a static weight by a
+        # symbolic index is supported and verified). Using the full projection
+        # would make the matmul (batch,batch)@(feature_dim,num_components)
+        # shape-incoherent whenever feature_dim != batch. WORKING-BAR LIMITATION
+        # (see class docstring): this re-uses the projection weight's leading
+        # rows as sample coefficients, which is the idiosyncratic "deep KPCA"
+        # approximation and REQUIRES feature_dim (the layer's input/component
+        # dim) >= batch_size; it is NOT a textbook Nystrom/eigh KPCA projection.
         components = ops.matmul(kernel_matrix_reg, projection_matrix[:batch_size, :])
 
         # Normalize by eigenvalues (approximate scaling)
@@ -543,7 +593,7 @@ class DeepKernelPCA(keras.layers.Layer):
                 components = components + self.coupling_strength * coupling_term
 
             # Apply activation for non-linearity between levels
-            components = ops.nn.tanh(components)
+            components = ops.tanh(components)
 
             # Store features
             level_features.append(components)
@@ -601,9 +651,23 @@ class DeepKernelPCA(keras.layers.Layer):
         return output
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer."""
+        """Compute the output shape of the layer.
+
+        The total number of output components is only resolved after ``build``
+        (the adaptive ``components_per_level=None`` path is filled in there), so
+        this method requires the layer to be built.
+        """
+        if isinstance(input_shape, (list, tuple)) and len(input_shape) > 0 \
+                and isinstance(input_shape[0], (list, tuple)):
+            input_shape = input_shape[0]
+        if not self.built or self.components_per_level is None:
+            raise ValueError(
+                "compute_output_shape requires the layer to be built "
+                "(components_per_level is resolved in build()). Build the layer "
+                "or call it on a concrete input first."
+            )
         batch_size = input_shape[0]
-        total_components = sum(self.components_per_level) if self.components_per_level else None
+        total_components = sum(self.components_per_level)
         return (batch_size, total_components)
 
     def get_explained_variance_ratio(self) -> List[float]:
@@ -630,10 +694,15 @@ class DeepKernelPCA(keras.layers.Layer):
         config = super().get_config()
         config.update({
             'num_levels': self.num_levels,
-            'components_per_level': self.components_per_level,
-            'kernel_type': self.kernel_types if len(set(self.kernel_types)) > 1 else self.kernel_types[0],
-            'kernel_params': self.kernel_params if len(set(map(str, self.kernel_params))) > 1 else self.kernel_params[
-                0],
+            # Serialize the ORIGINAL constructor args (sentinels preserved), NOT
+            # the post-build mutated attributes. components_per_level=None is the
+            # adaptive-sizing sentinel that build() overwrites; kernel_type /
+            # kernel_params are expanded to per-level lists in __init__.
+            # from_config(get_config()) must reconstruct an identical PRE-build
+            # layer.
+            'components_per_level': self._components_per_level_init,
+            'kernel_type': self._kernel_type_init,
+            'kernel_params': self._kernel_params_init,
             'regularization_lambda': self.regularization_lambda,
             'coupling_strength': self.coupling_strength,
             'use_backward_coupling': self.use_backward_coupling,
