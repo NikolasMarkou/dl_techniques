@@ -166,7 +166,7 @@ def validate_mixture_config(mixture_type: str, **kwargs: Any) -> None:
                 raise ValueError(f"{count_param} must be a positive integer, got {value}")
 
     # Validate positive float parameters common across mixtures
-    positive_floats = ['temperature', 'gamma_init', 'min_center_distance', 'min_distance']
+    positive_floats = ['temperature', 'gamma_init', 'min_center_distance', 'min_distance', 'variance_floor']
     for float_param in positive_floats:
         if float_param in kwargs and kwargs[float_param] is not None:
             if kwargs[float_param] <= 0:

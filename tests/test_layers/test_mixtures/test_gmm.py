@@ -258,3 +258,61 @@ class TestGMMLayerIntegration:
         history = model.fit(ops.convert_to_numpy(sample_data_2d), target,
                             epochs=1, batch_size=16, verbose=0)
         assert np.isfinite(history.history["loss"][-1])
+
+
+# ------------------------------------------------------ posterior correctness
+
+class TestGMMLayerPosteriorCorrectness:
+    """Pin weights to known values and check responsibilities equal the analytic
+    GMM posterior (closes review WARNING #1 — only sum-to-1 was asserted before)."""
+
+    def test_responsibilities_match_analytic_posterior(self) -> None:
+        import numpy as np
+        # temperature=1, uniform mixing logits (0), unit variances (log_var=0):
+        # responsibility_k = softmax_k(-0.5 * ||x - mu_k||^2)  (logdet=0, pi uniform,
+        # D log 2pi is a per-row constant that cancels in the softmax).
+        feat, k = 5, 3
+        layer = GMMLayer(n_components=k, temperature=1.0, mean_initializer="glorot_normal")
+        x = np.random.RandomState(0).normal(size=(7, feat)).astype("float32")
+        _ = layer(x)  # build
+        means = np.random.RandomState(1).normal(size=(k, feat)).astype("float32")
+        layer.means.assign(means)  # log_variances=0, mixture_logits=0 from default init
+
+        out = ops.convert_to_numpy(layer(x))
+
+        # analytic
+        sq = ((x[:, None, :] - means[None, :, :]) ** 2).sum(axis=-1)  # (7, k)
+        logits = -0.5 * sq
+        logits -= logits.max(axis=-1, keepdims=True)
+        expected = np.exp(logits)
+        expected /= expected.sum(axis=-1, keepdims=True)
+
+        np.testing.assert_allclose(out, expected, rtol=1e-5, atol=1e-5)
+
+    def test_temperature_sharpens(self) -> None:
+        import numpy as np
+        x = np.random.RandomState(2).normal(size=(6, 4)).astype("float32")
+        soft = GMMLayer(n_components=3, temperature=1.0, mean_initializer="glorot_normal")
+        hard = GMMLayer(n_components=3, temperature=0.05, mean_initializer="glorot_normal")
+        o_soft = ops.convert_to_numpy(soft(x))
+        o_hard = ops.convert_to_numpy(hard(x))
+        # lower temperature -> sharper (higher max responsibility on average)
+        assert o_hard.max(axis=-1).mean() >= o_soft.max(axis=-1).mean()
+
+    def test_mixture_mode_equals_responsibilities_dot_means(self) -> None:
+        import numpy as np
+        feat, k = 5, 3
+        layer = GMMLayer(n_components=k, output_mode="mixture", mean_initializer="glorot_normal")
+        x = np.random.RandomState(3).normal(size=(8, feat)).astype("float32")
+        recon = ops.convert_to_numpy(layer(x))
+
+        # recompute responsibilities from an assignments-mode twin sharing the weights
+        means = ops.convert_to_numpy(layer.means)
+        twin = GMMLayer(n_components=k, output_mode="assignments", mean_initializer="glorot_normal")
+        _ = twin(x)
+        twin.means.assign(means)
+        twin.log_variances.assign(layer.log_variances)
+        twin.mixture_logits.assign(layer.mixture_logits)
+        resp = ops.convert_to_numpy(twin(x))
+
+        np.testing.assert_allclose(recon, resp @ means, rtol=1e-5, atol=1e-5)
