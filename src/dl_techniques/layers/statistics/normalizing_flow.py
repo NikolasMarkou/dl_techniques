@@ -141,7 +141,9 @@ class AffineCouplingLayer(keras.layers.Layer):
         self.context_dim = context_dim
         self.hidden_units = hidden_units
         self.reverse = reverse
-        self.activation = activation
+        # Normalize activation to a callable/object so a callable passed in
+        # (e.g. keras.activations.relu) round-trips via keras.activations.serialize.
+        self.activation = keras.activations.get(activation)
         self.use_tanh_stabilization = use_tanh_stabilization
 
         # Compute splitting dimension
@@ -177,6 +179,12 @@ class AffineCouplingLayer(keras.layers.Layer):
         :param input_shapes: List of two shape tuples for ``[data, context]``.
         :type input_shapes: list[tuple[int | None, ...]]
         """
+        # Functional API may pass the two-element container of shapes as a tuple
+        # (e.g. ((None, d), (None, c))); accept it by normalizing to a list. A
+        # bare shape tuple like (None, 6) is NOT two shapes and stays invalid.
+        if isinstance(input_shapes, tuple) and len(input_shapes) == 2 \
+                and all(isinstance(s, (list, tuple)) for s in input_shapes):
+            input_shapes = list(input_shapes)
         if not isinstance(input_shapes, list) or len(input_shapes) != 2:
             raise ValueError("input_shapes must be a list of two shape tuples")
 
@@ -290,15 +298,18 @@ class AffineCouplingLayer(keras.layers.Layer):
         # Compute transformation parameters from static part and context
         s, t = self._compute_scale_and_shift(y_a, context)
 
-        # Apply inverse transformation to dynamic part
-        z_b = (y_b - t) / (s + EPSILON_CONSTANT)
+        # Apply inverse transformation to dynamic part.
+        # s = exp(...) is strictly positive, so no epsilon is needed; adding one
+        # to only the inverse/log-det (but not the forward `y_b = z_b*s + t`)
+        # would break exact invertibility for small s. Use plain s everywhere.
+        z_b = (y_b - t) / s
         z = ops.concatenate([y_a, z_b], axis=-1)
 
         # Apply reverse permutation to restore original ordering
         z = self._apply_split_and_reverse(z)
 
         # Compute log-determinant of Jacobian (sum of log scale factors)
-        log_det_jacobian = ops.sum(ops.log(s + EPSILON_CONSTANT), axis=-1)
+        log_det_jacobian = ops.sum(ops.log(s), axis=-1)
 
         return z, log_det_jacobian
 
@@ -328,7 +339,9 @@ class AffineCouplingLayer(keras.layers.Layer):
             "context_dim": self.context_dim,
             "hidden_units": self.hidden_units,
             "reverse": self.reverse,
-            "activation": self.activation,
+            # Serialize the activation so a callable (e.g. keras.activations.relu)
+            # round-trips as JSON; keras.activations.get rebuilds it on load.
+            "activation": keras.activations.serialize(self.activation),
             "use_tanh_stabilization": self.use_tanh_stabilization,
         })
         return config
@@ -429,7 +442,9 @@ class NormalizingFlowLayer(keras.layers.Layer):
         self.num_flow_steps = num_flow_steps
         self.context_dim = context_dim
         self.hidden_units_coupling = hidden_units_coupling
-        self.activation = activation
+        # Normalize activation to a callable/object so a callable passed in
+        # (e.g. keras.activations.relu) round-trips via keras.activations.serialize.
+        self.activation = keras.activations.get(activation)
         self.use_tanh_stabilization = use_tanh_stabilization
 
         # CREATE coupling layers in __init__ (modern Keras 3 pattern)
@@ -452,6 +467,12 @@ class NormalizingFlowLayer(keras.layers.Layer):
         :param input_shapes: List of two shape tuples for ``[data, context]``.
         :type input_shapes: list[tuple[int | None, ...]]
         """
+        # Functional API may pass the two-element container of shapes as a tuple
+        # (e.g. ((None, d), (None, c))); accept it by normalizing to a list. A
+        # bare shape tuple like (None, 4) is NOT two shapes and stays invalid.
+        if isinstance(input_shapes, tuple) and len(input_shapes) == 2 \
+                and all(isinstance(s, (list, tuple)) for s in input_shapes):
+            input_shapes = list(input_shapes)
         if not isinstance(input_shapes, list) or len(input_shapes) != 2:
             raise ValueError("input_shapes must be a list of two shape tuples")
 
@@ -596,7 +617,9 @@ class NormalizingFlowLayer(keras.layers.Layer):
             "num_flow_steps": self.num_flow_steps,
             "context_dim": self.context_dim,
             "hidden_units_coupling": self.hidden_units_coupling,
-            "activation": self.activation,
+            # Serialize the activation so a callable (e.g. keras.activations.relu)
+            # round-trips as JSON; keras.activations.get rebuilds it on load.
+            "activation": keras.activations.serialize(self.activation),
             "use_tanh_stabilization": self.use_tanh_stabilization,
         })
         return config
