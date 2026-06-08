@@ -276,3 +276,107 @@ Work on branch `fix/convnext-patchvae-vmf-prior`; artifacts in
 ```
 
 ---
+
+## Hierarchical (2-Level) Patch-Ladder-VAE
+
+> Plan: `plans/plan_2026-06-08_e3917bd5/` (iter-1). Model + tests + docs only —
+> no training script, no training run.
+
+### What it is
+
+A **2-Level Resolution-Agnostic Patch-Ladder-VAE** (`HierarchicalConvNeXtPatchVAE`),
+a sibling of the flat model above (not a subclass; serialization-isolated, D-004):
+
+- **Fine latent `z1 (B, Hp, Wp, D1)`** — the existing per-patch `ConvNeXtPatchEncoder`,
+  Gaussian.
+- **Coarse latent `z2 (B, Hp/2, Wp/2, D2)`** — **pool-derived**: `AvgPool2D(2)` over the
+  fine encoder's last hidden features (pre-mu-head) → `Conv2D(D2,1)` mu/lv heads, Gaussian.
+- **Learned top-down conditional prior `p(z1|z2)`**
+  (`_L2ConditionalPrior`): `z2 → UpSampling2D(2, nearest) → Conv2D(embed,1) →
+  M × ConvNextV2Block(kernel_size=3) → zero-init Conv2D(D1,1) mu_p + zero-init
+  Conv2D(D1,1) lv_p`. **VDVAE delta-parameterization**: `mu1 = mu_p + delta`, where
+  `delta` is the fine encoder's `mu_head` output (reused, D-002).
+- **Free-bits collapse gate** on the **coarse** KL:
+  `kl_l2 = mean(max(KL_per_patch(z2 ‖ N(0,I)), free_bits))`, default `0.25` nats/patch (D-006).
+
+Both latents are **Gaussian** (D-003) → the conditional fine KL is the closed-form
+Gaussian-Gaussian conditional KL (`_compute_kl_l2_conditional`). No vMF, no
+`keras.random.beta`, so XLA stays enabled (no `jit_compile=False` override).
+
+### Why
+
+The flat factorized per-patch prior cannot model **inter-patch JOINT structure**
+(global coherence) — the *aggregate-posterior hole* (Dai & Wipf 2019) diagnosed in
+the vMF section above. The coarse latent `z2` + the learned top-down prior `p(z1|z2)`
+add a global-context channel the fine prior lacks. Every cross-scale op is
+**pool-derived + conv-only** (`AvgPool2D` / `UpSampling2D(nearest)` / `Conv2D(k=1)` /
+`ConvNextV2Block(k=3)`) — no `Dense` / `GlobalAveragePooling` / fixed reshape — so the
+hierarchy is **resolution-agnostic by construction**.
+
+### Output-dict contract
+
+`call()` returns legacy aliases that point at the FINE level (callback compatibility)
+**plus** explicit two-level keys:
+
+| Key | Points at | Shape |
+|-----|-----------|-------|
+| `reconstruction`, `z`, `mu`, `log_var` | FINE level (aliases) | fine grid |
+| `z1`, `mu1`, `log_var1` | fine level (explicit) | `(B, Hp, Wp, D1)` |
+| `z2`, `mu2`, `log_var2` | coarse level (explicit) | `(B, Hp/2, Wp/2, D2)` |
+
+### Key config fields (`HierarchicalConvNeXtPatchVAEConfig`)
+
+| Field | Meaning |
+|-------|---------|
+| `coarse_latent_dim` | D2, coarse latent channels |
+| `prior_depth` | M, number of `ConvNextV2Block`s in the conditional prior |
+| `prior_embed_dim` | prior hidden width; `0`-sentinel → falls back to `embed_dim` |
+| `pool_factor` | fine→coarse pooling stride |
+| `free_bits` | coarse-KL floor, nats/patch (default `0.25`) |
+| `beta_kl_l1` / `beta_kl_l2` | KL weights for the fine / coarse levels |
+| `lambda_sigreg_l1` / `lambda_sigreg_l2` | SIGReg weights at the fine / coarse levels (N-scaled) |
+
+**Invariant** (`__post_init__`): `img_size % patch_size == 0` AND
+`(img_size // patch_size) % pool_factor == 0` (even fine grid, so `AvgPool2D` and
+`UpSampling2D` compose exactly).
+
+### Usage
+
+```python
+import keras
+from dl_techniques.models.convnext_patch_vae.model_hierarchical import (
+    create_hierarchical_convnext_patch_vae,
+)
+
+# Named variants: "tiny" / "base" / "large".
+m = create_hierarchical_convnext_patch_vae("base")
+m.compile(optimizer=keras.optimizers.AdamW(3e-4), loss=None)  # all losses via add_loss
+m.fit(x_train, epochs=50, batch_size=256)
+
+mu1, log_var1 = m.encode(x_any_resolution)   # fine posterior
+samples       = m.sample(num_samples=16, hp=8, wp=8)   # coherent two-level prior path
+```
+
+### TWO MANDATORY CAVEATS
+
+1. **Efficacy is UNPROVEN.** This is a *correct, trainable, serializable* implementation
+   — **NOT** a demonstrated generation improvement. The expected payoff (an analytic
+   43–66% of the joint-structure ceiling-gap) is a *scenario bound, not a measurement*:
+   no hierarchical model has been trained + measured here (analysis `H3=0.65`,
+   mechanism-only; pending prediction `PP2` is open). Source:
+   `analyses/analysis_2026-06-08_3ec50266/summary.md`.
+2. **The hierarchy fixes GLOBAL COHERENCE only (Axis A), NOT within-patch blur (Axis B).**
+   Reconstruction sharpness / patch coarseness is **orthogonal** — no joint prior touches
+   it. Realism needs a separate track (smaller patches + a perceptual/LPIPS decoder).
+   **Do NOT expect the hierarchy to fix blur.**
+
+### Future work
+
+- **vMF posterior at the fine level** is documented-but-NOT-implemented: it conflicts
+  with the closed-form Gaussian conditional prior (would require a vMF-vs-vMF conditional
+  KL). Deferred (D-003).
+- **Multi-resolution training** (`RandomResizedCrop` scale `[0.5, 2.0]`) is required for
+  off-training-resolution deployment, but that is a **TRAINER concern** — not part of this
+  model.
+
+---

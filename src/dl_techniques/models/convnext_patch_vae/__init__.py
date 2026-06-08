@@ -18,6 +18,22 @@ Core components:
 - :func:`create_convnext_patch_vae` — module-level factory wrapping
   :meth:`ConvNeXtPatchVAE.from_variant` (:mod:`.model`).
 
+Hierarchical (2-level) Patch-Ladder-VAE components
+(``plans/plan_2026-06-08_e3917bd5/``, :mod:`.model_hierarchical` and
+:mod:`.config`):
+
+- :class:`HierarchicalConvNeXtPatchVAEConfig` — dataclass config for the
+  hierarchical model (:mod:`.config`).
+- :class:`HierarchicalConvNeXtPatchVAE` — 2-level sibling model: pool-derived
+  coarse latent ``z2`` + learned top-down conditional prior ``p(z1|z2)`` with
+  VDVAE delta-parameterization and free-bits gating (:mod:`.model_hierarchical`).
+- :class:`_L2ConditionalPrior` — learned convolutional top-down conditional
+  prior layer (:mod:`.model_hierarchical`).
+- :class:`_CoarseLatentHead` — pool-derived coarse-latent head (:mod:`.model_hierarchical`).
+- :func:`create_hierarchical_convnext_patch_vae` — module-level factory wrapping
+  :meth:`HierarchicalConvNeXtPatchVAE.from_variant` (:mod:`.model_hierarchical`).
+- ``HIERARCHICAL_PRESETS`` — tiny/base/large preset dict (:mod:`.model_hierarchical`).
+
 Per ``models/CLAUDE.md`` this ``__init__.py`` exports nothing — import
 from submodules directly.
 """
