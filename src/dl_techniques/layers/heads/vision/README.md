@@ -76,7 +76,7 @@ outputs = {
 ```python
 import keras
 from dl_techniques.models.vit import ViT
-from dl_techniques.layers.vision_heads import create_vision_head, TaskType
+from dl_techniques.layers.heads.vision import create_vision_head, VisionTaskType
 
 # Step 1: Create foundation model
 vit = ViT(
@@ -91,7 +91,7 @@ vit = ViT(
 
 # Step 2: Create task head
 classification_head = create_vision_head(
-    TaskType.CLASSIFICATION,
+    VisionTaskType.CLASSIFICATION,
     num_classes=1000,  # ImageNet classes
     hidden_dim=768,
     use_global_pooling=True,
@@ -128,7 +128,7 @@ outputs = model(images)
 
 ```python
 from dl_techniques.models.resnet import ResNet50
-from dl_techniques.layers.vision_heads import DetectionHead
+from dl_techniques.layers.heads.vision import DetectionHead
 
 # Step 1: Create ResNet backbone with FPN
 backbone = ResNet50(
@@ -188,7 +188,7 @@ outputs = detector(images)
 
 ```python
 from dl_techniques.models.dino import DINOv2Model
-from dl_techniques.layers.vision_heads import SegmentationHead
+from dl_techniques.layers.heads.vision import SegmentationHead
 
 # Step 1: Create DINOv2 backbone
 dinov2 = DINOv2Model(
@@ -245,7 +245,7 @@ seg_output = segmenter(images)
 
 ```python
 from dl_techniques.models.efficientnet import EfficientNetB4
-from dl_techniques.layers.vision_heads import DepthEstimationHead
+from dl_techniques.layers.heads.vision import DepthEstimationHead
 
 # Step 1: Create EfficientNet backbone
 efficientnet = EfficientNetB4(
@@ -288,7 +288,7 @@ outputs = depth_model(images)
 ### Example 5: Multi-Task Learning with YOLO
 
 ```python
-from dl_techniques.layers.vision_heads import create_multi_task_head, TaskType
+from dl_techniques.layers.heads.vision import create_multi_task_head, VisionTaskType
 from dl_techniques.models.yolo12 import YOLOv12FeatureExtractor
 
 # Step 1: Create YOLO backbone
@@ -302,17 +302,17 @@ yolo_backbone = YOLOv12FeatureExtractor(
 # Step 2: Define multiple tasks
 task_configs = {
     'detection': {
-        'task_type': TaskType.DETECTION,
+        'task_type': VisionTaskType.DETECTION,
         'num_classes': 80,
         'num_anchors': 3
     },
     'segmentation': {
-        'task_type': TaskType.SEGMENTATION,
+        'task_type': VisionTaskType.SEGMENTATION,
         'num_classes': 80,
         'upsampling_factor': 4
     },
     'depth': {
-        'task_type': TaskType.DEPTH_ESTIMATION,
+        'task_type': VisionTaskType.DEPTH_ESTIMATION,
         'min_depth': 0.1,
         'max_depth': 50.0
     }
@@ -356,7 +356,7 @@ all_outputs = multi_model(images)
 ### Example 6: Instance Segmentation
 
 ```python
-from dl_techniques.layers.vision_heads import InstanceSegmentationHead
+from dl_techniques.layers.heads.vision import InstanceSegmentationHead
 
 # Create instance segmentation head
 instance_head = InstanceSegmentationHead(
@@ -407,7 +407,7 @@ Different tasks benefit from different attention strategies:
 ```python
 # CBAM for spatial tasks (segmentation, depth)
 spatial_head = create_vision_head(
-    TaskType.SEGMENTATION,
+    VisionTaskType.SEGMENTATION,
     num_classes=150,  # ADE20K classes
     use_attention=True,
     attention_type='cbam'  # Channel and spatial attention
@@ -415,7 +415,7 @@ spatial_head = create_vision_head(
 
 # Multi-head attention for global understanding
 global_head = create_vision_head(
-    TaskType.CLASSIFICATION,
+    VisionTaskType.CLASSIFICATION,
     num_classes=1000,
     use_attention=True,
     attention_type='multi_head',
@@ -424,7 +424,7 @@ global_head = create_vision_head(
 
 # Differential attention for fine-grained tasks
 fine_head = create_vision_head(
-    TaskType.KEYPOINT_DETECTION,
+    VisionTaskType.KEYPOINT_DETECTION,
     num_classes=17,  # COCO keypoints
     use_attention=True,
     attention_type='differential'
@@ -438,7 +438,7 @@ Enhance heads with different feed-forward networks:
 ```python
 # SwiGLU for best performance
 high_perf_head = create_vision_head(
-    TaskType.DETECTION,
+    VisionTaskType.DETECTION,
     num_classes=80,
     use_ffn=True,
     ffn_type='swiglu',
@@ -447,7 +447,7 @@ high_perf_head = create_vision_head(
 
 # GLU for efficiency
 efficient_head = create_vision_head(
-    TaskType.DETECTION,
+    VisionTaskType.DETECTION,
     num_classes=80,
     use_ffn=True,
     ffn_type='glu',
@@ -485,16 +485,16 @@ efficient_head = create_vision_head(
 from dl_techniques.vision.heads import HeadConfiguration
 
 # Get optimized detection config
-detection_config = HeadConfiguration.get_default_config(TaskType.DETECTION)
+detection_config = HeadConfiguration.get_default_config(VisionTaskType.DETECTION)
 # {'num_classes': 80, 'num_anchors': 9, 'bbox_dims': 4, ...}
 
 # High-performance variant
-hp_config = HeadConfiguration.get_high_performance_config(TaskType.DETECTION)
-detection_head = create_vision_head(TaskType.DETECTION, **hp_config)
+hp_config = HeadConfiguration.get_high_performance_config(VisionTaskType.DETECTION)
+detection_head = create_vision_head(VisionTaskType.DETECTION, **hp_config)
 
 # Efficient variant for mobile
-efficient_config = HeadConfiguration.get_efficient_config(TaskType.DETECTION)
-mobile_head = create_vision_head(TaskType.DETECTION, **efficient_config)
+efficient_config = HeadConfiguration.get_efficient_config(VisionTaskType.DETECTION)
+mobile_head = create_vision_head(VisionTaskType.DETECTION, **efficient_config)
 ```
 
 ### Segmentation with Skip Connections
@@ -585,17 +585,17 @@ class MultiTaskLoss(keras.losses.Loss):
 ```python
 # Task-aware augmentation
 def augment_for_task(images, labels, task_type):
-    if task_type == TaskType.DETECTION:
+    if task_type == VisionTaskType.DETECTION:
         # Preserve bounding box validity
         images, labels = random_flip_with_boxes(images, labels)
         images, labels = random_crop_with_boxes(images, labels)
     
-    elif task_type == TaskType.SEGMENTATION:
+    elif task_type == VisionTaskType.SEGMENTATION:
         # Apply same transforms to masks
         images, labels = random_crop_and_resize(images, labels)
         images = color_jitter(images)  # Masks unaffected
     
-    elif task_type == TaskType.DEPTH_ESTIMATION:
+    elif task_type == VisionTaskType.DEPTH_ESTIMATION:
         # Avoid geometric transforms that break depth
         images = color_augmentation_only(images)
     

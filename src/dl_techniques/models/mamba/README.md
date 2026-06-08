@@ -324,7 +324,7 @@ The `create_mamba_with_head` function in `mamba_v1.py` provides a powerful patte
 
 ```python
 from dl_techniques.models.mamba.mamba_v1 import create_mamba_with_head
-from dl_techniques.layers.nlp_heads import NLPTaskConfig, NLPTaskType
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 seq_cls_task = NLPTaskConfig(
     name="sentiment_analysis",

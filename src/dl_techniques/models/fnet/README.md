@@ -256,7 +256,7 @@ import numpy as np
 
 # Local imports
 from dl_techniques.models.fnet.model import create_fnet_with_head, FNet
-from dl_techniques.layers.nlp_heads import NLPTaskConfig, NLPTaskType
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 # 1. Define the task configuration
 task_config = NLPTaskConfig(
@@ -384,7 +384,7 @@ extractor = keras.Model(inputs, cls_embedding)
 
 ```python
 from dl_techniques.models.fnet.model import create_fnet_with_head
-from dl_techniques.layers.nlp_heads import NLPTaskConfig, NLPTaskType
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 # Configuration for 9 NER classes (e.g., CoNLL-2003)
 ner_config = NLPTaskConfig(

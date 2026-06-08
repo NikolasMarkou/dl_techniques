@@ -80,10 +80,25 @@ Adaptive lag attention, DeepAR blocks, EMA layer, forecasting layers, mixed sequ
 ### Tokenizers (`tokenizers/`)
 BPE tokenizer implementation.
 
-### Task Heads
-- `nlp_heads/` — NLP output heads with `factory.py` and `task_types.py`
-- `vision_heads/` — Vision output heads with `factory.py` and `task_types.py`
-- `vlm_heads/` — Vision-language model heads with `factory.py` and `task_types.py`
+### Task Heads (`heads/`)
+Single merged package consolidating the formerly-separate `nlp_heads/`,
+`vision_heads/`, and `vlm_heads/` packages into three sub-packages:
+- `heads/nlp/` — NLP output heads (text/token classification, QA, similarity,
+  generation, multiple-choice, multi-task). Sequence pooling reuses the shared
+  `SequencePooling` layer for `cls`/`mean`/`max` (the learnable `attention`
+  strategy stays inline — different mechanism + weights).
+- `heads/vision/` — vision output heads (detection, segmentation, depth,
+  classification, instance segmentation, enhancement, multi-task) +
+  `VisionTaskType` (with a `TaskType` back-compat alias).
+- `heads/vlm/` — vision-language model heads (captioning, VQA, visual grounding,
+  image-text matching, multi-task).
+
+Each sub-package keeps its own `factory.py` + `task_types.py`. A top-level
+`heads/factory.py` exposes a `create_head(domain, ...)` dispatch facade over the
+three single-head factories, and `heads/task_types.py` aggregates the task-type
+enums/configs. Import via `from dl_techniques.layers.heads import create_head` or
+`from dl_techniques.layers.heads.nlp import create_nlp_head` (likewise `.vision`,
+`.vlm`). See `heads/CLAUDE.md` and `heads/README.md`.
 
 ### Experimental (`experimental/`)
 Experimental/unstable layers: band RMS OOD, contextual counter FFN, contextual memory, field embeddings, graph MANN, hierarchical evidence LLM, hierarchical memory system, MST correlation filter.

@@ -2,7 +2,7 @@
 
 ## 1. Overview & Philosophy
 
-The `dl_techniques.layers.nlp_heads` module provides a unified, model-agnostic system for attaching task-specific "heads" to any NLP foundation model.
+The `dl_techniques.layers.heads.nlp` module provides a unified, model-agnostic system for attaching task-specific "heads" to any NLP foundation model.
 
 **Core Philosophy:** Decouple the *encoder* (foundation model) from the *decoder* (task head).
 *   **Foundation Model**: (e.g., BERT, RoBERTa, T5 Encoder, GPT, custom Transformers) is solely responsible for producing rich, contextualized hidden states from raw text.
@@ -40,7 +40,7 @@ Regardless of the specific task, the integration pattern is always the same:
 
 ```python
 import keras
-from dl_techniques.layers.nlp_heads import create_nlp_head, NLPTaskConfig, NLPTaskType
+from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig, NLPTaskType
 
 # 1. Load ANY foundation model (generic placeholder here)
 foundation_model = load_my_foundation_model(...)
@@ -208,7 +208,7 @@ Enabling `use_task_attention=True` inserts a full Transformer self-attention lay
 The `MultiTaskNLPHead` manages multiple sub-heads. It's a single layer that can route inputs to all its sub-heads simultaneously or just one.
 
 ```python
-from dl_techniques.layers.nlp_heads import create_multi_task_nlp_head
+from dl_techniques.layers.heads.nlp import create_multi_task_nlp_head
 
 # ... (define task_configs and input_dim)
 multi_head = create_multi_task_nlp_head(task_configs, input_dim)

@@ -72,7 +72,7 @@ _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
 # ===========================================================================
 #
 # DECISION D-001 — Minimal inline heads rather than reusing
-# ``dl_techniques.layers.vision_heads.factory``.  The factory heads are
+# ``dl_techniques.layers.heads.vision.factory``.  The factory heads are
 # transformer-oriented (optional attention/FFN stacks) and ``MultiTaskHead``
 # stores children in a plain ``dict`` that Keras does not track for weight
 # serialization.  A small, focused head keeps parity with the existing depth

@@ -51,7 +51,7 @@ Standard VLMs fuse vision and language through dot-product cross-attention, whic
 | Contrastive model (CliffordCLIP) | Done | `models/cliffordnet/clip.py` |
 | Contrastive loss (CLIPContrastiveLoss) | Done | `losses/clip_contrastive_loss.py` |
 | Multimodal fusion layer | Done | `layers/fusion/multimodal_fusion.py` |
-| VLM task heads | Done | `layers/vlm_heads/factory.py` |
+| VLM task heads | Done | `layers/heads/vlm/factory.py` |
 | **CliffordVLM (generative VLM)** | **Needed** | `models/cliffordnet/vlm.py` |
 | **Clifford cross-modal fusion** | **Needed** | New layer or extension |
 | **Vision-to-LM projector** | **Needed** | Lightweight adapter |
@@ -166,7 +166,7 @@ The codebase already has:
 - **NanoVLM** (`models/nano_vlm/model.py`): VisionEncoder + TextDecoder + MultiModalFusion -- configurable fusion strategies
 - **CLIP** (`models/clip/model.py`): Standard ViT [[Dosovitskiy 2021]](#13-references)-based dual encoder [[Radford 2021]](#13-references)
 - **MultiModalFusion** (`layers/fusion/multimodal_fusion.py`): 8 fusion strategies (cross_attention, concatenation, gated, bilinear, tensor_fusion, etc.)
-- **VLM task heads** (`layers/vlm_heads/factory.py`): Captioning, VQA, grounding, matching heads
+- **VLM task heads** (`layers/heads/vlm/factory.py`): Captioning, VQA, grounding, matching heads
 - **TextDecoder** (`layers/transformers/text_decoder.py`): Transformer-based autoregressive decoder
 - **VisionEncoder** (`layers/transformers/vision_encoder.py`): Configurable ViT-style encoder
 

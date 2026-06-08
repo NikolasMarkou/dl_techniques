@@ -265,7 +265,7 @@ print(f"Shape of last_hidden_state: {outputs['last_hidden_state'].shape}")
 | :--------------------- | :--------------------------------------------------- | :---------------------------------------------------------------------------------- |
 | **`ModernBertEmbeddings`** | `...embedding.modern_bert_embeddings.ModernBertEmbeddings` | Handles the initial embedding lookup and normalization.                             |
 | **`TransformerLayer`** | `...layers.transformers.TransformerLayer`            | The highly configurable, modern Transformer block that powers the encoder.          |
-| **`create_nlp_head`**  | `...layers.nlp_heads.factory.create_nlp_head`        | A factory for creating various downstream task heads (e.g., classification, NER). |
+| **`create_nlp_head`**  | `...layers.heads.nlp.factory.create_nlp_head`        | A factory for creating various downstream task heads (e.g., classification, NER). |
 
 ---
 
@@ -290,7 +290,7 @@ Use the factory function to attach a classification head to a ModernBERT encoder
 import keras
 import numpy as np
 from dl_techniques.models.modern_bert.modern_bert import ModernBERT
-from dl_techniques.layers.nlp_heads import NLPTaskConfig, NLPTaskType
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 # 1. Define the classification task
 classification_task = NLPTaskConfig(

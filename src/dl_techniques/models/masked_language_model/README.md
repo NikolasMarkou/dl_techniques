@@ -689,7 +689,7 @@ ner_model.compile(
 ### Using dl_techniques NLP Heads
 
 ```python
-from dl_techniques.layers.nlp_heads import create_nlp_head, NLPTaskConfig, NLPTaskType
+from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig, NLPTaskType
 
 # Define task
 task_config = NLPTaskConfig(
