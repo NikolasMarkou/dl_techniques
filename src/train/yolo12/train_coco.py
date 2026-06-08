@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 
 from train.common import setup_gpu, create_callbacks as create_common_callbacks
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.vision_heads.task_types import TaskType
+from dl_techniques.layers.heads.vision.task_types import VisionTaskType
 from dl_techniques.models.yolo12.multitask import create_yolov12_multitask
 from dl_techniques.losses.yolo12_multitask_loss import create_yolov12_multitask_loss
 from dl_techniques.datasets.vision.coco import COCODatasetBuilder, COCO_CLASSES as COCO_CLASSES_ORIGINAL
@@ -80,11 +80,11 @@ def create_coco_model_and_loss(
         num_segmentation_classes=segmentation_classes,
         input_shape=(img_size, img_size, 3),
         scale=scale,
-        tasks=[TaskType.DETECTION, TaskType.SEGMENTATION]
+        tasks=[VisionTaskType.DETECTION, VisionTaskType.SEGMENTATION]
     )
 
     loss_fn = create_yolov12_multitask_loss(
-        tasks=[TaskType.DETECTION, TaskType.SEGMENTATION],
+        tasks=[VisionTaskType.DETECTION, VisionTaskType.SEGMENTATION],
         num_detection_classes=detection_classes,
         num_segmentation_classes=segmentation_classes,
         input_shape=(img_size, img_size),

@@ -23,7 +23,7 @@ The model follows a multitask learning architecture with three main components:
      configurable hidden dimensions and dropout
 
 3. **Flexible Task Configuration**: Tasks can be enabled/disabled individually using
-   TaskType enums, allowing for various combinations from single-task to full multi-task
+   VisionTaskType enums, allowing for various combinations from single-task to full multi-task
    learning scenarios.
 
 Key Features
@@ -47,7 +47,7 @@ COCO Pretraining (80 detection classes, 80 segmentation classes):
     >>> model = YOLOv12MultiTask(
     ...     num_detection_classes=80,
     ...     num_segmentation_classes=80,
-    ...     task_config=[TaskType.DETECTION, TaskType.SEGMENTATION],
+    ...     task_config=[VisionTaskType.DETECTION, VisionTaskType.SEGMENTATION],
     ...     scale='s'
     ... )
 
@@ -55,7 +55,7 @@ Crack Detection Fine-tuning (1 detection class, 1 segmentation class):
     >>> model = YOLOv12MultiTask(
     ...     num_detection_classes=1,
     ...     num_segmentation_classes=1,
-    ...     task_config=[TaskType.DETECTION, TaskType.SEGMENTATION],
+    ...     task_config=[VisionTaskType.DETECTION, VisionTaskType.SEGMENTATION],
     ...     scale='s'
     ... )
 
@@ -63,15 +63,15 @@ Mixed Configuration (80 detection classes, 1 segmentation class):
     >>> model = YOLOv12MultiTask(
     ...     num_detection_classes=80,
     ...     num_segmentation_classes=1,
-    ...     task_config=[TaskType.DETECTION, TaskType.SEGMENTATION],
+    ...     task_config=[VisionTaskType.DETECTION, VisionTaskType.SEGMENTATION],
     ...     scale='s'
     ... )
 
 Task Configuration
 -----------------
 Tasks can be specified in multiple flexible ways:
-- Single TaskType enum: TaskType.DETECTION
-- List of TaskType enums: [TaskType.DETECTION, TaskType.SEGMENTATION]
+- Single VisionTaskType enum: VisionTaskType.DETECTION
+- List of VisionTaskType enums: [VisionTaskType.DETECTION, VisionTaskType.SEGMENTATION]
 - String representations: "detection" or ["detection", "segmentation"]
 - TaskConfiguration objects for advanced configuration
 - Predefined CommonTaskConfigurations for common combinations
@@ -86,8 +86,8 @@ from typing import Optional, Tuple, Dict, Any, List, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.vision_heads.task_types import (
-    TaskType,
+from dl_techniques.layers.heads.vision.task_types import (
+    VisionTaskType,
     TaskConfiguration,
     parse_task_list
 )
@@ -119,7 +119,7 @@ class YOLOv12MultiTask(keras.Model):
         input_shape: Input image shape (height, width, channels).
         scale: Model scale configuration ('n', 's', 'm', 'l', 'x').
         reg_max: Maximum value for DFL regression in detection.
-        task_config: TaskConfiguration instance or list of TaskType enums.
+        task_config: TaskConfiguration instance or list of VisionTaskType enums.
         segmentation_filters: Filter sizes for segmentation decoder.
         segmentation_dropout: Dropout rate for segmentation head.
         classification_hidden_dims: Hidden dimensions for classification head.
@@ -132,14 +132,14 @@ class YOLOv12MultiTask(keras.Model):
         >>> model = YOLOv12MultiTask(
         ...     num_detection_classes=80,
         ...     num_segmentation_classes=80,
-        ...     task_config=[TaskType.DETECTION, TaskType.SEGMENTATION]
+        ...     task_config=[VisionTaskType.DETECTION, VisionTaskType.SEGMENTATION]
         ... )
         >>>
         >>> # Crack detection fine-tuning
         >>> model = YOLOv12MultiTask(
         ...     num_detection_classes=1,
         ...     num_segmentation_classes=1,
-        ...     task_config=[TaskType.DETECTION, TaskType.SEGMENTATION]
+        ...     task_config=[VisionTaskType.DETECTION, VisionTaskType.SEGMENTATION]
         ... )
     """
 
@@ -157,11 +157,11 @@ class YOLOv12MultiTask(keras.Model):
         # Task configuration using enums
         task_config: Union[
             TaskConfiguration,
-            List[TaskType],
+            List[VisionTaskType],
             List[str],
-            TaskType,
+            VisionTaskType,
             str
-        ] = TaskType.DETECTION,
+        ] = VisionTaskType.DETECTION,
         # Segmentation head configuration
         segmentation_filters: List[int] = [128, 64, 32],
         segmentation_dropout: float = 0.1,
@@ -184,8 +184,8 @@ class YOLOv12MultiTask(keras.Model):
             input_shape: Input image shape (height, width, channels).
             scale: Model scale ('n', 's', 'm', 'l', 'x').
             reg_max: Maximum value for DFL regression.
-            task_config: Task configuration - can be TaskConfiguration, list of TaskType enums,
-                        list of strings, single TaskType, or single string.
+            task_config: Task configuration - can be TaskConfiguration, list of VisionTaskType enums,
+                        list of strings, single VisionTaskType, or single string.
             segmentation_filters: Filter sizes for segmentation decoder.
             segmentation_dropout: Dropout rate for segmentation.
             classification_hidden_dims: Hidden dims for classification MLP.
@@ -265,7 +265,7 @@ class YOLOv12MultiTask(keras.Model):
                 name="detection_head"
             )
             detection_output = detection_head(feature_maps)
-            task_outputs[TaskType.DETECTION.value] = detection_output
+            task_outputs[VisionTaskType.DETECTION.value] = detection_output
 
         if self.task_config.has_segmentation():
             segmentation_head = YOLOv12SegmentationHead(
@@ -276,7 +276,7 @@ class YOLOv12MultiTask(keras.Model):
                 name="segmentation_head"
             )
             segmentation_output = segmentation_head(feature_maps)
-            task_outputs[TaskType.SEGMENTATION.value] = segmentation_output
+            task_outputs[VisionTaskType.SEGMENTATION.value] = segmentation_output
 
         if self.task_config.has_classification():
             classification_head = YOLOv12ClassificationHead(
@@ -287,7 +287,7 @@ class YOLOv12MultiTask(keras.Model):
                 name="classification_head"
             )
             classification_output = classification_head(feature_maps)
-            task_outputs[TaskType.CLASSIFICATION.value] = classification_output
+            task_outputs[VisionTaskType.CLASSIFICATION.value] = classification_output
 
         outputs = task_outputs
 
@@ -347,12 +347,12 @@ class YOLOv12MultiTask(keras.Model):
             kernel_initializer=self.kernel_initializer
         )
 
-    def get_enabled_tasks(self) -> List[TaskType]:
+    def get_enabled_tasks(self) -> List[VisionTaskType]:
         """
         Get list of enabled tasks.
 
         Returns:
-            List of enabled TaskType enums.
+            List of enabled VisionTaskType enums.
         """
         return self.task_config.get_enabled_tasks()
 
@@ -365,12 +365,12 @@ class YOLOv12MultiTask(keras.Model):
         """
         return self.task_config.get_task_names()
 
-    def has_task(self, task: TaskType) -> bool:
+    def has_task(self, task: VisionTaskType) -> bool:
         """
         Check if a specific task is enabled.
 
         Args:
-            task: TaskType enum to check.
+            task: VisionTaskType enum to check.
 
         Returns:
             True if the task is enabled, False otherwise.
@@ -422,12 +422,12 @@ def create_yolov12_multitask(
     input_shape: Tuple[int, int, int] = (640, 640, 3),
     scale: str = "n",
     tasks: Union[
-        List[TaskType],
+        List[VisionTaskType],
         List[str],
         TaskConfiguration,
-        TaskType,
+        VisionTaskType,
         str
-    ] = TaskType.DETECTION,
+    ] = VisionTaskType.DETECTION,
     **kwargs
 ) -> YOLOv12MultiTask:
     """
@@ -440,8 +440,8 @@ def create_yolov12_multitask(
         num_classes: Fallback class count for backward compatibility.
         input_shape: Input image shape.
         scale: Model scale.
-        tasks: Tasks to enable - can be TaskConfiguration, list of TaskType enums,
-               list of strings, single TaskType, or single string.
+        tasks: Tasks to enable - can be TaskConfiguration, list of VisionTaskType enums,
+               list of strings, single VisionTaskType, or single string.
         **kwargs: Additional arguments.
 
     Returns:
@@ -452,7 +452,7 @@ def create_yolov12_multitask(
         >>> model = create_yolov12_multitask(
         ...     num_detection_classes=80,
         ...     num_segmentation_classes=80,
-        ...     tasks=[TaskType.DETECTION, TaskType.SEGMENTATION],
+        ...     tasks=[VisionTaskType.DETECTION, VisionTaskType.SEGMENTATION],
         ...     scale="s"
         ... )
         >>>
@@ -460,7 +460,7 @@ def create_yolov12_multitask(
         >>> model = create_yolov12_multitask(
         ...     num_detection_classes=1,
         ...     num_segmentation_classes=1,
-        ...     tasks=[TaskType.DETECTION, TaskType.SEGMENTATION],
+        ...     tasks=[VisionTaskType.DETECTION, VisionTaskType.SEGMENTATION],
         ...     scale="s"
         ... )
         >>>
@@ -468,7 +468,7 @@ def create_yolov12_multitask(
         >>> model = create_yolov12_multitask(
         ...     num_detection_classes=80,
         ...     num_segmentation_classes=1,
-        ...     tasks=[TaskType.DETECTION, TaskType.SEGMENTATION],
+        ...     tasks=[VisionTaskType.DETECTION, VisionTaskType.SEGMENTATION],
         ...     scale="s"
         ... )
     """

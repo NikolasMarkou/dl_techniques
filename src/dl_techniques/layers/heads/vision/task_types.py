@@ -5,7 +5,7 @@ from typing import List, Set, Dict, Optional
 # ---------------------------------------------------------------------
 
 @unique
-class TaskType(Enum):
+class VisionTaskType(Enum):
     """
     Enumeration of supported computer vision_heads tasks for multi-task models.
 
@@ -137,22 +137,22 @@ class TaskType(Enum):
     AESTHETIC_SCORING = "aesthetic_scoring"
 
     @classmethod
-    def all_tasks(cls) -> List["TaskType"]:
+    def all_tasks(cls) -> List["VisionTaskType"]:
         """
         Get all available task types.
 
-        :return: List of all TaskType enum values.
-        :rtype: List[TaskType]
+        :return: List of all VisionTaskType enum values.
+        :rtype: List[VisionTaskType]
         """
         return list(cls)
 
     @classmethod
-    def get_task_categories(cls) -> Dict[str, List["TaskType"]]:
+    def get_task_categories(cls) -> Dict[str, List["VisionTaskType"]]:
         """
         Get tasks organized by categories.
 
         :return: Dictionary mapping category names to lists of tasks.
-        :rtype: Dict[str, List[TaskType]]
+        :rtype: Dict[str, List[VisionTaskType]]
         """
         return {
             "Core Detection & Segmentation": [
@@ -219,14 +219,14 @@ class TaskType(Enum):
         }
 
     @classmethod
-    def get_compatible_tasks(cls, task: "TaskType") -> List["TaskType"]:
+    def get_compatible_tasks(cls, task: "VisionTaskType") -> List["VisionTaskType"]:
         """
         Get tasks that are commonly combined with the given task.
 
         :param task: The reference task.
-        :type task: TaskType
+        :type task: VisionTaskType
         :return: List of tasks that work well together with the reference task.
-        :rtype: List[TaskType]
+        :rtype: List[VisionTaskType]
         """
         compatibility_map = {
             # Core tasks work well together
@@ -282,12 +282,12 @@ class TaskType(Enum):
         return compatibility_map.get(task, [])
 
     @classmethod
-    def get_output_types(cls, task: "TaskType") -> Dict[str, str]:
+    def get_output_types(cls, task: "VisionTaskType") -> Dict[str, str]:
         """
         Get the expected output types for a given task.
 
         :param task: The task to get output types for.
-        :type task: TaskType
+        :type task: VisionTaskType
         :return: Dictionary mapping output names to their types/shapes.
         :rtype: Dict[str, str]
         """
@@ -362,14 +362,14 @@ class TaskType(Enum):
         return output_types.get(task, {"output": "float32[...]"})
 
     @classmethod
-    def from_string(cls, task_str: str) -> "TaskType":
+    def from_string(cls, task_str: str) -> "VisionTaskType":
         """
-        Create TaskType from string value.
+        Create VisionTaskType from string value.
 
         :param task_str: String representation of the task.
         :type task_str: str
-        :return: TaskType enum value.
-        :rtype: TaskType
+        :return: VisionTaskType enum value.
+        :rtype: VisionTaskType
         :raises ValueError: If task_str is not a valid task type.
         """
         task_str = task_str.lower().strip()
@@ -384,25 +384,25 @@ class TaskType(Enum):
         )
 
     @classmethod
-    def from_strings(cls, task_strs: List[str]) -> List["TaskType"]:
+    def from_strings(cls, task_strs: List[str]) -> List["VisionTaskType"]:
         """
         Create list of TaskTypes from list of strings.
 
         :param task_strs: List of string representations of tasks.
         :type task_strs: List[str]
-        :return: List of TaskType enum values.
-        :rtype: List[TaskType]
+        :return: List of VisionTaskType enum values.
+        :rtype: List[VisionTaskType]
         :raises ValueError: If any task_str is not a valid task type.
         """
         return [cls.from_string(task_str) for task_str in task_strs]
 
     @classmethod
-    def to_strings(cls, tasks: List["TaskType"]) -> List[str]:
+    def to_strings(cls, tasks: List["VisionTaskType"]) -> List[str]:
         """
         Convert list of TaskTypes to list of strings.
 
-        :param tasks: List of TaskType enum values.
-        :type tasks: List[TaskType]
+        :param tasks: List of VisionTaskType enum values.
+        :type tasks: List[VisionTaskType]
         :return: List of string representations.
         :rtype: List[str]
         """
@@ -421,12 +421,12 @@ class TaskType(Enum):
                 return category_name
         return "Uncategorized"
 
-    def is_compatible_with(self, other: "TaskType") -> bool:
+    def is_compatible_with(self, other: "VisionTaskType") -> bool:
         """
         Check if this task is compatible with another task.
 
-        :param other: Another TaskType to check compatibility with.
-        :type other: TaskType
+        :param other: Another VisionTaskType to check compatibility with.
+        :type other: VisionTaskType
         :return: True if tasks are compatible, False otherwise.
         :rtype: bool
         """
@@ -439,7 +439,7 @@ class TaskType(Enum):
 
     def __repr__(self) -> str:
         """Detailed string representation of the task type."""
-        return f"TaskType.{self.name}"
+        return f"VisionTaskType.{self.name}"
 
 
 # ---------------------------------------------------------------------
@@ -459,7 +459,7 @@ class TaskConfiguration:
         │    TaskConfiguration     │
         │                          │
         │  ┌────────────────────┐  │
-        │  │  Set[TaskType]     │  │
+        │  │  Set[VisionTaskType]     │  │
         │  │  (enabled tasks)   │  │
         │  └────────┬───────────┘  │
         │           ▼              │
@@ -469,18 +469,18 @@ class TaskConfiguration:
         │  └────────────────────┘  │
         └──────────────────────────┘
 
-    :param tasks: List of TaskType enum values to enable.
-    :type tasks: List[TaskType]
+    :param tasks: List of VisionTaskType enum values to enable.
+    :type tasks: List[VisionTaskType]
     :param validate_compatibility: Whether to check task compatibility.
     :type validate_compatibility: bool
     """
 
-    def __init__(self, tasks: List[TaskType], validate_compatibility: bool = True):
+    def __init__(self, tasks: List[VisionTaskType], validate_compatibility: bool = True):
         """
         Initialize task configuration.
 
-        :param tasks: List of TaskType enum values to enable.
-        :type tasks: List[TaskType]
+        :param tasks: List of VisionTaskType enum values to enable.
+        :type tasks: List[VisionTaskType]
         :param validate_compatibility: Whether to validate task compatibility.
         :type validate_compatibility: bool
         :raises ValueError: If tasks list is empty, contains duplicates, or
@@ -493,7 +493,7 @@ class TaskConfiguration:
         if len(tasks) != len(set(tasks)):
             raise ValueError("Duplicate tasks found in configuration")
 
-        self._tasks: Set[TaskType] = set(tasks)
+        self._tasks: Set[VisionTaskType] = set(tasks)
 
         if validate_compatibility and len(tasks) > 1:
             self._validate_task_compatibility()
@@ -504,8 +504,8 @@ class TaskConfiguration:
 
         # Check for obviously incompatible combinations
         incompatible_pairs = [
-            (TaskType.COLORIZATION, TaskType.DENOISING),  # Different input requirements
-            (TaskType.STEREO_MATCHING, TaskType.OPTICAL_FLOW),  # Different input types
+            (VisionTaskType.COLORIZATION, VisionTaskType.DENOISING),  # Different input requirements
+            (VisionTaskType.STEREO_MATCHING, VisionTaskType.OPTICAL_FLOW),  # Different input types
         ]
 
         for task1, task2 in incompatible_pairs:
@@ -513,53 +513,53 @@ class TaskConfiguration:
                 raise ValueError(f"Tasks {task1} and {task2} are incompatible")
 
     @property
-    def tasks(self) -> Set[TaskType]:
+    def tasks(self) -> Set[VisionTaskType]:
         """Get the set of enabled tasks."""
         return self._tasks.copy()
 
-    def has_task(self, task: TaskType) -> bool:
+    def has_task(self, task: VisionTaskType) -> bool:
         """Check if a specific task is enabled."""
         return task in self._tasks
 
     # Core task checks
     def has_detection(self) -> bool:
         """Check if detection task is enabled."""
-        return TaskType.DETECTION in self._tasks
+        return VisionTaskType.DETECTION in self._tasks
 
     def has_segmentation(self) -> bool:
         """Check if segmentation task is enabled."""
-        return TaskType.SEGMENTATION in self._tasks
+        return VisionTaskType.SEGMENTATION in self._tasks
 
     def has_classification(self) -> bool:
         """Check if classification task is enabled."""
-        return TaskType.CLASSIFICATION in self._tasks
+        return VisionTaskType.CLASSIFICATION in self._tasks
 
     # Geometric task checks
     def has_depth_estimation(self) -> bool:
         """Check if depth estimation task is enabled."""
-        return TaskType.DEPTH_ESTIMATION in self._tasks
+        return VisionTaskType.DEPTH_ESTIMATION in self._tasks
 
     def has_surface_normals(self) -> bool:
         """Check if surface normals estimation task is enabled."""
-        return TaskType.SURFACE_NORMALS in self._tasks
+        return VisionTaskType.SURFACE_NORMALS in self._tasks
 
     # Instance segmentation checks
     def has_instance_segmentation(self) -> bool:
         """Check if instance segmentation task is enabled."""
-        return TaskType.INSTANCE_SEGMENTATION in self._tasks
+        return VisionTaskType.INSTANCE_SEGMENTATION in self._tasks
 
     def has_panoptic_segmentation(self) -> bool:
         """Check if panoptic segmentation task is enabled."""
-        return TaskType.PANOPTIC_SEGMENTATION in self._tasks
+        return VisionTaskType.PANOPTIC_SEGMENTATION in self._tasks
 
     # Enhancement task checks
     def has_denoising(self) -> bool:
         """Check if denoising task is enabled."""
-        return TaskType.DENOISING in self._tasks
+        return VisionTaskType.DENOISING in self._tasks
 
     def has_super_resolution(self) -> bool:
         """Check if super resolution task is enabled."""
-        return TaskType.SUPER_RESOLUTION in self._tasks
+        return VisionTaskType.SUPER_RESOLUTION in self._tasks
 
     def is_single_task(self) -> bool:
         """Check if only one task is enabled."""
@@ -569,24 +569,24 @@ class TaskConfiguration:
         """Check if multiple tasks are enabled."""
         return len(self._tasks) > 1
 
-    def get_enabled_tasks(self) -> List[TaskType]:
+    def get_enabled_tasks(self) -> List[VisionTaskType]:
         """Get list of enabled tasks in a consistent order."""
         # Return in a consistent order for reproducibility
-        all_tasks = TaskType.all_tasks()
+        all_tasks = VisionTaskType.all_tasks()
         return [task for task in all_tasks if task in self._tasks]
 
     def get_task_names(self) -> List[str]:
         """Get list of enabled task names as strings."""
-        return TaskType.to_strings(self.get_enabled_tasks())
+        return VisionTaskType.to_strings(self.get_enabled_tasks())
 
-    def get_tasks_by_category(self) -> Dict[str, List[TaskType]]:
+    def get_tasks_by_category(self) -> Dict[str, List[VisionTaskType]]:
         """
         Get enabled tasks organized by category.
 
         :return: Dictionary mapping category names to lists of enabled tasks.
-        :rtype: Dict[str, List[TaskType]]
+        :rtype: Dict[str, List[VisionTaskType]]
         """
-        categories = TaskType.get_task_categories()
+        categories = VisionTaskType.get_task_categories()
         result = {}
 
         for category_name, category_tasks in categories.items():
@@ -596,14 +596,14 @@ class TaskConfiguration:
 
         return result
 
-    def get_output_specifications(self) -> Dict[TaskType, Dict[str, str]]:
+    def get_output_specifications(self) -> Dict[VisionTaskType, Dict[str, str]]:
         """
         Get output specifications for all enabled tasks.
 
         :return: Dictionary mapping tasks to their output specifications.
-        :rtype: Dict[TaskType, Dict[str, str]]
+        :rtype: Dict[VisionTaskType, Dict[str, str]]
         """
-        return {task: TaskType.get_output_types(task) for task in self._tasks}
+        return {task: VisionTaskType.get_output_types(task) for task in self._tasks}
 
     def to_dict(self) -> dict:
         """
@@ -613,7 +613,7 @@ class TaskConfiguration:
         :rtype: dict
         """
         result = {}
-        for task in TaskType.all_tasks():
+        for task in VisionTaskType.all_tasks():
             result[f"enable_{task.value}"] = task in self._tasks
         return result
 
@@ -631,7 +631,7 @@ class TaskConfiguration:
         """
         tasks = []
 
-        for task in TaskType.all_tasks():
+        for task in VisionTaskType.all_tasks():
             key = f"enable_{task.value}"
             if config_dict.get(key, False):
                 tasks.append(task)
@@ -650,7 +650,7 @@ class TaskConfiguration:
         :return: TaskConfiguration instance.
         :rtype: TaskConfiguration
         """
-        tasks = TaskType.from_strings(task_strings)
+        tasks = VisionTaskType.from_strings(task_strings)
         return cls(tasks, validate_compatibility=validate_compatibility)
 
     def __str__(self) -> str:
@@ -686,67 +686,67 @@ class CommonTaskConfigurations:
     """
 
     # Single task configurations - Core tasks
-    DETECTION_ONLY = TaskConfiguration([TaskType.DETECTION])
-    SEGMENTATION_ONLY = TaskConfiguration([TaskType.SEGMENTATION])
-    CLASSIFICATION_ONLY = TaskConfiguration([TaskType.CLASSIFICATION])
-    DEPTH_ONLY = TaskConfiguration([TaskType.DEPTH_ESTIMATION])
-    SURFACE_NORMALS_ONLY = TaskConfiguration([TaskType.SURFACE_NORMALS])
+    DETECTION_ONLY = TaskConfiguration([VisionTaskType.DETECTION])
+    SEGMENTATION_ONLY = TaskConfiguration([VisionTaskType.SEGMENTATION])
+    CLASSIFICATION_ONLY = TaskConfiguration([VisionTaskType.CLASSIFICATION])
+    DEPTH_ONLY = TaskConfiguration([VisionTaskType.DEPTH_ESTIMATION])
+    SURFACE_NORMALS_ONLY = TaskConfiguration([VisionTaskType.SURFACE_NORMALS])
 
     # Single task configurations - Specialized
-    INSTANCE_SEGMENTATION_ONLY = TaskConfiguration([TaskType.INSTANCE_SEGMENTATION])
-    PANOPTIC_SEGMENTATION_ONLY = TaskConfiguration([TaskType.PANOPTIC_SEGMENTATION])
-    DENOISING_ONLY = TaskConfiguration([TaskType.DENOISING])
-    SUPER_RESOLUTION_ONLY = TaskConfiguration([TaskType.SUPER_RESOLUTION])
-    KEYPOINT_DETECTION_ONLY = TaskConfiguration([TaskType.KEYPOINT_DETECTION])
+    INSTANCE_SEGMENTATION_ONLY = TaskConfiguration([VisionTaskType.INSTANCE_SEGMENTATION])
+    PANOPTIC_SEGMENTATION_ONLY = TaskConfiguration([VisionTaskType.PANOPTIC_SEGMENTATION])
+    DENOISING_ONLY = TaskConfiguration([VisionTaskType.DENOISING])
+    SUPER_RESOLUTION_ONLY = TaskConfiguration([VisionTaskType.SUPER_RESOLUTION])
+    KEYPOINT_DETECTION_ONLY = TaskConfiguration([VisionTaskType.KEYPOINT_DETECTION])
 
     # Two-task combinations - Core
-    DETECTION_SEGMENTATION = TaskConfiguration([TaskType.DETECTION, TaskType.SEGMENTATION])
-    DETECTION_CLASSIFICATION = TaskConfiguration([TaskType.DETECTION, TaskType.CLASSIFICATION])
-    SEGMENTATION_CLASSIFICATION = TaskConfiguration([TaskType.SEGMENTATION, TaskType.CLASSIFICATION])
+    DETECTION_SEGMENTATION = TaskConfiguration([VisionTaskType.DETECTION, VisionTaskType.SEGMENTATION])
+    DETECTION_CLASSIFICATION = TaskConfiguration([VisionTaskType.DETECTION, VisionTaskType.CLASSIFICATION])
+    SEGMENTATION_CLASSIFICATION = TaskConfiguration([VisionTaskType.SEGMENTATION, VisionTaskType.CLASSIFICATION])
 
     # Two-task combinations - Geometric
-    DEPTH_NORMALS = TaskConfiguration([TaskType.DEPTH_ESTIMATION, TaskType.SURFACE_NORMALS])
-    SEGMENTATION_DEPTH = TaskConfiguration([TaskType.SEGMENTATION, TaskType.DEPTH_ESTIMATION])
-    DETECTION_DEPTH = TaskConfiguration([TaskType.DETECTION, TaskType.DEPTH_ESTIMATION])
+    DEPTH_NORMALS = TaskConfiguration([VisionTaskType.DEPTH_ESTIMATION, VisionTaskType.SURFACE_NORMALS])
+    SEGMENTATION_DEPTH = TaskConfiguration([VisionTaskType.SEGMENTATION, VisionTaskType.DEPTH_ESTIMATION])
+    DETECTION_DEPTH = TaskConfiguration([VisionTaskType.DETECTION, VisionTaskType.DEPTH_ESTIMATION])
 
     # Two-task combinations - Instance segmentation
-    DETECTION_INSTANCE_SEG = TaskConfiguration([TaskType.DETECTION, TaskType.INSTANCE_SEGMENTATION])
-    SEGMENTATION_INSTANCE_SEG = TaskConfiguration([TaskType.SEGMENTATION, TaskType.INSTANCE_SEGMENTATION])
+    DETECTION_INSTANCE_SEG = TaskConfiguration([VisionTaskType.DETECTION, VisionTaskType.INSTANCE_SEGMENTATION])
+    SEGMENTATION_INSTANCE_SEG = TaskConfiguration([VisionTaskType.SEGMENTATION, VisionTaskType.INSTANCE_SEGMENTATION])
 
     # Three-task combinations
     DETECTION_SEGMENTATION_DEPTH = TaskConfiguration([
-        TaskType.DETECTION, TaskType.SEGMENTATION, TaskType.DEPTH_ESTIMATION
+        VisionTaskType.DETECTION, VisionTaskType.SEGMENTATION, VisionTaskType.DEPTH_ESTIMATION
     ])
     DETECTION_SEGMENTATION_CLASSIFICATION = TaskConfiguration([
-        TaskType.DETECTION, TaskType.SEGMENTATION, TaskType.CLASSIFICATION
+        VisionTaskType.DETECTION, VisionTaskType.SEGMENTATION, VisionTaskType.CLASSIFICATION
     ])
     GEOMETRIC_UNDERSTANDING = TaskConfiguration([
-        TaskType.DEPTH_ESTIMATION, TaskType.SURFACE_NORMALS, TaskType.EDGE_DETECTION
+        VisionTaskType.DEPTH_ESTIMATION, VisionTaskType.SURFACE_NORMALS, VisionTaskType.EDGE_DETECTION
     ])
 
     # Panoptic understanding (full scene parsing)
     PANOPTIC_UNDERSTANDING = TaskConfiguration([
-        TaskType.DETECTION, TaskType.SEGMENTATION, TaskType.INSTANCE_SEGMENTATION, TaskType.DEPTH_ESTIMATION
+        VisionTaskType.DETECTION, VisionTaskType.SEGMENTATION, VisionTaskType.INSTANCE_SEGMENTATION, VisionTaskType.DEPTH_ESTIMATION
     ])
 
     # Enhancement pipeline
     IMAGE_ENHANCEMENT = TaskConfiguration([
-        TaskType.DENOISING, TaskType.SUPER_RESOLUTION, TaskType.DEHAZE
+        VisionTaskType.DENOISING, VisionTaskType.SUPER_RESOLUTION, VisionTaskType.DEHAZE
     ])
 
     # Pose and structure
     POSE_AND_STRUCTURE = TaskConfiguration([
-        TaskType.POSE_ESTIMATION, TaskType.KEYPOINT_DETECTION, TaskType.EDGE_DETECTION
+        VisionTaskType.POSE_ESTIMATION, VisionTaskType.KEYPOINT_DETECTION, VisionTaskType.EDGE_DETECTION
     ])
 
     # All core tasks
     ALL_CORE_TASKS = TaskConfiguration([
-        TaskType.DETECTION, TaskType.SEGMENTATION, TaskType.CLASSIFICATION,
-        TaskType.DEPTH_ESTIMATION, TaskType.SURFACE_NORMALS
+        VisionTaskType.DETECTION, VisionTaskType.SEGMENTATION, VisionTaskType.CLASSIFICATION,
+        VisionTaskType.DEPTH_ESTIMATION, VisionTaskType.SURFACE_NORMALS
     ])
 
     # All tasks (be careful with this one!)
-    ALL_TASKS = TaskConfiguration(TaskType.all_tasks(), validate_compatibility=False)
+    ALL_TASKS = TaskConfiguration(VisionTaskType.all_tasks(), validate_compatibility=False)
 
     @classmethod
     def get_all_configurations(cls) -> List[TaskConfiguration]:
@@ -830,7 +830,7 @@ def parse_task_list(tasks, validate_compatibility: bool = True) -> TaskConfigura
     """
     Parse various task input formats into TaskConfiguration.
 
-    Accepts TaskConfiguration instances, single or lists of TaskType enums,
+    Accepts TaskConfiguration instances, single or lists of VisionTaskType enums,
     and single or lists of string task names.
 
     :param tasks: Task specification in any supported format.
@@ -842,18 +842,18 @@ def parse_task_list(tasks, validate_compatibility: bool = True) -> TaskConfigura
     """
     if isinstance(tasks, TaskConfiguration):
         return tasks
-    elif isinstance(tasks, TaskType):
+    elif isinstance(tasks, VisionTaskType):
         return TaskConfiguration([tasks], validate_compatibility=validate_compatibility)
     elif isinstance(tasks, str):
-        return TaskConfiguration([TaskType.from_string(tasks)], validate_compatibility=validate_compatibility)
+        return TaskConfiguration([VisionTaskType.from_string(tasks)], validate_compatibility=validate_compatibility)
     elif isinstance(tasks, (list, tuple)):
         if not tasks:
             raise ValueError("Task list cannot be empty")
 
-        # Check if first element is string or TaskType
+        # Check if first element is string or VisionTaskType
         if isinstance(tasks[0], str):
             return TaskConfiguration.from_strings(list(tasks), validate_compatibility=validate_compatibility)
-        elif isinstance(tasks[0], TaskType):
+        elif isinstance(tasks[0], VisionTaskType):
             return TaskConfiguration(list(tasks), validate_compatibility=validate_compatibility)
         else:
             raise ValueError(f"Invalid task type in list: {type(tasks[0])}")
@@ -861,27 +861,27 @@ def parse_task_list(tasks, validate_compatibility: bool = True) -> TaskConfigura
         raise ValueError(f"Invalid tasks format: {type(tasks)}")
 
 
-def get_task_suggestions(base_task: TaskType, max_suggestions: int = 5) -> List[TaskType]:
+def get_task_suggestions(base_task: VisionTaskType, max_suggestions: int = 5) -> List[VisionTaskType]:
     """
     Get task suggestions that work well with a base task.
 
     :param base_task: The base task to find compatible tasks for.
-    :type base_task: TaskType
+    :type base_task: VisionTaskType
     :param max_suggestions: Maximum number of suggestions to return.
     :type max_suggestions: int
-    :return: List of compatible TaskType suggestions.
-    :rtype: List[TaskType]
+    :return: List of compatible VisionTaskType suggestions.
+    :rtype: List[VisionTaskType]
     """
-    compatible_tasks = TaskType.get_compatible_tasks(base_task)
+    compatible_tasks = VisionTaskType.get_compatible_tasks(base_task)
     return compatible_tasks[:max_suggestions]
 
 
-def validate_task_combination(tasks: List[TaskType]) -> tuple[bool, Optional[str]]:
+def validate_task_combination(tasks: List[VisionTaskType]) -> tuple[bool, Optional[str]]:
     """
     Validate if a combination of tasks is reasonable.
 
     :param tasks: List of tasks to validate.
-    :type tasks: List[TaskType]
+    :type tasks: List[VisionTaskType]
     :return: Tuple of (is_valid, error_message).
     :rtype: tuple[bool, Optional[str]]
     """
@@ -890,5 +890,16 @@ def validate_task_combination(tasks: List[TaskType]) -> tuple[bool, Optional[str
         return True, None
     except ValueError as e:
         return False, str(e)
+
+
+# ---------------------------------------------------------------------
+
+# DECISION plan_2026-06-08_8b32ca51/D-003: keep a `TaskType` alias for the
+# renamed `VisionTaskType`. Do NOT delete this alias as "dead code" — it is a
+# deliberate backward-compat safety net for any missed / out-of-tree caller that
+# still imports `TaskType` from this module (the 4 in-tree callers are migrated
+# to `VisionTaskType`). The enum members/values are identical; the alias is the
+# SAME object, so `isinstance`/`is` checks across both names hold. See decisions.md D-003.
+TaskType = VisionTaskType
 
 # ---------------------------------------------------------------------

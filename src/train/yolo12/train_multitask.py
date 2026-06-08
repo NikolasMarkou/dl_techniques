@@ -21,8 +21,8 @@ from train.common import setup_gpu
 from dl_techniques.utils.logger import logger
 from dl_techniques.datasets.sut import OptimizedSUTDataset
 from dl_techniques.models.yolo12.multitask import create_yolov12_multitask
-from dl_techniques.layers.vision_heads.task_types import (
-    TaskType,
+from dl_techniques.layers.heads.vision.task_types import (
+    VisionTaskType,
     TaskConfiguration,
     parse_task_list
 )
@@ -42,7 +42,7 @@ def parse_tasks(task_strings: List[str]) -> TaskConfiguration:
         return task_config
     except ValueError as e:
         logger.error(f"Invalid task configuration: {e}")
-        logger.info(f"Valid tasks are: {[t.value for t in TaskType.all_tasks()]}")
+        logger.info(f"Valid tasks are: {[t.value for t in VisionTaskType.all_tasks()]}")
         raise
 
 
@@ -458,7 +458,7 @@ def create_model_and_loss(
     use_uncertainty_weighting: bool = False,
     **loss_kwargs
 ) -> Tuple[keras.Model, keras.losses.Loss]:
-    """Create multitask model and loss function with TaskType enum support."""
+    """Create multitask model and loss function with VisionTaskType enum support."""
     logger.info(f"Creating model with tasks: {task_config.get_task_names()}")
 
     model = create_yolov12_multitask(
@@ -957,7 +957,7 @@ def main():
 
     parser.add_argument('--data-dir', type=str, required=True, help='Path to dataset directory')
     parser.add_argument('--tasks', nargs='+',
-                       choices=[task.value for task in TaskType.all_tasks()],
+                       choices=[task.value for task in VisionTaskType.all_tasks()],
                        default=['detection', 'segmentation', 'classification'],
                        help='Tasks to enable for training')
 

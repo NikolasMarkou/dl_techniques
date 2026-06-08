@@ -36,8 +36,8 @@ from typing import Dict, Any, List, Union, Tuple, Optional
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.bounding_box import bbox_iou
 
-from dl_techniques.layers.vision_heads.task_types import (
-    TaskType,
+from dl_techniques.layers.heads.vision.task_types import (
+    VisionTaskType,
     TaskConfiguration,
     parse_task_list
 )
@@ -868,7 +868,7 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
 
     def __init__(
         self,
-        tasks: Union[TaskConfiguration, List[str], List[TaskType]],
+        tasks: Union[TaskConfiguration, List[str], List[VisionTaskType]],
         # Separate class counts for each task
         num_detection_classes: Optional[int] = None,
         num_segmentation_classes: Optional[int] = None,
@@ -926,20 +926,20 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
     def _build_loss_functions(self) -> None:
         """Instantiate internal, task-specific loss functions."""
         if self.task_config.has_detection():
-            self._internal_losses[TaskType.DETECTION.value] = YOLOv12ObjectDetectionLoss(
+            self._internal_losses[VisionTaskType.DETECTION.value] = YOLOv12ObjectDetectionLoss(
                 num_classes=self.num_detection_classes,
                 input_shape=self.input_shape,
                 reg_max=self.reg_max
             )
 
         if self.task_config.has_segmentation():
-            self._internal_losses[TaskType.SEGMENTATION.value] = DiceFocalSegmentationLoss(
+            self._internal_losses[VisionTaskType.SEGMENTATION.value] = DiceFocalSegmentationLoss(
                 num_classes=self.num_segmentation_classes,  # Use segmentation-specific class count
                 from_logits=True
             )
 
         if self.task_config.has_classification():
-            self._internal_losses[TaskType.CLASSIFICATION.value] = ClassificationFocalLoss(
+            self._internal_losses[VisionTaskType.CLASSIFICATION.value] = ClassificationFocalLoss(
                 from_logits=True
             )
 
@@ -994,11 +994,11 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
         pred_shape = y_pred.shape
 
         if len(pred_shape) == 3:
-            return TaskType.DETECTION.value
+            return VisionTaskType.DETECTION.value
         elif len(pred_shape) == 4:
-            return TaskType.SEGMENTATION.value
+            return VisionTaskType.SEGMENTATION.value
         elif len(pred_shape) == 2:
-            return TaskType.CLASSIFICATION.value
+            return VisionTaskType.CLASSIFICATION.value
 
         return None
 
@@ -1032,12 +1032,12 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
 
         # Apply weighting (either learnable uncertainty or static)
         if self.use_uncertainty_weighting:
-            if task_name == TaskType.DETECTION.value:
+            if task_name == VisionTaskType.DETECTION.value:
                 return (
                     ops.exp(-self.detection_log_var) * raw_loss +
                     self.detection_log_var
                 )
-            elif task_name == TaskType.SEGMENTATION.value:
+            elif task_name == VisionTaskType.SEGMENTATION.value:
                 return (
                     ops.exp(-self.segmentation_log_var) * raw_loss +
                     self.segmentation_log_var
@@ -1049,9 +1049,9 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
                 )
         else:
             # Apply static weights
-            if task_name == TaskType.DETECTION.value:
+            if task_name == VisionTaskType.DETECTION.value:
                 return self.detection_weight * raw_loss
-            elif task_name == TaskType.SEGMENTATION.value:
+            elif task_name == VisionTaskType.SEGMENTATION.value:
                 return self.segmentation_weight * raw_loss
             else:  # Classification
                 return self.classification_weight * raw_loss
@@ -1068,25 +1068,25 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
         if self.use_uncertainty_weighting:
             # Extract weights from learnable uncertainty parameters
             if self.task_config.has_detection():
-                weights[TaskType.DETECTION.value] = float(
+                weights[VisionTaskType.DETECTION.value] = float(
                     ops.exp(-self.detection_log_var)
                 )
             if self.task_config.has_segmentation():
-                weights[TaskType.SEGMENTATION.value] = float(
+                weights[VisionTaskType.SEGMENTATION.value] = float(
                     ops.exp(-self.segmentation_log_var)
                 )
             if self.task_config.has_classification():
-                weights[TaskType.CLASSIFICATION.value] = float(
+                weights[VisionTaskType.CLASSIFICATION.value] = float(
                     ops.exp(-self.classification_log_var)
                 )
         else:
             # Return static weights
             if self.task_config.has_detection():
-                weights[TaskType.DETECTION.value] = self.detection_weight
+                weights[VisionTaskType.DETECTION.value] = self.detection_weight
             if self.task_config.has_segmentation():
-                weights[TaskType.SEGMENTATION.value] = self.segmentation_weight
+                weights[VisionTaskType.SEGMENTATION.value] = self.segmentation_weight
             if self.task_config.has_classification():
-                weights[TaskType.CLASSIFICATION.value] = self.classification_weight
+                weights[VisionTaskType.CLASSIFICATION.value] = self.classification_weight
 
         return weights
 
@@ -1143,7 +1143,7 @@ class YOLOv12MultiTaskLoss(keras.losses.Loss):
 # ---------------------------------------------------------------------
 
 def create_yolov12_multitask_loss(
-    tasks: Union[List[TaskType], List[str], TaskConfiguration],
+    tasks: Union[List[VisionTaskType], List[str], TaskConfiguration],
     num_detection_classes: Optional[int] = None,
     num_segmentation_classes: Optional[int] = None,
     num_classification_classes: Optional[int] = None,
