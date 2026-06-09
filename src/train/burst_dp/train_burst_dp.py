@@ -69,8 +69,10 @@ from dl_techniques.utils.logger import logger
 # environment does not need the full training stack on PYTHONPATH.
 try:
     from train.common.gpu import setup_gpu
+    from train.common import set_seeds
 except Exception:  # pragma: no cover — fallback for editable installs
     setup_gpu = None  # type: ignore[assignment]
+    set_seeds = None  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -384,8 +386,7 @@ def main(argv: Optional[list] = None) -> None:
     args = build_argparser().parse_args(argv)
 
     # Reproducibility
-    keras.utils.set_random_seed(args.seed)
-    np.random.seed(args.seed)
+    set_seeds(args.seed)
 
     # GPU
     if setup_gpu is not None:

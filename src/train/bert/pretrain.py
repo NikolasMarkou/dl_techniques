@@ -11,7 +11,7 @@ import keras
 import tensorflow as tf
 from typing import Optional, Tuple
 
-from train.common import setup_gpu
+from train.common import setup_gpu, set_seeds
 from train.common.nlp import (
     create_tokenizer,
     load_text_dataset,
@@ -141,8 +141,7 @@ def train_bert_mlm(config: TrainingConfig) -> Tuple[MaskedLanguageModel, keras.c
     logger.info("BERT MLM Pre-training with Tiktoken")
     logger.info("=" * 60)
 
-    tf.random.set_seed(42)
-    keras.utils.set_random_seed(42)
+    set_seeds(42)
     os.makedirs(config.save_dir, exist_ok=True)
 
     preprocessor = create_tokenizer(

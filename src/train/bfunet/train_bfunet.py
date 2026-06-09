@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass, field
 from typing import Tuple, List, Optional, Dict, Any, Union
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks, save_config_json, collect_image_paths, EpochMetricsPlotCallback, augment_patch
+from train.common import setup_gpu, set_seeds, create_callbacks as create_common_callbacks, save_config_json, collect_image_paths, EpochMetricsPlotCallback, augment_patch
 from dl_techniques.losses import ScaledMseLoss
 from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.utils.logger import logger
@@ -262,7 +262,7 @@ def unconditional_sampling(
     Implements Kadkhodaie & Simoncelli's unconditional sampling algorithm.
     """
     if seed is not None:
-        tf.random.set_seed(seed)
+        set_seeds(seed)
 
     logger.info(f"Starting unconditional sampling: {num_samples} samples, {num_steps} steps")
 
