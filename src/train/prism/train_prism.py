@@ -41,7 +41,10 @@ from train.common import (
     create_callbacks as create_common_callbacks,
     generate_training_curves,
     set_seeds,
-    create_learning_rate_schedule
+    create_learning_rate_schedule,
+    json_numpy_default,
+    BaseTimeSeriesTrainingConfig,
+    WindowedTimeSeriesProcessor,
 )
 from dl_techniques.utils.logger import logger
 from dl_techniques.analyzer import AnalysisConfig
@@ -68,17 +71,20 @@ set_random_seeds(42)
 # ---------------------------------------------------------------------
 
 @dataclass
-class PRISMTrainingConfig:
-    """Configuration for PRISM training on multiple patterns."""
-    result_dir: str = "results"
-    save_results: bool = True
-    experiment_name: str = "prism_forecasting"
-    target_categories: Optional[List[str]] = None
+class PRISMTrainingConfig(BaseTimeSeriesTrainingConfig):
+    """Configuration for PRISM training on multiple patterns.
 
-    # Data splits
-    train_ratio: float = 0.7
-    val_ratio: float = 0.15
-    test_ratio: float = 0.15
+    Inherits the shared time-series fields (data splits, optimizer/warmup knobs,
+    pattern selection, category weights, visualization + deep-analysis flags)
+    from :class:`BaseTimeSeriesTrainingConfig` and adds the PRISM architecture
+    fields below. ``batch_size`` is re-declared because PRISM's default (64)
+    differs from the base default (128); all other inherited defaults match.
+    """
+
+    experiment_name: str = "prism_forecasting"
+
+    # Re-declared: PRISM's default differs from the base (128).
+    batch_size: int = 64
 
     # PRISM architecture
     context_len: int = 168
@@ -101,78 +107,32 @@ class PRISMTrainingConfig:
         default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
     )
 
-    # Training
-    epochs: int = 150
-    batch_size: int = 64
-    steps_per_epoch: int = 500
-    learning_rate: float = 1e-4
-    gradient_clip_norm: float = 1.0
-    optimizer: str = 'adamw'
-
-    # Warmup schedule
-    use_warmup: bool = True
-    warmup_steps: int = 1000
-    warmup_start_lr: float = 1e-6
-
-    # Pattern selection
-    max_patterns: Optional[int] = None
-    max_patterns_per_category: int = 10
+    # PRISM-specific pattern selection
     min_data_length: int = 2000
-    normalize_per_instance: bool = True
-
-    # Category weights for balanced sampling
-    category_weights: Dict[str, float] = field(default_factory=lambda: {
-        "trend": 1.0, "seasonal": 1.0, "composite": 1.2,
-        "financial": 1.5, "weather": 1.3, "biomedical": 1.2,
-        "industrial": 1.3, "intermittent": 1.0, "volatility": 1.1,
-        "regime": 1.2, "structural": 1.1
-    })
-
-    # Visualization
-    visualize_every_n_epochs: int = 5
-    save_interim_plots: bool = True
-    plot_top_k_patterns: int = 12
-    create_learning_curves: bool = True
-    create_prediction_plots: bool = True
-
-    # Deep analysis
-    perform_deep_analysis: bool = True
-    analysis_frequency: int = 10
-    analysis_start_epoch: int = 1
 
     # ONNX export
     export_onnx: bool = False
     onnx_opset_version: int = 17
 
     def __post_init__(self) -> None:
+        super().__post_init__()  # ratio-sum invariant
         if self.preset not in PRISMModel.PRESETS:
             raise ValueError(
                 f"preset must be one of {list(PRISMModel.PRESETS.keys())}, "
                 f"got '{self.preset}'"
             )
-        total_ratio = self.train_ratio + self.val_ratio + self.test_ratio
-        if not np.isclose(total_ratio, 1.0, atol=1e-6):
-            raise ValueError(f"Data ratios must sum to 1.0, got {total_ratio}")
         if self.context_len <= 0 or self.forecast_len <= 0:
             raise ValueError("context_len and forecast_len must be positive")
         if self.use_quantile_head and 0.5 not in self.quantile_levels:
             logger.warning("Recommended to include 0.5 (median) in quantile_levels for evaluation.")
 
 
-def _fill_nans(data: np.ndarray) -> np.ndarray:
-    """Forward fill NaNs in numpy array."""
-    mask = np.isnan(data)
-    idx = np.where(~mask, np.arange(mask.shape[0]), 0)
-    np.maximum.accumulate(idx, axis=0, out=idx)
-    out = data[idx]
-    out[np.isnan(out)] = 0
-    return out
+class PRISMDataProcessor(WindowedTimeSeriesProcessor):
+    """PRISM data processor: thin subclass of :class:`WindowedTimeSeriesProcessor`.
 
-
-class PRISMDataProcessor:
-    """
-    Data processor for PRISM with infinite streaming training generator,
-    pre-computed val/test datasets, and per-instance normalization.
+    Uses the base's default reshape-both ``_make_sample`` / ``output_signature``
+    hooks (context -> ``(context_len, num_features)``, horizon ->
+    ``(forecast_len, num_features)``) with STANDARD per-instance normalization.
     """
 
     def __init__(
@@ -181,138 +141,19 @@ class PRISMDataProcessor:
             generator: TimeSeriesGenerator,
             selected_patterns: List[str],
             pattern_to_category: Dict[str, str],
-            num_features: int = 1
+            num_features: int = 1,
     ):
-        self.config = config
-        self.ts_generator = generator
-        self.selected_patterns = selected_patterns
-        self.pattern_to_category = pattern_to_category
-        self.num_features = num_features
-        self.weighted_patterns, self.weights = self._prepare_weighted_sampling()
-
-    def _prepare_weighted_sampling(self) -> Tuple[List[str], List[float]]:
-        patterns, weights = [], []
-        for name in self.selected_patterns:
-            category = self.pattern_to_category.get(name, "unknown")
-            weights.append(self.config.category_weights.get(category, 1.0))
-            patterns.append(name)
-        total = sum(weights)
-        if total > 0:
-            weights = [w / total for w in weights]
-        else:
-            weights = [1.0 / len(patterns)] * len(patterns)
-        return patterns, weights
-
-    def _safe_normalize(self, series: np.ndarray) -> np.ndarray:
-        """Clean + optionally per-instance normalize, with clipping for stability."""
-        series = np.clip(series, -1e6, 1e6)
-        if np.isnan(series).any():
-            series = _fill_nans(series)
-        if self.config.normalize_per_instance:
-            normalizer = TimeSeriesNormalizer(method=NormalizationMethod.STANDARD)
-            series = normalizer.fit_transform(series)
-        series = np.clip(series, -10.0, 10.0)
-        return series.astype(np.float32)
-
-    def _training_generator(self) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
-        """Infinite generator with buffered pattern mixing."""
-        patterns_to_mix, windows_per_pattern = 50, 5
-        buffer: List[Tuple[np.ndarray, np.ndarray]] = []
-        total_len = self.config.context_len + self.config.forecast_len
-
-        while True:
-            if not buffer:
-                for name in random.choices(self.weighted_patterns, self.weights, k=patterns_to_mix):
-                    data = self.ts_generator.generate_task_data(name)
-                    if len(data) < total_len or not np.isfinite(data).all():
-                        continue
-                    train_data = data[:int(self.config.train_ratio * len(data))]
-                    max_start = len(train_data) - total_len
-                    if max_start <= 0:
-                        continue
-                    for _ in range(windows_per_pattern):
-                        start = random.randint(0, max_start)
-                        window = self._safe_normalize(train_data[start:start + total_len])
-                        context = window[:self.config.context_len].reshape(-1, self.num_features)
-                        target = window[self.config.context_len:].reshape(-1, self.num_features)
-                        buffer.append((context, target))
-                random.shuffle(buffer)
-            if buffer:
-                yield buffer.pop()
-
-    def _generate_fixed_dataset(self, split: str, num_samples: int) -> Tuple[np.ndarray, np.ndarray]:
-        """Pre-generate fixed dataset for val/test."""
-        logger.info(f"Pre-computing {split} dataset ({num_samples} samples)")
-        contexts, targets = [], []
-        total_len = self.config.context_len + self.config.forecast_len
-        collected, cycle = 0, 0
-
-        while collected < num_samples:
-            name = self.selected_patterns[cycle % len(self.selected_patterns)]
-            cycle += 1
-            data = self.ts_generator.generate_task_data(name)
-            if len(data) < total_len or not np.isfinite(data).all():
-                continue
-
-            train_end = int(self.config.train_ratio * len(data))
-            val_end = train_end + int(self.config.val_ratio * len(data))
-            split_data = data[train_end:val_end] if split == 'val' else data[val_end:]
-
-            max_start = len(split_data) - total_len
-            if max_start <= 0:
-                continue
-            window = self._safe_normalize(split_data[random.randint(0, max_start):][:total_len])
-            contexts.append(window[:self.config.context_len].reshape(-1, self.num_features))
-            targets.append(window[self.config.context_len:].reshape(-1, self.num_features))
-            collected += 1
-
-        return np.array(contexts, dtype=np.float32), np.array(targets, dtype=np.float32)
-
-    def _test_generator_raw(self) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
-        """Fresh test samples for visualization."""
-        total_len = self.config.context_len + self.config.forecast_len
-        viz_patterns = self.selected_patterns.copy()
-        random.shuffle(viz_patterns)
-
-        for name in viz_patterns:
-            data = self.ts_generator.generate_task_data(name)
-            if len(data) < total_len or not np.isfinite(data).all():
-                continue
-            test_data = data[int((self.config.train_ratio + self.config.val_ratio) * len(data)):]
-            if len(test_data) < total_len:
-                continue
-            start = random.randint(0, len(test_data) - total_len)
-            window = self._safe_normalize(test_data[start:start + total_len])
-            yield (
-                window[:self.config.context_len].reshape(-1, self.num_features),
-                window[self.config.context_len:].reshape(-1, self.num_features)
-            )
-
-    def prepare_datasets(self) -> Dict[str, Any]:
-        """Create tf.data.Datasets for train/val/test."""
-        output_sig = (
-            tf.TensorSpec(shape=(self.config.context_len, self.num_features), dtype=tf.float32),
-            tf.TensorSpec(shape=(self.config.forecast_len, self.num_features), dtype=tf.float32)
+        super().__init__(
+            config,
+            generator,
+            selected_patterns,
+            pattern_to_category=pattern_to_category,
+            context_len=config.context_len,
+            horizon_len=config.forecast_len,
+            num_features=num_features,
+            normalize=True,
+            normalize_method=NormalizationMethod.STANDARD,
         )
-        train_ds = tf.data.Dataset.from_generator(
-            self._training_generator, output_signature=output_sig
-        ).batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
-
-        val_steps = max(50, len(self.selected_patterns))
-        test_steps = max(20, len(self.selected_patterns))
-
-        val_x, val_y = self._generate_fixed_dataset('val', val_steps * self.config.batch_size)
-        val_ds = tf.data.Dataset.from_tensor_slices((val_x, val_y)).batch(
-            self.config.batch_size).cache().prefetch(tf.data.AUTOTUNE)
-
-        test_x, test_y = self._generate_fixed_dataset('test', test_steps * self.config.batch_size)
-        test_ds = tf.data.Dataset.from_tensor_slices((test_x, test_y)).batch(
-            self.config.batch_size).cache().prefetch(tf.data.AUTOTUNE)
-
-        return {
-            'train_ds': train_ds, 'val_ds': val_ds, 'test_ds': test_ds,
-            'validation_steps': val_steps, 'test_steps': test_steps
-        }
 
 
 class PRISMPerformanceCallback(keras.callbacks.Callback):
@@ -614,12 +455,6 @@ class PRISMTrainer:
         }
 
     def _save_results(self, results: Dict, exp_dir: str) -> None:
-        def json_convert(o: Any) -> Any:
-            if isinstance(o, np.floating): return float(o)
-            if isinstance(o, np.integer): return int(o)
-            if isinstance(o, np.ndarray): return o.tolist()
-            return str(o)
-
         serializable = {
             'history': results['history'],
             'test_metrics': results['test_metrics'],
@@ -628,7 +463,7 @@ class PRISMTrainer:
             'config': self.config.__dict__
         }
         with open(os.path.join(exp_dir, 'results.json'), 'w') as f:
-            json.dump(serializable, f, indent=4, default=json_convert)
+            json.dump(serializable, f, indent=4, default=json_numpy_default)
 
     def _export_to_onnx(self, model_path: str, exp_dir: str) -> Optional[str]:
         """Export trained model to ONNX format. Opt-in via config.export_onnx."""
