@@ -27,7 +27,15 @@ import seaborn as sns
 import tensorflow as tf
 from scipy import stats
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks, generate_training_curves, set_seeds, json_numpy_default
+from train.common import (
+    setup_gpu,
+    create_callbacks as create_common_callbacks,
+    generate_training_curves,
+    set_seeds,
+    json_numpy_default,
+    BaseTimeSeriesTrainingConfig,
+    WindowedTimeSeriesProcessor,
+)
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.mdn import MDNModel
 from dl_techniques.datasets.time_series import (
@@ -41,25 +49,31 @@ plt.style.use('default')
 sns.set_palette("husl")
 
 
-def set_random_seeds(seed: int = 42) -> None:
-    """Set random seeds for reproducibility."""
-    set_seeds(seed)
-
-
-set_random_seeds(42)
-
-
 @dataclass
-class MDNTrainingConfig:
-    """Configuration for Multi-Task MDN training."""
-    result_dir: str = "results"
-    save_results: bool = True
+class MDNTrainingConfig(BaseTimeSeriesTrainingConfig):
+    """Configuration for Multi-Task MDN training.
+
+    Inherits the shared time-series fields (data splits, optimizer/warmup knobs,
+    pattern selection, category weights, visualization + deep-analysis flags)
+    from :class:`BaseTimeSeriesTrainingConfig` and adds the MDN architecture
+    fields below. mdn is multi-task / uniform-sampling, so the inherited
+    ``category_weights`` / ``use_warmup`` / ``target_categories`` / ``warmup_*``
+    fields are unused (harmless) and intentionally not re-declared. A handful of
+    inherited defaults are re-declared because the MDN originals differ from the
+    base: ``batch_size`` (256 vs 128), ``steps_per_epoch`` (200 vs 500),
+    ``learning_rate`` (5e-4 vs 1e-4), ``plot_top_k_patterns`` (9 vs 12). The
+    ``optimizer`` ('adamw'), ``gradient_clip_norm`` (1.0),
+    ``max_patterns_per_category`` (10), and ``normalize_per_instance`` (True)
+    match the base defaults and are dropped.
+    """
+
     experiment_name: str = "mdn_multitask"
 
-    # Data splits
-    train_ratio: float = 0.7
-    val_ratio: float = 0.15
-    test_ratio: float = 0.15
+    # Re-declared: MDN originals differ from the base defaults.
+    batch_size: int = 256            # base default: 128
+    steps_per_epoch: int = 200       # base default: 500
+    learning_rate: float = 5e-4      # base default: 1e-4
+    plot_top_k_patterns: int = 9     # base default: 12
 
     # Sequence
     window_size: int = 120
@@ -82,39 +96,17 @@ class MDNTrainingConfig:
     calibration_weight: float = 0.1
 
     # Training
-    epochs: int = 100
-    batch_size: int = 256
-    steps_per_epoch: int = 200
-    learning_rate: float = 5e-4
-    gradient_clip_norm: float = 1.0
-    optimizer: str = 'adamw'
     weight_decay: float = 1e-4
 
-    # Pattern selection
-    max_patterns: Optional[int] = None
-    max_patterns_per_category: int = 10
-    normalize_per_instance: bool = True
-
-    # Visualization
+    # Visualization / forecasting
     confidence_level: float = 0.95
     num_forecast_samples: int = 100
     visualize_every_n_epochs: int = 5
-    plot_top_k_patterns: int = 9
 
     def __post_init__(self) -> None:
-        total_ratio = self.train_ratio + self.val_ratio + self.test_ratio
-        if not np.isclose(total_ratio, 1.0, atol=1e-6):
-            raise ValueError(f"Data ratios must sum to 1.0, got {total_ratio}")
+        super().__post_init__()  # ratio-sum invariant
         if self.window_size <= 0:
             raise ValueError("window_size must be positive")
-
-
-def _fill_nans(data: np.ndarray) -> np.ndarray:
-    """Forward fill NaNs in numpy array."""
-    mask = np.isnan(data)
-    idx = np.where(~mask, np.arange(mask.shape[0]), 0)
-    np.maximum.accumulate(idx, axis=0, out=idx)
-    return data[idx]
 
 
 @keras.saving.register_keras_serializable()
@@ -179,121 +171,50 @@ class MultiTaskMDNModel(keras.Model):
         return self.mdn_core.mdn_layer
 
 
-class MDNDataProcessor:
-    """Data processor for Multi-Task MDN with task ID mapping and streaming generation."""
+class MDNDataProcessor(WindowedTimeSeriesProcessor):
+    """Multi-task MDN data processor: subclass of :class:`WindowedTimeSeriesProcessor`.
+
+    mdn is the divergent (multi-task) call site: uniform pattern sampling
+    (``pattern_to_category=None``), ROBUST per-instance normalization, and a
+    nested ``((sequence, task_id), target)`` sample structure. Both axes are
+    expressed via the two base hooks (:meth:`_make_sample` emits the task id and
+    the base ``tf.nest`` stacking handles the nested structure) plus ctor params
+    (``windows_per_pattern=10``, ``min_length_multiplier=2``,
+    ``require_finite=False`` preserving the original no-skip behavior).
+    """
 
     def __init__(self, config: MDNTrainingConfig, generator: TimeSeriesGenerator,
                  selected_patterns: List[str]):
-        self.config = config
-        self.ts_generator = generator
-        self.selected_patterns = selected_patterns
-        self.pattern_to_id = {name: i for i, name in enumerate(selected_patterns)}
-        self.id_to_pattern = {i: name for name, i in self.pattern_to_id.items()}
-        self.num_tasks = len(selected_patterns)
+        super().__init__(
+            config,
+            generator,
+            selected_patterns,
+            pattern_to_category=None,  # uniform sampling
+            context_len=config.window_size,
+            horizon_len=config.pred_horizon,
+            num_features=1,
+            normalize=True,
+            normalize_method=NormalizationMethod.ROBUST,
+            windows_per_pattern=10,
+            min_length_multiplier=2,
+            require_finite=False,
+        )
         logger.info(f"Initialized processor with {self.num_tasks} tasks")
 
-    def _safe_normalize(self, series: np.ndarray) -> np.ndarray:
-        series = np.clip(series, -1e6, 1e6)
-        if self.config.normalize_per_instance:
-            normalizer = TimeSeriesNormalizer(method=NormalizationMethod.ROBUST)
-            if np.isnan(series).any():
-                series = _fill_nans(series)
-            series = normalizer.fit_transform(series)
-        series = np.clip(series, -10.0, 10.0)
-        return series.astype(np.float32)
+    def _make_sample(self, window: np.ndarray, pattern_name: str) -> Tuple[Any, Any]:
+        ctx = self.context_len
+        task_id = self.pattern_to_id[pattern_name]
+        x_seq = window[:ctx].reshape(-1, 1).astype(np.float32)
+        y = window[ctx:].reshape(-1).astype(np.float32)
+        return (x_seq, np.array([task_id], dtype=np.int32)), y
 
-    def _training_generator(self) -> Generator[Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray], None, None]:
-        """Infinite generator yielding ((sequence, task_id), target)."""
-        patterns_to_mix, windows_per_pattern = 50, 10
-        buffer = []
-        total_len = self.config.window_size + self.config.pred_horizon
-
-        while True:
-            if not buffer:
-                for name in random.choices(self.selected_patterns, k=patterns_to_mix):
-                    task_id = self.pattern_to_id[name]
-                    try:
-                        data = self.ts_generator.generate_task_data(name)
-                    except Exception:
-                        continue
-                    if len(data) < total_len * 2:
-                        continue
-                    train_data = data[:int(self.config.train_ratio * len(data))]
-                    if len(train_data) < total_len:
-                        continue
-                    max_start = len(train_data) - total_len
-                    for _ in range(windows_per_pattern):
-                        start = random.randint(0, max_start)
-                        window = self._safe_normalize(train_data[start:start + total_len])
-                        x_seq = window[:self.config.window_size].reshape(-1, 1)
-                        y_target = window[self.config.window_size:].reshape(-1)
-                        buffer.append(((x_seq, np.array([task_id], dtype=np.int32)), y_target))
-                random.shuffle(buffer)
-            if buffer:
-                yield buffer.pop()
-
-    def _generate_fixed_dataset(self, split: str, num_samples: int
-                                ) -> Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray]:
-        """Pre-compute dataset for val/test."""
-        logger.info(f"Pre-computing {split} dataset ({num_samples} samples)")
-        x_seqs, x_tasks, y_targets = [], [], []
-        total_len = self.config.window_size + self.config.pred_horizon
-        collected, cycle = 0, 0
-
-        while collected < num_samples:
-            name = self.selected_patterns[cycle % self.num_tasks]
-            cycle += 1
-            task_id = self.pattern_to_id[name]
-            try:
-                data = self.ts_generator.generate_task_data(name)
-            except Exception:
-                continue
-
-            train_end = int(self.config.train_ratio * len(data))
-            val_end = train_end + int(self.config.val_ratio * len(data))
-            split_data = data[train_end:val_end] if split == 'val' else data[val_end:]
-            if len(split_data) < total_len:
-                continue
-
-            start = random.randint(0, len(split_data) - total_len)
-            window = self._safe_normalize(split_data[start:start + total_len])
-            x_seqs.append(window[:self.config.window_size].reshape(-1, 1))
-            x_tasks.append([task_id])
-            y_targets.append(window[self.config.window_size:].reshape(-1))
-            collected += 1
-
+    @property
+    def output_signature(self) -> Tuple[Any, Any]:
         return (
-            (np.array(x_seqs, dtype=np.float32), np.array(x_tasks, dtype=np.int32)),
-            np.array(y_targets, dtype=np.float32)
-        )
-
-    def prepare_datasets(self) -> Dict[str, Any]:
-        """Create tf.data.Datasets for train/val/test."""
-        output_sig = (
-            (tf.TensorSpec(shape=(self.config.window_size, 1), dtype=tf.float32),
+            (tf.TensorSpec(shape=(self.context_len, 1), dtype=tf.float32),
              tf.TensorSpec(shape=(1,), dtype=tf.int32)),
-            tf.TensorSpec(shape=(1,), dtype=tf.float32)
+            tf.TensorSpec(shape=(self.horizon_len,), dtype=tf.float32),
         )
-        train_ds = tf.data.Dataset.from_generator(
-            self._training_generator, output_signature=output_sig
-        ).batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
-
-        val_steps = max(50, self.num_tasks)
-        test_steps = max(20, self.num_tasks)
-
-        val_inputs, val_y = self._generate_fixed_dataset('val', val_steps * self.config.batch_size)
-        val_ds = tf.data.Dataset.from_tensor_slices((val_inputs, val_y)).batch(
-            self.config.batch_size).cache().prefetch(tf.data.AUTOTUNE)
-
-        test_inputs, test_y = self._generate_fixed_dataset('test', test_steps * self.config.batch_size)
-        test_ds = tf.data.Dataset.from_tensor_slices((test_inputs, test_y)).batch(
-            self.config.batch_size).cache().prefetch(tf.data.AUTOTUNE)
-
-        return {
-            'train_ds': train_ds, 'val_ds': val_ds, 'test_ds': test_ds,
-            'validation_steps': val_steps, 'test_steps': test_steps,
-            'test_data_raw': (test_inputs, test_y)
-        }
 
 
 class MDNPerformanceCallback(keras.callbacks.Callback):
@@ -505,6 +426,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    set_seeds(42)
     setup_gpu(args.gpu)
 
     config = MDNTrainingConfig(
