@@ -25,15 +25,18 @@ These are plain classes / functions (not Keras layers or models) so there is no
 ``@keras.saving.register_keras_serializable()`` decoration here.
 """
 
+import os
 import random
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+import keras
 import numpy as np
 import tensorflow as tf
 
 from dl_techniques.datasets.time_series import TimeSeriesNormalizer, NormalizationMethod
 from dl_techniques.utils.logger import logger
+from train.common.evaluation import generate_training_curves
 
 # Default category -> sampling-weight map shared by nbeats / prism / tirex.
 # Centralized here so the three trio configs no longer each carry a copy.
@@ -410,3 +413,143 @@ class WindowedTimeSeriesProcessor:
             'test_steps': test_steps,
             'test_data_raw': test_stacked,
         }
+
+
+# --------------------------------------------------------------------------- #
+# Per-epoch visualization callback (shared scaffolding)
+# --------------------------------------------------------------------------- #
+def _prepare_viz_data_from_processor(
+        processor: WindowedTimeSeriesProcessor, k: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Collect up to ``k`` fixed test windows from a processor for visualization.
+
+    Absorbs the identical 10-line ``_test_generator_raw`` collection loop that
+    nbeats / prism / tirex each carried in their callback's viz-data prep. Each
+    yielded ``(x, y)`` is appended verbatim — so nbeats's reconstruction tuple
+    target (``(forecast, backcast)`` when ``reconstruction_loss_weight > 0``)
+    passes through unchanged.
+
+    Args:
+        processor: A :class:`WindowedTimeSeriesProcessor` exposing
+            ``_test_generator_raw()``.
+        k: Maximum number of windows to collect (``plot_top_k_patterns``).
+
+    Returns:
+        ``(viz_x, viz_y)`` stacked numpy arrays, or two empty arrays if the
+        generator yielded nothing.
+    """
+    viz_x, viz_y = [], []
+    for x, y in processor._test_generator_raw():
+        viz_x.append(x)
+        viz_y.append(y)
+        if len(viz_x) >= k:
+            break
+    if not viz_x:
+        return np.array([]), np.array([])
+    return np.array(viz_x), np.array(viz_y)
+
+
+class TimeSeriesPerformanceCallback(keras.callbacks.Callback):
+    """Abstract base for the per-epoch visualization callbacks of the TS trainers.
+
+    Owns the scaffolding that was ~70% identical across the four time-series
+    training scripts (nbeats / prism / tirex / mdn): the ``__init__`` +
+    ``makedirs``, the ``loss`` / ``val_loss`` history accumulation, the
+    ``(epoch + 1) % visualize_every_n_epochs`` gate, the
+    ``create_learning_curves`` / ``create_prediction_plots`` flag checks, and the
+    delegation of learning-curve rendering to
+    :func:`train.common.evaluation.generate_training_curves`. Only the
+    genuinely model-specific pieces are left to subclasses, via three hooks:
+
+    - :meth:`_prepare_viz_data` — load the fixed test samples used for prediction
+      plots. Default returns empty arrays; the forecasting trio override it via
+      :func:`_prepare_viz_data_from_processor`, while mdn overrides it to return
+      a pre-built ``viz_data`` tuple (it never touches a processor).
+    - :meth:`_extend_history` — append per-model metric keys (and optionally the
+      learning rate via :meth:`_track_lr`) to ``self.training_history`` each
+      epoch. Default is a no-op (mdn / nbeats track nothing extra).
+    - :meth:`_plot_predictions` — render the model-specific prediction plot
+      (mixture PDF / backcast-forecast / 4D or 3D quantile bands). Abstract:
+      the default raises :class:`NotImplementedError`.
+
+    Per SYSTEM.md, Keras callbacks are NOT
+    ``@keras.saving.register_keras_serializable`` — this class carries no
+    serialization decorator.
+
+    Args:
+        config: A :class:`BaseTimeSeriesTrainingConfig` (or subclass). Supplies
+            ``visualize_every_n_epochs`` and the optional
+            ``create_learning_curves`` / ``create_prediction_plots`` flags
+            (read via ``getattr(..., True)`` so configs lacking them — mdn —
+            keep "always plot" behavior).
+        save_dir: Directory for the emitted plot files (created if absent).
+        model_name: Short label used by subclasses when titling plots.
+    """
+
+    BASE_HISTORY_KEYS = ['loss', 'val_loss']
+
+    def __init__(self, config, save_dir: str, model_name: str = "model"):
+        super().__init__()
+        self.config = config
+        self.save_dir = save_dir
+        self.model_name = model_name
+        os.makedirs(self.save_dir, exist_ok=True)
+        self.training_history: Dict[str, List[float]] = {
+            k: [] for k in self.BASE_HISTORY_KEYS
+        }
+        self.viz_test_data = self._prepare_viz_data()
+
+    # ------------------------------------------------------------------ #
+    # Hooks (overridable by subclasses)
+    # ------------------------------------------------------------------ #
+    def _prepare_viz_data(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Load the fixed test samples for prediction plots. Default: empties."""
+        return np.array([]), np.array([])
+
+    def _extend_history(self, logs: dict) -> None:
+        """Append model-specific metrics to ``self.training_history``. Default: no-op."""
+        pass
+
+    def _track_lr(self, logs: dict) -> None:
+        """Opt-in helper: append the current learning rate under ``'lr'``.
+
+        Subclasses that track LR (prism / tirex) call this from their
+        :meth:`_extend_history`. The value comes from ``logs['lr']`` when Keras
+        provides it, else from the optimizer's ``learning_rate`` (guarded — on
+        any failure the epoch is simply skipped, never raising).
+        """
+        lr = logs.get('lr')
+        if lr is None:
+            try:
+                lr = float(keras.ops.convert_to_numpy(
+                    self.model.optimizer.learning_rate))
+            except Exception:
+                return
+        self.training_history.setdefault('lr', []).append(lr)
+
+    def _plot_predictions(self, epoch: int) -> None:
+        """Render the model-specific prediction plot. Abstract — must override."""
+        raise NotImplementedError
+
+    # ------------------------------------------------------------------ #
+    # Shared epoch loop + learning-curve delegation
+    # ------------------------------------------------------------------ #
+    def on_epoch_end(self, epoch: int, logs=None) -> None:
+        logs = logs or {}
+        self.training_history['loss'].append(logs.get('loss', 0.0))
+        self.training_history['val_loss'].append(logs.get('val_loss', 0.0))
+        self._extend_history(logs)
+
+        if (epoch + 1) % self.config.visualize_every_n_epochs == 0:
+            if getattr(self.config, 'create_learning_curves', True):
+                self._plot_learning_curves(epoch)
+            if getattr(self.config, 'create_prediction_plots', True):
+                self._plot_predictions(epoch)
+
+    def _plot_learning_curves(self, epoch: int) -> None:
+        """Delegate learning-curve rendering to the shared evaluation helper."""
+        generate_training_curves(
+            history=self.training_history,
+            results_dir=self.save_dir,
+            filename=f"learning_curves_epoch_{epoch + 1:03d}",
+        )
