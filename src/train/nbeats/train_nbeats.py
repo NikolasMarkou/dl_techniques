@@ -34,7 +34,6 @@ from train.common import (
     generate_training_curves,
     set_seeds,
     create_learning_rate_schedule,
-    json_numpy_default,
     BaseTimeSeriesTrainingConfig,
     WindowedTimeSeriesProcessor,
 )
@@ -414,6 +413,15 @@ class NBeatsTrainer:
         }
 
     def _save_results(self, results: Dict, exp_dir: str) -> None:
+        # Local serializer (NOT train.common.json_numpy_default): config.__dict__
+        # carries `primary_loss: Union[str, keras.losses.Loss]`; json_numpy_default
+        # raises on a Loss object whereas str() degrades gracefully. See
+        # plan_2026-06-09_a3c7304c/decisions.md D-005.
+        def default(o: Any) -> Any:
+            if isinstance(o, (np.integer, np.floating)):
+                return float(o)
+            return str(o)
+
         serializable = {
             'history': results['history'],
             'test_metrics': results['test_metrics'],
@@ -421,7 +429,7 @@ class NBeatsTrainer:
             'config': self.config.__dict__
         }
         with open(os.path.join(exp_dir, 'results.json'), 'w') as f:
-            json.dump(serializable, f, indent=4, default=json_numpy_default)
+            json.dump(serializable, f, indent=4, default=default)
 
 
 def parse_args() -> argparse.Namespace:
