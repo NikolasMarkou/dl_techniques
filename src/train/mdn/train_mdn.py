@@ -14,9 +14,8 @@ import sys
 import json
 import random
 import argparse
-from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Any, Dict, Generator, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import keras
 import matplotlib
@@ -30,19 +29,20 @@ from scipy import stats
 from train.common import (
     setup_gpu,
     create_callbacks as create_common_callbacks,
-    generate_training_curves,
     set_seeds,
     json_numpy_default,
     BaseTimeSeriesTrainingConfig,
     WindowedTimeSeriesProcessor,
+    TimeSeriesPerformanceCallback,
+    BaseTimeSeriesTrainer,
+    create_ts_argument_parser,
 )
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.mdn import MDNModel
 from dl_techniques.datasets.time_series import (
     TimeSeriesGenerator,
     TimeSeriesGeneratorConfig,
-    TimeSeriesNormalizer,
-    NormalizationMethod
+    NormalizationMethod,
 )
 
 plt.style.use('default')
@@ -217,36 +217,46 @@ class MDNDataProcessor(WindowedTimeSeriesProcessor):
         )
 
 
-class MDNPerformanceCallback(keras.callbacks.Callback):
-    """Tracks and visualizes MDN probabilistic forecast performance."""
+class MDNPerformanceCallback(TimeSeriesPerformanceCallback):
+    """Tracks and visualizes MDN probabilistic forecast performance.
 
-    def __init__(self, config: MDNTrainingConfig, save_dir: str,
-                 viz_data: Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray]):
-        super().__init__()
-        self.config = config
-        self.save_dir = save_dir
-        self.viz_inputs, self.viz_targets = viz_data
-        os.makedirs(self.save_dir, exist_ok=True)
-        self.history_log = {'loss': [], 'val_loss': []}
+    Thin subclass of :class:`TimeSeriesPerformanceCallback`. The base owns the
+    scaffolding (``__init__`` + makedirs, ``loss``/``val_loss`` accumulation, the
+    ``visualize_every_n_epochs`` gate, learning-curve delegation to
+    ``generate_training_curves``). mdn is the divergent (A4 / D-002) call site:
+    its callback is seeded with a PRE-BUILT ``viz_data`` tuple
+    (``((seq_stack, task_stack), y_stack)`` = the ``test_data_raw`` produced by
+    ``prepare_datasets``), NOT a processor — so :meth:`_prepare_viz_data` simply
+    returns the stored tuple, bypassing the processor path the trio use. mdn
+    tracks NO extra history keys and NO learning rate, so :meth:`_extend_history`
+    is left as the base no-op. mdn's config lacks ``create_learning_curves`` /
+    ``create_prediction_plots``, so the base's ``getattr(..., True)`` flag checks
+    default True → the original "always plot both" behavior is preserved.
+    """
 
-    def on_epoch_end(self, epoch: int, logs: Optional[Dict] = None) -> None:
-        logs = logs or {}
-        self.history_log['loss'].append(logs.get('loss', 0))
-        self.history_log['val_loss'].append(logs.get('val_loss', 0))
+    def __init__(self, config: MDNTrainingConfig,
+                 viz_data: Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray],
+                 save_dir: str, model_name: str = "model"):
+        # viz_data must be stored BEFORE super().__init__: the base ctor calls
+        # _prepare_viz_data() which returns self._viz_data.
+        self._viz_data = viz_data
+        super().__init__(config, save_dir, model_name)
 
-        if (epoch + 1) % self.config.visualize_every_n_epochs == 0:
-            logger.info(f"Visualizations for epoch {epoch + 1}")
-            self._plot_learning_curves(epoch)
-            self._plot_probabilistic_predictions(epoch)
+    def _prepare_viz_data(self) -> Tuple[Any, Any]:
+        # A4 / D-002: return the pre-built (inputs, targets) tuple verbatim; the
+        # base no-op default (empty arrays / processor path) is intentionally
+        # bypassed — mdn never touches a processor in its callback.
+        return self._viz_data
 
-    def _plot_learning_curves(self, epoch: int) -> None:
-        generate_training_curves(
-            history=self.history_log,
-            results_dir=self.save_dir,
-            filename=f"learning_curves_epoch_{epoch+1:03d}",
-        )
+    @property
+    def viz_inputs(self):
+        return self.viz_test_data[0]
 
-    def _plot_probabilistic_predictions(self, epoch: int) -> None:
+    @property
+    def viz_targets(self):
+        return self.viz_test_data[1]
+
+    def _plot_predictions(self, epoch: int) -> None:
         """Visualize MDN outputs: context, target, and predicted distribution."""
         total_samples = len(self.viz_targets)
         indices = np.random.choice(total_samples, min(self.config.plot_top_k_patterns, total_samples), replace=False)
@@ -311,45 +321,50 @@ class MDNPerformanceCallback(keras.callbacks.Callback):
         plt.close()
 
 
-class MDNTrainer:
-    """Trainer for Multi-Task MDN."""
+class MDNTrainer(BaseTimeSeriesTrainer):
+    """Orchestrates Multi-Task MDN training.
 
-    def __init__(self, config: MDNTrainingConfig,
-                 generator_config: TimeSeriesGeneratorConfig) -> None:
-        self.config = config
-        self.generator = TimeSeriesGenerator(generator_config)
-        all_patterns = self.generator.get_task_names()
+    Thin subclass of :class:`BaseTimeSeriesTrainer`. The base owns the skeleton
+    (``__init__`` generator/pattern setup, ``_create_experiment_dir``,
+    ``_train_model`` fit+evaluate, ``run_experiment``). mdn is the most divergent
+    call site (multi-task, uniform sampling, pre-built ``viz_data``, no ONNX) and
+    overrides:
 
-        if config.max_patterns:
-            self.selected_patterns = random.sample(all_patterns, config.max_patterns)
-        else:
-            self.selected_patterns = all_patterns
+    - :meth:`_select_patterns` — UNIFORM ``random.sample`` (D-002), NOT the base
+      category-balanced selection. The base ``__init__`` still builds
+      ``pattern_to_category`` (harmless; the processor passes ``None``).
+    - :meth:`_build_processor` — the multi-task :class:`MDNDataProcessor` (3-arg
+      signature, ``pattern_to_category=None`` internally).
+    - :meth:`_build_model` — bespoke :class:`MultiTaskMDNModel` + dummy-input
+      warmup + ``mdn_loss_wrapper`` compile.
+    - :meth:`_make_callbacks` — ``include_analyzer=False`` / ``patience=15`` /
+      ``model_name="MDN"`` (mdn never runs the deep analyzer), and seeds the
+      performance callback with ``self._test_data_raw`` (the ``test_data_raw``
+      the base ``_train_model`` exposes before calling this).
+    - :meth:`_save_results` — mdn's original key set is ``{history, test_metrics,
+      config}`` (NO ``final_epoch``, NO ``onnx_path``), so this overrides the
+      base 4-key write to match exactly.
+    - :meth:`_build_performance_callback` — abstract base hook; mdn builds it
+      inside :meth:`_make_callbacks` instead (it needs the viz tuple), so this
+      raises if ever called via the base path.
+    """
 
-        self.processor = MDNDataProcessor(config, self.generator, self.selected_patterns)
-        self.model: Optional[MultiTaskMDNModel] = None
+    def _select_patterns(self) -> List[str]:
+        # DECISION plan_2026-06-09_a3c7304c/D-002: uniform random.sample, NOT the
+        # base category-balanced _select_patterns. mdn is multi-task with uniform
+        # sampling (pattern_to_category=None in its processor). Do NOT replace this
+        # with the base body — that would re-introduce category weighting mdn never
+        # had. See decisions.md D-002.
+        all_patterns = self.all_patterns
+        if self.config.max_patterns:
+            return random.sample(all_patterns, self.config.max_patterns)
+        return all_patterns
 
-    def run_experiment(self) -> Dict[str, Any]:
-        logger.info("Starting Multi-Task MDN experiment")
-        self.exp_dir = self._create_experiment_dir()
-        data_pipeline = self.processor.prepare_datasets()
-        self.model = self._build_model(self.processor.num_tasks)
-        training_results = self._train_model(data_pipeline, self.exp_dir)
+    def _build_processor(self) -> MDNDataProcessor:
+        return MDNDataProcessor(self.config, self.generator, self.selected_patterns)
 
-        if self.config.save_results:
-            self._save_results(training_results, self.exp_dir)
-
-        return {
-            'config': self.config, 'experiment_dir': self.exp_dir,
-            'results': training_results
-        }
-
-    def _create_experiment_dir(self) -> str:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        exp_dir = os.path.join(self.config.result_dir, f"{self.config.experiment_name}_{timestamp}")
-        os.makedirs(exp_dir, exist_ok=True)
-        return exp_dir
-
-    def _build_model(self, num_tasks: int) -> MultiTaskMDNModel:
+    def _build_model(self) -> MultiTaskMDNModel:
+        num_tasks = self.processor.num_tasks
         logger.info(f"Building Multi-Task MDN for {num_tasks} tasks")
         model = MultiTaskMDNModel(num_tasks, self.config)
 
@@ -370,11 +385,21 @@ class MDNTrainer:
             return base_loss
 
         model.compile(optimizer=optimizer, loss=mdn_loss_wrapper)
-        model.summary(print_fn=logger.info)
         return model
 
-    def _train_model(self, data_pipeline: Dict[str, Any], exp_dir: str) -> Dict[str, Any]:
+    def _build_performance_callback(self, viz_dir: str):
+        # mdn builds its callback inside _make_callbacks (it needs the pre-built
+        # viz_data tuple). This base hook is intentionally unused.
+        raise NotImplementedError("MDN builds its callback in _make_callbacks")
+
+    def _make_callbacks(self, exp_dir: str) -> List:
+        """Override: mdn uses ``include_analyzer=False`` / ``patience=15`` /
+        ``model_name="MDN"`` and seeds the perf callback with the pre-built
+        ``test_data_raw`` tuple (exposed on ``self._test_data_raw`` by the base
+        ``_train_model``). ``use_lr_schedule=False`` (mdn uses a constant LR).
+        """
         viz_dir = os.path.join(exp_dir, 'visualizations')
+        os.makedirs(viz_dir, exist_ok=True)
 
         callbacks, _ = create_common_callbacks(
             model_name="MDN",
@@ -385,43 +410,59 @@ class MDNTrainer:
             include_terminate_on_nan=True,
             include_analyzer=False,
         )
-        callbacks.append(MDNPerformanceCallback(self.config, viz_dir, data_pipeline['test_data_raw']))
+        callbacks.append(
+            MDNPerformanceCallback(self.config, self._test_data_raw, viz_dir, "MDN"))
+        return callbacks
 
-        history = self.model.fit(
-            data_pipeline['train_ds'],
-            validation_data=data_pipeline['val_ds'],
-            epochs=self.config.epochs,
-            steps_per_epoch=self.config.steps_per_epoch,
-            validation_steps=data_pipeline['validation_steps'],
-            callbacks=callbacks, verbose=1
-        )
-
-        logger.info("Evaluating on test set")
-        test_metrics = self.model.evaluate(
-            data_pipeline['test_ds'], steps=data_pipeline['test_steps'], return_dict=True)
-
-        return {'history': history.history, 'test_metrics': test_metrics}
-
-    def _save_results(self, results: Dict, exp_dir: str) -> None:
+    def _save_results(self, results: Dict[str, Any], exp_dir: str,
+                      extra_fields: Optional[Dict[str, Any]] = None) -> None:
+        # mdn's original results.json key set is {history, test_metrics, config}
+        # ONLY (no final_epoch, no onnx_path). Override the base 4-key write to
+        # match exactly. (extra_fields is part of the base signature; mdn never
+        # passes any.)
         serializable = {
             'history': results['history'],
             'test_metrics': {k: float(v) for k, v in results['test_metrics'].items()},
-            'config': self.config.__dict__
+            'config': self.config.__dict__,
         }
+        if extra_fields:
+            serializable.update(extra_fields)
         with open(os.path.join(exp_dir, 'results.json'), 'w') as f:
             json.dump(serializable, f, indent=4, default=json_numpy_default)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Multi-Task MDN Training")
+def build_parser() -> argparse.ArgumentParser:
+    """Build the MDN CLI parser on top of the shared TS argument parser.
+
+    Starts from :func:`create_ts_argument_parser` (the shared TS args), restores
+    mdn's own defaults via ``set_defaults`` (``experiment_name="mdn_multitask"``,
+    ``epochs=100``, ``batch_size=256``, ``steps_per_epoch=200``,
+    ``learning_rate=5e-4``, ``plot_top_k_patterns=9``), then adds mdn's
+    architecture-specific flags. The shared parser additionally exposes warmup /
+    analysis flags mdn's original CLI lacked — the harmless superset pattern used
+    by the prism / tirex / nbeats migrations (mdn's config ignores warmup).
+    """
+    parser = create_ts_argument_parser("Multi-Task MDN Training")
+    parser.set_defaults(
+        experiment_name="mdn_multitask",
+        epochs=100,
+        batch_size=256,
+        steps_per_epoch=200,
+        learning_rate=5e-4,
+        plot_top_k_patterns=9,
+    )
+    # MDN architecture-specific arguments.
     parser.add_argument("--window_size", type=int, default=120)
     parser.add_argument("--num_mixtures", type=int, default=12)
-    parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--batch_size", type=int, default=256)
-    parser.add_argument("--learning_rate", type=float, default=5e-4)
-    parser.add_argument("--visualize_every_n_epochs", type=int, default=5)
-    parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
-    return parser.parse_args()
+    parser.add_argument("--task_embedding_dim", type=int, default=32)
+    parser.add_argument("--dropout_rate", type=float, default=0.3)
+    parser.add_argument("--no-attention", dest="use_attention", action="store_false")
+    parser.set_defaults(use_attention=True)
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    return build_parser().parse_args()
 
 
 def main() -> None:
@@ -430,18 +471,31 @@ def main() -> None:
     setup_gpu(args.gpu)
 
     config = MDNTrainingConfig(
+        experiment_name=args.experiment_name,
         window_size=args.window_size,
         num_mixtures=args.num_mixtures,
+        task_embedding_dim=args.task_embedding_dim,
+        dropout_rate=args.dropout_rate,
+        use_attention=args.use_attention,
         epochs=args.epochs,
         batch_size=args.batch_size,
+        steps_per_epoch=args.steps_per_epoch,
         learning_rate=args.learning_rate,
-        visualize_every_n_epochs=args.visualize_every_n_epochs
+        gradient_clip_norm=args.gradient_clip_norm,
+        max_patterns_per_category=args.max_patterns_per_category,
+        visualize_every_n_epochs=args.visualize_every_n_epochs,
+        plot_top_k_patterns=args.plot_top_k_patterns,
     )
 
     generator_config = TimeSeriesGeneratorConfig(
         n_samples=5000, random_seed=42, default_noise_level=0.1
     )
 
+    # Preserve mdn's original hard-exit teardown (os._exit(0)): a deliberate
+    # force-exit that skips Python/atexit cleanup to avoid TF prefetch-thread
+    # hangs on shutdown. Do NOT normalize to a sys.exit-only/finally template
+    # (per-script choice, not consolidatable duplication). See
+    # plan_2026-06-09_a3c7304c/decisions.md D-008.
     try:
         trainer = MDNTrainer(config, generator_config)
         results = trainer.run_experiment()

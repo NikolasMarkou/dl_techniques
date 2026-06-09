@@ -715,6 +715,12 @@ class BaseTimeSeriesTrainer:
     # ------------------------------------------------------------------ #
     def _train_model(self, data_pipeline: Dict[str, Any], exp_dir: str) -> Dict[str, Any]:
         """Shared ``model.fit`` + ``model.evaluate`` (identical across all four)."""
+        # Expose the pre-built test arrays so a subclass's performance callback can
+        # be seeded with the EXACT `test_data_raw` from `prepare_datasets` (mdn:
+        # its callback plots from a pre-built `viz_data` tuple, not from the
+        # processor). The forecasting trio ignore this (they build viz-data from
+        # `self.processor` in their callback). Harmless for them; faithful for mdn.
+        self._test_data_raw = data_pipeline.get('test_data_raw')
         callbacks = self._make_callbacks(exp_dir)
 
         history = self.model.fit(
