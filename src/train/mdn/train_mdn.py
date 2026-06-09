@@ -317,7 +317,8 @@ class MDNPerformanceCallback(TimeSeriesPerformanceCallback):
 
         plt.suptitle(f'MDN Probabilistic Forecasts (Epoch {epoch + 1})', fontsize=16)
         plt.tight_layout()
-        plt.savefig(os.path.join(self.save_dir, f'predictions_epoch_{epoch+1:03d}.png'))
+        plt.savefig(os.path.join(self.save_dir, f'predictions_epoch_{epoch+1:03d}.png'),
+                    dpi=150, bbox_inches='tight')
         plt.close()
 
 
@@ -423,6 +424,9 @@ class MDNTrainer(BaseTimeSeriesTrainer):
         serializable = {
             'history': results['history'],
             'test_metrics': {k: float(v) for k, v in results['test_metrics'].items()},
+            # Schema parity (plan_2026-06-09_49c73926 N1): include final_epoch like the
+            # other TS trainers. Robust fallback to len(history.loss) if absent.
+            'final_epoch': results.get('final_epoch', len(results['history']['loss'])),
             'config': self.config.__dict__,
         }
         if extra_fields:

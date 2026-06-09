@@ -42,6 +42,7 @@ from train.common import (
     TimeSeriesPerformanceCallback,
     BaseTimeSeriesTrainer,
     create_ts_argument_parser,
+    _prepare_viz_data_from_processor,
 )
 from dl_techniques.utils.logger import logger
 from dl_techniques.analyzer import AnalysisConfig
@@ -165,20 +166,13 @@ class PRISMPerformanceCallback(TimeSeriesPerformanceCallback):
         super().__init__(config, save_dir, model_name)
 
     def _prepare_viz_data(self) -> Tuple[np.ndarray, np.ndarray]:
-        viz_x, viz_y = [], []
-        for x, y in self.processor._test_generator_raw():
-            viz_x.append(x)
-            # DECISION plan_2026-06-09_49c73926/D-001: keep only the primary target of
-            # a nested target (ragged-tuple safety). No-op for prism's single arrays.
-            viz_y.append(y[0] if isinstance(y, (tuple, list)) else y)
-            if len(viz_x) >= self.config.plot_top_k_patterns:
-                break
-        if not viz_x:
-            return (
-                np.zeros((0, self.config.context_len, 1), dtype=np.float32),
-                np.zeros((0, self.config.forecast_len, 1), dtype=np.float32),
-            )
-        return np.array(viz_x), np.array(viz_y)
+        # N3 (plan_2026-06-09_49c73926 D-003): use the shared helper rather than an
+        # inline copy of the same collection loop (tirex/nbeats already use it). The
+        # helper carries the D-001 tuple-guard (no-op for prism's single-array targets)
+        # and the non-fatal wrapper lives in the base callback __init__. The empty case
+        # returns np.array([]); _plot_predictions guards on `len(context) == 0` above.
+        return _prepare_viz_data_from_processor(
+            self.processor, self.config.plot_top_k_patterns)
 
     def _extend_history(self, logs: dict) -> None:
         self.training_history.setdefault('metric', [])
@@ -243,7 +237,8 @@ class PRISMPerformanceCallback(TimeSeriesPerformanceCallback):
 
         plt.suptitle(f'PRISM Forecasts (Epoch {epoch + 1})', fontsize=16)
         plt.tight_layout()
-        plt.savefig(os.path.join(self.save_dir, f'predictions_epoch_{epoch + 1:03d}.png'))
+        plt.savefig(os.path.join(self.save_dir, f'predictions_epoch_{epoch + 1:03d}.png'),
+                    dpi=150, bbox_inches='tight')
         plt.close()
 
 

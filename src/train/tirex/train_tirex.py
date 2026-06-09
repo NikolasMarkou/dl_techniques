@@ -205,7 +205,8 @@ class TiRexPerformanceCallback(TimeSeriesPerformanceCallback):
 
         plt.suptitle(f'Probabilistic Forecasts (Epoch {epoch + 1})', fontsize=16)
         plt.tight_layout()
-        plt.savefig(os.path.join(self.save_dir, f'predictions_epoch_{epoch + 1:03d}.png'))
+        plt.savefig(os.path.join(self.save_dir, f'predictions_epoch_{epoch + 1:03d}.png'),
+                    dpi=150, bbox_inches='tight')
         plt.close()
 
 
