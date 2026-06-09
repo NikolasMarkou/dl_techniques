@@ -53,14 +53,6 @@ plt.style.use('default')
 sns.set_palette("husl")
 
 
-def set_random_seeds(seed: int = 42) -> None:
-    """Set random seeds for reproducibility."""
-    set_seeds(seed)
-
-
-set_random_seeds(42)
-
-
 @dataclass
 class NBeatsTrainingConfig(BaseTimeSeriesTrainingConfig):
     """Configuration for N-BEATS training.
@@ -462,6 +454,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    set_seeds(42)
     setup_gpu(args.gpu)
 
     config = NBeatsTrainingConfig(
