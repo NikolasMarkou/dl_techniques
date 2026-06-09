@@ -59,7 +59,9 @@ class TestAffineCouplingLayer:
         assert layer.context_dim == 4
         assert layer.hidden_units == 32
         assert layer.reverse is False
-        assert layer.activation == 'relu'
+        # activation is normalized to a callable via keras.activations.get so a
+        # callable round-trips through get_config; verify it resolves to relu.
+        assert layer.activation is keras.activations.relu
         assert layer.use_tanh_stabilization is True
         assert layer.split_dim == 3  # input_dim // 2
 
@@ -789,3 +791,207 @@ class TestNormalizingFlowIntegration:
         # Test sampling with large batch
         samples = flow.sample(3, large_context)
         assert samples.shape == (batch_size, 3, output_dim)
+
+
+class TestNormalizingFlowStep5Fixes:
+    """Regression tests for the Step-5 correctness fixes.
+
+    Covers: (1) coupling sub-layer weights tracked + saved, (2) epsilon-free
+    symmetric invertible scale (log-det == sum(log s)), (3) callable-activation
+    round-trip, (4) tuple input_shape accepted by build.
+    """
+
+    @pytest.fixture
+    def flow_config(self) -> Dict[str, Any]:
+        return {
+            'output_dimension': 4,
+            'num_flow_steps': 3,
+            'context_dim': 6,
+            'hidden_units_coupling': 16,
+            'activation': 'relu',
+            'use_tanh_stabilization': True,
+        }
+
+    def test_coupling_weights_tracked_and_saved(self, flow_config: Dict[str, Any]) -> None:
+        """Coupling weights appear in trainable_variables and survive .keras save/load."""
+        data_input = keras.Input(shape=(4,), name='data')
+        context_input = keras.Input(shape=(6,), name='context')
+        layer = NormalizingFlowLayer(**flow_config)
+        z, ldj = layer([data_input, context_input])
+        model = keras.Model([data_input, context_input], [z, ldj])
+
+        # Coupling weights MUST be tracked (6 vars per coupling x 3 = 18).
+        assert len(layer.trainable_variables) > 0
+        per_coupling = sum(len(cl.trainable_variables) for cl in layer.coupling_layers)
+        assert per_coupling == len(layer.trainable_variables)
+        assert per_coupling > 0
+
+        data = keras.random.normal((8, 4), seed=7)
+        ctx = keras.random.normal((8, 6), seed=8)
+        pre_z, pre_ldj = model([data, ctx])
+        # A specific coupling weight value, to verify it survives reload.
+        w0 = keras.ops.convert_to_numpy(
+            layer.coupling_layers[0].transformation_net.layers[0].kernel
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, 'flow.keras')
+            model.save(filepath)
+            loaded = keras.models.load_model(filepath)
+
+        loaded_flow = [l for l in loaded.layers if isinstance(l, NormalizingFlowLayer)][0]
+        w1 = keras.ops.convert_to_numpy(
+            loaded_flow.coupling_layers[0].transformation_net.layers[0].kernel
+        )
+        np.testing.assert_allclose(w0, w1, atol=1e-6,
+                                   err_msg="Coupling weight value did not survive reload")
+
+        post_z, post_ldj = loaded([data, ctx])
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(pre_z),
+            keras.ops.convert_to_numpy(post_z),
+            atol=1e-6, err_msg="z prediction changed after reload")
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(pre_ldj),
+            keras.ops.convert_to_numpy(post_ldj),
+            atol=1e-6, err_msg="log-det prediction changed after reload")
+
+    def test_identity_flow_nll_matches_standard_normal(self, flow_config: Dict[str, Any]) -> None:
+        """Zero-init coupling nets => s=exp(tanh(0))=1, t=0 (identity flow).
+
+        For an identity transform z == y and log-det == 0, so the flow NLL must
+        equal the analytic standard-normal NLL 0.5*(d*log(2pi) + ||z||^2).
+        """
+        layer = NormalizingFlowLayer(**flow_config)
+        data = keras.random.normal((10, 4), seed=11)
+        ctx = keras.random.normal((10, 6), seed=12)
+
+        # Build, then zero every weight in every coupling transformation net so
+        # log_s == 0 (s == 1) and t == 0 -> the flow is the identity map.
+        layer.build([(None, 4), (None, 6)])
+        for cl in layer.coupling_layers:
+            for w in cl.transformation_net.weights:
+                w.assign(keras.ops.zeros_like(w))
+
+        z, ldj = layer([data, ctx])
+        # Identity: z reproduces the input and log-det is zero.
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(z),
+            keras.ops.convert_to_numpy(data),
+            atol=1e-6, err_msg="Identity flow should leave data unchanged")
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(ldj),
+            np.zeros((10,)), atol=1e-6,
+            err_msg="Identity flow log-det should be zero")
+
+        loss = layer.loss_func(data, (z, ldj))
+        d = 4
+        z_np = keras.ops.convert_to_numpy(data)
+        analytic_nll = np.mean(
+            0.5 * (d * np.log(2.0 * np.pi) + np.sum(z_np ** 2, axis=-1))
+        )
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(loss), analytic_nll, atol=1e-4,
+            err_msg="Identity-flow NLL must equal analytic standard-normal NLL")
+
+    def test_small_scale_invertibility(self) -> None:
+        """Drive the coupling to small s (log_s strongly negative) and assert
+        forward->inverse reconstructs at atol 1e-6 (epsilon-asymmetry regression).
+
+        With use_tanh_stabilization=False, s = exp(clip(log_s, -10, 10)); a large
+        negative bias on the log_s output drives s ~ exp(-10) ~ 4.5e-5. The old
+        code divided by (s + 1e-6) in inverse while forward used plain s, so the
+        cycle drifted; with the fix it is exact.
+        """
+        layer = AffineCouplingLayer(
+            input_dim=4, context_dim=3, hidden_units=8,
+            use_tanh_stabilization=False,
+        )
+        data = keras.random.normal((5, 4), seed=21)
+        ctx = keras.random.normal((5, 3), seed=22)
+        layer.build([(None, 4), (None, 3)])
+
+        # Force the transformation net's final bias so the log_s half is very
+        # negative -> tiny s. Final Dense outputs [log_s | t]; zero kernel +
+        # negative bias on the log_s slice yields a constant tiny scale.
+        out_dense = layer.transformation_net.layers[-1]
+        out_dense.kernel.assign(keras.ops.zeros_like(out_dense.kernel))
+        dim_t = layer.input_dim - layer.split_dim
+        bias = np.zeros((dim_t * 2,), dtype="float32")
+        bias[:dim_t] = -9.0  # log_s slice -> s = exp(-9) ~ 1.2e-4
+        out_dense.bias.assign(keras.ops.convert_to_tensor(bias))
+
+        y = layer.forward(data, ctx)
+        z_rec, ldj = layer.inverse(y, ctx)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(data),
+            keras.ops.convert_to_numpy(z_rec),
+            atol=1e-6, err_msg="Small-scale forward/inverse must be exact inverses")
+        # log-det == sum(log s) == dim_t * (-9) per row (no epsilon offset).
+        expected_ldj = dim_t * (-9.0)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(ldj),
+            np.full((5,), expected_ldj), atol=1e-4,
+            err_msg="log-det must equal sum(log s) with no epsilon offset")
+
+    def test_callable_activation_round_trip_coupling(self) -> None:
+        """AffineCouplingLayer built with a CALLABLE activation get_config/from_config."""
+        layer = AffineCouplingLayer(
+            input_dim=4, context_dim=3, hidden_units=8,
+            activation=keras.activations.relu,
+        )
+        config = layer.get_config()
+        # Activation must be JSON-serializable (a string/dict, not a function).
+        assert isinstance(config['activation'], (str, dict))
+        rebuilt = AffineCouplingLayer.from_config(config)
+        assert rebuilt.activation is keras.activations.relu
+
+        data = keras.random.normal((6, 4), seed=31)
+        ctx = keras.random.normal((6, 3), seed=32)
+        layer.build([(None, 4), (None, 3)])
+        rebuilt.build([(None, 4), (None, 3)])
+        # Copy weights so behavior is comparable, then assert identical forward.
+        for w_src, w_dst in zip(layer.transformation_net.weights,
+                                rebuilt.transformation_net.weights):
+            w_dst.assign(w_src)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(layer.forward(data, ctx)),
+            keras.ops.convert_to_numpy(rebuilt.forward(data, ctx)),
+            atol=1e-6, err_msg="Callable-activation layer behaves differently after round-trip")
+
+    def test_callable_activation_round_trip_flow(self) -> None:
+        """NormalizingFlowLayer built with a CALLABLE activation full .keras round-trip."""
+        data_input = keras.Input(shape=(4,), name='data')
+        context_input = keras.Input(shape=(6,), name='context')
+        layer = NormalizingFlowLayer(
+            output_dimension=4, num_flow_steps=2, context_dim=6,
+            hidden_units_coupling=16, activation=keras.activations.relu,
+        )
+        z, ldj = layer([data_input, context_input])
+        model = keras.Model([data_input, context_input], [z, ldj])
+
+        config = layer.get_config()
+        assert isinstance(config['activation'], (str, dict))
+
+        data = keras.random.normal((8, 4), seed=41)
+        ctx = keras.random.normal((8, 6), seed=42)
+        pre_z, pre_ldj = model([data, ctx])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, 'flow_callable.keras')
+            model.save(filepath)
+            loaded = keras.models.load_model(filepath)
+        post_z, post_ldj = loaded([data, ctx])
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(pre_z),
+            keras.ops.convert_to_numpy(post_z),
+            atol=1e-6, err_msg="Callable-activation flow z changed after reload")
+
+    def test_build_accepts_tuple_input_shape(self, flow_config: Dict[str, Any]) -> None:
+        """build must accept a tuple of two shapes (functional API may pass either)."""
+        layer = NormalizingFlowLayer(**flow_config)
+        layer.build(((None, 4), (None, 6)))  # tuple, not list
+        assert layer.built
+
+        coupling = AffineCouplingLayer(input_dim=4, context_dim=6, hidden_units=8)
+        coupling.build(((None, 4), (None, 6)))
+        assert coupling.built

@@ -17,7 +17,7 @@ Usage Examples:
 .. code-block:: python
 
     import keras
-    from dl_techniques.layers.nlp_heads import (
+    from dl_techniques.layers.heads.nlp import (
         create_nlp_head, NLPTaskConfig, NLPTaskType,
     )
 
@@ -70,7 +70,7 @@ from dl_techniques.layers.transformers import (
     NormalizationPositionType,
 )
 from dl_techniques.layers.embedding.bert_embeddings import BertEmbeddings
-from dl_techniques.layers.nlp_heads import create_nlp_head, NLPTaskConfig
+from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig
 
 # ---------------------------------------------------------------------
 
@@ -904,7 +904,7 @@ def create_bert_with_head(
 
     This function demonstrates the intended integration pattern:
     1. Instantiate a foundational `BERT` model (optionally pretrained).
-    2. Instantiate a task-specific head from the `dl_techniques.layers.nlp_heads`
+    2. Instantiate a task-specific head from the `dl_techniques.layers.heads.nlp`
        factory.
     3. Combine them into a single, end-to-end `keras.Model`.
 
@@ -931,7 +931,7 @@ def create_bert_with_head(
     Example:
         .. code-block:: python
 
-            from dl_techniques.layers.nlp_heads import NLPTaskType
+            from dl_techniques.layers.heads.nlp import NLPTaskType
 
             # Define a task
             ner_task = NLPTaskConfig(

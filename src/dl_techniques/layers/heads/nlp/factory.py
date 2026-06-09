@@ -13,11 +13,12 @@ from typing import Dict, List, Optional, Union, Tuple, Any, Literal
 # local imports
 # ---------------------------------------------------------------------
 
-from ..activations import ActivationType
-from ..standard_blocks import DenseBlock
-from ..ffn import create_ffn_layer, FFNType
-from ..attention import create_attention_layer, AttentionType
-from ..norms import create_normalization_layer, NormalizationType
+from ...activations import ActivationType
+from ...standard_blocks import DenseBlock
+from ...ffn import create_ffn_layer, FFNType
+from ...attention import create_attention_layer, AttentionType
+from ...norms import create_normalization_layer, NormalizationType
+from ...sequence_pooling import SequencePooling
 
 from .task_types import NLPTaskType, NLPTaskConfig
 
@@ -126,10 +127,29 @@ class BaseNLPHead(keras.layers.Layer):
             name=f"{self.name}_norm"
         )
 
-        # Optional pooling for sequence-level tasks
+        # Optional pooling for sequence-level tasks.
+        #
+        # DECISION plan_2026-06-08_8b32ca51/D-002: PARTIAL delegation to
+        # SequencePooling. The cls/mean/max strategies are delegated to the
+        # shared `sequence_pooling.SequencePooling` facade (mask-aware mean/max
+        # are value-equivalent to the old inline code within atol 1e-6 for any
+        # sequence with >=1 valid token). The 'attention' strategy is NOT
+        # delegated: SequencePooling's `attention` uses AttentionPooling
+        # (Dense(hidden,tanh) scored against a learnable context vector) — a
+        # different mechanism and a different trainable-weight set than this
+        # head's single `Dense(1, tanh)` direct-score pooling. Delegating it
+        # would change pooled values AND break serialization of existing
+        # checkpoints. DO NOT replace the inline `attention` branch below with
+        # SequencePooling('attention'). See decisions.md D-002.
+        self.sequence_pooler = None
         self.attention_pooling = None
+        if self.use_pooling and self.pooling_type in ('cls', 'mean', 'max'):
+            self.sequence_pooler = SequencePooling(
+                strategy=self.pooling_type,
+                name=f"{self.name}_sequence_pooler"
+            )
         if self.use_pooling and self.pooling_type == 'attention':
-            # Attention-based pooling
+            # Attention-based pooling (kept inline — see D-002 above).
             self.attention_pooling = layers.Dense(
                 1,
                 activation='tanh',
@@ -200,29 +220,12 @@ class BaseNLPHead(keras.layers.Layer):
         :return: Pooled representation [batch_size, hidden_dim].
         :rtype: keras.KerasTensor
         """
-        if self.pooling_type == 'cls':
-            # Use first token (CLS token for BERT-like models)
-            return sequence[:, 0, :]
-
-        elif self.pooling_type == 'mean':
-            # Mean pooling with attention mask
-            if attention_mask is not None:
-                mask = ops.cast(attention_mask, dtype=sequence.dtype)
-                mask_expanded = ops.expand_dims(mask, axis=-1)
-                sum_embeddings = ops.sum(sequence * mask_expanded, axis=1)
-                sum_mask = ops.sum(mask_expanded, axis=1)
-                return sum_embeddings / ops.maximum(sum_mask, 1e-9)
-            else:
-                return ops.mean(sequence, axis=1)
-
-        elif self.pooling_type == 'max':
-            # Max pooling
-            if attention_mask is not None:
-                mask = ops.cast(attention_mask, dtype=sequence.dtype)
-                mask_expanded = ops.expand_dims(mask, axis=-1)
-                # Set masked positions to very negative value
-                sequence = sequence * mask_expanded + (1 - mask_expanded) * -1e9
-            return ops.max(sequence, axis=1)
+        # DECISION plan_2026-06-08_8b32ca51/D-002: cls/mean/max delegate to the
+        # shared SequencePooling facade (created in _create_common_layers).
+        # The 'attention' branch stays inline — do NOT route it through
+        # SequencePooling (different mechanism + weights). See decisions.md.
+        if self.pooling_type in ('cls', 'mean', 'max'):
+            return self.sequence_pooler(sequence, mask=attention_mask)
 
         elif self.pooling_type == 'attention':
             # Attention-based pooling
@@ -256,6 +259,10 @@ class BaseNLPHead(keras.layers.Layer):
             norm_input_shape = (hidden_shape[0], self.input_dim)
 
         self.norm.build(norm_input_shape)
+
+        # Build sequence pooler (cls/mean/max delegation; D-002) if needed
+        if self.sequence_pooler is not None:
+            self.sequence_pooler.build(hidden_shape)
 
         # Build attention pooling if needed
         if self.attention_pooling is not None:
@@ -386,8 +393,8 @@ class TextClassificationHead(BaseNLPHead):
             classifier_input_dim = self.input_dim
 
         # Classifier receives features after processing
-        batch_size = input_shape[0] if isinstance(input_shape, tuple) else \
-            input_shape.get('hidden_states', (None,))[0]
+        batch_size = input_shape.get('hidden_states', (None,))[0] \
+            if isinstance(input_shape, dict) else input_shape[0]
         classifier_input_shape = (batch_size, classifier_input_dim)
         self.classifier.build(classifier_input_shape)
 

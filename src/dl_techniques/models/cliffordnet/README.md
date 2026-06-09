@@ -325,7 +325,7 @@ A non-causal, BERT-style packaged sibling of `CliffordNetLMUNet`. Same U-Net
 encoder/bottleneck/decoder structure, but uses the bidirectional
 `CliffordNetBlock` / `CliffordNetBlockDSv2` and drops the causal upsample
 right-shift. Returns BERT-style dict outputs and is compatible with
-`MaskedLanguageModel` and the `dl_techniques.layers.nlp_heads` task heads.
+`MaskedLanguageModel` and the `dl_techniques.layers.heads.nlp` task heads.
 
 ```python
 from dl_techniques.models.cliffordnet import (

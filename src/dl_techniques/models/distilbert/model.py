@@ -73,7 +73,7 @@ from dl_techniques.layers.transformers import (
     NormalizationPositionType,
 )
 from dl_techniques.layers.norms import RMSNorm
-from dl_techniques.layers.nlp_heads import create_nlp_head, NLPTaskConfig
+from dl_techniques.layers.heads.nlp import create_nlp_head, NLPTaskConfig
 
 # ---------------------------------------------------------------------
 
@@ -1056,7 +1056,7 @@ def create_distilbert_with_head(
     Example:
         .. code-block:: python
 
-            from dl_techniques.layers.nlp_heads import NLPTaskType
+            from dl_techniques.layers.heads.nlp import NLPTaskType
 
             # Define a task
             ner_task = NLPTaskConfig(

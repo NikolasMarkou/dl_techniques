@@ -802,6 +802,91 @@ class TestIntegration:
 
 
 # ---------------------------------------------------------------------
+# Numerical Stability / Graph-Mode Tests (Step 2 fixes)
+# ---------------------------------------------------------------------
+
+
+class TestNumericalStability:
+    """Tests for the Step-2 correctness fixes (near-zero affine guard,
+    graph-safe store_stats)."""
+
+    @pytest.mark.parametrize("near_zero_value", [0.0, 1e-9, -1e-9])
+    def test_inverse_after_near_zero_affine(self, near_zero_value):
+        """inverse_transform must stay finite when the trainable affine_weight
+        is driven to (near) zero — the guarded denominator prevents inf/NaN."""
+        layer = UnifiedScaler(num_features=10, axis=1, affine=True)
+
+        sample = np.random.randn(8, 20, 10).astype(np.float32)
+
+        # Forward pass to build the layer and populate inverse statistics.
+        normalized = layer(sample)
+
+        # Drive the affine scale to a (near) zero value.
+        layer.affine_weight.assign(
+            ops.full_like(layer.affine_weight, near_zero_value)
+        )
+
+        restored = layer.inverse_transform(normalized)
+        restored_np = ops.convert_to_numpy(restored)
+
+        assert not np.isnan(restored_np).any(), "inverse produced NaN"
+        assert not np.isinf(restored_np).any(), "inverse produced inf"
+
+    def test_store_stats_graph_mode(self, sample_3d_input):
+        """store_stats=True must update stored stats one step under graph mode
+        (model.fit) without crashing."""
+        inputs = keras.Input(shape=sample_3d_input.shape[1:])
+        scaler = UnifiedScaler(num_features=10, axis=-1, store_stats=True)
+        normalized = scaler(inputs)
+        outputs = keras.layers.GlobalAveragePooling1D()(normalized)
+        outputs = keras.layers.Dense(1)(outputs)
+
+        model = keras.Model(inputs, outputs)
+        model.compile(optimizer="adam", loss="mse")
+
+        # Snapshot stored stats at init (mean=0, std=1).
+        mean_init, std_init = scaler.get_stats()
+        mean_init = ops.convert_to_numpy(mean_init).copy()
+        std_init = ops.convert_to_numpy(std_init).copy()
+
+        targets = np.random.randn(sample_3d_input.shape[0], 1).astype(np.float32)
+
+        # One graph-mode train step must not crash.
+        model.fit(sample_3d_input, targets, epochs=1, batch_size=8, verbose=0)
+
+        mean_after = ops.convert_to_numpy(scaler.stored_mean)
+        std_after = ops.convert_to_numpy(scaler.stored_std)
+
+        # Stats must have been updated away from their init values.
+        assert not np.allclose(mean_after, mean_init, atol=1e-6) or \
+            not np.allclose(std_after, std_init, atol=1e-6), \
+            "stored stats did not update under graph mode"
+
+    def test_store_stats_tf_function(self, sample_3d_input):
+        """store_stats=True call wrapped in a tf.function must not crash and
+        must update the stored stats."""
+        import tensorflow as tf
+
+        layer = UnifiedScaler(num_features=10, axis=-1, store_stats=True)
+        # Build eagerly first so weights exist.
+        layer(sample_3d_input)
+
+        std_init = ops.convert_to_numpy(layer.stored_std).copy()
+
+        @tf.function
+        def run(x):
+            return layer(x, training=True)
+
+        # Perturb input so updated stats differ from the init eager call.
+        out = run(sample_3d_input * 5.0 + 100.0)
+        assert not np.isnan(ops.convert_to_numpy(out)).any()
+
+        std_after = ops.convert_to_numpy(layer.stored_std)
+        assert not np.allclose(std_after, std_init, atol=1e-6), \
+            "stored std did not update under tf.function"
+
+
+# ---------------------------------------------------------------------
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

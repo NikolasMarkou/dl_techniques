@@ -14,12 +14,12 @@ from typing import Dict, List, Optional, Union, Tuple, Any
 # Local Imports
 # ---------------------------------------------------------------------
 
-from ..activations import ActivationType
-from ..attention.factory import create_attention_layer
-from ..ffn.factory import create_ffn_from_config, FFNType, create_ffn_layer
-from ..fusion.multimodal_fusion import FusionStrategy, MultiModalFusion
-from ..norms import NormalizationType
-from ..norms.factory import create_normalization_layer
+from ...activations import ActivationType
+from ...attention.factory import create_attention_layer
+from ...ffn.factory import create_ffn_from_config, FFNType, create_ffn_layer
+from ...fusion.multimodal_fusion import FusionStrategy, MultiModalFusion
+from ...norms import NormalizationType
+from ...norms.factory import create_normalization_layer
 from .task_types import VLMTaskConfig, VLMTaskType
 
 
@@ -257,7 +257,7 @@ class ImageCaptioningHead(keras.layers.Layer):
 
         for i in range(self.num_layers):
             cross_attn = create_attention_layer(
-                "multi_head",
+                "multi_head_cross",
                 dim=self.hidden_dim,
                 num_heads=self.num_heads,
                 dropout_rate=self.task_config.dropout_rate,
@@ -299,7 +299,8 @@ class ImageCaptioningHead(keras.layers.Layer):
 
         x = text_features
         seq_len = ops.shape(x)[1]
-        causal_mask = keras.ops.triu(ops.ones((seq_len, seq_len), dtype="bool"), k=1)
+        causal_mask = ops.tril(ops.ones((seq_len, seq_len)))   # 1=attend (current+past), 0=future
+        causal_mask = ops.expand_dims(causal_mask, 0)           # (1, S, S) full-mask form
 
         for i in range(self.num_layers):
             # Self-attention with causal mask
@@ -310,7 +311,7 @@ class ImageCaptioningHead(keras.layers.Layer):
 
             # Cross-attention to vision features
             cross_attn_output = self.cross_attention_layers[i](
-                x, context=vision_features, training=training
+                x, kv_input=vision_features, training=training
             )
             x = self.norm_layers[i * 3 + 1](x + cross_attn_output)
 
@@ -418,7 +419,7 @@ class VQAHead(keras.layers.Layer):
         # CREATE sub-layers
         if self.pooling_strategy == "attention":
             self.attention_pooling = create_attention_layer(
-                "multi_head",
+                "multi_head_cross",
                 dim=self.embed_dim,
                 num_heads=8,
                 dropout_rate=self.task_config.dropout_rate,
@@ -457,10 +458,10 @@ class VQAHead(keras.layers.Layer):
             text_pooled = ops.max(question_features, axis=1)
         elif self.pooling_strategy == "attention":
             vision_attended = self.attention_pooling(
-                vision_features, context=question_features, training=training
+                vision_features, kv_input=question_features, training=training
             )
             text_attended = self.attention_pooling(
-                question_features, context=vision_features, training=training
+                question_features, kv_input=vision_features, training=training
             )
             vision_pooled = ops.mean(vision_attended, axis=1)
             text_pooled = ops.mean(text_attended, axis=1)
@@ -687,13 +688,20 @@ class ImageTextMatchingHead(BaseVLMHead):
         # 1. Contrastive Alignment part
         vision_projected = self.vision_proj(vision_pooled)
         text_projected = self.text_proj(text_pooled)
-        vision_norm = ops.l2_normalize(vision_projected, axis=-1)
-        text_norm = ops.l2_normalize(text_projected, axis=-1)
+        vision_norm = ops.normalize(vision_projected, axis=-1)
+        text_norm = ops.normalize(text_projected, axis=-1)
         similarity_matrix = ops.matmul(vision_norm, ops.transpose(text_norm))
         logits = similarity_matrix / self.temperature
 
         # 2. Fine-grained Matching Score part
-        fused = self.fusion([vision_pooled, text_pooled], training=training)
+        # MultiModalFusion (concatenation) requires 3-D (B, S, D) inputs, but the
+        # pooled features are 2-D (B, D). Expand to (B, 1, D) for fusion, then
+        # squeeze the (B, 1, F) output back to (B, F) for the 2-D post-fusion
+        # norm / FFN / similarity head (D-001 scope expansion).
+        vision_pooled_3d = ops.expand_dims(vision_pooled, axis=1)
+        text_pooled_3d = ops.expand_dims(text_pooled, axis=1)
+        fused = self.fusion([vision_pooled_3d, text_pooled_3d], training=training)
+        fused = ops.squeeze(fused, axis=1)
         processed = self.post_fusion_norm(fused, training=training)
         if self.use_post_fusion_ffn:
             processed = self.post_fusion_ffn(processed, training=training)

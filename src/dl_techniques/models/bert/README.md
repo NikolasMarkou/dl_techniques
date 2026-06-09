@@ -243,7 +243,7 @@ The core building block of the BERT encoder, repeated multiple times.
 
 ### 4.3 Task-Specific Heads
 
-This implementation deliberately separates the core BERT model from task heads. The `dl_techniques.layers.nlp_heads` module and the `create_bert_with_head` factory function are the intended integration points.
+This implementation deliberately separates the core BERT model from task heads. The `dl_techniques.layers.heads.nlp` module and the `create_bert_with_head` factory function are the intended integration points.
 -   The heads are simple Keras layers that take the output from `BERT` (`last_hidden_state`) and project it to the desired output for a specific task.
 -   Examples: A `Dense` layer for classification, a `TokenClassificationHead` for NER, etc.
 
@@ -267,7 +267,7 @@ import keras
 import numpy as np
 
 from dl_techniques.models.bert import create_bert_with_head
-from dl_techniques.layers.nlp_heads import NLPTaskConfig, NLPTaskType
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 # 1. Define the downstream task
 sentiment_config = NLPTaskConfig(
@@ -393,7 +393,7 @@ NER is a token-level classification task. The factory handles this seamlessly.
 
 ```python
 from dl_techniques.models.bert import create_bert_with_head
-from dl_techniques.layers.nlp_heads.task_types import NLPTaskConfig, NLPTaskType
+from dl_techniques.layers.heads.nlp.task_types import NLPTaskConfig, NLPTaskType
 
 # 1. Define the NER task configuration
 ner_config = NLPTaskConfig(
@@ -427,7 +427,7 @@ You can use the raw output of the `BERT` encoder as rich contextual features for
 ```python
 import keras
 from dl_techniques.models.bert import BERT
-from dl_techniques.layers.nlp_heads.task_types import NLPTaskConfig, NLPTaskType
+from dl_techniques.layers.heads.nlp.task_types import NLPTaskConfig, NLPTaskType
 
 # 1. Create the standalone BERT encoder
 bert_encoder = BERT.from_variant("base", pretrained=True)
@@ -458,7 +458,7 @@ Share a single BERT encoder across multiple tasks to improve performance and eff
 ```python
 import keras
 from dl_techniques.models.bert import BERT
-from dl_techniques.layers.nlp_heads import NLPTaskConfig, NLPTaskType, TextClassificationHead, TokenClassificationHead
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType, TextClassificationHead, TokenClassificationHead
 
 # 1. Create one shared BERT encoder
 bert_encoder = BERT.from_variant("base", pretrained=True)

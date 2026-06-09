@@ -187,14 +187,14 @@ import numpy as np
 
 # Local imports from your project structure
 from dl_techniques.models.yolo12.multitask import YOLOv12MultiTask
-from dl_techniques.layers.vision_heads.task_types import TaskType
+from dl_techniques.layers.heads.vision.task_types import VisionTaskType
 
 # 1. Create a multi-task model for detection and segmentation
 # Configure separate class counts for each task.
 model = YOLOv12MultiTask(
     num_detection_classes=80,    # e.g., for COCO detection
     num_segmentation_classes=1,  # e.g., for binary road segmentation
-    task_config=[TaskType.DETECTION, TaskType.SEGMENTATION],
+    task_config=[VisionTaskType.DETECTION, VisionTaskType.SEGMENTATION],
     scale='s'  # Use the 'small' variant
 )
 
@@ -234,7 +234,7 @@ print(f"Segmentation output shape: {predictions['segmentation'].shape}")
 | **`...DetectionHead`** | `...layers.yolo12_heads.YOLOv12DetectionHead` | The head for object detection. |
 | **`...SegmentationHead`**|`...layers.yolo12_heads.YOLOv12SegmentationHead`| The head for semantic segmentation. |
 | **`...ClassificationHead`**|`...layers.yolo12_heads.YOLOv12ClassificationHead`| The head for image classification. |
-| **`TaskType`** | `...layers.vision_heads.task_types.TaskType` | Enum for defining which tasks to enable. |
+| **`VisionTaskType`** | `...layers.heads.vision.task_types.VisionTaskType` | Enum for defining which tasks to enable. |
 
 ---
 
@@ -264,7 +264,7 @@ from dl_techniques.models.yolo12.multitask import create_yolov12_multitask
 # The output will be a single tensor, not a dictionary.
 model = create_yolov12_multitask(
     num_detection_classes=80,
-    tasks="detection", # or tasks=TaskType.DETECTION
+    tasks="detection", # or tasks=VisionTaskType.DETECTION
     scale="m"
 )
 model.compile(optimizer="adamw", loss=some_detection_loss_fn)

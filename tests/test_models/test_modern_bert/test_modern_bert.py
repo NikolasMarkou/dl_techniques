@@ -21,7 +21,7 @@ import os
 from typing import Dict, Any
 
 
-from dl_techniques.layers.nlp_heads import NLPTaskConfig, NLPTaskType
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 from dl_techniques.layers.embedding.modern_bert_embeddings import ModernBertEmbeddings
 from dl_techniques.models.modern_bert.modern_bert  import ModernBERT, create_modern_bert_with_head
 

@@ -14,11 +14,9 @@ import os
 import sys
 import json
 import math
-import random
 import argparse
-from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import keras
 import matplotlib
@@ -28,43 +26,58 @@ import numpy as np
 import seaborn as sns
 import tensorflow as tf
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks, generate_training_curves, set_seeds, create_learning_rate_schedule
+from train.common import (
+    setup_gpu,
+    set_seeds,
+    create_learning_rate_schedule,
+    BaseTimeSeriesTrainingConfig,
+    WindowedTimeSeriesProcessor,
+    TimeSeriesPerformanceCallback,
+    BaseTimeSeriesTrainer,
+    create_ts_argument_parser,
+    _prepare_viz_data_from_processor,
+)
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.mase_loss import MASELoss
 from dl_techniques.models.nbeats import create_nbeats_model
 from dl_techniques.datasets.time_series import (
     TimeSeriesGenerator,
     TimeSeriesGeneratorConfig,
-    TimeSeriesNormalizer,
-    NormalizationMethod
+    NormalizationMethod,
 )
-from dl_techniques.analyzer import AnalysisConfig
-from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
 
 plt.style.use('default')
 sns.set_palette("husl")
 
 
-def set_random_seeds(seed: int = 42) -> None:
-    """Set random seeds for reproducibility."""
-    set_seeds(seed)
-
-
-set_random_seeds(42)
-
-
 @dataclass
-class NBeatsTrainingConfig:
-    """Configuration for N-BEATS training."""
-    result_dir: str = "results"
-    save_results: bool = True
-    experiment_name: str = "nbeats"
-    target_categories: Optional[List[str]] = None
+class NBeatsTrainingConfig(BaseTimeSeriesTrainingConfig):
+    """Configuration for N-BEATS training.
 
-    # Data splits
-    train_ratio: float = 0.7
-    val_ratio: float = 0.15
-    test_ratio: float = 0.15
+    Inherits the shared time-series fields (data splits, optimizer/warmup knobs,
+    pattern selection, category weights, visualization + deep-analysis flags)
+    from :class:`BaseTimeSeriesTrainingConfig` and adds the N-BEATS architecture
+    fields below. A handful of inherited defaults are re-declared because the
+    N-BEATS originals differ from the base: ``steps_per_epoch`` (1000 vs 500),
+    ``max_patterns_per_category`` (100 vs 10), and ``optimizer``
+    ('adam' vs 'adamw').
+
+    Note on ``warmup_steps``: this dataclass re-declares it as 5000, but that
+    value only takes effect for a *programmatic* config built without an explicit
+    ``warmup_steps``. The EFFECTIVE default under the normal CLI path is 1000:
+    ``main()`` always passes ``args.warmup_steps`` and the shared parser's default
+    is 1000 (matching the original N-BEATS CLI). So at default invocation the
+    runtime value is 1000, not 5000. ``category_weights`` and
+    ``normalize_per_instance`` match the base defaults and are dropped.
+    """
+
+    experiment_name: str = "nbeats"
+
+    # Re-declared: N-BEATS originals differ from the base defaults.
+    steps_per_epoch: int = 1000      # base default: 500
+    warmup_steps: int = 5000         # programmatic only; CLI path -> 1000 (see docstring)
+    max_patterns_per_category: int = 100  # base default: 10
+    optimizer: str = 'adam'          # base default: 'adamw'
 
     # N-BEATS architecture
     backcast_length: int = 168
@@ -76,294 +89,91 @@ class NBeatsTrainingConfig:
     use_normalization: bool = True
     use_bias: bool = True
     activation: str = "gelu"
-
-    # Training
-    epochs: int = 150
-    batch_size: int = 128
-    steps_per_epoch: int = 1000
-    learning_rate: float = 1e-4
-    gradient_clip_norm: float = 1.0
-    optimizer: str = 'adam'
     primary_loss: Union[str, keras.losses.Loss] = "mase_loss"
     mase_seasonal_periods: int = 1
-
-    # Warmup schedule
-    use_warmup: bool = True
-    warmup_steps: int = 5000
-    warmup_start_lr: float = 1e-6
 
     # Regularization
     kernel_regularizer_l2: float = 1e-5
     reconstruction_loss_weight: float = 0.5
     dropout_rate: float = 0.1
 
-    # Pattern selection
-    max_patterns: Optional[int] = None
-    max_patterns_per_category: int = 100
-    normalize_per_instance: bool = True
-
-    # Category weights
-    category_weights: Dict[str, float] = field(default_factory=lambda: {
-        "trend": 1.0, "seasonal": 1.0, "composite": 1.2,
-        "financial": 1.5, "weather": 1.3, "biomedical": 1.2,
-        "industrial": 1.3, "intermittent": 1.0, "volatility": 1.1,
-        "regime": 1.2, "structural": 1.1
-    })
-
-    # Visualization
-    visualize_every_n_epochs: int = 5
-    save_interim_plots: bool = True
-    plot_top_k_patterns: int = 12
-    create_learning_curves: bool = True
-    create_prediction_plots: bool = True
-
-    # Deep analysis
-    perform_deep_analysis: bool = True
-    analysis_frequency: int = 10
-    analysis_start_epoch: int = 1
-
     def __post_init__(self) -> None:
-        total_ratio = self.train_ratio + self.val_ratio + self.test_ratio
-        if not np.isclose(total_ratio, 1.0, atol=1e-6):
-            raise ValueError(f"Data ratios must sum to 1.0, got {total_ratio}")
+        super().__post_init__()  # ratio-sum invariant
         if self.backcast_length <= 0 or self.forecast_length <= 0:
             raise ValueError("backcast_length and forecast_length must be positive")
 
 
-def _fill_nans(data: np.ndarray) -> np.ndarray:
-    """Forward fill NaNs in numpy array."""
-    mask = np.isnan(data)
-    idx = np.where(~mask, np.arange(mask.shape[0]), 0)
-    np.maximum.accumulate(idx, axis=0, out=idx)
-    out = data[idx]
-    out[np.isnan(out)] = 0
-    return out
+class MultiPatternDataProcessor(WindowedTimeSeriesProcessor):
+    """N-BEATS data processor: subclass of :class:`WindowedTimeSeriesProcessor`.
 
-
-class MultiPatternDataProcessor:
-    """
-    Data processor for N-BEATS with infinite streaming training generator,
-    pre-computed val/test datasets, and per-instance normalization.
+    Overrides BOTH hooks to emit the optional backcast-reconstruction target.
+    With ``reconstruction_loss_weight > 0`` the target is a 2-tuple
+    ``(forecast, backcast.flatten())``; otherwise it is the single forecast
+    tensor (matching the base default). STANDARD per-instance normalization.
     """
 
     def __init__(self, config: NBeatsTrainingConfig, generator: TimeSeriesGenerator,
                  selected_patterns: List[str], pattern_to_category: Dict[str, str],
                  num_features: int = 1):
-        self.config = config
-        self.ts_generator = generator
-        self.selected_patterns = selected_patterns
-        self.pattern_to_category = pattern_to_category
-        self.num_features = num_features
-        self.weighted_patterns, self.weights = self._prepare_weighted_sampling()
+        super().__init__(
+            config,
+            generator,
+            selected_patterns,
+            pattern_to_category=pattern_to_category,
+            context_len=config.backcast_length,
+            horizon_len=config.forecast_length,
+            num_features=num_features,
+            normalize=True,
+            normalize_method=NormalizationMethod.STANDARD,
+        )
 
-    def _prepare_weighted_sampling(self) -> Tuple[List[str], List[float]]:
-        patterns, weights = [], []
-        for name in self.selected_patterns:
-            category = self.pattern_to_category.get(name, "unknown")
-            weights.append(self.config.category_weights.get(category, 1.0))
-            patterns.append(name)
-        total = sum(weights)
-        if total > 0:
-            weights = [w / total for w in weights]
-        else:
-            weights = [1.0 / len(patterns)] * len(patterns)
-        return patterns, weights
-
-    def _safe_normalize(self, series: np.ndarray) -> np.ndarray:
-        """Normalize with clipping for stability."""
-        series = np.clip(series, -1e6, 1e6)
-        if self.config.normalize_per_instance:
-            normalizer = TimeSeriesNormalizer(method=NormalizationMethod.STANDARD)
-            if np.isnan(series).any():
-                series = _fill_nans(series)
-            series = normalizer.fit_transform(series)
-        series = np.clip(series, -10.0, 10.0)
-        return series.astype(np.float32)
-
-    def _training_generator(self) -> Generator[Tuple[np.ndarray, Union[np.ndarray, Tuple]], None, None]:
-        """Infinite generator with buffered pattern mixing."""
-        patterns_to_mix, windows_per_pattern = 50, 5
-        buffer: List[Tuple[np.ndarray, Union[np.ndarray, Tuple]]] = []
-        total_len = self.config.backcast_length + self.config.forecast_length
-
-        while True:
-            if not buffer:
-                for name in random.choices(self.weighted_patterns, self.weights, k=patterns_to_mix):
-                    data = self.ts_generator.generate_task_data(name)
-                    if len(data) < total_len or not np.isfinite(data).all():
-                        continue
-                    train_data = data[:int(self.config.train_ratio * len(data))]
-                    max_start = len(train_data) - total_len
-                    if max_start <= 0:
-                        continue
-                    for _ in range(windows_per_pattern):
-                        start = random.randint(0, max_start)
-                        window = self._safe_normalize(train_data[start:start + total_len])
-                        backcast = window[:self.config.backcast_length].reshape(-1, self.num_features)
-                        forecast = window[self.config.backcast_length:].reshape(-1, self.num_features)
-                        if self.config.reconstruction_loss_weight > 0.0:
-                            buffer.append((backcast, (forecast, backcast.flatten())))
-                        else:
-                            buffer.append((backcast, forecast))
-                random.shuffle(buffer)
-            if buffer:
-                yield buffer.pop()
-
-    def _generate_fixed_dataset(self, split: str, num_samples: int
-                                ) -> Tuple[np.ndarray, Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]]:
-        """Pre-generate fixed dataset for val/test."""
-        logger.info(f"Pre-computing {split} dataset ({num_samples} samples)")
-        backcasts, forecasts, residuals = [], [], []
-        total_len = self.config.backcast_length + self.config.forecast_length
-        collected, cycle = 0, 0
-
-        while collected < num_samples:
-            name = self.selected_patterns[cycle % len(self.selected_patterns)]
-            cycle += 1
-            data = self.ts_generator.generate_task_data(name)
-            if len(data) < total_len or not np.isfinite(data).all():
-                continue
-
-            train_end = int(self.config.train_ratio * len(data))
-            val_end = train_end + int(self.config.val_ratio * len(data))
-            split_data = data[train_end:val_end] if split == 'val' else data[val_end:]
-
-            max_start = len(split_data) - total_len
-            if max_start <= 0:
-                continue
-            window = self._safe_normalize(split_data[random.randint(0, max_start):][:total_len])
-            backcast = window[:self.config.backcast_length].reshape(-1, self.num_features)
-            forecast = window[self.config.backcast_length:].reshape(-1, self.num_features)
-            backcasts.append(backcast)
-            forecasts.append(forecast)
-            if self.config.reconstruction_loss_weight > 0.0:
-                residuals.append(backcast.flatten())
-            collected += 1
-
-        x = np.array(backcasts, dtype=np.float32)
-        y_forecast = np.array(forecasts, dtype=np.float32)
+    def _make_sample(self, window: np.ndarray, pattern_name: str) -> Tuple[Any, Any]:
+        ctx = self.context_len
+        backcast = window[:ctx].reshape(-1, self.num_features).astype(np.float32)
+        forecast = window[ctx:].reshape(-1, self.num_features).astype(np.float32)
         if self.config.reconstruction_loss_weight > 0.0:
-            return x, (y_forecast, np.array(residuals, dtype=np.float32))
-        return x, y_forecast
+            return backcast, (forecast, backcast.flatten().astype(np.float32))
+        return backcast, forecast
 
-    def _test_generator_raw(self) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
-        """Fresh test samples for visualization."""
-        total_len = self.config.backcast_length + self.config.forecast_length
-        viz_patterns = self.selected_patterns.copy()
-        random.shuffle(viz_patterns)
-
-        for name in viz_patterns:
-            data = self.ts_generator.generate_task_data(name)
-            if len(data) < total_len or not np.isfinite(data).all():
-                continue
-            test_data = data[int((self.config.train_ratio + self.config.val_ratio) * len(data)):]
-            if len(test_data) < total_len:
-                continue
-            start = random.randint(0, len(test_data) - total_len)
-            window = self._safe_normalize(test_data[start:start + total_len])
-            yield (
-                window[:self.config.backcast_length].reshape(-1, self.num_features),
-                window[self.config.backcast_length:].reshape(-1, self.num_features)
-            )
-
-    def prepare_datasets(self) -> Dict[str, Any]:
-        """Create tf.data.Datasets for train/val/test."""
-        x_shape = (self.config.backcast_length, self.num_features)
-        y_shape = (self.config.forecast_length, self.num_features)
-
+    @property
+    def output_signature(self) -> Tuple[Any, Any]:
+        x_spec = tf.TensorSpec(shape=(self.context_len, self.num_features), dtype=tf.float32)
+        y_spec = tf.TensorSpec(shape=(self.horizon_len, self.num_features), dtype=tf.float32)
         if self.config.reconstruction_loss_weight > 0.0:
-            rec_shape = (self.config.backcast_length * self.num_features,)
-            output_signature = (
-                tf.TensorSpec(shape=x_shape, dtype=tf.float32),
-                (tf.TensorSpec(shape=y_shape, dtype=tf.float32),
-                 tf.TensorSpec(shape=rec_shape, dtype=tf.float32))
-            )
-        else:
-            output_signature = (
-                tf.TensorSpec(shape=x_shape, dtype=tf.float32),
-                tf.TensorSpec(shape=y_shape, dtype=tf.float32)
-            )
-
-        train_ds = tf.data.Dataset.from_generator(
-            self._training_generator, output_signature=output_signature
-        ).batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
-
-        val_steps = max(50, len(self.selected_patterns))
-        test_steps = max(20, len(self.selected_patterns))
-
-        val_data = self._generate_fixed_dataset('val', val_steps * self.config.batch_size)
-        if self.config.reconstruction_loss_weight > 0.0:
-            val_x, (val_yf, val_yr) = val_data
-            val_ds = tf.data.Dataset.from_tensor_slices((val_x, (val_yf, val_yr)))
-        else:
-            val_x, val_y = val_data
-            val_ds = tf.data.Dataset.from_tensor_slices((val_x, val_y))
-        val_ds = val_ds.batch(self.config.batch_size).cache().prefetch(tf.data.AUTOTUNE)
-
-        test_data = self._generate_fixed_dataset('test', test_steps * self.config.batch_size)
-        if self.config.reconstruction_loss_weight > 0.0:
-            test_x, (test_yf, test_yr) = test_data
-            test_ds = tf.data.Dataset.from_tensor_slices((test_x, (test_yf, test_yr)))
-        else:
-            test_x, test_y = test_data
-            test_ds = tf.data.Dataset.from_tensor_slices((test_x, test_y))
-        test_ds = test_ds.batch(self.config.batch_size).cache().prefetch(tf.data.AUTOTUNE)
-
-        return {
-            'train_ds': train_ds, 'val_ds': val_ds, 'test_ds': test_ds,
-            'validation_steps': val_steps, 'test_steps': test_steps
-        }
+            rec_spec = tf.TensorSpec(shape=(self.context_len * self.num_features,), dtype=tf.float32)
+            return (x_spec, (y_spec, rec_spec))
+        return (x_spec, y_spec)
 
 
-class PatternPerformanceCallback(keras.callbacks.Callback):
-    """Monitors and visualizes N-BEATS performance on a fixed test set."""
+class PatternPerformanceCallback(TimeSeriesPerformanceCallback):
+    """Monitors and visualizes N-BEATS performance on a fixed test set.
+
+    Thin subclass of :class:`TimeSeriesPerformanceCallback`. The base owns the
+    scaffolding (``__init__`` + makedirs, ``loss``/``val_loss`` accumulation, the
+    ``visualize_every_n_epochs`` gate, learning-curve delegation). N-BEATS keeps
+    only the three model-specific pieces: viz-data prep from its processor (the
+    backcast ``x`` / forecast ``y`` collection — same loop the original used),
+    the ``forecast_mae``/``val_forecast_mae`` extra-history tracking (N-BEATS
+    tracks NO learning rate, so no :meth:`_track_lr` call), and the
+    backcast/forecast prediction-plot body that unpacks ``predictions_tuple[0]``
+    from a ``model(x, training=False)`` call.
+    """
 
     def __init__(self, config: NBeatsTrainingConfig, data_processor: MultiPatternDataProcessor,
                  save_dir: str, model_name: str = "model"):
-        super().__init__()
-        self.config = config
+        # data_processor must be set BEFORE super().__init__: the base ctor calls
+        # _prepare_viz_data() which reads self.data_processor.
         self.data_processor = data_processor
-        self.save_dir = save_dir
-        self.model_name = model_name
-        self.training_history: Dict[str, List[float]] = {
-            'loss': [], 'val_loss': [], 'forecast_mae': [], 'val_forecast_mae': []
-        }
-        os.makedirs(save_dir, exist_ok=True)
-        self.viz_test_data = self._create_viz_test_set()
+        super().__init__(config, save_dir, model_name)
 
-    def _create_viz_test_set(self) -> Tuple[np.ndarray, np.ndarray]:
-        x_list, y_list = [], []
-        for x, y in self.data_processor._test_generator_raw():
-            x_list.append(x)
-            y_list.append(y)
-            if len(x_list) >= self.config.plot_top_k_patterns:
-                break
-        if not x_list:
-            logger.warning("Could not generate viz samples")
-            return np.array([]), np.array([])
-        return np.array(x_list), np.array(y_list)
+    def _prepare_viz_data(self) -> Tuple[np.ndarray, np.ndarray]:
+        return _prepare_viz_data_from_processor(self.data_processor, self.config.plot_top_k_patterns)
 
-    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, float]] = None) -> None:
-        logs = logs or {}
-        self.training_history['loss'].append(logs.get('loss', 0.0))
-        self.training_history['val_loss'].append(logs.get('val_loss', 0.0))
-        self.training_history['forecast_mae'].append(logs.get('forecast_mae', 0.0))
-        self.training_history['val_forecast_mae'].append(logs.get('val_forecast_mae', 0.0))
+    def _extend_history(self, logs: dict) -> None:
+        self.training_history.setdefault('forecast_mae', []).append(logs.get('forecast_mae', 0.0))
+        self.training_history.setdefault('val_forecast_mae', []).append(logs.get('val_forecast_mae', 0.0))
 
-        if (epoch + 1) % self.config.visualize_every_n_epochs == 0:
-            if self.config.create_learning_curves:
-                self._plot_learning_curves(epoch)
-            if self.config.create_prediction_plots and len(self.viz_test_data[0]) > 0:
-                self._plot_prediction_samples(epoch)
-
-    def _plot_learning_curves(self, epoch: int) -> None:
-        generate_training_curves(
-            history=self.training_history,
-            results_dir=self.save_dir,
-            filename=f"learning_curves_epoch_{epoch+1:03d}",
-        )
-
-    def _plot_prediction_samples(self, epoch: int) -> None:
+    def _plot_predictions(self, epoch: int) -> None:
         test_x, test_y = self.viz_test_data
         predictions_tuple = self.model(test_x, training=False)
 
@@ -400,54 +210,60 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
         plt.close()
 
 
-class NBeatsTrainer:
-    """Orchestrates N-BEATS training, evaluation, and reporting."""
+class NBeatsTrainer(BaseTimeSeriesTrainer):
+    """Orchestrates N-BEATS training, evaluation, and reporting.
 
-    def __init__(self, config: NBeatsTrainingConfig,
-                 generator_config: TimeSeriesGeneratorConfig) -> None:
-        self.config = config
-        self.generator_config = generator_config
-        self.generator = TimeSeriesGenerator(generator_config)
+    Thin subclass of :class:`BaseTimeSeriesTrainer`. The base owns the skeleton
+    (``__init__`` generator/pattern setup, ``_select_patterns``,
+    ``_create_experiment_dir``, ``_make_callbacks``, ``_train_model``,
+    ``run_experiment``). N-BEATS overrides only the genuine divergences: the
+    processor, the model build (+ compile + build-from-input-shape), the
+    performance callback, the ``model_name="N-BEATS"`` callback set, and
+    :meth:`_save_results` (D-005: the ``primary_loss: Union[str, Loss]`` field
+    needs a str-fallback serializer, NOT the base's ``json_numpy_default``).
+    N-BEATS has NO ONNX export, so it uses the base ``run_experiment`` directly.
+    """
 
-        self.all_patterns = self.generator.get_task_names()
-        self.pattern_categories = self.generator.get_task_categories()
-        self.pattern_to_category = {
-            task: cat
-            for cat in self.pattern_categories
-            for task in self.generator.get_tasks_by_category(cat)
-        }
-        self.selected_patterns = self._select_patterns()
-        self.processor = MultiPatternDataProcessor(
-            config, self.generator, self.selected_patterns, self.pattern_to_category
+    def _build_processor(self) -> MultiPatternDataProcessor:
+        return MultiPatternDataProcessor(
+            self.config, self.generator, self.selected_patterns,
+            self.pattern_to_category,
         )
-        self.model: Optional[keras.Model] = None
-        self.exp_dir: Optional[str] = None
 
-    def _select_patterns(self) -> List[str]:
-        if self.config.target_categories:
-            candidates = {
-                p for c in self.config.target_categories
-                for p in self.generator.get_tasks_by_category(c)
-            }
-        else:
-            candidates = self.all_patterns
+    def _build_performance_callback(self, viz_dir: str) -> PatternPerformanceCallback:
+        return PatternPerformanceCallback(self.config, self.processor, viz_dir, "nbeats")
 
-        selected: List[str] = []
-        cat_counts: Dict[str, int] = {}
-        for pattern in sorted(candidates):
-            cat = self.pattern_to_category.get(pattern)
-            if cat and cat_counts.get(cat, 0) < self.config.max_patterns_per_category:
-                selected.append(pattern)
-                cat_counts[cat] = cat_counts.get(cat, 0) + 1
+    def _make_callbacks(self, exp_dir: str) -> List:
+        """Override: N-BEATS uses ``model_name="N-BEATS"`` (base default is the
+        experiment name). ``patience=25`` matches the base default; everything
+        else (monitor, terminate-on-nan, analyzer config) matches the base body.
+        """
+        from dl_techniques.analyzer import AnalysisConfig
+        from train.common import create_callbacks as create_common_callbacks
 
-        if self.config.max_patterns and len(selected) > self.config.max_patterns:
-            selected = random.sample(selected, self.config.max_patterns)
+        viz_dir = os.path.join(exp_dir, 'visualizations')
+        os.makedirs(viz_dir, exist_ok=True)
 
-        logger.info(f"Selected {len(selected)} patterns for training")
-        return selected
+        callbacks, _ = create_common_callbacks(
+            model_name="N-BEATS",
+            results_dir_prefix=exp_dir,
+            monitor="val_loss",
+            patience=25,
+            use_lr_schedule=self.config.use_warmup,
+            include_terminate_on_nan=True,
+            include_analyzer=self.config.perform_deep_analysis,
+            analyzer_config=AnalysisConfig(
+                analyze_weights=True, analyze_spectral=True,
+                analyze_calibration=False, analyze_information_flow=False,
+                analyze_training_dynamics=False, verbose=False),
+            analyzer_start_epoch=self.config.analysis_start_epoch,
+            analyzer_epoch_frequency=self.config.analysis_frequency,
+        )
+        callbacks.append(self._build_performance_callback(viz_dir))
+        return callbacks
 
-    def create_model(self) -> keras.Model:
-        """Create and compile an N-BEATS model."""
+    def _build_model(self) -> keras.Model:
+        """Create and compile an N-BEATS model (+ build from input shape)."""
         kernel_regularizer = None
         if self.config.kernel_regularizer_l2 > 0:
             kernel_regularizer = keras.regularizers.L2(self.config.kernel_regularizer_l2)
@@ -508,78 +324,18 @@ class NBeatsTrainer:
             metrics = [keras.metrics.MeanAbsoluteError(name="forecast_mae")]
 
         model.compile(optimizer=optimizer, loss=losses, loss_weights=loss_weights, metrics=metrics)
+        model.build((None, self.config.backcast_length, self.config.input_dim))
         return model
 
-    def run_experiment(self) -> Dict[str, Any]:
-        """Run the complete training experiment."""
-        logger.info("Starting N-BEATS training experiment")
-        self.exp_dir = self._create_experiment_dir()
-        logger.info(f"Results: {self.exp_dir}")
-
-        data_pipeline = self.processor.prepare_datasets()
-        self.model = self.create_model()
-        self.model.build((None, self.config.backcast_length, self.config.input_dim))
-        logger.info(f"Model params: {self.model.count_params():,}")
-        self.model.summary(print_fn=logger.info)
-
-        training_results = self._train_model(data_pipeline, self.exp_dir)
-        if self.config.save_results:
-            self._save_results(training_results, self.exp_dir)
-
-        return {
-            'config': self.config, 'experiment_dir': self.exp_dir,
-            'training_results': training_results, 'results_dir': self.exp_dir
-        }
-
-    def _create_experiment_dir(self) -> str:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        exp_dir = os.path.join(self.config.result_dir, f"{self.config.experiment_name}_{timestamp}")
-        os.makedirs(exp_dir, exist_ok=True)
-        return exp_dir
-
-    def _train_model(self, data_pipeline: Dict, exp_dir: str) -> Dict[str, Any]:
-        viz_dir = os.path.join(exp_dir, 'visualizations')
-
-        callbacks, _ = create_common_callbacks(
-            model_name="N-BEATS",
-            results_dir_prefix=exp_dir,
-            monitor="val_loss",
-            patience=25,
-            use_lr_schedule=self.config.use_warmup,
-            include_terminate_on_nan=True,
-            include_analyzer=self.config.perform_deep_analysis,
-            analyzer_config=AnalysisConfig(
-                analyze_weights=True, analyze_spectral=True,
-                analyze_calibration=False, analyze_information_flow=False,
-                analyze_training_dynamics=False, verbose=False),
-            analyzer_start_epoch=self.config.analysis_start_epoch,
-            analyzer_epoch_frequency=self.config.analysis_frequency,
-        )
-        callbacks.append(PatternPerformanceCallback(self.config, self.processor, viz_dir, "nbeats"))
-
-        history = self.model.fit(
-            data_pipeline['train_ds'],
-            validation_data=data_pipeline['val_ds'],
-            epochs=self.config.epochs,
-            steps_per_epoch=self.config.steps_per_epoch,
-            validation_steps=data_pipeline['validation_steps'],
-            callbacks=callbacks, verbose=1
-        )
-
-        logger.info("Evaluating on test set")
-        test_results = self.model.evaluate(
-            data_pipeline['test_ds'], steps=data_pipeline['test_steps'],
-            verbose=1, return_dict=True
-        )
-
-        return {
-            'history': history.history,
-            'test_metrics': {k: float(v) for k, v in test_results.items()},
-            'final_epoch': len(history.history['loss'])
-        }
-
-    def _save_results(self, results: Dict, exp_dir: str) -> None:
-        def default(o: Any) -> str:
+    def _save_results(self, results: Dict[str, Any], exp_dir: str,
+                      extra_fields: Optional[Dict[str, Any]] = None) -> None:
+        # DECISION plan_2026-06-09_a3c7304c/D-005: use this LOCAL serializer, NOT
+        # the base's train.common.json_numpy_default. config.__dict__ carries
+        # `primary_loss: Union[str, keras.losses.Loss]`; json_numpy_default RAISES
+        # TypeError on a Loss object (prior-plan D-003 forbids restoring its
+        # str-coercion), whereas this local default() degrades a Loss to str(o).
+        # Do NOT swap this for json_numpy_default. See decisions.md D-005.
+        def default(o: Any) -> Any:
             if isinstance(o, (np.integer, np.floating)):
                 return float(o)
             return str(o)
@@ -588,42 +344,57 @@ class NBeatsTrainer:
             'history': results['history'],
             'test_metrics': results['test_metrics'],
             'final_epoch': results['final_epoch'],
-            'config': self.config.__dict__
+            'config': self.config.__dict__,
         }
+        if extra_fields:
+            serializable.update(extra_fields)
         with open(os.path.join(exp_dir, 'results.json'), 'w') as f:
             json.dump(serializable, f, indent=4, default=default)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="N-BEATS Training")
-    parser.add_argument("--experiment_name", type=str, default="nbeats")
+def build_parser() -> argparse.ArgumentParser:
+    """Build the N-BEATS CLI parser on top of the shared TS argument parser.
+
+    Starts from :func:`create_ts_argument_parser` (the shared TS args:
+    ``--epochs``/``--batch_size``/``--steps_per_epoch``/``--learning_rate``/
+    warmup/analysis/``--gpu`` etc.), restores N-BEATS's own defaults for the args
+    whose default differs from the shared parser via ``set_defaults`` (
+    ``experiment_name`` "nbeats"; the original N-BEATS CLI's ``optimizer`` was
+    "adamw" and ``warmup_steps`` 1000 — both already the shared-parser defaults,
+    so only ``experiment_name`` needs restoring), then adds N-BEATS's
+    architecture-specific flags (backcast/forecast lengths, stack types,
+    hidden units, reconstruction-loss weight, per-instance normalization toggle).
+    """
+    parser = create_ts_argument_parser("N-BEATS Training")
+
+    # Restore N-BEATS's per-arg defaults where they differ from the shared parser.
+    # The original N-BEATS CLI used experiment_name="nbeats"; its epochs(200)/
+    # batch_size(128)/steps_per_epoch(1000)/learning_rate(1e-4)/optimizer("adamw")/
+    # gradient_clip_norm(1.0)/warmup_steps(1000)/warmup_start_lr(1e-6)/
+    # analysis_frequency(10)/analysis_start_epoch(1) already match the shared parser.
+    # max_patterns_per_category=100 restores the N-BEATS config default (shared
+    # parser default is 10) so that, now that main() WIRES the flag into the
+    # config (review #5: no silent no-op), default invocation still selects 100.
+    parser.set_defaults(experiment_name="nbeats", max_patterns_per_category=100)
+
+    # N-BEATS architecture-specific arguments.
     parser.add_argument("--backcast_length", type=int, default=168)
     parser.add_argument("--forecast_length", type=int, default=24)
-    parser.add_argument("--epochs", type=int, default=200)
-    parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--steps_per_epoch", type=int, default=1000)
-    parser.add_argument("--learning_rate", type=float, default=1e-4)
-    parser.add_argument("--optimizer", type=str, default="adamw")
-    parser.add_argument("--gradient_clip_norm", type=float, default=1.0)
-    parser.add_argument("--no-normalize", dest="normalize_per_instance", action="store_false")
-    parser.set_defaults(normalize_per_instance=True)
     parser.add_argument("--stack_types", nargs='+', default=["trend", "seasonality", "generic"])
     parser.add_argument("--hidden_layer_units", type=int, default=256)
     parser.add_argument("--reconstruction_loss_weight", type=float, default=0.5)
-    parser.add_argument("--no-warmup", dest="use_warmup", action="store_false")
-    parser.set_defaults(use_warmup=True)
-    parser.add_argument("--warmup_steps", type=int, default=1000)
-    parser.add_argument("--warmup_start_lr", type=float, default=1e-6)
-    parser.add_argument("--no-deep-analysis", dest="perform_deep_analysis", action="store_false")
-    parser.set_defaults(perform_deep_analysis=True)
-    parser.add_argument("--analysis_frequency", type=int, default=10)
-    parser.add_argument("--analysis_start_epoch", type=int, default=1)
-    parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
-    return parser.parse_args()
+    parser.add_argument("--no-normalize", dest="normalize_per_instance", action="store_false")
+    parser.set_defaults(normalize_per_instance=True)
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    return build_parser().parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    set_seeds(42)
     setup_gpu(args.gpu)
 
     config = NBeatsTrainingConfig(
@@ -643,6 +414,13 @@ def main() -> None:
         use_warmup=args.use_warmup,
         warmup_steps=args.warmup_steps,
         warmup_start_lr=args.warmup_start_lr,
+        # Wire the shared-parser pattern/viz flags so they are not silent no-ops
+        # (review #5). max_patterns_per_category default is restored to 100 in
+        # build_parser; visualize_every_n_epochs/plot_top_k_patterns parser
+        # defaults (5/12) already equal the N-BEATS config defaults.
+        max_patterns_per_category=args.max_patterns_per_category,
+        visualize_every_n_epochs=args.visualize_every_n_epochs,
+        plot_top_k_patterns=args.plot_top_k_patterns,
         perform_deep_analysis=args.perform_deep_analysis,
         analysis_frequency=args.analysis_frequency,
         analysis_start_epoch=args.analysis_start_epoch
@@ -652,6 +430,10 @@ def main() -> None:
         n_samples=10000, random_seed=42, default_noise_level=0.1
     )
 
+    # Preserve nbeats's original hard-exit teardown (os._exit(0)): a deliberate
+    # force-exit that skips Python/atexit cleanup to avoid TF prefetch-thread
+    # hangs on shutdown. Do NOT normalize to sys.exit/finally (per-script choice,
+    # not consolidatable duplication). See plan_2026-06-09_a3c7304c/decisions.md D-008.
     try:
         trainer = NBeatsTrainer(config, generator_config)
         results = trainer.run_experiment()

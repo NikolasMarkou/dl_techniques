@@ -2,10 +2,13 @@
 This module provides a `MovingStd` layer that applies a 2D moving standard deviation
 filter to input images using a sliding window approach.
 
-The layer computes local standard deviation by applying the mathematical formula:
-`sqrt(E[X^2] - (E[X])^2)` where E represents the expectation (mean) over a sliding
-window. This is efficiently implemented using average pooling operations to compute
-both E[X] and E[X^2].
+The layer computes local standard deviation as the windowed variance over a
+sliding window. To avoid catastrophic cancellation for large-mean inputs (e.g.
+pixel values ~200), the variance is computed in a shift-invariant two-pass form:
+the input is first shifted by a per-channel constant (its spatial mean, treated as
+a constant), then average pooling computes E[Y] and E[Y^2] of the shifted signal.
+Because Var(X) == Var(X - c), this yields the exact windowed variance while keeping
+the pooled terms O(variance) instead of O(mean^2).
 
 This layer is particularly valuable for:
 - **Texture analysis**: Capturing local texture patterns and roughness
@@ -37,11 +40,16 @@ class MovingStd(keras.layers.Layer):
     """
     Applies a 2D moving standard deviation filter to input images for texture analysis.
 
-    Computes local standard deviation over sliding windows using the stable formula
-    ``std = sqrt(E[X^2] - (E[X])^2 + epsilon)``. Average pooling operations
-    efficiently compute the local expectations ``E[X]`` and ``E[X^2]``, and each
-    channel is processed independently. The variance is clamped to be non-negative
-    before taking the square root to handle floating-point precision errors.
+    Computes local standard deviation over sliding windows. To avoid catastrophic
+    cancellation for large-mean inputs, the variance is computed in a shift-invariant
+    two-pass form: the input is first shifted by a per-channel spatial-mean constant
+    (``stop_gradient``), then average pooling computes ``E[Y]`` and ``E[Y^2]`` of the
+    shifted signal ``Y = X - c``. Since ``Var(X) == Var(X - c)``, the windowed
+    variance ``E[Y^2] - (E[Y])^2`` is exact while both pooled terms stay
+    ``O(variance)`` rather than ``O(mean^2)``, eliminating the precision loss of the
+    naive ``E[X^2] - (E[X])^2`` shortcut. Each channel is processed independently.
+    The variance is clamped to be non-negative before taking ``sqrt`` to absorb any
+    residual floating-point error.
 
     **Architecture Overview:**
 
@@ -192,13 +200,34 @@ class MovingStd(keras.layers.Layer):
         :return: Local standard deviation at each spatial location.
         :rtype: keras.KerasTensor
         """
-        # Compute E[X] - local mean over the pooling window
-        mean_x = self.pooler(inputs, training=training)
+        # Two-pass, shift-invariant variance to avoid catastrophic cancellation.
+        #
+        # Resolution caveat: ``AveragePooling2D`` produces windowed means at the
+        # POOLED grid resolution, not the per-pixel grid, so we cannot subtract a
+        # per-window mean from ``inputs`` before pooling. Instead we exploit the
+        # shift-invariance of variance: Var(X) == Var(X - c) for any constant c.
+        # We subtract a per-channel constant ``c`` (the spatial mean of the batch,
+        # stop-gradient so it is treated as a constant) to shrink the magnitudes
+        # fed into the pooled E[Y] and E[Y²] terms. This keeps both pooled terms
+        # O(variance) rather than O(mean²), so the ``E[Y²] - E[Y]²`` subtraction no
+        # longer cancels two nearly-equal large numbers (the failure mode for
+        # large-mean inputs such as pixel values ~200). The result is exactly the
+        # windowed variance because the global per-channel shift is window-invariant.
+        spatial_axes = (
+            (2, 3) if self.data_format == "channels_first" else (1, 2)
+        )
+        shift = ops.stop_gradient(
+            ops.mean(inputs, axis=spatial_axes, keepdims=True)
+        )
+        centered = inputs - shift
 
-        # Compute E[X²] - local mean of squared values over the pooling window
-        mean_x_sq = self.pooler(ops.square(inputs), training=training)
+        # Compute E[Y] - local mean of the shifted values over the pooling window
+        mean_x = self.pooler(centered, training=training)
 
-        # Calculate local variance: Var(X) = E[X²] - (E[X])²
+        # Compute E[Y²] - local mean of squared shifted values over the window
+        mean_x_sq = self.pooler(ops.square(centered), training=training)
+
+        # Calculate local variance: Var(X) = Var(Y) = E[Y²] - (E[Y])²
         variance = mean_x_sq - ops.square(mean_x)
 
         # Ensure variance is non-negative for numerical stability

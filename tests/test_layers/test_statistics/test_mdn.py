@@ -239,5 +239,99 @@ class TestMDNUtilities:
         logger.info("MDN utility functions test passed.")
 
 
+class TestMDNNumerics:
+    """Correctness tests for the log-space NLL and logits-based pi (Step 4)."""
+
+    def _build_y_pred(self, layer, mu, sigma, pi_logits):
+        """Assemble a [batch, total_params] tensor in the [mu, sigma, pi] layout
+        that split_mixture_params expects.
+
+        mu, sigma: [batch, num_mix, output_dim]; pi_logits: [batch, num_mix].
+        """
+        batch = mu.shape[0]
+        mu_flat = mu.reshape(batch, -1)
+        sigma_flat = sigma.reshape(batch, -1)
+        y_pred = np.concatenate([mu_flat, sigma_flat, pi_logits], axis=-1)
+        return keras.ops.convert_to_tensor(y_pred.astype("float32"))
+
+    def test_nll_matches_analytic_ground_truth(self):
+        """loss_func equals a hand-computed log-space mixture NLL (atol 1e-5).
+
+        Tiny config: num_mix=2, output_dim=1. Hand-chosen mu/sigma/pi-logits and
+        target y; the analytic mixture NLL is computed independently in numpy.
+        """
+        layer = MDNLayer(output_dimension=1, num_mixtures=2,
+                         intermediate_units=4, use_batch_norm=False)
+
+        mu = np.array([[[0.5], [-1.0]]], dtype="float32")        # [1,2,1]
+        sigma = np.array([[[1.0], [0.5]]], dtype="float32")      # [1,2,1]
+        pi_logits = np.array([[0.3, -0.7]], dtype="float32")     # [1,2]
+        y = np.array([[0.2]], dtype="float32")                   # [1,1]
+
+        # Analytic ground-truth (log-space, single softmax over pi logits).
+        w = np.exp(pi_logits[0] - np.max(pi_logits[0]))
+        w = w / w.sum()                                          # mixture weights
+        comp_density = (1.0 / (np.sqrt(2.0 * np.pi) * sigma[0, :, 0])) * \
+            np.exp(-0.5 * ((y[0, 0] - mu[0, :, 0]) / sigma[0, :, 0]) ** 2)
+        nll_ref = -np.log(np.sum(w * comp_density))
+
+        y_pred = self._build_y_pred(layer, mu, sigma, pi_logits)
+        loss = keras.ops.convert_to_numpy(
+            layer.loss_func(keras.ops.convert_to_tensor(y), y_pred))
+
+        np.testing.assert_allclose(loss, nll_ref, atol=1e-5,
+                                   err_msg="log-space NLL diverges from analytic ground-truth")
+        logger.info(f"MDN NLL ground-truth test passed (loss={loss:.6f}, ref={nll_ref:.6f}).")
+
+    def test_pi_treated_as_logits_softmax_sums_to_one(self):
+        """The pi slice is raw logits; softmax over it sums to 1 (atol 1e-6).
+
+        Drives the model's own pi path (forward pass) and applies the same
+        softmax the loss/sampling use, verifying single-softmax semantics.
+        """
+        layer = MDNLayer(output_dimension=2, num_mixtures=4,
+                         intermediate_units=8, use_batch_norm=True)
+        x = keras.ops.convert_to_tensor(
+            np.random.normal(size=(5, 7)).astype("float32"))
+        y_pred = layer(x)
+
+        _, _, pi_logits = layer.split_mixture_params(y_pred)
+        weights = keras.ops.convert_to_numpy(
+            keras.activations.softmax(pi_logits, axis=-1))
+
+        sums = weights.sum(axis=-1)
+        np.testing.assert_allclose(sums, np.ones_like(sums), atol=1e-6)
+        # And the raw pi slice is NOT already a probability distribution
+        # (would be the symptom of the old softplus double-activation).
+        raw_pi = keras.ops.convert_to_numpy(pi_logits)
+        assert np.any(raw_pi < 0.0), \
+            "pi slice should be raw logits (can be negative), not softplus-positive."
+        logger.info("MDN pi-sums-to-1 / logits test passed.")
+
+    def test_high_output_dim_nll_is_finite(self):
+        """Log-space NLL is finite at high output_dim where prob-space underflows.
+
+        Old prob-space path: prod over output_dim of small Gaussian densities ->
+        underflow to 0 -> log(0) = -inf. Log-space sum stays finite.
+        """
+        output_dim, num_mix, batch = 16, 3, 4
+        layer = MDNLayer(output_dimension=output_dim, num_mixtures=num_mix,
+                         intermediate_units=8, use_batch_norm=False)
+
+        rng = np.random.default_rng(0)
+        mu = rng.normal(size=(batch, num_mix, output_dim)).astype("float32")
+        sigma = (0.05 + 0.01 * rng.random((batch, num_mix, output_dim))).astype("float32")
+        pi_logits = rng.normal(size=(batch, num_mix)).astype("float32")
+        # Target offset from every mean so densities are tiny per-dim.
+        y = (mu[:, 0, :] + 0.3).astype("float32")
+
+        y_pred = self._build_y_pred(layer, mu, sigma, pi_logits)
+        loss = keras.ops.convert_to_numpy(
+            layer.loss_func(keras.ops.convert_to_tensor(y), y_pred))
+
+        assert np.isfinite(loss), f"NLL not finite at output_dim={output_dim}: {loss}"
+        logger.info(f"MDN high-output_dim stability test passed (loss={loss:.4f}).")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -208,7 +208,7 @@ import keras
 import numpy as np
 
 from dl_techniques.models.distilbert import create_distilbert_with_head
-from dl_techniques.layers.nlp_heads import NLPTaskConfig, NLPTaskType
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 # 1. Define the downstream task
 sentiment_config = NLPTaskConfig(
@@ -304,7 +304,7 @@ model = DistilBERT.from_variant("base", pretrained=True, vocab_size=50000)
 
 ```python
 from dl_techniques.models.distilbert import create_distilbert_with_head
-from dl_techniques.layers.nlp_heads import NLPTaskConfig, NLPTaskType
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 ner_config = NLPTaskConfig(
     name="ner",

@@ -21,7 +21,7 @@ from dataclasses import dataclass, asdict
 from typing import List, Tuple, Optional, Dict, Any
 from pathlib import Path
 
-from train.common import setup_gpu, set_seeds
+from train.common import setup_gpu, set_seeds, json_numpy_default
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.byte_latent_transformer.model import create_blt_model
 from dl_techniques.layers.blt_blocks import ByteTokenizer, EntropyModel
@@ -90,7 +90,7 @@ class BLTTrainingConfig:
 
     def save_to_file(self, filepath: str) -> None:
         with open(filepath, 'w') as f:
-            json.dump(asdict(self), f, indent=2)
+            json.dump(asdict(self), f, indent=2, default=json_numpy_default)
 
     @classmethod
     def load_from_file(cls, filepath: str) -> 'BLTTrainingConfig':

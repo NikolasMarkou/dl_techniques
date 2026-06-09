@@ -20,7 +20,7 @@ from dl_techniques.models.fnet.model import (
     FNet,
     create_fnet_with_head,
 )
-from dl_techniques.layers.nlp_heads import NLPTaskConfig, NLPTaskType
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, NLPTaskType
 
 
 class TestFNetModel:

@@ -316,10 +316,9 @@ class UnifiedScaler(keras.layers.Layer):
 
         # Compute variance using the stable two-pass formula
         variance = ops.mean(ops.square(x - mean), axis=self.axis, keepdims=True)
+        # sqrt(variance + eps) >= sqrt(eps) > eps for any sane eps (e.g. 1e-5),
+        # so a subsequent ops.maximum(std, eps) floor would be unreachable; omitted.
         std = ops.sqrt(variance + self.eps)
-
-        # Additional protection against very small standard deviations
-        std = ops.maximum(std, self.eps)
 
         # Apply z-score normalization
         x_norm = (x - mean) / std
@@ -328,7 +327,32 @@ class UnifiedScaler(keras.layers.Layer):
         self._last_mean = mean
         self._last_std = std
 
-        # Update persistent statistics if enabled
+        # Update persistent statistics if enabled.
+        #
+        # This in-call ``.assign`` of a non-trainable variable mirrors the exact
+        # Keras 3 core idiom: ``keras.layers.BatchNormalization`` itself performs
+        # ``self.moving_mean.assign(...)`` / ``self.moving_variance.assign(...)``
+        # inside its own ``call`` (see Keras source
+        # ``layers/normalization/batch_normalization.py``:257,260). So the
+        # ``.assign``-inside-``call`` pattern here is the idiomatic Keras approach
+        # for in-call running-stat updates, NOT an anti-pattern to be "fixed".
+        #
+        # The absence of an ``if training:`` gate is INTENTIONAL: ``UnifiedScaler``'s
+        # contract is that the stored stats refresh on EVERY forward pass, including
+        # ``training=None`` inference calls. Do NOT add a ``training`` gate here —
+        # gating the update on ``training`` would break ``test_scaler_stored_statistics``
+        # (which asserts the stored stats track plain inference calls). This differs
+        # from BatchNorm (which DOES gate on training) by deliberate design.
+        #
+        # The update is gated on ``self.built`` only, so it is skipped during the
+        # symbolic functional-API shape-inference pass (where the weights are not yet
+        # created).
+        #
+        # Known limitation (same as BatchNorm's ``.assign``): this state mutation is
+        # graph-safe under the TF backend in both eager and ``tf.function`` /
+        # ``model.fit`` graph mode, but it is NOT supported under TF
+        # ``jit_compile=True`` (XLA) or the stateless JAX backend. Neither is used by
+        # this repo (backend is TF; this layer is never compiled with jit) — see plan A2.
         if self.store_stats and self.built:
             # Average statistics across batch dimension for storage
             batch_mean = ops.mean(mean, axis=0)
@@ -359,9 +383,17 @@ class UnifiedScaler(keras.layers.Layer):
 
         x = scaled_inputs
 
-        # Reverse affine transformation if enabled
+        # Reverse affine transformation if enabled.
+        # affine_weight (gamma) is trainable and initialised to ones, but training
+        # may drive it toward 0, making this division blow up to inf/NaN. Guard the
+        # denominator magnitude to be >= eps while preserving its sign. sign(0)==0
+        # would zero the denominator, so treat gamma==0 as a positive sign (+1) and
+        # floor the magnitude at eps.
         if self.affine:
-            x = (x - self.affine_bias) / self.affine_weight
+            gamma = self.affine_weight
+            sign = ops.where(gamma < 0, -1.0, 1.0)  # gamma==0 -> +1
+            gamma_safe = sign * ops.maximum(ops.abs(gamma), self.eps)
+            x = (x - self.affine_bias) / gamma_safe
 
         # Reverse normalization: multiply by std and add mean
         x = x * self._last_std + self._last_mean

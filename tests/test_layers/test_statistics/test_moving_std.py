@@ -178,6 +178,45 @@ class TestMovingStd:
             # Check that output is non-negative (standard deviation is always >= 0)
             assert np.all(output.numpy() >= 0), "Negative values detected in standard deviation"
 
+    def test_large_mean_numerical_stability(self):
+        """Large-mean input must not lose precision (catastrophic cancellation).
+
+        With a large constant (~200) plus tiny noise, the naive
+        ``E[X^2] - (E[X])^2`` form subtracts two nearly-equal large numbers and can
+        yield negative variance before the clamp. The shift-invariant two-pass form
+        must stay finite, non-negative, and match a numpy reference computed the
+        stable way (subtract the per-window mean, then average the squares).
+        """
+        pool_size = (3, 3)
+        layer = MovingStd(pool_size=pool_size, padding="valid", epsilon=1e-7)
+
+        rng = np.random.default_rng(0)
+        x = (200.0 + 0.01 * rng.standard_normal((2, 16, 16, 3))).astype(np.float32)
+
+        output = layer(x).numpy()
+
+        # Must be finite, no NaN, and non-negative.
+        assert np.all(np.isfinite(output)), "Non-finite values in output"
+        assert not np.any(np.isnan(output)), "NaN values detected in output"
+        assert np.all(output >= 0.0), "Negative std detected"
+
+        # numpy reference: stable two-pass windowed std, 'valid' padding, stride 1.
+        ph, pw = pool_size
+        bs, h, w, c = x.shape
+        oh, ow = h - ph + 1, w - pw + 1
+        ref = np.empty((bs, oh, ow, c), dtype=np.float64)
+        xd = x.astype(np.float64)
+        for i in range(oh):
+            for j in range(ow):
+                window = xd[:, i:i + ph, j:j + pw, :]  # (bs, ph, pw, c)
+                wmean = window.mean(axis=(1, 2), keepdims=True)
+                wvar = np.mean((window - wmean) ** 2, axis=(1, 2))  # (bs, c)
+                ref[:, i, j, :] = np.sqrt(wvar + layer.epsilon)
+
+        assert np.allclose(output, ref, atol=1e-4), (
+            f"max abs diff {np.max(np.abs(output - ref))}"
+        )
+
     def test_different_data_formats(self):
         """Test layer with different data formats."""
         # Test with channels_last

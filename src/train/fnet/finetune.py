@@ -26,8 +26,8 @@ from dl_techniques.analyzer import AnalysisConfig, DataInput, ModelAnalyzer
 from dl_techniques.models.fnet import FNet
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tokenizer import TiktokenPreprocessor
-from dl_techniques.layers.nlp_heads.task_types import NLPTaskType
-from dl_techniques.layers.nlp_heads import NLPTaskConfig, create_nlp_head
+from dl_techniques.layers.heads.nlp.task_types import NLPTaskType
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, create_nlp_head
 
 # ---------------------------------------------------------------------
 # Configuration

@@ -69,8 +69,11 @@ from dl_techniques.utils.logger import logger
 # environment does not need the full training stack on PYTHONPATH.
 try:
     from train.common.gpu import setup_gpu
+    from train.common import set_seeds, json_numpy_default
 except Exception:  # pragma: no cover — fallback for editable installs
     setup_gpu = None  # type: ignore[assignment]
+    set_seeds = None  # type: ignore[assignment]
+    json_numpy_default = str  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------
@@ -384,8 +387,7 @@ def main(argv: Optional[list] = None) -> None:
     args = build_argparser().parse_args(argv)
 
     # Reproducibility
-    keras.utils.set_random_seed(args.seed)
-    np.random.seed(args.seed)
+    set_seeds(args.seed)
 
     # GPU
     if setup_gpu is not None:
@@ -595,7 +597,7 @@ def main(argv: Optional[list] = None) -> None:
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     with open(out_dir / "run_config.json", "w") as f:
-        json.dump(run_cfg, f, indent=2, default=str)
+        json.dump(run_cfg, f, indent=2, default=json_numpy_default)
 
     # --- Fit ---
     # PyDataset passes directly to model.fit; Keras 3 iterates with the

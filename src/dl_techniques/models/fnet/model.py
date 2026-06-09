@@ -63,7 +63,7 @@ from typing import Any, Dict, List, Optional, Union
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.embedding.bert_embeddings import BertEmbeddings
 from dl_techniques.layers.fnet_encoder_block import FNetEncoderBlock
-from dl_techniques.layers.nlp_heads import NLPTaskConfig, create_nlp_head
+from dl_techniques.layers.heads.nlp import NLPTaskConfig, create_nlp_head
 from dl_techniques.layers.transformers import FFNType, NormalizationPositionType, NormalizationType
 
 # ---------------------------------------------------------------------
@@ -794,7 +794,7 @@ def create_fnet_with_head(
     Example:
         .. code-block:: python
 
-            from dl_techniques.layers.nlp_heads import NLPTaskType
+            from dl_techniques.layers.heads.nlp import NLPTaskType
 
             # Define a task
             ner_task = NLPTaskConfig(

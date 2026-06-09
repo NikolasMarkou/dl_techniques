@@ -141,8 +141,21 @@ class ResidualACFLayer(keras.layers.Layer):
             if lag < 1 or lag > max_lag:
                 raise ValueError(f"target_lags must be between 1 and {max_lag}, got {lag}")
 
-        # Initialize ACF storage for monitoring
+        # Initialize ACF storage for monitoring.
+        #
+        # NOTE: ``acf_values`` is a *call-scoped* convenience attribute holding the
+        # most-recent ACF tensor (eager value during a forward pass). It is
+        # intentionally NOT a weight and is NOT serialized: its shape depends on the
+        # dynamic batch dimension, so persisting it via ``add_weight`` would couple
+        # the layer to a fixed batch size and add no diagnostic value after reload.
+        # ``get_acf_summary()`` is therefore only valid immediately after a ``call()``
+        # in eager mode; after deserialization (or before any call) it returns None.
         self.acf_values = None
+
+        # Static sequence length, captured in ``build`` when known. Used to bound the
+        # Python ``range`` over lags so we never branch on a SYMBOLIC shape inside
+        # ``compute_acf`` (which is unsafe / silently wrong under TF graph mode).
+        self._seq_length = None
 
         logger.debug(f"Initialized ResidualACFLayer with max_lag={max_lag}, "
                      f"regularization_weight={regularization_weight}")
@@ -162,6 +175,15 @@ class ResidualACFLayer(keras.layers.Layer):
         if pred_shape != target_shape:
             raise ValueError(f"Predictions shape {pred_shape} must match targets shape {target_shape}")
 
+        # Capture the STATIC sequence length (axis -2) when known. This is a Python
+        # int for fixed-length series (or None for a fully-dynamic time axis) and lets
+        # ``compute_acf`` bound its Python lag-loop without ever branching on a
+        # symbolic tensor.
+        if isinstance(pred_shape, (list, tuple)) and len(pred_shape) >= 2:
+            self._seq_length = pred_shape[-2]
+        else:
+            self._seq_length = None
+
         logger.debug(f"Built ResidualACFLayer with input shapes: {input_shape}")
 
         # Always call parent build at the end
@@ -175,10 +197,6 @@ class ResidualACFLayer(keras.layers.Layer):
         :return: ACF values of shape ``(..., max_lag + 1, features)``.
         :rtype: keras.KerasTensor
         """
-        # Get tensor dimensions using Keras ops
-        shape = ops.shape(residuals)
-        seq_length = shape[-2]
-
         # Center the residuals by removing mean
         mean = ops.mean(residuals, axis=-2, keepdims=True)
         centered = residuals - mean
@@ -186,43 +204,54 @@ class ResidualACFLayer(keras.layers.Layer):
         # Compute variance (lag 0 autocovariance) with numerical stability
         variance = ops.mean(ops.square(centered), axis=-2, keepdims=True) + self.epsilon
 
-        # Get batch and feature dimensions for creating output tensor
-        batch_shape = ops.shape(residuals)[:-2]
-        n_features = ops.shape(residuals)[-1]
+        # A (..., 1, features) template tensor with the correct dynamic batch/feature
+        # extent, used to materialise the lag-0 ones and any out-of-range zeros via
+        # ``*_like`` (NO ``ops.ones(dynamic_shape)`` / ``ops.zeros(dynamic_shape)``,
+        # which require building a shape vector from a symbolic ``ops.shape``).
+        slot = centered[..., :1, :]
 
         # Initialize list to collect ACF values for each lag
         acf_list = []
 
-        # ACF at lag 0 is always 1.0 by definition
-        ones_shape = ops.concatenate([batch_shape, ops.array([1]), ops.array([n_features])], axis=0)
-        acf_lag0 = ops.ones(ones_shape, dtype=residuals.dtype)
-        acf_list.append(acf_lag0)
+        # ACF at lag 0 is always exactly 1.0 by definition.
+        acf_list.append(ops.ones_like(slot))
 
-        # Compute ACF for each lag from 1 to max_lag
+        # DECISION plan_2026-06-08_a5f40f4f/D-003: compute each lag's autocovariance
+        # by slicing ``centered`` with PYTHON-INT lag offsets, and decide
+        # in-range-vs-out-of-range using the STATIC sequence length captured in
+        # ``build`` — never with a Python ``if`` on the SYMBOLIC ``ops.shape(...)``.
+        # The old code did ``if lag < seq_length:`` where ``seq_length`` was a symbolic
+        # tensor; under TF graph mode that either raises ("using a tf.Tensor as a
+        # Python bool") or is always-truthy (silently producing wrong/empty slices
+        # when the series is shorter than max_lag). Do NOT reintroduce a symbolic
+        # branch here, and do NOT use ``ops.ones/zeros(dynamic_shape)``. When the
+        # static length is unknown (fully-dynamic time axis) we fall back to the
+        # tensor's own STATIC ``.shape[-2]`` (a Python int whenever the time axis is
+        # known at trace time, including direct ``compute_acf`` calls that bypass
+        # ``build``); only a truly unknown time axis leaves it None, in which case we
+        # compute every lag's slice (graph-safe for any series longer than max_lag).
+        # See decisions.md D-003.
+        seq_length = self._seq_length  # Python int or None (captured in build)
+        if seq_length is None:
+            static_seq = residuals.shape[-2]
+            seq_length = int(static_seq) if static_seq is not None else None
+
         for lag in range(1, self.max_lag + 1):
-            # Check if we have sufficient sequence length for this lag
-            if lag < seq_length:
-                # Calculate the length of overlapping segments
-                overlap_length = seq_length - lag
+            if seq_length is not None and lag >= seq_length:
+                # Out-of-range lag for this (statically-known) sequence length:
+                # ACF is deterministically 0 (no overlapping samples).
+                acf_list.append(ops.zeros_like(slot))
+                continue
 
-                # Extract overlapping segments using tensor slicing
-                segment1 = centered[..., :overlap_length, :]  # Earlier segment
-                segment2 = centered[..., lag:, :]             # Later segment
+            # Overlapping segments via Python-int slicing (graph-safe).
+            segment1 = centered[..., :-lag, :]  # Earlier segment r_{t-k}
+            segment2 = centered[..., lag:, :]   # Later segment   r_t
 
-                # Compute element-wise product and average for autocovariance
-                cross_product = segment1 * segment2
-                autocovariance = ops.mean(cross_product, axis=-2, keepdims=True)
+            # Autocovariance at this lag, normalized by lag-0 variance.
+            autocovariance = ops.mean(segment1 * segment2, axis=-2, keepdims=True)
+            acf_list.append(autocovariance / variance)
 
-                # Normalize by variance to get correlation coefficient
-                acf_lag = autocovariance / variance
-            else:
-                # Insufficient data for this lag, ACF is 0
-                zeros_shape = ops.concatenate([batch_shape, ops.array([1]), ops.array([n_features])], axis=0)
-                acf_lag = ops.zeros(zeros_shape, dtype=residuals.dtype)
-
-            acf_list.append(acf_lag)
-
-        # Concatenate all ACF values along the lag dimension
+        # Concatenate all ACF values along the lag dimension -> (..., max_lag+1, features)
         acf = ops.concatenate(acf_list, axis=-2)
 
         return acf
@@ -255,8 +284,12 @@ class ResidualACFLayer(keras.layers.Layer):
         # Store ACF values for monitoring and diagnostics
         self.acf_values = acf
 
-        # Apply regularization loss if specified and in training mode
-        if self.regularization_weight is not None and training:
+        # Apply regularization loss if specified and in training mode.
+        # Use identity ``training is True`` so that ``training=None`` (the default at
+        # inference) does NOT fire the loss; bare ``if training:`` would also skip
+        # under None which is fine, but ``is True`` makes the intent explicit and
+        # avoids treating any truthy non-bool as training.
+        if self.regularization_weight is not None and training is True:
             # Extract ACF values at target lags (excluding lag 0 which is always 1)
             target_acf_list = []
             for lag in self.target_lags:
@@ -292,6 +325,12 @@ class ResidualACFLayer(keras.layers.Layer):
 
     def get_acf_summary(self) -> Optional[Dict[str, float]]:
         """Get summary statistics of the most recent ACF computation.
+
+        .. note::
+            This reads the call-scoped ``self.acf_values`` attribute, which is only
+            populated by a preceding eager ``call()`` and is NOT serialized. After
+            ``model.load_model(...)`` (or before any forward pass) it returns ``None``.
+            It is a diagnostic convenience, not persisted state.
 
         :return: Dictionary with ACF statistics, or ``None`` if not yet computed.
         :rtype: dict[str, float] | None

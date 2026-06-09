@@ -2,11 +2,23 @@
 Deep Kernel Principal Component Analysis (DKPCA) algorithm.
 
 This layer provides a hierarchical, multi-level extension of Kernel Principal
-Component Analysis (KPCA). It is designed to learn more expressive and
-disentangled feature representations than shallow KPCA by creating a deep
-architecture with coupled optimization across all levels.
+Component Analysis (KPCA). It is designed to learn more expressive feature
+representations than shallow KPCA by stacking multiple kernel-PCA levels.
 
-Architecture and Design Philosophy:
+.. important:: **Fitted-path semantics (what this layer actually computes).**
+    After calling ``adapt(data)`` the layer performs a **greedy, per-level
+    Nystrom kernel-PCA stack**: each level is an INDEPENDENT kernel PCA fitted
+    on the previous fitted level's output, and the inter-level COUPLING is
+    DISABLED on the fitted path. It does **NOT** perform the paper's coupled /
+    globally-joint multi-level optimization described below -- that joint
+    objective is OUT OF SCOPE (it is not recoverable as a greedy layer-wise
+    ``adapt``). The forward/backward coupling described in this docstring
+    survives ONLY on the un-fitted (pre-``adapt``) fallback path. The
+    "coupled / joint / globally-coherent optimization" language below is
+    aspirational background from the reference paper, not what the fitted
+    layer executes.
+
+Architecture and Design Philosophy (reference-paper background):
 The core innovation of DKPCA lies in its forward and backward coupling
 mechanisms, which distinguish it from a naive stacking of independent KPCA
 layers. The architecture consists of multiple sequential levels, where each
@@ -52,6 +64,7 @@ References:
 """
 
 import keras
+import numpy as np
 from keras import ops, initializers, regularizers
 from typing import Optional, Union, Tuple, List, Dict, Any
 
@@ -62,15 +75,19 @@ class DeepKernelPCA(keras.layers.Layer):
     """
     Deep Kernel Principal Component Analysis layer for multi-level feature extraction.
 
-    This layer implements DKPCA, which extends traditional Kernel PCA to multiple
-    hierarchical levels with coupled optimization. It creates both forward and backward
-    dependencies across levels to extract more informative features than shallow KPCA.
-    The optimization minimizes ``min sum_j ||X^(j) - K^(j) alpha^(j)||^2_F + lambda sum_j ||alpha^(j)||^2_2``
-    where ``K^(j)`` is the kernel matrix at level ``j`` and ``alpha^(j)`` are the
-    principal component coefficients. Forward coupling passes components from level
-    ``j-1`` as input to level ``j``, while backward coupling refines shallower
-    representations using information from deeper levels through gated residual
-    connections.
+    This layer implements a hierarchical Kernel-PCA stack. After ``adapt(data)``
+    the FITTED path is a **greedy, per-level Nystrom kernel PCA**: each level is
+    an independent kernel PCA fitted on the previous fitted level's output, with
+    inter-level COUPLING DISABLED. This is the achievable correctness form; it
+    does NOT reproduce the reference paper's coupled / globally-joint multi-level
+    optimization (``min sum_j ||X^(j) - K^(j) alpha^(j)||^2_F + lambda sum_j
+    ||alpha^(j)||^2_2`` solved jointly across levels), which is OUT OF SCOPE.
+
+    The forward/backward coupling (forward coupling passing components from level
+    ``j-1`` as input to level ``j``; backward coupling refining shallower
+    representations from deeper levels via gated residual connections) is
+    reference-paper background and is active ONLY on the un-fitted (pre-``adapt``)
+    fallback path -- not on the fitted Nystrom path.
 
     **Architecture Overview:**
 
@@ -138,6 +155,36 @@ class DeepKernelPCA(keras.layers.Layer):
         Defaults to ``False``.
     :type trainable_kernels: bool
     :param kwargs: Additional arguments for Layer base class.
+
+    .. note:: **Two execution paths: fitted vs un-fitted fallback.**
+
+        * **Fitted path (after ``adapt``)** -- a genuine greedy per-level
+          Nystrom kernel PCA: each level eigendecomposes (``eigh``) the centered
+          training Gram of the previous fitted level's output, stores top-k
+          eigenvectors as Nystrom alphas, and projects out-of-sample points via
+          the canonical ``K(x, landmarks) @ alphas`` formula. The fitted path has
+          **no** ``feature_dim >= batch_size`` constraint and ``eigenvalues`` are
+          genuine, descending, data-fitted variances. Inter-level coupling is
+          DISABLED here (greedy stack only; the paper's joint optimization is out
+          of scope).
+        * **Un-fitted fallback (before ``adapt``)** -- the legacy idiosyncratic
+          variant, NOT a textbook eigendecomposition kernel PCA, kept so the
+          layer runs (and existing tests pass) without an ``adapt`` call:
+            - The per-level projection does **not** perform a true
+              eigendecomposition; it only L2-normalizes the learnable projection
+              columns (coefficients learned by gradient descent).
+            - ``extract_components`` reuses the leading ``batch_size`` rows of
+              each ``(feature_dim, num_components)`` projection weight as the
+              per-sample coefficients (the sample axis is dynamic and cannot be a
+              weight dimension). This **requires ``feature_dim >= batch_size`` at
+              every level**; it is a learned approximation, not an analytic
+              projection.
+            - ``eigenvalues`` remain at their all-ones init; explained-variance
+              ratios are nominal until ``adapt`` is called.
+
+        The un-fitted fallback's approximations are intentional; call ``adapt``
+        for genuine kernel PCA. The layer's baseline contract (either path) is a
+        non-crashing, gradient/serialization-safe hierarchical transform.
     """
 
     def __init__(
@@ -169,6 +216,10 @@ class DeepKernelPCA(keras.layers.Layer):
         # Store configuration
         self.num_levels = num_levels
         self.components_per_level = components_per_level
+        # Preserve the raw constructor argument so get_config() serializes the
+        # PRE-build value (None triggers the adaptive golden-ratio path in
+        # build()); self.components_per_level is mutated in-place there.
+        self._components_per_level_init = components_per_level
         self.regularization_lambda = regularization_lambda
         self.coupling_strength = coupling_strength
         self.use_backward_coupling = use_backward_coupling
@@ -177,6 +228,12 @@ class DeepKernelPCA(keras.layers.Layer):
         self.projection_regularizer = projection_regularizer
         self.coupling_regularizer = coupling_regularizer
         self.trainable_kernels = trainable_kernels
+
+        # Preserve original constructor args for serialization (build does not
+        # mutate these, but get_config reconstructs a single-vs-list form from
+        # the expanded per-level attrs which can lose the original intent).
+        self._kernel_type_init = kernel_type
+        self._kernel_params_init = kernel_params
 
         # Process kernel configuration
         if isinstance(kernel_type, str):
@@ -196,7 +253,9 @@ class DeepKernelPCA(keras.layers.Layer):
         if kernel_params is None:
             self.kernel_params = [{}] * num_levels
         elif isinstance(kernel_params, dict):
-            self.kernel_params = [kernel_params.copy()] * num_levels
+            # One independent copy per level (a shared `* num_levels` reference
+            # would alias one dict across all levels).
+            self.kernel_params = [kernel_params.copy() for _ in range(num_levels)]
         else:
             if len(kernel_params) != num_levels:
                 raise ValueError(f"kernel_params list length must match num_levels")
@@ -207,7 +266,22 @@ class DeepKernelPCA(keras.layers.Layer):
         self.projection_matrices = []
         self.eigenvalues = []
         self.coupling_weights_forward = []
-        self.coupling_weights_backward = []
+        # NOTE: the backward coupling pass (see call()) reuses the TRANSPOSE of
+        # coupling_weights_forward[level+1]; no separate backward weights exist.
+
+        # --- Genuine kernel-PCA fitted state (populated by adapt()) ---------
+        # When adapt() has run, call() takes a GENUINE Nystrom kernel-PCA path
+        # using these per-level weights instead of the un-fitted random
+        # projection above. _fit_flag is a non-trainable scalar weight (created
+        # in build) so the fitted-vs-unfitted decision survives serialization.
+        self._fit_flag = None
+        # Per-level fitted tensors (created lazily in adapt via add_weight so
+        # they are tracked + serialized): landmark representations, Nystrom
+        # alphas, and double-centering stats. See adapt() / D-006.
+        self.landmark_reprs = []      # level-input repr of the adapt landmarks
+        self.nystrom_alphas = []      # (M, k) eigvecs / sqrt(eigval)
+        self.train_kernel_rowmean = []  # (M,) training-Gram row means
+        self.train_kernel_allmean = []  # () training-Gram grand mean
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Create weights for multi-level kernel PCA.
@@ -215,6 +289,14 @@ class DeepKernelPCA(keras.layers.Layer):
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: tuple[int | None, ...]
         """
+        # Functional API may pass a LIST OF SHAPES for multi-input layers; this
+        # is single-input, so unwrap only a true nested list-of-shapes. A plain
+        # shape serialized as a list (e.g. [None, 8]) must NOT be unwrapped —
+        # its first element is an int/None, not a shape.
+        if isinstance(input_shape, (list, tuple)) and len(input_shape) > 0 \
+                and isinstance(input_shape[0], (list, tuple)):
+            input_shape = input_shape[0]
+
         input_dim = input_shape[-1]
         if input_dim is None:
             raise ValueError("Last dimension of input must be defined")
@@ -341,23 +423,21 @@ class DeepKernelPCA(keras.layers.Layer):
             else:
                 self.coupling_weights_forward.append(None)
 
-            # Backward coupling weights (from current level to previous)
-            if level < self.num_levels - 1 and self.use_backward_coupling and self.coupling_strength > 0:
-                # Will be properly sized when we know next level dimensions
-                self.coupling_weights_backward.append(
-                    self.add_weight(
-                        name=f'coupling_backward_level_{level}',
-                        shape=(num_components, num_components),  # Will be reshaped dynamically
-                        initializer=initializers.RandomNormal(stddev=0.01 * self.coupling_strength),
-                        trainable=True,
-                        regularizer=self.coupling_regularizer
-                    )
-                )
-            else:
-                self.coupling_weights_backward.append(None)
+            # (Backward coupling reuses transpose(coupling_weights_forward[level+1])
+            #  in call(); no dedicated backward weights are allocated.)
 
             # Update input dimension for next level
             current_input_dim = num_components
+
+        # Non-trainable flag: 0.0 = un-fitted (random projection), 1.0 = fitted
+        # (genuine Nystrom kernel PCA). Created here so it serializes and the
+        # fitted/un-fitted branch is reproducible after a round-trip.
+        self._fit_flag = self.add_weight(
+            name='fit_flag',
+            shape=(),
+            initializer='zeros',
+            trainable=False,
+        )
 
         super().build(input_shape)
 
@@ -464,29 +544,291 @@ class DeepKernelPCA(keras.layers.Layer):
         :return: Principal components of shape ``(batch_size, num_components)``.
         :rtype: keras.KerasTensor
         """
+        # Dynamic (graph-safe) batch size of the kernel matrix.
         batch_size = ops.shape(kernel_matrix)[0]
 
-        # Add regularization to diagonal for numerical stability
+        # Add regularization to diagonal for numerical stability.
+        # ops.eye accepts the symbolic batch size under TF graph mode (verified).
         kernel_matrix_reg = kernel_matrix + self.regularization_lambda * ops.eye(batch_size)
 
-        # During training, update projection via eigendecomposition (approximation)
-        if training:
-            # Compute eigendecomposition of regularized kernel matrix
-            # Note: In practice, we use the projection matrix as an approximation
-            # Full eigendecomposition would be: eigvals, eigvecs = ops.linalg.eigh(kernel_matrix_reg)
-            # But for efficiency, we use iterative approximation through gradient descent
+        # During training, normalize the projection columns to keep them on the
+        # unit sphere (an orthogonality-maintaining approximation of the true
+        # eigendecomposition update). NOTE (working-bar limitation): this is the
+        # idiosyncratic "deep" KPCA approximation, NOT a textbook eigh-based
+        # KPCA update. Use `training is True` so a symbolic/None flag under
+        # graph tracing does not silently take the training branch.
+        if training is True:
+            # ops.nn.l2_normalize does not exist in this Keras build; the
+            # canonical column-wise L2 normalization is ops.normalize(x, axis=0).
+            projection_matrix = ops.normalize(projection_matrix, axis=0)
 
-            # Normalize projection matrix to maintain orthogonality
-            projection_matrix = ops.nn.l2_normalize(projection_matrix, axis=0)
-
-        # Project kernel matrix to get components
-        # This approximates K @ eigenvectors[:, :num_components]
+        # Project the regularized kernel matrix onto the learned coefficients.
+        # The kernel matrix is (batch, batch); to yield (batch, num_components)
+        # we right-multiply by a coefficient block whose first axis is the
+        # sample axis. The projection weight is allocated as
+        # (feature_dim, num_components) because batch is dynamic and cannot be a
+        # weight dimension; its first `batch_size` rows are used as the
+        # per-sample coefficients.
+        #
+        # DECISION plan_2026-06-08_a5f40f4f/D-005: this dynamic slice
+        # `projection_matrix[:batch_size, :]` is KEPT (NOT replaced by the whole
+        # matrix). It is graph-safe under TF (slicing a static weight by a
+        # symbolic index is supported and verified). Using the full projection
+        # would make the matmul (batch,batch)@(feature_dim,num_components)
+        # shape-incoherent whenever feature_dim != batch. WORKING-BAR LIMITATION
+        # (see class docstring): this re-uses the projection weight's leading
+        # rows as sample coefficients, which is the idiosyncratic "deep KPCA"
+        # approximation and REQUIRES feature_dim (the layer's input/component
+        # dim) >= batch_size; it is NOT a textbook Nystrom/eigh KPCA projection.
         components = ops.matmul(kernel_matrix_reg, projection_matrix[:batch_size, :])
 
         # Normalize by eigenvalues (approximate scaling)
         components = components / (ops.sqrt(ops.abs(eigenvalues) + 1e-10))
 
         return components
+
+    # -----------------------------------------------------------------
+    # Genuine kernel-PCA fit (adapt) + fitted Nystrom transform
+    # -----------------------------------------------------------------
+
+    def _rbf_gamma(self, level: int, feature_dim: int) -> float:
+        """RBF gamma for a level (matches compute_kernel_matrix's default)."""
+        return float(self.kernel_params[level].get('gamma', 1.0 / feature_dim))
+
+    @staticmethod
+    def _rbf_pairwise_np(a: np.ndarray, b: np.ndarray, gamma: float) -> np.ndarray:
+        """exp(-gamma * ||a_i - b_j||^2), numpy, shape (len(a), len(b))."""
+        a_sq = np.sum(a * a, axis=1, keepdims=True)            # (n, 1)
+        b_sq = np.sum(b * b, axis=1, keepdims=True).T          # (1, m)
+        dist = np.maximum(a_sq + b_sq - 2.0 * (a @ b.T), 0.0)
+        return np.exp(-gamma * dist)
+
+    def _rbf_pairwise_keras(
+            self,
+            a: keras.KerasTensor,
+            b: keras.KerasTensor,
+            gamma: float,
+    ) -> keras.KerasTensor:
+        """exp(-gamma * ||a_i - b_j||^2), keras ops, shape (batch, M)."""
+        a_sq = ops.sum(ops.square(a), axis=1, keepdims=True)          # (batch, 1)
+        b_sq = ops.transpose(
+            ops.sum(ops.square(b), axis=1, keepdims=True)
+        )                                                            # (1, M)
+        dist = a_sq + b_sq - 2.0 * ops.matmul(a, ops.transpose(b))
+        dist = ops.maximum(dist, 0.0)
+        return ops.exp(-gamma * dist)
+
+    def adapt(self, data: Union[np.ndarray, keras.KerasTensor]) -> None:
+        # DECISION plan_2026-06-09_be55db55/D-006: this is the correctness-
+        # establishing GENUINE kernel-PCA fit. It runs eagerly OUTSIDE call()
+        # (like keras.layers.Normalization.adapt) and assigns into tracked
+        # weights via .assign / add_weight. The un-fitted call() path is a random
+        # projection (sklearn corr ~chance, findings/pca-correctness.md); this
+        # adapt replaces it with the canonical Nystrom out-of-sample formula
+        # (centered training Gram -> eigh -> alphas = eigvecs / sqrt(eigval);
+        # transform = centered K(x, landmarks) @ alphas).
+        #
+        # DO NOT move any of this into call(): a per-batch call() cannot do a
+        # dataset-level eigendecomposition, and an in-call .assign is graph-
+        # unsafe (deleted by plan_2026-06-08_a5f40f4f/D-006). DO NOT try to
+        # recover the paper's JOINT multi-level optimization here: it is NOT
+        # recoverable layer-wise and is OUT OF SCOPE (D-007). The fit is GREEDY
+        # layer-wise (each level fits on the previous fitted level's output) and
+        # the deep forward/backward COUPLING is intentionally disabled on the
+        # fitted path because it corrupts the clean Nystrom projection. See
+        # decisions.md D-006 / D-007.
+        """Fit genuine (Nystrom) kernel PCA to ``data``, greedy layer-wise.
+
+        Mirrors ``keras.layers.Normalization.adapt``. The adapt ``data`` doubles
+        as the Nystrom landmark set. For each level (sequentially): compute the
+        centered RBF training Gram of the current representation, eigendecompose
+        it, store the top-``components_per_level[level]`` eigenvectors (scaled by
+        ``1/sqrt(eigenvalue)``) as Nystrom coefficients, then transform the
+        landmarks through this level to produce the input representation for the
+        next level (greedy forward fit).
+
+        After ``adapt`` the layer's ``call`` performs the genuine fitted
+        transform. Until ``adapt`` is called the layer still RUNS (un-fitted
+        random-projection fallback, documented), producing meaningless output.
+
+        :param data: Calibration / landmark data ``(n_samples, input_dim)``.
+            ``n_samples`` becomes the number of Nystrom landmarks ``M`` and must
+            exceed every level's component count.
+        :type data: numpy.ndarray | keras.KerasTensor
+        :raises ValueError: if ``n_samples`` is too small for any level's
+            requested component count.
+        """
+        data = ops.convert_to_numpy(
+            ops.convert_to_tensor(data, dtype="float32")
+        ).astype(np.float64)
+        if not self.built:
+            self.build(tuple(data.shape))
+
+        n_samples = int(data.shape[0])
+        for level in range(self.num_levels):
+            k = self.components_per_level[level]
+            if n_samples - 1 < k:
+                raise ValueError(
+                    f"adapt requires at least n_components + 1 = {k + 1} "
+                    f"samples to fit level {level}, got n_samples = {n_samples}. "
+                    f"Provide more data or reduce components_per_level."
+                )
+
+        # Reset any prior fit (re-adapt is allowed).
+        self.landmark_reprs = []
+        self.nystrom_alphas = []
+        self.train_kernel_rowmean = []
+        self.train_kernel_allmean = []
+
+        current = data  # (M, feature_dim) representation entering this level
+        for level in range(self.num_levels):
+            k = self.components_per_level[level]
+            feature_dim = current.shape[1]
+            gamma = self._rbf_gamma(level, feature_dim)
+
+            # Training Gram of the landmarks at this level + double-centering.
+            gram = self._rbf_pairwise_np(current, current, gamma)  # (M, M)
+            row_mean = np.mean(gram, axis=1, keepdims=True)        # (M, 1)
+            all_mean = float(np.mean(gram))
+            gram_c = gram - row_mean - row_mean.T + all_mean
+
+            # eigh -> descending; top-k eigenvectors scaled by 1/sqrt(eigval)
+            # are the Nystrom out-of-sample coefficients (alphas).
+            eigvals, eigvecs = np.linalg.eigh(gram_c)
+            eigvals = eigvals[::-1]
+            eigvecs = eigvecs[:, ::-1]
+            top_vals = np.maximum(eigvals[:k], 1e-12)
+            top_vecs = eigvecs[:, :k]
+            alphas = top_vecs / np.sqrt(top_vals)                  # (M, k)
+
+            # Persist fitted state for this level as tracked weights.
+            self.landmark_reprs.append(self._fitted_weight(
+                f'landmark_repr_level_{level}', current.astype(np.float32)))
+            self.nystrom_alphas.append(self._fitted_weight(
+                f'nystrom_alpha_level_{level}', alphas.astype(np.float32)))
+            self.train_kernel_rowmean.append(self._fitted_weight(
+                f'train_rowmean_level_{level}',
+                row_mean.squeeze(-1).astype(np.float32)))
+            self.train_kernel_allmean.append(self._fitted_weight(
+                f'train_allmean_level_{level}',
+                np.array(all_mean, dtype=np.float32)))
+
+            # Record genuine eigenvalues (descending) into the existing weight.
+            self.eigenvalues[level].assign(top_vals.astype(np.float32))
+
+            # Greedy: transform the landmarks through this fitted level to get
+            # the next level's input representation. The fitted transform is
+            # exactly the out-of-sample formula evaluated on the landmarks
+            # themselves: centered Gram rows @ alphas.
+            gram_oos_c = (
+                gram - row_mean - row_mean.T + all_mean
+            )  # landmarks-vs-landmarks centered Gram == gram_c
+            current = (gram_oos_c @ alphas)  # (M, k)
+
+        self._fit_flag.assign(1.0)
+
+    def _fitted_weight(self, name: str, value: np.ndarray):
+        # DECISION plan_2026-06-09_be55db55/D-006: the Nystrom fitted weights are
+        # data-shaped (M landmarks unknown until adapt), so they cannot be
+        # created in build(). Keras locks the variable tracker after build, so we
+        # briefly unlock it to register these tracked, serialized, non-trainable
+        # weights, then re-lock. This is the documented escape hatch for
+        # adapt-time state (Normalization keeps its adapt stats in build, but its
+        # shapes are config-known; ours are not). DO NOT move this into call()
+        # (graph-unsafe) and DO NOT pre-allocate in build() (M is unknown there).
+        """Create-or-overwrite a tracked, non-trainable fitted-state weight."""
+        self._tracker.unlock()
+        try:
+            w = self.add_weight(
+                name=name,
+                shape=value.shape,
+                initializer='zeros',
+                trainable=False,
+            )
+        finally:
+            self._tracker.lock(
+                "You cannot add new elements of state (variables or sub-layers) "
+                "to a layer that is already built."
+            )
+        w.assign(value)
+        return w
+
+    def _rebuild_fitted_weights(self, m_landmarks: int) -> None:
+        # DECISION plan_2026-06-09_be55db55/D-006: the Nystrom fitted weights are
+        # created in adapt() with data-dependent shapes (M landmarks is unknown
+        # at build time). load_own_variables() therefore re-creates them here
+        # BEFORE assigning the saved values, so a round-trip restores the genuine
+        # fitted state. The per-level component count k is config-derived
+        # (components_per_level), only M comes from the saved arrays.
+        self.landmark_reprs = []
+        self.nystrom_alphas = []
+        self.train_kernel_rowmean = []
+        self.train_kernel_allmean = []
+        feature_dim = self.projection_matrices[0].shape[0]
+        for level in range(self.num_levels):
+            k = self.components_per_level[level]
+            self.landmark_reprs.append(self._fitted_weight(
+                f'landmark_repr_level_{level}',
+                np.zeros((m_landmarks, feature_dim), dtype=np.float32)))
+            self.nystrom_alphas.append(self._fitted_weight(
+                f'nystrom_alpha_level_{level}',
+                np.zeros((m_landmarks, k), dtype=np.float32)))
+            self.train_kernel_rowmean.append(self._fitted_weight(
+                f'train_rowmean_level_{level}',
+                np.zeros((m_landmarks,), dtype=np.float32)))
+            self.train_kernel_allmean.append(self._fitted_weight(
+                f'train_allmean_level_{level}',
+                np.array(0.0, dtype=np.float32)))
+            feature_dim = k
+
+    def load_own_variables(self, store) -> None:
+        """Re-create fitted weights (if the saved layer was adapted) then load.
+
+        The saved store lists base variables first (creation order) followed by
+        ``4 * num_levels`` fitted-state variables when the saved layer was
+        adapted. We detect that surplus, read the landmark count ``M`` from the
+        first saved fitted array's shape, re-create the data-shaped fitted
+        weights, then defer to the default index-based loader.
+        """
+        n_base = len(self._trainable_variables + self._non_trainable_variables)
+        n_store = len(store.keys())
+        if n_store > n_base and not self.landmark_reprs:
+            # First fitted array is landmark_repr_level_0 -> shape (M, feat).
+            first_fitted = np.asarray(store[str(n_base)])
+            m_landmarks = int(first_fitted.shape[0])
+            self._rebuild_fitted_weights(m_landmarks)
+        super().load_own_variables(store)
+
+    def _fitted_transform(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
+        """Genuine Nystrom kernel-PCA transform (post-adapt path).
+
+        Per level: center the out-of-sample kernel ``K(x, landmarks)`` against
+        the stored training-Gram statistics, project through the stored Nystrom
+        alphas, and feed the result as the next level's input (greedy forward,
+        no deep coupling -- D-007). Concatenates all levels' components.
+        """
+        current = inputs
+        outputs = []
+        for level in range(self.num_levels):
+            landmarks = self.landmark_reprs[level]
+            gamma = self._rbf_gamma(level, int(landmarks.shape[1]))
+
+            k_oos = self._rbf_pairwise_keras(current, landmarks, gamma)  # (b, M)
+            # Double-center against stored training-Gram stats:
+            # Kc = K - mean_row(K over landmarks) - train_rowmean + train_allmean
+            oos_row_mean = ops.mean(k_oos, axis=1, keepdims=True)        # (b, 1)
+            k_centered = (
+                k_oos
+                - oos_row_mean
+                - self.train_kernel_rowmean[level][None, :]
+                + self.train_kernel_allmean[level]
+            )
+            current = ops.matmul(k_centered, self.nystrom_alphas[level])  # (b,k)
+            outputs.append(current)
+
+        if len(outputs) == 1:
+            return outputs[0]
+        return ops.concatenate(outputs, axis=-1)
 
     def call(
             self,
@@ -502,6 +844,27 @@ class DeepKernelPCA(keras.layers.Layer):
         :return: Concatenated principal components from all levels.
         :rtype: keras.KerasTensor
         """
+        # === Genuine fitted path (post-adapt) ===
+        # DECISION plan_2026-06-09_be55db55/D-006: once adapt() has fitted the
+        # Nystrom kernel PCA, call() takes the genuine projection path and the
+        # un-fitted random-projection forward/coupling block below is bypassed
+        # entirely. The branch is on a Python list length (set in adapt /
+        # load_own_variables), NOT on the _fit_flag tensor, so it resolves at
+        # trace time and stays graph-safe.
+        #
+        # DECISION plan_2026-06-09_be55db55/D-007: the fitted path does NOT route
+        # through the deep forward/backward COUPLING block below. The coupling
+        # (gated residual cross-level mixing) corrupts the clean per-level
+        # Nystrom kernel-PCA projection and has no textbook kernel-PCA meaning;
+        # the paper's JOINT multi-level optimization that the coupling
+        # approximates is NOT recoverable greedily and is OUT OF SCOPE. DO NOT
+        # re-enable coupling on the fitted path to "match the paper" -- that is a
+        # research problem (F1). The fitted stack is greedy-layer-wise correct
+        # (each level a genuine kernel PCA on the previous level's output). See
+        # decisions.md D-007.
+        if len(self.nystrom_alphas) == self.num_levels:
+            return self._fitted_transform(inputs)
+
         batch_size = ops.shape(inputs)[0]
         current_features = inputs
 
@@ -509,7 +872,7 @@ class DeepKernelPCA(keras.layers.Layer):
         level_features = []
         level_kernels = []
 
-        # === Forward Pass ===
+        # === Forward Pass (un-fitted fallback) ===
         for level in range(self.num_levels):
             # Compute kernel matrix for current features
             kernel_matrix = self.compute_kernel_matrix(current_features, level)
@@ -543,7 +906,7 @@ class DeepKernelPCA(keras.layers.Layer):
                 components = components + self.coupling_strength * coupling_term
 
             # Apply activation for non-linearity between levels
-            components = ops.nn.tanh(components)
+            components = ops.tanh(components)
 
             # Store features
             level_features.append(components)
@@ -601,9 +964,23 @@ class DeepKernelPCA(keras.layers.Layer):
         return output
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute the output shape of the layer."""
+        """Compute the output shape of the layer.
+
+        The total number of output components is only resolved after ``build``
+        (the adaptive ``components_per_level=None`` path is filled in there), so
+        this method requires the layer to be built.
+        """
+        if isinstance(input_shape, (list, tuple)) and len(input_shape) > 0 \
+                and isinstance(input_shape[0], (list, tuple)):
+            input_shape = input_shape[0]
+        if not self.built or self.components_per_level is None:
+            raise ValueError(
+                "compute_output_shape requires the layer to be built "
+                "(components_per_level is resolved in build()). Build the layer "
+                "or call it on a concrete input first."
+            )
         batch_size = input_shape[0]
-        total_components = sum(self.components_per_level) if self.components_per_level else None
+        total_components = sum(self.components_per_level)
         return (batch_size, total_components)
 
     def get_explained_variance_ratio(self) -> List[float]:
@@ -630,10 +1007,15 @@ class DeepKernelPCA(keras.layers.Layer):
         config = super().get_config()
         config.update({
             'num_levels': self.num_levels,
-            'components_per_level': self.components_per_level,
-            'kernel_type': self.kernel_types if len(set(self.kernel_types)) > 1 else self.kernel_types[0],
-            'kernel_params': self.kernel_params if len(set(map(str, self.kernel_params))) > 1 else self.kernel_params[
-                0],
+            # Serialize the ORIGINAL constructor args (sentinels preserved), NOT
+            # the post-build mutated attributes. components_per_level=None is the
+            # adaptive-sizing sentinel that build() overwrites; kernel_type /
+            # kernel_params are expanded to per-level lists in __init__.
+            # from_config(get_config()) must reconstruct an identical PRE-build
+            # layer.
+            'components_per_level': self._components_per_level_init,
+            'kernel_type': self._kernel_type_init,
+            'kernel_params': self._kernel_params_init,
             'regularization_lambda': self.regularization_lambda,
             'coupling_strength': self.coupling_strength,
             'use_backward_coupling': self.use_backward_coupling,

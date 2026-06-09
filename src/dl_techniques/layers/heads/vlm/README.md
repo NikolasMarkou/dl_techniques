@@ -2,7 +2,7 @@
 
 ## 1. Overview & Philosophy
 
-The `dl_techniques.layers.vlm_heads` module provides a unified, model-agnostic system for attaching task-specific heads to any Visual Language Model (VLM) foundation model.
+The `dl_techniques.layers.heads.vlm` module provides a unified, model-agnostic system for attaching task-specific heads to any Visual Language Model (VLM) foundation model.
 
 **Core Philosophy:** Decouple the *multi-modal encoders* from the *task-specific head*.
 *   **Foundation Model Encoders**: (e.g., CLIP, BLIP, Flamingo) are responsible for producing rich, contextualized feature representations from visual and textual inputs.
@@ -156,7 +156,7 @@ The choice of `fusion_strategy` for fusion-based heads is critical and task-depe
 The `create_multi_task_vlm_head` factory simplifies building complex VLMs with a shared backbone. Crucially, it allows you to pass task-specific configurations for each head type.
 
 ```python
-from dl_techniques.layers.vlm_heads import create_multi_task_vlm_head, VLMTaskConfig, VLMTaskType
+from dl_techniques.layers.heads.vlm import create_multi_task_vlm_head, VLMTaskConfig, VLMTaskType
 
 # Step 1: Define multiple VLM task configs
 task_configs = {

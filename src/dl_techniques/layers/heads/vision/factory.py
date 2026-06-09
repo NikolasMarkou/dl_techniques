@@ -14,12 +14,12 @@ from typing import Dict, List, Optional, Union, Tuple, Any, Literal
 # local imports
 # ---------------------------------------------------------------------
 
-from ..activations import ActivationType
-from ..standard_blocks import ConvBlock, DenseBlock
-from ..ffn.factory import create_ffn_layer, FFNType
-from ..attention import create_attention_layer, AttentionType
-from ..norms import create_normalization_layer, NormalizationType
-from .task_types import TaskType, TaskConfiguration, CommonTaskConfigurations
+from ...activations import ActivationType
+from ...standard_blocks import ConvBlock, DenseBlock
+from ...ffn.factory import create_ffn_layer, FFNType
+from ...attention import create_attention_layer, AttentionType
+from ...norms import create_normalization_layer, NormalizationType
+from .task_types import VisionTaskType, TaskConfiguration, CommonTaskConfigurations
 
 # ---------------------------------------------------------------------
 # Base Head Class
@@ -898,6 +898,91 @@ class InstanceSegmentationHead(BaseVisionHead):
 
 
 # ---------------------------------------------------------------------
+# Enhancement Head
+# ---------------------------------------------------------------------
+
+@keras.saving.register_keras_serializable()
+class EnhancementHead(BaseVisionHead):
+    """
+    Enhancement head for image-restoration tasks (denoising, super-resolution).
+
+    Applies a small stack of ``ConvBlock`` refinement blocks, then either an
+    upsampling transposed-conv (super-resolution, ``scale_factor > 1``) or a
+    same-resolution output conv (denoising and similar). Returns
+    ``{'enhanced': <tensor>}``.
+
+    NOTE (module-scope, not a closure): this class was previously defined INSIDE
+    ``create_enhancement_head()`` and decorated there. A closure-local
+    ``@register_keras_serializable()`` class registers fine at import time but
+    is fragile and conceptually wrong (the registry holds a class redefined on
+    every factory call). It has been lifted to module scope; the class NAME is
+    kept EXACTLY ``EnhancementHead`` so the ``Custom>EnhancementHead``
+    registration string is unchanged and existing checkpoints still load.
+    Do NOT re-nest this inside the factory.
+
+    :param output_channels: Number of output channels of the enhanced image.
+    :type output_channels: int
+    :param scale_factor: Upsampling factor; ``> 1`` selects the transposed-conv
+        super-resolution path, otherwise a same-resolution output conv is used.
+    :type scale_factor: int
+    :param kwargs: Forwarded to :class:`BaseVisionHead`.
+    """
+
+    def __init__(self, output_channels: int = 3, scale_factor: int = 1, **kwargs):
+        super().__init__(**kwargs)
+        self.output_channels = output_channels
+        self.scale_factor = scale_factor
+
+        # Enhancement-specific layers
+        self.enhance_blocks = [
+            ConvBlock(
+                filters=self.hidden_dim,
+                kernel_size=3,
+                normalization_type=self.normalization_type,
+                activation_type=self.activation_type
+            )
+            for _ in range(3)
+        ]
+
+        if self.scale_factor > 1:
+            # For super-resolution
+            self.upsample = layers.Conv2DTranspose(
+                filters=self.output_channels,
+                kernel_size=3,
+                strides=self.scale_factor,
+                padding='same'
+            )
+        else:
+            # For denoising and other tasks
+            self.output_conv = layers.Conv2D(
+                filters=self.output_channels,
+                kernel_size=3,
+                padding='same'
+            )
+
+    def call(self, inputs, training=None):
+        x = inputs
+
+        for block in self.enhance_blocks:
+            x = block(x, training=training)
+
+        if self.scale_factor > 1:
+            x = self.upsample(x)
+        else:
+            x = self.output_conv(x)
+
+        return {'enhanced': x}
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'output_channels': self.output_channels,
+            'scale_factor': self.scale_factor
+        })
+        return config
+
+
+# ---------------------------------------------------------------------
 # Multi-Task Head
 # ---------------------------------------------------------------------
 
@@ -957,6 +1042,11 @@ class MultiTaskHead(keras.layers.Layer):
         self.task_heads = {}
 
         for task_name, config in self.task_configs.items():
+            # Copy before pop: do NOT mutate the caller's config dict (the
+            # entries of self.task_configs are the caller's objects). Mutating
+            # them stripped 'task_type' as a side-effect and broke get_config()
+            # round-trips and repeated construction. See decisions.md / SC6.
+            config = dict(config)
             task_type = config.pop('task_type')
 
             # Add shared configuration
@@ -964,15 +1054,15 @@ class MultiTaskHead(keras.layers.Layer):
             config['use_attention'] = self.use_task_specific_attention
 
             # Create appropriate head
-            if task_type == TaskType.DETECTION:
+            if task_type == VisionTaskType.DETECTION:
                 self.task_heads[task_name] = DetectionHead(**config)
-            elif task_type == TaskType.SEGMENTATION:
+            elif task_type == VisionTaskType.SEGMENTATION:
                 self.task_heads[task_name] = SegmentationHead(**config)
-            elif task_type == TaskType.DEPTH_ESTIMATION:
+            elif task_type == VisionTaskType.DEPTH_ESTIMATION:
                 self.task_heads[task_name] = DepthEstimationHead(**config)
-            elif task_type == TaskType.CLASSIFICATION:
+            elif task_type == VisionTaskType.CLASSIFICATION:
                 self.task_heads[task_name] = ClassificationHead(**config)
-            elif task_type == TaskType.INSTANCE_SEGMENTATION:
+            elif task_type == VisionTaskType.INSTANCE_SEGMENTATION:
                 self.task_heads[task_name] = InstanceSegmentationHead(**config)
             else:
                 raise ValueError(f"Unsupported task type: {task_type}")
@@ -1015,53 +1105,53 @@ class MultiTaskHead(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 def create_vision_head(
-        task_type: Union[TaskType, str],
+        task_type: Union[VisionTaskType, str],
         **kwargs: Any
 ) -> BaseVisionHead:
     """
     Factory function to create vision task heads.
 
-    :param task_type: TaskType enum or string specifying the task.
-    :type task_type: Union[TaskType, str]
+    :param task_type: VisionTaskType enum or string specifying the task.
+    :type task_type: Union[VisionTaskType, str]
     :param kwargs: Configuration parameters for the specific head.
     :return: Configured vision head for the specified task.
     :rtype: BaseVisionHead
     :raises ValueError: If task_type is not supported.
     """
 
-    # Convert string to TaskType if needed
+    # Convert string to VisionTaskType if needed
     if isinstance(task_type, str):
-        task_type = TaskType.from_string(task_type)
+        task_type = VisionTaskType.from_string(task_type)
 
     # Create appropriate head based on task type
-    if task_type == TaskType.DETECTION:
+    if task_type == VisionTaskType.DETECTION:
         return DetectionHead(**kwargs)
 
-    elif task_type == TaskType.SEGMENTATION:
+    elif task_type == VisionTaskType.SEGMENTATION:
         return SegmentationHead(**kwargs)
 
-    elif task_type == TaskType.DEPTH_ESTIMATION:
+    elif task_type == VisionTaskType.DEPTH_ESTIMATION:
         return DepthEstimationHead(**kwargs)
 
-    elif task_type == TaskType.CLASSIFICATION:
+    elif task_type == VisionTaskType.CLASSIFICATION:
         return ClassificationHead(**kwargs)
 
-    elif task_type == TaskType.INSTANCE_SEGMENTATION:
+    elif task_type == VisionTaskType.INSTANCE_SEGMENTATION:
         return InstanceSegmentationHead(**kwargs)
 
-    elif task_type == TaskType.SURFACE_NORMALS:
+    elif task_type == VisionTaskType.SURFACE_NORMALS:
         # Surface normals use similar architecture to depth
         return DepthEstimationHead(output_channels=3, **kwargs)
 
-    elif task_type == TaskType.OPTICAL_FLOW:
+    elif task_type == VisionTaskType.OPTICAL_FLOW:
         # Optical flow predicts 2D motion vectors
         return DepthEstimationHead(output_channels=2, **kwargs)
 
-    elif task_type == TaskType.KEYPOINT_DETECTION:
+    elif task_type == VisionTaskType.KEYPOINT_DETECTION:
         # Keypoint detection is similar to detection with different outputs
         return DetectionHead(**kwargs)
 
-    elif task_type in [TaskType.DENOISING, TaskType.SUPER_RESOLUTION]:
+    elif task_type in [VisionTaskType.DENOISING, VisionTaskType.SUPER_RESOLUTION]:
         # Image enhancement tasks
         return create_enhancement_head(task_type, **kwargs)
 
@@ -1070,88 +1160,35 @@ def create_vision_head(
 
 
 def create_enhancement_head(
-        task_type: TaskType,
+        task_type: VisionTaskType,
         **kwargs: Any
 ) -> BaseVisionHead:
     """
     Create enhancement-specific heads (denoising, super-resolution, etc.).
 
-    This is a placeholder for enhancement-specific architectures.
+    This is a placeholder for enhancement-specific architectures. The
+    ``EnhancementHead`` class itself lives at module scope (see above); this
+    factory only selects defaults and instantiates it.
     """
 
-    @keras.saving.register_keras_serializable()
-    class EnhancementHead(BaseVisionHead):
-        def __init__(self, output_channels: int = 3, scale_factor: int = 1, **kwargs):
-            super().__init__(**kwargs)
-            self.output_channels = output_channels
-            self.scale_factor = scale_factor
-
-            # Enhancement-specific layers
-            self.enhance_blocks = [
-                ConvBlock(
-                    filters=self.hidden_dim,
-                    kernel_size=3,
-                    normalization_type=self.normalization_type,
-                    activation_type=self.activation_type
-                )
-                for _ in range(3)
-            ]
-
-            if self.scale_factor > 1:
-                # For super-resolution
-                self.upsample = layers.Conv2DTranspose(
-                    filters=self.output_channels,
-                    kernel_size=3,
-                    strides=self.scale_factor,
-                    padding='same'
-                )
-            else:
-                # For denoising and other tasks
-                self.output_conv = layers.Conv2D(
-                    filters=self.output_channels,
-                    kernel_size=3,
-                    padding='same'
-                )
-
-        def call(self, inputs, training=None):
-            x = inputs
-
-            for block in self.enhance_blocks:
-                x = block(x, training=training)
-
-            if self.scale_factor > 1:
-                x = self.upsample(x)
-            else:
-                x = self.output_conv(x)
-
-            return {'enhanced': x}
-
-        def get_config(self):
-            config = super().get_config()
-            config.update({
-                'output_channels': self.output_channels,
-                'scale_factor': self.scale_factor
-            })
-            return config
-
-    if task_type == TaskType.SUPER_RESOLUTION:
+    if task_type == VisionTaskType.SUPER_RESOLUTION:
         kwargs['scale_factor'] = kwargs.get('scale_factor', 2)
 
     return EnhancementHead(**kwargs)
 
 
 def create_multi_task_head(
-        task_configuration: Union[TaskConfiguration, List[TaskType], Dict[str, Dict]],
+        task_configuration: Union[TaskConfiguration, List[VisionTaskType], Dict[str, Dict]],
         **kwargs: Any
 ) -> MultiTaskHead:
     """
     Create a multi-task head from task configuration.
 
-    Accepts a TaskConfiguration object, a list of TaskType enums, or a dict
+    Accepts a TaskConfiguration object, a list of VisionTaskType enums, or a dict
     mapping task names to configuration dicts.
 
     :param task_configuration: Task configuration in one of several formats.
-    :type task_configuration: Union[TaskConfiguration, List[TaskType], Dict[str, Dict]]
+    :type task_configuration: Union[TaskConfiguration, List[VisionTaskType], Dict[str, Dict]]
     :param kwargs: Additional configuration.
     :return: Configured multi-task head instance.
     :rtype: MultiTaskHead
@@ -1172,7 +1209,7 @@ def create_multi_task_head(
         task_configs = {}
         for task in task_configuration:
             if isinstance(task, str):
-                task = TaskType.from_string(task)
+                task = VisionTaskType.from_string(task)
             task_configs[task.value] = {
                 'task_type': task,
                 **kwargs.get(task.value, {})
@@ -1201,7 +1238,7 @@ class HeadConfiguration:
     """
 
     @staticmethod
-    def get_default_config(task_type: TaskType) -> Dict[str, Any]:
+    def get_default_config(task_type: VisionTaskType) -> Dict[str, Any]:
         """Get default configuration for a task type."""
 
         base_config = {
@@ -1215,34 +1252,34 @@ class HeadConfiguration:
         }
 
         task_specific = {
-            TaskType.DETECTION: {
+            VisionTaskType.DETECTION: {
                 'num_classes': 80,  # COCO default
                 'num_anchors': 9,
                 'bbox_dims': 4,
                 'use_attention': False
             },
-            TaskType.SEGMENTATION: {
+            VisionTaskType.SEGMENTATION: {
                 'num_classes': 21,  # VOC default
                 'upsampling_factor': 4,
                 'use_skip_connections': True,
                 'use_attention': True,
                 'attention_type': 'cbam'
             },
-            TaskType.DEPTH_ESTIMATION: {
+            VisionTaskType.DEPTH_ESTIMATION: {
                 'output_channels': 1,
                 'min_depth': 0.1,
                 'max_depth': 100.0,
                 'use_log_depth': True,
                 'use_attention': False
             },
-            TaskType.CLASSIFICATION: {
+            VisionTaskType.CLASSIFICATION: {
                 'num_classes': 1000,  # ImageNet default
                 'use_global_pooling': True,
                 'pooling_type': 'avg',
                 'use_attention': True,
                 'attention_type': 'multi_head'
             },
-            TaskType.INSTANCE_SEGMENTATION: {
+            VisionTaskType.INSTANCE_SEGMENTATION: {
                 'num_classes': 80,
                 'num_instances': 100,
                 'mask_size': (28, 28),
@@ -1258,7 +1295,7 @@ class HeadConfiguration:
         return config
 
     @staticmethod
-    def get_efficient_config(task_type: TaskType) -> Dict[str, Any]:
+    def get_efficient_config(task_type: VisionTaskType) -> Dict[str, Any]:
         """Get efficient (lightweight) configuration."""
 
         config = HeadConfiguration.get_default_config(task_type)
@@ -1273,7 +1310,7 @@ class HeadConfiguration:
         return config
 
     @staticmethod
-    def get_high_performance_config(task_type: TaskType) -> Dict[str, Any]:
+    def get_high_performance_config(task_type: VisionTaskType) -> Dict[str, Any]:
         """Get high-performance configuration."""
 
         config = HeadConfiguration.get_default_config(task_type)
