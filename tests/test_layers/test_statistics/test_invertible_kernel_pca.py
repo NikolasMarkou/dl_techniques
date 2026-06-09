@@ -29,6 +29,11 @@ from dl_techniques.layers.statistics.invertible_kernel_pca import (
     InvertibleKernelPCADenoiser,
 )
 
+# sklearn is available in the venv (findings/pca-correctness.md ran a live probe).
+from sklearn.datasets import make_circles
+from sklearn.decomposition import KernelPCA
+from sklearn.linear_model import LogisticRegression
+
 
 # ---------------------------------------------------------------------
 # Fixtures
@@ -408,3 +413,132 @@ class TestInvertibleKernelPCADenoiser:
         y_after = ops.convert_to_numpy(restored(sample_data))
 
         np.testing.assert_allclose(y_before, y_after, atol=1e-6)
+
+
+# =====================================================================
+# Correctness: adapt() -> GENUINE (RFF-approximate) kernel PCA
+# =====================================================================
+#
+# These tests prove that adapt() turns the layer into a real kernel-PCA
+# fit (separates concentric circles, correlates with sklearn KernelPCA),
+# which the un-fitted (random-init projection) layer FAILS to do. Tuned
+# config (n_random_features=256, gamma=0.5) clears the F2 bar comfortably
+# (separability acc=1.0, |corr|=0.995 vs sklearn). Kernel-PCA components
+# are sign/rotation-ambiguous, so we test class-separability + |corr| +
+# eigenvalue-ordering, NOT atol-vs-sklearn on raw components.
+
+# Tuned to clear the F2 bar (separability acc=1.0, |corr|~0.99 vs sklearn).
+_GAMMA = 0.5
+_N_RFF = 256
+
+
+def _circles_embedded(input_dim: int = 8, seed: int = 0):
+    """Concentric circles (2D) embedded into ``input_dim`` via a random map."""
+    rng = np.random.default_rng(seed)
+    x2, labels = make_circles(
+        n_samples=300, factor=0.3, noise=0.05, random_state=seed
+    )
+    proj = rng.standard_normal((2, input_dim)).astype("float32")
+    embedded = (x2.astype("float32") @ proj).astype("float32")
+    return embedded, labels.astype("int32")
+
+
+class TestInvertibleKernelPCACorrectness:
+
+    def test_adapt_separates_concentric_circles(self):
+        # After adapt, the top-k kernel-PCs linearly separate inner/outer.
+        X, y = _circles_embedded()
+        layer = InvertibleKernelPCA(
+            n_random_features=_N_RFF, n_components=2, gamma=_GAMMA, random_seed=0
+        )
+        layer.adapt(X)
+        comp = ops.convert_to_numpy(layer(X, training=False))
+        clf = LogisticRegression(max_iter=1000).fit(comp, y)
+        acc = clf.score(comp, y)
+        assert acc > 0.90, f"fitted separability acc {acc:.3f} <= 0.90 (F2)"
+
+    def test_adapt_corr_with_sklearn_kernelpca(self):
+        # Leading fitted component vs sklearn KernelPCA leading component.
+        X, _ = _circles_embedded()
+        layer = InvertibleKernelPCA(
+            n_random_features=_N_RFF, n_components=2, gamma=_GAMMA, random_seed=0
+        )
+        layer.adapt(X)
+        comp = ops.convert_to_numpy(layer(X, training=False))
+
+        sk = KernelPCA(n_components=2, kernel="rbf", gamma=_GAMMA).fit_transform(X)
+        corr = abs(np.corrcoef(comp[:, 0], sk[:, 0])[0, 1])
+        # RFF-appropriate bar (sign-invariant). Do NOT lower below 0.80.
+        assert corr > 0.85, f"|corr| {corr:.3f} <= 0.85 vs sklearn (F2)"
+
+    def test_eigenvalues_sorted_descending(self):
+        X, _ = _circles_embedded()
+        layer = InvertibleKernelPCA(
+            n_random_features=_N_RFF, n_components=4, gamma=_GAMMA, random_seed=0
+        )
+        layer.adapt(X)
+        eig = ops.convert_to_numpy(layer.eigenvalues)
+        assert np.all(np.diff(eig) <= 1e-6), f"eigenvalues not descending: {eig}"
+        # adapt must move eigenvalues off their all-ones init.
+        assert not np.allclose(eig, 1.0)
+
+    def test_adapt_then_serialization_preserves_fit(self, tmp_path, input_dim):
+        X, _ = _circles_embedded(input_dim=input_dim)
+        inp = keras.Input(shape=(input_dim,))
+        layer = InvertibleKernelPCA(
+            n_random_features=_N_RFF, n_components=2, gamma=_GAMMA, random_seed=3
+        )
+        out = layer(inp)
+        model = keras.Model(inp, out)
+        layer.adapt(X)
+
+        fitted_eig = ops.convert_to_numpy(layer.eigenvalues)
+        y_before = ops.convert_to_numpy(model(X))
+
+        path = os.path.join(tmp_path, "ikpca_fitted.keras")
+        model.save(path)
+        restored = keras.models.load_model(path)
+        y_after = ops.convert_to_numpy(restored(X))
+
+        np.testing.assert_allclose(y_before, y_after, atol=1e-5)
+        # fitted eigenvalues survive the round-trip (not reset to all-ones).
+        restored_eig = ops.convert_to_numpy(
+            restored.layers[-1].eigenvalues
+        )
+        np.testing.assert_allclose(restored_eig, fitted_eig, atol=1e-5)
+        assert not np.allclose(restored_eig, 1.0)
+
+    def test_unfitted_still_runs(self):
+        # Un-adapted layer must still run call() (random-projection fallback);
+        # output is meaningless until adapt, but must not error.
+        X, _ = _circles_embedded()
+        layer = InvertibleKernelPCA(
+            n_random_features=_N_RFF, n_components=2, gamma=_GAMMA, random_seed=0
+        )
+        out = ops.convert_to_numpy(layer(X, training=False))
+        assert out.shape == (X.shape[0], 2)
+        assert np.all(np.isfinite(out))
+        # un-fitted eigenvalues remain at the all-ones init.
+        assert np.allclose(ops.convert_to_numpy(layer.eigenvalues), 1.0)
+
+    def test_adapt_undersampled_raises(self):
+        # n_samples - 1 < n_components -> clear ValueError (fit needs more data).
+        layer = InvertibleKernelPCA(
+            n_random_features=_N_RFF, n_components=4, gamma=_GAMMA, random_seed=0
+        )
+        tiny = np.random.default_rng(0).standard_normal((3, 8)).astype("float32")
+        with pytest.raises(ValueError, match="at least"):
+            layer.adapt(tiny)
+
+    def test_denoiser_adapt_delegates(self):
+        X, _ = _circles_embedded()
+        denoiser = InvertibleKernelPCADenoiser(
+            n_components=2, n_random_features=_N_RFF, gamma=_GAMMA, kernel_type="rbf"
+        )
+        denoiser.adapt(X)
+        # child fitted (eigenvalues moved off all-ones)
+        child_eig = ops.convert_to_numpy(denoiser.ikpca.eigenvalues)
+        assert not np.allclose(child_eig, 1.0)
+        out = ops.convert_to_numpy(denoiser(X, training=False))
+        assert out.shape == X.shape
+        assert np.all(np.isfinite(out))

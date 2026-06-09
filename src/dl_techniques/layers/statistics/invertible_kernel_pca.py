@@ -353,6 +353,91 @@ class InvertibleKernelPCA(keras.layers.Layer):
 
         super().build(input_shape)
 
+    def adapt(self, data: Union[np.ndarray, keras.KerasTensor]) -> None:
+        # DECISION plan_2026-06-09_be55db55/D-005: this is the correctness-
+        # establishing fit. It mirrors keras.layers.Normalization.adapt:
+        # eager, OUTSIDE call(), assigning into already-existing weights.
+        #
+        # DO NOT move this logic (or any .assign) into call(): an in-call
+        # variable assignment is illegal/unsafe in TF graph mode and was
+        # deleted by plan_2026-06-08_a5f40f4f/D-006. The genuine kernel-PCA
+        # fit is a DATASET-LEVEL operation (eigendecomposition of the full RFF
+        # covariance) and CANNOT be computed per-batch inside call(). Without
+        # this adapt() the layer's projection_matrix stays orthogonal-init and
+        # the output is a random projection (sklearn corr ~chance, see
+        # findings/pca-correctness.md). See decisions.md D-005.
+        """Fit the kernel-PCA projection to ``data`` (genuine RFF kernel PCA).
+
+        Mirrors ``keras.layers.Normalization.adapt``. Computes the Random
+        Fourier Features of ``data``, then eigendecomposes their covariance and
+        stores the top-``n_components`` eigenvectors into ``projection_matrix``,
+        the corresponding eigenvalues (descending) into ``eigenvalues``, and the
+        RFF mean into ``feature_mean``. All ``.assign`` calls run eagerly,
+        OUTSIDE ``call`` (legal, like ``Normalization.adapt``).
+
+        Until ``adapt`` is called the layer still RUNS (random-init projection),
+        but its output is a meaningless random projection of the RFF features.
+
+        :param data: Calibration data of shape ``(n_samples, input_dim)``.
+        :type data: numpy.ndarray | keras.KerasTensor
+        :raises ValueError: if ``n_samples`` is too small to estimate the
+            RFF covariance for the requested ``n_components``.
+        """
+        # Build (creates the weights) if not yet built.
+        data = ops.convert_to_tensor(data, dtype="float32")
+        if not self.built:
+            self.build(tuple(data.shape))
+
+        n_samples = int(data.shape[0])
+
+        # RFF features (existing, mathematically-correct map) -> numpy.
+        rff = ops.convert_to_numpy(self.compute_random_features(data)).astype(
+            np.float64
+        )  # (n_samples, n_random_features)
+
+        # Under-determination guard: a reliable covariance estimate needs more
+        # samples than the requested components (rank of the empirical
+        # covariance is at most n_samples - 1).
+        if n_samples - 1 < self.n_components:
+            raise ValueError(
+                f"adapt requires at least n_components + 1 = "
+                f"{self.n_components + 1} samples to estimate the RFF "
+                f"covariance, got n_samples = {n_samples}. Provide more data "
+                f"or reduce n_components."
+            )
+
+        # Center the RFF features.
+        feature_mean_value = np.mean(rff, axis=0)  # (n_random_features,)
+        rff_centered = rff - feature_mean_value
+
+        # RFF covariance (n_random_features, n_random_features), diagonally
+        # regularized for numerical stability (rank-deficient when
+        # n_samples < n_random_features).
+        cov = (rff_centered.T @ rff_centered) / (n_samples - 1)
+        cov += self.regularization * np.eye(cov.shape[0], dtype=cov.dtype)
+
+        # eigh returns ascending eigenvalues; reverse to descending and take
+        # the top-n_components eigenvectors (columns).
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        eigvals = eigvals[::-1]
+        eigvecs = eigvecs[:, ::-1]
+
+        top_eigvecs = eigvecs[:, : self.n_components]  # (n_random_features, k)
+        top_eigvals = eigvals[: self.n_components]  # (k,)
+
+        # Assign the fitted state into the existing weights (eager / outside
+        # call -> legal). Cast back to the weights' dtype.
+        if self.center_features:
+            self.feature_mean.assign(
+                feature_mean_value.astype(np.float32)
+            )
+        self.projection_matrix.assign(top_eigvecs.astype(np.float32))
+        # Clamp tiny/negative eigenvalues (regularization can push them
+        # slightly negative) to keep whitening well-defined.
+        self.eigenvalues.assign(
+            np.maximum(top_eigvals, 0.0).astype(np.float32)
+        )
+
     def compute_random_features(
             self,
             inputs: keras.KerasTensor
@@ -715,6 +800,21 @@ class InvertibleKernelPCADenoiser(keras.layers.Layer):
             raise ValueError(f"Unknown noise estimation method: {self.noise_estimation}")
 
         return noise_level
+
+    def adapt(self, data: Union[np.ndarray, keras.KerasTensor]) -> None:
+        """Fit the underlying ikPCA child to ``data`` (delegates).
+
+        Builds the denoiser (and its ``ikpca`` child) if needed, then calls
+        ``self.ikpca.adapt(data)`` so the denoising forward (transform ->
+        inverse) operates in the fitted principal subspace.
+
+        :param data: Calibration data of shape ``(n_samples, input_dim)``.
+        :type data: numpy.ndarray | keras.KerasTensor
+        """
+        data = ops.convert_to_tensor(data, dtype="float32")
+        if not self.built:
+            self.build(tuple(data.shape))
+        self.ikpca.adapt(data)
 
     def call(
             self,
