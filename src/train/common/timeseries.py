@@ -26,7 +26,9 @@ These are plain classes / functions (not Keras layers or models) so there is no
 """
 
 import os
+import json
 import random
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -34,9 +36,16 @@ import keras
 import numpy as np
 import tensorflow as tf
 
-from dl_techniques.datasets.time_series import TimeSeriesNormalizer, NormalizationMethod
+from dl_techniques.analyzer import AnalysisConfig
+from dl_techniques.datasets.time_series import (
+    TimeSeriesNormalizer,
+    NormalizationMethod,
+    TimeSeriesGenerator,
+)
 from dl_techniques.utils.logger import logger
+from train.common.config_io import json_numpy_default
 from train.common.evaluation import generate_training_curves
+from train.common.callbacks import create_callbacks as create_common_callbacks
 
 # Default category -> sampling-weight map shared by nbeats / prism / tirex.
 # Centralized here so the three trio configs no longer each carry a copy.
@@ -126,10 +135,19 @@ def _fill_nans(data: np.ndarray) -> np.ndarray:
     Returns:
         Array of the same shape with NaNs forward-filled then zero-filled.
     """
+    # DECISION plan_2026-06-09_a3c7304c/D-007: build the axis-0 ramp with a shape
+    # that broadcasts ONLY along axis 0, and gather with take_along_axis. The
+    # prior `np.where(~mask, np.arange(N), 0)` + `data[idx]` form silently
+    # BROADCAST a 2-D `(N, 1)` input to `(N, N, 1)` (arange is `(N,)`, mask is
+    # `(N, 1)`), corrupting every windowed sample once the D-003 change made this
+    # call unconditional (the originals guarded it behind `if isnan.any()`, so
+    # clean 2-D series never hit it). Do NOT revert to `np.arange(mask.shape[0])`
+    # / `data[idx]` — that re-introduces the shape blow-up. See decisions.md D-007.
     mask = np.isnan(data)
-    idx = np.where(~mask, np.arange(mask.shape[0]), 0)
+    ramp = np.arange(mask.shape[0]).reshape([-1] + [1] * (mask.ndim - 1))
+    idx = np.where(~mask, ramp, 0)
     np.maximum.accumulate(idx, axis=0, out=idx)
-    out = data[idx]
+    out = np.take_along_axis(data, idx, axis=0)
     out[np.isnan(out)] = 0
     return out
 
@@ -553,3 +571,263 @@ class TimeSeriesPerformanceCallback(keras.callbacks.Callback):
             results_dir=self.save_dir,
             filename=f"learning_curves_epoch_{epoch + 1:03d}",
         )
+
+
+# --------------------------------------------------------------------------- #
+# Trainer orchestration (shared skeleton)
+# --------------------------------------------------------------------------- #
+class BaseTimeSeriesTrainer:
+    """Abstract base for the four synthetic time-series trainers.
+
+    Absorbs the ~70% of the ``nbeats`` / ``prism`` / ``tirex`` / ``mdn`` trainer
+    classes that was structurally identical: the ``__init__`` (build the
+    :class:`~dl_techniques.datasets.time_series.TimeSeriesGenerator`, the
+    ``pattern_to_category`` map, the selected-pattern list, and the data
+    processor), the byte-identical ``_select_patterns`` body (promoted verbatim
+    from the nbeats original), ``_create_experiment_dir``, the
+    ``create_common_callbacks`` assembly in :meth:`_make_callbacks`, the shared
+    ``model.fit`` + ``model.evaluate`` in :meth:`_train_model`, the ``results.json``
+    write in :meth:`_save_results`, the prism/tirex ONNX export, and the
+    :meth:`run_experiment` skeleton.
+
+    Three abstract hooks carry the genuine per-model variation and MUST be
+    overridden by every subclass:
+
+    - :meth:`_build_processor` — returns the
+      :class:`WindowedTimeSeriesProcessor` subclass with model-specific
+      normalization / output signature.
+    - :meth:`_build_model` — full model construction + compile (loss, metrics,
+      LR schedule, jit).
+    - :meth:`_build_performance_callback` — the domain
+      :class:`TimeSeriesPerformanceCallback` subclass holding the model-specific
+      prediction-plot body.
+
+    Two methods are overridable but have working defaults:
+    :meth:`_build_results_prefix` (default ``config.experiment_name``) and
+    :meth:`_make_callbacks` (mdn overrides it for ``include_analyzer=False`` /
+    ``patience=15``). :meth:`_save_results` is overridable too (nbeats overrides
+    it for the D-005 ``primary_loss`` serializer).
+
+    Args:
+        config: A :class:`BaseTimeSeriesTrainingConfig` (or subclass).
+        generator_config: A ``TimeSeriesGeneratorConfig`` passed straight to
+            :class:`~dl_techniques.datasets.time_series.TimeSeriesGenerator`.
+    """
+
+    def __init__(self, config, generator_config) -> None:
+        self.config = config
+        self.generator_config = generator_config
+        self.generator = TimeSeriesGenerator(generator_config)
+
+        self.all_patterns = self.generator.get_task_names()
+        self.pattern_categories = self.generator.get_task_categories()
+        self.pattern_to_category = {
+            task: cat
+            for cat in self.pattern_categories
+            for task in self.generator.get_tasks_by_category(cat)
+        }
+        self.selected_patterns = self._select_patterns()
+        self.processor = self._build_processor()
+        self.model: Optional[keras.Model] = None
+        self.exp_dir: Optional[str] = None
+
+    # ------------------------------------------------------------------ #
+    # Pattern selection (canonical body, verbatim from nbeats)
+    # ------------------------------------------------------------------ #
+    def _select_patterns(self) -> List[str]:
+        if self.config.target_categories:
+            candidates = {
+                p for c in self.config.target_categories
+                for p in self.generator.get_tasks_by_category(c)
+            }
+        else:
+            candidates = self.all_patterns
+
+        selected: List[str] = []
+        cat_counts: Dict[str, int] = {}
+        for pattern in sorted(candidates):
+            cat = self.pattern_to_category.get(pattern)
+            if cat and cat_counts.get(cat, 0) < self.config.max_patterns_per_category:
+                selected.append(pattern)
+                cat_counts[cat] = cat_counts.get(cat, 0) + 1
+
+        if self.config.max_patterns and len(selected) > self.config.max_patterns:
+            selected = random.sample(selected, self.config.max_patterns)
+
+        logger.info(f"Selected {len(selected)} patterns for training")
+        return selected
+
+    # ------------------------------------------------------------------ #
+    # Experiment dir + results prefix
+    # ------------------------------------------------------------------ #
+    def _build_results_prefix(self) -> str:
+        """Directory-name prefix. Default: the experiment name.
+
+        prism / tirex override this to fold in ``preset``/``mode`` or
+        ``model_type``.
+        """
+        return self.config.experiment_name
+
+    def _create_experiment_dir(self, prefix: Optional[str] = None) -> str:
+        """Create ``{result_dir}/{prefix}_{timestamp}`` and return it."""
+        prefix = prefix or self._build_results_prefix()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        exp_dir = os.path.join(self.config.result_dir, f"{prefix}_{timestamp}")
+        os.makedirs(exp_dir, exist_ok=True)
+        return exp_dir
+
+    # ------------------------------------------------------------------ #
+    # Callbacks
+    # ------------------------------------------------------------------ #
+    def _make_callbacks(self, exp_dir: str) -> List:
+        """Assemble Pattern-2 callbacks + the model-specific performance callback.
+
+        Reproduces the trio's ``create_common_callbacks`` call (8 kwargs,
+        ``monitor='val_loss'``, ``include_terminate_on_nan=True``,
+        ``patience=25``, conditional analyzer with the lightweight
+        :class:`AnalysisConfig`) and appends
+        :meth:`_build_performance_callback`. mdn overrides this for
+        ``include_analyzer=False`` / ``patience=15``.
+        """
+        viz_dir = os.path.join(exp_dir, 'visualizations')
+        os.makedirs(viz_dir, exist_ok=True)
+
+        callbacks, _ = create_common_callbacks(
+            model_name=self.config.experiment_name,
+            results_dir_prefix=exp_dir,
+            monitor="val_loss",
+            patience=25,
+            use_lr_schedule=self.config.use_warmup,
+            include_terminate_on_nan=True,
+            include_analyzer=self.config.perform_deep_analysis,
+            analyzer_config=AnalysisConfig(
+                analyze_weights=True, analyze_spectral=True,
+                analyze_calibration=False, analyze_information_flow=False,
+                analyze_training_dynamics=False, verbose=False),
+            analyzer_start_epoch=self.config.analysis_start_epoch,
+            analyzer_epoch_frequency=self.config.analysis_frequency,
+        )
+        callbacks.append(self._build_performance_callback(viz_dir))
+        return callbacks
+
+    # ------------------------------------------------------------------ #
+    # Train / evaluate
+    # ------------------------------------------------------------------ #
+    def _train_model(self, data_pipeline: Dict[str, Any], exp_dir: str) -> Dict[str, Any]:
+        """Shared ``model.fit`` + ``model.evaluate`` (identical across all four)."""
+        callbacks = self._make_callbacks(exp_dir)
+
+        history = self.model.fit(
+            data_pipeline['train_ds'],
+            validation_data=data_pipeline['val_ds'],
+            epochs=self.config.epochs,
+            steps_per_epoch=self.config.steps_per_epoch,
+            validation_steps=data_pipeline['validation_steps'],
+            callbacks=callbacks, verbose=1
+        )
+
+        logger.info("Evaluating on test set")
+        test_results = self.model.evaluate(
+            data_pipeline['test_ds'], steps=data_pipeline['test_steps'],
+            verbose=1, return_dict=True
+        )
+
+        return {
+            'history': history.history,
+            'test_metrics': {k: float(v) for k, v in test_results.items()},
+            'final_epoch': len(history.history['loss'])
+        }
+
+    # ------------------------------------------------------------------ #
+    # Persistence
+    # ------------------------------------------------------------------ #
+    def _save_results(self, results: Dict[str, Any], exp_dir: str,
+                      extra_fields: Optional[Dict[str, Any]] = None) -> None:
+        """Write the standard 4-key ``results.json`` (+ optional ``extra_fields``).
+
+        Uses :data:`train.common.config_io.json_numpy_default` (prism/tirex/mdn).
+        nbeats overrides this for the D-005 ``primary_loss`` str-fallback.
+        """
+        serializable = {
+            'history': results['history'],
+            'test_metrics': results['test_metrics'],
+            'final_epoch': results['final_epoch'],
+            'config': self.config.__dict__,
+        }
+        if extra_fields:
+            serializable.update(extra_fields)
+        with open(os.path.join(exp_dir, 'results.json'), 'w') as f:
+            json.dump(serializable, f, indent=4, default=json_numpy_default)
+
+    def _export_to_onnx(self, model_path: str, exp_dir: str) -> Optional[str]:
+        """Export the trained model to ONNX (prism/tirex). No-op otherwise.
+
+        Guarded by ``getattr(config, 'export_onnx', False)`` (mdn/nbeats lack the
+        flag → skip) and ``os.path.exists(model_path)`` (early-stop may never fire
+        → checkpoint absent). Conversion failures are caught + logged (matching
+        the originals' silent-catch), returning ``None``.
+        """
+        if not getattr(self.config, 'export_onnx', False):
+            return None
+        if not os.path.exists(model_path):
+            logger.warning(f"ONNX export skipped: checkpoint absent ({model_path})")
+            return None
+
+        onnx_path = os.path.join(exp_dir, 'model.onnx')
+        try:
+            logger.info(f"Exporting to ONNX: {onnx_path}")
+            best_model = keras.saving.load_model(model_path, compile=False)
+            input_signature = [
+                keras.InputSpec(
+                    shape=(None, self.config.context_len, self.processor.num_features),
+                    dtype="float32"
+                )
+            ]
+            best_model.export(
+                onnx_path, format="onnx",
+                input_signature=input_signature,
+                opset_version=self.config.onnx_opset_version, verbose=True
+            )
+            logger.info(f"ONNX export successful: {onnx_path}")
+            return onnx_path
+        except Exception as e:
+            logger.error(f"ONNX export failed: {e}", exc_info=True)
+            return None
+
+    # ------------------------------------------------------------------ #
+    # Orchestration skeleton
+    # ------------------------------------------------------------------ #
+    def run_experiment(self) -> Dict[str, Any]:
+        """Shared skeleton: dir → datasets → build → train → save → return."""
+        logger.info(f"Starting {self.config.experiment_name} training experiment")
+        self.exp_dir = self._create_experiment_dir()
+        logger.info(f"Results: {self.exp_dir}")
+
+        data_pipeline = self.processor.prepare_datasets()
+        self.model = self._build_model()
+        logger.info(f"Model params: {self.model.count_params():,}")
+        self.model.summary(print_fn=logger.info)
+
+        training_results = self._train_model(data_pipeline, self.exp_dir)
+        if self.config.save_results:
+            self._save_results(training_results, self.exp_dir)
+
+        return {
+            'config': self.config, 'experiment_dir': self.exp_dir,
+            'training_results': training_results, 'results_dir': self.exp_dir
+        }
+
+    # ------------------------------------------------------------------ #
+    # Abstract hooks (must override)
+    # ------------------------------------------------------------------ #
+    def _build_processor(self) -> WindowedTimeSeriesProcessor:
+        """Return the model-specific data processor. Abstract — must override."""
+        raise NotImplementedError
+
+    def _build_model(self) -> keras.Model:
+        """Construct + compile the model. Abstract — must override."""
+        raise NotImplementedError
+
+    def _build_performance_callback(self, viz_dir: str):
+        """Return the domain performance callback. Abstract — must override."""
+        raise NotImplementedError

@@ -47,6 +47,7 @@ from train.common.timeseries import (
     BaseTimeSeriesTrainingConfig,
     WindowedTimeSeriesProcessor,
     TimeSeriesPerformanceCallback,
+    BaseTimeSeriesTrainer,
     _prepare_viz_data_from_processor,
     _fill_nans,
 )
