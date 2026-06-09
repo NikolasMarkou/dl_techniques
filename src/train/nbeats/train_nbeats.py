@@ -14,11 +14,9 @@ import os
 import sys
 import json
 import math
-import random
 import argparse
-from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import keras
 import matplotlib
@@ -30,12 +28,14 @@ import tensorflow as tf
 
 from train.common import (
     setup_gpu,
-    create_callbacks as create_common_callbacks,
-    generate_training_curves,
     set_seeds,
     create_learning_rate_schedule,
     BaseTimeSeriesTrainingConfig,
     WindowedTimeSeriesProcessor,
+    TimeSeriesPerformanceCallback,
+    BaseTimeSeriesTrainer,
+    create_ts_argument_parser,
+    _prepare_viz_data_from_processor,
 )
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.mase_loss import MASELoss
@@ -43,11 +43,8 @@ from dl_techniques.models.nbeats import create_nbeats_model
 from dl_techniques.datasets.time_series import (
     TimeSeriesGenerator,
     TimeSeriesGeneratorConfig,
-    TimeSeriesNormalizer,
-    NormalizationMethod
+    NormalizationMethod,
 )
-from dl_techniques.analyzer import AnalysisConfig
-from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
 
 plt.style.use('default')
 sns.set_palette("husl")
@@ -141,55 +138,35 @@ class MultiPatternDataProcessor(WindowedTimeSeriesProcessor):
         return (x_spec, y_spec)
 
 
-class PatternPerformanceCallback(keras.callbacks.Callback):
-    """Monitors and visualizes N-BEATS performance on a fixed test set."""
+class PatternPerformanceCallback(TimeSeriesPerformanceCallback):
+    """Monitors and visualizes N-BEATS performance on a fixed test set.
+
+    Thin subclass of :class:`TimeSeriesPerformanceCallback`. The base owns the
+    scaffolding (``__init__`` + makedirs, ``loss``/``val_loss`` accumulation, the
+    ``visualize_every_n_epochs`` gate, learning-curve delegation). N-BEATS keeps
+    only the three model-specific pieces: viz-data prep from its processor (the
+    backcast ``x`` / forecast ``y`` collection — same loop the original used),
+    the ``forecast_mae``/``val_forecast_mae`` extra-history tracking (N-BEATS
+    tracks NO learning rate, so no :meth:`_track_lr` call), and the
+    backcast/forecast prediction-plot body that unpacks ``predictions_tuple[0]``
+    from a ``model(x, training=False)`` call.
+    """
 
     def __init__(self, config: NBeatsTrainingConfig, data_processor: MultiPatternDataProcessor,
                  save_dir: str, model_name: str = "model"):
-        super().__init__()
-        self.config = config
+        # data_processor must be set BEFORE super().__init__: the base ctor calls
+        # _prepare_viz_data() which reads self.data_processor.
         self.data_processor = data_processor
-        self.save_dir = save_dir
-        self.model_name = model_name
-        self.training_history: Dict[str, List[float]] = {
-            'loss': [], 'val_loss': [], 'forecast_mae': [], 'val_forecast_mae': []
-        }
-        os.makedirs(save_dir, exist_ok=True)
-        self.viz_test_data = self._create_viz_test_set()
+        super().__init__(config, save_dir, model_name)
 
-    def _create_viz_test_set(self) -> Tuple[np.ndarray, np.ndarray]:
-        x_list, y_list = [], []
-        for x, y in self.data_processor._test_generator_raw():
-            x_list.append(x)
-            y_list.append(y)
-            if len(x_list) >= self.config.plot_top_k_patterns:
-                break
-        if not x_list:
-            logger.warning("Could not generate viz samples")
-            return np.array([]), np.array([])
-        return np.array(x_list), np.array(y_list)
+    def _prepare_viz_data(self) -> Tuple[np.ndarray, np.ndarray]:
+        return _prepare_viz_data_from_processor(self.data_processor, self.config.plot_top_k_patterns)
 
-    def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, float]] = None) -> None:
-        logs = logs or {}
-        self.training_history['loss'].append(logs.get('loss', 0.0))
-        self.training_history['val_loss'].append(logs.get('val_loss', 0.0))
-        self.training_history['forecast_mae'].append(logs.get('forecast_mae', 0.0))
-        self.training_history['val_forecast_mae'].append(logs.get('val_forecast_mae', 0.0))
+    def _extend_history(self, logs: dict) -> None:
+        self.training_history.setdefault('forecast_mae', []).append(logs.get('forecast_mae', 0.0))
+        self.training_history.setdefault('val_forecast_mae', []).append(logs.get('val_forecast_mae', 0.0))
 
-        if (epoch + 1) % self.config.visualize_every_n_epochs == 0:
-            if self.config.create_learning_curves:
-                self._plot_learning_curves(epoch)
-            if self.config.create_prediction_plots and len(self.viz_test_data[0]) > 0:
-                self._plot_prediction_samples(epoch)
-
-    def _plot_learning_curves(self, epoch: int) -> None:
-        generate_training_curves(
-            history=self.training_history,
-            results_dir=self.save_dir,
-            filename=f"learning_curves_epoch_{epoch+1:03d}",
-        )
-
-    def _plot_prediction_samples(self, epoch: int) -> None:
+    def _plot_predictions(self, epoch: int) -> None:
         test_x, test_y = self.viz_test_data
         predictions_tuple = self.model(test_x, training=False)
 
@@ -226,54 +203,60 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
         plt.close()
 
 
-class NBeatsTrainer:
-    """Orchestrates N-BEATS training, evaluation, and reporting."""
+class NBeatsTrainer(BaseTimeSeriesTrainer):
+    """Orchestrates N-BEATS training, evaluation, and reporting.
 
-    def __init__(self, config: NBeatsTrainingConfig,
-                 generator_config: TimeSeriesGeneratorConfig) -> None:
-        self.config = config
-        self.generator_config = generator_config
-        self.generator = TimeSeriesGenerator(generator_config)
+    Thin subclass of :class:`BaseTimeSeriesTrainer`. The base owns the skeleton
+    (``__init__`` generator/pattern setup, ``_select_patterns``,
+    ``_create_experiment_dir``, ``_make_callbacks``, ``_train_model``,
+    ``run_experiment``). N-BEATS overrides only the genuine divergences: the
+    processor, the model build (+ compile + build-from-input-shape), the
+    performance callback, the ``model_name="N-BEATS"`` callback set, and
+    :meth:`_save_results` (D-005: the ``primary_loss: Union[str, Loss]`` field
+    needs a str-fallback serializer, NOT the base's ``json_numpy_default``).
+    N-BEATS has NO ONNX export, so it uses the base ``run_experiment`` directly.
+    """
 
-        self.all_patterns = self.generator.get_task_names()
-        self.pattern_categories = self.generator.get_task_categories()
-        self.pattern_to_category = {
-            task: cat
-            for cat in self.pattern_categories
-            for task in self.generator.get_tasks_by_category(cat)
-        }
-        self.selected_patterns = self._select_patterns()
-        self.processor = MultiPatternDataProcessor(
-            config, self.generator, self.selected_patterns, self.pattern_to_category
+    def _build_processor(self) -> MultiPatternDataProcessor:
+        return MultiPatternDataProcessor(
+            self.config, self.generator, self.selected_patterns,
+            self.pattern_to_category,
         )
-        self.model: Optional[keras.Model] = None
-        self.exp_dir: Optional[str] = None
 
-    def _select_patterns(self) -> List[str]:
-        if self.config.target_categories:
-            candidates = {
-                p for c in self.config.target_categories
-                for p in self.generator.get_tasks_by_category(c)
-            }
-        else:
-            candidates = self.all_patterns
+    def _build_performance_callback(self, viz_dir: str) -> PatternPerformanceCallback:
+        return PatternPerformanceCallback(self.config, self.processor, viz_dir, "nbeats")
 
-        selected: List[str] = []
-        cat_counts: Dict[str, int] = {}
-        for pattern in sorted(candidates):
-            cat = self.pattern_to_category.get(pattern)
-            if cat and cat_counts.get(cat, 0) < self.config.max_patterns_per_category:
-                selected.append(pattern)
-                cat_counts[cat] = cat_counts.get(cat, 0) + 1
+    def _make_callbacks(self, exp_dir: str) -> List:
+        """Override: N-BEATS uses ``model_name="N-BEATS"`` (base default is the
+        experiment name). ``patience=25`` matches the base default; everything
+        else (monitor, terminate-on-nan, analyzer config) matches the base body.
+        """
+        from dl_techniques.analyzer import AnalysisConfig
+        from train.common import create_callbacks as create_common_callbacks
 
-        if self.config.max_patterns and len(selected) > self.config.max_patterns:
-            selected = random.sample(selected, self.config.max_patterns)
+        viz_dir = os.path.join(exp_dir, 'visualizations')
+        os.makedirs(viz_dir, exist_ok=True)
 
-        logger.info(f"Selected {len(selected)} patterns for training")
-        return selected
+        callbacks, _ = create_common_callbacks(
+            model_name="N-BEATS",
+            results_dir_prefix=exp_dir,
+            monitor="val_loss",
+            patience=25,
+            use_lr_schedule=self.config.use_warmup,
+            include_terminate_on_nan=True,
+            include_analyzer=self.config.perform_deep_analysis,
+            analyzer_config=AnalysisConfig(
+                analyze_weights=True, analyze_spectral=True,
+                analyze_calibration=False, analyze_information_flow=False,
+                analyze_training_dynamics=False, verbose=False),
+            analyzer_start_epoch=self.config.analysis_start_epoch,
+            analyzer_epoch_frequency=self.config.analysis_frequency,
+        )
+        callbacks.append(self._build_performance_callback(viz_dir))
+        return callbacks
 
-    def create_model(self) -> keras.Model:
-        """Create and compile an N-BEATS model."""
+    def _build_model(self) -> keras.Model:
+        """Create and compile an N-BEATS model (+ build from input shape)."""
         kernel_regularizer = None
         if self.config.kernel_regularizer_l2 > 0:
             kernel_regularizer = keras.regularizers.L2(self.config.kernel_regularizer_l2)
@@ -334,81 +317,17 @@ class NBeatsTrainer:
             metrics = [keras.metrics.MeanAbsoluteError(name="forecast_mae")]
 
         model.compile(optimizer=optimizer, loss=losses, loss_weights=loss_weights, metrics=metrics)
+        model.build((None, self.config.backcast_length, self.config.input_dim))
         return model
 
-    def run_experiment(self) -> Dict[str, Any]:
-        """Run the complete training experiment."""
-        logger.info("Starting N-BEATS training experiment")
-        self.exp_dir = self._create_experiment_dir()
-        logger.info(f"Results: {self.exp_dir}")
-
-        data_pipeline = self.processor.prepare_datasets()
-        self.model = self.create_model()
-        self.model.build((None, self.config.backcast_length, self.config.input_dim))
-        logger.info(f"Model params: {self.model.count_params():,}")
-        self.model.summary(print_fn=logger.info)
-
-        training_results = self._train_model(data_pipeline, self.exp_dir)
-        if self.config.save_results:
-            self._save_results(training_results, self.exp_dir)
-
-        return {
-            'config': self.config, 'experiment_dir': self.exp_dir,
-            'training_results': training_results, 'results_dir': self.exp_dir
-        }
-
-    def _create_experiment_dir(self) -> str:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        exp_dir = os.path.join(self.config.result_dir, f"{self.config.experiment_name}_{timestamp}")
-        os.makedirs(exp_dir, exist_ok=True)
-        return exp_dir
-
-    def _train_model(self, data_pipeline: Dict, exp_dir: str) -> Dict[str, Any]:
-        viz_dir = os.path.join(exp_dir, 'visualizations')
-
-        callbacks, _ = create_common_callbacks(
-            model_name="N-BEATS",
-            results_dir_prefix=exp_dir,
-            monitor="val_loss",
-            patience=25,
-            use_lr_schedule=self.config.use_warmup,
-            include_terminate_on_nan=True,
-            include_analyzer=self.config.perform_deep_analysis,
-            analyzer_config=AnalysisConfig(
-                analyze_weights=True, analyze_spectral=True,
-                analyze_calibration=False, analyze_information_flow=False,
-                analyze_training_dynamics=False, verbose=False),
-            analyzer_start_epoch=self.config.analysis_start_epoch,
-            analyzer_epoch_frequency=self.config.analysis_frequency,
-        )
-        callbacks.append(PatternPerformanceCallback(self.config, self.processor, viz_dir, "nbeats"))
-
-        history = self.model.fit(
-            data_pipeline['train_ds'],
-            validation_data=data_pipeline['val_ds'],
-            epochs=self.config.epochs,
-            steps_per_epoch=self.config.steps_per_epoch,
-            validation_steps=data_pipeline['validation_steps'],
-            callbacks=callbacks, verbose=1
-        )
-
-        logger.info("Evaluating on test set")
-        test_results = self.model.evaluate(
-            data_pipeline['test_ds'], steps=data_pipeline['test_steps'],
-            verbose=1, return_dict=True
-        )
-
-        return {
-            'history': history.history,
-            'test_metrics': {k: float(v) for k, v in test_results.items()},
-            'final_epoch': len(history.history['loss'])
-        }
-
-    def _save_results(self, results: Dict, exp_dir: str) -> None:
-        # Local serializer (NOT train.common.json_numpy_default): config.__dict__
-        # carries `primary_loss: Union[str, keras.losses.Loss]`; json_numpy_default
-        # raises on a Loss object whereas str() degrades gracefully. See
-        # plan_2026-06-09_a3c7304c/decisions.md D-005.
+    def _save_results(self, results: Dict[str, Any], exp_dir: str,
+                      extra_fields: Optional[Dict[str, Any]] = None) -> None:
+        # DECISION plan_2026-06-09_a3c7304c/D-005: use this LOCAL serializer, NOT
+        # the base's train.common.json_numpy_default. config.__dict__ carries
+        # `primary_loss: Union[str, keras.losses.Loss]`; json_numpy_default RAISES
+        # TypeError on a Loss object (prior-plan D-003 forbids restoring its
+        # str-coercion), whereas this local default() degrades a Loss to str(o).
+        # Do NOT swap this for json_numpy_default. See decisions.md D-005.
         def default(o: Any) -> Any:
             if isinstance(o, (np.integer, np.floating)):
                 return float(o)
@@ -418,38 +337,49 @@ class NBeatsTrainer:
             'history': results['history'],
             'test_metrics': results['test_metrics'],
             'final_epoch': results['final_epoch'],
-            'config': self.config.__dict__
+            'config': self.config.__dict__,
         }
+        if extra_fields:
+            serializable.update(extra_fields)
         with open(os.path.join(exp_dir, 'results.json'), 'w') as f:
             json.dump(serializable, f, indent=4, default=default)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="N-BEATS Training")
-    parser.add_argument("--experiment_name", type=str, default="nbeats")
+def build_parser() -> argparse.ArgumentParser:
+    """Build the N-BEATS CLI parser on top of the shared TS argument parser.
+
+    Starts from :func:`create_ts_argument_parser` (the shared TS args:
+    ``--epochs``/``--batch_size``/``--steps_per_epoch``/``--learning_rate``/
+    warmup/analysis/``--gpu`` etc.), restores N-BEATS's own defaults for the args
+    whose default differs from the shared parser via ``set_defaults`` (
+    ``experiment_name`` "nbeats"; the original N-BEATS CLI's ``optimizer`` was
+    "adamw" and ``warmup_steps`` 1000 — both already the shared-parser defaults,
+    so only ``experiment_name`` needs restoring), then adds N-BEATS's
+    architecture-specific flags (backcast/forecast lengths, stack types,
+    hidden units, reconstruction-loss weight, per-instance normalization toggle).
+    """
+    parser = create_ts_argument_parser("N-BEATS Training")
+
+    # Restore N-BEATS's per-arg defaults where they differ from the shared parser.
+    # The original N-BEATS CLI used experiment_name="nbeats"; its epochs(200)/
+    # batch_size(128)/steps_per_epoch(1000)/learning_rate(1e-4)/optimizer("adamw")/
+    # gradient_clip_norm(1.0)/warmup_steps(1000)/warmup_start_lr(1e-6)/
+    # analysis_frequency(10)/analysis_start_epoch(1) already match the shared parser.
+    parser.set_defaults(experiment_name="nbeats")
+
+    # N-BEATS architecture-specific arguments.
     parser.add_argument("--backcast_length", type=int, default=168)
     parser.add_argument("--forecast_length", type=int, default=24)
-    parser.add_argument("--epochs", type=int, default=200)
-    parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--steps_per_epoch", type=int, default=1000)
-    parser.add_argument("--learning_rate", type=float, default=1e-4)
-    parser.add_argument("--optimizer", type=str, default="adamw")
-    parser.add_argument("--gradient_clip_norm", type=float, default=1.0)
-    parser.add_argument("--no-normalize", dest="normalize_per_instance", action="store_false")
-    parser.set_defaults(normalize_per_instance=True)
     parser.add_argument("--stack_types", nargs='+', default=["trend", "seasonality", "generic"])
     parser.add_argument("--hidden_layer_units", type=int, default=256)
     parser.add_argument("--reconstruction_loss_weight", type=float, default=0.5)
-    parser.add_argument("--no-warmup", dest="use_warmup", action="store_false")
-    parser.set_defaults(use_warmup=True)
-    parser.add_argument("--warmup_steps", type=int, default=1000)
-    parser.add_argument("--warmup_start_lr", type=float, default=1e-6)
-    parser.add_argument("--no-deep-analysis", dest="perform_deep_analysis", action="store_false")
-    parser.set_defaults(perform_deep_analysis=True)
-    parser.add_argument("--analysis_frequency", type=int, default=10)
-    parser.add_argument("--analysis_start_epoch", type=int, default=1)
-    parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
-    return parser.parse_args()
+    parser.add_argument("--no-normalize", dest="normalize_per_instance", action="store_false")
+    parser.set_defaults(normalize_per_instance=True)
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    return build_parser().parse_args()
 
 
 def main() -> None:
@@ -487,13 +417,13 @@ def main() -> None:
         trainer = NBeatsTrainer(config, generator_config)
         results = trainer.run_experiment()
         logger.info(f"Completed. Results: {results['results_dir']}")
+    except Exception as e:
+        logger.error(f"Failed: {e}", exc_info=True)
+        sys.exit(1)
+    finally:
         keras.backend.clear_session()
         sys.stdout.flush()
         sys.stderr.flush()
-    except Exception as e:
-        logger.error(f"Failed: {e}", exc_info=True)
-
-    os._exit(0)
 
 
 if __name__ == "__main__":
