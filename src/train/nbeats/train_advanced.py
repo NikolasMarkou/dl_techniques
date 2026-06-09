@@ -17,7 +17,10 @@ import numpy as np
 import seaborn as sns
 import tensorflow as tf
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks, generate_training_curves, set_seeds
+from train.common import (
+    setup_gpu, create_callbacks as create_common_callbacks, generate_training_curves,
+    set_seeds, BaseTimeSeriesTrainingConfig,
+)
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.mase_loss import MASELoss
 from dl_techniques.models.nbeats import create_nbeats_model
@@ -40,17 +43,28 @@ set_random_seeds(42)
 
 
 @dataclass
-class NBeatsTrainingConfig:
-    """Configuration for N-BEATS training with forecasting layers."""
-    result_dir: str = "results"
-    save_results: bool = True
+class NBeatsTrainingConfig(BaseTimeSeriesTrainingConfig):
+    """Configuration for N-BEATS training with forecasting layers.
+
+    Subclasses :class:`BaseTimeSeriesTrainingConfig`, which contributes the
+    shared time-series fields (data splits, optimizer/warmup knobs, pattern
+    selection, category weights, visualization + deep-analysis flags) at their
+    standard defaults. Only the fields whose defaults DIVERGE from the base
+    (``experiment_name``, ``steps_per_epoch``, ``optimizer``, ``warmup_steps``,
+    ``max_patterns_per_category``) are re-declared here, plus all the
+    N-BEATS-architecture-specific fields that the base does not carry. The base
+    ``category_weights`` default already equals this script's former inline map,
+    so it is inherited unchanged.
+    """
+
+    # --- Divergent-default overrides of base fields (kept to preserve behavior) ---
     experiment_name: str = "nbeats_forecasting_layers"
+    steps_per_epoch: int = 1000
+    optimizer: str = 'adam'
+    warmup_steps: int = 5000
+    max_patterns_per_category: int = 100
 
-    target_categories: Optional[List[str]] = None
-
-    train_ratio: float = 0.7
-    val_ratio: float = 0.15
-    test_ratio: float = 0.15
+    # --- N-BEATS architecture-specific fields (not in the base) ---
     num_realizations_per_pattern: int = 10
 
     backcast_length: int = 168
@@ -71,52 +85,34 @@ class NBeatsTrainingConfig:
     gate_hidden_units: int = 16
     gate_activation: str = "relu"
 
-    epochs: int = 150
-    batch_size: int = 128
-    steps_per_epoch: int = 1000
-    learning_rate: float = 1e-4
-    gradient_clip_norm: float = 1.0
-    optimizer: str = 'adam'
     primary_loss: Union[str, keras.losses.Loss] = "mase_loss"
     mase_seasonal_periods: int = 1
-
-    use_warmup: bool = True
-    warmup_steps: int = 5000
-    warmup_start_lr: float = 1e-6
 
     kernel_regularizer_l2: float = 1e-5
     reconstruction_loss_weight: float = 0.5
     dropout_rate: float = 0.25
 
-    max_patterns: Optional[int] = None
-    max_patterns_per_category: int = 100
-    normalize_per_instance: bool = True
-
-    category_weights: Dict[str, float] = field(default_factory=lambda: {
-        "trend": 1.0, "seasonal": 1.0, "composite": 1.2,
-        "financial": 1.5, "weather": 1.3, "biomedical": 1.2,
-        "industrial": 1.3, "intermittent": 1.0, "volatility": 1.1,
-        "regime": 1.2, "structural": 1.1
-    })
-
-    visualize_every_n_epochs: int = 5
-    save_interim_plots: bool = True
-    plot_top_k_patterns: int = 12
-    create_learning_curves: bool = True
-    create_prediction_plots: bool = True
-
-    perform_deep_analysis: bool = True
-    analysis_frequency: int = 10
-    analysis_start_epoch: int = 1
-
     def __post_init__(self) -> None:
-        total_ratio = self.train_ratio + self.val_ratio + self.test_ratio
-        if not np.isclose(total_ratio, 1.0, atol=1e-6):
-            raise ValueError(f"Data ratios must sum to 1.0, got {total_ratio}")
+        # Base enforces the train/val/test ratio-sum invariant.
+        super().__post_init__()
         if self.backcast_length <= 0 or self.forecast_length <= 0:
             raise ValueError("backcast_length and forecast_length must be positive")
 
 
+# NOTE: This processor is intentionally NOT migrated onto
+# ``train.common.WindowedTimeSeriesProcessor`` (see decisions.md D-004). It is a
+# structurally different engine, not a copy of the streaming trio's processor:
+#   - it pre-materializes a dense ``(NumPatterns, NumRealizations, T, 1)`` tensor
+#     and samples windows with an ``@tf.function`` ``tf.random.categorical`` /
+#     ``tf.random.uniform`` GRAPH sampler (vs. the base's Python buffered streaming),
+#   - it normalizes per instance to MIN-MAX [-1, 1] (vs. the base's STANDARD/ROBUST
+#     z-score), and
+#   - it builds uncached, infinitely-resampled val/test pipelines sized by
+#     ``steps_per_epoch * ratio`` (vs. the base's pre-computed fixed cached splits).
+# The base's two hooks only reshape one already-normalized window; they cannot
+# replace this sampling engine, normalization, or val/test construction. Forcing
+# it would change runtime numerics and is out of scope for the config-only
+# migration (STOP-IF S1). Only the config above was migrated onto the shared base.
 class MultiPatternDataProcessor:
     """Manages data loading using pre-generated Tensors and TF Graph sampling."""
 
@@ -597,6 +593,10 @@ class NBeatsTrainer:
             'config': self.config.__dict__
         }
 
+        # Keep the bespoke ``default`` (numpy -> float, else ``str``): the config
+        # dict may carry non-numpy objects (e.g. a ``keras.losses.Loss`` passed as
+        # ``primary_loss``) that ``json_numpy_default`` would raise on. The str
+        # fallback preserves behavior on non-default configs.
         def default(o):
             if isinstance(o, (np.integer, np.floating)):
                 return float(o)
