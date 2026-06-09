@@ -2,11 +2,23 @@
 Deep Kernel Principal Component Analysis (DKPCA) algorithm.
 
 This layer provides a hierarchical, multi-level extension of Kernel Principal
-Component Analysis (KPCA). It is designed to learn more expressive and
-disentangled feature representations than shallow KPCA by creating a deep
-architecture with coupled optimization across all levels.
+Component Analysis (KPCA). It is designed to learn more expressive feature
+representations than shallow KPCA by stacking multiple kernel-PCA levels.
 
-Architecture and Design Philosophy:
+.. important:: **Fitted-path semantics (what this layer actually computes).**
+    After calling ``adapt(data)`` the layer performs a **greedy, per-level
+    Nystrom kernel-PCA stack**: each level is an INDEPENDENT kernel PCA fitted
+    on the previous fitted level's output, and the inter-level COUPLING is
+    DISABLED on the fitted path. It does **NOT** perform the paper's coupled /
+    globally-joint multi-level optimization described below -- that joint
+    objective is OUT OF SCOPE (it is not recoverable as a greedy layer-wise
+    ``adapt``). The forward/backward coupling described in this docstring
+    survives ONLY on the un-fitted (pre-``adapt``) fallback path. The
+    "coupled / joint / globally-coherent optimization" language below is
+    aspirational background from the reference paper, not what the fitted
+    layer executes.
+
+Architecture and Design Philosophy (reference-paper background):
 The core innovation of DKPCA lies in its forward and backward coupling
 mechanisms, which distinguish it from a naive stacking of independent KPCA
 layers. The architecture consists of multiple sequential levels, where each
@@ -63,15 +75,19 @@ class DeepKernelPCA(keras.layers.Layer):
     """
     Deep Kernel Principal Component Analysis layer for multi-level feature extraction.
 
-    This layer implements DKPCA, which extends traditional Kernel PCA to multiple
-    hierarchical levels with coupled optimization. It creates both forward and backward
-    dependencies across levels to extract more informative features than shallow KPCA.
-    The optimization minimizes ``min sum_j ||X^(j) - K^(j) alpha^(j)||^2_F + lambda sum_j ||alpha^(j)||^2_2``
-    where ``K^(j)`` is the kernel matrix at level ``j`` and ``alpha^(j)`` are the
-    principal component coefficients. Forward coupling passes components from level
-    ``j-1`` as input to level ``j``, while backward coupling refines shallower
-    representations using information from deeper levels through gated residual
-    connections.
+    This layer implements a hierarchical Kernel-PCA stack. After ``adapt(data)``
+    the FITTED path is a **greedy, per-level Nystrom kernel PCA**: each level is
+    an independent kernel PCA fitted on the previous fitted level's output, with
+    inter-level COUPLING DISABLED. This is the achievable correctness form; it
+    does NOT reproduce the reference paper's coupled / globally-joint multi-level
+    optimization (``min sum_j ||X^(j) - K^(j) alpha^(j)||^2_F + lambda sum_j
+    ||alpha^(j)||^2_2`` solved jointly across levels), which is OUT OF SCOPE.
+
+    The forward/backward coupling (forward coupling passing components from level
+    ``j-1`` as input to level ``j``; backward coupling refining shallower
+    representations from deeper levels via gated residual connections) is
+    reference-paper background and is active ONLY on the un-fitted (pre-``adapt``)
+    fallback path -- not on the fitted Nystrom path.
 
     **Architecture Overview:**
 
@@ -140,27 +156,35 @@ class DeepKernelPCA(keras.layers.Layer):
     :type trainable_kernels: bool
     :param kwargs: Additional arguments for Layer base class.
 
-    .. note:: **Working-bar limitations (documented approximations).** This is
-        an idiosyncratic "deep" KPCA variant, NOT a textbook eigendecomposition
-        kernel PCA. Specifically:
+    .. note:: **Two execution paths: fitted vs un-fitted fallback.**
 
-        * The per-level projection does **not** perform a true
-          eigendecomposition (``eigh``) of the centered Gram matrix. During
-          training it only L2-normalizes the learnable projection columns; the
-          principal-component coefficients are learned by gradient descent.
-        * ``extract_components`` reuses the leading ``batch_size`` rows of each
-          ``(feature_dim, num_components)`` projection weight as the per-sample
-          coefficients (because the sample axis is dynamic and cannot be a
-          weight dimension). This **requires ``feature_dim >= batch_size`` at
-          every level** (i.e. the layer's input dim and each level's component
-          count must be at least the batch size); it is a learned approximation,
-          not a Nystrom/analytic projection.
-        * ``eigenvalues`` are tracked but not fitted from data; the
-          explained-variance ratios are nominal.
+        * **Fitted path (after ``adapt``)** -- a genuine greedy per-level
+          Nystrom kernel PCA: each level eigendecomposes (``eigh``) the centered
+          training Gram of the previous fitted level's output, stores top-k
+          eigenvectors as Nystrom alphas, and projects out-of-sample points via
+          the canonical ``K(x, landmarks) @ alphas`` formula. The fitted path has
+          **no** ``feature_dim >= batch_size`` constraint and ``eigenvalues`` are
+          genuine, descending, data-fitted variances. Inter-level coupling is
+          DISABLED here (greedy stack only; the paper's joint optimization is out
+          of scope).
+        * **Un-fitted fallback (before ``adapt``)** -- the legacy idiosyncratic
+          variant, NOT a textbook eigendecomposition kernel PCA, kept so the
+          layer runs (and existing tests pass) without an ``adapt`` call:
+            - The per-level projection does **not** perform a true
+              eigendecomposition; it only L2-normalizes the learnable projection
+              columns (coefficients learned by gradient descent).
+            - ``extract_components`` reuses the leading ``batch_size`` rows of
+              each ``(feature_dim, num_components)`` projection weight as the
+              per-sample coefficients (the sample axis is dynamic and cannot be a
+              weight dimension). This **requires ``feature_dim >= batch_size`` at
+              every level**; it is a learned approximation, not an analytic
+              projection.
+            - ``eigenvalues`` remain at their all-ones init; explained-variance
+              ratios are nominal until ``adapt`` is called.
 
-        These approximations are intentional and out of scope to "fix" into
-        canonical kernel PCA; the layer's contract is a non-crashing,
-        gradient-trainable, round-trip-serializable hierarchical transform.
+        The un-fitted fallback's approximations are intentional; call ``adapt``
+        for genuine kernel PCA. The layer's baseline contract (either path) is a
+        non-crashing, gradient/serialization-safe hierarchical transform.
     """
 
     def __init__(

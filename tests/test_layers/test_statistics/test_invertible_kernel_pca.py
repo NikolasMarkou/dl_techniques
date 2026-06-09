@@ -471,6 +471,45 @@ class TestInvertibleKernelPCACorrectness:
         # RFF-appropriate bar (sign-invariant). Do NOT lower below 0.80.
         assert corr > 0.85, f"|corr| {corr:.3f} <= 0.85 vs sklearn (F2)"
 
+    def test_adapt_generalizes_to_heldout(self):
+        # OUT-OF-SAMPLE (canonical RFF/Nystrom generalization, WARNING#1):
+        # adapt on a TRAIN split ONLY, then transform a HELD-OUT split and
+        # score a classifier trained on the train components. This proves the
+        # fit GENERALIZES (not in-sample memorization). An un-fitted random
+        # projection scores ~chance held-out (see test_unfitted_fails_corr_bar).
+        X, y = _circles_embedded()
+        n = X.shape[0]
+        n_tr = int(n * 0.70)
+        X_tr, X_te = X[:n_tr], X[n_tr:]
+        y_tr, y_te = y[:n_tr], y[n_tr:]
+        layer = InvertibleKernelPCA(
+            n_random_features=_N_RFF, n_components=2, gamma=_GAMMA, random_seed=0
+        )
+        layer.adapt(X_tr)  # fit on TRAIN ONLY
+        comp_tr = ops.convert_to_numpy(layer(X_tr, training=False))
+        comp_te = ops.convert_to_numpy(layer(X_te, training=False))
+        clf = LogisticRegression(max_iter=1000).fit(comp_tr, y_tr)
+        acc = clf.score(comp_te, y_te)  # score on HELD-OUT
+        assert acc > 0.90, f"held-out separability acc {acc:.3f} <= 0.90 (F2)"
+
+    def test_unfitted_fails_corr_bar(self):
+        # NEGATIVE CONTROL (WARNING#2): an UN-FITTED layer (no adapt = random
+        # RFF projection) must FAIL the |corr| bar the fitted layer clears at
+        # 0.99. This pins that adapt() is what establishes correctness, so a
+        # silent adapt-no-op regression is caught. random_seed=0 is stable at
+        # |corr|~0.41 (well below 0.85) over the full 300 points.
+        X, _ = _circles_embedded()
+        layer = InvertibleKernelPCA(
+            n_random_features=_N_RFF, n_components=2, gamma=_GAMMA, random_seed=0
+        )
+        comp = ops.convert_to_numpy(layer(X, training=False))  # NO adapt
+        sk = KernelPCA(n_components=2, kernel="rbf", gamma=_GAMMA).fit_transform(X)
+        corr = abs(np.corrcoef(comp[:, 0], sk[:, 0])[0, 1])
+        assert corr < 0.85, (
+            f"un-fitted |corr| {corr:.3f} >= 0.85 -- negative control failed; "
+            f"adapt() is not load-bearing"
+        )
+
     def test_eigenvalues_sorted_descending(self):
         X, _ = _circles_embedded()
         layer = InvertibleKernelPCA(

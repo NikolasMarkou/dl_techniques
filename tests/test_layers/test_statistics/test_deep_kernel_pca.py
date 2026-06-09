@@ -393,6 +393,57 @@ class TestDeepKernelPCACorrectness:
         acc = LogisticRegression(max_iter=1000).fit(comp, y).score(comp, y)
         assert acc > 0.90, f"multi-level greedy sep acc {acc:.3f} <= 0.90 (F1)"
 
+    def test_adapt_generalizes_to_heldout(self):
+        # OUT-OF-SAMPLE (canonical Nystrom generalization, WARNING#1):
+        # adapt on a TRAIN split ONLY (these become the Nystrom landmarks),
+        # then transform a HELD-OUT split and score a classifier trained on the
+        # train components. This exercises the whole point of the Nystrom path:
+        # projecting points NOT in the adapt set. The FITTED Nystrom path has NO
+        # feature_dim >= batch_size constraint, so held-out scoring is fine.
+        X, y = _circles_embedded()
+        n = X.shape[0]
+        n_tr = int(n * 0.70)
+        X_tr, X_te = X[:n_tr], X[n_tr:]
+        y_tr, y_te = y[:n_tr], y[n_tr:]
+        layer = DeepKernelPCA(
+            num_levels=1, components_per_level=[2], kernel_type="rbf",
+            kernel_params={"gamma": _GAMMA},
+        )
+        layer.adapt(X_tr)  # fit on TRAIN ONLY (landmarks = train split)
+        comp_tr = ops.convert_to_numpy(layer(X_tr, training=False))
+        comp_te = ops.convert_to_numpy(layer(X_te, training=False))
+        clf = LogisticRegression(max_iter=1000).fit(comp_tr, y_tr)
+        acc = clf.score(comp_te, y_te)  # score on HELD-OUT
+        assert acc > 0.90, f"held-out separability acc {acc:.3f} <= 0.90 (F1)"
+
+    def test_unfitted_fails_corr_bar(self):
+        # NEGATIVE CONTROL (WARNING#2): an UN-FITTED layer (no adapt = fitted
+        # path inactive -> random-projection fallback) must FAIL the |corr| bar
+        # the fitted layer clears at ~1.0. This pins that adapt() is what
+        # establishes correctness, catching a silent adapt-no-op / broken
+        # fitted-branch regression. The un-fitted fallback carries the legacy
+        # feature_dim >= batch_size precondition, so use batch=64 with
+        # components_per_level=[64] over input_dim=80 (feature_dim 80 >= 64).
+        # Correlating over 64 points (not a tiny batch) keeps the control STABLE
+        # (seeded; |corr|~0.48, well below 0.85; small-batch corr is noisy and
+        # was deliberately avoided).
+        keras.utils.set_random_seed(0)
+        X, _ = _circles_embedded(input_dim=80)
+        X_b = X[:64]
+        layer = DeepKernelPCA(
+            num_levels=1, components_per_level=[64], kernel_type="rbf",
+            kernel_params={"gamma": _GAMMA},
+        )
+        comp = ops.convert_to_numpy(layer(X_b, training=False))  # NO adapt
+        sk = KernelPCA(
+            n_components=2, kernel="rbf", gamma=_GAMMA
+        ).fit_transform(X_b)
+        corr = abs(np.corrcoef(comp[:, 0], sk[:, 0])[0, 1])
+        assert corr < 0.85, (
+            f"un-fitted |corr| {corr:.3f} >= 0.85 -- negative control failed; "
+            f"adapt() is not load-bearing"
+        )
+
     def test_eigenvalues_sorted_descending(self):
         X, _ = _circles_embedded()
         layer = DeepKernelPCA(
