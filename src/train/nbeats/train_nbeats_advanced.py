@@ -25,7 +25,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.losses.mase_loss import MASELoss
 from dl_techniques.models.nbeats import create_nbeats_model
 from dl_techniques.optimization.warmup_schedule import WarmupSchedule
-from dl_techniques.datasets.time_series import TimeSeriesConfig, TimeSeriesGenerator
+from dl_techniques.datasets.time_series import TimeSeriesGeneratorConfig, TimeSeriesGenerator
 from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.layers.time_series.forecasting_layers import (
     NaiveResidual, ForecastabilityGate)
@@ -260,7 +260,18 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
             'loss': [], 'val_loss': [], 'forecast_mae': [], 'val_forecast_mae': []
         }
         os.makedirs(self.viz_dir, exist_ok=True)
-        self.viz_test_data = self._create_viz_test_set()
+        # DECISION plan_2026-06-09_49c73926/D-001: viz-data prep must NEVER abort a
+        # training run (mirrors the base TimeSeriesPerformanceCallback guard). On any
+        # failure, degrade to empty viz data -> per-epoch prediction plots are skipped
+        # (on_epoch_end already guards on len(viz_test_data[0]) > 0) and fit() proceeds.
+        try:
+            self.viz_test_data = self._create_viz_test_set()
+        except Exception as exc:
+            logger.warning(
+                f"{self.model_name}: viz-data preparation failed ({exc!r}); "
+                f"per-epoch prediction plots disabled, training continues."
+            )
+            self.viz_test_data = (np.array([]), np.array([]))
 
     def _create_viz_test_set(self) -> Tuple[np.ndarray, np.ndarray]:
         """Generate a diverse visualization test set with 1 sample from N different patterns."""
@@ -365,7 +376,7 @@ class PatternPerformanceCallback(keras.callbacks.Callback):
 class NBeatsTrainer:
     """Main trainer class for N-BEATS with forecasting layers."""
 
-    def __init__(self, config: NBeatsTrainingConfig, ts_config: TimeSeriesConfig):
+    def __init__(self, config: NBeatsTrainingConfig, ts_config: TimeSeriesGeneratorConfig):
         self.config = config
         self.ts_config = ts_config
 
@@ -672,7 +683,7 @@ def main() -> None:
         analysis_start_epoch=args.analysis_start_epoch
     )
 
-    ts_config = TimeSeriesConfig(n_samples=5000, random_seed=42)
+    ts_config = TimeSeriesGeneratorConfig(n_samples=5000, random_seed=42)
 
     try:
         trainer = NBeatsTrainer(config, ts_config)
