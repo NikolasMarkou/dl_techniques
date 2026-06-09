@@ -403,13 +403,23 @@ class MDNLayer(keras.layers.Layer):
 
         return loss
 
-    def sample(self, y_pred: keras.KerasTensor, temperature: float = 1.0) -> keras.KerasTensor:
+    def sample(
+            self,
+            y_pred: keras.KerasTensor,
+            temperature: float = 1.0,
+            seed: Optional[int] = None
+    ) -> keras.KerasTensor:
         """Sample from the predicted mixture distribution via ancestral sampling.
 
         :param y_pred: Concatenated prediction parameters.
         :type y_pred: keras.KerasTensor
         :param temperature: Sampling temperature controlling diversity. Defaults to 1.0.
         :type temperature: float
+        :param seed: Optional integer seed for reproducible sampling. When provided,
+            both the categorical (Gumbel) draw and the Gaussian draw are derived from
+            it (offset by 1 for the Gaussian) so a fixed ``seed`` yields identical
+            samples across calls. Defaults to ``None`` (nondeterministic).
+        :type seed: int | None
         :return: Sampled values of shape ``(batch_size, output_dim)``.
         :rtype: keras.KerasTensor
         """
@@ -419,8 +429,20 @@ class MDNLayer(keras.layers.Layer):
         if temperature != 1.0:
             out_pi = out_pi / temperature
 
+        # DECISION plan_2026-06-09_be55db55/D-004: `sample` accepts an explicit
+        # `seed` threaded into BOTH keras.random draws. The plan assumed the prior
+        # iteration already added seed support here — it had NOT (sample took only
+        # temperature). Do NOT drop the seed param or assume a global RNG: MDNModel
+        # computes `seed + i` per sample to decorrelate draws, and that value was
+        # being discarded (model.py latent bug), so per-sample seeds MUST reach the
+        # random ops. The Gaussian draw uses `seed + 1` so it does not alias the
+        # categorical draw's stream. See decisions.md D-004.
+        pi_seed = seed
+        normal_seed = None if seed is None else seed + 1
+
         mix_weights = keras.activations.softmax(out_pi, axis=-1)
-        gumbel_noise = -ops.log(-ops.log(keras.random.uniform(ops.shape(out_pi))))
+        gumbel_noise = -ops.log(-ops.log(
+            keras.random.uniform(ops.shape(out_pi), seed=pi_seed)))
         selected_logits = ops.log(mix_weights + keras.backend.epsilon()) + gumbel_noise
         selected_components = ops.argmax(selected_logits, axis=-1)
 
@@ -430,7 +452,7 @@ class MDNLayer(keras.layers.Layer):
         selected_mu = ops.sum(out_mu * one_hot_expanded, axis=1)
         selected_sigma = ops.sum(out_sigma * one_hot_expanded, axis=1)
 
-        epsilon = keras.random.normal(ops.shape(selected_mu))
+        epsilon = keras.random.normal(ops.shape(selected_mu), seed=normal_seed)
         samples = selected_mu + selected_sigma * epsilon
 
         return samples

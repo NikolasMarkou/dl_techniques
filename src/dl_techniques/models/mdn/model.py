@@ -451,7 +451,13 @@ class MDNModel(keras.Model):
 
             # Generate one sample from the mixture distribution
             # This involves: component selection + Gaussian sampling
-            sample = self.mdn_layer.sample(predictions, temperature=temperature)
+            # DECISION plan_2026-06-09_be55db55/D-004: forward the per-sample
+            # `sample_seed` (seed + i) into mdn_layer.sample. It was previously
+            # computed and DISCARDED (latent bug), making `seed=` a no-op. Do NOT
+            # drop this arg; MDNLayer.sample was extended to accept `seed`. See
+            # decisions.md D-004.
+            sample = self.mdn_layer.sample(
+                predictions, temperature=temperature, seed=sample_seed)
             samples.append(sample)
 
         # Stack samples along a new dimension: [batch, samples, output_dim]
