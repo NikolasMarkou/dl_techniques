@@ -442,10 +442,15 @@ def _prepare_viz_data_from_processor(
     """Collect up to ``k`` fixed test windows from a processor for visualization.
 
     Absorbs the identical 10-line ``_test_generator_raw`` collection loop that
-    nbeats / prism / tirex each carried in their callback's viz-data prep. Each
-    yielded ``(x, y)`` is appended verbatim — so nbeats's reconstruction tuple
-    target (``(forecast, backcast)`` when ``reconstruction_loss_weight > 0``)
-    passes through unchanged.
+    nbeats / prism / tirex each carried in their callback's viz-data prep.
+
+    Robustness: when a sample's target is *nested* — e.g. nbeats's reconstruction
+    tuple ``(forecast, backcast)`` for ``reconstruction_loss_weight > 0``, whose
+    two arrays have mismatched lengths — only the **primary** element (the
+    forecast) is kept. Stacking the full ragged tuple with ``np.array`` would
+    raise ``ValueError: inhomogeneous shape``, and the prediction plots only ever
+    render the forecast anyway. For single-array targets (tirex / prism) the
+    guard is a strict no-op, preserving the stacked-array shape exactly.
 
     Args:
         processor: A :class:`WindowedTimeSeriesProcessor` exposing
@@ -459,7 +464,10 @@ def _prepare_viz_data_from_processor(
     viz_x, viz_y = [], []
     for x, y in processor._test_generator_raw():
         viz_x.append(x)
-        viz_y.append(y)
+        # DECISION plan_2026-06-09_49c73926/D-001: keep only the primary target of
+        # a nested (tuple/list) target so np.array() never stacks a ragged tuple.
+        # No-op for single-array targets.
+        viz_y.append(y[0] if isinstance(y, (tuple, list)) else y)
         if len(viz_x) >= k:
             break
     if not viz_x:
@@ -515,7 +523,17 @@ class TimeSeriesPerformanceCallback(keras.callbacks.Callback):
         self.training_history: Dict[str, List[float]] = {
             k: [] for k in self.BASE_HISTORY_KEYS
         }
-        self.viz_test_data = self._prepare_viz_data()
+        # DECISION plan_2026-06-09_49c73926/D-001: viz-data prep must NEVER abort a
+        # training run. Any failure here (ragged target, odd processor, empty data)
+        # degrades to "skip per-epoch prediction plots" — fit() proceeds normally.
+        try:
+            self.viz_test_data = self._prepare_viz_data()
+        except Exception as exc:
+            logger.warning(
+                f"{self.model_name}: viz-data preparation failed ({exc!r}); "
+                f"per-epoch prediction plots disabled, training continues."
+            )
+            self.viz_test_data = (np.array([]), np.array([]))
 
     # ------------------------------------------------------------------ #
     # Hooks (overridable by subclasses)

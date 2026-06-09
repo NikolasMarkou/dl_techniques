@@ -168,7 +168,9 @@ class PRISMPerformanceCallback(TimeSeriesPerformanceCallback):
         viz_x, viz_y = [], []
         for x, y in self.processor._test_generator_raw():
             viz_x.append(x)
-            viz_y.append(y)
+            # DECISION plan_2026-06-09_49c73926/D-001: keep only the primary target of
+            # a nested target (ragged-tuple safety). No-op for prism's single arrays.
+            viz_y.append(y[0] if isinstance(y, (tuple, list)) else y)
             if len(viz_x) >= self.config.plot_top_k_patterns:
                 break
         if not viz_x:
