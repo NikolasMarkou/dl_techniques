@@ -22,6 +22,11 @@ import tensorflow as tf
 
 from dl_techniques.layers.statistics.deep_kernel_pca import DeepKernelPCA
 
+# sklearn is available in the venv (findings/pca-correctness.md ran a live probe).
+from sklearn.datasets import make_circles
+from sklearn.decomposition import KernelPCA
+from sklearn.linear_model import LogisticRegression
+
 
 # ---------------------------------------------------------------------
 # Fixtures
@@ -311,3 +316,170 @@ class TestDeepKernelPCA:
         )
         out = layer(sample_data, training=False)
         assert tuple(out.shape) == (batch_size, 12)
+
+
+# ---------------------------------------------------------------------
+# Textbook-correctness (genuine Nystrom kernel PCA via adapt())
+# ---------------------------------------------------------------------
+#
+# Kernel-PCA components are sign- and rotation-ambiguous, so atol-vs-sklearn on
+# raw components is INVALID. Correctness is established by class-separability on
+# concentric circles, |corr| of the leading component vs sklearn, and
+# eigenvalue-ordering -- NOT atol-vs-sklearn on raw components.
+#
+# The fitted path uses the canonical Nystrom out-of-sample formula (adapt =
+# greedy layer-wise eigh of the centered training Gram; call = centered
+# K(x, landmarks) @ alphas). With the exact RBF kernel this clears a HIGHER bar
+# than the RFF-based ikPCA (>0.95 corr). gamma is tuned so the top-2 eigenvalues
+# separate (avoids the near-degenerate rotation ambiguity).
+
+# Tuned so leading eigenvalues separate (sep acc=1.0, |corr|~1.0 vs sklearn).
+_GAMMA = 0.5
+
+
+def _circles_embedded(input_dim: int = 20, seed: int = 0):
+    """Concentric circles (2D) embedded into ``input_dim`` via a random map."""
+    rng = np.random.default_rng(seed)
+    x2, labels = make_circles(
+        n_samples=300, factor=0.3, noise=0.05, random_state=seed
+    )
+    proj = rng.standard_normal((2, input_dim)).astype("float32")
+    embedded = (x2.astype("float32") @ proj).astype("float32")
+    return embedded, labels.astype("int32")
+
+
+class TestDeepKernelPCACorrectness:
+
+    def test_adapt_separates_concentric_circles(self):
+        # After adapt, the top-k kernel-PCs linearly separate inner/outer.
+        # Single genuine level is sufficient (multi-level greedy also passes;
+        # see test_multilevel_greedy_separates). Nystrom has no batch<=feature
+        # constraint, so input_dim is free.
+        X, y = _circles_embedded()
+        layer = DeepKernelPCA(
+            num_levels=1, components_per_level=[2], kernel_type="rbf",
+            kernel_params={"gamma": _GAMMA},
+        )
+        layer.adapt(X)
+        comp = ops.convert_to_numpy(layer(X, training=False))
+        acc = LogisticRegression(max_iter=1000).fit(comp, y).score(comp, y)
+        assert acc > 0.90, f"fitted separability acc {acc:.3f} <= 0.90 (F1)"
+
+    def test_corr_with_sklearn_kernelpca(self):
+        # Leading fitted component vs sklearn KernelPCA leading component.
+        X, _ = _circles_embedded()
+        layer = DeepKernelPCA(
+            num_levels=1, components_per_level=[2], kernel_type="rbf",
+            kernel_params={"gamma": _GAMMA},
+        )
+        layer.adapt(X)
+        comp = ops.convert_to_numpy(layer(X, training=False))
+
+        sk = KernelPCA(n_components=2, kernel="rbf", gamma=_GAMMA).fit_transform(X)
+        corr = abs(np.corrcoef(comp[:, 0], sk[:, 0])[0, 1])
+        # Exact-RBF Nystrom -> higher bar than RFF. Do NOT lower below 0.90.
+        assert corr > 0.90, f"|corr| {corr:.3f} <= 0.90 vs sklearn (F1)"
+
+    def test_multilevel_greedy_separates(self):
+        # Greedy multi-level stacking still separates the circles end-to-end.
+        X, y = _circles_embedded()
+        layer = DeepKernelPCA(
+            num_levels=2, components_per_level=[4, 2], kernel_type="rbf",
+            kernel_params={"gamma": _GAMMA},
+        )
+        layer.adapt(X)
+        comp = ops.convert_to_numpy(layer(X, training=False))
+        assert comp.shape == (X.shape[0], 6)
+        acc = LogisticRegression(max_iter=1000).fit(comp, y).score(comp, y)
+        assert acc > 0.90, f"multi-level greedy sep acc {acc:.3f} <= 0.90 (F1)"
+
+    def test_eigenvalues_sorted_descending(self):
+        X, _ = _circles_embedded()
+        layer = DeepKernelPCA(
+            num_levels=2, components_per_level=[4, 2], kernel_type="rbf",
+            kernel_params={"gamma": _GAMMA},
+        )
+        layer.adapt(X)
+        for level in range(layer.num_levels):
+            eig = ops.convert_to_numpy(layer.eigenvalues[level])
+            assert np.all(np.diff(eig) <= 1e-4), \
+                f"level {level} eigenvalues not descending: {eig}"
+        # adapt must move level-0 eigenvalues off their all-ones init.
+        assert not np.allclose(ops.convert_to_numpy(layer.eigenvalues[0]), 1.0)
+
+    def test_adapt_then_serialization_preserves_fit(self, tmp_path):
+        X, _ = _circles_embedded()
+        inp = keras.Input(shape=(X.shape[1],))
+        layer = DeepKernelPCA(
+            num_levels=2, components_per_level=[4, 2], kernel_type="rbf",
+            kernel_params={"gamma": _GAMMA},
+        )
+        out = layer(inp)
+        model = keras.Model(inp, out)
+        layer.adapt(X)
+
+        fitted_eig = ops.convert_to_numpy(layer.eigenvalues[0])
+        y_before = ops.convert_to_numpy(model(X, training=False))
+
+        path = os.path.join(str(tmp_path), "dkpca_fitted.keras")
+        model.save(path)
+        restored = keras.models.load_model(path)
+        y_after = ops.convert_to_numpy(restored(X, training=False))
+
+        # genuine fitted transform survives the round-trip (not reset to the
+        # un-fitted random-projection path).
+        np.testing.assert_allclose(y_before, y_after, atol=1e-5)
+        restored_eig = ops.convert_to_numpy(restored.layers[-1].eigenvalues[0])
+        np.testing.assert_allclose(restored_eig, fitted_eig, atol=1e-4)
+        assert not np.allclose(restored_eig, 1.0)
+
+    def test_unfitted_still_runs(self):
+        # Un-adapted layer must still run call() (random-projection fallback);
+        # output is meaningless until adapt, but must not error. The UN-FITTED
+        # fallback still carries the legacy feature_dim >= batch_size precondition
+        # (prior-plan D-005), so use a small batch (<= input_dim) here. The
+        # FITTED Nystrom path has NO such constraint (it runs on n=300 above).
+        X, _ = _circles_embedded()
+        # The un-fitted fallback needs every level's component count >= batch
+        # (reuses projection-weight rows as coefficients). Use batch 6 with
+        # components [6, 6] (the existing working-bar fixture's shape).
+        X_small = X[:6]
+        layer = DeepKernelPCA(
+            num_levels=2, components_per_level=[6, 6], kernel_type="rbf",
+            kernel_params={"gamma": _GAMMA},
+        )
+        out = ops.convert_to_numpy(layer(X_small, training=False))
+        assert out.shape == (X_small.shape[0], 12)
+        assert np.all(np.isfinite(out))
+        # un-fitted eigenvalues remain at the all-ones init.
+        assert np.allclose(ops.convert_to_numpy(layer.eigenvalues[0]), 1.0)
+
+    def test_adapt_undersampled_raises(self):
+        # n_samples - 1 < a level's component count -> clear ValueError.
+        layer = DeepKernelPCA(
+            num_levels=1, components_per_level=[8], kernel_type="rbf",
+            kernel_params={"gamma": _GAMMA},
+        )
+        tiny = np.random.default_rng(0).standard_normal((4, 20)).astype("float32")
+        with pytest.raises(ValueError, match="at least"):
+            layer.adapt(tiny)
+
+    def test_fitted_call_graph_mode(self):
+        # Fitted Nystrom path must run under graph mode (tf.function / Model).
+        X, _ = _circles_embedded()
+        inp = keras.Input(shape=(X.shape[1],))
+        layer = DeepKernelPCA(
+            num_levels=2, components_per_level=[4, 2], kernel_type="rbf",
+            kernel_params={"gamma": _GAMMA},
+        )
+        out = layer(inp)
+        model = keras.Model(inp, out)
+        layer.adapt(X)
+
+        @tf.function
+        def run(x):
+            return model(x, training=False)
+
+        y = run(tf.convert_to_tensor(X))
+        assert np.all(np.isfinite(y.numpy()))
+        assert tuple(y.shape) == (X.shape[0], 6)
