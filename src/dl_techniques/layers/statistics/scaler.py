@@ -329,15 +329,30 @@ class UnifiedScaler(keras.layers.Layer):
 
         # Update persistent statistics if enabled.
         #
-        # The in-call ``.assign`` of a non-trainable ``tf.Variable`` is the
-        # documented behaviour (stats refresh on every forward pass whenever
-        # ``store_stats=True``, including ``training=None`` inference calls). Under
-        # the TF backend this is graph-legal in both eager and ``tf.function`` /
-        # ``model.fit`` graph mode. It is gated on ``self.built`` so it is skipped
-        # during the symbolic functional-API shape-inference pass (where the weights
-        # are not yet created). NOTE: this state mutation is TF-specific; on jit /
-        # stateless backends (JAX) in-call ``.assign`` is not supported (out of scope,
-        # backend is TF — see plan A1).
+        # This in-call ``.assign`` of a non-trainable variable mirrors the exact
+        # Keras 3 core idiom: ``keras.layers.BatchNormalization`` itself performs
+        # ``self.moving_mean.assign(...)`` / ``self.moving_variance.assign(...)``
+        # inside its own ``call`` (see Keras source
+        # ``layers/normalization/batch_normalization.py``:257,260). So the
+        # ``.assign``-inside-``call`` pattern here is the idiomatic Keras approach
+        # for in-call running-stat updates, NOT an anti-pattern to be "fixed".
+        #
+        # The absence of an ``if training:`` gate is INTENTIONAL: ``UnifiedScaler``'s
+        # contract is that the stored stats refresh on EVERY forward pass, including
+        # ``training=None`` inference calls. Do NOT add a ``training`` gate here —
+        # gating the update on ``training`` would break ``test_scaler_stored_statistics``
+        # (which asserts the stored stats track plain inference calls). This differs
+        # from BatchNorm (which DOES gate on training) by deliberate design.
+        #
+        # The update is gated on ``self.built`` only, so it is skipped during the
+        # symbolic functional-API shape-inference pass (where the weights are not yet
+        # created).
+        #
+        # Known limitation (same as BatchNorm's ``.assign``): this state mutation is
+        # graph-safe under the TF backend in both eager and ``tf.function`` /
+        # ``model.fit`` graph mode, but it is NOT supported under TF
+        # ``jit_compile=True`` (XLA) or the stateless JAX backend. Neither is used by
+        # this repo (backend is TF; this layer is never compiled with jit) — see plan A2.
         if self.store_stats and self.built:
             # Average statistics across batch dimension for storage
             batch_mean = ops.mean(mean, axis=0)
