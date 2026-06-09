@@ -35,6 +35,7 @@ from train.common import (
     create_callbacks,
     validate_model_loading,
     run_model_analysis,
+    save_config_json,
     CIFAR10_MEAN,
     CIFAR10_STD,
 )
@@ -522,8 +523,7 @@ def train_model(args) -> None:
             "input_shape": list(input_shape),
             "num_classes": num_classes,
         }
-        with open(os.path.join(results_dir, "config.json"), "w") as f:
-            json.dump(config_dict, f, indent=2)
+        save_config_json(config_dict, results_dir)
     except Exception as e:
         logger.warning(f"Failed to save config: {e}")
 
