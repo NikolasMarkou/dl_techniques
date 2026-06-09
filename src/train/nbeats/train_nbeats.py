@@ -59,8 +59,15 @@ class NBeatsTrainingConfig(BaseTimeSeriesTrainingConfig):
     from :class:`BaseTimeSeriesTrainingConfig` and adds the N-BEATS architecture
     fields below. A handful of inherited defaults are re-declared because the
     N-BEATS originals differ from the base: ``steps_per_epoch`` (1000 vs 500),
-    ``warmup_steps`` (5000 vs 1000), ``max_patterns_per_category`` (100 vs 10),
-    and ``optimizer`` ('adam' vs 'adamw'). ``category_weights`` and
+    ``max_patterns_per_category`` (100 vs 10), and ``optimizer``
+    ('adam' vs 'adamw').
+
+    Note on ``warmup_steps``: this dataclass re-declares it as 5000, but that
+    value only takes effect for a *programmatic* config built without an explicit
+    ``warmup_steps``. The EFFECTIVE default under the normal CLI path is 1000:
+    ``main()`` always passes ``args.warmup_steps`` and the shared parser's default
+    is 1000 (matching the original N-BEATS CLI). So at default invocation the
+    runtime value is 1000, not 5000. ``category_weights`` and
     ``normalize_per_instance`` match the base defaults and are dropped.
     """
 
@@ -68,7 +75,7 @@ class NBeatsTrainingConfig(BaseTimeSeriesTrainingConfig):
 
     # Re-declared: N-BEATS originals differ from the base defaults.
     steps_per_epoch: int = 1000      # base default: 500
-    warmup_steps: int = 5000         # base default: 1000
+    warmup_steps: int = 5000         # programmatic only; CLI path -> 1000 (see docstring)
     max_patterns_per_category: int = 100  # base default: 10
     optimizer: str = 'adam'          # base default: 'adamw'
 
@@ -365,7 +372,10 @@ def build_parser() -> argparse.ArgumentParser:
     # batch_size(128)/steps_per_epoch(1000)/learning_rate(1e-4)/optimizer("adamw")/
     # gradient_clip_norm(1.0)/warmup_steps(1000)/warmup_start_lr(1e-6)/
     # analysis_frequency(10)/analysis_start_epoch(1) already match the shared parser.
-    parser.set_defaults(experiment_name="nbeats")
+    # max_patterns_per_category=100 restores the N-BEATS config default (shared
+    # parser default is 10) so that, now that main() WIRES the flag into the
+    # config (review #5: no silent no-op), default invocation still selects 100.
+    parser.set_defaults(experiment_name="nbeats", max_patterns_per_category=100)
 
     # N-BEATS architecture-specific arguments.
     parser.add_argument("--backcast_length", type=int, default=168)
@@ -404,6 +414,13 @@ def main() -> None:
         use_warmup=args.use_warmup,
         warmup_steps=args.warmup_steps,
         warmup_start_lr=args.warmup_start_lr,
+        # Wire the shared-parser pattern/viz flags so they are not silent no-ops
+        # (review #5). max_patterns_per_category default is restored to 100 in
+        # build_parser; visualize_every_n_epochs/plot_top_k_patterns parser
+        # defaults (5/12) already equal the N-BEATS config defaults.
+        max_patterns_per_category=args.max_patterns_per_category,
+        visualize_every_n_epochs=args.visualize_every_n_epochs,
+        plot_top_k_patterns=args.plot_top_k_patterns,
         perform_deep_analysis=args.perform_deep_analysis,
         analysis_frequency=args.analysis_frequency,
         analysis_start_epoch=args.analysis_start_epoch

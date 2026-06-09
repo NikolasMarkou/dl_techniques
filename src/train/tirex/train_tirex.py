@@ -234,20 +234,23 @@ class TiRexTrainer(BaseTimeSeriesTrainer):
     def _build_results_prefix(self) -> str:
         return f"{self.config.experiment_name}_{self.config.model_type}"
 
-    def _make_callbacks(self, exp_dir: str) -> List:
-        """Override: TiRex uses ``patience=30`` / ``model_name="TiRex"``.
-
-        The base default is ``patience=25`` / ``model_name=experiment_name``;
-        TiRex's original ``create_common_callbacks`` call used 30 / "TiRex", so
-        this overrides to preserve that exact behavior (same sanctioned hook
-        prism uses). Everything else matches the base body.
-        """
-        viz_dir = os.path.join(exp_dir, 'visualizations')
-        os.makedirs(viz_dir, exist_ok=True)
-
-        callbacks, _ = create_common_callbacks(
+    def _make_callbacks(self, exp_dir: Optional[str] = None) -> List:
+        """Override: TiRex uses ``patience=30`` / ``model_name="TiRex"`` AND owns
+        its experiment dir (D-009)."""
+        # DECISION plan_2026-06-09_a3c7304c/D-009
+        # Pass a BARE prefix (self._build_results_prefix()) to
+        # create_common_callbacks and adopt its RETURNED results_dir as
+        # self.exp_dir -- matching the git-original tirex flow (c3fbacef:511,
+        # `self.exp_dir = results_dir`). Do NOT pass the pre-created full
+        # exp_dir path as results_dir_prefix and do NOT use the base
+        # _create_experiment_dir here: that built a SEPARATE doubly-nested
+        # results/results/{prefix}_TiRex_{ts2}/best_model.keras while the ONNX
+        # read path used the first dir -> checkpoint not found -> silent None
+        # when export_onnx=True, and lost the _TiRex dir infix.
+        # The exp_dir param is ignored on purpose. See decisions.md D-009.
+        callbacks, results_dir = create_common_callbacks(
             model_name="TiRex",
-            results_dir_prefix=exp_dir,
+            results_dir_prefix=self._build_results_prefix(),
             monitor="val_loss",
             patience=30,
             use_lr_schedule=self.config.use_warmup,
@@ -260,6 +263,9 @@ class TiRexTrainer(BaseTimeSeriesTrainer):
             analyzer_start_epoch=self.config.analysis_start_epoch,
             analyzer_epoch_frequency=self.config.analysis_frequency,
         )
+        self.exp_dir = results_dir
+        viz_dir = os.path.join(self.exp_dir, 'visualizations')
+        os.makedirs(viz_dir, exist_ok=True)
         callbacks.append(self._build_performance_callback(viz_dir))
         return callbacks
 
@@ -309,22 +315,25 @@ class TiRexTrainer(BaseTimeSeriesTrainer):
     def run_experiment(self) -> Dict[str, Any]:
         """Base skeleton + TiRex's ONNX export folded into ``results.json``.
 
-        Overridden (not using the bare base ``run_experiment``) because TiRex's
-        original ``results.json`` carried a 5th ``onnx_path`` key. The base
-        ``_export_to_onnx`` (guarded by ``export_onnx`` + checkpoint existence)
-        runs here and its path is passed via ``extra_fields`` so the base
-        ``_save_results`` writes the same key set the original did.
+        Overridden (not using the bare base ``run_experiment``) for two reasons:
+        TiRex's original ``results.json`` carried a 5th ``onnx_path`` key, AND
+        TiRex resolves ``self.exp_dir`` from ``create_common_callbacks``'
+        returned dir (D-009) rather than the base ``_create_experiment_dir``.
+        ``self.exp_dir`` is therefore set INSIDE ``_train_model`` (via its
+        ``_make_callbacks`` call); the ONNX read + ``_save_results`` below run
+        after it and read the now-coincident ``self.exp_dir`` so checkpoint,
+        viz, results.json, and the ONNX read path all live in one dir.
         """
         logger.info("Starting TiRex training experiment")
-        self.exp_dir = self._create_experiment_dir()
-        logger.info(f"Results: {self.exp_dir}")
 
         data_pipeline = self.processor.prepare_datasets()
         self.model = self._build_model()
         logger.info(f"Model params: {self.model.count_params():,}")
         self.model.summary(print_fn=logger.info)
 
-        training_results = self._train_model(data_pipeline, self.exp_dir)
+        # _train_model -> _make_callbacks sets self.exp_dir (D-009).
+        training_results = self._train_model(data_pipeline, exp_dir=None)
+        logger.info(f"Results: {self.exp_dir}")
 
         best_model_path = os.path.join(self.exp_dir, 'best_model.keras')
         onnx_path = self._export_to_onnx(best_model_path, self.exp_dir)
