@@ -234,13 +234,21 @@ class WindowedTimeSeriesProcessor:
         inside their normalize branch; at their default ``normalize_per_instance=True``
         it makes no difference, and filling always is strictly safer.
 
-        When ``normalize`` is ``False`` (tirex) this is just clip(1e6) + fill +
-        float32 — the model handles normalization itself.
+        D-003 (decision log): two independent axes the originals keep separate.
+        (a) the per-instance STANDARD/ROBUST transform is gated on
+        ``config.normalize_per_instance``; (b) the ``clip(-10, 10)`` is applied by
+        every *normalizing* processor (``self.normalize=True`` → nbeats/prism/mdn)
+        whenever it runs, INDEPENDENT of the per-instance toggle — disabling
+        per-instance normalization still clips. tirex passes ``normalize=False`` so
+        neither fires (clip(1e6)+fill+float32 only, matching tirex original). This
+        reproduces all four originals across BOTH ``normalize_per_instance``
+        settings. Do NOT re-couple clip(10) to ``normalize_per_instance``.
         """
         series = np.clip(series, -1e6, 1e6)
         series = _fill_nans(series)
         if self.normalize:
-            series = TimeSeriesNormalizer(method=self.normalize_method).fit_transform(series)
+            if getattr(self.config, 'normalize_per_instance', True):
+                series = TimeSeriesNormalizer(method=self.normalize_method).fit_transform(series)
             series = np.clip(series, -10.0, 10.0)
         return series.astype(np.float32)
 
