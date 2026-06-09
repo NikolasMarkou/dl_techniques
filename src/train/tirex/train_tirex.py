@@ -30,7 +30,16 @@ import numpy as np
 import seaborn as sns
 import tensorflow as tf
 
-from train.common import setup_gpu, create_callbacks as create_common_callbacks, generate_training_curves, set_seeds, json_numpy_default, create_learning_rate_schedule
+from train.common import (
+    setup_gpu,
+    create_callbacks as create_common_callbacks,
+    generate_training_curves,
+    set_seeds,
+    json_numpy_default,
+    create_learning_rate_schedule,
+    BaseTimeSeriesTrainingConfig,
+    WindowedTimeSeriesProcessor,
+)
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.quantile_loss import QuantileLoss
 from dl_techniques.models.tirex.model import create_tirex_by_variant, TiRexCore
@@ -38,6 +47,7 @@ from dl_techniques.models.tirex.model_extended import create_tirex_extended, TiR
 from dl_techniques.datasets.time_series import (
     TimeSeriesGenerator,
     TimeSeriesGeneratorConfig,
+    NormalizationMethod,
 )
 from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
@@ -55,18 +65,19 @@ set_random_seeds(42)
 
 
 @dataclass
-class TiRexTrainingConfig:
-    """Configuration for TiRex training on multiple patterns."""
-    result_dir: str = "results"
-    save_results: bool = True
+class TiRexTrainingConfig(BaseTimeSeriesTrainingConfig):
+    """Configuration for TiRex training on multiple patterns.
+
+    Inherits the shared time-series fields (data splits, optimizer/warmup knobs,
+    pattern selection, category weights, visualization + deep-analysis flags)
+    from :class:`BaseTimeSeriesTrainingConfig` and adds the TiRex architecture
+    fields below. All inherited defaults (``batch_size=128``, ``steps_per_epoch=500``,
+    ``warmup_steps=1000``, ``category_weights``) match the base, so none are
+    re-declared.
+    """
+
     experiment_name: str = "tirex_probabilistic"
     model_type: str = "core"  # 'core' or 'extended'
-    target_categories: Optional[List[str]] = None
-
-    # Data splits
-    train_ratio: float = 0.7
-    val_ratio: float = 0.15
-    test_ratio: float = 0.15
 
     # TiRex architecture
     input_length: int = 168
@@ -78,74 +89,33 @@ class TiRexTrainingConfig:
         default_factory=lambda: [0.1, 0.25, 0.5, 0.75, 0.9]
     )
 
-    # Training
-    epochs: int = 150
-    batch_size: int = 128
-    steps_per_epoch: int = 500
-    learning_rate: float = 1e-4
-    gradient_clip_norm: float = 1.0
-    optimizer: str = 'adamw'
-
-    # Warmup schedule
-    use_warmup: bool = True
-    warmup_steps: int = 1000
-    warmup_start_lr: float = 1e-6
-
-    # Pattern selection
-    max_patterns: Optional[int] = None
-    max_patterns_per_category: int = 10
+    # TiRex-specific pattern selection
     min_data_length: int = 2000
-
-    # Category weights for balanced sampling
-    category_weights: Dict[str, float] = field(default_factory=lambda: {
-        "trend": 1.0, "seasonal": 1.0, "composite": 1.2,
-        "financial": 1.5, "weather": 1.3, "biomedical": 1.2,
-        "industrial": 1.3, "intermittent": 1.0, "volatility": 1.1,
-        "regime": 1.2, "structural": 1.1
-    })
-
-    # Visualization
-    visualize_every_n_epochs: int = 5
-    save_interim_plots: bool = True
-    plot_top_k_patterns: int = 12
-    create_learning_curves: bool = True
-    create_prediction_plots: bool = True
-
-    # Deep analysis
-    perform_deep_analysis: bool = True
-    analysis_frequency: int = 10
-    analysis_start_epoch: int = 1
 
     # ONNX export
     export_onnx: bool = False
     onnx_opset_version: int = 17
 
     def __post_init__(self) -> None:
+        super().__post_init__()  # ratio-sum invariant
         if self.model_type not in ['core', 'extended']:
             raise ValueError(f"model_type must be 'core' or 'extended', got '{self.model_type}'")
-        total_ratio = self.train_ratio + self.val_ratio + self.test_ratio
-        if not np.isclose(total_ratio, 1.0, atol=1e-6):
-            raise ValueError(f"Data ratios must sum to 1.0, got {total_ratio}")
         if self.input_length <= 0 or self.prediction_length <= 0:
             raise ValueError("input_length and prediction_length must be positive")
         if 0.5 not in self.quantile_levels:
             logger.warning("Recommended to include 0.5 (median) in quantile_levels.")
 
 
-def _fill_nans(data: np.ndarray) -> np.ndarray:
-    """Forward fill NaNs in numpy array."""
-    mask = np.isnan(data)
-    idx = np.where(~mask, np.arange(mask.shape[0]), 0)
-    np.maximum.accumulate(idx, axis=0, out=idx)
-    out = data[idx]
-    out[np.isnan(out)] = 0
-    return out
+class TiRexDataProcessor(WindowedTimeSeriesProcessor):
+    """TiRex data processor: thin subclass of :class:`WindowedTimeSeriesProcessor`.
 
-
-class TiRexDataProcessor:
-    """
-    Data processor for TiRex with infinite streaming training generator
-    and pre-computed in-memory validation/test datasets.
+    Two TiRex-specific differences from the trio default:
+    1. ``normalize=False`` — the model handles normalization, so the base only
+       clips + NaN-fills + casts to float32 (matching the original
+       ``_safe_normalize``: no per-instance normalize, no clip(10)).
+    2. the target is FLATTENED to ``(prediction_length,)`` rather than reshaped
+       to ``(horizon_len, num_features)``, so ``_make_sample`` and
+       ``output_signature`` are overridden accordingly.
     """
 
     def __init__(
@@ -154,134 +124,31 @@ class TiRexDataProcessor:
             generator: TimeSeriesGenerator,
             selected_patterns: List[str],
             pattern_to_category: Dict[str, str],
-            num_features: int = 1
+            num_features: int = 1,
     ):
-        self.config = config
-        self.ts_generator = generator
-        self.selected_patterns = selected_patterns
-        self.pattern_to_category = pattern_to_category
-        self.num_features = num_features
-        self.weighted_patterns, self.weights = self._prepare_weighted_sampling()
-
-    def _prepare_weighted_sampling(self) -> Tuple[List[str], List[float]]:
-        patterns, weights = [], []
-        for name in self.selected_patterns:
-            category = self.pattern_to_category.get(name, "unknown")
-            weights.append(self.config.category_weights.get(category, 1.0))
-            patterns.append(name)
-        total = sum(weights)
-        if total > 0:
-            weights = [w / total for w in weights]
-        else:
-            weights = [1.0 / len(patterns)] * len(patterns)
-        return patterns, weights
-
-    def _safe_normalize(self, series: np.ndarray) -> np.ndarray:
-        """Clean series with safety clip and NaN filling (model handles normalization)."""
-        series = np.clip(series, -1e6, 1e6)
-        if np.isnan(series).any():
-            series = _fill_nans(series)
-        return series.astype(np.float32)
-
-    def _training_generator(self) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
-        """Infinite generator with buffered pattern mixing."""
-        patterns_to_mix, windows_per_pattern = 50, 5
-        buffer: List[Tuple[np.ndarray, np.ndarray]] = []
-        total_len = self.config.input_length + self.config.prediction_length
-
-        while True:
-            if not buffer:
-                for name in random.choices(self.weighted_patterns, self.weights, k=patterns_to_mix):
-                    data = self.ts_generator.generate_task_data(name)
-                    if len(data) < total_len or not np.isfinite(data).all():
-                        continue
-                    train_data = data[:int(self.config.train_ratio * len(data))]
-                    max_start = len(train_data) - total_len
-                    if max_start <= 0:
-                        continue
-                    for _ in range(windows_per_pattern):
-                        start = random.randint(0, max_start)
-                        window = self._safe_normalize(train_data[start:start + total_len])
-                        context = window[:self.config.input_length].reshape(-1, self.num_features)
-                        target = window[self.config.input_length:].flatten()
-                        buffer.append((context, target))
-                random.shuffle(buffer)
-            if buffer:
-                yield buffer.pop()
-
-    def _generate_fixed_dataset(self, split: str, num_samples: int) -> Tuple[np.ndarray, np.ndarray]:
-        """Pre-generate fixed dataset for val/test."""
-        logger.info(f"Pre-computing {split} dataset ({num_samples} samples)")
-        contexts, targets = [], []
-        total_len = self.config.input_length + self.config.prediction_length
-        collected, cycle = 0, 0
-
-        while collected < num_samples:
-            name = self.selected_patterns[cycle % len(self.selected_patterns)]
-            cycle += 1
-            data = self.ts_generator.generate_task_data(name)
-            if len(data) < total_len or not np.isfinite(data).all():
-                continue
-
-            train_end = int(self.config.train_ratio * len(data))
-            val_end = train_end + int(self.config.val_ratio * len(data))
-            split_data = data[train_end:val_end] if split == 'val' else data[val_end:]
-
-            max_start = len(split_data) - total_len
-            if max_start <= 0:
-                continue
-            window = self._safe_normalize(split_data[random.randint(0, max_start):][: total_len])
-            contexts.append(window[:self.config.input_length].reshape(-1, self.num_features))
-            targets.append(window[self.config.input_length:].flatten())
-            collected += 1
-
-        return np.array(contexts, dtype=np.float32), np.array(targets, dtype=np.float32)
-
-    def _test_generator_raw(self) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
-        """Fresh test samples for visualization."""
-        total_len = self.config.input_length + self.config.prediction_length
-        viz_patterns = self.selected_patterns.copy()
-        random.shuffle(viz_patterns)
-
-        for name in viz_patterns:
-            data = self.ts_generator.generate_task_data(name)
-            if len(data) < total_len or not np.isfinite(data).all():
-                continue
-            test_data = data[int((self.config.train_ratio + self.config.val_ratio) * len(data)):]
-            if len(test_data) < total_len:
-                continue
-            start = random.randint(0, len(test_data) - total_len)
-            window = self._safe_normalize(test_data[start:start + total_len])
-            yield (
-                window[:self.config.input_length].reshape(-1, self.num_features),
-                window[self.config.input_length:].flatten()
-            )
-
-    def prepare_datasets(self) -> Dict[str, Any]:
-        """Create tf.data.Datasets for train/val/test."""
-        output_sig = (
-            tf.TensorSpec(shape=(self.config.input_length, self.num_features), dtype=tf.float32),
-            tf.TensorSpec(shape=(self.config.prediction_length,), dtype=tf.float32)
+        super().__init__(
+            config,
+            generator,
+            selected_patterns,
+            pattern_to_category=pattern_to_category,
+            context_len=config.input_length,
+            horizon_len=config.prediction_length,
+            num_features=num_features,
+            normalize=False,
         )
-        train_ds = tf.data.Dataset.from_generator(
-            self._training_generator, output_signature=output_sig
-        ).batch(self.config.batch_size).prefetch(tf.data.AUTOTUNE)
 
-        val_steps = max(50, len(self.selected_patterns))
-        test_steps = max(20, len(self.selected_patterns))
+    def _make_sample(self, window: np.ndarray, pattern_name: str) -> Tuple[np.ndarray, np.ndarray]:
+        ctx = self.context_len
+        x = window[:ctx].reshape(-1, self.num_features).astype(np.float32)
+        y = window[ctx:].flatten().astype(np.float32)
+        return x, y
 
-        val_x, val_y = self._generate_fixed_dataset('val', val_steps * self.config.batch_size)
-        val_ds = tf.data.Dataset.from_tensor_slices((val_x, val_y)).batch(
-            self.config.batch_size).cache().prefetch(tf.data.AUTOTUNE)
-
-        test_x, test_y = self._generate_fixed_dataset('test', test_steps * self.config.batch_size)
-        test_ds = tf.data.Dataset.from_tensor_slices((test_x, test_y)).batch(
-            self.config.batch_size).cache().prefetch(tf.data.AUTOTUNE)
-
-        return {
-            'train_ds': train_ds, 'val_ds': val_ds, 'test_ds': test_ds,
-            'validation_steps': val_steps, 'test_steps': test_steps
-        }
+    @property
+    def output_signature(self) -> Tuple[Any, Any]:
+        return (
+            tf.TensorSpec(shape=(self.context_len, self.num_features), dtype=tf.float32),
+            tf.TensorSpec(shape=(self.horizon_len,), dtype=tf.float32),
+        )
 
 
 class TiRexPerformanceCallback(keras.callbacks.Callback):
