@@ -413,17 +413,21 @@ def main() -> None:
         n_samples=10000, random_seed=42, default_noise_level=0.1
     )
 
+    # Preserve nbeats's original hard-exit teardown (os._exit(0)): a deliberate
+    # force-exit that skips Python/atexit cleanup to avoid TF prefetch-thread
+    # hangs on shutdown. Do NOT normalize to sys.exit/finally (per-script choice,
+    # not consolidatable duplication). See plan_2026-06-09_a3c7304c/decisions.md D-008.
     try:
         trainer = NBeatsTrainer(config, generator_config)
         results = trainer.run_experiment()
         logger.info(f"Completed. Results: {results['results_dir']}")
-    except Exception as e:
-        logger.error(f"Failed: {e}", exc_info=True)
-        sys.exit(1)
-    finally:
         keras.backend.clear_session()
         sys.stdout.flush()
         sys.stderr.flush()
+    except Exception as e:
+        logger.error(f"Failed: {e}", exc_info=True)
+
+    os._exit(0)
 
 
 if __name__ == "__main__":
