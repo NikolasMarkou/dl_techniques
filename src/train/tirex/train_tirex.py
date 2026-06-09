@@ -14,13 +14,10 @@ References:
 
 import os
 import sys
-import json
 import math
-import random
 import argparse
-from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Any, Dict, Generator, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import keras
 import matplotlib
@@ -28,29 +25,28 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
-import tensorflow as tf
 
 from train.common import (
     setup_gpu,
     create_callbacks as create_common_callbacks,
-    generate_training_curves,
     set_seeds,
-    json_numpy_default,
     create_learning_rate_schedule,
     BaseTimeSeriesTrainingConfig,
     WindowedTimeSeriesProcessor,
+    TimeSeriesPerformanceCallback,
+    BaseTimeSeriesTrainer,
+    create_ts_argument_parser,
+    _prepare_viz_data_from_processor,
 )
 from dl_techniques.utils.logger import logger
+from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.losses.quantile_loss import QuantileLoss
 from dl_techniques.models.tirex.model import create_tirex_by_variant, TiRexCore
 from dl_techniques.models.tirex.model_extended import create_tirex_extended, TiRexExtended
 from dl_techniques.datasets.time_series import (
     TimeSeriesGenerator,
     TimeSeriesGeneratorConfig,
-    NormalizationMethod,
 )
-from dl_techniques.analyzer import AnalysisConfig
-from dl_techniques.callbacks.analyzer_callback import EpochAnalyzerCallback
 
 plt.style.use('default')
 sns.set_palette("husl")
@@ -137,68 +133,41 @@ class TiRexDataProcessor(WindowedTimeSeriesProcessor):
 
     @property
     def output_signature(self) -> Tuple[Any, Any]:
+        import tensorflow as tf
         return (
             tf.TensorSpec(shape=(self.context_len, self.num_features), dtype=tf.float32),
             tf.TensorSpec(shape=(self.horizon_len,), dtype=tf.float32),
         )
 
 
-class TiRexPerformanceCallback(keras.callbacks.Callback):
-    """Tracks and visualizes TiRex quantile forecast performance."""
+class TiRexPerformanceCallback(TimeSeriesPerformanceCallback):
+    """Tracks and visualizes TiRex quantile forecast performance.
+
+    Thin subclass of :class:`TimeSeriesPerformanceCallback`. The base owns the
+    scaffolding (``__init__`` + makedirs, ``loss``/``val_loss`` accumulation, the
+    ``visualize_every_n_epochs`` gate, learning-curve delegation). TiRex keeps
+    only the three model-specific pieces: viz-data prep from its processor, the
+    ``mae_median``/``val_mae_median``/``lr`` extra-history tracking, and the
+    3D-quantile prediction-plot body (``preds[i, :, q]``) rendered from a
+    ``model(x, training=False)`` inference call.
+    """
 
     def __init__(self, config: TiRexTrainingConfig, processor: TiRexDataProcessor,
                  save_dir: str, model_name: str = "tirex"):
-        super().__init__()
-        self.config = config
+        # processor must be set BEFORE super().__init__: the base ctor calls
+        # _prepare_viz_data() which reads self.processor.
         self.processor = processor
-        self.save_dir = save_dir
-        self.model_name = model_name
-        os.makedirs(self.save_dir, exist_ok=True)
-        self.viz_test_data = self._prepare_viz_data()
-        self.training_history: Dict[str, List[float]] = {
-            'loss': [], 'val_loss': [], 'mae_median': [], 'val_mae_median': [], 'lr': []
-        }
+        super().__init__(config, save_dir, model_name)
 
     def _prepare_viz_data(self) -> Tuple[np.ndarray, np.ndarray]:
-        viz_x, viz_y = [], []
-        for x, y in self.processor._test_generator_raw():
-            viz_x.append(x)
-            viz_y.append(y)
-            if len(viz_x) >= self.config.plot_top_k_patterns:
-                break
-        if not viz_x:
-            return np.array([]), np.array([])
-        return np.array(viz_x), np.array(viz_y)
+        return _prepare_viz_data_from_processor(self.processor, self.config.plot_top_k_patterns)
 
-    def on_epoch_end(self, epoch: int, logs: Optional[Dict] = None) -> None:
-        logs = logs or {}
-        self.training_history['loss'].append(logs.get('loss', 0))
-        self.training_history['val_loss'].append(logs.get('val_loss', 0))
-        self.training_history['mae_median'].append(logs.get('mae_of_median', 0))
-        self.training_history['val_mae_median'].append(logs.get('val_mae_of_median', 0))
+    def _extend_history(self, logs: dict) -> None:
+        self.training_history.setdefault('mae_median', []).append(logs.get('mae_of_median', 0))
+        self.training_history.setdefault('val_mae_median', []).append(logs.get('val_mae_of_median', 0))
+        self._track_lr(logs)
 
-        lr = float(keras.ops.convert_to_numpy(self.model.optimizer.learning_rate))
-        if hasattr(self.model.optimizer.learning_rate, '__call__'):
-            lr = float(keras.ops.convert_to_numpy(
-                self.model.optimizer.learning_rate(self.model.optimizer.iterations)
-            ))
-        self.training_history['lr'].append(lr)
-
-        if (epoch + 1) % self.config.visualize_every_n_epochs == 0:
-            logger.info(f"Visualizations for epoch {epoch + 1}")
-            if self.config.create_learning_curves:
-                self._plot_learning_curves(epoch)
-            if self.config.create_prediction_plots:
-                self._plot_prediction_samples(epoch)
-
-    def _plot_learning_curves(self, epoch: int) -> None:
-        generate_training_curves(
-            history=self.training_history,
-            results_dir=self.save_dir,
-            filename=f"learning_curves_epoch_{epoch + 1:03d}",
-        )
-
-    def _plot_prediction_samples(self, epoch: int) -> None:
+    def _plot_predictions(self, epoch: int) -> None:
         test_x, test_y = self.viz_test_data
         if len(test_x) == 0:
             return
@@ -240,53 +209,61 @@ class TiRexPerformanceCallback(keras.callbacks.Callback):
         plt.close()
 
 
-class TiRexTrainer:
-    """Orchestrates TiRex training with Quantile Loss."""
+class TiRexTrainer(BaseTimeSeriesTrainer):
+    """Orchestrates TiRex training with Quantile Loss.
 
-    def __init__(self, config: TiRexTrainingConfig,
-                 generator_config: TimeSeriesGeneratorConfig) -> None:
-        self.config = config
-        self.generator_config = generator_config
-        self.generator = TimeSeriesGenerator(generator_config)
+    Thin subclass of :class:`BaseTimeSeriesTrainer`. The base owns the skeleton
+    (``__init__`` generator/pattern setup, ``_select_patterns``,
+    ``_create_experiment_dir``, ``_train_model``, ``_save_results``,
+    ``_export_to_onnx``). TiRex overrides only the genuine divergences: the
+    processor, the model build (+compile), the performance callback, the
+    ``model_type`` results prefix, the ``patience=30``/``model_name="TiRex"``
+    callback set, and a minimal ``run_experiment`` to fold ``onnx_path`` into
+    ``results.json``.
+    """
 
-        self.all_patterns = self.generator.get_task_names()
-        self.pattern_categories = self.generator.get_task_categories()
-        self.pattern_to_category = {
-            task: cat
-            for cat in self.pattern_categories
-            for task in self.generator.get_tasks_by_category(cat)
-        }
-        self.selected_patterns = self._select_patterns()
-        self.processor = TiRexDataProcessor(
-            config, self.generator, self.selected_patterns, self.pattern_to_category
+    def _build_processor(self) -> TiRexDataProcessor:
+        return TiRexDataProcessor(
+            self.config, self.generator, self.selected_patterns,
+            self.pattern_to_category,
         )
-        self.model: Optional[Union[TiRexCore, TiRexExtended]] = None
-        self.exp_dir: Optional[str] = None
 
-    def _select_patterns(self) -> List[str]:
-        if self.config.target_categories:
-            candidates = {
-                p for c in self.config.target_categories
-                for p in self.generator.get_tasks_by_category(c)
-            }
-        else:
-            candidates = self.all_patterns
+    def _build_performance_callback(self, viz_dir: str) -> TiRexPerformanceCallback:
+        return TiRexPerformanceCallback(self.config, self.processor, viz_dir, "tirex")
 
-        selected: List[str] = []
-        cat_counts: Dict[str, int] = {}
-        for pattern in sorted(candidates):
-            cat = self.pattern_to_category.get(pattern)
-            if cat and cat_counts.get(cat, 0) < self.config.max_patterns_per_category:
-                selected.append(pattern)
-                cat_counts[cat] = cat_counts.get(cat, 0) + 1
+    def _build_results_prefix(self) -> str:
+        return f"{self.config.experiment_name}_{self.config.model_type}"
 
-        if self.config.max_patterns and len(selected) > self.config.max_patterns:
-            selected = random.sample(selected, self.config.max_patterns)
+    def _make_callbacks(self, exp_dir: str) -> List:
+        """Override: TiRex uses ``patience=30`` / ``model_name="TiRex"``.
 
-        logger.info(f"Selected {len(selected)} patterns for training")
-        return selected
+        The base default is ``patience=25`` / ``model_name=experiment_name``;
+        TiRex's original ``create_common_callbacks`` call used 30 / "TiRex", so
+        this overrides to preserve that exact behavior (same sanctioned hook
+        prism uses). Everything else matches the base body.
+        """
+        viz_dir = os.path.join(exp_dir, 'visualizations')
+        os.makedirs(viz_dir, exist_ok=True)
 
-    def create_model(self) -> Union[TiRexCore, TiRexExtended]:
+        callbacks, _ = create_common_callbacks(
+            model_name="TiRex",
+            results_dir_prefix=exp_dir,
+            monitor="val_loss",
+            patience=30,
+            use_lr_schedule=self.config.use_warmup,
+            include_terminate_on_nan=True,
+            include_analyzer=self.config.perform_deep_analysis,
+            analyzer_config=AnalysisConfig(
+                analyze_weights=True, analyze_spectral=True,
+                analyze_calibration=False, analyze_information_flow=False,
+                analyze_training_dynamics=False, verbose=False),
+            analyzer_start_epoch=self.config.analysis_start_epoch,
+            analyzer_epoch_frequency=self.config.analysis_frequency,
+        )
+        callbacks.append(self._build_performance_callback(viz_dir))
+        return callbacks
+
+    def _build_model(self) -> Union[TiRexCore, TiRexExtended]:
         """Create and compile the TiRex model."""
         factory = create_tirex_by_variant if self.config.model_type == 'core' else create_tirex_extended
         logger.info(f"Creating TiRex{self.config.model_type.title()} ({self.config.variant})")
@@ -330,141 +307,74 @@ class TiRexTrainer:
         return model
 
     def run_experiment(self) -> Dict[str, Any]:
-        """Run the complete training experiment."""
+        """Base skeleton + TiRex's ONNX export folded into ``results.json``.
+
+        Overridden (not using the bare base ``run_experiment``) because TiRex's
+        original ``results.json`` carried a 5th ``onnx_path`` key. The base
+        ``_export_to_onnx`` (guarded by ``export_onnx`` + checkpoint existence)
+        runs here and its path is passed via ``extra_fields`` so the base
+        ``_save_results`` writes the same key set the original did.
+        """
         logger.info("Starting TiRex training experiment")
-        prefix = self._build_results_prefix()
+        self.exp_dir = self._create_experiment_dir()
+        logger.info(f"Results: {self.exp_dir}")
 
         data_pipeline = self.processor.prepare_datasets()
-        self.model = self.create_model()
+        self.model = self._build_model()
         logger.info(f"Model params: {self.model.count_params():,}")
         self.model.summary(print_fn=logger.info)
 
-        training_results = self._train_model(data_pipeline, prefix)
+        training_results = self._train_model(data_pipeline, self.exp_dir)
+
+        best_model_path = os.path.join(self.exp_dir, 'best_model.keras')
+        onnx_path = self._export_to_onnx(best_model_path, self.exp_dir)
+
         if self.config.save_results:
-            self._save_results(training_results, self.exp_dir)
+            self._save_results(training_results, self.exp_dir,
+                               extra_fields={'onnx_path': onnx_path})
 
         return {
             'config': self.config, 'experiment_dir': self.exp_dir,
             'training_results': training_results, 'results_dir': self.exp_dir
         }
 
-    def _build_results_prefix(self) -> str:
-        return f"{self.config.experiment_name}_{self.config.model_type}"
 
-    def _train_model(self, data_pipeline: Dict, prefix: str) -> Dict[str, Any]:
-        callbacks, results_dir = create_common_callbacks(
-            model_name="TiRex",
-            results_dir_prefix=prefix,
-            monitor="val_loss",
-            patience=30,
-            use_lr_schedule=self.config.use_warmup,
-            include_terminate_on_nan=True,
-            include_analyzer=self.config.perform_deep_analysis,
-            analyzer_config=AnalysisConfig(
-                analyze_weights=True, analyze_spectral=True,
-                analyze_calibration=False, analyze_information_flow=False,
-                analyze_training_dynamics=False, verbose=False),
-            analyzer_start_epoch=self.config.analysis_start_epoch,
-            analyzer_epoch_frequency=self.config.analysis_frequency,
-        )
-        self.exp_dir = results_dir
-        viz_dir = os.path.join(self.exp_dir, 'visualizations')
-        os.makedirs(viz_dir, exist_ok=True)
-        callbacks.append(TiRexPerformanceCallback(self.config, self.processor, viz_dir, "tirex"))
+def build_parser() -> argparse.ArgumentParser:
+    """Build the TiRex CLI parser on top of the shared TS argument parser.
 
-        history = self.model.fit(
-            data_pipeline['train_ds'],
-            validation_data=data_pipeline['val_ds'],
-            epochs=self.config.epochs,
-            steps_per_epoch=self.config.steps_per_epoch,
-            validation_steps=data_pipeline['validation_steps'],
-            callbacks=callbacks, verbose=1
-        )
+    Starts from :func:`create_ts_argument_parser` (the shared TS args:
+    ``--epochs``/``--batch_size``/``--steps_per_epoch``/``--learning_rate``/
+    warmup/analysis/``--gpu`` etc.), restores TiRex's own defaults for the args
+    whose default differs from the shared parser via ``set_defaults``
+    (experiment_name "tirex", max_patterns_per_category 100), then adds TiRex's
+    architecture-specific flags (model_type, variant, input/prediction lengths,
+    patch_size, ONNX).
+    """
+    parser = create_ts_argument_parser("TiRex Training Framework")
 
-        logger.info("Evaluating on test set")
-        test_metrics = self.model.evaluate(
-            data_pipeline['test_ds'], steps=data_pipeline['test_steps'],
-            verbose=1, return_dict=True
-        )
+    # Restore TiRex's per-arg defaults where they differ from the shared parser.
+    # Shared parser already matches TiRex on epochs(200)/batch_size(128)/
+    # steps_per_epoch(1000)/learning_rate(1e-4); only experiment_name and
+    # max_patterns_per_category differ.
+    parser.set_defaults(
+        experiment_name="tirex",
+        max_patterns_per_category=100,
+    )
 
-        best_model_path = os.path.join(self.exp_dir, 'best_model.keras')
-        onnx_path = self._export_to_onnx(best_model_path, self.exp_dir)
-
-        return {
-            'history': history.history,
-            'test_metrics': {k: float(v) for k, v in test_metrics.items()},
-            'final_epoch': len(history.history['loss']),
-            'onnx_path': onnx_path
-        }
-
-    def _save_results(self, results: Dict, exp_dir: str) -> None:
-        serializable = {
-            'history': results['history'],
-            'test_metrics': results['test_metrics'],
-            'final_epoch': results['final_epoch'],
-            'onnx_path': results.get('onnx_path'),
-            'config': self.config.__dict__
-        }
-        with open(os.path.join(exp_dir, 'results.json'), 'w') as f:
-            json.dump(serializable, f, indent=4, default=json_numpy_default)
-
-    def _export_to_onnx(self, model_path: str, exp_dir: str) -> Optional[str]:
-        """Export trained model to ONNX format."""
-        if not self.config.export_onnx:
-            return None
-
-        onnx_path = os.path.join(exp_dir, 'model.onnx')
-        try:
-            logger.info(f"Exporting to ONNX: {onnx_path}")
-            best_model = keras.saving.load_model(model_path, compile=False)
-            input_signature = [
-                keras.InputSpec(
-                    shape=(None, self.config.input_length, self.processor.num_features),
-                    dtype="float32"
-                )
-            ]
-            best_model.export(
-                onnx_path, format="onnx",
-                input_signature=input_signature,
-                opset_version=self.config.onnx_opset_version, verbose=True
-            )
-            logger.info(f"ONNX export successful: {onnx_path}")
-            return onnx_path
-        except Exception as e:
-            logger.error(f"ONNX export failed: {e}", exc_info=True)
-            return None
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="TiRex Training Framework")
-    parser.add_argument("--experiment_name", type=str, default="tirex")
+    # TiRex architecture-specific arguments.
     parser.add_argument("--model_type", type=str, default="core", choices=['core', 'extended'])
     parser.add_argument("--variant", type=str, default="small", choices=['tiny', 'small', 'medium', 'large'])
     parser.add_argument("--input_length", type=int, default=256)
     parser.add_argument("--prediction_length", type=int, default=24)
     parser.add_argument("--patch_size", type=int, default=4)
-    parser.add_argument("--epochs", type=int, default=200)
-    parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--steps_per_epoch", type=int, default=1000)
-    parser.add_argument("--learning_rate", type=float, default=1e-4)
-    parser.add_argument("--gradient_clip_norm", type=float, default=1.0)
-    parser.add_argument("--optimizer", type=str, default="adamw")
-    parser.add_argument("--no-warmup", dest="use_warmup", action="store_false")
-    parser.set_defaults(use_warmup=True)
-    parser.add_argument("--warmup_steps", type=int, default=1000)
-    parser.add_argument("--warmup_start_lr", type=float, default=1e-6)
-    parser.add_argument("--max_patterns_per_category", type=int, default=100)
-    parser.add_argument("--visualize_every_n_epochs", type=int, default=5)
-    parser.add_argument("--plot_top_k_patterns", type=int, default=12)
-    parser.add_argument("--no-deep-analysis", dest="perform_deep_analysis", action="store_false")
-    parser.set_defaults(perform_deep_analysis=True)
-    parser.add_argument("--analysis_frequency", type=int, default=10)
-    parser.add_argument("--analysis_start_epoch", type=int, default=1)
     parser.add_argument("--no-onnx", dest="export_onnx", action="store_false")
     parser.set_defaults(export_onnx=False)
     parser.add_argument("--onnx_opset_version", type=int, default=17)
-    parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
-    return parser.parse_args()
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    return build_parser().parse_args()
 
 
 def main() -> None:
