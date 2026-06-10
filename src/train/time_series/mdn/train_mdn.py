@@ -37,8 +37,15 @@ from train.common import (
     BaseTimeSeriesTrainer,
     create_ts_argument_parser,
 )
+from train.common.timeseries import compute_post_hoc_forecast_metrics
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.time_series.mdn import MDNModel
+from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
+from dl_techniques.layers.statistics.mdn_layer import (
+    get_point_estimate,
+    get_uncertainty,
+    get_prediction_intervals,
+)
 from dl_techniques.datasets.time_series import (
     TimeSeriesGenerator,
     TimeSeriesGeneratorConfig,
@@ -110,8 +117,14 @@ class MDNTrainingConfig(BaseTimeSeriesTrainingConfig):
 
 
 @keras.saving.register_keras_serializable()
-class MultiTaskMDNModel(keras.Model):
-    """Multi-task wrapper around MDNModel with task embeddings, Conv1D, and attention."""
+class MultiTaskMDNModel(keras.Model, ForecastMixin):
+    """Multi-task wrapper around MDNModel with task embeddings, Conv1D, and attention.
+
+    Joins the unified :class:`ForecastMixin` contract via :meth:`_forecast`, which
+    converts the Gaussian-mixture output into a :class:`Forecast` (point estimate +
+    a symmetric Gaussian prediction interval). ``ForecastMixin`` carries NO instance
+    state, so ``get_config`` / round-trip behaviour is unaffected (invariant I3).
+    """
 
     def __init__(self, num_tasks: int, config: MDNTrainingConfig, **kwargs):
         super().__init__(**kwargs)
@@ -169,6 +182,55 @@ class MultiTaskMDNModel(keras.Model):
 
     def get_mdn_layer(self):
         return self.mdn_core.mdn_layer
+
+    def _forecast(self, x, confidence_level: Optional[float] = None, **kwargs) -> Forecast:
+        """Produce a :class:`Forecast` from the Gaussian-mixture output.
+
+        ``x`` is the FULL 2-tuple ``(sequence, task_ids)`` this model consumes; it
+        is passed straight through to the MDN analysis helpers, which call
+        ``self.predict(x)`` internally so Keras routes the tuple through
+        :meth:`call` (edge case E2). output_dim is 1, so the point estimate is
+        ``[B, 1]`` and is reshaped to the contract ``[B, H=1, F=1]``; the symmetric
+        Gaussian interval (``mu +/- z*sigma``) is packed as ``quantiles``
+        ``[B, 1, 1, 2]`` with ``quantile_levels = [(1-cl)/2, 1-(1-cl)/2]`` (low
+        first, high last) — exactly the two levels CoverageMetric / SharpnessMetric
+        consume for the widest central interval. No median level is included: a
+        third level is unnecessary for the point + interval metrics and would only
+        add a redundant plane.
+
+        Args:
+            x: Model input 2-tuple ``(sequence, task_ids)``.
+            confidence_level: Central-interval width; defaults to
+                ``self.config.confidence_level`` (0.95).
+
+        Returns:
+            A :class:`Forecast` with ``point`` ``[B, 1, 1]`` and ``quantiles``
+            ``[B, 1, 1, 2]``.
+        """
+        cl = confidence_level if confidence_level is not None else getattr(
+            getattr(self, 'config', None), 'confidence_level', 0.95)
+
+        mdn_layer = self.get_mdn_layer()
+
+        point = np.asarray(get_point_estimate(self, x, mdn_layer))      # [B, 1]
+        total_variance, _ = get_uncertainty(self, x, mdn_layer, point)  # [B, 1]
+        lower, upper = get_prediction_intervals(point, total_variance, confidence_level=cl)
+
+        # [B, 1] -> [B, H=1, F=1]
+        point_bhf = point.reshape(point.shape[0], 1, point.shape[-1])
+        lower_bhf = np.asarray(lower).reshape(point_bhf.shape)
+        upper_bhf = np.asarray(upper).reshape(point_bhf.shape)
+
+        # quantiles [B, H=1, F=1, Q=2]; last axis ordered low, high.
+        quantiles = np.stack([lower_bhf, upper_bhf], axis=-1).astype(np.float32)
+        alpha = 1.0 - cl
+        quantile_levels = [alpha / 2.0, 1.0 - alpha / 2.0]
+
+        return Forecast(
+            point=point_bhf.astype(np.float32),
+            quantiles=quantiles,
+            quantile_levels=quantile_levels,
+        )
 
 
 class MDNDataProcessor(WindowedTimeSeriesProcessor):
@@ -454,6 +516,55 @@ class MDNTrainer(BaseTimeSeriesTrainer):
             'training_results': training_results, 'results_dir': self.exp_dir
         }
 
+    def _compute_post_hoc_metrics(self, data_pipeline: Dict[str, Any]) -> Dict[str, float]:
+        """Override: re-assemble the FULL 2-tuple test input for the post-hoc block.
+
+        Keeps the base contract's ADDITIVE / NON-FATAL / ForecastMixin-GATED
+        structure (invariant I1): a new ``post_hoc_metrics`` key only, wrapped in
+        try/except (warning + ``{}`` on failure), and run only when the model is a
+        :class:`ForecastMixin`.
+        """
+        # DECISION plan_2026-06-10_31eed970/D-003: MDN's MultiTaskMDNModel consumes
+        # a 2-tuple (sequence, task_ids) input, but the base extractor
+        # (timeseries.py:1050) strips to inputs[0] -- which would break
+        # MultiTaskMDNModel.call (it unpacks `sequence_input, task_input = inputs`).
+        # So we override LOCALLY to re-assemble the full tuple and pass it through.
+        # Do NOT delete this override / fall back to the base extractor -- the base
+        # only knows single-input models. Generalizing the base extractor to
+        # multi-input models was deliberately DEFERRED (only mdn needs it today;
+        # use-before-reuse). See decisions.md D-003.
+        try:
+            test_data_raw = data_pipeline.get('test_data_raw')
+            if test_data_raw is None:
+                return {}
+
+            if not isinstance(self.model, ForecastMixin):
+                logger.info(
+                    "post_hoc_metrics: model is not a ForecastMixin; skipping")
+                return {}
+
+            # test_data_raw == ((seq_stack [B,W,1], task_stack [B,1]), y_stack).
+            # Pass the FULL 2-tuple to predict_forecast (NOT inputs[0]); the seq
+            # context is the backcast; y_stack is y_true.
+            full_inputs, targets = test_data_raw
+            backcast = full_inputs[0] if isinstance(full_inputs, (tuple, list)) else full_inputs
+            y_true = targets[0] if isinstance(targets, (tuple, list)) else targets
+
+            fc = self.model.predict_forecast(full_inputs)
+            quantiles = fc.quantiles if fc.has_quantiles() else None
+            quantile_levels = fc.quantile_levels if fc.has_quantiles() else None
+
+            return compute_post_hoc_forecast_metrics(
+                np.asarray(y_true),
+                np.asarray(fc.point),
+                backcast=np.asarray(backcast),
+                quantiles=None if quantiles is None else np.asarray(quantiles),
+                quantile_levels=quantile_levels,
+            )
+        except Exception as e:
+            logger.warning(f"post_hoc_metrics computation failed: {e}")
+            return {}
+
     def _save_results(self, results: Dict[str, Any], exp_dir: str,
                       extra_fields: Optional[Dict[str, Any]] = None) -> None:
         # mdn's original results.json key set is {history, test_metrics, config}
@@ -463,6 +574,9 @@ class MDNTrainer(BaseTimeSeriesTrainer):
         serializable = {
             'history': results['history'],
             'test_metrics': {k: float(v) for k, v in results['test_metrics'].items()},
+            # Additive (I1/D-001): a NEW key alongside test_metrics, never a
+            # replacement. json_numpy_default handles the plain floats.
+            'post_hoc_metrics': results.get('post_hoc_metrics', {}),
             # Schema parity (plan_2026-06-09_49c73926 N1): include final_epoch like the
             # other TS trainers. Robust fallback to len(history.loss) if absent.
             'final_epoch': results.get('final_epoch', len(results['history']['loss'])),
