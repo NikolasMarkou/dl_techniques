@@ -61,6 +61,7 @@ from typing import Optional, Union, List, Any, Tuple, Dict, Literal
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.ffn.residual_block import ResidualBlock
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding1D
@@ -80,7 +81,7 @@ DEFAULT_QUANTILES: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
 
 @keras.saving.register_keras_serializable()
-class TiRexCore(keras.Model):
+class TiRexCore(keras.Model, ForecastMixin):
     """
     TiRex Core Model for Time Series Forecasting.
 
@@ -508,6 +509,39 @@ class TiRexCore(keras.Model):
         mean_preds = raw_predictions[:, :, median_idx]
 
         return quantile_preds, mean_preds
+
+    def _forecast(
+            self,
+            x: Union[np.ndarray, keras.utils.PyDataset],
+            quantile_levels: Optional[List[float]] = None,
+            **kwargs: Any
+    ) -> Forecast:
+        """Produce a unified :class:`Forecast` by reusing ``predict_quantiles``.
+
+        This is the ``ForecastMixin`` hook. It does NOT reimplement any quantile
+        mapping; it delegates to the model's existing ``predict_quantiles`` and
+        packs the result into the shared contract.
+
+        Args:
+            x: Context window, shape ``[B, input_length, F]`` (or a dataset).
+            quantile_levels: Levels to extract; defaults to the model's
+                configured ``self.quantile_levels``.
+            **kwargs: Forwarded to ``predict_quantiles`` (e.g. ``batch_size``,
+                ``verbose``).
+
+        Returns:
+            A :class:`Forecast` with ``point`` shape ``[B, H]`` and ``quantiles``
+            shape ``[B, H, Q]``. TiRex flattens the target feature axis, so the
+            shapes are intentionally passed through unchanged (no fabricated
+            ``F`` axis); downstream metrics/helpers handle both ranks.
+        """
+        levels = quantile_levels if quantile_levels is not None else self.quantile_levels
+        quantile_preds, point_preds = self.predict_quantiles(x, levels, **kwargs)
+        return Forecast(
+            point=np.asarray(point_preds),
+            quantiles=np.asarray(quantile_preds),
+            quantile_levels=list(levels),
+        )
 
     @classmethod
     def from_variant(

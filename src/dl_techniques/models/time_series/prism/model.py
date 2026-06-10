@@ -74,6 +74,7 @@ from typing import Dict, Any, Optional, Union, List, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.time_series.prism_blocks import PRISMLayer
 from dl_techniques.layers.time_series.quantile_head_fixed_io import QuantileHead
@@ -85,7 +86,7 @@ DEFAULT_QUANTILES: List[float] = [0.1, 0.5, 0.9]
 
 
 @keras.saving.register_keras_serializable()
-class PRISMModel(keras.Model):
+class PRISMModel(keras.Model, ForecastMixin):
     """
     Complete PRISM model for time series forecasting.
 
@@ -509,6 +510,48 @@ class PRISMModel(keras.Model):
         mean_preds = raw_predictions[:, :, :, median_idx]
 
         return quantile_preds, mean_preds
+
+    def _forecast(
+            self,
+            x: Union[np.ndarray, keras.utils.PyDataset],
+            quantile_levels: Optional[List[float]] = None,
+            **kwargs: Any
+    ) -> Forecast:
+        """Produce a unified :class:`Forecast` reusing the model's predict paths.
+
+        This is the ``ForecastMixin`` hook. In quantile mode it delegates to
+        ``predict_quantiles`` (no quantile-mapping reimplementation); in point
+        mode it uses the model's normal point prediction path and emits
+        ``quantiles=None`` (never fabricate intervals for a point model).
+
+        Args:
+            x: Context window, shape ``[B, context_len, F]`` (or a dataset).
+            quantile_levels: Levels to extract in quantile mode; defaults to the
+                model's configured ``self.quantile_levels``. Ignored in point mode.
+            **kwargs: Forwarded to ``predict_quantiles``/``predict`` (e.g.
+                ``batch_size``, ``verbose``).
+
+        Returns:
+            A :class:`Forecast`. Quantile mode: ``point`` ``[B, H, F]`` and
+            ``quantiles`` ``[B, H, F, Q]``. Point mode: ``point`` ``[B, H, F]``
+            with ``quantiles=None`` and ``quantile_levels=None``.
+        """
+        if self.use_quantile_head:
+            levels = quantile_levels if quantile_levels is not None else self.quantile_levels
+            quantile_preds, point_preds = self.predict_quantiles(x, levels, **kwargs)
+            return Forecast(
+                point=np.asarray(point_preds),
+                quantiles=np.asarray(quantile_preds),
+                quantile_levels=list(levels),
+            )
+
+        # Point mode: normal point prediction path; never fabricate intervals.
+        point_preds = self.predict(x, **kwargs)
+        return Forecast(
+            point=np.asarray(point_preds),
+            quantiles=None,
+            quantile_levels=None,
+        )
 
     def compute_output_shape(
         self,
