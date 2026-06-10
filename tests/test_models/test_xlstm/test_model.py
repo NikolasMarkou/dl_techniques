@@ -25,7 +25,7 @@ import tensorflow as tf
 from typing import Dict, Any, List
 
 
-from dl_techniques.models.xlstm.model import xLSTM
+from dl_techniques.models.time_series.xlstm.model import xLSTM
 
 
 # =============================================================================
