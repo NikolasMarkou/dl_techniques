@@ -33,7 +33,7 @@ from dl_techniques.utils.logger import logger
 # Without these imports `keras.saving.load_model` cannot resolve
 # `AdaptiveEMATrainingWrapper` / `AdaptiveEMASlopeFilterModel` from the
 # `Custom>` namespace embedded in the .keras config.
-from dl_techniques.models.adaptive_ema import AdaptiveEMASlopeFilterModel  # noqa: F401
+from dl_techniques.models.time_series.adaptive_ema import AdaptiveEMASlopeFilterModel  # noqa: F401
 from train.adaptive_ema.train_adaptive_ema import AdaptiveEMATrainingWrapper  # noqa: F401
 
 

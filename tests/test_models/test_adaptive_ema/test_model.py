@@ -17,7 +17,7 @@ import keras
 from keras import ops
 import tensorflow as tf
 
-from dl_techniques.models.adaptive_ema import (
+from dl_techniques.models.time_series.adaptive_ema import (
     AdaptiveEMASlopeFilterModel,
     create_adaptive_ema_slope_filter,
 )
@@ -293,7 +293,7 @@ class TestAdaptiveEMASlopeFilterModel:
 
     def test_learnable_thresholds_warning(self, monkeypatch):
         """``__init__`` warns when only 2 scalars are trainable."""
-        from dl_techniques.models.adaptive_ema import model as model_mod
+        from dl_techniques.models.time_series.adaptive_ema import model as model_mod
 
         captured = []
 
@@ -316,7 +316,7 @@ class TestAdaptiveEMASlopeFilterModel:
 
     def test_no_warning_when_head_configured(self, monkeypatch):
         """No I-19 warning when learnable_thresholds=True + quantile head set."""
-        from dl_techniques.models.adaptive_ema import model as model_mod
+        from dl_techniques.models.time_series.adaptive_ema import model as model_mod
 
         captured = []
         monkeypatch.setattr(
