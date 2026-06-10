@@ -44,6 +44,7 @@ from train.common import (
     create_ts_argument_parser,
     _prepare_viz_data_from_processor,
 )
+from train.common.timeseries import _plot_ts_forecast
 from dl_techniques.utils.logger import logger
 from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.models.time_series.prism.model import PRISMModel
@@ -209,28 +210,31 @@ class PRISMPerformanceCallback(TimeSeriesPerformanceCallback):
             low_idx, high_idx = 0, -1
 
         for i in range(num_samples):
-            ax = axes[i]
-            ctx_data = context[i, :, 0].flatten()
-            tgt_data = target[i, :, 0].flatten()
-            x_ctx = np.arange(len(ctx_data))
-            x_tgt = np.arange(len(ctx_data), len(ctx_data) + len(tgt_data))
-
-            ax.plot(x_ctx, ctx_data, label='Context', color='blue')
-            ax.plot(x_tgt, tgt_data, label='Target', color='green', linestyle='--')
-
             if self.config.use_quantile_head:
-                pred_median = predictions[i, :, 0, median_idx].flatten()
-                pred_low = predictions[i, :, 0, low_idx].flatten()
-                pred_high = predictions[i, :, 0, high_idx].flatten()
-                ax.plot(x_tgt, pred_median, label='Median', color='red', alpha=0.9)
-                ax.fill_between(x_tgt, pred_low, pred_high, color='red', alpha=0.2,
-                                label=f'{quantiles[low_idx]}-{quantiles[high_idx]} Q')
+                _plot_ts_forecast(
+                    axes[i],
+                    context[i, :, 0].flatten(),
+                    target[i, :, 0].flatten(),
+                    predictions[i, :, 0, median_idx].flatten(),
+                    lower=predictions[i, :, 0, low_idx].flatten(),
+                    upper=predictions[i, :, 0, high_idx].flatten(),
+                    title=f'Sample {i}',
+                    context_label='Context',
+                    target_label='Target',
+                    point_label='Median',
+                    band_label=f'{quantiles[low_idx]}-{quantiles[high_idx]} Q',
+                )
             else:
-                ax.plot(x_tgt, predictions[i, :, 0].flatten(), label='Pred', color='red', alpha=0.7)
-
-            if i == 0:
-                ax.legend(loc='upper left', fontsize='small')
-            ax.set_title(f'Sample {i}')
+                _plot_ts_forecast(
+                    axes[i],
+                    context[i, :, 0].flatten(),
+                    target[i, :, 0].flatten(),
+                    predictions[i, :, 0].flatten(),
+                    title=f'Sample {i}',
+                    context_label='Context',
+                    target_label='Target',
+                    point_label='Pred',
+                )
 
         for j in range(num_samples, len(axes)):
             axes[j].axis('off')

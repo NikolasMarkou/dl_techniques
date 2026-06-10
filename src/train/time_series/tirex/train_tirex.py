@@ -16,7 +16,7 @@ import os
 import sys
 import math
 import argparse
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import keras
@@ -38,6 +38,7 @@ from train.common import (
     create_ts_argument_parser,
     _prepare_viz_data_from_processor,
 )
+from train.common.timeseries import _plot_ts_forecast
 from dl_techniques.utils.logger import logger
 from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.losses.quantile_loss import QuantileLoss
@@ -73,9 +74,9 @@ class TiRexTrainingConfig(BaseTimeSeriesTrainingConfig):
     variant: str = "small"  # 'tiny', 'small', 'medium', 'large'
     patch_size: int = 12
     dropout_rate: float = 0.1
-    quantile_levels: List[float] = field(
-        default_factory=lambda: [0.1, 0.25, 0.5, 0.75, 0.9]
-    )
+    # quantile_levels consumed from BaseTimeSeriesTrainingConfig (promoted in
+    # step-6); the prior local override was identical to the base default
+    # ([0.1, 0.25, 0.5, 0.75, 0.9]) so it is dropped (deliverable D-consume).
 
     # TiRex-specific pattern selection
     min_data_length: int = 2000
@@ -186,19 +187,19 @@ class TiRexPerformanceCallback(TimeSeriesPerformanceCallback):
         axes = axes.flatten()
 
         for i in range(num_plots):
-            ax = axes[i]
-            input_x = np.arange(-self.config.input_length, 0)
-            pred_x = np.arange(0, self.config.prediction_length)
-
-            ax.plot(input_x, test_x[i].flatten(), label='Input', color='blue', alpha=0.7)
-            ax.plot(pred_x, test_y[i].flatten(), label='True', color='green', linewidth=2)
-            ax.plot(pred_x, preds[i, :, median_idx], label='Median', color='red', linestyle='--')
-            ax.fill_between(pred_x, preds[i, :, low_idx], preds[i, :, high_idx],
-                            color='red', alpha=0.2, label=f'{quantiles[low_idx]}-{quantiles[high_idx]} Q')
-            ax.set_title(f'Sample {i + 1}')
-            if i == 0:
-                ax.legend(loc='upper left', fontsize='small')
-            ax.grid(True, alpha=0.3)
+            _plot_ts_forecast(
+                axes[i],
+                test_x[i].flatten(),
+                test_y[i].flatten(),
+                preds[i, :, median_idx],
+                lower=preds[i, :, low_idx],
+                upper=preds[i, :, high_idx],
+                title=f'Sample {i + 1}',
+                context_label='Input',
+                target_label='True',
+                point_label='Median',
+                band_label=f'{quantiles[low_idx]}-{quantiles[high_idx]} Q',
+            )
 
         for j in range(num_plots, len(axes)):
             axes[j].axis('off')
