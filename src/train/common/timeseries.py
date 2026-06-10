@@ -115,6 +115,23 @@ class BaseTimeSeriesTrainingConfig:
     analysis_frequency: int = 10
     analysis_start_epoch: int = 1
 
+    # Probabilistic / quantile forecasting (shared so unified inference, metrics
+    # and viz can read them off any subclass). Defaults match the prior per-script
+    # behavior: quantile head OFF by default, monotonicity enforced when ON, and
+    # the 5-level quantile grid used by tirex.
+    quantile_levels: List[float] = field(
+        default_factory=lambda: [0.1, 0.25, 0.5, 0.75, 0.9]
+    )
+    use_quantile_head: bool = False
+    enforce_monotonicity: bool = True
+
+    # ONNX export (off by default; opset 17 matches the per-script defaults)
+    export_onnx: bool = False
+    onnx_opset_version: int = 17
+
+    # Reproducibility seed (consumed by set_seeds / generators)
+    seed: int = 42
+
     def __post_init__(self) -> None:
         total = self.train_ratio + self.val_ratio + self.test_ratio
         if not np.isclose(total, 1.0, atol=1e-6):

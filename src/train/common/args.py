@@ -108,6 +108,10 @@ def create_ts_argument_parser(description: str) -> argparse.ArgumentParser:
     # Experiment
     parser.add_argument("--experiment_name", type=str, default="timeseries",
                         help="Experiment name / results-dir prefix")
+    parser.add_argument("--result_dir", type=str, default="results",
+                        help="Root output directory")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed")
 
     # Training
     parser.add_argument("--epochs", type=int, default=200,
