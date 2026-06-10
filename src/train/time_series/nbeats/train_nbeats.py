@@ -37,8 +37,10 @@ from train.common import (
     create_ts_argument_parser,
     _prepare_viz_data_from_processor,
 )
+from train.common.timeseries import _plot_ts_forecast
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.mase_loss import MASELoss
+from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 from dl_techniques.models.time_series.nbeats import create_nbeats_model
 from dl_techniques.datasets.time_series import (
     TimeSeriesGenerator,
@@ -48,6 +50,46 @@ from dl_techniques.datasets.time_series import (
 
 plt.style.use('default')
 sns.set_palette("husl")
+
+
+# DECISION plan_2026-06-10_31eed970/D-002
+# Named ForecastMixin subclass REPLACING the previous anonymous
+# keras.Model(inputs=..., outputs=forecast_only, name="nbeats_forecast_only")
+# used on the reconstruction-off path. The anonymous functional model was NOT a
+# ForecastMixin, so self.model failed the isinstance gate in
+# BaseTimeSeriesTrainer._compute_post_hoc_metrics and emitted no post_hoc block.
+# DO NOT revert to the anonymous wrapper, and DO NOT instead override the
+# trainer-level base _compute_post_hoc_metrics (rejected Option A): that would
+# leak nbeats-specific branching into the shared, model-generic post_hoc path.
+# This subclass holds the inner NBeatsNet and returns ONLY its forecast head in
+# call(), reproducing the EXACT same inputs->forecast forward graph as the old
+# anonymous model (training numerics unchanged, A2), while making self.model
+# isinstance-pass in BOTH the recon-off and recon-on paths. See decisions.md D-002.
+@keras.saving.register_keras_serializable()
+class _NBeatsForecastOnly(keras.Model, ForecastMixin):
+    """Forecast-only wrapper around an inner ``NBeatsNet`` (reconstruction loss
+    disabled).
+
+    Exists so the trained ``self.model`` satisfies the ``ForecastMixin``
+    post_hoc isinstance gate on the ``reconstruction_loss_weight == 0`` path.
+    ``call`` returns only the forecast head of the inner model, exactly matching
+    the old anonymous ``keras.Model(inputs, outputs=forecast)`` forward graph.
+    """
+
+    def __init__(self, base_model: keras.Model, **kwargs: Any) -> None:
+        kwargs.setdefault("name", "nbeats_forecast_only")
+        super().__init__(**kwargs)
+        self.base_model = base_model
+
+    def call(self, inputs, training=None):
+        raw_output = self.base_model(inputs, training=training)
+        return raw_output[0] if isinstance(raw_output, (list, tuple)) else raw_output
+
+    def _forecast(self, x, **kwargs) -> Forecast:
+        preds = self.predict(x, verbose=0)
+        if isinstance(preds, (list, tuple)):
+            preds = preds[0]
+        return Forecast(point=np.asarray(preds), quantiles=None, quantile_levels=None)
 
 
 @dataclass
@@ -190,16 +232,20 @@ class PatternPerformanceCallback(TimeSeriesPerformanceCallback):
         axes = axes.flatten()
 
         for i in range(num_plots):
-            ax = axes[i]
-            bk_steps = np.arange(-self.config.backcast_length, 0)
-            fc_steps = np.arange(0, self.config.forecast_length)
-            ax.plot(bk_steps, test_x[i].flatten(), label='Backcast', color='blue', alpha=0.6)
-            ax.plot(fc_steps, test_y[i].flatten(), label='True Future', color='green')
-            ax.plot(fc_steps, predictions[i].flatten(), label='Pred Future', color='red', linestyle='--')
-            ax.set_title(f'Sample {i+1}')
-            if i == 0:
-                ax.legend()
-            ax.grid(True, alpha=0.3)
+            # Model-specific slicing stays local; the context/future split, line
+            # styles, and band convention are delegated to the shared renderer.
+            _plot_ts_forecast(
+                axes[i],
+                context=test_x[i],
+                target=test_y[i],
+                point=predictions[i],
+                lower=None,
+                upper=None,
+                title=f'Sample {i+1}',
+                context_label='Backcast',
+                target_label='True Future',
+                point_label='Pred Future',
+            )
 
         for j in range(num_plots, len(axes)):
             axes[j].axis('off')
@@ -353,10 +399,10 @@ class NBeatsTrainer(BaseTimeSeriesTrainer):
                 [keras.metrics.MeanAbsoluteError(name="residual_mae")]
             ]
         else:
-            inputs = keras.Input(shape=(self.config.backcast_length, self.config.input_dim))
-            raw_output = base_model(inputs)
-            forecast = raw_output[0] if isinstance(raw_output, (list, tuple)) else raw_output
-            model = keras.Model(inputs=inputs, outputs=forecast, name="nbeats_forecast_only")
+            # D-002: named ForecastMixin subclass (NOT an anonymous keras.Model)
+            # so self.model isinstance-passes the post_hoc gate; same forward
+            # graph (inner NBeatsNet forecast head). See _NBeatsForecastOnly.
+            model = _NBeatsForecastOnly(base_model)
             losses = (MASELoss(seasonal_periods=self.config.mase_seasonal_periods)
                       if self.config.primary_loss == 'mase_loss'
                       else keras.losses.get(self.config.primary_loss))
@@ -384,6 +430,7 @@ class NBeatsTrainer(BaseTimeSeriesTrainer):
             'history': results['history'],
             'test_metrics': results['test_metrics'],
             'final_epoch': results['final_epoch'],
+            'post_hoc_metrics': results.get('post_hoc_metrics', {}),
             'config': self.config.__dict__,
         }
         if extra_fields:
