@@ -24,6 +24,7 @@ Reference:
 import os
 import sys
 import json
+import math
 import argparse
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -40,6 +41,7 @@ from train.common import (
     setup_gpu,
     set_seeds,
     create_callbacks as create_common_callbacks,
+    create_learning_rate_schedule,
     BaseTimeSeriesTrainingConfig,
     WindowedTimeSeriesProcessor,
     TimeSeriesPerformanceCallback,
@@ -52,6 +54,7 @@ from train.common.timeseries import (
     _plot_ts_forecast,
 )
 from dl_techniques.utils.logger import logger
+from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.models.time_series.deepar.model import DeepAR
 from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 from dl_techniques.datasets.time_series import (
@@ -334,5 +337,413 @@ class DeepARDataProcessor(WindowedTimeSeriesProcessor):
 
 
 # ---------------------------------------------------------------------
-# Trainer / callbacks / parser / main: added by steps 5-11.
+# Performance callback (Step 7)
 # ---------------------------------------------------------------------
+
+
+class DeepARPerformanceCallback(TimeSeriesPerformanceCallback):
+    """Tracks and visualizes DeepAR probabilistic-forecast performance.
+
+    Thin subclass of :class:`TimeSeriesPerformanceCallback` (mirrors the tirex
+    callback). The base owns the scaffolding (``__init__`` + makedirs,
+    ``loss``/``val_loss`` accumulation, the ``visualize_every_n_epochs`` gate, the
+    non-fatal viz guard, learning-curve delegation). DeepAR keeps only the
+    model-specific pieces: viz-data prep from its processor, optional ``lr``
+    tracking, and the fan-chart prediction body rendered through the SAMPLING
+    forecast path (``predict_forecast``).
+
+    Each viz window has full length ``T = L + H``; the conditioning prefix
+    ``window[:L]`` and the synthetic ``full_covariates`` spanning ``L + H`` (I3)
+    are assembled into the prediction-mode dict, then the empirical median +
+    low/high quantile band are routed through :func:`_plot_ts_forecast`.
+    """
+
+    def __init__(self, config: DeepARTrainingConfig, processor: DeepARDataProcessor,
+                 save_dir: str, model_name: str = "deepar"):
+        # processor must be set BEFORE super().__init__: the base ctor calls
+        # _prepare_viz_data() which reads self.processor.
+        self.processor = processor
+        super().__init__(config, save_dir, model_name)
+
+    def _prepare_viz_data(self) -> Tuple[np.ndarray, np.ndarray]:
+        return _prepare_viz_data_from_processor(self.processor, self.config.plot_top_k_patterns)
+
+    def _extend_history(self, logs: dict) -> None:
+        self._track_lr(logs)
+
+    def _plot_predictions(self, epoch: int) -> None:
+        # viz_test_data holds full windows: x is the dict-mode sample's 'target'
+        # [T, D] (T = L + H); y is the unused zero placeholder. We split each
+        # window into conditioning [L, D] and true future [H, D].
+        test_x, _ = self.viz_test_data
+        if len(test_x) == 0:
+            return
+
+        L = self.config.input_length
+        H = self.config.prediction_length
+
+        windows = np.asarray(test_x)              # [B, T, D] (or [B, T])
+        if windows.ndim == 2:
+            windows = windows[..., np.newaxis]    # -> [B, T, 1]
+        B = windows.shape[0]
+
+        cond = windows[:, :L, :]                  # [B, L, D]
+        true_future = windows[:, L:L + H, :]      # [B, H, D]
+
+        # ONE covariate generator (step 4) spanning the WHOLE L+H horizon (I3).
+        full_cov = np.stack(
+            [self.processor._make_covariates(L + H)] * B, axis=0)  # [B, L+H, C]
+
+        pred_dict = {'conditioning_target': cond, 'full_covariates': full_cov}
+        fc = self.model.predict_forecast(pred_dict)
+
+        # Empirical low/high band from the trained quantile levels.
+        lower, upper = fc.interval(fc.quantile_levels[0], fc.quantile_levels[-1])
+
+        num_plots = min(B, self.config.plot_top_k_patterns)
+        n_cols, n_rows = 3, math.ceil(num_plots / 3)
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 4 * n_rows), squeeze=False)
+        axes = axes.flatten()
+
+        for i in range(num_plots):
+            _plot_ts_forecast(
+                axes[i],
+                cond[i, :, 0],
+                true_future[i, :, 0],
+                fc.point[i, :, 0],
+                lower=lower[i, :, 0],
+                upper=upper[i, :, 0],
+                title=f'Sample {i + 1}',
+                context_label='Input',
+                target_label='True',
+                point_label='Median',
+                band_label=f'{fc.quantile_levels[0]}-{fc.quantile_levels[-1]} Q',
+            )
+
+        for j in range(num_plots, len(axes)):
+            axes[j].axis('off')
+
+        plt.suptitle(f'DeepAR Probabilistic Forecasts (Epoch {epoch + 1})', fontsize=16)
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.save_dir, f'predictions_epoch_{epoch + 1:03d}.png'),
+                    dpi=150, bbox_inches='tight')
+        plt.close()
+
+
+# ---------------------------------------------------------------------
+# Trainer (Steps 5, 6, 8, 9, 10)
+# ---------------------------------------------------------------------
+
+
+class DeepARTrainer(BaseTimeSeriesTrainer):
+    """Orchestrates DeepAR probabilistic-forecast training.
+
+    Thin subclass of :class:`BaseTimeSeriesTrainer`. The base owns the skeleton
+    (``__init__`` generator/pattern setup, ``_select_patterns``,
+    ``_create_experiment_dir``, ``_train_model``, ``_save_results``,
+    ``_export_to_onnx``). DeepAR overrides only the genuine divergences: the
+    processor, the wrapped model build (+compile ``loss=None``, D-001), the
+    dict-input post-hoc metrics (I4), the performance callback, the
+    ``likelihood`` results prefix, the D-009 callback set, and a ``run_experiment``
+    that folds ``onnx_path`` into ``results.json``.
+    """
+
+    def _build_processor(self) -> DeepARDataProcessor:
+        return DeepARDataProcessor(
+            self.config, self.generator, self.selected_patterns,
+            self.pattern_to_category,
+        )
+
+    def _build_performance_callback(self, viz_dir: str) -> DeepARPerformanceCallback:
+        return DeepARPerformanceCallback(self.config, self.processor, viz_dir, "deepar")
+
+    def _build_results_prefix(self) -> str:
+        return f"{self.config.experiment_name}_{self.config.likelihood}"
+
+    def _build_model(self) -> DeepARTrainingWrapper:
+        """Construct DeepAR, wrap it for the add_loss NLL, and compile.
+
+        Returns the wrapper (the base assigns ``self.model = self._build_model()``,
+        matching tirex). The base is BUILT with a training-mode dummy dict forward
+        pass; the wrapper is then built by one call on the same dummy dict before
+        ``compile(loss=None)`` (D-001 / I2). NO ``jit_compile`` — DeepAR's eager
+        sampling path is not XLA-traceable.
+        """
+        logger.info(
+            f"Creating DeepAR (likelihood={self.config.likelihood}, "
+            f"layers={self.config.num_layers}, hidden={self.config.hidden_dim})")
+
+        base = DeepAR(
+            num_layers=self.config.num_layers,
+            hidden_dim=self.config.hidden_dim,
+            dropout=self.config.dropout,
+            recurrent_dropout=self.config.recurrent_dropout,
+            likelihood=self.config.likelihood,
+            target_dim=self.config.num_features,
+            num_samples=self.config.num_samples,
+            scale_epsilon=self.config.scale_epsilon,
+        )
+
+        # Build the base + wrapper with a training-mode dummy dict (T = L + H).
+        T = self.config.input_length + self.config.prediction_length
+        D = self.config.num_features
+        C = self.config.covariate_dim
+        dummy = {
+            'target': np.zeros((1, T, D), dtype=np.float32),
+            'covariates': np.zeros((1, T, C), dtype=np.float32),
+        }
+        base(dummy, training=False)
+
+        wrapper = DeepARTrainingWrapper(base)
+        wrapper(dummy, training=False)  # build the wrapper's weights/loss graph
+
+        if self.config.use_warmup:
+            lr_schedule = create_learning_rate_schedule(
+                self.config.learning_rate, 'cosine',
+                total_epochs=self.config.epochs,
+                steps_per_epoch=self.config.steps_per_epoch,
+                warmup_steps=self.config.warmup_steps,
+                warmup_start_lr=self.config.warmup_start_lr,
+            )
+            logger.info("Using Warmup + CosineDecay schedule")
+        else:
+            lr_schedule = self.config.learning_rate
+
+        optimizer = keras.optimizers.get(self.config.optimizer)
+        optimizer.learning_rate = lr_schedule
+        if self.config.gradient_clip_norm:
+            optimizer.clipnorm = self.config.gradient_clip_norm
+
+        # loss=None: the NLL is registered inside the wrapper via add_loss (D-001).
+        wrapper.compile(optimizer=optimizer, loss=None)
+        return wrapper
+
+    # DECISION plan_2026-06-10_7036cab1/D-001 -- the dict-input post-hoc assembly
+    # is the non-obvious resolution of I4: the base extractor does inputs[0]
+    # (timeseries.py:1050), incompatible with DeepAR's dict test_data_raw, AND it
+    # must build the PREDICTION-mode dict {conditioning_target, full_covariates}
+    # from the teacher-forced training window. Do NOT fall back to the base
+    # extractor and do NOT let full_covariates span only H -- it MUST span L+H
+    # (I3) or DeepAR silently mis-derives pred_len. One covariate generator
+    # (processor._make_covariates) is reused for train + this path. See D-001.
+    def _compute_post_hoc_metrics(self, data_pipeline: Dict[str, Any]) -> Dict[str, float]:
+        """Override: assemble DeepAR's prediction-mode dict from the test window.
+
+        Keeps the base contract's ADDITIVE / NON-FATAL / ForecastMixin-GATED
+        structure: a new ``post_hoc_metrics`` key only, wrapped in try/except
+        (warning + ``{}`` on failure), run only when the model is a
+        :class:`ForecastMixin`.
+        """
+        try:
+            test_data_raw = data_pipeline.get('test_data_raw')
+            if test_data_raw is None:
+                return {}
+
+            if not isinstance(self.model, ForecastMixin):
+                logger.info(
+                    "post_hoc_metrics: model is not a ForecastMixin; skipping")
+                return {}
+
+            # DeepAR processor emits ({'target':[T,D],'covariates':[T,C]}, zeros).
+            # After stacking, test_data_raw == (inputs_dict, zeros) where
+            # inputs_dict['target'] is [B, T, D] (T = L + H).
+            inputs, _ = test_data_raw
+            target_stack = np.asarray(inputs['target'])  # [B, T, D]
+            if target_stack.ndim == 2:
+                target_stack = target_stack[..., np.newaxis]
+
+            L = self.config.input_length
+            H = self.config.prediction_length
+            B = target_stack.shape[0]
+
+            cond = target_stack[:, :L, :]            # [B, L, D]
+            y_true = target_stack[:, L:L + H, :]     # [B, H, D]
+
+            full_cov = np.stack(
+                [self.processor._make_covariates(L + H)] * B, axis=0)  # [B, L+H, C]
+            assert full_cov.shape[1] == L + H, (
+                f"full_covariates must span L+H={L + H}, got {full_cov.shape[1]}")
+
+            fc = self.model.predict_forecast(
+                {'conditioning_target': cond, 'full_covariates': full_cov})
+
+            quantiles = fc.quantiles if fc.has_quantiles() else None
+            quantile_levels = fc.quantile_levels if fc.has_quantiles() else None
+
+            return compute_post_hoc_forecast_metrics(
+                np.asarray(y_true),
+                np.asarray(fc.point),
+                backcast=np.asarray(cond),
+                quantiles=None if quantiles is None else np.asarray(quantiles),
+                quantile_levels=quantile_levels,
+            )
+        except Exception as e:
+            logger.warning(f"post_hoc_metrics computation failed: {e}")
+            return {}
+
+    def _make_callbacks(self, exp_dir: Optional[str] = None) -> List:
+        """Override: DeepAR owns its experiment dir via the D-009 bare-prefix flow."""
+        # DECISION plan_2026-06-09_a3c7304c/D-009
+        # Pass a BARE prefix (self._build_results_prefix()) to
+        # create_common_callbacks and adopt its RETURNED results_dir as
+        # self.exp_dir -- matching the git-original tirex flow. Do NOT pass the
+        # pre-created full exp_dir path as results_dir_prefix and do NOT use the
+        # base _create_experiment_dir here: that built a SEPARATE doubly-nested
+        # results/results/... dir while the ONNX read path used the first dir ->
+        # checkpoint not found -> silent None when export_onnx=True.
+        # The exp_dir param is ignored on purpose. See decisions.md D-009.
+        callbacks, results_dir = create_common_callbacks(
+            model_name="DeepAR",
+            results_dir_prefix=self._build_results_prefix(),
+            monitor="val_loss",
+            patience=25,
+            use_lr_schedule=self.config.use_warmup,
+            include_terminate_on_nan=True,
+            include_analyzer=self.config.perform_deep_analysis,
+            analyzer_config=AnalysisConfig(
+                analyze_weights=True, analyze_spectral=True,
+                analyze_calibration=False, analyze_information_flow=False,
+                analyze_training_dynamics=False, verbose=False),
+            analyzer_start_epoch=self.config.analysis_start_epoch,
+            analyzer_epoch_frequency=self.config.analysis_frequency,
+        )
+        self.exp_dir = results_dir
+        viz_dir = os.path.join(self.exp_dir, 'visualizations')
+        os.makedirs(viz_dir, exist_ok=True)
+        callbacks.append(self._build_performance_callback(viz_dir))
+        return callbacks
+
+    def run_experiment(self) -> Dict[str, Any]:
+        """Base skeleton + DeepAR's ONNX export folded into ``results.json``.
+
+        ``self.exp_dir`` is resolved from ``create_common_callbacks``' returned
+        dir (inside ``_train_model`` -> ``_make_callbacks``, D-009) rather than
+        the base ``_create_experiment_dir``; passing ``exp_dir=None`` to
+        ``_train_model`` means no first dir is pre-built, so checkpoint, viz,
+        results.json, and the ONNX read path all live in one dir.
+        """
+        logger.info("Starting DeepAR training experiment")
+
+        data_pipeline = self.processor.prepare_datasets()
+        self.model = self._build_model()
+        logger.info(f"Model params: {self.model.count_params():,}")
+        self.model.summary(print_fn=logger.info)
+
+        # _train_model -> _make_callbacks sets self.exp_dir (D-009).
+        training_results = self._train_model(data_pipeline, exp_dir=None)
+        logger.info(f"Results: {self.exp_dir}")
+
+        best_model_path = os.path.join(self.exp_dir, 'best_model.keras')
+        onnx_path = self._export_to_onnx(best_model_path, self.exp_dir)
+
+        if self.config.save_results:
+            self._save_results(training_results, self.exp_dir,
+                               extra_fields={'onnx_path': onnx_path})
+
+        return {
+            'config': self.config, 'experiment_dir': self.exp_dir,
+            'training_results': training_results, 'results_dir': self.exp_dir
+        }
+
+
+# ---------------------------------------------------------------------
+# CLI parser + main (Step 11)
+# ---------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the DeepAR CLI parser on top of the shared TS argument parser.
+
+    Starts from :func:`create_ts_argument_parser` (shared TS args:
+    ``--epochs``/``--batch_size``/``--steps_per_epoch``/``--learning_rate``/
+    warmup/analysis/``--gpu``), restores DeepAR's own defaults via
+    ``set_defaults`` (``experiment_name="deepar"``, lighter cadence), then adds
+    DeepAR's architecture-specific flags. ``--conditioning_length`` maps to the
+    config's ``input_length``.
+    """
+    parser = create_ts_argument_parser("DeepAR Training")
+    parser.set_defaults(
+        experiment_name="deepar",
+        batch_size=64,
+        steps_per_epoch=200,
+    )
+
+    # DeepAR architecture-specific arguments.
+    parser.add_argument("--num_layers", type=int, default=3)
+    parser.add_argument("--hidden_dim", type=int, default=40)
+    parser.add_argument("--likelihood", type=str, default="gaussian",
+                        choices=['gaussian', 'negative_binomial'])
+    parser.add_argument("--num_samples", type=int, default=20)
+    parser.add_argument("--covariate_dim", type=int, default=4)
+    parser.add_argument("--conditioning_length", type=int, default=96)
+    parser.add_argument("--prediction_length", type=int, default=24)
+    parser.add_argument("--num_features", type=int, default=1)
+    parser.add_argument("--dropout", type=float, default=0.0)
+    parser.add_argument("--recurrent_dropout", type=float, default=0.0)
+    parser.add_argument("--scale_epsilon", type=float, default=1.0)
+    parser.add_argument("--no-onnx", dest="export_onnx", action="store_false")
+    parser.set_defaults(export_onnx=False)
+    parser.add_argument("--onnx_opset_version", type=int, default=17)
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    return build_parser().parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    set_seeds(getattr(args, 'seed', 42))
+    setup_gpu(args.gpu)
+
+    config = DeepARTrainingConfig(
+        experiment_name=args.experiment_name,
+        input_length=args.conditioning_length,
+        prediction_length=args.prediction_length,
+        num_features=args.num_features,
+        covariate_dim=args.covariate_dim,
+        num_layers=args.num_layers,
+        hidden_dim=args.hidden_dim,
+        dropout=args.dropout,
+        recurrent_dropout=args.recurrent_dropout,
+        likelihood=args.likelihood,
+        num_samples=args.num_samples,
+        scale_epsilon=args.scale_epsilon,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        steps_per_epoch=args.steps_per_epoch,
+        learning_rate=args.learning_rate,
+        use_warmup=args.use_warmup,
+        warmup_steps=args.warmup_steps,
+        warmup_start_lr=args.warmup_start_lr,
+        gradient_clip_norm=args.gradient_clip_norm,
+        optimizer=args.optimizer,
+        max_patterns_per_category=args.max_patterns_per_category,
+        visualize_every_n_epochs=args.visualize_every_n_epochs,
+        plot_top_k_patterns=args.plot_top_k_patterns,
+        perform_deep_analysis=args.perform_deep_analysis,
+        analysis_frequency=args.analysis_frequency,
+        analysis_start_epoch=args.analysis_start_epoch,
+        export_onnx=args.export_onnx,
+        onnx_opset_version=args.onnx_opset_version,
+    )
+
+    generator_config = TimeSeriesGeneratorConfig(
+        n_samples=10000, random_seed=42, default_noise_level=0.1
+    )
+
+    try:
+        trainer = DeepARTrainer(config, generator_config)
+        results = trainer.run_experiment()
+        logger.info(f"Completed. Results: {results['results_dir']}")
+    except Exception as e:
+        logger.error(f"Failed: {e}", exc_info=True)
+        sys.exit(1)
+    finally:
+        keras.backend.clear_session()
+        sys.stdout.flush()
+        sys.stderr.flush()
+
+
+if __name__ == "__main__":
+    main()
