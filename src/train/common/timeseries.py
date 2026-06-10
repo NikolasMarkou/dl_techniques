@@ -665,18 +665,37 @@ def compute_post_hoc_forecast_metrics(
     y_true = np.asarray(y_true, dtype=np.float32)
     point = np.asarray(point, dtype=np.float32)
 
+    # Rank reconciliation: models disagree on whether a univariate forecast
+    # carries a trailing feature axis (e.g. TiRex emits point [B, H] while the
+    # raw test target is [B, H, 1]). The two reuse paths want different ranks:
+    #   - calculate_comprehensive_metrics requires 3-D [B, H, F] (+ 3-D backcast,
+    #     which it indexes as backcast[:, -1:, :] for the naive baseline);
+    #   - CoverageMetric/SharpnessMetric compare y_true against a quantile slice
+    #     of rank (quantiles.ndim - 1).
+    # So we build a canonical 3-D view for point metrics and a separately-ranked
+    # view for the interval metrics, rather than forcing one global shape.
+    def _to_ndim(arr: np.ndarray, target_ndim: int) -> np.ndarray:
+        while arr.ndim > target_ndim and arr.shape[-1] == 1:
+            arr = np.squeeze(arr, axis=-1)
+        while arr.ndim < target_ndim:
+            arr = arr[..., None]
+        return arr
+
+    y_true_3d = _to_ndim(y_true, 3)
+    point_3d = _to_ndim(point, 3)
+
     if backcast is not None:
-        backcast = np.asarray(backcast, dtype=np.float32)
-        point_metrics = calculate_comprehensive_metrics(y_true, point, backcast)
+        backcast_3d = _to_ndim(np.asarray(backcast, dtype=np.float32), 3)
+        point_metrics = calculate_comprehensive_metrics(y_true_3d, point_3d, backcast_3d)
     else:
         # No backcast → only the backcast-independent metrics are well-defined.
         # Compute MAE/RMSE/sMAPE directly (mirrors calculate_comprehensive_metrics)
         # and skip rMAE/MASE rather than crash on a missing baseline window.
         eps = 1e-7
-        mae = float(np.mean(np.abs(y_true - point)))
-        rmse = float(np.sqrt(np.mean((y_true - point) ** 2)))
-        denom = np.abs(y_true) + np.abs(point) + eps
-        smape = float(200.0 * np.mean(np.abs(y_true - point) / denom))
+        mae = float(np.mean(np.abs(y_true_3d - point_3d)))
+        rmse = float(np.sqrt(np.mean((y_true_3d - point_3d) ** 2)))
+        denom = np.abs(y_true_3d) + np.abs(point_3d) + eps
+        smape = float(200.0 * np.mean(np.abs(y_true_3d - point_3d) / denom))
         point_metrics = {"MAE": mae, "RMSE": rmse, "sMAPE": smape}
 
     metrics.update({k: float(v) for k, v in point_metrics.items()})
@@ -687,10 +706,15 @@ def compute_post_hoc_forecast_metrics(
         low_index = int(np.argmin(levels))
         high_index = int(np.argmax(levels))
 
+        # A quantile slice has rank (quantiles.ndim - 1); align y_true to it so
+        # the inside/width comparison broadcasts (TiRex [B,H,Q]→slice [B,H] needs
+        # y_true [B,H]; PRISM [B,H,F,Q]→slice [B,H,F] needs y_true [B,H,F]).
+        y_true_cov = _to_ndim(y_true, quantiles.ndim - 1)
+
         cov = CoverageMetric(low_index=low_index, high_index=high_index)
-        cov.update_state(y_true, quantiles)
+        cov.update_state(y_true_cov, quantiles)
         shp = SharpnessMetric(low_index=low_index, high_index=high_index)
-        shp.update_state(y_true, quantiles)
+        shp.update_state(y_true_cov, quantiles)
 
         metrics["coverage"] = float(keras.ops.convert_to_numpy(cov.result()))
         metrics["sharpness"] = float(keras.ops.convert_to_numpy(shp.result()))
