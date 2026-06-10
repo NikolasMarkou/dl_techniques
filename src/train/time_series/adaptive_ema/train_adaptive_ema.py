@@ -28,7 +28,7 @@ import random
 import argparse
 from datetime import datetime
 from dataclasses import dataclass, field
-from typing import Any, Dict, Generator, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import keras
 import matplotlib
@@ -49,6 +49,9 @@ from train.common import (
     set_seeds,
     json_numpy_default,
     create_learning_rate_schedule,
+    BaseTimeSeriesTrainingConfig,
+    WindowedTimeSeriesProcessor,
+    _fill_nans,
 )
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.quantile_loss import QuantileLoss
@@ -56,6 +59,7 @@ from dl_techniques.models.time_series.adaptive_ema.model import AdaptiveEMASlope
 from dl_techniques.datasets.time_series import (
     TimeSeriesGenerator,
     TimeSeriesGeneratorConfig,
+    NormalizationMethod,
 )
 from dl_techniques.analyzer import AnalysisConfig
 
@@ -79,71 +83,67 @@ def set_random_seeds(seed: int = 42) -> None:
 # ---------------------------------------------------------------------
 
 @dataclass
-class AdaptiveEMATrainingConfig:
-    """Configuration for AdaptiveEMASlopeFilterModel training."""
+class AdaptiveEMATrainingConfig(BaseTimeSeriesTrainingConfig):
+    """Configuration for AdaptiveEMASlopeFilterModel training.
+
+    Inherits the shared time-series fields (data splits, optimizer/warmup knobs,
+    pattern selection, category weights, visualization + deep-analysis flags,
+    quantile-head toggle, ONNX export) from :class:`BaseTimeSeriesTrainingConfig`
+    and adds the AdaptiveEMA-specific fields below.
+
+    Re-declared inherited defaults that diverge from the base: ``epochs`` (50 vs
+    150), ``steps_per_epoch`` (200 vs 500), ``batch_size`` (64 vs 128),
+    ``learning_rate`` (1e-3 vs 1e-4), ``warmup_steps`` (500 vs 1000),
+    ``max_patterns_per_category`` (6 vs 10), ``perform_deep_analysis`` (False vs
+    True — too few params to be interesting), ``plot_top_k_patterns`` (6 vs 12),
+    and ``use_quantile_head`` (True vs False — the slope-quantile head is the
+    core output here). ``target_categories`` is re-declared with a non-None
+    default (``["trend", "composite", "financial"]``) because
+    :meth:`AdaptiveEMATrainer._select_patterns` iterates it directly.
+
+    Field renames vs the pre-migration standalone config (base names adopted):
+    ``plot_top_k_samples`` -> ``plot_top_k_patterns``,
+    ``enable_quantile_head`` -> ``use_quantile_head``,
+    ``dataset_patterns`` -> ``target_categories``. ``prediction_horizon`` is kept
+    as an AdaptiveEMA-specific field (the future-slope horizon the training
+    wrapper slices to); the base has no equivalent.
+    """
 
     # Bookkeeping
     experiment_name: str = "adaptive_ema"
-    result_dir: str = "results"
-    save_results: bool = True
     mode: str = "quantile"  # "classification" | "quantile"
 
-    # Model
+    # Re-declared inherited defaults that diverge from the base.
+    epochs: int = 50                       # base default: 150
+    steps_per_epoch: int = 200             # base default: 500
+    batch_size: int = 64                   # base default: 128
+    learning_rate: float = 1e-3            # base default: 1e-4
+    warmup_steps: int = 500                # base default: 1000
+    max_patterns_per_category: int = 6     # base default: 10
+    perform_deep_analysis: bool = False    # base default: True
+    plot_top_k_patterns: int = 6           # base default: 12
+    use_quantile_head: bool = True         # base default: False
+    target_categories: Optional[List[str]] = field(  # base default: None
+        default_factory=lambda: ["trend", "composite", "financial"]
+    )
+
+    # Model (AdaptiveEMA-specific)
     ema_period: int = 25
     lookback_period: int = 25
     initial_upper_threshold: float = 1.5
     initial_lower_threshold: float = -1.5
     learnable_thresholds: bool = True
     adjust_ema: bool = True
-    enable_quantile_head: bool = True
     num_quantiles: int = 5
     quantile_dropout_rate: float = 0.1
-    quantile_levels: List[float] = field(
-        default_factory=lambda: [0.1, 0.25, 0.5, 0.75, 0.9]
-    )
 
-    # Data
+    # Data (AdaptiveEMA-specific; horizon is the future-slope length)
     input_length: int = 128
     prediction_horizon: int = 24
-    train_ratio: float = 0.7
-    val_ratio: float = 0.15
-    test_ratio: float = 0.15
     num_features: int = 1
-    dataset_patterns: List[str] = field(
-        default_factory=lambda: ["trend", "composite", "financial"]
-    )
-    max_patterns_per_category: int = 6
-
-    # Training
-    epochs: int = 50
-    batch_size: int = 64
-    steps_per_epoch: int = 200
-    learning_rate: float = 1e-3
-    gradient_clip_norm: float = 1.0
-    optimizer: str = "adamw"
-    use_warmup: bool = True
-    warmup_steps: int = 500
-    warmup_start_lr: float = 1e-6
-
-    # Visualization
-    visualize_every_n_epochs: int = 5
-    plot_top_k_samples: int = 6
-    create_learning_curves: bool = True
-    create_prediction_plots: bool = True
-
-    # Deep analysis (off by default — too few params to be interesting)
-    perform_deep_analysis: bool = False
-    analysis_frequency: int = 10
-    analysis_start_epoch: int = 1
-
-    # ONNX export
-    export_onnx: bool = False
-    onnx_opset_version: int = 17
 
     def __post_init__(self) -> None:
-        total_ratio = self.train_ratio + self.val_ratio + self.test_ratio
-        if not np.isclose(total_ratio, 1.0, atol=1e-6):
-            raise ValueError(f"Data ratios must sum to 1.0, got {total_ratio}")
+        super().__post_init__()  # ratio-sum invariant
         if self.mode not in ("classification", "quantile"):
             raise ValueError(
                 f"mode must be 'classification' or 'quantile', got '{self.mode}'"
@@ -152,11 +152,11 @@ class AdaptiveEMATrainingConfig:
             raise ValueError(
                 "input_length and prediction_horizon must be positive"
             )
-        if self.mode == "quantile" and not self.enable_quantile_head:
+        if self.mode == "quantile" and not self.use_quantile_head:
             logger.warning(
-                "mode='quantile' but enable_quantile_head=False — forcing it on."
+                "mode='quantile' but use_quantile_head=False — forcing it on."
             )
-            self.enable_quantile_head = True
+            self.use_quantile_head = True
         if self.mode == "classification" and not self.learnable_thresholds:
             logger.warning(
                 "mode='classification' with learnable_thresholds=False has "
@@ -169,14 +169,22 @@ class AdaptiveEMATrainingConfig:
 # Data
 # ---------------------------------------------------------------------
 
-class AdaptiveEMADataProcessor:
+class AdaptiveEMADataProcessor(WindowedTimeSeriesProcessor):
     """
     Streaming data processor for AdaptiveEMA training.
 
-    Pulls plausibly price-like synthetic series from ``TimeSeriesGenerator``
+    Subclass of :class:`WindowedTimeSeriesProcessor` (Pattern-2 convention):
+    pulls plausibly price-like synthetic series from ``TimeSeriesGenerator``
     (trend / composite / financial categories), windows them into
     ``(context, future)`` pairs, and produces a binary "in regime" target
     (classification mode) or a continuous future-slope target (quantile mode).
+
+    Sampling is uniform (``pattern_to_category=None``). The base supplies the
+    buffered streaming generator, the fixed val/test pre-computation, the raw
+    test generator, and ``tf.data`` assembly; this subclass overrides only the
+    two hooks (:meth:`_make_sample` / :attr:`output_signature`) for the
+    slope/regime target, plus :meth:`_safe_normalize` for AdaptiveEMA's
+    centered/unit-variance transform (which the EMA thresholds depend on).
     """
 
     def __init__(
@@ -185,24 +193,43 @@ class AdaptiveEMADataProcessor:
         generator: TimeSeriesGenerator,
         selected_patterns: List[str],
     ) -> None:
-        self.config = config
-        self.ts_generator = generator
-        self.selected_patterns = selected_patterns
+        super().__init__(
+            config,
+            generator,
+            selected_patterns,
+            pattern_to_category=None,  # uniform sampling
+            context_len=config.input_length,
+            horizon_len=config.prediction_horizon,
+            num_features=config.num_features,
+            normalize=False,  # AdaptiveEMA uses its own _safe_normalize below
+            patterns_to_mix=16,
+            windows_per_pattern=8,
+            min_length_multiplier=1,
+            require_finite=True,
+        )
 
-    # -- helpers ------------------------------------------------------
+    # -- normalization ------------------------------------------------
 
     def _safe_normalize(self, series: np.ndarray) -> np.ndarray:
+        # DECISION plan_2026-06-10_31eed970/D-004: subclass WindowedTimeSeriesProcessor
+        # so NaN handling flows through the shared `_fill_nans` (timeseries.py:147),
+        # which carries the D-007 fix. The pre-D-007 in-place form here was
+        # `idx = np.where(~mask, np.arange(mask.shape[0]), 0); series = series[idx]`
+        # — on a 2-D `(T, 1)` window that BROADCASTS to `(T, T, 1)` (arange is `(T,)`,
+        # mask is `(T, 1)`), blowing up the sample shape. It was only ever reached on
+        # NaN-containing input (guarded by `if isnan.any()`), so the bug stayed latent.
+        # Do NOT reinstate the `np.arange(mask.shape[0])` / `series[idx]` form or an
+        # in-place patch of it; rely on `_fill_nans` via the base. See decisions.md D-004.
+        # The centered/unit-variance transform below is AdaptiveEMA-specific (keeps the
+        # learnable thresholds in [-1.5, 1.5] meaningful) so `normalize=False` is passed
+        # to the base and this override owns the whole transform.
         series = np.clip(series, -1e6, 1e6)
-        if np.isnan(series).any():
-            mask = np.isnan(series)
-            idx = np.where(~mask, np.arange(mask.shape[0]), 0)
-            np.maximum.accumulate(idx, axis=0, out=idx)
-            series = series[idx]
-            series[np.isnan(series)] = 0.0
-        # Centered, unit-variance — keeps thresholds in [-1.5, 1.5] meaningful.
+        series = _fill_nans(series)
         mean = float(np.mean(series))
         std = float(np.std(series)) + 1e-6
         return ((series - mean) / std).astype(np.float32)
+
+    # -- target generation --------------------------------------------
 
     def _compute_future_slope(self, future: np.ndarray) -> np.ndarray:
         """Approximate slope of the future window via finite difference."""
@@ -217,9 +244,9 @@ class AdaptiveEMADataProcessor:
         """Build training target from the realized future segment.
 
         The synthetic ``TimeSeriesGenerator`` returns ``(T, 1)`` arrays, so
-        ``future`` may be 2D. Targets are 1D ``(prediction_horizon,)`` per
-        the output signature in :meth:`prepare_datasets`, so we squeeze any
-        trailing singleton feature axis defensively.
+        ``future`` may be 2D. Targets are 1D ``(prediction_horizon,)`` per the
+        :attr:`output_signature`, so we squeeze any trailing singleton feature
+        axis defensively.
         """
         if future.ndim == 2 and future.shape[-1] == 1:
             future = future.reshape(-1)
@@ -232,80 +259,26 @@ class AdaptiveEMADataProcessor:
         # quantile mode → predict the slope itself
         return future_slope.astype(np.float32)
 
-    # -- generators ---------------------------------------------------
+    # -- hooks (override WindowedTimeSeriesProcessor) -----------------
 
-    def _training_generator(
-        self,
-    ) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
-        total_len = self.config.input_length + self.config.prediction_horizon
-        buffer: List[Tuple[np.ndarray, np.ndarray]] = []
-        windows_per_pattern = 8
-        patterns_to_mix = 16
-
-        while True:
-            if not buffer:
-                for name in random.choices(self.selected_patterns, k=patterns_to_mix):
-                    data = self.ts_generator.generate_task_data(name)
-                    if len(data) < total_len or not np.isfinite(data).all():
-                        continue
-                    train_end = int(self.config.train_ratio * len(data))
-                    train_data = data[:train_end]
-                    max_start = len(train_data) - total_len
-                    if max_start <= 0:
-                        continue
-                    for _ in range(windows_per_pattern):
-                        start = random.randint(0, max_start)
-                        window = self._safe_normalize(
-                            train_data[start:start + total_len]
-                        )
-                        context = window[: self.config.input_length].reshape(
-                            -1, self.config.num_features
-                        )
-                        future = window[self.config.input_length:]
-                        target = self._target_for_context(future)
-                        buffer.append((context, target))
-                random.shuffle(buffer)
-            if buffer:
-                yield buffer.pop()
-
-    def _generate_fixed_dataset(
-        self, split: str, num_samples: int
+    def _make_sample(
+        self, window: np.ndarray, pattern_name: str
     ) -> Tuple[np.ndarray, np.ndarray]:
-        logger.info(
-            f"Pre-computing {split} dataset ({num_samples} samples)"
-        )
-        total_len = self.config.input_length + self.config.prediction_horizon
-        contexts: List[np.ndarray] = []
-        targets: List[np.ndarray] = []
-        collected = 0
-        cycle = 0
-        while collected < num_samples:
-            name = self.selected_patterns[cycle % len(self.selected_patterns)]
-            cycle += 1
-            data = self.ts_generator.generate_task_data(name)
-            if len(data) < total_len or not np.isfinite(data).all():
-                continue
-            train_end = int(self.config.train_ratio * len(data))
-            val_end = train_end + int(self.config.val_ratio * len(data))
-            split_data = (
-                data[train_end:val_end] if split == "val" else data[val_end:]
-            )
-            max_start = len(split_data) - total_len
-            if max_start <= 0:
-                continue
-            start = random.randint(0, max_start)
-            window = self._safe_normalize(split_data[start:start + total_len])
-            contexts.append(
-                window[: self.config.input_length].reshape(
-                    -1, self.config.num_features
-                )
-            )
-            future = window[self.config.input_length:]
-            targets.append(self._target_for_context(future))
-            collected += 1
+        """Split a normalized window into ``(context, slope/regime target)``."""
+        context = window[: self.context_len].reshape(
+            -1, self.num_features
+        ).astype(np.float32)
+        future = window[self.context_len:]
+        target = self._target_for_context(future)
+        return context, target
+
+    @property
+    def output_signature(self) -> Tuple[tf.TensorSpec, tf.TensorSpec]:
         return (
-            np.asarray(contexts, dtype=np.float32),
-            np.asarray(targets, dtype=np.float32),
+            tf.TensorSpec(
+                shape=(self.context_len, self.num_features), dtype=tf.float32
+            ),
+            tf.TensorSpec(shape=(self.horizon_len,), dtype=tf.float32),
         )
 
     def _viz_samples(
@@ -313,53 +286,6 @@ class AdaptiveEMADataProcessor:
     ) -> Tuple[np.ndarray, np.ndarray]:
         x, y = self._generate_fixed_dataset("test", n)
         return x, y
-
-    def prepare_datasets(self) -> Dict[str, Any]:
-        target_len = self.config.prediction_horizon
-        output_sig = (
-            tf.TensorSpec(
-                shape=(self.config.input_length, self.config.num_features),
-                dtype=tf.float32,
-            ),
-            tf.TensorSpec(shape=(target_len,), dtype=tf.float32),
-        )
-        train_ds = (
-            tf.data.Dataset.from_generator(
-                self._training_generator, output_signature=output_sig
-            )
-            .batch(self.config.batch_size)
-            .prefetch(tf.data.AUTOTUNE)
-        )
-
-        val_steps = max(20, len(self.selected_patterns))
-        test_steps = max(10, len(self.selected_patterns))
-        val_x, val_y = self._generate_fixed_dataset(
-            "val", val_steps * self.config.batch_size
-        )
-        test_x, test_y = self._generate_fixed_dataset(
-            "test", test_steps * self.config.batch_size
-        )
-
-        val_ds = (
-            tf.data.Dataset.from_tensor_slices((val_x, val_y))
-            .batch(self.config.batch_size)
-            .cache()
-            .prefetch(tf.data.AUTOTUNE)
-        )
-        test_ds = (
-            tf.data.Dataset.from_tensor_slices((test_x, test_y))
-            .batch(self.config.batch_size)
-            .cache()
-            .prefetch(tf.data.AUTOTUNE)
-        )
-
-        return {
-            "train_ds": train_ds,
-            "val_ds": val_ds,
-            "test_ds": test_ds,
-            "validation_steps": val_steps,
-            "test_steps": test_steps,
-        }
 
 
 # ---------------------------------------------------------------------
@@ -434,7 +360,7 @@ class AdaptiveEMAPerformanceCallback(keras.callbacks.Callback):
         self.save_dir = save_dir
         os.makedirs(self.save_dir, exist_ok=True)
         self.viz_x, self.viz_y = self.processor._viz_samples(
-            self.config.plot_top_k_samples
+            self.config.plot_top_k_patterns
         )
         self.training_history: Dict[str, List[float]] = {
             "loss": [], "val_loss": [], "lr": []
@@ -478,7 +404,7 @@ class AdaptiveEMAPerformanceCallback(keras.callbacks.Callback):
         if not isinstance(preds, np.ndarray):
             preds = np.asarray(preds)
 
-        num_plots = min(len(self.viz_x), self.config.plot_top_k_samples)
+        num_plots = min(len(self.viz_x), self.config.plot_top_k_patterns)
         n_cols = 2
         n_rows = math.ceil(num_plots / n_cols)
         fig, axes = plt.subplots(
@@ -563,7 +489,7 @@ class AdaptiveEMATrainer:
     def _select_patterns(self) -> List[str]:
         all_categories = self.generator.get_task_categories()
         selected: List[str] = []
-        for cat in self.config.dataset_patterns:
+        for cat in (self.config.target_categories or []):
             if cat not in all_categories:
                 logger.warning(
                     f"Requested category '{cat}' not in generator categories; "
@@ -585,7 +511,7 @@ class AdaptiveEMATrainer:
 
     def create_model(self) -> AdaptiveEMATrainingWrapper:
         quantile_head_config: Optional[Dict[str, Any]] = None
-        if self.config.enable_quantile_head:
+        if self.config.use_quantile_head:
             quantile_head_config = {
                 "num_quantiles": self.config.num_quantiles,
                 "dropout_rate": self.config.quantile_dropout_rate,
@@ -801,10 +727,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.set_defaults(learnable_thresholds=True)
     parser.add_argument(
-        "--no-quantile-head", dest="enable_quantile_head",
+        "--no-quantile-head", dest="use_quantile_head",
         action="store_false",
     )
-    parser.set_defaults(enable_quantile_head=True)
+    parser.set_defaults(use_quantile_head=True)
     parser.add_argument("--num_quantiles", type=int, default=5)
     parser.add_argument("--input_length", type=int, default=128)
     parser.add_argument("--prediction_horizon", type=int, default=24)
@@ -821,7 +747,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup_steps", type=int, default=500)
     parser.add_argument("--warmup_start_lr", type=float, default=1e-6)
     parser.add_argument("--visualize_every_n_epochs", type=int, default=5)
-    parser.add_argument("--plot_top_k_samples", type=int, default=6)
+    parser.add_argument(
+        "--plot_top_k_samples", dest="plot_top_k_patterns", type=int, default=6
+    )
     parser.add_argument(
         "--deep-analysis", dest="perform_deep_analysis", action="store_true",
         help="Enable EpochAnalyzerCallback (off by default — model has few params).",
@@ -853,7 +781,7 @@ def main() -> None:
         initial_upper_threshold=args.initial_upper_threshold,
         initial_lower_threshold=args.initial_lower_threshold,
         learnable_thresholds=args.learnable_thresholds,
-        enable_quantile_head=args.enable_quantile_head,
+        use_quantile_head=args.use_quantile_head,
         num_quantiles=args.num_quantiles,
         input_length=args.input_length,
         prediction_horizon=args.prediction_horizon,
@@ -867,7 +795,7 @@ def main() -> None:
         warmup_steps=args.warmup_steps,
         warmup_start_lr=args.warmup_start_lr,
         visualize_every_n_epochs=args.visualize_every_n_epochs,
-        plot_top_k_samples=args.plot_top_k_samples,
+        plot_top_k_patterns=args.plot_top_k_patterns,
         perform_deep_analysis=args.perform_deep_analysis,
         analysis_frequency=args.analysis_frequency,
         analysis_start_epoch=args.analysis_start_epoch,
