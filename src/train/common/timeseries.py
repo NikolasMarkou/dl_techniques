@@ -42,6 +42,12 @@ from dl_techniques.datasets.time_series import (
     NormalizationMethod,
     TimeSeriesGenerator,
 )
+from dl_techniques.metrics.time_series_metrics import calculate_comprehensive_metrics
+from dl_techniques.metrics.probabilistic_forecast_metrics import (
+    CoverageMetric,
+    SharpnessMetric,
+)
+from dl_techniques.models.time_series.forecast import ForecastMixin
 from dl_techniques.utils.logger import logger
 from train.common.config_io import json_numpy_default
 from train.common.evaluation import generate_training_curves
@@ -605,6 +611,94 @@ def _plot_ts_forecast(
         residual_ax.grid(True, alpha=0.3)
 
 
+# --------------------------------------------------------------------------- #
+# Unified post-hoc forecast metrics
+# --------------------------------------------------------------------------- #
+def compute_post_hoc_forecast_metrics(
+        y_true: np.ndarray,
+        point: np.ndarray,
+        backcast: Optional[np.ndarray] = None,
+        quantiles: Optional[np.ndarray] = None,
+        quantile_levels: Optional[List[float]] = None,
+) -> Dict[str, float]:
+    """Compute a uniform post-hoc forecast metric block from numpy arrays.
+
+    A PURE, model-agnostic helper (no Keras model, no training state) so it is
+    directly unit-testable. It always returns a flat dict of Python ``float``
+    values, ready to serialize into ``results.json``.
+
+    Point metrics REUSE
+    :func:`dl_techniques.metrics.time_series_metrics.calculate_comprehensive_metrics`
+    (MAE/RMSE/sMAPE/rMAE/MASE), which requires a ``backcast`` ``[B, Lb, F]`` to
+    derive the naive/random-walk baselines for rMAE and MASE. When ``backcast``
+    is ``None``, the backcast-dependent metrics cannot be formed, so only the
+    backcast-independent ones (MAE/RMSE/sMAPE) are computed directly here — the
+    full call is never attempted with a missing backcast.
+
+    When ``quantiles`` is supplied with at least two ``quantile_levels``, interval
+    coverage and sharpness are added over the WIDEST central interval — the span
+    from the minimum to the maximum supplied level — by REUSING
+    :class:`~dl_techniques.metrics.probabilistic_forecast_metrics.CoverageMetric`
+    and :class:`~dl_techniques.metrics.probabilistic_forecast_metrics.SharpnessMetric`
+    so the post-hoc numbers match the in-training metric definitions exactly.
+
+    Args:
+        y_true: Realized targets, numpy ``[B, H, F]`` (or ``[B, H]``).
+        point: Point/median forecast, numpy ``[B, H, F]`` (or ``[B, H]``), same
+            shape as ``y_true``.
+        backcast: Optional historical context window, numpy ``[B, Lb, F]``. When
+            ``None``, rMAE/MASE are skipped (MAE/RMSE/sMAPE still computed).
+        quantiles: Optional quantile predictions, numpy ``[B, H, F, Q]`` (or
+            ``[B, H, Q]``); the last axis is ordered to match ``quantile_levels``.
+        quantile_levels: Optional list of the ``Q`` quantile levels. Coverage and
+            sharpness are added only when this has at least two entries.
+
+    Returns:
+        A dict of ``str -> float``. Always carries the available point metric
+        keys (``MAE``/``RMSE``/``sMAPE`` always; ``rMAE``/``MASE`` when a
+        ``backcast`` was supplied). With usable quantiles it additionally carries
+        ``coverage``, ``sharpness``, and ``coverage_nominal`` (the nominal width
+        ``max_level - min_level``).
+    """
+    metrics: Dict[str, float] = {}
+
+    y_true = np.asarray(y_true, dtype=np.float32)
+    point = np.asarray(point, dtype=np.float32)
+
+    if backcast is not None:
+        backcast = np.asarray(backcast, dtype=np.float32)
+        point_metrics = calculate_comprehensive_metrics(y_true, point, backcast)
+    else:
+        # No backcast → only the backcast-independent metrics are well-defined.
+        # Compute MAE/RMSE/sMAPE directly (mirrors calculate_comprehensive_metrics)
+        # and skip rMAE/MASE rather than crash on a missing baseline window.
+        eps = 1e-7
+        mae = float(np.mean(np.abs(y_true - point)))
+        rmse = float(np.sqrt(np.mean((y_true - point) ** 2)))
+        denom = np.abs(y_true) + np.abs(point) + eps
+        smape = float(200.0 * np.mean(np.abs(y_true - point) / denom))
+        point_metrics = {"MAE": mae, "RMSE": rmse, "sMAPE": smape}
+
+    metrics.update({k: float(v) for k, v in point_metrics.items()})
+
+    if quantiles is not None and quantile_levels is not None and len(quantile_levels) >= 2:
+        quantiles = np.asarray(quantiles, dtype=np.float32)
+        levels = list(quantile_levels)
+        low_index = int(np.argmin(levels))
+        high_index = int(np.argmax(levels))
+
+        cov = CoverageMetric(low_index=low_index, high_index=high_index)
+        cov.update_state(y_true, quantiles)
+        shp = SharpnessMetric(low_index=low_index, high_index=high_index)
+        shp.update_state(y_true, quantiles)
+
+        metrics["coverage"] = float(keras.ops.convert_to_numpy(cov.result()))
+        metrics["sharpness"] = float(keras.ops.convert_to_numpy(shp.result()))
+        metrics["coverage_nominal"] = float(max(levels) - min(levels))
+
+    return metrics
+
+
 class TimeSeriesPerformanceCallback(keras.callbacks.Callback):
     """Abstract base for the per-epoch visualization callbacks of the TS trainers.
 
@@ -886,11 +980,72 @@ class BaseTimeSeriesTrainer:
             verbose=1, return_dict=True
         )
 
+        post_hoc_metrics = self._compute_post_hoc_metrics(data_pipeline)
+
         return {
             'history': history.history,
             'test_metrics': {k: float(v) for k, v in test_results.items()},
+            'post_hoc_metrics': post_hoc_metrics,
             'final_epoch': len(history.history['loss'])
         }
+
+    def _compute_post_hoc_metrics(self, data_pipeline: Dict[str, Any]) -> Dict[str, float]:
+        """Build the unified, additive post-hoc forecast metric block.
+
+        Runs AFTER ``model.evaluate`` and writes a NEW ``post_hoc_metrics`` key
+        in ``results.json``; it never touches ``test_metrics`` / ``model.evaluate``.
+        """
+        # DECISION plan_2026-06-10_39646d39/D-001: this block is ADDITIVE,
+        # NON-FATAL, and ForecastMixin-GATED.
+        #   * ADDITIVE — it populates a new `post_hoc_metrics` key only; it must
+        #     NOT replace or mutate `test_metrics` or the `model.evaluate` flow.
+        #   * NON-FATAL — the ENTIRE computation is wrapped in try/except: a
+        #     metric failure logs a warning and yields `{}`, never aborting a
+        #     training run (mirrors the non-fatal viz pattern, D-001/F2). Do NOT
+        #     let any exception here propagate.
+        #   * ForecastMixin-GATED — only models that implement the Forecast
+        #     contract yield a point/quantiles uniformly. For a non-mixin model we
+        #     deliberately do NOT guess how to extract a point from an arbitrary
+        #     output paradigm (that is later-iteration work); we skip instead.
+        try:
+            test_data_raw = data_pipeline.get('test_data_raw')
+            if test_data_raw is None:
+                return {}
+
+            if not isinstance(self.model, ForecastMixin):
+                logger.info(
+                    "post_hoc_metrics: model is not a ForecastMixin; "
+                    "skipping unified forecast metrics"
+                )
+                return {}
+
+            # test_data_raw is (inputs, targets); inputs is the context window
+            # (backcast), targets is y_true. Either may be a nested tuple/list —
+            # take the primary element (same guard as _prepare_viz_data_from_processor).
+            inputs, targets = test_data_raw
+            test_inputs = inputs[0] if isinstance(inputs, (tuple, list)) else inputs
+            y_true = targets[0] if isinstance(targets, (tuple, list)) else targets
+            backcast = test_inputs
+
+            fc = self.model.predict_forecast(test_inputs)
+            point = fc.point
+            quantiles = None
+            quantile_levels = None
+            if fc.has_quantiles():
+                quantiles = fc.quantiles
+                quantile_levels = fc.quantile_levels or getattr(
+                    self.config, 'quantile_levels', None)
+
+            return compute_post_hoc_forecast_metrics(
+                np.asarray(y_true),
+                np.asarray(point),
+                backcast=np.asarray(backcast),
+                quantiles=None if quantiles is None else np.asarray(quantiles),
+                quantile_levels=quantile_levels,
+            )
+        except Exception as e:
+            logger.warning(f"post_hoc_metrics computation failed: {e}")
+            return {}
 
     # ------------------------------------------------------------------ #
     # Persistence
@@ -905,6 +1060,9 @@ class BaseTimeSeriesTrainer:
         serializable = {
             'history': results['history'],
             'test_metrics': results['test_metrics'],
+            # Additive (D-001): a NEW key alongside test_metrics, never a
+            # replacement. Plain floats serialize cleanly under json_numpy_default.
+            'post_hoc_metrics': results.get('post_hoc_metrics', {}),
             'final_epoch': results['final_epoch'],
             'config': self.config.__dict__,
         }
