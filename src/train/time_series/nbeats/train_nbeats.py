@@ -242,7 +242,7 @@ class NBeatsTrainer(BaseTimeSeriesTrainer):
         from dl_techniques.analyzer import AnalysisConfig
         from train.common import create_callbacks as create_common_callbacks
 
-        # DECISION plan_2026-06-10_39646d39/D-009
+        # DECISION plan_2026-06-10_39646d39/D-002
         # Pass a BARE prefix (self._build_results_prefix()) to
         # create_common_callbacks and adopt its RETURNED results_dir as
         # self.exp_dir -- the D-009 bare-prefix contract, mirroring prism/tirex.

@@ -399,7 +399,7 @@ class MDNTrainer(BaseTimeSeriesTrainer):
         ``test_data_raw`` tuple (exposed on ``self._test_data_raw`` by the base
         ``_train_model``). ``use_lr_schedule=False`` (mdn uses a constant LR).
         """
-        # DECISION plan_2026-06-10_39646d39/D-009
+        # DECISION plan_2026-06-10_39646d39/D-002
         # Pass a BARE prefix (self._build_results_prefix()) to
         # create_common_callbacks and adopt its RETURNED results_dir as
         # self.exp_dir -- the D-009 bare-prefix contract, mirroring prism/tirex.
