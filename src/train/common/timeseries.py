@@ -475,6 +475,119 @@ def _prepare_viz_data_from_processor(
     return np.array(viz_x), np.array(viz_y)
 
 
+def _as_1d(arr: np.ndarray) -> np.ndarray:
+    """Coerce a forecast slice to 1-D.
+
+    Accepts a 1-D array (returned unchanged) or a trailing-singleton 2-D array
+    ``[H, 1]`` (the per-sample single-feature slice the tirex/prism plotters pass
+    via ``preds[i, :, 0]``), which is squeezed to ``[H]``. Anything else is
+    flattened defensively so a stray rank never aborts a plot.
+
+    Args:
+        arr: Array-like forecast/context/target slice.
+
+    Returns:
+        A contiguous 1-D ``np.ndarray``.
+    """
+    arr = np.asarray(arr)
+    if arr.ndim == 1:
+        return arr
+    if arr.ndim == 2 and arr.shape[-1] == 1:
+        return arr[:, 0]
+    return arr.flatten()
+
+
+def _plot_ts_forecast(
+        ax,
+        context: np.ndarray,
+        target: np.ndarray,
+        point: np.ndarray,
+        lower: Optional[np.ndarray] = None,
+        upper: Optional[np.ndarray] = None,
+        *,
+        residual_ax=None,
+        title: Optional[str] = None,
+        context_label: str = "context",
+        target_label: str = "actual",
+        point_label: str = "forecast",
+        band_label: Optional[str] = None,
+) -> None:
+    """Draw ONE forecast sample (context + actual + point, optional band/residual).
+
+    The shared single-sample forecast renderer for the time-series trainers. It
+    collapses the hand-rolled ``ax.plot(context)`` / ``ax.plot(target)`` /
+    ``ax.plot(point)`` / ``ax.fill_between(lower, upper)`` idiom that tirex and
+    prism each carried in their ``_plot_predictions`` override into one drop-in
+    call, so future trainers stop re-deriving the context/future x-axis split and
+    the band-plot conventions.
+
+    The context is drawn on ``x = [0 .. Lb)``; the target and point forecast are
+    drawn on the future axis ``x = [Lb .. Lb + H)``, with a dashed vertical
+    divider at the forecast start (``x = Lb``). When both ``lower`` and ``upper``
+    are supplied an ``alpha=0.2`` uncertainty band is filled between them on the
+    future axis. When a separate ``residual_ax`` is supplied, the per-step
+    residual ``target - point`` is drawn there as a step plot with a zero line.
+
+    Pure matplotlib (Agg backend assumed by the trainers); draws on the provided
+    axes and returns nothing. Inputs are coerced to 1-D via :func:`_as_1d`, so a
+    caller may pass either a 1-D slice or a trailing-singleton ``[H, 1]`` slice.
+
+    Args:
+        ax: The primary :class:`matplotlib.axes.Axes` to draw the lines/band on.
+        context: 1-D past values of length ``Lb`` (or ``[Lb, 1]``).
+        target: 1-D true future values of length ``H`` (or ``[H, 1]``).
+        point: 1-D point/median forecast of length ``H`` (or ``[H, 1]``).
+        lower: Optional lower interval bound of length ``H``. A band is drawn only
+            when BOTH ``lower`` and ``upper`` are provided.
+        upper: Optional upper interval bound of length ``H``.
+        residual_ax: Optional separate :class:`~matplotlib.axes.Axes` for the
+            ``target - point`` residual panel. ``None`` skips the residual panel.
+        title: Optional title set on ``ax``.
+        context_label: Legend label for the context line.
+        target_label: Legend label for the actual/target line.
+        point_label: Legend label for the point/median forecast line.
+        band_label: Legend label for the uncertainty band; defaults to
+            ``"interval"`` when a band is drawn.
+
+    Returns:
+        None. Side-effect only — draws on ``ax`` (and ``residual_ax`` if given).
+    """
+    context = _as_1d(context)
+    target = _as_1d(target)
+    point = _as_1d(point)
+
+    lb = len(context)
+    horizon = len(target)
+    ctx_x = np.arange(lb)
+    future_x = np.arange(lb, lb + horizon)
+
+    ax.plot(ctx_x, context, label=context_label, color='tab:blue', alpha=0.8)
+    ax.plot(future_x, target, label=target_label, color='tab:green',
+            linewidth=2, linestyle='--')
+    ax.plot(future_x, point, label=point_label, color='tab:red', alpha=0.9)
+
+    if lower is not None and upper is not None:
+        ax.fill_between(
+            future_x, _as_1d(lower), _as_1d(upper),
+            color='tab:red', alpha=0.2, label=band_label or 'interval',
+        )
+
+    # Vertical divider marking the forecast start (context | future boundary).
+    ax.axvline(lb, color='gray', linestyle=':', linewidth=1, alpha=0.7)
+
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='upper left', fontsize='small')
+    if title is not None:
+        ax.set_title(title)
+
+    if residual_ax is not None:
+        residual = target - point
+        residual_ax.step(future_x, residual, where='mid',
+                         color='tab:purple', alpha=0.8, label='residual')
+        residual_ax.axhline(0.0, color='gray', linestyle=':', linewidth=1, alpha=0.7)
+        residual_ax.grid(True, alpha=0.3)
+
+
 class TimeSeriesPerformanceCallback(keras.callbacks.Callback):
     """Abstract base for the per-epoch visualization callbacks of the TS trainers.
 
