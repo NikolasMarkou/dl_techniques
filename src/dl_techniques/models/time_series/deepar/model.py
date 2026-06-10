@@ -26,12 +26,13 @@ from dl_techniques.layers.time_series.deepar_blocks import (
     NegativeBinomialLikelihoodHead,
     DeepARCell
 )
+from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 
 # ---------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
-class DeepAR(keras.Model):
+class DeepAR(keras.Model, ForecastMixin):
     """
     DeepAR: Probabilistic forecasting with autoregressive recurrent networks.
 
@@ -504,6 +505,55 @@ class DeepAR(keras.Model):
         """Override predict_step to use sampling mode."""
         x, _, _ = keras.utils.unpack_x_y_sample_weight(data)
         return self(x, training=False, return_samples=True)
+
+    def _forecast(
+            self,
+            x: Dict[str, "keras.KerasTensor"],
+            quantile_levels: Optional[list] = None,
+            **kwargs: Any
+    ) -> Forecast:
+        """Produce a unified :class:`Forecast` via Monte-Carlo sampling.
+
+        This is the ``ForecastMixin`` hook for DeepAR. It runs the model's
+        autoregressive sampling path and reduces the resulting trajectories into
+        the shared contract: an empirical-mean point forecast plus
+        empirical-percentile quantiles. DeepAR is the ONLY model on the contract
+        that populates :attr:`Forecast.samples` (the raw Monte-Carlo paths),
+        because it is the only sampler — point and quantile-tensor models have no
+        per-sample trajectories to expose.
+
+        Prediction is routed through ``self.predict`` (NOT ``self(x)``) so it
+        hits the :meth:`predict_step` override, which forces
+        ``return_samples=True`` and returns the sampled trajectories of shape
+        ``(S, B, H, D)``.
+
+        Args:
+            x: Prediction-mode input dict with keys ``conditioning_target``
+                ``(B, conditioning_len, target_dim)`` and ``full_covariates``
+                ``(B, conditioning_len + prediction_len, covariate_dim)``
+                (optionally ``scale``). The forecast horizon ``H`` is derived as
+                ``total_len - conditioning_len`` inside the prediction path.
+            quantile_levels: Quantile levels to extract; defaults to
+                ``[0.1, 0.5, 0.9]``.
+            **kwargs: Forwarded to ``self.predict`` (e.g. ``batch_size``,
+                ``verbose``).
+
+        Returns:
+            A :class:`Forecast` with ``point`` shape ``[B, H, D]``, ``quantiles``
+            shape ``[B, H, D, Q]`` ordered to match ``quantile_levels``, and
+            ``samples`` shape ``[S, B, H, D]`` (non-``None``).
+        """
+        samples = np.asarray(self.predict(x, **kwargs))      # (S, B, H, D)
+        point = samples.mean(axis=0)                         # (B, H, D)
+        levels = list(quantile_levels) if quantile_levels is not None else [0.1, 0.5, 0.9]
+        q = np.percentile(samples, [lvl * 100 for lvl in levels], axis=0)  # (Q, B, H, D)
+        q = np.moveaxis(q, 0, -1)                            # (B, H, D, Q)
+        return Forecast(
+            point=point,
+            quantiles=q,
+            quantile_levels=levels,
+            samples=samples,
+        )
 
     @staticmethod
     def gaussian_loss(
