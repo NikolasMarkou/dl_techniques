@@ -30,8 +30,6 @@ import keras
 from keras import ops
 from typing import Any, Dict, Optional
 
-from dl_techniques.utils.logger import logger
-
 # ---------------------------------------------------------------------
 # Probabilistic forecast metrics
 # ---------------------------------------------------------------------
