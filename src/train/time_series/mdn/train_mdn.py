@@ -37,7 +37,7 @@ from train.common import (
     BaseTimeSeriesTrainer,
     create_ts_argument_parser,
 )
-from train.common.timeseries import compute_post_hoc_forecast_metrics
+from train.common.timeseries import compute_post_hoc_forecast_metrics, _plot_ts_forecast
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.time_series.mdn import MDNModel
 from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
@@ -124,6 +124,16 @@ class MultiTaskMDNModel(keras.Model, ForecastMixin):
     converts the Gaussian-mixture output into a :class:`Forecast` (point estimate +
     a symmetric Gaussian prediction interval). ``ForecastMixin`` carries NO instance
     state, so ``get_config`` / round-trip behaviour is unaffected (invariant I3).
+
+    Multi-step horizon (Option A / D-001): the MDN core is built with
+    ``output_dimension = config.pred_horizon``, so the model emits ONE joint
+    H-dimensional Gaussian mixture whose mixture weights pi are SHARED across the H
+    horizon steps (diagonal-joint: the steps are independent conditional on the
+    chosen mixture component). This is the documented modeling concession of
+    Option A -- it trades per-step-independent mixtures for a near-zero blast
+    radius that keeps ``MDNLayer`` / ``MDNModel`` byte-unchanged (invariant I1).
+    The concession is acceptable for univariate (F=1) windowed forecasting. See
+    decisions.md D-001.
     """
 
     def __init__(self, num_tasks: int, config: MDNTrainingConfig, **kwargs):
@@ -144,8 +154,17 @@ class MultiTaskMDNModel(keras.Model, ForecastMixin):
             self.att_norm = keras.layers.LayerNormalization()
 
         self.flatten = keras.layers.Flatten()
+        # DECISION plan_2026-06-10_721a80b5/D-001: output_dimension = pred_horizon
+        # (Option A). One JOINT H-dim Gaussian mixture with mixture weights pi
+        # SHARED across the H horizon steps (diagonal-joint). Do NOT "fix" this to
+        # output_dimension=1 + an autoregressive/per-step-head scheme: Option B
+        # (per-step heads) needs MDNModel surgery and breaks its shape tests;
+        # Option C (autoregressive) is a full rewrite. Confining H to this single
+        # constructor arg keeps MDNLayer/MDNModel byte-unchanged (invariant I1) and
+        # every other consumer green. Trade-off: shared-pi across steps, acceptable
+        # for univariate (F=1) windowed forecasting. See decisions.md D-001.
         self.mdn_core = MDNModel(
-            hidden_layers=config.hidden_units, output_dimension=1,
+            hidden_layers=config.hidden_units, output_dimension=config.pred_horizon,
             num_mixtures=config.num_mixtures, dropout_rate=config.dropout_rate,
             use_batch_norm=config.use_batch_norm)
 
@@ -184,19 +203,27 @@ class MultiTaskMDNModel(keras.Model, ForecastMixin):
         return self.mdn_core.mdn_layer
 
     def _forecast(self, x, confidence_level: Optional[float] = None, **kwargs) -> Forecast:
-        """Produce a :class:`Forecast` from the Gaussian-mixture output.
+        """Produce a :class:`Forecast` from the joint Gaussian-mixture output.
 
         ``x`` is the FULL 2-tuple ``(sequence, task_ids)`` this model consumes; it
         is passed straight through to the MDN analysis helpers, which call
         ``self.predict(x)`` internally so Keras routes the tuple through
-        :meth:`call` (edge case E2). output_dim is 1, so the point estimate is
-        ``[B, 1]`` and is reshaped to the contract ``[B, H=1, F=1]``; the symmetric
-        Gaussian interval (``mu +/- z*sigma``) is packed as ``quantiles``
-        ``[B, 1, 1, 2]`` with ``quantile_levels = [(1-cl)/2, 1-(1-cl)/2]`` (low
-        first, high last) — exactly the two levels CoverageMetric / SharpnessMetric
-        consume for the widest central interval. No median level is included: a
-        third level is unnecessary for the point + interval metrics and would only
-        add a redundant plane.
+        :meth:`call` (edge case E2).
+
+        Option A (D-001) shared-pi diagonal-joint concession: ``output_dimension``
+        is ``H = config.pred_horizon``, so the MDN emits ONE joint H-dim Gaussian
+        mixture whose mixture weights pi are SHARED across the H horizon steps
+        (the steps are independent conditional on the chosen component). This is
+        valid for univariate (F=1) windowed forecasting and is the price of keeping
+        MDNLayer/MDNModel byte-unchanged (I1). The MDN helpers return ``[B, H]``,
+        which is reshaped to the contract ``[B, H, F=1]``; the symmetric Gaussian
+        interval (``mu +/- z*sigma``) is packed as ``quantiles`` ``[B, H, 1, 2]``
+        with ``quantile_levels = [(1-cl)/2, 1-(1-cl)/2]`` (low first, high last) --
+        exactly the two levels CoverageMetric / SharpnessMetric consume for the
+        widest central interval. No median level is included: a third level is
+        unnecessary for the point + interval metrics and would only add a redundant
+        plane. For ``H == 1`` the reshape reproduces the prior ``[B, 1, 1]`` /
+        ``[B, 1, 1, 2]`` shapes exactly (no regression, edge case E1).
 
         Args:
             x: Model input 2-tuple ``(sequence, task_ids)``.
@@ -204,24 +231,25 @@ class MultiTaskMDNModel(keras.Model, ForecastMixin):
                 ``self.config.confidence_level`` (0.95).
 
         Returns:
-            A :class:`Forecast` with ``point`` ``[B, 1, 1]`` and ``quantiles``
-            ``[B, 1, 1, 2]``.
+            A :class:`Forecast` with ``point`` ``[B, H, 1]`` and ``quantiles``
+            ``[B, H, 1, 2]`` (``H = config.pred_horizon``).
         """
         cl = confidence_level if confidence_level is not None else getattr(
             getattr(self, 'config', None), 'confidence_level', 0.95)
 
+        H = self.config.pred_horizon
         mdn_layer = self.get_mdn_layer()
 
-        point = np.asarray(get_point_estimate(self, x, mdn_layer))      # [B, 1]
-        total_variance, _ = get_uncertainty(self, x, mdn_layer, point)  # [B, 1]
+        point = np.asarray(get_point_estimate(self, x, mdn_layer))      # [B, H]
+        total_variance, _ = get_uncertainty(self, x, mdn_layer, point)  # [B, H]
         lower, upper = get_prediction_intervals(point, total_variance, confidence_level=cl)
 
-        # [B, 1] -> [B, H=1, F=1]
-        point_bhf = point.reshape(point.shape[0], 1, point.shape[-1])
+        # [B, H] -> [B, H, F=1]  (H==1 reproduces the prior [B, 1, 1] exactly, E1)
+        point_bhf = point.reshape(point.shape[0], H, 1)
         lower_bhf = np.asarray(lower).reshape(point_bhf.shape)
         upper_bhf = np.asarray(upper).reshape(point_bhf.shape)
 
-        # quantiles [B, H=1, F=1, Q=2]; last axis ordered low, high.
+        # quantiles [B, H, F=1, Q=2]; last axis ordered low, high.
         quantiles = np.stack([lower_bhf, upper_bhf], axis=-1).astype(np.float32)
         alpha = 1.0 - cl
         quantile_levels = [alpha / 2.0, 1.0 - alpha / 2.0]
@@ -319,7 +347,15 @@ class MDNPerformanceCallback(TimeSeriesPerformanceCallback):
         return self.viz_test_data[1]
 
     def _plot_predictions(self, epoch: int) -> None:
-        """Visualize MDN outputs: context, target, and predicted distribution."""
+        """Visualize MDN outputs: context, target, and predicted distribution.
+
+        For ``pred_horizon == 1`` this renders the original 3x3 mixture-PDF grid
+        (each subplot reconstructs the full mixture density at the single future
+        step). For ``pred_horizon > 1`` the scalar mixture-PDF view does not apply,
+        so each subplot is drawn via the shared ``_plot_ts_forecast`` band plot
+        (context + true future + point forecast + central interval over the H-step
+        horizon). The save path / dpi / bbox are identical in both branches (I5).
+        """
         total_samples = len(self.viz_targets)
         indices = np.random.choice(total_samples, min(self.config.plot_top_k_patterns, total_samples), replace=False)
 
@@ -327,57 +363,87 @@ class MDNPerformanceCallback(TimeSeriesPerformanceCallback):
         sample_task = self.viz_inputs[1][indices]
         sample_target = self.viz_targets[indices]
 
-        params = self.model.predict((sample_seq, sample_task), verbose=0)
-        mdn_layer = self.model.get_mdn_layer()
-        mus, sigmas, pis = mdn_layer.split_mixture_params(params)
+        if self.config.pred_horizon == 1:
+            params = self.model.predict((sample_seq, sample_task), verbose=0)
+            mdn_layer = self.model.get_mdn_layer()
+            mus, sigmas, pis = mdn_layer.split_mixture_params(params)
 
-        mus = keras.ops.convert_to_numpy(mus)
-        sigmas = keras.ops.convert_to_numpy(sigmas)
-        pis = keras.ops.convert_to_numpy(pis)
-        pis = np.exp(pis) / np.sum(np.exp(pis), axis=1, keepdims=True)
+            mus = keras.ops.convert_to_numpy(mus)
+            sigmas = keras.ops.convert_to_numpy(sigmas)
+            pis = keras.ops.convert_to_numpy(pis)
+            pis = np.exp(pis) / np.sum(np.exp(pis), axis=1, keepdims=True)
 
-        fig, axes = plt.subplots(3, 3, figsize=(15, 12))
-        axes = axes.flatten()
+            fig, axes = plt.subplots(3, 3, figsize=(15, 12))
+            axes = axes.flatten()
 
-        for i, ax in enumerate(axes):
-            if i >= len(indices):
-                break
+            for i, ax in enumerate(axes):
+                if i >= len(indices):
+                    break
 
-            ctx = sample_seq[i].flatten()
-            tgt = sample_target[i]
-            time_steps = np.arange(len(ctx))
-            future_step = len(ctx)
+                ctx = sample_seq[i].flatten()
+                tgt = sample_target[i]
+                time_steps = np.arange(len(ctx))
+                future_step = len(ctx)
 
-            ax.plot(time_steps, ctx, label='Context', color='blue', alpha=0.6)
-            ax.scatter([future_step], [tgt], label='True Target', color='green', marker='x', s=100, zorder=5)
+                ax.plot(time_steps, ctx, label='Context', color='blue', alpha=0.6)
+                ax.scatter([future_step], [tgt], label='True Target', color='green', marker='x', s=100, zorder=5)
 
-            # Reconstruct mixture PDF and compute percentiles
-            y_min = min(ctx.min(), float(tgt)) - 2.0
-            y_max = max(ctx.max(), float(tgt)) + 2.0
-            y_grid = np.linspace(y_min, y_max, 200)
+                # Reconstruct mixture PDF and compute percentiles
+                y_min = min(ctx.min(), float(tgt)) - 2.0
+                y_max = max(ctx.max(), float(tgt)) + 2.0
+                y_grid = np.linspace(y_min, y_max, 200)
 
-            pdf_values = np.zeros_like(y_grid)
-            for k in range(self.config.num_mixtures):
-                pdf_values += pis[i, k] * stats.norm.pdf(y_grid, mus[i, k], sigmas[i, k])
+                pdf_values = np.zeros_like(y_grid)
+                for k in range(self.config.num_mixtures):
+                    pdf_values += pis[i, k] * stats.norm.pdf(y_grid, mus[i, k], sigmas[i, k])
 
-            cdf_values = np.cumsum(pdf_values)
-            if cdf_values[-1] > 0:
-                cdf_values /= cdf_values[-1]
-                idx_05 = np.clip(np.searchsorted(cdf_values, 0.05), 0, len(y_grid) - 1)
-                idx_50 = np.clip(np.searchsorted(cdf_values, 0.50), 0, len(y_grid) - 1)
-                idx_95 = np.clip(np.searchsorted(cdf_values, 0.95), 0, len(y_grid) - 1)
+                cdf_values = np.cumsum(pdf_values)
+                if cdf_values[-1] > 0:
+                    cdf_values /= cdf_values[-1]
+                    idx_05 = np.clip(np.searchsorted(cdf_values, 0.05), 0, len(y_grid) - 1)
+                    idx_50 = np.clip(np.searchsorted(cdf_values, 0.50), 0, len(y_grid) - 1)
+                    idx_95 = np.clip(np.searchsorted(cdf_values, 0.95), 0, len(y_grid) - 1)
 
-                lower, median_pred, upper = y_grid[idx_05], y_grid[idx_50], y_grid[idx_95]
-                ax.scatter([future_step], [median_pred], label='Median Pred', color='red', alpha=0.8)
-                ax.errorbar([future_step], [median_pred],
-                            yerr=[[median_pred - lower], [upper - median_pred]],
-                            fmt='none', ecolor='red', alpha=0.3, capsize=5, label='90% CI')
+                    lower, median_pred, upper = y_grid[idx_05], y_grid[idx_50], y_grid[idx_95]
+                    ax.scatter([future_step], [median_pred], label='Median Pred', color='red', alpha=0.8)
+                    ax.errorbar([future_step], [median_pred],
+                                yerr=[[median_pred - lower], [upper - median_pred]],
+                                fmt='none', ecolor='red', alpha=0.3, capsize=5, label='90% CI')
 
-            ax.set_title(f'Sample {i} (Task {sample_task[i][0]})')
-            if i == 0:
-                ax.legend(loc='upper left', fontsize='small')
+                ax.set_title(f'Sample {i} (Task {sample_task[i][0]})')
+                if i == 0:
+                    ax.legend(loc='upper left', fontsize='small')
 
-        plt.suptitle(f'MDN Probabilistic Forecasts (Epoch {epoch + 1})', fontsize=16)
+            plt.suptitle(f'MDN Probabilistic Forecasts (Epoch {epoch + 1})', fontsize=16)
+        else:
+            # H>1: scalar mixture-PDF view does not apply. Route through the shared
+            # _plot_ts_forecast band renderer (tirex/prism/nbeats use it too). One
+            # predict_forecast over the selected batch yields point [B,H,1] and a
+            # central interval; each subplot draws one sample's context+forecast.
+            fc = self.model.predict_forecast((sample_seq, sample_task))
+            lower, upper = fc.interval(fc.quantile_levels[0], fc.quantile_levels[1])
+
+            n = len(indices)
+            fig, axes = plt.subplots(3, 3, figsize=(15, 12))
+            axes = axes.flatten()
+            for i, ax in enumerate(axes):
+                if i >= n:
+                    ax.axis('off')
+                    continue
+                _plot_ts_forecast(
+                    ax,
+                    context=sample_seq[i].reshape(-1),
+                    target=sample_target[i].reshape(-1),
+                    point=fc.point[i, :, 0],
+                    lower=lower[i, :, 0],
+                    upper=upper[i, :, 0],
+                    title=f'Sample {i} (Task {sample_task[i][0]})',
+                )
+                if i == 0:
+                    ax.legend(loc='upper left', fontsize='small')
+
+            plt.suptitle(f'MDN Multi-Step Forecasts (Epoch {epoch + 1})', fontsize=16)
+
         plt.tight_layout()
         plt.savefig(os.path.join(self.save_dir, f'predictions_epoch_{epoch+1:03d}.png'),
                     dpi=150, bbox_inches='tight')
@@ -610,6 +676,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     # MDN architecture-specific arguments.
     parser.add_argument("--window_size", type=int, default=120)
+    parser.add_argument("--pred_horizon", type=int, default=1)
     parser.add_argument("--num_mixtures", type=int, default=12)
     parser.add_argument("--task_embedding_dim", type=int, default=32)
     parser.add_argument("--dropout_rate", type=float, default=0.3)
@@ -630,6 +697,7 @@ def main() -> None:
     config = MDNTrainingConfig(
         experiment_name=args.experiment_name,
         window_size=args.window_size,
+        pred_horizon=args.pred_horizon,
         num_mixtures=args.num_mixtures,
         task_embedding_dim=args.task_embedding_dim,
         dropout_rate=args.dropout_rate,
