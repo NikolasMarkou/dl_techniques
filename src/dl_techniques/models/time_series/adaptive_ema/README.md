@@ -157,7 +157,7 @@ Output Dict:
 ```python
 import keras
 import numpy as np
-from dl_techniques.models.adaptive_ema.model import AdaptiveEMASlopeFilterModel
+from dl_techniques.models.time_series.adaptive_ema.model import AdaptiveEMASlopeFilterModel
 
 # Synthetic price-like series: 32 samples, 256 bars
 prices = np.cumsum(np.random.randn(32, 256), axis=1).astype("float32")
@@ -259,7 +259,7 @@ You can combine B and C (learnable thresholds + quantile head) freely.
 
 ### Example 1 — Fixed thresholds, batch inference
 ```python
-from dl_techniques.models.adaptive_ema.model import AdaptiveEMASlopeFilterModel
+from dl_techniques.models.time_series.adaptive_ema.model import AdaptiveEMASlopeFilterModel
 import numpy as np
 
 prices = np.cumsum(np.random.randn(16, 512), axis=1).astype("float32")
