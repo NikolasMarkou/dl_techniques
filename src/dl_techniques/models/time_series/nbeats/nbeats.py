@@ -57,6 +57,7 @@ References
 """
 
 import keras
+import numpy as np
 from keras import ops, layers, initializers, regularizers
 from typing import List, Tuple, Optional, Union, Any, Dict, Callable
 
@@ -65,6 +66,7 @@ from typing import List, Tuple, Optional, Union, Any, Dict, Callable
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 from dl_techniques.layers.time_series.nbeats_blocks import (
     GenericBlock, TrendBlock, SeasonalityBlock
 )
@@ -72,7 +74,7 @@ from dl_techniques.layers.time_series.nbeats_blocks import (
 # ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class NBeatsNet(keras.Model):
+class NBeatsNet(keras.Model, ForecastMixin):
     """
     Neural Basis Expansion Analysis for Time Series (N-BEATS) forecasting model.
 
@@ -609,6 +611,36 @@ class NBeatsNet(keras.Model):
             )
 
         return cls(**config)
+
+    def _forecast(self, x: Any, **kwargs: Any) -> Forecast:
+        """Produce a point-only :class:`Forecast` (``ForecastMixin`` hook).
+
+        N-BEATS is a point forecaster: it emits no predictive intervals, so
+        this NEVER fabricates quantile bands. It reuses the model's existing
+        prediction path — ``predict`` returns the forecast tensor (the first
+        element of the ``(forecast, residual)`` tuple from :meth:`call`) of
+        shape ``[B, forecast_length, output_dim]``.
+
+        Args:
+            x: Context window, shape ``[B, backcast_length, input_dim]`` (or the
+                2D univariate form ``[B, backcast_length]``).
+            **kwargs: Forwarded to ``keras.Model.predict`` (e.g. ``batch_size``).
+
+        Returns:
+            A :class:`Forecast` with ``point`` of shape
+            ``[B, forecast_length, output_dim]`` and ``quantiles=None``.
+        """
+        kwargs.setdefault("verbose", 0)
+        preds = self.predict(x, **kwargs)
+        # call() returns a (forecast, residual) tuple; predict mirrors that, so
+        # take the first element (the forecast [B, H, output_dim]) when present.
+        if isinstance(preds, (tuple, list)):
+            preds = preds[0]
+        return Forecast(
+            point=np.asarray(preds),
+            quantiles=None,
+            quantile_levels=None,
+        )
 
 
 # ---------------------------------------------------------------------
