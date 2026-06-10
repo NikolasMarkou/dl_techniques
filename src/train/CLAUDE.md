@@ -19,7 +19,12 @@ src/train/
 │   └── __init__.py      # Re-exports all public functions
 ├── convnext/            # ConvNeXt V1, V2, V2+MAE
 ├── cliffordnet/         # CliffordNet classification, depth estimation, denoising, CLIP
-├── nbeats/              # N-BEATS time-series
+├── time_series/         # Time-series trainers (grouped)
+│   ├── mdn/             # Mixture Density Network forecasting
+│   ├── nbeats/          # N-BEATS
+│   ├── prism/           # PRISM probabilistic forecaster
+│   ├── tirex/           # TiRex patch transformer
+│   └── adaptive_ema/    # Adaptive EMA slope filter
 ├── bert/                # BERT pretrain/finetune
 ├── ...
 └── CLAUDE.md

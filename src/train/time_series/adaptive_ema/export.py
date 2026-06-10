@@ -10,7 +10,7 @@ verification path needs a single tensor — pass ``--output-key`` to pick
 which one to compare (default: the first ONNX output).
 
 Usage:
-    python -m train.adaptive_ema.export \\
+    python -m train.time_series.adaptive_ema.export \\
         --model_path results/adaptive_ema_xxx/best_model.keras \\
         --opset_version 17 --verify --output-key slope_quantiles
 """

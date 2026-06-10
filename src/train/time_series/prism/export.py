@@ -9,8 +9,8 @@ or rank 4 in quantile mode), so this exporter does NOT expose a --output-key
 flag.
 
 Usage:
-    python -m train.prism.export --model_path results/experiment/best_model.keras
-    python -m train.prism.export --model_path results/experiment/best_model.keras --output_path model.onnx --verify
+    python -m train.time_series.prism.export --model_path results/experiment/best_model.keras
+    python -m train.time_series.prism.export --model_path results/experiment/best_model.keras --output_path model.onnx --verify
 """
 
 import os

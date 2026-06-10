@@ -318,14 +318,14 @@ restored = keras.saving.load_model("adaptive_ema.keras")
 
 ## 9. Training & Best Practices
 
-A ready-to-run trainer lives at [`src/train/adaptive_ema/train_adaptive_ema.py`](../../../../train/adaptive_ema/train_adaptive_ema.py). It mirrors `src/train/tirex/` (Pattern 2 — time-series / probabilistic) and supports two modes:
+A ready-to-run trainer lives at [`src/train/time_series/adaptive_ema/train_adaptive_ema.py`](../../../../train/time_series/adaptive_ema/train_adaptive_ema.py). It mirrors `src/train/time_series/tirex/` (Pattern 2 — time-series / probabilistic) and supports two modes:
 
 - `--mode classification`: trains `signal_between` against a binary "in regime" target derived from the realized future slope, using `BinaryCrossentropy`. Requires `--learnable-thresholds` to be meaningful (the wrapped head only has gradient when thresholds are trainable).
 - `--mode quantile`: trains `slope_quantiles` against the realized future slope using `QuantileLoss`.
 
 Headless run (always required on remote / no-X11 machines):
 ```bash
-MPLBACKEND=Agg .venv/bin/python -m train.adaptive_ema.train_adaptive_ema \
+MPLBACKEND=Agg .venv/bin/python -m train.time_series.adaptive_ema.train_adaptive_ema \
     --mode quantile --epochs 10 --batch_size 64 \
     --enable_quantile_head --gpu 0
 ```
@@ -350,10 +350,10 @@ Round-trip works because:
 - All constructor args are scalars or a small JSON-able dict.
 
 ### ONNX
-A standalone exporter is provided at [`src/train/adaptive_ema/export.py`](../../../../train/adaptive_ema/export.py). It mirrors `train/tirex/export.py` (CPU-only env preset, auto input-length detection, optional output-key verification round-trip):
+A standalone exporter is provided at [`src/train/time_series/adaptive_ema/export.py`](../../../../train/time_series/adaptive_ema/export.py). It mirrors `train/time_series/tirex/export.py` (CPU-only env preset, auto input-length detection, optional output-key verification round-trip):
 
 ```bash
-python -m train.adaptive_ema.export \
+python -m train.time_series.adaptive_ema.export \
     --model_path results/adaptive_ema_xxx/best_model.keras \
     --opset_version 17 --verify --output_key slope_quantiles
 ```

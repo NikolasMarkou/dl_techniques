@@ -363,16 +363,16 @@ pred = restored.predict(X[:1], verbose=0)
 
 ## 10. Training & Best Practices
 
-A ready-to-run trainer lives at [`src/train/prism/train_prism.py`](../../../../train/prism/train_prism.py). It mirrors `src/train/tirex/` (Pattern 2 — time-series / probabilistic) and supports both point and quantile modes via `--use_quantile_head`.
+A ready-to-run trainer lives at [`src/train/time_series/prism/train_prism.py`](../../../../train/time_series/prism/train_prism.py). It mirrors `src/train/time_series/tirex/` (Pattern 2 — time-series / probabilistic) and supports both point and quantile modes via `--use_quantile_head`.
 
 **Headless smoke run** (always required on remote / no-X11 machines):
 
 ```bash
-MPLBACKEND=Agg .venv/bin/python -m train.prism.train_prism \
+MPLBACKEND=Agg .venv/bin/python -m train.time_series.prism.train_prism \
     --epochs 1 --steps_per_epoch 50 --batch_size 32 --gpu 0
 ```
 
-A standalone CPU-only ONNX exporter lives at [`src/train/prism/export.py`](../../../../train/prism/export.py). ONNX export is **off by default** in the trainer; pass nothing to skip it (use `--no_onnx` is unnecessary — the default is already off).
+A standalone CPU-only ONNX exporter lives at [`src/train/time_series/prism/export.py`](../../../../train/time_series/prism/export.py). ONNX export is **off by default** in the trainer; pass nothing to skip it (use `--no_onnx` is unnecessary — the default is already off).
 
 **Best-practice notes**
 
@@ -404,14 +404,14 @@ Round-trip works because:
 
 ### ONNX
 
-A standalone exporter is provided at [`src/train/prism/export.py`](../../../../train/prism/export.py). It mirrors `train/tirex/export.py`:
+A standalone exporter is provided at [`src/train/time_series/prism/export.py`](../../../../train/time_series/prism/export.py). It mirrors `train/time_series/tirex/export.py`:
 
 - CPU-only env-pin (`CUDA_VISIBLE_DEVICES=""` set before `import keras`) to avoid CudnnRNN ops in the export trace.
 - Auto-detection of `context_len` from `model.get_config()` (falls back to `--input_length`).
 - Single-tensor verification at `rtol=atol=1e-4` between Keras and the ONNX runtime output.
 
 ```bash
-.venv/bin/python -m train.prism.export \
+.venv/bin/python -m train.time_series.prism.export \
     --model_path results/prism_small_point_xxx/best_model.keras \
     --opset_version 17 --verify
 ```
@@ -446,7 +446,7 @@ Higher weight on low-pass (approximation) bands indicates the node is focused on
 - **L-4. `num_features=1` is the well-tested default.** The architecture supports multivariate `num_features>1`, but the bundled trainer and the existing test suite focus on `num_features=1`. Validate point mode first when going multivariate, then enable quantile.
 - **L-5. Tree depth is exponential in node count.** Each layer has `2^tree_depth - 1` internal segments plus leaves. Setting `tree_depth > 3` rarely helps and inflates parameter count and graph build time significantly.
 - **L-6. `PRISMNode.call()` uses `keras.ops.cond` for the interpolation branch.** Under the TF backend, `ops.cond` traces both branches, so the conditional is purely a control-flow nicety, not a perf optimization. Acceptable for forward pass, but a latent inefficiency if you are benchmarking on very large trees. Surfaced from issue I-12.
-- **L-7. ONNX export is not exercised in CI.** The exporter at `train/prism/export.py` is a near-verbatim copy of `train/tirex/export.py` (which is exercised), but the PRISM-specific path has not been smoke-tested end-to-end. ONNX export is opt-in only (off by default in the trainer).
+- **L-7. ONNX export is not exercised in CI.** The exporter at `train/time_series/prism/export.py` is a near-verbatim copy of `train/time_series/tirex/export.py` (which is exercised), but the PRISM-specific path has not been smoke-tested end-to-end. ONNX export is opt-in only (off by default in the trainer).
 - **L-8. No instance normalization.** PRISM does not include ReVIN-style per-instance normalization. The bundled trainer does per-instance Z-score normalization in the data pipeline; if you build a custom pipeline, normalize inputs yourself.
 
 ### Troubleshooting / FAQs
@@ -461,7 +461,7 @@ Higher weight on low-pass (approximation) bands indicates the node is focused on
 
 **Q. Can I use this for classification?** Not directly. `PRISMModel` is forecast-only. You can lift the `PRISMLayer` stack into a custom model and attach a classification head (e.g. GlobalAveragePooling + Dense) yourself.
 
-**Q. ONNX export fails.** The exporter pins `CUDA_VISIBLE_DEVICES=""` before `import keras` to dodge `CudnnRNN`. If you set the env var after import, the pin is silently ignored. Run `python -m train.prism.export --verify` from a fresh process.
+**Q. ONNX export fails.** The exporter pins `CUDA_VISIBLE_DEVICES=""` before `import keras` to dodge `CudnnRNN`. If you set the env var after import, the pin is silently ignored. Run `python -m train.time_series.prism.export --verify` from a fresh process.
 
 **Q. Where are the router weights during training?** Inside each `PRISMNode.router`. Access them via `model.prism_layers[i].time_tree.all_nodes[k].router`. See section 12.
 
