@@ -53,16 +53,17 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 - `nano_vlm/` — NanoVLM
 - `nano_vlm_world_model/` — NanoVLM world model
 
-### Time Series
-- `deepar/` — DeepAR probabilistic forecasting
-- `nbeats/` — N-BEATS
-- `prism/` — PRISM forecasting
-- `tirex/` — TiReX time series
-- `adaptive_ema/` — Adaptive EMA model
+### Time Series (`models/time_series/`)
+- `time_series/deepar/` — DeepAR probabilistic forecasting
+- `time_series/nbeats/` — N-BEATS
+- `time_series/prism/` — PRISM forecasting
+- `time_series/tirex/` — TiReX time series
+- `time_series/adaptive_ema/` — Adaptive EMA model
+- `time_series/mdn/` — Mixture Density Networks
+- `time_series/xlstm/` — xLSTM
 
 ### Sequence / State Space
 - `mamba/` — Mamba (SSM)
-- `xlstm/` — xLSTM
 
 ### Tabular
 - `tabm/` — TabM for tabular data
@@ -82,7 +83,6 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 - `vq_vae_rotation/` — VQ-VAE with rotation-based codebook updates
 - `lewm/` — Latent-energy world model
 - `nam/` — Neural additive model
-- `mdn/` — Mixture Density Networks
 - `fnet/` — FNet (Fourier)
 - `fftnet/` — FFTNet
 - `pw_fnet/` — Patchwise FNet
