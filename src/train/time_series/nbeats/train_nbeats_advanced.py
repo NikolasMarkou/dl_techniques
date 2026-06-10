@@ -5,7 +5,6 @@ import json
 import math
 import random
 import argparse
-from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -21,6 +20,7 @@ from train.common import (
     setup_gpu, create_callbacks as create_common_callbacks, generate_training_curves,
     set_seeds, BaseTimeSeriesTrainingConfig,
 )
+from train.common.timeseries import compute_post_hoc_forecast_metrics
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.mase_loss import MASELoss
 from dl_techniques.models.time_series.nbeats import create_nbeats_model
@@ -379,6 +379,8 @@ class NBeatsTrainer:
     def __init__(self, config: NBeatsTrainingConfig, ts_config: TimeSeriesGeneratorConfig):
         self.config = config
         self.ts_config = ts_config
+        # Resolved in _train_model from create_common_callbacks' returned dir (D-002).
+        self.exp_dir: Optional[str] = None
 
         generator = TimeSeriesGenerator(ts_config)
         all_patterns = generator.get_task_names()
@@ -534,30 +536,38 @@ class NBeatsTrainer:
         return model
 
     def run_experiment(self) -> Dict[str, Any]:
-        """Run the complete training experiment."""
-        exp_dir = os.path.join(
-            self.config.result_dir,
-            f"{self.config.experiment_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        )
-        os.makedirs(exp_dir, exist_ok=True)
-        logger.info(f"Starting N-BEATS Experiment: {exp_dir}")
+        """Run the complete training experiment.
+
+        The single canonical result dir is resolved INSIDE ``_train_model`` from
+        ``create_common_callbacks``' returned ``results_dir`` (the D-002
+        bare-prefix contract); no first dir is pre-built here.
+        """
+        logger.info("Starting N-BEATS Experiment (forecasting layers)")
 
         data_pipeline = self.processor.prepare_datasets()
-        results = self._train_model(data_pipeline, exp_dir)
-        self._save_results(results, exp_dir)
-        return {"results_dir": exp_dir, "results": results}
+        results = self._train_model(data_pipeline)
+        self._save_results(results, self.exp_dir)
+        return {"results_dir": self.exp_dir, "results": results}
 
-    def _train_model(self, data_pipeline: Dict, exp_dir: str) -> Dict[str, Any]:
+    def _train_model(self, data_pipeline: Dict) -> Dict[str, Any]:
         """Train the model and return results."""
         model = self.create_model()
         model.build((None, self.config.backcast_length, self.config.input_dim))
         model.summary(print_fn=logger.info)
 
-        viz_dir = os.path.join(exp_dir, 'visualizations')
-
-        callbacks, _ = create_common_callbacks(
+        # DECISION plan_2026-06-10_31eed970/D-002
+        # Pass a BARE prefix (self.config.experiment_name) to
+        # create_common_callbacks and ADOPT its RETURNED results_dir as the single
+        # canonical self.exp_dir -- the bare-prefix contract, mirroring
+        # train_nbeats.py:301. DO NOT pre-build a full timestamped exp_dir and pass
+        # it as results_dir_prefix: that produced a SECOND doubly-nested
+        # results/{full}_N-BEATS-Forecasting_{ts2}/ that received
+        # CSVLogger/ModelCheckpoint while results.json/visualizations landed in the
+        # discarded first dir. viz, results.json, checkpoints and CSVLogger now all
+        # land in this one returned dir. See decisions.md D-002.
+        callbacks, results_dir = create_common_callbacks(
             model_name="N-BEATS-Forecasting",
-            results_dir_prefix=exp_dir,
+            results_dir_prefix=self.config.experiment_name,
             monitor="val_loss",
             patience=25,
             use_lr_schedule=self.config.use_warmup,
@@ -570,6 +580,9 @@ class NBeatsTrainer:
             analyzer_start_epoch=self.config.analysis_start_epoch,
             analyzer_epoch_frequency=self.config.analysis_frequency,
         )
+        self.exp_dir = results_dir
+        viz_dir = os.path.join(self.exp_dir, 'visualizations')
+        os.makedirs(viz_dir, exist_ok=True)
         callbacks.append(PatternPerformanceCallback(
             self.config, self.processor, viz_dir, "nbeats_forecasting"
         ))
@@ -589,11 +602,65 @@ class NBeatsTrainer:
             verbose=1, return_dict=True
         )
 
+        post_hoc_metrics = self._compute_post_hoc_metrics(model, data_pipeline)
+
         return {
             'history': history.history,
             'test_metrics': {k: float(v) for k, v in test_results.items()},
-            'final_epoch': len(history.history['loss'])
+            'final_epoch': len(history.history['loss']),
+            'post_hoc_metrics': post_hoc_metrics,
         }
+
+    def _compute_post_hoc_metrics(self, model: keras.Model,
+                                  data_pipeline: Dict) -> Dict[str, float]:
+        """Point-only post_hoc forecast metrics for the trained model.
+
+        This trainer is LOCAL (not :class:`BaseTimeSeriesTrainer`), so the shared
+        ``isinstance(model, ForecastMixin)``-gated block does NOT run
+        automatically. The post_hoc block is computed here directly via the SHARED
+        :func:`compute_post_hoc_forecast_metrics`, re-using the SAME uncached
+        resampled ``test_ds`` (D-004 processor untouched). The model is the
+        anonymous functional wrapper around NBeatsNet + forecasting layers, so its
+        point forecast is ``model.predict(x)`` (``[0]`` when the recon-on path
+        returns a ``(forecast, residual)`` tuple).
+
+        Kept ADDITIVE and NON-FATAL (I1): any failure logs a warning and yields an
+        empty block so the run still completes and writes results.json.
+        """
+        try:
+            x_batches: List[np.ndarray] = []
+            y_batches: List[np.ndarray] = []
+            for x_b, y_b in data_pipeline['test_ds'].take(data_pipeline['test_steps']):
+                # recon-on path yields y_b as a (forecast, rec_target) tuple.
+                if isinstance(y_b, (list, tuple)):
+                    y_b = y_b[0]
+                x_batches.append(np.asarray(x_b, dtype=np.float32))
+                y_batches.append(np.asarray(y_b, dtype=np.float32))
+
+            if not x_batches:
+                logger.warning("post_hoc: no test batches collected; skipping block.")
+                return {}
+
+            backcast = np.concatenate(x_batches, axis=0)
+            y_true = np.concatenate(y_batches, axis=0)
+
+            point = model.predict(backcast, verbose=0)
+            if isinstance(point, (list, tuple)):
+                point = point[0]
+            point = np.asarray(point, dtype=np.float32)
+
+            block = compute_post_hoc_forecast_metrics(
+                y_true=y_true, point=point, backcast=backcast,
+                quantiles=None, quantile_levels=None,
+            )
+            logger.info(f"post_hoc_metrics: {block}")
+            return {k: float(v) for k, v in block.items()}
+        except Exception as exc:
+            logger.warning(
+                f"post_hoc_metrics computation failed ({exc!r}); "
+                f"emitting empty block, run continues."
+            )
+            return {}
 
     def _save_results(self, results: Dict, exp_dir: str) -> None:
         """Save experiment results to JSON."""
@@ -601,6 +668,7 @@ class NBeatsTrainer:
             'history': results['history'],
             'test_metrics': results['test_metrics'],
             'final_epoch': results['final_epoch'],
+            'post_hoc_metrics': results.get('post_hoc_metrics', {}),
             'config': self.config.__dict__
         }
 
