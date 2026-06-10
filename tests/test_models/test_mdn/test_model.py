@@ -24,7 +24,7 @@ import numpy as np
 import tensorflow as tf
 from typing import Dict, Any
 
-from dl_techniques.models.mdn.model import MDNModel
+from dl_techniques.models.time_series.mdn.model import MDNModel
 from dl_techniques.layers.statistics.mdn_layer import MDNLayer
 from dl_techniques.utils.logger import logger
 

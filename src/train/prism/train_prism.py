@@ -46,7 +46,7 @@ from train.common import (
 )
 from dl_techniques.utils.logger import logger
 from dl_techniques.analyzer import AnalysisConfig
-from dl_techniques.models.prism.model import PRISMModel
+from dl_techniques.models.time_series.prism.model import PRISMModel
 from dl_techniques.losses.quantile_loss import QuantileLoss
 from dl_techniques.datasets.time_series import (
     TimeSeriesGenerator,

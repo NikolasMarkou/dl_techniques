@@ -12,7 +12,7 @@ import tempfile
 import numpy as np
 from typing import Dict, Any, Tuple
 
-from dl_techniques.models.prism.model import PRISMModel
+from dl_techniques.models.time_series.prism.model import PRISMModel
 
 
 class TestPRISMModelInstantiation:

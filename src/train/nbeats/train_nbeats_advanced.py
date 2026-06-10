@@ -23,7 +23,7 @@ from train.common import (
 )
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.mase_loss import MASELoss
-from dl_techniques.models.nbeats import create_nbeats_model
+from dl_techniques.models.time_series.nbeats import create_nbeats_model
 from dl_techniques.optimization.warmup_schedule import WarmupSchedule
 from dl_techniques.datasets.time_series import TimeSeriesGeneratorConfig, TimeSeriesGenerator
 from dl_techniques.analyzer import AnalysisConfig

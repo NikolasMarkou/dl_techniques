@@ -38,7 +38,7 @@ from train.common import (
     create_ts_argument_parser,
 )
 from dl_techniques.utils.logger import logger
-from dl_techniques.models.mdn import MDNModel
+from dl_techniques.models.time_series.mdn import MDNModel
 from dl_techniques.datasets.time_series import (
     TimeSeriesGenerator,
     TimeSeriesGeneratorConfig,
