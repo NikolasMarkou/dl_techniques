@@ -366,7 +366,19 @@ class DeepARPerformanceCallback(TimeSeriesPerformanceCallback):
         super().__init__(config, save_dir, model_name)
 
     def _prepare_viz_data(self) -> Tuple[np.ndarray, np.ndarray]:
-        return _prepare_viz_data_from_processor(self.processor, self.config.plot_top_k_patterns)
+        # DeepAR's processor yields dict inputs ({'target','covariates'}), so the
+        # generic `_prepare_viz_data_from_processor` would stack a list of dicts
+        # into a 1-D object array. Extract and stack the 'target' window
+        # [T, D] per sample into a proper [B, T, D] array for the fan-chart split.
+        viz_targets = []
+        for x, _y in self.processor._test_generator_raw():
+            tgt = x['target'] if isinstance(x, dict) else x
+            viz_targets.append(np.asarray(tgt, dtype=np.float32))
+            if len(viz_targets) >= self.config.plot_top_k_patterns:
+                break
+        if not viz_targets:
+            return np.array([]), np.array([])
+        return np.stack(viz_targets, axis=0), np.zeros((len(viz_targets),), np.float32)
 
     def _extend_history(self, logs: dict) -> None:
         self._track_lr(logs)

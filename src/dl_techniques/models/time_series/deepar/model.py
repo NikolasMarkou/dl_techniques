@@ -543,6 +543,17 @@ class DeepAR(keras.Model, ForecastMixin):
             shape ``[B, H, D, Q]`` ordered to match ``quantile_levels``, and
             ``samples`` shape ``[S, B, H, D]`` (non-``None``).
         """
+        # DECISION plan_2026-06-10_7036cab1/D-001
+        # Force a SINGLE predict batch. `predict_step` returns (S, B, H, D) with
+        # axis-0 = num_samples (NOT batch). Keras' default multi-batch predict
+        # concatenates per-batch outputs along axis 0 (the sample axis), which
+        # scrambles the result to the last partial batch's B (observed: y_true
+        # (928,8,1) vs point (32,8,1)). Passing batch_size = B keeps it one batch
+        # (correct shapes) and is also faster: the sampling loop is vectorized
+        # over B, so one big batch beats many re-batched calls.
+        cond = x['conditioning_target'] if isinstance(x, dict) else x
+        kwargs.setdefault('batch_size', int(np.asarray(cond).shape[0]))
+        kwargs.setdefault('verbose', 0)
         samples = np.asarray(self.predict(x, **kwargs))      # (S, B, H, D)
         point = samples.mean(axis=0)                         # (B, H, D)
         levels = list(quantile_levels) if quantile_levels is not None else [0.1, 0.5, 0.9]
