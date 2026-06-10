@@ -45,12 +45,12 @@ import tensorflow as tf
 from train.common import (
     setup_gpu,
     create_callbacks as create_common_callbacks,
-    generate_training_curves,
     set_seeds,
     json_numpy_default,
     create_learning_rate_schedule,
     BaseTimeSeriesTrainingConfig,
     WindowedTimeSeriesProcessor,
+    TimeSeriesPerformanceCallback,
     _fill_nans,
 )
 from dl_techniques.utils.logger import logger
@@ -345,8 +345,27 @@ class AdaptiveEMATrainingWrapper(keras.Model):
 # Visualization callback
 # ---------------------------------------------------------------------
 
-class AdaptiveEMAPerformanceCallback(keras.callbacks.Callback):
-    """Visualizes predictions vs. realized future slope or in-regime mask."""
+class AdaptiveEMAPerformanceCallback(TimeSeriesPerformanceCallback):
+    """Visualizes predictions vs. realized future slope or in-regime mask.
+
+    Thin subclass of :class:`TimeSeriesPerformanceCallback`. The base owns the
+    scaffolding (``__init__`` + makedirs, ``loss``/``val_loss`` accumulation, the
+    ``visualize_every_n_epochs`` gate, learning-curve delegation to
+    ``generate_training_curves``, and — critically — the D-001 non-fatal
+    try/except guard around viz-data preparation so a viz-prep failure can never
+    abort training, I1). This subclass overrides only the three genuinely
+    bespoke hooks:
+
+    - :meth:`_prepare_viz_data` — pulls fixed ``(context, slope/regime target)``
+      samples from the AdaptiveEMA processor (under the base non-fatal guard).
+    - :meth:`_extend_history` — tracks the learning rate via :meth:`_track_lr`.
+    - :meth:`_plot_predictions` — the slope/signal/quantile-band plot stays
+      bespoke (input-domain slope semantics; it is deliberately NOT routed
+      through ``_plot_ts_forecast``, which assumes a forecast-horizon target).
+
+    Per SYSTEM.md, Keras callbacks are NOT
+    ``@keras.saving.register_keras_serializable``.
+    """
 
     def __init__(
         self,
@@ -354,52 +373,28 @@ class AdaptiveEMAPerformanceCallback(keras.callbacks.Callback):
         processor: AdaptiveEMADataProcessor,
         save_dir: str,
     ) -> None:
-        super().__init__()
-        self.config = config
+        # processor must be stored BEFORE super().__init__: the base ctor calls
+        # _prepare_viz_data() (inside its non-fatal guard), which reads it.
         self.processor = processor
-        self.save_dir = save_dir
-        os.makedirs(self.save_dir, exist_ok=True)
-        self.viz_x, self.viz_y = self.processor._viz_samples(
-            self.config.plot_top_k_patterns
-        )
-        self.training_history: Dict[str, List[float]] = {
-            "loss": [], "val_loss": [], "lr": []
-        }
+        super().__init__(config, save_dir, model_name="AdaptiveEMA")
 
-    def on_epoch_end(
-        self, epoch: int, logs: Optional[Dict[str, Any]] = None
-    ) -> None:
-        logs = logs or {}
-        self.training_history["loss"].append(float(logs.get("loss", 0.0)))
-        self.training_history["val_loss"].append(
-            float(logs.get("val_loss", 0.0))
-        )
-        try:
-            lr = float(
-                keras.ops.convert_to_numpy(self.model.optimizer.learning_rate)
-            )
-        except Exception:
-            lr = 0.0
-        self.training_history["lr"].append(lr)
+    def _prepare_viz_data(self) -> Tuple[np.ndarray, np.ndarray]:
+        return self.processor._viz_samples(self.config.plot_top_k_patterns)
 
-        if (epoch + 1) % self.config.visualize_every_n_epochs != 0:
-            return
+    def _extend_history(self, logs: Dict[str, Any]) -> None:
+        self._track_lr(logs)
 
-        logger.info(f"Visualizations for epoch {epoch + 1}")
-        if self.config.create_learning_curves:
-            try:
-                generate_training_curves(
-                    history=self.training_history,
-                    results_dir=self.save_dir,
-                    filename=f"learning_curves_epoch_{epoch + 1:03d}",
-                )
-            except Exception as exc:
-                logger.warning(f"Learning-curve plot failed: {exc}")
+    @property
+    def viz_x(self) -> np.ndarray:
+        return self.viz_test_data[0]
 
-        if self.config.create_prediction_plots and len(self.viz_x) > 0:
-            self._plot_predictions(epoch)
+    @property
+    def viz_y(self) -> np.ndarray:
+        return self.viz_test_data[1]
 
     def _plot_predictions(self, epoch: int) -> None:
+        if len(self.viz_x) == 0:
+            return
         preds = self.model(self.viz_x, training=False)
         if not isinstance(preds, np.ndarray):
             preds = np.asarray(preds)
@@ -640,9 +635,21 @@ class AdaptiveEMATrainer:
     def _save_results(
         self, results: Dict[str, Any], exp_dir: str
     ) -> None:
+        # DECISION plan_2026-06-10_31eed970/D-001: AdaptiveEMASlopeFilterModel is
+        # intentionally and PERMANENTLY ForecastMixin-EXEMPT (I7, user-confirmed).
+        # It is a signal/regime model whose outputs live in the INPUT domain
+        # ([B, T] slope/regime tensors), NOT the forecast horizon ([B, H, F]) that
+        # `compute_post_hoc_forecast_metrics` (coverage/sharpness) assumes. Forcing
+        # a `predict_forecast` onto it would fabricate a forecast and emit
+        # misleading metrics. So this trainer emits a SCHEMA-PLACEHOLDER empty
+        # `post_hoc_metrics` block (NOT a fabricated forecast) purely to keep
+        # results.json shape-uniform with the four contract-joining TS trainers.
+        # Do NOT populate this block or add `_forecast` to the model. See
+        # decisions.md D-001 + plan.md I7.
         serializable = {
             "history": results["history"],
             "test_metrics": results["test_metrics"],
+            "post_hoc_metrics": results.get("post_hoc_metrics", {}),
             "final_epoch": results["final_epoch"],
             "onnx_path": results.get("onnx_path"),
             "config": self.config.__dict__,
