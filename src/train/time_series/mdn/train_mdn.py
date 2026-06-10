@@ -393,27 +393,66 @@ class MDNTrainer(BaseTimeSeriesTrainer):
         # viz_data tuple). This base hook is intentionally unused.
         raise NotImplementedError("MDN builds its callback in _make_callbacks")
 
-    def _make_callbacks(self, exp_dir: str) -> List:
+    def _make_callbacks(self, exp_dir: Optional[str] = None) -> List:
         """Override: mdn uses ``include_analyzer=False`` / ``patience=15`` /
         ``model_name="MDN"`` and seeds the perf callback with the pre-built
         ``test_data_raw`` tuple (exposed on ``self._test_data_raw`` by the base
         ``_train_model``). ``use_lr_schedule=False`` (mdn uses a constant LR).
         """
-        viz_dir = os.path.join(exp_dir, 'visualizations')
-        os.makedirs(viz_dir, exist_ok=True)
-
-        callbacks, _ = create_common_callbacks(
+        # DECISION plan_2026-06-10_39646d39/D-009
+        # Pass a BARE prefix (self._build_results_prefix()) to
+        # create_common_callbacks and adopt its RETURNED results_dir as
+        # self.exp_dir -- the D-009 bare-prefix contract, mirroring prism/tirex.
+        # Do NOT pass the pre-created full exp_dir path as results_dir_prefix and
+        # do NOT rely on the base _create_experiment_dir here: passing the full
+        # path as prefix built a SEPARATE doubly-nested
+        # results/{full}_MDN_{ts2}/ that received CSVLogger/ModelCheckpoint while
+        # results.json/visualizations landed in the discarded first dir.
+        # The exp_dir param is ignored on purpose. See decisions.md D-009.
+        callbacks, results_dir = create_common_callbacks(
             model_name="MDN",
-            results_dir_prefix=exp_dir,
+            results_dir_prefix=self._build_results_prefix(),
             monitor="val_loss",
             patience=15,
             use_lr_schedule=False,
             include_terminate_on_nan=True,
             include_analyzer=False,
         )
+        self.exp_dir = results_dir
+        viz_dir = os.path.join(self.exp_dir, 'visualizations')
+        os.makedirs(viz_dir, exist_ok=True)
         callbacks.append(
             MDNPerformanceCallback(self.config, self._test_data_raw, viz_dir, "MDN"))
         return callbacks
+
+    def run_experiment(self) -> Dict[str, Any]:
+        """Base skeleton with the D-009 dir resolution (mirrors prism/tirex).
+
+        Overridden so ``self.exp_dir`` is resolved from
+        ``create_common_callbacks``' returned dir (inside ``_train_model`` ->
+        ``_make_callbacks``) instead of the base ``_create_experiment_dir``.
+        Passing ``exp_dir=None`` to ``_train_model`` means no first dir is
+        pre-built; CSVLogger/ModelCheckpoint, results.json, and visualizations
+        all land in the single returned dir.
+        """
+        logger.info(f"Starting {self.config.experiment_name} training experiment")
+
+        data_pipeline = self.processor.prepare_datasets()
+        self.model = self._build_model()
+        logger.info(f"Model params: {self.model.count_params():,}")
+        self.model.summary(print_fn=logger.info)
+
+        # _train_model -> _make_callbacks sets self.exp_dir (D-009).
+        training_results = self._train_model(data_pipeline, exp_dir=None)
+        logger.info(f"Results: {self.exp_dir}")
+
+        if self.config.save_results:
+            self._save_results(training_results, self.exp_dir)
+
+        return {
+            'config': self.config, 'experiment_dir': self.exp_dir,
+            'training_results': training_results, 'results_dir': self.exp_dir
+        }
 
     def _save_results(self, results: Dict[str, Any], exp_dir: str,
                       extra_fields: Optional[Dict[str, Any]] = None) -> None:
