@@ -39,6 +39,7 @@ Design notes:
     per repo convention.
 """
 
+import argparse
 from typing import List, Optional
 
 import numpy as np
@@ -46,6 +47,61 @@ import numpy as np
 import keras
 
 from dl_techniques.utils.logger import logger
+
+
+def create_ts_export_argument_parser(description: str) -> argparse.ArgumentParser:
+    """Build the shared argument parser for standard ONNX export scripts.
+
+    Factors the byte-identical 7-argument ``argparse`` block previously copied
+    verbatim across the standard single-tensor export scripts (``tirex``,
+    ``prism``, ``xlstm``, ``mdn``, ``nbeats``). Each script passes its own
+    ``description`` and keeps its bespoke bits (``DEFAULT_INPUT_LENGTH`` constant,
+    ``config_keys`` list, custom-object ``noqa`` imports). The bespoke exporters
+    (``deepar``, ``adaptive_ema``) do NOT use this parser.
+
+    The ``--input_length`` flag defaults to ``None`` (a user OVERRIDE): when not
+    provided, each script resolves the length itself via
+    :func:`detect_input_length` against its own ``DEFAULT_INPUT_LENGTH``.
+
+    Args:
+        description: The ``argparse`` program description (per-script).
+
+    Returns:
+        An :class:`argparse.ArgumentParser` exposing the 7 standard export args:
+        ``--model_path``, ``--output_path``, ``--opset_version``,
+        ``--input_length``, ``--num_features``, ``--verify``,
+        ``--num_verify_samples``.
+    """
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument(
+        "--model_path", type=str, required=True,
+        help="Path to the .keras model file"
+    )
+    parser.add_argument(
+        "--output_path", type=str, default=None,
+        help="Output path for ONNX file. Defaults to model directory."
+    )
+    parser.add_argument(
+        "--opset_version", type=int, default=17,
+        help="ONNX opset version (default: 17)"
+    )
+    parser.add_argument(
+        "--input_length", type=int, default=None,
+        help="Input sequence length. Auto-detected if not specified."
+    )
+    parser.add_argument(
+        "--num_features", type=int, default=1,
+        help="Number of input features (default: 1)"
+    )
+    parser.add_argument(
+        "--verify", action="store_true",
+        help="Verify ONNX output matches Keras output"
+    )
+    parser.add_argument(
+        "--num_verify_samples", type=int, default=100,
+        help="Number of samples for verification (default: 100)"
+    )
+    return parser
 
 
 def detect_input_length(

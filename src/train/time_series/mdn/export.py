@@ -56,6 +56,7 @@ from dl_techniques.models.time_series.mdn import MDNModel  # noqa: F401
 from dl_techniques.layers.statistics.mdn_layer import MDNLayer  # noqa: F401
 from train.time_series.mdn.train_mdn import MultiTaskMDNModel  # noqa: F401
 from train.common.ts_export import (
+    create_ts_export_argument_parser,
     detect_input_length,
     export_standard_ts_model,
     verify_standard_ts_model,
@@ -68,36 +69,8 @@ DEFAULT_INPUT_LENGTH = 120
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
+    parser = create_ts_export_argument_parser(
         description="Export Multi-Task MDN Keras model to ONNX format (CPU-only)"
-    )
-    parser.add_argument(
-        "--model_path", type=str, required=True,
-        help="Path to the .keras model file"
-    )
-    parser.add_argument(
-        "--output_path", type=str, default=None,
-        help="Output path for ONNX file. Defaults to model directory."
-    )
-    parser.add_argument(
-        "--opset_version", type=int, default=17,
-        help="ONNX opset version (default: 17)"
-    )
-    parser.add_argument(
-        "--input_length", type=int, default=None,
-        help="Input sequence length. Auto-detected if not specified."
-    )
-    parser.add_argument(
-        "--num_features", type=int, default=1,
-        help="Number of input features (default: 1)"
-    )
-    parser.add_argument(
-        "--verify", action="store_true",
-        help="Verify ONNX output matches Keras output"
-    )
-    parser.add_argument(
-        "--num_verify_samples", type=int, default=100,
-        help="Number of samples for verification (default: 100)"
     )
     return parser.parse_args()
 
