@@ -191,6 +191,9 @@ class NBeatsNet(keras.Model, ForecastMixin):
     SEASONALITY_BLOCK: str = 'seasonality'
     VALID_STACK_TYPES: set = {GENERIC_BLOCK, TREND_BLOCK, SEASONALITY_BLOCK}
 
+    # Numeric floor for the RevIN std divisor (prevents division by zero).
+    NORM_EPSILON: float = 1e-7
+
     def __init__(
             self,
             backcast_length: int,
@@ -436,7 +439,7 @@ class NBeatsNet(keras.Model, ForecastMixin):
             mean = ops.mean(inputs_3d, axis=1, keepdims=True)
             std = ops.std(inputs_3d, axis=1, keepdims=True)
             # Prevent division by zero
-            std = ops.maximum(std, 1e-7)
+            std = ops.maximum(std, self.NORM_EPSILON)
             normalized_input = (inputs_3d - mean) / std
         else:
             normalized_input = inputs_3d

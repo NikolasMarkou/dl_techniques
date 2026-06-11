@@ -1,6 +1,6 @@
 import keras
-from typing import List
-from keras import ops, layers
+from typing import Any, Callable, Dict, List, Optional, Union
+from keras import ops, layers, initializers, regularizers
 
 # ---------------------------------------------------------------------
 # local imports
@@ -14,34 +14,87 @@ from dl_techniques.layers.time_series.nbeats_blocks import GenericBlock, TrendBl
 
 @keras.saving.register_keras_serializable()
 class NBeatsXNet(keras.Model):
-    """
-    N-BEATSx: Neural Basis Expansion Analysis with Exogenous Variables.
+    """N-BEATSx: Neural Basis Expansion Analysis with Exogenous Variables.
 
-    Extends the N-BEATS architecture to include exogenous variables via a specialized
-    block (ExogenousBlock) and TCN encoder.
+    **Intent**: Extend the interpretable doubly-residual N-BEATS topology
+    (Trend / Seasonality decomposition over a univariate target) with a
+    dedicated exogenous-variable pathway, so that side information available
+    both in the history window AND the forecast horizon (calendar features,
+    prices, weather, etc.) can be folded into the forecast without breaking
+    the residual stacking discipline. Endogenous blocks operate on the
+    normalized target residual; exogenous blocks (``ExogenousBlock``) consume
+    the history+future exogenous tensors via an optional TCN encoder and emit
+    their own backcast/forecast contributions into the same residual stream.
 
-    **Input Handling**:
-    To handle history and future exogenous variables, this model expects a dictionary
-    input during `fit` and `predict`:
-    ```python
-    inputs = {
-        "target_history": (batch, backcast_len, 1),
-        "exog_history":   (batch, backcast_len, exog_dim),
-        "exog_forecast":  (batch, forecast_len, exog_dim)
-    }
-    ```
+    Architecture::
+
+        target_history ──RevIN──> residual ─┐
+                                            v
+          ┌───────────────── stack 0 ─────────────────┐
+          │  block: Trend / Seasonality / Generic      │  (endogenous)
+          │  block: Exogenous(TCN(exog_hist, exog_fut)) │  (exogenous)
+          └───────────────────────────────────────────┘
+                 │ backcast (subtracted)  │ forecast (summed)
+                 v                         v
+              residual'               forecast_sum ──denorm──> y_hat
+
+    Each block subtracts its backcast from the running residual and adds its
+    forecast to the global accumulator; the summed forecast is de-normalized
+    with the target's own statistics (reversible instance norm).
+
+    **Input Handling**: history and future exogenous variables require a
+    dictionary input during ``fit`` / ``predict``::
+
+        inputs = {
+            "target_history": (batch, backcast_len, 1),
+            "exog_history":   (batch, backcast_len, exog_dim),
+            "exog_forecast":  (batch, forecast_len, exog_dim),
+        }
 
     **Stack Types**:
-    - 'trend', 'seasonality': Standard N-BEATS blocks (endogenous only).
-    - 'exogenous': NBEATSx block using TCN on exogenous variables.
-    - 'exogenous_interpretable': NBEATSx block using raw exogenous variables.
+        - ``'trend'`` / ``'seasonality'`` / ``'generic'``: standard N-BEATS
+          blocks (endogenous target residual only).
+        - ``'exogenous'``: NBEATSx block using a TCN over exogenous variables.
+        - ``'exogenous_interpretable'``: NBEATSx block using raw (un-encoded)
+          exogenous variables.
 
     Args:
-        exogenous_dim: Integer, number of exogenous features.
-        tcn_filters: Integer, channels for TCN encoder.
-        tcn_kernel_size: Integer, kernel size for TCN.
-        tcn_dropout: Float, dropout for TCN.
-        (All other args same as NBeatsNet)
+        backcast_length: Integer, length of the input (history) window.
+        forecast_length: Integer, length of the forecast horizon.
+        exogenous_dim: Integer, number of exogenous features per timestep.
+        stack_types: List of stack-type strings (see **Stack Types**).
+        nb_blocks_per_stack: Integer, blocks per stack.
+        thetas_dim: List of basis-expansion dims, one per stack.
+        hidden_layer_units: Integer, hidden width of each block's FC trunk.
+        share_weights_in_stack: Boolean, share FC weights across blocks in a
+            stack (threaded to each block as ``share_weights``).
+        use_normalization: Boolean, apply reversible instance norm to target.
+        dropout_rate: Float in [0, 1), residual-stream dropout probability.
+        activation: Activation for block hidden layers.
+        use_bias: Boolean, bias on block FC layers.
+        kernel_initializer: Initializer for block FC kernels.
+        kernel_regularizer: Optional regularizer for block FC kernels.
+        theta_regularizer: Optional regularizer for block theta projections.
+        tcn_filters: Integer, channels for the exogenous TCN encoder.
+        tcn_kernel_size: Integer, kernel size for the exogenous TCN.
+        tcn_dropout: Float, dropout inside the exogenous TCN.
+        **kwargs: Forwarded to ``keras.Model``.
+
+    Example:
+        >>> import keras
+        >>> model = NBeatsXNet(
+        ...     backcast_length=48, forecast_length=12, exogenous_dim=3,
+        ...     stack_types=['trend', 'exogenous'], thetas_dim=[4, 16],
+        ...     kernel_regularizer=keras.regularizers.L2(1e-4),
+        ... )
+        >>> inputs = {
+        ...     'target_history': keras.random.normal((8, 48, 1)),
+        ...     'exog_history':   keras.random.normal((8, 48, 3)),
+        ...     'exog_forecast':  keras.random.normal((8, 12, 3)),
+        ... }
+        >>> y_hat = model(inputs)
+        >>> y_hat.shape
+        (8, 12, 1)
     """
 
     EXOGENOUS_BLOCK: str = 'exogenous'
@@ -59,6 +112,11 @@ class NBeatsXNet(keras.Model):
             share_weights_in_stack: bool = False,
             use_normalization: bool = True,
             dropout_rate: float = 0.0,
+            activation: Union[str, Callable] = 'relu',
+            use_bias: bool = False,
+            kernel_initializer: Union[str, initializers.Initializer] = 'he_normal',
+            kernel_regularizer: Optional[regularizers.Regularizer] = None,
+            theta_regularizer: Optional[regularizers.Regularizer] = None,
             tcn_filters: int = 16,
             tcn_kernel_size: int = 3,
             tcn_dropout: float = 0.0,
@@ -66,17 +124,29 @@ class NBeatsXNet(keras.Model):
     ):
         super().__init__(**kwargs)
 
+        # Validate configuration before storing any state.
+        self._validate_configuration(
+            backcast_length, forecast_length, exogenous_dim,
+            nb_blocks_per_stack, hidden_layer_units, dropout_rate,
+            stack_types, thetas_dim,
+        )
+
         # Configuration
         self.backcast_length = backcast_length
         self.forecast_length = forecast_length
         self.exogenous_dim = exogenous_dim
-        self.stack_types = stack_types
+        self.stack_types = list(stack_types)
         self.nb_blocks_per_stack = nb_blocks_per_stack
-        self.thetas_dim = thetas_dim
+        self.thetas_dim = list(thetas_dim)
         self.hidden_layer_units = hidden_layer_units
         self.share_weights_in_stack = share_weights_in_stack
         self.use_normalization = use_normalization
         self.dropout_rate = dropout_rate
+        self.activation = activation
+        self.use_bias = use_bias
+        self.kernel_initializer = initializers.get(kernel_initializer)
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.theta_regularizer = regularizers.get(theta_regularizer)
 
         # TCN Config
         self.tcn_filters = tcn_filters
@@ -86,6 +156,40 @@ class NBeatsXNet(keras.Model):
         self.blocks = []
         self.dropout_layers = []
         self._create_block_stacks()
+
+    def _validate_configuration(
+            self,
+            backcast_length: int,
+            forecast_length: int,
+            exogenous_dim: int,
+            nb_blocks_per_stack: int,
+            hidden_layer_units: int,
+            dropout_rate: float,
+            stack_types: List[str],
+            thetas_dim: List[int],
+    ) -> None:
+        """Validate constructor arguments, raising ValueError on bad input."""
+        if backcast_length <= 0:
+            raise ValueError(f"backcast_length must be positive, got {backcast_length}")
+        if forecast_length <= 0:
+            raise ValueError(f"forecast_length must be positive, got {forecast_length}")
+        if exogenous_dim <= 0:
+            raise ValueError(f"exogenous_dim must be positive, got {exogenous_dim}")
+        if nb_blocks_per_stack <= 0:
+            raise ValueError(
+                f"nb_blocks_per_stack must be positive, got {nb_blocks_per_stack}"
+            )
+        if hidden_layer_units <= 0:
+            raise ValueError(
+                f"hidden_layer_units must be positive, got {hidden_layer_units}"
+            )
+        if not 0.0 <= dropout_rate < 1.0:
+            raise ValueError(f"dropout_rate must be in [0, 1), got {dropout_rate}")
+        if len(stack_types) != len(thetas_dim):
+            raise ValueError(
+                f"Length of stack_types ({len(stack_types)}) must match "
+                f"length of thetas_dim ({len(thetas_dim)})"
+            )
 
     def _create_block_stacks(self):
         dropout_counter = 0
@@ -104,7 +208,13 @@ class NBeatsXNet(keras.Model):
                     'forecast_length': self.forecast_length,
                     'input_dim': 1,  # Endogenous target is usually univariate
                     'output_dim': 1,
+                    'share_weights': self.share_weights_in_stack,
                     'use_normalization': self.use_normalization,
+                    'activation': self.activation,
+                    'use_bias': self.use_bias,
+                    'kernel_initializer': self.kernel_initializer,
+                    'kernel_regularizer': self.kernel_regularizer,
+                    'theta_regularizer': self.theta_regularizer,
                     'name': block_name
                 }
 
@@ -143,9 +253,25 @@ class NBeatsXNet(keras.Model):
         # Assuming input is dict, we define standard shapes
         dummy_resid_shape = (None, self.backcast_length * 1)  # Univariate target
 
+        # DECISION plan_2026-06-11_fe7401f4/D-003: materialize EVERY block's
+        # variables here (incl. the ExogenousBlock TCN's lazy Conv1D children)
+        # via a real symbolic forward pass. Do NOT rely on block.build() alone:
+        # ExogenousBlock.build() calls self.encoder.build(...) on a
+        # TemporalConvNet that has NO real build() method, so its inner Conv1D
+        # layers stay unbuilt and .keras load fails ("layer was never built but
+        # the weights file lists N variables"). A symbolic call forces those
+        # children to exist BEFORE Keras restores weights on load. The TCN
+        # itself is out of scope; do not patch it. See decisions.md D-003.
+        dummy_resid = ops.zeros((1, self.backcast_length * 1))
+        dummy_x_hist = ops.zeros((1, self.backcast_length, self.exogenous_dim))
+        dummy_x_fore = ops.zeros((1, self.forecast_length, self.exogenous_dim))
+
         for stack in self.blocks:
             for block in stack:
                 block.build(dummy_resid_shape)
+                if isinstance(block, ExogenousBlock):
+                    # Forces the TCN encoder's Conv1D children to build.
+                    block(dummy_resid, exogenous_inputs=(dummy_x_hist, dummy_x_fore))
 
         super().build(input_shape)
 
@@ -217,7 +343,7 @@ class NBeatsXNet(keras.Model):
         # Return only forecast for predict() consistency
         return forecast_3d
 
-    def get_config(self):
+    def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({
             'backcast_length': self.backcast_length,
@@ -227,13 +353,36 @@ class NBeatsXNet(keras.Model):
             'nb_blocks_per_stack': self.nb_blocks_per_stack,
             'thetas_dim': self.thetas_dim,
             'hidden_layer_units': self.hidden_layer_units,
+            'share_weights_in_stack': self.share_weights_in_stack,
+            'use_normalization': self.use_normalization,
+            'dropout_rate': self.dropout_rate,
+            'activation': self.activation,
+            'use_bias': self.use_bias,
+            'kernel_initializer': initializers.serialize(self.kernel_initializer),
+            'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
+            'theta_regularizer': regularizers.serialize(self.theta_regularizer),
             'tcn_filters': self.tcn_filters,
             'tcn_kernel_size': self.tcn_kernel_size,
             'tcn_dropout': self.tcn_dropout,
-            'use_normalization': self.use_normalization,
-            'dropout_rate': self.dropout_rate
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> 'NBeatsXNet':
+        """Reconstruct from config, deserializing initializer/regularizers."""
+        if config.get('kernel_initializer') is not None:
+            config['kernel_initializer'] = initializers.deserialize(
+                config['kernel_initializer']
+            )
+        if config.get('kernel_regularizer') is not None:
+            config['kernel_regularizer'] = regularizers.deserialize(
+                config['kernel_regularizer']
+            )
+        if config.get('theta_regularizer') is not None:
+            config['theta_regularizer'] = regularizers.deserialize(
+                config['theta_regularizer']
+            )
+        return cls(**config)
 
 # ---------------------------------------------------------------------
 

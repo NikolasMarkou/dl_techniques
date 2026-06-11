@@ -7,7 +7,12 @@ from keras import ops
 import tensorflow as tf
 from typing import Dict, Any, Tuple
 
-from dl_techniques.models.time_series.nbeats import NBeatsNet, create_nbeats_model
+from dl_techniques.models.time_series.nbeats import (
+    NBeatsNet,
+    create_nbeats_model,
+    NBeatsXNet,
+    create_nbeatsx_model,
+)
 
 
 class TestNBeatsNet:
@@ -579,6 +584,134 @@ class TestNBeatsFactory:
         # Test invalid stack types (should raise error from NBeatsNet validation)
         with pytest.raises(ValueError):
             create_nbeats_model(stack_types=['invalid_stack_type'])
+
+
+class TestNBeatsXNet:
+    """First-ever coverage for NBeatsXNet (exogenous-variable N-BEATS)."""
+
+    @pytest.fixture
+    def xnet_config(self) -> Dict[str, Any]:
+        """Default NBeatsXNet config (default initializer/regularizer/activation)."""
+        return {
+            'backcast_length': 48,
+            'forecast_length': 12,
+            'exogenous_dim': 3,
+            'stack_types': ['trend', 'seasonality', 'exogenous'],
+            'nb_blocks_per_stack': 2,
+            'thetas_dim': [4, 8, 16],
+            'hidden_layer_units': 32,
+            'use_normalization': True,
+            'dropout_rate': 0.0,
+        }
+
+    @pytest.fixture
+    def xnet_inputs(self, xnet_config) -> Dict[str, Any]:
+        b = xnet_config['backcast_length']
+        f = xnet_config['forecast_length']
+        e = xnet_config['exogenous_dim']
+        return {
+            'target_history': keras.random.normal((6, b, 1)),
+            'exog_history': keras.random.normal((6, b, e)),
+            'exog_forecast': keras.random.normal((6, f, e)),
+        }
+
+    def test_forward_pass(self, xnet_config, xnet_inputs):
+        model = NBeatsXNet(**xnet_config)
+        out = model(xnet_inputs)
+        assert out.shape == (6, xnet_config['forecast_length'], 1)
+        assert not np.allclose(ops.convert_to_numpy(out), 0.0, atol=1e-6)
+
+    def test_config_completeness(self, xnet_config):
+        """get_config must emit EVERY __init__ parameter."""
+        model = NBeatsXNet(**xnet_config)
+        config = model.get_config()
+
+        # Params explicitly passed in the fixture.
+        for key in xnet_config:
+            assert key in config, f"Missing {key} in get_config()"
+
+        # Params that default in __init__ but MUST still be serialized
+        # (these were the dropped/missing keys the defect exposed).
+        expected_keys = [
+            'share_weights_in_stack', 'activation', 'use_bias',
+            'kernel_initializer', 'kernel_regularizer', 'theta_regularizer',
+            'tcn_filters', 'tcn_kernel_size', 'tcn_dropout',
+        ]
+        for key in expected_keys:
+            assert key in config, f"Missing default parameter {key} in get_config()"
+
+    def test_serialization_round_trip_nondefault(self, xnet_config, xnet_inputs):
+        """CRITICAL: round-trip with NON-DEFAULT regularizers/activation.
+
+        A default-only config would not exercise the newly-added get_config
+        keys; this case forces them through serialize/deserialize and asserts
+        numeric equality after a full .keras save/load.
+        """
+        config = dict(xnet_config)
+        config.update({
+            'activation': 'gelu',
+            'use_bias': True,
+            'kernel_regularizer': keras.regularizers.L2(1e-4),
+            'theta_regularizer': keras.regularizers.L1(1e-5),
+            'kernel_initializer': 'glorot_uniform',
+        })
+        model = NBeatsXNet(**config)
+
+        # Build via forward pass before saving (subclassed dict-input model).
+        original = model(xnet_inputs)
+
+        # Sanity: the non-default complex objects survive get_config and are
+        # re-created on from_config (in-memory round-trip first).
+        cfg = model.get_config()
+        reconstructed = NBeatsXNet.from_config(cfg)
+        assert isinstance(
+            reconstructed.kernel_regularizer, keras.regularizers.L2
+        )
+        assert isinstance(
+            reconstructed.theta_regularizer, keras.regularizers.L1
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, 'nbeatsx_nondefault.keras')
+            model.save(filepath)
+
+            loaded = keras.models.load_model(filepath)
+            loaded_out = loaded(xnet_inputs)
+
+            np.testing.assert_allclose(
+                ops.convert_to_numpy(original),
+                ops.convert_to_numpy(loaded_out),
+                rtol=1e-6, atol=1e-6,
+                err_msg="NBeatsXNet predictions should match after serialization",
+            )
+
+    def test_validation_errors(self):
+        with pytest.raises(ValueError, match="backcast_length must be positive"):
+            NBeatsXNet(backcast_length=0, forecast_length=12, exogenous_dim=2,
+                       stack_types=['trend'], thetas_dim=[4])
+        with pytest.raises(ValueError, match="forecast_length must be positive"):
+            NBeatsXNet(backcast_length=24, forecast_length=-1, exogenous_dim=2,
+                       stack_types=['trend'], thetas_dim=[4])
+        with pytest.raises(ValueError, match="exogenous_dim must be positive"):
+            NBeatsXNet(backcast_length=24, forecast_length=12, exogenous_dim=0,
+                       stack_types=['trend'], thetas_dim=[4])
+        with pytest.raises(ValueError, match="dropout_rate must be in"):
+            NBeatsXNet(backcast_length=24, forecast_length=12, exogenous_dim=2,
+                       stack_types=['trend'], thetas_dim=[4], dropout_rate=1.0)
+        with pytest.raises(ValueError, match="Length of stack_types .* must match"):
+            NBeatsXNet(backcast_length=24, forecast_length=12, exogenous_dim=2,
+                       stack_types=['trend', 'exogenous'], thetas_dim=[4])
+
+    def test_factory(self):
+        model = create_nbeatsx_model(
+            backcast_length=72, forecast_length=24, exogenous_dim=4,
+            stack_types=['trend', 'exogenous'],
+        )
+        assert isinstance(model, NBeatsXNet)
+        assert model.backcast_length == 72
+        assert model.forecast_length == 24
+        assert model.exogenous_dim == 4
+        assert model.thetas_dim == [4, 16]
 
 
 if __name__ == "__main__":
