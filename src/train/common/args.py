@@ -3,6 +3,8 @@
 import argparse
 from typing import Optional, List
 
+from dl_techniques.datasets.time_series import TimeSeriesGeneratorConfig
+
 
 # ---------------------------------------------------------------------
 
@@ -74,9 +76,10 @@ def create_base_argument_parser(
 def create_ts_argument_parser(description: str) -> argparse.ArgumentParser:
     """Create argument parser with the shared time-series training arguments.
 
-    Consolidates the argparse block duplicated verbatim across the four
-    synthetic time-series trainers (mdn, nbeats, prism, tirex). Scripts extend
-    the returned parser with architecture-specific arguments before parsing:
+    Consolidates the argparse block duplicated across the synthetic
+    time-series trainers (mdn, nbeats, prism, tirex, deepar, xlstm,
+    adaptive_ema). Scripts extend the returned parser with
+    architecture-specific arguments before parsing:
 
         parser = create_ts_argument_parser("Train MyTSModel")
         parser.add_argument('--preset', type=str, default='small')
@@ -112,6 +115,12 @@ def create_ts_argument_parser(description: str) -> argparse.ArgumentParser:
                         help="Root output directory")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed")
+
+    # Synthetic data generation
+    parser.add_argument("--n_samples", type=int, default=10000,
+                        help="Number of synthetic series samples to generate")
+    parser.add_argument("--noise_level", type=float, default=0.1,
+                        help="Default noise level for the synthetic generator")
 
     # Training
     parser.add_argument("--epochs", type=int, default=200,
@@ -161,3 +170,28 @@ def create_ts_argument_parser(description: str) -> argparse.ArgumentParser:
                         help="GPU device index to use (default: all GPUs)")
 
     return parser
+
+
+# ---------------------------------------------------------------------
+
+def build_generator_config(args: argparse.Namespace) -> TimeSeriesGeneratorConfig:
+    """Build a ``TimeSeriesGeneratorConfig`` from parsed TS training args.
+
+    Deduplicates the copy-pasted ``TimeSeriesGeneratorConfig(...)`` triple
+    previously scattered across the synthetic time-series trainers, wiring the
+    shared CLI flags (``--n_samples``, ``--seed``, ``--noise_level``) into the
+    generator config's corresponding fields.
+
+    Args:
+        args: Parsed namespace from a parser produced by
+            ``create_ts_argument_parser`` (must carry ``n_samples``, ``seed``,
+            and ``noise_level`` attributes).
+
+    Returns:
+        A ``TimeSeriesGeneratorConfig`` populated from ``args``.
+    """
+    return TimeSeriesGeneratorConfig(
+        n_samples=args.n_samples,
+        random_seed=args.seed,
+        default_noise_level=args.noise_level,
+    )
