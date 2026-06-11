@@ -57,6 +57,7 @@ from train.common import (
     _prepare_viz_data_from_processor,
 )
 from train.common.timeseries import _plot_ts_forecast
+from train.common.args import build_generator_config
 from dl_techniques.utils.logger import logger
 from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.losses.quantile_loss import QuantileLoss
@@ -66,7 +67,6 @@ from dl_techniques.models.time_series.xlstm.forecaster import (
 )
 from dl_techniques.datasets.time_series import (
     TimeSeriesGenerator,
-    TimeSeriesGeneratorConfig,
 )
 
 plt.style.use('default')
@@ -463,10 +463,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    set_seeds(42)
+    set_seeds(args.seed)
     setup_gpu(args.gpu)
 
     config = XLSTMForecasterTrainingConfig(
+        seed=args.seed,
         experiment_name=args.experiment_name,
         input_length=args.input_length,
         prediction_length=args.prediction_length,
@@ -495,9 +496,7 @@ def main() -> None:
         onnx_opset_version=args.onnx_opset_version,
     )
 
-    generator_config = TimeSeriesGeneratorConfig(
-        n_samples=10000, random_seed=42, default_noise_level=0.1
-    )
+    generator_config = build_generator_config(args)
 
     try:
         trainer = XLSTMForecasterTrainer(config, generator_config)
