@@ -74,6 +74,17 @@ class TemporalBlock(layers.Layer):
             **kwargs
     ):
         super().__init__(**kwargs)
+        if filters <= 0:
+            raise ValueError(f"filters must be positive, got {filters}")
+        if kernel_size <= 0:
+            raise ValueError(f"kernel_size must be positive, got {kernel_size}")
+        if dilation_rate <= 0:
+            raise ValueError(f"dilation_rate must be positive, got {dilation_rate}")
+        if not (0.0 <= dropout_rate <= 1.0):
+            raise ValueError(
+                f"dropout_rate must be in [0, 1], got {dropout_rate}"
+            )
+
         self.filters = filters
         self.kernel_size = kernel_size
         self.dilation_rate = dilation_rate
@@ -102,21 +113,49 @@ class TemporalBlock(layers.Layer):
         )
         self.dropout2 = layers.Dropout(dropout_rate)
 
+        # Reused activation applied to the residual sum (created once, not per call)
+        self.act = layers.Activation(activation)
+
         # 1x1 conv for residual connection if dimensions mismatch
         self.downsample = None
 
     def build(self, input_shape):
         """
-        Build the layer, creating a 1x1 projection if input channels differ from filters.
+        Build the layer and all sublayers, threading shapes through each.
+
+        Explicitly builds ``conv1``, ``dropout1``, ``conv2``, ``dropout2``, the
+        residual activation, and (conditionally) the ``downsample`` projection so
+        that every inner ``Conv1D`` materializes its variables at build time —
+        before any forward pass or ``.keras`` weight restore.
 
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: tuple
         """
+        self.conv1.build(input_shape)
+        shape_f = (input_shape[0], input_shape[1], self.filters)
+        self.dropout1.build(shape_f)
+        self.conv2.build(shape_f)
+        self.dropout2.build(shape_f)
+        self.act.build(shape_f)
+
         if input_shape[-1] != self.filters:
             self.downsample = layers.Conv1D(
                 self.filters, kernel_size=1, padding='same'
             )
+            self.downsample.build(input_shape)
+
         super().build(input_shape)
+
+    def compute_output_shape(self, input_shape):
+        """
+        Compute the output shape of the temporal block.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
+        :return: Output shape ``(batch, time, filters)``.
+        :rtype: tuple
+        """
+        return (input_shape[0], input_shape[1], self.filters)
 
     def call(self, inputs, training=None):
         """
@@ -135,7 +174,7 @@ class TemporalBlock(layers.Layer):
         x = self.dropout2(x, training=training)
 
         res = inputs if self.downsample is None else self.downsample(inputs)
-        return layers.Activation(self.activation)(x + res)
+        return self.act(x + res)
 
     def get_config(self):
         """
@@ -215,6 +254,17 @@ class TemporalConvNet(layers.Layer):
             **kwargs
     ):
         super().__init__(**kwargs)
+        if filters <= 0:
+            raise ValueError(f"filters must be positive, got {filters}")
+        if kernel_size <= 0:
+            raise ValueError(f"kernel_size must be positive, got {kernel_size}")
+        if num_levels <= 0:
+            raise ValueError(f"num_levels must be positive, got {num_levels}")
+        if not (0.0 <= dropout_rate <= 1.0):
+            raise ValueError(
+                f"dropout_rate must be in [0, 1], got {dropout_rate}"
+            )
+
         self.filters = filters
         self.kernel_size = kernel_size
         self.num_levels = num_levels
@@ -233,6 +283,36 @@ class TemporalConvNet(layers.Layer):
                     activation=activation
                 )
             )
+
+    def build(self, input_shape):
+        """
+        Build each stacked ``TemporalBlock`` in sequence, threading shapes.
+
+        Block 0 receives ``input_shape``; each subsequent block receives the
+        previous block's output shape ``(batch, time, filters)``. Building each
+        block here materializes all inner ``Conv1D`` children at build time so
+        that ``encoder.build()`` (e.g. from ``ExogenousBlock``) propagates fully
+        and ``.keras`` weight restore lands correctly.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
+        """
+        current = input_shape
+        for block in self.blocks:
+            block.build(current)
+            current = block.compute_output_shape(current)
+        super().build(input_shape)
+
+    def compute_output_shape(self, input_shape):
+        """
+        Compute the output shape of the temporal convolutional network.
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: tuple
+        :return: Output shape ``(batch, time, filters)``.
+        :rtype: tuple
+        """
+        return (input_shape[0], input_shape[1], self.filters)
 
     def call(self, inputs, training=None):
         """
