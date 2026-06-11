@@ -37,6 +37,7 @@ from train.common import (
     BaseTimeSeriesTrainer,
     create_ts_argument_parser,
 )
+from train.common.args import build_generator_config
 from train.common.timeseries import compute_post_hoc_forecast_metrics, _plot_ts_forecast
 from dl_techniques.utils.logger import logger
 from dl_techniques.models.time_series.mdn import MDNModel
@@ -48,7 +49,6 @@ from dl_techniques.layers.statistics.mdn_layer import (
 )
 from dl_techniques.datasets.time_series import (
     TimeSeriesGenerator,
-    TimeSeriesGeneratorConfig,
     NormalizationMethod,
 )
 
@@ -83,8 +83,8 @@ class MDNTrainingConfig(BaseTimeSeriesTrainingConfig):
     plot_top_k_patterns: int = 9     # base default: 12
 
     # Sequence
-    window_size: int = 120
-    pred_horizon: int = 1
+    input_length: int = 120
+    prediction_length: int = 1
     stride: int = 1
 
     # Model architecture
@@ -112,8 +112,8 @@ class MDNTrainingConfig(BaseTimeSeriesTrainingConfig):
 
     def __post_init__(self) -> None:
         super().__post_init__()  # ratio-sum invariant
-        if self.window_size <= 0:
-            raise ValueError("window_size must be positive")
+        if self.input_length <= 0:
+            raise ValueError("input_length must be positive")
 
 
 @keras.saving.register_keras_serializable()
@@ -126,7 +126,7 @@ class MultiTaskMDNModel(keras.Model, ForecastMixin):
     state, so ``get_config`` / round-trip behaviour is unaffected (invariant I3).
 
     Multi-step horizon (Option A / D-001): the MDN core is built with
-    ``output_dimension = config.pred_horizon``, so the model emits ONE joint
+    ``output_dimension = config.prediction_length``, so the model emits ONE joint
     H-dimensional Gaussian mixture whose mixture weights pi are SHARED across the H
     horizon steps (diagonal-joint: the steps are independent conditional on the
     chosen mixture component). This is the documented modeling concession of
@@ -154,7 +154,7 @@ class MultiTaskMDNModel(keras.Model, ForecastMixin):
             self.att_norm = keras.layers.LayerNormalization()
 
         self.flatten = keras.layers.Flatten()
-        # DECISION plan_2026-06-10_721a80b5/D-001: output_dimension = pred_horizon
+        # DECISION plan_2026-06-10_721a80b5/D-001: output_dimension = prediction_length
         # (Option A). One JOINT H-dim Gaussian mixture with mixture weights pi
         # SHARED across the H horizon steps (diagonal-joint). Do NOT "fix" this to
         # output_dimension=1 + an autoregressive/per-step-head scheme: Option B
@@ -163,8 +163,12 @@ class MultiTaskMDNModel(keras.Model, ForecastMixin):
         # constructor arg keeps MDNLayer/MDNModel byte-unchanged (invariant I1) and
         # every other consumer green. Trade-off: shared-pi across steps, acceptable
         # for univariate (F=1) windowed forecasting. See decisions.md D-001.
+        #
+        # MDNModel's ctor param `output_dimension` is FIXED model API (mdn/model.py);
+        # the plan_2026-06-11 rename maps config.prediction_length onto it -- the
+        # param name is NOT renamed (INV-1).
         self.mdn_core = MDNModel(
-            hidden_layers=config.hidden_units, output_dimension=config.pred_horizon,
+            hidden_layers=config.hidden_units, output_dimension=config.prediction_length,
             num_mixtures=config.num_mixtures, dropout_rate=config.dropout_rate,
             use_batch_norm=config.use_batch_norm)
 
@@ -211,7 +215,7 @@ class MultiTaskMDNModel(keras.Model, ForecastMixin):
         :meth:`call` (edge case E2).
 
         Option A (D-001) shared-pi diagonal-joint concession: ``output_dimension``
-        is ``H = config.pred_horizon``, so the MDN emits ONE joint H-dim Gaussian
+        is ``H = config.prediction_length``, so the MDN emits ONE joint H-dim Gaussian
         mixture whose mixture weights pi are SHARED across the H horizon steps
         (the steps are independent conditional on the chosen component). This is
         valid for univariate (F=1) windowed forecasting and is the price of keeping
@@ -232,12 +236,12 @@ class MultiTaskMDNModel(keras.Model, ForecastMixin):
 
         Returns:
             A :class:`Forecast` with ``point`` ``[B, H, 1]`` and ``quantiles``
-            ``[B, H, 1, 2]`` (``H = config.pred_horizon``).
+            ``[B, H, 1, 2]`` (``H = config.prediction_length``).
         """
         cl = confidence_level if confidence_level is not None else getattr(
             getattr(self, 'config', None), 'confidence_level', 0.95)
 
-        H = self.config.pred_horizon
+        H = self.config.prediction_length
         mdn_layer = self.get_mdn_layer()
 
         point = np.asarray(get_point_estimate(self, x, mdn_layer))      # [B, H]
@@ -280,8 +284,11 @@ class MDNDataProcessor(WindowedTimeSeriesProcessor):
             generator,
             selected_patterns,
             pattern_to_category=None,  # uniform sampling
-            context_len=config.window_size,
-            horizon_len=config.pred_horizon,
+            # WindowedTimeSeriesProcessor.__init__ params context_len/horizon_len are
+            # FIXED base API (locked by test_timeseries_base.py); the rename maps
+            # config.input_length/prediction_length onto them, never renames them (INV-1).
+            context_len=config.input_length,
+            horizon_len=config.prediction_length,
             num_features=1,
             normalize=True,
             normalize_method=NormalizationMethod.ROBUST,
@@ -349,9 +356,9 @@ class MDNPerformanceCallback(TimeSeriesPerformanceCallback):
     def _plot_predictions(self, epoch: int) -> None:
         """Visualize MDN outputs: context, target, and predicted distribution.
 
-        For ``pred_horizon == 1`` this renders the original 3x3 mixture-PDF grid
+        For ``prediction_length == 1`` this renders the original 3x3 mixture-PDF grid
         (each subplot reconstructs the full mixture density at the single future
-        step). For ``pred_horizon > 1`` the scalar mixture-PDF view does not apply,
+        step). For ``prediction_length > 1`` the scalar mixture-PDF view does not apply,
         so each subplot is drawn via the shared ``_plot_ts_forecast`` band plot
         (context + true future + point forecast + central interval over the H-step
         horizon). The save path / dpi / bbox are identical in both branches (I5).
@@ -363,7 +370,7 @@ class MDNPerformanceCallback(TimeSeriesPerformanceCallback):
         sample_task = self.viz_inputs[1][indices]
         sample_target = self.viz_targets[indices]
 
-        if self.config.pred_horizon == 1:
+        if self.config.prediction_length == 1:
             params = self.model.predict((sample_seq, sample_task), verbose=0)
             mdn_layer = self.model.get_mdn_layer()
             mus, sigmas, pis = mdn_layer.split_mixture_params(params)
@@ -497,7 +504,7 @@ class MDNTrainer(BaseTimeSeriesTrainer):
         logger.info(f"Building Multi-Task MDN for {num_tasks} tasks")
         model = MultiTaskMDNModel(num_tasks, self.config)
 
-        dummy_seq = tf.zeros((1, self.config.window_size, 1))
+        dummy_seq = tf.zeros((1, self.config.input_length, 1))
         dummy_task = tf.zeros((1, 1), dtype=tf.int32)
         model((dummy_seq, dummy_task))
 
@@ -673,10 +680,14 @@ def build_parser() -> argparse.ArgumentParser:
         steps_per_epoch=200,
         learning_rate=5e-4,
         plot_top_k_patterns=9,
+        # mdn historically generated 5000 synthetic samples (vs the shared
+        # parser default of 10000); preserve the dataset size via set_defaults so
+        # build_generator_config(args) reproduces it.
+        n_samples=5000,
     )
     # MDN architecture-specific arguments.
-    parser.add_argument("--window_size", type=int, default=120)
-    parser.add_argument("--pred_horizon", type=int, default=1)
+    parser.add_argument("--input_length", type=int, default=120)
+    parser.add_argument("--prediction_length", type=int, default=1)
     parser.add_argument("--num_mixtures", type=int, default=12)
     parser.add_argument("--task_embedding_dim", type=int, default=32)
     parser.add_argument("--dropout_rate", type=float, default=0.3)
@@ -691,13 +702,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    set_seeds(42)
+    set_seeds(args.seed)
     setup_gpu(args.gpu)
 
     config = MDNTrainingConfig(
+        seed=args.seed,
         experiment_name=args.experiment_name,
-        window_size=args.window_size,
-        pred_horizon=args.pred_horizon,
+        input_length=args.input_length,
+        prediction_length=args.prediction_length,
         num_mixtures=args.num_mixtures,
         task_embedding_dim=args.task_embedding_dim,
         dropout_rate=args.dropout_rate,
@@ -712,9 +724,7 @@ def main() -> None:
         plot_top_k_patterns=args.plot_top_k_patterns,
     )
 
-    generator_config = TimeSeriesGeneratorConfig(
-        n_samples=5000, random_seed=42, default_noise_level=0.1
-    )
+    generator_config = build_generator_config(args)
 
     # Preserve mdn's original hard-exit teardown (os._exit(0)): a deliberate
     # force-exit that skips Python/atexit cleanup to avoid TF prefetch-thread
