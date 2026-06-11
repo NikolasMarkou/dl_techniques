@@ -22,11 +22,8 @@ References:
 
 import os
 import sys
-import json
 import math
-import random
 import argparse
-from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -46,36 +43,27 @@ from train.common import (
     setup_gpu,
     create_callbacks as create_common_callbacks,
     set_seeds,
-    json_numpy_default,
-    create_learning_rate_schedule,
     BaseTimeSeriesTrainingConfig,
     WindowedTimeSeriesProcessor,
     TimeSeriesPerformanceCallback,
+    BaseTimeSeriesTrainer,
+    create_ts_argument_parser,
+    create_learning_rate_schedule,
     _fill_nans,
 )
+from train.common.args import build_generator_config
 from dl_techniques.utils.logger import logger
+from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.losses.quantile_loss import QuantileLoss
 from dl_techniques.models.time_series.adaptive_ema.model import AdaptiveEMASlopeFilterModel
 from dl_techniques.datasets.time_series import (
     TimeSeriesGenerator,
-    TimeSeriesGeneratorConfig,
-    NormalizationMethod,
 )
-from dl_techniques.analyzer import AnalysisConfig
 
 # ---------------------------------------------------------------------
 
 plt.style.use('default')
 sns.set_palette("husl")
-
-
-# ---------------------------------------------------------------------
-# Reproducibility
-# ---------------------------------------------------------------------
-
-def set_random_seeds(seed: int = 42) -> None:
-    """Set random seeds for Python, NumPy, Keras and TF."""
-    set_seeds(seed)
 
 
 # ---------------------------------------------------------------------
@@ -104,9 +92,12 @@ class AdaptiveEMATrainingConfig(BaseTimeSeriesTrainingConfig):
     Field renames vs the pre-migration standalone config (base names adopted):
     ``plot_top_k_samples`` -> ``plot_top_k_patterns``,
     ``enable_quantile_head`` -> ``use_quantile_head``,
-    ``dataset_patterns`` -> ``target_categories``. ``prediction_horizon`` is kept
-    as an AdaptiveEMA-specific field (the future-slope horizon the training
-    wrapper slices to); the base has no equivalent.
+    ``dataset_patterns`` -> ``target_categories``,
+    ``prediction_horizon`` -> ``prediction_length`` (canonical TS name adopted in
+    step-9). ``prediction_length`` is AdaptiveEMA-specific here: semantically it is
+    the realized-slope horizon the training wrapper slices to (NOT a standard
+    forecast horizon — the model emits input-domain slope/regime tensors, I7), so
+    it is kept on this subclass rather than promoted to the base.
     """
 
     # Bookkeeping
@@ -137,9 +128,10 @@ class AdaptiveEMATrainingConfig(BaseTimeSeriesTrainingConfig):
     num_quantiles: int = 5
     quantile_dropout_rate: float = 0.1
 
-    # Data (AdaptiveEMA-specific; horizon is the future-slope length)
+    # Data (AdaptiveEMA-specific; prediction_length is the future-slope length,
+    # i.e. the realized-slope horizon — NOT a standard forecast horizon)
     input_length: int = 128
-    prediction_horizon: int = 24
+    prediction_length: int = 24
     num_features: int = 1
 
     def __post_init__(self) -> None:
@@ -148,9 +140,9 @@ class AdaptiveEMATrainingConfig(BaseTimeSeriesTrainingConfig):
             raise ValueError(
                 f"mode must be 'classification' or 'quantile', got '{self.mode}'"
             )
-        if self.input_length <= 0 or self.prediction_horizon <= 0:
+        if self.input_length <= 0 or self.prediction_length <= 0:
             raise ValueError(
-                "input_length and prediction_horizon must be positive"
+                "input_length and prediction_length must be positive"
             )
         if self.mode == "quantile" and not self.use_quantile_head:
             logger.warning(
@@ -199,7 +191,7 @@ class AdaptiveEMADataProcessor(WindowedTimeSeriesProcessor):
             selected_patterns,
             pattern_to_category=None,  # uniform sampling
             context_len=config.input_length,
-            horizon_len=config.prediction_horizon,
+            horizon_len=config.prediction_length,
             num_features=config.num_features,
             normalize=False,  # AdaptiveEMA uses its own _safe_normalize below
             patterns_to_mix=16,
@@ -244,7 +236,7 @@ class AdaptiveEMADataProcessor(WindowedTimeSeriesProcessor):
         """Build training target from the realized future segment.
 
         The synthetic ``TimeSeriesGenerator`` returns ``(T, 1)`` arrays, so
-        ``future`` may be 2D. Targets are 1D ``(prediction_horizon,)`` per the
+        ``future`` may be 2D. Targets are 1D ``(prediction_length,)`` per the
         :attr:`output_signature`, so we squeeze any trailing singleton feature
         axis defensively.
         """
@@ -304,32 +296,32 @@ class AdaptiveEMATrainingWrapper(keras.Model):
         self,
         base: AdaptiveEMASlopeFilterModel,
         output_key: str,
-        prediction_horizon: int,
+        prediction_length: int,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.base = base
         self.output_key = output_key
-        self.prediction_horizon = prediction_horizon
+        self.prediction_length = prediction_length
 
     def call(
         self, inputs: keras.KerasTensor, training: Optional[bool] = None
     ) -> keras.KerasTensor:
         outputs = self.base(inputs, training=training)
         tensor = outputs[self.output_key]
-        # Slice the trailing `prediction_horizon` timesteps so the target
+        # Slice the trailing `prediction_length` timesteps so the target
         # of shape (B, H) lines up.
         # tensor shape: (B, T) or (B, T, F) or (B, T, K)
         if len(tensor.shape) == 2:
-            return tensor[:, -self.prediction_horizon:]
-        return tensor[:, -self.prediction_horizon:, ...]
+            return tensor[:, -self.prediction_length:]
+        return tensor[:, -self.prediction_length:, ...]
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update(
             {
                 "output_key": self.output_key,
-                "prediction_horizon": self.prediction_horizon,
+                "prediction_length": self.prediction_length,
                 "base": keras.saving.serialize_keras_object(self.base),
             }
         )
@@ -410,7 +402,7 @@ class AdaptiveEMAPerformanceCallback(TimeSeriesPerformanceCallback):
         for i in range(num_plots):
             ax = axes[i]
             input_x = np.arange(-self.config.input_length, 0)
-            pred_x = np.arange(0, self.config.prediction_horizon)
+            pred_x = np.arange(0, self.config.prediction_length)
             ax.plot(
                 input_x, self.viz_x[i].flatten(), label="Input price",
                 color="blue", alpha=0.6,
@@ -455,7 +447,8 @@ class AdaptiveEMAPerformanceCallback(TimeSeriesPerformanceCallback):
         )
         plt.tight_layout()
         plt.savefig(
-            os.path.join(self.save_dir, f"predictions_epoch_{epoch + 1:03d}.png")
+            os.path.join(self.save_dir, f"predictions_epoch_{epoch + 1:03d}.png"),
+            dpi=150, bbox_inches='tight',
         )
         plt.close()
 
@@ -464,24 +457,96 @@ class AdaptiveEMAPerformanceCallback(TimeSeriesPerformanceCallback):
 # Trainer
 # ---------------------------------------------------------------------
 
-class AdaptiveEMATrainer:
-    """Orchestrates the full training experiment."""
+class AdaptiveEMATrainer(BaseTimeSeriesTrainer):
+    """Orchestrates the full AdaptiveEMA training experiment.
 
-    def __init__(
-        self,
-        config: AdaptiveEMATrainingConfig,
-        generator_config: TimeSeriesGeneratorConfig,
-    ) -> None:
-        self.config = config
-        self.generator = TimeSeriesGenerator(generator_config)
-        self.selected_patterns = self._select_patterns()
-        self.processor = AdaptiveEMADataProcessor(
-            config, self.generator, self.selected_patterns
+    Subclass of :class:`BaseTimeSeriesTrainer` (step-9 migration). The base owns
+    the skeleton (``__init__`` generator/pattern/processor setup, the canonical
+    ``_make_callbacks`` / ``_train_model`` / ``_save_results``). AdaptiveEMA keeps
+    only the genuine divergences as overrides:
+
+    - :meth:`_select_patterns` — KEPT: AdaptiveEMA iterates ``target_categories``
+      directly with a ``[:max_patterns_per_category]`` slice and a "first-6-tasks"
+      fallback (A5), which differs from the base category-balanced capper. Verified
+      divergent, so the override stays.
+    - :meth:`_build_processor` / :meth:`_build_model` / :meth:`_build_performance_callback`
+      — the three abstract base hooks.
+    - :meth:`_export_to_onnx` — KEPT: AdaptiveEMA's config carries ``input_length``
+      (no ``context_len``), so the base export (which reads ``config.context_len``)
+      does not apply; a minimal override builds the input signature from
+      ``input_length``.
+    - :meth:`run_experiment` — KEPT: needs a dummy forward pass to materialize the
+      :class:`AdaptiveEMATrainingWrapper` before ``count_params`` and folds the
+      ONNX ``onnx_path`` into ``results.json`` (like tirex).
+
+    ``_train_model`` and ``_save_results`` are INHERITED: the base versions are
+    equivalent modulo config (the base ``_compute_post_hoc_metrics`` returns ``{}``
+    for this ForecastMixin-EXEMPT model — I7 — matching the prior placeholder, and
+    ``_save_results`` accepts ``extra_fields={'onnx_path': ...}``).
+    """
+
+    def _build_processor(self) -> AdaptiveEMADataProcessor:
+        return AdaptiveEMADataProcessor(
+            self.config, self.generator, self.selected_patterns
         )
-        self.model: Optional[AdaptiveEMATrainingWrapper] = None
-        self.exp_dir: Optional[str] = None
+
+    def _build_results_prefix(self) -> str:
+        return f"{self.config.experiment_name}_{self.config.mode}"
+
+    def _build_performance_callback(
+        self, viz_dir: str
+    ) -> AdaptiveEMAPerformanceCallback:
+        return AdaptiveEMAPerformanceCallback(self.config, self.processor, viz_dir)
+
+    def _make_callbacks(self, exp_dir: Optional[str] = None) -> List:
+        # DECISION plan_2026-06-11_84296249/D-009: mirror tirex's D-009 fix. Pass a
+        # BARE prefix (`_build_results_prefix()`) to `create_common_callbacks` and
+        # adopt its RETURNED results_dir as `self.exp_dir`, because
+        # `create_callbacks` ALWAYS mints its own `results/{prefix}_{name}_{ts}` dir
+        # and writes `best_model.keras` there. The base `_make_callbacks` passes the
+        # pre-created full `exp_dir` as `results_dir_prefix`, which would yield a
+        # SEPARATE doubly-nested `results/results/..._..._ts2/best_model.keras` while
+        # `run_experiment` reads the ONNX source from the first dir -> checkpoint not
+        # found -> silent None on `--onnx`. Adopting the returned dir keeps
+        # checkpoint, viz, results.json, and the ONNX read path in ONE dir. The
+        # `exp_dir` param is ignored on purpose. Also keeps AdaptiveEMA's
+        # `model_name="AdaptiveEMA"` + `analyze_spectral=False` (few params).
+        # See decisions.md D-009.
+        callbacks, results_dir = create_common_callbacks(
+            model_name="AdaptiveEMA",
+            results_dir_prefix=self._build_results_prefix(),
+            monitor="val_loss",
+            patience=25,
+            use_lr_schedule=self.config.use_warmup,
+            include_terminate_on_nan=True,
+            include_analyzer=self.config.perform_deep_analysis,
+            analyzer_config=AnalysisConfig(
+                analyze_weights=True,
+                analyze_spectral=False,
+                analyze_calibration=False,
+                analyze_information_flow=False,
+                analyze_training_dynamics=False,
+                verbose=False,
+            ),
+            analyzer_start_epoch=self.config.analysis_start_epoch,
+            analyzer_epoch_frequency=self.config.analysis_frequency,
+        )
+        self.exp_dir = results_dir
+        viz_dir = os.path.join(self.exp_dir, "visualizations")
+        os.makedirs(viz_dir, exist_ok=True)
+        callbacks.append(self._build_performance_callback(viz_dir))
+        return callbacks
 
     def _select_patterns(self) -> List[str]:
+        # DECISION plan_2026-06-11_84296249/D-007: KEEP AdaptiveEMA's
+        # category-only pattern selection as an override (A5). It iterates
+        # `target_categories` directly, takes `sorted(tasks)[:max_per_category]`
+        # per category, and falls back to the first 6 generator tasks when nothing
+        # matches. This DIVERGES from the base `_select_patterns`, which iterates
+        # ALL candidate patterns once and caps per-category via a running
+        # `cat_counts` balancer (and applies `max_patterns` subsampling). The two
+        # produce different pattern sets, so do NOT delete this and inherit the
+        # base capper. See decisions.md D-007.
         all_categories = self.generator.get_task_categories()
         selected: List[str] = []
         for cat in (self.config.target_categories or []):
@@ -504,7 +569,7 @@ class AdaptiveEMATrainer:
         logger.info(f"Selected {len(selected)} patterns: {selected}")
         return selected
 
-    def create_model(self) -> AdaptiveEMATrainingWrapper:
+    def _build_model(self) -> AdaptiveEMATrainingWrapper:
         quantile_head_config: Optional[Dict[str, Any]] = None
         if self.config.use_quantile_head:
             quantile_head_config = {
@@ -548,7 +613,7 @@ class AdaptiveEMATrainer:
         wrapper = AdaptiveEMATrainingWrapper(
             base=base,
             output_key=output_key,
-            prediction_horizon=self.config.prediction_horizon,
+            prediction_length=self.config.prediction_length,
         )
 
         # LR schedule
@@ -572,95 +637,20 @@ class AdaptiveEMATrainer:
         wrapper.compile(optimizer=optimizer, loss=loss, metrics=metrics)
         return wrapper
 
-    def _build_results_prefix(self) -> str:
-        return f"{self.config.experiment_name}_{self.config.mode}"
-
-    def _train_model(
-        self, data_pipeline: Dict[str, Any], prefix: str
-    ) -> Dict[str, Any]:
-        callbacks, results_dir = create_common_callbacks(
-            model_name="AdaptiveEMA",
-            results_dir_prefix=prefix,
-            monitor="val_loss",
-            patience=25,
-            use_lr_schedule=self.config.use_warmup,
-            include_terminate_on_nan=True,
-            include_analyzer=self.config.perform_deep_analysis,
-            analyzer_config=AnalysisConfig(
-                analyze_weights=True,
-                analyze_spectral=False,
-                analyze_calibration=False,
-                analyze_information_flow=False,
-                analyze_training_dynamics=False,
-                verbose=False,
-            ),
-            analyzer_start_epoch=self.config.analysis_start_epoch,
-            analyzer_epoch_frequency=self.config.analysis_frequency,
-        )
-        self.exp_dir = results_dir
-        viz_dir = os.path.join(self.exp_dir, "visualizations")
-        os.makedirs(viz_dir, exist_ok=True)
-        callbacks.append(
-            AdaptiveEMAPerformanceCallback(self.config, self.processor, viz_dir)
-        )
-
-        history = self.model.fit(
-            data_pipeline["train_ds"],
-            validation_data=data_pipeline["val_ds"],
-            epochs=self.config.epochs,
-            steps_per_epoch=self.config.steps_per_epoch,
-            validation_steps=data_pipeline["validation_steps"],
-            callbacks=callbacks,
-            verbose=1,
-        )
-
-        logger.info("Evaluating on test set")
-        test_metrics = self.model.evaluate(
-            data_pipeline["test_ds"],
-            steps=data_pipeline["test_steps"],
-            verbose=1,
-            return_dict=True,
-        )
-
-        best_model_path = os.path.join(self.exp_dir, "best_model.keras")
-        onnx_path = self._export_to_onnx(best_model_path, self.exp_dir)
-
-        return {
-            "history": history.history,
-            "test_metrics": {k: float(v) for k, v in test_metrics.items()},
-            "final_epoch": len(history.history["loss"]),
-            "onnx_path": onnx_path,
-        }
-
-    def _save_results(
-        self, results: Dict[str, Any], exp_dir: str
-    ) -> None:
-        # DECISION plan_2026-06-10_31eed970/D-001: AdaptiveEMASlopeFilterModel is
-        # intentionally and PERMANENTLY ForecastMixin-EXEMPT (I7, user-confirmed).
-        # It is a signal/regime model whose outputs live in the INPUT domain
-        # ([B, T] slope/regime tensors), NOT the forecast horizon ([B, H, F]) that
-        # `compute_post_hoc_forecast_metrics` (coverage/sharpness) assumes. Forcing
-        # a `predict_forecast` onto it would fabricate a forecast and emit
-        # misleading metrics. So this trainer emits a SCHEMA-PLACEHOLDER empty
-        # `post_hoc_metrics` block (NOT a fabricated forecast) purely to keep
-        # results.json shape-uniform with the four contract-joining TS trainers.
-        # Do NOT populate this block or add `_forecast` to the model. See
-        # decisions.md D-001 + plan.md I7.
-        serializable = {
-            "history": results["history"],
-            "test_metrics": results["test_metrics"],
-            "post_hoc_metrics": results.get("post_hoc_metrics", {}),
-            "final_epoch": results["final_epoch"],
-            "onnx_path": results.get("onnx_path"),
-            "config": self.config.__dict__,
-        }
-        with open(os.path.join(exp_dir, "results.json"), "w") as f:
-            json.dump(serializable, f, indent=4, default=json_numpy_default)
-
     def _export_to_onnx(
         self, model_path: str, exp_dir: str
     ) -> Optional[str]:
+        # DECISION plan_2026-06-11_84296249/D-008: KEEP a minimal ONNX-export
+        # override. The base `_export_to_onnx` builds its input signature from
+        # `self.config.context_len`, but AdaptiveEMA's config carries
+        # `input_length` (the canonical TS name) and has NO `context_len` field, so
+        # the base method would AttributeError. Do NOT rename the config field to
+        # `context_len` just to inherit — `input_length` is the cross-trainer
+        # canonical name (steps 5-8). See decisions.md D-008.
         if not self.config.export_onnx:
+            return None
+        if not os.path.exists(model_path):
+            logger.warning(f"ONNX export skipped: checkpoint absent ({model_path})")
             return None
         onnx_path = os.path.join(exp_dir, "model.onnx")
         try:
@@ -686,12 +676,22 @@ class AdaptiveEMATrainer:
             return None
 
     def run_experiment(self) -> Dict[str, Any]:
+        """Base skeleton + AdaptiveEMA's dummy-forward build and ONNX fold-in.
+
+        Overridden (not the bare base ``run_experiment``) for two reasons: the
+        :class:`AdaptiveEMATrainingWrapper` is a functional wrapper that must see a
+        dummy forward pass before ``count_params`` reports a real number, and the
+        original ``results.json`` carried a 5th ``onnx_path`` key (folded in via
+        ``_save_results(extra_fields=...)``). ``self.exp_dir`` is resolved INSIDE
+        ``_train_model`` (via its ``_make_callbacks`` call, D-009) rather than the
+        base ``_create_experiment_dir``, so checkpoint / viz / results.json / the
+        ONNX read path all live in one directory.
+        """
         logger.info("Starting AdaptiveEMA training experiment")
-        prefix = self._build_results_prefix()
 
         data_pipeline = self.processor.prepare_datasets()
-        self.model = self.create_model()
-        # Build the wrapper with a dummy forward pass so params count is real
+        self.model = self._build_model()
+        # Materialize the wrapper with a dummy forward pass so count_params is real.
         dummy = np.zeros(
             (1, self.config.input_length, self.config.num_features),
             dtype=np.float32,
@@ -700,9 +700,18 @@ class AdaptiveEMATrainer:
         logger.info(f"Model params: {self.model.count_params():,}")
         self.model.summary(print_fn=logger.info)
 
-        training_results = self._train_model(data_pipeline, prefix)
+        # _train_model -> _make_callbacks sets self.exp_dir (D-009).
+        training_results = self._train_model(data_pipeline, exp_dir=None)
+        logger.info(f"Results: {self.exp_dir}")
+
+        best_model_path = os.path.join(self.exp_dir, "best_model.keras")
+        onnx_path = self._export_to_onnx(best_model_path, self.exp_dir)
+
         if self.config.save_results:
-            self._save_results(training_results, self.exp_dir)
+            self._save_results(
+                training_results, self.exp_dir,
+                extra_fields={"onnx_path": onnx_path},
+            )
         return {
             "config": self.config,
             "experiment_dir": self.exp_dir,
@@ -715,11 +724,39 @@ class AdaptiveEMATrainer:
 # CLI
 # ---------------------------------------------------------------------
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="AdaptiveEMA Slope Filter Training"
+def build_parser() -> argparse.ArgumentParser:
+    """Build the AdaptiveEMA CLI on top of the shared TS argument parser.
+
+    Starts from :func:`create_ts_argument_parser` (the shared TS args:
+    ``--experiment_name``/``--seed``/``--n_samples``/``--noise_level``/
+    ``--epochs``/``--batch_size``/``--steps_per_epoch``/``--learning_rate``/
+    warmup/``--max_patterns_per_category``/``--plot_top_k_patterns``/analysis/
+    ``--gpu`` etc.), restores AdaptiveEMA's tuned defaults via ``set_defaults``,
+    then adds AdaptiveEMA's architecture-specific flags.
+
+    Flag-name change (step-9): the old ``--plot_top_k_samples`` (dest
+    ``plot_top_k_patterns``) is now the shared ``--plot_top_k_patterns``; the old
+    ``--prediction_horizon`` is now the shared/canonical ``--prediction_length``;
+    the old ``--deep-analysis`` opt-IN becomes the shared ``--no-deep-analysis``
+    opt-OUT (default kept OFF via ``set_defaults``).
+    """
+    parser = create_ts_argument_parser("AdaptiveEMA Slope Filter Training")
+
+    # Restore AdaptiveEMA's tuned defaults where they differ from the shared parser.
+    parser.set_defaults(
+        experiment_name="adaptive_ema",
+        n_samples=4000,
+        epochs=50,
+        batch_size=64,
+        steps_per_epoch=200,
+        learning_rate=1e-3,
+        warmup_steps=500,
+        max_patterns_per_category=6,
+        plot_top_k_patterns=6,
+        perform_deep_analysis=False,
     )
-    parser.add_argument("--experiment_name", type=str, default="adaptive_ema")
+
+    # AdaptiveEMA architecture-specific arguments.
     parser.add_argument(
         "--mode", type=str, default="quantile",
         choices=["classification", "quantile"],
@@ -740,47 +777,30 @@ def parse_args() -> argparse.Namespace:
     parser.set_defaults(use_quantile_head=True)
     parser.add_argument("--num_quantiles", type=int, default=5)
     parser.add_argument("--input_length", type=int, default=128)
-    parser.add_argument("--prediction_horizon", type=int, default=24)
-    parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--steps_per_epoch", type=int, default=200)
-    parser.add_argument("--learning_rate", type=float, default=1e-3)
-    parser.add_argument("--gradient_clip_norm", type=float, default=1.0)
-    parser.add_argument("--optimizer", type=str, default="adamw")
     parser.add_argument(
-        "--no-warmup", dest="use_warmup", action="store_false"
+        "--prediction_length", type=int, default=24,
+        help="Realized-slope horizon (NOT a standard forecast horizon).",
     )
-    parser.set_defaults(use_warmup=True)
-    parser.add_argument("--warmup_steps", type=int, default=500)
-    parser.add_argument("--warmup_start_lr", type=float, default=1e-6)
-    parser.add_argument("--visualize_every_n_epochs", type=int, default=5)
-    parser.add_argument(
-        "--plot_top_k_samples", dest="plot_top_k_patterns", type=int, default=6
-    )
-    parser.add_argument(
-        "--deep-analysis", dest="perform_deep_analysis", action="store_true",
-        help="Enable EpochAnalyzerCallback (off by default — model has few params).",
-    )
-    parser.set_defaults(perform_deep_analysis=False)
-    parser.add_argument("--analysis_frequency", type=int, default=10)
-    parser.add_argument("--analysis_start_epoch", type=int, default=1)
     parser.add_argument(
         "--onnx", dest="export_onnx", action="store_true",
         help="Export to ONNX at end of training.",
     )
     parser.set_defaults(export_onnx=False)
     parser.add_argument("--onnx_opset_version", type=int, default=17)
-    parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
-    parser.add_argument("--seed", type=int, default=42)
-    return parser.parse_args()
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    return build_parser().parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    set_random_seeds(args.seed)
+    set_seeds(args.seed)
     setup_gpu(args.gpu)
 
     config = AdaptiveEMATrainingConfig(
+        seed=args.seed,
         experiment_name=args.experiment_name,
         mode=args.mode,
         ema_period=args.ema_period,
@@ -791,7 +811,7 @@ def main() -> None:
         use_quantile_head=args.use_quantile_head,
         num_quantiles=args.num_quantiles,
         input_length=args.input_length,
-        prediction_horizon=args.prediction_horizon,
+        prediction_length=args.prediction_length,
         epochs=args.epochs,
         batch_size=args.batch_size,
         steps_per_epoch=args.steps_per_epoch,
@@ -801,6 +821,7 @@ def main() -> None:
         use_warmup=args.use_warmup,
         warmup_steps=args.warmup_steps,
         warmup_start_lr=args.warmup_start_lr,
+        max_patterns_per_category=args.max_patterns_per_category,
         visualize_every_n_epochs=args.visualize_every_n_epochs,
         plot_top_k_patterns=args.plot_top_k_patterns,
         perform_deep_analysis=args.perform_deep_analysis,
@@ -810,9 +831,7 @@ def main() -> None:
         onnx_opset_version=args.onnx_opset_version,
     )
 
-    generator_config = TimeSeriesGeneratorConfig(
-        n_samples=4000, random_seed=args.seed, default_noise_level=0.1
-    )
+    generator_config = build_generator_config(args)
 
     try:
         trainer = AdaptiveEMATrainer(config, generator_config)
