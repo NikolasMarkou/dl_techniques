@@ -175,7 +175,7 @@ class TiRexPerformanceCallback(TimeSeriesPerformanceCallback):
 
         quantiles = self.config.quantile_levels
         median_idx = quantiles.index(0.5) if 0.5 in quantiles else len(quantiles) // 2
-        low_idx, high_idx = 0, len(quantiles) - 1 if len(quantiles) >= 3 else -1
+        low_idx, high_idx = 0, len(quantiles) - 1
 
         num_plots = min(len(test_x), self.config.plot_top_k_patterns)
         n_cols, n_rows = 3, math.ceil(num_plots / 3)

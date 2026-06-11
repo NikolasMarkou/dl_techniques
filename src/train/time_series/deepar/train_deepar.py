@@ -418,8 +418,15 @@ class DeepARPerformanceCallback(TimeSeriesPerformanceCallback):
         pred_dict = {'conditioning_target': cond, 'full_covariates': full_cov}
         fc = self.model.predict_forecast(pred_dict)
 
-        # Empirical low/high band from the trained quantile levels.
-        lower, upper = fc.interval(fc.quantile_levels[0], fc.quantile_levels[-1])
+        # Empirical low/high band from the trained quantile levels. Guard against
+        # a None or short (< 2) quantile-level list: fall back to a point-only plot
+        # rather than crashing the (non-fatal-wrapped) prediction viz entirely.
+        if fc.quantile_levels is not None and len(fc.quantile_levels) >= 2:
+            lower, upper = fc.interval(fc.quantile_levels[0], fc.quantile_levels[-1])
+            band_label = f'{fc.quantile_levels[0]}-{fc.quantile_levels[-1]} Q'
+        else:
+            lower = upper = None
+            band_label = None
 
         num_plots = min(B, self.config.plot_top_k_patterns)
         n_cols, n_rows = 3, math.ceil(num_plots / 3)
@@ -432,13 +439,13 @@ class DeepARPerformanceCallback(TimeSeriesPerformanceCallback):
                 cond[i, :, 0],
                 true_future[i, :, 0],
                 fc.point[i, :, 0],
-                lower=lower[i, :, 0],
-                upper=upper[i, :, 0],
+                lower=lower[i, :, 0] if lower is not None else None,
+                upper=upper[i, :, 0] if upper is not None else None,
                 title=f'Sample {i + 1}',
                 context_label='Input',
                 target_label='True',
                 point_label='Median',
-                band_label=f'{fc.quantile_levels[0]}-{fc.quantile_levels[-1]} Q',
+                band_label=band_label,
             )
 
         for j in range(num_plots, len(axes)):

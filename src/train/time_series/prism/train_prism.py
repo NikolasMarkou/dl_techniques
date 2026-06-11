@@ -198,7 +198,7 @@ class PRISMPerformanceCallback(TimeSeriesPerformanceCallback):
         if self.config.use_quantile_head:
             quantiles = self.config.quantile_levels
             median_idx = quantiles.index(0.5) if 0.5 in quantiles else len(quantiles) // 2
-            low_idx, high_idx = 0, -1
+            low_idx, high_idx = 0, len(quantiles) - 1
 
         for i in range(num_samples):
             if self.config.use_quantile_head:
