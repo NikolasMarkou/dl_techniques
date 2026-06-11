@@ -49,6 +49,7 @@ from train.common import (
     create_ts_argument_parser,
     _prepare_viz_data_from_processor,
 )
+from train.common.args import build_generator_config
 from train.common.timeseries import (
     compute_post_hoc_forecast_metrics,
     _plot_ts_forecast,
@@ -59,7 +60,6 @@ from dl_techniques.models.time_series.deepar.model import DeepAR
 from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 from dl_techniques.datasets.time_series import (
     TimeSeriesGenerator,
-    TimeSeriesGeneratorConfig,
     NormalizationMethod,
 )
 
@@ -258,6 +258,19 @@ class DeepARDataProcessor(WindowedTimeSeriesProcessor):
             context_len=config.input_length,
             horizon_len=config.prediction_length,
             num_features=config.num_features,
+            # DECISION plan_2026-06-11_84296249/D-005
+            # KEEP normalize=True (STANDARD z-score). The D-002 double-norm was
+            # diagnosed and the candidate fix (normalize=False, letting DeepAR's
+            # per-series scale own normalization) was EMPIRICALLY FALSIFIED: with
+            # raw-magnitude targets (mean~25, max~325) the gaussian NLL goes
+            # invalid on batch 1 and TerminateOnNaN fires immediately (the LESSONS
+            # "DeepAR scale hazard": mean-based scale on raw inputs -> near-zero/
+            # unstable scale -> NaN). The z-scored path trains finitely (loss
+            # ~17, no NaN). The model's per-series scale IS rendered a ~no-op by
+            # the z-score (|scale-epsilon|~1.2e-4), but with scale_epsilon=1.0 it
+            # is a BENIGN identity, not a destabilizer. Do NOT set normalize=False
+            # without a model-side scale fix (out of this trainers-only scope).
+            # See decisions.md D-005.
             normalize=True,
             normalize_method=NormalizationMethod.STANDARD,
         )
@@ -670,8 +683,8 @@ def build_parser() -> argparse.ArgumentParser:
     ``--epochs``/``--batch_size``/``--steps_per_epoch``/``--learning_rate``/
     warmup/analysis/``--gpu``), restores DeepAR's own defaults via
     ``set_defaults`` (``experiment_name="deepar"``, lighter cadence), then adds
-    DeepAR's architecture-specific flags. ``--conditioning_length`` maps to the
-    config's ``input_length``.
+    DeepAR's architecture-specific flags. ``--input_length`` is the conditioning
+    (context) length fed to the encoder.
     """
     parser = create_ts_argument_parser("DeepAR Training")
     parser.set_defaults(
@@ -687,7 +700,8 @@ def build_parser() -> argparse.ArgumentParser:
                         choices=['gaussian', 'negative_binomial'])
     parser.add_argument("--num_samples", type=int, default=20)
     parser.add_argument("--covariate_dim", type=int, default=4)
-    parser.add_argument("--conditioning_length", type=int, default=96)
+    parser.add_argument("--input_length", type=int, default=96,
+                        help="Conditioning (context) length fed to the encoder.")
     parser.add_argument("--prediction_length", type=int, default=24)
     parser.add_argument("--num_features", type=int, default=1)
     parser.add_argument("--dropout", type=float, default=0.0)
@@ -705,12 +719,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    set_seeds(getattr(args, 'seed', 42))
+    set_seeds(args.seed)
     setup_gpu(args.gpu)
 
     config = DeepARTrainingConfig(
         experiment_name=args.experiment_name,
-        input_length=args.conditioning_length,
+        input_length=args.input_length,
         prediction_length=args.prediction_length,
         num_features=args.num_features,
         covariate_dim=args.covariate_dim,
@@ -738,11 +752,10 @@ def main() -> None:
         analysis_start_epoch=args.analysis_start_epoch,
         export_onnx=args.export_onnx,
         onnx_opset_version=args.onnx_opset_version,
+        seed=args.seed,
     )
 
-    generator_config = TimeSeriesGeneratorConfig(
-        n_samples=10000, random_seed=42, default_noise_level=0.1
-    )
+    generator_config = build_generator_config(args)
 
     try:
         trainer = DeepARTrainer(config, generator_config)
