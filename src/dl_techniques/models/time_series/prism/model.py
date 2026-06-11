@@ -81,14 +81,21 @@ from dl_techniques.layers.time_series.quantile_head_fixed_io import QuantileHead
 
 # ---------------------------------------------------------------------
 
-# Default quantile levels for probabilistic forecasting
-DEFAULT_QUANTILES: List[float] = [0.1, 0.5, 0.9]
-
 
 @keras.saving.register_keras_serializable()
 class PRISMModel(keras.Model, ForecastMixin):
     """
     Complete PRISM model for time series forecasting.
+
+    **Intent**: Provide a hierarchical multiscale (time + frequency)
+    forecasting model that maps a context window to either point forecasts
+    ``[B, H, F]`` or probabilistic quantile forecasts ``[B, H, F, Q]``, with a
+    parameter-efficient channel-independent temporal decoder (DLinear-style)
+    and a standardized ``QuantileHead`` for monotonic confidence intervals.
+    Conforms to the Keras 3 custom-model contract: all sublayers are created in
+    ``__init__``, built explicitly in ``build()``, and the full config
+    round-trips via ``get_config``/``from_config``. Named architecture sizes are
+    exposed via ``MODEL_VARIANTS`` + :meth:`from_variant`.
 
     Combines hierarchical time-frequency decomposition with a forecasting
     head to predict future values of a time series. Supports both point
@@ -156,8 +163,11 @@ class PRISMModel(keras.Model, ForecastMixin):
         **kwargs: Additional arguments for the Model base class.
     """
 
-    # Presets for common configurations
-    PRESETS: Dict[str, Dict[str, Any]] = {
+    # Default quantile levels for probabilistic forecasting.
+    DEFAULT_QUANTILES: List[float] = [0.1, 0.5, 0.9]
+
+    # Named architecture variants (sizes) for common configurations.
+    MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
         "tiny": {
             "hidden_dim": 32,
             "num_layers": 1,
@@ -564,21 +574,21 @@ class PRISMModel(keras.Model, ForecastMixin):
         return (batch_size, self.forecast_len, self.num_features)
 
     @classmethod
-    def from_preset(
+    def from_variant(
         cls,
-        preset: str,
+        variant: str,
         context_len: int,
         forecast_len: int,
         num_features: int,
         **kwargs: Any
     ) -> "PRISMModel":
-        """Create model from a predefined preset ('tiny', 'small', 'base', 'large')."""
-        if preset not in cls.PRESETS:
+        """Create model from a predefined variant ('tiny', 'small', 'base', 'large')."""
+        if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
-                f"Unknown preset '{preset}'. Available: {list(cls.PRESETS.keys())}"
+                f"Unknown variant '{variant}'. Available: {list(cls.MODEL_VARIANTS.keys())}"
             )
 
-        config = cls.PRESETS[preset].copy()
+        config = cls.MODEL_VARIANTS[variant].copy()
         config.update(kwargs)
 
         return cls(
@@ -626,5 +636,95 @@ class PRISMModel(keras.Model, ForecastMixin):
                 config["kernel_regularizer"]
             )
         return cls(**config)
+
+
+# ---------------------------------------------------------------------
+# Backward-compatible module-level alias for the default quantile levels.
+# Canonical source is ``PRISMModel.DEFAULT_QUANTILES``; this alias is kept so
+# external code importing the module-level name keeps working.
+# ---------------------------------------------------------------------
+
+DEFAULT_QUANTILES: List[float] = PRISMModel.DEFAULT_QUANTILES
+
+
+def create_prism_model(
+    context_len: int,
+    forecast_len: int,
+    num_features: int,
+    hidden_dim: Optional[int] = None,
+    num_layers: int = 2,
+    tree_depth: int = 2,
+    overlap_ratio: float = 0.25,
+    num_wavelet_levels: int = 3,
+    router_hidden_dim: int = 64,
+    router_temperature: float = 1.0,
+    dropout_rate: float = 0.1,
+    ffn_expansion: int = 4,
+    use_quantile_head: bool = False,
+    num_quantiles: int = 3,
+    quantile_levels: Optional[List[float]] = None,
+    enforce_monotonicity: bool = True,
+    **kwargs: Any
+) -> PRISMModel:
+    """
+    Create a PRISM model with the specified configuration.
+
+    Mirrors the other time-series factories (e.g. ``create_tirex_model``): it
+    constructs the model and runs a dummy forward pass so all sublayers are
+    built and weights/shapes are initialized before the model is returned.
+
+    Args:
+        context_len: Length of input context window.
+        forecast_len: Length of forecast horizon.
+        num_features: Number of input/output features (channels).
+        hidden_dim: Hidden dimension for processing. If None, uses num_features.
+        num_layers: Number of stacked PRISM layers.
+        tree_depth: Depth of time tree in each PRISM layer.
+        overlap_ratio: Overlap ratio for segment splitting.
+        num_wavelet_levels: Number of Haar DWT levels.
+        router_hidden_dim: Hidden dimension for routers.
+        router_temperature: Temperature for router softmax.
+        dropout_rate: Dropout rate.
+        ffn_expansion: Expansion factor for forecasting head FFN.
+        use_quantile_head: Whether to use a quantile prediction head.
+        num_quantiles: Number of quantiles to predict when using quantile head.
+        quantile_levels: Optional list of quantile levels.
+        enforce_monotonicity: Whether to enforce non-crossing quantiles.
+        **kwargs: Additional arguments for :class:`PRISMModel`.
+
+    Returns:
+        A built :class:`PRISMModel` instance.
+    """
+    model = PRISMModel(
+        context_len=context_len,
+        forecast_len=forecast_len,
+        num_features=num_features,
+        hidden_dim=hidden_dim,
+        num_layers=num_layers,
+        tree_depth=tree_depth,
+        overlap_ratio=overlap_ratio,
+        num_wavelet_levels=num_wavelet_levels,
+        router_hidden_dim=router_hidden_dim,
+        router_temperature=router_temperature,
+        dropout_rate=dropout_rate,
+        ffn_expansion=ffn_expansion,
+        use_quantile_head=use_quantile_head,
+        num_quantiles=num_quantiles,
+        quantile_levels=quantile_levels,
+        enforce_monotonicity=enforce_monotonicity,
+        **kwargs
+    )
+
+    # Build the model with a dummy input to initialize weights and shapes.
+    dummy_input = np.zeros((1, context_len, num_features), dtype="float32")
+    _ = model(dummy_input)
+
+    logger.info(
+        f"Created PRISM model: context_len={context_len}, "
+        f"forecast_len={forecast_len}, num_features={num_features}, "
+        f"hidden_dim={model.hidden_dim}, use_quantile_head={use_quantile_head}"
+    )
+
+    return model
 
 # ---------------------------------------------------------------------

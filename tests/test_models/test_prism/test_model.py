@@ -12,7 +12,7 @@ import tempfile
 import numpy as np
 from typing import Dict, Any, Tuple
 
-from dl_techniques.models.time_series.prism.model import PRISMModel
+from dl_techniques.models.time_series.prism.model import PRISMModel, create_prism_model
 
 
 class TestPRISMModelInstantiation:
@@ -434,16 +434,16 @@ class TestPRISMModelSerialization:
 
 
 class TestPRISMModelPresets:
-    """Test preset configurations."""
+    """Test model variant configurations."""
 
     @pytest.mark.parametrize(
-        "preset",
+        "variant",
         ["tiny", "small", "base", "large"]
     )
-    def test_preset_creation(self, preset: str) -> None:
-        """Test model can be created from presets."""
-        model = PRISMModel.from_preset(
-            preset=preset,
+    def test_variant_creation(self, variant: str) -> None:
+        """Test model can be created from variants."""
+        model = PRISMModel.from_variant(
+            variant=variant,
             context_len=96,
             forecast_len=24,
             num_features=7,
@@ -453,43 +453,43 @@ class TestPRISMModelPresets:
         assert model.forecast_len == 24
         assert model.num_features == 7
 
-        # Check preset-specific configurations
-        preset_config = PRISMModel.PRESETS[preset]
-        assert model.hidden_dim == preset_config["hidden_dim"]
-        assert model.num_layers == preset_config["num_layers"]
-        assert model.tree_depth == preset_config["tree_depth"]
+        # Check variant-specific configurations
+        variant_config = PRISMModel.MODEL_VARIANTS[variant]
+        assert model.hidden_dim == variant_config["hidden_dim"]
+        assert model.num_layers == variant_config["num_layers"]
+        assert model.tree_depth == variant_config["tree_depth"]
 
-    def test_preset_with_override(self) -> None:
-        """Test preset parameters can be overridden."""
-        model = PRISMModel.from_preset(
-            preset="small",
+    def test_variant_with_override(self) -> None:
+        """Test variant parameters can be overridden."""
+        model = PRISMModel.from_variant(
+            variant="small",
             context_len=96,
             forecast_len=24,
             num_features=7,
-            hidden_dim=128,  # Override preset value
-            num_layers=3,  # Override preset value
+            hidden_dim=128,  # Override variant value
+            num_layers=3,  # Override variant value
         )
 
         assert model.hidden_dim == 128
         assert model.num_layers == 3
 
-    def test_invalid_preset_raises_error(self) -> None:
-        """Test invalid preset name raises ValueError."""
-        with pytest.raises(ValueError, match="Unknown preset"):
-            PRISMModel.from_preset(
-                preset="nonexistent",
+    def test_invalid_variant_raises_error(self) -> None:
+        """Test invalid variant name raises ValueError."""
+        with pytest.raises(ValueError, match="Unknown variant"):
+            PRISMModel.from_variant(
+                variant="nonexistent",
                 context_len=96,
                 forecast_len=24,
                 num_features=7,
             )
 
-    def test_all_presets_functional(self) -> None:
-        """Test all presets create functional models."""
+    def test_all_variants_functional(self) -> None:
+        """Test all variants create functional models."""
         inputs = np.random.randn(4, 96, 7).astype(np.float32)
 
-        for preset in PRISMModel.PRESETS.keys():
-            model = PRISMModel.from_preset(
-                preset=preset,
+        for variant in PRISMModel.MODEL_VARIANTS.keys():
+            model = PRISMModel.from_variant(
+                variant=variant,
                 context_len=96,
                 forecast_len=24,
                 num_features=7,
@@ -497,6 +497,46 @@ class TestPRISMModelPresets:
 
             output = model(inputs)
             assert output.shape == (4, 24, 7)
+
+
+class TestPRISMModelFactory:
+    """Test the create_prism_model module-level factory."""
+
+    def test_factory_builds_point_model(self) -> None:
+        """Factory returns a built point-forecast model with valid output."""
+        model = create_prism_model(
+            context_len=96,
+            forecast_len=24,
+            num_features=7,
+            hidden_dim=32,
+            num_layers=1,
+        )
+
+        # Dummy forward inside the factory must have built the model.
+        assert model.built
+        assert len(model.weights) > 0
+
+        inputs = np.random.randn(4, 96, 7).astype(np.float32)
+        output = model(inputs)
+        assert output.shape == (4, 24, 7)
+
+    def test_factory_builds_quantile_model(self) -> None:
+        """Factory respects quantile-head configuration."""
+        model = create_prism_model(
+            context_len=96,
+            forecast_len=24,
+            num_features=7,
+            hidden_dim=32,
+            num_layers=1,
+            use_quantile_head=True,
+            num_quantiles=3,
+            quantile_levels=[0.1, 0.5, 0.9],
+        )
+
+        assert model.built
+        inputs = np.random.randn(4, 96, 7).astype(np.float32)
+        output = model(inputs)
+        assert output.shape == (4, 24, 7, 3)
 
 
 class TestPRISMModelBuild:

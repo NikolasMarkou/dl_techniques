@@ -108,9 +108,9 @@ class PRISMTrainingConfig(BaseTimeSeriesTrainingConfig):
 
     def __post_init__(self) -> None:
         super().__post_init__()  # ratio-sum invariant
-        if self.preset not in PRISMModel.PRESETS:
+        if self.preset not in PRISMModel.MODEL_VARIANTS:
             raise ValueError(
-                f"preset must be one of {list(PRISMModel.PRESETS.keys())}, "
+                f"preset must be one of {list(PRISMModel.MODEL_VARIANTS.keys())}, "
                 f"got '{self.preset}'"
             )
         if self.context_len <= 0 or self.forecast_len <= 0:
@@ -313,7 +313,7 @@ class PRISMTrainer(BaseTimeSeriesTrainer):
         num_features = self.processor.num_features
 
         model_kwargs: Dict[str, Any] = {
-            "preset": self.config.preset,
+            "variant": self.config.preset,
             "context_len": self.config.context_len,
             "forecast_len": self.config.forecast_len,
             "num_features": num_features,
@@ -333,7 +333,7 @@ class PRISMTrainer(BaseTimeSeriesTrainer):
         if self.config.hidden_dim is not None:
             model_kwargs["hidden_dim"] = self.config.hidden_dim
 
-        model = PRISMModel.from_preset(**model_kwargs)
+        model = PRISMModel.from_variant(**model_kwargs)
 
         if self.config.use_warmup:
             lr_schedule = create_learning_rate_schedule(

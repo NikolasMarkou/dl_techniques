@@ -206,7 +206,7 @@ data = np.sin(x).astype("float32")[:, None]
 X = np.stack([data[i : i + 96] for i in range(1000)])              # (1000, 96, 1)
 y = np.stack([data[i + 96 : i + 96 + 24] for i in range(1000)])    # (1000, 24, 1)
 
-model = PRISMModel.from_preset(
+model = PRISMModel.from_variant(
     "small",
     context_len=96,
     forecast_len=24,
@@ -266,16 +266,16 @@ print(forecast.shape)  # (1, 24, 1)
 | `use_residual` | Whether to add `x + Tree(x)` (default `True`). |
 | `use_output_norm` | Whether to LayerNorm after residual (default `True`). |
 
-### `PRESETS`
+### `MODEL_VARIANTS`
 
-`PRISMModel.PRESETS` is a class-level `Dict[str, Dict[str, Any]]` with the keys `"tiny"`, `"small"`, `"base"`, `"large"`. Used by `PRISMModel.from_preset(name, ...)`.
+`PRISMModel.MODEL_VARIANTS` is a class-level `Dict[str, Dict[str, Any]]` with the keys `"tiny"`, `"small"`, `"base"`, `"large"`. Used by `PRISMModel.from_variant(name, ...)`.
 
 ---
 
 ## 8. Configuration & Presets
 
 ```python
-PRISMModel.PRESETS = {
+PRISMModel.MODEL_VARIANTS = {
     "tiny":  {"hidden_dim":  32, "num_layers": 1, "tree_depth": 1, "num_wavelet_levels": 2, "router_hidden_dim":  32, "ffn_expansion": 2},
     "small": {"hidden_dim":  64, "num_layers": 2, "tree_depth": 2, "num_wavelet_levels": 3, "router_hidden_dim":  64, "ffn_expansion": 4},
     "base":  {"hidden_dim": 128, "num_layers": 3, "tree_depth": 2, "num_wavelet_levels": 3, "router_hidden_dim": 128, "ffn_expansion": 4},
@@ -288,7 +288,7 @@ PRISMModel.PRESETS = {
 - **`base`** — wider for multivariate (e.g. ETT, Weather). 3 layers, depth 2.
 - **`large`** — long context / large-scale pre-training. 4 layers, depth 2, deeper wavelets.
 
-`from_preset` accepts any preset key plus the three required positional fields (`context_len`, `forecast_len`, `num_features`) plus any override kwargs (e.g. `use_quantile_head=True`, `num_quantiles=9`). Preset fields are merged with user kwargs (user kwargs win).
+`from_variant` accepts any variant key plus the three required positional fields (`context_len`, `forecast_len`, `num_features`) plus any override kwargs (e.g. `use_quantile_head=True`, `num_quantiles=9`). Preset fields are merged with user kwargs (user kwargs win).
 
 ---
 
@@ -299,7 +299,7 @@ PRISMModel.PRESETS = {
 ```python
 from dl_techniques.models.prism.model import PRISMModel
 
-model = PRISMModel.from_preset(
+model = PRISMModel.from_variant(
     "small",
     context_len=168, forecast_len=24, num_features=1,
 )
@@ -324,7 +324,7 @@ model.compile(optimizer="adamw", loss="mae")
 from dl_techniques.losses.quantile_loss import QuantileLoss
 
 quantile_levels = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
-model = PRISMModel.from_preset(
+model = PRISMModel.from_variant(
     "small",
     context_len=168, forecast_len=24, num_features=1,
     use_quantile_head=True,
@@ -441,7 +441,7 @@ Higher weight on low-pass (approximation) bands indicates the node is focused on
 ### Limitations (read these before filing issues)
 
 - **L-1. Single-tensor output, two ranks.** Point mode returns rank 3 (`(B, F_out, F)`); quantile mode returns rank 4 (`(B, F_out, F, Q)`). Downstream code that handles both must branch on rank, not on key names.
-- **L-2. `predict_quantiles` self-mutates `self.quantile_levels` on first call** if `quantile_levels` was empty or `None` at construction. Pass `quantile_levels` explicitly at construction time (or via `from_preset`) to avoid this footgun. Surfaced from issue I-8.
+- **L-2. `predict_quantiles` self-mutates `self.quantile_levels` on first call** if `quantile_levels` was empty or `None` at construction. Pass `quantile_levels` explicitly at construction time (or via `from_variant`) to avoid this footgun. Surfaced from issue I-8.
 - **L-3. `num_quantiles` and `enforce_monotonicity` are stored even in point mode.** When `use_quantile_head=False` these values are kept in `get_config()` for round-trip fidelity but never used at inference. Not a bug, just noisy config. Surfaced from issue I-9.
 - **L-4. `num_features=1` is the well-tested default.** The architecture supports multivariate `num_features>1`, but the bundled trainer and the existing test suite focus on `num_features=1`. Validate point mode first when going multivariate, then enable quantile.
 - **L-5. Tree depth is exponential in node count.** Each layer has `2^tree_depth - 1` internal segments plus leaves. Setting `tree_depth > 3` rarely helps and inflates parameter count and graph build time significantly.
