@@ -37,6 +37,7 @@ from train.common import (
     create_ts_argument_parser,
     _prepare_viz_data_from_processor,
 )
+from train.common.args import build_generator_config
 from train.common.timeseries import _plot_ts_forecast
 from dl_techniques.utils.logger import logger
 from dl_techniques.losses.mase_loss import MASELoss
@@ -44,7 +45,6 @@ from dl_techniques.models.time_series.forecast import Forecast, ForecastMixin
 from dl_techniques.models.time_series.nbeats import create_nbeats_model
 from dl_techniques.datasets.time_series import (
     TimeSeriesGenerator,
-    TimeSeriesGeneratorConfig,
     NormalizationMethod,
 )
 
@@ -481,11 +481,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    set_seeds(42)
+    set_seeds(args.seed)
     setup_gpu(args.gpu)
 
     config = NBeatsTrainingConfig(
         experiment_name=args.experiment_name,
+        seed=args.seed,
         backcast_length=args.backcast_length,
         forecast_length=args.forecast_length,
         stack_types=args.stack_types,
@@ -513,9 +514,7 @@ def main() -> None:
         analysis_start_epoch=args.analysis_start_epoch
     )
 
-    generator_config = TimeSeriesGeneratorConfig(
-        n_samples=10000, random_seed=42, default_noise_level=0.1
-    )
+    generator_config = build_generator_config(args)
 
     # Preserve nbeats's original hard-exit teardown (os._exit(0)): a deliberate
     # force-exit that skips Python/atexit cleanup to avoid TF prefetch-thread
