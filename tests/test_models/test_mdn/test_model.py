@@ -24,7 +24,7 @@ import numpy as np
 import tensorflow as tf
 from typing import Dict, Any
 
-from dl_techniques.models.time_series.mdn.model import MDNModel
+from dl_techniques.models.time_series.mdn.model import MDNModel, create_mdn_model
 from dl_techniques.layers.statistics.mdn_layer import MDNLayer
 from dl_techniques.utils.logger import logger
 
@@ -70,7 +70,13 @@ class TestMDNModel:
 
     # -- 1 -----------------------------------------------------------------
     def test_initialization_stores_config(self, model_config):
-        """All __init__ attrs stored; model not built before first call."""
+        """All __init__ attrs stored; sublayers created in __init__ (Golden Rule).
+
+        Per the Golden Rule, all sublayers are CREATED in __init__ (every
+        architectural param is construction-time known). The model itself is NOT
+        yet built (creating layers != building the model) — build() runs on the
+        first call / explicit build().
+        """
         model = MDNModel(**model_config)
 
         assert model.hidden_layers_sizes == model_config["hidden_layers"]
@@ -78,8 +84,13 @@ class TestMDNModel:
         assert model.num_mix == model_config["num_mixtures"]
         assert model.use_batch_norm is False
         assert model.dropout_rate is None
-        assert model.mdn_layer is None        # created in build()
-        assert model.feature_layers == []
+        # Golden Rule: sublayers exist after __init__ (created, not yet built).
+        assert model.mdn_layer is not None
+        assert isinstance(model.mdn_layer, MDNLayer)
+        assert len(model.feature_layers) > 0
+        # No batch_norm/dropout -> each hidden layer = Dense + Activation.
+        assert len(model.feature_layers) == 2 * len(model_config["hidden_layers"])
+        # Creating layers != building the model.
         assert not model.built
         logger.info("MDNModel initialization test passed.")
 
@@ -279,6 +290,25 @@ class TestMDNModel:
         assert not np.allclose(s1, s3, atol=1e-6), \
             "Different seeds should produce different samples."
         logger.info("MDNModel sample_seed reproducibility test passed.")
+
+    # -- 12 (factory) ------------------------------------------------------
+    def test_create_mdn_model_factory(self, model_config, input_dim, sample_input):
+        """create_mdn_model returns a BUILT MDNModel with matching architecture."""
+        model = create_mdn_model(
+            hidden_layers=model_config["hidden_layers"],
+            output_dimension=model_config["output_dimension"],
+            num_mixtures=model_config["num_mixtures"],
+            input_dimension=input_dim,
+        )
+        assert isinstance(model, MDNModel)
+        assert model.built  # dummy forward pass builds the model
+        assert model.mdn_layer is not None
+        assert len(model.feature_layers) > 0
+
+        output = model(sample_input, training=False)
+        expected = self._expected_params(model_config)
+        assert output.shape == (sample_input.shape[0], expected)
+        logger.info("MDNModel create_mdn_model factory test passed.")
 
 
 if __name__ == "__main__":

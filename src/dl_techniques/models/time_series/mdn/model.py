@@ -77,6 +77,7 @@ as weighted combinations of simpler Gaussian components.
 """
 
 import keras
+import numpy as np
 from keras import ops
 from keras import layers
 from typing import List, Union, Optional, Dict, Any, Tuple
@@ -98,6 +99,14 @@ from dl_techniques.layers.statistics.mdn_layer import (
 @keras.saving.register_keras_serializable()
 class MDNModel(keras.Model):
     """A complete Mixture Density Network model.
+
+    **Intent**: Wrap a configurable Dense feature-extraction stack and an
+    ``MDNLayer`` output head into a single serializable ``keras.Model`` that
+    predicts the parameters of a Gaussian-mixture distribution P(y|x) instead of
+    a point estimate, enabling uncertainty quantification, multi-modal regression,
+    and probabilistic sampling. All sublayers are created in ``__init__`` (every
+    architectural parameter is construction-time known); ``build()`` only threads
+    shapes through them so saved weights restore losslessly.
 
     This model combines a feature extraction network with an MDN layer and handles
     the appropriate loss function and sampling functionality. It enables the prediction
@@ -172,22 +181,30 @@ class MDNModel(keras.Model):
         probabilistic predictions.
     """
 
+    # Class-level defaults (discoverability).
+    DEFAULT_HIDDEN_ACTIVATION: str = "relu"
+    DEFAULT_KERNEL_INITIALIZER: str = "glorot_uniform"
+    DEFAULT_USE_BATCH_NORM: bool = False
+
     def __init__(
             self,
             hidden_layers: List[int],
             output_dimension: int,
             num_mixtures: int,
-            hidden_activation: str = "relu",
-            kernel_initializer: Union[str, keras.initializers.Initializer] = "glorot_uniform",
+            hidden_activation: str = DEFAULT_HIDDEN_ACTIVATION,
+            kernel_initializer: Union[str, keras.initializers.Initializer] = DEFAULT_KERNEL_INITIALIZER,
             kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
-            use_batch_norm: bool = False,
+            use_batch_norm: bool = DEFAULT_USE_BATCH_NORM,
             dropout_rate: Optional[float] = None,
             **kwargs: Any
     ) -> None:
         """Initialize the MDN model.
 
-        Validates all input parameters and stores configuration for later use in build().
-        Does not create the actual layers - this happens in build() when input shape is known.
+        Validates all input parameters and CREATES all sublayers (every
+        architectural parameter is construction-time known). ``build()`` then only
+        threads shapes through them. Creating layers here (not in ``build()``) is
+        required so that on ``.keras`` weight-restore the sublayers already exist
+        and saved weights land losslessly instead of being silently re-initialized.
 
         Raises:
             ValueError: If hidden_layers is empty or contains non-positive values.
@@ -222,10 +239,42 @@ class MDNModel(keras.Model):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = kernel_regularizer
 
-        # Initialize layer containers - actual layers created in build()
-        self.feature_layers = []  # Will contain: [Dense, BatchNorm?, Activation, Dropout?]*N
-        self.mdn_layer = None     # The final MDN output layer
         self._build_input_shape = None  # For serialization
+
+        # CREATE ALL SUBLAYERS (Golden Rule).
+        # Every architectural parameter is construction-time known, so all
+        # sublayers are instantiated here. build() only threads shapes through
+        # them via explicit .build() calls.
+        #
+        # Each "hidden layer" expands to up to 4 sublayers:
+        #   Dense -> [BatchNorm] -> Activation -> [Dropout]
+        # (BatchNorm before activation; Dropout last — standard ordering.)
+        self.feature_layers = []  # [Dense, BatchNorm?, Activation, Dropout?]*N
+        for i, units in enumerate(self.hidden_layers_sizes):
+            self.feature_layers.append(layers.Dense(
+                units,
+                activation=None,  # Activation applied separately after BatchNorm
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                name=f"dense_{i}",
+            ))
+            if self.use_batch_norm:
+                self.feature_layers.append(
+                    layers.BatchNormalization(name=f"batch_norm_{i}"))
+            self.feature_layers.append(layers.Activation(
+                self.hidden_activation, name=f"activation_{i}"))
+            if self.dropout_rate is not None:
+                self.feature_layers.append(
+                    layers.Dropout(self.dropout_rate, name=f"dropout_{i}"))
+
+        # The final MDN output layer (μ, σ, π parameters).
+        self.mdn_layer = MDNLayer(
+            output_dimension=self.output_dim,
+            num_mixtures=self.num_mix,
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            name="mdn_layer",
+        )
 
         logger.info(f"Initialized MDNModel with {len(hidden_layers)} hidden layers, "
                    f"{output_dimension}D output, {num_mixtures} mixtures")
@@ -233,15 +282,12 @@ class MDNModel(keras.Model):
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the model with the given input shape.
 
-        This method creates the complete architecture:
-        1. Feature extraction layers (Dense + optional BatchNorm + Activation + optional Dropout)
-        2. Final MDN layer that outputs mixture parameters
-
-        The feature extraction network transforms raw inputs into a representation suitable
-        for mixture parameter prediction. Each layer can optionally include:
-        - Batch normalization: Normalizes activations for better training stability
-        - Dropout: Randomly zeros activations for regularization
-        - Configurable activation: Non-linearity (default ReLU)
+        Sublayers are CREATED in ``__init__``; this method only threads shapes
+        through them by calling each sublayer's ``.build()`` explicitly (each layer
+        needs the output shape of the previous one). The explicit per-sublayer
+        ``.build()`` chain is REQUIRED: a ``build()`` that defers sublayer building
+        to first ``call`` leaves them unbuilt at ``.keras`` weight-restore time,
+        which silently re-initializes the restored weights.
 
         Args:
             input_shape: Shape tuple of the input tensor.
@@ -252,83 +298,19 @@ class MDNModel(keras.Model):
 
         logger.info(f"Building MDNModel with input shape: {input_shape}")
 
-        # BUILD FEATURE EXTRACTION NETWORK
-        # Each "hidden layer" actually consists of up to 4 sublayers arranged as:
-        # Dense -> [BatchNorm] -> Activation -> [Dropout]
-        # This ordering follows best practices for deep networks
-
-        for i, units in enumerate(self.hidden_layers_sizes):
-            # 1. DENSE LAYER: Linear transformation W*x + b
-            # No activation here - applied after optional batch normalization
-            dense_layer = layers.Dense(
-                units,
-                activation=None,  # Activation applied separately after BatchNorm
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer,
-                name=f"dense_{i}"
-            )
-            self.feature_layers.append(dense_layer)
-
-            # 2. BATCH NORMALIZATION (optional)
-            # Normalizes layer inputs to have zero mean and unit variance
-            # Helps with training stability and allows higher learning rates
-            # Applied before activation for best performance
-            if self.use_batch_norm:
-                batch_norm_layer = layers.BatchNormalization(name=f"batch_norm_{i}")
-                self.feature_layers.append(batch_norm_layer)
-
-            # 3. ACTIVATION FUNCTION
-            # Introduces non-linearity after the linear transformation
-            # ReLU is default: f(x) = max(0, x)
-            activation_layer = layers.Activation(
-                self.hidden_activation,
-                name=f"activation_{i}"
-            )
-            self.feature_layers.append(activation_layer)
-
-            # 4. DROPOUT (optional)
-            # Randomly sets fraction of inputs to 0 during training
-            # Prevents overfitting by reducing co-adaptation between neurons
-            # Only active during training, disabled during inference
-            if self.dropout_rate is not None:
-                dropout_layer = layers.Dropout(
-                    self.dropout_rate,
-                    name=f"dropout_{i}"
-                )
-                self.feature_layers.append(dropout_layer)
-
-        # BUILD MDN OUTPUT LAYER
-        # This layer takes the learned features and outputs mixture parameters:
-        # - μ parameters: means for each mixture component and output dimension
-        # - σ parameters: standard deviations (forced positive)
-        # - π parameters: mixture weights (converted to probabilities via softmax)
-        self.mdn_layer = MDNLayer(
-            output_dimension=self.output_dim,
-            num_mixtures=self.num_mix,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            name="mdn_layer"
-        )
-
-        # BUILD ALL LAYERS SEQUENTIALLY
-        # Each layer needs to know the output shape of the previous layer
-        # We simulate the forward pass to determine shapes
+        # BUILD ALL SUBLAYERS SEQUENTIALLY
+        # Each layer needs to know the output shape of the previous layer; we
+        # propagate shapes forward (Dropout/Activation pass shape through).
         current_shape = input_shape
-
         for layer in self.feature_layers:
-            # Build each layer with the current shape
             layer.build(current_shape)
-
-            # Update shape for next layer
-            # Some layers (like Dropout) don't change shape, others do
             if hasattr(layer, 'compute_output_shape'):
                 current_shape = layer.compute_output_shape(current_shape)
-            # If layer doesn't have compute_output_shape, shape remains unchanged
 
-        # Build the final MDN layer with the shape after all feature layers
+        # Build the final MDN layer with the shape after all feature layers.
         self.mdn_layer.build(current_shape)
 
-        # Mark the model as built
+        # Mark the model as built.
         super().build(input_shape)
         logger.info("MDNModel built successfully")
 
@@ -798,5 +780,69 @@ class MDNModel(keras.Model):
 
         # Return shape preserving batch dimension
         return tuple(input_shape_list[:-1] + [output_features])
+
+# ---------------------------------------------------------------------
+
+def create_mdn_model(
+        hidden_layers: List[int],
+        output_dimension: int,
+        num_mixtures: int,
+        input_dimension: int,
+        hidden_activation: str = MDNModel.DEFAULT_HIDDEN_ACTIVATION,
+        kernel_initializer: Union[str, keras.initializers.Initializer] = MDNModel.DEFAULT_KERNEL_INITIALIZER,
+        kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        use_batch_norm: bool = MDNModel.DEFAULT_USE_BATCH_NORM,
+        dropout_rate: Optional[float] = None,
+        **kwargs: Any
+) -> MDNModel:
+    """Construct and build an :class:`MDNModel`.
+
+    Convenience factory mirroring ``create_nbeats_model``/``create_deepar``: it
+    instantiates the model and runs a tiny inference-mode dummy forward pass so
+    the returned model is already BUILT (weights materialized), ready for
+    ``.summary()``, ``.save()``, or weight transfer without a separate warmup.
+
+    Args:
+        hidden_layers: List of hidden layer sizes for feature extraction.
+        output_dimension: Dimensionality of the target/output space.
+        num_mixtures: Number of Gaussian mixture components.
+        input_dimension: Feature dimension of the input, used only to build the
+            model via the dummy forward pass.
+        hidden_activation: Activation for hidden layers. Defaults to ``"relu"``.
+        kernel_initializer: Kernel weight initializer. Defaults to
+            ``"glorot_uniform"``.
+        kernel_regularizer: Optional kernel regularizer. Defaults to ``None``.
+        use_batch_norm: Whether to insert BatchNormalization. Defaults to ``False``.
+        dropout_rate: Dropout rate in ``[0, 1)`` or ``None``. Defaults to ``None``.
+        **kwargs: Forwarded to :class:`MDNModel` (e.g. ``name``).
+
+    Returns:
+        A built :class:`MDNModel` instance.
+
+    Example:
+        >>> model = create_mdn_model(
+        ...     hidden_layers=[64, 32],
+        ...     output_dimension=2,
+        ...     num_mixtures=5,
+        ...     input_dimension=10,
+        ... )
+        >>> model.compile(optimizer="adam")
+    """
+    model = MDNModel(
+        hidden_layers=hidden_layers,
+        output_dimension=output_dimension,
+        num_mixtures=num_mixtures,
+        hidden_activation=hidden_activation,
+        kernel_initializer=kernel_initializer,
+        kernel_regularizer=kernel_regularizer,
+        use_batch_norm=use_batch_norm,
+        dropout_rate=dropout_rate,
+        **kwargs
+    )
+
+    # Build via a tiny inference-mode dummy forward pass.
+    dummy = np.zeros((1, input_dimension), dtype="float32")
+    model(dummy, training=False)
+    return model
 
 # ---------------------------------------------------------------------
