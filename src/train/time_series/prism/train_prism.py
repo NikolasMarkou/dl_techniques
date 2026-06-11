@@ -102,10 +102,6 @@ class PRISMTrainingConfig(BaseTimeSeriesTrainingConfig):
     # PRISM-specific pattern selection
     min_data_length: int = 2000
 
-    # ONNX export
-    export_onnx: bool = False
-    onnx_opset_version: int = 17
-
     def __post_init__(self) -> None:
         super().__post_init__()  # ratio-sum invariant
         if self.preset not in PRISMModel.MODEL_VARIANTS:
@@ -363,7 +359,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(enforce_monotonicity=True)
     parser.add_argument("--no-normalize", dest="normalize_per_instance", action="store_false")
     parser.set_defaults(normalize_per_instance=True)
-    parser.add_argument("--no_onnx", dest="export_onnx", action="store_false")
+    parser.add_argument("--no-onnx", dest="export_onnx", action="store_false")
     parser.set_defaults(export_onnx=False)
     parser.add_argument("--onnx_opset_version", type=int, default=17)
     return parser

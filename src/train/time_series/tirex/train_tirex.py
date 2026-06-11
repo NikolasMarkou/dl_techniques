@@ -81,10 +81,6 @@ class TiRexTrainingConfig(BaseTimeSeriesTrainingConfig):
     # TiRex-specific pattern selection
     min_data_length: int = 2000
 
-    # ONNX export
-    export_onnx: bool = False
-    onnx_opset_version: int = 17
-
     def __post_init__(self) -> None:
         super().__post_init__()  # ratio-sum invariant
         if self.model_type not in ['core', 'extended']:

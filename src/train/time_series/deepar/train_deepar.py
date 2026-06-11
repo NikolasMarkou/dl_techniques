@@ -93,7 +93,7 @@ class DeepARTrainingConfig(BaseTimeSeriesTrainingConfig):
         covariate_dim: Number of synthetic positional covariate channels.
         num_layers: Number of stacked LSTM layers.
         hidden_dim: LSTM hidden width.
-        dropout: LSTM output dropout rate.
+        dropout_rate: LSTM output dropout rate.
         recurrent_dropout: LSTM recurrent dropout rate.
         likelihood: Observation distribution, ``'gaussian'`` or
             ``'negative_binomial'``.
@@ -116,15 +116,11 @@ class DeepARTrainingConfig(BaseTimeSeriesTrainingConfig):
     covariate_dim: int = 4
     num_layers: int = 3
     hidden_dim: int = 40
-    dropout: float = 0.0
+    dropout_rate: float = 0.0
     recurrent_dropout: float = 0.0
     likelihood: str = "gaussian"
     num_samples: int = 20
     scale_epsilon: float = 1.0
-
-    # ONNX export
-    export_onnx: bool = False
-    onnx_opset_version: int = 17
 
     def __post_init__(self) -> None:
         super().__post_init__()  # ratio-sum invariant
@@ -502,7 +498,7 @@ class DeepARTrainer(BaseTimeSeriesTrainer):
         base = DeepAR(
             num_layers=self.config.num_layers,
             hidden_dim=self.config.hidden_dim,
-            dropout=self.config.dropout,
+            dropout=self.config.dropout_rate,
             recurrent_dropout=self.config.recurrent_dropout,
             likelihood=self.config.likelihood,
             target_dim=self.config.num_features,
@@ -625,7 +621,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Conditioning (context) length fed to the encoder.")
     parser.add_argument("--prediction_length", type=int, default=24)
     parser.add_argument("--num_features", type=int, default=1)
-    parser.add_argument("--dropout", type=float, default=0.0)
+    parser.add_argument("--dropout_rate", type=float, default=0.0)
     parser.add_argument("--recurrent_dropout", type=float, default=0.0)
     parser.add_argument("--scale_epsilon", type=float, default=1.0)
     parser.add_argument("--no-onnx", dest="export_onnx", action="store_false")
@@ -651,7 +647,7 @@ def main() -> None:
         covariate_dim=args.covariate_dim,
         num_layers=args.num_layers,
         hidden_dim=args.hidden_dim,
-        dropout=args.dropout,
+        dropout_rate=args.dropout_rate,
         recurrent_dropout=args.recurrent_dropout,
         likelihood=args.likelihood,
         num_samples=args.num_samples,

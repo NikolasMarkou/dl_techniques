@@ -98,10 +98,6 @@ class XLSTMForecasterTrainingConfig(BaseTimeSeriesTrainingConfig):
     mlstm_num_heads: int = 4
     dropout_rate: float = 0.1
 
-    # ONNX export (xLSTM recurrence may not be tf2onnx-traceable; off by default)
-    export_onnx: bool = False
-    onnx_opset_version: int = 17
-
     def __post_init__(self) -> None:
         super().__post_init__()  # ratio-sum invariant + promoted-field defaults
         if self.input_length <= 0 or self.prediction_length <= 0:
