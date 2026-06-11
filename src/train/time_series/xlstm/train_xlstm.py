@@ -12,20 +12,16 @@ emits clean ``[B, context, F]`` tensor input, so the base
 ``BaseTimeSeriesTrainer._compute_post_hoc_metrics`` (ForecastMixin-gated) populates
 the post-hoc forecast metric block unchanged — the contract-native payoff.
 
-.. warning::
-    **EXPERIMENTAL — known training instability (NaN) as of plan_2026-06-10_c6197fb1.**
-    The ``xLSTMForecaster`` MODEL is correct and fully tested (eager forward /
-    ``_forecast`` / single-step gradient on real batches are all finite; 11 model
-    tests pass; ``get_config`` round-trips). However, ``model.fit()`` through this
-    trainer produces ``NaN`` loss from ~step 1 under every configuration tried
-    (``jit_compile`` True/False, ``run_eagerly=True``, both normalization paths).
-    A single manual eager train step on a real batch is finite, so the NaN is a
-    fit-loop/data interaction not yet pinned — prime suspect: a near-constant
-    synthetic window hitting the base ``_safe_normalize`` STANDARD per-instance
-    divide-by-~0-std (no epsilon). DEFERRED to a follow-up. Do NOT treat this
-    trainer as production-ready until the NaN is root-caused and fixed. The
-    structural pieces (config/processor/callback/trainer, NO post_hoc override —
-    the contract-native payoff) are otherwise complete and correct.
+.. note::
+    The training NaN deferred from ``plan_2026-06-10_c6197fb1`` is FIXED
+    (``plan_2026-06-11_50891da1``). Root cause was NOT in this trainer: the shared
+    ``mLSTMCell`` computed its input gate as a bare unbounded ``exp(i_proj)`` with no
+    log-domain max-stabilizer, so the matrix-memory recurrence overflowed fp32 once
+    the sequence reached ~64 steps (the trainer uses ``input_length=168``). It was a
+    forward-pass overflow, NOT a fit-loop / normalization / jit interaction — the
+    earlier ``_safe_normalize`` and XLA suspicions were both wrong. The fix adds the
+    stabilizer (a 4th cell state ``m_t``), mirroring the sibling ``sLSTMCell``. The
+    trainer fits with finite loss and the model is finite to long sequences.
 
 References:
     Beck, M., et al. (2024) - xLSTM: Extended Long Short-Term Memory (arXiv:2405.04517)
@@ -379,11 +375,10 @@ class XLSTMForecasterTrainer(BaseTimeSeriesTrainer):
             loss = keras.losses.MeanAbsoluteError()
             metrics = [keras.metrics.MeanSquaredError(name='mse')]
 
-        # jit_compile=False (STOP-IF-1 fired): the gated mLSTM/sLSTM recurrence
-        # produces NaN under XLA on real data while EAGER forward+loss+gradient are
-        # all finite (diagnosed: eager train step finite, jit=True NaN at step 1).
-        # XLA-GPU has no faithful kernel for these ops here -- same class of issue
-        # as the vMF keras.random.beta XLA incompatibility (SYSTEM.md). Disabled.
+        # jit_compile left False as the conservative default. (The historical NaN
+        # was NOT a jit/XLA issue -- it was an unstabilized exp() overflow in the
+        # shared mLSTMCell, fixed in plan_2026-06-11_50891da1. jit=True may be
+        # re-enabled if a smoke confirms the gated recurrence has an XLA-GPU kernel.)
         model.compile(optimizer=optimizer, loss=loss, metrics=metrics, jit_compile=False)
 
         # Build the subclassed model with a dummy forward pass so downstream

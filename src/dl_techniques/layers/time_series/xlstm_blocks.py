@@ -501,11 +501,19 @@ class mLSTMCell(keras.layers.Layer):
     to traditional LSTMs.
 
     The cell computes query, key, and value projections alongside input, forget,
-    and output gates:
+    and output gates. The exponential input gate is stabilized in log space by a
+    running max state ``m_t`` (one scalar per head), mirroring ``sLSTMCell`` and
+    following Eq. 15-17 of the xLSTM paper. Without this stabilizer the matrix
+    memory overflows fp32 once the sequence is long enough (~64 steps); the
+    stabilized form is mathematically equivalent in the finite regime:
 
-        C_t = f_t * C_{t-1} + i_t * (v_t (outer) k_t^T)
-        n_t = f_t * n_{t-1} + i_t * k_t
-        h_t = o_t * (C_t @ q_t / (n_t^T @ q_t))
+        log_f = log(sigmoid(f_proj))
+        m_t   = max(m_{t-1} + log_f, i_proj)            # log-domain stabilizer
+        i_t   = exp(i_proj - m_t)                       # bounded in (0, 1]
+        f_t   = exp(m_{t-1} + log_f - m_t)              # bounded
+        C_t   = f_t * C_{t-1} + i_t * (v_t (outer) k_t^T)
+        n_t   = f_t * n_{t-1} + i_t * k_t
+        h_t   = o_t * (C_t @ q_t / max(|n_t^T @ q_t|, exp(-m_t)))
 
     **Architecture Overview:**
 

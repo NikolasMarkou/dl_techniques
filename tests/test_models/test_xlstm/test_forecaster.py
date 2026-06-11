@@ -88,6 +88,31 @@ class TestXLSTMForecaster:
         out = model(dummy_input)
         assert tuple(out.shape) == (B, H, F)
 
+    @pytest.mark.parametrize("long_len", [168, 256])
+    def test_forward_long_sequence_finite(self, long_len):
+        """Regression: mLSTM matrix memory must NOT overflow fp32 on long sequences.
+
+        Pre-fix (plan_2026-06-11_50891da1) the mLSTMCell input gate ``exp(i_proj)``
+        had no log-domain max-stabilizer and the forward pass produced ``inf`` once
+        the sequence reached ~64 steps. ALL-mLSTM (``mlstm_ratio=1.0``) is the
+        worst case. The existing tests used ``L=32`` and missed this entirely.
+        """
+        model = create_xlstm_forecaster(
+            input_length=long_len,
+            prediction_length=H,
+            num_features=F,
+            embed_dim=EMBED_DIM,
+            num_layers=NUM_LAYERS,
+            mlstm_ratio=1.0,                # all mLSTM blocks -> worst case
+            mlstm_num_heads=MLSTM_NUM_HEADS,
+            use_quantile_head=True,
+            quantile_levels=QLEVELS,
+            use_normalization=False,
+        )
+        x = np.random.randn(B, long_len, F).astype("float32")
+        out = np.asarray(model(x, training=False))
+        assert np.isfinite(out).all(), f"non-finite forward at input_length={long_len}"
+
     # ----------------------------------------------------------------- _forecast
     def test_forecast_quantile(self, quantile_config, dummy_input):
         """Quantile mode _forecast -> Forecast with quantiles + point."""
