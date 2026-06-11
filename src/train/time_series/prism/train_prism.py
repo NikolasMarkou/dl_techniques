@@ -44,6 +44,7 @@ from train.common import (
     create_ts_argument_parser,
     _prepare_viz_data_from_processor,
 )
+from train.common.args import build_generator_config
 from train.common.timeseries import _plot_ts_forecast
 from dl_techniques.utils.logger import logger
 from dl_techniques.analyzer import AnalysisConfig
@@ -51,7 +52,6 @@ from dl_techniques.models.time_series.prism.model import PRISMModel
 from dl_techniques.losses.quantile_loss import QuantileLoss
 from dl_techniques.datasets.time_series import (
     TimeSeriesGenerator,
-    TimeSeriesGeneratorConfig,
     NormalizationMethod,
 )
 
@@ -79,8 +79,8 @@ class PRISMTrainingConfig(BaseTimeSeriesTrainingConfig):
     batch_size: int = 64
 
     # PRISM architecture
-    context_len: int = 168
-    forecast_len: int = 24
+    input_length: int = 168
+    prediction_length: int = 24
     preset: str = "small"  # 'tiny', 'small', 'base', 'large'
     hidden_dim: Optional[int] = None
     num_layers: int = 2
@@ -113,8 +113,8 @@ class PRISMTrainingConfig(BaseTimeSeriesTrainingConfig):
                 f"preset must be one of {list(PRISMModel.MODEL_VARIANTS.keys())}, "
                 f"got '{self.preset}'"
             )
-        if self.context_len <= 0 or self.forecast_len <= 0:
-            raise ValueError("context_len and forecast_len must be positive")
+        if self.input_length <= 0 or self.prediction_length <= 0:
+            raise ValueError("input_length and prediction_length must be positive")
         if self.use_quantile_head and 0.5 not in self.quantile_levels:
             logger.warning("Recommended to include 0.5 (median) in quantile_levels for evaluation.")
 
@@ -123,8 +123,8 @@ class PRISMDataProcessor(WindowedTimeSeriesProcessor):
     """PRISM data processor: thin subclass of :class:`WindowedTimeSeriesProcessor`.
 
     Uses the base's default reshape-both ``_make_sample`` / ``output_signature``
-    hooks (context -> ``(context_len, num_features)``, horizon ->
-    ``(forecast_len, num_features)``) with STANDARD per-instance normalization.
+    hooks (context -> ``(input_length, num_features)``, horizon ->
+    ``(prediction_length, num_features)``) with STANDARD per-instance normalization.
     """
 
     def __init__(
@@ -140,8 +140,8 @@ class PRISMDataProcessor(WindowedTimeSeriesProcessor):
             generator,
             selected_patterns,
             pattern_to_category=pattern_to_category,
-            context_len=config.context_len,
-            horizon_len=config.forecast_len,
+            context_len=config.input_length,
+            horizon_len=config.prediction_length,
             num_features=num_features,
             normalize=True,
             normalize_method=NormalizationMethod.STANDARD,
@@ -185,12 +185,7 @@ class PRISMPerformanceCallback(TimeSeriesPerformanceCallback):
             self.training_history['metric'].append(logs.get('mae', 0))
             self.training_history['val_metric'].append(logs.get('val_mae', 0))
 
-        lr = float(keras.ops.convert_to_numpy(self.model.optimizer.learning_rate))
-        if hasattr(self.model.optimizer.learning_rate, '__call__'):
-            lr = float(keras.ops.convert_to_numpy(
-                self.model.optimizer.learning_rate(self.model.optimizer.iterations)
-            ))
-        self.training_history.setdefault('lr', []).append(lr)
+        self._track_lr(logs)
 
     def _plot_predictions(self, epoch: int) -> None:
         context, target = self.viz_test_data
@@ -314,8 +309,10 @@ class PRISMTrainer(BaseTimeSeriesTrainer):
 
         model_kwargs: Dict[str, Any] = {
             "variant": self.config.preset,
-            "context_len": self.config.context_len,
-            "forecast_len": self.config.forecast_len,
+            # PRISMModel API kwargs are FIXED (context_len/forecast_len); only the
+            # VALUE source renamed to the config's input_length/prediction_length.
+            "context_len": self.config.input_length,
+            "forecast_len": self.config.prediction_length,
             "num_features": num_features,
             "num_layers": self.config.num_layers,
             "tree_depth": self.config.tree_depth,
@@ -352,7 +349,7 @@ class PRISMTrainer(BaseTimeSeriesTrainer):
         if self.config.gradient_clip_norm:
             optimizer.clipnorm = self.config.gradient_clip_norm
 
-        model.build((None, self.config.context_len, num_features))
+        model.build((None, self.config.input_length, num_features))
 
         if self.config.use_quantile_head:
             logger.info("Compiling with QuantileLoss")
@@ -373,7 +370,7 @@ class PRISMTrainer(BaseTimeSeriesTrainer):
 
         # PRISMModel (subclassed Model) needs a forward pass to finalize weights.
         dummy_input = np.zeros(
-            (1, self.config.context_len, num_features), dtype='float32')
+            (1, self.config.input_length, num_features), dtype='float32')
         model(dummy_input)
         return model
 
@@ -421,7 +418,7 @@ def build_parser() -> argparse.ArgumentParser:
     warmup/analysis/``--gpu`` etc.), restores PRISM's own defaults for the args
     whose default differs from the shared parser via ``set_defaults`` (epochs
     150, batch_size 64, steps_per_epoch 500, experiment_name "prism"), then adds
-    PRISM's architecture-specific flags (preset, context/forecast lengths,
+    PRISM's architecture-specific flags (preset, input/prediction lengths,
     quantile head, ONNX, per-instance normalization toggle).
     """
     parser = create_ts_argument_parser("PRISM Training Framework")
@@ -438,8 +435,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # PRISM architecture-specific arguments.
     parser.add_argument("--preset", type=str, default="small", choices=['tiny', 'small', 'base', 'large'])
-    parser.add_argument("--context_len", type=int, default=168)
-    parser.add_argument("--forecast_len", type=int, default=24)
+    parser.add_argument("--input_length", type=int, default=168)
+    parser.add_argument("--prediction_length", type=int, default=24)
     parser.add_argument("--hidden_dim", type=int, default=None)
     parser.add_argument("--num_layers", type=int, default=2)
     parser.add_argument("--tree_depth", type=int, default=2)
@@ -461,14 +458,15 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    set_seeds(42)
+    set_seeds(args.seed)
     setup_gpu(args.gpu)
 
     config = PRISMTrainingConfig(
+        seed=args.seed,
         experiment_name=args.experiment_name,
         preset=args.preset,
-        context_len=args.context_len,
-        forecast_len=args.forecast_len,
+        input_length=args.input_length,
+        prediction_length=args.prediction_length,
         hidden_dim=args.hidden_dim,
         num_layers=args.num_layers,
         tree_depth=args.tree_depth,
@@ -495,9 +493,7 @@ def main() -> None:
         onnx_opset_version=args.onnx_opset_version,
     )
 
-    generator_config = TimeSeriesGeneratorConfig(
-        n_samples=10000, random_seed=42, default_noise_level=0.1
-    )
+    generator_config = build_generator_config(args)
 
     try:
         trainer = PRISMTrainer(config, generator_config)
