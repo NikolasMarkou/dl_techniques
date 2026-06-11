@@ -1000,6 +1000,7 @@ class BaseTimeSeriesTrainer:
         callbacks, results_dir = create_common_callbacks(
             model_name=self.MODEL_DISPLAY_NAME or self.config.experiment_name,
             results_dir_prefix=self._build_results_prefix(),
+            output_root=self.config.result_dir,
             monitor="val_loss",
             patience=self.EARLY_STOPPING_PATIENCE,
             use_lr_schedule=self.config.use_warmup,

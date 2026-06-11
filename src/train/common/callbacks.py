@@ -18,6 +18,7 @@ from train.common.evaluation import generate_training_curves
 def create_callbacks(
         model_name: str,
         results_dir_prefix: str = "model",
+        output_root: str = "results",
         monitor: str = 'val_accuracy',
         patience: int = 15,
         use_lr_schedule: bool = True,
@@ -37,6 +38,8 @@ def create_callbacks(
         Name identifier for the model (used in directory naming).
     results_dir_prefix : str
         Prefix for the results directory (e.g., 'convnext_v1', 'convnext_v2').
+    output_root : str
+        Base directory under which the timestamped run dir is created. Default 'results'.
     monitor : str
         Metric to monitor for checkpointing/early stopping.
     patience : int
@@ -62,7 +65,7 @@ def create_callbacks(
         List of callbacks and the results directory path.
     """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = os.path.join("results", f"{results_dir_prefix}_{model_name}_{timestamp}")
+    results_dir = os.path.join(output_root, f"{results_dir_prefix}_{model_name}_{timestamp}")
     os.makedirs(results_dir, exist_ok=True)
 
     monitor_mode = 'max' if 'accuracy' in monitor else 'min'
