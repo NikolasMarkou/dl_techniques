@@ -253,25 +253,12 @@ class NBeatsXNet(keras.Model):
         # Assuming input is dict, we define standard shapes
         dummy_resid_shape = (None, self.backcast_length * 1)  # Univariate target
 
-        # DECISION plan_2026-06-11_fe7401f4/D-003: materialize EVERY block's
-        # variables here (incl. the ExogenousBlock TCN's lazy Conv1D children)
-        # via a real symbolic forward pass. Do NOT rely on block.build() alone:
-        # ExogenousBlock.build() calls self.encoder.build(...) on a
-        # TemporalConvNet that has NO real build() method, so its inner Conv1D
-        # layers stay unbuilt and .keras load fails ("layer was never built but
-        # the weights file lists N variables"). A symbolic call forces those
-        # children to exist BEFORE Keras restores weights on load. The TCN
-        # itself is out of scope; do not patch it. See decisions.md D-003.
-        dummy_resid = ops.zeros((1, self.backcast_length * 1))
-        dummy_x_hist = ops.zeros((1, self.backcast_length, self.exogenous_dim))
-        dummy_x_fore = ops.zeros((1, self.forecast_length, self.exogenous_dim))
-
+        # NOTE: D-003 (plan_2026-06-11_fe7401f4) resolved by plan_2026-06-11_5f49f080 —
+        # TemporalConvNet now has a real build(); ExogenousBlock.build()->encoder.build()
+        # materializes all TCN Conv1D children, so no eager dummy forward is needed.
         for stack in self.blocks:
             for block in stack:
                 block.build(dummy_resid_shape)
-                if isinstance(block, ExogenousBlock):
-                    # Forces the TCN encoder's Conv1D children to build.
-                    block(dummy_resid, exogenous_inputs=(dummy_x_hist, dummy_x_fore))
 
         super().build(input_shape)
 
