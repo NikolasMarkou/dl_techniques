@@ -375,11 +375,12 @@ class XLSTMForecasterTrainer(BaseTimeSeriesTrainer):
             loss = keras.losses.MeanAbsoluteError()
             metrics = [keras.metrics.MeanSquaredError(name='mse')]
 
-        # jit_compile left False as the conservative default. (The historical NaN
-        # was NOT a jit/XLA issue -- it was an unstabilized exp() overflow in the
-        # shared mLSTMCell, fixed in plan_2026-06-11_50891da1. jit=True may be
-        # re-enabled if a smoke confirms the gated recurrence has an XLA-GPU kernel.)
-        model.compile(optimizer=optimizer, loss=loss, metrics=metrics, jit_compile=False)
+        # jit_compile=True. The historical NaN was NOT a jit/XLA issue -- it was an
+        # unstabilized exp() overflow in the shared mLSTMCell (fixed in
+        # plan_2026-06-11_50891da1). With the stabilizer in place the gated
+        # recurrence compiles and trains finitely under XLA (smoke-confirmed:
+        # jit=True quantile/point trainer smokes complete with finite loss).
+        model.compile(optimizer=optimizer, loss=loss, metrics=metrics, jit_compile=True)
 
         # Build the subclassed model with a dummy forward pass so downstream
         # `count_params()` / `summary()` (run_experiment) work before fit.
