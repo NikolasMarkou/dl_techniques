@@ -12,6 +12,7 @@ References:
 import os
 import sys
 import json
+import math
 import random
 import argparse
 from dataclasses import dataclass, field
@@ -364,7 +365,15 @@ class MDNPerformanceCallback(TimeSeriesPerformanceCallback):
         horizon). The save path / dpi / bbox are identical in both branches (I5).
         """
         total_samples = len(self.viz_targets)
-        indices = np.random.choice(total_samples, min(self.config.plot_top_k_patterns, total_samples), replace=False)
+        k = self.config.plot_top_k_patterns
+        indices = np.random.choice(total_samples, min(k, total_samples), replace=False)
+
+        # Grid sized from plot_top_k_patterns (F9): 3 cols, ceil(k/3) rows. The
+        # number of populated panels is bounded by len(indices) (= min(k, avail)),
+        # so we never index viz_x/viz_y/preds out of range when k > available.
+        n_cols = 3
+        n_rows = math.ceil(k / n_cols)
+        used = len(indices)
 
         sample_seq = self.viz_inputs[0][indices]
         sample_task = self.viz_inputs[1][indices]
@@ -380,12 +389,11 @@ class MDNPerformanceCallback(TimeSeriesPerformanceCallback):
             pis = keras.ops.convert_to_numpy(pis)
             pis = np.exp(pis) / np.sum(np.exp(pis), axis=1, keepdims=True)
 
-            fig, axes = plt.subplots(3, 3, figsize=(15, 12))
+            fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows), squeeze=False)
             axes = axes.flatten()
 
-            for i, ax in enumerate(axes):
-                if i >= len(indices):
-                    break
+            for i in range(used):
+                ax = axes[i]
 
                 ctx = sample_seq[i].flatten()
                 tgt = sample_target[i]
@@ -421,6 +429,9 @@ class MDNPerformanceCallback(TimeSeriesPerformanceCallback):
                 if i == 0:
                     ax.legend(loc='upper left', fontsize='small')
 
+            for j in range(used, len(axes)):
+                axes[j].axis('off')
+
             plt.suptitle(f'MDN Probabilistic Forecasts (Epoch {epoch + 1})', fontsize=16)
         else:
             # H>1: scalar mixture-PDF view does not apply. Route through the shared
@@ -430,13 +441,10 @@ class MDNPerformanceCallback(TimeSeriesPerformanceCallback):
             fc = self.model.predict_forecast((sample_seq, sample_task))
             lower, upper = fc.interval(fc.quantile_levels[0], fc.quantile_levels[1])
 
-            n = len(indices)
-            fig, axes = plt.subplots(3, 3, figsize=(15, 12))
+            fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 4 * n_rows), squeeze=False)
             axes = axes.flatten()
-            for i, ax in enumerate(axes):
-                if i >= n:
-                    ax.axis('off')
-                    continue
+            for i in range(used):
+                ax = axes[i]
                 _plot_ts_forecast(
                     ax,
                     context=sample_seq[i].reshape(-1),
@@ -448,6 +456,9 @@ class MDNPerformanceCallback(TimeSeriesPerformanceCallback):
                 )
                 if i == 0:
                     ax.legend(loc='upper left', fontsize='small')
+
+            for j in range(used, len(axes)):
+                axes[j].axis('off')
 
             plt.suptitle(f'MDN Multi-Step Forecasts (Epoch {epoch + 1})', fontsize=16)
 
@@ -654,6 +665,7 @@ def main() -> None:
     config = MDNTrainingConfig(
         seed=args.seed,
         experiment_name=args.experiment_name,
+        result_dir=args.result_dir,
         input_length=args.input_length,
         prediction_length=args.prediction_length,
         num_mixtures=args.num_mixtures,
