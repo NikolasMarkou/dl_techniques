@@ -63,6 +63,7 @@ from typing import Optional, Union, Any, Dict, Literal
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.time_series.xlstm_blocks import mLSTMBlock, sLSTMBlock
 
@@ -155,6 +156,39 @@ class xLSTM(keras.Model):
         ```
     """
 
+    # Default architectural constants (discoverability; cosmetic).
+    DEFAULT_MLSTM_RATIO: float = 0.5
+    DEFAULT_MLSTM_NUM_HEADS: int = 4
+    DEFAULT_FFN_TYPE: str = 'swiglu'
+    DEFAULT_NORMALIZATION_TYPE: str = 'layer_norm'
+
+    # Predefined size variants for the language model (small / base / large).
+    # These are the ONLY model in the family with NEW semantic size variants:
+    # LM scaling (embed_dim / num_layers / heads) is a real, meaningful axis.
+    MODEL_VARIANTS = {
+        "small": {
+            "embed_dim": 256,
+            "num_layers": 6,
+            "mlstm_ratio": 0.5,
+            "mlstm_num_heads": 4,
+            "ffn_expansion_factor": 2,
+        },
+        "base": {
+            "embed_dim": 512,
+            "num_layers": 12,
+            "mlstm_ratio": 0.5,
+            "mlstm_num_heads": 8,
+            "ffn_expansion_factor": 2,
+        },
+        "large": {
+            "embed_dim": 1024,
+            "num_layers": 24,
+            "mlstm_ratio": 0.5,
+            "mlstm_num_heads": 16,
+            "ffn_expansion_factor": 4,
+        },
+    }
+
     def __init__(
         self,
         vocab_size: int,
@@ -201,7 +235,9 @@ class xLSTM(keras.Model):
         self.ffn_type = ffn_type
         self.ffn_expansion_factor = ffn_expansion_factor
         self.normalization_type = normalization_type
-        self.normalization_kwargs = normalization_kwargs or {}
+        # Store the RAW value (preserve the None sentinel for lossless round-trip);
+        # `or {}` is applied ONLY at the create_normalization_layer call site below.
+        self.normalization_kwargs = normalization_kwargs
         self.dropout_rate = dropout_rate
         self.embedding_dropout_rate = embedding_dropout_rate
         self.kernel_initializer = kernel_initializer
@@ -273,7 +309,7 @@ class xLSTM(keras.Model):
         self.final_norm = create_normalization_layer(
             normalization_type=normalization_type,
             name='final_norm',
-            **self.normalization_kwargs
+            **(self.normalization_kwargs or {})
         )
 
         # Output head
@@ -285,6 +321,31 @@ class xLSTM(keras.Model):
             bias_regularizer=bias_regularizer,
             name='output_head',
         )
+
+    def build(self, input_shape) -> None:
+        """Explicitly build every sublayer so weights restore on `.keras` load.
+
+        LM input is integer tokens ``[B, T]``. The Embedding maps ``[B, T]`` ->
+        ``[B, T, embed_dim]``; every downstream sublayer (dropout, blocks,
+        final_norm, output_head) operates on the ``[B, T, embed_dim]`` shape.
+
+        Per LESSONS (D-002): a ``super().build()``-only body leaves sublayers
+        unbuilt at ``load_model`` weight-restore time, so the restored weights
+        have nowhere to land and the next forward silently re-initializes them.
+        Build each sublayer in order BEFORE ``super().build()``.
+        """
+        # Token shape [B, T] -> embedded shape [B, T, embed_dim].
+        embedded_shape = tuple(input_shape) + (self.embed_dim,)
+
+        self.embedding.build(input_shape)
+        if self.embedding_dropout is not None:
+            self.embedding_dropout.build(embedded_shape)
+        for block in self.blocks:
+            block.build(embedded_shape)
+        self.final_norm.build(embedded_shape)
+        self.output_head.build(embedded_shape)
+
+        super().build(input_shape)
 
     def call(
         self,
@@ -322,9 +383,57 @@ class xLSTM(keras.Model):
 
         return logits
 
+    @classmethod
+    def from_variant(
+        cls,
+        variant: str,
+        vocab_size: int,
+        pretrained: bool = False,
+        **overrides: Any
+    ) -> 'xLSTM':
+        """
+        Create an :class:`xLSTM` language model from a predefined size variant.
+
+        Args:
+            variant: One of ``"small"``, ``"base"``, ``"large"``.
+            vocab_size: Vocabulary size (required; not part of the variant dict).
+            pretrained: Must be False; pretrained weights are not provided.
+            **overrides: Override / supply constructor arguments. These take
+                precedence over the variant defaults.
+
+        Returns:
+            An :class:`xLSTM` instance.
+
+        Raises:
+            ValueError: If ``variant`` is not recognized.
+            NotImplementedError: If ``pretrained=True`` (no checkpoints shipped).
+
+        Example:
+            >>> model = xLSTM.from_variant("small", vocab_size=50000)
+        """
+        if pretrained:
+            raise NotImplementedError(
+                "Pretrained xLSTM weights are not provided. "
+                "Use pretrained=False and train from scratch."
+            )
+        if variant not in cls.MODEL_VARIANTS:
+            raise ValueError(
+                f"Unknown variant '{variant}'. Available variants: "
+                f"{list(cls.MODEL_VARIANTS.keys())}"
+            )
+
+        config = cls.MODEL_VARIANTS[variant].copy()
+        config['vocab_size'] = vocab_size
+        config.update(overrides)
+
+        logger.info(f"Creating xLSTM-{variant.upper()} language model")
+
+        return cls(**config)
+
     def get_config(self) -> Dict[str, Any]:
         """Return the configuration of the model."""
-        config = {
+        config = super().get_config()
+        config.update({
             'vocab_size': self.vocab_size,
             'embed_dim': self.embed_dim,
             'num_layers': self.num_layers,
@@ -350,14 +459,57 @@ class xLSTM(keras.Model):
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
             'recurrent_regularizer': keras.regularizers.serialize(self.recurrent_regularizer),
             'bias_regularizer': keras.regularizers.serialize(self.bias_regularizer),
-            'name': self.name,
-            'trainable': self.trainable,
-        }
+        })
         return config
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'xLSTM':
         """Create model from configuration."""
         return cls(**config)
+
+# ---------------------------------------------------------------------
+
+
+def create_xlstm(
+    vocab_size: int,
+    embed_dim: int,
+    num_layers: int,
+    mlstm_ratio: float = 0.5,
+    mlstm_num_heads: int = 4,
+    ffn_type: str = 'swiglu',
+    normalization_type: str = 'layer_norm',
+    **kwargs: Any
+) -> xLSTM:
+    """
+    Factory for :class:`xLSTM` (language model).
+
+    Thin config-driven constructor wrapper following the repo factory
+    convention (mirrors ``create_xlstm_forecaster``). All additional
+    constructor arguments are forwarded via ``**kwargs``.
+
+    Args:
+        vocab_size: Size of the vocabulary.
+        embed_dim: Dimensionality of token embeddings.
+        num_layers: Total number of xLSTM blocks.
+        mlstm_ratio: Fraction of layers that are mLSTM. Defaults to 0.5.
+        mlstm_num_heads: Number of mLSTM heads. Defaults to 4.
+        ffn_type: FFN type for sLSTM blocks. Defaults to ``'swiglu'``.
+        normalization_type: Normalization layer type. Defaults to
+            ``'layer_norm'``.
+        **kwargs: Forwarded to the :class:`xLSTM` constructor.
+
+    Returns:
+        A configured :class:`xLSTM` instance.
+    """
+    return xLSTM(
+        vocab_size=vocab_size,
+        embed_dim=embed_dim,
+        num_layers=num_layers,
+        mlstm_ratio=mlstm_ratio,
+        mlstm_num_heads=mlstm_num_heads,
+        ffn_type=ffn_type,
+        normalization_type=normalization_type,
+        **kwargs
+    )
 
 # ---------------------------------------------------------------------

@@ -25,7 +25,7 @@ import tensorflow as tf
 from typing import Dict, Any, List
 
 
-from dl_techniques.models.time_series.xlstm.model import xLSTM
+from dl_techniques.models.time_series.xlstm.model import xLSTM, create_xlstm
 
 
 # =============================================================================
@@ -892,6 +892,75 @@ class TestXLSTMModel:
 
         output = model(sample_input, training=False)
         assert output.shape == (batch_size, seq_len, config['vocab_size'])
+
+    # -------------------------------------------------------------------------
+    # Factory + Variant Tests
+    # -------------------------------------------------------------------------
+
+    def test_create_xlstm_factory(self, small_vocab_size):
+        """create_xlstm returns a working xLSTM with a valid forward pass."""
+        model = create_xlstm(
+            vocab_size=small_vocab_size,
+            embed_dim=32,
+            num_layers=2,
+            mlstm_ratio=0.5,
+            mlstm_num_heads=4,
+        )
+
+        assert isinstance(model, xLSTM)
+        assert model.vocab_size == small_vocab_size
+        assert model.embed_dim == 32
+        assert len(model.blocks) == 2
+
+        seq_len = 8
+        batch_size = 2
+        sample_input = keras.random.randint(
+            shape=(batch_size, seq_len),
+            minval=0,
+            maxval=small_vocab_size,
+        )
+        output = model(sample_input, training=False)
+        assert output.shape == (batch_size, seq_len, small_vocab_size)
+
+    def test_from_variant(self, small_vocab_size):
+        """from_variant constructs each declared variant + runs a forward pass.
+
+        Variant defaults (embed_dim up to 1024) are overridden with tiny dims to
+        keep the test fast; the point is to exercise the variant-resolution path
+        and the constructed-model forward pass for every declared variant.
+        """
+        for variant in xLSTM.MODEL_VARIANTS:
+            model = xLSTM.from_variant(
+                variant,
+                vocab_size=small_vocab_size,
+                # Override to tiny dims for speed (variant path still exercised).
+                embed_dim=32,
+                num_layers=2,
+                mlstm_num_heads=4,
+            )
+            assert isinstance(model, xLSTM)
+            assert model.vocab_size == small_vocab_size
+
+            seq_len = 6
+            batch_size = 2
+            sample_input = keras.random.randint(
+                shape=(batch_size, seq_len),
+                minval=0,
+                maxval=small_vocab_size,
+            )
+            output = model(sample_input, training=False)
+            assert output.shape == (batch_size, seq_len, small_vocab_size)
+
+    def test_from_variant_unknown_raises(self, small_vocab_size):
+        """from_variant with an unknown variant name raises ValueError."""
+        with pytest.raises(ValueError, match="Unknown variant"):
+            xLSTM.from_variant("nonexistent", vocab_size=small_vocab_size)
+
+    def test_from_variant_pretrained_raises(self, small_vocab_size):
+        """from_variant(pretrained=True) is not implemented."""
+        variant = next(iter(xLSTM.MODEL_VARIANTS))
+        with pytest.raises(NotImplementedError):
+            xLSTM.from_variant(variant, vocab_size=small_vocab_size, pretrained=True)
 
 
 # =============================================================================

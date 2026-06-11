@@ -11,6 +11,9 @@ Covers both head modes (quantile / point):
 This file does NOT touch the LM test ``test_model.py`` (no regression intended).
 """
 
+import os
+import tempfile
+
 import pytest
 import numpy as np
 import keras
@@ -174,6 +177,39 @@ class TestXLSTMForecaster:
         # Rebuilt model produces a same-shaped output.
         rebuilt_out = rebuilt(dummy_input, training=False)
         assert tuple(rebuilt_out.shape) == tuple(original.shape)
+
+    @pytest.mark.parametrize("mode", ["quantile", "point"])
+    def test_keras_file_round_trip(self, mode, quantile_config, point_config, dummy_input):
+        """CRITICAL: full ``.keras`` file save/load round-trip with numeric match.
+
+        Exercises the ``blocks`` list-serialization path end to end (the
+        ``from_config`` shape round-trip alone never restores weights). Per
+        D-002/D-003, an explicit ``build()`` must pre-build every sublayer
+        (including each block in the list) so the restored weights land
+        correctly; otherwise the reloaded model silently re-initializes and the
+        predictions diverge.
+        """
+        config_in = quantile_config if mode == "quantile" else point_config
+        model = xLSTMForecaster(**config_in)
+
+        # Build by calling once before serializing (LESSONS).
+        original = np.asarray(model(dummy_input, training=False))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, f"xlstm_forecaster_{mode}.keras")
+            model.save(filepath)
+
+            loaded = keras.models.load_model(filepath)
+            loaded_out = np.asarray(loaded(dummy_input, training=False))
+
+        assert loaded_out.shape == original.shape
+        np.testing.assert_allclose(
+            original,
+            loaded_out,
+            rtol=1e-6,
+            atol=1e-6,
+            err_msg="Predictions differ after .keras save/load (blocks weights lost)",
+        )
 
     # ----------------------------------------------------------------- factory
     def test_create_factory(self, dummy_input):

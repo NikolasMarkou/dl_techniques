@@ -59,7 +59,10 @@ from dl_techniques.layers.time_series.quantile_head_fixed_io import QuantileHead
 # Type definitions
 # ---------------------------------------------------------------------
 
-# Default quantile levels for probabilistic forecasting
+# Default quantile levels for probabilistic forecasting.
+# Module-level alias retained for the constructor / factory signature defaults
+# (and any external importers); the canonical home is
+# ``xLSTMForecaster.DEFAULT_QUANTILES`` (assigned on the class below).
 DEFAULT_QUANTILES: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
 # ---------------------------------------------------------------------
@@ -160,6 +163,10 @@ class xLSTMForecaster(keras.Model, ForecastMixin):
         ```
     """
 
+    # Canonical default quantile levels (class attribute; the module-level
+    # ``DEFAULT_QUANTILES`` is a backward-compatible alias of this value).
+    DEFAULT_QUANTILES: List[float] = DEFAULT_QUANTILES
+
     # Model variant configurations (small / tiny for quick experiments).
     MODEL_VARIANTS = {
         "tiny": {
@@ -243,7 +250,9 @@ class xLSTMForecaster(keras.Model, ForecastMixin):
         self.ffn_type = ffn_type
         self.ffn_expansion_factor = ffn_expansion_factor
         self.normalization_type = normalization_type
-        self.normalization_kwargs = normalization_kwargs or {}
+        # Store the RAW value (preserve the None sentinel for lossless round-trip);
+        # `or {}` is applied ONLY at the create_normalization_layer call site below.
+        self.normalization_kwargs = normalization_kwargs
         self.dropout_rate = dropout_rate
         self.use_quantile_head = use_quantile_head
         self.quantile_levels = list(quantile_levels)
@@ -308,7 +317,7 @@ class xLSTMForecaster(keras.Model, ForecastMixin):
         self.final_norm = create_normalization_layer(
             normalization_type=normalization_type,
             name='final_norm',
-            **self.normalization_kwargs
+            **(self.normalization_kwargs or {})
         )
 
         # Forecasting head (quantile or point), gated by use_quantile_head.
@@ -339,6 +348,36 @@ class xLSTMForecaster(keras.Model, ForecastMixin):
             f"prediction_length={prediction_length}, "
             f"head={'quantile' if use_quantile_head else 'point'}"
         )
+
+    def build(self, input_shape) -> None:
+        """Explicitly build every sublayer so weights restore on `.keras` load.
+
+        Continuous input is ``[B, input_length, num_features]``. The input
+        projection maps ``[B, T, F]`` -> ``[B, T, embed_dim]``; blocks and
+        ``final_norm`` operate on ``[B, T, embed_dim]``; the head consumes the
+        global mean-pooled ``[B, 1, embed_dim]`` (the static seq-len of 1 is
+        required by ``QuantileHead(flatten_input=True)``).
+
+        Per LESSONS (D-002/D-003): building only via ``super().build()`` leaves
+        the block / head sublayers unbuilt at ``load_model`` weight-restore time,
+        so this exercises the ``blocks`` list-serialization path explicitly.
+        """
+        input_shape = tuple(input_shape)
+        # A 2D [B, T] context is expanded to [B, T, 1] in call(); build for 3D.
+        if len(input_shape) == 2:
+            input_shape = input_shape + (1,)
+
+        seq_len = input_shape[1]
+        projected_shape = (input_shape[0], seq_len, self.embed_dim)
+        pooled_shape = (input_shape[0], 1, self.embed_dim)
+
+        self.input_projection.build(input_shape)
+        for block in self.blocks:
+            block.build(projected_shape)
+        self.final_norm.build(projected_shape)
+        self.head.build(pooled_shape)
+
+        super().build(input_shape)
 
     def call(
         self,
