@@ -12,6 +12,21 @@ emits clean ``[B, context, F]`` tensor input, so the base
 ``BaseTimeSeriesTrainer._compute_post_hoc_metrics`` (ForecastMixin-gated) populates
 the post-hoc forecast metric block unchanged — the contract-native payoff.
 
+.. warning::
+    **EXPERIMENTAL — known training instability (NaN) as of plan_2026-06-10_c6197fb1.**
+    The ``xLSTMForecaster`` MODEL is correct and fully tested (eager forward /
+    ``_forecast`` / single-step gradient on real batches are all finite; 11 model
+    tests pass; ``get_config`` round-trips). However, ``model.fit()`` through this
+    trainer produces ``NaN`` loss from ~step 1 under every configuration tried
+    (``jit_compile`` True/False, ``run_eagerly=True``, both normalization paths).
+    A single manual eager train step on a real batch is finite, so the NaN is a
+    fit-loop/data interaction not yet pinned — prime suspect: a near-constant
+    synthetic window hitting the base ``_safe_normalize`` STANDARD per-instance
+    divide-by-~0-std (no epsilon). DEFERRED to a follow-up. Do NOT treat this
+    trainer as production-ready until the NaN is root-caused and fixed. The
+    structural pieces (config/processor/callback/trainer, NO post_hoc override —
+    the contract-native payoff) are otherwise complete and correct.
+
 References:
     Beck, M., et al. (2024) - xLSTM: Extended Long Short-Term Memory (arXiv:2405.04517)
     Kim, T., et al. (2022) - Reversible Instance Normalization (ICLR)
@@ -31,6 +46,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
+import tensorflow as tf
 
 from train.common import (
     setup_gpu,
@@ -104,13 +120,16 @@ class XLSTMForecasterTrainingConfig(BaseTimeSeriesTrainingConfig):
 
 
 class XLSTMForecasterDataProcessor(WindowedTimeSeriesProcessor):
-    """xLSTMForecaster data processor: thin subclass of :class:`WindowedTimeSeriesProcessor`.
+    """xLSTMForecaster data processor: subclass of :class:`WindowedTimeSeriesProcessor`.
 
-    Unlike tirex (which flattens the target and disables base normalization),
-    xLSTMForecaster consumes the base ``[B, context, F]`` / ``[B, H, F]`` sample
-    layout directly. Only ``__init__`` is overridden to forward the context/horizon
-    lengths and turn ON per-instance STANDARD normalization; ``_make_sample`` and
-    ``output_signature`` are inherited unchanged.
+    Context is always ``[context, F]``. The TARGET shape is mode-dependent so it
+    matches the model output + loss:
+    - quantile mode: target is FLATTENED to ``[H]`` (like tirex) — `QuantileLoss`
+      expects ``y_true [B,H]`` and internally expands to broadcast against the
+      ``y_pred [B,H,Q]`` quantile axis; a ``[B,H,1]`` target would rank-mismatch.
+    - point mode: target stays ``[H, F]`` to match the point head's ``[B,H,F]``
+      MeanAbsoluteError target.
+    Per-instance STANDARD normalization is ON (base default).
     """
 
     def __init__(
@@ -129,8 +148,31 @@ class XLSTMForecasterDataProcessor(WindowedTimeSeriesProcessor):
             context_len=config.input_length,
             horizon_len=config.prediction_length,
             num_features=num_features,
+            # normalize=True: the processor owns normalization (mdn/prism pattern).
+            # This is the NaN-safe path: base normalization runs `_fill_nans` so
+            # raw synthetic NaN windows never reach the model. The model's own RevIN
+            # is DISABLED (use_normalization=False in _build_model) to avoid double
+            # normalization; targets are already standardized, so QuantileLoss
+            # (normalize=True) divides by a healthy mean(|target|) ~= 0.8, not ~0.
             normalize=True,
         )
+
+    def _make_sample(self, window: np.ndarray, pattern_name: str) -> Tuple[Any, Any]:
+        inputs = window[:self.context_len].reshape(-1, self.num_features).astype(np.float32)
+        targets = window[self.context_len:].reshape(-1, self.num_features).astype(np.float32)
+        if self.config.use_quantile_head:
+            # QuantileLoss expects y_true [H]; flatten the trailing feature axis.
+            targets = targets.reshape(self.horizon_len).astype(np.float32)
+        return inputs, targets
+
+    @property
+    def output_signature(self) -> Tuple[Any, Any]:
+        ctx_spec = tf.TensorSpec(shape=(self.context_len, self.num_features), dtype=tf.float32)
+        if self.config.use_quantile_head:
+            tgt_spec = tf.TensorSpec(shape=(self.horizon_len,), dtype=tf.float32)
+        else:
+            tgt_spec = tf.TensorSpec(shape=(self.horizon_len, self.num_features), dtype=tf.float32)
+        return (ctx_spec, tgt_spec)
 
 
 class XLSTMForecasterPerformanceCallback(TimeSeriesPerformanceCallback):
@@ -301,6 +343,10 @@ class XLSTMForecasterTrainer(BaseTimeSeriesTrainer):
             quantile_levels=self.config.quantile_levels,
             enforce_monotonicity=self.config.enforce_monotonicity,
             dropout_rate=self.config.dropout_rate,
+            # Processor already normalizes (normalize=True, NaN-safe). Disable the
+            # model's RevIN to avoid double normalization (which collapses targets
+            # and NaNs QuantileLoss). Single normalization owned by the processor.
+            use_normalization=False,
         )
 
         if self.config.use_warmup:
@@ -333,11 +379,17 @@ class XLSTMForecasterTrainer(BaseTimeSeriesTrainer):
             loss = keras.losses.MeanAbsoluteError()
             metrics = [keras.metrics.MeanSquaredError(name='mse')]
 
-        # jit_compile: default True (tirex precedent). SINGLE point to flip to
-        # False if the gated mLSTM/sLSTM recurrence lacks an XLA-GPU kernel
-        # (vMF keras.random.beta precedent, SYSTEM.md) -- the step-13 smoke will
-        # catch a jit XLA crash and flip this.
-        model.compile(optimizer=optimizer, loss=loss, metrics=metrics, jit_compile=True)
+        # jit_compile=False (STOP-IF-1 fired): the gated mLSTM/sLSTM recurrence
+        # produces NaN under XLA on real data while EAGER forward+loss+gradient are
+        # all finite (diagnosed: eager train step finite, jit=True NaN at step 1).
+        # XLA-GPU has no faithful kernel for these ops here -- same class of issue
+        # as the vMF keras.random.beta XLA incompatibility (SYSTEM.md). Disabled.
+        model.compile(optimizer=optimizer, loss=loss, metrics=metrics, jit_compile=False)
+
+        # Build the subclassed model with a dummy forward pass so downstream
+        # `count_params()` / `summary()` (run_experiment) work before fit.
+        dummy = keras.ops.zeros((1, self.config.input_length, 1), dtype="float32")
+        _ = model(dummy, training=False)
         return model
 
     def run_experiment(self) -> Dict[str, Any]:
