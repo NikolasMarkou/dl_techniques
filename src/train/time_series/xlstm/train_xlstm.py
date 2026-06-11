@@ -265,14 +265,16 @@ class XLSTMForecasterTrainer(BaseTimeSeriesTrainer):
     (generator/pattern setup, ``_select_patterns``, ``_train_model``,
     ``_save_results``, ``_export_to_onnx``, AND ``_compute_post_hoc_metrics``).
     This trainer overrides only the genuine divergences: the processor, the model
-    build (+compile), the performance callback, the head-mode results prefix, the
-    ``patience=30`` / ``model_name="xLSTMForecaster"`` callback set, and a minimal
-    ``run_experiment`` to fold ``onnx_path`` into ``results.json``.
+    build (+compile), the performance callback, the head-mode results prefix, and
+    the two callback class attrs (``MODEL_DISPLAY_NAME``/``EARLY_STOPPING_PATIENCE``).
 
     NOTE: ``_compute_post_hoc_metrics`` is DELIBERATELY NOT overridden. The model
     feeds the base a clean ``[B, context, F]`` tensor, so the base ForecastMixin
     path populates the metric block unchanged (the contract-native payoff).
     """
+
+    MODEL_DISPLAY_NAME = "xLSTMForecaster"
+    EARLY_STOPPING_PATIENCE = 30
 
     def _build_processor(self) -> XLSTMForecasterDataProcessor:
         return XLSTMForecasterDataProcessor(
@@ -286,39 +288,6 @@ class XLSTMForecasterTrainer(BaseTimeSeriesTrainer):
     def _build_results_prefix(self) -> str:
         mode = 'quantile' if self.config.use_quantile_head else 'point'
         return f"{self.config.experiment_name}_{mode}"
-
-    def _make_callbacks(self, exp_dir: Optional[str] = None) -> List:
-        """Override: xLSTMForecaster uses ``patience=30`` /
-        ``model_name="xLSTMForecaster"`` AND owns its experiment dir (D-009)."""
-        # DECISION plan_2026-06-09_a3c7304c/D-009
-        # Pass a BARE prefix (self._build_results_prefix()) to
-        # create_common_callbacks and adopt its RETURNED results_dir as
-        # self.exp_dir -- matching the tirex flow. Do NOT pass the pre-created
-        # full exp_dir as results_dir_prefix and do NOT use the base
-        # _create_experiment_dir here: that built a SEPARATE doubly-nested
-        # results dir while the ONNX read path used the first dir -> checkpoint
-        # not found -> silent None when export_onnx=True. The exp_dir param is
-        # ignored on purpose. See decisions.md D-009.
-        callbacks, results_dir = create_common_callbacks(
-            model_name="xLSTMForecaster",
-            results_dir_prefix=self._build_results_prefix(),
-            monitor="val_loss",
-            patience=30,
-            use_lr_schedule=self.config.use_warmup,
-            include_terminate_on_nan=True,
-            include_analyzer=self.config.perform_deep_analysis,
-            analyzer_config=AnalysisConfig(
-                analyze_weights=True, analyze_spectral=True,
-                analyze_calibration=False, analyze_information_flow=False,
-                analyze_training_dynamics=False, verbose=False),
-            analyzer_start_epoch=self.config.analysis_start_epoch,
-            analyzer_epoch_frequency=self.config.analysis_frequency,
-        )
-        self.exp_dir = results_dir
-        viz_dir = os.path.join(self.exp_dir, 'visualizations')
-        os.makedirs(viz_dir, exist_ok=True)
-        callbacks.append(self._build_performance_callback(viz_dir))
-        return callbacks
 
     def _build_model(self) -> xLSTMForecaster:
         """Create and compile the xLSTMForecaster."""
@@ -372,39 +341,6 @@ class XLSTMForecasterTrainer(BaseTimeSeriesTrainer):
         dummy = keras.ops.zeros((1, self.config.input_length, 1), dtype="float32")
         _ = model(dummy, training=False)
         return model
-
-    def run_experiment(self) -> Dict[str, Any]:
-        """Base skeleton + optional ONNX export folded into ``results.json``.
-
-        Overridden (not the bare base ``run_experiment``) because xLSTMForecaster
-        resolves ``self.exp_dir`` from ``create_common_callbacks``' returned dir
-        (D-009) rather than the base ``_create_experiment_dir``, and may carry an
-        ``onnx_path`` key. ``self.exp_dir`` is set INSIDE ``_train_model`` (via its
-        ``_make_callbacks`` call); the ONNX read + ``_save_results`` below run after
-        it so checkpoint, viz, results.json, and the ONNX read path share one dir.
-        """
-        logger.info("Starting xLSTMForecaster training experiment")
-
-        data_pipeline = self.processor.prepare_datasets()
-        self.model = self._build_model()
-        logger.info(f"Model params: {self.model.count_params():,}")
-        self.model.summary(print_fn=logger.info)
-
-        # _train_model -> _make_callbacks sets self.exp_dir (D-009).
-        training_results = self._train_model(data_pipeline, exp_dir=None)
-        logger.info(f"Results: {self.exp_dir}")
-
-        best_model_path = os.path.join(self.exp_dir, 'best_model.keras')
-        onnx_path = self._export_to_onnx(best_model_path, self.exp_dir)
-
-        if self.config.save_results:
-            self._save_results(training_results, self.exp_dir,
-                               extra_fields={'onnx_path': onnx_path})
-
-        return {
-            'config': self.config, 'experiment_dir': self.exp_dir,
-            'training_results': training_results, 'results_dir': self.exp_dir
-        }
 
 
 def build_parser() -> argparse.ArgumentParser:

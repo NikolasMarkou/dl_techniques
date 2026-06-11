@@ -249,9 +249,12 @@ class PRISMTrainer(BaseTimeSeriesTrainer):
     ``_create_experiment_dir``, ``_make_callbacks``, ``_train_model``,
     ``_save_results``, ``_export_to_onnx``). PRISM overrides only the genuine
     divergences: the processor, the model build (+dummy warmup), the
-    performance callback, the ``preset``/``mode`` results prefix, and a minimal
-    ``run_experiment`` to fold ``onnx_path`` into ``results.json``.
+    performance callback, the ``preset``/``mode`` results prefix, and the two
+    callback class attrs.
     """
+
+    MODEL_DISPLAY_NAME = "PRISM"
+    EARLY_STOPPING_PATIENCE = 30
 
     def _build_processor(self) -> PRISMDataProcessor:
         return PRISMDataProcessor(
@@ -265,42 +268,6 @@ class PRISMTrainer(BaseTimeSeriesTrainer):
     def _build_results_prefix(self) -> str:
         mode = "quantile" if self.config.use_quantile_head else "point"
         return f"{self.config.experiment_name}_{self.config.preset}_{mode}"
-
-    def _make_callbacks(self, exp_dir: Optional[str] = None) -> List:
-        """Override: PRISM uses ``patience=30`` / ``model_name="PRISM"`` AND owns
-        its experiment dir (D-009)."""
-        # DECISION plan_2026-06-09_a3c7304c/D-009
-        # Pass a BARE prefix (self._build_results_prefix()) to
-        # create_common_callbacks and adopt its RETURNED results_dir as
-        # self.exp_dir -- matching the git-original prism flow (c3fbacef:586,
-        # `self.exp_dir = results_dir`). Do NOT pass the pre-created full
-        # exp_dir path as results_dir_prefix and do NOT use the base
-        # _create_experiment_dir here: that built a SEPARATE doubly-nested
-        # results/results/{prefix}_PRISM_{ts2}/best_model.keras while the ONNX
-        # read path used the first dir -> checkpoint not found -> silent None
-        # when export_onnx=True, and lost the _PRISM dir infix.
-        # The exp_dir param is ignored on purpose (base passes it in; PRISM
-        # resolves its own). See decisions.md D-009.
-        callbacks, results_dir = create_common_callbacks(
-            model_name="PRISM",
-            results_dir_prefix=self._build_results_prefix(),
-            monitor="val_loss",
-            patience=30,
-            use_lr_schedule=self.config.use_warmup,
-            include_terminate_on_nan=True,
-            include_analyzer=self.config.perform_deep_analysis,
-            analyzer_config=AnalysisConfig(
-                analyze_weights=True, analyze_spectral=True,
-                analyze_calibration=False, analyze_information_flow=False,
-                analyze_training_dynamics=False, verbose=False),
-            analyzer_start_epoch=self.config.analysis_start_epoch,
-            analyzer_epoch_frequency=self.config.analysis_frequency,
-        )
-        self.exp_dir = results_dir
-        viz_dir = os.path.join(self.exp_dir, 'visualizations')
-        os.makedirs(viz_dir, exist_ok=True)
-        callbacks.append(self._build_performance_callback(viz_dir))
-        return callbacks
 
     def _build_model(self) -> PRISMModel:
         """Create and compile the PRISM model (+ dummy-input warmup)."""
@@ -358,41 +325,6 @@ class PRISMTrainer(BaseTimeSeriesTrainer):
             (1, self.config.input_length, num_features), dtype='float32')
         model(dummy_input)
         return model
-
-    def run_experiment(self) -> Dict[str, Any]:
-        """Base skeleton + PRISM's ONNX export folded into ``results.json``.
-
-        Overridden (not using the bare base ``run_experiment``) for two reasons:
-        PRISM's original ``results.json`` carried a 5th ``onnx_path`` key, AND
-        PRISM resolves ``self.exp_dir`` from ``create_common_callbacks``'
-        returned dir (D-009) rather than the base ``_create_experiment_dir``.
-        ``self.exp_dir`` is therefore set INSIDE ``_train_model`` (via its
-        ``_make_callbacks`` call); the ONNX read + ``_save_results`` below run
-        after it and read the now-coincident ``self.exp_dir`` so checkpoint,
-        viz, results.json, and the ONNX read path all live in one dir.
-        """
-        logger.info("Starting PRISM training experiment")
-
-        data_pipeline = self.processor.prepare_datasets()
-        self.model = self._build_model()
-        logger.info(f"Model params: {self.model.count_params():,}")
-        self.model.summary(print_fn=logger.info)
-
-        # _train_model -> _make_callbacks sets self.exp_dir (D-009).
-        training_results = self._train_model(data_pipeline, exp_dir=None)
-        logger.info(f"Results: {self.exp_dir}")
-
-        best_model_path = os.path.join(self.exp_dir, 'best_model.keras')
-        onnx_path = self._export_to_onnx(best_model_path, self.exp_dir)
-
-        if self.config.save_results:
-            self._save_results(training_results, self.exp_dir,
-                               extra_fields={'onnx_path': onnx_path})
-
-        return {
-            'config': self.config, 'experiment_dir': self.exp_dir,
-            'training_results': training_results, 'results_dir': self.exp_dir
-        }
 
 
 def build_parser() -> argparse.ArgumentParser:

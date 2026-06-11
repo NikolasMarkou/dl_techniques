@@ -462,7 +462,10 @@ class AdaptiveEMATrainer(BaseTimeSeriesTrainer):
 
     Subclass of :class:`BaseTimeSeriesTrainer` (step-9 migration). The base owns
     the skeleton (``__init__`` generator/pattern/processor setup, the canonical
-    ``_make_callbacks`` / ``_train_model`` / ``_save_results``). AdaptiveEMA keeps
+    ``_make_callbacks`` / ``_train_model`` / ``_save_results``). Callback
+    divergence is parameterized via the ``MODEL_DISPLAY_NAME="AdaptiveEMA"`` /
+    ``ANALYZE_SPECTRAL=False`` class attrs (``INCLUDE_ANALYZER`` stays ``None`` so
+    the analyzer still tracks ``config.perform_deep_analysis``). AdaptiveEMA keeps
     only the genuine divergences as overrides:
 
     - :meth:`_select_patterns` — KEPT: AdaptiveEMA iterates ``target_categories``
@@ -485,6 +488,9 @@ class AdaptiveEMATrainer(BaseTimeSeriesTrainer):
     ``_save_results`` accepts ``extra_fields={'onnx_path': ...}``).
     """
 
+    MODEL_DISPLAY_NAME = "AdaptiveEMA"
+    ANALYZE_SPECTRAL = False
+
     def _build_processor(self) -> AdaptiveEMADataProcessor:
         return AdaptiveEMADataProcessor(
             self.config, self.generator, self.selected_patterns
@@ -497,45 +503,6 @@ class AdaptiveEMATrainer(BaseTimeSeriesTrainer):
         self, viz_dir: str
     ) -> AdaptiveEMAPerformanceCallback:
         return AdaptiveEMAPerformanceCallback(self.config, self.processor, viz_dir)
-
-    def _make_callbacks(self, exp_dir: Optional[str] = None) -> List:
-        # DECISION plan_2026-06-11_84296249/D-009: mirror tirex's D-009 fix. Pass a
-        # BARE prefix (`_build_results_prefix()`) to `create_common_callbacks` and
-        # adopt its RETURNED results_dir as `self.exp_dir`, because
-        # `create_callbacks` ALWAYS mints its own `results/{prefix}_{name}_{ts}` dir
-        # and writes `best_model.keras` there. The base `_make_callbacks` passes the
-        # pre-created full `exp_dir` as `results_dir_prefix`, which would yield a
-        # SEPARATE doubly-nested `results/results/..._..._ts2/best_model.keras` while
-        # `run_experiment` reads the ONNX source from the first dir -> checkpoint not
-        # found -> silent None on `--onnx`. Adopting the returned dir keeps
-        # checkpoint, viz, results.json, and the ONNX read path in ONE dir. The
-        # `exp_dir` param is ignored on purpose. Also keeps AdaptiveEMA's
-        # `model_name="AdaptiveEMA"` + `analyze_spectral=False` (few params).
-        # See decisions.md D-009.
-        callbacks, results_dir = create_common_callbacks(
-            model_name="AdaptiveEMA",
-            results_dir_prefix=self._build_results_prefix(),
-            monitor="val_loss",
-            patience=25,
-            use_lr_schedule=self.config.use_warmup,
-            include_terminate_on_nan=True,
-            include_analyzer=self.config.perform_deep_analysis,
-            analyzer_config=AnalysisConfig(
-                analyze_weights=True,
-                analyze_spectral=False,
-                analyze_calibration=False,
-                analyze_information_flow=False,
-                analyze_training_dynamics=False,
-                verbose=False,
-            ),
-            analyzer_start_epoch=self.config.analysis_start_epoch,
-            analyzer_epoch_frequency=self.config.analysis_frequency,
-        )
-        self.exp_dir = results_dir
-        viz_dir = os.path.join(self.exp_dir, "visualizations")
-        os.makedirs(viz_dir, exist_ok=True)
-        callbacks.append(self._build_performance_callback(viz_dir))
-        return callbacks
 
     def _select_patterns(self) -> List[str]:
         # DECISION plan_2026-06-11_84296249/D-007: KEEP AdaptiveEMA's

@@ -883,6 +883,12 @@ class BaseTimeSeriesTrainer:
             :class:`~dl_techniques.datasets.time_series.TimeSeriesGenerator`.
     """
 
+    # D-009 callback parameterization (override per-subclass only where divergent)
+    MODEL_DISPLAY_NAME: Optional[str] = None      # None -> self.config.experiment_name
+    EARLY_STOPPING_PATIENCE: int = 25
+    INCLUDE_ANALYZER: Optional[bool] = None       # None -> self.config.perform_deep_analysis; False -> force off
+    ANALYZE_SPECTRAL: bool = True
+
     def __init__(self, config, generator_config) -> None:
         self.config = config
         self.generator_config = generator_config
@@ -948,10 +954,8 @@ class BaseTimeSeriesTrainer:
     def _build_optimizer(self) -> keras.optimizers.Optimizer:
         """Construct the warmup/cosine-or-constant LR optimizer.
 
-        Shared by the warmup trainers (tirex/prism/xlstm/deepar/adaptive_ema/
-        nbeats). mdn keeps a constant-LR path (INV-3) and nbeats_advanced keeps
-        a bespoke ``WarmupSchedule``/``CosineDecay`` block (D-002) — neither
-        calls this helper.
+        Shared by all warmup trainers (tirex/prism/xlstm/deepar/adaptive_ema/
+        nbeats/mdn). mdn now conforms (D-003: warmup+cosine LR like the rest).
         """
         if self.config.use_warmup:
             lr_schedule = create_learning_rate_schedule(
@@ -974,34 +978,43 @@ class BaseTimeSeriesTrainer:
     # ------------------------------------------------------------------ #
     # Callbacks
     # ------------------------------------------------------------------ #
-    def _make_callbacks(self, exp_dir: str) -> List:
-        """Assemble Pattern-2 callbacks + the model-specific performance callback.
+    # DECISION plan_2026-06-11_49671f7a/D-001: D-009 dir contract lives in the base --
+    # bare prefix to create_common_callbacks, adopt returned results_dir as
+    # self.exp_dir; subclasses parameterize via class attrs, do NOT re-override.
+    # Passing the pre-created full exp_dir as results_dir_prefix (the pre-D-009
+    # form) built a SEPARATE doubly-nested results/results/... dir while the ONNX
+    # read path used the first dir -> checkpoint not found -> silent None on
+    # export_onnx. Do NOT revert to results_dir_prefix=exp_dir + `callbacks, _`.
+    # See decisions.md D-001 (and the originating plan_2026-06-09_a3c7304c D-009).
+    def _make_callbacks(self, exp_dir: Optional[str] = None) -> List:
+        """Assemble Pattern-2 callbacks + the model performance callback (D-009).
 
-        Reproduces the trio's ``create_common_callbacks`` call (8 kwargs,
-        ``monitor='val_loss'``, ``include_terminate_on_nan=True``,
-        ``patience=25``, conditional analyzer with the lightweight
-        :class:`AnalysisConfig`) and appends
-        :meth:`_build_performance_callback`. mdn overrides this for
-        ``include_analyzer=False`` / ``patience=15``.
+        Owns the experiment dir: passes a BARE prefix to create_common_callbacks
+        and adopts its RETURNED results_dir as self.exp_dir. The exp_dir param is
+        accepted for backward-compat (INV-2) and ignored. Subclasses parameterize
+        via the MODEL_DISPLAY_NAME / EARLY_STOPPING_PATIENCE / INCLUDE_ANALYZER /
+        ANALYZE_SPECTRAL class attributes, not by overriding this method.
         """
-        viz_dir = os.path.join(exp_dir, 'visualizations')
-        os.makedirs(viz_dir, exist_ok=True)
-
-        callbacks, _ = create_common_callbacks(
-            model_name=self.config.experiment_name,
-            results_dir_prefix=exp_dir,
+        include_analyzer = (self.config.perform_deep_analysis
+                            if self.INCLUDE_ANALYZER is None else self.INCLUDE_ANALYZER)
+        callbacks, results_dir = create_common_callbacks(
+            model_name=self.MODEL_DISPLAY_NAME or self.config.experiment_name,
+            results_dir_prefix=self._build_results_prefix(),
             monitor="val_loss",
-            patience=25,
+            patience=self.EARLY_STOPPING_PATIENCE,
             use_lr_schedule=self.config.use_warmup,
             include_terminate_on_nan=True,
-            include_analyzer=self.config.perform_deep_analysis,
+            include_analyzer=include_analyzer,
             analyzer_config=AnalysisConfig(
-                analyze_weights=True, analyze_spectral=True,
+                analyze_weights=True, analyze_spectral=self.ANALYZE_SPECTRAL,
                 analyze_calibration=False, analyze_information_flow=False,
                 analyze_training_dynamics=False, verbose=False),
             analyzer_start_epoch=self.config.analysis_start_epoch,
             analyzer_epoch_frequency=self.config.analysis_frequency,
         )
+        self.exp_dir = results_dir
+        viz_dir = os.path.join(self.exp_dir, 'visualizations')
+        os.makedirs(viz_dir, exist_ok=True)
         callbacks.append(self._build_performance_callback(viz_dir))
         return callbacks
 
@@ -1173,24 +1186,36 @@ class BaseTimeSeriesTrainer:
     # ------------------------------------------------------------------ #
     # Orchestration skeleton
     # ------------------------------------------------------------------ #
+    # DECISION plan_2026-06-11_49671f7a/D-001: D-009 skeleton -- the exp dir is set
+    # INSIDE _train_model -> _make_callbacks (NOT pre-created via
+    # _create_experiment_dir), so _train_model is called with exp_dir=None and the
+    # ONNX read + _save_results below run AFTER it against the now-coincident
+    # self.exp_dir. The ONNX fold is GATED on getattr(config,'export_onnx',False):
+    # nbeats/mdn (export_onnx default False) skip it cleanly and keep their
+    # original 4-key results.json (no onnx_path). Do NOT un-gate the fold and do
+    # NOT reintroduce _create_experiment_dir. See decisions.md D-001.
     def run_experiment(self) -> Dict[str, Any]:
-        """Shared skeleton: dir → datasets → build → train → save → return."""
+        """Shared D-009 skeleton: datasets -> build -> train (dir set inside
+        _make_callbacks) -> optional ONNX fold -> save -> return."""
         logger.info(f"Starting {self.config.experiment_name} training experiment")
-        self.exp_dir = self._create_experiment_dir()
-        logger.info(f"Results: {self.exp_dir}")
-
         data_pipeline = self.processor.prepare_datasets()
         self.model = self._build_model()
         logger.info(f"Model params: {self.model.count_params():,}")
         self.model.summary(print_fn=logger.info)
-
-        training_results = self._train_model(data_pipeline, self.exp_dir)
-        if self.config.save_results:
+        # _train_model -> _make_callbacks sets self.exp_dir (D-009).
+        training_results = self._train_model(data_pipeline, exp_dir=None)
+        logger.info(f"Results: {self.exp_dir}")
+        if getattr(self.config, 'export_onnx', False):
+            best_model_path = os.path.join(self.exp_dir, 'best_model.keras')
+            onnx_path = self._export_to_onnx(best_model_path, self.exp_dir)
+            if self.config.save_results:
+                self._save_results(training_results, self.exp_dir,
+                                   extra_fields={'onnx_path': onnx_path})
+        elif self.config.save_results:
             self._save_results(training_results, self.exp_dir)
-
         return {
             'config': self.config, 'experiment_dir': self.exp_dir,
-            'training_results': training_results, 'results_dir': self.exp_dir
+            'training_results': training_results, 'results_dir': self.exp_dir,
         }
 
     # ------------------------------------------------------------------ #

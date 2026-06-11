@@ -265,11 +265,14 @@ class NBeatsTrainer(BaseTimeSeriesTrainer):
     ``_create_experiment_dir``, ``_make_callbacks``, ``_train_model``,
     ``run_experiment``). N-BEATS overrides only the genuine divergences: the
     processor, the model build (+ compile + build-from-input-shape), the
-    performance callback, the ``model_name="N-BEATS"`` callback set, and
+    performance callback, the ``MODEL_DISPLAY_NAME="N-BEATS"`` class attr, and
     :meth:`_save_results` (D-005: the ``primary_loss: Union[str, Loss]`` field
     needs a str-fallback serializer, NOT the base's ``json_numpy_default``).
-    N-BEATS has NO ONNX export, so it uses the base ``run_experiment`` directly.
+    N-BEATS has NO ONNX export (no ``export_onnx`` config field), so the base
+    ``run_experiment`` skips the ONNX fold cleanly.
     """
+
+    MODEL_DISPLAY_NAME = "N-BEATS"
 
     def _build_processor(self) -> MultiPatternDataProcessor:
         return MultiPatternDataProcessor(
@@ -279,74 +282,6 @@ class NBeatsTrainer(BaseTimeSeriesTrainer):
 
     def _build_performance_callback(self, viz_dir: str) -> PatternPerformanceCallback:
         return PatternPerformanceCallback(self.config, self.processor, viz_dir, "nbeats")
-
-    def _make_callbacks(self, exp_dir: Optional[str] = None) -> List:
-        """Override: N-BEATS uses ``model_name="N-BEATS"`` (base default is the
-        experiment name). ``patience=25`` matches the base default; everything
-        else (monitor, terminate-on-nan, analyzer config) matches the base body.
-        """
-        from dl_techniques.analyzer import AnalysisConfig
-        from train.common import create_callbacks as create_common_callbacks
-
-        # DECISION plan_2026-06-10_39646d39/D-002
-        # Pass a BARE prefix (self._build_results_prefix()) to
-        # create_common_callbacks and adopt its RETURNED results_dir as
-        # self.exp_dir -- the D-009 bare-prefix contract, mirroring prism/tirex.
-        # Do NOT pass the pre-created full exp_dir path as results_dir_prefix and
-        # do NOT rely on the base _create_experiment_dir here: passing the full
-        # path as prefix built a SEPARATE doubly-nested
-        # results/{full}_N-BEATS_{ts2}/ that received CSVLogger/ModelCheckpoint
-        # while results.json/visualizations landed in the discarded first dir.
-        # The exp_dir param is ignored on purpose. See decisions.md D-009.
-        callbacks, results_dir = create_common_callbacks(
-            model_name="N-BEATS",
-            results_dir_prefix=self._build_results_prefix(),
-            monitor="val_loss",
-            patience=25,
-            use_lr_schedule=self.config.use_warmup,
-            include_terminate_on_nan=True,
-            include_analyzer=self.config.perform_deep_analysis,
-            analyzer_config=AnalysisConfig(
-                analyze_weights=True, analyze_spectral=True,
-                analyze_calibration=False, analyze_information_flow=False,
-                analyze_training_dynamics=False, verbose=False),
-            analyzer_start_epoch=self.config.analysis_start_epoch,
-            analyzer_epoch_frequency=self.config.analysis_frequency,
-        )
-        self.exp_dir = results_dir
-        viz_dir = os.path.join(self.exp_dir, 'visualizations')
-        os.makedirs(viz_dir, exist_ok=True)
-        callbacks.append(self._build_performance_callback(viz_dir))
-        return callbacks
-
-    def run_experiment(self) -> Dict[str, Any]:
-        """Base skeleton with the D-009 dir resolution (mirrors prism/tirex).
-
-        Overridden so ``self.exp_dir`` is resolved from
-        ``create_common_callbacks``' returned dir (inside ``_train_model`` ->
-        ``_make_callbacks``) instead of the base ``_create_experiment_dir``.
-        Passing ``exp_dir=None`` to ``_train_model`` means no first dir is
-        pre-built; CSVLogger/ModelCheckpoint, results.json, and visualizations
-        all land in the single returned dir.
-        """
-        logger.info(f"Starting {self.config.experiment_name} training experiment")
-
-        data_pipeline = self.processor.prepare_datasets()
-        self.model = self._build_model()
-        logger.info(f"Model params: {self.model.count_params():,}")
-        self.model.summary(print_fn=logger.info)
-
-        # _train_model -> _make_callbacks sets self.exp_dir (D-009).
-        training_results = self._train_model(data_pipeline, exp_dir=None)
-        logger.info(f"Results: {self.exp_dir}")
-
-        if self.config.save_results:
-            self._save_results(training_results, self.exp_dir)
-
-        return {
-            'config': self.config, 'experiment_dir': self.exp_dir,
-            'training_results': training_results, 'results_dir': self.exp_dir
-        }
 
     def _build_model(self) -> keras.Model:
         """Create and compile an N-BEATS model (+ build from input shape)."""
