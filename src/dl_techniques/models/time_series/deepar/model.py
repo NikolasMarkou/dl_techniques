@@ -157,6 +157,10 @@ class DeepAR(keras.Model, ForecastMixin):
         cause issues in forecasting, unlike in some NLP tasks.
     """
 
+    # Likelihoods this model can construct a head for. Single source of truth
+    # for the ctor validation below (do NOT duplicate the string set inline).
+    SUPPORTED_LIKELIHOODS = ('gaussian', 'negative_binomial')
+
     def __init__(
             self,
             num_layers: int = 3,
@@ -170,6 +174,21 @@ class DeepAR(keras.Model, ForecastMixin):
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
+
+        # Validate hyperparameters (fail fast on nonsensical geometry).
+        if num_layers <= 0:
+            raise ValueError(f"num_layers must be > 0, got {num_layers}")
+        if hidden_dim <= 0:
+            raise ValueError(f"hidden_dim must be > 0, got {hidden_dim}")
+        if target_dim <= 0:
+            raise ValueError(f"target_dim must be > 0, got {target_dim}")
+        if num_samples <= 0:
+            raise ValueError(f"num_samples must be > 0, got {num_samples}")
+        if likelihood not in self.SUPPORTED_LIKELIHOODS:
+            raise ValueError(
+                f"Unknown likelihood: {likelihood}. "
+                f"Must be one of {self.SUPPORTED_LIKELIHOODS}"
+            )
 
         # Store configuration
         self.num_layers = num_layers
@@ -188,7 +207,10 @@ class DeepAR(keras.Model, ForecastMixin):
             name='scale_layer'
         )
 
-        # Create LSTM layers (stacked)
+        # Create LSTM layers (stacked).
+        # NOTE: a plain Python list attribute IS tracked by Keras 3 — verified
+        # empirically (model.weights non-empty incl. lstm_*/lstm_cell/* paths
+        # after a forward pass), so no ListWrapper/tracked-storage is needed.
         self.lstm_layers = []
         for i in range(num_layers):
             lstm = layers.LSTM(
@@ -201,22 +223,52 @@ class DeepAR(keras.Model, ForecastMixin):
             )
             self.lstm_layers.append(lstm)
 
-        # Create likelihood head
+        # Create likelihood head (likelihood already validated above).
         if likelihood == 'gaussian':
             self.likelihood_head = GaussianLikelihoodHead(
                 units=target_dim,
                 name='gaussian_head'
             )
-        elif likelihood == 'negative_binomial':
+        else:  # negative_binomial
             self.likelihood_head = NegativeBinomialLikelihoodHead(
                 units=target_dim,
                 name='negbin_head'
             )
-        else:
-            raise ValueError(
-                f"Unknown likelihood: {likelihood}. "
-                f"Must be 'gaussian' or 'negative_binomial'"
-            )
+
+    def build(self, input_shape: Any) -> None:
+        """Build the model and its sublayers explicitly.
+
+        DeepAR consumes a DICT input (``{'target': (B, T, target_dim),
+        'covariates': (B, T, covariate_dim), ...}``). Keras captures this dict
+        shape in the build-config and replays it on ``load_model``. We MUST build
+        the sublayers here (not lazily in ``call``): on load, Keras calls
+        ``build`` then restores weights, so the sublayers must already exist to
+        receive the saved values. A minimal ``super().build()``-only body left
+        the LSTM/head unbuilt at restore time -> kernels were re-initialized on
+        the next forward and the saved weights were silently discarded.
+
+        # DECISION plan_2026-06-11_fe7401f4/D-002
+
+        Args:
+            input_shape: Dict with ``'target'`` and ``'covariates'`` shapes, OR a
+                non-dict/None shape (e.g. from a bare ``model.build(None)``), in
+                which case sublayer builds are deferred to the first ``call``.
+        """
+        if isinstance(input_shape, dict) and 'covariates' in input_shape:
+            covariate_dim = input_shape['covariates'][-1]
+            seq_len = input_shape['target'][1]
+
+            # LSTM stack input: concat([lagged_target (target_dim), covariates]).
+            lstm_input_shape = (None, seq_len, self.target_dim + covariate_dim)
+            for lstm in self.lstm_layers:
+                lstm.build(lstm_input_shape)
+                # Subsequent layers consume the prior LSTM's hidden sequence.
+                lstm_input_shape = (None, seq_len, self.hidden_dim)
+
+            # Likelihood head consumes the final LSTM hidden state.
+            self.likelihood_head.build((None, seq_len, self.hidden_dim))
+
+        super().build(input_shape)
 
     def compute_scale(
             self,
@@ -246,35 +298,34 @@ class DeepAR(keras.Model, ForecastMixin):
             self,
             inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],
             training: Optional[bool] = None,
-            return_samples: bool = False
-    ) -> Union[Dict[str, keras.KerasTensor], keras.KerasTensor]:
+    ) -> Dict[str, keras.KerasTensor]:
         """
-        Forward pass through DeepAR.
+        Forward pass through DeepAR (training mode).
+
+        ``call`` is the training-mode (teacher-forced) path and returns the
+        likelihood-parameter dict. The Monte-Carlo SAMPLING path is NOT routed
+        through ``call``: it lives in :meth:`predict_step`, which invokes
+        :meth:`_prediction_mode` directly. This keeps ``call`` a single,
+        symbolic, dict-returning function (canonical Keras 3 contract) instead
+        of overloading it with a mode flag.
 
         Args:
             inputs: Dictionary with keys:
                 - 'target': Target time series (batch, seq_len, target_dim)
                 - 'covariates': Covariates (batch, seq_len, covariate_dim)
                 - 'scale': Optional pre-computed scale (batch, 1, target_dim)
-                For prediction mode:
-                - 'conditioning_target': (batch, cond_len, target_dim)
-                - 'full_covariates': (batch, total_len, covariate_dim)
             training: Whether in training mode.
-            return_samples: If True, return Monte Carlo samples (prediction mode).
 
         Returns:
-            Training mode: Dictionary with likelihood parameters.
-            Prediction mode (return_samples=True): Sampled trajectories.
+            Dictionary with likelihood parameters
+            (``{'mu', 'sigma', 'target'}`` for Gaussian,
+            ``{'mu', 'alpha', 'target'}`` for negative-binomial).
         """
-        if isinstance(inputs, dict):
-            if return_samples:
-                return self._prediction_mode(inputs, training=training)
-            else:
-                return self._training_mode(inputs, training=training)
-        else:
+        if not isinstance(inputs, dict):
             raise ValueError(
                 "Inputs must be a dictionary with 'target' and 'covariates' keys"
             )
+        return self._training_mode(inputs, training=training)
 
     def _training_mode(
             self,
@@ -502,9 +553,15 @@ class DeepAR(keras.Model, ForecastMixin):
         return samples
 
     def predict_step(self, data):
-        """Override predict_step to use sampling mode."""
+        """Override predict_step to use the sampling (prediction) mode.
+
+        ``call`` returns training-mode params only; the sampling path is invoked
+        here by calling :meth:`_prediction_mode` directly. Returns ``(S, B, H, D)``
+        with axis-0 = num_samples (NOT batch) — the ``_forecast`` reducer and the
+        batch-size-forcing logic in ``_forecast`` depend on this axis order.
+        """
         x, _, _ = keras.utils.unpack_x_y_sample_weight(data)
-        return self(x, training=False, return_samples=True)
+        return self._prediction_mode(x, training=False)
 
     def _forecast(
             self,
@@ -523,8 +580,8 @@ class DeepAR(keras.Model, ForecastMixin):
         per-sample trajectories to expose.
 
         Prediction is routed through ``self.predict`` (NOT ``self(x)``) so it
-        hits the :meth:`predict_step` override, which forces
-        ``return_samples=True`` and returns the sampled trajectories of shape
+        hits the :meth:`predict_step` override, which calls
+        :meth:`_prediction_mode` and returns the sampled trajectories of shape
         ``(S, B, H, D)``.
 
         Args:
@@ -639,5 +696,77 @@ class DeepAR(keras.Model, ForecastMixin):
             'scale_epsilon': self.scale_epsilon,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "DeepAR":
+        """Reconstruct a DeepAR from its config.
+
+        All constructor arguments are plain JSON-serializable scalars/strings
+        (no nested Keras objects), so a direct ``cls(**config)`` round-trips.
+        """
+        return cls(**config)
+
+
+# ---------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------
+
+
+def create_deepar(
+        num_layers: int = 3,
+        hidden_dim: int = 40,
+        dropout: float = 0.0,
+        recurrent_dropout: float = 0.0,
+        likelihood: Literal['gaussian', 'negative_binomial'] = 'gaussian',
+        target_dim: int = 1,
+        num_samples: int = 100,
+        scale_epsilon: float = 1.0,
+        covariate_dim: int = 1,
+        **kwargs: Any
+) -> DeepAR:
+    """Construct and build a :class:`DeepAR` model.
+
+    Convenience factory mirroring ``create_tirex_model``: it instantiates the
+    model and runs a tiny training-mode dummy forward pass so the returned model
+    is already BUILT (weights materialized), ready for ``.summary()``,
+    ``.save()``, or weight transfer without a separate warmup call.
+
+    Args:
+        num_layers: Number of stacked LSTM layers.
+        hidden_dim: LSTM hidden width.
+        dropout: LSTM output dropout rate.
+        recurrent_dropout: LSTM recurrent dropout rate.
+        likelihood: Observation distribution, ``'gaussian'`` or
+            ``'negative_binomial'``.
+        target_dim: Target feature dimension.
+        num_samples: Monte-Carlo sample count for prediction.
+        scale_epsilon: Constant added in scale computation.
+        covariate_dim: Covariate channel width used only for the dummy build
+            forward pass (the model is covariate-width agnostic at construction).
+        **kwargs: Forwarded to :class:`DeepAR` (e.g. ``name``).
+
+    Returns:
+        A built :class:`DeepAR` instance.
+    """
+    model = DeepAR(
+        num_layers=num_layers,
+        hidden_dim=hidden_dim,
+        dropout=dropout,
+        recurrent_dropout=recurrent_dropout,
+        likelihood=likelihood,
+        target_dim=target_dim,
+        num_samples=num_samples,
+        scale_epsilon=scale_epsilon,
+        **kwargs
+    )
+
+    # Build via a tiny training-mode dummy dict forward pass.
+    dummy = {
+        'target': np.zeros((1, 4, target_dim), dtype='float32'),
+        'covariates': np.zeros((1, 4, covariate_dim), dtype='float32'),
+    }
+    model(dummy, training=False)
+    return model
+
 
 # ---------------------------------------------------------------------
