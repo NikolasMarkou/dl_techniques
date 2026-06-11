@@ -1138,13 +1138,24 @@ class BaseTimeSeriesTrainer:
             logger.warning(f"ONNX export skipped: checkpoint absent ({model_path})")
             return None
 
+        # No TS trainer config defines ``context_len``; resolve the input length
+        # from the actual config field (``input_length``, or nbeats' ``backcast_length``).
+        input_length = getattr(self.config, 'input_length', None) or getattr(
+            self.config, 'backcast_length', None)
+        if input_length is None:
+            logger.error(
+                "ONNX export skipped: config has neither 'input_length' nor "
+                "'backcast_length' to size the input signature."
+            )
+            return None
+
         onnx_path = os.path.join(exp_dir, 'model.onnx')
         try:
             logger.info(f"Exporting to ONNX: {onnx_path}")
             best_model = keras.saving.load_model(model_path, compile=False)
             input_signature = [
                 keras.InputSpec(
-                    shape=(None, self.config.context_len, self.processor.num_features),
+                    shape=(None, input_length, self.processor.num_features),
                     dtype="float32"
                 )
             ]
