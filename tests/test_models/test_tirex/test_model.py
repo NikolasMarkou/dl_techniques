@@ -173,6 +173,45 @@ class TestTiRexCore:
                 err_msg="Predictions should match after serialization"
             )
 
+    def test_serialization_cycle_no_layer_norm(self, basic_config, sample_univariate_input):
+        """CRITICAL TEST (E2): save/load round-trip on the use_layer_norm=False
+        path, where output_norm is keras.layers.Identity (DEFECT #3 fix replaced
+        the non-serializable Lambda(lambda x: x)). This path was previously
+        untested for serialization."""
+        config_no_norm = basic_config.copy()
+        config_no_norm['use_layer_norm'] = False
+
+        inputs = keras.Input(shape=sample_univariate_input.shape[1:])
+        tirex_layer = TiRexCore(**config_no_norm)
+        outputs = tirex_layer(inputs)
+        model = keras.Model(inputs, outputs, name='tirex_no_norm_test')
+
+        # output_norm must be an Identity (not a Lambda) on this branch.
+        assert isinstance(tirex_layer.output_norm, keras.layers.Identity)
+
+        original_prediction = model(sample_univariate_input)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, 'tirex_no_norm_test.keras')
+            model.save(filepath)
+
+            loaded_model = keras.models.load_model(filepath)
+            loaded_prediction = loaded_model(sample_univariate_input)
+
+            np.testing.assert_allclose(
+                ops.convert_to_numpy(original_prediction),
+                ops.convert_to_numpy(loaded_prediction),
+                rtol=1e-6, atol=1e-6,
+                err_msg="use_layer_norm=False predictions should match after serialization"
+            )
+
+    def test_compute_output_shape_matches_actual(self, basic_config, sample_univariate_input):
+        """compute_output_shape must equal the real forward-pass output shape."""
+        model = TiRexCore(**basic_config)
+        declared = model.compute_output_shape(tuple(sample_univariate_input.shape))
+        actual = tuple(model(sample_univariate_input).shape)
+        assert declared == actual, f"declared {declared} != actual {actual}"
+
     def test_serialization_cycle_multivariate(self, multivariate_config, sample_multivariate_input):
         """CRITICAL TEST: Full serialization cycle for multivariate model."""
         inputs = keras.Input(shape=sample_multivariate_input.shape[1:])

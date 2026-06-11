@@ -74,7 +74,10 @@ from dl_techniques.layers.time_series.mixed_sequential_block import MixedSequent
 
 BlockType = Literal['lstm', 'transformer', 'mixed']
 
-# Default quantile levels for probabilistic forecasting
+# Default quantile levels for probabilistic forecasting.
+# Canonical source list; also exposed as the class attr `TiRexCore.DEFAULT_QUANTILES`
+# (which references this list). Kept module-level for backward-compat: external
+# modules (e.g. model_extended.py) import this name directly.
 DEFAULT_QUANTILES: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
 # ---------------------------------------------------------------------
@@ -84,6 +87,11 @@ DEFAULT_QUANTILES: List[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 class TiRexCore(keras.Model, ForecastMixin):
     """
     TiRex Core Model for Time Series Forecasting.
+
+    **Intent**: Provide a Keras-3-canonical, serializable hybrid LSTM/Transformer
+    forecaster that emits monotonic quantile predictions with reversible
+    per-instance normalization, configurable per-block (lstm/transformer/mixed),
+    and ForecastMixin-wired inference.
 
     This model implements a TiRex-inspired architecture using mixed sequential blocks
     (LSTM + Transformer) for probabilistic time series forecasting. The model follows
@@ -137,6 +145,12 @@ class TiRexCore(keras.Model, ForecastMixin):
         )
         ```
     """
+
+    # Default quantile levels for probabilistic forecasting (class-level attr).
+    # References the single module-level source list (defined above the class)
+    # so the value lives in exactly one place; model_extended.py imports the
+    # module-level name, which remains a backward-compat alias for the same list.
+    DEFAULT_QUANTILES: List[float] = DEFAULT_QUANTILES
 
     # Model variant configurations following ConvNeXt V2 pattern
     MODEL_VARIANTS = {
@@ -268,7 +282,11 @@ class TiRexCore(keras.Model, ForecastMixin):
                 )
             )
         else:
-            self.output_norm = keras.layers.Lambda(lambda x: x, name="output_norm")
+            # DEFECT #3 fix: keras.layers.Identity is a serializable Keras-3
+            # drop-in for the old Lambda(lambda x: x), which serialized a
+            # Python lambda (fragile / non-portable). Identity has build +
+            # compute_output_shape and accepts the training kwarg.
+            self.output_norm = keras.layers.Identity(name="output_norm")
 
         # Quantile prediction head
         self.quantile_head = QuantileHead(
@@ -286,6 +304,82 @@ class TiRexCore(keras.Model, ForecastMixin):
             f"TiRex model initialized: {num_blocks} blocks, "
             f"embed_dim={embed_dim}, prediction_length={prediction_length}"
         )
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Build all sub-layers explicitly with threaded shapes.
+
+        Explicit per-sublayer builds are REQUIRED (not optional): on
+        ``.keras`` load, Keras replays the captured build config and restores
+        weights BEFORE the first ``call``. If sub-layers are left unbuilt at
+        restore time, the restored weights have nowhere to land and the first
+        forward pass lazily re-initializes them, silently discarding the saved
+        values. (See plan D-002 — the same failure mode bit DeepAR.)
+
+        Shape threading mirrors ``call``: the raw input ``(B, T, F)`` is
+        concatenated with its NaN-mask (doubling the feature axis to ``2F``)
+        before patch embedding, then projected, processed through the blocks,
+        mean-pooled over time, and projected to quantiles.
+
+        Args:
+            input_shape: Raw input shape ``(batch, seq_len, features)``. A 2D
+                ``(batch, seq_len)`` shape is treated as ``(batch, seq_len, 1)``
+                to match ``call``'s expand-dims path.
+        """
+        # Normalize a 2D input shape to 3D (mirrors call's expand_dims).
+        if len(input_shape) == 2:
+            input_shape = (input_shape[0], input_shape[1], 1)
+        if len(input_shape) != 3:
+            raise ValueError(
+                f"Expected 3D input (batch, seq_len, features), got "
+                f"{len(input_shape)}D input with shape {input_shape}"
+            )
+
+        batch_size, seq_len, features = input_shape[0], input_shape[1], input_shape[2]
+
+        # call() concatenates the NaN mask onto the feature axis -> 2 * features.
+        masked_features = None if features is None else features * 2
+        patch_input_shape = (batch_size, seq_len, masked_features)
+
+        # 1. Patch embedding: (B, T, 2F) -> (B, num_patches, 2*embed_dim)
+        self.patch_embedding.build(patch_input_shape)
+        embedded_shape = self.patch_embedding.compute_output_shape(patch_input_shape)
+
+        # 2. Input projection (ResidualBlock): -> (B, num_patches, embed_dim)
+        self.input_projection.build(embedded_shape)
+        projected_shape = self.input_projection.compute_output_shape(embedded_shape)
+
+        # 3. Mixed sequential blocks (shape-preserving)
+        current_shape = projected_shape
+        for block in self.blocks:
+            block.build(current_shape)
+            current_shape = block.compute_output_shape(current_shape)
+
+        # 4. Output normalization (rms_norm or Identity; shape-preserving)
+        self.output_norm.build(current_shape)
+
+        # 5. Quantile head: input is mean-pooled over time -> (B, 1, embed_dim)
+        pooled_shape = (current_shape[0], 1, current_shape[2])
+        self.quantile_head.build(pooled_shape)
+
+        super().build(input_shape)
+
+    def compute_output_shape(
+            self, input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """
+        Compute the output shape: ``(batch, prediction_length, num_quantiles)``.
+
+        Matches the rank-3 ``[B, H, Q]`` quantile output of ``call``.
+
+        Args:
+            input_shape: Raw input shape ``(batch, seq_len, features)``.
+
+        Returns:
+            Output shape ``(batch, prediction_length, len(quantile_levels))``.
+        """
+        batch_size = input_shape[0]
+        return (batch_size, self.prediction_length, len(self.quantile_levels))
 
     def call(
             self,

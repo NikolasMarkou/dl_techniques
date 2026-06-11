@@ -54,7 +54,7 @@ References:
 import keras
 import numpy as np
 from keras import ops
-from typing import Optional, List, Any, Dict
+from typing import Optional, List, Any, Dict, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
@@ -107,6 +107,7 @@ class TiRexExtended(TiRexCore):
             dropout_rate: float = 0.1,
             use_layer_norm: bool = True,
             use_normalization: bool = True,
+            attention_window_size: int = 8,
             name: str = "TiRexExtended",
             **kwargs: Any
     ) -> None:
@@ -116,7 +117,9 @@ class TiRexExtended(TiRexCore):
         All arguments mirror TiRexCore, but the internal graph construction
         differs for the prediction head and token handling.
         """
-        # Explicitly pass arguments to the parent TiRexCore
+        # Explicitly pass arguments to the parent TiRexCore.
+        # attention_window_size is surfaced in the signature (was previously
+        # swallowed by **kwargs) and forwarded so it round-trips via get_config.
         super().__init__(
             patch_size=patch_size,
             embed_dim=embed_dim,
@@ -130,6 +133,7 @@ class TiRexExtended(TiRexCore):
             dropout_rate=dropout_rate,
             use_layer_norm=use_layer_norm,
             use_normalization=use_normalization,
+            attention_window_size=attention_window_size,
             name=name,
             **kwargs
         )
@@ -151,6 +155,86 @@ class TiRexExtended(TiRexCore):
             use_bias=True,
             name="quantile_head"
         )
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """
+        Build sub-layers explicitly for the query-token (Extended) topology.
+
+        Cannot delegate to ``TiRexCore.build``: the Extended variant appends
+        ``prediction_length`` learnable query tokens to the embedded history,
+        so the blocks (and output norm) see a LONGER sequence
+        (``num_patches + prediction_length``), and the head is the token-wise
+        ``QuantileSequenceHead`` operating on ``(B, prediction_length, embed_dim)``
+        rather than the pooled ``QuantileHead``.
+
+        Explicit per-sublayer builds are required so a ``.keras`` load restores
+        weights onto already-built sub-layers (see plan D-002).
+
+        Args:
+            input_shape: Raw input shape ``(batch, seq_len, features)``.
+        """
+        if len(input_shape) == 2:
+            input_shape = (input_shape[0], input_shape[1], 1)
+        if len(input_shape) != 3:
+            raise ValueError(
+                f"Expected 3D input (batch, seq_len, features), got "
+                f"{len(input_shape)}D input with shape {input_shape}"
+            )
+
+        batch_size, seq_len, features = input_shape[0], input_shape[1], input_shape[2]
+
+        # call() concatenates the NaN mask onto the feature axis -> 2 * features.
+        masked_features = None if features is None else features * 2
+        patch_input_shape = (batch_size, seq_len, masked_features)
+
+        # 1. Patch embedding -> (B, num_patches, 2*embed_dim)
+        self.patch_embedding.build(patch_input_shape)
+        embedded_shape = self.patch_embedding.compute_output_shape(patch_input_shape)
+
+        # 2. Input projection -> (B, num_patches, embed_dim)
+        self.input_projection.build(embedded_shape)
+        projected_shape = self.input_projection.compute_output_shape(embedded_shape)
+
+        # 3. Append prediction_length query tokens along the time axis.
+        num_patches = projected_shape[1]
+        augmented_len = (
+            None if num_patches is None else num_patches + self.prediction_length
+        )
+        current_shape = (projected_shape[0], augmented_len, self.embed_dim)
+
+        # 4. Mixed sequential blocks (shape-preserving) over the augmented sequence
+        for block in self.blocks:
+            block.build(current_shape)
+            current_shape = block.compute_output_shape(current_shape)
+
+        # 5. Output normalization (shape-preserving)
+        self.output_norm.build(current_shape)
+
+        # 6. Quantile head: token-wise over the sliced query states
+        #    (B, prediction_length, embed_dim)
+        head_input_shape = (current_shape[0], self.prediction_length, self.embed_dim)
+        self.quantile_head.build(head_input_shape)
+
+        # query_tokens is created via add_weight in __init__ (already built).
+        # Skip TiRexCore.build (different topology); go straight to keras.Model.
+        keras.Model.build(self, input_shape)
+
+    def compute_output_shape(
+            self, input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """
+        Compute the output shape: ``(batch, prediction_length, num_quantiles)``.
+
+        Identical rank-3 ``[B, H, Q]`` contract to ``TiRexCore``.
+
+        Args:
+            input_shape: Raw input shape ``(batch, seq_len, features)``.
+
+        Returns:
+            Output shape ``(batch, prediction_length, len(quantile_levels))``.
+        """
+        batch_size = input_shape[0]
+        return (batch_size, self.prediction_length, len(self.quantile_levels))
 
     def call(self, inputs, training=None):
         """
