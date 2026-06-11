@@ -608,9 +608,17 @@ class mLSTMCell(keras.layers.Layer):
         self.recurrent_regularizer = recurrent_regularizer
         self.bias_regularizer = bias_regularizer
 
-        # State size: [h, C (flattened), n]
+        # State size: [h, C (flattened), n, m]
         # C is (num_heads, key_dim, value_dim) flattened
         # n is (num_heads, key_dim)
+        # m is (num_heads,) -- log-domain max-stabilizer (one scalar per head),
+        # mirroring sLSTMCell; prevents the exp() input gate from overflowing fp32
+        # when accumulated over long sequences.
+        # DECISION plan_2026-06-11_50891da1/D-001: the 4th state m_t is the
+        # paper-correct (Beck et al. 2024) log-domain max-stabilizer. Do NOT
+        # remove it or revert to the bare exp() input gate -- that form overflows
+        # fp32 at seq>=64 (repro_isolate.py). Do NOT add a forecaster-only wrapper
+        # cell or clip the gate instead: both were rejected (see decisions.md D-001).
         self.matrix_memory_size = self.num_heads * self.key_dim * self.value_dim
         self.normalizer_size = self.num_heads * self.key_dim
 
@@ -618,6 +626,7 @@ class mLSTMCell(keras.layers.Layer):
             self.units,  # h_t
             self.matrix_memory_size,  # C_t (flattened)
             self.normalizer_size,  # n_t
+            self.num_heads,  # m_t (stabilizer, scalar per head)
         ]
         self.output_size = self.units
 
@@ -681,14 +690,14 @@ class mLSTMCell(keras.layers.Layer):
 
         :param inputs: Input tensor of shape ``(batch_size, input_dim)``.
         :type inputs: keras.KerasTensor
-        :param states: List of state tensors ``[h_tm1, C_tm1_flat, n_tm1_flat]``.
+        :param states: List of state tensors ``[h_tm1, C_tm1_flat, n_tm1_flat, m_tm1]``.
         :type states: list of keras.KerasTensor
         :param training: Whether the layer is in training mode.
         :type training: bool, optional
-        :return: Tuple of ``(h_t, [h_t, C_t_flat, n_t_flat])``.
+        :return: Tuple of ``(h_t, [h_t, C_t_flat, n_t_flat, m_t])``.
         :rtype: tuple
         """
-        h_tm1, C_tm1_flat, n_tm1_flat = states
+        h_tm1, C_tm1_flat, n_tm1_flat, m_tm1 = states
         batch_size = ops.shape(inputs)[0]
 
         # Reshape states
@@ -723,9 +732,16 @@ class mLSTMCell(keras.layers.Layer):
         k_t = ops.reshape(k_proj, (batch_size, self.num_heads, self.key_dim))
         v_t = ops.reshape(v_proj, (batch_size, self.num_heads, self.value_dim))
 
-        # Gates (with exponential for i, sigmoid for f and o)
-        i_t = ops.exp(i_proj)  # (batch_size, num_heads)
-        f_t = ops.sigmoid(f_proj)  # (batch_size, num_heads)
+        # Stabilized gates (mirrors sLSTMCell): a log-domain max-stabilizer m_t
+        # keeps the exponential input gate bounded so the matrix-memory recurrence
+        # cannot overflow fp32 over long sequences. log_f uses sigmoid-forget
+        # semantics (same as the unstabilized form, just in log space).
+        # DECISION plan_2026-06-11_50891da1/D-001: do NOT revert to a bare
+        # `i_t = ops.exp(i_proj)`; that overflows fp32 at seq>=64. See decisions.md D-001.
+        log_f = ops.log(ops.sigmoid(f_proj) + 1e-8)  # (batch_size, num_heads)
+        m_t = ops.maximum(m_tm1 + log_f, i_proj)      # (batch_size, num_heads)
+        i_t = ops.exp(i_proj - m_t)                   # bounded in (0, 1]
+        f_t = ops.exp(m_tm1 + log_f - m_t)            # bounded
         o_t = ops.sigmoid(o_proj)  # (batch_size, units)
 
         # Reshape gates for broadcasting
@@ -757,8 +773,14 @@ class mLSTMCell(keras.layers.Layer):
         )  # (batch, heads, value_dim, 1)
         memory_retrieval = ops.squeeze(memory_retrieval, axis=-1)  # (batch, heads, value_dim)
 
-        # Normalization: n_t^T @ q_t
-        normalization = ops.sum(n_t * q_t, axis=-1, keepdims=True) + 1e-8  # (batch, heads, 1)
+        # Normalization: max(|n_t^T @ q_t|, exp(-m_t)) -- the stabilized mLSTM
+        # denominator (Beck et al. 2024). exp(-m_t) lower-bounds the divisor so a
+        # near-zero n_t^T q_t cannot blow up the retrieval.
+        # DECISION plan_2026-06-11_50891da1/D-001: keep the exp(-m_t) floor; the
+        # bare `+ 1e-8` form was insufficient. See decisions.md D-001.
+        nq = ops.sum(n_t * q_t, axis=-1, keepdims=True)  # (batch, heads, 1)
+        m_t3 = ops.reshape(m_t, (batch_size, self.num_heads, 1))
+        normalization = ops.maximum(ops.abs(nq), ops.exp(-m_t3)) + 1e-8  # (batch, heads, 1)
 
         # Normalized retrieval
         normalized_retrieval = memory_retrieval / normalization  # (batch, heads, value_dim)
@@ -776,7 +798,7 @@ class mLSTMCell(keras.layers.Layer):
         C_t_flat = ops.reshape(C_t, (batch_size, self.matrix_memory_size))
         n_t_flat = ops.reshape(n_t, (batch_size, self.normalizer_size))
 
-        return h_t, [h_t, C_t_flat, n_t_flat]
+        return h_t, [h_t, C_t_flat, n_t_flat, m_t]
 
     def get_initial_state(
         self,
@@ -787,13 +809,14 @@ class mLSTMCell(keras.layers.Layer):
 
         :param batch_size: Batch size for the initial state tensors.
         :type batch_size: int, optional
-        :return: List of initial state tensors ``[h_0, C_0_flat, n_0_flat]``.
+        :return: List of initial state tensors ``[h_0, C_0_flat, n_0_flat, m_0]``.
         :rtype: list of keras.KerasTensor
         """
         return [
             ops.zeros((batch_size, self.units), dtype=self.compute_dtype),
             ops.zeros((batch_size, self.matrix_memory_size), dtype=self.compute_dtype),
             ops.zeros((batch_size, self.normalizer_size), dtype=self.compute_dtype),
+            ops.zeros((batch_size, self.num_heads), dtype=self.compute_dtype),
         ]
 
     def get_config(self) -> Dict[str, Any]:
