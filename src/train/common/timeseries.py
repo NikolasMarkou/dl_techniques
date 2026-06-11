@@ -51,7 +51,10 @@ from dl_techniques.models.time_series.forecast import ForecastMixin
 from dl_techniques.utils.logger import logger
 from train.common.config_io import json_numpy_default
 from train.common.evaluation import generate_training_curves
-from train.common.callbacks import create_callbacks as create_common_callbacks
+from train.common.callbacks import (
+    create_callbacks as create_common_callbacks,
+    create_learning_rate_schedule,
+)
 
 # Default category -> sampling-weight map shared by nbeats / prism / tirex.
 # Centralized here so the three trio configs no longer each carry a copy.
@@ -941,6 +944,32 @@ class BaseTimeSeriesTrainer:
         exp_dir = os.path.join(self.config.result_dir, f"{prefix}_{timestamp}")
         os.makedirs(exp_dir, exist_ok=True)
         return exp_dir
+
+    def _build_optimizer(self) -> keras.optimizers.Optimizer:
+        """Construct the warmup/cosine-or-constant LR optimizer.
+
+        Shared by the warmup trainers (tirex/prism/xlstm/deepar/adaptive_ema/
+        nbeats). mdn keeps a constant-LR path (INV-3) and nbeats_advanced keeps
+        a bespoke ``WarmupSchedule``/``CosineDecay`` block (D-002) — neither
+        calls this helper.
+        """
+        if self.config.use_warmup:
+            lr_schedule = create_learning_rate_schedule(
+                self.config.learning_rate, 'cosine',
+                total_epochs=self.config.epochs,
+                steps_per_epoch=self.config.steps_per_epoch,
+                warmup_steps=self.config.warmup_steps,
+                warmup_start_lr=self.config.warmup_start_lr,
+            )
+            logger.info("Using Warmup + CosineDecay schedule")
+        else:
+            lr_schedule = self.config.learning_rate
+
+        optimizer = keras.optimizers.get(self.config.optimizer)
+        optimizer.learning_rate = lr_schedule
+        if self.config.gradient_clip_norm:
+            optimizer.clipnorm = self.config.gradient_clip_norm
+        return optimizer
 
     # ------------------------------------------------------------------ #
     # Callbacks

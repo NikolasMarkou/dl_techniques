@@ -542,6 +542,7 @@ class NBeatsTrainer(BaseTimeSeriesTrainer):
             )
 
         # Optimizer
+        # DECISION plan_2026-06-11_49671f7a/D-002: bespoke WarmupSchedule/CosineDecay optimizer kept (NOT extracted to BaseTimeSeriesTrainer._build_optimizer) -- different schedule class + explicit Adam/AdamW clipnorm-in-ctor; unifying would change training behavior.
         if self.config.use_warmup:
             primary_schedule = keras.optimizers.schedules.CosineDecay(
                 initial_learning_rate=self.config.learning_rate,

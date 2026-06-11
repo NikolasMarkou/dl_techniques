@@ -285,22 +285,7 @@ class TiRexTrainer(BaseTimeSeriesTrainer):
             dropout_rate=self.config.dropout_rate
         )
 
-        if self.config.use_warmup:
-            lr_schedule = create_learning_rate_schedule(
-                self.config.learning_rate, 'cosine',
-                total_epochs=self.config.epochs,
-                steps_per_epoch=self.config.steps_per_epoch,
-                warmup_steps=self.config.warmup_steps,
-                warmup_start_lr=self.config.warmup_start_lr,
-            )
-            logger.info("Using Warmup + CosineDecay schedule")
-        else:
-            lr_schedule = self.config.learning_rate
-
-        optimizer = keras.optimizers.get(self.config.optimizer)
-        optimizer.learning_rate = lr_schedule
-        if self.config.gradient_clip_norm:
-            optimizer.clipnorm = self.config.gradient_clip_norm
+        optimizer = self._build_optimizer()
 
         loss = QuantileLoss(quantiles=self.config.quantile_levels, normalize=True)
         metrics = []
