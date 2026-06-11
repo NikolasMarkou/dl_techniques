@@ -212,6 +212,35 @@ class TestAdaptiveEMASlopeFilterModel:
                 f"max diff = {np.abs(a - b).max()}"
             )
 
+    def test_from_config_round_trip(self, quantile_config):
+        """Explicit ``from_config(get_config())`` reconstructs all ctor params.
+
+        Exercises the explicit ``from_config`` conformance override directly
+        (the ``.save``/``load_model`` path is covered by
+        ``test_serialization_round_trip``). ``quantile_config`` is used so the
+        nested ``quantile_head_config`` dict survives the round trip too.
+        """
+        model = AdaptiveEMASlopeFilterModel(**quantile_config)
+        config = model.get_config()
+        rebuilt = AdaptiveEMASlopeFilterModel.from_config(config)
+
+        assert isinstance(rebuilt, AdaptiveEMASlopeFilterModel)
+        for attr in (
+            "ema_period",
+            "lookback_period",
+            "initial_upper_threshold",
+            "initial_lower_threshold",
+            "learnable_thresholds",
+            "adjust_ema",
+            "slope_softness",
+            "quantile_head_config",
+            "slope_feature_dim",
+            "slope_feature_kernel",
+        ):
+            assert getattr(rebuilt, attr) == getattr(model, attr), (
+                f"from_config dropped/changed '{attr}'"
+            )
+
     # ------------------------------------------------------------------
     # Gradient flow
     # ------------------------------------------------------------------

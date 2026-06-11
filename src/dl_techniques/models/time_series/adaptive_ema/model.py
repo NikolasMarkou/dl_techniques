@@ -414,6 +414,20 @@ class AdaptiveEMASlopeFilterModel(keras.Model):
         })
         return config
 
+    @classmethod
+    def from_config(
+        cls, config: Dict[str, Any]
+    ) -> "AdaptiveEMASlopeFilterModel":
+        """Create model from configuration.
+
+        ``get_config`` serializes only plain ctor params (no Keras
+        initializer/regularizer objects are used by this model), so the
+        config is reconstructable by direct keyword expansion — no
+        ``deserialize_keras_object`` step is required. Provided as the
+        explicit conformance override mandated by the canonical checklist.
+        """
+        return cls(**config)
+
 
 # ---------------------------------------------------------------------
 
