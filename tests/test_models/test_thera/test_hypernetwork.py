@@ -187,3 +187,29 @@ def test_coord_gradient_finite_nonzero():
     g = keras.ops.convert_to_numpy(grad)
     assert np.all(np.isfinite(g))
     assert np.abs(g).sum() > 0.0
+
+
+# ---------------------------------------------------------------------
+# 7. compute_output_shape: multi-input [enc, coords, t] -> (B, Hq, Wq, out_dim);
+#    works before the layer is built (guide Pitfall 11/12).
+# ---------------------------------------------------------------------
+
+
+def test_hypernetwork_compute_output_shape():
+    hyper = TheraHypernetwork(hidden_dim=32, out_dim=3)
+    # Must work BEFORE build (uses stored config, not weight shapes).
+    assert not hyper.built
+    shape = hyper.compute_output_shape([(2, 8, 8, 16), (2, 12, 12, 2), (2, 1)])
+    assert shape == (2, 12, 12, 3)
+    assert not hyper.built
+
+    # Matches the real decode output shape.
+    encoding = keras.random.normal((2, 8, 8, 16))
+    coords = _coords(2, 12, 12)
+    t = keras.ops.ones((2, 1))
+    out = hyper.decode(encoding, coords, t)
+    assert tuple(out.shape) == shape
+
+    # Bare-encoding (direct-call) path: query dims unknown -> None, out_dim kept.
+    bare = hyper.compute_output_shape((2, 8, 8, 16))
+    assert bare == (2, None, None, 3)

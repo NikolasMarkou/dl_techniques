@@ -98,6 +98,31 @@ class TheraHypernetwork(keras.layers.Layer):
 
     Output shape tracks the query coordinate grid: ``(B, Hq, Wq, out_dim)``.
 
+    **Intent**: Turn a frozen backbone ``encoding`` into a per-pixel,
+    spatially-varying SIREN-style heat field and evaluate it at arbitrary query
+    coordinates -- the implicit-field decoder that makes THERA arbitrary-scale
+    and aliasing-free. This layer owns the 1x1 ``out_conv`` hypernetwork and the
+    :class:`HeatField`; the backbone/tail live in the step-8 ``Thera`` model.
+
+    **Architecture**::
+
+        encoding (B, Hs, Ws, C)
+              |  sample at coords (NEAREST, order=0)
+              v
+        enc_at (B, Hq, Wq, C)
+              |  1x1 out_conv
+              v
+        phi (B, Hq, Wq, output_size)
+              |  split -> phi_phase (.., hidden), phi_kernel (.., hidden, out)
+              |
+        coords (B, Hq, Wq, 2) --+--> rel = coords - nearest(coords)   (* Hs, Ws)
+                                |        (source-pixel relative coord)
+                                v
+        HeatField einsum(rel, phi_phase, phi_kernel, t)
+              |
+              v
+        out (B, Hq, Wq, out_dim)
+
     Args:
         hidden_dim: Heat-field hidden width ``N`` (number of frequency
             components). Must be positive.
@@ -213,6 +238,36 @@ class TheraHypernetwork(keras.layers.Layer):
         ):
             return tuple(input_shape[0])
         return tuple(input_shape)
+
+    def compute_output_shape(self, input_shape: Any) -> Tuple[Optional[int], ...]:
+        """Infer the decode output shape ``(B, Hq, Wq, out_dim)`` (guide Pitfall 11).
+
+        The query spatial dims ``Hq, Wq`` track the ``coords`` grid, NOT the
+        source ``encoding``. Uses only stored config (``self.out_dim``), never a
+        weight shape (Pitfall 12), so it works before the layer is built.
+
+        Args:
+            input_shape: Either the multi-input ``[enc_shape, coords_shape,
+                t_shape]`` list (functional ``call`` path -- ``coords_shape`` =
+                ``(B, Hq, Wq, 2)`` supplies the query dims) or a bare encoding
+                shape ``(B, Hs, Ws, C)`` (direct ``decode`` build path, where the
+                query dims are unknown -> ``None``).
+
+        Returns:
+            ``(B, Hq, Wq, out_dim)`` for the multi-input case, else
+            ``(B, None, None, out_dim)``.
+        """
+        # Multi-input: [enc_shape, coords_shape, t_shape]; coords are input #1.
+        if (
+            isinstance(input_shape, (list, tuple))
+            and len(input_shape) >= 2
+            and isinstance(input_shape[1], (list, tuple))
+        ):
+            coords_shape = input_shape[1]  # (B, Hq, Wq, 2)
+            return (coords_shape[0], coords_shape[1], coords_shape[2], self.out_dim)
+        # Bare encoding shape: query spatial dims unknown without coords.
+        batch = input_shape[0] if isinstance(input_shape, (list, tuple)) else None
+        return (batch, None, None, self.out_dim)
 
     # -----------------------------------------------------------------
 
