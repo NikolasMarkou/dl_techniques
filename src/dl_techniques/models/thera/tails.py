@@ -23,9 +23,11 @@ a model-size key. The reference JAX/Flax dispatcher (THERA ``model/tail.py``)::
   leaky-relu, returning ``num_feat`` channels. Spatial size is preserved.
 
 REUSE (no Swin/ConvNeXt internals are reimplemented here):
-- ``ConvNextV1Block`` (depthwise conv + LN + 4x inverted-bottleneck MLP + residual)
-  is THERA's ``group_features=True`` ConvNeXt block. It requires input channels ==
-  ``filters`` for its residual add, so a channel change needs a ``_Projection`` first.
+- ``ConvNextV1Block`` (depthwise conv + LN + 4x inverted-bottleneck MLP)
+  is THERA's ``group_features=True`` ConvNeXt block. Its depthwise conv operates
+  at a fixed channel width (output channels == ``filters``), so the ConvNeXt tail
+  stack runs at one working width per block group; a ``_Projection`` 1x1 conv
+  adapts the channel count at each group transition.
 - ``SwinTransformerBlock`` consumes/returns NHWC ``(B, H, W, C)``, infers ``H, W``
   dynamically, and builds its own (shifted) window attention mask. No patch
   embed/unembed is needed.
@@ -130,9 +132,11 @@ class _Projection(keras.layers.Layer):
     """THERA ``Projection``: ``LayerNorm`` -> ``Conv2D(n_dims, 1x1)``.
 
     **Intent**: Provide the channel-count adapter the ``plus`` tail inserts
-    before a ConvNeXt block on a channel change, since the reused depthwise
-    ``ConvNextV1Block`` cannot change channels (its residual add requires
-    input channels == ``filters``).
+    before a ConvNeXt block on a channel change. The ConvNeXt tail block stack
+    operates at a fixed channel width: the reused depthwise ``ConvNextV1Block``
+    keeps the channel count fixed at ``filters`` throughout the block, so a 1x1
+    projection is needed to adapt the running channel count (e.g. the backbone's
+    64-ch feature map) to the next block group's working width.
 
     **Architecture**::
 
@@ -145,8 +149,8 @@ class _Projection(keras.layers.Layer):
         Output (B, H, W, n_dims)                 # spatial size preserved
 
     Inserted by the ``plus`` tail before a ConvNeXt block whenever the channel
-    count changes (a depthwise ConvNeXt block cannot change channels because of
-    its residual add). Spatial size is preserved.
+    count changes (a depthwise ConvNeXt block runs at a fixed channel width and
+    cannot itself change the channel count). Spatial size is preserved.
     """
 
     def __init__(self, n_dims: int, **kwargs: Any) -> None:

@@ -233,7 +233,7 @@ def evaluate_multiscale(
             sr = super_resolve(thera_model, lr, (h, w))
 
             # Plain bicubic-upscale baseline.
-            bicubic = tf.image.resize(lr, (h, w), method="bicubic")
+            bicubic = tf.image.resize(lr, (h, w), method="bicubic", antialias=True)
             bicubic = np.asarray(
                 tf.clip_by_value(bicubic, 0.0, 1.0), dtype=np.float32
             )
