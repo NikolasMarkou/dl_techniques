@@ -421,6 +421,10 @@ def train(config: TheraConfig) -> None:
         shuffle=False,
         seed=config.seed,
         repeat=False,
+        # REV-W1/OBS-1: deterministic val (fixed scale/center-crop/no-aug) +
+        # keep final partial batch; empty corpus already raises in the builder.
+        training=False,
+        drop_remainder=False,
     )
 
     # ------------------------------------------------------------------

@@ -143,6 +143,7 @@ def _per_sample(
     augment_scale_range: Tuple[float, float],
     augment_scale_prob: float,
     seed: Optional[int] = None,
+    training: bool = True,
 ) -> dict:
     """Build one arbitrary-scale training example from an image path.
 
@@ -159,6 +160,12 @@ def _per_sample(
         augment_scale_prob: Probability of applying scale augmentation.
         seed: Optional op-level seed for the per-sample query-point shuffle
             (reproducibility).
+        training: When ``True`` (default), uses the stochastic augmentation
+            recipe (random base scale, scale-aug, crop location, h/v flip,
+            k*90 rotation, shuffled query points) byte-identically to the
+            pre-flag implementation. When ``False``, uses a fully deterministic
+            validation transform (fixed midpoint scale, no scale-aug, center
+            crop, no flip/rotation, even-stride query-point selection).
 
     Returns:
         Dict with keys ``source``, ``target_coords``, ``target``,
@@ -166,14 +173,28 @@ def _per_sample(
     """
     img = _decode_image(path)
 
+    # DECISION plan_2026-06-12_f8843c4f/D-001: training is a trace-time Python
+    # bool (closure constant from _map_fn), so a plain if/else is correct here
+    # (NOT tf.cond). The if-training arm MUST stay byte-identical to the
+    # pre-flag six random ops (scale, scale-aug, crop, flips, rot90, query
+    # shuffle) — do NOT seed or reorder them. The else arm is a deterministic
+    # validation transform (fixed midpoint scale, no aug, center crop, no
+    # flip/rot, even-stride query select). See decisions.md D-001.
     # --- draw scales ---
-    scale = tf.random.uniform([], scale_range[0], scale_range[1])
-    do_aug = tf.random.uniform([]) < augment_scale_prob
-    augment_scale = tf.where(
-        do_aug,
-        tf.random.uniform([], augment_scale_range[0], augment_scale_range[1]),
-        tf.constant(1.0),
-    )
+    if training:
+        scale = tf.random.uniform([], scale_range[0], scale_range[1])
+        do_aug = tf.random.uniform([]) < augment_scale_prob
+        augment_scale = tf.where(
+            do_aug,
+            tf.random.uniform(
+                [], augment_scale_range[0], augment_scale_range[1]
+            ),
+            tf.constant(1.0),
+        )
+    else:
+        scale = tf.constant((scale_range[0] + scale_range[1]) / 2.0, tf.float32)
+        do_aug = tf.constant(False)
+        augment_scale = tf.constant(1.0)
 
     # --- crop window ---
     crop = tf.cast(
@@ -181,7 +202,15 @@ def _per_sample(
         tf.int32,
     )
     img = _ensure_min_size(img, crop)
-    target = tf.image.random_crop(img, [crop, crop, 3])  # (crop, crop, 3)
+    if training:
+        target = tf.image.random_crop(img, [crop, crop, 3])  # (crop, crop, 3)
+    else:
+        # Deterministic center crop (val). _ensure_min_size guarantees
+        # H,W >= crop, so off_h/off_w >= 0 and the slice is in-bounds.
+        sh = tf.shape(img)
+        off_h = (sh[0] - crop) // 2
+        off_w = (sh[1] - crop) // 2
+        target = img[off_h:off_h + crop, off_w:off_w + crop, :]
 
     # --- target size (undo the augment scale) ---
     target_size = tf.cast(
@@ -200,11 +229,12 @@ def _per_sample(
         lambda: target,
     )
 
-    # --- augmentations: random h/v flip + k*90 rotation ---
-    target = tf.image.random_flip_left_right(target)
-    target = tf.image.random_flip_up_down(target)
-    k = tf.random.uniform([], 0, 4, dtype=tf.int32)
-    target = tf.image.rot90(target, k=k)
+    # --- augmentations: random h/v flip + k*90 rotation (train only) ---
+    if training:
+        target = tf.image.random_flip_left_right(target)
+        target = tf.image.random_flip_up_down(target)
+        k = tf.random.uniform([], 0, 4, dtype=tf.int32)
+        target = tf.image.rot90(target, k=k)
 
     # --- LR source (bicubic downscale, antialias for clean decimation: E6) ---
     source = tf.image.resize(
@@ -235,7 +265,14 @@ def _per_sample(
     target_flat = tf.reshape(target, (-1, 3))  # (n, 3)
     source_up_flat = tf.reshape(source_up, (-1, 3))  # (n, 3)
 
-    idc = tf.random.shuffle(tf.range(n), seed=seed)[:n_samples]  # (n_samples,)
+    if training:
+        idc = tf.random.shuffle(tf.range(n), seed=seed)[:n_samples]  # (n_samples,)
+    else:
+        # Deterministic even-stride selection (val). assert_greater_equal above
+        # guarantees n >= n_samples, so range(0, n, stride) has >= n_samples
+        # elements; [:n_samples] truncates to exactly n_samples.
+        stride = tf.maximum(n // n_samples, 1)
+        idc = tf.range(0, n, stride)[:n_samples]
 
     coords_s = tf.gather(coords_flat, idc)  # (n_samples, 2)
     target_s = tf.gather(target_flat, idc)  # (n_samples, 3)
@@ -286,6 +323,8 @@ def build_arbitrary_scale_dataset(
     num_parallel_calls: int = tf.data.AUTOTUNE,
     seed: Optional[int] = None,
     repeat: bool = True,
+    training: bool = True,
+    drop_remainder: bool = True,
 ) -> tf.data.Dataset:
     """Build the THERA arbitrary-scale SR ``tf.data`` pipeline.
 
@@ -316,6 +355,15 @@ def build_arbitrary_scale_dataset(
         num_parallel_calls: Parallelism for the per-sample map.
         seed: Optional seed for file-list and buffer shuffles (reproducibility).
         repeat: Repeat the dataset indefinitely (for ``model.fit`` step loops).
+        training: When ``True`` (default) the per-sample map uses the stochastic
+            augmentation recipe (train). When ``False`` it uses a fully
+            deterministic validation transform (fixed midpoint scale, center
+            crop, no flip/rotation, even-stride query selection) so val metrics
+            are stable across epochs and builds (OBS-1).
+        drop_remainder: Passed to ``.batch()``. ``True`` (default) preserves the
+            train behavior. Set ``False`` for val builds so a final partial
+            batch is kept — without it a corpus with ``N < batch_size`` yields
+            zero val batches (REV-W1).
 
     Returns:
         A batched, prefetched ``tf.data.Dataset``.
@@ -347,6 +395,7 @@ def build_arbitrary_scale_dataset(
             augment_scale_range=augment_scale_range,
             augment_scale_prob=augment_scale_prob,
             seed=seed,
+            training=training,
         )
 
     if shuffle:
@@ -358,7 +407,11 @@ def build_arbitrary_scale_dataset(
         )
 
     ds = ds.map(_map_fn, num_parallel_calls=num_parallel_calls)
-    ds = ds.batch(batch_size, drop_remainder=True)
+    # DECISION plan_2026-06-12_f8843c4f/D-002: drop_remainder is parameterized
+    # (default True keeps train behavior). Val passes drop_remainder=False so a
+    # corpus with N < batch_size keeps its final partial batch instead of
+    # silently yielding zero val batches. See decisions.md D-002.
+    ds = ds.batch(batch_size, drop_remainder=drop_remainder)
     if repeat:
         ds = ds.repeat()
     ds = ds.prefetch(tf.data.AUTOTUNE)
