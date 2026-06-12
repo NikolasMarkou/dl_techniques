@@ -292,24 +292,29 @@ class TheraHypernetwork(keras.layers.Layer):
 
     # -----------------------------------------------------------------
 
-    def decode(
+    def _compute_rel_and_phi(
         self,
         encoding: Any,
         coords: Any,
-        t: Any,
-        training: Optional[bool] = None,
-    ) -> Any:
-        """Decode the heat field at the query coordinates (THERA ``apply_decoder``).
+    ) -> Tuple[Any, Any, Any]:
+        """Compute the reusable ``(rel_coords, phi_phase, phi_kernel)`` triple.
+
+        Factored out of :meth:`decode` so both the plain forward path and the
+        :meth:`decode_with_jac` (step-9 Jacobian-TV) path share EXACTLY the same
+        rel-coordinate and per-pixel-parameter computation. ``rel`` here carries
+        the coordinate gradient (the TV-loss path flows through the direct
+        ``coords`` term of ``rel = coords - nearest(coords)``; the nearest term
+        is piecewise-constant, zero-grad a.e. -- D-008).
 
         Args:
             encoding: Backbone feature map, shape ``(B, Hs, Ws, C)``.
-            coords: Query coordinates, shape ``(B, Hq, Wq, 2)`` (channel order
-                ``[h, w]``, THERA pixel-center convention).
-            t: Heat-diffusion time, broadcastable to ``(B, 1)``.
-            training: Forwarded to the heat field.
+            coords: Query coordinates, shape ``(B, Hq, Wq, 2)``.
 
         Returns:
-            Super-resolved field values, shape ``(B, Hq, Wq, out_dim)``.
+            ``(rel, phi_phase, phi_kernel)`` where ``rel`` has shape
+            ``(B, Hq, Wq, 2)`` (scaled to source pixel units), ``phi_phase`` has
+            shape ``(B, Hq, Wq, hidden)`` and ``phi_kernel`` has shape
+            ``(B, Hq, Wq, hidden, out)``.
         """
         phi_phase, phi_kernel = self.get_phi_at_coords(encoding, coords)
 
@@ -333,8 +338,122 @@ class TheraHypernetwork(keras.layers.Layer):
         rel_h = rel[..., 0] * hs_f  # (B, Hq, Wq)
         rel_w = rel[..., 1] * ws_f
         rel = ops.stack([rel_h, rel_w], axis=-1)  # (B, Hq, Wq, 2)
+        return rel, phi_phase, phi_kernel
 
+    def decode(
+        self,
+        encoding: Any,
+        coords: Any,
+        t: Any,
+        training: Optional[bool] = None,
+    ) -> Any:
+        """Decode the heat field at the query coordinates (THERA ``apply_decoder``).
+
+        Args:
+            encoding: Backbone feature map, shape ``(B, Hs, Ws, C)``.
+            coords: Query coordinates, shape ``(B, Hq, Wq, 2)`` (channel order
+                ``[h, w]``, THERA pixel-center convention).
+            t: Heat-diffusion time, broadcastable to ``(B, 1)``.
+            training: Forwarded to the heat field.
+
+        Returns:
+            Super-resolved field values, shape ``(B, Hq, Wq, out_dim)``.
+        """
+        rel, phi_phase, phi_kernel = self._compute_rel_and_phi(encoding, coords)
         return self.heat_field(rel, phi_phase, phi_kernel, t, training=training)
+
+    # -----------------------------------------------------------------
+
+    # DECISION plan_2026-06-11_f662207d/D-010
+    # EXACT analytic spatial Jacobian d(field)/d(rel_coords) at t=0, NOT a
+    # finite-difference approximation (Q3 forbids finite-difference; see
+    # decisions.md D-010). THERA's reference (`model/thera.py apply_decoder`
+    # return_jac branch) takes `jacrev(field.apply, argnums=rel_coords)` at t=0;
+    # we reproduce it with a nested `tf.GradientTape.batch_jacobian` because:
+    #   * the heat field is POINTWISE in rel_coords (query pixel n's output
+    #     depends ONLY on rel_coords[n]), so a flattened per-pixel
+    #     `batch_jacobian` over the leading (B*Hq*Wq) axis is mathematically
+    #     EXACT -- the off-diagonal pixel-cross terms are identically zero, never
+    #     computed.
+    #   * the Jacobian is evaluated at t=0 (heat envelope == 1, the un-smoothed
+    #     "clean" field), matching the reference `zeros_like(t)`.
+    # SECOND-ORDER / pfor NOTE: this `jac` is itself differentiated by the
+    # trainer's OUTER tape (TV loss -> weight grads, WGAN-GP style). TF's default
+    # pfor vectorization of `batch_jacobian` does NOT compose with a second
+    # outer tape (the vectorized while-loop yields None weight-grads). We pass
+    # `experimental_use_pfor=False` so the inner Jacobian is built with an
+    # unrolled per-output loop that the outer tape CAN differentiate -- slower,
+    # but second-order-safe and STILL EXACT (NOT finite-difference). Do NOT
+    # re-enable pfor here: the STOP-IF #1 nested-tape weight-grad oracle
+    # (test_thera_jacobian_tv.py) goes None if you do.
+    # This raw-`tf` GradientTape usage is the explicit INV-3 exemption (H3/plan).
+    def decode_with_jac(
+        self,
+        encoding: Any,
+        coords: Any,
+        t: Any,
+        training: Optional[bool] = None,
+    ) -> Tuple[Any, Any]:
+        """Decode the field AND its exact spatial Jacobian ``d(field)/d(rel)`` at t=0.
+
+        Reproduces THERA's ``apply_decoder(..., return_jac=True)`` branch: the
+        forward output is taken at the REAL ``t`` while the aliasing Jacobian is
+        the per-pixel ``d(field)/d(rel_coords)`` evaluated at ``t=0`` (envelope
+        == 1). The Jacobian is consumed by the step-9 TV penalty
+        (``mean(abs(jac))``) and differentiates through to the weights via the
+        trainer's outer tape (STOP-IF #1).
+
+        Args:
+            encoding: Backbone feature map, shape ``(B, Hs, Ws, C)``.
+            coords: Query coordinates, shape ``(B, Hq, Wq, 2)``.
+            t: Heat-diffusion time, broadcastable to ``(B, 1)``.
+            training: Forwarded to the heat field.
+
+        Returns:
+            ``(out, jac)`` where ``out`` has shape ``(B, Hq, Wq, out_dim)`` (at
+            the real ``t``) and ``jac`` has shape ``(B, Hq, Wq, out_dim, 2)``
+            (the per-pixel spatial Jacobian at ``t=0``).
+        """
+        rel, phi_phase, phi_kernel = self._compute_rel_and_phi(encoding, coords)
+
+        # Forward output at the REAL t.
+        out = self.heat_field(rel, phi_phase, phi_kernel, t, training=training)
+
+        # Flatten the leading (B, Hq, Wq) dims to a single pixel axis N so a
+        # per-pixel batch_jacobian is exact (pointwise field => block-diagonal
+        # full Jacobian; batch_jacobian computes only the per-pixel blocks).
+        out_dim = self.out_dim
+        hidden = self.hidden_dim
+        flat = tf.shape(rel)  # (B, Hq, Wq, 2)
+        n = flat[0] * flat[1] * flat[2]
+
+        rel_flat = ops.reshape(rel, (n, 2))  # (N, 2)
+        phase_flat = ops.reshape(phi_phase, (n, hidden))  # (N, hidden)
+        kernel_flat = ops.reshape(phi_kernel, (n, hidden, out_dim))  # (N, hidden, out)
+        # t=0 broadcast to every pixel: (N, 1) zeros -> envelope == 1.
+        t_zero = tf.zeros((n, 1), dtype=rel_flat.dtype)
+
+        # persistent=True is REQUIRED by tf: batch_jacobian with
+        # experimental_use_pfor=False in eager mode unrolls a per-output loop that
+        # re-reads the tape, so the tape must outlive a single gradient call.
+        with tf.GradientTape(persistent=True) as jac_tape:
+            jac_tape.watch(rel_flat)
+            out0_flat = self.heat_field(
+                rel_flat, phase_flat, kernel_flat, t_zero, training=training
+            )  # (N, out_dim)
+        # experimental_use_pfor=False -> unrolled per-output loop; composes with
+        # the trainer's outer tape (D-010). (N, out_dim, 2).
+        jac_flat = jac_tape.batch_jacobian(
+            out0_flat, rel_flat, experimental_use_pfor=False
+        )
+        del jac_tape
+
+        # Reshape back to (B, Hq, Wq, out_dim, 2).
+        out_shape = tf.concat(
+            [flat[:3], tf.constant([out_dim, 2], dtype=flat.dtype)], axis=0
+        )
+        jac = ops.reshape(jac_flat, out_shape)
+        return out, jac
 
     # -----------------------------------------------------------------
 

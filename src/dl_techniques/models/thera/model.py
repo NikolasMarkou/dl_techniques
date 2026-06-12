@@ -242,31 +242,48 @@ class Thera(keras.Model):
             encoding: Backbone+tail encoding ``(B, Hs, Ws, C_feat)``.
             coords: Query coordinates ``(B, Hq, Wq, 2)`` (pixel-center, ``[h, w]``).
             t: Heat-diffusion time, broadcastable to ``(B, 1)``.
-            return_jac: Accepted for signature parity with the THERA reference;
-                the coordinate-Jacobian wiring lives in step 9 (the Jacobian-TV
-                regularizer), NOT here. Currently ignored.
+            return_jac: When ``True``, also return the exact per-pixel spatial
+                Jacobian ``d(field)/d(rel_coords)`` evaluated at ``t=0`` (THERA's
+                ``apply_decoder(..., return_jac=True)`` branch, step-9 Jacobian-TV
+                aliasing regularizer). See D-010.
             training: Forwarded to the hypernetwork.
 
         Returns:
-            Raw residual field ``(B, Hq, Wq, out_dim)``.
+            Raw residual field ``(B, Hq, Wq, out_dim)`` when ``return_jac`` is
+            ``False``; otherwise ``(out, jac)`` where ``jac`` has shape
+            ``(B, Hq, Wq, out_dim, 2)``.
         """
-        # return_jac is intentionally a pass-through no-op here (step 9 owns the
-        # nested-tape Jacobian; the model stays a plain forward predictor).
+        if return_jac:
+            return self.hypernetwork.decode_with_jac(
+                encoding, coords, t, training=training
+            )
         return self.hypernetwork.decode(encoding, coords, t, training=training)
 
-    def call(self, inputs: Any, training: Optional[bool] = None) -> Any:
+    def call(
+        self,
+        inputs: Any,
+        training: Optional[bool] = None,
+        return_jac: bool = False,
+    ) -> Any:
         """Forward pass: ``inputs = (source, coords, t)`` -> residual field.
 
         Args:
             inputs: 3-tuple ``(source, coords, t)``.
             training: Forwarded to the backbone, tail, and hypernetwork.
+            return_jac: When ``True``, also return the exact spatial Jacobian
+                ``d(field)/d(rel_coords)`` at ``t=0`` (step-9 Jacobian-TV). Kept
+                default ``False`` so existing forward/serialization paths are
+                unaffected.
 
         Returns:
-            Raw residual field ``(B, Hq, Wq, out_dim)``.
+            Raw residual field ``(B, Hq, Wq, out_dim)`` when ``return_jac`` is
+            ``False``; otherwise ``(out, jac)``.
         """
         source, coords, t = inputs
         encoding = self.apply_encoder(source, training=training)
-        return self.apply_decoder(encoding, coords, t, training=training)
+        return self.apply_decoder(
+            encoding, coords, t, return_jac=return_jac, training=training
+        )
 
     # -----------------------------------------------------------------
 
