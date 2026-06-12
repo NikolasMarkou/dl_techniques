@@ -137,3 +137,134 @@ def test_make_grid_matches_grid_sample():
     inference = make_grid(n)  # (n, n, 2) numpy, int side
     assert pipeline.shape == inference.shape == (n, n, 2)
     np.testing.assert_allclose(pipeline, inference, atol=1e-6)
+
+
+# ---------------------------------------------------------------------
+# 9. THERA review caveats (plan_2026-06-12_f8843c4f):
+#    OBS-1 deterministic validation, INV-1 train-still-random, REV-W1
+#    small-corpus >=1 batch, deterministic val scale.
+# ---------------------------------------------------------------------
+
+
+_VAL_KW = dict(
+    source_size=48,
+    target_samples=16,
+    scale_range=(1.2, 2.0),
+    augment_scale_range=(1.0, 2.0),
+    augment_scale_prob=0.5,
+)
+
+
+def _build_val(corpus, **overrides):
+    kw = dict(_VAL_KW)
+    kw.update(overrides)
+    return build_arbitrary_scale_dataset(
+        corpus,
+        training=False,
+        drop_remainder=False,
+        repeat=False,
+        shuffle=False,
+        batch_size=kw.pop("batch_size", 2),
+        **kw,
+    )
+
+
+_VAL_KEYS = ("source", "target", "target_coords", "source_nearest", "scale")
+
+
+def test_val_pipeline_deterministic(corpus):
+    """OBS-1: two independent val builds AND two iterations of one build are
+    elementwise identical for every output field."""
+    ds1 = _build_val(corpus)
+    ds2 = _build_val(corpus)
+    b1 = next(iter(ds1))
+    b2 = next(iter(ds2))
+    for k in _VAL_KEYS:
+        assert np.array_equal(
+            np.array(b1[k]), np.array(b2[k])
+        ), f"val field '{k}' differs across two independent builds (non-deterministic)"
+
+    # Re-iterate the SAME dataset twice: first batch must be identical (stable
+    # across epochs).
+    a = next(iter(ds1))
+    b = next(iter(ds1))
+    for k in _VAL_KEYS:
+        assert np.array_equal(
+            np.array(a[k]), np.array(b[k])
+        ), f"val field '{k}' differs across two iterations of one dataset"
+
+
+def test_train_pipeline_still_random(corpus):
+    """INV-1 guard: the training path stays stochastic. Two consecutive batches
+    from a training dataset must differ (determinism must NOT leak into train)."""
+    ds = build_arbitrary_scale_dataset(
+        corpus,
+        training=True,
+        drop_remainder=False,
+        repeat=True,
+        shuffle=True,
+        batch_size=2,
+        **_VAL_KW,
+    )
+    it = iter(ds)
+    b1 = next(it)
+    b2 = next(it)
+    target_differs = not np.array_equal(
+        np.array(b1["target"]), np.array(b2["target"])
+    )
+    scale_differs = not np.array_equal(
+        np.array(b1["scale"]), np.array(b2["scale"])
+    )
+    assert target_differs or scale_differs, (
+        "two consecutive training batches are identical — determinism leaked "
+        "into the training path (INV-1 violated)"
+    )
+
+
+def test_val_small_corpus_yields_batch(tmp_path):
+    """REV-W1: a non-empty corpus smaller than batch_size still yields >=1 val
+    batch when drop_remainder=False."""
+    rng = np.random.default_rng(7)
+    for i in range(2):  # 2 images < batch_size=8
+        arr = rng.integers(0, 256, size=(96, 96, 3), dtype=np.uint8)
+        png = tf.io.encode_png(tf.convert_to_tensor(arr))
+        tf.io.write_file(str(tmp_path / f"img_{i:02d}.png"), png)
+    corpus = str(tmp_path)
+
+    ds_keep = build_arbitrary_scale_dataset(
+        corpus,
+        training=False,
+        drop_remainder=False,
+        repeat=False,
+        shuffle=False,
+        batch_size=8,
+        **_VAL_KW,
+    )
+    assert len(list(ds_keep)) >= 1, "small val corpus yielded zero batches (REV-W1)"
+
+    # Contrast: drop_remainder=True drops the only (partial) batch -> 0 batches.
+    ds_drop = build_arbitrary_scale_dataset(
+        corpus,
+        training=False,
+        drop_remainder=True,
+        repeat=False,
+        shuffle=False,
+        batch_size=8,
+        **_VAL_KW,
+    )
+    assert len(list(ds_drop)) == 0, (
+        "drop_remainder=True should drop the only partial batch (documents the "
+        "exact failure REV-W1 fixes)"
+    )
+
+
+def test_val_scale_is_midpoint(corpus):
+    """The deterministic val ``scale`` (effective_scale = target_size/source_size)
+    is constant across the batch and identical across independent builds. We do
+    NOT couple to the raw midpoint value (target_size rounding)."""
+    ds1 = _build_val(corpus, scale_range=(1.2, 2.0))
+    ds2 = _build_val(corpus, scale_range=(1.2, 2.0))
+    s1 = np.array(next(iter(ds1))["scale"])
+    s2 = np.array(next(iter(ds2))["scale"])
+    assert np.allclose(s1, s1.flat[0]), f"val scale not constant across batch: {s1}"
+    assert np.array_equal(s1, s2), "val scale differs across two builds (non-deterministic)"

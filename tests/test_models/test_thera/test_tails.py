@@ -230,3 +230,11 @@ def test_tailplus_fail_loud_non_64ch():
     x = keras.random.normal((2, 16, 16, 32))  # 32 != 64
     with pytest.raises(ValueError):
         tail(x)  # triggers build(input_shape) with last dim 32
+
+
+def test_tailplus_contract_message():
+    # REV-W2: the guard message must name `in_channels` so a caller building a
+    # `plus` tail for a non-64ch backbone is told the actionable fix.
+    tail = TheraTailPlus()
+    with pytest.raises(ValueError, match="in_channels"):
+        tail.build((None, 8, 8, 32))  # 32 != default 64
