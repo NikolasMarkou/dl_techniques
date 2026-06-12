@@ -119,12 +119,34 @@ class ResnetBlock(keras.layers.Layer):
             out_channels, kernel_size=3, strides=1, padding="same", name="conv2"
         )
         # 1x1 projection skip only when the channel count changes.
+        # DECISION plan_2026-06-12_59a18a10/D-007: nin_shortcut kept conditional
+        # (created only when in_channels != out_channels). This is STRUCTURAL
+        # (matches the PyTorch reference), NOT a runtime config toggle. Do NOT
+        # "always create" an identity 1x1 conv when in==out per the guide's
+        # weight-compat rule: that rule targets runtime toggles, and an identity
+        # 1x1 conv here would add dead parameters and diverge from PyTorch. See
+        # decisions.md D-007.
         self.nin_shortcut: Optional[keras.layers.Conv2D] = None
         if in_channels != out_channels:
             self.nin_shortcut = keras.layers.Conv2D(
                 out_channels, kernel_size=1, strides=1, padding="valid",
                 name="nin_shortcut",
             )
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        # Explicit sub-layer build (guide §3.2): build each owned sub-layer in
+        # forward order with propagated shapes; the residual/skip path builds on
+        # the ORIGINAL input_shape. No new sub-layers created here.
+        self.norm1.build(input_shape)
+        norm1_shape = self.norm1.compute_output_shape(input_shape)
+        self.conv1.build(norm1_shape)
+        conv1_shape = self.conv1.compute_output_shape(norm1_shape)
+        self.norm2.build(conv1_shape)
+        norm2_shape = self.norm2.compute_output_shape(conv1_shape)
+        self.conv2.build(norm2_shape)
+        if self.nin_shortcut is not None:
+            self.nin_shortcut.build(input_shape)
+        super().build(input_shape)
 
     def call(
         self,
@@ -209,6 +231,19 @@ class AttnBlock(keras.layers.Layer):
             channels, kernel_size=1, strides=1, padding="valid", name="proj_out"
         )
 
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        # Explicit sub-layer build (guide §3.2). norm + q/k/v all consume the
+        # input shape; proj_out consumes the (channel-preserving) attention
+        # output, which has the same shape as the input. No new sub-layers.
+        self.norm.build(input_shape)
+        norm_shape = self.norm.compute_output_shape(input_shape)
+        self.q.build(norm_shape)
+        self.k.build(norm_shape)
+        self.v.build(norm_shape)
+        # Attention preserves (B, H, W, C); proj_out builds on that shape.
+        self.proj_out.build(self.q.compute_output_shape(norm_shape))
+        super().build(input_shape)
+
     def call(
         self,
         inputs: keras.KerasTensor,
@@ -223,9 +258,12 @@ class AttnBlock(keras.layers.Layer):
         shp = keras.ops.shape(h)
         b, hh, ww, c = shp[0], shp[1], shp[2], shp[3]
         n = hh * ww
-        q = keras.ops.reshape(q, (b, n, c))
-        k = keras.ops.reshape(k, (b, n, c))
-        v = keras.ops.reshape(v, (b, n, c))
+        # Build reshape targets with ops.stack (not python tuples of symbolic
+        # scalars) for graph safety (guide §4).
+        bnc = keras.ops.stack([b, n, c])
+        q = keras.ops.reshape(q, bnc)
+        k = keras.ops.reshape(k, bnc)
+        v = keras.ops.reshape(v, bnc)
 
         # Scaled dot-product attention over the H*W tokens (scale 1/sqrt(C)).
         scale = 1.0 / keras.ops.sqrt(keras.ops.cast(c, h.dtype))
@@ -234,7 +272,7 @@ class AttnBlock(keras.layers.Layer):
         out = keras.ops.matmul(attn, v)  # (B, N, C)
 
         # Restore spatial layout, project, and add residually.
-        out = keras.ops.reshape(out, (b, hh, ww, c))
+        out = keras.ops.reshape(out, keras.ops.stack([b, hh, ww, c]))
         out = self.proj_out(out, training=training)
         return inputs + out
 
@@ -278,6 +316,20 @@ class Downsample(keras.layers.Layer):
         self.conv = keras.layers.Conv2D(
             channels, kernel_size=3, strides=2, padding="valid", name="conv"
         )
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        # Explicit sub-layer build (guide §3.2). The conv consumes the
+        # asymmetrically PADDED input (bottom+right +1), so build it on that
+        # padded shape to match call().
+        b, h, w, ch = input_shape
+        padded_shape = (
+            b,
+            None if h is None else h + 1,
+            None if w is None else w + 1,
+            ch,
+        )
+        self.conv.build(padded_shape)
+        super().build(input_shape)
 
     def call(
         self,
@@ -343,6 +395,14 @@ class Upsample(keras.layers.Layer):
         self.conv = keras.layers.Conv2D(
             channels, kernel_size=3, strides=1, padding="same", name="conv"
         )
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        # Explicit sub-layer build (guide §3.2). UpSampling2D doubles spatial
+        # dims (channels unchanged); conv consumes that upsampled shape.
+        self.up.build(input_shape)
+        up_shape = self.up.compute_output_shape(input_shape)
+        self.conv.build(up_shape)
+        super().build(input_shape)
 
     def call(
         self,
@@ -457,6 +517,41 @@ class Encoder(keras.layers.Layer):
             2 * z_channels, kernel_size=1, strides=1, padding="valid",
             name="quant_conv",
         )
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        # Explicit sub-layer build (guide §3.2): thread the shape through the
+        # whole stack in the SAME order call() consumes it, using each child's
+        # compute_output_shape to get the next shape. No new sub-layers.
+        self.conv_in.build(input_shape)
+        shape = self.conv_in.compute_output_shape(input_shape)
+
+        num_resolutions = len(self.ch_mult)
+        block_idx = 0
+        for level in range(num_resolutions):
+            for _ in range(self.num_res_blocks):
+                blk = self.down_blocks[block_idx]
+                blk.build(shape)
+                shape = blk.compute_output_shape(shape)
+                block_idx += 1
+            sampler = self.down_samplers[level]
+            if sampler is not None:
+                sampler.build(shape)
+                shape = sampler.compute_output_shape(shape)
+
+        # Mid block on the bottleneck shape.
+        self.mid_block_1.build(shape)
+        shape = self.mid_block_1.compute_output_shape(shape)
+        self.mid_attn.build(shape)
+        shape = self.mid_attn.compute_output_shape(shape)
+        self.mid_block_2.build(shape)
+        shape = self.mid_block_2.compute_output_shape(shape)
+
+        self.norm_out.build(shape)
+        shape = self.norm_out.compute_output_shape(shape)
+        self.conv_out.build(shape)
+        shape = self.conv_out.compute_output_shape(shape)
+        self.quant_conv.build(shape)
+        super().build(input_shape)
 
     def call(
         self,
@@ -609,6 +704,41 @@ class Decoder(keras.layers.Layer):
             out_channels, kernel_size=3, strides=1, padding="same",
             name="conv_out",
         )
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        # Explicit sub-layer build (guide §3.2): thread the shape through the
+        # whole stack in the SAME order call() consumes it, using each child's
+        # compute_output_shape to get the next shape. No new sub-layers.
+        self.post_quant_conv.build(input_shape)
+        shape = self.post_quant_conv.compute_output_shape(input_shape)
+        self.conv_in.build(shape)
+        shape = self.conv_in.compute_output_shape(shape)
+
+        # Mid block on the bottleneck shape.
+        self.mid_block_1.build(shape)
+        shape = self.mid_block_1.compute_output_shape(shape)
+        self.mid_attn.build(shape)
+        shape = self.mid_attn.compute_output_shape(shape)
+        self.mid_block_2.build(shape)
+        shape = self.mid_block_2.compute_output_shape(shape)
+
+        num_resolutions = len(self.ch_mult)
+        block_idx = 0
+        for sampler_pos in range(num_resolutions):
+            for _ in range(self.num_res_blocks + 1):
+                blk = self.up_blocks[block_idx]
+                blk.build(shape)
+                shape = blk.compute_output_shape(shape)
+                block_idx += 1
+            sampler = self.up_samplers[sampler_pos]
+            if sampler is not None:
+                sampler.build(shape)
+                shape = sampler.compute_output_shape(shape)
+
+        self.norm_out.build(shape)
+        shape = self.norm_out.compute_output_shape(shape)
+        self.conv_out.build(shape)
+        super().build(input_shape)
 
     def call(
         self,
