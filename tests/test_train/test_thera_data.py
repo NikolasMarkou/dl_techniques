@@ -10,7 +10,8 @@ import numpy as np
 import pytest
 import tensorflow as tf
 
-from train.thera.data import build_arbitrary_scale_dataset
+from train.thera.data import build_arbitrary_scale_dataset, _make_grid_tf
+from dl_techniques.layers.grid_sample import make_grid
 
 
 SOURCE_SIZE = 48
@@ -120,3 +121,19 @@ def test_second_batch_differs(corpus):
     assert not np.allclose(
         b0["source"].numpy(), b1["source"].numpy()
     ), "two consecutive batches are identical (randomness not working)"
+
+
+# ---------------------------------------------------------------------
+# A9(d) (review): the dynamic-side pipeline grid `_make_grid_tf` must match the
+# static inference grid `make_grid` elementwise, so the training-time query
+# coords and the inference-time coords share ONE pixel-center convention. A
+# divergence would silently shift every training query off the inference grid.
+# ---------------------------------------------------------------------
+
+
+def test_make_grid_matches_grid_sample():
+    n = 5
+    pipeline = _make_grid_tf(tf.constant(n, dtype=tf.int32)).numpy()  # (n, n, 2)
+    inference = make_grid(n)  # (n, n, 2) numpy, int side
+    assert pipeline.shape == inference.shape == (n, n, 2)
+    np.testing.assert_allclose(pipeline, inference, atol=1e-6)

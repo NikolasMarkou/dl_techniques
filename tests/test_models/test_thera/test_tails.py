@@ -212,3 +212,21 @@ def test_tail_compute_output_shape():
 def test_tailpro_dim_validation():
     with pytest.raises(ValueError):
         TheraTailPro(embed_dim=0)
+
+
+# ---------------------------------------------------------------------
+# 8. A9(a) (review): TheraTailPlus.build fail-loud on non-64ch input (tails.py
+#    ~300). The leading-_Projection decision is made in __init__ from in_channels
+#    (default block_defs[0][0] == 64). A build with a mismatched channel count
+#    would silently feed wrong channels into the first ConvNeXt block, so build()
+#    must raise ValueError instead.
+# ---------------------------------------------------------------------
+
+
+def test_tailplus_fail_loud_non_64ch():
+    # Default construction => expected_in == block_defs[0][0] == 64. Feeding a
+    # 32-channel input must raise at build (not silently mis-wire).
+    tail = TheraTailPlus()
+    x = keras.random.normal((2, 16, 16, 32))  # 32 != 64
+    with pytest.raises(ValueError):
+        tail(x)  # triggers build(input_shape) with last dim 32

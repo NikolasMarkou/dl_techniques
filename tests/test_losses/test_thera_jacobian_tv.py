@@ -108,6 +108,34 @@ def test_total_loss_combines(small_model, inputs):
 
 
 # ---------------------------------------------------------------------
+# A7 (review): KNOWN-ANSWER oracle -- thera_tv_penalty == mean(abs(x)) computed
+# by an INDEPENDENT numpy path (NOT a recompute via thera_tv_penalty). This is
+# the non-tautological replacement for the `expected = thera_tv_penalty(jac)`
+# pattern above: the RHS here never calls the function under test.
+# ---------------------------------------------------------------------
+
+
+def test_tv_penalty_known_answer():
+    import keras
+
+    # Hand-known 2x2: mean(|[-1, 2, 3, -4]|) = (1 + 2 + 3 + 4) / 4 = 2.5.
+    x_np = np.array([[-1.0, 2.0], [3.0, -4.0]], dtype=np.float32)
+    x = keras.ops.convert_to_tensor(x_np)
+    oracle = float(np.mean(np.abs(x_np)))
+    assert oracle == 2.5  # literal sanity on the hand computation itself
+    assert np.isclose(float(thera_tv_penalty(x)), oracle, atol=1e-6)
+
+    # A second tensor of a DIFFERENT (5-D, Jacobian-like) shape against the same
+    # independent numpy oracle -- guards against any shape-dependent reduction bug.
+    rng = np.random.default_rng(7)
+    y_np = rng.standard_normal((2, 3, 4, 5, 2)).astype(np.float32)
+    y = keras.ops.convert_to_tensor(y_np)
+    assert np.isclose(
+        float(thera_tv_penalty(y)), float(np.mean(np.abs(y_np))), atol=1e-6
+    )
+
+
+# ---------------------------------------------------------------------
 # 4. STOP-IF #1 ORACLE: nested-tape weight gradients
 # ---------------------------------------------------------------------
 

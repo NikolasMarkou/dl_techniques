@@ -24,6 +24,7 @@ import keras
 # backbone for speed -- 'pro'/'plus' Swin/ConvNeXt tails are heavy).
 from dl_techniques.models.thera import EDSRBackbone, build_thera_tail
 from dl_techniques.models.thera.model import Thera, DEFAULT_K_INIT
+from dl_techniques.layers.grid_sample import make_grid
 
 from train.thera.train_thera import TheraTrainingModel, TheraConfig, main  # noqa: F401
 from train.thera.data import build_arbitrary_scale_dataset
@@ -167,3 +168,84 @@ class TestTheraTrainer:
         assert np.isfinite(results["loss"]), f"val loss not finite: {results}"
         for k, v in results.items():
             assert np.isfinite(v), f"non-finite eval metric {k}={v}"
+
+    # -----------------------------------------------------------------
+    # A8 (review): TheraTrainingModel save->load round-trip. The wrapper is
+    # @register_keras_serializable with get_config/from_config that nest-
+    # serialize the inner Thera; it is exercised by NO existing test. This pins
+    # the repo .keras round-trip invariant for the training harness itself.
+    # -----------------------------------------------------------------
+
+    def test_training_model_serialization_round_trip(self, tmp_path):
+        thera = _build_small_thera()
+        model = TheraTrainingModel(
+            thera, tv_weight=0.05, loss_name="mae", max_grad_norm=1.0
+        )
+
+        # One dummy forward to build (mirror train_thera _forward: standardized
+        # source, target_coords grid, heat-time t). call() returns the inner
+        # Thera RAW residual field -- the deterministic, weight-only path.
+        source = keras.random.normal((2, 8, 8, 3))
+        coords = keras.ops.convert_to_tensor(make_grid(10)[None, ...])
+        coords = keras.ops.broadcast_to(coords, (2, 10, 10, 2))
+        t = keras.ops.ones((2, 1))
+        y_before = keras.ops.convert_to_numpy(model((source, coords, t)))
+
+        path = str(tmp_path / "trainer.keras")
+        model.save(path)
+        reloaded = keras.models.load_model(path)
+
+        assert reloaded.tv_weight == 0.05
+        assert reloaded.loss_name == "mae"
+        assert reloaded.max_grad_norm == 1.0
+
+        y_after = keras.ops.convert_to_numpy(reloaded((source, coords, t)))
+        np.testing.assert_allclose(y_before, y_after, atol=1e-4, rtol=1e-4)
+
+    # -----------------------------------------------------------------
+    # A9(b) (review): Charbonnier reconstruction branch (_recon_loss) is never
+    # exercised by an existing test. One train_step must run finite under
+    # loss_name="charbonnier" (with tv active).
+    # -----------------------------------------------------------------
+
+    def test_charbonnier_recon_path_finite(self, dataset):
+        model = TheraTrainingModel(
+            _build_small_thera(),
+            tv_weight=0.05,
+            loss_name="charbonnier",
+            max_grad_norm=1.0,
+        )
+        model.compile(
+            optimizer=keras.optimizers.AdamW(learning_rate=1e-4),
+            jit_compile=False,
+        )
+        history = model.fit(dataset, steps_per_epoch=1, epochs=1, verbose=0)
+        loss = history.history["loss"][-1]
+        mae = history.history["mae"][-1]
+        tv = history.history["tv"][-1]
+        assert np.isfinite(loss), f"charbonnier loss not finite: {loss}"
+        assert np.isfinite(mae), f"charbonnier mae not finite: {mae}"
+        assert np.isfinite(tv), f"charbonnier tv not finite: {tv}"
+
+    # -----------------------------------------------------------------
+    # A9(c): tv_weight=0.0 must skip the inner Jacobian tape (jac=None branch)
+    # and the `tv` tracker must read EXACTLY 0.0 (no nested-tape compute at all).
+    # -----------------------------------------------------------------
+
+    def test_tv_weight_zero_skips_jacobian(self, dataset):
+        model = TheraTrainingModel(
+            _build_small_thera(),
+            tv_weight=0.0,
+            loss_name="mae",
+            max_grad_norm=1.0,
+        )
+        model.compile(
+            optimizer=keras.optimizers.AdamW(learning_rate=1e-4),
+            jit_compile=False,
+        )
+        history = model.fit(dataset, steps_per_epoch=1, epochs=1, verbose=0)
+        loss = history.history["loss"][-1]
+        tv = history.history["tv"][-1]
+        assert np.isfinite(loss), f"tv_weight=0 loss not finite: {loss}"
+        # jac=None path => tv contribution is the python literal 0.0, exactly.
+        assert tv == 0.0, f"tv tracker must be exactly 0.0 when tv_weight=0: {tv}"
