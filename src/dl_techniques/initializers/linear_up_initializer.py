@@ -47,6 +47,11 @@ from dl_techniques.utils.logger import logger
 class LinearUpInitializer(keras.initializers.Initializer):
     """Initialize 2D heat-field frequencies uniformly over a disk of radius ``pi*scale``.
 
+    **Intent**: Reproduce THERA's reference ``linear_up`` initializer so the
+    neural-heat-field's first-layer frequencies start as an isotropic,
+    band-limited, uniform-on-disk sample tied to the query scale — the property
+    that keeps the SIREN-style field well-conditioned at initialization.
+
     Produces a ``(2, N)`` (or ``(..., 2, N)``) tensor of 2D frequency vectors.
     For each of the ``N`` columns a radius ``r = pi * scale * sqrt(U)`` and angle
     ``theta = 2*pi*U`` are drawn (``U ~ Uniform(0,1)`` independently), then the

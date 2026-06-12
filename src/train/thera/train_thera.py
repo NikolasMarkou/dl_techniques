@@ -93,6 +93,28 @@ class TheraTrainingModel(keras.Model):
     and the reconstruction + Jacobian-TV objective. The inner ``Thera`` is the
     deployable artifact; this wrapper is a training harness.
 
+    **Intent**: Provide a thin ``keras.Model`` training harness that hosts the
+    THERA objective the bare ``Thera`` model deliberately omits (D-009) — the
+    channel standardization, the heat-time mapping, the denormalize + nearest-
+    source residual add, and the reconstruction + Jacobian-TV loss with a manual
+    global-norm clip — so the inner ``Thera`` can stay a pure residual-field
+    predictor and remain the sole deployable artifact.
+
+    **Architecture**::
+
+        batch (source, target_coords, source_nearest, target, scale)
+          -> standardize source  : (source - MEAN) / sqrt(VAR)
+          -> heat time           : t = scale ** -2
+          -> inner Thera((source, coords, t), return_jac)  -> field [, jac]
+          -> denorm + residual   : field * sqrt(VAR) + MEAN + source_nearest
+          -> loss                : MAE/Charbonnier(out, target)
+                                   + tv_weight * Jacobian-TV(jac)
+          -> grads               : tf.clip_by_global_norm(..., max_grad_norm)
+
+    The OUTER ``tf.GradientTape`` (in ``train_step``) differentiates the weights;
+    the INNER persistent tape inside ``Thera.decode_with_jac`` supplies the exact
+    per-pixel spatial Jacobian for the TV term (D-010 / D-012).
+
     Args:
         thera_model: The inner :class:`Thera` model (raw residual predictor).
         tv_weight: Weight on the aliasing TV penalty. ``> 0`` activates the
@@ -147,6 +169,16 @@ class TheraTrainingModel(keras.Model):
             self.tv_tracker,
             self.psnr_metric,
         ]
+
+    # -----------------------------------------------------------------
+
+    def build(self, input_shape):
+        if not self.thera.built:
+            self.thera.build(input_shape)
+        super().build(input_shape)
+
+    def compute_output_shape(self, input_shape):
+        return self.thera.compute_output_shape(input_shape)
 
     # -----------------------------------------------------------------
 

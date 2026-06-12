@@ -143,6 +143,18 @@ class TestTheraTrainer:
         for w in thera.weights:
             assert np.all(np.isfinite(np.array(w))), f"non-finite weight: {w.path}"
 
+    def test_training_model_compute_output_shape(self):
+        """compute_output_shape delegates to the inner Thera (query coords -> HR).
+
+        The output spatial extent comes from the ``target_coords`` input
+        (input_shape[1]); the channel count is the inner Thera's ``out_dim``.
+        """
+        model = TheraTrainingModel(_build_small_thera(), tv_weight=1e-4)
+        out_shape = model.compute_output_shape(
+            [(2, 16, 16, 3), (2, 24, 24, 2), (2, 1)]
+        )
+        assert tuple(out_shape) == (2, 24, 24, 3), out_shape
+
     def test_evaluate_returns_finite_val_metrics(self, dataset):
         model = TheraTrainingModel(_build_small_thera(), tv_weight=1e-4)
         model.compile(
