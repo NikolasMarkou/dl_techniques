@@ -188,7 +188,12 @@ class ScalarSinusoidalEmbedding(keras.layers.Layer):
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
         # Accept both (...,) and (..., 1) — squeeze a trailing singleton.
-        if len(keras.ops.shape(x)) > 0 and x.shape[-1] == 1:
+        # Use the STATIC rank (`len(x.shape)`): the rank is known at trace time
+        # and `x.shape` is a static TensorShape. Do NOT use
+        # `len(keras.ops.shape(x))` — that calls len() on a symbolic shape,
+        # which is not graph-safe. The squeeze semantics are identical: a
+        # trailing dim of size 1 is squeezed iff present.
+        if len(x.shape) > 0 and x.shape[-1] == 1:
             x = keras.ops.squeeze(x, axis=-1)
 
         x = keras.ops.cast(x, "float32")
@@ -215,3 +220,14 @@ class ScalarSinusoidalEmbedding(keras.layers.Layer):
             "input_range": (self.range_min, self.range_max),
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "ScalarSinusoidalEmbedding":
+        # JSON round-trips the `input_range` tuple to a list. The guide
+        # requires explicit coercion back to a tuple so the reconstruction
+        # arg matches what get_config emitted (the ctor accepts a Sequence,
+        # so this is robustness, not a functional fix).
+        config = dict(config)
+        if "input_range" in config and config["input_range"] is not None:
+            config["input_range"] = tuple(config["input_range"])
+        return cls(**config)

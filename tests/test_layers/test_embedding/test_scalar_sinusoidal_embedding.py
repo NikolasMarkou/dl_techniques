@@ -151,6 +151,11 @@ class TestScalarSinusoidalEmbedding:
             atol=1e-6,
         )
 
+        # from_config must restore input_range as a tuple even though the
+        # serialized .keras JSON round-trips it to a list.
+        rebuilt = ScalarSinusoidalEmbedding.from_config(new_layer.get_config())
+        assert isinstance(rebuilt.get_config()["input_range"], tuple)
+
     def test_get_config_round_trip(self):
         layer = ScalarSinusoidalEmbedding(dim=32, input_range=(-1.0, 2.0))
         cfg = layer.get_config()
@@ -158,3 +163,12 @@ class TestScalarSinusoidalEmbedding:
         assert rebuilt.dim == 32
         assert rebuilt.range_min == -1.0
         assert rebuilt.range_max == 2.0
+
+    def test_from_config_coerces_input_range_to_tuple(self):
+        # Simulate JSON having turned the tuple into a list (as .keras does).
+        layer = ScalarSinusoidalEmbedding(dim=32, input_range=(-1.0, 2.0))
+        cfg = layer.get_config()
+        cfg["input_range"] = list(cfg["input_range"])  # tuple -> list
+        rebuilt = ScalarSinusoidalEmbedding.from_config(cfg)
+        assert isinstance(rebuilt.get_config()["input_range"], tuple)
+        assert rebuilt.get_config()["input_range"] == (-1.0, 2.0)
