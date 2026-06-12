@@ -420,7 +420,7 @@ def train(config: TheraConfig) -> None:
         batch_size=config.batch_size,
         shuffle=False,
         seed=config.seed,
-        repeat=True,
+        repeat=False,
     )
 
     # ------------------------------------------------------------------
@@ -492,7 +492,7 @@ def train(config: TheraConfig) -> None:
         epochs=config.epochs,
         steps_per_epoch=config.steps_per_epoch,
         validation_data=val_ds,
-        validation_steps=config.val_steps,
+        validation_steps=None,  # A5: consume whole (non-repeating) val set deterministically each epoch
         callbacks=callbacks,
         verbose=1,
     )

@@ -142,6 +142,7 @@ def _per_sample(
     scale_range: Tuple[float, float],
     augment_scale_range: Tuple[float, float],
     augment_scale_prob: float,
+    seed: Optional[int] = None,
 ) -> dict:
     """Build one arbitrary-scale training example from an image path.
 
@@ -156,6 +157,8 @@ def _per_sample(
         scale_range: ``(min, max)`` for the base SR scale.
         augment_scale_range: ``(min, max)`` for the extra scale augmentation.
         augment_scale_prob: Probability of applying scale augmentation.
+        seed: Optional op-level seed for the per-sample query-point shuffle
+            (reproducibility).
 
     Returns:
         Dict with keys ``source``, ``target_coords``, ``target``,
@@ -232,7 +235,7 @@ def _per_sample(
     target_flat = tf.reshape(target, (-1, 3))  # (n, 3)
     source_up_flat = tf.reshape(source_up, (-1, 3))  # (n, 3)
 
-    idc = tf.random.shuffle(tf.range(n))[:n_samples]  # (n_samples,)
+    idc = tf.random.shuffle(tf.range(n), seed=seed)[:n_samples]  # (n_samples,)
 
     coords_s = tf.gather(coords_flat, idc)  # (n_samples, 2)
     target_s = tf.gather(target_flat, idc)  # (n_samples, 3)
@@ -343,6 +346,7 @@ def build_arbitrary_scale_dataset(
             scale_range=scale_range,
             augment_scale_range=augment_scale_range,
             augment_scale_prob=augment_scale_prob,
+            seed=seed,
         )
 
     if shuffle:
