@@ -20,6 +20,8 @@ All layers in this module are supported by the factory system, which provides au
 | `continuous_rope`| `ContinuousRoPE` | RoPE extended for continuous multi-dimensional coordinates. | Positional encoding for data with spatial coordinates (e.g., 3D point clouds). |
 | `continuous_sincos`| `ContinuousSinCosEmbed`| Embeds continuous coordinates using sine/cosine functions. | Creating fixed, smooth positional representations for continuous data. |
 | `bert_embeddings` | `BertEmbeddings` | BERT embeddings combining word, position, and token type embeddings. | BERT-style language models with configurable normalization. |
+| `scalar_sinusoidal` | `ScalarSinusoidalEmbedding` | Sinusoidal embedding of a scalar (e.g. diffusion time in `[0,1]`) followed by a SiLU MLP. | Timestep/scalar conditioning in diffusion / flow-matching models. |
+| `mrope_ideogram4` | `Ideogram4MRoPE` | 3D multi-axis (t/h/w) rotary position embedding with per-axis frequency-band interleave. | Image/text multimodal positional encoding (Ideogram4-style DiT). |
 
 ## Factory Interface
 
