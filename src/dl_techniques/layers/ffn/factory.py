@@ -198,6 +198,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             'base_trainable': True,
             'spline_trainable': True,
             'kernel_initializer': 'glorot_uniform',
+            'base_scaler_initializer': 'ones',
             'epsilon': 1e-7
         },
         'use_case': 'Learnable per-connection univariate activations via B-splines (Kolmogorov-Arnold)'
