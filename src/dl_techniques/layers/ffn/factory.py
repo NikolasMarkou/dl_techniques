@@ -70,6 +70,7 @@ from .swiglu_ffn import SwiGLUFFN
 from .diff_ffn import DifferentialFFN
 from .glu_ffn import GLUFFN
 from .geglu_ffn import GeGLUFFN
+from .gelu_mlp_ffn import GELUMLPFFN
 from .residual_block import ResidualBlock
 from .swin_mlp import SwinMLP
 from .counting_ffn import CountingFFN
@@ -89,6 +90,7 @@ FFNType = Literal[
     'differential',
     'gated_mlp',
     'geglu',
+    'gelu_tanh',
     'glu',
     'kan',
     'logic',
@@ -167,6 +169,17 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             'bias_regularizer': None
         },
         'use_case': 'GELU-based gated processing for transformers'
+    },
+    'gelu_tanh': {
+        'class': GELUMLPFFN,
+        'description': 'SD3-style GELU (tanh-approximation) MLP FeedForward (Dense -> gelu(approximate=True) -> Dense)',
+        'required_params': ['hidden_dim'],
+        'optional_params': {
+            'output_dim': None,
+            'dropout_rate': 0.0,
+            'use_bias': True
+        },
+        'use_case': 'SD3 / MMDiT FeedForward; tanh-approximate GELU MLP, output_dim defaults to input dim'
     },
     'glu': {
         'class': GLUFFN,
