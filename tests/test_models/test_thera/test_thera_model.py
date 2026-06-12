@@ -61,11 +61,13 @@ def _small_backbone(kind: str) -> keras.layers.Layer:
 
 def _small_thera(kind: str, size: str, out_dim: int = 3) -> Thera:
     """A small Thera (hidden_dim=16, tiny backbone) for fast forward/round-trip."""
+    backbone = _small_backbone(kind)
+    feat_ch = backbone.compute_output_shape((None, None, None, 3))[-1]
     return Thera(
         hidden_dim=16,
         out_dim=out_dim,
-        backbone=_small_backbone(kind),
-        tail=build_thera_tail(size),
+        backbone=backbone,
+        tail=build_thera_tail(size, in_channels=feat_ch),
     )
 
 

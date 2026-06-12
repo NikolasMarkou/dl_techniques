@@ -569,20 +569,25 @@ class TheraTailPro(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-def build_thera_tail(size: str) -> keras.layers.Layer:
+def build_thera_tail(
+    size: str, in_channels: Optional[int] = None
+) -> keras.layers.Layer:
     """Build the THERA feature-refiner tail for a model-size key.
 
     Mirrors THERA's ``build_tail(size)`` dispatcher.
 
     :param size: One of ``'air'`` (identity), ``'plus'`` (ConvNeXt), or
         ``'pro'`` (SwinIR/RSTB).
+    :param in_channels: Input channel count from the backbone; forwarded to the
+        ``plus`` tail so it creates the leading 1x1 projection when the backbone
+        does not emit 64 channels. Ignored by ``air``/``pro``.
     :return: The corresponding tail layer.
     :raises ValueError: If ``size`` is not one of the three known keys.
     """
     if size == "air":
         return TheraTailAir(name="thera_tail_air")
     elif size == "plus":
-        return TheraTailPlus(name="thera_tail_plus")
+        return TheraTailPlus(in_channels=in_channels, name="thera_tail_plus")
     elif size == "pro":
         return TheraTailPro(name="thera_tail_pro")
     raise ValueError(

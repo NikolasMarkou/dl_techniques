@@ -433,7 +433,8 @@ def build_thera(
     else:  # "rdn"
         backbone_layer = RDNBackbone(name="backbone_rdn")
 
-    tail_layer = build_thera_tail(size)
+    feat_ch = backbone_layer.compute_output_shape((None, None, None, 3))[-1]
+    tail_layer = build_thera_tail(size, in_channels=feat_ch)
 
     return Thera(
         hidden_dim=hidden_dim,
