@@ -62,6 +62,17 @@ class EDSRResidualBlock(keras.layers.Layer):
     keep the channel count and spatial size fixed (``padding='same'``), so the
     block is shape-preserving.
 
+    **Intent**: Provide a single THERA/EDSR residual unit -- a two-conv residual
+    branch with a configurable scale -- that is fully serializable (the
+    activation is stored as a resolved Keras activation object and round-trips
+    via ``keras.activations.serialize``/``deserialize``) and shape-preserving.
+
+    **Architecture**::
+
+        x ->  Conv(k) -> act -> Conv(k) -> (* res_scale) ->  (+) -> out
+        |                                                      ^
+        +------------------------ skip ------------------------+
+
     res_scale note (THERA fidelity)
     -------------------------------
     THERA's reference residual block returns ``x + body(x)`` and *ignores* the
@@ -108,11 +119,17 @@ class EDSRResidualBlock(keras.layers.Layer):
         super().__init__(**kwargs)
         if num_feats <= 0:
             raise ValueError(f"num_feats must be positive, got {num_feats}")
+        if kernel_size <= 0:
+            raise ValueError(f"kernel_size must be positive, got {kernel_size}")
         self.num_feats = int(num_feats)
         self.kernel_size = int(kernel_size)
         self.res_scale = float(res_scale)
-        self.activation = activation
-        self._activation_fn = keras.activations.get(activation)
+        # Resolve + store the activation as a Keras activation object (guide
+        # §7/8: complex objects are serialized via keras.activations.serialize).
+        # keras.activations.get accepts a string, a callable, or a serialized
+        # dict and always returns the callable, which Conv/usage accepts.
+        self.activation = keras.activations.get(activation)
+        self._activation_fn = self.activation
 
         # Sublayers (created here, built explicitly in ``build`` -- four-strike
         # build-ordering discipline, LESSONS.md).
@@ -161,17 +178,40 @@ class EDSRResidualBlock(keras.layers.Layer):
                 "num_feats": self.num_feats,
                 "kernel_size": self.kernel_size,
                 "res_scale": self.res_scale,
-                "activation": self.activation,
+                "activation": keras.activations.serialize(self.activation),
             }
         )
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "EDSRResidualBlock":
+        config = dict(config)
+        if "activation" in config:
+            # keras.activations.deserialize accepts a serialized dict OR a bare
+            # string name (back-compat with pre-iter-2 string configs), so this
+            # is safe for both the already-string and already-serialized cases.
+            config["activation"] = keras.activations.deserialize(config["activation"])
+        return cls(**config)
 
 
 @keras.saving.register_keras_serializable()
 class EDSRBackbone(keras.layers.Layer):
     """EDSR-baseline feature backbone for THERA (no upsampling tail).
 
-    Architecture (shape-preserving over spatial dims)::
+    **Intent**: Extract low-resolution spatial features for the THERA arbitrary-
+    scale super-resolution pipeline -- a head conv, a deep residual-block stack,
+    a body conv, and a long skip -- producing a ``num_feats``-channel feature map
+    at the input resolution (the heat-field decoder downstream handles
+    upsampling). Fully serializable (the residual blocks round-trip their
+    activation via ``keras.activations.serialize``).
+
+    **Architecture** (shape-preserving over spatial dims)::
+
+        x -> head Conv -> [ res_block_1 -> ... -> res_block_N ] -> body Conv -> (+) -> features
+                  |                                                              ^
+                  +------------------------ long skip ---------------------------+
+
+    Equivalently::
 
         h   = head_conv(x)                      # (B, H, W, num_feats)
         b   = res_block_1(h)
@@ -226,11 +266,16 @@ class EDSRBackbone(keras.layers.Layer):
             raise ValueError(f"num_feats must be positive, got {num_feats}")
         if num_blocks <= 0:
             raise ValueError(f"num_blocks must be positive, got {num_blocks}")
+        if kernel_size <= 0:
+            raise ValueError(f"kernel_size must be positive, got {kernel_size}")
         self.num_feats = int(num_feats)
         self.num_blocks = int(num_blocks)
         self.kernel_size = int(kernel_size)
         self.res_scale = float(res_scale)
-        self.activation = activation
+        # Resolve + store the activation as a Keras activation object (guide
+        # §7/8). It is forwarded (as the callable) to each residual block, which
+        # re-resolves it through keras.activations.get -- a no-op on a callable.
+        self.activation = keras.activations.get(activation)
 
         # Sublayers (built explicitly in ``build`` -- four-strike discipline).
         self.head_conv = keras.layers.Conv2D(
@@ -297,7 +342,16 @@ class EDSRBackbone(keras.layers.Layer):
                 "num_blocks": self.num_blocks,
                 "kernel_size": self.kernel_size,
                 "res_scale": self.res_scale,
-                "activation": self.activation,
+                "activation": keras.activations.serialize(self.activation),
             }
         )
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "EDSRBackbone":
+        config = dict(config)
+        if "activation" in config:
+            # Accepts a serialized dict OR a bare string name (back-compat with
+            # pre-iter-2 string configs); deserialize is a no-op on a string.
+            config["activation"] = keras.activations.deserialize(config["activation"])
+        return cls(**config)

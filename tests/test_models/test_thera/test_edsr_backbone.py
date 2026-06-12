@@ -111,7 +111,9 @@ def test_config_roundtrip():
     assert rebuilt.num_blocks == 5
     assert rebuilt.kernel_size == 5
     assert rebuilt.res_scale == 0.1
-    assert rebuilt.activation == "gelu"
+    # activation is now stored as a resolved Keras activation object; compare by
+    # its serialized name rather than a bare string.
+    assert keras.activations.serialize(rebuilt.activation) == "gelu"
     assert len(rebuilt.res_blocks) == 5
 
 
@@ -121,7 +123,7 @@ def test_residual_block_config_roundtrip():
     assert rebuilt.num_feats == 16
     assert rebuilt.kernel_size == 3
     assert rebuilt.res_scale == 0.1
-    assert rebuilt.activation == "relu"
+    assert keras.activations.serialize(rebuilt.activation) == "relu"
 
 
 # ---------------------------------------------------------------------
@@ -173,3 +175,43 @@ def test_baseline_param_count_reasonable(baseline_kwargs):
 
 def test_import_smoke():
     from dl_techniques.models.thera.edsr_backbone import EDSRBackbone as _E  # noqa: F401
+
+
+# ---------------------------------------------------------------------
+# 7. iter-2 compliance: callable-activation serialization round-trip
+# ---------------------------------------------------------------------
+
+
+def test_activation_callable_roundtrip():
+    # Build with a CALLABLE activation (not a string).
+    backbone = EDSRBackbone(
+        num_feats=32, num_blocks=2, activation=keras.activations.relu
+    )
+    x = keras.random.normal((1, 8, 8, 3))
+    y_before = backbone(x)
+    assert tuple(y_before.shape) == (1, 8, 8, 32)
+
+    config = backbone.get_config()
+    # get_config must serialize the activation to a serialized form (string name
+    # for a built-in), NOT leak a bare python function object.
+    assert config["activation"] == "relu"
+    assert not callable(config["activation"])
+
+    # serialize_keras_object round-trip exercises get_config + from_config.
+    serialized = keras.saving.serialize_keras_object(backbone)
+    rebuilt = keras.saving.deserialize_keras_object(serialized)
+
+    y_after = rebuilt(x)
+    assert tuple(y_after.shape) == (1, 8, 8, 32)
+    # the reconstructed activation resolves back to relu.
+    assert keras.activations.serialize(rebuilt.activation) == "relu"
+
+
+def test_kernel_size_validation():
+    with pytest.raises(ValueError):
+        EDSRBackbone(kernel_size=0)
+
+
+def test_compute_output_shape_edsr():
+    backbone = EDSRBackbone(num_feats=32)
+    assert backbone.compute_output_shape((2, 16, 16, 3)) == (2, 16, 16, 32)
