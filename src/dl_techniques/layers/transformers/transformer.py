@@ -184,6 +184,17 @@ class TransformerLayer(keras.layers.Layer):
         creation fails due to incompatible parameters.
     """
 
+    # DECISION plan_2026-06-12_0bb1729b/D-001: attention types whose factory
+    # layer `call` signature does NOT accept an `attention_mask` argument.
+    # `call()` must invoke these WITHOUT passing `attention_mask`, or the
+    # sub-layer raises TypeError. Verified empirically (signatures):
+    #   - 'fnet'       -> FNetFourierTransform.call(inputs, training)
+    #   - 'anchor'     -> AnchorAttention.call(x, num_anchor_tokens=None, training)
+    #   - 'lighthouse' -> LighthouseAttention.call(inputs, training)
+    # 'multi_head_latent' DOES accept attention_mask and stays on the standard
+    # branch. Do NOT add a type here unless its `call` genuinely rejects mask.
+    _MASKLESS_ATTENTION_TYPES = frozenset({'fnet', 'anchor', 'lighthouse'})
+
     def __init__(
             self,
             hidden_size: int,
@@ -412,6 +423,41 @@ class TransformerLayer(keras.layers.Layer):
                 'lambda_init': self.lambda_init,
                 'name': name
             }
+        # --- DECISION plan_2026-06-12_0bb1729b/D-001: additionally-wired
+        # self-attention factory types. Each accepts a standard
+        # `(inputs, attention_mask=..., training=...)` self-attention call
+        # (except 'fnet', see _MASKLESS_ATTENTION_TYPES). Added additively to
+        # keep the 4 branches above byte-identical (regression invariant). ---
+        elif self.attention_type == 'multi_head_latent':
+            # MLA requires kv_latent_dim; TransformerLayer has no dedicated
+            # ctor param for it, so a documented default is used and any
+            # user-supplied value in attention_args overrides via the merge below.
+            default_params = {
+                'dim': self.hidden_size,
+                'num_heads': self.num_heads,
+                'kv_latent_dim': max(1, self.hidden_size // 4),
+                'name': name
+            }
+        elif self.attention_type == 'anchor':
+            default_params = {
+                'dim': self.hidden_size,
+                'num_heads': self.num_heads,
+                'dropout_rate': self.attention_dropout_rate,
+                'use_bias': self.use_bias,
+                'name': name
+            }
+        elif self.attention_type == 'lighthouse':
+            default_params = {
+                'dim': self.hidden_size,
+                'num_heads': self.num_heads,
+                'name': name
+            }
+        elif self.attention_type == 'fnet':
+            # FNetFourierTransform is parameter-free (no dim/num_heads); it
+            # mixes tokens via a 2D DFT. Maskless — see _MASKLESS_ATTENTION_TYPES.
+            default_params = {
+                'name': name
+            }
         else:
             raise ValueError(f"Unknown attention type: {self.attention_type}")
 
@@ -562,6 +608,8 @@ class TransformerLayer(keras.layers.Layer):
             x = self.attention_norm(inputs, training=training)
             if self.attention_type == 'differential':
                 x = self.attention(x, attention_mask=attention_mask, layer_idx=layer_idx, training=training)
+            elif self.attention_type in self._MASKLESS_ATTENTION_TYPES:
+                x = self.attention(x, training=training)
             else:
                 x = self.attention(x, attention_mask=attention_mask, training=training)
             if self.attention_stochastic_depth is not None:
@@ -589,6 +637,8 @@ class TransformerLayer(keras.layers.Layer):
                     attention_mask=attention_mask,
                     layer_idx=layer_idx,
                     training=training)
+            elif self.attention_type in self._MASKLESS_ATTENTION_TYPES:
+                x = self.attention(inputs, training=training)
             else:
                 x = self.attention(
                     inputs,
