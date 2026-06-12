@@ -23,6 +23,8 @@ from .continuous_sin_cos_embedding import ContinuousSinCosEmbed
 from .patch_embedding import PatchEmbedding1D, PatchEmbedding2D
 from .positional_embedding import PositionalEmbedding
 from .rotary_position_embedding import RotaryPositionEmbedding
+from .multi_axis_rope import Ideogram4MRoPE
+from .scalar_sinusoidal_embedding import ScalarSinusoidalEmbedding
 
 # ---------------------------------------------------------------------
 # Type definition for Embedding types
@@ -36,7 +38,9 @@ EmbeddingType = Literal[
     'dual_rope',
     'continuous_rope',
     'continuous_sincos',
-    'bert_embeddings'
+    'bert_embeddings',
+    'scalar_sinusoidal',
+    'mrope_ideogram4'
 ]
 
 # ---------------------------------------------------------------------
@@ -133,6 +137,22 @@ EMBEDDING_REGISTRY: Dict[str, Dict[str, Any]] = {
             'normalization_type': 'layer_norm'
         },
         'use_case': 'BERT-style language models combining word, positional, and segment embeddings with sum aggregation and normalization.'
+    },
+    'scalar_sinusoidal': {
+        'class': ScalarSinusoidalEmbedding,
+        'description': 'Sinusoidal scalar (timestep) embedding refined by a 2-layer SiLU MLP, for the Ideogram4 DiT.',
+        'required_params': ['dim'],
+        'optional_params': {
+            'input_range': (0.0, 1.0)
+        },
+        'use_case': 'Diffusion-model timestep or other continuous scalar conditioning.'
+    },
+    'mrope_ideogram4': {
+        'class': Ideogram4MRoPE,
+        'description': '3D multi-axis RoPE (t, h, w) for the Ideogram4 DiT. call() returns a (cos, sin) tuple.',
+        'required_params': ['head_dim', 'rope_theta', 'mrope_section'],
+        'optional_params': {},
+        'use_case': 'Packed-sequence DiT (Ideogram4) where position ids carry (t, h, w) per token.'
     }
 }
 
