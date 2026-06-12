@@ -233,6 +233,17 @@ class TheraTailPlus(keras.layers.Layer):
         first block needs a leading ``_Projection``. Defaults to ``None``, which
         assumes the input matches ``block_defs[0][0]`` (THERA backbones always
         emit 64 = the first ``plus`` block dim, so no leading projection).
+        **Contract**: when constructing this tail MANUALLY for a backbone that
+        does NOT emit 64 channels (``!= block_defs[0][0]``), you MUST pass
+        ``in_channels=<backbone output channels>`` so the leading 1x1
+        ``_Projection`` (in_channels -> 64) is created here in ``__init__``;
+        otherwise :meth:`build` raises ``ValueError``.
+
+    .. note::
+        The :func:`build_thera` factory derives the backbone's output channel
+        count and passes ``in_channels`` for you, so the manual-construction
+        contract above only applies when you instantiate this tail (or
+        :func:`build_thera_tail`) yourself.
     """
 
     def __init__(
@@ -583,6 +594,15 @@ def build_thera_tail(
         does not emit 64 channels. Ignored by ``air``/``pro``.
     :return: The corresponding tail layer.
     :raises ValueError: If ``size`` is not one of the three known keys.
+
+    .. note::
+        **Contract (``plus`` tail)**: when building the ``plus`` tail MANUALLY
+        for a backbone that does NOT emit 64 channels (i.e. ``!=
+        block_defs[0][0]``), you MUST pass ``in_channels=<backbone output
+        channels>`` so the leading 1x1 ``_Projection`` (in_channels -> 64) is
+        created in ``__init__``; otherwise :meth:`TheraTailPlus.build` raises
+        ``ValueError``. The :func:`build_thera` factory does this automatically
+        (it derives the backbone's output channels and passes them).
     """
     if size == "air":
         return TheraTailAir(name="thera_tail_air")

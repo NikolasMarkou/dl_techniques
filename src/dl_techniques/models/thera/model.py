@@ -124,7 +124,13 @@ class Thera(keras.Model):
             (:class:`EDSRBackbone` or :class:`RDNBackbone`), shape-preserving
             ``(B, H, W, C_in) -> (B, H, W, C_feat)``.
         tail: A feature-refiner tail LAYER instance (air / plus / pro) consuming
-            and (spatially) preserving the backbone features.
+            and (spatially) preserving the backbone features. If you pass a
+            manually-built ``plus`` tail (:class:`TheraTailPlus`) and your
+            backbone does not emit 64 channels, construct it as
+            ``build_thera_tail('plus', in_channels=<backbone_out>)`` so the
+            leading 1x1 projection is created -- otherwise its ``build()`` raises
+            ``ValueError`` (see :class:`TheraTailPlus` for the in_channels
+            contract).
         k_init: Initial heat-conductivity scalar ``k`` forwarded to the
             hypernetwork. Defaults to the THERA reference
             ``sqrt(log 4) / (2*pi^2)`` when ``None``.
