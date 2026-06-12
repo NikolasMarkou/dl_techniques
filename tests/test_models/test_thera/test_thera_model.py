@@ -19,6 +19,7 @@ import pytest
 import tensorflow as tf
 
 from dl_techniques.layers.grid_sample import make_grid
+from dl_techniques.layers.thera_heat_field import DEFAULT_K_INIT
 from dl_techniques.models.thera import (
     Thera,
     build_thera,
@@ -261,3 +262,25 @@ class TestArbitraryScale:
         out_b = model((source, _coords(2, 31, 37), t))
         assert tuple(out_b.shape) == (2, 31, 37, 3)
         assert np.all(np.isfinite(keras.ops.convert_to_numpy(out_b)))
+
+
+# ---------------------------------------------------------------------
+# Test 7: compute_output_shape -- spatial extent follows coords, not source
+# ---------------------------------------------------------------------
+
+
+class TestComputeOutputShape:
+    def test_thera_compute_output_shape(self) -> None:
+        model = Thera(
+            hidden_dim=16,
+            out_dim=3,
+            backbone=EDSRBackbone(num_feats=32, num_blocks=2),
+            tail=build_thera_tail("air"),
+            k_init=DEFAULT_K_INIT,
+            components_init_scale=16.0,
+        )
+        # source 16x16 -> coords 24x24 (arbitrary upscale); out_dim=3.
+        out_shape = model.compute_output_shape(
+            [(2, 16, 16, 3), (2, 24, 24, 2), (2, 1)]
+        )
+        assert out_shape == (2, 24, 24, 3)

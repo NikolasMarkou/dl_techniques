@@ -93,6 +93,29 @@ class Thera(keras.Model):
     performs MEAN/VAR denormalization and adds the nearest-neighbour upsampled
     source -- the model does NOT.
 
+    **Intent**: Provide a single ``keras.Model`` that performs aliasing-free
+    arbitrary-scale super-resolution by predicting a continuous neural heat
+    field. A LOW-resolution ``source`` is encoded once; the field is then sampled
+    at an arbitrary query grid ``coords`` (any ``Hq x Wq``), so one trained model
+    upscales to any target resolution. The model emits ONLY the raw residual
+    field; denormalization and the nearest-neighbour add belong to the trainer.
+
+    **Architecture**::
+
+        source (B,Hs,Ws,3)
+              |
+              v
+        backbone  (EDSR-baseline | RDN, spatial-shape preserving)
+              |
+              v
+        tail = encoding  (air: identity | plus: ConvNeXt | pro: SwinIR)
+              |
+              v
+        hypernetwork.decode(encoding, coords, t)   # query at coords, time t
+              |
+              v
+        raw residual field (B,Hq,Wq,out_dim)
+
     Args:
         hidden_dim: Heat-field hidden width ``N`` (frequency-component count).
             ``32`` for the THERA "air" size, ``512`` otherwise. Must be positive.
@@ -284,6 +307,24 @@ class Thera(keras.Model):
         return self.apply_decoder(
             encoding, coords, t, return_jac=return_jac, training=training
         )
+
+    def compute_output_shape(self, input_shape: Any) -> Tuple[Optional[int], ...]:
+        """Output shape of ``call((source, coords, t))``.
+
+        The query height/width are dictated by the ``coords`` input (NOT by the
+        low-resolution ``source``): THERA decodes at the resolution of the query
+        grid, so the output spatial extent equals ``coords``'s ``(Hq, Wq)`` and
+        the channel count is the stored ``out_dim``.
+
+        Args:
+            input_shape: 3-element list ``[source_shape, coords_shape, t_shape]``,
+                each a shape tuple. ``coords_shape`` is ``(B, Hq, Wq, 2)``.
+
+        Returns:
+            ``(B, Hq, Wq, out_dim)``.
+        """
+        coords_shape = input_shape[1]  # (B, Hq, Wq, 2)
+        return (coords_shape[0], coords_shape[1], coords_shape[2], self.out_dim)
 
     # -----------------------------------------------------------------
 
