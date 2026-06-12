@@ -286,6 +286,25 @@ class TheraTailPlus(keras.layers.Layer):
         # Sub-layers already exist (created in __init__); build() ONLY propagates
         # shapes (Keras-3 four-strike build ordering: every sub-layer must be
         # built with the right propagated channel shape for .keras weight reload).
+        #
+        # The leading-projection decision was made in __init__ from `in_channels`
+        # (default: block_defs[0][0]). If the actual input width disagrees, the
+        # pre-created sub-layer stack would silently feed wrong channels into the
+        # first ConvNeXt block. Fail loud and direct the caller to pass
+        # `in_channels` at construction (so the leading _Projection is created).
+        in_ch = input_shape[-1]
+        expected_in = (
+            self.in_channels if self.in_channels is not None
+            else self.block_defs[0][0]
+        )
+        if in_ch is not None and in_ch != expected_in:
+            raise ValueError(
+                f"TheraTailPlus was constructed for input channels {expected_in} "
+                f"(in_channels or block_defs[0][0]) but received input with "
+                f"{in_ch} channels. Pass in_channels={in_ch} at construction so "
+                f"the leading projection is created."
+            )
+
         shape = tuple(input_shape)
         for layer, out_dims in zip(self._sublayers, self._sublayer_out_dims):
             layer.build(shape)
