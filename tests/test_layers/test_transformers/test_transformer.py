@@ -378,3 +378,159 @@ class TestTransformerLayer:
         output = layer(sample_input, training=False)
         assert output.shape == sample_input.shape
         assert not np.any(np.isnan(ops.convert_to_numpy(output)))
+
+
+# ===================================================================
+# F4: newly-wired attention types (plan_2026-06-12_0bb1729b)
+# multi_head_latent, anchor, lighthouse, fnet
+# ===================================================================
+class TestTransformerLayerExtendedAttention:
+    """Covers the attention types added to TransformerLayer._get_attention_params.
+
+    These four factory keys were previously rejected at construction with
+    ``ValueError: Unknown attention type``. This suite asserts they now
+    construct, forward, carry gradients, and round-trip through ``.keras`` —
+    while a companion regression test confirms the original 4 types are
+    byte-identical in their sub-layer wiring.
+    """
+
+    HIDDEN = 64
+    HEADS = 4
+    INTER = 128
+
+    @pytest.fixture
+    def sample_input(self) -> tf.Tensor:
+        return tf.random.normal(shape=(2, 16, self.HIDDEN))
+
+    def _make(self, attention_type, attention_args=None, normalization_position='pre'):
+        return TransformerLayer(
+            hidden_size=self.HIDDEN,
+            num_heads=self.HEADS,
+            intermediate_size=self.INTER,
+            attention_type=attention_type,
+            attention_args=attention_args or {},
+            normalization_position=normalization_position,
+            dropout_rate=0.0,
+            attention_dropout_rate=0.0,
+        )
+
+    @pytest.mark.parametrize("attention_type, attention_args", [
+        ('multi_head_latent', {}),
+        ('multi_head_latent', {'kv_latent_dim': 8}),
+        ('anchor', {}),
+        ('lighthouse', {}),
+        ('fnet', {}),
+    ])
+    @pytest.mark.parametrize("normalization_position", ['pre', 'post'])
+    def test_construct_and_forward(self, sample_input, attention_type, attention_args, normalization_position):
+        """Each new type constructs and forwards (B, seq, H) -> same shape, no NaN."""
+        layer = self._make(attention_type, attention_args, normalization_position)
+        out = layer(sample_input, training=False)
+        assert out.shape == sample_input.shape
+        assert not np.any(np.isnan(ops.convert_to_numpy(out)))
+
+    @pytest.mark.parametrize("attention_type, attention_args", [
+        ('multi_head_latent', {'kv_latent_dim': 8}),
+        ('anchor', {}),
+        ('lighthouse', {}),
+        ('fnet', {}),
+    ])
+    def test_serialization_round_trip(self, sample_input, attention_type, attention_args):
+        """`.keras` save/load is numerically identical at atol=1e-6."""
+        inputs = layers.Input(shape=sample_input.shape[1:])
+        outputs = self._make(attention_type, attention_args)(inputs)
+        model = models.Model(inputs, outputs)
+        original = model(sample_input, training=False)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "extattn.keras")
+            model.save(filepath)
+            loaded = models.load_model(filepath)
+            reloaded = loaded(sample_input, training=False)
+        np.testing.assert_allclose(
+            ops.convert_to_numpy(original),
+            ops.convert_to_numpy(reloaded),
+            rtol=1e-6, atol=1e-6,
+            err_msg=f"round-trip mismatch for {attention_type} {attention_args}",
+        )
+
+    @pytest.mark.parametrize("attention_type", ['multi_head_latent', 'anchor', 'lighthouse', 'fnet'])
+    def test_gradient_flow(self, sample_input, attention_type):
+        """Gradients flow end-to-end through the layer.
+
+        Most variables must receive a non-None gradient. A documented
+        exception: ``AnchorAttention`` carries a ``query_token_proj`` that is
+        structurally unused under the default (no explicit anchor-token) config,
+        so its gradient is legitimately None. Any OTHER None gradient is a bug.
+        """
+        layer = self._make(attention_type)
+        x = tf.Variable(sample_input)
+        with tf.GradientTape() as tape:
+            out = layer(x, training=True)
+            loss = tf.reduce_mean(tf.square(out))
+        grads = tape.gradient(loss, layer.trainable_variables)
+        assert len(layer.trainable_variables) > 0
+        none_paths = [v.path for v, g in zip(layer.trainable_variables, grads) if g is None]
+        # Tolerate only the anchor layer's known structurally-unused projection.
+        assert all('query_token_proj' in p for p in none_paths), \
+            f"unexpected None grad(s) for {attention_type}: {none_paths}"
+        assert any(g is not None for g in grads), f"no gradient flow for {attention_type}"
+
+    def test_multi_head_latent_default_kv_latent_dim(self, sample_input):
+        """MLA constructs with the documented hidden_size//4 fallback (no user arg)."""
+        layer = self._make('multi_head_latent', attention_args={})
+        out = layer(sample_input, training=False)
+        assert out.shape == sample_input.shape
+
+    def test_fnet_is_maskless_and_ignores_layer_mask(self, sample_input):
+        """fnet forwards without an attention_mask reaching the sub-layer, and
+        passing a mask at the TransformerLayer level does not crash (mask is
+        simply not forwarded to the parameter-free Fourier mixer)."""
+        assert 'fnet' in TransformerLayer._MASKLESS_ATTENTION_TYPES
+        layer = self._make('fnet')
+        mask = tf.ones((sample_input.shape[0], sample_input.shape[1], sample_input.shape[1]))
+        out_no_mask = layer(sample_input, training=False)
+        out_with_mask = layer(sample_input, attention_mask=mask, training=False)
+        # Mask is ignored for fnet -> identical output.
+        np.testing.assert_allclose(
+            ops.convert_to_numpy(out_no_mask),
+            ops.convert_to_numpy(out_with_mask),
+            rtol=1e-6, atol=1e-6,
+        )
+
+    @pytest.mark.parametrize("attention_type", ['anchor', 'lighthouse'])
+    def test_maskless_attention_types_membership(self, attention_type):
+        """anchor and lighthouse are registered maskless (their call rejects mask)."""
+        assert attention_type in TransformerLayer._MASKLESS_ATTENTION_TYPES
+
+    def test_regression_existing_types_unchanged(self):
+        """The 4 pre-existing types keep their exact attention sub-layer wiring.
+
+        Guards against a refactor silently altering param mapping (the
+        catastrophic checkpoint-break failure mode). Asserts the param dict
+        produced by ``_get_attention_params`` for each legacy type.
+        """
+        layer_mh = TransformerLayer(64, 4, 128, attention_type='multi_head')
+        p = layer_mh._get_attention_params('attn')
+        assert p == {'dim': 64, 'num_heads': 4, 'dropout_rate': 0.1,
+                     'use_bias': True, 'kernel_initializer': layer_mh.kernel_initializer,
+                     'name': 'attn'}
+
+        layer_win = TransformerLayer(64, 4, 128, attention_type='window', window_size=4)
+        p = layer_win._get_attention_params('attn')
+        assert p == {'dim': 64, 'num_heads': 4, 'window_size': 4,
+                     'dropout_rate': 0.1, 'name': 'attn'}
+
+        layer_gqa = TransformerLayer(64, 4, 128, attention_type='group_query', n_kv_head=2)
+        p = layer_gqa._get_attention_params('attn')
+        assert p == {'dim': 64, 'num_heads': 4, 'num_kv_heads': 2,
+                     'dropout_rate': 0.1, 'use_bias': True, 'name': 'attn'}
+
+        layer_diff = TransformerLayer(64, 4, 128, attention_type='differential')
+        p = layer_diff._get_attention_params('attn')
+        assert p == {'dim': 64, 'num_heads': 4, 'head_dim': 16,
+                     'dropout_rate': 0.1, 'lambda_init': 0.8, 'name': 'attn'}
+
+    def test_unknown_attention_type_still_raises(self):
+        """An unsupported factory key still fails fast at construction."""
+        with pytest.raises(ValueError, match="Unknown attention type"):
+            TransformerLayer(64, 4, 128, attention_type='capsule_routing')
