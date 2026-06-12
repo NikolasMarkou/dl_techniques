@@ -20,6 +20,9 @@ Available Initializers:
 -   `PolarInitializer`: Samples in polar coordinates -- exact per-vector L2 norm
     with a uniform-on-sphere direction (PolarQuant Lemma 2), enabling equinorm
     initialization.
+-   `LinearUpInitializer`: THERA heat-field frequency init -- 2D frequency vectors
+    drawn uniformly over a disk of radius `pi*scale` (`r = pi*scale*sqrt(U)`),
+    producing a `(2, N)` x/y-row matrix for SIREN-style neural heat fields.
 """
 
 from .haar_wavelet_initializer import (
@@ -30,6 +33,7 @@ from .he_orthonormal_initializer import HeOrthonormalInitializer
 from .orthonormal_initializer import OrthonormalInitializer
 from .hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
 from .polar_initializer import PolarInitializer
+from .linear_up_initializer import LinearUpInitializer
 
 __all__ = [
     "HaarWaveletInitializer",
@@ -38,4 +42,5 @@ __all__ = [
     "OrthonormalInitializer",
     "OrthogonalHypersphereInitializer",
     "PolarInitializer",
+    "LinearUpInitializer",
 ]
