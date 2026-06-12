@@ -10,7 +10,9 @@ The primary components are:
 
 Foundational Layer:
 - TransformerLayer: The generic, factory-based building block for all
-  Transformer models.
+  Transformer models (self-attention only).
+- TransformerDecoderLayer: The encoder-decoder counterpart — masked/causal
+  self-attention + cross-attention to encoder memory + FFN, factory-driven.
 
 Complete Modality Stacks:
 - VisionEncoder: A complete ViT-style encoder for image processing.
@@ -48,6 +50,7 @@ from .transformer import (
     NormalizationType,
     NormalizationPositionType,
 )
+from .transformer_decoder import TransformerDecoderLayer
 
 # ---------------------------------------------------------------------
 # Vision Models
@@ -94,6 +97,7 @@ from .adaln_zero import AdaLNZeroConditionalBlock
 __all__ = [
     # Foundational Layer
     "TransformerLayer",
+    "TransformerDecoderLayer",
 
     # Vision Models
     "VisionEncoder",
