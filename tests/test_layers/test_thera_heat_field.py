@@ -225,3 +225,26 @@ class TestComponentsWeight:
             np.zeros((1, 1), dtype="float32"),
         )
         assert float(ops.convert_to_numpy(hf.k)) == pytest.approx(0.123)
+
+
+# ---------------------------------------------------------------------
+# 7. compute_output_shape + ctor validation (plan iter-2 step 1)
+# ---------------------------------------------------------------------
+
+class TestComputeOutputShape:
+    def test_thermal_compute_output_shape(self):
+        # Works on an UNBUILT layer, before any forward pass, and is shape-
+        # preserving over the first input ``x`` (the oscillation tensor).
+        act = ThermalActivation()
+        assert not act.built
+        assert act.compute_output_shape((2, 8, 8, 32)) == (2, 8, 8, 32)
+
+
+class TestValidation:
+    def test_heatfield_validation(self):
+        with pytest.raises(ValueError):
+            HeatField(hidden_dim=16, out_dim=3, w0=-1.0)
+        with pytest.raises(ValueError):
+            HeatField(hidden_dim=16, out_dim=3, c=0.0)
+        with pytest.raises(ValueError):
+            ThermalActivation(w0=0.0)

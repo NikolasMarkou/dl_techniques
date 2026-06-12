@@ -84,6 +84,21 @@ DEFAULT_COMPONENTS_INIT_SCALE: float = 16.0
 class ThermalActivation(keras.layers.Layer):
     """THERA thermal activation: a phase-shifted sine with a heat-decay envelope.
 
+    **Intent**: Provide THERA's aliasing-free nonlinearity -- a SIREN-style
+    sinusoid whose amplitude is attenuated by the closed-form solution of the
+    heat equation. As the diffusion time ``t`` increases, high-frequency hidden
+    units (large ``norm``) are damped faster, yielding an analytically smooth
+    (anti-aliased) field response at any target scale. The layer is the pointwise
+    activation core shared by every query pixel of :class:`HeatField`.
+
+    **Architecture**::
+
+        x ----------> sin(w0 * x + phase) ----+
+                                              (*) --> output  (..., hidden)
+        norm,k,t --> exp(-(w0*norm)^2 * k * t)-+
+
+        output = sin(w0 * x + phase) * exp(-(w0 * ||norm||)^2 * k * t)
+
     Computes, elementwise over the hidden axis::
 
         sin(w0 * x + phase) * exp(-(w0 * norm)^2 * k * t)
@@ -114,6 +129,8 @@ class ThermalActivation(keras.layers.Layer):
 
     def __init__(self, w0: float = 1.0, **kwargs: Any) -> None:
         super().__init__(**kwargs)
+        if w0 <= 0:
+            raise ValueError(f"w0 must be positive, got {w0}")
         self.w0 = float(w0)
 
     def build(self, input_shape: Any) -> None:
@@ -162,6 +179,12 @@ class ThermalActivation(keras.layers.Layer):
         envelope = ops.exp(-ops.square(self.w0 * norm) * k * t)
         return oscillation * envelope
 
+    def compute_output_shape(self, input_shape: Any) -> Tuple[Optional[int], ...]:
+        # Pointwise over the hidden axis: output matches the first input ``x``
+        # (the oscillation tensor), shape ``(..., hidden)``, unchanged. The
+        # envelope only broadcasts in, so it never alters x's shape.
+        return tuple(input_shape)
+
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({"w0": self.w0})
@@ -174,6 +197,28 @@ class ThermalActivation(keras.layers.Layer):
 @keras.saving.register_keras_serializable()
 class HeatField(keras.layers.Layer):
     """THERA spatially-varying neural heat field evaluated at query coordinates.
+
+    **Intent**: Realize THERA's spatially-varying neural heat field as a single
+    Keras layer: a per-pixel SIREN field whose decay follows the heat equation,
+    producing aliasing-free arbitrary-scale super-resolution. The field is shared
+    across pixels only through its frequency ``components`` and conductivity
+    ``k``; the per-pixel ``phase`` and output ``kernel`` are injected as inputs
+    from the hypernetwork, so every query pixel evaluates its own field while
+    still vectorizing over the ``(B, Hq, Wq)`` grid via a batched einsum.
+
+    **Architecture**::
+
+        rel_coords (...,2) --einsum('...c,ck')[components (2,k)]--> x (...,k)
+                                                                     |
+        phi_phase (...,k) -----------------------------------+      |
+        norm = ||components||_2 (axis -2) (k,)              \\ |     |
+        k (scalar), t (...,1) -----------------------------> ThermalActivation
+                                                                     |
+                                                       thermal (...,k)
+                                                                     |
+        phi_kernel (...,k,o) --einsum('...k,...ko->...o')------------+
+                                                                     v
+                                                          out (...,o)
 
     A per-pixel SIREN-style field with a heat-equation decay envelope. Given
     relative query coordinates ``rel_coords`` and a heat time ``t``, it projects
@@ -232,6 +277,10 @@ class HeatField(keras.layers.Layer):
             raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
         if out_dim <= 0:
             raise ValueError(f"out_dim must be positive, got {out_dim}")
+        if w0 <= 0:
+            raise ValueError(f"w0 must be positive, got {w0}")
+        if c <= 0:
+            raise ValueError(f"c must be positive, got {c}")
 
         self.hidden_dim = int(hidden_dim)
         self.out_dim = int(out_dim)

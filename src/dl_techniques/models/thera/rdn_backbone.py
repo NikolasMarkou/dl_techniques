@@ -82,6 +82,21 @@ class RDBConv(keras.layers.Layer):
     channel axis. The output therefore has ``C_in + growth_rate`` channels,
     where ``C_in`` is the number of input channels.
 
+    **Intent**: Provide the atomic dense-growth building block of an RDB: a
+    conv-ReLU whose output is concatenated back onto its input so that each
+    successive unit sees an ever-wider feature stack (densely-connected growth),
+    while keeping channel bookkeeping closed-form for explicit, reload-safe
+    ``build()`` of the inner convolution.
+
+    **Architecture**:
+    ```
+    x  -->  Conv(growRate, kxk, same)  -->  relu  -->  out
+    │                                                    │
+    └──────────────────  concat([x, out], axis=-1)  ─────┘
+                                 ↓
+            (channels grow by growRate: C_in -> C_in + growRate)
+    ```
+
     Args:
         growth_rate: Integer, number of feature maps produced by the inner
             convolution (the channel growth per unit). Must be positive.
@@ -156,6 +171,25 @@ class RDB(keras.layers.Layer):
     ``growth_rate_0`` channels with a 1x1 convolution (local feature fusion),
     and adds the block input as a residual. Input and output both have
     ``growth_rate_0`` channels.
+
+    **Intent**: Assemble the RDB of the Residual Dense Network -- a contiguous
+    memory mechanism where ``C`` dense conv units accumulate features, a 1x1
+    local-fusion conv adaptively collapses the wide stack back to ``G0``, and a
+    local residual connection stabilises training and preserves the block's
+    input/output channel contract.
+
+    **Architecture**:
+    ```
+    x ──────────────────────────────────────────────┐ (local residual)
+    │                                                 │
+    └─> [ RDBConv x C ]  (dense growth: G0 -> G0+C*G) │
+              ↓                                        │
+        Conv(G0, 1x1, same)  (local feature fusion)    │
+              ↓                                        │
+              + x  <───────────────────────────────────┘
+              ↓
+            output (G0 channels)
+    ```
 
     Args:
         growth_rate_0: Integer, the block's input/output channel count ``G0``
@@ -261,6 +295,34 @@ class RDNBackbone(keras.layers.Layer):
     1x1 then a kxk conv (global feature fusion); finally the shallow feature
     ``f_1`` is added back. The result is a ``(B, H, W, growth_rate_0)`` feature
     map at the **input resolution** (no upsampling tail).
+
+    **Intent**: Provide THERA's deep RDN feature extractor as a single reusable
+    Keras layer -- shallow feature extraction, ``D`` residual dense blocks with
+    global hierarchical feature fusion, and a global residual to the shallow
+    features -- yielding a resolution-preserving feature map for downstream
+    THERA tails/hypernetwork, deliberately omitting the upsampling tail so
+    arbitrary-scale components own the resampling.
+
+    **Architecture**:
+    ```
+    x
+    ↓
+    Conv(G0, kxk, same) = f_1 ───────────────────────┐ (global residual)
+    ↓                                                 │
+    Conv(G0, kxk, same)                               │
+    ↓                                                 │
+    [ RDB x D ]  (collect each block output)          │
+    ↓                                                 │
+    concat(RDB_out[0..D-1], axis=-1)  (D*G0 channels) │
+    ↓                                                 │
+    Conv(G0, 1x1, same)  ─┐                           │
+    ↓                     ├─ global feature fusion     │
+    Conv(G0, kxk, same)  ─┘                           │
+    ↓                                                 │
+    + f_1  <──────────────────────────────────────────┘
+    ↓
+    features (B, H, W, G0)   # input resolution, no upsampling
+    ```
 
     Args:
         growth_rate_0: Integer, base channel width ``G0`` (also the output
