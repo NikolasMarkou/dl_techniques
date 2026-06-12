@@ -183,3 +183,32 @@ def test_import_smoke():
         TheraTailPlus as _P,
         TheraTailPro as _R,
     )
+
+
+# ---------------------------------------------------------------------
+# 7. iter-2 compliance: Pitfall-1 (sub-layers in __init__), compute_output_shape,
+#    and pro dim validation.
+# ---------------------------------------------------------------------
+
+
+def test_tailplus_sublayers_created_in_init():
+    # Pitfall 1 fixed: sub-layers must exist immediately after __init__,
+    # BEFORE any build / forward pass.
+    tail = TheraTailPlus()
+    assert len(tail._sublayers) > 0
+
+
+def test_tail_compute_output_shape():
+    assert build_thera_tail("air").compute_output_shape((2, 16, 16, 64)) == (
+        2,
+        16,
+        16,
+        64,
+    )
+    assert build_thera_tail("plus").compute_output_shape((2, 16, 16, 64))[-1] == 128
+    assert build_thera_tail("pro").compute_output_shape((2, 16, 16, 64))[-1] == 64
+
+
+def test_tailpro_dim_validation():
+    with pytest.raises(ValueError):
+        TheraTailPro(embed_dim=0)
