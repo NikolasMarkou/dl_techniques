@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import keras
 import numpy as np
@@ -301,6 +301,34 @@ class Ideogram4FlowTrainer(keras.Model):
     ) -> keras.KerasTensor:
         velocity = self.transformer(inputs, training=training)  # (B, L, in_ch)
         return velocity[:, self.num_text_tokens:, :]            # (B, N, in_ch)
+
+    def compute_output_shape(
+        self, input_shape: Dict[str, Tuple[Optional[int], ...]]
+    ) -> Tuple[Optional[int], ...]:
+        """Shape of the image-token velocity slice ``(B, N_image, in_channels)``.
+
+        ``call`` returns ``transformer(inputs)[:, num_text_tokens:]``, so the
+        output is the transformer's ``(B, L, in_channels)`` with the leading
+        ``num_text_tokens`` (T) packed text positions sliced off. The channel
+        dim is delegated to the wrapped transformer's ``compute_output_shape``;
+        the token dim becomes ``L - T`` (or ``None`` when ``L`` is unknown).
+
+        Args:
+            input_shape: Dict of per-key input shapes (uses ``"x"`` ->
+                ``(B, L, in_channels)``), matching the dict ``call`` input.
+
+        Returns:
+            ``(B, L - num_text_tokens, in_channels)`` with ``None`` preserved
+            for unknown batch / sequence dimensions.
+        """
+        full_shape = self.transformer.compute_output_shape(input_shape)
+        batch = full_shape[0]
+        seq_len = full_shape[1]
+        in_channels = full_shape[-1]
+        num_image_tokens = (
+            None if seq_len is None else seq_len - self.num_text_tokens
+        )
+        return (batch, num_image_tokens, in_channels)
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()

@@ -247,7 +247,9 @@ class Ideogram4Transformer(keras.Model):
 
         # --- conditioning (time) -> AdaLN input ---
         t_cond = self.t_embedding(t, training=training)  # (B, emb) or (B, L, emb)
-        if len(t_cond.shape) == 2:
+        # Static-rank branch (guide-preferred ndim over len(.shape)); rank is
+        # known at trace, so this stays a python `if`, not a tensor-value branch.
+        if keras.ops.ndim(t_cond) == 2:
             # t was (B,): add a length-1 token axis to broadcast over L.
             t_cond = keras.ops.expand_dims(t_cond, axis=1)  # (B, 1, emb)
         adaln_input = keras.ops.silu(

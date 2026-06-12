@@ -135,6 +135,16 @@ class TestTrainerForwardAndFit:
         assert out.shape == (B, N, in_channels)
         # Velocity head is float32 even though it is sliced post-call.
         assert out.dtype == tf.float32
+        # compute_output_shape mirrors the (B, N_image, in_channels) slice.
+        seq_len = config.num_text_tokens + N
+        in_shape = {"x": (B, seq_len, in_channels)}
+        assert trainer.compute_output_shape(in_shape) == (B, N, in_channels)
+        # Unknown sequence length -> None image-token axis, channels preserved.
+        assert trainer.compute_output_shape({"x": (B, None, in_channels)}) == (
+            B,
+            None,
+            in_channels,
+        )
 
     def test_in_process_fit_finite_loss(self):
         """A 2-step fit produces a finite (non-NaN) loss -- the smoke gate."""
