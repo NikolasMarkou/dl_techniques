@@ -114,12 +114,31 @@ class KANLinear(keras.layers.Layer):
     :param spline_trainable: Whether spline scaling weights are trainable.
         Defaults to True.
     :type spline_trainable: bool
-    :param kernel_initializer: Initializer for spline coefficient weights.
-        Defaults to ``'glorot_uniform'``.
+    :param kernel_initializer: Initializer for spline coefficient weights
+        (the ``spline_weight`` / spline path). Defaults to ``'glorot_uniform'``.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
+    :param base_scaler_initializer: Initializer for the residual ``base_scaler``
+        weights (the base-activation / residual path). Defaults to ``'ones'``,
+        which is byte-identical to the historical behavior. Defaults to ``'ones'``.
+    :type base_scaler_initializer: Union[str, keras.initializers.Initializer]
     :param epsilon: Small float for numerical stability. Defaults to 1e-7.
     :type epsilon: float
     :param kwargs: Additional arguments for Layer base class.
+
+    .. note::
+
+        The Rigas et al. (2026) variance-controlled KAN init schemes are wired
+        by passing the outputs of
+        ``dl_techniques.initializers.create_kan_initializers(...)`` into the two
+        weight slots: the ``residual`` initializer into ``base_scaler_initializer``
+        and the ``spline`` initializer into ``kernel_initializer``. For example::
+
+            res, spl = create_kan_initializers(grid_size=5, spline_order=3,
+                                               scheme='power_law', seed=0)
+            layer = KANLinear(features=8, kernel_initializer=spl,
+                              base_scaler_initializer=res)
+
+        See :class:`dl_techniques.initializers.KANInitializer` for the schemes.
     """
 
     def __init__(
@@ -132,6 +151,7 @@ class KANLinear(keras.layers.Layer):
             base_trainable: bool = True,
             spline_trainable: bool = True,
             kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
+            base_scaler_initializer: Union[str, keras.initializers.Initializer] = 'ones',
             epsilon: float = 1e-7,
             **kwargs: Any
     ) -> None:
@@ -156,6 +176,7 @@ class KANLinear(keras.layers.Layer):
         self.base_trainable = base_trainable
         self.spline_trainable = spline_trainable
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.base_scaler_initializer = keras.initializers.get(base_scaler_initializer)
         self.epsilon = epsilon
         self.base_activation_fn = keras.activations.get(activation)
 
@@ -202,10 +223,17 @@ class KANLinear(keras.layers.Layer):
 
         # 3. Base Scaler
         # Shape: (input_features, output_features)
+        # DECISION plan_2026-06-12_6cc7c378/D-003: the default 'ones'
+        # base_scaler_initializer keeps this weight byte-identical to the
+        # historical behavior, while still allowing the residual-path init
+        # schemes (Rigas et al.) to be wired in via base_scaler_initializer.
+        # Do NOT hard-code 'ones' here and do NOT route this through
+        # kernel_initializer (that slot is the spline/coefficient path);
+        # spline_scaler stays 'ones' because the paper does not init it.
         self.base_scaler = self.add_weight(
             name="base_scaler",
             shape=(self.input_features, self.features),
-            initializer='ones',
+            initializer=self.base_scaler_initializer,
             trainable=self.base_trainable,
         )
 
@@ -440,6 +468,9 @@ class KANLinear(keras.layers.Layer):
             "spline_trainable": self.spline_trainable,
             "kernel_initializer": keras.initializers.serialize(
                 self.kernel_initializer
+            ),
+            "base_scaler_initializer": keras.initializers.serialize(
+                self.base_scaler_initializer
             ),
             "epsilon": self.epsilon,
         })
