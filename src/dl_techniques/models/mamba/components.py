@@ -8,6 +8,7 @@ from typing import Optional, Union, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.norms.factory import create_normalization_layer
 
 # ---------------------------------------------------------------------
 
@@ -651,7 +652,8 @@ class MambaResidualBlock(keras.layers.Layer):
         self.mamba_kwargs = mamba_kwargs or {}
 
         # CREATE sub-layers in __init__
-        self.norm = keras.layers.LayerNormalization(
+        self.norm = create_normalization_layer(
+            'layer_norm',
             epsilon=self.norm_epsilon,
             name="norm"
         )
