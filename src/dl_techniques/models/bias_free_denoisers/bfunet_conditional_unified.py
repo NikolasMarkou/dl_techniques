@@ -322,32 +322,38 @@ class DiscreteConditioningInjection(keras.layers.Layer):
 
         if self.method == 'spatial_broadcast':
             # Reshape to (batch, 1, 1, channels) for broadcasting
-            projected = keras.layers.Reshape((1, 1, self.projected_channels))(projected)
+            projected = keras.ops.reshape(
+                projected, (-1, 1, 1, self.projected_channels)
+            )
 
             # Multiplicative Modulation (Scale-only FiLM)
             # x_out = x * (1 + P(c))
-            return keras.layers.Multiply()([target_features, projected + 1.0])
+            return target_features * (1.0 + projected)
 
         elif self.method == 'channel_concat':
             # Get spatial dimensions from target
-            spatial_h = keras.ops.shape(target_features)[1]
-            spatial_w = keras.ops.shape(target_features)[2]
+            target_shape = keras.ops.shape(target_features)
+            spatial_h = target_shape[1]
+            spatial_w = target_shape[2]
 
-            # Tile spatially
-            tiled = keras.layers.RepeatVector(spatial_h * spatial_w)(projected)
-            tiled = keras.layers.Reshape((spatial_h, spatial_w, self.projected_channels))(tiled)
+            # Tile spatially: reshape to (batch, 1, 1, C) then broadcast to (B, H, W, C)
+            tiled = keras.ops.reshape(
+                projected, (-1, 1, 1, self.projected_channels)
+            )
+            tiled = keras.ops.broadcast_to(
+                tiled, (target_shape[0], spatial_h, spatial_w, self.projected_channels)
+            )
 
             # Calculate mean absolute amplitude of target features for scaling
-            scale_factor = keras.layers.Lambda(
-                lambda t: keras.ops.mean(keras.ops.abs(t), axis=[1, 2, 3], keepdims=True),
-                name=f'{self.name}_energy_calc'
-            )(target_features)
-            
+            scale_factor = keras.ops.mean(
+                keras.ops.abs(target_features), axis=[1, 2, 3], keepdims=True
+            )
+
             # Scale the tiled embeddings
-            tiled_scaled = keras.layers.Multiply()([tiled, scale_factor])
+            tiled_scaled = tiled * scale_factor
 
             # Concatenate along channel dimension
-            return keras.layers.Concatenate(axis=-1)([target_features, tiled_scaled])
+            return keras.ops.concatenate([target_features, tiled_scaled], axis=-1)
 
         else:
             raise ValueError(f"Unknown injection method: {self.method}")
