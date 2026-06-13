@@ -81,3 +81,14 @@ DEFAULT_COSINE_ALPHA = 0.0001  # Minimum learning rate as fraction of initial ra
 DEFAULT_COSINE_RESTARTS_T_MUL = 2.0  # Factor to multiply period length after each restart
 DEFAULT_COSINE_RESTARTS_M_MUL = 0.9  # Factor to multiply initial learning rate after each restart
 DEFAULT_COSINE_RESTARTS_ALPHA = 0.001  # Minimum learning rate as fraction of initial rate
+
+# ==============================================================================
+# VSGD Optimizer Defaults
+# ==============================================================================
+DEFAULT_VSGD_GHATTG        = 30.0
+DEFAULT_VSGD_PS            = 1e-8
+DEFAULT_VSGD_TAU1          = 0.81
+DEFAULT_VSGD_TAU2          = 0.90
+DEFAULT_VSGD_LEARNING_RATE = 0.1
+DEFAULT_VSGD_WEIGHT_DECAY  = 0.0
+DEFAULT_VSGD_EPS           = 1e-8

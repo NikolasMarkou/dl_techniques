@@ -42,6 +42,7 @@ from keras.api.optimizers.schedules import LearningRateSchedule
 from dl_techniques.utils.logger import logger
 from .warmup_schedule import WarmupSchedule
 from .sgld_optimizer import SGLD
+from .vsgd_optimizer import VSGD
 from .constants import *
 
 # ---------------------------------------------------------------------
@@ -63,6 +64,7 @@ class OptimizerType(str, Enum):
     RMSPROP = "rmsprop"
     ADADELTA = "adadelta"
     SGLD = "sgld"
+    VSGD = "vsgd"
 
 
 # ---------------------------------------------------------------------
@@ -290,6 +292,8 @@ def optimizer_builder(
         optimizer = _build_adadelta_optimizer(config, base_params)
     elif optimizer_type == OptimizerType.SGLD:
         optimizer = _build_sgld_optimizer(config, base_params)
+    elif optimizer_type == OptimizerType.VSGD:
+        optimizer = _build_vsgd_optimizer(config, base_params)
     else:
         raise ValueError(
             f"Unknown optimizer_type: [{optimizer_type}]. "
@@ -437,3 +441,42 @@ def _build_sgld_optimizer(
     }
 
     return SGLD(**optimizer_params)
+
+
+def _build_vsgd_optimizer(
+        config: Dict[str, Any],
+        base_params: Dict[str, Any]
+) -> VSGD:
+    """Build VSGD optimizer with configuration parameters.
+
+    VSGD (Variational Stochastic Gradient Descent) models gradient updates as
+    a probabilistic model and uses Stochastic Variational Inference to derive
+    an adaptive closed-form update rule with per-variable running statistics.
+
+    Args:
+        config: Configuration dictionary with VSGD-specific parameters.
+            Optional keys:
+                - ghattg: Gradient hat target (default 30.0).
+                - ps: Prior scale (default 1e-8).
+                - tau1: EMA exponent for bg (default 0.81).
+                - tau2: EMA exponent for bhg (default 0.90).
+                - weight_decay: Decoupled weight decay coefficient (default 0.0).
+                - eps: Numerical stability floor (default 1e-8).
+        base_params: Base parameters common to all optimizers (learning_rate,
+            clipvalue, clipnorm, global_clipnorm).
+
+    Returns:
+        Configured VSGD optimizer instance.
+    """
+    optimizer_params = {
+        "name": "VSGD",
+        "ghattg": config.get("ghattg", DEFAULT_VSGD_GHATTG),
+        "ps": config.get("ps", DEFAULT_VSGD_PS),
+        "tau1": config.get("tau1", DEFAULT_VSGD_TAU1),
+        "tau2": config.get("tau2", DEFAULT_VSGD_TAU2),
+        "weight_decay": config.get("weight_decay", DEFAULT_VSGD_WEIGHT_DECAY),
+        "eps": config.get("eps", DEFAULT_VSGD_EPS),
+        **base_params,
+    }
+
+    return VSGD(**optimizer_params)
