@@ -338,36 +338,37 @@ class FreMLP(keras.layers.Layer):
         Returns:
             Output tensor of shape (batch, height, width, channels).
         """
-        # Get STATIC spatial dimensions for IFFT later (XLA-compatible:
-        # irfft2 's=' must be Python ints / None, never symbolic scalars).
-        h = x.shape[1]
-        w = x.shape[2]
+        # NOTE: keras.ops exposes a complex-as-(real, imag)-tuple FFT API
+        # (fft2/ifft2) and transforms the LAST TWO axes. There is no rfft2/
+        # irfft2/angle/complex in keras.ops, so we use full-spectrum fft2 over
+        # the spatial (H, W) dims by moving them last: NHWC -> NCHW.
 
-        # 1. FFT (Fast Fourier Transform) over spatial dimensions (H, W)
-        # rfft2: real-to-complex FFT, more efficient for real inputs
-        # axes=(1, 2): apply over height and width dimensions
-        x_freq = ops.fft.rfft2(x, axes=(1, 2), norm='backward')
+        # 1. FFT over spatial dimensions (H, W). Input is real -> zero imag part.
+        x_t = ops.transpose(x, (0, 3, 1, 2))           # (B, C, H, W)
+        freq_real, freq_imag = ops.fft2((x_t, ops.zeros_like(x_t)))
 
-        # 2. Extract Magnitude and Phase
-        mag = ops.abs(x_freq)
-        pha = ops.angle(x_freq)
+        # 2. Magnitude (phase is retained implicitly via the unit phasor below).
+        mag = ops.sqrt(ops.square(freq_real) + ops.square(freq_imag))  # (B, C, H, W)
 
-        # 3. Process Magnitude through MLP
-        mag = self.conv1(mag)
-        mag = self.act(mag)
-        mag = self.conv2(mag)
+        # 3. Process the magnitude spectrum through the 1x1-conv MLP, which
+        # operates channels-last; transpose to NHWC and back.
+        mag_nhwc = ops.transpose(mag, (0, 2, 3, 1))    # (B, H, W, C)
+        mag_nhwc = self.conv1(mag_nhwc)
+        mag_nhwc = self.act(mag_nhwc)
+        mag_nhwc = self.conv2(mag_nhwc)
+        mag_proc = ops.transpose(mag_nhwc, (0, 3, 1, 2))  # (B, C, H, W)
 
-        # 4. Reconstruct Complex Tensor from processed magnitude and original phase
-        real = mag * ops.cos(pha)
-        imag = mag * ops.sin(pha)
-        x_out_complex = ops.complex(real, imag)
+        # 4. Reconstruct with the original phase: scale the unit phasor
+        # (freq / |freq|) by the processed magnitude. Guard the divide.
+        denom = ops.maximum(mag, keras.backend.epsilon())
+        out_real = mag_proc * (freq_real / denom)
+        out_imag = mag_proc * (freq_imag / denom)
 
-        # 5. Inverse FFT to return to spatial domain
-        # s=(h, w): ensure output matches input spatial dimensions
-        s = (h, w) if (h is not None and w is not None) else None
-        x_out = ops.fft.irfft2(x_out_complex, axes=(1, 2), s=s, norm='backward')
-
-        return x_out
+        # 5. Inverse FFT back to the spatial domain. The processed spectrum
+        # keeps the Hermitian symmetry of a real signal (the 1x1 conv acts
+        # identically on conjugate-pair bins), so the real part is the output.
+        spatial_real, _ = ops.ifft2((out_real, out_imag))  # (B, C, H, W)
+        return ops.transpose(spatial_real, (0, 2, 3, 1))   # (B, H, W, C)
 
     def compute_output_shape(
         self,
