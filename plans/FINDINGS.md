@@ -34,6 +34,26 @@
 - **`current_phase` / `_global_step` counters**: `add_weight(trainable=False, dtype="float32")` — int32 fails CPU/GPU device placement.
 <!-- /COMPRESSED-SUMMARY -->
 
+## plan_2026-06-13_88695f5c
+### Index
+| # | Finding | File | Confidence |
+|---|---------|------|------------|
+| F-001 | Audit surface: ~94 inline `keras.layers.Layer` subclasses in 53 files across ~40 model subpackages | findings/audit-surface.md | HIGH (grep-verified) |
+| F-002 | Scope decision: deliverable = audit report ONLY (no code); coverage = full exhaustive sweep | (this file) | HIGH (user-confirmed) |
+| F-003 | Reference vocabulary: 8 factory registries (attention 23 keys, ffn 15, norms 16, embedding 10, activations 22, mixtures 3, seq-pooling 3, heads 21) + canonical primitive homes (RMSNorm, TransformerLayer, SwiGLUFFN, SqueezeExcitation, CBAM, PatchEmbedding2D, StochasticDepth, LearnableMultiplier, RoPE, Sampling, VectorQuantizer) | findings/layers-inventory.md | HIGH (source-read) |
+| F-004 | Import/duplication scan: per-package layers/ import map; reuse-blind packages = masked_autoencoder, squeezenet; confirmed dup clusters (HashNGramEmbedding x2, _LayerScale1D=LearnableMultiplier, SAM PatchEmbedding=PatchEmbedding2D needs flatten flag) | findings/model-import-scan.md | HIGH (grep+read) |
+| F-005 | Rubric validated on bias_free_denoisers + cliffordnet: REPLACE/RELOCATE/KEEP all exercised; 5 gotchas (name-match false positives, output-contract semantics, GGR one-param gap, in-call sublayer anti-pattern, latent bias-free violation) | findings/sample-classification.md | HIGH (deep source-read) |
+
+### Key Constraints
+- **[HARD] Deliverable is a report only** — no code changes to models/ or layers/. User reviews and decides what to act on. (user-confirmed)
+- **[HARD] Full exhaustive coverage** — all ~94 inline layer classes must be classified, not a subset. (user-confirmed)
+- **[HARD] Source-grounded classification** — per LESSONS.md, a reuse-review is a HYPOTHESIS; every "REPLACE by X" / "RELOCATE" claim must be backed by reading BOTH the inline layer's `call`/`build` signature AND the candidate layers/ implementation. No name-matching shortcuts.
+- **[SOFT] Classification rubric** — each inline layer → one of REPLACE (existing layers/ equivalent, with the candidate named) / RELOCATE (reusable, no equivalent, belongs in layers/) / KEEP (model-specific, stays inline).
+- **[SOFT] Factory awareness** — many reusable components are exposed via factories (attention/ffn/norms/embedding/heads), not just direct classes. A "REPLACE" candidate may be a factory key, not a class import.
+
+### Corrections
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
+
 ## plan_2026-06-13_5b933e7f
 ### Index
 
@@ -143,26 +163,3 @@ variable -= lr / (sqrt(mug_sq) + eps) * mug_new
 
 ### Corrections
 *Append [CORRECTED iter-N] entries here when earlier findings prove wrong.*
-
-## plan_2026-06-13_e7b5704d
-### Index
-| # | Topic | File | Summary |
-|---|-------|------|---------|
-| F1 | Repo-wide AST scan | (this file) | 572 keras Layer/Model subclasses. Raw hits: 54 layers w/o compute_output_shape, 11 w/o register, 10 add_weight-in-init, 1 w/o get_config. |
-| F2 | compute_output_shape cluster A (layers core/ts/attn) | `findings/cos-cluster-a.md` | 13 ADD, rest SKIP (abstract bases, RNN cells, inherited). |
-| F3 | compute_output_shape cluster B (heads/experimental) | `findings/cos-cluster-b.md` | 6 ADD (dict-output), SKIP abstract + dynamic-dict multitask. |
-| F4 | compute_output_shape cluster C (models) | `findings/cos-cluster-c.md` | 18 ADD, 5 SKIP (multi-input/non-tensor-arg/3-output cell). |
-| F5 | register / get_config / add_weight | `findings/register-and-addweight.md` | 6 ADD register (5 tabm pkg=TabM incl MLPBlock collision, 1 experimental); Base* abstract SKIP; ALL 10 add_weight-in-init are ACCEPTABLE-LEAVE (config-shape, not input-shape). |
-
-### Key Constraints
-- **[HARD] `MLPBlock` name collision**: `tabm_blocks.py:MLPBlock` vs already-registered `ffn/mlp.py:MLPBlock`. Must register tabm classes with `package="TabM"` or import raises.
-- **[HARD] Abstract base classes are NOT violations**: `BaseMemory/Head/Controller/NTM` (ntm_interface), `BaseExpert` (moe), `BaseGating` (moe), `BaseVisionHead/BaseVLMHead`, `ComplexLayer` are `ABC`/@abstractmethod — do NOT register or add compute_output_shape.
-- **[HARD] RNN cells exempt from compute_output_shape**: `DeepARCell`, `mLSTMCell`, `sLSTMCell`, `NAMCell`, `TRMInner` use the `state_size`/`output_size` cell contract. SKIP.
-- **[HARD] All 10 `add_weight`-in-`__init__` are config-shaped (learnable tokens/temperatures/pos-embeds), NOT input-shaped → working pattern, NOT the guide's anti-pattern. LEAVE (documented).
-- **[SOFT] Dynamic-dict-output heads** (`MultiTaskHead`, `MultiTaskVLMHead`) build their return dict from runtime task names → no static compute_output_shape. SKIP.
-- **[HARD] A wrong compute_output_shape is worse than none**: each added method must be verified against a real forward pass before commit.
-
-### Corrections / Discoveries
-- **[DISCOVERY iter-1]** `mst_correlation_filter.py` was UNIMPORTABLE pre-change (`keras.KerasTensorShape` nonexistent attr in annotations). Fixed (D-002). SystemicGraphFilter was effectively dead code.
-- **[DISCOVERY iter-1] DETR is pre-existing broken/untested**: `DetrTransformer` encoder constructs `TransformerLayer(attention_type='multi_head_attention')` — not a valid factory key ('multi_head' is) → cannot construct. `DetrDecoderLayer.build` unpacks a 2-shape tuple, failing on isolated Keras auto-build. No `tests/test_models/test_detr/` exists. Out of scope (conformance only); compute_output_shape added mirrors detr's own build() unpacking. Flag for a future DETR-fix plan.
-- **[DISCOVERY iter-1] Pre-existing flaky test**: `test_cliffordnet_lmunet.py::TestMRLSerialization::test_save_load_keras_with_mrl` fails at ~2e-5 save/load mismatch — FAILS IDENTICALLY AT BASELINE (my edits stashed). Not a regression; pre-existing numeric/XLA non-determinism.

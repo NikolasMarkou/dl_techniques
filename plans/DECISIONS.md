@@ -30,6 +30,30 @@
 - Anchor at impact site (not at decision definition). One anchor per impact site, even if shared with sibling decision.
 <!-- /COMPRESSED-SUMMARY -->
 
+## plan_2026-06-13_88695f5c
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-06-13_88695f5c/D-NNN` anchor exists in source)
+-->
+
+### D-001 | Deliverable is a report-only audit, decomposed by model family | 2026-06-13
+**Context**: The goal is to classify ~94 inline `keras.layers.Layer` subclasses across `models/` as REPLACE / RELOCATE / KEEP against the `layers/` catalog. Two structural choices: (A) classify-and-report only, leaving all refactoring to a later user-directed plan; (B) classify and immediately refactor (replace/relocate) in the same plan. Decomposition choice: (i) one batch per coherent model family so an analyst keeps context, vs (ii) one batch per verdict-type or per-file flat sweep.
+**Decision**: Report-only (A) + family-batched decomposition (i): 7 sequential steps, each source-classifies one coherent family into a per-batch findings file and appends a section to a single growing report; synthesis step fills summary tables + bug appendix + recommendations.
+**Trade-off**: A reviewable, low-risk, source-grounded hypothesis document the user can act on selectively **at the cost of** delivering zero immediate code improvement and a positive net line count (a doc, not a refactor).
+**Reasoning**: LESSONS.md is explicit that a reuse-review is a HYPOTHESIS to be source-verified, not an executable change set; conflating audit with refactor would risk shipping name-match false-positive REPLACEs as real edits (the exact trap the rubric probe caught: `_LearnedQueryPool1D`, `_ClassificationHeadBlock`). Family-batching keeps the analyst in one architectural context per step, minimizing cross-batch dependency (steps depend on each other only for file-append ordering). Rejected: (B) combined audit+refactor — too much blast radius, violates the user-confirmed report-only HARD constraint; (ii) verdict-type or flat-file batching — forces context-switching across unrelated architectures within a batch, raising miscount and false-positive risk.
+**Anchor-Refs**: none (documentation deliverable; no in-source anchors).
+
+### D-002 | REFLECT evaluation — recommend CLOSE | 2026-06-13
+**Context**: All 7 steps executed; 95/95 inline layer classes classified across 6 family sections; synthesis tables + 11-bug appendix + 4-tier recommendations written. REFLECT ran 6 success criteria + plan hygiene.
+**Decision**: Recommend CLOSE. 6/6 criteria PASS; no regressions; no scope drift; no simplification blockers.
+**Trade-off**: Accepting the report as complete on a representative both-sides spot-check (not an exhaustive re-read of all 36 REPLACE+RELOCATE rows) **at the cost of** a small residual risk that a mid-confidence RELOCATE "absence" verdict could be wrong if an equivalent exists under an unsearched name — recorded in verification.md Not Verified.
+**Reasoning**: The 47 validator ERRORs are 100% pre-existing orphan/unknown-plan DECISION anchors in src/ from OTHER plans (bdd100k_video, routing_probabilities, lighthouse_attention, etc.); this plan touched zero src/ files and added zero anchors, so it introduced zero ERRORs — consistent with the plan's verification strategy. Two name-match false positives that the source-read rule caught during execution (Gemma3 dual-post-norm not expressible via TransformerLayer; GroupAttention != group_query) confirm the rubric's anti-false-positive discipline held. WARNs (changelog approx-LOC format, classification findings using table layout instead of the EXPLORE findings template) are cosmetic and do not affect the deliverable.
+**Devil's-advocate (one reason this could still be wrong)**: "Drop-in" REPLACE claims are structural, not runtime-proven — e.g. `TRMReasoningModule`→`HierarchicalReasoningModule` was verified to share the stack-of-TransformerLayers + input-injection shape, but exact param-name/serialization-key parity was not executed. Mitigation: every drop-in is a recommendation for a future implementation plan, not an applied edit; rows note known shims (e.g. `_LayerScale1D` checkpoint-shim for `Custom>_LayerScale1D` saves).
+**Anchor-Refs**: none.
+
 ## plan_2026-06-13_5b933e7f
 ### D-001 | EXPLORE → PLAN | YYYY-MM-DD
 **Context**: <one-paragraph background — what was discovered in EXPLORE>
@@ -116,26 +140,3 @@
 **Decision**: Pass `mask_flat=None` to `DetrTransformer` in the initial fix, disabling attention masking entirely. Document as a known limitation.
 **Trade-off**: Unblocking construction and forward pass correctness **at the cost of** not masking padded positions in the encoder attention, which slightly degrades detection on heavily-padded images.
 **Reasoning**: Masking is optional in `TransformerLayer`; removing it avoids a silent incorrect masking (a flat boolean mask used as an attention mask produces garbage attention weights). Proper mask support requires a follow-up plan to define the correct attention mask shape and expand logic. The initial fix prioritises correctness of what IS implemented over completeness.
-
-## plan_2026-06-13_e7b5704d
-### D-001 | EXPLORE → PLAN | YYYY-MM-DD
-**Context**: <one-paragraph background — what was discovered in EXPLORE>
-**Decision**: <chosen approach in one sentence>
-**Trade-off**: <X> **at the cost of** <Y>
-**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-06-13_e7b5704d/D-NNN` anchor exists in source)
--->
-
-### D-001 | EXPLORE → PLAN | 2026-06-13
-**Context**: AST scan of 572 keras Layer/Model subclasses found 54 layers without compute_output_shape, 11 without register, 10 add_weight-in-init, 1 without get_config. Naive "fix all" would wrongly modify abstract bases, RNN cells, dynamic-dict heads, and config-shaped model weights — risking import collisions and breaking working code.
-**Decision**: Fix only the genuine, mechanically-verifiable violations: add compute_output_shape to the 37 CONCRETE layers and the register decorator to the 6 CONCRETE classes (tabm w/ package="TabM" to dodge the MLPBlock collision). Treat abstract bases / RNN cells / dynamic-dict multitask heads / non-tensor-arg layers as documented exemptions; leave all 10 add_weight-in-init (verified config-shaped, not the guide anti-pattern).
-**Trade-off**: Full guide conformance for concrete components **at the cost of** NOT forcing the rules onto classes where they are semantically wrong (a smaller, surgical change set than "every flagged class").
-**Reasoning**: The guide's "every class" rules target concrete, instantiated, serialized layers; applying them to ABCs/cells is a no-op-at-best/harmful-at-worst. compute_output_shape is a pure addition (never called in forward/train) so it cannot change numerics — verified by 8/8 forward-vs-cos probe + 547 covering tests. Rejected: (a) blanket registration of Base* (import collision + meaningless on ABCs); (b) migrating add_weight to build() on Models (risky, zero benefit for config-shaped weights).
-**Anchor-Refs**: 37 compute_output_shape methods + 6 decorators across 20 files (see plan.md Files To Modify; no in-code D-NNN anchors — additive methods need none).
-
-### D-002 | EXECUTE Step 1 | 2026-06-13
-**Context**: `mst_correlation_filter.py` used `keras.KerasTensorShape` (nonexistent attribute) in 6 function annotations → the module was UNIMPORTABLE (annotations eval at class-def time). The register-decorator fix could not take effect without import working.
-**Decision**: Replace `keras.KerasTensorShape` → `Tuple[Optional[int], ...]` (repo-standard) throughout the file.
-**Trade-off**: Fixing an adjacent pre-existing import bug **at the cost of** a small out-of-original-scope edit.
-**Reasoning**: A module I am registering must at least import; the fix is trivial and correct (the attribute never existed in this Keras version). Necessary for SystemicGraphFilter registration to mean anything.
-**Anchor-Refs**: `src/dl_techniques/layers/experimental/mst_correlation_filter.py` (6 annotation sites)
