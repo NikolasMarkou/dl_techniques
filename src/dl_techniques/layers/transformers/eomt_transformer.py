@@ -226,8 +226,8 @@ class EomtTransformer(keras.layers.Layer):
         self.kernel_regularizer = kernel_regularizer
         self.bias_regularizer = bias_regularizer
 
-        # Training step counter for mask annealing
-        self.current_step = 0
+        # Training step counter for mask annealing (set as keras.Variable in build())
+        self.current_step = None  # set in build()
 
         # CREATE all sub-layers in __init__
 
@@ -291,6 +291,14 @@ class EomtTransformer(keras.layers.Layer):
             mask_proj_shape = (main_shape[0], None, None)  # Dynamic shape
             self.mask_projection.build(mask_proj_shape)
 
+        self.current_step = self.add_weight(
+            name="current_step",
+            shape=(),
+            dtype="float32",
+            trainable=False,
+            initializer="zeros",
+        )
+
         super().build(input_shape)
 
     def _apply_masked_attention(
@@ -316,7 +324,7 @@ class EomtTransformer(keras.layers.Layer):
         # Calculate effective mask probability with annealing
         if self.mask_annealing_steps > 0:
             annealing_factor = ops.minimum(
-                ops.cast(self.current_step, dtype='float32') / self.mask_annealing_steps,
+                self.current_step / self.mask_annealing_steps,
                 1.0
             )
             effective_prob = self.mask_probability * annealing_factor
@@ -433,7 +441,7 @@ class EomtTransformer(keras.layers.Layer):
 
         # Increment training step counter
         if training and self.mask_annealing_steps > 0:
-            self.current_step += 1
+            self.current_step.assign(self.current_step + 1.0)
 
         return output
 
