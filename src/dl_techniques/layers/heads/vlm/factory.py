@@ -322,6 +322,15 @@ class ImageCaptioningHead(keras.layers.Layer):
         logits = self.output_proj(x)
         return {"logits": logits, "hidden_states": x}
 
+    def compute_output_shape(self, input_shape):
+        """Returns output-shape dict mirroring call() outputs."""
+        text_shape = input_shape["text_features"]
+        batch, seq_len = text_shape[0], text_shape[1]
+        return {
+            "logits": (batch, seq_len, self.task_config.vocab_size),
+            "hidden_states": (batch, seq_len, self.hidden_dim),
+        }
+
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update(
@@ -476,6 +485,11 @@ class VQAHead(keras.layers.Layer):
 
         logits = self.output_layer(x)
         return {"answer_logits": logits}
+
+    def compute_output_shape(self, input_shape):
+        """Returns output-shape dict mirroring call() outputs."""
+        vision_shape = input_shape["vision_features"]
+        return {"answer_logits": (vision_shape[0], self.task_config.num_classes)}
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()

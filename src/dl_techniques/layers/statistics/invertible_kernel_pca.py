@@ -847,6 +847,10 @@ class InvertibleKernelPCADenoiser(keras.layers.Layer):
 
         return denoised
 
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """Output shape equals input shape (denoising preserves dimensions)."""
+        return input_shape
+
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization.
 

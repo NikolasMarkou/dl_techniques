@@ -240,6 +240,12 @@ class DetrTransformer(layers.Layer):
 
         return decoder_outputs
 
+    def compute_output_shape(self, input_shape):
+        """Output is a list of per-decoder-layer query feature shapes."""
+        src_shape, _, query_embed_shape, _ = input_shape
+        single = (src_shape[0], query_embed_shape[0], self.hidden_dim)
+        return [single] * self.num_decoder_layers
+
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({
@@ -448,6 +454,10 @@ class DetrDecoderLayer(layers.Layer):
         tgt = tgt + self.dropout3(ffn_output, training=training)
 
         return tgt
+
+    def compute_output_shape(self, input_shape):
+        """Output shape equals the target (tgt) input shape."""
+        return tuple(input_shape[0])
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()

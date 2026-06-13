@@ -154,6 +154,10 @@ class _ClassificationHeadBlock(keras.layers.Layer):
             x = self.hidden(x)
         return self.logits(x)
 
+    def compute_output_shape(self, input_shape: Any) -> Tuple:
+        """Pooled logits: (B, ..., C) -> (B, num_classes)."""
+        return (input_shape[0], self.num_classes)
+
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update(
@@ -236,6 +240,10 @@ class _SpatialHeadBlock(keras.layers.Layer):
         if self.hidden is not None:
             x = self.hidden(x)
         return self.proj(x)
+
+    def compute_output_shape(self, input_shape: Any) -> Tuple:
+        """Spatial head: replace channel axis with out_channels."""
+        return (input_shape[0], input_shape[1], input_shape[2], self.out_channels)
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()

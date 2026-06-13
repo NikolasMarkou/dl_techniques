@@ -143,6 +143,10 @@ class TubeMaskGenerator(keras.layers.Layer):
         )
         return mask
 
+    def compute_output_shape(self, input_shape):
+        """Output spatial tube mask shape ``(B, H_p, W_p)``."""
+        return (None, self.patches_per_side, self.patches_per_side)
+
     # ------------------------------------------------------------------
     # Serialization
     # ------------------------------------------------------------------

@@ -83,6 +83,13 @@ class ReconstructionHead(keras.layers.Layer):
         delta = self.decoder(x, training=training)
         return self.residual_proj(delta)
 
+    def compute_output_shape(self, input_shape: Any) -> Tuple:
+        """Spatial upsample by patch_size; channels become out_channels."""
+        b, h, w, _ = input_shape
+        h_out = h * self.patch_size if h is not None else None
+        w_out = w * self.patch_size if w is not None else None
+        return (b, h_out, w_out, self.out_channels)
+
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update(
@@ -120,6 +127,13 @@ class SegmentationHead(keras.layers.Layer):
 
     def call(self, x: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
         return self.decoder(x, training=training)
+
+    def compute_output_shape(self, input_shape: Any) -> Tuple:
+        """Spatial upsample by patch_size; channels become num_classes."""
+        b, h, w, _ = input_shape
+        h_out = h * self.patch_size if h is not None else None
+        w_out = w * self.patch_size if w is not None else None
+        return (b, h_out, w_out, self.num_classes)
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()

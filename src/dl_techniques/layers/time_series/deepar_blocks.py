@@ -116,6 +116,10 @@ class ScaleLayer(keras.layers.Layer):
         else:
             return inputs / scale
 
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """Output shape equals input shape (scaling preserves dimensions)."""
+        return input_shape
+
     def get_config(self) -> Dict[str, Any]:
         """
         Return the layer configuration for serialization.

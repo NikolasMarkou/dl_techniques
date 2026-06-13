@@ -251,6 +251,10 @@ class StrongAugmentation(keras.layers.Layer):
 
         return x
 
+    def compute_output_shape(self, input_shape):
+        """Output shape equals input shape (augmentation preserves dimensions)."""
+        return input_shape
+
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration."""
         config = super().get_config()

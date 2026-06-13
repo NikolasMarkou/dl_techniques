@@ -185,6 +185,22 @@ class GaussianFilter(keras.layers.Layer):
 
         return outputs
 
+    def compute_output_shape(self, input_shape):
+        """Compute output spatial dims from strides/padding/kernel_size."""
+        if self.data_format == "channels_last":
+            batch, h, w, c = input_shape
+        else:
+            batch, c, h, w = input_shape
+        if self.padding == "same":
+            out_h = (h + self.strides[0] - 1) // self.strides[0] if h is not None else None
+            out_w = (w + self.strides[1] - 1) // self.strides[1] if w is not None else None
+        else:
+            out_h = (h - self.kernel_size[0]) // self.strides[0] + 1 if h is not None else None
+            out_w = (w - self.kernel_size[1]) // self.strides[1] + 1 if w is not None else None
+        if self.data_format == "channels_last":
+            return (batch, out_h, out_w, c)
+        return (batch, c, out_h, out_w)
+
     def get_config(self):
         """Return the configuration for serialization.
 

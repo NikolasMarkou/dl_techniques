@@ -184,6 +184,10 @@ class _LayerScale1D(keras.layers.Layer):
     def call(self, x: keras.KerasTensor) -> keras.KerasTensor:
         return x * self.gamma
 
+    def compute_output_shape(self, input_shape: Tuple) -> Tuple:
+        """Elementwise scale preserves the input shape."""
+        return tuple(input_shape)
+
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({"channels": self.channels, "init_value": self.init_value})
@@ -238,6 +242,14 @@ class _LearnedQueryPool1D(keras.layers.Layer):
             scores = scores + (1.0 - mask) * (-1e9)
         weights = keras.activations.softmax(scores, axis=-1)
         return ops.einsum("bn,bnd->bd", weights, features)
+
+    def compute_output_shape(self, input_shape: Tuple) -> Tuple:
+        """Pool over the sequence axis: (B, N, D) -> (B, D)."""
+        if isinstance(input_shape, (list, tuple)) and len(input_shape) == 2 and isinstance(input_shape[0], (list, tuple)):
+            features_shape = input_shape[0]
+        else:
+            features_shape = input_shape
+        return (features_shape[0], features_shape[-1])
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()

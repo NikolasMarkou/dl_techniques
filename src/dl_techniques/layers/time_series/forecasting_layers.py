@@ -131,6 +131,14 @@ class NaiveResidual(layers.Layer):
         # Add the network's learned "Value Added" to the naive baseline
         return network_output + naive_forecast
 
+    def compute_output_shape(self, input_shape):
+        """Output is the forecast tensor (batch, forecast_length, features)."""
+        if isinstance(input_shape, (list, tuple)) and len(input_shape) == 2 and isinstance(input_shape[0], (list, tuple)):
+            net_shape = input_shape[1]
+        else:
+            net_shape = input_shape
+        return (net_shape[0], self.forecast_length, net_shape[-1])
+
     def get_config(self) -> Dict[str, Any]:
         """
         Return the layer configuration for serialization.
@@ -329,6 +337,12 @@ class ForecastabilityGate(layers.Layer):
         # If alpha = 0 (pure noise) -> return naive forecast
         # If alpha = 1 (clear pattern) -> return deep forecast
         return (alpha * deep_forecast) + ((1.0 - alpha) * naive_forecast)
+
+    def compute_output_shape(self, input_shape):
+        """Output matches the forecast shape (deep/naive forecast)."""
+        if isinstance(input_shape, (list, tuple)) and len(input_shape) == 3 and isinstance(input_shape[0], (list, tuple)):
+            return input_shape[1]
+        return input_shape
 
     def get_config(self) -> Dict[str, Any]:
         """
@@ -581,6 +595,10 @@ class ConformalQuantileHead(layers.Layer):
         upper_calibrated = upper_pred + q
 
         return median_pred, lower_calibrated, upper_calibrated
+
+    def compute_output_shape(self, input_shape):
+        """Output shape (batch, forecast_length, output_dim, 3) for quantiles."""
+        return (input_shape[0], self.forecast_length, self.output_dim, 3)
 
     def get_config(self) -> Dict[str, Any]:
         """

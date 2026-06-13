@@ -1235,6 +1235,10 @@ class sLSTMBlock(keras.layers.Layer):
         # Residual connection
         return x + residual
 
+    def compute_output_shape(self, input_shape):
+        """Output shape equals input shape (residual block preserves dimensions)."""
+        return input_shape
+
     def get_config(self) -> Dict[str, Any]:
         """
         Return the configuration of the layer for serialization.
@@ -1496,6 +1500,10 @@ class mLSTMBlock(keras.layers.Layer):
 
         # Residual connection
         return x + residual
+
+    def compute_output_shape(self, input_shape):
+        """Output shape equals input shape (residual block preserves dimensions)."""
+        return input_shape
 
     def get_config(self) -> Dict[str, Any]:
         """

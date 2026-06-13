@@ -157,6 +157,11 @@ class EvidenceEncoder(keras.layers.Layer):
             'combined': combined_evidence
         }
 
+    def compute_output_shape(self, input_shape):
+        """Returns output-shape dict mirroring call() outputs."""
+        context_shape = input_shape["context"]
+        return {"local": context_shape, "global": context_shape, "external": context_shape, "combined": context_shape}
+
     def _encode_local_evidence(
             self,
             context: keras.KerasTensor,
@@ -394,6 +399,15 @@ class HierarchicalEvidenceAggregator(keras.layers.Layer):
             'aggregated_support': aggregated_support
         }
 
+    def compute_output_shape(self, input_shape):
+        """Returns output-shape dict mirroring call() outputs."""
+        batch, seq_len = input_shape[0], input_shape[1]
+        return {
+            "hierarchical_evidence": (batch, self.num_levels, seq_len, self.embed_dim),
+            "support_scores": (batch, seq_len, self.num_levels),
+            "aggregated_support": (batch, seq_len, self.embed_dim),
+        }
+
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({
@@ -562,6 +576,18 @@ class SupportEmbeddingLayer(keras.layers.Layer):
             'uncertainty': uncertainty,
             'reasoning_chain': reasoning_stack,
             'support_embeddings': support_embeddings
+        }
+
+    def compute_output_shape(self, input_shape):
+        """Returns output-shape dict mirroring call() outputs."""
+        evidence_shape = input_shape["evidence"]
+        batch, seq_len = evidence_shape[0], evidence_shape[1]
+        return {
+            "token_support": (batch, seq_len, self.vocab_size),
+            "confidence": (batch, seq_len),
+            "uncertainty": (batch, seq_len),
+            "reasoning_chain": (batch, seq_len, self.num_reasoning_steps, self.support_dim),
+            "support_embeddings": (batch, seq_len, self.support_dim),
         }
 
     def get_config(self) -> Dict[str, Any]:
@@ -757,6 +783,22 @@ class EvidenceSupportedTokenGeneration(keras.layers.Layer):
             'hierarchical_evidence': hierarchy_outputs['hierarchical_evidence'],
             'raw_logits': logits,
             'token_support_scores': token_support
+        }
+
+    def compute_output_shape(self, input_shape):
+        """Returns output-shape dict mirroring call() outputs."""
+        input_ids_shape = input_shape["input_ids"]
+        batch, seq_len = input_ids_shape[0], input_ids_shape[1]
+        _reasoning_steps = self.support_embedding_layer.num_reasoning_steps
+        return {
+            "logits": (batch, seq_len, self.vocab_size),
+            "evidence_support": (batch, seq_len, self.embed_dim),
+            "confidence_scores": (batch, seq_len),
+            "uncertainty_scores": (batch, seq_len),
+            "reasoning_chains": (batch, seq_len, _reasoning_steps, self.support_dim),
+            "hierarchical_evidence": (batch, self.num_evidence_levels, seq_len, self.embed_dim),
+            "raw_logits": (batch, seq_len, self.vocab_size),
+            "token_support_scores": (batch, seq_len, self.vocab_size),
         }
 
     def get_config(self) -> Dict[str, Any]:

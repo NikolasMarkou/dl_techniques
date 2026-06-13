@@ -132,6 +132,10 @@ class PositionalEncoding(keras.layers.Layer):
         x = x + self.pe[:, :seq_len, :]
         return self.dropout(x, training=training)
 
+    def compute_output_shape(self, input_shape):
+        """Output shape is identical to the input shape."""
+        return tuple(input_shape)
+
     def get_config(self) -> Dict[str, Any]:
         """Returns the layer's configuration for serialization."""
         config = super().get_config()
@@ -321,6 +325,12 @@ class GroupAttention(keras.layers.Layer):
 
         return g_attn, neibor_attn
 
+    def compute_output_shape(self, input_shape):
+        """Return ``(g_attn, neibor_attn)`` shapes ``(b, s, s)`` each."""
+        context_shape = input_shape[0]
+        b, s = context_shape[0], context_shape[1]
+        return ((b, s, s), (b, s, s))
+
     def get_config(self) -> Dict[str, Any]:
         """Returns the layer's configuration for serialization."""
         config = super().get_config()
@@ -471,6 +481,11 @@ class TreeMHA(keras.layers.Layer):
         output = ops.transpose(output, axes=[0, 2, 1, 3])
         output = ops.reshape(output, (batch_size, -1, self.hidden_size))
         return self.dense(output)
+
+    def compute_output_shape(self, input_shape):
+        """Output shape is ``(batch, seq_len, hidden_size)``."""
+        query_shape = input_shape[0]
+        return (query_shape[0], query_shape[1], self.hidden_size)
 
     def get_config(self) -> Dict[str, Any]:
         """Returns the layer's configuration for serialization."""
@@ -643,6 +658,12 @@ class TreeTransformerBlock(keras.layers.Layer):
         x = x + self.dropout2(ffn_output, training=training)
 
         return x, group_prob_out, break_prob
+
+    def compute_output_shape(self, input_shape):
+        """Return ``(x_out, group_prob_out, break_prob)`` shapes."""
+        x_shape = input_shape[0]
+        b, s = x_shape[0], x_shape[1]
+        return ((b, s, self.hidden_size), (b, s, s), (b, s, s))
 
     def get_config(self) -> Dict[str, Any]:
         """Returns the layer's configuration for serialization."""

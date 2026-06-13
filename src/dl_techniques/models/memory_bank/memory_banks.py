@@ -163,6 +163,16 @@ class LongTermMemoryBank(keras.layers.Layer):
             f"(shape={centroids.shape})"
         )
 
+    def compute_output_shape(self, input_shape):
+        """Return static ``(K_lt_shape, V_lt_shape)`` independent of input."""
+        if self.multi_head_keys:
+            k_shape = (self.s_lt, self.num_heads, self.d_k)
+            v_shape = (self.s_lt, self.num_heads, self.d_v)
+        else:
+            k_shape = (self.s_lt, self.d_k)
+            v_shape = (self.s_lt, self.d_v)
+        return (k_shape, v_shape)
+
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({

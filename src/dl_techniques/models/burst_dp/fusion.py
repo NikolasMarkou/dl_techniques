@@ -204,6 +204,10 @@ class BurstFusionBlock(keras.layers.Layer):
 
         return x
 
+    def compute_output_shape(self, input_shape: Any) -> Tuple:
+        """Output equals the reference-token shape (input_shape[0])."""
+        return tuple(input_shape[0])
+
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update(
@@ -362,6 +366,10 @@ class BurstFusionBlockAdaLN(keras.layers.Layer):
         """
         c = self._masked_aux_mean(aux_tokens, aux_mask)  # (B, 1, D)
         return self.adaln([ref_tokens, c], training=training)
+
+    def compute_output_shape(self, input_shape: Any) -> Tuple:
+        """Output equals the reference-token shape (input_shape[0])."""
+        return tuple(input_shape[0])
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()

@@ -310,6 +310,10 @@ class DINOHead(keras.layers.Layer):
 
         return x
 
+    def compute_output_shape(self, input_shape: Tuple[int, ...]) -> Tuple[int, ...]:
+        """Project (batch_size, in_dim) -> (batch_size, out_dim)."""
+        return (input_shape[0], self.out_dim)
+
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization."""
         config = super().get_config()

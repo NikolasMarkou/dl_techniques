@@ -541,6 +541,10 @@ class TripSE2(layers.Layer):
         total = ops.add(ops.add(outputs[0], outputs[1]), outputs[2])
         return ops.divide(total, 3.0)
 
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """Output shape equals input shape (attention preserves dimensions)."""
+        return input_shape
+
     def get_config(self) -> dict:
         config = super().get_config()
         config.update({
@@ -719,6 +723,10 @@ class TripSE3(layers.Layer):
         total = ops.add(ops.add(outputs[0], outputs[1]), outputs[2])
         return ops.divide(total, 3.0)
 
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """Output shape equals input shape (attention preserves dimensions)."""
+        return input_shape
+
     def get_config(self) -> dict:
         config = super().get_config()
         config.update({
@@ -842,7 +850,11 @@ class _SEWeights(layers.Layer):
         logits = self.conv_restore(x, training=training)
         # Return logits (pre-sigmoid) for addition in TripSE4
         return logits
-    
+
+    def compute_output_shape(self, input_shape):
+        """Returns channel-logit shape (B, 1, 1, C)."""
+        return (input_shape[0], 1, 1, input_shape[-1])
+
     def get_config(self):
         config = super().get_config()
         config.update({
@@ -1045,6 +1057,10 @@ class TripSE4(layers.Layer):
         # Final SE
         output = self.final_se(combined, training=training)
         return output
+
+    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
+        """Output shape equals input shape (attention preserves dimensions)."""
+        return input_shape
 
     def get_config(self) -> dict:
         config = super().get_config()
