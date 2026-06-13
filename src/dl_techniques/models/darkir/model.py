@@ -338,8 +338,10 @@ class FreMLP(keras.layers.Layer):
         Returns:
             Output tensor of shape (batch, height, width, channels).
         """
-        # Get spatial dimensions for IFFT later
-        _, h, w, _ = ops.shape(x)
+        # Get STATIC spatial dimensions for IFFT later (XLA-compatible:
+        # irfft2 's=' must be Python ints / None, never symbolic scalars).
+        h = x.shape[1]
+        w = x.shape[2]
 
         # 1. FFT (Fast Fourier Transform) over spatial dimensions (H, W)
         # rfft2: real-to-complex FFT, more efficient for real inputs
@@ -362,7 +364,8 @@ class FreMLP(keras.layers.Layer):
 
         # 5. Inverse FFT to return to spatial domain
         # s=(h, w): ensure output matches input spatial dimensions
-        x_out = ops.fft.irfft2(x_out_complex, axes=(1, 2), s=(h, w), norm='backward')
+        s = (h, w) if (h is not None and w is not None) else None
+        x_out = ops.fft.irfft2(x_out_complex, axes=(1, 2), s=s, norm='backward')
 
         return x_out
 
