@@ -29,6 +29,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
 from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
 from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization
+from dl_techniques.layers.norms.factory import create_normalization_layer
 
 
 # ---------------------------------------------------------------------
@@ -129,7 +130,8 @@ class ConvUNextStem(keras.layers.Layer):
         )
 
         # Use LayerNorm for stem (standard ConvNeXt design)
-        self.norm = keras.layers.LayerNormalization(
+        self.norm = create_normalization_layer(
+            'layer_norm',
             epsilon=1e-6,
             name='stem_norm'
         )
