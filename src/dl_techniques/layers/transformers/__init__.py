@@ -89,6 +89,8 @@ from .swin_conv_block import SwinConvBlock
 from .perceiver_transformer import PerceiverTransformerLayer
 from .eomt_transformer import EomtTransformer
 from .adaln_zero import AdaLNZeroConditionalBlock
+from .free_transformer import BinaryMapper, FreeTransformerLayer
+from .progressive_focused_transformer import PFTBlock
 
 # ---------------------------------------------------------------------
 # Public API
@@ -120,6 +122,9 @@ __all__ = [
     "PerceiverTransformerLayer",
     "EomtTransformer",
     "AdaLNZeroConditionalBlock",
+    "BinaryMapper",
+    "FreeTransformerLayer",
+    "PFTBlock",
 
     # Type Aliases
     "AttentionType",
