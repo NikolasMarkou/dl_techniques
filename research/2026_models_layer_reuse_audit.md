@@ -35,25 +35,274 @@ Distilled from `findings/sample-classification.md` § Rubric Gotchas. Every REPL
 5. **Flag latent bugs found during the audit, but do NOT recommend preserving them.** A relocation/replacement is an opportunity to fix a bug, never to carry it forward.
 
 ## Summary
-*(filled in Synthesis step)*
+
+95 inline `keras.layers.Layer` subclasses were audited across `src/dl_techniques/models/` (94 from the `audit-surface.md` inventory + 1 SAM `PatchEmbedding` surfaced by the `model-import-scan.md` Cluster 6 probe): **11 REPLACE** (delete inline, import from `layers/`), **25 RELOCATE** (move to `layers/`, no current equivalent), **59 KEEP** (model-specific or decision-locked).
 
 ### Counts by verdict
-*(filled in Synthesis step)*
+
+**Overall:**
+
+| Verdict | Count | % of 95 |
+|---|---|---|
+| REPLACE | 11 | 11.6% |
+| RELOCATE | 25 | 26.3% |
+| KEEP | 59 | 62.1% |
+| **Total** | **95** | **100%** |
+
+**Per-batch breakdown:**
+
+| Batch | Total | REPLACE | RELOCATE | KEEP |
+|---|---|---|---|---|
+| Batch 0 — bias_free_denoisers + cliffordnet | 14 | 5 | 6 | 3 |
+| Batch A — transformer/LLM family | 21 | 2 | 2 | 17 |
+| Batch B — vision/conv family | 15 | 0 | 6 | 9 |
+| Batch C — VLM/multimodal/generative | 12 | 0 | 4 | 8 |
+| Batch D — SSL/JEPA/encoder-decoder/segmentation | 13 | 3 | 3 | 7 |
+| Batch E — super-res/world-model/memory/misc | 20 | 1 | 4 | 15 |
+| **Grand total** | **95** | **11** | **25** | **59** |
 
 ### REPLACE list
-*(filled in Synthesis step)*
+
+Sorted drop-in first (highest value, lowest risk), then needs-adapter. All 11 rows.
+
+**Drop-in replacements (delete inline class, import from `layers/` with matching args):**
+
+| Class | file:line | Target (`layers/` class or factory key) | Drop-in? | Adapter note |
+|---|---|---|---|---|
+| `_LayerScale1D` | `cliffordnet/clip.py:153` | `layers/layer_scale.py:LearnableMultiplier` | drop-in | Pass `multiplier_type='CHANNEL'`, `initializer=Constant(1e-5)`, `constraint=None`; checkpoint shim needed for existing `Custom>_LayerScale1D` saves (default `constraint='non_neg'` differs). |
+| `DINOv2Block` | `dino/dino_v2.py:68` | `layers/transformers/transformer.py:TransformerLayer` | drop-in | Config: `normalization_position='pre'`, `use_layer_scale=True`, `layer_scale_init_value=init_values`, `use_stochastic_depth=True`, `stochastic_depth_rate=stochastic_depth_rate`; all factory params already delegated identically. |
+| `ByteTokenizer` | `modern_bert/components.py:10` | `layers/blt_blocks.py:ByteTokenizer` | drop-in | Unify on `errors='replace'` (candidate uses `errors='ignore'` on encode); both stateless, `vocab_size=260`, pad/bos/eos/unk IDs identical. |
+| `TRMReasoningModule` | `tiny_recursive_model/components.py:47` | `layers/reasoning/hrm_reasoning_module.py:HierarchicalReasoningModule` | drop-in | Bit-for-bit equivalent; identical parameter names and injection mechanism. Add `from layers.reasoning.hrm_reasoning_module import HierarchicalReasoningModule` to `tiny_recursive_model/components.py`. |
+
+**Needs-adapter replacements (minor `layers/` extension required before deletion):**
+
+| Class | file:line | Target (`layers/` class or factory key) | Drop-in? | Adapter note |
+|---|---|---|---|---|
+| `_ClassificationHeadBlock` | `cliffordnet/unet.py:83` | `layers/heads/vision/factory.py:ClassificationHead` | needs-adapter | Candidate applies softmax + returns dict; inline returns bare logits. Add `use_logits=True` mode (or strip softmax in caller) — output-contract trap (rule 3). |
+| `BiasFreeClifordNetBlock` | `cliffordnet/denoiser.py:61` | `layers/geometric/clifford_block.py:CliffordNetBlock` | needs-adapter | Candidate `center=True` default; add `norm_center: bool = True` param to `CliffordNetBlock`. Candidate already accepts `use_bias`. |
+| `BiasFreeGatedGeometricResidual` | `cliffordnet/denoiser.py:246` | `layers/geometric/clifford_block.py:GatedGeometricResidual` | needs-adapter | Candidate gate `Dense(C, use_bias=True)`; inline uses `use_bias=False`. Add `use_bias: bool = True` to `GatedGeometricResidual` — one-param gap (rule 2). |
+| `BiasFreeConditionedGGR` | `cliffordnet/conditional_denoiser.py:78` | `layers/geometric/clifford_block.py:GatedGeometricResidual` | needs-adapter | Byte-for-byte duplicate of `BiasFreeGatedGeometricResidual`. Same one-param gap; both become dead code once `GatedGeometricResidual` gains `use_bias`. |
+| `HashNGramEmbedding` (blt_hrm.py) | `modern_bert/modern_bert_blt_hrm.py:191` | `layers/embedding/hash_ngram_embedding.py:HashNGramEmbedding` (post-relocation of components.py version) | needs-adapter | Intra-package duplicate with Python loop bug and AVERAGE vs SUM aggregation. Delete after `components.py:94` version is promoted to `layers/`; update callers to import from `layers/`. |
+| `CausalSelfAttnMLPBlock` | `video_jepa/predictor.py:63` | `layers/transformers/transformer.py:TransformerLayer` | needs-adapter | Identical pre-norm + LayerScale(1e-5) structure; uses raw `keras.layers.MultiHeadAttention` instead of factory. Adapter: switch to `create_attention_layer('multi_head', ...)` and verify causal-mask forwarding through factory before merging. |
+| `PatchEmbedding` [+scope] | `sam/image_encoder.py:117` | `layers/embedding/patch_embedding.py:PatchEmbedding2D` | needs-adapter | Candidate always flattens to `(B,N,D)`; SAM needs 4D `(B,H/p,W/p,D)` for window attention. Add `flatten: bool = True` param to `PatchEmbedding2D`; when `False`, skip reshape at line 247. |
 
 ### RELOCATE list
-*(filled in Synthesis step)*
+
+Grouped by proposed destination subpackage. All 25 rows.
+
+**`layers/geometric/clifford_block.py` — Clifford geometric primitives (3 classes):**
+
+| Class | file:line | Proposed `layers/` home | Why reusable |
+|---|---|---|---|
+| `BiasFreeConditionedCliffordBlock` | `cliffordnet/conditional_denoiser.py:187` | `layers/geometric/clifford_block.py` as **ConditionedCliffordNetBlock** | `CliffordNetBlock` arch + `use_bias=False`/`center=False` + two optional FiLM conditioning arms (`cond_gamma_proj` multiplicative, `class_proj` additive); conditioning flags absent from `CliffordNetBlock`. General to any conditional Clifford encoder. Fix additive bug (appendix #1) on relocate. |
+| `BiasFreeGeometricDownsample` | `cliffordnet/conditional_denoiser.py:460` | `layers/geometric/clifford_block.py` as **BiasFreeGeometricDownsample** | Novel geometric strided-downsample (ctx: DWConv→BN→SiLU; detail: Dense→AvgPool; fusion: SparseRollingGeometricProduct→Conv2D→BN); no geometric-aware downsample in `layers/`. General to any Clifford encoder. |
+| `BiasFreeGeometricUpsample` | `cliffordnet/conditional_denoiser.py:628` | `layers/geometric/clifford_block.py` as **BiasFreeGeometricUpsample** | Symmetric upsample via `UpSampling2D(2,'nearest')` + optional channel transition + Clifford refinement; no geometric-aware upsample in `layers/`. Belongs alongside `BiasFreeGeometricDownsample`. |
+
+**`layers/` top-level — conditioning/modulation (2 classes):**
+
+| Class | file:line | Proposed `layers/` home | Why reusable |
+|---|---|---|---|
+| `DenseConditioningInjection` | `bias_free_denoisers/bfunet_conditional_unified.py:112` | `layers/` (or `layers/ffn/`) as **BiasFreeFeatureModulation** | Bias-free two-input FiLM (multiplicative/concatenation only; additive rejected). Cross-cutting for bias-free U-Net / VAE / diffusion models; no FiLM/conditioning-injection layer exists in `layers/`. |
+| `DiscreteConditioningInjection` | `bias_free_denoisers/bfunet_conditional_unified.py:247` | `layers/` as **BiasFreeEmbeddingBroadcast** | Embedding → spatial broadcast (`spatial_broadcast` / `channel_concat`). Standard in conditional diffusion / generative U-Nets. Fix in-`call` sublayer construction bug (appendix #2) on relocate. |
+
+**`layers/sequence_pooling/` — attention pooling variant (1 class):**
+
+| Class | file:line | Proposed `layers/` home | Why reusable |
+|---|---|---|---|
+| `_LearnedQueryPool1D` | `cliffordnet/clip.py:198` | `layers/sequence_pooling/` as **LearnedQueryPool** | Learnable query scaled dot-product pool `(B,D)` with optional mask; NOT `SequencePooling('attention')` (different math). Reusable for CLIP/EVA-style class-token-free attention pooling. Preserve `mask` arg on relocate. |
+
+**`layers/embedding/` — new embedding primitives (3 classes):**
+
+| Class | file:line | Proposed `layers/` home | Why reusable |
+|---|---|---|---|
+| `HashNGramEmbedding` (components.py) | `modern_bert/components.py:94` | `layers/embedding/hash_ngram_embedding.py` as **HashNGramEmbedding**; register factory key `hash_ngram` | Canonical vectorized byte-ngram embedding (idiomatic sublayers, graph-mode safe, SUM aggregation). General byte-level NLP primitive; promote this version, delete `blt_hrm.py:191` duplicate. |
+| `PositionalEncoding` | `tree_transformer/components.py:32` | `layers/embedding/positional_encoding_sine_1d.py` as **PositionalEncodingSine1D**; register factory key `sine_1d` | Fixed Vaswani sinusoidal PE `(1,max_len,d)` non-trainable; not covered by `positional_learned`, `continuous_sincos`, `scalar_sinusoidal`, or `PositionEmbeddingSine2D`. Reusable by any non-RoPE transformer. |
+| `PositionEmbeddingRandom` | `sam/prompt_encoder.py:88` | `layers/embedding/positional_embedding_random.py` as **PositionEmbeddingRandom** | Non-trainable Gaussian random matrix for Fourier spatial PE `call(size)→(2*D,H,W)`; distinct from `random_fourier_features.py` (data-space RBF) and `PositionEmbeddingSine2D` (deterministic). Reusable for SAM, NeRF, conditional diffusion with spatial prompts. |
+
+**`layers/masking/` — new subpackage: SSL masking primitives (2 classes):**
+
+| Class | file:line | Proposed `layers/` home | Why reusable |
+|---|---|---|---|
+| `TubeMaskGenerator` | `video_jepa/masking.py:38` | `layers/masking/tube_mask_generator.py` as **TubeMaskGenerator** | Stateless argsort-of-noise spatial tube mask `(B,H_p,W_p)`; no weights. Cross-SSL: same argsort idiom as `masked_autoencoder.patch_masking`. Reusable for MAE, V-JEPA, SimMIM, I-JEPA. |
+| `PatchMasking` | `masked_autoencoder/patch_masking.py:12` | `layers/masking/patch_masking.py` as **PatchMasking** | Pixel-space patch masking `(B,H,W,C)` with learnable/noise/zero/constant fill; argsort sampling. Cross-cutting SSL primitive (MAE/SimMIM/BEiT/MaskFeat). Co-locate with `TubeMaskGenerator`. |
+
+**`layers/vae/` — new subpackage: VAE primitives (4 classes):**
+
+| Class | file:line | Proposed `layers/` home | Why reusable |
+|---|---|---|---|
+| `_L2ConditionalPrior` | `convnext_patch_vae/model_hierarchical.py:50` | `layers/vae/` as **HierarchicalConditionalPrior** | Top-down conditional prior (UpSampling→Conv2D→ConvNextV2Block→LN→mu+log_var heads); Ladder-VAE / VDVAE family primitive. Document resolution-agnostic (D-001) and zero-init (D-002) constraints on relocate. |
+| `_CoarseLatentHead` | `convnext_patch_vae/model_hierarchical.py:293` | `layers/vae/` as **PoolDerivedGaussianHead** | Lightweight 3-op pool-derived Gaussian head (AvgPool→mu_head+log_var_head Conv2D). Reusable for any hierarchical VAE deriving coarse latent from fine features. Document D-001 constraint. |
+| `ResnetBlock` | `ideogram4/vae.py:76` | `layers/vae/` as **GroupNormResnetBlock** | Flux2 KL-VAE GroupNorm(32) residual block (GN→swish→Conv2D→GN→swish→Conv2D + optional 1x1 shortcut). 2 current callers (ideogram4 + sd3_mmdit). No GroupNorm-based ResNet block in `layers/`; document channels-must-be-divisible-by-32 constraint. |
+| `AttnBlock` | `ideogram4/vae.py:191` | `layers/vae/` as **VAEAttnBlock** | Flux2 KL-VAE spatial self-attention (GN→1x1 Conv Q/K/V→flatten→scaled-dot-product→reshape→proj_out→residual). 2 current callers (ideogram4 + sd3_mmdit). No GroupNorm+Conv Q/K/V spatial attention in `layers/`. Fix `ops.stack` reshape bug (appendix #8) on relocate. |
+
+**`layers/transformers/` — transformer spatial wrapper (1 class):**
+
+| Class | file:line | Proposed `layers/` home | Why reusable |
+|---|---|---|---|
+| `AttentionBlockVLM` | `fastvlm/components.py:15` | `layers/transformers/` as **SpatialTransformerBlock** | Flatten `(B,H,W,C)→(B,H*W,C)` → `TransformerLayer` → unflatten → optional `LearnableMultiplier`; zero original math, both sub-components already canonical. Standard VLM vision-backbone pattern; applicable to any 4D→sequence→4D flow. |
+
+**`layers/heads/vlm/` — VLM projection head (1 class):**
+
+| Class | file:line | Proposed `layers/` home | Why reusable |
+|---|---|---|---|
+| `ImageProjectionHead` | `mobile_clip/components.py:19` | `layers/heads/vlm/` as **ImageProjectionHead** | GAP → Dropout → Dense → optional activation; standard CLIP/ALIGN/BLIP image-to-embedding projector. Natural home alongside existing VLM head family. |
+
+**`layers/fire_module.py` — SqueezeNet primitives (2 classes):**
+
+| Class | file:line | Proposed `layers/` home | Why reusable |
+|---|---|---|---|
+| `FireModule` | `squeezenet/squeezenet_v1.py:79` | `layers/fire_module.py` as **FireModule** | Squeeze 1x1 → parallel expand 1x1+3x3 → Concatenate. Canonical SqueezeNet block; distinct from `SqueezeExcitation`. Reusable for any efficient conv model. |
+| `SimplifiedFireModule` | `squeezenet/squeezenet_v2.py:77` | `layers/fire_module.py` as **SimplifiedFireModule** (alongside `FireModule`) | 3x3-only expand variant (no parallel 1x1); medical-imaging SqueezeNet simplification. Co-locate with `FireModule` in same file. |
+
+**`layers/simple_gate.py` — parameter-free gating (1 class):**
+
+| Class | file:line | Proposed `layers/` home | Why reusable |
+|---|---|---|---|
+| `SimpleGate` | `darkir/model.py:92` | `layers/simple_gate.py` as **SimpleGate** | Parameter-free channel-split gate `x1,x2=split(x,2,-1); return x1*x2`; operates on 4D NHWC. Distinct from Dense-based GLU/GeGLU/SwiGLU in `layers/ffn/`. Reusable for NAFNet/DarkIR-style efficient CNNs. |
+
+**`layers/fft_layers.py` or `layers/frequency_mlp.py` — frequency-domain primitive (1 class):**
+
+| Class | file:line | Proposed `layers/` home | Why reusable |
+|---|---|---|---|
+| `FreMLP` | `darkir/model.py:191` | `layers/fft_layers.py` (alongside FFTLayer/IFFTLayer) or `layers/frequency_mlp.py` as **FreMLP** | rfft2 → magnitude+phase → Conv2D MLP → reconstruct → irfft2; shape-preserving. Distinct from `FFTLayer`/`IFFTLayer` (full-spectrum, no inverse). Reusable for image restoration/enhancement. Fix symbolic-shape bug (appendix #6) on relocate. |
+
+**`layers/sr_residual_block.py` / `layers/rdn_dense_block.py` — SR primitives (3 classes):**
+
+| Class | file:line | Proposed `layers/` home | Why reusable |
+|---|---|---|---|
+| `EDSRResidualBlock` | `thera/edsr_backbone.py:57` | `layers/sr_residual_block.py` as **EDSRResidualBlock** | Conv-residual with `res_scale` float; no BN (EDSR design). Distinct from `layers/standard_blocks.py:BasicBlock` (BN+ReLU). Reusable for EDSR/THERA/any SR backbone. Document `res_scale=1.0` default matches THERA, `res_scale=0.1` recovers textbook EDSR. |
+| `RDBConv` | `thera/rdn_backbone.py:77` | `layers/rdn_dense_block.py` as **RDBConv** (alongside `RDB`) | Atomic dense-growth conv: `relu(conv(x))` concatenated onto x, `C_in → C_in + growth_rate`. Reusable for any RDN-family SR model. |
+| `RDB` | `thera/rdn_backbone.py:166` | `layers/rdn_dense_block.py` as **RDB** (alongside `RDBConv`) | Residual Dense Block: N×RDBConv → 1x1 local_fusion → residual add. Standard RDN/DenseNet-SR primitive. Co-locate with `RDBConv`. |
+
+**`layers/ffn/normed_mlp.py` — normed MLP projector (1 class):**
+
+| Class | file:line | Proposed `layers/` home | Why reusable |
+|---|---|---|---|
+| `MLPProjector` | `lewm/projector.py:26` | `layers/ffn/normed_mlp.py` as **NormedMLPProjector**; register factory key `normed_mlp` | Dense(hidden) → [LayerNorm] → GELU → Dense(output); mid-MLP LayerNorm absent from all 15 `layers/ffn/` factory keys. Standard I-JEPA/V-JEPA/LeWM SSL projector pattern. |
 
 ### KEEP rationale rollup
-*(filled in Synthesis step)*
+
+59 classes remain inline. By reason category:
+
+| Reason category | Count | Example classes |
+|---|---|---|
+| (a) Bespoke composite / model-specific topology | 28 | `Qwen3NextBlock`, `Gemma3TransformerBlock`, `MMDiTBlock`, `DarkIREncoderBlock`, `NAMCell` |
+| (b) RNN cell / stateful (exempt) | 0 | — |
+| (c) Decision-locked (D-005, D-007, D-008) | 5 | `ideogram4/vae.py Downsample`, `ideogram4/vae.py Upsample`, `TheraHypernetwork`, `TheraTailPro`, `ConvNeXtPatchEncoder` (D-001/D-003) |
+| (d) Thin glue / wrapper (inline-able) | 7 | `_DetectionHeadBlock`, `TheraTailAir`, `_Projection`, `ConvUNextStem` (B), `DilatedBranch`, `TRMInner`, `VideoJEPACliffordEncoder` |
+| (e) Full model-level composite (pipeline, not primitive) | 19 | `Qwen3EmbeddingLayer`, `ReasoningByteCore`, `EDSRBackbone`, `RDNBackbone`, `ideogram4 Encoder/Decoder`, `TheraTailPlus`, `ARPredictor` |
+
+**Sub-component reuse opportunities within KEEP classes** — the following KEEP rows have Notes flagging inline primitives that could additionally use `layers/` factories (low-risk incremental cleanup, not audit-blocking):
+
+- `Mamba2ResidualBlock` (`mamba/components_v2.py:324`): `LayerNormalization(rms_scaling=True)` could be `layers/norms/rms_norm.py:RMSNorm`.
+- `MambaResidualBlock` (`mamba/components.py:554`): `LayerNormalization` could be `create_normalization_layer('layer_norm')`.
+- `WaveFieldDecoderBlock` (`wave_field_llm/wave_field_llm.py:67`): inline FFN `Dense(4D,gelu)→Dense(D)` could be `create_ffn_layer('mlp', hidden_dim=4*D, output_dim=D)`.
+- `ConvUNextStem` (`convunext/model.py:39`): `LayerNormalization(epsilon=1e-6)` could be `create_normalization_layer('layer_norm', epsilon=1e-6)`.
+- `TreeTransformerBlock` (`tree_transformer/components.py:504`): already uses `create_ffn_layer` and `create_normalization_layer` — no gap remaining.
 
 ## Appendix: Flagged bugs & anti-patterns
-*(filled in Synthesis step)*
+
+Bugs found during audit. None of these should be carried forward into any relocation or replacement. Severity codes: **correctness** = wrong output today; **serialization** = `from_config` / checkpoint round-trip broken; **XLA-compat** = fails under JAX/XLA trace; **footgun** = silent wrong behavior under specific invocation; **portability** = breaks non-TF backends.
+
+1. **`cliffordnet/conditional_denoiser.py:391`** — `BiasFreeConditionedCliffordBlock.call`: additive discrete-conditioning injection (`x_norm = x_norm + cls_feat`) despite docstring claiming all modulations are multiplicative. Violates the bias-free property of the network. **Severity: correctness.** Fix on relocate to `ConditionedCliffordNetBlock`.
+
+2. **`bias_free_denoisers/bfunet_conditional_unified.py:247`** — `DiscreteConditioningInjection.call`: constructs `RepeatVector`/`Reshape` Keras layer objects inside `call()` (new Python objects every forward pass) instead of `__init__`/`build`. Causes unbounded layer registry growth and is an anti-pattern that can break graph tracing. **Severity: footgun.** Fix on relocate to `BiasFreeEmbeddingBroadcast`.
+
+3. **`modern_bert/modern_bert_blt_hrm.py:191`** — `HashNGramEmbedding._compute_ngram_embeddings`: Python `for i in range(seq_len)` loop over dynamic tensor length. Breaks graph tracing (AutoGraph can unroll only static ranges); O(seq_len) Python overhead. **Severity: XLA-compat.** Must be vectorized (as in `components.py:94` version) before any relocation.
+
+4. **`modern_bert/modern_bert_blt_hrm.py:221`** — `HashNGramEmbedding.build`: `if self.built: return` guard. `built` is a managed property in Keras 3 (`Layer.__call__` sets it atomically); user code setting or checking it is a Keras 3 anti-pattern that can interfere with re-entrancy. **Severity: footgun.** Remove on deletion.
+
+5. **`modern_bert/modern_bert_blt_hrm.py:358`** — `ReasoningByteEmbeddings.build`: creates Keras sublayers (`Embedding`, etc.) inside `build()` rather than `__init__`. Breaks `get_config`/`from_config` serialization round-trip — sublayers do not exist until `build()` is called, so they are invisible to the serialization machinery. **Severity: serialization.** Fix on next touch.
+
+6. **`darkir/model.py:343`** — `FreMLP.call`: `_, h, w, _ = ops.shape(x)` then `s=(h, w)` passed to `ops.fft.irfft2`. Under JAX/XLA, `ops.shape` returns symbolic tensors; using them as a Python tuple for `irfft2`'s `s` argument may cause a trace failure or incorrect shape dispatch. Prefer static `x.shape[1]`, `x.shape[2]` at trace time. **Severity: XLA-compat.** Fix on relocate to `FreMLP`.
+
+7. **`nano_vlm_world_model/scheduler.py:20`** — `DiffusionScheduler`: subclasses `keras.layers.Layer` with no `call()` override and no trainable weights. Invoking as a layer returns `None` (base class `call`). No functional bug today (never called via `layer(x)`) but is a latent silent-None footgun. The correct pattern is a plain Python class (cf. `sd3_mmdit/scheduler.py:51 FlowMatchEulerScheduler`). **Severity: footgun.** Refactor to plain Python class on next touch.
+
+8. **`ideogram4/vae.py:263`** — `AttnBlock.call`: `ops.stack([b, n, c])` where all three are symbolic dims (from `ops.shape`). `ops.stack` returns a 1D tensor of symbolic ints, which is unconventional as a reshape target and may behave incorrectly under XLA reshape dispatch. Prefer `ops.reshape(q, (b, n, c))` directly. **Severity: XLA-compat.** Fix on relocate to `VAEAttnBlock`.
+
+9. **`dino/dino_v1.py:176–267`** — `DINOHead.build`: all sublayers (`mlp_layers` list, `last_layer`) created in `build()` not `__init__`. Violates Keras 3 Create-vs-Build rule; sublayers are invisible to `get_config`/`from_config`, breaking serialization of any model that saves a `DINOHead`. **Severity: serialization.** Fix on next touch to `DINOHead`.
+
+10. **`depth_anything/components.py:149–208`** — `DPTDecoder.build`: all sublayers (`conv_layers`, `batch_norm_layers`, `activation_layers`, `upsample_layers`, `output_conv`) created in `build()` not `__init__`. Same Keras 3 anti-pattern; additionally `self.conv_layers = []` clear at line 159 would clobber rebuilt sublayers on double-build. **Severity: serialization / correctness on double-build.** Fix on next touch.
+
+11. **`memory_bank/write_controller.py:111–117`** — `MemoryWriteController.call`: uses `tf.debugging.assert_less_equal` directly (raw TF op). Documented as an intentional TF-backend workaround for `ops.pad` dynamic-paddings tracing failure, but it hard-binds the layer to the TF backend. Not a functional bug on TF but breaks JAX/PyTorch backends. **Severity: portability.** Replace with `keras.ops`-compatible guard when multi-backend support is needed.
 
 ## Recommendations (prioritized)
-*(filled in Synthesis step)*
+
+These are recommendations for a **future plan**. This audit is report-only; nothing under `src/` was changed.
+
+---
+
+### Tier 1 — Drop-in REPLACEs (delete duplication, near-zero risk)
+
+Four inline classes are byte-for-byte or config-for-config equivalent to existing `layers/` classes. No `layers/` modification required. Delete the inline class and add an import.
+
+- **`_LayerScale1D` (`cliffordnet/clip.py:153`)** → import `LearnableMultiplier` from `layers/layer_scale.py`. Pass `multiplier_type='CHANNEL'`, `initializer=Constant(1e-5)`, `constraint=None`. Add a checkpoint shim for existing `Custom>_LayerScale1D` saves.
+- **`DINOv2Block` (`dino/dino_v2.py:68`)** → import `TransformerLayer` from `layers/transformers/transformer.py`. Config confirmed bit-for-bit equivalent with `pre-norm`, `use_layer_scale=True`, `layer_scale_init_value=init_values`, `use_stochastic_depth=True`. The block wrapper is pure duplication.
+- **`ByteTokenizer` (`modern_bert/components.py:10`)** → import `ByteTokenizer` from `layers/blt_blocks.py`. Unify on `errors='replace'` for robustness. Stateless; no checkpoint concern.
+- **`TRMReasoningModule` (`tiny_recursive_model/components.py:47`)** → import `HierarchicalReasoningModule` from `layers/reasoning/hrm_reasoning_module.py`. Identical parameter names and injection mechanism; confirmed bit-for-bit equivalent. Update `TRMInner` callers.
+
+---
+
+### Tier 2 — One-param-gap REPLACEs (tiny `layers/` additions unlock multiple deletions)
+
+Small extensions to existing `layers/` classes turn needs-adapter rows into drop-ins and eliminate two to three inline classes per change.
+
+- **Add `use_bias: bool = True` to `GatedGeometricResidual` (`layers/geometric/clifford_block.py:287`):** Deletes both `BiasFreeGatedGeometricResidual` (`cliffordnet/denoiser.py:246`) and `BiasFreeConditionedGGR` (`cliffordnet/conditional_denoiser.py:78`) — 2 deletions for 1 line change.
+- **Add `norm_center: bool = True` to `CliffordNetBlock` (`layers/geometric/clifford_block.py:482`):** Deletes `BiasFreeClifordNetBlock` (`cliffordnet/denoiser.py:61`) — 1 deletion. Pair with the `use_bias` change above to cover the full bias-free cliffordnet surface.
+- **Add `flatten: bool = True` to `PatchEmbedding2D` (`layers/embedding/patch_embedding.py:74`):** When `False`, skip reshape at line 247. Deletes `PatchEmbedding` in `sam/image_encoder.py:117` — 1 deletion. Also future-proofs for any model needing 4D patch features.
+- **Add `use_token_type_ids: bool = True` and `sinusoidal_pos_embds: bool = False` to `BertEmbeddings` (`layers/embedding/bert_embeddings.py:80`):** Unifies `DistilBertEmbeddings` (`distilbert/model.py:82`) — 1 deletion. (Note: `DistilBertEmbeddings` is currently KEEP; this upgrade path unlocks a future REPLACE.)
+- **Add `use_logits: bool = False` (or strip softmax path) to `ClassificationHead` (`layers/heads/vision/factory.py:633`):** Unifies `_ClassificationHeadBlock` (`cliffordnet/unet.py:83`) — 1 deletion.
+- **Verify causal-mask forwarding through `create_attention_layer`:** Once confirmed, `CausalSelfAttnMLPBlock` (`video_jepa/predictor.py:63`) → `TransformerLayer(pre-norm, layer_scale=1e-5)` — 1 deletion.
+
+---
+
+### Tier 3 — High-value RELOCATEs (new shared subpackages)
+
+Prioritized by number of current or near-term consumers.
+
+1. **`layers/vae/` (new subpackage) — 4 classes, 2 multi-model consumers:** `ResnetBlock` and `AttnBlock` are already shared by ideogram4 and sd3_mmdit (2 callers each). Creating `layers/vae/` with `GroupNormResnetBlock`, `VAEAttnBlock`, `HierarchicalConditionalPrior`, `PoolDerivedGaussianHead` eliminates the cross-model duplication immediately. Fix appendix bugs #8 (AttnBlock `ops.stack`) during relocation.
+
+2. **`layers/masking/` (new subpackage) — 2 classes, cross-SSL:** `TubeMaskGenerator` (V-JEPA) and `PatchMasking` (MAE) implement the same argsort-based masking idiom and are directly cited as related in source comments. A shared `layers/masking/` subpackage makes SimMIM/BEiT/I-JEPA extensions trivial.
+
+3. **`layers/fire_module.py` — 2 classes, squeezenet package currently reuse-blind:** `FireModule` and `SimplifiedFireModule` currently import nothing from `layers/`. Relocating both to a single file makes the squeezenet package consistent with the rest of the library.
+
+4. **Clifford geometric extensions (`layers/geometric/clifford_block.py`) — 3 classes:** `ConditionedCliffordNetBlock`, `BiasFreeGeometricDownsample`, `BiasFreeGeometricUpsample` extend an existing file and fix the additive-conditioning bug (appendix #1). Any future Clifford encoder/U-Net benefits immediately.
+
+5. **`layers/ffn/normed_mlp.py` — `NormedMLPProjector`, factory key `normed_mlp`:** The mid-MLP LayerNorm pattern (`MLPProjector`) is the standard SSL projector idiom (I-JEPA, V-JEPA, LeWM). Registering a factory key makes it accessible to any model via `create_ffn_layer('normed_mlp', ...)`.
+
+6. **`layers/embedding/` — 3 new embedding primitives:** `HashNGramEmbedding` (fix Python-loop bug, appendix #3 before relocating), `PositionalEncodingSine1D`, `PositionEmbeddingRandom`. Each fills a confirmed gap in the 10-key embedding factory.
+
+7. **`layers/sr_residual_block.py` + `layers/rdn_dense_block.py` — SR primitives:** `EDSRResidualBlock`, `RDBConv`, `RDB` are standard SR building blocks; any future EDSR/RDN/THERA variant would benefit.
+
+---
+
+### Tier 4 — Bug fixes to bundle with any relocation or replacement
+
+Never carry a bug forward into `layers/`. Bundle the relevant appendix fix with each action:
+
+- Relocating `BiasFreeConditionedCliffordBlock` → fix additive conditioning bias-free violation (appendix #1).
+- Relocating `DiscreteConditioningInjection` → fix in-`call` sublayer construction (appendix #2).
+- Relocating `HashNGramEmbedding` (components.py version) → confirm vectorized hashing before promoting; the `blt_hrm.py` version (appendix #3, #4) must be deleted, not merged.
+- Relocating `FreMLP` → fix symbolic-shape `irfft2` bug (appendix #6).
+- Relocating `AttnBlock` → fix `ops.stack` reshape bug (appendix #8).
+- On next touch to `DINOHead` → fix sublayer-in-build anti-pattern (appendix #9).
+- On next touch to `DPTDecoder` → fix sublayer-in-build + double-build clobber (appendix #10).
+- On next touch to `DiffusionScheduler` → refactor to plain Python class (appendix #7).
+- On next touch to `ReasoningByteEmbeddings` → fix sublayer-in-build (appendix #5).
+
+---
+
+### Closing note — intra-models duplicates to dedup independently
+
+The following duplications exist within `models/` itself and are worth cleaning up regardless of the `layers/` migration:
+
+- **`HashNGramEmbedding` ×2:** `modern_bert/components.py:94` (canonical, vectorized, SUM) vs `modern_bert/modern_bert_blt_hrm.py:191` (buggy Python loop, AVERAGE). Promote `components.py` version to `layers/`, delete `blt_hrm.py` version, update `ReasoningByteEmbeddings` import.
+- **`ConvUNextStem` ×2:** `bias_free_denoisers/bfconvunext.py:59` (GRN+GELU, `use_bias=False` hardcoded) vs `convunext/model.py:39` (LN, `use_bias` param, no GELU). These are related but distinct; a single parameterized `BiasFreeConvStem` could unify them only if a third caller appears — leave as KEEP for now, track.
+- **`ByteTokenizer` cross-package:** `modern_bert/components.py:10` duplicates `layers/blt_blocks.py:232`. Tier-1 drop-in REPLACE above eliminates the `models/` copy.
+
+---
+
+*Self-consistency check: REPLACE list = 11 rows; RELOCATE list = 25 rows; KEEP = 59; total = 95. Batch tallies: Batch0 14 [5R/6Reloc/3K] + BatchA 21 [2R/2Reloc/17K] + BatchB 15 [0R/6Reloc/9K] + BatchC 12 [0R/4Reloc/8K] + BatchD 13 [3R/3Reloc/7K] + BatchE 20 [1R/4Reloc/15K] = 95. All consistent.*
 
 ## Findings by family
 
@@ -150,7 +399,7 @@ Distilled from `findings/sample-classification.md` § Rubric Gotchas. Every REPL
 | `Decoder` | `ideogram4/vae.py:621` | KEEP | — | — | inline: full Flux2 KL-VAE decoder composite (`post_quant_conv` → `conv_in` → mid → flat list ResnetBlock + Upsample → `norm_out` → `conv_out`). No equivalent VAE decoder in layers/. Sub-components are RELOCATE targets. | Full VAE decoder pipeline; model-specific Flux2 architecture. Symmetric to Encoder. |
 
 **Bugs noted for Synthesis appendix (Batch C):**
-(7) `nano_vlm_world_model/scheduler.py:20` `DiffusionScheduler`: subclasses `keras.layers.Layer` with no `call()` override and no trainable weights. Invoking as a layer returns None (base class `call`). Should be a plain Python class (like `FlowMatchEulerScheduler` in `sd3_mmdit/scheduler.py:51`). No functional bug today (never called via `layer(x)`) but is a latent silent-None footgun.
+(7) `nano_vlm_world_model/scheduler.py:20` `DiffusionScheduler`: subclasses `keras.layers.Layer` with no `call()` override and no trainable weights. Invoking as a layer returns `None` (base class `call`). Should be a plain Python class (like `FlowMatchEulerScheduler` in `sd3_mmdit/scheduler.py:51`). No functional bug today (never called via `layer(x)`) but is a latent silent-None footgun.
 (8) `ideogram4/vae.py:263` `AttnBlock.call`: `ops.stack([b, n, c])` where `b = shp[0]`, `n = hh * ww`, `c = shp[3]` are all symbolic. `ops.stack` produces a 1D tensor of symbolic ints, which is unconventional as a reshape target. Prefer `ops.reshape(q, (b, n, c))` directly (works because all dims are ops.shape outputs). Review for XLA reshape safety.
 
 **GHOST constraint verification (Batch C):**
