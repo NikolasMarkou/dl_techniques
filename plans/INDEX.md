@@ -126,3 +126,45 @@
 | plan_2026-06-03_da3a2bbb | 2026-06-03 | Convert the single-file module `src/dl_techniques/layers/seq |  |
 | plan_2026-06-04_a114f829 | 2026-06-04 | Add a new Keras 3 layer class `HypersphereSampling` as a SIB |  |
 | plan_2026-06-04_d4ef81f1 | 2026-06-04 | Add a registry-driven sampling-layer factory to `layers/samp |  |
+| plan_2026-06-04_7ff8ea8b | 2026-06-04 | Deliver a defensible, evidence-backed answer to the question |  |
+| plan_2026-06-04_6196678d | 2026-06-04 | Implement a TRUE von Mises-Fisher Spherical VAE (Davidson et |  |
+| plan_2026-06-05_56b39171 | 2026-06-05 | Enable `cifar100` as a dataset choice in the VAE trainer (`s |  |
+| plan_2026-06-06_38aa045e | 2026-06-06 | Add a serializable per-patch von Mises-Fisher (vMF) sampling |  |
+| plan_2026-06-07_8b718ac4 | 2026-06-07 | convnext_patch_vae: comprehensive review of architecture, vM |  |
+| plan_2026-06-08_e3917bd5 | 2026-06-08 | Add a library-grade, two-level hierarchical variant to the ` |  |
+| plan_2026-06-08_91b27275 | 2026-06-08 | Rewrite `src/applications/anomaly_detection/` so the anomaly |  |
+| plan_2026-06-08_57a975d1 | 2026-06-08 | Create a new layer sub-module `src/dl_techniques/layers/mixt |  |
+| plan_2026-06-08_8b32ca51 | 2026-06-08 | Consolidate the three sibling task-head packages |  |
+| plan_2026-06-08_aaefc92b | 2026-06-08 | Fix the 3 named pre-existing latent bugs in `src/dl_techniqu |  |
+| plan_2026-06-08_a5f40f4f | 2026-06-08 | Deep, comprehensive correctness pass over all 7 layer files  |  |
+| plan_2026-06-09_be55db55 | 2026-06-09 | A four-item correctness pass: |  |
+| plan_2026-06-09_a3c7304c | 2026-06-09 | Finish normalizing the four synthetic time-series trainers ( |  |
+| plan_2026-06-09_e0e96220 | 2026-06-09 | Train every time-series model in `src/train/` one-by-one on  |  |
+| plan_2026-06-09_49c73926 | 2026-06-09 | Fix the two broken time-series trainers (`nbeats/train_nbeat |  |
+| plan_2026-06-10_f361b14c | 2026-06-10 | move src/dl_techniques/models/{tirex,prism,nbeats,mndn} unde |  |
+| plan_2026-06-10_7ba2471a | 2026-06-10 | Move `src/dl_techniques/models/deepar` and `src/dl_technique |  |
+| plan_2026-06-10_8b2431d9 | 2026-06-10 | Create `src/train/time_series/` and move the five time-serie |  |
+| plan_2026-06-10_7a0e42b1 | 2026-06-10 | Move `src/dl_techniques/models/xlstm/` to `src/dl_techniques |  |
+| plan_2026-06-10_39646d39 | 2026-06-10 | Build a thin, shared forecasting contract and the metrics/vi |  |
+| plan_2026-06-10_31eed970 | 2026-06-10 | Bring the four remaining time-series trainers — **nbeats**,  |  |
+| plan_2026-06-10_721a80b5 | 2026-06-10 | Make the Multi-Task MDN trainer produce a genuine multi-step |  |
+| plan_2026-06-10_7036cab1 | 2026-06-10 | Ship a complete, runnable Pattern-2 training pipeline for th |  |
+| plan_2026-06-10_c6197fb1 | 2026-06-10 | Add the LAST missing piece of the unified Forecast contract: |  |
+| plan_2026-06-11_50891da1 | 2026-06-11 | Fix the xLSTMForecaster trainer fit() NaN by giving `mLSTMCe |  |
+| plan_2026-06-11_fe7401f4 | 2026-06-11 | Normalize all 7 model families under `src/dl_techniques/mode |  |
+| plan_2026-06-11_5f49f080 | 2026-06-11 | Give `TemporalConvNet` and its `TemporalBlock` |  |
+| plan_2026-06-11_84296249 | 2026-06-11 | Normalize the 7 production time-series trainers (`mdn`, `nbe |  |
+| plan_2026-06-11_49671f7a | 2026-06-11 | Normalize the 8 time-series trainers under `src/train/time_s |  |
+| plan_2026-06-11_92e06228 | 2026-06-11 | Run all 7 active time series trainers for 100 epochs each, s |  |
+| plan_2026-06-11_f662207d | 2026-06-11 | Bring every THERA custom **Layer** and **Model** into full c |  |
+| plan_2026-06-12_bda3e5b5 | 2026-06-12 | Apply the WARNING-tier fixes from a completed THERA code rev |  |
+| plan_2026-06-12_f8843c4f | 2026-06-12 | Resolve the three carry-forward caveats from the THERA revie |  |
+| plan_2026-06-12_6cc7c378 | 2026-06-12 | Add a new `KANInitializer` (Rigas et al. 2026 init schemes:  |  |
+| plan_2026-06-12_59a18a10 | 2026-06-12 | Make every new custom `keras.layers.Layer` / `keras.Model` / |  |
+| plan_2026-06-12_7af1504c | 2026-06-12 | Register the newly-created Ideogram4 EMBEDDING layers into t |  |
+| plan_2026-06-12_dfce0712 | 2026-06-12 | Port the MiniDiffusion SD3-style text-to-image stack from Py |  |
+| plan_2026-06-12_0bb1729b | 2026-06-12 | Make more of the repo's out-of-submodule transformer/attenti |  |
+| plan_2026-06-13_e7b5704d | 2026-06-13 | Bring all custom layers/models into conformance with `resear |  |
+| plan_2026-06-13_28f0b453 | 2026-06-13 | Fix all confirmed bugs in `src/dl_techniques/models/detr/mod |  |
+| plan_2026-06-13_250487cb | 2026-06-13 | Fix all confirmed Keras guide violations in `src/dl_techniqu |  |
+| plan_2026-06-13_5b933e7f | 2026-06-13 | Implement the VSGD (Variational Stochastic Gradient Descent) |  |

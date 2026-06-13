@@ -34,153 +34,135 @@
 - **`current_phase` / `_global_step` counters**: `add_weight(trainable=False, dtype="float32")` — int32 fails CPU/GPU device placement.
 <!-- /COMPRESSED-SUMMARY -->
 
-## plan_2026-06-04_d4ef81f1
+## plan_2026-06-13_5b933e7f
 ### Index
 
-| # | Finding | File | Covers |
-|---|---------|------|--------|
-| 1 | VAE model structure, sampler site, KL loss, config, z_log_var shapes | `findings/vae-model-and-loss.md` | model + loss + the 2 blockers |
-| 2 | Canonical registry factory pattern (sequence_pooling) + inline-vs-package options | `findings/factory-pattern.md` | factory design |
-| 3 | train_vae.py gaps + comparison-driver template + compare_runs signature | `findings/vae-trainer-and-comparison.md` | trainer + comparison |
-| 4 | Locked design (resolved with user) | this file, "Design Decision" | scope/architecture |
+| # | Topic | File | Summary |
+|---|-------|------|---------|
+| F1 | Optimization package structure, conventions, __init__.py | `findings/optimization-package.md` | Package exports only 3 builder functions; Muon/SGLD not exported. OptimizerType enum + dispatch in optimizer.py. Constants in constants.py. 5 test classes per optimizer. Muon = stateful template (add_variable_from_reference). SGLD = stateless template. |
+| F2 | Keras 3 optimizer API + test patterns | `findings/test-and-keras-optimizer-patterns.md` | Must implement build(var_list), update_step(gradient, variable, learning_rate), get_config(), from_config(cls, config). @register_keras_serializable required. Per-variable state via add_variable_from_reference. self.iterations is global step counter (already incremented before update_step). |
+| F3 | VSGD algorithm mapping (from provided PyTorch source) | (this file) | VSGD has per-variable state (mug, bg, bhg) + scalar constants (pa2, pbg2, pbhg2) derivable from hyperparams. step counter = self.iterations. Step-1 branch needed (ops.where). Weight decay is AdamW-style. |
 
 ### Key Constraints
 
-### Hard
-- **Factory inline** in `layers/sampling.py` (1 precedent `sparse_autoencoder.py:823`; package promotion would break the 3 existing `from dl_techniques.layers.sampling import Sampling` sites). 2 layer types: `gaussian`->`Sampling`, `hypersphere`->`HypersphereSampling`.
-- **z_log_var shape fork**: `Sampling` needs `[B,latent_dim]`; `HypersphereSampling.build` hard-rejects last-dim != 1 (`sampling.py:360-364`). Hypersphere modes must feed `[B,1]`.
-- **KL/prior mismatch**: Gaussian KL (`-0.5·Σ(1+logvar−μ²−e^logvar)`, `model.py:786-810`) is the wrong prior for the sphere — faithful mode replaces it.
-- **Decoder graph extraction** at `model.py:242-244` uses `self.get_layer("vae_sampling").output` — ALL modes MUST keep the sampler layer name `"vae_sampling"` (output is `[B,latent_dim]` in every mode, so extraction is unaffected).
-- **`create_vae` assertion** `model.py:948` `z_log_var.shape==(2,latent_dim)` — must branch for faithful ([B,1]).
-- **`CUSTOM_OBJECTS`** `train_vae.py:36` only lists `Sampling` — add `HypersphereSampling` for the hypersphere arms' checkpoint reload.
-- **compare_runs** (`train/common/compare_runs.py:198`, `(run_a, run_b, labels, output_dir)`) is 2-arm + needs pandas + `training_log.csv` per run. For 3 arms call it pairwise vs the gaussian baseline.
-- **Driver CPU-only**: `CUDA_VISIBLE_DEVICES=''` at module top BEFORE TF import (XLA-allocator crash risk; convnext pattern). Child arm gets GPU via `env['CUDA_VISIBLE_DEVICES']=str(gpu)`. Serial subprocess; NEVER parallel.
-- **GPU1 for our runs** (`CUDA_VISIBLE_DEVICES=1`, RTX 4070). Single job at a time.
-- **Full A/B run (>2 min) MUST be launched by the MAIN thread (orchestrator), NOT a sub-agent** (LESSONS: `run_in_background` from a sub-agent dies when the sub-agent exits). ip-executor handles only the short --smoke; orchestrator runs the full comparison.
+- **[HARD] @keras.saving.register_keras_serializable()** required on the class for save/load round-trip
+- **[HARD] build(var_list)** must guard with `if self.built: return`, call `super().build(var_list)`, allocate per-variable mug/bg/bhg via `add_variable_from_reference`
+- **[HARD] update_step(gradient, variable, learning_rate)** — `learning_rate` is already evaluated scalar; use `keras.ops` only (no raw tf.*)
+- **[HARD] Step-1 branching** must use `ops.where` (not Python if) for graph-safety
+- **[HARD] No print statements** — use `dl_techniques.utils.logger`
+- **[HARD] get_config() must call super().get_config()** first; base class handles learning_rate schedule serialization
+- **[SOFT] weight_decay**: pass `weight_decay=0.0` to super() and manage manually (Muon pattern) OR pass through (SGLD pattern) — VSGD manages it manually in update_step (AdamW-style)
+- **[SOFT] Add VSGD to OptimizerType enum** and optimizer_builder dispatch in optimizer.py
+- **[SOFT] Export VSGD from __init__.py** (fix the existing Muon/SGLD omission inconsistency)
+- **[SOFT] Constants in constants.py** following SGLD defaults block pattern
 
-### Soft
-- Mirror `sequence_pooling/factory.py` surface: `SamplingType` literal, `SAMPLING_REGISTRY`, `create_sampling_layer(type, name=None, **kwargs)`, `create_sampling_from_config(config)`, `validate_sampling_config(type, **kwargs)`, `get_sampling_info()`.
-- train_vae.py has no `--smoke`/`--seed`/`--sampler`/`config.json` today — add all four; `set_seeds(args.seed)`; `save_config_json(args, results_dir)`.
-- Monitor metric is `val_total_loss`; dataset MNIST default (28x28x1), 10 epochs / batch 128.
+### F3: VSGD Algorithm State Mapping
 
-### Design Decision (resolved with user via AskUserQuestion)
+### Per-variable state (same shape as parameter — use add_variable_from_reference)
+- `mug`: running mean estimate of gradient g_t, initialized to zeros
+- `bg`: running variance estimate of g_t, initialized to zeros
+- `bhg`: running variance estimate of ghat_t, initialized to zeros
 
-**Build + RUN the full A/B now on GPU1** (serial). Three VAE `sampling_type` configs:
+### Scalar constants (derived from hyperparams — not stored as state)
+- `pa2 = 2*ps + 1.0 + 1e-4` (prior shape param)
+- `pbg2 = 2*ps` (prior scale for g variance)
+- `pbhg2 = 2*ghattg*ps` (prior scale for ghat variance)
 
-1. **`gaussian`** (baseline) — unchanged. `Sampling([mu[B,D], log_var[B,D]])`; Gaussian KL over `[B,D]`.
-2. **`hypersphere_controlled`** — isolate the sampler. Encoder UNCHANGED (mu[B,D], log_var[B,D]). Adapter: `rlv = mean(log_var, axis=-1, keepdims=True)` -> `[B,1]`; `z = HypersphereSampling([mu, rlv])`. Loss = SAME Gaussian KL on the original `(mu, log_var[B,D])`. Only the sampling op differs. Output dict `z_log_var` stays `[B,D]`.
-3. **`hypersphere_faithful`** — geometrically-honest. Encoder: shared trunk -> `mu=Dense(latent_dim)` (direction) + `radius_log_var=Dense(1)` `[B,1]`. `z = HypersphereSampling([mu, radius_log_var])`. Loss = hyperspherical regularizer (replaces Gaussian KL): radius-variance KL `kl = mean(0.5·(exp(rlv) − rlv − 1))` (rlv clipped [-20,20]); direction has a uniform-sphere prior -> NO direction KL term (documented simplification — radius mean is fixed at 1.0 by the layer; not a full vMF S-VAE). Output dict `z_log_var = radius_log_var [B,1]`.
+### Global step counter
+- `step = self.iterations` (Keras base class, incremented BEFORE update_step is called)
+- On first call: self.iterations == 1
 
-Factory has **2 layer types** (gaussian, hypersphere); the **3rd config (faithful) is a VAE-level encoder+loss mode**, same `hypersphere` layer. All modes name the sampler `"vae_sampling"`.
-
-**Comparison**: `src/train/vae/run_sampler_comparison.py` (new), mirroring `run_stochastic_comparison.py`; 3 serial arms; `compare_runs` called pairwise vs gaussian baseline (gaussian-vs-controlled, gaussian-vs-faithful). Smoke-verify all 3 arms first, then orchestrator launches the full run on GPU1.
-
-### Corrections
-*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
-
-## plan_2026-06-04_a114f829
-### Index
-
-| # | Finding | File | Covers |
-|---|---------|------|--------|
-| 1 | Existing `Sampling` layer is the structural template | `src/dl_techniques/layers/sampling.py:57-218` (read inline) | existing pattern |
-| 2 | `Sampling` usage, exports, and test conventions | `findings/sampling-usage-and-tests.md` | affected files, test pattern |
-| 3 | Hypersphere math, reuse targets, canonical keras idioms | `findings/hypersphere-math-and-idioms.md` | constraints, idioms |
-| 4 | Design intent resolved by user (AskUserQuestion) | this file, "Design Decision" below | scope/interface |
-
-### Key Constraints
-
-### Hard
-- **New class is a sibling in the SAME file** `src/dl_techniques/layers/sampling.py` (file already exists with one class `Sampling`). Do NOT create a new file.
-- **5-method Keras-3 pattern mandatory** (`research/2026_keras_custom_models_instructions.md`): `__init__` (store config only), `build` (validate shapes; `super().build()` last), `call` (`keras.ops` only), `compute_output_shape`, `get_config` (`super().get_config()` + all params). `@keras.saving.register_keras_serializable()` mandatory.
-- **Random ops under `keras.random.*`** — `keras.ops.random.*` does NOT exist in Keras 3.8. Mirror sibling: `keras.random.normal(shape=..., seed=self.seed)`.
-- **`layers/__init__.py` is empty by convention** — `Sampling` is NOT exported; callers import `from dl_techniques.layers.sampling import Sampling`. New class needs no export.
-- **Logger only, no print**; Google-style docstrings; type hints.
-
-### Soft
-- **Mirror sibling idioms**: `seed: Optional[int]` ctor param, `ops.shape(...)`, accept-but-ignore `training`, `logger.debug` init line, ASCII architecture diagram in class docstring.
-- **L2 normalize idiom**: `ops.normalize(x, axis=-1)` is the dominant repo pattern. Verify zero-safety in EXECUTE; fall back to manual `x / maximum(norm, eps)` (polar_initializer.py:78-97 pattern) if `ops.normalize` is not zero-safe.
-- **Cite references** like `hypersphere_orthogonal_initializer.py` (Marsaglia 1972; Muller 1959) for the Gaussian-normalize-scale method.
-- **Tests**: extend existing `tests/test_layers/test_sampling.py` with a `TestHypersphereSampling` class mirroring `TestSampling` (init / forward / shape / gradient / `get_config`+`from_config` / model save+load with `seed=42` deterministic compare per LESSONS "stochastic by design").
-
-### Ghost (rejected)
-- **`keras.random.SeedGenerator`** — explorer flagged int-seed statelessness as a "risk", BUT the sibling `Sampling` deliberately uses raw-int `seed` and the existing `test_model_save_load` relies on it (seed=42 → reproducible). Treat SeedGenerator as a GHOST; mirror the sibling exactly. (LESSONS: "Treat sibling-template invariants as GHOSTS until proven applicable" — here the sibling invariant IS the spec.)
-
-### Design Decision (resolved with user via AskUserQuestion)
-
-New class **`HypersphereSampling`**. Inputs `call([z_mean, z_log_var])`:
-- `z_mean`: `[B, D]` — encoder direction (carries information)
-- `z_log_var`: `[B, 1]` — per-sample single scalar variance (shell thickness)
-
-Formula:
+### Update rule (Keras 3 translation)
 ```
-eps = N(0, I)  shape [B, D]
-eta = N(0, 1)  shape [B, 1]
-u   = normalize(z_mean + eps, axis=-1)     # direction on unit sphere
-r   = radius + exp(0.5 * z_log_var) * eta  # radius default 1.0; thin shell
-z   = r * u                                # [B, D], ||z|| = |r| ~ radius
+step = cast(self.iterations, dtype)
+is_first = (step <= 1.0)
+sg = where(is_first, pbg2/(pa2-1), bg/pa2)
+shg = where(is_first, pbhg2/(pa2-1), bhg/pa2)
+mug_prev = copy(mug)
+mug_new = (ghat*sg + mug_prev*shg) / (sg + shg)
+sigg = sg * shg / (sg + shg)
+mug_sq = sigg + mug_new**2
+bg2 = pbg2 + mug_sq - 2*mug_new*mug_prev + mug_prev**2
+bhg2 = pbhg2 + mug_sq - 2*ghat*mug_new + ghat**2
+rho1 = step**(-tau1); rho2 = step**(-tau2)
+bg_new = bg*(1-rho1) + bg2*rho1
+bhg_new = bhg*(1-rho2) + bhg2*rho2
+variable *= (1 - lr*weight_decay)   # AdamW weight decay
+mug.assign(mug_new); bg.assign(bg_new); bhg.assign(bhg_new)
+variable -= lr / (sqrt(mug_sq) + eps) * mug_new
 ```
-- Direction from encoder mean + Gaussian noise; magnitude (radius) is a thin Gaussian shell centered at `radius` (ctor float, default 1.0) with per-sample variance from the encoder.
-- Always stochastic (mirror sibling; `training` accepted-but-unused). `seed` makes it reproducible for tests.
 
 ### Corrections
 *Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
 
-## plan_2026-06-03_da3a2bbb
+## plan_2026-06-13_250487cb
 ### Index
 
-| # | Finding | File | Key takeaway |
-|---|---------|------|--------------|
-| F1 | Source file + importers | `findings/source-file-and-importers.md` | `sequence_pooling.py` (935 LOC): 3 classes (`AttentionPooling`, `WeightedPooling`, `SequencePooling`) + 2 type aliases (`PoolingStrategy` 18 strategies, `AggregationMethod`). Bare decorators. Importers: `text_encoder.py:99`, `vision_encoder.py:87` (relative), `tests/test_layers/test_sequence_pooling.py:16` (absolute, 1001 LOC). NOT in `layers/__init__.py` (empty). RST/Sphinx docstrings (non-Google). |
-| F2 | attention/ template structure | `findings/attention-template-structure.md` | Canonical factory idiom: `Literal` type alias `<Domain>Type`, `<DOMAIN>_REGISTRY: Dict[str,Dict]` (class/required_params/optional_params/description/use_case[/complexity/paper]), `create_<domain>_layer(type, name=None, **kwargs)`, helpers `validate_*`/`create_*_from_config`/`get_*_info`, explicit `__init__.py` re-exports + string `__all__`. README=catalog, GUIDE=contributor guide. ffn/ cross-validates. |
-| F3 | Migration mechanics + serialization | `findings/migration-mechanics.md` | `git mv` into new dir; add `__init__.py` re-exporting 3 classes + `PoolingStrategy` + `AggregationMethod`. No relative imports inside the file. Two callers' `from ..sequence_pooling import ...` resolve UNCHANGED (parent still `layers/`). Test absolute import unchanged. Precedent: `neuro_grid.py`→`memory/` (708e615c). |
+| # | Topic | File | Summary |
+|---|-------|------|---------|
+| F1 | Transformer layer audit (all 15 files) | `findings/transformer-layer-files.md` | All concrete classes have @register, build, compute_output_shape, get_config. Primary violations: `BinaryMapper` uses raw `tf.*`; `FreeTransformerLayer` + `PFTBlock` create sublayers in `build()` (not `__init__`); `EomtTransformer` mutates Python int in `call()`; `TextDecoder.get_config()` omits 6 params. |
+| F2 | Keras guide requirements | `findings/keras-guide-requirements.md` | HARD: sublayers in `__init__`, `add_weight` only in `build()`, no raw `tf.*` in call, all `__init__` params in `get_config()`. SOFT: consistent package= in register. |
+| F3 | Factory wiring + `__init__.py` exports | `findings/factory-wiring.md` | 10 classes exported; `sd3_adaln`, `ideogram4_block` intentionally direct-import. `free_transformer.py` and `progressive_focused_transformer.py` not exported (unclear if intentional). No `create_text_decoder` factory. |
 
 ### Key Constraints
 
-- **[HARD] Serialization keys are SAFE.** Bare `@keras.saving.register_keras_serializable()` → key `Custom>ClassName`, derived from default `package="Custom"`, **NOT from `__module__`**. Verified by orchestrator directly (see Corrections F1-correction). Moving the file does NOT change keys; existing `.keras` saves load fine as long as the class is imported (registered) before load. Re-export from `__init__.py` guarantees that.
-- **[HARD] `PoolingStrategy` and (used) symbols must be re-exported** from `sequence_pooling/__init__.py` or `text_encoder.py`/`vision_encoder.py` break at runtime (they do `from ..sequence_pooling import SequencePooling, PoolingStrategy`).
-- **[HARD] `SequencePooling.__init__` instantiates `AttentionPooling`/`WeightedPooling` directly** — if classes are split across files, intra-package imports must be wired correctly.
-- **[HARD] Factory idiom is fixed**: `create_sequence_pooling_layer(pooling_type: SequencePoolingType, name=None, **kwargs)`, registry dict, pure registry dispatch (no if/elif), explicit string `__all__` (do NOT replicate ffn's object-based `__all__` bug).
-- **[SOFT] No `__all__` in source file** — adding one clarifies public surface.
-- **[SOFT] Docstring dialect is RST/Sphinx** (`:param:`/`:type:`) not Google-style repo convention. Converting is optional scope.
-- **[SOFT] GUIDE.md** exists only in `attention/` (not ffn/norms/memory). User explicitly requested it ("GUIDE etc etc").
-- **[GHOST] "Moving deeper breaks relative imports by one dot"** — does NOT apply here: the source file has zero `from ..`/`from ...` imports, and external callers keep parent `layers/`.
-
-### Corrections
-
-- **[CORRECTED iter-0] F1 serialization-key claim was WRONG.** `findings/source-file-and-importers.md` (Summary + Constraints) and its claim that keys are "derived from `__module__`" / "silently break on move" is FALSE. Orchestrator verified directly via `keras.saving.get_registered_name()`: a bare-decorated class registers as `Custom>ClassName` regardless of `__module__` (confirmed key `Custom>SequencePooling` while `__module__`=`__main__`). `findings/migration-mechanics.md` is the correct account: **no serialization break, no `package=` pin needed.** This de-risks the migration substantially.
-
-## plan_2026-06-03_5c8c6d19
-### Index
-
-| # | Finding | File | Key facts |
-|---|---------|------|-----------|
-| 1 | CCNets train folder current state | `findings/ccnets-current-state.md` | 6 scripts + `CLAUDE.md`, no `README.md`; all 6 violate `train_<model>.py`; no argparse in 4; architectures defined inline; cross-script imports between train files |
-| 2 | Canonical train-folder conventions | `findings/train-conventions.md` | `train_<task>.py` naming; `README.md` (not subfolder `CLAUDE.md`); models imported from `dl_techniques.models.*`; `main()`+argparse via `create_base_argument_parser`; `setup_gpu(args.gpu)`/`set_seeds(args.seed)`; 12-point checklist |
-| 3 | CCNets model package vs train scripts | `findings/ccnets-models.md` | `models/ccnets/` is framework-only (orchestrator/trainer/config/losses), zero architectures; 17 classes in `mnist.py`, 7 in `cifar100.py`, text classes in `text_sentiment.py`; factories `create_mnist_ccnet`/`create_cifar100_ccnet` live in train scripts |
-
-### Key Constraints
-
-### HARD
-- CCNet framework contracts (PRINCIPLES_CCNETS.md P1-P11): three-network design `explainer(x)->(mu,log_var)`, `reasoner(x,e)->y`, `producer(y,e)->x_hat`; differentiable label projection `Dense(use_bias=False)` not `Embedding`; variational Explainer. Must be preserved byte-for-byte across any move.
-- `src/train/CLAUDE.md:42` — scripts must be named `train_<model>.py`, never bare nouns (`mnist.py` shadows package names).
-- Model architecture classes must NOT live in train scripts — belong in `dl_techniques/models/<pkg>/`.
-- `CCNetTrainer` owns a CUSTOM training loop (manual GradientTapes, per-network optimizers, KL annealing) — `model.fit()` is NOT used, so `train.common.create_callbacks()` cannot wrap it directly. This is an intrinsic deviation, not neglect.
-- `setup_gpu(args.gpu)` must receive the parsed `--gpu` arg.
-
-### SOFT
-- Provide `README.md` (not subfolder `CLAUDE.md`) matching the convex/cliffordnet README structure.
-- Provide `main()` + argparse with at least `--gpu/--epochs/--batch-size`.
-- Call `set_seeds(args.seed)` consistently (currently only 2 of 6 scripts).
-- Use `save_config_json` / `validate_model_loading` post-training where feasible.
-
-### GHOST
-- Subfolder-level `CLAUDE.md` — only `src/train/CLAUDE.md` should be the AI-instruction layer; no other train subfolder has its own `CLAUDE.md`. The ccnets `CLAUDE.md` content is mostly findings/results that belong in a README.
-- `dynamic_weighting` flag in `CCNetConfig` is deprecated (`base.py:76`), stays `False`.
-
-### Structural insight (drives the plan)
-
-Moving architectures into `dl_techniques/models/ccnets/` SOLVES the cross-script-import fragility: today `cifar100.py`<-`mnist.py`, `cifar100_hybrid.py`<-`cifar100.py`, `baseline_comparison.py`/`latent_sweep.py`<-`mnist.py`. Once classes live in the model package, every train script imports cleanly from `dl_techniques.models.ccnets.*` and renaming becomes safe. Therefore: **architecture migration must precede script renaming.**
+- **[HARD] `BinaryMapper` uses raw `tf.*`** -- `tf.constant` in `__init__`, `tf.nn.sigmoid_cross_entropy_with_logits` in `call()` -- must be replaced with `keras.ops` equivalents or removed
+- **[HARD] `FreeTransformerLayer` creates sublayers in `build()`** -- 9 sublayers (`encoder_attention`, `encoder_ffn`, etc.) deferred to `build()` -- must move to `__init__`
+- **[HARD] `PFTBlock` creates sublayers in `build()`** -- `_norm1`, `_norm2`, `_attn`, `_ffn`, `_drop_path` deferred to `build()` -- must move to `__init__`
+- **[HARD] `EomtTransformer.current_step`** -- plain Python int mutated in `call()`, resets on reload, not serialized -- must become a `keras.Variable` or be removed if unused for correctness
+- **[HARD] `TextDecoder.get_config()` omits 6 params** -- `embedding_type`, `positional_type`, `attention_type`, `normalization_type`, `normalization_position`, `ffn_type` missing -- deserialization reverts to defaults silently
+- **[SOFT] `sd3_adaln.py` and `ideogram4_block.py` are intentionally direct-import** -- SYSTEM.md confirms this; do NOT add to `__init__.py`
+- **[SOFT] `free_transformer.py` and `progressive_focused_transformer.py` are absent from `__init__.py`** -- status unclear; export only after fixing violations
+- **[SOFT] `TextEncoder.cls_token`** -- `add_weight` in `build()` is acceptable but inconsistent with `VisionEncoder` (which does it in `__init__`); low priority
 
 ### Corrections
 *Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
+
+- **[NOTE]** `sd3_adaln.py` and `ideogram4_block.py` missing from `__init__.py` is INTENTIONAL per SYSTEM.md ("Direct-import only") -- factory-wiring finding F3 initially flagged as a gap but is correct behavior.
+
+## plan_2026-06-13_28f0b453
+### Index
+
+| # | Topic | File | Summary |
+|---|-------|------|---------|
+| F1 | DETR model code -- all bugs | `findings/detr-model-code.md` | 10 confirmed bugs: wrong attention_type key (crash), bad build signatures (crash), NCHW pos_embed not transposed (silent shape corruption), DetrDecoderLayer reimplements TransformerDecoderLayer from scratch, query_embed weight access fragile, mask shape mismatch, compute_output_shape fails on flat input. |
+| F2 | Factory/transformer compatibility | `findings/detr-factory-compatibility.md` | `'multi_head'` is the valid key (not `'multi_head_attention'`). `TransformerDecoderLayer(use_causal_mask=False)` is a drop-in for `DetrDecoderLayer`. Full-refactor path eliminates ~200 lines. |
+| F3 | Test patterns + DETR test plan | `findings/detr-test-patterns.md` | No DETR tests exist. Must use a minimal stub backbone (avoid ResNet50 download). 5 test classes needed; canonical pattern from `test_thera_model.py` / `test_vit/`. |
+
+### Key Constraints
+
+- **[HARD] `attention_type='multi_head'`** -- the correct registry key; `'multi_head_attention'` raises `ValueError` at construction. `DetrTransformer.__init__` currently uses the wrong string at `model.py:158`.
+- **[HARD] `PositionEmbeddingSine2D` returns NCHW** `(B, C, H, W)` -- must transpose to `(B, H, W, C)` before reshape to `(B, H*W, C)`. Current code silently corrupts positional encodings (`model.py:594`).
+- **[HARD] `TransformerDecoderLayer.build(input_shape)`** expects a single 3-tuple `(B, T, H)` for the decoder input, NOT a 2-tuple `(tgt_shape, memory_shape)` as `DetrDecoderLayer.build` currently does. `DetrTransformer.build` at `model.py:191` must be updated accordingly.
+- **[HARD] `TransformerDecoderLayer.call(inputs, encoder_output, ...)`** -- `encoder_output` is a required positional arg (not a kwarg `memory=`).
+- **[HARD] `use_causal_mask=False`** on `TransformerDecoderLayer` -- DETR queries are not autoregressive.
+- **[HARD] No test suite exists** -- tests must be written; tests must use a minimal stub backbone, NOT `create_detr` which downloads ResNet50 weights.
+- **[SOFT] `DetrDecoderLayer` should be deleted** and replaced with `TransformerDecoderLayer` -- repo convention is reuse over bespoke reimplementation.
+- **[SOFT] `self.query_embed.embeddings`** is safer than `self.query_embed.weights[0]` for accessing the Embedding weight.
+- **[GHOST] `'multi_head_attention'` was never a valid factory key** -- this string was never registered.
+
+### Corrections
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong.*
+
+## plan_2026-06-13_e7b5704d
+### Index
+| # | Topic | File | Summary |
+|---|-------|------|---------|
+| F1 | Repo-wide AST scan | (this file) | 572 keras Layer/Model subclasses. Raw hits: 54 layers w/o compute_output_shape, 11 w/o register, 10 add_weight-in-init, 1 w/o get_config. |
+| F2 | compute_output_shape cluster A (layers core/ts/attn) | `findings/cos-cluster-a.md` | 13 ADD, rest SKIP (abstract bases, RNN cells, inherited). |
+| F3 | compute_output_shape cluster B (heads/experimental) | `findings/cos-cluster-b.md` | 6 ADD (dict-output), SKIP abstract + dynamic-dict multitask. |
+| F4 | compute_output_shape cluster C (models) | `findings/cos-cluster-c.md` | 18 ADD, 5 SKIP (multi-input/non-tensor-arg/3-output cell). |
+| F5 | register / get_config / add_weight | `findings/register-and-addweight.md` | 6 ADD register (5 tabm pkg=TabM incl MLPBlock collision, 1 experimental); Base* abstract SKIP; ALL 10 add_weight-in-init are ACCEPTABLE-LEAVE (config-shape, not input-shape). |
+
+### Key Constraints
+- **[HARD] `MLPBlock` name collision**: `tabm_blocks.py:MLPBlock` vs already-registered `ffn/mlp.py:MLPBlock`. Must register tabm classes with `package="TabM"` or import raises.
+- **[HARD] Abstract base classes are NOT violations**: `BaseMemory/Head/Controller/NTM` (ntm_interface), `BaseExpert` (moe), `BaseGating` (moe), `BaseVisionHead/BaseVLMHead`, `ComplexLayer` are `ABC`/@abstractmethod — do NOT register or add compute_output_shape.
+- **[HARD] RNN cells exempt from compute_output_shape**: `DeepARCell`, `mLSTMCell`, `sLSTMCell`, `NAMCell`, `TRMInner` use the `state_size`/`output_size` cell contract. SKIP.
+- **[HARD] All 10 `add_weight`-in-`__init__` are config-shaped (learnable tokens/temperatures/pos-embeds), NOT input-shaped → working pattern, NOT the guide's anti-pattern. LEAVE (documented).
+- **[SOFT] Dynamic-dict-output heads** (`MultiTaskHead`, `MultiTaskVLMHead`) build their return dict from runtime task names → no static compute_output_shape. SKIP.
+- **[HARD] A wrong compute_output_shape is worse than none**: each added method must be verified against a real forward pass before commit.
+
+### Corrections / Discoveries
+- **[DISCOVERY iter-1]** `mst_correlation_filter.py` was UNIMPORTABLE pre-change (`keras.KerasTensorShape` nonexistent attr in annotations). Fixed (D-002). SystemicGraphFilter was effectively dead code.
+- **[DISCOVERY iter-1] DETR is pre-existing broken/untested**: `DetrTransformer` encoder constructs `TransformerLayer(attention_type='multi_head_attention')` — not a valid factory key ('multi_head' is) → cannot construct. `DetrDecoderLayer.build` unpacks a 2-shape tuple, failing on isolated Keras auto-build. No `tests/test_models/test_detr/` exists. Out of scope (conformance only); compute_output_shape added mirrors detr's own build() unpacking. Flag for a future DETR-fix plan.
+- **[DISCOVERY iter-1] Pre-existing flaky test**: `test_cliffordnet_lmunet.py::TestMRLSerialization::test_save_load_keras_with_mrl` fails at ~2e-5 save/load mismatch — FAILS IDENTICALLY AT BASELINE (my edits stashed). Not a regression; pre-existing numeric/XLA non-determinism.

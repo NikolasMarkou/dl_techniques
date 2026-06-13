@@ -1,5 +1,5 @@
 # System Atlas
-*Last refreshed: plan_2026-06-04_d4ef81f1 | 2026-06-04 | 83 plans closed*
+*Last refreshed: plan_2026-06-13_88695f5c | 2026-06-13*
 *Domain-neutral system map. Rewritten by ip-archivist at CLOSE -- max 300 lines. Read before PLAN/EXPLORE.*
 
 ## Identity
@@ -7,199 +7,265 @@
 
 ## Components
 
+### Layer-reuse audit (plan_2026-06-13_88695f5c)
+Full audit at `research/2026_models_layer_reuse_audit.md`: all 95 inline `keras.layers.Layer` subclasses in `models/` classified as **11 REPLACE / 25 RELOCATE / 59 KEEP** against `layers/`. Key structural findings: (1) `layers/` exposes 8 factory registries (attention 23 keys, ffn 15, norms 16, embedding 10, activations 22, mixtures 3, seq-pooling 3, heads 21); (2) `layers/memory/` is already canonical for MANN/NTM -- memory_bank classes (`LongTermMemoryBank`, `WorkingMemoryBank`, `MemoryReadController`, `MemoryWriteController`) are KEEP (distinct domain, not duplicates); (3) structural gap: `layers/downsample.py`/`upsample.py` are free functions, not Layer classes -- blocks REPLACEs for inline `Downsample`/`Upsample` subclasses; (4) proposed new shared subpackages from the audit: `layers/masking/` (MAE `PatchMasking` + JEPA `TubeMaskGenerator`) and `layers/vae/` (ideogram4 + sd3 shared `ResnetBlock`/`AttnBlock`). 11-bug appendix included; see §Recommendations for 4-tier follow-on work.
+
 ### Layers (`src/dl_techniques/layers/`)
-290+ custom Keras layers -- geometric/Clifford, attention variants (incl. `WaveFieldAttention`), normalization, FFN, routing, logic/arithmetic.
+290+ custom Keras layers -- geometric/Clifford, attention variants (incl. `WaveFieldAttention`), normalization, FFN, routing, logic/arithmetic, mixtures, task heads.
 
-- **`layers/norms/polar_weight_norm.py`** -- polar weight reparameterization. Module-level `polar_encode` / `polar_decode` / `_next_power_of_two`. `PolarWeightNorm` layer: Dense-style; trainable params `radius (units,)` + `angles (units, d-1)`, `d = next_pow2(fan_in)`; kernel reconstructed each forward via decode + slice + renorm-after-slice; exact per-unit L2 norm = |radius|. Module docstring is RBF-structured (merged from former companion `.md`, which is deleted). `PolarInitializer` lives in `initializers/polar_initializer.py` (cross-referenced, not duplicated). 28 PASS tests.
+- **`layers/norms/polar_weight_norm.py`** -- polar weight reparameterization. `PolarWeightNorm` layer: trainable `radius (units,)` + `angles (units, d-1)`. 28 PASS tests.
 
-- **`layers/orthogonal_butterfly.py`** -- `OrthogonalButterfly`: standalone layer, exact-orthogonal Givens butterfly (WtW=I), O(d log d) cost, identity-at-init, invertible (`inverse=True` ctor / `.inverse()` method / `log_det_jacobian==0`). Power-of-two input dim only (no padding). Bare `@register_keras_serializable()` (key `Custom>OrthogonalButterfly`; package defaults to literal `"Custom"`, not `__module__`; omitting `package=` is correct -- do not add it). Module docstring is RBF-structured (merged from former companion `.md`). Not exported from `layers/__init__.py` (intentional). 49 PASS tests.
+- **`layers/orthogonal_butterfly.py`** -- `OrthogonalButterfly`: exact-orthogonal Givens butterfly (WtW=I), O(d log d), identity-at-init, invertible. Power-of-two input dim only. 49 PASS tests.
 
-- **`layers/logic/`** -- DARTS-style differentiable-primitive package (4 source files): `LearnableArithmeticOperator`, `LearnableLogicOperator`, `CircuitDepthLayer`, `LearnableNeuralCircuit`. Defaults: `softplus_temperature=True`, `operation_initializer='zeros'`, `allow_unary_degenerate=False`.
+- **`layers/logic/`** -- DARTS-style differentiable-primitive package: `LearnableArithmeticOperator`, `LearnableLogicOperator`, `CircuitDepthLayer`, `LearnableNeuralCircuit`.
 
-- **`layers/sequence_pooling/`** -- factory'd attention-style package (7 files). Public surface: `{SequencePooling, AttentionPooling, WeightedPooling, PoolingStrategy, AggregationMethod, create_sequence_pooling_layer, create_sequence_pooling_from_config, validate_sequence_pooling_config, get_sequence_pooling_info, SequencePoolingType}`. `SequencePooling` is a facade over 18 strategies + 4 aggregation methods, composing `AttentionPooling` / `WeightedPooling` for the `attention`/`multi_head_attention`/`weighted` strategies. Factory registers 3 types (`'attention'`/`'weighted'`/`'sequence'`); `'sequence'` has no required params. Bare decorators (keys `Custom>ClassName`, `__module__`-independent). Consumed by `transformers/{text_encoder,vision_encoder}.py` via `from ..sequence_pooling import SequencePooling, PoolingStrategy`. Not exported from `layers/__init__.py` (empty by convention). 53 PASS tests. Has README.md + GUIDE.md.
+- **`layers/sequence_pooling/`** -- factory'd attention-style package (7 files). `SequencePooling` facade over 18 strategies + 4 aggregation methods. 53 PASS tests. **Note:** `SequencePooling('attention')` uses `AttentionPooling` (Dense(hidden,tanh) + learnable context vector) -- NOT a drop-in for a head's inline `Dense(1,tanh)` direct-score pooling. `cls/mean/max` strategies ARE value-equivalent at atol 1e-6 to hand-rolled pooling.
 
-- **`layers/sampling.py`** -- TWO stateless reparameterization samplers + inline registry factory. `Sampling`: Gaussian-ball `z = mu + exp(0.5*log_var)*eps`. `HypersphereSampling(radius=1.0, seed=None)`: thin Gaussian shell -- `call([z_mean[B,D], z_log_var[B,1]]) -> z[B,D]`; direction fallback to `e_0=[1,0,...]` when norm<eps; degenerate-direction D-004 anchor at `:409`; raw-int seed D-002 anchor at `:396`. **Factory (inline, D-001 anchor `:457`)**: `SamplingType = Literal["gaussian","hypersphere"]`, `SAMPLING_REGISTRY` (2 types: `gaussian`->Sampling, `hypersphere`->HypersphereSampling), `create_sampling_layer(type, name=None, **kwargs)`, `create_sampling_from_config(config)`, `validate_sampling_config(type, **kwargs)`, `get_sampling_info()`. Factory placed inline (not a package) -- 3 existing `from ...sampling import Sampling` callers are unaffected. Neither sampler exported from `layers/__init__.py`. 55 PASS tests.
+- **`layers/sampling.py`** -- THREE stateless reparameterization samplers + inline registry factory.
+  - `Sampling`: Gaussian-ball `z = mu + exp(0.5*log_var)*eps`.
+  - `HypersphereSampling(radius=1.0, shell_thickness=0.1, seed=None)`: thin strictly-positive shell.
+  - `VMFSampling(seed=None, rejection_oversample=32)`: fixed-K (K=32) Wood/Ulrich-1984 rejection sampler on vMF. `# DECISION plan_2026-06-04_6196678d/D-002` at `:860`. **XLA-GPU-incompatible: uses `keras.random.beta`; any model using VMFSampling MUST override `compile()` to force `jit_compile=False`.**
+  - Module-level vMF numerics helpers: `_bessel_ratio_cf`, `_log_iv`, `vmf_kl_divergence(kappa, dim)`. **70 PASS tests**.
 
-- **`layers/ffn/`** -- factory'd FFN sub-package: 14 registered types via `create_ffn_layer(<type>, ...)`.
+- **`layers/mixtures/`** -- differentiable soft-clustering sub-package. `RBFLayer`, `KMeansLayer` (centroid_initializer='orthonormal' lazy-resolved), `GMMLayer` (mean_initializer='orthonormal' lazy-resolved), `factory.py`. **105 PASS tests**. Known deferred: `cluster_axis` mutate-then-serialize cross-rank reload hazard (same-rank works).
 
-- **`layers/memory/`** -- canonical home for memory-augmented layers (MANN + NTM families + SOMs). `factory.create_mann(...)` routes to a `NeuralTuringMachine`. `MannLayer` / `SOM2dLayer` retained as BC aliases. `AddressingMode` pruned to `{CONTENT, HYBRID}`.
+- **`layers/heads/`** -- task head sub-package. `heads/nlp/` (8 classes + `create_nlp_head`), `heads/vision/` (8 classes + `create_vision_head`), `heads/vlm/` (6 classes + `create_vlm_head`; `VisualGroundingHead`+`MultiTaskVLMHead` UNTESTED), `heads/factory.py` (`create_head(domain: Literal['nlp','vision','vlm'])`). **37 PASS tests**.
 
-- **`layers/transformers/adaln_zero.AdaLNZeroConditionalBlock`** -- factory-configurable via 8 optional ctor kwargs. AdaLN-Zero affine-False norm invariant: D-005 anchor `adaln_zero.py:181`.
+- **`layers/statistics/`** -- probability/statistics layer package. **~257 PASS tests**. `__init__.py` is EMPTY BY DESIGN.
+  - **LIVE**: `MDNLayer` (`mdn_layer.py`): NLL via log-space logsumexp; `mdn_pi` emits RAW LOGITS; `sample(y_pred, temperature, seed)` seeds both `keras.random` draws. `UnifiedScaler`/`RevINScaler` (`scaler.py`): invertible affine normalization; `store_stats=True` refreshes on EVERY forward pass. `MovingStd`, `NormalizingFlowLayer`/`AffineCouplingLayer`.
+  - **DEAD (0 external consumers)**: `InvertibleKernelPCA`+`InvertibleKernelPCADenoiser`, `DeepKernelPCA`, `ResidualACFLayer`/`ACFMonitorCallback`.
+
+- **`layers/time_series/`** -- shared TS utility layers.
+  - **`TemporalConvNet` + `TemporalBlock`** -- shared dilated causal TCN used by `NBeatsXNet` `ExogenousBlock`. **Now Keras-3-canonical** (plan_2026-06-11_5f49f080): explicit `build()` on both classes, `compute_output_shape()`, ctor `ValueError` validation, `Activation` created in `__init__` (not `call()`). **24 PASS tests** (incl. `.keras` round-trip). The prior D-003 `NBeatsXNet` eager-dummy workaround is RESOLVED and removed.
+  - **`xlstm_blocks.py`** -- `mLSTMCell`, `mLSTMLayer`, `sLSTMCell`, `sLSTMBlock` (shared by `xLSTM` LM + `xLSTMForecaster`). **`mLSTMCell` state_size is 4-tuple** `[units, matrix_memory_size, normalizer_size, num_heads]`; 4th state `m_t` is the log-domain max-stabilizer mirroring sLSTM. Finite to any sequence length. 3 `# DECISION plan_2026-06-11_50891da1/D-001` anchors.
+  - **`quantile_head_fixed_io.py`** -- `QuantileHead` shared by TiRex + xLSTMForecaster.
+
+- **`layers/grid_sample.py`** -- pure functions (NOT a Layer): `make_grid` (pixel-center `linspace(-0.5+1/(2n),0.5-1/(2n),n)`, channel-order `[h,w]`, indexing `ij`) + `interpolate_grid` (bilinear or nearest, differentiable w.r.t. coords). TF-backend only; raw `tf.*` inside (no `keras.ops` equivalent). **NOT a drop-in for `SpatialLayer`** (different linspace endpoints + no z-score). D-003.
+- **`layers/thera_heat_field.py`** -- `ThermalActivation` (sin(w0*x+phase)*exp(-(w0*norm)^2*k*t), Gaussian heat-kernel decay) + `HeatField` (SIREN-style per-pixel implicit field). `HeatField` owns global `components (2,hidden)` + scalar `k` weights (`LinearUpInitializer`); receives per-pixel `phi_phase (...,hidden)` and `phi_kernel (...,hidden,out)` as `call` inputs from the hypernetwork (NOT layer weights). Batched `einsum` over `(B,Hq,Wq)` replaces JAX vmap. D-004.
+- **`layers/ffn/`** -- factory'd FFN sub-package: 14 registered types. `FFN_REGISTRY['kan']` registers `KANLinear` with `optional_params` including `base_scaler_initializer` (default `'ones'`). `KANLinear` ctor params: `kernel_initializer` (spline/coefficient path), `base_scaler_initializer` (residual path, new -- wires `KANInitializer(target='residual')`; default `'ones'` is byte-identical to pre-plan). Both serialized via `keras.initializers.serialize()` in `get_config`. Factory silently drops kwargs NOT listed in `optional_params` (factory.py:492-500).
+- **`layers/memory/`** -- canonical home for MANN + NTM families + SOMs.
+- **`layers/transformers/transformer.TransformerLayer`** -- config-driven self-attention encoder block. Delegates to `attention/`, `ffn/`, `norms/` factories. Supports **8 attention types** (plan_2026-06-12_0bb1729b): `multi_head`, `window`, `group_query`, `differential` (legacy 4, byte-stable) + `multi_head_latent`, `anchor`, `lighthouse`, `fnet` (new). `_MASKLESS_ATTENTION_TYPES = {'fnet', 'anchor', 'lighthouse'}` -- `call()` omits `attention_mask` for these. MLA `kv_latent_dim` rides `attention_args` (no new ctor params). All 19 other factory-registered types still raise `ValueError` at construction. **441 PASS tests** in `test_transformers/`.
+- **`layers/transformers/transformer_decoder.TransformerDecoderLayer`** -- canonical cross-attention decoder block (plan_2026-06-12_0bb1729b). Masked/causal self-attn + `multi_head_cross` cross-attn + FFN, all factory-driven, pre/post norm. `call(inputs, encoder_output, self_attention_mask=None, cross_attention_mask=None, training=None)`. Causal mask via arange index-comparison (`row >= col`), NOT `ops.tril`. Exported from `transformers/__init__.py`. Full Keras 3 lifecycle + `.keras` round-trip.
+- **`layers/transformers/free_transformer.FreeTransformerLayer`** -- config-driven self-attention encoder with optional binary quantization path (via `BinaryMapper`). Exported from `transformers/__init__.py` (plan_2026-06-13_250487cb). Guide-compliant: all 9 sublayers in `__init__`, `build()` calls sublayer `.build()` only. **`BinaryMapper`** -- binary quantization mapper; param is `num_bits` (NOT `num_latent_bits`); `pow2` computed inline as `ops.array(...)` in `call()` (not a weight); exported from `transformers/__init__.py`.
+- **`layers/transformers/progressive_focused_transformer.PFTBlock`** -- progressive focused transformer block. Exported from `transformers/__init__.py` (plan_2026-06-13_250487cb). Guide-compliant: all 5 sublayers (`_norm1`, `_norm2`, `_attn`, `_ffn`, `_drop_path`) in `__init__`. **Known pre-existing limitation**: `PFTBlock` outputs a tuple `(output, attention_weights)`; Keras Functional API `.keras` round-trip for tuple-output layers has a pre-existing failure; direct `.keras` layer round-trip works.
+- **`layers/transformers/adaln_zero.AdaLNZeroConditionalBlock`** -- factory-configurable via 8 optional ctor kwargs.
 
 ### Models (`src/dl_techniques/models/`)
 150+ architectures, one subpackage per family.
 
-- **`models/video_jepa/`** -- Video JEPA pretraining model with EMA target encoder. `VideoJEPA` composes online + target encoders, `Predictor`, `TubeMaskGenerator`, multi-horizon prediction heads. Six locked invariants: (1) tube-mask gated on `training` (D-001 `model.py:401`); (2) gate uses `(training is True)` Python identity (D-003 `model.py:407`); (3) `CausalSelfAttnMLPBlock` guards dropout (D-005 `predictor.py:120`); (4) explicit `self.loss_tracker` + `metrics` + `update_state` (D-005 `model.py:176,552`); (5) multi-horizon advisory warning; (6) `ema_divergence` weight-space L2 metric (D-001 `model.py:207,353`). Tests: 78 PASS.
+- **`models/time_series/`** -- namespace package (empty `__init__.py`) grouping all time-series model families. **All 7 families are now Keras-3-canonical** (plan_2026-06-11_fe7401f4): `@register_keras_serializable`, sublayers created in `__init__`, explicit `build()`, full `get_config()`/`from_config()` round-trip, factory function.
 
-- **`models/convnext/`** -- Public surface: `{ConvNeXtV1, ConvNeXtV2, create_convnext_v1, create_convnext_v2}`. Both models accept `drop_path_rate: float = 0.0` and `stochastic_mode: str = 'depth'` (kwarg plumbed through `get_config()`). `'depth'` (default, behavior-preserving) -> `StochasticDepth`; `'gradient'` (opt-in, forward-identity grad-only) -> `StochasticGradient`; other values raise `ValueError`. D-001 anchor: `convnext_v1.py:310`, `convnext_v2.py:327`. Block layers (`ConvNextV1Block`, `ConvNextV2Block`) carry NO drop_path and are reused by 5 other models (convnext_patch_vae, convnext_patch_vae_v2, convunext, bfconvunext + VAE encoder). Factories thread `**kwargs` to the model constructor. `StochasticDepth`/`StochasticGradient` not exported from `layers/__init__.py` -- import direct from module.
+  - **`models/time_series/forecast.py`** -- `Forecast` dataclass `{point, quantiles, quantile_levels, samples}` + `ForecastMixin.predict_forecast(x)->Forecast`. Plain dataclass -- NOT `@register_keras_serializable`. N/A by design.
 
-- **`models/convnext_patch_vae/`** -- Resolution-agnostic ConvNeXt VAE on per-patch 4D latents. Public surface: `{ConvNeXtPatchVAE, ConvNeXtPatchVAEConfig, ConvNeXtPatchEncoder, ConvNeXtPatchDecoder, create_convnext_patch_vae}`. Hierarchical variant fully removed. Architecture: encoder = `Conv2D(stride=patch_size)` stem -> LN -> N x `ConvNextV2Block` -> `Conv2D(1,1,2*latent_dim)` bottleneck -> split `(mu, log_var)`. Latent shape `(B, Hp, Wp, latent_dim)`. Loss: `recon + beta_kl * KL_per_patch + lambda_sigreg * SIGReg`. PRESETS = {tiny, base, large}. Invariants: `img_size % patch_size == 0`; no GlobalAveragePooling2D; `jit_compile=False`. Tests: 21 PASS.
+  - **`models/time_series/deepar/`** -- `DeepAR(keras.Model, ForecastMixin)`. `build(input_shape)` parses dict `{target:(B,T,D), covariates:(B,T,C)}` and explicitly builds LSTM stack + head before `super().build()`. `SUPPORTED_LIKELIHOODS`; `create_deepar` factory. **GOTCHA**: `predict_step` returns `[S,B,H,D]` (axis-0=samples); force `batch_size=B` in `_forecast`. **12 PASS tests**.
 
-- **`models/vae/`** -- Functional-API ResNet VAE. `VAE(sampling_type="gaussian"|"hypersphere_controlled"|"hypersphere_faithful")`: three modes selected at construction. (1) `gaussian` (default): `Sampling([mu[B,D], log_var[B,D]])`; Gaussian KL over `[B,D]`. (2) `hypersphere_controlled`: `HypersphereSampling([mu, mean(log_var,-1,keepdims=True)[B,1]])`; same Gaussian KL on original `[B,D]` log_var -- only the sampling op differs. (3) `hypersphere_faithful`: encoder gets a `Dense(1)` `radius_log_var` head; `HypersphereSampling([mu, radius_log_var[B,1]])`; KL replaced by radius-variance KL `mean(0.5*(exp(rlv_clip)-rlv_clip-1))` (D-003 anchor `:865`); no direction KL; documented NOT a full vMF S-VAE. All modes name the sampler `"vae_sampling"` (D-004 anchor `:293`) so decoder extraction `self.get_layer("vae_sampling").output` is untouched. `z=[B,latent_dim]` in every mode; `z_log_var=[B,D]` gaussian/controlled, `[B,1]` faithful. `get_config` round-trips `sampling_type`. A/B verdict (MNIST 20ep): val_total_loss faithful=0.208 < gaussian=0.227 < controlled=0.261.
+  - **`models/time_series/tirex/`** -- `TiRexCore` + `TiRexExtended`. Both `ForecastMixin`. `use_layer_norm=False` branch uses `keras.layers.Identity()`. `DEFAULT_QUANTILES` class attr. Emits `[B,H]`/`[B,H,Q]`. **32 PASS tests**.
 
-- **`models/memory_bank/`** -- `LongTermMemoryBank`, `WorkingMemoryBank`, `MemoryReadController`, `MemoryWriteController`, `PhaseScheduler`, `WaveFieldMemoryLLM`, `MemoryStats`.
+  - **`models/time_series/mdn/`** -- `MDNModel(keras.Model)`. Golden-Rule conformant; all sublayers created in `__init__`. `compile()` override auto-injects `mdn_layer.loss_func`. NOT ForecastMixin (train wrapper IS ForecastMixin). **12 PASS tests**.
 
-- **`models/burst_dp/`** -- multi-view reference-conditioned vision model. `fusion_type in {"custom","adaln"}`. Trainer `train_burst_dp.py`: `--dataset {coco,div2k,vggface2}`; 20 `--aux-*` CLI flags. 13 PASS tests.
+  - **`models/time_series/nbeats/`** -- `NBeatsNet(keras.Model, ForecastMixin)` + `NBeatsXNet(keras.Model)`. `NBeatsXNet.build()` calls `block.build(dummy_resid_shape)` for each block; no eager dummy forward (D-003 resolved). `NBeatsNet.NORM_EPSILON = 1e-7`. **33 PASS tests**.
 
-- **`models/vit/`** -- `ViT`, `create_vit`, `create_inference_model_from_training_model`. `ViT.MODEL_VARIANTS = {vit_pico/tiny/small/base/large/huge}`. Trainer `train_vit.py` is canonical Pattern-4 image reference.
+  - **`models/time_series/prism/`** -- `PRISMModel(keras.Model, ForecastMixin)`. `MODEL_VARIANTS` + `from_variant` class interface. `DEFAULT_QUANTILES`. Emits `[B,H,F]`/`[B,H,F,Q]`. **60 PASS tests**.
 
-- **`models/cliffordnet/`** -- public surface `{CliffordNet, create_cliffordnet, CliffordCLIP, CliffordNetLMRouting, CliffordNetLMUNet, CliffordNetEmbedding}`. `CliffordNetLMUNet` flat-keyed dict output; width-rule "Power-of-2 anchored" D-002 `lmunet.py:415`.
-  - **`CliffordCLIP`** (`clip.py`): `text_use_global_context: bool = False` ctor kwarg. `logit_scale` pinned `dtype="float32"` under bf16 global policy (`# DECISION plan_2026-05-31_76981d58/D-001` at `clip.py:1044`). `encode_image()` / `encode_text()` return L2-normalized embeddings by default. Wrapper model is `ContrastiveCliffordCLIP` (`self.clip_model`); head LayerScale at `inner.{vision,text}_head_scale.gamma` (absent for `head_kind='plain'` -- always getattr-guard).
-  - **SRGP docstring**: `clifford_block.py:65-66` correctly reads `(c-s)%D`; impl `roll(shift=s)` @ line 223 is correct.
+  - **`models/time_series/adaptive_ema/`** -- `AdaptiveEMASlopeFilterModel`. PERMANENTLY ForecastMixin-EXEMPT: signal/regime outputs live in input domain `[B,T]`, not forecast horizon `[B,H,F]`. **19 PASS tests**.
 
-- **`models/ccnets/`** -- Causal Cooperative Nets framework + migrated architectures. Framework files unchanged: `base.py`, `orchestrators.py`, `trainer.py`, `losses.py`, `control.py`, `utils.py`. Migrated: `blocks.py` (FiLMLayer/ConvBlock/DenseBlock, depend on GoLU); `architectures/{mnist,cifar100,text}.py` (task Explainer/Reasoner/Producer networks, AR+non-AR text producers, factories `create_{mnist,cifar100,text}_ccnet`, HybridCCNetOrchestrator/TextCCNetOrchestrator/ARTextCCNetOrchestrator). Package `__init__` exports 25 symbols. Invariants: variational Explainer returns `(mu, log_var)`; bias-free `Dense(use_bias=False)` label projection (never Embedding); `package=` qualified serialization keys (`ccnets_cifar100`, `ccnets_text`); `dynamic_weighting` stays `False` (deprecated). Tests: `test_orchestrator.py` + `test_architectures.py` (28). Pre-existing flaky: `test_orchestrator.py::TestTrainStep::test_training_reduces_total_error` (no seed).
+  - **`models/time_series/xlstm/`** -- xLSTM family. `xLSTM` (LM) + `xLSTMForecaster` (ForecastMixin). `DEFAULT_QUANTILES`. `MODEL_VARIANTS` (small/base/large) + `from_variant`. Emits `[B,H,Q]`/`[B,H,F]`. **67 PASS tests** (48 LM + 13 forecaster + 2 long-seq + 4 new).
 
-- **`models/{bert, gpt2, tree_transformer, depth_anything, accunet, tiny_recursive_model, prism, lewm}/`** -- each: `{Model, create_<model>}` public surface, `from_variant(pretrained=True)` raises `NotImplementedError`.
+- **`models/vae/`** -- Functional-API ResNet VAE. Three sampling modes. **77 PASS tests** (GPU).
+- **`models/video_jepa/`** -- Video JEPA pretraining. Six locked invariants. **78 PASS tests**.
+- **`models/thera/`** -- THERA arbitrary-scale super-resolution (neural heat fields). Keras 3 port of JAX/Flax reference. **6-variant matrix**: `{edsr-baseline, rdn} x {air, plus, pro}` exposed via `build_thera(backbone, size)` / `Thera.from_variant(name)`. Architecture: backbone (EDSR or RDN, no upsampling) -> tail (feature refiner) -> hypernetwork (1x1 conv emits per-pixel phi, sampled at query coords via order=0 grid_sample, decoded via HeatField einsum) -> raw residual field. Trainer owns standardize/denorm/+source_nearest. Full guide compliance (compute_output_shape everywhere, Intent/Architecture docstrings). **146 PASS tests** (GPU1, post plan_2026-06-12_f8843c4f). D-001..D-013.
+  - **`models/thera/edsr_backbone.py`** -- `EDSRBackbone` (16 res blocks, num_feats=64, no upsampling). `res_scale=1.0` default is numerically identical to THERA reference; pass 0.1 for textbook EDSR. D-005.
+  - **`models/thera/rdn_backbone.py`** -- `RDNBackbone` (dense-concat RDBs, explicit channel-tracked build). Channel arithmetic: entering RDB = G0 channels; after c-th RDBConv = G0+c*G; local 1x1 fusion -> G0; global fusion 1x1 consumes D*G0.
+  - **`models/thera/tails.py`** -- `TheraTailAir` (identity), `TheraTailPlus` (ConvNeXt stack; sub-layers in `__init__`, FLAT list), `TheraTailPro` (SwinIR/RSTB; reflect-pads H,W to window-size multiple -- NOT assert-divisibility). Swin blocks in FLAT `self.swin_blocks` (nested `List[List[Layer]]` silently breaks `.keras` reload). D-007. **`build_thera_tail(size, in_channels=None)`**: accepts `in_channels` (plan_2026-06-12_bda3e5b5 D-003); forwarded to `TheraTailPlus` which creates a leading `_Projection` when `in_channels != 64`. Default 64ch path: no-op (no projection, byte-identical weights). **CONTRACT (documented plan_2026-06-12_f8843c4f D-003)**: callers with a non-64ch backbone MUST pass `in_channels`; `build_thera` derives this automatically; manual `Thera(tail=build_thera_tail("plus"))` callers must plumb it themselves. Fail-loud guard at `tails.py:305` raises `ValueError` matching `in_channels` on mismatch. Contract documented in `build_thera_tail`, `TheraTailPlus`, and `Thera.__init__` docstrings; pinned by `test_tailplus_contract_message`.
+  - **`models/thera/hypernetwork.py`** -- `TheraHypernetwork`. 1x1 `out_conv` emits `phi=phi_phase||reshape(phi_kernel)`. Static numpy `make_grid` fast path; dynamic `keras.ops.linspace/meshgrid` fallback (None spatial dims). `decode_with_jac`: nested `tf.GradientTape.batch_jacobian(experimental_use_pfor=False, persistent=True)` for exact spatial Jacobian at t=0. D-008/D-010.
+  - **`models/thera/model.py`** -- `Thera(keras.Model)`. Explicit `build([source,coords,t])` chains backbone->compute_output_shape->tail->hypernet. `build_thera` factory derives `feat_ch = backbone.compute_output_shape((None,None,None,3))[-1]` and passes `in_channels=feat_ch` to `build_thera_tail`. Serializes backbone/tail via `keras.saving.serialize_keras_object`. D-009. **Deliberate NO-FIX**: `k` unconstrained (matches reference); full Jacobian on val `test_step` (intentional val=train objective); height-only eval `t` (matches reference); `tf.shape`/ops.shape mix (D-008 waiver).
+  - **Known open items**: REV-W1 / REV-W2 / OBS-1 all RESOLVED (plan_2026-06-12_f8843c4f). Remaining deferred: end-to-end val-curve smoothness at scale (DIV2K full run) -- mechanism unit-proven, scale benefit not yet observed in production training.
+- **`models/convnext/`** -- `{ConvNeXtV1, ConvNeXtV2, create_convnext_v1, create_convnext_v2}`. Reference canonical Keras-3 model pattern. Block layers carry NO drop_path; reused by 5 other models.
+- **`models/convnext_patch_vae/`** -- Resolution-agnostic ConvNeXt VAE on 4D spatial latents. **OOM rule**: patch_size=4@img256 = 4096-position latent grid (OOMs at 24GB). **60 PASS tests** (GPU).
+- **`models/cliffordnet/`** -- `{CliffordNet, create_cliffordnet, CliffordCLIP, ...}`. `CliffordCLIP`: `logit_scale` pinned `dtype="float32"` under bf16.
+- **`models/ccnets/`** -- Causal Cooperative Nets; custom GradientTape loop. 28 tests.
+- **`models/{bert, gpt2, tree_transformer, depth_anything, accunet, tiny_recursive_model, lewm}/`** -- each: `{Model, create_<model>}` + `from_variant(pretrained=True)` raises `NotImplementedError`.
 
 ### Initializers (`src/dl_techniques/initializers/`)
-Orthonormal, He-orthonormal, hypersphere, Haar-wavelet, `PolarInitializer` initializers.
+Public API exports: `OrthonormalInitializer`, `HeOrthonormalInitializer`, `OrthogonalHypersphereInitializer`, `HaarWaveletInitializer`, `create_haar_depthwise_conv2d`, `PolarInitializer`, `LinearUpInitializer`, `KANInitializer`, `create_kan_initializers`.
 
-### Losses & Metrics (`src/dl_techniques/{losses,metrics}/`)
-Masked CLM loss, contrastive losses, `Perplexity`, `BitsPerToken`, `BitsPerCharacter`. **`SegmentationWrapperLoss`** is the canonical save/load-friendly segmentation loss.
+- **`initializers/polar_initializer.py`** -- `PolarInitializer`. Structural template for all new initializers: bare `@keras.saving.register_keras_serializable()`, `np.random.default_rng(seed)` -> numpy arithmetic -> `ops.cast(ops.convert_to_tensor(result), dtype)`, minimal `get_config`/`from_config`, `__repr__`.
+- **`initializers/linear_up_initializer.py`** -- `LinearUpInitializer`. Samples 2D frequency components uniform on a disk of radius `scale`: random angle + radius `r = scale*sqrt(U[0,1])`. Used to initialize `HeatField.components`. Extends the PolarInitializer direction-sampling pattern with a random radius. Guide-compliant (Intent docstring). D-004.
+- **`initializers/kan_initializer.py`** -- `KANInitializer` + `create_kan_initializers`. Shape-driven initializer for KAN weight roles (Rigas et al. 2026). Schemes: `power_law`, `glorot_inspired`, `baseline`. Targets: `residual` (2D `(n_in, n_out)`) and `spline` (3D `(n_in, n_out, n_coeffs)`). N-consistency with `KANLinear`: `N = shape[-1]` for 3D spline; `N = grid_size + spline_order` for 2D residual (NOT the paper's G+k+1 -- see D-001). Per-call seed determinism via `np.random.default_rng(seed)`. `create_kan_initializers(grid_size, spline_order, scheme, ...) -> (residual_init, spline_init)`. Wire: residual -> `KANLinear(base_scaler_initializer=...)`, spline -> `KANLinear(kernel_initializer=...)`.
 
-### Training utilities (`src/dl_techniques/training/`)
-`token_superposition.py` (TST): `TSTConfig`, `TSTState`, `TSTEmbedding`, `TSTCausalLMLoss`, `TSTPhaseCallback`. Invariant (D-007 `token_superposition.py:691`): TWO named dataset transforms, NOT a single `tf.cond`. 54 PASS tests.
+- **`models/ideogram4/`** -- flow-matching DiT + Flux2 KL-VAE package (plan_2026-06-12_59a18a10). **183 PASS tests** (GPU1). Conditioning abstracted as `llm_features: (B, L_text, 4096)` call input; Qwen3-VL stays in PyTorch.
+  - `config.py`: `Ideogram4Config` + `AutoEncoderParams`; `PRESETS = {"tiny": ..., "full": ...}`. Tiny preset smoke-trained: loss 2.595→1.671 (8 epochs, RTX 4070, no NaN).
+  - `transformer.py`: `Ideogram4Transformer(keras.Model)` -- packed image+text stream DiT; `Ideogram4FinalLayer`. Factory: `create_ideogram4_transformer`.
+  - `vae.py`: Flux2 KL-VAE -- `ResnetBlock` (GroupNorm32+swish; `nin_shortcut` conditional by channel-mismatch, D-007), `AttnBlock`, `Downsample`, `Upsample` (thin wrapper -- D-005), `Encoder`, `Decoder`, `AutoEncoder`. All 6 composite layers have explicit `build()` (guide §3.2, iter-2). Factory: `create_autoencoder`.
+  - `scheduler.py`: `LogitNormalSchedule` (scipy ndtri/expit, float64->float32, logsnr clamp) + `get_schedule_for_resolution` + `make_step_intervals`. Plain Python -- not a Keras layer.
+  - `pipeline.py`: `Ideogram4Pipeline` -- `_build_inputs`, Euler + asymmetric-CFG denoise loop, unpatchify, VAE decode. Plain Python.
+  - `constants.py` / `latent_norm.py`: ported Ideogram4 constants + LATENT_SHIFT/SCALE 128-vecs.
+  - **Reuse map**: RMSNorm (`layers/norms/`), SwiGLUFFN (`layers/ffn/`), Gaussian `Sampling` (`layers/sampling.py`), `keras.layers.GroupNormalization` (built-in). Built new: mRoPE, attention, block, VAE conv blocks, scheduler, velocity loss, pipeline.
+  - **Not weight-loadable**: nf4/fp8 PyTorch safetensors require an external converter. Architecture is faithful (component-level numpy-reference parity at atol ≤ 1e-6). Full-scale preset defined but not trained (multi-billion params, requires multi-GPU).
+
+- **`models/sd3_mmdit/`** -- dual-stream SD3 MMDiT flow-matching text-to-image port (plan_2026-06-12_dfce0712). **177 PASS tests** (GPU1). Tiny preset smoke-trained: loss 2.255->1.568 (6 epochs, RTX 4070, no NaN).
+  - `config.py`: `SD3MMDiTConfig` + `PRESETS = {"tiny": ..., "full": ...}` + `get_sd3_config(variant) -> (SD3MMDiTConfig, AutoEncoderParams)`. Tiny: dim=192, heads=6, depth=4. Full: dim=1536, heads=24, depth=24.
+  - `blocks.py`: `MMDiTBlock` (dual-stream; optional SD3.5-medium dual-attn `attn2` via `keras.layers.MultiHeadAttention`, D-005) + `MMDiTFinalLayer`.
+  - `transformer.py`: `SD3MMDiT(keras.Model)` -- dict-input call `{latent, encoder_hidden_states, pooled_projections, timestep}`; static non-trainable 2D-sincos pos-embed (`add_weight(trainable=False)`, D-006); `create_sd3_mmdit` factory. Reuses `PatchEmbedding2D`.
+  - `scheduler.py`: `FlowMatchEulerScheduler` -- `add_noise(x0, noise, t) = (1-t)*x0 + t*noise`; `euler_step(xt, v, dt) = xt + v*dt` with SIGNED `dt = t_next - t` (t=0 data, t=1 noise; D-007); logit-normal time sampling.
+  - `vae.py`: thin config wrapper over `ideogram4.AutoEncoder` with `z_channels=16`; SD3 scalar `SD3_SCALING_FACTOR=0.13025` / `SD3_SHIFT_FACTOR=0.0` (NOT ideogram4 per-channel `latent_norm.py`; D-008). `create_sd3_vae` factory. Tiny: `(B,32,32,3) <-> (B,16,16,16)`.
+  - `text_encoders.py`: `CLIPTextEncoder` (QuickGELU, causal mask via arange index-comparison NOT `ops.tril`, learned abs-pos, pooled-EOS), `OpenCLIPTextEncoder` (subclass, larger dims, GELU), `T5Encoder` (relative-position-bucket bias, RMSNorm pre-norm, gated-GELU FFN, 4096-dim; NO `1/sqrt(d)` attention scaling -- D-009). All consume INTEGER token-id tensors. No tokenizers, no pretrained weights.
+  - `pipeline.py`: `SD3Pipeline` -- encode text (CLIP pooled + T5 sequence), sample latent, Euler denoise loop, VAE decode. Plain Python.
+  - `PORT_NOTES.md`: reuse map (drop-in / adapted / new), encoder-faithfulness notes, no-pretrained constraint, out-of-scope (tokenizers, FID, full-preset training).
+  - **Reuse map**: `ideogram4.AutoEncoder` (D-002), `RMSNorm`, `ScalarSinusoidalEmbedding` (`input_range=(0,1000)`), `PatchEmbedding2D`, `Sampling`, `FlowMatchingVelocityLoss`. Built new: `MMDiTJointAttention`, AdaLN trio, `GELUMLPFFN`, `MMDiTBlock`, scheduler, text encoders, pipeline.
+  - **Not weight-loadable**: no pretrained-weight loading path in this repo. Architecture faithful (component-level parity at atol <=1e-6). Full-scale preset defined but untrained.
+
+- **New layers for `models/ideogram4/`**:
+  - `layers/embedding/multi_axis_rope.py` -- `Ideogram4MRoPE`: 3D t/h/w rotary PE; static one-hot `(head_dim/2, 3)` weight + einsum replaces PyTorch scatter (XLA-safe; D-003). **Factory key `mrope_ideogram4`** in `embedding/factory.py` (plan_2026-06-12_7af1504c); required `[head_dim, rope_theta, mrope_section]`.
+  - `layers/embedding/scalar_sinusoidal_embedding.py` -- `ScalarSinusoidalEmbedding`: sinusoidal embed + SiLU MLP; freqs stored as `add_weight(trainable=False)` (`.keras` round-trip safe; D-002). **Factory key `scalar_sinusoidal`** in `embedding/factory.py`; required `[dim]`, optional `input_range=(0.0,1.0)`.
+  - `layers/attention/ideogram4_attention.py` -- `Ideogram4Attention`: fused QKV, per-head RMS QK-norm, mRoPE inject, additive finite `-1e9` segment mask, manual SDPA. **Direct-import only -- NOT in attention factory** (non-standard `call(x, segment_ids, cos, sin)` is a semantic hazard as a factory-registered type).
+  - `layers/transformers/ideogram4_block.py` -- `Ideogram4TransformerBlock`: 4-stream tanh-AdaLN, RMSNorm sandwich + `Ideogram4FinalLayer`. **Direct-import only -- no `transformers/factory.py` exists**.
+
+- **New layers for `models/sd3_mmdit/`** (plan_2026-06-12_dfce0712):
+  - `layers/attention/mmdit_joint_attention.MMDiTJointAttention` -- per-stream Q/K/V Dense, concat image+text along seq, manual SDPA, split back; per-head QK-RMSNorm. **Direct-import only** (non-standard `call((hidden_states, encoder_hidden_states))` two-tensor tuple).
+  - `layers/transformers/sd3_adaln.{AdaLayerNormZero, AdaLayerNormZeroX, AdaLayerNormContinuous}` -- 6-way / 9-way / 2-way AdaLN modulation for SD3 dual-stream. **Direct-import only**.
+  - `layers/ffn/gelu_mlp_ffn.GELUMLPFFN` -- GELU-tanh FFN (`keras.activations.gelu(approximate=True)`). **Factory key `gelu_tanh`** in `ffn/factory.py` (standard single-tensor call; 15th FFN type).
+
+### Losses (`src/dl_techniques/losses/`)
+- **`losses/thera_jacobian_tv.py`** -- pure functions: `thera_tv_penalty(jac) -> scalar` (L1 mean|jac|) + `thera_total_loss(recon, jac, tv_weight)`. Jacobian produced by `TheraHypernetwork.decode_with_jac` at t=0 (un-smoothed field). D-010.
+- **`losses/flow_matching_velocity_loss.py`** -- `FlowMatchingVelocityLoss`: rectified-flow velocity MSE `||v_pred - (x1-x0)||^2` + scalar `loss_weight`. Exported from `losses/__init__.py`.
+
+### Optimization (`src/dl_techniques/optimization/`)
+Custom optimizer sub-package. `OptimizerType` enum + `optimizer_builder(config, lr)` dispatch in `optimizer.py`. Default constants in `constants.py` (wildcard-imported into `optimizer.py`). Structural template for new optimizers: `muon_optimizer.py`.
+
+- **`Muon`** -- quasi-hyperbolic momentum optimizer with Nesterov update + orthogonal projection via Newton-Schulz.
+- **`SGLD`** -- Stochastic Gradient Langevin Dynamics; stateless (no per-variable state beyond built-ins). Passes weight_decay through to super().
+- **`VSGD`** -- Variational SGD (Chen et al. 2024); stateful per-variable `mug`/`bg`/`bhg` allocated via `add_variable_from_reference`. Derived constants `_pa2`/`_pbg2`/`_pbhg2` computed in `__init__`. `ops.where` for graph-safe step-1 branch (`self.iterations == 1` on first call). Manual AdamW-style weight decay (Muon pattern: passes `weight_decay=0.0` to super). 7 hyperparams. **16 PASS tests**.
+- All three exported from `__init__.py` as `Muon`, `SGLD`, `VSGD`. Factory key for VSGD: `"vsgd"`.
+
+### Metrics (`src/dl_techniques/metrics/`)
+Masked CLM loss, contrastive losses, `Perplexity`, `BitsPerToken`, `BitsPerCharacter`. `SegmentationWrapperLoss` is canonical save/load-friendly segmentation loss.
+
+- **`metrics/probabilistic_forecast_metrics.py`** -- `CoverageMetric(low_index, high_index)` + `SharpnessMetric(low_index, high_index)`. **14 PASS tests**.
 
 ### Analyzer (`src/dl_techniques/analyzer/`)
-WeightWatcher/SETOL HTSR spectral analysis framework. **Authoritative reference: Charles Martin's WeightWatcher source.** Where WW and SETOL.md conflict on mechanism or terminology, WW wins (user-declared, D-001 bc986e52). Compliance doc: `src/dl_techniques/analyzer/SETOL.md`.
-
-- **`spectral_metrics.py`**: core per-layer computation. Eigenvalues default to σ² (no 1/N); 1/N is an opt-in `normalize` flag. ERG path applies `rescale_eigenvalues` wscale (Σλ→N, SETOL §10.2 sanctioned correction; byte-identical to WW). Key outputs:
-  - `alpha`: Clauset MLE power-law exponent (joint xmin/KS fit). Tail `n<20` uses bias-corrected `alpha_bc = 1+(n-1)/s` with penalized xmin `J = D_ks − 0.868/√n` (WW small-N branch, D-008 anchor at :265).
-  - `alpha_weighted` (`MetricNames.ALPHA_WEIGHTED`): WW canonical = α·log₁₀(λ_max) on σ² eigenvalues. **Primary cross-architecture quality metric.**
-  - `alpha_hat`: alias of `alpha_weighted` (same value; SETOL-paper notation).
-  - `alpha_hat_normalized`: /N variant = α·log₁₀(λ_max/N) — non-WW SETOL extra, documented as such.
-  - `mp_softrank` (`MetricNames.MP_SOFTRANK`): = λ_plus/λ_max after removing num_spikes outliers (WW R6; `compute_mp_softrank`).
-  - `rand_sv_ratio` (`MetricNames.RAND_SV_RATIO`): = max(rand_evals)/max(evals) — randomization diagnostic (distinct from mp_softrank).
-  - `erg_delta_lambda_min`: **signed** gap (SETOL §7.3). `abs()` MUST NOT be added. ERG tail boundary computed by reusing `compute_detX_constraint` (descending-product loop; D-004 anchor at :424).
-  - MP edge: `σ²(1+1/√Q)²`, `σ²(1−1/√Q)²` where Q=N/M, N=larger dim (WW-exact; D-002 anchor at :543). NOT `(1+√Q)²`.
-  - TW threshold: `bulk_max + c_TW·√[(1/√Q)·bulk_max^(2/3)·M^(-2/3)]`; `SPECTRAL_TW_SAFETY_FACTOR=1.0` (WW-exact default; D-003 anchor at :551).
-  - `classify_learning_phase`: α<0 "failed"; 0≤α<2 "over-trained"; 2≤α≤6 "good"; α>6 "under-trained" (WW labels; D-009 anchor at ~:458). No "ideal" band. No "over-regularized".
-- **`spectral_visualizer.py`**: (α, Δλ_min) funnel plot (WW-neutral phrasing; α=2 over-trained/good boundary); MP bulk envelope overlay on per-layer ESD panel.
-- **`constants.py`**: `MetricNames` enum — `ALPHA_WEIGHTED`, `ALPHA_HAT`, `MP_SOFTRANK='mp_softrank'`, `RAND_SV_RATIO='rand_sv_ratio'`, `MATRIX_RANK`, `NORM`, `SPECTRAL_NORM`; `SPECTRAL_DEFAULT_SUMMARY_METRICS` includes `ALPHA_WEIGHTED`+`ALPHA_HAT`+`LOG_SPECTRAL_NORM`; `SPECTRAL_SMALL_N_CUTOFF=20`.
-- **`spectral_utils.py`**: NORM layers are explicitly skipped with `logger.debug` ("degenerate ESD; spectral analysis skipped"); D-010 anchor at :162.
-- Conv2D layers: reshaped to (H·W·C_in, C_out). BN/Dropout/bias excluded. Correlation-trap randomize protocol preserved.
-- **α̂ normalization**: `MetricNames.ALPHA_WEIGHTED` exposes the WW un-normalized convention; `alpha_hat_normalized` (/N) is a documented non-WW extra.
-
-### Callbacks (`src/dl_techniques/callbacks/`)
-Keras callbacks; analyzer integration; `TemperatureAnnealingCallback`.
-
-### Utils / Datasets
-- `utils/`: `logger`, `weight_transfer`, GPU setup.
-- `datasets/vision/coco_burst_dp.py` + `image_folder_burst_dp.py`. 9 PASS tests.
+WeightWatcher/SETOL HTSR spectral analysis. Core: `alpha_weighted`; MP edge; TW threshold; ERG `erg_delta_lambda_min` signed (abs() MUST NOT be added). Learning phases: over-trained(<2)/good([2,6])/under-trained(>6).
 
 ### Applications (`src/applications/`)
-
-- **`applications/bias_free_denoiser/`** -- flat 4-file layout (`__init__.py`, `samplers.py`, `main.py`, `README.md`). Conventions: logger only, type hints, Google docstrings.
-
-- **`applications/anomaly_detection/`** -- `PatchEntropyAnomalyDetector` reusing single-scale `ConvNeXtPatchVAE` encoder-only (`encode()` -> `(mu, log_var)`) for per-patch KL anomaly scoring. Entry points: `from_pretrained(path)`, `preprocess()`, `kl_maps()`, `anomaly_mask()`, `score()`, `overlay()`. GUI: `streamlit_app.py` (isolated). Invariants: `log_var` clipped `[-10, +10]`; inputs `/255.0` in `[0,1]`.
+- **`anomaly_detection/`** -- `PatchReconstructionAnomalyDetector` on ConvNeXtPatchVAE; Streamlit GUI.
 
 ### Training pipelines (`src/train/`)
-- **`train/vae/`** -- VAE training + sampler comparison.
-  - `train_vae.py`: `--sampler {gaussian,hypersphere_controlled,hypersphere_faithful}` (default gaussian), `--seed`, `--smoke` (1 epoch + subset), `--no-epoch-analyzer` (pass to `create_callbacks`; default OFF = analyzer enabled). Saves `config.json`. `CUSTOM_OBJECTS` includes `HypersphereSampling`. Monitor metric: `val_total_loss`. Local alias `total_loss`->`loss` before calling `generate_training_curves` (shared util hard-requires `'loss'` key -- do NOT fix the util).
-  - `run_sampler_comparison.py`: CPU-only 3-arm serial driver (`CUDA_VISIBLE_DEVICES=''` at module top). Runs 3 arms (gaussian/hypersphere_controlled/hypersphere_faithful) serially; always passes `--no-epoch-analyzer`; calls `compare_runs` pairwise vs gaussian baseline; results under `results/vae_sampler_compare_{dataset}/{controlled,faithful}/`.
-- **`train/video_jepa/`** -- V-JEPA pretrainer; smoke + BDD100K dataset wiring; reload-check at `train_video_jepa.py:515`.
-- **`train/convnext_patch_vae/`** -- ConvNeXtPatchVAE trainer (single-scale only). `compile(loss=None, jit_compile=False)`. Reload check via `encode()` mu. `--smoke` with explicit tiny `img_size=32` override. `TrainingConfig.augment_color: bool = True`.
-- **`train/cliffordnet/`** -- CliffordNet + CliffordCLIP trainers.
-  - **`train_clip.py`**: `--mixed-bfloat16`, `--probe-every-steps` default=750, `--gamma-probe-every-steps`; `GammaProbeCallback` logs mean `vision_head_scale.gamma` / `text_head_scale.gamma`. `IMAGENET_MEAN/STD` used for the `'imagenet'` normalization branch (`# DECISION plan_2026-06-02_35651564/D-002` at line 88).
-  - **`eval_clip_retrieval.py`** (159 LOC) -- COCO zero-shot R@1/5/10 harness.
-  - **`filter_cc3m_clipscore.py`** (323 LOC) -- CC3M per-pair CLIP-score caption filter. Full 2.9M pass is user-launched.
-- **`train/logic/`** -- LearnableNeuralCircuit benchmark suite + `multiseed_sweep.py` subprocess driver + `multiseed_stats.py`. 30-test stats harness.
-- **`train/rms_variants_train/`** -- 8-norm comparison harness; `NORM_VARIANTS` append-only invariant (D-001 `config.py:27`). 637+ PASS tests.
-- **`train/convnext/`** -- 3 ConvNeXt trainers + 1 comparison driver:
-  - `train_convnext_v1.py`: CLI flags `--stochastic-mode {depth,gradient}` (default `depth`), `--seed`, `--no-epoch-analyzer`. Compile with `SparseCategoricalCrossentropy(from_logits=True)` -- the classifier head is bare Dense (no softmax; emitting logits). `set_seeds(args.seed)` called before `load_dataset`.
-  - `train_convnext_v2.py`: mirror of v1 plumbing. Already had `from_logits=True`.
-  - `train_convnext_v2_mae.py`: `--stochastic-mode` + `--seed` threaded explicitly through fixed-signature `create_convnext_encoder(stochastic_mode=...)` -> `create_convnext_v2(...)` (no `**kwargs` fallback; param must be named explicitly at every boundary).
-  - `run_stochastic_comparison.py`: serial subprocess driver. Launches each mode once, discovers the run dir via snapshot-diff of `results/` (assert exactly-one-new-dir or `SystemExit`). Driver runs **CPU-only** (`CUDA_VISIBLE_DEVICES=''` at module top before TF import) to avoid fragmenting the trainer's XLA allocator. Child subprocess gets GPU via hard-set `env['CUDA_VISIBLE_DEVICES']=str(args.gpu)`. Calls `compare_runs(depth_dir, gradient_dir, labels=('depth','gradient'), ...)` from `train.common.compare_runs`.
-  - `README.md`: documents the stochastic_mode knob, driver usage, experiment verdict (depth > gradient on CIFAR-10), and 4 gotchas (from_logits, driver CPU-only, strides coupling, epoch-analyzer cost).
-  - **Experiment verdict (CIFAR-10, seed 42)**: `depth` (StochasticDepth) outperforms `gradient` (StochasticGradient) -- +0.6pt at 30ep, +1.26pt at 100ep; gradient mode overfits more. Prefer `stochastic_mode='depth'` (default).
-
-- **`train/ccnets/`** -- Causal Cooperative Nets trainers. 4 `train_<task>.py` (mnist/cifar100/cifar100_hybrid/text_sentiment) + 2 `run_<experiment>.py` (baseline_comparison/latent_sweep). All architecture imported from `dl_techniques.models.ccnets`; thin wrappers with main/argparse/setup_gpu/set_seeds/--smoke. Uses CUSTOM `CCNetTrainer` GradientTape loop (NOT model.fit / create_callbacks) — intrinsic CCNet deviation. Sanctioned data-prep sibling edges: `run_latent_sweep`->`train_mnist` (DataConfig + prepare_mnist_data), `train_cifar100_hybrid`->`train_cifar100` (data/eval/config). `README.md` (not CLAUDE.md). Smoke train: acc=0.9504 on mnist, loss finite/decreasing.
+- **`train/time_series/`** -- namespace package grouping **7** active TS trainer packages: `mdn/`, `nbeats/`, `prism/`, `tirex/`, `adaptive_ema/`, `deepar/`, `xlstm/`. `nbeats_advanced` was DELETED (plan_2026-06-11_49671f7a D-004; recoverable from git `0f77836c`). Invocation: `python -m train.time_series.<model>.train_<model>`. **All 7 trainers functional.**
+- **`train/thera/`** -- THERA arbitrary-scale SR training package.
+  - `data.py`: `build_arbitrary_scale_dataset(image_dir, ..., training=True, drop_remainder=True)` -- pure `tf.data` graph pipeline. Bicubic downscale to 48x48 `source` (`antialias=True`); nearest upsample to `source_nearest`; pixel-center coord grid; random query sampling. Returns raw `[0,1]` tensors + 5 keys. Trainer owns standardize/+source_nearest. D-011. **`training` flag (plan_2026-06-12_f8843c4f D-001)**: trace-time Python bool threaded through `_map_fn` closure into `_per_sample`. When `training=False`, `_per_sample` uses a fully deterministic transform: fixed scale = midpoint of `scale_range`; `do_aug=False`; center crop; no flip/rot; even-stride query selection. The `training=True` (default) arm is byte-identical to pre-D-001. **`drop_remainder` param (D-002)**: exposed on `build_arbitrary_scale_dataset`; val build passes `drop_remainder=False` so any non-empty corpus yields >=1 batch. Default `True` preserves train behavior. **Reproducibility**: `_per_sample`/`_map_fn` accept optional `seed`; query-point shuffle seeded when set (plan_2026-06-12_bda3e5b5 A4). Training augmentation (crop/flip/rot90) unseeded by design.
+  - `train_thera.py`: `TheraTrainingModel` wraps inner `Thera`. Custom `train_step`: standardize source, t=scale^-2, forward with optional return_jac, denorm+source_nearest, Charbonnier recon + tv_weight*TV. Explicit loss/mae/tv/psnr trackers (Keras 3.8 no auto-tracker). `jit_compile=False`. Saves inner `thera` as `thera_model.keras`. `tv_weight=0.0` skips inner tape (jac=None path). D-012. Val build: `training=False, drop_remainder=False, repeat=False, shuffle=False` (plan_2026-06-12_f8843c4f). Train build: all defaults.
+  - `eval_thera.py`: `super_resolve(model, lr_image, target_size)` + `evaluate_multiscale(model, hr_dir, scales, border_crop)`. PSNR/SSIM vs bicubic baseline (`antialias=True` on both LR generation and baseline resize, post plan_2026-06-12_bda3e5b5 A2).
+  - Invocation: `MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=N .venv/bin/python -m train.thera.train_thera --image_dir <path> --epochs N [--result_dir results]`
+- **`train/ideogram4/`** -- synthetic flow-matching trainer. `Ideogram4FlowTrainer(keras.Model)`: `train_step` slices velocity prediction on the image-token range; `compute_output_shape` returns `(B, L-L_text, in_channels)`. `sample_flow_batch` builds packed-index `(noisy_latents, velocity_target, llm_features, packed_indices)`. `TrainingConfig` dataclass. Invocation: `MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 python -m train.ideogram4.train_ideogram4 [--epochs N]`.
+- **`train/sd3_mmdit/`** -- SD3 MMDiT synthetic flow-matching trainer. `SD3FlowTrainer(keras.Model)`: custom `train_step`, mean-1 weight norm, `FlowMatchingVelocityLoss`. `make_synthetic_dataset` (random latents/features/token-ids/timesteps). `TrainingConfig` dataclass. Invocation: `MPLBACKEND=Agg CUDA_VISIBLE_DEVICES=1 python -m train.sd3_mmdit.train_sd3_mmdit --variant tiny`.
+- Other trainers: `train/vae/`, `train/video_jepa/`, `train/convnext_patch_vae/`, `train/cliffordnet/`, `train/logic/`, `train/rms_variants_train/`, `train/convnext/`, `train/ccnets/`, `train/yolo12/`.
 
 ### Training common (`src/train/common/`)
-**3-plan consolidation arc (`30721a0f` -> `35651564` -> `cc4d4e14`) is now largely complete.** Remaining duplication is intentional-divergence (7 C1 LR sites) or out-of-scope (F13 bug-fix, risky F6/seed sites).
+Mature, well-adopted (17+ modules, ~85 symbols).
 
-- **`generation_probe.py`** -- `GenerationProbeCallback(logits_fn, probe_every_steps, prompts, encoding_name, max_tokens, temperature, top_p, repetition_penalty, eot_token_id, pad_token_id, ctx_length, stop_on_eot, save_dir, initial_step, step_counter, seed, gc_on_probe, trigger_requires_positive_step)`. Closure contract: `logits_fn(ctx_ids[1,seq]) -> float32[vocab]` for last real position (UNPADDED input; common class always reads `[0,-1,:]`). `_post_generate_hook` overridable. Replaces 5 per-trainer copies (992 LOC). Re-exported via `nlp.py` + `__init__.py`. NOT `@register_keras_serializable`.
-- **`step_checkpoint.py`** -- `StepCheckpointCallback(keras.callbacks.Callback)` superset of 6 former per-trainer copies. Constructor: `(save_dir, save_every_steps, analyze_every_steps, max_checkpoints, model_name, initial_step, log_every_steps, plot_every_steps, step_counter=None, gc_on_save=False, csv_fields=None)`. `_global_step` persists across `fit()` calls (resume support). NOT `@register_keras_serializable`.
-- **`seed.py`** -- `set_seeds(seed)`. Sets PYTHONHASHSEED + `random.seed` + `np.random.seed` + `keras.utils.set_random_seed`. **Do NOT use at CLM-resume sites** that carry `data_seed = config.seed + initial_step` after the keras seed line.
-- **`config_io.py`** -- `save_config_json(config, results_dir, filename="config.json")`: dataclass -> `dataclasses.asdict`; else `vars(config)`; numpy-safe via `json_numpy_default`. `json_numpy_default(obj)`: `np.floating->float`, `np.integer->int`, `np.ndarray->.tolist()`; raises `TypeError` otherwise.
-- **`augment.py`** -- `augment_patch(patch: tf.Tensor) -> tf.Tensor` (flip-lr + flip-ud + rot90), `augment_pair(patch, target) -> (tf.Tensor, tf.Tensor)` (same transforms applied consistently to both). Replaces 7 denoiser copies. `bfunet/train_conditional.py` (class_label variant) stays local.
-- **`evaluation.py`** -- `setup_visualization_manager(save_dir, color_scheme) -> VisualizationManager`. Replaces the one live caller (`convnext_v2`); resnet/vit copies were dead code and were deleted.
-- **`datasets.py`** -- Three DISTINCT normalization constant pairs:
-  - `CIFAR10_MEAN = [0.4914, 0.4822, 0.4465]` / `CIFAR10_STD` (CIFAR-10 channel stats)
-  - `IMAGENET_MEAN = [0.485, 0.456, 0.406]` / `IMAGENET_STD = [0.229, 0.224, 0.225]` (ImageNet channel stats)
-  - DISTINCT from OpenAI CLIP `IMAGE_MEAN/STD` in `image_text.py` (`[0.48145466,...]`) -- never conflate.
-  - `load_dataset()` for CIFAR/ImageNet/MNIST (does `/255` only, NO per-channel normalization).
-  - `make_imagenet_filesystem_dataset(data_dir, image_size, batch_size, is_training, augment, augment_color, shuffle_buffer, num_parallel_calls, cache_val, drop_remainder, prefetch_buffer)` -- class-subdir ImageNet `*.JPEG` tf.data builder.
-  - `collect_image_paths(directories, extensions, max_files, shuffle_seed, sort) -> List[str]` -- rglob path collector. Does NOT replace early-break-after-N monitor/preview sites (fundamentally different semantics).
-- **`callbacks.py`** -- `EpochMetricsPlotCallback(viz_dir, metric_names, every_n=5, write_json=False)`. `create_learning_rate_schedule(..., warmup_steps=0, warmup_start_lr=0.0)`: warmup now wired to `WarmupSchedule` when `warmup_steps>0`; `warmup_steps=0` is a no-op (all pre-plan callers unaffected). 4 canonical sites adopted (tirex, prism, nbeats, adaptive_ema); 7 sites with divergent `alpha`/`warmup_start_lr`/`decay_steps` stay local.
-- **`image_text.py`** -- `load_coco2017_local_split`, `load_cc3m_local_split` (with npz tokenization sidecar cache), `make_image_text_tf_dataset`, `tokenize_captions`. `IMAGE_MEAN/STD` = OpenAI CLIP normalization (`[0.48145466,...]`).
+**Shared utilities:** `gpu.py`, `seed.py`, `config_io.py`, `callbacks.py` (`create_callbacks`, `create_learning_rate_schedule`), `evaluation.py` (`generate_training_curves` -- hard-requires `'loss'`/`'val_loss'`), `datasets.py`, `args.py`, and others.
+
+**`args.py` TS helpers:**
+- `create_ts_argument_parser()` -- shared parser for all 7 TS trainers. Declares `--seed`, `--n_samples` (default 10000), `--noise_level` (default 0.1), `--result_dir`, and all canonical flags.
+- `build_generator_config(args) -> TimeSeriesGeneratorConfig` -- replaces copy-pasted triples. All 7 trainers use it.
+- `--result_dir` is now HONORED (plan_2026-06-11_49671f7a D-005 fixed the previously inert pass-through).
+
+**`ts_export.py`:**
+- `export_standard_ts_model(model_path, output_path, opset, input_length, num_features)` -- shared ONNX export.
+- `verify_standard_ts_model(...)` -- Keras-vs-ONNX allclose comparison (single-output only).
+- `detect_input_length(model, config_keys, default)` -- resolves `input_length` from model `get_config()`. 6 consumers.
+- `create_ts_export_argument_parser(description)` -- shared 7-arg export argparse block (plan_2026-06-11_49671f7a). 5 consumers: tirex, prism, mdn, nbeats, xlstm export.py. deepar/adaptive_ema export.py remain bespoke.
+
+**`callbacks.py`:**
+- `create_callbacks(...)` now accepts `output_root: str = "results"` (plan_2026-06-11_49671f7a D-005). Default preserves all 15 non-TS callers. TS trainers pass `config.result_dir` so `--result_dir` is honored.
+
+**Time-series infra (`timeseries.py`):**
+- `BaseTimeSeriesTrainingConfig` -- shared TS config dataclass. Promoted fields include `quantile_levels`, `use_quantile_head`, `enforce_monotonicity`, `export_onnx`, `onnx_opset_version`, `seed`, `result_dir`.
+- `WindowedTimeSeriesProcessor` -- streaming windowed sampler; 2 hooks. Ctor kwargs are `context_len`/`horizon_len` (FIXED API -- trainers MAP `config.input_length`/`config.prediction_length` to these). **GOTCHA for dict-input processors:** `_prepare_viz_data_from_processor` returns `np.array([dict,...])` (object array) -- override `_prepare_viz_data` to stack the primary tensor.
+- `TimeSeriesPerformanceCallback` -- per-epoch viz scaffolding; 3 hooks; non-fatal viz wrapper.
+- `_plot_ts_forecast(ax, ...)` -- shared viz helper.
+- `compute_post_hoc_forecast_metrics(y_true, point, backcast, quantiles, quantile_levels)` -- pure helper.
+- `BaseTimeSeriesTrainer` -- orchestration skeleton. `_train_model` computes unified post_hoc_metrics: additive, non-fatal, gated on `isinstance(model, ForecastMixin)`.
+  - **`_build_optimizer(self)`** (plan_2026-06-11_49671f7a): warmup+cosine LR or constant LR depending on `config.use_warmup`. **7 consumers**: tirex, prism, deepar, xlstm, adaptive_ema, nbeats, mdn.
+  - **`_make_callbacks(self, exp_dir=None)`** (plan_2026-06-11_49671f7a): OWNS the D-009 dir contract. Passes `results_dir_prefix=self._build_results_prefix()`, captures returned `results_dir`, sets `self.exp_dir`, makes `visualizations/` subdir, appends `_build_performance_callback(viz_dir)`. Parameterized by 4 class attrs: `MODEL_DISPLAY_NAME` (None=`config.experiment_name`), `EARLY_STOPPING_PATIENCE` (default 25), `INCLUDE_ANALYZER` (None=`config.perform_deep_analysis`; False=force off), `ANALYZE_SPECTRAL` (default True). `exp_dir` param kept for backward compat (always None post-D-009). Passes `output_root=self.config.result_dir`.
+  - **`run_experiment(self)`** (plan_2026-06-11_49671f7a): OWNED by base. Calls `_train_model(exp_dir=None)`; gated ONNX fold if `getattr(config,'export_onnx',False)`; `_save_results` with optional `extra_fields={'onnx_path':...}`. Only **adaptive_ema** overrides this (bespoke dummy-forward before `count_params`).
+  - **`_export_to_onnx`** F1 fixed: input-length resolved via `getattr(config,'input_length',None) or getattr(config,'backcast_length',None)` (no longer reads non-existent `context_len`). adaptive_ema overrides this (D-008).
+
+**Trainer CLI/config surface:**
+- ALL 7 trainers build via `create_ts_argument_parser` + `set_defaults`.
+- **Canonical names**: `--input_length`/`--prediction_length` in mdn, prism, deepar, adaptive_ema, tirex, xlstm.
+- **Paper names kept**: `--backcast_length`/`--forecast_length` in nbeats (N-BEATS terminology).
+- **deepar**: `--dropout_rate` (was `--dropout` -- renamed plan_2026-06-11_49671f7a F7). Config field `dropout_rate`; model ctor kwarg remains `dropout=`.
+- **prism**: `--no-onnx` (was `--no_onnx` -- renamed plan_2026-06-11_49671f7a F8).
+- **mdn**: now uses warmup+cosine LR (was constant-LR; D-003 user directive). `MDNPerformanceCallback` lives in `_build_performance_callback`. `INCLUDE_ANALYZER=False`, `EARLY_STOPPING_PATIENCE=15`.
+- NO standalone trainers remain: all 7 subclass `BaseTimeSeriesTrainer`.
+
+**Export.py status:**
+- tirex, prism: full ONNX round-trip verified (allclose ~1e-6).
+- mdn: `MultiTaskMDNModel` non-serializable; `--verify` blocked.
+- xlstm: tf2onnx cannot convert mLSTM causal-conv `StatefulPartitionedCall`; `--verify` blocked.
+- nbeats: `NBeatsNet` returns `(forecast,backcast)` tuple; single-output verifier incompatible; `--verify` blocked.
+- deepar: bespoke export.py (dict-input); `detect_input_length` shared.
+- All export.py files structurally canonical; model-layer fixes required for blocked verify paths.
+
+**Known limitations:**
+- DeepAR post-hoc eval (whole-test-set LSTM) takes ~900s on GPU1 12GB; training completes, `results.json` write is slow. Run on GPU0 (24GB) or bound test-eval set.
+- `setup_gpu` called after TF GPU init -> non-fatal `Physical devices cannot be modified` at `src/train/common/gpu.py:32` (all 7 trainers).
+
+**Orphaned common modules (0 consumers):** `tfrecord.py` (15 symbols), `token_superposition.py` (8 symbols).
 
 ## Boundaries
 **In scope**: everything under `src/`, `tests/`, `research/`. Library code follows Keras 3 conventions strictly.
-**External deps**: tiktoken (gpt2/cl100k_base), HuggingFace datasets (Wikipedia), tensorflow 2.18.0, keras >=3.8.0 <4.0, numpy, scipy, scikit-learn, matplotlib (always `MPLBACKEND=Agg`).
+**External deps**: tiktoken, HuggingFace datasets, tensorflow 2.18.0, keras >=3.8.0 <4.0, numpy, scipy, scikit-learn, matplotlib (always `MPLBACKEND=Agg`).
 **Out of scope**: external systems, CI infra, deployment pipelines.
 
 ## Invariants
 
+### Guide-conformance baseline (as of plan_2026-06-13_e7b5704d)
+- **All concrete custom layers now implement `compute_output_shape`.** Remaining classes without it are intentional exemptions: abstract bases (BaseMemory/Head/Controller/NTM, BaseExpert, BaseGating, BaseVisionHead/VLMHead, ComplexLayer), RNN cells (DeepARCell, mLSTMCell, sLSTMCell, NAMCell, TRMInner), dynamic-dict-output heads (MultiTaskHead, MultiTaskVLMHead), and multi-input/non-tensor-arg edge cases.
+- **All concrete custom classes are `@register_keras_serializable`.** The 5 tabm classes use `package="TabM"` to avoid collision with `ffn/mlp.py:MLPBlock` (registered as `Custom>MLPBlock`); `SystemicGraphFilter` uses `package="Experimental"`.
+- **DETR (`models/detr/`) is pre-existing broken and has no test suite.** `DetrTransformer` encoder uses `attention_type='multi_head_attention'` (invalid factory key; correct is `'multi_head'`) — cannot construct. `DetrDecoderLayer.build` assumes a 2-shape tuple, fails on isolated Keras auto-build. Do not build on DETR until a dedicated fix plan is run.
+
 ### Keras 3 idioms (library-wide)
-- `@keras.saving.register_keras_serializable()` on all custom layers/models (NOT on callbacks).
-- `keras.ops` (no raw TF inside library code). Random ops live under `keras.random.*`.
-- Full `get_config()` round-trip.
-- `dl_techniques.utils.logger` only -- no `print`.
-- Frozen tensor state in layers MUST be `add_weight(trainable=False, ...)` or numpy on `self`.
+- `@keras.saving.register_keras_serializable()` on all concrete custom layers/models/metrics (NOT on abstract bases, callbacks, or plain dataclasses). Bare form registers as `Custom>ClassName`; use `package=` when a name collision exists across packages.
+- `keras.ops` (no raw TF inside library code). One exception: `tf.math.bessel_i0e` in `_log_iv`.
+- Full `get_config()` round-trip. `dl_techniques.utils.logger` only.
+- **Canonical ops**: `ops.normalize(x, axis=-1)` for L2-normalize. The `ops.nn.*` namespace is UNRELIABLE.
+- **NO `.assign()` reachable from `call`** for algorithmic updates. EXCEPTION: genuine running-stat layers.
+- **`training is True`** Python identity check under `@tf.function`.
+- **Explicit sublayer `.build()` in parent `build()`** required for `.keras` load-time weight restore. The Keras UserWarning "build() was called but layer does not have a build() method" identifies the exact defective shared layer. An eager `ops.zeros` dummy forward is the WORKAROUND; the durable fix is giving the shared layer a real `build()`.
 
 ### CLM training (library-wide)
-- **Output dict key MUST be `"logits"`** -- `MaskedCausalLMLoss` and `model.compile(loss={"logits": ...})` key on it.
-- **AdamW WD only** -- no `kernel_regularizer=L2(...)` combined with `AdamW(weight_decay=...)`.
-- **`prepare_dict_keyed_compile(model, output_key="logits")`** is a permanent contract for dict-output trainers.
-- **Pattern-3 CLI uniformity** -- `--steps-per-epoch`, `--seed`, `--min-article-length`, `--shuffle-shards`, `--resume`.
-- **`pad_token_id`** must match tokenizer (tiktoken cl100k_base = 100266); model default 0 is a silent semantic bug.
-
-### Causality (Clifford / time-series)
-- `(H=1, W=seq_len)` Clifford blocks must use `avg`/`max` pool only.
-- DSv2 nearest-upsample requires `_causal_upsample` right-shift by `s-1`.
-
-### Custom `train_step` / multi-optimizer
-- **Two-optimizer differential-LR**: register ONE optimizer with `super().compile(...)`, apply the second manually.
-- **`current_phase` / `_global_step`: `add_weight(trainable=False, dtype="float32")`** -- int32 caused device-placement failures.
-- **Custom `train_step` bypassing `compile(loss=...)` (uses `add_loss`)** MUST explicitly create `self.loss_tracker` in `__init__`, expose via `metrics`, and `update_state(loss)` in `train_step`.
-- **`training` flag gates** -- use `(training is True)` Python identity check under `@tf.function`.
-- **VAE compile pattern**: `model.compile(optimizer=AdamW, loss=None, jit_compile=False)`.
+- Output dict key MUST be `"logits"`. `prepare_dict_keyed_compile(model, output_key="logits")` required.
+- `AdamW` WD only -- no `kernel_regularizer=L2(...)` combined with `AdamW(weight_decay=...)`.
+- `pad_token_id` must match tokenizer (tiktoken cl100k_base = 100266).
 
 ### Save / load
-- `.keras` save/load on GPU under fp32 has reduction-order noise ~5e-5 for U-Net-shaped models. Default tolerance 1e-4.
+- `.keras` on GPU fp32 has reduction-order noise ~5e-5 for U-Net-shaped models. Default tolerance 1e-4.
 - Keras 3.8 `model.load_weights(path.keras, by_name=True)` is broken. Use `weight_transfer.load_weights_from_checkpoint`.
-- Custom-subclass Model wrapping another `keras.Model`: use `save_own_variables` / `load_own_variables`.
+- **Data-shaped fitted weights**: `_tracker.unlock()/lock()` to create in `adapt`; custom `load_own_variables` re-creates from saved shapes before default index-based load.
 
 ### Operational
-- **`results/` MUST be repo-root `results/`, never `src/results/`**.
-- **`MPLBACKEND=Agg`** required prefix for any training-script invocation.
-- **Single GPU jobs only** -- never parallel training.
-- **Pin GPU via shell env** -- Use `CUDA_VISIBLE_DEVICES=N MPLBACKEND=Agg python -m train.<...>`.
-- **All training callbacks that write to `save_dir` MUST `os.makedirs(..., exist_ok=True)` at the top of every save method**.
+- `results/` MUST be repo-root `results/`, never `src/results/`.
+- `MPLBACKEND=Agg` required prefix for any training-script invocation.
+- Single GPU jobs only. Pin via `CUDA_VISIBLE_DEVICES=N MPLBACKEND=Agg python -m train.<...>`.
 
 ## Flows
-- **CLM training** -- `python -m train.<model>.pretrain --config small` -> `TrainingConfig` -> tiktoken/Wikipedia -> packed token shards -> `MaskedCausalLMLoss` -> AdamW + warmup-cosine -> `StepCheckpointCallback` + `GenerationProbeCallback`.
-- **V-JEPA pretraining** -- `python -m train.video_jepa.train_video_jepa --smoke --dataset bdd100k --videos-root <...>` -> online + EMA-target encoders -> custom `train_step` -> reload-check (bit-exact).
-- **Image training (canonical: `train/vit/train_vit.py`)** -- `@dataclass TrainingConfig` -> `make_imagenet_filesystem_dataset` (or per-dataset builder) -> augment-then-normalize -> `_assert_train_val_distribution_match` -> AdamW/SGD -> `EpochMetricsPlotCallback` -> guarded SUCCESS log.
-- **ConvNeXtPatchVAE training** -- `python -m train.convnext_patch_vae.train_convnext_patch_vae [--smoke] [--seed N]` -> `TrainingConfig` -> CIFAR-10 -> `compile(loss=None, jit_compile=False)` -> `ReconVisualizationCallback` -> reload check via `encode()` mu.
-- **CliffordCLIP A/B training** -- `CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg python -m train.cliffordnet.train_clip --head-kind plain|learned_query_residual --mixed-bfloat16 --gamma-probe-every-steps N`. Signal-floor gate: COCO R@1 >= 5% on plain arm.
-- **CliffordCLIP zero-shot eval** -- `python -m train.cliffordnet.eval_clip_retrieval --checkpoint <ckpt.keras> --coco-root <...>` -> prints R@1/5/10.
-- **CC3M CLIP-score filter** -- `python -m train.cliffordnet.filter_cc3m_clipscore --checkpoint <ckpt.keras> --cc3m-root <...> --out-manifest <filtered.jsonl>` (full pass USER-LAUNCHED).
-- **Save / load round-trip** -- `@register_keras_serializable()` decorator -> `.keras` archive -> `keras.models.load_model(path, custom_objects={...})`.
-- **Multi-seed sweep** -- subprocess-per-seed driver, glob+merge, pure-stats module.
+- **VAE training (vmf)** -- `CUDA_VISIBLE_DEVICES=N MPLBACKEND=Agg python -m train.vae.train_vae --sampler vmf --kl-loss-weight 1e-4 --kl-warmup-epochs 8 --early-stop-monitor val_reconstruction_loss`.
+- **TS training (all 7 trainers functional)** -- `CUDA_VISIBLE_DEVICES=N MPLBACKEND=Agg python -m train.time_series.<model>.train_<model> --epochs N --gpu N [--result_dir <path>]`. Use `--visualize_every_n_epochs 1` in short smoke runs. `os._exit(0)` scripts (nbeats, mdn): success oracle is `"Completed."` log line + `results.json` presence (NOT exit code).
+- **TS unified forecast inference** -- call `model.predict_forecast(x)` on any `ForecastMixin` model (`TiRexCore`, `TiRexExtended`, `PRISMModel`, `NBeatsNet`, `MultiTaskMDNModel`, `DeepAR`, `xLSTMForecaster`) to get a `Forecast`. `AdaptiveEMASlopeFilterModel` is EXEMPT. `DeepAR` is the only model that populates `Forecast.samples`.
+- **CLM training** -- `python -m train.<model>.pretrain --config small` -> tiktoken/Wikipedia -> `MaskedCausalLMLoss` -> AdamW + warmup-cosine -> StepCheckpointCallback + GenerationProbeCallback.
+- **V-JEPA pretraining** -- online + EMA-target encoders -> custom `train_step` -> reload-check (bit-exact).
+- **Save / load round-trip** -- `@register_keras_serializable()` (bare) -> `.keras` -> `keras.models.load_model(path, custom_objects={...})`.
 - **Test scoping** -- pytest only on changed module + immediate importers. `make test` reserved for explicit pre-push request (~1.5h).
-- **Plan close** -- orchestrator writes `summary.md`, runs decision-anchor audit, updates `plans/LESSONS.md` (<=200 lines) and `plans/SYSTEM.md` (<=300 lines), then `bootstrap.mjs close`.
 
 ## Known Patterns
-- **Pattern-3 NLP CLM training script** -- ~95% generic `TrainingConfig` + `StepCheckpointCallback` + `GenerationProbeCallback` (from `train.common`) + AdamW/warmup-cosine + tiktoken/Wikipedia + `MaskedCausalLMLoss`. New CLM = mirror file-by-file.
-- **Pattern-4 image trainer (canonical: `train/vit/train_vit.py`)** -- `@dataclass TrainingConfig` + `make_imagenet_filesystem_dataset` (or per-dataset builder) + AdamW/SGD WD branch + `_assert_train_val_distribution_match` + `EpochMetricsPlotCallback` + guarded SUCCESS log. New image trainer = mirror file-by-file.
-- **Pattern-4 VAE variant (canonical: `train/convnext_patch_vae/train_convnext_patch_vae.py`)** -- hybrid Pattern-4 + compile(`loss=None, jit_compile=False`) + `ReconVisualizationCallback` + reload check via deterministic `encode()` mu.
-- **EMA target encoder pretraining (canonical: `models/video_jepa/`)** -- sibling encoder with `trainable=False`, dummy-batch eager build, custom `train_step` with EMA update, cosine momentum via `add_weight("ema_step")`. Do NOT use for VAE objectives.
-- **Two-optimizer differential-LR via custom `train_step`** -- register one optimizer with `super().compile(...)`, apply the second manually; variable routing via name-prefix split.
-- **Subprocess-per-seed multi-seed sweep** -- clean TF/Keras init eliminates cross-seed state contamination.
-- **Mechanical patch replication across N sibling files** -- per-file repetition beats shared-helper extraction for N<=4 if extraction would cross package boundaries.
-- **Eval harness = glue, not build** -- for any model with `_compute_retrieval_metrics` / `encode_*` methods, a zero-shot eval harness is ~argparse + `load_model` + 3 existing function calls; write it as a thin script, not a new class.
+- **Pattern-2 TS trainer** -- `BaseTimeSeriesTrainingConfig` subclass + `WindowedTimeSeriesProcessor` subclass (2 hooks) + `TimeSeriesPerformanceCallback` subclass (3 hooks) + `BaseTimeSeriesTrainer` subclass. **All 7 trainers** use the bare-prefix dir contract: `_make_callbacks` and `run_experiment` live in BASE; subclasses set class attrs only (`MODEL_DISPLAY_NAME`, `EARLY_STOPPING_PATIENCE`, `INCLUDE_ANALYZER`, `ANALYZE_SPECTRAL`) and override only genuinely bespoke methods. Only adaptive_ema overrides `run_experiment` (dummy-forward before `count_params`). `_build_optimizer` is base-owned (7 call sites). Multi-input/dict-input models must override `_compute_post_hoc_metrics`. Named `class _NBeatsForecastOnly(keras.Model, ForecastMixin)` is the pattern for replacing an anonymous functional wrapper so isinstance gates pass. `add_loss` + `compile(loss=None)` is the pattern for dict-output models whose static losses read `y_pred['key']`.
+- **ForecastMixin pattern** -- mix `ForecastMixin` into a `@register_keras_serializable` model; implement `_forecast(x)->Forecast`. `get_config` is unaffected (mixin adds no state). Point models set `quantiles=None`. Models whose outputs live in the input domain should be EXEMPT with documented rationale. **GOTCHA**: models with a non-batch-major leading axis on `predict_step` (e.g. DeepAR's `[S,B,H,D]`) MUST force a single predict batch in `_forecast`.
+- **`MODEL_VARIANTS`/`from_variant` pattern** -- class-level dict of variant configs + classmethod factory. Add ONLY where discrete model-size variants are semantically real (e.g. xLSTM small/base/large, TiRex, PRISM). DO NOT add to models with continuous hyperparams and no real size variants (DeepAR, MDN, adaptive_ema, NBeats) -- that is fake taxonomy.
+- **Post-hoc metric block** -- additive new key in `results.json`; non-fatal try/except; gated on `isinstance(model, ForecastMixin)`. ForecastMixin-EXEMPT models emit `post_hoc={}` as schema placeholder.
+- **Factory'd layer sub-module** -- own `__init__.py` + `factory.py`. Factory gets its own test file.
+- **Dataset-level fit via `adapt(data)`** -- build if unbuilt; compute stats eagerly; `.assign` outside `call`; serialize via weights.
 
 ## Codebase Specialization
 - **Python**: >=3.11, type hints, Google-style docstrings.
