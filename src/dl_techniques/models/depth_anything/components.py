@@ -138,28 +138,13 @@ class DPTDecoder(keras.layers.Layer):
                 f"{self._num_upsamples} decoder stages, but len(dims)={len(self.dims)}"
             )
 
-        # Will be initialized in build()
+        # All sublayer dims are shape-independent (derived from self.dims /
+        # self.output_channels / self._num_upsamples), so create them here in
+        # __init__ for stable layer tracking across (de)serialization.
         self.conv_layers: List[keras.layers.Conv2D] = []
         self.batch_norm_layers: List[keras.layers.BatchNormalization] = []
         self.activation_layers: List[keras.layers.Layer] = []
         self.upsample_layers: List[Optional[keras.layers.Layer]] = []
-        self.output_conv: Optional[keras.layers.Conv2D] = None
-        self._build_input_shape: Optional[Tuple[int, ...]] = None
-
-    def build(self, input_shape: Tuple[int, ...]) -> None:
-        """Build decoder layers based on input shape.
-
-        Args:
-            input_shape: Shape tuple of the input tensor.
-        """
-        # Store input shape for serialization
-        self._build_input_shape = input_shape
-
-        # Clear any existing layers (in case of rebuild)
-        self.conv_layers = []
-        self.batch_norm_layers = []
-        self.activation_layers = []
-        self.upsample_layers = []
 
         # Create convolutional layers for each dimension
         for i, dim in enumerate(self.dims):
@@ -206,6 +191,21 @@ class DPTDecoder(keras.layers.Layer):
             use_bias=True,  # Output layer typically uses bias
             name='output_conv'
         )
+
+        self._build_input_shape: Optional[Tuple[int, ...]] = None
+
+    def build(self, input_shape: Tuple[int, ...]) -> None:
+        """Build decoder layers based on input shape.
+
+        Sublayers are created in __init__ (their dims are shape-independent);
+        build only records the input shape for serialization. Sublayer weights
+        are constructed lazily on the first call.
+
+        Args:
+            input_shape: Shape tuple of the input tensor.
+        """
+        # Store input shape for serialization
+        self._build_input_shape = input_shape
 
         super().build(input_shape)
 
