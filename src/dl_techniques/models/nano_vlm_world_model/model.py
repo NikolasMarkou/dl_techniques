@@ -126,7 +126,11 @@ class ScoreBasedNanoVLM(keras.Model):
         self.text_encoder = TextEncoder(**text_config, name='text_encoder')
 
         # === Diffusion Scheduler ===
-        self.scheduler = DiffusionScheduler(**diffusion_config, name='scheduler')
+        # DiffusionScheduler is a plain Python class (not a Layer); it takes no `name`
+        # kwarg. Re-created here from diffusion_config (inlined into get_config), so the
+        # model round-trips without the scheduler being a serialized sub-layer. See
+        # DECISION plan_2026-06-13_ae9ee2cd/D-004 in scheduler.py.
+        self.scheduler = DiffusionScheduler(**diffusion_config)
 
         # === Denoiser Networks (The Core Innovation) ===
 

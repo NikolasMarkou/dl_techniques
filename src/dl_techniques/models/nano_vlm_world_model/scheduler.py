@@ -10,14 +10,20 @@ This is the foundation for score-based generative modeling in the VLM context.
 import keras
 import numpy as np
 from keras import ops
-from typing import Tuple, Optional, Literal, Dict, Any
+from typing import Tuple, Optional, Literal, Any
 
 
 from dl_techniques.utils.logger import logger
 
 
-@keras.saving.register_keras_serializable()
-class DiffusionScheduler(keras.layers.Layer):
+# DECISION plan_2026-06-13_ae9ee2cd/D-004: DiffusionScheduler is a PLAIN Python class,
+# NOT a keras.layers.Layer (cf. sd3_mmdit/scheduler.py FlowMatchEulerScheduler). It holds
+# only NumPy schedule arrays and exposes pure tensor-math methods (.add_noise/.step/etc.);
+# it is never invoked as scheduler(x). Do NOT re-add the Layer base or
+# @register_keras_serializable: as a Layer it polluted model.layers and the .keras graph
+# with a non-trainable utility. The parent ScoreBasedNanoVLM re-creates it in __init__ from
+# its own inlined diffusion_config, so model round-trip does not depend on Layer serialization.
+class DiffusionScheduler:
     """
     Base diffusion scheduler for score-based models.
 
@@ -37,7 +43,6 @@ class DiffusionScheduler(keras.layers.Layer):
         clip_sample: Whether to clip samples to [-1, 1]. Defaults to True.
         prediction_type: What the model predicts ('epsilon', 'sample', 'v_prediction').
             Defaults to 'epsilon'.
-        **kwargs: Additional layer arguments.
 
     References:
         - Ho et al. "Denoising Diffusion Probabilistic Models" (2020)
@@ -53,10 +58,7 @@ class DiffusionScheduler(keras.layers.Layer):
             beta_end: float = 0.02,
             clip_sample: bool = True,
             prediction_type: Literal['epsilon', 'sample', 'v_prediction'] = 'epsilon',
-            **kwargs
     ) -> None:
-        super().__init__(**kwargs)
-
         if num_timesteps <= 0:
             raise ValueError(f"num_timesteps must be positive, got {num_timesteps}")
         if not 0.0 < beta_start < beta_end < 1.0:
@@ -355,20 +357,3 @@ class DiffusionScheduler(keras.layers.Layer):
             res = ops.expand_dims(res, -1)
 
         return res
-
-    def compute_output_shape(self, input_shape):
-        """Scheduler utility methods preserve input data shape."""
-        return input_shape
-
-    def get_config(self) -> Dict[str, Any]:
-        """Get layer configuration."""
-        config = super().get_config()
-        config.update({
-            'num_timesteps': self.num_timesteps,
-            'beta_schedule': self.beta_schedule,
-            'beta_start': self.beta_start,
-            'beta_end': self.beta_end,
-            'clip_sample': self.clip_sample,
-            'prediction_type': self.prediction_type,
-        })
-        return config
