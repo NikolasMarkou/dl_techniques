@@ -77,7 +77,9 @@ class DiffusionScheduler:
         # Precompute useful quantities (following DDPM notation)
         self.alphas = 1.0 - self.betas
         self.alphas_cumprod = np.cumprod(self.alphas, axis=0)
-        self.alphas_cumprod_prev = np.concatenate([[1.0], self.alphas_cumprod[:-1]])
+        self.alphas_cumprod_prev = np.concatenate(
+            [np.array([1.0], dtype=np.float32), self.alphas_cumprod[:-1]]
+        )
 
         # Quantities for forward process q(x_t | x_0)
         self.sqrt_alphas_cumprod = np.sqrt(self.alphas_cumprod)

@@ -23,8 +23,8 @@ from keras import ops, layers
 from typing import Dict, Optional, Tuple, Union, Any, Literal
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.text_encoder import TextEncoder
-from dl_techniques.layers.vision_encoder import create_vision_encoder
+from dl_techniques.layers.transformers.text_encoder import TextEncoder
+from dl_techniques.layers.transformers.vision_encoder import create_vision_encoder
 
 from .denoisers import VisionDenoiser, TextDenoiser, JointDenoiser
 from .scheduler import DiffusionScheduler
