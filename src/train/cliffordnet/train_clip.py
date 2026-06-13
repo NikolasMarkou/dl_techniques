@@ -547,7 +547,7 @@ class GammaProbeCallback(keras.callbacks.Callback):
     Detects the **E1 wedge-ignition transition**: in the
     ``head_kind="learned_query_residual"`` configuration each tower mixes a
     deterministic feature with a Clifford-geometric branch scaled by a
-    learnable per-channel ``_LayerScale1D.gamma`` (init ~1e-4). When training
+    learnable per-channel ``LearnableMultiplier.gamma`` (init ~1e-5). When training
     pushes the mean of that gamma above ~0.1 the Clifford head has started
     to contribute — i.e. the geometric branch has "ignited". Tracking the
     gamma mean every N steps is the cheap A/B telemetry that tells whether

@@ -258,8 +258,8 @@ Every model in the family was audited against the core properties of the Cliffor
 | Shifts filtered with warning | Yes | Yes | Yes | Yes (+ `_head_shifts_for` validation) |
 | Causality preserved | N/A | Left-only DWConv padding + causal cumulative mean | N/A | Text tower: causal; vision: bidirectional |
 | Bias-free constraint | N/A | N/A | All Dense/Conv `use_bias=False`; all norms `center=False` | N/A |
-| Clifford algebra in projection head | N/A | N/A | N/A | `SparseRollingGeometricProduct` + `_LayerScale1D` residual |
-| Serialization round-trip | `get_config` / `from_config` | `get_config` / `from_config` | `get_config` / `from_config` | `get_config` / `from_config` (+ `_LayerScale1D`, `_LearnedQueryPool1D`) |
+| Clifford algebra in projection head | N/A | N/A | N/A | `SparseRollingGeometricProduct` + `LearnableMultiplier` (CHANNEL) residual |
+| Serialization round-trip | `get_config` / `from_config` | `get_config` / `from_config` | `get_config` / `from_config` | `get_config` / `from_config` (+ `LearnableMultiplier`, `_LearnedQueryPool1D`) |
 
 ### Design decisions and their rationale
 

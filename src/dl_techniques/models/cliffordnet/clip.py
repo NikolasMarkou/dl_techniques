@@ -118,6 +118,7 @@ from dl_techniques.layers.geometric.clifford_block import (
     CtxMode,
     SparseRollingGeometricProduct,
 )
+from dl_techniques.layers.layer_scale import LearnableMultiplier
 from dl_techniques.layers.patch_merging import PatchMerging
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.logger import logger
@@ -147,51 +148,6 @@ def _head_shifts_for(channels: int, requested: Optional[List[int]]) -> List[int]
 
 _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
 _LN_EPS: float = 1e-6
-
-
-@keras.saving.register_keras_serializable()
-class _LayerScale1D(keras.layers.Layer):
-    """Per-channel learnable scale, init near zero.
-
-    Multiplies an input ``(B, D)`` tensor elementwise by a learnable
-    ``(D,)`` gamma. Used by the ``learned_query_residual`` head to gate
-    the Clifford geometric product output on top of a plain residual
-    path. Gamma starts at ``init_value`` (default 1e-5), so the head
-    initially behaves like plain CLIP and gradually injects wedge/inner
-    content as training progresses — the same LayerScale pattern GGR
-    uses inside the Clifford backbone.
-    """
-
-    def __init__(
-        self,
-        channels: int,
-        init_value: float = 1e-5,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(**kwargs)
-        self.channels = channels
-        self.init_value = init_value
-
-    def build(self, input_shape: Tuple) -> None:
-        self.gamma = self.add_weight(
-            name="gamma",
-            shape=(self.channels,),
-            initializer=initializers.Constant(self.init_value),
-            trainable=True,
-        )
-        super().build(input_shape)
-
-    def call(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        return x * self.gamma
-
-    def compute_output_shape(self, input_shape: Tuple) -> Tuple:
-        """Elementwise scale preserves the input shape."""
-        return tuple(input_shape)
-
-    def get_config(self) -> Dict[str, Any]:
-        config = super().get_config()
-        config.update({"channels": self.channels, "init_value": self.init_value})
-        return config
 
 
 @keras.saving.register_keras_serializable()
@@ -1014,14 +970,16 @@ class CliffordCLIP(keras.Model):
         self.vision_head_scale = None
         self.text_head_scale = None
         if self.head_kind == "learned_query_residual":
-            self.vision_head_scale = _LayerScale1D(
-                channels=self.vision_channels,
-                init_value=1e-5,
+            self.vision_head_scale = LearnableMultiplier(
+                multiplier_type="CHANNEL",
+                initializer=keras.initializers.Constant(1e-5),
+                constraint=None,
                 name="vision_head_scale",
             )
-            self.text_head_scale = _LayerScale1D(
-                channels=self.text_channels,
-                init_value=1e-5,
+            self.text_head_scale = LearnableMultiplier(
+                multiplier_type="CHANNEL",
+                initializer=keras.initializers.Constant(1e-5),
+                constraint=None,
                 name="text_head_scale",
             )
 
