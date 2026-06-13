@@ -183,6 +183,44 @@ class PFTBlock(keras.layers.Layer):
         # Check for invalid parameter combinations early
         self._validate_config()
 
+        # ============ Create Sublayers ============
+        # All sublayers depend only on config params, not on input_shape.
+        mlp_hidden_dim = int(self._dim * self._mlp_ratio)
+
+        self._norm1 = create_normalization_layer(
+            normalization_type=self._norm_type,
+            name="attention_norm",
+            **self._norm_kwargs
+        )
+
+        self._norm2 = create_normalization_layer(
+            normalization_type=self._norm_type,
+            name="ffn_norm",
+            **self._norm_kwargs
+        )
+
+        self._attn = ProgressiveFocusedAttention(
+            dim=self._dim,
+            num_heads=self._num_heads,
+            window_size=self._window_size,
+            shift_size=self._shift_size,
+            qkv_bias=self._qkv_bias,
+            attention_dropout=self._attention_dropout,
+            projection_dropout=self._projection_dropout,
+            use_lepe=self._use_lepe,
+            name="progressive_focused_attention"
+        )
+
+        self._ffn = self._build_ffn(mlp_hidden_dim)
+
+        if self._drop_path_rate > 0.0:
+            self._drop_path = StochasticDepth(
+                drop_rate=self._drop_path_rate,
+                name="stochastic_depth"
+            )
+        else:
+            self._drop_path = None
+
     def _validate_config(self) -> None:
         """Validate layer configuration parameters.
 
@@ -248,50 +286,11 @@ class PFTBlock(keras.layers.Layer):
         else:
             x_shape = input_shape
 
-        # ============ Create Normalization Layers ============
-        # Using factory pattern for flexibility in normalization choice
-        # Pre-normalization: norm is applied before attention/FFN
-        self._norm1 = create_normalization_layer(
-            normalization_type=self._norm_type,
-            name="attention_norm",
-            **self._norm_kwargs
-        )
-
-        self._norm2 = create_normalization_layer(
-            normalization_type=self._norm_type,
-            name="ffn_norm",
-            **self._norm_kwargs
-        )
-
-        # ============ Create Progressive Focused Attention ============
-        # This is the core innovation of PFT
-        self._attn = ProgressiveFocusedAttention(
-            dim=self._dim,
-            num_heads=self._num_heads,
-            window_size=self._window_size,
-            shift_size=self._shift_size,
-            qkv_bias=self._qkv_bias,
-            attention_dropout=self._attention_dropout,
-            projection_dropout=self._projection_dropout,
-            use_lepe=self._use_lepe,
-            name="progressive_focused_attention"
-        )
-
-        # ============ Create Feed-Forward Network ============
-        # Using factory pattern for flexibility in FFN architecture
-        mlp_hidden_dim = int(self._dim * self._mlp_ratio)
-        self._ffn = self._build_ffn(mlp_hidden_dim)
-
-        # ============ Create Stochastic Depth ============
-        # Stochastic depth (layer dropout) for regularization
-        # Applied to both attention and FFN outputs before residual connection
-        if self._drop_path_rate > 0.0:
-            self._drop_path = StochasticDepth(
-                drop_rate=self._drop_path_rate,
-                name="stochastic_depth"
-            )
-        else:
-            self._drop_path = None
+        # Guard: if input_shape is None or not a subscriptable sequence
+        # (e.g. called from build_from_config with a None shape during load),
+        # derive a minimal shape from config params so sublayers can still build.
+        if not hasattr(x_shape, '__len__') or x_shape is None:
+            x_shape = (None, None, None, self._dim)
 
         # ============ Explicitly Build Sub-layers ============
         # This ensures all weights are created and properly initialized
