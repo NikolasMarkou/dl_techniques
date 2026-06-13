@@ -52,7 +52,6 @@ References:
 """
 
 import keras
-import tensorflow as tf
 from keras import layers
 from typing import Optional, Union, Any, Dict, Tuple
 
@@ -61,7 +60,7 @@ from typing import Optional, Union, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 from .transformer import TransformerLayer
-from ..ffn.factory import create_ffn_from_config, FFNType
+from ..ffn.factory import create_ffn_layer, FFNType
 from ..norms import create_normalization_layer, NormalizationType
 from ..attention.factory import create_attention_layer, AttentionType
 
@@ -128,14 +127,6 @@ class BinaryMapper(keras.layers.Layer):
         self.num_bits = num_bits
         self.num_categories = 2 ** num_bits
 
-        # Powers of 2 for binary-to-integer conversion: [1, 2, 4, 8, ...]
-        # Shape: (num_bits,)
-        self.pow2 = tf.constant(
-            [2 ** i for i in range(num_bits)],
-            dtype=tf.int32,
-            name='binary_powers'
-        )
-
     def call(
             self,
             bit_logits: keras.KerasTensor,
@@ -168,7 +159,8 @@ class BinaryMapper(keras.layers.Layer):
         # Step 3: Convert binary vector to integer index
         # index = Σ(B_h * 2^h) for h in [0, H-1]
         # Using einsum for efficient computation: (B, T, H) @ (H,) -> (B, T)
-        indices = keras.ops.einsum('bth,h->bt', sampled_bits, self.pow2)
+        pow2 = keras.ops.cast(keras.ops.array([2**i for i in range(self.num_bits)]), "int32")
+        indices = keras.ops.einsum('bth,h->bt', sampled_bits, pow2)
 
         # Step 4: Create one-hot encoding
         # Shape: (batch_size, sequence_length, 2^H)
@@ -185,11 +177,8 @@ class BinaryMapper(keras.layers.Layer):
             # log P(B_h) = -sigmoid_cross_entropy(label=B_h, logit=logit_h)
             sampled_bits_float = keras.ops.cast(sampled_bits, self.compute_dtype)
 
-            # Note: We need to use TensorFlow's sigmoid_cross_entropy for stability
-            log_probs = -tf.nn.sigmoid_cross_entropy_with_logits(
-                labels=sampled_bits_float,
-                logits=bit_logits
-            )
+            # Use keras.ops.binary_crossentropy for numerical stability
+            log_probs = -keras.ops.binary_crossentropy(sampled_bits_float, bit_logits, from_logits=True)
 
             # Sum log probabilities across bits to get log P(B_t = U(d-1))
             # where U(d-1) is the binary encoding of the sampled index
@@ -350,17 +339,95 @@ class FreeTransformerLayer(TransformerLayer):
 
         self.num_latent_categories = 2 ** num_latent_bits
 
-        # These will be built in build() method
-        self.zeta = None  # Learned constant query for encoder
-        self.encoder_attention = None  # Non-causal attention for encoder
-        self.encoder_attention_norm = None
-        self.encoder_ffn = None
-        self.encoder_output_norm = None
-        self.encoder_attention_dropout = None
-        self.encoder_ffn_dropout = None
-        self.encoder_readout = None  # Linear layer: D → H bits
-        self.binary_mapper = None  # Samples one-hot Z from bit logits
-        self.post_sampler_fc = None  # Linear layer: 2^H → D
+        # Zeta weight is created in build() via add_weight
+        self.zeta = None
+
+        # ---------------------------------------------------------------------
+        # Encoder sublayers (created here; built in build())
+        # ---------------------------------------------------------------------
+
+        # Override attention args to ensure non-causal behavior
+        encoder_attn_args = (encoder_attention_args or {}).copy()
+        encoder_attn_args['causal'] = False  # Critical: encoder must be non-causal
+
+        self.encoder_attention = create_attention_layer(
+            attention_type=self.encoder_attention_type,
+            dim=self.hidden_size,
+            num_heads=self.num_heads,
+            dropout_rate=self.attention_dropout_rate,
+            use_bias=self.use_bias,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
+            name='encoder_attention',
+            **encoder_attn_args
+        )
+
+        self.encoder_attention_norm = create_normalization_layer(
+            normalization_type=self.encoder_normalization_type,
+            name='encoder_attention_norm',
+            **(self.attention_norm_args or {})
+        )
+
+        self.encoder_attention_dropout = layers.Dropout(
+            rate=self.attention_dropout_rate,
+            name='encoder_attention_dropout'
+        )
+
+        self.encoder_ffn = create_ffn_layer(
+            ffn_type=self.encoder_ffn_type,
+            hidden_dim=self.intermediate_size,
+            output_dim=self.hidden_size,
+            activation=self.activation,
+            dropout_rate=self.dropout_rate,
+            use_bias=self.use_bias,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
+            name='encoder_ffn',
+            **self.encoder_ffn_args
+        )
+
+        self.encoder_output_norm = create_normalization_layer(
+            normalization_type=self.encoder_normalization_type,
+            name='encoder_output_norm',
+            **(self.ffn_norm_args or {})
+        )
+
+        self.encoder_ffn_dropout = layers.Dropout(
+            rate=self.dropout_rate,
+            name='encoder_ffn_dropout'
+        )
+
+        self.encoder_readout = layers.Dense(
+            units=self.num_latent_bits,
+            use_bias=self.use_bias,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
+            name='encoder_readout_fc',
+            dtype=self.dtype
+        )
+
+        self.binary_mapper = BinaryMapper(
+            num_bits=self.num_latent_bits,
+            name='binary_mapper',
+            dtype=self.dtype
+        )
+
+        self.post_sampler_fc = layers.Dense(
+            units=self.hidden_size,
+            use_bias=self.use_bias,
+            kernel_initializer=self.kernel_initializer,
+            bias_initializer=self.bias_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+            bias_regularizer=self.bias_regularizer,
+            name='post_sampler_fc',
+            dtype=self.dtype
+        )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build all sub-layers including encoder components if enabled.
@@ -374,9 +441,6 @@ class FreeTransformerLayer(TransformerLayer):
         if not self.use_free_transformer:
             return
 
-        # Extract dimensions
-        # input_shape is (batch, seq_len, hidden_size)
-
         # ---------------------------------------------------------------------
         # 1. Learned constant query vector ζ (zeta) for encoder
         # ---------------------------------------------------------------------
@@ -389,117 +453,15 @@ class FreeTransformerLayer(TransformerLayer):
             dtype=self.dtype
         )
 
-        # ---------------------------------------------------------------------
-        # 2. Encoder attention block (non-causal)
-        # ---------------------------------------------------------------------
-        # Override attention args to ensure non-causal behavior
-        encoder_attn_args = self.encoder_attention_args.copy()
-        encoder_attn_args['causal'] = False  # Critical: encoder must be non-causal
-
-        self.encoder_attention = create_attention_layer(
-            attention_type=self.encoder_attention_type,
-            hidden_size=self.hidden_size,
-            num_heads=self.num_heads,
-            dropout_rate=self.attention_dropout_rate,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            name='encoder_attention',
-            **encoder_attn_args
-        )
-
-        # Build attention layer
+        # Build sublayers (created in __init__)
         self.encoder_attention.build(input_shape)
-
-        # Attention normalization
-        self.encoder_attention_norm = create_normalization_layer(
-            normalization_type=self.encoder_normalization_type,
-            name='encoder_attention_norm',
-            **(self.attention_norm_args or {})
-        )
         self.encoder_attention_norm.build(input_shape)
-
-        # Attention dropout
-        self.encoder_attention_dropout = layers.Dropout(
-            rate=self.attention_dropout_rate,
-            name='encoder_attention_dropout'
-        )
-
-        # ---------------------------------------------------------------------
-        # 3. Encoder FFN block
-        # ---------------------------------------------------------------------
-        self.encoder_ffn = create_ffn_from_config(
-            ffn_type=self.encoder_ffn_type,
-            hidden_size=self.hidden_size,
-            intermediate_size=self.intermediate_size,
-            activation=self.activation,
-            dropout_rate=self.dropout_rate,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            name='encoder_ffn',
-            **self.encoder_ffn_args
-        )
         self.encoder_ffn.build(input_shape)
-
-        # FFN normalization
-        self.encoder_output_norm = create_normalization_layer(
-            normalization_type=self.encoder_normalization_type,
-            name='encoder_output_norm',
-            **(self.ffn_norm_args or {})
-        )
         self.encoder_output_norm.build(input_shape)
-
-        # FFN dropout
-        self.encoder_ffn_dropout = layers.Dropout(
-            rate=self.dropout_rate,
-            name='encoder_ffn_dropout'
-        )
-
-        # ---------------------------------------------------------------------
-        # 4. Encoder readout: hidden_size → num_latent_bits
-        # ---------------------------------------------------------------------
-        self.encoder_readout = layers.Dense(
-            units=self.num_latent_bits,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            name='encoder_readout_fc',
-            dtype=self.dtype
-        )
         self.encoder_readout.build(input_shape)
-
-        # ---------------------------------------------------------------------
-        # 5. Binary Mapper: samples one-hot Z from bit logits
-        # ---------------------------------------------------------------------
-        self.binary_mapper = BinaryMapper(
-            num_bits=self.num_latent_bits,
-            name='binary_mapper',
-            dtype=self.dtype
-        )
         # Binary mapper input shape: (batch, seq, num_bits)
         self.binary_mapper.build(input_shape[:-1] + (self.num_latent_bits,))
-
-        # ---------------------------------------------------------------------
-        # 6. Post-sampler: projects Z back to hidden dimension
-        # ---------------------------------------------------------------------
-        # Input is one-hot Z of shape (batch, seq, 2^H)
-        self.post_sampler_fc = layers.Dense(
-            units=self.hidden_size,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            name='post_sampler_fc',
-            dtype=self.dtype
-        )
+        # Post-sampler input shape: (batch, seq, 2^H)
         self.post_sampler_fc.build(input_shape[:-1] + (self.num_latent_categories,))
 
     def call(
@@ -559,7 +521,7 @@ class FreeTransformerLayer(TransformerLayer):
                     training=training
                 )
 
-            attention_output = self.attention_dropout(attention_output, training=training)
+            attention_output = self.dropout(attention_output, training=training)
 
             if self.attention_stochastic_depth is not None:
                 attention_output = self.attention_stochastic_depth(
@@ -585,7 +547,7 @@ class FreeTransformerLayer(TransformerLayer):
                     training=training
                 )
 
-            x = self.attention_dropout(x, training=training)
+            x = self.dropout(x, training=training)
 
             if self.attention_stochastic_depth is not None:
                 x = self.attention_stochastic_depth(x, training=training)
@@ -649,10 +611,13 @@ class FreeTransformerLayer(TransformerLayer):
             seq_len = keras.ops.shape(inputs)[1]
 
             # Sample random indices uniformly in [0, 2^H - 1]
-            random_indices = keras.random.uniform(
-                shape=(batch_size, seq_len),
-                minval=0,
-                maxval=self.num_latent_categories,
+            random_indices = keras.ops.cast(
+                keras.random.uniform(
+                    shape=(batch_size, seq_len),
+                    minval=0,
+                    maxval=self.num_latent_categories,
+                    dtype='float32'
+                ),
                 dtype='int32'
             )
 
