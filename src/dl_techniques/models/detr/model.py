@@ -6,7 +6,8 @@ This module provides a Keras 3 implementation of the DETR model, as described in
 
 The implementation follows modern Keras 3 best practices and leverages existing
 components from the dl_techniques framework including:
-- TransformerLayer for encoder/decoder blocks
+- TransformerLayer for encoder blocks
+- TransformerDecoderLayer for decoder blocks
 - Normalization factory for flexible normalization
 - FFN factory for configurable feed-forward networks
 - Attention factory for attention mechanisms
@@ -56,8 +57,7 @@ from typing import Optional, Dict, Any, List, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.ffn import create_ffn_layer
-from dl_techniques.layers.norms import create_normalization_layer
-from dl_techniques.layers.transformers import TransformerLayer, FFNType, NormalizationType
+from dl_techniques.layers.transformers import TransformerLayer, TransformerDecoderLayer, FFNType, NormalizationType
 from dl_techniques.layers.embedding.positional_embedding_sine_2d import PositionEmbeddingSine2D
 
 # ---------------------------------------------------------------------
@@ -155,41 +155,45 @@ class DetrTransformer(layers.Layer):
                     normalization_type=normalization_type,
                     normalization_position='pre',
                     ffn_type=ffn_type,
-                    attention_type='multi_head_attention',
+                    attention_type='multi_head',  # fix 1a: was 'multi_head_attention'
                     name=f"encoder_layer_{i}"
                 )
             )
 
-        # Create decoder layers
+        # Create decoder layers using TransformerDecoderLayer (fix 1c/1d: replaced DetrDecoderLayer)
         self.decoder_layers = []
         for i in range(num_decoder_layers):
             self.decoder_layers.append(
-                DetrDecoderLayer(
-                    hidden_dim=hidden_dim,
+                TransformerDecoderLayer(
+                    hidden_size=hidden_dim,
                     num_heads=num_heads,
-                    ffn_dim=ffn_dim,
-                    dropout=dropout,
+                    intermediate_size=ffn_dim,
+                    dropout_rate=dropout,
                     activation=activation,
                     normalization_type=normalization_type,
+                    normalization_position='pre',
+                    use_causal_mask=False,
                     ffn_type=ffn_type,
                     name=f"decoder_layer_{i}"
                 )
             )
 
-    def build(self, input_shape: Tuple[Tuple[int, ...], ...]) -> None:
-        """Build encoder and decoder layers."""
-        src_shape, mask_shape, query_embed_shape, pos_embed_shape = input_shape
+    def build(self, input_shape) -> None:
+        """Explicitly build all encoder and decoder sub-layers.
 
-        # Build encoder layers
-        for encoder_layer in self.encoder_layers:
-            encoder_layer.build(src_shape)
-
-        # Build decoder layers
-        # Decoder input shape is (batch_size, num_queries, hidden_dim)
-        decoder_input_shape = (src_shape[0], query_embed_shape[0], self.hidden_dim)
-        for decoder_layer in self.decoder_layers:
-            decoder_layer.build((decoder_input_shape, src_shape))
-
+        Required for .keras round-trip: Keras weight-restore needs every
+        sub-layer to be built before weights can be re-indexed by path.
+        Lazy build (super().build() only) leaves sub-layers unbuilt at load
+        time, causing a weight count mismatch.
+        """
+        enc_shape = (None, None, self.hidden_dim)
+        dec_shape = (None, None, self.hidden_dim)
+        for layer in self.encoder_layers:
+            if not layer.built:
+                layer.build(enc_shape)
+        for layer in self.decoder_layers:
+            if not layer.built:
+                layer.build(dec_shape)
         super().build(input_shape)
 
     def call(
@@ -205,7 +209,7 @@ class DetrTransformer(layers.Layer):
 
         Args:
             src: Source features (batch_size, H*W, hidden_dim)
-            mask: Padding mask (batch_size, H*W)
+            mask: Padding mask (batch_size, H*W) -- currently unused (see fix 1i)
             query_embed: Object query embeddings (num_queries, hidden_dim)
             pos_embed: Positional encodings (batch_size, H*W, hidden_dim)
             training: Training mode flag
@@ -219,21 +223,20 @@ class DetrTransformer(layers.Layer):
             # Add positional encoding to the input for each encoder layer
             memory = encoder_layer(memory + pos_embed, training=training)
 
-        # Decoder forward pass
-        # Initialize target with zeros and add query embeddings
+        # Decoder forward pass (fix 1f)
         batch_size = keras.ops.shape(src)[0]
         num_queries = keras.ops.shape(query_embed)[0]
-
-        # Expand query_embed to batch dimension
+        query_embed_expanded = keras.ops.tile(
+            keras.ops.expand_dims(query_embed, axis=0),
+            [batch_size, 1, 1]
+        )
         tgt = keras.ops.zeros((batch_size, num_queries, self.hidden_dim))
 
         decoder_outputs = []
         for decoder_layer in self.decoder_layers:
             tgt = decoder_layer(
-                tgt=tgt,
-                memory=memory,
-                query_pos=query_embed,
-                pos_embed=pos_embed,
+                tgt + query_embed_expanded,
+                memory,
                 training=training
             )
             decoder_outputs.append(tgt)
@@ -253,217 +256,6 @@ class DetrTransformer(layers.Layer):
             "num_heads": self.num_heads,
             "num_encoder_layers": self.num_encoder_layers,
             "num_decoder_layers": self.num_decoder_layers,
-            "ffn_dim": self.ffn_dim,
-            "dropout": self.dropout_rate,
-            "activation": self.activation,
-            "normalization_type": self.normalization_type,
-            "ffn_type": self.ffn_type,
-        })
-        return config
-
-
-@keras.saving.register_keras_serializable()
-class DetrDecoderLayer(layers.Layer):
-    """
-    A single DETR Transformer Decoder Layer with pre-normalization.
-
-    **Intent**: To produce object-centric features by attending to the encoder's
-    output (`memory`) using a set of learned `object queries`. It uses two
-    attention mechanisms: self-attention among queries and cross-attention
-    between queries and image features.
-
-    **Architecture**:
-    ```
-    Input (tgt) & Memory
-         ↓ (tgt)
-    Norm1 → Self-Attention → Add with Input (tgt)
-         ↓
-    Norm2 → Cross-Attention(Q=tgt, K,V=memory) → Add
-         ↓
-    Norm3 → FFN → Add with previous output
-         ↓
-       Output
-    ```
-
-    Args:
-        hidden_dim: The dimensionality of features.
-        num_heads: The number of attention heads.
-        ffn_dim: The hidden dimension of the feed-forward network.
-        dropout: The dropout rate. Defaults to 0.1.
-        activation: The activation for the FFN. Defaults to "relu".
-        normalization_type: Type of normalization. Defaults to "layer_norm".
-        ffn_type: Type of FFN to use. Defaults to "mlp".
-        **kwargs: Additional layer arguments.
-
-    Input shape:
-        - tgt: `(batch_size, num_queries, hidden_dim)`
-        - memory: `(batch_size, H*W, hidden_dim)`
-        - query_pos: `(num_queries, hidden_dim)` (optional)
-        - pos_embed: `(batch_size, H*W, hidden_dim)` (optional)
-
-    Output shape:
-        - `(batch_size, num_queries, hidden_dim)`
-    """
-
-    def __init__(
-        self,
-        hidden_dim: int,
-        num_heads: int,
-        ffn_dim: int,
-        dropout: float = 0.1,
-        activation: str = "relu",
-        normalization_type: str = "layer_norm",
-        ffn_type: str = "mlp",
-        **kwargs
-    ):
-        super().__init__(**kwargs)
-
-        if hidden_dim <= 0 or num_heads <= 0 or ffn_dim <= 0:
-            raise ValueError("Dimensions must be positive.")
-        if hidden_dim % num_heads != 0:
-            raise ValueError(f"hidden_dim ({hidden_dim}) must be divisible by num_heads ({num_heads}).")
-
-        self.hidden_dim = hidden_dim
-        self.num_heads = num_heads
-        self.ffn_dim = ffn_dim
-        self.dropout_rate = dropout
-        self.activation = activation
-        self.normalization_type = normalization_type
-        self.ffn_type = ffn_type
-
-        # Self-attention
-        self.self_attn = layers.MultiHeadAttention(
-            num_heads=num_heads,
-            key_dim=hidden_dim // num_heads,
-            dropout=dropout,
-            name="self_attn"
-        )
-
-        # Cross-attention
-        self.cross_attn = layers.MultiHeadAttention(
-            num_heads=num_heads,
-            key_dim=hidden_dim // num_heads,
-            dropout=dropout,
-            name="cross_attn"
-        )
-
-        # Feed-forward network using factory
-        self.ffn = create_ffn_layer(
-            ffn_type,
-            hidden_dim=ffn_dim,
-            output_dim=hidden_dim,
-            activation=activation,
-            dropout_rate=dropout,
-            name="ffn"
-        )
-
-        # Normalization layers using factory
-        self.norm1 = create_normalization_layer(normalization_type, name="norm1")
-        self.norm2 = create_normalization_layer(normalization_type, name="norm2")
-        self.norm3 = create_normalization_layer(normalization_type, name="norm3")
-
-        # Dropout layers
-        self.dropout1 = layers.Dropout(dropout, name="dropout1")
-        self.dropout2 = layers.Dropout(dropout, name="dropout2")
-        self.dropout3 = layers.Dropout(dropout, name="dropout3")
-
-    def build(self, input_shape: Tuple[Tuple[int, ...], Tuple[int, ...]]) -> None:
-        """Build all sub-layers."""
-        tgt_shape, memory_shape = input_shape
-
-        # Build normalization layers
-        self.norm1.build(tgt_shape)
-        self.norm2.build(tgt_shape)
-        self.norm3.build(tgt_shape)
-
-        # Build FFN
-        self.ffn.build(tgt_shape)
-
-        super().build(input_shape)
-
-    def call(
-        self,
-        tgt: keras.KerasTensor,
-        memory: keras.KerasTensor,
-        query_pos: Optional[keras.KerasTensor] = None,
-        pos_embed: Optional[keras.KerasTensor] = None,
-        training: Optional[bool] = None
-    ) -> keras.KerasTensor:
-        """
-        Forward pass through decoder layer.
-
-        Args:
-            tgt: Target queries (batch_size, num_queries, hidden_dim)
-            memory: Encoder memory (batch_size, H*W, hidden_dim)
-            query_pos: Query positional encodings (num_queries, hidden_dim)
-            pos_embed: Positional encodings for memory (batch_size, H*W, hidden_dim)
-            training: Training mode flag
-
-        Returns:
-            Updated target queries
-        """
-        # Self-attention block
-        tgt_norm = self.norm1(tgt, training=training)
-
-        # Add query positional encoding to query and key for self-attention
-        if query_pos is not None:
-            # Expand query_pos to batch dimension
-            batch_size = keras.ops.shape(tgt)[0]
-            query_pos_expanded = keras.ops.tile(
-                keras.ops.expand_dims(query_pos, axis=0),
-                [batch_size, 1, 1]
-            )
-            q = k = tgt_norm + query_pos_expanded
-        else:
-            q = k = tgt_norm
-
-        attn_output = self.self_attn(
-            query=q,
-            value=tgt_norm,
-            key=k,
-            training=training
-        )
-        tgt = tgt + self.dropout1(attn_output, training=training)
-
-        # Cross-attention block
-        tgt_norm = self.norm2(tgt, training=training)
-
-        # Add query positional encoding to query
-        if query_pos is not None:
-            q = tgt_norm + query_pos_expanded
-        else:
-            q = tgt_norm
-
-        # Add positional encoding to memory for key
-        if pos_embed is not None:
-            k = memory + pos_embed
-        else:
-            k = memory
-
-        cross_attn_output = self.cross_attn(
-            query=q,
-            value=memory,
-            key=k,
-            training=training
-        )
-        tgt = tgt + self.dropout2(cross_attn_output, training=training)
-
-        # FFN block
-        tgt_norm = self.norm3(tgt, training=training)
-        ffn_output = self.ffn(tgt_norm, training=training)
-        tgt = tgt + self.dropout3(ffn_output, training=training)
-
-        return tgt
-
-    def compute_output_shape(self, input_shape):
-        """Output shape equals the target (tgt) input shape."""
-        return tuple(input_shape[0])
-
-    def get_config(self) -> Dict[str, Any]:
-        config = super().get_config()
-        config.update({
-            "hidden_dim": self.hidden_dim,
-            "num_heads": self.num_heads,
             "ffn_dim": self.ffn_dim,
             "dropout": self.dropout_rate,
             "activation": self.activation,
@@ -559,6 +351,40 @@ class DETR(models.Model):
         # Positional embedding
         self.pos_embed = PositionEmbeddingSine2D(num_pos_feats=hidden_dim // 2, name="pos_embed")
 
+    def build(self, input_shape) -> None:
+        """Build DETR and all sublayers so .keras round-trip can restore weights.
+
+        Keras weight-restore calls load_own_variables() on each sublayer; if a
+        sublayer is unbuilt (no variables), load_own_variables raises when the
+        saved store has more entries than the (empty) variable list.  Building
+        here ensures every sublayer has its variables before weights are loaded.
+        """
+        # input_shape is either [(B,H,W,3),(B,H,W)] or (B,H,W,3)
+        if isinstance(input_shape, (list, tuple)) and len(input_shape) == 2:
+            images_shape = input_shape[0]
+        else:
+            images_shape = input_shape
+
+        if not self.backbone.built:
+            self.backbone.build(images_shape)
+
+        backbone_out_shape = self.backbone.compute_output_shape(images_shape)
+        if not self.input_proj.built:
+            self.input_proj.build(backbone_out_shape)
+
+        seq_shape = (None, None, self.hidden_dim)
+        if not self.class_embed.built:
+            self.class_embed.build(seq_shape)
+        if not self.bbox_embed.built:
+            self.bbox_embed.build(seq_shape)
+        if not self.query_embed.built:
+            self.query_embed.build((None,))
+
+        if not self.transformer.built:
+            self.transformer.build(seq_shape)
+
+        super().build(input_shape)
+
     def call(
         self,
         inputs: Tuple[keras.KerasTensor, keras.KerasTensor],
@@ -579,11 +405,19 @@ class DETR(models.Model):
         # Extract features from backbone
         features = self.backbone(images, training=training)
 
-        # Generate positional encodings
-        pos_embed = self.pos_embed(features, mask=padding_mask)
-
-        # Project features to transformer dimension
+        # Project features to transformer dimension first so pos_embed is
+        # computed at feature-map resolution, not full-image resolution.
+        # padding_mask is (B, img_H, img_W); PositionEmbeddingSine2D uses the
+        # mask's spatial dims to build the encoding grid, so passing the
+        # full-image mask would produce (B, C, img_H, img_W) -- wrong size.
+        # We pass mask=None so the layer uses projected_features' spatial dims.
         projected_features = self.input_proj(features)
+
+        # fix 1g: compute pos_embed on projected_features (feature-map resolution).
+        # PositionEmbeddingSine2D returns (B, C, H, W) channels-first;
+        # transpose to (B, H, W, C) to match projected_features layout.
+        pos_embed = self.pos_embed(projected_features)
+        pos_embed = keras.ops.transpose(pos_embed, [0, 2, 3, 1])
 
         # Flatten spatial dimensions: (B, H, W, C) -> (B, H*W, C)
         batch_size = keras.ops.shape(projected_features)[0]
@@ -593,17 +427,13 @@ class DETR(models.Model):
         src = keras.ops.reshape(projected_features, (batch_size, height * width, self.hidden_dim))
         pos_embed_flat = keras.ops.reshape(pos_embed, (batch_size, height * width, self.hidden_dim))
 
-        # Flatten mask if provided
-        if padding_mask is not None:
-            mask_flat = keras.ops.reshape(padding_mask, (batch_size, height * width))
-        else:
-            mask_flat = None
+        # fix 1h: get query embeddings via a forward call (build-safe; avoids
+        # accessing .embeddings before the Embedding layer is built).
+        query_embed_weights = self.query_embed(keras.ops.arange(self.num_queries))
 
-        # Get query embeddings - this gives us the embedding matrix
-        query_embed_weights = self.query_embed.weights[0]
-
-        # Pass through transformer
-        hs = self.transformer(src, mask_flat, query_embed_weights, pos_embed_flat, training=training)
+        # fix 1i: mask_flat is (B, H*W); TransformerLayer expects (B,T,T) attention_mask shape.
+        # Masking support deferred -- pass None for now.
+        hs = self.transformer(src, None, query_embed_weights, pos_embed_flat, training=training)
 
         # Apply prediction heads to all decoder outputs
         outputs_class = [self.class_embed(h) for h in hs]
@@ -639,11 +469,10 @@ class DETR(models.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "DETR":
-        """Deserialize model from configuration."""
-        backbone_config = config.pop("backbone")
-        transformer_config = config.pop("transformer")
-        backbone = keras.saving.deserialize_keras_object(backbone_config)
-        transformer = keras.saving.deserialize_keras_object(transformer_config)
+        """Deserialize model from configuration. fix 1k: defensive copy."""
+        config = dict(config)
+        backbone = keras.saving.deserialize_keras_object(config.pop("backbone"))
+        transformer = keras.saving.deserialize_keras_object(config.pop("transformer"))
         return cls(backbone=backbone, transformer=transformer, **config)
 
 
