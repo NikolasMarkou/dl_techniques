@@ -47,9 +47,15 @@ Example Usage:
 from .optimizer import optimizer_builder
 from .schedule import schedule_builder as learning_rate_schedule_builder
 from .deep_supervision import schedule_builder as deep_supervision_schedule_builder
+from .muon_optimizer import Muon
+from .sgld_optimizer import SGLD
+from .vsgd_optimizer import VSGD
 
 __all__ = [
     "optimizer_builder",
-    "learning_rate_schedule_builder", 
-    "deep_supervision_schedule_builder"
+    "learning_rate_schedule_builder",
+    "deep_supervision_schedule_builder",
+    "Muon",
+    "SGLD",
+    "VSGD",
 ]
