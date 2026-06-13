@@ -53,6 +53,7 @@ from typing import Dict, List, Literal, Optional, Tuple, Union, Any
 
 # ---------------------------------------------------------------------
 
+@keras.saving.register_keras_serializable(package="TabM")
 class ScaleEnsemble(keras.layers.Layer):
     """
     Learnable per-feature scaling for ensemble members.
@@ -160,6 +161,7 @@ class ScaleEnsemble(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
+@keras.saving.register_keras_serializable(package="TabM")
 class LinearEfficientEnsemble(keras.layers.Layer):
     """
     Efficient ensemble linear layer with rank-1 perturbations.
@@ -336,6 +338,7 @@ class LinearEfficientEnsemble(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
+@keras.saving.register_keras_serializable(package="TabM")
 class NLinear(keras.layers.Layer):
     """
     N fully independent parallel linear layers using einsum.
@@ -465,6 +468,7 @@ class NLinear(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
+@keras.saving.register_keras_serializable(package="TabM")
 class MLPBlock(keras.layers.Layer):
     """
     MLP block with optional efficient ensemble support.
@@ -622,6 +626,7 @@ class MLPBlock(keras.layers.Layer):
 
 # ---------------------------------------------------------------------
 
+@keras.saving.register_keras_serializable(package="TabM")
 class TabMBackbone(keras.layers.Layer):
     """
     TabM backbone MLP with optional ensemble support.

@@ -44,6 +44,7 @@ import keras
 from typing import Optional, Tuple, Union, Dict, Any
 
 
+@keras.saving.register_keras_serializable(package="Experimental")
 class SystemicGraphFilter(keras.layers.Layer):
     """
     A principled, graph-based filter for correlation matrices.
@@ -150,12 +151,12 @@ class SystemicGraphFilter(keras.layers.Layer):
         self.learnable_temperature = learnable_temperature
         self.epsilon = epsilon
 
-    def build(self, input_shape: Union[Tuple[int, ...], keras.KerasTensorShape]) -> None:
+    def build(self, input_shape: Union[Tuple[int, ...], Tuple[Optional[int], ...]]) -> None:
         """
         Build the layer and create trainable weights.
 
         :param input_shape: Shape of input tensor.
-        :type input_shape: Union[Tuple[int, ...], keras.KerasTensorShape]
+        :type input_shape: Union[Tuple[int, ...], Tuple[Optional[int], ...]]
         """
         super().build(input_shape)
 
@@ -345,16 +346,16 @@ class SystemicGraphFilter(keras.layers.Layer):
 
     def compute_output_shape(
         self,
-        input_shape: Union[Tuple[int, ...], keras.KerasTensorShape]
-    ) -> Union[Tuple[int, ...], keras.KerasTensorShape]:
+        input_shape: Union[Tuple[int, ...], Tuple[Optional[int], ...]]
+    ) -> Union[Tuple[int, ...], Tuple[Optional[int], ...]]:
         """
         Compute output shape of the layer.
 
         :param input_shape: Shape of input tensor.
-        :type input_shape: Union[Tuple[int, ...], keras.KerasTensorShape]
+        :type input_shape: Union[Tuple[int, ...], Tuple[Optional[int], ...]]
 
         :return: Shape of output tensor (same as input).
-        :rtype: Union[Tuple[int, ...], keras.KerasTensorShape]
+        :rtype: Union[Tuple[int, ...], Tuple[Optional[int], ...]]
         """
         return input_shape
 
@@ -422,19 +423,19 @@ class StructuredAttention(keras.layers.MultiHeadAttention):
 
     def build(
         self,
-        query_shape: Union[Tuple[int, ...], keras.KerasTensorShape],
-        value_shape: Optional[Union[Tuple[int, ...], keras.KerasTensorShape]] = None,
-        key_shape: Optional[Union[Tuple[int, ...], keras.KerasTensorShape]] = None
+        query_shape: Union[Tuple[int, ...], Tuple[Optional[int], ...]],
+        value_shape: Optional[Union[Tuple[int, ...], Tuple[Optional[int], ...]]] = None,
+        key_shape: Optional[Union[Tuple[int, ...], Tuple[Optional[int], ...]]] = None
     ) -> None:
         """
         Build the layer and initialize sublayers.
 
         :param query_shape: Shape of query input.
-        :type query_shape: Union[Tuple[int, ...], keras.KerasTensorShape]
+        :type query_shape: Union[Tuple[int, ...], Tuple[Optional[int], ...]]
         :param value_shape: Shape of value input.
-        :type value_shape: Optional[Union[Tuple[int, ...], keras.KerasTensorShape]]
+        :type value_shape: Optional[Union[Tuple[int, ...], Tuple[Optional[int], ...]]]
         :param key_shape: Shape of key input.
-        :type key_shape: Optional[Union[Tuple[int, ...], keras.KerasTensorShape]]
+        :type key_shape: Optional[Union[Tuple[int, ...], Tuple[Optional[int], ...]]]
         """
         super().build(query_shape, value_shape, key_shape)
 
