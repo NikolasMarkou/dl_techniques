@@ -443,6 +443,15 @@ class ByteLatentReasoningCore(keras.layers.Layer):
             trainable=True
         )
 
+        # Explicitly build the HRM reasoning modules for robust .keras round-trip
+        # (otherwise they only lazily build on first call). Mirrors the canonical
+        # sibling reasoning/hrm_reasoning_core.py:391-394. HierarchicalReasoningModule
+        # requires a 2-element list of IDENTICAL shapes whose last dim == embed_dim
+        # (hrm_reasoning_module.py:193-201); the carry z_h/z_l are (B, max_patches, embed_dim).
+        reasoning_input_shape = (None, self.max_patches, self.embed_dim)
+        self.h_reasoning.build([reasoning_input_shape, reasoning_input_shape])
+        self.l_reasoning.build([reasoning_input_shape, reasoning_input_shape])
+
         super().build(input_shape)
 
     def _create_reasoning_embeddings(self, byte_tokens, puzzle_ids, patch_representations, entropy_values):
@@ -465,11 +474,15 @@ class ByteLatentReasoningCore(keras.layers.Layer):
 
         # Incorporate entropy information into reasoning
         if entropy_values is not None:
-            # Pool entropy values by patches (simplified approach)
-            pooled_entropy = keras.ops.expand_dims(
-                keras.ops.mean(entropy_values, axis=1),
-                axis=1
-            )
+            # Pool entropy values by patches (simplified approach: mean over the
+            # whole sequence — documented design simplification, not redesigned).
+            # NOTE: pooled entropy MUST be 3-D (B, 1, 1) before tile([1, P, 1]).
+            # mean(axis=1) gives (B,); a single expand_dims gives only (B, 1),
+            # which mis-broadcasts under a 3-element tile and breaks the add at
+            # the end of this block. Two expand_dims => (B, 1, 1).
+            pooled_entropy = keras.ops.mean(entropy_values, axis=1)
+            pooled_entropy = keras.ops.expand_dims(pooled_entropy, axis=1)
+            pooled_entropy = keras.ops.expand_dims(pooled_entropy, axis=1)
             pooled_entropy = keras.ops.tile(
                 pooled_entropy,
                 [1, keras.ops.shape(patch_reasoning)[1], 1]
@@ -564,25 +577,37 @@ class ByteLatentReasoningCore(keras.layers.Layer):
         # Step 5: Hierarchical reasoning cycles with byte-patch interaction
         z_h, z_l = carry["z_h"], carry["z_l"]
 
-        # Forward iterations (detached for efficiency)
-        with keras.ops.stop_gradient():
-            for h_step in range(self.h_cycles):
-                for l_step in range(self.l_cycles):
-                    # Skip last L step of last H cycle
-                    if not (h_step == self.h_cycles - 1 and l_step == self.l_cycles - 1):
-                        # Low-level reasoning: incorporate patch information
-                        z_l = self.l_reasoning(
-                            z_l, z_h + reasoning_input, training=training
-                        )
+        # Forward iterations (detached for efficiency / truncated BPTT).
+        # DECISION plan_2026-06-14_080e7636/D-002: detach via the FUNCTION
+        # keras.ops.stop_gradient(x) after the loop — NOT `with keras.ops.stop_gradient():`.
+        # stop_gradient is a function, not a context manager; the `with` form is a
+        # TypeError on every forward. The cycle loop runs plainly; only the final
+        # step carries gradient. Mirrors reasoning/hrm_reasoning_core.py:534-540.
+        for h_step in range(self.h_cycles):
+            for l_step in range(self.l_cycles):
+                # Skip last L step of last H cycle (done with gradients below)
+                if not (h_step == self.h_cycles - 1 and l_step == self.l_cycles - 1):
+                    # Low-level reasoning: incorporate patch information.
+                    # DECISION plan_2026-06-14_080e7636/D-002: HierarchicalReasoningModule
+                    # takes a SINGLE 2-element list [hidden_states, input_injection]
+                    # (hrm_reasoning_module.py:227-231) — two positional tensors fail
+                    # its isinstance(list)/len==2 assert. Do NOT pass positionally.
+                    z_l = self.l_reasoning(
+                        [z_l, z_h + reasoning_input], training=training
+                    )
 
-                # Skip last H step
-                if h_step != self.h_cycles - 1:
-                    # High-level reasoning: abstract patch representations
-                    z_h = self.h_reasoning(z_h, z_l, training=training)
+            # Skip last H step (done with gradients below)
+            if h_step != self.h_cycles - 1:
+                # High-level reasoning: abstract patch representations
+                z_h = self.h_reasoning([z_h, z_l], training=training)
 
-        # Final step with gradients
-        z_l = self.l_reasoning(z_l, z_h + reasoning_input, training=training)
-        z_h = self.h_reasoning(z_h, z_l, training=training)
+        # Detach states before the final step (truncated BPTT)
+        z_h = keras.ops.stop_gradient(z_h)
+        z_l = keras.ops.stop_gradient(z_l)
+
+        # Final step with gradients (list-args; see D-002)
+        z_l = self.l_reasoning([z_l, z_h + reasoning_input], training=training)
+        z_h = self.h_reasoning([z_h, z_l], training=training)
 
         # Step 6: Process patch representations through global transformer
         # Convert reasoning states back to byte processing format
