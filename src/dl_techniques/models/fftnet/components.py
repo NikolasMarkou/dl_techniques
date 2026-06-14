@@ -421,7 +421,13 @@ class ComplexInterpolationLayer(layers.Layer):
         real_up = ops.reshape(real_up_4d, (B, G, self.size))
         imag_up = ops.reshape(imag_up_4d, (B, G, self.size))
 
-        return ops.cast(ops.complex(real_up, imag_up), dtype=inputs.dtype)
+        # DECISION plan_2026-06-14_8c7365d0/D-007: keras.ops has NO complex/angle/
+        # rfft2/irfft2 in Keras 3.8/TF 2.18 (empirically confirmed). The backend is
+        # hardcoded to tensorflow at module top (line 21), so reassemble the
+        # interpolated real/imag halves with tf.complex — NOT ops.complex (absent,
+        # dead-on-forward). This preserves the complex-tensor OUTPUT contract that the
+        # sole consumer (SpectreHead.interp_layer) depends on. See decisions.md D-007.
+        return ops.cast(tf.complex(real_up, imag_up), dtype=inputs.dtype)
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute output shape."""
@@ -479,14 +485,23 @@ class ComplexConv1DLayer(layers.Layer):
         Args:
             input_shape: Shape tuple of the input.
         """
-        self.kernel = self.add_weight(
-            name='complex_kernel',
+        # DECISION plan_2026-06-14_8c7365d0/D-008: TF cannot init a dtype="complex64"
+        # weight via RandomNormal (StatelessRandomNormalV2 rejects complex dtype,
+        # InvalidArgumentError — empirically confirmed). Store the complex kernel as
+        # two REAL weights (k_real, k_imag) instead of one complex weight. Do NOT
+        # revert to a single complex64 weight. See decisions.md D-008.
+        init = initializers.RandomNormal(stddev=1.0 / math.sqrt(self.kernel_size))
+        self.k_real = self.add_weight(
+            name='complex_kernel_real',
             shape=(self.kernel_size,),
-            initializer=initializers.RandomNormal(
-                stddev=1.0 / math.sqrt(self.kernel_size)
-            ),
+            initializer=init,
             trainable=True,
-            dtype="complex64"
+        )
+        self.k_imag = self.add_weight(
+            name='complex_kernel_imag',
+            shape=(self.kernel_size,),
+            initializer=init,
+            trainable=True,
         )
         super().build(input_shape)
 
@@ -514,7 +529,7 @@ class ComplexConv1DLayer(layers.Layer):
 
         # Split into real/imaginary parts
         x_r, x_i = ops.real(x_padded), ops.imag(x_padded)
-        k_r, k_i = ops.real(self.kernel), ops.imag(self.kernel)
+        k_r, k_i = self.k_real, self.k_imag  # two real weights (see D-008)
 
         # Reshape kernel for conv1d: (kernel_size, in_channels, out_channels)
         k_r_conv = ops.reshape(k_r, (self.kernel_size, 1, 1))
@@ -530,7 +545,7 @@ class ComplexConv1DLayer(layers.Layer):
         imag_part = conv_ad + conv_bc
 
         # Combine and reshape back
-        output_flat = ops.complex(real_part, imag_part)
+        output_flat = tf.complex(real_part, imag_part)  # ops.complex absent (D-008)
         return ops.reshape(output_flat, (B, G, K))
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
