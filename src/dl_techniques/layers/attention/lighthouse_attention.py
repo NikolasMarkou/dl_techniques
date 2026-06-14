@@ -647,9 +647,8 @@ class LighthouseAttention(keras.layers.Layer):
         q_t = ops.transpose(q_g, (0, 2, 1, 3))
         k_t = ops.transpose(k_g, (0, 2, 1, 3))
         v_t = ops.transpose(v_g, (0, 2, 1, 3))
-        scale = ops.cast(
-            1.0 / ops.sqrt(ops.cast(self.head_dim, q_t.dtype)), q_t.dtype
-        )
+        # DECISION plan_2026-06-14_33b77a7a/D-002: reuse precomputed self._scale (D-002 pattern); ops.cast(self._scale,dt) == 1/ops.sqrt(cast(head_dim,dt)) in float32. Do NOT recompute ops.sqrt per call.
+        scale = ops.cast(self._scale, q_t.dtype)
         scores = ops.matmul(q_t, ops.transpose(k_t, (0, 1, 3, 2))) * scale
         # Lower-triangular causal mask on (K, K)
         k_len = ops.shape(scores)[-1]
@@ -759,9 +758,7 @@ class LighthouseAttention(keras.layers.Layer):
             q_t = ops.transpose(q, (0, 2, 1, 3))
             k_t = ops.transpose(k, (0, 2, 1, 3))
             v_t = ops.transpose(v, (0, 2, 1, 3))
-            scale = ops.cast(
-                1.0 / ops.sqrt(ops.cast(D, q_t.dtype)), q_t.dtype
-            )
+            scale = ops.cast(self._scale, q_t.dtype)
             scores = ops.matmul(q_t, ops.transpose(k_t, (0, 1, 3, 2))) * scale
             # Causal mask: positions j > i are masked.
             i = ops.arange(ops.shape(scores)[-2])
