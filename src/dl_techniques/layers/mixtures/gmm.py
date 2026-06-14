@@ -71,6 +71,7 @@ from typing import Optional, Union, Literal, List, Any, Tuple, Dict
 # ---------------------------------------------------------------------
 
 from ...utils.logger import logger
+from ...utils.tensors import resolve_training_factor
 from ...initializers.orthonormal_initializer import OrthonormalInitializer
 
 # ---------------------------------------------------------------------
@@ -580,10 +581,19 @@ class GMMLayer(keras.layers.Layer):
         responsibilities = self._responsibilities(log_density)
 
         # Register isometric-kernel regularization during training.
-        # ``training is True``: graph-safe identity check (symbolic/None/False skip the
-        # add_loss without coercing a tensor to bool). Canonical repo idiom.
-        if training is True and self.isometric_regularizer_strength > 0:
-            self.add_loss(self._isometric_regularization_loss())
+        # DECISION plan_2026-06-14_5e80bd3e/D-001: gate on a graph-safe training factor so
+        # the loss fires for a symbolic training=True tensor (custom @tf.function loop) and
+        # is a zero contribution under symbolic-False, never coercing a tensor to a bool.
+        # python-True keeps the exact unmasked add_loss; the symbolic path multiplies by the
+        # 0/1 factor.
+        if self.isometric_regularizer_strength > 0:
+            training_factor = resolve_training_factor(training, self.compute_dtype)
+            if training_factor is not None:
+                loss = self._isometric_regularization_loss()
+                self.add_loss(
+                    loss if isinstance(training_factor, float)
+                    else training_factor * loss
+                )
 
         # Compute output based on mode
         if self.output_mode == 'assignments':
