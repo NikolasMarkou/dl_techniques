@@ -38,6 +38,7 @@ References:
 
 """
 
+import math
 import keras
 from typing import Optional, Union, Tuple, Dict, Any
 from keras import ops, layers, initializers, regularizers
@@ -340,6 +341,8 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         # Set actual dimensions based on configuration
         self.actual_key_dim = self.key_dim if self.key_dim is not None else self.embed_dim // self.num_heads
         self.actual_value_dim = self.value_dim if self.value_dim is not None else self.actual_key_dim
+        # DECISION plan_2026-06-14_33b77a7a/D-004: precompute 1/sqrt(actual_key_dim) in build() (resolved from input_shape; None in __init__). D-002 pattern; replaces per-call ops.sqrt.
+        self._inv_sqrt_key_dim = 1.0 / math.sqrt(float(self.actual_key_dim))
 
         # Validate dimension compatibility
         if self.key_dim is None and self.embed_dim % self.num_heads != 0:
@@ -516,9 +519,7 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
 
         # Compute scaled dot-product attention logits
         attention_logits = ops.matmul(query, ops.transpose(key, [0, 1, 3, 2]))
-        attention_logits = attention_logits / ops.sqrt(
-            ops.cast(self.actual_key_dim, attention_logits.dtype)
-        )
+        attention_logits = attention_logits * self._inv_sqrt_key_dim
 
         # Apply capsule routing enhancements
         routing_output = attention_logits
