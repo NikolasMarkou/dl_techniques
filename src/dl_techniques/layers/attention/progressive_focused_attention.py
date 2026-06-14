@@ -419,9 +419,26 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
             self._lepe.build(lepe_input_shape)
 
         # ============ Create Attention Mask for Shifted Windows ============
-        # For SW-MSA, we need a mask to prevent attention across shifted regions
+        # For SW-MSA, we need a mask to prevent attention across shifted regions.
+        # DECISION plan_2026-06-14_b9456f74/D-001: the SW-MSA mask is built for the
+        # ACTUAL static (H, W) so it is correct for general feature-map sizes (not
+        # only H=W=2*ws). This REQUIRES statically-known H and W. Do NOT attempt to
+        # build the mask from dynamic (None) spatial dims or fall back to a fixed
+        # 2x2-window grid -- that silently produces a wrong-geometry mask for the
+        # production callers (pft_sr, thera, swin). Fail loud instead. See D-001.
         if self._shift_size > 0:
-            self._attn_mask = self._compute_attention_mask()
+            height = x_shape[1]
+            width = x_shape[2]
+            if height is None or width is None:
+                raise ValueError(
+                    "ProgressiveFocusedAttention with shift_size > 0 (SW-MSA) "
+                    "requires statically-known height and width; got input "
+                    f"shape {x_shape!r}. The shifted-window attention mask "
+                    "geometry cannot be built from dynamic (None) spatial "
+                    "dimensions. Provide a fixed-size input (e.g. via a static "
+                    "input shape) or use shift_size=0 (W-MSA)."
+                )
+            self._attn_mask = self._compute_attention_mask(height, width)
         else:
             self._attn_mask = None
 
@@ -450,11 +467,28 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
 
         super().build(input_shape)
 
-    def _compute_attention_mask(self) -> keras.Variable:
+    def _compute_attention_mask(self, height: int, width: int) -> keras.Variable:
         """Compute attention mask for shifted window attention (SW-MSA).
 
+        Builds the SW-MSA mask for the ACTUAL static feature-map size
+        ``(height, width)``. The mask image is partitioned into windows using
+        the SAME ordering as :meth:`_window_partition` (B-major / window-minor),
+        so each mask entry aligns with its corresponding window slot.
+
+        SW-MSA requires statically-known ``height`` and ``width``: the mask
+        geometry (number of windows, per-window region assignment) cannot be
+        constructed from a dynamic ``None`` spatial dimension. ``build()`` fails
+        loud (``ValueError``) when either is ``None`` rather than silently
+        emitting a wrong-geometry mask. See ``# DECISION D-001`` in ``build()``.
+
+        :param height: Static feature-map height. Must be divisible by
+            ``window_size`` and ``>= 2 * window_size``.
+        :type height: int
+        :param width: Static feature-map width. Same divisibility/size rule.
+        :type width: int
         :return: Attention mask of shape ``(num_windows, window_area, window_area)``
-            with 0.0 for valid pairs and -100.0 for masked pairs.
+            with 0.0 for valid pairs and -100.0 for masked pairs, where
+            ``num_windows = (height // ws) * (width // ws)``.
         :rtype: keras.Variable
         """
         # Define slice indices for creating region boundaries
@@ -473,9 +507,9 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
         # Create a mask image with region indices using numpy (for static computation)
         import numpy as np
 
-        # Create index mask for 2x2 windows (minimum required for shifted attention)
-        mask_size = self._window_size * 2
-        img_mask = np.zeros((1, mask_size, mask_size, 1), dtype=np.float32)
+        # Build the index mask at the ACTUAL feature-map size (general H, W),
+        # not a fixed 2x2-window grid.
+        img_mask = np.zeros((1, height, width, 1), dtype=np.float32)
 
         # Assign each region a unique index
         cnt = 0
@@ -484,12 +518,20 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
                 img_mask[:, h, w, :] = cnt
                 cnt += 1
 
-        # Partition the index mask into windows (same as we'll do to features)
+        # Partition the index mask into windows using the SAME logic as
+        # _window_partition: (1,H,W,1) -> (1,nH,ws,nW,ws,1) ->
+        # transpose (0,1,3,2,4,5) -> (nW_total, ws*ws). This makes the mask
+        # window-order match _window_partition exactly (B-major, window-minor).
+        num_windows_h = height // self._window_size
+        num_windows_w = width // self._window_size
         img_mask = img_mask.reshape(
-            1, 2, self._window_size, 2, self._window_size, 1
+            1, num_windows_h, self._window_size,
+            num_windows_w, self._window_size, 1
         )
         img_mask = img_mask.transpose(0, 1, 3, 2, 4, 5)
-        mask_windows = img_mask.reshape(-1, self._window_size * self._window_size)
+        mask_windows = img_mask.reshape(
+            num_windows_h * num_windows_w, self._window_size * self._window_size
+        )
 
         # Compute pairwise attention mask:
         # If indices differ, mask out (set to -100); otherwise allow (set to 0)
@@ -794,22 +836,17 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
 
         # ============ Apply Shifted Window Attention Mask ============
         if self._attn_mask is not None and self._shift_size > 0:
-            # The mask prevents attention across different shifted regions
-            # Add mask (0 for valid, -100 for invalid) to attention scores
-            # Broadcasting handles batch and head dimensions
-            num_windows_actual = (height // self._window_size) * (width // self._window_size)
-
-            # Broadcast mask to match attention score dimensions
-            attn_mask = keras.ops.tile(
-                self._attn_mask[None, None, :, :],
-                (batch_size, self._num_heads, 1, 1)
+            # _attn_mask: (nW, wa, wa) in the same window order as _window_partition.
+            # attn_scores: (B*nW, num_heads, wa, wa). Broadcast mask over batch and heads.
+            num_windows_per_image = (height // self._window_size) * (width // self._window_size)
+            mask = keras.ops.reshape(
+                self._attn_mask,
+                (num_windows_per_image, 1, self._window_area, self._window_area)
             )
-
-            # Add mask to scores (masked positions get large negative values)
-            attn_scores = attn_scores + keras.ops.reshape(
-                attn_mask[:, :, :self._window_area, :self._window_area],
-                (1, 1, self._window_area, self._window_area)
-            )
+            # Tile B times along axis 0 to match the B-major/window-minor
+            # flattening of _window_partition: (B*nW, 1, wa, wa). Broadcasts over heads.
+            mask = keras.ops.tile(mask, (batch_size, 1, 1, 1))
+            attn_scores = attn_scores + mask
 
         # ============ Progressive Focusing ============
         # Multiply with previous layer's attention to focus on relevant tokens

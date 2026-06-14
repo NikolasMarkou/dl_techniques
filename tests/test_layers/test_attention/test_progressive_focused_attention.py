@@ -118,22 +118,8 @@ class TestForwardPass:
         assert tuple(out2.shape) == (2, 8, 8, 16)
         assert not np.allclose(np.asarray(out1), np.asarray(out2), atol=1e-6)
 
-    @pytest.mark.xfail(
-        reason="SW-MSA mask broadcast in call() is dead-on-forward: self._attn_mask "
-               "is 3D (num_windows, wa, wa); the [None, None, :, :] indexing yields a "
-               "5D tensor, the tile uses a mismatched 4-tuple, and the final reshape "
-               "collapses (B*heads, wa, wa) into (1, 1, wa, wa) -> InvalidArgumentError "
-               "(4096 vs 256 values). Correct Swin masking needs a per-window reshape "
-               "+ broadcast (>10-line restructure altering masked-attention semantics) "
-               "-- needs dedicated plan. shift_size=0 (W-MSA) path is fully covered.",
-        strict=False,
-    )
     def test_shifted_window_forward(self):
-        """SW-MSA path (shift_size > 0) runs and preserves shape.
-
-        XFAIL: the shifted-window attention-mask branch is latent dead code
-        (never exercised before this first-ever test). See xfail reason.
-        """
+        """SW-MSA path (shift_size > 0) runs and preserves shape."""
         layer = ProgressiveFocusedAttention(
             dim=16, num_heads=2, window_size=4, shift_size=2
         )
