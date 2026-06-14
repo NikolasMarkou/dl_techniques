@@ -670,7 +670,7 @@ class TestFFNFactory:
             'mlp',
             'swiglu',
             'differential',
-            'glu', 'geglu', 'residual', 'swin_mlp',
+            'glu', 'geglu', 'gelu_tanh', 'residual', 'swin_mlp',
             'counting', 'gated_mlp', 'power_mlp',  'orthoglu', 'logic',
             'kan', 'tversky'
         }

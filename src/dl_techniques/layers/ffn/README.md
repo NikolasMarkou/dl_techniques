@@ -4,7 +4,7 @@ The `dl_techniques.layers.ffn` module provides a comprehensive collection of fee
 
 ## Overview
 
-This module includes fourteen different FFN layer types and a factory system for standardized creation and parameter validation. All layers are designed for modern Keras 3.x compatibility with full serialization support.
+This module includes fifteen different FFN layer types and a factory system for standardized creation and parameter validation. All layers are designed for modern Keras 3.x compatibility with full serialization support.
 
 ## Available FFN Types
 
@@ -16,6 +16,7 @@ The following layers are supported by the factory system with automated paramete
 | `differential` | `DifferentialFFN` | Dual-pathway differential processing | Enhanced feature processing with opponent signals |
 | `gated_mlp` | `GatedMLP` | Spatially-gated MLP using 1x1 convolutions | Vision models, efficient attention alternative |
 | `geglu` | `GeGLUFFN` | GELU-based Gated Linear Unit | GELU-based gated processing in transformers |
+| `gelu_tanh` | `GELUMLPFFN` | Two-layer MLP with tanh-approximate GELU (SD3-faithful) | Diffusion/transformer blocks needing the tanh-GELU variant |
 | `glu` | `GLUFFN` | Gated Linear Unit with configurable activation | Gated processing for improved gradient flow |
 | `kan` | `KANLinear` | Kolmogorov-Arnold linear layer with B-spline learnable activations | Expressive per-connection nonlinearities; supports N-D inputs |
 | `logic` | `LogicFFN` | FFN with learnable soft logic operations | Tasks requiring symbolic-like reasoning |
@@ -255,7 +256,7 @@ power_mlp = create_ffn_layer(
 
 ### KANLinear
 **Required:** `features`
-**Optional:** `grid_size` (default: 5), `spline_order` (default: 3), `grid_range` (default: `(-2.0, 2.0)`), `activation` (default: 'swish'), `base_trainable` (default: True), `spline_trainable` (default: True), `epsilon` (default: 1e-7)
+**Optional:** `grid_size` (default: 5), `spline_order` (default: 3), `grid_range` (default: `(-2.0, 2.0)`), `activation` (default: 'swish'), `base_trainable` (default: True), `spline_trainable` (default: True), `kernel_initializer` (default: 'glorot_uniform'), `base_scaler_initializer` (default: 'ones'), `epsilon` (default: 1e-7)
 
 Kolmogorov-Arnold linear layer using B-spline parameterized learnable univariate activations. Forward kernel supports N-D inputs (e.g. `(batch, time, dim)`) via einsum.
 
@@ -311,11 +312,11 @@ counting_ffn = CountingFFN(
 ```python
 @keras.saving.register_keras_serializable()
 class CustomTransformerLayer(keras.layers.Layer):
-    def __init__(self, hidden_size, ffn_type='mlp', **ffn_kwargs, **kwargs):
+    def __init__(self, hidden_size, ffn_type='mlp', ffn_kwargs=None, **kwargs):
         super().__init__(**kwargs)
         self.hidden_size = hidden_size
         self.ffn_type = ffn_type
-        self.ffn_kwargs = ffn_kwargs
+        self.ffn_kwargs = ffn_kwargs or {}
         
         # Create FFN using factory
         from dl_techniques.layers.ffn import create_ffn_layer
@@ -324,7 +325,7 @@ class CustomTransformerLayer(keras.layers.Layer):
             hidden_dim=hidden_size * 4,
             output_dim=hidden_size,
             name='ffn',
-            **ffn_kwargs
+            **self.ffn_kwargs
         )
     
     def call(self, inputs):

@@ -387,11 +387,6 @@ def validate_ffn_config(ffn_type: str, **kwargs: Any) -> None:
         if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(f"dropout_rate must be between 0.0 and 1.0, got {dropout_rate}")
 
-    if 'drop_rate' in kwargs:  # Used by swin_mlp
-        drop_rate = kwargs['drop_rate']
-        if not (0.0 <= drop_rate <= 1.0):
-            raise ValueError(f"drop_rate must be between 0.0 and 1.0, got {drop_rate}")
-
     positive_dims = ['hidden_dim', 'output_dim', 'count_dim', 'logic_dim', 'filters', 'units', 'features', 'num_features']
     for dim_param in positive_dims:
         if dim_param in kwargs and kwargs[dim_param] is not None:
