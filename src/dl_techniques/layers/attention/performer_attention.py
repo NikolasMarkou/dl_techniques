@@ -20,6 +20,7 @@ References:
 
 # ---------------------------------------------------------------------
 
+import math
 import keras
 import numpy as np
 from typing import Optional, Union, Tuple, Any, Dict
@@ -161,6 +162,7 @@ class PerformerAttention(keras.layers.Layer):
         # Computed attributes
         self.head_dim = dim // num_heads
         self.scale = 1.0 / np.sqrt(self.head_dim)
+        self._feature_scale = math.sqrt(2.0 / float(self.nb_features))
 
         # Create sub-layers in __init__
         # Q, K, V projection layer
@@ -242,7 +244,8 @@ class PerformerAttention(keras.layers.Layer):
             projection = projection * self.ortho_scaling
 
         # Scale by sqrt(head_dim) for proper variance
-        projection = projection / ops.sqrt(ops.cast(self.head_dim, dtype=projection.dtype))
+        # DECISION plan_2026-06-14_33b77a7a/D-001: precompute static attention scale as a Python float (D-002 pattern); projection*self.scale == projection/ops.sqrt(head_dim) in float32. Do NOT revert to ops.sqrt in call().
+        projection = projection * self.scale
 
         # Broadcast to batch dimension
         # Shape: (batch, num_heads, nb_features//2, head_dim)
@@ -286,7 +289,7 @@ class PerformerAttention(keras.layers.Layer):
 
         # Apply proper scaling for kernel approximation
         # The scaling ensures E[φ(x)ᵀφ(y)] ≈ exp(xᵀy)
-        features = features * ops.sqrt(2.0 / ops.cast(self.nb_features, dtype=features.dtype))
+        features = features * self._feature_scale
 
         # For numerical stability, apply exponential normalization
         if is_query:
