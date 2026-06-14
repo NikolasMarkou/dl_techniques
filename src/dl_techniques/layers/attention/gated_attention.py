@@ -65,6 +65,7 @@ References:
 
 """
 
+import math
 import keras
 from keras import layers, initializers, regularizers, ops
 from typing import Optional, Union, Tuple, Dict, Any
@@ -239,6 +240,13 @@ class GatedAttention(keras.layers.Layer):
         # TRICKY POINT: When using custom head_dim, attention_dim may not equal dim
         # This requires an additional projection layer to match dimensions
         self.attention_dim = self.num_heads * self.head_dim
+
+        # DECISION plan_2026-06-14_ab855e7e/D-001: precompute the static attention
+        # scale as a Python float (math.sqrt, NOT ops.sqrt on a cast scalar). An
+        # ops.sqrt on a static int returns a backend tensor that can leak when
+        # __init__ runs inside a symbolic scratch graph (the D-002 pattern; same
+        # fix already applied to cross/diff/MLA). Do NOT revert to ops.sqrt here.
+        self.scale = 1.0 / math.sqrt(float(self.head_dim))
 
         # CREATE all sub-layers in __init__ (they are unbuilt)
         # Following the Golden Rule: Create in __init__, Build in build()
@@ -508,9 +516,9 @@ class GatedAttention(keras.layers.Layer):
         # Compute attention scores
         matmul_qk = ops.matmul(q, ops.transpose(k, axes=[0, 1, 3, 2]))
 
-        # Scale by sqrt(head_dim) for numerical stability
-        dk = ops.cast(self.head_dim, keras.backend.floatx())
-        scaled_attention_logits = matmul_qk / ops.sqrt(dk)
+        # Scale by 1/sqrt(head_dim) for numerical stability (precomputed Python
+        # float self.scale; see D-001 anchor in __init__).
+        scaled_attention_logits = matmul_qk * ops.cast(self.scale, matmul_qk.dtype)
 
         if attention_mask is not None:
             # The mask can be (batch, seq_len) for padding or (batch, seq_len, seq_len) for causal.

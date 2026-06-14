@@ -249,7 +249,7 @@ class MobileMQA(GroupedQueryAttention):
 
         # 6. Attention Mechanism
         # (B, H, S_q, D) @ (B, H, D, S_kv) -> (B, H, S_q, S_kv)
-        scale = ops.cast(1.0 / ops.sqrt(ops.cast(self.head_dim, 'float32')), k.dtype)
+        scale = ops.cast(self.scale, k.dtype)  # D-001: inherited precomputed float
         scores = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2))) * scale
 
         # Note: Masking is typically not used in standard MobileMQA vision contexts,

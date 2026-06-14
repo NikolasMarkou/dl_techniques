@@ -26,6 +26,7 @@ References:
       Embedding." https://arxiv.org/abs/2104.09864 (RoPE integration)
 """
 
+import math
 import keras
 from keras import ops
 from typing import Optional, Union, Any, Dict, Tuple
@@ -194,6 +195,11 @@ class GroupedQueryAttention(keras.layers.Layer):
         # Derived parameters
         self.head_dim = self.dim // self.num_heads
         self.num_groups = self.num_heads // self.num_kv_heads
+
+        # DECISION plan_2026-06-14_ab855e7e/D-001: static attention scale as a
+        # Python float (math.sqrt, NOT ops.sqrt on a cast scalar — D-002 pattern).
+        # Inherited by MobileMQA. Do NOT revert to ops.sqrt.
+        self.scale = 1.0 / math.sqrt(float(self.head_dim))
 
         # CREATE all sub-layers in __init__
         self.w_q = keras.layers.Dense(
@@ -454,7 +460,7 @@ class GroupedQueryAttention(keras.layers.Layer):
         # 6. Scaled Dot-Product Attention
         # (B, H, S, D_h) @ (B, H, D_h, S) -> (B, H, S, S)
         scores = ops.matmul(q, ops.transpose(k, (0, 1, 3, 2)))
-        scores = scores / ops.sqrt(ops.cast(self.head_dim, scores.dtype))
+        scores = scores * ops.cast(self.scale, scores.dtype)  # D-001: precomputed
 
         if attention_mask is not None:
             scores = self._apply_mask(scores, attention_mask)
