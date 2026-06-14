@@ -31,8 +31,14 @@ self-attention.
 
 The key insight is that this simple, parameter-free linear mixing is
 sufficient to achieve strong performance on a variety of NLP tasks, while
-being significantly more memory and computationally efficient, with a
-complexity of O(N log N) compared to O(N^2) for self-attention.
+being more memory efficient than self-attention (no learnable projections,
+no materialized S x S attention matrix). Note on complexity: this layer
+implements the DFT via cached DFT-matrix multiplication, which costs
+O(S^2 * D + S * D^2) per token-mixing step (two complex matmuls), NOT the
+O(N log N) of a true Fast Fourier Transform. A real FFT-based path is not
+implemented here. The original FNet paper attributes its O(N log N) figure
+to an FFT implementation; the matrix path traded that asymptotic for
+hardware simplicity and exact serializable DFT weights.
 
 References:
   - "FNet: Mixing Tokens with Fourier Transforms" (Lee-Thorp et al., 2021)
@@ -61,10 +67,15 @@ class FNetFourierTransform(keras.layers.Layer):
 
     Implements the core innovation from FNet by applying sequential 1D DFTs
     along the sequence and hidden dimensions, then extracting the real part.
-    This achieves global token mixing in ``O(N log N)`` complexity without
-    any learnable parameters, replacing the ``O(N^2)`` self-attention
-    mechanism. The transform is computed as
-    ``output = Re(DFT_hidden(DFT_seq(X)))``.
+    This achieves global token mixing without any learnable parameters,
+    replacing the ``O(N^2)`` self-attention mechanism. The transform is
+    computed as ``output = Re(DFT_hidden(DFT_seq(X)))``.
+
+    **Complexity:** the DFT is computed via cached DFT-matrix multiplication,
+    costing ``O(S^2 * D + S * D^2)`` per call for an input of shape
+    ``(B, S, D)`` (two complex matmuls), NOT the ``O(N log N)`` of a true
+    FFT. The asymptotically faster FFT path is **not implemented**; see the
+    ``implementation`` parameter.
 
     **Architecture Overview:**
 
@@ -99,9 +110,13 @@ class FNetFourierTransform(keras.layers.Layer):
         │   Output [B, S, D]                                      │
         └─────────────────────────────────────────────────────────┘
 
-    :param implementation: Strategy for computing DFT. ``'matrix'`` uses
-        cached DFT matrix multiplication (default, most compatible);
-        ``'fft'`` uses Fast Fourier Transform when available.
+    :param implementation: Strategy for computing the DFT. Only ``'matrix'``
+        (the default) is implemented: it uses cached DFT-matrix
+        multiplication. ``'fft'`` is **accepted but not implemented** — a true
+        Fast Fourier Transform path does not exist here; passing ``'fft'``
+        logs a one-time warning and transparently falls back to the
+        ``'matrix'`` path (identical output). Do not rely on ``'fft'`` for any
+        asymptotic speedup. Defaults to ``'matrix'``.
     :type implementation: str
     :param normalize_dft: Whether to apply ``1/sqrt(N)`` normalization to
         DFT matrices for energy preservation and numerical stability.
@@ -133,6 +148,21 @@ class FNetFourierTransform(keras.layers.Layer):
             raise ValueError(
                 f"implementation must be one of {valid_implementations}, "
                 f"got '{implementation}'"
+            )
+        # DECISION plan_2026-06-14_0c5d4a21/D-006: 'fft' is accepted but NOT a
+        # real FFT path — build()/call() always use the matrix DFT. Do NOT
+        # "raise NotImplementedError" here: an existing passing test
+        # (test_fnet_fourier_transform.py::test_different_implementations)
+        # constructs implementation='fft' and asserts a finite forward, so
+        # failing loud would break a green gate test. Instead warn once + fall
+        # back to matrix (honest + behavior-preserving). Do NOT implement a
+        # true FFT (user D2: guard/document, do not re-implement). See D-006.
+        if implementation == 'fft':
+            logger.warning(
+                "FNetFourierTransform(implementation='fft') is not implemented; "
+                "a true FFT path does not exist. Falling back to the 'matrix' "
+                "DFT path (identical output). Use implementation='matrix' to "
+                "silence this warning."
             )
         if epsilon <= 0:
             raise ValueError(f"epsilon must be positive, got {epsilon}")
