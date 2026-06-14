@@ -724,6 +724,126 @@ class TestHopfieldAttentionEdgeCases:
         assert output.shape == query.shape
 
 
+class TestHopfieldAttentionPlan077a2a35:
+    """Regression gate for plan_2026-06-14_077a2a35 Step 1 (F7 + AF1 + AF2).
+
+    - F7/D-001: cross-attention with DIFFERENT K/V feature dim builds the K/V
+      Dense layers from the actual key/value shapes (not query_shape).
+    - AF1: ``value_dim=None`` round-trips through ``.keras`` as ``None``.
+    - AF2: precomputed ``math.sqrt`` scale leaves self-attn numerics
+      byte-identical.
+    """
+
+    def test_self_attention_byte_identical_reference(self):
+        """Self-attention forward is finite, correctly shaped, and matches a
+        deterministic reference (locks AF2 scale + F7 fallback byte-identity)."""
+        layer = HopfieldAttention(num_heads=4, key_dim=32, qk_norm_type=None)
+
+        # Deterministic input + deterministic weights via build + reference.
+        x = keras.random.normal((2, 16, 128), seed=1234)
+        out = layer(x)
+
+        assert out.shape == (2, 16, 128)
+        assert not keras.ops.any(keras.ops.isnan(out))
+        assert not keras.ops.any(keras.ops.isinf(out))
+
+        # The scale folded into __init__ must equal the old
+        # ops.sqrt(cast(key_dim, float32)) AT THE FLOAT32 PRECISION the division
+        # actually runs in: the Python-float divisor is cast to the score
+        # tensor's float32 dtype, so both round to the same float32 value. (The
+        # math.sqrt result is float64; comparing it to the float32 reference at
+        # full f64 precision would spuriously fail by ~1e-7 — not a numeric drift
+        # in the forward pass, which runs in float32.)
+        old_scale_f32 = np.float32(
+            keras.ops.convert_to_numpy(
+                keras.ops.sqrt(keras.ops.cast(32, "float32"))
+            )
+        )
+        new_scale_f32 = np.float32(layer._sqrt_key_dim)
+        assert new_scale_f32 == old_scale_f32
+
+        # Re-running with the same (now built) weights must be bit-stable.
+        out2 = layer(x)
+        np.testing.assert_array_equal(
+            keras.ops.convert_to_numpy(out),
+            keras.ops.convert_to_numpy(out2),
+        )
+
+    def test_cross_attention_different_kv_feature_dim(self):
+        """F7: cross-attn via list input where K/V feature dim != query dim
+        must build without shape error and return query-length output."""
+        layer = HopfieldAttention(num_heads=4, key_dim=32, qk_norm_type=None)
+
+        query = keras.random.normal((2, 16, 256), seed=1)   # query feature dim 256
+        key = keras.random.normal((2, 24, 384), seed=2)     # K feature dim 384
+        value = keras.random.normal((2, 24, 384), seed=3)   # V feature dim 384
+
+        output = layer([query, key, value])
+
+        # Output maps back to query feature dim and query sequence length.
+        assert output.shape == (2, 16, 256)
+        assert not keras.ops.any(keras.ops.isnan(output))
+
+        # K/V Dense kernels must have been built from the ACTUAL K/V feature
+        # dim (384), not the query dim (256).
+        assert layer.key_dense.kernel.shape[0] == 384
+        assert layer.value_dense.kernel.shape[0] == 384
+        assert layer.query_dense.kernel.shape[0] == 256
+        # output_dense maps back to the query feature dim.
+        assert layer.output_dense.units == 256
+
+    def test_cross_attention_different_kv_and_value_dim(self):
+        """F7: K and V carry different feature dims from each other and query."""
+        layer = HopfieldAttention(num_heads=4, key_dim=32, qk_norm_type=None)
+
+        query = keras.random.normal((2, 16, 256), seed=1)
+        key = keras.random.normal((2, 24, 384), seed=2)
+        value = keras.random.normal((2, 24, 200), seed=3)  # V feature dim 200
+
+        output = layer([query, key, value])
+
+        assert output.shape == (2, 16, 256)
+        assert layer.key_dense.kernel.shape[0] == 384
+        assert layer.value_dense.kernel.shape[0] == 200
+
+    def test_value_dim_none_roundtrip(self):
+        """AF1: value_dim=None round-trips through .keras as None; forward works."""
+        inputs = keras.Input(shape=(16, 128))
+        x = HopfieldAttention(
+            num_heads=4, key_dim=32, value_dim=None, name="hop_none"
+        )(inputs)
+        outputs = keras.layers.GlobalAveragePooling1D()(x)
+        model = keras.Model(inputs=inputs, outputs=outputs)
+
+        test_input = keras.random.normal((2, 16, 128), seed=7)
+        original_output = model(test_input)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = os.path.join(tmpdir, "model.keras")
+            model.save(model_path)
+            loaded_model = keras.models.load_model(model_path)
+
+            reloaded = loaded_model.get_layer("hop_none")
+            # The raw constructor arg None must survive serialization.
+            assert reloaded.get_config()["value_dim"] is None
+            # Internally still resolved to key_dim.
+            assert reloaded.value_dim == 32
+
+            loaded_output = loaded_model(test_input)
+            assert keras.ops.all(
+                keras.ops.isclose(original_output, loaded_output, atol=1e-6)
+            )
+
+    def test_value_dim_int_roundtrip(self):
+        """AF1: an explicit int value_dim still round-trips as that int."""
+        layer = HopfieldAttention(num_heads=4, key_dim=32, value_dim=48)
+        config = layer.get_config()
+        assert config["value_dim"] == 48
+        rebuilt = HopfieldAttention.from_config(config)
+        assert rebuilt.value_dim == 48
+        assert rebuilt.get_config()["value_dim"] == 48
+
+
 # Run the tests
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

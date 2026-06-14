@@ -51,6 +51,7 @@ References:
         arXiv:2008.02217.
 """
 
+import math
 import keras
 from keras import ops
 from typing import Optional, Tuple, Union, Any, List, Dict
@@ -229,7 +230,16 @@ class HopfieldAttention(keras.layers.Layer):
         # Store ALL configuration parameters
         self.num_heads = num_heads
         self.key_dim = key_dim
+        # AF1: keep the RAW constructor arg so get_config() round-trips
+        # value_dim=None as None (not the resolved key_dim int). self.value_dim
+        # below stays the resolved value used for all internal compute.
+        self._value_dim_arg = value_dim
         self.value_dim = value_dim if value_dim is not None else key_dim
+        # AF2: precompute the static attention scale once. key_dim is a fixed
+        # Python int, so math.sqrt(float(key_dim)) is the identical scalar value
+        # that ops.sqrt(ops.cast(key_dim, ...)) produced in call() — folding it
+        # into __init__ avoids a per-call op while staying byte-identical.
+        self._sqrt_key_dim = math.sqrt(float(self.key_dim))
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
@@ -369,10 +379,26 @@ class HopfieldAttention(keras.layers.Layer):
         # Build sub-layers explicitly in computational order
         # This ensures all weight variables exist before weight restoration
 
+        # DECISION plan_2026-06-14_077a2a35/D-001: build K/V Dense from actual
+        # key/value shapes (cross-attn). Self-attn = flat tuple ->
+        # isinstance(input_shape[0], (list,tuple)) False -> falls back to
+        # query_shape (byte-identical). Do NOT revert to query_shape; breaks
+        # cross-attention with differing K/V feature dim.
+        key_shape = (
+            input_shape[1]
+            if isinstance(input_shape[0], (list, tuple)) and len(input_shape) > 1
+            else query_shape
+        )
+        val_shape = (
+            input_shape[2]
+            if isinstance(input_shape[0], (list, tuple)) and len(input_shape) > 2
+            else key_shape
+        )
+
         # Build projection layers with input shape
         self.query_dense.build(query_shape)
-        self.key_dense.build(query_shape)  # Assuming key has same shape as query for self-attention
-        self.value_dense.build(query_shape)  # Assuming value has same shape as query for self-attention
+        self.key_dense.build(key_shape)
+        self.value_dense.build(val_shape)
 
         # Calculate intermediate shape for output projection
         projected_shape = list(query_shape)
@@ -427,8 +453,10 @@ class HopfieldAttention(keras.layers.Layer):
         :return: Tuple of ``(updated_output, attention_weights)``.
         :rtype: tuple[keras.KerasTensor, keras.KerasTensor]
         """
-        # Scaled dot-product attention
-        scale = ops.sqrt(ops.cast(self.key_dim, query.dtype))
+        # Scaled dot-product attention. AF2: precomputed static scalar (same
+        # value as ops.sqrt(ops.cast(key_dim, ...))); a Python float divisor
+        # broadcasts against the score tensor unchanged.
+        scale = self._sqrt_key_dim
         attention_scores = ops.matmul(query, ops.transpose(key, [0, 1, 3, 2])) / scale
 
         # Handle mask processing
@@ -614,7 +642,8 @@ class HopfieldAttention(keras.layers.Layer):
         config.update({
             "num_heads": self.num_heads,
             "key_dim": self.key_dim,
-            "value_dim": self.value_dim,
+            # AF1: serialize the RAW arg so value_dim=None round-trips as None.
+            "value_dim": self._value_dim_arg,
             "dropout_rate": self.dropout_rate,
             "use_bias": self.use_bias,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),
