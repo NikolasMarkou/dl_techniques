@@ -472,3 +472,38 @@ def length(vectors) -> Any:
     return ops.sqrt(ops.sum(ops.square(vectors), axis=-1) + keras.backend.epsilon())
 
 # ---------------------------------------------------------------------
+
+def resolve_training_factor(training: Any, dtype: Any = "float32") -> Any:
+    """Resolve a Keras ``training`` flag into a graph-safe scalar factor.
+
+    Layers that run a training-only side effect (an EMA state update, an
+    ``add_loss`` term, ...) must gate it on ``training`` without coercing a
+    symbolic tensor to a Python ``bool`` (which raises
+    ``OperatorNotAllowedInGraphError`` under ``tf.function``). This helper
+    returns one of three things so callers can both skip and mask correctly:
+
+    - ``None`` — ``training`` is ``None`` or ``False``: the caller should SKIP
+      the side effect entirely (no state writes at inference).
+    - ``1.0`` — ``training`` is Python ``True``: run the side effect at full
+      strength (multiplying by the Python float ``1.0`` is exact, so callers may
+      take an unmasked fast path on ``isinstance(factor, float)``).
+    - a 0/1 scalar tensor — ``training`` is a symbolic ``tf.Tensor`` (custom
+      ``@tf.function`` train loop): the caller should MULTIPLY the side-effect
+      delta / loss by this factor so a runtime-``False`` flag becomes a true
+      no-op, all without any tensor-to-bool branching.
+
+    :param training: The Keras ``call`` training flag (``None``, ``bool``, or a
+        symbolic boolean tensor).
+    :type training: Any
+    :param dtype: Target dtype for the cast in the symbolic-tensor case.
+    :type dtype: Any
+    :return: ``None``, the float ``1.0``, or a scalar tensor.
+    :rtype: Any
+    """
+    if training is None or training is False:
+        return None
+    if training is True:
+        return 1.0
+    return ops.cast(training, dtype)
+
+# ---------------------------------------------------------------------

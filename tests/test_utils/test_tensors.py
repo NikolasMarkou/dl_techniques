@@ -5,7 +5,8 @@ from numpy.testing import assert_allclose
 from typing import Tuple
 
 from dl_techniques.utils.tensors import \
-    power_iteration, wt_x_w_normalize, gram_matrix, reshape_to_2d, gaussian_kernel
+    power_iteration, wt_x_w_normalize, gram_matrix, reshape_to_2d, gaussian_kernel, \
+    resolve_training_factor
 
 
 @pytest.fixture
@@ -236,3 +237,38 @@ class TestGaussianKernel:
         """Test if gaussian_kernel handles invalid inputs correctly."""
         with pytest.raises(ValueError):
             gaussian_kernel((3,), (1.0,))  # Invalid tuple lengths
+
+
+class TestResolveTrainingFactor:
+    """Tests for the graph-safe training-flag resolver."""
+
+    def test_none_skips(self):
+        assert resolve_training_factor(None) is None
+
+    def test_python_false_skips(self):
+        assert resolve_training_factor(False) is None
+
+    def test_python_true_is_exact_one(self):
+        f = resolve_training_factor(True)
+        assert isinstance(f, float) and f == 1.0
+
+    def test_symbolic_true_is_unit_tensor(self):
+        f = resolve_training_factor(tf.constant(True), dtype="float32")
+        # Not the python-float fast path -> caller will mask with this tensor.
+        assert not isinstance(f, float)
+        assert float(np.asarray(f)) == 1.0
+
+    def test_symbolic_false_is_zero_tensor(self):
+        f = resolve_training_factor(tf.constant(False), dtype="float32")
+        assert not isinstance(f, float)
+        assert float(np.asarray(f)) == 0.0
+
+    def test_graph_safe_under_tf_function(self):
+        """Must not coerce a symbolic tensor to bool (no graph break)."""
+        @tf.function
+        def run(flag):
+            f = resolve_training_factor(flag, dtype="float32")
+            return f * tf.ones(())
+
+        assert float(run(tf.constant(True))) == 1.0
+        assert float(run(tf.constant(False))) == 0.0
