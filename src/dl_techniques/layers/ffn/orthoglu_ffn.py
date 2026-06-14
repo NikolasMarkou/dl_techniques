@@ -196,10 +196,13 @@ class OrthoGLUFFN(keras.layers.Layer):
         self.use_bias = use_bias
         self.ortho_reg_factor = ortho_reg_factor
 
-        # Unpack tuple or duplicate single value for block-specific configs
+        # Unpack pair or duplicate single value for block-specific configs.
+        # Accept list too: a tuple ortho_reg_factor is serialized to a JSON list
+        # and comes back as a list after a .keras round-trip — `isinstance(...,
+        # tuple)` alone would misroute the reloaded value into OrthoBlock.
         ortho_factors = (
-            ortho_reg_factor
-            if isinstance(ortho_reg_factor, tuple)
+            tuple(ortho_reg_factor)
+            if isinstance(ortho_reg_factor, (tuple, list))
             else (ortho_reg_factor, ortho_reg_factor)
         )
 
