@@ -171,8 +171,24 @@ class PerceiverAttention(keras.layers.Layer):
             or a list of two shape tuples for query and kv inputs.
         :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
         """
-        # Handle different input formats
-        if isinstance(input_shape, list):
+        # Handle different input formats.
+        # DECISION plan_2026-06-14_7734bacd/D-003: disambiguate a LIST-OF-SHAPES
+        # (two inputs for cross-attention) from a SINGLE serialized shape. Keras
+        # serializes a shape tuple to a plain list on save, so on
+        # build_from_config a single 3D shape arrives as e.g. [None, 8, 32] (a
+        # 3-element list of scalars). Do NOT branch on isinstance(list) alone:
+        # that wrongly treats a serialized single shape as 3 inputs and breaks
+        # the `.keras` round-trip (ValueError "got 3"). A genuine multi-input
+        # list has elements that are themselves shapes (list/tuple). See
+        # decisions.md D-003.
+        def _is_list_of_shapes(s: Any) -> bool:
+            return (
+                isinstance(s, (list, tuple))
+                and len(s) > 0
+                and isinstance(s[0], (list, tuple))
+            )
+
+        if _is_list_of_shapes(input_shape):
             # Two separate inputs for cross-attention
             if len(input_shape) != 2:
                 raise ValueError(f"Expected 2 inputs for cross-attention, got {len(input_shape)}")
