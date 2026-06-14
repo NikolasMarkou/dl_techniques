@@ -50,7 +50,7 @@ class TestResidualBlock:
         assert layer.hidden_dim == 64
         assert layer.output_dim == 32
         assert layer.dropout_rate == 0.0
-        assert layer.activation == 'relu'
+        assert keras.activations.serialize(layer.activation) == 'relu'
         assert layer.use_bias is True
         assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
         assert isinstance(layer.bias_initializer, keras.initializers.Zeros)
@@ -77,7 +77,7 @@ class TestResidualBlock:
         assert layer.hidden_dim == 256
         assert layer.output_dim == 128
         assert layer.dropout_rate == 0.2
-        assert layer.activation == 'gelu'
+        assert keras.activations.serialize(layer.activation) == 'gelu'
         assert layer.use_bias is True
         assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
         assert isinstance(layer.bias_initializer, keras.initializers.Ones)
