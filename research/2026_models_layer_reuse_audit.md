@@ -478,3 +478,45 @@ The following duplications exist within `models/` itself and are worth cleaning 
 - **`TRMReasoningModule` (`tiny_recursive_model/components.py`) → `HierarchicalReasoningModule`** — REFUTED. The two share the math idea but have incompatible interfaces. Critical: `TRMReasoningModule.call(hidden_states, input_injection, training)` takes two positional tensors, but `HierarchicalReasoningModule.call(inputs: List, attention_mask, training)` takes a single list — and `TRMInner` (`components.py:544`) calls `self.L_level(z_L, input_emb_padded, training=...)` with two positionals, so the injection tensor would silently bind to `attention_mask`. Constructor params also diverge (`hidden_size`/`expansion`/`seq_len` vs `embed_dim`/`ffn_expansion_factor`/`use_bias`), `build()` contracts differ (single shape vs list-of-two), and TRM forwards `rope_theta`/`max_seq_len` to its TransformerLayer that HRM does not. Requires a wrapping adapter, not an import swap (Tier-2).
 
 *Verification artifacts: `plans/plan_2026-06-13_ae26345d/findings/replace-layerscale1d.md`, `replace-dinov2block.md`, `replace-bytetok-trm.md`.*
+
+---
+
+## Implementation Addendum — Bug-fixes & sub-component cleanups (2026-06-14)
+
+*Added during plan `plan_2026-06-13_ae9ee2cd`, which implemented the Appendix bug-fixes (1–11) and the "Sub-component reuse opportunities" cleanups. Per the established discipline (and the Tier-1 lesson above), **every finding was re-verified against current source before any edit**. Scope: bug-fixes + sub-component cleanups only — NO REPLACE, NO RELOCATE; back-compat shims waived; no file under `src/dl_techniques/layers/` modified. As before, the original tables/appendix are retained for history; this addendum is authoritative for the rows it covers.*
+
+### Re-verification outcome (16 findings checked)
+
+**The audit's bug appendix had a meaningful false-positive rate (4 of 16 dead), AND it systematically missed deeper bugs because it is a static read that never executed the code.** Of 16 findings: 10 actionable, 1 optional, 5 dead.
+
+**Dead on re-verification (no action — audit was wrong or already done):**
+- **Appendix #1** (`cliffordnet/conditional_denoiser.py` additive bias-free conditioning) — REFUTED: the additive injection is intentional and documented (discrete conditioning is additive *before* the dual-stream split; only dense conditioning is multiplicative FiLM). Audit misread the docstring.
+- **Appendix #8** (`ideogram4/vae.py` `AttnBlock` `ops.stack` reshape) — REFUTED: `ops.stack([b,n,c])` is the **correct** XLA-safe pattern (builds a 1-D shape tensor for `ops.reshape`), explicitly avoiding the broken Python-tuple-of-symbolic-scalars alternative. Audit inverted the diagnosis.
+- **Cleanup C1** (`mamba/components_v2.py` `LayerNormalization(rms_scaling=True)` → `RMSNorm`) — REFUTED: `rms_scaling=True` still mean-centers; `RMSNorm` does not. Different math, not equivalent.
+- **Cleanup C3** (`wave_field_llm.py` inline FFN → `create_ffn_layer('mlp')`) — REFUTED: dropout placement and weight initializer (`TruncatedNormal(0.02)` vs `glorot_uniform`) differ. Not equivalent.
+- **Cleanup C5** (`tree_transformer` `TreeTransformerBlock`) — NO-OP: already uses both factories.
+
+### ✅ IMPLEMENTED & VERIFIED (9 fixes committed)
+
+| Finding | Fix | Commit | Verification |
+|---|---|---|---|
+| Appendix #6 (`darkir/model.py` `FreMLP`) | **+ a 12th bug the audit missed:** `FreMLP` used `ops.fft.rfft2`/`irfft2`/`ops.angle`/`ops.complex`, none of which exist in keras 3 — the layer was dead on first forward. Rewrote the whole frequency path onto the real `keras.ops` tuple FFT API (`fft2`/`ifft2`, NHWC↔NCHW transpose, magnitude processing, unit-phasor reconstruction). | `99bf9543`,`ff629ecc` | fft2/ifft2 round-trip 3.6e-7; forward+grad+serialization smoke; Hermitian-symmetry verified (residual imag ~1e-7) |
+| Appendix #2 (`bfunet_conditional_unified.py` `DiscreteConditioningInjection`) | replace per-forward-pass Keras layer allocation (Reshape/Multiply/RepeatVector/Concatenate/Lambda) with `keras.ops` primitives | `42f7860d` | test 13/13 (both modes); numeric equivalence reviewer-verified out-of-band |
+| Appendix #10 (`depth_anything/components.py` `DPTDecoder`) | move shape-independent sublayer creation `build()`→`__init__()` (the audit's "clobber on double-build" sub-claim was REFUTED — lists are cleared) | `d371f70b` | `test_save_load_roundtrip` + `test_get_config_roundtrip` 2/2 |
+| Appendix #7 (`nano_vlm_world_model/scheduler.py` `DiffusionScheduler`) | `keras.layers.Layer` subclass → plain Python class (cf. `sd3_mmdit` `FlowMatchEulerScheduler`); dropped `name=` kwarg at the one caller | `29367bc3` | scheduler smoke 7/7; no longer in `model.layers` |
+| Appendix #11 (`memory_bank/write_controller.py`) | gate raw `tf.debugging.assert_less_equal` + `import tensorflow` behind `keras.backend.backend()=="tensorflow"` | `513dc340` | `test_write_controller.py` 6/6 incl. assert-raises |
+| Cleanup C2 (`mamba/components.py` `MambaResidualBlock`) | `LayerNormalization` → `create_normalization_layer('layer_norm', ...)` | `4f44b8bf` | py_compile + factory passthrough verified |
+| Cleanup C4 (`convunext/model.py` `ConvUNextStem`) | `LayerNormalization(epsilon=1e-6)` → factory form | `0a391187` | py_compile + factory passthrough verified |
+| nano_vlm import/dtype (discovered) | model.py import paths `dl_techniques.layers.{text,vision}_encoder` → `.transformers.{...}`; scheduler `alphas_cumprod_prev` float64→float32 | `1d15636e` | import + `.step(t>0)` finite verified |
+
+### ⛔ DEFERRED — blocked by deeper pre-existing bugs (see follow-up doc)
+
+- **Appendix #3/#4/#5** (`modern_bert/modern_bert_blt_hrm.py` — vectorize ngram loop, drop `if self.built:` guards, sublayers→`__init__`): the fixes are authored and **known-good** (py_compile clean, `HashNGramEmbedding` standalone forward passes, model builds), but `ReasoningByteBERT` cannot complete a forward — **two pre-existing bugs block it**: (i) `ReasoningByteCore` called `HierarchicalReasoningModule.build/call` with the wrong argument form (single shape / two positional tensors instead of the required 2-element list) — fix is known-good and unblocks build + ~200 lines of forward; (ii) a `LocalEncoder`/`PatchPooling` shape-contract bug in `layers/blt_blocks.py:861` (out of this plan's no-`layers/`-edits scope). Deferred to a follow-up plan.
+- **Appendix #9** (`dino/dino_v1.py` `DINOHead.build` sublayers) — DOWNGRADED then SKIPPED: the audited "serialization bug" is FALSE (`get_config` round-trips correctly); only a theoretical double-build append hazard remains. Skipped as low-value per user.
+- **nano_vlm full-model forward** — blocked by a further pre-existing bug (`create_vision_encoder` defaults to `output_mode='cls'` → rank-2, but `ConditionalDenoiser` expects rank-3). B7 is verified at the scheduler level; full-model `.keras` round-trip deferred.
+
+### Meta-finding
+
+The bug appendix is a **static read** — reliable for "this code references an API that doesn't exist / mislocates sublayer creation," but it never executed any model, so it **missed 5 distinct dead-on-forward bugs** (FreMLP FFT API, HRM call convention, nano_vlm imports, nano_vlm dtype, nano_vlm vision-rank, blt_blocks PatchPooling) clustered in the untested model files. Treat audit verdicts as hypotheses; for any untested model, a forward+round-trip smoke surfaces far more than a static scan. See `research/2026_models_dead_model_bugs_followup.md` for the deferred work.
+
+*Verification artifacts: `plans/plan_2026-06-13_ae9ee2cd/findings/verify-*.md`, `fix-hrm-and-nanovlm.md`, `review-iter-2.md`.*
