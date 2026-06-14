@@ -48,7 +48,6 @@ References:
 """
 
 import keras
-import tensorflow as tf
 from typing import Tuple, Optional, Dict, Any, Union, Callable
 
 # ---------------------------------------------------------------------
@@ -105,8 +104,8 @@ class KANLinear(keras.layers.Layer):
         produce smoother activations (1=linear, 2=quadratic, 3=cubic). Defaults to 3.
     :type spline_order: int
     :param grid_range: ``(min, max)`` range for the initial B-spline grid.
-        Can be updated via ``update_grid_from_samples()`` (eager-only; call
-        between epochs, not inside ``@tf.function``). Defaults to ``(-2.0, 2.0)``.
+        Defaults to ``(-2.0, 2.0)``. The live knot grid can be adapted to data via
+        ``update_grid_from_samples()`` (which updates the ``grid`` weight).
     :type grid_range: Tuple[float, float]
     :param activation: Base activation function ``b(x)``. Defaults to ``'swish'``.
     :type activation: Union[str, Callable]
@@ -260,13 +259,15 @@ class KANLinear(keras.layers.Layer):
 
         super().build(input_shape)
 
-    def _compute_grid_values(self, start: float, stop: float) -> keras.KerasTensor:
+    def _compute_grid_values(
+        self, start: Union[float, keras.KerasTensor], stop: Union[float, keras.KerasTensor]
+    ) -> keras.KerasTensor:
         """Compute the extended B-spline knot sequence values.
 
-        :param start: Range minimum.
-        :type start: float
-        :param stop: Range maximum.
-        :type stop: float
+        :param start: Range minimum (Python float or scalar tensor).
+        :type start: Union[float, keras.KerasTensor]
+        :param stop: Range maximum (Python float or scalar tensor).
+        :type stop: Union[float, keras.KerasTensor]
         :return: Tensor containing the complete knot sequence.
         :rtype: keras.KerasTensor
         """
@@ -294,13 +295,15 @@ class KANLinear(keras.layers.Layer):
             [extended_knots_start, grid_points, extended_knots_end], axis=0
         )
 
-    def _set_grid_from_range(self, start: float, stop: float) -> None:
+    def _set_grid_from_range(
+        self, start: Union[float, keras.KerasTensor], stop: Union[float, keras.KerasTensor]
+    ) -> None:
         """Calculate and assign grid values to the state variable.
 
-        :param start: Range minimum.
-        :type start: float
-        :param stop: Range maximum.
-        :type stop: float
+        :param start: Range minimum (Python float or scalar tensor).
+        :type start: Union[float, keras.KerasTensor]
+        :param stop: Range maximum (Python float or scalar tensor).
+        :type stop: Union[float, keras.KerasTensor]
         """
         grid_values = self._compute_grid_values(start, stop)
         self.grid.assign(grid_values)
@@ -402,29 +405,19 @@ class KANLinear(keras.layers.Layer):
         return output
 
     def update_grid_from_samples(self, x: Union[keras.KerasTensor, Any]) -> None:
-        """Update B-spline grid based on input data statistics.
+        """Adapt the B-spline knot grid to the empirical distribution of ``x``.
 
-        **Eager-only.** This method materializes concrete values via
-        ``keras.ops.convert_to_numpy`` and reassigns ``self.grid_range`` /
-        the grid weight. It MUST be called in eager context (e.g. between
-        training epochs on a batch of real data), NOT inside a ``@tf.function``
-        or any graph/symbolic trace. A graph-mode call raises ``RuntimeError``.
+        Estimates per-feature quantile boundaries from a data batch and writes the
+        new knot sequence into the ``grid`` weight via ``assign``. Fully
+        tensor-based, so it runs in both eager and ``@tf.function``/graph contexts.
+        ``grid_range`` is the configured *initial* range and is intentionally not
+        mutated here — the ``grid`` weight is the adapted source of truth and
+        persists across ``.keras`` save/load.
 
         :param x: Input data tensor of shape ``(batch_size, input_features)``.
         :type x: Union[keras.KerasTensor, Any]
-        :raises RuntimeError: If called outside eager execution (graph mode).
         :raises ValueError: If input is not 2D.
         """
-        # Fail loud in graph mode: the convert_to_numpy below has no graph-mode
-        # semantics, so a silent/cryptic failure is replaced with a clear error.
-        if not tf.executing_eagerly():
-            raise RuntimeError(
-                "KANLinear.update_grid_from_samples() is eager-only and cannot run "
-                "inside a @tf.function / graph trace. Call it in eager context "
-                "(e.g. between epochs on a batch of real data), not in the graph."
-            )
-
-        # Ensure input is a tensor
         x = keras.ops.convert_to_tensor(x, dtype=self.dtype)
 
         if len(keras.ops.shape(x)) != 2:
@@ -450,13 +443,9 @@ class KANLinear(keras.layers.Layer):
         # Shape: (grid_size + 1,)
         new_grid_points = keras.ops.mean(grid_points_per_feature, axis=1)
 
-        # Update the grid range configuration
-        new_min = float(keras.ops.convert_to_numpy(new_grid_points[0]))
-        new_max = float(keras.ops.convert_to_numpy(new_grid_points[-1]))
-        self.grid_range = (new_min, new_max)
-
-        # Re-calculate and assign the grid weight values
-        self._set_grid_from_range(new_min, new_max)
+        # Re-calculate and assign the grid weight values. Endpoints stay tensors
+        # (no host-side materialization), keeping this graph-compatible.
+        self._set_grid_from_range(new_grid_points[0], new_grid_points[-1])
 
     def compute_output_shape(
             self, input_shape: Tuple[Optional[int], ...]
