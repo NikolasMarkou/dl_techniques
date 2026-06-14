@@ -177,8 +177,10 @@ class RPCAttention(keras.layers.Layer):
         self.dropout_rate = dropout_rate
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = kernel_regularizer
-        self.bias_regularizer = bias_regularizer
+        # Normalize regularizers via regularizers.get() so str/dict/object/None
+        # all round-trip uniformly through regularizers.serialize() in get_config.
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.bias_regularizer = regularizers.get(bias_regularizer)
         self.probability_type = probability_type
         self.probability_config = probability_config
         self.qk_norm_type = qk_norm_type

@@ -88,7 +88,13 @@ class PerformerAttention(keras.layers.Layer):
     :param nb_features: Number of random features for kernel approximation.
         Higher values give better approximation at the cost of more memory.
     :type nb_features: int
-    :param ortho_scaling: Scaling factor for orthogonal features. 0.0 disables.
+    :param ortho_scaling: Scaling factor applied to the random projection matrix.
+        NOTE (limitation): when ``ortho_scaling > 0`` this currently applies a plain
+        scalar multiplication to the random Gaussian projection; it does NOT perform
+        orthogonal random feature construction. True FAVOR+ orthogonalization (e.g.
+        QR / Gram-Schmidt of the projection rows) is NOT implemented. The parameter
+        therefore only rescales the (non-orthogonal) random features. ``0.0`` disables
+        the scaling.
     :type ortho_scaling: float
     :param causal: Whether to use causal (autoregressive) attention masking.
     :type causal: bool
@@ -147,8 +153,10 @@ class PerformerAttention(keras.layers.Layer):
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = kernel_regularizer
-        self.bias_regularizer = bias_regularizer
+        # Normalize regularizers via regularizers.get() so str/dict/object/None
+        # all round-trip uniformly through regularizers.serialize() in get_config.
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.bias_regularizer = regularizers.get(bias_regularizer)
 
         # Computed attributes
         self.head_dim = dim // num_heads
