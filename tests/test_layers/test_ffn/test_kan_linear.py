@@ -410,38 +410,48 @@ class TestKANLinear:
         # Update the grid
         layer.update_grid_from_samples(update_data)
 
-        # Check that grid and range have changed
+        # The grid weight is the adapted source of truth and must change.
         new_grid = ops.convert_to_numpy(layer.grid)
-        new_grid_range = layer.grid_range
-
         assert not np.allclose(original_grid, new_grid), "Grid should have been updated."
-        assert original_grid_range != new_grid_range, "Grid range should have been updated."
-        assert 10.0 <= new_grid_range[0] < 11.0, "New grid min is out of expected range."
-        assert 19.0 < new_grid_range[1] <= 20.0, "New grid max is out of expected range."
+
+        # grid_range is the configured INITIAL range and is intentionally NOT
+        # mutated by update_grid_from_samples (the grid weight holds the adapted state).
+        assert layer.grid_range == original_grid_range, "grid_range is init-only; must not change."
+
+        # The live grid's central (non-padding) knots reflect the new data range (~10..20).
+        so = layer.spline_order
+        assert 10.0 <= new_grid[so] < 11.0, "New grid min knot is out of expected range."
+        assert 19.0 < new_grid[-(so + 1)] <= 20.0, "New grid max knot is out of expected range."
 
         # Check invalid input for grid update
         with pytest.raises(ValueError, match="Input 'x' for grid update must be 2D."):
             layer.update_grid_from_samples(ops.zeros((2, 4, 6)))
 
-    def test_update_grid_eager_only_guard(self, basic_config: Dict[str, Any]) -> None:
-        """update_grid_from_samples is eager-only: a @tf.function call must raise
-        RuntimeError, while an eager call still works (regression for the guard)."""
+    def test_update_grid_graph_mode(self, basic_config: Dict[str, Any]) -> None:
+        """update_grid_from_samples is graph-compatible: it runs inside a
+        @tf.function without raising, and produces a grid identical to the eager
+        path on the same data (regression for the graph-compat rewrite)."""
         import tensorflow as tf
 
-        layer = KANLinear(**basic_config)
-        layer.build((100, 10))
+        data = keras.random.uniform(shape=(100, 10), minval=10.0, maxval=20.0)
 
-        # Eager call succeeds.
-        layer.update_grid_from_samples(keras.random.normal(shape=(100, 10)))
+        layer_eager = KANLinear(**basic_config)
+        layer_eager.build((100, 10))
+        layer_eager.update_grid_from_samples(data)
+        grid_eager = ops.convert_to_numpy(layer_eager.grid)
 
-        # Graph-mode call fails loud.
+        layer_graph = KANLinear(**basic_config)
+        layer_graph.build((100, 10))
+
         @tf.function
         def _graph_update(x):
-            layer.update_grid_from_samples(x)
-            return x
+            layer_graph.update_grid_from_samples(x)
+            return 0
 
-        with pytest.raises(RuntimeError, match="eager-only"):
-            _graph_update(tf.random.normal((100, 10)))
+        _graph_update(data)  # must NOT raise
+        grid_graph = ops.convert_to_numpy(layer_graph.grid)
+
+        assert np.allclose(grid_eager, grid_graph, atol=1e-5), "Eager and graph grids differ."
 
 # ============================================================================
 # Integration Test with Model Training
