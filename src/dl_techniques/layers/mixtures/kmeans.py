@@ -216,7 +216,7 @@ class KMeansLayer(keras.layers.Layer):
         self.repulsion_strength = repulsion_strength
         self.min_distance = min_distance
         self.output_mode = output_mode
-        self.cluster_axis = [cluster_axis] if isinstance(cluster_axis, int) else cluster_axis
+        self.cluster_axis = [cluster_axis] if isinstance(cluster_axis, int) else list(cluster_axis)
         # DECISION plan_2026-06-14_8c7365d0/D-005: serialize the ORIGINAL (pre-build)
         # cluster_axis, not the build()-mutated positive form. build() rewrites negative
         # axes to positive against input_rank (_setup_cluster_axes), so serializing
@@ -666,11 +666,32 @@ class KMeansLayer(keras.layers.Layer):
                 self.centroid_initializer if isinstance(self.centroid_initializer, str)
                 else keras.initializers.serialize(self.centroid_initializer)
             ),
-            "centroid_regularizer": (keras.regularizers.serialize(self.centroid_regularizer)
-                                   if self.centroid_regularizer else None),
+            # Always serialize (returns None for a None regularizer) for uniformity
+            # with GMMLayer.get_config.
+            "centroid_regularizer": keras.regularizers.serialize(self.centroid_regularizer),
             "random_seed": self.random_seed
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "KMeansLayer":
+        """Create a layer instance from its serialized configuration.
+
+        :param config: Configuration dictionary produced by ``get_config``.
+        :type config: Dict[str, Any]
+        :return: Reconstructed layer instance.
+        :rtype: KMeansLayer
+        """
+        config = dict(config)
+        if "centroid_initializer" in config and not isinstance(config["centroid_initializer"], str):
+            config["centroid_initializer"] = keras.initializers.deserialize(
+                config["centroid_initializer"]
+            )
+        if "centroid_regularizer" in config:
+            config["centroid_regularizer"] = keras.regularizers.deserialize(
+                config["centroid_regularizer"]
+            )
+        return cls(**config)
 
     @property
     def cluster_centers(self) -> Optional[keras.KerasTensor]:

@@ -337,6 +337,32 @@ class RBFLayer(keras.layers.Layer):
         })
         return config
 
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "RBFLayer":
+        """Create a layer instance from its serialized configuration.
+
+        :param config: Configuration dictionary produced by ``get_config``.
+        :type config: Dict[str, Any]
+        :return: Reconstructed layer instance.
+        :rtype: RBFLayer
+        """
+        config = dict(config)
+        if "center_initializer" in config and not isinstance(config["center_initializer"], str):
+            config["center_initializer"] = keras.initializers.deserialize(
+                config["center_initializer"]
+            )
+        if "center_constraint" in config:
+            config["center_constraint"] = keras.constraints.deserialize(config["center_constraint"])
+        if "kernel_regularizer" in config:
+            config["kernel_regularizer"] = keras.regularizers.deserialize(
+                config["kernel_regularizer"]
+            )
+        if "gamma_regularizer" in config:
+            config["gamma_regularizer"] = keras.regularizers.deserialize(
+                config["gamma_regularizer"]
+            )
+        return cls(**config)
+
 
     # Convenience properties for inspection
     @property
