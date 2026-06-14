@@ -12,5 +12,6 @@ Differentiable soft-clustering / mixture layers for `dl_techniques`.
 
 ## Conventions
 - All three layers default `*_initializer='orthonormal'`; the string is resolved lazily in `build()` (it is not a registered keras alias — resolving eagerly raises). `n_components`/`n_clusters > feature_dims` falls back to GlorotNormal.
+- **Training flag**: training-only side effects (KMeans EMA centroid update; GMM/RBF `add_loss`) are gated via `dl_techniques.utils.tensors.resolve_training_factor`. They fire for python `training=True` AND a symbolic `training=tf.constant(True)` tensor (custom `@tf.function` train loops), and are a true no-op under `None`/`False`/symbolic-False — all graph-safe (no tensor→bool coercion). The python-`True` path is numerically exact (unmasked); the symbolic path masks the delta/loss by a 0/1 factor.
 - Public API: `from dl_techniques.layers.mixtures import RBFLayer, KMeansLayer, GMMLayer, create_mixture_layer`.
 - Tests: `tests/test_layers/test_mixtures/`.
