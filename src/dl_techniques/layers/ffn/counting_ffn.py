@@ -266,6 +266,9 @@ class CountingFFN(keras.layers.Layer):
             name="gate",
         )
 
+        # Static input feature dim, resolved in build() (graph-safe branch in call()).
+        self._input_last_dim: Optional[int] = None
+
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
         Build the Counting FFN and all its sub-layers.
@@ -286,6 +289,12 @@ class CountingFFN(keras.layers.Layer):
         input_dim = input_shape[-1]
         if input_dim is None:
             raise ValueError("Input feature dimension must be specified")
+
+        # Capture the static feature dim so call() can decide the residual-vs-gated
+        # branch with a Python int comparison instead of branching on a dynamic
+        # keras.ops.shape() tensor (graph-unsafe under @tf.function). Derived from
+        # input_shape -> not serialized in get_config.
+        self._input_last_dim = int(input_dim)
 
         logger.info(
             f"Building CountingFFN: input_dim={input_dim}, output_dim={self.output_dim}, "
@@ -367,10 +376,10 @@ class CountingFFN(keras.layers.Layer):
         # Shape: (batch, seq, output_dim)
         gate_values = self.gate(inputs, training=training)
 
-        # 5. Blend the count information based on dimensions compatibility
-        input_dim = keras.ops.shape(inputs)[-1]
-
-        if self.output_dim == input_dim:
+        # 5. Blend the count information based on dimensions compatibility.
+        # Decided at build time from the static feature dim (graph-safe: Python
+        # int vs Python int, no branch on a dynamic ops.shape() tensor).
+        if self.output_dim == self._input_last_dim:
             # When dimensions match, perform residual-style blending with original input
             # The gate decides how much count information vs original input to use
             output = (gate_values * transformed_counts) + ((1 - gate_values) * inputs)
