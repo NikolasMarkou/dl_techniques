@@ -1,7 +1,9 @@
 # Follow-up: Dead-on-forward bugs in untested model files
 *Date: 2026-06-14. Origin: plan `plan_2026-06-13_ae9ee2cd` (bug-fix + cleanup implementation of `2026_models_layer_reuse_audit.md`).*
 
-While implementing the audit's bug appendix, re-verifying each finding against current source surfaced a cluster of **pre-existing, dead-on-forward bugs** the static audit never caught — because it never executed the models. Three model files (`darkir`, `modern_bert_blt_hrm`, `nano_vlm_world_model`) could not complete a forward pass. `darkir/FreMLP` was fixed in that plan; the rest are captured here for a dedicated follow-up. None of these models have tests, which is why the bugs survived.
+> **STATUS UPDATE (2026-06-14, plan `plan_2026-06-14_77a433bc`):** Items **1 (modern_bert_blt_hrm)** and **2 (nano_vlm_world_model)** are **RESOLVED** — both models now pass a forward + `.keras` round-trip smoke (commits `124d464b`, `1b61a381`). **Crucially, item 1b was a MISATTRIBUTION:** the bug is NOT in `layers/blt_blocks.py` — `LocalEncoder` correctly pools internally (two canonical callers, `byte_latent_transformer` and `blt_core`, prove it), and `ReasoningByteCore` was simply **double-pooling**. The fix was `models/`-only; ZERO `layers/` edits were needed. Item 3 (orphan anchors) remains open. One NEW pre-existing bug was discovered — see item 4 below.
+
+While implementing the audit's bug appendix, re-verifying each finding against current source surfaced a cluster of **pre-existing, dead-on-forward bugs** the static audit never caught — because it never executed the models. Three model files (`darkir`, `modern_bert_blt_hrm`, `nano_vlm_world_model`) could not complete a forward pass. `darkir/FreMLP` was fixed in that plan; `modern_bert_blt_hrm` and `nano_vlm_world_model` were resolved in `plan_2026-06-14_77a433bc` (see status update above). None of these models have tests, which is why the bugs survived.
 
 ## Scope note
 The implementation plan had a HARD constraint: **no edits under `src/dl_techniques/layers/`**. Two of the deferred items require exactly such edits, which is why they were deferred rather than fixed.
@@ -54,6 +56,13 @@ The implementation plan had a HARD constraint: **no edits under `src/dl_techniqu
 - This is cross-plan debt; address in a dedicated housekeeping pass, not mixed into feature work.
 
 ---
+
+## 4. layers/blt_core.py — `ByteLatentReasoningCore` dead on forward (NEW, discovered 2026-06-14)
+
+Surfaced while smoke-testing the BLT callers during `plan_2026-06-14_77a433bc` (the "verify all BLT callers" regression check). The model-level caller `ByteLatentTransformer` forwards fine, but the layer-level `ByteLatentReasoningCore` in `src/dl_techniques/layers/blt_core.py` fails on forward:
+- Symptom: `InvalidArgumentError: required broadcastable shapes` at an `AddV2` op.
+- **Proven pre-existing**: reproduced with `plan_2026-06-14_77a433bc`'s change git-stashed; `blt_core.py` does not import the edited `modern_bert_blt_hrm.py`. NOT a regression.
+- Not investigated/fixed (out of that plan's scope; HARD leash forbade chasing into `layers/`). Needs its own investigation: find the smallest config that reproduces, identify the two operands whose shapes mismatch in the residual `Add`, fix, and add a smoke/test.
 
 ## Meta-lesson
 For any **untested** model in this repo, a static audit is necessary but far from sufficient: a forward + `.keras` round-trip smoke at the smallest config surfaces dead-on-forward bugs (wrong ops API, wrong call conventions, broken imports, dtype promotion, shape-contract mismatches) that no static read will catch. Several models here have multi-bug chains spanning `models/` and `layers/` and have clearly never been executed. Prioritize adding a minimal smoke test per model over trusting static analysis.
