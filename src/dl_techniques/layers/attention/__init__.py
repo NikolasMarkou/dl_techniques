@@ -23,6 +23,7 @@ from .multi_head_attention import MultiHeadAttention
 from .multi_head_cross_attention import MultiHeadCrossAttention
 from .group_query_attention import GroupedQueryAttention
 from .differential_attention import DifferentialMultiHeadAttention
+from .multi_head_latent_attention import MultiHeadLatentAttention
 from .shared_weights_cross_attention import SharedWeightsCrossAttention
 
 # Vision and Spatial Attention
@@ -48,6 +49,11 @@ from .performer_attention import PerformerAttention
 from .ring_attention import RingAttention
 from .rpc_attention import RPCAttention
 
+# Additional specialized attention (direct instantiation only)
+from .progressive_focused_attention import ProgressiveFocusedAttention
+from .single_window_attention import SingleWindowAttention
+from .wave_field_attention import WaveFieldAttention
+
 __all__ = [
     # Factory Interface
     "create_attention_from_config",
@@ -61,6 +67,7 @@ __all__ = [
     "MultiHeadCrossAttention",
     "GroupedQueryAttention",
     "DifferentialMultiHeadAttention",
+    "MultiHeadLatentAttention",
     "SharedWeightsCrossAttention",
 
     # Vision & Spatial
@@ -88,4 +95,9 @@ __all__ = [
     "PerformerAttention",
     "RingAttention",
     "RPCAttention",
+
+    # Additional Specialized (Direct Instantiation Only)
+    "ProgressiveFocusedAttention",
+    "SingleWindowAttention",
+    "WaveFieldAttention",
 ]
