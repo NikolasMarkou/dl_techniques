@@ -49,7 +49,7 @@ class TestSwinMLP:
         # Check stored configuration
         assert layer.hidden_dim == 128
         assert layer.output_dim is None
-        assert layer.activation == "gelu"
+        assert keras.activations.serialize(layer.activation) == "gelu"
         assert layer.dropout_rate == 0.0
         assert layer.use_bias is True
         assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
@@ -75,7 +75,8 @@ class TestSwinMLP:
         # Verify all custom parameters are stored correctly
         assert layer.hidden_dim == 512
         assert layer.output_dim == 128
-        assert layer.activation == 'swish'
+        # get() resolves swish -> the silu function; assert functional equivalence.
+        assert layer.activation == keras.activations.get('swish')
         assert layer.dropout_rate == 0.2
         assert layer.use_bias is True
         assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
@@ -263,7 +264,9 @@ class TestSwinMLP:
         # Verify specific values
         assert config['hidden_dim'] == 512
         assert config['output_dim'] == 128
-        assert config['activation'] == 'swish'
+        # Activation serialized via keras.activations.serialize canonicalizes
+        # aliases (swish -> silu); assert functional equivalence.
+        assert keras.activations.get(config['activation']) == keras.activations.get('swish')
         assert config['dropout_rate'] == 0.2
 
     def test_serialization_cycle(self, layer_config, sample_input):
