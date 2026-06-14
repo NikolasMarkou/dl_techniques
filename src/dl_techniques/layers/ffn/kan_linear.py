@@ -48,6 +48,7 @@ References:
 """
 
 import keras
+import tensorflow as tf
 from typing import Tuple, Optional, Dict, Any, Union, Callable
 
 # ---------------------------------------------------------------------
@@ -104,7 +105,8 @@ class KANLinear(keras.layers.Layer):
         produce smoother activations (1=linear, 2=quadratic, 3=cubic). Defaults to 3.
     :type spline_order: int
     :param grid_range: ``(min, max)`` range for the initial B-spline grid.
-        Can be updated via ``update_grid_from_samples()``. Defaults to ``(-2.0, 2.0)``.
+        Can be updated via ``update_grid_from_samples()`` (eager-only; call
+        between epochs, not inside ``@tf.function``). Defaults to ``(-2.0, 2.0)``.
     :type grid_range: Tuple[float, float]
     :param activation: Base activation function ``b(x)``. Defaults to ``'swish'``.
     :type activation: Union[str, Callable]
@@ -402,10 +404,26 @@ class KANLinear(keras.layers.Layer):
     def update_grid_from_samples(self, x: Union[keras.KerasTensor, Any]) -> None:
         """Update B-spline grid based on input data statistics.
 
+        **Eager-only.** This method materializes concrete values via
+        ``keras.ops.convert_to_numpy`` and reassigns ``self.grid_range`` /
+        the grid weight. It MUST be called in eager context (e.g. between
+        training epochs on a batch of real data), NOT inside a ``@tf.function``
+        or any graph/symbolic trace. A graph-mode call raises ``RuntimeError``.
+
         :param x: Input data tensor of shape ``(batch_size, input_features)``.
         :type x: Union[keras.KerasTensor, Any]
+        :raises RuntimeError: If called outside eager execution (graph mode).
         :raises ValueError: If input is not 2D.
         """
+        # Fail loud in graph mode: the convert_to_numpy below has no graph-mode
+        # semantics, so a silent/cryptic failure is replaced with a clear error.
+        if not tf.executing_eagerly():
+            raise RuntimeError(
+                "KANLinear.update_grid_from_samples() is eager-only and cannot run "
+                "inside a @tf.function / graph trace. Call it in eager context "
+                "(e.g. between epochs on a batch of real data), not in the graph."
+            )
+
         # Ensure input is a tensor
         x = keras.ops.convert_to_tensor(x, dtype=self.dtype)
 
@@ -466,7 +484,7 @@ class KANLinear(keras.layers.Layer):
             "grid_size": self.grid_size,
             "spline_order": self.spline_order,
             "grid_range": self.grid_range,
-            "activation": self.base_activation_name,
+            "activation": keras.activations.serialize(self.base_activation_fn),
             "base_trainable": self.base_trainable,
             "spline_trainable": self.spline_trainable,
             "kernel_initializer": keras.initializers.serialize(

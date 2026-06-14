@@ -258,7 +258,10 @@ class TestKANLinear:
         assert reconstructed_layer.features == original_layer.features
         assert reconstructed_layer.grid_size == original_layer.grid_size
         assert reconstructed_layer.spline_order == original_layer.spline_order
-        assert reconstructed_layer.base_activation_name == original_layer.base_activation_name
+        # base_activation_name round-trips through keras.activations.serialize, which
+        # canonicalizes aliases (swish -> silu); assert functional equivalence.
+        assert (keras.activations.get(reconstructed_layer.base_activation_name)
+                == keras.activations.get(original_layer.base_activation_name))
         assert reconstructed_layer.base_trainable == original_layer.base_trainable
 
     # ========================================================================
