@@ -281,18 +281,13 @@ class HopfieldAttention(keras.layers.Layer):
             name="value_dense"
         )
 
-        # Output projection - input_dim will be determined in build()
-        # For now, we create it but it will be properly built later
-        self.output_dense = keras.layers.Dense(
-            0,  # Will be set correctly in build()
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            activity_regularizer=self.activity_regularizer,
-            name="output_dense"
-        )
+        # Output projection - its output dimension depends on the input feature
+        # dim (known only at build()). Created as a None sentinel here and
+        # instantiated with the correct units in build(). Do NOT create it as
+        # Dense(0) in __init__: a units=0 layer is a malformed placeholder that
+        # must be discarded and rebuilt anyway. The None-sentinel + idempotency
+        # guard in build() keeps first-build weights/forward exactly as before.
+        self.output_dense = None
 
         # Dropout layer (conditional creation)
         if self.dropout_rate > 0.0:
@@ -352,18 +347,21 @@ class HopfieldAttention(keras.layers.Layer):
         input_dim = query_shape[-1]
         logger.debug(f"Building HopfieldAttention with input_dim={input_dim}")
 
-        # Update output_dense to have correct units
-        # We need to recreate it with the correct output dimension
-        self.output_dense = keras.layers.Dense(
-            input_dim,  # Output same dimension as input
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            bias_initializer=self.bias_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-            bias_regularizer=self.bias_regularizer,
-            activity_regularizer=self.activity_regularizer,
-            name="output_dense"
-        )
+        # Create output_dense with the correct output dimension now that the
+        # input feature dim is known. Idempotency-guarded so a re-build (via
+        # from_config / functional reuse) does not clobber an already-created
+        # sublayer (which would orphan restored weights).
+        if self.output_dense is None:
+            self.output_dense = keras.layers.Dense(
+                input_dim,  # Output same dimension as input
+                use_bias=self.use_bias,
+                kernel_initializer=self.kernel_initializer,
+                bias_initializer=self.bias_initializer,
+                kernel_regularizer=self.kernel_regularizer,
+                bias_regularizer=self.bias_regularizer,
+                activity_regularizer=self.activity_regularizer,
+                name="output_dense"
+            )
 
         # Build sub-layers explicitly in computational order
         # This ensures all weight variables exist before weight restoration
@@ -537,43 +535,34 @@ class HopfieldAttention(keras.layers.Layer):
         if self.k_norm is not None:
             key_proj = self.k_norm(key_proj, training=training)
 
-        # Initialize Hopfield update loop
+        # Hopfield iterative updates.
+        #
+        # DECISION plan_2026-06-14_0c5d4a21/D-002: bounded Python loop (no Python
+        # bool on a traced tensor) for graph-mode iterative Hopfield; early-exit
+        # removed as optimization-only. The previous `while True` did
+        # `if diff_norm < self.update_steps_eps:` where `diff_norm` is a traced
+        # tensor (ops.sqrt result) -> a Python bool() on a symbolic tensor, which
+        # raises under @tf.function / jit when update_steps_max > 0. Do NOT
+        # reintroduce a data-dependent Python `if` on a traced tensor here (and
+        # do NOT reach for keras.ops.cond — a plain bounded loop is simpler). The
+        # convergence early-exit was an optimization, not a numeric contract:
+        # running the full bounded `update_steps_max + 1` steps yields the same
+        # final state when the network has not already converged. The
+        # `update_steps_max == 0` path runs exactly one step (range(1)), query
+        # never updated — numerically identical to before. See decisions.md D-002.
         current_query = query_proj
-        prev_attention = None
-        update_step = 0
-
-        # Hopfield iterative updates
-        while True:
+        attention_weights = None
+        output = None
+        for update_step in range(self.update_steps_max + 1):
             # Perform one Hopfield update step
             output, attention_weights = self._hopfield_update_step(
                 current_query, key_proj, value_proj, attention_mask, training
             )
 
-            # If update_steps_max is 0, only do one step (standard attention)
-            if self.update_steps_max == 0:
-                break
-
-            # Check convergence if we have previous attention weights
-            if prev_attention is not None and self.update_steps_eps > 0:
-                # Compute Frobenius norm of the difference
-                diff = attention_weights - prev_attention
-                diff_norm = ops.sqrt(ops.sum(ops.square(diff)))
-                if diff_norm < self.update_steps_eps:
-                    logger.debug(f"Hopfield converged after {update_step} steps")
-                    break
-
-            # Check maximum steps
-            if update_step >= self.update_steps_max:
-                logger.debug(f"Hopfield stopped at max steps: {self.update_steps_max}")
-                break
-
-            # Update for next iteration
-            prev_attention = attention_weights
-            update_step += 1
-
-            # Use attention weights to update the query for next iteration
-            # This implements the iterative Hopfield dynamics
-            current_query = ops.matmul(attention_weights, key_proj)
+            # Update the query for the next iteration (skipped after the final
+            # step). This implements the iterative Hopfield dynamics.
+            if update_step < self.update_steps_max:
+                current_query = ops.matmul(attention_weights, key_proj)
 
         # Reshape output back to original format
         output = ops.transpose(output, [0, 2, 1, 3])  # (batch, seq_len, num_heads, value_dim)
