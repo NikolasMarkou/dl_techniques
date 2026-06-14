@@ -686,6 +686,29 @@ class TestRBFLayerGraphMode:
         assert tuple(y_train.shape) == (8, 8)
         assert tuple(y_infer.shape) == (8, 8)
 
+    def test_symbolic_training_fires_repulsion_loss(self) -> None:
+        """A SYMBOLIC training=True tensor must fire the repulsion add_loss (== the
+        python-True value); symbolic False must contribute zero (the foot-gun fix).
+        """
+        layer = RBFLayer(units=8, repulsion_strength=0.5)
+        x = tf.constant(np.random.normal(0, 1, (16, 16)).astype(np.float32))
+        layer.build((16, 16))
+
+        _ = layer(x, training=True)
+        python_loss = float(ops.convert_to_numpy(tf.add_n(layer.losses)))
+
+        @tf.function
+        def step(inp, training):
+            _ = layer(inp, training=training)
+            return tf.add_n(layer.losses) if layer.losses else tf.constant(0.0)
+
+        sym_true = float(step(x, tf.constant(True)))
+        sym_false = float(step(x, tf.constant(False)))
+        assert python_loss > 0.0
+        assert np.isclose(sym_true, python_loss, atol=1e-6), \
+            "symbolic training=True repulsion loss must equal the python-True value"
+        assert sym_false == 0.0, "symbolic training=False must contribute zero loss"
+
 
 if __name__ == '__main__':
     # Run with: python -m pytest test_radial_basis_function.py -v

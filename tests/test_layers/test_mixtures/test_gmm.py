@@ -339,6 +339,36 @@ class TestGMMLayerGraphMode:
         assert tuple(y_train.shape) == (8, 4)
         assert tuple(y_infer.shape) == (8, 4)
 
+    def test_symbolic_training_fires_isometric_loss(self, basic_config: Dict[str, Any]) -> None:
+        """A SYMBOLIC training=True tensor must fire the isometric add_loss (== the
+        python-True value); symbolic False must contribute zero (the foot-gun fix).
+        """
+        import tensorflow as tf
+
+        layer = GMMLayer(**basic_config)
+        x = tf.constant(np.random.normal(0, 1, (16, 64)).astype(np.float32))
+        layer.build((16, 64))
+        # Perturb log-variances so covariances are anisotropic -> non-zero isometric loss
+        # (a fresh isotropic init has a genuinely zero isometric penalty).
+        layer.log_variances.assign(
+            tf.constant(np.random.normal(0, 1, layer.log_variances.shape).astype(np.float32))
+        )
+
+        y = layer(x, training=True)
+        python_loss = float(ops.convert_to_numpy(tf.add_n(layer.losses)))
+
+        @tf.function
+        def step(inp, training):
+            _ = layer(inp, training=training)
+            return tf.add_n(layer.losses) if layer.losses else tf.constant(0.0)
+
+        sym_true = float(step(x, tf.constant(True)))
+        sym_false = float(step(x, tf.constant(False)))
+        assert python_loss > 0.0
+        assert np.isclose(sym_true, python_loss, atol=1e-6), \
+            "symbolic training=True isometric loss must equal the python-True value"
+        assert sym_false == 0.0, "symbolic training=False must contribute zero loss"
+
     def test_compute_output_shape_before_build_multi_axis(self) -> None:
         """compute_output_shape correct PRE-build for multi/negative axes."""
         layer = GMMLayer(n_components=5, cluster_axis=[-2, -1], output_mode="assignments")

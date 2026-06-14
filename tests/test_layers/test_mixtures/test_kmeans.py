@@ -680,6 +680,34 @@ class TestKMeansLayerGraphAndRoundTrip:
         assert tuple(y_train.shape) == (8, 4)
         assert tuple(y_infer.shape) == (8, 4)
 
+    def test_symbolic_training_drives_centroid_update(self, basic_config: Dict[str, Any]) -> None:
+        """Custom @tf.function loop with a SYMBOLIC training flag must update centroids
+        under True and be a true no-op under False (the foot-gun fix).
+        """
+        import tensorflow as tf
+
+        layer = KMeansLayer(**basic_config)
+        x = tf.constant(np.random.normal(0, 1, (16, 64)).astype(np.float32))
+        layer.build((16, 64))
+
+        @tf.function
+        def step(inp, training):
+            return layer(inp, training=training)
+
+        c0 = ops.convert_to_numpy(layer.centroids).copy()
+        step(x, tf.constant(True))
+        c1 = ops.convert_to_numpy(layer.centroids).copy()
+        assert not np.allclose(c0, c1), "symbolic training=True must move centroids"
+
+        # Reset and confirm symbolic False leaves centroids AND momentum untouched.
+        layer.centroids.assign(c0)
+        m0 = ops.convert_to_numpy(layer.centroid_momentum).copy()
+        step(x, tf.constant(False))
+        assert np.allclose(c0, ops.convert_to_numpy(layer.centroids)), \
+            "symbolic training=False must not move centroids"
+        assert np.allclose(m0, ops.convert_to_numpy(layer.centroid_momentum)), \
+            "symbolic training=False must not move the momentum buffer"
+
     def test_keras_model_round_trip(self, basic_config: Dict[str, Any]) -> None:
         """Full .keras save/load round-trip must reconstruct an identical layer."""
         import os
