@@ -87,23 +87,24 @@ class TestGELUMLPFFN:
     def test_uses_approximate_gelu(self) -> None:
         """A 1-layer config must match manual tanh-approximate GELU, and must
         differ from the exact-erf GELU path on the same fixed input."""
-        layer = GELUMLPFFN(hidden_dim=8, output_dim=4, dropout_rate=0.0, use_bias=True)
-        x = keras.random.normal(shape=(3, 6))
+        # Seed weight init AND input for full determinism — the approx-vs-exact
+        # margin depends on the random weights, so an unseeded layer is flaky.
+        keras.utils.set_random_seed(42)
+        layer = GELUMLPFFN(hidden_dim=32, output_dim=4, dropout_rate=0.0, use_bias=True)
+        x = keras.random.normal(shape=(3, 6), seed=1234)
         y = layer(x)  # builds the layer
 
-        w1, b1 = layer.fc1.get_weights()
-        w2, b2 = layer.fc2.get_weights()
+        # Reconstruct both references through the layer's OWN fc1 and fc2 (keras
+        # ops, NOT numpy matmul). The ONLY difference between the two paths is the
+        # GELU variant, so err_approx collapses to ~0 regardless of the random
+        # weight init and err_exact is the genuine approx-vs-exact gap. A previous
+        # numpy-matmul reconstruction made this assertion weight-init-flaky.
+        h = layer.fc1(x)
+        y_manual_approx = np.asarray(layer.fc2(keras.ops.gelu(h, approximate=True)))
+        y_manual_exact = np.asarray(layer.fc2(keras.ops.gelu(h, approximate=False)))
 
-        h = np.matmul(np.asarray(x), w1) + b1
-        h_approx = np.asarray(keras.ops.gelu(keras.ops.convert_to_tensor(h), approximate=True))
-        y_manual_approx = np.matmul(h_approx, w2) + b2
-
-        h_exact = np.asarray(keras.ops.gelu(keras.ops.convert_to_tensor(h), approximate=False))
-        y_manual_exact = np.matmul(h_exact, w2) + b2
-
-        # Layer matches the tanh-approximate reference (tol loose: the manual
-        # path recomputes fc1 in numpy float, drifting the cubic term slightly).
-        np.testing.assert_allclose(np.asarray(y), y_manual_approx, atol=1e-3)
+        # Layer matches the tanh-approximate reference exactly (same graph ops).
+        np.testing.assert_allclose(np.asarray(y), y_manual_approx, atol=1e-6)
         # The approximate path is closer to the layer than the exact-erf path,
         # AND the two paths are measurably different -> approximate=True is used.
         err_approx = np.max(np.abs(np.asarray(y) - y_manual_approx))
