@@ -241,6 +241,17 @@ class LighthouseAttention(keras.layers.Layer):
         compatibility. Defaults to 0.0.
 
     :raises ValueError: If any argument is invalid.
+
+    .. note::
+        **Call-signature contract.** ``call()`` accepts only ``(inputs,
+        training=None)`` — there is **no** ``attention_mask`` parameter
+        (causality is enforced internally via the pyramid scatter-back
+        shift). Additionally, the layer requires a **statically-known
+        sequence length**: the pyramid index buffers are constructed in
+        ``build()`` from the concrete ``N`` of ``input_shape``. If the layer
+        is built with a dynamic / ``None`` sequence dimension, ``call()``
+        raises ``RuntimeError`` ("requires a statically known sequence
+        length"). Build with a concrete ``N`` (the common training case).
     """
 
     def __init__(

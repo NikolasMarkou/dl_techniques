@@ -210,8 +210,8 @@ When adding a new layer, you must update `dl_techniques/layers/attention/factory
 ```python
 'my_new_attention': {
     'class': MyNewAttention,
-    'required': ['dim', 'num_heads'],
-    'optional': {
+    'required_params': ['dim', 'num_heads'],
+    'optional_params': {
         'dropout_rate': 0.0,
         'prob_type': 'softmax',     # Expose probability type
         'prob_config': None,        # Expose probability config

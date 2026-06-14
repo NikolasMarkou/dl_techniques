@@ -40,6 +40,22 @@ The following layers are supported by the factory system with automated paramete
 | `window` | `WindowAttention` | Windowed Multi-Head Attention from Swin Transformer, using grid-based partitioning for efficient local attention. | Vision transformers (e.g., Swin) for efficient local attention. | `(batch, seq_len, dim)` |
 | `window_zigzag` | `WindowAttention` | Windowed attention with zigzag partitioning to group frequency-proximate tokens. Induces a frequency-based locality bias. | Vision models where frequency-domain relationships are important. | `(batch, seq_len, dim)` |
 
+## Call-signature caveats
+
+The factory (`create_attention_layer`) is **construction-only** — it standardizes how layers are *built*, not how they are *called*. Most layers follow the standard self-attention call signature `call(inputs, attention_mask=None, training=None)`, but seven layers deviate for intentional, architectural reasons. These are documented (not "fixed"): renaming them would break serialized configs and existing call sites. When invoking these layers directly, use their native signatures:
+
+| Layer | Non-standard call signature | Reason |
+|-------|-----------------------------|--------|
+| `rpc_attention` | mask passed as `mask=` (not `attention_mask=`) | Distinct parameter name predates the standard convention. |
+| `shared_weights_cross_attention` | requires a positional `split_sizes` argument | Needs explicit per-modality segment boundaries to split the concatenated sequence. |
+| `anchor_attention` | accepts **no** mask argument | Anchor/local windowing defines the attention pattern internally. |
+| `performer_attention` | accepts **no** mask argument | FAVOR+ linear-attention kernel does not support a dense additive mask. |
+| `lighthouse_attention` | accepts **no** mask argument; requires static seq-len | Causality is enforced by the pyramid scatter-back shift; raises `RuntimeError` on dynamic/`None` seq-len. |
+| `group_query_attention` | `call(inputs, training=None, attention_mask=None)` (order swapped) | `training` precedes `attention_mask` positionally. |
+| `ring_attention` | `call(inputs, training=None, attention_mask=None)` (order swapped) | `training` precedes `attention_mask` positionally. |
+
+For `group_query`/`ring`, pass `attention_mask` as a keyword argument to avoid the positional-order pitfall.
+
 ## Customization Hooks
 
 Most softmax-based attention layers expose two unified customization hooks (defaults preserve standard behavior):

@@ -43,7 +43,7 @@ from .hopfield_attention import HopfieldAttention
 from .lighthouse_attention import LighthouseAttention
 from .perceiver_attention import PerceiverAttention
 
-# Layers available for direct instantiation (not yet in factory registry)
+# Factory-registered layers (also available for direct instantiation)
 from .gated_attention import GatedAttention
 from .performer_attention import PerformerAttention
 from .ring_attention import RingAttention

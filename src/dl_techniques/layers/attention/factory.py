@@ -1019,6 +1019,16 @@ def validate_attention_config(attention_type: str, **kwargs: Any) -> None:
                 f"must be divisible by num_kv_heads ({kwargs['num_kv_heads']})"
             )
 
+    if attention_type == 'differential':
+        if all(p in kwargs for p in ('dim', 'num_heads', 'head_dim')):
+            expected = kwargs['num_heads'] * kwargs['head_dim']
+            if kwargs['dim'] != expected:
+                raise ValueError(
+                    f"For differential attention, dim ({kwargs['dim']}) must "
+                    f"equal num_heads * head_dim "
+                    f"({kwargs['num_heads']} * {kwargs['head_dim']} = {expected})"
+                )
+
     logger.debug(
         f"Validation successful for '{attention_type}' with parameters: {kwargs}"
     )

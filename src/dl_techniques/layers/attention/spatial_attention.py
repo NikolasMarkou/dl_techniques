@@ -206,7 +206,12 @@ class SpatialAttention(keras.layers.Layer):
         :param inputs: Input tensor of shape
             ``(batch_size, height, width, channels)``.
         :type inputs: keras.KerasTensor
-        :param attention_mask: Optional attention mask tensor.
+        :param attention_mask: Accepted for interface compatibility with the
+            standard attention ``call`` signature, but **ignored**. This is a
+            vision spatial-attention layer that pools over channels and emits a
+            per-location gate; it has no token-masking semantics. The parameter
+            is retained (not removed) so the layer stays signature-compatible
+            with masked attention layers and existing serialized configs.
         :type attention_mask: keras.KerasTensor or None
         :param training: Whether the layer should behave in training mode
             or inference mode.
