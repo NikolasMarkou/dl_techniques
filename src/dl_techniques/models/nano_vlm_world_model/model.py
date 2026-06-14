@@ -120,6 +120,13 @@ class ScoreBasedNanoVLM(keras.Model):
 
         # === Core Encoding Components ===
         # Vision encoder (processes clean images to features)
+        # Defensive: the denoisers' ConditionalDenoiser.call concatenates the
+        # condition along axis=1 and requires a rank-3 [B, seq, D] sequence; the
+        # default 'cls' pooling collapses to rank-2. Force sequence output.
+        # Mirrors nano_vlm/model.py:334-336.
+        if vision_config.get('output_mode', 'cls') != 'none':
+            vision_config = dict(vision_config, output_mode='none')
+        self.vision_config = vision_config
         self.vision_encoder = create_vision_encoder(**vision_config)
 
         # Text encoder (processes text to embeddings)
@@ -571,7 +578,7 @@ def create_score_based_nanovlm(
         'mini': {
             'vision_config': {
                 'img_size': 224, 'patch_size': 16, 'embed_dim': 384,
-                'depth': 6, 'num_heads': 6
+                'depth': 6, 'num_heads': 6, 'output_mode': 'none'
             },
             'text_config': {
                 'vocab_size': vocab_size, 'embed_dim': 384,
@@ -584,7 +591,7 @@ def create_score_based_nanovlm(
         'base': {
             'vision_config': {
                 'img_size': 224, 'patch_size': 16, 'embed_dim': 768,
-                'depth': 12, 'num_heads': 12
+                'depth': 12, 'num_heads': 12, 'output_mode': 'none'
             },
             'text_config': {
                 'vocab_size': vocab_size, 'embed_dim': 768,
@@ -597,7 +604,7 @@ def create_score_based_nanovlm(
         'large': {
             'vision_config': {
                 'img_size': 384, 'patch_size': 16, 'embed_dim': 1024,
-                'depth': 24, 'num_heads': 16
+                'depth': 24, 'num_heads': 16, 'output_mode': 'none'
             },
             'text_config': {
                 'vocab_size': vocab_size, 'embed_dim': 1024,
