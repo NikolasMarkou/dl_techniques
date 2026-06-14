@@ -214,14 +214,6 @@ class TestEdgeCases:
         layer = RingAttention(dim=16, num_heads=2, name="ring_special")
         assert layer.name == "ring_special"
 
-    @pytest.mark.xfail(
-        reason="Blockwise output uses ops.slice_update -> XlaDynamicUpdateSlice, "
-        "which has no registered gradient in eager TF; backprop through the "
-        "blockwise loop is unsupported on this backend. Forward / config / "
-        ".keras round-trip all pass. Needs a dedicated plan to rewrite the "
-        "block-placement as a gradient-friendly scatter/concat.",
-        strict=False,
-    )
     def test_gradient_flow(self):
         layer = RingAttention(dim=16, num_heads=2, block_size=4)
         x = keras.random.normal((1, 6, 16))

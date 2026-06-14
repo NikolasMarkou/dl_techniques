@@ -386,8 +386,13 @@ class RingAttention(keras.layers.Layer):
         # exponential normalizer; alternatives like sparsemax or threshmax do
         # not admit an equivalent streaming form and would break exactness.
 
-        # Initialize output tensor
-        outputs = ops.zeros_like(queries)
+        # Accumulate per-block outputs in a Python list, concatenated after the
+        # loop. NOTE: do NOT reassemble via ops.slice_update — on the TF backend
+        # it lowers to XlaDynamicUpdateSlice, which has no registered eager
+        # gradient (LookupError on backprop). list + ops.concatenate is fully
+        # differentiable and forward-identical (blocks appended in q_block_idx
+        # order map 1:1 to the original q_start offsets along axis=2).
+        block_outputs = []
 
         # Process each query block
         for q_block_idx in range(num_blocks):
@@ -479,15 +484,14 @@ class RingAttention(keras.layers.Layer):
             running_sum_expanded = ops.expand_dims(running_sum, axis=-1)
             block_output = accumulated_output / running_sum_expanded
 
-            # Place block output in final tensor using slice assignment
-            # Create indices for the slice assignment
-            start_indices = [0, 0, q_start, 0]
-            outputs = ops.slice_update(
-                outputs,
-                start_indices=start_indices,
-                updates=block_output
-            )
+            # Collect this block's output; concatenated in loop order below.
+            block_outputs.append(block_output)
 
+        # Reassemble along the sequence axis. Loop order (q_block_idx 0,1,2,...)
+        # places each block at its original q_start offset, so concatenation is
+        # numerically identical to the prior slice_update assembly, and the
+        # last (possibly partial) block carries its own size via the q-slice.
+        outputs = ops.concatenate(block_outputs, axis=2)
         return outputs
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
