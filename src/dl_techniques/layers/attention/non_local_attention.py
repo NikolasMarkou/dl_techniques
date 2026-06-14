@@ -335,7 +335,15 @@ class NonLocalAttention(keras.layers.Layer):
             self.attn_dropout = None
             self.dropout = None
 
-        # Note: output_conv will be created in build() since we need input channels
+        # DECISION plan_2026-06-14_0c5d4a21/D-003: output_conv/output_activation_layer
+        # are declared as None sentinels here (NOT instantiated) because their filter
+        # count depends on the input channels resolved in build(); they are instantiated
+        # behind an idempotency guard in build(). Do NOT move full instantiation here
+        # (filters unknown pre-build) and do NOT leave them undeclared until build()
+        # (Keras-3 conformance: attributes must exist post-__init__; a second build()
+        # must not replace already-built sublayers). See decisions.md D-003 (F3).
+        self.output_conv = None
+        self.output_activation_layer = None
 
     def _validate_inputs(
         self,
@@ -367,24 +375,36 @@ class NonLocalAttention(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer and all sub-layers for robust serialization."""
+        # Idempotency guard (D-003): a second build() (from_config / functional reuse)
+        # must be a no-op. The explicit child `.build(...)` calls below are NOT
+        # self-guarded by Keras and would raise a "cannot add state to an already-built
+        # layer" lock violation if re-run; returning early preserves first-build state
+        # and numerics exactly. See decisions.md D-003 (F3).
+        if self.built:
+            return
+
         channels = input_shape[-1]
         actual_output_channels = (
             channels if self.output_channels <= 0
             else self.output_channels
         )
 
-        # Create output projection layer (needs input channels)
-        self.output_conv = keras.layers.Conv2D(
-            filters=actual_output_channels,
-            name='output_conv',
-            **self._conv_params
-        )
-        # Output activation routed through the activation factory.
-        self.output_activation_layer = resolve_activation_layer(
-            self.output_activation,
-            name='output_activation',
-            **(self.output_activation_args or {}),
-        )
+        # Create output projection layer (needs input channels). Idempotency-guarded:
+        # a second build() (e.g. under from_config / functional reuse) must NOT replace
+        # already-built sublayers. See D-003.
+        if self.output_conv is None:
+            self.output_conv = keras.layers.Conv2D(
+                filters=actual_output_channels,
+                name='output_conv',
+                **self._conv_params
+            )
+        if self.output_activation_layer is None:
+            # Output activation routed through the activation factory.
+            self.output_activation_layer = resolve_activation_layer(
+                self.output_activation,
+                name='output_activation',
+                **(self.output_activation_args or {}),
+            )
 
         # Build sub-layers in computational order for serialization robustness
         self.depthwise_conv.build(input_shape)
