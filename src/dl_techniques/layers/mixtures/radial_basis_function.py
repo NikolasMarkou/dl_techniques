@@ -50,6 +50,10 @@ from typing import Optional, Union, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
 
+from ...utils.tensors import resolve_training_factor
+
+# ---------------------------------------------------------------------
+
 @keras.saving.register_keras_serializable()
 class RBFLayer(keras.layers.Layer):
     """Radial Basis Function layer with adaptive center repulsion.
@@ -295,11 +299,19 @@ class RBFLayer(keras.layers.Layer):
 
         output = ops.exp(-exponent)
 
-        # ``training is True``: graph-safe identity check (symbolic/None/False skip the
-        # repulsion add_loss without coercing a tensor to bool). Canonical repo idiom.
-        if training is True and self.units > 1 and self.repulsion_strength > 0:
-            repulsion_loss = self._compute_repulsion_loss()
-            self.add_loss(repulsion_loss)
+        # DECISION plan_2026-06-14_5e80bd3e/D-001: gate on a graph-safe training factor so
+        # the repulsion loss fires for a symbolic training=True tensor (custom @tf.function
+        # loop) and is a zero contribution under symbolic-False, never coercing a tensor to
+        # a bool. python-True keeps the exact unmasked add_loss; symbolic path multiplies by
+        # the 0/1 factor.
+        if self.units > 1 and self.repulsion_strength > 0:
+            training_factor = resolve_training_factor(training, self.compute_dtype)
+            if training_factor is not None:
+                repulsion_loss = self._compute_repulsion_loss()
+                self.add_loss(
+                    repulsion_loss if isinstance(training_factor, float)
+                    else training_factor * repulsion_loss
+                )
 
         return output
 
