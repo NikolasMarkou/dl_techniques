@@ -1,0 +1,772 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="SELECTIVE" />
+  </component>
+  <component name="ChangeListManager">
+    <list default="true" id="b35edab1-c83e-4814-a399-af91f24d4dcc" name="Changes" comment="[cleanup]">
+      <change beforePath="$PROJECT_DIR$/plans/DECISIONS.md" beforeDir="false" afterPath="$PROJECT_DIR$/plans/DECISIONS.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plans/FINDINGS.md" beforeDir="false" afterPath="$PROJECT_DIR$/plans/FINDINGS.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plans/INDEX.md" beforeDir="false" afterPath="$PROJECT_DIR$/plans/INDEX.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plans/LESSONS.md" beforeDir="false" afterPath="$PROJECT_DIR$/plans/LESSONS.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/plans/SYSTEM.md" beforeDir="false" afterPath="$PROJECT_DIR$/plans/SYSTEM.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/dl_techniques/models/ideogram4/transformer.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/dl_techniques/models/ideogram4/transformer.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/src/train/ideogram4/train_ideogram4.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/train/ideogram4/train_ideogram4.py" afterDir="false" />
+    </list>
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="FileTemplateManagerImpl">
+    <option name="RECENT_TEMPLATES">
+      <list>
+        <option value="Python Script" />
+      </list>
+    </option>
+  </component>
+  <component name="Git.Settings">
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+    <option name="RESET_MODE" value="HARD" />
+  </component>
+  <component name="GitHubPullRequestSearchHistory">{
+  &quot;lastFilter&quot;: {
+    &quot;state&quot;: &quot;OPEN&quot;,
+    &quot;assignee&quot;: &quot;NikolasMarkou&quot;
+  }
+}</component>
+  <component name="GithubDefaultAccount">
+    <option name="defaultAccountId" value="3734aa96-69fc-4076-90dd-f3a48bc0f89f" />
+  </component>
+  <component name="GithubPullRequestsUISettings">{
+  &quot;selectedUrlAndAccountId&quot;: {
+    &quot;url&quot;: &quot;https://github.com/NikolasMarkou/dl_techniques.git&quot;,
+    &quot;accountId&quot;: &quot;3734aa96-69fc-4076-90dd-f3a48bc0f89f&quot;
+  }
+}</component>
+  <component name="MarkdownSettingsMigration">
+    <option name="stateVersion" value="1" />
+  </component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 2
+}</component>
+  <component name="ProjectId" id="2rkQjQH0o4eFAacuc89AE8nrAVN" />
+  <component name="ProjectViewState">
+    <option name="autoscrollFromSource" value="true" />
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="showLibraryContents" value="true" />
+  </component>
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.OpenProjectViewOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
+    &quot;WebServerToolWindowFactoryState&quot;: &quot;false&quot;,
+    &quot;ai.playground.ignore.import.keys.banner.in.settings&quot;: &quot;true&quot;,
+    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;main&quot;,
+    &quot;junie.onboarding.icon.badge.shown&quot;: &quot;true&quot;,
+    &quot;last_opened_file_path&quot;: &quot;/media/arxwn/data_fast/repositories/iterative-planner&quot;,
+    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
+    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
+    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+    &quot;settings.editor.selected.configurable&quot;: &quot;preferences.pluginManager&quot;,
+    &quot;to.speed.mode.migration.done&quot;: &quot;true&quot;,
+    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
+  }
+}</component>
+  <component name="RdControllerToolWindowsLayoutState" isNewUi="true">
+    <layout>
+      <window_info id="Space Code Reviews" />
+      <window_info id="Bookmarks" side_tool="true" />
+      <window_info id="Merge Requests" />
+      <window_info id="Commit_Guest" />
+      <window_info id="Pull Requests" />
+      <window_info id="Learn" />
+      <window_info active="true" content_ui="combo" id="Project" order="0" visible="true" weight="0.12996033" />
+      <window_info id="Commit" order="1" weight="0.19146825" />
+      <window_info id="Structure" order="2" side_tool="true" weight="0.25" />
+      <window_info anchor="bottom" id="Database Changes" />
+      <window_info anchor="bottom" id="TypeScript" />
+      <window_info anchor="bottom" id="Python Packages" />
+      <window_info anchor="bottom" id="TODO" />
+      <window_info anchor="bottom" id="File Transfer" />
+      <window_info anchor="bottom" id="HfCacheToolWindow" />
+      <window_info anchor="bottom" id="Python Console" />
+      <window_info anchor="bottom" id="Version Control" order="0" weight="0.33020833" />
+      <window_info anchor="bottom" id="Problems View" order="1" weight="0.33020833" />
+      <window_info anchor="bottom" id="Problems" order="2" />
+      <window_info active="true" anchor="bottom" x="-318" y="271" width="2520" height="1440" id="Terminal" order="3" type="WINDOWED" />
+      <window_info anchor="bottom" id="Services" order="4" />
+      <window_info anchor="bottom" id="Find" order="5" weight="0.33020833" />
+      <window_info anchor="right" id="Plots" />
+      <window_info anchor="right" id="Augment" />
+      <window_info anchor="right" id="Endpoints" />
+      <window_info anchor="right" id="make" side_tool="true" />
+      <window_info anchor="right" id="Coverage" side_tool="true" />
+      <window_info anchor="right" id="ElectroJunToolWindow" />
+      <window_info anchor="right" id="SciView" />
+      <window_info anchor="right" id="Meet New UI" side_tool="true" />
+      <window_info anchor="right" content_ui="combo" id="Notifications" order="0" weight="0.25" />
+      <window_info anchor="right" id="Database" order="1" weight="0.25" />
+      <window_info anchor="right" id="AIAssistant" order="2" weight="0.25" />
+      <window_info anchor="right" id="Gradle" order="3" weight="0.25" />
+      <window_info anchor="right" id="Maven" order="4" weight="0.25" />
+    </layout>
+  </component>
+  <component name="RecentsManager">
+    <key name="CopyFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/src/dl_techniques/models/vq_vae_rotation" />
+      <recent name="$PROJECT_DIR$/research/guides" />
+      <recent name="$PROJECT_DIR$/src/dl_techniques/utils/alignment" />
+      <recent name="$PROJECT_DIR$/src/train/mann" />
+      <recent name="$PROJECT_DIR$/src/dl_techniques/layers/ntm" />
+    </key>
+    <key name="MoveFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/research" />
+      <recent name="$PROJECT_DIR$/research/paper/cliffordnet_extensions" />
+      <recent name="$PROJECT_DIR$/research/system_instructions" />
+      <recent name="$PROJECT_DIR$/src/dl_techniques/layers/graphs" />
+      <recent name="$PROJECT_DIR$/src/dl_techniques/utils" />
+    </key>
+  </component>
+  <component name="SharedIndexes">
+    <attachedChunks>
+      <set>
+        <option value="bundled-js-predefined-d6986cc7102b-31caf2ab9e3c-JavaScript-PY-261.24374.152" />
+        <option value="bundled-python-sdk-c59985aa861c-c2ffad84badb-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-261.24374.152" />
+      </set>
+    </attachedChunks>
+  </component>
+  <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="application-level" UseSingleDictionary="true" transferred="true" />
+  <component name="TaskManager">
+    <task active="true" id="Default" summary="Default task">
+      <changelist id="b35edab1-c83e-4814-a399-af91f24d4dcc" name="Changes" comment="" />
+      <created>1737100728545</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1737100728545</updated>
+      <workItem from="1737100729670" duration="22602000" />
+      <workItem from="1737443457854" duration="6196000" />
+      <workItem from="1737459451546" duration="78000" />
+      <workItem from="1737486789742" duration="11005000" />
+      <workItem from="1737584470312" duration="7687000" />
+      <workItem from="1737626367517" duration="4531000" />
+      <workItem from="1737668659561" duration="1788000" />
+      <workItem from="1737727714609" duration="21000" />
+      <workItem from="1738061909732" duration="10884000" />
+      <workItem from="1738348236482" duration="988000" />
+      <workItem from="1738582660459" duration="83000" />
+      <workItem from="1739178979268" duration="8585000" />
+      <workItem from="1739347143863" duration="170000" />
+      <workItem from="1741080353754" duration="6771000" />
+      <workItem from="1741170090045" duration="3444000" />
+      <workItem from="1741600667015" duration="8780000" />
+      <workItem from="1741616437786" duration="817000" />
+      <workItem from="1741618197750" duration="16000" />
+      <workItem from="1741690679073" duration="11812000" />
+      <workItem from="1741705499212" duration="10000" />
+      <workItem from="1741705737959" duration="8000" />
+      <workItem from="1742219343495" duration="7725000" />
+      <workItem from="1742587046861" duration="1921000" />
+      <workItem from="1742589020340" duration="3056000" />
+      <workItem from="1742635810626" duration="10096000" />
+      <workItem from="1742992338204" duration="699000" />
+      <workItem from="1744633344788" duration="6415000" />
+      <workItem from="1744665851782" duration="9777000" />
+      <workItem from="1744698471682" duration="21778000" />
+      <workItem from="1744722694984" duration="1173000" />
+      <workItem from="1744783916366" duration="14682000" />
+      <workItem from="1745415147510" duration="1765000" />
+      <workItem from="1745430747410" duration="13120000" />
+      <workItem from="1745572258202" duration="7938000" />
+      <workItem from="1745601571472" duration="12555000" />
+      <workItem from="1745699153549" duration="4941000" />
+      <workItem from="1746428650981" duration="42000" />
+      <workItem from="1746442358796" duration="1559000" />
+      <workItem from="1746606365444" duration="2389000" />
+      <workItem from="1747131273248" duration="816000" />
+      <workItem from="1750226989351" duration="6098000" />
+      <workItem from="1750234514625" duration="36580000" />
+      <workItem from="1750340711439" duration="16274000" />
+      <workItem from="1750761383153" duration="12821000" />
+      <workItem from="1750833346146" duration="39015000" />
+      <workItem from="1751007326324" duration="13407000" />
+      <workItem from="1751034020132" duration="1118000" />
+      <workItem from="1751267066979" duration="25476000" />
+      <workItem from="1751358200422" duration="14612000" />
+      <workItem from="1751439850769" duration="641000" />
+      <workItem from="1751454203211" duration="568000" />
+      <workItem from="1751460919067" duration="16780000" />
+      <workItem from="1751615586454" duration="17048000" />
+      <workItem from="1751886578602" duration="31050000" />
+      <workItem from="1751981279410" duration="2457000" />
+      <workItem from="1752050826802" duration="16261000" />
+      <workItem from="1752128595893" duration="5270000" />
+      <workItem from="1752137380545" duration="2454000" />
+      <workItem from="1752152981151" duration="3178000" />
+      <workItem from="1752236723910" duration="3807000" />
+      <workItem from="1752563416767" duration="23576000" />
+      <workItem from="1752651723397" duration="23118000" />
+      <workItem from="1752824867440" duration="40804000" />
+      <workItem from="1753166471569" duration="40061000" />
+      <workItem from="1753443675157" duration="7766000" />
+      <workItem from="1753692299129" duration="15937000" />
+      <workItem from="1753711947261" duration="17000" />
+      <workItem from="1753771866463" duration="25725000" />
+      <workItem from="1753861449306" duration="11937000" />
+      <workItem from="1754032377982" duration="30960000" />
+      <workItem from="1754376372888" duration="26527000" />
+      <workItem from="1754463425438" duration="23350000" />
+      <workItem from="1754550376144" duration="16428000" />
+      <workItem from="1754574889302" duration="1403000" />
+      <workItem from="1754580246640" duration="1222000" />
+      <workItem from="1754642473971" duration="13292000" />
+      <workItem from="1754894760446" duration="21326000" />
+      <workItem from="1754986463961" duration="19343000" />
+      <workItem from="1755070729413" duration="11352000" />
+      <workItem from="1756708530054" duration="14197000" />
+      <workItem from="1756725971217" duration="10699000" />
+      <workItem from="1756796132988" duration="16029000" />
+      <workItem from="1756813532417" duration="9670000" />
+      <workItem from="1756882164316" duration="25460000" />
+      <workItem from="1756966451778" duration="12251000" />
+      <workItem from="1756981729041" duration="10377000" />
+      <workItem from="1757053277545" duration="28250000" />
+      <workItem from="1757312222923" duration="26004000" />
+      <workItem from="1757397753074" duration="16449000" />
+      <workItem from="1757482995628" duration="6918000" />
+      <workItem from="1757500089048" duration="12787000" />
+      <workItem from="1757571273525" duration="18921000" />
+      <workItem from="1757659996494" duration="15673000" />
+      <workItem from="1757917985383" duration="10298000" />
+      <workItem from="1758020673556" duration="10721000" />
+      <workItem from="1758092602917" duration="21951000" />
+      <workItem from="1758175129387" duration="25331000" />
+      <workItem from="1758878051693" duration="12146000" />
+      <workItem from="1759128385893" duration="23139000" />
+      <workItem from="1759218985432" duration="6518000" />
+      <workItem from="1759394575768" duration="6462000" />
+      <workItem from="1759402588662" duration="11414000" />
+      <workItem from="1759501049691" duration="74000" />
+      <workItem from="1759730391241" duration="27116000" />
+      <workItem from="1759758567532" duration="31245000" />
+      <workItem from="1759992276846" duration="13225000" />
+      <workItem from="1760089394394" duration="14632000" />
+      <workItem from="1760337904957" duration="74201000" />
+      <workItem from="1760680790487" duration="21006000" />
+      <workItem from="1761054226229" duration="2028000" />
+      <workItem from="1761199989067" duration="53595000" />
+      <workItem from="1762497244075" duration="5666000" />
+      <workItem from="1762508237882" duration="20687000" />
+      <workItem from="1762759106163" duration="12322000" />
+      <workItem from="1762781397336" duration="4379000" />
+      <workItem from="1763121358729" duration="8776000" />
+      <workItem from="1763362492672" duration="3887000" />
+      <workItem from="1763367894480" duration="11591000" />
+      <workItem from="1763379842489" duration="299000" />
+      <workItem from="1763450402175" duration="6280000" />
+      <workItem from="1763462353192" duration="42371000" />
+      <workItem from="1763711609762" duration="5910000" />
+      <workItem from="1763989433567" duration="13746000" />
+      <workItem from="1764138524566" duration="29744000" />
+      <workItem from="1764230320157" duration="15079000" />
+      <workItem from="1764333132772" duration="29289000" />
+      <workItem from="1764659245059" duration="7306000" />
+      <workItem from="1764749880759" duration="16510000" />
+      <workItem from="1764772543422" duration="498000" />
+      <workItem from="1765265740568" duration="22545000" />
+      <workItem from="1765290468641" duration="28096000" />
+      <workItem from="1765869651034" duration="19387000" />
+      <workItem from="1765893658240" duration="9149000" />
+      <workItem from="1767349170259" duration="15601000" />
+      <workItem from="1767859128779" duration="24149000" />
+      <workItem from="1767945741009" duration="18769000" />
+      <workItem from="1768202681662" duration="6750000" />
+      <workItem from="1768218936353" duration="1417000" />
+      <workItem from="1768229931617" duration="719000" />
+      <workItem from="1768286625400" duration="4720000" />
+      <workItem from="1768291670954" duration="13416000" />
+      <workItem from="1768921094438" duration="146000" />
+      <workItem from="1768923005948" duration="64000" />
+      <workItem from="1769160764407" duration="2571000" />
+      <workItem from="1771425866400" duration="3354000" />
+      <workItem from="1771577688016" duration="4112000" />
+      <workItem from="1773312397681" duration="4616000" />
+      <workItem from="1773386827437" duration="5928000" />
+      <workItem from="1774852428369" duration="115209000" />
+      <workItem from="1775629876580" duration="8942000" />
+      <workItem from="1775652951969" duration="12435000" />
+      <workItem from="1776176009368" duration="104000" />
+      <workItem from="1776233389282" duration="8894000" />
+      <workItem from="1776665864336" duration="28659000" />
+      <workItem from="1776936650813" duration="7416000" />
+      <workItem from="1777010696005" duration="26991000" />
+      <workItem from="1777529984574" duration="9094000" />
+      <workItem from="1777895901004" duration="14782000" />
+      <workItem from="1778139535758" duration="11098000" />
+      <workItem from="1778585994993" duration="17891000" />
+      <workItem from="1779084263367" duration="21043000" />
+      <workItem from="1779173376529" duration="5874000" />
+      <workItem from="1779429900065" duration="7498000" />
+      <workItem from="1779706314077" duration="8964000" />
+      <workItem from="1779717511621" duration="26627000" />
+      <workItem from="1780913776265" duration="10363000" />
+      <workItem from="1781163250954" duration="2258000" />
+      <workItem from="1781174811496" duration="1986000" />
+      <workItem from="1781266011420" duration="633000" />
+    </task>
+    <task id="LOCAL-00794" summary="[ntm] metrics, benchmarks">
+      <option name="closed" value="true" />
+      <created>1767355520846</created>
+      <option name="number" value="00794" />
+      <option name="presentableId" value="LOCAL-00794" />
+      <option name="project" value="LOCAL" />
+      <updated>1767355520846</updated>
+    </task>
+    <task id="LOCAL-00795" summary="[ntm] metrics, benchmarks">
+      <option name="closed" value="true" />
+      <created>1767355602079</created>
+      <option name="number" value="00795" />
+      <option name="presentableId" value="LOCAL-00795" />
+      <option name="project" value="LOCAL" />
+      <updated>1767355602080</updated>
+    </task>
+    <task id="LOCAL-00796" summary="[ntm] metrics, benchmarks">
+      <option name="closed" value="true" />
+      <created>1767356332578</created>
+      <option name="number" value="00796" />
+      <option name="presentableId" value="LOCAL-00796" />
+      <option name="project" value="LOCAL" />
+      <updated>1767356332578</updated>
+    </task>
+    <task id="LOCAL-00797" summary="[ntm] metrics, benchmarks">
+      <option name="closed" value="true" />
+      <created>1767357985416</created>
+      <option name="number" value="00797" />
+      <option name="presentableId" value="LOCAL-00797" />
+      <option name="project" value="LOCAL" />
+      <updated>1767357985416</updated>
+    </task>
+    <task id="LOCAL-00798" summary="[research] update guide">
+      <option name="closed" value="true" />
+      <created>1767358624244</created>
+      <option name="number" value="00798" />
+      <option name="presentableId" value="LOCAL-00798" />
+      <option name="project" value="LOCAL" />
+      <updated>1767358624244</updated>
+    </task>
+    <task id="LOCAL-00799" summary="[ntm] updated and refinment">
+      <option name="closed" value="true" />
+      <created>1767362039579</created>
+      <option name="number" value="00799" />
+      <option name="presentableId" value="LOCAL-00799" />
+      <option name="project" value="LOCAL" />
+      <updated>1767362039579</updated>
+    </task>
+    <task id="LOCAL-00800" summary="[ntm] updated and refinements">
+      <option name="closed" value="true" />
+      <created>1767363398892</created>
+      <option name="number" value="00800" />
+      <option name="presentableId" value="LOCAL-00800" />
+      <option name="project" value="LOCAL" />
+      <updated>1767363398892</updated>
+    </task>
+    <task id="LOCAL-00801" summary="[ntm] updated and refinements">
+      <option name="closed" value="true" />
+      <created>1767366501869</created>
+      <option name="number" value="00801" />
+      <option name="presentableId" value="LOCAL-00801" />
+      <option name="project" value="LOCAL" />
+      <updated>1767366501869</updated>
+    </task>
+    <task id="LOCAL-00802" summary="[prism] fixed components and tests">
+      <option name="closed" value="true" />
+      <created>1767861347591</created>
+      <option name="number" value="00802" />
+      <option name="presentableId" value="LOCAL-00802" />
+      <option name="project" value="LOCAL" />
+      <updated>1767861347591</updated>
+    </task>
+    <task id="LOCAL-00803" summary="[cleanup] naming">
+      <option name="closed" value="true" />
+      <created>1767861363156</created>
+      <option name="number" value="00803" />
+      <option name="presentableId" value="LOCAL-00803" />
+      <option name="project" value="LOCAL" />
+      <updated>1767861363156</updated>
+    </task>
+    <task id="LOCAL-00804" summary="[cleanup] naming">
+      <option name="closed" value="true" />
+      <created>1767868304791</created>
+      <option name="number" value="00804" />
+      <option name="presentableId" value="LOCAL-00804" />
+      <option name="project" value="LOCAL" />
+      <updated>1767868304791</updated>
+    </task>
+    <task id="LOCAL-00805" summary="[prism] train file fixing visualizations">
+      <option name="closed" value="true" />
+      <created>1767869853449</created>
+      <option name="number" value="00805" />
+      <option name="presentableId" value="LOCAL-00805" />
+      <option name="project" value="LOCAL" />
+      <updated>1767869853449</updated>
+    </task>
+    <task id="LOCAL-00806" summary="[alignment] implementation of representation alignment metrics from &quot;The Platonic Representation Hypothesis&quot;">
+      <option name="closed" value="true" />
+      <created>1767871345691</created>
+      <option name="number" value="00806" />
+      <option name="presentableId" value="LOCAL-00806" />
+      <option name="project" value="LOCAL" />
+      <updated>1767871345691</updated>
+    </task>
+    <task id="LOCAL-00807" summary="[book] keras ebook">
+      <option name="closed" value="true" />
+      <created>1767877825149</created>
+      <option name="number" value="00807" />
+      <option name="presentableId" value="LOCAL-00807" />
+      <option name="project" value="LOCAL" />
+      <updated>1767877825149</updated>
+    </task>
+    <task id="LOCAL-00808" summary="[prism] added quantile head">
+      <option name="closed" value="true" />
+      <created>1767878231174</created>
+      <option name="number" value="00808" />
+      <option name="presentableId" value="LOCAL-00808" />
+      <option name="project" value="LOCAL" />
+      <updated>1767878231174</updated>
+    </task>
+    <task id="LOCAL-00809" summary="[prism] added quantile head">
+      <option name="closed" value="true" />
+      <created>1767882418419</created>
+      <option name="number" value="00809" />
+      <option name="presentableId" value="LOCAL-00809" />
+      <option name="project" value="LOCAL" />
+      <updated>1767882418419</updated>
+    </task>
+    <task id="LOCAL-00810" summary="[prism] added quantile head">
+      <option name="closed" value="true" />
+      <created>1767885740561</created>
+      <option name="number" value="00810" />
+      <option name="presentableId" value="LOCAL-00810" />
+      <option name="project" value="LOCAL" />
+      <updated>1767885740561</updated>
+    </task>
+    <task id="LOCAL-00811" summary="[research] added curriculum learning">
+      <option name="closed" value="true" />
+      <created>1767960658591</created>
+      <option name="number" value="00811" />
+      <option name="presentableId" value="LOCAL-00811" />
+      <option name="project" value="LOCAL" />
+      <updated>1767960658591</updated>
+    </task>
+    <task id="LOCAL-00812" summary="[time_series] normalized training for time_series models">
+      <option name="closed" value="true" />
+      <created>1767960702382</created>
+      <option name="number" value="00812" />
+      <option name="presentableId" value="LOCAL-00812" />
+      <option name="project" value="LOCAL" />
+      <updated>1767960702382</updated>
+    </task>
+    <task id="LOCAL-00813" summary="[train] mdn model">
+      <option name="closed" value="true" />
+      <created>1768205174125</created>
+      <option name="number" value="00813" />
+      <option name="presentableId" value="LOCAL-00813" />
+      <option name="project" value="LOCAL" />
+      <updated>1768205174125</updated>
+    </task>
+    <task id="LOCAL-00814" summary="[train] mdn model">
+      <option name="closed" value="true" />
+      <created>1768229947112</created>
+      <option name="number" value="00814" />
+      <option name="presentableId" value="LOCAL-00814" />
+      <option name="project" value="LOCAL" />
+      <updated>1768229947112</updated>
+    </task>
+    <task id="LOCAL-00815" summary="[train] tirex export to onnx">
+      <option name="closed" value="true" />
+      <created>1768297716926</created>
+      <option name="number" value="00815" />
+      <option name="presentableId" value="LOCAL-00815" />
+      <option name="project" value="LOCAL" />
+      <updated>1768297716926</updated>
+    </task>
+    <task id="LOCAL-00816" summary="[train] tirex export to onnx">
+      <option name="closed" value="true" />
+      <created>1768304516858</created>
+      <option name="number" value="00816" />
+      <option name="presentableId" value="LOCAL-00816" />
+      <option name="project" value="LOCAL" />
+      <updated>1768304516858</updated>
+    </task>
+    <task id="LOCAL-00817" summary="[documents] conformal prediction">
+      <option name="closed" value="true" />
+      <created>1768921184527</created>
+      <option name="number" value="00817" />
+      <option name="presentableId" value="LOCAL-00817" />
+      <option name="project" value="LOCAL" />
+      <updated>1768921184528</updated>
+    </task>
+    <task id="LOCAL-00818" summary="[documents] conformal prediction">
+      <option name="closed" value="true" />
+      <created>1768923025733</created>
+      <option name="number" value="00818" />
+      <option name="presentableId" value="LOCAL-00818" />
+      <option name="project" value="LOCAL" />
+      <updated>1768923025734</updated>
+    </task>
+    <task id="LOCAL-00819" summary="[documents] knowledge distilation">
+      <option name="closed" value="true" />
+      <created>1769160828100</created>
+      <option name="number" value="00819" />
+      <option name="presentableId" value="LOCAL-00819" />
+      <option name="project" value="LOCAL" />
+      <updated>1769160828101</updated>
+    </task>
+    <task id="LOCAL-00820" summary="[documents] forecasting science">
+      <option name="closed" value="true" />
+      <created>1771598390516</created>
+      <option name="number" value="00820" />
+      <option name="presentableId" value="LOCAL-00820" />
+      <option name="project" value="LOCAL" />
+      <updated>1771598390516</updated>
+    </task>
+    <task id="LOCAL-00821" summary="[documents] ml principles">
+      <option name="closed" value="true" />
+      <created>1771945940758</created>
+      <option name="number" value="00821" />
+      <option name="presentableId" value="LOCAL-00821" />
+      <option name="project" value="LOCAL" />
+      <updated>1771945940758</updated>
+    </task>
+    <task id="LOCAL-00822" summary="[attention] added wave field attention and tests">
+      <option name="closed" value="true" />
+      <created>1773318672096</created>
+      <option name="number" value="00822" />
+      <option name="presentableId" value="LOCAL-00822" />
+      <option name="project" value="LOCAL" />
+      <updated>1773318672097</updated>
+    </task>
+    <task id="LOCAL-00823" summary="[attention] added wave field attention and tests">
+      <option name="closed" value="true" />
+      <created>1773395567741</created>
+      <option name="number" value="00823" />
+      <option name="presentableId" value="LOCAL-00823" />
+      <option name="project" value="LOCAL" />
+      <updated>1773395567742</updated>
+    </task>
+    <task id="LOCAL-00824" summary="[cliffordnet] block, model and train">
+      <option name="closed" value="true" />
+      <created>1774867586803</created>
+      <option name="number" value="00824" />
+      <option name="presentableId" value="LOCAL-00824" />
+      <option name="project" value="LOCAL" />
+      <updated>1774867586803</updated>
+    </task>
+    <task id="LOCAL-00825" summary="[claude] cleaning up for claude code integration">
+      <option name="closed" value="true" />
+      <created>1774869072929</created>
+      <option name="number" value="00825" />
+      <option name="presentableId" value="LOCAL-00825" />
+      <option name="project" value="LOCAL" />
+      <updated>1774869072929</updated>
+    </task>
+    <task id="LOCAL-00826" summary="[ascii] fixing the ascii diagrams">
+      <option name="closed" value="true" />
+      <created>1775112046769</created>
+      <option name="number" value="00826" />
+      <option name="presentableId" value="LOCAL-00826" />
+      <option name="project" value="LOCAL" />
+      <updated>1775112046769</updated>
+    </task>
+    <task id="LOCAL-00827" summary="[geometrics/fields] fixing bugs and readme">
+      <option name="closed" value="true" />
+      <created>1775128588569</created>
+      <option name="number" value="00827" />
+      <option name="presentableId" value="LOCAL-00827" />
+      <option name="project" value="LOCAL" />
+      <updated>1775128588569</updated>
+    </task>
+    <task id="LOCAL-00828" summary="[ascii] ascii diagram fixes">
+      <option name="closed" value="true" />
+      <created>1775129162841</created>
+      <option name="number" value="00828" />
+      <option name="presentableId" value="LOCAL-00828" />
+      <option name="project" value="LOCAL" />
+      <updated>1775129162841</updated>
+    </task>
+    <task id="LOCAL-00829" summary="[layers/moe] fixed bugs and normalized keras building">
+      <option name="closed" value="true" />
+      <created>1775131266120</created>
+      <option name="number" value="00829" />
+      <option name="presentableId" value="LOCAL-00829" />
+      <option name="project" value="LOCAL" />
+      <updated>1775131266120</updated>
+    </task>
+    <task id="LOCAL-00830" summary="[gpt2/wikipedia] train code">
+      <option name="closed" value="true" />
+      <created>1775135828437</created>
+      <option name="number" value="00830" />
+      <option name="presentableId" value="LOCAL-00830" />
+      <option name="project" value="LOCAL" />
+      <updated>1775135828437</updated>
+    </task>
+    <task id="LOCAL-00831" summary="[research] jepa and curriculum learning">
+      <option name="closed" value="true" />
+      <created>1776234574040</created>
+      <option name="number" value="00831" />
+      <option name="presentableId" value="LOCAL-00831" />
+      <option name="project" value="LOCAL" />
+      <updated>1776234574040</updated>
+    </task>
+    <task id="LOCAL-00832" summary="[activations] refined ascii diagrams for routing algorithms">
+      <option name="closed" value="true" />
+      <created>1777896119415</created>
+      <option name="number" value="00832" />
+      <option name="presentableId" value="LOCAL-00832" />
+      <option name="project" value="LOCAL" />
+      <updated>1777896119416</updated>
+    </task>
+    <task id="LOCAL-00833" summary="[activations] refined ascii diagrams for activation algorithms">
+      <option name="closed" value="true" />
+      <created>1777898678681</created>
+      <option name="number" value="00833" />
+      <option name="presentableId" value="LOCAL-00833" />
+      <option name="project" value="LOCAL" />
+      <updated>1777898678681</updated>
+    </task>
+    <task id="LOCAL-00834" summary="[documentation] cleanup ascii diagrams">
+      <option name="closed" value="true" />
+      <created>1778152620817</created>
+      <option name="number" value="00834" />
+      <option name="presentableId" value="LOCAL-00834" />
+      <option name="project" value="LOCAL" />
+      <updated>1778152620818</updated>
+    </task>
+    <task id="LOCAL-00835" summary="[documentation] cleanup ascii diagrams">
+      <option name="closed" value="true" />
+      <created>1779095403692</created>
+      <option name="number" value="00835" />
+      <option name="presentableId" value="LOCAL-00835" />
+      <option name="project" value="LOCAL" />
+      <updated>1779095403693</updated>
+    </task>
+    <task id="LOCAL-00836" summary="[norms] cleanup logging">
+      <option name="closed" value="true" />
+      <created>1779096170431</created>
+      <option name="number" value="00836" />
+      <option name="presentableId" value="LOCAL-00836" />
+      <option name="project" value="LOCAL" />
+      <updated>1779096170431</updated>
+    </task>
+    <task id="LOCAL-00837" summary="[mothnet_blocks] ascii diagram">
+      <option name="closed" value="true" />
+      <created>1779098858171</created>
+      <option name="number" value="00837" />
+      <option name="presentableId" value="LOCAL-00837" />
+      <option name="project" value="LOCAL" />
+      <updated>1779098858171</updated>
+    </task>
+    <task id="LOCAL-00838" summary="[patch_merging] ascii diagram">
+      <option name="closed" value="true" />
+      <created>1779098968302</created>
+      <option name="number" value="00838" />
+      <option name="presentableId" value="LOCAL-00838" />
+      <option name="project" value="LOCAL" />
+      <updated>1779098968302</updated>
+    </task>
+    <task id="LOCAL-00839" summary="[blur_pool] normalizing logger">
+      <option name="closed" value="true" />
+      <created>1779099633789</created>
+      <option name="number" value="00839" />
+      <option name="presentableId" value="LOCAL-00839" />
+      <option name="project" value="LOCAL" />
+      <updated>1779099633789</updated>
+    </task>
+    <task id="LOCAL-00840" summary="[rot_trick] image">
+      <option name="closed" value="true" />
+      <created>1779104827623</created>
+      <option name="number" value="00840" />
+      <option name="presentableId" value="LOCAL-00840" />
+      <option name="project" value="LOCAL" />
+      <updated>1779104827623</updated>
+    </task>
+    <task id="LOCAL-00841" summary="[cleanup]">
+      <option name="closed" value="true" />
+      <created>1779704901226</created>
+      <option name="number" value="00841" />
+      <option name="presentableId" value="LOCAL-00841" />
+      <option name="project" value="LOCAL" />
+      <updated>1779704901227</updated>
+    </task>
+    <task id="LOCAL-00842" summary="[cleanup]">
+      <option name="closed" value="true" />
+      <created>1779711220113</created>
+      <option name="number" value="00842" />
+      <option name="presentableId" value="LOCAL-00842" />
+      <option name="project" value="LOCAL" />
+      <updated>1779711220113</updated>
+    </task>
+    <option name="localTasksCounter" value="843" />
+    <servers />
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="3" />
+  </component>
+  <component name="Vcs.Log.Tabs.Properties">
+    <option name="TAB_STATES">
+      <map>
+        <entry key="MAIN">
+          <value>
+            <State />
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
+  <component name="VcsManagerConfiguration">
+    <MESSAGE value="[time_series] normalized training for time_series models" />
+    <MESSAGE value="[train] mdn model" />
+    <MESSAGE value="[train] tirex export to onnx" />
+    <MESSAGE value="[documents] conformal prediction" />
+    <MESSAGE value="[documents] knowledge distilation" />
+    <MESSAGE value="[documents] forecasting science" />
+    <MESSAGE value="[documents] ml principles" />
+    <MESSAGE value="[attention] added wave field attention and tests" />
+    <MESSAGE value="[cliffordnet] block, model and train" />
+    <MESSAGE value="[claude] cleaning up for claude code integration" />
+    <MESSAGE value="[ascii] fixing the ascii diagrams" />
+    <MESSAGE value="[geometrics/fields] fixing bugs and readme" />
+    <MESSAGE value="[ascii] ascii diagram fixes" />
+    <MESSAGE value="[layers/moe] fixed bugs and normalized keras building" />
+    <MESSAGE value="[gpt2/wikipedia] train code" />
+    <MESSAGE value="[research] jepa and curriculum learning" />
+    <MESSAGE value="[activations] refined ascii diagrams for routing algorithms" />
+    <MESSAGE value="[activations] refined ascii diagrams for activation algorithms" />
+    <MESSAGE value="[documentation] cleanup ascii diagrams" />
+    <MESSAGE value="[norms] cleanup logging" />
+    <MESSAGE value="[mothnet_blocks] ascii diagram" />
+    <MESSAGE value="[patch_merging] ascii diagram" />
+    <MESSAGE value="[blur_pool] normalizing logger" />
+    <MESSAGE value="[rot_trick] image" />
+    <MESSAGE value="[cleanup]" />
+    <option name="LAST_COMMIT_MESSAGE" value="[cleanup]" />
+  </component>
+  <component name="XDebuggerManager">
+    <breakpoint-manager>
+      <breakpoints>
+        <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
+          <url>file://$PROJECT_DIR$/.venv/lib/python3.11/site-packages/keras/src/optimizers/adamw.py</url>
+          <line>62</line>
+          <option name="timeStamp" value="1" />
+        </line-breakpoint>
+      </breakpoints>
+    </breakpoint-manager>
+  </component>
+</project>

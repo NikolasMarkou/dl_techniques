@@ -169,3 +169,14 @@
 | plan_2026-06-13_250487cb | 2026-06-13 | Fix all confirmed Keras guide violations in `src/dl_techniqu |  |
 | plan_2026-06-13_5b933e7f | 2026-06-13 | Implement the VSGD (Variational Stochastic Gradient Descent) |  |
 | plan_2026-06-13_88695f5c | 2026-06-13 | Produce one source-grounded **audit report** at repo-root `r |  |
+| plan_2026-06-13_ae26345d | 2026-06-13 | Execute the ONE source-verified Tier-1 drop-in REPLACE from  |  |
+| plan_2026-06-13_ae9ee2cd | 2026-06-13 | Implement the 10 actionable bug fixes plus 2 sub-component c |  |
+| plan_2026-06-14_77a433bc | 2026-06-14 | Make two never-executed models pass a forward + `.keras` rou |  |
+| plan_2026-06-14_8c7365d0 | 2026-06-14 | Fix the 5 confirmed open code bugs left by prior plans, each |  |
+| plan_2026-06-14_080e7636 | 2026-06-14 | Resurrect `ByteLatentReasoningCore` (`src/dl_techniques/laye |  |
+| plan_2026-06-14_a5ed2c2a | 2026-06-14 | Eliminate the symbolic-trace scratch-graph tensor leak cause |  |
+| plan_2026-06-14_0c5d4a21 | 2026-06-14 | Bring `src/dl_techniques/layers/attention/` into contract co |  |
+| plan_2026-06-14_adaddf34 | 2026-06-14 | Fix two pre-existing, reproduced bugs in `NonLocalAttention` |  |
+| plan_2026-06-14_7734bacd | 2026-06-14 | Deep comprehensive review of all attention layers in `src/dl |  |
+| plan_2026-06-14_b9456f74 | 2026-06-14 | Deep comprehensive review of all attention layers in `src/dl |  |
+| plan_2026-06-14_ab855e7e | 2026-06-14 | Resolve the verified residue (F2-F7) from a fresh adversaria |  |

@@ -12,10 +12,12 @@ Covers the previously-untested ``create_attention_layer`` factory surface:
 """
 
 import inspect
+import typing
 import pytest
 
 from dl_techniques.layers.attention.factory import (
     ATTENTION_REGISTRY,
+    AttentionType,
     create_attention_layer,
     create_attention_from_config,
     validate_attention_config,
@@ -46,11 +48,13 @@ MINIMAL_PARAMS = {
     'ring': {'dim': 64},
     'rpc': {'dim': 64},
     'shared_weights_cross': {'dim': 64},
+    'single_window': {'dim': 64, 'window_size': 7, 'num_heads': 8},
     'spatial': {},
     'tripse1': {},
     'tripse2': {},
     'tripse3': {},
     'tripse4': {},
+    'wave_field': {'dim': 64},
     'window': {'dim': 64, 'window_size': 4, 'num_heads': 4},
     'window_zigzag': {'dim': 64, 'window_size': 4, 'num_heads': 4},
 }
@@ -72,11 +76,15 @@ def _ctor_param_names(cls_or_fn):
 
 
 class TestRegistryIntegrity:
-    """The registry must describe exactly 27 types and stay in sync with classes."""
+    """The registry must describe exactly 29 types and stay in sync with classes."""
 
-    def test_registry_has_27_types(self):
-        assert len(ATTENTION_REGISTRY) == 27
-        assert len(list_attention_types()) == 27
+    def test_registry_has_29_types(self):
+        assert len(ATTENTION_REGISTRY) == 29
+        assert len(list_attention_types()) == 29
+
+    def test_literal_members_match_registry_keys(self):
+        literal_members = set(typing.get_args(AttentionType))
+        assert literal_members == set(ATTENTION_REGISTRY.keys())
 
     @pytest.mark.parametrize('attn_type', sorted(ATTENTION_REGISTRY.keys()))
     def test_registry_keys_are_real_ctor_args(self, attn_type):
@@ -108,6 +116,24 @@ class TestConstructAll:
 
     def test_minimal_params_cover_all_registered(self):
         assert set(MINIMAL_PARAMS.keys()) == set(ATTENTION_REGISTRY.keys())
+
+
+class TestNewlyRegisteredTypesF8:
+    """wave_field + single_window (F8) must construct AND build via the factory."""
+
+    def test_wave_field_constructs_and_builds(self):
+        layer = create_attention_layer('wave_field', dim=64)
+        assert layer is not None
+        layer.build((None, 16, 64))
+        assert layer.built
+
+    def test_single_window_constructs_and_builds(self):
+        layer = create_attention_layer(
+            'single_window', dim=64, window_size=7, num_heads=8
+        )
+        assert layer is not None
+        layer.build((None, 49, 64))
+        assert layer.built
 
 
 class TestParamPassthroughF4:
@@ -169,7 +195,7 @@ class TestFactoryHelpers:
 
     def test_get_attention_info_complete(self):
         info = get_attention_info()
-        assert len(info) == 27
+        assert len(info) == 29
 
     def test_get_requirements_roundtrip(self):
         req = get_attention_requirements('anchor')

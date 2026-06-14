@@ -10,8 +10,9 @@
 - **Run the existing test suite as the FIRST step of EXPLORE when the goal is "fix issues found in a review".**
 - **A reuse-review / recommendation doc is a HYPOTHESIS, not a finding -- source-read every claim before PLAN.**
 - **An inventory finding about a layer's `call` signature is a HYPOTHESIS; verify by reading the actual signature before relying on it.**
+- **Explorer audit claims are HYPOTHESES.** Source-verify every explorer claim before planning.
 - **Pre-Mortem "STOP IF X" triggers earn their cost when they fire in 1-2 plans out of N.**
-- **Plan-time line-count predictions undershoot.** ~2x for sibling-class additions, 5-10x for dtype-semantics under mixed precision, ~1.7x for multi-layer flag-plumbing. Greenfield model packages land in the +1000..+1300 band. A new contract + metrics + test files budget for +1000..+1400. Additive else-branches + docstrings overshoot ~2x. A new test file for a shared layer undershoots ~3x.
+- **Plan-time line-count predictions undershoot.** ~2x for sibling-class additions, 5-10x for dtype-semantics under mixed precision, ~1.7x for multi-layer flag-plumbing. A new test file for a shared layer undershoots ~3x.
 - **Pre-existing tests can encode bugs as contracts.** When a fix causes adjacent tests to fail, read the failing assertions before assuming regression.
 - **Verify "every site does X" with grep BEFORE PLAN, not during EXECUTE.**
 - **`run_in_background` from a sub-agent kills the background task when the sub-agent exits.** Any task >2 min OR whose wall-clock depends on a download MUST be orchestrator-launched.
@@ -26,105 +27,115 @@
 - **A plan can legitimately REVERSE a closed prior plan's decisions** when a new authoritative source contradicts them.
 - **Architecture-first migration ordering**: migrate into the library BEFORE renaming/deleting the train scripts that import them.
 - **git archaeology (`git show <sha>:<path>`) is the cheapest scaffold source when a deleted implementation is the closest ancestor.**
-- **First-ever forward-pass tests on never-tested layers surface CASCADING latent bugs.** Budget explicitly.
+- **First-ever forward-pass tests on never-tested layers surface CASCADING latent bugs.** Budget explicitly. In confirmed instances (modern_bert_blt_hrm, ByteLatentReasoningCore, attention T1 layers) a single reported bug masked a multi-bug chain. Assume multi-bug chains in never-executed code.
 - **`--visualize_every_n_epochs 1` in smoke runs is required to exercise the prediction-plot savefig path.** Default cadence 5 skips plots in a 3-epoch run.
-- **Explorer gap-map claims ("get_config drops param X") MUST be source-verified against the actual `__init__` signature.** Reading 20 lines is 1 tool call; implementing a spurious fix costs a full step.
+- **Explorer gap-map claims ("get_config drops param X") MUST be source-verified against the actual `__init__` signature.**
 - **A grep-gate scoped to a package dir catches stale README/doc residue too.**
-- **Adversarial explorer CRITICALs MUST be verified against the passing test suite BEFORE planning.** False positives waste fix-work on non-bugs.
-- **REFLECT regression runs MUST cover test files that NO EXECUTE step touched.** Invisible regressions only surface in files no step ran.
+- **Adversarial explorer CRITICALs MUST be verified against the passing test suite BEFORE planning.**
+- **REFLECT regression runs MUST cover test files that NO EXECUTE step touched.**
 - **A late fail-loud guard that demands a constructor arg is only safe if ALL call sites (factory + tests + manual construction) plumb that arg.**
-- **Check the repo before building "new" layers from a research doc.** Existing implementations often already cover the paper's structure.
-- **A guide-conformance pass (explicit build(), compute_output_shape, from_config) is behavior-preserving.** The existing .keras round-trip suite is the regression gate. Any numeric delta from a conformance edit is a BUG -- revert.
-- **When extending a config-driven block with new factory types, prefer additive `elif` branches over a dispatch-table rewrite when the dominant risk is regression.**
-- **Additive sibling-class optimizer additions (new file + enum member + elif branch + constants section) land at ~2x predicted LOC due to docstrings; this is expected and not a complexity problem.**
+- **Fail-loud guards require a grep-verified zero-caller check first.** log-warn+fallback is the safe choice when the caller population is non-zero.
+- **Check the repo before building "new" layers from a research doc.**
+- **A guide-conformance pass (explicit build(), compute_output_shape, from_config) is behavior-preserving.** Any numeric delta is a BUG -- revert.
+- **When extending a config-driven block with new factory types, prefer additive `elif` branches over a dispatch-table rewrite.**
 - **Earned-abstraction rule for optimizer base classes: do not introduce a shared base until >= 2 concrete call sites need it.**
 - **Maskless attention layers (fnet/anchor/lighthouse) need a `call()` branch that omits `attention_mask`.** Use a class-level `_MASKLESS_ATTENTION_TYPES` set as the contract surface.
+- **Tiered execution with a hard autonomy leash is load-bearing for bug-fix plans that touch untested models.**
+- **Static audits miss runtime bugs.** For any untested layer, a forward + `.keras` round-trip smoke surfaces far more than static analysis.
+- **`keras.ops.fft` surface is narrow.** Available: `fft/fft2/ifft2/rfft/irfft/real/imag`. NOT available: `rfft2/irfft2/angle/complex`.
+- **MISATTRIBUTION risk: a prior plan's reported bug LOCATION can be wrong.** Verify by checking whether OTHER callers of the shared code work correctly.
+- **Audit-doc location claims disagree with reproduction? The traceback wins.**
+- **`keras.ops.stop_gradient` is a FUNCTION, not a context manager.** Use `z = ops.stop_gradient(x)`.
+- **A missing `return config` in `get_config` returns None silently.** Every new-layer test MUST assert `get_config`/`from_config` directly.
+- **Compute STATIC scalars (e.g. attention `scale = 1/sqrt(head_dim)`) with stdlib `math.*`, NOT `keras.ops.*`.**
+- **`LocalEncoder` (blt_blocks) already pools internally -- callers must NOT re-pool.**
+- **Keras sublayer-list accumulators in `build()` are a double-build trap.** Any `build()` that appends to `self.some_list` MUST reset the accumulator at the TOP of `build()`.
+- **When `get_config` serializes a dataclass via `to_dict()`, add a `from_config` class method that rebuilds the dataclass.**
+- **Anticipated multi-bug chains sometimes do NOT materialize.** Fix-on-demand is correct. Do NOT pre-emptively edit unconfirmed bugs.
+- **Surface EXECUTE-discovered out-of-scope bugs -- don't silently scope-creep.** Defer to a dedicated follow-up plan.
+- **Deferring out-of-scope bugs keeps both the parent plan and the fix plan clean and verifiable.**
+- **Surface+defer with xfail-gating is the correct call for multi-bug chains that exceed the 10-line leash.** A focused follow-up plan resolves them cleanly. (Confirmed: S2/S3/S4 each deferred by plan_2026-06-14_7734bacd, all resolved in plan_2026-06-14_b9456f74.)
+- **Ephemeral manual verification is not durable.** When a reviewer flags a blind spot, commit the regression test immediately.
+- **"Fully resolved" from a prior plan is scoped to that plan's findings, not exhaustive.** A fresh adversarial pass with per-claim source verification can still find real residue. Re-review of a "done" area is not wasteful when the area is complex. (plan_2026-06-14_ab855e7e found F2-F6 residue after 5 prior plans declared attention/ done.)
+- **When fixing a defect class, grep ALL files in the package.** A sweep that fixes "the known instances" can miss siblings (capsule/PFA had static-shape + fail-loud; ring/anchor/gated/gqa/mobile_mqa missed by the prior sweep). Recurring defect classes in attention/: ops.sqrt-on-static-scalar; range-over-dynamic-ops.shape; Python-bool branch on dynamic seq.
+- **Factory `optional_params` completeness needs a param-passthrough test, not just construct-smoke.** Construct-smoke succeeds even when kwargs are silently dropped. Assert the param actually lands on the instance.
 
-## Layer-reuse audit methodology (plan_2026-06-13_88695f5c)
+## Graph-safe attention patterns (plan_2026-06-14_7734bacd)
 
-- **Build the "replace-with" inventory FIRST.** For a models/-vs-layers/ audit, cataloguing all factory registries and canonical primitive homes before classifying a single inline layer is the load-bearing prerequisite. Without it, REPLACE verdicts have no target and RELOCATE absences cannot be grep-confirmed.
-- **Name-match false positives are the dominant risk.** The both-sides-read rule (read BOTH the inline layer's `call`/`build` AND the candidate's `call`/`get_config`) reliably catches them. Confirmed catches: `Gemma3TransformerBlock` dual-post-norm is not expressible via `TransformerLayer` config; `GroupAttention` tree_transformer != `group_query` factory key; `_LearnedQueryPool1D` != `SequencePooling('attention')`.
-- **Sub-agent prose summaries routinely miscount verdict tallies.** The committed table rows are authoritative. Always recount verdict totals from the per-class rows at synthesis, not from the explorer's prose summary header.
-- **`layers/downsample.py` / `upsample.py` are free functions, not Layer classes.** This is a real structural gap that blocks otherwise-valid REPLACE verdicts for inline `Downsample`/`Upsample` Layer subclasses. Note the gap explicitly in the report row; do not issue a REPLACE verdict pointing at a function.
-- **Family-batched decomposition keeps the analyst in one architectural context per step.** For a broad cross-package audit, one batch per coherent model family (transformer, vision/conv, VLM, SSL, super-res) is preferable to per-verdict-type or flat-file batching, which forces context-switching across unrelated architectures within a single step.
-- **Documentation-deliverable plans invert the net-LOC sign expectation.** Net-positive line count is correct and expected; the usual net-zero/net-negative default does NOT apply. Do not flag a positive line count at REFLECT for a doc-only plan.
-- **RELOCATE absence must be grep-confirmed, not just inventory-lookup-absent.** A "no equivalent exists in layers/" verdict requires a positive grep result (only the named near-miss exists, not the target) to guard against an incomplete inventory yielding a false RELOCATE.
+- **`range(ops.shape(x)[N])` is graph-broken** under `@tf.function`/jit. A test using a concrete shape passes; only a `TensorSpec([None,...])` symbolic trace reproduces the crash.
+- **Static `.shape[N]` + fail-loud `ValueError` on `None`** is the graph-safe fix for any Python loop or Python-int branch over a sequence-length dim.
+- **Keras functional API uses `compute_output_shape` and does NOT execute `call()` symbolically.** A `keras.Input(shape=(None,...))` test will NOT trigger a fail-loud guard inside `call()`. Only a `tf.function` + `TensorSpec([None,...])` trace runs `call()` with a dynamic dim and can expose the guard. (Confirmed: ring/anchor graph-safety tests required `tf.function`, not functional-API build.)
+- **Dense-with-input-shape-dependent-units stays None-sentinel-in-build + idempotency guard.** Fix is `if self.built: return` as the FIRST line of `build()`. Hopfield, NonLocal, and Capsule are all instances of this pattern.
+- **Keras tuple->list shape serialization breaks `isinstance(input_shape, list)` multi-input disambiguation.** Fix: check whether elements are list/tuple (list-of-shapes) vs int/None (single serialized shape).
 
-## Porting PyTorch DiT / VAE to Keras 3
+## Attention-specific fixes (plan_2026-06-14_b9456f74)
 
-- **Reuse first, build only the absent pieces.**
-- **Functional builders (`upsample()`, graph builders) cannot be sub-layers of a subclassed Model.** Wrap in a thin `keras.layers.Layer`.
-- **PyTorch dynamic scatter -> static one-hot select for XLA-safe mRoPE.**
-- **Boolean SDPA keep-mask -> additive finite (-1e9) mask.**
-- **The existing `TimestepEmbedding` stores sinusoidal freqs as a plain Python tensor -- breaks `.keras` round-trip.** Fix: `add_weight(trainable=False)`.
-- **Abstract the giant text encoder as a precomputed input.** An 8B HuggingFace/PyTorch model cannot run in Keras.
-- **"Faithful" for a PyTorch port means component-level numpy-reference parity, NOT end-to-end model output parity.**
-- **Porting a model whose premise is loading pretrained checkpoints yields architecture-faithful-but-untrained components.** Set that expectation at PLAN.
-- **`ops.tril` on a dynamic-shaped tensor routes through a `tf.cond` that raises `pred must not be a Python bool` during symbolic `.keras` save/load trace.** Use an arange index-comparison (`row >= col`).
-- **`ScalarSinusoidalEmbedding` squeezes a trailing size-1 axis.** Pass timestep reshaped to `(B, 1)`.
-- **T5 attention deliberately omits `1/sqrt(head_dim)` scaling.** Adding the scale is the single most common T5-port bug.
-- **For a fixed 2D sin-cos positional embedding, implement it as a non-trainable weight (`add_weight(trainable=False)`), not via `PositionEmbeddingSine2D`.**
-- **SD3 / rectified-flow sign convention: t=0 is clean data, t=1 is pure noise; `euler_step` uses signed `dt = t_next - t`.** Do NOT use `abs(dt)`.
+- **Performer causal FAVOR+ prefix-sum**: `kv_outer = einsum('bhnf,bhnd->bhnfd',k,v)` -> `kv_cumsum = cumsum(kv_outer,axis=2)` -> `out = einsum('bhnf,bhnfd->bhnd',q,kv_cumsum) / expand_dims(z_causal,-1)`. NO `expand_dims` on v or q -- spurious rank-5 expansion is the bug.
+- **Ring/blockwise differentiable assembly**: replace `ops.slice_update` (lowers to `XlaDynamicUpdateSlice`, no eager-TF gradient) with Python list-append + `ops.concatenate(axis=seq_dim)`. Forward numerics byte-identical; gradient flows correctly.
+- **Swin SW-MSA mask MUST be parametrized by actual static H,W.** Hardcoded 2xws grid is silently wrong for any feature map != 2xws. Build `img_mask (1,H,W,1)` then partition into nW windows (exactly as `_window_partition` does it) so tile is B-major/window-minor and aligns with `attn_scores`. Fail-loud ValueError on dynamic H or W.
+- **`if self.built: return` guard sweep across 25 attention files was mechanical and zero-regression.** The existing `.keras` round-trip suite is the regression oracle. Adding guard to passing single-build layers is always safe in Keras 3.
 
-## Keras initializers
+## Attention residue cleanup (plan_2026-06-14_ab855e7e)
 
-- **Keras custom initializers are shape-driven (`__call__(shape, dtype)`) -- do NOT bake `n_in`/`n_out` into the constructor.**
-- **For KAN initializers: `N` (spline basis count) MUST match `KANLinear.num_basis_fns = grid_size + spline_order` (NOT the paper's `G+k+1`).**
-- **Per-call seed reproducibility requires `np.random.default_rng(seed)` inside `__call__`, NOT `keras.random.SeedGenerator`.**
-- **`polar_initializer.py` is the structural template** for new initializers.
-- **`FFN_REGISTRY['kan']['optional_params']` must list every new `KANLinear` ctor param.**
-- **A string initializer alias that is NOT a registered Keras alias crashes in `__init__` via eager `keras.initializers.get(str)`.**
-- **`git mv` + bare `@register_keras_serializable()` = serialization-safe relocation.**
-- **A factory is the user-requested deliverable's contract surface -- give it its own test file.**
-- **dl_techniques embedding/attention factories are construction-only (REGISTRY-dict + Literal).** Register only construction-clean layers, or leave as direct-import and document why.
+- **self.scale = 1.0/math.sqrt(float(head_dim)) in `__init__`** is the D-002 scale contract. Prior plans fixed cross/diff; gated/gqa/mobile_mqa were missed. After any D-002 fix sweep, grep the whole package for remaining `ops.sqrt(ops.cast(` scale sites.
+- **Factory `optional_params` is the kwarg filter.** Only keys in required_params + optional_params reach the class constructor. Missing keys silently drop real class args. Fixed entries: anchor (head_dim, probability_type, probability_config), channel (intermediate_activation_{type,args}, gate_activation_{type,args}), spatial (gate_activation_{type,args}), tripse1-4 (gate_activation_{type,args} + tripse4 se_reduction_activation_{type,args}).
+- **mobile_mqa silently ignores `attention_mask`** due to downsampling making general masking non-trivial. Contract: document with IGNORED note in docstring + README caveat table (spatial_attention precedent). No behavior change needed.
+- **Deferred (no caller): hopfield cross-attn KV-dim latent bug.** Self-attention path is correct. Fix only when a cross-attention caller exists.
 
-## tf.data / data-pipeline determinism
+## Attention layer invariants (F18/F19 lessons -- plan_2026-06-14_adaddf34)
 
-- **For tf.data pipeline determinism, a trace-time Python bool `training` flag with a plain if/else keeps the training path byte-identical.**
-- **Validation that reuses the training augmentation recipe gives a noisy early-stopping signal.**
-- **`drop_remainder=True` on a non-repeating val pipeline silently yields zero batches when N_val < batch_size.**
+- **Q@Kt REQUIRES Q and K to share the contraction (channel) dim.** A layer that reduces only K/V while leaving Q at full channels is mathematically broken.
+- **Keras .keras round-trip serializes tuple ctor args and reloads them as list/TrackedList.** Normalize ALL size-like constructor args with `(x, x) if isinstance(x, int) else tuple(x)`.
 
 ## Keras 3 build-ordering (CONFIRMED FOUR-STRIKE defect class)
 
 - **An explicit `build()` that only calls `super().build()` leaves sublayers unbuilt at Keras `.keras` load-time weight-restore.**
 - **The durable fix for the lazy-sublayer build-ordering defect is to give the SHARED layer a real `build()` that explicitly builds its sublayers.**
-- **A wrapper layer with no `build()` makes every parent `child.build()` call a silent no-op.**
 - **A `.keras` round-trip test is the detection oracle AND the removal-safety oracle.**
 - **`keras.layers.Identity()` is a serializable drop-in for `Lambda(lambda x: x)`.**
 - **Manual `child.build(input_shape)` in `parent.build()` required for Keras 3 model-save round-trip.**
-- **`ResnetBlock.nin_shortcut` (and similar structural conditionals) are CORRECTLY kept conditional.** The guide's "always create" rule targets RUNTIME config toggles, NOT structural channel-mismatch branches.
-
-## Guide-conformance and repo-wide mechanical fixes
-
-- **Before a repo-wide conformance fix, AST-scan to QUANTIFY then TRIAGE.** A large fraction of mechanically-flagged violations are legitimate exemptions.
-- **`compute_output_shape` is a pure addition** -- never called in forward/train, only during functional-API shape inference. It cannot change numerics.
-- **`register_keras_serializable` keys by bare class name.** Two classes with the same name registered under the same package collide at import with `ValueError`. Use `package=` to disambiguate.
-- **Parallel ip-executors over DISJOINT file sets + CPU py_compile, with GPU tests run SERIALLY afterward,** respects the no-parallel-GPU rule while still parallelizing mechanical edits.
-- **A module that is UNIMPORTABLE cannot be registered.** Fix import-breaking bugs before adding `@register_keras_serializable`.
-- **A wrong `compute_output_shape` is worse than none.** Each added method must be verified against a real forward pass before commit.
+- **`ResnetBlock.nin_shortcut` (and similar structural conditionals) are CORRECTLY kept conditional.**
 - **Moving sublayers from `build()` to `__init__()` exposes latent attribute-name bugs hidden by construction-time deferral.**
-- **Verify actual attribute/param names in source before writing fix code.**
+- **Keras locks the sublayer tracker after first `build()`, so build-idempotency bugs only bite via `from_config`/functional-reuse.**
 
-## Multi-step forecasting
+### Canonical Keras-3 lifecycle-conformance fix pattern
 
-- **A model that already consumes a temporal window can be made multi-step purely by widening its OUTPUT dimension.**
-- **The shared-pi diagonal-joint modeling concession is acceptable for univariate windowed forecasting (F=1) and MUST be documented in-code.**
-
-## train/common and TS trainer infra
-
-- **A viz-data-prep failure must NEVER abort a training run.** Wrap viz prep in a non-fatal try/except in callback `__init__`.
-- **`Forecast` dataclass + `ForecastMixin` is a clean way to normalize point-vs-probabilistic model outputs WITHOUT a base-class rewrite.**
-- **An anonymous `keras.Model(inputs, outputs, name="x")` functional wrapper silently breaks an `isinstance(mixin)` gate.**
-- **`compile(loss=static_loss)` is broken for dict-output models.** Fix: `add_loss(...)` inside `call` + `compile(loss=None)`.
-- **Deleting the non-conforming outlier beats perpetual special-casing.**
+- **`None`-sentinel in `__init__`** when filter/unit counts depend on build-time input shape.
+- **`if self.built: return` MUST be the FIRST line of `build()`** -- explicit child `.build()` calls are NOT self-guarded by Keras.
+- **`while True` + `if <traced_tensor> < eps:` is graph-broken** under `@tf.function`. Replace with bounded `for range(n)`.
+- **Factory registration of construction-clean layers is additive + low-risk.**
 
 ## Keras 3 ops and layer-call contracts
 
-- **`keras.ops.normalize(x, axis=-1)` is the canonical L2-normalize idiom.** The `ops.nn.*` namespace is UNRELIABLE.
+- **`keras.ops.normalize(x, axis=-1)` is the canonical L2-normalize idiom.**
 - **`.assign()` reachable from `call` is a recurring bug class** for DEAD or no-op in-call updates.
 - **`create_attention_layer("multi_head")` is self-attention only.** Cross-attention requires `"multi_head_cross"`.
-- **A Keras layer's `build(input_shape)` receives a LIST via the Keras functional API, a tuple via direct call, a dict for multi-input.**
 - **`keras.ops.shape()` returns a TUPLE of scalar tensors on the TF backend.** Use `tf.shape(x)` + `tf.concat` for dynamic reshape targets.
+
+## Porting PyTorch DiT / VAE to Keras 3
+
+- **Reuse first, build only the absent pieces.**
+- **Functional builders cannot be sub-layers of a subclassed Model.** Wrap in a thin `keras.layers.Layer`.
+- **PyTorch dynamic scatter -> static one-hot select for XLA-safe mRoPE.**
+- **Boolean SDPA keep-mask -> additive finite (-1e9) mask.**
+- **The existing `TimestepEmbedding` stores sinusoidal freqs as a plain Python tensor -- breaks `.keras` round-trip.** Fix: `add_weight(trainable=False)`.
+- **`ops.tril` on a dynamic-shaped tensor routes through a `tf.cond` that raises `pred must not be a Python bool` during symbolic `.keras` save/load trace.** Use an arange index-comparison (`row >= col`).
+- **T5 attention deliberately omits `1/sqrt(head_dim)` scaling.**
+- **SD3 / rectified-flow sign convention: t=0 is clean data, t=1 is pure noise; `euler_step` uses signed `dt = t_next - t`.**
+
+## Keras initializers
+
+- **Keras custom initializers are shape-driven (`__call__(shape, dtype)`) -- do NOT bake `n_in`/`n_out` into the constructor.**
+- **Per-call seed reproducibility requires `np.random.default_rng(seed)` inside `__call__`, NOT `keras.random.SeedGenerator`.**
+- **`polar_initializer.py` is the structural template** for new initializers.
+- **A string initializer alias that is NOT a registered Keras alias crashes in `__init__` via eager `keras.initializers.get(str)`.**
+
+## Guide-conformance and repo-wide mechanical fixes
+
+- **Before a repo-wide conformance fix, AST-scan to QUANTIFY then TRIAGE.**
+- **`compute_output_shape` is a pure addition** -- never called in forward/train, only during functional-API shape inference.
+- **`register_keras_serializable` keys by bare class name.** Two classes with the same name collide at import. Use `package=` to disambiguate.
+- **A wrong `compute_output_shape` is worse than none.**
 
 ## Numerical / ML algorithm stability
 
@@ -132,19 +143,13 @@
 - **A vMF sphere VAE's free-learned kappa posterior-collapses to ~0 unless prevented.** Fix: high kappa init + KL warmup.
 - **Early-stopping on `val_total_loss` is confounded by KL warmup.** Monitor `val_reconstruction_loss`.
 - **mLSTM/matrix-memory cells REQUIRE the log-domain max-stabilizer m_t, same as sLSTM.**
-- **Eager correctness and `model.fit()` correctness are distinct failure classes.** Bisect with a manual single-step `GradientTape` loop BEFORE blaming jit/XLA.
+- **Eager correctness and `model.fit()` correctness are distinct failure classes.**
 
 ## XLA / GPU kernel compatibility
 
 - **`keras.random.beta` lowers to `StatelessRandomGammaV3`, which has NO XLA-GPU kernel in TF 2.18.** Override `Model.compile()` to force `jit_compile=False`.
 - **Always run the scoped suite on GPU -- XLA-GPU-only crashes pass silently on CPU.**
-
-## Keras 3 / TF: implicit fields + arbitrary-scale SR (THERA)
-
-- **Nested `List[List[Layer]]` silently breaks `.keras` reload.** Fix: flat single-level attribute list.
-- **Per-pixel spatially-varying MLP ports to Keras as a batched einsum** with per-pixel weights passed as `call` INPUTS.
-- **Moving sub-layer creation `build()` -> `__init__()` must preserve sub-layer order/names** or `.keras` round-trip breaks.
-- **Keras 3.8 does NOT auto-create a loss tracker for a custom `train_step`.** Create explicit trackers and expose via the `metrics` property.
+- **`ops.slice_update` lowers to `XlaDynamicUpdateSlice`, which has no registered eager-TF gradient.** Backprop through blockwise output placement requires list-append + `ops.concatenate`.
 
 ## Codebase-specific (dl_techniques)
 
@@ -157,7 +162,7 @@
 - **VAE Sampling layers are stochastic by design -- reload checks must compare deterministic encoder mu.**
 - **`keras.ops.random.uniform` does NOT exist in Keras 3.8.** Random ops live under `keras.random.*`.
 - **`DepthwiseConv2D` on TF GPU rejects asymmetric strides.**
-- **DETR (`models/detr/`) was fixed in plan_2026-06-13_28f0b453.** Now fully tested (21 tests). `DetrDecoderLayer` deleted; use `TransformerDecoderLayer(use_causal_mask=False)` for detection decoders.
+- **DETR (`models/detr/`) was fixed in plan_2026-06-13_28f0b453.** Now fully tested (21 tests).
 
 ## git safety in EXECUTE
 
@@ -169,6 +174,12 @@
 - **A whole-file Write can SILENTLY no-op when the file was modified since last read.** Gate: repo-wide grep success-criterion immediately after every large rewrite.
 - **Before rewriting a to-be-edited file, restore from VCS.**
 - **Removing a model variant is importer-first, delete-last.**
+
+## tf.data / data-pipeline determinism
+
+- **For tf.data pipeline determinism, a trace-time Python bool `training` flag with a plain if/else keeps the training path byte-identical.**
+- **Validation that reuses the training augmentation recipe gives a noisy early-stopping signal.**
+- **`drop_remainder=True` on a non-repeating val pipeline silently yields zero batches when N_val < batch_size.**
 
 ## Multi-optimizer / layer / model patterns
 

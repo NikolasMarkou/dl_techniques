@@ -6,7 +6,7 @@ with unified interfaces, type safety, parameter validation, and detailed documen
 This factory enables seamless integration and experimentation with different attention
 types across vision_heads, NLP, and multi-modal architectures.
 
-The factory supports twenty-seven different attention mechanisms, from standard multi-head attention
+The factory supports twenty-nine different attention mechanisms, from standard multi-head attention
 to specialized variants like differential attention, mobile-optimized MQA, and hierarchical
 anchor attention. Each layer is fully documented with use cases, parameter requirements,
 and architectural considerations.
@@ -49,8 +49,10 @@ from .performer_attention import PerformerAttention
 from .ring_attention import RingAttention
 from .rpc_attention import RPCAttention
 from .shared_weights_cross_attention import SharedWeightsCrossAttention
+from .single_window_attention import SingleWindowAttention
 from .spatial_attention import SpatialAttention
 from .tripse_attention import TripSE1, TripSE2, TripSE3, TripSE4
+from .wave_field_attention import WaveFieldAttention
 from .window_attention import (
     create_zigzag_window_attention,
     create_grid_window_attention
@@ -81,11 +83,13 @@ AttentionType = Literal[
     'ring',
     'rpc',
     'shared_weights_cross',
+    'single_window',
     'spatial',
     'tripse1',
     'tripse2',
     'tripse3',
     'tripse4',
+    'wave_field',
     'window',
     'window_zigzag'
 ]
@@ -580,6 +584,48 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         'paper': 'Shared-weight Cross-attention for Multi-modal Fusion'
     },
 
+    'single_window': {
+        'class': SingleWindowAttention,
+        'description': (
+            'Unified multi-head self-attention restricted to a single square window '
+            'of side window_size (window_size**2 tokens). Internally pads inputs up to '
+            'window_size**2 tokens before attention and strips the padding from the '
+            'output. Supports a standard linear QKV projection or a non-linear '
+            'KAN-based Key projection (attention_mode), a configurable probability '
+            'output strategy, optional QK-normalization, and an optional learnable '
+            'relative position bias (Swin convention).'
+        ),
+        'required_params': ['dim', 'window_size', 'num_heads'],
+        'optional_params': {
+            'attention_mode': 'linear',
+            'use_relative_position_bias': True,
+            'qkv_bias': True,
+            'qk_scale': None,
+            'dropout_rate': 0.0,
+            'proj_bias': True,
+            'kan_grid_size': 5,
+            'kan_spline_order': 3,
+            'kan_activation': 'swish',
+            'probability_type': 'softmax',
+            'probability_config': None,
+            'qk_norm_type': None,
+            'qk_norm_kwargs': None,
+            'kernel_initializer': 'glorot_uniform',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'bias_regularizer': None
+        },
+        'use_case': (
+            'Window-local attention for vision transformers and patch-based models '
+            'where attention should be confined to a single fixed-size spatial window. '
+            'The kan_key mode injects a non-linear key projection for richer local '
+            'feature interactions; the relative position bias preserves intra-window '
+            'spatial structure.'
+        ),
+        'complexity': 'O(W^4) for a window of side W (W**2 tokens)',
+        'paper': 'Swin Transformer (windowed self-attention) + KAN key projection'
+    },
+
     'spatial': {
         'class': SpatialAttention,
         'description': (
@@ -710,6 +756,48 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         ),
         'complexity': 'Similar to TripSE2 but with broadcasted logit fusion',
         'paper': 'Achieving 3D Attention via Triplet Squeeze and Excitation Block'
+    },
+
+    'wave_field': {
+        'class': WaveFieldAttention,
+        'description': (
+            'Physics-inspired multi-head attention that replaces dot-product '
+            'attention with an FFT-based damped-wave field convolution. Tokens '
+            'deposit information onto a 1-D field grid weighted by key magnitude, '
+            'a per-head damped-wave kernel is convolved via FFT, a learnable '
+            'coupling matrix mixes across heads at each field position, and each '
+            'token gathers from the convolved field. A query-dependent sigmoid '
+            'modulation and an input-based content gate refine the output before '
+            'the final projection. The left-aligned kernel makes information flow '
+            'inherently causal.'
+        ),
+        'required_params': ['dim'],
+        'optional_params': {
+            'num_heads': 8,
+            'field_size': 512,
+            'max_seq_len': 128,
+            'dropout_rate': 0.0,
+            'use_bias': True,
+            'gate_bias_init': 2.0,
+            'coupling_noise_stddev': 0.01,
+            'coupling_seed': None,
+            'kernel_initializer': 'glorot_uniform',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'bias_regularizer': None,
+            'query_modulation_activation_type': 'sigmoid',
+            'query_modulation_activation_args': None,
+            'gate_activation_type': 'sigmoid',
+            'gate_activation_args': None
+        },
+        'use_case': (
+            'Long-range causal sequence modeling where a linear-in-sequence-length, '
+            'FFT-based field propagation is an attractive alternative to quadratic '
+            'dot-product attention. The inherent causality (left-aligned wave kernel) '
+            'suits autoregressive tasks without explicit masking.'
+        ),
+        'complexity': 'O(N*D + G*log(G)*H*D_h) where G is the field grid size',
+        'paper': 'Wave Field Attention (damped-wave FFT field convolution)'
     },
 
     'window': {
