@@ -4,7 +4,7 @@ The `dl_techniques.layers.attention` module provides a comprehensive collection 
 
 ## Overview
 
-This module includes twenty-seven different attention layer types, ranging from standard multi-head attention to specialized variants for vision, efficiency, and advanced modeling. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these attention mechanisms into your models.
+This module includes twenty-nine different attention layer types, ranging from standard multi-head attention to specialized variants for vision, efficiency, and advanced modeling. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these attention mechanisms into your models.
 
 ## Available Attention Types
 
@@ -37,8 +37,12 @@ The following layers are supported by the factory system with automated paramete
 | `tripse2` | `TripSE2` | Triplet Attention with Pre-Process Squeeze-and-Excitation. | Vision tasks where channel recalibration should precede spatial rotation. | `(batch, H, W, channels)` |
 | `tripse3` | `TripSE3` | Triplet Attention with Parallel Squeeze-and-Excitation. | Vision tasks requiring independent spatial and channel modeling. | `(batch, H, W, channels)` |
 | `tripse4` | `TripSE4` | Hybrid 3D Attention with Affine Fusion of logits. | Advanced vision tasks requiring deep integration of spatial/channel contexts. | `(batch, H, W, channels)` |
-| `window` | `WindowAttention` | Windowed Multi-Head Attention from Swin Transformer, using grid-based partitioning for efficient local attention. | Vision transformers (e.g., Swin) for efficient local attention. | `(batch, seq_len, dim)` |
-| `window_zigzag` | `WindowAttention` | Windowed attention with zigzag partitioning to group frequency-proximate tokens. Induces a frequency-based locality bias. | Vision models where frequency-domain relationships are important. | `(batch, seq_len, dim)` |
+| `single_window` | `SingleWindowAttention` | Single-window Multi-Head Attention over the full sequence as one window (optional relative-position bias). | Vision/sequence models needing windowed attention without grid partitioning. | `(batch, seq_len, dim)` |
+| `wave_field` | `WaveFieldAttention` | FFT-based token mixing with a learned wave-field coupling kernel. | Long-sequence models seeking efficient frequency-domain mixing. | `(batch, seq_len, dim)` |
+| `window` | `WindowAttention` [^win] | Windowed Multi-Head Attention from Swin Transformer, using grid-based partitioning for efficient local attention. | Vision transformers (e.g., Swin) for efficient local attention. | `(batch, seq_len, dim)` |
+| `window_zigzag` | `WindowAttention` [^win] | Windowed attention with zigzag partitioning to group frequency-proximate tokens. Induces a frequency-based locality bias. | Vision models where frequency-domain relationships are important. | `(batch, seq_len, dim)` |
+
+[^win]: The `window` and `window_zigzag` registry entries dispatch through the factory functions `create_grid_window_attention` / `create_zigzag_window_attention` (which set the partitioning mode); the instance they return is a `WindowAttention` layer.
 
 ## Call-signature caveats
 
@@ -55,6 +59,8 @@ The factory (`create_attention_layer`) is **construction-only** — it standardi
 | `ring_attention` | `call(inputs, training=None, attention_mask=None)` (order swapped) | `training` precedes `attention_mask` positionally. |
 | `mobile_mqa` | `call(inputs, training=None, attention_mask=None, return_attention_weights=False)` (order swapped + extra flag) | `training` precedes `attention_mask` positionally; an extra `return_attention_weights` flag follows. |
 | `differential_attention` | `call(inputs, attention_mask=None, layer_idx=0, training=None)` (extra positional `layer_idx`) | An extra `layer_idx` positional argument sits between `attention_mask` and `training`. |
+| `spatial` | 4D input `(batch, H, W, channels)`; **no** mask argument | Spatial CBAM attention operates over the full feature map; there is no token mask to apply. |
+| `non_local` | 4D input `(batch, H, W, channels)`; mask argument **ignored** | Non-local attention computes dense global affinities over spatial positions; a token/sequence mask does not apply. |
 
 For `group_query`/`ring`/`mobile_mqa`, pass `attention_mask` as a keyword argument to avoid the positional-order pitfall. For `differential_attention`, pass `training` as a keyword argument: because `layer_idx` is the 3rd positional parameter (`call(inputs, attention_mask=None, layer_idx=0, training=None)`), a positionally-passed `training` would otherwise bind to `layer_idx`.
 

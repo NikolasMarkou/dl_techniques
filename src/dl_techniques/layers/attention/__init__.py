@@ -15,7 +15,9 @@ from .factory import (
     create_attention_layer,
     validate_attention_config,
     AttentionType,
-    get_attention_info
+    get_attention_info,
+    list_attention_types,
+    get_attention_requirements
 )
 
 # Standard and Efficient Attention
@@ -63,6 +65,8 @@ __all__ = [
     "validate_attention_config",
     "AttentionType",
     "get_attention_info",
+    "list_attention_types",
+    "get_attention_requirements",
 
     # Standard & Efficient
     "MultiHeadAttention",
