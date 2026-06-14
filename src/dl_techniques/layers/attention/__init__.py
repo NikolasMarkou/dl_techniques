@@ -53,6 +53,8 @@ from .rpc_attention import RPCAttention
 from .progressive_focused_attention import ProgressiveFocusedAttention
 from .single_window_attention import SingleWindowAttention
 from .wave_field_attention import WaveFieldAttention
+from .ideogram4_attention import Ideogram4Attention
+from .mmdit_joint_attention import MMDiTJointAttention
 
 __all__ = [
     # Factory Interface
@@ -100,4 +102,6 @@ __all__ = [
     "ProgressiveFocusedAttention",
     "SingleWindowAttention",
     "WaveFieldAttention",
+    "Ideogram4Attention",
+    "MMDiTJointAttention",
 ]

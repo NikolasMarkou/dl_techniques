@@ -9,6 +9,7 @@ This module provides comprehensive tests for:
 - Model integration and persistence
 """
 
+import os
 import pytest
 import numpy as np
 import tensorflow as tf
@@ -301,6 +302,75 @@ class TestSharedWeightsCrossAttention:
         assert not ops.any(ops.isnan(output2))
         assert not ops.any(ops.isinf(output1))
         assert not ops.any(ops.isinf(output2))
+
+    def test_keras_file_round_trip(self, layer_config, two_modality_input, tmp_path):
+        """Full .keras file save/load round-trip with weight restoration.
+
+        Unlike ``test_full_serialization_cycle`` (which only does
+        get_config/from_config + shape rebuild on a freshly-initialized layer),
+        this builds a real functional model, saves it to a ``.keras`` file,
+        reloads it, and asserts the reloaded model reproduces the pre-save
+        output bit-for-bit (weights are restored, not re-initialized).
+
+        ``split_sizes`` is a required positional call-time argument, so the
+        layer is wrapped in a serializable ``keras.layers.Layer`` that stores
+        ``split_sizes`` in its config (mirrors the wrapper in
+        ``test_model_training_integration``).
+        """
+        combined_input, split_sizes = two_modality_input
+        # Deterministic, dropout-free config so pre/post outputs must match exactly.
+        config = dict(layer_config)
+        config['dropout_rate'] = 0.0
+
+        @keras.saving.register_keras_serializable()
+        class SplitSizesAttentionWrapper(keras.layers.Layer):
+            def __init__(self, attention_layer, split_sizes, **kwargs):
+                super().__init__(**kwargs)
+                self.attention_layer = attention_layer
+                self.split_sizes = list(split_sizes)
+
+            def call(self, inputs, training=None):
+                return self.attention_layer(
+                    inputs, split_sizes=self.split_sizes, training=training
+                )
+
+            def get_config(self):
+                cfg = super().get_config()
+                cfg.update({
+                    'attention_layer': keras.saving.serialize_keras_object(
+                        self.attention_layer
+                    ),
+                    'split_sizes': self.split_sizes,
+                })
+                return cfg
+
+            @classmethod
+            def from_config(cls, cfg):
+                cfg = dict(cfg)
+                cfg['attention_layer'] = keras.saving.deserialize_keras_object(
+                    cfg['attention_layer']
+                )
+                return cls(**cfg)
+
+        inputs = layers.Input(shape=combined_input.shape[1:])
+        attention_layer = SharedWeightsCrossAttention(**config)
+        outputs = SplitSizesAttentionWrapper(attention_layer, split_sizes)(inputs)
+        model = models.Model(inputs=inputs, outputs=outputs)
+
+        original_output = model(combined_input, training=False)
+
+        filepath = os.path.join(str(tmp_path), "m.keras")
+        model.save(filepath)
+        loaded_model = keras.models.load_model(filepath)
+
+        loaded_output = loaded_model(combined_input, training=False)
+
+        np.testing.assert_allclose(
+            ops.convert_to_numpy(original_output),
+            ops.convert_to_numpy(loaded_output),
+            rtol=1e-5, atol=1e-5,
+            err_msg="Reloaded model output diverged from pre-save output."
+        )
 
     def test_config_completeness(self, layer_config):
         """Test that get_config contains all __init__ parameters."""

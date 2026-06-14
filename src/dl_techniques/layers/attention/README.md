@@ -53,8 +53,10 @@ The factory (`create_attention_layer`) is **construction-only** — it standardi
 | `lighthouse_attention` | accepts **no** mask argument; requires static seq-len | Causality is enforced by the pyramid scatter-back shift; raises `RuntimeError` on dynamic/`None` seq-len. |
 | `group_query_attention` | `call(inputs, training=None, attention_mask=None)` (order swapped) | `training` precedes `attention_mask` positionally. |
 | `ring_attention` | `call(inputs, training=None, attention_mask=None)` (order swapped) | `training` precedes `attention_mask` positionally. |
+| `mobile_mqa` | `call(inputs, training=None, attention_mask=None, return_attention_weights=False)` (order swapped + extra flag) | `training` precedes `attention_mask` positionally; an extra `return_attention_weights` flag follows. |
+| `differential_attention` | `call(inputs, attention_mask=None, layer_idx=0, training=None)` (extra positional `layer_idx`) | An extra `layer_idx` positional argument sits between `attention_mask` and `training`. |
 
-For `group_query`/`ring`, pass `attention_mask` as a keyword argument to avoid the positional-order pitfall.
+For `group_query`/`ring`/`mobile_mqa`, pass `attention_mask` as a keyword argument to avoid the positional-order pitfall. For `differential_attention`, pass `attention_mask` and `training` as keyword arguments so a positionally-passed `attention_mask` is not bound to `layer_idx`.
 
 ## Customization Hooks
 
