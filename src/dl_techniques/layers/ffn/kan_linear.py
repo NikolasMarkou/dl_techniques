@@ -193,6 +193,9 @@ class KANLinear(keras.layers.Layer):
         :param input_shape: Shape tuple of the input tensor. Must be at least 2D.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         if len(input_shape) < 2:
             raise ValueError(f"Input must be at least 2D, got shape {input_shape}")
 

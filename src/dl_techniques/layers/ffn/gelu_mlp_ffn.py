@@ -185,6 +185,9 @@ class GELUMLPFFN(keras.layers.Layer):
         :type input_shape: Tuple[Optional[int], ...]
         :raises ValueError: If the last input dimension is undefined.
         """
+        if self.built:
+            return
+
         if input_shape[-1] is None:
             raise ValueError("Last dimension of input must be defined")
 

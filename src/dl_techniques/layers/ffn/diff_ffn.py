@@ -325,6 +325,9 @@ class DifferentialFFN(keras.layers.Layer):
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         # Build positive branch sub-layers in computational order
         self.positive_dense.build(input_shape)
         dense_output_shape = self.positive_dense.compute_output_shape(input_shape)

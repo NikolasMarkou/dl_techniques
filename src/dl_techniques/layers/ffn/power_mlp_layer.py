@@ -262,6 +262,9 @@ class PowerMLPLayer(keras.layers.Layer):
             dimension as None or an integer.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         # Build sub-layers in computational order for robust serialization
         self.main_dense.build(input_shape)
 

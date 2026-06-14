@@ -232,6 +232,9 @@ class OrthoGLUFFN(keras.layers.Layer):
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         if input_shape[-1] is None:
             raise ValueError("Last dimension of input must be defined")
 

@@ -253,6 +253,9 @@ class GLUFFN(keras.layers.Layer):
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         # Validate input shape has defined last dimension
         if input_shape[-1] is None:
             raise ValueError("The last dimension of input_shape must be defined")

@@ -256,6 +256,9 @@ class MLPBlock(keras.layers.Layer):
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         # Build sub-layers in computational order for robust serialization
         self.fc1.build(input_shape)
 

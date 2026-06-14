@@ -310,6 +310,9 @@ class SwiGLUFFN(keras.layers.Layer):
         :param input_shape: Shape of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         # Build sub-layers in computational order
         self.gate_proj.build(input_shape)
         self.up_proj.build(input_shape)

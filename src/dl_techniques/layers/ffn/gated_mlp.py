@@ -288,6 +288,9 @@ class GatedMLP(keras.layers.Layer):
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         # Build sub-layers in computational order for robust serialization
         self.conv_gate.build(input_shape)
         self.conv_up.build(input_shape)

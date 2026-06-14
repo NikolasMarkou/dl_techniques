@@ -243,6 +243,9 @@ class ResidualBlock(keras.layers.Layer):
         :param input_shape: Shape of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         # Build sub-layers in computational order for robust serialization
         self.hidden_layer.build(input_shape)
 
