@@ -431,8 +431,6 @@ class TestKANLinear:
         """update_grid_from_samples is graph-compatible: it runs inside a
         @tf.function without raising, and produces a grid identical to the eager
         path on the same data (regression for the graph-compat rewrite)."""
-        import tensorflow as tf
-
         data = keras.random.uniform(shape=(100, 10), minval=10.0, maxval=20.0)
 
         layer_eager = KANLinear(**basic_config)
