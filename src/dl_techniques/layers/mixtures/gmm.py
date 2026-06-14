@@ -315,10 +315,14 @@ class GMMLayer(keras.layers.Layer):
 
         :raises ValueError: If cluster axes are invalid.
         """
+        # DECISION plan_2026-06-14_7384c2e3/D-003: re-derive from the ORIGINAL constructor
+        # value (_cluster_axis_arg), not in-place on self.cluster_axis. This makes build()
+        # idempotent -- a second build() re-normalizes from the stable source instead of
+        # double-shifting an already-positive axis (which would corrupt cluster_axis).
         # Convert negative axes to positive
         self.cluster_axis = [
             axis if axis >= 0 else self.input_rank + axis
-            for axis in self.cluster_axis
+            for axis in self._cluster_axis_arg
         ]
 
         # Validate axes
