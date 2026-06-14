@@ -217,6 +217,12 @@ class KMeansLayer(keras.layers.Layer):
         self.min_distance = min_distance
         self.output_mode = output_mode
         self.cluster_axis = [cluster_axis] if isinstance(cluster_axis, int) else cluster_axis
+        # DECISION plan_2026-06-14_8c7365d0/D-005: serialize the ORIGINAL (pre-build)
+        # cluster_axis, not the build()-mutated positive form. build() rewrites negative
+        # axes to positive against input_rank (_setup_cluster_axes), so serializing
+        # self.cluster_axis would bake in a rank-specific value -> cross-rank reload picks
+        # the wrong logical axis. Stash the constructor value here and emit it in get_config.
+        self._cluster_axis_arg = list(self.cluster_axis)
         # DECISION plan_2026-06-08_57a975d1/D-002: do NOT replace this with a bare
         # keras.initializers.get(centroid_initializer). 'orthonormal' is not a registered
         # keras alias (OrthonormalInitializer registers as Custom>OrthonormalInitializer),
@@ -226,7 +232,7 @@ class KMeansLayer(keras.layers.Layer):
             self.centroid_initializer = centroid_initializer
         else:
             self.centroid_initializer = keras.initializers.get(centroid_initializer)
-        self.centroid_regularizer = centroid_regularizer
+        self.centroid_regularizer = keras.regularizers.get(centroid_regularizer)
         self.random_seed = random_seed
 
         # Initialize attribute placeholders - weights created in build()
@@ -638,7 +644,8 @@ class KMeansLayer(keras.layers.Layer):
             "repulsion_strength": self.repulsion_strength,
             "min_distance": self.min_distance,
             "output_mode": self.output_mode,
-            "cluster_axis": self.cluster_axis,
+            # DECISION plan_2026-06-14_8c7365d0/D-005: serialize the pre-build axis.
+            "cluster_axis": self._cluster_axis_arg,
             "centroid_initializer": (
                 self.centroid_initializer if isinstance(self.centroid_initializer, str)
                 else keras.initializers.serialize(self.centroid_initializer)
