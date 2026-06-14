@@ -316,3 +316,32 @@ class TestGMMLayerPosteriorCorrectness:
         resp = ops.convert_to_numpy(twin(x))
 
         np.testing.assert_allclose(recon, resp @ means, rtol=1e-5, atol=1e-5)
+
+
+# --------------------------------------------------------------- graph mode
+
+class TestGMMLayerGraphMode:
+    """Graph-compatibility regression: call() must trace with a symbolic flag."""
+
+    def test_graph_mode_symbolic_training(self, basic_config: Dict[str, Any]) -> None:
+        """Regression for the bare ``if training and ...:`` graph-breaker."""
+        import tensorflow as tf
+
+        layer = GMMLayer(**basic_config)
+        x = tf.constant(np.random.normal(0, 1, (8, 64)).astype(np.float32))
+
+        @tf.function
+        def run(inp, training):
+            return layer(inp, training=training)
+
+        y_train = run(x, tf.constant(True))
+        y_infer = run(x, tf.constant(False))
+        assert tuple(y_train.shape) == (8, 4)
+        assert tuple(y_infer.shape) == (8, 4)
+
+    def test_compute_output_shape_before_build_multi_axis(self) -> None:
+        """compute_output_shape correct PRE-build for multi/negative axes."""
+        layer = GMMLayer(n_components=5, cluster_axis=[-2, -1], output_mode="assignments")
+        assert layer.compute_output_shape((8, 3, 16)) == (8, 5)
+        y = layer(np.random.normal(0, 1, (8, 3, 16)).astype(np.float32))
+        assert tuple(y.shape) == (8, 5)

@@ -651,5 +651,73 @@ class TestKMeansLayerIntegration:
         assert output.shape == (16, 10)
 
 
+class TestKMeansLayerGraphAndRoundTrip:
+    """Graph-compatibility and full model round-trip tests (regression oracle).
+
+    Guards the iter-1 fixes: graph-safe ``training is True`` guard,
+    build-independent ``compute_output_shape``, idempotent ``_setup_cluster_axes``,
+    and the ``from_config`` serialization contract.
+    """
+
+    def test_graph_mode_symbolic_training(self, basic_config: Dict[str, Any]) -> None:
+        """call() must trace under @tf.function with a SYMBOLIC training flag.
+
+        Regression for the bare ``if training:`` graph-breaker.
+        """
+        import tensorflow as tf
+
+        layer = KMeansLayer(**basic_config)
+        x = tf.constant(np.random.normal(0, 1, (8, 64)).astype(np.float32))
+
+        @tf.function
+        def run(inp, training):
+            return layer(inp, training=training)
+
+        # Symbolic tensor training flag — bare `if training:` would raise
+        # OperatorNotAllowedInGraphError here.
+        y_train = run(x, tf.constant(True))
+        y_infer = run(x, tf.constant(False))
+        assert tuple(y_train.shape) == (8, 4)
+        assert tuple(y_infer.shape) == (8, 4)
+
+    def test_keras_model_round_trip(self, basic_config: Dict[str, Any]) -> None:
+        """Full .keras save/load round-trip must reconstruct an identical layer."""
+        import os
+        import tempfile
+
+        inputs = keras.layers.Input(shape=(64,))
+        outputs = KMeansLayer(**basic_config)(inputs)
+        model = keras.Model(inputs=inputs, outputs=outputs)
+
+        x = np.random.normal(0, 1, (8, 64)).astype(np.float32)
+        y_before = ops.convert_to_numpy(model(x))
+
+        path = os.path.join(tempfile.mkdtemp(), "kmeans_model.keras")
+        model.save(path)
+        reloaded = keras.models.load_model(path)
+        y_after = ops.convert_to_numpy(reloaded(x))
+
+        np.testing.assert_allclose(y_before, y_after, atol=1e-6)
+
+    def test_compute_output_shape_before_build_multi_axis(self) -> None:
+        """compute_output_shape must be correct PRE-build, incl. multi/negative axes."""
+        layer = KMeansLayer(n_clusters=5, cluster_axis=[-2, -1], output_mode="assignments")
+        # Never built — must still infer correctly from input rank.
+        assert layer.compute_output_shape((8, 3, 16)) == (8, 5)
+        # And it must agree with a real forward pass.
+        y = layer(np.random.normal(0, 1, (8, 3, 16)).astype(np.float32))
+        assert tuple(y.shape) == (8, 5)
+
+    def test_setup_cluster_axes_idempotent(self) -> None:
+        """Repeated axis normalization must be stable (no double-shift corruption)."""
+        layer = KMeansLayer(n_clusters=4, cluster_axis=[-2, -1])
+        layer.input_rank = 3
+        layer._setup_cluster_axes()
+        first = list(layer.cluster_axis)
+        layer._setup_cluster_axes()
+        second = list(layer.cluster_axis)
+        assert first == second == [1, 2]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

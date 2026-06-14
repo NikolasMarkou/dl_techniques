@@ -669,6 +669,24 @@ class TestRBFLayer:
             f"Unexpected losses for single unit: {[float(loss) for loss in single_unit_layer.losses]}"
 
 
+class TestRBFLayerGraphMode:
+    """Graph-compatibility regression: call() must trace with a symbolic flag."""
+
+    def test_graph_mode_symbolic_training(self) -> None:
+        """Regression for the bare ``if training and ...:`` graph-breaker."""
+        layer = RBFLayer(units=8, repulsion_strength=0.1)
+        x = tf.constant(np.random.normal(0, 1, (8, 16)).astype(np.float32))
+
+        @tf.function
+        def run(inp, training):
+            return layer(inp, training=training)
+
+        y_train = run(x, tf.constant(True))
+        y_infer = run(x, tf.constant(False))
+        assert tuple(y_train.shape) == (8, 8)
+        assert tuple(y_infer.shape) == (8, 8)
+
+
 if __name__ == '__main__':
     # Run with: python -m pytest test_radial_basis_function.py -v
     pytest.main([__file__, '-v', '--tb=short'])
