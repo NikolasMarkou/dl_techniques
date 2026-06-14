@@ -84,6 +84,7 @@ from typing import Optional, Union, Literal, List, Any, Tuple, Dict
 # ---------------------------------------------------------------------
 
 from ...utils.logger import logger
+from ...utils.tensors import resolve_training_factor
 from ...initializers.orthonormal_initializer import OrthonormalInitializer
 
 # ---------------------------------------------------------------------
@@ -534,7 +535,8 @@ class KMeansLayer(keras.layers.Layer):
     def _update_centroids(
         self,
         inputs: keras.KerasTensor,
-        assignments: keras.KerasTensor
+        assignments: keras.KerasTensor,
+        factor: Any = 1.0
     ) -> None:
         """Update centroids using soft assignments with momentum and repulsion.
 
@@ -542,6 +544,11 @@ class KMeansLayer(keras.layers.Layer):
         :type inputs: keras.KerasTensor
         :param assignments: Soft assignment probabilities of shape ``(batch, n_clusters)``.
         :type assignments: keras.KerasTensor
+        :param factor: Training factor from ``resolve_training_factor``. The python
+            float ``1.0`` (python ``training=True``) takes the exact unmasked path;
+            a 0/1 scalar tensor (symbolic training) masks the update so a runtime-False
+            flag is a true no-op.
+        :type factor: Any
         """
         # Compute weighted sum of points
         # Shape: (n_clusters, features)
@@ -568,10 +575,19 @@ class KMeansLayer(keras.layers.Layer):
         # Update momentum buffer
         new_momentum = (self.momentum * self.centroid_momentum +
                        (1.0 - self.momentum) * update)
-        self.centroid_momentum.assign(new_momentum)
 
-        # Apply momentum update with learning rate
-        self.centroids.assign_add(self.centroid_lr * self.centroid_momentum)
+        if isinstance(factor, float):
+            # python training=True fast path: exact, unmasked (factor is always 1.0).
+            self.centroid_momentum.assign(new_momentum)
+            self.centroids.assign_add(self.centroid_lr * self.centroid_momentum)
+        else:
+            # Symbolic-tensor path: mask both writes by the 0/1 factor so a runtime
+            # training=False leaves momentum and centroids unchanged (true no-op).
+            masked_momentum = self.centroid_momentum + factor * (
+                new_momentum - self.centroid_momentum
+            )
+            self.centroid_momentum.assign(masked_momentum)
+            self.centroids.assign_add(factor * self.centroid_lr * masked_momentum)
 
     def _reshape_output(self, output: keras.KerasTensor) -> keras.KerasTensor:
         """Reshape clustering output to match desired output shape.
@@ -627,13 +643,15 @@ class KMeansLayer(keras.layers.Layer):
         distances = self._compute_distances(reshaped_inputs)
         assignments = self._soft_assignments(distances)
 
-        # Update centroids during training. Use identity ``training is True`` so the
-        # EMA centroid update fires ONLY in genuine training and a symbolic/None/False
-        # flag skips it without coercing a tensor to a python bool (graph-safe). Bare
-        # ``if training:`` raises OperatorNotAllowedInGraphError under a tf.Tensor flag.
-        # Canonical repo idiom (cf. residual_acf.py, mdn_layer.py, deep_kernel_pca.py).
-        if training is True:
-            self._update_centroids(reshaped_inputs, assignments)
+        # DECISION plan_2026-06-14_5e80bd3e/D-001: gate the EMA update on a graph-safe
+        # training factor (None -> skip; 1.0 -> exact python-True path; 0/1 tensor ->
+        # masked symbolic path). This fires the update for a symbolic training=True tensor
+        # (custom @tf.function loop) AND keeps a symbolic False a true no-op, without ever
+        # coercing a tensor to a python bool. Supersedes the prior `if training is True:`
+        # gate which silently skipped the symbolic case.
+        training_factor = resolve_training_factor(training, self.compute_dtype)
+        if training_factor is not None:
+            self._update_centroids(reshaped_inputs, assignments, training_factor)
 
         # Compute output based on mode
         if self.output_mode == 'assignments':
