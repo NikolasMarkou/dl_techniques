@@ -321,6 +321,15 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
 
         :raises ValueError: If input is not 3D or dimensions are incompatible.
         """
+        # DECISION plan_2026-06-14_7734bacd/D-002: the four Dense projections stay
+        # created in build() (NOT __init__) because their units depend on
+        # embed_dim = input_shape[-1] (actual_key_dim defaults to embed_dim//num_heads;
+        # output_dense uses embed_dim). Do NOT "fix" by moving them to __init__.
+        # This guard makes build() idempotent so a second build() (functional reuse /
+        # from_config) does not re-create and discard already-built Dense weights.
+        if self.built:
+            return
+
         if len(input_shape) != 3:
             raise ValueError(f"Expected 3D input, got shape {input_shape}")
 
@@ -718,7 +727,17 @@ class CapsuleRoutingSelfAttention(keras.layers.Layer):
         :return: Horizontal routing output of same shape as input.
         :rtype: keras.KerasTensor
         """
-        seq_len = ops.shape(attention_weights)[2]
+        # Use the STATIC sequence-length so `range(...)` unrolls at trace time
+        # (graph-safe). `ops.shape(...)[2]` returns a symbolic tensor under
+        # tf.function, and `range(symbolic_tensor)` raises TypeError.
+        seq_len = attention_weights.shape[2]
+        if seq_len is None:
+            raise ValueError(
+                "CapsuleRoutingSelfAttention positional routing "
+                "(use_positional_routing=True) requires a statically-known "
+                "sequence length; got None. Build with a concrete seq_len or "
+                "set use_positional_routing=False."
+            )
 
         if self.use_positional_routing:
             # Apply positional constraints: each position can only route from previous positions

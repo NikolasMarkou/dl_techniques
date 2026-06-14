@@ -779,3 +779,149 @@ class TestCapsuleRoutingSelfAttention:
             output_numpy = ops.convert_to_numpy(output)
             assert not np.any(np.isnan(output_numpy)), f"NaN values with epsilon={eps}"
             assert not np.any(np.isinf(output_numpy)), f"Inf values with epsilon={eps}"
+
+    def test_graph_mode_positional_routing_symbolic_seqlen_raises(self):
+        """Locks A1: a tf.function trace with UNKNOWN seq-len must fail LOUD.
+
+        This is the exact bug shape. Pre-fix, `_horizontal_routing` did
+        `seq_len = ops.shape(...)[2]` then `for l in range(seq_len)`; tracing
+        with an unknown-N input signature made `range(symbolic_tensor)` raise a
+        cryptic `TypeError("'SymbolicTensor' object cannot be interpreted as an
+        integer")`. Post-fix the static `.shape[2]` is None under a symbolic
+        signature, so we raise a clear `ValueError` (documented static-N
+        contract) BEFORE the loop. We assert the message, which guarantees the
+        new code path (not the old TypeError) is what fires.
+        """
+        layer = CapsuleRoutingSelfAttention(
+            num_heads=4,
+            key_dim=16,
+            use_vertical_routing=False,
+            use_horizontal_routing=True,
+            use_positional_routing=True,  # the DEFAULT — the crashing path
+        )
+        # Build eagerly with a concrete seq_len so the Dense layers exist;
+        # the symbolic trace below exercises only the routing loop.
+        _ = layer(keras.random.normal([2, 8, 64]))
+
+        @tf.function(input_signature=[tf.TensorSpec([None, None, 64], tf.float32)])
+        def fwd(t):
+            return layer(t, training=False)
+
+        with pytest.raises(ValueError, match=r"statically-known sequence length"):
+            fwd(tf.convert_to_tensor(keras.random.normal([2, 8, 64])))
+
+    def test_graph_mode_positional_routing_concrete_seqlen(self):
+        """Locks A1: a tf.function trace with a CONCRETE seq-len must trace and
+        match eager output bit-for-bit (the static `.shape[2]` unrolls the loop).
+        """
+        batch_size, seq_len, embed_dim = 2, 8, 64
+        test_input = keras.random.normal([batch_size, seq_len, embed_dim])
+
+        layer = CapsuleRoutingSelfAttention(
+            num_heads=4,
+            key_dim=16,
+            use_vertical_routing=False,
+            use_horizontal_routing=True,
+            use_positional_routing=True,
+        )
+
+        # Eager reference (also builds the layer with a concrete seq_len).
+        eager_output = ops.convert_to_numpy(layer(test_input, training=False))
+
+        # Concrete-signature tf.function: static shape known at trace time.
+        @tf.function(input_signature=[tf.TensorSpec([None, seq_len, embed_dim], tf.float32)])
+        def graph_forward(x):
+            return layer(x, training=False)
+
+        graph_output = ops.convert_to_numpy(graph_forward(test_input))
+
+        assert graph_output.shape == (batch_size, seq_len, embed_dim)
+        np.testing.assert_allclose(
+            eager_output,
+            graph_output,
+            rtol=1e-6, atol=1e-6,
+            err_msg="Graph-mode positional routing must match eager output",
+        )
+
+    def test_graph_mode_positional_routing_in_compiled_model(self):
+        """Locks A1 via the compiled-model path (predict() traces a tf.function)."""
+        batch_size, seq_len, embed_dim = 2, 8, 64
+        test_input = keras.random.normal([batch_size, seq_len, embed_dim])
+
+        inputs = keras.Input(shape=(seq_len, embed_dim))
+        x = CapsuleRoutingSelfAttention(
+            num_heads=4,
+            key_dim=16,
+            use_vertical_routing=False,
+            use_horizontal_routing=True,
+            use_positional_routing=True,
+            name="capsule_pos",
+        )(inputs)
+        model = keras.Model(inputs=inputs, outputs=x)
+
+        # model.predict runs the forward inside a traced tf.function — pre-fix
+        # this crashed with a TypeError from range(symbolic).
+        preds = model.predict(test_input, verbose=0)
+        assert preds.shape == (batch_size, seq_len, embed_dim)
+        assert not np.any(np.isnan(preds))
+
+    def test_keras_roundtrip_positional_routing(self):
+        """Locks A2: .keras save/load of a positional-routing model reloads weights.
+
+        The build() idempotency guard ensures a second build() (on reload /
+        functional reuse) does not re-create and discard the four Dense
+        projections. Reloaded forward must match the original bit-for-bit.
+        """
+        batch_size, seq_len, embed_dim = 2, 8, 64
+        test_input = keras.random.normal([batch_size, seq_len, embed_dim])
+
+        inputs = keras.Input(shape=(seq_len, embed_dim))
+        x = CapsuleRoutingSelfAttention(
+            num_heads=4,
+            key_dim=16,
+            use_vertical_routing=True,
+            use_horizontal_routing=True,
+            use_positional_routing=True,  # explicitly exercise the A1/A2 path
+            name="capsule_pos",
+        )(inputs)
+        model = keras.Model(inputs=inputs, outputs=x)
+
+        original_prediction = model.predict(test_input, verbose=0)
+
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            model_path = os.path.join(tmpdirname, "model.keras")
+            model.save(model_path)
+            loaded_model = keras.models.load_model(model_path)
+            loaded_prediction = loaded_model.predict(test_input, verbose=0)
+
+            np.testing.assert_allclose(
+                original_prediction,
+                loaded_prediction,
+                rtol=1e-6, atol=1e-6,
+                err_msg="Positional-routing predictions must match after .keras reload",
+            )
+
+            capsule_layer = loaded_model.get_layer("capsule_pos")
+            assert isinstance(capsule_layer, CapsuleRoutingSelfAttention)
+            assert capsule_layer.use_positional_routing is True
+
+    def test_build_idempotent_preserves_weights(self):
+        """Locks A2 directly: a second build() must NOT replace the Dense layers."""
+        layer = CapsuleRoutingSelfAttention(num_heads=4, key_dim=16)
+        test_input = keras.random.normal([2, 8, 64])
+        _ = layer(test_input)
+
+        # Capture the Dense object identities after first build.
+        q_id = id(layer.query_dense)
+        k_id = id(layer.key_dense)
+        v_id = id(layer.value_dense)
+        o_id = id(layer.output_dense)
+
+        # Re-invoking build() must be a no-op (guard) — same objects, no
+        # weight discard.
+        layer.build(test_input.shape)
+
+        assert id(layer.query_dense) == q_id
+        assert id(layer.key_dense) == k_id
+        assert id(layer.value_dense) == v_id
+        assert id(layer.output_dense) == o_id
