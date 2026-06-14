@@ -397,17 +397,25 @@ class GMMLayer(keras.layers.Layer):
         :rtype: Tuple[Optional[int], ...]
         """
         if self.output_mode == 'assignments':
+            # Normalize axes LOCALLY from the original constructor value + input rank
+            # rather than reading self.cluster_axis (which build() mutates negative->
+            # positive and which may not be normalized yet during functional-API tracing,
+            # when compute_output_shape is called BEFORE build). Mirrors _setup_cluster_axes.
+            rank = len(input_shape)
+            axes = sorted(
+                ax if ax >= 0 else rank + ax for ax in self._cluster_axis_arg
+            )
             output_shape = list(input_shape)
 
             # Handle multiple clustering axes
-            if len(self.cluster_axis) > 1:
+            if len(axes) > 1:
                 # Replace clustered dimensions with n_components
                 # Remove extra axes in reverse order to preserve indices
-                for axis in reversed(self.cluster_axis[1:]):
+                for axis in reversed(axes[1:]):
                     output_shape.pop(axis)
-                output_shape[self.cluster_axis[0]] = self.n_components
+                output_shape[axes[0]] = self.n_components
             else:
-                output_shape[self.cluster_axis[0]] = self.n_components
+                output_shape[axes[0]] = self.n_components
 
             return tuple(output_shape)
 
