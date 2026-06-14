@@ -293,6 +293,9 @@ class WaveFieldAttention(keras.layers.Layer):
     # -----------------------------------------------------------------
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        if self.built:
+            return
+
         if len(input_shape) != 3:
             raise ValueError(f"Expected 3-D input (batch, seq_len, dim), got {input_shape}")
         if input_shape[-1] is not None and input_shape[-1] != self.dim:

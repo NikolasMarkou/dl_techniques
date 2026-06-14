@@ -292,6 +292,9 @@ class AnchorAttention(keras.layers.Layer):
 
         :raises ValueError: If input is not 3D or last dimension does not match dim.
         """
+        if self.built:
+            return
+
         if len(input_shape) != 3:
             raise ValueError(f"Input must be 3D, got shape {input_shape}")
 

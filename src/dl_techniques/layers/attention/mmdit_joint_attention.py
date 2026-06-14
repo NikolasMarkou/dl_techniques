@@ -218,6 +218,9 @@ class MMDiTJointAttention(keras.layers.Layer):
         :raises ValueError: If ``input_shape`` is not a list/tuple of two shapes,
             or either stream's last dim is not ``dim``.
         """
+        if self.built:
+            return
+
         if not isinstance(input_shape, (list, tuple)) or len(input_shape) != 2:
             raise ValueError(
                 "MMDiTJointAttention expects input_shape to be a list of two "

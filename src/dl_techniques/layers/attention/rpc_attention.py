@@ -249,6 +249,9 @@ class RPCAttention(keras.layers.Layer):
         :param input_shape: Shape tuple of the input.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         # Validate input shape
         if len(input_shape) != 3:
             raise ValueError(f"Expected 3D input, got shape {input_shape}")

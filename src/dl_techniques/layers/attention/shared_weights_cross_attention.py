@@ -227,6 +227,9 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         if len(input_shape) != 3:
             raise ValueError(f"Input must be 3D, got shape {input_shape}")
 

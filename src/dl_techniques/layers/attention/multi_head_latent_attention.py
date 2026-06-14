@@ -353,6 +353,9 @@ class MultiHeadLatentAttention(keras.layers.Layer):
             self-attention or a list of tuples for cross-attention.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         # Handle input_shape being a list (cross-attention) or single tuple
         is_list_of_shapes = isinstance(input_shape, list) and len(input_shape) > 0 and isinstance(input_shape[0], (list, tuple))
 

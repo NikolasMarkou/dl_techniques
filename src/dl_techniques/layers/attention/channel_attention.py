@@ -215,6 +215,9 @@ class ChannelAttention(keras.layers.Layer):
             ``(batch_size, height, width, channels)``.
         :type input_shape: tuple
         """
+        if self.built:
+            return
+
         # Validate input shape
         if len(input_shape) != 4:
             raise ValueError(

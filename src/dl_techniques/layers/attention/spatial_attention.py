@@ -180,6 +180,9 @@ class SpatialAttention(keras.layers.Layer):
             ``(batch_size, height, width, channels)``.
         :type input_shape: tuple
         """
+        if self.built:
+            return
+
         # Build the convolution layer with concatenated pooling features (2 channels)
         # After avg_pool and max_pool concatenation, we have 2 channels
         conv_input_shape = list(input_shape)

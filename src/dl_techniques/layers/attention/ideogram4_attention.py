@@ -148,6 +148,9 @@ class Ideogram4Attention(keras.layers.Layer):
         :type input_shape: Tuple[Optional[int], ...]
         :raises ValueError: If the last input dimension is not ``hidden_size``.
         """
+        if self.built:
+            return
+
         if len(input_shape) != 3 or input_shape[-1] != self.hidden_size:
             raise ValueError(
                 f"Ideogram4Attention expects x of shape (B, L, hidden_size="

@@ -142,6 +142,9 @@ class TripletAttentionBranch(layers.Layer):
         :param input_shape: 4-D shape ``(B, H, W, C)``.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         # Determine shape after permutation
         # input_shape is (B, H, W, C)
         # We need to simulate the permutation to know the spatial dims for logging/debug
@@ -348,6 +351,9 @@ class TripSE1(layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        if self.built:
+            return
+
         self.branch_hw.build(input_shape)
         self.branch_cw.build(input_shape)
         self.branch_hc.build(input_shape)
@@ -485,6 +491,9 @@ class TripSE2(layers.Layer):
             ))
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        if self.built:
+            return
+
         batch = input_shape[0]
 
         for i, pattern in enumerate(self._patterns):
@@ -674,6 +683,9 @@ class TripSE3(layers.Layer):
             ))
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        if self.built:
+            return
+
         batch = input_shape[0]
         for i, pattern in enumerate(self._patterns):
             perm_indices = [p + 1 for p in pattern]
@@ -1010,12 +1022,15 @@ class TripSE4(layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        if self.built:
+            return
+
         batch = input_shape[0]
-        
+
         for i, pattern in enumerate(self._patterns):
             perm_indices = [p + 1 for p in pattern]
             permuted_shape = (batch,) + tuple(input_shape[idx] for idx in perm_indices)
-            
+
             self.se_logit_layers[i].build(permuted_shape)
 
             d1, d2 = permuted_shape[1], permuted_shape[2]

@@ -373,6 +373,9 @@ class SingleWindowAttention(keras.layers.Layer):
             ``window_size ** 2`` since the layer pads internally.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         if self.use_relative_position_bias:
             num_relative_positions = (2 * self.window_size - 1) ** 2
             self.relative_position_bias_table = self.add_weight(

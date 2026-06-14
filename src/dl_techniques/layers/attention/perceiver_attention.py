@@ -171,6 +171,9 @@ class PerceiverAttention(keras.layers.Layer):
             or a list of two shape tuples for query and kv inputs.
         :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
         """
+        if self.built:
+            return
+
         # Handle different input formats.
         # DECISION plan_2026-06-14_7734bacd/D-003: disambiguate a LIST-OF-SHAPES
         # (two inputs for cross-attention) from a SINGLE serialized shape. Keras

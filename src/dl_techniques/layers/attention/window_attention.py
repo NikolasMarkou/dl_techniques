@@ -417,6 +417,9 @@ class WindowAttention(keras.layers.Layer):
         :param input_shape: Shape tuple ``(batch, seq_len, dim)``.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         if self.partition_mode == "zigzag":
             N_actual = input_shape[1]
             if N_actual is None:

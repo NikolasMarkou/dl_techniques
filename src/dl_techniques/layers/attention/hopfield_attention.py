@@ -331,6 +331,9 @@ class HopfieldAttention(keras.layers.Layer):
             ``[query, key, value]``.
         :type input_shape: tuple or list
         """
+        if self.built:
+            return
+
         # Handle different input formats to extract query shape
         if isinstance(input_shape, (list, tuple)) and len(input_shape) > 0:
             # Check if this is a list of shapes or a single shape

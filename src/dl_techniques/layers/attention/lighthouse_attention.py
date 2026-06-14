@@ -459,6 +459,9 @@ class LighthouseAttention(keras.layers.Layer):
         :raises ValueError: 2D input or static ``N`` not divisible by
             ``pooling_factor ** (num_levels - 1)``.
         """
+        if self.built:
+            return
+
         if len(input_shape) != 3:
             raise ValueError(
                 f"Expected 3D input shape (batch, seq_len, dim), got {input_shape}"

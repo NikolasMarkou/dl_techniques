@@ -257,6 +257,9 @@ class RingAttention(keras.layers.Layer):
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         # Build sub-layers in computational order
         self.w_q.build(input_shape)
         self.w_k.build(input_shape)

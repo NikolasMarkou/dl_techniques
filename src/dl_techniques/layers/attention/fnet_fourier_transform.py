@@ -192,6 +192,9 @@ class FNetFourierTransform(keras.layers.Layer):
             ``(batch_size, sequence_length, hidden_dim)``.
         :type input_shape: tuple
         """
+        if self.built:
+            return
+
         if len(input_shape) != 3:
             raise ValueError(
                 f"FNetFourierTransform expects 3D input (batch, sequence, hidden), "

@@ -328,6 +328,9 @@ class GroupedQueryAttention(keras.layers.Layer):
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         # Detect if we need to flatten for 4D inputs during build logic if needed,
         # but Dense layers are generally agnostic to outer dimensions.
         self.w_q.build(input_shape)

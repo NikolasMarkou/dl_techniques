@@ -197,6 +197,9 @@ class CBAM(keras.layers.Layer):
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: tuple
         """
+        if self.built:
+            return
+
         # BUILD sub-layers explicitly for serialization robustness
         self.channel_attention.build(input_shape)
         self.spatial_attention.build(input_shape)

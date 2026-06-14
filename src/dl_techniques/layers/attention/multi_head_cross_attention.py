@@ -317,6 +317,9 @@ class MultiHeadCrossAttention(keras.layers.Layer):
             self-attention or a list of two tuples for cross-attention.
         :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
         """
+        if self.built:
+            return
+
         # Robustly determine if input_shape is a list of shapes (cross-attention)
         # or a single shape (self-attention). This works across backends.
         is_list_of_shapes = (

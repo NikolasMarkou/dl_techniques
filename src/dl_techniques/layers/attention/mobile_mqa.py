@@ -146,6 +146,9 @@ class MobileMQA(GroupedQueryAttention):
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: tuple
         """
+        if self.built:
+            return
+
         # Build standard GQA weights (w_q, w_k, w_v, w_o)
         super().build(input_shape)
 

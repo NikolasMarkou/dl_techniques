@@ -199,6 +199,9 @@ class MultiHeadAttention(keras.layers.Layer):
             ``(batch_size, seq_len, dim)``.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         # Validate input shape
         if isinstance(input_shape, list):
             input_shape = tuple(input_shape)
