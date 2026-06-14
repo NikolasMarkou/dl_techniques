@@ -200,7 +200,7 @@ class NonLocalAttention(keras.layers.Layer):
 
         # Store ALL configuration parameters
         self.attention_channels = attention_channels
-        self.kernel_size = kernel_size if isinstance(kernel_size, tuple) else (kernel_size, kernel_size)
+        self.kernel_size = (kernel_size, kernel_size) if isinstance(kernel_size, int) else tuple(kernel_size)
         self.use_bias = use_bias
         self.probability_type = probability_type
         self.probability_config = probability_config
