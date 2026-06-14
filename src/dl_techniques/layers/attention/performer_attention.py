@@ -313,26 +313,7 @@ class PerformerAttention(keras.layers.Layer):
         :return: Attention output of shape ``(batch, num_heads, seq_len, head_dim)``.
         :rtype: keras.KerasTensor
         """
-        # Compute KV: φ(K)ᵀV
-        # k: (batch, num_heads, seq_len, nb_features)
-        # v: (batch, num_heads, seq_len, head_dim)
-        # kv: (batch, num_heads, nb_features, head_dim)
-        kv = ops.einsum('bhnf,bhnd->bhfd', k, v)
-
-        # Compute normalization: φ(Q) · sum(φ(K))
-        # k_sum: (batch, num_heads, nb_features)
-        k_sum = ops.sum(k, axis=2)
-
-        # z: (batch, num_heads, seq_len)
-        z = ops.einsum('bhnf,bhf->bhn', q, k_sum)
-        z = z + 1e-6  # Add small epsilon for numerical stability
-
-        # Compute output: φ(Q) · KV / Z
-        # out: (batch, num_heads, seq_len, head_dim)
-        out = ops.einsum('bhnf,bhfd->bhnd', q, kv)
-        out = out / ops.expand_dims(z, axis=-1)
-
-        # Apply causal mask if needed
+        # DECISION plan_2026-06-14_077a2a35/D-002: branch causal vs non-causal so the non-causal block is not computed-then-discarded on the causal path. Both blocks are verbatim-unchanged; numerics byte-identical. Do NOT merge back into compute-all-then-overwrite.
         if self.causal:
             # For causal attention, we need cumulative sums
             # This is a simplified implementation - consider optimizing for production
@@ -354,6 +335,25 @@ class PerformerAttention(keras.layers.Layer):
             z_causal = ops.einsum('bhnf,bhnf->bhn', q, k_cumsum) + 1e-6
             out = ops.einsum('bhnf,bhnfd->bhnd', q, kv_cumsum)
             out = out / ops.expand_dims(z_causal, axis=-1)
+        else:
+            # Compute KV: φ(K)ᵀV
+            # k: (batch, num_heads, seq_len, nb_features)
+            # v: (batch, num_heads, seq_len, head_dim)
+            # kv: (batch, num_heads, nb_features, head_dim)
+            kv = ops.einsum('bhnf,bhnd->bhfd', k, v)
+
+            # Compute normalization: φ(Q) · sum(φ(K))
+            # k_sum: (batch, num_heads, nb_features)
+            k_sum = ops.sum(k, axis=2)
+
+            # z: (batch, num_heads, seq_len)
+            z = ops.einsum('bhnf,bhf->bhn', q, k_sum)
+            z = z + 1e-6  # Add small epsilon for numerical stability
+
+            # Compute output: φ(Q) · KV / Z
+            # out: (batch, num_heads, seq_len, head_dim)
+            out = ops.einsum('bhnf,bhfd->bhnd', q, kv)
+            out = out / ops.expand_dims(z, axis=-1)
 
         return out
 
