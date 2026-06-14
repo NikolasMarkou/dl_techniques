@@ -6,7 +6,7 @@ with unified interfaces, type safety, parameter validation, and detailed documen
 This factory enables seamless integration and experimentation with different attention
 types across vision_heads, NLP, and multi-modal architectures.
 
-The factory supports twenty-three different attention mechanisms, from standard multi-head attention
+The factory supports twenty-seven different attention mechanisms, from standard multi-head attention
 to specialized variants like differential attention, mobile-optimized MQA, and hierarchical
 anchor attention. Each layer is fully documented with use cases, parameter requirements,
 and architectural considerations.
@@ -35,6 +35,7 @@ from .channel_attention import ChannelAttention
 from .convolutional_block_attention import CBAM
 from .differential_attention import DifferentialMultiHeadAttention
 from .fnet_fourier_transform import FNetFourierTransform
+from .gated_attention import GatedAttention
 from .group_query_attention import GroupedQueryAttention
 from .hopfield_attention import HopfieldAttention
 from .lighthouse_attention import LighthouseAttention
@@ -44,6 +45,9 @@ from .multi_head_cross_attention import MultiHeadCrossAttention
 from .multi_head_latent_attention import MultiHeadLatentAttention
 from .non_local_attention import NonLocalAttention
 from .perceiver_attention import PerceiverAttention
+from .performer_attention import PerformerAttention
+from .ring_attention import RingAttention
+from .rpc_attention import RPCAttention
 from .shared_weights_cross_attention import SharedWeightsCrossAttention
 from .spatial_attention import SpatialAttention
 from .tripse_attention import TripSE1, TripSE2, TripSE3, TripSE4
@@ -63,6 +67,7 @@ AttentionType = Literal[
     'channel',
     'differential',
     'fnet',
+    'gated',
     'group_query',
     'hopfield',
     'lighthouse',
@@ -72,6 +77,9 @@ AttentionType = Literal[
     'multi_head_latent',
     'non_local',
     'perceiver',
+    'performer',
+    'ring',
+    'rpc',
     'shared_weights_cross',
     'spatial',
     'tripse1',
@@ -749,6 +757,147 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         ),
         'complexity': 'O(W²) per window, same as standard window attention',
         'paper': "Extends 'Swin Transformer' with zigzag partitioning and advanced normalization"
+    },
+
+    # DECISION plan_2026-06-14_0c5d4a21/D-007: gated/performer/ring/rpc registered
+    # (construction-only); performer/rpc call-mask quirks documented not renamed
+    # (F1, user D1). Do NOT rename performer.call (no attention_mask param) or
+    # rpc.call (uses `mask` not `attention_mask`) — that is behavior-touching and
+    # out of scope (Invariant 5). The factory is construction-only; these are
+    # documented caveats, not registration blockers. See decisions.md D-007.
+    'gated': {
+        'class': GatedAttention,
+        'description': (
+            'Gated multi-head self-attention with partial rotary position embeddings '
+            '(RoPE) and a learned per-head output gate. Combines QK-normalization, '
+            'configurable attention-probability function, and a sigmoid-style gate that '
+            'modulates the attention output, improving training stability and selectivity.'
+        ),
+        'required_params': ['dim', 'num_heads'],
+        'optional_params': {
+            'head_dim': None,
+            'max_seq_len': 4096,
+            'rope_percentage': 0.5,
+            'dropout_rate': 0.0,
+            'use_bias': False,
+            'kernel_initializer': 'glorot_uniform',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'bias_regularizer': None,
+            'probability_type': 'softmax',
+            'probability_config': None,
+            'qk_norm_type': 'zero_centered_rms_norm',
+            'qk_norm_kwargs': None,
+            'gate_activation_type': 'sigmoid',
+            'gate_activation_args': None
+        },
+        'use_case': (
+            'Transformer language and sequence models that benefit from gated, '
+            'rotary-position self-attention with QK-norm for stable training. A '
+            'drop-in self-attention block where output gating improves selectivity.'
+        ),
+        'complexity': 'O(n²d) standard self-attention plus a per-head output gate',
+        'paper': 'Gated Attention (QK-norm + partial RoPE + output gating)'
+    },
+
+    'performer': {
+        'class': PerformerAttention,
+        'description': (
+            'Linear-complexity self-attention via the FAVOR+ random-feature approximation '
+            'of softmax attention. Projects queries/keys into a random feature space '
+            '(nb_features) to compute attention in O(n) time and memory. NOTE: '
+            'ortho_scaling is a scalar multiply of the random features, NOT FAVOR+ '
+            'orthogonalization (see layer docstring). CALL-SIG CAVEAT: performer.call '
+            'has NO attention_mask parameter (construction-only registration; the '
+            'mask-less call signature is a documented, intentional quirk, not renamed).'
+        ),
+        'required_params': ['dim'],
+        'optional_params': {
+            'num_heads': 8,
+            'nb_features': 256,
+            'ortho_scaling': 0.0,
+            'causal': False,
+            'dropout_rate': 0.0,
+            'use_bias': False,
+            'kernel_initializer': 'glorot_uniform',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'bias_regularizer': None
+        },
+        'use_case': (
+            'Long-sequence modeling where quadratic attention is prohibitive and a '
+            'linear-attention approximation is acceptable. Suited to large context '
+            'windows in NLP and other long-range sequence tasks.'
+        ),
+        'complexity': 'O(n) linear attention via FAVOR+ random features (vs O(n²))',
+        'paper': 'Rethinking Attention with Performers (FAVOR+)'
+    },
+
+    'ring': {
+        'class': RingAttention,
+        'description': (
+            'Block-wise self-attention designed for memory-efficient distribution of '
+            'long sequences across devices in a ring topology. Processes the sequence in '
+            'blocks of block_size with optional QK-normalization, enabling near-linear '
+            'memory scaling for very long contexts.'
+        ),
+        'required_params': ['dim'],
+        'optional_params': {
+            'num_heads': 8,
+            'block_size': 512,
+            'dropout_rate': 0.0,
+            'use_bias': False,
+            'kernel_initializer': 'glorot_uniform',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'bias_regularizer': None,
+            'qk_norm_type': None,
+            'qk_norm_kwargs': None
+        },
+        'use_case': (
+            'Extremely long-context training/inference where the full sequence does not '
+            'fit in a single device, leveraging block-wise computation and ring '
+            'communication for memory-efficient exact attention.'
+        ),
+        'complexity': 'O(n²) compute, O(n·block_size) peak memory via block-wise tiling',
+        'paper': 'Ring Attention with Blockwise Transformers for Near-Infinite Context'
+    },
+
+    'rpc': {
+        'class': RPCAttention,
+        'description': (
+            'Robust PCA attention that decomposes the attention signal into a low-rank '
+            'plus sparse structure (via an iterative PCP-style refinement with an SVD '
+            'threshold) to suppress noise/outliers in the attention map. CALL-SIG '
+            'CAVEAT: rpc.call uses a `mask` parameter (NOT `attention_mask`); this is a '
+            'construction-only registration and the parameter name is a documented, '
+            'intentional quirk, not renamed (Invariant 5). NOTE: lambda_sparse is a '
+            'sparsity-regularization weight (>0), NOT a 0-1 dropout-style rate.'
+        ),
+        'required_params': ['dim'],
+        'optional_params': {
+            'num_heads': 8,
+            'lambda_sparse': 0.1,
+            'max_pcp_iter': 10,
+            'svd_threshold': 1.0,
+            'qkv_bias': False,
+            'dropout_rate': 0.0,
+            'kernel_initializer': 'glorot_uniform',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'bias_regularizer': None,
+            'probability_type': 'softmax',
+            'probability_config': None,
+            'qk_norm_type': None,
+            'qk_norm_kwargs': None
+        },
+        'use_case': (
+            'Attention scenarios with noisy or outlier-heavy correspondences where a '
+            'robust low-rank + sparse decomposition of the attention map improves '
+            'stability over standard softmax attention.'
+        ),
+        'complexity': 'O(n²d) plus iterative PCP/SVD refinement overhead per call',
+        'paper': 'Robust PCA Attention (low-rank + sparse decomposition)'
     }
 }
 """
