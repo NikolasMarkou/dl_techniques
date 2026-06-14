@@ -180,6 +180,14 @@ class DINOHead(keras.layers.Layer):
         """Build the DINO head layers."""
         super().build(input_shape)
 
+        # DECISION plan_2026-06-14_8c7365d0/D-006
+        # Reset the sublayer accumulators to their __init__ empty state BEFORE
+        # appending. build() must be idempotent: a second build (functional-API
+        # reuse or from_config reconstruction) would otherwise duplicate every
+        # sublayer/weight. Do NOT append without clearing first.
+        self.mlp_layers = []
+        self.last_layer = None
+
         if self.nlayers == 1:
             # Single layer: direct projection to bottleneck dimension
             layer = keras.layers.Dense(
