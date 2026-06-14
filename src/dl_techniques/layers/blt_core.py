@@ -690,5 +690,9 @@ class ByteLatentReasoningCore(keras.layers.Layer):
             "embeddings_regularizer": keras.regularizers.serialize(self.embeddings_regularizer),
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
         })
+        # DECISION plan_2026-06-14_080e7636/D-003: get_config MUST `return config`.
+        # The original method built+updated config but never returned it (returned
+        # None) -> .keras / from_config round-trip dead. Surfaced by the first test.
+        return config
 
 # ---------------------------------------------------------------------
