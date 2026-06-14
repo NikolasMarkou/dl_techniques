@@ -83,12 +83,19 @@ class TverskyProjectionLayer(layers.Layer):
     where feature presence is determined by positive dot products with the
     feature bank vectors and all parameters are learned end-to-end.
 
+    .. note::
+        This layer operates on **rank-2** inputs only, i.e. shape
+        ``(batch_size, input_dim)``. ``build()`` raises ``ValueError`` for any
+        other rank. Apply it per-token (e.g. via ``TimeDistributed``) if you
+        need to project sequence/spatial tensors.
+
     **Architecture Overview:**
 
     .. code-block:: text
 
         ┌────────────────────────────────────────┐
-        │  Input [..., input_dim]                │
+        │  Input (batch_size, input_dim)         │
+        │  (rank-2 only — see note below)        │
         └──────────────┬─────────────────────────┘
                        ▼
         ┌────────────────────────────────────────┐
@@ -169,6 +176,19 @@ class TverskyProjectionLayer(layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Create the layer's weights: prototypes, features, and contrast params."""
+        if self.built:
+            return
+
+        # This layer's set-operation broadcasting is rank-2 only. Fail loud rather
+        # than silently produce mismatched-rank broadcasts for higher-rank inputs.
+        if len(input_shape) != 2:
+            raise ValueError(
+                "`TverskyProjectionLayer` operates on rank-2 inputs "
+                f"(batch_size, input_dim). Got rank-{len(input_shape)} input "
+                f"with shape {input_shape}. Wrap the layer in `TimeDistributed` "
+                "to apply it per-token on higher-rank tensors."
+            )
+
         input_dim = input_shape[-1]
         if input_dim is None:
             raise ValueError(
@@ -205,8 +225,17 @@ class TverskyProjectionLayer(layers.Layer):
 
         super().build(input_shape)
 
-    def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """Forward pass computation of Tversky similarity."""
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
+        """Forward pass computation of Tversky similarity.
+
+        :param inputs: Rank-2 tensor of shape ``(batch_size, input_dim)``.
+        :param training: Unused; accepted for standard FFN call-signature
+            compatibility (the layer has no training-specific behavior).
+        """
         # Compute dot products to get feature presence scores.
         # inputs shape: (batch_size, input_dim)
         # feature_bank shape: (num_features, input_dim)
