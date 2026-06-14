@@ -201,12 +201,12 @@ class MyNewAttention(keras.layers.Layer):
 When adding a new layer, you must update `dl_techniques/layers/attention/factory.py`.
 
 1.  **Define Type Literal:** Add your layer string to `AttentionType`.
-2.  **Update Registry:** Add mapping in `_ATTENTION_LAYER_REGISTRY`.
-3.  **Define Params:** Add parameter definitions to `_ATTENTION_PARAMS`.
-    *   Define `required` parameters (validation will fail if missing).
-    *   Define `optional` parameters with defaults.
+2.  **Update Registry:** Add mapping in `ATTENTION_REGISTRY`.
+3.  **Define Params:** Add parameter definitions to the same `ATTENTION_REGISTRY` entry.
+    *   Define `required_params` (validation will fail if missing).
+    *   Define `optional_params` with defaults.
 
-**Example `_ATTENTION_PARAMS` entry:**
+**Example `ATTENTION_REGISTRY` entry:**
 ```python
 'my_new_attention': {
     'class': MyNewAttention,

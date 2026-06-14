@@ -198,17 +198,17 @@ attn = create_attention_layer(
 ```python
 attn = create_attention_layer(
     'fnet',
-    implementation='fft'
+    implementation='matrix'
 )
 ```
+**Known limitation:** `implementation='fft'` is **not** implemented — a true O(N log N) FFT path does not exist. Requesting `'fft'` emits a one-time warning and transparently falls back to the matrix DFT (`'matrix'`), whose cost is `O(S^2 * D + S * D^2)` (two complex matmuls), not O(N log N). Output is byte-identical to `'matrix'`.
 
 ### `gated`
 **Required:** `dim`, `num_heads`  
-**Optional:** `head_dim` (default: None), `max_seq_len` (default: 4096), `rope_percentage` (default: 0.5)
+**Optional:** `head_dim` (default: None), `max_seq_len` (default: 4096), `rope_percentage` (default: 0.5), `probability_type` (default: 'softmax'), `probability_config` (default: None), `qk_norm_type` (default: 'zero_centered_rms_norm'), `gate_activation_type` (default: 'sigmoid')
 ```python
-# This layer is not yet in the factory, instantiate directly
-from dl_techniques.layers.attention import GatedAttention
-attn = GatedAttention(
+attn = create_attention_layer(
+    'gated',
     dim=768,
     num_heads=12,
     max_seq_len=2048
@@ -241,7 +241,7 @@ attn = create_attention_layer(
 
 ### `lighthouse`
 **Required:** `dim`, `num_heads`
-**Optional:** `head_dim` (default: None), `num_levels` (default: 3), `pooling_factor` (default: 4), `top_k` (default: 1536), `full_attention` (default: False), `normalization_type` (default: 'rms_norm')
+**Optional:** `head_dim` (default: None), `num_levels` (default: 3), `pooling_factor` (default: 4), `top_k` (default: 1536), `full_attention` (default: False), `qk_norm_type` (default: 'rms_norm')
 ```python
 # Pyramid path: 3 levels, branch factor 4, top-1536 entries
 attn = create_attention_layer(
@@ -288,21 +288,22 @@ attn = create_attention_layer(
 
 ### `multi_head_cross`
 **Required:** `dim`  
-**Optional:** `num_heads` (default: 8), `dropout_rate` (default: 0.0), `shared_qk_projections` (default: False), `use_adaptive_softmax` (default: False), `use_hierarchical_routing` (default: False), `adaptive_softmax_config` (default: None)
+**Optional:** `num_heads` (default: 8), `dropout_rate` (default: 0.0), `shared_qk_projections` (default: False), `probability_type` (default: 'softmax'), `probability_config` (default: None), `qk_norm_type` (default: None)
 ```python
-# Create a cross-attention layer with adaptive temperature
+# Create a cross-attention layer with an adaptive (entropy-adaptive softmax)
+# attention-probability function
 attn = create_attention_layer(
     'multi_head_cross',
     dim=512,
     num_heads=8,
-    use_adaptive_softmax=True,
-    adaptive_softmax_config={'min_temp': 0.2, 'max_temp': 1.5}
+    probability_type='adaptive',
+    probability_config={'min_temp': 0.2, 'max_temp': 1.5}
 )
 ```
 
 ### `multi_head_latent`
 **Required:** `dim`, `num_heads`, `kv_latent_dim`
-**Optional:** `qk_nope_head_dim` (default: 128), `qk_rope_head_dim` (default: 64), `v_head_dim` (default: 128), `q_latent_dim` (default: None), `normalization_type` (default: 'rms_norm')
+**Optional:** `qk_nope_head_dim` (default: 128), `qk_rope_head_dim` (default: 64), `v_head_dim` (default: 128), `q_latent_dim` (default: None), `qk_norm_type` (default: 'rms_norm')
 ```python
 attn = create_attention_layer(
     'multi_head_latent',
@@ -315,12 +316,12 @@ attn = create_attention_layer(
 
 ### `non_local`
 **Required:** `attention_channels`  
-**Optional:** `normalization` (default: 'batch'), `attention_mode` (default: 'gaussian')
+**Optional:** `output_norm_type` (default: 'batch_norm'), `attention_mode` (default: 'gaussian')
 ```python
 attn = create_attention_layer(
     'non_local',
     attention_channels=128,
-    normalization='layer',
+    output_norm_type='layer_norm',
     attention_mode='dot_product'
 )
 ```
@@ -339,24 +340,25 @@ attn = create_attention_layer(
 
 ### `performer`
 **Required:** `dim`
-**Optional:** `num_heads` (default: 8), `nb_features` (default: 256), `causal` (default: False)
+**Optional:** `num_heads` (default: 8), `nb_features` (default: 256), `ortho_scaling` (default: 0.0), `causal` (default: False)
 ```python
-# This layer is not yet in the factory, instantiate directly
-from dl_techniques.layers.attention import PerformerAttention
-attn = PerformerAttention(
+attn = create_attention_layer(
+    'performer',
     dim=512,
     num_heads=8,
     nb_features=256
 )
 ```
+**Known limitations:**
+- `ortho_scaling` applies a plain scalar multiply to the random features; it does **not** perform FAVOR+ orthogonalization (that path is not implemented). See the layer docstring.
+- `performer.call` has **no** `attention_mask` parameter (its call signature is `call(inputs, training=None, return_attention_scores=False)`). Factory registration is construction-only; the mask-less call is an intentional, documented quirk and is not renamed. Do not pass `attention_mask` to a factory-created performer layer.
 
 ### `ring`
 **Required:** `dim`
-**Optional:** `num_heads` (default: 8), `block_size` (default: 512)
+**Optional:** `num_heads` (default: 8), `block_size` (default: 512), `qk_norm_type` (default: None)
 ```python
-# This layer is not yet in the factory, instantiate directly
-from dl_techniques.layers.attention import RingAttention
-attn = RingAttention(
+attn = create_attention_layer(
+    'ring',
     dim=768,
     num_heads=12,
     block_size=1024
@@ -365,16 +367,18 @@ attn = RingAttention(
 
 ### `rpc`
 **Required:** `dim`
-**Optional:** `num_heads` (default: 8), `lambda_sparse` (default: 0.1), `max_pcp_iter` (default: 10)
+**Optional:** `num_heads` (default: 8), `lambda_sparse` (default: 0.1), `max_pcp_iter` (default: 10), `svd_threshold` (default: 1.0), `probability_type` (default: 'softmax'), `qk_norm_type` (default: None)
 ```python
-# This layer is not yet in the factory, instantiate directly
-from dl_techniques.layers.attention import RPCAttention
-attn = RPCAttention(
+attn = create_attention_layer(
+    'rpc',
     dim=512,
     num_heads=8,
     lambda_sparse=0.15
 )
 ```
+**Known limitations:**
+- `lambda_sparse` is a sparsity-regularization weight (`>0`), **not** a 0-1 dropout-style rate.
+- `rpc.call` uses a `mask` parameter, **not** `attention_mask` (call signature `call(inputs, mask=None, training=None, return_attention_scores=False)`). Factory registration is construction-only; the parameter name is an intentional, documented quirk and is not renamed. Pass `mask=` (not `attention_mask=`) to a factory-created rpc layer.
 
 ### `shared_weights_cross`
 **Required:** `dim`  
@@ -425,16 +429,17 @@ attn = create_attention_layer(
 
 ### `window_zigzag`
 **Required:** `dim`, `window_size`, `num_heads`  
-**Optional:** `dropout_rate` (default: 0.0), `qkv_bias` (default: True), `normalization` (default: 'softmax'), `use_relative_position_bias` (default: False)
+**Optional:** `dropout_rate` (default: 0.0), `qkv_bias` (default: True), `probability_type` (default: 'softmax'), `probability_config` (default: None), `use_relative_position_bias` (default: False)
 ```python
-# Create a zigzag window attention with adaptive softmax
+# Create a zigzag window attention with an adaptive (entropy-adaptive softmax)
+# attention-probability function
 attn = create_attention_layer(
     'window_zigzag',
     dim=96,
     window_size=7,
     num_heads=4,
-    normalization='adaptive_softmax',
-    adaptive_softmax_config={'min_temp': 0.1, 'max_temp': 2.0}
+    probability_type='adaptive',
+    probability_config={'min_temp': 0.1, 'max_temp': 2.0}
 )
 ```
 
