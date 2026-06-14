@@ -180,3 +180,5 @@
 | plan_2026-06-14_7734bacd | 2026-06-14 | Deep comprehensive review of all attention layers in `src/dl |  |
 | plan_2026-06-14_b9456f74 | 2026-06-14 | Deep comprehensive review of all attention layers in `src/dl |  |
 | plan_2026-06-14_ab855e7e | 2026-06-14 | Resolve the verified residue (F2-F7) from a fresh adversaria |  |
+| plan_2026-06-14_077a2a35 | 2026-06-14 | 7th-pass remediation of `src/dl_techniques/layers/attention/ |  |
+| plan_2026-06-14_33b77a7a | 2026-06-14 | Complete the deferred `ops.sqrt`-in-`call()` consistency swe |  |

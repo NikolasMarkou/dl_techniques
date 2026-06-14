@@ -337,7 +337,7 @@ class MLPBlock(keras.layers.Layer):
         config.update({
             "hidden_dim": self.hidden_dim,
             "output_dim": self.output_dim,
-            "activation": self.activation_name,  # Store original name/callable
+            "activation": keras.activations.serialize(self.activation_fn),
             "dropout_rate": self.dropout_rate,
             "use_bias": self.use_bias,
             "kernel_initializer": keras.initializers.serialize(self.kernel_initializer),

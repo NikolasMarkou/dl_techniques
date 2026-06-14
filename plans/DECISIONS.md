@@ -30,6 +30,87 @@
 - Anchor at impact site (not at decision definition). One anchor per impact site, even if shared with sibling decision.
 <!-- /COMPRESSED-SUMMARY -->
 
+## plan_2026-06-14_33b77a7a
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-06-14_33b77a7a/D-NNN` anchor exists in source)
+-->
+
+### D-001 | EXPLORE → PLAN | sweep scope + byte-identity gate | 2026-06-14
+**Context**: D-003 deferred the ops.sqrt-in-call() sweep. Census found 6 static call()-time sqrt-scale sites (performer:245/289, lighthouse:651/763, capsule:519, non_local:514) and 3 genuinely-dynamic sites (window:489, wave_field:556, capsule:599 — tensor norms / runtime shape).
+**Decision**: Precompute the 6 static scales as Python floats (reuse performer.self.scale + lighthouse._scale where they already exist; add 3 new attrs). Leave the 3 dynamic sites. Gate every site with `np.float32(new)==np.float32(old)` + the existing test suite; revert any site that shifts a test.
+**Trade-off**: Eliminating per-forward ops.sqrt tensor-node creation + D-002 consistency **at the cost of** touching 4 live numeric paths where a >1-ULP float drift would be a regression.
+**Reasoning**: The precompute pattern is the blessed D-002 idiom already in ~15 layers. The risk is bounded to float32 rounding and fully covered by the regression oracle. Alternatives (leave deferred) rejected — the user explicitly requested the sweep.
+**Anchor-Refs**: `src/dl_techniques/layers/attention/performer_attention.py:247` (D-001), `src/dl_techniques/layers/attention/lighthouse_attention.py:650` (D-002), `src/dl_techniques/layers/attention/non_local_attention.py:515` (D-003), `src/dl_techniques/layers/attention/capsule_routing_attention.py:344` (D-004) — per-step in-code anchors.
+
+### D-002 | PLAN | capsule precompute in build(), not __init__ | 2026-06-14
+**Context**: capsule `actual_key_dim` is None in __init__ (resolved in build() from input_shape embed_dim).
+**Decision**: Precompute `_inv_sqrt_key_dim` in build() after actual_key_dim resolves; non_local/performer precompute in __init__ (init-static dims).
+**Trade-off**: Correct value at every call **at the cost of** one non-uniform precompute location (build vs init).
+**Reasoning**: Precomputing in __init__ would read None and crash. Mirrors the build-time-resolution pattern already in the layer.
+**Anchor-Refs**: `src/dl_techniques/layers/attention/lighthouse_attention.py:650` (in-code `D-002` anchor — D-002 precompute-reuse pattern), `src/dl_techniques/layers/attention/capsule_routing_attention.py:344` (D-004, build())
+
+### D-003 | EXECUTE | non_local dot_product-only scale precompute | 2026-06-14
+**Context**: `non_local_attention.py:514` computed `scores / ops.sqrt(cast(key_value_channels))` per forward, inside the `dot_product` branch only; `gaussian` mode is intentionally unscaled (matches keras Attention use_scale=False).
+**Decision**: Precompute `self._inv_sqrt_kv = 1.0/math.sqrt(float(key_value_channels))` in `__init__` (key_value_channels is final at init); replace 514 with `scores * self._inv_sqrt_kv`; remove the dead `d_k` line. Gaussian branch untouched.
+**Trade-off**: Drop per-call ops.sqrt + D-002 consistency **at the cost of** a scale constant captured at init (correct: key_value_channels never mutates post-init).
+**Reasoning**: np.float32 probe equal (0 ULP: 0.125 both); 16 non_local tests green incl. gaussian.
+**Anchor-Refs**: `src/dl_techniques/layers/attention/non_local_attention.py:515`
+
+### D-004 | EXECUTE | capsule scale precompute in build() | 2026-06-14
+**Context**: `capsule_routing_attention.py:519` computed `attention_logits / ops.sqrt(cast(actual_key_dim))` per forward. `actual_key_dim` is None in __init__, resolved in build() from input_shape.
+**Decision**: Precompute `self._inv_sqrt_key_dim = 1.0/math.sqrt(float(actual_key_dim))` in build() after actual_key_dim resolves; replace 519 with `attention_logits * self._inv_sqrt_key_dim`.
+**Trade-off**: Drop per-call ops.sqrt **at the cost of** a non-uniform precompute location (build, not init) — mandated by actual_key_dim's resolution timing.
+**Reasoning**: np.float32 probe equal (0 ULP: 0.25 both); 34 capsule tests green incl. graph-mode + .keras round-trip.
+**Anchor-Refs**: `src/dl_techniques/layers/attention/capsule_routing_attention.py:344`
+
+## plan_2026-06-14_077a2a35
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-06-14_077a2a35/D-NNN` anchor exists in source)
+-->
+
+### D-001 | Hopfield F7 cross-attn KV-dim derivation | 2026-06-14
+**Context**: `hopfield_attention.py:373-375` builds `key_dense`/`value_dense` with `query_shape` ("Assuming key has same shape as query"). Cross-attention with a different K/V feature dim locks in a wrong-shaped kernel. Zero callers trigger it today; self-attention is correct.
+**Decision**: Derive `key_shape`/`val_shape` from the list-of-shapes branch (element-type check `isinstance(input_shape[0], (list,tuple))`), falling back to `query_shape` for the flat single-shape (self-attention) case; build K/V Dense from those.
+**Trade-off**: Correct cross-attention build **at the cost of** four extra lines in `build()` and a wider input contract that the self-attn path must provably pass through unchanged.
+**Reasoning**: The element-type disambiguation is the established pattern (perceiver S1, LESSONS tuple->list rule). Self-attn input is a flat tuple so the fallback keeps it byte-identical (the live-path invariant). Alternative (rename/restructure inputs) rejected: out of scope, no caller demand. STOP-IF self-attn diverges -> revert this step, ship AF1/AF2 only.
+**Anchor-Refs**: `src/dl_techniques/layers/attention/hopfield_attention.py:382-396` (build() K/V shape fix)
+
+### D-002 | Performer NOTE 1 causal/non-causal branch | 2026-06-14
+**Context**: `performer_attention.py:_linear_attention()` always computes the non-causal block (lines 320-333, incl. a rank-4 `kv` materialization) then overwrites `out` when `self.causal`. The non-causal compute is fully dead on the causal path.
+**Decision**: Wrap the body in `if self.causal: <causal block> else: <non-causal block>`, each block byte-identical to its current form (causal block is the S3-fixed version).
+**Trade-off**: Eliminated dead FLOPs on the causal path **at the cost of** touching a hot live numeric path where any byte-level drift is a regression.
+**Reasoning**: Pure compute-elision; both branches are exactly today's code. Gated by atol-0 forwards for both `causal` values + the full performer test file. Alternative (leave as-is) rejected because the deferred NOTE 1 is a named open item and the fix is <=8 lines and behavior-identical.
+**Anchor-Refs**: `src/dl_techniques/layers/attention/performer_attention.py:316` (causal/non-causal guard)
+
+### D-003 | Scope discipline — defer SQRT sweep + not-a-bug items | 2026-06-14
+**Context**: Adversarial pass flagged `ops.sqrt`-in-`call()` at performer:245/289, lighthouse:651/763, capsule:519, non_local:514 (consistency, not correctness), plus AF3 mobile_mqa get_config and NOTE 2 add_weight ordering.
+**Decision**: Fix only hopfield AF2 (folds into Step 1); defer the rest of the SQRT sweep; classify AF3 + NOTE 2 as NOT-A-BUG and leave untouched.
+**Trade-off**: A smaller, fully behavior-verifiable plan **at the cost of** leaving a known cosmetic SQRT-consistency gap across four files.
+**Reasoning**: Those call-time sqrt sites produce correct output and are behavior-neutral (YAGNI); a broad sweep would expand the live-path blast radius for zero functional gain. AF3/NOTE 2 are provably safe under standard Keras `from_config`/idempotency guard (findings). Surface-and-defer keeps both this plan and any future SQRT-consistency plan clean.
+**Anchor-Refs**: (none — scope decision, no source anchor)
+
+### D-004 | FLAKY capsule test — diagnostic-first, not source-contort | 2026-06-14
+**Context**: `test_capsule_routing_attention.py::...test_graph_mode_positional_routing_concrete_seqlen` passes isolated (6.67s), fails in full-suite run. Classified as test-isolation/global-state pollution, not a source defect.
+**Decision**: Diagnose root cause; apply a fix ONLY if it is a quick, clearly-correct test-isolation change (missing reset / stale registration / deterministic seed). Otherwise document and leave source AND test untouched.
+**Trade-off**: Honest diagnosis with a hard autonomy leash **at the cost of** possibly leaving a known CI-flake unfixed this iteration.
+**Reasoning**: Contorting source to satisfy polluted global state would introduce a real defect to mask a test-infra problem (LESSONS: diagnostic-vs-fix framing logged before code). If diagnosis reveals a real source defect, that falsifies A7 -> NEEDS_EXPLORE, not a quick fix.
+**Anchor-Refs**: (none until a concrete test-isolation fix is chosen)
+
+### D-005 | FLAKY root cause = eager-vs-graph tolerance, fix applied | 2026-06-14
+**Context**: Diagnosed D-004. Isolated 20-run stress (GPU1) on the eager-vs-graph comparison: 0 failures but worst `maxabs = 5.96e-7`, sitting right under the test's `atol=1e-6`. No random-order plugin; conftest has no seeding/policy-reset fixtures. The input was UNSEEDED (`keras.random.normal` w/o seed), so per-run magnitude varied and under full-suite GPU memory pressure (different XLA kernel selection) the delta occasionally exceeded 1e-6. NOT a source defect, NOT global-state pollution — genuine eager-vs-XLA float nondeterminism with an over-tight tolerance.
+**Decision**: Seed the test input (`seed=1337`) for determinism and loosen the eager-vs-graph assertion from `1e-6` to `1e-5` (a realistic GPU eager-vs-graph delta). Source untouched. This satisfied A7 (test-infra, not source) and the D-004 "quick clearly-correct test-isolation fix" gate.
+**Trade-off**: A deterministic, non-flaky A1 lock **at the cost of** a 10x looser numeric tolerance on that one assertion.
+**Reasoning**: The A1 invariant (static-shape loop unrolls; graph matches eager) is still fully locked at 1e-5 — a broken unroll diverges by orders of magnitude, not 1e-6. Seeding removes run-to-run variance; the tolerance reflects the true eager-vs-XLA delta. The compiled-model sibling (test...in_compiled_model) only checks shape/NaN, and the roundtrip test compares same-path predict() calls — neither is at risk, so no further edits. Verified: full capsule file 34 passed.
+**Anchor-Refs**: (none — test-only change)
+
 ## plan_2026-06-14_ab855e7e
 ### D-001 | EXPLORE → PLAN | YYYY-MM-DD
 **Context**: <one-paragraph background — what was discovered in EXPLORE>
@@ -82,70 +163,3 @@ D-001 in-code anchors (F2 scale): `src/dl_techniques/layers/attention/gated_atte
 - **NOTE 4** (README `differential_attention` rationale imprecise — pitfall is a positional `training` binding to `layer_idx`, not `attention_mask`): FIXED in commit `d5bafaa4` (step-7).
 - **Blind-spot closure**: reviewer flagged general-H×W PFA SW-MSA correctness was verified only by an ephemeral manual forward → added committed regression `test_shifted_window_forward_general_geometry` (4 geometries incl. non-square nW>1) in commit `721a6e83` (step-6).
 **Anchor-Refs**: none (REFLECT routing decision; no new in-code anchor).
-
-## plan_2026-06-14_7734bacd
-### D-001 | EXPLORE → PLAN | YYYY-MM-DD
-**Context**: <one-paragraph background — what was discovered in EXPLORE>
-**Decision**: <chosen approach in one sentence>
-**Trade-off**: <X> **at the cost of** <Y>
-**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-06-14_7734bacd/D-NNN` anchor exists in source)
--->
-
-### D-001 | EXPLORE → PLAN | 2026-06-14
-**Context**: 4 parallel explorers audited all 30 attention files (33 classes), factory, docs, tests. Package largely healthy (prior F18/F19/hopfield/cross-attn fixes verified present). Found 2 real robustness bugs (capsule `range(graph_tensor)` graph crash A1, capsule Dense-in-build A2), 4 doc/wiring defects (W1-W4), 3 contract-limit findings (C1-C3), 6 untested/partial layers (T1/T2). Explorers over-flagged `ops.sqrt`-in-`call()` as HARD; downgraded to non-bug (N1, dropped).
-**Decision**: Scoped plan = Bugs + docs + tests. Fix A1/A2/W1-W4, document C1/C2/C3, add forward+config+`.keras` tests for the 6 layers. Defer L1 mass-guard pass + L2/F20 + C1 renames.
-**Trade-off**: Fix verified-real bugs and close the regression-gate gap **at the cost of** leaving ~25 harmless missing-guard build()s and 7 non-standard call sigs documented-but-unchanged (renames break serialized configs).
-**Reasoning**: User-selected scope. L1 guards are pure-additive cosmetic conformance with near-zero real payoff and high review cost; C1 renames unsafe. The 6 untested layers are the real robustness risk — tests close coverage AND surface latent dead-on-forward bugs (LESSONS: never-executed code hides multi-bug chains). User directed fix-in-plan, per-step leash still gates (2 attempts → STOP).
-**Anchor-Refs**: none yet (code anchors added during EXECUTE if a fix meets the 5 trigger conditions)
-
-### D-002 | EXECUTE step 2 | 2026-06-14
-**Context**: Capsule A2 fix. The four Dense projections (query/key/value/output) are None-init in `__init__` and created in `build()` because their units depend on `embed_dim = input_shape[-1]` (`actual_key_dim` defaults to `embed_dim // num_heads`; `output_dense` uses `embed_dim`). Build had no idempotency guard, so a second `build()` (functional reuse / from_config) re-creates and discards already-built Dense weights.
-**Decision**: Keep the Denses created in `build()` (None-sentinel pattern, same as HopfieldAttention precedent in this package) and add `if self.built: return` as the first line of `build()` to make it idempotent. Do NOT move the Denses to `__init__`.
-**Trade-off**: Idempotent build with weight-correct reload **at the cost of** retaining the None-sentinel-in-build pattern (units genuinely need input shape, so moving to `__init__` is impossible without an extra ctor arg).
-**Reasoning**: Trigger conditions: non-obvious ("why not move Denses to __init__?") + framework constraint (units depend on input_shape[-1]) + a simpler-looking alternative (move to __init__) deliberately rejected. The guard alone is the actual A2 fix; the `.keras` round-trip test is the detection oracle.
-**Anchor-Refs**: `src/dl_techniques/layers/attention/capsule_routing_attention.py:328-334`
-
-### D-003 | EXECUTE step 3 | 2026-06-14
-**Context**: First-ever `.keras` round-trip test for `PerceiverAttention` surfaced a latent serialization bug. `build()` branched on `isinstance(input_shape, list)` to decide "two inputs (cross-attention) vs single input". Keras serializes a shape tuple to a plain list, so on `build_from_config` during `load_model` a single 3D query shape arrives as `[None, 8, 32]` (a 3-element list of scalars). The old check treated that as 3 inputs and raised `ValueError("Expected 2 inputs for cross-attention, got 3")`. Forward/eager and symbolic-build worked (shape passed as a real tuple); the bug bit ONLY via the functional `.keras` round-trip (build_config replay) — the classic "never-executed code" failure mode.
-**Decision**: Disambiguate a genuine list-of-shapes (elements are themselves list/tuple) from a single serialized shape (elements are int/None) via a local `_is_list_of_shapes` helper, instead of `isinstance(list)` alone. 7-line contained fix; forward semantics unchanged on every previously-working path (cross-attention suite 65 green, perceiver_transformer consumer smoke green).
-**Trade-off**: Robust round-trip + multi-input support **at the cost of** a small structural-typing helper inside build() (vs the simpler-but-wrong isinstance check).
-**Reasoning**: Trigger conditions: framework constraint (Keras tuple→list shape serialization) + non-obvious ("why not just isinstance(list)?") + a simpler alternative (the original check) deliberately rejected because it is the bug. A separately-surfaced PFA SW-MSA mask bug (dead-on-forward, 5D index + mismatched tile + collapsing reshape) was NOT chased — it needs a >10-line restructure altering masked-attention semantics, so its test is `xfail(strict=False)` and surfaced for a dedicated plan (per leash).
-**Anchor-Refs**: `src/dl_techniques/layers/attention/perceiver_attention.py:174-198`
-
-### D-004 | EXECUTE step 4 | 2026-06-14
-**Context**: First-ever tests for RingAttention + PerformerAttention surfaced two latent bugs in never-executed code paths (per LESSONS). (1) Performer `causal=True` forward is dead-on-forward: `_linear_attention` causal branch (`performer_attention.py:333-349`) builds a 5-D tensor via `ops.einsum('bhnf,bhnd->bhnfd', ...)`, `cumsum`es it, then feeds it (with a mis-ranked `expand_dims(q, -2)`) into a second einsum `'bhnf,bhnfd->bhnd'` whose subscripts are inconsistent with the actual tensor ranks → `InvalidArgumentError` (rank 5 vs expected 4). (2) RingAttention forward/config/.keras all pass, but backprop fails: blockwise output placement uses `ops.slice_update` → `XlaDynamicUpdateSlice`, which has no registered gradient in eager TF.
-**Decision**: Per HARD leash (multi-bug chain / >10-line restructure → STOP, xfail, do NOT chase). Both bugs marked `@pytest.mark.xfail(strict=False)` with root-cause reasons and kept as gates. NO source edits — revert-clean (working paths untouched). Performer non-causal forward + Ring forward/config/.keras are fully functional and covered by passing tests.
-**Trade-off**: Closes coverage on the working paths + documents the two latent bugs as standing gates **at the cost of** leaving causal-Performer and Ring-gradient-flow unfixed (each needs a dedicated plan: streaming-causal math rewrite; gradient-friendly scatter/concat block placement).
-**Reasoning**: 3-strike / multi-bug-chain leash. The causal fix requires re-deriving the streaming-causal cumsum (>10 lines, semantics-altering); the Ring gradient fix requires replacing `slice_update` with a differentiable block-placement (backend-level, semantics-sensitive). Neither is a contained ≤10-line fix. Surfaced for dedicated follow-up plans (the F18/F19 / PFA-SW-MSA deferral pattern).
-**Anchor-Refs**: none (no source edited; xfail gates at `tests/test_layers/test_attention/test_performer_attention.py` TestForward::test_output_shape_causal and `tests/test_layers/test_attention/test_ring_attention.py` TestEdgeCases::test_gradient_flow)
-
-### D-005 | REFLECT iter-1 | 2026-06-14
-**Context**: All 5 steps complete. Final regression gate: 935 passed / 3 xfailed / 0 failed / 0 errors (+109 vs 826 baseline). 6/6 success criteria PASS. Scope drift none, diff clean, validate-plan introduces zero new ERRORs (31 pre-existing orphan anchors from other plans). EXECUTE surfaced 4 latent bugs: S1 (Perceiver .keras) FIXED in-plan (D-003); S2/S3/S4 (PFA shifted-window mask, Performer causal, Ring gradient-flow) DEFERRED as xfail-gated multi-bug chains per the autonomy leash.
-**Decision**: Recommend CLOSE. The plan's scoped goal (fix A1/A2/W1-W4, document C1-C3, add T1/T2 coverage) is fully met. The 3 deferred bugs are correctly out-of-scope (each a >10-line multi-bug restructure) and now permanently gated by xfail regression tests + findings S2/S3/S4 for dedicated follow-up plans.
-**Trade-off**: Ship a verified, fully-tested attention package with 3 documented-and-gated known-broken modes **at the cost of** not resolving S2/S3/S4 here (genuine multi-bug chains; chasing them would violate the leash and risk derailing 1 clean fix + 6 clean test-additions — the F18/F19 deferral pattern).
-**Reasoning**: User directed "fix all in-plan" but acknowledged the per-step leash still gates; S2/S3/S4 each blew the 10-line / multi-bug threshold on diagnosis, so xfail+defer is the correct leash application. Devil's advocate: 3 layer modes remain broken in source — but they were ALREADY broken (never-executed dead code), this plan did not regress them, and it converted silent breakage into loud xfail-gated + documented breakage, strictly better.
-**Anchor-Refs**: none (REFLECT routing decision, no new source anchor)
-
-## plan_2026-06-14_adaddf34
-### D-001 | EXPLORE → PLAN | YYYY-MM-DD
-**Context**: <one-paragraph background — what was discovered in EXPLORE>
-**Decision**: <chosen approach in one sentence>
-**Trade-off**: <X> **at the cost of** <Y>
-**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-06-14_adaddf34/D-NNN` anchor exists in source)
--->
-
-### D-001 | EXPLORE → PLAN | 2026-06-14
-**Context**: Two pre-existing `NonLocalAttention` bugs surfaced (not caused) by plan_2026-06-14_0c5d4a21, deferred to this plan. Both source-verified AND reproduced: F18/G1 — DEFAULT `attention_mode='gaussian'` reduces K/V to `attention_channels//8` but leaves `query_conv` at full `attention_channels`, so `Q@Kᵀ` is shape-incompatible (`Matrix size-incompatible [2,256,32] x [2,4,256]`); F19/G2 — `kernel_size` normalization uses `isinstance(kernel_size, tuple)`, False for the LIST Keras produces on `.keras` reload → wraps to `([7,7],[7,7])`, breaking round-trip.
-**Decision**: Two surgical fixes in `non_local_attention.py` (G2 normalize via `tuple(...)`; G1 align Q to embedded `key_value_channels` + `max(1,//8)` guard + docstring) plus a NEW `test_non_local_attention.py` regression gate. Byte-identical on working paths (dot_product; int/tuple kernel_size).
-**Trade-off**: Correct Non-local embedded-Gaussian + robust serialization **at the cost of** changing the gaussian-mode query channel count (a path that currently crashes → no working caller affected) and 1 new test file.
-**Reasoning**: `Q@Kᵀ` REQUIRES a matched contraction dim, so reducing only K/V is a bug, not a design choice; aligning Q to `key_value_channels` is minimal + byte-identical in dot_product. `tuple(kernel_size)` uniformly handles int/tuple/list/TrackedList. Rejected: separate Q-projection (extra params, not the paper); custom from_config (band-aid — root cause is __init__ normalization); changing `//8` (out of scope).
-**Anchor-Refs**: `src/dl_techniques/layers/attention/non_local_attention.py` (D-002 anchor added at the gaussian channel-alignment site during EXECUTE step 2)
-
-### D-002 | EXECUTE step 2 | 2026-06-14
-**Context**: F18/G1 — gaussian mode left `query_conv` at full `attention_channels` while K/V were reduced to `attention_channels//8`, so `Q@Kᵀ` contracted mismatched dims and crashed. The embedded-Gaussian formulation (Wang et al.) projects theta/phi/g all to the same reduced dim.
-**Decision**: In gaussian mode set `key_value_channels = max(1, attention_channels // 8)` and route `query_conv` (and the `call()` q-reshape, `build()` q_seq_shape, and dot_product `d_k` scaling) through `key_value_channels` so Q,K,V share one embedded dim. `dot_product` keeps `key_value_channels == attention_channels` → byte-identical.
-**Trade-off**: Correct, well-formed gaussian attention **at the cost of** reducing the gaussian-mode query channel count (a path that only ever crashed → no working caller affected).
-**Reasoning**: `Q@Kᵀ` needs a matched contraction dim; reducing only K/V is a bug. `max(1, ...)` clamps `attention_channels<8` to embedded dim 1 (avoids a 0-filter Conv2D). Rejected: a separate Q-projection (extra params, not the paper); keeping Q full via padding (incorrect). Verified SC2 dot_product `array_equal` (max_abs_diff 0.0), SC1 gaussian forward finite, SC5 (channels=4) guard forward finite.
-**Anchor-Refs**: `src/dl_techniques/layers/attention/non_local_attention.py:279-284`

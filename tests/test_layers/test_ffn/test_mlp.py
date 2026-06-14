@@ -278,7 +278,9 @@ class TestMLPBlock:
         # Verify specific values
         assert config['hidden_dim'] == 2048
         assert config['output_dim'] == 256
-        assert config['activation'] == 'swish'
+        # Activation serialized via keras.activations.serialize canonicalizes
+        # aliases (swish -> silu); assert functional equivalence.
+        assert keras.activations.get(config['activation']) == keras.activations.get('swish')
         assert config['dropout_rate'] == 0.2
 
     def test_serialization_cycle(self, layer_config, sample_input):

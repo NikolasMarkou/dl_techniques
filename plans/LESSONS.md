@@ -10,7 +10,7 @@
 - **Run the existing test suite as the FIRST step of EXPLORE when the goal is "fix issues found in a review".**
 - **A reuse-review / recommendation doc is a HYPOTHESIS, not a finding -- source-read every claim before PLAN.**
 - **An inventory finding about a layer's `call` signature is a HYPOTHESIS; verify by reading the actual signature before relying on it.**
-- **Explorer audit claims are HYPOTHESES.** Source-verify every explorer claim before planning.
+- **Explorer audit claims are HYPOTHESES.** Source-verify every explorer claim before planning. A CONFIRMED explorer finding can still be REFUTED on direct source read (confirmed twice: DiffFFN regularizer, GatedMLP docstring math).
 - **Pre-Mortem "STOP IF X" triggers earn their cost when they fire in 1-2 plans out of N.**
 - **Plan-time line-count predictions undershoot.** ~2x for sibling-class additions, 5-10x for dtype-semantics under mixed precision, ~1.7x for multi-layer flag-plumbing. A new test file for a shared layer undershoots ~3x.
 - **Pre-existing tests can encode bugs as contracts.** When a fix causes adjacent tests to fail, read the failing assertions before assuming regression.
@@ -27,7 +27,7 @@
 - **A plan can legitimately REVERSE a closed prior plan's decisions** when a new authoritative source contradicts them.
 - **Architecture-first migration ordering**: migrate into the library BEFORE renaming/deleting the train scripts that import them.
 - **git archaeology (`git show <sha>:<path>`) is the cheapest scaffold source when a deleted implementation is the closest ancestor.**
-- **First-ever forward-pass tests on never-tested layers surface CASCADING latent bugs.** Budget explicitly. In confirmed instances (modern_bert_blt_hrm, ByteLatentReasoningCore, attention T1 layers) a single reported bug masked a multi-bug chain. Assume multi-bug chains in never-executed code.
+- **First-ever forward-pass tests on never-tested layers surface CASCADING latent bugs.** Budget explicitly. In confirmed instances (modern_bert_blt_hrm, ByteLatentReasoningCore, attention T1 layers, OrthoGLUFFN) a single reported bug masked real defects. Assume multi-bug chains in never-executed code.
 - **`--visualize_every_n_epochs 1` in smoke runs is required to exercise the prediction-plot savefig path.** Default cadence 5 skips plots in a 3-epoch run.
 - **Explorer gap-map claims ("get_config drops param X") MUST be source-verified against the actual `__init__` signature.**
 - **A grep-gate scoped to a package dir catches stale README/doc residue too.**
@@ -48,44 +48,47 @@
 - **`keras.ops.stop_gradient` is a FUNCTION, not a context manager.** Use `z = ops.stop_gradient(x)`.
 - **A missing `return config` in `get_config` returns None silently.** Every new-layer test MUST assert `get_config`/`from_config` directly.
 - **Compute STATIC scalars (e.g. attention `scale = 1/sqrt(head_dim)`) with stdlib `math.*`, NOT `keras.ops.*`.**
+- **Before adding a new precomputed scale attr, check whether the class already holds one.** In attention layers `self.scale` / `self._scale` are common; reusing them at the new call site is DRY and avoids divergence (plan_2026-06-14_33b77a7a: 4 of 6 sites were reuse, not new attrs).
+- **Precompute timing is dictated by when the dimension resolves.** Init-static dims (`head_dim`, `nb_features`, `key_value_channels`) go in `__init__`; build-time dims (`actual_key_dim` resolved from `input_shape`) MUST go in `build()` -- placing them in `__init__` reads `None` and crashes.
+- **0-ULP `np.float32` equality is stronger evidence than a tolerance test for a scale-constant swap.** `atol=1e-5` allows drift; byte-identity rules out float32 rounding entirely and is the right gate for behavior-preserving precompute conversions.
 - **`LocalEncoder` (blt_blocks) already pools internally -- callers must NOT re-pool.**
 - **Keras sublayer-list accumulators in `build()` are a double-build trap.** Any `build()` that appends to `self.some_list` MUST reset the accumulator at the TOP of `build()`.
 - **When `get_config` serializes a dataclass via `to_dict()`, add a `from_config` class method that rebuilds the dataclass.**
 - **Anticipated multi-bug chains sometimes do NOT materialize.** Fix-on-demand is correct. Do NOT pre-emptively edit unconfirmed bugs.
 - **Surface EXECUTE-discovered out-of-scope bugs -- don't silently scope-creep.** Defer to a dedicated follow-up plan.
 - **Deferring out-of-scope bugs keeps both the parent plan and the fix plan clean and verifiable.**
-- **Surface+defer with xfail-gating is the correct call for multi-bug chains that exceed the 10-line leash.** A focused follow-up plan resolves them cleanly. (Confirmed: S2/S3/S4 each deferred by plan_2026-06-14_7734bacd, all resolved in plan_2026-06-14_b9456f74.)
+- **Surface+defer with xfail-gating is the correct call for multi-bug chains that exceed the 10-line leash.** A focused follow-up plan resolves them cleanly.
 - **Ephemeral manual verification is not durable.** When a reviewer flags a blind spot, commit the regression test immediately.
-- **"Fully resolved" from a prior plan is scoped to that plan's findings, not exhaustive.** A fresh adversarial pass with per-claim source verification can still find real residue. Re-review of a "done" area is not wasteful when the area is complex. (plan_2026-06-14_ab855e7e found F2-F6 residue after 5 prior plans declared attention/ done.)
-- **When fixing a defect class, grep ALL files in the package.** A sweep that fixes "the known instances" can miss siblings (capsule/PFA had static-shape + fail-loud; ring/anchor/gated/gqa/mobile_mqa missed by the prior sweep). Recurring defect classes in attention/: ops.sqrt-on-static-scalar; range-over-dynamic-ops.shape; Python-bool branch on dynamic seq.
-- **Factory `optional_params` completeness needs a param-passthrough test, not just construct-smoke.** Construct-smoke succeeds even when kwargs are silently dropped. Assert the param actually lands on the instance.
+- **"Fully resolved" from a prior plan is scoped to that plan's findings, not exhaustive.** A fresh adversarial pass with per-claim source verification can still find real residue.
+- **When fixing a defect class, grep ALL files in the package.** A sweep that fixes "the known instances" can miss siblings.
+- **Factory `optional_params` completeness needs a param-passthrough test, not just construct-smoke.** Construct-smoke succeeds even when kwargs are silently dropped. Assert the param actually lands on the instance with a **non-default value**.
 
 ## Graph-safe attention patterns (plan_2026-06-14_7734bacd)
 
 - **`range(ops.shape(x)[N])` is graph-broken** under `@tf.function`/jit. A test using a concrete shape passes; only a `TensorSpec([None,...])` symbolic trace reproduces the crash.
 - **Static `.shape[N]` + fail-loud `ValueError` on `None`** is the graph-safe fix for any Python loop or Python-int branch over a sequence-length dim.
-- **Keras functional API uses `compute_output_shape` and does NOT execute `call()` symbolically.** A `keras.Input(shape=(None,...))` test will NOT trigger a fail-loud guard inside `call()`. Only a `tf.function` + `TensorSpec([None,...])` trace runs `call()` with a dynamic dim and can expose the guard. (Confirmed: ring/anchor graph-safety tests required `tf.function`, not functional-API build.)
-- **Dense-with-input-shape-dependent-units stays None-sentinel-in-build + idempotency guard.** Fix is `if self.built: return` as the FIRST line of `build()`. Hopfield, NonLocal, and Capsule are all instances of this pattern.
+- **Keras functional API uses `compute_output_shape` and does NOT execute `call()` symbolically.** A `keras.Input(shape=(None,...))` test will NOT trigger a fail-loud guard inside `call()`. Only a `tf.function` + `TensorSpec([None,...])` trace runs `call()` with a dynamic dim.
+- **Dense-with-input-shape-dependent-units stays None-sentinel-in-build + idempotency guard.** Fix is `if self.built: return` as the FIRST line of `build()`.
 - **Keras tuple->list shape serialization breaks `isinstance(input_shape, list)` multi-input disambiguation.** Fix: check whether elements are list/tuple (list-of-shapes) vs int/None (single serialized shape).
 
 ## Attention-specific fixes (plan_2026-06-14_b9456f74)
 
 - **Performer causal FAVOR+ prefix-sum**: `kv_outer = einsum('bhnf,bhnd->bhnfd',k,v)` -> `kv_cumsum = cumsum(kv_outer,axis=2)` -> `out = einsum('bhnf,bhnfd->bhnd',q,kv_cumsum) / expand_dims(z_causal,-1)`. NO `expand_dims` on v or q -- spurious rank-5 expansion is the bug.
 - **Ring/blockwise differentiable assembly**: replace `ops.slice_update` (lowers to `XlaDynamicUpdateSlice`, no eager-TF gradient) with Python list-append + `ops.concatenate(axis=seq_dim)`. Forward numerics byte-identical; gradient flows correctly.
-- **Swin SW-MSA mask MUST be parametrized by actual static H,W.** Hardcoded 2xws grid is silently wrong for any feature map != 2xws. Build `img_mask (1,H,W,1)` then partition into nW windows (exactly as `_window_partition` does it) so tile is B-major/window-minor and aligns with `attn_scores`. Fail-loud ValueError on dynamic H or W.
-- **`if self.built: return` guard sweep across 25 attention files was mechanical and zero-regression.** The existing `.keras` round-trip suite is the regression oracle. Adding guard to passing single-build layers is always safe in Keras 3.
+- **Swin SW-MSA mask MUST be parametrized by actual static H,W.** Hardcoded 2xws grid is silently wrong for any feature map != 2xws.
+- **`if self.built: return` guard sweep across 25 attention files was mechanical and zero-regression.** Confirmed again for 10 ffn/ files (plan_2026-06-14_60541575) -- the sweep is always safe in Keras 3 when layers are single-build today.
 
 ## Attention residue cleanup (plan_2026-06-14_ab855e7e)
 
 - **self.scale = 1.0/math.sqrt(float(head_dim)) in `__init__`** is the D-002 scale contract. Prior plans fixed cross/diff; gated/gqa/mobile_mqa were missed. After any D-002 fix sweep, grep the whole package for remaining `ops.sqrt(ops.cast(` scale sites.
-- **Factory `optional_params` is the kwarg filter.** Only keys in required_params + optional_params reach the class constructor. Missing keys silently drop real class args. Fixed entries: anchor (head_dim, probability_type, probability_config), channel (intermediate_activation_{type,args}, gate_activation_{type,args}), spatial (gate_activation_{type,args}), tripse1-4 (gate_activation_{type,args} + tripse4 se_reduction_activation_{type,args}).
-- **mobile_mqa silently ignores `attention_mask`** due to downsampling making general masking non-trivial. Contract: document with IGNORED note in docstring + README caveat table (spatial_attention precedent). No behavior change needed.
+- **Factory `optional_params` is the kwarg filter.** Only keys in required_params + optional_params reach the class constructor. Missing keys silently drop real class args.
+- **mobile_mqa silently ignores `attention_mask`** due to downsampling making general masking non-trivial. Contract: document with IGNORED note in docstring + README caveat table.
 - **Deferred (no caller): hopfield cross-attn KV-dim latent bug.** Self-attention path is correct. Fix only when a cross-attention caller exists.
 
 ## Attention layer invariants (F18/F19 lessons -- plan_2026-06-14_adaddf34)
 
 - **Q@Kt REQUIRES Q and K to share the contraction (channel) dim.** A layer that reduces only K/V while leaving Q at full channels is mathematically broken.
-- **Keras .keras round-trip serializes tuple ctor args and reloads them as list/TrackedList.** Normalize ALL size-like constructor args with `(x, x) if isinstance(x, int) else tuple(x)`.
+- **Keras .keras round-trip serializes tuple ctor args and reloads them as list/TrackedList.** Normalize ALL size-like constructor args with `(x, x) if isinstance(x, int) else tuple(x)`. This recurred in ffn/OrthoGLUFFN (plan_2026-06-14_60541575 D-002) -- use `isinstance(x, (tuple, list))` for guards, then `tuple(x)` to normalize.
 
 ## Keras 3 build-ordering (CONFIRMED FOUR-STRIKE defect class)
 
@@ -144,6 +147,7 @@
 - **Early-stopping on `val_total_loss` is confounded by KL warmup.** Monitor `val_reconstruction_loss`.
 - **mLSTM/matrix-memory cells REQUIRE the log-domain max-stabilizer m_t, same as sLSTM.**
 - **Eager correctness and `model.fit()` correctness are distinct failure classes.**
+- **Seed BOTH weights AND inputs for any margin-comparison test.** An unseeded weight+input combination magnifies float32 variation under GPU memory pressure, causing non-deterministic failures at tight tolerances. Use `atol=1e-5` for eager-vs-graph comparisons (not 1e-6); a real graph-unroll defect diverges by orders of magnitude, so 1e-5 still locks the structural invariant.
 
 ## XLA / GPU kernel compatibility
 

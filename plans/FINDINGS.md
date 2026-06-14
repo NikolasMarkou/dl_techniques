@@ -36,6 +36,111 @@
 - **`current_phase` / `_global_step` counters**: `add_weight(trainable=False, dtype="float32")` — int32 fails CPU/GPU device placement.
 <!-- /COMPRESSED-SUMMARY -->
 
+## plan_2026-06-14_33b77a7a
+### Goal
+Complete the deferred `ops.sqrt`-in-`call()` consistency sweep (D-003 of plan_2026-06-14_077a2a35).
+Precompute STATIC attention scales as Python floats (D-002 pattern: `1.0/math.sqrt(float(static_int))`),
+reuse existing precomputed attrs where present. Behavior-preserving. Leave genuinely-dynamic sqrt.
+
+### Full sqrt-site census (grep of attention/*.py)
+
+### STATIC — precompute / reuse (IN SCOPE)
+| Site | Current | Static source | Fix | Where to precompute |
+|------|---------|---------------|-----|---------------------|
+| `performer_attention.py:245` | `projection / ops.sqrt(ops.cast(self.head_dim, dtype))` | head_dim (init:162) | REUSE `self.scale` (init:163 = 1/np.sqrt(head_dim)) -> `projection * self.scale` | already exists |
+| `performer_attention.py:289` | `features * ops.sqrt(2.0/ops.cast(self.nb_features, dtype))` | nb_features (init:149) | new `self._feature_scale = math.sqrt(2.0/float(nb_features))` -> `features * self._feature_scale` | `__init__` |
+| `lighthouse_attention.py:651` | `ops.cast(1.0/ops.sqrt(ops.cast(self.head_dim,dt)),dt)` | head_dim | REUSE `self._scale` (init:340 = 1/float(head_dim)**0.5) -> `ops.cast(self._scale, q_t.dtype)` | already exists |
+| `lighthouse_attention.py:763` | `ops.cast(1.0/ops.sqrt(ops.cast(D,dt)),dt)` D=head_dim (742) | head_dim | REUSE `self._scale` | already exists |
+| `capsule_routing_attention.py:519` | `attention_logits / ops.sqrt(ops.cast(self.actual_key_dim,dt))` | actual_key_dim resolved in build (341) | new `self._inv_sqrt_key_dim = 1.0/math.sqrt(float(actual_key_dim))` -> `attention_logits * self._inv_sqrt_key_dim` | **`build()`** (after line 342) |
+| `non_local_attention.py:514` | `scores / ops.sqrt(d_k)` d_k=cast(key_value_channels) | key_value_channels (init:284) | new `self._inv_sqrt_kv = 1.0/math.sqrt(float(key_value_channels))` -> `scores * self._inv_sqrt_kv` (dot_product mode only; gaussian unaffected) | `__init__` (after 284) |
+
+### DYNAMIC — genuine runtime tensors (OUT OF SCOPE, leave as-is)
+| Site | Why dynamic |
+|------|-------------|
+| `window_attention.py:489` | `sqrt(cast(N_actual))` N_actual = `ops.shape(inputs)[1]` runtime seq len |
+| `wave_field_attention.py:556` | `sqrt(sum(square(k)))` — per-vector L2 norm over a tensor |
+| `capsule_routing_attention.py:599` | `sqrt(squared_norm + eps)` — squash norm over a tensor |
+
+### ALREADY-FIXED precedent (do not touch)
+gated:249, gqa:202, mla:242, ring:162, shared_weights_cross:169, diff:246, mhxa:237, hopfield:242 (AF2),
+wave_field:249, ideogram4:126, mmdit:158, performer:163(self.scale), lighthouse:340(_scale), anchor:222, rpc:191.
+
+### Index
+| ID | Topic | File | Summary |
+|----|-------|------|---------|
+| CENSUS | sqrt-site classification | findings.md (this file) | 6 static call()-time sites to fix across 5 files; 3 dynamic left; reuse self.scale/_scale at 4 sites, 2 new attrs. |
+| TIMING | precompute location | findings.md | non_local+performer in __init__; capsule in build() (actual_key_dim needs input_shape). |
+| MP | mixed-precision test coverage | findings.md | NONE of lighthouse/performer/capsule/non_local have MP tests. float32 is the live/tested path. |
+
+### Key Constraints
+- **HARD**: behavior-preserving. Precomputed Python-float scale must equal the old `ops.sqrt` result in
+  float32 (the tested path). Verify per-site with `np.float32(new) == np.float32(old)`; tests are the oracle.
+  Any forward test shift -> revert that site (it is consistency-only, not worth a regression).
+- **HARD**: precompute timing — capsule MUST be in build() (actual_key_dim is None until build resolves
+  embed_dim from input_shape). Precomputing in __init__ would crash/use None.
+- **HARD**: non_local fix applies ONLY to `dot_product` mode (line 514); `gaussian` mode has no scaling — do not add any.
+- **SOFT**: reuse existing precomputed attrs (self.scale / self._scale) rather than add duplicates (DRY).
+
+### Corrections
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong.*
+
+## plan_2026-06-14_077a2a35
+### Prior-work context (CRITICAL — read before exploring)
+
+`src/dl_techniques/layers/attention/` has been reviewed by ~6 closed plans TODAY (2026-06-14).
+Current ground-truth baseline: **989 passed / 27 skipped / 0 failed** (per ab855e7e CLOSE).
+HEAD = 97996298. This is a 7th pass — value is in (a) deferred items, (b) fresh adversarial residue.
+
+Prior plans + what they fixed:
+- `0c5d4a21`: F1-F16. Factory registration 23->27, build-guard sentinels (hopfield/nonlocal/PFA/tripse),
+  fnet fft guard, performer/rpc regularizer round-trip, README/GUIDE param-name fixes, __init__ exports.
+- `adaddf34`: NonLocal F18 (gaussian Q/K/V dim alignment) + F19 (kernel_size normalize) + new test.
+- `7734bacd`: "Deep review" — capsule A1/A2, W1-W4 docs/wiring, C1-C3 contract docs, Perceiver .keras
+  fix (D-003). Deferred S1(fixed)/S2/S3/S4 as xfail.
+- `b9456f74`: Resolved S2 (PFA SW-MSA mask), S3 (Performer causal einsum), S4 (Ring gradient list+concat),
+  L1/L2/F20 (29 build() idempotency guards across 25 files), D1-D3 docs/exports. 939 passed.
+- `ab855e7e`: Fresh adversarial pass F2-F6. Precompute static scale (gated/gqa/mobile_mqa),
+  ring/anchor static-seq fail-loud guards, factory optional_params completion, mobile_mqa mask doc,
+  MLA training= forward. 989 passed.
+
+### KNOWN DEFERRED / OPEN ITEMS (the user explicitly asked to check these)
+- **F7 (ab855e7e)**: `hopfield_attention.py` builds K/V Dense with query_shape only; cross-attention with
+  a different K/V feature dim gets a wrong-shaped kernel. No caller today; self-attention path correct.
+  Inline-commented. -> VERIFY + assess fix.
+- **F8 (ab855e7e)**: `wave_field_attention` and `single_window_attention` have STANDARD call sigs but are
+  NOT factory-registered. -> VERIFY + assess registration.
+- **NOTE 1 (b9456f74)**: Performer runs dead non-causal compute even when causal=True (wasted FLOPs,
+  correctness-neutral). Optional `if not self.causal:` guard.
+- **NOTE 2 (b9456f74)**: mobile_mqa add_weight after super().build() — latent smell, idempotent-safe.
+- **C2 (b9456f74)**: package= on bare-registered classes changes registration KEY -> breaks already-saved
+  .keras deserialization. Document-only, NOT a fix.
+- **call() param renames**: D-007 (0c5d4a21) — renaming breaks serialized configs. Document-only.
+
+### ANCHOR DEBT
+~38 pre-existing foreign-plan orphan ERRORs from validate-plan.mjs at REFLECT. NOT blockers; triage by
+plan-id (project_validate_plan_anchor_debt memory).
+
+### Index
+| ID | Topic | File | Summary |
+|----|-------|------|---------|
+| FCT | Factory optional_params gaps | findings/factory-docs-audit.md | CONFIRMED: 7 registry entries silently drop real ctor params — capsule_routing/multi_head/group_query/perceiver/shared_weights_cross miss probability_type/probability_config/qk_norm_type/qk_norm_kwargs; non_local misses output_activation_args; window/window_zigzag miss kan_* . Same class ab855e7e fixed for anchor/channel/spatial/tripse — these were MISSED. |
+| F8 | wave_field+single_window unregistered | findings/deferred-items.md | CLEAN-FIX: both standard call sigs, additive registry+Literal+import. |
+| F7 | hopfield cross-attn KV-dim build | findings/deferred-items.md | CLEAN-FIX: build() uses query_shape for K/V Dense; wrong for cross-attn; byte-identical for self-attn (zero callers). |
+| DOC | README/__all__ doc gaps | findings/factory-docs-audit.md | README:82 wrongly says capsule_routing has no probability hooks; window class column shows class not factory fn; caveats table missing spatial/non_local; __all__ omits list_attention_types/get_attention_requirements. |
+| N1 | performer dead non-causal compute | findings/deferred-items.md | CLEAN-FIX (≤8 lines): non-causal block fully recomputed+discarded when causal=True. if/else guard, behavior-identical. |
+| AF1 | hopfield value_dim=None get_config | findings/adversarial-correctness.md | LOW: get_config serializes resolved int not original None. Round-trip functionally equiv. 1-line raw-arg store. |
+| SQRT | ops.sqrt-in-call() consistency | findings/adversarial-correctness.md | MED/consistency, NOT bugs: hopfield:431, performer:245/289, lighthouse:651/763, capsule:519, non_local:514 use ops.sqrt in call(). Call-time = correct output; only a precompute-consistency gap. Candidate DEFER (YAGNI). |
+| AF3 | mobile_mqa get_config key-delete | findings/adversarial-correctness.md | NOT-A-BUG: standard from_config re-injects; works. Skip. |
+| FLAKY | capsule graph test suite-order flake | findings/test-ground-truth.md | MED: fails in full suite, passes isolated. Test-isolation/global-state, not source. Diagnose. |
+
+### Key Constraints
+- **HARD**: behavior-preserving on all live call paths (zero regressions vs 989 baseline).
+- **HARD**: no registration-KEY changes (breaks saved .keras) — C2/param-renames stay document-only.
+- **SOFT**: follow established precedent patterns (None-sentinel build, fail-loud dynamic-N, math.sqrt scale).
+
+### Corrections
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong.*
+
 ## plan_2026-06-14_ab855e7e
 ### Index
 | # | Finding | File | Tag/Sev |
@@ -95,70 +200,3 @@ Detailed reports: `findings/review-core-mha.md`, `findings/review-efficient.md`,
 
 ### Corrections
 *None yet.*
-
-## plan_2026-06-14_7734bacd
-### Index
-
-| # | Finding | Severity | Evidence | Detail file |
-|---|---------|----------|----------|-------------|
-| A1 | **Capsule `range(graph_tensor)` crash.** `_horizontal_routing` does `seq_len = ops.shape(attention_weights)[2]` then `for l in range(seq_len)`. `use_positional_routing=True` is the DEFAULT. Works eagerly (passing test is eager-only); crashes under `tf.function`/jit (`range()` on a symbolic tensor). | HIGH | capsule_routing_attention.py:721-727; default :201 | lifecycle-group-b.md |
-| A2 | **Capsule Dense projections created in `build()` not `__init__`** (`query_dense`/`key_dense`/`value_dense`/`output_dense` = None in init, instantiated in build) + no `if self.built: return` guard → double-build replaces sublayers, `.keras` round-trip weight-corruption risk. | MEDIUM | capsule_routing_attention.py:303-381 | lifecycle-group-b.md |
-| W1 | **`__init__.py:46` stale comment** says gated/performer/ring/rpc are "not yet in factory registry" — all four ARE registered (factory.py:768-901). Doc-accuracy defect. | MEDIUM | __init__.py:46; factory.py:768-901 | wiring-docs.md |
-| W2 | **GUIDE.md:213-214 wrong dict keys** in the "add a new attention type" example: uses `'required'`/`'optional'` instead of `'required_params'`/`'optional_params'`. A developer following it silently bypasses all required-param validation. | MEDIUM | GUIDE.md:213-214 | wiring-docs.md |
-| W3 | `TripletAttentionBranch` exported from `__init__.__all__` though it is a tripse-internal helper (should be `_`-private or dropped from `__all__`). | LOW | __init__.py; tripse_attention.py:45 | wiring-docs.md |
-| W4 | `validate_attention_config`: no `dim == num_heads*head_dim` consistency check for `differential`; `key_dim` (hopfield-required) still unchecked; `window`/`window_zigzag` registry entries store factory FUNCTIONS not classes (works at runtime, breaks any `isinstance(info['class'], type)` guard). | LOW | factory.py:790-901 | wiring-docs.md |
-| T1 | **4 zero-coverage layers** (no forward/config/save-load test anywhere): `RingAttention`, `PerceiverAttention`, `PerformerAttention`, `ProgressiveFocusedAttention`. Untested layers in this repo have historically masked dead-on-forward bug chains (LESSONS). | HIGH | tests/test_layers/test_attention/ (absent) | test-coverage.md |
-| T2 | **2 partial-coverage layers**: `SingleWindowAttention` (only `isinstance`-checked in test_window_attention.py:71), `SpatialAttention` (only as CBAM sublayer in test_convolutional_block_attention.py:93). No standalone forward/serialize/round-trip. | MEDIUM | test-coverage.md | test-coverage.md |
-| T3 | **Weak serialization gates**: test_wave_field_attention.py (63 tests, 3 `.keras` hits), test_shared_weights_cross_attention.py (22 tests, 2 `.keras` hits) — config-heavy, thin save/load gate. Collection clean (826 tests, 0 errors). | LOW | test-coverage.md | test-coverage.md |
-| C1 | **7 non-standard `call()` signatures** vs the contract `call(inputs, attention_mask=None, training=None)`: `rpc`(`mask=`), `shared_weights_cross`(required positional `split_sizes`), `anchor`/`performer`/`lighthouse`(no mask), `group_query`/`ring`(`training` before `attention_mask`). Factory is construction-only so none block registration. Mostly architectural or risky-to-rename. | MEDIUM (document) | lifecycle-group-a.md | lifecycle-group-a.md |
-| C2 | **Lighthouse requires static seq-len**: `call()` raises `RuntimeError` when `_N_static is None` (dynamic/functional-API None seq-len). Fail-loud, intentional, but NOT documented in the docstring; combined with no-mask sig it is a limited-contract layer. | MEDIUM (document) | lighthouse_attention.py:717-726 | lifecycle-group-a.md |
-| C3 | **SpatialAttention silently ignores `attention_mask`** — param accepted, never used (vision layer). Misleading API: remove param or document. | LOW (document) | spatial_attention.py:197-229 | lifecycle-group-b.md |
-| L1 | **`build()` idempotency guard (`if self.built: return`) absent from ~25 of the layer/helper `build()` methods.** Only `NonLocalAttention`, `ProgressiveFocusedAttention`, `_SEWeights` have it. Pure-additive, behavior-preserving conformance gap; only bites layers that explicitly child-`.build()` AND get rebuilt (functional reuse / `from_config` on built parent). `.keras` round-trip is the regression gate. | LOW (mechanical) | lifecycle-group-a/b.md | both |
-| L2 | **F20 (known open): TripSE1-4 `build()` lack idempotency guard.** Single-build flow green (58 tests). Subset of L1. | LOW | tripse_attention.py:350,487,676,1012 | lifecycle-group-b.md |
-| N1 | **`ops.sqrt` used inside `call()`** in gated/hopfield/lighthouse/group_query to compute `1/sqrt(head_dim)` fresh per forward. Explorers flagged HARD; **DOWNGRADED**: D-002 is an `__init__`-time graph-leak rule — inside `call()` this is a harmless scalar recompute, NOT a correctness bug. Optional micro-efficiency cleanup (precompute `math.sqrt` float in `__init__`). | INFO (not a bug) | group_query:454, gated:510, hopfield:428, lighthouse:638,749 | lifecycle-group-a.md |
-| V1 | **Prior fixes VERIFIED present** (not regressed): non_local F18 (`query_conv` uses `key_value_channels`, :291) + F19 (kernel_size norm, :204); hopfield bounded loop (:556) + output_dense None-sentinel (:354); cross-attn `math.sqrt` (:237); performer/rpc regularizers via `regularizers.get()`. Atlas claims hold. | INFO | multiple | all |
-
-### Key Constraints
-
-- **[HARD] Behavior-preserving**: any conformance edit (idempotency guards, sublayer-in-init moves, scale precompute) MUST be byte-identical on forward. The `.keras` round-trip + existing 826-test suite is the regression gate. Any numeric delta = bug, revert.
-- **[HARD] Factory is construction-only**: ideogram4/mmdit correctly excluded (non-standard sigs). Do NOT factory-register them. Non-standard `call()` sigs (C1) do not block registration.
-- **[HARD] Untested-layer fixes need the test FIRST**: for A1 (capsule graph-safety) and any bug surfaced in T1, the new/expanded test is the regression gate — write it before/with the fix.
-- **[SOFT] GUIDE naming standard** (`dim`/`num_heads`/`head_dim`): legacy param names (`channels`, `attention_channels`, `key_dim`) are PRE-EXISTING; renaming breaks callers + serialized models → document, do not rename.
-- **[SOFT] Call-signature standardization (C1)**: renaming `mask`→`attention_mask` or reordering args risks breaking callers/serialized configs. Prefer document over rename unless a safe additive alias exists.
-- **[GHOST] "lifecycle conformance done"** (atlas claim): TRUE only for the specific layers prior plans targeted. ~25 build()s still lack the guard (L1) — but most are harmless. Do NOT treat the atlas as asserting full-package guard coverage.
-- **[GHOST] `ops.sqrt`-in-`call()` as a D-002 violation** (N1): the D-002 lesson is `__init__`-scoped; does not apply to `call()`. Not a ghost to chase.
-
-### Surfaced during EXECUTE (test-tier discoveries)
-
-| # | Finding | Severity | Status |
-|---|---------|----------|--------|
-| S1 | **Perceiver `.keras` round-trip bug** — `build()` used `isinstance(input_shape, list)` to pick single-vs-two-input; Keras serializes shape tuples to lists, so `load_model` mis-read a single query shape as "3 inputs" → `ValueError("Expected 2 inputs, got 3")`. Bit ONLY via `.keras` reload (forward/symbolic worked). | HIGH | FIXED step-3, D-003, `perceiver_attention.py:175-198`; cross-attn suite (65) green |
-| S2 | **PFA shifted-window (`shift_size>0`) mask path dead-on-forward** — `self._attn_mask` is 3D but `[None,None,:,:]` makes 5D, `tile` uses a mismatched 4-tuple, final `reshape` collapses `(B*heads,wa,wa)`→`(1,1,wa,wa)` → `InvalidArgumentError` (4096 vs 256). Multi-bug chain needing >10-line Swin-mask restructure. W-MSA (`shift_size=0`) path is fine. | HIGH | DEFERRED — xfail'd gate `test_shifted_window_forward` in test_progressive_focused_attention.py; **needs dedicated plan** |
-| S3 | **Performer `causal=True` dead-on-forward** — `_linear_attention` causal branch (`performer_attention.py:333-349`) builds 5-D einsum `'bhnf,bhnd->bhnfd'`, cumsums, then feeds into `'bhnf,bhnfd->bhnd'` with a mis-ranked `expand_dims(q,-2)` → `InvalidArgumentError` (rank 5 vs 4). Non-causal path is fine. | HIGH | DEFERRED — xfail'd gate in test_performer_attention.py; **needs dedicated plan** |
-| S4 | **Ring gradient-flow unsupported** — forward/config/`.keras` PASS, but backprop fails: blockwise output placement uses `ops.slice_update` → `XlaDynamicUpdateSlice`, no registered eager-TF gradient. Online-softmax forward exactness confirmed (single==multi block, atol 1e-5). | MEDIUM | DEFERRED — xfail'd gradient gate in test_ring_attention.py; **needs gradient-friendly scatter rewrite (dedicated plan)** |
-
-### Corrections
-*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
-
-## plan_2026-06-14_adaddf34
-### Index
-
-| # | Finding (source-verified + reproduced) | Severity | Evidence |
-|---|----------------------------------------|----------|----------|
-| G1 | **F18 — gaussian mode shape crash (DEFAULT mode).** `non_local_attention.py:285-289`: in `'gaussian'` mode `key_value_channels = attention_channels // 8`, but `query_conv` (`:277-281`) keeps full `attention_channels` filters. In `call()` (`:494-504`) `q` is `(B,N,attention_channels)`, `k` is `(B,N,kv)`, and `scores = matmul(q, transpose(k))` contracts q's last dim (attention_channels) with k's (kv=attention_channels//8) → **size-incompatible**. REPRODUCED: `NonLocalAttention(attention_channels=32)` forward `(2,16,16,64)` → `InvalidArgumentError: Matrix size-incompatible: In[0]: [2,256,32] ...`. `attention_mode='gaussian'` is the constructor DEFAULT, so `create_attention_layer('non_local', attention_channels=N)` + forward crashes. | CRITICAL | repro: matmul `[2,256,32]` x `[2,4,256]` |
-| G2 | **F19 — `.keras` round-trip kernel_size list-wrap.** `non_local_attention.py:203`: `self.kernel_size = kernel_size if isinstance(kernel_size, tuple) else (kernel_size, kernel_size)`. On `.keras` reload the serialized tuple `(7,7)` returns as a LIST `[7,7]` (TrackedList); `isinstance([7,7], tuple)` is False → else-branch wraps it to `([7,7],[7,7])`, then `DepthwiseConv2D(kernel_size=([7,7],[7,7]))` raises. REPRODUCED: Functional `.keras` save/load → `TypeError ... could not be deserialized`; isolate `NonLocalAttention(kernel_size=[7,7])` → `ValueError: kernel_size argument must be a tuple of 2 integers. Received kernel_size=([7, 7], [7, 7]) ... type TrackedList`. | HIGH | repro: ValueError on list kernel_size |
-
-### Root causes (both confirmed by reproduction)
-
-- **G1 fix direction**: the original Non-local embedded-Gaussian reduces Q, K, AND V to the same embedded channel dim (theta/phi/g all project to C_hat). The layer wrongly reduces only K/V. Make `query_conv` use `self.key_value_channels` too (and the `call()` q-reshape + dot_product `d_k` scaling reference `key_value_channels`). In `dot_product` mode `key_value_channels == attention_channels`, so the change is **byte-identical** there; in `gaussian` mode it makes Q@Kᵀ well-formed (all C//8). Docstring currently says "key/value channels are reduced" — update to "query, key, and value channels are reduced".
-- **G2 fix direction**: normalize `kernel_size` for int/tuple/list/TrackedList uniformly: `self.kernel_size = (kernel_size, kernel_size) if isinstance(kernel_size, int) else tuple(kernel_size)`. Byte-identical for int/tuple inputs; fixes the list/reload path.
-
-### Key Constraints
-
-- **HARD — behavior-preserving for dot_product + int/tuple inputs**: the G1 query-channel change must be byte-identical in `dot_product` mode (key_value_channels==attention_channels); the G2 normalization must be byte-identical for int and tuple `kernel_size` args. Any numeric delta in the unaffected paths = bug.
-- **HARD — no test currently exists** for non_local (parent plan finding). The regression gate is a NEW test file + inline smoke. This plan SHOULD add `tests/test_layers/test_attention/test_non_local_attention.py` covering: gaussian forward, dot_product forward, `.keras` Functional round-trip, int + tuple + list kernel_size, get_config/from_config.
-- **SOFT — gaussian channel reduction factor (//8)**: keep the existing `//8` (do not change to //2); only fix the query side to match. Caveat: `attention_channels < 8` makes `key_value_channels == 0` (degenerate) — consider a guard (`max(1, ...)`) or document; decide in PLAN.
-- **GHOST — "reduce only K/V" intent**: the docstring's claim that only K/V are reduced is mathematically impossible for Q@Kᵀ; it is a bug, not a constraint. Reducing Q to match is the correct Non-local behavior.
-
-### Corrections
-*Append [CORRECTED iter-N] entries here when earlier findings prove wrong.*

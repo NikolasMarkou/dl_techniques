@@ -224,9 +224,11 @@ class TestFFNFactory:
             kernel_initializer='he_normal'
         )
 
-        # Verify configuration is stored correctly
+        # Verify configuration is stored correctly. Activation is serialized via
+        # keras.activations.serialize, which canonicalizes aliases (swish -> silu);
+        # assert functional equivalence rather than the literal alias.
         config = layer.get_config()
-        assert config['activation'] == 'swish'
+        assert keras.activations.get(config['activation']) == keras.activations.get('swish')
         assert config['dropout_rate'] == 0.2
         assert config['use_bias'] == False
         assert config['kernel_initializer']['class_name'] == 'HeNormal'
