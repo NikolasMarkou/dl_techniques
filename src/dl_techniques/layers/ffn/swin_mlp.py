@@ -225,6 +225,12 @@ class SwinMLP(keras.layers.Layer):
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        # Guard against re-build (functional reuse / deserialization). Without
+        # this, fc2 is re-created below and the previously-built weights are
+        # dropped. Must be the FIRST line of build().
+        if self.built:
+            return
+
         # Validate input shape
         if len(input_shape) < 2:
             raise ValueError(f"Input must be at least 2D, got shape {input_shape}")
