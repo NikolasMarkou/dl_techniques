@@ -812,10 +812,20 @@ class TestCapsuleRoutingSelfAttention:
 
     def test_graph_mode_positional_routing_concrete_seqlen(self):
         """Locks A1: a tf.function trace with a CONCRETE seq-len must trace and
-        match eager output bit-for-bit (the static `.shape[2]` unrolls the loop).
+        match eager output (the static `.shape[2]` unrolls the loop).
+
+        Tolerance note: eager and graph (XLA) kernels differ at the ~1e-6 level
+        on GPU; the unseeded input previously made the worst-case delta straddle
+        atol=1e-6, so this test flaked only under full-suite GPU memory pressure
+        (passed in isolation). The seed makes the input deterministic and the
+        1e-5 tolerance reflects the real eager-vs-graph float delta — a broken
+        loop unroll would diverge by orders of magnitude, not 1e-6, so the A1
+        invariant is still fully locked.
         """
         batch_size, seq_len, embed_dim = 2, 8, 64
-        test_input = keras.random.normal([batch_size, seq_len, embed_dim])
+        test_input = keras.random.normal(
+            [batch_size, seq_len, embed_dim], seed=1337
+        )
 
         layer = CapsuleRoutingSelfAttention(
             num_heads=4,
@@ -839,7 +849,7 @@ class TestCapsuleRoutingSelfAttention:
         np.testing.assert_allclose(
             eager_output,
             graph_output,
-            rtol=1e-6, atol=1e-6,
+            rtol=1e-5, atol=1e-5,
             err_msg="Graph-mode positional routing must match eager output",
         )
 
