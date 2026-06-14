@@ -51,8 +51,9 @@ class NonLocalAttention(keras.layers.Layer):
     ``out = attn @ V``. In ``'dot_product'`` mode, scores are scaled by
     ``1/sqrt(d_k)`` (matching the previous behavior of ``use_scale=True``); in
     ``'gaussian'`` mode no scaling is applied (matching the previous
-    ``use_scale=False``) and the key/value channels are reduced to ``d_attn / 8``
-    as in the original paper. The attended output is reshaped back to spatial
+    ``use_scale=False``) and the query, key, and value channels are reduced to
+    ``d_attn / 8`` (clamped to ``>=1``) as in the original paper. The attended
+    output is reshaped back to spatial
     format and projected to the desired output channels.
 
     **Architecture Overview:**
@@ -76,7 +77,7 @@ class NonLocalAttention(keras.layers.Layer):
              ▼         ▼         ▼
         ┌────────────────────────────┐
         │ Reshape (H,W) → (H*W)      │
-        │ Q [B, H*W, d_attn]         │
+        │ Q [B, H*W, d_kv]           │
         │ K [B, H*W, d_kv]           │
         │ V [B, H*W, d_kv]           │
         └─────────────┬──────────────┘
@@ -273,19 +274,24 @@ class NonLocalAttention(keras.layers.Layer):
         else:
             self.output_norm = None
 
-        # Create Query, Key, Value projection layers
-        self.query_conv = keras.layers.Conv2D(
-            filters=self.attention_channels,
-            name='query_conv',
-            **self._conv_params
-        )
-
-        # Adjust key/value channels based on attention mode.
+        # Adjust the embedded attention dim based on attention mode.
         # Gaussian mode uses fewer channels as per original paper.
+        # DECISION plan_2026-06-14_adaddf34/D-002: gaussian reduces Q,K,V to a shared
+        # embedded dim (Q@Kᵀ needs a matched contraction dim); dot_product path
+        # byte-identical since key_value_channels==attention_channels there (F18).
+        # The max(1, ...) clamps attention_channels<8 to embedded dim 1 (not 0).
+        # See decisions.md D-002.
         self.key_value_channels = (
             self.attention_channels
             if self.attention_mode == 'dot_product'
-            else self.attention_channels // 8
+            else max(1, self.attention_channels // 8)
+        )
+
+        # Create Query, Key, Value projection layers (all share the embedded dim)
+        self.query_conv = keras.layers.Conv2D(
+            filters=self.key_value_channels,
+            name='query_conv',
+            **self._conv_params
         )
 
         self.key_conv = keras.layers.Conv2D(
@@ -428,7 +434,7 @@ class NonLocalAttention(keras.layers.Layer):
         width = input_shape[2] if input_shape[2] is not None else 32
         seq_len = height * width if (input_shape[1] is not None and input_shape[2] is not None) else None
 
-        q_seq_shape = (input_shape[0], seq_len, self.attention_channels)
+        q_seq_shape = (input_shape[0], seq_len, self.key_value_channels)
         kv_seq_shape = (input_shape[0], seq_len, self.key_value_channels)
 
         if self.q_norm is not None:
@@ -491,7 +497,7 @@ class NonLocalAttention(keras.layers.Layer):
         shape = ops.shape(query)
         batch_size, height, width = shape[0], shape[1], shape[2]
 
-        q = ops.reshape(query, [batch_size, -1, self.attention_channels])
+        q = ops.reshape(query, [batch_size, -1, self.key_value_channels])
         k = ops.reshape(key, [batch_size, -1, self.key_value_channels])
         v = ops.reshape(value, [batch_size, -1, self.key_value_channels])
 
@@ -504,7 +510,7 @@ class NonLocalAttention(keras.layers.Layer):
         scores = ops.matmul(q, ops.transpose(k, axes=[0, 2, 1]))
         if self.attention_mode == 'dot_product':
             # Match previous behavior of keras.layers.Attention(use_scale=True)
-            d_k = ops.cast(self.attention_channels, scores.dtype)
+            d_k = ops.cast(self.key_value_channels, scores.dtype)
             scores = scores / ops.sqrt(d_k)
         # In 'gaussian' mode, no scaling (matches previous use_scale=False)
 
