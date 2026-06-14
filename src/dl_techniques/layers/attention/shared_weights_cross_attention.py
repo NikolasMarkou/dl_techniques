@@ -20,6 +20,7 @@ References:
 
 # ---------------------------------------------------------------------
 
+import math
 import keras
 from keras import ops
 from typing import Any, List, Union, Tuple, Optional, Dict
@@ -162,8 +163,10 @@ class SharedWeightsCrossAttention(keras.layers.Layer):
         self.qk_norm_type = qk_norm_type
         self.qk_norm_kwargs = qk_norm_kwargs
 
-        # Scale factor for attention scores
-        self.scale = 1.0 / ops.sqrt(float(self.head_dim))
+        # Scale factor for attention scores.
+        # stdlib math.sqrt (Python float), not ops.sqrt; see D-002 in
+        # multi_head_cross_attention.py (symbolic scratch-graph tensor leak).
+        self.scale = 1.0 / math.sqrt(float(self.head_dim))
 
         # CREATE all sub-layers in __init__ (they are unbuilt)
         self.qkv_dense = keras.layers.Dense(

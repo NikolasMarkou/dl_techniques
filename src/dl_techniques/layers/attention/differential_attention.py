@@ -25,6 +25,7 @@ References:
     while canceling noise"
 """
 
+import math
 import keras
 from keras import ops
 from typing import Any, Dict, Optional, Tuple, Union
@@ -240,7 +241,9 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         self._proj_dim = self.num_heads * self.head_dim
 
         # Scale factor for scaled dot-product attention.
-        self.scale = 1.0 / ops.sqrt(float(self.head_dim))
+        # stdlib math.sqrt (Python float), not ops.sqrt; see D-002 in
+        # multi_head_cross_attention.py (symbolic scratch-graph tensor leak).
+        self.scale = 1.0 / math.sqrt(float(self.head_dim))
 
         # CREATE all sub-layers in __init__ following modern Keras 3 pattern
         try:

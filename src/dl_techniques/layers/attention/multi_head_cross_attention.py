@@ -44,6 +44,7 @@ References:
       Knowledge in a Neural Network".
 """
 
+import math
 import keras
 from keras import ops
 from typing import Optional, Any, Dict, Tuple, Union, List
@@ -225,8 +226,15 @@ class MultiHeadCrossAttention(keras.layers.Layer):
         self.qk_norm_type = qk_norm_type
         self.qk_norm_kwargs = qk_norm_kwargs
 
-        # Scale factor for attention scores
-        self.scale = 1.0 / ops.sqrt(float(self.head_dim))
+        # Scale factor for attention scores.
+        # DECISION plan_2026-06-14_a5ed2c2a/D-002: use stdlib math.sqrt (a Python
+        # float), NOT keras.ops.sqrt. ops.sqrt returns a backend tensor even for a
+        # static int head_dim; when __init__ runs inside a symbolic scratch graph
+        # (lazy build under compute_output_spec / functional trace) that tensor
+        # leaks out of scope ("<tf.Tensor '.../truediv:0'> is out of scope").
+        # head_dim is a static int, so a plain float is correct and bit-identical
+        # at the call site (cast/multiply rounds to the same float32). See D-002.
+        self.scale = 1.0 / math.sqrt(float(self.head_dim))
 
         # CREATE sub-layers based on projection strategy
         dense_kwargs = {
