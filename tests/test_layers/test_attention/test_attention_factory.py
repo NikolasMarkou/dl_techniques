@@ -172,6 +172,35 @@ class TestParamPassthroughF4:
         assert layer.se_reduction_activation_type == 'gelu'
 
 
+class TestParamPassthroughFCT:
+    """optional_params completed in FCT must reach the constructed instance.
+
+    Construct-smoke would pass even if the factory silently dropped these
+    kwargs (they have defaults); these assertions prove the forwarded value
+    lands on the layer rather than being filtered out by ``valid_param_names``.
+    """
+
+    def test_multi_head_qk_norm_forwarded(self):
+        layer = create_attention_layer(
+            'multi_head', dim=64, qk_norm_type='rms_norm'
+        )
+        assert layer.qk_norm_type == 'rms_norm'
+
+    def test_multi_head_probability_type_forwarded(self):
+        layer = create_attention_layer(
+            'multi_head', dim=64, probability_type='softmax'
+        )
+        assert layer.probability_type == 'softmax'
+
+    def test_capsule_routing_qk_norm_forwarded(self):
+        layer = create_attention_layer(
+            'capsule_routing', num_heads=4,
+            probability_type='softmax', qk_norm_type='rms_norm',
+        )
+        assert layer.qk_norm_type == 'rms_norm'
+        assert layer.probability_type == 'softmax'
+
+
 class TestFactoryHelpers:
     def test_from_config(self):
         layer = create_attention_layer('multi_head', dim=64)

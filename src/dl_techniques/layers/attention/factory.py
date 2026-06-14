@@ -158,7 +158,11 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'use_vertical_routing': True,
             'use_horizontal_routing': True,
             'use_positional_routing': True,
-            'epsilon': 1e-8
+            'epsilon': 1e-8,
+            'probability_type': 'softmax',
+            'probability_config': None,
+            'qk_norm_type': None,
+            'qk_norm_kwargs': None
         },
         'use_case': (
             'Experimental architectures requiring robust part-whole relationship modeling. '
@@ -294,7 +298,11 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'kernel_initializer': 'glorot_uniform',
             'bias_initializer': 'zeros',
             'kernel_regularizer': None,
-            'bias_regularizer': None
+            'bias_regularizer': None,
+            'probability_type': 'softmax',
+            'probability_config': None,
+            'qk_norm_type': None,
+            'qk_norm_kwargs': None
         },
         'use_case': (
             'Large language models requiring extended context windows with memory efficiency. '
@@ -417,7 +425,11 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'dropout_rate': 0.0,
             'kernel_initializer': 'he_normal',
             'kernel_regularizer': None,
-            'use_bias': False
+            'use_bias': False,
+            'probability_type': 'softmax',
+            'probability_config': None,
+            'qk_norm_type': None,
+            'qk_norm_kwargs': None
         },
         'use_case': (
             'Core building block for Transformer architectures across vision_heads, NLP, and '
@@ -511,7 +523,9 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'qk_norm_type': None,
             'qk_norm_kwargs': None,
             'intermediate_activation': 'relu',
+            'intermediate_activation_args': None,
             'output_activation': 'linear',
+            'output_activation_args': None,
             'output_channels': -1,
             'dropout_rate': 0.0,
             'attention_mode': 'gaussian',
@@ -546,7 +560,11 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'kernel_initializer': 'glorot_uniform',
             'bias_initializer': 'zeros',
             'kernel_regularizer': None,
-            'bias_regularizer': None
+            'bias_regularizer': None,
+            'probability_type': 'softmax',
+            'probability_config': None,
+            'qk_norm_type': None,
+            'qk_norm_kwargs': None
         },
         'use_case': (
             'Large-scale and multi-modal input processing: raw pixel classification, '
@@ -573,7 +591,11 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'kernel_initializer': 'glorot_uniform',
             'bias_initializer': 'zeros',
             'kernel_regularizer': None,
-            'bias_regularizer': None
+            'bias_regularizer': None,
+            'probability_type': 'softmax',
+            'probability_config': None,
+            'qk_norm_type': None,
+            'qk_norm_kwargs': None
         },
         'use_case': (
             'Multi-modal fusion with parameter constraints: vision_heads-language models, '
@@ -820,6 +842,9 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'qk_norm_type': None,
             'qk_norm_kwargs': None,
             'use_relative_position_bias': True,
+            'kan_grid_size': 5,
+            'kan_spline_order': 3,
+            'kan_activation': 'swish',
             'kernel_initializer': 'glorot_uniform',
             'bias_initializer': 'zeros',
             'kernel_regularizer': None,
@@ -852,6 +877,9 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'qk_norm_type': None,
             'qk_norm_kwargs': None,
             'use_relative_position_bias': False,
+            'kan_grid_size': 5,
+            'kan_spline_order': 3,
+            'kan_activation': 'swish',
             'kernel_initializer': 'glorot_uniform',
             'bias_initializer': 'zeros',
             'kernel_regularizer': None,
