@@ -567,8 +567,10 @@ class GMMLayer(keras.layers.Layer):
         log_density = self._log_gaussian_density(reshaped_inputs)
         responsibilities = self._responsibilities(log_density)
 
-        # Register isometric-kernel regularization during training
-        if training and self.isometric_regularizer_strength > 0:
+        # Register isometric-kernel regularization during training.
+        # ``training is True``: graph-safe identity check (symbolic/None/False skip the
+        # add_loss without coercing a tensor to bool). Canonical repo idiom.
+        if training is True and self.isometric_regularizer_strength > 0:
             self.add_loss(self._isometric_regularization_loss())
 
         # Compute output based on mode

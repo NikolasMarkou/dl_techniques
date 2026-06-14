@@ -615,8 +615,12 @@ class KMeansLayer(keras.layers.Layer):
         distances = self._compute_distances(reshaped_inputs)
         assignments = self._soft_assignments(distances)
 
-        # Update centroids during training
-        if training:
+        # Update centroids during training. Use identity ``training is True`` so the
+        # EMA centroid update fires ONLY in genuine training and a symbolic/None/False
+        # flag skips it without coercing a tensor to a python bool (graph-safe). Bare
+        # ``if training:`` raises OperatorNotAllowedInGraphError under a tf.Tensor flag.
+        # Canonical repo idiom (cf. residual_acf.py, mdn_layer.py, deep_kernel_pca.py).
+        if training is True:
             self._update_centroids(reshaped_inputs, assignments)
 
         # Compute output based on mode

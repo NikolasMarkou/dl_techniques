@@ -295,7 +295,9 @@ class RBFLayer(keras.layers.Layer):
 
         output = ops.exp(-exponent)
 
-        if training and self.units > 1 and self.repulsion_strength > 0:
+        # ``training is True``: graph-safe identity check (symbolic/None/False skip the
+        # repulsion add_loss without coercing a tensor to bool). Canonical repo idiom.
+        if training is True and self.units > 1 and self.repulsion_strength > 0:
             repulsion_loss = self._compute_repulsion_loss()
             self.add_loss(repulsion_loss)
 
