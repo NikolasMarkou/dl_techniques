@@ -190,7 +190,13 @@ class MobileMQA(GroupedQueryAttention):
         :type inputs: keras.KerasTensor
         :param training: Whether in training or inference mode.
         :type training: bool or None
-        :param attention_mask: Optional attention mask tensor.
+        :param attention_mask: Currently **IGNORED**. Accepted only for
+            call-signature compatibility with the standard attention contract;
+            it is not applied to the attention scores. Optional spatial
+            downsampling of K/V changes the key/value sequence length, so a
+            general token mask cannot be applied unambiguously. Passing a mask
+            has no effect on the output — do not rely on masking with this
+            layer (this is a documented limitation, like ``spatial``).
         :type attention_mask: keras.KerasTensor or None
         :param return_attention_weights: Whether to return attention
             weights alongside the output.

@@ -283,6 +283,9 @@ attn_full = create_attention_layer(
 ### `mobile_mqa`
 **Required:** `dim`  
 **Optional:** `num_heads` (default: 8), `use_downsampling` (default: False)
+
+> **Mask caveat:** `mobile_mqa.call` accepts an `attention_mask` argument for signature compatibility but **ignores it** — the mask is never applied to the attention scores. Optional spatial downsampling of K/V changes the key/value length, so a general token mask cannot be applied unambiguously. Do not rely on masking with this layer (a documented limitation, like `spatial`).
+
 ```python
 attn = create_attention_layer(
     'mobile_mqa',

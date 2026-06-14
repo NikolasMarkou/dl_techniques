@@ -531,7 +531,7 @@ class MultiHeadLatentAttention(keras.layers.Layer):
         if attention_mask is not None:
             scores = self._apply_attention_mask(scores, attention_mask)
 
-        attn_weights = self.attn_prob(scores)
+        attn_weights = self.attn_prob(scores, training=training)  # F6: forward training
 
         if self.dropout_layer is not None:
             attn_weights = self.dropout_layer(attn_weights, training=training)
