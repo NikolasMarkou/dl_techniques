@@ -333,20 +333,24 @@ class PerformerAttention(keras.layers.Layer):
         if self.causal:
             # For causal attention, we need cumulative sums
             # This is a simplified implementation - consider optimizing for production
-            seq_len = ops.shape(v)[2]
 
-            # Create cumulative KV and K_sum for causal attention
+            # Create cumulative KV and K_sum for causal attention.
+            # k: (B, h, N, F), v: (B, h, N, D). Per-position outer product
+            # k (x) v -> (B, h, N, F, D); cumsum over the sequence axis gives the
+            # prefix-summed KV state. No expand_dims on v: the einsum already
+            # produces the rank-5 outer product (a stray expand_dims made v rank-5
+            # and crashed the einsum with "rank 5 vs expected 4").
             kv_cumsum = ops.cumsum(
-                ops.einsum('bhnf,bhnd->bhnfd', k, ops.expand_dims(v, axis=-2)),
+                ops.einsum('bhnf,bhnd->bhnfd', k, v),
                 axis=2
             )
             k_cumsum = ops.cumsum(k, axis=2)
 
-            # Recompute with cumulative values
+            # Recompute with cumulative values. q:(B,h,N,F) contracts against
+            # kv_cumsum:(B,h,N,F,D) -> out:(B,h,N,D) directly (rank-4, no squeeze).
             z_causal = ops.einsum('bhnf,bhnf->bhn', q, k_cumsum) + 1e-6
-            out = ops.einsum('bhnf,bhnfd->bhnd',
-                             ops.expand_dims(q, axis=-2), kv_cumsum)
-            out = ops.squeeze(out, axis=-2) / ops.expand_dims(z_causal, axis=-1)
+            out = ops.einsum('bhnf,bhnfd->bhnd', q, kv_cumsum)
+            out = out / ops.expand_dims(z_causal, axis=-1)
 
         return out
 

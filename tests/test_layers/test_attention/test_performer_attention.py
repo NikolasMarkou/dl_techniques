@@ -113,16 +113,6 @@ class TestForward:
         assert out.shape == (2, 6, 16)
         assert not np.any(np.isnan(np.array(out)))
 
-    @pytest.mark.xfail(
-        reason="causal=True path is dead-on-forward (never-executed code): "
-        "_linear_attention causal branch builds a 5-D einsum "
-        "'bhnf,bhnd->bhnfd' then feeds it (plus a mis-ranked expand_dims(q)) "
-        "into a second einsum 'bhnf,bhnfd->bhnd' with inconsistent subscripts "
-        "-> InvalidArgumentError (rank 5 vs expected 4). Multi-bug chain in the "
-        "streaming-causal cumsum math; needs a >10-line restructure -> deferred "
-        "to a dedicated plan. Non-causal Performer forward is fully functional.",
-        strict=False,
-    )
     def test_output_shape_causal(self):
         x = keras.random.normal((2, 6, 16))
         layer = PerformerAttention(dim=16, num_heads=2, nb_features=8, causal=True)
