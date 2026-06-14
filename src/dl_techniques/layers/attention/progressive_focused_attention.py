@@ -23,6 +23,7 @@ from typing import Optional, Tuple, Union, Dict, Any, Literal
 
 from ..activations import ProbabilityOutput
 from ..norms.factory import create_normalization_layer
+from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 # Type definitions
@@ -118,12 +119,20 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
     :type shift_size: int
     :param top_k: Number of top-k tokens to attend to when
         ``sparsity_mode='top_k'``. ``None`` attends to all tokens.
+
+        .. warning::
+           The sparse attention path is **not implemented**. The ``'top_k'``
+           and ``'threshold'`` sparsity modes are no-op stubs (the layer always
+           performs dense attention). Constructing the layer with a non-default
+           ``sparsity_mode`` raises ``NotImplementedError``. Only
+           ``sparsity_mode='none'`` (the default, dense attention) is supported.
     :type top_k: Optional[int]
     :param sparsity_threshold: Threshold for sparsity-based attention masking
-        when ``sparsity_mode='threshold'``.
+        when ``sparsity_mode='threshold'``. NOT IMPLEMENTED (see ``top_k``).
     :type sparsity_threshold: float
     :param sparsity_mode: Sparse attention mode: ``'none'``, ``'top_k'``, or
-        ``'threshold'``.
+        ``'threshold'``. **Only** ``'none'`` is implemented; ``'top_k'`` and
+        ``'threshold'`` raise ``NotImplementedError`` (dense fallback only).
     :type sparsity_mode: SparsityMode
     :param qkv_bias: Whether to include bias terms in QKV projections.
     :type qkv_bias: bool
@@ -240,6 +249,65 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
             self.q_norm = None
             self.k_norm = None
 
+        # ---------------------------------------------------------------------
+        # Projection / dropout / LePE sub-layers.
+        # Their configs depend ONLY on constructor args (dim, qkv_bias,
+        # initializers, dropout rates, lepe kernel size), so they are created
+        # here in __init__ per the Keras-3 authoring guide (F7). build() only
+        # resolves input shapes and calls the explicit child .build(...).
+        # ---------------------------------------------------------------------
+
+        # QKV projection: projects input to Q, K, V simultaneously (3 * dim).
+        self._qkv = keras.layers.Dense(
+            self._dim * 3,
+            use_bias=self._qkv_bias,
+            kernel_initializer=self._kernel_initializer,
+            bias_initializer=self._bias_initializer,
+            name="qkv_projection"
+        )
+
+        # Output projection: concatenated multi-head output back to dim.
+        self._proj = keras.layers.Dense(
+            self._dim,
+            use_bias=True,
+            kernel_initializer=self._kernel_initializer,
+            bias_initializer=self._bias_initializer,
+            name="output_projection"
+        )
+
+        # Attention dropout (applied to attention weights after softmax).
+        if self._attention_dropout > 0.0:
+            self._attn_drop = keras.layers.Dropout(
+                self._attention_dropout,
+                name="attention_dropout"
+            )
+        else:
+            self._attn_drop = None
+
+        # Projection dropout (regularizes the final output projection).
+        if self._projection_dropout > 0.0:
+            self._proj_drop = keras.layers.Dropout(
+                self._projection_dropout,
+                name="projection_dropout"
+            )
+        else:
+            self._proj_drop = None
+
+        # LePE: Locally-Enhanced Positional Encoding via depthwise conv on V.
+        if self._use_lepe:
+            self._lepe = keras.layers.DepthwiseConv2D(
+                kernel_size=self._lepe_kernel_size,
+                strides=1,
+                padding='same',
+                depth_multiplier=1,
+                depthwise_initializer=self._kernel_initializer,
+                use_bias=True,
+                bias_initializer=self._bias_initializer,
+                name="lepe_conv"
+            )
+        else:
+            self._lepe = None
+
     def _validate_config(self) -> None:
         """Validate layer configuration parameters.
 
@@ -284,6 +352,23 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
                 f"top_k ({self._top_k}) must be positive"
             )
 
+        # DECISION plan_2026-06-14_0c5d4a21/D-004: top_k/sparsity_mode guarded+documented
+        # as not-implemented (dense fallback) per user D2, F13. Do NOT silently accept a
+        # non-default sparsity_mode/top_k: the sparse path in _apply_sparsity is a no-op
+        # stub (the 'top_k' branch builds an unused mask + TODO; 'threshold' masks but the
+        # advertised top-k focusing is absent), so the layer would do DENSE attention while
+        # claiming sparse focusing. Re-implementing FAVOR-style sparse top-k is out of scope
+        # (research effort); here we fail loud at construction. See decisions.md D-004.
+        if self._sparsity_mode != 'none':
+            raise NotImplementedError(
+                f"sparsity_mode='{self._sparsity_mode}' is not implemented in "
+                f"ProgressiveFocusedAttention. The sparse attention path is a no-op "
+                f"stub that falls back to dense attention; advertising sparse focusing "
+                f"while computing dense attention would be misleading. Only "
+                f"sparsity_mode='none' (dense attention) is supported. "
+                f"(top_k={self._top_k!r} is therefore unused.)"
+            )
+
         # Check dropout rates
         if self._attention_dropout < 0.0 or self._attention_dropout > 1.0:
             raise ValueError(
@@ -304,70 +389,23 @@ class ProgressiveFocusedAttention(keras.layers.Layer):
             Expected shape: ``(batch_size, height, width, dim)``.
         :type input_shape: Union[tuple, list]
         """
+        # Idempotency guard (F7): build() may be re-entered via from_config /
+        # functional reuse. The sub-layers are created once in __init__; the
+        # explicit child .build(...) calls below are NOT self-guarded by Keras
+        # (a second .build() on an already-built child raises a lock violation),
+        # so we early-return if already built.
+        if self.built:
+            return
+
         # Handle different input shape formats
         if isinstance(input_shape, list):
             x_shape = input_shape[0]
         else:
             x_shape = input_shape
 
-        # ============ QKV Projection ============
-        # Projects input to queries, keys, and values simultaneously
-        # Output dimension is 3*dim to accommodate all three projections
-        self._qkv = keras.layers.Dense(
-            self._dim * 3,
-            use_bias=self._qkv_bias,
-            kernel_initializer=self._kernel_initializer,
-            bias_initializer=self._bias_initializer,
-            name="qkv_projection"
-        )
-
-        # ============ Output Projection ============
-        # Projects concatenated multi-head attention output back to dim
-        self._proj = keras.layers.Dense(
-            self._dim,
-            use_bias=True,
-            kernel_initializer=self._kernel_initializer,
-            bias_initializer=self._bias_initializer,
-            name="output_projection"
-        )
-
-        # ============ Attention Dropout ============
-        # Applied to attention weights after softmax to prevent overfitting
-        if self._attention_dropout > 0.0:
-            self._attn_drop = keras.layers.Dropout(
-                self._attention_dropout,
-                name="attention_dropout"
-            )
-        else:
-            self._attn_drop = None
-
-        # ============ Projection Dropout ============
-        # Applied to output projection to regularize the final output
-        if self._projection_dropout > 0.0:
-            self._proj_drop = keras.layers.Dropout(
-                self._projection_dropout,
-                name="projection_dropout"
-            )
-        else:
-            self._proj_drop = None
-
-        # ============ LePE: Locally-Enhanced Positional Encoding ============
-        # Uses depthwise convolution to inject local positional information
-        # This is more efficient than absolute positional embeddings for vision tasks
-        # as it provides translation-equivariant local position awareness
-        if self._use_lepe:
-            self._lepe = keras.layers.DepthwiseConv2D(
-                kernel_size=self._lepe_kernel_size,
-                strides=1,
-                padding='same',
-                depth_multiplier=1,
-                depthwise_initializer=self._kernel_initializer,
-                use_bias=True,
-                bias_initializer=self._bias_initializer,
-                name="lepe_conv"
-            )
-        else:
-            self._lepe = None
+        # Sub-layers (_qkv, _proj, _attn_drop, _proj_drop, _lepe) are created in
+        # __init__ (their configs are constructor-only). build() resolves the
+        # input shapes and explicitly builds them for weight restore.
 
         # ============ Explicitly Build Sub-layers ============
         # This ensures weights exist before any restoration/serialization
