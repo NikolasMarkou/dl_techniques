@@ -49,7 +49,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms.rms_norm import RMSNorm
 from dl_techniques.layers.blt_blocks import (
     ByteTokenizer, EntropyModel, DynamicPatcher,
-    LocalEncoder, PatchPooling
+    LocalEncoder
 )
 from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
 from dl_techniques.layers.reasoning.hrm_reasoning_module import HierarchicalReasoningModule
@@ -218,9 +218,6 @@ class HashNGramEmbedding(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build hash embedding tables."""
-        if self.built:
-            return
-
         self._build_input_shape = input_shape
 
         # Create embedding table for each n-gram size
@@ -265,31 +262,30 @@ class HashNGramEmbedding(keras.layers.Layer):
             inputs: keras.KerasTensor,
             n: int
     ) -> keras.KerasTensor:
-        """Compute embeddings for specific n-gram size using polynomial hashing."""
-        batch_size = ops.shape(inputs)[0]
+        """Compute embeddings for a specific n-gram size using a vectorized
+        polynomial hashing method compatible with Keras graph mode.
+
+        Mirrors the vectorized pattern in
+        ``models/modern_bert/components.py:174-195`` (B3). The hash tables here
+        are raw ``add_weight`` tensors, so the final lookup uses
+        ``ops.take(table, hashed_indices, axis=0)`` rather than an Embedding
+        layer call.
+        """
         seq_len = ops.shape(inputs)[1]
+        inputs = ops.cast(inputs, dtype='int64')
+        base = 257  # A prime larger than the byte vocabulary (256)
+        powers = ops.power(base, ops.arange(n - 1, -1, -1, dtype=inputs.dtype))
+        padded_input = ops.pad(inputs, [[0, 0], [n - 1, 0]])
+        ngram_components = [
+            padded_input[:, i: i + seq_len] for i in range(n)
+        ]
+        stacked_ngrams = ops.stack(ngram_components, axis=-1)
+        hash_values = ops.sum(stacked_ngrams * powers, axis=-1)
+        hashed_indices = hash_values % self.hash_vocab_size
 
-        # Rolling polynomial hash with base 257
-        base = 257
-
-        # Initialize hash values
-        hash_values = ops.zeros((batch_size, seq_len), dtype='int32')
-
-        # Compute rolling hash for each position
-        for i in range(seq_len):
-            if i < n - 1:
-                current_hash = ops.cast(inputs[:, i], 'int32')
-            else:
-                current_hash = ops.cast(inputs[:, i], 'int32')
-                for j in range(1, n):
-                    byte_val = ops.cast(inputs[:, i - j], 'int32')
-                    current_hash = (current_hash * base + byte_val) % self.hash_vocab_size
-
-            hash_values = ops.slice_update(hash_values, [slice(None), i], current_hash)
-
-        # Look up embeddings
+        # Look up embeddings (raw add_weight table)
         embedding_table = self.hash_embeddings[str(n)]
-        ngram_embeddings = ops.take(embedding_table, hash_values, axis=0)
+        ngram_embeddings = ops.take(embedding_table, hashed_indices, axis=0)
 
         return ngram_embeddings
 
@@ -330,21 +326,6 @@ class ReasoningByteEmbeddings(keras.layers.Layer):
         super().__init__(**kwargs)
         self.config = config
 
-        # Initialize ByteTokenizer
-        self.tokenizer = ByteTokenizer(
-            vocab_size=config.vocab_size,
-            name="byte_tokenizer"
-        )
-
-        # Initialize sublayers to None - created in build()
-        self.byte_embeddings = None
-        self.position_embeddings = None
-        self.rope = None
-        self.hash_embeddings = None
-        self.puzzle_embedding = None
-        self.layer_norm = None
-        self.dropout = None
-
         # Calculate puzzle embedding sequence length
         self.puzzle_emb_len = max(1, (
                     config.puzzle_emb_dim + config.embed_dim - 1) // config.embed_dim) if config.puzzle_emb_dim > 0 else 0
@@ -353,17 +334,12 @@ class ReasoningByteEmbeddings(keras.layers.Layer):
         # Embedding scale
         self.embed_scale = math.sqrt(config.embed_dim)
 
-        self._build_input_shape = None
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build all embedding sublayers."""
-        if self.built:
-            return
-
-        self._build_input_shape = input_shape
-
-        # Build ByteTokenizer
-        self.tokenizer.build(input_shape)
+        # ---- Sublayer CREATION (B5: moved build()->__init__, order/names preserved) ----
+        # Initialize ByteTokenizer
+        self.tokenizer = ByteTokenizer(
+            vocab_size=config.vocab_size,
+            name="byte_tokenizer"
+        )
 
         # Direct byte embeddings
         self.byte_embeddings = keras.layers.Embedding(
@@ -377,6 +353,7 @@ class ReasoningByteEmbeddings(keras.layers.Layer):
         )
 
         # Puzzle embeddings (if enabled)
+        self.puzzle_embedding = None
         if self.config.puzzle_emb_dim > 0:
             self.puzzle_embedding = SparsePuzzleEmbedding(
                 num_embeddings=self.config.num_puzzle_identifiers,
@@ -387,6 +364,8 @@ class ReasoningByteEmbeddings(keras.layers.Layer):
             )
 
         # Positional embeddings
+        self.rope = None
+        self.position_embeddings = None
         if self.config.pos_encodings == "rope":
             self.rope = RotaryPositionEmbedding(
                 head_dim=self.config.embed_dim // self.config.num_heads,
@@ -403,6 +382,7 @@ class ReasoningByteEmbeddings(keras.layers.Layer):
             )
 
         # Hash n-gram embeddings if enabled
+        self.hash_embeddings = None
         if self.config.use_hash_embeddings:
             self.hash_embeddings = HashNGramEmbedding(
                 hash_vocab_size=self.config.hash_vocab_size,
@@ -412,6 +392,7 @@ class ReasoningByteEmbeddings(keras.layers.Layer):
             )
 
         # Normalization and dropout
+        self.layer_norm = None
         if self.config.normalization_type == 'layer_norm':
             self.layer_norm = keras.layers.LayerNormalization(
                 epsilon=self.config.layer_norm_eps,
@@ -427,6 +408,15 @@ class ReasoningByteEmbeddings(keras.layers.Layer):
             rate=self.config.hidden_dropout_prob,
             name="dropout"
         )
+
+        self._build_input_shape = None
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build all embedding sublayers."""
+        self._build_input_shape = input_shape
+
+        # Build ByteTokenizer
+        self.tokenizer.build(input_shape)
 
         # Build all sublayers
         self.byte_embeddings.build(input_shape)
@@ -522,6 +512,14 @@ class ReasoningByteEmbeddings(keras.layers.Layer):
         config.update({'config': self.config.to_dict()})
         return config
 
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> 'ReasoningByteEmbeddings':
+        """Rebuild from config, reconstructing the dataclass from its dict."""
+        config = dict(config)
+        if isinstance(config.get('config'), dict):
+            config['config'] = ReasoningByteBertConfig.from_dict(config['config'])
+        return cls(**config)
+
 
 @keras.saving.register_keras_serializable()
 class ReasoningByteCore(keras.layers.Layer):
@@ -543,34 +541,12 @@ class ReasoningByteCore(keras.layers.Layer):
         super().__init__(**kwargs)
         self.config = config
 
-        # Initialize components to None - created in build()
-        self.entropy_model = None
-        self.patcher = None
-        self.local_encoder = None
-        self.patch_pooling = None
-        self.h_reasoning = None
-        self.l_reasoning = None
-        self.lm_head = None
-        self.q_head = None
-
-        # Initial states for reasoning
-        self.h_init = None
-        self.l_init = None
-
         # Calculate sequence dimensions
         self.puzzle_emb_len = max(1, (
                     config.puzzle_emb_dim + config.embed_dim - 1) // config.embed_dim) if config.puzzle_emb_dim > 0 else 0
         self.total_seq_len = config.seq_len + self.puzzle_emb_len
 
-        self._build_input_shape = None
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build all reasoning components."""
-        if self.built:
-            return
-
-        self._build_input_shape = input_shape
-
+        # ---- Sublayer CREATION (B5: moved build()->__init__, order/names preserved) ----
         # Entropy model for dynamic patching
         self.entropy_model = EntropyModel(
             vocab_size=self.config.vocab_size,
@@ -588,7 +564,8 @@ class ReasoningByteCore(keras.layers.Layer):
             name='patcher'
         )
 
-        # Local encoder for byte-level processing
+        # Local encoder for byte-level processing (pools internally -> returns
+        # (B, max_patches, global_dim); no separate PatchPooling here — F1)
         self.local_encoder = LocalEncoder(
             vocab_size=self.config.vocab_size,
             local_dim=self.config.local_hidden_size,
@@ -601,14 +578,6 @@ class ReasoningByteCore(keras.layers.Layer):
             global_dim=self.config.embed_dim,
             cross_attention_queries=self.config.cross_attention_queries,
             name='local_encoder'
-        )
-
-        # Patch pooling
-        self.patch_pooling = PatchPooling(
-            pooling_method=self.config.patch_pooling_method,
-            output_dim=self.config.embed_dim,
-            num_queries=self.config.cross_attention_queries,
-            name='patch_pooling'
         )
 
         # Hierarchical reasoning modules
@@ -657,7 +626,13 @@ class ReasoningByteCore(keras.layers.Layer):
             name="q_head"
         )
 
-        # Initial states
+        self._build_input_shape = None
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build all reasoning components."""
+        self._build_input_shape = input_shape
+
+        # Initial states (add_weight stays in build — B5)
         self.h_init = self.add_weight(
             name="h_init",
             shape=(self.config.embed_dim,),
@@ -680,10 +655,11 @@ class ReasoningByteCore(keras.layers.Layer):
         # Local encoder expects byte tokens
         self.local_encoder.build(token_input_shape)
 
-        # Reasoning modules expect patch representations
+        # Reasoning modules expect patch representations.
+        # HRM.build asserts a 2-element list [hidden_states, input_injection] (A1a).
         reasoning_input_shape = (None, self.config.max_patches, self.config.embed_dim)
-        self.h_reasoning.build(reasoning_input_shape)
-        self.l_reasoning.build(reasoning_input_shape)
+        self.h_reasoning.build([reasoning_input_shape, reasoning_input_shape])
+        self.l_reasoning.build([reasoning_input_shape, reasoning_input_shape])
 
         # Output heads
         self.lm_head.build((None, self.config.embed_dim))
@@ -756,34 +732,32 @@ class ReasoningByteCore(keras.layers.Layer):
         patch_lengths = self.patcher(entropy, training=training)
         patch_ids = self.patcher.compute_patch_ids(patch_lengths)
 
-        # Local byte encoding within patches
-        local_output = self.local_encoder(
+        # Local byte encoding within patches. LocalEncoder pools internally and
+        # returns (B, max_patches, embed_dim) — no separate PatchPooling (F1).
+        patch_representations = self.local_encoder(
             pure_byte_tokens, patch_ids, training=training
-        )
-
-        # Pool bytes to patch representations
-        patch_representations = self.patch_pooling(
-            local_output, patch_ids, training=training
         )
 
         # Get current reasoning states
         z_h, z_l = carry["z_h"], carry["z_l"]
 
-        # Hierarchical reasoning cycles (detached for efficiency)
-        with ops.stop_gradient():
-            for h_step in range(self.config.h_cycles):
-                for l_step in range(self.config.l_cycles):
-                    # Skip last L step of last H cycle
-                    if not (h_step == self.config.h_cycles - 1 and l_step == self.config.l_cycles - 1):
-                        z_l = self.l_reasoning(z_l, z_h + patch_representations, training=training)
+        # Hierarchical reasoning cycles (detached for efficiency). keras.ops has
+        # no stop_gradient context manager, so detach each intermediate update
+        # per-tensor (the final step below keeps gradients).
+        for h_step in range(self.config.h_cycles):
+            for l_step in range(self.config.l_cycles):
+                # Skip last L step of last H cycle
+                if not (h_step == self.config.h_cycles - 1 and l_step == self.config.l_cycles - 1):
+                    z_l = ops.stop_gradient(
+                        self.l_reasoning([z_l, z_h + patch_representations], training=training))
 
-                # Skip last H step
-                if h_step != self.config.h_cycles - 1:
-                    z_h = self.h_reasoning(z_h, z_l, training=training)
+            # Skip last H step
+            if h_step != self.config.h_cycles - 1:
+                z_h = ops.stop_gradient(self.h_reasoning([z_h, z_l], training=training))
 
         # Final step with gradients
-        z_l = self.l_reasoning(z_l, z_h + patch_representations, training=training)
-        z_h = self.h_reasoning(z_h, z_l, training=training)
+        z_l = self.l_reasoning([z_l, z_h + patch_representations], training=training)
+        z_h = self.h_reasoning([z_h, z_l], training=training)
 
         # Generate outputs using first patch representation (global context)
         global_representation = z_h[:, 0]  # Shape: (batch_size, embed_dim)
@@ -833,6 +807,14 @@ class ReasoningByteCore(keras.layers.Layer):
         config.update({'config': self.config.to_dict()})
         return config
 
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> 'ReasoningByteCore':
+        """Rebuild from config, reconstructing the dataclass from its dict."""
+        config = dict(config)
+        if isinstance(config.get('config'), dict):
+            config['config'] = ReasoningByteBertConfig.from_dict(config['config'])
+        return cls(**config)
+
 
 @keras.saving.register_keras_serializable()
 class ReasoningByteBERT(keras.Model):
@@ -861,9 +843,15 @@ class ReasoningByteBERT(keras.Model):
         config.validate()
         self.config = config
 
-        # Initialize components to None - created in build()
-        self.embeddings = None
-        self.reasoning_core = None
+        # ---- Sublayer CREATION (B5: moved build()->__init__, order/names preserved) ----
+        self.embeddings = ReasoningByteEmbeddings(
+            config=self.config,
+            name="embeddings"
+        )
+        self.reasoning_core = ReasoningByteCore(
+            config=self.config,
+            name="reasoning_core"
+        )
 
         self._build_input_shape = None
 
@@ -873,9 +861,6 @@ class ReasoningByteBERT(keras.Model):
 
     def build(self, input_shape: Union[Tuple[Optional[int], ...], Dict[str, Tuple[Optional[int], ...]]]) -> None:
         """Build the complete ReasoningByteBERT model."""
-        if self.built:
-            return
-
         self._build_input_shape = input_shape
 
         # Handle different input formats
@@ -886,19 +871,11 @@ class ReasoningByteBERT(keras.Model):
 
         logger.info(f"Building ReasoningByteBERT with token shape: {token_shape}")
 
-        # Create embeddings layer
-        self.embeddings = ReasoningByteEmbeddings(
-            config=self.config,
-            name="embeddings"
-        )
+        # Build embeddings layer (created in __init__ — B5)
         self.embeddings.build(token_shape)
 
-        # Create reasoning core
+        # Build reasoning core (created in __init__ — B5)
         embeddings_shape = (*token_shape, self.config.embed_dim)
-        self.reasoning_core = ReasoningByteCore(
-            config=self.config,
-            name="reasoning_core"
-        )
         self.reasoning_core.build(embeddings_shape)
 
         super().build(input_shape)
@@ -1089,6 +1066,14 @@ class ReasoningByteBERT(keras.Model):
         config = super().get_config()
         config.update({'config': self.config.to_dict()})
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> 'ReasoningByteBERT':
+        """Rebuild from config, reconstructing the dataclass from its dict."""
+        config = dict(config)
+        if isinstance(config.get('config'), dict):
+            config['config'] = ReasoningByteBertConfig.from_dict(config['config'])
+        return cls(**config)
 
 
 # ---------------------------------------------------------------------
