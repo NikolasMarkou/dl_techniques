@@ -7,8 +7,8 @@
 | Aspect | K-means layer (original) | RBF layer | GMM layer (this rewrite) |
 |---|---|---|---|
 | Prototype | centroid `c_k` | center `c_k` | mean `mu_k` + diagonal covariance `Sigma_k` + mixing weight `pi_k` |
-| Similarity score | `-||x - c_k||^2` | `exp(-||x - c_k||^2 / 2*sigma^2)` | `log pi_k - 0.5(mahalanobis + logdet + D log 2pi)` |
-| Spread | none (pure distance) | width `sigma` (scalar or per-center) | full per-dimension variance `var_kd` |
+| Similarity score | `-||x - c_k||^2` | `exp(-gamma_k ||x - c_k||^2)` | `log pi_k - 0.5(mahalanobis + logdet + D log 2pi)` |
+| Spread | none (pure distance) | per-center precision `gamma_k` (equiv. `1/(2 sigma_k^2)`) | full per-dimension variance `var_kd` |
 | Normalization across prototypes | softmax (temperature) | usually none, or NRBF (divide by sum) | softmax of log-posterior (proper Bayes rule) |
 | Probabilistic meaning | none; heuristic soft assignment | none; basis activation | exact posterior `P(component=k | x)` |
 
