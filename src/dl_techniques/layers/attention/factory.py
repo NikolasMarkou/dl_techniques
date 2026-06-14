@@ -112,8 +112,11 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         'required_params': ['dim'],
         'optional_params': {
             'num_heads': 8,
+            'head_dim': None,
             'dropout_rate': 0.0,
             'use_bias': True,
+            'probability_type': 'softmax',
+            'probability_config': None,
             'kernel_initializer': 'glorot_uniform',
             'bias_initializer': 'zeros',
             'kernel_regularizer': None,
@@ -203,7 +206,11 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'ratio': 8,
             'kernel_initializer': 'glorot_uniform',
             'kernel_regularizer': None,
-            'use_bias': False
+            'use_bias': False,
+            'intermediate_activation_type': 'relu',
+            'intermediate_activation_args': None,
+            'gate_activation_type': 'sigmoid',
+            'gate_activation_args': None
         },
         'use_case': (
             'Selective channel emphasis in CNN feature maps. Ideal when spatial information '
@@ -586,7 +593,9 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'kernel_size': 7,
             'kernel_initializer': 'glorot_uniform',
             'kernel_regularizer': None,
-            'use_bias': True
+            'use_bias': True,
+            'gate_activation_type': 'sigmoid',
+            'gate_activation_args': None
         },
         'use_case': (
             'Spatial focus enhancement in CNN feature maps. Effective for object detection '
@@ -610,7 +619,9 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'kernel_size': 7,
             'use_bias': False,
             'kernel_initializer': 'glorot_uniform',
-            'kernel_regularizer': None
+            'kernel_regularizer': None,
+            'gate_activation_type': 'sigmoid',
+            'gate_activation_args': None
         },
         'use_case': (
             'Computer vision tasks requiring both spatial and channel-wise refinement. '
@@ -634,7 +645,9 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'kernel_size': 7,
             'use_bias': False,
             'kernel_initializer': 'glorot_uniform',
-            'kernel_regularizer': None
+            'kernel_regularizer': None,
+            'gate_activation_type': 'sigmoid',
+            'gate_activation_args': None
         },
         'use_case': (
             'Variants of 3D attention where channel importance is dominant and should '
@@ -658,7 +671,9 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'kernel_size': 7,
             'use_bias': False,
             'kernel_initializer': 'glorot_uniform',
-            'kernel_regularizer': None
+            'kernel_regularizer': None,
+            'gate_activation_type': 'sigmoid',
+            'gate_activation_args': None
         },
         'use_case': (
             'Architectures favoring parallel processing paths to preserve gradient flow '
@@ -682,7 +697,11 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'kernel_size': 7,
             'use_bias': False,
             'kernel_initializer': 'glorot_uniform',
-            'kernel_regularizer': None
+            'kernel_regularizer': None,
+            'gate_activation_type': 'sigmoid',
+            'gate_activation_args': None,
+            'se_reduction_activation_type': 'relu',
+            'se_reduction_activation_args': None
         },
         'use_case': (
             'Advanced vision tasks where the correlation between "where" (spatial) and '
