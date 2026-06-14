@@ -423,6 +423,26 @@ class TestKANLinear:
         with pytest.raises(ValueError, match="Input 'x' for grid update must be 2D."):
             layer.update_grid_from_samples(ops.zeros((2, 4, 6)))
 
+    def test_update_grid_eager_only_guard(self, basic_config: Dict[str, Any]) -> None:
+        """update_grid_from_samples is eager-only: a @tf.function call must raise
+        RuntimeError, while an eager call still works (regression for the guard)."""
+        import tensorflow as tf
+
+        layer = KANLinear(**basic_config)
+        layer.build((100, 10))
+
+        # Eager call succeeds.
+        layer.update_grid_from_samples(keras.random.normal(shape=(100, 10)))
+
+        # Graph-mode call fails loud.
+        @tf.function
+        def _graph_update(x):
+            layer.update_grid_from_samples(x)
+            return x
+
+        with pytest.raises(RuntimeError, match="eager-only"):
+            _graph_update(tf.random.normal((100, 10)))
+
 # ============================================================================
 # Integration Test with Model Training
 # ============================================================================
