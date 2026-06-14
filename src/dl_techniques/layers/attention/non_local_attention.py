@@ -27,6 +27,7 @@ References:
 
 # ---------------------------------------------------------------------
 
+import math
 import keras
 from keras import ops
 from typing import Any, Dict, Tuple, Optional, Literal, Union
@@ -286,6 +287,7 @@ class NonLocalAttention(keras.layers.Layer):
             if self.attention_mode == 'dot_product'
             else max(1, self.attention_channels // 8)
         )
+        self._inv_sqrt_kv = 1.0 / math.sqrt(float(self.key_value_channels))
 
         # Create Query, Key, Value projection layers (all share the embedded dim)
         self.query_conv = keras.layers.Conv2D(
@@ -510,8 +512,8 @@ class NonLocalAttention(keras.layers.Layer):
         scores = ops.matmul(q, ops.transpose(k, axes=[0, 2, 1]))
         if self.attention_mode == 'dot_product':
             # Match previous behavior of keras.layers.Attention(use_scale=True)
-            d_k = ops.cast(self.key_value_channels, scores.dtype)
-            scores = scores / ops.sqrt(d_k)
+            # DECISION plan_2026-06-14_33b77a7a/D-003: precompute 1/sqrt(key_value_channels) (D-002 pattern); dot_product mode only — gaussian stays unscaled. key_value_channels is final at __init__.
+            scores = scores * self._inv_sqrt_kv
         # In 'gaussian' mode, no scaling (matches previous use_scale=False)
 
         # Optional additive attention mask
