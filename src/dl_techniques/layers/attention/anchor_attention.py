@@ -428,7 +428,21 @@ class AnchorAttention(keras.layers.Layer):
         :rtype: keras.KerasTensor
         """
         batch_size = ops.shape(x)[0]
-        seq_len = ops.shape(x)[1]
+        # DECISION plan_2026-06-14_ab855e7e/D-002: hierarchical mode needs a static
+        # sequence length — the `num_anchor_tokens >= seq_len` branch below is a
+        # Python-bool decision that crashes under @tf.function when seq_len is a
+        # dynamic ops.shape() tensor (static-shape defect class; capsule/PFA
+        # precedent). Fail loud on None; batch stays dynamic. Do NOT revert to
+        # ops.shape for the sequence dim here. _standard_attention (no branch on
+        # seq_len) is intentionally left dynamic-safe.
+        seq_len = x.shape[1]
+        if seq_len is None:
+            raise ValueError(
+                "AnchorAttention hierarchical mode (num_anchor_tokens set) "
+                "requires a statically-known sequence length; got None. Provide "
+                "inputs with a fixed sequence dimension, or use standard mode "
+                "(num_anchor_tokens=None)."
+            )
 
         # Fallback to standard attention if all tokens are anchors
         if num_anchor_tokens >= seq_len:

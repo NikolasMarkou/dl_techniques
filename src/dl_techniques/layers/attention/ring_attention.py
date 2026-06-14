@@ -377,7 +377,19 @@ class RingAttention(keras.layers.Layer):
         """
         batch_size = ops.shape(queries)[0]
         num_heads = self.num_heads
-        seq_len = ops.shape(queries)[2]
+        # DECISION plan_2026-06-14_ab855e7e/D-002: the block-wise loop count and
+        # `range(num_blocks)` below require a Python int. A dynamic
+        # ops.shape(queries)[2] makes range() crash under @tf.function/jit (the
+        # static-shape defect class already fixed in capsule/PFA). Read the seq
+        # dim statically and fail loud on None; batch stays dynamic. Do NOT revert
+        # to ops.shape for the sequence dim here.
+        seq_len = queries.shape[2]
+        if seq_len is None:
+            raise ValueError(
+                "RingAttention requires a statically-known sequence length "
+                "(the block-wise loop needs a Python-int block count); got None. "
+                "Provide inputs with a fixed sequence dimension."
+            )
         head_dim = self.head_dim
 
         # Calculate number of blocks
@@ -401,7 +413,7 @@ class RingAttention(keras.layers.Layer):
         for q_block_idx in range(num_blocks):
             # Get query block bounds
             q_start = q_block_idx * self.block_size
-            q_end = ops.minimum(q_start + self.block_size, seq_len)
+            q_end = min(q_start + self.block_size, seq_len)  # Python int (static seq_len)
             q_block = queries[:, :, q_start:q_end, :]  # (batch, num_heads, q_block_size, head_dim)
 
             q_block_size = q_end - q_start
@@ -424,7 +436,7 @@ class RingAttention(keras.layers.Layer):
             for kv_block_idx in range(num_blocks):
                 # Get key/value block bounds
                 kv_start = kv_block_idx * self.block_size
-                kv_end = ops.minimum(kv_start + self.block_size, seq_len)
+                kv_end = min(kv_start + self.block_size, seq_len)  # Python int (static seq_len)
                 k_block = keys[:, :, kv_start:kv_end, :]  # (batch, num_heads, kv_block_size, head_dim)
                 v_block = values[:, :, kv_start:kv_end, :]
 

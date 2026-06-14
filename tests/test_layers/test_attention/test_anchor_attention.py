@@ -470,6 +470,44 @@ class TestEdgeCases:
         assert isinstance(clone.layers[0], AnchorAttention)
 
 
+class TestGraphSafetyRegression:
+    """plan_2026-06-14_ab855e7e F3/D-002: static-seq fail-loud guard.
+
+    Hierarchical mode (num_anchor_tokens set) branches on
+    `num_anchor_tokens >= seq_len`, a Python-bool decision that needs a static
+    seq_len. A dynamic (None) seq dim must raise a clear ValueError. Standard
+    mode (num_anchor_tokens=None) is intentionally left dynamic-safe.
+    """
+
+    def test_hierarchical_dynamic_seq_raises_valueerror(self):
+        # call() executes under @tf.function tracing (not the functional/
+        # compute_output_shape path); a None seq dim in hierarchical mode must
+        # fail loud.
+        layer = AnchorAttention(dim=32, num_heads=4)
+        _ = layer(tf.random.normal((2, 10, 32)), num_anchor_tokens=3)  # build first
+
+        @tf.function
+        def traced(x):
+            return layer(x, num_anchor_tokens=2)
+
+        spec = tf.TensorSpec(shape=(None, None, 32), dtype=tf.float32)
+        with pytest.raises(ValueError, match="statically-known sequence length"):
+            traced.get_concrete_function(spec)
+
+    def test_hierarchical_static_seq_still_works(self):
+        layer = AnchorAttention(dim=32, num_heads=4)
+        x = tf.random.normal((2, 10, 32))
+        out = layer(x, num_anchor_tokens=3)
+        assert tuple(out.shape) == (2, 10, 32)
+
+    def test_standard_mode_dynamic_seq_ok(self):
+        """Standard mode must still accept a dynamic seq dim (no branch on it)."""
+        layer = AnchorAttention(dim=32, num_heads=4)
+        inp = keras.Input(shape=(None, 32))
+        out = layer(inp)  # num_anchor_tokens=None -> standard path
+        assert out.shape[-1] == 32
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
 

@@ -224,5 +224,34 @@ class TestEdgeCases:
         assert all(g is not None and tf.reduce_any(g != 0) for g in grads)
 
 
+class TestGraphSafetyRegression:
+    """plan_2026-06-14_ab855e7e F3/D-002: static-seq fail-loud guard.
+
+    The block-wise loop needs a Python-int block count; a dynamic (None)
+    sequence dim must raise a clear ValueError, not crash cryptically under
+    @tf.function. Static-shape forward must keep working.
+    """
+
+    def test_dynamic_seq_raises_valueerror(self):
+        # call() executes under @tf.function tracing (not the functional/
+        # compute_output_shape path); a None seq dim must fail loud.
+        layer = RingAttention(dim=16, num_heads=2, block_size=4)
+        _ = layer(tf.random.normal((2, 12, 16)))  # build first
+
+        @tf.function
+        def traced(x):
+            return layer(x)
+
+        spec = tf.TensorSpec(shape=(None, None, 16), dtype=tf.float32)
+        with pytest.raises(ValueError, match="statically-known sequence length"):
+            traced.get_concrete_function(spec)
+
+    def test_static_seq_still_works(self):
+        layer = RingAttention(dim=16, num_heads=2, block_size=4)
+        x = tf.random.normal((2, 12, 16))
+        out = layer(x)
+        assert tuple(out.shape) == (2, 12, 16)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
