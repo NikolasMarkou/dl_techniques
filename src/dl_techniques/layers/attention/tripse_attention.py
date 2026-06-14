@@ -169,7 +169,12 @@ class TripletAttentionBranch(layers.Layer):
         # BN input: (Batch, D1, D2, 1)
         conv_output_shape = (batch, permuted_dims[0], permuted_dims[1], 1)
         self.batch_norm.build(conv_output_shape)
-        
+
+        # Gate activation operates on the BN output (B, D1, D2, 1) — see call().
+        # Explicit build is required so a gate activation carrying trainable
+        # params (e.g. a parametric activation) round-trips through .keras.
+        self.sigmoid.build(conv_output_shape)
+
         super().build(input_shape)
 
     def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
@@ -813,24 +818,38 @@ class _SEWeights(layers.Layer):
         self.conv_restore = None
 
     def build(self, input_shape):
+        # DECISION plan_2026-06-14_0c5d4a21/D-005: conv_reduce/conv_restore are
+        # created here (their filter counts depend on build-time input_channels,
+        # so they cannot be fully instantiated in __init__). Do NOT drop these
+        # guards: the explicit child .build(...) calls below are NOT self-guarded
+        # by Keras, so a second build() (from_config / functional reuse) would
+        # re-create the convs and re-build already-built children, hitting the
+        # "cannot add state to an already-built layer" lock. The `if self.built:
+        # return` early-return + `is None` sentinel guards make build() idempotent
+        # while keeping the first-build path byte-identical. See decisions.md D-005.
+        if self.built:
+            return
+
         input_channels = input_shape[-1]
         bottleneck_channels = max(1, int(input_channels * self.reduction_ratio))
-        
-        self.conv_reduce = layers.Conv2D(
-            filters=bottleneck_channels,
-            kernel_size=1,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer
-        )
-        self.conv_restore = layers.Conv2D(
-            filters=input_channels,
-            kernel_size=1,
-            use_bias=self.use_bias,
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer
-        )
-        
+
+        if self.conv_reduce is None:
+            self.conv_reduce = layers.Conv2D(
+                filters=bottleneck_channels,
+                kernel_size=1,
+                use_bias=self.use_bias,
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer
+            )
+        if self.conv_restore is None:
+            self.conv_restore = layers.Conv2D(
+                filters=input_channels,
+                kernel_size=1,
+                use_bias=self.use_bias,
+                kernel_initializer=self.kernel_initializer,
+                kernel_regularizer=self.kernel_regularizer
+            )
+
         # Build explicitly
         self.global_pool.build(input_shape)
         # GAP out: (B, 1, 1, C)
