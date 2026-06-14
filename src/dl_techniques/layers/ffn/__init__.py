@@ -3,6 +3,10 @@ from .swiglu_ffn import SwiGLUFFN
 from .diff_ffn import DifferentialFFN
 from .glu_ffn import GLUFFN
 from .geglu_ffn import GeGLUFFN
+from .gelu_mlp_ffn import GELUMLPFFN
+from .gated_mlp import GatedMLP
+from .orthoglu_ffn import OrthoGLUFFN
+from .power_mlp_layer import PowerMLPLayer
 from .residual_block import ResidualBlock
 from .swin_mlp import SwinMLP
 from .logic_ffn import LogicFFN
@@ -23,18 +27,26 @@ from .factory import (
 # ---------------------------------------------------------------------
 
 __all__ = [
-    LogicFFN,
-    MLPBlock,
-    SwiGLUFFN,
-    DifferentialFFN,
-    GeGLUFFN,
-    ResidualBlock,
-    CountingFFN,
-    KANLinear,
-    TverskyProjectionLayer,
-    FFNType,
-    create_ffn_layer,
-    create_ffn_from_config,
-    get_ffn_info,
-    validate_ffn_config,
+    # Layer classes
+    "MLPBlock",
+    "SwiGLUFFN",
+    "DifferentialFFN",
+    "GLUFFN",
+    "GeGLUFFN",
+    "GELUMLPFFN",
+    "GatedMLP",
+    "OrthoGLUFFN",
+    "PowerMLPLayer",
+    "ResidualBlock",
+    "SwinMLP",
+    "LogicFFN",
+    "CountingFFN",
+    "KANLinear",
+    "TverskyProjectionLayer",
+    # Factory interface
+    "FFNType",
+    "create_ffn_layer",
+    "create_ffn_from_config",
+    "get_ffn_info",
+    "validate_ffn_config",
 ]
