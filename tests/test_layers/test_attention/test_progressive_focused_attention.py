@@ -127,6 +127,25 @@ class TestForwardPass:
         output, attn_weights = layer(x)
         assert tuple(output.shape) == (2, 8, 8, 16)
 
+    def test_shifted_window_forward_general_geometry(self):
+        """SW-MSA must work for general H,W (nW>1), not just H=W=2*ws.
+
+        Regression for S2: _compute_attention_mask is parametrized by actual
+        (H,W); production callers (pft_sr/thera/swin) use maps larger than
+        2*window_size. Each geometry below has nW = (H/ws)*(W/ws) windows.
+        """
+        for h, w in [(8, 8), (16, 8), (16, 16), (8, 16)]:
+            layer = ProgressiveFocusedAttention(
+                dim=16, num_heads=2, window_size=4, shift_size=2
+            )
+            x = keras.random.normal((2, h, w, 16))
+            output, attn_weights = layer(x)
+            assert tuple(output.shape) == (2, h, w, 16), (
+                f"geometry {(h, w)} produced wrong output shape {tuple(output.shape)}"
+            )
+            # output must be finite (mask applied correctly, no NaN/inf from -100 fill)
+            assert np.all(np.isfinite(np.asarray(output))), f"non-finite output at {(h, w)}"
+
     def test_no_lepe_forward(self):
         layer = ProgressiveFocusedAttention(
             dim=16, num_heads=2, window_size=4, use_lepe=False
