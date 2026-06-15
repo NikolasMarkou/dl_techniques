@@ -303,7 +303,7 @@ class FreeTransformerLayer(TransformerLayer):
             intermediate_size: int,
             use_free_transformer: bool = False,
             num_latent_bits: int = 16,
-            encoder_attention_type: AttentionType = 'multi_head',
+            encoder_attention_type: AttentionType = 'multi_head_cross',
             encoder_ffn_type: FFNType = 'swiglu',
             encoder_attention_args: Optional[Dict[str, Any]] = None,
             encoder_ffn_args: Optional[Dict[str, Any]] = None,
@@ -346,9 +346,9 @@ class FreeTransformerLayer(TransformerLayer):
         # Encoder sublayers (created here; built in build())
         # ---------------------------------------------------------------------
 
-        # Override attention args to ensure non-causal behavior
+        # The encoder is a cross-attention block (Q=zeta, K/V=sequence); it is
+        # inherently non-causal, so no causal flag is needed.
         encoder_attn_args = (encoder_attention_args or {}).copy()
-        encoder_attn_args['causal'] = False  # Critical: encoder must be non-causal
 
         self.encoder_attention = create_attention_layer(
             attention_type=self.encoder_attention_type,
@@ -581,16 +581,14 @@ class FreeTransformerLayer(TransformerLayer):
             # Normalize queries
             zeta_norm = self.encoder_attention_norm(zeta_queries, training=training)
 
-            # DECISION plan_2026-06-15_5e7ae321/D-002 (KNOWN LIMITATION, documented
-            # not redesigned): the comment describes Q=zeta, KV=attention_output cross
-            # attention, but the factory ``encoder_attention`` is a SELF-attention layer
-            # and only ``zeta_norm`` is passed -- ``attention_output`` is NOT supplied as
-            # K/V, so the posterior Q(Z|S) is currently unconditional on S. A faithful
-            # fix requires a cross-attention layer accepting separate K/V (out of scope:
-            # would expand functionality). FreeTransformerLayer is not used by any model.
+            # Cross-attention: Q = learned zeta queries, K/V = ``attention_output``
+            # (the first-half sequence representation S). This makes the posterior
+            # Q(Z|S) genuinely conditional on the sequence. ``encoder_attention`` is a
+            # cross-attention layer ('multi_head_cross') taking ``kv_input`` separately.
             encoder_attn_out = self.encoder_attention(
                 zeta_norm,
-                attention_mask=None,  # Non-causal, no mask needed
+                kv_input=attention_output,
+                attention_mask=None,  # Non-causal, full attention over the sequence
                 training=training
             )
             encoder_attn_out = self.encoder_attention_dropout(
