@@ -4,7 +4,7 @@ The `dl_techniques.layers.norms` module provides a comprehensive collection of n
 
 ## Overview
 
-This module includes fifteen different normalization layer types, ranging from standard Keras layers to specialized variants for stability, efficiency, and advanced modeling like out-of-distribution detection. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these normalization mechanisms into your models.
+This module includes sixteen different normalization layer types, ranging from standard Keras layers to specialized variants for stability, efficiency, and advanced modeling like out-of-distribution detection. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these normalization mechanisms into your models.
 
 ## Weight Reparameterization (not factory-registered)
 
@@ -35,7 +35,7 @@ The following layers are supported by the factory system with automated paramete
 | `zero_centered_adaptive_band_rms_norm`| `ZeroCenteredAdaptiveBandRMS` | Zero-centered RMS with adaptive (log-RMS dense-projected) per-feature scaling. | Advanced LLMs needing zero-mean stability + input-adaptive flexibility. | Arbitrary |
 | `band_rms` | `BandRMS` | RMS normalization with a learnable, bounded magnitude constraint. | Imposing "thick spherical shell" constraints for stable training. | Arbitrary |
 | `adaptive_band_rms` | `AdaptiveBandRMS` | Adaptive RMS with scaling based on log-transformed RMS statistics. | Advanced training stability with input-adaptive scaling. | Arbitrary |
-| `band_logit_norm` | `BandLogitNorm` | L2 normalization with a learned scaling factor bounded in a band. | Classification tasks with constrained logit magnitude. | Arbitrary |
+| `band_logit_norm` | `BandLogitNorm` | L2 normalization with a band-bounded scale. (Known limitation: the "adaptive" component is degenerate — see note in `band_logit_norm.py`; it reduces to a constant scale `1 - 0.5·max_band_width`.) | Classification tasks with constrained logit magnitude. | Arbitrary |
 | `global_response_norm`| `GlobalResponseNormalization` | Global Response Normalization (GRN) from ConvNeXt V2. | ConvNeXt-style architectures to enhance inter-channel competition. | 2D, 3D, or 4D tensors |
 | `logit_norm` | `LogitNorm` | Temperature-scaled L2 normalization for classification logits. | Classification with calibrated confidence estimates. | Arbitrary |
 | `max_logit_norm` | `MaxLogitNorm` | L2 normalization on logits to separate magnitude and direction. | Out-of-distribution (OOD) detection and uncertainty estimation. | Arbitrary |
@@ -204,6 +204,13 @@ norm = create_normalization_layer(
 
 ### `band_logit_norm`
 **Optional:** `max_band_width` (default: 0.01), `axis` (default: -1), `epsilon` (default: 1e-7)
+
+> **Note:** the internal `LayerNormalization` is applied to the per-sample L2-norm
+> tensor of shape `(..., 1)`, which normalizes a single-element axis to 0. The band
+> scale therefore collapses to the constant `1 - 0.5·max_band_width`; the layer
+> behaves as L2-normalization × a fixed band-floor. Retained as-is for backward
+> compatibility.
+
 ```python
 norm = create_normalization_layer(
     'band_logit_norm',
