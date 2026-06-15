@@ -13,7 +13,6 @@ been exercised end-to-end — a build/forward break is captured via xfail.
 """
 
 import numpy as np
-import pytest
 
 
 def _assert_finite(value):
@@ -24,17 +23,12 @@ def _assert_finite(value):
 
 
 def test_smoke_build_and_forward():
-    try:
-        from dl_techniques.models.pft_sr.model import create_pft_sr
+    from dl_techniques.models.pft_sr.model import create_pft_sr
 
-        model = create_pft_sr(scale=2, variant="light")
+    model = create_pft_sr(scale=2, variant="light")
 
-        images = np.random.rand(2, 32, 32, 3).astype("float32")
-        out = model(images, training=False)
-    except Exception as exc:  # noqa: BLE001
-        pytest.xfail(
-            f"pft_sr build/forward failed: {type(exc).__name__}: {exc}"
-        )
+    images = np.random.rand(2, 32, 32, 3).astype("float32")
+    out = model(images, training=False)
 
     if isinstance(out, (list, tuple)):
         for v in out:

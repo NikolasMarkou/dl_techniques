@@ -13,6 +13,7 @@ References:
 import keras
 from typing import Optional, List, Literal
 from dl_techniques.layers.transformers.progressive_focused_transformer import PFTBlock
+from dl_techniques.layers.pixel_unshuffle import PixelShuffle2D
 
 
 @keras.saving.register_keras_serializable()
@@ -165,7 +166,7 @@ class PFTSR(keras.Model):
                     qkv_bias=self.qkv_bias,
                     attention_dropout=self.attention_dropout,
                     projection_dropout=self.projection_dropout,
-                    drop_path=self.dpr[block_idx],
+                    drop_path_rate=self.dpr[block_idx],
                     norm_type=self.norm_type,
                     use_lepe=self.use_lepe,
                     name=f"stage{stage_idx}_block{block_idx_in_stage}"
@@ -224,11 +225,14 @@ class PFTSR(keras.Model):
                     name=f"upsample_conv"
                 )
             )
+            # DECISION plan_2026-06-15_39a31d4a/D-003: keras.ops.nn.depth_to_space
+            # absent in Keras 3.8 -> use PixelShuffle2D (serializable, graph-safe);
+            # PFTBlock kwarg is drop_path_rate, not drop_path. Do NOT restore the
+            # Lambda(keras.ops.nn.depth_to_space) form (symbol does not exist /
+            # breaks .keras round-trip). block_size matches the depth_to_space
+            # factor at each site (self.scale / 2 / 2 / self.scale). See D-003.
             layers.append(
-                keras.layers.Lambda(
-                    lambda x: keras.ops.nn.depth_to_space(x, self.scale),
-                    name="pixel_shuffle"
-                )
+                PixelShuffle2D(block_size=self.scale, name="pixel_shuffle")
             )
         elif self.scale == 4:
             # 4x = 2x + 2x
@@ -242,10 +246,7 @@ class PFTSR(keras.Model):
                 )
             )
             layers.append(
-                keras.layers.Lambda(
-                    lambda x: keras.ops.nn.depth_to_space(x, 2),
-                    name="pixel_shuffle1"
-                )
+                PixelShuffle2D(block_size=2, name="pixel_shuffle1")
             )
             layers.append(
                 keras.layers.Conv2D(
@@ -257,10 +258,7 @@ class PFTSR(keras.Model):
                 )
             )
             layers.append(
-                keras.layers.Lambda(
-                    lambda x: keras.ops.nn.depth_to_space(x, 2),
-                    name="pixel_shuffle2"
-                )
+                PixelShuffle2D(block_size=2, name="pixel_shuffle2")
             )
         else:
             raise ValueError(f"Unsupported scale: {self.scale}")
@@ -282,10 +280,7 @@ class PFTSR(keras.Model):
                 padding='same',
                 name="upsample_conv"
             ),
-            keras.layers.Lambda(
-                lambda x: keras.ops.nn.depth_to_space(x, self.scale),
-                name="pixel_shuffle"
-            )
+            PixelShuffle2D(block_size=self.scale, name="pixel_shuffle")
         ]
 
         return keras.Sequential(layers, name="upsampler")
@@ -337,7 +332,22 @@ class PFTSR(keras.Model):
 
         for stage_blocks in self.stages:
             for block in stage_blocks:
-                x, prev_attn_map = block((x, prev_attn_map), training=training)
+                # DECISION plan_2026-06-15_39a31d4a/D-003: do NOT pass
+                # (x, None) as a structured input to PFTBlock — Keras' __call__
+                # shape machinery (optree get_shapes_dict) raises on the None
+                # element. The first block has no prior attention map; call it
+                # with bare x (PFTBlock.call handles the non-tuple case and sets
+                # prev_attn_map=None internally). See decisions.md D-003.
+                # Pass a LIST (not a tuple) for the structured input so
+                # PFTBlock.build's `isinstance(input_shape, list)` branch fires
+                # and extracts x_shape = input_shape[0]; a tuple is mis-read as a
+                # single shape -> `Invalid dtype: tuple` at norm build.
+                if prev_attn_map is None:
+                    x, prev_attn_map = block(x, training=training)
+                else:
+                    x, prev_attn_map = block(
+                        [x, prev_attn_map], training=training
+                    )
 
         # 3. Reconstruction
         x = self.conv_after_body(x)
