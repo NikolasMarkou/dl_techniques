@@ -184,6 +184,10 @@ class RBFLayer(keras.layers.Layer):
 
         self._feature_dim = feature_dim
 
+        # Mixed-precision: autocast=False keeps centers in variable_dtype (float32) inside
+        # call() under a mixed_float16 policy, so the distance / exp math runs in float32
+        # (matching the float32 inputs cast) and the output is cast to compute_dtype on
+        # return. Uniform with GMMLayer / KMeansLayer. No-op under the float32 policy.
         self.centers = self.add_weight(
             name='centers',
             shape=(self.units, self._feature_dim),
@@ -191,6 +195,7 @@ class RBFLayer(keras.layers.Layer):
             constraint=self.center_constraint,
             regularizer=self.kernel_regularizer,
             trainable=True,
+            autocast=False,
         )
 
         # Calculate inverse softplus for initialization
@@ -208,6 +213,7 @@ class RBFLayer(keras.layers.Layer):
             initializer=keras.initializers.Constant(init_val),
             regularizer=self.gamma_regularizer,
             trainable=self.trainable_gamma,
+            autocast=False,  # mixed-precision: keep float32 for the kernel math
         )
 
         super().build(input_shape)
@@ -246,8 +252,9 @@ class RBFLayer(keras.layers.Layer):
         # Penalty: max(0, threshold - distance)^2
         penalty = ops.square(ops.maximum(0.0, threshold - dist))
 
-        # Mask the diagonal (distance to self is 0, which would cause max penalty)
-        eye_mask = ops.eye(self.units, dtype=self.compute_dtype)
+        # Mask the diagonal (distance to self is 0, which would cause max penalty).
+        # variable_dtype (float32) to match the autocast=False centers under mixed precision.
+        eye_mask = ops.eye(self.units, dtype=self.variable_dtype)
         # Invert mask: 1.0 for off-diagonal, 0.0 for diagonal
         off_diag_mask = 1.0 - eye_mask
 
@@ -259,7 +266,7 @@ class RBFLayer(keras.layers.Layer):
         # Following original logic: scale by dim and strength.
         mean_penalty = ops.mean(masked_penalty)
 
-        dim_scale = ops.cast(self._feature_dim, dtype=self.compute_dtype)
+        dim_scale = ops.cast(self._feature_dim, dtype=self.variable_dtype)
 
         return self.repulsion_strength * dim_scale * mean_penalty
 
@@ -278,6 +285,11 @@ class RBFLayer(keras.layers.Layer):
         :rtype: keras.KerasTensor"""
         # Inputs shape: (batch, ..., dim)
         # Centers shape: (units, dim)
+
+        # Cast inputs to variable_dtype (float32) so the distance / exp math runs in full
+        # precision and matches the autocast=False centers under a mixed_float16 policy.
+        # The output is cast back to compute_dtype before returning (no-op under float32).
+        inputs = ops.cast(inputs, self.variable_dtype)
 
         # We broaden inputs to (batch, ..., 1, dim) to broadcast against centers
         # This works for 2D inputs (batch, dim) -> (batch, 1, dim)
@@ -305,7 +317,9 @@ class RBFLayer(keras.layers.Layer):
         # a bool. python-True keeps the exact unmasked add_loss; symbolic path multiplies by
         # the 0/1 factor.
         if self.units > 1 and self.repulsion_strength > 0:
-            training_factor = resolve_training_factor(training, self.compute_dtype)
+            # variable_dtype factor so the masked loss stays float32-consistent under
+            # a mixed_float16 policy (matches the autocast=False weights).
+            training_factor = resolve_training_factor(training, self.variable_dtype)
             if training_factor is not None:
                 repulsion_loss = self._compute_repulsion_loss()
                 self.add_loss(
@@ -313,7 +327,9 @@ class RBFLayer(keras.layers.Layer):
                     else training_factor * repulsion_loss
                 )
 
-        return output
+        # Cast to compute_dtype so the layer emits the policy's compute dtype
+        # (float16 under mixed precision; no-op under float32).
+        return ops.cast(output, self.compute_dtype)
 
     def compute_output_shape(
         self,

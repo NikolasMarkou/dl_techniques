@@ -709,6 +709,24 @@ class TestRBFLayerGraphMode:
             "symbolic training=True repulsion loss must equal the python-True value"
         assert sym_false == 0.0, "symbolic training=False must contribute zero loss"
 
+    def test_mixed_float16_forward(self) -> None:
+        """Forward must run under a mixed_float16 policy with float32 kernel math and a
+        compute_dtype output (uniform with GMMLayer / KMeansLayer)."""
+        original_policy = keras.mixed_precision.global_policy()
+        try:
+            keras.mixed_precision.set_global_policy("mixed_float16")
+            layer = RBFLayer(units=8, repulsion_strength=0.5)
+            x = np.random.normal(0, 1, (8, 16)).astype(np.float32)
+            y = layer(x)
+            assert keras.backend.standardize_dtype(y.dtype) == "float16"
+            y_np = np.asarray(ops.convert_to_numpy(y), dtype=np.float32)
+            assert not np.isnan(y_np).any() and not np.isinf(y_np).any()
+            # Parameters stay float32 (autocast=False).
+            assert keras.backend.standardize_dtype(layer.centers.dtype) == "float32"
+            assert keras.backend.standardize_dtype(layer.gamma_raw.dtype) == "float32"
+        finally:
+            keras.mixed_precision.set_global_policy(original_policy)
+
 
 if __name__ == '__main__':
     # Run with: python -m pytest test_radial_basis_function.py -v
