@@ -160,7 +160,7 @@ class BandRMS(keras.layers.Layer):
         super().__init__(**kwargs)
 
         # Validate inputs early
-        self._validate_inputs(max_band_width, epsilon)
+        self._validate_inputs(max_band_width, axis, epsilon)
 
         # Store ALL configuration parameters - required for get_config()
         self.max_band_width = max_band_width
@@ -178,15 +178,23 @@ class BandRMS(keras.layers.Layer):
 
         logger.debug(f"Initialized BandRMS with max_band_width={max_band_width}, axis={axis}, epsilon={epsilon}")
 
-    def _validate_inputs(self, max_band_width: float, epsilon: float) -> None:
+    def _validate_inputs(
+        self,
+        max_band_width: float,
+        axis: Union[int, Tuple[int, ...]],
+        epsilon: float,
+    ) -> None:
         """
         Validate initialization parameters.
 
         :param max_band_width: Maximum allowed deviation from unit norm.
         :type max_band_width: float
+        :param axis: Axis/axes over which to normalize.
+        :type axis: Union[int, Tuple[int, ...]]
         :param epsilon: Small constant for numerical stability.
         :type epsilon: float
-        :raises ValueError: If parameters are invalid.
+        :raises ValueError: If max_band_width or epsilon is invalid.
+        :raises TypeError: If axis is not an int or a sequence of ints.
         """
         if not 0 < max_band_width < 1:
             raise ValueError(
@@ -194,6 +202,15 @@ class BandRMS(keras.layers.Layer):
             )
         if epsilon <= 0:
             raise ValueError(f"epsilon must be positive, got {epsilon}")
+        if isinstance(axis, (list, tuple)):
+            if not all(isinstance(ax, int) for ax in axis):
+                raise TypeError(
+                    f"All elements in axis must be integers, got {axis}"
+                )
+        elif not isinstance(axis, int):
+            raise TypeError(
+                f"axis must be int or tuple of ints, got {type(axis)}"
+            )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
