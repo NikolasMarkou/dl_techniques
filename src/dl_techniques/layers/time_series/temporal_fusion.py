@@ -100,7 +100,7 @@ class TemporalFusionLayer(keras.layers.Layer):
                      │                │
                      │                ▼
                      │    ┌──────────────────────┐
-                     │    │  Lag Projector (opt.) │
+                     │    │  Lag Projector (opt.)│
                      │    └──────────┬───────────┘
                      │               │
                      ▼               │
@@ -126,14 +126,14 @@ class TemporalFusionLayer(keras.layers.Layer):
              ├────────────────┤
              │                │
              ▼                │
-        ┌──────────────┐     │
-        │ Context       │     │
-        │ Forecaster    │     │
-        │  Dense        │     │
-        └──────┬───────┘     │
-               │ f_ctx       │
-               │             │
-               ▼             ▼
+        ┌──────────────┐      │
+        │ Context      │      │
+        │ Forecaster   │      │
+        │  Dense       │      │
+        └──────┬───────┘      │
+               │ f_ctx        │
+               │              │
+               ▼              ▼
              ┌───────────────────┐
         g ──►│  Fusion Gate      │
              │  (1-g)*f_ctx      │
