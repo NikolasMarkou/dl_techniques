@@ -336,12 +336,14 @@ class NanoVLM(keras.Model):
             self.vision_config['output_mode'] = 'none'
 
         # Enhance fusion config with embedding dimension
-        self.fusion_config['embed_dim'] = vision_dim
+        self.fusion_config['dim'] = vision_dim
 
         # Set fusion strategy-specific defaults
         fusion_strategy = self.fusion_config['fusion_strategy']
-        if fusion_strategy == 'cross_attention' and 'num_heads' not in self.fusion_config:
-            self.fusion_config['num_heads'] = self.vision_config['num_heads']
+        if fusion_strategy == 'cross_attention':
+            attention_config = self.fusion_config.setdefault('attention_config', {})
+            if 'num_heads' not in attention_config:
+                attention_config['num_heads'] = self.vision_config['num_heads']
 
     def _create_vision_encoder(self) -> VisionEncoder:
         """Create VisionEncoder using existing component."""
@@ -361,6 +363,10 @@ class NanoVLM(keras.Model):
 
     def _create_fusion_layer(self) -> MultiModalFusion:
         """Create MultiModalFusion using existing component."""
+        # DECISION plan_2026-06-15_39a31d4a/D-002: MultiModalFusion takes dim +
+        # attention_config={'num_heads':N}, NOT embed_dim/num_heads (caller was coded
+        # against a ghost API). Every fusion_config source must use the new keys or the
+        # **splat re-injects the ghost kwarg. Correct form: layers/heads/vlm/factory.py:121.
         return MultiModalFusion(**self.fusion_config, name='multimodal_fusion')
 
     def _create_output_projection(self) -> layers.Layer:
@@ -453,12 +459,13 @@ class NanoVLM(keras.Model):
         self.output_projection.build(combined_shape)
         logger.debug(f"Built output projection with shape: {combined_shape}")
 
-        # Handle weight sharing if enabled
-        if (self.use_shared_embedding and
-            self.text_component_type == 'decoder' and
-            hasattr(self.text_component, 'word_embeddings')):
-            # Tie weights between input embedding and output projection
-            self.output_projection.kernel = self.text_component.word_embeddings.embeddings
+        # NOTE (plan_2026-06-15_39a31d4a/D-002 cascade): Keras 3 forbids reassigning a
+        # built layer's `.kernel` (raises "cannot add new elements of state ... already
+        # built"), and `word_embeddings.embeddings` is (vocab, dim) — the transpose of the
+        # Dense kernel (dim, vocab) — so the old tie was both illegal AND shape-wrong. The
+        # output_projection keeps its own built kernel; weight-tying is dropped (was
+        # dead-on-forward code, never executed). Re-add via a proper tied-Dense layer if
+        # memory-sharing is later required.
 
         # Always call parent build at the end
         super().build(input_shape)
@@ -725,8 +732,8 @@ def create_nanovlm(
                 'num_heads': 6, 'max_seq_len': 512
             },
             'fusion_config': {
-                'fusion_strategy': fusion_strategy, 'embed_dim': 384,
-                'num_heads': 6, 'num_fusion_layers': 3
+                'fusion_strategy': fusion_strategy, 'dim': 384,
+                'attention_config': {'num_heads': 6}, 'num_fusion_layers': 3
             }
         },
         'base': {
@@ -739,8 +746,8 @@ def create_nanovlm(
                 'num_heads': 12, 'max_seq_len': 512
             },
             'fusion_config': {
-                'fusion_strategy': fusion_strategy, 'embed_dim': 768,
-                'num_heads': 12, 'num_fusion_layers': 6
+                'fusion_strategy': fusion_strategy, 'dim': 768,
+                'attention_config': {'num_heads': 12}, 'num_fusion_layers': 6
             }
         },
         'large': {
@@ -753,8 +760,8 @@ def create_nanovlm(
                 'num_heads': 16, 'max_seq_len': 1024
             },
             'fusion_config': {
-                'fusion_strategy': fusion_strategy, 'embed_dim': 1024,
-                'num_heads': 16, 'num_fusion_layers': 8
+                'fusion_strategy': fusion_strategy, 'dim': 1024,
+                'attention_config': {'num_heads': 16}, 'num_fusion_layers': 8
             }
         }
     }

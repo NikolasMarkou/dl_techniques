@@ -15,7 +15,6 @@ embed_dim=384). ``call()`` (model.py:467) takes a dict with ``images``
 """
 
 import numpy as np
-import pytest
 
 
 def _assert_finite(value):
@@ -26,21 +25,16 @@ def _assert_finite(value):
 
 
 def test_smoke_build_and_forward():
-    try:
-        from dl_techniques.models.nano_vlm.model import create_nanovlm
+    from dl_techniques.models.nano_vlm.model import create_nanovlm
 
-        model = create_nanovlm(variant="mini", vocab_size=256)
+    model = create_nanovlm(variant="mini", vocab_size=256)
 
-        b, t = 2, 16
-        inputs = {
-            "images": np.random.rand(b, 224, 224, 3).astype("float32"),
-            "text_tokens": np.random.randint(0, 256, (b, t)).astype("int32"),
-        }
-        out = model(inputs, training=False)
-    except Exception as exc:  # noqa: BLE001
-        pytest.xfail(
-            f"nano_vlm build/forward failed: {type(exc).__name__}: {exc}"
-        )
+    b, t = 2, 16
+    inputs = {
+        "images": np.random.rand(b, 224, 224, 3).astype("float32"),
+        "text_tokens": np.random.randint(0, 256, (b, t)).astype("int32"),
+    }
+    out = model(inputs, training=False)
 
     # Output may be a single logits tensor, or a dict/tuple/list of tensors.
     if isinstance(out, dict):
