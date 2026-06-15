@@ -161,7 +161,7 @@ class TransformerDecoderLayer(keras.layers.Layer):
         self.dropout_rate = dropout_rate
         self.attention_dropout_rate = attention_dropout_rate
         self.use_causal_mask = bool(use_causal_mask)
-        self.activation = activation
+        self.activation = keras.activations.get(activation)
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
@@ -349,7 +349,7 @@ class TransformerDecoderLayer(keras.layers.Layer):
             'dropout_rate': self.dropout_rate,
             'attention_dropout_rate': self.attention_dropout_rate,
             'use_causal_mask': self.use_causal_mask,
-            'activation': self.activation,
+            'activation': keras.activations.serialize(self.activation),
             'use_bias': self.use_bias,
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
             'bias_initializer': initializers.serialize(self.bias_initializer),

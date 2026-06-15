@@ -326,7 +326,7 @@ class TextEncoder(keras.layers.Layer):
         self.attention_dropout_rate = attention_dropout_rate
         self.embed_dropout_rate = embed_dropout_rate
         self.stochastic_depth_rate = stochastic_depth_rate
-        self.activation = activation
+        self.activation = keras.activations.get(activation)
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
@@ -818,7 +818,7 @@ class TextEncoder(keras.layers.Layer):
             'attention_dropout_rate': self.attention_dropout_rate,
             'embed_dropout_rate': self.embed_dropout_rate,
             'stochastic_depth_rate': self.stochastic_depth_rate,
-            'activation': self.activation,
+            'activation': keras.activations.serialize(self.activation),
             'use_bias': self.use_bias,
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
             'bias_initializer': initializers.serialize(self.bias_initializer),

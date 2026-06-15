@@ -216,7 +216,7 @@ class EomtTransformer(keras.layers.Layer):
         self.attention_dropout_rate = attention_dropout_rate
         self.use_stochastic_depth = use_stochastic_depth
         self.stochastic_depth_rate = stochastic_depth_rate
-        self.activation = activation
+        self.activation = keras.activations.get(activation)
         self.use_bias = use_bias
         self.use_masked_attention = use_masked_attention
         self.mask_probability = mask_probability
@@ -431,7 +431,7 @@ class EomtTransformer(keras.layers.Layer):
             'attention_dropout_rate': self.attention_dropout_rate,
             'use_stochastic_depth': self.use_stochastic_depth,
             'stochastic_depth_rate': self.stochastic_depth_rate,
-            'activation': self.activation,
+            'activation': keras.activations.serialize(self.activation),
             'use_bias': self.use_bias,
             'use_masked_attention': self.use_masked_attention,
             'mask_probability': self.mask_probability,

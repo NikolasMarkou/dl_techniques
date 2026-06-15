@@ -39,7 +39,8 @@ class TestSwinTransformerBlock:
         assert layer.dropout_rate == 0.0
         assert layer.attention_dropout_rate == 0.0
         assert layer.stochastic_depth_rate == 0.0
-        assert layer.activation == "gelu"
+        # activation stored via keras.activations.get() -> function; assert serialized token
+        assert keras.activations.serialize(layer.activation) == "gelu"
         assert layer.use_bias is True
         assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
         assert isinstance(layer.bias_initializer, keras.initializers.Zeros)
@@ -77,7 +78,7 @@ class TestSwinTransformerBlock:
         assert layer.dropout_rate == 0.1
         assert layer.attention_dropout_rate == 0.1
         assert layer.stochastic_depth_rate == 0.1
-        assert layer.activation == "relu"
+        assert keras.activations.serialize(layer.activation) == "relu"
         assert layer.use_bias is False
         assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
         assert layer.kernel_regularizer == custom_regularizer
