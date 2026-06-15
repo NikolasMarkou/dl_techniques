@@ -219,7 +219,11 @@ norm = create_normalization_layer(
 ```
 
 ### `global_response_norm`
-**Optional:** `eps` (default: 1e-6), `gamma_initializer` (default: 'ones'), `beta_initializer` (default: 'zeros')
+**Optional:** `eps` (default: 1e-6), `gamma_initializer` (default: 'ones'), `beta_initializer` (default: 'zeros'), `gamma_regularizer`, `beta_regularizer`, `activity_regularizer`
+
+> **Note (gamma init):** this layer defaults `gamma_initializer='ones'`. The ConvNeXt V2
+> paper initializes gamma=0 (and beta=0) so GRN is an identity at init. To reproduce the
+> paper's identity-at-init behavior, pass `gamma_initializer='zeros'` explicitly.
 ```python
 # Note: factory maps `epsilon` to `eps` if `eps` is not provided
 norm = create_normalization_layer(
@@ -262,9 +266,13 @@ focal_norm = create_normalization_layer('dml_plus_focal')
 # Center model variant
 center_norm = create_normalization_layer('dml_plus_center')
 ```
+> **Note (tuple outputs):** `dml_plus_center` (and `decoupled_max_logit`) return a
+> **tuple** `(score, norm_factor)` from `call()`, not a single tensor. Generic code
+> that expects one tensor from any normalization layer must special-case these keys.
+> `dml_plus_focal` returns a single tensor.
 
 ### `dynamic_tanh`
-**Optional:** `axis` (default: -1), `alpha_init_value` (default: 0.5), `kernel_initializer` (default: 'ones'), `bias_initializer` (default: 'zeros')
+**Optional:** `axis` (default: -1), `alpha_init_value` (default: 0.5), `kernel_initializer` (default: 'ones'), `bias_initializer` (default: 'zeros'), `kernel_regularizer`, `bias_regularizer`, `kernel_constraint`, `bias_constraint`
 ```python
 norm = create_normalization_layer(
     'dynamic_tanh',

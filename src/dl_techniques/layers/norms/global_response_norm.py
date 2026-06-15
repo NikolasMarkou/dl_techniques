@@ -114,7 +114,10 @@ class GlobalResponseNormalization(keras.layers.Layer):
         Defaults to 1e-6.
     :type eps: float
     :param gamma_initializer: Initializer for gamma (scale) weights.
-        Defaults to ``'ones'``.
+        Defaults to ``'ones'``. NOTE: the ConvNeXt V2 paper initializes gamma to
+        zero (with beta zero) so GRN is an identity at init; this implementation
+        defaults to ``'ones'``. Pass ``gamma_initializer='zeros'`` to reproduce
+        the paper's identity-at-init behavior.
     :type gamma_initializer: Union[str, keras.initializers.Initializer]
     :param beta_initializer: Initializer for beta (bias) weights.
         Defaults to ``'zeros'``.
