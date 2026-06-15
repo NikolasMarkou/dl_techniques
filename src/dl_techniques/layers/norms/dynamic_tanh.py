@@ -116,8 +116,11 @@ class DynamicTanh(keras.layers.Layer):
         if not isinstance(alpha_init_value, (int, float)):
             raise ValueError(f"alpha_init_value must be a number, got {type(alpha_init_value)}")
 
-        # Store ALL configuration parameters
+        # Store ALL configuration parameters. self.axis keeps the constructor value
+        # verbatim (never mutated by build) so get_config is build-state-independent;
+        # the build-normalized (positive) axes live in self._norm_axis.
         self.axis = list(axis) if isinstance(axis, (list, tuple)) else [axis]
+        self._norm_axis: Optional[List[int]] = None
         self.alpha_init_value = float(alpha_init_value)
 
         # Store serializable initializers/regularizers/constraints
@@ -151,6 +154,9 @@ class DynamicTanh(keras.layers.Layer):
         :param input_shape: Shape of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         ndims = len(input_shape)
 
         # Validate and normalize axes
@@ -164,10 +170,10 @@ class DynamicTanh(keras.layers.Layer):
             normalized_ax = ndims + ax if ax < 0 else ax
             normalized_axis.append(normalized_ax)
 
-        self.axis = normalized_axis
+        self._norm_axis = normalized_axis
 
         # Calculate parameter shape for weight and bias
-        param_shape = tuple(input_shape[ax] for ax in self.axis)
+        param_shape = tuple(input_shape[ax] for ax in self._norm_axis)
 
         # Create layer's own weights
         # Alpha: learnable scalar parameter
@@ -232,7 +238,7 @@ class DynamicTanh(keras.layers.Layer):
         # Create broadcast shape for weight and bias
         broadcast_shape = []
         for i in range(ndims):
-            if i in self.axis:
+            if i in self._norm_axis:
                 broadcast_shape.append(input_shape[i])
             else:
                 broadcast_shape.append(1)
