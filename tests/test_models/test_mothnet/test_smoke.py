@@ -11,7 +11,6 @@ readout); output is class logits ``(B, num_classes)``.
 """
 
 import numpy as np
-import pytest
 
 
 def _assert_finite(value):
@@ -22,18 +21,13 @@ def _assert_finite(value):
 
 
 def test_smoke_build_and_forward():
-    try:
-        from dl_techniques.models.mothnet.model import MothNet
+    from dl_techniques.models.mothnet.model import MothNet
 
-        model = MothNet(num_classes=10)
+    model = MothNet(num_classes=10)
 
-        # Tabular: (batch=2, num_features=64) float32.
-        features = np.random.rand(2, 64).astype("float32")
-        out = model(features, training=False)
-    except Exception as exc:  # noqa: BLE001
-        pytest.xfail(
-            f"mothnet build/forward failed: {type(exc).__name__}: {exc}"
-        )
+    # Tabular: (batch=2, num_features=64) float32.
+    features = np.random.rand(2, 64).astype("float32")
+    out = model(features, training=False)
 
     if isinstance(out, dict):
         vals = list(out.values())

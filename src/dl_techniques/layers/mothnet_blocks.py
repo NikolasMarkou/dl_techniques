@@ -404,7 +404,8 @@ class MushroomBodyLayer(keras.layers.Layer):
         ], axis=1)
 
         # Scatter top-k values into sparse tensor
-        sparse_output = keras.ops.scatter_nd_update(
+        # DECISION plan_2026-06-15_00924f53/D-003: keras.ops has scatter_update (inputs,indices,updates), NOT scatter_nd_update, in Keras 3.8; functional scatter-into-zeros (WTA top-k), indices already (B*k,2).
+        sparse_output = keras.ops.scatter_update(
             sparse_output,
             indices,
             keras.ops.reshape(top_k_values, [-1])
