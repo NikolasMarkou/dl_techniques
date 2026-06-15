@@ -61,9 +61,34 @@ class TestFreeTransformerLayer:
         assert np.all(np.isfinite(np.array(output)))
 
     def test_free_path_inference(self, x):
+        """Inference returns the SAME structure as training: (output, bit_logits).
+        bit_logits is the uniform-prior zeros tensor."""
         layer = self._layer(use_free_transformer=True, num_latent_bits=4)
-        out = layer(x, training=False)
-        assert tuple(out.shape) == (2, self.T, self.HID)
+        result = layer(x, training=False)
+        assert isinstance(result, (tuple, list)) and len(result) == 2
+        output, bit_logits = result
+        assert tuple(output.shape) == (2, self.T, self.HID)
+        assert tuple(bit_logits.shape) == (2, self.T, 4)
+        assert np.allclose(np.array(bit_logits), 0.0)  # uniform prior
+
+    def test_output_structure_matches_compute_output_shape(self, x):
+        """call() output structure must match compute_output_shape in BOTH modes
+        (the structure depends only on use_free_transformer, not on training)."""
+        # use_free_transformer=True -> 2-tuple in both modes
+        layer = self._layer(use_free_transformer=True, num_latent_bits=4)
+        cos = layer.compute_output_shape((2, self.T, self.HID))
+        assert isinstance(cos, tuple) and len(cos) == 2 and isinstance(cos[0], tuple)
+        for mode in (True, False):
+            result = layer(x, training=mode)
+            assert isinstance(result, (tuple, list)) and len(result) == 2
+            assert tuple(result[0].shape) == tuple(cos[0])
+            assert tuple(result[1].shape) == tuple(cos[1])
+        # use_free_transformer=False -> single tensor matching single shape
+        plain = self._layer(use_free_transformer=False)
+        cos_plain = plain.compute_output_shape((2, self.T, self.HID))
+        out = plain(x, training=False)
+        assert not isinstance(out, (tuple, list))
+        assert tuple(out.shape) == tuple(cos_plain)
 
     def test_encoder_is_cross_attention(self, x):
         """The redesign: the encoder must use cross-attention, so its output
