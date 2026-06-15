@@ -479,8 +479,13 @@ class ReasoningByteEmbeddings(keras.layers.Layer):
 
         # Add hash n-gram embeddings if enabled
         if self.hash_embeddings is not None:
-            # Create padded token_ids for hash embeddings
-            if self.puzzle_emb_len > 0:
+            # Create padded token_ids for hash embeddings.
+            # DECISION plan_2026-06-15_e6a0391c/D-005: pad by puzzle_emb_len ONLY
+            # when puzzle tokens were actually prepended above (same condition as
+            # line ~461). Padding unconditionally produced a seq-length mismatch
+            # (embeddings len N vs hash_embeds len N+puzzle_emb_len) when
+            # puzzle_ids is None, raising an AddV2 shape error on forward.
+            if self.puzzle_emb_len > 0 and puzzle_ids is not None:
                 padded_tokens = ops.pad(token_ids, [[0, 0], [self.puzzle_emb_len, 0]], constant_values=0)
             else:
                 padded_tokens = token_ids

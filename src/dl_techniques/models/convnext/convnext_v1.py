@@ -272,7 +272,12 @@ class ConvNeXtV1(keras.Model):
             filters=self.dims[stage_idx],
             kernel_size=downsample_kernel_size,
             strides=downsample_stride,
-            padding="valid",
+            # DECISION plan_2026-06-15_e6a0391c/D-003: "same" (not "valid") so the
+            # kernel==stride downsample never collapses to 0x0 on small inputs
+            # (CIFAR 32x32 / 16x16 — sizes the convnext tests exercise), which
+            # previously yielded non-finite (NaN) output. Identical to "valid"
+            # when the spatial dim is divisible by the stride.
+            padding="same",
             use_bias=self.use_bias,
             kernel_initializer=self.STEM_INITIALIZER,
             kernel_regularizer=self.kernel_regularizer,

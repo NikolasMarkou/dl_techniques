@@ -388,13 +388,19 @@ class WindowedAttentionWithRelPos(layers.Layer):
         else:
             rel_pos_resized = rel_pos
 
-        # Calculate relative coordinates
-        q_coords = ops.expand_dims(ops.arange(q_size), axis=1) * max(k_size / q_size, 1.0)
-        k_coords = ops.expand_dims(ops.arange(k_size), axis=0) * max(q_size / k_size, 1.0)
-        relative_coords = (q_coords - k_coords) + (k_size - 1) * max(q_size / k_size, 1.0)
+        # Calculate relative coordinates.
+        # DECISION plan_2026-06-15_e6a0391c/D-004: cast arange (int32) to float32
+        # before scaling by the Python float ratio — multiplying an int32 tensor
+        # by a float raised "Cannot convert 1.0 to EagerTensor of dtype int32".
+        q_coords = ops.cast(ops.expand_dims(ops.arange(q_size), axis=1), "float32") * max(k_size / q_size, 1.0)
+        k_coords = ops.cast(ops.expand_dims(ops.arange(k_size), axis=0), "float32") * max(q_size / k_size, 1.0)
+        relative_coords = (q_coords - k_coords) + float(k_size - 1) * max(q_size / k_size, 1.0)
 
-        # Gather the embeddings using the coordinates
-        return ops.gather(rel_pos_resized, ops.cast(relative_coords, 'int32'))
+        # Gather the embeddings using the coordinates.
+        # DECISION plan_2026-06-15_e6a0391c/D-004: keras.ops has no `gather`; use
+        # `ops.take(..., axis=0)` (equivalent row-gather) — `ops.gather` raised
+        # AttributeError on Keras 3.8.
+        return ops.take(rel_pos_resized, ops.cast(relative_coords, 'int32'), axis=0)
 
     def _add_decomposed_rel_pos(
         self,
@@ -423,9 +429,11 @@ class WindowedAttentionWithRelPos(layers.Layer):
         # Reshape query for einsum operations
         r_q = ops.reshape(q, (B, nH, q_h, q_w, D))
 
-        # Compute relative biases for height and width
+        # Compute relative biases for height and width.
+        # DECISION plan_2026-06-15_e6a0391c/D-004: rel_w output label was a typo
+        # ('x' not present in inputs → einsum ValueError); must be 'k' like rel_h.
         rel_h = ops.einsum("bnhwc,hkc->bnhwk", r_q, Rh)
-        rel_w = ops.einsum("bnhwc,wkc->bnhwx", r_q, Rw)
+        rel_w = ops.einsum("bnhwc,wkc->bnhwk", r_q, Rw)
 
         # Add the biases to the attention scores
         attn = ops.reshape(attn, (B, nH, q_h, q_w, q_h, q_w))
