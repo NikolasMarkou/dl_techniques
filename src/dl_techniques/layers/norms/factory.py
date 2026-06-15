@@ -64,7 +64,12 @@ def create_normalization_layer(
     :param name: Optional name for the layer. If None, layer will use default naming.
     :type name: Optional[str]
     :param epsilon: Small constant for numerical stability. Defaults to 1e-6.
-        Used by normalization layers that support epsilon parameter.
+        Used by normalization layers that support an epsilon parameter. NOTE: this
+        1e-6 default is imposed by the factory (via ``setdefault``) and may differ
+        from a layer class's own default — the custom RMS-family classes default to
+        1e-7, and Keras ``LayerNormalization``/``BatchNormalization`` default to
+        1e-3. Pass ``epsilon`` explicitly to control it; instantiate the class
+        directly to get its own default.
     :type epsilon: float
     :param kwargs: Additional keyword arguments specific to each normalization type.
         Common kwargs include axis, center, scale, use_scale, max_band_width,
@@ -226,12 +231,12 @@ def get_normalization_info() -> Dict[str, Dict[str, Any]]:
         },
         'band_rms': {
             'description': 'RMS normalization with bounded magnitude constraints',
-            'parameters': ['max_band_width', 'axis', 'epsilon'],
+            'parameters': ['max_band_width', 'axis', 'epsilon', 'band_initializer', 'band_regularizer'],
             'use_case': 'Training stability in deep networks with gradient control'
         },
         'adaptive_band_rms': {
             'description': 'Adaptive RMS with log-transformed RMS-based scaling',
-            'parameters': ['max_band_width', 'axis', 'epsilon'],
+            'parameters': ['max_band_width', 'axis', 'epsilon', 'band_initializer', 'band_regularizer'],
             'use_case': 'Advanced training stability with adaptive scaling'
         },
         'band_logit_norm': {
@@ -241,7 +246,8 @@ def get_normalization_info() -> Dict[str, Dict[str, Any]]:
         },
         'global_response_norm': {
             'description': 'Global Response Normalization from ConvNeXt',
-            'parameters': ['eps', 'gamma_initializer', 'beta_initializer'],
+            'parameters': ['eps', 'gamma_initializer', 'beta_initializer',
+                           'gamma_regularizer', 'beta_regularizer', 'activity_regularizer'],
             'use_case': 'ConvNeXt-style architectures and vision_heads models'
         },
         'logit_norm': {
