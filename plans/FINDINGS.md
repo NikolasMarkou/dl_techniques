@@ -36,6 +36,37 @@
 - **`current_phase` / `_global_step` counters**: `add_weight(trainable=False, dtype="float32")` — int32 fails CPU/GPU device placement.
 <!-- /COMPRESSED-SUMMARY -->
 
+## plan_2026-06-15_c8f516c3
+### Index
+
+| # | Finding | Severity | Source | Decision |
+|---|---------|----------|--------|----------|
+| F1 | All 5 MoE layer `build()` methods lack `if self.built: return` first-line guard. Explicit double-build raises ValueError (CONFIRMED by repro). Canonical Keras-3 pattern (LESSONS). LinearGating:212, CosineGating:433, SoftMoEGating:643, FFNExpert:190, MixtureOfExperts:139. | [BUG-hygiene] | gating.md#2, experts-layer#2/3, repro | FIX (Tier A) |
+| F2 | `SoftMoEGating` `raw_gate_probs` has wrong shape `[b,s,e,slots]` (softmax axis=-1 over slots) vs contract `[b,s,e]` that the other 2 gatings emit. gating.py:721. Latent (layer.py:252 suppresses aux-loss for softmoe) but violates the shared aux_info contract. | [BUG-latent] | gating.md#5 | FIX (Tier A) |
+| F3 | README stale/wrong: line 632 `GatingConfig(train_capacity_factor=1.0)` raises TypeError if copied; lines 178-179 show removed `train_/eval_capacity_factor` as live `MoEConfig` fields; `capacity_factor` documented as functional (143/344/534/654/718) but is a never-consumed no-op stub; norm fields undocumented. | [DOC-BUG] | config-and-wiring#11/12/13, gating.md#6 | FIX (Tier A) |
+| F4 | `layer.py:286` `num_tokens = ops.shape(inputs_flat)[0]` is a dead assignment (only referenced in comments). | [cleanup] | (orchestrator verify) | FIX (Tier A) |
+| F5 | `GatingConfig` has NO `__post_init__` validation; `ExpertConfig` HAS one (config.py:79). Contract asymmetry. Invalid `gating_type`/`top_k<1`/`num_slots<1` pass silently until layer construction. | [RISK/contract] | config-and-wiring#2 | FIX (Tier B) |
+| F6 | `CosineGating` learnable temperature unconstrained (gating.py:443); division `cosine_sim / temperature_value` (489). temperature→0 ⇒ NaN; negative ⇒ inverted routing. | [RISK-robustness] | gating.md#4 | FIX (Tier B) |
+| F7 | `ExpertConfig.use_bias/kernel_initializer/bias_initializer/kernel_regularizer/bias_regularizer` (config.py:65-69) are serialized+round-tripped but never forwarded to FFNExpert. Docstring scopes them to "additional layers (not part of the FFN itself)" — which do not exist ⇒ inert BY DESIGN. | [DEFERRED] | experts-layer#10, config:50-69 | DOC-note only; wiring=expand (REJECT) |
+| F8 | `register_keras_serializable()` has no `package=` on any MoE class (gating ×3, FFNExpert, MixtureOfExperts). | [REJECT] | gating.md#3 | DO NOT FIX — adding `package=` CHANGES the registration key and breaks already-saved `.keras` models (LESSONS). Repo convention is bare per experts.py:90. |
+| F9 | `capacity_factor`/`drop_tokens`/`use_residual_connection` are reserved no-ops, already commented in code (layer.py:329-333). Only the README over-advertises capacity_factor (folded into F3). | [DEFERRED] | all 3 findings | Code OK; doc via F3 |
+| F10 | `integration.py:168 _apply_moe_learning_rate_multipliers` warning branch fires for every standard optimizer; sets duck-typed `optimizer.learning_rate_multipliers` attr. Pre-existing training-glue, not layer contract. | [RISK-out-of-scope] | experts-layer#9 | DEFER — training integration, not the MoE layer contract. Note only. |
+
+### Key Constraints
+
+- **[HARD] No EAGER, all graph-compatible.** VERIFIED already satisfied: all 3 gating types + full MoE layer trace cleanly under `@tf.function` with `TensorSpec([None,5,16])`, including `top_k==num_experts`. The dense "run-all-experts" combine (layer.py:315-327) and static `for expert_id in range(self.num_experts)` are graph-safe. No `.numpy()`/`int(tensor)`/dynamic-dim python loops exist.
+- **[HARD] Keras-3 serialization round-trips.** VERIFIED: save/load roundtrip PASS (max|Δ|=0) for linear/cosine/softmoe. The missing `if self.built: return` guard does NOT break the Keras `__call__`-driven build path (framework guards it) — only explicit re-`build()` raises. Fix is hygiene/contract, not a roundtrip bug.
+- **[HARD] Never change/add a `package=` on existing registered classes** — breaks deserialization of saved models (LESSONS). ⇒ F8 REJECTED.
+- **[HARD] Don't expand functionality / fix what's there.** ⇒ wiring ExpertConfig dead fields (F7) and implementing capacity_factor (F9) are OUT. Removing reserved fields breaks serialization ⇒ also OUT.
+- **[SOFT] Same contract across pieces.** ExpertConfig validates in `__post_init__`; GatingConfig should too (F5). All gatings emit aux_info `raw_gate_probs` shaped `[...,num_experts]` (F2 makes softmoe comply).
+- **[GHOST] `train_capacity_factor`/`eval_capacity_factor`** — removed from code, silently dropped in `MoEConfig.from_dict`, still shown live in README (F3).
+- **Baseline: 57 MoE tests pass** (`tests/test_layers/test_moe/`). Fixes must keep all green + add targeted regressions.
+
+### Corrections
+
+- **[CORRECTED iter-0]** `gating.md#1` (and Risks) claimed an **EAGER BREAK / functional-trace crash** in the `top_k==num_experts` "use all experts" branch via `ops.broadcast_to(..., (ops.shape(gate_logits)[0], N))` at gating.py:280-283 / 512-515. **REFUTED by direct repro**: `LinearGating(num_experts=4,top_k=4)` and `CosineGating(...,top_k=4)` build cleanly via `keras.Input`, AND the full MoE traces under `@tf.function`/`TensorSpec([None,...])`. On the TF backend `keras.ops.shape(x)[0]` is a dynamic scalar tensor (not Python `None`), so `broadcast_to` is fine. Matches the recurring "explorer over-flags graph-safety" pattern in LESSONS. NO FIX NEEDED.
+- **[CORRECTED iter-0]** `experts-layer#5` flagged `if training and ...` (layer.py:218,252) as `[EAGER]`/`[RISK]`. This is the standard Keras `training`-bool guard; Keras passes a Python bool in `model.fit` (LESSONS). Graph-trace repro passes. NOT a defect. NO FIX.
+
 ## plan_2026-06-15_2485b951
 ### Scope
 13 norm layer files in `src/dl_techniques/layers/norms/` (+ `factory.py`, `__init__.py`, `README.md`).
@@ -189,26 +220,3 @@ GlobalResponseNormalization, DynamicTanh, PolarWeightNorm.
 *Append [CORRECTED iter-N] entries here when earlier findings prove wrong.*
 </content>
 </invoke>
-
-## plan_2026-06-14_5e80bd3e
-### Index
-
-| ID | Topic | Key takeaway |
-|----|-------|--------------|
-| F-SITES | The 3 side-effect sites | KMeans `call:619` gates `self._update_centroids()` (which does TWO state writes: `centroid_momentum.assign` kmeans.py:571 + `centroids.assign_add` kmeans.py:574). GMM `call:573` gates `add_loss(self._isometric_regularization_loss())`. RBF `call:300` gates `add_loss(self._compute_repulsion_loss())`. All three currently gated by `if training is True:` (from prior plan plan_2026-06-14_7384c2e3/D-001) → skip under symbolic tensor. |
-| F-PRECEDENT | Graph-safe conditional idiom in repo | Repo uses `keras.ops.cond` for graph-safe VALUE selection (stochastic_gradient.py:141, prism_blocks.py:499). No training-resolution helper exists anywhere. `utils/tensors.py` is the natural home for one. For SIDE EFFECTS (add_loss / .assign), `ops.cond` branches are awkward (must return matching structures); tensor MASKING (multiply the delta/loss by `cast(training)`) is cleaner and equally graph-safe. |
-| F-PROTO | Empirically validated fix idiom | Standalone @tf.function prototype confirms: gate `if training is not None and training is not False:` + factor `1.0 if training is True else keras.ops.cast(training, dtype)`, then MASK state-deltas/loss by factor → symbolic True fires both side-effects, symbolic False is a TRUE no-op (centroid unchanged, loss=0), python True preserved exactly, None graph-safe under tf.function. No graph break (all branching is on python identity/type, never on a tensor value). |
-| F-NUMERIC | Zero-regression guard | To preserve EXACT numerics on the existing python-True training tests, the python-True path must keep the unmasked `assign`/`add_loss` (factor==1.0 float → exact); only the symbolic-tensor path uses the masked formula. Branch on `isinstance(factor, float)` (a python-type check, static at trace time, graph-safe). |
-
-### Key Constraints
-
-- **[HARD]** Side-effects MUST fire when `training` is a symbolic `tf.Tensor` that is True at runtime (the user's foot-gun). This REVISES prior plan plan_2026-06-14_7384c2e3/D-001 which intentionally skipped the tensor case.
-- **[HARD]** Everything stays graph-compatible — no eager, no bool-coercion of a tensor. (carried constraint)
-- **[HARD]** Zero numeric regression on the python-bool / None call paths (existing 112 tests must stay green). Preserve exact python-True update via `isinstance(factor, float)` fast path (F-NUMERIC).
-- **[HARD]** Symbolic-False at runtime must be a true no-op for STATE (no centroid/momentum drift at inference) and zero loss contribution.
-- **[SOFT]** Single source of truth for the factor logic (shared `resolve_training_factor` helper in utils/tensors.py) → uniform across all 3 layers, testable once. (DRY; 3 call sites = earned abstraction)
-- **[SOFT]** Update the now-stale in-code comments (added last plan) that claim "symbolic/None/False skip the side-effect" — symbolic no longer skips.
-- **[GHOST]** Prior LESSONS/SYSTEM say `training is True` is THE canonical idiom. That holds for layers whose side-effects are inference-irrelevant, but is the wrong contract for layers that must support symbolic-training custom loops. Will reconcile at CLOSE (idiom is context-dependent, not absolute).
-
-### Corrections
-*None yet.*

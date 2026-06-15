@@ -57,6 +57,7 @@
 - **Graph-trace tests catch padding-path eager breaks** that reshape-only code review misses. Always include a `@tf.function` trace test with `TensorSpec([None,...])` when fixing graph-safety issues.
 - **Dynamic reshape idiom**: `ops.reshape(t, (*ops.shape(x)[:-1], -1))` is graph-safe with one `-1` inferred trailing dim. Avoid `list(tensor.shape)` in shape tuples -- materializes None at trace time.
 - **`range(ops.shape(x)[N])` is graph-broken** under `@tf.function`/jit. Use static `.shape[N]` + fail-loud `ValueError` on None.
+- **`keras.ops.shape(x)[i]` is a DYNAMIC scalar tensor (not Python `None`) on the TF backend.** So `ops.broadcast_to(t, (ops.shape(x)[0], N))` is graph-safe and traces fine in the functional API — a recurring explorer "EAGER BREAK" false-positive (refuted by repro in MoE gating `top_k==num_experts` path). Distinguish from `list(tensor.shape)[i]` which CAN be `None`.
 - **Before adding an "eager-only" guard, check whether host materialization is actually necessary.** `Variable.assign` and `keras.ops.linspace(tensor, tensor, n)` are graph-safe; only `float(convert_to_numpy(...))` + Python-attr mutation force eager.
 - **When removing an eager-only debug warning for graph safety**: keep the ctor arg accepted + stored + serialized (back-compat for saved configs); update docstring; add an in-code NOTE comment.
 
@@ -86,7 +87,8 @@
 - **An explicit `build()` that only calls `super().build()` leaves sublayers unbuilt at `.keras` load-time weight-restore.**
 - **Canonical Keras-3 lifecycle**: `None`-sentinel in `__init__` for build-time dims; `if self.built: return` MUST be the FIRST line of `build()`; explicit sublayer `.build()` in parent `build()`; `super().build()` LAST.
 - **Keras sublayer-list accumulators in `build()` are a double-build trap.** Any `build()` that appends to `self.some_list` MUST reset the accumulator at the TOP (or guard via `if self.built: return` first).
-- **`if self.built: return` guard sweep is mechanical and zero-regression** (confirmed: 25 attention files, 14 embedding files, 15 FFN files, 7 activation files, 10 norms files -- 5 sub-package sweeps).
+- **`if self.built: return` guard sweep is mechanical and zero-regression** (confirmed: 25 attention files, 14 embedding files, 15 FFN files, 7 activation files, 10 norms files, 5 MoE classes -- 6 sub-package sweeps).
+- **Missing `if self.built: return` does NOT break `.keras` save/load roundtrip** -- Keras's `__call__`-driven build path already no-ops on a built layer (verified Δ=0). The guard's real payoff is tolerating an EXPLICIT second `layer.build(shape)` (which otherwise raises `ValueError: cannot add state ... already built`) and matching the canonical pattern. Don't report a missing guard as a serialization bug.
 - **Manual `child.build(input_shape)` in `parent.build()` required for Keras 3 model-save round-trip.**
 - **`keras.layers.Identity()` is a serializable drop-in for `Lambda(lambda x: x)`.**
 
