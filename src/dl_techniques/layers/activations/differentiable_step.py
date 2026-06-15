@@ -136,8 +136,8 @@ class DifferentiableStep(keras.layers.Layer):
             axis: Optional[int] = -1,
             slope_initializer: Union[str, keras.initializers.Initializer] = 'ones',
             shift_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
-            shift_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = keras.regularizers.L2(1e-3), # incentivize center -> 0
-            shift_constraint: Optional[Union[str, keras.constraints.Constraint]] = ValueRangeConstraint(min_value=-1, max_value=+1), # clip it to be sure
+            shift_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None, # default: L2(1e-3), incentivize center -> 0
+            shift_constraint: Optional[Union[str, keras.constraints.Constraint]] = None, # default: ValueRangeConstraint(-1, +1), clip it to be sure
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -145,6 +145,12 @@ class DifferentiableStep(keras.layers.Layer):
         # Validate inputs
         if axis is not None and not isinstance(axis, int):
             raise TypeError(f"Expected `axis` to be an int or None, but got: {axis}")
+
+        # Resolve mutable defaults inside the body (avoid shared module-level instances)
+        if shift_regularizer is None:
+            shift_regularizer = keras.regularizers.L2(1e-3)
+        if shift_constraint is None:
+            shift_constraint = ValueRangeConstraint(min_value=-1, max_value=+1)
 
         # Store ALL configuration for serialization
         self.axis = axis
