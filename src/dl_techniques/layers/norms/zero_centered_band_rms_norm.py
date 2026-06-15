@@ -183,8 +183,10 @@ class ZeroCenteredBandRMSNorm(keras.layers.Layer):
         self.epsilon = epsilon
         self.band_initializer = initializers.get(band_initializer)
 
-        # Default regularizer if none provided
-        self.band_regularizer = band_regularizer or regularizers.L2(1e-5)
+        # Default regularizer if none provided. Pass through regularizers.get() so a
+        # serialized regularizer dict (from from_config) is rebuilt into a Regularizer
+        # object, keeping get_config/from_config round-trips correct.
+        self.band_regularizer = regularizers.get(band_regularizer) or regularizers.L2(1e-5)
 
         # Initialize weight attributes - created in build()
         self.band_param = None
@@ -240,6 +242,9 @@ class ZeroCenteredBandRMSNorm(keras.layers.Layer):
             First dimension (batch size) may be None.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         # Create a single scalar band parameter using add_weight()
         # This parameter controls the learned position within the [1-α, 1] band
         self.band_param = self.add_weight(

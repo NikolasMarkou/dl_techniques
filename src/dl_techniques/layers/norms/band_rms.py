@@ -168,8 +168,10 @@ class BandRMS(keras.layers.Layer):
         self.epsilon = epsilon
         self.band_initializer = keras.initializers.get(band_initializer)
 
-        # Default regularizer if none provided
-        self.band_regularizer = band_regularizer or keras.regularizers.L2(1e-5)
+        # Default regularizer if none provided. Pass through keras.regularizers.get()
+        # so a serialized regularizer dict (from from_config) is rebuilt into a
+        # Regularizer object, keeping get_config/from_config round-trips correct.
+        self.band_regularizer = keras.regularizers.get(band_regularizer) or keras.regularizers.L2(1e-5)
 
         # Initialize weight attributes - created in build()
         self.band_param = None
@@ -204,6 +206,9 @@ class BandRMS(keras.layers.Layer):
             First dimension (batch size) may be None.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         # Create a single scalar band parameter using add_weight()
         self.band_param = self.add_weight(
             name="band_param",
