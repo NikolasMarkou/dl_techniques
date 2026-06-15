@@ -44,7 +44,7 @@ Legend — **Evidence**: `new smoke test (this plan)` = built+forwarded here; `e
 | 14 | darkir | PASS | PASS | smoke test (FIXED plan_2026-06-15_00924f53) | was: `keras.layers` has no `DepthToSpace`. FIXED: added `PixelShuffle2D` layer + cascade fixes (skip channels, `_add_list` for missing `ops.add_n`). |
 | 15 | depth_anything | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_depth_anything/` (forces CPU) |
 | 16 | detr | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_detr/` — **FUNCTIONAL** (21 tests pass); SYSTEM.md line 245 "broken" is STALE |
-| 17 | dino (v1/v2/v3) | XFAIL | **BROKEN** | new smoke test (this plan) / known-broken note | `RuntimeError: forgot to call super().__init__()` in `DINOv1.__init__` (ctor-order; affects v2/v3 too). `.keras` round-trip separately known-broken |
+| 17 | dino (v1/v2/v3) | v1 PASS; v2/v3 src-fixed | v1 PASS | smoke test (FIXED plan_2026-06-15_39a31d4a) | was ctor-order crash. FIXED: new `ClassTokenPrepend` layer owns cls_token `add_weight` in `build()` (v1+v3); v3 double-`super().__init__` removed. v1 smoke PASS. v2/v3 src patched but their forward smoke not yet authored (v2 untested; v3 has latent `.item()` at :273). `.keras` round-trip still separately broken. |
 | 18 | distilbert | PASS | PASS | new smoke test (this plan) | raw `DistilBERT` ctor smallest config |
 | 19 | fastvlm | PASS (re-run) | PASS (re-run) | existing test suite (re-run step 5) | `tests/test_models/test_fastvlm/`; risk-cluster — re-run, no regression |
 | 20 | fftnet | PASS (vision) | PASS (vision) | new smoke test (this plan) | vision stack only; **SpectreHead NOT tested** — separately triple-dead |
@@ -68,10 +68,10 @@ Legend — **Evidence**: `new smoke test (this plan)` = built+forwarded here; `e
 | 38 | modern_bert | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_modern_bert/`; `modern_bert_blt_hrm` GHOST reportedly functional (commit 124d464b) — not exercised here |
 | 39 | mothnet | PASS | PASS | smoke test (FIXED plan_2026-06-15_00924f53) | was: `keras.ops` has no `scatter_nd_update`. FIXED: `scatter_nd_update` -> `scatter_update` (one-token). |
 | 40 | nam | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_nam/` |
-| 41 | nano_vlm | XFAIL | **BROKEN** | new smoke test (this plan) | `Unrecognized keyword arguments passed to MultiModalFusion: {'embed_dim','num_heads'}` (transformers-refactor signature drift); filled `test_nanovlm/test_model.py` stub |
+| 41 | nano_vlm | PASS | PASS | smoke test (FIXED plan_2026-06-15_39a31d4a) | was MultiModalFusion kwarg drift. FIXED: renamed ghost kwargs (`embed_dim`->`dim`, `num_heads`->`attention_config`) at 5 fusion_config sources + dropped a broken weight-tie in `build()` (CAVEAT: embedding/output weight-sharing removed to make forward; re-add via a tied-Dense if desired). Smoke PASS (2,213,256). |
 | 42 | nano_vlm_world_model | XFAIL | **BROKEN** | new smoke test (this plan) / known-broken note | `keras.random.uniform requires a floating point dtype. Received: int32` (timestep sampling in `ScoreBasedNanoVLM.call`); GHOST still broken despite commit 1b61a381 |
 | 43 | ntm | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_ntm/` |
-| 44 | pft_sr | XFAIL | **BROKEN** | new smoke test (this plan) | `Unrecognized keyword arguments passed to PFTBlock: {'drop_path': 0.0}` (never exercised since import fix fec455f7) |
+| 44 | pft_sr | PASS | PASS | smoke test (FIXED plan_2026-06-15_39a31d4a) | was PFTBlock `drop_path` kwarg. FIXED: `drop_path`->`drop_path_rate`; 4x `keras.ops.nn.depth_to_space` Lambda -> `PixelShuffle2D`; + 2 call-loop cascade fixes (None-input, tuple->list to PFTBlock.build). Smoke PASS (2,64,64,3). Latent: PFTBlock tuple/list build asymmetry. |
 | 45 | power_mlp | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_powermlp/` |
 | 46 | pw_fnet | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_pw_fnet/` |
 | 47 | qwen | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_qwen/` |
@@ -121,10 +121,10 @@ Each item is a candidate for a future dedicated fix plan. Grouped by likely root
 2. ~~**mothnet** — `keras.ops` has no `scatter_nd_update`.~~ **RESOLVED**: `scatter_nd_update` → `scatter_update` (`layers/mothnet_blocks.py:407`). Smoke test passes.
 3. ~~**darkir** — `keras.layers` has no `DepthToSpace`.~~ **RESOLVED**: added serializable `PixelShuffle2D` (`layers/pixel_unshuffle.py`) + cascade fixes (skip channels; `keras.ops.add_n` also absent → `_add_list` helper). Smoke test passes. NOTE for future: `keras.ops.depth_to_space` and `keras.ops.add_n` do NOT exist in Keras 3.8 (the original fix hint above was wrong on `depth_to_space`).
 
-### Class B — Construction / signature drift (kwargs no longer accepted by a refactored sub-layer)
-4. **nano_vlm** — `Unrecognized keyword arguments passed to MultiModalFusion: {'embed_dim','num_heads'}` (transformers-refactor signature drift). *`models/nano_vlm/model.py:102-105` consumers; `MultiModalFusion` ctor.* Fix hint: update the call site to the post-refactor `MultiModalFusion` signature.
-5. **pft_sr** — `Unrecognized keyword arguments passed to PFTBlock: {'drop_path': 0.0}` (never exercised since import fix fec455f7). *`models/pft_sr/model.py` PFTBlock instantiation.* Fix hint: drop/rename `drop_path` to the kwarg `PFTBlock` now expects (likely `drop_path_rate`), or thread it through.
-6. **dino_v1 (also v2/v3)** — `RuntimeError: you forgot to call super().__init__() as the first statement` in `DINOv1.__init__` (construction-order bug). *`models/dino/dino_v1.py` (and v2/v3) `__init__`.* Fix hint: move `super().__init__(...)` to the first statement before any attribute assignment. Note: `.keras` round-trip is a separate known break in `DINOHead.build()` (`dino_v1.py:179`).
+### Class B — Construction / signature drift — ✅ ALL RESOLVED in plan_2026-06-15_39a31d4a
+4. ~~**nano_vlm** — MultiModalFusion kwarg drift.~~ **RESOLVED**: ghost kwargs renamed (`embed_dim`->`dim`, `num_heads`->`attention_config`) at 5 sources; broken weight-tie in `build()` dropped (CAVEAT: weight-sharing removed — follow-up to re-add via tied-Dense). Smoke passes.
+5. ~~**pft_sr** — PFTBlock `drop_path` kwarg.~~ **RESOLVED**: `drop_path`->`drop_path_rate`; 4x `keras.ops.nn.depth_to_space` -> `PixelShuffle2D`; 2 call-loop cascade fixes. Smoke passes. Latent follow-up: PFTBlock tuple/list `build()` asymmetry.
+6. ~~**dino_v1 (also v2/v3)** — ctor-order crash.~~ **RESOLVED (v1)**: new `ClassTokenPrepend` layer owns cls_token weight in `build()`; v3 double-super removed. v1 smoke passes. Follow-up: v2/v3 forward smoke not yet authored (v2 untested; v3 latent `.item()` at :273); DINOHead `.keras` round-trip still broken (separate).
 
 ### Class C — Input-contract bug (model wiring feeds the wrong tensor shape/type to a block)
 7. **shgcn** — `SHGCNLayer.call` requires a SparseTensor adjacency; a dense float32 adjacency is rejected (TypeError). *`models/shgcn/model.py` → `SHGCNLayer.call`.* Fix hint: accept/convert dense adjacency, or document the sparse-input contract and have the smoke test build a SparseTensor.
