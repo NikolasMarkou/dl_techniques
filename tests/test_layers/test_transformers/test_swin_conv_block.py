@@ -32,7 +32,9 @@ class TestSwinMLP:
         # Check default values
         assert layer.hidden_dim == 128
         assert layer.output_dim is None
-        assert layer.activation == "gelu"
+        # activation is stored via keras.activations.get() -> a function; assert
+        # functional equivalence, not the raw string token.
+        assert keras.activations.serialize(layer.activation) == "gelu"
         assert layer.dropout_rate == 0.0
         assert isinstance(layer.kernel_initializer, keras.initializers.GlorotUniform)
         assert isinstance(layer.bias_initializer, keras.initializers.Zeros)
@@ -59,7 +61,7 @@ class TestSwinMLP:
         # Check custom values
         assert layer.hidden_dim == 256
         assert layer.output_dim == 64
-        assert layer.activation == "relu"
+        assert keras.activations.serialize(layer.activation) == "relu"
         assert layer.dropout_rate == 0.2
         assert isinstance(layer.kernel_initializer, keras.initializers.HeNormal)
         assert isinstance(layer.bias_initializer, keras.initializers.Ones)
