@@ -268,7 +268,10 @@ class ProbabilityOutput(keras.layers.Layer):
         config = super().get_config()
         config.update({
             "probability_type": self._probability_type,
-            "type_config": self._type_config,
+            # Serialize via keras so that any nested keras objects in type_config
+            # (e.g. a kernel_regularizer for hierarchical routing) survive
+            # save/load. Identity for plain primitive dicts.
+            "type_config": keras.saving.serialize_keras_object(self._type_config),
         })
         return config
 
@@ -282,6 +285,11 @@ class ProbabilityOutput(keras.layers.Layer):
         :return: New instance of ProbabilityOutput.
         :rtype: ProbabilityOutput
         """
+        config = dict(config)
+        if config.get("type_config") is not None:
+            config["type_config"] = keras.saving.deserialize_keras_object(
+                config["type_config"]
+            )
         return cls(**config)
 
     @property

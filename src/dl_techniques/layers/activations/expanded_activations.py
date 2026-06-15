@@ -523,7 +523,7 @@ def elu_plus_one_plus_epsilon(x: keras.KerasTensor) -> keras.KerasTensor:
     :return: Tensor with ELU activation plus one plus a small epsilon.
     :rtype: keras.KerasTensor
     """
-    return keras.activations.elu(x) + 1.0 + keras.backend.epsilon()
+    return keras.ops.elu(x) + 1.0 + keras.backend.epsilon()
 
 
 @keras.saving.register_keras_serializable()
