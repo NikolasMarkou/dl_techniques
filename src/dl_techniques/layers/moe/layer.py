@@ -142,6 +142,8 @@ class MixtureOfExperts(keras.layers.Layer):
 
         CRITICAL: Explicitly build each sub-layer for robust serialization.
         """
+        if self.built:
+            return
         self._built_input_shape = input_shape
 
         # Validate input shape

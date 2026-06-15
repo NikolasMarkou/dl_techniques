@@ -211,6 +211,8 @@ class LinearGating(BaseGating):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the linear gating layers."""
+        if self.built:
+            return
         # BUILD all sublayers explicitly
         if self.pre_norm is not None:
             self.pre_norm.build(input_shape)
@@ -432,6 +434,8 @@ class CosineGating(BaseGating):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the cosine gating layers."""
+        if self.built:
+            return
         # CREATE weights in build()
         self.expert_embeddings = self.add_weight(
             name='expert_embeddings',
@@ -642,6 +646,8 @@ class SoftMoEGating(BaseGating):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the SoftMoE gating layers."""
+        if self.built:
+            return
         hidden_dim = input_shape[-1]
         if hidden_dim is None:
             raise ValueError("Hidden dimension must be known for SoftMoE")
