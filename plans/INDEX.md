@@ -189,3 +189,5 @@
 | plan_2026-06-14_5e80bd3e | 2026-06-14 | Make the mixtures layers' training-only side-effects (KMeans |  |
 | plan_2026-06-15_9dbb87c1 | 2026-06-15 | Bring every layer in `src/dl_techniques/layers/embedding/` i |  |
 | plan_2026-06-15_0205772c | 2026-06-15 | Deep review + fix of `src/dl_techniques/layers/activations`: |  |
+| plan_2026-06-15_2485b951 | 2026-06-15 | Deep comprehensive review of all norm layers in `src/dl_tech |  |
+| plan_2026-06-15_c8f516c3 | 2026-06-15 | Deep review of the MoE framework (`src/dl_techniques/layers/ |  |

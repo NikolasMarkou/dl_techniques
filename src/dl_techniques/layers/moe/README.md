@@ -126,11 +126,20 @@ moe_config = MoEConfig(
 @dataclass
 class ExpertConfig:
     ffn_config: Dict[str, Any]                                    # FFN configuration dict
-    use_bias: bool = True                                         # Bias in additional layers
+
+    # Reserved for additional (non-FFN) wrapper layers — currently INERT
+    # (the FFN itself is configured entirely through ``ffn_config``).
+    use_bias: bool = True
     kernel_initializer: Union[str, Initializer] = 'glorot_uniform'
     bias_initializer: Union[str, Initializer] = 'zeros'
     kernel_regularizer: Optional[Regularizer] = None
     bias_regularizer: Optional[Regularizer] = None
+
+    # Optional per-expert normalization via the norms factory.
+    norm_type: Optional[str] = None        # e.g. 'rms_norm', 'band_rms'; None disables
+    norm_config: Dict[str, Any] = field(default_factory=dict)
+    pre_norm: bool = True                  # apply norm before the FFN
+    post_norm: bool = False                # apply norm after the FFN
 ```
 
 #### GatingConfig
@@ -140,8 +149,8 @@ class ExpertConfig:
 class GatingConfig:
     gating_type: Literal['linear', 'cosine', 'softmoe'] = 'linear'
     top_k: int = 1                    # Experts selected per token
-    capacity_factor: float = 1.25     # Expert capacity multiplier
-    add_noise: bool = True            # Exploration noise
+    capacity_factor: float = 1.25     # RESERVED — not consumed by the current dense kernel
+    add_noise: bool = True            # Exploration noise (linear gating)
     noise_std: float = 1.0            # Noise standard deviation
     temperature: float = 1.0          # Softmax temperature
 
@@ -156,8 +165,12 @@ class GatingConfig:
     num_slots: int = 4
 
     # Load balancing
-    aux_loss_weight: float = 0.01     # Auxiliary loss weight
-    z_loss_weight: float = 1e-3       # Router z-loss weight
+    aux_loss_weight: float = 0.01     # Auxiliary loss weight (not applied to softmoe)
+    z_loss_weight: float = 1e-3       # Router z-loss weight (not applied to softmoe)
+
+    # Optional pre-gating normalization via the norms factory.
+    norm_type: Optional[str] = None
+    norm_config: Dict[str, Any] = field(default_factory=dict)
 ```
 
 #### MoEConfig
@@ -171,14 +184,19 @@ class MoEConfig:
 
     # System parameters
     jitter_noise: float = 0.01
-    drop_tokens: bool = True
-    use_residual_connection: bool = True
-
-    # Training parameters
-    train_capacity_factor: Optional[float] = None
-    eval_capacity_factor: Optional[float] = None
+    drop_tokens: bool = True               # RESERVED — dense kernel never drops tokens
+    use_residual_connection: bool = True   # RESERVED — pairs with drop_tokens
     routing_dtype: str = 'float32'
 ```
+
+> **Reserved / not-yet-implemented fields.** The current routing kernel is
+> *dense* — every expert processes every token and outputs are masked by the
+> routing weights. Consequently `capacity_factor`, `drop_tokens`, and
+> `use_residual_connection` are accepted and serialized but have **no runtime
+> effect**; they are placeholders for a future capacity-based sparse dispatch.
+> The legacy `train_capacity_factor` / `eval_capacity_factor` fields have been
+> **removed** (they are silently ignored by `MoEConfig.from_dict` for backward
+> compatibility). Passing them to a config constructor raises `TypeError`.
 
 ## Basic Usage
 
@@ -341,15 +359,15 @@ config = MoEConfig(
     gating_config=GatingConfig(
         gating_type='linear',
         top_k=2,
-        capacity_factor=1.25,          # Expert capacity
+        capacity_factor=1.25,          # RESERVED (no effect in the dense kernel)
         add_noise=True,                # Exploration noise
         noise_std=1.0,
         aux_loss_weight=0.01,          # Load balancing
         z_loss_weight=1e-3             # Entropy regularization
     ),
-    # Token management
-    drop_tokens=True,                  # Drop tokens if capacity exceeded
-    use_residual_connection=True,      # Add input back for dropped tokens
+    # Token management (RESERVED — no effect in the current dense kernel)
+    drop_tokens=True,
+    use_residual_connection=True,
     jitter_noise=0.01                  # Input noise for regularization
 )
 ```
@@ -531,9 +549,9 @@ def train_step(batch_x, batch_y):
 
 ### Memory Usage
 
-- **Expert Capacity**: Balance between load balancing (`capacity_factor > 1.0`) and memory usage.
-- **Top-K Selection**: Higher `top_k` increases computation but can improve quality.
-- **Token Dropping**: `drop_tokens=True` reduces memory but may hurt performance if capacity is too low.
+- **Dense kernel cost**: every expert processes every token (compute scales with `num_experts`, not `top_k`). Control memory via `num_experts` and the per-expert FFN size.
+- **Top-K Selection**: Higher `top_k` changes which experts are weighted into the output; in the dense kernel it does not reduce compute, but it still affects routing quality.
+- **Capacity / token dropping**: `capacity_factor`, `drop_tokens`, and `use_residual_connection` are RESERVED and have no effect in the current dense kernel (see *Reserved / not-yet-implemented fields* above).
 
 ### Computational Efficiency
 
@@ -627,11 +645,16 @@ gating_config = GatingConfig(
 #### Memory Issues
 **Symptoms**: Out-of-memory (OOM) errors during training.
 ```python
-# Solution: Reduce expert capacity or enable token dropping
+# Solution: reduce per-expert cost or the number of active experts.
+# NOTE: the current kernel is dense, so capacity-based token dropping is not
+# yet available — reduce num_experts, top_k, or the FFN size instead.
 config = MoEConfig(
-    gating_config=GatingConfig(train_capacity_factor=1.0), # Reduce from 1.25
-    drop_tokens=True,
-    use_residual_connection=True  # Handle dropped tokens gracefully
+    num_experts=8,                                     # fewer experts
+    expert_config=ExpertConfig(ffn_config={
+        "type": "mlp", "hidden_dim": 1024, "output_dim": 512,  # smaller FFN
+    }),
+    gating_config=GatingConfig(gating_type='linear', top_k=1),  # minimal routing
+    routing_dtype='float32',
 )
 ```
 
@@ -714,10 +737,11 @@ def validate_moe_model(model, sample_input):
 - Supported types: `'linear'`, `'cosine'`, `'softmoe'`.
 - Check for spelling errors and case sensitivity.
 
-#### "Expert capacity exceeded" (if `drop_tokens=False`)
-- Increase `capacity_factor` in `GatingConfig`.
-- Enable `drop_tokens=True` and `use_residual_connection=True`.
-- Reduce `top_k` to decrease the load on each expert.
+#### Out-of-memory with many experts
+- The kernel is dense (no capacity limit / no token dropping), so memory scales
+  with `num_experts` and the per-expert FFN size.
+- Reduce `num_experts`, shrink the FFN (`hidden_dim` / `output_dim`), or lower
+  `top_k`. `capacity_factor` / `drop_tokens` are reserved and have no effect yet.
 
 ## Examples
 

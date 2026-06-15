@@ -189,6 +189,8 @@ class FFNExpert(BaseExpert):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """BUILD the FFN expert sub-layers explicitly."""
+        if self.built:
+            return
         self._built_input_shape = input_shape
 
         if self.pre_norm is not None:

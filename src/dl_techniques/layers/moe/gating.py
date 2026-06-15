@@ -211,6 +211,8 @@ class LinearGating(BaseGating):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the linear gating layers."""
+        if self.built:
+            return
         # BUILD all sublayers explicitly
         if self.pre_norm is not None:
             self.pre_norm.build(input_shape)
@@ -432,6 +434,8 @@ class CosineGating(BaseGating):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the cosine gating layers."""
+        if self.built:
+            return
         # CREATE weights in build()
         self.expert_embeddings = self.add_weight(
             name='expert_embeddings',
@@ -484,8 +488,12 @@ class CosineGating(BaseGating):
         cosine_similarities = ops.matmul(projected_inputs_norm, expert_embeddings_norm)
 
         # Apply temperature (standard softmax-temperature semantics: divide).
-        # Larger ``temperature`` -> flatter distribution.
+        # Larger ``temperature`` -> flatter distribution. Floor the divisor at a
+        # small positive epsilon so a learnable temperature that drifts to zero
+        # (or a zero/negative user value) cannot produce inf/NaN logits or
+        # silently invert routing. No-op for any temperature >= epsilon.
         temperature_value = self.temperature_param if self.learnable_temperature else self.temperature
+        temperature_value = ops.maximum(temperature_value, keras.backend.epsilon())
         gate_logits = cosine_similarities / temperature_value
 
         # Top-k selection
@@ -642,6 +650,8 @@ class SoftMoEGating(BaseGating):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the SoftMoE gating layers."""
+        if self.built:
+            return
         hidden_dim = input_shape[-1]
         if hidden_dim is None:
             raise ValueError("Hidden dimension must be known for SoftMoE")
@@ -718,7 +728,11 @@ class SoftMoEGating(BaseGating):
             'expert_inputs': expert_inputs,
             'expert_weights': expert_weights,
             'gate_logits': phi_logits,  # For z-loss computation
-            'raw_gate_probs': ops.softmax(phi_logits, axis=-1),
+            # Per-token marginal probability over experts: softmax over the
+            # expert axis (2), then average out the slot axis. Shape
+            # [batch, seq_len, num_experts] to match the LinearGating /
+            # CosineGating aux-info contract consumed by compute_auxiliary_loss.
+            'raw_gate_probs': ops.mean(ops.softmax(phi_logits, axis=2), axis=-1),
         }
 
         return expert_weights, expert_indices, auxiliary_info
