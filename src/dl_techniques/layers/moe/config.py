@@ -58,6 +58,14 @@ class ExpertConfig:
     :type kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
     :param bias_regularizer: Regularization applied to biases in additional layers.
     :type bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
+
+    .. note::
+        ``use_bias``, ``kernel_initializer``, ``bias_initializer``,
+        ``kernel_regularizer`` and ``bias_regularizer`` apply only to *additional*
+        linear layers wrapped around the FFN. The current ``FFNExpert`` delegates
+        entirely to the FFN factory and builds no such extra layers, so these
+        fields are serialized for forward-compatibility but are currently inert.
+        Configure the FFN itself through ``ffn_config``.
     """
     ffn_config: Dict[str, Any] = field(default_factory=dict)
 
@@ -169,6 +177,30 @@ class GatingConfig:
     # Optional pre-gating normalization via the norms factory.
     norm_type: Optional[str] = None
     norm_config: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        """Validate gating configuration after dataclass creation.
+
+        Mirrors ``ExpertConfig.__post_init__`` so both sub-configs fail loud at
+        construction time rather than deep inside layer assembly.
+        """
+        valid_types = ('linear', 'cosine', 'softmoe')
+        if self.gating_type not in valid_types:
+            raise ValueError(
+                f"gating_type must be one of {valid_types}, got '{self.gating_type}'"
+            )
+        if self.top_k < 1:
+            raise ValueError(f"top_k must be >= 1, got {self.top_k}")
+        if self.num_slots < 1:
+            raise ValueError(f"num_slots must be >= 1, got {self.num_slots}")
+        if self.embedding_dim < 1:
+            raise ValueError(f"embedding_dim must be >= 1, got {self.embedding_dim}")
+        if self.capacity_factor <= 0:
+            raise ValueError(f"capacity_factor must be > 0, got {self.capacity_factor}")
+        if self.temperature <= 0:
+            raise ValueError(f"temperature must be > 0, got {self.temperature}")
+        if self.noise_std < 0:
+            raise ValueError(f"noise_std must be >= 0, got {self.noise_std}")
 
 # ---------------------------------------------------------------------
 
