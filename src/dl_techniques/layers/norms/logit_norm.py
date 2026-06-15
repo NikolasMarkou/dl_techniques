@@ -3,8 +3,8 @@ LogitNorm Layer for Classification Tasks
 =======================================
 
 This module implements LogitNorm, a normalization technique that applies L2 normalization
-to logits with a learned temperature parameter. This helps stabilize training and can
-improve model calibration by reducing overconfidence in predictions.
+to logits with a fixed temperature hyperparameter (not learned). This helps stabilize
+training and can improve model calibration by reducing overconfidence in predictions.
 
 Mathematical Formulation:
 ------------------------

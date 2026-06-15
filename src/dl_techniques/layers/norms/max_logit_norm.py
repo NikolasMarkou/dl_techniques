@@ -179,8 +179,9 @@ class MaxLogitNorm(keras.layers.Layer):
 class DecoupledMaxLogit(keras.layers.Layer):
     """Decoupled MaxLogit (DML) normalization layer.
 
-    Separates MaxLogit into cosine similarity and L2 norm components with
-    learnable weighting. The decomposition computes:
+    Separates MaxLogit into cosine similarity and L2 norm components with a
+    fixed weighting hyperparameter (``constant``; not a learned weight). The
+    decomposition computes:
     ``normalized = inputs / ||inputs||_2``,
     ``max_cosine = max(normalized)``,
     ``max_norm = max(||inputs||_2)``,
@@ -225,7 +226,7 @@ class DecoupledMaxLogit(keras.layers.Layer):
         │    max_cosine, max_norm)     │
         └──────────────────────────────┘
 
-    :param constant: Weight between cosine and L2 components. Must be positive.
+    :param constant: Fixed weighting hyperparameter between cosine and L2 components (not a learned weight). Must be positive.
         Defaults to 1.0.
     :type constant: float
     :param axis: Axis along which to normalize. Defaults to -1.
@@ -246,7 +247,7 @@ class DecoupledMaxLogit(keras.layers.Layer):
     ) -> None:
         """Initialize the DecoupledMaxLogit layer.
 
-        :param constant: Weight between cosine and L2 components. Must be positive.
+        :param constant: Fixed weighting hyperparameter between cosine and L2 components (not a learned weight). Must be positive.
         :type constant: float
         :param axis: Axis along which to normalize.
         :type axis: int
@@ -272,7 +273,7 @@ class DecoupledMaxLogit(keras.layers.Layer):
     def _validate_inputs(self, constant: float, epsilon: float) -> None:
         """Validate initialization parameters.
 
-        :param constant: Weight between cosine and L2 components.
+        :param constant: Fixed weighting hyperparameter between cosine and L2 components (not a learned weight).
         :type constant: float
         :param epsilon: Small constant for numerical stability.
         :type epsilon: float
