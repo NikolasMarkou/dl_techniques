@@ -574,11 +574,19 @@ class DINOv2VisionTransformer(keras.Model):
         # Build the model
         outputs = self._build_model(inputs, masks_input, is_training_input)
 
+        # DECISION plan_2026-06-15_e2759fbc/D-007: backbone name was hardcoded in
+        # super().__init__ while the wrapper (DINOv2._build_model) ALSO passed
+        # name='dinov2_backbone' into **kwargs -> duplicate `name` kwarg TypeError on the
+        # first-ever wrapper->backbone construction. Fixed on the BACKBONE side: honor a
+        # caller-supplied name via kwargs.pop, falling back to the variant-derived default.
+        # Do NOT re-add a hardcoded name= alongside **kwargs (re-introduces the collision).
+        name = kwargs.pop('name', f'dinov2_vit_{embed_dim}d_{depth}l')
+
         # Initialize the Model
         super().__init__(
             inputs=[inputs, masks_input, is_training_input],
             outputs=outputs,
-            name=f'dinov2_vit_{embed_dim}d_{depth}l',
+            name=name,
             **kwargs
         )
 
@@ -753,37 +761,56 @@ class DINOv2VisionTransformer(keras.Model):
         else:
             x_norm = x
 
-        # Split outputs based on token types
-        def split_outputs(args):
-            x_normalized, x_pre, mask_tensor, training_flag = args
+        # DECISION plan_2026-06-15_e2759fbc/D-005: ALWAYS return the 5-key dict; do NOT
+        # branch on `is_training` via keras.ops.cond. The original code returned a 5-key
+        # dict in the training branch but a bare CLS tensor in the inference branch — a
+        # mismatched nested structure that keras.ops.cond rejects, and an output whose
+        # STRUCTURE depended on `training` (the training-dependent-output anti-pattern).
+        # This is a Functional model with a fixed `is_training` Input, so the runtime
+        # branch never earned its keep. Each output key is produced by its OWN tensor op
+        # (a per-key Lambda returning a single tensor) so Keras can shape-infer each one;
+        # a single Lambda returning a Python dict cannot always infer its output shape
+        # ("could not infer the shape of the Lambda's output"). The `is_training` Input
+        # stays wired (3-input contract) but is intentionally unused here. Do NOT
+        # reintroduce ops.cond, a bare-tensor inference branch, or a dict-returning Lambda.
+        num_reg = self.num_register_tokens
 
-            cls_token = x_normalized[:, 0]  # CLS token
+        cls_token = layers.Lambda(
+            lambda t: t[:, 0], name='slice_cls_token'
+        )(x_norm)
 
-            if self.num_register_tokens > 0:
-                reg_start = 1
-                reg_end = 1 + self.num_register_tokens
-                reg_tokens = x_normalized[:, reg_start:reg_end]  # Register tokens
-                patch_tokens = x_normalized[:, reg_end:]  # Patch tokens
-            else:
-                reg_tokens = tf.zeros((keras.ops.shape(x_normalized)[0], 0, self.embed_dim), dtype=x_normalized.dtype)
-                patch_tokens = x_normalized[:, 1:]  # Patch tokens
+        if num_reg > 0:
+            reg_tokens = layers.Lambda(
+                lambda t: t[:, 1:1 + num_reg], name='slice_reg_tokens'
+            )(x_norm)
+            patch_tokens = layers.Lambda(
+                lambda t: t[:, 1 + num_reg:], name='slice_patch_tokens'
+            )(x_norm)
+        else:
+            reg_tokens = layers.Lambda(
+                lambda t: t[:, 0:0], name='slice_reg_tokens'
+            )(x_norm)
+            patch_tokens = layers.Lambda(
+                lambda t: t[:, 1:], name='slice_patch_tokens'
+            )(x_norm)
 
-            # Return different outputs based on training mode
-            def training_output():
-                return {
-                    "x_norm_clstoken": cls_token,
-                    "x_norm_regtokens": reg_tokens,
-                    "x_norm_patchtokens": patch_tokens,
-                    "x_prenorm": x_pre,
-                    "masks": mask_tensor,
-                }
+        # DECISION plan_2026-06-15_e2759fbc/D-008: route the `masks` input through an
+        # identity Lambda before echoing it as an output. Passing the RAW `masks` input
+        # KerasTensor straight into the outputs dict makes it both an input AND an output
+        # of this Functional model; when the DINOv2 wrapper nests this backbone and feeds
+        # its own masks input in, Keras's _build_map sees the input tensor reachable from
+        # the backbone op that consumes it and raises "Tensor input_masks ... is part of a
+        # cycle". Wrapping in an identity op makes the echoed mask a DISTINCT node, breaking
+        # the input-is-output aliasing. Do NOT put the bare `masks` input back in the dict.
+        masks_out = layers.Lambda(lambda t: t, name='masks_passthrough')(masks)
 
-            def inference_output():
-                return cls_token
-
-            return keras.ops.cond(training_flag, training_output, inference_output)
-
-        outputs = layers.Lambda(split_outputs, name='split_outputs')([x_norm, x_prenorm, masks, is_training])
+        outputs = {
+            "x_norm_clstoken": cls_token,
+            "x_norm_regtokens": reg_tokens,
+            "x_norm_patchtokens": patch_tokens,
+            "x_prenorm": x_prenorm,
+            "masks": masks_out,
+        }
 
         return outputs
 
@@ -976,11 +1003,17 @@ class DINOv2(keras.Model):
         self.classifier = None
 
         # Create inputs
-        inputs = keras.Input(shape=input_shape, name="input_images")
+        # DECISION plan_2026-06-15_e2759fbc/D-008: the wrapper's keras.Input names MUST
+        # be UNIQUE from the backbone sub-model's internal input names ("input_images",
+        # "input_masks", "is_training"). Sharing names makes Keras alias the wrapper's
+        # symbolic inputs with the nested backbone's inputs at super().__init__, producing
+        # a graph cycle ("input_masks" collision). Do NOT rename these back to match the
+        # backbone — prefix with "dinov2_" so the two input layers stay distinct. See D-008.
+        inputs = keras.Input(shape=input_shape, name="dinov2_input_images")
 
         # For inference, we typically don't need masks, so provide default
-        masks = keras.Input(shape=(None,), dtype=tf.bool, name="input_masks")
-        is_training = keras.Input(shape=(), dtype=tf.bool, name="is_training")
+        masks = keras.Input(shape=(None,), dtype=tf.bool, name="dinov2_input_masks")
+        is_training = keras.Input(shape=(), dtype=tf.bool, name="dinov2_is_training")
 
         # Build the model
         outputs = self._build_model(inputs, masks, is_training)
@@ -995,6 +1028,21 @@ class DINOv2(keras.Model):
         logger.info(f"Created DINOv2 complete model with include_top={include_top}")
         if include_top:
             logger.info(f"Classification head for {num_classes} classes")
+
+    def call(self, inputs, training=None, mask=None):
+        # DECISION plan_2026-06-15_e2759fbc/D-008: coerce a rank-0 `is_training` scalar to
+        # rank-1 before the Functional graph validates input rank. The 3rd input
+        # `dinov2_is_training` is a `keras.Input(shape=())` (per-sample scalar), so the
+        # Functional graph expects rank-1 `(batch,)` and rejects a rank-0 `np.array(False)`
+        # with "Expected shape (None,), but input has incompatible shape ()". `is_training`
+        # is SPURIOUS/unused (the backbone always emits the 5-key dict, D-005), so its rank
+        # is immaterial to the result — we just need to accept the conventional scalar form.
+        # Do NOT drop the 3-input contract; do NOT branch on this value. See decisions.md D-008.
+        if isinstance(inputs, (list, tuple)) and len(inputs) == 3:
+            images, masks, is_training = inputs
+            is_training = keras.ops.reshape(is_training, (-1,))
+            inputs = [images, masks, is_training]
+        return super().call(inputs, training=training, mask=mask)
 
     def _build_model(
             self,
@@ -1020,17 +1068,14 @@ class DINOv2(keras.Model):
             **self.backbone_kwargs
         )
 
-        # Get backbone output - we only want the CLS token for classification
-        def extract_cls_features(backbone_output):
-            # If training mode returns dict, extract CLS token
-            return keras.ops.cond(
-                is_training,
-                lambda: backbone_output["x_norm_clstoken"],
-                lambda: backbone_output  # Already CLS token in inference
-            )
-
+        # DECISION plan_2026-06-15_e2759fbc/D-006: the backbone output is ALWAYS a
+        # 5-key dict (see D-005) — slice ["x_norm_clstoken"] directly by subscripting the
+        # functional output. Do NOT wrap this in a Lambda + keras.ops.cond on
+        # `is_training`: the old code ran a cond whose inference branch returned the WHOLE
+        # dict (not the CLS tensor), which is both wrong and a mismatched-structure cond.
+        # Dict subscription on a Functional model's output is legal and shape-inferable.
         backbone_output = self.backbone([inputs, masks, is_training])
-        features = layers.Lambda(extract_cls_features, name='extract_cls_features')(backbone_output)
+        features = backbone_output["x_norm_clstoken"]
 
         # Create classifier if needed
         if self.include_top and self.num_classes > 0:
