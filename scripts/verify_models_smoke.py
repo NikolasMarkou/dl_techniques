@@ -121,7 +121,7 @@ _reg("bert", "RUN", _b_bert, _f_bert, "tiny")
 # --- bias_free_denoisers ---------------------------------------------------
 def _b_bfcnn():
     from dl_techniques.models.bias_free_denoisers.bfcnn import create_bfcnn_variant
-    return create_bfcnn_variant("small")
+    return create_bfcnn_variant("small", input_shape=(32, 32, 3))
 _reg("bias_free_denoisers", "RUN", _b_bfcnn,
      lambda m: m(_img(), training=False), "bfcnn small representative")
 
@@ -194,15 +194,15 @@ _reg("convnext_v2", "RUN", _b_convnext_v2, lambda m: m(_img(), training=False), 
 # --- convnext_patch_vae ----------------------------------------------------
 def _b_cpvae():
     from dl_techniques.models.convnext_patch_vae.model import ConvNeXtPatchVAE
-    return ConvNeXtPatchVAE.from_variant("tiny", image_size=64, patch_size=8)
+    return ConvNeXtPatchVAE.from_variant("tiny", img_size=32, patch_size=8)
 _reg("convnext_patch_vae", "RUN", _b_cpvae,
-     lambda m: m(_img(h=64, w=64), training=False), "tiny, patch8 (OOM guard)")
+     lambda m: m(_img(h=32, w=32), training=False), "tiny, img32/patch8")
 
 
 # --- convunext -------------------------------------------------------------
 def _b_convunext():
     from dl_techniques.models.convunext.model import ConvUNextModel
-    return ConvUNextModel.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3))
+    return ConvUNextModel.from_variant("tiny", output_channels=10, input_shape=(32, 32, 3))
 _reg("convunext", "RUN", _b_convunext, lambda m: m(_img(), training=False), "tiny")
 
 
@@ -234,33 +234,37 @@ _reg("depth_anything", "RUN", _b_depth,
 def _b_detr():
     from dl_techniques.models.detr.model import create_detr
     return create_detr(num_classes=80, num_queries=100)
-_reg("detr", "RUN", _b_detr,
-     lambda m: m(_img(h=128, w=128), training=False), "resnet50 backbone")
+def _f_detr(m):
+    images = _img(h=128, w=128)              # (2,128,128,3)
+    pad = np.zeros((2, 128, 128), dtype=bool)  # padding mask
+    return m((images, pad), training=False)
+_reg("detr", "RUN", _b_detr, _f_detr, "resnet50 backbone; (images, pad_mask)")
 
 
 # --- dino (v1/v2/v3) -------------------------------------------------------
 def _b_dino_v1():
     from dl_techniques.models.dino.dino_v1 import DINOv1
-    return DINOv1.from_variant("vit_tiny", image_size=32, patch_size=4)
-_reg("dino_v1", "RUN", _b_dino_v1, lambda m: m(_img(), training=False), "vit_tiny")
+    return DINOv1.from_variant("tiny", image_size=32, patch_size=4)
+_reg("dino_v1", "RUN", _b_dino_v1, lambda m: m(_img(), training=False), "tiny")
 
 def _b_dino_v2():
     from dl_techniques.models.dino.dino_v2 import DINOv2
     return DINOv2.from_variant("small", num_classes=10)
 def _f_dino_v2(m):
-    imgs = _img(h=32, w=32)
-    # masks: (B, N_patches) -- infer patch count from model if possible
+    imgs = _img(h=224, w=224)
+    # masks: (B, N_patches) boolean -- infer patch count from model
     n = getattr(m, "num_patches", None)
     if n is None:
-        n = (32 // 4) * (32 // 4)
-    masks = np.zeros((2, int(n)), dtype=np.int32)
+        n = (224 // 14) * (224 // 14)
+    masks = np.zeros((2, int(n)), dtype=bool)
     return m([imgs, masks], training=False)
-_reg("dino_v2", "RUN", _b_dino_v2, _f_dino_v2, "2-input [images, masks]")
+_reg("dino_v2", "RUN", _b_dino_v2, _f_dino_v2, "224x224, 2-input [images, masks]")
 
 def _b_dino_v3():
     from dl_techniques.models.dino.dino_v3 import DINOv3
     return DINOv3.from_variant("tiny", num_classes=10)
-_reg("dino_v3", "RUN", _b_dino_v3, lambda m: m(_img(), training=False), "tiny")
+_reg("dino_v3", "RUN", _b_dino_v3,
+     lambda m: m(_img(h=224, w=224), training=False), "tiny @224")
 
 
 # --- distilbert ------------------------------------------------------------
@@ -338,13 +342,30 @@ def _b_ideo():
     from dl_techniques.models.ideogram4.transformer import create_ideogram4_transformer
     return create_ideogram4_transformer(variant="tiny")
 def _f_ideo(m):
-    cfg = getattr(m, "config", None)
-    in_ch = getattr(cfg, "in_channels", 4) if cfg is not None else 4
-    llm_dim = getattr(cfg, "llm_features_dim", 64) if cfg is not None else 64
-    lat = np.random.rand(2, 8, 8, in_ch).astype(np.float32)
-    txt = np.random.rand(2, llm_dim).astype(np.float32)
-    return m([lat, txt], training=False)
-_reg("ideogram4", "RUN", _b_ideo, _f_ideo, "tiny PRESETS; latents + text cond")
+    # Packed-stream DiT: dict with llm_features, x, t, position_ids,
+    # segment_ids, indicator. indicator: 3=LLM text token, 2=image token.
+    from dl_techniques.models.ideogram4.constants import (
+        LLM_TOKEN_INDICATOR, OUTPUT_IMAGE_INDICATOR,
+    )
+    cfg = m.config
+    in_ch = cfg.in_channels
+    llm_dim = cfg.llm_features_dim
+    B, L = 2, 8
+    n_text = 2  # first 2 tokens are text, rest are image tokens
+    llm = np.random.rand(B, L, llm_dim).astype(np.float32)
+    x = np.random.rand(B, L, in_ch).astype(np.float32)
+    t = np.random.rand(B).astype(np.float32)
+    position_ids = np.zeros((B, L, 3), dtype=np.int32)
+    position_ids[:, :, 1] = np.arange(L)  # arbitrary h coords
+    segment_ids = np.zeros((B, L), dtype=np.int32)
+    indicator = np.full((B, L), OUTPUT_IMAGE_INDICATOR, dtype=np.int32)
+    indicator[:, :n_text] = LLM_TOKEN_INDICATOR
+    return m({
+        "llm_features": llm, "x": x, "t": t,
+        "position_ids": position_ids, "segment_ids": segment_ids,
+        "indicator": indicator,
+    }, training=False)
+_reg("ideogram4", "RUN", _b_ideo, _f_ideo, "tiny; packed-stream dict")
 
 
 # --- jepa (SKIP) -----------------------------------------------------------
@@ -355,7 +376,7 @@ _reg("jepa", "SKIP", None, None,
 # --- kan -------------------------------------------------------------------
 def _b_kan():
     from dl_techniques.models.kan.model import KAN
-    return KAN.from_variant("small", input_dim=784, output_dim=10)
+    return KAN.from_variant("small", input_features=784, output_features=10)
 _reg("kan", "RUN", _b_kan, lambda m: m(_vec(d=784), training=False), "small")
 
 
@@ -376,16 +397,16 @@ def _b_lewm():
     from dl_techniques.models.lewm.model import LeWM
     return LeWM()
 def _f_lewm(m):
-    # dict {"pixels": (B,T,H,W,C), "action": (B,T-1,A)}
-    cfg = getattr(m, "config", None)
-    a = getattr(cfg, "action_dim", 4) if cfg is not None else 4
-    h = getattr(cfg, "image_size", 32) if cfg is not None else 32
-    if isinstance(h, (list, tuple)):
-        h = h[0]
-    pixels = np.random.rand(2, 3, int(h), int(h), 3).astype(np.float32)
-    action = np.random.rand(2, 2, int(a)).astype(np.float32)
+    # dict {"pixels": (B,T,H,W,C), "action": (B,T-1,A)}; T = history+preds.
+    cfg = m.config
+    a = cfg.action_dim
+    h = cfg.img_size            # square edge (224 default; internal ViT)
+    c = cfg.img_channels
+    t = cfg.history_size + cfg.num_preds
+    pixels = np.random.rand(2, t, int(h), int(h), c).astype(np.float32)
+    action = np.random.rand(2, t - 1, int(a)).astype(np.float32)
     return m({"pixels": pixels, "action": action}, training=False)
-_reg("lewm", "RUN", _b_lewm, _f_lewm, "dict {pixels, action}; embeds ViT-tiny")
+_reg("lewm", "RUN", _b_lewm, _f_lewm, "dict {pixels, action}; img_size from config")
 
 
 # --- mamba (v1/v2) ---------------------------------------------------------
@@ -408,23 +429,27 @@ _reg("mamba_v2", "RUN", _b_mamba2, _f_mamba, "v2 base")
 
 # --- masked_autoencoder (needs encoder) ------------------------------------
 def _b_mae():
-    from dl_techniques.models.masked_autoencoder.mae import create_mae_model
+    # Real class is MaskedAutoencoder (no create_* factory); encoder must
+    # emit a 4D (B,H,W,C) feature map. patch_size must divide H/W (32).
+    from dl_techniques.models.masked_autoencoder.mae import MaskedAutoencoder
     enc = keras.Sequential([
         keras.layers.Input((32, 32, 3)),
         keras.layers.Conv2D(32, 3, padding="same"),
         keras.layers.Conv2D(64, 3, padding="same"),
     ])
-    return create_mae_model(encoder=enc, input_shape=(32, 32, 3))
+    return MaskedAutoencoder(encoder=enc, patch_size=16, input_shape=(32, 32, 3))
 _reg("masked_autoencoder", "RUN", _b_mae,
-     lambda m: m(_img(), training=False), "tiny inline encoder")
+     lambda m: m(_img(), training=False), "MaskedAutoencoder; inline conv encoder")
 
 
 # --- masked_language_model (needs encoder) ---------------------------------
 def _b_mlm():
-    from dl_techniques.models.masked_language_model.mlm import create_mlm_training_model
+    # Real class is MaskedLanguageModel (no create_* factory). MLM head
+    # vocab_size must match the BERT encoder vocab so token ids stay valid.
+    from dl_techniques.models.masked_language_model.mlm import MaskedLanguageModel
     from dl_techniques.models.bert.bert import BERT
-    enc = BERT.from_variant("tiny")
-    return create_mlm_training_model(encoder=enc, vocab_size=30522, mask_token_id=103)
+    enc = BERT.from_variant("tiny", vocab_size=1000)
+    return MaskedLanguageModel(encoder=enc, vocab_size=1000, mask_token_id=103)
 def _f_mlm(m):
     ids = _tokens(vocab=1000)
     mask = np.ones_like(ids)
@@ -443,7 +468,7 @@ _reg("memory_bank", "RUN", _b_membank,
 # --- mini_vec2vec ----------------------------------------------------------
 def _b_minivec():
     from dl_techniques.models.mini_vec2vec.model import create_mini_vec2vec_aligner
-    return create_mini_vec2vec_aligner(source_dim=128, target_dim=128)
+    return create_mini_vec2vec_aligner(embedding_dim=128)
 _reg("mini_vec2vec", "RUN", _b_minivec,
      lambda m: m(_vec(d=128), training=False), "")
 
@@ -465,13 +490,13 @@ _reg("mobile_clip", "RUN", _b_mobileclip, _f_mobileclip, "s0")
 # --- mobilenet (v1-v4) -----------------------------------------------------
 def _b_mnv1():
     from dl_techniques.models.mobilenet.mobilenet_v1 import MobileNetV1
-    return MobileNetV1.from_variant("0.75", num_classes=10, input_shape=(32, 32, 3))
-_reg("mobilenet_v1", "RUN", _b_mnv1, lambda m: m(_img(), training=False), "0.75")
+    return MobileNetV1.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
+_reg("mobilenet_v1", "RUN", _b_mnv1, lambda m: m(_img(), training=False), "small")
 
 def _b_mnv2():
     from dl_techniques.models.mobilenet.mobilenet_v2 import MobileNetV2
-    return MobileNetV2.from_variant("0.75", num_classes=10, input_shape=(32, 32, 3))
-_reg("mobilenet_v2", "RUN", _b_mnv2, lambda m: m(_img(), training=False), "0.75")
+    return MobileNetV2.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
+_reg("mobilenet_v2", "RUN", _b_mnv2, lambda m: m(_img(), training=False), "small")
 
 def _b_mnv3():
     from dl_techniques.models.mobilenet.mobilenet_v3 import MobileNetV3
@@ -480,8 +505,8 @@ _reg("mobilenet_v3", "RUN", _b_mnv3, lambda m: m(_img(), training=False), "small
 
 def _b_mnv4():
     from dl_techniques.models.mobilenet.mobilenet_v4 import MobileNetV4
-    return MobileNetV4.from_variant("conv_small", num_classes=10, input_shape=(32, 32, 3))
-_reg("mobilenet_v4", "RUN", _b_mnv4, lambda m: m(_img(), training=False), "conv_small")
+    return MobileNetV4.from_variant("small", num_classes=10, input_shape=(32, 32, 3))
+_reg("mobilenet_v4", "RUN", _b_mnv4, lambda m: m(_img(), training=False), "small")
 
 
 # --- modern_bert (+ blt + hrm) ---------------------------------------------
@@ -524,7 +549,13 @@ _reg("mothnet", "RUN", _b_mothnet, lambda m: m(_vec(d=64), training=False),
 def _b_nam():
     from dl_techniques.models.nam.model import NAM
     return NAM.from_variant("tiny")
-_reg("nam", "RUN", _b_nam, lambda m: m(_tokens(vocab=64), training=False), "tiny")
+def _f_nam(m):
+    # ACT-step model: call(carry, batch). vocab_size=21 (tiny default).
+    batch = {"input_ids": _tokens(vocab=21, s=16)}
+    carry = m.initial_carry(batch)
+    new_carry, outputs = m(carry, batch, training=False)
+    return outputs
+_reg("nam", "RUN", _b_nam, _f_nam, "tiny; ACT-step call(carry, batch)")
 
 
 # --- nano_vlm --------------------------------------------------------------
@@ -532,9 +563,9 @@ def _b_nanovlm():
     from dl_techniques.models.nano_vlm.model import create_nanovlm
     return create_nanovlm(variant="mini", vocab_size=32000)
 def _f_nanovlm(m):
-    return m({"image": _img(h=224, w=224), "input_ids": _tokens(vocab=32000, s=16)},
-             training=False)
-_reg("nano_vlm", "RUN", _b_nanovlm, _f_nanovlm, "mini")
+    return m({"images": _img(h=224, w=224),
+              "text_tokens": _tokens(vocab=32000, s=16)}, training=False)
+_reg("nano_vlm", "RUN", _b_nanovlm, _f_nanovlm, "mini; {images, text_tokens}")
 
 
 # --- nano_vlm_world_model (DEAD) -------------------------------------------
@@ -551,7 +582,7 @@ _reg("nano_vlm_world_model", "XFAIL", _b_nanovlm_wm, _f_nanovlm_wm,
 # --- ntm -------------------------------------------------------------------
 def _b_ntm():
     from dl_techniques.models.ntm.model import NTMModel
-    return NTMModel.from_variant("small")
+    return NTMModel.from_variant("tiny", input_shape=(8, 8), output_dim=10)
 def _f_ntm(m):
     x = np.random.rand(2, 8, 8).astype(np.float32)  # (B, T, input_dim)
     return m(x, training=False)
@@ -593,10 +624,19 @@ def _b_relgt():
     from dl_techniques.models.relgt.model import create_relgt_model
     return create_relgt_model(output_dim=10, model_size="small")
 def _f_relgt(m):
-    x = np.random.rand(2, 16, 32).astype(np.float32)  # (B, N, feature_dim)
-    return m(x, training=False)
+    # RELGTTokenEncoder needs 5 keys: node_features, node_types,
+    # hop_distances, relative_times, subgraph_adjacency.
+    B, K, F = 2, 10, 32
+    inp = {
+        "node_features": np.random.rand(B, K, F).astype(np.float32),
+        "node_types": np.random.randint(0, 10, (B, K)).astype(np.int32),
+        "hop_distances": np.random.randint(0, 3, (B, K)).astype(np.int32),
+        "relative_times": np.random.rand(B, K, 1).astype(np.float32),
+        "subgraph_adjacency": np.random.rand(B, K, K).astype(np.float32),
+    }
+    return m(inp, training=False)
 _reg("relgt", "RUN", _b_relgt, _f_relgt,
-     "small; node feature matrix (UNSURE: may need adjacency)")
+     "small; 5-key graph token dict")
 
 
 # --- resnet ----------------------------------------------------------------
@@ -610,14 +650,23 @@ _reg("resnet", "RUN", _b_resnet, lambda m: m(_img(), training=False), "resnet18"
 def _b_sam():
     from dl_techniques.models.sam.model import SAM
     return SAM.from_variant("vit_b")
-_reg("sam", "RUN", _b_sam,
-     lambda m: m(_img(h=1024, w=1024), training=False), "vit_b @1024 (OOM risk)")
+def _f_sam(m):
+    # dict {image, original_size}; original_size must be a TENSOR (a python
+    # tuple trips Keras' positional-arg guard on the nested dict input).
+    image = _img(h=1024, w=1024)
+    osz = keras.ops.convert_to_tensor([1024, 1024])
+    return m({"image": image, "original_size": osz}, training=False)
+# Recipe is correct (tensor original_size clears the input guard); the residual
+# FAIL is a GENUINE model bug: WindowedAttentionWithRelPos multiplies an int32
+# tensor by a float (1.0) -> "Expected int32 ... got 1.0". Not a harness error.
+_reg("sam", "RUN", _b_sam, _f_sam,
+     "vit_b @1024; {image, original_size(tensor)} - GENUINE bug in encoder attn")
 
 
 # --- scunet ----------------------------------------------------------------
 def _b_scunet():
     from dl_techniques.models.scunet.model import SCUNet
-    return SCUNet(in_nc=3, dim=32, input_resolution=64)
+    return SCUNet(in_nc=3, dim=64, input_resolution=64)
 _reg("scunet", "RUN", _b_scunet,
      lambda m: m(_img(h=64, w=64), training=False), "input_resolution must match")
 
@@ -627,16 +676,21 @@ def _b_sd3():
     from dl_techniques.models.sd3_mmdit.transformer import create_sd3_mmdit
     return create_sd3_mmdit(variant="tiny")
 def _f_sd3(m):
-    cfg = getattr(m, "config", None)
-    in_ch = getattr(cfg, "in_channels", 4) if cfg is not None else 4
-    hid = getattr(cfg, "hidden_dim", getattr(cfg, "hidden_size", 64)) if cfg is not None else 64
-    ctx = getattr(cfg, "context_dim", hid) if cfg is not None else hid
-    lat = np.random.rand(2, 8, 8, in_ch).astype(np.float32)
-    txt = np.random.rand(2, 16, ctx).astype(np.float32)
-    ts = np.array([1.0, 1.0], dtype=np.float32)
-    return m([lat, txt, ts], training=False)
+    # MM-DiT dict: latent, encoder_hidden_states, pooled_projections, timestep.
+    cfg = m.config
+    s = cfg.sample_size            # latent grid edge (16 for tiny)
+    in_ch = cfg.in_channels
+    jdim = cfg.joint_attention_dim
+    pdim = cfg.pooled_projection_dim
+    B = 2
+    return m({
+        "latent": np.random.rand(B, s, s, in_ch).astype(np.float32),
+        "encoder_hidden_states": np.random.rand(B, 16, jdim).astype(np.float32),
+        "pooled_projections": np.random.rand(B, pdim).astype(np.float32),
+        "timestep": np.array([1.0, 1.0], dtype=np.float32),
+    }, training=False)
 _reg("sd3_mmdit", "RUN", _b_sd3, _f_sd3,
-     "tiny; latents+text+timestep (UNSURE: input signature)")
+     "tiny; {latent, encoder_hidden_states, pooled_projections, timestep}")
 
 
 # --- shgcn (DEAD) ----------------------------------------------------------
@@ -666,11 +720,15 @@ _reg("squeezenet_v1", "RUN", _b_sqv1, lambda m: m(_img(), training=False), "1.0"
 
 def _b_sqv2():
     from dl_techniques.models.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2
-    return SqueezeNoduleNetV2.from_variant("v2", num_classes=2, input_shape=(32, 32, 32, 1))
+    return SqueezeNoduleNetV2.from_variant("v2_3d", num_classes=2, input_shape=(32, 32, 32, 1))
 def _f_sqv2(m):
     x = np.random.rand(2, 32, 32, 32, 1).astype(np.float32)  # (B,D,H,W,1) 3D volume
     return m(x, training=False)
-_reg("squeezenet_v2", "RUN", _b_sqv2, _f_sqv2, "v2 3D nodule (B,D,H,W,1)")
+# Recipe is correct (v2_3d + 4D volume builds & forwards). Residual FAIL is a
+# GENUINE non-finite forward (NaN logits on untrained model, no NaN weights) --
+# same family as squeezenet_v1 in the baseline. Not a harness error.
+_reg("squeezenet_v2", "RUN", _b_sqv2, _f_sqv2,
+     "v2_3d (B,D,H,W,1) - GENUINE non-finite forward bug")
 
 
 # --- swin_transformer (DEAD) -----------------------------------------------
@@ -684,8 +742,9 @@ _reg("swin_transformer", "XFAIL", _b_swin, lambda m: m(_img(), training=False),
 # --- tabm ------------------------------------------------------------------
 def _b_tabm():
     from dl_techniques.models.tabm.model import create_tabm_mini
-    return create_tabm_mini(input_dim=16, output_dim=1)
-_reg("tabm", "RUN", _b_tabm, lambda m: m(_vec(d=16), training=False), "mini")
+    return create_tabm_mini(n_num_features=16, cat_cardinalities=[], n_classes=2)
+_reg("tabm", "RUN", _b_tabm, lambda m: m(_vec(d=16), training=False),
+     "mini; 16 num features, no cat, 2 classes")
 
 
 # --- thera -----------------------------------------------------------------
@@ -701,28 +760,33 @@ _reg("thera", "RUN", _b_thera, _f_thera, "edsr-air; [source, scale]")
 
 # --- time_series (7 subpackages) -------------------------------------------
 def _b_xlstm():
-    from dl_techniques.models.time_series.xlstm.model import xLSTMForecaster
-    return xLSTMForecaster.from_variant("small", prediction_length=24)
+    # xLSTMForecaster lives in forecaster.py (model.py has the LM xLSTM).
+    from dl_techniques.models.time_series.xlstm.forecaster import xLSTMForecaster
+    return xLSTMForecaster.from_variant("tiny", input_length=48,
+                                        prediction_length=12, num_features=4)
 def _f_ts3(m):
     x = np.random.rand(2, 48, 4).astype(np.float32)  # (B, T, features)
     return m(x, training=False)
 _reg("time_series_xlstm", "RUN", _b_xlstm, _f_ts3,
-     "small (UNSURE: exact module path/features)")
+     "tiny forecaster; (B,48,4)")
 
 def _b_nbeats():
-    from dl_techniques.models.time_series.nbeats.model import create_nbeats_model
-    return create_nbeats_model(lookback=96, horizon=24)
+    # Factory lives in nbeats.py (no nbeats/model.py); args are
+    # backcast_length / forecast_length.
+    from dl_techniques.models.time_series.nbeats.nbeats import create_nbeats_model
+    return create_nbeats_model(backcast_length=96, forecast_length=24)
 def _f_ts_uni(m):
     x = np.random.rand(2, 96).astype(np.float32)  # (B, T) univariate
     return m(x, training=False)
 _reg("time_series_nbeats", "RUN", _b_nbeats, _f_ts_uni,
-     "lookback96/horizon24 (UNSURE: input rank)")
+     "backcast96/forecast24; (B,96)")
 
 def _b_prism():
     from dl_techniques.models.time_series.prism.model import PRISMModel
-    return PRISMModel.from_variant("tiny", prediction_length=12)
+    return PRISMModel.from_variant("tiny", context_len=48, forecast_len=12,
+                                   num_features=4)
 _reg("time_series_prism", "RUN", _b_prism, _f_ts3,
-     "tiny (UNSURE: exact module path)")
+     "tiny; (B,48,4) context window")
 
 def _b_tirex():
     from dl_techniques.models.time_series.tirex.model import TiRexCore
@@ -732,18 +796,28 @@ _reg("time_series_tirex", "RUN", _b_tirex, _f_ts_uni,
 
 def _b_deepar():
     from dl_techniques.models.time_series.deepar.model import create_deepar
-    return create_deepar(input_size=10, prediction_length=24)
+    return create_deepar(hidden_dim=16, num_layers=1, target_dim=1, covariate_dim=4)
+def _f_deepar(m):
+    # training-mode dict: target (B,T,target_dim), covariates (B,T,cov_dim).
+    return m({
+        "target": np.random.rand(2, 48, 1).astype(np.float32),
+        "covariates": np.random.rand(2, 48, 4).astype(np.float32),
+    }, training=False)
+_reg("time_series_deepar", "RUN", _b_deepar, _f_deepar,
+     "{target, covariates}")
+
 def _f_ts_feat(m):
     x = np.random.rand(2, 48, 10).astype(np.float32)
     return m(x, training=False)
-_reg("time_series_deepar", "RUN", _b_deepar, _f_ts_feat,
-     "(UNSURE: input shape)")
 
 def _b_mdn():
     from dl_techniques.models.time_series.mdn.model import create_mdn_model
-    return create_mdn_model(input_size=10, output_size=5, prediction_length=12)
-_reg("time_series_mdn", "RUN", _b_mdn, _f_ts_feat,
-     "(UNSURE: input shape)")
+    return create_mdn_model(hidden_layers=[32, 32], output_dimension=1,
+                            num_mixtures=5, input_dimension=10)
+def _f_mdn(m):
+    x = np.random.rand(2, 10).astype(np.float32)  # (B, input_dimension)
+    return m(x, training=False)
+_reg("time_series_mdn", "RUN", _b_mdn, _f_mdn, "flat (B,10) features")
 
 def _b_adaptive_ema():
     from dl_techniques.models.time_series.adaptive_ema.model import (
@@ -757,9 +831,16 @@ _reg("time_series_adaptive_ema", "RUN", _b_adaptive_ema, _f_ts_uni,
 # --- tiny_recursive_model --------------------------------------------------
 def _b_trm():
     from dl_techniques.models.tiny_recursive_model.model import create_trm
-    return create_trm(vocab_size=256, embed_dim=64)
-_reg("tiny_recursive_model", "RUN", _b_trm,
-     lambda m: m(_tokens(vocab=256), training=False), "")
+    return create_trm(vocab_size=256, hidden_size=64, num_heads=4,
+                      expansion=2.0, seq_len=16)
+def _f_trm(m):
+    # ACT-step model: call(carry, batch); batch dict key "inputs" (B, seq_len).
+    batch = {"inputs": _tokens(vocab=256, s=16)}
+    carry = m.initial_carry(batch)
+    new_carry, outputs = m(carry, batch, training=False)
+    return outputs
+_reg("tiny_recursive_model", "RUN", _b_trm, _f_trm,
+     "ACT-step call(carry, batch)")
 
 
 # --- tree_transformer ------------------------------------------------------
