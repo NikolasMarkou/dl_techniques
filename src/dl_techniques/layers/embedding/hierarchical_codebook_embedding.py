@@ -225,6 +225,9 @@ class HierarchicalCodebookEmbedding(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        if self.built:
+            return
+
         for k in range(self.num_chunks):
             cb = self.add_weight(
                 name=f"codebook_{k}",

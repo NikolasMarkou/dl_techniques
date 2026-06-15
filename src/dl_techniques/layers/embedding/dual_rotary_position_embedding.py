@@ -181,6 +181,9 @@ class DualRotaryPositionEmbedding(keras.layers.Layer):
         :raises ValueError: If input shape is not 4D or ``head_dim`` does not
             match.
         """
+        if self.built:
+            return
+
         # Validate input shape
         if len(input_shape) != 4:
             raise ValueError(

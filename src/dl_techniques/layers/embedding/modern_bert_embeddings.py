@@ -126,6 +126,9 @@ class ModernBertEmbeddings(keras.layers.Layer):
             ``(batch_size, sequence_length)``.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         # Build sub-layers explicitly in computational order for robust serialization
         self.word_embeddings.build(input_shape)
         self.token_type_embeddings.build(input_shape)

@@ -197,6 +197,9 @@ class PatchEmbedding2D(keras.layers.Layer):
             ``(batch_size, height, width, channels)``.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         # Validate input shape
         if len(input_shape) != 4:
             raise ValueError(f"Expected 4D input (batch_size, height, width, channels), "
@@ -404,6 +407,9 @@ class PatchEmbedding1D(keras.layers.Layer):
             ``(batch_size, seq_len, features)``.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         # Validate input shape
         if len(input_shape) != 3:
             raise ValueError(f"Expected 3D input (batch_size, seq_len, features), "

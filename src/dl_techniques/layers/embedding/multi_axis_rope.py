@@ -157,6 +157,9 @@ class Ideogram4MRoPE(keras.layers.Layer):
         :type input_shape: Tuple[Optional[int], ...]
         :raises ValueError: If the last input dimension is not 3.
         """
+        if self.built:
+            return
+
         if len(input_shape) != 3 or input_shape[-1] != 3:
             raise ValueError(
                 f"Ideogram4MRoPE expects position_ids of shape (B, L, 3), "

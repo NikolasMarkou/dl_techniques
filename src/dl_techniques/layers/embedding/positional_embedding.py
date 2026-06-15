@@ -184,6 +184,9 @@ class PositionalEmbedding(keras.layers.Layer):
             ``(batch_size, seq_len, dim)``.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         # Validate input shape
         if len(input_shape) != 3:
             raise ValueError(

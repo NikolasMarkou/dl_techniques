@@ -136,6 +136,9 @@ class ScalarSinusoidalEmbedding(keras.layers.Layer):
         self.freq = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        if self.built:
+            return
+
         # DECISION plan_2026-06-12_59a18a10/D-002: store the sinusoidal
         # frequencies as a NON-TRAINABLE weight (values computed with numpy
         # here), NOT as a plain tensor attribute. The plain-attr form (the

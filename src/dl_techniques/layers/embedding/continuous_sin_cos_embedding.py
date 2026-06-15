@@ -190,6 +190,9 @@ class ContinuousSinCosEmbed(keras.layers.Layer):
         :type input_shape: Tuple[Optional[int], ...]
         :raises ValueError: If input shape is invalid.
         """
+        if self.built:
+            return
+
         # Validate input shape
         if len(input_shape) < 2:
             raise ValueError(f"Input must be at least 2D, got shape {input_shape}")

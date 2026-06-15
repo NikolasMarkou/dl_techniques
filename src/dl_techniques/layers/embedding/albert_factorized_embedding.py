@@ -137,6 +137,9 @@ class AlbertFactorizedEmbedding(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        if self.built:
+            return
+
         # Explicitly build sub-layers so save/load round-trip works without
         # Keras complaining about unbuilt internal state.
         self.inner_embedding.build(input_shape)
