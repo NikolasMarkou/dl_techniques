@@ -110,8 +110,12 @@ class ScalarSinusoidalEmbedding(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
-        if dim < 2:
-            raise ValueError(f"dim must be >= 2, got {dim}")
+        if dim < 4:
+            # half = dim // 2 must be >= 2: the frequency schedule divides by
+            # (half - 1), so dim < 4 (half <= 1) produces a div-by-zero -> NaN
+            # frequency weight.
+            raise ValueError(f"dim must be >= 4 (got {dim}); the sinusoidal "
+                             f"frequency schedule needs dim // 2 >= 2.")
         if len(input_range) != 2:
             raise ValueError(
                 f"input_range must have length 2, got {len(input_range)}"

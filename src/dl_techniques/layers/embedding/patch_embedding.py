@@ -465,8 +465,9 @@ class PatchEmbedding1D(keras.layers.Layer):
                 output_len = (seq_len - self.patch_size) // self.stride + 1
             elif self.padding == 'same':
                 output_len = (seq_len + self.stride - 1) // self.stride
-            else:  # causal
-                output_len = seq_len // self.stride
+            else:  # causal — Conv1D pads (kernel-1) on the left, so length
+                   # matches 'same' semantics: ceil(seq_len / stride).
+                output_len = (seq_len + self.stride - 1) // self.stride
 
         return (batch_size, output_len, self.embed_dim)
 

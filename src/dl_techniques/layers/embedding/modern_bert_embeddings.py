@@ -88,6 +88,17 @@ class ModernBertEmbeddings(keras.layers.Layer):
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
+
+        # Validate configuration (mirrors BertEmbeddings).
+        if vocab_size <= 0:
+            raise ValueError(f"vocab_size must be positive, got {vocab_size}")
+        if hidden_size <= 0:
+            raise ValueError(f"hidden_size must be positive, got {hidden_size}")
+        if type_vocab_size <= 0:
+            raise ValueError(f"type_vocab_size must be positive, got {type_vocab_size}")
+        if not (0.0 <= dropout_rate <= 1.0):
+            raise ValueError(f"dropout_rate must be in [0, 1], got {dropout_rate}")
+
         # Store all configuration
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size

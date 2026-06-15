@@ -107,7 +107,7 @@ class ContinuousRoPE(keras.layers.Layer):
         └───────────────┬──────────────────┘
                         ▼
         ┌──────────────────────────────────┐
-        │  Output phase angles (..., dim)  │
+        │  Output phase angles (..., dim/2)│
         └──────────────────────────────────┘
 
     :param dim: Dimensionality of the embedding (typically ``head_dim`` in
@@ -217,8 +217,9 @@ class ContinuousRoPE(keras.layers.Layer):
         :type coords: keras.KerasTensor
         :param training: Whether in training mode (unused).
         :type training: Optional[bool]
-        :return: Phase angles tensor with shape ``(..., dim)`` for rotational
-            position encoding.
+        :return: Phase angles tensor whose last dimension is the phase width
+            (``dim // 2`` for a ``dim`` divisible by ``ndim``); the caller turns
+            these phases into a full-width rotation via cos/sin.
         :rtype: keras.KerasTensor
         """
         # NOTE: `assert_positive` is retained as a config-compatible flag but no
@@ -260,13 +261,22 @@ class ContinuousRoPE(keras.layers.Layer):
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.
 
+        The output carries the per-position PHASE width, which is half of the
+        requested ``dim`` (these phases are later turned into a full-width
+        rotation by the caller applying cos/sin). For a ``dim`` cleanly
+        divisible by ``ndim`` this equals ``dim // 2``.
+
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
-        :return: Output shape with last dimension changed to ``dim``.
+        :return: Output shape with last dimension set to the phase width.
         :rtype: Tuple[Optional[int], ...]
         """
+        # DECISION plan_2026-06-15_9dbb87c1/D-003: report the ACTUAL phase width
+        # (= dim/2 for divisible dim), not ``dim``. The prior code returned
+        # ``dim`` (2x too large); a wrong compute_output_shape is worse than none.
+        phase_width = self.ndim * (self.effective_dim_per_wave // 2) + self.padding // 2
         input_shape_list = list(input_shape)
-        return tuple(input_shape_list[:-1] + [self.dim])
+        return tuple(input_shape_list[:-1] + [phase_width])
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization.

@@ -376,15 +376,8 @@ class BertEmbeddings(keras.layers.Layer):
         })
         return config
 
-    @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> 'BertEmbeddings':
-        """Create layer from configuration.
-
-        :param config: Configuration dictionary.
-        :type config: Dict[str, Any]
-        :return: New ``BertEmbeddings`` instance.
-        :rtype: BertEmbeddings
-        """
-        return cls(**{k: v for k, v in config.items() if k != 'name'})
+    # NOTE: no custom from_config — the default `cls(**config)` preserves the
+    # layer `name` (all config values are primitives). The previous override
+    # stripped `name`, losing it on `.keras` round-trip.
 
 # ---------------------------------------------------------------------
