@@ -290,6 +290,9 @@ class ExpandedActivation(BaseActivation):
         :param input_shape: Shape of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         self.alpha = self.add_weight(
             name='alpha',
             shape=(),

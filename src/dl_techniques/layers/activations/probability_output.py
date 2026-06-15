@@ -215,6 +215,9 @@ class ProbabilityOutput(keras.layers.Layer):
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: tuple
         """
+        if self.built:
+            return
+
         self.strategy_layer.build(input_shape)
         super().build(input_shape)
 

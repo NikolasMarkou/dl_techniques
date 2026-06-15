@@ -177,6 +177,9 @@ class ThreshMax(keras.layers.Layer):
         :param input_shape: Shape of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         init = self.slope_initializer
         # Use slope_initial_value if using default "ones" initializer
         is_default_ones = (

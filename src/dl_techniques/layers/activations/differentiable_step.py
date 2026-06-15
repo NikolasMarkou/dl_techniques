@@ -164,6 +164,9 @@ class DifferentiableStep(keras.layers.Layer):
         :param input_shape: Shape tuple of the input tensor.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         if self.axis is None:
             # Scalar mode: weights have no shape
             param_shape = ()

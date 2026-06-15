@@ -196,6 +196,9 @@ class AdaptiveTemperatureSoftmax(keras.layers.Layer):
         :param input_shape: Shape tuple of input tensor.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         # Validate that we have at least 2 dimensions (batch + classes)
         if len(input_shape) < 2:
             raise ValueError(

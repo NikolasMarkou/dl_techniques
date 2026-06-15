@@ -247,6 +247,9 @@ class MonotonicityLayer(keras.layers.Layer):
         :type input_shape: Tuple[Optional[int], ...]
         :raises ValueError: If the size along monotonicity axis is less than 2.
         """
+        if self.built:
+            return
+
         # Normalize axis to positive index
         ndim = len(input_shape)
         if self.axis < 0:

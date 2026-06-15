@@ -498,6 +498,9 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer: compute tree dims and create projection state."""
+        if self.built:
+            return
+
         # Stash shape so get_build_config() can return it for save/load.
         self._build_input_shape = tuple(input_shape)
         # M7: mark layer built before creating weights so error tracebacks
