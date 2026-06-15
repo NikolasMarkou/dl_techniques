@@ -516,9 +516,13 @@ def compute_rigid_transform(
     # Step 4: Compute weighted cross-covariance matrix
     # H = sum_k w_k * mu_source_k^T * mu_target_k
     # This 3x3 matrix encodes the optimal rotation information
+    # DECISION plan_2026-06-15_00924f53/D-001: pre-existing forward blocker exposed once the
+    # graph-feature fix let the encoder run. `weights` is (B,K,1); to scale the transposed
+    # source (B,3,K) per component, broadcast (B,1,K) via transpose -- NOT expand_dims(axis=1)
+    # which yields a rank-4 (B,1,K,1) and crashes the Mul. Minimal in-scope F-LGM-2 fix.
     H = keras.ops.matmul(
-        # Transpose source: (B, 3, K)
-        keras.ops.transpose(mu_source_centered, (0, 2, 1)) * keras.ops.expand_dims(weights, axis=1),
+        # Transpose source: (B, 3, K); per-component weights broadcast as (B, 1, K)
+        keras.ops.transpose(mu_source_centered, (0, 2, 1)) * keras.ops.transpose(weights, (0, 2, 1)),
         mu_target_centered  # (B, K, 3)
     )  # Result: (B, 3, 3)
 
@@ -526,10 +530,14 @@ def compute_rigid_transform(
     # The optimal rotation is given by R = V * U^T (when det(V*U^T) = +1)
     # Note: Using TensorFlow backend for SVD as keras.ops doesn't have native SVD
     import tensorflow as tf
-    U, _, Vt = tf.linalg.svd(H)  # Vt is already transposed
+    # DECISION plan_2026-06-15_00924f53/D-001: tf.linalg.svd returns (s, u, v) with
+    # H = u @ diag(s) @ v^T (v is NOT pre-transposed). The original unpack `U,_,Vt`
+    # mis-bound s->U and v->Vt, crashing transpose on the rank-2 singular values.
+    # Bind u, v correctly; R = V @ U^T. Minimal in-scope F-LGM-2 fix.
+    _s, U, V = tf.linalg.svd(H)
 
     # Compute initial rotation matrix
-    R = keras.ops.matmul(Vt, keras.ops.transpose(U, (0, 2, 1)))  # V * U^T
+    R = keras.ops.matmul(V, keras.ops.transpose(U, (0, 2, 1)))  # V * U^T
 
     # Step 6: Ensure proper rotation (det(R) = +1, not -1 for reflection)
     # If det(R) = -1, we have a reflection instead of rotation
@@ -548,7 +556,7 @@ def compute_rigid_transform(
 
     # Apply correction: R = V * correction * U^T
     R = keras.ops.matmul(
-        keras.ops.matmul(Vt, correction_matrix),
+        keras.ops.matmul(V, correction_matrix),
         keras.ops.transpose(U, (0, 2, 1))
     )
 

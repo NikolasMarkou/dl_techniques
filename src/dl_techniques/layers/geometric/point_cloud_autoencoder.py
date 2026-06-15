@@ -4,6 +4,56 @@ from typing import List, Dict, Any, Tuple
 
 # ---------------------------------------------------------------------
 
+
+# DECISION plan_2026-06-15_00924f53/D-001: keras.ops.get_graph_feature never existed in
+# Keras 3.8 -- this is the local DGCNN kNN edge-feature impl; output last-dim MUST be 2*C to
+# match mlp.build() (6 for C=3, 128 for C=64). Do NOT call a nonexistent keras.ops symbol.
+def _get_graph_feature(x: keras.KerasTensor, k: int) -> keras.KerasTensor:
+    """Build DGCNN kNN edge features for a channels-last point cloud.
+
+    For each point i, finds its k nearest neighbours (by squared L2 in feature
+    space) and emits the edge feature ``[x_i ; x_j - x_i]`` for each neighbour j.
+
+    :param x: Channels-last tensor ``(B, N, C)``.
+    :type x: keras.KerasTensor
+    :param k: Number of nearest neighbours.
+    :type k: int
+    :return: Edge-feature tensor ``(B, N, k, 2*C)`` (k-neighbour axis is axis 2;
+        last dim is exactly ``2*C`` to match the hard-coded ``mlp.build()`` shapes).
+    :rtype: keras.KerasTensor
+    """
+    # Pairwise squared distances -> (B, N, N).
+    # dist[b,i,j] = ||x_i - x_j||^2 = |x_i|^2 - 2 x_i . x_j + |x_j|^2
+    x2 = ops.sum(ops.square(x), axis=-1, keepdims=True)  # (B, N, 1)
+    inner = ops.matmul(x, ops.transpose(x, (0, 2, 1)))   # (B, N, N)
+    dist = x2 - 2.0 * inner + ops.transpose(x2, (0, 2, 1))  # (B, N, N)
+
+    # k nearest neighbours = k smallest distances = top_k of the negated distances.
+    idx = ops.top_k(-dist, k=k)[1]  # (B, N, k), int
+
+    # Gather neighbour features via take_along_axis.
+    # Broadcast x to (B, 1, N, C) and idx to (B, N, k, 1); gather along the
+    # source-point axis (axis=2 of the broadcast tensor).
+    c = ops.shape(x)[-1]
+    x_b = ops.expand_dims(x, axis=1)        # (B, 1, N, C)
+    idx_b = ops.expand_dims(idx, axis=-1)   # (B, N, k, 1)
+    idx_b = ops.broadcast_to(idx_b, (ops.shape(idx)[0], ops.shape(idx)[1], k, c))  # (B, N, k, C)
+    x_b = ops.broadcast_to(
+        x_b, (ops.shape(x)[0], ops.shape(idx)[1], ops.shape(x)[1], c)
+    )  # (B, N, N, C)
+    neighbors = ops.take_along_axis(x_b, idx_b, axis=2)  # (B, N, k, C)
+
+    # Centre features broadcast over the k axis -> (B, N, k, C).
+    center = ops.broadcast_to(
+        ops.expand_dims(x, axis=2), (ops.shape(x)[0], ops.shape(x)[1], k, c)
+    )  # (B, N, k, C)
+
+    # Edge feature: [center ; neighbor - center] -> (B, N, k, 2*C).
+    return ops.concatenate([center, neighbors - center], axis=-1)
+
+
+# ---------------------------------------------------------------------
+
 @keras.saving.register_keras_serializable()
 class PointCloudAutoencoder(keras.layers.Layer):
     """DGCNN-based autoencoder for point cloud feature extraction.
@@ -130,19 +180,19 @@ class PointCloudAutoencoder(keras.layers.Layer):
         # EdgeConv Block 1: Extract first-level geometric features
         # Constructs k-NN graph and computes edge features for each point-neighbor pair
         # Edge feature = [point_features; neighbor_features - point_features]
-        graph1 = keras.ops.get_graph_feature(pc, k=self.k_neighbors)
+        graph1 = _get_graph_feature(pc, self.k_neighbors)
         f1 = self.mlp1(graph1)  # Apply MLP to edge features
         f1 = ops.max(f1, axis=2)  # Max pool over neighbors → (B, N, 64)
 
         # EdgeConv Block 2: Extract second-level features from f1
         # Now working in feature space rather than coordinate space
-        graph2 = keras.ops.get_graph_feature(f1, k=self.k_neighbors)
+        graph2 = _get_graph_feature(f1, self.k_neighbors)
         f2 = self.mlp2(graph2)
         f2 = ops.max(f2, axis=2)  # → (B, N, 64)
 
         # EdgeConv Block 3: Extract third-level features from f2
         # Captures higher-order geometric relationships
-        graph3 = keras.ops.get_graph_feature(f2, k=self.k_neighbors)
+        graph3 = _get_graph_feature(f2, self.k_neighbors)
         f3 = self.mlp3(graph3)
         f3 = ops.max(f3, axis=2)  # → (B, N, 64)
 
