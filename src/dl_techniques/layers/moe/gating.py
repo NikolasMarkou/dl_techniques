@@ -11,8 +11,13 @@ from abc import ABC, abstractmethod
 from keras import ops, layers, initializers
 from typing import Optional, Union, Tuple, Any, Dict
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from ..norms import create_normalization_layer
 
+# ---------------------------------------------------------------------
 
 def _mask_neg_inf(dtype: Any) -> float:
     """Return a dtype-appropriate large-negative value for softmax masking."""
