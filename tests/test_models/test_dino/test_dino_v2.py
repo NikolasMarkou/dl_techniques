@@ -81,3 +81,41 @@ def test_masked_forward_path():
 
     _assert_finite(out2)
     assert tuple(np.asarray(out2).shape) == (2, 10)
+
+
+def test_register_tokens_forward():
+    """Register-enabled variant (num_register_tokens=4) builds + forwards finite.
+
+    Register tokens are inserted AFTER the positional embedding, producing a
+    ``(B, 1 + R + N, D)`` sequence while ``pos_embed`` is sized only ``N + 1``
+    (CLS + patches). This is INTENTIONAL, not a bug: register tokens are
+    DELIBERATELY position-free learnable tokens (Darcet et al. 2023, "Vision
+    Transformers Need Registers") -- they receive NO positional signal by
+    design, and the length-agnostic attention blocks + final norm accept the
+    extended sequence. The 'large'/'giant' variants auto-enable 4 registers, so
+    this path is the default for the two biggest variants; this test locks it in
+    on a tiny model. Asserts both finiteness AND input-sensitivity (two distinct
+    images must yield distinct logits) so a constant-output regression fails
+    loudly. See dino_v2.py D-009 + decisions.md D-009.
+    """
+    from dl_techniques.models.dino.dino_v2 import create_dino_v2
+
+    model = create_dino_v2(
+        "tiny",
+        image_size=28,
+        patch_size=14,
+        num_classes=10,
+        num_register_tokens=4,
+    )
+
+    images_a = np.random.rand(2, 28, 28, 3).astype("float32")
+    images_b = np.random.rand(2, 28, 28, 3).astype("float32")
+    masks = np.zeros((2, 4), dtype=bool)
+
+    out_a = model([images_a, masks], training=False)
+    out_b = model([images_b, masks], training=False)
+
+    _assert_finite(out_a)
+    assert tuple(np.asarray(out_a).shape) == (2, 10)
+    # Position-free registers do not degrade the forward into a constant.
+    assert np.any(np.abs(np.asarray(out_a) - np.asarray(out_b)) > 1e-6)

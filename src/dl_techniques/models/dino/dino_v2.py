@@ -688,10 +688,21 @@ class DINOv2VisionTransformer(keras.Model):
         x = self.pos_embed(x)
 
         # B3: insert register tokens after CLS via Concatenate (NOT a Lambda). Cold path on
-        # the smoke (num_register_tokens=0).
+        # the smoke (num_register_tokens=0); 'large'/'giant' auto-enable 4 registers.
         # DECISION plan_2026-06-15_e2759fbc/D-003: reg_tokens via the hoisted Dense OUTSIDE any
         # Lambda; insertion via Concatenate([cls, reg, rest]). Do NOT use a Lambda or an
         # in-Lambda Dense for register tokens. See decisions.md D-003.
+        #
+        # DECISION plan_2026-06-15_e2759fbc/D-009: register tokens are inserted AFTER the
+        # positional embedding (pos_embed above is sized num_patches + num_tokens = CLS+patches
+        # and applied to the (B, N+1, D) post-CLS tensor at line ~688, BEFORE this concat). This
+        # is INTENTIONAL: register tokens are DELIBERATELY position-free learnable tokens (Darcet
+        # et al. 2023, "Vision Transformers Need Registers") -- they receive NO positional signal
+        # by design. The resulting (B, 1+R+N, D) sequence is accepted by the length-agnostic
+        # attention blocks + final norm (empirically verified: a 'tiny'+4-register model forwards
+        # finite (2,10) and is input-sensitive). Do NOT "fix" this by enlarging pos_embed to
+        # 1+R+N or by moving register insertion before pos_embed -- that would WRONGLY give
+        # registers a positional signal. See decisions.md D-009 + tests::test_register_tokens_forward.
         if self.num_register_tokens > 0:
             reg_base = self.register_token_projection(
                 keras.ops.ones((1, self.num_register_tokens, 1))
