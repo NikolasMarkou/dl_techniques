@@ -484,8 +484,11 @@ class FreeTransformerLayer(TransformerLayer):
         :type layer_idx: int
         :param training: Training mode flag.
         :type training: Optional[bool]
-        :return: Output ``(B, T, D)`` or tuple ``(output, bit_logits)``
-            during training when Free Transformer is enabled.
+        :return: If ``use_free_transformer`` is False, the output ``(B, T, D)``.
+            If True, ALWAYS the tuple ``(output, bit_logits)`` -- in both training
+            and inference (the structure does not depend on ``training``). At
+            inference ``bit_logits`` are zeros (the uniform prior). This matches
+            ``compute_output_shape`` in every mode.
         :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]
         """
         # Standard transformer behavior when Free Transformer is disabled
@@ -634,6 +637,15 @@ class FreeTransformerLayer(TransformerLayer):
                 dtype=self.compute_dtype
             )
 
+            # The uniform inference prior corresponds to per-bit Bernoulli(0.5),
+            # i.e. zero bit-logits. Emitting it keeps the layer's output structure
+            # training-independent (always (output, bit_logits) when the Free
+            # Transformer is enabled), matching compute_output_shape.
+            bit_logits = keras.ops.zeros(
+                (batch_size, seq_len, self.num_latent_bits),
+                dtype=self.compute_dtype
+            )
+
         # ---------------------------------------------------------------------
         # Step 3: Condition on Z by injecting into keys/values
         # ---------------------------------------------------------------------
@@ -682,15 +694,14 @@ class FreeTransformerLayer(TransformerLayer):
             layer_output = self.output_norm(x + residual, training=training)
 
         # ---------------------------------------------------------------------
-        # Return appropriate output based on mode
+        # Return (output, bit_logits)
         # ---------------------------------------------------------------------
-
-        if training is True:
-            # During training, return both output and bit_logits for KL computation
-            return layer_output, bit_logits
-        else:
-            # During inference, return only the output
-            return layer_output
+        # The output STRUCTURE depends only on ``use_free_transformer`` (a
+        # construction-time flag), never on ``training`` -- so it matches
+        # ``compute_output_shape`` in both modes. During training ``bit_logits``
+        # are the encoder readout (for the KL term); at inference they are the
+        # uniform-prior zeros set above.
+        return layer_output, bit_logits
 
     def compute_output_shape(
             self,
@@ -702,7 +713,9 @@ class FreeTransformerLayer(TransformerLayer):
         :param input_shape: Shape tuple (batch, sequence, hidden_size).
         :type input_shape: Tuple[Optional[int], ...]
         :return: Single shape tuple if use_free_transformer=False, or tuple of
-            two shapes (output, bit_logits) if use_free_transformer=True.
+            two shapes (output, bit_logits) if use_free_transformer=True. This
+            mirrors ``call`` exactly: the free path always returns both outputs
+            (at inference bit_logits is the uniform-prior zeros tensor).
         :rtype: Union[Tuple[Optional[int], ...], Tuple[Tuple[Optional[int], ...], ...]]
         """
         if not self.use_free_transformer:
