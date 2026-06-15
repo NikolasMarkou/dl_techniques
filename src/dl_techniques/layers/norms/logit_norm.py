@@ -10,18 +10,19 @@ Mathematical Formulation:
 ------------------------
 For input logits x with shape (..., d), LogitNorm computes:
 
-    norm = sqrt(sum(x²) + ε)
+    norm = sqrt(max(sum(x²), ε))
     output = x / (norm * τ)
 
 Where:
 - sum(x²) is computed over specified axes (typically the class dimension)
-- ε is a small epsilon for numerical stability
-- τ is the temperature parameter that controls the spread of normalized logits
+- ε is a small epsilon floor (via ``max``) for numerical stability
+- τ is the temperature parameter (a fixed hyperparameter) that controls the spread
+  of normalized logits
 
 Key Benefits:
 - **Improved Calibration**: Reduces model overconfidence
 - **Training Stability**: L2 normalization prevents logit explosion
-- **Temperature Scaling**: Learnable parameter for optimal calibration
+- **Temperature Scaling**: Fixed hyperparameter controlling calibration sharpness
 - **Gradient Flow**: Maintains good gradient properties during backpropagation
 
 References:
@@ -48,8 +49,8 @@ class LogitNorm(keras.layers.Layer):
     Applies L2 normalization with a temperature parameter to logits, stabilizing
     training and improving model calibration by reducing overconfidence. The
     normalization is computed as:
-    ``norm = sqrt(sum(logits²) + ε)``, ``output = logits / (norm × τ)``,
-    where τ is the temperature controlling distribution sharpness.
+    ``norm = sqrt(max(sum(logits²), ε))``, ``output = logits / (norm × τ)``,
+    where τ is the (fixed) temperature controlling distribution sharpness.
 
     **Architecture Overview:**
 
@@ -67,8 +68,8 @@ class LogitNorm(keras.layers.Layer):
                     │
                     ▼
         ┌─────────────────────────┐
-        │  Sum along axis + ε     │
-        │  norm² = Σ(x²) + ε      │
+        │  Sum, floor at ε        │
+        │  norm² = max(Σ(x²), ε)  │
         └───────────┬─────────────┘
                     │
                     ▼
