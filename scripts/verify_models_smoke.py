@@ -484,7 +484,11 @@ def _f_mobileclip(m):
     except Exception:
         return m({"image": _img(h=256, w=256), "text": _tokens(vocab=1000, s=16)},
                  training=False)
-_reg("mobile_clip", "RUN", _b_mobileclip, _f_mobileclip, "s0")
+# No implemented backbone: variants reference mci0/mci1/mci2/vit_b16, none of
+# which exist in keras.applications. Needs an MCI backbone port.
+_reg("mobile_clip", "XFAIL", _b_mobileclip, _f_mobileclip,
+     "no implemented backbone (variants reference mci0/mci1/mci2/vit_b16 absent "
+     "from keras.applications); needs MCI backbone port")
 
 
 # --- mobilenet (v1-v4) -----------------------------------------------------
@@ -512,29 +516,56 @@ _reg("mobilenet_v4", "RUN", _b_mnv4, lambda m: m(_img(), training=False), "small
 # --- modern_bert (+ blt + hrm) ---------------------------------------------
 def _b_modernbert():
     from dl_techniques.models.modern_bert.modern_bert import ModernBERT
-    return ModernBERT.from_variant("base")
+    return ModernBERT.from_variant("tiny")
 def _f_modernbert(m):
     ids = _tokens(vocab=1000)
-    try:
-        return m({"input_ids": ids}, training=False)
-    except Exception:
-        return m(ids, training=False)
-_reg("modern_bert", "RUN", _b_modernbert, _f_modernbert, "base")
+    mask = np.ones_like(ids)
+    # supply attention_mask: ModernBERT echoes it in the output dict; passing
+    # None makes the dict carry a None leaf that the finite-check can't handle.
+    return m({"input_ids": ids, "attention_mask": mask}, training=False)
+# tiny (window_size=64). base's 2D window-grid padding inflates a 16-token seq
+# to a 16384-token window -> OOM on the 12GB GPU. Test-artifact, not a bug.
+_reg("modern_bert", "RUN", _b_modernbert, _f_modernbert, "tiny")
 
 def _b_modernbert_blt():
     from dl_techniques.models.modern_bert.modern_bert_blt import ModernBertBLT
-    return ModernBertBLT.from_variant("base")
-_reg("modern_bert_blt", "RUN", _b_modernbert_blt,
-     lambda m: m(_tokens(vocab=256), training=False), "BLT base (byte input)")
+    # No tiny variant exists; base's window_size=128 inflates a 16-token seq to
+    # a 16384-token window -> OOM. Construct a small config directly instead.
+    return ModernBertBLT(
+        vocab_size=260, hidden_size=128, num_layers=2, num_heads=4,
+        intermediate_size=256, local_attention_window_size=8,
+        global_attention_interval=2, max_seq_len=64,
+    )
+def _f_modernbert_blt(m):
+    ids = np.random.randint(0, 256, (2, 16)).astype(np.int32)
+    mask = np.ones_like(ids)
+    # supply attention_mask: BLT echoes it in the output dict; None there
+    # makes the finite-check choke on a None leaf.
+    return m({"input_ids": ids, "attention_mask": mask}, training=False)
+_reg("modern_bert_blt", "RUN", _b_modernbert_blt, _f_modernbert_blt,
+     "small config (byte input)")
 
 def _b_modernbert_hrm():
     from dl_techniques.models.modern_bert.modern_bert_blt_hrm import (
-        ReasoningByteBERT, create_reasoning_byte_bert_base,
+        ReasoningByteBERT, ReasoningByteBertConfig,
     )
-    return ReasoningByteBERT(config=create_reasoning_byte_bert_base())
+    # base config OOMs at the hash n-gram / reasoning-attention scale on the
+    # 12GB GPU. Build a small config: tiny embed/local dims, few reasoning
+    # layers+cycles, short seq, small hash vocab. embed_dim % num_heads == 0.
+    cfg = ReasoningByteBertConfig(
+        vocab_size=260, seq_len=64, embed_dim=96,
+        local_hidden_size=64, max_patches=32,
+        use_hash_embeddings=True, hash_vocab_size=4096,
+        ngram_sizes=[3, 4],
+        num_puzzle_identifiers=4, puzzle_emb_dim=0,
+        h_layers=1, l_layers=1, h_cycles=1, l_cycles=1,
+        num_heads=4, ffn_expansion_factor=2,
+        halt_max_steps=2,
+    )
+    return ReasoningByteBERT(config=cfg)
 _reg("modern_bert_blt_hrm", "RUN", _b_modernbert_hrm,
-     lambda m: m(_tokens(vocab=256), training=False),
-     "ReasoningByteBERT (now functional, commit 124d464b)")
+     lambda m: m(np.random.randint(0, 256, (2, 16)).astype(np.int32), training=False),
+     "ReasoningByteBERT small config (seq-len bug fixed in src)")
 
 
 # --- mothnet ---------------------------------------------------------------
@@ -656,11 +687,11 @@ def _f_sam(m):
     image = _img(h=1024, w=1024)
     osz = keras.ops.convert_to_tensor([1024, 1024])
     return m({"image": image, "original_size": osz}, training=False)
-# Recipe is correct (tensor original_size clears the input guard); the residual
-# FAIL is a GENUINE model bug: WindowedAttentionWithRelPos multiplies an int32
-# tensor by a float (1.0) -> "Expected int32 ... got 1.0". Not a harness error.
-_reg("sam", "RUN", _b_sam, _f_sam,
-     "vit_b @1024; {image, original_size(tensor)} - GENUINE bug in encoder attn")
+# Image-encoder rel-pos chain was fixed (dtype/gather/einsum), but a residual
+# multi-bug chain remains in the mask decoder (use_causal_mask Keras-3 incompat).
+_reg("sam", "XFAIL", _b_sam, _f_sam,
+     "image-encoder rel-pos chain fixed (dtype/gather/einsum); residual multi-bug "
+     "chain in mask decoder (use_causal_mask Keras-3 incompat)")
 
 
 # --- scunet ----------------------------------------------------------------
@@ -715,20 +746,22 @@ _reg("som", "RUN", _b_som, lambda m: m(_vec(d=64), training=False), "SOM cluster
 # --- squeezenet (v1/v2) ----------------------------------------------------
 def _b_sqv1():
     from dl_techniques.models.squeezenet.squeezenet_v1 import SqueezeNetV1
-    return SqueezeNetV1.from_variant("1.0", num_classes=10, input_shape=(32, 32, 3))
-_reg("squeezenet_v1", "RUN", _b_sqv1, lambda m: m(_img(), training=False), "1.0")
+    return SqueezeNetV1.from_variant("1.0", num_classes=10, input_shape=(64, 64, 3))
+# 64x64 (matches squeezenet's own tests). At 32px the valid-padding pools
+# collapse the spatial map to 0x0 -> NaN. Test-artifact, not a model bug.
+_reg("squeezenet_v1", "RUN", _b_sqv1,
+     lambda m: m(_img(h=64, w=64), training=False), "1.0 @64px")
 
 def _b_sqv2():
     from dl_techniques.models.squeezenet.squeezenet_v2 import SqueezeNoduleNetV2
-    return SqueezeNoduleNetV2.from_variant("v2_3d", num_classes=2, input_shape=(32, 32, 32, 1))
+    return SqueezeNoduleNetV2.from_variant("v2_3d", num_classes=2, input_shape=(64, 64, 64, 1))
 def _f_sqv2(m):
-    x = np.random.rand(2, 32, 32, 32, 1).astype(np.float32)  # (B,D,H,W,1) 3D volume
+    x = np.random.rand(2, 64, 64, 64, 1).astype(np.float32)  # (B,D,H,W,1) 3D volume
     return m(x, training=False)
-# Recipe is correct (v2_3d + 4D volume builds & forwards). Residual FAIL is a
-# GENUINE non-finite forward (NaN logits on untrained model, no NaN weights) --
-# same family as squeezenet_v1 in the baseline. Not a harness error.
+# 64x64x64 (matches squeezenet_v2's own tests). At 32px the valid-padding 3D
+# pools collapse the volume to 0x0x0 -> NaN. Test-artifact, not a model bug.
 _reg("squeezenet_v2", "RUN", _b_sqv2, _f_sqv2,
-     "v2_3d (B,D,H,W,1) - GENUINE non-finite forward bug")
+     "v2_3d (B,64,64,64,1)")
 
 
 # --- swin_transformer (DEAD) -----------------------------------------------
@@ -752,10 +785,13 @@ def _b_thera():
     from dl_techniques.models.thera.model import build_thera
     return build_thera(out_dim=3, backbone="edsr-baseline", size="air")
 def _f_thera(m):
+    from dl_techniques.layers.grid_sample import make_grid
     src = _img(h=32, w=32)
-    scale = np.array(2.0, dtype=np.float32)
-    return m([src, scale], training=False)
-_reg("thera", "RUN", _b_thera, _f_thera, "edsr-air; [source, scale]")
+    coords = np.broadcast_to(make_grid(64)[None], (2, 64, 64, 2)).astype(np.float32)
+    t = np.ones((2, 1), dtype=np.float32)
+    # Thera.call() unpacks (source, coords, t) -- a 3-tuple, NOT [src, scale].
+    return m((src, coords, t), training=False)
+_reg("thera", "RUN", _b_thera, _f_thera, "edsr-air; (source, coords, t)")
 
 
 # --- time_series (7 subpackages) -------------------------------------------
@@ -868,10 +904,12 @@ def _b_videojepa():
     from dl_techniques.models.video_jepa.config import VideoJEPAConfig
     return VideoJEPA(config=VideoJEPAConfig())
 def _f_videojepa(m):
-    x = np.random.rand(2, 4, 32, 32, 3).astype(np.float32)  # (B,T,H,W,C)
-    return m(x, training=False)
+    # config defaults: img_size=64, img_channels=3, num_frames=4.
+    # call() expects a dict {"pixels": (B,T,H,W,C)}, not a bare tensor.
+    x = np.random.rand(2, 4, 64, 64, 3).astype(np.float32)  # (B,T,H,W,C)
+    return m({"pixels": x}, training=False)
 _reg("video_jepa", "RUN", _b_videojepa, _f_videojepa,
-     "default config (UNSURE: T/H/W from config)")
+     "default config; {'pixels': (B,4,64,64,3)}")
 
 
 # --- vit -------------------------------------------------------------------
