@@ -41,7 +41,7 @@ Legend — **Evidence**: `new smoke test (this plan)` = built+forwarded here; `e
 | 11 | convnext_patch_vae | assumed-PASS | assumed-PASS | existing test suite | `test_convnext_patch_vae/` + `test_convnext_patch_vae_v2/` |
 | 12 | convunext | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_convunext/` |
 | 13 | coshnet | PASS | PASS | new smoke test (this plan) | filled 0-byte stub `test_coshnet/test_model.py` |
-| 14 | darkir | XFAIL | **BROKEN** | new smoke test (this plan) / known-broken note | `keras.layers` has no `DepthToSpace` (FreMLP/pixel-shuffle path) |
+| 14 | darkir | PASS | PASS | smoke test (FIXED plan_2026-06-15_00924f53) | was: `keras.layers` has no `DepthToSpace`. FIXED: added `PixelShuffle2D` layer + cascade fixes (skip channels, `_add_list` for missing `ops.add_n`). |
 | 15 | depth_anything | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_depth_anything/` (forces CPU) |
 | 16 | detr | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_detr/` — **FUNCTIONAL** (21 tests pass); SYSTEM.md line 245 "broken" is STALE |
 | 17 | dino (v1/v2/v3) | XFAIL | **BROKEN** | new smoke test (this plan) / known-broken note | `RuntimeError: forgot to call super().__init__()` in `DINOv1.__init__` (ctor-order; affects v2/v3 too). `.keras` round-trip separately known-broken |
@@ -56,7 +56,7 @@ Legend — **Evidence**: `new smoke test (this plan)` = built+forwarded here; `e
 | 26 | ideogram4 | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_ideogram4/` |
 | 27 | jepa | SKIP | SKIP | new smoke test (this plan) / known-broken note | no top-level `keras.Model`; `JEPAEncoder`/`JEPAPredictor` are layers-only |
 | 28 | kan | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_kan/` |
-| 29 | latent_gmm_registration | XFAIL | **BROKEN** | new smoke test (this plan) | `keras.ops` has no `get_graph_feature` (in `PointCloudAutoencoder.call`) |
+| 29 | latent_gmm_registration | PASS | PASS | smoke test (FIXED plan_2026-06-15_00924f53) | was: `keras.ops` has no `get_graph_feature`. FIXED: implemented `_get_graph_feature` DGCNN kNN helper + cascade fixes in `compute_rigid_transform` (rank-4 weight broadcast, `tf.linalg.svd` return-order). |
 | 30 | lewm | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_lewm.py` (file, not dir) |
 | 31 | mamba | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_mamba/` |
 | 32 | masked_autoencoder | PASS | PASS | new smoke test (this plan) | `create_mae_model(encoder, 16, 0.75, (32,32,3))` w/ tiny in-test encoder |
@@ -66,7 +66,7 @@ Legend — **Evidence**: `new smoke test (this plan)` = built+forwarded here; `e
 | 36 | mobile_clip | PASS (re-run) | PASS (re-run) | existing test suite (re-run step 5) | `tests/test_models/test_mobile_clip/`; risk-cluster — re-run, no regression. `mobile_clip_v2.py` is 0 bytes (v1 only) |
 | 37 | mobilenet | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_mobilenet/` |
 | 38 | modern_bert | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_modern_bert/`; `modern_bert_blt_hrm` GHOST reportedly functional (commit 124d464b) — not exercised here |
-| 39 | mothnet | XFAIL | **BROKEN** | new smoke test (this plan) | `keras.ops` has no `scatter_nd_update` (in `MushroomBodyLayer.call`) |
+| 39 | mothnet | PASS | PASS | smoke test (FIXED plan_2026-06-15_00924f53) | was: `keras.ops` has no `scatter_nd_update`. FIXED: `scatter_nd_update` -> `scatter_update` (one-token). |
 | 40 | nam | assumed-PASS | assumed-PASS | existing test suite | `tests/test_models/test_nam/` |
 | 41 | nano_vlm | XFAIL | **BROKEN** | new smoke test (this plan) | `Unrecognized keyword arguments passed to MultiModalFusion: {'embed_dim','num_heads'}` (transformers-refactor signature drift); filled `test_nanovlm/test_model.py` stub |
 | 42 | nano_vlm_world_model | XFAIL | **BROKEN** | new smoke test (this plan) / known-broken note | `keras.random.uniform requires a floating point dtype. Received: int32` (timestep sampling in `ScoreBasedNanoVLM.call`); GHOST still broken despite commit 1b61a381 |
@@ -116,10 +116,10 @@ Legend — **Evidence**: `new smoke test (this plan)` = built+forwarded here; `e
 
 Each item is a candidate for a future dedicated fix plan. Grouped by likely root-cause class. Format: **family** — error / root cause — *source to investigate* — fix hint.
 
-### Class A — Missing `keras.ops` / `keras.layers` symbol (dead-on-forward: calls an op/layer absent in this Keras/TF 2.18)
-1. **latent_gmm_registration** — `keras.ops` has no `get_graph_feature`. *`models/latent_gmm_registration/` → `PointCloudAutoencoder.call`.* Fix hint: implement `get_graph_feature` from primitive `keras.ops` (kNN gather + concat), or replace with an existing graph-feature helper.
-2. **mothnet** — `keras.ops` has no `scatter_nd_update`. *`models/mothnet/` → `MushroomBodyLayer.call`.* Fix hint: use `keras.ops.scatter_update` / `slice_update`, or rebuild the sparse update via gather+segment ops.
-3. **darkir** — `keras.layers` has no `DepthToSpace` (Keras 3 has no such layer). *`models/darkir/model.py` FreMLP / pixel-shuffle path (near `:348`).* Fix hint: implement pixel-shuffle via `keras.ops.depth_to_space` (or reshape+transpose), drop the nonexistent `keras.layers.DepthToSpace`.
+### Class A — Missing `keras.ops` / `keras.layers` symbol (dead-on-forward) — ✅ ALL RESOLVED in plan_2026-06-15_00924f53
+1. ~~**latent_gmm_registration** — `keras.ops` has no `get_graph_feature`.~~ **RESOLVED**: implemented `_get_graph_feature` DGCNN kNN helper (`layers/geometric/point_cloud_autoencoder.py`) + cascade fixes in `compute_rigid_transform`. Smoke test passes.
+2. ~~**mothnet** — `keras.ops` has no `scatter_nd_update`.~~ **RESOLVED**: `scatter_nd_update` → `scatter_update` (`layers/mothnet_blocks.py:407`). Smoke test passes.
+3. ~~**darkir** — `keras.layers` has no `DepthToSpace`.~~ **RESOLVED**: added serializable `PixelShuffle2D` (`layers/pixel_unshuffle.py`) + cascade fixes (skip channels; `keras.ops.add_n` also absent → `_add_list` helper). Smoke test passes. NOTE for future: `keras.ops.depth_to_space` and `keras.ops.add_n` do NOT exist in Keras 3.8 (the original fix hint above was wrong on `depth_to_space`).
 
 ### Class B — Construction / signature drift (kwargs no longer accepted by a refactored sub-layer)
 4. **nano_vlm** — `Unrecognized keyword arguments passed to MultiModalFusion: {'embed_dim','num_heads'}` (transformers-refactor signature drift). *`models/nano_vlm/model.py:102-105` consumers; `MultiModalFusion` ctor.* Fix hint: update the call site to the post-refactor `MultiModalFusion` signature.
