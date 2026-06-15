@@ -314,10 +314,11 @@ class DecoupledMaxLogit(keras.layers.Layer):
         # Get maximum cosine similarity (remove keepdims for final output)
         max_cosine = ops.max(normalized, axis=self.axis)
 
-        # Get maximum norm (squeeze to remove keepdims)
-        max_norm = ops.squeeze(ops.max(norm, axis=self.axis), axis=-1)
+        # Get maximum norm. ops.max over the keepdims=True `norm` already drops
+        # the reduced axis, yielding the same shape as `max_cosine` above.
+        max_norm = ops.max(norm, axis=self.axis)
 
-        # Combine with learned weight
+        # Combine with the fixed decoupling constant (a hyperparameter, not a weight)
         output = self.constant * max_cosine + max_norm
 
         return output, max_cosine, max_norm
@@ -488,8 +489,9 @@ class DMLPlus(keras.layers.Layer):
             # Focal model returns MaxCosine
             return ops.max(normalized, axis=self.axis)
         else:
-            # Center model returns MaxNorm and norm factor
-            max_norm = ops.squeeze(ops.max(norm, axis=self.axis), axis=-1)
+            # Center model returns MaxNorm and norm factor. ops.max over the
+            # keepdims=True `norm` already drops the reduced axis.
+            max_norm = ops.max(norm, axis=self.axis)
             return max_norm, norm
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Union[Tuple[Optional[int], ...], Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]]:
