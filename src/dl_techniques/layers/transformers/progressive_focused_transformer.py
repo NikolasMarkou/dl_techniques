@@ -284,7 +284,12 @@ class PFTBlock(keras.layers.Layer):
         if self.built:
             return
 
-        if isinstance(input_shape, list):
+        # DECISION plan_2026-06-15_2a23a001/D-002: accept a tuple OF SHAPES too (mirror
+        # call:452); strictly widens accepted types — backward-compatible. A bare
+        # single-input shape is a tuple of ints (e.g. (B,H,W,dim)), so only treat the
+        # input as multi-input when its first element is itself a shape sequence.
+        if isinstance(input_shape, (list, tuple)) and len(input_shape) > 0 \
+                and isinstance(input_shape[0], (list, tuple)):
             x_shape = input_shape[0]
         else:
             x_shape = input_shape
@@ -549,8 +554,11 @@ class PFTBlock(keras.layers.Layer):
         :return: Tuple ``(output_shape, attn_map_shape)``.
         :rtype: Tuple[tuple, tuple]
         """
-        # Extract x shape
-        if isinstance(input_shape, list):
+        # Extract x shape (see D-002 in build: accept a tuple OF SHAPES, but a bare
+        # single-input shape is itself a tuple of ints — only index when the first
+        # element is a shape sequence).
+        if isinstance(input_shape, (list, tuple)) and len(input_shape) > 0 \
+                and isinstance(input_shape[0], (list, tuple)):
             x_shape = input_shape[0]
         else:
             x_shape = input_shape
