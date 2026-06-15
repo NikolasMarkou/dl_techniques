@@ -30,6 +30,43 @@
 - Anchor at impact site (not at decision definition). One anchor per impact site, even if shared with sibling decision.
 <!-- /COMPRESSED-SUMMARY -->
 
+## plan_2026-06-15_2485b951
+### D-001 | EXPLORE → PLAN | 2026-06-15
+**Context**: Source-verified review of all 14 norm classes found 4 correctness bugs (B1 squeeze crash, B3 regularizer-not-deserialized x2, B4 axis mutation, B2 degenerate BandLogitNorm), a package-wide missing built-guard (C1), a broken `__init__.py` (C2), and low-severity factory/doc gaps (F1, D1). User constraint: fix-only, no functionality expansion, no eager, full Keras-3 compliance.
+**Decision**: Apply a tight 10-step remediation grouped by file (correctness bugs first, then mechanical built-guard sweep, then factory/init/docs, then pin with tests). Author plan directly (orchestrator holds line-accurate verified context) rather than spawn plan-writer blind to source.
+**Trade-off**: Maximum coverage of confirmed defects **at the cost of** leaving design-level redesigns (B2 math, FW-2/3/4) out of scope.
+**Reasoning**: "Fix what's there, don't expand" rules out redesigns; mechanical fixes are zero-regression (LESSONS-confirmed across 4 prior sub-package sweeps).
+
+### D-002 | PLAN | 2026-06-15
+**Context**: BandLogitNorm's `LayerNormalization(axis=-1)` applied to the `[...,1]` L2-norm tensor is mathematically degenerate (output ≡ 0 → constant scale). Used by `train/rms_variants_train/`. A real fix is a redesign.
+**Decision**: Preserve the degenerate math; apply only the Keras-3 contract fixes (create sublayer in `__init__`, add built-guard, `super().build()` last) and DOCUMENT the limitation honestly in the docstring.
+**Trade-off**: Honest contract + docs **at the cost of** the layer remaining non-adaptive in practice.
+**Reasoning**: Changing the math = functionality redesign = out of scope + would alter a production experiment harness's variant. Anchor: textual (see summary Decision Anchors Registry at CLOSE).
+
+### D-003 | PLAN | 2026-06-15
+**Context**: Factory injects `epsilon=1e-6` via `setdefault` while the 8 custom classes default to `1e-7`; Keras `layer_norm`/`batch_norm` default to `1e-3` (already shifted to 1e-6 by the factory).
+**Decision**: Leave the factory's 1e-6 default behavior unchanged; clarify in the factory docstring that it is factory-imposed and may differ from a class's own default.
+**Trade-off**: Numeric stability of already-saved factory-built models **at the cost of** factory/class default divergence (documented, not silent).
+**Reasoning**: Silently changing epsilon would alter numerics of existing trained/saved models — higher risk than the cosmetic divergence. Revisit only if user requests alignment.
+
+### D-004 | PLAN | 2026-06-15
+**Context**: Deferred item FW-1 (register PolarWeightNorm in the norms factory) from plan_2026-05-29_4538aa62.
+**Decision**: WON'T-FIX BY DESIGN — PolarWeightNorm is a *weight* reparameterization (Dense replacement: `units`, radius+angles), not an activation-normalization layer; it does not fit `create_normalization_layer`'s contract. Already documented as not-registered in `layers/CLAUDE.md` + module docstring.
+**Trade-off**: Contract purity of the norm factory **at the cost of** one-line factory convenience for PolarWeightNorm.
+**Reasoning**: Registering it would force a semantically wrong key (a transform layer among normalizers). FW-2/3/4 + kernel-cache are new functionality → out of scope.
+
+<!-- Schema example — DO NOT REMOVE. Real entries follow this shape.
+     See references/file-formats.md "Entry Schema by Type" for required fields per entry type.
+     In-code anchors carry the plan-id prefix: `# DECISION plan_2026-06-15_2485b951/D-NNN` (see references/decision-anchoring.md).
+
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-06-15_2485b951/D-NNN` anchor exists in source)
+-->
+
 ## plan_2026-06-15_0205772c
 ### D-001 | EXPLORE → PLAN | YYYY-MM-DD
 **Context**: <one-paragraph background — what was discovered in EXPLORE>
@@ -106,32 +143,3 @@
 **Decision**: Put it in ONE shared helper `resolve_training_factor` in `utils/tensors.py`, unit-tested once.
 **Trade-off**: One new util function (new public surface) **at the cost of** vs inlining 3×; chosen for DRY + a single tested source of truth.
 **Reasoning**: 3 call sites = earned abstraction; subtle correctness logic should not be duplicated. Repo convention is per-site `ops.cond`, but that idiom doesn't fit side-effects; a tiny resolver is the better fit.
-
-## plan_2026-06-14_7384c2e3
-### D-001 | EXPLORE → PLAN | YYYY-MM-DD
-**Context**: <one-paragraph background — what was discovered in EXPLORE>
-**Decision**: <chosen approach in one sentence>
-**Trade-off**: <X> **at the cost of** <Y>
-**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-06-14_7384c2e3/D-NNN` anchor exists in source)
--->
-
-### D-001 | EXPLORE → PLAN | 2026-06-14
-**Context**: Review of `src/dl_techniques/layers/mixtures/` (GMM/KMeans/RBF + factory). EXPLORE found the package healthy (factory clean, math faithful, 105 tests green) with a narrow defect set: 3 graph-breaking `if training` guards (kmeans:619, gmm:571, rbf:298), build-state-dependent `compute_output_shape` (GMM/KMeans), double-build axis corruption, and contract non-uniformity (KMeans/RBF lack `from_config`).
-**Decision**: Fix-only campaign in 6 steps, behavior-preserving for the python-bool path, using the repo's canonical `if training is True:` idiom for the graph-compat fix.
-**Trade-off**: Use `training is True` (skips side-effects under `None`/`False`/symbolic) **at the cost of** not running training-only side-effects when a caller passes a symbolic `training=tf.constant(True)` tensor (that path now no-ops the EMA/add_loss rather than erroring).
-**Reasoning**: `training is True` is the documented repo contract (residual_acf.py:288-291; mdn/deep_kernel_pca/vector_quantizer). It is graph-safe (identity check never coerces a tensor to bool) and matches 5+ sibling layers, satisfying both "graph compatible" and "keras rules compliant + uniform". REJECTED the explorer-suggested `if training is not False:` — it fires side-effects under `training=None` (the default inference path), contradicting the contract. REJECTED `keras.ops.cond` — the KMeans `.assign` path inside cond branches is non-trivial and overkill for the Keras model-level call contract.
-**Anchor-Refs**: none (the training-guard edits are plain comments, not `# DECISION` anchors).
-
-### D-002 | PLAN | 2026-06-14
-**Context**: `compute_output_shape` (GMM gmm.py:391, KMeans kmeans.py:402) reads `self.cluster_axis`, which `build()`→`_setup_cluster_axes()` mutates from negative to positive indices. Pre-build / multi-axis-negative it returns wrong shapes; Keras functional tracing calls it before build.
-**Decision**: Normalize axes LOCALLY inside `compute_output_shape` from `len(input_shape)` + `self._cluster_axis_arg`, never reading build-mutated state.
-**Trade-off**: Duplicate the small negative→positive axis-normalization logic in `compute_output_shape` **at the cost of** a few lines of DRY violation vs `_setup_cluster_axes`.
-**Reasoning**: `compute_output_shape` must be build-independent per the Keras contract; the alternative (require build first) is wrong. The normalization is ~3 lines; extracting a shared helper is possible but the input differs (rank from input_shape vs self.input_rank), so inline is clearer.
-
-### D-003 | EXECUTE (step 3) | 2026-06-14
-**Context**: `_setup_cluster_axes()` (GMM gmm.py:313, KMeans kmeans.py:324) normalized negative→positive axes IN PLACE on `self.cluster_axis`. A second normalization (cross-rank re-build) would re-shift an already-positive axis, corrupting it. Keras locks same-rank re-build, so this is a latent/cross-rank robustness gap.
-**Decision**: Re-derive `self.cluster_axis` from the original constructor value `self._cluster_axis_arg` at the top of `_setup_cluster_axes()`, making normalization idempotent and cross-rank-correct.
-**Trade-off**: Read from `_cluster_axis_arg` instead of `self.cluster_axis` **at the cost of** a tight coupling to the D-005 stash field (acceptable — both serve the same "stable original axis" purpose).
-**Reasoning**: Aligns the axis source across get_config (D-005), compute_output_shape (D-002), and build (D-003) — one canonical source. Anchored in code so the in-place mutation is not "fixed" back.
-**Anchor-Refs**: `src/dl_techniques/layers/mixtures/gmm.py:318`, `src/dl_techniques/layers/mixtures/kmeans.py:329`

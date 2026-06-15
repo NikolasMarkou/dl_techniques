@@ -9,8 +9,8 @@
 - **Doc updates belong in the same plan as the code change they describe.**
 - **Run the existing test suite as the FIRST step of EXPLORE when the goal is "fix issues found in a review".**
 - **A reuse-review / recommendation doc is a HYPOTHESIS, not a finding -- source-read every claim before PLAN.**
-- **Explorer audit claims are HYPOTHESES.** Source-verify every explorer claim before planning. A CONFIRMED explorer finding can still be REFUTED on direct source read. This pattern has been confirmed three times (bert_embeddings:222 CRITICAL refuted; attention plan similar; activation plan: `len(inputs.shape)`, `keras.activations.elu`, `keras.backend.epsilon()` all flagged "graph-unsafe" by explorers -- all are graph-safe on source read). Do not skip orchestrator verification.
-- **`len(tensor.shape)` returns the STATIC RANK as a Python int -- graph-safe.** Do not flag it as eager/graph-unsafe. Likewise `keras.activations.*` functions are graph-traceable and `keras.backend.epsilon()` is a Python float. Recurring explorer over-flagging pattern.
+- **Explorer audit claims are HYPOTHESES.** Source-verify every explorer claim before planning. A CONFIRMED explorer finding can still be REFUTED on direct source read (bert_embeddings:222 refuted; activation plan: `len(inputs.shape)`, `keras.activations.elu`, `keras.backend.epsilon()` all flagged "graph-unsafe" -- all are graph-safe on source read). Do not skip orchestrator verification.
+- **`len(tensor.shape)` returns the STATIC RANK as a Python int -- graph-safe.** Do not flag it as eager/graph-unsafe. `keras.activations.*` functions are graph-traceable; `keras.backend.epsilon()` is a Python float. Recurring explorer over-flagging pattern.
 - **Pre-Mortem "STOP IF X" triggers earn their cost when they fire in 1-2 plans out of N.**
 - **Plan-time line-count predictions undershoot.** ~2x for sibling-class additions, 5-10x for dtype-semantics under mixed precision, ~1.7x for multi-layer flag-plumbing.
 - **Pre-existing tests can encode bugs as contracts.** When a fix causes adjacent tests to fail, read the failing assertions before assuming regression.
@@ -20,7 +20,7 @@
 - **Smoke != correctness -- smoke tests must assert distributional invariants across tf.data + preprocessing boundaries.**
 - **Adversarial review (iter>=2) catches opt-in path regressions the stub tests miss.** Always exercise opt-in paths.
 - **Diagnostic-vs-fix framing is a load-bearing decision -- log it explicitly in `decisions.md` BEFORE writing any code step.**
-- **`validate-plan.mjs` is repo-wide.** Gate before CLOSE is zero ERRORs INTRODUCED by the current plan. Pre-existing orphan/unknown-plan errors from trimmed prior plans are NOT CLOSE blockers -- triage by plan ID.
+- **`validate-plan.mjs` is repo-wide.** Gate before CLOSE is zero ERRORs INTRODUCED by the current plan. Pre-existing orphan/unknown-plan errors from prior plans are NOT CLOSE blockers -- triage by plan ID.
 - **In-code anchor IDs MUST be numeric D-NNN matching decisions.md.** Finding-report IDs (D-A, D-E style) are not valid anchor IDs.
 - **decisions.md `## D-NNN` headers MUST be exactly 3 segments: `## D-NNN | <context> | YYYY-MM-DD`.**
 - **A plan can legitimately REVERSE a closed prior plan's decisions** when a new authoritative source contradicts them.
@@ -34,27 +34,40 @@
 - **"Fully resolved" from a prior plan is scoped to that plan's findings, not exhaustive.** A fresh adversarial pass can still find real residue.
 - **When fixing a defect class, grep ALL files in the package.** A sweep that fixes "the known instances" can miss siblings.
 - **Factory `optional_params` completeness needs a param-passthrough test, not just construct-smoke.**
-- **Factory registries can silently diverge from class `__init__` defaults** (override a constraint with None, flip a bool). When auditing a factory package, diff every registry `optional_params` value against the class signature -- the class is source-of-truth (tests assert it). (plan_2026-06-15_0205772c: `thresh_max` `trainable_slope` True vs False; `differentiable_step` `shift_constraint` None vs `ValueRangeConstraint(-1,+1)`.)
+- **Factory registries can silently diverge from class `__init__` defaults** (override a constraint with None, flip a bool). Diff every registry `optional_params` value against the class signature -- class is source-of-truth. (plan_2026-06-15_0205772c: `thresh_max` `trainable_slope` True vs False; `differentiable_step` `shift_constraint` None vs `ValueRangeConstraint(-1,+1)`.)
 - **Anticipated multi-bug chains sometimes do NOT materialize.** Fix-on-demand is correct. Do NOT pre-emptively edit unconfirmed bugs.
+
+## Serialization / __init__ package hygiene
+
+- **`__all__` MUST be `List[str]`, not a list of class objects.** Class objects in `__all__` break star-import and static-analysis tooling silently. Check this first when auditing a package `__init__`. (plan_2026-06-15_2485b951: norms `__init__.py` had class objects; 5 classes also simply missing.)
+- **`x or DEFAULT` for serializable objects (regularizers, initializers) skips `keras.<x>.get()`.** A serialized dict from `from_config` is truthy and stored verbatim, breaking re-serialization. Use `keras.regularizers.get(x) or DEFAULT` (or the equivalent `.initializers.get`). (plan_2026-06-15_2485b951 B3: `band_rms`/`zero_centered_band_rms_norm`; contrast with `band_initializer` which correctly used `.get()`.)
+- **`build()` MUST NOT mutate ctor attrs.** Normalizing `self.axis` in `build()` (e.g. negative → positive) makes `get_config` return build-state-dependent values, breaking deserialization contract. Store the normalized form in `self._attr`; keep the ctor attr verbatim throughout. (plan_2026-06-15_2485b951 B4: DynamicTanh; fix: `self._norm_axis`.)
+
+## Math correctness / "operates as advertised"
+
+- **A layer can advertise "adaptive/learnable" behavior that is mathematically degenerate.** Verify the math, not just the docstring. When the real fix is a redesign and is out of scope, document the limitation honestly and apply only contract fixes. (plan_2026-06-15_2485b951 B2: BandLogitNorm LayerNorm over `[...,1]` → scale ≡ constant.)
+- **A layer advertising a mathematical property (monotonicity) may not actually guarantee it.** Verify the math; correctness fix bounds the perturbation relative to guaranteed spacing. (plan_2026-06-15_0205772c: `MonotonicityLayer._sigmoid` flexibility=0.5 could produce inversions.)
+- **Modified-Bessel ratio `I_nu/I_{nu-1}` MUST use the continued-fraction / downward (Miller) recurrence.**
+- **A vMF sphere VAE's free-learned kappa posterior-collapses to ~0 unless prevented.**
+- **mLSTM/matrix-memory cells REQUIRE the log-domain max-stabilizer m_t.**
+- **Seed BOTH weights AND inputs for any margin-comparison test.**
 
 ## Graph-safety patterns
 
-- **Graph-trace tests catch padding-path eager breaks** that reshape-only code review misses. Always include a `@tf.function` trace test with `tf.constant([None,...])` inputs when fixing graph-safety issues. (plan_2026-06-15_9dbb87c1: `ops.zeros(list(emb.shape))` in a padding path broke on None dims -- found by trace test, not by reading the reshape code.)
+- **Graph-trace tests catch padding-path eager breaks** that reshape-only code review misses. Always include a `@tf.function` trace test with `TensorSpec([None,...])` when fixing graph-safety issues.
 - **Dynamic reshape idiom**: `ops.reshape(t, (*ops.shape(x)[:-1], -1))` is graph-safe with one `-1` inferred trailing dim. Avoid `list(tensor.shape)` in shape tuples -- materializes None at trace time.
-- **`range(ops.shape(x)[N])` is graph-broken** under `@tf.function`/jit. A test using a concrete shape passes; only a `TensorSpec([None,...])` symbolic trace reproduces the crash.
-- **Static `.shape[N]` + fail-loud `ValueError` on `None`** is the graph-safe fix for any Python loop over a sequence-length dim.
+- **`range(ops.shape(x)[N])` is graph-broken** under `@tf.function`/jit. Use static `.shape[N]` + fail-loud `ValueError` on None.
 - **Before adding an "eager-only" guard, check whether host materialization is actually necessary.** `Variable.assign` and `keras.ops.linspace(tensor, tensor, n)` are graph-safe; only `float(convert_to_numpy(...))` + Python-attr mutation force eager.
-- **When removing an eager-only debug warning for graph safety**: keep the ctor arg accepted + stored + serialized (back-compat for saved configs); update docstring to note it is a retained no-op; add an in-code NOTE comment. (assert_positive pattern, D-001.)
+- **When removing an eager-only debug warning for graph safety**: keep the ctor arg accepted + stored + serialized (back-compat for saved configs); update docstring; add an in-code NOTE comment.
 
 ## Graph-safe training-gate patterns
 
-- **`training is True` is NOT universally applicable.** Correct for layers whose training-only side-effects are inference-irrelevant AND never called from a custom `@tf.function` loop passing a symbolic tensor flag.
-- **For layers that must support symbolic-training custom loops**: use the masked-factor pattern. `resolve_training_factor(training, dtype)` in `utils/tensors.py` returns `None` (skip), `1.0` (python-True exact), or `keras.ops.cast(training, dtype)` (symbolic). Gate on `if factor is not None:` then branch `isinstance(factor, float)` for the exact path vs the masked path. (plan_2026-06-14_5e80bd3e, KMeans/GMM/RBF.)
-- **`keras.ops.cond` is awkward for side-effects** (`add_loss` / `.assign`): cond branches must return matching structures. Tensor-masking (`cast(training) * delta/loss`) is the cleaner graph-safe alternative.
-- **`if training:` crashes under symbolic tensor** (`OperatorNotAllowedInGraphError`). `if training is not False:` fires under `training=None` (wrong). `if training is True:` skips the symbolic case.
+- **`training is True` is NOT universally applicable.** For layers that must support symbolic-training custom loops: use the masked-factor pattern (`resolve_training_factor` in `utils/tensors.py`).
+- **`keras.ops.cond` is awkward for side-effects** (`add_loss` / `.assign`): tensor-masking (`cast(training) * delta/loss`) is cleaner.
+- **`if training:` crashes under symbolic tensor.** `if training is not False:` fires under `training=None` (wrong). `if training is True:` is the canonical guard.
 - **`model.fit()` passes `training` as python `bool True` in Keras 3.8 / TF 2.18.** Symbolic-tensor case only arises in hand-rolled `@tf.function` custom loops.
 
-## Graph-safe attention patterns (plan_2026-06-14_7734bacd)
+## Graph-safe attention patterns
 
 - **Keras functional API uses `compute_output_shape` and does NOT execute `call()` symbolically.**
 - **Dense-with-input-shape-dependent-units stays None-sentinel-in-build + idempotency guard.**
@@ -64,16 +77,16 @@
 
 ## Activation / serialization (ffn package)
 
-- **`keras.activations.serialize(keras.activations.get('swish')) == 'silu'`** -- alias canonicalization. Tests asserting a literal activation token after `get()` storage + serialization MUST assert functional equivalence, not the literal.
-- **A `lambda` activation cannot round-trip through `.keras` for ANY layer** -- `OSError: could not get source code`. Keras/Python limitation.
+- **`keras.activations.serialize(keras.activations.get('swish')) == 'silu'`** -- alias canonicalization. Tests asserting a literal activation token after `get()` + serialization MUST assert functional equivalence, not the literal.
+- **A `lambda` activation cannot round-trip through `.keras` for ANY layer.**
 - **All 15 `layers/ffn/` layers use the canonical activation contract**: `keras.activations.get()` in `__init__`, `keras.activations.serialize()` in `get_config`.
 
 ## Keras 3 build-ordering
 
-- **An explicit `build()` that only calls `super().build()` leaves sublayers unbuilt at Keras `.keras` load-time weight-restore.**
-- **Canonical Keras-3 lifecycle**: `None`-sentinel in `__init__` for build-time dims; `if self.built: return` MUST be the FIRST line of `build()`; explicit sublayer `.build()` in parent `build()`.
-- **Keras sublayer-list accumulators in `build()` are a double-build trap.** Any `build()` that appends to `self.some_list` MUST reset the accumulator at the TOP of `build()` (or guard via `if self.built: return` first, which achieves the same).
-- **`if self.built: return` guard sweep is mechanical and zero-regression** (confirmed: 25 attention files, 14 embedding files, 15 FFN files across multiple plans).
+- **An explicit `build()` that only calls `super().build()` leaves sublayers unbuilt at `.keras` load-time weight-restore.**
+- **Canonical Keras-3 lifecycle**: `None`-sentinel in `__init__` for build-time dims; `if self.built: return` MUST be the FIRST line of `build()`; explicit sublayer `.build()` in parent `build()`; `super().build()` LAST.
+- **Keras sublayer-list accumulators in `build()` are a double-build trap.** Any `build()` that appends to `self.some_list` MUST reset the accumulator at the TOP (or guard via `if self.built: return` first).
+- **`if self.built: return` guard sweep is mechanical and zero-regression** (confirmed: 25 attention files, 14 embedding files, 15 FFN files, 7 activation files, 10 norms files -- 5 sub-package sweeps).
 - **Manual `child.build(input_shape)` in `parent.build()` required for Keras 3 model-save round-trip.**
 - **`keras.layers.Identity()` is a serializable drop-in for `Lambda(lambda x: x)`.**
 
@@ -87,24 +100,19 @@
 - **Compute STATIC scalars (e.g. attention `scale = 1/sqrt(head_dim)`) with stdlib `math.*`, NOT `keras.ops.*`.**
 - **`keras.ops.random.uniform` does NOT exist in Keras 3.8.** Random ops live under `keras.random.*`.
 - **`while True` + `if <traced_tensor> < eps:` is graph-broken.** Replace with bounded `for range(n)`.
-- **A wrong `compute_output_shape` is worse than none.** Must normalize axes locally from passed-in rank, never from build-mutated state.
 - **`register_keras_serializable` keys by bare class name.** Use `package=` to disambiguate collisions. NEVER change an existing `package=` string -- it changes the registration KEY and breaks deserialization of already-saved `.keras` models.
 - **When `get_config` serializes a dataclass via `to_dict()`, add a `from_config` class method that rebuilds the dataclass.**
 
-## Embedding sub-package specifics (plan_2026-06-15_9dbb87c1)
+## Embedding sub-package specifics
 
-- **`HierarchicalCodebookEmbedding` is direct-import-only.** Non-standard ctor; not factory-registered. Document explicitly.
-- **`PositionEmbeddingSine2D` emits channels-FIRST `(B, 2*num_pos_feats, H, W)`.** Factory description and README note this. Consumers expecting channels-last must transpose.
-- **`ModernBertEmbeddings` has NO ctor defaults** -- all 7 args required. Factory supplies the 4 optional-context defaults so factory construction works.
-- **`ContinuousRoPE.compute_output_shape` returns dim/2** (phase width), NOT dim. Conventional RoPE design; the dim docstring was wrong.
+- **`HierarchicalCodebookEmbedding` is direct-import-only.** Non-standard ctor; not factory-registered.
+- **`PositionEmbeddingSine2D` emits channels-FIRST `(B, 2*num_pos_feats, H, W)`.** Consumers expecting channels-last must transpose.
+- **`ModernBertEmbeddings` has NO ctor defaults** -- all 7 args required. Factory supplies the 4 optional-context defaults.
+- **`ContinuousRoPE.compute_output_shape` returns dim/2** (phase width), NOT dim.
 
 ## Numerical / ML algorithm stability
 
-- **A layer advertising a mathematical property (monotonicity) may not actually guarantee it -- verify the math, not just the docstring.** Minimal correctness fix: bound the perturbation relative to the guaranteed spacing (flexibility=1/(n-1) for a sigmoid-sigmoid interpolation with n equally-spaced targets). (plan_2026-06-15_0205772c: `MonotonicityLayer._sigmoid` with hardcoded `flexibility=0.5` could produce inversions when adjacent spacing < 0.5*(max-min).)
-- **Modified-Bessel ratio `I_nu/I_{nu-1}` MUST use the continued-fraction / downward (Miller) recurrence.**
-- **A vMF sphere VAE's free-learned kappa posterior-collapses to ~0 unless prevented.**
-- **mLSTM/matrix-memory cells REQUIRE the log-domain max-stabilizer m_t.**
-- **Seed BOTH weights AND inputs for any margin-comparison test.** Use `atol=1e-5` for eager-vs-graph comparisons. 0-ULP equality is stronger evidence for a scale-constant swap.
+- **Seed BOTH weights AND inputs for any margin-comparison test.** Use `atol=1e-5` for eager-vs-graph comparisons.
 
 ## XLA / GPU kernel compatibility
 

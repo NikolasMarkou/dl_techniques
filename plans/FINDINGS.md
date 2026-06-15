@@ -36,6 +36,61 @@
 - **`current_phase` / `_global_step` counters**: `add_weight(trainable=False, dtype="float32")` — int32 fails CPU/GPU device placement.
 <!-- /COMPRESSED-SUMMARY -->
 
+## plan_2026-06-15_2485b951
+### Scope
+13 norm layer files in `src/dl_techniques/layers/norms/` (+ `factory.py`, `__init__.py`, `README.md`).
+Classes: RMSNorm, ZeroCenteredRMSNorm, BandRMS, AdaptiveBandRMS, ZeroCenteredBandRMSNorm,
+ZeroCenteredAdaptiveBandRMS, BandLogitNorm, LogitNorm, MaxLogitNorm, DecoupledMaxLogit, DMLPlus,
+GlobalResponseNormalization, DynamicTanh, PolarWeightNorm.
+
+### Index
+| # | File (detailed) | Topic | Key conclusion |
+|---|-----------------|-------|----------------|
+| F-contract | findings/contract-conformance.md | Keras-3 lifecycle conformance | explorer hypotheses; SOURCE-VERIFIED below |
+| F-graph | findings/graph-safety-correctness.md | graph-safety + "as advertised" | explorer hypotheses; SOURCE-VERIFIED below |
+| F-factory | findings/factory-docs-deferred.md | factory/docs/deferred items | explorer hypotheses; SOURCE-VERIFIED below |
+
+### SOURCE-VERIFIED ISSUE LIST (orchestrator confirmed against current source)
+
+### Correctness bugs (confirmed)
+- **B1 [HIGH] MaxLogit squeeze crash.** `max_logit_norm.py:318` (DecoupledMaxLogit.call) + `:492` (DMLPlus center): `ops.squeeze(ops.max(norm, axis=self.axis), axis=-1)`. `ops.max` over a keepdims=True norm already drops that axis, so `squeeze(...,axis=-1)` targets the batch dim → `Cannot squeeze axis=-1` for batch>1. Fix: drop the squeeze, use `ops.max(norm, axis=self.axis)` (matches `max_cosine` pattern on line 315). **ZERO src consumers** (grep) → unexercised but real; pin with a test.
+- **B3 [MEDIUM] band_regularizer not deserialized.** `band_rms.py:172` + `zero_centered_band_rms_norm.py:187`: `self.band_regularizer = band_regularizer or keras.regularizers.L2(1e-5)` — skips `keras.regularizers.get()` (unlike `band_initializer` which IS `.get()`-wrapped). A serialized dict from `from_config` is stored verbatim (truthy dict), so the next `get_config`→`regularizers.serialize(dict)` breaks for any non-None custom regularizer. Fix: `keras.regularizers.get(band_regularizer) or keras.regularizers.L2(1e-5)`. NOTE: the default-None→L2(1e-5) behavior is ADVERTISED in the docstring — keep it (round-trips fine for the None case because add_weight re-gets internally). AdaptiveBandRMS/ZeroCenteredAdaptiveBandRMS correctly use `.get()` and default to None (no injected L2) — inter-layer inconsistency is intentional/documented, NOT a bug.
+- **B4 [MEDIUM] DynamicTanh mutates ctor state in build.** `dynamic_tanh.py:167` `self.axis = normalized_axis` overwrites the ctor `axis` with the build-normalized (positive) list; `get_config` then serializes post-build state (build-state-dependent). Production-used (vit/vit_siglip/vit_hmlp). Fix: keep `self.axis` = ctor value; store normalized axes in a separate attr (e.g. `self._norm_axis`) used by build/call. Zero behavior change.
+
+### "Operate as advertised" — design-level (decision required)
+- **B2 [MEDIUM] BandLogitNorm degenerate adaptive mechanism.** `band_logit_norm.py:162-172`: creates `LayerNormalization(axis=-1)` and applies it to `x_length` of shape `[...,1]`. LayerNorm over a size-1 axis is identically 0 → `tanh(0)=0` → scale collapses to the constant `1 - 0.5*max_band_width`. The "adaptive"/learnable claim is non-functional; behaves as L2-normalize × constant. Also `build()` calls `super().build()` FIRST (line 158) then creates the sublayer (anti-pattern). **Used by `train/rms_variants_train/`** (harness even references the inner LayerNorm). Real math fix = redesign = EXPANSION → out of scope. DECISION: apply Keras-3 contract fixes (create LayerNormalization in `__init__`, add built-guard) WITHOUT changing the degenerate math, and DOCUMENT the limitation honestly in the docstring.
+
+### Keras-3 contract (mechanical, zero-regression)
+- **C1 [MEDIUM] Missing `if self.built: return` guard.** ZERO grep hits for `if self.built` across the whole package. All weight/sublayer-creating `build()` methods must have it as the FIRST line (canonical sweep, confirmed zero-regression across attention/ffn/embedding/activations). Affected (10): rms_norm, zero_centered_rms_norm, band_rms, adaptive_band_rms (Dense in build), zero_centered_band_rms_norm, zero_centered_adaptive_band_rms_norm (Dense in build), global_response_norm, polar_weight_norm, dynamic_tanh, band_logit_norm. Stateless (no build/weights, N/A): logit_norm, max_logit_norm (all 3 classes — `constant` is a plain float, not a weight).
+- **C2 [HIGH] `__init__.py` broken.** (a) `__all__` contains class OBJECTS, not strings — must be `List[str]`. (b) Missing imports/exports for 5 classes: AdaptiveBandRMS, GlobalResponseNormalization, DynamicTanh, ZeroCenteredRMSNorm, ZeroCenteredBandRMSNorm (README's direct-import example for ZeroCenteredBandRMSNorm is a broken ImportError). (c) factory helpers `get_normalization_info`/`validate_normalization_config` not exported. Fix: import all 14 classes + factory symbols; `__all__` as strings.
+
+### Factory / docs (low)
+- **F1 [LOW] `validate_normalization_config` whitelist incomplete.** `get_normalization_info()` 'parameters' lists omit valid ctor params, causing false `ValueError` via `validate`: band_rms/adaptive_band_rms missing `band_initializer`/`band_regularizer`; global_response_norm missing `gamma_regularizer`/`beta_regularizer`/`activity_regularizer`. Fix: complete the lists (source-of-truth = class `__init__`).
+- **D1 [LOW] doc nits.** LogitNorm docstring says `norm = sqrt(sum(x²)+ε)` but code is `sqrt(max(sum(x²),ε))` (logit_norm.py:175-176); also calls temperature "learnable" though it's a fixed float. DecoupledMaxLogit/DMLPlus comment "learned weight" but `constant` is a fixed float. Fix docstrings to match code.
+- **README** — add the 5 layers missing from the export example; verify factory-key table matches the 16 Literal types.
+
+### Confirmed NOT bugs (explorer over-flags — per LESSONS "claims are hypotheses")
+- PolarWeightNorm `convert_to_numpy`/`np.*` are in `build()` ONLY (init-time seed-kernel→polar encode, lines 311/321). `build()` runs eagerly in Keras 3; `call()`/`_reconstruct_kernel()` are pure `keras.ops` = graph-safe. Host materialization is necessary (LESSONS L46). NOT a fix target.
+- BandRMS `band_regularizer or L2` default-injection is ADVERTISED and round-trips for None case (downgraded from "bug" to the narrower B3 `.get()` asymmetry).
+- `len(input_shape)`/`len(tensor.shape)` static-rank usages are graph-safe (LESSONS).
+
+### Deferred items (from prior plans) — verified disposition
+- **FW-1** PolarWeightNorm factory registration → WON'T-FIX BY DESIGN. PolarWeightNorm is a *weight* reparameterization (Dense replacement: radius+angles, units param), NOT an activation-normalization layer; it does not fit `create_normalization_layer`'s contract. Documented as not-registered in `layers/CLAUDE.md` + module docstring. Keep documented.
+- **FW-2** angle_regularizer toward π/4 prior; **FW-3** benchmark vs Dense; **FW-4** PolarOrthogonalLayer; **kernel-cache** caveat → all NEW functionality → OUT OF SCOPE ("don't expand functionality").
+- **Coverage gap** → NO tests for logit_norm, max_logit_norm (3 classes), and NO factory test. Adding regression tests for existing code is in-scope (pins B1).
+
+### Key Constraints
+- **HARD**: No eager ops in any traced (`call`) path; must be `@tf.function`/graph-compatible. (Build-time eager init is allowed per Keras 3 + LESSONS L46.)
+- **HARD**: Full Keras-3 serialization round-trip (`get_config`/`from_config`, `.keras` save/load) must hold for every layer.
+- **HARD**: Fix existing behavior only — DO NOT expand functionality / add features (no new layers, no new params, no redesigns).
+- **HARD**: `@keras.saving.register_keras_serializable()`; do NOT change any existing `package=` (registration key) — would break already-saved models.
+- **SOFT**: Follow `research/2026_keras_custom_models_instructions.md` canonical patterns (built-guard, sublayers in `__init__`).
+- **SOFT**: Net-neutral/negative line count; mechanical guard sweep preferred over rewrites.
+- **GHOST (to verify, not assume)**: factory `epsilon=1e-6` default vs class `1e-7` defaults (F2). Changing it alters numerics of existing factory-built/saved models (layer_norm/batch_norm would shift 1e-6→Keras 1e-3). Lean: leave documented default, do NOT silently change. Decide at PLAN.
+
+### Corrections
+*Append [CORRECTED iter-N] entries here when earlier findings prove wrong.*
+
 ## plan_2026-06-15_0205772c
 ### Index
 
@@ -157,28 +212,3 @@
 
 ### Corrections
 *None yet.*
-
-## plan_2026-06-14_7384c2e3
-### Index
-
-| ID | Topic | File | Key takeaway |
-|----|-------|------|--------------|
-| F-GRAPH | Graph/eager audit | findings/graph-eager-audit.md | The ONLY graph-breaker class is bare `if training:`/`if training and ...` on a value that may be a symbolic tensor — at kmeans.py:619, gmm.py:571, rbf:298. All 3 raise `OperatorNotAllowedInGraphError` when `training` is a `tf.Tensor`. No `.numpy()`/`convert_to_numpy`/`py_function`/dynamic-loop escapes anywhere. `.assign`/`add_loss` are graph-safe. Empirically: all 3 PASS @tf.function with python-bool, FAIL with tensor-bool. |
-| F-CONTRACT | Contract & keras-rules compliance | findings/contract-keras-compliance.md | HIGH: `compute_output_shape` in GMM (gmm.py:391) + KMeans (kmeans.py:402) reads build-mutated `self.cluster_axis` → wrong/inconsistent for multi-axis pre-build. MED: KMeans+RBF lack `from_config` (GMM has it); GMM+KMeans `build()`→`_setup_cluster_axes()` mutates `self.cluster_axis` in place with no reset from `_cluster_axis_arg` → double-build corruption. LOW: kmeans.py:219 stores tuple raw (GMM uses `list()`); kmeans regularizer serialize guard inconsistency. |
-| F-FACTORY | Factory/docs/tests/as-advertised | findings/factory-docs-tests.md | Factory wiring: CLEAN (all 3 wired, exports complete, matches ffn/norms sibling contract). Advertised math: all correct. Docs: 1 soft notation mismatch (README.md:9 RBF formula uses textbook `2*sigma^2` vs impl `exp(-gamma*dist_sq)`). Tests: 105 pass / 0 fail; gaps = KMeans has NO `.keras` round-trip test, and ZERO graph-mode (@tf.function tensor-training) tests across all 3. |
-| F-IDIOM | Canonical graph-safe training-gate idiom | (this file) | Repo canonical idiom is `if training is True:` — documented verbatim in residual_acf.py:288-291, and used in mdn_layer.py:291, deep_kernel_pca.py:560, vector_quantizer_rotation_trick.py:369/390/392, logic operators. `is` identity check never coerces a tensor to bool (graph-safe); `None`/`False`/symbolic all skip the training-only side-effect, which is the intended contract for EMA updates + add_loss. This SUPERSEDES the explorer's `is not False` suggestion (see Corrections). |
-
-### Key Constraints
-
-- **[HARD]** All layers must be graph-compatible: no construct in `call()` (or anything reachable from it) may coerce a possibly-symbolic tensor to a python bool. Fix the 3 `if training` guards. (user: "no EAGER SHIT, all graph compatible")
-- **[HARD]** Fix-only, no functionality expansion. Target the existing defects + deferred items; do not add features. (user directive)
-- **[HARD]** `compute_output_shape` must return correct shapes without the layer being built (Keras functional-API tracing calls it pre-build).
-- **[HARD]** The training-gate fix MUST use the repo's canonical `training is True` idiom (F-IDIOM), not a bare truthiness or an ad-hoc variant, for keras-rules compliance + cross-layer uniformity.
-- **[SOFT]** The 3 layers should comply to the SAME contract (uniform `from_config`, uniform `cluster_axis` normalization, uniform serialize style). (user: "comply to the same contract")
-- **[SOFT]** README RBF formula notation should match the implementation.
-- **[GHOST]** Explorer-suggested `if training is not False:` — REJECTED; it would fire training-only side effects under `training=None`/symbolic, contradicting the repo's documented `training is True` contract. Not a real constraint.
-- Existing `# DECISION plan_2026-06-14_8c7365d0/D-005` (cluster_axis stash) and `plan_2026-06-08_57a975d1/D-002` (orthonormal lazy-resolve) anchors are CORRECT-BY-DESIGN — preserve, do not touch.
-
-### Corrections
-
-- **[CORRECTED iter-0]** findings/graph-eager-audit.md recommends the fix `if training is not False:` (claimed KAN/SwinMLP precedent). VERIFICATION FAILED: grep shows kan_linear.py / swin_mlp.py do NOT use that idiom, and no layer in the repo uses `is not False`. The actual canonical idiom is `if training is True:` (residual_acf.py:288-291 documents it explicitly; also mdn_layer, deep_kernel_pca, vector_quantizer_rotation_trick, logic operators). `is not False` is semantically WRONG (fires under `training=None`). Use `training is True`. See F-IDIOM.
