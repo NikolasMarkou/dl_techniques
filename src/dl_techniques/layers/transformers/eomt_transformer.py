@@ -285,27 +285,34 @@ class EomtTransformer(keras.layers.Layer):
 
         super().build(input_shape)
 
-    def _apply_masked_attention(
+    def _compute_attention_keep_mask(
             self,
             inputs: keras.KerasTensor,
             mask: keras.KerasTensor,
             training: Optional[bool] = None
     ) -> keras.KerasTensor:
-        """Apply masked attention by modifying query-token representations.
+        """Build a ``(B, seq, seq)`` keep-mask for true masked self-attention.
+
+        Implements the EoMT masked-attention scheme: each object query attends
+        ONLY to the patch tokens inside its predicted segmentation region (plus
+        all object queries), while patch tokens attend freely. The mask is fed
+        into the underlying attention layer via ``base_transformer(..., attention_mask=...)``.
+
+        Keep-mask convention (consumed by the factory attention layer as
+        ``scores + (1 - mask) * large_negative``): **1.0 = attend, 0.0 = blocked**.
+        The query-to-query block is kept all-ones so no attention row is ever
+        fully masked (which would make ``softmax`` over all ``-inf`` produce NaN).
+
+        Masking fires probabilistically with optional annealing; the gate is a
+        graph-safe arithmetic blend (no python branch on a traced tensor).
 
         :param inputs: Concatenated patch+query tensor ``(B, seq, D)``.
-        :type inputs: keras.KerasTensor
-        :param mask: Segmentation mask ``(B, num_queries, H, W)``.
-        :type mask: keras.KerasTensor
+        :param mask: Segmentation mask ``(B, num_queries, H, W)``, values in ``[0, 1]``
+            (thresholded at 0.5 to decide attend/block per patch).
         :param training: Training mode flag.
-        :type training: Optional[bool]
-        :return: Modulated inputs.
-        :rtype: keras.KerasTensor
+        :return: Keep-mask ``(B, seq, seq)`` with the same dtype as ``inputs``.
         """
-        if not training or mask is None:
-            return inputs
-
-        # Calculate effective mask probability with annealing
+        # Effective masking probability with annealing
         if self.mask_annealing_steps > 0:
             annealing_factor = ops.minimum(
                 self.current_step / self.mask_annealing_steps,
@@ -315,45 +322,34 @@ class EomtTransformer(keras.layers.Layer):
         else:
             effective_prob = self.mask_probability
 
-        # Apply mask probabilistically. ``should_mask`` is a scalar in {0.0, 1.0};
-        # it MUST be applied via arithmetic blending, not a python ``if`` -- a
-        # ``if not should_mask`` branch on this traced tensor breaks under
-        # ``@tf.function`` / ``model.fit`` graph tracing.
+        # Graph-safe probabilistic gate scalar in {0.0, 1.0} (no python ``if`` on
+        # the traced comparison -- that would break under @tf.function / model.fit).
         should_mask = ops.cast(
             keras.random.uniform([]) < effective_prob,
             dtype=inputs.dtype
         )
 
-        # Determine split between patches and queries
+        batch_size = ops.shape(inputs)[0]
         seq_len = ops.shape(inputs)[1]
         num_queries = ops.shape(mask)[1]
         num_patches = seq_len - num_queries
 
-        # Flatten spatial mask: [batch, num_queries, H, W] -> [batch, num_queries, H*W]
-        batch_size = ops.shape(inputs)[0]
+        # Flatten spatial mask -> (B, num_queries, H*W); keep the first num_patches
+        # columns (one entry per patch token). Threshold to a hard keep-mask.
         mask_flat = ops.reshape(mask, [batch_size, num_queries, -1])
+        query_patch = mask_flat[:, :, :num_patches]               # (B, nq, num_patches)
+        query_patch_keep = ops.cast(query_patch >= 0.5, inputs.dtype)
 
-        # DECISION plan_2026-06-15_5e7ae321/D-002 (limitation, documented not redesigned):
-        # True masked self-attention would require feeding an attention-bias matrix
-        # into the factory-created attention layer, which it does not accept. As an
-        # in-scope approximation this applies a SOFT modulation of the query tokens by
-        # their mask occupancy. Do NOT mistake this for full masked attention.
-        patch_tokens = inputs[:, :num_patches, :]
-        query_tokens = inputs[:, num_patches:, :]
+        # Patch rows attend to everything; query rows attend to their patches plus
+        # all queries (query->query block all-ones => no fully-masked row).
+        top = ops.ones((batch_size, num_patches, seq_len), dtype=inputs.dtype)
+        query_query = ops.ones((batch_size, num_queries, num_queries), dtype=inputs.dtype)
+        bottom = ops.concatenate([query_patch_keep, query_query], axis=-1)  # (B, nq, seq)
+        keep = ops.concatenate([top, bottom], axis=1)             # (B, seq, seq)
 
-        mask_influence = ops.mean(mask_flat, axis=-1, keepdims=True)  # [batch, queries, 1]
-        modulated_query_tokens = query_tokens * (1.0 + 0.1 * mask_influence)
-
-        # Graph-safe probabilistic gate (replaces the eager ``if not should_mask``).
-        query_tokens = (
-            should_mask * modulated_query_tokens
-            + (1.0 - should_mask) * query_tokens
-        )
-
-        # Recombine
-        inputs = ops.concatenate([patch_tokens, query_tokens], axis=1)
-
-        return inputs
+        # Probabilistic gate: should_mask=0 -> attend-all; should_mask=1 -> computed keep.
+        keep = 1.0 - should_mask * (1.0 - keep)
+        return keep
 
     def call(
             self,
@@ -380,12 +376,14 @@ class EomtTransformer(keras.layers.Layer):
         else:
             x = inputs
 
-        # Apply masked attention if configured
+        # Build the masked-attention keep-mask if configured (training only). The
+        # mask is forwarded by TransformerLayer to its attention sublayer.
+        attention_mask = None
         if self.use_masked_attention and mask is not None and training:
-            x = self._apply_masked_attention(x, mask, training)
+            attention_mask = self._compute_attention_keep_mask(x, mask, training)
 
-        # Pass through base transformer
-        output = self.base_transformer(x, training=training)
+        # Pass through base transformer (masked attention via attention_mask)
+        output = self.base_transformer(x, attention_mask=attention_mask, training=training)
 
         # Increment training step counter
         if training and self.mask_annealing_steps > 0:
