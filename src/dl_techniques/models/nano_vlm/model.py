@@ -537,7 +537,19 @@ class NanoVLM(keras.Model):
         if self.final_dropout is not None:
             combined_features = self.final_dropout(combined_features, training=training)
 
-        logits = self.output_projection(combined_features)
+        # DECISION plan_2026-06-15_2a23a001/D-001: tie input/output embeddings at CALL
+        # time via matmul(x, transpose(word_embeddings.embeddings)); NEVER reassign another
+        # layer's weight post-build (that broke in plan_2026-06-15_39a31d4a). output_projection
+        # stays built (serialization / use_shared_embedding=False) but is unused on this path.
+        if (self.use_shared_embedding and
+                self.text_component_type == 'decoder' and
+                hasattr(self.text_component, 'word_embeddings')):
+            logits = ops.matmul(
+                combined_features,
+                ops.transpose(self.text_component.word_embeddings.embeddings)
+            )
+        else:
+            logits = self.output_projection(combined_features)
         logger.debug(f"Output logits shape: {ops.shape(logits)}")
 
         return logits
@@ -592,7 +604,16 @@ class NanoVLM(keras.Model):
                 combined = fused
 
             # Get logits and sample next token
-            logits = self.output_projection(combined)
+            # Shared-embedding tie at call time (mirrors call(); see D-001 anchor above).
+            if (self.use_shared_embedding and
+                    self.text_component_type == 'decoder' and
+                    hasattr(self.text_component, 'word_embeddings')):
+                logits = ops.matmul(
+                    combined,
+                    ops.transpose(self.text_component.word_embeddings.embeddings)
+                )
+            else:
+                logits = self.output_projection(combined)
 
             # Extract text logits (skip vision_heads tokens)
             vision_seq_len = ops.shape(vision_features)[1]
