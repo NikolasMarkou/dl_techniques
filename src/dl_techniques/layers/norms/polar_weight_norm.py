@@ -298,6 +298,9 @@ class PolarWeightNorm(keras.layers.Layer):
             raise ValueError(f"epsilon must be positive, got {epsilon}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        if self.built:
+            return
+
         fan_in = input_shape[-1]
         if fan_in is None:
             raise ValueError("The last dimension of the input must be defined.")

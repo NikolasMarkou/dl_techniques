@@ -182,6 +182,9 @@ class GlobalResponseNormalization(keras.layers.Layer):
         :raises ValueError: If input rank is not 2, 3, or 4, or if the
             channel dimension is not defined.
         """
+        if self.built:
+            return
+
         rank = len(input_shape)
         if rank not in [2, 3, 4]:
             raise ValueError(

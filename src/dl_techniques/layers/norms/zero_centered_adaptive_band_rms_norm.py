@@ -250,6 +250,9 @@ class ZeroCenteredAdaptiveBandRMS(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Create the inner dense layer with proper parameter sizing."""
+        if self.built:
+            return
+
         self._param_shape, self._scaling_axes = (
             self._compute_param_shape_and_axes(input_shape)
         )

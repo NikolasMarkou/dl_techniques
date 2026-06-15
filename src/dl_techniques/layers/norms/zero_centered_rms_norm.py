@@ -200,6 +200,9 @@ class ZeroCenteredRMSNorm(keras.layers.Layer):
         :raises ValueError: If attempting to create scale parameter with dynamic
             shape along normalization axes.
         """
+        if self.built:
+            return
+
         if self.use_scale:
             # Determine the shape for the scale parameter
             # Scale parameter shape matches the input shape along normalization axes

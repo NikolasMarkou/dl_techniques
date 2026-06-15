@@ -268,6 +268,9 @@ class AdaptiveBandRMS(keras.layers.Layer):
         :param input_shape: Shape tuple indicating input tensor shape.
         :type input_shape: Tuple[Optional[int], ...]
         """
+        if self.built:
+            return
+
         # Compute parameter configuration
         self._param_shape, self._scaling_axes = self._compute_param_shape_and_axes(
             input_shape
