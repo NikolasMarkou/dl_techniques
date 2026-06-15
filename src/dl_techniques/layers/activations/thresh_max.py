@@ -127,8 +127,8 @@ class ThreshMax(keras.layers.Layer):
             epsilon: float = 1e-12,
             trainable_slope: bool = False,
             slope_initializer: Union[str, initializers.Initializer] = "ones",
-            slope_regularizer: Optional[Union[str, regularizers.Regularizer]] = L2_custom(-1e-4),
-            slope_constraint: Optional[Union[str, constraints.Constraint]] = ValueRangeConstraint(1.0, 50.0),
+            slope_regularizer: Optional[Union[str, regularizers.Regularizer]] = None, # default: L2_custom(-1e-4)
+            slope_constraint: Optional[Union[str, constraints.Constraint]] = None, # default: ValueRangeConstraint(1.0, 50.0)
             **kwargs: Any
     ) -> None:
         """Initialize the ThreshMax layer.
@@ -156,6 +156,12 @@ class ThreshMax(keras.layers.Layer):
             raise ValueError(f"epsilon must be positive, got {epsilon}")
         if slope <= 0:
             raise ValueError(f"slope must be positive, got {slope}")
+
+        # Resolve mutable defaults inside the body (avoid shared module-level instances)
+        if slope_regularizer is None:
+            slope_regularizer = L2_custom(-1e-4)
+        if slope_constraint is None:
+            slope_constraint = ValueRangeConstraint(1.0, 50.0)
 
         self.axis = axis
         self.slope_initial_value = float(slope)
