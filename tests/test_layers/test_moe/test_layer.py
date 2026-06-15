@@ -20,7 +20,9 @@ from typing import Dict, Any
 from dl_techniques.layers.moe.experts import FFNExpert, create_expert
 from dl_techniques.layers.moe.layer import MixtureOfExperts, create_ffn_moe
 from dl_techniques.layers.moe.config import MoEConfig, ExpertConfig, GatingConfig
-from dl_techniques.layers.moe.gating import LinearGating, CosineGating, SoftMoEGating, create_gating
+from dl_techniques.layers.moe.gating import (
+    LinearGating, CosineGating, SoftMoEGating, create_gating, compute_auxiliary_loss
+)
 
 
 class TestMixtureOfExperts:
@@ -1271,6 +1273,102 @@ class TestReviewFixes:
             ops.convert_to_numpy(y_new),
             atol=1e-5,
         )
+
+
+class TestMoEReviewRegressions:
+    """Regressions pinning the iter-1 MoE review fixes.
+
+    Covers: build() idempotency guard, SoftMoE aux-info contract shape,
+    GatingConfig validation symmetry, and CosineGating temperature robustness.
+    """
+
+    # --- F1: build() idempotency (if self.built: return) -----------------
+
+    def _moe(self, gating_type: str, top_k: int = 2, num_experts: int = 4):
+        ec = ExpertConfig(ffn_config={'type': 'mlp', 'hidden_dim': 32, 'output_dim': 16})
+        gc = GatingConfig(gating_type=gating_type, top_k=top_k)
+        return MixtureOfExperts(MoEConfig(num_experts=num_experts, expert_config=ec, gating_config=gc))
+
+    @pytest.mark.parametrize("gating_type,top_k", [
+        ('linear', 2), ('cosine', 2), ('softmoe', 1),
+    ])
+    def test_moe_double_build_idempotent(self, gating_type, top_k):
+        """Calling build() twice must be a no-op, not raise."""
+        layer = self._moe(gating_type, top_k)
+        layer.build((2, 5, 16))
+        layer.build((2, 5, 16))  # must not raise
+        assert layer.built
+
+    def test_gating_layers_double_build_idempotent(self):
+        """All three gating layers and FFNExpert tolerate a second build()."""
+        gatings = [
+            LinearGating(num_experts=4, top_k=2),
+            CosineGating(num_experts=4, top_k=2, embedding_dim=8),
+            SoftMoEGating(num_experts=4, num_slots=3),
+        ]
+        for g in gatings:
+            g.build((2, 5, 16))
+            g.build((2, 5, 16))  # must not raise
+            assert g.built
+
+        expert = FFNExpert(ffn_config={'type': 'mlp', 'hidden_dim': 16, 'output_dim': 16})
+        expert.build((2, 16))
+        expert.build((2, 16))  # must not raise
+        assert expert.built
+
+    # --- F2: SoftMoE raw_gate_probs contract shape -----------------------
+
+    def test_softmoe_raw_gate_probs_shape_and_aux_loss(self):
+        """raw_gate_probs must be [batch, seq, num_experts] and feed aux loss."""
+        num_experts = 4
+        g = SoftMoEGating(num_experts=num_experts, num_slots=3)
+        x = np.random.randn(2, 5, 16).astype('float32')
+        weights, _, info = g(x, training=False)
+
+        rgp = info['raw_gate_probs']
+        assert tuple(rgp.shape) == (2, 5, num_experts)
+
+        # marginal over experts is a probability distribution
+        sums = ops.convert_to_numpy(ops.sum(rgp, axis=-1))
+        np.testing.assert_allclose(sums, np.ones_like(sums), atol=1e-4)
+
+        # accepted by compute_auxiliary_loss without shape error
+        loss = compute_auxiliary_loss(weights, rgp, num_experts=num_experts)
+        assert np.isfinite(float(ops.convert_to_numpy(loss)))
+
+    # --- F5: GatingConfig validation symmetry ----------------------------
+
+    @pytest.mark.parametrize("kwargs", [
+        {'gating_type': 'bogus'},
+        {'top_k': 0},
+        {'num_slots': 0},
+        {'embedding_dim': 0},
+        {'capacity_factor': 0.0},
+        {'temperature': 0.0},
+        {'noise_std': -1.0},
+    ])
+    def test_gating_config_rejects_invalid(self, kwargs):
+        with pytest.raises(ValueError):
+            GatingConfig(**kwargs)
+
+    def test_gating_config_accepts_valid(self):
+        GatingConfig()
+        GatingConfig(gating_type='cosine', top_k=2, embedding_dim=64)
+        GatingConfig(gating_type='softmoe', num_slots=8)
+
+    # --- F6: CosineGating temperature robustness -------------------------
+
+    def test_cosine_learnable_temperature_zero_is_finite(self):
+        """A learnable temperature drifting to 0 / negative must not NaN."""
+        g = CosineGating(num_experts=4, top_k=2, embedding_dim=8,
+                         temperature=1.0, learnable_temperature=True)
+        g.build((2, 5, 16))
+        x = np.random.randn(2, 5, 16).astype('float32')
+        for bad in (0.0, -0.5):
+            g.temperature_param.assign(bad)
+            w = ops.convert_to_numpy(g(x, training=False)[0])
+            assert np.isfinite(w).all()
+            np.testing.assert_allclose(w.sum(-1), np.ones(w.shape[:-1]), atol=1e-4)
 
 
 # Run tests with: pytest test_mixture_of_experts.py -v
