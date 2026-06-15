@@ -488,8 +488,12 @@ class CosineGating(BaseGating):
         cosine_similarities = ops.matmul(projected_inputs_norm, expert_embeddings_norm)
 
         # Apply temperature (standard softmax-temperature semantics: divide).
-        # Larger ``temperature`` -> flatter distribution.
+        # Larger ``temperature`` -> flatter distribution. Floor the divisor at a
+        # small positive epsilon so a learnable temperature that drifts to zero
+        # (or a zero/negative user value) cannot produce inf/NaN logits or
+        # silently invert routing. No-op for any temperature >= epsilon.
         temperature_value = self.temperature_param if self.learnable_temperature else self.temperature
+        temperature_value = ops.maximum(temperature_value, keras.backend.epsilon())
         gate_logits = cosine_similarities / temperature_value
 
         # Top-k selection
