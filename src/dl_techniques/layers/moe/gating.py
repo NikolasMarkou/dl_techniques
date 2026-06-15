@@ -724,7 +724,11 @@ class SoftMoEGating(BaseGating):
             'expert_inputs': expert_inputs,
             'expert_weights': expert_weights,
             'gate_logits': phi_logits,  # For z-loss computation
-            'raw_gate_probs': ops.softmax(phi_logits, axis=-1),
+            # Per-token marginal probability over experts: softmax over the
+            # expert axis (2), then average out the slot axis. Shape
+            # [batch, seq_len, num_experts] to match the LinearGating /
+            # CosineGating aux-info contract consumed by compute_auxiliary_loss.
+            'raw_gate_probs': ops.mean(ops.softmax(phi_logits, axis=2), axis=-1),
         }
 
         return expert_weights, expert_indices, auxiliary_info
