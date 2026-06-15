@@ -242,6 +242,12 @@ class ZeroCenteredAdaptiveBandRMS(keras.layers.Layer):
         scaling_axes: List[int] = []
         for i in range(1, input_rank):
             if i in normalized_axes:
+                if input_shape[i] is None:
+                    raise ValueError(
+                        f"Normalized axis {i} has an undefined (None) size; "
+                        f"ZeroCenteredAdaptiveBandRMS needs a static dimension to "
+                        f"size its scaling Dense layer. Got input_shape={input_shape}."
+                    )
                 param_shape.append(input_shape[i])
                 scaling_axes.append(i)
             else:
