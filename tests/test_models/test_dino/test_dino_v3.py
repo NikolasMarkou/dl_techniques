@@ -18,7 +18,6 @@ round-trip is known-broken).
 """
 
 import numpy as np
-import pytest
 
 
 def _assert_finite(value):
@@ -31,20 +30,17 @@ def _assert_finite(value):
 def test_smoke_build_and_forward():
     from dl_techniques.models.dino.dino_v3 import create_dino_v3
 
-    out = None
-    try:
-        model = create_dino_v3(
-            "small",
-            image_size=(32, 32),
-            num_classes=10,
-        )
+    # v3 forwards cleanly (plan_2026-06-15_2a23a001) -- no xfail safety net, so
+    # any future regression in build/forward fails loudly.
+    model = create_dino_v3(
+        "small",
+        image_size=(32, 32),
+        num_classes=10,
+    )
 
-        images = np.random.rand(2, 32, 32, 3).astype("float32")
-        out = model(images, training=False)
-    except Exception as e:  # first-ever v3 forward: capture any cascade
-        pytest.xfail(f"dino v3 first-forward cascade: {type(e).__name__}: {e}")
+    images = np.random.rand(2, 32, 32, 3).astype("float32")
+    out = model(images, training=False)
 
-    # Finiteness asserted OUTSIDE the try so a NaN/Inf fails loudly (no xfail).
     # Output may be a tensor (logits) or dict depending on head config.
     if isinstance(out, dict):
         for v in out.values():
