@@ -24,16 +24,17 @@ returns finite classification logits ``(B, num_classes)``. dino has no
 a tiny model: 28x28 image / patch 14 -> (28//14)^2 = 4 patches, so masks are
 ``(B, 4)``; ``include_top=True`` + ``num_classes=10`` -> logits ``(B, 10)``.
 
-FORWARD ONLY: no ``.keras`` round-trip (the DINOHead round-trip is a separate
-known break). No xfail safety-net -- v2 forwards for real, so any future
-build/forward regression fails loudly.
+Coverage: forward (zeros/all/mixed mask), register-enabled variant, and a
+``.keras`` save/load round-trip (which now passes for real after the D-009
+extension registered ``MaskTokenApply`` and removed the fragile ``call()``
+override + dead ``is_training`` input). No xfail safety-nets -- any future
+build/forward/serialization regression fails loudly.
 """
 
 import os
 import tempfile
 
 import numpy as np
-import pytest
 
 
 def _assert_finite(value):
@@ -135,11 +136,9 @@ def test_dino_v2_keras_roundtrip():
 
     All v2 custom layers/models are ``@register_keras_serializable``, so the
     registry resolves them; we ALSO pass them as ``custom_objects`` belt-and-
-    braces. The DINOHead ``.keras`` round-trip is SEPARATELY known-broken (build
-    appends unbuilt sublayers; load finds unbuilt children) -- if that surfaces,
-    this test is xfailed (non-strict) so the suite stays green and the
-    limitation is documented, rather than masking a NEW serialization break our
-    2-input / MaskTokenApply changes might introduce.
+    braces. This round-trip PASSES for real: the D-009 extension (registered
+    ``MaskTokenApply``, removed the ``DINOv2.call`` override + dead
+    ``is_training`` input) is exactly what made the wrapper serializable.
     """
     import keras
 
@@ -172,16 +171,13 @@ def test_dino_v2_keras_roundtrip():
         "MaskTokenApply": MaskTokenApply,
     }
 
+    # v2 round-trips cleanly after the step-5 fixes (registered MaskTokenApply,
+    # removed the fragile call() override + dead is_training input). No xfail
+    # safety-net -- a future serialization regression must fail loudly.
     with tempfile.TemporaryDirectory() as tmpdir:
         path = os.path.join(tmpdir, "dino_v2.keras")
-        try:
-            model.save(path)
-            loaded = keras.models.load_model(path, custom_objects=custom_objects)
-        except Exception as exc:  # noqa: BLE001
-            pytest.xfail(
-                f"{type(exc).__name__}: {exc}: DINOHead .keras round-trip "
-                "known-broken, separate from forward -- see sweep report"
-            )
+        model.save(path)
+        loaded = keras.models.load_model(path, custom_objects=custom_objects)
         out_after = np.asarray(loaded([images, masks], training=False))
 
     _assert_finite(out_after)
