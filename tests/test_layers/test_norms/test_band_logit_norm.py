@@ -73,8 +73,9 @@ class TestBandLogitNorm:
         assert layer.max_band_width == 0.01
         assert layer.axis == -1
         assert layer.epsilon == 1e-7
-        # Inner LN is created in build()
-        assert layer.norm is None
+        # Inner LN is created in __init__ (canonical Keras-3; built in build()).
+        assert layer.norm is not None
+        assert isinstance(layer.norm, keras.layers.LayerNormalization)
 
     def test_initialization_custom(self, custom_params):
         layer = BandLogitNorm(**custom_params)

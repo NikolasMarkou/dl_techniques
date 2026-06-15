@@ -564,5 +564,25 @@ class TestBandRMSEdgeCases:
         assert np.all(per_sample_rms <= 1.0 + 1e-4)
 
 
+class TestBandRMSRegularizerRoundTrip:
+    """Pins B1->B3 (plan_2026-06-15_2485b951): a custom band_regularizer must be
+    deserialized back into a Regularizer object (was stored as a dict, breaking
+    a second get_config). None must still default to L2."""
+
+    def test_custom_regularizer_double_roundtrip(self):
+        x = ops.convert_to_tensor(np.random.randn(4, 32).astype("float32"))
+        layer = BandRMS(band_regularizer=keras.regularizers.L1(1e-4))
+        layer(x)
+        rebuilt = BandRMS.from_config(layer.get_config())
+        rebuilt(x)
+        assert isinstance(rebuilt.band_regularizer, keras.regularizers.Regularizer)
+        # second get_config must not raise (the bug serialized a dict here)
+        assert rebuilt.get_config()["band_regularizer"] is not None
+
+    def test_none_defaults_to_l2(self):
+        layer = BandRMS()
+        assert isinstance(layer.band_regularizer, keras.regularizers.L2)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

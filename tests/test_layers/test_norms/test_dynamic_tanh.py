@@ -140,8 +140,10 @@ class TestDynamicTanh:
         layer = DynamicTanh(axis=[-2, -1])
         _ = layer(input_tensor)
 
-        # After build, axes should be converted to positive
-        assert layer.axis == [2, 3]  # -2 -> 2, -1 -> 3 for 4D tensor
+        # build() resolves positive axes into _norm_axis; self.axis keeps the
+        # constructor value (build-state-independent get_config).
+        assert layer._norm_axis == [2, 3]  # -2 -> 2, -1 -> 3 for 4D tensor
+        assert layer.axis == [-2, -1]
 
     def test_forward_pass_functionality(self):
         """Test forward pass with controlled inputs."""
@@ -232,10 +234,11 @@ class TestDynamicTanh:
             assert not np.any(np.isnan(output.numpy()))
             assert not np.any(np.isinf(output.numpy()))
 
-            # Check that axes were normalized correctly
+            # Check that axes were normalized correctly into _norm_axis (self.axis
+            # keeps the constructor value).
             expected_axes = axis_config if isinstance(axis_config, list) else [axis_config]
             expected_axes = [ax if ax >= 0 else len(input_shape) + ax for ax in expected_axes]
-            assert layer.axis == expected_axes
+            assert layer._norm_axis == expected_axes
 
     def test_mathematical_properties(self):
         """Test mathematical properties of the DynamicTanh layer."""
@@ -716,8 +719,9 @@ class TestDynamicTanhEdgeCases:
         assert output.shape == input_tensor.shape
         assert not np.any(np.isnan(output.numpy()))
 
-        # Check that axis was normalized correctly (should be [3, 4] for 5D tensor)
-        assert layer.axis == [3, 4]
+        # Check that axis was normalized correctly into _norm_axis (should be
+        # [3, 4] for 5D tensor); self.axis keeps the constructor value.
+        assert layer._norm_axis == [3, 4]
 
     @pytest.fixture
     def input_tensor(self):
@@ -793,6 +797,28 @@ class TestDynamicTanhIntegration:
     def input_tensor(self):
         """Create a test input tensor for integration tests."""
         return np.random.normal(0, 1, (4, 32)).astype(np.float32)
+
+
+class TestDynamicTanhAxisBuildIndependence:
+    """Pins B4 (plan_2026-06-15_2485b951): build() must NOT mutate self.axis;
+    get_config must serialize the constructor axis, not the build-normalized one."""
+
+    def test_axis_unchanged_after_build(self):
+        x = np.random.normal(0, 1, (2, 3, 4, 8)).astype(np.float32)
+        layer = DynamicTanh(axis=[-1, -2])
+        layer(x)  # triggers build
+        assert layer.axis == [-1, -2], layer.axis
+        assert layer.get_config()["axis"] == [-1, -2]
+
+    def test_default_axis_roundtrip(self):
+        x = np.random.normal(0, 1, (4, 8)).astype(np.float32)
+        layer = DynamicTanh()
+        y1 = keras.ops.convert_to_numpy(layer(x))
+        rebuilt = DynamicTanh.from_config(layer.get_config())
+        assert rebuilt.get_config()["axis"] == [-1]
+        # rebuilt forward must reproduce the original (default-init) output
+        y2 = keras.ops.convert_to_numpy(rebuilt(x))
+        np.testing.assert_allclose(y1, y2, atol=1e-6)
 
 
 if __name__ == '__main__':

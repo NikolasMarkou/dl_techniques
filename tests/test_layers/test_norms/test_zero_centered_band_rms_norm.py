@@ -450,5 +450,24 @@ def test_differs_from_band_rms_on_nonzero_mean(sample_inputs_non_zero_mean) -> N
     )
 
 
+class TestZCBandRMSRegularizerRoundTrip:
+    """Pins B3 (plan_2026-06-15_2485b951): custom band_regularizer survives
+    deserialization as a Regularizer object; None still defaults to L2."""
+
+    def test_custom_regularizer_double_roundtrip(self):
+        x = np.random.randn(4, 32).astype("float32")
+        layer = ZeroCenteredBandRMSNorm(band_regularizer=keras.regularizers.L1(1e-4))
+        layer(x)
+        rebuilt = ZeroCenteredBandRMSNorm.from_config(layer.get_config())
+        rebuilt(x)
+        assert isinstance(rebuilt.band_regularizer, keras.regularizers.Regularizer)
+        assert rebuilt.get_config()["band_regularizer"] is not None
+
+    def test_none_defaults_to_l2(self):
+        assert isinstance(
+            ZeroCenteredBandRMSNorm().band_regularizer, keras.regularizers.L2
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
