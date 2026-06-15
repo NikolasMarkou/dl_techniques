@@ -84,6 +84,22 @@ from typing import List, Optional, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.layers.pixel_unshuffle import PixelShuffle2D
+
+
+# ---------------------------------------------------------------------
+
+
+def _add_list(tensors: List[Any]) -> Any:
+    """Element-wise sum of a non-empty list of tensors.
+
+    Backend-agnostic replacement for the nonexistent ``keras.ops.add_n``
+    (absent in Keras 3.8). Folds the list with ``keras.ops.add``.
+    """
+    acc = tensors[0]
+    for t in tensors[1:]:
+        acc = ops.add(acc, t)
+    return acc
 
 # ---------------------------------------------------------------------
 
@@ -852,7 +868,7 @@ class DarkIREncoderBlock(keras.layers.Layer):
         x = self.conv1(x)
 
         # Sum all parallel branches
-        z = ops.add_n([branch(x) for branch in self.branches])
+        z = _add_list([branch(x) for branch in self.branches])
 
         # SimpleGate activation
         z = self.sg1(z)
@@ -1235,7 +1251,7 @@ class DarkIRDecoderBlock(keras.layers.Layer):
         x = self.extra_conv(x)
 
         # Sum all parallel branches
-        z = ops.add_n([branch(x) for branch in self.branches])
+        z = _add_list([branch(x) for branch in self.branches])
 
         # First SimpleGate activation
         z = self.sg1(z)
@@ -1529,15 +1545,24 @@ def create_darkir_model(
 
     # === Decoder Path ===
     for i, num_blocks in enumerate(dec_blk_nums):
-        # Upsample using PixelShuffle (DepthToSpace in Keras)
-        # First expand channels by 4 (2x2 upsampling)
+        # Upsample using PixelShuffle (depth->space).
+        # PixelShuffle2D(block_size=2) divides channels by 4 while doubling
+        # H,W. The decoder halves channels per stage (chan -> chan//2), so the
+        # pre-shuffle 1x1 conv must produce (chan//2)*4 == chan*2 filters so the
+        # post-shuffle channel count matches the popped encoder skip. (The
+        # original chan*4 left chan channels post-shuffle, mismatching the
+        # chan//2-channel skip in the Add below; never caught because the model
+        # was dead-on-forward via the nonexistent DepthToSpace. See D-002.)
         x = layers.Conv2D(
-            chan * 4,
+            chan * 2,
             kernel_size=1,
             use_bias=False,
             name=f"up_conv_{i}"
         )(x)
-        x = layers.DepthToSpace(block_size=2, name=f"pixel_shuffle_{i}")(x)
+        # DECISION plan_2026-06-15_00924f53/D-002: keras.layers.DepthToSpace
+        # does not exist in Keras 3.8; PixelShuffle2D is the NHWC depth->space
+        # replacement (inverse of PixelUnshuffle2D). See decisions.md D-002.
+        x = PixelShuffle2D(block_size=2, name=f"pixel_shuffle_{i}")(x)
 
         # Halve channels (due to 2x spatial increase)
         chan = chan // 2

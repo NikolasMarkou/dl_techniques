@@ -21,17 +21,12 @@ def _assert_finite(value):
 
 
 def test_smoke_build_and_forward():
-    try:
-        from dl_techniques.models.darkir.model import create_darkir_model
+    from dl_techniques.models.darkir.model import create_darkir_model
 
-        model = create_darkir_model(img_channels=3, width=16)
+    model = create_darkir_model(img_channels=3, width=16)
 
-        images = np.random.rand(2, 32, 32, 3).astype("float32")
-        out = model(images, training=False)
-    except Exception as exc:  # noqa: BLE001
-        pytest.xfail(
-            f"darkir build/forward failed: {type(exc).__name__}: {exc}"
-        )
+    images = np.random.rand(2, 32, 32, 3).astype("float32")
+    out = model(images, training=False)
 
     # Functional model may return a tensor or (with side loss) a tuple/list.
     if isinstance(out, (list, tuple)):

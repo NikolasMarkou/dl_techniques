@@ -189,3 +189,75 @@ class PixelUnshuffle2D(keras.layers.Layer):
 
 
 # ---------------------------------------------------------------------
+
+
+# DECISION plan_2026-06-15_00924f53/D-002: keras.layers.DepthToSpace and
+# keras.ops(.nn).depth_to_space do NOT exist in Keras 3.8; this is the NHWC
+# pixel-shuffle (depth->space), the exact inverse of PixelUnshuffle2D. Do NOT
+# replace this with keras.layers.DepthToSpace / keras.ops.nn.depth_to_space
+# (neither symbol exists in this build) nor with a Lambda (breaks .keras
+# round-trip). The reshape->transpose(0,1,3,2,4,5)->reshape order is the
+# inverse of PixelUnshuffle2D.call and is pinned by the round-trip test in
+# tests/test_layers/test_pixel_shuffle_2d.py. See decisions.md D-002.
+@keras.saving.register_keras_serializable()
+class PixelShuffle2D(keras.layers.Layer):
+    """Lossless depth-to-space upsampling (pixel-shuffle), NHWC.
+
+    Rearranges the channel dimension into non-overlapping
+    ``block_size x block_size`` spatial blocks, mapping
+    ``(B, H, W, C) -> (B, H*block_size, W*block_size, C/block_size**2)``. The
+    rearrangement carries no parameters and preserves every input value. This
+    is the exact inverse of :class:`PixelUnshuffle2D` (space-to-depth): for
+    ``r = block_size``, ``PixelUnshuffle2D(scale=r)(PixelShuffle2D(r)(x)) == x``.
+
+    :param block_size: Upsampling factor for both spatial axes. The channel
+        dimension must be divisible by ``block_size**2``. Default ``2``.
+    :type block_size: int
+    :param kwargs: Additional keyword arguments for the Layer base class.
+
+    Example:
+
+    .. code-block:: python
+
+        x = keras.layers.Input(shape=(16, 16, 12))
+        # -> (None, 32, 32, 3)
+        y = PixelShuffle2D(block_size=2)(x)
+    """
+
+    def __init__(self, block_size: int = 2, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        if not isinstance(block_size, int) or block_size < 1:
+            raise ValueError(
+                f"block_size must be a positive integer, got {block_size!r}"
+            )
+        self.block_size = block_size
+
+    def call(self, inputs: Any, training: Optional[bool] = None) -> Any:
+        r = self.block_size
+        # Fully dynamic shape so symbolic build with None H/W is fine.
+        shape = ops.shape(inputs)
+        b, h, w, c = shape[0], shape[1], shape[2], shape[3]
+        # Inverse of PixelUnshuffle2D.call:
+        # (B, H, W, r*r*C') -> (B, H, r, W, r, C')
+        x = ops.reshape(inputs, (b, h, w, r, r, c // (r * r)))
+        # (B, H, r, W, r, C')  -- (0,1,3,2,4,5) is its own inverse
+        x = ops.transpose(x, (0, 1, 3, 2, 4, 5))
+        # (B, H*r, W*r, C')
+        x = ops.reshape(x, (b, h * r, w * r, c // (r * r)))
+        return x
+
+    def compute_output_shape(self, input_shape: Any) -> Any:
+        b, h, w, c = input_shape
+        r = self.block_size
+        new_h = None if h is None else h * r
+        new_w = None if w is None else w * r
+        new_c = None if c is None else c // (r * r)
+        return (b, new_h, new_w, new_c)
+
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        config.update({"block_size": self.block_size})
+        return config
+
+
+# ---------------------------------------------------------------------
