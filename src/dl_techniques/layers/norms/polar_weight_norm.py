@@ -231,6 +231,14 @@ class PolarWeightNorm(keras.layers.Layer):
     and encoding it, so a freshly built ``PolarWeightNorm`` reproduces a standard
     ``Dense`` kernel exactly; training then moves the radius/angle parameters.
 
+    .. note::
+        ``build()`` materializes the seed kernel on the host (NumPy) to compute the
+        initial radius/angles. This runs eagerly, as Keras ``build()`` always does in
+        the Functional/Sequential APIs and ``model.fit`` (build happens before tracing).
+        The forward ``call()`` is fully graph-safe. The only unsupported pattern is
+        wrapping an *unbuilt* instance directly in ``@tf.function``; build the layer
+        first (call it once eagerly, or use ``keras.Input``) before tracing.
+
     Args:
         units: Positive integer, output dimensionality.
         activation: Optional activation (name, callable, or None).

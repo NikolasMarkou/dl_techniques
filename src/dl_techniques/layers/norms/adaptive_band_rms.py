@@ -146,7 +146,7 @@ class AdaptiveBandRMS(keras.layers.Layer):
         super().__init__(**kwargs)
 
         # Validate inputs early
-        self._validate_inputs(max_band_width, epsilon)
+        self._validate_inputs(max_band_width, axis, epsilon)
 
         # Store ALL configuration - required for get_config()
         self.max_band_width = max_band_width
@@ -170,15 +170,23 @@ class AdaptiveBandRMS(keras.layers.Layer):
             f"epsilon={epsilon}"
         )
 
-    def _validate_inputs(self, max_band_width: float, epsilon: float) -> None:
+    def _validate_inputs(
+        self,
+        max_band_width: float,
+        axis: Union[int, Tuple[int, ...], List[int]],
+        epsilon: float,
+    ) -> None:
         """
         Validate initialization parameters.
 
         :param max_band_width: Maximum deviation from unit normalization.
         :type max_band_width: float
+        :param axis: Axis/axes over which to normalize.
+        :type axis: Union[int, Tuple[int, ...], List[int]]
         :param epsilon: Numerical stability constant.
         :type epsilon: float
-        :raises ValueError: If parameters are invalid.
+        :raises ValueError: If max_band_width or epsilon is invalid.
+        :raises TypeError: If axis is not an int or a sequence of ints.
         """
         if not 0 < max_band_width < 1:
             raise ValueError(
@@ -186,6 +194,15 @@ class AdaptiveBandRMS(keras.layers.Layer):
             )
         if epsilon <= 0:
             raise ValueError(f"epsilon must be positive, got {epsilon}")
+        if isinstance(axis, (list, tuple)):
+            if not all(isinstance(ax, int) for ax in axis):
+                raise TypeError(
+                    f"All elements in axis must be integers, got {axis}"
+                )
+        elif not isinstance(axis, int):
+            raise TypeError(
+                f"axis must be int or tuple of ints, got {type(axis)}"
+            )
 
     def _compute_param_shape_and_axes(
         self,
@@ -249,6 +266,12 @@ class AdaptiveBandRMS(keras.layers.Layer):
 
         for i in range(1, input_rank):  # Skip batch dimension
             if i in normalized_axes:
+                if input_shape[i] is None:
+                    raise ValueError(
+                        f"Normalized axis {i} has an undefined (None) size; "
+                        f"AdaptiveBandRMS needs a static dimension to size its "
+                        f"scaling Dense layer. Got input_shape={input_shape}."
+                    )
                 param_shape.append(input_shape[i])
                 scaling_axes.append(i)
             else:
@@ -334,16 +357,13 @@ class AdaptiveBandRMS(keras.layers.Layer):
 
     def _reshape_scaling_factors(
         self,
-        scaling_factors: keras.KerasTensor,
-        input_shape: Tuple[Optional[int], ...]
+        scaling_factors: keras.KerasTensor
     ) -> keras.KerasTensor:
         """
         Reshape scaling factors from dense layer for proper broadcasting.
 
         :param scaling_factors: Output from dense layer, shape [batch, num_params].
         :type scaling_factors: keras.KerasTensor
-        :param input_shape: Original input tensor shape.
-        :type input_shape: Tuple[Optional[int], ...]
         :return: Reshaped scaling factors ready for element-wise multiplication.
         :rtype: keras.KerasTensor
         """
@@ -400,7 +420,7 @@ class AdaptiveBandRMS(keras.layers.Layer):
         )
 
         # Step 6: Reshape for broadcasting and apply adaptive scaling
-        scale_factors = self._reshape_scaling_factors(scale_factors, inputs.shape)
+        scale_factors = self._reshape_scaling_factors(scale_factors)
         output = normalized * ops.cast(scale_factors, "float32")
 
         # Cast back to original dtype

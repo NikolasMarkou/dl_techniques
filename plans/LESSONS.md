@@ -99,6 +99,8 @@
 - **`keras.ops.fft` surface is narrow.** Available: `fft/fft2/ifft2/rfft/irfft/real/imag`. NOT available: `rfft2/irfft2/angle/complex`.
 - **`keras.ops.stop_gradient` is a FUNCTION, not a context manager.**
 - **A missing `return config` in `get_config` returns None silently.** Every new-layer test MUST assert `get_config`/`from_config` directly.
+- **`compute_output_shape` is a silent functional-API bug surface — test it against ACTUAL `call` output.** keepdims reductions return `[...,1]` (not the reduced shape, not the full input shape); multi-output layers must declare a tuple. Tests that only exercise `call()` pass while shape metadata is wrong. (norms `DMLPlus(model_type='center')`: declared `(B,C)`, actual `(B,1)`.)
+- **Config-factory `validate` and `create` must be cross-checked per-key against the REAL ctor signature.** Whitelist drift is recurring: a first sweep fixed some keys, a second pass found more (`dynamic_tanh` missing 5 ctor params; `max_band_width` missing its `<1` upper bound while classes enforce `0<x<1`). When fixing a factory whitelist, enumerate EVERY key and BOTH bounds, and add a `validate`==`create` agreement test.
 - **Compute STATIC scalars (e.g. attention `scale = 1/sqrt(head_dim)`) with stdlib `math.*`, NOT `keras.ops.*`.**
 - **`keras.ops.random.uniform` does NOT exist in Keras 3.8.** Random ops live under `keras.random.*`.
 - **`while True` + `if <traced_tensor> < eps:` is graph-broken.** Replace with bounded `for range(n)`.

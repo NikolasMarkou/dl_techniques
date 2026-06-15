@@ -21,7 +21,9 @@ This implementation is generalized to handle 2D, 3D, and 4D tensors.
 
 ## Mathematical Formulation:
 For an input X with rank N:
-1. Compute feature norm: N_c = ||X_c||_2 over axes (1, ..., N-2) for each channel c.
+1. Compute feature norm: N_c = sqrt(sum(X_c^2) + eps) over axes (1, ..., N-2) for each
+   channel c (a small ``eps`` is added inside the sqrt for numerical stability, so N_c
+   is an eps-floored L2 norm rather than the exact ||X_c||_2).
 2. Compute global mean: μ = mean(N_c) across all channels.
 3. Normalize: N'_c = N_c / (μ + ε).
 4. Apply learnable parameters: Y = X + γ * (X ⊙ N') + β,
@@ -112,7 +114,10 @@ class GlobalResponseNormalization(keras.layers.Layer):
         Defaults to 1e-6.
     :type eps: float
     :param gamma_initializer: Initializer for gamma (scale) weights.
-        Defaults to ``'ones'``.
+        Defaults to ``'ones'``. NOTE: the ConvNeXt V2 paper initializes gamma to
+        zero (with beta zero) so GRN is an identity at init; this implementation
+        defaults to ``'ones'``. Pass ``gamma_initializer='zeros'`` to reproduce
+        the paper's identity-at-init behavior.
     :type gamma_initializer: Union[str, keras.initializers.Initializer]
     :param beta_initializer: Initializer for beta (bias) weights.
         Defaults to ``'zeros'``.

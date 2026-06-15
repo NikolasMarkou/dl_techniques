@@ -8,7 +8,7 @@ applies a learned scaling factor bounded within a specified band around 1.0.
 Mathematical Operation:
 1. Normalize input to unit L2 norm: x_norm = x / ||x||_2
 2. Apply LayerNormalization to the L2 norms: norm_scaled = LayerNorm(||x||_2)
-3. Apply tanh activation to bound the normalized norms: bounded = tanh(norm_scaled)
+3. Apply tanh activation to bound the normalized norms: bounded = tanh(4 * norm_scaled)
 4. Scale to [1-max_band_width, 1]: scale = max_band_width * (bounded + 1)/2 + (1 - max_band_width)
 5. Apply scaling: output = x_norm * scale
 

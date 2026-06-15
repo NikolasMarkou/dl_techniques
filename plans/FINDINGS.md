@@ -36,6 +36,46 @@
 - **`current_phase` / `_global_step` counters**: `add_weight(trainable=False, dtype="float32")` — int32 fails CPU/GPU device placement.
 <!-- /COMPRESSED-SUMMARY -->
 
+## plan_2026-06-15_3028e33c
+### Index
+
+| # | Finding | Severity | Source+verify | Decision |
+|---|---------|----------|---------------|----------|
+| A1 | `DMLPlus.compute_output_shape` center model returns `input_shape` `(B,C)` for the norm_factor output, but `call` returns keepdims `norm` `(B,1)`. REPRO: declared `(8,5)` vs actual `(8,1)`. max_logit_norm.py:520. | [BUG] | logit-family#1, repro CONFIRMED | FIX (A) |
+| A2 | Factory `get_normalization_info['dynamic_tanh']` lists only 3 params; DynamicTanh ctor accepts 5 more (bias_initializer, kernel_regularizer, bias_regularizer, kernel_constraint, bias_constraint). `validate` REJECTS what `create` ACCEPTS. factory.py:280 vs dynamic_tanh.py:106-110. | [BUG] | factory-wiring#F-1, repro CONFIRMED | FIX (A) |
+| A3 | Factory validate `max_band_width` checks only `<=0`; all 5 band classes enforce `0<x<1`. REPRO: `validate(band_rms, max_band_width=1.5)` accepts, `create` rejects "must be between 0 and 1". factory.py:322. Fixing + aligning message also makes README:348 (F-3) correct. | [BUG] | factory-wiring#F-2/F-3, repro CONFIRMED | FIX (A) |
+| B1 | `AdaptiveBandRMS` + `ZeroCenteredAdaptiveBandRMS`: a `None` dim on a normalized axis is silently skipped in num_params (`if dim is not None`), yielding wrong Dense units + a `None` in reshape target. adaptive_band_rms.py:280-283 + 351; zero_centered_adaptive_band_rms_norm.py:241-249. Should fail-loud at build. | [BUG/RISK] | rms-family#2, source CONFIRMED | FIX (B) |
+| B2 | `AdaptiveBandRMS._reshape_scaling_factors(self, scaling_factors, input_shape)` — `input_shape` is dead (only `self._param_shape` used); sibling omits it. adaptive_band_rms.py:335-339 + call 403. | [cleanup] | rms-family#1, source CONFIRMED | FIX (B) |
+| B3 | Axis-type validation absent in `BandRMS` + `AdaptiveBandRMS` (`_validate_inputs`); the other 4 RMS classes have it. band_rms.py:181-196, adaptive_band_rms.py:173-188. Contract asymmetry. | [RISK] | rms-family#5, source CONFIRMED | FIX (B) |
+| C1 | logit_norm.py:6 module docstring still says "**learned** temperature" (pass-1 fixed class docstring/comment, missed module line). | [DOC] | logit-family#2 | FIX (C) |
+| C2 | `DecoupledMaxLogit` `constant` called "learnable weighting"/"Weight" (docstrings 182-183, 228, 249, 275) but is a plain float (266); inline comment 321 says "fixed hyperparameter". | [DOC] | logit-family#3 | FIX (C) |
+| C3 | band_logit_norm.py:11 module docstring step 3 `tanh(norm_scaled)` omits the `4×` (code:217 `tanh(4*x)`; class docstring+diagram already correct). | [DOC] | logit-family#4 | FIX (C) |
+| C4 | global_response_norm.py docstring step1 says `N_c=||X_c||_2` (exact) but code (247) computes `sqrt(sum(x²)+eps)`. | [DOC] | other-layers#3 | FIX (C) |
+| C5 | README param lists: dynamic_tanh (F-4) omits 5 params; global_response_norm (F-5) omits gamma/beta/activity_regularizer. README.md:267, 222. | [DOC] | factory-wiring#F-4/F-5 | FIX (C) |
+| C6 | Factory keys `dml_plus_center` + `decoupled_max_logit` return `(score, norm)` TUPLES, not a single tensor — undocumented in factory/README. | [DOC] | factory-wiring#bonus | FIX (C) |
+
+### Deferred / WON'T-FIX (judgment — behavior-change or by-design, matching first-pass D-002/D-003/D-004 precedent)
+
+| # | Finding | Why NOT changing |
+|---|---------|------------------|
+| D1 | GRN `gamma_initializer='ones'` diverges from ConvNeXt V2 paper (gamma=0 identity-at-init). global_response_norm.py:135. | 3 production model families (convnext_v2_block, bfconvunext, convunext) use the DEFAULT. Changing it alters their training dynamics. Per first-pass D-002 precedent: preserve production behavior, DOCUMENT the divergence + how to get paper init. → DOC only (no default change). |
+| D2 | `PolarWeightNorm.build()` calls `ops.convert_to_numpy(...)` (314,324); bare `@tf.function` on an UNBUILT layer fails. | `build()` is eager BY DESIGN in Keras (creates weights); the numpy seeding is legitimate one-time work; the `call`/forward path is fully graph-safe (verified). All standard workflows (Functional/Sequential/`model.fit`) pre-build before trace. Per LESSONS "don't add eager guards when host materialization is necessary". → DOC note only (must build before tracing). |
+| D3 | Epsilon strategy floor(`maximum`) vs additive(`+eps`) across logit/maxlogit families; regularizer-default L2(1e-5) present in band classes but not adaptive classes. | Unifying either = a numerical/training behavior change to production-used layers. → acknowledge; no code change (out of "fix-don't-break" scope). |
+| D4 | `_scaling_axes` computed+stored but unused in both adaptive classes (dead scaffolding). | Build-time attr, not serialized; removal is optional cleanup folded into B1/B2 only if low-risk; else leave. |
+
+### Key Constraints
+
+- **[HARD] No eager / graph-compatible.** VERIFIED: all `call()` paths across 16 types are graph-safe (no `.numpy()`/`int(tensor)`/dynamic-dim loops). The only eager surfaced (D2 PolarWeightNorm `build()`) is build-time-by-design, not a call-path break.
+- **[HARD] Don't break production behavior.** GRN gamma default (D1), epsilon strategy + regularizer defaults (D3) are behavior-changing → DOC/WON'T-FIX, NOT code changes. Mirrors first pass's D-002.
+- **[HARD] Never re-flag first-pass WON'T-FIX** (BandLogitNorm degenerate math, factory epsilon=1e-6 divergence, PolarWeightNorm-not-factory-registered) — none re-flagged.
+- **[SOFT] Same contract across siblings**: axis validation (B3), None-dim fail-loud (B1), `_reshape` signature (B2) bring divergent RMS classes into line.
+- **Baseline: 424 norms tests pass.** Fixes must keep all green + add targeted regressions.
+
+### Corrections
+
+- **[CORRECTED iter-0]** other-layers#1 flagged GRN `gamma_initializer='ones'` as a **[BUG]**. Downgraded to **[DOC]/WON'T-CHANGE-DEFAULT**: it IS a divergence from the cited ConvNeXt V2 paper, but 3 production model families rely on the current default; changing it is a training-behavior change out of "fix-don't-break" scope. Documenting the divergence instead (first-pass D-002 precedent).
+- **[CORRECTED iter-0]** other-layers#2 flagged PolarWeightNorm `build()` `convert_to_numpy` as **[EAGER]** hard-constraint break. Downgraded to **DOC/by-design**: `build()` runs eagerly in all standard Keras workflows; the seeding is necessary one-time host work; the forward path is graph-safe. Only an unsupported usage (bare `@tf.function` on an unbuilt layer) fails. Per LESSONS, not an over-flag to fix.
+
 ## plan_2026-06-15_c8f516c3
 ### Index
 
@@ -157,66 +197,3 @@ GlobalResponseNormalization, DynamicTanh, PolarWeightNorm.
 
 ### Corrections
 *Append [CORRECTED iter-N] entries here when earlier findings prove wrong.*
-
-## plan_2026-06-15_9dbb87c1
-### Index
-
-| ID | Topic | File | Status |
-|----|-------|------|--------|
-| F1 | Factory/spine wiring + `__init__` defects | findings/spine-factory.md | OPEN |
-| F2 | RoPE family review (rotary/dual/continuous/multi_axis) | findings/rope-family.md | pending explorer |
-| F3 | Continuous/scalar/positional family review | findings/continuous-positional.md | pending explorer |
-| F4 | BERT-family review (bert/modern_bert/albert) | findings/bert-family.md | pending explorer |
-| F5 | Patch + hierarchical-codebook review | findings/patch-codebook.md | pending explorer |
-
-### Key Constraints
-
-### HARD
-- Keras 3.8 / TF 2.18; `keras.ops` only (no raw TF in library code, narrow documented exceptions allowed).
-- **Graph-compatible**: NO eager ops reachable from `call()` (no `convert_to_numpy`, `.numpy()`, `float(tensor)` on traced tensors). User explicit: "no EAGER SHIT, all must be graph compatible".
-- Canonical Keras-3 lifecycle: `@register_keras_serializable`, `None`-sentinel ctor for build-time dims, `if self.built: return` FIRST line of `build()`, explicit sublayer `.build()` in parent `build()`, full `get_config`/`from_config` round-trip, `compute_output_shape`.
-- `training is True` Python identity idiom (never `if training:` / `if training is not False:`).
-- Scope: FIX existing functionality only — NO new functionality/expansion. Target DEFERRED items.
-- Work autonomously, no questions.
-
-### SOFT
-- Keras guide: `research/2026_keras_custom_models_instructions.md` (authoritative).
-- Docstrings Google-style; logging via `dl_techniques.utils.logger` only.
-
-### GHOST (to verify)
-- README.md + layers/CLAUDE.md describe an older roster (mention ModernBERT but NOT albert/hierarchical_codebook/sine_2d/scalar_sinusoidal/mrope) — doc drift, not a code constraint.
-
-### Preliminary direct-read facts (orchestrator, pre-explorer)
-
-- **14 layer files** in `src/dl_techniques/layers/embedding/` + `factory.py` + `__init__.py` + `README.md`.
-- **Factory registry = 10 keys**: patch_1d, patch_2d, positional_learned, rope, dual_rope, continuous_rope, continuous_sincos, bert_embeddings, scalar_sinusoidal, mrope_ideogram4.
-- **NOT factory-registered (4 classes)**: `AlbertFactorizedEmbedding`, `ModernBertEmbeddings`, `HierarchicalCodebookEmbedding`, `PositionalEmbeddingSine2D`. (Verify whether each SHOULD be — standard call sig? — or is intentionally direct-import.)
-- **`__init__.py` `__all__` BUG**: `__all__ = [create_embedding_from_config, create_embedding_layer, validate_embedding_config]` lists the function OBJECTS, not their string names. `__all__` must be a list of `str`. Real defect (breaks `from ... import *` / tooling).
-- **`__init__.py` does NOT export layer classes** (only 3 factory funcs). Consistent with "import from submodules" convention, but factory funcs are the only re-exports.
-- **EAGER SUSPECTS (graph-breaking, prime targets)**:
-  - `continuous_sin_cos_embedding.py:237: if ops.convert_to_numpy(min_coords) < 0:` — if reachable from `call()` under `assert_positive`, breaks graph trace.
-  - `continuous_rope_embedding.py:224: if ops.convert_to_numpy(min_coords) < 0:` — same pattern.
-  - (np.arange/np.eye in `build()`/`__init__` are trace-time constant folding — graph-SAFE, not targets.)
-- **Test coverage GAPS** (no test file): `continuous_rope_embedding`, `continuous_sin_cos_embedding`, `positional_embedding_sine_2d`. Factory has only `test_factory_ideogram4.py` (no general factory test covering all 10 keys / param passthrough).
-- Existing tests present for: dual_rotary, patch, hierarchical_codebook, modern_bert, multi_axis_rope, rotary_position, scalar_sinusoidal, positional_embedding, albert_factorized, bert.
-
-### Verified-by-orchestrator (direct source read, supersedes explorer claims)
-
-- **[REFUTED] bert_embeddings.py:222 was NOT a CRITICAL bug.** `_create_normalization_layer(self, name)` takes `name` as the *sublayer name string*; its body (lines 241-265) branches on `self.normalization_type` and returns LayerNorm/RMSNorm/BandRMS/BatchNorm accordingly. Passing `"layer_norm"` is just the sublayer's `.name`. `normalization_type` IS honored. The only cosmetic quirk: the sublayer is always named "layer_norm" even when it is an RMSNorm. NOT a defect. (bert build() also correctly has `if self.built: return` at :275 + explicit sublayer builds.)
-- **[VERIFIED] continuous_sincos `compute_output_shape` returns `dim` and that is CORRECT.** Math: merged trailing = ndim·effective_dim_per_wave = (dim−padding); plus `padding` zero cols = dim. No fix needed.
-- **[VERIFIED] continuous_rope `compute_output_shape` returns `dim` but ACTUAL output is `ndim·(effective_dim_per_wave//2) + padding//2 = dim/2`** (phase angles, no sin/cos doubling). REAL bug — `compute_output_shape` over-reports by 2x. Docstring also says `(..., dim)`. ZERO callers in repo (safe to fix). Fix = correct compute_output_shape + docstring to actual phase width; do NOT change call() (dim/2 phases is conventional RoPE design).
-- **[VERIFIED] `__init__.py` `__all__` lists function OBJECTS not strings** — real defect (`__all__ = [create_embedding_from_config, ...]`).
-- **[VERIFIED] eager graph-breaks** continuous_sin_cos:237 + continuous_rope:224 (`ops.convert_to_numpy` in call() under default `assert_positive=True`); both are pure advisory `logger.warning` blocks with no functional effect → graph-safe fix = delete the block, keep `assert_positive` param accepted+serialized for config compat.
-- **[DECISION] multi_axis_rope.py:56 `package="dl_techniques.layers"` — do NOT "align".** Changing a `register_keras_serializable` package= string changes the registration KEY and breaks deserialization of already-saved `.keras` models (attention-plan C2 lesson). Leave as-is.
-
-### Real callers (grep-verified)
-- `ContinuousRoPE`: **ZERO callers** anywhere in src/.
-- `ContinuousSinCosEmbed`: text_decoder.py, text_encoder.py (via factory 'continuous_sincos'), supernode_pooling.py (direct). Eager bug affects real callers.
-- `PositionEmbeddingSine2D`: detr/model.py, video_jepa/encoder.py (direct import). Class name is `PositionEmbeddingSine2D`.
-- `ModernBertEmbeddings`: modern_bert/modern_bert.py (direct import).
-- `AlbertFactorizedEmbedding`: no src callers (standalone).
-
-### Corrections
-*Append [CORRECTED iter-N] entries here when earlier findings prove wrong.*
-</content>
-</invoke>

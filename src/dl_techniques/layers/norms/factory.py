@@ -277,7 +277,9 @@ def get_normalization_info() -> Dict[str, Dict[str, Any]]:
         },
         'dynamic_tanh': {
             'description': 'Dynamic Tanh normalization for normalization-free transformers',
-            'parameters': ['axis', 'alpha_init_value', 'kernel_initializer'],
+            'parameters': ['axis', 'alpha_init_value', 'kernel_initializer',
+                           'bias_initializer', 'kernel_regularizer', 'bias_regularizer',
+                           'kernel_constraint', 'bias_constraint'],
             'use_case': 'Normalization-free transformer architectures'
         }
     }
@@ -319,8 +321,11 @@ def validate_normalization_config(
     if normalization_type in ['band_rms', 'adaptive_band_rms', 'band_logit_norm', 'zero_centered_band_rms_norm', 'zero_centered_adaptive_band_rms_norm']:
         if 'max_band_width' in kwargs:
             max_band_width = kwargs['max_band_width']
-            if not isinstance(max_band_width, (int, float)) or max_band_width <= 0:
-                raise ValueError("max_band_width must be a positive number")
+            if (not isinstance(max_band_width, (int, float))
+                    or max_band_width <= 0 or max_band_width >= 1):
+                raise ValueError(
+                    f"max_band_width must be between 0 and 1, got {max_band_width}"
+                )
 
     if normalization_type == 'logit_norm':
         if 'temperature' in kwargs:
