@@ -4,7 +4,7 @@ The `dl_techniques.layers.embedding` module provides a comprehensive collection 
 
 ## Overview
 
-This module includes eight distinct embedding layer types, covering patch tokenization, learned absolute positional encodings, various forms of Rotary Position Embeddings (RoPE), and BERT-style embeddings. All layers are designed for modern Keras 3.x compatibility with full serialization support and are accessible through a centralized factory system.
+This module includes thirteen factory-registered embedding layer types, covering patch tokenization, learned absolute positional encodings, fixed 2D sinusoidal encodings, various forms of Rotary Position Embeddings (RoPE), scalar/timestep sinusoidal embeddings, and BERT/ModernBERT/ALBERT-style token embeddings (plus one direct-import-only codebook embedding). All layers are designed for modern Keras 3.x compatibility with full serialization support and are accessible through a centralized factory system.
 
 ## Available Embedding Types
 
@@ -20,8 +20,15 @@ All layers in this module are supported by the factory system, which provides au
 | `continuous_rope`| `ContinuousRoPE` | RoPE extended for continuous multi-dimensional coordinates. | Positional encoding for data with spatial coordinates (e.g., 3D point clouds). |
 | `continuous_sincos`| `ContinuousSinCosEmbed`| Embeds continuous coordinates using sine/cosine functions. | Creating fixed, smooth positional representations for continuous data. |
 | `bert_embeddings` | `BertEmbeddings` | BERT embeddings combining word, position, and token type embeddings. | BERT-style language models with configurable normalization. |
+| `modern_bert_embeddings` | `ModernBertEmbeddings` | Word + token-type embeddings, normalized; no learned positional embedding (RoPE applied in attention). | ModernBERT-style encoders with rotary attention. |
+| `albert_factorized` | `AlbertFactorizedEmbedding` | ALBERT-style factorized embedding (vocab -> bottleneck -> hidden). | Parameter-efficient token embeddings. |
+| `positional_sine_2d` | `PositionEmbeddingSine2D` | Fixed 2D sinusoidal positional encoding. Emits **channels-first** `(B, 2*num_pos_feats, H, W)` — caller transposes as needed. | DETR / ViT detectors needing a non-learnable 2D positional grid. |
 | `scalar_sinusoidal` | `ScalarSinusoidalEmbedding` | Sinusoidal embedding of a scalar (e.g. diffusion time in `[0,1]`) followed by a SiLU MLP. | Timestep/scalar conditioning in diffusion / flow-matching models. |
 | `mrope_ideogram4` | `Ideogram4MRoPE` | 3D multi-axis (t/h/w) rotary position embedding with per-axis frequency-band interleave. | Image/text multimodal positional encoding (Ideogram4-style DiT). |
+
+> **Direct-import only (not factory-registered):** `HierarchicalCodebookEmbedding`
+> (bit-chunk factorized vocabulary embedding) — construct it directly via
+> `from dl_techniques.layers.embedding.hierarchical_codebook_embedding import HierarchicalCodebookEmbedding`.
 
 ## Factory Interface
 

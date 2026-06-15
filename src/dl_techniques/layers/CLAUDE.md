@@ -16,7 +16,7 @@ MLP, SwiGLU, GeGLU, GLU, OrthoGLU, gated MLP, power MLP, counting FFN, diff FFN,
 RMS norm, zero-centered RMS, band RMS, adaptive band RMS, logit norm, max logit norm, band logit norm, dynamic tanh, global response norm. Includes `factory.py`. Also hosts `PolarWeightNorm` — a polar-coordinate *weight* reparameterization (radius + hierarchical angles, exact per-unit norm; generalizes Weight Normalization). Not factory-registered; see the `PolarWeightNorm` module docstring in `norms/polar_weight_norm.py`.
 
 ### Embeddings (`embedding/`)
-Patch embedding, positional (learned, sine 2D), rotary position (RoPE), dual rotary, continuous RoPE, continuous sin/cos, BERT embeddings, ModernBERT embeddings. Includes `factory.py`.
+Patch embedding (1D/2D), learned positional, fixed 2D sinusoidal positional, rotary position (RoPE), dual rotary, continuous RoPE, continuous sin/cos, scalar/timestep sinusoidal, multi-axis (t/h/w) RoPE, BERT / ModernBERT / ALBERT-factorized token embeddings. Includes `factory.py` with **13 registered keys** (`patch_1d`, `patch_2d`, `positional_learned`, `rope`, `dual_rope`, `continuous_rope`, `continuous_sincos`, `bert_embeddings`, `modern_bert_embeddings`, `albert_factorized`, `positional_sine_2d`, `scalar_sinusoidal`, `mrope_ideogram4`). `HierarchicalCodebookEmbedding` is direct-import-only (not factory-registered). All `call()` paths are graph-safe (no eager ops); `positional_sine_2d` emits channels-first `(B, 2*num_pos_feats, H, W)`.
 
 ### Mixture of Experts (`moe/`)
 Full MoE framework: `config.py` (MoE configuration), `experts.py` (expert networks), `gating.py` (routing/gating), `layer.py` (main MoE layer), `integration.py` (integration helpers).
