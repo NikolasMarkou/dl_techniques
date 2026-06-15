@@ -56,6 +56,7 @@ from typing import Optional, Union, Dict, Any, Tuple, Literal
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.embedding import create_embedding_layer
+from dl_techniques.layers.embedding.class_token import ClassTokenPrepend
 from dl_techniques.layers.attention import create_attention_layer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.stochastic_depth import StochasticDepth
@@ -138,7 +139,7 @@ class DINOv2Block(keras.layers.Layer):
             dim: int,
             num_heads: int,
             mlp_ratio: float = 4.0,
-            attention_type: str = 'multi_head_attention',
+            attention_type: str = 'multi_head',
             ffn_type: str = 'mlp',
             normalization_type: str = 'layer_norm',
             qkv_bias: bool = True,
@@ -195,8 +196,8 @@ class DINOv2Block(keras.layers.Layer):
             'dropout_rate': self.attention_dropout
         }
 
-        if self.attention_type == 'multi_head_attention':
-            attention_args['embed_dim'] = self.dim
+        if self.attention_type == 'multi_head':
+            attention_args['dim'] = self.dim
             attention_args['use_bias'] = self.qkv_bias
         else:
             attention_args['dim'] = self.dim
@@ -471,7 +472,7 @@ class DINOv2VisionTransformer(keras.Model):
             stochastic_depth_rate: float = 0.0,  # Renamed from drop_path_rate
             drop_path_uniform: bool = False,
             init_values: Optional[float] = None,
-            attention_type: str = 'multi_head_attention',
+            attention_type: str = 'multi_head',
             ffn_type: str = 'mlp',
             normalization_type: str = 'layer_norm',
             num_register_tokens: int = 0,
@@ -533,6 +534,35 @@ class DINOv2VisionTransformer(keras.Model):
         self.patch_embed = None
         self.pos_embed = None
         self.norm = None
+
+        # DECISION plan_2026-06-15_e2759fbc/D-001: mask-token projection is hoisted to
+        # __init__ (NOT instantiated inside the apply_masks Lambda). A weight-creating
+        # layer created during functional-graph trace yields untracked/uncreatable
+        # weights. Do NOT move this Dense back into the Lambda body. See decisions.md D-001.
+        self.mask_token_projection = layers.Dense(
+            self.embed_dim,
+            use_bias=False,
+            kernel_initializer='zeros',
+            name='mask_token_projection'
+        )
+
+        # DECISION plan_2026-06-15_e2759fbc/D-002: CLS token is a real learnable token via
+        # ClassTokenPrepend (owns its (1,1,dim) weight in build()), NOT a Dense-on-ones
+        # projection hack. ClassTokenPrepend is safe to assign pre-super (lazy build).
+        # Do NOT replace with a Dense(name='cls_token_projection') on ones. See decisions.md D-002.
+        self.cls_token_layer = ClassTokenPrepend(name="cls_token")
+
+        # DECISION plan_2026-06-15_e2759fbc/D-003: register-token projection hoisted to
+        # __init__ (guarded by num_register_tokens>0), same no-weight-creating-layer-in-Lambda
+        # rule as D-001. Insertion uses Concatenate, not a Lambda. See decisions.md D-003.
+        self.register_token_projection = None
+        if self.num_register_tokens > 0:
+            self.register_token_projection = layers.Dense(
+                self.embed_dim,
+                use_bias=False,
+                kernel_initializer=initializers.TruncatedNormal(stddev=1e-6),
+                name='register_token_projection'
+            )
 
         # Create inputs and build model using functional API
         inputs = keras.Input(shape=input_shape, name="input_images")
@@ -608,37 +638,33 @@ class DINOv2VisionTransformer(keras.Model):
             masks: keras.KerasTensor
     ) -> keras.KerasTensor:
         """Build token preparation with CLS, register tokens, and positional embeddings."""
-        batch_size = keras.ops.shape(patch_embeddings)[0]
-
-        # Apply masking if provided (for iBOT)
-        def apply_masks(args):
-            patch_emb, mask_tensor = args
-            # Create mask token (learnable parameter will be added as layer)
-            mask_token_layer = layers.Dense(
-                self.embed_dim,
-                use_bias=False,
-                kernel_initializer='zeros',
-                name='mask_token_projection'
-            )
-            mask_tokens = mask_token_layer(keras.ops.ones((batch_size, self.num_patches, 1)))
-
-            mask_expanded = keras.ops.expand_dims(mask_tensor, -1)  # (B, N, 1)
-            return keras.ops.where(mask_expanded, mask_tokens, patch_emb)
-
-        x = layers.Lambda(apply_masks, name='apply_masks')([patch_embeddings, masks])
-
-        # Add CLS token (learnable parameter)
-        cls_token_layer = layers.Dense(
-            self.embed_dim,
-            use_bias=False,
-            kernel_initializer=initializers.TruncatedNormal(stddev=1e-6),
-            name='cls_token_projection'
+        # B1: apply iBOT masking. The mask-token projection is the hoisted
+        # self.mask_token_projection (D-001); mask_tokens are computed OUTSIDE the Lambda
+        # so the Lambda body closes over NO weight-creating layer. The Lambda does only the
+        # elementwise select.
+        # DECISION plan_2026-06-15_e2759fbc/D-001: compute mask_tokens via the hoisted Dense
+        # OUTSIDE the Lambda; the Lambda is a pure keras.ops.where. Do NOT instantiate a
+        # Dense inside apply_masks. Mask tokens use a batch dim of 1 (NOT a symbolic
+        # keras.ops.shape(x)[0], which is None at functional-trace time and fails an eager
+        # keras.ops.ones) and broadcast across the batch inside keras.ops.where. See
+        # decisions.md D-001.
+        mask_tokens = self.mask_token_projection(
+            keras.ops.ones((1, self.num_patches, 1))
         )
-        cls_tokens = cls_token_layer(keras.ops.ones((batch_size, 1, 1)))
+        x = layers.Lambda(
+            lambda a: keras.ops.where(keras.ops.expand_dims(a[1], -1), a[2], a[0]),
+            name='apply_masks'
+        )([patch_embeddings, masks, mask_tokens])
 
-        x = layers.Concatenate(axis=1, name='add_cls_token')([cls_tokens, x])
+        # B2: prepend a real learnable CLS token (B,N,D)->(B,N+1,D) via ClassTokenPrepend,
+        # after masking, before pos-embed.
+        # DECISION plan_2026-06-15_e2759fbc/D-002: use ClassTokenPrepend, not a Dense-on-ones
+        # hack. Do NOT reintroduce a Dense(name='cls_token_projection'). See decisions.md D-002.
+        x = self.cls_token_layer(x)
 
-        # Add positional embeddings
+        # B4/B7: positional embeddings. The weight is sized num_patches + num_tokens (CLS),
+        # so it accounts for the prepended CLS; PositionalEmbedding.call slices to the seq
+        # length. Variable-resolution interpolation is OUT OF SCOPE.
         pos_embed_seq_len = self.num_patches + self.num_tokens
         self.pos_embed = create_embedding_layer(
             'positional_learned',
@@ -647,91 +673,37 @@ class DINOv2VisionTransformer(keras.Model):
             name='pos_embed'
         )
 
-        # Create positional embedding function that handles interpolation
-        def add_pos_embed(x_with_cls):
-            H, W = keras.ops.shape(original_inputs)[1], keras.ops.shape(original_inputs)[2]
-            pos_embeddings = self._get_interpolated_pos_embed(x_with_cls, W, H)
-            return x_with_cls + pos_embeddings
+        # DECISION plan_2026-06-15_e2759fbc/D-004: flatten pos-embed to x = self.pos_embed(x).
+        # The deleted path nested a Lambda inside a Lambda (illegal layer-creation-in-trace),
+        # read the WRONG attribute self.pos_embed.pos_embed (correct is .pos_embedding), and
+        # ran a Python assert on a symbolic tensor (a trace-time no-op). Do NOT reintroduce
+        # _get_interpolated_pos_embed or an add_pos_embed Lambda; var-res is out of scope.
+        # See decisions.md D-004.
+        x = self.pos_embed(x)
 
-        x = layers.Lambda(add_pos_embed, name='add_pos_embed')(x)
-
-        # Add register tokens if configured
+        # B3: insert register tokens after CLS via Concatenate (NOT a Lambda). Cold path on
+        # the smoke (num_register_tokens=0).
+        # DECISION plan_2026-06-15_e2759fbc/D-003: reg_tokens via the hoisted Dense OUTSIDE any
+        # Lambda; insertion via Concatenate([cls, reg, rest]). Do NOT use a Lambda or an
+        # in-Lambda Dense for register tokens. See decisions.md D-003.
         if self.num_register_tokens > 0:
-            register_token_layer = layers.Dense(
-                self.embed_dim,
-                use_bias=False,
-                kernel_initializer=initializers.TruncatedNormal(stddev=1e-6),
-                name='register_token_projection'
+            reg_base = self.register_token_projection(
+                keras.ops.ones((1, self.num_register_tokens, 1))
             )
-            register_tokens = register_token_layer(
-                keras.ops.ones((batch_size, self.num_register_tokens, 1))
-            )
-
-            # Insert register tokens after CLS token
-            def insert_register_tokens(args):
-                x_tokens, reg_tokens = args
-                cls_token = x_tokens[:, :1]  # CLS token
-                patch_tokens = x_tokens[:, 1:]  # Patch tokens
-                return keras.ops.concatenate([cls_token, reg_tokens, patch_tokens], axis=1)
-
-            x = layers.Lambda(insert_register_tokens, name='add_register_tokens')([x, register_tokens])
+            # Broadcast reg tokens (1,R,D) to the runtime batch of x via a pure-op Lambda
+            # (no weights), so Concatenate sees a matching batch dim.
+            reg_tokens = layers.Lambda(
+                lambda a: keras.ops.broadcast_to(
+                    a[1],
+                    (keras.ops.shape(a[0])[0], self.num_register_tokens, self.embed_dim)
+                ),
+                name='broadcast_register_tokens'
+            )([x, reg_base])
+            cls = x[:, :1]
+            rest = x[:, 1:]
+            x = layers.Concatenate(axis=1, name='add_register_tokens')([cls, reg_tokens, rest])
 
         return x
-
-    def _get_interpolated_pos_embed(
-            self,
-            x: keras.KerasTensor,
-            w: int,
-            h: int
-    ) -> keras.KerasTensor:
-        """Get interpolated positional embeddings for different input resolutions."""
-        def interpolate_pos_embed(x_input):
-            npatch = keras.ops.shape(x_input)[1] - 1  # Exclude CLS token
-            N = self.num_patches
-
-            if npatch == N and w == h:
-                # No interpolation needed - use original embeddings
-                return self.pos_embed.pos_embed
-
-            # Get weights from the positional embedding layer
-            pos_embed_weights = self.pos_embed.pos_embed
-            pos_embed = keras.ops.cast(pos_embed_weights, x_input.dtype)
-
-            class_pos_embed = pos_embed[:, 0:1]  # CLS token embedding
-            patch_pos_embed = pos_embed[:, 1:]  # Patch embeddings
-
-            dim = keras.ops.shape(x_input)[-1]
-            w0 = w // self.patch_size[0]
-            h0 = h // self.patch_size[1]
-
-            # Calculate original grid size
-            M = int(np.sqrt(N))
-            assert N == M * M, f"Number of patches {N} is not a perfect square"
-
-            # Reshape and interpolate using tf.image.resize
-            patch_pos_embed = keras.ops.reshape(patch_pos_embed, (1, M, M, dim))
-
-            if self.interpolate_offset:
-                # Historical offset for backward compatibility
-                sx = float(w0 + self.interpolate_offset) / M
-                sy = float(h0 + self.interpolate_offset) / M
-                new_size = (int(M * sx), int(M * sy))
-            else:
-                new_size = (w0, h0)
-
-            # Use tf.image.resize for interpolation
-            patch_pos_embed = tf.image.resize(
-                patch_pos_embed,
-                size=new_size,
-                method='bicubic',
-                antialias=self.interpolate_antialias
-            )
-
-            patch_pos_embed = keras.ops.reshape(patch_pos_embed, (1, -1, dim))
-
-            return keras.ops.concatenate([class_pos_embed, patch_pos_embed], axis=1)
-
-        return layers.Lambda(interpolate_pos_embed, name='interpolate_pos_embed')(x)
 
     def _build_transformer_blocks(self, x: keras.KerasTensor) -> keras.KerasTensor:
         """Build transformer blocks with stochastic depth."""
