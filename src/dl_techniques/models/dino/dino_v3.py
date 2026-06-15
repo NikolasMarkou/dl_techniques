@@ -271,7 +271,9 @@ class DINOv3(keras.Model):
     def _build_encoder(self, x: keras.KerasTensor) -> keras.KerasTensor:
         """Creates the stack of transformer encoder layers."""
         self.encoder_layers = []
-        dpr = [r.item() for r in ops.linspace(0., self.stochastic_depth_rate, self.depth)]
+        # DECISION plan_2026-06-15_2a23a001/D-004: keras tensors have no .item(); use float(r).
+        # (NumPy-only method, crashes on a linspace tensor under TF backend.)
+        dpr = [float(r) for r in ops.linspace(0., self.stochastic_depth_rate, self.depth)]
 
         for i in range(self.depth):
             encoder_layer = TransformerLayer(
