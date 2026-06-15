@@ -72,6 +72,7 @@ from typing import Optional, Union, Tuple, Dict, Any, Literal
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
+from dl_techniques.layers.embedding.class_token import ClassTokenPrepend
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.utils.logger import logger
 
@@ -534,25 +535,14 @@ class DINOv1(keras.Model):
 
         # Add CLS token if requested
         if self.use_cls_token:
-            batch_size = keras.ops.shape(x)[0]
-            seq_len = keras.ops.shape(x)[1]
-
-            # Create learnable CLS token
-            self.cls_token = self.add_weight(
-                shape=(1, 1, self.embed_dim),
-                initializer="truncated_normal",
-                trainable=True,
-                name="cls_token"
-            )
-
-            # Expand CLS token for batch
-            cls_tokens = keras.ops.tile(self.cls_token, [batch_size, 1, 1])
-
-            # Concatenate CLS token with patch embeddings
-            x = keras.ops.concatenate([cls_tokens, x], axis=1)
-            seq_len = seq_len + 1
-        else:
-            seq_len = keras.ops.shape(x)[1]
+            # DECISION plan_2026-06-15_39a31d4a/D-001: add_weight (cls_token) must
+            # not fire before super().__init__ in a Functional model. The CLS token
+            # is owned by the ClassTokenPrepend sub-layer (its build() runs add_weight),
+            # called inside this functional graph, so DINOv1 itself creates no weight
+            # before super().__init__(inputs=, outputs=). Do NOT inline self.add_weight
+            # here — that re-introduces the pre-super crash.
+            self.cls_token_layer = ClassTokenPrepend(name="cls_token")
+            x = self.cls_token_layer(x)
 
         # Positional embedding
         max_seq_len = self.num_patches + (1 if self.use_cls_token else 0)
@@ -566,7 +556,7 @@ class DINOv1(keras.Model):
 
         # Transformer blocks
         self.transformer_blocks = []
-        dpr = [x.item() for x in keras.ops.linspace(0., self.stochastic_depth_rate, self.depth)]  # Updated
+        dpr = [float(x) for x in keras.ops.linspace(0., self.stochastic_depth_rate, self.depth)]  # Updated
 
         for i in range(self.depth):
             block = TransformerLayer(
@@ -655,9 +645,7 @@ class DINOv1(keras.Model):
         x = self.patch_embed(x)
 
         if self.use_cls_token:
-            batch_size = keras.ops.shape(x)[0]
-            cls_tokens = keras.ops.tile(self.cls_token, [batch_size, 1, 1])
-            x = keras.ops.concatenate([cls_tokens, x], axis=1)
+            x = self.cls_token_layer(x)
 
         x = self.pos_embed(x)
 

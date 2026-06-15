@@ -57,6 +57,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
+from dl_techniques.layers.embedding.class_token import ClassTokenPrepend
 from dl_techniques.layers.norms import create_normalization_layer
 
 # ---------------------------------------------------------------------
@@ -177,7 +178,11 @@ class DINOv3(keras.Model):
         if embed_dim % num_heads != 0:
             raise ValueError(f"embed_dim ({embed_dim}) must be divisible by num_heads ({num_heads})")
 
-        super().__init__(**kwargs)
+        # DECISION plan_2026-06-15_39a31d4a/D-001: a Functional Model calls
+        # super().__init__(inputs=, outputs=) EXACTLY once. The previous bare
+        # super().__init__(**kwargs) here was a double-init (the functional call
+        # below at the end of __init__ is the real one). Do NOT re-add a bare
+        # super().__init__ before the functional graph is built.
 
         # Store configuration
         self.image_size = image_size
@@ -246,17 +251,13 @@ class DINOv3(keras.Model):
 
     def _build_token_processing(self, x: keras.KerasTensor) -> keras.KerasTensor:
         """Adds the [CLS] token and positional embeddings."""
-        batch_size = ops.shape(x)[0]
-
-        # Add CLS token
-        self.cls_token = self.add_weight(
-            shape=(1, 1, self.embed_dim),
-            initializer="truncated_normal",
-            trainable=True,
-            name="cls_token"
-        )
-        cls_tokens = ops.tile(self.cls_token, [batch_size, 1, 1])
-        x = ops.concatenate([cls_tokens, x], axis=1)
+        # DECISION plan_2026-06-15_39a31d4a/D-001: this runs inside _build_model,
+        # which executes BEFORE the functional super().__init__ — so an inline
+        # self.add_weight(cls_token) here would fire before super().__init__ and
+        # crash. The CLS token is owned by the ClassTokenPrepend sub-layer (build()
+        # owns add_weight) called in the functional graph. Do NOT inline add_weight.
+        self.cls_token_layer = ClassTokenPrepend(name="cls_token")
+        x = self.cls_token_layer(x)
 
         # Add positional embedding using the shared layer
         self.pos_embed = PositionalEmbedding(
