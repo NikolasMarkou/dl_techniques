@@ -263,8 +263,8 @@ class TransformerLayer(keras.layers.Layer):
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = kernel_regularizer
-        self.bias_regularizer = bias_regularizer
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.bias_regularizer = regularizers.get(bias_regularizer)
         self.window_size = window_size
         self.n_kv_head = n_kv_head if n_kv_head is not None else num_heads
         self.lambda_init = lambda_init
@@ -555,6 +555,9 @@ class TransformerLayer(keras.layers.Layer):
         :type input_shape: Tuple[Optional[int], ...]
         :raises ValueError: If input shape is invalid or incompatible.
         """
+        if self.built:
+            return
+
         if len(input_shape) != 3:
             raise ValueError(f"Expected 3D input shape, got {len(input_shape)}D: {input_shape}")
         if input_shape[-1] != self.hidden_size:

@@ -198,6 +198,9 @@ class AdaLayerNormZero(keras.layers.Layer):
         )
 
     def build(self, input_shape: Any) -> None:
+        if self.built:
+            return
+
         x_shape, cond_shape = _unpack_pair_shape(input_shape)
         if x_shape[-1] != self.dim:
             raise ValueError(
@@ -316,6 +319,9 @@ class AdaLayerNormZeroX(keras.layers.Layer):
         )
 
     def build(self, input_shape: Any) -> None:
+        if self.built:
+            return
+
         x_shape, cond_shape = _unpack_pair_shape(input_shape)
         if x_shape[-1] != self.dim:
             raise ValueError(
@@ -447,6 +453,9 @@ class AdaLayerNormContinuous(keras.layers.Layer):
         )
 
     def build(self, input_shape: Any) -> None:
+        if self.built:
+            return
+
         x_shape, cond_shape = _unpack_pair_shape(input_shape)
         if x_shape[-1] != self.dim:
             raise ValueError(

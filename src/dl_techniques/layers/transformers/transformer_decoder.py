@@ -232,6 +232,9 @@ class TransformerDecoderLayer(keras.layers.Layer):
         The encoder memory shape is unknown at build time, so the cross-attention
         key/value sequence length is built as ``None`` (dynamic).
         """
+        if self.built:
+            return
+
         if len(input_shape) != 3:
             raise ValueError(f"Expected 3D decoder input shape, got {len(input_shape)}D: {input_shape}")
         if input_shape[-1] is not None and input_shape[-1] != self.hidden_size:

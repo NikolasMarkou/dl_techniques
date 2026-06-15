@@ -275,6 +275,9 @@ class SwinConvBlock(keras.layers.Layer):
         :type input_shape: Tuple[Optional[int], ...]
         :raises ValueError: If shape is not 4-D or channels mismatch.
         """
+        if self.built:
+            return
+
         if len(input_shape) != 4:
             raise ValueError(
                 f"Expected 4D input shape (B, H, W, C), got {input_shape}"

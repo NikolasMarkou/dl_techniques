@@ -330,8 +330,8 @@ class TextEncoder(keras.layers.Layer):
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = kernel_regularizer
-        self.bias_regularizer = bias_regularizer
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.bias_regularizer = regularizers.get(bias_regularizer)
         self.initializer_range = initializer_range
         self.layer_norm_eps = layer_norm_eps
         self.rope_theta = rope_theta
@@ -488,24 +488,20 @@ class TextEncoder(keras.layers.Layer):
                 name="positional_embeddings"
             )
 
-        elif self.positional_type == 'rope':
-            # RoPE is applied within attention layers, but the provided TransformerLayer
-            # uses attention mechanisms that do not support RoPE parameters in their
-            # constructor. To prevent crashing, we avoid adding these to attention_args.
-            # This means RoPE is effectively NOT applied with the current setup.
-            # self.attention_args.update({
-            #     'rope_theta': self.rope_theta,
-            #     'rope_percentage': self.rope_percentage
-            # })
-            return None
-
-        elif self.positional_type == 'dual_rope':
-            # See comment for 'rope'.
-            # self.attention_args.update({
-            #     'global_theta_base': self.rope_theta,
-            #     'local_theta_base': 10000.0  # Standard local theta
-            # })
-            return None
+        elif self.positional_type in ('rope', 'dual_rope'):
+            # DECISION plan_2026-06-15_5e7ae321/D-001: RoPE is NOT wired into this
+            # encoder. RoPE must be applied inside the attention layer, but the
+            # factory attention types selected here do not receive rope parameters.
+            # The previous behaviour silently returned None -> a positionless model.
+            # Fail loud instead of advertising positional encoding that is absent.
+            # Wiring real RoPE is out of scope (expand functionality); use
+            # positional_type='learned' or 'sincos' for a working encoder.
+            raise NotImplementedError(
+                f"positional_type='{self.positional_type}' is not implemented in "
+                f"TextEncoder: RoPE is not wired into the factory attention layers, "
+                f"so it would silently produce a model with no positional information. "
+                f"Use positional_type='learned' or 'sincos'."
+            )
 
         else:  # sincos
             # Fixed sinusoidal positional embeddings
@@ -525,6 +521,9 @@ class TextEncoder(keras.layers.Layer):
         :raises ValueError: If shape is invalid.
         """
         # Handle multiple input shapes
+        if self.built:
+            return
+
         if isinstance(input_shape, dict):
             main_input_shape = input_shape['input_ids']
         elif isinstance(input_shape, list):
@@ -997,7 +996,9 @@ def create_modern_encoder(
         num_heads=num_heads,
         max_seq_len=max_seq_len,
         embedding_type='factorized',
-        positional_type='rope',
+        # DECISION plan_2026-06-15_5e7ae321/D-001: 'rope' is not wired into the
+        # encoder (would be positionless); use 'learned' for a working model.
+        positional_type='learned',
         attention_type='differential',
         normalization_type='rms_norm',
         normalization_position='pre',
@@ -1026,7 +1027,9 @@ def create_efficient_encoder(
         num_heads=num_heads,
         max_seq_len=max_seq_len,
         embedding_type='factorized',
-        positional_type='rope',
+        # DECISION plan_2026-06-15_5e7ae321/D-001: 'rope' is not wired into the
+        # encoder (would be positionless); use 'learned' for a working model.
+        positional_type='learned',
         attention_type='multi_head',
         normalization_type='rms_norm',
         normalization_position='pre',

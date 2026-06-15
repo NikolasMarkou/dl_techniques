@@ -171,7 +171,7 @@ class BinaryMapper(keras.layers.Layer):
         )
 
         # Step 5: Gradient pass-through (Equation 8 in paper)
-        if training:
+        if training is True:
             # Compute log probability of each bit choice
             # Using sigmoid_cross_entropy for numerical stability:
             # log P(B_h) = -sigmoid_cross_entropy(label=B_h, logit=logit_h)
@@ -436,6 +436,9 @@ class FreeTransformerLayer(TransformerLayer):
         :type input_shape: Tuple[Optional[int], ...]
         """
         # Build base transformer components
+        if self.built:
+            return
+
         super().build(input_shape)
 
         if not self.use_free_transformer:
@@ -558,7 +561,7 @@ class FreeTransformerLayer(TransformerLayer):
         # Step 2: Encoder path (training/prefill) or uniform sampling (inference)
         # ---------------------------------------------------------------------
 
-        if training:
+        if training is True:
             # === Encoder Path (Training) ===
             # Run the non-causal encoder block to infer Z from the sequence
 
@@ -578,8 +581,13 @@ class FreeTransformerLayer(TransformerLayer):
             # Normalize queries
             zeta_norm = self.encoder_attention_norm(zeta_queries, training=training)
 
-            # Non-causal cross-attention: Q=zeta, KV=attention_output
-            # Note: The encoder attention was built with causal=False
+            # DECISION plan_2026-06-15_5e7ae321/D-002 (KNOWN LIMITATION, documented
+            # not redesigned): the comment describes Q=zeta, KV=attention_output cross
+            # attention, but the factory ``encoder_attention`` is a SELF-attention layer
+            # and only ``zeta_norm`` is passed -- ``attention_output`` is NOT supplied as
+            # K/V, so the posterior Q(Z|S) is currently unconditional on S. A faithful
+            # fix requires a cross-attention layer accepting separate K/V (out of scope:
+            # would expand functionality). FreeTransformerLayer is not used by any model.
             encoder_attn_out = self.encoder_attention(
                 zeta_norm,
                 attention_mask=None,  # Non-causal, no mask needed
@@ -679,7 +687,7 @@ class FreeTransformerLayer(TransformerLayer):
         # Return appropriate output based on mode
         # ---------------------------------------------------------------------
 
-        if training:
+        if training is True:
             # During training, return both output and bit_logits for KL computation
             return layer_output, bit_logits
         else:

@@ -284,8 +284,8 @@ class VisionEncoder(keras.layers.Layer):
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = kernel_regularizer
-        self.bias_regularizer = bias_regularizer
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.bias_regularizer = regularizers.get(bias_regularizer)
         self.attention_args = attention_args or {}
         self.norm_args = norm_args or {}
         self.ffn_args = ffn_args or {}
@@ -497,6 +497,9 @@ class VisionEncoder(keras.layers.Layer):
         :type input_shape: Tuple[Optional[int], ...]
         :raises ValueError: If shape is invalid.
         """
+        if self.built:
+            return
+
         if len(input_shape) != 4:
             raise ValueError(
                 f"Expected 4D input shape (batch, height, width, channels), "

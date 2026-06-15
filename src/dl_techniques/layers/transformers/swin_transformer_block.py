@@ -374,6 +374,9 @@ class SwinTransformerBlock(keras.layers.Layer):
         :type input_shape: Tuple[Optional[int], ...]
         :raises ValueError: If shape is not 4-D or channels != dim.
         """
+        if self.built:
+            return
+
         if len(input_shape) != 4:
             raise ValueError(
                 f"SwinTransformerBlock expects 4D input (batch, height, width, channels), "

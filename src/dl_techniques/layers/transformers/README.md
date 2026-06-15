@@ -364,7 +364,7 @@ x_shifted = shifted_block(x)
 | `window_size`   | `int`   | The size of the attention window.                                              | `8`     |
 | `shift_size`    | `int`   | The shift size for SW-MSA. `0` for regular W-MSA.                                | `0`     |
 | `mlp_ratio`     | `float` | The expansion ratio for the MLP's hidden dimension.                            | `4.0`   |
-| `drop_path`     | `float` | The stochastic depth rate.                                                     | `0.0`   |
+| `stochastic_depth_rate` | `float` | The stochastic depth (drop-path) rate.                                  | `0.0`   |
 
 ### SwinConvBlock
 
@@ -409,7 +409,7 @@ outputs = block(inputs)  # Shape: (None, 56, 56, 128)
 | `head_dim`     | `int`   | The dimension of each attention head.                                          | `32`    |
 | `window_size`  | `int`   | The size of the attention window in the transformer path.                      | `8`     |
 | `block_type`   | `str`   | The type of Swin block: `'W'` (Window) or `'SW'` (Shifted Window).             | `'W'`   |
-| `drop_path`    | `float` | The stochastic depth rate.                                                     | `0.0`   |
+| `drop_path_rate` | `float` | The stochastic depth rate.                                                   | `0.0`   |
 
 ### PerceiverTransformerLayer
 
@@ -588,3 +588,54 @@ block = AdaLNZeroConditionalBlock(
 | `adaln_activation_args`   | `Optional[Dict]` | Kwargs forwarded to `resolve_activation_layer`.                                              | `None`  |
 
 References: Peebles & Xie, "Scalable Diffusion Models with Transformers" (DiT), 2023; Sobal et al., "Learning the World with Minimal Supervision" (LeWM), 2024.
+
+## TransformerDecoderLayer
+
+The `dl_techniques.layers.transformers.transformer_decoder.TransformerDecoderLayer` is the encoder-decoder counterpart of `TransformerLayer`. It performs masked/causal self-attention over the target sequence, cross-attention to encoder memory, and an FFN, each wrapped with residual connections and factory-configurable normalization (pre/post).
+
+### Usage
+
+```python
+import keras
+from dl_techniques.layers.transformers.transformer_decoder import TransformerDecoderLayer
+
+decoder_block = TransformerDecoderLayer(
+    hidden_size=512,
+    num_heads=8,
+    intermediate_size=2048,
+    normalization_position='pre',
+    ffn_type='swiglu',
+)
+# target sequence + encoder memory
+y = decoder_block(target_embeddings, encoder_output=memory)
+```
+
+It shares the foundational lifecycle/serialization contract of `TransformerLayer` (None-sentinel build dims, `if self.built: return` guard, explicit child build, full `get_config`).
+
+## BinaryMapper / FreeTransformerLayer
+
+The `dl_techniques.layers.transformers.free_transformer` module implements the FREE (Faster Resolution Encoder-decoder) latent-variable transformer.
+
+-   **`BinaryMapper`**: maps continuous logits to a discrete latent index via per-bit Bernoulli sampling with a straight-through gradient estimator (Equation 8), producing a one-hot over `2^num_bits` categories.
+-   **`FreeTransformerLayer`**: a causal transformer block with an optional non-causal encoder path that infers a latent `Z` from the sequence during training and uniform-samples it at inference.
+
+> **Limitation (documented, not redesigned)**: the encoder path's cross-attention does not currently receive the sequence as separate K/V, so the posterior `Q(Z|S)` is unconditional on `S`. See the in-code `D-002` note. Use with awareness; no production model depends on this layer.
+
+```python
+from dl_techniques.layers.transformers.free_transformer import FreeTransformerLayer
+
+block = FreeTransformerLayer(hidden_size=512, num_heads=8, intermediate_size=2048,
+                             use_free_transformer=True, num_bits=8)
+```
+
+## PFTBlock
+
+The `dl_techniques.layers.transformers.progressive_focused_transformer.PFTBlock` is the core block of the Progressive Focused Transformer (PFT-SR, CVPR 2025) for single-image super-resolution. It applies progressive-focused attention with shared focused-attention statistics across the block stack.
+
+```python
+from dl_techniques.layers.transformers.progressive_focused_transformer import PFTBlock
+
+block = PFTBlock(dim=180, num_heads=6, window_size=16, mlp_ratio=2.0)
+```
+
+> **Note**: `pft_sr` imports `PFTBlock` from `progressive_focused_transformer` (the module name, not `progressive_focused_transformer_block`).

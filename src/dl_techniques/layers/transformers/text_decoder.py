@@ -215,6 +215,14 @@ class TextDecoder(keras.layers.Layer):
             raise ValueError(f"attention_dropout must be between 0.0 and 1.0, got {attention_dropout_rate}")
         if not 0.0 <= stochastic_depth_rate <= 1.0:
             raise ValueError(f"stochastic_depth_rate must be between 0.0 and 1.0, got {stochastic_depth_rate}")
+        # Fail loud on an unknown embedding_type: build() only handles these three,
+        # and call() unconditionally reads self.word_embeddings -- an invalid value
+        # would otherwise raise an opaque AttributeError at first forward pass.
+        if embedding_type not in ('learned', 'shared', 'factorized'):
+            raise ValueError(
+                f"embedding_type must be one of 'learned', 'shared', 'factorized', "
+                f"got {embedding_type!r}"
+            )
 
         # --- Store Configuration ---
         self.vocab_size = vocab_size
@@ -323,6 +331,9 @@ class TextDecoder(keras.layers.Layer):
         This ensures all weight variables exist before weight restoration during loading.
         """
         # Build word embedding layers
+        if self.built:
+            return
+
         if hasattr(self, 'word_embeddings'):
             self.word_embeddings.build(input_shape)
         elif hasattr(self, 'factorized_embed_layer'):

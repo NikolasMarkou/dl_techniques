@@ -206,6 +206,9 @@ class Ideogram4TransformerBlock(keras.layers.Layer):
         :type input_shape: Tuple[Optional[int], ...]
         :raises ValueError: If the last input dimension is not ``hidden_size``.
         """
+        if self.built:
+            return
+
         if len(input_shape) != 3 or input_shape[-1] != self.hidden_size:
             raise ValueError(
                 f"Ideogram4TransformerBlock expects x of shape "
@@ -399,6 +402,9 @@ class Ideogram4FinalLayer(keras.layers.Layer):
         :type input_shape: Tuple[Optional[int], ...]
         :raises ValueError: If the last input dimension is not ``hidden_size``.
         """
+        if self.built:
+            return
+
         if len(input_shape) != 3 or input_shape[-1] != self.hidden_size:
             raise ValueError(
                 f"Ideogram4FinalLayer expects x of shape "

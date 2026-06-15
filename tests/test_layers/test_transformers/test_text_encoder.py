@@ -63,7 +63,9 @@ class TestTextEncoder:
             'num_heads': 8,
             'max_seq_len': 1024,
             'embedding_type': 'factorized',
-            'positional_type': 'rope',
+            # D-001: 'rope' is not wired into TextEncoder (fail-loud); modern
+            # encoder uses 'learned' positional embeddings.
+            'positional_type': 'learned',
             'attention_type': 'differential',
             'normalization_type': 'rms_norm',
             'normalization_position': 'pre',
@@ -119,12 +121,20 @@ class TestTextEncoder:
         encoder = TextEncoder(**config)
         assert encoder.embedding_type == embedding_type
 
-    @pytest.mark.parametrize("positional_type", ['learned', 'rope', 'dual_rope', 'sincos'])
+    @pytest.mark.parametrize("positional_type", ['learned', 'sincos'])
     def test_initialization_positional_types(self, basic_config, positional_type):
-        """Tests initialization with different positional encoding types."""
+        """Tests initialization with the supported positional encoding types."""
         config = {**basic_config, 'positional_type': positional_type}
         encoder = TextEncoder(**config)
         assert encoder.positional_type == positional_type
+
+    @pytest.mark.parametrize("positional_type", ['rope', 'dual_rope'])
+    def test_rope_positional_types_fail_loud(self, basic_config, positional_type):
+        """D-001: rope/dual_rope are not wired in and must fail loud, not silently
+        produce a positionless model."""
+        config = {**basic_config, 'positional_type': positional_type}
+        with pytest.raises(NotImplementedError):
+            TextEncoder(**config)
 
     @pytest.mark.parametrize("attention_type", [
         'multi_head', 'window', 'group_query', 'differential'
@@ -485,7 +495,7 @@ class TestTextEncoder:
         encoder = create_modern_encoder(vocab_size=1000, embed_dim=64, max_seq_len=16, num_heads=4)
         assert isinstance(encoder, TextEncoder)
         assert encoder.embedding_type == 'factorized'
-        assert encoder.positional_type == 'rope'
+        assert encoder.positional_type == 'learned'  # D-001: repointed from 'rope'
         assert encoder.attention_type == 'differential'
         assert encoder.normalization_type == 'rms_norm'
         assert encoder.ffn_type == 'swiglu'
@@ -570,18 +580,16 @@ class TestTextEncoder:
         assert output.shape == expected_shape
 
     def test_rope_with_custom_parameters(self, basic_config, sample_input_ids):
-        """Tests RoPE with custom theta and percentage parameters."""
+        """D-001: RoPE is not wired into TextEncoder; requesting it must fail loud
+        regardless of the custom rope_theta/rope_percentage values."""
         config = {
             **basic_config,
             'positional_type': 'rope',
             'rope_theta': 100000.0,
             'rope_percentage': 0.5
         }
-        encoder = TextEncoder(**config)
-        output = encoder(sample_input_ids, training=False)
-
-        expected_shape = (sample_input_ids.shape[0], basic_config['max_seq_len'], basic_config['embed_dim'])
-        assert output.shape == expected_shape
+        with pytest.raises(NotImplementedError):
+            TextEncoder(**config)
 
     def test_factorized_embeddings_with_custom_dim(self, basic_config, sample_input_ids):
         """Tests factorized embeddings with custom factorization dimension."""

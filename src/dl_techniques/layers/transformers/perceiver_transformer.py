@@ -237,6 +237,9 @@ class PerceiverTransformerLayer(keras.layers.Layer):
         :type input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
         """
         # Handle different input formats
+        if self.built:
+            return
+
         if isinstance(input_shape, list):
             # Two separate inputs
             if len(input_shape) != 2:
@@ -252,10 +255,12 @@ class PerceiverTransformerLayer(keras.layers.Layer):
         if len(kv_shape) != 3:
             raise ValueError(f"KV input must be 3D, got shape {kv_shape}")
 
-        if query_shape[-1] != self.dim:
+        # Only validate the feature dim when it is statically known -- a None
+        # channel dim is legitimate at build time and must not be rejected.
+        if query_shape[-1] is not None and query_shape[-1] != self.dim:
             raise ValueError(f"Query last dimension ({query_shape[-1]}) "
                              f"must match dim ({self.dim})")
-        if kv_shape[-1] != self.dim:
+        if kv_shape[-1] is not None and kv_shape[-1] != self.dim:
             raise ValueError(f"KV last dimension ({kv_shape[-1]}) "
                              f"must match dim ({self.dim})")
 

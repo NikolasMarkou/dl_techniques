@@ -281,6 +281,9 @@ class PFTBlock(keras.layers.Layer):
         """
         # ============ Extract Input Shape ============
         # Handle both single tensor and tuple inputs
+        if self.built:
+            return
+
         if isinstance(input_shape, list):
             x_shape = input_shape[0]
         else:

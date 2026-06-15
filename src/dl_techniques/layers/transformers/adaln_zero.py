@@ -276,6 +276,9 @@ class AdaLNZeroConditionalBlock(keras.layers.Layer):
             shapes.
         """
         # Keras passes a list/tuple of shapes for multi-input layers.
+        if self.built:
+            return
+
         if isinstance(input_shape, (list, tuple)) and len(input_shape) == 2 \
                 and all(isinstance(s, (list, tuple)) for s in input_shape):
             x_shape, c_shape = input_shape
