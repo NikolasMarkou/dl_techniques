@@ -235,16 +235,11 @@ class PatchEmbedding2D(keras.layers.Layer):
         # Apply convolution to extract and embed patches
         x = self.proj(inputs, training=training)  # (batch_size, h_patches, w_patches, embed_dim)
 
-        # Get the spatial dimensions after convolution
+        # Flatten the patch grid into a sequence. Let the backend infer the
+        # patch-count axis with -1 (graph-safe; avoids multiplying two symbolic
+        # ops.shape() scalars, which some backends reject as a reshape arg).
         batch_size = ops.shape(x)[0]
-        h_patches = ops.shape(x)[1]
-        w_patches = ops.shape(x)[2]
-
-        # Calculate total number of patches
-        num_patches = h_patches * w_patches
-
-        # Reshape to (batch_size, num_patches, embed_dim)
-        x = ops.reshape(x, (batch_size, num_patches, self.embed_dim))
+        x = ops.reshape(x, (batch_size, -1, self.embed_dim))
 
         return x
 

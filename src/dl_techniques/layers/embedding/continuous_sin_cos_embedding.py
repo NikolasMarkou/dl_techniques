@@ -231,11 +231,11 @@ class ContinuousSinCosEmbed(keras.layers.Layer):
             alternating sine and cosine functions at different frequencies.
         :rtype: keras.KerasTensor
         """
-        if self.assert_positive:
-            # Check if coordinates are positive
-            min_coords = ops.min(coords)
-            if ops.convert_to_numpy(min_coords) < 0:
-                logger.warning(f"Negative coordinates detected: min={min_coords}")
+        # NOTE: `assert_positive` is retained as a config-compatible flag but no
+        # longer triggers a runtime check. The previous implementation called
+        # `ops.convert_to_numpy(ops.min(coords))` here, which is an eager host
+        # materialization that breaks `@tf.function` / graph tracing. Removed for
+        # graph compatibility (DECISION plan_2026-06-15_9dbb87c1/D-001).
 
         # Ensure float32 precision for numerical stability
         coords = ops.cast(coords, "float32")
@@ -258,23 +258,18 @@ class ContinuousSinCosEmbed(keras.layers.Layer):
         # Concatenate sin and cos: (..., ndim, 2*freq_dim)
         emb = ops.concatenate([sin_vals, cos_vals], axis=-1)
 
-        # Reshape to flatten ndim and frequency dimensions
-        if len(coords.shape) == 3:  # Batch case
-            batch_size, num_points, _ = coords.shape
-            emb = ops.reshape(emb, (batch_size, num_points, -1))
-        elif len(coords.shape) == 2:  # No batch case
-            num_points, _ = coords.shape
-            emb = ops.reshape(emb, (num_points, -1))
-        else:
-            # General case for arbitrary dimensions
-            new_shape = list(coords.shape[:-1]) + [-1]
-            emb = ops.reshape(emb, new_shape)
+        # Flatten the (ndim, 2*freq_dim) trailing axes into one. Use the dynamic
+        # leading dims from ops.shape (runtime values, never None) plus a single
+        # inferred -1 so this is graph-safe for any rank / dynamic batch dim.
+        emb = ops.reshape(emb, (*ops.shape(coords)[:-1], -1))
 
-        # Add padding if necessary
+        # Add padding if necessary. Build the pad shape from dynamic leading
+        # dims (ops.shape -> runtime values, never None) + a static last dim,
+        # so ops.zeros is graph-safe under symbolic tracing.
         if self.padding > 0:
-            padding_shape = list(emb.shape)
-            padding_shape[-1] = self.padding
-            padding = ops.zeros(padding_shape, dtype=emb.dtype)
+            padding = ops.zeros(
+                (*ops.shape(emb)[:-1], self.padding), dtype=emb.dtype
+            )
             emb = ops.concatenate([emb, padding], axis=-1)
 
         return emb
