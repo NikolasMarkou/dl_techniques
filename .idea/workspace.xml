@@ -5,13 +5,12 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="b35edab1-c83e-4814-a399-af91f24d4dcc" name="Changes" comment="[cleanup]">
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/plans/DECISIONS.md" beforeDir="false" afterPath="$PROJECT_DIR$/plans/DECISIONS.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/plans/FINDINGS.md" beforeDir="false" afterPath="$PROJECT_DIR$/plans/FINDINGS.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/plans/INDEX.md" beforeDir="false" afterPath="$PROJECT_DIR$/plans/INDEX.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/plans/LESSONS.md" beforeDir="false" afterPath="$PROJECT_DIR$/plans/LESSONS.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/plans/SYSTEM.md" beforeDir="false" afterPath="$PROJECT_DIR$/plans/SYSTEM.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/dl_techniques/models/ideogram4/transformer.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/dl_techniques/models/ideogram4/transformer.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/src/train/ideogram4/train_ideogram4.py" beforeDir="false" afterPath="$PROJECT_DIR$/src/train/ideogram4/train_ideogram4.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -319,23 +318,7 @@
       <workItem from="1780913776265" duration="10363000" />
       <workItem from="1781163250954" duration="2258000" />
       <workItem from="1781174811496" duration="1986000" />
-      <workItem from="1781266011420" duration="633000" />
-    </task>
-    <task id="LOCAL-00794" summary="[ntm] metrics, benchmarks">
-      <option name="closed" value="true" />
-      <created>1767355520846</created>
-      <option name="number" value="00794" />
-      <option name="presentableId" value="LOCAL-00794" />
-      <option name="project" value="LOCAL" />
-      <updated>1767355520846</updated>
-    </task>
-    <task id="LOCAL-00795" summary="[ntm] metrics, benchmarks">
-      <option name="closed" value="true" />
-      <created>1767355602079</created>
-      <option name="number" value="00795" />
-      <option name="presentableId" value="LOCAL-00795" />
-      <option name="project" value="LOCAL" />
-      <updated>1767355602080</updated>
+      <workItem from="1781266011420" duration="4644000" />
     </task>
     <task id="LOCAL-00796" summary="[ntm] metrics, benchmarks">
       <option name="closed" value="true" />
@@ -713,7 +696,23 @@
       <option name="project" value="LOCAL" />
       <updated>1779711220113</updated>
     </task>
-    <option name="localTasksCounter" value="843" />
+    <task id="LOCAL-00843" summary="[cleanup]">
+      <option name="closed" value="true" />
+      <created>1781503455244</created>
+      <option name="number" value="00843" />
+      <option name="presentableId" value="LOCAL-00843" />
+      <option name="project" value="LOCAL" />
+      <updated>1781503455245</updated>
+    </task>
+    <task id="LOCAL-00844" summary="[cleanup]">
+      <option name="closed" value="true" />
+      <created>1781508580401</created>
+      <option name="number" value="00844" />
+      <option name="presentableId" value="LOCAL-00844" />
+      <option name="project" value="LOCAL" />
+      <updated>1781508580401</updated>
+    </task>
+    <option name="localTasksCounter" value="845" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">

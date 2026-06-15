@@ -192,3 +192,13 @@
 | plan_2026-06-15_2485b951 | 2026-06-15 | Deep comprehensive review of all norm layers in `src/dl_tech |  |
 | plan_2026-06-15_c8f516c3 | 2026-06-15 | Deep review of the MoE framework (`src/dl_techniques/layers/ |  |
 | plan_2026-06-15_3028e33c | 2026-06-15 | Second-pass deep review of `src/dl_techniques/layers/norms/` |  |
+| plan_2026-06-15_5e7ae321 | 2026-06-15 | Deep comprehensive review of all 15 transformer layers in `src/dl_techniques/layers/transformers/`: contract compliance, robustness, keras-compliance, factory wiring, docs, downstream model integrity. | transformers, graph-safety, rope, eomt, free_transformer, pft_sr |
+| plan_2026-06-15_6e879eeb | 2026-06-15 | Fix remaining transformers-review issues: 2 failing SwinMLP test assertions + activation raw-storage in 6 transformer layers. | transformers, activation, serialization, bug-as-contract |
+| plan_2026-06-15_d7754cfc | 2026-06-15 | D-002 redesigns (user lifted no-expand): EomtTransformer real masked self-attention (keep-mask via existing attention_mask plumbing); FreeTransformerLayer real encoder cross-attention (multi_head_cross + kv_input=attention_output). First-ever tests for both. 469 passed (+17). | transformers, eomt, free_transformer, masked-attention, cross-attention, behavioral-tests |
+| plan_2026-06-15_32b5822c | 2026-06-15 | Fix FreeTransformerLayer call/compute_output_shape contract: free path now always returns (output, bit_logits); inference bit_logits=zeros (uniform prior). 470 passed (+1 consistency test). | transformers, free_transformer, output-contract, compute_output_shape |
+| plan_2026-06-15_b5cec9e4 | 2026-06-15 | Verify all models in `src/dl_techniques/models/` can be buil |  |
+| plan_2026-06-15_00924f53 | 2026-06-15 | Fix the 3 dead-on-forward model families whose `call()` path |  |
+| plan_2026-06-15_39a31d4a | 2026-06-15 | Fix the construction/signature-drift model families so they  |  |
+| plan_2026-06-15_2a23a001 | 2026-06-15 | Resolve the four documented follow-ups carried out of plan_2 |  |
+| plan_2026-06-15_e2759fbc | 2026-06-15 | Fix dino v2 (`DINOv2VisionTransformer` backbone + `DINOv2` w |  |
+| plan_2026-06-15_e6a0391c | 2026-06-15 | Verify every model package in `src/dl_techniques/models/` ca |  |

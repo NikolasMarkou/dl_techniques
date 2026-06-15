@@ -9,114 +9,123 @@
 - **Doc updates belong in the same plan as the code change they describe.**
 - **Run the existing test suite as the FIRST step of EXPLORE when the goal is "fix issues found in a review".**
 - **A reuse-review / recommendation doc is a HYPOTHESIS, not a finding -- source-read every claim before PLAN.**
-- **Explorer audit claims are HYPOTHESES.** Source-verify every explorer claim before planning. A CONFIRMED explorer finding can still be REFUTED on direct source read (bert_embeddings:222 refuted; activation plan: `len(inputs.shape)`, `keras.activations.elu`, `keras.backend.epsilon()` all flagged "graph-unsafe" -- all are graph-safe on source read). Do not skip orchestrator verification.
-- **`len(tensor.shape)` returns the STATIC RANK as a Python int -- graph-safe.** Do not flag it as eager/graph-unsafe. `keras.activations.*` functions are graph-traceable; `keras.backend.epsilon()` is a Python float. Recurring explorer over-flagging pattern.
+- **Explorer audit claims are HYPOTHESES.** Source-verify every explorer claim before planning. A CONFIRMED explorer finding can still be REFUTED on direct source read.
+- **Entrypoint maps produced by explorers are HYPOTHESES.** At least 3 family signatures were stale in plan_2026-06-15_b5cec9e4: fftnet is a vision model not an LM; `create_blt_model` real sig is `(variant, vocab_size, max_sequence_length, ...)`; `create_tabm_mini` requires `cat_cardinalities` as a positional argument. Executors MUST source-read constructor signatures before constructing.
+- **`len(tensor.shape)` returns the STATIC RANK as a Python int -- graph-safe.** Do not flag it as eager/graph-unsafe.
 - **Pre-Mortem "STOP IF X" triggers earn their cost when they fire in 1-2 plans out of N.**
 - **Plan-time line-count predictions undershoot.** ~2x for sibling-class additions, 5-10x for dtype-semantics under mixed precision, ~1.7x for multi-layer flag-plumbing.
-- **Pre-existing tests can encode bugs as contracts.** When a fix causes adjacent tests to fail, read the failing assertions before assuming regression.
+- **Pre-existing tests can encode bugs as contracts.** Triage as pre-existing before assuming regression.
 - **Verify "every site does X" with grep BEFORE PLAN, not during EXECUTE.**
 - **`run_in_background` from a sub-agent kills the background task when the sub-agent exits.** Tasks >2 min MUST be orchestrator-launched.
-- **For `os._exit(0)` scripts the success oracle is the completion log line + results file, NOT exit code.**
 - **Smoke != correctness -- smoke tests must assert distributional invariants across tf.data + preprocessing boundaries.**
 - **Adversarial review (iter>=2) catches opt-in path regressions the stub tests miss.** Always exercise opt-in paths.
 - **Diagnostic-vs-fix framing is a load-bearing decision -- log it explicitly in `decisions.md` BEFORE writing any code step.**
-- **`validate-plan.mjs` is repo-wide.** Gate before CLOSE is zero ERRORs INTRODUCED by the current plan. Pre-existing orphan/unknown-plan errors from prior plans are NOT CLOSE blockers -- triage by plan ID.
-- **In-code anchor IDs MUST be numeric D-NNN matching decisions.md.** Finding-report IDs (D-A, D-E style) are not valid anchor IDs.
+- **`validate-plan.mjs` is repo-wide.** Gate before CLOSE is zero ERRORs INTRODUCED by the current plan. Pre-existing orphan/unknown-plan errors from prior plans are NOT CLOSE blockers.
+- **In-code anchor IDs MUST be numeric D-NNN matching decisions.md.**
 - **decisions.md `## D-NNN` headers MUST be exactly 3 segments: `## D-NNN | <context> | YYYY-MM-DD`.**
-- **A plan can legitimately REVERSE a closed prior plan's decisions** when a new authoritative source contradicts them.
 - **Architecture-first migration ordering**: migrate into the library BEFORE renaming/deleting the train scripts that import them.
-- **First-ever forward-pass tests on never-tested layers surface CASCADING latent bugs.** Budget explicitly. Assume multi-bug chains in never-executed code.
+- **First-ever forward-pass tests on never-tested layers surface CASCADING latent bugs.** Budget explicitly. Assume multi-bug chains in never-executed code. In plan_2026-06-15_b5cec9e4 sweep, 10 of 20 gap families broke on first real forward. plan_2026-06-15_e2759fbc: dino v2 surfaced 13 bugs total (7 planned + 6 cascade). Never estimate one bug per family; budget at least two.
 - **Explorer gap-map claims MUST be source-verified against the actual `__init__` signature.**
 - **REFLECT regression runs MUST cover test files that NO EXECUTE step touched.**
-- **Fail-loud guards require a grep-verified zero-caller check first.** log-warn+fallback is the safe choice when the caller population is non-zero.
+- **Fail-loud guards require a grep-verified zero-caller check first.**
 - **Surface EXECUTE-discovered out-of-scope bugs -- don't silently scope-creep.** Defer to a dedicated follow-up plan.
-- **Ephemeral manual verification is not durable.** When a reviewer flags a blind spot, commit the regression test immediately.
-- **"Fully resolved" from a prior plan is scoped to that plan's findings, not exhaustive.** A fresh adversarial pass can still find real residue.
+- **Ephemeral manual verification is not durable.** Commit the regression test immediately when a reviewer flags a blind spot.
 - **When fixing a defect class, grep ALL files in the package.** A sweep that fixes "the known instances" can miss siblings.
 - **Factory `optional_params` completeness needs a param-passthrough test, not just construct-smoke.**
-- **Factory registries can silently diverge from class `__init__` defaults** (override a constraint with None, flip a bool). Diff every registry `optional_params` value against the class signature -- class is source-of-truth. (plan_2026-06-15_0205772c: `thresh_max` `trainable_slope` True vs False; `differentiable_step` `shift_constraint` None vs `ValueRangeConstraint(-1,+1)`.)
+- **Factory registries can silently diverge from class `__init__` defaults.** Diff every registry value against the class signature.
 - **Anticipated multi-bug chains sometimes do NOT materialize.** Fix-on-demand is correct. Do NOT pre-emptively edit unconfirmed bugs.
+- **Verify the call signature before declaring a multi-input layer broken.** `L([q,kv])` vs `L(q, kv)` looks like a bug but is just the wrong convention.
+- **A subclass inherits attributes from its base -- grep the base class before reporting an "undefined attribute".**
+- **A layer's OUTPUT STRUCTURE must depend ONLY on construction-time config, never on `training`.** `compute_output_shape` is training-agnostic. Emit a semantically correct placeholder for training-only auxiliary outputs at inference (e.g. zeros for bit_logits = uniform prior). (plan_2026-06-15_32b5822c D-001.)
+- **xfail-with-captured-error pattern**: `pytest.xfail(str(e))` inside `except Exception` after a genuine build+forward attempt is the correct smoke idiom for report-only sweeps. Broad `except` also converts NaN-assertion failures into xfail. Acceptable for coverage sweep markers; not for correctness tests.
+- **Actual model dir count is 70** (not 71 -- the extra was `__pycache__`). Always verify with `find ... -mindepth 1 -maxdepth 1 -type d | grep -v __pycache__`.
+- **For math-heavy fixes (Kabsch/SVD, matrix decompositions), add explicit correctness checks at REFLECT** -- not just finiteness.
+- **Semantic fix-forwards are adversarial-review targets.** Dropping a broken weight-tie makes a test green but silently removes intended weight-sharing. Must be surfaced in decisions.md and code comments -- not silently accepted. (plan_2026-06-15_39a31d4a D-002 cascade.)
+- **When a never-run model is fixed, remove the xfail safety-net as soon as it passes.** Leaving `try/except pytest.xfail` silently swallows future regressions. (plan_2026-06-15_2a23a001 step 5.)
+- **Verify adversarial reviewer CRITICALs empirically before patching.** The register-token CRITICAL in plan_2026-06-15_e2759fbc was a design-misread: DINOv2-w-registers keeps registers position-free by design (Darcet 2023). A blind fix would have corrupted the architecture. Build a probe, run it, observe the actual crash (or non-crash) before writing any fix.
+- **Cascade budget overrides must be logged immediately in decisions.md, not absorbed silently.** When the declared STOP-IF fires (plan_2026-06-15_e2759fbc D-007: 3rd extra cascade bug), create the D-NNN entry BEFORE continuing. That entry is the only durable record of why the plan pushed through. An override without a log entry is silent scope creep.
+- **Fix-forward to non-crash is not the same as correct.** The adversarial review in plan_2026-06-15_e2759fbc caught a degenerate constant-zero mask token (zero-init Dense-on-ones) + a fragile call() override + dead is_training input that all passed the forward smoke. The principled fixes (MaskTokenApply learnable weight, remove dead input) also fixed .keras serialization as a side effect -- non-crash is necessary but not sufficient.
+- **The Dense-on-ones-projection is a recurring antipattern.** CLS in dino v1/v2 (plan_2026-06-15_39a31d4a, plan_2026-06-15_e2759fbc D-002) and mask token in dino v2 (D-001, later D-009) both used it. The canonical fix is a small weight-owning layer: ClassTokenPrepend for CLS, MaskTokenApply for iBOT mask. Both live in `layers/embedding/` and are reusable.
+- **Cascade budgets are guards, not laws.** A never-run model can surface many bugs. With explicit user authorization + monotonically non-thrashing progress (each bug is a distinct area, 3-strike rule has NOT fired), pushing through is valid. The key contract: each override is LOGGED (D-007/D-008), and the HARD STOP rule changes from "bug count" to "architectural redesign needed OR 3-strike thrash."
 
-## Serialization / __init__ package hygiene
+## Keras-3 Functional-model construction rules
 
-- **`__all__` MUST be `List[str]`, not a list of class objects.** Class objects in `__all__` break star-import and static-analysis tooling silently. Check this first when auditing a package `__init__`. (plan_2026-06-15_2485b951: norms `__init__.py` had class objects; 5 classes also simply missing.)
-- **`x or DEFAULT` for serializable objects (regularizers, initializers) skips `keras.<x>.get()`.** A serialized dict from `from_config` is truthy and stored verbatim, breaking re-serialization. Use `keras.regularizers.get(x) or DEFAULT` (or the equivalent `.initializers.get`). (plan_2026-06-15_2485b951 B3: `band_rms`/`zero_centered_band_rms_norm`; contrast with `band_initializer` which correctly used `.get()`.)
-- **`build()` MUST NOT mutate ctor attrs.** Normalizing `self.axis` in `build()` (e.g. negative → positive) makes `get_config` return build-state-dependent values, breaking deserialization contract. Store the normalized form in `self._attr`; keep the ctor attr verbatim throughout. (plan_2026-06-15_2485b951 B4: DynamicTanh; fix: `self._norm_axis`.)
+- **`add_weight` must NOT fire before `super().__init__(inputs=, outputs=)`** in a Functional model. Keras layer machinery is not yet initialized. Reusable fix: create a dedicated sub-layer whose `build()` owns the weight; instantiate the sub-layer inside the model's graph-build function (which runs AFTER `super().__init__`). See `ClassTokenPrepend` in `layers/embedding/class_token.py` (plan_2026-06-15_39a31d4a/D-001).
+- **Option B (model `build()` override) does NOT work for Functional models.** The graph finalizes at `__init__`; `build()` never re-runs the symbolic part.
+- **A `**kwargs` splat means EVERY source of a ghost kwarg must be fixed.** Missing one source re-injects the broken kwarg. Grep all injection points before PLAN. (plan_2026-06-15_39a31d4a D-002: 5 sources for nano_vlm fusion config.)
+- **`PFTBlock.build` and `compute_output_shape` now accept both list and tuple of shapes** (plan_2026-06-15_2a23a001/D-002). Detection must check `isinstance(input_shape[0], (list, tuple))` -- NOT `isinstance(input_shape, (list, tuple))` because a single input SHAPE is a tuple-of-ints. The naive 2-token widen is a latent bug.
 
-## Math correctness / "operates as advertised"
+## Weight-tying
 
-- **A layer can advertise "adaptive/learnable" behavior that is mathematically degenerate.** Verify the math, not just the docstring. When the real fix is a redesign and is out of scope, document the limitation honestly and apply only contract fixes. (plan_2026-06-15_2485b951 B2: BandLogitNorm LayerNorm over `[...,1]` → scale ≡ constant.)
-- **A layer advertising a mathematical property (monotonicity) may not actually guarantee it.** Verify the math; correctness fix bounds the perturbation relative to guaranteed spacing. (plan_2026-06-15_0205772c: `MonotonicityLayer._sigmoid` flexibility=0.5 could produce inversions.)
-- **Modified-Bessel ratio `I_nu/I_{nu-1}` MUST use the continued-fraction / downward (Miller) recurrence.**
-- **A vMF sphere VAE's free-learned kappa posterior-collapses to ~0 unless prevented.**
-- **mLSTM/matrix-memory cells REQUIRE the log-domain max-stabilizer m_t.**
-- **Seed BOTH weights AND inputs for any margin-comparison test.**
+- **Weight-tying in Keras 3 MUST be at CALL TIME.** Use `ops.matmul(x, ops.transpose(emb))` at the logit site(s). NEVER reassign another layer's weight post-build -- that is illegal under Keras 3 ("cannot add state to an already-built Layer") and was the exact failure in plan_2026-06-15_39a31d4a/D-002.
+- **The tying test MUST use a negative-proof.** Zero or perturb the unused Dense kernel; assert logits are unchanged. Finiteness + shape alone is a fake-tie hazard -- the matmul path could silently fall through to the Dense.
+- **Keep the unused Dense built.** It is needed for `use_shared_embedding=False`, `get_config()`, and `.keras` save/load of the unshared path.
 
-## Graph-safety patterns
+## Attention and transformer patterns
 
-- **Graph-trace tests catch padding-path eager breaks** that reshape-only code review misses. Always include a `@tf.function` trace test with `TensorSpec([None,...])` when fixing graph-safety issues.
-- **Dynamic reshape idiom**: `ops.reshape(t, (*ops.shape(x)[:-1], -1))` is graph-safe with one `-1` inferred trailing dim. Avoid `list(tensor.shape)` in shape tuples -- materializes None at trace time.
+- **`TransformerLayer.call` ALREADY forwards `attention_mask` to its multi_head attention sublayer.** Masked-attention features MUST reuse this plumbing.
+- **`multi_head_cross` is the factory-registered cross-attention type.** Use `encoder_attention_type='multi_head_cross'` and pass `kv_input=...` for real encoder cross-attention.
+- **When building an attention keep-mask, keep a query->query block all-ones.** If any attention row is fully masked, softmax over all -inf yields NaN.
+- **`create_attention_layer` FILTERS unknown kwargs to the constructor signature.** Unknown kwargs are silently dropped.
+- **First-ever tests on never-tested layers must assert BEHAVIORAL properties, not just shapes.**
+- **`_MASKLESS_ATTENTION_TYPES = {'fnet', 'anchor', 'lighthouse'}`** -- these three skip the `attention_mask` forward path.
+
+## Graph-safety / Keras 3 call patterns
+
+- **An eager `if not <traced_tensor>:` branch on a probabilistic gate breaks under `@tf.function`/`model.fit`.** Replace with arithmetic blending.
+- **`if training:` crashes under symbolic tensor.** Canonical guard: `if training is True:`.
+- **`training is True` is NOT universally applicable.** For symbolic-training custom loops: use the masked-factor pattern.
+- **`keras.ops.cond` is awkward for side-effects**: tensor-masking is cleaner.
+- **Graph-trace tests catch padding-path eager breaks** that reshape-only code review misses.
+- **Dynamic reshape idiom**: `ops.reshape(t, (*ops.shape(x)[:-1], -1))` is graph-safe with one `-1` inferred trailing dim.
 - **`range(ops.shape(x)[N])` is graph-broken** under `@tf.function`/jit. Use static `.shape[N]` + fail-loud `ValueError` on None.
-- **`keras.ops.shape(x)[i]` is a DYNAMIC scalar tensor (not Python `None`) on the TF backend.** So `ops.broadcast_to(t, (ops.shape(x)[0], N))` is graph-safe and traces fine in the functional API — a recurring explorer "EAGER BREAK" false-positive (refuted by repro in MoE gating `top_k==num_experts` path). Distinguish from `list(tensor.shape)[i]` which CAN be `None`.
-- **Before adding an "eager-only" guard, check whether host materialization is actually necessary.** `Variable.assign` and `keras.ops.linspace(tensor, tensor, n)` are graph-safe; only `float(convert_to_numpy(...))` + Python-attr mutation force eager.
-- **When removing an eager-only debug warning for graph safety**: keep the ctor arg accepted + stored + serialized (back-compat for saved configs); update docstring; add an in-code NOTE comment.
-
-## Graph-safe training-gate patterns
-
-- **`training is True` is NOT universally applicable.** For layers that must support symbolic-training custom loops: use the masked-factor pattern (`resolve_training_factor` in `utils/tensors.py`).
-- **`keras.ops.cond` is awkward for side-effects** (`add_loss` / `.assign`): tensor-masking (`cast(training) * delta/loss`) is cleaner.
-- **`if training:` crashes under symbolic tensor.** `if training is not False:` fires under `training=None` (wrong). `if training is True:` is the canonical guard.
-- **`model.fit()` passes `training` as python `bool True` in Keras 3.8 / TF 2.18.** Symbolic-tensor case only arises in hand-rolled `@tf.function` custom loops.
-
-## Graph-safe attention patterns
-
-- **Keras functional API uses `compute_output_shape` and does NOT execute `call()` symbolically.**
-- **Dense-with-input-shape-dependent-units stays None-sentinel-in-build + idempotency guard.**
-- **Keras tuple->list shape serialization breaks `isinstance(input_shape, list)` multi-input disambiguation.** Fix: check whether elements are list/tuple (list-of-shapes) vs int/None (single serialized shape).
-- **Performer causal FAVOR+ prefix-sum**: `kv_outer = einsum('bhnf,bhnd->bhnfd',k,v)` -> `kv_cumsum = cumsum(kv_outer,axis=2)` -> `out = einsum('bhnf,bhnfd->bhnd',q,kv_cumsum) / expand_dims(z_causal,-1)`.
-- **Ring/blockwise differentiable assembly**: replace `ops.slice_update` with Python list-append + `ops.concatenate(axis=seq_dim)`.
-
-## Activation / serialization (ffn package)
-
-- **`keras.activations.serialize(keras.activations.get('swish')) == 'silu'`** -- alias canonicalization. Tests asserting a literal activation token after `get()` + serialization MUST assert functional equivalence, not the literal.
-- **A `lambda` activation cannot round-trip through `.keras` for ANY layer.**
-- **All 15 `layers/ffn/` layers use the canonical activation contract**: `keras.activations.get()` in `__init__`, `keras.activations.serialize()` in `get_config`.
+- **`keras.ops.shape(x)[i]` is a DYNAMIC scalar tensor** on the TF backend -- graph-safe. Distinguish from `list(tensor.shape)[i]` which CAN be `None`.
+- **`while True` + `if <traced_tensor> < eps:` is graph-broken.** Replace with bounded `for range(n)`.
+- **`keras.ops.random.uniform` does NOT exist in Keras 3.8.** Random ops live under `keras.random.*`.
 
 ## Keras 3 build-ordering
 
-- **An explicit `build()` that only calls `super().build()` leaves sublayers unbuilt at `.keras` load-time weight-restore.**
 - **Canonical Keras-3 lifecycle**: `None`-sentinel in `__init__` for build-time dims; `if self.built: return` MUST be the FIRST line of `build()`; explicit sublayer `.build()` in parent `build()`; `super().build()` LAST.
-- **Keras sublayer-list accumulators in `build()` are a double-build trap.** Any `build()` that appends to `self.some_list` MUST reset the accumulator at the TOP (or guard via `if self.built: return` first).
-- **`if self.built: return` guard sweep is mechanical and zero-regression** (confirmed: 25 attention files, 14 embedding files, 15 FFN files, 7 activation files, 10 norms files, 5 MoE classes -- 6 sub-package sweeps).
-- **Missing `if self.built: return` does NOT break `.keras` save/load roundtrip** -- Keras's `__call__`-driven build path already no-ops on a built layer (verified Δ=0). The guard's real payoff is tolerating an EXPLICIT second `layer.build(shape)` (which otherwise raises `ValueError: cannot add state ... already built`) and matching the canonical pattern. Don't report a missing guard as a serialization bug.
+- **`if self.built: return` guard sweep is mechanical and zero-regression.**
+- **A weight-bearing sublayer built with a None last-dim Dense crashes build().** If never called in call(), it is DEAD AND build-breaking; remove it entirely.
+- **Missing `if self.built: return` does NOT break `.keras` save/load roundtrip.**
+- **Keras sublayer-list accumulators in `build()` are a double-build trap.** Reset the accumulator at the TOP of build(), or guard via `if self.built: return`.
 - **Manual `child.build(input_shape)` in `parent.build()` required for Keras 3 model-save round-trip.**
 - **`keras.layers.Identity()` is a serializable drop-in for `Lambda(lambda x: x)`.**
 
+## Serialization / __init__ package hygiene
+
+- **`__all__` MUST be `List[str]`, not a list of class objects.**
+- **`x or DEFAULT` for serializable objects skips `keras.<x>.get()`.** Use `keras.regularizers.get(x) or DEFAULT`.
+- **`build()` MUST NOT mutate ctor attrs.** Store normalized form in `self._attr`; keep the ctor attr verbatim.
+- **`register_keras_serializable` keys by bare class name.** NEVER change an existing `package=` string -- it breaks deserialization of saved models.
+- **A missing `return config` in `get_config` returns None silently.** Every new-layer test MUST assert `get_config`/`from_config`.
+
+## Activation / serialization contract
+
+- **`keras.activations.serialize(keras.activations.get('swish')) == 'silu'`** -- alias canonicalization.
+- **A `lambda` activation cannot round-trip through `.keras` for ANY layer.**
+- **Canonical activation pattern**: `keras.activations.get(activation)` in `__init__`, `keras.activations.serialize(self.activation)` in `get_config`.
+
+## Math correctness
+
+- **`__init__` that eagerly calls a `_create_*` helper which can `return None` silently produces a broken model.** Make it fail loud.
+- **Modified-Bessel ratio `I_nu/I_{nu-1}` MUST use the continued-fraction / downward (Miller) recurrence.**
+- **mLSTM/matrix-memory cells REQUIRE the log-domain max-stabilizer m_t.**
+- **Compute STATIC scalars (e.g. attention `scale = 1/sqrt(head_dim)`) with stdlib `math.*`, NOT `keras.ops.*`.**
+- **`compute_output_shape` is a silent functional-API bug surface -- test it against ACTUAL `call` output.**
+- **`tf.linalg.svd` returns `(s, u, v)` with `H = u @ diag(s) @ v^T`.** Kabsch rotation: `R = V @ U^T`. Det-correction: `diag([1,1,det(R)])`. Do NOT unpack as `(U, s, Vt)` or `(U, _, Vt)`.
+
 ## Keras 3 ops and layer-call contracts
 
-- **`keras.ops.normalize(x, axis=-1)` is the canonical L2-normalize idiom.**
-- **`keras.ops.shape()` returns a TUPLE of scalar tensors on the TF backend.**
 - **`keras.ops.fft` surface is narrow.** Available: `fft/fft2/ifft2/rfft/irfft/real/imag`. NOT available: `rfft2/irfft2/angle/complex`.
 - **`keras.ops.stop_gradient` is a FUNCTION, not a context manager.**
-- **A missing `return config` in `get_config` returns None silently.** Every new-layer test MUST assert `get_config`/`from_config` directly.
-- **`compute_output_shape` is a silent functional-API bug surface — test it against ACTUAL `call` output.** keepdims reductions return `[...,1]` (not the reduced shape, not the full input shape); multi-output layers must declare a tuple. Tests that only exercise `call()` pass while shape metadata is wrong. (norms `DMLPlus(model_type='center')`: declared `(B,C)`, actual `(B,1)`.)
-- **Config-factory `validate` and `create` must be cross-checked per-key against the REAL ctor signature.** Whitelist drift is recurring: a first sweep fixed some keys, a second pass found more (`dynamic_tanh` missing 5 ctor params; `max_band_width` missing its `<1` upper bound while classes enforce `0<x<1`). When fixing a factory whitelist, enumerate EVERY key and BOTH bounds, and add a `validate`==`create` agreement test.
-- **Compute STATIC scalars (e.g. attention `scale = 1/sqrt(head_dim)`) with stdlib `math.*`, NOT `keras.ops.*`.**
 - **`keras.ops.random.uniform` does NOT exist in Keras 3.8.** Random ops live under `keras.random.*`.
-- **`while True` + `if <traced_tensor> < eps:` is graph-broken.** Replace with bounded `for range(n)`.
-- **`register_keras_serializable` keys by bare class name.** Use `package=` to disambiguate collisions. NEVER change an existing `package=` string -- it changes the registration KEY and breaks deserialization of already-saved `.keras` models.
-- **When `get_config` serializes a dataclass via `to_dict()`, add a `from_config` class method that rebuilds the dataclass.**
-
-## Embedding sub-package specifics
-
-- **`HierarchicalCodebookEmbedding` is direct-import-only.** Non-standard ctor; not factory-registered.
-- **`PositionEmbeddingSine2D` emits channels-FIRST `(B, 2*num_pos_feats, H, W)`.** Consumers expecting channels-last must transpose.
-- **`ModernBertEmbeddings` has NO ctor defaults** -- all 7 args required. Factory supplies the 4 optional-context defaults.
-- **`ContinuousRoPE.compute_output_shape` returns dim/2** (phase width), NOT dim.
-
-## Numerical / ML algorithm stability
-
-- **Seed BOTH weights AND inputs for any margin-comparison test.** Use `atol=1e-5` for eager-vs-graph comparisons.
+- **`keras.ops.get_graph_feature` does NOT exist** in Keras 3.8. Use `_get_graph_feature` in `layers/geometric/point_cloud_autoencoder.py` (plan_2026-06-15_00924f53/D-001).
+- **`keras.ops.scatter_nd_update` does NOT exist** in Keras 3.8. Use `keras.ops.scatter_update(inputs, indices, updates)` (plan_2026-06-15_00924f53/D-003).
+- **`keras.layers.DepthToSpace` / `keras.ops.depth_to_space` / `keras.ops.nn.depth_to_space` do NOT exist** in Keras 3.8. Use `PixelShuffle2D` from `layers/pixel_unshuffle.py` (plan_2026-06-15_00924f53/D-002; also plan_2026-06-15_39a31d4a/D-003).
+- **`keras.ops.add_n` does NOT exist** in Keras 3.8. Use a fold: `acc = tensors[0]; for t in tensors[1:]: acc = ops.add(acc, t)`.
+- **Keras tensor `.item()` does NOT exist** -- use `float(r)`. NumPy-only; crashes on any non-NumPy tensor. (plan_2026-06-15_39a31d4a dino_v1; plan_2026-06-15_2a23a001/D-004 dino_v3.)
 
 ## XLA / GPU kernel compatibility
 
@@ -133,6 +142,13 @@
 - **Use `dl_techniques.utils.logger` only -- no `print`.**
 - **Single GPU jobs only.** Never spawn parallel training runs.
 - **ConvNeXt V1/V2 heads emit raw logits.** Trainers must compile with `from_logits=True`.
+- **DETR is functional** (commit 072df479, 21 tests; old SYSTEM.md "DETR broken" invariant was stale as of plan_2026-06-15_b5cec9e4).
+- **Model dir count is 70** (not 71; __pycache__ inflates naive directory listings).
+- **Canonical model smoke harness**: `scripts/verify_models_smoke.py` (86-entry registry) is the single instrument for build+forward compliance across all 70 model packages. Re-run: `CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src TF_CPP_MIN_LOG_LEVEL=3 .venv/bin/python scripts/verify_models_smoke.py [--only <name>]`.
+- **Harness-recipe-error triage**: when a first-pass sweep shows many FAILs, inspect the traceback frame origin before touching model source. Harness lambda frame = recipe error (fix the registry); model source frame = model bug. In the plan_2026-06-15_e6a0391c sweep, 27/40 FAILs were recipe errors (wrong variant, wrong image size, wrong input format).
+- **Keras-3 ops gaps (confirmed in sweep)**: `keras.ops` has no `gather` -- use `ops.take(x, idx, axis=0)`; `ops.arange` returns int32, cannot multiply by Python float without explicit cast to float32; convnext `padding="valid"` with kernel==stride collapses small inputs to 0x0 spatial map -> NaN -- use `"same"` (safe when kernel==stride; output shape unchanged for stride-divisible inputs).
+- **SAM multi-bug chain**: image_encoder has 3 Keras-3 bugs (all fixed, D-004); mask_decoder has a separate multi-bug chain -- hit the 3-strike leash. XFAIL until a dedicated fix plan.
+- **mobile_clip is non-functional**: references backbones mci0/mci1/mci2/vit_b16 absent from keras.applications. Non-functional until those backbones are ported.
 
 ## git safety in EXECUTE
 
