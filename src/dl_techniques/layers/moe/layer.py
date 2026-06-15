@@ -285,8 +285,6 @@ class MixtureOfExperts(keras.layers.Layer):
         routing decision.  This is computationally O(N) not O(k) but avoids
         scatter/gather ops that are problematic in graph mode.
         """
-        num_tokens = ops.shape(inputs_flat)[0]
-
         # Determine output dimension from expert config
         ffn_config = self.expert_config.ffn_config
         output_dim = ffn_config.get('output_dim', None) or ffn_config.get('d_model', None)
