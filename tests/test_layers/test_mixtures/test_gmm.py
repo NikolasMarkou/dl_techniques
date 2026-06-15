@@ -375,3 +375,25 @@ class TestGMMLayerGraphMode:
         assert layer.compute_output_shape((8, 3, 16)) == (8, 5)
         y = layer(np.random.normal(0, 1, (8, 3, 16)).astype(np.float32))
         assert tuple(y.shape) == (8, 5)
+
+    @pytest.mark.parametrize("output_mode", ["assignments", "mixture"])
+    def test_mixed_float16_forward(self, output_mode: str) -> None:
+        """Forward must run under a mixed_float16 policy (float32 density math,
+        compute_dtype output) without the autocast half-vs-float Sub crash.
+        """
+        original_policy = keras.mixed_precision.global_policy()
+        try:
+            keras.mixed_precision.set_global_policy("mixed_float16")
+            layer = GMMLayer(
+                n_components=4, output_mode=output_mode, mean_initializer="glorot_normal"
+            )
+            x = np.random.normal(0, 1, (8, 16)).astype(np.float32)
+            y = layer(x)
+            # Layer must emit the policy compute dtype and be finite.
+            assert keras.backend.standardize_dtype(y.dtype) == "float16"
+            y_np = np.asarray(ops.convert_to_numpy(y), dtype=np.float32)
+            assert not np.isnan(y_np).any() and not np.isinf(y_np).any()
+            # Internal parameters stay float32 (autocast=False).
+            assert keras.backend.standardize_dtype(layer.means.dtype) == "float32"
+        finally:
+            keras.mixed_precision.set_global_policy(original_policy)

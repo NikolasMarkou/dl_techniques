@@ -296,7 +296,8 @@ class GMMLayer(keras.layers.Layer):
             shape=(self.n_components, self.feature_dims),
             initializer=self.log_variance_initializer,
             trainable=True,
-            dtype=self.dtype
+            dtype=self.dtype,
+            autocast=False  # mixed-precision: keep float32 for the density math
         )
 
         # Initialize mixing logits (uniform mixture at start)
@@ -305,7 +306,8 @@ class GMMLayer(keras.layers.Layer):
             shape=(self.n_components,),
             initializer="zeros",
             trainable=True,
-            dtype=self.dtype
+            dtype=self.dtype,
+            autocast=False  # mixed-precision: keep float32 for the density math
         )
 
         # Call parent build at the end
@@ -383,14 +385,21 @@ class GMMLayer(keras.layers.Layer):
         else:
             initializer = self.mean_initializer
 
-        # Create means weight
+        # Create means weight.
+        # Mixed-precision: autocast=False keeps the parameter in variable_dtype (float32)
+        # inside call() under a mixed_float16 policy. The diagonal-Gaussian density
+        # (exp/log/softmax/division) is numerically unsafe in float16, so the forward is
+        # computed in float32 and the OUTPUT is cast to compute_dtype on return. Without
+        # this, the autocast float16 weight mismatches the float32 inputs
+        # (InvalidArgumentError: Sub half vs float).
         self.means = self.add_weight(
             name="means",
             shape=(self.n_components, self.feature_dims),
             initializer=initializer,
             regularizer=self.mean_regularizer,
             trainable=True,
-            dtype=self.dtype
+            dtype=self.dtype,
+            autocast=False
         )
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
@@ -570,8 +579,11 @@ class GMMLayer(keras.layers.Layer):
         :return: Output tensor based on output_mode.
         :rtype: keras.KerasTensor
         """
-        # Cast inputs to layer dtype for numerical stability
-        inputs = keras.ops.cast(inputs, self.dtype)
+        # Cast inputs to variable_dtype (float32) so the density math runs in full
+        # precision and matches the autocast=False weights under a mixed_float16 policy.
+        # The output is cast back to compute_dtype before returning. Under the default
+        # float32 policy this is a no-op.
+        inputs = keras.ops.cast(inputs, self.variable_dtype)
 
         # Reshape input for clustering
         reshaped_inputs = self._reshape_for_clustering(inputs)
@@ -587,7 +599,9 @@ class GMMLayer(keras.layers.Layer):
         # python-True keeps the exact unmasked add_loss; the symbolic path multiplies by the
         # 0/1 factor.
         if self.isometric_regularizer_strength > 0:
-            training_factor = resolve_training_factor(training, self.compute_dtype)
+            # variable_dtype factor so the masked loss term stays float32-consistent
+            # under a mixed_float16 policy.
+            training_factor = resolve_training_factor(training, self.variable_dtype)
             if training_factor is not None:
                 loss = self._isometric_regularization_loss()
                 self.add_loss(
@@ -602,8 +616,9 @@ class GMMLayer(keras.layers.Layer):
             # Reconstruct inputs as responsibility-weighted component means
             output = keras.ops.matmul(responsibilities, self.means)
 
-        # Reshape output to match desired shape
-        return self._reshape_output(output)
+        # Reshape, then cast to compute_dtype so the layer emits the policy's compute
+        # dtype (float16 under mixed precision; no-op under float32).
+        return keras.ops.cast(self._reshape_output(output), self.compute_dtype)
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.

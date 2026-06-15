@@ -708,6 +708,26 @@ class TestKMeansLayerGraphAndRoundTrip:
         assert np.allclose(m0, ops.convert_to_numpy(layer.centroid_momentum)), \
             "symbolic training=False must not move the momentum buffer"
 
+    @pytest.mark.parametrize("output_mode", ["assignments", "mixture"])
+    def test_mixed_float16_forward(self, output_mode: str) -> None:
+        """Forward must run under a mixed_float16 policy (float32 distance/softmax math,
+        compute_dtype output) without the autocast half-vs-float Sub crash.
+        """
+        original_policy = keras.mixed_precision.global_policy()
+        try:
+            keras.mixed_precision.set_global_policy("mixed_float16")
+            layer = KMeansLayer(
+                n_clusters=4, output_mode=output_mode, centroid_initializer="glorot_normal"
+            )
+            x = np.random.normal(0, 1, (8, 16)).astype(np.float32)
+            y = layer(x)
+            assert keras.backend.standardize_dtype(y.dtype) == "float16"
+            y_np = np.asarray(ops.convert_to_numpy(y), dtype=np.float32)
+            assert not np.isnan(y_np).any() and not np.isinf(y_np).any()
+            assert keras.backend.standardize_dtype(layer.centroids.dtype) == "float32"
+        finally:
+            keras.mixed_precision.set_global_policy(original_policy)
+
     def test_keras_model_round_trip(self, basic_config: Dict[str, Any]) -> None:
         """Full .keras save/load round-trip must reconstruct an identical layer."""
         import os

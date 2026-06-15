@@ -310,13 +310,16 @@ class KMeansLayer(keras.layers.Layer):
         # Initialize centroids using add_weight
         self._initialize_centroids()
 
-        # Initialize momentum buffer with zeros
+        # Initialize momentum buffer with zeros.
+        # Mixed-precision: autocast=False keeps the EMA buffer in variable_dtype (float32)
+        # so the momentum assign/assign_add stays full precision (see centroids below).
         self.centroid_momentum = self.add_weight(
             name="centroid_momentum",
             shape=(self.n_clusters, self.feature_dims),
             initializer="zeros",
             trainable=False,
-            dtype=self.dtype
+            dtype=self.dtype,
+            autocast=False
         )
 
         # Call parent build at the end
@@ -394,14 +397,20 @@ class KMeansLayer(keras.layers.Layer):
         else:
             initializer = self.centroid_initializer
 
-        # Create centroids weight
+        # Create centroids weight.
+        # Mixed-precision: autocast=False keeps the centroids in variable_dtype (float32)
+        # inside call() under a mixed_float16 policy. The distance / temperature-softmax
+        # math runs in float32 (matching the float32 inputs cast) and the output is cast to
+        # compute_dtype on return. Without this, the autocast float16 weight mismatches the
+        # float32 inputs (InvalidArgumentError: Sub half vs float).
         self.centroids = self.add_weight(
             name="centroids",
             shape=(self.n_clusters, self.feature_dims),
             initializer=initializer,
             regularizer=self.centroid_regularizer,
             trainable=True,
-            dtype=self.dtype
+            dtype=self.dtype,
+            autocast=False
         )
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
@@ -633,8 +642,11 @@ class KMeansLayer(keras.layers.Layer):
         :return: Output tensor based on output_mode.
         :rtype: keras.KerasTensor
         """
-        # Cast inputs to layer dtype for numerical stability
-        inputs = keras.ops.cast(inputs, self.dtype)
+        # Cast inputs to variable_dtype (float32) so the distance / softmax math runs in
+        # full precision and matches the autocast=False centroids under a mixed_float16
+        # policy. The output is cast back to compute_dtype before returning. Under the
+        # default float32 policy this is a no-op.
+        inputs = keras.ops.cast(inputs, self.variable_dtype)
 
         # Reshape input for clustering
         reshaped_inputs = self._reshape_for_clustering(inputs)
@@ -649,7 +661,9 @@ class KMeansLayer(keras.layers.Layer):
         # (custom @tf.function loop) AND keeps a symbolic False a true no-op, without ever
         # coercing a tensor to a python bool. Supersedes the prior `if training is True:`
         # gate which silently skipped the symbolic case.
-        training_factor = resolve_training_factor(training, self.compute_dtype)
+        # variable_dtype factor so the masked centroid update stays float32-consistent
+        # under a mixed_float16 policy (matches the autocast=False weights).
+        training_factor = resolve_training_factor(training, self.variable_dtype)
         if training_factor is not None:
             self._update_centroids(reshaped_inputs, assignments, training_factor)
 
@@ -660,8 +674,9 @@ class KMeansLayer(keras.layers.Layer):
             # Reconstruct inputs using weighted centroids
             output = keras.ops.matmul(assignments, self.centroids)
 
-        # Reshape output to match desired shape
-        return self._reshape_output(output)
+        # Reshape, then cast to compute_dtype so the layer emits the policy's compute
+        # dtype (float16 under mixed precision; no-op under float32).
+        return keras.ops.cast(self._reshape_output(output), self.compute_dtype)
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration for serialization.
