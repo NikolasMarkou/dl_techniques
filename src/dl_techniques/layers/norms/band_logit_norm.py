@@ -38,6 +38,16 @@ class BandLogitNorm(keras.layers.Layer):
     via ``tanh`` to the range ``[1 - max_band_width, 1]``. This provides
     controlled normalization strength while preserving directional information.
 
+    .. note::
+        **Degenerate adaptive component (known limitation).** The "learned scaling"
+        is produced by a ``LayerNormalization`` applied to the L2-norm tensor, which
+        has shape ``(..., 1)`` (``keepdims=True``). Normalizing a single-element axis
+        yields 0, so ``tanh(4 * 0) = 0`` and the band scale collapses to the constant
+        ``1 - 0.5 * max_band_width`` regardless of input. In practice this layer
+        therefore behaves as L2-normalization followed by a constant band-floor scale;
+        the input-adaptive component is inert. Retained as-is for backward
+        compatibility (callers exist in ``train/rms_variants_train/``).
+
     **Architecture Overview:**
 
     .. code-block:: text
@@ -122,8 +132,14 @@ class BandLogitNorm(keras.layers.Layer):
         self.epsilon = epsilon
         self.max_band_width = max_band_width
 
-        # Initialize normalization layer (will be properly configured in build())
-        self.norm = None
+        # Create the normalization sublayer here (construction is input-independent;
+        # canonical Keras-3 pattern). It is built against the norm-tensor shape in
+        # build(). See the class-docstring note re: its degenerate (..., 1) input.
+        self.norm = keras.layers.LayerNormalization(
+            axis=-1,
+            epsilon=self.epsilon,
+            name=f"{self.name}_layer_norm",
+        )
 
         logger.debug(
             f"Initialized BandLogitNorm with "
@@ -150,26 +166,20 @@ class BandLogitNorm(keras.layers.Layer):
             raise ValueError(f"epsilon must be positive, got {epsilon}")
 
     def build(self, input_shape) -> None:
-        """Build the layer by initializing the LayerNormalization sublayer.
+        """Build the LayerNormalization sublayer against the norm-tensor shape.
 
         :param input_shape: Shape of the input tensor.
         :type input_shape: tuple
         """
-        super().build(input_shape)
+        if self.built:
+            return
 
-        # Initialize LayerNormalization with the same axis configuration
-        # This normalizes the L2 norms to have zero mean and unit variance
-        self.norm = keras.layers.LayerNormalization(
-            axis=-1,  # Normalize across the last dimension of the norm tensor
-            epsilon=self.epsilon,
-            name=f"{self.name}_layer_norm"
-        )
-
-        # Build the normalization layer
-        # The norm tensor will have shape [..., 1] due to keepdims=True
+        # The norm tensor fed to self.norm has shape [..., 1] (keepdims=True).
         norm_shape = list(input_shape)
         norm_shape[self.axis] = 1
         self.norm.build(norm_shape)
+
+        super().build(input_shape)
 
     def call(
             self,
