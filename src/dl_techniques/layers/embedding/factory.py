@@ -7,6 +7,7 @@ This factory supports patch embeddings, learned positional embeddings, various
 forms of rotary position embeddings (RoPE), and BERT-style embeddings.
 """
 
+import math
 import keras
 from typing import Dict, Any, Literal, Optional
 
@@ -25,6 +26,9 @@ from .positional_embedding import PositionalEmbedding
 from .rotary_position_embedding import RotaryPositionEmbedding
 from .multi_axis_rope import Ideogram4MRoPE
 from .scalar_sinusoidal_embedding import ScalarSinusoidalEmbedding
+from .positional_embedding_sine_2d import PositionEmbeddingSine2D
+from .modern_bert_embeddings import ModernBertEmbeddings
+from .albert_factorized_embedding import AlbertFactorizedEmbedding
 
 # ---------------------------------------------------------------------
 # Type definition for Embedding types
@@ -39,6 +43,9 @@ EmbeddingType = Literal[
     'continuous_rope',
     'continuous_sincos',
     'bert_embeddings',
+    'modern_bert_embeddings',
+    'albert_factorized',
+    'positional_sine_2d',
     'scalar_sinusoidal',
     'mrope_ideogram4'
 ]
@@ -138,6 +145,41 @@ EMBEDDING_REGISTRY: Dict[str, Dict[str, Any]] = {
         },
         'use_case': 'BERT-style language models combining word, positional, and segment embeddings with sum aggregation and normalization.'
     },
+    'modern_bert_embeddings': {
+        'class': ModernBertEmbeddings,
+        'description': 'ModernBERT embeddings: word + token-type embeddings, normalized (no learned positional embedding; RoPE is applied in attention).',
+        'required_params': ['vocab_size', 'hidden_size', 'type_vocab_size'],
+        'optional_params': {
+            'initializer_range': 0.02,
+            'layer_norm_eps': 1e-12,
+            'dropout_rate': 0.0,
+            'use_bias': True
+        },
+        'use_case': 'ModernBERT-style encoders where positional information is injected by rotary attention rather than a learned position embedding.'
+    },
+    'albert_factorized': {
+        'class': AlbertFactorizedEmbedding,
+        'description': 'ALBERT-style factorized embedding: vocab -> bottleneck_dim -> output_dim via a two-matrix decomposition.',
+        'required_params': ['vocab_size', 'bottleneck_dim', 'output_dim'],
+        'optional_params': {
+            'embeddings_initializer': 'uniform',
+            'embeddings_regularizer': None,
+            'projection_regularizer': None
+        },
+        'use_case': 'Parameter-efficient token embeddings where a small bottleneck is projected up to the model hidden size.'
+    },
+    'positional_sine_2d': {
+        'class': PositionEmbeddingSine2D,
+        'description': 'Fixed 2D sinusoidal positional encoding for image feature maps. NOTE: emits channels-FIRST (B, 2*num_pos_feats, H, W); callers must transpose to channels-last as needed.',
+        'required_params': [],
+        'optional_params': {
+            'num_pos_feats': 64,
+            'temperature': 10000.0,
+            'normalize': True,
+            'scale': 2 * math.pi
+        },
+        'use_case': 'DETR / ViT-style detectors needing a non-learnable 2D positional grid over a convolutional feature map.'
+    },
     'scalar_sinusoidal': {
         'class': ScalarSinusoidalEmbedding,
         'description': 'Sinusoidal scalar (timestep) embedding refined by a 2-layer SiLU MLP, for the Ideogram4 DiT.',
@@ -202,7 +244,8 @@ def validate_embedding_config(embedding_type: str, **kwargs: Any) -> None:
 
     # Common positive integer checks
     positive_params = ['dim', 'embed_dim', 'head_dim', 'max_seq_len', 'patch_size', 'ndim',
-                      'vocab_size', 'hidden_size', 'max_position_embeddings', 'type_vocab_size']
+                      'vocab_size', 'hidden_size', 'max_position_embeddings', 'type_vocab_size',
+                      'bottleneck_dim', 'output_dim', 'num_pos_feats']
     for param in positive_params:
         if param in kwargs and kwargs[param] is not None:
             value = kwargs[param]
@@ -261,6 +304,10 @@ def validate_embedding_config(embedding_type: str, **kwargs: Any) -> None:
             valid_norm_types = ['layer_norm', 'rms_norm', 'band_rms', 'batch_norm']
             if kwargs['normalization_type'] not in valid_norm_types:
                 raise ValueError(f"normalization_type must be one of {valid_norm_types}, got {kwargs['normalization_type']}")
+
+    if embedding_type == 'positional_sine_2d':
+        if 'temperature' in kwargs and kwargs['temperature'] <= 0:
+            raise ValueError(f"temperature must be positive, got {kwargs['temperature']}")
 
 
 def create_embedding_layer(
