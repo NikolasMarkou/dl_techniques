@@ -516,8 +516,13 @@ class DMLPlus(keras.layers.Layer):
         if self.model_type == "focal":
             return reduced_shape
         else:
-            # Center model returns (max_norm, norm_factor)
-            return (reduced_shape, input_shape)
+            # Center model returns (max_norm, norm_factor). norm_factor is the
+            # keepdims L2 norm: the reduced axis collapses to size 1 (it is NOT
+            # removed), so the shape is input_shape with that axis set to 1.
+            norm_factor_list = list(input_shape)
+            reduce_axis = self.axis if self.axis != -1 else len(norm_factor_list) - 1
+            norm_factor_list[reduce_axis] = 1
+            return (reduced_shape, tuple(norm_factor_list))
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization.
