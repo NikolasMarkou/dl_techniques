@@ -12,7 +12,7 @@ References:
 
 import keras
 from typing import Optional, List, Literal
-from dl_techniques.layers.transformers.progressive_focused_transformer_block import PFTBlock
+from dl_techniques.layers.transformers.progressive_focused_transformer import PFTBlock
 
 
 @keras.saving.register_keras_serializable()
