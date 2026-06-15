@@ -182,3 +182,10 @@
 | plan_2026-06-14_ab855e7e | 2026-06-14 | Resolve the verified residue (F2-F7) from a fresh adversaria |  |
 | plan_2026-06-14_077a2a35 | 2026-06-14 | 7th-pass remediation of `src/dl_techniques/layers/attention/ |  |
 | plan_2026-06-14_33b77a7a | 2026-06-14 | Complete the deferred `ops.sqrt`-in-`call()` consistency swe |  |
+| plan_2026-06-14_60541575 | 2026-06-14 | Remediate every confirmed defect from the deep review of `sr |  |
+| plan_2026-06-14_43ff1d31 | 2026-06-14 | Resolve the two in-scope DEFERRED items left by the prior FF |  |
+| plan_2026-06-14_b5c957c5 | 2026-06-14 | Make `KANLinear.update_grid_from_samples` graph-compatible ( |  |
+| plan_2026-06-14_7384c2e3 | 2026-06-14 | Deep comprehensive review + fix of all mixture layers in `sr |  |
+| plan_2026-06-14_5e80bd3e | 2026-06-14 | Make the mixtures layers' training-only side-effects (KMeans |  |
+| plan_2026-06-15_9dbb87c1 | 2026-06-15 | Bring every layer in `src/dl_techniques/layers/embedding/` i |  |
+| plan_2026-06-15_0205772c | 2026-06-15 | Deep review + fix of `src/dl_techniques/layers/activations`: |  |

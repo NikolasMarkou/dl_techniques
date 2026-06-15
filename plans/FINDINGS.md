@@ -36,167 +36,149 @@
 - **`current_phase` / `_global_step` counters**: `add_weight(trainable=False, dtype="float32")` — int32 fails CPU/GPU device placement.
 <!-- /COMPRESSED-SUMMARY -->
 
-## plan_2026-06-14_33b77a7a
-### Goal
-Complete the deferred `ops.sqrt`-in-`call()` consistency sweep (D-003 of plan_2026-06-14_077a2a35).
-Precompute STATIC attention scales as Python floats (D-002 pattern: `1.0/math.sqrt(float(static_int))`),
-reuse existing precomputed attrs where present. Behavior-preserving. Leave genuinely-dynamic sqrt.
-
-### Full sqrt-site census (grep of attention/*.py)
-
-### STATIC — precompute / reuse (IN SCOPE)
-| Site | Current | Static source | Fix | Where to precompute |
-|------|---------|---------------|-----|---------------------|
-| `performer_attention.py:245` | `projection / ops.sqrt(ops.cast(self.head_dim, dtype))` | head_dim (init:162) | REUSE `self.scale` (init:163 = 1/np.sqrt(head_dim)) -> `projection * self.scale` | already exists |
-| `performer_attention.py:289` | `features * ops.sqrt(2.0/ops.cast(self.nb_features, dtype))` | nb_features (init:149) | new `self._feature_scale = math.sqrt(2.0/float(nb_features))` -> `features * self._feature_scale` | `__init__` |
-| `lighthouse_attention.py:651` | `ops.cast(1.0/ops.sqrt(ops.cast(self.head_dim,dt)),dt)` | head_dim | REUSE `self._scale` (init:340 = 1/float(head_dim)**0.5) -> `ops.cast(self._scale, q_t.dtype)` | already exists |
-| `lighthouse_attention.py:763` | `ops.cast(1.0/ops.sqrt(ops.cast(D,dt)),dt)` D=head_dim (742) | head_dim | REUSE `self._scale` | already exists |
-| `capsule_routing_attention.py:519` | `attention_logits / ops.sqrt(ops.cast(self.actual_key_dim,dt))` | actual_key_dim resolved in build (341) | new `self._inv_sqrt_key_dim = 1.0/math.sqrt(float(actual_key_dim))` -> `attention_logits * self._inv_sqrt_key_dim` | **`build()`** (after line 342) |
-| `non_local_attention.py:514` | `scores / ops.sqrt(d_k)` d_k=cast(key_value_channels) | key_value_channels (init:284) | new `self._inv_sqrt_kv = 1.0/math.sqrt(float(key_value_channels))` -> `scores * self._inv_sqrt_kv` (dot_product mode only; gaussian unaffected) | `__init__` (after 284) |
-
-### DYNAMIC — genuine runtime tensors (OUT OF SCOPE, leave as-is)
-| Site | Why dynamic |
-|------|-------------|
-| `window_attention.py:489` | `sqrt(cast(N_actual))` N_actual = `ops.shape(inputs)[1]` runtime seq len |
-| `wave_field_attention.py:556` | `sqrt(sum(square(k)))` — per-vector L2 norm over a tensor |
-| `capsule_routing_attention.py:599` | `sqrt(squared_norm + eps)` — squash norm over a tensor |
-
-### ALREADY-FIXED precedent (do not touch)
-gated:249, gqa:202, mla:242, ring:162, shared_weights_cross:169, diff:246, mhxa:237, hopfield:242 (AF2),
-wave_field:249, ideogram4:126, mmdit:158, performer:163(self.scale), lighthouse:340(_scale), anchor:222, rpc:191.
-
+## plan_2026-06-15_0205772c
 ### Index
-| ID | Topic | File | Summary |
-|----|-------|------|---------|
-| CENSUS | sqrt-site classification | findings.md (this file) | 6 static call()-time sites to fix across 5 files; 3 dynamic left; reuse self.scale/_scale at 4 sites, 2 new attrs. |
-| TIMING | precompute location | findings.md | non_local+performer in __init__; capsule in build() (actual_key_dim needs input_shape). |
-| MP | mixed-precision test coverage | findings.md | NONE of lighthouse/performer/capsule/non_local have MP tests. float32 is the live/tested path. |
+
+| # | Finding | Severity | File:line | Status |
+|---|---------|----------|-----------|--------|
+| F1 | `ExpandedActivation.build()` (parent of xATLU/xGELU/xSiLU) lacks `if self.built: return` guard; `add_weight('alpha')` doubles on re-build | HIGH | expanded_activations.py:286 | VERIFIED |
+| F2 | `DifferentiableStep.build()` lacks guard; doubles slope+shift weights | HIGH | differentiable_step.py:160 | VERIFIED |
+| F3 | `ThreshMax.build()` lacks guard; doubles slope weight | HIGH | thresh_max.py:174 | VERIFIED |
+| F4 | `RoutingProbabilitiesLayer.build()` lacks `if self.built: return` (7 add_weight); super().build() at 505 is fine but no top guard | HIGH | routing_probabilities.py:499 | VERIFIED |
+| F5 | `DifferentiableStep.__init__` mutable default instances: `keras.regularizers.L2(1e-3)`, `ValueRangeConstraint(-1,+1)` (Pitfall 8; stateless so benign at runtime, contract violation) | MEDIUM | differentiable_step.py:139-140 | VERIFIED |
+| F6 | Factory `differentiable_step` registry sets `shift_constraint: None`, OVERRIDING class default `ValueRangeConstraint(-1,+1)` → factory-built layer silently loses constraint. Also shared L2 instance. | HIGH | factory.py:102-103 | VERIFIED |
+| F7 | Factory `thresh_max` registry: `trainable_slope: True` contradicts class default `False` (test asserts False); `slope_regularizer L2_custom(-1e-3)` vs class `-1e-4`; shared mutable instances | HIGH | factory.py:269-272 | VERIFIED |
+| F8 | `MonotonicityLayer._sigmoid` does NOT guarantee monotonicity (advertised "non-decreasing"). Per-element deviation `±0.25*(max-min)` can exceed adjacent spacing `(max-min)/(n-1)` → inversions; clip does not restore order. | MEDIUM (correctness) | monotonicity_layer.py:505-509 | VERIFIED |
+| F9 | Build guards absent on weightless build() overrides (adaptive_softmax:192, monotonicity build, probability_output:211) — re-validate/re-build-sublayer on double call; cheap consistency fix | LOW | (3 files) | VERIFIED |
+| F10 | `elu_plus_one_plus_epsilon` uses `keras.activations.elu` + `keras.backend.epsilon()` — graph-SAFE (traceable + python float) but not `keras.ops`; purity nit | LOW | expanded_activations.py:523 | VERIFIED |
+
+### Explorer claims DOWNGRADED / REFUTED on source-verify (do NOT fix)
+- `len(inputs.shape)` in monotonicity_layer (319/324/495), routing (663/508), monotonicity build: returns **static rank** as Python int → graph-SAFE. NOT a bug. (Explorer A/C/D overstated "graph-unsafe".)
+- `keras.activations.elu/softmax`, `keras.backend.epsilon()`: graph-traceable / python float → NOT eager. Downgraded to F10 LOW.
+- `ProbabilityOutput` absent from factory: INTENTIONAL — it is a meta-dispatcher that itself instantiates activation layers (softmax/sparsemax/routing strategies). Direct-import-only is correct; do NOT register. Document only.
+- `probability_output.get_config` stores `type_config` verbatim: edge case (nested keras objects); current serialization tests pass. OUT of scope (no expansion).
+- `SaturatedMish.mish_at_alpha` not in config: deterministically rederived from `alpha`. Not a bug.
+- `relu_k.py:136` raises TypeError vs ValueError: LOW style, OUT of scope.
 
 ### Key Constraints
-- **HARD**: behavior-preserving. Precomputed Python-float scale must equal the old `ops.sqrt` result in
-  float32 (the tested path). Verify per-site with `np.float32(new) == np.float32(old)`; tests are the oracle.
-  Any forward test shift -> revert that site (it is consistency-only, not worth a regression).
-- **HARD**: precompute timing — capsule MUST be in build() (actual_key_dim is None until build resolves
-  embed_dim from input_shape). Precomputing in __init__ would crash/use None.
-- **HARD**: non_local fix applies ONLY to `dot_product` mode (line 514); `gaussian` mode has no scaling — do not add any.
-- **SOFT**: reuse existing precomputed attrs (self.scale / self._scale) rather than add duplicates (DRY).
+
+- **[HARD]** Fix-only, NO functionality expansion. Target existing defects + contract gaps; do not add features. (user directive)
+- **[HARD]** All `call()` paths must be graph-compatible — no eager ops. (user: "no EAGER SHIT"). VERIFIED: grep shows NO `tf.*`, NO `.numpy()`, NO `int(tensor)` anywhere in the package. Graph-safety is already largely sound; the genuine issue space is idempotency guards, factory/class default consistency, and one math-correctness bug.
+- **[HARD]** Keras-3 contract per `research/2026_keras_custom_models_instructions.md`: `if self.built: return` first line of every build() (repo-wide convention, established for embeddings iter-1/step-2 commit b8b88fe3, and FFN/attention packages per SYSTEM.md).
+- **[HARD]** Full save/load round-trip must keep passing. Baseline: **367 passed / 0 failed** (`tests/test_layers/test_activations/`, CUDA_VISIBLE_DEVICES=1, 69s).
+- **[SOFT]** Factory registry `optional_params` should mirror class defaults (advertised via `get_activation_info()`); divergence is the bug.
+- **Blast radius**: `MonotonicityLayer` has ZERO src callers outside the package. Factory keys `thresh_max`/`differentiable_step` have ZERO src callers. `ThreshMax`/`DifferentiableStep` used directly only by capsule_routing_attention.py (direct class, unaffected by factory changes). Low risk across the board.
 
 ### Corrections
 *Append [CORRECTED iter-N] entries here when earlier findings prove wrong.*
 
-## plan_2026-06-14_077a2a35
-### Prior-work context (CRITICAL — read before exploring)
-
-`src/dl_techniques/layers/attention/` has been reviewed by ~6 closed plans TODAY (2026-06-14).
-Current ground-truth baseline: **989 passed / 27 skipped / 0 failed** (per ab855e7e CLOSE).
-HEAD = 97996298. This is a 7th pass — value is in (a) deferred items, (b) fresh adversarial residue.
-
-Prior plans + what they fixed:
-- `0c5d4a21`: F1-F16. Factory registration 23->27, build-guard sentinels (hopfield/nonlocal/PFA/tripse),
-  fnet fft guard, performer/rpc regularizer round-trip, README/GUIDE param-name fixes, __init__ exports.
-- `adaddf34`: NonLocal F18 (gaussian Q/K/V dim alignment) + F19 (kernel_size normalize) + new test.
-- `7734bacd`: "Deep review" — capsule A1/A2, W1-W4 docs/wiring, C1-C3 contract docs, Perceiver .keras
-  fix (D-003). Deferred S1(fixed)/S2/S3/S4 as xfail.
-- `b9456f74`: Resolved S2 (PFA SW-MSA mask), S3 (Performer causal einsum), S4 (Ring gradient list+concat),
-  L1/L2/F20 (29 build() idempotency guards across 25 files), D1-D3 docs/exports. 939 passed.
-- `ab855e7e`: Fresh adversarial pass F2-F6. Precompute static scale (gated/gqa/mobile_mqa),
-  ring/anchor static-seq fail-loud guards, factory optional_params completion, mobile_mqa mask doc,
-  MLA training= forward. 989 passed.
-
-### KNOWN DEFERRED / OPEN ITEMS (the user explicitly asked to check these)
-- **F7 (ab855e7e)**: `hopfield_attention.py` builds K/V Dense with query_shape only; cross-attention with
-  a different K/V feature dim gets a wrong-shaped kernel. No caller today; self-attention path correct.
-  Inline-commented. -> VERIFY + assess fix.
-- **F8 (ab855e7e)**: `wave_field_attention` and `single_window_attention` have STANDARD call sigs but are
-  NOT factory-registered. -> VERIFY + assess registration.
-- **NOTE 1 (b9456f74)**: Performer runs dead non-causal compute even when causal=True (wasted FLOPs,
-  correctness-neutral). Optional `if not self.causal:` guard.
-- **NOTE 2 (b9456f74)**: mobile_mqa add_weight after super().build() — latent smell, idempotent-safe.
-- **C2 (b9456f74)**: package= on bare-registered classes changes registration KEY -> breaks already-saved
-  .keras deserialization. Document-only, NOT a fix.
-- **call() param renames**: D-007 (0c5d4a21) — renaming breaks serialized configs. Document-only.
-
-### ANCHOR DEBT
-~38 pre-existing foreign-plan orphan ERRORs from validate-plan.mjs at REFLECT. NOT blockers; triage by
-plan-id (project_validate_plan_anchor_debt memory).
-
+## plan_2026-06-15_9dbb87c1
 ### Index
-| ID | Topic | File | Summary |
-|----|-------|------|---------|
-| FCT | Factory optional_params gaps | findings/factory-docs-audit.md | CONFIRMED: 7 registry entries silently drop real ctor params — capsule_routing/multi_head/group_query/perceiver/shared_weights_cross miss probability_type/probability_config/qk_norm_type/qk_norm_kwargs; non_local misses output_activation_args; window/window_zigzag miss kan_* . Same class ab855e7e fixed for anchor/channel/spatial/tripse — these were MISSED. |
-| F8 | wave_field+single_window unregistered | findings/deferred-items.md | CLEAN-FIX: both standard call sigs, additive registry+Literal+import. |
-| F7 | hopfield cross-attn KV-dim build | findings/deferred-items.md | CLEAN-FIX: build() uses query_shape for K/V Dense; wrong for cross-attn; byte-identical for self-attn (zero callers). |
-| DOC | README/__all__ doc gaps | findings/factory-docs-audit.md | README:82 wrongly says capsule_routing has no probability hooks; window class column shows class not factory fn; caveats table missing spatial/non_local; __all__ omits list_attention_types/get_attention_requirements. |
-| N1 | performer dead non-causal compute | findings/deferred-items.md | CLEAN-FIX (≤8 lines): non-causal block fully recomputed+discarded when causal=True. if/else guard, behavior-identical. |
-| AF1 | hopfield value_dim=None get_config | findings/adversarial-correctness.md | LOW: get_config serializes resolved int not original None. Round-trip functionally equiv. 1-line raw-arg store. |
-| SQRT | ops.sqrt-in-call() consistency | findings/adversarial-correctness.md | MED/consistency, NOT bugs: hopfield:431, performer:245/289, lighthouse:651/763, capsule:519, non_local:514 use ops.sqrt in call(). Call-time = correct output; only a precompute-consistency gap. Candidate DEFER (YAGNI). |
-| AF3 | mobile_mqa get_config key-delete | findings/adversarial-correctness.md | NOT-A-BUG: standard from_config re-injects; works. Skip. |
-| FLAKY | capsule graph test suite-order flake | findings/test-ground-truth.md | MED: fails in full suite, passes isolated. Test-isolation/global-state, not source. Diagnose. |
+
+| ID | Topic | File | Status |
+|----|-------|------|--------|
+| F1 | Factory/spine wiring + `__init__` defects | findings/spine-factory.md | OPEN |
+| F2 | RoPE family review (rotary/dual/continuous/multi_axis) | findings/rope-family.md | pending explorer |
+| F3 | Continuous/scalar/positional family review | findings/continuous-positional.md | pending explorer |
+| F4 | BERT-family review (bert/modern_bert/albert) | findings/bert-family.md | pending explorer |
+| F5 | Patch + hierarchical-codebook review | findings/patch-codebook.md | pending explorer |
 
 ### Key Constraints
-- **HARD**: behavior-preserving on all live call paths (zero regressions vs 989 baseline).
-- **HARD**: no registration-KEY changes (breaks saved .keras) — C2/param-renames stay document-only.
-- **SOFT**: follow established precedent patterns (None-sentinel build, fail-loud dynamic-N, math.sqrt scale).
+
+### HARD
+- Keras 3.8 / TF 2.18; `keras.ops` only (no raw TF in library code, narrow documented exceptions allowed).
+- **Graph-compatible**: NO eager ops reachable from `call()` (no `convert_to_numpy`, `.numpy()`, `float(tensor)` on traced tensors). User explicit: "no EAGER SHIT, all must be graph compatible".
+- Canonical Keras-3 lifecycle: `@register_keras_serializable`, `None`-sentinel ctor for build-time dims, `if self.built: return` FIRST line of `build()`, explicit sublayer `.build()` in parent `build()`, full `get_config`/`from_config` round-trip, `compute_output_shape`.
+- `training is True` Python identity idiom (never `if training:` / `if training is not False:`).
+- Scope: FIX existing functionality only — NO new functionality/expansion. Target DEFERRED items.
+- Work autonomously, no questions.
+
+### SOFT
+- Keras guide: `research/2026_keras_custom_models_instructions.md` (authoritative).
+- Docstrings Google-style; logging via `dl_techniques.utils.logger` only.
+
+### GHOST (to verify)
+- README.md + layers/CLAUDE.md describe an older roster (mention ModernBERT but NOT albert/hierarchical_codebook/sine_2d/scalar_sinusoidal/mrope) — doc drift, not a code constraint.
+
+### Preliminary direct-read facts (orchestrator, pre-explorer)
+
+- **14 layer files** in `src/dl_techniques/layers/embedding/` + `factory.py` + `__init__.py` + `README.md`.
+- **Factory registry = 10 keys**: patch_1d, patch_2d, positional_learned, rope, dual_rope, continuous_rope, continuous_sincos, bert_embeddings, scalar_sinusoidal, mrope_ideogram4.
+- **NOT factory-registered (4 classes)**: `AlbertFactorizedEmbedding`, `ModernBertEmbeddings`, `HierarchicalCodebookEmbedding`, `PositionalEmbeddingSine2D`. (Verify whether each SHOULD be — standard call sig? — or is intentionally direct-import.)
+- **`__init__.py` `__all__` BUG**: `__all__ = [create_embedding_from_config, create_embedding_layer, validate_embedding_config]` lists the function OBJECTS, not their string names. `__all__` must be a list of `str`. Real defect (breaks `from ... import *` / tooling).
+- **`__init__.py` does NOT export layer classes** (only 3 factory funcs). Consistent with "import from submodules" convention, but factory funcs are the only re-exports.
+- **EAGER SUSPECTS (graph-breaking, prime targets)**:
+  - `continuous_sin_cos_embedding.py:237: if ops.convert_to_numpy(min_coords) < 0:` — if reachable from `call()` under `assert_positive`, breaks graph trace.
+  - `continuous_rope_embedding.py:224: if ops.convert_to_numpy(min_coords) < 0:` — same pattern.
+  - (np.arange/np.eye in `build()`/`__init__` are trace-time constant folding — graph-SAFE, not targets.)
+- **Test coverage GAPS** (no test file): `continuous_rope_embedding`, `continuous_sin_cos_embedding`, `positional_embedding_sine_2d`. Factory has only `test_factory_ideogram4.py` (no general factory test covering all 10 keys / param passthrough).
+- Existing tests present for: dual_rotary, patch, hierarchical_codebook, modern_bert, multi_axis_rope, rotary_position, scalar_sinusoidal, positional_embedding, albert_factorized, bert.
+
+### Verified-by-orchestrator (direct source read, supersedes explorer claims)
+
+- **[REFUTED] bert_embeddings.py:222 was NOT a CRITICAL bug.** `_create_normalization_layer(self, name)` takes `name` as the *sublayer name string*; its body (lines 241-265) branches on `self.normalization_type` and returns LayerNorm/RMSNorm/BandRMS/BatchNorm accordingly. Passing `"layer_norm"` is just the sublayer's `.name`. `normalization_type` IS honored. The only cosmetic quirk: the sublayer is always named "layer_norm" even when it is an RMSNorm. NOT a defect. (bert build() also correctly has `if self.built: return` at :275 + explicit sublayer builds.)
+- **[VERIFIED] continuous_sincos `compute_output_shape` returns `dim` and that is CORRECT.** Math: merged trailing = ndim·effective_dim_per_wave = (dim−padding); plus `padding` zero cols = dim. No fix needed.
+- **[VERIFIED] continuous_rope `compute_output_shape` returns `dim` but ACTUAL output is `ndim·(effective_dim_per_wave//2) + padding//2 = dim/2`** (phase angles, no sin/cos doubling). REAL bug — `compute_output_shape` over-reports by 2x. Docstring also says `(..., dim)`. ZERO callers in repo (safe to fix). Fix = correct compute_output_shape + docstring to actual phase width; do NOT change call() (dim/2 phases is conventional RoPE design).
+- **[VERIFIED] `__init__.py` `__all__` lists function OBJECTS not strings** — real defect (`__all__ = [create_embedding_from_config, ...]`).
+- **[VERIFIED] eager graph-breaks** continuous_sin_cos:237 + continuous_rope:224 (`ops.convert_to_numpy` in call() under default `assert_positive=True`); both are pure advisory `logger.warning` blocks with no functional effect → graph-safe fix = delete the block, keep `assert_positive` param accepted+serialized for config compat.
+- **[DECISION] multi_axis_rope.py:56 `package="dl_techniques.layers"` — do NOT "align".** Changing a `register_keras_serializable` package= string changes the registration KEY and breaks deserialization of already-saved `.keras` models (attention-plan C2 lesson). Leave as-is.
+
+### Real callers (grep-verified)
+- `ContinuousRoPE`: **ZERO callers** anywhere in src/.
+- `ContinuousSinCosEmbed`: text_decoder.py, text_encoder.py (via factory 'continuous_sincos'), supernode_pooling.py (direct). Eager bug affects real callers.
+- `PositionEmbeddingSine2D`: detr/model.py, video_jepa/encoder.py (direct import). Class name is `PositionEmbeddingSine2D`.
+- `ModernBertEmbeddings`: modern_bert/modern_bert.py (direct import).
+- `AlbertFactorizedEmbedding`: no src callers (standalone).
 
 ### Corrections
 *Append [CORRECTED iter-N] entries here when earlier findings prove wrong.*
+</content>
+</invoke>
 
-## plan_2026-06-14_ab855e7e
+## plan_2026-06-14_5e80bd3e
 ### Index
-| # | Finding | File | Tag/Sev |
-|---|---------|------|---------|
-| F1 | Baseline `tests/test_layers/test_attention/` = **940 passed, 0 fail** (CUDA1). Regression oracle. | findings/review-* | CONFIRMED-OK |
-| F2 | `ops.sqrt(ops.cast(static_head_dim,...))` (D-002 pattern) survives in 3 files: `gated_attention.py:512-513`, `group_query_attention.py:457`, `mobile_mqa.py:252`. Prior D-002 sweep fixed only cross/diff. Correctness-neutral (leak version-conditional) but violates "same contract". | gated/gqa/mobile_mqa | NEW-BUG LOW |
-| F3 | Graph-safety residue (static-shape defect class fixed in capsule/PFA, missed here): `ring_attention.py:384` `seq_len=ops.shape(q)[2]` → `range(num_blocks)`; `anchor_attention.py:434` `if num_anchor_tokens >= seq_len` (dynamic). Break under `@tf.function`/jit with None seq dim. | ring/anchor | NEW-BUG MED |
-| F4 | Factory `optional_params` silently drop real class args (factory filters kwargs to required∪optional). CONFIRMED: `anchor` missing head_dim/probability_type/probability_config; `channel` missing intermediate_activation_{type,args}+gate_activation_{type,args}; `spatial` missing gate_activation_{type,args}; `tripse1-4` missing gate_activation_{type,args} (+tripse4 se_reduction_activation_{type,args}). Fails "wired up in factory". Additive zero-risk fix. | factory.py | NEW-BUG MED |
-| F5 | `mobile_mqa.call` accepts+documents `attention_mask` but silently ignores it (mobile_mqa.py:255-257). Advertised-vs-actual mismatch. Mask under downsampling is non-trivial. Fix: document (spatial precedent) + README caveat. | mobile_mqa.py | NEW-BUG MED |
-| F6 | `attn_prob(scores)` called without `training=` (ProbabilityOutput.call DOES accept training): MLA:534, gated:533, others. Systematic; default softmax unaffected. | multiple | NEW-SMELL LOW |
-| F7 | `hopfield_attention.py:373-375` builds K/V Dense with `query_shape` only; cross-attn with different K/V feature dim → wrong kernel. No current caller (self-attn path OK). | hopfield | NEW-BUG LOW (latent) |
-| F8 | Unregistered files: `ideogram4`, `mmdit_joint`, `progressive_focused` JUSTIFIED (non-standard call sig). `wave_field`, `single_window` have standard `call(inputs, attention_mask, training)` sig → registration is possible but not done (explorer: not structurally forced). | factory.py | WIRING (review) |
-| F9 | All prior-plan fixes CONFIRMED holding: `if self.built: return` guards (all files); Performer causal einsum; Ring list+concatenate assembly; capsule/PFA/non_local static-shape+failloud; __all__ exports; README caveat table accurate (8 entries). | all | CONFIRMED-OK |
 
-Detailed reports: `findings/review-core-mha.md`, `findings/review-efficient.md`, `findings/review-vision.md`, `findings/review-factory-docs.md`.
+| ID | Topic | Key takeaway |
+|----|-------|--------------|
+| F-SITES | The 3 side-effect sites | KMeans `call:619` gates `self._update_centroids()` (which does TWO state writes: `centroid_momentum.assign` kmeans.py:571 + `centroids.assign_add` kmeans.py:574). GMM `call:573` gates `add_loss(self._isometric_regularization_loss())`. RBF `call:300` gates `add_loss(self._compute_repulsion_loss())`. All three currently gated by `if training is True:` (from prior plan plan_2026-06-14_7384c2e3/D-001) → skip under symbolic tensor. |
+| F-PRECEDENT | Graph-safe conditional idiom in repo | Repo uses `keras.ops.cond` for graph-safe VALUE selection (stochastic_gradient.py:141, prism_blocks.py:499). No training-resolution helper exists anywhere. `utils/tensors.py` is the natural home for one. For SIDE EFFECTS (add_loss / .assign), `ops.cond` branches are awkward (must return matching structures); tensor MASKING (multiply the delta/loss by `cast(training)`) is cleaner and equally graph-safe. |
+| F-PROTO | Empirically validated fix idiom | Standalone @tf.function prototype confirms: gate `if training is not None and training is not False:` + factor `1.0 if training is True else keras.ops.cast(training, dtype)`, then MASK state-deltas/loss by factor → symbolic True fires both side-effects, symbolic False is a TRUE no-op (centroid unchanged, loss=0), python True preserved exactly, None graph-safe under tf.function. No graph break (all branching is on python identity/type, never on a tensor value). |
+| F-NUMERIC | Zero-regression guard | To preserve EXACT numerics on the existing python-True training tests, the python-True path must keep the unmasked `assign`/`add_loss` (factor==1.0 float → exact); only the symbolic-tensor path uses the masked formula. Branch on `isinstance(factor, float)` (a python-type check, static at trace time, graph-safe). |
 
 ### Key Constraints
-- **[HARD] Behavior-preserving for passing layers.** 940 tests pass now; any numeric delta on existing tests is a regression → revert. (LESSONS: guide-conformance is behavior-preserving.)
-- **[HARD] D-002 fix pattern is `self.scale = 1.0/math.sqrt(float(head_dim))` in `__init__`** (Python float, math.* not ops.*). F2 fixes must match it.
-- **[HARD] Graph-safe shape pattern = static `.shape[N]` + fail-loud `ValueError` on None** (capsule/PFA precedent). F3 fixes must match it.
-- **[HARD] Adding `package=` to @register_keras_serializable is FORBIDDEN** (breaks already-saved .keras models) — documented known-open, NOT to "fix".
-- **[HARD] Do NOT rename performer.call (no attention_mask) / rpc.call (`mask`)** — documented intentional quirks (D-007), behavior-touching, out of scope.
-- **[SOFT] Factory registry additions (F4) are additive** — add keys with class-default values; do not change required_params or existing defaults.
-- **[GHOST] "attention/ already fully resolved" — TRUE for the items prior plans targeted, but a fresh adversarial pass found F2-F7 residue. The "resolved" label was scoped to those plans' findings, not exhaustive.**
 
-### Corrections
-*Append [CORRECTED iter-N] entries here when earlier findings prove wrong. Reference the original finding file and what changed.*
-
-## plan_2026-06-14_b9456f74
-### Baseline
-- `pytest tests/test_layers/test_attention/` = **935 passed / 3 xfailed / 0 failed** (284s, GPU1). Repo at clean post-`plan_2026-06-14_7734bacd` state. The 3 xfails are S2/S3/S4 below.
-- This directory had 3 prior plans: `0c5d4a21` (contract/factory/docs/lifecycle), `adaddf34` (NonLocal F18/F19), `7734bacd` (deep review + tests, deferred S2/S3/S4 + L1/L2).
-
-### Index
-| ID | File | Finding | Verdict |
-|----|------|---------|---------|
-| S2 | findings/deferred-bugs.md | PFA SW-MSA mask dead-on-forward: `_attn_mask[None,None,:,:]` → 5-D, mismatched tile, reshape collapse → InvalidArgumentError. ALSO `_compute_attention_mask` hardcodes 2×2 grid (`mask_size=ws*2`) regardless of actual H×W → silently wrong mask for production callers (pft_sr, thera, swin) with larger maps. | FIX (operate-as-advertised); has prod callers |
-| S3 | findings/deferred-bugs.md | Performer `causal=True` crash: `ops.expand_dims(v,-2)` makes einsum 2nd arg rank-5 (line 340); `expand_dims(q,-2)`+`squeeze` rank bug (347-349) → InvalidArgumentError. | FIX BOUNDED (3 lines) |
-| S4 | findings/deferred-bugs.md | Ring gradient crash: `ops.slice_update` (line 485) → `XlaDynamicUpdateSlice` has no eager-TF gradient. Forward OK. | FIX BOUNDED (list+concat, ~6 lines) |
-| L1 | findings/lifecycle-robustness.md | 22 build() methods + 5 tripse classes lack `if self.built: return` first-line guard while calling `child.build()`/`add_weight()`. Weight-creating ones (fnet:184, differential:335/362, mobile_mqa, single_window, wave_field) silently DUPLICATE weights on 2nd build. Repo-standard fix used 5x already. | FIX (keras-compliant / same-contract) |
-| L2/F20 | findings/lifecycle-robustness.md | tripse `TripletAttentionBranch`(139), `TripSE1`(350), `TripSE2`(487), `TripSE3`(676), `TripSE4`(1012) all lack outer guard; only `_SEWeights`(820) has it. Subset of L1. | FIX with L1 |
-| D1 | findings/contract-factory-docs.md | README caveat table lists 7 non-standard call() sigs but MISSES: `mobile_mqa`(175, swapped order + `return_attention_weights`), `differential`(504, extra `layer_idx=0`). | FIX docs |
-| D2 | findings/contract-factory-docs.md | `Ideogram4Attention` + `MMDiTJointAttention` are registered-serializable but NOT in `__init__.py __all__` → not importable via public API. | FIX exports (additive) |
-| D3 | findings/lifecycle-robustness.md | `test_shared_weights_cross_attention.py` lacks a real `.keras` file save/load round-trip test (only from_config). | ADD test (also regression oracle for guard fix) |
-| C1 | findings/contract-factory-docs.md | Factory: 27 registered types CONFIRMED. 5 unregistered (ideogram4, mmdit, progressive_focused, single_window, wave_field) for valid architectural reasons. | CONFIRMED-GOOD |
-| C2 | findings/contract-factory-docs.md | 32/34 serializable classes lack `package=`. Latent bare-name collision risk BUT adding package= changes the registration KEY → breaks already-saved `.keras` models. | DEFER (document; regression risk) |
-
-### Key Constraints
-- **[HARD]** RingAttention forward numerics must stay identical (online-softmax single==multi verified atol 1e-5). `concatenate` of blocks in order == slice_update assembly. (S4)
-- **[HARD]** Keras 3 / `keras.ops` only — no raw TF ops. Static scalars via `math.*`.
-- **[HARD]** `if self.built: return` MUST be FIRST statement of any build() that calls `child.build()` or `add_weight()` — Keras does NOT self-guard explicit child `.build()` (2nd build raises lock violation / duplicates weights). Established repo pattern (used 5x). (L1)
-- **[HARD]** Do NOT rename call() params (rpc `mask`, anchor `x`, performer no-mask, etc.) — D-007 (plan 0c5d4a21): renaming breaks serialized configs. Document only. (D1)
-- **[HARD]** Do NOT add `package=` to the 32 bare-registered classes — changes registration key, breaks deserialization of already-saved models. Document as known latent hazard. (C2)
-- **[SOFT]** S2 mask should be correct for general H×W (standard Swin), not just the H=W=2·ws test case — "operate as advertised". Reference: `swin_transformer_block.py:446-483`.
-- **[GHOST]** PFA comment line 799 "Broadcasting handles batch and head dimensions" is false — broadcasting never worked. (S2)
-- **[GHOST]** Prior "gated/performer/ring/rpc not registered" concern — all 4 now registered (D-007 resolved). Don't re-investigate.
+- **[HARD]** Side-effects MUST fire when `training` is a symbolic `tf.Tensor` that is True at runtime (the user's foot-gun). This REVISES prior plan plan_2026-06-14_7384c2e3/D-001 which intentionally skipped the tensor case.
+- **[HARD]** Everything stays graph-compatible — no eager, no bool-coercion of a tensor. (carried constraint)
+- **[HARD]** Zero numeric regression on the python-bool / None call paths (existing 112 tests must stay green). Preserve exact python-True update via `isinstance(factor, float)` fast path (F-NUMERIC).
+- **[HARD]** Symbolic-False at runtime must be a true no-op for STATE (no centroid/momentum drift at inference) and zero loss contribution.
+- **[SOFT]** Single source of truth for the factor logic (shared `resolve_training_factor` helper in utils/tensors.py) → uniform across all 3 layers, testable once. (DRY; 3 call sites = earned abstraction)
+- **[SOFT]** Update the now-stale in-code comments (added last plan) that claim "symbolic/None/False skip the side-effect" — symbolic no longer skips.
+- **[GHOST]** Prior LESSONS/SYSTEM say `training is True` is THE canonical idiom. That holds for layers whose side-effects are inference-irrelevant, but is the wrong contract for layers that must support symbolic-training custom loops. Will reconcile at CLOSE (idiom is context-dependent, not absolute).
 
 ### Corrections
 *None yet.*
+
+## plan_2026-06-14_7384c2e3
+### Index
+
+| ID | Topic | File | Key takeaway |
+|----|-------|------|--------------|
+| F-GRAPH | Graph/eager audit | findings/graph-eager-audit.md | The ONLY graph-breaker class is bare `if training:`/`if training and ...` on a value that may be a symbolic tensor — at kmeans.py:619, gmm.py:571, rbf:298. All 3 raise `OperatorNotAllowedInGraphError` when `training` is a `tf.Tensor`. No `.numpy()`/`convert_to_numpy`/`py_function`/dynamic-loop escapes anywhere. `.assign`/`add_loss` are graph-safe. Empirically: all 3 PASS @tf.function with python-bool, FAIL with tensor-bool. |
+| F-CONTRACT | Contract & keras-rules compliance | findings/contract-keras-compliance.md | HIGH: `compute_output_shape` in GMM (gmm.py:391) + KMeans (kmeans.py:402) reads build-mutated `self.cluster_axis` → wrong/inconsistent for multi-axis pre-build. MED: KMeans+RBF lack `from_config` (GMM has it); GMM+KMeans `build()`→`_setup_cluster_axes()` mutates `self.cluster_axis` in place with no reset from `_cluster_axis_arg` → double-build corruption. LOW: kmeans.py:219 stores tuple raw (GMM uses `list()`); kmeans regularizer serialize guard inconsistency. |
+| F-FACTORY | Factory/docs/tests/as-advertised | findings/factory-docs-tests.md | Factory wiring: CLEAN (all 3 wired, exports complete, matches ffn/norms sibling contract). Advertised math: all correct. Docs: 1 soft notation mismatch (README.md:9 RBF formula uses textbook `2*sigma^2` vs impl `exp(-gamma*dist_sq)`). Tests: 105 pass / 0 fail; gaps = KMeans has NO `.keras` round-trip test, and ZERO graph-mode (@tf.function tensor-training) tests across all 3. |
+| F-IDIOM | Canonical graph-safe training-gate idiom | (this file) | Repo canonical idiom is `if training is True:` — documented verbatim in residual_acf.py:288-291, and used in mdn_layer.py:291, deep_kernel_pca.py:560, vector_quantizer_rotation_trick.py:369/390/392, logic operators. `is` identity check never coerces a tensor to bool (graph-safe); `None`/`False`/symbolic all skip the training-only side-effect, which is the intended contract for EMA updates + add_loss. This SUPERSEDES the explorer's `is not False` suggestion (see Corrections). |
+
+### Key Constraints
+
+- **[HARD]** All layers must be graph-compatible: no construct in `call()` (or anything reachable from it) may coerce a possibly-symbolic tensor to a python bool. Fix the 3 `if training` guards. (user: "no EAGER SHIT, all graph compatible")
+- **[HARD]** Fix-only, no functionality expansion. Target the existing defects + deferred items; do not add features. (user directive)
+- **[HARD]** `compute_output_shape` must return correct shapes without the layer being built (Keras functional-API tracing calls it pre-build).
+- **[HARD]** The training-gate fix MUST use the repo's canonical `training is True` idiom (F-IDIOM), not a bare truthiness or an ad-hoc variant, for keras-rules compliance + cross-layer uniformity.
+- **[SOFT]** The 3 layers should comply to the SAME contract (uniform `from_config`, uniform `cluster_axis` normalization, uniform serialize style). (user: "comply to the same contract")
+- **[SOFT]** README RBF formula notation should match the implementation.
+- **[GHOST]** Explorer-suggested `if training is not False:` — REJECTED; it would fire training-only side effects under `training=None`/symbolic, contradicting the repo's documented `training is True` contract. Not a real constraint.
+- Existing `# DECISION plan_2026-06-14_8c7365d0/D-005` (cluster_axis stash) and `plan_2026-06-08_57a975d1/D-002` (orthonormal lazy-resolve) anchors are CORRECT-BY-DESIGN — preserve, do not touch.
+
+### Corrections
+
+- **[CORRECTED iter-0]** findings/graph-eager-audit.md recommends the fix `if training is not False:` (claimed KAN/SwinMLP precedent). VERIFICATION FAILED: grep shows kan_linear.py / swin_mlp.py do NOT use that idiom, and no layer in the repo uses `is not False`. The actual canonical idiom is `if training is True:` (residual_acf.py:288-291 documents it explicitly; also mdn_layer, deep_kernel_pca, vector_quantizer_rotation_trick, logic operators). `is not False` is semantically WRONG (fires under `training=None`). Use `training is True`. See F-IDIOM.
