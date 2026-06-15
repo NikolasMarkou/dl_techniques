@@ -57,6 +57,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.embedding import create_embedding_layer
 from dl_techniques.layers.embedding.class_token import ClassTokenPrepend
+from dl_techniques.layers.embedding.mask_token import MaskTokenApply
 from dl_techniques.layers.attention import create_attention_layer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.stochastic_depth import StochasticDepth
@@ -390,17 +391,20 @@ class DINOv2VisionTransformer(keras.Model):
         input_shape: Input shape. If None, computed from image_size and in_chans.
         **kwargs: Additional keyword arguments for the Model base class.
 
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`.
+    Inputs:
+        A 2-element list ``[images, masks]``:
+            - images: 4D tensor `(batch_size, height, width, channels)`.
+            - masks: 2D boolean tensor `(batch_size, num_patches)` (iBOT mask;
+              `True` marks patches replaced by the learnable mask token).
 
-    Output shape:
-        - If `is_training=False`: 2D tensor with shape: `(batch_size, embed_dim)` (CLS token)
-        - If `is_training=True`: Dictionary with keys:
+    Output:
+        Always a dictionary (output structure is config-fixed, not
+        training-dependent) with keys:
             - 'x_norm_clstoken': CLS token features (B, D)
             - 'x_norm_regtokens': Register token features (B, R, D)
             - 'x_norm_patchtokens': Patch token features (B, N, D)
             - 'x_prenorm': Pre-normalization features (B, 1+R+N, D)
-            - 'masks': Input masks (if provided)
+            - 'masks': Input masks (echoed through an identity op)
 
     Example:
         ```python
@@ -535,16 +539,16 @@ class DINOv2VisionTransformer(keras.Model):
         self.pos_embed = None
         self.norm = None
 
-        # DECISION plan_2026-06-15_e2759fbc/D-001: mask-token projection is hoisted to
-        # __init__ (NOT instantiated inside the apply_masks Lambda). A weight-creating
-        # layer created during functional-graph trace yields untracked/uncreatable
-        # weights. Do NOT move this Dense back into the Lambda body. See decisions.md D-001.
-        self.mask_token_projection = layers.Dense(
-            self.embed_dim,
-            use_bias=False,
-            kernel_initializer='zeros',
-            name='mask_token_projection'
-        )
+        # DECISION plan_2026-06-15_e2759fbc/D-009: the iBOT mask token is a GENUINE
+        # learnable (1,1,embed_dim) weight via MaskTokenApply (owns its weight in build(),
+        # like ClassTokenPrepend), NOT a Dense(use_bias=False, kernel_initializer='zeros')
+        # applied to ones(1,N,1). The old Dense-on-ones produced a CONSTANT-ZERO vector at
+        # init (degenerate: ops.where(mask, zeros, patch) merely ZEROED masked patches) —
+        # the exact "projection-on-ones" hack D-002 already rejected for the CLS token. Do
+        # NOT revert to a zero Dense-on-ones; the mask token must be a real add_weight so it
+        # learns a non-degenerate iBOT replacement vector. MaskTokenApply is safe to assign
+        # pre-super (lazy build). See decisions.md D-009.
+        self.mask_token_layer = MaskTokenApply(name='mask_token')
 
         # DECISION plan_2026-06-15_e2759fbc/D-002: CLS token is a real learnable token via
         # ClassTokenPrepend (owns its (1,1,dim) weight in build()), NOT a Dense-on-ones
@@ -567,12 +571,16 @@ class DINOv2VisionTransformer(keras.Model):
         # Create inputs and build model using functional API
         inputs = keras.Input(shape=input_shape, name="input_images")
 
-        # Handle additional inputs for training mode
+        # DECISION plan_2026-06-15_e2759fbc/D-009: the model contract is 2-input
+        # [images, masks]. The former 3rd `is_training` Input was SPURIOUS — once B5/D-005
+        # made the output structure always the 5-key dict (no training-dependent branch),
+        # nothing in the graph reads `is_training`, so it was dead weight carried only to
+        # be coerced by a fragile DINOv2.call override (#13). Do NOT re-add an `is_training`
+        # Input here or to the wrapper; there is no branch that needs it. See decisions.md D-009.
         masks_input = keras.Input(shape=(self.num_patches,), dtype=tf.bool, name="input_masks")
-        is_training_input = keras.Input(shape=(), dtype=tf.bool, name="is_training")
 
         # Build the model
-        outputs = self._build_model(inputs, masks_input, is_training_input)
+        outputs = self._build_model(inputs, masks_input)
 
         # DECISION plan_2026-06-15_e2759fbc/D-007: backbone name was hardcoded in
         # super().__init__ while the wrapper (DINOv2._build_model) ALSO passed
@@ -584,7 +592,7 @@ class DINOv2VisionTransformer(keras.Model):
 
         # Initialize the Model
         super().__init__(
-            inputs=[inputs, masks_input, is_training_input],
+            inputs=[inputs, masks_input],
             outputs=outputs,
             name=name,
             **kwargs
@@ -598,18 +606,16 @@ class DINOv2VisionTransformer(keras.Model):
     def _build_model(
             self,
             inputs: keras.KerasTensor,
-            masks: keras.KerasTensor,
-            is_training: keras.KerasTensor
+            masks: keras.KerasTensor
     ) -> keras.KerasTensor:
         """Build the complete DINOv2 Vision Transformer architecture.
 
         Args:
             inputs: Input image tensor
             masks: Input mask tensor for iBOT objective
-            is_training: Whether in training mode
 
         Returns:
-            Output tensor or dictionary based on is_training
+            The 5-key output dict (always — output structure is config-fixed).
         """
         # Build patch embedding
         x = self._build_patch_embedding(inputs)
@@ -621,7 +627,7 @@ class DINOv2VisionTransformer(keras.Model):
         x = self._build_transformer_blocks(x)
 
         # Build final processing
-        outputs = self._build_final_processing(x, masks, is_training)
+        outputs = self._build_final_processing(x, masks)
 
         return outputs
 
@@ -646,23 +652,15 @@ class DINOv2VisionTransformer(keras.Model):
             masks: keras.KerasTensor
     ) -> keras.KerasTensor:
         """Build token preparation with CLS, register tokens, and positional embeddings."""
-        # B1: apply iBOT masking. The mask-token projection is the hoisted
-        # self.mask_token_projection (D-001); mask_tokens are computed OUTSIDE the Lambda
-        # so the Lambda body closes over NO weight-creating layer. The Lambda does only the
-        # elementwise select.
-        # DECISION plan_2026-06-15_e2759fbc/D-001: compute mask_tokens via the hoisted Dense
-        # OUTSIDE the Lambda; the Lambda is a pure keras.ops.where. Do NOT instantiate a
-        # Dense inside apply_masks. Mask tokens use a batch dim of 1 (NOT a symbolic
-        # keras.ops.shape(x)[0], which is None at functional-trace time and fails an eager
-        # keras.ops.ones) and broadcast across the batch inside keras.ops.where. See
-        # decisions.md D-001.
-        mask_tokens = self.mask_token_projection(
-            keras.ops.ones((1, self.num_patches, 1))
-        )
-        x = layers.Lambda(
-            lambda a: keras.ops.where(keras.ops.expand_dims(a[1], -1), a[2], a[0]),
-            name='apply_masks'
-        )([patch_embeddings, masks, mask_tokens])
+        # B1: apply iBOT masking via MaskTokenApply, which owns the learnable (1,1,D)
+        # mask-token weight in its build() and performs the elementwise select internally.
+        # DECISION plan_2026-06-15_e2759fbc/D-009: the masked positions are replaced by a
+        # REAL learnable mask token (not a Dense-on-ones zero vector, and not a raw
+        # weight-creating layer inside a Lambda). MaskTokenApply((patch_emb, mask)) returns
+        # where(expand_dims(mask,-1), mask_token, patch_emb) with mask_token broadcast over
+        # the batch. Do NOT revert to a zero Dense-on-ones + an apply_masks ops.where Lambda.
+        # See decisions.md D-009.
+        x = self.mask_token_layer([patch_embeddings, masks])
 
         # B2: prepend a real learnable CLS token (B,N,D)->(B,N+1,D) via ClassTokenPrepend,
         # after masking, before pos-embed.
@@ -745,8 +743,7 @@ class DINOv2VisionTransformer(keras.Model):
     def _build_final_processing(
             self,
             x: keras.KerasTensor,
-            masks: keras.KerasTensor,
-            is_training: keras.KerasTensor
+            masks: keras.KerasTensor
     ) -> keras.KerasTensor:
         """Build final normalization and output processing."""
         x_prenorm = x  # Store pre-normalization features
@@ -770,9 +767,9 @@ class DINOv2VisionTransformer(keras.Model):
         # branch never earned its keep. Each output key is produced by its OWN tensor op
         # (a per-key Lambda returning a single tensor) so Keras can shape-infer each one;
         # a single Lambda returning a Python dict cannot always infer its output shape
-        # ("could not infer the shape of the Lambda's output"). The `is_training` Input
-        # stays wired (3-input contract) but is intentionally unused here. Do NOT
-        # reintroduce ops.cond, a bare-tensor inference branch, or a dict-returning Lambda.
+        # ("could not infer the shape of the Lambda's output"). The output structure is
+        # config-fixed (always the 5-key dict). Do NOT reintroduce ops.cond, a bare-tensor
+        # inference branch, an `is_training` Input, or a dict-returning Lambda.
         num_reg = self.num_register_tokens
 
         cls_token = layers.Lambda(
@@ -1005,22 +1002,25 @@ class DINOv2(keras.Model):
         # Create inputs
         # DECISION plan_2026-06-15_e2759fbc/D-008: the wrapper's keras.Input names MUST
         # be UNIQUE from the backbone sub-model's internal input names ("input_images",
-        # "input_masks", "is_training"). Sharing names makes Keras alias the wrapper's
-        # symbolic inputs with the nested backbone's inputs at super().__init__, producing
-        # a graph cycle ("input_masks" collision). Do NOT rename these back to match the
-        # backbone — prefix with "dinov2_" so the two input layers stay distinct. See D-008.
+        # "input_masks"). Sharing names makes Keras alias the wrapper's symbolic inputs with
+        # the nested backbone's inputs at super().__init__, producing a graph cycle
+        # ("input_masks" collision). Do NOT rename these back to match the backbone —
+        # prefix with "dinov2_" so the two input layers stay distinct. See D-008.
+        # DECISION plan_2026-06-15_e2759fbc/D-009: the wrapper contract is 2-input
+        # [images, masks]. The former 3rd `dinov2_is_training` Input was spurious (unused
+        # under the always-dict backbone) and only existed to feed the fragile DINOv2.call
+        # rank-0 coercion override (#13), which is now removed. Do NOT re-add it.
         inputs = keras.Input(shape=input_shape, name="dinov2_input_images")
 
         # For inference, we typically don't need masks, so provide default
         masks = keras.Input(shape=(None,), dtype=tf.bool, name="dinov2_input_masks")
-        is_training = keras.Input(shape=(), dtype=tf.bool, name="dinov2_is_training")
 
         # Build the model
-        outputs = self._build_model(inputs, masks, is_training)
+        outputs = self._build_model(inputs, masks)
 
         # Initialize the Model
         super().__init__(
-            inputs=[inputs, masks, is_training],
+            inputs=[inputs, masks],
             outputs=outputs,
             name='dinov2_model'
         )
@@ -1029,33 +1029,16 @@ class DINOv2(keras.Model):
         if include_top:
             logger.info(f"Classification head for {num_classes} classes")
 
-    def call(self, inputs, training=None, mask=None):
-        # DECISION plan_2026-06-15_e2759fbc/D-008: coerce a rank-0 `is_training` scalar to
-        # rank-1 before the Functional graph validates input rank. The 3rd input
-        # `dinov2_is_training` is a `keras.Input(shape=())` (per-sample scalar), so the
-        # Functional graph expects rank-1 `(batch,)` and rejects a rank-0 `np.array(False)`
-        # with "Expected shape (None,), but input has incompatible shape ()". `is_training`
-        # is SPURIOUS/unused (the backbone always emits the 5-key dict, D-005), so its rank
-        # is immaterial to the result — we just need to accept the conventional scalar form.
-        # Do NOT drop the 3-input contract; do NOT branch on this value. See decisions.md D-008.
-        if isinstance(inputs, (list, tuple)) and len(inputs) == 3:
-            images, masks, is_training = inputs
-            is_training = keras.ops.reshape(is_training, (-1,))
-            inputs = [images, masks, is_training]
-        return super().call(inputs, training=training, mask=mask)
-
     def _build_model(
             self,
             inputs: keras.KerasTensor,
-            masks: keras.KerasTensor,
-            is_training: keras.KerasTensor
+            masks: keras.KerasTensor
     ) -> keras.KerasTensor:
         """Build the complete DINOv2 model architecture.
 
         Args:
             inputs: Input tensor
             masks: Mask tensor
-            is_training: Training flag tensor
 
         Returns:
             Output tensor
@@ -1074,7 +1057,7 @@ class DINOv2(keras.Model):
         # `is_training`: the old code ran a cond whose inference branch returned the WHOLE
         # dict (not the CLS tensor), which is both wrong and a mismatched-structure cond.
         # Dict subscription on a Functional model's output is legal and shape-inferable.
-        backbone_output = self.backbone([inputs, masks, is_training])
+        backbone_output = self.backbone([inputs, masks])
         features = backbone_output["x_norm_clstoken"]
 
         # Create classifier if needed

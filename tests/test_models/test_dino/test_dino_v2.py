@@ -12,8 +12,12 @@ NEVER been run end-to-end. This plan fixed a 13-bug chain in
     input-name collision, masks input-is-output graph cycle, and a rank-0
     ``is_training`` shape coercion).
 
-Forward contract (3-input masked-forward, verified from source):
-``model([images (B,H,W,3) f32, masks (B, num_patches) bool, is_training () bool])``
+A later extension (D-009) made the iBOT mask token a real learnable weight and
+removed the dead ``is_training`` input + the ``DINOv2.call`` override, reducing
+the model to a 2-input contract.
+
+Forward contract (2-input masked-forward, verified from source):
+``model([images (B,H,W,3) f32, masks (B, num_patches) bool])``
 returns finite classification logits ``(B, num_classes)``. dino has no
 ``__init__`` exports, so import the factory directly from the submodule.
 ``create_dino_v2('tiny', image_size=28, patch_size=14, num_classes=10)`` builds
@@ -50,9 +54,8 @@ def test_smoke_build_and_forward():
     images = np.random.rand(2, 28, 28, 3).astype("float32")
     # 28 // 14 == 2 -> 2 * 2 == 4 patches.
     masks = np.zeros((2, 4), dtype=bool)
-    is_training = np.array(False)
 
-    out = model([images, masks, is_training], training=False)
+    out = model([images, masks], training=False)
 
     _assert_finite(out)
     assert tuple(np.asarray(out).shape) == (2, 10)
@@ -74,7 +77,7 @@ def test_masked_forward_path():
     images = np.random.rand(2, 28, 28, 3).astype("float32")
     masks_all = np.ones((2, 4), dtype=bool)
 
-    out2 = model([images, masks_all, np.array(False)], training=False)
+    out2 = model([images, masks_all], training=False)
 
     _assert_finite(out2)
     assert tuple(np.asarray(out2).shape) == (2, 10)
