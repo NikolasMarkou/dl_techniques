@@ -503,9 +503,17 @@ class MonotonicityLayer(keras.layers.Layer):
         # Then blend with sigmoid output: final = target + (max - min) * (sigmoid - 0.5) * flexibility
         target_values = min_val + (max_val - min_val) * normalized_indices
 
-        # Use sigmoid to allow deviation from target while maintaining order
-        # The 0.5 centering means sigmoid < 0.5 pulls down, > 0.5 pulls up
-        flexibility = 0.5  # How much deviation from linear spacing is allowed
+        # Use sigmoid to allow deviation from target while maintaining order.
+        # The 0.5 centering means sigmoid < 0.5 pulls down, > 0.5 pulls up.
+        # The per-element deviation magnitude is bounded by
+        #   (max-min) * 0.5 * flexibility,
+        # while adjacent target positions are spaced (max-min)/(n-1) apart.
+        # Setting flexibility = 1/(n-1) keeps the worst-case adjacent difference
+        # strictly non-negative (gap - 2*max_dev = 0), so the output is guaranteed
+        # non-decreasing along the axis -- which is what this layer advertises.
+        flexibility = 1.0 / keras.ops.maximum(
+            keras.ops.cast(axis_size - 1, inputs.dtype), self.epsilon
+        )
         output = target_values + (max_val - min_val) * (normalized - 0.5) * flexibility
 
         # Clip to ensure we stay in bounds
