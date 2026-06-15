@@ -56,7 +56,7 @@ References:
 """
 
 import keras
-from keras import ops, layers, initializers, regularizers
+from keras import ops, initializers, regularizers
 from typing import Optional, Any, Tuple, Union, Dict, Literal
 
 # ---------------------------------------------------------------------
@@ -223,8 +223,8 @@ class EomtTransformer(keras.layers.Layer):
         self.mask_annealing_steps = mask_annealing_steps
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = kernel_regularizer
-        self.bias_regularizer = bias_regularizer
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.bias_regularizer = regularizers.get(bias_regularizer)
 
         # Training step counter for mask annealing (set as keras.Variable in build())
         self.current_step = None  # set in build()
@@ -257,24 +257,15 @@ class EomtTransformer(keras.layers.Layer):
             name="base_transformer"
         )
 
-        # Optional mask projection layer for dimension matching
-        if self.use_masked_attention:
-            self.mask_projection = layers.Dense(
-                self.hidden_size,
-                use_bias=False,
-                kernel_initializer=self.kernel_initializer,
-                kernel_regularizer=self.kernel_regularizer,
-                name="mask_projection"
-            )
-        else:
-            self.mask_projection = None
-
     def build(self, input_shape: Union[Tuple[Optional[int], ...], Dict[str, Tuple[Optional[int], ...]]]) -> None:
         """Build the layer and all sub-layers.
 
         :param input_shape: Shape tuple or dict of shapes.
         :type input_shape: Union[Tuple, Dict]
         """
+        if self.built:
+            return
+
         # Handle both single tensor and dict inputs
         if isinstance(input_shape, dict):
             main_shape = input_shape.get('inputs', input_shape.get('x'))
@@ -283,13 +274,6 @@ class EomtTransformer(keras.layers.Layer):
 
         # Build base transformer
         self.base_transformer.build(main_shape)
-
-        # Build mask projection if needed
-        if self.mask_projection is not None:
-            # Mask projection operates on flattened mask
-            # Shape: [batch, num_queries, H*W] -> project last dim
-            mask_proj_shape = (main_shape[0], None, None)  # Dynamic shape
-            self.mask_projection.build(mask_proj_shape)
 
         self.current_step = self.add_weight(
             name="current_step",
@@ -331,76 +315,40 @@ class EomtTransformer(keras.layers.Layer):
         else:
             effective_prob = self.mask_probability
 
-        # Apply mask probabilistically
+        # Apply mask probabilistically. ``should_mask`` is a scalar in {0.0, 1.0};
+        # it MUST be applied via arithmetic blending, not a python ``if`` -- a
+        # ``if not should_mask`` branch on this traced tensor breaks under
+        # ``@tf.function`` / ``model.fit`` graph tracing.
         should_mask = ops.cast(
             keras.random.uniform([]) < effective_prob,
             dtype=inputs.dtype
         )
 
-        if not should_mask:
-            return inputs
-
         # Determine split between patches and queries
-        batch_size = ops.shape(inputs)[0]
         seq_len = ops.shape(inputs)[1]
         num_queries = ops.shape(mask)[1]
         num_patches = seq_len - num_queries
 
-        # Create attention mask
-        # Shape: [batch, seq_len, seq_len]
-        attention_mask = ops.ones((batch_size, seq_len, seq_len))
-
         # Flatten spatial mask: [batch, num_queries, H, W] -> [batch, num_queries, H*W]
+        batch_size = ops.shape(inputs)[0]
         mask_flat = ops.reshape(mask, [batch_size, num_queries, -1])
 
-        # For each query, mask out patches it shouldn't attend to
-        # We modify the attention mask matrix at positions [query_idx, patch_idx]
-        # where query_idx is in range [num_patches, seq_len)
-        # and patch_idx is in range [0, num_patches)
-
-        # Create a mask for query-to-patch attention
-        # Shape: [batch, num_queries, num_patches]
-        query_patch_mask = mask_flat[:, :, :num_patches]
-
-        # Insert into full attention mask at appropriate positions
-        # Top-left: patch-to-patch (all ones, no masking)
-        # Top-right: patch-to-query (all ones, patches can attend to queries)
-        # Bottom-left: query-to-patch (apply mask)
-        # Bottom-right: query-to-query (all ones, queries can attend to each other)
-
-        # Create indices for scatter update
-        batch_indices = ops.arange(batch_size)[:, None, None]
-        query_indices = ops.arange(num_queries)[None, :, None] + num_patches
-        patch_indices = ops.arange(num_patches)[None, None, :]
-
-        # Since we can't directly modify tensor slices in Keras ops,
-        # we'll create the mask more directly
-        top_part = ops.ones((batch_size, num_patches, seq_len))
-
-        # Bottom part: queries attending
-        bottom_left = query_patch_mask  # [batch, num_queries, num_patches]
-        bottom_right = ops.ones((batch_size, num_queries, num_queries))
-        bottom_part = ops.concatenate([bottom_left, bottom_right], axis=-1)
-
-        attention_mask = ops.concatenate([top_part, bottom_part], axis=1)
-
-        # Add attention mask to inputs (as a hack to pass it through)
-        # Note: This is a simplified approach. In practice, you'd want to modify
-        # the TransformerLayer to accept an attention mask directly
-
-        # For now, we'll apply masking by modifying the inputs themselves
-        # This is a workaround since we can't easily pass attention masks through
-        # the factory-created attention layers
-
-        # Split inputs
+        # DECISION plan_2026-06-15_5e7ae321/D-002 (limitation, documented not redesigned):
+        # True masked self-attention would require feeding an attention-bias matrix
+        # into the factory-created attention layer, which it does not accept. As an
+        # in-scope approximation this applies a SOFT modulation of the query tokens by
+        # their mask occupancy. Do NOT mistake this for full masked attention.
         patch_tokens = inputs[:, :num_patches, :]
         query_tokens = inputs[:, num_patches:, :]
 
-        # Apply mask influence to query tokens
-        # This is a soft masking approach that modifies query representations
-        # based on their associated masks
         mask_influence = ops.mean(mask_flat, axis=-1, keepdims=True)  # [batch, queries, 1]
-        query_tokens = query_tokens * (1.0 + 0.1 * mask_influence)  # Slight modulation
+        modulated_query_tokens = query_tokens * (1.0 + 0.1 * mask_influence)
+
+        # Graph-safe probabilistic gate (replaces the eager ``if not should_mask``).
+        query_tokens = (
+            should_mask * modulated_query_tokens
+            + (1.0 - should_mask) * query_tokens
+        )
 
         # Recombine
         inputs = ops.concatenate([patch_tokens, query_tokens], axis=1)
