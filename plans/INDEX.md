@@ -191,3 +191,4 @@
 | plan_2026-06-15_0205772c | 2026-06-15 | Deep review + fix of `src/dl_techniques/layers/activations`: |  |
 | plan_2026-06-15_2485b951 | 2026-06-15 | Deep comprehensive review of all norm layers in `src/dl_tech |  |
 | plan_2026-06-15_c8f516c3 | 2026-06-15 | Deep review of the MoE framework (`src/dl_techniques/layers/ |  |
+| plan_2026-06-15_3028e33c | 2026-06-15 | Second-pass deep review of `src/dl_techniques/layers/norms/` |  |

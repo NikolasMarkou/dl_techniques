@@ -30,6 +30,27 @@
 - Anchor at impact site (not at decision definition). One anchor per impact site, even if shared with sibling decision.
 <!-- /COMPRESSED-SUMMARY -->
 
+## plan_2026-06-15_3028e33c
+### D-001 | EXPLORE → PLAN | YYYY-MM-DD
+**Context**: <one-paragraph background — what was discovered in EXPLORE>
+**Decision**: <chosen approach in one sentence>
+**Trade-off**: <X> **at the cost of** <Y>
+**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
+**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-06-15_3028e33c/D-NNN` anchor exists in source)
+-->
+
+### D-001 | EXPLORE → PLAN | 2026-06-15
+**Context**: Second pass over norms after the first review (plan_2026-06-15_2485b951) merged. 4 explorers + source-verify + 3 repros confirmed the first-pass fixes hold and surfaced a residual cluster: 3 factory/shape contract bugs (A1-A3), 3 RMS-sibling gaps (B1-B3), 6 doc misses (C1-C6).
+**Decision**: Fix A1-C6 (contract/robustness/docs, all fix-in-place, no call-path numerics change). DOCUMENT but do NOT change D1-D4 (behavior-changing or by-design).
+**Trade-off**: Truthful, contract-consistent norms package **at the cost of** leaving cross-family numeric/init divergences (GRN gamma, epsilon strategy, regularizer defaults) as documented quirks rather than unified.
+**Reasoning**: User constraints: no eager (already satisfied in all call paths), fix-don't-expand, don't break production. Changing GRN gamma default hits 3 production model families; unifying epsilon/regularizer defaults changes training numerics. This mirrors the first pass's own D-002/D-003/D-004 precedent (preserve production behavior, document honestly).
+
+### D-002 | PLAN | 2026-06-15
+**Context**: Explorers flagged GRN `gamma='ones'` as [BUG] (vs paper) and PolarWeightNorm `build()` convert_to_numpy as [EAGER].
+**Decision**: Downgrade both. GRN→DOC (document divergence, keep default). PolarWeightNorm→by-design (build is eager in all standard workflows; forward path graph-safe; add build-before-trace note).
+**Trade-off**: Stability/back-compat **at the cost of** not being paper-literal (GRN) and not supporting bare-@tf.function-on-unbuilt-layer (Polar).
+**Reasoning**: Both are recurring "explorer over-flags" per LESSONS; changing them is higher-risk than the issue. Anchor: textual (docstring notes + this entry).
+
 ## plan_2026-06-15_c8f516c3
 ### D-001 | EXPLORE → PLAN | 2026-06-15
 **Context**: 3 explorers flagged many issues; orchestrator source-verified + ran live repro. The two headline "EAGER BREAK" claims (broadcast_to on top_k==num_experts; `if training` guard) were REFUTED — the framework is already graph-safe and serialization-correct. Real work is hygiene/contract/robustness/docs.
@@ -109,42 +130,3 @@
 **Trade-off**: Targeted contract+correctness fixes **at the cost of** leaving documented-but-out-of-scope items (ProbabilityOutput factory registration, type_config serialization hardening, relu_k TypeError style) for a follow-up — honoring the user's fix-only/no-expansion directive.
 **Reasoning**: Class defaults are source-of-truth (test_threshmax asserts `trainable_slope=False`); factory keys + MonotonicityLayer have zero src callers so blast radius is minimal. Aligning factory to class fixes silent mis-config without changing any real caller. `_sigmoid` fix `flexibility=1/(n-1)` is the minimal in-spirit change that provably restores monotonicity.
 **Anchor-Refs**: none (mechanical/contract fixes; no in-source DECISION anchors warranted — all changes are self-explanatory contract conformance)
-
-## plan_2026-06-15_9dbb87c1
-### D-001 | EXPLORE → PLAN | YYYY-MM-DD
-**Context**: <one-paragraph background — what was discovered in EXPLORE>
-**Decision**: <chosen approach in one sentence>
-**Trade-off**: <X> **at the cost of** <Y>
-**Reasoning**: <why this trade-off is acceptable; what alternatives were rejected>
-**Anchor-Refs**: `path/to/file.ext:LL`, `other/file.ext:LL-MM`  (required when a matching `# DECISION plan_2026-06-15_9dbb87c1/D-NNN` anchor exists in source)
--->
-
-### D-001 | EXPLORE → PLAN | 2026-06-15
-**Context**: continuous_sin_cos:237 and continuous_rope:224 call `ops.convert_to_numpy(min_coords)` inside `call()` under default `assert_positive=True`, breaking graph trace. The block only emits `logger.warning` on negative coords — no functional effect.
-**Decision**: Delete the eager warning block; keep `assert_positive` accepted/stored/serialized as a documented no-op for config back-compat.
-**Trade-off**: graph compatibility + zero behavior change for valid inputs **at the cost of** losing a debug-only negative-coordinate warning.
-**Reasoning**: A graph-safe assertion would add complexity for a log line nobody consumes; removal is the KISS fix. assert_positive kept so existing configs/`.keras` still load.
-
-### D-002 | EXPLORE → PLAN | 2026-06-15
-**Context**: PositionEmbeddingSine2D, ModernBertEmbeddings, AlbertFactorizedEmbedding exist + are `@register_keras_serializable` but are NOT in `factory.py`; `layers/CLAUDE.md` already implies ModernBERT factory support. User explicitly asked for factory + doc wiring.
-**Decision**: Register all 3 (standard ctors) in the factory with exact param lists read from each `__init__`.
-**Trade-off**: closing the factory/doc gap + honoring the user instruction **at the cost of** 3 more registry keys to maintain.
-**Reasoning**: Factory only constructs (never calls) so a non-standard `call()` sig is irrelevant; this is wiring of existing classes, not functional expansion. Pre-mortem Scenario B drops any key whose ctor proves non-standard.
-
-### D-003 | EXPLORE → PLAN | 2026-06-15
-**Context**: continuous_rope `compute_output_shape` returns `dim` but actual `call()` output is `dim/2` (phase angles). 0 callers.
-**Decision**: Fix compute_output_shape + docstring to the true phase width; do NOT change `call()` output.
-**Trade-off**: correct shape contract + conventional RoPE phase semantics **at the cost of** the docstring's original `(..., dim)` promise being corrected downward.
-**Reasoning**: A wrong `compute_output_shape` is worse than none (LESSONS); dim/2 phase width is the standard RoPE design; changing call() output would be riskier with zero benefit (no callers).
-
-### D-004 | EXPLORE → PLAN | 2026-06-15
-**Context**: multi_axis_rope uses `register_keras_serializable(package="dl_techniques.layers")` while siblings use the default package.
-**Decision**: Leave the package= string unchanged.
-**Trade-off**: preserve loadability of already-saved `.keras` models **at the cost of** cross-layer package-string inconsistency.
-**Reasoning**: Changing a package= string changes the registration KEY and breaks deserialization of existing saved models (attention-plan C2 lesson).
-
-### D-005 | EXPLORE → PLAN | 2026-06-15
-**Context**: Several cosmetic items found (zeros+assign vs Constant init; patch stride=None config asymmetry; tests using custom_objects / tf.GradientTape).
-**Decision**: Skip them; fix only functional/contract defects.
-**Trade-off**: stay in scope + minimize regression surface **at the cost of** leaving minor style inconsistencies.
-**Reasoning**: User said fix what's there / no expansion; these have no functional/contract impact.
