@@ -743,7 +743,7 @@ _reg("sd3_mmdit", "RUN", _b_sd3, _f_sd3,
      "tiny; {latent, encoder_hidden_states, pooled_projections, timestep}")
 
 
-# --- shgcn (DEAD) ----------------------------------------------------------
+# --- shgcn -----------------------------------------------------------------
 def _b_shgcn():
     from dl_techniques.models.shgcn.model import SHGCNModel
     return SHGCNModel(hidden_dims=[64, 32], output_dim=10)
@@ -751,8 +751,8 @@ def _f_shgcn(m):
     feats = np.random.rand(2, 16, 8).astype(np.float32)
     adj = np.eye(16, dtype=np.float32)[None].repeat(2, 0)
     return m([feats, adj], training=False)
-_reg("shgcn", "XFAIL", _b_shgcn, _f_shgcn,
-     "DEAD: needs SparseTensor adjacency (SYSTEM.md)")
+_reg("shgcn", "RUN", _b_shgcn, _f_shgcn,
+     "Simplified Hyperbolic GCN; batched dense adjacency (B,N,N) via keras.ops.matmul")
 
 
 # --- som -------------------------------------------------------------------
