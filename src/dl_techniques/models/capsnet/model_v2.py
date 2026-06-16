@@ -8,7 +8,7 @@ Improvements over V1
 --------------------
 * **Attention routing.** Replaces the iterative dynamic-routing inner loop with
   a single-step :class:`AttentionRoutingCapsule` (see
-  :mod:`dl_techniques.layers.capsules_v2`).
+  :mod:`dl_techniques.layers.attention.attention_routing_capsule`).
 * **Decoupled length & probability.** Capsule magnitude is a learned scalar
   (sigmoid head) rather than a squash side-effect, eliminating saturation at
   zero.
@@ -41,7 +41,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.utils.tensors import length
 from dl_techniques.losses.capsule_margin_loss import CapsuleMarginLoss
 from dl_techniques.layers.capsules import PrimaryCapsule
-from dl_techniques.layers.capsules_v2 import (
+from dl_techniques.layers.attention.attention_routing_capsule import (
     AttentionRoutingCapsule,
     CapsuleBlockV2,
 )

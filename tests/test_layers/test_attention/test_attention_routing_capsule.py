@@ -1,4 +1,4 @@
-"""Tests for capsules_v2 — AttentionRoutingCapsule and CapsuleBlockV2."""
+"""Tests for attention_routing_capsule — AttentionRoutingCapsule and CapsuleBlockV2."""
 
 import os
 import tempfile
@@ -8,7 +8,7 @@ import keras
 import pytest
 import tensorflow as tf
 
-from dl_techniques.layers.capsules_v2 import (
+from dl_techniques.layers.attention.attention_routing_capsule import (
     AttentionRoutingCapsule,
     CapsuleBlockV2,
 )
