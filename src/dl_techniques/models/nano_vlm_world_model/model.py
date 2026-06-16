@@ -239,9 +239,9 @@ class ScoreBasedNanoVLM(keras.Model):
         # Sample random timesteps if not provided
         if timesteps is None:
             batch_size = ops.shape(images)[0]
-            timesteps = keras.random.uniform(
-                (batch_size,), minval=0, maxval=self.scheduler.num_timesteps,
-                dtype='int32'
+            timesteps = keras.random.randint(
+                shape=(batch_size,), minval=0,
+                maxval=self.scheduler.num_timesteps
             )
 
         outputs = {}

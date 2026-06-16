@@ -604,10 +604,9 @@ def _b_nanovlm_wm():
     from dl_techniques.models.nano_vlm_world_model.model import create_score_based_nanovlm
     return create_score_based_nanovlm(variant="mini")
 def _f_nanovlm_wm(m):
-    return m({"image": _img(h=224, w=224), "input_ids": _tokens(vocab=32000, s=16)},
+    return m({"images": _img(h=224, w=224), "text": _tokens(vocab=32000, s=16)},
              training=False)
-_reg("nano_vlm_world_model", "XFAIL", _b_nanovlm_wm, _f_nanovlm_wm,
-     "DEAD: keras.random.uniform int32 dtype bug (SYSTEM.md)")
+_reg("nano_vlm_world_model", "RUN", _b_nanovlm_wm, _f_nanovlm_wm)
 
 
 # --- ntm -------------------------------------------------------------------
