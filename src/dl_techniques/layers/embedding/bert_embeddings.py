@@ -292,8 +292,9 @@ class BertEmbeddings(keras.layers.Layer):
         self.layer_norm.build(embeddings_output_shape)
         self.dropout.build(embeddings_output_shape)
 
-        super().build(input_shape)
         logger.info("Embeddings built successfully")
+
+        super().build(input_shape)
 
     def call(
             self,

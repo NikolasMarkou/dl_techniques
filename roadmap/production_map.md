@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 121 / 245 files production-verified**
+**Progress: 129 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -382,14 +382,14 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `embedding/albert_factorized_embedding.py` | PASS | rubric-verify |
-| `[ ]` | `embedding/bert_embeddings.py` | FAIL | super_build_last |
-| `[ ]` | `embedding/class_token.py` | PASS | rubric-verify |
-| `[ ]` | `embedding/continuous_rope_embedding.py` | PASS | rubric-verify |
-| `[ ]` | `embedding/continuous_sin_cos_embedding.py` | PASS | rubric-verify |
-| `[ ]` | `embedding/dual_rotary_position_embedding.py` | PASS | rubric-verify |
-| `[ ]` | `embedding/factory.py` | N/A | N/A (factory-only) |
-| `[ ]` | `embedding/hierarchical_codebook_embedding.py` | PASS | rubric-verify |
+| `[x]` | `embedding/albert_factorized_embedding.py` | PASS | done: rubric-verified clean |
+| `[x]` | `embedding/bert_embeddings.py` | PASS | done: H6 (logger before super().build()); existing test passes |
+| `[x]` | `embedding/class_token.py` | PASS | done: clean (str-typed initializer round-trips verbatim by design) |
+| `[x]` | `embedding/continuous_rope_embedding.py` | PASS | done: rubric-verified clean (parameter-only RoPE) |
+| `[x]` | `embedding/continuous_sin_cos_embedding.py` | PASS | done: rubric-verified clean |
+| `[x]` | `embedding/dual_rotary_position_embedding.py` | PASS | done: rubric-verified clean |
+| `[x]` | `embedding/factory.py` | N/A | N/A confirmed (create_embedding_layer registry/factory fns) |
+| `[x]` | `embedding/hierarchical_codebook_embedding.py` | PASS | done: rubric-verified clean (H5/H9/H11 good) |
 
 ### Round 17 — embedding/ re-audit (2/2)  (8 files)
 
