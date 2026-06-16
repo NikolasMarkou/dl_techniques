@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 176 / 245 files production-verified**
+**Progress: 182 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -472,12 +472,12 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `norms/max_logit_norm.py` | PASS | rubric-verify |
-| `[ ]` | `norms/polar_weight_norm.py` | PASS | rubric-verify (findings grep flagged raw-tf outside call — re-check, see §5) |
-| `[ ]` | `norms/rms_norm.py` | PASS | rubric-verify |
-| `[ ]` | `norms/zero_centered_adaptive_band_rms_norm.py` | PASS | rubric-verify |
-| `[ ]` | `norms/zero_centered_band_rms_norm.py` | PASS | rubric-verify |
-| `[ ]` | `norms/zero_centered_rms_norm.py` | PASS | rubric-verify |
+| `[x]` | `norms/max_logit_norm.py` | PASS | done: rubric-verified clean (3 classes: MaxLogitNorm/DecoupledMaxLogit/DMLPlus) |
+| `[x]` | `norms/polar_weight_norm.py` | PASS | done: §5 raw-tf re-check RESOLVED — false positive (zero tf tokens; forward path keras.ops only; build() numpy is static seed-encoding). H10 clean |
+| `[x]` | `norms/rms_norm.py` | PASS | done: rubric-verified clean |
+| `[x]` | `norms/zero_centered_adaptive_band_rms_norm.py` | PASS | done: rubric-verified clean (dense_layer built; training forwarded) |
+| `[x]` | `norms/zero_centered_band_rms_norm.py` | PASS | done: rubric-verified clean |
+| `[x]` | `norms/zero_centered_rms_norm.py` | PASS | done: rubric-verified clean |
 
 ### Round 24 — transformers/ re-audit (1/2)  (7 files)
 
