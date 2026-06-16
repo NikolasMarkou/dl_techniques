@@ -59,7 +59,7 @@ package-dir = { "" = "src" }
 # Actually find packages in these directories
 where = ["src"]
 
-[tool.pytest]
+[tool.pytest.ini_options]
 pythonpath = [
     "src"
 ]

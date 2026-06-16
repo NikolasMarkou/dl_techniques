@@ -10,8 +10,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # 4. Copy your source code into the container's /workspace directory
 COPY ./src ./src
+COPY pyproject.toml README.md LICENSE ./
 
-# 5. [OPTIONAL] Set a default command that keeps the container running
+# 5. Install the package so `import dl_techniques` resolves at runtime
+RUN pip install --no-cache-dir -e .
+
+# 6. [OPTIONAL] Set a default command that keeps the container running
 # This command does nothing but prevents the container from exiting immediately.
 # It's useful if you want a long-running container to attach to.
 CMD ["bash"]
