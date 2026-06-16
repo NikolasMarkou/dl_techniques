@@ -465,13 +465,13 @@ class SoftSOMLayer(keras.layers.Layer):
         # Create grid positions for topological regularization
         self.grid_positions = self._create_grid_positions()
 
-        # Always call parent build at the end
-        super().build(input_shape)
-
         logger.info(
             f"Built SoftSOMLayer with grid_shape={self.grid_shape}, "
             f"input_dim={self.input_dim}, trainable weights: {self.weights_map.shape}"
         )
+
+        # Always call parent build at the end (MUST be last)
+        super().build(input_shape)
 
     def _create_grid_positions(self) -> keras.KerasTensor:
         """

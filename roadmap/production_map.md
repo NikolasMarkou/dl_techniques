@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 41 / 245 files production-verified**
+**Progress: 49 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -249,14 +249,14 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `memory/baseline_ntm.py` | PASS | rubric-verify |
-| `[ ]` | `memory/factory.py` | N/A | N/A (factory-only) |
-| `[ ]` | `memory/mann.py` | PASS | rubric-verify |
-| `[ ]` | `memory/neuro_grid.py` | PASS | rubric-verify |
-| `[ ]` | `memory/ntm_interface.py` | N/A | N/A (ABC / interface) |
-| `[ ]` | `memory/som_2d_layer.py` | N/A | N/A (no concrete layer per scanner — human re-check) |
-| `[ ]` | `memory/som_nd_layer.py` | FAIL | super_build_last |
-| `[ ]` | `memory/som_nd_soft_layer.py` | FAIL | super_build_last |
+| `[x]` | `memory/baseline_ntm.py` | PASS | done: scanner-clean + no raw-tf/reg/print; comprehensive existing test passes |
+| `[x]` | `memory/factory.py` | N/A | N/A confirmed (create_mann / create_som_2d functions only) |
+| `[x]` | `memory/mann.py` | PASS | done: clean rubric; +new test (LSTM path full; GRU forward xfail — keras GRU return_state drops batch dim upstream) |
+| `[x]` | `memory/neuro_grid.py` | PASS | done: scanner-clean + no raw-tf/reg/print; comprehensive existing test passes |
+| `[x]` | `memory/ntm_interface.py` | N/A | N/A confirmed (Enums + dataclasses + ABC interfaces w/ @abstractmethod) |
+| `[x]` | `memory/som_2d_layer.py` | N/A* | concrete SOMLayer subclass (scanner N/A mislabel); inherits fixed build; comprehensive existing test passes |
+| `[x]` | `memory/som_nd_layer.py` | PASS | done: H6 (logger before super().build()); existing test passes |
+| `[x]` | `memory/som_nd_soft_layer.py` | PASS | done: H6 (logger before super().build()); existing test passes |
 
 ### Round 7 — moe/ + fusion/ (NEEDS-AUDIT)  (6 files)
 

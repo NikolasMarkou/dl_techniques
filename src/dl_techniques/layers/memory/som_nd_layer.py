@@ -327,9 +327,10 @@ class SOMLayer(keras.layers.Layer):
         # Initialize grid positions
         self.grid_positions = self._initialize_grid_positions()
 
-        super().build(input_shape)
-
         logger.info(f"Built SOMLayer with grid_shape={self.grid_shape}, input_dim={self.input_dim}")
+
+        # Always call parent build at the end (MUST be last)
+        super().build(input_shape)
 
     def _initialize_grid_positions(self) -> keras.KerasTensor:
         """
