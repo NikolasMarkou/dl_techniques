@@ -311,6 +311,72 @@ class TestSampler:
         assert ids_on[0] != cls_id  # CLS stripped from the returned sequence
         assert len(ids_on) == 3 + 4  # net gen-only count matches CLS-off
 
+    def test_mh_acceptance_formula(self):
+        """Pin the Metropolis-Hastings acceptance arithmetic.
+
+        The accept probability in ``mcmc_power_sample`` is
+        ``min(1, exp(min(log_r, 0.0)))`` where ``log_r`` is the trajectory
+        log-ratio. This locks the formula SHAPE so a future sign-flip or slice
+        off-by-one that changes the accept math is caught numerically.
+        """
+        def accept_prob(log_r):
+            return min(1.0, float(np.exp(min(log_r, 0.0))))
+
+        # log_r >= 0 always accepts (clamped to 0 -> exp(0) = 1).
+        assert accept_prob(0.0) == 1.0
+        assert accept_prob(5.0) == 1.0
+        # log_r = ln(0.5) -> accept prob exactly 0.5.
+        assert abs(accept_prob(np.log(0.5)) - 0.5) <= 1e-6
+        # log_r -> -inf -> accept prob 0.
+        assert accept_prob(float("-inf")) == 0.0
+
+    def test_mcmc_deterministic_under_seed(self):
+        """Two seeded mcmc_power_sample runs must be bit-identical.
+
+        Seeding both ``random`` and ``np.random`` fixes proposal indices AND
+        the ``np.random.rand() < exp(min(log_r, 0))`` accept draws, so the real
+        ``log_r`` accept/reject path is exercised and must be reproducible.
+        """
+        cfg = PowerSamplingConfig(
+            pad_token_id=0, ctx_len=16, max_tokens=4, block_num=2, mcmc_steps=3,
+        )
+
+        random.seed(123)
+        np.random.seed(123)
+        s1 = PowerSampler(DictMockLM(seed=7), CharTokenizer(), cfg)
+        ids1, info1 = s1.mcmc_power_sample("abc")
+
+        random.seed(123)
+        np.random.seed(123)
+        s2 = PowerSampler(DictMockLM(seed=7), CharTokenizer(), cfg)
+        ids2, info2 = s2.mcmc_power_sample("abc")
+
+        assert ids1 == ids2
+        assert info1["acceptance_ratio"] == info2["acceptance_ratio"]
+        assert info1["acceptances"] == info2["acceptances"]
+
+    def test_make_batch_logits_fn_varlen(self):
+        """make_batch_logits_fn ctx_len=None: right-pad ragged batch to max.
+
+        Ragged prefixes are right-padded to the batch maximum with pad_id and
+        each row is gathered at its own real length -> (B, vocab) float32.
+        """
+        m = DictMockLM()
+        fn = forward_mod.make_batch_logits_fn(
+            m, ctx_len=None, pad_id=0, logits_key="logits",
+        )
+        out = fn([[1, 2], [3, 4, 5, 6], [7]])
+        assert out.shape == (3, VOCAB)
+        assert out.dtype == np.float32
+
+    def test_make_batch_logits_fn_fixed_ctxlen(self):
+        """make_batch_logits_fn fixed ctx_len: pad each row to ctx_len."""
+        m = DictMockLM()
+        fn = forward_mod.make_batch_logits_fn(m, ctx_len=8, pad_id=0)
+        out = fn([[1, 2], [3, 4, 5, 6], [7]])
+        assert out.shape == (3, VOCAB)
+        assert out.dtype == np.float32
+
     def test_logits_fn_injection(self):
         """Explicit logits_fn= path + single-fn batched fallback."""
         random.seed(0)

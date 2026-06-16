@@ -432,7 +432,7 @@ CliffordNetLM is a fixed-shape model with GPT-2-style special tokens. Behavior i
 
 ```python
 import tiktoken
-from dl_techniques.models.cliffordnet.model import CliffordNetLM
+from dl_techniques.models.cliffordnet.lm import CliffordNetLM
 from dl_techniques.models.power_sampling import PowerSampler, PowerSamplingConfig
 
 model = CliffordNetLM.from_variant("base")     # or keras.models.load_model(...)
