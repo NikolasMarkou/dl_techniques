@@ -236,8 +236,6 @@ class SequencePooling(keras.layers.Layer):
         Args:
             input_shape: Shape tuple of the input tensor.
         """
-        super().build(input_shape)
-
         # CRITICAL: Explicitly build all learnable components
         for component in self.learnable_components.values():
             component.build(input_shape)
@@ -251,6 +249,8 @@ class SequencePooling(keras.layers.Layer):
                 regularizer=self.kernel_regularizer,
                 trainable=True
             )
+
+        super().build(input_shape)
 
     def _apply_mask_and_exclusions(
         self,

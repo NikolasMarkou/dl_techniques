@@ -90,8 +90,6 @@ class WeightedPooling(keras.layers.Layer):
         Args:
             input_shape: Shape tuple of the input tensor.
         """
-        super().build(input_shape)
-
         # Create learnable position weights
         self.position_weights = self.add_weight(
             name='position_weights',
@@ -106,6 +104,8 @@ class WeightedPooling(keras.layers.Layer):
             # Dropout expects shape (batch, seq_len)
             dropout_shape = (input_shape[0], input_shape[1])
             self.dropout.build(dropout_shape)
+
+        super().build(input_shape)
 
     def call(
         self,

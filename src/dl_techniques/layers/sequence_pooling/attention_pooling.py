@@ -111,10 +111,6 @@ class AttentionPooling(keras.layers.Layer):
         Args:
             input_shape: Shape tuple of the input tensor.
         """
-        super().build(input_shape)
-
-        embed_dim = input_shape[-1]
-
         # Build sub-layers explicitly (Critical for serialization)
         self.attention_dense.build(input_shape)
 
@@ -132,6 +128,8 @@ class AttentionPooling(keras.layers.Layer):
             # Dropout expects shape (batch, seq_len, num_heads)
             dropout_shape = (input_shape[0], input_shape[1], self.num_heads)
             self.dropout.build(dropout_shape)
+
+        super().build(input_shape)
 
     def call(
         self,

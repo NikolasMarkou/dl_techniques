@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 196 / 245 files production-verified**
+**Progress: 204 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -507,14 +507,14 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `mixtures/factory.py` | N/A | N/A (factory-only) |
-| `[ ]` | `mixtures/gmm.py` | PASS | rubric-verify |
-| `[ ]` | `mixtures/kmeans.py` | PASS | rubric-verify |
-| `[ ]` | `mixtures/radial_basis_function.py` | PASS | rubric-verify |
-| `[ ]` | `sequence_pooling/attention_pooling.py` | FAIL | super_build_last |
-| `[ ]` | `sequence_pooling/factory.py` | N/A | N/A (factory-only) |
-| `[ ]` | `sequence_pooling/sequence_pooling.py` | FAIL | super_build_last |
-| `[ ]` | `sequence_pooling/weighted_pooling.py` | FAIL | super_build_last |
+| `[x]` | `mixtures/factory.py` | N/A | N/A confirmed (MixtureType + create_mixture_layer/from_config fns) |
+| `[x]` | `mixtures/gmm.py` | PASS | done: rubric-verified clean (init/reg serialize+from_config; orthonormal-string branch handled) |
+| `[x]` | `mixtures/kmeans.py` | PASS | done: rubric-verified clean |
+| `[x]` | `mixtures/radial_basis_function.py` | PASS | done: rubric-verified clean (init/constraint/2 regularizers serialized) |
+| `[x]` | `sequence_pooling/attention_pooling.py` | PASS | done: H6 (super().build() moved last; sublayer build + add_weight were after it) |
+| `[x]` | `sequence_pooling/factory.py` | N/A | N/A confirmed (create_sequence_pooling factory fns) |
+| `[x]` | `sequence_pooling/sequence_pooling.py` | PASS | done: H6 (super().build() moved last) |
+| `[x]` | `sequence_pooling/weighted_pooling.py` | PASS | done: H6 (super().build() moved last) |
 
 ### Round 27 — tested root-level files re-audit (1/5)  (10 files)
 
