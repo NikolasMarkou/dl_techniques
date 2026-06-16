@@ -248,9 +248,10 @@ class MDNLayer(keras.layers.Layer):
         self.mdn_sigmas.build(intermediate_shape)
         self.mdn_pi.build(intermediate_shape)
 
-        # Always call the parent's build() method at the end
-        super().build(input_shape)
         logger.debug(f"MDN layer built with input shape: {input_shape}")
+
+        # Always call the parent's build() method at the end (MUST be last)
+        super().build(input_shape)
 
     def call(
             self,

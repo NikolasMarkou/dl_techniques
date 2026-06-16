@@ -224,9 +224,9 @@ class DeepKernelPCA(keras.layers.Layer):
         self.coupling_strength = coupling_strength
         self.use_backward_coupling = use_backward_coupling
         self.center_kernel = center_kernel
-        self.kernel_regularizer = kernel_regularizer
-        self.projection_regularizer = projection_regularizer
-        self.coupling_regularizer = coupling_regularizer
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.projection_regularizer = regularizers.get(projection_regularizer)
+        self.coupling_regularizer = regularizers.get(coupling_regularizer)
         self.trainable_kernels = trainable_kernels
 
         # Preserve original constructor args for serialization (build does not

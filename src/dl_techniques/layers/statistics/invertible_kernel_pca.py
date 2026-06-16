@@ -210,8 +210,8 @@ class InvertibleKernelPCA(keras.layers.Layer):
         self.random_seed = random_seed
         self.trainable_frequencies = trainable_frequencies
         self.use_bias = use_bias
-        self.kernel_regularizer = kernel_regularizer
-        self.bias_regularizer = bias_regularizer
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.bias_regularizer = regularizers.get(bias_regularizer)
 
         # Initialize weight attributes (created in build)
         self.frequencies = None

@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 55 / 245 files production-verified**
+**Progress: 62 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -273,13 +273,16 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `statistics/deep_kernel_pca.py` | PASS | rubric-verify (DEAD-CODE candidate — keep/delete, see §5) |
-| `[ ]` | `statistics/invertible_kernel_pca.py` | PASS | rubric-verify (DEAD-CODE candidate — keep/delete, see §5) |
-| `[ ]` | `statistics/mdn_layer.py` | FAIL | super_build_last |
-| `[ ]` | `statistics/moving_std.py` | PASS | rubric-verify |
-| `[ ]` | `statistics/normalizing_flow.py` | PASS | rubric-verify |
-| `[ ]` | `statistics/residual_acf.py` | PASS | rubric-verify (DEAD-CODE candidate `ResidualACFLayer` — keep/delete, see §5) |
-| `[ ]` | `statistics/scaler.py` | PASS | rubric-verify |
+| `[x]` | `statistics/deep_kernel_pca.py` | PASS | KEPT (user decision; 0 consumers): H8/H9 regularizer deserialize ×3; existing test passes |
+| `[x]` | `statistics/invertible_kernel_pca.py` | PASS | KEPT (user decision; 0 consumers): H8/H9 regularizer deserialize ×2; existing test passes |
+| `[x]` | `statistics/mdn_layer.py` | PASS | done: H6 (logger before super().build()); existing test passes |
+| `[x]` | `statistics/moving_std.py` | PASS | done: clean; existing test passes |
+| `[x]` | `statistics/normalizing_flow.py` | PASS | done: clean; existing test passes |
+| `[x]` | `statistics/residual_acf.py` | PASS | KEPT (user decision; 0 consumers): clean; existing test passes |
+| `[x]` | `statistics/scaler.py` | PASS | done: clean; existing test passes |
+
+> **Round 8 dead-code decision (§5):** user chose KEEP for all 3 zero-consumer candidates
+> (`deep_kernel_pca`, `invertible_kernel_pca`, `residual_acf`). Denominator stays 245.
 
 ### Round 9 — time_series/ (1/2, NEEDS-AUDIT)  (7 files)
 
