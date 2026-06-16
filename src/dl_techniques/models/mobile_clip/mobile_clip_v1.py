@@ -44,6 +44,15 @@ class MobileClipModel(keras.Model):
     - MobileClip-S1: Small variant with MCI1 image encoder and 12-layer text encoder
     - MobileClip-S2: Small variant with MCI2 image encoder and 12-layer text encoder
 
+    .. note::
+        The official MobileCLIP image backbones (``vit_b16``, ``mci0``, ``mci1``,
+        ``mci2``) do NOT exist in ``keras.applications``. To keep every variant
+        buildable and able to run forward inference, these names are resolved to
+        real ``keras.applications`` CNN backbones via
+        ``components._BACKBONE_ALIASES`` (see decision D-001). This is a
+        functional substitute, NOT a weights-faithful ViT/MCi port — variant
+        ``b`` runs a MobileNetV3Large CNN rather than a true ViT-B/16.
+
     Args:
         embed_dim: Integer, shared embedding dimension for both modalities.
             Must be positive.
