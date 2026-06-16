@@ -171,10 +171,10 @@ class MixtureOfExperts(keras.layers.Layer):
         logger.debug(f"Building {self.gating_config.gating_type} gating network")
         self.gating_network.build(input_shape)
 
-        # Always call parent build at the end
-        super().build(input_shape)
-
         logger.info(f"MoE layer built with input shape: {input_shape}")
+
+        # Always call parent build at the end (MUST be last)
+        super().build(input_shape)
 
     def call(
             self,

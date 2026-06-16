@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 49 / 245 files production-verified**
+**Progress: 55 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -262,12 +262,12 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `moe/config.py` | N/A | N/A (dataclass config) |
-| `[ ]` | `moe/experts.py` | N/A | N/A (scanner — human re-check) |
-| `[ ]` | `moe/gating.py` | N/A | N/A (scanner — human re-check) |
-| `[ ]` | `moe/integration.py` | N/A | N/A (scanner — human re-check) |
-| `[ ]` | `moe/layer.py` | FAIL | super_build_last |
-| `[ ]` | `fusion/multimodal_fusion.py` | PASS | rubric-verify |
+| `[x]` | `moe/config.py` | N/A | N/A confirmed (ExpertConfig/GatingConfig/MoEConfig dataclasses) |
+| `[x]` | `moe/experts.py` | PASS* | concrete FFNExpert (scanner N/A mislabel — subclasses BaseExpert ABC); H6-compliant, clean; +direct test |
+| `[x]` | `moe/gating.py` | PASS* | 3 concrete gating layers (scanner N/A mislabel — subclass BaseGating ABC); H6-compliant, init via .get; +direct test (incl. CosineGating serialization gap) |
+| `[x]` | `moe/integration.py` | N/A | N/A confirmed (MoETrainingConfig dataclass + MoEOptimizerBuilder helper) |
+| `[x]` | `moe/layer.py` | PASS | done: H6 (logger before super().build()); comprehensive existing test passes |
+| `[x]` | `fusion/multimodal_fusion.py` | PASS | done: clean (init via .get, super().build() last, no raw-tf); existing test passes |
 
 ### Round 8 — statistics/ (NEEDS-AUDIT; 3 dead-code candidates)  (7 files)
 
