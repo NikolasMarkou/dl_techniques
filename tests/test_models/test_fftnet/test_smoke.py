@@ -9,7 +9,7 @@ STALE-ENTRYPOINT NOTE: entrypoints.md row 20 lists fftnet as a token-id LM
 ``create_fftnet(variant, image_size, patch_size)`` taking ``(B, H, W, 3)``
 float32 images and returning a dict ``{last_hidden_state, cls_token,
 patch_features}``. There is no ``vocab_size`` argument. We test the vision
-path only and do NOT touch the (triple-dead) SpectreHead stack — out of scope.
+path only.
 """
 
 import numpy as np
