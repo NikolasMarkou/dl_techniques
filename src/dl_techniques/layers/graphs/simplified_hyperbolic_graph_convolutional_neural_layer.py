@@ -243,10 +243,11 @@ class SHGCNLayer(keras.layers.Layer):
         # H_tan = log₀^c(H_hyp): [N, units] -> [N, units]
         h_tangent = _poincare_math.log_map_0(h_hyp, c)
 
-        # Step 6: Neighborhood aggregation using sparse matrix multiplication
-        # Y = Ã @ H_tan: [N, N] (sparse) @ [N, units] -> [N, units]
+        # Step 6: Neighborhood aggregation using batched dense matrix multiplication
+        # Y = Ã @ H_tan: [B, N, N] @ [B, N, units] -> [B, N, units]
         # This is the key simplification: aggregation in Euclidean space
-        aggregated = tf.sparse.sparse_dense_matmul(adj, h_tangent)
+        # DECISION plan_2026-06-16_fa3ffc26/D-001: batched dense matmul replaces rank-2-only tf.sparse.sparse_dense_matmul (zero sparse consumers; repo-canonical GCN form).
+        aggregated = keras.ops.matmul(adj, h_tangent)
 
         # Step 7: Apply Euclidean activation function
         # Out = σ(Y): [N, units] -> [N, units]
@@ -262,11 +263,11 @@ class SHGCNLayer(keras.layers.Layer):
 
         :param input_shape: List of ``[features_shape, adjacency_shape]``.
         :type input_shape: Union[Tuple, List[Tuple]]
-        :return: Output shape tuple ``(num_nodes, units)``.
+        :return: Output shape tuple ``(..., num_nodes, units)`` preserving all leading dims.
         :rtype: Tuple[Optional[int], ...]
         """
         feat_shape = input_shape[0]
-        return (feat_shape[0], self.units)
+        return tuple(feat_shape[:-1]) + (self.units,)
 
     def get_config(self) -> dict:
         """Get layer configuration for serialization.
