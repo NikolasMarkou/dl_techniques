@@ -302,6 +302,49 @@ class SAM(keras.Model):
             self.mask_decoder.build(None)
         super().build(input_shape)
 
+    def get_build_config(self) -> Dict[str, Any]:
+        """
+        Returns a build config so Keras invokes `build_from_config` on load.
+
+        DECISION plan_2026-06-16_6e8c78a3/D-011: returning a non-empty dict is
+        what makes Keras call `build_from_config` during deserialization. The
+        image-encoder ViT blocks and the mask-decoder two-way transformer build
+        their attention/FFN/norm sublayers LAZILY on the first `call()`, so the
+        explicit `build()` chain alone materializes only ~92 of ~124 weights.
+        Without a full materialization before weight restore, the lazily-built
+        weights are created fresh (random) on first call and the saved values are
+        silently dropped -> a save/load round-trip produced a model with ~30%
+        mask drift. We pin `img_size` so `build_from_config` can run a dummy
+        forward to materialize the complete weight set.
+
+        Gated on `self.built`: a model saved UNBUILT (no forward pass yet) has no
+        weights in the archive, so forcing a full build at load would raise
+        "expected N variables, received 0". Returning None there preserves the
+        stock unbuilt-save / unbuilt-load behavior.
+        """
+        if not self.built:
+            return None
+        return {"img_size": int(self.image_encoder.img_size)}
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """
+        Fully materializes the weight set at load time (see D-011).
+
+        Runs the static `build()` chain plus a single dummy forward pass so that
+        every lazily-built sublayer (ViT blocks, two-way transformer, mask-decoder
+        heads) creates its variables BEFORE Keras restores the saved weights.
+        """
+        img_size = int(config.get("img_size") or self.image_encoder.img_size)
+        if not self.built:
+            self.build(None)
+        # Materialize lazily-built attention/transformer sublayers via a dummy
+        # forward (image-only; no prompts needed to trigger the full graph).
+        dummy_inputs = {
+            "image": ops.zeros((1, img_size, img_size, 3), dtype="float32"),
+            "original_size": ops.convert_to_tensor((img_size, img_size)),
+        }
+        self(dummy_inputs, multimask_output=True)
+
     def call(
         self,
         inputs: Dict[str, Any],
