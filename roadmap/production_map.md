@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 232 / 245 files production-verified**
+**Progress: 242 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -565,16 +565,16 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `res_path.py` | PASS | rubric-verify |
-| `[ ]` | `rigid_simplex_layer.py` | PASS | rubric-verify |
-| `[ ]` | `sampling.py` | PASS | rubric-verify (findings grep flagged raw-tf outside call — re-check, see §5) |
-| `[ ]` | `shearlet_transform.py` | PASS | rubric-verify |
-| `[ ]` | `squeeze_excitation.py` | PASS | rubric-verify |
-| `[ ]` | `stochastic_depth.py` | PASS | rubric-verify |
-| `[ ]` | `thera_heat_field.py` | PASS | rubric-verify |
-| `[ ]` | `vector_quantizer.py` | PASS | rubric-verify |
-| `[ ]` | `vector_quantizer_rotation_trick.py` | PASS | rubric-verify |
-| `[ ]` | `yolo12_blocks.py` | PASS | rubric-verify |
+| `[x]` | `res_path.py` | PASS | done: rubric-verified clean (residual SE blocks; sublayers built; existing test passes) |
+| `[x]` | `rigid_simplex_layer.py` | PASS | done: rubric-verified clean (frozen ETF + rotation; add_loss; from_config deserializes init; existing test passes) |
+| `[x]` | `sampling.py` | PASS | done: §5 raw-tf RESOLVED — `tf.math.bessel_i0e` is sole accepted-exception (D-001; no keras.ops Bessel) and lives in `_log_iv`→`vmf_kl_divergence`, OFF all 3 call() forward paths; existing test passes |
+| `[x]` | `shearlet_transform.py` | PASS | done: rubric-verified clean (NumPy filter gen static in build off forward path; call uses ops.fft2 only; existing test passes) |
+| `[x]` | `squeeze_excitation.py` | PASS | done: rubric-verified clean (2D/3D/4D SE; sublayers built; existing test passes) |
+| `[x]` | `stochastic_depth.py` | PASS | done: rubric-verified clean (stateless drop-path; keras.random; existing test passes) |
+| `[x]` | `thera_heat_field.py` | PASS | done: rubric-verified clean (ThermalActivation + multi-input HeatField; einsum; existing test passes) |
+| `[x]` | `vector_quantizer.py` | PASS | done: rubric-verified clean (STE VQ + EMA; add_weight in build; existing test passes) |
+| `[x]` | `vector_quantizer_rotation_trick.py` | PASS | done: rubric-verified clean (rotation-trick VQ; k-means warm-start is opt-in eager, default forward pure ops; existing test passes) |
+| `[x]` | `yolo12_blocks.py` | PASS | done: rubric-verified clean (6 classes ConvBlock/AreaAttention/AttentionBlock/Bottleneck/C3k2/A2C2f; sublayers built; existing test passes) |
 
 ### Round 31 — tested root-level files re-audit (5/5)  (1 file)
 
