@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 101 / 245 files production-verified**
+**Progress: 111 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -352,16 +352,16 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `attention/hopfield_attention.py` | FAIL | super_build_last |
-| `[ ]` | `attention/ideogram4_attention.py` | PASS | rubric-verify |
-| `[ ]` | `attention/lighthouse_attention.py` | PASS | rubric-verify |
-| `[ ]` | `attention/mmdit_joint_attention.py` | PASS | rubric-verify |
-| `[ ]` | `attention/mobile_mqa.py` | N/A | N/A (scanner — human re-check) |
-| `[ ]` | `attention/multi_head_attention.py` | PASS | rubric-verify |
-| `[ ]` | `attention/multi_head_cross_attention.py` | PASS | rubric-verify |
-| `[ ]` | `attention/multi_head_latent_attention.py` | PASS | rubric-verify |
-| `[ ]` | `attention/non_local_attention.py` | PASS | rubric-verify |
-| `[ ]` | `attention/perceiver_attention.py` | PASS | rubric-verify |
+| `[x]` | `attention/hopfield_attention.py` | PASS | done: H6 (logger before super().build()); existing test passes |
+| `[x]` | `attention/ideogram4_attention.py` | PASS | done: rubric-verified clean |
+| `[x]` | `attention/lighthouse_attention.py` | PASS | done: clean (un-forwarded sublayers are training-invariant RMSNorm/softmax) |
+| `[x]` | `attention/mmdit_joint_attention.py` | PASS | done: rubric-verified clean |
+| `[x]` | `attention/mobile_mqa.py` | PASS* | done: concrete MobileMQA (subclass GQA; scanner N/A mislabel); H6 (super().build() was not last — lambda/downsample built after); H7 via inherited compute_output_shape; existing test passes |
+| `[x]` | `attention/multi_head_attention.py` | PASS | done: rubric-verified clean |
+| `[x]` | `attention/multi_head_cross_attention.py` | PASS | done: rubric-verified clean |
+| `[x]` | `attention/multi_head_latent_attention.py` | PASS | done: clean (un-forwarded norms training-invariant; dropout gets training) |
+| `[x]` | `attention/non_local_attention.py` | PASS | done: rubric-verified clean (H3/H5/H8/H9/H11 good) |
+| `[x]` | `attention/perceiver_attention.py` | PASS | done: rubric-verified clean |
 
 ### Round 15 — attention/ re-audit (3/3)  (10 files)
 

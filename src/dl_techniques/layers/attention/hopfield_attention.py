@@ -422,9 +422,10 @@ class HopfieldAttention(keras.layers.Layer):
         score_shape = (None, self.num_heads, None, None)
         self.attn_prob.build(score_shape)
 
+        logger.debug("HopfieldAttention build completed")
+
         # Always call parent build at the end
         super().build(input_shape)
-        logger.debug("HopfieldAttention build completed")
 
     def _hopfield_update_step(
         self,

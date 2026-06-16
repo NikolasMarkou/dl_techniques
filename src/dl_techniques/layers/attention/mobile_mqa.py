@@ -149,9 +149,6 @@ class MobileMQA(GroupedQueryAttention):
         if self.built:
             return
 
-        # Build standard GQA weights (w_q, w_k, w_v, w_o)
-        super().build(input_shape)
-
         # Create learnable residual scalar
         self.lambda_param = self.add_weight(
             name="lambda",
@@ -174,6 +171,10 @@ class MobileMQA(GroupedQueryAttention):
             else:
                 # Should typically be 4D for this layer, but handle gracefully
                 pass
+
+        # Build standard GQA weights (w_q, w_k, w_v, w_o) last, so the parent
+        # build() — which finalizes layer state — is the final statement.
+        super().build(input_shape)
 
     def call(
         self,
