@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 111 / 245 files production-verified**
+**Progress: 121 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -367,16 +367,16 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `attention/performer_attention.py` | PASS | rubric-verify |
-| `[ ]` | `attention/progressive_focused_attention.py` | PASS | rubric-verify |
-| `[ ]` | `attention/ring_attention.py` | PASS | rubric-verify |
-| `[ ]` | `attention/rpc_attention.py` | PASS | rubric-verify |
-| `[ ]` | `attention/shared_weights_cross_attention.py` | PASS | rubric-verify |
-| `[ ]` | `attention/single_window_attention.py` | PASS | rubric-verify |
-| `[ ]` | `attention/spatial_attention.py` | PASS | rubric-verify |
-| `[ ]` | `attention/tripse_attention.py` | PASS | rubric-verify |
-| `[ ]` | `attention/wave_field_attention.py` | PASS | rubric-verify |
-| `[ ]` | `attention/window_attention.py` | PASS | rubric-verify |
+| `[x]` | `attention/performer_attention.py` | PASS | done: rubric-verified clean |
+| `[x]` | `attention/progressive_focused_attention.py` | PASS | done: rubric-verified clean |
+| `[x]` | `attention/ring_attention.py` | PASS | done: rubric-verified clean |
+| `[x]` | `attention/rpc_attention.py` | PASS | done: rubric-verified clean |
+| `[x]` | `attention/shared_weights_cross_attention.py` | PASS | done: rubric-verified clean |
+| `[x]` | `attention/single_window_attention.py` | PASS | done: rubric-verified clean |
+| `[x]` | `attention/spatial_attention.py` | PASS | done: rubric-verified clean |
+| `[x]` | `attention/tripse_attention.py` | PASS | done: H12 (_SEWeights build/call/compute_output_shape/get_config type hints); existing test passes |
+| `[x]` | `attention/wave_field_attention.py` | PASS | done: rubric-verified clean |
+| `[x]` | `attention/window_attention.py` | PASS | done: H9 self-consistency (resolve initializers/regularizers via keras.*.get in __init__); existing test passes |
 
 ### Round 16 — embedding/ re-audit (1/2)  (8 files)
 

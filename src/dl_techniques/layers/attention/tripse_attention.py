@@ -829,7 +829,7 @@ class _SEWeights(layers.Layer):
         self.conv_reduce = None
         self.conv_restore = None
 
-    def build(self, input_shape):
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         # DECISION plan_2026-06-14_0c5d4a21/D-005: conv_reduce/conv_restore are
         # created here (their filter counts depend on build-time input_channels,
         # so they cannot be fully instantiated in __init__). Do NOT drop these
@@ -872,7 +872,11 @@ class _SEWeights(layers.Layer):
         
         super().build(input_shape)
 
-    def call(self, inputs, training=None):
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         # Squeeze
         x = self.global_pool(inputs)
         # Excitation (MLP)
@@ -882,11 +886,14 @@ class _SEWeights(layers.Layer):
         # Return logits (pre-sigmoid) for addition in TripSE4
         return logits
 
-    def compute_output_shape(self, input_shape):
+    def compute_output_shape(
+        self,
+        input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
         """Returns channel-logit shape (B, 1, 1, C)."""
         return (input_shape[0], 1, 1, input_shape[-1])
 
-    def get_config(self):
+    def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({
             "reduction_ratio": self.reduction_ratio,

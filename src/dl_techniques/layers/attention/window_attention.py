@@ -299,10 +299,12 @@ class WindowAttention(keras.layers.Layer):
         self.probability_config = probability_config
         self.qk_norm_type = qk_norm_type
         self.qk_norm_kwargs = qk_norm_kwargs
-        self.kernel_initializer = kernel_initializer
-        self.bias_initializer = bias_initializer
-        self.kernel_regularizer = kernel_regularizer
-        self.bias_regularizer = bias_regularizer
+        # Resolve to objects so the stored attributes round-trip cleanly via
+        # get_config (the child SingleWindowAttention also resolves these).
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         # placeholder
         self._call_internal = None
 
