@@ -637,4 +637,98 @@ any other layer in Round 8.
 
 ## §6 Handover Prompt
 
-*(authored in step 3)*
+This is the self-contained instruction block to drive ONE round in a fresh, context-cleared session.
+Copy the fenced block below **verbatim** into a new agent session that has zero memory of how this
+roadmap was built. It depends on nothing but the files in this repository.
+
+```text
+You are picking up an ongoing, multi-session effort to make every custom Keras layer in
+`src/dl_techniques/layers/` production-quality. You have NO memory of prior sessions; everything you
+need is in the repository. Work exactly ONE round, then stop.
+
+STEP 0 — Read the roadmap.
+Read `roadmap/production_map.md` IN FULL. It is the single source of truth. Specifically internalize:
+  - §2 The Production-Quality Rubric — the [HARD] items (H1-H14) you must enforce, the [SOFT] items you
+    apply when reasonable, and the GHOST item (`if self.built: return`) you must NOT grade on or add.
+  - §3 How a Round Works — the per-round procedure and the standing user decisions (FULL re-audit; audit
+    AND fix in the same round; one round per session; the user pushes, you never push).
+  - §4 Batched Worklist — the ordered rounds, each a small batch of files with a checkbox, a baseline
+    scanner verdict, and a gap-hint.
+  - §5 Known DEEP-gap + Dead-code — the files that need extra care (forward-path raw `tf.*`, dead-code
+    keep-vs-delete candidates, and the `physics/lagrange_layer.py` accepted-exception candidate).
+
+STEP 1 — Pick the next round.
+In §4, find the LOWEST-numbered round whose file rows are still `[ ]` PENDING (an incomplete round).
+That batch is your work for this session. Announce out loud which round number you are picking up and
+list its files before doing anything else.
+
+STEP 2 — Mechanical audit with the scanner.
+Run the read-only AST scanner over the round's files to get the CURRENT mechanical verdicts (the §4
+verdicts are a stale baseline — files may have changed):
+    CUDA_VISIBLE_DEVICES=1 .venv/bin/python scripts/audit_layers.py --path <file1> <file2> ...
+or, for a batch that is a whole subpackage:
+    CUDA_VISIBLE_DEVICES=1 .venv/bin/python scripts/audit_layers.py --subpackage <name>
+(Add `--json /tmp/round.json` for a machine-readable report.) The scanner is an AID, not an oracle:
+it covers the mechanical HARD items only and can mislabel aliased imports / metaclass ABCs.
+
+STEP 3 — Grade + fix each file against the FULL rubric.
+For EVERY file in the batch: open it and grade it against the FULL §2 rubric by reading it (not just the
+scanner output). The canonical, gold-standard exemplar to match is
+`src/dl_techniques/layers/convnext_v1_block.py`; the authoritative spec is
+`research/2026_keras_custom_models_instructions.md` (Pattern 2 begins at line 381).
+  - Fix ALL [HARD] gaps (H1-H14) and all reasonable [SOFT] gaps to match the canonical style.
+  - Do NOT add `if self.built: return` to `build()` — it is GHOST (§2). Its absence is not a defect and
+    must never be treated as round work.
+  - If a file has a DEEP forward-path raw-`tf.` gap (§5) that cannot be cleanly migrated to `keras.ops`,
+    do NOT force a broken rewrite. Make at most 2 fix attempts; if it still won't come clean, mark that
+    file `[~]` in §4 with a one-line note (e.g. "raw-tf in call(); keras.ops has no equivalent — see §5")
+    and surface it in your final report rather than committing a broken layer. `physics/lagrange_layer.py`
+    in particular is an ACCEPTED-EXCEPTION candidate (`tf.GradientTape` has no `keras.ops` equivalent):
+    document the exception in the file header and accept it; do not rewrite it.
+
+STEP 4 — Ensure/repair a test.
+Each concrete layer needs a real test under `tests/test_layers/...` mirroring the source path. If missing
+or thin, add or repair one that covers, at minimum:
+  - construction (including the `ValueError` input-validation paths),
+  - a forward pass,
+  - a full serialization round-trip: build a tiny model using the layer, save it, reload it with
+    `keras.models.load_model(path, custom_objects={...})`, and assert identical output before/after,
+  - `compute_output_shape(...)` agreement with the actual `call()` output shape.
+
+STEP 5 — Run scoped tests (GPU1 only, never parallel).
+Run pytest scoped to JUST this batch's tests. Use GPU1 and serial execution (repo convention — never run
+GPU jobs in parallel):
+    CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_layers/<batch tests> -x
+All selected tests must pass before you check anything off.
+
+STEP 6 — Re-run the scanner on the batch.
+    CUDA_VISIBLE_DEVICES=1 .venv/bin/python scripts/audit_layers.py --path <batch files>
+Confirm every file now reports PASS — OR a documented, accepted exception per §5 (e.g.
+`physics/lagrange_layer.py`'s `tf.GradientTape`). An unexplained FAIL means the round is not done.
+
+STEP 7 — Update §4 in place.
+For each completed file, flip its row's `[ ]` to `[x]` (use `[~]` for a deferred DEEP-gap file with its
+one-line note). Then update the tally line at the top of §4 — `**Progress: X / 245 files
+production-verified**` — incrementing X by the number of files you finished this session. Edit only the
+rows for THIS round; do not touch other rounds.
+
+STEP 8 — Commit locally (do NOT push).
+Stage ONLY the specific files you edited (the layer files, their tests, and `roadmap/production_map.md`).
+Do NOT use `git add -A`. Then commit with a message of the form:
+    git commit -m "[production-map/round-N] <short batch description>"
+Do NOT push — the user pushes themselves.
+
+STEP 9 — Report and STOP.
+Report: which round you completed, a per-file before/after verdict, which tests you ran and their result,
+the new "X / 245" tally, and which round is next (the next PENDING round in §4). Then STOP. ONE round per
+session is the intended cadence — do not chain into the next round. Let the user clear context.
+```
+
+---
+
+## §7 Provenance
+
+This roadmap (the scanner `scripts/audit_layers.py`, the rubric, the 245-file worklist, and the §6
+handover prompt) was authored as durable, standalone infrastructure. It is intentionally self-contained:
+every future round is driven solely by this document plus the scanner — no external session state or
+planning scaffold is required, and none is referenced here.
