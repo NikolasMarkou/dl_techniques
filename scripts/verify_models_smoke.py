@@ -289,8 +289,19 @@ _reg("fastvlm", "RUN", _b_fastvlm, lambda m: m(_img(), training=False), "tiny")
 def _b_fftnet():
     from dl_techniques.models.fftnet.model import FFTNet
     return FFTNet.from_variant("base")
-_reg("fftnet", "XFAIL", _b_fftnet, lambda m: m(_img(), training=False),
-     "FFTNet core should forward; XFAIL guard (SpectreHead is the dead part)")
+_reg("fftnet", "RUN", _b_fftnet, lambda m: m(_img(h=224, w=224), training=False),
+     "FFTNet-base vision foundation model; needs 224x224 input "
+     "(was XFAIL on wrong 32px recipe, not SpectreHead)")
+
+
+# --- spectrehead (fftnet complex-FFT sequence mixer; direct component probe) -
+def _b_spectrehead():
+    from dl_techniques.models.fftnet.components import SpectreHead
+    return SpectreHead(embed_dim=64, fft_size=16, num_groups=4)
+_reg("spectrehead", "RUN", _b_spectrehead,
+     lambda m: m(np.random.rand(2, 16, 64).astype("float32"), training=False),
+     "SpectreHead complex-FFT sequence mixer; direct probe "
+     "(zero consumers, first runtime coverage)")
 
 
 # --- fnet ------------------------------------------------------------------
