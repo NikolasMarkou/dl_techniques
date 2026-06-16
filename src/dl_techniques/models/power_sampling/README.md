@@ -68,8 +68,8 @@ Standard autoregressive decoding samples one token at a time from `p`. Low-tempe
 │                                                             │
 │  p_T(x_t | x_<t)  ∝  p(x_t | x_<t)^(1/T)                    │
 │                                                             │
-│  Each token is chosen to be locally most likely.           │
-│  Asks:  "How likely is THIS token, right now?"             │
+│  Each token is chosen to be locally most likely.            │
+│  Asks:  "How likely is THIS token, right now?"              │
 │                                                             │
 │  Failure mode: a confident-but-wrong early token greedily   │
 │  commits the model to a globally poor trajectory.           │
@@ -84,7 +84,7 @@ Standard autoregressive decoding samples one token at a time from `p`. Low-tempe
 │                                                             │
 │  WHOLE sequences are reweighted; an MCMC loop swaps in      │
 │  re-generated suffixes that raise trajectory probability.   │
-│  Asks:  "If I pick this token, how GOOD are the futures?"  │
+│  Asks:  "If I pick this token, how GOOD are the futures?"   │
 │                                                             │
 │  Diversity is preserved because acceptance is stochastic    │
 │  (Metropolis-Hastings), not greedy.                         │
@@ -101,30 +101,30 @@ The engine generates one block of tokens at a time. After each block it samples 
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│                    Power Sampling Generation Loop                   │
+│                    Power Sampling Generation Loop                  │
 │                                                                    │
-│  prompt ──► tokenize ──► [optional CLS prepend] ──► gen = prompt    │
+│  prompt ──► tokenize ──► [optional CLS prepend] ──► gen = prompt   │
 │                                                       │            │
 │   ┌───────────────────────────────────────────────────┘            │
-│   ▼                                                                 │
-│  for block_idx in range(block_num):                                 │
+│   ▼                                                                │
+│  for block_idx in range(block_num):                                │
 │                                                                    │
 │   ┌──────────────────────────┐                                     │
-│   │ naive_temp_generate      │  append jump_size tokens at temp T   │
-│   │  (proposal distribution) │  record proposal & target log-probs  │
+│   │ naive_temp_generate      │  append jump_size tokens at temp T  │
+│   │  (proposal distribution) │  record proposal & target log-probs │
 │   └────────────┬─────────────┘                                     │
-│                ▼                                                     │
+│                ▼                                                   │
 │   ┌──────────────────────────┐                                     │
-│   │ sample K=mcmc_steps cut   │  idx_k = randint(c, t-1)            │
-│   │ points; re-generate each  │  prefixes = gen[:idx_k]             │
-│   │ to the end IN PARALLEL    │  ── ONE batched forward per step ── │
-│   │  (_batched_generate)      │                                     │
+│   │ sample K=mcmc_steps cut   │  idx_k = randint(c, t-1)           │
+│   │ points; re-generate each  │  prefixes = gen[:idx_k]            │
+│   │ to the end IN PARALLEL    │  ── ONE batched forward per step ──│
+│   │  (_batched_generate)      │                                    │
 │   └────────────┬─────────────┘                                     │
-│                ▼                                                     │
+│                ▼                                                   │
 │   ┌──────────────────────────┐    accept w.p. min(1, e^{log r})    │
-│   │ Metropolis-Hastings       │    (max_swap: accept iff log r > 0) │
-│   │ accept / reject each       │ ─► on accept: gen = proposal,      │
-│   │ proposal                  │    splice in its log-probs          │
+│   │ Metropolis-Hastings       │    (max_swap: accept iff log r > 0)│
+│   │ accept / reject each       │ ─► on accept: gen = proposal,     │
+│   │ proposal                  │    splice in its log-probs         │
 │   └──────────────────────────┘                                     │
 │                                                                    │
 │  return gen[strip:]  (strip the CLS prefix only if one was added)  │
