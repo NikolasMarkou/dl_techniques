@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 62 / 245 files production-verified**
+**Progress: 69 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -288,13 +288,13 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `time_series/adaptive_lag_attention.py` | FAIL | super_build_last |
-| `[ ]` | `time_series/deepar_blocks.py` | FAIL | compute_output_shape |
-| `[ ]` | `time_series/ema_layer.py` | PASS | rubric-verify |
-| `[ ]` | `time_series/forecasting_layers.py` | PASS | rubric-verify |
-| `[ ]` | `time_series/mixed_sequential_block.py` | PASS | rubric-verify |
-| `[ ]` | `time_series/nbeats_blocks.py` | N/A | N/A (scanner — human re-check) |
-| `[ ]` | `time_series/nbeatsx_blocks.py` | N/A | N/A (scanner — human re-check) |
+| `[x]` | `time_series/adaptive_lag_attention.py` | PASS | done: H6 (logger before super().build()); +test |
+| `[x]` | `time_series/deepar_blocks.py` | PASS | done: H7 compute_output_shape on DeepARCell (RNN cell); +test (4 layers) |
+| `[x]` | `time_series/ema_layer.py` | PASS | done: clean; existing test passes |
+| `[x]` | `time_series/forecasting_layers.py` | PASS | done: H8/H9 kernel_regularizer deserialize ×2 (NaiveResidual/ConformalQuantileHead); +test (3 layers) |
+| `[x]` | `time_series/mixed_sequential_block.py` | PASS | done: clean; existing test passes |
+| `[x]` | `time_series/nbeats_blocks.py` | PASS* | concrete Generic/Trend/Seasonality blocks (scanner N/A mislabel — subclass NBeatsBlock); super().build() last, clean; existing test passes |
+| `[x]` | `time_series/nbeatsx_blocks.py` | PASS* | concrete ExogenousBlock (scanner N/A mislabel); H6 (super().build() was not last — encoder built after) + S1 module docstring; +test |
 
 ### Round 10 — time_series/ (2/2, NEEDS-AUDIT)  (6 files)
 

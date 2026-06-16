@@ -1,3 +1,23 @@
+"""
+N-BEATSx Exogenous Block.
+=========================
+
+Extends the N-BEATS architecture (see :mod:`nbeats_blocks`) with support for
+exogenous covariates, implementing the N-BEATSx block of Olivares et al. (2023,
+https://arxiv.org/abs/2104.05522).
+
+The block processes the target residual through the inherited N-BEATS fully
+connected stack to produce per-sample basis weights (``theta``), while a
+parallel encoder turns the exogenous inputs into a dynamic basis. Backcast and
+forecast are then formed by an einsum projection of the basis against theta:
+
+    backcast = einsum('btc,bc->bt', basis_backcast, theta_backcast)
+    forecast = einsum('btc,bc->bt', basis_forecast, theta_forecast)
+
+When ``use_tcn`` is True (NBEATSx-G) the basis is ``C = TCN(X)``; otherwise the
+raw exogenous tensor is used directly as the basis.
+"""
+
 import keras
 from keras import ops, layers
 
@@ -133,15 +153,16 @@ class ExogenousBlock(NBeatsBlock):
         :param input_shape: Shape of the residual input (y).
         :type input_shape: tuple
         """
-        # We need to build the Dense stack from the parent
-        # input_shape here refers to the residual input (y)
-        super().build(input_shape)
-
         # Build encoder
         # Input to encoder is (Batch, Time, Exog_Dim)
         total_len = self.backcast_length + self.forecast_length
         if self.use_tcn:
             self.encoder.build((None, total_len, self.exogenous_dim))
+
+        # Build the Dense stack from the parent (input_shape refers to the
+        # residual input y). MUST be last so the layer is marked built only
+        # after all sub-layers exist.
+        super().build(input_shape)
 
     def call(self, inputs, training=None, exogenous_inputs=None):
         """

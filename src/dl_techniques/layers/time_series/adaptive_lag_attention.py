@@ -243,9 +243,10 @@ class AdaptiveLagAttentionLayer(keras.layers.Layer):
         self.attention_generator.build(context_shape)
         self.gate_generator.build(context_shape)
 
-        # Always call parent build at the end
-        super().build(input_shape)
         logger.debug(f"AdaptiveLagAttentionLayer built with context_shape={context_shape}, lag_shape={lag_shape}")
+
+        # Always call parent build at the end (MUST be last)
+        super().build(input_shape)
 
     def call(
         self,

@@ -522,6 +522,20 @@ class DeepARCell(keras.layers.Layer):
         """
         return self.lstm_cell.get_initial_state(batch_size=batch_size)
 
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """
+        Compute the per-time-step output shape of the cell.
+
+        :param input_shape: Shape of the per-step input ``(batch_size, input_dim)``.
+        :type input_shape: tuple[int or None, ...]
+        :return: Per-step output shape ``(batch_size, units)``.
+        :rtype: tuple[int or None, ...]
+        """
+        return (input_shape[0], self.units)
+
     def get_config(self) -> Dict[str, Any]:
         """
         Return the layer configuration for serialization.

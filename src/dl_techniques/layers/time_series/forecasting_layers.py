@@ -252,7 +252,7 @@ class ForecastabilityGate(layers.Layer):
         self.hidden_units = hidden_units
         self.activation = activation
         self.kernel_initializer = initializers.get(kernel_initializer)
-        self.kernel_regularizer = kernel_regularizer
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
 
         # Complexity analyzer will be built in build()
         self.complexity_analyzer = None
@@ -459,7 +459,7 @@ class ConformalQuantileHead(layers.Layer):
         self.forecast_length = forecast_length
         self.output_dim = output_dim
         self.kernel_initializer = initializers.get(kernel_initializer)
-        self.kernel_regularizer = kernel_regularizer
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
 
         # Projection layer will be built in build()
         self.projection = None
