@@ -123,6 +123,7 @@ class MobileClipModel(keras.Model):
             "image_config": {
                 "backbone_name": "vit_b16",
                 "image_size": 224,
+                "backbone_weights": None,  # D-001: CNN substitute built from scratch (no imagenet weights)
                 "backbone_trainable": True,
                 "projection_dropout": 0.1,
             },
@@ -144,6 +145,7 @@ class MobileClipModel(keras.Model):
             "image_config": {
                 "backbone_name": "mci0",
                 "image_size": 256,
+                "backbone_weights": None,  # D-001: CNN substitute built from scratch (no imagenet weights)
                 "backbone_trainable": True,
                 "projection_dropout": 0.1,
             },
@@ -165,6 +167,7 @@ class MobileClipModel(keras.Model):
             "image_config": {
                 "backbone_name": "mci1",
                 "image_size": 256,
+                "backbone_weights": None,  # D-001: CNN substitute built from scratch (no imagenet weights)
                 "backbone_trainable": True,
                 "projection_dropout": 0.1,
             },
@@ -186,6 +189,7 @@ class MobileClipModel(keras.Model):
             "image_config": {
                 "backbone_name": "mci2",
                 "image_size": 256,
+                "backbone_weights": None,  # D-001: CNN substitute built from scratch (no imagenet weights)
                 "backbone_trainable": True,
                 "projection_dropout": 0.1,
             },
@@ -252,7 +256,7 @@ class MobileClipModel(keras.Model):
             self.image_encoder.build(input_shape["image"])
         if "text" in input_shape and hasattr(self.text_encoder, 'build'):
             self.text_encoder.build(input_shape["text"])
-        self.built = True
+        super().build(input_shape)
 
     def encode_image(
             self,
