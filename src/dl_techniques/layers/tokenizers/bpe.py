@@ -192,6 +192,10 @@ class BPETokenizer(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
+        # Validate inputs
+        if max_length <= 0:
+            raise ValueError(f"max_length must be positive, got {max_length}")
+
         self.vocab_dict = vocab_dict or {}
         self.merges = merges or []
         self.max_length = max_length
@@ -437,6 +441,12 @@ class TokenEmbedding(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
+        # Validate inputs
+        if vocab_size <= 0:
+            raise ValueError(f"vocab_size must be positive, got {vocab_size}")
+        if embedding_dim <= 0:
+            raise ValueError(f"embedding_dim must be positive, got {embedding_dim}")
+
         self.vocab_size = vocab_size
         self.embedding_dim = embedding_dim
         self.mask_zero = mask_zero
@@ -450,6 +460,18 @@ class TokenEmbedding(keras.layers.Layer):
             embeddings_initializer=embeddings_initializer,
             name="token_embedding"
         )
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the layer and its embedding sub-layer.
+
+        Explicitly builds the wrapped ``Embedding`` sub-layer so all weight
+        variables exist before weight restoration during deserialization.
+
+        :param input_shape: Shape tuple of the input token-ID tensor.
+        :type input_shape: tuple[int | None, ...]
+        """
+        self.embedding.build(input_shape)
+        super().build(input_shape)
 
     def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
         """Forward pass of the embedding layer.

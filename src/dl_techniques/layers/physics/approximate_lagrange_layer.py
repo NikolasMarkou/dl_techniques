@@ -1,3 +1,34 @@
+"""
+Approximated Lagrangian Neural Network Layer
+============================================
+
+A gradient-tape-free approximation of Lagrangian Neural Network (LNN) dynamics,
+inspired by "Lagrangian Neural Networks" (Cranmer et al., 2020,
+https://arxiv.org/abs/2003.04630).
+
+Key Features:
+------------
+- Three parallel MLPs directly learn the components of the Euler-Lagrange
+  equation (``dL/dq``, the inverse Hessian ``(d^2L/dq_dot^2)^{-1}``, and the
+  mixed partial ``d/dq(dL/dq_dot)``) instead of computing them via nested
+  automatic differentiation.
+- Fully backend-agnostic forward path (only ``keras.ops``); no ``GradientTape``,
+  so the layer runs identically on TensorFlow, JAX, and PyTorch backends.
+- Trades a 3x parameter count for substantially faster inference relative to the
+  tape-based :class:`LagrangianNeuralNetworkLayer`.
+
+Architecture:
+------------
+The output-projection dimensionality of each internal MLP depends on the input
+coordinate dimension (``coord_dim`` and ``coord_dim ** 2``), which is only known
+once the input shape is available. The hidden stacks are created in ``__init__``;
+the input-shape-dependent output projections are appended in ``build()``.
+
+The computation flow is:
+[q, q_dot] -> concat -> {MLP_grad, MLP_invH, MLP_mixed} ->
+              q_ddot = H^{-1} * [dL/dq - J * q_dot]
+"""
+
 import keras
 from keras import ops, layers
 from typing import List, Dict, Any, Tuple, Optional
@@ -169,7 +200,11 @@ class ApproximatedLNNLayer(keras.layers.Layer):
         # Always call parent build at the end
         super().build(input_shape)
 
-    def call(self, inputs: List[keras.KerasTensor]) -> keras.KerasTensor:
+    def call(
+            self,
+            inputs: List[keras.KerasTensor],
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """
         Forward pass computing accelerations from approximated components.
 
@@ -178,6 +213,8 @@ class ApproximatedLNNLayer(keras.layers.Layer):
 
         :param inputs: List containing ``[q, q_dot]``.
         :type inputs: List[keras.KerasTensor]
+        :param training: Boolean indicating whether the layer is in training mode.
+        :type training: Optional[bool]
         :return: Computed generalized accelerations ``q_ddot``.
         :rtype: keras.KerasTensor
         """
@@ -190,17 +227,21 @@ class ApproximatedLNNLayer(keras.layers.Layer):
         # 1. Approximate all required components using the MLPs
 
         # Approximate ∂L/∂q (gradient w.r.t. coordinates)
-        grad_L_q = self.grad_L_q_mlp(coords_and_velocities)
+        grad_L_q = self.grad_L_q_mlp(coords_and_velocities, training=training)
 
         # Approximate (∂²L/∂q̇²)⁻¹ (inverse Hessian matrix)
-        inverse_hessian_flat = self.inverse_hessian_mlp(coords_and_velocities)
+        inverse_hessian_flat = self.inverse_hessian_mlp(
+            coords_and_velocities, training=training
+        )
         inverse_hessian = ops.reshape(
             inverse_hessian_flat,
             (-1, coord_dim, coord_dim)
         )
 
         # Approximate ∂/∂q(∂L/∂q̇) (mixed partial derivatives)
-        jac_q_grad_q_dot_flat = self.jac_q_grad_q_dot_mlp(coords_and_velocities)
+        jac_q_grad_q_dot_flat = self.jac_q_grad_q_dot_mlp(
+            coords_and_velocities, training=training
+        )
         jac_q_grad_q_dot = ops.reshape(
             jac_q_grad_q_dot_flat,
             (-1, coord_dim, coord_dim)

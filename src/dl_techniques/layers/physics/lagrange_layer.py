@@ -1,3 +1,34 @@
+"""
+Lagrangian Neural Network Layer
+===============================
+
+A physics-informed layer that models system dynamics through a learned scalar
+Lagrangian, implementing "Lagrangian Neural Networks" (Cranmer et al., 2020,
+https://arxiv.org/abs/2003.04630).
+
+An internal MLP approximates ``L(q, q_dot)``; accelerations are obtained by
+numerically solving the Euler-Lagrange equation using automatic differentiation
+of that learned Lagrangian.
+
+ACCEPTED BACKEND-SPECIFIC EXCEPTION (H10 / graph-safe ``call``):
+--------------------------------------------------------------
+The forward path of this layer intentionally uses raw TensorFlow operations and
+therefore is **TensorFlow-backend-only** by design:
+
+- ``tf.GradientTape`` / ``tape.jacobian`` / ``tape.gradient`` — required to
+  differentiate the learned Lagrangian w.r.t. ``q`` and ``q_dot`` at inference
+  time. ``keras.ops`` exposes **no backend-agnostic automatic-differentiation
+  API**, so this cannot be migrated to ``keras.ops``.
+- ``tf.linalg.pinv`` — the Moore-Penrose pseudoinverse of the velocity Hessian;
+  ``keras.ops.linalg`` provides ``inv``/``solve``/``lstsq`` but **no ``pinv``**.
+
+This is a documented, accepted exception to the "only ``keras.ops`` in ``call``"
+rule (see the production roadmap §5). A backend-agnostic rewrite would require a
+fundamentally different architecture (e.g. ``jax.grad``); the gradient-free
+:class:`ApproximatedLNNLayer` is the portable alternative. Do NOT "fix" this by
+forcing a broken ``keras.ops`` rewrite.
+"""
+
 import keras
 import tensorflow as tf
 from keras import ops, layers
@@ -120,7 +151,11 @@ class LagrangianNeuralNetworkLayer(keras.layers.Layer):
         # Always call parent build at the end
         super().build(input_shape)
 
-    def call(self, inputs: List[keras.KerasTensor]) -> keras.KerasTensor:
+    def call(
+            self,
+            inputs: List[keras.KerasTensor],
+            training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """
         Forward pass computing accelerations from learned Lagrangian.
 
@@ -128,8 +163,15 @@ class LagrangianNeuralNetworkLayer(keras.layers.Layer):
         automatic differentiation to compute required derivatives of the
         learned Lagrangian function.
 
+        .. note::
+            This forward path uses ``tf.GradientTape`` and ``tf.linalg.pinv``
+            and is therefore TensorFlow-backend-only by design (documented,
+            accepted exception — see module docstring and roadmap §5).
+
         :param inputs: List containing ``[q, q_dot]``.
         :type inputs: List[keras.KerasTensor]
+        :param training: Boolean indicating whether the layer is in training mode.
+        :type training: Optional[bool]
         :return: Computed generalized accelerations ``q_ddot``.
         :rtype: keras.KerasTensor
         """
@@ -146,22 +188,27 @@ class LagrangianNeuralNetworkLayer(keras.layers.Layer):
 
                 # 1. Compute the scalar Lagrangian L(q, q_dot)
                 coords_and_velocities = ops.concatenate([q, q_dot], axis=-1)
-                lagrangian = self.mlp(coords_and_velocities)
+                lagrangian = self.mlp(coords_and_velocities, training=training)
                 lagrangian = ops.squeeze(lagrangian, axis=-1)  # Shape: (batch,)
 
             # 2. Compute first-order derivatives
             # ∂L/∂q_dot (gradient w.r.t. velocities)
             grad_L_q_dot = tape1.gradient(lagrangian, q_dot)
 
-        # 3. Compute second-order derivatives using the persistent tape
+        # 3. Compute second-order derivatives using the persistent tape.
+        # ``batch_jacobian`` returns the PER-SAMPLE Jacobian of shape
+        # (batch, coord_dim, coord_dim) — assuming no cross-sample coupling,
+        # which holds here — rather than the full (batch, coord, batch, coord)
+        # tensor produced by ``jacobian``.
+
         # ∂²L/∂q_dot² (Hessian matrix w.r.t. velocities)
-        hessian_L_q_dot = tape2.jacobian(grad_L_q_dot, q_dot)
+        hessian_L_q_dot = tape2.batch_jacobian(grad_L_q_dot, q_dot)
 
         # ∂L/∂q (gradient w.r.t. coordinates)
         grad_L_q = tape2.gradient(lagrangian, q)
 
         # ∂/∂q(∂L/∂q_dot) (mixed partial derivatives)
-        jac_q_grad_q_dot = tape2.jacobian(grad_L_q_dot, q)
+        jac_q_grad_q_dot = tape2.batch_jacobian(grad_L_q_dot, q)
 
         # Clean up persistent tape to prevent memory leaks
         del tape2

@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 0 / 245 files production-verified**
+**Progress: 3 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -183,9 +183,9 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `physics/approximate_lagrange_layer.py` | PASS | rubric-verify |
-| `[ ]` | `physics/lagrange_layer.py` | FAIL | forward-raw-tf (ACCEPTED-EXCEPTION candidate — see §5) |
-| `[ ]` | `tokenizers/bpe.py` | PASS | rubric-verify |
+| `[x]` | `physics/approximate_lagrange_layer.py` | PASS | done: +module docstring (S1), +`training` fwd (H11); build-time input-dependent output proj accepted |
+| `[x]` | `physics/lagrange_layer.py` | FAIL→ACCEPTED | done: H10 accepted-exception documented in header (`tf.GradientTape`/`tf.linalg.pinv`, no `keras.ops` eq — §5); fixed real batch_jacobian forward bug; +`training` fwd |
+| `[x]` | `tokenizers/bpe.py` | PASS | done: +`max_length` validation (H4, BPETokenizer); +input validation (H4) & explicit `build()` (H5, TokenEmbedding) |
 
 ### Round 2 — graphs/ (4 of 5 untested) + heads/vlm/  (7 files)
 
