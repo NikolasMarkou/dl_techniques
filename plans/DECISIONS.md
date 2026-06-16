@@ -87,6 +87,13 @@
 **Reasoning**: Verified by a dedicated repro: multi-box `(2,3,4)`→`(2,6,D)` finite; per-box independence (perturbing box k changes only box k's slice); batch independence; N=1 unchanged; full SAM still forwards. ~10 lines.
 **Anchor-Refs**: `src/dl_techniques/models/sam/prompt_encoder.py:~483`
 
+### D-008 | POST-CLOSE follow-up (sam build override) | 2026-06-16
+**Context**: `SAM.call()` takes a dict input (`inputs['image']`). With no `build()` override, Keras attempted to auto-trace `call()` with a single symbolic tensor, hit the dict membership check (`'image' not in inputs`), and emitted a spurious "iterating over a symbolic tf.Tensor" / "unbuilt state" UserWarning on first call (non-fatal but noisy; would also break `@tf.function` tracing).
+**Decision**: Add an idempotent `SAM.build()` that explicitly builds the three sub-models (image_encoder with `(None,img,img,3)`; prompt_encoder/mask_decoder with `None` — both input-shape-independent) behind `if not X.built` guards, then `super().build()`.
+**Trade-off**: One small override **at the cost of** nothing — sub-builds are idempotent and input-shape-independent; also improves deserialization robustness (weights exist before load).
+**Reasoning**: Defining `build()` makes Keras call it instead of tracing → warning gone (verified: `warn-lines=0`), SAM still forwards (78 PASS). Closes the last SAM caveat.
+**Anchor-Refs**: `src/dl_techniques/models/sam/model.py:~282`
+
 ## plan_2026-06-15_e2759fbc
 ### D-001 | EXPLORE → PLAN | YYYY-MM-DD
 **Context**: <one-paragraph background — what was discovered in EXPLORE>

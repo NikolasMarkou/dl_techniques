@@ -279,6 +279,29 @@ class SAM(keras.Model):
         self._pixel_mean_list = pixel_mean
         self._pixel_std_list = pixel_std
 
+    def build(self, input_shape: Optional[Any] = None) -> None:
+        """
+        Explicitly build the three sub-models.
+
+        DECISION plan_2026-06-15_e6a0391c/D-008: `call()` takes a dict input
+        (`inputs['image']`). Without a `build()` override, Keras tries to
+        auto-trace `call()` with a single symbolic tensor, hits the dict
+        membership check (`'image' not in inputs`), and emits a spurious
+        "iterating over a symbolic tf.Tensor" UserWarning on first call. Defining
+        `build()` makes Keras call it instead of tracing, and explicitly building
+        the sub-models ensures their weights exist before any weight load
+        (deserialization robustness). Each sub-build is idempotent and
+        input-shape-independent, so the guards keep this safe to call repeatedly.
+        """
+        if not self.image_encoder.built:
+            img = self.image_encoder.img_size
+            self.image_encoder.build((None, img, img, 3))
+        if not self.prompt_encoder.built:
+            self.prompt_encoder.build(None)
+        if not self.mask_decoder.built:
+            self.mask_decoder.build(None)
+        super().build(input_shape)
+
     def call(
         self,
         inputs: Dict[str, Any],
