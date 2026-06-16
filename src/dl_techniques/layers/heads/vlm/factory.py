@@ -24,6 +24,48 @@ from .task_types import VLMTaskConfig, VLMTaskType
 
 
 # ---------------------------------------------------------------------
+# Serialization helpers
+# ---------------------------------------------------------------------
+
+
+def _serialize_task_config(task_config: VLMTaskConfig) -> Dict[str, Any]:
+    """Serialize a ``VLMTaskConfig`` to a JSON-safe dict.
+
+    The dataclass stores ``task_type`` as a ``VLMTaskType`` enum, which is not
+    JSON-serializable; this converts it to its string value so the layer config
+    survives a ``.keras`` round-trip.
+
+    :param task_config: The task configuration to serialize.
+    :type task_config: VLMTaskConfig
+    :return: JSON-serializable configuration dict.
+    :rtype: Dict[str, Any]
+    """
+    cfg = dict(task_config.__dict__)
+    cfg["task_type"] = task_config.task_type.value
+    return cfg
+
+
+def _deserialize_task_config(
+    config: Union[VLMTaskConfig, Dict[str, Any]]
+) -> VLMTaskConfig:
+    """Reconstruct a ``VLMTaskConfig`` from a serialized dict.
+
+    :param config: Serialized config dict (or an existing ``VLMTaskConfig``,
+        returned unchanged).
+    :type config: Union[VLMTaskConfig, Dict[str, Any]]
+    :return: A ``VLMTaskConfig`` instance.
+    :rtype: VLMTaskConfig
+    """
+    if isinstance(config, VLMTaskConfig):
+        return config
+    cfg = dict(config)
+    task_type = cfg.get("task_type")
+    if isinstance(task_type, str):
+        cfg["task_type"] = VLMTaskType.from_string(task_type)
+    return VLMTaskConfig(**cfg)
+
+
+# ---------------------------------------------------------------------
 # Base VLM Head Class
 # ---------------------------------------------------------------------
 
@@ -147,12 +189,37 @@ class BaseVLMHead(keras.layers.Layer):
         """Builds the layer."""
         super().build(input_shape)
 
+    def compute_output_shape(
+        self, input_shape: Union[Dict, Tuple, List]
+    ) -> Tuple[Optional[int], ...]:
+        """Compute the pooled fused-representation output shape.
+
+        The common post-fusion stack emits a ``(batch, hidden_dim)`` tensor;
+        subclasses with richer ``call()`` outputs override this.
+
+        :param input_shape: Input shape(s); a dict keyed by feature name, a list
+            of shapes, or a single shape tuple.
+        :return: Output shape ``(batch, hidden_dim)``.
+        :rtype: Tuple[Optional[int], ...]
+        """
+        if isinstance(input_shape, dict):
+            ref = input_shape.get("vision_features") or next(iter(input_shape.values()))
+        elif (
+            isinstance(input_shape, (list, tuple))
+            and input_shape
+            and isinstance(input_shape[0], (list, tuple))
+        ):
+            ref = input_shape[0]
+        else:
+            ref = input_shape
+        return (ref[0], self.hidden_dim)
+
     def get_config(self) -> Dict[str, Any]:
         """Gets layer configuration."""
         config = super().get_config()
         config.update(
             {
-                "task_config": self.task_config.__dict__,
+                "task_config": _serialize_task_config(self.task_config),
                 "vision_dim": self.vision_dim,
                 "text_dim": self.text_dim,
                 "fusion_strategy": self.fusion_strategy,
@@ -165,6 +232,23 @@ class BaseVLMHead(keras.layers.Layer):
             }
         )
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "BaseVLMHead":
+        """Reconstruct the head, deserializing the ``task_config`` dataclass.
+
+        The layer name is regenerated from ``task_config.name`` in ``__init__``,
+        so the stored ``name`` is dropped to avoid a duplicate-keyword conflict.
+
+        :param config: Serialized layer configuration.
+        :type config: Dict[str, Any]
+        :return: A reconstructed head instance.
+        :rtype: BaseVLMHead
+        """
+        config = dict(config)
+        config.pop("name", None)
+        config["task_config"] = _deserialize_task_config(config["task_config"])
+        return cls(**config)
 
 
 # ---------------------------------------------------------------------
@@ -335,7 +419,7 @@ class ImageCaptioningHead(keras.layers.Layer):
         config = super().get_config()
         config.update(
             {
-                "task_config": self.task_config.__dict__,
+                "task_config": _serialize_task_config(self.task_config),
                 "vision_dim": self.vision_dim,
                 "text_dim": self.text_dim,
                 "num_layers": self.num_layers,
@@ -344,6 +428,14 @@ class ImageCaptioningHead(keras.layers.Layer):
             }
         )
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "ImageCaptioningHead":
+        """Reconstruct the head, deserializing the ``task_config`` dataclass."""
+        config = dict(config)
+        config.pop("name", None)
+        config["task_config"] = _deserialize_task_config(config["task_config"])
+        return cls(**config)
 
 
 # ---------------------------------------------------------------------
@@ -495,7 +587,7 @@ class VQAHead(keras.layers.Layer):
         config = super().get_config()
         config.update(
             {
-                "task_config": self.task_config.__dict__,
+                "task_config": _serialize_task_config(self.task_config),
                 "vision_dim": self.vision_dim,
                 "text_dim": self.text_dim,
                 "hidden_dims": self.hidden_dims,
@@ -503,6 +595,14 @@ class VQAHead(keras.layers.Layer):
             }
         )
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "VQAHead":
+        """Reconstruct the head, deserializing the ``task_config`` dataclass."""
+        config = dict(config)
+        config.pop("name", None)
+        config["task_config"] = _deserialize_task_config(config["task_config"])
+        return cls(**config)
 
 
 # ---------------------------------------------------------------------
@@ -593,6 +693,21 @@ class VisualGroundingHead(BaseVLMHead):
             "bbox": ops.sigmoid(bbox),
             "confidence": region_scores,
             "grounded_features": top_features,
+        }
+
+    def compute_output_shape(self, input_shape: Dict) -> Dict[str, Tuple[Optional[int], ...]]:
+        """Returns output-shape dict mirroring call() outputs.
+
+        :param input_shape: Dict with ``vision_features`` ``(B, N_regions, D_vis)``.
+        :return: Shapes for ``bbox``, ``confidence`` and ``grounded_features``.
+        :rtype: Dict[str, Tuple[Optional[int], ...]]
+        """
+        vision_shape = input_shape["vision_features"]
+        batch, num_regions = vision_shape[0], vision_shape[1]
+        return {
+            "bbox": (batch, 4),
+            "confidence": (batch, num_regions),
+            "grounded_features": (batch, self.hidden_dim),
         }
 
 
@@ -729,6 +844,23 @@ class ImageTextMatchingHead(BaseVLMHead):
             "text_embeddings": text_norm,
         }
 
+    def compute_output_shape(self, input_shape: Dict) -> Dict[str, Tuple[Optional[int], ...]]:
+        """Returns output-shape dict mirroring call() outputs.
+
+        :param input_shape: Dict with ``vision_features`` and ``text_features``.
+        :return: Shapes for the five output tensors.
+        :rtype: Dict[str, Tuple[Optional[int], ...]]
+        """
+        vision_shape = input_shape["vision_features"]
+        batch = vision_shape[0]
+        return {
+            "similarity_matrix": (batch, batch),
+            "logits": (batch, batch),
+            "match_score": (batch,),
+            "vision_embeddings": (batch, self.projection_dim),
+            "text_embeddings": (batch, self.projection_dim),
+        }
+
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update(
@@ -826,12 +958,28 @@ class MultiTaskVLMHead(keras.layers.Layer):
             outputs[name] = head(inputs, training=training)
         return outputs
 
+    def compute_output_shape(self, input_shape: Dict) -> Dict[str, Any]:
+        """Returns a dict of per-task output shapes.
+
+        Mirrors the no-``task_name`` ``call()`` path, which routes the shared
+        inputs to every task head.
+
+        :param input_shape: Shared input shapes (dict keyed by feature name).
+        :return: Mapping of task name to that head's output shape(s).
+        :rtype: Dict[str, Any]
+        """
+        return {
+            name: head.compute_output_shape(input_shape)
+            for name, head in self.task_heads.items()
+        }
+
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update(
             {
                 "task_configs": {
-                    name: tc.__dict__ for name, tc in self.task_configs.items()
+                    name: _serialize_task_config(tc)
+                    for name, tc in self.task_configs.items()
                 },
                 "shared_vision_dim": self.shared_vision_dim,
                 "shared_text_dim": self.shared_text_dim,
@@ -839,6 +987,23 @@ class MultiTaskVLMHead(keras.layers.Layer):
         )
         config.update(self.shared_head_kwargs)
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "MultiTaskVLMHead":
+        """Reconstruct the multi-task head, deserializing each ``task_config``.
+
+        Keras base kwargs (``name``/``trainable``/``dtype``) are dropped so they
+        are not forwarded into per-task head construction (where ``name`` would
+        collide with each head's auto-generated name).
+        """
+        config = dict(config)
+        for base_key in ("name", "trainable", "dtype"):
+            config.pop(base_key, None)
+        config["task_configs"] = {
+            name: _deserialize_task_config(tc)
+            for name, tc in config["task_configs"].items()
+        }
+        return cls(**config)
 
 
 # ---------------------------------------------------------------------

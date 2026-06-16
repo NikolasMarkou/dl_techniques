@@ -235,8 +235,8 @@ class GraphNeuralNetworkLayer(keras.layers.Layer):
         self.epsilon = epsilon
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.bias_initializer = keras.initializers.get(bias_initializer)
-        self.kernel_regularizer = kernel_regularizer
-        self.bias_regularizer = bias_regularizer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # CREATE all sub-layers in __init__ (they are unbuilt)
         self.gnn_layers = []

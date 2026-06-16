@@ -19,6 +19,7 @@ The three forward-pass-fixed heads are locked here:
     directions, so the tests use ``vision_dim == text_dim``.
 """
 
+import json
 import os
 import tempfile
 
@@ -31,6 +32,7 @@ from dl_techniques.layers.heads.vlm import (
     VLMTaskType,
     VLMTaskConfig,
     create_vlm_head,
+    create_multi_task_vlm_head,
     BaseVLMHead,
     ImageCaptioningHead,
     VQAHead,
@@ -254,3 +256,83 @@ class TestVLMRoundtrip:
             loaded = keras.models.load_model(path)
         y1 = loaded(inputs)
         assert tuple(y1["logits"].shape) == tuple(y0["logits"].shape) == (B, S, VOCAB)
+
+
+# ---------------------------------------------------------------------
+# H8/H9 — get_config is JSON-serializable and from_config round-trips
+# (the task_config dataclass holds a VLMTaskType enum)
+# ---------------------------------------------------------------------
+
+class TestVLMConfigRoundtrip:
+
+    def _heads(self):
+        return {
+            "captioning": _captioning_head(),
+            "vqa": _vqa_head(),
+            "itm": _itm_head(),
+            "grounding": create_vlm_head(
+                VLMTaskConfig(name="grd", task_type=VLMTaskType.VISUAL_GROUNDING,
+                              hidden_size=DIM),
+                vision_dim=DIM, text_dim=DIM,
+            ),
+            "base": BaseVLMHead(
+                task_config=VLMTaskConfig(name="base",
+                                          task_type=VLMTaskType.VISUAL_DIALOGUE,
+                                          hidden_size=DIM),
+                vision_dim=DIM, text_dim=DIM,
+            ),
+        }
+
+    @pytest.mark.parametrize("name", ["captioning", "vqa", "itm", "grounding", "base"])
+    def test_config_is_json_serializable_and_reconstructs(self, name):
+        head = self._heads()[name]
+        config = head.get_config()
+        # Must be JSON-safe (enum collapsed to its string value).
+        json.dumps(config)
+        rebuilt = type(head).from_config(config)
+        assert isinstance(rebuilt, type(head))
+        assert rebuilt.task_config.task_type == head.task_config.task_type
+
+    def test_multitask_config_round_trip(self):
+        mt = create_multi_task_vlm_head(
+            [VLMTaskConfig(name="itm", task_type=VLMTaskType.IMAGE_TEXT_MATCHING,
+                           hidden_size=DIM)],
+            shared_vision_dim=DIM, shared_text_dim=DIM,
+        )
+        config = mt.get_config()
+        json.dumps(config)
+        rebuilt = MultiTaskVLMHead.from_config(config)
+        assert list(rebuilt.task_heads) == list(mt.task_heads)
+
+
+# ---------------------------------------------------------------------
+# H7 — compute_output_shape mirrors call() outputs
+# ---------------------------------------------------------------------
+
+class TestVLMComputeOutputShape:
+
+    def test_captioning_shape(self):
+        head = _captioning_head()
+        shapes = head.compute_output_shape(
+            {"vision_features": (B, S, DIM), "text_features": (B, S, DIM)}
+        )
+        assert shapes["logits"] == (B, S, VOCAB)
+
+    def test_vqa_shape(self):
+        head = _vqa_head()
+        shapes = head.compute_output_shape(
+            {"vision_features": (B, S, DIM), "question_features": (B, S, DIM)}
+        )
+        assert shapes["answer_logits"] == (B, NUM_CLASSES)
+
+    def test_itm_shape(self, vision_feats, text_feats):
+        head = _itm_head()
+        out = head({
+            "vision_features": ops.convert_to_tensor(vision_feats),
+            "text_features": ops.convert_to_tensor(text_feats),
+        })
+        shapes = head.compute_output_shape(
+            {"vision_features": (B, S, DIM), "text_features": (B, S, DIM)}
+        )
+        for key in out:
+            assert tuple(out[key].shape) == tuple(shapes[key])

@@ -105,7 +105,7 @@ class LightweightGNNLayer(keras.layers.Layer):
         self.units = units
         self.activation = keras.activations.get(activation)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.kernel_regularizer = kernel_regularizer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         # Weight placeholder (created in build)
         self.kernel = None
@@ -383,6 +383,10 @@ class RELGTTokenEncoder(keras.layers.Layer):
 
         # Build feature encoder
         self.feature_encoder.build(feature_shape)
+
+        # Build type and hop embedding encoders (indexed by integer id tensors)
+        self.type_encoder.build(input_shape["node_types"])
+        self.hop_encoder.build(input_shape["hop_distances"])
 
         # Build time encoder
         self.time_encoder.build(time_shape)

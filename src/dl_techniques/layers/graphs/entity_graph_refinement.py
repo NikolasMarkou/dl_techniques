@@ -355,9 +355,10 @@ class EntityGraphRefinement(keras.layers.Layer):
         self.sparsification_gate.build(input_shape=(None, 2 * self.entity_dim))
         logger.debug("Built sparsification gate MLP")
 
-        # Call parent build method to finalize layer construction
-        super().build(input_shape)
         logger.info("EntityGraphRefinement layer built successfully")
+
+        # Call parent build method to finalize layer construction (MUST be last)
+        super().build(input_shape)
 
     def _get_edge_features(self, entities: keras.KerasTensor) -> keras.KerasTensor:
         """Create pairwise feature representations for all potential edges.

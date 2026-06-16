@@ -19,7 +19,6 @@ where:
 """
 
 import keras
-import tensorflow as tf
 from typing import Optional, Union, List, Tuple, Any
 
 # ---------------------------------------------------------------------
@@ -177,8 +176,8 @@ class SHGCNLayer(keras.layers.Layer):
                 trainable=True
             )
         else:
-            # Fixed curvature
-            self.c_theta = tf.constant(0.54, dtype=tf.float32)
+            # Fixed curvature (backend-agnostic constant; not a trainable weight)
+            self.c_theta = keras.ops.convert_to_tensor(0.54, dtype='float32')
 
         # Build dropout layer
         self.dropout.build(feat_shape)

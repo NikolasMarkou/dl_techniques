@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 3 / 245 files production-verified**
+**Progress: 10 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -191,13 +191,13 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `graphs/entity_graph_refinement.py` | FAIL | super_build_last |
-| `[ ]` | `graphs/fermi_diract_decoder.py` | PASS | rubric-verify |
-| `[ ]` | `graphs/graph_neural_network.py` | PASS | rubric-verify |
-| `[ ]` | `graphs/relational_graph_transformer_blocks.py` | PASS | rubric-verify |
-| `[ ]` | `graphs/simplified_hyperbolic_graph_convolutional_neural_layer.py` | PASS | rubric-verify (findings grep flagged raw-tf outside call — re-check, see §5) |
-| `[ ]` | `heads/vlm/factory.py` | FAIL | compute_output_shape |
-| `[ ]` | `heads/vlm/task_types.py` | N/A | N/A (no concrete layer) |
+| `[x]` | `graphs/entity_graph_refinement.py` | PASS | done: H6 fixed (moved log before super().build()); existing test covers round-trip |
+| `[x]` | `graphs/fermi_diract_decoder.py` | PASS | done: clean; +new test |
+| `[x]` | `graphs/graph_neural_network.py` | PASS | done: deserialize regularizers in __init__ (H8/H9); +new test |
+| `[x]` | `graphs/relational_graph_transformer_blocks.py` | PASS | done: regularizer deserialize (H8/H9) + RELGTTokenEncoder H5 (build type/hop embeddings); +new test |
+| `[x]` | `graphs/simplified_hyperbolic_graph_convolutional_neural_layer.py` | PASS | done: raw-tf re-check resolved — tf.constant in build()→keras.ops, dropped tf import; +new test |
+| `[x]` | `heads/vlm/factory.py` | PASS | done: H7 compute_output_shape on 4 heads + H8/H9 task_config enum serialize/from_config across all 6 heads; +tests |
+| `[x]` | `heads/vlm/task_types.py` | N/A | N/A confirmed (VLMTaskType Enum + VLMTaskConfig dataclass; no concrete layer) |
 
 ### Round 3 — untested root-level files (1/3)  (11 files)
 
