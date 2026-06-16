@@ -101,7 +101,7 @@ print("Outputs are consistent after serialization.")
 
 import keras
 from keras import layers, ops
-from typing import Optional, Tuple, Any, Dict, Union, Literal
+from typing import Optional, Tuple, Any, Dict, Literal
 
 # ---------------------------------------------------------------------
 # local imports
@@ -109,124 +109,9 @@ from typing import Optional, Tuple, Any, Dict, Union, Literal
 
 from dl_techniques.layers.ffn import create_ffn_layer
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.layers.embedding.patch_embedding import PatchEmbedding2D
 
 # ---------------------------------------------------------------------
-
-
-@keras.saving.register_keras_serializable()
-class PatchEmbedding(layers.Layer):
-    """
-    Image to Patch Embedding Layer.
-
-    Converts a 2D image into a sequence of patch embeddings using a single
-    convolutional layer. This is the first step in tokenizing the image for
-    the Vision Transformer.
-
-    **Intent**: To efficiently tokenize an image into a grid of feature vectors,
-    where each vector represents a small patch of the image.
-
-    **Architecture**:
-    ```
-    Input Image (B, H, W, C)
-          |
-          v
-    Conv2D(kernel=patch_size, strides=patch_size)
-          |
-          v
-    Output Patches (B, H/patch, W/patch, embed_dim)
-    ```
-
-    Args:
-        patch_size: Integer or tuple, the size of each patch (height, width).
-            Defaults to 16.
-        embed_dim: Integer, the dimensionality of the output patch embeddings.
-            Defaults to 768.
-        **kwargs: Additional arguments for the `keras.layers.Layer` base class.
-
-    Input shape:
-        4D tensor with shape: `(batch_size, height, width, channels)`.
-
-    Output shape:
-        4D tensor with shape: `(batch_size, height/patch_size, width/patch_size, embed_dim)`.
-
-    Attributes:
-        proj: A `keras.layers.Conv2D` layer that performs the projection.
-    """
-
-    def __init__(
-        self,
-        patch_size: Union[int, Tuple[int, int]] = 16,
-        embed_dim: int = 768,
-        **kwargs: Any
-    ) -> None:
-        super().__init__(**kwargs)
-        # Store all configuration parameters
-        self.patch_size = (patch_size, patch_size) if isinstance(patch_size, int) else patch_size
-        self.embed_dim = embed_dim
-
-        # CREATE sub-layers in __init__
-        self.proj = layers.Conv2D(
-            filters=embed_dim,
-            kernel_size=self.patch_size,
-            strides=self.patch_size,
-            name="projection"
-        )
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """
-        Builds the sub-layer.
-
-        Following the "Create vs. Build" principle, we explicitly build sub-layers
-        here to ensure their weights are created before the model attempts to
-        load any saved weights during deserialization.
-
-        Args:
-            input_shape: Shape tuple of the input.
-        """
-        self.proj.build(input_shape)
-        super().build(input_shape)
-
-    def call(self, x: keras.KerasTensor) -> keras.KerasTensor:
-        """
-        Forward pass for patch embedding.
-
-        Args:
-            x: Input tensor of shape (batch_size, height, width, channels).
-
-        Returns:
-            Patch embeddings of shape (batch_size, H/patch_size, W/patch_size, embed_dim).
-        """
-        x = self.proj(x)
-        return x
-
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """
-        Compute output shape of the layer.
-
-        Args:
-            input_shape: Shape tuple of the input.
-
-        Returns:
-            Output shape tuple.
-        """
-        batch_size = input_shape[0]
-        h_out = input_shape[1] // self.patch_size[0] if input_shape[1] is not None else None
-        w_out = input_shape[2] // self.patch_size[1] if input_shape[2] is not None else None
-        return (batch_size, h_out, w_out, self.embed_dim)
-
-    def get_config(self) -> Dict[str, Any]:
-        """
-        Returns the configuration of the layer for serialization.
-
-        Returns:
-            Configuration dictionary.
-        """
-        config = super().get_config()
-        config.update({
-            "patch_size": self.patch_size,
-            "embed_dim": self.embed_dim,
-        })
-        return config
 
 
 @keras.saving.register_keras_serializable()
@@ -808,10 +693,16 @@ class ImageEncoderViT(keras.Model):
         self.activation = activation
         self.grid_size = img_size // patch_size
 
-        # CREATE all sub-layers in __init__
-        self.patch_embed = PatchEmbedding(
+        # CREATE all sub-layers in __init__.
+        # DECISION plan_2026-06-16_6e8c78a3/D-009: reuse the shared
+        # PatchEmbedding2D with flatten=False (returns the 4D spatial grid) in
+        # place of an inline duplicate. Do NOT use the default flatten=True here
+        # — the SAM encoder adds a 4D pos_embed and runs windowed attention on
+        # the spatial layout. See decisions.md D-009.
+        self.patch_embed = PatchEmbedding2D(
             patch_size=self.patch_size,
             embed_dim=self.embed_dim,
+            flatten=False,
             name="patch_embed"
         )
         # `pos_embed` is a weight, not a layer, so it's created in `build`

@@ -129,6 +129,13 @@ class PatchEmbedding2D(keras.layers.Layer):
     :param use_bias: Whether to use bias in the projection layer. Defaults to
         ``True``.
     :type use_bias: bool
+    :param flatten: Whether to flatten the patch grid into a sequence. When
+        ``True`` (default) the layer returns a 3D tensor
+        ``(batch, num_patches, embed_dim)`` as required by Transformer encoders.
+        When ``False`` the layer returns the raw 4D spatial grid
+        ``(batch, H/P_h, W/P_w, embed_dim)`` (e.g. for window-attention
+        backbones such as SAM that operate on the spatial layout).
+    :type flatten: bool
     :param kwargs: Additional layer arguments.
 
     :raises ValueError: If ``patch_size`` or ``embed_dim`` are not positive.
@@ -146,6 +153,7 @@ class PatchEmbedding2D(keras.layers.Layer):
         bias_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         activation: Optional[Union[str, callable]] = "linear",
         use_bias: bool = True,
+        flatten: bool = True,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -171,6 +179,7 @@ class PatchEmbedding2D(keras.layers.Layer):
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
         self.activation = keras.activations.get(activation)
         self.use_bias = use_bias
+        self.flatten = flatten
 
         # CREATE sub-layer in __init__ (modern Keras 3 pattern)
         self.proj = keras.layers.Conv2D(
@@ -238,6 +247,14 @@ class PatchEmbedding2D(keras.layers.Layer):
         # Apply convolution to extract and embed patches
         x = self.proj(inputs, training=training)  # (batch_size, h_patches, w_patches, embed_dim)
 
+        # DECISION plan_2026-06-16_6e8c78a3/D-009: when flatten=False return the
+        # raw 4D spatial grid. Do NOT always flatten — window-attention backbones
+        # (SAM image encoder) consume the 4D layout and add a 4D pos_embed; the
+        # default flatten=True preserves the 3D sequence contract for the 13
+        # Transformer callers. See decisions.md D-009.
+        if not self.flatten:
+            return x
+
         # Flatten the patch grid into a sequence. Let the backend infer the
         # patch-count axis with -1 (graph-safe; avoids multiplying two symbolic
         # ops.shape() scalars, which some backends reject as a reshape arg).
@@ -260,10 +277,21 @@ class PatchEmbedding2D(keras.layers.Layer):
         batch_size = input_shape[0]
         height, width = input_shape[1], input_shape[2]
 
-        # Calculate number of patches
-        if height is not None and width is not None:
+        # Calculate number of patches per spatial axis
+        if height is not None:
             h_patches = height // self.patch_size[0]
+        else:
+            h_patches = None
+        if width is not None:
             w_patches = width // self.patch_size[1]
+        else:
+            w_patches = None
+
+        if not self.flatten:
+            # Return the raw 4D spatial grid (window-attention backbones).
+            return (batch_size, h_patches, w_patches, self.embed_dim)
+
+        if h_patches is not None and w_patches is not None:
             num_patches = h_patches * w_patches
         else:
             num_patches = None
@@ -287,6 +315,7 @@ class PatchEmbedding2D(keras.layers.Layer):
             "bias_regularizer": keras.regularizers.serialize(self.bias_regularizer),
             "activation": keras.activations.serialize(self.activation),
             "use_bias": self.use_bias,
+            "flatten": self.flatten,
         })
         return config
 
