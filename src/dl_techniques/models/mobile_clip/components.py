@@ -6,8 +6,29 @@ from typing import Optional, Union, Tuple, Dict, Any, Callable, List
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.embedding.positional_embedding import PositionalEmbedding
+
+
+# ---------------------------------------------------------------------
+# Backbone name resolution
+# ---------------------------------------------------------------------
+# DECISION plan_2026-06-16_5a05afc3/D-001: the official MobileCLIP variants name
+# image backbones (`mci0/mci1/mci2/vit_b16`) that DO NOT exist in
+# `keras.applications` (no MCi port, no ViT). The `ImageProjectionHead` begins
+# with `GlobalAveragePooling2D`, so the backbone MUST emit a 4D [B,H,W,C] feature
+# map — which rules out a token-output ViT. We therefore SUBSTITUTE real
+# keras.applications CNN backbones so the model builds and runs forward inference.
+# This is a deliberate semantic fix-forward (functional buildability over
+# weights-faithful MobileCLIP fidelity), NOT a faithful MCi/ViT port. Any string
+# that is already a valid keras.applications class name passes through unchanged.
+_BACKBONE_ALIASES: Dict[str, str] = {
+    "mci0": "MobileNetV3Small",
+    "mci1": "MobileNetV2",
+    "mci2": "MobileNetV3Large",
+    "vit_b16": "MobileNetV3Large",
+}
 
 
 # ---------------------------------------------------------------------
@@ -243,19 +264,33 @@ class MobileClipImageEncoder(keras.Model):
         )
 
     def _create_backbone(self) -> keras.Model:
-        """Instantiates the backbone model from keras.applications."""
-        try:
-            backbone_class = getattr(keras.applications, self.backbone_name)
-            backbone = backbone_class(
-                include_top=False,
-                weights=self.backbone_weights,
-                pooling=None,
-                input_shape=(self.image_size, self.image_size, 3)
+        """Instantiates the backbone model from keras.applications.
+
+        MobileCLIP variant names (`mci0/mci1/mci2/vit_b16`) are resolved to real
+        keras.applications CNN backbones via `_BACKBONE_ALIASES` (see D-001).
+        Names already valid in keras.applications pass through unchanged.
+        """
+        resolved_name = _BACKBONE_ALIASES.get(self.backbone_name, self.backbone_name)
+        if resolved_name != self.backbone_name:
+            logger.info(
+                f"Resolving MobileCLIP backbone '{self.backbone_name}' -> "
+                f"keras.applications.{resolved_name} (CNN substitute, see D-001)."
             )
-            backbone.trainable = self.backbone_trainable
-            return backbone
+        try:
+            backbone_class = getattr(keras.applications, resolved_name)
         except AttributeError:
-            raise ValueError(f"Unsupported backbone: {self.backbone_name}.")
+            raise ValueError(
+                f"Unsupported backbone: '{self.backbone_name}' "
+                f"(resolved to '{resolved_name}', not found in keras.applications)."
+            )
+        backbone = backbone_class(
+            include_top=False,
+            weights=self.backbone_weights,
+            pooling=None,
+            input_shape=(self.image_size, self.image_size, 3)
+        )
+        backbone.trainable = self.backbone_trainable
+        return backbone
 
     def build(self, input_shape: Union[Tuple[int, ...], List[int]]) -> None:
         """
@@ -268,7 +303,7 @@ class MobileClipImageEncoder(keras.Model):
         self.backbone.build(input_shape)
         backbone_output_shape = self.backbone.compute_output_shape(input_shape)
         self.projection_head.build(backbone_output_shape)
-        self.built = True
+        super().build(input_shape)
 
     def call(
         self,
