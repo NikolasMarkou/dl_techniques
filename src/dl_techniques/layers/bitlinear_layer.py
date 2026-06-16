@@ -222,10 +222,21 @@ class BitLinear(keras.layers.Layer):
         self.weight_range = self._bits_to_range(weight_bits)
         self.activation_range = self._bits_to_range(activation_bits)
 
+        # Optional input normalization sub-layer (created in __init__, built in build)
+        if self.use_input_norm:
+            self.input_norm = keras.layers.LayerNormalization(
+                axis=-1,
+                epsilon=1e-6,
+                center=True,
+                scale=True,
+                name="input_norm",
+            )
+        else:
+            self.input_norm = None
+
         # Layer weights (created in build)
         self.kernel = None
         self.bias = None
-        self.input_norm = None
 
     def _bits_to_range(
         self,
@@ -393,8 +404,6 @@ class BitLinear(keras.layers.Layer):
         :param input_shape: Shape tuple of the input.
         :type input_shape: Tuple[Optional[int], ...]
         """
-        super().build(input_shape)
-
         # Extract input dimension
         input_dim = input_shape[-1]
         if input_dim is None:
@@ -424,16 +433,12 @@ class BitLinear(keras.layers.Layer):
                 dtype=self.dtype
             )
 
-        # Create input normalization layer if needed
-        if self.use_input_norm:
-            self.input_norm = keras.layers.LayerNormalization(
-                axis=-1,
-                epsilon=1e-6,
-                center=True,
-                scale=True,
-                name=f"{self.name}_input_norm" if self.name else "input_norm"
-            )
+        # Build the optional input normalization sub-layer
+        if self.use_input_norm and self.input_norm is not None:
             self.input_norm.build(input_shape)
+
+        # Always call parent build at the end (MUST be last)
+        super().build(input_shape)
 
     def call(
         self,
@@ -475,15 +480,20 @@ class BitLinear(keras.layers.Layer):
         w_scaled = self.kernel * weight_scale
         w_quantized = self._quantize_tensor(w_scaled, self.weight_range)
 
-        # Perform quantized matrix multiplication
-        output = keras.ops.matmul(x_quantized, w_quantized)
+        # Dequantize BEFORE the matmul so that per-channel activation scaling
+        # (one factor per input feature) is applied to the correct axis. Folding
+        # the rescale into the post-matmul output only works when the activation
+        # scale is per-tensor; for per-channel scaling the input-feature factor
+        # is contracted away by the matmul and cannot be recovered afterwards.
+        x_dequantized = x_quantized / activation_scale
+        w_dequantized = w_quantized / weight_scale
+
+        # Perform the (simulated-quantized) matrix multiplication
+        output = keras.ops.matmul(x_dequantized, w_dequantized)
 
         # Add bias if present
         if self.use_bias and self.bias is not None:
             output = output + self.bias
-
-        # Rescale output to original magnitude
-        output = output / (activation_scale * weight_scale)
 
         return output
 

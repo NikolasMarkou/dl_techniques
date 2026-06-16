@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 10 / 245 files production-verified**
+**Progress: 21 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -203,17 +203,17 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `anchor_generator.py` | PASS | rubric-verify |
-| `[ ]` | `bitlinear_layer.py` | FAIL | super_build_last |
-| `[ ]` | `blt_blocks.py` | FAIL | super_build_last |
-| `[ ]` | `clahe.py` | PASS | rubric-verify (findings grep flagged raw-tf outside call — re-check, see §5) |
-| `[ ]` | `conditional_output_layer.py` | PASS | rubric-verify |
-| `[ ]` | `conv2d_builder.py` | N/A | N/A (ConvType Enum only) |
-| `[ ]` | `depthwise_separable_block.py` | FAIL | super_build_last |
-| `[ ]` | `downsample.py` | N/A | N/A (no concrete layer) |
-| `[ ]` | `eomt_mask.py` | PASS | rubric-verify |
-| `[ ]` | `fft_layers.py` | PASS | rubric-verify |
-| `[ ]` | `film.py` | PASS | rubric-verify |
+| `[x]` | `anchor_generator.py` | PASS | done: clean; +new test |
+| `[x]` | `bitlinear_layer.py` | PASS | done: H6 (super().build last) + H2 (input_norm to __init__) + fixed real per-channel-rescale forward bug (units!=input_dim); +test |
+| `[x]` | `blt_blocks.py` | PASS | done: H6 ×4 (EntropyModel/LocalEncoder/GlobalTransformer/LocalDecoder super().build last); +test (7 layers) |
+| `[x]` | `clahe.py` | PASS | done: raw-tf re-check — tf.histogram_fixed_width is forward-path accepted-exception (documented header); removed @tf.function (broken graph trace) → eager; +test |
+| `[x]` | `conditional_output_layer.py` | PASS | done: clean (stateless); +test |
+| `[x]` | `conv2d_builder.py` | N/A | N/A confirmed (ConvType Enum + factory fns) |
+| `[x]` | `depthwise_separable_block.py` | PASS | done: H6 (logger before super().build()) + H8/H9 regularizer deserialize; +test |
+| `[x]` | `downsample.py` | N/A | N/A confirmed (pure-function module) |
+| `[x]` | `eomt_mask.py` | PASS | done: H8/H9 regularizers+constraints deserialize in __init__; +test |
+| `[x]` | `fft_layers.py` | PASS | done: +module docstring (S1); +test (FFT+IFFT) |
+| `[x]` | `film.py` | PASS | done: clean (input-dependent projections built in build()); +test |
 
 ### Round 4 — untested root-level files (2/3)  (10 files)
 

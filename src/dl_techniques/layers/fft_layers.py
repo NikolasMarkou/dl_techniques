@@ -1,3 +1,23 @@
+"""
+FFT / IFFT spectral-transform layers.
+=====================================
+
+A complementary pair of backend-agnostic layers that move real-valued spatial
+feature maps to/from the 2D frequency domain, used by the Fourier token mixer in
+PW-FNet.
+
+Key Features:
+------------
+- ``FFTLayer``: applies a 2D FFT to a real input ``[B, H, W, C]`` and returns the
+  real and imaginary spectra concatenated along the channel axis ``[B, H, W, 2*C]``.
+- ``IFFTLayer``: inverts that representation, taking ``[B, H, W, 2*C]`` back to the
+  spatial domain ``[B, H, W, C]`` (real part of the inverse transform).
+- Fully ``keras.ops``-based (``fft2`` / ``ifft2``); both layers are stateless.
+
+The spatial transform operates on the last two axes, so inputs are permuted to
+channels-first for the transform and permuted back afterwards.
+"""
+
 import keras
 from typing import Optional, Tuple, Dict, Any
 

@@ -50,6 +50,24 @@ References:
       A., Greer, T., ... & Zimmerman, J. B. "Adaptive Histogram Equalization
       and Its Variations". This is the foundational paper on CLAHE.
       https://doi.org/10.1016/0734-189X(87)90186-X
+
+ACCEPTED BACKEND-SPECIFIC EXCEPTION (H10 / graph-safe forward path):
+-------------------------------------------------------------------
+This layer is **TensorFlow-backend-only** by design. The forward path uses raw
+TensorFlow operations that have **no ``keras.ops`` equivalent**:
+
+- ``tf.histogram_fixed_width`` (in ``_process_tile``, reached from ``call``) —
+  per-tile histogram binning; ``keras.ops`` exposes no histogram primitive.
+
+The forward pass runs **eagerly**: the tile count is data-dependent (a function
+of the runtime ``H``/``W``), so the nested Python tile loop cannot be cleanly
+traced into a graph ``while_loop`` (an earlier ``@tf.function`` wrapper raised
+``InaccessibleTensorError`` from the nested-loop ``keras.ops.take``). Apply this
+layer eagerly (or wrap per-image with known shapes).
+
+This is a documented, accepted exception to the "only ``keras.ops`` in the
+forward path" rule (see the production roadmap §5). Do NOT "fix" it by forcing a
+broken ``keras.ops`` rewrite.
 """
 
 import keras
@@ -206,12 +224,14 @@ class CLAHE(keras.layers.Layer):
         indices = keras.ops.cast(keras.ops.round(tile), "int32")
         return keras.ops.take(cdf_mapped, indices)
 
-    @tf.function
     def call(self, inputs: tf.Tensor) -> tf.Tensor:
         """Apply CLAHE to the input tensor.
 
-        Uses a ``tf.function``-decorated loop for tiling, which is specific to
-        the TensorFlow backend's AutoGraph feature for dynamic input shapes.
+        Executes eagerly on the TensorFlow backend: the number of tiles is
+        data-dependent (a function of the runtime ``H``/``W``), so the nested
+        Python tile loop is run eagerly rather than traced into a graph
+        ``while_loop`` (graph tracing of the loop + ``tf.histogram_fixed_width``
+        is not supported — see the module-level accepted-exception note).
 
         :param inputs: Input image tensor of shape ``(H, W, 1)``.
         :type inputs: tf.Tensor

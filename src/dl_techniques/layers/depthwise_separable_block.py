@@ -131,7 +131,7 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
         self.stride = stride
         self.block_id = block_id
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.kernel_regularizer = kernel_regularizer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.normalization_type = normalization_type
         self.activation_type = activation_type
         self.normalization_kwargs = normalization_kwargs or {}
@@ -228,15 +228,15 @@ class DepthwiseSeparableBlock(keras.layers.Layer):
         self.pointwise_norm.build(pointwise_output_shape)
         self.pointwise_activation.build(pointwise_output_shape)
 
-        # Always call parent build at the end
-        super().build(input_shape)
-
         logger.debug(
             f"Built DepthwiseSeparableBlock_{self.block_id}: "
             f"input_shape={input_shape} -> output_shape={pointwise_output_shape}, "
             f"kernel_size={self.depthwise_kernel_size}, norm={self.normalization_type}, "
             f"act={self.activation_type}"
         )
+
+        # Always call parent build at the end (MUST be last)
+        super().build(input_shape)
 
     def call(
             self,

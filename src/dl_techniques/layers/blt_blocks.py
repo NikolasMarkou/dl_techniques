@@ -435,8 +435,6 @@ class EntropyModel(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the entropy model layers."""
-        super().build(input_shape)
-
         # Explicitly build sub-layers for serialization
         self.embedding.build(input_shape)
 
@@ -456,6 +454,9 @@ class EntropyModel(keras.layers.Layer):
         self.layer_norm.build(current_shape)
         norm_shape = current_shape
         self.output_projection.build(norm_shape)
+
+        # Always call parent build at the end (MUST be last)
+        super().build(input_shape)
 
     def call(
             self,
@@ -1012,8 +1013,6 @@ class LocalEncoder(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build local encoder layers."""
-        super().build(input_shape)
-
         # Build embedding layer
         self.byte_embedding.build(input_shape)
 
@@ -1036,6 +1035,9 @@ class LocalEncoder(keras.layers.Layer):
 
         # Build patch pooling
         self.patch_pooling.build(norm_shape)
+
+        # Always call parent build at the end (MUST be last)
+        super().build(input_shape)
 
     def call(
             self,
@@ -1167,8 +1169,6 @@ class GlobalTransformer(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build global transformer layers."""
-        super().build(input_shape)
-
         # Build positional embedding
         self.patch_positional_embedding.build(input_shape)
         pos_embedded_shape = self.patch_positional_embedding.compute_output_shape(input_shape)
@@ -1181,6 +1181,9 @@ class GlobalTransformer(keras.layers.Layer):
 
         # Build final layer norm
         self.layer_norm.build(current_shape)
+
+        # Always call parent build at the end (MUST be last)
+        super().build(input_shape)
 
     def call(
             self,
@@ -1346,8 +1349,6 @@ class LocalDecoder(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build local decoder layers."""
-        super().build(input_shape)
-
         # Build byte embedding
         byte_input_shape = input_shape[0] if isinstance(input_shape, list) else input_shape
         self.byte_embedding.build(byte_input_shape)
@@ -1385,6 +1386,9 @@ class LocalDecoder(keras.layers.Layer):
         # Build final layers
         self.layer_norm.build(current_shape)
         self.output_projection.build(current_shape)
+
+        # Always call parent build at the end (MUST be last)
+        super().build(input_shape)
 
     def call(
             self,
