@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 21 / 245 files production-verified**
+**Progress: 31 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -219,16 +219,16 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `fractal_block.py` | FAIL | super_build_last |
-| `[ ]` | `hierarchical_mlp_stem.py` | PASS | rubric-verify |
-| `[ ]` | `inverted_residual_block.py` | N/A | N/A (no concrete layer) |
-| `[ ]` | `io_preparation.py` | PASS | rubric-verify |
-| `[ ]` | `modality_projection.py` | FAIL | super_build_last |
-| `[ ]` | `mothnet_blocks.py` | PASS | rubric-verify |
-| `[ ]` | `one_hot_encoding.py` | PASS | rubric-verify |
-| `[ ]` | `patch_merging.py` | PASS | rubric-verify |
-| `[ ]` | `random_fourier_features.py` | PASS | rubric-verify |
-| `[ ]` | `restricted_boltzmann_machine.py` | PASS | rubric-verify |
+| `[x]` | `fractal_block.py` | PASS | done: H6 (logger before super().build()); +test |
+| `[x]` | `hierarchical_mlp_stem.py` | PASS | done: clean (existing `if self.built` is GHOST — left as-is); +test |
+| `[x]` | `inverted_residual_block.py` | PASS* | done: concrete layer (scanner N/A mislabel — subclasses UIB); fixed broken from_config (forced name= collision) + S1 module docstring; +test |
+| `[x]` | `io_preparation.py` | PASS | done: clean (4 preprocessing layers); +test |
+| `[x]` | `modality_projection.py` | PASS | done: H5 (explicit sublayer build, was lazy) + H6 (super().build() last); +test |
+| `[x]` | `mothnet_blocks.py` | PASS | done: H8/H9 regularizer deserialize (AntennalLobe + HebbianReadout); RBM-style clean; +test |
+| `[x]` | `one_hot_encoding.py` | PASS | done: H4 cardinalities validation; +test |
+| `[x]` | `patch_merging.py` | PASS | done: H5 (added explicit build() — sublayers were lazy-only); +test |
+| `[x]` | `random_fourier_features.py` | PASS | done: H8/H9 regularizer+constraint deserialize; fixed list/tuple build-shape concat bug on reload; +test |
+| `[x]` | `restricted_boltzmann_machine.py` | PASS | done: clean (regularizer via get; "tf.GradientTape" is a comment only — code uses ops); +test |
 
 ### Round 5 — untested root-level files (3/3)  (10 files)
 

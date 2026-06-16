@@ -190,10 +190,10 @@ class RFFKernelLayer(keras.layers.Layer):
         self.activation = keras.activations.get(activation)
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = kernel_regularizer
-        self.bias_regularizer = bias_regularizer
-        self.kernel_constraint = kernel_constraint
-        self.bias_constraint = bias_constraint
+        self.kernel_regularizer = regularizers.get(kernel_regularizer)
+        self.bias_regularizer = regularizers.get(bias_regularizer)
+        self.kernel_constraint = constraints.get(kernel_constraint)
+        self.bias_constraint = constraints.get(bias_constraint)
 
         # Validate output_dim
         if self.output_dim <= 0:
@@ -265,8 +265,9 @@ class RFFKernelLayer(keras.layers.Layer):
         self._scale_factor = ops.sqrt(2.0 / self.n_features)
 
         # Build the output Dense layer
-        # The input to Dense will be the random features of shape (..., n_features)
-        feature_shape = input_shape[:-1] + (self.n_features,)
+        # The input to Dense will be the random features of shape (..., n_features).
+        # Coerce to tuple: on deserialization Keras may pass input_shape as a list.
+        feature_shape = tuple(input_shape[:-1]) + (self.n_features,)
         self.linear.build(feature_shape)
 
         super().build(input_shape)

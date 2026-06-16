@@ -1,3 +1,19 @@
+"""
+Inverted Residual Block (MobileNetV2).
+======================================
+
+A thin specialization of :class:`UniversalInvertedBottleneck` that hard-codes the
+MobileNetV2 inverted-residual configuration: a 1x1 expansion, a 3x3 depthwise
+spatial convolution, and a *linear* 1x1 projection (no activation on the
+bottleneck), with ReLU6 activations and batch normalization throughout. A
+residual connection is added when ``stride == 1`` and the input/output channel
+counts match.
+
+Reference:
+    - Sandler, M., et al. (2018). "MobileNetV2: Inverted Residuals and Linear
+      Bottlenecks." https://arxiv.org/abs/1801.04381
+"""
+
 import keras
 from typing import  Optional, Dict, Any, Union
 
@@ -96,6 +112,11 @@ class InvertedResidualBlock(UniversalInvertedBottleneck):
         self._kernel_initializer_arg = kernel_initializer
         self._kernel_regularizer_arg = kernel_regularizer
 
+        # Default the layer name from the block id, but let an explicit ``name``
+        # (e.g. one restored from get_config) take precedence — passing both a
+        # positional default and a kwarg ``name`` would collide on round-trip.
+        kwargs.setdefault("name", f"inverted_residual_block_{block_id}")
+
         # Call the parent UniversalInvertedBottleneck's __init__ with the
         # specific configuration for a MobileNetV2 block.
         super().__init__(
@@ -114,7 +135,6 @@ class InvertedResidualBlock(UniversalInvertedBottleneck):
             depthwise_initializer=kernel_initializer,
             kernel_regularizer=kernel_regularizer,
             depthwise_regularizer=kernel_regularizer,
-            name=f"inverted_residual_block_{block_id}",
             **kwargs,
         )
 

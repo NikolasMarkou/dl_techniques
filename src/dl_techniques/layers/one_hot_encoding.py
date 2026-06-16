@@ -110,6 +110,13 @@ class OneHotEncoding(keras.layers.Layer):
             **kwargs
     ) -> None:
         super().__init__(**kwargs)
+
+        # Validate inputs (an empty list is allowed -> zero-width output)
+        if any(card <= 0 for card in cardinalities):
+            raise ValueError(
+                f"All cardinalities must be positive integers, got {cardinalities}"
+            )
+
         self.cardinalities = cardinalities
         self.total_dim = sum(cardinalities)
         self.cumulative_cardinalities = None

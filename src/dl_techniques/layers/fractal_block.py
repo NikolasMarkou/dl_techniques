@@ -187,9 +187,10 @@ class FractalBlock(keras.layers.Layer):
             if self.drop_path2 is not None:
                 self.drop_path2.build(branch_output_shape)
 
-        # Always call parent build at the end
-        super().build(input_shape)
         logger.debug(f"Built FractalBlock with input_shape={input_shape}, depth={self.depth}")
+
+        # Always call parent build at the end (MUST be last)
+        super().build(input_shape)
 
     def call(
         self,

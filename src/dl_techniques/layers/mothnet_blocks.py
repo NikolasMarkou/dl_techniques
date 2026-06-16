@@ -136,7 +136,7 @@ class AntennalLobeLayer(keras.layers.Layer):
         self.inhibition_strength = inhibition_strength
         self.activation_fn = keras.activations.get(activation)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.kernel_regularizer = kernel_regularizer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.use_bias = use_bias
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -507,7 +507,7 @@ class HebbianReadoutLayer(keras.layers.Layer):
         self.units = units
         self.learning_rate = learning_rate
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.kernel_regularizer = kernel_regularizer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.use_bias = use_bias
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:

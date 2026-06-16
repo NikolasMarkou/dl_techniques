@@ -237,15 +237,28 @@ class ModalityProjection(keras.layers.Layer):
                 f"specified input_dim ({self.input_dim})"
             )
 
-        # The layers are now created in __init__, so we just call super().build()
-        # Keras will handle building the sub-layers.
-        super().build(input_shape)
-
+        # Explicitly build each sub-layer in computational order for robust
+        # serialization (so all weight variables exist before weight restoration).
+        self.pixel_shuffle.build(input_shape)
         pixel_shuffle_output_shape = self.pixel_shuffle.compute_output_shape(input_shape)
+
+        self.projection_dense.build(pixel_shuffle_output_shape)
+        dense_output_shape = self.projection_dense.compute_output_shape(
+            pixel_shuffle_output_shape
+        )
+
+        if self.projection_activation is not None:
+            self.projection_activation.build(dense_output_shape)
+        if self.projection_norm is not None:
+            self.projection_norm.build(dense_output_shape)
+
         logger.debug(
             f"Built ModalityProjection with input_shape={input_shape}, "
             f"pixel_shuffle_output_shape={pixel_shuffle_output_shape}"
         )
+
+        # Always call parent build at the end (MUST be last)
+        super().build(input_shape)
 
     def call(
             self,

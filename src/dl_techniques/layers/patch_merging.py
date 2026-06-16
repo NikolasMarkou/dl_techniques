@@ -149,6 +149,27 @@ class PatchMerging(keras.layers.Layer):
             name="reduction"
         )
 
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Explicitly build the sub-layers for robust serialization.
+
+        After 2x2 patch extraction and channel concatenation the feature depth
+        becomes ``4 * dim``; both the normalization and the linear reduction
+        operate on that merged representation.
+
+        :param input_shape: Shape tuple ``(batch, H, W, dim)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        """
+        batch_size, height, width, _ = input_shape
+        merged_h = None if height is None else (height + 1) // 2
+        merged_w = None if width is None else (width + 1) // 2
+        merged_shape = (batch_size, merged_h, merged_w, 4 * self.dim)
+
+        self.norm.build(merged_shape)
+        self.reduction.build(merged_shape)
+
+        # Always call parent build at the end (MUST be last)
+        super().build(input_shape)
+
     def call(
             self,
             inputs: keras.KerasTensor,
