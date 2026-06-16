@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 212 / 245 files production-verified**
+**Progress: 222 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -535,16 +535,16 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `dynamic_conv2d.py` | PASS | rubric-verify |
-| `[ ]` | `fnet_encoder_block.py` | PASS | rubric-verify |
-| `[ ]` | `gated_delta_net.py` | PASS | rubric-verify |
-| `[ ]` | `gaussian_filter.py` | PASS | rubric-verify |
-| `[ ]` | `gaussian_pyramid.py` | PASS | rubric-verify |
-| `[ ]` | `global_sum_pool_2d.py` | PASS | rubric-verify |
-| `[ ]` | `grid_sample.py` | N/A | N/A (pure-function module, by design) |
-| `[ ]` | `haar_wavelet_decomposition.py` | PASS | rubric-verify |
-| `[ ]` | `hanc_block.py` | PASS | rubric-verify |
-| `[ ]` | `hanc_layer.py` | PASS | rubric-verify |
+| `[x]` | `dynamic_conv2d.py` | PASS | done: rubric-verified clean (input-dim-dependent conv/attention sublayers built explicitly in build(); H8/H9 via keras.*.get; existing test passes) |
+| `[x]` | `fnet_encoder_block.py` | PASS | done: rubric-verified clean (factory norm/ffn built in build(); from_config trivial; existing test passes) |
+| `[x]` | `gated_delta_net.py` | PASS | done: rubric-verified clean (ops.while_loop delta rule; H8/H9 via initializers.get; existing test test_gated_deltanet.py passes) |
+| `[x]` | `gaussian_filter.py` | PASS | done: rubric-verified clean (add_weight kernel in build; `if self.built` is GHOST — left as-is; existing test passes) |
+| `[x]` | `gaussian_pyramid.py` | PASS | done: rubric-verified clean (sublayers in __init__, built in build; existing test passes) |
+| `[x]` | `global_sum_pool_2d.py` | PASS | done: rubric-verified clean (stateless pooling; existing test passes) |
+| `[x]` | `grid_sample.py` | N/A | N/A confirmed (pure-function module; TF-native by documented decision D-003) |
+| `[x]` | `haar_wavelet_decomposition.py` | PASS | done: rubric-verified clean (1D/2D/3D DWT, ops-only; existing test passes) |
+| `[x]` | `hanc_block.py` | PASS | done: rubric-verified clean (sublayers in __init__, built in build, training fwd; existing test passes) |
+| `[x]` | `hanc_layer.py` | PASS | done: rubric-verified clean (ops.image.resize, training fwd to BN; existing test passes) |
 
 ### Round 29 — tested root-level files re-audit (3/5)  (10 files)
 
