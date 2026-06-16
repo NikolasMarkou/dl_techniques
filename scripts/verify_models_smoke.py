@@ -498,17 +498,13 @@ def _b_mobileclip():
     from dl_techniques.models.mobile_clip.mobile_clip_v1 import MobileClipModel
     return MobileClipModel.from_variant("s0")
 def _f_mobileclip(m):
-    inp = {"images": _img(h=256, w=256), "texts": _tokens(vocab=1000, s=16)}
-    try:
-        return m(inp, training=False)
-    except Exception:
-        return m({"image": _img(h=256, w=256), "text": _tokens(vocab=1000, s=16)},
-                 training=False)
-# No implemented backbone: variants reference mci0/mci1/mci2/vit_b16, none of
-# which exist in keras.applications. Needs an MCI backbone port.
-_reg("mobile_clip", "XFAIL", _b_mobileclip, _f_mobileclip,
-     "no implemented backbone (variants reference mci0/mci1/mci2/vit_b16 absent "
-     "from keras.applications); needs MCI backbone port")
+    return m({"image": _img(h=256, w=256), "text": _tokens(vocab=1000, s=16)},
+             training=False)
+# Variant backbone names (mci0/mci1/mci2/vit_b16) are absent from keras.applications;
+# resolved to real keras.applications CNN backbones via _BACKBONE_ALIASES (D-001,
+# plan_2026-06-16_5a05afc3) so the model builds and runs forward inference.
+_reg("mobile_clip", "RUN", _b_mobileclip, _f_mobileclip,
+     "CNN-backbone substitute for absent mci/vit variants (D-001)")
 
 
 # --- mobilenet (v1-v4) -----------------------------------------------------
