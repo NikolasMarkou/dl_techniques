@@ -41,6 +41,27 @@ Technical Details:
    - ComplexDense: Complex-valued fully connected layer
    - ComplexReLU: Split ReLU activation for complex values
 
+ACCEPTED BACKEND-SPECIFIC EXCEPTION (H10 / graph-safe ``call``):
+--------------------------------------------------------------
+The forward paths of these layers intentionally use raw TensorFlow operations
+and are therefore **TensorFlow-backend-only** by design:
+
+- ``tf.complex`` / ``complex64`` dtype — these layers operate on genuinely
+  complex-valued tensors (complex ``Input``, complex weights, complex outputs).
+  ``keras.ops`` provides ``real``/``imag`` extractors but **no complex-tensor
+  constructor and no complex dtype**, so a complex result cannot be assembled
+  through ``keras.ops``.
+- ``tf.math.real`` / ``tf.math.imag`` / ``tf.cast`` (to/from complex) — split
+  the complex tensors into the real/imag components on which the 4-real-op
+  complex arithmetic is performed.
+
+A backend-agnostic rewrite would require either complex-dtype support in
+``keras.ops`` (absent) or a full re-architecture to thread two parallel
+real-valued (real, imag) tensors through every layer and the public API —
+changing the layers' complex-tensor contract. This is a documented, accepted
+exception to the "only ``keras.ops`` in ``call``" rule (see the production
+roadmap §5). Do NOT "fix" this by forcing a broken ``keras.ops`` rewrite.
+
 References:
 ----------
 1. "Deep Complex Networks" (Trabelsi et al., 2018)

@@ -1,3 +1,34 @@
+"""
+Canny Edge Detection Layer
+==========================
+
+A differentiable, multi-stage Canny edge detector (Canny, 1986,
+https://doi.org/10.1109/TPAMI.1986.4767851) as a Keras layer: Gaussian
+smoothing, Sobel gradients, directional non-maximum suppression, double
+thresholding, and iterative hysteresis edge tracking. All convolution kernels
+are stored as non-trainable weights.
+
+ACCEPTED BACKEND-SPECIFIC EXCEPTION (H10 / graph-safe ``call``):
+--------------------------------------------------------------
+The forward path of this layer intentionally uses raw TensorFlow operations and
+is therefore **TensorFlow-backend-only** by design:
+
+- ``tf.nn.dilation2d`` — directional morphological dilation used both for
+  non-maximum suppression (selecting the per-direction local maximum) and for
+  propagating strong edges into adjacent weak ones during hysteresis.
+  ``keras.ops`` exposes **no morphological-dilation primitive** of any kind, so
+  this cannot be migrated to ``keras.ops``.
+- ``tf.while_loop`` / ``tf.identity`` / ``tf.constant`` — drive the iterative
+  hysteresis fixed-point that connects weak edges to strong ones until
+  convergence. ``keras.ops.while_loop`` exists but the loop body depends on
+  ``tf.nn.dilation2d`` above, which has no backend-agnostic equivalent.
+
+This is a documented, accepted exception to the "only ``keras.ops`` in ``call``"
+rule (see the production roadmap §5). A backend-agnostic rewrite would require a
+morphological-dilation primitive that ``keras.ops`` does not provide. Do NOT
+"fix" this by forcing a broken ``keras.ops`` rewrite.
+"""
+
 import keras
 import numpy as np
 import tensorflow as tf

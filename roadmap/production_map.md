@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 243 / 245 files production-verified**  (remaining: `canny.py`, `complex_layers.py` — DEEP raw-tf, deferred Round 27, see §5)
+**Progress: 245 / 245 files production-verified**  (Level 1 COMPLETE; `canny.py` + `complex_layers.py` carry documented accepted-exception headers for forward-path raw-`tf`, see §5)
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -524,9 +524,9 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 | `[x]` | `bias_free_conv2d.py` | PASS | done: H3+H8 fixed real bug — `use_batch_norm` was dropped (not stored/not in get_config → silent default on reload); +existing test passes |
 | `[x]` | `blt_core.py` | PASS | done: H12 type hints on build/call/compute_output_shape/get_config/empty_carry/reset_carry/_create_reasoning_embeddings; initializers round-trip via child layers; existing test round-trips |
 | `[x]` | `blur_pool.py` | PASS | done: H6 (logger before super().build()) |
-| `[~]` | `canny.py` | FAIL→DEFERRED | DEEP: `tf.nn.dilation2d` (directional NMS) + `tf.while_loop` (hysteresis) in call(); keras.ops has NO morphological-dilation equivalent — see §5. Accepted-exception candidate like lagrange_layer; needs user decision |
+| `[x]` | `canny.py` | FAIL→ACCEPTED | done: H10 accepted-exception documented in header (`tf.nn.dilation2d` directional NMS + hysteresis dilation, `tf.while_loop` hysteresis fixed-point; keras.ops has NO morphological-dilation primitive — §5); user-approved accept. Existing test passes |
 | `[x]` | `capsules.py` | PASS | done: H6 ×3 (PrimaryCapsule/RoutingCapsule/CapsuleBlock — logger before super().build()) |
-| `[~]` | `complex_layers.py` | FAIL→DEFERRED | DEEP: `tf.complex`/`complex64` dtype in call() across 4 layers; keras.ops has real/imag but NO complex constructor/dtype — see §5. Full fix needs split-real/imag rearchitecture; needs user decision |
+| `[x]` | `complex_layers.py` | FAIL→ACCEPTED | done: H10 accepted-exception documented in header (`tf.complex`/`complex64` dtype + `tf.math.real`/`imag` across layers; keras.ops has real/imag but NO complex constructor/dtype — §5); user-approved accept. Existing test passes |
 | `[x]` | `convnext_v1_block.py` | PASS | done: CANONICAL EXEMPLAR re-confirmed fully compliant (H3/H5/H8/H9/H10/H11/H12/H13) |
 | `[x]` | `convnext_v2_block.py` | PASS | done: rubric-verified clean |
 | `[x]` | `convolutional_kan.py` | PASS | done: H6 (logger before super().build()) |
@@ -609,14 +609,15 @@ point of using an AST scanner over grep:
   marked `rubric-verify` with a re-check note in §4 because a human should confirm the `tf.*` is truly
   off the graph-traced forward path (and migrate to `keras.ops` where trivially possible).
 
-**Reconciled DEEP-gap (true forward-path) list — 4 files / 7 layers:**
+**Reconciled DEEP-gap (true forward-path) list — 4 files / 7 layers. ALL RESOLVED:**
+three accepted as documented backend-specific exceptions (user-approved), one migrated.
 
-| File | Round | Note |
-|------|-------|------|
-| `physics/lagrange_layer.py` | 1 | **ACCEPTED-EXCEPTION candidate.** Uses `tf.GradientTape` (and `tf.linalg.pinv`) for physics gradient computation; `tf.GradientTape` has **no `keras.ops` equivalent**. A backend-agnostic rewrite would require a different architecture (e.g. JAX `jax.grad`). **Document the exception in the file header and accept it — do NOT force a rewrite.** This file may pass the round with a documented N/A on H10 rather than a fix. |
-| `complex_layers.py` | 27 | `tf.complex`, `tf.math.real/imag`, complex `dtype` args. `keras.ops.real`/`imag` exist but complex-dtype handling is backend-specific; partial fix possible, full fix may need backend-conditional code. Also FAILs `compute_output_shape`. Real work, not a quick fix. |
-| `canny.py` | 27 | `tf.*` in edge-detection ops; migrate to `keras.ops` where possible. |
-| `router.py` | 5 | `tf.*` in routing ops; migrate to `keras.ops` where possible. |
+| File | Round | Status |
+|------|-------|--------|
+| `physics/lagrange_layer.py` | 1 | **ACCEPTED EXCEPTION (documented).** Uses `tf.GradientTape` (and `tf.linalg.pinv`) for physics gradient computation; `tf.GradientTape` has **no `keras.ops` equivalent** (backend-agnostic AD would need e.g. JAX `jax.grad`). Exception documented in the file header; do NOT force a rewrite. The gradient-free `ApproximatedLNNLayer` is the portable alternative. |
+| `complex_layers.py` | 27 | **ACCEPTED EXCEPTION (documented, user-approved).** `tf.complex`/`complex64` dtype + `tf.math.real`/`imag` across the layers; `keras.ops` has `real`/`imag` but **no complex-tensor constructor and no complex dtype**. Full fix needs a split-real/imag re-architecture changing the layers' complex-tensor contract. Exception documented in the file header; do NOT force a rewrite. |
+| `canny.py` | 27 | **ACCEPTED EXCEPTION (documented, user-approved).** `tf.nn.dilation2d` (directional NMS + hysteresis dilation) + `tf.while_loop` (hysteresis fixed-point); `keras.ops` has **no morphological-dilation primitive**. Exception documented in the file header; do NOT force a rewrite. |
+| `router.py` | 5 | **RESOLVED (migrated).** Only raw-tf was `tf.minimum`→`ops.minimum`; clean keras.ops migration, `tf` import dropped. |
 
 **`rubric-verify` raw-`tf`-adjacent (confirm off-forward-path during the round):**
 `sampling.py` (R30), `clahe.py` (R3), `norms/polar_weight_norm.py` (R23),
