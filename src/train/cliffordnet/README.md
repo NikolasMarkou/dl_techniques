@@ -587,7 +587,7 @@ PYTHONPATH=src python -m train.cliffordnet.train_confidence_denoiser \
 ## 7. Power Sampling Inference
 
 **Script**: `infer_cliffordnet_nlp.py`
-**Module**: `dl_techniques/models/cliffordnet/power_sampling.py`
+**Module**: `dl_techniques/models/power_sampling/` (was `cliffordnet/power_sampling.py`)
 
 After training `CliffordNetLM`, generate text using **power sampling** -- an inference-time method that improves reasoning and coherence without any additional training or reward models.
 
@@ -682,7 +682,7 @@ python -m train.cliffordnet.infer_cliffordnet_nlp \
 
 ```python
 import tiktoken
-from dl_techniques.models.cliffordnet.power_sampling import (
+from dl_techniques.models.power_sampling import (
     PowerSampler,
     PowerSamplingConfig,
 )
@@ -697,6 +697,11 @@ config = PowerSamplingConfig(
     mcmc_steps=10,
     block_num=8,
     max_tokens=200,
+    # CliffordNetLM identity (was the old PowerSamplingConfig GPT-2 defaults)
+    cls_token_id=50257,
+    pad_token_id=50260,
+    special_token_ids={50257, 50258, 50259, 50260},
+    ctx_len=511,
 )
 sampler = PowerSampler(model, enc, config=config)
 

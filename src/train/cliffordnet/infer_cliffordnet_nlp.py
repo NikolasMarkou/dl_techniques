@@ -52,7 +52,7 @@ import tiktoken
 
 from train.common import setup_gpu
 from dl_techniques.models.cliffordnet.lm import CliffordNetLM
-from dl_techniques.models.cliffordnet.power_sampling import (
+from dl_techniques.models.power_sampling import (
     PowerSampler,
     PowerSamplingConfig,
 )
@@ -237,6 +237,11 @@ def main() -> None:
         max_tokens=args.max_tokens,
         top_p=args.top_p,
         repetition_penalty=args.repetition_penalty,
+        # CliffordNetLM identity (was the old PowerSamplingConfig GPT-2 defaults)
+        cls_token_id=50257,
+        pad_token_id=50260,
+        special_token_ids={50257, 50258, 50259, 50260},
+        ctx_len=511,
     )
     sampler = PowerSampler(model, enc, config=config)
 
