@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 69 / 245 files production-verified**
+**Progress: 75 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -300,12 +300,12 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `time_series/prism_blocks.py` | PASS | rubric-verify |
-| `[ ]` | `time_series/quantile_head_fixed_io.py` | PASS | rubric-verify |
-| `[ ]` | `time_series/quantile_head_variable_io.py` | PASS | rubric-verify |
-| `[ ]` | `time_series/temporal_convolutional_network.py` | PASS | rubric-verify |
-| `[ ]` | `time_series/temporal_fusion.py` | FAIL | super_build_last |
-| `[ ]` | `time_series/xlstm_blocks.py` | FAIL | compute_output_shape |
+| `[x]` | `time_series/prism_blocks.py` | PASS | done: clean (5 PRISM layers); +test (needs seq_len>=32 for wavelet bands) |
+| `[x]` | `time_series/quantile_head_fixed_io.py` | PASS | done: clean; existing test passes |
+| `[x]` | `time_series/quantile_head_variable_io.py` | PASS | done: clean; existing test passes |
+| `[x]` | `time_series/temporal_convolutional_network.py` | PASS | done: clean (str-passthrough initializer, self-consistent); existing test passes |
+| `[x]` | `time_series/temporal_fusion.py` | PASS | done: H6 (logger before super().build()); +test |
+| `[x]` | `time_series/xlstm_blocks.py` | PASS | done: H7 compute_output_shape on sLSTMCell/mLSTMCell + H8/H9 regularizer deserialize (6 classes); existing test passes |
 
 ### Round 11 — logic/ + reasoning/ + geometric/ (NEEDS-AUDIT)  (10 files)
 

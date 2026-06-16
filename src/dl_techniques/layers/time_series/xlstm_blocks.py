@@ -144,9 +144,9 @@ class sLSTMCell(keras.layers.Layer):
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.recurrent_initializer = initializers.get(recurrent_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = kernel_regularizer
-        self.recurrent_regularizer = recurrent_regularizer
-        self.bias_regularizer = bias_regularizer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.recurrent_regularizer = keras.regularizers.get(recurrent_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # Activation functions
         self.f_activation = (
@@ -202,6 +202,19 @@ class sLSTMCell(keras.layers.Layer):
         )
 
         super().build(input_shape)
+
+    def compute_output_shape(
+        self,
+        input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """Compute the per-time-step output shape of the cell.
+
+        :param input_shape: Per-step input shape ``(batch_size, input_dim)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Per-step output shape ``(batch_size, units)``.
+        :rtype: Tuple[Optional[int], ...]
+        """
+        return (input_shape[0], self.units)
 
     def call(
         self,
@@ -383,9 +396,9 @@ class sLSTMLayer(keras.layers.Layer):
         self.kernel_initializer = kernel_initializer
         self.recurrent_initializer = recurrent_initializer
         self.bias_initializer = bias_initializer
-        self.kernel_regularizer = kernel_regularizer
-        self.recurrent_regularizer = recurrent_regularizer
-        self.bias_regularizer = bias_regularizer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.recurrent_regularizer = keras.regularizers.get(recurrent_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # Create the cell
         self.cell = sLSTMCell(
@@ -612,9 +625,9 @@ class mLSTMCell(keras.layers.Layer):
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.recurrent_initializer = initializers.get(recurrent_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = kernel_regularizer
-        self.recurrent_regularizer = recurrent_regularizer
-        self.bias_regularizer = bias_regularizer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.recurrent_regularizer = keras.regularizers.get(recurrent_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # State size: [h, C (flattened), n, m]
         # C is (num_heads, key_dim, value_dim) flattened
@@ -686,6 +699,19 @@ class mLSTMCell(keras.layers.Layer):
         )
 
         super().build(input_shape)
+
+    def compute_output_shape(
+        self,
+        input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """Compute the per-time-step output shape of the cell.
+
+        :param input_shape: Per-step input shape ``(batch_size, input_dim)``.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Per-step output shape ``(batch_size, units)``.
+        :rtype: Tuple[Optional[int], ...]
+        """
+        return (input_shape[0], self.units)
 
     def call(
         self,
@@ -943,9 +969,9 @@ class mLSTMLayer(keras.layers.Layer):
         self.kernel_initializer = kernel_initializer
         self.recurrent_initializer = recurrent_initializer
         self.bias_initializer = bias_initializer
-        self.kernel_regularizer = kernel_regularizer
-        self.recurrent_regularizer = recurrent_regularizer
-        self.bias_regularizer = bias_regularizer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.recurrent_regularizer = keras.regularizers.get(recurrent_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # Create the cell
         self.cell = mLSTMCell(
@@ -1150,9 +1176,9 @@ class sLSTMBlock(keras.layers.Layer):
         self.kernel_initializer = kernel_initializer
         self.recurrent_initializer = recurrent_initializer
         self.bias_initializer = bias_initializer
-        self.kernel_regularizer = kernel_regularizer
-        self.recurrent_regularizer = recurrent_regularizer
-        self.bias_regularizer = bias_regularizer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.recurrent_regularizer = keras.regularizers.get(recurrent_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         # Create sub-layers (Create in __init__, Build in build())
         self.slstm = sLSTMLayer(
@@ -1376,9 +1402,9 @@ class mLSTMBlock(keras.layers.Layer):
         self.kernel_initializer = kernel_initializer
         self.recurrent_initializer = recurrent_initializer
         self.bias_initializer = bias_initializer
-        self.kernel_regularizer = kernel_regularizer
-        self.recurrent_regularizer = recurrent_regularizer
-        self.bias_regularizer = bias_regularizer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.recurrent_regularizer = keras.regularizers.get(recurrent_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
         self.inner_dim = units * expansion_factor
 

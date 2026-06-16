@@ -321,9 +321,10 @@ class TemporalFusionLayer(keras.layers.Layer):
         weighted_sum_shape = (context_shape[0], 1)
         self.lag_forecaster.build(weighted_sum_shape)
 
-        # Always call parent build at the end
-        super().build(input_shape)
         logger.debug(f"TemporalFusionLayer built with context_shape={context_shape}, lag_shape={lag_shape}")
+
+        # Always call parent build at the end (MUST be last)
+        super().build(input_shape)
 
     def call(self, inputs: List[keras.KerasTensor], training: Optional[bool] = None) -> keras.KerasTensor:
         """
