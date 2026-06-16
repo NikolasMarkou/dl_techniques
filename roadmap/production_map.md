@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 153 / 245 files production-verified**
+**Progress: 161 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -434,14 +434,14 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `ffn/counting_ffn.py` | PASS | rubric-verify |
-| `[ ]` | `ffn/diff_ffn.py` | PASS | rubric-verify |
-| `[ ]` | `ffn/factory.py` | N/A | N/A (factory-only) |
-| `[ ]` | `ffn/gated_mlp.py` | PASS | rubric-verify |
-| `[ ]` | `ffn/geglu_ffn.py` | PASS | rubric-verify |
-| `[ ]` | `ffn/gelu_mlp_ffn.py` | PASS | rubric-verify |
-| `[ ]` | `ffn/glu_ffn.py` | PASS | rubric-verify |
-| `[ ]` | `ffn/kan_linear.py` | PASS | rubric-verify (findings grep flagged raw-tf outside call — re-check, see §5) |
+| `[x]` | `ffn/counting_ffn.py` | PASS | done: rubric-verified clean |
+| `[x]` | `ffn/diff_ffn.py` | PASS | done: clean (Dense sublayers training-invariant; real dropout gets training) |
+| `[x]` | `ffn/factory.py` | N/A | N/A confirmed (create_ffn_layer registry/factory fns) |
+| `[x]` | `ffn/gated_mlp.py` | PASS | done: rubric-verified clean |
+| `[x]` | `ffn/geglu_ffn.py` | PASS | done: rubric-verified clean |
+| `[x]` | `ffn/gelu_mlp_ffn.py` | PASS | done: rubric-verified clean |
+| `[x]` | `ffn/glu_ffn.py` | PASS | done: rubric-verified clean |
+| `[x]` | `ffn/kan_linear.py` | PASS | done: §5 raw-tf re-check RESOLVED — false positive (only docstring "tf.function" prose; call()/build()/helpers are keras.ops only). H10 clean |
 
 ### Round 21 — ffn/ re-audit (2/2)  (8 files)
 
