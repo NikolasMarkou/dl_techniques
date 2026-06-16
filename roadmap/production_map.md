@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 242 / 245 files production-verified**
+**Progress: 243 / 245 files production-verified**  (remaining: `canny.py`, `complex_layers.py` — DEEP raw-tf, deferred Round 27, see §5)
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -580,7 +580,7 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `yolo12_heads.py` | PASS | rubric-verify |
+| `[x]` | `yolo12_heads.py` | PASS | done: rubric-verified clean (3 multi-input heads Detection/Segmentation/Classification; input-dependent Sequential branches built explicitly in build(); H6/H7/H8/H11 good; existing test passes) |
 <!-- /WORKLIST -->
 
 ---
