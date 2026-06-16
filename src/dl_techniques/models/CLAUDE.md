@@ -2,7 +2,7 @@
 
 Complete model architectures organized as subdirectories. Each subdirectory is a self-contained model implementation.
 
-> **New models MUST follow `research/2026_keras_custom_models_instructions.md`.** Read it before creating a new model directory — it is the canonical guide for Keras 3 custom model authoring in this repo (serialization, `build`, `get_config`, factories, tests).
+> **ALL model work MUST follow `research/2026_keras_custom_models_instructions.md`.** Read it before creating a new model directory *or authoring any new layer inside a model* — it is the canonical guide for Keras 3 custom authoring in this repo (serialization, `build`, `get_config`, factories, tests). This is non-negotiable for every model in this package, new or existing.
 
 ## Model Categories
 
@@ -106,6 +106,29 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 - All models follow Keras 3 patterns with full `get_config()` serialization
 - Models use config dicts (`Dict[str, Any]`) for construction parameters
 - Factory patterns are common for creating model variants
+
+## Layer Reuse Policy (factory-first)
+
+> **Before implementing ANY new layer, you MUST first check for an existing one to reuse.** Authoring a bespoke layer is the last resort, not the first move — the library already ships a large, tested layer surface.
+
+Check in this precedence order; only proceed to the next step when nothing fits:
+
+1. **The relevant layer factory** — each factory exposes a `create_*_layer()` entry point backed by a registry of named types. Pass a `type` string + config; do not hand-roll what a factory already builds.
+
+   | Domain | Factory entry point | Registered types |
+   |--------|---------------------|------------------|
+   | Normalization | `create_normalization_layer()` in `src/dl_techniques/layers/norms/factory.py` | ~16 |
+   | Attention | `create_attention_layer()` in `src/dl_techniques/layers/attention/factory.py` | ~29 |
+   | FFN / MLP | `create_ffn_layer()` in `src/dl_techniques/layers/ffn/factory.py` | ~15 |
+   | Embeddings | `create_embedding_layer()` in `src/dl_techniques/layers/embedding/factory.py` | ~13 |
+   | Activations | `create_activation_layer()` in `src/dl_techniques/layers/activations/factory.py` | ~22 |
+   | Transformer blocks | `TransformerLayer` in `src/dl_techniques/layers/transformers/transformer.py` (direct import) | n/a |
+
+   > **Note on transformer blocks**: `transformers/` has no `create_*_layer` factory. Use `TransformerLayer` directly — it is highly configurable (selectable attention / FFN / normalization types and normalization position via its config) and composes the factories above internally, so it covers most cases without a custom block. The package also offers higher-level `create_*_encoder` builders (`vision_encoder.py`, `text_encoder.py`).
+
+2. **The broader `layers/` package** — if no factory covers your need, search `src/dl_techniques/layers/` (20+ subpackages of standalone layers) for an existing implementation before writing your own.
+
+3. **Only then, a new custom layer** — if nothing above fits, implement it following `research/2026_keras_custom_models_instructions.md` (full serialization, `build`, `get_config`, tests). Prefer adding it to the appropriate `layers/` subpackage (and its factory registry, where one exists) over burying it inside the model directory, so the next author can reuse it too.
 
 ## Testing
 
