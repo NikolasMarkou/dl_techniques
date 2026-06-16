@@ -221,8 +221,9 @@ class GlobalResponseNormalization(keras.layers.Layer):
             trainable=True,
         )
 
-        super().build(input_shape)
         logger.debug("GlobalResponseNormalization build completed")
+
+        super().build(input_shape)
 
     def call(
         self,

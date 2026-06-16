@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 169 / 245 files production-verified**
+**Progress: 176 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -460,13 +460,13 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `norms/adaptive_band_rms.py` | PASS | rubric-verify |
-| `[ ]` | `norms/band_logit_norm.py` | PASS | rubric-verify |
-| `[ ]` | `norms/band_rms.py` | PASS | rubric-verify |
-| `[ ]` | `norms/dynamic_tanh.py` | PASS | rubric-verify |
-| `[ ]` | `norms/factory.py` | N/A | N/A (factory-only) |
-| `[ ]` | `norms/global_response_norm.py` | FAIL | super_build_last |
-| `[ ]` | `norms/logit_norm.py` | PASS | rubric-verify |
+| `[x]` | `norms/adaptive_band_rms.py` | PASS | done: rubric-verified clean (dense_layer built; band init/reg via keras.*.get) |
+| `[x]` | `norms/band_logit_norm.py` | PASS | done: rubric-verified clean (LayerNorm sublayer built; training forwarded) |
+| `[x]` | `norms/band_rms.py` | PASS | done: rubric-verified clean |
+| `[x]` | `norms/dynamic_tanh.py` | PASS | done: rubric-verified clean (init/reg/constraint via keras.*.get) |
+| `[x]` | `norms/factory.py` | N/A | N/A confirmed (create_normalization_layer registry/factory fns) |
+| `[x]` | `norms/global_response_norm.py` | PASS | done: H6 (logger before super().build()); existing test passes |
+| `[x]` | `norms/logit_norm.py` | PASS | done: rubric-verified clean |
 
 ### Round 23 — norms/ re-audit (2/2)  (6 files)
 
