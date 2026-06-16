@@ -51,9 +51,10 @@ class AttentionBlockVLM(keras.layers.Layer):
             Defaults to 8.
         mlp_ratio: Float, expansion ratio for the MLP in transformer.
             Must be positive. Defaults to 4.0.
-        attention_type: String, type of attention mechanism to use.
-            Options: 'multi_head_attention', 'window_attention', 'group_query_attention'.
-            Defaults to 'multi_head_attention'.
+        attention_type: String, type of attention mechanism to use, forwarded to
+            TransformerLayer. Options: 'multi_head', 'window', 'group_query'
+            (see dl_techniques.layers.attention.factory.AttentionType).
+            Defaults to 'multi_head'.
         normalization_position: String, position of normalization layers.
             Options: 'pre', 'post'. Defaults to 'pre'.
         dropout_rate: Float, dropout rate. Must be between 0 and 1. Defaults to 0.0.
@@ -86,7 +87,7 @@ class AttentionBlockVLM(keras.layers.Layer):
         attn = AttentionBlockVLM(
             dim=512,
             num_heads=16,
-            attention_type='window_attention',
+            attention_type='window',
             mlp_ratio=6.0
         )
 
@@ -116,7 +117,7 @@ class AttentionBlockVLM(keras.layers.Layer):
             dim: int,
             num_heads: int = 8,
             mlp_ratio: float = 4.0,
-            attention_type: str = 'multi_head_attention',
+            attention_type: str = 'multi_head',
             normalization_position: str = 'pre',
             dropout_rate: float = 0.0,
             use_layer_scale: bool = True,
@@ -178,6 +179,8 @@ class AttentionBlockVLM(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the attention block and extract spatial dimensions."""
+        if self.built:
+            return
         if len(input_shape) != 4:
             raise ValueError(f"Expected 4D input, got {len(input_shape)}D")
 
