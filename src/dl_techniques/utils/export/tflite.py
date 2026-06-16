@@ -6,6 +6,8 @@ os.environ["KERAS_BACKEND"] = "tensorflow"
 
 import tensorflow as tf
 import keras
+
+from dl_techniques.utils.logger import logger
 from model import TiRexCore  # Assuming your file is named model.py
 
 
@@ -16,7 +18,7 @@ def export_tirex_to_tflite(
         prediction_length=24,
         output_path="tirex_model.tflite"
 ):
-    print(f"Initializing TiRex-{model_variant} for export...")
+    logger.info(f"Initializing TiRex-{model_variant} for export...")
 
     # 2. Initialize the model
     # We use fixed dimensions for TFLite to ensure better hardware acceleration
@@ -31,7 +33,7 @@ def export_tirex_to_tflite(
     dummy_input = tf.ones(input_shape, dtype=tf.float32)
     _ = model(dummy_input)
 
-    print("Converting to TFLite format...")
+    logger.info("Converting to TFLite format...")
 
     # 4. Use the TFLite Converter
     converter = tf.lite.TFLiteConverter.from_keras_model(model)
@@ -53,13 +55,13 @@ def export_tirex_to_tflite(
     with open(output_path, "wb") as f:
         f.write(tflite_model)
 
-    print(f"✅ Success! Model saved to: {output_path}")
-    print(f"Model Size: {os.path.getsize(output_path) / 1024 / 1024:.2f} MB")
+    logger.info(f"✅ Success! Model saved to: {output_path}")
+    logger.info(f"Model Size: {os.path.getsize(output_path) / 1024 / 1024:.2f} MB")
 
 
 def verify_tflite(tflite_path, input_length, features):
     """Simple verification to ensure the TFLite model runs."""
-    print("\nVerifying TFLite Inference...")
+    logger.info("\nVerifying TFLite Inference...")
     interpreter = tf.lite.Interpreter(model_path=tflite_path)
     interpreter.allocate_tensors()
 
@@ -73,9 +75,9 @@ def verify_tflite(tflite_path, input_length, features):
     interpreter.invoke()
 
     output_data = interpreter.get_tensor(output_details[0]['index'])
-    print(f"Input Shape: {test_input.shape}")
-    print(f"Output Shape (Quantiles): {output_data.shape}")
-    print("Verification complete.")
+    logger.info(f"Input Shape: {test_input.shape}")
+    logger.info(f"Output Shape (Quantiles): {output_data.shape}")
+    logger.info("Verification complete.")
 
 
 if __name__ == "__main__":

@@ -26,6 +26,8 @@ from typing import Optional, Union, Tuple, List, Dict, Any, Callable, Literal
 import math
 import numpy as np
 
+from dl_techniques.utils.logger import logger
+
 # Conditional TensorFlow import for FFT operations
 try:
     import tensorflow as tf
@@ -33,7 +35,7 @@ try:
     _HAVE_TF = True
 except ImportError:
     _HAVE_TF = False
-    print("Warning: TensorFlow not found. FFT operations require TensorFlow backend.")
+    logger.warning("Warning: TensorFlow not found. FFT operations require TensorFlow backend.")
 
 # Import factories from dl_techniques
 from dl_techniques.layers.norms import create_normalization_layer

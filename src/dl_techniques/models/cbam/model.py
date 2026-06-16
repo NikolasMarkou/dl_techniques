@@ -41,6 +41,7 @@ from typing import List, Optional, Union, Tuple, Dict, Any
 # Local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
 from dl_techniques.layers.attention.convolutional_block_attention import CBAM
 
 
@@ -403,14 +404,14 @@ class CBAMNet(keras.Model):
             if isinstance(pretrained, str):
                 # Load from provided path
                 weights_path = pretrained
-                print(f"Loading weights from {weights_path}...")
+                logger.info(f"Loading weights from {weights_path}...")
             else:
                 # Download from URL
                 try:
                     weights_path = cls._download_weights(variant, weights_dataset)
-                    print(f"Downloaded weights from {weights_dataset}...")
+                    logger.info(f"Downloaded weights from {weights_dataset}...")
                 except Exception as e:
-                    print(
+                    logger.warning(
                         f"Warning: Failed to download pretrained weights: {e}. "
                         "Model will be randomly initialized."
                     )
@@ -429,9 +430,9 @@ class CBAMNet(keras.Model):
                         by_name=True
                     )
                     suffix = " (classifier layer skipped)" if skip_mismatch else ""
-                    print(f"✓ Loaded weights successfully{suffix}.")
+                    logger.info(f"✓ Loaded weights successfully{suffix}.")
                 except Exception as e:
-                    print(f"Warning: Failed to load weights: {e}")
+                    logger.warning(f"Warning: Failed to load weights: {e}")
 
         return model
 
@@ -463,7 +464,7 @@ class CBAMNet(keras.Model):
             )
 
         url = CBAMNet.PRETRAINED_WEIGHTS[variant][dataset]
-        print(f"Downloading weights for CBAMNet-{variant} from {dataset}...")
+        logger.info(f"Downloading weights for CBAMNet-{variant} from {dataset}...")
 
         weights_path = keras.utils.get_file(
             fname=f"cbamnet_{variant}_{dataset}.keras",

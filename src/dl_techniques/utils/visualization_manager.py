@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from sklearn.metrics import confusion_matrix
 from typing import Union, Optional, Tuple, Dict, List
 
+from dl_techniques.utils.logger import logger
+
 # ------------------------------------------------------------------------------
 
 @dataclass
@@ -361,9 +363,10 @@ class VisualizationManager:
                 y_pred = np.argmax(y_pred, axis=1)
 
             if y_pred.shape != y_true.shape:
-                print(f"Shape mismatch for {model_name}:")
-                print(f"y_true shape: {y_true.shape}")
-                print(f"y_pred shape: {y_pred.shape}")
+                logger.warning(
+                    f"Shape mismatch for {model_name}: "
+                    f"y_true shape: {y_true.shape}, y_pred shape: {y_pred.shape}"
+                )
                 raise ValueError(f"Predictions shape mismatch for model {model_name}")
 
             cm = confusion_matrix(y_true, y_pred)

@@ -11,6 +11,8 @@ import tensorflow as tf
 import numpy as np
 from typing import Union, List, Optional, Dict, Tuple
 
+from dl_techniques.utils.logger import logger
+
 from .metrics import AlignmentMetrics
 from .utils import prepare_features, compute_score, normalize_features
 
@@ -430,7 +432,7 @@ class AlignmentLogger:
             'layer_indices': indices
         })
         
-        print(f"\nEpoch {epoch} - Alignment: {score:.4f} (layers: {indices})")
+        logger.info(f"\nEpoch {epoch} - Alignment: {score:.4f} (layers: {indices})")
         
         # Save if log_dir provided
         if self.log_dir:
@@ -464,11 +466,11 @@ class AlignmentLogger:
         try:
             import matplotlib.pyplot as plt
         except ImportError:
-            print("matplotlib not available for plotting")
+            logger.warning("matplotlib not available for plotting")
             return
-        
+
         if not self.scores:
-            print("No scores to plot")
+            logger.info("No scores to plot")
             return
         
         epochs = [s['epoch'] for s in self.scores]
@@ -483,7 +485,7 @@ class AlignmentLogger:
         
         if save_path:
             plt.savefig(save_path, dpi=150, bbox_inches='tight')
-            print(f"Saved plot to {save_path}")
+            logger.info(f"Saved plot to {save_path}")
         else:
             plt.show()
         

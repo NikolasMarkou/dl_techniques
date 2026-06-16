@@ -15,6 +15,8 @@ import numpy as np
 from collections import deque
 from typing import Callable, Optional, Tuple, Any, Dict, Literal
 
+from dl_techniques.utils.logger import logger
+
 # ---------------------------------------------------------------------
 
 class ConformalForecaster:
@@ -397,7 +399,7 @@ class ConformalForecaster:
             self.q_hat = self._compute_weighted_quantile(
                 flat_scores, flat_weights, q_level
             )
-            print(f"ICP Calibrated (Global): Q={self.q_hat:.4f}")
+            logger.info(f"ICP Calibrated (Global): Q={self.q_hat:.4f}")
 
         elif self.strategy in ['step_wise', 'adaptive']:
             # Separate Q-value per horizon step
@@ -413,7 +415,7 @@ class ConformalForecaster:
 
             # Reshape for broadcasting: (1, horizon)
             self.q_hat = self.q_hat.reshape(1, -1)
-            print(
+            logger.info(
                 f"ICP Calibrated ({self.strategy.title()}): "
                 f"Q_avg={np.mean(self.q_hat):.4f}, "
                 f"Q_min={np.min(self.q_hat):.4f}, "

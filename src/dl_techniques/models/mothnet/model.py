@@ -81,6 +81,7 @@ from typing import Optional, Tuple, Dict, Any
 # local imports
 # ---------------------------------------------------------------------
 
+from dl_techniques.utils.logger import logger
 from dl_techniques.layers.mothnet_blocks import (
     AntennalLobeLayer,
     MushroomBodyLayer,
@@ -510,7 +511,7 @@ class MothNet(keras.Model):
             history['loss'].append(avg_loss)
 
             if verbose > 0:
-                print(f"Epoch {epoch+1}/{epochs} - loss: {avg_loss:.4f}")
+                logger.info(f"Epoch {epoch+1}/{epochs} - loss: {avg_loss:.4f}")
 
         return history
 

@@ -11,6 +11,8 @@ import tensorflow as tf
 from typing import Tuple, Union
 import scipy.sparse as sp
 
+from dl_techniques.utils.logger import logger
+
 # ---------------------------------------------------------------------
 
 def normalize_adjacency_symmetric(
@@ -383,7 +385,7 @@ def sample_negative_edges(
         attempts += 1
 
     if len(negative_edges) < num_samples:
-        print(
+        logger.warning(
             f"Warning: Only sampled {len(negative_edges)} negative edges "
             f"out of {num_samples} requested."
         )

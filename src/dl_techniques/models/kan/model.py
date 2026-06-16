@@ -501,7 +501,7 @@ class KAN(keras.Model):
 
     def summary(self, **kwargs: Any) -> None:
         super().summary(**kwargs)
-        print("\n" + self.get_architecture_summary())
+        logger.info("\n" + self.get_architecture_summary())
 
     def get_config(self) -> Dict[str, Any]:
         # Functional model only needs construction args to be serializable
