@@ -56,7 +56,6 @@ References:
 """
 
 import keras
-import tensorflow as tf
 from typing import Optional, Union, Any, Dict, Tuple
 from keras import layers, initializers, regularizers, ops
 
@@ -240,8 +239,8 @@ class RouterLayer(keras.layers.Layer):
         batch_size = ops.shape(inputs)[0]
         seq_len = ops.shape(inputs)[1]
 
-        # Use tf ops for dynamic shape handling during pooling
-        num_windows_eff = tf.minimum(self.num_windows, seq_len)
+        # Use backend-agnostic ops for dynamic shape handling during pooling
+        num_windows_eff = ops.minimum(self.num_windows, seq_len)
         window_len = seq_len // num_windows_eff
         truncated_len = window_len * num_windows_eff
         pooled_input = inputs[:, :truncated_len, :]

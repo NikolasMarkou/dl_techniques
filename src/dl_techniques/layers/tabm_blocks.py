@@ -547,12 +547,8 @@ class MLPBlock(keras.layers.Layer):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        # Layers will be built in build()
-        self.linear = None
-        self.dropout = None
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the MLP block layers."""
+        # CREATE sub-layers in __init__ (units/k are config-known) so weights
+        # are reliably created/restored across serialization.
         if self.k is None:
             # Plain linear layer
             self.linear = keras.layers.Dense(
@@ -579,6 +575,17 @@ class MLPBlock(keras.layers.Layer):
 
         if self.dropout_rate > 0:
             self.dropout = keras.layers.Dropout(self.dropout_rate)
+        else:
+            self.dropout = None
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the MLP block layers."""
+        # Explicitly build sub-layers for robust serialization
+        self.linear.build(input_shape)
+        linear_output_shape = self.linear.compute_output_shape(input_shape)
+
+        if self.dropout is not None:
+            self.dropout.build(linear_output_shape)
 
         super().build(input_shape)
 
@@ -703,14 +710,10 @@ class TabMBackbone(keras.layers.Layer):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        # Blocks will be built in build()
-        self.blocks = []
-
-    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the backbone MLP blocks."""
-        self.blocks = []
-        for i, units in enumerate(self.hidden_dims):
-            block = MLPBlock(
+        # CREATE all MLP blocks in __init__ (hidden_dims are config-known) so
+        # weights are reliably created/restored across serialization.
+        self.blocks = [
+            MLPBlock(
                 units=units,
                 k=self.k,
                 activation=self.activation,
@@ -722,7 +725,15 @@ class TabMBackbone(keras.layers.Layer):
                 bias_regularizer=self.bias_regularizer,
                 name=f'block_{i}'
             )
-            self.blocks.append(block)
+            for i, units in enumerate(self.hidden_dims)
+        ]
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the backbone MLP blocks in computational order."""
+        current_shape = input_shape
+        for block in self.blocks:
+            block.build(current_shape)
+            current_shape = block.compute_output_shape(current_shape)
 
         super().build(input_shape)
 

@@ -55,7 +55,7 @@ References:
 
 import keras
 from keras import ops
-from typing import Dict, Tuple, Any
+from typing import Dict, Tuple, Any, Optional
 
 # ---------------------------------------------------------------------
 
@@ -113,11 +113,26 @@ class StrongAugmentation(keras.layers.Layer):
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
+
+        # Validate inputs
+        if not (0.0 <= cutmix_prob <= 1.0):
+            raise ValueError(f"cutmix_prob must be in [0, 1], got {cutmix_prob}")
+        if color_jitter_strength < 0.0:
+            raise ValueError(
+                f"color_jitter_strength must be non-negative, got {color_jitter_strength}"
+            )
+        if (len(cutmix_ratio_range) != 2
+                or not (0.0 <= cutmix_ratio_range[0] <= cutmix_ratio_range[1] <= 1.0)):
+            raise ValueError(
+                f"cutmix_ratio_range must be (min, max) with 0 <= min <= max <= 1, "
+                f"got {cutmix_ratio_range}"
+            )
+
         self.cutmix_prob = cutmix_prob
         self.cutmix_ratio_range = cutmix_ratio_range
         self.color_jitter_strength = color_jitter_strength
 
-    def call(self, inputs: keras.KerasTensor, training: bool = None) -> keras.KerasTensor:
+    def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
         """
         Apply strong augmentations to input images.
 
@@ -251,8 +266,17 @@ class StrongAugmentation(keras.layers.Layer):
 
         return x
 
-    def compute_output_shape(self, input_shape):
-        """Output shape equals input shape (augmentation preserves dimensions)."""
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """Output shape equals input shape (augmentation preserves dimensions).
+
+        :param input_shape: Shape tuple of the input tensor.
+        :type input_shape: Tuple[Optional[int], ...]
+        :return: Output shape tuple (identical to input).
+        :rtype: Tuple[Optional[int], ...]
+        """
         return input_shape
 
     def get_config(self) -> Dict[str, Any]:

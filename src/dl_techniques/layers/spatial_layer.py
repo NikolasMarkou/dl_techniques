@@ -193,7 +193,7 @@ class SpatialLayer(keras.layers.Layer):
         # Resize the coordinate grid to match input spatial dimensions
         # Use keras.ops.image.resize for backend-agnostic resizing
         xy_grid_resized = ops.image.resize(
-            image=self.xy_grid,
+            images=self.xy_grid,
             size=(target_height, target_width),
             interpolation=self.resize_method,
             data_format='channels_last'

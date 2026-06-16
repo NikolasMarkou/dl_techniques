@@ -174,8 +174,8 @@ class ConvBlock(keras.layers.Layer):
         self.use_pooling = use_pooling
         self.pool_size = pool_size
         self.pool_type = pool_type
-        self.kernel_regularizer = kernel_regularizer
-        self.kernel_initializer = kernel_initializer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.normalization_kwargs = normalization_kwargs or {}
         self.activation_kwargs = activation_kwargs or {}
 
@@ -397,13 +397,13 @@ class DenseBlock(keras.layers.Layer):
         self.normalization_type = normalization_type
         self.activation_type = activation_type
         self.dropout_rate = dropout_rate
-        self.kernel_regularizer = kernel_regularizer
-        self.bias_regularizer = bias_regularizer
-        self.activity_regularizer = activity_regularizer
-        self.kernel_initializer = kernel_initializer
-        self.bias_initializer = bias_initializer
-        self.kernel_constraint = kernel_constraint
-        self.bias_constraint = bias_constraint
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.bias_regularizer = keras.regularizers.get(bias_regularizer)
+        self.activity_regularizer = keras.regularizers.get(activity_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.bias_initializer = keras.initializers.get(bias_initializer)
+        self.kernel_constraint = keras.constraints.get(kernel_constraint)
+        self.bias_constraint = keras.constraints.get(bias_constraint)
         self.use_bias = use_bias
         self.normalization_kwargs = normalization_kwargs or {}
         self.activation_kwargs = activation_kwargs or {}
@@ -605,8 +605,8 @@ class ResidualDenseBlock(keras.layers.Layer):
         self.normalization_type = normalization_type
         self.activation_type = activation_type
         self.dropout_rate = dropout_rate
-        self.kernel_regularizer = kernel_regularizer
-        self.kernel_initializer = kernel_initializer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.use_bias = use_bias
         self.normalization_kwargs = normalization_kwargs or {}
         self.activation_kwargs = activation_kwargs or {}
@@ -805,7 +805,7 @@ class BasicBlock(keras.layers.Layer):
         self.filters = filters
         self.stride = stride
         self.use_projection = use_projection
-        self.kernel_regularizer = kernel_regularizer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.normalization_type = normalization_type
         # DECISION plan_2026-05-18_6776f8ba/D-003
         # Optional, additive `normalization_kwargs` -> `create_normalization_layer`.
@@ -1045,7 +1045,7 @@ class BottleneckBlock(keras.layers.Layer):
         self.filters = filters
         self.stride = stride
         self.use_projection = use_projection
-        self.kernel_regularizer = kernel_regularizer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.normalization_type = normalization_type
         # DECISION plan_2026-05-18_6776f8ba/D-003 (parallel to BasicBlock above).
         self.normalization_kwargs = dict(normalization_kwargs) if normalization_kwargs else {}

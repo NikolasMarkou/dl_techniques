@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 31 / 245 files production-verified**
+**Progress: 41 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -234,16 +234,16 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `router.py` | FAIL | forward-raw-tf (DEEP gap — see §5) |
-| `[ ]` | `selective_gradient_mask.py` | PASS | rubric-verify |
-| `[ ]` | `sparse_autoencoder.py` | PASS | rubric-verify |
-| `[ ]` | `spatial_layer.py` | PASS | rubric-verify |
-| `[ ]` | `standard_blocks.py` | PASS | rubric-verify |
-| `[ ]` | `stochastic_gradient.py` | PASS | rubric-verify |
-| `[ ]` | `strong_augmentation.py` | PASS | rubric-verify |
-| `[ ]` | `tabm_blocks.py` | PASS | rubric-verify |
-| `[ ]` | `universal_inverted_bottleneck.py` | PASS | rubric-verify |
-| `[ ]` | `upsample.py` | N/A | N/A (no concrete layer) |
+| `[x]` | `router.py` | PASS | done: DEEP gap resolved — only raw-tf was `tf.minimum`→`ops.minimum` (clean migration, not deep); dropped tf import; +test |
+| `[x]` | `selective_gradient_mask.py` | PASS | done: clean (stateless STE); +test |
+| `[x]` | `sparse_autoencoder.py` | PASS | done: clean (uses .get + from_config); +test (5 variants) |
+| `[x]` | `spatial_layer.py` | PASS | done: fixed broken forward — `ops.image.resize(image=...)`→`images=` (wrong kwarg); +test |
+| `[x]` | `standard_blocks.py` | PASS | done: H8/H9 regularizer+initializer+constraint deserialize across all 5 layers; +test |
+| `[x]` | `stochastic_gradient.py` | PASS | done: clean; +test |
+| `[x]` | `strong_augmentation.py` | PASS | done: H4 validation + H12 compute_output_shape type hints; +test |
+| `[x]` | `tabm_blocks.py` | PASS | done: fixed MLPBlock/TabMBackbone H2+H5 (sublayers created in build & not built → broken weight restore); +test (5 layers) |
+| `[x]` | `universal_inverted_bottleneck.py` | PASS | done: clean; +test |
+| `[x]` | `upsample.py` | N/A | N/A confirmed (pure-function module) |
 
 ### Round 6 — memory/ (NEEDS-AUDIT)  (8 files)
 
