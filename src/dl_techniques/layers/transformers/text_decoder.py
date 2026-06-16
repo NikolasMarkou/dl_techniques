@@ -411,7 +411,7 @@ class TextDecoder(keras.layers.Layer):
             x = ops.add(x, pos_embed)
 
         # 3. Embedding normalization and dropout
-        x = self.embed_norm(x)
+        x = self.embed_norm(x, training=training)
         x = self.embed_dropout_layer(x, training=training)
 
         # 4. Create Attention Mask using the Masking Factory
@@ -453,7 +453,7 @@ class TextDecoder(keras.layers.Layer):
             x = layer(x, attention_mask=attend_mask, training=training)
 
         # 6. Final Normalization
-        x = self.final_norm(x)
+        x = self.final_norm(x, training=training)
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:

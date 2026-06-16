@@ -406,13 +406,13 @@ class SwinTransformerBlock(keras.layers.Layer):
         # 4. Build MLP layer (operates on original input shape)
         self.mlp.build(input_shape)
 
-        # Always call parent build at the end
-        super().build(input_shape)
-
         logger.debug(
             f"Built SwinTransformerBlock: input_shape={input_shape}, "
             f"windowed_shape={windowed_shape}"
         )
+
+        # Always call parent build at the end
+        super().build(input_shape)
 
     def call(
         self,

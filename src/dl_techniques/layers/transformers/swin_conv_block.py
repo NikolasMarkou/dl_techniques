@@ -314,9 +314,10 @@ class SwinConvBlock(keras.layers.Layer):
         )
         self.conv1_2.build(combined_shape)
 
+        logger.debug(f"Built SwinConvBlock with input_shape={input_shape}")
+
         # Always call parent build at the end
         super().build(input_shape)
-        logger.debug(f"Built SwinConvBlock with input_shape={input_shape}")
 
     def call(
         self,

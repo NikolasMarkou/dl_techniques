@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 189 / 245 files production-verified**
+**Progress: 196 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -495,13 +495,13 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `transformers/swin_conv_block.py` | FAIL | super_build_last |
-| `[ ]` | `transformers/swin_transformer_block.py` | FAIL | super_build_last |
-| `[ ]` | `transformers/text_decoder.py` | PASS | rubric-verify |
-| `[ ]` | `transformers/text_encoder.py` | PASS | rubric-verify |
-| `[ ]` | `transformers/transformer.py` | PASS | rubric-verify |
-| `[ ]` | `transformers/transformer_decoder.py` | PASS | rubric-verify |
-| `[ ]` | `transformers/vision_encoder.py` | PASS | rubric-verify |
+| `[x]` | `transformers/swin_conv_block.py` | PASS | done: H6 (logger before super().build()); existing test passes |
+| `[x]` | `transformers/swin_transformer_block.py` | PASS | done: H6 (logger before super().build()); existing test passes |
+| `[x]` | `transformers/text_decoder.py` | PASS | done: H11 (forward training to embed_norm/final_norm, matching text_encoder); existing test passes |
+| `[x]` | `transformers/text_encoder.py` | PASS | done: rubric-verified clean (list/dict input disambiguated) |
+| `[x]` | `transformers/transformer.py` | PASS | done: rubric-verified clean (moe_config serialized; all conditionals guarded) |
+| `[x]` | `transformers/transformer_decoder.py` | PASS | done: rubric-verified clean (cross-attn built with [dec,enc]; tuple-cast shapes) |
+| `[x]` | `transformers/vision_encoder.py` | PASS | done: rubric-verified clean |
 
 ### Round 26 — mixtures/ + sequence_pooling/ re-audit  (8 files)
 
