@@ -59,8 +59,8 @@ via `dl_techniques.layers.memory.*`:
   (differentiable soft-assignment grid; uses orthogonal hypersphere init +
   soft-orthonormal regularization).
 - **Factory** (`factory.py`) — uniform construction surface:
-  `create_ntm(...)`, `create_mann(...)` (returns a `NeuralTuringMachine`
-  configured to preserve the historical MANN output shape), `create_som_2d(...)`.
+  `create_mann(...)` (returns a `NeuralTuringMachine`
+  configured to preserve the historical MANN output shape) and `create_som_2d(...)`.
 
 ### Logic (`logic/`)
 Arithmetic operators, logic operators, neural circuit.
