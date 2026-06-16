@@ -768,7 +768,11 @@ def _b_swin():
     from dl_techniques.models.swin_transformer.model import SwinTransformer
     return SwinTransformer.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3))
 _reg("swin_transformer", "XFAIL", _b_swin, lambda m: m(_img(), training=False),
-     "DEAD: 4D/3D shape mismatch in block (SYSTEM.md)")
+     "MODEL BUG (not recipe): PatchEmbedding2D.call flattens to 3D seq "
+     "(B, num_patches, embed_dim) but SwinTransformerBlock.build requires 4D "
+     "(B,H,W,C); model.py wires patch_embed -> block with no grid-restore "
+     "reshape, so block raises 'expects 4D input ... got (None,64,96)'. "
+     "Input-size-independent (always 3D); needs model-source fix, out of scope.")
 
 
 # --- tabm ------------------------------------------------------------------
