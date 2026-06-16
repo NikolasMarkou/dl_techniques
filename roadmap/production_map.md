@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 222 / 245 files production-verified**
+**Progress: 232 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -550,16 +550,16 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `laplacian_filter.py` | PASS | rubric-verify |
-| `[ ]` | `layer_scale.py` | PASS | rubric-verify |
-| `[ ]` | `mobile_one_block.py` | PASS | rubric-verify |
-| `[ ]` | `mps_layer.py` | PASS | rubric-verify |
-| `[ ]` | `multi_level_feature_compilation.py` | PASS | rubric-verify |
-| `[ ]` | `orthoblock.py` | PASS | rubric-verify |
-| `[ ]` | `orthogonal_butterfly.py` | PASS | rubric-verify |
-| `[ ]` | `pixel_shuffle.py` | PASS | rubric-verify |
-| `[ ]` | `pixel_unshuffle.py` | FAIL | super_build_last |
-| `[ ]` | `repmixer_block.py` | PASS | rubric-verify |
+| `[x]` | `laplacian_filter.py` | PASS | done: rubric-verified clean (DoG/LoG/kernel; GaussianFilter sublayer built; existing test passes) |
+| `[x]` | `layer_scale.py` | PASS | done: rubric-verified clean (LearnableMultiplier; add_weight in build, super().build last; existing test passes) |
+| `[x]` | `mobile_one_block.py` | PASS | done: rubric-verified clean (Conv-BN branches built explicitly; H8/H9 serialize; existing test passes) |
+| `[x]` | `mps_layer.py` | PASS | done: rubric-verified clean (tensor-train; add_weight in build; existing test passes) |
+| `[x]` | `multi_level_feature_compilation.py` | PASS | done: rubric-verified clean (MLFCLayer 4-input; ops.image.resize; test_mlfc_layers.py passes) |
+| `[x]` | `orthoblock.py` | PASS | done: rubric-verified clean (Dense+RMS+gate pipeline; sublayers built; existing test passes) |
+| `[x]` | `orthogonal_butterfly.py` | PASS | done: rubric-verified clean (Givens butterfly; add_weight in build; existing test passes) |
+| `[x]` | `pixel_shuffle.py` | PASS | done: rubric-verified clean (ViT token space-to-depth; existing test passes) |
+| `[x]` | `pixel_unshuffle.py` | PASS | done: H6 fixed (logger.debug moved before super().build() in PixelUnshuffle2D); PixelShuffle2D clean; test passes |
+| `[x]` | `repmixer_block.py` | PASS | done: rubric-verified clean (RepMixerBlock + ConvolutionalStem; sublayers built; existing test passes) |
 
 ### Round 30 — tested root-level files re-audit (4/5)  (10 files)
 

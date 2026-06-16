@@ -133,11 +133,11 @@ class PixelUnshuffle2D(keras.layers.Layer):
         # (build receives the symbolic Input shape and must accept None HW).
         if self.proj is not None:
             self.proj.build((input_shape[0], None, None, c * self.scale ** 2))
-        super().build(input_shape)
         logger.debug(
             f"PixelUnshuffle2D built: scale={self.scale}, "
             f"out_channels={self.out_channels}, in_channels={c}"
         )
+        super().build(input_shape)
 
     def call(self, inputs: Any, training: Optional[bool] = None) -> Any:
         s = self.scale
