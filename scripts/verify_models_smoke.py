@@ -689,9 +689,9 @@ def _f_sam(m):
     return m({"image": image, "original_size": osz}, training=False)
 # Image-encoder rel-pos chain was fixed (dtype/gather/einsum), but a residual
 # multi-bug chain remains in the mask decoder (use_causal_mask Keras-3 incompat).
-_reg("sam", "XFAIL", _b_sam, _f_sam,
-     "image-encoder rel-pos chain fixed (dtype/gather/einsum); residual multi-bug "
-     "chain in mask decoder (use_causal_mask Keras-3 incompat)")
+_reg("sam", "RUN", _b_sam, _f_sam,
+     "image-encoder rel-pos chain + mask-decoder batch-broadcast (D-006) fixed; "
+     "forwards end-to-end (no-prompt path)")
 
 
 # --- scunet ----------------------------------------------------------------

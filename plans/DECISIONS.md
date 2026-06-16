@@ -73,6 +73,13 @@
 **Reasoning**: Matches the exact condition that prepends puzzle tokens (line ~461); minimal one-clause change.
 **Anchor-Refs**: `src/dl_techniques/models/modern_bert/modern_bert_blt_hrm.py:~483`
 
+### D-006 | POST-CLOSE follow-up (sam mask decoder) | 2026-06-16
+**Context**: After the plan closed, sam was XFAIL with a documented mask-decoder chain. Diagnosis found it was a SINGLE blocking bug: `MaskDecoder.predict_masks` read `batch_size` from `sparse_prompt_embeddings`, which the prompt encoder returns at batch-1 when prompts are absent/shared, while `image_embeddings` carries the real batch B>1 — so output_tokens (1,…) mismatched the (B,…) image keys and crashed the two-way-transformer cross-attention.
+**Decision**: Derive `batch_size` from `image_embeddings` and tile `sparse_prompt_embeddings` to that batch before the token concat.
+**Trade-off**: Correct batched no-prompt/shared-prompt forward **at the cost of** nothing — when prompts already match the image batch, the tile factor is 1 (no-op).
+**Reasoning**: 4-line fix; resolved the entire residual chain (forward now returns finite masks/iou). Two ADJACENT items left documented-not-fixed: SAM has no `build()` (cosmetic symbolic-trace UserWarning, non-fatal) and `prompt_encoder._embed_boxes` reshape+type-embedding assume exactly 2 corners (latent multi-box bug, not hit by single-box smoke test; proper fix is a real rework, not 2 lines).
+**Anchor-Refs**: `src/dl_techniques/models/sam/mask_decoder.py:~425`
+
 ## plan_2026-06-15_e2759fbc
 ### D-001 | EXPLORE → PLAN | YYYY-MM-DD
 **Context**: <one-paragraph background — what was discovered in EXPLORE>

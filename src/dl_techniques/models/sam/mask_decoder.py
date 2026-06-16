@@ -422,10 +422,24 @@ class MaskDecoder(keras.layers.Layer):
         )
         # Expand and broadcast to batch size: (batch_size, num_mask_tokens + 1, transformer_dim)
         output_tokens = ops.expand_dims(output_tokens, 0)
-        batch_size = ops.shape(sparse_prompt_embeddings)[0]
+        # DECISION plan_2026-06-15_e6a0391c/D-006: derive the batch size from
+        # image_embeddings, NOT sparse_prompt_embeddings. The prompt encoder
+        # returns a batch-1 sparse tensor when prompts are absent/shared while
+        # the image stack is batched (B>1); reading the batch from the prompts
+        # made output_tokens (1, ...) mismatch the (B, ...) image keys and
+        # crashed the two-way transformer cross-attention.
+        batch_size = ops.shape(image_embeddings)[0]
         output_tokens = ops.broadcast_to(
             output_tokens,
             (batch_size, ops.shape(output_tokens)[1], ops.shape(output_tokens)[2])
+        )
+
+        # Tile sparse prompt embeddings up to the image batch size so the
+        # concat (and downstream cross-attention) batch dims agree.
+        sparse_batch = ops.shape(sparse_prompt_embeddings)[0]
+        sparse_prompt_embeddings = ops.tile(
+            sparse_prompt_embeddings,
+            [batch_size // sparse_batch, 1, 1]
         )
 
         # Concatenate output tokens with sparse prompt embeddings
