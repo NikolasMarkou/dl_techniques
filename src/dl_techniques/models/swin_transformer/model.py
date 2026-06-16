@@ -392,6 +392,22 @@ class SwinTransformer(keras.Model):
             )
             x = self.patch_embed_norm(x)
 
+        # DECISION plan_2026-06-16_c8f3e9ca/D-004: restore (B,H,W,C) grid between
+        # PatchEmbedding2D (emits 3D (B, H*W, embed_dim)) and SwinTransformerBlock
+        # (requires 4D (B,H,W,C)). Both shared-layer contracts are intentional and
+        # are left UNCHANGED — the seam fix lives here, in the model. Do NOT "fix"
+        # this by making PatchEmbedding2D emit 4D or by relaxing the block's 4D
+        # assertion: other models rely on the 3D patch-embed output. The patch grid
+        # is square and static (H=W=input_size//patch_size), so a Reshape with a
+        # known target shape is graph-safe. PatchMerging and SwinTransformerBlock
+        # both keep the tensor 4D thereafter, so this single reshape suffices.
+        grid_h = self._input_shape[0] // self.patch_size
+        grid_w = self._input_shape[1] // self.patch_size
+        x = layers.Reshape(
+            (grid_h, grid_w, self.embed_dim),
+            name="patch_embed_grid_restore"
+        )(x)
+
         return x
 
     def _create_patch_merging(

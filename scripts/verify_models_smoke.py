@@ -778,16 +778,18 @@ _reg("squeezenet_v2", "RUN", _b_sqv2, _f_sqv2,
      "v2_3d (B,64,64,64,1)")
 
 
-# --- swin_transformer (DEAD) -----------------------------------------------
+# --- swin_transformer ------------------------------------------------------
 def _b_swin():
     from dl_techniques.models.swin_transformer.model import SwinTransformer
-    return SwinTransformer.from_variant("tiny", num_classes=10, input_shape=(32, 32, 3))
-_reg("swin_transformer", "XFAIL", _b_swin, lambda m: m(_img(), training=False),
-     "MODEL BUG (not recipe): PatchEmbedding2D.call flattens to 3D seq "
-     "(B, num_patches, embed_dim) but SwinTransformerBlock.build requires 4D "
-     "(B,H,W,C); model.py wires patch_embed -> block with no grid-restore "
-     "reshape, so block raises 'expects 4D input ... got (None,64,96)'. "
-     "Input-size-independent (always 3D); needs model-source fix, out of scope.")
+    # 224x224: default window_size=7 cleanly divides every stage's grid
+    # (56->28->14->7). 32x32 (grid 8->4->2->1) is too small for a 4-stage,
+    # window-7 pyramid — the deepest grids are smaller than the window and
+    # window_partition() (no resolution clamp) cannot tile them. Pairs with the
+    # model-side grid-restore reshape (D-004).
+    return SwinTransformer.from_variant("tiny", num_classes=10, input_shape=(224, 224, 3))
+_reg("swin_transformer", "RUN", _b_swin,
+     lambda m: m(_img(h=224, w=224), training=False),
+     "tiny @224 (grid 56->7 divisible by window 7); grid-restore reshape D-004")
 
 
 # --- tabm ------------------------------------------------------------------
