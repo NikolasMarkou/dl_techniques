@@ -343,13 +343,7 @@ def _f_hrm(m):
     return m({"token_ids": _tokens(vocab=256, s=16),
               "puzzle_ids": np.zeros((2,), dtype=np.int32)},
              training=False)
-_reg("hierarchical_reasoning_model", "XFAIL", _b_hrm, _f_hrm,
-     "MODEL BUG: _forward_step calls core.reset_carry() BEFORE core(...), "
-     "so HierarchicalReasoningCore.build() never ran and self.h_init/l_init "
-     "are None (model.py:627 vs 639; hrm_reasoning_core.py:484). Needs a "
-     "model build() override (build the core first) — not a recipe fix. "
-     "Recipe (dict {token_ids,puzzle_ids} + from_variant vocab/seq_len) is "
-     "now correct; this XFAIL surfaces the real ordering bug.")
+_reg("hierarchical_reasoning_model", "RUN", _b_hrm, _f_hrm)
 
 
 # --- ideogram4 -------------------------------------------------------------

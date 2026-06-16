@@ -529,6 +529,39 @@ class HierarchicalReasoningModel(keras.Model):
         if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(f"dropout_rate must be in [0, 1], got {dropout_rate}")
 
+    def build(self, input_shape: Any = None) -> None:
+        """Explicitly build the reasoning core before any forward/reset_carry.
+
+        `_forward_step` calls `self.core.reset_carry(...)` BEFORE the first
+        `self.core(...)` call, but `reset_carry` is a plain method that does
+        not trigger Keras auto-build, so `core.h_init`/`core.l_init` would
+        otherwise stay None and the forward crashes. This override builds the
+        core first so those add_weight states exist. Mirrors the SAM D-008
+        build()-override precedent.
+        """
+        # DECISION plan_2026-06-16_c8f3e9ca/D-005: build reasoning core
+        # (h_init/l_init via add_weight) before reset_carry; mirrors SAM D-008.
+        # reset_carry is a plain method that does NOT trigger Keras auto-build.
+        # Do NOT rely on auto-build via the first core(...) call: _forward_step
+        # invokes core.reset_carry() first, which reads h_init/l_init. The
+        # core's own build() ignores the input_shape content (it creates
+        # fixed-shape weights from config), so any (None, seq_len) is fine.
+        if self.built:
+            return
+
+        # call() takes a dict {token_ids, puzzle_ids}; input_shape may be a
+        # dict of shapes. Extract token_ids shape if present (SAM D-008 pattern
+        # for dict inputs); otherwise fall back to the config-derived shape.
+        if isinstance(input_shape, dict) and "token_ids" in input_shape:
+            core_input_shape = input_shape["token_ids"]
+        else:
+            core_input_shape = (None, self.seq_len)
+
+        if not self.core.built:
+            self.core.build(core_input_shape)
+
+        super().build(input_shape)
+
     def initial_carry(self, batch: Dict[str, keras.KerasTensor]) -> Dict[str, keras.KerasTensor]:
         """Initialize carry state for a batch.
 
