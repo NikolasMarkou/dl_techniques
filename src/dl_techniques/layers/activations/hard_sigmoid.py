@@ -101,6 +101,14 @@ class HardSigmoid(keras.layers.Layer):
         super().__init__(**kwargs)
         self.activation = keras.layers.ReLU(max_value=6.0)
 
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the wrapped ReLU6 sub-layer.
+
+        :param input_shape: Shape of the input tensor.
+        """
+        self.activation.build(input_shape)
+        super().build(input_shape)
+
     def call(
             self,
             inputs: keras.KerasTensor,

@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 137 / 245 files production-verified**
+**Progress: 145 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -408,14 +408,14 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `activations/adaptive_softmax.py` | PASS | rubric-verify |
-| `[ ]` | `activations/basis_function.py` | PASS | rubric-verify |
-| `[ ]` | `activations/differentiable_step.py` | PASS | rubric-verify |
-| `[ ]` | `activations/expanded_activations.py` | PASS | rubric-verify |
-| `[ ]` | `activations/factory.py` | N/A | N/A (factory-only — human re-check for inline layers) |
-| `[ ]` | `activations/golu.py` | PASS | rubric-verify |
-| `[ ]` | `activations/hard_sigmoid.py` | PASS | rubric-verify |
-| `[ ]` | `activations/hard_swish.py` | PASS | rubric-verify |
+| `[x]` | `activations/adaptive_softmax.py` | PASS | done: rubric-verified clean |
+| `[x]` | `activations/basis_function.py` | PASS | done: rubric-verified clean (stateless) |
+| `[x]` | `activations/differentiable_step.py` | PASS | done: rubric-verified clean (init/reg/constraint via keras.*.get) |
+| `[x]` | `activations/expanded_activations.py` | PASS | done: rubric-verified clean |
+| `[x]` | `activations/factory.py` | N/A | N/A confirmed (create_activation_layer registry/factory fns; no inline layers) |
+| `[x]` | `activations/golu.py` | PASS | done: rubric-verified clean; +new test |
+| `[x]` | `activations/hard_sigmoid.py` | PASS | done: H5 (explicit build of wrapped ReLU6 sublayer); +new test |
+| `[x]` | `activations/hard_swish.py` | PASS | done: H5 (explicit build of wrapped ReLU6 sublayer); +new test |
 
 ### Round 19 — activations/ re-audit (2/2)  (8 files)
 
