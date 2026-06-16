@@ -260,11 +260,33 @@ def _failing_items(items: Dict[str, Any]) -> List[str]:
     return fails
 
 
+def _failing_items_model(items: Dict[str, Any]) -> List[str]:
+    """HARD failures for one CONCRETE-MODEL (Level 2).
+
+    Same universal mechanical items as a layer EXCEPT ``compute_output_shape``:
+    Keras infers it for functional/composite models and subclassed models
+    commonly (and acceptably) omit it, so its absence is NOT a model FAIL.
+    ``super_build_last`` is still enforced when a ``build()`` exists.
+    """
+    fails: List[str] = []
+    if not items["register_decorator"]:
+        fails.append("register_decorator")
+    if not items["get_config"]:
+        fails.append("get_config")
+    if items["build_present"] and items["super_build_last"] is False:
+        fails.append("super_build_last")
+    if items["forward_raw_tf"] > 0:
+        fails.append("forward-raw-tf")
+    if items["print_call"] > 0:
+        fails.append("print-call")
+    return fails
+
+
 # --------------------------------------------------------------------------- #
 # Per-file scan
 # --------------------------------------------------------------------------- #
 
-def scan_file(path: Path) -> Dict[str, Any]:
+def scan_file(path: Path, grade_models: bool = False) -> Dict[str, Any]:
     rel = str(path)
     try:
         source = path.read_text(encoding="utf-8")
@@ -289,6 +311,15 @@ def scan_file(path: Path) -> Dict[str, Any]:
             items = _grade_layer(cls)
             entry["items"] = items
             entry["failing_items"] = _failing_items(items)
+            concrete.append(entry)
+        elif kind == "MODEL" and grade_models:
+            # Level 2: grade concrete keras.Model subclasses with the
+            # model-applicable HARD subset (see _failing_items_model).
+            entry["kind"] = "CONCRETE-MODEL"
+            kinds[-1] = "CONCRETE-MODEL"
+            items = _grade_layer(cls)
+            entry["items"] = items
+            entry["failing_items"] = _failing_items_model(items)
             concrete.append(entry)
         classes.append(entry)
 
@@ -375,20 +406,28 @@ def print_report(results: List[Dict[str, Any]]) -> None:
         "print_clean": [0, 0],
     }
     concrete_layers = 0
+    concrete_models = 0
     files_with_concrete = 0
     for r in results:
         clayers = [c for c in r["classes"] if c["kind"] == "CONCRETE-LAYER"]
-        if clayers:
+        cmodels = [c for c in r["classes"] if c["kind"] == "CONCRETE-MODEL"]
+        if clayers or cmodels:
             files_with_concrete += 1
-        for c in clayers:
-            concrete_layers += 1
+        for c in clayers + cmodels:
+            is_model = c["kind"] == "CONCRETE-MODEL"
+            if is_model:
+                concrete_models += 1
+            else:
+                concrete_layers += 1
             it = c["items"]
             agg["register_decorator"][1] += 1
             agg["register_decorator"][0] += int(it["register_decorator"])
             agg["get_config"][1] += 1
             agg["get_config"][0] += int(it["get_config"])
-            agg["compute_output_shape"][1] += 1
-            agg["compute_output_shape"][0] += int(it["compute_output_shape"])
+            # compute_output_shape is a HARD item for layers only.
+            if not is_model:
+                agg["compute_output_shape"][1] += 1
+                agg["compute_output_shape"][0] += int(it["compute_output_shape"])
             if it["build_present"]:
                 agg["super_build_last"][1] += 1
                 agg["super_build_last"][0] += int(bool(it["super_build_last"]))
@@ -406,10 +445,11 @@ def print_report(results: List[Dict[str, Any]]) -> None:
     print(f"  FAIL                   : {counts.get('FAIL', 0)}")
     print(f"  N/A                    : {counts.get('N/A', 0)}")
     print(f"  PARSE-ERROR            : {counts.get('PARSE-ERROR', 0)}")
-    print(f"Files with concrete layer: {files_with_concrete}")
+    print(f"Files with concrete cls  : {files_with_concrete}")
     print(f"Concrete layers graded   : {concrete_layers}")
+    print(f"Concrete models graded   : {concrete_models}")
     print()
-    print("Per-HARD-item (over concrete layers):")
+    print("Per-HARD-item (over concrete layers + models):")
     for key, (ok, tot) in agg.items():
         pct = f"{(100.0 * ok / tot):5.1f}%" if tot else "  n/a "
         print(f"  {key:<24}: {ok:4d} / {tot:<4d}  {pct}")
@@ -424,6 +464,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="scan src/dl_techniques/layers/<name>/ instead")
     parser.add_argument("--json", dest="json_out", default=None,
                         help="write machine-readable JSON report to this path")
+    parser.add_argument("--models", action="store_true",
+                        help="ALSO grade concrete keras.Model subclasses "
+                             "(Level 2). Off by default (Level 1 = layers only).")
     args = parser.parse_args(argv)
 
     if args.subpackage:
@@ -436,7 +479,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     files = collect_files(target)
-    results = [scan_file(p) for p in files]
+    results = [scan_file(p, grade_models=args.models) for p in files]
 
     if args.json_out:
         Path(args.json_out).write_text(
