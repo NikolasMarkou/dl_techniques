@@ -743,7 +743,12 @@ class SpectreHead(layers.Layer):
         V = self.W_v(inputs)
 
         # 2. FFT of V
-        V_fft = tf.signal.rfft(V, fft_length=[self.fft_size], axis=1)  # (B, F_half, D)
+        # DECISION plan_2026-06-16_16fad484/D-001: tf.signal.rfft/irfft transform LAST
+        # axis only (no axis= kwarg in TF2.18); transpose seq-axis to last and back.
+        # Shape-identical to original axis=1 intent. See decisions.md D-001.
+        V_dn = ops.transpose(V, (0, 2, 1))  # (B, D, N)
+        V_fft_dn = tf.signal.rfft(V_dn, fft_length=[self.fft_size])  # (B, D, F_half)
+        V_fft = ops.transpose(V_fft_dn, (0, 2, 1))  # (B, F_half, D)
 
         # 3. Grouped bucket gate
         q_pool = self.q_norm(self.pooling(Q))  # (B, D)
@@ -751,7 +756,7 @@ class SpectreHead(layers.Layer):
         # Predict anchors
         gate_params = self.gate_mlp(q_pool)  # (B, G * B * 2)
         gate_rs = ops.reshape(gate_params, (B, self.num_groups, self.B, 2))
-        gate_anchor = ops.complex(gate_rs[..., 0], gate_rs[..., 1])  # (B, G, B)
+        gate_anchor = tf.complex(gate_rs[..., 0], gate_rs[..., 1])  # ops.complex absent (D-007/D-008)
 
         # Optional Toeplitz convolution on anchors
         if self.toeplitz_conv:
@@ -771,8 +776,10 @@ class SpectreHead(layers.Layer):
 
         mixed_half = gate_broadcast * V_fft
 
-        # 5. Inverse FFT
-        v_time = tf.signal.irfft(mixed_half, fft_length=[self.fft_size], axis=1)
+        # 5. Inverse FFT (D-001: last-axis only; transpose seq-axis to last and back)
+        mixed_half_dn = ops.transpose(mixed_half, (0, 2, 1))  # (B, D, F_half)
+        v_time_dn = tf.signal.irfft(mixed_half_dn, fft_length=[self.fft_size])  # (B, D, fft_size)
+        v_time = ops.transpose(v_time_dn, (0, 2, 1))  # (B, fft_size, D)
 
         # Truncate to original sequence length and apply dropout
         result = self.dropout(v_time[:, :N, :], training=training)
@@ -1034,15 +1041,19 @@ class SpectreBlock(layers.Layer):
 
         # Create optional spectral memory bank
         if self.memory_size > 0:
-            F_half = self.fft_size // 2 + 1
-            mem_freq_bins = min(self.memory_size, F_half) if self.memory_size > 1 else F_half
-
-            self.memory_fft = self.add_weight(
-                name="memory_fft",
-                shape=(mem_freq_bins, self.embed_dim),
-                initializer=initializers.RandomNormal(stddev=1.0 / math.sqrt(self.embed_dim)),
-                trainable=False,  # Persistent factual memory bank
-                dtype="complex64"
+            # DECISION plan_2026-06-16_16fad484/D-002: the original add_weight here used
+            # dtype="complex64" with a real-valued RandomNormal initializer, which TF
+            # cannot initialize (D-008 class of bug). A 2-real-weight rewrite
+            # (k_real/k_imag, mirroring ComplexConv1DLayer.build) was DELIBERATELY
+            # rejected: self.memory_fft is NEVER read in SpectreBlock.call() (no
+            # use-site), so a rewrite would only create different dead state with
+            # silent-semantic-change risk and zero functional gain. Fail loud instead;
+            # memory_size>0 is off by default. See decisions.md D-002.
+            raise ValueError(
+                "complex64 spectral memory bank (memory_size>0) is unimplemented: "
+                "the original dtype='complex64' weight cannot be initialized by a "
+                "real-valued initializer, and memory_fft has no use-site in call(). "
+                "Use memory_size=0 (default) until the memory path is designed."
             )
 
         super().build(input_shape)
