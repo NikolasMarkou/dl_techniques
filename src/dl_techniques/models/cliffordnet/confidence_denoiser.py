@@ -75,7 +75,6 @@ from dl_techniques.utils.drop_path import linear_drop_path_rates
 
 from .conditional_denoiser import (
     BiasFreeConditionedCliffordBlock,
-    BiasFreeConditionedGGR,
     _DEFAULT_KERNEL_INIT,
 )
 

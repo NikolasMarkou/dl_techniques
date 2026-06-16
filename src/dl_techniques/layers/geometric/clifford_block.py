@@ -332,6 +332,9 @@ class GatedGeometricResidual(keras.layers.Layer):
     :type layer_scale_init: float
     :param drop_path_rate: Stochastic-depth probability. Defaults to 0.0.
     :type drop_path_rate: float
+    :param use_bias: Whether the gate Dense uses an additive bias. Defaults to
+        True. Set to False for bias-free (Miyasawa-compliant) denoising blocks.
+    :type use_bias: bool
     :param kernel_initializer: Initializer for the gate kernel.
     :type kernel_initializer: Any
     :param bias_initializer: Initializer for the gate bias.
@@ -348,6 +351,7 @@ class GatedGeometricResidual(keras.layers.Layer):
         channels: int,
         layer_scale_init: float = 1e-5,
         drop_path_rate: float = 0.0,
+        use_bias: bool = True,
         kernel_initializer: Any = "glorot_uniform",
         bias_initializer: Any = "zeros",
         kernel_regularizer: Optional[Any] = None,
@@ -366,6 +370,7 @@ class GatedGeometricResidual(keras.layers.Layer):
         self.channels = channels
         self.layer_scale_init = layer_scale_init
         self.drop_path_rate = drop_path_rate
+        self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
@@ -374,7 +379,7 @@ class GatedGeometricResidual(keras.layers.Layer):
         # Learned gate: Dense(2C -> C) followed by sigmoid
         self.gate_dense = keras.layers.Dense(
             channels,
-            use_bias=True,
+            use_bias=self.use_bias,
             kernel_initializer=kernel_initializer,
             bias_initializer=bias_initializer,
             kernel_regularizer=kernel_regularizer,
@@ -464,6 +469,7 @@ class GatedGeometricResidual(keras.layers.Layer):
                 "channels": self.channels,
                 "layer_scale_init": self.layer_scale_init,
                 "drop_path_rate": self.drop_path_rate,
+                "use_bias": self.use_bias,
                 "kernel_initializer": initializers.serialize(self.kernel_initializer),
                 "bias_initializer": initializers.serialize(self.bias_initializer),
                 "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),

@@ -55,8 +55,8 @@ from dl_techniques.layers.geometric.clifford_block import (
     CliMode,
     CtxMode,
     SparseRollingGeometricProduct,
+    GatedGeometricResidual,
 )
-from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 
@@ -67,115 +67,6 @@ _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-# ===========================================================================
-# BiasFreeConditionedGGR
-# ===========================================================================
-
-
-@keras.saving.register_keras_serializable()
-class BiasFreeConditionedGGR(keras.layers.Layer):
-    """Bias-free Gated Geometric Residual with conditioning support.
-
-    Same as BiasFreeGatedGeometricResidual but the gate also receives
-    a conditioning vector when available, enabling the gate to modulate
-    the geometric features based on external context.
-
-    :param channels: Feature dimensionality D.
-    :param layer_scale_init: Initial LayerScale gamma.
-    :param drop_path_rate: Stochastic-depth probability.
-    :param kernel_initializer: Kernel initializer.
-    :param kernel_regularizer: Kernel regularizer.
-    """
-
-    def __init__(
-        self,
-        channels: int,
-        layer_scale_init: float = 1e-5,
-        drop_path_rate: float = 0.0,
-        kernel_initializer: Any = "glorot_uniform",
-        kernel_regularizer: Optional[Any] = None,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(**kwargs)
-
-        if channels <= 0:
-            raise ValueError(f"channels must be positive, got {channels}")
-
-        self.channels = channels
-        self.layer_scale_init = layer_scale_init
-        self.drop_path_rate = drop_path_rate
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-
-        self.gate_dense = keras.layers.Dense(
-            channels,
-            use_bias=False,
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
-            name="gate_dense",
-        )
-        self.drop_path = (
-            StochasticDepth(drop_path_rate=drop_path_rate, name="drop_path")
-            if drop_path_rate > 0.0
-            else None
-        )
-
-    def build(self, input_shape: Tuple) -> None:
-        self._input_shape_for_build = input_shape
-        self.gamma = self.add_weight(
-            name="gamma",
-            shape=(self.channels,),
-            initializer=initializers.Constant(self.layer_scale_init),
-            trainable=True,
-        )
-        gate_input_shape = (*input_shape[:-1], 2 * self.channels)
-        self.gate_dense.build(gate_input_shape)
-        super().build(input_shape)
-
-    def get_build_config(self) -> Dict[str, Any]:
-        if hasattr(self, "_input_shape_for_build"):
-            return {"input_shape": self._input_shape_for_build}
-        return {}
-
-    def build_from_config(self, config: Dict[str, Any]) -> None:
-        if "input_shape" in config:
-            self.build(config["input_shape"])
-
-    def call(
-        self,
-        h_norm: keras.KerasTensor,
-        g_feat: keras.KerasTensor,
-        training: Optional[bool] = None,
-    ) -> keras.KerasTensor:
-        gate_input = keras.ops.concatenate([h_norm, g_feat], axis=-1)
-        alpha = keras.activations.sigmoid(self.gate_dense(gate_input))
-        h_mix = keras.activations.silu(h_norm) + alpha * g_feat
-        h_mix = h_mix * self.gamma
-        if self.drop_path is not None:
-            h_mix = self.drop_path(h_mix, training=training)
-        return h_mix
-
-    def compute_output_shape(
-        self, input_shape: Tuple[Optional[int], ...]
-    ) -> Tuple[Optional[int], ...]:
-        return (*input_shape[:-1], self.channels)
-
-    def get_config(self) -> Dict[str, Any]:
-        config = super().get_config()
-        config.update({
-            "channels": self.channels,
-            "layer_scale_init": self.layer_scale_init,
-            "drop_path_rate": self.drop_path_rate,
-            "kernel_initializer": initializers.serialize(
-                self.kernel_initializer
-            ),
-            "kernel_regularizer": regularizers.serialize(
-                self.kernel_regularizer
-            ),
-        })
-        return config
 
 
 # ===========================================================================
@@ -319,10 +210,11 @@ class BiasFreeConditionedCliffordBlock(keras.layers.Layer):
             self.global_geo_prod = None
 
         # --- GGR gate (bias-free) ---
-        self.ggr = BiasFreeConditionedGGR(
+        self.ggr = GatedGeometricResidual(
             channels=channels,
             layer_scale_init=layer_scale_init,
             drop_path_rate=drop_path_rate,
+            use_bias=False,
             kernel_initializer=kernel_initializer,
             kernel_regularizer=kernel_regularizer,
             name="ggr",
