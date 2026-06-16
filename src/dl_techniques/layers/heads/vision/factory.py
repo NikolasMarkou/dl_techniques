@@ -168,9 +168,56 @@ class BaseVisionHead(keras.layers.Layer):
         if self.dropout_rate > 0:
             self.dropout = layers.Dropout(self.dropout_rate)
 
+    def _common_processed_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """Shape after the attention + FFN common processing.
+
+        Mirrors the ``if self.use_attention: ... if self.use_ffn: ...`` block
+        that subclass ``call()`` methods apply before their task-specific
+        layers. Used by subclass ``build()`` to propagate intermediate shapes.
+
+        :param input_shape: Input feature-map shape.
+        :return: Shape after the (optional) attention and FFN stages.
+        """
+        shape = tuple(input_shape)
+        if self.use_attention:
+            shape = tuple(self.attention.compute_output_shape(shape))
+        if self.use_ffn:
+            shape = tuple(self.ffn.compute_output_shape(shape))
+        return shape
+
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        """Build the layer."""
+        """Build the common sub-layers shared across heads.
+
+        :param input_shape: Input feature-map shape.
+        """
+        # The common layers each consume the raw input feature map.
+        self.norm.build(input_shape)
+        if self.use_attention:
+            self.attention.build(input_shape)
+        if self.use_ffn:
+            self.ffn.build(input_shape)
+        if self.dropout_rate > 0:
+            self.dropout.build(input_shape)
+
         super().build(input_shape)
+
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """Compute output shape.
+
+        The base head performs no task-specific transformation and is a
+        passthrough; concrete subclasses override this with their task-specific
+        output shape.
+
+        :param input_shape: Shape of the input feature map.
+        :return: Output shape (identical to the input for the base head).
+        """
+        return input_shape
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration."""
@@ -282,6 +329,21 @@ class DetectionHead(BaseVisionHead):
             name='reg_head'
         )
 
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build detection-specific sub-layers, then the common layers.
+
+        :param input_shape: Input feature-map shape.
+        """
+        feature_shape = self._common_processed_shape(input_shape)
+
+        self.cls_conv.build(feature_shape)
+        self.cls_head.build(self.cls_conv.compute_output_shape(feature_shape))
+
+        self.reg_conv.build(feature_shape)
+        self.reg_head.build(self.reg_conv.compute_output_shape(feature_shape))
+
+        super().build(input_shape)
+
     def call(
             self,
             inputs: keras.KerasTensor,
@@ -307,6 +369,24 @@ class DetectionHead(BaseVisionHead):
         return {
             'classifications': cls_output,
             'regressions': reg_output
+        }
+
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Dict[str, Tuple[Optional[int], ...]]:
+        """Compute output shapes for the detection head.
+
+        Spatial dimensions are preserved (all convolutions use stride 1 with
+        ``'same'`` padding); only the channel dimension changes.
+
+        :param input_shape: Shape ``(batch, height, width, channels)``.
+        :return: Dict with ``'classifications'`` and ``'regressions'`` shapes.
+        """
+        batch, height, width = input_shape[0], input_shape[1], input_shape[2]
+        return {
+            'classifications': (batch, height, width, self.num_anchors * self.num_classes),
+            'regressions': (batch, height, width, self.num_anchors * self.bbox_dims)
         }
 
     def get_config(self) -> Dict[str, Any]:
@@ -425,6 +505,48 @@ class SegmentationHead(BaseVisionHead):
             name='seg_head'
         )
 
+    def build(
+            self,
+            input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
+    ) -> None:
+        """Build refinement, upsampling and head sub-layers, then common layers.
+
+        Mirrors the shape flow of ``call()`` including skip-connection
+        concatenation for multi-scale (list) inputs.
+
+        :param input_shape: Single feature-map shape, or a list of shapes for
+            multi-scale inputs.
+        """
+        if isinstance(input_shape, list) and self.use_skip_connections:
+            base_shape = input_shape[-1]
+            skip_shapes = input_shape[:-1][::-1]
+        else:
+            base_shape = input_shape[-1] if isinstance(input_shape, list) else input_shape
+            skip_shapes = []
+
+        shape = self._common_processed_shape(base_shape)
+
+        for i, refine_block in enumerate(self.refine_blocks):
+            refine_block.build(shape)
+            shape = tuple(refine_block.compute_output_shape(shape))
+            if self.use_skip_connections and i < len(skip_shapes):
+                skip_channels = skip_shapes[i][-1]
+                merged = (
+                    shape[-1] + skip_channels
+                    if shape[-1] is not None and skip_channels is not None
+                    else None
+                )
+                shape = shape[:-1] + (merged,)
+
+        for upsample_layer in self.upsample_layers:
+            upsample_layer.build(shape)
+            shape = tuple(upsample_layer.compute_output_shape(shape))
+
+        self.seg_head.build(shape)
+
+        # Common layers operate on the single highest-level feature map.
+        super().build(base_shape)
+
     def call(
             self,
             inputs: Union[keras.KerasTensor, List[keras.KerasTensor]],
@@ -462,6 +584,27 @@ class SegmentationHead(BaseVisionHead):
         seg_output = self.seg_head(x)
 
         return seg_output
+
+    def compute_output_shape(
+            self,
+            input_shape: Union[Tuple[Optional[int], ...], List[Tuple[Optional[int], ...]]]
+    ) -> Tuple[Optional[int], ...]:
+        """Compute output shape for the segmentation head.
+
+        Each of the ``int(upsampling_factor ** 0.5)`` transposed-conv layers
+        doubles the spatial resolution; the final conv emits ``num_classes``
+        channels. Multi-scale (list) inputs use the highest-level feature map.
+
+        :param input_shape: Single feature-map shape, or a list of shapes for
+            multi-scale inputs.
+        :return: Output shape ``(batch, out_height, out_width, num_classes)``.
+        """
+        base_shape = input_shape[-1] if isinstance(input_shape, list) else input_shape
+        batch, height, width = base_shape[0], base_shape[1], base_shape[2]
+        scale = 2 ** int(self.upsampling_factor ** 0.5)
+        out_height = height * scale if height is not None else None
+        out_width = width * scale if width is not None else None
+        return (batch, out_height, out_width, self.num_classes)
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration."""
@@ -575,6 +718,23 @@ class DepthEstimationHead(BaseVisionHead):
             name='depth_head'
         )
 
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build depth-specific sub-layers, then the common layers.
+
+        :param input_shape: Input feature-map shape.
+        """
+        shape = self._common_processed_shape(input_shape)
+
+        for conv_block, upsample in self.depth_blocks:
+            conv_block.build(shape)
+            shape = tuple(conv_block.compute_output_shape(shape))
+            upsample.build(shape)
+            shape = tuple(upsample.compute_output_shape(shape))
+
+        self.depth_head.build(shape)
+
+        super().build(input_shape)
+
     def call(
             self,
             inputs: keras.KerasTensor,
@@ -612,6 +772,26 @@ class DepthEstimationHead(BaseVisionHead):
             'depth': depth,
             'confidence': depth_normalized  # Can be used as confidence
         }
+
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Dict[str, Tuple[Optional[int], ...]]:
+        """Compute output shapes for the depth-estimation head.
+
+        Three transposed-conv blocks each double the spatial resolution (×8
+        total); the final conv emits ``output_channels``. ``'depth'`` and
+        ``'confidence'`` share the same shape.
+
+        :param input_shape: Shape ``(batch, height, width, channels)``.
+        :return: Dict with ``'depth'`` and ``'confidence'`` shapes.
+        """
+        batch, height, width = input_shape[0], input_shape[1], input_shape[2]
+        scale = 8  # three transposed-conv upsamples, stride 2 each
+        out_height = height * scale if height is not None else None
+        out_width = width * scale if width is not None else None
+        shape = (batch, out_height, out_width, self.output_channels)
+        return {'depth': shape, 'confidence': shape}
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration."""
@@ -719,6 +899,34 @@ class ClassificationHead(BaseVisionHead):
             name='classifier'
         )
 
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build classification-specific sub-layers, then the common layers.
+
+        :param input_shape: Input feature-map shape.
+        """
+        shape = tuple(input_shape)
+        # Classification call() applies attention only (no FFN) before pooling.
+        if self.use_attention:
+            shape = tuple(self.attention.compute_output_shape(shape))
+
+        if self.use_global_pooling:
+            self.pooling.build(shape)
+            shape = tuple(self.pooling.compute_output_shape(shape))
+        else:
+            # call() flattens via an inline (stateless) Flatten layer.
+            flat = 1
+            for dim in shape[1:]:
+                flat = None if (dim is None or flat is None) else flat * dim
+            shape = (shape[0], flat)
+
+        for dense_block in self.dense_blocks:
+            dense_block.build(shape)
+            shape = tuple(dense_block.compute_output_shape(shape))
+
+        self.classifier.build(shape)
+
+        super().build(input_shape)
+
     def call(
             self,
             inputs: keras.KerasTensor,
@@ -749,6 +957,23 @@ class ClassificationHead(BaseVisionHead):
             'logits': logits,
             'probabilities': logits  # Softmax already applied
         }
+
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Dict[str, Tuple[Optional[int], ...]]:
+        """Compute output shapes for the classification head.
+
+        Spatial dimensions are collapsed (global pooling or flatten) and the
+        final dense layer emits ``num_classes`` logits. ``'logits'`` and
+        ``'probabilities'`` share the same shape.
+
+        :param input_shape: Shape ``(batch, height, width, channels)``.
+        :return: Dict with ``'logits'`` and ``'probabilities'`` shapes.
+        """
+        batch = input_shape[0]
+        shape = (batch, self.num_classes)
+        return {'logits': shape, 'probabilities': shape}
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration."""
@@ -855,6 +1080,24 @@ class InstanceSegmentationHead(BaseVisionHead):
             name='mask_head'
         )
 
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the detection sub-head and mask branch, then common layers.
+
+        :param input_shape: Input feature-map shape.
+        """
+        feature_shape = self._common_processed_shape(input_shape)
+
+        # Detection sub-head consumes the common-processed features.
+        self.detection_head.build(feature_shape)
+
+        shape = tuple(feature_shape)
+        for mask_conv in self.mask_conv_blocks:
+            mask_conv.build(shape)
+            shape = tuple(mask_conv.compute_output_shape(shape))
+        self.mask_head.build(shape)
+
+        super().build(input_shape)
+
     def call(
             self,
             inputs: keras.KerasTensor,
@@ -884,6 +1127,28 @@ class InstanceSegmentationHead(BaseVisionHead):
             'classifications': detection_outputs['classifications'],
             'regressions': detection_outputs['regressions'],
             'instance_masks': instance_masks
+        }
+
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Dict[str, Tuple[Optional[int], ...]]:
+        """Compute output shapes for the instance-segmentation head.
+
+        Detection branch shapes are delegated to the internal
+        :class:`DetectionHead`; the mask branch preserves spatial dimensions
+        and emits ``num_instances`` channels.
+
+        :param input_shape: Shape ``(batch, height, width, channels)``.
+        :return: Dict with ``'classifications'``, ``'regressions'`` and
+            ``'instance_masks'`` shapes.
+        """
+        batch, height, width = input_shape[0], input_shape[1], input_shape[2]
+        detection_shapes = self.detection_head.compute_output_shape(input_shape)
+        return {
+            'classifications': detection_shapes['classifications'],
+            'regressions': detection_shapes['regressions'],
+            'instance_masks': (batch, height, width, self.num_instances)
         }
 
     def get_config(self) -> Dict[str, Any]:
@@ -960,6 +1225,23 @@ class EnhancementHead(BaseVisionHead):
                 padding='same'
             )
 
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build enhancement-specific sub-layers, then the common layers.
+
+        :param input_shape: Input feature-map shape.
+        """
+        shape = tuple(input_shape)
+        for block in self.enhance_blocks:
+            block.build(shape)
+            shape = tuple(block.compute_output_shape(shape))
+
+        if self.scale_factor > 1:
+            self.upsample.build(shape)
+        else:
+            self.output_conv.build(shape)
+
+        super().build(input_shape)
+
     def call(self, inputs, training=None):
         x = inputs
 
@@ -972,6 +1254,25 @@ class EnhancementHead(BaseVisionHead):
             x = self.output_conv(x)
 
         return {'enhanced': x}
+
+    def compute_output_shape(
+            self,
+            input_shape: Tuple[Optional[int], ...]
+    ) -> Dict[str, Tuple[Optional[int], ...]]:
+        """Compute output shape for the enhancement head.
+
+        Super-resolution (``scale_factor > 1``) scales spatial dimensions by
+        ``scale_factor`` via transposed conv; otherwise the same-resolution
+        output conv preserves them. Channels become ``output_channels``.
+
+        :param input_shape: Shape ``(batch, height, width, channels)``.
+        :return: Dict with the ``'enhanced'`` output shape.
+        """
+        batch, height, width = input_shape[0], input_shape[1], input_shape[2]
+        scale = self.scale_factor if self.scale_factor > 1 else 1
+        out_height = height * scale if height is not None else None
+        out_width = width * scale if width is not None else None
+        return {'enhanced': (batch, out_height, out_width, self.output_channels)}
 
     def get_config(self):
         config = super().get_config()
@@ -1067,6 +1368,24 @@ class MultiTaskHead(keras.layers.Layer):
             else:
                 raise ValueError(f"Unsupported task type: {task_type}")
 
+    def build(
+            self,
+            input_shape: Union[Tuple[Optional[int], ...], Dict[str, Tuple[Optional[int], ...]]]
+    ) -> None:
+        """Build every task head on its (shared or per-task) input shape.
+
+        :param input_shape: Single shared feature-map shape, or a dict mapping
+            task names to per-task feature-map shapes.
+        """
+        for task_name, task_head in self.task_heads.items():
+            if isinstance(input_shape, dict):
+                task_input_shape = input_shape.get(task_name, input_shape.get('shared'))
+            else:
+                task_input_shape = input_shape
+            task_head.build(task_input_shape)
+
+        super().build(input_shape)
+
     def call(
             self,
             inputs: Union[keras.KerasTensor, Dict[str, keras.KerasTensor]],
@@ -1088,6 +1407,29 @@ class MultiTaskHead(keras.layers.Layer):
                 outputs[task_name] = task_head(inputs, training=training)
 
         return outputs
+
+    def compute_output_shape(
+            self,
+            input_shape: Union[Tuple[Optional[int], ...], Dict[str, Tuple[Optional[int], ...]]]
+    ) -> Dict[str, Any]:
+        """Compute output shapes for every task head.
+
+        Delegates to each task head's ``compute_output_shape``. A dict
+        ``input_shape`` provides per-task feature shapes (falling back to the
+        ``'shared'`` entry); a single shape is broadcast to all tasks.
+
+        :param input_shape: Single shared feature-map shape, or a dict mapping
+            task names to per-task feature-map shapes.
+        :return: Dict mapping each task name to that head's output shape.
+        """
+        output_shapes = {}
+        for task_name, task_head in self.task_heads.items():
+            if isinstance(input_shape, dict):
+                task_input_shape = input_shape.get(task_name, input_shape.get('shared'))
+            else:
+                task_input_shape = input_shape
+            output_shapes[task_name] = task_head.compute_output_shape(task_input_shape)
+        return output_shapes
 
     def get_config(self) -> Dict[str, Any]:
         """Get layer configuration."""

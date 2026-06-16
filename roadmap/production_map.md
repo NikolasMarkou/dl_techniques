@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 85 / 245 files production-verified**
+**Progress: 91 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -326,12 +326,12 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `heads/factory.py` | N/A | N/A (factory-only) |
-| `[ ]` | `heads/nlp/factory.py` | PASS | rubric-verify |
-| `[ ]` | `heads/nlp/task_types.py` | N/A | N/A (Enum / task-type config) |
-| `[ ]` | `heads/task_types.py` | N/A | N/A (Enum / task-type config) |
-| `[ ]` | `heads/vision/factory.py` | FAIL | compute_output_shape |
-| `[ ]` | `heads/vision/task_types.py` | N/A | N/A (Enum / task-type config) |
+| `[x]` | `heads/factory.py` | N/A | N/A confirmed (thin create_head dispatch facade; no layer) |
+| `[x]` | `heads/nlp/factory.py` | PASS | done: rubric-verified clean (compute_output_shape+from_config+task_config serialize on all heads; no raw-tf/print) |
+| `[x]` | `heads/nlp/task_types.py` | N/A | N/A confirmed (NLPTaskType Enum + NLPTaskConfig dataclass) |
+| `[x]` | `heads/task_types.py` | N/A | N/A confirmed (aggregator re-exporting domain enums/configs) |
+| `[x]` | `heads/vision/factory.py` | PASS | done: H7 compute_output_shape on all 8 heads + H5 explicit sublayer build (compute_output_shape bypasses call-trace → lazy builds dropped on reload) + H6 super().build() last; +tests |
+| `[x]` | `heads/vision/task_types.py` | N/A | N/A confirmed (VisionTaskType Enum + TaskConfiguration/helpers) |
 
 ### Round 13 — attention/ re-audit (1/3)  (10 files)
 
