@@ -326,15 +326,30 @@ def _b_gpt2():
 _reg("gpt2", "RUN", _b_gpt2, lambda m: m(_tokens(vocab=256), training=False), "tiny")
 
 
-# --- hierarchical_reasoning_model (DEAD) -----------------------------------
+# --- hierarchical_reasoning_model ------------------------------------------
 def _b_hrm():
     from dl_techniques.models.hierarchical_reasoning_model.model import (
         HierarchicalReasoningModel,
     )
-    return HierarchicalReasoningModel.from_variant("tiny")
-_reg("hierarchical_reasoning_model", "XFAIL", _b_hrm,
-     lambda m: m(_tokens(vocab=256), training=False),
-     "DEAD: None->tensor bug in call() (SYSTEM.md)")
+    # from_variant requires vocab_size + seq_len (no defaults); seq_len=16
+    # matches _tokens default s=16. tiny sets halt_max_steps=6 so the ACT
+    # halt loop iterates (outputs is never None).
+    return HierarchicalReasoningModel.from_variant(
+        "tiny", vocab_size=256, seq_len=16, num_puzzle_identifiers=8
+    )
+def _f_hrm(m):
+    # call() dispatches on isinstance(inputs, dict); requires keys
+    # token_ids (B, seq_len) int + puzzle_ids (B,) int (model.py:541,641-642).
+    return m({"token_ids": _tokens(vocab=256, s=16),
+              "puzzle_ids": np.zeros((2,), dtype=np.int32)},
+             training=False)
+_reg("hierarchical_reasoning_model", "XFAIL", _b_hrm, _f_hrm,
+     "MODEL BUG: _forward_step calls core.reset_carry() BEFORE core(...), "
+     "so HierarchicalReasoningCore.build() never ran and self.h_init/l_init "
+     "are None (model.py:627 vs 639; hrm_reasoning_core.py:484). Needs a "
+     "model build() override (build the core first) — not a recipe fix. "
+     "Recipe (dict {token_ids,puzzle_ids} + from_variant vocab/seq_len) is "
+     "now correct; this XFAIL surfaces the real ordering bug.")
 
 
 # --- ideogram4 -------------------------------------------------------------
