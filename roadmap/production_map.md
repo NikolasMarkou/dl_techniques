@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 161 / 245 files production-verified**
+**Progress: 169 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -447,14 +447,14 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `ffn/logic_ffn.py` | FAIL | super_build_last |
-| `[ ]` | `ffn/mlp.py` | PASS | rubric-verify |
-| `[ ]` | `ffn/orthoglu_ffn.py` | PASS | rubric-verify |
-| `[ ]` | `ffn/power_mlp_layer.py` | FAIL | super_build_last |
-| `[ ]` | `ffn/residual_block.py` | PASS | rubric-verify |
-| `[ ]` | `ffn/swiglu_ffn.py` | PASS | rubric-verify |
-| `[ ]` | `ffn/swin_mlp.py` | PASS | rubric-verify |
-| `[ ]` | `ffn/tversky_projection.py` | PASS | rubric-verify |
+| `[x]` | `ffn/logic_ffn.py` | PASS | done: H6 (logger before super().build()); existing test passes |
+| `[x]` | `ffn/mlp.py` | PASS | done: rubric-verified clean |
+| `[x]` | `ffn/orthoglu_ffn.py` | PASS | done: rubric-verified clean |
+| `[x]` | `ffn/power_mlp_layer.py` | PASS | done: H6 (logger before super().build()); existing test passes |
+| `[x]` | `ffn/residual_block.py` | PASS | done: rubric-verified clean |
+| `[x]` | `ffn/swiglu_ffn.py` | PASS | done: rubric-verified clean |
+| `[x]` | `ffn/swin_mlp.py` | PASS | done: clean (fc2 deferred to build — runtime input-dim dependency when output_dim=None; guarded+explicitly built, round-trips) |
+| `[x]` | `ffn/tversky_projection.py` | PASS | done: rubric-verified clean (add_weight-only; init via keras.*.get) |
 
 ### Round 22 — norms/ re-audit (1/2)  (7 files)
 

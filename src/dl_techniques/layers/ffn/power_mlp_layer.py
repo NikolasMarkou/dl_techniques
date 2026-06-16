@@ -276,10 +276,10 @@ class PowerMLPLayer(keras.layers.Layer):
         # basis_function output shape is the same as input shape
         self.basis_dense.build(input_shape)
 
+        logger.debug(f"Built PowerMLP layer with input shape: {input_shape}")
+
         # Always call parent build at the end
         super().build(input_shape)
-
-        logger.debug(f"Built PowerMLP layer with input shape: {input_shape}")
 
     def call(
             self,

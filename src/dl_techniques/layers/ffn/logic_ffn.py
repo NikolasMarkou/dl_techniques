@@ -281,13 +281,13 @@ class LogicFFN(keras.layers.Layer):
         logic_output_shape = tuple(list(input_shape[:-1]) + [self.logic_dim])
         self.output_projection.build(logic_output_shape)
 
-        # Always call parent build at the end
-        super().build(input_shape)
-
         logger.info(
             f"Built LogicFFN: input_dim={input_dim}, "
             f"logic_dim={self.logic_dim}, output_dim={self.output_dim}"
         )
+
+        # Always call parent build at the end
+        super().build(input_shape)
 
     def call(
             self,
