@@ -113,6 +113,32 @@ Bias-free Conv1D/Conv2D, BitLinear, BLT blocks/core, Canny edge detection, capsu
 - All layers must implement `get_config()` for Keras serialization
 - Layers follow Keras 3 custom layer patterns: `__init__`, `build`, `call`, `get_config`
 
+## Layer Reuse Policy (factory-first)
+
+> **Before implementing ANY new layer, you MUST first check for an existing one to reuse.** Authoring a bespoke layer is the last resort, not the first move — this package already ships a large, tested layer surface.
+
+Check in this precedence order; only proceed to the next step when nothing fits:
+
+1. **The relevant domain factory** — each factory exposes a `create_*_layer()` entry point backed by a registry of named types. Pass a `type` string + config; do not hand-roll what a factory already builds.
+
+   | Domain | Factory entry point | Registered types |
+   |--------|---------------------|------------------|
+   | Normalization | `create_normalization_layer()` in `norms/factory.py` | ~16 |
+   | Attention | `create_attention_layer()` in `attention/factory.py` | ~29 |
+   | FFN / MLP | `create_ffn_layer()` in `ffn/factory.py` | ~15 |
+   | Embeddings | `create_embedding_layer()` in `embedding/factory.py` | ~13 |
+   | Activations | `create_activation_layer()` in `activations/factory.py` | ~22 |
+   | Mixtures | `create_mixture_layer()` in `mixtures/factory.py` | RBF / KMeans / GMM |
+   | Memory | `create_mann()` / `create_som_2d()` in `memory/factory.py` | n/a |
+   | Task heads | `create_head(domain, ...)` in `heads/factory.py` (NLP / vision / VLM) | n/a |
+   | Transformer blocks | `TransformerLayer` in `transformers/transformer.py` (direct import) | n/a |
+
+   > **Note on transformer blocks**: `transformers/` has no `create_*_layer` factory. Use `TransformerLayer` directly — it is highly configurable (selectable attention / FFN / normalization types and normalization position via its config) and composes the domain factories above internally, so it covers most cases without a custom block. The package also offers higher-level `create_*_encoder` builders (`transformers/vision_encoder.py`, `transformers/text_encoder.py`).
+
+2. **An existing standalone layer** — if no factory covers your need, search the subpackages and the top-level Standalone Layers list above before writing your own. The reuse surface is broad; a close match often already exists.
+
+3. **Only then, a new custom layer** — if nothing above fits, implement it following `research/2026_keras_custom_models_instructions.md` (full serialization, `build`, `get_config`, tests). Place it in the appropriate domain subpackage and, where that domain has a `factory.py`, register it there so the next author can reuse it via the factory too.
+
 ## Testing
 
 Tests in `tests/test_layers/` organized by subdomain (attention, embeddings, ffn, norms, graphs, moe, etc.).
