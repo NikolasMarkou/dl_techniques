@@ -320,7 +320,7 @@ class NAM(keras.Model):
 
         is_last_step = ops.greater_equal(steps, self.config.halt_max_steps)
 
-        if training:
+        if training is True:
             halt_signal = ops.greater(q_halt, ops.cast(0.0, q_halt.dtype))
             new_halted = ops.logical_or(is_last_step, halt_signal)
 

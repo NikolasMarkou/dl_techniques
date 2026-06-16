@@ -450,7 +450,7 @@ class NAMCell(keras.layers.Layer):
         # Select arithmetic output:
         # - Training: soft-select (differentiable, gradients flow to op_classifier)
         # - Inference: hard-select (argmax, exact operation, no blending)
-        if training:
+        if training is True:
             op_weights = ops.expand_dims(op_probs, axis=-1)  # (B, 4, 1)
             result = ops.sum(all_results * op_weights, axis=1)  # (B, 1)
             valid = ops.sum(all_valid * op_weights, axis=1)  # (B, 1)
@@ -539,6 +539,50 @@ class NAMCell(keras.layers.Layer):
             "reduction_weights": reduction_weights,  # (B, L) sub-expression focus
         }
 
+        return new_carry, outputs
+
+    def compute_output_shape(self, input_shape: Any) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """
+        Return the ``(new_carry, outputs)`` shape structure.
+
+        Shapes are derived entirely from construction-time config (hidden_size
+        ``D``, memory_size ``M``, max_expression_len ``L``, num_read_heads) and
+        the batch axis ``B`` taken from the hidden-state input; they never
+        depend on ``training`` (the soft/hard op-select branch produces the same
+        ``result``/``valid`` shapes either way).
+
+        :param input_shape: Tuple of (carry, hidden, mask, token_ids) shapes.
+            ``B`` is read from the hidden-state shape ``(B, L, D)``.
+        """
+        h = self.config.hidden_size
+        m = self.config.memory_size
+        seq = self.config.max_expression_len
+        # input_shape mirrors call() inputs: (carry, hidden, mask, token_ids)
+        hidden_shape = input_shape[1]
+        b = hidden_shape[0]
+
+        new_carry = {
+            "memory": (b, m, h),
+            "memory_usage": (b, m),
+            "read_weights": [(b, m) for _ in range(self.config.num_read_heads)],
+            "write_weights": (b, m),
+            "accumulated_result": (b, 1),
+            "accumulated_valid": (b, 1),
+            "steps": (b,),
+        }
+        outputs = {
+            "result": (b, 1),
+            "valid": (b, 1),
+            "op_logits": (b, 4),
+            "q_halt": (b,),
+            "q_continue": (b,),
+            "hidden": (b, seq, h),
+            "break_prob": (b, seq, seq),
+            "group_prob": (b, seq, seq),
+            "left_val": (b, 1),
+            "right_val": (b, 1),
+            "reduction_weights": (b, seq),
+        }
         return new_carry, outputs
 
     def get_config(self) -> Dict[str, Any]:

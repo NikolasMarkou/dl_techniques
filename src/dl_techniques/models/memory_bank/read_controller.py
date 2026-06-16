@@ -409,6 +409,21 @@ class MemoryReadController(keras.layers.Layer):
 
         return injection
 
+    def compute_output_shape(
+        self, input_shape: Tuple[Optional[int], ...],
+    ) -> Tuple[Optional[int], ...]:
+        """Return the gated-injection output shape ``(B, T, embed_dim)``.
+
+        Although ``call`` takes seven positional tensors, ``build`` and the
+        Keras shape machinery only thread the primary input ``x_r`` of shape
+        ``(B, T, D)``. The returned injection ``g * V_proj`` has the same
+        ``(B, T)`` prefix as ``x_r`` and last axis ``embed_dim`` (W_out
+        projects head-concat -> embed_dim), independent of ``training``.
+
+        :param input_shape: Shape of ``x_r``, ``(B, T, D)``.
+        """
+        return (input_shape[0], input_shape[1], self.embed_dim)
+
     # ------------------------------------------------------------------
     # Aux losses (Step 4)
     # ------------------------------------------------------------------

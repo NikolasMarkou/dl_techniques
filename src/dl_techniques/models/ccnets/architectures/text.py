@@ -445,7 +445,7 @@ class ARSentimentProducer(keras.Model):
 
         # Word dropout: replace some context tokens with <oov> (id 2) so the
         # decoder cannot ignore (Y, E) and simply copy the surrounding text.
-        if training:
+        if training is True:
             drop = keras.random.uniform(keras.ops.shape(context_ids)) \
                 < self.config.producer_word_dropout
             context_ids = keras.ops.where(

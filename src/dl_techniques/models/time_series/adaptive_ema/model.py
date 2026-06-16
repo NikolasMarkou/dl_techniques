@@ -312,7 +312,7 @@ class AdaptiveEMASlopeFilterModel(keras.Model):
         # membership functions. Temperature ``T`` (``slope_softness``) is a
         # configurable scalar > 0.
         T = ops.cast(self.slope_softness, slope.dtype)
-        if training:
+        if training is True:
             signal_above = ops.sigmoid((slope - upper) / T)
             signal_below = ops.sigmoid((lower - slope) / T)
             signal_between = (
