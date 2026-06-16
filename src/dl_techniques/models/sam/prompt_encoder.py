@@ -479,17 +479,27 @@ class PromptEncoder(layers.Layer):
         """
         # Add 0.5 for pixel center offset
         boxes = boxes + 0.5
-        # Reshape to (batch_size, num_boxes*2, 2) for corner coordinates
-        coords = ops.reshape(boxes, (-1, 2, 2))
+        # DECISION plan_2026-06-15_e6a0391c/D-007: reshape must PRESERVE the batch
+        # axis. The old `reshape(boxes, (-1, 2, 2))` collapsed batch*num_boxes into
+        # the leading dim, returning (B*N, 2, D) instead of (B, 2N, D) — which
+        # crashed the axis-1 concat in call() for N>1 (batch B vs B*N) and only
+        # happened to work for N==1. Split each (x1,y1,x2,y2) box into its two
+        # corners while keeping (B, 2N, 2): order is [tl0, br0, tl1, br1, ...].
+        batch_size = ops.shape(boxes)[0]
+        num_boxes = ops.shape(boxes)[1]
+        coords = ops.reshape(boxes, (batch_size, num_boxes * 2, 2))
 
-        # Get positional encoding for corner coordinates
+        # Get positional encoding for corner coordinates -> (B, 2N, D)
         corner_embedding = self.pe_layer.forward_with_coords(coords, self.input_image_size)
 
-        # Add type embeddings: embedding[2] for top-left, embedding[3] for bottom-right
-        corner_embedding = ops.concatenate([
-            corner_embedding[:, 0:1, :] + self.point_embeddings[2].weights[0],
-            corner_embedding[:, 1:2, :] + self.point_embeddings[3].weights[0]
-        ], axis=1)
+        # Add per-corner type embeddings, alternating top-left / bottom-right for
+        # each box: [emb2, emb3, emb2, emb3, ...] of length 2N, broadcast over batch.
+        type_pair = ops.concatenate([
+            self.point_embeddings[2].weights[0],   # (1, D) top-left
+            self.point_embeddings[3].weights[0],   # (1, D) bottom-right
+        ], axis=0)                                 # (2, D)
+        type_embeddings = ops.tile(type_pair, [num_boxes, 1])      # (2N, D)
+        corner_embedding = corner_embedding + ops.expand_dims(type_embeddings, 0)
         return corner_embedding
 
     def _embed_masks(self, masks: keras.KerasTensor) -> keras.KerasTensor:

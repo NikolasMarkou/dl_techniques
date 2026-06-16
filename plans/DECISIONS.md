@@ -80,6 +80,13 @@
 **Reasoning**: 4-line fix; resolved the entire residual chain (forward now returns finite masks/iou). Two ADJACENT items left documented-not-fixed: SAM has no `build()` (cosmetic symbolic-trace UserWarning, non-fatal) and `prompt_encoder._embed_boxes` reshape+type-embedding assume exactly 2 corners (latent multi-box bug, not hit by single-box smoke test; proper fix is a real rework, not 2 lines).
 **Anchor-Refs**: `src/dl_techniques/models/sam/mask_decoder.py:~425`
 
+### D-007 | POST-CLOSE follow-up (sam prompt-encoder multi-box) | 2026-06-16
+**Context**: `PromptEncoder._embed_boxes` reshaped boxes `(B,N,4)` via `reshape(-1,2,2)`, collapsing batch*num_boxes into the leading axis → returned `(B*N, 2, D)` instead of the documented `(B, 2N, D)`; the corner type-embedding concat also hard-coded exactly 2 corners. For N=1 this accidentally worked; for N>1 the axis-1 concat in `call()` crashed (batch B vs B*N), so multi-box prompts were unusable.
+**Decision**: Reshape preserving batch → `(B, 2N, 2)`; positional-encode → `(B, 2N, D)`; add an alternating `[tl,br,…]` type-embedding of length `2N` built via `tile`, broadcast over batch.
+**Trade-off**: Correct arbitrary-N multi-box support **at the cost of** nothing — output is byte-identical for N=1 (regression-safe), no new weights, graph-safe.
+**Reasoning**: Verified by a dedicated repro: multi-box `(2,3,4)`→`(2,6,D)` finite; per-box independence (perturbing box k changes only box k's slice); batch independence; N=1 unchanged; full SAM still forwards. ~10 lines.
+**Anchor-Refs**: `src/dl_techniques/models/sam/prompt_encoder.py:~483`
+
 ## plan_2026-06-15_e2759fbc
 ### D-001 | EXPLORE → PLAN | YYYY-MM-DD
 **Context**: <one-paragraph background — what was discovered in EXPLORE>
