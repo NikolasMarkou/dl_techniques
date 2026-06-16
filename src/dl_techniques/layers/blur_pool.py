@@ -102,10 +102,11 @@ class BlurPool2D(keras.layers.Layer):
             trainable=False,
         )
 
-        super().build(input_shape)
         logger.debug(
             f"BlurPool2D built: channels={channels}, strides={self.strides}"
         )
+
+        super().build(input_shape)
 
     def call(self, inputs: Any, training: Optional[bool] = None) -> Any:
         return ops.nn.depthwise_conv(

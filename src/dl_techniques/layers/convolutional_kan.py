@@ -299,8 +299,9 @@ class KANvolution(keras.layers.Layer):
         )
         self.grid.assign(grid_values)
 
-        super().build(input_shape)
         logger.info("KANvolution layer built successfully")
+
+        super().build(input_shape)
 
     def _compute_bspline_basis(self, x: keras.KerasTensor) -> keras.KerasTensor:
         """Compute linear B-spline basis functions for input values.

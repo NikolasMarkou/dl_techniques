@@ -78,7 +78,7 @@ References:
 
 import math
 import keras
-from typing import Optional, Union
+from typing import Optional, Union, Dict, Any, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
@@ -280,7 +280,7 @@ class ByteLatentReasoningCore(keras.layers.Layer):
         self.reasoning_to_byte_proj = None
         self.entropy_to_reasoning_proj = None
 
-    def build(self, input_shape):
+    def build(self, input_shape: Dict[str, Any]) -> None:
         """Build the model components."""
         # Byte processing components
         self.tokenizer = ByteTokenizer(
@@ -454,7 +454,13 @@ class ByteLatentReasoningCore(keras.layers.Layer):
 
         super().build(input_shape)
 
-    def _create_reasoning_embeddings(self, byte_tokens, puzzle_ids, patch_representations, entropy_values):
+    def _create_reasoning_embeddings(
+            self,
+            byte_tokens: keras.KerasTensor,
+            puzzle_ids: keras.KerasTensor,
+            patch_representations: keras.KerasTensor,
+            entropy_values: keras.KerasTensor
+    ) -> keras.KerasTensor:
         """Create input embeddings for reasoning modules."""
         batch_size = keras.ops.shape(byte_tokens)[0]
 
@@ -500,7 +506,7 @@ class ByteLatentReasoningCore(keras.layers.Layer):
         # Scale embeddings
         return self.embed_scale * patch_reasoning
 
-    def empty_carry(self, batch_size):
+    def empty_carry(self, batch_size: int) -> Dict[str, keras.KerasTensor]:
         """Create empty carry state for byte-level reasoning."""
         return {
             "z_h": keras.ops.zeros((batch_size, self.max_patches, self.embed_dim)),
@@ -509,7 +515,11 @@ class ByteLatentReasoningCore(keras.layers.Layer):
             "entropy_state": keras.ops.zeros((batch_size, self.seq_len))
         }
 
-    def reset_carry(self, reset_flag, carry):
+    def reset_carry(
+            self,
+            reset_flag: keras.KerasTensor,
+            carry: Dict[str, keras.KerasTensor]
+    ) -> Dict[str, keras.KerasTensor]:
         """Reset carry state for halted sequences."""
         batch_size = keras.ops.shape(reset_flag)[0]
 
@@ -543,7 +553,12 @@ class ByteLatentReasoningCore(keras.layers.Layer):
             "entropy_state": new_entropy_state
         }
 
-    def call(self, carry, inputs, training=None):
+    def call(
+            self,
+            carry: Dict[str, keras.KerasTensor],
+            inputs: Dict[str, keras.KerasTensor],
+            training: Optional[bool] = None
+    ) -> Tuple[Dict[str, keras.KerasTensor], Dict[str, keras.KerasTensor]]:
         """
         Forward pass through the byte latent hierarchical reasoning core.
 
@@ -651,7 +666,10 @@ class ByteLatentReasoningCore(keras.layers.Layer):
 
         return new_carry, outputs
 
-    def compute_output_shape(self, input_shape):
+    def compute_output_shape(
+            self,
+            input_shape: Dict[str, Any]
+    ) -> Dict[str, Tuple[Optional[int], ...]]:
         """Compute output shapes."""
         batch_size = input_shape.get("byte_tokens", [None])[0]
         return {
@@ -662,7 +680,7 @@ class ByteLatentReasoningCore(keras.layers.Layer):
             "patch_lengths": (batch_size, self.max_patches)
         }
 
-    def get_config(self):
+    def get_config(self) -> Dict[str, Any]:
         """Get layer configuration."""
         config = super().get_config()
         config.update({

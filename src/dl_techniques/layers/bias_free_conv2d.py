@@ -327,6 +327,7 @@ class BiasFreeResidualBlock(keras.layers.Layer):
         self.filters = filters
         self.kernel_size = kernel_size
         self.activation = activation
+        self.use_batch_norm = use_batch_norm
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
@@ -338,7 +339,7 @@ class BiasFreeResidualBlock(keras.layers.Layer):
             activation=self.activation,
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
-            use_batch_norm=use_batch_norm,
+            use_batch_norm=self.use_batch_norm,
             name=f'{self.name}_conv1'
         )
 
@@ -349,7 +350,7 @@ class BiasFreeResidualBlock(keras.layers.Layer):
             activation=None,  # No activation before addition
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
-            use_batch_norm=use_batch_norm,
+            use_batch_norm=self.use_batch_norm,
             name=f'{self.name}_conv2'
         )
 
@@ -475,6 +476,7 @@ class BiasFreeResidualBlock(keras.layers.Layer):
             'activation': keras.activations.serialize(
                 keras.activations.get(self.activation)
             ),
+            'use_batch_norm': self.use_batch_norm,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
         })

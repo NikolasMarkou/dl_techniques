@@ -179,10 +179,10 @@ class PrimaryCapsule(keras.layers.Layer):
         )
         self.squash_layer.build(squash_input_shape)
 
-        super().build(input_shape)
-
         logger.info(f"Built PrimaryCapsule layer: {self.num_capsules} capsules, "
                    f"{self.dim_capsules} dimensions each")
+
+        super().build(input_shape)
 
     def call(
         self,
@@ -404,10 +404,10 @@ class RoutingCapsule(keras.layers.Layer):
         squash_input_shape = (input_shape[0], 1, self.num_capsules, self.dim_capsules, 1)
         self.squash_layer.build(squash_input_shape)
 
-        super().build(input_shape)
-
         logger.info(f"Built RoutingCapsule layer: {self.num_input_capsules} -> {self.num_capsules} capsules, "
                    f"{self.routing_iterations} routing iterations")
+
+        super().build(input_shape)
 
     def call(
         self,
@@ -671,10 +671,10 @@ class CapsuleBlock(keras.layers.Layer):
                 "subspace only (see DECISION D-002)."
             )
 
-        super().build(input_shape)
-
         logger.info(f"Built CapsuleBlock: {self.num_capsules} capsules, "
                    f"dropout={self.dropout_rate}, layer_norm={self.use_layer_norm}")
+
+        super().build(input_shape)
 
     def call(
         self,

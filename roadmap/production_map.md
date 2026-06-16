@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 204 / 245 files production-verified**
+**Progress: 212 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -520,16 +520,16 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `bias_free_conv1d.py` | PASS | rubric-verify |
-| `[ ]` | `bias_free_conv2d.py` | PASS | rubric-verify |
-| `[ ]` | `blt_core.py` | PASS | rubric-verify |
-| `[ ]` | `blur_pool.py` | FAIL | super_build_last |
-| `[ ]` | `canny.py` | FAIL | forward-raw-tf (DEEP gap — see §5) |
-| `[ ]` | `capsules.py` | FAIL | super_build_last |
-| `[ ]` | `complex_layers.py` | FAIL | compute_output_shape + forward-raw-tf (DEEP gap — see §5) |
-| `[ ]` | `convnext_v1_block.py` | PASS | CANONICAL EXEMPLAR — confirm still full-PASS |
-| `[ ]` | `convnext_v2_block.py` | PASS | rubric-verify |
-| `[ ]` | `convolutional_kan.py` | FAIL | super_build_last |
+| `[x]` | `bias_free_conv1d.py` | PASS | done: clean (shortcut_conv is build-time-dim dependent — accepted, built in build(); conv training-invariant) |
+| `[x]` | `bias_free_conv2d.py` | PASS | done: H3+H8 fixed real bug — `use_batch_norm` was dropped (not stored/not in get_config → silent default on reload); +existing test passes |
+| `[x]` | `blt_core.py` | PASS | done: H12 type hints on build/call/compute_output_shape/get_config/empty_carry/reset_carry/_create_reasoning_embeddings; initializers round-trip via child layers; existing test round-trips |
+| `[x]` | `blur_pool.py` | PASS | done: H6 (logger before super().build()) |
+| `[~]` | `canny.py` | FAIL→DEFERRED | DEEP: `tf.nn.dilation2d` (directional NMS) + `tf.while_loop` (hysteresis) in call(); keras.ops has NO morphological-dilation equivalent — see §5. Accepted-exception candidate like lagrange_layer; needs user decision |
+| `[x]` | `capsules.py` | PASS | done: H6 ×3 (PrimaryCapsule/RoutingCapsule/CapsuleBlock — logger before super().build()) |
+| `[~]` | `complex_layers.py` | FAIL→DEFERRED | DEEP: `tf.complex`/`complex64` dtype in call() across 4 layers; keras.ops has real/imag but NO complex constructor/dtype — see §5. Full fix needs split-real/imag rearchitecture; needs user decision |
+| `[x]` | `convnext_v1_block.py` | PASS | done: CANONICAL EXEMPLAR re-confirmed fully compliant (H3/H5/H8/H9/H10/H11/H12/H13) |
+| `[x]` | `convnext_v2_block.py` | PASS | done: rubric-verified clean |
+| `[x]` | `convolutional_kan.py` | PASS | done: H6 (logger before super().build()) |
 
 ### Round 28 — tested root-level files re-audit (2/5)  (10 files)
 
