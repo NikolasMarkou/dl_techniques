@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 145 / 245 files production-verified**
+**Progress: 153 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -421,14 +421,14 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `activations/mish.py` | PASS | rubric-verify |
-| `[ ]` | `activations/monotonicity_layer.py` | PASS | rubric-verify |
-| `[ ]` | `activations/probability_output.py` | PASS | rubric-verify |
-| `[ ]` | `activations/relu_k.py` | PASS | rubric-verify |
-| `[ ]` | `activations/routing_probabilities.py` | FAIL | super_build_last |
-| `[ ]` | `activations/sparsemax.py` | PASS | rubric-verify |
-| `[ ]` | `activations/squash.py` | PASS | rubric-verify |
-| `[ ]` | `activations/thresh_max.py` | PASS | rubric-verify |
+| `[x]` | `activations/mish.py` | PASS | done: rubric-verified clean (Mish + SaturatedMish) |
+| `[x]` | `activations/monotonicity_layer.py` | PASS | done: rubric-verified clean |
+| `[x]` | `activations/probability_output.py` | PASS | done: rubric-verified clean (strategy_layer built; type_config serialize/from_config) |
+| `[x]` | `activations/relu_k.py` | PASS | done: rubric-verified clean (H4 type+value validation); +new test |
+| `[x]` | `activations/routing_probabilities.py` | PASS | done: H6 (super().build() moved to end; M7 early-build was traceback-only; routing save/load FuncGraph tests pass) |
+| `[x]` | `activations/sparsemax.py` | PASS | done: rubric-verified clean (H4 axis validation); +new test |
+| `[x]` | `activations/squash.py` | PASS | done: H4 (axis/epsilon validation added); +new test |
+| `[x]` | `activations/thresh_max.py` | PASS | done: rubric-verified clean (init/reg/constraint via keras.*.get) |
 
 ### Round 20 — ffn/ re-audit (1/2)  (8 files)
 

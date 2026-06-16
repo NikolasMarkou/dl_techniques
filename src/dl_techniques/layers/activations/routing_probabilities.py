@@ -503,9 +503,6 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
 
         # Stash shape so get_build_config() can return it for save/load.
         self._build_input_shape = tuple(input_shape)
-        # M7: mark layer built before creating weights so error tracebacks
-        # surface from add_weight, not from "layer not built" downstream.
-        super().build(input_shape)
 
         # Normalize axis
         input_rank = len(input_shape)
@@ -647,6 +644,8 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         self._mask_mul_np, self._mask_add_np = _compute_validity_masks(
             self.output_dim, self.padded_output_dim
         )
+
+        super().build(input_shape)
 
     def call(
             self,

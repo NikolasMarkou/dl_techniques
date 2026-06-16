@@ -136,6 +136,12 @@ class SquashLayer(keras.layers.Layer):
         """
         super().__init__(**kwargs)
 
+        # Validate configuration
+        if not isinstance(axis, int):
+            raise ValueError(f"axis must be an integer, got {type(axis).__name__}")
+        if epsilon is not None and epsilon <= 0:
+            raise ValueError(f"epsilon must be positive, got {epsilon}")
+
         # Store configuration
         self.axis = axis
         self.epsilon = epsilon if epsilon is not None else backend.epsilon()
