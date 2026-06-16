@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 75 / 245 files production-verified**
+**Progress: 85 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -311,16 +311,16 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `logic/arithmetic_operators.py` | PASS | rubric-verify |
-| `[ ]` | `logic/factory.py` | N/A | N/A (factory-only — human re-check for inline layers) |
-| `[ ]` | `logic/logic_operators.py` | PASS | rubric-verify |
-| `[ ]` | `logic/neural_circuit.py` | PASS | rubric-verify |
-| `[ ]` | `reasoning/hrm_reasoning_core.py` | PASS | rubric-verify |
-| `[ ]` | `reasoning/hrm_reasoning_module.py` | PASS | rubric-verify |
-| `[ ]` | `reasoning/hrm_sparse_puzzle_embedding.py` | PASS | rubric-verify |
-| `[ ]` | `geometric/clifford_block.py` | PASS | rubric-verify |
-| `[ ]` | `geometric/point_cloud_autoencoder.py` | PASS | rubric-verify |
-| `[ ]` | `geometric/supernode_pooling.py` | PASS | rubric-verify |
+| `[x]` | `logic/arithmetic_operators.py` | PASS | done: clean (no raw-tf/reg/print); existing test passes |
+| `[x]` | `logic/factory.py` | N/A | N/A confirmed (create_logic_layer / create_logic_from_config functions only — no inline layers) |
+| `[x]` | `logic/logic_operators.py` | PASS | done: clean; existing test passes |
+| `[x]` | `logic/neural_circuit.py` | PASS | done: clean; existing test passes |
+| `[x]` | `reasoning/hrm_reasoning_core.py` | PASS | done: clean; existing test passes |
+| `[x]` | `reasoning/hrm_reasoning_module.py` | PASS | done: clean; existing test passes |
+| `[x]` | `reasoning/hrm_sparse_puzzle_embedding.py` | PASS | done: clean; existing test passes |
+| `[x]` | `geometric/clifford_block.py` | PASS | done: clean (7 layers, all direct Layer subclasses); existing tests pass |
+| `[x]` | `geometric/point_cloud_autoencoder.py` | PASS | done: clean; existing test passes |
+| `[x]` | `geometric/supernode_pooling.py` | PASS | done: clean; existing test passes |
 
 ### Round 12 — heads/ remaining (nlp / vision / root, NEEDS-AUDIT)  (6 files)
 
