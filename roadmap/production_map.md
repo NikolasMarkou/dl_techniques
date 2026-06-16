@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 91 / 245 files production-verified**
+**Progress: 101 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -337,16 +337,16 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `attention/anchor_attention.py` | PASS | rubric-verify |
-| `[ ]` | `attention/attention_routing_capsule.py` | FAIL | super_build_last |
-| `[ ]` | `attention/capsule_routing_attention.py` | PASS | rubric-verify |
-| `[ ]` | `attention/channel_attention.py` | PASS | rubric-verify |
-| `[ ]` | `attention/convolutional_block_attention.py` | PASS | rubric-verify |
-| `[ ]` | `attention/differential_attention.py` | PASS | rubric-verify |
-| `[ ]` | `attention/factory.py` | N/A | N/A (factory-only) |
-| `[ ]` | `attention/fnet_fourier_transform.py` | PASS | rubric-verify |
-| `[ ]` | `attention/gated_attention.py` | PASS | rubric-verify |
-| `[ ]` | `attention/group_query_attention.py` | PASS | rubric-verify |
+| `[x]` | `attention/anchor_attention.py` | PASS | done: rubric-verified clean (H3/H5/H8/H9/H11 all good) |
+| `[x]` | `attention/attention_routing_capsule.py` | PASS | done: H6 (logger before super().build()); existing test passes |
+| `[x]` | `attention/capsule_routing_attention.py` | PASS | done: clean (activity_regularizer round-trips via base Layer.get_config) |
+| `[x]` | `attention/channel_attention.py` | PASS | done: rubric-verified clean |
+| `[x]` | `attention/convolutional_block_attention.py` | PASS | done: rubric-verified clean (CBAM) |
+| `[x]` | `attention/differential_attention.py` | PASS | done: clean (activity_regularizer via base) |
+| `[x]` | `attention/factory.py` | N/A | N/A confirmed (create_attention_layer registry/factory fns) |
+| `[x]` | `attention/fnet_fourier_transform.py` | PASS | done: rubric-verified clean (parameter-free DFT layer) |
+| `[x]` | `attention/gated_attention.py` | PASS | done: rubric-verified clean |
+| `[x]` | `attention/group_query_attention.py` | PASS | done: H12 (_apply_mask type hints); existing test passes |
 
 ### Round 14 — attention/ re-audit (2/3)  (10 files)
 

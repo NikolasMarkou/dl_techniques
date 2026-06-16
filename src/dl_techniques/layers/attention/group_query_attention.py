@@ -487,7 +487,11 @@ class GroupedQueryAttention(keras.layers.Layer):
             return output, attention_weights
         return output
 
-    def _apply_mask(self, scores, mask):
+    def _apply_mask(
+            self,
+            scores: keras.KerasTensor,
+            mask: keras.KerasTensor
+    ) -> keras.KerasTensor:
         """Broadcast and apply attention mask to scores.
 
         :param scores: Attention scores of shape ``(B, H, S, S)``.

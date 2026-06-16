@@ -220,12 +220,13 @@ class AttentionRoutingCapsule(keras.layers.Layer):
 
         self.prob_head.build((None, self.num_capsules, self.dim_capsules))
 
-        super().build(input_shape)
         logger.info(
             f"Built AttentionRoutingCapsule: {self.num_input_capsules} -> "
             f"{self.num_capsules} capsules, softmax_axis={self.softmax_axis}, "
             f"top_k={self.top_k}, use_load_balancing={self.use_load_balancing}"
         )
+
+        super().build(input_shape)
 
     # ------------------------------------------------------------------
     def _apply_top_k_mask(
