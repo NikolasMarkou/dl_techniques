@@ -134,7 +134,7 @@ class FastVLM(keras.Model):
             num_classes=1000,
             embed_dims=[128, 256, 512],
             depths=[4, 6, 8],
-            attention_type='window_attention',
+            attention_type='window',
             num_heads=[4, 8, 16],
             mlp_ratio=6.0,
             use_se=True
@@ -548,7 +548,9 @@ class FastVLM(keras.Model):
             'use_se': self.use_se,
             'attention_type': self.attention_type,
             'use_layer_scale': self.use_layer_scale,
-            'activation': self.activation,
+            'activation': keras.activations.serialize(
+                keras.activations.get(self.activation)
+            ),
             'kernel_initializer': initializers.serialize(
                 initializers.get(self.kernel_initializer)
             ),
