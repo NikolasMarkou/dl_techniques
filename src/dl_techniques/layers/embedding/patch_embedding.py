@@ -226,10 +226,10 @@ class PatchEmbedding2D(keras.layers.Layer):
         # CRITICAL: Explicitly build sub-layers for robust serialization
         self.proj.build(input_shape)
 
+        logger.info(f"Built PatchEmbedding2D with input_shape={input_shape}")
+
         # Always call parent build at the end
         super().build(input_shape)
-
-        logger.info(f"Built PatchEmbedding2D with input_shape={input_shape}")
 
     def call(self, inputs, training: Optional[bool] = None) -> keras.KerasTensor:
         """Project image patches into embedding vectors.
@@ -447,10 +447,10 @@ class PatchEmbedding1D(keras.layers.Layer):
         # CRITICAL: Explicitly build sub-layers for robust serialization
         self.embedding.build(input_shape)
 
+        logger.info(f"Built PatchEmbedding1D with input_shape={input_shape}")
+
         # Always call parent build at the end
         super().build(input_shape)
-
-        logger.info(f"Built PatchEmbedding1D with input_shape={input_shape}")
 
     def call(self, inputs, training: Optional[bool] = None) -> keras.KerasTensor:
         """Convert inputs to patches and embed them.

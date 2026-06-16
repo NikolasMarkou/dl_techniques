@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 129 / 245 files production-verified**
+**Progress: 137 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -395,14 +395,14 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `embedding/mask_token.py` | PASS | rubric-verify |
-| `[ ]` | `embedding/modern_bert_embeddings.py` | PASS | rubric-verify |
-| `[ ]` | `embedding/multi_axis_rope.py` | PASS | rubric-verify |
-| `[ ]` | `embedding/patch_embedding.py` | FAIL | super_build_last |
-| `[ ]` | `embedding/positional_embedding.py` | FAIL | super_build_last |
-| `[ ]` | `embedding/positional_embedding_sine_2d.py` | PASS | rubric-verify |
-| `[ ]` | `embedding/rotary_position_embedding.py` | PASS | rubric-verify |
-| `[ ]` | `embedding/scalar_sinusoidal_embedding.py` | PASS | rubric-verify |
+| `[x]` | `embedding/mask_token.py` | PASS | done: rubric-verified clean |
+| `[x]` | `embedding/modern_bert_embeddings.py` | PASS | done: rubric-verified clean |
+| `[x]` | `embedding/multi_axis_rope.py` | PASS | done: rubric-verified clean (parameter-only RoPE) |
+| `[x]` | `embedding/patch_embedding.py` | PASS | done: H6 ×2 (logger before super().build() on PatchEmbedding2D + 1D); existing test passes |
+| `[x]` | `embedding/positional_embedding.py` | PASS | done: H6 (logger before super().build()); existing test passes |
+| `[x]` | `embedding/positional_embedding_sine_2d.py` | PASS | done: H12 (__init__ -> None return hint); existing test passes |
+| `[x]` | `embedding/rotary_position_embedding.py` | PASS | done: rubric-verified clean |
+| `[x]` | `embedding/scalar_sinusoidal_embedding.py` | PASS | done: rubric-verified clean |
 
 ### Round 18 — activations/ re-audit (1/2)  (8 files)
 

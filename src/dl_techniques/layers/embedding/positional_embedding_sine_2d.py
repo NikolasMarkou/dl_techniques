@@ -125,7 +125,7 @@ class PositionEmbeddingSine2D(keras.layers.Layer):
         normalize: bool = True,
         scale: float = 2 * math.pi,
         **kwargs: Any
-    ):
+    ) -> None:
         super().__init__(**kwargs)
 
         # Validate inputs

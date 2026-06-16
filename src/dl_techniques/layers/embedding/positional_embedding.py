@@ -210,10 +210,10 @@ class PositionalEmbedding(keras.layers.Layer):
         # Dropout doesn't change shape, so we can use input_shape
         self.dropout.build(input_shape)
 
+        logger.info(f"Built PositionalEmbedding with input_shape={input_shape}")
+
         # Always call parent build at the end
         super().build(input_shape)
-
-        logger.info(f"Built PositionalEmbedding with input_shape={input_shape}")
 
     def call(
             self,
