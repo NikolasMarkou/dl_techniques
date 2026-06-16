@@ -240,7 +240,16 @@ class PerceiverTransformerLayer(keras.layers.Layer):
         if self.built:
             return
 
-        if isinstance(input_shape, list):
+        # A list/tuple whose first element is itself a shape (list/tuple) means
+        # two separate [query, kv] inputs; a bare single shape is a flat
+        # sequence of ints. This disambiguation is required because Keras passes
+        # the stored single-input shape back as a JSON list on deserialization.
+        is_multi_input = (
+            isinstance(input_shape, (list, tuple))
+            and len(input_shape) > 0
+            and isinstance(input_shape[0], (list, tuple))
+        )
+        if is_multi_input:
             # Two separate inputs
             if len(input_shape) != 2:
                 raise ValueError(f"Expected 2 inputs, got {len(input_shape)}")

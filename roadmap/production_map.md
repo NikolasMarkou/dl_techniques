@@ -165,7 +165,7 @@ Per-round procedure:
 
 ## §4 Batched Worklist
 
-**Progress: 182 / 245 files production-verified**
+**Progress: 189 / 245 files production-verified**
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS · `[x]` DONE.
 `verdict` is the current `scripts/audit_layers.py` mechanical result at baseline `2d96078a`
@@ -483,13 +483,13 @@ subpackages and tested root files. 31 rounds total; 245 file rows.
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `transformers/adaln_zero.py` | PASS | rubric-verify |
-| `[ ]` | `transformers/eomt_transformer.py` | PASS | rubric-verify |
-| `[ ]` | `transformers/free_transformer.py` | PASS | rubric-verify |
-| `[ ]` | `transformers/ideogram4_block.py` | PASS | rubric-verify |
-| `[ ]` | `transformers/perceiver_transformer.py` | PASS | rubric-verify |
-| `[ ]` | `transformers/progressive_focused_transformer.py` | PASS | rubric-verify |
-| `[ ]` | `transformers/sd3_adaln.py` | PASS | rubric-verify |
+| `[x]` | `transformers/adaln_zero.py` | PASS | done: rubric-verified clean |
+| `[x]` | `transformers/eomt_transformer.py` | PASS | done: rubric-verified clean |
+| `[x]` | `transformers/free_transformer.py` | PASS | done: rubric-verified clean |
+| `[x]` | `transformers/ideogram4_block.py` | PASS | done: rubric-verified clean (2 classes) |
+| `[x]` | `transformers/perceiver_transformer.py` | PASS | done: fixed real serialization bug (build() misread reloaded single shape as 2 inputs — disambiguate by element type); +new test |
+| `[x]` | `transformers/progressive_focused_transformer.py` | PASS | done: fixed real serialization bug (build() `(None,)+x_shape[1:]` failed on reloaded list shape — coerce to tuple); +new test |
+| `[x]` | `transformers/sd3_adaln.py` | PASS | done: rubric-verified clean |
 
 ### Round 25 — transformers/ re-audit (2/2)  (7 files)
 

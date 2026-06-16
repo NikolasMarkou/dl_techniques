@@ -300,6 +300,10 @@ class PFTBlock(keras.layers.Layer):
         if not hasattr(x_shape, '__len__') or x_shape is None:
             x_shape = (None, None, None, self._dim)
 
+        # Coerce to a tuple: on deserialization Keras passes shapes back as JSON
+        # lists, and tuple-concatenation below requires a tuple.
+        x_shape = tuple(x_shape)
+
         # ============ Explicitly Build Sub-layers ============
         # This ensures all weights are created and properly initialized
         # Shape: (batch, H, W, dim)
