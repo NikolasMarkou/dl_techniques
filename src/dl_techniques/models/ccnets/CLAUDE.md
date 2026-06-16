@@ -14,7 +14,7 @@ context). The payoff is **counterfactual generation**: hold `E` fixed, swap `Y`.
 
 Files: `orchestrators.py` (forward pass + train step), `trainer.py` (epoch loop, KL
 annealing), `losses.py`, `control.py` (Reasoner throttling), `base.py` (config + dataclasses),
-`utils.py` (`wrap_keras_model`, early stopping). Reference task: `src/train/ccnets/mnist.py`.
+`utils.py` (`wrap_keras_model`, early stopping). Reference task: `src/train/ccnets/train_mnist.py`.
 
 Companion docs: `PRINCIPLES_CCNETS.md` (the design principles — *why* the paradigm works),
 `FOUNDATION.md` (the conceptual essay), `FIXES.md` (defect history and rationale),
@@ -121,7 +121,7 @@ reconstruction term — the anchor keeps training stable while the Producer is s
 Steps for a new task:
 
 1. Build three networks honoring the contract above. Copy `MNISTExplainer/Reasoner/Producer`
-   from `train/ccnets/mnist.py` and swap the feature extractor for your modality.
+   from `train/ccnets/train_mnist.py` and swap the feature extractor for your modality.
 2. Keep the Producer's label path differentiable (Invariant 1).
 3. Pick `loss_fn` for the `X` reconstruction (`l2` for continuous, `l1`/`huber` for sharper
    edges or outliers).

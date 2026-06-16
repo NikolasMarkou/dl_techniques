@@ -31,7 +31,6 @@ Complete model architectures organized as subdirectories. Each subdirectory is a
 - `fractalnet/` — FractalNet
 - `bias_free_denoisers/` — Bias-free denoiser models
 - `convnext_patch_vae/` — ConvNeXt patch-level VAE with SIGReg anti-collapse
-- `burst_dp/` — Burst-mode dense prediction
 - `video_jepa/` — Video JEPA (joint embedding predictive)
 
 ### NLP / Language

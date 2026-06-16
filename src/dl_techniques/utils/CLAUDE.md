@@ -23,7 +23,7 @@ Shared utilities used across the library — tensor operations, geometry, maskin
 - `conformal_forecaster.py` — `ConformalForecaster`: model-agnostic uncertainty quantification with finite-sample coverage guarantees. Supports multiple nonconformity measures (absolute, normalized, CQR, locally_weighted) and multi-horizon strategies
 - `forecastability_analyzer.py` — `ForecastabilityAssessor`: permutation entropy, AMI-based delay estimation, Cao's embedding dimension, baseline benchmarking, and forecastability scoring [0-100]
 - `deep_supervision.py` — Deep-supervision output helpers (auxiliary heads, weight scheduling glue)
-- `drop_path.py` — `DropPath` stochastic-depth utility for transformer/ConvNeXt blocks
+- `drop_path.py` — `linear_drop_path_rates(num_blocks, max_rate)`: computes per-block stochastic-depth (drop-path) rates for transformer/ConvNeXt block stacks
 - `weight_transfer.py` — `load_weights_from_checkpoint(target, ckpt_path, skip_prefixes, strict)`: layer-by-layer weight transfer from a saved `.keras` model. Use this instead of `model.load_weights(by_name=True)` (broken in Keras 3.8 for `.keras` files)
 - `yolo_decode.py` — YOLOv12 output decoder (anchors-free decoding to boxes + scores)
 

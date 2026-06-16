@@ -19,9 +19,9 @@ from dl_techniques.losses import (
     # Generative
     WassersteinLoss,
     # Specialized
-    CapsuleMarginLoss, SegmentationLoss, SegmentationWrapperLoss, ImageRestorationLoss,
+    CapsuleMarginLoss, SegmentationLosses, SegmentationWrapperLoss,
     # Information-theoretic
-    GoodhartLoss, DecoupledInformationLoss,
+    GoodhartAwareLoss, DecoupledInformationLoss,
 )
 ```
 
