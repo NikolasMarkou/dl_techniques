@@ -650,6 +650,50 @@ class TestSCUNetSerialization:
         assert config['input_resolution'] == 192
 
 
+class TestSCUNetValidation:
+    """Test constructor input validation (ValueError paths)."""
+
+    def test_invalid_in_nc(self) -> None:
+        with pytest.raises(ValueError, match="in_nc must be positive"):
+            SCUNet(in_nc=0)
+
+    def test_invalid_config_type(self) -> None:
+        with pytest.raises(ValueError, match="config must be a list"):
+            SCUNet(in_nc=3, config="not_a_list")
+
+    def test_invalid_config_length(self) -> None:
+        with pytest.raises(ValueError, match="exactly 7 stage entries"):
+            SCUNet(in_nc=3, config=[4, 4, 4])
+
+    def test_invalid_config_entry(self) -> None:
+        with pytest.raises(ValueError, match="positive int"):
+            SCUNet(in_nc=3, config=[4, 4, 4, 0, 4, 4, 4])
+
+    def test_invalid_dim_nonpositive(self) -> None:
+        with pytest.raises(ValueError, match="dim must be positive"):
+            SCUNet(in_nc=3, dim=0)
+
+    def test_invalid_dim_odd(self) -> None:
+        with pytest.raises(ValueError, match="dim must be even"):
+            SCUNet(in_nc=3, dim=63)
+
+    def test_invalid_head_dim(self) -> None:
+        with pytest.raises(ValueError, match="head_dim must be positive"):
+            SCUNet(in_nc=3, head_dim=0)
+
+    def test_invalid_window_size(self) -> None:
+        with pytest.raises(ValueError, match="window_size must be positive"):
+            SCUNet(in_nc=3, window_size=0)
+
+    def test_invalid_stochastic_depth_rate(self) -> None:
+        with pytest.raises(ValueError, match=r"stochastic_depth_rate must be in"):
+            SCUNet(in_nc=3, stochastic_depth_rate=1.5)
+
+    def test_invalid_input_resolution(self) -> None:
+        with pytest.raises(ValueError, match="input_resolution must be positive"):
+            SCUNet(in_nc=3, input_resolution=0)
+
+
 class TestSCUNetErrorHandling:
     """Test error handling and edge cases."""
 

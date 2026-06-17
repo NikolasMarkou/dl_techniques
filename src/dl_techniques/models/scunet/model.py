@@ -1,3 +1,54 @@
+"""
+SCUNet — Swin-Conv-UNet for image restoration.
+
+A U-Net architecture that fuses Swin Transformer self-attention with convolutional
+operations, designed for image restoration tasks (denoising, deblurring, etc.). Each
+stage stacks `SwinConvBlock`s that split their channels between a convolutional branch
+and a windowed-attention (W) / shifted-window (SW) transformer branch, alternating block
+type for cross-window connectivity.
+
+Key Features
+------------
+- Symmetric encoder-decoder (3 down stages, a bottleneck, 3 up stages) with additive
+  skip connections.
+- Strided Conv2D downsampling / Conv2DTranspose upsampling (factor 2 per stage → total
+  factor 64 = 2^6).
+- Reflection padding so arbitrary input resolutions divisible-by-64 constraint is met,
+  cropped back to the original size on output.
+- Linearly-scheduled stochastic depth across all blocks.
+
+Architecture
+------------
+::
+
+    input (B, H, W, C)
+        │  reflect-pad to multiple of 64
+        ▼
+    head Conv2D ───────────────┐ x1
+        ▼                      │
+    down1 (blocks + ↓2) ───────┤ x2
+        ▼                      │
+    down2 (blocks + ↓2) ───────┤ x3
+        ▼                      │
+    down3 (blocks + ↓2) ───────┤ x4
+        ▼                      │
+    body (bottleneck blocks)   │
+        ▼  + x4                │
+    up3  (↑2 + blocks)         │
+        ▼  + x3                │
+    up2  (↑2 + blocks)         │
+        ▼  + x2                │
+    up1  (↑2 + blocks)         │
+        ▼  + x1 ◄──────────────┘
+    tail Conv2D
+        ▼  crop to (H, W)
+    output (B, H, W, C)
+
+Reference
+---------
+- Zhang et al., "Practical Blind Denoising via Swin-Conv-UNet and Data Synthesis" (2022).
+"""
+
 import keras
 import numpy as np
 from keras import ops
@@ -47,6 +98,16 @@ class SCUNet(keras.Model):
         if config is None:
             config = [4, 4, 4, 4, 4, 4, 4]
 
+        self._validate_config(
+            in_nc=in_nc,
+            config=config,
+            dim=dim,
+            head_dim=head_dim,
+            window_size=window_size,
+            stochastic_depth_rate=stochastic_depth_rate,
+            input_resolution=input_resolution,
+        )
+
         self.in_nc = in_nc
         self.config = config
         self.dim = dim
@@ -63,6 +124,71 @@ class SCUNet(keras.Model):
 
         # Build network components
         self._build_network(dpr)
+
+    def _validate_config(
+            self,
+            in_nc: int,
+            config: List[int],
+            dim: int,
+            head_dim: int,
+            window_size: int,
+            stochastic_depth_rate: float,
+            input_resolution: int,
+    ) -> None:
+        """Validate constructor arguments, raising ``ValueError`` on invalid input.
+
+        Args:
+            in_nc: Number of input channels.
+            config: Per-stage block counts (must have exactly 7 entries).
+            dim: Base feature dimension.
+            head_dim: Attention head dimension.
+            window_size: Attention window size.
+            stochastic_depth_rate: Maximum stochastic-depth drop rate.
+            input_resolution: Expected input resolution.
+
+        Raises:
+            ValueError: If any argument is outside its valid range.
+        """
+        if in_nc <= 0:
+            raise ValueError(f"in_nc must be positive, got {in_nc}")
+
+        if not isinstance(config, (list, tuple)):
+            raise ValueError(
+                f"config must be a list/tuple, got {type(config).__name__}"
+            )
+        if len(config) != 7:
+            raise ValueError(
+                f"config must have exactly 7 stage entries "
+                f"(3 down + bottleneck + 3 up), got {len(config)}"
+            )
+        if any((not isinstance(c, int)) or c <= 0 for c in config):
+            raise ValueError(
+                f"every config entry must be a positive int, got {config}"
+            )
+
+        if dim <= 0:
+            raise ValueError(f"dim must be positive, got {dim}")
+        if dim % 2 != 0:
+            raise ValueError(
+                f"dim must be even (the outer stages use dim // 2), got {dim}"
+            )
+
+        if head_dim <= 0:
+            raise ValueError(f"head_dim must be positive, got {head_dim}")
+
+        if window_size <= 0:
+            raise ValueError(f"window_size must be positive, got {window_size}")
+
+        if not (0.0 <= stochastic_depth_rate <= 1.0):
+            raise ValueError(
+                f"stochastic_depth_rate must be in [0, 1], "
+                f"got {stochastic_depth_rate}"
+            )
+
+        if input_resolution <= 0:
+            raise ValueError(
+                f"input_resolution must be positive, got {input_resolution}"
+            )
 
     def _build_network(self, dpr: List[float]) -> None:
         """Build the network architecture.

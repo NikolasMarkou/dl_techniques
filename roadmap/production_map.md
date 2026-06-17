@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 134 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete; nano_vlm_world_model/model.py M2-DEFERRED [~], not counted)
+**Progress: 135 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete; nano_vlm_world_model/model.py M2-DEFERRED [~], not counted)
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -1140,11 +1140,11 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 | `[x]` | `sam/prompt_encoder.py` | PASS | H7 FIXED — added PositionEmbeddingRandom.compute_output_shape (call(size)→(2*num_pos_feats, h, w)) |
 | `[x]` | `sam/transformer.py` | PASS | rubric-verified |
 
-### L2-Round 20 — scunet  (1 file)
+### L2-Round 20 — scunet  (1 file)  — DONE
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `scunet/model.py` | PASS | rubric-verify |
+| `[x]` | `scunet/model.py` | PASS | done: H4 added (`_validate_config` — in_nc/config len-7+positive/dim even-positive/head_dim/window_size/sd_rate∈[0,1]/input_resolution) + S1 module docstring; added 10 ValueError tests; 63 tests pass incl. M2 round-trips |
 
 ### L2-Round 21 — sd3_mmdit  (7 files)
 
