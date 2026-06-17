@@ -189,6 +189,21 @@ class TestMNISTArchitectures:
         after = keras.ops.convert_to_numpy(reloaded(x, e, training=False))
         np.testing.assert_allclose(before, after, atol=1e-4)
 
+    def test_producer_round_trip(self, mnist_config, tmp_path):
+        _, _, producer = _build_mnist(mnist_config)
+        rng = np.random.default_rng(11)
+        y = keras.utils.to_categorical(
+            rng.integers(0, mnist_config.num_classes, BATCH),
+            mnist_config.num_classes).astype("float32")
+        e = rng.random((BATCH, mnist_config.explanation_dim)).astype("float32")
+        before = keras.ops.convert_to_numpy(producer(y, e, training=False))
+
+        path = str(tmp_path / "mnist_producer.keras")
+        producer.save(path)
+        reloaded = keras.models.load_model(path)
+        after = keras.ops.convert_to_numpy(reloaded(y, e, training=False))
+        np.testing.assert_allclose(before, after, atol=1e-4)
+
 
 # =====================================================================
 # CIFAR-100 architectures
@@ -251,6 +266,34 @@ class TestCifar100Architectures:
         reloaded = keras.models.load_model(path)
         mu_after = keras.ops.convert_to_numpy(reloaded(x, training=False)[0])
         np.testing.assert_allclose(mu_before, mu_after, atol=1e-4)
+
+    def test_reasoner_round_trip(self, cifar_config, tmp_path):
+        _, reasoner, _ = _build_cifar(cifar_config)
+        rng = np.random.default_rng(12)
+        x = rng.random((BATCH, 32, 32, cifar_config.image_channels)).astype("float32")
+        e = rng.random((BATCH, cifar_config.explanation_dim)).astype("float32")
+        before = keras.ops.convert_to_numpy(reasoner(x, e, training=False))
+
+        path = str(tmp_path / "cifar_reasoner.keras")
+        reasoner.save(path)
+        reloaded = keras.models.load_model(path)
+        after = keras.ops.convert_to_numpy(reloaded(x, e, training=False))
+        np.testing.assert_allclose(before, after, atol=1e-4)
+
+    def test_producer_round_trip(self, cifar_config, tmp_path):
+        _, _, producer = _build_cifar(cifar_config)
+        rng = np.random.default_rng(13)
+        y = keras.utils.to_categorical(
+            rng.integers(0, cifar_config.num_classes, BATCH),
+            cifar_config.num_classes).astype("float32")
+        e = rng.random((BATCH, cifar_config.explanation_dim)).astype("float32")
+        before = keras.ops.convert_to_numpy(producer(y, e, training=False))
+
+        path = str(tmp_path / "cifar_producer.keras")
+        producer.save(path)
+        reloaded = keras.models.load_model(path)
+        after = keras.ops.convert_to_numpy(reloaded(y, e, training=False))
+        np.testing.assert_allclose(before, after, atol=1e-4)
 
 
 # =====================================================================
@@ -331,6 +374,61 @@ class TestTextArchitectures:
         reloaded = keras.models.load_model(path)
         mu_after = keras.ops.convert_to_numpy(reloaded(x, training=False)[0])
         np.testing.assert_allclose(mu_before, mu_after, atol=1e-4)
+
+    def test_reasoner_round_trip(self, text_config, tmp_path):
+        c = text_config
+        reasoner = SentimentReasoner(c)
+        reasoner(keras.ops.zeros((1, c.max_len), dtype="int32"),
+                 keras.ops.zeros((1, c.explanation_dim)))
+
+        rng = np.random.default_rng(14)
+        x = rng.integers(0, c.vocab_size, (BATCH, c.max_len)).astype("int32")
+        e = rng.random((BATCH, c.explanation_dim)).astype("float32")
+        before = keras.ops.convert_to_numpy(reasoner(x, e, training=False))
+
+        path = str(tmp_path / "text_reasoner.keras")
+        reasoner.save(path)
+        reloaded = keras.models.load_model(path)
+        after = keras.ops.convert_to_numpy(reloaded(x, e, training=False))
+        np.testing.assert_allclose(before, after, atol=1e-4)
+
+    def test_producer_round_trip(self, text_config, tmp_path):
+        c = text_config
+        producer = SentimentProducer(c)
+        producer(keras.ops.zeros((1, c.num_classes)),
+                 keras.ops.zeros((1, c.explanation_dim)))
+
+        rng = np.random.default_rng(15)
+        y = keras.utils.to_categorical(
+            rng.integers(0, c.num_classes, BATCH), c.num_classes).astype("float32")
+        e = rng.random((BATCH, c.explanation_dim)).astype("float32")
+        before = keras.ops.convert_to_numpy(producer(y, e, training=False))
+
+        path = str(tmp_path / "text_producer.keras")
+        producer.save(path)
+        reloaded = keras.models.load_model(path)
+        after = keras.ops.convert_to_numpy(reloaded(y, e, training=False))
+        np.testing.assert_allclose(before, after, atol=1e-4)
+
+    def test_ar_producer_round_trip(self, ar_text_config, tmp_path):
+        c = ar_text_config
+        producer = ARSentimentProducer(c)
+        producer(keras.ops.zeros((1, c.num_classes)),
+                 keras.ops.zeros((1, c.explanation_dim)),
+                 keras.ops.zeros((1, c.max_len), dtype="int32"))
+
+        rng = np.random.default_rng(16)
+        y = keras.utils.to_categorical(
+            rng.integers(0, c.num_classes, BATCH), c.num_classes).astype("float32")
+        e = rng.random((BATCH, c.explanation_dim)).astype("float32")
+        x = rng.integers(0, c.vocab_size, (BATCH, c.max_len)).astype("int32")
+        before = keras.ops.convert_to_numpy(producer(y, e, x, training=False))
+
+        path = str(tmp_path / "text_ar_producer.keras")
+        producer.save(path)
+        reloaded = keras.models.load_model(path)
+        after = keras.ops.convert_to_numpy(reloaded(y, e, x, training=False))
+        np.testing.assert_allclose(before, after, atol=1e-4)
 
 
 # =====================================================================

@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 11 / 183 files production-verified**
+**Progress: 20 / 183 files production-verified**
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -931,19 +931,19 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 | `[x]` | `capsnet/model_v2.py` | PASS | rubric-verified; round-trip test passes |
 | `[x]` | `cbam/model.py` | PASS | rubric-verified; round-trip test passes |
 
-### L2-Round 3 — ccnets  (9 files)
+### L2-Round 3 — ccnets  (9 files)  — DONE
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `ccnets/architectures/cifar100.py` | PASS | rubric-verify |
-| `[ ]` | `ccnets/architectures/mnist.py` | PASS | rubric-verify |
-| `[ ]` | `ccnets/architectures/text.py` | PASS | rubric-verify |
-| `[ ]` | `ccnets/base.py` | N/A | N/A — non-layer |
-| `[ ]` | `ccnets/control.py` | N/A | N/A — non-layer |
-| `[ ]` | `ccnets/losses.py` | N/A | N/A — non-layer |
-| `[ ]` | `ccnets/orchestrators.py` | N/A | N/A — non-layer |
-| `[ ]` | `ccnets/trainer.py` | N/A | N/A — non-layer |
-| `[ ]` | `ccnets/utils.py` | N/A | N/A — non-layer (ccnets = smoke SKIP, §L2-5) |
+| `[x]` | `ccnets/architectures/cifar100.py` | PASS | rubric-verified; added reasoner+producer M2 round-trip tests |
+| `[x]` | `ccnets/architectures/mnist.py` | PASS | rubric-verified; added producer M2 round-trip test |
+| `[x]` | `ccnets/architectures/text.py` | PASS | rubric-verified; added reasoner+producer+AR-producer M2 round-trip tests |
+| `[x]` | `ccnets/base.py` | N/A | N/A — non-layer (confirmed; exercised by orchestrator tests) |
+| `[x]` | `ccnets/control.py` | N/A | N/A — non-layer (confirmed) |
+| `[x]` | `ccnets/losses.py` | N/A | N/A — non-layer (confirmed) |
+| `[x]` | `ccnets/orchestrators.py` | N/A | N/A — non-layer (confirmed) |
+| `[x]` | `ccnets/trainer.py` | N/A | N/A — non-layer (confirmed) |
+| `[x]` | `ccnets/utils.py` | N/A | N/A — non-layer (ccnets = smoke SKIP, §L2-5) |
 
 ### L2-Round 4 — cliffordnet  (10 files)
 
