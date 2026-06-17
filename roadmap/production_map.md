@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 58 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete)
+**Progress: 65 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete)
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -1008,17 +1008,17 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 | `[x]` | `gpt2/gpt2.py` | PASS | rubric-verified; added test_round_trip.py (M2 was untested; round-trip clean) |
 | `[x]` | `hierarchical_reasoning_model/model.py` | PASS | rubric-verified (build() override SAM D-008); added test_model.py with M2 round-trip (was smoke-only; round-trip clean) |
 
-### L2-Round 9 — ideogram4  (7 files)
+### L2-Round 9 — ideogram4  (7 files)  — DONE
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `ideogram4/config.py` | N/A | N/A — dataclass-config |
-| `[ ]` | `ideogram4/constants.py` | N/A | N/A — pure-functions |
-| `[ ]` | `ideogram4/latent_norm.py` | N/A | N/A — pure-functions |
-| `[ ]` | `ideogram4/pipeline.py` | N/A | N/A — non-layer |
-| `[ ]` | `ideogram4/scheduler.py` | N/A | N/A — dataclass-config |
-| `[ ]` | `ideogram4/transformer.py` | PASS | rubric-verify |
-| `[ ]` | `ideogram4/vae.py` | PASS | rubric-verify |
+| `[x]` | `ideogram4/config.py` | N/A | N/A — dataclass-config (confirmed: no Layer/Model subclass) |
+| `[x]` | `ideogram4/constants.py` | N/A | N/A — pure-functions (confirmed) |
+| `[x]` | `ideogram4/latent_norm.py` | N/A | N/A — pure-functions (confirmed) |
+| `[x]` | `ideogram4/pipeline.py` | N/A | N/A — non-layer (confirmed) |
+| `[x]` | `ideogram4/scheduler.py` | N/A | N/A — dataclass-config (confirmed) |
+| `[x]` | `ideogram4/transformer.py` | PASS | rubric-verified; existing test has real M2 deterministic-velocity round-trip |
+| `[x]` | `ideogram4/vae.py` | PASS | rubric-verified; existing test has real M2 deterministic-mu round-trip |
 
 ### L2-Round 10 — kan, latent_gmm_registration, lewm  (7 files)
 
