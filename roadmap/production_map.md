@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 45 / 183 files production-verified**
+**Progress: 52 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete)
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -985,17 +985,17 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 | `[x]` | `depth_anything/teacher_ema.py` | N/A | N/A — non-layer (confirmed) |
 | `[x]` | `detr/model.py` | PASS | rubric-verified; round-trip tests pass |
 
-### L2-Round 7 — dino, distilbert, fastvlm, fftnet  (7 files)
+### L2-Round 7 — dino, distilbert, fastvlm, fftnet  (7 files)  — DONE
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `dino/dino_v1.py` | FAIL | DINOHead: super_build_last (also fixes pre-existing DINOHead .keras round-trip, §L2-5) |
-| `[ ]` | `dino/dino_v2.py` | PASS | rubric-verify (2-input [images, masks] contract) |
-| `[ ]` | `dino/dino_v3.py` | PASS | rubric-verify |
-| `[ ]` | `distilbert/model.py` | PASS | rubric-verify |
-| `[ ]` | `fastvlm/components.py` | PASS | rubric-verify |
-| `[ ]` | `fastvlm/model.py` | PASS | rubric-verify (image-only despite VLM name) |
-| `[ ]` | `fftnet/model.py` | FAIL | FFTMixer: forward-raw-tf (ACCEPTED-EXCEPTION — TF FFT, §L2-5) |
+| `[x]` | `dino/dino_v1.py` | PASS | H6: DINOHead super().build() last + explicit sublayer build (fixes DINOHead round-trip); ALSO fixed DINOv1 model round-trip (patch_size/image_size deserialized as list broke `//`); added test_model_v1.py |
+| `[x]` | `dino/dino_v2.py` | PASS | rubric-verified (2-input [images, masks] contract) |
+| `[x]` | `dino/dino_v3.py` | PASS | rubric-verified |
+| `[x]` | `distilbert/model.py` | PASS | rubric-verified; added test_model.py with M2 round-trip (was smoke-only) |
+| `[x]` | `fastvlm/components.py` | PASS | rubric-verified |
+| `[x]` | `fastvlm/model.py` | PASS | rubric-verified (image-only despite VLM name) |
+| `[~]` | `fftnet/model.py` | FAIL→ACCEPTED | FFTMixer raw-tf FFT is a DOCUMENTED accepted exception (header note added; keras.ops has no ifft, §L2-5). Also fixed FFTNet M2 round-trip (explicit sublayer build) + added test_model.py. Scanner FAIL is the accepted H10 exception. |
 
 ### L2-Round 8 — fnet, fractalnet, gemma, gpt2, hierarchical_reasoning_model  (6 files)
 

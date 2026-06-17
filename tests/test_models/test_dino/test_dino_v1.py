@@ -13,7 +13,8 @@ at build time, so a small ``input_shape`` is legal: with ``patch_size=16`` a
 32x32 image yields a 2x2 patch grid. ``num_classes=10`` + default
 ``include_top=True`` returns logits ``(B, 10)``.
 
-FORWARD ONLY: the DINOHead ``.keras`` round-trip is known-broken — not tested.
+FORWARD ONLY here: the DINOHead / DINOv1 ``.keras`` round-trips (previously
+known-broken) are now FIXED and covered separately in ``test_model_v1.py``.
 """
 
 import numpy as np

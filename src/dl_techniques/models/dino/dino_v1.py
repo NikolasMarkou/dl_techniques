@@ -179,8 +179,6 @@ class DINOHead(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[int, ...]) -> None:
         """Build the DINO head layers."""
-        super().build(input_shape)
-
         # DECISION plan_2026-06-14_8c7365d0/D-006
         # Reset the sublayer accumulators to their __init__ empty state BEFORE
         # appending. build() must be idempotent: a second build (functional-API
@@ -282,10 +280,19 @@ class DINOHead(keras.layers.Layer):
             name="last_layer"
         )
 
-        # Initialize last layer weights with unit norm if specified
-        if self.norm_last_layer:
-            # This will be applied in the build method of the Dense layer
-            pass
+        # Explicitly build every sublayer in forward order so their weights
+        # materialize on .keras reload (lazy first-call build leaves the
+        # sublayers unbuilt -> their weights are silently dropped on load).
+        # Guards tolerate a non-layer activation callable.
+        current_shape = input_shape
+        for layer in self.mlp_layers:
+            if hasattr(layer, "build") and not getattr(layer, "built", False):
+                layer.build(current_shape)
+            if hasattr(layer, "compute_output_shape"):
+                current_shape = layer.compute_output_shape(current_shape)
+        self.last_layer.build(current_shape)
+
+        super().build(input_shape)
 
     def call(
             self,
@@ -482,8 +489,16 @@ class DINOv1(keras.Model):
         self.embed_dim = embed_dim
         self.depth = depth
         self.num_heads = num_heads
-        self.patch_size = patch_size if isinstance(patch_size, tuple) else (patch_size, patch_size)
-        self.image_size = image_size if isinstance(image_size, tuple) else (image_size, image_size)  # Renamed
+        # Normalize to a 2-tuple. Accept list/tuple (e.g. from .keras
+        # deserialization, where tuples come back as TrackedList) as well as int.
+        self.patch_size = (
+            tuple(patch_size) if isinstance(patch_size, (tuple, list))
+            else (patch_size, patch_size)
+        )
+        self.image_size = (
+            tuple(image_size) if isinstance(image_size, (tuple, list))
+            else (image_size, image_size)
+        )
         self.in_channels = in_channels
         self.num_classes = num_classes
         self.mlp_ratio = mlp_ratio

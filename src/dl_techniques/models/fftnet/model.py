@@ -10,6 +10,14 @@ vision tasks.
 Based on: "The FFT Strikes Back: An Efficient Alternative to Self-Attention"
 (Fein-Ashley, 2025) arXiv:2502.18394v2 [cs.LG]
 
+ACCEPTED RAW-TF EXCEPTION (production-map §L2-5 / H10):
+    ``FFTMixer.call`` uses ``tf.signal.fft`` / ``tf.signal.ifft`` on a complex64
+    tensor for adaptive spectral filtering. This cannot migrate to ``keras.ops``:
+    ``keras.ops`` exposes only a real/imag-tuple ``fft`` and has NO ``ifft``, so a
+    backend-agnostic complex forward+inverse transform is not expressible. The raw
+    ``tf.signal`` FFT path is therefore an accepted, documented exception to the
+    keras.ops-only (H10) rule for the forward pass.
+
 Refactored Architecture Philosophy:
 -----------------------------------
 
@@ -567,6 +575,16 @@ class FFTNet(keras.Model):
             initializer=initializers.RandomNormal(stddev=0.02),
             trainable=True
         )
+
+        # Explicitly build sublayers in forward order so their weights
+        # materialize on .keras reload (lazy first-call build leaves the
+        # patch-embed / block / norm weights unloadable on deserialization).
+        self.patch_embed.build(input_shape)
+        seq_shape = (input_shape[0], self.num_patches + 1, self.embed_dim)
+        self.pos_drop.build(seq_shape)
+        for block in self.blocks:
+            block.build(seq_shape)
+        self.norm.build(seq_shape)
 
         super().build(input_shape)
 
