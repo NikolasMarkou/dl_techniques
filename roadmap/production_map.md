@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 98 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete)
+**Progress: 106 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete)
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -1073,18 +1073,18 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 | `[x]` | `mobilenet/mobilenet_v3.py` | PASS | rubric-verified; 6 round-trip tests pass |
 | `[x]` | `mobilenet/mobilenet_v4.py` | PASS | rubric-verified; 6 round-trip tests pass |
 
-### L2-Round 14 — modern_bert, mothnet, nam  (8 files)
+### L2-Round 14 — modern_bert, mothnet, nam  (8 files)  — DONE
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `modern_bert/components.py` | PASS | rubric-verify |
-| `[ ]` | `modern_bert/modern_bert.py` | PASS | rubric-verify |
-| `[ ]` | `modern_bert/modern_bert_blt.py` | PASS | rubric-verify (OOM at seq 16384 — use small config; §L2-5) |
-| `[ ]` | `mothnet/model.py` | PASS | rubric-verify |
-| `[ ]` | `nam/cell.py` | PASS | rubric-verify |
-| `[ ]` | `nam/config.py` | N/A | N/A — dataclass-config |
-| `[ ]` | `nam/model.py` | PASS | rubric-verify |
-| `[ ]` | `nam/tokenizer.py` | N/A | N/A — non-layer |
+| `[x]` | `modern_bert/components.py` | PASS | rubric-verified; round-trip tests pass |
+| `[x]` | `modern_bert/modern_bert.py` | PASS | rubric-verified; round-trip tests pass |
+| `[x]` | `modern_bert/modern_bert_blt.py` | PASS | rubric-verified; added test_modern_bert_blt.py with M2 round-trip (small config; round-trip clean 0.0) |
+| `[x]` | `mothnet/model.py` | PASS | rubric-verified; added test_model.py (forward + ValueError + M2 round-trip; was smoke-only) |
+| `[x]` | `nam/cell.py` | PASS | rubric-verified (embedded; config round-trip + bit-exact weight transfer tested) |
+| `[x]` | `nam/config.py` | N/A | N/A — dataclass-config (confirmed) |
+| `[x]` | `nam/model.py` | PASS | rubric-verified; NTM-style stateful (call(carry,batch)) — M2 covered by bit-exact weight round-trip + config round-trip (full .keras not well-defined for carry-based forward) |
+| `[x]` | `nam/tokenizer.py` | N/A | N/A — non-layer (confirmed) |
 
 ### L2-Round 15 — nano_vlm, nano_vlm_world_model, ntm  (7 files)
 
