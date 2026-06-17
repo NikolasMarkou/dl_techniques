@@ -467,9 +467,10 @@ class NanoVLM(keras.Model):
         # dead-on-forward code, never executed). Re-add via a proper tied-Dense layer if
         # memory-sharing is later required.
 
+        logger.info("NanoVLM build completed successfully")
+
         # Always call parent build at the end
         super().build(input_shape)
-        logger.info("NanoVLM build completed successfully")
 
     def call(
             self,

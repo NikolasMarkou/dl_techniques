@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 106 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete)
+**Progress: 112 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete; nano_vlm_world_model/model.py M2-DEFERRED [~], not counted)
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -1086,17 +1086,17 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 | `[x]` | `nam/model.py` | PASS | rubric-verified; NTM-style stateful (call(carry,batch)) — M2 covered by bit-exact weight round-trip + config round-trip (full .keras not well-defined for carry-based forward) |
 | `[x]` | `nam/tokenizer.py` | N/A | N/A — non-layer (confirmed) |
 
-### L2-Round 15 — nano_vlm, nano_vlm_world_model, ntm  (7 files)
+### L2-Round 15 — nano_vlm, nano_vlm_world_model, ntm  (7 files)  — DONE (6/7; nano_vlm_world_model/model.py M2 DEFERRED [~])
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `nano_vlm/model.py` | FAIL | NanoVLM: super_build_last |
-| `[ ]` | `nano_vlm_world_model/denoisers.py` | PASS | rubric-verify |
-| `[ ]` | `nano_vlm_world_model/model.py` | PASS | rubric-verify (was dead-on-forward; fixed) |
-| `[ ]` | `nano_vlm_world_model/scheduler.py` | N/A | N/A — non-layer |
-| `[ ]` | `nano_vlm_world_model/train.py` | N/A | N/A — non-layer |
-| `[ ]` | `ntm/model.py` | PASS | rubric-verify |
-| `[ ]` | `ntm/model_multitask.py` | PASS | rubric-verify |
+| `[x]` | `nano_vlm/model.py` | PASS | H6 fixed (logger before super().build()); added test_model.py (factory + forward + M2 round-trip; clean 0.0) |
+| `[x]` | `nano_vlm_world_model/denoisers.py` | PASS | rubric-verified (embedded denoiser Layers: TimestepEmbedding/Conditional/Vision/Text/Joint) |
+| `[~]` | `nano_vlm_world_model/model.py` | PASS(scanner)/M2-DEFERRED | DEEP M2 gap: .keras round-trip drops ~604/1400 weights (204 paths structurally absent on reload). Denoisers/head build lazily; model forward is STOCHASTIC (keras.random noise) so no output-identity test is even possible. Attempt 1 (get_build_config/build_from_config + concrete dummy-forward in build()) did NOT resolve (796 same/400 diff/204 missing) — reverted. Needs per-denoiser explicit build in a dedicated effort. Forward works (smoke passes). |
+| `[x]` | `nano_vlm_world_model/scheduler.py` | N/A | N/A — non-layer (confirmed) |
+| `[x]` | `nano_vlm_world_model/train.py` | N/A | N/A — non-layer (confirmed) |
+| `[x]` | `ntm/model.py` | PASS | rubric-verified; existing test_model.py has 4 .keras round-trips |
+| `[x]` | `ntm/model_multitask.py` | PASS | rubric-verified; added test_model_multitask.py (forward + ValueError + M2 round-trip; clean 0.0) |
 
 ### L2-Round 16 — pft_sr, power_mlp, power_sampling  (7 files)
 
