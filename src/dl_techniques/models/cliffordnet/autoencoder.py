@@ -159,12 +159,12 @@ class CliffordLaplacianUNet(keras.Model):
         self.blur_kernel_size = blur_kernel_size
         self.blur_sigma = blur_sigma
         self.blur_trainable = blur_trainable
-        self.kernel_initializer = kernel_initializer
-        self.kernel_regularizer = kernel_regularizer
+        self.kernel_initializer = keras.initializers.get(kernel_initializer)
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         _conv_kwargs: Dict[str, Any] = dict(
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
         )
 
         def _make_blocks(n: int, channels: int, shifts: List[int]):
@@ -343,11 +343,30 @@ class CliffordLaplacianUNet(keras.Model):
                 "blur_kernel_size": self.blur_kernel_size,
                 "blur_sigma": self.blur_sigma,
                 "blur_trainable": self.blur_trainable,
-                "kernel_initializer": self.kernel_initializer,
-                "kernel_regularizer": self.kernel_regularizer,
+                "kernel_initializer": keras.initializers.serialize(
+                    self.kernel_initializer
+                ),
+                "kernel_regularizer": keras.regularizers.serialize(
+                    self.kernel_regularizer
+                ),
             }
         )
         return config
+
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "CliffordLaplacianUNet":
+        config = dict(config)
+        if config.get("kernel_initializer") is not None:
+            config["kernel_initializer"] = keras.initializers.deserialize(
+                config["kernel_initializer"]
+            )
+        if config.get("kernel_regularizer") is not None:
+            config["kernel_regularizer"] = keras.regularizers.deserialize(
+                config["kernel_regularizer"]
+            )
+        return cls(**config)
 
     # ------------------------------------------------------------------
     # Variants

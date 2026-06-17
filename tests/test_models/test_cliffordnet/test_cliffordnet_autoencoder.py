@@ -106,6 +106,29 @@ class TestSaveLoad:
             err_msg="CliffordLaplacianUNet differs after .keras round-trip",
         )
 
+    def test_keras_roundtrip_with_objects(self, tmp_path):
+        m = CliffordLaplacianUNet(
+            in_channels=3, level_channels=(8, 16, 32), level_blocks=(1, 1, 1),
+            kernel_initializer=keras.initializers.TruncatedNormal(stddev=0.02),
+            kernel_regularizer=keras.regularizers.L2(1e-4),
+        )
+        x = np.random.RandomState(7).randn(2, 64, 64, 3).astype("float32")
+        y1 = keras.ops.convert_to_numpy(m(x)["reconstruction"])
+        cfg1 = m.get_config()
+        path = os.path.join(str(tmp_path), "m_obj.keras")
+        m.save(path)
+        m2 = keras.models.load_model(path)
+        y2 = keras.ops.convert_to_numpy(m2(x)["reconstruction"])
+        np.testing.assert_allclose(
+            y1, y2, atol=1e-4,
+            err_msg="object-initializer/regularizer round-trip drift",
+        )
+        cfg2 = m2.get_config()
+        assert cfg2["kernel_initializer"] == cfg1["kernel_initializer"], \
+            "initializer config not preserved"
+        assert cfg2["kernel_regularizer"] == cfg1["kernel_regularizer"], \
+            "regularizer config not preserved"
+
 
 # ---------------------------------------------------------------------
 # Variants + factory + imports
