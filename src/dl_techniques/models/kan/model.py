@@ -34,6 +34,7 @@ import numpy as np
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.ffn.kan_linear import KANLinear
 
 # ---------------------------------------------------------------------
@@ -215,10 +216,17 @@ class KAN(keras.Model):
     ) -> None:
         """Load pretrained weights into the model.
 
+        Weights are transferred layer-by-layer via
+        :func:`dl_techniques.utils.weight_transfer.load_weights_from_checkpoint`,
+        the canonical replacement for ``self.load_weights(by_name=True)`` (which
+        raises on ``.keras`` files in Keras 3.8+).
+
         Args:
             weights_path: String, path to the weights file (.keras format).
             skip_mismatch: Boolean, whether to skip layers with mismatched shapes.
-            by_name: Boolean, whether to load weights by layer name.
+                Maps to ``strict=not skip_mismatch``.
+            by_name: Retained for backward compatibility; layer-by-layer transfer
+                is always name-based, so this argument is ignored.
 
         Raises:
             FileNotFoundError: If weights_path doesn't exist.
@@ -227,15 +235,19 @@ class KAN(keras.Model):
         if not os.path.exists(weights_path):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
 
+        del by_name  # name-based transfer is implicit; kept for signature stability
+
         try:
             logger.info(f"Loading pretrained weights from {weights_path}")
 
-            self.load_weights(
-                weights_path,
-                skip_mismatch=skip_mismatch,
-                by_name=by_name
+            report = load_weights_from_checkpoint(
+                target=self,
+                ckpt_path=weights_path,
+                skip_prefixes=(),
+                strict=not skip_mismatch,
             )
 
+            logger.info(report.summary_string())
             if skip_mismatch:
                 logger.info(
                     "Weights loaded with skip_mismatch=True. "

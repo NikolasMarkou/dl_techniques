@@ -85,7 +85,9 @@ class TestLeWM:
     def test_rollout_shape(self, cfg, rng):
         model = LeWM(config=cfg)
         B = 2
-        S = 2
+        # rollout encodes only pixels_history[:, 0]; the model contract requires
+        # S == 1 (distinct per-S histories must be tiled / called individually).
+        S = 1
         T_rollout = 4
 
         # Build the model with a matching training forward (T = num_frames

@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 65 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete)
+**Progress: 72 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete)
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -1020,17 +1020,17 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 | `[x]` | `ideogram4/transformer.py` | PASS | rubric-verified; existing test has real M2 deterministic-velocity round-trip |
 | `[x]` | `ideogram4/vae.py` | PASS | rubric-verified; existing test has real M2 deterministic-mu round-trip |
 
-### L2-Round 10 — kan, latent_gmm_registration, lewm  (7 files)
+### L2-Round 10 — kan, latent_gmm_registration, lewm  (7 files)  — DONE
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `kan/model.py` | PASS | rubric-verify (from_pretrained → load_weights; M3 review) |
-| `[ ]` | `latent_gmm_registration/model.py` | PASS | rubric-verify (tf.linalg.svd accepted-exception, §L2-5) |
-| `[ ]` | `lewm/config.py` | N/A | N/A — dataclass-config |
-| `[ ]` | `lewm/embedder.py` | PASS | rubric-verify |
-| `[ ]` | `lewm/model.py` | PASS | rubric-verify |
-| `[ ]` | `lewm/predictor.py` | PASS | rubric-verify |
-| `[ ]` | `lewm/projector.py` | PASS | rubric-verify |
+| `[x]` | `kan/model.py` | PASS | rubric-verified; weight-handling migrated load_pretrained_weights → load_weights_from_checkpoint (M3) |
+| `[x]` | `latent_gmm_registration/model.py` | PASS | rubric-verified; documented tf.linalg.svd accepted-exception in header (§L2-5); added M2 round-trip test |
+| `[x]` | `lewm/config.py` | N/A | N/A — dataclass-config (confirmed) |
+| `[x]` | `lewm/embedder.py` | PASS | rubric-verified (ActionEmbedder, H7 present) |
+| `[x]` | `lewm/model.py` | PASS | rubric-verified; M2 round-trip covered by test_lewm.py |
+| `[x]` | `lewm/predictor.py` | PASS | rubric-verified (ARPredictor, H7 present) |
+| `[x]` | `lewm/projector.py` | PASS | rubric-verified (MLPProjector, H7 present); fixed pre-existing stale test_rollout_shape (S==1 contract) |
 
 ### L2-Round 11 — mamba, masked_autoencoder  (8 files)
 

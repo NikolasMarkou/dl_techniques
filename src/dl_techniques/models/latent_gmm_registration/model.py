@@ -1,3 +1,17 @@
+"""
+Latent-GMM Point Cloud Registration model.
+
+ACCEPTED RAW-TF EXCEPTION (production-map §L2-5 / H10):
+    The weighted-Procrustes rotation solver in the forward path uses
+    ``tf.linalg.svd`` / ``tf.linalg.det`` / ``tf.linalg.diag`` to recover the
+    optimal rigid rotation from the cross-covariance matrix. This cannot migrate
+    to ``keras.ops``: there is no ``keras.ops.svd`` (nor a backend-agnostic
+    determinant/diag-construct path suitable here), so the SVD-based closed-form
+    rotation is not expressible without the raw ``tf.linalg`` ops. The raw-TF
+    linear-algebra path is therefore an accepted, documented exception to the
+    keras.ops-only (H10) rule for the forward pass.
+"""
+
 import keras
 from typing import Dict, Any, Tuple
 
