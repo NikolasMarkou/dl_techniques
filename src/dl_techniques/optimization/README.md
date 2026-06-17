@@ -22,9 +22,10 @@ A comprehensive guide to using the optimization module for configuring optimizer
 
 The optimization module provides comprehensive components for configuring training optimization and inference:
 
-- **Optimizer Builder**: Creates and configures Keras optimizers (Adam, AdamW, RMSprop, Adadelta, SGLD) with gradient clipping support
+- **Optimizer Builder**: Creates and configures Keras optimizers (Adam, AdamW, RMSprop, Adadelta, SGLD, Gefen) with gradient clipping support
 - **Muon Optimizer**: MomentUm Orthogonalized by Newton-schulz optimizer for faster convergence on Transformers and ConvNets
 - **SGLD Optimizer**: Stochastic Gradient Langevin Dynamics — SGD with Gaussian noise for Bayesian posterior sampling and escape from shallow minima
+- **Gefen Optimizer**: Memory-lean AdamW variant (Gefen-lite, shared-v) that shares one second-moment estimate per block of parameters, reducing second-moment optimizer state
 - **Learning Rate Schedule Builder**: Creates learning rate schedules with automatic warmup periods
 - **Deep Supervision Schedule Builder**: Creates weight schedules for multi-scale deep supervision training
 - **SLED Logits Processor**: Self Logits Evolution Decoding for improving factuality in LLMs
@@ -113,6 +114,7 @@ The optimizer builder creates configured Keras optimizers with gradient clipping
 - **RMSprop**: Root mean square propagation (good for RNNs)
 - **Adadelta**: Adaptive learning rate method
 - **SGLD**: Stochastic Gradient Langevin Dynamics (SGD + calibrated Gaussian noise for Bayesian sampling)
+- **Gefen**: Memory-lean AdamW variant (Gefen-lite, shared-v) with a block-shared second moment; graph/`jit_compile`/`model.fit`-compatible drop-in for AdamW
 
 ### Basic Configuration
 
@@ -178,6 +180,20 @@ sgld_config = {
     "seed": 42,             # Optional int for reproducible noise (default: None)
     "weight_decay": 1e-4    # Optional decoupled weight decay
 }
+```
+
+#### Gefen
+```python
+gefen_config = {
+    "type": "gefen",
+    "beta_1": 0.9,          # First moment (momentum) decay rate
+    "beta_2": 0.999,        # Block-shared second moment decay rate
+    "epsilon": 1e-8,        # Numerical stability constant
+    "weight_decay": 0.0,    # Decoupled (AdamW) weight decay
+    "max_block_size": 1024, # Upper bound on the per-variable block size (period)
+    "min_block_size": 8     # Below this divisor, fall back to per-element AdamW
+}
+optimizer = optimizer_builder(gefen_config, lr_schedule)  # learning_rate via the lr/schedule
 ```
 
 ### Gradient Clipping Options
@@ -393,6 +409,96 @@ optimizer = optimizer_builder(config, lr_schedule=1e-3)
 
 - The noise coefficient `sqrt(2 * lr)` is the canonical Langevin scaling. Some reference implementations use `sqrt(lr)` (without the factor of two) — this implementation follows the standard derivation.
 - For preconditioned variants (pSGLD), implement as a subclass; SGLD itself is intentionally stateless.
+
+## Gefen Optimizer
+
+The Gefen optimizer is a **memory-lean AdamW variant** (this implementation is "Gefen-lite, shared-v") that shares a single second-moment estimate across each *block* of `period` contiguous (flattened) parameters, while keeping full-precision, full-shape first-moment momentum. Inspired by the Gefen paper (arxiv 2606.13894).
+
+The block `period` is chosen deterministically from each variable's shape in `build()` — the largest divisor of its element count that is `<= max_block_size`, falling back to `1` (per-element AdamW) when no valid divisor is `>= min_block_size`. Because `period` and the block count `K = numel / period` are static Python ints per variable, the block reshape is graph-static, making Gefen a `jit_compile`-compatible, `model.fit`-friendly drop-in for `keras.optimizers.AdamW`.
+
+### Honest Scope (vs. the full paper)
+
+This is a **shared-second-moment adaptation only**, NOT the full Gefen algorithm:
+
+- **No uint8 momentum quantization** and **no learned codebook**. Momentum is stored full-shape and full-precision (standard Adam first moment).
+- **Shape-based period selection** (not gradient-statistic period selection from step 1).
+
+As a consequence, the memory saving is on the **second-moment state only** — Gefen-lite does NOT reproduce the paper's full ~8x optimizer-state reduction (which depends on the omitted momentum quantization). The momentum buffer is the same size as AdamW's; only the second-moment buffer is compressed (from `numel` to `K = numel / period` floats per variable).
+
+### Update Rule
+
+```
+m       = beta_1 * m + (1 - beta_1) * g                  # full-shape momentum
+g_block = reshape(g, [K, period])
+bmsq    = mean(g_block^2, axis=1)                         # [K] block mean-square
+vmean   = beta_2 * vmean + (1 - beta_2) * bmsq            # [K] shared 2nd moment
+h_block = sqrt(vmean / (1 - beta_2^t)) + epsilon          # [K]
+denom   = broadcast(h_block) reshaped to var.shape        # one h per block
+p      *= (1 - lr * weight_decay)                         # decoupled (AdamW) WD
+p      -= lr * (m / (1 - beta_1^t)) / denom
+```
+
+### Basic Usage
+
+```python
+from dl_techniques.optimization.gefen_optimizer import Gefen
+
+optimizer = Gefen(
+    learning_rate=1e-3,
+    beta_1=0.9,
+    beta_2=0.999,
+    epsilon=1e-8,
+    weight_decay=0.0,
+    max_block_size=1024,
+    min_block_size=8,
+)
+
+model.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy')
+model.fit(x_train, y_train, epochs=10)  # graph / jit_compile compatible
+```
+
+### Configuration Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `learning_rate` | 1e-3 | Base learning rate. Accepts a float or a `LearningRateSchedule` (supplied via the lr/schedule like other optimizers). |
+| `beta_1` | 0.9 | Exponential decay rate for the first moment (momentum), in `[0, 1)`. |
+| `beta_2` | 0.999 | Exponential decay rate for the block-shared second moment, in `[0, 1)`. |
+| `epsilon` | 1e-8 | Small constant added to the denominator for numerical stability (`>= 0`). |
+| `weight_decay` | 0.0 | Decoupled (AdamW) weight decay coefficient, applied before the gradient step (`>= 0`). |
+| `max_block_size` | 1024 | Upper bound on the block size (`period`); the chosen period is the largest divisor of `numel` not exceeding this. |
+| `min_block_size` | 8 | If the largest valid divisor is `< min_block_size`, `period` falls back to `1` (per-element AdamW). |
+
+Standard `clipnorm`, `global_clipnorm`, and `clipvalue` are supported via the base `keras.optimizers.Optimizer` class.
+
+### Config-Driven Usage via `optimizer_builder`
+
+```python
+from dl_techniques.optimization import optimizer_builder
+
+config = {
+    "type": "gefen",
+    "beta_1": 0.9,
+    "beta_2": 0.999,
+    "epsilon": 1e-8,
+    "weight_decay": 0.0,
+    "max_block_size": 1024,
+    "min_block_size": 8,
+    "gradient_clipping_by_norm": 1.0,   # Standard clipping still applies
+}
+optimizer = optimizer_builder(config, lr_schedule=1e-3)
+```
+
+### When to Use Gefen
+
+- AdamW-style training where the second-moment optimizer state is a meaningful fraction of the memory budget.
+- A drop-in replacement for AdamW under `jit_compile=True` / `model.fit` without changing the training loop.
+
+### Notes
+
+- `period` is derived from each variable's shape at `build()` time and is therefore **not serialized**; it is recomputed identically on load from the restored shapes (only `max_block_size` / `min_block_size` are serialized).
+- Scalar / tiny variables (or those whose largest valid divisor is `< min_block_size`) degenerate to standard per-element AdamW (`period = 1`). Acceptable and documented.
+- Block math and `vmean` are kept in float32 for mixed-precision safety; the denominator is cast back to the variable dtype before the assign.
 
 ## Learning Rate Schedule Builder
 
@@ -864,6 +970,12 @@ The module uses research-backed default values from the constants module:
 - `seed=None` (non-deterministic noise unless set)
 - `weight_decay=None`
 
+#### Gefen Defaults
+- `learning_rate=1e-3`
+- `beta_1=0.9, beta_2=0.999, epsilon=1e-8`
+- `weight_decay=0.0`
+- `max_block_size=1024, min_block_size=8`
+
 #### Muon Defaults
 - `learning_rate=0.02`
 - `momentum=0.95`
@@ -940,6 +1052,7 @@ The module uses research-backed default values from the constants module:
    - **RMSprop**: RNNs, unstable gradients
    - **Adadelta**: When learning rate is hard to tune
    - **SGLD**: Bayesian posterior sampling, escaping shallow minima on rugged landscapes
+   - **Gefen**: AdamW-style training when second-moment optimizer state memory matters (block-shared second moment)
 
 2. **Muon Learning Rates**:
    ```python
@@ -1083,7 +1196,7 @@ config = {
 #### "Unknown optimizer/schedule type"
 ```python
 # Check spelling and supported types
-supported_optimizers = ["adam", "adamw", "rmsprop", "adadelta", "sgld"]
+supported_optimizers = ["adam", "adamw", "rmsprop", "adadelta", "sgld", "gefen"]
 supported_schedules = ["cosine_decay", "exponential_decay", "cosine_decay_restarts"]
 supported_ds_schedules = [
     "constant_equal", "constant_low_to_high", "constant_high_to_low",
