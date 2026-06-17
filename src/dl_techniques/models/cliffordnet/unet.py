@@ -326,6 +326,10 @@ class _DetectionHeadBlock(keras.layers.Layer):
             )
         return self._det_head(list(inputs), training=training)
 
+    def compute_output_shape(self, input_shape: Any) -> Tuple:
+        """Delegate to the wrapped YOLOv12 detection head."""
+        return self._det_head.compute_output_shape(list(input_shape))
+
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update(

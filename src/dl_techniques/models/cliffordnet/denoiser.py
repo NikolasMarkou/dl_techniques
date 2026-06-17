@@ -396,13 +396,13 @@ class CliffordNetDenoiser(keras.Model):
     # ------------------------------------------------------------------
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        super().build(input_shape)
         if len(input_shape) == 3:
             build_shape = (None,) + tuple(input_shape)
         else:
             build_shape = tuple(input_shape)
         dummy = keras.KerasTensor(build_shape)
         _ = self.call(dummy)
+        super().build(input_shape)
 
     # ------------------------------------------------------------------
     # Forward pass

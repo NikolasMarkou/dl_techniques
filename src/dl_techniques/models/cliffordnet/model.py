@@ -45,6 +45,7 @@ from dl_techniques.layers.geometric.clifford_block import (
 )
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
+from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 
 # Match the reference: trunc_normal_(std=0.02) for all Conv2d and Linear.
 _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
@@ -315,13 +316,13 @@ class CliffordNet(keras.Model):
 
         :param input_shape: Input tensor shape ``(B, H, W, C_in)``.
         """
-        super().build(input_shape)
         if len(input_shape) == 3:
             build_shape = (None,) + tuple(input_shape)
         else:
             build_shape = tuple(input_shape)
         dummy = keras.KerasTensor(build_shape)
         _ = self.call(dummy)
+        super().build(input_shape)
 
     # ------------------------------------------------------------------
     # Forward pass helpers
@@ -406,23 +407,34 @@ class CliffordNet(keras.Model):
         Handles loading with smart mismatch handling, useful when the
         number of classes differs or when loading backbone-only weights.
 
+        Weights are transferred layer-by-layer via
+        :func:`dl_techniques.utils.weight_transfer.load_weights_from_checkpoint`,
+        the canonical replacement for ``self.load_weights(by_name=True)`` (which
+        raises on ``.keras`` files in Keras 3.8+).
+
         :param weights_path: Path to the ``.keras`` weights file.
         :param skip_mismatch: Skip layers with mismatched shapes. Useful
-            when loading weights with different ``num_classes``.
-        :param by_name: Load weights by layer name.
+            when loading weights with different ``num_classes``. Maps to
+            ``strict=not skip_mismatch``.
+        :param by_name: Retained for backward compatibility; layer-by-layer
+            transfer is always name-based, so this argument is ignored.
         :raises FileNotFoundError: If ``weights_path`` does not exist.
         :raises ValueError: If weights cannot be loaded.
         """
         if not os.path.exists(weights_path):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
 
+        del by_name  # name-based transfer is implicit; kept for signature stability
+
         try:
             logger.info(f"Loading pretrained weights from {weights_path}")
-            self.load_weights(
-                weights_path,
-                skip_mismatch=skip_mismatch,
-                by_name=by_name,
+            report = load_weights_from_checkpoint(
+                target=self,
+                ckpt_path=weights_path,
+                skip_prefixes=(),
+                strict=not skip_mismatch,
             )
+            logger.info(report.summary_string())
             note = (
                 " Layers with shape mismatches were skipped."
                 if skip_mismatch

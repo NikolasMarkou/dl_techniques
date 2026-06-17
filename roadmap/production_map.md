@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 20 / 183 files production-verified**
+**Progress: 30 / 183 files production-verified**
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -945,20 +945,20 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 | `[x]` | `ccnets/trainer.py` | N/A | N/A — non-layer (confirmed) |
 | `[x]` | `ccnets/utils.py` | N/A | N/A — non-layer (ccnets = smoke SKIP, §L2-5) |
 
-### L2-Round 4 — cliffordnet  (10 files)
+### L2-Round 4 — cliffordnet  (10 files)  — DONE
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `cliffordnet/clip.py` | PASS | rubric-verify |
-| `[ ]` | `cliffordnet/conditional_denoiser.py` | PASS | rubric-verify |
-| `[ ]` | `cliffordnet/confidence_denoiser.py` | PASS | rubric-verify |
-| `[ ]` | `cliffordnet/denoiser.py` | FAIL | CliffordNetDenoiser: super_build_last |
-| `[ ]` | `cliffordnet/embedding_unet.py` | PASS | rubric-verify |
-| `[ ]` | `cliffordnet/lm.py` | PASS | rubric-verify |
-| `[ ]` | `cliffordnet/lm_routing.py` | PASS | rubric-verify |
-| `[ ]` | `cliffordnet/lmunet.py` | PASS | rubric-verify |
-| `[ ]` | `cliffordnet/model.py` | FAIL | CliffordNet: super_build_last (NON-TRIVIAL — post-super dummy-forward, §L2-5; weight-handling SOFT ~L413) |
-| `[ ]` | `cliffordnet/unet.py` | FAIL | _DetectionHeadBlock: compute_output_shape (embedded LAYER → H7 HARD) |
+| `[x]` | `cliffordnet/clip.py` | PASS | rubric-verified |
+| `[x]` | `cliffordnet/conditional_denoiser.py` | PASS | rubric-verified; added M2 round-trip test (was untested) |
+| `[x]` | `cliffordnet/confidence_denoiser.py` | PASS | rubric-verified; added M2 round-trip test (was untested) |
+| `[x]` | `cliffordnet/denoiser.py` | PASS | H6 fixed (dummy-forward before super().build()); added M2 round-trip test (was untested) |
+| `[x]` | `cliffordnet/embedding_unet.py` | PASS | rubric-verified |
+| `[x]` | `cliffordnet/lm.py` | PASS | rubric-verified |
+| `[x]` | `cliffordnet/lm_routing.py` | PASS | rubric-verified |
+| `[x]` | `cliffordnet/lmunet.py` | PASS | rubric-verified |
+| `[x]` | `cliffordnet/model.py` | PASS | H6 fixed — dummy-forward CLEAN reorder before super().build() (NON-TRIVIAL resolved, no interaction); weight-handling migrated to load_weights_from_checkpoint |
+| `[x]` | `cliffordnet/unet.py` | PASS | H7: added _DetectionHeadBlock.compute_output_shape (delegates to YOLOv12DetectionHead) |
 
 ### L2-Round 5 — clip, convnext, convnext_patch_vae  (8 files)
 
