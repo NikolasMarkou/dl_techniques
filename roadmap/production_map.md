@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 7 / 183 files production-verified**
+**Progress: 11 / 183 files production-verified**
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -922,14 +922,14 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 | `[x]` | `bias_free_denoisers/bfunet_conditional.py` | N/A | N/A — pure-functions (confirmed) |
 | `[x]` | `bias_free_denoisers/bfunet_conditional_unified.py` | PASS | H5 explicit sublayer build in both injection layers (fixes .keras round-trip); M2 round-trip test added |
 
-### L2-Round 2 — byte_latent_transformer, capsnet, cbam  (4 files)
+### L2-Round 2 — byte_latent_transformer, capsnet, cbam  (4 files)  — DONE
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `byte_latent_transformer/model.py` | FAIL | ByteLatentTransformer: super_build_last |
-| `[ ]` | `capsnet/model.py` | PASS | rubric-verify |
-| `[ ]` | `capsnet/model_v2.py` | PASS | rubric-verify |
-| `[ ]` | `cbam/model.py` | PASS | rubric-verify |
+| `[x]` | `byte_latent_transformer/model.py` | PASS | H6 fixed (logger before super().build); H4 added (_validate_config); M2 fixed: get_build_config/build_from_config + explicit MHA build in blt_blocks PatchPooling/LocalDecoder (was dropping 16 attn weights on reload); new test_model.py |
+| `[x]` | `capsnet/model.py` | PASS | rubric-verified; round-trip test passes |
+| `[x]` | `capsnet/model_v2.py` | PASS | rubric-verified; round-trip test passes |
+| `[x]` | `cbam/model.py` | PASS | rubric-verified; round-trip test passes |
 
 ### L2-Round 3 — ccnets  (9 files)
 

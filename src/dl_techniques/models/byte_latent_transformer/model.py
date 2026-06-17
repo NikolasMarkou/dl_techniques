@@ -229,6 +229,9 @@ class ByteLatentTransformer(keras.Model):
         self.patch_pooling_method = patch_pooling_method
         self._custom_entropy_model = entropy_model is not None
 
+        # Validate configuration before constructing sub-layers
+        self._validate_config()
+
         # Create all sub-layers in __init__ following modern Keras pattern
         self.tokenizer = ByteTokenizer(
             vocab_size=vocab_size,
@@ -290,6 +293,53 @@ class ByteLatentTransformer(keras.Model):
             name='local_decoder'
         )
 
+    def _validate_config(self) -> None:
+        """
+        Validate constructor arguments.
+
+        :raises ValueError: If any dimension/layer/head count is non-positive, if
+            head counts do not divide their corresponding model dimensions, or if
+            ``patch_pooling_method`` is not a recognized value.
+        """
+        positive_args = {
+            'vocab_size': self.vocab_size,
+            'local_dim': self.local_dim,
+            'global_dim': self.global_dim,
+            'num_local_layers': self.num_local_layers,
+            'num_global_layers': self.num_global_layers,
+            'num_heads_local': self.num_heads_local,
+            'num_heads_global': self.num_heads_global,
+            'max_sequence_length': self.max_sequence_length,
+            'max_patches': self.max_patches,
+            'cross_attention_queries': self.cross_attention_queries,
+        }
+        for name, value in positive_args.items():
+            if value <= 0:
+                raise ValueError(f"{name} must be positive, got {value}")
+
+        if self.local_dim % self.num_heads_local != 0:
+            raise ValueError(
+                f"local_dim ({self.local_dim}) must be divisible by "
+                f"num_heads_local ({self.num_heads_local})"
+            )
+        if self.global_dim % self.num_heads_global != 0:
+            raise ValueError(
+                f"global_dim ({self.global_dim}) must be divisible by "
+                f"num_heads_global ({self.num_heads_global})"
+            )
+
+        if not (0.0 <= self.dropout_rate < 1.0):
+            raise ValueError(
+                f"dropout_rate must be in [0, 1), got {self.dropout_rate}"
+            )
+
+        valid_pooling = {'attention', 'mean', 'max'}
+        if self.patch_pooling_method not in valid_pooling:
+            raise ValueError(
+                f"patch_pooling_method must be one of {valid_pooling}, "
+                f"got '{self.patch_pooling_method}'"
+            )
+
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
         Build the model and all sub-layers.
@@ -297,6 +347,9 @@ class ByteLatentTransformer(keras.Model):
         Args:
             input_shape: Shape of input tensor (batch_size, sequence_length).
         """
+        # Remember the shape so the model can be rebuilt on .keras deserialization
+        self._build_input_shape = input_shape
+
         # Build sub-layers explicitly (skip if already built, e.g. pre-trained entropy model)
         if not self.tokenizer.built:
             self.tokenizer.build(input_shape)
@@ -319,10 +372,10 @@ class ByteLatentTransformer(keras.Model):
         if not self.local_decoder.built:
             self.local_decoder.build([input_shape, global_context_shape, input_shape])
 
+        logger.info(f"Built BLT model with input shape {input_shape}")
+
         # Always call parent build at the end
         super().build(input_shape)
-
-        logger.info(f"Built BLT model with input shape {input_shape}")
 
     def call(
             self,
@@ -657,6 +710,26 @@ class ByteLatentTransformer(keras.Model):
             'entropy_model': None if not self._custom_entropy_model else self.entropy_model,
         })
         return config
+
+    def get_build_config(self) -> Dict[str, Any]:
+        """
+        Return the build configuration so the model can be rebuilt on load.
+
+        :returns: A dict carrying the stored ``input_shape``, or an empty dict if
+            the model was never built.
+        """
+        if hasattr(self, "_build_input_shape") and self._build_input_shape is not None:
+            return {"input_shape": list(self._build_input_shape)}
+        return {}
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """
+        Rebuild the model (and all sub-layers) from a saved build configuration.
+
+        :param config: Dict produced by :meth:`get_build_config`.
+        """
+        if "input_shape" in config and config["input_shape"] is not None:
+            self.build(tuple(config["input_shape"]))
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'ByteLatentTransformer':

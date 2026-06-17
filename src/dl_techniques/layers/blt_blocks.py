@@ -732,8 +732,12 @@ class PatchPooling(keras.layers.Layer):
                 name='query_embeddings'
             )
 
-            # Let Keras build attention lazily on first call
-            # (explicit build not needed for Keras built-in MHA)
+            # Explicitly build the attention layer so its weights materialize on
+            # .keras reload (lazy first-call build leaves weights unloadable).
+            # call() uses query=(B, num_queries, input_dim), key/value=(B, T, input_dim).
+            query_shape = (input_shape[0], self.num_queries, input_dim)
+            kv_shape = (input_shape[0], None, input_dim)
+            self.attention_layer.build(query_shape, kv_shape, kv_shape)
 
         # Create and build output projection
         self.output_projection = keras.layers.Dense(
@@ -1376,7 +1380,14 @@ class LocalDecoder(keras.layers.Layer):
             decoder_layer.build(current_shape)
             decoder_output_shape = decoder_layer.compute_output_shape(current_shape)
 
-            # Cross-attention builds lazily on first call (Keras built-in MHA)
+            # Explicitly build cross-attention so its weights materialize on
+            # .keras reload (lazy first-call build leaves weights unloadable).
+            # call() uses query=decoder_hidden (local_dim), key/value=local_dim context.
+            cross_attention.build(
+                decoder_output_shape,
+                cross_attention_kv_shape,
+                cross_attention_kv_shape,
+            )
 
             # Build cross-attention norm
             cross_norm.build(decoder_output_shape)
