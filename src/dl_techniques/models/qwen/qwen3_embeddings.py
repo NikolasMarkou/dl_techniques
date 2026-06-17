@@ -283,18 +283,19 @@ class Qwen3EmbeddingLayer(keras.layers.Layer):
         # Apply final normalization
         hidden_states = self.final_norm(hidden_states)
 
-        # Last-token pooling
+        # Last-token pooling: gather the hidden state at each sequence's final
+        # non-padded position. take_along_axis requires the index tensor to match
+        # the rank of `hidden_states` (B, T, D), so broadcast the per-row last
+        # index to (B, 1, D) before gathering.
         sequence_lengths = ops.sum(ops.cast(attention_mask, "int32"), axis=1) - 1
-        batch_size = ops.shape(hidden_states)[0]
+        hidden_dim = ops.shape(hidden_states)[-1]
 
-        # Create indices for gathering the last token's hidden state
-        batch_indices = ops.arange(batch_size)
-        gather_indices = ops.stack([batch_indices, sequence_lengths], axis=1)
-
+        gather_indices = ops.reshape(sequence_lengths, (-1, 1, 1))
+        gather_indices = ops.broadcast_to(
+            gather_indices, (ops.shape(hidden_states)[0], 1, hidden_dim)
+        )
         pooled_embeddings = ops.take_along_axis(
-            hidden_states,
-            ops.expand_dims(gather_indices[:, 1], axis=-1),
-            axis=1
+            hidden_states, gather_indices, axis=1
         )
         pooled_embeddings = ops.squeeze(pooled_embeddings, axis=1)
 
@@ -551,19 +552,18 @@ class Qwen3RerankerLayer(keras.layers.Layer):
         # Get logits from language modeling head
         logits = self.lm_head(hidden_states)
 
-        # Get the logits for the last token in each sequence
+        # Get the logits for the last token in each sequence. take_along_axis
+        # needs the index tensor to match the rank of `logits` (B, T, V), so
+        # broadcast the per-row last index to (B, 1, V) before gathering.
         sequence_lengths = ops.sum(ops.cast(attention_mask, "int32"), axis=1) - 1
-        batch_size = ops.shape(logits)[0]
+        vocab_dim = ops.shape(logits)[-1]
 
-        # Create indices for gathering
-        batch_indices = ops.arange(batch_size)
-        gather_indices = ops.stack([batch_indices, sequence_lengths], axis=1)
-
-        # Gather last token logits
+        gather_indices = ops.reshape(sequence_lengths, (-1, 1, 1))
+        gather_indices = ops.broadcast_to(
+            gather_indices, (ops.shape(logits)[0], 1, vocab_dim)
+        )
         last_token_logits = ops.take_along_axis(
-            logits,
-            ops.expand_dims(gather_indices[:, 1], axis=-1),
-            axis=1
+            logits, gather_indices, axis=1
         )
         last_token_logits = ops.squeeze(last_token_logits, axis=1)
 

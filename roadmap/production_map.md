@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 120 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete; nano_vlm_world_model/model.py M2-DEFERRED [~], not counted)
+**Progress: 127 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete; nano_vlm_world_model/model.py M2-DEFERRED [~], not counted)
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -1116,17 +1116,17 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 |------|------|---------|----------|
 | `[x]` | `pw_fnet/model.py` | PASS | H6 fixed in both embedded Downsample + Upsample layers (explicit inner-conv build before super().build()); existing test_model.py (10 round-trips, 46 tests) passes |
 
-### L2-Round 18 — qwen  (7 files)
+### L2-Round 18 — qwen  (7 files)  — DONE
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `qwen/components.py` | PASS | rubric-verify |
-| `[ ]` | `qwen/qwen3.py` | PASS | rubric-verify |
-| `[ ]` | `qwen/qwen3_embeddings.py` | PASS | rubric-verify |
-| `[ ]` | `qwen/qwen3_mega.py` | PASS | rubric-verify |
-| `[ ]` | `qwen/qwen3_next.py` | PASS | rubric-verify |
-| `[ ]` | `qwen/qwen3_omni.py` | N/A | N/A — pure-functions |
-| `[ ]` | `qwen/qwen3_som.py` | PASS | rubric-verify |
+| `[x]` | `qwen/components.py` | PASS | rubric-verified; 53 tests incl. round-trips |
+| `[x]` | `qwen/qwen3.py` | PASS | rubric-verified; round-trip tests pass |
+| `[x]` | `qwen/qwen3_embeddings.py` | PASS | was DEAD-ON-FORWARD (both Qwen3Embedding/Reranker models): last-token pooling fed a 2-D index to ops.take_along_axis on a 3-D tensor → fixed to broadcast index to (B,1,D)/(B,1,V). Added test_qwen3_embeddings.py (forward + M2). Was untested. |
+| `[x]` | `qwen/qwen3_mega.py` | PASS | rubric-verified; added test_qwen3_mega.py (forward + M2 round-trip; clean 0.0). Was untested. |
+| `[x]` | `qwen/qwen3_next.py` | PASS | rubric-verified; round-trip tests pass |
+| `[x]` | `qwen/qwen3_omni.py` | N/A | N/A — pure-functions (confirmed) |
+| `[x]` | `qwen/qwen3_som.py` | PASS | rubric-verified; added test_qwen3_som.py (gen + cls forward + M2; clean 0.0). Was untested. |
 
 ### L2-Round 19 — relgt, resnet, sam  (7 files)
 
