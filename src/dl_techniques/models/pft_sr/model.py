@@ -204,6 +204,15 @@ class PFTSR(keras.Model):
             name="conv_last"
         )
 
+        # Explicitly materialize every sublayer via a concrete dummy forward so
+        # their weights exist on .keras reload. The sublayers are created here but
+        # build lazily on first call; without this, build_from_config re-creates
+        # them unbuilt and weight loading fails ("... was never built"). Calling
+        # self.call directly (not self(...)) avoids re-entering build().
+        if all(d is not None for d in input_shape[1:]):
+            dummy = keras.ops.zeros((1,) + tuple(input_shape[1:]))
+            self.call(dummy, training=False)
+
         super().build(input_shape)
 
     def _build_pixelshuffle_upsampler(self) -> keras.Sequential:

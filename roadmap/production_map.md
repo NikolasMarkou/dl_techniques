@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 112 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete; nano_vlm_world_model/model.py M2-DEFERRED [~], not counted)
+**Progress: 119 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete; nano_vlm_world_model/model.py M2-DEFERRED [~], not counted)
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -1098,17 +1098,17 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 | `[x]` | `ntm/model.py` | PASS | rubric-verified; existing test_model.py has 4 .keras round-trips |
 | `[x]` | `ntm/model_multitask.py` | PASS | rubric-verified; added test_model_multitask.py (forward + ValueError + M2 round-trip; clean 0.0) |
 
-### L2-Round 16 — pft_sr, power_mlp, power_sampling  (7 files)
+### L2-Round 16 — pft_sr, power_mlp, power_sampling  (7 files)  — DONE
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `pft_sr/model.py` | PASS | rubric-verify |
-| `[ ]` | `power_mlp/model.py` | PASS | rubric-verify |
-| `[ ]` | `power_sampling/config.py` | N/A | N/A — dataclass-config |
-| `[ ]` | `power_sampling/forward.py` | N/A | N/A — non-layer (pure-Python inference engine, no keras.Model) |
-| `[ ]` | `power_sampling/ops.py` | N/A | N/A — pure-functions |
-| `[ ]` | `power_sampling/protocols.py` | N/A | N/A — non-layer (typing.Protocol) |
-| `[ ]` | `power_sampling/sampler.py` | N/A | N/A — non-layer |
+| `[x]` | `pft_sr/model.py` | PASS | FIXED M2 round-trip (sublayers created in build() built lazily → 120 unbuilt on reload; added concrete dummy-forward in build()). Added test_model.py. |
+| `[x]` | `power_mlp/model.py` | PASS | rubric-verified; added test dir + test_model.py (forward + from_variant + ValueError + M2 round-trip; clean 0.0) |
+| `[x]` | `power_sampling/config.py` | N/A | N/A — dataclass-config (confirmed) |
+| `[x]` | `power_sampling/forward.py` | N/A | N/A — non-layer (pure-Python inference engine, no keras.Model) |
+| `[x]` | `power_sampling/ops.py` | N/A | N/A — pure-functions (confirmed) |
+| `[x]` | `power_sampling/protocols.py` | N/A | N/A — non-layer (typing.Protocol) |
+| `[x]` | `power_sampling/sampler.py` | N/A | N/A — non-layer (confirmed) |
 
 ### L2-Round 17 — pw_fnet  (1 file)
 
