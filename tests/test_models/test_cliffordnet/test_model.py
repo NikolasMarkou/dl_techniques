@@ -37,7 +37,9 @@ class TestCliffordNetIter1Refactor:
         import dl_techniques.models.cliffordnet as pkg
 
         # Surface expanded by plan_2026-05-12_632605aa to add the
-        # CliffordNetEmbedding bidirectional U-Net embedding model + factories.
+        # CliffordNetEmbedding bidirectional U-Net embedding model + factories,
+        # and by plan_2026-06-17_4b339fb7 to add the CliffordLaplacianUNet
+        # Laplacian-pyramid autoencoder + factory.
         assert set(pkg.__all__) == {
             "CliffordNet",
             "create_cliffordnet",
@@ -46,4 +48,6 @@ class TestCliffordNetIter1Refactor:
             "CliffordNetEmbedding",
             "create_cliffordnet_embedding",
             "create_cliffordnet_embedding_with_head",
+            "CliffordLaplacianUNet",
+            "create_clifford_laplacian_unet",
         }
