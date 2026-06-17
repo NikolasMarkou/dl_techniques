@@ -17,6 +17,8 @@ Available Initializers:
     geometric separation.
 -   `HaarWaveletInitializer`: Constructs fixed 2D Haar wavelet filters for
     use in convolutional layers, enabling multi-resolution feature extraction.
+-   `GaborFiltersInitializer`: Deterministic Gabor filter-bank initialization for
+    the first Conv2D layer, sweeping Table I parameters (Ozbulak & Ekenel).
 -   `PolarInitializer`: Samples in polar coordinates -- exact per-vector L2 norm
     with a uniform-on-sphere direction (PolarQuant Lemma 2), enabling equinorm
     initialization.
@@ -33,6 +35,7 @@ from .haar_wavelet_initializer import (
     HaarWaveletInitializer,
     create_haar_depthwise_conv2d,
 )
+from .gabor_filters_initializer import GaborFiltersInitializer
 from .he_orthonormal_initializer import HeOrthonormalInitializer
 from .orthonormal_initializer import OrthonormalInitializer
 from .hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
@@ -46,6 +49,7 @@ from .kan_initializer import (
 __all__ = [
     "HaarWaveletInitializer",
     "create_haar_depthwise_conv2d",
+    "GaborFiltersInitializer",
     "HeOrthonormalInitializer",
     "OrthonormalInitializer",
     "OrthogonalHypersphereInitializer",
