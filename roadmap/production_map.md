@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 89 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete)
+**Progress: 98 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete)
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -1059,19 +1059,19 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 | `[x]` | `memory_bank/wave_field_memory_llm.py` | PASS | rubric-verified; 8 .keras round-trip tests pass |
 | `[x]` | `memory_bank/write_controller.py` | PASS | H10 FIXED — removed the tf.debugging raw-tf debug-guard; replaced with keras.ops `ops.maximum(max_seq_len-t, 0)` clamp (graph-safe, no exception needed) |
 
-### L2-Round 13 — mini_vec2vec, mobile_clip, mobilenet  (9 files)
+### L2-Round 13 — mini_vec2vec, mobile_clip, mobilenet  (9 files)  — DONE
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `mini_vec2vec/example_alignment.py` | N/A | N/A — pure-functions |
-| `[ ]` | `mini_vec2vec/model.py` | PASS | rubric-verify |
-| `[ ]` | `mobile_clip/components.py` | PASS | rubric-verify |
-| `[ ]` | `mobile_clip/mobile_clip_v1.py` | PASS | rubric-verify (CNN substitutes via _BACKBONE_ALIASES) |
-| `[ ]` | `mobile_clip/mobile_clip_v2.py` | N/A | N/A — pure-functions |
-| `[ ]` | `mobilenet/mobilenet_v1.py` | PASS | rubric-verify |
-| `[ ]` | `mobilenet/mobilenet_v2.py` | PASS | rubric-verify |
-| `[ ]` | `mobilenet/mobilenet_v3.py` | PASS | rubric-verify |
-| `[ ]` | `mobilenet/mobilenet_v4.py` | PASS | rubric-verify |
+| `[x]` | `mini_vec2vec/example_alignment.py` | N/A | N/A — pure-functions (confirmed) |
+| `[x]` | `mini_vec2vec/model.py` | PASS | rubric-verified; added test_model.py with M2 round-trip (was smoke-only; round-trip clean) |
+| `[x]` | `mobile_clip/components.py` | PASS | rubric-verified; round-trip tests pass |
+| `[x]` | `mobile_clip/mobile_clip_v1.py` | PASS | rubric-verified (CNN substitutes via _BACKBONE_ALIASES); round-trip tests pass |
+| `[x]` | `mobile_clip/mobile_clip_v2.py` | N/A | N/A — pure-functions (confirmed) |
+| `[x]` | `mobilenet/mobilenet_v1.py` | PASS | rubric-verified; 6 round-trip tests pass |
+| `[x]` | `mobilenet/mobilenet_v2.py` | PASS | rubric-verified; 6 round-trip tests pass |
+| `[x]` | `mobilenet/mobilenet_v3.py` | PASS | rubric-verified; 6 round-trip tests pass |
+| `[x]` | `mobilenet/mobilenet_v4.py` | PASS | rubric-verified; 6 round-trip tests pass |
 
 ### L2-Round 14 — modern_bert, mothnet, nam  (8 files)
 
