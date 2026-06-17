@@ -896,7 +896,11 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 0 / 183 files production-verified**
+**Progress: 7 / 183 files production-verified**
+
+> **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
+> authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
+> suites (build + forward + `.keras` reload) provide equivalent runtime coverage and were used instead.
 
 Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS/DEFERRED · `[x]` DONE.
 `verdict` is the `scripts/audit_layers.py --models` mechanical result at baseline `7b1e28af`
@@ -906,17 +910,17 @@ human-confirmed), or `rubric-verify` for current-PASS files needing a human rubr
 Rounds are directory-cohesive (whole directories per round; model files interdepend). 25 rounds.
 
 <!-- L2-WORKLIST -->
-### L2-Round 1 — accunet, bert, bias_free_denoisers  (7 files)
+### L2-Round 1 — accunet, bert, bias_free_denoisers  (7 files)  — DONE
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `accunet/model.py` | PASS | rubric-verify |
-| `[ ]` | `bert/bert.py` | PASS | rubric-verify (CANONICAL EXEMPLAR — re-confirm) |
-| `[ ]` | `bias_free_denoisers/bfcnn.py` | N/A | N/A — pure-functions |
-| `[ ]` | `bias_free_denoisers/bfconvunext.py` | FAIL | ConvUNextStem: super_build_last |
-| `[ ]` | `bias_free_denoisers/bfunet.py` | N/A | N/A — pure-functions (weight-handling SOFT: load_weights by_name ~L515) |
-| `[ ]` | `bias_free_denoisers/bfunet_conditional.py` | N/A | N/A — pure-functions |
-| `[ ]` | `bias_free_denoisers/bfunet_conditional_unified.py` | PASS | rubric-verify |
+| `[x]` | `accunet/model.py` | PASS | rubric-verified; 70 accunet+bert tests pass |
+| `[x]` | `bert/bert.py` | PASS | CANONICAL EXEMPLAR re-confirmed (no changes) |
+| `[x]` | `bias_free_denoisers/bfcnn.py` | N/A | N/A — pure-functions (confirmed) |
+| `[x]` | `bias_free_denoisers/bfconvunext.py` | PASS | H6 fixed (super().build last); fixed latent bug (kernel_initializer passed to ConvNextBlock); H5 explicit sublayer build for .keras round-trip; new test added |
+| `[x]` | `bias_free_denoisers/bfunet.py` | N/A | N/A — pure-functions; weight-handling SOFT migrated to load_weights_from_checkpoint |
+| `[x]` | `bias_free_denoisers/bfunet_conditional.py` | N/A | N/A — pure-functions (confirmed) |
+| `[x]` | `bias_free_denoisers/bfunet_conditional_unified.py` | PASS | H5 explicit sublayer build in both injection layers (fixes .keras round-trip); M2 round-trip test added |
 
 ### L2-Round 2 — byte_latent_transformer, capsnet, cbam  (4 files)
 

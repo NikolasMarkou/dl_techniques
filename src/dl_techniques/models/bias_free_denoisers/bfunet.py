@@ -32,6 +32,7 @@ from typing import Optional, Union, Tuple, List, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.bias_free_conv2d import BiasFreeConv2D, BiasFreeResidualBlock
 
 # ---------------------------------------------------------------------
@@ -525,13 +526,19 @@ def load_pretrained_weights_into_model(
     particularly useful when the input shape, output channels, or deep
     supervision settings differ between the pretrained and target models.
 
+    Weights are transferred layer-by-layer via
+    :func:`dl_techniques.utils.weight_transfer.load_weights_from_checkpoint`,
+    which is the canonical replacement for ``model.load_weights(by_name=True)``
+    (the latter raises on ``.keras`` files in Keras 3.8+).
+
     Args:
         model: Keras Model, the BFUNet model to load weights into.
         weights_path: String, path to the weights file (.keras format).
         skip_mismatch: Boolean, whether to skip layers with mismatched shapes.
             Useful when loading weights with different input/output shapes
-            or deep supervision settings.
-        by_name: Boolean, whether to load weights by layer name.
+            or deep supervision settings. Maps to ``strict=not skip_mismatch``.
+        by_name: Boolean, retained for backward compatibility. Layer-by-layer
+            transfer is always name-based; this argument is ignored.
 
     Raises:
         FileNotFoundError: If weights_path doesn't exist.
@@ -550,21 +557,24 @@ def load_pretrained_weights_into_model(
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"Weights file not found: {weights_path}")
 
+    del by_name  # name-based transfer is implicit; kept for signature stability
+
     try:
-        # Build model if not already built
+        # Build model if not already built (weight transfer needs a built target)
         if not model.built:
             dummy_input = keras.random.normal((1,) + tuple(model.input.shape[1:]))
             model(dummy_input, training=False)
 
         logger.info(f"Loading pretrained weights from {weights_path}")
 
-        # Load weights with appropriate settings
-        model.load_weights(
-            weights_path,
-            skip_mismatch=skip_mismatch,
-            by_name=by_name
+        report = load_weights_from_checkpoint(
+            target=model,
+            ckpt_path=weights_path,
+            skip_prefixes=(),
+            strict=not skip_mismatch,
         )
 
+        logger.info(report.summary_string())
         if skip_mismatch:
             logger.info(
                 "Weights loaded with skip_mismatch=True. "

@@ -177,6 +177,11 @@ class DenseConditioningInjection(keras.layers.Layer):
                 name=f'{self.name}_scale'
             )
 
+        # Explicitly build the projection sublayer so its weights materialize
+        # on .keras reload (lazy auto-build drops state during deserialization).
+        if self.projection_layer is not None:
+            self.projection_layer.build(conditioning_shape)
+
         super().build(input_shape)
 
     def call(self, inputs):
@@ -302,6 +307,10 @@ class DiscreteConditioningInjection(keras.layers.Layer):
             kernel_regularizer=self.kernel_regularizer,
             name=f'{self.name}_projection'
         )
+
+        # Explicitly build the projection sublayer so its weights materialize
+        # on .keras reload (lazy auto-build drops state during deserialization).
+        self.projection_layer.build(embedding_shape)
 
         super().build(input_shape)
 

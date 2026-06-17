@@ -213,6 +213,45 @@ class TestUnifiedConditionalBFUNet:
         assert outputs[1].shape == (1, 32, 32, 1)
         assert outputs[2].shape == (1, 16, 16, 1)
 
+    # ================================================================
+    # M2: Full .keras round-trip (save -> load -> identical outputs)
+    # ================================================================
+
+    def test_keras_round_trip_hybrid(self, tmp_path, target_shape, dense_shape, num_classes):
+        """Full save/load round-trip must preserve outputs exactly.
+
+        Exercises the registered embedded layers DenseConditioningInjection and
+        DiscreteConditioningInjection through the hybrid path.
+        """
+        model = create_unified_conditional_bfunet(
+            target_shape=target_shape,
+            dense_conditioning_shape=dense_shape,
+            num_classes=num_classes,
+            depth=3,
+            initial_filters=16,
+        )
+
+        x_target = np.random.rand(1, *target_shape).astype(np.float32)
+        x_dense = np.random.rand(1, *dense_shape).astype(np.float32)
+        c_label = np.array([0], dtype=np.int32)
+        inputs = [x_target, x_dense, c_label]
+
+        y_before = model(inputs)
+
+        save_path = os.path.join(str(tmp_path), 'unified_bfunet.keras')
+        model.save(save_path)
+        loaded = keras.models.load_model(save_path)
+
+        y_after = loaded(inputs)
+
+        # GPU fp32 reduction noise -> atol 1e-4 (SYSTEM invariant)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(y_before),
+            keras.ops.convert_to_numpy(y_after),
+            atol=1e-4,
+            err_msg="Outputs differ after .keras round-trip"
+        )
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

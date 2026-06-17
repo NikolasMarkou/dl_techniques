@@ -92,8 +92,6 @@ class ConvUNextStem(keras.layers.Layer):
 
     def build(self, input_shape):
         """Build the stem layers."""
-        super().build(input_shape)
-
         # Large kernel convolution (bias-free)
         self.conv = keras.layers.Conv2D(
             filters=self.filters,
@@ -107,6 +105,14 @@ class ConvUNextStem(keras.layers.Layer):
 
         # Global Response Normalization (consistent with ConvNeXt V2)
         self.grn = GlobalResponseNormalization(name='stem_grn')
+
+        # Explicitly build sublayers so weights materialize on .keras reload
+        # (lazy auto-build drops their state during deserialization).
+        self.conv.build(input_shape)
+        conv_output_shape = self.conv.compute_output_shape(input_shape)
+        self.grn.build(conv_output_shape)
+
+        super().build(input_shape)
 
     def call(self, inputs, training=None):
         """Forward pass."""
@@ -355,7 +361,6 @@ def create_convunext_denoiser(
                 use_bias=False,  # Bias-free for scaling invariance
                 dropout_rate=current_drop_path,  # Use as stochastic depth
                 spatial_dropout_rate=0.0,
-                kernel_initializer=kernel_initializer,
                 kernel_regularizer=kernel_regularizer,
                 name=f'encoder_level_{level}_convnext_{convnext_version}_block_{block_idx}'
             )(x)
@@ -403,7 +408,6 @@ def create_convunext_denoiser(
             use_bias=False,  # Bias-free for scaling invariance
             dropout_rate=drop_path_rate,
             spatial_dropout_rate=0.0,
-            kernel_initializer=kernel_initializer,
             kernel_regularizer=kernel_regularizer,
             name=f'bottleneck_convnext_{convnext_version}_block_{block_idx}'
         )(x)
@@ -468,7 +472,6 @@ def create_convunext_denoiser(
                 use_bias=False,  # Bias-free for scaling invariance
                 dropout_rate=current_drop_path,
                 spatial_dropout_rate=0.0,
-                kernel_initializer=kernel_initializer,
                 kernel_regularizer=kernel_regularizer,
                 name=f'decoder_level_{level}_convnext_{convnext_version}_block_{block_idx}'
             )(x)
