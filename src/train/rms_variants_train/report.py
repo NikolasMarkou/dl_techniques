@@ -55,13 +55,12 @@ BASELINE_NORM = "rms_norm"
 RNG_SEED = 20260515
 
 
-# DECISION plan_2026-05-18_74a935a2/D-002: per-variant verdict-rule
-# parameterization. DyT does not normalize by RMS → act_mean_abs /
-# per_sample_rms_* are mechanism-irrelevant. band_logit_norm normalizes by L2
-# (not RMS) → per_sample_rms_* are irrelevant; additionally it is designed
-# for classification logits, so residual-stream contexts (E2/E3/E4) are
-# off-label and must NOT be compared head-to-head against the rms_norm
-# baseline's headline metric.
+# Per-variant verdict-rule parameterization. DyT does not normalize by RMS →
+# act_mean_abs / per_sample_rms_* are mechanism-irrelevant. band_logit_norm
+# normalizes by L2 (not RMS) → per_sample_rms_* are irrelevant; additionally
+# it is designed for classification logits, so residual-stream contexts
+# (E2/E3/E4) are off-label and must NOT be compared head-to-head against the
+# rms_norm baseline's headline metric.
 #
 # `applicable_probes` is an *informational* contract — it says which probe
 # columns are meaningful for this variant's mechanism. The headline

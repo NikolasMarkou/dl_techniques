@@ -213,7 +213,6 @@ def _iter_inner_ops(model: keras.Model):
             yield layer
 
 
-# DECISION plan_2026-05-13_25774a34/D-002
 # Hard-extraction snapshot pattern. Mutating `operation_weights` in place with
 # a large-magnitude one-hot makes softmax numerically one-hot for any
 # reasonable temperature (typical trained T in [0.5, 2.0]). We snapshot the

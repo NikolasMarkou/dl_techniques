@@ -21,13 +21,13 @@ from typing import Any, Dict, Optional, Tuple
 # Strings are the factory keys consumed by
 # ``dl_techniques.layers.norms.factory.create_normalization_layer(<key>)``.
 #
-# DECISION plan_2026-05-18_74a935a2/D-001: this tuple is the campaign's
-# variant universe. Reordering it invalidates RESULTS.md tables (columns are
-# indexed by position). Append-only on extension; never insert in the middle.
-# DECISION plan_2026-05-18_63121227/D-001: extended to 8-tuple by appending
-# `zero_centered_adaptive_band_rms_norm` (the 8th library variant from
-# plan_c7f1947d). Phase 1 column ordering preserved byte-identical; the new
-# variant is the right-most column in all RESULTS.md tables.
+# This tuple is the campaign's variant universe. Reordering it invalidates
+# RESULTS.md tables (columns are indexed by position). Append-only on
+# extension; never insert in the middle.
+# Extended to 8-tuple by appending `zero_centered_adaptive_band_rms_norm`
+# (the 8th library variant from plan_c7f1947d). Phase 1 column ordering
+# preserved byte-identical; the new variant is the right-most column in all
+# RESULTS.md tables.
 NORM_VARIANTS: Tuple[str, str, str, str, str, str, str, str] = (
     "rms_norm",
     "band_rms",

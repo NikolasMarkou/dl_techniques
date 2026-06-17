@@ -106,11 +106,11 @@ class FinetuneConfig:
     # Train/val split for local files
     val_fraction: float = 0.1
 
-    # DECISION D-001: optional override of LR-schedule horizon. None uses
+    # Optional override of LR-schedule horizon. None uses
     # the chunk-aware estimator with measured train cardinality.
     steps_per_epoch: Optional[int] = None
 
-    # DECISION D-006: end-to-end seed plumbing.
+    # End-to-end seed plumbing.
     seed: int = 42
 
     # Analysis
@@ -333,7 +333,7 @@ def finetune_gpt2(
     # Data
     train_dataset, val_dataset = load_finetune_datasets(config, preprocessor)
 
-    # DECISION D-001: estimate steps_per_epoch via the canonical helper.
+    # Estimate steps_per_epoch via the canonical helper.
     # tf.data.Dataset.cardinality() returns UNKNOWN_CARDINALITY for the
     # generator-backed packed CLM pipeline, so we cannot count chunks
     # directly. Fall back to the helper's default Wikipedia-token estimate

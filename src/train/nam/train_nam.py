@@ -761,7 +761,7 @@ def main():
         logger.info(f"Loading checkpoint from {args.checkpoint}")
         model.load_weights(args.checkpoint)
 
-        # DECISION D-006: restore training state from sidecar JSON if present
+        # Restore training state from sidecar JSON if present
         saved_state = load_training_state(args.checkpoint)
         if saved_state is not None:
             start_step = saved_state["step"]
@@ -894,7 +894,7 @@ def main():
     for step in range(start_step + 1, args.steps + 1):
         # Generate batch — curriculum mode shifts difficulty over training
         if use_curriculum:
-            # DECISION D-002: cap progress at --curriculum-cap (default 0.8)
+            # Cap progress at --curriculum-cap (default 0.8)
             # to keep hardest levels mixed with easier data throughout
             # training — prevents late op_acc regression.
             progress = min(args.curriculum_cap, step / args.steps)

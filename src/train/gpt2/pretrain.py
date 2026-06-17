@@ -105,13 +105,13 @@ class TrainingConfig:
     # HuggingFace / Wikipedia settings
     hf_cache_dir: str = "/media/arxwn/data0_4tb/datasets/wikipedia"
     hf_wikipedia_config: str = "20231101.en"
-    # DECISION D-003: 0 → packed CLM uses every token; pass 500+ only for
+    # 0 → packed CLM uses every token; pass 500+ only for
     # per-doc consumers (MLM, classification).
     min_article_length: int = 0
     val_fraction: float = 0.02
     max_val_samples: int = 5000
     max_train_samples: Optional[int] = None
-    # DECISION D-002: parallel tokenization shards + per-epoch reshuffle.
+    # Parallel tokenization shards + per-epoch reshuffle.
     shuffle_shards: int = 4
 
     # Checkpointing & analysis (step-based for large datasets)
@@ -123,7 +123,7 @@ class TrainingConfig:
 
     # Resume from checkpoint
     resume_from: Optional[str] = None
-    # DECISION D-006: end-to-end seed plumbing. On --resume, data seed is
+    # End-to-end seed plumbing. On --resume, data seed is
     # shifted by initial_step so resumed runs see new article ordering.
     seed: int = 42
 
@@ -384,7 +384,7 @@ def train_gpt2(
         config.mask_token_id,
     )
 
-    # DECISION D-006: derive data_seed from initial_step BEFORE building the
+    # Derive data_seed from initial_step BEFORE building the
     # dataset, so resumed runs see new article ordering (not a replay of the
     # first N chunks).
     initial_step = (
