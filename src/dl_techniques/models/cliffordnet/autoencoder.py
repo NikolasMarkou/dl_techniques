@@ -114,6 +114,21 @@ class CliffordLaplacianUNet(keras.Model):
     :param kwargs: Additional keyword arguments for :class:`keras.Model`.
     """
 
+    MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
+        "small": dict(
+            level_channels=[32, 64, 128],
+            level_blocks=[2, 2, 2],
+        ),
+        "base": dict(
+            level_channels=[48, 96, 192, 384],
+            level_blocks=[2, 2, 2, 2],
+        ),
+        "large": dict(
+            level_channels=[64, 128, 256, 512],
+            level_blocks=[3, 3, 3, 3],
+        ),
+    }
+
     def __init__(
         self,
         in_channels: int = 3,
@@ -133,20 +148,10 @@ class CliffordLaplacianUNet(keras.Model):
         super().__init__(**kwargs)
 
         self.num_levels = len(level_channels)
-        if len(level_blocks) != self.num_levels:
-            raise ValueError(
-                f"len(level_blocks)={len(level_blocks)} must equal "
-                f"num_levels=len(level_channels)={self.num_levels}"
-            )
         if level_shifts is None:
             # [1, 2] is valid for SparseRollingGeometricProduct (ints >= 1) and
             # matches the hardcoded global-branch shifts.
             level_shifts = [[1, 2] for _ in range(self.num_levels)]
-        if len(level_shifts) != self.num_levels:
-            raise ValueError(
-                f"len(level_shifts)={len(level_shifts)} must equal "
-                f"num_levels={self.num_levels}"
-            )
 
         # Store all ctor args verbatim (as given) for get_config.
         self.in_channels = in_channels
@@ -161,6 +166,9 @@ class CliffordLaplacianUNet(keras.Model):
         self.blur_trainable = blur_trainable
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
+
+        # Validate config BEFORE building any sublayers.
+        self._validate_config()
 
         _conv_kwargs: Dict[str, Any] = dict(
             kernel_initializer=self.kernel_initializer,
@@ -220,6 +228,82 @@ class CliffordLaplacianUNet(keras.Model):
         # --- Output head: decoder level-0 features -> image channels ---
         self.out_conv = keras.layers.Conv2D(in_channels, 1, **_conv_kwargs)
 
+        logger.info(
+            f"Created CliffordLaplacianUNet: {self.num_levels} levels, "
+            f"channels={list(self.level_channels)}, "
+            f"blocks={list(self.level_blocks)}"
+        )
+
+    # ------------------------------------------------------------------
+
+    def _validate_config(self) -> None:
+        """Validate constructor arguments; raise ``ValueError`` on bad config.
+
+        Defense-in-depth model-scoped validation that fails at construction
+        (before any sublayer is built) with a clear message. The valid
+        ``cli_mode``/``ctx_mode`` literals mirror the sets enforced by
+        :class:`CliffordNetBlock` (``clifford_block.py``).
+        """
+        if self.in_channels <= 0:
+            raise ValueError(
+                f"CliffordLaplacianUNet: in_channels must be positive, "
+                f"got {self.in_channels}"
+            )
+
+        if len(self.level_blocks) != self.num_levels:
+            raise ValueError(
+                f"CliffordLaplacianUNet: len(level_blocks)="
+                f"{len(self.level_blocks)} must equal "
+                f"num_levels=len(level_channels)={self.num_levels}"
+            )
+
+        for i, ch in enumerate(self.level_channels):
+            if ch <= 0:
+                raise ValueError(
+                    f"CliffordLaplacianUNet: level_channels[{i}] must be "
+                    f"positive, got {ch}"
+                )
+
+        for i, nb in enumerate(self.level_blocks):
+            if nb <= 0:
+                raise ValueError(
+                    f"CliffordLaplacianUNet: level_blocks[{i}] must be "
+                    f"positive, got {nb}"
+                )
+
+        if len(self.level_shifts) != self.num_levels:
+            raise ValueError(
+                f"CliffordLaplacianUNet: len(level_shifts)="
+                f"{len(self.level_shifts)} must equal "
+                f"num_levels={self.num_levels}"
+            )
+
+        if self.cli_mode not in ("inner", "wedge", "full"):
+            raise ValueError(
+                f"CliffordLaplacianUNet: cli_mode must be 'inner', 'wedge', "
+                f"or 'full', got {self.cli_mode!r}"
+            )
+
+        if self.ctx_mode not in ("diff", "abs"):
+            raise ValueError(
+                f"CliffordLaplacianUNet: ctx_mode must be 'diff' or 'abs', "
+                f"got {self.ctx_mode!r}"
+            )
+
+        ks = self.blur_kernel_size
+        if (
+            not isinstance(ks, (tuple, list))
+            or len(ks) != 2
+            or any(
+                (not isinstance(k, int)) or isinstance(k, bool) or k <= 0
+                for k in ks
+            )
+        ):
+            raise ValueError(
+                f"CliffordLaplacianUNet: blur_kernel_size must be a length-2 "
+                f"sequence of positive ints, got {ks!r}"
+            )
+
     # ------------------------------------------------------------------
 
     def build(self, input_shape) -> None:
@@ -230,6 +314,10 @@ class CliffordLaplacianUNet(keras.Model):
 
         :param input_shape: Input shape ``(B, H, W, C)``.
         """
+        # summary() may call build with a 3D shape (no batch dim); prepend a
+        # dummy batch dim so the unpack below is safe.
+        if len(input_shape) == 3:
+            input_shape = (None,) + tuple(input_shape)
         batch, h, w, c = input_shape
         divisor = 2 ** self.num_levels
         for dim, name in ((h, "height"), (w, "width")):
@@ -372,21 +460,6 @@ class CliffordLaplacianUNet(keras.Model):
     # Variants
     # ------------------------------------------------------------------
 
-    MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
-        "small": dict(
-            level_channels=[32, 64, 128],
-            level_blocks=[2, 2, 2],
-        ),
-        "base": dict(
-            level_channels=[48, 96, 192, 384],
-            level_blocks=[2, 2, 2, 2],
-        ),
-        "large": dict(
-            level_channels=[64, 128, 256, 512],
-            level_blocks=[3, 3, 3, 3],
-        ),
-    }
-
     @classmethod
     def from_variant(
         cls,
@@ -408,6 +481,10 @@ class CliffordLaplacianUNet(keras.Model):
         defaults = dict(cls.MODEL_VARIANTS[variant])
         defaults.update(kwargs)
         logger.info(f"Creating CliffordLaplacianUNet-{variant.upper()}")
+        logger.info(
+            f"from_variant received in_channels={in_channels}, "
+            f"overrides={kwargs}"
+        )
         return cls(in_channels=in_channels, **defaults)
 
 
