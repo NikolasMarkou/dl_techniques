@@ -1,7 +1,27 @@
+"""Model-level tests for `dl_techniques.models.tiny_recursive_model`.
+
+Ported from the former `tests/test_models/test_trm/test_model.py` during the
+iter-1 test-dir consolidation onto the src-mirroring `test_tiny_recursive_model/`.
+
+Coverage here is the UNIQUE state/config/integration coverage not already in the
+canonical `test_trm.py` (carry structure, single-step state changes, state reset
+on halt, layer-config variants, Bellman target presence, end-to-end training).
+
+NOTE: the stale `TestTRMModelBasic::test_multi_step_loop_simulation` was
+INTENTIONALLY DROPPED, not ported. Its assertion that inference never halts
+early contradicts the live, decision-anchored TRM semantics
+(`DECISION plan_2026-05-10_e6309bd5/D-001`, model.py:365-382: inference halts on
+`is_last_step | (q_halt > 0)` BY DESIGN). Its only valid concern — that the model
+halts by `halt_max_steps` — is already covered by canonical
+`test_trm.py::test_inference_early_halt` (+ `test_inference_halt_max_steps_1`,
+`test_inference_halt_qlearning`). See plan_2026-06-17_b38768bf D-001.
+Redundant tests (`test_model_creation`, serialization-cycle/config-reconstruction)
+were also dropped in favour of the canonical `test_creation` /
+`test_get_config_roundtrip` / `test_save_load_roundtrip`.
+"""
+
 import pytest
 import numpy as np
-import tempfile
-import os
 from typing import Dict, Any
 
 import keras
@@ -40,14 +60,6 @@ class TestTRMModelBasic:
                 dtype='int32'
             ),
         }
-
-    def test_model_creation(self, tiny_config: Dict[str, Any]):
-        """Test basic model creation and sub-layer initialization."""
-        model = TRM(**tiny_config)
-        assert isinstance(model.inner, TRMInner)
-        assert isinstance(model.inner.L_level, TRMReasoningModule)
-        assert len(model.inner.L_level.layers_list) == tiny_config['l_layers']
-        assert len(model.inner.H_level.layers_list) == tiny_config['h_layers']
 
     def test_initial_carry(self, tiny_config: Dict[str, Any], sample_batch: Dict[str, keras.KerasTensor]):
         """Test the initial_carry method for correct state structure and shapes."""
@@ -96,32 +108,6 @@ class TestTRMModelBasic:
         assert new_carry["steps"].shape == (sample_batch["inputs"].shape[0],)
         assert keras.ops.all(new_carry["steps"] == 1)  # Steps should be 1
         assert not keras.ops.all(new_carry["halted"])  # Should not be halted after one step in training
-
-    def test_multi_step_loop_simulation(self, tiny_config: Dict[str, Any], sample_batch: Dict[str, keras.KerasTensor]):
-        """Simulate the external ACT loop and verify state progression."""
-        model = TRM(**tiny_config)
-        carry = model.initial_carry(sample_batch)
-
-        max_steps = tiny_config["halt_max_steps"]
-        all_halted = False
-        for step in range(max_steps + 1):
-            carry, outputs = model(carry, sample_batch, training=False)
-            steps_np = keras.ops.convert_to_numpy(carry["steps"])
-            halted_np = keras.ops.convert_to_numpy(carry["halted"])
-
-            # In inference, steps should just increment
-            assert np.all(steps_np == step + 1)
-
-            if step == max_steps - 1:
-                # Should halt exactly on the last step in inference mode
-                assert np.all(halted_np)
-                all_halted = True
-                break
-            else:
-                # Should not halt before the last step in inference
-                assert not np.any(halted_np)
-
-        assert all_halted, "Model did not halt at max_steps during inference."
 
     def test_state_reset_on_halt(self, tiny_config: Dict[str, Any], sample_batch: Dict[str, keras.KerasTensor]):
         """Verify that z_H and z_L are reset when an item is halted."""
@@ -214,79 +200,6 @@ class TestTRMModelConfigurations:
         # In inference mode, it should not be present
         _, outputs = model(carry, batch, training=False)
         assert "target_q_continue" not in outputs
-
-
-class TestTRMModelSerialization:
-    """Test model serialization and deserialization."""
-
-    @pytest.fixture
-    def serializable_config(self) -> Dict[str, Any]:
-        """Create a config for serialization testing."""
-        return {
-            "vocab_size": 100, "hidden_size": 32, "seq_len": 16, "expansion": 2.0,
-            "num_heads": 4, "l_layers": 2, "h_layers": 2,
-            "puzzle_emb_len": 4,
-            "halt_max_steps": 5, "rope_theta": 10000.0, "halt_exploration_prob": 0.1,
-            "no_act_continue": True,
-        }
-
-    @pytest.fixture
-    def sample_batch(self, serializable_config: Dict[str, Any]) -> Dict[str, Any]:
-        """Create a sample input batch for serialization testing."""
-        batch_size = 2
-        return {
-            "inputs": keras.ops.convert_to_tensor(
-                np.random.randint(0, serializable_config['vocab_size'],
-                                  size=(batch_size, serializable_config['seq_len'])),
-                dtype='int32'
-            ),
-        }
-
-    def test_serialization_cycle(self, serializable_config: Dict[str, Any], sample_batch: Dict[str, Any]):
-        """Test full serialization and deserialization cycle."""
-        original_model = TRM(**serializable_config)
-        initial_carry = original_model.initial_carry(sample_batch)
-
-        # Run one step to build the model completely
-        original_carry, original_outputs = original_model(initial_carry, sample_batch, training=False)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            model_path = os.path.join(tmpdir, "trm_model.keras")
-            original_model.save(model_path)
-
-            # Register custom objects for loading if they are in a local file
-            custom_objects = {
-                "TinyRecursiveReasoningModel": TRM,
-                "TRMInner": TRMInner,
-                "TRMReasoningModule": TRMReasoningModule
-            }
-            loaded_model = keras.models.load_model(model_path, custom_objects=custom_objects)
-
-            # Test loaded model
-            loaded_carry, loaded_outputs = loaded_model(initial_carry, sample_batch, training=False)
-
-            # Compare outputs
-            for key in original_outputs:
-                np.testing.assert_allclose(
-                    keras.ops.convert_to_numpy(original_outputs[key]),
-                    keras.ops.convert_to_numpy(loaded_outputs[key]),
-                    rtol=1e-5, atol=1e-5,
-                    err_msg=f"Output mismatch for key '{key}' after serialization."
-                )
-
-            # Compare carry states
-            assert keras.ops.all(original_carry["halted"] == loaded_carry["halted"])
-            assert keras.ops.all(original_carry["steps"] == loaded_carry["steps"])
-
-    def test_config_reconstruction(self, serializable_config: Dict[str, Any]):
-        """Test that the model can be reconstructed from its config."""
-        model = TRM(**serializable_config)
-        config = model.get_config()
-
-        reconstructed_model = TRM.from_config(config)
-
-        assert reconstructed_model.get_config() == model.get_config()
-        assert len(reconstructed_model.inner.L_level.layers_list) == len(model.inner.L_level.layers_list)
 
 
 class TestTRMIntegration:
