@@ -19,6 +19,7 @@ def create_callbacks(
         model_name: str,
         results_dir_prefix: str = "model",
         output_root: str = "results",
+        run_dir: Optional[str] = None,
         monitor: str = 'val_accuracy',
         patience: int = 15,
         use_lr_schedule: bool = True,
@@ -40,6 +41,12 @@ def create_callbacks(
         Prefix for the results directory (e.g., 'convnext_v1', 'convnext_v2').
     output_root : str
         Base directory under which the timestamped run dir is created. Default 'results'.
+    run_dir : Optional[str]
+        Exact run directory to write artifacts into. When provided, it is used
+        verbatim as the results directory and the ``{prefix}_{model_name}_{timestamp}``
+        construction (and ``output_root``) is bypassed. Use this when the caller
+        already owns a run directory, to avoid creating a second orphan dir.
+        Default None preserves the timestamped-dir behavior.
     monitor : str
         Metric to monitor for checkpointing/early stopping.
     patience : int
@@ -64,8 +71,11 @@ def create_callbacks(
     Tuple[List, str]
         List of callbacks and the results directory path.
     """
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = os.path.join(output_root, f"{results_dir_prefix}_{model_name}_{timestamp}")
+    if run_dir is not None:
+        results_dir = run_dir
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        results_dir = os.path.join(output_root, f"{results_dir_prefix}_{model_name}_{timestamp}")
     os.makedirs(results_dir, exist_ok=True)
 
     monitor_mode = 'max' if 'accuracy' in monitor else 'min'
