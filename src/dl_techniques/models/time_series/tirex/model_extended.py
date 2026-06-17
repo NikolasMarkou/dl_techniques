@@ -236,7 +236,11 @@ class TiRexExtended(TiRexCore):
         batch_size = input_shape[0]
         return (batch_size, self.prediction_length, len(self.quantile_levels))
 
-    def call(self, inputs, training=None):
+    def call(
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
         """
         Forward pass with Query Token appending.
 

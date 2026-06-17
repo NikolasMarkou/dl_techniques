@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 153 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete; nano_vlm_world_model/model.py M2-DEFERRED [~], not counted)
+**Progress: 164 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete; nano_vlm_world_model/model.py M2-DEFERRED [~], not counted)
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -1174,21 +1174,21 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 | `[x]` | `thera/rdn_backbone.py` | PASS | rubric-verified exemplary (RDBConv/RDB/RDNBackbone all compliant); existing round-trip passes |
 | `[x]` | `thera/tails.py` | PASS | rubric-verified exemplary (TheraTailAir/_Projection/TheraTailPlus/TheraTailPro + build_thera_tail factory); existing round-trip passes |
 
-### L2-Round 23 — time_series  (11 files)
+### L2-Round 23 — time_series  (11 files)  — DONE
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `time_series/adaptive_ema/model.py` | PASS | rubric-verify |
-| `[ ]` | `time_series/deepar/model.py` | PASS | rubric-verify |
-| `[ ]` | `time_series/forecast.py` | N/A | N/A — non-layer |
-| `[ ]` | `time_series/mdn/model.py` | FAIL | MDNModel: super_build_last |
-| `[ ]` | `time_series/nbeats/nbeats.py` | PASS | rubric-verify |
-| `[ ]` | `time_series/nbeats/nbeatsx.py` | PASS | rubric-verify |
-| `[ ]` | `time_series/prism/model.py` | PASS | rubric-verify |
-| `[ ]` | `time_series/tirex/model.py` | PASS | rubric-verify |
-| `[ ]` | `time_series/tirex/model_extended.py` | N/A | N/A — non-layer |
-| `[ ]` | `time_series/xlstm/forecaster.py` | PASS | rubric-verify |
-| `[ ]` | `time_series/xlstm/model.py` | PASS | rubric-verify |
+| `[x]` | `time_series/adaptive_ema/model.py` | PASS | rubric-verified clean (H4/H8/H9/H11 good; training-branch + static-shape checks off-graph); existing round-trip passes |
+| `[x]` | `time_series/deepar/model.py` | PASS | rubric-verified (likelihood head is pure Dense → no training to forward; _prediction_mode eager range is predict_step-only, off call()); existing round-trip passes |
+| `[x]` | `time_series/forecast.py` | N/A | N/A confirmed (Forecast dataclass + ForecastMixin helper) |
+| `[x]` | `time_series/mdn/model.py` | PASS | done: H6 fixed (logger.info moved before super().build()); H8/H9 serialize+deserialize init/reg; existing round-trip passes |
+| `[x]` | `time_series/nbeats/nbeats.py` | PASS | rubric-verified clean (NBeatsNet; H4 via _validate_configuration; H9 deserializes init/reg); existing round-trip passes |
+| `[x]` | `time_series/nbeats/nbeatsx.py` | PASS | done: H12 type hints (__init__/_create_block_stacks/build/call); existing round-trip passes |
+| `[x]` | `time_series/prism/model.py` | PASS | rubric-verified clean (PRISMModel; H5/H6 build last, H8/H9 init/reg, M1+M5); existing round-trip passes |
+| `[x]` | `time_series/tirex/model.py` | PASS | rubric-verified clean (TiRexCore; H5/H6 build last, M1 from_variant + M5 factory); existing round-trip passes |
+| `[x]` | `time_series/tirex/model_extended.py` | PASS* | concrete TiRexExtended(TiRexCore) — scanner N/A MISLABEL (subclasses TiRexCore not keras.Model directly). H6 (keras.Model.build last), H7, inherited H8/H9; done: H12 call type hints; added test_model_extended.py (forward + factory + M2 round-trip; clean) |
+| `[x]` | `time_series/xlstm/forecaster.py` | PASS | done: H9 from_config deserializes 6 init/reg (get_config serialized them; was cls(**config)); existing 2 round-trips pass |
+| `[x]` | `time_series/xlstm/model.py` | PASS | done: H9 from_config deserializes 6 init/reg; existing round-trip passes |
 
 ### L2-Round 24 — tiny_recursive_model, tree_transformer, vae, video_jepa  (10 files)
 

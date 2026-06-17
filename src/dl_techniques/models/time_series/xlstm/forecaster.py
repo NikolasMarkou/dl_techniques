@@ -672,7 +672,20 @@ class xLSTMForecaster(keras.Model, ForecastMixin):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'xLSTMForecaster':
-        """Create a model from its configuration."""
+        """Create a model from its configuration.
+
+        Deserializes the initializer/regularizer objects that ``get_config``
+        serialized (H9) before reconstructing the model.
+        """
+        config = dict(config)
+        for key in ("kernel_initializer", "recurrent_initializer",
+                    "bias_initializer"):
+            if config.get(key) is not None:
+                config[key] = keras.initializers.deserialize(config[key])
+        for key in ("kernel_regularizer", "recurrent_regularizer",
+                    "bias_regularizer"):
+            if config.get(key) is not None:
+                config[key] = keras.regularizers.deserialize(config[key])
         return cls(**config)
 
 

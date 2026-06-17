@@ -120,8 +120,8 @@ class NBeatsXNet(keras.Model):
             tcn_filters: int = 16,
             tcn_kernel_size: int = 3,
             tcn_dropout: float = 0.0,
-            **kwargs
-    ):
+            **kwargs: Any,
+    ) -> None:
         super().__init__(**kwargs)
 
         # Validate configuration before storing any state.
@@ -191,7 +191,7 @@ class NBeatsXNet(keras.Model):
                 f"length of thetas_dim ({len(thetas_dim)})"
             )
 
-    def _create_block_stacks(self):
+    def _create_block_stacks(self) -> None:
         dropout_counter = 0
 
         for stack_id, (stack_type, theta_dim) in enumerate(zip(self.stack_types, self.thetas_dim)):
@@ -248,7 +248,7 @@ class NBeatsXNet(keras.Model):
 
             self.blocks.append(stack_blocks)
 
-    def build(self, input_shape=None):
+    def build(self, input_shape: Optional[Any] = None) -> None:
         # We manually trigger builds for sub-blocks to ensure variables exist
         # Assuming input is dict, we define standard shapes
         dummy_resid_shape = (None, self.backcast_length * 1)  # Univariate target
@@ -262,7 +262,11 @@ class NBeatsXNet(keras.Model):
 
         super().build(input_shape)
 
-    def call(self, inputs, training=None):
+    def call(
+            self,
+            inputs: Dict[str, keras.KerasTensor],
+            training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
         """
         Args:
             inputs: Dictionary containing:

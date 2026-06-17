@@ -464,7 +464,20 @@ class xLSTM(keras.Model):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> 'xLSTM':
-        """Create model from configuration."""
+        """Create model from configuration.
+
+        Deserializes the initializer/regularizer objects that ``get_config``
+        serialized (H9) before reconstructing the model.
+        """
+        config = dict(config)
+        for key in ("kernel_initializer", "recurrent_initializer",
+                    "bias_initializer"):
+            if config.get(key) is not None:
+                config[key] = keras.initializers.deserialize(config[key])
+        for key in ("kernel_regularizer", "recurrent_regularizer",
+                    "bias_regularizer"):
+            if config.get(key) is not None:
+                config[key] = keras.regularizers.deserialize(config[key])
         return cls(**config)
 
 # ---------------------------------------------------------------------

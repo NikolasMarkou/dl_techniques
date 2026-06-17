@@ -310,9 +310,10 @@ class MDNModel(keras.Model):
         # Build the final MDN layer with the shape after all feature layers.
         self.mdn_layer.build(current_shape)
 
-        # Mark the model as built.
-        super().build(input_shape)
         logger.info("MDNModel built successfully")
+
+        # Mark the model as built (must be the LAST statement of build()).
+        super().build(input_shape)
 
     def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
         """Forward pass of the model.
