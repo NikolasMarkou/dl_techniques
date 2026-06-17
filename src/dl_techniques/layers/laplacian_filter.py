@@ -36,6 +36,14 @@ It's important to note that these layers implement fixed, non-trainable filters.
 parameters (the kernel shapes) are determined by mathematical formulas, not learned
 from data. They serve as classical feature extractors that can be seamlessly integrated
 into a modern deep learning pipeline.
+
+Beyond these single-scale DoG edge-detector filters, this module also provides
+``LaplacianPyramidLevel``, an exactly-invertible multi-scale split/merge pyramid LEVEL.
+This is a distinct operation from the edge-detector filters above: rather than producing
+a single edge map, it downsamples a low-frequency residual to the next pyramid level and
+keeps the complementary high-frequency band, such that ``merge(split(x)) == x`` to float
+precision. It is channel-preserving and signal-level (no learnable channel change), which
+is exactly what makes its reconstruction identity hold.
 """
 
 import keras
@@ -47,6 +55,8 @@ from typing import Tuple, Union, List, Optional, Sequence, Any, Dict, Literal
 # ---------------------------------------------------------------------
 
 from .gaussian_filter import GaussianFilter
+from .blur_pool import BlurPool2D
+from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
@@ -475,5 +485,180 @@ class AdvancedLaplacianFilter(keras.layers.Layer):
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer)
         })
         return config
+
+
+# ---------------------------------------------------------------------
+
+
+@keras.saving.register_keras_serializable()
+class LaplacianPyramidLevel(keras.layers.Layer):
+    """Explicit, signal-level Laplacian pyramid split/merge for one level.
+
+    **Intent**: Provide an exactly-invertible, auditable multi-scale frequency
+    decomposition for a single pyramid level. Unlike :class:`LaplacianFilter`
+    (a single-scale edge detector), this layer splits an input into a
+    downsampled low-frequency band and a same-resolution high-frequency
+    residual, such that merging them reconstructs the input to float precision.
+    The split is purely signal-level (channel-preserving, NO learnable channel
+    change), which is exactly what makes the reconstruction identity hold.
+
+    **Architecture**:
+    ```
+    split(x):
+        x (B, H, W, C)
+           |
+           +-----------------------------+
+           |                             |
+           v                             |
+        blur = GaussianFilter(x)         |
+           |                             |
+           v                             |
+        low  = BlurPool2D(blur)          |  (B, H/2, W/2, C)
+           |                             |
+           v                             |
+        up   = UpSampling2D(low)         |  (B, H, W, C)
+           |                             |
+           +------------> high = x - up(low)   (B, H, W, C)
+
+    merge(low, high):
+        x_rec = high + up(low)  ==  x   (exact reconstruction identity)
+    ```
+
+    Args:
+        blur_kernel_size: Height/width of the Gaussian blur kernel as a
+            length-2 sequence of positive ints. Defaults to ``(5, 5)``.
+        blur_sigma: Gaussian sigma; ``-1`` derives it from the kernel size.
+            Defaults to ``-1``.
+        blur_trainable: If ``True`` the blur kernel is learnable; the default
+            ``False`` keeps the split a fixed, auditable signal operation.
+        **kwargs: Additional keyword arguments for the Layer base class.
+
+    Input shape:
+        4D tensor: `(batch_size, height, width, channels)`.
+
+    Output shape:
+        Tuple of two 4D tensors ``(low, high)`` where
+        ``low`` is `(batch_size, height / 2, width / 2, channels)` and
+        ``high`` is `(batch_size, height, width, channels)`.
+
+    The decomposition is channel-preserving and operates at the raw signal
+    level, so ``merge(split(x)) == x`` holds to float precision independent of
+    blur quality (``high`` is DEFINED as the residual ``x - up(low)``).
+
+    See Also:
+        :class:`LaplacianFilter` -- a single-scale Difference-of-Gaussians edge
+        detector. It produces one same-resolution edge map (no downsampling and
+        no inverse). ``LaplacianPyramidLevel`` is a different operation: a
+        multi-scale, exactly-invertible split/merge that downsamples a
+        low-frequency residual to the next level and keeps the complementary
+        high-frequency band.
+
+    :raises ValueError: If ``blur_kernel_size`` is not a length-2 sequence of
+        positive ints, ``blur_sigma`` is not a number, or ``blur_trainable`` is
+        not a bool.
+    """
+
+    def __init__(
+        self,
+        blur_kernel_size: Tuple[int, int] = (5, 5),
+        blur_sigma: float = -1,
+        blur_trainable: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+
+        # Validate blur_kernel_size: length-2 sequence of positive ints.
+        if (not isinstance(blur_kernel_size, Sequence)
+                or isinstance(blur_kernel_size, str)
+                or len(blur_kernel_size) != 2):
+            raise ValueError(
+                "blur_kernel_size must be a length-2 sequence (height, width), "
+                f"got {blur_kernel_size!r}"
+            )
+        if not all(isinstance(k, int) and not isinstance(k, bool) and k > 0
+                   for k in blur_kernel_size):
+            raise ValueError(
+                "blur_kernel_size entries must be positive ints, "
+                f"got {blur_kernel_size!r}"
+            )
+
+        # Validate blur_sigma: numeric (bool excluded).
+        if isinstance(blur_sigma, bool) or not isinstance(blur_sigma, (int, float)):
+            raise ValueError(
+                f"blur_sigma must be a number, got {blur_sigma!r}"
+            )
+
+        # Validate blur_trainable: bool.
+        if not isinstance(blur_trainable, bool):
+            raise ValueError(
+                f"blur_trainable must be a bool, got {blur_trainable!r}"
+            )
+
+        self.blur_kernel_size = blur_kernel_size
+        self.blur_sigma = blur_sigma
+        self.blur_trainable = blur_trainable
+
+        # Sublayers created in __init__ (built explicitly in build()).
+        self.blur = GaussianFilter(
+            kernel_size=blur_kernel_size,
+            strides=(1, 1),
+            sigma=blur_sigma,
+            padding="same",
+            trainable=blur_trainable,
+        )
+        self.down = BlurPool2D(strides=2)
+        self.up = keras.layers.UpSampling2D(size=(2, 2), interpolation="bilinear")
+
+    def build(self, input_shape) -> None:
+        # Build sublayers in computational order; super().build() LAST.
+        self.blur.build(input_shape)
+        blur_out = self.blur.compute_output_shape(input_shape)
+        self.down.build(blur_out)
+        low_shape = self.down.compute_output_shape(blur_out)
+        self.up.build(low_shape)
+        super().build(input_shape)
+
+    def split(self, x):
+        """Decompose ``x`` into ``(low, high)`` signal bands.
+
+        :param x: Input tensor ``(B, H, W, C)``.
+        :return: ``(low, high)`` where ``low`` is ``(B, H/2, W/2, C)`` and
+            ``high`` is ``(B, H, W, C)``.
+        """
+        low = self.down(self.blur(x))
+        high = keras.ops.subtract(x, self.up(low))
+        return low, high
+
+    def merge(self, low, high):
+        """Reconstruct the level: ``high + up(low)`` (exact inverse of split).
+
+        :param low: Low band ``(B, H/2, W/2, C)``.
+        :param high: High band ``(B, H, W, C)``.
+        :return: Reconstructed tensor ``(B, H, W, C)``.
+        """
+        return keras.ops.add(high, self.up(low))
+
+    def call(self, inputs):
+        return self.split(inputs)
+
+    def compute_output_shape(self, input_shape):
+        batch, h, w, c = input_shape
+        low_h = None if h is None else h // 2
+        low_w = None if w is None else w // 2
+        low_shape = (batch, low_h, low_w, c)
+        high_shape = (batch, h, w, c)
+        return low_shape, high_shape
+
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        config.update(
+            {
+                "blur_kernel_size": self.blur_kernel_size,
+                "blur_sigma": self.blur_sigma,
+                "blur_trainable": self.blur_trainable,
+            }
+        )
+        return config
+
 
 # ---------------------------------------------------------------------

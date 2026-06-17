@@ -34,122 +34,22 @@ The model class (``CliffordLaplacianUNet``) widens channels via external 1x1
 ``Conv2D`` before each isotropic ``CliffordNetBlock`` group; the Laplacian SIGNAL
 pyramid itself stays at the raw channel count. Clifford blocks process widened
 feature copies that contribute learned refinements on the decoder side; they
-never sit inside the invertibility path of this helper. (Model class added in a
-later step; this module currently defines only the helper layer.)
+never sit inside the invertibility path of this helper. The ``LaplacianPyramidLevel``
+helper now lives in ``dl_techniques.layers.laplacian_filter``; this module defines
+the model (``CliffordLaplacianUNet``) and imports the helper from there.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import keras
 
-from typing import List
-
 from dl_techniques.layers.gaussian_filter import GaussianFilter
 from dl_techniques.layers.blur_pool import BlurPool2D
+from dl_techniques.layers.laplacian_filter import LaplacianPyramidLevel
 from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
 from dl_techniques.utils.logger import logger
-
-
-# ===========================================================================
-# LaplacianPyramidLevel
-# ===========================================================================
-
-
-@keras.saving.register_keras_serializable()
-class LaplacianPyramidLevel(keras.layers.Layer):
-    """Explicit, signal-level Laplacian pyramid split/merge for one level.
-
-    split(x) -> (low, high):  low = down(blur(x)) at H/2; high = x - up(low) at H.
-    merge(low, high) -> high + up(low) == x  (exact reconstruction identity).
-    Pure signal-level (channel-preserving) -- NO learnable channel change, so the
-    reconstruction identity holds to float precision.
-
-    :param blur_kernel_size: Height/width of the Gaussian blur kernel.
-    :type blur_kernel_size: Tuple[int, int]
-    :param blur_sigma: Gaussian sigma; ``-1`` derives it from the kernel size.
-    :type blur_sigma: float
-    :param blur_trainable: If True the blur kernel is learnable (default False
-        keeps the split a fixed, auditable signal operation).
-    :type blur_trainable: bool
-    :param kwargs: Additional keyword arguments for :class:`keras.layers.Layer`.
-    """
-
-    def __init__(
-        self,
-        blur_kernel_size: Tuple[int, int] = (5, 5),
-        blur_sigma: float = -1,
-        blur_trainable: bool = False,
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(**kwargs)
-
-        self.blur_kernel_size = blur_kernel_size
-        self.blur_sigma = blur_sigma
-        self.blur_trainable = blur_trainable
-
-        # Sublayers created in __init__ (built explicitly in build()).
-        self.blur = GaussianFilter(
-            kernel_size=blur_kernel_size,
-            strides=(1, 1),
-            sigma=blur_sigma,
-            padding="same",
-            trainable=blur_trainable,
-        )
-        self.down = BlurPool2D(strides=2)
-        self.up = keras.layers.UpSampling2D(size=(2, 2), interpolation="bilinear")
-
-    def build(self, input_shape) -> None:
-        # Build sublayers in computational order; super().build() LAST.
-        self.blur.build(input_shape)
-        blur_out = self.blur.compute_output_shape(input_shape)
-        self.down.build(blur_out)
-        low_shape = self.down.compute_output_shape(blur_out)
-        self.up.build(low_shape)
-        super().build(input_shape)
-
-    def split(self, x):
-        """Decompose ``x`` into ``(low, high)`` signal bands.
-
-        :param x: Input tensor ``(B, H, W, C)``.
-        :return: ``(low, high)`` where ``low`` is ``(B, H/2, W/2, C)`` and
-            ``high`` is ``(B, H, W, C)``.
-        """
-        low = self.down(self.blur(x))
-        high = keras.ops.subtract(x, self.up(low))
-        return low, high
-
-    def merge(self, low, high):
-        """Reconstruct the level: ``high + up(low)`` (exact inverse of split).
-
-        :param low: Low band ``(B, H/2, W/2, C)``.
-        :param high: High band ``(B, H, W, C)``.
-        :return: Reconstructed tensor ``(B, H, W, C)``.
-        """
-        return keras.ops.add(high, self.up(low))
-
-    def call(self, inputs):
-        return self.split(inputs)
-
-    def compute_output_shape(self, input_shape):
-        batch, h, w, c = input_shape
-        low_h = None if h is None else h // 2
-        low_w = None if w is None else w // 2
-        low_shape = (batch, low_h, low_w, c)
-        high_shape = (batch, h, w, c)
-        return low_shape, high_shape
-
-    def get_config(self) -> Dict[str, Any]:
-        config = super().get_config()
-        config.update(
-            {
-                "blur_kernel_size": self.blur_kernel_size,
-                "blur_sigma": self.blur_sigma,
-                "blur_trainable": self.blur_trainable,
-            }
-        )
-        return config
 
 
 # ===========================================================================
