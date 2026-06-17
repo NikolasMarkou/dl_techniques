@@ -121,20 +121,19 @@ _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
 def _causal_upsample(x: keras.KerasTensor, stride: int) -> keras.KerasTensor:
     """Causally right-shift an upsampled feature by ``stride - 1`` along W.
 
-    # DECISION D-007: causal upsample via right-shift.
-    # Plain ``UpSampling2D(size=(1, s), interpolation="nearest")`` is NOT
-    # causal at fine resolution. Pooled cell ``j`` was computed by DSv2 from
-    # input positions ``[j*s, j*s+s-1]``. Nearest-upsample maps output
-    # position ``k`` to pooled cell ``k // s``, whose max-input-seen is
-    # ``(k//s)*s + s - 1``. For ``k % s != s - 1`` that exceeds ``k`` — a
-    # future leak. Empirically observed: nano (stride [2,2], total_stride=4)
-    # leaked positions 4-6 when only position 7 was perturbed (D-006).
-    #
-    # Right-shifting the upsampled feature by ``s - 1`` along W (left-zero-
-    # pad ``s - 1``, drop ``s - 1`` from the right) maps output ``k`` to
-    # pooled cell ``(k - (s - 1)) // s`` whose max-input-seen is
-    # ``((k - (s - 1)) // s) * s + s - 1 <= k``. Strictly causal for all k.
-    # See plans/plan_2026-05-06_82749628/decisions.md (D-007).
+    Causal upsample via right-shift.
+    Plain ``UpSampling2D(size=(1, s), interpolation="nearest")`` is NOT
+    causal at fine resolution. Pooled cell ``j`` was computed by DSv2 from
+    input positions ``[j*s, j*s+s-1]``. Nearest-upsample maps output
+    position ``k`` to pooled cell ``k // s``, whose max-input-seen is
+    ``(k//s)*s + s - 1``. For ``k % s != s - 1`` that exceeds ``k`` — a
+    future leak. Empirically observed: nano (stride [2,2], total_stride=4)
+    leaked positions 4-6 when only position 7 was perturbed.
+
+    Right-shifting the upsampled feature by ``s - 1`` along W (left-zero-
+    pad ``s - 1``, drop ``s - 1`` from the right) maps output ``k`` to
+    pooled cell ``(k - (s - 1)) // s`` whose max-input-seen is
+    ``((k - (s - 1)) // s) * s + s - 1 <= k``. Strictly causal for all k.
     """
     if stride <= 1:
         return x
@@ -844,9 +843,8 @@ class CliffordNetLMUNet(keras.Model):
         for i in reversed(range(self.num_levels - 1)):
             up = self.decoder_upsamplers[i]
             x = up(x)
-            # DECISION D-007: causal upsample via right-shift; without this
-            # the round trip pool->nearest-upsample leaks future info into
-            # past positions (see plans/plan_2026-05-06_82749628/decisions.md).
+            # Causal upsample via right-shift; without this the round trip
+            # pool->nearest-upsample leaks future info into past positions.
             x = _causal_upsample(x, self.stride_per_stage[i])
             skip = skip_features[i]
             x = self.decoder_concats[i]([x, skip])

@@ -498,12 +498,12 @@ class PromptEncoder(layers.Layer):
         """
         # Add 0.5 for pixel center offset
         boxes = boxes + 0.5
-        # DECISION plan_2026-06-15_e6a0391c/D-007: reshape must PRESERVE the batch
-        # axis. The old `reshape(boxes, (-1, 2, 2))` collapsed batch*num_boxes into
-        # the leading dim, returning (B*N, 2, D) instead of (B, 2N, D) — which
-        # crashed the axis-1 concat in call() for N>1 (batch B vs B*N) and only
-        # happened to work for N==1. Split each (x1,y1,x2,y2) box into its two
-        # corners while keeping (B, 2N, 2): order is [tl0, br0, tl1, br1, ...].
+        # reshape must PRESERVE the batch axis. The old `reshape(boxes, (-1, 2, 2))`
+        # collapsed batch*num_boxes into the leading dim, returning (B*N, 2, D)
+        # instead of (B, 2N, D) — which crashed the axis-1 concat in call() for
+        # N>1 (batch B vs B*N) and only happened to work for N==1. Split each
+        # (x1,y1,x2,y2) box into its two corners while keeping (B, 2N, 2):
+        # order is [tl0, br0, tl1, br1, ...].
         batch_size = ops.shape(boxes)[0]
         num_boxes = ops.shape(boxes)[1]
         coords = ops.reshape(boxes, (batch_size, num_boxes * 2, 2))

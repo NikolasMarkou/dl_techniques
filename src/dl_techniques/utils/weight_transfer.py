@@ -37,7 +37,7 @@ import numpy as np
 from dl_techniques.utils.logger import logger
 
 
-# DECISION D-001: Layer-by-layer set_weights rather than load_weights(by_name=True).
+# Layer-by-layer set_weights rather than load_weights(by_name=True).
 # Keras 3.8's load_weights on a .keras file rejects the by_name kwarg outright.
 # Three existing helpers in the repo (cliffordnet/model.py:413, bfunet.py:515,
 # convnext_v2.py:400) carry this latent bug. Documented in plans/LESSONS.md.

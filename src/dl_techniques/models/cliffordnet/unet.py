@@ -71,7 +71,7 @@ _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
 # Inline head blocks
 # ===========================================================================
 #
-# DECISION D-001 — Minimal inline heads rather than reusing
+# Minimal inline heads rather than reusing
 # ``dl_techniques.layers.heads.vision.factory``.  The factory heads are
 # transformer-oriented (optional attention/FFN stacks) and ``MultiTaskHead``
 # stores children in a plain ``dict`` that Keras does not track for weight

@@ -179,11 +179,10 @@ def bdd100k_video_dataset(
         f"T={T}, img_size={img_size}, B={batch_size}."
     )
 
-    # DECISION plan_2026-05-23_c573e591/D-001: avoid the global
-    # ``np.random.seed(seed)`` side effect — it used to be needed because
-    # ``_read_clip`` reached into ``np.random.randint``. The loader now
-    # threads a local ``Generator`` into ``_read_clip(rng=...)`` so seeding
-    # stays scoped to this loader instance and concurrent users of
+    # Avoid the global ``np.random.seed(seed)`` side effect — it used to be
+    # needed because ``_read_clip`` reached into ``np.random.randint``. The
+    # loader now threads a local ``Generator`` into ``_read_clip(rng=...)``
+    # so seeding stays scoped to this loader instance and concurrent users of
     # ``np.random`` are not perturbed.
     rng = np.random.default_rng(seed)
 

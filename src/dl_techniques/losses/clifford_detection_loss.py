@@ -21,7 +21,7 @@ from keras import ops
 from dl_techniques.losses.yolo12_multitask_loss import YOLOv12ObjectDetectionLoss
 
 
-# DECISION D-005: Subclass rather than fork. The parent stays intact for
+# Subclass rather than fork. The parent stays intact for
 # YOLOv12-model users; we override only _make_anchors.
 
 

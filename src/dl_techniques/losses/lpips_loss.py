@@ -164,8 +164,7 @@ class LPIPSLoss(keras.losses.Loss):
         # Lazy-built on first call (see _build_extractor). After
         # deserialization, this is None until first invocation.
         self._extractor: Optional[keras.Model] = None
-        # DECISION plan_2026-05-27_4a444b14/D-001: VGG extractor lazily
-        # built and held inside the Loss to defer the
+        # VGG extractor lazily built and held inside the Loss to defer the
         # `keras.applications.VGG{16,19}` import + ImageNet weight download
         # until first call. This keeps deserialization fast and avoids a
         # download-during-config failure when networks are offline. The

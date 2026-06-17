@@ -317,7 +317,7 @@ class CliffordNetLMRouting(keras.Model):
             if dropout_rate > 0.0
             else None
         )
-        # DECISION D-002: routing layer replaces Dense(vocab_size). Default
+        # Routing layer replaces Dense(vocab_size). Default
         # routing_mode="trainable" — deterministic mode is too tight for a
         # 50K vocabulary (padded to 65536, only 16 cosine projections to
         # discriminate 50K classes is at the info-theoretic floor).
@@ -419,10 +419,9 @@ class CliffordNetLMRouting(keras.Model):
         x = self.head_norm(x, training=training)
         if self.head_dropout is not None:
             x = self.head_dropout(x, training=training)
-        # DECISION D-001: output dict key remains "logits" even though
-        # values are probabilities. This preserves compatibility with the
-        # existing training pipeline data wrapper
-        # ((x, y) -> (x, {"logits": y})) and compile spec
+        # Output dict key remains "logits" even though values are probabilities.
+        # This preserves compatibility with the existing training pipeline data
+        # wrapper ((x, y) -> (x, {"logits": y})) and compile spec
         # (loss={"logits": ...}, metrics={"logits": ["accuracy"]}) without
         # forking them. Downstream loss must use from_logits=False.
         logits = self.output_routing(x, training=training)

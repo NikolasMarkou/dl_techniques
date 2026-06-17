@@ -551,8 +551,8 @@ class DepthAnything(keras.Model):
         """Labeled-only path: single forward + compute_loss + backprop."""
         with tf.GradientTape() as tape:
             y_pred = self(x, training=True)
-            # DECISION plan_2026-05-10_44694bc9/D-003: Keras-3 canonical train_step
-            # — replaces deprecated compiled-loss / compiled-metrics calls.
+            # Keras-3 canonical train_step — replaces deprecated
+            # compiled-loss / compiled-metrics calls.
             # See dl_techniques/models/masked_language_model/mlm.py:309-343.
             loss = self.compute_loss(x=x, y=y, y_pred=y_pred)
             loss = loss * self.loss_weights.get('labeled', 1.0)

@@ -190,9 +190,9 @@ class LeWM(keras.Model):
         pixels = inputs["pixels"]
         action = inputs["action"]
 
-        # DECISION D-001: target encoder is live (no EMA, no stop_gradient).
+        # Target encoder is live (no EMA, no stop_gradient).
         # Upstream LeWM uses the same encoder for both context and target.
-        # Gradient flows through both paths. See decisions.md.
+        # Gradient flows through both paths.
         emb = self.encode_pixels(pixels, training=training)   # (B, T, D)
 
         # Pad action along time axis with zeros so act_emb has T timesteps.
@@ -268,11 +268,10 @@ class LeWM(keras.Model):
                 f"history_size={HS}."
             )
 
-        # DECISION plan_2026-05-23_692fd5e5/D-001: enforce S==1. The original
-        # implementation took pixels_history[:, 0] and broadcast it over S,
-        # silently dropping per-S histories (a footgun: callers passing
-        # distinct histories would see them ignored without warning). Upstream
-        # `/tmp/lewm_source/jepa.py:rollout` does the same trick because its
+        # Enforce S==1. The original implementation took pixels_history[:, 0]
+        # and broadcast it over S, silently dropping per-S histories (a footgun:
+        # callers passing distinct histories would see them ignored without
+        # warning). Upstream jepa.py:rollout does the same trick because its
         # callers tile externally; we surface the constraint instead. To
         # rollout multiple distinct histories, call rollout once per history
         # or tile s=0 yourself.

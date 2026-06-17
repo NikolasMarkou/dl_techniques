@@ -51,11 +51,11 @@ class LeWMConfig:
     sigreg_num_proj: int = 1024
 
     def __post_init__(self) -> None:
-        # DECISION plan_2026-05-22_de5197c2/D-002: num_frames is a serialized
-        # field (not a @property) so to_dict/from_dict round-trips for old and
-        # new configs. Derive it from history_size + num_preds when the caller
-        # left the sentinel 0; reject an explicit value that cannot cover the
-        # training sequence length (would crash ARPredictor's pos-embedding add).
+        # num_frames is a serialized field (not a @property) so to_dict/from_dict
+        # round-trips for old and new configs. Derive it from history_size +
+        # num_preds when the caller left the sentinel 0; reject an explicit value
+        # that cannot cover the training sequence length (would crash
+        # ARPredictor's pos-embedding add).
         required = self.history_size + self.num_preds
         if self.num_frames <= 0:
             self.num_frames = required
