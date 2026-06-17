@@ -43,6 +43,7 @@ from dl_techniques.utils.logger import logger
 from .warmup_schedule import WarmupSchedule
 from .sgld_optimizer import SGLD
 from .vsgd_optimizer import VSGD
+from .gefen_optimizer import Gefen
 from .constants import *
 
 # ---------------------------------------------------------------------
@@ -65,6 +66,7 @@ class OptimizerType(str, Enum):
     ADADELTA = "adadelta"
     SGLD = "sgld"
     VSGD = "vsgd"
+    GEFEN = "gefen"
 
 
 # ---------------------------------------------------------------------
@@ -294,6 +296,8 @@ def optimizer_builder(
         optimizer = _build_sgld_optimizer(config, base_params)
     elif optimizer_type == OptimizerType.VSGD:
         optimizer = _build_vsgd_optimizer(config, base_params)
+    elif optimizer_type == OptimizerType.GEFEN:
+        optimizer = _build_gefen_optimizer(config, base_params)
     else:
         raise ValueError(
             f"Unknown optimizer_type: [{optimizer_type}]. "
@@ -480,3 +484,45 @@ def _build_vsgd_optimizer(
     }
 
     return VSGD(**optimizer_params)
+
+
+def _build_gefen_optimizer(
+        config: Dict[str, Any],
+        base_params: Dict[str, Any]
+) -> Gefen:
+    """Build Gefen-lite optimizer with configuration parameters.
+
+    Gefen-lite (shared-v) is an AdamW-style optimizer with a block-shared
+    second moment (one `vmean` per block of `period` elements) and
+    full-precision momentum. The block `period` is chosen deterministically
+    from each variable's shape, keeping the update graph-static and
+    `jit_compile`-safe. Drop-in for AdamW.
+
+    Args:
+        config: Configuration dictionary with Gefen-specific parameters.
+            Optional keys:
+                - beta_1: First-moment EMA decay (default 0.9).
+                - beta_2: Second-moment EMA decay (default 0.999).
+                - epsilon: Numerical stability floor (default 1e-8).
+                - weight_decay: Decoupled weight decay coefficient (default 0.0).
+                - max_block_size: Largest allowed block period (default 1024).
+                - min_block_size: Smallest block period before falling back to
+                    per-element AdamW (default 8).
+        base_params: Base parameters common to all optimizers (learning_rate,
+            clipvalue, clipnorm, global_clipnorm).
+
+    Returns:
+        Configured Gefen optimizer instance.
+    """
+    optimizer_params = {
+        "name": "gefen",
+        "beta_1": config.get("beta_1", DEFAULT_GEFEN_BETA_1),
+        "beta_2": config.get("beta_2", DEFAULT_GEFEN_BETA_2),
+        "epsilon": config.get("epsilon", DEFAULT_GEFEN_EPSILON),
+        "weight_decay": config.get("weight_decay", DEFAULT_GEFEN_WEIGHT_DECAY),
+        "max_block_size": config.get("max_block_size", DEFAULT_GEFEN_MAX_BLOCK_SIZE),
+        "min_block_size": config.get("min_block_size", DEFAULT_GEFEN_MIN_BLOCK_SIZE),
+        **base_params,
+    }
+
+    return Gefen(**optimizer_params)
