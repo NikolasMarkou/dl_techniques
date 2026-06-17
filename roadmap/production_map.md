@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 38 / 183 files production-verified**
+**Progress: 45 / 183 files production-verified**
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -973,17 +973,17 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 | `[x]` | `convnext_patch_vae/model.py` | PASS | rubric-verified; round-trip tests pass |
 | `[x]` | `convnext_patch_vae/model_hierarchical.py` | PASS | rubric-verified; round-trip tests pass |
 
-### L2-Round 6 — convunext, coshnet, darkir, depth_anything, detr  (7 files)
+### L2-Round 6 — convunext, coshnet, darkir, depth_anything, detr  (7 files)  — DONE
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `convunext/model.py` | PASS | rubric-verify |
-| `[ ]` | `coshnet/model.py` | PASS | rubric-verify |
-| `[ ]` | `darkir/model.py` | PASS | rubric-verify |
-| `[ ]` | `depth_anything/components.py` | PASS | rubric-verify |
-| `[ ]` | `depth_anything/model.py` | PASS | rubric-verify (uses weight_transfer — canonical M3) |
-| `[ ]` | `depth_anything/teacher_ema.py` | N/A | N/A — non-layer |
-| `[ ]` | `detr/model.py` | PASS | rubric-verify |
+| `[x]` | `convunext/model.py` | PASS | rubric-verified; round-trip tests pass |
+| `[x]` | `coshnet/model.py` | PASS | rubric-verified; replaced xfail-smoke with real test (construction+ValueError+forward+M2 round-trip) |
+| `[x]` | `darkir/model.py` | PASS | rubric-verified; added test_model.py (forward + side-loss variant + M2 round-trip) |
+| `[x]` | `depth_anything/components.py` | PASS | rubric-verified |
+| `[x]` | `depth_anything/model.py` | PASS | rubric-verified (uses weight_transfer — canonical M3) |
+| `[x]` | `depth_anything/teacher_ema.py` | N/A | N/A — non-layer (confirmed) |
+| `[x]` | `detr/model.py` | PASS | rubric-verified; round-trip tests pass |
 
 ### L2-Round 7 — dino, distilbert, fastvlm, fftnet  (7 files)
 
