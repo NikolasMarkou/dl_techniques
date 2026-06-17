@@ -61,7 +61,16 @@ from dl_techniques.utils.logger import logger
 class CliffordLaplacianUNet(keras.Model):
     """Deterministic image autoencoder: explicit learnable Laplacian pyramid + Clifford U-Net.
 
-    A feature-space Laplacian U-Net with two decoupled tracks:
+    **Intent**: Provide a feature-space Laplacian U-Net that fuses an EXPLICIT,
+    inspectable signal pyramid with isotropic CliffordNet geometric-algebra
+    feature extraction. The multi-scale split/merge is a standalone, serializable
+    helper layer (:class:`LaplacianPyramidLevel`) operating at the RAW signal
+    channel count, fully decoupled from any learned Clifford processing, so the
+    high/low frequency decomposition stays auditable and the reconstruction
+    identity exact to float precision. The model returns a single-output dict
+    ``{"reconstruction": y}`` with ``y`` of identical shape to the input.
+
+    The architecture has two decoupled tracks:
 
     - **Track A (signal pyramid)**: one :class:`LaplacianPyramidLevel` per encoder
       level produces ``(low_i, high_i)`` at the NATIVE channel count. ``low_i``
@@ -77,41 +86,101 @@ class CliffordLaplacianUNet(keras.Model):
       each step refined by Clifford blocks. A final 1x1 conv projects back to
       ``in_channels``.
 
-    The model returns a single-output dict ``{"reconstruction": y}`` with ``y`` of
-    identical shape to the input.
+    **Architecture**:
+    ```
+    Input(B, H, W, C_in)
+           |
+      +----v---------------------------------------------------+
+      | Encoder (per level i = 0 .. num_levels-1)              |
+      |   low_i, high_i = LaplacianPyramidLevel[i].split(x)   |  Track A (signal)
+      |   h_i  = enc_proj[i](high_i)        # 1x1 -> ch[i]    |  Track B (features)
+      |   h_i  = enc_blocks[i](h_i)         # Clifford x N    |
+      |   x    = low_i                      # feeds level i+1 |
+      +----v---------------------------------------------------+
+           |  (coarsest low band, native channels)
+      +----v---------------------------------------------------+
+      | Bottleneck                                            |
+      |   b = bottleneck_proj(x)            # 1x1 -> ch[-1]   |
+      |   b = bottleneck_blocks(b)          # Clifford x N    |
+      +----v---------------------------------------------------+
+           |
+      +----v---------------------------------------------------+
+      | Decoder (per level i = num_levels-1 .. 0)             |
+      |   up     = dec_up[i](feat)          # bilinear x2     |
+      |   up     = dec_align[i](up)         # 1x1 -> ch[i]    |
+      |   merged = add(up, h_i)             # Laplacian merge |
+      |   feat   = dec_blocks[i](merged)    # Clifford x N    |
+      +----v---------------------------------------------------+
+           |
+      out_conv(feat)                        # 1x1 -> C_in
+           |
+    {"reconstruction": (B, H, W, C_in)}
+    ```
 
     Divisibility contract: input H, W must be divisible by ``2**num_levels``
     (each encoder level halves the spatial resolution via :class:`BlurPool2D`).
 
-    :param in_channels: Number of input/output image channels (e.g. 3 for RGB).
-    :type in_channels: int
-    :param level_channels: Per-level working width for the Clifford feature track.
-        Its length defines ``num_levels``.
-    :type level_channels: Tuple[int, ...]
-    :param level_blocks: Number of Clifford blocks per level (encoder and decoder);
-        the bottleneck reuses ``level_blocks[-1]``. Must match ``num_levels``.
-    :type level_blocks: Tuple[int, ...]
-    :param level_shifts: Per-level channel-shift offsets for the Clifford blocks.
-        ``None`` defaults to ``[[1, 2]] * num_levels``.
-    :type level_shifts: Optional[List[List[int]]]
-    :param cli_mode: Algebraic components for the local interaction.
-    :type cli_mode: str
-    :param ctx_mode: Context mode for the Clifford blocks.
-    :type ctx_mode: str
-    :param use_global_context: Whether Clifford blocks use the global-context
-        branch (requires per-block ``channels >= 2``).
-    :type use_global_context: bool
-    :param blur_kernel_size: Gaussian blur kernel size for the pyramid split.
-    :type blur_kernel_size: Tuple[int, int]
-    :param blur_sigma: Gaussian sigma; ``-1`` derives it from the kernel size.
-    :type blur_sigma: float
-    :param blur_trainable: Whether the pyramid blur kernels are learnable.
-    :type blur_trainable: bool
-    :param kernel_initializer: Initializer for all 1x1 ``Conv2D`` projections.
-    :type kernel_initializer: Any
-    :param kernel_regularizer: Regularizer for all 1x1 ``Conv2D`` projections.
-    :type kernel_regularizer: Optional[Any]
-    :param kwargs: Additional keyword arguments for :class:`keras.Model`.
+    Args:
+        in_channels: Number of input/output image channels (e.g. 3 for RGB).
+            Must be positive. Defaults to ``3``.
+        level_channels: Per-level working width for the Clifford feature track.
+            Its length defines ``num_levels``. Defaults to ``(32, 64, 128)``.
+        level_blocks: Number of Clifford blocks per level (encoder and decoder);
+            the bottleneck reuses ``level_blocks[-1]``. Must match ``num_levels``.
+            Defaults to ``(2, 2, 2)``.
+        level_shifts: Per-level channel-shift offsets for the Clifford blocks.
+            ``None`` defaults to ``[[1, 2]] * num_levels``. Defaults to ``None``.
+        cli_mode: Algebraic components for the local interaction; one of
+            ``"inner"``, ``"wedge"``, ``"full"``. Defaults to ``"full"``.
+        ctx_mode: Context mode for the Clifford blocks; one of ``"diff"``,
+            ``"abs"``. Defaults to ``"diff"``.
+        use_global_context: Whether Clifford blocks use the global-context branch
+            (requires per-block ``channels >= 2``). Defaults to ``True``.
+        blur_kernel_size: Gaussian blur kernel size (length-2 tuple of positive
+            ints) for the pyramid split. Defaults to ``(5, 5)``.
+        blur_sigma: Gaussian sigma; ``-1`` derives it from the kernel size.
+            Defaults to ``-1``.
+        blur_trainable: Whether the pyramid blur kernels are learnable. Defaults
+            to ``False``.
+        kernel_initializer: Initializer for all 1x1 ``Conv2D`` projections.
+            Defaults to ``"glorot_uniform"``.
+        kernel_regularizer: Regularizer for all 1x1 ``Conv2D`` projections.
+            Defaults to ``None``.
+        **kwargs: Additional keyword arguments for :class:`keras.Model`.
+
+    Input shape:
+        4D tensor ``(batch_size, height, width, in_channels)``. ``height`` and
+        ``width`` must be divisible by ``2 ** num_levels``.
+
+    Output shape:
+        A dict ``{"reconstruction": tensor}`` whose tensor has the same shape as
+        the input: ``(batch_size, height, width, in_channels)``.
+
+    Raises:
+        ValueError: If ``in_channels <= 0``; if any ``level_channels`` or
+            ``level_blocks`` value is non-positive; if ``len(level_channels) !=
+            len(level_blocks)``; if ``cli_mode``/``ctx_mode`` is not in its valid
+            set; or if ``blur_kernel_size`` is not a length-2 tuple of positive
+            ints.
+
+    Example:
+        ```python
+        import numpy as np
+
+        # Direct construction (tiny, CPU-friendly).
+        model = CliffordLaplacianUNet(
+            level_channels=(8, 16),
+            level_blocks=(1, 1),
+        )
+        out = model(np.zeros((1, 32, 32, 3), "float32"))
+        recon = out["reconstruction"]  # shape (1, 32, 32, 3)
+
+        # Named variant.
+        model = CliffordLaplacianUNet.from_variant("small", in_channels=3)
+
+        # Factory convenience.
+        model = create_clifford_laplacian_unet("small", in_channels=3)
+        ```
     """
 
     MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
@@ -356,7 +425,14 @@ class CliffordLaplacianUNet(keras.Model):
         Enforces the divisibility contract: static H, W (if known) must be
         divisible by ``2**num_levels``.
 
-        :param input_shape: Input shape ``(B, H, W, C)``.
+        Args:
+            input_shape: Input shape ``(B, H, W, C)``. A 3D shape ``(H, W, C)``
+                (e.g. from ``summary()``) is accepted and a dummy batch dim is
+                prepended.
+
+        Raises:
+            ValueError: If a known static ``height`` or ``width`` is not divisible
+                by ``2 ** num_levels``.
         """
         # summary() may call build with a 3D shape (no batch dim); prepend a
         # dummy batch dim so the unpack below is safe.
@@ -418,12 +494,19 @@ class CliffordLaplacianUNet(keras.Model):
 
     # ------------------------------------------------------------------
 
-    def call(self, inputs, training=None) -> Dict[str, Any]:
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None,
+    ) -> Dict[str, keras.KerasTensor]:
         """Forward pass.
 
-        :param inputs: Image tensor ``(B, H, W, C)``.
-        :param training: Whether in training mode.
-        :return: ``{"reconstruction": y}`` with ``y`` of shape ``(B, H, W, C)``.
+        Args:
+            inputs: Image tensor ``(B, H, W, C)``.
+            training: Whether the call is in training mode.
+
+        Returns:
+            A dict ``{"reconstruction": y}`` with ``y`` of shape ``(B, H, W, C)``.
         """
         # --- Encoder ---
         x = inputs
@@ -513,10 +596,23 @@ class CliffordLaplacianUNet(keras.Model):
     ) -> "CliffordLaplacianUNet":
         """Create a :class:`CliffordLaplacianUNet` from a named variant.
 
-        :param variant: One of ``small``, ``base``, ``large``.
-        :param in_channels: Number of input/output image channels (3 for RGB).
-        :param kwargs: Override any default hyperparameter (kwargs win over the
-            variant defaults).
+        Args:
+            variant: One of ``"small"``, ``"base"``, ``"large"``.
+            in_channels: Number of input/output image channels (3 for RGB).
+                Defaults to ``3``.
+            **kwargs: Override any default hyperparameter (kwargs win over the
+                variant defaults).
+
+        Returns:
+            A configured (un-built) :class:`CliffordLaplacianUNet`.
+
+        Raises:
+            ValueError: If ``variant`` is not a key of ``MODEL_VARIANTS``.
+
+        Example:
+            ```python
+            model = CliffordLaplacianUNet.from_variant("base", in_channels=1)
+            ```
         """
         if variant not in cls.MODEL_VARIANTS:
             raise ValueError(
@@ -531,6 +627,22 @@ class CliffordLaplacianUNet(keras.Model):
         )
         return cls(in_channels=in_channels, **defaults)
 
+    # ------------------------------------------------------------------
+
+    def summary(self, **kwargs) -> None:
+        """Print the Keras model summary plus a config line.
+
+        Args:
+            **kwargs: Forwarded verbatim to :meth:`keras.Model.summary`.
+        """
+        super().summary(**kwargs)
+        logger.info(
+            f"CliffordLaplacianUNet config: levels={self.num_levels}, "
+            f"channels={list(self.level_channels)}, "
+            f"blocks={list(self.level_blocks)}, "
+            f"cli_mode={self.cli_mode}, ctx_mode={self.ctx_mode}"
+        )
+
 
 # ---------------------------------------------------------------------
 # Factory
@@ -540,24 +652,35 @@ class CliffordLaplacianUNet(keras.Model):
 def create_clifford_laplacian_unet(
     variant: str = "small",
     in_channels: int = 3,
-    **overrides: Any,
-) -> CliffordLaplacianUNet:
+    **kwargs: Any,
+) -> "CliffordLaplacianUNet":
     """Create a :class:`CliffordLaplacianUNet` deterministic image autoencoder.
 
-    Thin convenience delegate to :meth:`CliffordLaplacianUNet.from_variant`.
+    **Intent**: Thin convenience delegate to
+    :meth:`CliffordLaplacianUNet.from_variant` so callers can build a named
+    variant in one call without importing the class directly.
 
-    :param variant: Named model variant; one of ``small``, ``base``, ``large``.
-        ``small`` is a 3-level pyramid, ``base``/``large`` are 4-level (inputs
-        must be divisible by ``2**num_levels`` -> 8 for ``small``, 16 for the
-        4-level variants).
-    :type variant: str
-    :param in_channels: Number of input/output image channels (3 for RGB).
-    :type in_channels: int
-    :param overrides: Keyword overrides forwarded to the constructor; these take
-        precedence over the variant defaults.
-    :return: A configured (un-built) :class:`CliffordLaplacianUNet`.
-    :rtype: CliffordLaplacianUNet
+    Args:
+        variant: Named model variant; one of ``"small"``, ``"base"``,
+            ``"large"``. ``"small"`` is a 3-level pyramid; ``"base"``/``"large"``
+            are 4-level (inputs must be divisible by ``2 ** num_levels`` -> 8 for
+            ``"small"``, 16 for the 4-level variants). Defaults to ``"small"``.
+        in_channels: Number of input/output image channels (3 for RGB). Defaults
+            to ``3``.
+        **kwargs: Keyword overrides forwarded to the constructor; these take
+            precedence over the variant defaults.
+
+    Returns:
+        A configured (un-built) :class:`CliffordLaplacianUNet`.
+
+    Example:
+        ```python
+        model = create_clifford_laplacian_unet("small", in_channels=3)
+
+        # Override a variant default.
+        model = create_clifford_laplacian_unet("base", blur_trainable=True)
+        ```
     """
     return CliffordLaplacianUNet.from_variant(
-        variant, in_channels=in_channels, **overrides
+        variant, in_channels=in_channels, **kwargs
     )
