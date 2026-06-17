@@ -50,6 +50,7 @@ from .deep_supervision import schedule_builder as deep_supervision_schedule_buil
 from .muon_optimizer import Muon
 from .sgld_optimizer import SGLD
 from .vsgd_optimizer import VSGD
+from .gefen_optimizer import Gefen
 
 __all__ = [
     "optimizer_builder",
@@ -58,4 +59,5 @@ __all__ = [
     "Muon",
     "SGLD",
     "VSGD",
+    "Gefen",
 ]
