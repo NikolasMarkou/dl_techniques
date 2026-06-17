@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 52 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete)
+**Progress: 58 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete)
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -997,16 +997,16 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 | `[x]` | `fastvlm/model.py` | PASS | rubric-verified (image-only despite VLM name) |
 | `[~]` | `fftnet/model.py` | FAIL→ACCEPTED | FFTMixer raw-tf FFT is a DOCUMENTED accepted exception (header note added; keras.ops has no ifft, §L2-5). Also fixed FFTNet M2 round-trip (explicit sublayer build) + added test_model.py. Scanner FAIL is the accepted H10 exception. |
 
-### L2-Round 8 — fnet, fractalnet, gemma, gpt2, hierarchical_reasoning_model  (6 files)
+### L2-Round 8 — fnet, fractalnet, gemma, gpt2, hierarchical_reasoning_model  (6 files)  — DONE
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `fnet/model.py` | PASS | rubric-verify |
-| `[ ]` | `fractalnet/model.py` | PASS | rubric-verify |
-| `[ ]` | `gemma/components.py` | PASS | rubric-verify |
-| `[ ]` | `gemma/gemma3.py` | PASS | rubric-verify |
-| `[ ]` | `gpt2/gpt2.py` | PASS | rubric-verify |
-| `[ ]` | `hierarchical_reasoning_model/model.py` | PASS | rubric-verify (build() override — SAM D-008 pattern) |
+| `[x]` | `fnet/model.py` | PASS | rubric-verified; round-trip test passes |
+| `[x]` | `fractalnet/model.py` | PASS | rubric-verified; round-trip test passes |
+| `[x]` | `gemma/components.py` | PASS | rubric-verified |
+| `[x]` | `gemma/gemma3.py` | PASS | rubric-verified; round-trip test passes |
+| `[x]` | `gpt2/gpt2.py` | PASS | rubric-verified; added test_round_trip.py (M2 was untested; round-trip clean) |
+| `[x]` | `hierarchical_reasoning_model/model.py` | PASS | rubric-verified (build() override SAM D-008); added test_model.py with M2 round-trip (was smoke-only; round-trip clean) |
 
 ### L2-Round 9 — ideogram4  (7 files)
 
