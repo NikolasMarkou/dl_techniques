@@ -170,63 +170,11 @@ class CliffordLaplacianUNet(keras.Model):
         # Validate config BEFORE building any sublayers.
         self._validate_config()
 
-        _conv_kwargs: Dict[str, Any] = dict(
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-        )
-
-        def _make_blocks(n: int, channels: int, shifts: List[int]):
-            return [
-                CliffordNetBlock(
-                    channels=channels,
-                    shifts=shifts,
-                    cli_mode=cli_mode,
-                    ctx_mode=ctx_mode,
-                    use_global_context=use_global_context,
-                )
-                for _ in range(n)
-            ]
-
-        # --- Signal pyramid (Track A): one per level, native channels ---
-        self.pyramid_levels = [
-            LaplacianPyramidLevel(blur_kernel_size, blur_sigma, blur_trainable)
-            for _ in range(self.num_levels)
-        ]
-
-        # --- Encoder (Track B): project native high band -> level width, refine ---
-        self.enc_proj = [
-            keras.layers.Conv2D(level_channels[i], 1, **_conv_kwargs)
-            for i in range(self.num_levels)
-        ]
-        self.enc_blocks = [
-            _make_blocks(level_blocks[i], level_channels[i], level_shifts[i])
-            for i in range(self.num_levels)
-        ]
-
-        # --- Bottleneck on coarsest low band (native channels) ---
-        self.bottleneck_proj = keras.layers.Conv2D(
-            level_channels[-1], 1, **_conv_kwargs
-        )
-        self.bottleneck_blocks = _make_blocks(
-            level_blocks[-1], level_channels[-1], level_shifts[-1]
-        )
-
-        # --- Decoder: upsample coarser features, align channels, merge + refine ---
-        self.dec_up = [
-            keras.layers.UpSampling2D(size=(2, 2), interpolation="bilinear")
-            for _ in range(self.num_levels)
-        ]
-        self.dec_align = [
-            keras.layers.Conv2D(level_channels[i], 1, **_conv_kwargs)
-            for i in range(self.num_levels)
-        ]
-        self.dec_blocks = [
-            _make_blocks(level_blocks[i], level_channels[i], level_shifts[i])
-            for i in range(self.num_levels)
-        ]
-
-        # --- Output head: decoder level-0 features -> image channels ---
-        self.out_conv = keras.layers.Conv2D(in_channels, 1, **_conv_kwargs)
+        # Build sublayers via private helpers (same attrs/order/args as inline).
+        self._build_encoder()
+        self._build_bottleneck()
+        self._build_decoder()
+        self._build_output()
 
         logger.info(
             f"Created CliffordLaplacianUNet: {self.num_levels} levels, "
@@ -303,6 +251,102 @@ class CliffordLaplacianUNet(keras.Model):
                 f"CliffordLaplacianUNet: blur_kernel_size must be a length-2 "
                 f"sequence of positive ints, got {ks!r}"
             )
+
+    # ------------------------------------------------------------------
+
+    def _make_blocks(
+        self, n: int, channels: int, shifts: List[int]
+    ) -> List[CliffordNetBlock]:
+        """Build ``n`` isotropic CliffordNetBlock(s) at ``channels`` width."""
+        return [
+            CliffordNetBlock(
+                channels=channels,
+                shifts=shifts,
+                cli_mode=self.cli_mode,
+                ctx_mode=self.ctx_mode,
+                use_global_context=self.use_global_context,
+            )
+            for _ in range(n)
+        ]
+
+    # ------------------------------------------------------------------
+
+    def _build_encoder(self) -> None:
+        """Build the signal pyramid and the encoder feature track."""
+        _conv_kwargs: Dict[str, Any] = dict(
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+        )
+
+        # --- Signal pyramid (Track A): one per level, native channels ---
+        self.pyramid_levels = [
+            LaplacianPyramidLevel(
+                self.blur_kernel_size, self.blur_sigma, self.blur_trainable
+            )
+            for _ in range(self.num_levels)
+        ]
+
+        # --- Encoder (Track B): project native high band -> level width, refine ---
+        self.enc_proj = [
+            keras.layers.Conv2D(self.level_channels[i], 1, **_conv_kwargs)
+            for i in range(self.num_levels)
+        ]
+        self.enc_blocks = [
+            self._make_blocks(
+                self.level_blocks[i], self.level_channels[i], self.level_shifts[i]
+            )
+            for i in range(self.num_levels)
+        ]
+
+    # ------------------------------------------------------------------
+
+    def _build_bottleneck(self) -> None:
+        """Build the bottleneck on the coarsest low band (native channels)."""
+        _conv_kwargs: Dict[str, Any] = dict(
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+        )
+
+        self.bottleneck_proj = keras.layers.Conv2D(
+            self.level_channels[-1], 1, **_conv_kwargs
+        )
+        self.bottleneck_blocks = self._make_blocks(
+            self.level_blocks[-1], self.level_channels[-1], self.level_shifts[-1]
+        )
+
+    # ------------------------------------------------------------------
+
+    def _build_decoder(self) -> None:
+        """Build the decoder: upsample, align channels, merge + refine."""
+        _conv_kwargs: Dict[str, Any] = dict(
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+        )
+
+        self.dec_up = [
+            keras.layers.UpSampling2D(size=(2, 2), interpolation="bilinear")
+            for _ in range(self.num_levels)
+        ]
+        self.dec_align = [
+            keras.layers.Conv2D(self.level_channels[i], 1, **_conv_kwargs)
+            for i in range(self.num_levels)
+        ]
+        self.dec_blocks = [
+            self._make_blocks(
+                self.level_blocks[i], self.level_channels[i], self.level_shifts[i]
+            )
+            for i in range(self.num_levels)
+        ]
+
+    # ------------------------------------------------------------------
+
+    def _build_output(self) -> None:
+        """Build the output head: decoder level-0 features -> image channels."""
+        _conv_kwargs: Dict[str, Any] = dict(
+            kernel_initializer=self.kernel_initializer,
+            kernel_regularizer=self.kernel_regularizer,
+        )
+        self.out_conv = keras.layers.Conv2D(self.in_channels, 1, **_conv_kwargs)
 
     # ------------------------------------------------------------------
 
