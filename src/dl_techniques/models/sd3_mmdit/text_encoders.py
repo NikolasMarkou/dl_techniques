@@ -529,6 +529,12 @@ class T5Encoder(keras.Model):
     ) -> None:
         super().__init__(**kwargs)
 
+        if embed_dim % num_heads != 0:
+            raise ValueError(
+                f"embed_dim ({embed_dim}) must be divisible by num_heads "
+                f"({num_heads})."
+            )
+
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
         self.num_layers = num_layers

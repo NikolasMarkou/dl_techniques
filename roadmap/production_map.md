@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 135 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete; nano_vlm_world_model/model.py M2-DEFERRED [~], not counted)
+**Progress: 142 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete; nano_vlm_world_model/model.py M2-DEFERRED [~], not counted)
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -1146,17 +1146,17 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 |------|------|---------|----------|
 | `[x]` | `scunet/model.py` | PASS | done: H4 added (`_validate_config` — in_nc/config len-7+positive/dim even-positive/head_dim/window_size/sd_rate∈[0,1]/input_resolution) + S1 module docstring; added 10 ValueError tests; 63 tests pass incl. M2 round-trips |
 
-### L2-Round 21 — sd3_mmdit  (7 files)
+### L2-Round 21 — sd3_mmdit  (7 files)  — DONE
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `sd3_mmdit/blocks.py` | PASS | rubric-verify |
-| `[ ]` | `sd3_mmdit/config.py` | N/A | N/A — dataclass-config |
-| `[ ]` | `sd3_mmdit/pipeline.py` | N/A | N/A — non-layer |
-| `[ ]` | `sd3_mmdit/scheduler.py` | N/A | N/A — dataclass-config |
-| `[ ]` | `sd3_mmdit/text_encoders.py` | PASS | rubric-verify |
-| `[ ]` | `sd3_mmdit/transformer.py` | PASS | rubric-verify |
-| `[ ]` | `sd3_mmdit/vae.py` | N/A | N/A — non-layer |
+| `[x]` | `sd3_mmdit/blocks.py` | PASS | rubric-verified exemplary (MMDiTBlock/MMDiTFinalLayer: H4/H5/H6/H7/H8/H11 all good); 2 .keras round-trips pass |
+| `[x]` | `sd3_mmdit/config.py` | N/A | N/A confirmed (SD3MMDiTConfig frozen dataclass) |
+| `[x]` | `sd3_mmdit/pipeline.py` | N/A | N/A confirmed (SD3Pipeline plain-Python inference object) |
+| `[x]` | `sd3_mmdit/scheduler.py` | N/A | N/A confirmed (FlowMatchEulerScheduler frozen dataclass) |
+| `[x]` | `sd3_mmdit/text_encoders.py` | PASS | done: H4 added to T5Encoder (embed_dim%num_heads — for parity with CLIPTextEncoder; head_dim split needs it); +2 ValueError tests (CLIP+T5); 4 .keras round-trips pass |
+| `[x]` | `sd3_mmdit/transformer.py` | PASS | rubric-verified exemplary (SD3MMDiT: H4 TypeError, build-override super().build() last, H7/H9, M1/M5 create_sd3_mmdit factory); 2 .keras round-trips pass |
+| `[x]` | `sd3_mmdit/vae.py` | N/A | N/A confirmed (SD3VAE plain-Python wrapper, not a keras.Model) |
 
 ### L2-Round 22 — shgcn, som, squeezenet, swin_transformer, tabm, thera  (11 files)
 

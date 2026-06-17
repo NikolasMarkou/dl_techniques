@@ -143,6 +143,13 @@ class TestCLIPLikeEncoders:
             assert out["pooled"].shape == (B, D)
             assert out["last_hidden"].shape == (B, L, D)
 
+    def test_invalid_embed_dim_raises(self):
+        """embed_dim not divisible by num_heads must raise (H4)."""
+        bad = dict(CLIP_TINY)
+        bad["embed_dim"] = 30  # 30 % 4 != 0
+        with pytest.raises(ValueError, match="must be divisible by num_heads"):
+            CLIPTextEncoder(**bad)
+
     def test_causal_mask_faithfulness(self, kind):
         """Changing a LATER token must NOT change an EARLIER token's hidden state.
 
@@ -238,6 +245,13 @@ class TestT5Encoder:
         for B, L in [(1, 4), (3, 8), (2, 15)]:
             out = enc(_ids(B, L, T5_TINY["vocab_size"]))
             assert out.shape == (B, L, D)
+
+    def test_invalid_embed_dim_raises(self):
+        """embed_dim not divisible by num_heads must raise (H4)."""
+        bad = dict(T5_TINY)
+        bad["embed_dim"] = 30  # 30 % 4 != 0
+        with pytest.raises(ValueError, match="must be divisible by num_heads"):
+            T5Encoder(**bad)
 
     def test_relative_position_bucket_range(self):
         """Buckets must stay within [0, num_buckets)."""
