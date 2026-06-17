@@ -715,17 +715,13 @@ def create_callbacks(
     common_callbacks, results_dir = create_common_callbacks(
         model_name=config.experiment_name,
         results_dir_prefix="cliffordnet_cond_denoiser",
+        run_dir=str(Path(config.output_dir) / config.experiment_name),
         monitor="val_loss",
         patience=config.early_stopping_patience,
         use_lr_schedule=True,
         include_tensorboard=True,
         include_analyzer=False,
     )
-
-    # Point config.output_dir / experiment_name at the common dir so
-    # domain-specific callbacks write into the same place.
-    config.output_dir = str(Path(results_dir).parent)
-    config.experiment_name = Path(results_dir).name
 
     common_callbacks.append(ConditionalMetricsVisualizationCallback(config))
     common_callbacks.append(StreamingResultMonitor(config))
