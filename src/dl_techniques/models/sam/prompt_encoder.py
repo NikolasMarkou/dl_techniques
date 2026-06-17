@@ -220,6 +220,25 @@ class PositionEmbeddingRandom(keras.layers.Layer):
         coords = ops.stack([coords_x, coords_y], axis=-1)
         return self._pe_encoding(ops.cast(coords, dtype=self.compute_dtype))
 
+    def compute_output_shape(
+        self,
+        input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
+        """
+        Compute the output shape of :meth:`call`.
+
+        ``call`` receives a ``(height, width)`` spatial size and returns a
+        positional-encoding grid of shape ``(2 * num_pos_feats, height, width)``.
+
+        Args:
+            input_shape: The ``(height, width)`` spatial size passed to ``call``.
+
+        Returns:
+            Output shape ``(2 * num_pos_feats, height, width)``.
+        """
+        height, width = input_shape
+        return (2 * self.num_pos_feats, height, width)
+
     def get_config(self) -> Dict[str, Any]:
         """
         Returns the configuration of the layer for serialization.

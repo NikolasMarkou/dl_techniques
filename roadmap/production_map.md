@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 127 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete; nano_vlm_world_model/model.py M2-DEFERRED [~], not counted)
+**Progress: 134 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete; nano_vlm_world_model/model.py M2-DEFERRED [~], not counted)
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -1128,17 +1128,17 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 | `[x]` | `qwen/qwen3_omni.py` | N/A | N/A — pure-functions (confirmed) |
 | `[x]` | `qwen/qwen3_som.py` | PASS | rubric-verified; added test_qwen3_som.py (gen + cls forward + M2; clean 0.0). Was untested. |
 
-### L2-Round 19 — relgt, resnet, sam  (7 files)
+### L2-Round 19 — relgt, resnet, sam  (7 files)  — DONE
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `relgt/model.py` | PASS | rubric-verify |
-| `[ ]` | `resnet/model.py` | PASS | rubric-verify |
-| `[ ]` | `sam/image_encoder.py` | PASS | rubric-verify (PatchEmbedding2D flatten=False) |
-| `[ ]` | `sam/mask_decoder.py` | PASS | rubric-verify (pre-existing mask-drift on reload, §L2-5) |
-| `[ ]` | `sam/model.py` | PASS | rubric-verify |
-| `[ ]` | `sam/prompt_encoder.py` | FAIL | PositionEmbeddingRandom: compute_output_shape (embedded LAYER → H7 HARD) |
-| `[ ]` | `sam/transformer.py` | PASS | rubric-verify |
+| `[x]` | `relgt/model.py` | PASS | rubric-verified; added test_model.py. Forward is STOCHASTIC at inference (local-neighborhood sampling) → M2 verified by weight-preservation (all 49 weights identical across round-trip), not output-identity |
+| `[x]` | `resnet/model.py` | PASS | rubric-verified; added test_round_trip.py (M2 output-identity; clean 0.0) |
+| `[x]` | `sam/image_encoder.py` | PASS | rubric-verified (PatchEmbedding2D flatten=False) |
+| `[x]` | `sam/mask_decoder.py` | PASS | rubric-verified; sam suite 35 tests pass incl. round-trip (the §L2-5 mask-drift no longer fails) |
+| `[x]` | `sam/model.py` | PASS | rubric-verified |
+| `[x]` | `sam/prompt_encoder.py` | PASS | H7 FIXED — added PositionEmbeddingRandom.compute_output_shape (call(size)→(2*num_pos_feats, h, w)) |
+| `[x]` | `sam/transformer.py` | PASS | rubric-verified |
 
 ### L2-Round 20 — scunet  (1 file)
 
