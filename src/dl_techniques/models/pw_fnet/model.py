@@ -489,9 +489,9 @@ class Downsample(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the internal convolution layer."""
-        super().build(input_shape)
         if not self.conv.built:
             self.conv.build(input_shape)
+        super().build(input_shape)
 
     def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """
@@ -576,9 +576,9 @@ class Upsample(keras.layers.Layer):
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the internal transposed convolution layer."""
-        super().build(input_shape)
         if not self.conv_transpose.built:
             self.conv_transpose.build(input_shape)
+        super().build(input_shape)
 
     def call(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """

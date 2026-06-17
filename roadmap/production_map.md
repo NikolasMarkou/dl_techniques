@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 119 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete; nano_vlm_world_model/model.py M2-DEFERRED [~], not counted)
+**Progress: 120 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete; nano_vlm_world_model/model.py M2-DEFERRED [~], not counted)
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -1110,11 +1110,11 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 | `[x]` | `power_sampling/protocols.py` | N/A | N/A — non-layer (typing.Protocol) |
 | `[x]` | `power_sampling/sampler.py` | N/A | N/A — non-layer (confirmed) |
 
-### L2-Round 17 — pw_fnet  (1 file)
+### L2-Round 17 — pw_fnet  (1 file)  — DONE
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `pw_fnet/model.py` | FAIL | Downsample: super_build_last; Upsample: super_build_last |
+| `[x]` | `pw_fnet/model.py` | PASS | H6 fixed in both embedded Downsample + Upsample layers (explicit inner-conv build before super().build()); existing test_model.py (10 round-trips, 46 tests) passes |
 
 ### L2-Round 18 — qwen  (7 files)
 
