@@ -85,7 +85,6 @@ def _compute_level_ids(n: int, num_levels: int, pooling_factor: int) -> np.ndarr
     return np.concatenate(parts, axis=0)
 
 
-# DECISION plan_2026-05-17_8babb636/D-005
 def _compute_scatter_targets(
     n: int, num_levels: int, pooling_factor: int
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -589,7 +588,6 @@ class LighthouseAttention(keras.layers.Layer):
     # ------------------------------------------------------------------
     # Step 3 — selection + sub-attention + scatter-back
     # ------------------------------------------------------------------
-    # DECISION plan_2026-05-17_8babb636/D-002
     # Top-K is shared across heads (single (B, K) index set, not per-head)
     # — port simplification. Coarsest-level always retained via a +1e9 score
     # boost (DECISION D-003). Indices are sorted by base position before
@@ -605,7 +603,6 @@ class LighthouseAttention(keras.layers.Layer):
         joint = ops.maximum(s_qk_pyr, s_kq_pyr)  # (B, S_pyr, H)
         s_shared = ops.max(joint, axis=-1)       # (B, S_pyr)
 
-        # DECISION plan_2026-05-17_8babb636/D-003
         # Always-keep coarsest-level entries via +1e9 score boost — replaces
         # the paper's chunked-bitonic stratified guarantee. Finer-level holes
         # fall back to the (always-present) coarsest contribution only.
@@ -661,7 +658,6 @@ class LighthouseAttention(keras.layers.Layer):
         out_g = ops.transpose(out_t, (0, 2, 1, 3))  # (B, K, H, D)
         return out_g
 
-    # DECISION plan_2026-05-17_8babb636/D-004
     # Scatter-back via flat segment_sum: encode (batch, target) as a single
     # segment id (`b * (N+1) + target`) so a single 1-D segment_sum covers
     # all batches deterministically. Target N is the sentinel for "drop"

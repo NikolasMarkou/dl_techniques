@@ -637,8 +637,6 @@ class CapsuleBlock(keras.layers.Layer):
             # LN over axis=-1 destroys ||v||, which encodes detection
             # probability under capsule margin loss. The layer instance below
             # is reused on direction (unit) vectors.
-            # DECISION D-002 (plan 2026-04-30_9c4cdf31): API stable, behavior
-            # corrected to length-preserving LN.
             self.layer_norm = keras.layers.LayerNormalization(
                 axis=-1,
                 name="block_norm"

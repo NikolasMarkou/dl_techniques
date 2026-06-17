@@ -184,7 +184,7 @@ def _compute_validity_masks(
 # ---------------------------------------------------------------------
 
 
-# DECISION D-001: A single class with a `mode` flag is preferred over two
+# A single class with a `mode` flag is preferred over two
 # distinct classes or an inheritance hierarchy. This keeps the shared
 # axis-manipulation, tree-build, and slice/renormalize logic in one place.
 # Trainable-only kwargs are accepted in deterministic mode for config
@@ -579,10 +579,10 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
             f"routing decisions."
         )
 
-        # DECISION D-003: both modes share the same projection
+        # Both modes share the same projection
         # [input_dim, num_decisions] with attribute name `self.kernel`. The
         # only difference is whether it is a trainable Keras weight.
-        # DECISION D-004: in deterministic mode the cosine basis is stored
+        # In deterministic mode the cosine basis is stored
         # as a non-trainable Keras weight (add_weight(trainable=False))
         # rather than a plain tensor. Plain tensors created inside build()
         # get captured in the FuncGraph used by Keras' compute_output_spec
@@ -627,7 +627,7 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         # decisions at internal nodes whose subtree contains no valid leaf.
         # For pow2 output_dim every entry is (mul=1, add=0) and the masks
         # are a no-op.
-        # DECISION D-006: stored as numpy arrays on ``self`` (NOT as
+        # Stored as numpy arrays on ``self`` (NOT as
         # ``add_weight``). The masks are a deterministic function of
         # ``(output_dim, padded_output_dim)``; persisting them as weights
         # bloats every checkpoint by 8 * (padded_output_dim - 1) bytes per
@@ -713,12 +713,6 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         # --- Step 2: Initialize root probability mass = 1.0 ---
         # decision_probs is already float32 from the cast above; the tree
         # accumulation continues in float32 regardless of compute dtype.
-        # DECISION D-006: convert the numpy validity masks to backend tensors
-        # INSIDE call() so the conversion is captured in the call trace, not
-        # in build()'s transient FuncGraph. The numpy arrays are constants
-        # (function of output_dim only) so the conversion is cheap and the
-        # XLA cache reuses the resulting constants. See the build() comment
-        # for the full rationale and the D-004 distinction.
         mask_mul = ops.convert_to_tensor(self._mask_mul_np, dtype="float32")
         mask_add = ops.convert_to_tensor(self._mask_add_np, dtype="float32")
         batch_size = ops.shape(inputs_2d)[0]
@@ -765,7 +759,7 @@ class RoutingProbabilitiesLayer(keras.layers.Layer):
         else:
             final_probs = unnormalized_probs
 
-        # DECISION D-005: scoped override of the mixed-precision compute_dtype
+        # Scoped override of the mixed-precision compute_dtype
         # contract — under fp16 ONLY, keep the output in float32 to preserve
         # the sum-to-one invariant. At large vocab (e.g. 50K+) individual leaf
         # masses (~2e-5) are below the smallest fp16 normal (~6.1e-5), so a

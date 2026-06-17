@@ -132,7 +132,7 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
             raise ValueError(
                 f"cli_mode must be 'inner', 'wedge', or 'full', got {cli_mode!r}"
             )
-        # DECISION D-001: reject shifts <= 0. s=0 makes the wedge term
+        # Reject shifts <= 0. s=0 makes the wedge term
         # identically zero and wastes a slot in the proj input; negative
         # shifts are accepted by keras.ops.roll but are almost certainly
         # unintended.
@@ -593,7 +593,7 @@ class CliffordNetBlock(keras.layers.Layer):
             raise ValueError(f"channels must be positive, got {channels}")
         if ctx_mode not in ("diff", "abs"):
             raise ValueError(f"ctx_mode must be 'diff' or 'abs', got {ctx_mode!r}")
-        # DECISION D-002: the global branch hardcodes shifts=[1, 2]; with
+        # The global branch hardcodes shifts=[1, 2]; with
         # channels < 2 the inner SRGP filter would either silently drop
         # shifts (channels=2 -> only shift=1 remains, warning) or reject
         # the layer entirely (channels=1 -> ValueError). Fail up front.
@@ -2020,7 +2020,7 @@ class CliffordNetBlockDSv2(keras.layers.Layer):
             pass
         elif self.ctx_mode == "pyramid_diff":
             if self._pyr_pool is not None and self._pyr_up is not None:
-                # DECISION D-003: pyramid_diff at strides>1.
+                # pyramid_diff at strides>1.
                 # AveragePooling2D(padding="same", pool_size=s) on a tensor
                 # of spatial shape (H/s, W/s) produces ceil((H/s)/s) rows;
                 # UpSampling2D(size=s) then expands those by an exact factor
@@ -2245,7 +2245,7 @@ class CausalCliffordNetBlockDSv2(keras.layers.Layer):
 
         if channels <= 0:
             raise ValueError(f"channels must be positive, got {channels}")
-        # DECISION D-001: ctx_mode is restricted to 'diff'|'abs' for the
+        # ctx_mode is restricted to 'diff'|'abs' for the
         # causal variant. 'pyramid_diff' is excluded because the
         # bilinear UpSampling2D used by the DSv2 pyramid path mixes
         # neighbouring positions, which would leak future information
@@ -2262,7 +2262,7 @@ class CausalCliffordNetBlockDSv2(keras.layers.Layer):
             )
         if not isinstance(strides, int) or strides < 1:
             raise ValueError(f"strides must be int>=1, got {strides!r}")
-        # DECISION D-001 (cont.): stream_pool / skip_pool restricted to
+        # stream_pool / skip_pool restricted to
         # avg/max. blur and gaussian_dw use symmetric kernels that cross
         # the temporal boundary on the right edge -> future leak.
         # pixel_unshuffle changes channel count (incompatible with the
@@ -2328,7 +2328,7 @@ class CausalCliffordNetBlockDSv2(keras.layers.Layer):
             name="linear_det",
         )
 
-        # DECISION D-002: causal DW conv = (1, kernel_size) + valid +
+        # Causal DW conv = (1, kernel_size) + valid +
         # manual left-pad of (kernel_size - 1) along W. Same pattern as
         # CausalCliffordNetBlock but generalised to arbitrary kernel_size
         # and stride. With stride s, output W = ceil(W/s) (verified in
