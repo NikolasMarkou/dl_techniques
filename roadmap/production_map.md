@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 30 / 183 files production-verified**
+**Progress: 38 / 183 files production-verified**
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -960,18 +960,18 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 | `[x]` | `cliffordnet/model.py` | PASS | H6 fixed — dummy-forward CLEAN reorder before super().build() (NON-TRIVIAL resolved, no interaction); weight-handling migrated to load_weights_from_checkpoint |
 | `[x]` | `cliffordnet/unet.py` | PASS | H7: added _DetectionHeadBlock.compute_output_shape (delegates to YOLOv12DetectionHead) |
 
-### L2-Round 5 — clip, convnext, convnext_patch_vae  (8 files)
+### L2-Round 5 — clip, convnext, convnext_patch_vae  (8 files)  — DONE
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `clip/model.py` | PASS | rubric-verify |
-| `[ ]` | `convnext/convnext_v1.py` | FAIL | ConvNeXtV1: super_build_last |
-| `[ ]` | `convnext/convnext_v2.py` | FAIL | ConvNeXtV2: super_build_last (weight-handling SOFT ~L400) |
-| `[ ]` | `convnext_patch_vae/config.py` | N/A | N/A — dataclass-config |
-| `[ ]` | `convnext_patch_vae/decoder.py` | PASS | rubric-verify |
-| `[ ]` | `convnext_patch_vae/encoder.py` | PASS | rubric-verify |
-| `[ ]` | `convnext_patch_vae/model.py` | PASS | rubric-verify |
-| `[ ]` | `convnext_patch_vae/model_hierarchical.py` | PASS | rubric-verify |
+| `[x]` | `clip/model.py` | PASS | rubric-verified; round-trip test passes |
+| `[x]` | `convnext/convnext_v1.py` | PASS | H6 fixed (dummy-forward before super().build()); save/load test passes |
+| `[x]` | `convnext/convnext_v2.py` | PASS | H6 fixed (same reorder); weight-handling migrated to load_weights_from_checkpoint |
+| `[x]` | `convnext_patch_vae/config.py` | N/A | N/A — dataclass-config (confirmed) |
+| `[x]` | `convnext_patch_vae/decoder.py` | PASS | rubric-verified |
+| `[x]` | `convnext_patch_vae/encoder.py` | PASS | rubric-verified |
+| `[x]` | `convnext_patch_vae/model.py` | PASS | rubric-verified; round-trip tests pass |
+| `[x]` | `convnext_patch_vae/model_hierarchical.py` | PASS | rubric-verified; round-trip tests pass |
 
 ### L2-Round 6 — convunext, coshnet, darkir, depth_anything, detr  (7 files)
 

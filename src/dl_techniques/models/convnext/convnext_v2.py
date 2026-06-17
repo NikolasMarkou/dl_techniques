@@ -47,6 +47,7 @@ from typing import List, Optional, Union, Tuple, Dict, Any
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.layers.stochastic_gradient import StochasticGradient
@@ -367,7 +368,6 @@ class ConvNeXtV2(keras.Model):
     def build(self, input_shape):
         """Builds the model and its layers."""
 
-        super().build(input_shape)
         # The summary() method might call build with a 3D shape (without batch dim).
         # We add a dummy batch dimension if that's the case to ensure layers build correctly.
         if len(input_shape) == 3:
@@ -377,6 +377,8 @@ class ConvNeXtV2(keras.Model):
         # A dummy forward pass with a KerasTensor will correctly build all sub-layers.
         dummy_input = keras.KerasTensor(build_shape)
         _ = self.call(dummy_input)
+
+        super().build(input_shape)
 
     def call(self, inputs: keras.KerasTensor, training: Optional[bool] = None) -> keras.KerasTensor:
         """Defines the forward pass of the model.
@@ -426,11 +428,18 @@ class ConvNeXtV2(keras.Model):
         particularly useful when the number of classes differs or when
         loading weights without the top classifier.
 
+        Weights are transferred layer-by-layer via
+        :func:`dl_techniques.utils.weight_transfer.load_weights_from_checkpoint`,
+        the canonical replacement for ``self.load_weights(by_name=True)`` (which
+        raises on ``.keras`` files in Keras 3.8+).
+
         Args:
             weights_path: String, path to the weights file (.keras format).
             skip_mismatch: Boolean, whether to skip layers with mismatched shapes.
-                Useful when loading weights with different num_classes.
-            by_name: Boolean, whether to load weights by layer name.
+                Useful when loading weights with different num_classes. Maps to
+                ``strict=not skip_mismatch``.
+            by_name: Retained for backward compatibility; layer-by-layer transfer
+                is always name-based, so this argument is ignored.
 
         Raises:
             FileNotFoundError: If weights_path doesn't exist.
@@ -443,21 +452,24 @@ class ConvNeXtV2(keras.Model):
         if not os.path.exists(weights_path):
             raise FileNotFoundError(f"Weights file not found: {weights_path}")
 
+        del by_name  # name-based transfer is implicit; kept for signature stability
+
         try:
-            # Build model if not already built
+            # Build model if not already built (weight transfer needs a built target)
             if not self.built:
                 dummy_input = keras.random.normal((1,) + tuple(self.input_shape))
                 self(dummy_input, training=False)
 
             logger.info(f"Loading pretrained weights from {weights_path}")
 
-            # Load weights with appropriate settings
-            self.load_weights(
-                weights_path,
-                skip_mismatch=skip_mismatch,
-                by_name=by_name
+            report = load_weights_from_checkpoint(
+                target=self,
+                ckpt_path=weights_path,
+                skip_prefixes=(),
+                strict=not skip_mismatch,
             )
 
+            logger.info(report.summary_string())
             if skip_mismatch:
                 logger.info(
                     "Weights loaded with skip_mismatch=True. "
