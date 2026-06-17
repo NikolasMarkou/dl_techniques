@@ -43,7 +43,7 @@ We bridge the chasm between theoretical innovation and practical application, pr
 This library is a comprehensive suite of tools organized into five key pillars, developed through rigorous research and validated in real-world enterprise applications:
 
 <details>
-<summary><b>1. State-of-the-Art Architectures & Models (150+ Implementations)</b></summary>
+<summary><b>1. State-of-the-Art Architectures & Models (70+ Architectures)</b></summary>
 <p>
 
 - **Next-Generation Language Models**: Production-ready implementations of **`Gemma 3`**, **`Qwen3`** (including MEGA & SOM variants), **`Mamba`**, and modern **`BERT`** variants featuring Block-wise Latent Transformers (BLT) and Hierarchical Reasoning Models (HRM).
@@ -60,7 +60,7 @@ This library is a comprehensive suite of tools organized into five key pillars, 
 <p>
 
 - **Pioneering Attention Mechanisms**: Go beyond standard attention with **`DifferentialMultiHeadAttention`**, modern **`HopfieldAttention`**, **`GroupQueryAttention`**, `CapsuleRoutingAttention`, and efficient alternatives like `FNetFourierTransform` and `RingAttention`.
-- **Unified Factory Architecture**: A consistent, powerful factory system for creating and validating over **15+ attention mechanisms**, **15+ normalization variants** (including `BandRMS`, `LogitNorm`), and **10+ Feed-Forward Network (FFN)** types (`SwiGLU`, `GeGLU`, `OrthoGLU`) with a single line of code.
+- **Unified Factory Architecture**: A consistent, powerful factory system for creating and validating over **25+ attention mechanisms**, **16 normalization variants** (including `BandRMS`, `LogitNorm`), and **15 Feed-Forward Network (FFN)** types (`SwiGLU`, `GeGLU`, `OrthoGLU`) with a single line of code.
 - **Graph & Structural Primitives**: Configurable **GNN layers** with multiple aggregation strategies (`GCN`, `GAT`, `GraphSAGE`), **`Relational Graph Transformer`** (RELGT) blocks, and **`Entity-Graph Refinement`** for learning hierarchical relationships.
 - **Mixture of Experts (MoE) System**: A complete MoE implementation with configurable FFN experts, multiple gating strategies (including **SoftMoE** and Cosine Gating), and integrated training utilities.
 - **Probabilistic & Statistical Layers**: Build models that reason about uncertainty with **`Mixture Density Networks`** (MDN), **`Normalizing Flows`**, and time series analysis layers for residual autocorrelation (`ResidualACFLayer`).
@@ -94,9 +94,9 @@ This library is a comprehensive suite of tools organized into five key pillars, 
 <summary><b>5. Enterprise-Grade Training & Deployment Infrastructure</b></summary>
 <p>
 
-- **Accelerated Development with Training Pipelines**: Over **25+ ready-to-use training scripts** (`src/train/`) for all major architectures, establishing standardized and reproducible workflows for training, validation, and testing across domains like NLP, Vision, and Time Series.
+- **Accelerated Development with Training Pipelines**: Over **75+ ready-to-use training scripts** (`src/train/`) for all major architectures, establishing standardized and reproducible workflows for training, validation, and testing across domains like NLP, Vision, and Time Series.
 - **Production-Ready Utilities**: A suite of tools including advanced data loaders, augmentation pipelines, a structured visualization and logging manager (`VisualizationManager`), and enhanced model serialization with custom object support.
-- **Assured Reliability**: An extensive suite of over **600+ unit and integration tests** (`tests/`) ensures the correctness and stability of every component.
+- **Assured Reliability**: An extensive **500+ module test suite** (`tests/`) ensures the correctness and stability of every component.
 - **Validated Performance**: Rigorous benchmarks against reference implementations and established academic results to guarantee numerical accuracy and performance.
 </p>
 </details>
@@ -134,7 +134,7 @@ This library is a comprehensive suite of tools organized into five key pillars, 
     ```bash
     pip install -e ".[dev]"
     ```
-    This installs additional tools such as `pytest`, `pylint`, and `black`.
+    This installs additional tools such as `pytest`, `pytest-cov`, `pylint`, and `pre-commit`.
 
 4.  **Verify Installation:**
     ```bash
@@ -159,13 +159,13 @@ inputs = keras.Input(shape=(1024, 512))
 
 # Use factories for consistent, validated component creation
 attention = create_attention_layer(
-    'differential_mha',
+    'differential',
     dim=512,
     num_heads=8,
     head_dim=64
 )
 norm = create_normalization_layer('rms_norm', epsilon=1e-6)
-ffn = create_ffn_layer('swiglu_ffn', hidden_dim=2048)
+ffn = create_ffn_layer('swiglu', output_dim=512)
 
 # Build a modern transformer block
 x = attention(inputs)
@@ -178,49 +178,51 @@ model.summary()
 
 ### 2. Deploy a Probabilistic Time Series Forecaster
 
-Instantiate a state-of-the-art time series model capable of generating robust, uncertainty-aware forecasts.
+Instantiate a state-of-the-art univariate time series model capable of generating robust, uncertainty-aware forecasts.
 
 ```python
-from dl_techniques.models.tirex.model import create_tirex_model
+from dl_techniques.models.time_series.tirex.model import create_tirex_model
+from dl_techniques.losses.quantile_loss import QuantileLoss
 
-# Create a TiRex model for multivariate probabilistic forecasting
+# TiRex: probabilistic univariate forecasting with quantile prediction
 model = create_tirex_model(
-    input_shape=(100, 10),  # 100 timesteps, 10 features
-    forecast_horizon=24,
-    quantiles=[0.1, 0.5, 0.9],  # Generate 80% prediction intervals
-    variant='base'
+    input_length=100,            # length of the input context window
+    prediction_length=24,        # forecast horizon
+    quantile_levels=[0.1, 0.5, 0.9],  # 80% prediction interval + median
 )
 
-# Compile with a quantile loss to train for uncertainty estimation
+# Train directly for calibrated uncertainty with a quantile loss
 model.compile(
     optimizer='adamw',
-    loss='quantile_loss',
-    metrics=['mae', 'mse']
+    loss=QuantileLoss(quantiles=[0.1, 0.5, 0.9]),
+    metrics=['mae', 'mse'],
 )
 ```
 
-### 3. Build a Complete Vision-Language Model
+### 3. Contrastive Vision-Language Learning with CLIP
 
-Construct a powerful, efficient vision-language model for complex multimodal tasks in just a few lines.
+Map images and text into a single shared embedding space with a CLIP dual encoder, unlocking zero-shot classification and cross-modal retrieval.
 
 ```python
 import keras
-from dl_techniques.models.fastvlm.model import FastVLM
+from dl_techniques.models.clip.model import create_clip_variant
 
-# Create a FastVLM instance from a predefined, optimized variant
-vlm = FastVLM.from_variant(
-    'base',
-    vocab_size=32000,
-    max_length=512,
-    image_size=224
-)
+# CLIP ViT-B/32: a dual encoder mapping images and text into one space
+model = create_clip_variant("ViT-B/32")
+model.build({"image": (None, 224, 224, 3), "text": (None, 77)})
 
-# The model seamlessly handles both image and text inputs
-image_input = keras.Input(shape=(224, 224, 3))
-text_input = keras.Input(shape=(512,), dtype='int32')
+images = keras.random.normal((4, 224, 224, 3))
+tokens = keras.ops.cast(keras.random.uniform((4, 77), 0, 49408), "int32")
 
-outputs = vlm([image_input, text_input])
-model = keras.Model([image_input, text_input], outputs)
+# Full contrastive forward pass
+outputs = model({"image": images, "text": tokens}, training=False)
+# outputs["image_features"]   -> (4, 512), L2-normalised
+# outputs["text_features"]    -> (4, 512), L2-normalised
+# outputs["logits_per_image"] -> (4, 4),  similarity matrix
+
+# Or encode each modality independently for retrieval
+image_features = model.encode_image(images)
+text_features = model.encode_text(tokens)
 ```
 
 ### 4. Dissect Model Behavior with the Analysis Engine
@@ -239,7 +241,7 @@ test_data = DataInput(x_test, y_test)
 config = AnalysisConfig(
     analyze_training_dynamics=True,
     analyze_calibration=True,
-    analyze_weight_health=True,
+    analyze_weights=True,
     analyze_spectral=True, # Unleash spectral analysis for generalization insights
     save_plots=True,
     plot_style='publication'
@@ -309,7 +311,7 @@ This library is engineered to be a living knowledge base, bridging the gap betwe
 
 ### Tutorials & Deep Dives (`research/`)
 
-Our `research/` directory contains over 50 articles providing the theoretical foundations, implementation details, and best practices behind key components. Highlights include:
+Our `research/` directory contains over 100+ articles providing the theoretical foundations, implementation details, and best practices behind key components. Highlights include:
 
 -   **[Complete Transformer Guide (2025)](./research/2025_transformer_architectures.md)**: A production-focused guide to implementing state-of-the-art Transformer architectures.
 -   **[Model Analyzer Guide](./src/dl_techniques/analyzer/README.md)**: A comprehensive tutorial for the advanced model analysis toolkit.
@@ -318,8 +320,8 @@ Our `research/` directory contains over 50 articles providing the theoretical fo
 -   **[Band-Constrained Normalization](./research/bcn_thesis.md)**: A novel normalization technique that preserves magnitude information within bounded constraints.
 -   **[Mixture Density Networks](./research/mdn.md)**: The theory and best practices for implementing probabilistic models.
 
-### API Reference (`docs/`)
-For detailed, auto-generated documentation on every module, class, and function, please refer to the `docs/` directory or the online documentation.
+### API Reference (per-module docs)
+For detailed documentation on every module, class, and function, browse the source tree directly: each subpackage ships a focused `README.md` (e.g. [`src/dl_techniques/analyzer/README.md`](./src/dl_techniques/analyzer/README.md)) and a per-package `CLAUDE.md` describing its conventions, patterns, and components. The `research/` guides above complement these with the underlying theory.
 
 ---
 
@@ -330,15 +332,15 @@ The repository is organized for clarity, maintainability, and ease of contributi
 ```
 dl_techniques/
 ├── src/dl_techniques/
-│   ├── models/                # 150+ complete, ready-to-train model implementations
+│   ├── models/                # 70+ complete, ready-to-train model implementations
 │   │   ├── qwen/              # Qwen3 family (Base, MEGA, SOM)
 │   │   ├── dino/              # DINO v1, v2, v3
 │   │   ├── fastvlm/           # Fast Vision-Language Models
 │   │   └── ...
 │   ├── layers/                # 290+ specialized layer implementations
-│   │   ├── attention/         # 15+ modern attention mechanisms with factory
-│   │   ├── norms/             # 15+ advanced normalization layers with factory
-│   │   ├── ffn/               # 10+ feed-forward networks with factory
+│   │   ├── attention/         # 25+ modern attention mechanisms with factory
+│   │   ├── norms/             # 16 advanced normalization layers with factory
+│   │   ├── ffn/               # 15 feed-forward networks with factory
 │   │   ├── graphs/            # Graph neural network components
 │   │   ├── moe/               # Mixture of Experts (MoE) system
 │   │   └── statistics/        # Statistical and probabilistic layers (MDN, Flows)
@@ -346,10 +348,9 @@ dl_techniques/
 │   ├── analyzer/              # Comprehensive model analysis toolkit and visualizers
 │   ├── regularizers/          # Advanced regularization techniques (SRIP, Orthogonal)
 │   └── utils/                 # Core utilities, loggers, and data handlers
-├── research/                  # 50+ in-depth articles and theoretical guides
-├── src/train/                 # 25+ ready-to-use training pipelines and scripts
-├── tests/                     # 600+ unit and integration tests ensuring component reliability
-└── docs/                      # Auto-generated API documentation
+├── research/                  # 100+ in-depth articles and theoretical guides
+├── src/train/                 # 75+ ready-to-use training pipelines and scripts
+└── tests/                     # 500+ test modules ensuring component reliability
 ```
 
 ---
@@ -365,9 +366,9 @@ We welcome contributions from the research community. Whether you are implementi
 4.  **Adhere to our development standards**: Use type hints, write comprehensive tests, and document your code thoroughly.
 
 ### Development Standards
--   **Code Quality**: Follow PEP 8 guidelines. Use `black` for formatting and `isort` for import sorting.
--   **Testing**: Write comprehensive tests using `pytest`. Aim for coverage greater than 90%.
--   **Documentation**: Provide Sphinx-compliant docstrings and update relevant guides in the `research/` directory.
+-   **Code Quality**: Follow PEP 8, use type hints, and rely on centralized logging via `dl_techniques.utils.logger` (no `print`).
+-   **Testing**: Develop in the `.venv` environment and write comprehensive tests using `pytest`, scoped to the modules you change (`make test` runs the full ~1.5h suite). Set `MPLBACKEND=Agg` when running training scripts on headless machines.
+-   **Documentation**: Provide Google-style docstrings and update relevant guides in the `research/` directory.
 -   **Validation**: Include benchmarks or comparisons against reference implementations where applicable.
 
 ### Contribution Types
