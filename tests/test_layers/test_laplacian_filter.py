@@ -6,7 +6,11 @@ import keras
 from typing import Any, Dict, List, Tuple, Literal
 
 # Import the layers to test
-from dl_techniques.layers.laplacian_filter import LaplacianFilter, AdvancedLaplacianFilter
+from dl_techniques.layers.laplacian_filter import (
+    LaplacianFilter,
+    AdvancedLaplacianFilter,
+    LaplacianPyramidLevel,
+)
 
 
 class TestLaplacianFilter:
@@ -712,3 +716,136 @@ class TestLaplacianFilterIntegration:
         features = model(sample_data)
 
         assert features.shape == (2, 16)
+
+
+class TestLaplacianPyramidLevel:
+    """Test suite for the LaplacianPyramidLevel split/merge pyramid layer."""
+
+    @pytest.fixture
+    def sample_input(self) -> np.ndarray:
+        """Fixed, divisible-by-2 input for the pyramid level."""
+        return np.random.RandomState(0).randn(2, 64, 64, 3).astype("float32")
+
+    def test_reconstruction_identity(self, sample_input):
+        """merge(split(x)) must reconstruct x to float precision (I1/SC1)."""
+        layer = LaplacianPyramidLevel()
+        low, high = layer(sample_input)
+        recon = layer.merge(low, high)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(recon),
+            sample_input,
+            atol=1e-5,
+            err_msg="LaplacianPyramidLevel merge(split(x)) != x",
+        )
+
+    def test_split_shapes(self, sample_input):
+        """Low band is halved spatially; high band keeps full resolution."""
+        layer = LaplacianPyramidLevel()
+        low, high = layer(sample_input)
+        assert tuple(low.shape) == (2, 32, 32, 3)
+        assert tuple(high.shape) == (2, 64, 64, 3)
+
+    def test_compute_output_shape(self):
+        """compute_output_shape returns the (low, high) shape tuple."""
+        layer = LaplacianPyramidLevel()
+        low_s, high_s = layer.compute_output_shape((2, 64, 64, 3))
+        assert low_s == (2, 32, 32, 3)
+        assert high_s == (2, 64, 64, 3)
+
+    def test_initialization(self):
+        """Default attrs stored, sublayers created, layer not yet built."""
+        layer = LaplacianPyramidLevel()
+
+        assert layer.blur_kernel_size == (5, 5)
+        assert layer.blur_sigma == -1
+        assert layer.blur_trainable is False
+
+        # Sublayers created in __init__, not built yet.
+        assert layer.blur is not None
+        assert layer.down is not None
+        assert layer.up is not None
+        assert not layer.built
+        assert not layer.blur.built
+
+    def test_invalid_args(self):
+        """__init__ rejects malformed args with ValueError."""
+        # Bad blur_kernel_size: non-positive entry.
+        with pytest.raises(ValueError):
+            LaplacianPyramidLevel(blur_kernel_size=(0, 5))
+
+        # Bad blur_kernel_size: wrong length.
+        with pytest.raises(ValueError):
+            LaplacianPyramidLevel(blur_kernel_size=(5,))
+
+        # Bad blur_sigma: non-numeric.
+        with pytest.raises(ValueError):
+            LaplacianPyramidLevel(blur_sigma="x")
+
+        # Bad blur_trainable: non-bool.
+        with pytest.raises(ValueError):
+            LaplacianPyramidLevel(blur_trainable="no")
+
+    def test_serialization_cycle(self, sample_input):
+        """CRITICAL TEST: full .keras serialization cycle (guide 8.2).
+
+        ``call`` returns a TUPLE ``(low, high)``; wrap it in a Functional
+        keras.Model with two outputs and verify both bands match after a
+        save/load round-trip.
+        """
+        inp = keras.Input(shape=(64, 64, 3))
+        low, high = LaplacianPyramidLevel()(inp)
+        model = keras.Model(inp, [low, high])
+
+        low_orig, high_orig = model(sample_input)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, "m.keras")
+            model.save(filepath)
+            loaded_model = keras.models.load_model(filepath)
+
+        low_load, high_load = loaded_model(sample_input)
+
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(low_orig),
+            keras.ops.convert_to_numpy(low_load),
+            rtol=1e-6, atol=1e-6,
+            err_msg="Low band differs after serialization",
+        )
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(high_orig),
+            keras.ops.convert_to_numpy(high_load),
+            rtol=1e-6, atol=1e-6,
+            err_msg="High band differs after serialization",
+        )
+
+    def test_gradient_flow(self, sample_input):
+        """Trainable-blur variant yields non-empty, finite gradients."""
+        import tensorflow as tf
+
+        layer = LaplacianPyramidLevel(blur_trainable=True)
+
+        with tf.GradientTape() as tape:
+            low, high = layer(sample_input)
+            # low and high differ in spatial size, so reduce each band
+            # separately before summing the scalar losses.
+            loss = keras.ops.mean(keras.ops.square(high)) + keras.ops.mean(
+                keras.ops.square(low)
+            )
+
+        grads = tape.gradient(loss, layer.trainable_variables)
+        assert len(grads) > 0, "Expected at least one trainable variable"
+        assert all(g is not None for g in grads)
+        for g in grads:
+            assert np.all(np.isfinite(keras.ops.convert_to_numpy(g)))
+
+    def test_config_roundtrip(self):
+        """get_config / from_config reconstructs equal attributes."""
+        layer = LaplacianPyramidLevel(
+            blur_kernel_size=(3, 3), blur_sigma=1.0, blur_trainable=True
+        )
+        cfg = layer.get_config()
+        rebuilt = LaplacianPyramidLevel.from_config(cfg)
+
+        assert tuple(rebuilt.blur_kernel_size) == (3, 3)
+        assert rebuilt.blur_sigma == 1.0
+        assert rebuilt.blur_trainable is True

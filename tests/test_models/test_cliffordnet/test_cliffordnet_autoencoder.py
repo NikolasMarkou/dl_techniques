@@ -2,11 +2,11 @@
 Test suite for the explicit-Laplacian-pyramid CliffordNet autoencoder
 (autoencoder.py).
 
-This file currently covers the standalone ``LaplacianPyramidLevel`` helper: the
-falsifiable reconstruction identity ``merge(split(x)) == x`` (atol 1e-5), the
-split band shapes, and ``compute_output_shape``. Model-level tests (config
-round-trip, forward, .keras save/load, variants, fit-smoke) are added in later
-steps.
+This file covers the ``CliffordLaplacianUNet`` model: config round-trip,
+forward pass, ``.keras`` save/load, variants/factory, and fit-smoke. The
+standalone ``LaplacianPyramidLevel`` helper now lives in
+``dl_techniques.layers.laplacian_filter`` and its tests live in
+``tests/test_layers/test_laplacian_filter.py``.
 """
 
 import os
@@ -16,7 +16,6 @@ import pytest
 import numpy as np
 
 from dl_techniques.models.cliffordnet.autoencoder import (
-    LaplacianPyramidLevel,
     CliffordLaplacianUNet,
     create_clifford_laplacian_unet,
 )
@@ -31,37 +30,6 @@ def _tiny_model(**overrides) -> CliffordLaplacianUNet:
     cfg = dict(in_channels=3, level_channels=(8, 16), level_blocks=(1, 1))
     cfg.update(overrides)
     return CliffordLaplacianUNet(**cfg)
-
-
-# ---------------------------------------------------------------------
-# LaplacianPyramidLevel
-# ---------------------------------------------------------------------
-
-class TestLaplacianIdentity:
-
-    def test_reconstruction_identity(self):
-        x = np.random.RandomState(0).randn(2, 64, 64, 3).astype("float32")
-        layer = LaplacianPyramidLevel()
-        low, high = layer(x)
-        recon = layer.merge(low, high)
-        recon_np = keras.ops.convert_to_numpy(recon)
-        np.testing.assert_allclose(
-            recon_np, x, atol=1e-5,
-            err_msg="LaplacianPyramidLevel merge(split(x)) != x",
-        )
-
-    def test_split_shapes(self):
-        x = np.random.RandomState(0).randn(2, 64, 64, 3).astype("float32")
-        layer = LaplacianPyramidLevel()
-        low, high = layer(x)
-        assert tuple(low.shape) == (2, 32, 32, 3)
-        assert tuple(high.shape) == (2, 64, 64, 3)
-
-    def test_compute_output_shape(self):
-        layer = LaplacianPyramidLevel()
-        low_s, high_s = layer.compute_output_shape((2, 64, 64, 3))
-        assert low_s == (2, 32, 32, 3)
-        assert high_s == (2, 64, 64, 3)
 
 
 # ---------------------------------------------------------------------
