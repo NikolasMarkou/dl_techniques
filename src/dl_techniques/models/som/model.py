@@ -273,6 +273,11 @@ class SOMModel(keras.Model):
             raise ValueError(f"initial_learning_rate must be positive, got {initial_learning_rate}")
         if sigma <= 0:
             raise ValueError(f"sigma must be positive, got {sigma}")
+        if neighborhood_function not in ("gaussian", "bubble"):
+            raise ValueError(
+                f"neighborhood_function must be 'gaussian' or 'bubble', "
+                f"got {neighborhood_function!r}"
+            )
 
         # Store configuration for serialization and introspection
         self.map_size = map_size

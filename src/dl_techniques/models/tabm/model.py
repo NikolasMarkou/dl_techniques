@@ -424,7 +424,7 @@ class TabMModel(keras.Model):
             **kwargs: Additional Model arguments.
 
         Raises:
-            AssertionError: If configuration is invalid.
+            ValueError: If configuration is invalid.
         """
         # Validate arguments
         self._validate_parameters(n_num_features, cat_cardinalities, hidden_dims, arch_type, k, share_training_batches, dropout_rate)
@@ -483,25 +483,44 @@ class TabMModel(keras.Model):
             dropout_rate: Dropout rate.
 
         Raises:
-            AssertionError: If parameters are invalid.
+            ValueError: If parameters are invalid.
         """
-        assert n_num_features >= 0, f"n_num_features must be non-negative, got {n_num_features}"
-        assert n_num_features or cat_cardinalities, "Must have either numerical or categorical features"
+        if n_num_features < 0:
+            raise ValueError(
+                f"n_num_features must be non-negative, got {n_num_features}"
+            )
+        if not (n_num_features or cat_cardinalities):
+            raise ValueError(
+                "Must have either numerical or categorical features"
+            )
 
-        if cat_cardinalities:
-            assert all(c > 0 for c in cat_cardinalities), "All cardinalities must be positive"
+        if cat_cardinalities and not all(c > 0 for c in cat_cardinalities):
+            raise ValueError("All cardinalities must be positive")
 
-        assert hidden_dims, "hidden_dims cannot be empty"
-        assert all(d > 0 for d in hidden_dims), "All hidden dimensions must be positive"
+        if not hidden_dims:
+            raise ValueError("hidden_dims cannot be empty")
+        if not all(d > 0 for d in hidden_dims):
+            raise ValueError("All hidden dimensions must be positive")
 
         if arch_type == 'plain':
-            assert k is None, "Plain architecture must have k=None"
-            assert share_training_batches, 'Plain architecture must use share_training_batches=True'
+            if k is not None:
+                raise ValueError("Plain architecture must have k=None")
+            if not share_training_batches:
+                raise ValueError(
+                    "Plain architecture must use share_training_batches=True"
+                )
         else:
-            assert k is not None, f"Ensemble architecture {arch_type} requires k to be specified"
-            assert k > 0, f"k must be positive, got {k}"
+            if k is None:
+                raise ValueError(
+                    f"Ensemble architecture {arch_type} requires k to be specified"
+                )
+            if k <= 0:
+                raise ValueError(f"k must be positive, got {k}")
 
-        assert 0.0 <= dropout_rate <= 1.0, f"dropout_rate must be in [0, 1], got {dropout_rate}"
+        if not 0.0 <= dropout_rate <= 1.0:
+            raise ValueError(
+                f"dropout_rate must be in [0, 1], got {dropout_rate}"
+            )
 
     def _create_layers(self) -> None:
         """Create all model layers with proper initialization."""

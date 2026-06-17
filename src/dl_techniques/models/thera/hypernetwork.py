@@ -59,6 +59,18 @@ the ``nearest`` term is piecewise-constant (zero gradient almost everywhere) whi
 the direct ``coords`` term carries gradient 1, propagating into the heat field --
 NOT through the sampler. Do not upgrade the sampler to bilinear here.
 
+Accepted backend-specific exception (H10)
+------------------------------------------
+The plain inference forward path (``get_phi_at_coords`` / ``_compute_rel_and_phi``
+/ ``decode``) is pure ``keras.ops``. The ONLY raw-``tf.*`` usage is confined to
+:meth:`TheraHypernetwork.decode_with_jac`, the step-9 TV-loss path, which uses
+``tf.GradientTape.batch_jacobian`` to compute the exact per-pixel spatial Jacobian
+of the heat field. ``keras.ops`` has no backend-agnostic AD / batched-Jacobian
+primitive, so this is an accepted, documented exception (mirrors the
+``physics/lagrange_layer`` ``tf.GradientTape`` exception). ``decode_with_jac`` is a
+training-only loss path; it is NOT on the inference forward path and is never
+graph-traced by ``.keras`` serialization. Do NOT force a rewrite.
+
 Reference:
     Becker et al., "Thera: Aliasing-Free Arbitrary-Scale Super-Resolution with
     Neural Heat Fields" (original JAX/Flax ``model/hyper.py`` + ``model/thera.py``).
@@ -298,13 +310,14 @@ class TheraHypernetwork(keras.layers.Layer):
 
         # Reshape the kernel slab to (..., hidden, out). Use dynamic leading dims
         # so arbitrary query grids work; only the trailing two axes are static.
-        # NOTE: keras.ops.shape returns a TUPLE of scalar tensors on the TF
-        # backend, which keras.ops.concatenate cannot consume -- use tf.shape
-        # (a 1-D tensor) sliced and concatenated with a static int32 tail.
-        dyn = tf.shape(phi_kernel_flat)  # 1-D int32 tensor: (B, Hq, Wq, hidden*out)
-        tail = tf.constant([self.hidden_dim, self.out_dim], dtype=dyn.dtype)
-        kernel_shape = tf.concat([dyn[:-1], tail], axis=0)
-        phi_kernel = ops.reshape(phi_kernel_flat, kernel_shape)
+        # keras.ops.shape returns a TUPLE (static ints + dynamic scalar tensors);
+        # we do NOT route it through ops.concatenate (which rejects the mixed
+        # tuple) -- instead build the target as a plain Python tuple and hand it
+        # straight to ops.reshape, which packs the mixed scalars itself.
+        lead = ops.shape(phi_kernel_flat)[:-1]  # (B, Hq, Wq) leading dims
+        phi_kernel = ops.reshape(
+            phi_kernel_flat, (*lead, self.hidden_dim, self.out_dim)
+        )
         return phi_phase, phi_kernel
 
     # -----------------------------------------------------------------
@@ -377,10 +390,11 @@ class TheraHypernetwork(keras.layers.Layer):
         source_grid = self._source_grid(encoding)
 
         # Tile to (B, Hs, Ws, 2) so interpolate_grid can sample it per batch.
-        # tf.shape gives 1-D int32 tensors; assemble the broadcast target as one.
-        batch = tf.shape(encoding)[0:1]  # (1,) int32
-        grid_shape = tf.shape(source_grid)  # (3,) -> (Hs, Ws, 2)
-        target = tf.concat([batch, grid_shape], axis=0)  # (B, Hs, Ws, 2)
+        # Build the broadcast target as a plain Python tuple (mixed static ints +
+        # dynamic batch scalar) and hand it to ops.broadcast_to directly.
+        batch = ops.shape(encoding)[0]  # dynamic batch scalar
+        grid_shape = ops.shape(source_grid)  # (Hs, Ws, 2)
+        target = (batch, *grid_shape)  # (B, Hs, Ws, 2)
         source_coords = ops.broadcast_to(source_grid[None, ...], target)
 
         # NEAREST: coordinate of the nearest source pixel for each query coord.

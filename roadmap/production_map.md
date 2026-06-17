@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 142 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete; nano_vlm_world_model/model.py M2-DEFERRED [~], not counted)
+**Progress: 153 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete; nano_vlm_world_model/model.py M2-DEFERRED [~], not counted)
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -1158,21 +1158,21 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 | `[x]` | `sd3_mmdit/transformer.py` | PASS | rubric-verified exemplary (SD3MMDiT: H4 TypeError, build-override super().build() last, H7/H9, M1/M5 create_sd3_mmdit factory); 2 .keras round-trips pass |
 | `[x]` | `sd3_mmdit/vae.py` | N/A | N/A confirmed (SD3VAE plain-Python wrapper, not a keras.Model) |
 
-### L2-Round 22 — shgcn, som, squeezenet, swin_transformer, tabm, thera  (11 files)
+### L2-Round 22 — shgcn, som, squeezenet, swin_transformer, tabm, thera  (11 files)  — DONE
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `shgcn/model.py` | PASS | rubric-verify |
-| `[ ]` | `som/model.py` | PASS | rubric-verify |
-| `[ ]` | `squeezenet/squeezenet_v1.py` | PASS | rubric-verify |
-| `[ ]` | `squeezenet/squeezenet_v2.py` | PASS | rubric-verify |
-| `[ ]` | `swin_transformer/model.py` | PASS | rubric-verify (window_size=7 needs ≥224px) |
-| `[ ]` | `tabm/model.py` | PASS | rubric-verify |
-| `[ ]` | `thera/edsr_backbone.py` | PASS | rubric-verify |
-| `[ ]` | `thera/hypernetwork.py` | PASS | rubric-verify |
-| `[ ]` | `thera/model.py` | PASS | rubric-verify |
-| `[ ]` | `thera/rdn_backbone.py` | PASS | rubric-verify |
-| `[ ]` | `thera/tails.py` | PASS | rubric-verify |
+| `[x]` | `shgcn/model.py` | PASS | rubric-verified (3 models; H4 propagates via SHGCNModel backbone; output_activation→string round-trip); added test_round_trip.py (M2 for model/classifier/link-predictor + ValueError paths). Was smoke-only |
+| `[x]` | `som/model.py` | PASS | done: H4 added neighborhood_function membership check; host-side train/viz raw-numpy is OFF the call() forward path (H10 clean); existing test_model.py round-trip passes |
+| `[x]` | `squeezenet/squeezenet_v1.py` | PASS | rubric-verified (functional model; FireModule embedded layer fully compliant; get_config returns init-args by-design for functional-reconstruct, name cosmetic-drop only); existing round-trip passes |
+| `[x]` | `squeezenet/squeezenet_v2.py` | PASS | rubric-verified (functional model; SimplifiedFireModule compliant; 3D path uses keras.Sequential — round-trips via functional graph); existing round-trip passes |
+| `[x]` | `swin_transformer/model.py` | PASS | rubric-verified (functional model, extensive H4 validation, H9 deserializes init/reg); added test_round_trip.py (M2 output-identity at 224px + ValueError paths). Was smoke-only |
+| `[x]` | `tabm/model.py` | PASS | done: H4 asserts→ValueError (asserts stripped under -O); H10 `//` is tensor floordiv (graph-safe, not a Python cast); added test_round_trip.py (M2 + 6 ValueError paths). Was smoke-only |
+| `[x]` | `thera/edsr_backbone.py` | PASS | rubric-verified exemplary (EDSRResidualBlock/EDSRBackbone: H4/H5/H6/H7/H8/H9/H11); existing round-trip passes |
+| `[x]` | `thera/hypernetwork.py` | PASS | done: H10 migrated 2 plain-forward-path raw-tf spots (tf.shape/tf.concat → ops.shape tuple + ops.reshape/broadcast_to); decode_with_jac tf.GradientTape.batch_jacobian documented as accepted exception in header (§L2-5; no keras.ops AD); existing round-trip passes |
+| `[x]` | `thera/model.py` | PASS | rubric-verified exemplary (Thera: H4/H5/H6/H8/H9/H11, M1 from_variant + M5 build_thera factory); existing round-trip passes |
+| `[x]` | `thera/rdn_backbone.py` | PASS | rubric-verified exemplary (RDBConv/RDB/RDNBackbone all compliant); existing round-trip passes |
+| `[x]` | `thera/tails.py` | PASS | rubric-verified exemplary (TheraTailAir/_Projection/TheraTailPlus/TheraTailPro + build_thera_tail factory); existing round-trip passes |
 
 ### L2-Round 23 — time_series  (11 files)
 
@@ -1234,6 +1234,7 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 |------|-------|--------|
 | `fftnet/model.py` (FFTMixer) | 7 | **ACCEPTED-EXCEPTION.** `fftnet` hardcodes `KERAS_BACKEND="tensorflow"`; uses `tf.signal.rfft/ifft` + `tf.complex`. `keras.ops` has `fft/fft2/ifft2/rfft/irfft/real/imag` but **NO `rfft2/irfft2/angle/complex`**. The transpose-to-last + `tf.complex(re,im)` idiom is the only option. Document in the file header (mirror PART I §5 lagrange/canny pattern) and accept. |
 | `latent_gmm_registration/model.py` | 10 | **ACCEPTED-EXCEPTION.** `tf.linalg.svd` — no `keras.ops` equivalent. Document + accept. |
+| `thera/hypernetwork.py` (TheraHypernetwork) | 22 | **ACCEPTED-EXCEPTION (documented, header).** `decode_with_jac` uses `tf.GradientTape.batch_jacobian` for the exact per-pixel spatial Jacobian (step-9 TV loss); `keras.ops` has no backend-agnostic AD/batched-Jacobian (mirrors `physics/lagrange_layer`). Training-only loss path, NOT the inference forward path, never graph-traced by `.keras`. The plain forward path (get_phi_at_coords/_compute_rel_and_phi) was MIGRATED off raw-tf to keras.ops in Round 22. |
 | `memory_bank/write_controller.py` (MemoryWriteController) | 12 | **VERIFY IN-ROUND (HYPOTHESIS).** The flagged `tf.*` is a debug-guard `tf.debugging.assert_less_equal` behind a backend check, possibly not in the graph forward path. Confirm whether it's inside `call()`; if a debug-only assertion, replace with a `keras.ops` check or accept-and-document. 2-attempt leash; do not force a broken rewrite. |
 
 (Plus inherited layer-level accepted exceptions consumed by models: `tf.math.bessel_i0e` in
