@@ -12,6 +12,7 @@ from dl_techniques.initializers import (
     HaarWaveletInitializer,
     create_haar_depthwise_conv2d,
     PolarInitializer,
+    GaborFiltersInitializer,
 )
 ```
 
@@ -22,6 +23,7 @@ from dl_techniques.initializers import (
 - `hypersphere_orthogonal_initializer.py` — `OrthogonalHypersphereInitializer`: orthogonal vectors on a hypersphere
 - `haar_wavelet_initializer.py` — `HaarWaveletInitializer`: fixed 2D Haar wavelet filters for conv layers; also provides `create_haar_depthwise_conv2d` factory
 - `polar_initializer.py` — `PolarInitializer`: exact per-vector L2 norm with a uniform-on-sphere direction ("equinorm" init); polar-coordinate sampling (PolarQuant Lemma 2)
+- `gabor_filters_initializer.py` — `GaborFiltersInitializer`: deterministic Gabor filter-bank initialization for the first Conv2D layer (Ozbulak & Ekenel)
 
 ## Conventions
 

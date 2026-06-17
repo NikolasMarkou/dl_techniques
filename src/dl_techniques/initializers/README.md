@@ -4,7 +4,7 @@ The `dl_techniques.initializers` module provides a collection of advanced weight
 
 ## Overview
 
-This module offers five specialized initializers that go beyond standard random distributions. They leverage principles from linear algebra and signal processing—such as orthogonality, wavelet theory, and polar/hyperspherical geometry—to construct weight matrices with desirable mathematical properties from the start of training. All initializers are implemented as standard Keras `Initializer` subclasses, supporting full serialization and seamless integration into any Keras model.
+This module offers eight specialized initializers that go beyond standard random distributions. They leverage principles from linear algebra and signal processing—such as orthogonality, wavelet theory, and polar/hyperspherical geometry—to construct weight matrices with desirable mathematical properties from the start of training. All initializers are implemented as standard Keras `Initializer` subclasses, supporting full serialization and seamless integration into any Keras model.
 
 ## Available Initializers
 
@@ -15,6 +15,7 @@ This module offers five specialized initializers that go beyond standard random 
 | `hypersphere_orthogonal` | `OrthogonalHypersphereInitializer` | Creates orthogonal vectors on a hypersphere of a specified radius. Falls back to a uniform distribution if orthogonality is impossible. | Maximizing initial feature diversity for embeddings, attention heads, or mixture-of-experts models. |
 | `haar_wavelet` | `HaarWaveletInitializer` | Deterministically creates fixed 2x2 filters for 2D Haar wavelet decomposition. | Building non-trainable, engineered feature extractors for multi-resolution analysis in CNNs. |
 | `polar` | `PolarInitializer` | Sets each weight vector (along a chosen axis) to an exact L2 norm with a uniform-on-sphere direction. | Equinorm / magnitude-controlled, well-conditioned initialization where chi-distributed Gaussian norms are undesirable. |
+| `gabor_filters` | `GaborFiltersInitializer` | Deterministically fills a convolution kernel with a bank of Gabor filters whose orientation, frequency, scale, aspect, and phase are swept uniformly across the Ozbulak-Ekenel Table I intervals. | Pre-training-free transfer learning by initializing the first convolutional layer with edge/texture-selective low-level features. |
 
 ## Orthonormal Initializer
 
@@ -169,6 +170,69 @@ layer = keras.layers.Dense(128, kernel_initializer=PolarInitializer(norm=1.0, ax
 
 It is the companion of `PolarWeightNorm` (see the module docstring of
 `dl_techniques/layers/norms/polar_weight_norm.py`).
+
+## Gabor Filters Initializer
+
+This is a deterministic initializer that fills a convolutional kernel with a bank
+of 2D Gabor filters, implementing the CNN initialization scheme of Ozbulak &
+Ekenel, "Initialization of Convolutional Neural Networks by Gabor Filters". The
+idea is to seed the **first convolutional layer** with biologically-motivated,
+edge- and texture-selective features instead of random noise. Because a Gabor
+bank already captures the kind of oriented, multi-scale low-level structure that
+the early layers of a trained network learn anyway, this provides much of the
+benefit of transfer learning *without* requiring a pretrained network — the
+filters are a strong starting point that is then fine-tuned by ordinary training.
+
+Each output channel `j` holds a distinct 2D Gabor filter evaluated on a grid
+centered at the origin (paper Eq. 2):
+
+```
+x_theta =  x*cos(theta) + y*sin(theta)
+y_theta = -x*sin(theta) + y*cos(theta)
+g(x, y) = exp(-(x_theta**2 + (gamma**2) * y_theta**2) / (2 * sigma**2))
+          * cos(2*pi*x_theta/lambda + psi)
+```
+
+The number of distinct filters equals the number of output channels
+(`n_filters = out_channels`). For each of the five parameters, `out_channels`
+values are drawn with `np.linspace(min, max, out_channels)` across its Table I
+interval, and channel `j` uses the `j`-th value of every parameter. The same 2D
+Gabor filter is replicated identically across all input channels.
+
+**Arguments:** all five arguments are `(min, max)` ranges swept uniformly across
+the output channels:
+
+- `sigma_range` — Gaussian envelope standard deviation (scale). Table I default
+  `(2.0, 21.0)`. The minimum must be `> 0`.
+- `theta_range` — filter orientation **in degrees**. Table I default
+  `(0.0, 360.0)`.
+- `lambda_range` — sinusoidal wavelength (frequency). Table I default
+  `(8.0, 100.0)`.
+- `gamma_range` — spatial aspect ratio (ellipticity of the envelope). Table I
+  default `(0.0, 300.0)`.
+- `psi_range` — phase offset **in degrees**. Table I default `(0.0, 360.0)`.
+
+Note that `theta` and `psi` are specified in degrees and converted internally.
+For the degenerate `out_channels == 1` case, every `np.linspace(min, max, 1)`
+returns `[min]`, so the single filter uses the minimum endpoint of each range.
+
+### Usage
+
+```python
+import keras
+from dl_techniques.initializers import GaborFiltersInitializer
+
+# Initialize the first convolutional layer with a Gabor filter bank.
+# 96 output channels -> 96 distinct Gabor filters swept over Table I intervals.
+gabor_conv = keras.layers.Conv2D(
+    filters=96,
+    kernel_size=5,
+    padding='same',
+    kernel_initializer=GaborFiltersInitializer(),
+    trainable=True,  # filters are a starting point, then fine-tuned
+    input_shape=(32, 32, 3),
+)
+```
 
 ## Integration with Keras Models
 
