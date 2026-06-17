@@ -449,5 +449,75 @@ class CliffordLaplacianUNet(keras.Model):
         )
         return config
 
+    # ------------------------------------------------------------------
+    # Variants
+    # ------------------------------------------------------------------
+
+    MODEL_VARIANTS: Dict[str, Dict[str, Any]] = {
+        "small": dict(
+            level_channels=[32, 64, 128],
+            level_blocks=[2, 2, 2],
+        ),
+        "base": dict(
+            level_channels=[48, 96, 192, 384],
+            level_blocks=[2, 2, 2, 2],
+        ),
+        "large": dict(
+            level_channels=[64, 128, 256, 512],
+            level_blocks=[3, 3, 3, 3],
+        ),
+    }
+
+    @classmethod
+    def from_variant(
+        cls,
+        variant: str,
+        in_channels: int = 3,
+        **kwargs: Any,
+    ) -> "CliffordLaplacianUNet":
+        """Create a :class:`CliffordLaplacianUNet` from a named variant.
+
+        :param variant: One of ``small``, ``base``, ``large``.
+        :param in_channels: Number of input/output image channels (3 for RGB).
+        :param kwargs: Override any default hyperparameter (kwargs win over the
+            variant defaults).
+        """
+        if variant not in cls.MODEL_VARIANTS:
+            raise ValueError(
+                f"Unknown variant {variant!r}. Available: {list(cls.MODEL_VARIANTS)}"
+            )
+        defaults = dict(cls.MODEL_VARIANTS[variant])
+        defaults.update(kwargs)
+        logger.info(f"Creating CliffordLaplacianUNet-{variant.upper()}")
+        return cls(in_channels=in_channels, **defaults)
+
 
 # ---------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------
+
+
+def create_clifford_laplacian_unet(
+    variant: str = "small",
+    in_channels: int = 3,
+    **overrides: Any,
+) -> CliffordLaplacianUNet:
+    """Create a :class:`CliffordLaplacianUNet` deterministic image autoencoder.
+
+    Thin convenience delegate to :meth:`CliffordLaplacianUNet.from_variant`.
+
+    :param variant: Named model variant; one of ``small``, ``base``, ``large``.
+        ``small`` is a 3-level pyramid, ``base``/``large`` are 4-level (inputs
+        must be divisible by ``2**num_levels`` -> 8 for ``small``, 16 for the
+        4-level variants).
+    :type variant: str
+    :param in_channels: Number of input/output image channels (3 for RGB).
+    :type in_channels: int
+    :param overrides: Keyword overrides forwarded to the constructor; these take
+        precedence over the variant defaults.
+    :return: A configured (un-built) :class:`CliffordLaplacianUNet`.
+    :rtype: CliffordLaplacianUNet
+    """
+    return CliffordLaplacianUNet.from_variant(
+        variant, in_channels=in_channels, **overrides
+    )

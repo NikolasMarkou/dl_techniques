@@ -6,6 +6,7 @@ from .embedding_unet import (
     create_cliffordnet_embedding,
     create_cliffordnet_embedding_with_head,
 )
+from .autoencoder import CliffordLaplacianUNet, create_clifford_laplacian_unet
 
 __all__ = [
     "CliffordNet",
@@ -15,4 +16,6 @@ __all__ = [
     "CliffordNetEmbedding",
     "create_cliffordnet_embedding",
     "create_cliffordnet_embedding_with_head",
+    "CliffordLaplacianUNet",
+    "create_clifford_laplacian_unet",
 ]
