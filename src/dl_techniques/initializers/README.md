@@ -218,10 +218,13 @@ returns `[min]`, so the single filter uses the minimum endpoint of each range.
 
 ### Usage
 
+A builder utility, `create_gabor_conv2d`, is provided for convenience.
+
 ```python
 import keras
-from dl_techniques.initializers import GaborFiltersInitializer
+from dl_techniques.initializers import GaborFiltersInitializer, create_gabor_conv2d
 
+# -- Method 1: Direct Initializer Usage --
 # Initialize the first convolutional layer with a Gabor filter bank.
 # 96 output channels -> 96 distinct Gabor filters swept over Table I intervals.
 gabor_conv = keras.layers.Conv2D(
@@ -231,6 +234,17 @@ gabor_conv = keras.layers.Conv2D(
     kernel_initializer=GaborFiltersInitializer(),
     trainable=True,  # filters are a starting point, then fine-tuned
     input_shape=(32, 32, 3),
+)
+
+# -- Method 2: Using the Builder Utility --
+# This creates a Conv2D layer pre-configured with the Gabor filter bank,
+# with paper-default first-layer settings (96 filters / 5x5 / trainable).
+gabor_layer = create_gabor_conv2d(
+    filters=96,
+    kernel_size=5,
+    trainable=True,
+    input_shape=(32, 32, 3),
+    name='gabor_first_conv',
 )
 ```
 

@@ -300,3 +300,115 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
         return cls(**config)
 
 # ---------------------------------------------------------------------
+# builder utility
+# ---------------------------------------------------------------------
+
+def create_gabor_conv2d(
+    filters: int,
+    kernel_size: Union[int, Tuple[int, int]] = 5,
+    sigma_range: Union[Tuple[float, float], Sequence[float]] = (2.0, 21.0),
+    theta_range: Union[Tuple[float, float], Sequence[float]] = (0.0, 360.0),
+    lambda_range: Union[Tuple[float, float], Sequence[float]] = (8.0, 100.0),
+    gamma_range: Union[Tuple[float, float], Sequence[float]] = (0.0, 300.0),
+    psi_range: Union[Tuple[float, float], Sequence[float]] = (0.0, 360.0),
+    strides: Union[int, Tuple[int, int]] = 1,
+    padding: str = 'same',
+    use_bias: bool = False,
+    kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+    trainable: bool = True,
+    input_shape: Optional[Tuple[int, ...]] = None,
+    name: Optional[str] = None,
+) -> keras.layers.Conv2D:
+    """Create a ``Conv2D`` layer initialized with a Gabor filter bank.
+
+    Builds a standard ``keras.layers.Conv2D`` whose kernel is initialized by a
+    ``GaborFiltersInitializer`` (Ozbulak & Ekenel). With ``filters`` output
+    channels, the kernel holds ``filters`` distinct 2D Gabor filters swept over
+    the paper's Table I parameter intervals (the same 2D filter replicated across
+    all input channels). This is the standard recipe for seeding the **first
+    convolutional layer** of a CNN with biologically-motivated, orientation- and
+    frequency-selective features instead of random weights.
+
+    The defaults follow the paper's first convolutional layer: ``filters=96``
+    (per call site), ``kernel_size=5``, ``strides=1``. Unlike
+    ``create_haar_depthwise_conv2d`` (which defaults ``trainable=False`` because
+    wavelet filters are fixed), this builder defaults ``trainable=True``: the
+    Gabor initialization is a strong **starting point** that is then refined by
+    gradient descent.
+
+    Note: this returns a *standard* ``Conv2D`` (not a ``DepthwiseConv2D``),
+    matching the paper's standard-convolution first layer.
+
+    Args:
+        filters: Number of output channels (= number of distinct Gabor filters).
+            Must be >= 1.
+        kernel_size: Spatial size of the convolution window. Int or
+            ``(kh, kw)`` tuple. Defaults to ``5``.
+        sigma_range: ``(min, max)`` interval for the Gaussian envelope width
+            ``sigma``; ``min`` must be > 0. Table I default ``(2.0, 21.0)``.
+        theta_range: ``(min, max)`` interval for orientation, in DEGREES. Table I
+            default ``(0.0, 360.0)``.
+        lambda_range: ``(min, max)`` interval for the sinusoid wavelength. Table I
+            default ``(8.0, 100.0)``.
+        gamma_range: ``(min, max)`` interval for the spatial aspect ratio. Table I
+            default ``(0.0, 300.0)``.
+        psi_range: ``(min, max)`` interval for the phase offset, in DEGREES.
+            Table I default ``(0.0, 360.0)``.
+        strides: Convolution strides. Int or ``(sh, sw)`` tuple. Defaults to ``1``.
+        padding: Padding mode (``'same'`` or ``'valid'``). Defaults to ``'same'``.
+        use_bias: Whether to add bias terms. Defaults to ``False``.
+        kernel_regularizer: Optional kernel regularization.
+        trainable: Whether the Gabor-initialized kernel can be trained. Defaults
+            to ``True`` (the Gabor init is a warm start refined by training).
+        input_shape: Optional input shape ``(H, W, C)`` for use as a model's first
+            layer. Passed through only when not ``None``.
+        name: Layer name. Defaults to ``'gabor_conv2d'``.
+
+    Returns:
+        keras.layers.Conv2D: Configured Conv2D layer with a Gabor-bank kernel
+        initializer.
+
+    Raises:
+        ValueError: If ``filters < 1``. (Range validation is delegated to
+            ``GaborFiltersInitializer.__init__``.)
+
+    Example:
+        >>> from dl_techniques.initializers import create_gabor_conv2d
+        >>> # First convolutional layer of a CNN (trainable Gabor warm start):
+        >>> layer = create_gabor_conv2d(
+        ...     filters=96,
+        ...     kernel_size=5,
+        ...     trainable=True,
+        ...     input_shape=(32, 32, 3),
+        ...     name='gabor_first_conv',
+        ... )
+        >>> # Input: (batch, 32, 32, 3) -> Output: (batch, 32, 32, 96)
+    """
+    if filters < 1:
+        raise ValueError(f"filters must be >= 1, got {filters}")
+
+    logger.info(
+        f"Creating Gabor Conv2D layer: filters={filters}, "
+        f"kernel_size={kernel_size}, trainable={trainable}"
+    )
+
+    layer_kwargs = dict(
+        filters=filters,
+        kernel_size=kernel_size,
+        strides=strides,
+        padding=padding,
+        use_bias=use_bias,
+        kernel_initializer=GaborFiltersInitializer(
+            sigma_range=sigma_range, theta_range=theta_range,
+            lambda_range=lambda_range, gamma_range=gamma_range, psi_range=psi_range,
+        ),
+        kernel_regularizer=kernel_regularizer,
+        trainable=trainable,
+        name=name or 'gabor_conv2d',
+    )
+    if input_shape is not None:
+        layer_kwargs['input_shape'] = input_shape
+
+    return keras.layers.Conv2D(**layer_kwargs)
+
+# ---------------------------------------------------------------------

@@ -35,7 +35,7 @@ from .haar_wavelet_initializer import (
     HaarWaveletInitializer,
     create_haar_depthwise_conv2d,
 )
-from .gabor_filters_initializer import GaborFiltersInitializer
+from .gabor_filters_initializer import GaborFiltersInitializer, create_gabor_conv2d
 from .he_orthonormal_initializer import HeOrthonormalInitializer
 from .orthonormal_initializer import OrthonormalInitializer
 from .hypersphere_orthogonal_initializer import OrthogonalHypersphereInitializer
@@ -50,6 +50,7 @@ __all__ = [
     "HaarWaveletInitializer",
     "create_haar_depthwise_conv2d",
     "GaborFiltersInitializer",
+    "create_gabor_conv2d",
     "HeOrthonormalInitializer",
     "OrthonormalInitializer",
     "OrthogonalHypersphereInitializer",

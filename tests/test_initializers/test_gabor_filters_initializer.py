@@ -15,7 +15,10 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.initializers import GaborFiltersInitializer
+from dl_techniques.initializers import (
+    GaborFiltersInitializer,
+    create_gabor_conv2d,
+)
 
 
 class TestGaborFiltersInitializer:
@@ -282,6 +285,82 @@ class TestGaborFiltersInitializer:
 
         with tempfile.TemporaryDirectory() as tmpdirname:
             model_path = os.path.join(tmpdirname, "gabor_model.keras")
+            model.save(model_path)
+
+            loaded_model = keras.models.load_model(
+                model_path,
+                custom_objects={"GaborFiltersInitializer": GaborFiltersInitializer},
+            )
+
+            loaded_prediction = loaded_model.predict(test_input, verbose=0)
+
+            np.testing.assert_allclose(
+                original_prediction,
+                loaded_prediction,
+                rtol=1e-6,
+                atol=1e-6,
+            )
+
+
+class TestCreateGaborConv2D:
+    """Test suite for the create_gabor_conv2d builder utility."""
+
+    def test_returns_conv2d(self):
+        """The builder returns a keras.layers.Conv2D instance."""
+        layer = create_gabor_conv2d(filters=8)
+        assert isinstance(layer, keras.layers.Conv2D)
+        assert layer.filters == 8
+
+    @pytest.mark.parametrize("filters", [0, -1])
+    def test_invalid_filters(self, filters):
+        """filters < 1 raises ValueError."""
+        with pytest.raises(ValueError):
+            create_gabor_conv2d(filters=filters)
+
+    def test_kernel_matches_initializer(self):
+        """Built layer's kernel equals GaborFiltersInitializer()((kh,kw,in,filters))."""
+        filters = 8
+        in_ch = 3
+        kh, kw = 5, 5
+        layer = create_gabor_conv2d(filters=filters, kernel_size=5)
+
+        # Build the layer on a known input shape (1, 16, 16, 3).
+        layer.build((None, 16, 16, in_ch))
+
+        kernel = np.asarray(layer.kernel)
+        expected = np.asarray(
+            GaborFiltersInitializer()((kh, kw, in_ch, filters))
+        )
+
+        np.testing.assert_allclose(kernel, expected, atol=1e-6)
+
+    def test_trainable_flag(self):
+        """trainable flag is honored on the returned layer."""
+        trainable_layer = create_gabor_conv2d(filters=4, trainable=True)
+        frozen_layer = create_gabor_conv2d(filters=4, trainable=False)
+
+        assert trainable_layer.trainable is True
+        assert frozen_layer.trainable is False
+
+    def test_builder_model_save_load(self):
+        """A model built with create_gabor_conv2d round-trips through .keras."""
+        inputs = keras.layers.Input(shape=(16, 16, 1), name="input")
+        x = create_gabor_conv2d(
+            filters=8,
+            kernel_size=5,
+            trainable=True,
+            name="gabor_conv",
+        )(inputs)
+        x = keras.layers.GlobalAveragePooling2D()(x)
+        outputs = keras.layers.Dense(5, activation="softmax", name="output")(x)
+
+        model = keras.Model(inputs=inputs, outputs=outputs, name="gabor_builder_model")
+
+        test_input = keras.random.normal([2, 16, 16, 1])
+        original_prediction = model.predict(test_input, verbose=0)
+
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            model_path = os.path.join(tmpdirname, "gabor_builder_model.keras")
             model.save(model_path)
 
             loaded_model = keras.models.load_model(
