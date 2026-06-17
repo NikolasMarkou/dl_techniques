@@ -1,2 +1,0 @@
-- [User context](user_context.md) — Nikolas Markou, dl_techniques author, STANDARD-tier epistemic deconstructor sessions on training pipelines
-- [ConvNeXtPatchVAE scope audit](project_convnext_patch_vae.md) — Phase 0.7 findings: 7 exogeneity candidates, H_S_prime updated 0.30->0.75, scope expanded to sigreg/sampling/convnext_v2_block/encoder

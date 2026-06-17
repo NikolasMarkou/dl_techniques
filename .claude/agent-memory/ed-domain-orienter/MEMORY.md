@@ -1,2 +1,0 @@
-- [Phase 0.3 metrics promotion](feedback_metrics_promotion.md) — metrics must be promoted via `candidates promote --id MET-N` after `add-metric`; `add-metric` alone leaves them staged (promoted=false) and they do not count toward the gate
-- [RAG / LoRA double-grounding workaround](feedback_double_grounding.md) — tool does not allow re-grounding to upgrade source; ground analyst first, then add a second entry with library source and distinct name; downstream citations prefer the library entry
