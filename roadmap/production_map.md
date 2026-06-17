@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 80 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete)
+**Progress: 89 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete)
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -1045,19 +1045,19 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 | `[x]` | `masked_autoencoder/patch_masking.py` | PASS | rubric-verified (embedded Layer, H7 present) |
 | `[x]` | `masked_autoencoder/utils.py` | N/A | N/A — pure-functions (confirmed) |
 
-### L2-Round 12 — masked_language_model, memory_bank  (9 files)
+### L2-Round 12 — masked_language_model, memory_bank  (9 files)  — DONE
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `masked_language_model/clm.py` | PASS | rubric-verify |
-| `[ ]` | `masked_language_model/mlm.py` | PASS | rubric-verify |
-| `[ ]` | `masked_language_model/utils.py` | N/A | N/A — pure-functions |
-| `[ ]` | `memory_bank/memory_banks.py` | PASS | rubric-verify |
-| `[ ]` | `memory_bank/memory_stats.py` | N/A | N/A — non-layer |
-| `[ ]` | `memory_bank/phase_scheduler.py` | N/A | N/A — non-layer |
-| `[ ]` | `memory_bank/read_controller.py` | PASS | rubric-verify |
-| `[ ]` | `memory_bank/wave_field_memory_llm.py` | PASS | rubric-verify |
-| `[ ]` | `memory_bank/write_controller.py` | FAIL | MemoryWriteController: forward-raw-tf (debug-guard tf.debugging — verify in-round, §L2-5) |
+| `[x]` | `masked_language_model/clm.py` | PASS | rubric-verified; round-trip tests pass |
+| `[x]` | `masked_language_model/mlm.py` | PASS | rubric-verified; round-trip tests pass |
+| `[x]` | `masked_language_model/utils.py` | N/A | N/A — pure-functions (confirmed) |
+| `[x]` | `memory_bank/memory_banks.py` | PASS | rubric-verified (embedded Layer; exercised via wave_field round-trip) |
+| `[x]` | `memory_bank/memory_stats.py` | N/A | N/A — non-layer (confirmed) |
+| `[x]` | `memory_bank/phase_scheduler.py` | N/A | N/A — non-layer (confirmed) |
+| `[x]` | `memory_bank/read_controller.py` | PASS | rubric-verified (embedded Layer) |
+| `[x]` | `memory_bank/wave_field_memory_llm.py` | PASS | rubric-verified; 8 .keras round-trip tests pass |
+| `[x]` | `memory_bank/write_controller.py` | PASS | H10 FIXED — removed the tf.debugging raw-tf debug-guard; replaced with keras.ops `ops.maximum(max_seq_len-t, 0)` clamp (graph-safe, no exception needed) |
 
 ### L2-Round 13 — mini_vec2vec, mobile_clip, mobilenet  (9 files)
 

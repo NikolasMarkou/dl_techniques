@@ -11,6 +11,9 @@ to the read controller. Storing per-batch state on the controller would
 break ``keras.Model.save`` round-trip (per LESSONS — frozen state must
 be ``add_weight(trainable=False)`` not a plain attribute set in
 ``call``).
+
+Contract: the input sequence length ``T`` MUST be ``<= max_seq_len`` so the
+right-pad length stays non-negative.
 """
 
 from typing import Any, Dict, Optional, Tuple
@@ -102,23 +105,11 @@ class MemoryWriteController(keras.layers.Layer):
         # call `len(paddings)` which fails on symbolic tensors).
         b = ops.shape(k_wm)[0]
         t = ops.shape(k_wm)[1]
-        # B6: guard T <= max_seq_len. If a caller passes a longer sequence,
-        # `pad_len` would be negative and `ops.zeros((b, pad_len, ...))`
-        # silently produces an empty / nonsense tensor. We assert in graph
-        # mode via tf.debugging (project convention; this is a model
-        # built only on the TF backend per dl_techniques policy). The raw
-        # tf.debugging call is gated behind a backend check so the layer
-        # stays importable / runnable under non-TF Keras backends.
-        if keras.backend.backend() == "tensorflow":
-            import tensorflow as tf
-            tf.debugging.assert_less_equal(
-                t, self.max_seq_len,
-                message=(
-                    "MemoryWriteController: input sequence length T exceeds "
-                    "max_seq_len. T must be <= max_seq_len."
-                ),
-            )
-        pad_len = self.max_seq_len - t
+        # B6: the input sequence length T must be <= max_seq_len (module
+        # contract). Clamp the pad length to be non-negative with keras.ops so
+        # the forward path stays backend-agnostic (graph-safe, H10) and a
+        # contract violation can never produce a negative-size `ops.zeros`.
+        pad_len = ops.maximum(self.max_seq_len - t, 0)
 
         if self.multi_head_keys:
             # Per-head shape (B, T, H, d). Pad along T (axis=1) with H
