@@ -92,3 +92,17 @@ DEFAULT_VSGD_TAU2          = 0.90
 DEFAULT_VSGD_LEARNING_RATE = 0.1
 DEFAULT_VSGD_WEIGHT_DECAY  = 0.0
 DEFAULT_VSGD_EPS           = 1e-8
+
+# ==============================================================================
+# GEFEN Optimizer Defaults
+# ==============================================================================
+# Gefen-lite (shared-v): AdamW-style update with a block-shared second moment.
+# Defaults mirror Gefen.__init__ (gefen_optimizer.py) exactly so the factory
+# builder cannot silently diverge from the class defaults.
+DEFAULT_GEFEN_LEARNING_RATE = 1e-3
+DEFAULT_GEFEN_BETA_1        = 0.9
+DEFAULT_GEFEN_BETA_2        = 0.999
+DEFAULT_GEFEN_EPSILON       = 1e-8
+DEFAULT_GEFEN_WEIGHT_DECAY  = 0.0
+DEFAULT_GEFEN_MAX_BLOCK_SIZE = 1024
+DEFAULT_GEFEN_MIN_BLOCK_SIZE = 8
