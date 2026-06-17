@@ -56,8 +56,8 @@ class YOLOv12FeatureExtractor(keras.Model):
             scale: str = "n",
             kernel_initializer: str = "he_normal",
             name: Optional[str] = None,
-            **kwargs
-    ):
+            **kwargs: Any
+    ) -> None:
         """
         Initialize YOLOv12 feature extractor.
 
@@ -106,13 +106,31 @@ class YOLOv12FeatureExtractor(keras.Model):
 
         logger.info(f"Created YOLOv12FeatureExtractor-{scale}")
 
-    def build(self, input_shape):
-        """Build the feature extractor layers."""
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Build the feature extractor and materialize all sub-layer weights.
+
+        ``_build_layers`` only *instantiates* the sub-layers; their variables
+        are otherwise created lazily on the first ``call``. That lazy build
+        silently drops weights on a ``.keras`` reload (the sub-layers are unbuilt
+        at weight-restore time). To satisfy M2 we run one dummy forward through
+        the sub-layer chain here so every variable exists before restore.
+
+        Args:
+            input_shape: Input tensor shape ``(B, H, W, C)``.
+        """
         if self._layers_built:
             return
 
         self._build_input_shape = input_shape
         self._build_layers()
+
+        # Materialize sub-layer weights via a concrete dummy forward (calls the
+        # sub-layers directly, NOT self() — so no recursion into build()).
+        dummy_shape = (1,) + tuple(
+            int(d) if d is not None else 32 for d in input_shape[1:]
+        )
+        self._forward(ops.zeros(dummy_shape), training=False)
+
         self._layers_built = True
         super().build(input_shape)
 
@@ -262,6 +280,23 @@ class YOLOv12FeatureExtractor(keras.Model):
     ) -> List[keras.KerasTensor]:
         """
         Forward pass through feature extractor.
+
+        Args:
+            inputs: Input tensor (batch_size, height, width, channels).
+            training: Whether in training mode.
+
+        Returns:
+            List of three feature maps [P3, P4, P5] at different scales.
+        """
+        return self._forward(inputs, training=training)
+
+    def _forward(
+            self,
+            inputs: keras.KerasTensor,
+            training: Optional[bool] = None
+    ) -> List[keras.KerasTensor]:
+        """Run the backbone + neck forward pass (shared by ``call`` and
+        ``build``'s weight-materialization dummy forward).
 
         Args:
             inputs: Input tensor (batch_size, height, width, channels).

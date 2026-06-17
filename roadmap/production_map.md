@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 174 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete; nano_vlm_world_model/model.py M2-DEFERRED [~], not counted)
+**Progress: 182 / 183 files production-verified**  (ALL 25 rounds DONE; the only remaining file is `nano_vlm_world_model/model.py` M2-DEFERRED [~] — a known deep M2 gap, not counted. fftnet counted: documented accepted raw-tf exception, M2 + tests complete.)
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -1205,18 +1205,18 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 | `[x]` | `video_jepa/model.py` | PASS | done: H11 fixed — encode_frames now forwards training to online encoder (Clifford BatchNorm was stuck in inference mode during training); train_step GradientTape GHOST; existing round-trip passes |
 | `[x]` | `video_jepa/predictor.py` | PASS | rubric-verified clean (CausalSelfAttnMLPBlock/VideoJEPAPredictor; H5/H6/H7/H11; conditional Dropout M4 low-severity ok) |
 
-### L2-Round 25 — vit, vit_hmlp, vit_siglip, vq_vae, vq_vae_rotation, wave_field_llm, yolo12  (8 files)
+### L2-Round 25 — vit, vit_hmlp, vit_siglip, vq_vae, vq_vae_rotation, wave_field_llm, yolo12  (8 files)  — DONE
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `vit/model.py` | PASS | rubric-verify (uses weight_transfer — canonical M3) |
-| `[ ]` | `vit_hmlp/model.py` | FAIL | ViTHMLP: super_build_last |
-| `[ ]` | `vit_siglip/model.py` | PASS | rubric-verify |
-| `[ ]` | `vq_vae/model.py` | PASS | rubric-verify |
-| `[ ]` | `vq_vae_rotation/model.py` | PASS | rubric-verify |
-| `[ ]` | `wave_field_llm/wave_field_llm.py` | PASS | rubric-verify |
-| `[ ]` | `yolo12/feature_extractor.py` | PASS | rubric-verify |
-| `[ ]` | `yolo12/multitask.py` | PASS | rubric-verify |
+| `[x]` | `vit/model.py` | PASS | rubric-verified clean (subclassed ViT; H4/H5/H6/H8/H11 good; M3 load_weights_from_checkpoint); existing round-trip passes |
+| `[x]` | `vit_hmlp/model.py` | PASS | done: H6 fixed (logger.info moved before super().build()); existing round-trip passes |
+| `[x]` | `vit_siglip/model.py` | PASS | rubric-verified clean (self.norm has None-default at L375 → M4 ok; static-int reshape off-graph); existing round-trip passes |
+| `[x]` | `vq_vae/model.py` | PASS | rubric-verified clean (call() pure ops; train_step GradientTape GHOST); existing round-trip passes |
+| `[x]` | `vq_vae_rotation/model.py` | PASS | rubric-verified clean (class docstring satisfies H13 file-level; H8/H9 serialize encoder/decoder/init); existing round-trip passes |
+| `[x]` | `wave_field_llm/wave_field_llm.py` | PASS | done: WaveFieldDecoderBlock H4 (embed_dim%num_heads/positivity) + H5 (explicit build of all 6 sublayers, was attention-only); WaveFieldLLM clean (M1 from_variant); existing round-trip passes |
+| `[x]` | `yolo12/feature_extractor.py` | PASS | done: H12 type hints (__init__/build); FIXED M2 round-trip — lazy first-call sublayer build dropped 76% of weights on reload; added concrete dummy-forward in build() (refactored call→_forward) to materialize weights; added test_round_trip.py |
+| `[x]` | `yolo12/multitask.py` | PASS | done: H3 mutable-default lists→None sentinels; H4 (scale membership + class/reg_max positivity); H12 (__init__ -> None, typed kwargs); M2 round-trip fixed via FE materialization; added test_round_trip.py. Was smoke-only |
 <!-- /L2-WORKLIST -->
 
 > **Coverage invariant.** The 25 rounds above cover all **183** source files across all **70**

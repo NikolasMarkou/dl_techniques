@@ -104,6 +104,22 @@ class WaveFieldDecoderBlock(keras.layers.Layer):
     ) -> None:
         super().__init__(**kwargs)
 
+        if embed_dim <= 0 or num_heads <= 0:
+            raise ValueError(
+                f"embed_dim and num_heads must be positive, got "
+                f"embed_dim={embed_dim}, num_heads={num_heads}"
+            )
+        if embed_dim % num_heads != 0:
+            raise ValueError(
+                f"embed_dim ({embed_dim}) must be divisible by "
+                f"num_heads ({num_heads})."
+            )
+        if max_seq_len <= 0 or field_size <= 0:
+            raise ValueError(
+                f"max_seq_len and field_size must be positive, got "
+                f"max_seq_len={max_seq_len}, field_size={field_size}"
+            )
+
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.max_seq_len = max_seq_len
@@ -154,15 +170,30 @@ class WaveFieldDecoderBlock(keras.layers.Layer):
         )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
-        # Explicit build of WaveFieldAttention is required: when the block
-        # is invoked, Keras 3's __call__ wrapper triggers build for the
-        # block but does not always reach nested sub-layer build paths
-        # before the inner call is traced — so add_weight inside the
-        # attention layer can fail with "'NoneType' object has no
-        # attribute 'assign'". Building it explicitly here pins variable
-        # creation to the block's build phase. Other sub-layers are
-        # standard Keras layers and self-build on first invocation.
+        """Explicitly build every sub-layer so a ``.keras`` reload restores
+        weights onto already-built sub-layers (H5).
+
+        Explicit build of WaveFieldAttention is especially required: when the
+        block is invoked, Keras 3's ``__call__`` wrapper triggers build for the
+        block but does not always reach nested sub-layer build paths before the
+        inner call is traced -- so ``add_weight`` inside the attention layer can
+        fail with "'NoneType' object has no attribute 'assign'". Building it
+        explicitly here pins variable creation to the block's build phase.
+
+        Args:
+            input_shape: Shape of the block input ``(B, seq, embed_dim)``.
+        """
+        # Attention block: pre-norm -> WaveFieldAttention.
+        self.attn_norm.build(input_shape)
         self.attention.build(input_shape)
+
+        # FFN block: pre-norm -> dense_1 -> dense_2 -> dropout.
+        self.ffn_norm.build(input_shape)
+        self.ffn_dense_1.build(input_shape)
+        ffn_hidden_shape = tuple(input_shape[:-1]) + (self.ffn_intermediate_size,)
+        self.ffn_dense_2.build(ffn_hidden_shape)
+        self.ffn_dropout.build(input_shape)
+
         super().build(input_shape)
 
     def call(

@@ -536,10 +536,10 @@ class ViTHMLP(keras.Model):
         if self.global_pool is not None:
             self.global_pool.build(pos_input_shape)
 
-        # Always call parent build at the end
-        super().build(input_shape)
-
         logger.info(f"Built VisionTransformer-hMLP-{self.scale} with {self.num_patches} patches")
+
+        # Always call parent build at the end (must be the LAST statement)
+        super().build(input_shape)
 
     def call(
             self,

@@ -163,16 +163,16 @@ class YOLOv12MultiTask(keras.Model):
             str
         ] = VisionTaskType.DETECTION,
         # Segmentation head configuration
-        segmentation_filters: List[int] = [128, 64, 32],
+        segmentation_filters: Optional[List[int]] = None,
         segmentation_dropout: float = 0.1,
         # Classification head configuration
-        classification_hidden_dims: List[int] = [512, 256],
+        classification_hidden_dims: Optional[List[int]] = None,
         classification_dropout: float = 0.3,
         # Common configuration
         kernel_initializer: str = "he_normal",
         name: Optional[str] = None,
-        **kwargs
-    ):
+        **kwargs: Any
+    ) -> None:
         """
         Initialize YOLOv12 multi-task model using Functional API.
 
@@ -194,6 +194,30 @@ class YOLOv12MultiTask(keras.Model):
             name: Model name.
             **kwargs: Additional keyword arguments.
         """
+        # Resolve mutable-default head configs (never share a list across instances).
+        if segmentation_filters is None:
+            segmentation_filters = [128, 64, 32]
+        if classification_hidden_dims is None:
+            classification_hidden_dims = [512, 256]
+
+        # Validate inputs.
+        valid_scales = set(YOLOv12FeatureExtractor.SCALE_CONFIGS.keys())
+        if scale not in valid_scales:
+            raise ValueError(
+                f"scale must be one of {sorted(valid_scales)}, got {scale!r}"
+            )
+        if num_classes <= 0:
+            raise ValueError(f"num_classes must be positive, got {num_classes}")
+        for cls_name, cls_val in (
+            ("num_detection_classes", num_detection_classes),
+            ("num_segmentation_classes", num_segmentation_classes),
+            ("num_classification_classes", num_classification_classes),
+        ):
+            if cls_val is not None and cls_val <= 0:
+                raise ValueError(f"{cls_name} must be positive, got {cls_val}")
+        if reg_max <= 0:
+            raise ValueError(f"reg_max must be positive, got {reg_max}")
+
         # Parse task configuration
         self.task_config = parse_task_list(task_config)
 
