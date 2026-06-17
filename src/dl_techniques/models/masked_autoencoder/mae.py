@@ -70,15 +70,18 @@ class MaskedAutoencoder(keras.Model):
         self.decoder_depth = decoder_depth
         self.norm_pix_loss = norm_pix_loss
         self.mask_value = mask_value
-        self.input_shape_config = input_shape
+        # Normalize to a tuple: on .keras deserialization input_shape comes back
+        # as a list, and `(None,) + input_shape` would raise (tuple + list).
+        self.input_shape_config = tuple(input_shape)
         self.non_mask_value = non_mask_value
 
         # Ensure encoder is built to determine shapes
         if not self.encoder.built:
-            self.encoder.build((None,) + input_shape)
+            self.encoder.build((None,) + self.input_shape_config)
 
         # Compute output shape to determine channels
-        encoder_output_shape = self.encoder.compute_output_shape((None,) + input_shape)
+        encoder_output_shape = self.encoder.compute_output_shape(
+            (None,) + self.input_shape_config)
 
         # Handle Deep Supervision (List of shapes)
         # We assume the first output is the main feature map for the default decoder

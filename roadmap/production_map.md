@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 72 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete)
+**Progress: 80 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete)
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -1032,18 +1032,18 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 | `[x]` | `lewm/predictor.py` | PASS | rubric-verified (ARPredictor, H7 present) |
 | `[x]` | `lewm/projector.py` | PASS | rubric-verified (MLPProjector, H7 present); fixed pre-existing stale test_rollout_shape (S==1 contract) |
 
-### L2-Round 11 — mamba, masked_autoencoder  (8 files)
+### L2-Round 11 — mamba, masked_autoencoder  (8 files)  — DONE
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `mamba/components.py` | PASS | rubric-verify |
-| `[ ]` | `mamba/components_v2.py` | PASS | rubric-verify |
-| `[ ]` | `mamba/mamba_v1.py` | PASS | rubric-verify (pretrained=str → bare load_weights; M3 review) |
-| `[ ]` | `mamba/mamba_v2.py` | PASS | rubric-verify |
-| `[ ]` | `masked_autoencoder/conv_decoder.py` | PASS | rubric-verify |
-| `[ ]` | `masked_autoencoder/mae.py` | PASS | rubric-verify |
-| `[ ]` | `masked_autoencoder/patch_masking.py` | PASS | rubric-verify |
-| `[ ]` | `masked_autoencoder/utils.py` | N/A | N/A — pure-functions |
+| `[x]` | `mamba/components.py` | PASS | rubric-verified |
+| `[x]` | `mamba/components_v2.py` | PASS | rubric-verified |
+| `[x]` | `mamba/mamba_v1.py` | PASS | rubric-verified; M3 OK — uses BARE load_weights(path) (not by_name=True), the valid whole-model restore; no migration needed |
+| `[x]` | `mamba/mamba_v2.py` | PASS | rubric-verified |
+| `[x]` | `masked_autoencoder/conv_decoder.py` | PASS | rubric-verified (embedded Layer, H7 present); covered via MAE round-trip |
+| `[x]` | `masked_autoencoder/mae.py` | PASS | rubric-verified; FIXED M2 round-trip (input_shape deserialized as list broke `(None,)+input_shape`); added test_model.py |
+| `[x]` | `masked_autoencoder/patch_masking.py` | PASS | rubric-verified (embedded Layer, H7 present) |
+| `[x]` | `masked_autoencoder/utils.py` | N/A | N/A — pure-functions (confirmed) |
 
 ### L2-Round 12 — masked_language_model, memory_bank  (9 files)
 
