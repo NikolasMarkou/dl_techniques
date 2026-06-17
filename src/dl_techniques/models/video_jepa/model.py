@@ -273,19 +273,23 @@ class VideoJEPA(keras.Model):
     # ------------------------------------------------------------------
     # Core helpers
     # ------------------------------------------------------------------
-    def encode_frames(self, pixels: keras.KerasTensor) -> keras.KerasTensor:
+    def encode_frames(
+        self, pixels: keras.KerasTensor, training: Optional[bool] = None
+    ) -> keras.KerasTensor:
         """Encode a pixel tensor ``(B, T, H, W, C) → (B, T, H_p, W_p, D)``
         through the **online** encoder.
 
         Mirrors :meth:`LeWM.encode_pixels` but keeps the 4D patch grid
-        instead of pooling.
+        instead of pooling. ``training`` is forwarded to the online encoder so
+        its BatchNorm/dropout sub-layers (the Clifford blocks) run in the
+        correct mode.
         """
         cfg = self.config
         shape = ops.shape(pixels)
         B, T = shape[0], shape[1]
         H, W, C = cfg.img_size, cfg.img_size, cfg.img_channels
         flat = ops.reshape(pixels, (B * T, H, W, C))
-        feat = self.encoder(flat)  # (B*T, H_p, W_p, D)
+        feat = self.encoder(flat, training=training)  # (B*T, H_p, W_p, D)
         Hp = cfg.patches_per_side
         return ops.reshape(feat, (B, T, Hp, Hp, cfg.embed_dim))
 
@@ -424,7 +428,7 @@ class VideoJEPA(keras.Model):
         # Online (gradient-carrying) encoder — feeds the predictor and
         # SIGReg. ``z`` retained as a local alias for downstream code that
         # still expects the iter-1 name (predictor-input substitution).
-        z_online = self.encode_frames(pixels)               # (B, T, H_p, W_p, D)
+        z_online = self.encode_frames(pixels, training=training)  # (B, T, H_p, W_p, D)
         z = z_online
 
         # --- EMA target encoder (plan_2026-05-23_15151c75/D-001) ---

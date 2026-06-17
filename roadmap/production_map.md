@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 164 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete; nano_vlm_world_model/model.py M2-DEFERRED [~], not counted)
+**Progress: 174 / 183 files production-verified**  (fftnet counted: documented accepted raw-tf exception, M2 + tests complete; nano_vlm_world_model/model.py M2-DEFERRED [~], not counted)
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -1190,20 +1190,20 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 | `[x]` | `time_series/xlstm/forecaster.py` | PASS | done: H9 from_config deserializes 6 init/reg (get_config serialized them; was cls(**config)); existing 2 round-trips pass |
 | `[x]` | `time_series/xlstm/model.py` | PASS | done: H9 from_config deserializes 6 init/reg; existing round-trip passes |
 
-### L2-Round 24 — tiny_recursive_model, tree_transformer, vae, video_jepa  (10 files)
+### L2-Round 24 — tiny_recursive_model, tree_transformer, vae, video_jepa  (10 files)  — DONE
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
-| `[ ]` | `tiny_recursive_model/components.py` | FAIL | TRMInner: compute_output_shape (embedded LAYER → H7 HARD) |
-| `[ ]` | `tiny_recursive_model/model.py` | PASS | rubric-verify |
-| `[ ]` | `tree_transformer/components.py` | PASS | rubric-verify |
-| `[ ]` | `tree_transformer/model.py` | PASS | rubric-verify (uses weight_transfer — canonical M3) |
-| `[ ]` | `vae/model.py` | PASS | rubric-verify (sampling_type gaussian/hypersphere/vmf) |
-| `[ ]` | `video_jepa/config.py` | N/A | N/A — dataclass-config |
-| `[ ]` | `video_jepa/encoder.py` | PASS | rubric-verify |
-| `[ ]` | `video_jepa/masking.py` | PASS | rubric-verify |
-| `[ ]` | `video_jepa/model.py` | PASS | rubric-verify |
-| `[ ]` | `video_jepa/predictor.py` | PASS | rubric-verify |
+| `[x]` | `tiny_recursive_model/components.py` | PASS | done: H7 added TRMInner.compute_output_shape (carry/logits/q-head structure from config); H4 added to TRMReasoningModule + TRMInner (hidden_size%num_heads, positivity, layer counts); existing test_trm.py round-trip passes |
+| `[x]` | `tiny_recursive_model/model.py` | PASS | rubric-verified clean (TRM; H4 present, M5 create_trm; H10 branches on Python flags only); existing round-trip passes |
+| `[x]` | `tree_transformer/components.py` | PASS | done: H12 type hints on 3 compute_output_shape; H11 GroupAttention forwards training to norm; H4 added to TreeTransformerBlock; existing round-trip passes |
+| `[x]` | `tree_transformer/model.py` | PASS | done: H12 type hints (compute_output_shape + _validate_config params); M3 correct (load_weights_from_checkpoint); M1+M5 present; existing round-trip passes |
+| `[x]` | `vae/model.py` | PASS | rubric-verified clean (functional VAE; H4/H8/H9 + M1 from_variant + M5 factory; train_step tf.GradientTape is GHOST, not graded); existing round-trip passes |
+| `[x]` | `video_jepa/config.py` | N/A | N/A confirmed (dataclass-config, self-validating __post_init__) |
+| `[x]` | `video_jepa/encoder.py` | PASS | rubric-verified clean (VideoJEPACliffordEncoder; H5/H6/H7/H11; conditional Dropout has no weights — M4 low-severity ok) |
+| `[x]` | `video_jepa/masking.py` | PASS | rubric-verified clean (TubeMaskGenerator; stateless, static-int branch off-graph) |
+| `[x]` | `video_jepa/model.py` | PASS | done: H11 fixed — encode_frames now forwards training to online encoder (Clifford BatchNorm was stuck in inference mode during training); train_step GradientTape GHOST; existing round-trip passes |
+| `[x]` | `video_jepa/predictor.py` | PASS | rubric-verified clean (CausalSelfAttnMLPBlock/VideoJEPAPredictor; H5/H6/H7/H11; conditional Dropout M4 low-severity ok) |
 
 ### L2-Round 25 — vit, vit_hmlp, vit_siglip, vq_vae, vq_vae_rotation, wave_field_llm, yolo12  (8 files)
 

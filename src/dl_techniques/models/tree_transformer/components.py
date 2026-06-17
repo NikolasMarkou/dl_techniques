@@ -132,7 +132,9 @@ class PositionalEncoding(keras.layers.Layer):
         x = x + self.pe[:, :seq_len, :]
         return self.dropout(x, training=training)
 
-    def compute_output_shape(self, input_shape):
+    def compute_output_shape(
+        self, input_shape: Tuple[Optional[int], ...]
+    ) -> Tuple[Optional[int], ...]:
         """Output shape is identical to the input shape."""
         return tuple(input_shape)
 
@@ -262,7 +264,7 @@ class GroupAttention(keras.layers.Layer):
         final_adj_mask = ops.logical_and(adj_mask, padding_mask_2d)
 
         # Scaled dot-product attention, masked to only consider neighbors.
-        context_norm = self.norm(context)
+        context_norm = self.norm(context, training=training)
         key = self.linear_key(context_norm)
         query = self.linear_query(context_norm)
         scores = ops.matmul(query, ops.transpose(key, axes=(0, 2, 1)))
@@ -325,7 +327,9 @@ class GroupAttention(keras.layers.Layer):
 
         return g_attn, neibor_attn
 
-    def compute_output_shape(self, input_shape):
+    def compute_output_shape(
+        self, input_shape: Any
+    ) -> Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]]:
         """Return ``(g_attn, neibor_attn)`` shapes ``(b, s, s)`` each."""
         context_shape = input_shape[0]
         b, s = context_shape[0], context_shape[1]
@@ -482,7 +486,9 @@ class TreeMHA(keras.layers.Layer):
         output = ops.reshape(output, (batch_size, -1, self.hidden_size))
         return self.dense(output)
 
-    def compute_output_shape(self, input_shape):
+    def compute_output_shape(
+        self, input_shape: Any
+    ) -> Tuple[Optional[int], ...]:
         """Output shape is ``(batch, seq_len, hidden_size)``."""
         query_shape = input_shape[0]
         return (query_shape[0], query_shape[1], self.hidden_size)
@@ -572,6 +578,22 @@ class TreeTransformerBlock(keras.layers.Layer):
     ) -> None:
         """Initializes the TreeTransformerBlock."""
         super().__init__(**kwargs)
+
+        if hidden_size <= 0 or num_heads <= 0:
+            raise ValueError(
+                f"hidden_size and num_heads must be positive, got "
+                f"hidden_size={hidden_size}, num_heads={num_heads}"
+            )
+        if hidden_size % num_heads != 0:
+            raise ValueError(
+                f"hidden_size ({hidden_size}) must be divisible by "
+                f"num_heads ({num_heads})."
+            )
+        if intermediate_size <= 0:
+            raise ValueError(
+                f"intermediate_size must be positive, got {intermediate_size}"
+            )
+
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.intermediate_size = intermediate_size
@@ -659,7 +681,9 @@ class TreeTransformerBlock(keras.layers.Layer):
 
         return x, group_prob_out, break_prob
 
-    def compute_output_shape(self, input_shape):
+    def compute_output_shape(
+        self, input_shape: Any
+    ) -> Tuple[Tuple[Optional[int], ...], ...]:
         """Return ``(x_out, group_prob_out, break_prob)`` shapes."""
         x_shape = input_shape[0]
         b, s = x_shape[0], x_shape[1]

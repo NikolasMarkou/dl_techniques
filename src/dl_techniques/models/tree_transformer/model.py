@@ -264,12 +264,12 @@ class TreeTransformer(keras.Model):
 
     def _validate_config(
         self,
-        vocab_size,
-        hidden_size,
-        num_layers,
-        num_heads,
-        hidden_dropout_rate,
-        attention_dropout_rate,
+        vocab_size: int,
+        hidden_size: int,
+        num_layers: int,
+        num_heads: int,
+        hidden_dropout_rate: float,
+        attention_dropout_rate: float,
     ) -> None:
         """Validates model configuration parameters."""
         if vocab_size <= 0:
@@ -335,7 +335,9 @@ class TreeTransformer(keras.Model):
             self.vocab_size, name="lm_head_projection"
         )
 
-    def compute_output_shape(self, input_shape):
+    def compute_output_shape(
+        self, input_shape: Any
+    ) -> Dict[str, Any]:
         """Computes the output shape of the layer."""
         if isinstance(input_shape, dict):
             input_shape = input_shape["input_ids"]

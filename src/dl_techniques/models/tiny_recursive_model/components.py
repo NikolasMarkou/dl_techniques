@@ -165,6 +165,21 @@ class TRMReasoningModule(keras.layers.Layer):
         """
         super().__init__(**kwargs)
 
+        if hidden_size <= 0 or num_heads <= 0:
+            raise ValueError(
+                f"hidden_size and num_heads must be positive, got "
+                f"hidden_size={hidden_size}, num_heads={num_heads}"
+            )
+        if hidden_size % num_heads != 0:
+            raise ValueError(
+                f"hidden_size ({hidden_size}) must be divisible by "
+                f"num_heads ({num_heads})."
+            )
+        if num_layers < 1:
+            raise ValueError(f"num_layers must be >= 1, got {num_layers}")
+        if expansion <= 0:
+            raise ValueError(f"expansion must be positive, got {expansion}")
+
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.expansion = expansion
@@ -416,6 +431,24 @@ class TRMInner(keras.layers.Layer):
         """
         super().__init__(**kwargs)
 
+        if vocab_size <= 0:
+            raise ValueError(f"vocab_size must be positive, got {vocab_size}")
+        if hidden_size <= 0 or num_heads <= 0:
+            raise ValueError(
+                f"hidden_size and num_heads must be positive, got "
+                f"hidden_size={hidden_size}, num_heads={num_heads}"
+            )
+        if hidden_size % num_heads != 0:
+            raise ValueError(
+                f"hidden_size ({hidden_size}) must be divisible by "
+                f"num_heads ({num_heads})."
+            )
+        if h_layers < 1 or l_layers < 1:
+            raise ValueError(
+                f"h_layers and l_layers must be >= 1, got "
+                f"h_layers={h_layers}, l_layers={l_layers}"
+            )
+
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.num_heads = num_heads
@@ -554,6 +587,35 @@ class TRMInner(keras.layers.Layer):
         q_halt, q_continue = q_logits[..., 0], q_logits[..., 1]
 
         return new_carry, logits, (q_halt, q_continue)
+
+    def compute_output_shape(
+        self, input_shape: Any
+    ) -> Tuple[
+        Dict[str, Tuple[Optional[int], ...]],
+        Tuple[Optional[int], ...],
+        Tuple[Tuple[Optional[int], ...], Tuple[Optional[int], ...]],
+    ]:
+        """Return the output shapes of one inner reasoning step.
+
+        Mirrors :meth:`call`'s return structure, derived purely from stored
+        config (works before ``build``). The batch dimension is left dynamic.
+
+        Args:
+            input_shape: Structure of the ``(carry, data)`` inputs (unused; the
+                output shapes are fully determined by the layer config).
+
+        Returns:
+            ``(new_carry_shape, logits_shape, (q_halt_shape, q_continue_shape))``
+            where ``new_carry_shape`` is ``{"z_H": (B, full_seq, hidden),
+            "z_L": (B, full_seq, hidden)}``, ``logits_shape`` is
+            ``(B, seq_len, vocab_size)`` and each q-head shape is ``(B,)``.
+        """
+        full_seq_len = self.seq_len + self.puzzle_emb_len
+        latent_shape = (None, full_seq_len, self.hidden_size)
+        new_carry_shape = {"z_H": latent_shape, "z_L": latent_shape}
+        logits_shape = (None, self.seq_len, self.vocab_size)
+        q_shape = (None,)
+        return new_carry_shape, logits_shape, (q_shape, q_shape)
 
     def get_config(self) -> Dict[str, Any]:
         """Return the configuration for serialization.
