@@ -126,13 +126,13 @@ class TrainingConfig:
     # HuggingFace / Wikipedia settings
     hf_cache_dir: str = "/media/arxwn/data0_4tb/datasets/wikipedia"
     hf_wikipedia_config: str = "20231101.en"
-    # DECISION D-003: 0 → packed CLM uses every token; pass 500+ only for
+    # 0 → packed CLM uses every token; pass 500+ only for
     # per-doc consumers (MLM, classification).
     min_article_length: int = 0
     val_fraction: float = 0.02
     max_val_samples: int = 5000
     max_train_samples: Optional[int] = None
-    # DECISION D-002: parallel tokenization shards + per-epoch reshuffle.
+    # Parallel tokenization shards + per-epoch reshuffle.
     shuffle_shards: int = 4
 
     # Checkpointing & analysis (step-based for large datasets)
@@ -144,7 +144,7 @@ class TrainingConfig:
 
     # Resume from checkpoint
     resume_from: Optional[str] = None
-    # DECISION D-006: end-to-end seed plumbing.
+    # End-to-end seed plumbing.
     seed: int = 42
 
     # Generation probes
@@ -431,7 +431,7 @@ def train_cliffordnet_nlp(
         config.mask_token_id,
     )
 
-    # DECISION D-006: derive data_seed before building the dataset.
+    # Derive data_seed before building the dataset.
     initial_step = (
         _extract_step_from_checkpoint(config.resume_from)
         if config.resume_from else 0

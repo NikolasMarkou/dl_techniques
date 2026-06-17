@@ -141,7 +141,7 @@ def preprocess_mlm_dataset(
         },
         num_parallel_calls=tf.data.AUTOTUNE,
     )
-    # DECISION D-005: do NOT call dataset.cache() here. Caching the tokenized
+    # Do NOT call dataset.cache() here. Caching the tokenized
     # MLM stream OOMs on Wikipedia-scale corpora (~20 GB tokenized in RAM
     # during the first epoch). The trade-off is per-epoch re-tokenization on
     # bounded TFDS sets, which costs <2 min/epoch on a 4090 host CPU.
@@ -357,7 +357,7 @@ def preprocess_classification_dataset(
 # ---------------------------------------------------------------------
 
 
-# DECISION D-001: single canonical estimator for packed-CLM steps_per_epoch.
+# Single canonical estimator for packed-CLM steps_per_epoch.
 # The packed CLM pipeline (preprocess_clm_packed_dataset) emits chunks, not
 # articles, so the historical formula ``num_articles // batch_size`` undercounts
 # total optimizer steps by ``avg_tokens_per_article / max_seq_length`` and
@@ -544,7 +544,7 @@ def build_clm_metrics(
 # ---------------------------------------------------------------------
 
 
-# DECISION plan_2026-05-07_824e5687/D-001: subclassed Keras 3 models that
+# Subclassed Keras 3 models that
 # return ``{"logits": ...}`` from ``call()`` have no ``output_names``
 # populated by the framework. Calling ``model.compile(metrics={"logits":
 # [...]})`` against such a model causes Keras's ``MetricsList`` to silently

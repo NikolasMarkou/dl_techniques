@@ -688,13 +688,12 @@ class TSTPhaseCallback(keras.callbacks.Callback):
 # ---------------------------------------------------------------------
 # Dataset transforms — TWO named callables, one per phase (D-007).
 #
-# DECISION plan_2026-05-17_413eae7d/D-007 (resolving D-005 fallback after
-# Falsification C soft trigger; see D-006 for the trace):
-#   Each transform has a single statically-determined output rank — no
-#   tf.cond in the data graph, no shape-inference hazard, no tf.Variable-
-#   read race between tf.data and the rest of the training loop. The
-#   phase boundary is explicit in the user's training script (two .fit()
-#   calls with `initial_epoch=` for resume).
+# Two named callables, one per phase: each transform has a single
+# statically-determined output rank — no tf.cond in the data graph,
+# no shape-inference hazard, no tf.Variable-read race between tf.data
+# and the rest of the training loop. The phase boundary is explicit in
+# the user's training script (two .fit() calls with `initial_epoch=` for
+# resume).
 # ---------------------------------------------------------------------
 
 

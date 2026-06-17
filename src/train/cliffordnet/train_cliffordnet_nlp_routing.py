@@ -212,16 +212,16 @@ class TrainingConfig:
     # HuggingFace / Wikipedia settings
     hf_cache_dir: str = "/media/arxwn/data0_4tb/datasets/wikipedia"
     hf_wikipedia_config: str = "20231101.en"
-    # DECISION D-003: 0 → packed CLM uses every token; stub filtering only
+    # 0 → packed CLM uses every token; stub filtering only
     # loses tokens. Pass 500+ for per-doc consumers (MLM, classification).
     min_article_length: int = 0
     val_fraction: float = 0.02
     max_val_samples: int = 5000
     max_train_samples: Optional[int] = None
-    # DECISION D-002: parallel tokenization shards + per-epoch reshuffle.
+    # Parallel tokenization shards + per-epoch reshuffle.
     shuffle_shards: int = 4
 
-    # DECISION D-006: end-to-end seed plumbing. On --resume the train loop
+    # End-to-end seed plumbing. On --resume the train loop
     # derives data_seed = seed + initial_step so resumed runs see new
     # article ordering instead of replaying the first N chunks.
     seed: int = 42
@@ -608,7 +608,7 @@ def train_cliffordnet_nlp_routing(
         config.mask_token_id,
     )
 
-    # DECISION D-006: per-resume seed shift. We need initial_step BEFORE
+    # Per-resume seed shift. We need initial_step BEFORE
     # building the dataset to derive the data seed, but checkpoint loading
     # also has to happen before fit. Pre-extract initial_step here.
     initial_step = (
