@@ -896,7 +896,7 @@ Per-round procedure:
 
 ## §L2-4 Batched Worklist
 
-**Progress: 182 / 183 files production-verified**  (ALL 25 rounds DONE; the only remaining file is `nano_vlm_world_model/model.py` M2-DEFERRED [~] — a known deep M2 gap, not counted. fftnet counted: documented accepted raw-tf exception, M2 + tests complete.)
+**Progress: 183 / 183 files production-verified**  (COMPLETE — all 25 rounds DONE and the post-round-25 `nano_vlm_world_model/model.py` deep M2 gap is now RESOLVED. fftnet counted: documented accepted raw-tf exception, M2 + tests complete.)
 
 > **NOTE (Round 1):** `scripts/verify_models_smoke.py` was removed at HEAD (commit `79bebe5d`,
 > authored after the PART II roadmap). STEP 5/7 runtime smoke is therefore unavailable; the pytest
@@ -1086,13 +1086,13 @@ Rounds are directory-cohesive (whole directories per round; model files interdep
 | `[x]` | `nam/model.py` | PASS | rubric-verified; NTM-style stateful (call(carry,batch)) — M2 covered by bit-exact weight round-trip + config round-trip (full .keras not well-defined for carry-based forward) |
 | `[x]` | `nam/tokenizer.py` | N/A | N/A — non-layer (confirmed) |
 
-### L2-Round 15 — nano_vlm, nano_vlm_world_model, ntm  (7 files)  — DONE (6/7; nano_vlm_world_model/model.py M2 DEFERRED [~])
+### L2-Round 15 — nano_vlm, nano_vlm_world_model, ntm  (7 files)  — DONE (7/7; nano_vlm_world_model/model.py M2 resolved in the post-round-25 deep-gap effort)
 
 | done | file | verdict | gap-hint |
 |------|------|---------|----------|
 | `[x]` | `nano_vlm/model.py` | PASS | H6 fixed (logger before super().build()); added test_model.py (factory + forward + M2 round-trip; clean 0.0) |
 | `[x]` | `nano_vlm_world_model/denoisers.py` | PASS | rubric-verified (embedded denoiser Layers: TimestepEmbedding/Conditional/Vision/Text/Joint) |
-| `[~]` | `nano_vlm_world_model/model.py` | PASS(scanner)/M2-DEFERRED | DEEP M2 gap: .keras round-trip drops ~604/1400 weights (204 paths structurally absent on reload). Denoisers/head build lazily; model forward is STOCHASTIC (keras.random noise) so no output-identity test is even possible. Attempt 1 (get_build_config/build_from_config + concrete dummy-forward in build()) did NOT resolve (796 same/400 diff/204 missing) — reverted. Needs per-denoiser explicit build in a dedicated effort. Forward works (smoke passes). |
+| `[x]` | `nano_vlm_world_model/model.py` | PASS | M2 RESOLVED (post-round-25 dedicated effort): root cause was lazy first-call build of the denoisers' nested MultiHeadAttention + Sequential sub-layers (dropped ~600 weights on reload). Fix: added explicit `build()` to ConditionalDenoiser/VisionDenoiser/TextDenoiser/JointDenoiser (MHA built via `build(query_shape=,value_shape=)`), and the model's `build()` now builds all denoisers + head + adds get_build_config/build_from_config. Verified by test_round_trip.py: weight-count preserved + every component (encoders + all denoisers, all 3 modes) bit-identical after reload (stochastic top-level forward → component-level determinism is the M2 proof). |
 | `[x]` | `nano_vlm_world_model/scheduler.py` | N/A | N/A — non-layer (confirmed) |
 | `[x]` | `nano_vlm_world_model/train.py` | N/A | N/A — non-layer (confirmed) |
 | `[x]` | `ntm/model.py` | PASS | rubric-verified; existing test_model.py has 4 .keras round-trips |

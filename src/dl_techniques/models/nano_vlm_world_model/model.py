@@ -180,9 +180,26 @@ class ScoreBasedNanoVLM(keras.Model):
         logger.info("Score-Based nanoVLM initialized successfully")
 
     def build(self, input_shape: Union[Dict, Tuple]) -> None:
-        """Build all components."""
+        """Build all components, materializing every sub-layer's weights.
+
+        The denoisers and the text-decoder head are otherwise built lazily on
+        the first ``call``, which silently drops ~600 weights (MultiHeadAttention
+        + nested Sequential blocks) on a ``.keras`` reload. Building them
+        explicitly here pins variable creation to the build phase so the
+        round-trip preserves every weight (M2). All denoiser weight shapes derive
+        from the stored config, so the exact ``input_shape`` content is not
+        required for them.
+
+        Args:
+            input_shape: Either a dict ``{'images': ..., 'text': ...}`` or a
+                ``(vision_shape, text_shape)`` tuple.
+        """
         if self.built:
             return
+
+        # Remember the build shape so the .keras reload (build_from_config)
+        # rebuilds the full sub-layer tree before weights are restored.
+        self._build_input_shape = input_shape
 
         # Build encoders
         if isinstance(input_shape, dict):
@@ -197,7 +214,29 @@ class ScoreBasedNanoVLM(keras.Model):
         if text_shape is not None:
             self.text_encoder.build({'input_ids': text_shape})
 
+        # Build denoisers + output head explicitly (shapes from config).
+        vision_dim = self.vision_config.get('embed_dim', 768)
+        text_dim = self.text_config.get('embed_dim', 768)
+        if self.generation_mode in ['text_to_image', 'joint']:
+            self.vision_denoiser.build((None, None, vision_dim))
+        if self.generation_mode in ['image_to_text', 'joint']:
+            self.text_denoiser.build((None, None, text_dim))
+        if self.generation_mode == 'joint':
+            self.joint_denoiser.build((None, None, vision_dim))
+        if self.generation_mode in ['image_to_text', 'joint']:
+            self.text_decoder_head.build((None, None, text_dim))
+
         super().build(input_shape)
+
+    def get_build_config(self) -> Dict[str, Any]:
+        """Return the build config so reload rebuilds the full sub-layer tree."""
+        return {'input_shape': getattr(self, '_build_input_shape', None)}
+
+    def build_from_config(self, config: Dict[str, Any]) -> None:
+        """Rebuild from :meth:`get_build_config` before weight restore."""
+        input_shape = config.get('input_shape')
+        if input_shape is not None:
+            self.build(input_shape)
 
     def call(
             self,

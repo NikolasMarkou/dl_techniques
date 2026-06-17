@@ -186,6 +186,41 @@ class ConditionalDenoiser(layers.Layer):
             f"hidden_dim={hidden_dim}, attention={use_self_attention}"
         )
 
+    def build(self, input_shape: Any) -> None:
+        """Explicitly build every sub-layer so a ``.keras`` reload restores all
+        weights (M2).
+
+        The ``MultiHeadAttention`` layers and the nested ``Sequential`` blocks
+        do NOT survive a lazy first-call build across serialization: on reload
+        the layer is unbuilt at weight-restore time, so its variables are
+        silently re-initialized. Building them here (from stored config; only
+        the feature dims matter, sequence dims stay dynamic) pins variable
+        creation to the build phase so weight paths match on restore.
+
+        Args:
+            input_shape: Inbound shape(s); content is unused (all sub-layer
+                weight shapes derive from the stored config).
+        """
+        hd = self.hidden_dim
+        # Timestep MLP consumes the [B, hidden_dim] sinusoidal embedding.
+        self.time_mlp.build((None, hd))
+        # Input projections (last dim = data / condition feature dims).
+        self.data_proj.build((None, None, self.data_dim))
+        self.condition_proj.build((None, None, self.condition_dim))
+        # Residual blocks all operate on hidden_dim sequences.
+        block_shape = (None, None, hd)
+        for block in self.blocks:
+            block['norm1'].build(block_shape)
+            block['dense1'].build(block_shape)
+            block['dense2'].build((None, None, hd * 4))
+            if self.use_self_attention:
+                block['norm_attn'].build(block_shape)
+                block['attention'].build(
+                    query_shape=block_shape, value_shape=block_shape
+                )
+        self.output_proj.build(block_shape)
+        super().build(input_shape)
+
     def call(
             self,
             noisy_data: keras.KerasTensor,
@@ -313,6 +348,12 @@ class VisionDenoiser(layers.Layer):
 
         logger.info(f"Initialized VisionDenoiser for text-to-image generation")
 
+    def build(self, input_shape: Any) -> None:
+        """Build the inner ConditionalDenoiser so weights survive reload (M2)."""
+        if not self.denoiser.built:
+            self.denoiser.build(input_shape)
+        super().build(input_shape)
+
     def call(
             self,
             noisy_vision: keras.KerasTensor,
@@ -389,6 +430,12 @@ class TextDenoiser(layers.Layer):
         )
 
         logger.info(f"Initialized TextDenoiser for image-to-text generation")
+
+    def build(self, input_shape: Any) -> None:
+        """Build the inner ConditionalDenoiser so weights survive reload (M2)."""
+        if not self.denoiser.built:
+            self.denoiser.build(input_shape)
+        super().build(input_shape)
 
     def call(
             self,
@@ -508,6 +555,41 @@ class JointDenoiser(layers.Layer):
         self.text_out = layers.Dense(text_dim, kernel_initializer='zeros', name='text_out')
 
         logger.info(f"Initialized JointDenoiser for unified vision-language score modeling")
+
+    def build(self, input_shape: Any) -> None:
+        """Explicitly build every sub-layer so a ``.keras`` reload restores all
+        weights (M2).
+
+        The 4 ``MultiHeadAttention`` layers per block and the per-block
+        ``Sequential`` MLPs are lazily built otherwise and silently drop their
+        weights on reload. All weight shapes derive from the stored config
+        (sequence dims stay dynamic).
+
+        Args:
+            input_shape: Inbound shape(s); content is unused.
+        """
+        hd = self.hidden_dim
+        self.vision_proj.build((None, None, self.vision_dim))
+        self.text_proj.build((None, None, self.text_dim))
+        block_shape = (None, None, hd)
+        for block in self.joint_blocks:
+            for attn_key in (
+                'vision_self_attn', 'text_self_attn',
+                'vision_cross_attn', 'text_cross_attn',
+            ):
+                block[attn_key].build(
+                    query_shape=block_shape, value_shape=block_shape
+                )
+            for norm_key in (
+                'vision_norm1', 'vision_norm2', 'vision_norm3',
+                'text_norm1', 'text_norm2', 'text_norm3',
+            ):
+                block[norm_key].build(block_shape)
+            block['vision_mlp'].build(block_shape)
+            block['text_mlp'].build(block_shape)
+        self.vision_out.build(block_shape)
+        self.text_out.build(block_shape)
+        super().build(input_shape)
 
     def call(
             self,
