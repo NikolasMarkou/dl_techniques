@@ -31,12 +31,15 @@ Make all **245** layer source files under `src/dl_techniques/layers/` production
 against the §2 rubric, with a real test under `tests/test_layers/` for each concrete layer. This is
 the entire active scope of this roadmap; §4 is its worklist.
 
-### Level 2 — Models (FUTURE, not started)
-After Level 1 completes, the same audit+fix discipline applies to model definitions under
-`src/dl_techniques/models/` (~70 model directories). Models compose layers, so they inherit the same
-serialization / `get_config` / `build` discipline plus model-level concerns (factory functions,
-end-to-end `.keras` round-trip, training-loop correctness). **No round in this document touches
-models.** A separate worklist will be authored when Level 1 is done.
+### Level 2 — Models (ACTIVE — see PART II below)
+Level 1 is COMPLETE (245/245). The same audit+fix discipline now applies to model definitions under
+`src/dl_techniques/models/` (**70 model directories, 183 source files**). Models compose layers, so
+they inherit the same serialization / `get_config` / `build` discipline plus model-level concerns
+(factory functions, end-to-end `.keras` round-trip, weight handling). The Level-2 worklist,
+rubric, per-round procedure, and handover prompt are in **PART II — LEVEL 2: MODELS** at the end of
+this file (sections §L2-1…§L2-7). The canonical Level-2 exemplar is
+`src/dl_techniques/models/bert/bert.py`. Level-1 sections §1–§7 below are frozen (DONE) and are not
+touched by Level-2 rounds.
 
 ### Level 3 — Losses / Metrics / Optimizers / Regularizers / Initializers / Constraints (FUTURE, not started)
 The remaining custom-component families (`losses/`, `metrics/`, `optimizers/`, `regularizers/`,
@@ -736,3 +739,629 @@ This roadmap (the scanner `scripts/audit_layers.py`, the rubric, the 245-file wo
 handover prompt) was authored as durable, standalone infrastructure. It is intentionally self-contained:
 every future round is driven solely by this document plus the scanner — no external session state or
 planning scaffold is required, and none is referenced here.
+
+---
+---
+
+# PART II — LEVEL 2: MODELS
+
+> **This is the ACTIVE worklist.** Level 1 (PART I, §1–§7 above) is COMPLETE and frozen. All current
+> work is Level 2: bringing every `keras.Model` subclass under `src/dl_techniques/models/` to
+> production quality. The single source of truth for "production-quality model" is the canonical
+> exemplar `src/dl_techniques/models/bert/bert.py` plus the authoritative spec
+> `research/2026_keras_custom_models_instructions.md` (model/composite-model sections: §5 line 863, §6
+> line 1000, §7 line 1175, §8 line 1378, §9 line 1527, §11 line 1954, gold example §15.2 line 2778).
+> Level-2 sections are numbered **§L2-1 … §L2-7** to avoid collision with PART I's §1–§7. This is a
+> LIVING document: each round edits §L2-4 in place (`[ ]` → `[x]`) and bumps the §L2-4 tally.
+
+## §L2-1 Mission & Scope
+
+**Mission.** Make all **183 model source files** across **70 model directories** under
+`src/dl_techniques/models/` production-quality, one self-contained, context-cleared session ("round")
+at a time, graded against the §L2-2 rubric, verified by two instruments (§L2-3), with a real test
+under `tests/test_models/` for each model.
+
+**Baseline snapshot (commit `7b1e28af`, live tree walk + `audit_layers.py --models`).** 183 source
+files (excluding `__init__.py` and `__pycache__`) across 70 directories (`jepa/` is an empty package —
+only `__init__.py` — and is EXCLUDED from the denominator): **127 PASS / 16 FAIL / 40 N/A** (0
+PARSE-ERROR). 99 concrete `keras.layers.Layer` subclasses + 120 concrete `keras.Model` subclasses
+graded (219 total). Dominant mechanical gap: `super().build()` not last (`super_build_last` 131/143 =
+91.6% — 12 of the 16 FAILs); 2 layers carry raw `tf.*` in the forward path; `compute_output_shape`
+96/99 over LAYER subclasses (3 FAILs, all embedded layers). register-decorator, `get_config`, and
+no-`print` are 100%.
+
+**Two-instrument verification.** Unlike Level 1 (one AST scanner), Level 2 uses BOTH:
+1. **Mechanical AST** — `scripts/audit_layers.py --models` (the `--models` flag grades `keras.Model`
+   subclasses; without it the scanner is Level-1 layers-only).
+2. **Runtime smoke** — `scripts/verify_models_smoke.py` (87-entry registry harness: build + forward +
+   `.keras` reload). Baseline **85 PASS / 0 FAIL / 2 SKIP** (`jepa`, `ccnets` — see §L2-5).
+
+> **LIVING document.** Each round edits §L2-4 in place — flipping `[ ]` → `[x]`, updating the per-round
+> status, and bumping the §L2-4 progress tally. §L2-1…§L2-3 and §L2-5 are stable reference. The
+> handover prompt to drive a fresh round is §L2-6.
+
+---
+
+## §L2-2 The Model Production-Quality Rubric
+
+Distilled from `src/dl_techniques/models/bert/bert.py` and the spec's model sections. The PART I
+layer rubric (H1–H14, §2) is the foundation; this section states how each item maps to a
+`keras.Model` subclass and adds the model-only items (M-items). **[HARD]** = a miss is a
+non-compliant file; **[SOFT]** = canonical style, apply when reasonable; **[GHOST]** = NOT graded.
+
+### H1–H14 carry-over to models
+
+| # | Item | Status for `keras.Model` | Notes |
+|---|------|--------------------------|-------|
+| H1 | `@keras.saving.register_keras_serializable()` | **[HARD]** | Required on every concrete model class. `bert.py:78`. |
+| H2 | Sublayers created in `__init__` | **[HARD]** → sharpened to **M4** | See M4 (always-create across config flags). `add_weight` never in `__init__`. |
+| H3 | All `__init__` args stored as `self.*` | **[HARD]** | Survives `get_config`. `bert.py:346-366`. |
+| H4 | Input validation (`ValueError`) | **[HARD]** | bert uses a `_validate_config()` helper. `bert.py:376-425`. |
+| H5 | Explicit sublayer `build()` | **[CONDITIONAL]** | Only when the model OVERRIDES `build()` (custom shape-dependent sublayers). Composite models that create sublayers in `__init__` and let Keras auto-build on first call do NOT need a `build()` override (bert has none). When a `build()` override IS present, it must build sublayers in order. |
+| H6 | `super().build()` LAST | **[HARD when `build()` exists]** | If the model/embedded-layer defines `build()`, `super().build()` must be the structural last statement. 12 of 16 FAILs are this. |
+| H7 | `compute_output_shape` | **[SOFT for models] / [HARD for embedded layers]** | Keras infers model output shape from `call()`; the spec's model examples omit it. But any `keras.layers.Layer` subclass living inside a model dir is graded by the LAYER rule (HARD). 3 FAILs are embedded layers. |
+| H8 | Full `get_config` | **[HARD]** | `super().get_config()` + every `__init__` arg; serialize regularizers/initializers/activations when present. `bert.py:748-778`. |
+| H9 | `from_config` deserialization | **[HARD]** | Deserialize objects when config carries them; `return cls(**config)` suffices when config is plain scalars (bert). `bert.py:780-789`. |
+| H10 | Graph-safe `call()` | **[HARD]** | Only `keras.ops` in the forward path (accepted exceptions in §L2-5). |
+| H11 | `training` forwarded | **[HARD]** | `call(..., training=None)` propagated to every sublayer that uses it. `bert.py:465-524`. |
+| H12 | Type hints | **[HARD]** | Every method signature annotated. |
+| H13 | Structured docstrings | **[HARD]** | bert uses RST `:param:`/`:type:`/`:raises:`/`:ivar:` + architecture diagram. |
+| H14 | Logger, not `print` | **[HARD]** | `from dl_techniques.utils.logger import logger`. |
+
+### Model addendum (M-items)
+
+| # | Item | Status | What it means | Source |
+|---|------|--------|---------------|--------|
+| M1 | Variant configs | **[SOFT]** | `MODEL_VARIANTS` class dict + `from_variant(variant, pretrained=, **kwargs)` classmethod — ONLY where discrete size tiers (tiny/small/base/large) are semantically real. Not every model has tiers. | `bert.py:207-236, 621-746`; spec §7.2/§11.1 |
+| M2 | `.keras` round-trip | **[HARD]** | Full `model.save(path)` → `keras.models.load_model(path, custom_objects=...)` → **numerically identical outputs** (`atol=1e-6`; GPU fp32 reduction noise → use `1e-4`, SYSTEM invariant). This is STRONGER than a `from_config` round-trip and is the load-bearing model test. | spec §8.2:1462-1523 |
+| M3 | Pretrained weight handling | **[SOFT]** | If a model loads real checkpoints, use `dl_techniques.utils.weight_transfer.load_weights_from_checkpoint(target, ckpt_path, ...)`, NOT `load_weights(by_name=True)` on a `.keras` file (broken in Keras 3.8+). Build-before-load. See weight-handling policy below. | `weight_transfer.py`; spec Pitfall 9 |
+| M4 | Always-create sublayers | **[HARD]** | All sublayers instantiated unconditionally in `__init__` regardless of config flags (`include_top`, `enable_aux`, …); flags only gate usage in `call()`. Keeps weight names stable across configurations so `.keras`/checkpoint load works. | spec §9.1 (Pitfall 1) |
+| M5 | Module-level factory | **[SOFT]** | `create_<model>(...)` thin wrapper (and `create_<model>_with_head(...)` where heads compose). | `bert.py:829-1011` |
+| M6 | Stable explicit layer names | **[SOFT]** | `name=f'...'` on sublayers, especially in list-of-layers loops (weight-name stability). | `bert.py:438,461` |
+
+### Weight-handling policy (decision D-003 of the authoring plan)
+
+- `model.load_weights(path.keras, by_name=True)` **raises** in Keras 3.8 for `.keras` files — it is a
+  **latent anti-pattern**. The canonical replacement is
+  `dl_techniques.utils.weight_transfer.load_weights_from_checkpoint(...)` (layer-by-layer name match,
+  returns a `TransferReport`). Three model files carry this latent bug live and SHOULD migrate (SOFT,
+  in their owning round): `cliffordnet/model.py` (~line 413), `bias_free_denoisers/bfunet.py`
+  (~line 515), `convnext/convnext_v2.py` (~line 400). These never load a real checkpoint today, so the
+  bug is dormant — migration is SOFT, not a round-blocker.
+- The exemplar **bert itself** uses `load_weights(by_name=True)` in `load_pretrained_weights`
+  (`bert.py:574-578`); it is never exercised (`pretrained=True` → `NotImplementedError`). This
+  exemplar quirk is **[GHOST]** — do NOT propagate it to other models, and do NOT rip it out of bert
+  as round work.
+
+### GHOST — do NOT grade or add as round work
+
+- **`train_step` override** — the spec has no guidance; not a rubric item.
+- **`if self.built: return` at the top of `build()`** — carried from PART I §2 (GHOST). Absence is not
+  a defect; presence is harmless but never required.
+- **bert's own `load_weights(by_name=True)`** — see weight-handling policy above.
+
+### Scanner-mechanical vs human-judged (models)
+
+`scripts/audit_layers.py --models` mechanically checks: H1 (register), H8 (`get_config` present), H6
+(`super_build_last`, when `build()` exists), H10 (`forward_raw_tf` in `call()`), H14 (`print`).
+`compute_output_shape` is INFO-only for models (HARD for embedded layers). Everything else —
+H3/H4/H9/H11 correctness, H12/H13 quality, M1-M6, and the runtime M2 `.keras` round-trip — is
+human-judged + smoke-verified during the round. The scanner is an **aid, not an oracle**.
+
+---
+
+## §L2-3 How a Level-2 Round Works
+
+A "round" is one self-contained, context-cleared session that clears a single batch from §L2-4.
+Standing user decisions (same as PART I):
+
+- **FULL re-audit.** Grade every file fresh against §L2-2 — do not trust the stale §L2-4 baseline verdict.
+- **Audit AND fix in the SAME round.** Grade and repair the batch; don't defer.
+- **One round per cleared-context session.** Pick the next PENDING round, do it end-to-end, commit, stop.
+- **Push is the user's job.** Commit locally only; never push.
+
+Per-round procedure:
+
+1. **Read this file** (PART II). Find the lowest-numbered §L2-4 round with `[ ]` rows. That's the batch.
+2. **Mechanical audit** over the batch:
+   ```
+   CUDA_VISIBLE_DEVICES=1 .venv/bin/python scripts/audit_layers.py --models --path <file1> <file2> ...
+   ```
+   (`--path` accepts a directory too; add `--json /tmp/round.json` for machine-readable output.)
+3. **Grade + fix each file** against the FULL §L2-2 rubric by reading it. Match the canonical
+   `models/bert/bert.py` and the spec. Fix all [HARD] gaps and reasonable [SOFT] gaps. Do NOT add
+   `if self.built: return` (GHOST). For an H7 FAIL, check whether the class is a `keras.Model` (SOFT —
+   skip) or an embedded `keras.layers.Layer` (HARD — add `compute_output_shape`).
+4. **Tests.** Ensure a real test under `tests/test_models/test_<name>/` mirroring the model. If missing
+   or thin, add/repair one covering: construction (incl. `ValueError` paths), forward pass, **M2 full
+   `.keras` save→load→identical-output round-trip**, and (where applicable) variants/factory.
+5. **Runtime smoke** for each model in the batch:
+   ```
+   CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src TF_CPP_MIN_LOG_LEVEL=3 .venv/bin/python scripts/verify_models_smoke.py --only <name>
+   ```
+6. **Scoped pytest** (GPU1, serial — repo convention; never run GPU jobs in parallel):
+   ```
+   CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_models/test_<name>/ -x
+   ```
+7. **Two-instrument pass.** Re-run the scanner AND the smoke harness; every file must report PASS (or
+   a documented accepted exception — §L2-5; or a documented smoke SKIP — `jepa`, `ccnets`).
+8. **Update §L2-4 in place.** Flip the batch's `[ ]` → `[x]`, set the round status to DONE, bump the
+   §L2-4 tally ("X / 183").
+9. **Commit** (locally; do not push):
+   ```
+   git commit -m "[production-map/L2-round-N] <short batch description>"
+   ```
+
+---
+
+## §L2-4 Batched Worklist
+
+**Progress: 0 / 183 files production-verified**
+
+Status legend: `[ ]` PENDING · `[~]` IN-PROGRESS/DEFERRED · `[x]` DONE.
+`verdict` is the `scripts/audit_layers.py --models` mechanical result at baseline `7b1e28af`
+(re-run the scanner during the round — files change). `gap-hint` is the failing item for FAIL files,
+`N/A — <kind>` for non-graded modules (dataclass-config / pure-functions / non-layer — still
+human-confirmed), or `rubric-verify` for current-PASS files needing a human rubric/M2/doc review.
+Rounds are directory-cohesive (whole directories per round; model files interdepend). 25 rounds.
+
+<!-- L2-WORKLIST -->
+### L2-Round 1 — accunet, bert, bias_free_denoisers  (7 files)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `accunet/model.py` | PASS | rubric-verify |
+| `[ ]` | `bert/bert.py` | PASS | rubric-verify (CANONICAL EXEMPLAR — re-confirm) |
+| `[ ]` | `bias_free_denoisers/bfcnn.py` | N/A | N/A — pure-functions |
+| `[ ]` | `bias_free_denoisers/bfconvunext.py` | FAIL | ConvUNextStem: super_build_last |
+| `[ ]` | `bias_free_denoisers/bfunet.py` | N/A | N/A — pure-functions (weight-handling SOFT: load_weights by_name ~L515) |
+| `[ ]` | `bias_free_denoisers/bfunet_conditional.py` | N/A | N/A — pure-functions |
+| `[ ]` | `bias_free_denoisers/bfunet_conditional_unified.py` | PASS | rubric-verify |
+
+### L2-Round 2 — byte_latent_transformer, capsnet, cbam  (4 files)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `byte_latent_transformer/model.py` | FAIL | ByteLatentTransformer: super_build_last |
+| `[ ]` | `capsnet/model.py` | PASS | rubric-verify |
+| `[ ]` | `capsnet/model_v2.py` | PASS | rubric-verify |
+| `[ ]` | `cbam/model.py` | PASS | rubric-verify |
+
+### L2-Round 3 — ccnets  (9 files)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `ccnets/architectures/cifar100.py` | PASS | rubric-verify |
+| `[ ]` | `ccnets/architectures/mnist.py` | PASS | rubric-verify |
+| `[ ]` | `ccnets/architectures/text.py` | PASS | rubric-verify |
+| `[ ]` | `ccnets/base.py` | N/A | N/A — non-layer |
+| `[ ]` | `ccnets/control.py` | N/A | N/A — non-layer |
+| `[ ]` | `ccnets/losses.py` | N/A | N/A — non-layer |
+| `[ ]` | `ccnets/orchestrators.py` | N/A | N/A — non-layer |
+| `[ ]` | `ccnets/trainer.py` | N/A | N/A — non-layer |
+| `[ ]` | `ccnets/utils.py` | N/A | N/A — non-layer (ccnets = smoke SKIP, §L2-5) |
+
+### L2-Round 4 — cliffordnet  (10 files)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `cliffordnet/clip.py` | PASS | rubric-verify |
+| `[ ]` | `cliffordnet/conditional_denoiser.py` | PASS | rubric-verify |
+| `[ ]` | `cliffordnet/confidence_denoiser.py` | PASS | rubric-verify |
+| `[ ]` | `cliffordnet/denoiser.py` | FAIL | CliffordNetDenoiser: super_build_last |
+| `[ ]` | `cliffordnet/embedding_unet.py` | PASS | rubric-verify |
+| `[ ]` | `cliffordnet/lm.py` | PASS | rubric-verify |
+| `[ ]` | `cliffordnet/lm_routing.py` | PASS | rubric-verify |
+| `[ ]` | `cliffordnet/lmunet.py` | PASS | rubric-verify |
+| `[ ]` | `cliffordnet/model.py` | FAIL | CliffordNet: super_build_last (NON-TRIVIAL — post-super dummy-forward, §L2-5; weight-handling SOFT ~L413) |
+| `[ ]` | `cliffordnet/unet.py` | FAIL | _DetectionHeadBlock: compute_output_shape (embedded LAYER → H7 HARD) |
+
+### L2-Round 5 — clip, convnext, convnext_patch_vae  (8 files)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `clip/model.py` | PASS | rubric-verify |
+| `[ ]` | `convnext/convnext_v1.py` | FAIL | ConvNeXtV1: super_build_last |
+| `[ ]` | `convnext/convnext_v2.py` | FAIL | ConvNeXtV2: super_build_last (weight-handling SOFT ~L400) |
+| `[ ]` | `convnext_patch_vae/config.py` | N/A | N/A — dataclass-config |
+| `[ ]` | `convnext_patch_vae/decoder.py` | PASS | rubric-verify |
+| `[ ]` | `convnext_patch_vae/encoder.py` | PASS | rubric-verify |
+| `[ ]` | `convnext_patch_vae/model.py` | PASS | rubric-verify |
+| `[ ]` | `convnext_patch_vae/model_hierarchical.py` | PASS | rubric-verify |
+
+### L2-Round 6 — convunext, coshnet, darkir, depth_anything, detr  (7 files)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `convunext/model.py` | PASS | rubric-verify |
+| `[ ]` | `coshnet/model.py` | PASS | rubric-verify |
+| `[ ]` | `darkir/model.py` | PASS | rubric-verify |
+| `[ ]` | `depth_anything/components.py` | PASS | rubric-verify |
+| `[ ]` | `depth_anything/model.py` | PASS | rubric-verify (uses weight_transfer — canonical M3) |
+| `[ ]` | `depth_anything/teacher_ema.py` | N/A | N/A — non-layer |
+| `[ ]` | `detr/model.py` | PASS | rubric-verify |
+
+### L2-Round 7 — dino, distilbert, fastvlm, fftnet  (7 files)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `dino/dino_v1.py` | FAIL | DINOHead: super_build_last (also fixes pre-existing DINOHead .keras round-trip, §L2-5) |
+| `[ ]` | `dino/dino_v2.py` | PASS | rubric-verify (2-input [images, masks] contract) |
+| `[ ]` | `dino/dino_v3.py` | PASS | rubric-verify |
+| `[ ]` | `distilbert/model.py` | PASS | rubric-verify |
+| `[ ]` | `fastvlm/components.py` | PASS | rubric-verify |
+| `[ ]` | `fastvlm/model.py` | PASS | rubric-verify (image-only despite VLM name) |
+| `[ ]` | `fftnet/model.py` | FAIL | FFTMixer: forward-raw-tf (ACCEPTED-EXCEPTION — TF FFT, §L2-5) |
+
+### L2-Round 8 — fnet, fractalnet, gemma, gpt2, hierarchical_reasoning_model  (6 files)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `fnet/model.py` | PASS | rubric-verify |
+| `[ ]` | `fractalnet/model.py` | PASS | rubric-verify |
+| `[ ]` | `gemma/components.py` | PASS | rubric-verify |
+| `[ ]` | `gemma/gemma3.py` | PASS | rubric-verify |
+| `[ ]` | `gpt2/gpt2.py` | PASS | rubric-verify |
+| `[ ]` | `hierarchical_reasoning_model/model.py` | PASS | rubric-verify (build() override — SAM D-008 pattern) |
+
+### L2-Round 9 — ideogram4  (7 files)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `ideogram4/config.py` | N/A | N/A — dataclass-config |
+| `[ ]` | `ideogram4/constants.py` | N/A | N/A — pure-functions |
+| `[ ]` | `ideogram4/latent_norm.py` | N/A | N/A — pure-functions |
+| `[ ]` | `ideogram4/pipeline.py` | N/A | N/A — non-layer |
+| `[ ]` | `ideogram4/scheduler.py` | N/A | N/A — dataclass-config |
+| `[ ]` | `ideogram4/transformer.py` | PASS | rubric-verify |
+| `[ ]` | `ideogram4/vae.py` | PASS | rubric-verify |
+
+### L2-Round 10 — kan, latent_gmm_registration, lewm  (7 files)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `kan/model.py` | PASS | rubric-verify (from_pretrained → load_weights; M3 review) |
+| `[ ]` | `latent_gmm_registration/model.py` | PASS | rubric-verify (tf.linalg.svd accepted-exception, §L2-5) |
+| `[ ]` | `lewm/config.py` | N/A | N/A — dataclass-config |
+| `[ ]` | `lewm/embedder.py` | PASS | rubric-verify |
+| `[ ]` | `lewm/model.py` | PASS | rubric-verify |
+| `[ ]` | `lewm/predictor.py` | PASS | rubric-verify |
+| `[ ]` | `lewm/projector.py` | PASS | rubric-verify |
+
+### L2-Round 11 — mamba, masked_autoencoder  (8 files)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `mamba/components.py` | PASS | rubric-verify |
+| `[ ]` | `mamba/components_v2.py` | PASS | rubric-verify |
+| `[ ]` | `mamba/mamba_v1.py` | PASS | rubric-verify (pretrained=str → bare load_weights; M3 review) |
+| `[ ]` | `mamba/mamba_v2.py` | PASS | rubric-verify |
+| `[ ]` | `masked_autoencoder/conv_decoder.py` | PASS | rubric-verify |
+| `[ ]` | `masked_autoencoder/mae.py` | PASS | rubric-verify |
+| `[ ]` | `masked_autoencoder/patch_masking.py` | PASS | rubric-verify |
+| `[ ]` | `masked_autoencoder/utils.py` | N/A | N/A — pure-functions |
+
+### L2-Round 12 — masked_language_model, memory_bank  (9 files)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `masked_language_model/clm.py` | PASS | rubric-verify |
+| `[ ]` | `masked_language_model/mlm.py` | PASS | rubric-verify |
+| `[ ]` | `masked_language_model/utils.py` | N/A | N/A — pure-functions |
+| `[ ]` | `memory_bank/memory_banks.py` | PASS | rubric-verify |
+| `[ ]` | `memory_bank/memory_stats.py` | N/A | N/A — non-layer |
+| `[ ]` | `memory_bank/phase_scheduler.py` | N/A | N/A — non-layer |
+| `[ ]` | `memory_bank/read_controller.py` | PASS | rubric-verify |
+| `[ ]` | `memory_bank/wave_field_memory_llm.py` | PASS | rubric-verify |
+| `[ ]` | `memory_bank/write_controller.py` | FAIL | MemoryWriteController: forward-raw-tf (debug-guard tf.debugging — verify in-round, §L2-5) |
+
+### L2-Round 13 — mini_vec2vec, mobile_clip, mobilenet  (9 files)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `mini_vec2vec/example_alignment.py` | N/A | N/A — pure-functions |
+| `[ ]` | `mini_vec2vec/model.py` | PASS | rubric-verify |
+| `[ ]` | `mobile_clip/components.py` | PASS | rubric-verify |
+| `[ ]` | `mobile_clip/mobile_clip_v1.py` | PASS | rubric-verify (CNN substitutes via _BACKBONE_ALIASES) |
+| `[ ]` | `mobile_clip/mobile_clip_v2.py` | N/A | N/A — pure-functions |
+| `[ ]` | `mobilenet/mobilenet_v1.py` | PASS | rubric-verify |
+| `[ ]` | `mobilenet/mobilenet_v2.py` | PASS | rubric-verify |
+| `[ ]` | `mobilenet/mobilenet_v3.py` | PASS | rubric-verify |
+| `[ ]` | `mobilenet/mobilenet_v4.py` | PASS | rubric-verify |
+
+### L2-Round 14 — modern_bert, mothnet, nam  (8 files)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `modern_bert/components.py` | PASS | rubric-verify |
+| `[ ]` | `modern_bert/modern_bert.py` | PASS | rubric-verify |
+| `[ ]` | `modern_bert/modern_bert_blt.py` | PASS | rubric-verify (OOM at seq 16384 — use small config; §L2-5) |
+| `[ ]` | `mothnet/model.py` | PASS | rubric-verify |
+| `[ ]` | `nam/cell.py` | PASS | rubric-verify |
+| `[ ]` | `nam/config.py` | N/A | N/A — dataclass-config |
+| `[ ]` | `nam/model.py` | PASS | rubric-verify |
+| `[ ]` | `nam/tokenizer.py` | N/A | N/A — non-layer |
+
+### L2-Round 15 — nano_vlm, nano_vlm_world_model, ntm  (7 files)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `nano_vlm/model.py` | FAIL | NanoVLM: super_build_last |
+| `[ ]` | `nano_vlm_world_model/denoisers.py` | PASS | rubric-verify |
+| `[ ]` | `nano_vlm_world_model/model.py` | PASS | rubric-verify (was dead-on-forward; fixed) |
+| `[ ]` | `nano_vlm_world_model/scheduler.py` | N/A | N/A — non-layer |
+| `[ ]` | `nano_vlm_world_model/train.py` | N/A | N/A — non-layer |
+| `[ ]` | `ntm/model.py` | PASS | rubric-verify |
+| `[ ]` | `ntm/model_multitask.py` | PASS | rubric-verify |
+
+### L2-Round 16 — pft_sr, power_mlp, power_sampling  (7 files)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `pft_sr/model.py` | PASS | rubric-verify |
+| `[ ]` | `power_mlp/model.py` | PASS | rubric-verify |
+| `[ ]` | `power_sampling/config.py` | N/A | N/A — dataclass-config |
+| `[ ]` | `power_sampling/forward.py` | N/A | N/A — non-layer (pure-Python inference engine, no keras.Model) |
+| `[ ]` | `power_sampling/ops.py` | N/A | N/A — pure-functions |
+| `[ ]` | `power_sampling/protocols.py` | N/A | N/A — non-layer (typing.Protocol) |
+| `[ ]` | `power_sampling/sampler.py` | N/A | N/A — non-layer |
+
+### L2-Round 17 — pw_fnet  (1 file)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `pw_fnet/model.py` | FAIL | Downsample: super_build_last; Upsample: super_build_last |
+
+### L2-Round 18 — qwen  (7 files)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `qwen/components.py` | PASS | rubric-verify |
+| `[ ]` | `qwen/qwen3.py` | PASS | rubric-verify |
+| `[ ]` | `qwen/qwen3_embeddings.py` | PASS | rubric-verify |
+| `[ ]` | `qwen/qwen3_mega.py` | PASS | rubric-verify |
+| `[ ]` | `qwen/qwen3_next.py` | PASS | rubric-verify |
+| `[ ]` | `qwen/qwen3_omni.py` | N/A | N/A — pure-functions |
+| `[ ]` | `qwen/qwen3_som.py` | PASS | rubric-verify |
+
+### L2-Round 19 — relgt, resnet, sam  (7 files)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `relgt/model.py` | PASS | rubric-verify |
+| `[ ]` | `resnet/model.py` | PASS | rubric-verify |
+| `[ ]` | `sam/image_encoder.py` | PASS | rubric-verify (PatchEmbedding2D flatten=False) |
+| `[ ]` | `sam/mask_decoder.py` | PASS | rubric-verify (pre-existing mask-drift on reload, §L2-5) |
+| `[ ]` | `sam/model.py` | PASS | rubric-verify |
+| `[ ]` | `sam/prompt_encoder.py` | FAIL | PositionEmbeddingRandom: compute_output_shape (embedded LAYER → H7 HARD) |
+| `[ ]` | `sam/transformer.py` | PASS | rubric-verify |
+
+### L2-Round 20 — scunet  (1 file)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `scunet/model.py` | PASS | rubric-verify |
+
+### L2-Round 21 — sd3_mmdit  (7 files)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `sd3_mmdit/blocks.py` | PASS | rubric-verify |
+| `[ ]` | `sd3_mmdit/config.py` | N/A | N/A — dataclass-config |
+| `[ ]` | `sd3_mmdit/pipeline.py` | N/A | N/A — non-layer |
+| `[ ]` | `sd3_mmdit/scheduler.py` | N/A | N/A — dataclass-config |
+| `[ ]` | `sd3_mmdit/text_encoders.py` | PASS | rubric-verify |
+| `[ ]` | `sd3_mmdit/transformer.py` | PASS | rubric-verify |
+| `[ ]` | `sd3_mmdit/vae.py` | N/A | N/A — non-layer |
+
+### L2-Round 22 — shgcn, som, squeezenet, swin_transformer, tabm, thera  (11 files)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `shgcn/model.py` | PASS | rubric-verify |
+| `[ ]` | `som/model.py` | PASS | rubric-verify |
+| `[ ]` | `squeezenet/squeezenet_v1.py` | PASS | rubric-verify |
+| `[ ]` | `squeezenet/squeezenet_v2.py` | PASS | rubric-verify |
+| `[ ]` | `swin_transformer/model.py` | PASS | rubric-verify (window_size=7 needs ≥224px) |
+| `[ ]` | `tabm/model.py` | PASS | rubric-verify |
+| `[ ]` | `thera/edsr_backbone.py` | PASS | rubric-verify |
+| `[ ]` | `thera/hypernetwork.py` | PASS | rubric-verify |
+| `[ ]` | `thera/model.py` | PASS | rubric-verify |
+| `[ ]` | `thera/rdn_backbone.py` | PASS | rubric-verify |
+| `[ ]` | `thera/tails.py` | PASS | rubric-verify |
+
+### L2-Round 23 — time_series  (11 files)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `time_series/adaptive_ema/model.py` | PASS | rubric-verify |
+| `[ ]` | `time_series/deepar/model.py` | PASS | rubric-verify |
+| `[ ]` | `time_series/forecast.py` | N/A | N/A — non-layer |
+| `[ ]` | `time_series/mdn/model.py` | FAIL | MDNModel: super_build_last |
+| `[ ]` | `time_series/nbeats/nbeats.py` | PASS | rubric-verify |
+| `[ ]` | `time_series/nbeats/nbeatsx.py` | PASS | rubric-verify |
+| `[ ]` | `time_series/prism/model.py` | PASS | rubric-verify |
+| `[ ]` | `time_series/tirex/model.py` | PASS | rubric-verify |
+| `[ ]` | `time_series/tirex/model_extended.py` | N/A | N/A — non-layer |
+| `[ ]` | `time_series/xlstm/forecaster.py` | PASS | rubric-verify |
+| `[ ]` | `time_series/xlstm/model.py` | PASS | rubric-verify |
+
+### L2-Round 24 — tiny_recursive_model, tree_transformer, vae, video_jepa  (10 files)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `tiny_recursive_model/components.py` | FAIL | TRMInner: compute_output_shape (embedded LAYER → H7 HARD) |
+| `[ ]` | `tiny_recursive_model/model.py` | PASS | rubric-verify |
+| `[ ]` | `tree_transformer/components.py` | PASS | rubric-verify |
+| `[ ]` | `tree_transformer/model.py` | PASS | rubric-verify (uses weight_transfer — canonical M3) |
+| `[ ]` | `vae/model.py` | PASS | rubric-verify (sampling_type gaussian/hypersphere/vmf) |
+| `[ ]` | `video_jepa/config.py` | N/A | N/A — dataclass-config |
+| `[ ]` | `video_jepa/encoder.py` | PASS | rubric-verify |
+| `[ ]` | `video_jepa/masking.py` | PASS | rubric-verify |
+| `[ ]` | `video_jepa/model.py` | PASS | rubric-verify |
+| `[ ]` | `video_jepa/predictor.py` | PASS | rubric-verify |
+
+### L2-Round 25 — vit, vit_hmlp, vit_siglip, vq_vae, vq_vae_rotation, wave_field_llm, yolo12  (8 files)
+
+| done | file | verdict | gap-hint |
+|------|------|---------|----------|
+| `[ ]` | `vit/model.py` | PASS | rubric-verify (uses weight_transfer — canonical M3) |
+| `[ ]` | `vit_hmlp/model.py` | FAIL | ViTHMLP: super_build_last |
+| `[ ]` | `vit_siglip/model.py` | PASS | rubric-verify |
+| `[ ]` | `vq_vae/model.py` | PASS | rubric-verify |
+| `[ ]` | `vq_vae_rotation/model.py` | PASS | rubric-verify |
+| `[ ]` | `wave_field_llm/wave_field_llm.py` | PASS | rubric-verify |
+| `[ ]` | `yolo12/feature_extractor.py` | PASS | rubric-verify |
+| `[ ]` | `yolo12/multitask.py` | PASS | rubric-verify |
+<!-- /L2-WORKLIST -->
+
+> **Coverage invariant.** The 25 rounds above cover all **183** source files across all **70**
+> non-empty model directories exactly once (`jepa/` is empty and excluded). Verified by a live tree
+> walk at authoring time (`Glob src/dl_techniques/models/**/*.py` minus `__init__.py`/`__pycache__`
+> = 183; union of round rows = 183; 70 distinct dirs).
+
+---
+
+## §L2-5 Known deep-gap + accepted exceptions
+
+### Forward-path raw `tf.*` (accepted exceptions — do NOT force a `keras.ops` rewrite)
+
+| File | Round | Status |
+|------|-------|--------|
+| `fftnet/model.py` (FFTMixer) | 7 | **ACCEPTED-EXCEPTION.** `fftnet` hardcodes `KERAS_BACKEND="tensorflow"`; uses `tf.signal.rfft/ifft` + `tf.complex`. `keras.ops` has `fft/fft2/ifft2/rfft/irfft/real/imag` but **NO `rfft2/irfft2/angle/complex`**. The transpose-to-last + `tf.complex(re,im)` idiom is the only option. Document in the file header (mirror PART I §5 lagrange/canny pattern) and accept. |
+| `latent_gmm_registration/model.py` | 10 | **ACCEPTED-EXCEPTION.** `tf.linalg.svd` — no `keras.ops` equivalent. Document + accept. |
+| `memory_bank/write_controller.py` (MemoryWriteController) | 12 | **VERIFY IN-ROUND (HYPOTHESIS).** The flagged `tf.*` is a debug-guard `tf.debugging.assert_less_equal` behind a backend check, possibly not in the graph forward path. Confirm whether it's inside `call()`; if a debug-only assertion, replace with a `keras.ops` check or accept-and-document. 2-attempt leash; do not force a broken rewrite. |
+
+(Plus inherited layer-level accepted exceptions consumed by models: `tf.math.bessel_i0e` in
+`layers/sampling.py`; the PART I §5 `physics/lagrange_layer.py`, `canny.py`, `complex_layers.py`.)
+
+### Non-trivial mechanical FAILs (verify in-round; HYPOTHESES from the authoring audit)
+
+- **`cliffordnet/model.py` (CliffordNet) H6** — Round 4. `super().build()` is placed FIRST, then a
+  symbolic dummy-forward block runs. Moving `super().build()` to be structurally last may interact
+  with the dummy forward. Investigate; if a clean reorder isn't possible in 2 attempts, mark `[~]`
+  with a one-line note and surface it. (HYPOTHESIS — re-verify the actual `build()` body.)
+- The other 11 `super_build_last` FAILs are expected TRIVIAL (move `super().build()` / a trailing
+  `logger`/extra statement so `super().build()` is last) — but grade each fresh.
+- The 3 `compute_output_shape` FAILs (`cliffordnet/unet.py` _DetectionHeadBlock,
+  `sam/prompt_encoder.py` PositionEmbeddingRandom, `tiny_recursive_model/components.py` TRMInner) are
+  **embedded `keras.layers.Layer` subclasses** → H7 is HARD for them: derive the shape formula from
+  `call()`.
+
+### Pre-existing model issues (NOT introduced by Level-2; fix opportunistically, don't block a round)
+
+- **`sam/`** — `test_output_consistency_after_loading` mask drift 28-32% at atol=1e-5 (pre-existing,
+  mask-decoder `use_causal_mask` Keras-3 incompat; image-encoder path already fixed). Round 19.
+- **`dino/dino_v1.py`** — `DINOHead` `.keras` round-trip broken (pre-existing); likely a side-effect
+  of the H6 FAIL — the Round 7 H6 fix should also resolve the round-trip. Verify M2 after fixing.
+- **`modern_bert/modern_bert_blt.py`** — OOM in ngram-hash Embedding at seq_len 16384 (resource
+  scaling, not a correctness bug); smoke with a small window/config. Round 14.
+
+### Smoke-harness SKIPs (documented; not a per-round blocker)
+
+- **`jepa`** — empty package (encoder/predictor live in `video_jepa`); no top-level `keras.Model`;
+  EXCLUDED from the 183-file denominator entirely.
+- **`ccnets`** — 3-model orchestrator (Round 3), not a single `model(x)` callable → no smoke entry.
+  Its concrete classes still get the mechanical + pytest treatment; the smoke step is a documented
+  SKIP for this package.
+
+### No layer-extraction mandate
+
+`research/2026_models_layer_reuse_audit.md` catalogs 102 inline `keras.layers.Layer` subclasses in
+`models/`; per institutional memory **0 are safe drop-in replaceable as-is** and audit verdicts are
+HYPOTHESES. Level-2 rounds bring inline layers up to the §L2-2 rubric IN PLACE; they do NOT mandate
+extracting them into `layers/`. Opportunistic, source-verified reuse only.
+
+---
+
+## §L2-6 Handover Prompt
+
+Copy the fenced block below **verbatim** into a new, context-cleared agent session to drive ONE
+Level-2 round. It depends on nothing but the files in this repository.
+
+```text
+You are picking up an ongoing, multi-session effort to make every Keras model in
+`src/dl_techniques/models/` production-quality (Level 2). You have NO memory of prior sessions;
+everything you need is in the repository. Work exactly ONE round, then stop.
+
+STEP 0 — Read the roadmap.
+Read `roadmap/production_map.md` — specifically PART II (sections §L2-1…§L2-7). Internalize:
+  - §L2-2 The Model Production-Quality Rubric — the H1-H14 carry-over (H5 conditional; H6 HARD when a
+    build() override exists; H7 SOFT for keras.Model but HARD for embedded keras.layers.Layer
+    subclasses) and the model addendum M1-M6 (M2 .keras round-trip HARD, M4 always-create sublayers
+    HARD; M1 variants / M3 weight-handling / M5 factory / M6 names SOFT). Do NOT grade or add
+    `if self.built: return` or `train_step` (GHOST). Honor the weight-handling policy.
+  - §L2-3 How a Level-2 Round Works — the per-round procedure and standing decisions (FULL re-audit;
+    audit AND fix in the same round; one round per session; commit locally, the USER pushes).
+  - §L2-4 Batched Worklist — the ordered rounds (checkboxes + baseline verdict + gap-hint).
+  - §L2-5 Known deep-gap + accepted exceptions — accepted raw-tf (fftnet, latent_gmm), the non-trivial
+    cliffordnet H6, the memory_bank H10 to verify, pre-existing issues (sam, dino), smoke SKIPs.
+
+STEP 1 — Pick the next round.
+In §L2-4 find the LOWEST-numbered round whose rows are still `[ ]` PENDING. Announce the round number
+and list its files before doing anything else.
+
+STEP 2 — Mechanical audit (the §L2-4 verdicts are a STALE baseline — re-run):
+    CUDA_VISIBLE_DEVICES=1 .venv/bin/python scripts/audit_layers.py --models --path <file1> <file2> ...
+(`--path` accepts a directory; add `--json /tmp/round.json` for machine output.) The scanner is an
+AID, not an oracle — it can mislabel aliased imports / metaclass ABCs / a model vs an embedded layer.
+
+STEP 3 — Grade + fix each file against the FULL §L2-2 rubric by READING it.
+The canonical exemplar is `src/dl_techniques/models/bert/bert.py`; the spec is
+`research/2026_keras_custom_models_instructions.md` (model sections §5/§6/§7/§8/§9/§11; gold example
+§15.2). Fix all [HARD] gaps and reasonable [SOFT] gaps to match bert.
+  - For an H7 FAIL: if the class is a `keras.Model` subclass, H7 is SOFT (skip); if it is an embedded
+    `keras.layers.Layer` subclass, H7 is HARD — add `compute_output_shape` from stored config.
+  - For an H6 FAIL: make `super().build()` the structural last statement (move any trailing
+    logger/extra statements before it). Do NOT add `if self.built: return`.
+  - For a forward-path raw-`tf.` gap that cannot cleanly migrate to `keras.ops` (§L2-5): do NOT force
+    a broken rewrite. Make at most 2 fix attempts; if it won't come clean, document the exception in
+    the file header (mirror PART I §5) and accept it, or mark the row `[~]` with a one-line note and
+    surface it in your final report.
+  - Weight handling: if the file loads real checkpoints via `load_weights(by_name=True)` on a `.keras`
+    file, migrate to `dl_techniques.utils.weight_transfer.load_weights_from_checkpoint` (SOFT). Do NOT
+    change bert's own (GHOST).
+
+STEP 4 — Ensure/repair a test under `tests/test_models/test_<name>/` mirroring the model. Cover at
+minimum: construction (incl. ValueError paths), a forward pass, and the M2 full `.keras` round-trip —
+`model.save(path)` then `keras.models.load_model(path, custom_objects={...})`, assert identical output
+before/after (atol 1e-4 on GPU fp32). Add variant/factory coverage where the model has them.
+
+STEP 5 — Runtime smoke for each model in the batch (skip only the documented SKIPs jepa/ccnets):
+    CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src TF_CPP_MIN_LOG_LEVEL=3 .venv/bin/python scripts/verify_models_smoke.py --only <name>
+
+STEP 6 — Scoped pytest (GPU1, serial — repo convention; never run GPU jobs in parallel):
+    CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m pytest tests/test_models/test_<name>/ -x
+All selected tests must pass before you check anything off.
+
+STEP 7 — Two-instrument re-check on the batch:
+    CUDA_VISIBLE_DEVICES=1 .venv/bin/python scripts/audit_layers.py --models --path <batch files>
+    CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src TF_CPP_MIN_LOG_LEVEL=3 .venv/bin/python scripts/verify_models_smoke.py --only <each model>
+Confirm every file reports PASS (or a documented accepted exception per §L2-5, or a documented smoke
+SKIP). An unexplained FAIL means the round is not done.
+
+STEP 8 — Update §L2-4 in place. Flip each completed row `[ ]` → `[x]` (use `[~]` for a deferred deep
+gap with a one-line note). Then update the tally line — `**Progress: X / 183 files
+production-verified**` — incrementing X by the files you finished. Edit only THIS round's rows.
+
+STEP 9 — Commit locally (do NOT push). Stage ONLY the files you edited (model files, their tests, and
+`roadmap/production_map.md`). Do NOT use `git add -A`. Commit message:
+    git commit -m "[production-map/L2-round-N] <short batch description>"
+Do NOT push — the user pushes themselves.
+
+STEP 10 — Report and STOP. Report: which round you completed, a per-file before/after verdict, the
+tests + smoke you ran and their results, the new "X / 183" tally, and which round is next. Then STOP.
+ONE round per session — do not chain. Let the user clear context.
+```
+
+---
+
+## §L2-7 Provenance
+
+PART II (the `--models` extension of `scripts/audit_layers.py`, the model rubric, the 183-file
+worklist, and the §L2-6 handover prompt) was authored as durable, standalone infrastructure, mirroring
+the proven PART I shape. It is self-contained: every Level-2 round is driven solely by this document
+plus the two instruments (`scripts/audit_layers.py --models`, `scripts/verify_models_smoke.py`) — no
+external session state or planning scaffold is required. Canonical exemplar:
+`src/dl_techniques/models/bert/bert.py`. Spec: `research/2026_keras_custom_models_instructions.md`.
+Baseline commit: `7b1e28af` (127 PASS / 16 FAIL / 40 N/A over 183 files / 70 dirs).
