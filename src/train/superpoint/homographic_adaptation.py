@@ -38,7 +38,9 @@ Usage::
 
     MPLBACKEND=Agg python -m train.superpoint.homographic_adaptation \\
         --checkpoint results/magicpoint_tiny_*/final_model.keras \\
-        --image-dir /media/arxwn/data0_4tb/datasets/COCO/train2017 \\
+        --image-dirs /media/arxwn/data0_4tb/datasets/COCO/train2017 \\
+                     /media/arxwn/data0_4tb/datasets/div2k/train \\
+        --dataset-weights 0.5 0.5 \\
         --n-homographies 100 --num-images 5000 --gpu 1
 
     # Fast smoke (seconds on GPU1, fresh model, synthetic images):
@@ -49,17 +51,19 @@ Usage::
 import json
 import keras
 import argparse
+import collections
 import numpy as np
 import tensorflow as tf
 from pathlib import Path
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 from train.common import (
     setup_gpu,
     set_seeds,
     save_config_json,
+    collect_image_paths,
 )
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.homography import sample_homography, warp_image
@@ -85,8 +89,16 @@ class HomographicAdaptationConfig:
     checkpoint_path: Optional[str] = None
     variant: str = "tiny"
 
-    # Data
-    image_dir: str = "/media/arxwn/data0_4tb/datasets/COCO/train2017"
+    # Data. Multiple real-image datasets sourced simultaneously; the HA worklist
+    # is drawn per-dataset by normalized ``dataset_weights`` (balanced default)
+    # so DIV2K's ~800 images are not drowned by COCO's ~118K. See D-002.
+    image_dirs: List[str] = field(
+        default_factory=lambda: [
+            "/media/arxwn/data0_4tb/datasets/COCO/train2017",
+            "/media/arxwn/data0_4tb/datasets/div2k/train",
+        ]
+    )
+    dataset_weights: Optional[List[float]] = None
     input_size: int = 240
     channels: int = 1
     cell: int = DEFAULT_CELL
@@ -126,6 +138,21 @@ class HomographicAdaptationConfig:
             )
         if self.variant not in ("tiny", "base", "large"):
             raise ValueError(f"Unknown variant: {self.variant}")
+
+        if not self.image_dirs:
+            raise ValueError("image_dirs must contain at least one directory")
+        if self.dataset_weights is not None:
+            if len(self.dataset_weights) != len(self.image_dirs):
+                raise ValueError(
+                    f"dataset_weights ({len(self.dataset_weights)}) must match "
+                    f"image_dirs ({len(self.image_dirs)}) in length"
+                )
+            if any(w < 0 for w in self.dataset_weights):
+                raise ValueError("dataset_weights must all be >= 0")
+            total = float(sum(self.dataset_weights))
+            if total <= 0:
+                raise ValueError("dataset_weights must sum to > 0")
+            self.dataset_weights = [w / total for w in self.dataset_weights]
 
         if self.experiment_name is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -319,11 +346,136 @@ def _load_real_image(path: str, input_size: int, channels: int) -> np.ndarray:
     return img.numpy().astype(np.float32)
 
 
+def select_weighted_image_paths(
+    image_dirs: List[str],
+    weights: Optional[List[float]],
+    num_images: Optional[int],
+    seed: int,
+    collect_fn=collect_image_paths,
+) -> List[Tuple[str, str]]:
+    """Assemble a per-dataset weighted HA worklist of ``(dataset_name, path)``.
+
+    # DECISION plan_2026-06-18_1cca4fc1/D-002: collect each directory's pool
+    # SEPARATELY (one ``collect_fn([d])`` call per dir, UNCAPPED) and draw
+    # per-dir integer quotas from normalized weights. Do NOT flat-concat all
+    # dirs and cap the merged list (``collect_image_paths([d1, d2], max_files)``):
+    # COCO's ~118K images would draw ~99% of any cap and drown DIV2K's ~800.
+    # The pure-Python quota draw — not ``collect_image_paths`` — owns per-dir
+    # counts. See decisions.md D-002.
+
+    Args:
+        image_dirs: Real-image directories, one pool collected per dir.
+        weights: Optional per-dir sampling weights (aligned to ``image_dirs``).
+            ``None`` -> equal weight over the NON-empty dirs. Empty dirs are
+            dropped and the remaining weights renormalized to sum 1.
+        num_images: Total worklist size. ``None`` -> use every collected path
+            exactly once (no quota cap, no wraparound), weight-interleaved.
+        seed: Base seed; each kept dir is permuted with
+            ``np.random.default_rng([seed, dir_index])`` for a reproducible draw.
+        collect_fn: Path-collection callable (injectable for testing); must
+            accept ``(dirs, shuffle_seed=..., sort=...)`` and return a path list.
+
+    Returns:
+        A list of ``(dataset_name, path)`` pairs (``dataset_name = Path(dir).name``).
+        Exactly ``num_images`` long (with wraparound for undersized dirs) when
+        ``num_images`` is set; otherwise every collected path once. ``[]`` when
+        no images are found.
+    """
+    # Collect + permute each dir's OWN pool; remember the original index so the
+    # per-dir RNG and any supplied weights stay aligned to the kept dirs.
+    kept_names: List[str] = []
+    kept_pools: List[List[str]] = []
+    kept_indices: List[int] = []
+    for dir_index, d in enumerate(image_dirs):
+        pool = collect_fn([d], shuffle_seed=seed, sort=True)
+        if not pool:
+            logger.warning(f"No images found under {d!r}; dropping from worklist")
+            continue
+        rng = np.random.default_rng([seed, dir_index])
+        permuted = [pool[i] for i in rng.permutation(len(pool))]
+        kept_names.append(Path(d).name)
+        kept_pools.append(permuted)
+        kept_indices.append(dir_index)
+
+    k = len(kept_pools)
+    if k == 0:
+        return []
+
+    # Weights over the kept (non-empty) dirs.
+    if weights is None:
+        kept_weights = [1.0 / k] * k
+    else:
+        sliced = [max(0.0, float(weights[i])) for i in kept_indices]
+        total = sum(sliced)
+        if total <= 0:
+            kept_weights = [1.0 / k] * k
+        else:
+            kept_weights = [w / total for w in sliced]
+
+    # num_images is None -> every path once, weighted round-robin interleave.
+    if num_images is None:
+        return _interleave_by_weight(
+            kept_names, [list(p) for p in kept_pools], kept_weights
+        )
+
+    # Integer quotas via largest-fractional-remainder so they sum EXACTLY to
+    # num_images (deterministic; ties broken by dir index).
+    raw = [w * num_images for w in kept_weights]
+    quotas = [int(np.floor(r)) for r in raw]
+    leftover = num_images - sum(quotas)
+    if leftover > 0:
+        remainders = sorted(
+            range(k), key=lambda i: (-(raw[i] - np.floor(raw[i])), i)
+        )
+        for i in remainders[:leftover]:
+            quotas[i] += 1
+
+    # Per-dir selection with wraparound when quota_i > len(pool).
+    per_dir: List[List[str]] = []
+    for pool, quota in zip(kept_pools, quotas):
+        n = len(pool)
+        per_dir.append([pool[j % n] for j in range(quota)])
+
+    return _interleave_by_weight(kept_names, per_dir, kept_weights)
+
+
+def _interleave_by_weight(
+    names: List[str],
+    selections: List[List[str]],
+    weights: List[float],
+) -> List[Tuple[str, str]]:
+    """Deterministic weighted round-robin interleave of per-dir selections.
+
+    Emits one path at a time from the dir whose served fraction most lags its
+    target ``weight`` (ties broken by dir index), preserving each dir's internal
+    order. The result contains every supplied path exactly once.
+    """
+    cursors = [0] * len(selections)
+    served = [0] * len(selections)
+    total = sum(len(s) for s in selections)
+    out: List[Tuple[str, str]] = []
+    for _ in range(total):
+        best = None
+        best_deficit = None
+        for i, sel in enumerate(selections):
+            if cursors[i] >= len(sel):
+                continue
+            # Larger deficit (target share minus served share) wins.
+            deficit = weights[i] - (served[i] / total)
+            if best is None or deficit > best_deficit:
+                best = i
+                best_deficit = deficit
+        out.append((names[best], selections[best][cursors[best]]))
+        cursors[best] += 1
+        served[best] += 1
+    return out
+
+
 def iter_images(config: HomographicAdaptationConfig):
     """Yield ``(image_id, image (H, W, C) float32)`` for the configured source.
 
     Smoke -> deterministic tiny SYNTHETIC images (never touches real COCO).
-    Real  -> images collected from ``config.image_dir``.
+    Real  -> images drawn per-dataset from ``config.image_dirs`` by weight.
     """
     if config.smoke:
         rng = np.random.default_rng(config.seed)
@@ -334,22 +486,22 @@ def iter_images(config: HomographicAdaptationConfig):
             yield f"synthetic_{i:04d}", img.astype(np.float32)
         return
 
-    # Real path: collect image files from the COCO directory.
-    from train.common import collect_image_paths
-
-    paths = collect_image_paths(
-        [config.image_dir],
-        max_files=config.num_images,
-        shuffle_seed=config.seed,
+    # Real path: weighted per-dataset draw across config.image_dirs.
+    selected = select_weighted_image_paths(
+        config.image_dirs,
+        config.dataset_weights,
+        config.num_images,
+        config.seed,
     )
-    if not paths:
+    if not selected:
         raise FileNotFoundError(
-            f"No images found under image_dir={config.image_dir!r}. "
-            f"Point --image-dir at a directory of real images (e.g. COCO "
-            f"train2017)."
+            f"No images found under image_dirs={config.image_dirs!r}. "
+            f"Point --image-dirs at directories of real images (e.g. COCO "
+            f"train2017 and DIV2K train)."
         )
-    logger.info(f"Collected {len(paths)} images from {config.image_dir}")
-    for path in paths:
+    counts = collections.Counter(name for name, _ in selected)
+    logger.info(f"HA worklist: {dict(counts)} (total {len(selected)})")
+    for ds_name, path in selected:
         image_id = Path(path).stem
         yield image_id, _load_real_image(path, config.input_size, config.channels)
 
@@ -473,8 +625,17 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--variant", choices=["tiny", "base", "large"],
                         default="tiny")
     parser.add_argument(
-        "--image-dir", type=str,
-        default="/media/arxwn/data0_4tb/datasets/COCO/train2017",
+        "--image-dirs", type=str, nargs="+",
+        default=[
+            "/media/arxwn/data0_4tb/datasets/COCO/train2017",
+            "/media/arxwn/data0_4tb/datasets/div2k/train",
+        ],
+        help="One or more real-image directories sourced simultaneously.",
+    )
+    parser.add_argument(
+        "--dataset-weights", type=float, nargs="+", default=None,
+        help="Per-dataset sampling weights aligned to --image-dirs "
+             "(normalized to sum 1). Omit for a balanced split.",
     )
     parser.add_argument("--input-size", type=int, default=240)
     parser.add_argument("--num-images", type=int, default=5000)
@@ -502,7 +663,8 @@ def main():
     config = HomographicAdaptationConfig(
         checkpoint_path=args.checkpoint,
         variant=args.variant,
-        image_dir=args.image_dir,
+        image_dirs=args.image_dirs,
+        dataset_weights=args.dataset_weights,
         input_size=args.input_size,
         num_images=args.num_images,
         n_homographies=args.n_homographies,
