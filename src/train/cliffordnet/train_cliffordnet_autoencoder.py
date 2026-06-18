@@ -51,6 +51,9 @@ from dl_techniques.optimization import (
 from dl_techniques.models.cliffordnet import (
     create_clifford_laplacian_unet,
 )
+from dl_techniques.callbacks.cliffordnet_bottleneck_monitor import (
+    CliffordBottleneckMonitorCallback,
+)
 
 
 # ---------------------------------------------------------------------
@@ -101,6 +104,7 @@ class TrainingConfig:
 
     # Monitoring
     monitor_every_n_epochs: int = 5
+    monitor_bottleneck: bool = True  # gates the bottleneck-latent monitor callback
     save_best_only: bool = True
     early_stopping_patience: int = 15
     validation_steps: Optional[int] = 200
@@ -524,7 +528,18 @@ def create_callbacks(
     )
 
     common_callbacks.append(MetricsVisualizationCallback(config))
-    common_callbacks.append(StreamingResultMonitor(config, val_directories))
+
+    streaming_monitor = StreamingResultMonitor(config, val_directories)
+    common_callbacks.append(streaming_monitor)
+
+    if config.monitor_bottleneck:
+        common_callbacks.append(
+            CliffordBottleneckMonitorCallback(
+                val_batch=streaming_monitor.test_batch,
+                output_dir=Path(config.output_dir) / config.experiment_name,
+                monitor_freq=config.monitor_every_n_epochs,
+            )
+        )
 
     return common_callbacks
 
