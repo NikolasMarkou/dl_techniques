@@ -344,7 +344,8 @@ def create_gabor_depthwise_conv2d(
 
     Defaults to ``trainable=False`` (a frozen, deterministic Gabor front-end),
     matching :func:`create_haar_depthwise_conv2d`. The depthwise kernel has shape
-    ``(kh, kw, in_channels, filters)`` and lives in ``layer.depthwise_kernel``.
+    ``(kh, kw, in_channels, filters)`` and is exposed as ``layer.kernel`` in
+    Keras 3.8 (not ``layer.depthwise_kernel``).
 
     Args:
         filters: Number of Gabor filters applied per channel (``depth_multiplier``).
