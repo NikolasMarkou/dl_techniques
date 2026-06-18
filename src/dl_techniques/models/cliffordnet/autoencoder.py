@@ -166,6 +166,12 @@ class CliffordLaplacianUNet(keras.Model):
             to ``96``.
         gabor_kernel_size: Spatial size of the Gabor stem kernel. Used only when
             ``use_gabor_stem=True``. Defaults to ``7``.
+        output_activation: Activation applied by the output-head ``Conv2D``
+            (string name, callable, or ``None``). ``None`` (default) means a
+            linear head, recommended for high-fidelity reconstruction. A bounded
+            activation such as ``"tanh"`` (matching ``[-1, +1]`` targets) is
+            supported for experimentation but can saturate at the range
+            endpoints. Defaults to ``None``.
         kernel_initializer: Initializer for all 1x1 ``Conv2D`` projections.
             Defaults to ``"glorot_uniform"``.
         kernel_regularizer: Regularizer for all 1x1 ``Conv2D`` projections.
@@ -237,6 +243,7 @@ class CliffordLaplacianUNet(keras.Model):
         use_gabor_stem: bool = True,
         gabor_filters: int = 96,
         gabor_kernel_size: int = 7,
+        output_activation: Optional[Any] = None,
         kernel_initializer: Any = "glorot_uniform",
         kernel_regularizer: Optional[Any] = None,
         **kwargs: Any,
@@ -263,6 +270,7 @@ class CliffordLaplacianUNet(keras.Model):
         self.use_gabor_stem = use_gabor_stem
         self.gabor_filters = gabor_filters
         self.gabor_kernel_size = gabor_kernel_size
+        self.output_activation = output_activation
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
@@ -478,12 +486,21 @@ class CliffordLaplacianUNet(keras.Model):
     # ------------------------------------------------------------------
 
     def _build_output(self) -> None:
-        """Build the output head: decoder level-0 features -> image channels."""
+        """Build the output head: decoder level-0 features -> image channels.
+
+        ``output_activation`` (default ``None`` = linear) is applied by the
+        head ``Conv2D``. A linear head is recommended for high-fidelity
+        reconstruction; a bounded activation (e.g. ``"tanh"`` for ``[-1, +1]``
+        targets) is available for experimentation but can saturate at the
+        range endpoints.
+        """
         _conv_kwargs: Dict[str, Any] = dict(
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
         )
-        self.out_conv = keras.layers.Conv2D(self.in_channels, 1, **_conv_kwargs)
+        self.out_conv = keras.layers.Conv2D(
+            self.in_channels, 1, activation=self.output_activation, **_conv_kwargs
+        )
 
     # ------------------------------------------------------------------
 
@@ -642,6 +659,13 @@ class CliffordLaplacianUNet(keras.Model):
                 "use_gabor_stem": self.use_gabor_stem,
                 "gabor_filters": self.gabor_filters,
                 "gabor_kernel_size": self.gabor_kernel_size,
+                "output_activation": (
+                    keras.activations.serialize(
+                        keras.activations.get(self.output_activation)
+                    )
+                    if self.output_activation is not None
+                    else None
+                ),
                 "kernel_initializer": keras.initializers.serialize(
                     self.kernel_initializer
                 ),
@@ -664,6 +688,10 @@ class CliffordLaplacianUNet(keras.Model):
         if config.get("kernel_regularizer") is not None:
             config["kernel_regularizer"] = keras.regularizers.deserialize(
                 config["kernel_regularizer"]
+            )
+        if config.get("output_activation") is not None:
+            config["output_activation"] = keras.activations.deserialize(
+                config["output_activation"]
             )
         return cls(**config)
 

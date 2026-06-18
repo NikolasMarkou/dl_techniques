@@ -203,3 +203,32 @@ class TestGaborStem:
         m2(x)  # build
         assert tuple(m2.gabor_stem.kernel.shape) == (5, 5, 3, 32)
         assert m2.gabor_stem.trainable is False
+
+
+# ---------------------------------------------------------------------
+# Output activation
+# ---------------------------------------------------------------------
+
+class TestOutputActivation:
+
+    def test_default_is_linear(self):
+        m = _tiny_model()
+        assert m.output_activation is None
+        assert m.get_config()["output_activation"] is None
+
+    def test_tanh_bounds_output_and_roundtrips(self, tmp_path):
+        m = _tiny_model(output_activation="tanh")
+        # Large-magnitude input to push a linear head out of [-1, 1].
+        x = np.random.RandomState(8).randn(2, 32, 32, 3).astype("float32") * 5.0
+        y = keras.ops.convert_to_numpy(m(x)["reconstruction"])
+        assert y.min() >= -1.0 and y.max() <= 1.0  # tanh-bounded
+
+        cfg = m.get_config()
+        assert cfg["output_activation"] == "tanh"
+
+        # full .keras round-trip with the activation in the head
+        path = os.path.join(str(tmp_path), "m_act.keras")
+        m.save(path)
+        m2 = keras.models.load_model(path)
+        y2 = keras.ops.convert_to_numpy(m2(x)["reconstruction"])
+        np.testing.assert_allclose(y, y2, atol=1e-4)
