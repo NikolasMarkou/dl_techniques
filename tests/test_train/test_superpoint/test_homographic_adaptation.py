@@ -19,6 +19,7 @@ import pytest
 from train.superpoint.homographic_adaptation import (
     select_weighted_image_paths,
     HomographicAdaptationConfig,
+    _build_manifest_entry,
 )
 
 
@@ -151,3 +152,25 @@ class TestSelectWeightedImagePaths:
             HomographicAdaptationConfig(
                 image_dirs=["/a", "/b"], dataset_weights=[1.0]
             )
+
+
+# ---------------------------------------------------------------------
+# Self-describing manifest entry (plan SC1, unit-level)
+# ---------------------------------------------------------------------
+
+
+class TestBuildManifestEntry:
+
+    def test_build_manifest_entry_has_source_fields(self):
+        entry = _build_manifest_entry(
+            image_id="x",
+            dataset_name="coco",
+            source_path="/abs/x.jpg",
+            npz_rel="pseudo_labels/x.npz",
+            num_keypoints=5,
+        )
+        assert entry["source_path"] == "/abs/x.jpg"
+        assert entry["dataset_name"] == "coco"
+        assert entry["image_id"] == "x"
+        assert entry["npz"] == "pseudo_labels/x.npz"
+        assert entry["num_keypoints"] == 5
