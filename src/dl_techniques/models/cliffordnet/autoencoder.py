@@ -1,42 +1,46 @@
 """
-CliffordNet explicit-Laplacian-pyramid image autoencoder.
+CliffordNet hierarchical Laplacian U-Net image autoencoder.
 
 This module builds a deterministic image autoencoder that fuses an EXPLICIT,
-inspectable Laplacian pyramid with CliffordNet geometric-algebra feature
-extraction. The defining design choice is that the multi-scale split/merge is a
-standalone, serializable helper Layer (``LaplacianPyramidLevel``) operating at
-the RAW signal channel count, completely decoupled from any learned Clifford
-processing. This makes the high/low frequency decomposition auditable and makes
-the reconstruction identity exact to float precision.
+inspectable Laplacian split/merge with CliffordNet geometric-algebra feature
+extraction in a standard hierarchical (encode-then-split) U-Net topology. At
+each encoder stage a ``CliffordNetBlock`` group ENCODES the full incoming signal
+at the current scale; a :class:`LaplacianPyramidLevel` then splits the ENCODED
+FEATURES into a high band (kept as the decoder skip) and a low band (fed to the
+next, coarser stage). The deepest stage does not split -- it serves directly as
+the bottleneck. The decoder collapses bottom-up, merging upsampled coarser
+features with the level skip in FEATURE space (``keras.ops.add``) and refining
+each merge with Clifford blocks. The model returns ``{"reconstruction": y}`` with
+``y`` of identical shape to the input.
 
-Channel-bookkeeping scheme (LOCKED)
------------------------------------
-The low/high decomposition is deliberately *channel-preserving* so the Laplacian
-reconstruction identity holds exactly in raw signal space:
+What this is (and is NOT)
+-------------------------
+The Laplacian split here operates on ENCODED FEATURE tensors, not on the raw
+input signal. The pyramid is therefore a *learnable multi-scale high/low
+decomposition* baked into the U-Net, NOT an invertible raw-signal codec: there
+is NO raw-signal exact-reconstruction property. (The full model never delivered
+one anyway -- the decoder merges in feature space via ``keras.ops.add``, not via
+``LaplacianPyramidLevel.merge``.) ``LaplacianPyramidLevel.split`` remains
+algebraically invertible per call (``high + up(low) == x`` up to float rounding,
+on whatever tensor it is given), but the surrounding model is a learned
+autoencoder whose reconstruction quality is trained, not guaranteed by algebra.
 
-- ``low_i  = down(blur(x_i))``  via ``GaussianFilter(strides=(1,1), padding="same")``
-  (preserves C) then ``BlurPool2D(strides=2)`` (preserves C). Result has shape
-  ``(B, H/2, W/2, C_i)`` -- same channel count as ``x_i``. Both stages are
-  anti-aliased.
+Channel-bookkeeping
+-------------------
+The low/high split is *channel-preserving*, so it applies cleanly to the encoded
+``level_channels[i]``-wide feature tensor at each split stage:
+
+- ``low  = down(blur(e))``  via ``GaussianFilter(strides=(1,1), padding="same")``
+  then ``BlurPool2D(strides=2)`` (both preserve C). Result ``(B, H/2, W/2, C_i)``.
 - ``up`` via ``UpSampling2D(bilinear)`` -- preserves channels, doubles H, W.
-- ``high_i = x_i - up(low_i)``: shape ``(B, H, W, C_i)``, same channels as ``x_i``.
-  Since ``high_i`` is DEFINED as the residual ``x_i - up(low_i)``, the merge
-  ``high_i + up(low_i)`` recovers ``x_i`` exactly (up to float rounding),
-  independent of blur quality.
+- ``high = e - up(low)``: shape ``(B, H, W, C_i)``, same channels as ``e``; this
+  high band is used directly as the decoder skip (no extra Clifford on it).
 
-The split is purely signal-level (NO learnable channel change): this is what
-makes the reconstruction identity hold. ``PixelUnshuffle2D`` is deliberately NOT
-used for the low path -- its 4x channel multiplier breaks the additive identity.
-It is reserved as a documented alternative only if a future lossless variant is
-wanted; the default path is Gaussian + BlurPool down / bilinear up.
-
-The model class (``CliffordLaplacianUNet``) widens channels via external 1x1
-``Conv2D`` before each isotropic ``CliffordNetBlock`` group; the Laplacian SIGNAL
-pyramid itself stays at the raw channel count. Clifford blocks process widened
-feature copies that contribute learned refinements on the decoder side; they
-never sit inside the invertibility path of this helper. The ``LaplacianPyramidLevel``
-helper now lives in ``dl_techniques.layers.laplacian_filter``; this module defines
-the model (``CliffordLaplacianUNet``) and imports the helper from there.
+``CliffordNetBlock`` is ISOTROPIC, so every channel change is an external 1x1
+``keras.layers.Conv2D`` (``enc_proj`` on the encoder side, ``dec_align`` on the
+decoder side). The ``LaplacianPyramidLevel`` helper lives in
+``dl_techniques.layers.laplacian_filter``; this module defines the model
+(``CliffordLaplacianUNet``) and imports the helper from there.
 """
 
 from __future__ import annotations
@@ -60,56 +64,59 @@ from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
 
 @keras.saving.register_keras_serializable()
 class CliffordLaplacianUNet(keras.Model):
-    """Deterministic image autoencoder: explicit learnable Laplacian pyramid + Clifford U-Net.
+    """Deterministic image autoencoder: hierarchical Laplacian U-Net + Clifford blocks.
 
-    **Intent**: Provide a feature-space Laplacian U-Net that fuses an EXPLICIT,
-    inspectable signal pyramid with isotropic CliffordNet geometric-algebra
-    feature extraction. The multi-scale split/merge is a standalone, serializable
-    helper layer (:class:`LaplacianPyramidLevel`) operating at the RAW signal
-    channel count, fully decoupled from any learned Clifford processing, so the
-    high/low frequency decomposition stays auditable and the reconstruction
-    identity exact to float precision. The model returns a single-output dict
+    **Intent**: Provide a hierarchical (encode-then-split) Laplacian U-Net that
+    fuses an EXPLICIT, inspectable high/low split/merge with isotropic CliffordNet
+    geometric-algebra feature extraction. At each encoder stage a Clifford block
+    group ENCODES the full incoming signal at that scale; a
+    :class:`LaplacianPyramidLevel` then splits the ENCODED FEATURES into a high
+    band (the decoder skip) and a low band (the next, coarser stage's input). The
+    deepest stage does not split -- it IS the bottleneck. The split operates on
+    feature tensors, so there is NO raw-signal exact-reconstruction property; the
+    pyramid is a learnable multi-scale decomposition, and the model is a trained
+    autoencoder (see the module docstring). It returns a single-output dict
     ``{"reconstruction": y}`` with ``y`` of identical shape to the input.
 
-    The architecture has two decoupled tracks:
+    Per-stage flow (``L = num_levels``):
 
-    - **Track A (signal pyramid)**: one :class:`LaplacianPyramidLevel` per encoder
-      level produces ``(low_i, high_i)`` at the NATIVE channel count. ``low_i``
-      (H/2) feeds the next level; ``high_i`` (full res) is the high-frequency band
-      kept at level ``i``. This track is weightless except for the (optionally
-      learnable) blur and is decoupled from any learned channel change.
-    - **Track B (learned features)**: :class:`CliffordNetBlock` is ISOTROPIC, so
-      EVERY channel change is an external 1x1 ``keras.layers.Conv2D``. The high
-      band of each level is projected up to ``level_channels[i]``, refined by
-      Clifford blocks, and used as the decoder skip. The coarsest ``low`` feeds a
-      bottleneck. The decoder collapses bottom-up via a FEATURE-SPACE Laplacian
-      merge (``keras.ops.add`` of upsampled coarser features and the level skip),
-      each step refined by Clifford blocks. A final 1x1 conv projects back to
-      ``in_channels``.
+    - **Encoder, split stages** (``i = 0 .. L-2``): ``e = enc_proj[i](x)`` (1x1
+      ``Conv2D`` ``C_in``/``ch[i-1]`` -> ``ch[i]``), then ``e = enc_blocks[i](e)``
+      (Clifford x N, isotropic) encodes the FULL signal at this scale.
+      ``low, high = pyramid_levels[i].split(e)``; ``high`` (full res, ``ch[i]``)
+      is appended as the decoder skip WITH NO extra Clifford on it; ``low`` (H/2)
+      feeds stage ``i+1``.
+    - **Encoder, deepest stage** (``i = L-1``): ``e = enc_proj[L-1](x)``; ``e =
+      enc_blocks[L-1](e)``; NO split. This ``e`` is the bottleneck feature.
+    - **Decoder** (``i = L-2 .. 0``): ``up = dec_up[i](feat)`` (bilinear x2);
+      ``up = dec_align[i](up)`` (1x1 -> ``ch[i]``); ``merged = add(up, skip_i)``
+      (FEATURE-SPACE merge); ``feat = dec_blocks[i](merged)`` (Clifford x N).
+    - **Head**: ``out_conv(feat)`` (1x1 -> ``in_channels``).
 
     **Architecture**:
     ```
     Input(B, H, W, C_in)
            |
       +----v---------------------------------------------------+
-      | Encoder (per level i = 0 .. num_levels-1)              |
-      |   low_i, high_i = LaplacianPyramidLevel[i].split(x)   |  Track A (signal)
-      |   h_i  = enc_proj[i](high_i)        # 1x1 -> ch[i]    |  Track B (features)
-      |   h_i  = enc_blocks[i](h_i)         # Clifford x N    |
-      |   x    = low_i                      # feeds level i+1 |
+      | Encoder split stages (i = 0 .. L-2)                   |
+      |   e         = enc_proj[i](x)        # 1x1 -> ch[i]    |
+      |   e         = enc_blocks[i](e)      # Clifford x N    |
+      |   low, high = pyramid_levels[i].split(e)              |
+      |   skip_i    = high                  # decoder skip    |
+      |   x         = low                   # feeds stage i+1 |
       +----v---------------------------------------------------+
-           |  (coarsest low band, native channels)
+           |  (coarsest low band, ch[L-2])
       +----v---------------------------------------------------+
-      | Bottleneck                                            |
-      |   b = bottleneck_proj(x)            # 1x1 -> ch[-1]   |
-      |   b = bottleneck_blocks(b)          # Clifford x N    |
+      | Deepest stage = bottleneck (i = L-1, NO split)        |
+      |   e    = enc_proj[L-1](x)           # 1x1 -> ch[L-1]  |
+      |   feat = enc_blocks[L-1](e)         # Clifford x N    |
       +----v---------------------------------------------------+
            |
       +----v---------------------------------------------------+
-      | Decoder (per level i = num_levels-1 .. 0)             |
+      | Decoder (i = L-2 .. 0)                                |
       |   up     = dec_up[i](feat)          # bilinear x2     |
       |   up     = dec_align[i](up)         # 1x1 -> ch[i]    |
-      |   merged = add(up, h_i)             # Laplacian merge |
+      |   merged = add(up, skip_i)          # feature merge   |
       |   feat   = dec_blocks[i](merged)    # Clifford x N    |
       +----v---------------------------------------------------+
            |
@@ -118,8 +125,10 @@ class CliffordLaplacianUNet(keras.Model):
     {"reconstruction": (B, H, W, C_in)}
     ```
 
-    Divisibility contract: input H, W must be divisible by ``2**num_levels``
-    (each encoder level halves the spatial resolution via :class:`BlurPool2D`).
+    Divisibility contract: input H, W must be divisible by ``2**(num_levels-1)``.
+    Each SPLIT stage halves the spatial resolution via :class:`BlurPool2D`, and
+    there are ``num_levels-1`` split stages (the deepest stage is the bottleneck
+    and does not downsample).
 
     Args:
         in_channels: Number of input/output image channels (e.g. 3 for RGB).
@@ -127,8 +136,9 @@ class CliffordLaplacianUNet(keras.Model):
         level_channels: Per-level working width for the Clifford feature track.
             Its length defines ``num_levels``. Defaults to ``(32, 64, 128)``.
         level_blocks: Number of Clifford blocks per level (encoder and decoder);
-            the bottleneck reuses ``level_blocks[-1]``. Must match ``num_levels``.
-            Defaults to ``(2, 2, 2)``.
+            the deepest stage (which serves as the bottleneck) uses
+            ``level_blocks[-1]``. Must match ``num_levels``. Defaults to
+            ``(2, 2, 2)``.
         level_shifts: Per-level channel-shift offsets for the Clifford blocks.
             ``None`` defaults to ``[[1, 2]] * num_levels``. Defaults to ``None``.
         cli_mode: Algebraic components for the local interaction; one of
@@ -151,7 +161,7 @@ class CliffordLaplacianUNet(keras.Model):
 
     Input shape:
         4D tensor ``(batch_size, height, width, in_channels)``. ``height`` and
-        ``width`` must be divisible by ``2 ** num_levels``.
+        ``width`` must be divisible by ``2 ** (num_levels - 1)``.
 
     Output shape:
         A dict ``{"reconstruction": tensor}`` whose tensor has the same shape as
@@ -412,7 +422,9 @@ class CliffordLaplacianUNet(keras.Model):
         """Build all sublayers in computational order; ``super().build()`` LAST.
 
         Enforces the divisibility contract: static H, W (if known) must be
-        divisible by ``2**num_levels``.
+        divisible by ``2**(num_levels-1)`` (one halving per SPLIT stage; there
+        are ``num_levels-1`` split stages, the deepest stage being the
+        non-downsampling bottleneck).
 
         Args:
             input_shape: Input shape ``(B, H, W, C)``. A 3D shape ``(H, W, C)``
@@ -421,7 +433,7 @@ class CliffordLaplacianUNet(keras.Model):
 
         Raises:
             ValueError: If a known static ``height`` or ``width`` is not divisible
-                by ``2 ** num_levels``.
+                by ``2 ** (num_levels - 1)``.
         """
         # summary() may call build with a 3D shape (no batch dim); prepend a
         # dummy batch dim so the unpack below is safe.
@@ -654,9 +666,10 @@ def create_clifford_laplacian_unet(
 
     Args:
         variant: Named model variant; one of ``"small"``, ``"base"``,
-            ``"large"``. ``"small"`` is a 3-level pyramid; ``"base"``/``"large"``
-            are 4-level (inputs must be divisible by ``2 ** num_levels`` -> 8 for
-            ``"small"``, 16 for the 4-level variants). Defaults to ``"small"``.
+            ``"large"``. ``"small"`` is a 3-level model; ``"base"``/``"large"``
+            are 4-level. Inputs must be divisible by ``2 ** (num_levels - 1)``:
+            4 for the 3-level ``"small"``, 8 for the 4-level ``"base"``/``"large"``
+            variants. Defaults to ``"small"``.
         in_channels: Number of input/output image channels (3 for RGB). Defaults
             to ``3``.
         **kwargs: Keyword overrides forwarded to the constructor; these take
