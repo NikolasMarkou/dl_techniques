@@ -527,6 +527,7 @@ def create_callbacks(
     callbacks, _ = create_common_callbacks(
         model_name=config.experiment_name or config.model_type,
         results_dir_prefix="bfunet",
+        run_dir=str(Path(config.output_dir) / config.experiment_name),
         monitor="val_loss",
         patience=config.early_stopping_patience,
         use_lr_schedule=True,

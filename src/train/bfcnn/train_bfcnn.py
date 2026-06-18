@@ -381,7 +381,8 @@ def create_callbacks(config: TrainingConfig, val_directories: List[str]) -> List
     """Create training callbacks using common utilities plus domain-specific callbacks."""
     common_callbacks, _ = create_common_callbacks(
         model_name=config.experiment_name,
-        results_dir_prefix=str(Path(config.output_dir) / config.experiment_name),
+        results_dir_prefix="bfcnn",
+        run_dir=str(Path(config.output_dir) / config.experiment_name),
         monitor="val_loss",
         patience=config.early_stopping_patience,
         use_lr_schedule=True,
