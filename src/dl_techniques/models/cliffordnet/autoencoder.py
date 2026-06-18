@@ -591,20 +591,23 @@ class CliffordLaplacianUNet(keras.Model):
 
     # ------------------------------------------------------------------
 
-    def call(
+    def _encode(
         self,
         inputs: keras.KerasTensor,
         training: Optional[bool] = None,
-    ) -> Dict[str, keras.KerasTensor]:
-        """Forward pass.
-
-        Args:
-            inputs: Image tensor ``(B, H, W, C)``.
-            training: Whether the call is in training mode.
+    ) -> Tuple[Any, List[Any]]:
+        """Run the gabor stem + hierarchical Clifford encoder.
 
         Returns:
-            A dict ``{"reconstruction": y}`` with ``y`` of shape ``(B, H, W, C)``.
+            A tuple ``(feat, skips)`` where ``feat`` is the deepest-stage
+            bottleneck tensor (no Laplacian split) and ``skips`` is the list of
+            per-level high-band skip tensors (length ``num_levels - 1``).
         """
+        # DECISION plan_2026-06-18_c129aae7/D-001: encoder path extracted into a
+        # single shared helper so call() and the public encode() use ONE code
+        # path -- the monitor's bottleneck must be byte-identical to what the
+        # decoder consumes. Do NOT duplicate the encoder loop.
+        #
         # DECISION plan_2026-06-18_959c992a/D-001: encode-then-split hierarchical flow.
         # Clifford ENCODES the full incoming signal at each scale FIRST, THEN the
         # Laplacian pyramid splits the ENCODED features (high -> skip, low -> next stage);
@@ -629,6 +632,27 @@ class CliffordLaplacianUNet(keras.Model):
                 x = low
             else:
                 feat = e
+        return feat, skips
+
+    # ------------------------------------------------------------------
+
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None,
+    ) -> Dict[str, keras.KerasTensor]:
+        """Forward pass.
+
+        Args:
+            inputs: Image tensor ``(B, H, W, C)``.
+            training: Whether the call is in training mode.
+
+        Returns:
+            A dict ``{"reconstruction": y}`` with ``y`` of shape ``(B, H, W, C)``.
+        """
+        # Encoder path (gabor stem + hierarchical Clifford encode-then-split) is
+        # delegated to the shared _encode helper; see the DECISION anchor there.
+        feat, skips = self._encode(inputs, training=training)
 
         for i in range(self.num_levels - 2, -1, -1):
             up = self.dec_up[i](feat)
@@ -640,6 +664,37 @@ class CliffordLaplacianUNet(keras.Model):
 
         y = self.out_conv(feat)
         return {"reconstruction": y}
+
+    # ------------------------------------------------------------------
+
+    def encode(
+        self,
+        inputs: keras.KerasTensor,
+        training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
+        """Encode inputs to the deepest-stage bottleneck latent.
+
+        This runs only the encoder path (gabor stem + hierarchical Clifford
+        encoder) and returns the bottleneck tensor produced at the deepest
+        stage (post ``enc_proj[-1]`` + ``enc_blocks[-1]``, with no Laplacian
+        split). Useful for latent-space monitoring/visualization.
+
+        Args:
+            inputs: Image tensor ``(B, H, W, C)``.
+            training: Whether the call is in training mode.
+
+        Returns:
+            The bottleneck tensor of shape
+            ``(B, H / 2**(num_levels-1), W / 2**(num_levels-1), level_channels[-1])``.
+
+        Example:
+            ```python
+            model = create_clifford_laplacian_unet("small")
+            z = model.encode(images)  # (B, 64, 64, 128) for 256px input
+            ```
+        """
+        feat, _ = self._encode(inputs, training=training)
+        return feat
 
     # ------------------------------------------------------------------
 
