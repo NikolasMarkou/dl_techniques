@@ -472,10 +472,14 @@ def _interleave_by_weight(
 
 
 def iter_images(config: HomographicAdaptationConfig):
-    """Yield ``(image_id, image (H, W, C) float32)`` for the configured source.
+    """Yield ``(image_id, dataset_name, source_path, image (H, W, C) float32)``.
 
-    Smoke -> deterministic tiny SYNTHETIC images (never touches real COCO).
-    Real  -> images drawn per-dataset from ``config.image_dirs`` by weight.
+    Smoke -> deterministic tiny SYNTHETIC images (never touches real COCO);
+    ``dataset_name="synthetic"`` and ``source_path=None`` (no file on disk yet;
+    ``run_adaptation`` persists it and fills in the path).
+    Real  -> images drawn per-dataset from ``config.image_dirs`` by weight;
+    ``dataset_name`` is the dir name and ``source_path`` the absolute resolved
+    path of the on-disk file.
     """
     if config.smoke:
         rng = np.random.default_rng(config.seed)
@@ -483,7 +487,7 @@ def iter_images(config: HomographicAdaptationConfig):
             img, _ = generate_synthetic_sample(
                 config.input_size, config.input_size, rng
             )
-            yield f"synthetic_{i:04d}", img.astype(np.float32)
+            yield f"synthetic_{i:04d}", "synthetic", None, img.astype(np.float32)
         return
 
     # Real path: weighted per-dataset draw across config.image_dirs.
@@ -503,7 +507,13 @@ def iter_images(config: HomographicAdaptationConfig):
     logger.info(f"HA worklist: {dict(counts)} (total {len(selected)})")
     for ds_name, path in selected:
         image_id = Path(path).stem
-        yield image_id, _load_real_image(path, config.input_size, config.channels)
+        source_path = str(Path(path).resolve())
+        yield (
+            image_id,
+            ds_name,
+            source_path,
+            _load_real_image(path, config.input_size, config.channels),
+        )
 
 
 # ---------------------------------------------------------------------
@@ -528,6 +538,40 @@ def _build_model(config: HomographicAdaptationConfig) -> keras.Model:
     return model
 
 
+def _build_manifest_entry(
+    image_id: str,
+    dataset_name: str,
+    source_path: str,
+    npz_rel: str,
+    num_keypoints: int,
+) -> dict:
+    """Build one self-describing manifest entry for a pseudo-labeled image.
+
+    # DECISION plan_2026-06-18_8ecab001/D-001: entries record ``source_path``
+    # (absolute) + ``dataset_name`` so stage-4 can RELOAD the source image
+    # directly. Do NOT drop these keys back to the bare ``image_id`` schema:
+    # stage-4 would then have to stem-match against ~118K COCO + DIV2K files
+    # (fragile, collision-prone). See decisions.md D-001.
+
+    Args:
+        image_id: Stable image identifier (file stem or ``synthetic_NNNN``).
+        dataset_name: Source dataset name (dir name, or ``"synthetic"``).
+        source_path: Absolute path to the source image on disk.
+        npz_rel: Path to the ``.npz`` label, relative to the experiment dir.
+        num_keypoints: Number of pseudo keypoints in this image.
+
+    Returns:
+        The per-entry manifest dict.
+    """
+    return {
+        "image_id": image_id,
+        "dataset_name": dataset_name,
+        "source_path": source_path,
+        "npz": npz_rel,
+        "num_keypoints": num_keypoints,
+    }
+
+
 def run_adaptation(config: HomographicAdaptationConfig) -> Path:
     """Run one Homographic Adaptation self-labeling pass over the image corpus.
 
@@ -543,6 +587,7 @@ def run_adaptation(config: HomographicAdaptationConfig) -> Path:
     output_dir = Path(config.output_dir) / config.experiment_name
     labels_dir = output_dir / "pseudo_labels"
     labels_dir.mkdir(parents=True, exist_ok=True)
+    images_dir = output_dir / "images"
     save_config_json(config, str(output_dir), "config.json")
 
     model = _build_model(config)
@@ -550,8 +595,25 @@ def run_adaptation(config: HomographicAdaptationConfig) -> Path:
     rng = np.random.default_rng(config.seed)
     manifest: List[dict] = []
 
-    for idx, (image_id, image) in enumerate(iter_images(config)):
+    for idx, (image_id, dataset_name, source_path, image) in enumerate(
+        iter_images(config)
+    ):
         H, W = image.shape[0], image.shape[1]
+
+        # Smoke synthetic images have no file on disk; persist each one as a
+        # grayscale PNG so the smoke pseudo-label set is self-contained and
+        # reloadable end-to-end (stage-4 reads source_path). Real images
+        # already exist -> just record their absolute resolved path.
+        if source_path is None:
+            images_dir.mkdir(parents=True, exist_ok=True)
+            png_path = images_dir / f"{image_id}.png"
+            uint8_hwc = tf.cast(
+                tf.clip_by_value(tf.convert_to_tensor(image), 0.0, 1.0) * 255.0,
+                tf.uint8,
+            )
+            tf.io.write_file(str(png_path), tf.io.encode_png(uint8_hwc))
+            source_path = str(png_path.resolve())
+
         keypoints, _aggregate = homographic_adaptation_round(
             model,
             image,
@@ -575,11 +637,13 @@ def run_adaptation(config: HomographicAdaptationConfig) -> Path:
             raise ValueError(f"Non-finite keypoints produced for image {image_id}")
 
         manifest.append(
-            {
-                "image_id": image_id,
-                "npz": str(npz_path.relative_to(output_dir)),
-                "num_keypoints": int(keypoints.shape[0]),
-            }
+            _build_manifest_entry(
+                image_id=image_id,
+                dataset_name=dataset_name,
+                source_path=source_path,
+                npz_rel=str(npz_path.relative_to(output_dir)),
+                num_keypoints=int(keypoints.shape[0]),
+            )
         )
         logger.info(
             f"[{idx + 1}/{config.num_images}] {image_id}: "
