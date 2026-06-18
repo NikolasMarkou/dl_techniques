@@ -431,10 +431,13 @@ class StreamingResultMonitor(keras.callbacks.Callback):
         clean: tf.Tensor,
         recon: tf.Tensor,
     ):
-        """Save clean/reconstruction comparison grid."""
+        """Save input / reconstruction / abs-difference comparison grid."""
+        # Reconstruction errors in an identity AE are small; amplify the
+        # absolute-difference heatmap so they are visible at a glance.
+        diff_amplify = 5.0
         try:
             num_samples = min(10, clean.shape[0])
-            fig, axes = plt.subplots(2, num_samples, figsize=(25, 5))
+            fig, axes = plt.subplots(3, num_samples, figsize=(25, 7.5))
             fig.suptitle(
                 f"CliffordLaplacianUNet Autoencoder - Epoch {epoch}",
                 fontsize=20,
@@ -446,12 +449,25 @@ class StreamingResultMonitor(keras.callbacks.Callback):
                 clean_img = np.clip((clean[i].numpy() + 1.0) / 2.0, 0.0, 1.0)
                 recon_img = np.clip((recon[i].numpy() + 1.0) / 2.0, 0.0, 1.0)
 
+                # Absolute error in display space (collapse channels to a
+                # single heatmap), amplified and clipped for visibility.
+                diff_img = np.abs(clean_img - recon_img)
+                if diff_img.ndim == 3 and diff_img.shape[-1] > 1:
+                    diff_img = diff_img.mean(axis=-1)
+                diff_img = np.clip(diff_img * diff_amplify, 0.0, 1.0)
+                if diff_img.ndim == 3:  # grayscale: drop trailing channel
+                    diff_img = diff_img.squeeze(-1)
+
                 cmap = "gray" if clean_img.shape[-1] == 1 else None
                 if clean_img.shape[-1] == 1:
                     clean_img = clean_img.squeeze(-1)
                     recon_img = recon_img.squeeze(-1)
 
-                row_labels = ["Input", "Reconstruction"]
+                row_labels = [
+                    "Input",
+                    "Reconstruction",
+                    f"|Diff| x{diff_amplify:g}",
+                ]
                 for row, img in enumerate([clean_img, recon_img]):
                     axes[row, i].imshow(img, cmap=cmap, vmin=0, vmax=1)
                     if i == 0:
@@ -463,10 +479,23 @@ class StreamingResultMonitor(keras.callbacks.Callback):
                             va="center",
                         )
                     axes[row, i].axis("off")
+
+                # Difference heatmap (perceptual colormap, fixed 0..1 scale).
+                axes[2, i].imshow(diff_img, cmap="inferno", vmin=0, vmax=1)
+                if i == 0:
+                    axes[2, i].set_ylabel(
+                        row_labels[2],
+                        fontsize=14,
+                        rotation=0,
+                        ha="right",
+                        va="center",
+                    )
+                axes[2, i].axis("off")
+
                 axes[0, i].set_title(f"Sample {i + 1}", fontsize=10)
 
             plt.tight_layout()
-            plt.subplots_adjust(top=0.88, left=0.08, right=0.98)
+            plt.subplots_adjust(top=0.90, left=0.08, right=0.98)
             plt.savefig(
                 self.results_dir / f"epoch_{epoch:03d}_samples.png",
                 dpi=150,
