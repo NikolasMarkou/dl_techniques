@@ -100,6 +100,10 @@ from dl_techniques.datasets.synthetic_shapes import (
     keypoints_to_grid_labels,
     DEFAULT_CELL,
 )
+# Sibling module in the train.superpoint package; importing the image loader here
+# (A3: no cycle -- HA's top-level imports are only train.common/dl_techniques.*)
+# reuses the exact stage-3 image I/O instead of reimplementing it.
+from train.superpoint.homographic_adaptation import _load_real_image
 
 
 # ---------------------------------------------------------------------
@@ -115,6 +119,10 @@ class SuperPointConfig:
     input_size: int = 128
     channels: int = 1
     cell: int = DEFAULT_CELL  # detector-head cell size (8 -> 65 classes)
+    # Data source: "synthetic" (synthetic shapes, default -- unchanged behavior)
+    # or "pseudo" (real images + stage-3 HA pseudo-labels via pseudo_labels_dir).
+    data_mode: str = "synthetic"
+    pseudo_labels_dir: Optional[str] = None
 
     # Model
     variant: str = "tiny"
@@ -174,6 +182,16 @@ class SuperPointConfig:
             raise ValueError(
                 f"input_size ({self.input_size}) must be >= 64 so H/8 >= 8 "
                 f"(the 8x8 detector reshape stays meaningful)"
+            )
+        if self.data_mode not in ("synthetic", "pseudo"):
+            raise ValueError(
+                f"Unknown data_mode: {self.data_mode!r} "
+                "(expected 'synthetic' or 'pseudo')"
+            )
+        if self.data_mode == "pseudo" and self.pseudo_labels_dir is None:
+            raise ValueError(
+                "data_mode='pseudo' requires pseudo_labels_dir "
+                "(the stage-3 HA experiment dir containing manifest.json)"
             )
         if self.variant not in ("tiny", "base", "large"):
             raise ValueError(f"Unknown variant: {self.variant}")
@@ -263,6 +281,83 @@ def _pair_generator(
         )
 
 
+# DECISION plan_2026-06-18_8ecab001/D-002: pseudo mode reloads the REAL source
+# image via the imported _load_real_image and loads grid_label DIRECTLY from the
+# npz; do NOT re-encode grid_label from keypoints (it is already (Hc,Wc) i32
+# [0..64], identical to the synthetic detector-label format) and do NOT
+# reimplement image I/O. Everything after the (image, grid_label) source load is
+# copied verbatim from _pair_generator (homography sample/warp/correspondence is
+# image-content-independent), so this generator stays a thin source swap. See
+# decisions.md D-002.
+def _pseudo_pair_generator(
+    config: SuperPointConfig,
+) -> Iterator[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    """Yield ``(image, warped_image, grid_label, correspondence)`` from HA labels.
+
+    Reads the stage-3 HA manifest at ``<pseudo_labels_dir>/manifest.json``,
+    reloads each entry's REAL source image via :func:`_load_real_image`, loads the
+    pre-encoded ``grid_label`` directly from the npz, then synthesizes the
+    homography pair exactly as :func:`_pair_generator`. Loops with wraparound over
+    the manifest entries (infinite generator), mirroring ``_pair_generator``.
+
+    Yields:
+        ``image (H, W, 1) f32``, ``warped (H, W, 1) f32``,
+        ``grid_label (Hc, Wc) i32``, ``correspondence (N, N) f32``.
+    """
+    H = W = config.input_size
+    rng = np.random.default_rng(config.seed)
+
+    pseudo_dir = Path(config.pseudo_labels_dir)
+    with open(pseudo_dir / "manifest.json") as f:
+        manifest = json.load(f)
+
+    # Fail loud BEFORE any tf.data signature is built: the stored grid_label shape
+    # is (input_size//cell), so a mismatch would otherwise surface as an opaque
+    # from_generator shape error.
+    if manifest["input_size"] != config.input_size:
+        raise ValueError(
+            f"manifest input_size ({manifest['input_size']}) != config.input_size "
+            f"({config.input_size}); reload images at the manifest size"
+        )
+    if manifest["cell"] != config.cell:
+        raise ValueError(
+            f"manifest cell ({manifest['cell']}) != config.cell ({config.cell})"
+        )
+
+    entries = manifest["entries"]
+    if not entries:
+        raise ValueError(f"manifest at {pseudo_dir} has no entries")
+
+    logger.info(
+        f"superpoint pseudo generator: H={H} W={W} cell={config.cell} "
+        f"seed={config.seed} entries={len(entries)} dir={pseudo_dir}"
+    )
+
+    idx = 0
+    while True:
+        entry = entries[idx % len(entries)]
+        idx += 1
+
+        if "source_path" not in entry:
+            raise ValueError(
+                f"manifest entry {entry.get('image_id', '?')!r} has no "
+                "'source_path'; re-run HA with the patched writer"
+            )
+
+        image = _load_real_image(entry["source_path"], config.input_size, config.channels)
+        grid_label = np.load(pseudo_dir / entry["npz"])["grid_label"].astype(np.int32)
+
+        h_mat = sample_homography((H, W), rng=rng)
+        warped = warp_image(image, h_mat).numpy()  # (H, W, 1)
+        corr = _cell_correspondence(h_mat, H, W, config.cell)
+        yield (
+            image.astype(np.float32),
+            warped.astype(np.float32),
+            grid_label,
+            corr,
+        )
+
+
 def create_dataset(config: SuperPointConfig) -> tf.data.Dataset:
     """Build an infinite tf.data stream of homography-pair joint-training examples.
 
@@ -286,8 +381,13 @@ def create_dataset(config: SuperPointConfig) -> tf.data.Dataset:
         tf.TensorSpec(shape=(n, n), dtype=tf.float32),
     )
 
+    gen_fn = (
+        _pseudo_pair_generator
+        if config.data_mode == "pseudo"
+        else _pair_generator
+    )
     dataset = tf.data.Dataset.from_generator(
-        lambda: _pair_generator(config),
+        lambda: gen_fn(config),
         output_signature=output_signature,
     )
 
@@ -533,6 +633,20 @@ def parse_arguments() -> argparse.Namespace:
         "--variant", choices=["tiny", "base", "large"], default="tiny"
     )
     parser.add_argument("--input-size", type=int, default=128)
+    parser.add_argument(
+        "--data-mode",
+        choices=["synthetic", "pseudo"],
+        default="synthetic",
+        help="Data source: 'synthetic' shapes (default) or 'pseudo' real images "
+        "+ stage-3 HA pseudo-labels (requires --pseudo-labels-dir).",
+    )
+    parser.add_argument(
+        "--pseudo-labels-dir",
+        type=str,
+        default=None,
+        help="Stage-3 HA experiment dir (results/<exp>/) containing manifest.json; "
+        "required for --data-mode pseudo.",
+    )
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--steps-per-epoch", type=int, default=500)
@@ -567,6 +681,8 @@ def main():
 
     config = SuperPointConfig(
         input_size=args.input_size,
+        data_mode=args.data_mode,
+        pseudo_labels_dir=args.pseudo_labels_dir,
         variant=args.variant,
         batch_size=args.batch_size,
         epochs=args.epochs,
