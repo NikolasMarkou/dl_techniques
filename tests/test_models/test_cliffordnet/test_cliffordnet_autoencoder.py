@@ -160,3 +160,46 @@ class TestFitSmoke:
         y = {"reconstruction": x}
         hist = m.fit(x, y, epochs=1, batch_size=2, verbose=0)
         assert np.isfinite(hist.history["loss"][-1])
+
+
+# ---------------------------------------------------------------------
+# Frozen Gabor stem
+# ---------------------------------------------------------------------
+
+class TestGaborStem:
+
+    def test_stem_present_and_frozen_by_default(self):
+        m = _tiny_model()  # use_gabor_stem defaults True; 96 filters, 7x7
+        assert m.gabor_stem is not None
+        assert m.gabor_stem.trainable is False
+
+        x = np.random.RandomState(0).randn(2, 32, 32, 3).astype("float32")
+        out = m(x)  # builds the stem; spatial resolution preserved
+        assert tuple(out["reconstruction"].shape) == (2, 32, 32, 3)
+        # (kh, kw, in_channels, filters)
+        assert tuple(m.gabor_stem.kernel.shape) == (7, 7, 3, 96)
+
+        # Frozen: stem weights must not appear in trainable_variables.
+        stem_paths = {w.path for w in m.gabor_stem.weights}
+        trainable_paths = {v.path for v in m.trainable_variables}
+        assert not (stem_paths & trainable_paths)
+
+    def test_stem_disabled(self):
+        m = _tiny_model(use_gabor_stem=False)
+        assert m.gabor_stem is None
+        x = np.random.RandomState(1).randn(1, 32, 32, 3).astype("float32")
+        assert tuple(m(x)["reconstruction"].shape) == (1, 32, 32, 3)
+
+    def test_stem_custom_config_roundtrip(self):
+        m = _tiny_model(gabor_filters=32, gabor_kernel_size=5)
+        cfg = m.get_config()
+        assert cfg["use_gabor_stem"] is True
+        assert cfg["gabor_filters"] == 32
+        assert cfg["gabor_kernel_size"] == 5
+
+        m2 = CliffordLaplacianUNet.from_config(cfg)
+        assert m2.gabor_stem is not None
+        x = np.random.RandomState(5).randn(1, 32, 32, 3).astype("float32")
+        m2(x)  # build
+        assert tuple(m2.gabor_stem.kernel.shape) == (5, 5, 3, 32)
+        assert m2.gabor_stem.trainable is False

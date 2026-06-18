@@ -53,6 +53,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.initializers import create_gabor_conv2d
 from dl_techniques.layers.laplacian_filter import LaplacianPyramidLevel
 from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
 
@@ -153,6 +154,18 @@ class CliffordLaplacianUNet(keras.Model):
             Defaults to ``-1``.
         blur_trainable: Whether the pyramid blur kernels are learnable. Defaults
             to ``False``.
+        use_gabor_stem: Whether to prepend a frozen (non-trainable) Conv2D stem
+            whose kernel is a deterministic Gabor filter bank
+            (:class:`GaborFiltersInitializer`). Runs at ``strides=1``,
+            ``padding="same"`` so spatial resolution and the divisibility
+            contract are unchanged; maps ``in_channels -> gabor_filters`` as a
+            fixed orientation/frequency-selective front-end before the encoder.
+            Defaults to ``True``.
+        gabor_filters: Number of Gabor stem output channels (the size of the
+            fixed filter bank). Used only when ``use_gabor_stem=True``. Defaults
+            to ``96``.
+        gabor_kernel_size: Spatial size of the Gabor stem kernel. Used only when
+            ``use_gabor_stem=True``. Defaults to ``7``.
         kernel_initializer: Initializer for all 1x1 ``Conv2D`` projections.
             Defaults to ``"glorot_uniform"``.
         kernel_regularizer: Regularizer for all 1x1 ``Conv2D`` projections.
@@ -221,6 +234,9 @@ class CliffordLaplacianUNet(keras.Model):
         blur_kernel_size: Tuple[int, int] = (5, 5),
         blur_sigma: float = -1,
         blur_trainable: bool = False,
+        use_gabor_stem: bool = True,
+        gabor_filters: int = 96,
+        gabor_kernel_size: int = 7,
         kernel_initializer: Any = "glorot_uniform",
         kernel_regularizer: Optional[Any] = None,
         **kwargs: Any,
@@ -244,6 +260,9 @@ class CliffordLaplacianUNet(keras.Model):
         self.blur_kernel_size = blur_kernel_size
         self.blur_sigma = blur_sigma
         self.blur_trainable = blur_trainable
+        self.use_gabor_stem = use_gabor_stem
+        self.gabor_filters = gabor_filters
+        self.gabor_kernel_size = gabor_kernel_size
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
@@ -251,6 +270,7 @@ class CliffordLaplacianUNet(keras.Model):
         self._validate_config()
 
         # Build sublayers via private helpers (same attrs/order/args as inline).
+        self._build_stem()
         self._build_encoder()
         self._build_decoder()
         self._build_output()
@@ -330,6 +350,55 @@ class CliffordLaplacianUNet(keras.Model):
                 f"CliffordLaplacianUNet: blur_kernel_size must be a length-2 "
                 f"sequence of positive ints, got {ks!r}"
             )
+
+        if self.use_gabor_stem:
+            if (
+                not isinstance(self.gabor_filters, int)
+                or isinstance(self.gabor_filters, bool)
+                or self.gabor_filters < 1
+            ):
+                raise ValueError(
+                    f"CliffordLaplacianUNet: gabor_filters must be a positive "
+                    f"int when use_gabor_stem=True, got {self.gabor_filters!r}"
+                )
+            if (
+                not isinstance(self.gabor_kernel_size, int)
+                or isinstance(self.gabor_kernel_size, bool)
+                or self.gabor_kernel_size < 1
+            ):
+                raise ValueError(
+                    f"CliffordLaplacianUNet: gabor_kernel_size must be a "
+                    f"positive int when use_gabor_stem=True, got "
+                    f"{self.gabor_kernel_size!r}"
+                )
+
+    # ------------------------------------------------------------------
+
+    def _build_stem(self) -> None:
+        """Build the optional frozen Gabor-initialized Conv2D stem (layer 0).
+
+        When ``use_gabor_stem`` is True, ``self.gabor_stem`` is a non-trainable
+        ``Conv2D`` whose kernel is a deterministic Gabor filter bank
+        (:class:`GaborFiltersInitializer`). It runs at ``strides=1``,
+        ``padding="same"`` so it preserves spatial resolution (the divisibility
+        contract is unaffected) and maps ``in_channels -> gabor_filters`` as a
+        fixed orientation/frequency-selective front-end. The encoder's
+        ``enc_proj[0]`` (1x1 Conv2D) then projects ``gabor_filters -> ch[0]``.
+        When False, ``self.gabor_stem`` is ``None`` and the model behaves as if
+        there were no stem.
+        """
+        if self.use_gabor_stem:
+            self.gabor_stem = create_gabor_conv2d(
+                filters=self.gabor_filters,
+                kernel_size=self.gabor_kernel_size,
+                strides=1,
+                padding="same",
+                use_bias=False,
+                trainable=False,
+                name="gabor_stem",
+            )
+        else:
+            self.gabor_stem = None
 
     # ------------------------------------------------------------------
 
@@ -451,8 +520,13 @@ class CliffordLaplacianUNet(keras.Model):
 
         L = self.num_levels
 
-        # --- Encoder: encode the full signal at each scale, THEN split ---
+        # --- Optional frozen Gabor stem (layer 0): preserves H, W ---
         cur = input_shape  # signal at the current scale
+        if self.gabor_stem is not None:
+            self.gabor_stem.build(cur)
+            cur = self.gabor_stem.compute_output_shape(cur)
+
+        # --- Encoder: encode the full signal at each scale, THEN split ---
         bottleneck_shape = None
         for i in range(L):
             self.enc_proj[i].build(cur)
@@ -517,6 +591,9 @@ class CliffordLaplacianUNet(keras.Model):
         # "raw-signal exact-reconstruction" framing never held for the full model anyway
         # (the decoder merges in feature space via keras.ops.add, not LaplacianPyramidLevel.merge).
         x = inputs
+        # Optional frozen Gabor front-end: fixed orientation/frequency features.
+        if self.gabor_stem is not None:
+            x = self.gabor_stem(x)
         skips: List[Any] = []
         feat = None
         for i in range(self.num_levels):
@@ -562,6 +639,9 @@ class CliffordLaplacianUNet(keras.Model):
                 "blur_kernel_size": self.blur_kernel_size,
                 "blur_sigma": self.blur_sigma,
                 "blur_trainable": self.blur_trainable,
+                "use_gabor_stem": self.use_gabor_stem,
+                "gabor_filters": self.gabor_filters,
+                "gabor_kernel_size": self.gabor_kernel_size,
                 "kernel_initializer": keras.initializers.serialize(
                     self.kernel_initializer
                 ),
