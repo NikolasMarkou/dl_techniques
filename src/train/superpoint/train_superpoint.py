@@ -70,6 +70,7 @@ import json
 import keras
 import argparse
 import tempfile
+import functools
 import numpy as np
 import tensorflow as tf
 from pathlib import Path
@@ -94,7 +95,14 @@ from dl_techniques.losses.superpoint_loss import (
     SuperPointDescriptorLoss,
 )
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
-from dl_techniques.utils.homography import sample_homography, warp_image, warp_points
+from dl_techniques.utils.homography import (
+    sample_homography,
+    warp_image,
+    warp_points,
+    sample_homography_tf,
+    warp_image_tf,
+    _cell_correspondence_tf,
+)
 from dl_techniques.datasets.synthetic_shapes import (
     generate_synthetic_sample,
     keypoints_to_grid_labels,
@@ -123,6 +131,10 @@ class SuperPointConfig:
     # or "pseudo" (real images + stage-3 HA pseudo-labels via pseudo_labels_dir).
     data_mode: str = "synthetic"
     pseudo_labels_dir: Optional[str] = None
+    # Pseudo-mode only: cache the decoded grayscale images in RAM after the first
+    # epoch (before the per-element warp). Default OFF (RAM cost ~= num_images *
+    # input_size^2 * 4 bytes). Only honoured by the in-graph pseudo pipeline.
+    cache: bool = False
 
     # Model
     variant: str = "tiny"
@@ -358,11 +370,178 @@ def _pseudo_pair_generator(
         )
 
 
+def _load_pseudo_sources(
+    config: SuperPointConfig,
+) -> Tuple[list, np.ndarray]:
+    """Read the HA manifest and preload all source paths + grid labels.
+
+    Build-time (Python, once) half of the in-graph pseudo pipeline. Reuses the
+    EXACT fail-loud validation of :func:`_pseudo_pair_generator` (manifest
+    ``input_size``/``cell`` must match config, every entry must carry a
+    ``source_path``) so the new path fails identically, but instead of yielding
+    per sample it returns the full source-path list and ONE stacked
+    ``(num_entries, Hc, Wc) int32`` grid-label array -- removing the per-sample
+    ``np.load`` from the hot path (A4 / D-002).
+
+    Args:
+        config: Training configuration (``data_mode == "pseudo"``).
+
+    Returns:
+        ``(source_paths, grid_labels)`` where ``source_paths`` is a list of
+        absolute image paths and ``grid_labels`` is ``(num_entries, Hc, Wc)``
+        ``int32``.
+    """
+    pseudo_dir = Path(config.pseudo_labels_dir)
+    with open(pseudo_dir / "manifest.json") as f:
+        manifest = json.load(f)
+
+    if manifest["input_size"] != config.input_size:
+        raise ValueError(
+            f"manifest input_size ({manifest['input_size']}) != config.input_size "
+            f"({config.input_size}); reload images at the manifest size"
+        )
+    if manifest["cell"] != config.cell:
+        raise ValueError(
+            f"manifest cell ({manifest['cell']}) != config.cell ({config.cell})"
+        )
+
+    entries = manifest["entries"]
+    if not entries:
+        raise ValueError(f"manifest at {pseudo_dir} has no entries")
+
+    source_paths = []
+    grids = []
+    for entry in entries:
+        if "source_path" not in entry:
+            raise ValueError(
+                f"manifest entry {entry.get('image_id', '?')!r} has no "
+                "'source_path'; re-run HA with the patched writer"
+            )
+        source_paths.append(entry["source_path"])
+        grids.append(
+            np.load(pseudo_dir / entry["npz"])["grid_label"].astype(np.int32)
+        )
+
+    grid_labels = np.stack(grids, axis=0)  # (num_entries, Hc, Wc) i32
+    logger.info(
+        f"superpoint pseudo pipeline: H={config.input_size} W={config.input_size} "
+        f"cell={config.cell} seed={config.seed} entries={len(entries)} "
+        f"grid_labels={grid_labels.shape} dir={pseudo_dir}"
+    )
+    return source_paths, grid_labels
+
+
+def _decode_grayscale(
+    path: "tf.Tensor",
+    label: "tf.Tensor",
+    input_size: int,
+    channels: int,
+) -> Tuple["tf.Tensor", "tf.Tensor"]:
+    """In-graph decode+resize of a source image path (graph-safe ``.map`` fn).
+
+    In-graph equivalent of :func:`_load_real_image` (which returns numpy and is
+    not ``.map``-able): ``read_file -> decode_image(PNG/JPEG) -> float ->
+    [rgb_to_grayscale] -> resize bilinear``. ``decode_image`` handles both DIV2K
+    PNGs and COCO JPEGs; ``expand_animations=False`` keeps a static rank.
+    ``set_shape`` restores the spatial/channel shape that ``from_tensor_slices``
+    drops (so downstream warp + batch see a known shape).
+
+    Args:
+        path: scalar string tensor (absolute image path).
+        label: ``(Hc, Wc)`` ``int32`` grid label, passed through untouched.
+        input_size: target square spatial size.
+        channels: 1 (grayscale) or 3.
+
+    Returns:
+        ``(image (input_size, input_size, channels) f32, label)``.
+    """
+    raw = tf.io.read_file(path)
+    img = tf.io.decode_image(raw, channels=3, expand_animations=False)
+    img = tf.image.convert_image_dtype(img, tf.float32)
+    if channels == 1:
+        img = tf.image.rgb_to_grayscale(img)
+    img = tf.image.resize(img, (input_size, input_size), method="bilinear")
+    img.set_shape((input_size, input_size, channels))
+    return img, label
+
+
+def _warp_and_correspond(
+    image: "tf.Tensor",
+    label: "tf.Tensor",
+    idx: "tf.Tensor",
+    base_seed: int,
+    input_size: int,
+    channels: int,
+    cell: int,
+) -> Tuple["tf.Tensor", "tf.Tensor", "tf.Tensor", "tf.Tensor"]:
+    """In-graph homography pair + correspondence for one element (``.map`` fn).
+
+    Per-element STATELESS seeding: each element gets ``seed=[base_seed, idx]``
+    (``idx`` from a zipped counter), so the sampled homography is distinct per
+    element yet reproducible (A6 / D-002) -- preferred over a stateful
+    ``tf.random`` draw. Samples ``H`` via :func:`sample_homography_tf`, warps the
+    image via :func:`warp_image_tf`, and builds the H/8 correspondence via
+    :func:`_cell_correspondence_tf`. ``set_shape`` restores the static shapes
+    that the graph ops lose so ``.batch`` sees known dims.
+
+    Args:
+        image: ``(input_size, input_size, channels) f32`` source image.
+        label: ``(Hc, Wc) i32`` grid label, passed through.
+        idx: scalar ``int64`` per-element counter (from a zipped Counter).
+        base_seed: python int base seed (the second seed component is ``idx``).
+        input_size: square spatial size (== H == W).
+        channels: image channels.
+        cell: detector/descriptor cell size.
+
+    Returns:
+        ``(image, warped, label, corr)`` -- ``corr`` is ``(N, N) f32``.
+    """
+    H = W = input_size
+    Hc, Wc = H // cell, W // cell
+    n = Hc * Wc
+
+    seed = tf.stack([tf.constant(base_seed, dtype=tf.int32), tf.cast(idx, tf.int32)])
+    h_mat = sample_homography_tf((H, W), seed)
+    warped = warp_image_tf(image, h_mat)
+    corr = _cell_correspondence_tf(h_mat, H, W, cell)
+
+    image.set_shape((input_size, input_size, channels))
+    warped.set_shape((input_size, input_size, channels))
+    label.set_shape((Hc, Wc))
+    corr.set_shape((n, n))
+    return image, warped, label, corr
+
+
+def _pack_dict(
+    image: "tf.Tensor",
+    warped: "tf.Tensor",
+    label: "tf.Tensor",
+    corr: "tf.Tensor",
+) -> Tuple["tf.Tensor", dict]:
+    """Pack the joint-training tuple into the SAME dict the ``train_step`` reads."""
+    return (
+        image,
+        {
+            "keypoints": label,
+            "warped_image": warped,
+            "correspondence": corr,
+        },
+    )
+
+
 def create_dataset(config: SuperPointConfig) -> tf.data.Dataset:
     """Build an infinite tf.data stream of homography-pair joint-training examples.
 
     Yields ``(image, {"keypoints": label, "warped_image": warped,
     "correspondence": corr})`` -- the custom ``train_step`` consumes the dict.
+
+    Two backends, byte-contract-identical output:
+
+    - ``data_mode == "synthetic"``: the unchanged single-thread
+      ``_pair_generator`` + ``from_generator`` path.
+    - ``data_mode == "pseudo"``: the in-graph parallel pipeline
+      (``from_tensor_slices`` of preloaded paths+labels -> parallel
+      decode -> parallel warp+correspondence -> batch -> prefetch).
 
     Args:
         config: Training configuration.
@@ -374,6 +553,64 @@ def create_dataset(config: SuperPointConfig) -> tf.data.Dataset:
     Hc, Wc = H // config.cell, W // config.cell
     n = Hc * Wc
 
+    if config.data_mode == "pseudo":
+        # DECISION plan_2026-06-18_37e1ce56/D-002: pseudo mode uses an in-graph
+        # parallel pipeline (from_tensor_slices of PRELOADED source paths +
+        # stacked grid_labels -> parallel decode -> parallel warp+correspondence
+        # -> batch -> prefetch), NOT the single-thread from_generator path the
+        # synthetic branch keeps. Do NOT "unify" the two branches under one
+        # from_generator: that re-serializes decode/warp/np.load onto one Python
+        # thread (the exact GPU-starvation this step removes -- benchmarked
+        # BEFORE=9.85 samples/sec, GPU starved). Labels are preloaded into one
+        # RAM array (np.load OFF the hot path, A4); homographies are sampled
+        # per-element via a zipped Counter for stateless reproducibility (A6) --
+        # the realized RNG sequence differs from the numpy serial RNG by design
+        # (D-001), distribution preserved. See decisions.md D-002.
+        source_paths, grid_labels = _load_pseudo_sources(config)
+
+        ds = tf.data.Dataset.from_tensor_slices(
+            (tf.constant(source_paths), tf.constant(grid_labels))
+        )
+        ds = ds.shuffle(
+            len(source_paths),
+            seed=config.seed,
+            reshuffle_each_iteration=True,
+        ).repeat()
+
+        decode_fn = functools.partial(
+            _decode_grayscale,
+            input_size=config.input_size,
+            channels=config.channels,
+        )
+        ds = ds.map(decode_fn, num_parallel_calls=tf.data.AUTOTUNE)
+
+        if config.cache:
+            # Cache the decoded (pre-warp) images so disk decode runs once total
+            # rather than once per epoch. RAM-bounded by num_images; opt-in.
+            ds = ds.cache()
+
+        # Zip a per-element counter so each element gets a distinct stateless seed
+        # (base_seed, idx) for sample_homography_tf -- reproducible across runs.
+        counter = tf.data.Dataset.counter(start=0, step=1)
+        ds = tf.data.Dataset.zip((ds, counter))
+        warp_fn = functools.partial(
+            _warp_and_correspond,
+            base_seed=config.seed,
+            input_size=config.input_size,
+            channels=config.channels,
+            cell=config.cell,
+        )
+        ds = ds.map(
+            lambda img_lbl, idx: warp_fn(img_lbl[0], img_lbl[1], idx),
+            num_parallel_calls=tf.data.AUTOTUNE,
+        )
+
+        ds = ds.map(_pack_dict, num_parallel_calls=tf.data.AUTOTUNE)
+        ds = ds.batch(config.batch_size, drop_remainder=True)
+        ds = ds.prefetch(tf.data.AUTOTUNE)
+        return ds
+
+    # --- synthetic branch: BYTE-IDENTICAL to before (untouched path) ---
     output_signature = (
         tf.TensorSpec(shape=(H, W, config.channels), dtype=tf.float32),
         tf.TensorSpec(shape=(H, W, config.channels), dtype=tf.float32),
@@ -381,13 +618,8 @@ def create_dataset(config: SuperPointConfig) -> tf.data.Dataset:
         tf.TensorSpec(shape=(n, n), dtype=tf.float32),
     )
 
-    gen_fn = (
-        _pseudo_pair_generator
-        if config.data_mode == "pseudo"
-        else _pair_generator
-    )
     dataset = tf.data.Dataset.from_generator(
-        lambda: gen_fn(config),
+        lambda: _pair_generator(config),
         output_signature=output_signature,
     )
 
@@ -718,6 +950,13 @@ def parse_arguments() -> argparse.Namespace:
         help="Stage-3 HA experiment dir (results/<exp>/) containing manifest.json; "
         "required for --data-mode pseudo.",
     )
+    parser.add_argument(
+        "--cache",
+        action="store_true",
+        help="Pseudo-mode only: cache decoded source images in RAM (decode once "
+        "total, not per epoch). RAM cost ~= num_images * input_size^2 * 4 bytes; "
+        "default OFF.",
+    )
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--steps-per-epoch", type=int, default=500)
@@ -773,6 +1012,7 @@ def main():
         input_size=args.input_size,
         data_mode=args.data_mode,
         pseudo_labels_dir=args.pseudo_labels_dir,
+        cache=args.cache,
         variant=args.variant,
         batch_size=args.batch_size,
         epochs=args.epochs,
