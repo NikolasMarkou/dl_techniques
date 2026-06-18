@@ -153,6 +153,12 @@ from .siglip_contrastive_loss import (
 # from .smape_loss
 from .smape_loss import SMAPELoss, smape_metric
 
+# from .superpoint_loss
+from .superpoint_loss import (
+    SuperPointDetectorLoss,
+    SuperPointDescriptorLoss,
+)
+
 # from .tabm_loss
 from .tabm_loss import TabMLoss
 
@@ -278,6 +284,9 @@ __all__ = [
     # smape_loss
     "SMAPELoss",
     "smape_metric",
+    # superpoint_loss
+    "SuperPointDetectorLoss",
+    "SuperPointDescriptorLoss",
     # tabm_loss
     "TabMLoss",
     # utilization_loss
