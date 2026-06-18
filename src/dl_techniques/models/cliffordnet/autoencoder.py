@@ -53,7 +53,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from dl_techniques.initializers import create_gabor_conv2d
+from dl_techniques.initializers import create_gabor_depthwise_conv2d
 from dl_techniques.layers.laplacian_filter import LaplacianPyramidLevel
 from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
 
@@ -154,16 +154,19 @@ class CliffordLaplacianUNet(keras.Model):
             Defaults to ``-1``.
         blur_trainable: Whether the pyramid blur kernels are learnable. Defaults
             to ``False``.
-        use_gabor_stem: Whether to prepend a frozen (non-trainable) Conv2D stem
-            whose kernel is a deterministic Gabor filter bank
-            (:class:`GaborFiltersInitializer`). Runs at ``strides=1``,
-            ``padding="same"`` so spatial resolution and the divisibility
-            contract are unchanged; maps ``in_channels -> gabor_filters`` as a
-            fixed orientation/frequency-selective front-end before the encoder.
-            Defaults to ``True``.
-        gabor_filters: Number of Gabor stem output channels (the size of the
-            fixed filter bank). Used only when ``use_gabor_stem=True``. Defaults
-            to ``96``.
+        use_gabor_stem: Whether to prepend a frozen (non-trainable) depthwise
+            Gabor stem whose kernel is a deterministic Gabor filter bank
+            (:class:`GaborFiltersInitializer`), applied PER CHANNEL with no
+            cross-channel mixing. Runs at ``strides=1``, ``padding="same"`` so
+            spatial resolution and the divisibility contract are unchanged; maps
+            ``in_channels -> in_channels * gabor_filters`` as a fixed
+            orientation/frequency-selective front-end before the encoder (the
+            encoder's ``enc_proj[0]`` 1x1 conv then projects it to
+            ``level_channels[0]``). Defaults to ``True``.
+        gabor_filters: Number of Gabor filters applied PER input channel. The
+            stem output channel count is ``in_channels * gabor_filters`` (e.g.
+            3 * 96 = 288 for RGB). Used only when ``use_gabor_stem=True``.
+            Defaults to ``96``.
         gabor_kernel_size: Spatial size of the Gabor stem kernel. Used only when
             ``use_gabor_stem=True``. Defaults to ``7``.
         output_activation: Activation applied by the output-head ``Conv2D``
@@ -383,20 +386,23 @@ class CliffordLaplacianUNet(keras.Model):
     # ------------------------------------------------------------------
 
     def _build_stem(self) -> None:
-        """Build the optional frozen Gabor-initialized Conv2D stem (layer 0).
+        """Build the optional frozen depthwise Gabor stem (layer 0).
 
+        # DECISION plan_2026-06-18_ba4e0079/D-001: per-channel (depthwise) Gabor.
         When ``use_gabor_stem`` is True, ``self.gabor_stem`` is a non-trainable
-        ``Conv2D`` whose kernel is a deterministic Gabor filter bank
-        (:class:`GaborFiltersInitializer`). It runs at ``strides=1``,
-        ``padding="same"`` so it preserves spatial resolution (the divisibility
-        contract is unaffected) and maps ``in_channels -> gabor_filters`` as a
-        fixed orientation/frequency-selective front-end. The encoder's
-        ``enc_proj[0]`` (1x1 Conv2D) then projects ``gabor_filters -> ch[0]``.
-        When False, ``self.gabor_stem`` is ``None`` and the model behaves as if
-        there were no stem.
+        ``DepthwiseConv2D`` whose kernel is a deterministic Gabor filter bank
+        (:class:`GaborFiltersInitializer`), applied PER CHANNEL with NO
+        cross-channel mixing. It runs at ``strides=1``, ``padding="same"`` so it
+        preserves spatial resolution (the divisibility contract is unaffected).
+        Each of ``gabor_filters`` filters is applied independently to every input
+        channel, so the stem maps ``in_channels -> in_channels * gabor_filters``
+        (e.g. 3 -> 288 for RGB with 96 filters). The encoder's ``enc_proj[0]``
+        (1x1 Conv2D) is the follow-on projection that maps that down to
+        ``level_channels[0]``. When False, ``self.gabor_stem`` is ``None`` and the
+        model behaves as if there were no stem.
         """
         if self.use_gabor_stem:
-            self.gabor_stem = create_gabor_conv2d(
+            self.gabor_stem = create_gabor_depthwise_conv2d(
                 filters=self.gabor_filters,
                 kernel_size=self.gabor_kernel_size,
                 strides=1,
