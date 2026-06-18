@@ -218,34 +218,40 @@ returns `[min]`, so the single filter uses the minimum endpoint of each range.
 
 ### Usage
 
-A builder utility, `create_gabor_conv2d`, is provided for convenience.
+A builder utility, `create_gabor_depthwise_conv2d`, is provided for convenience.
+It applies the Gabor bank **per channel** (depthwise, no cross-channel mixing):
+each of `filters` Gabor filters is applied independently to every input channel,
+so the output has `in_channels * filters` channels. For a specific output width,
+follow it with a `1x1` `Conv2D` projection.
 
 ```python
 import keras
-from dl_techniques.initializers import GaborFiltersInitializer, create_gabor_conv2d
+from dl_techniques.initializers import (
+    GaborFiltersInitializer,
+    create_gabor_depthwise_conv2d,
+)
 
 # -- Method 1: Direct Initializer Usage --
-# Initialize the first convolutional layer with a Gabor filter bank.
-# 96 output channels -> 96 distinct Gabor filters swept over Table I intervals.
-gabor_conv = keras.layers.Conv2D(
-    filters=96,
-    kernel_size=5,
+# The deterministic Gabor bank fills any Conv2D/DepthwiseConv2D kernel whose
+# LAST axis is the filter count; it is replicated across the `in` axis.
+gabor_conv = keras.layers.DepthwiseConv2D(
+    kernel_size=7,
+    depth_multiplier=96,           # 96 Gabor filters PER input channel
     padding='same',
-    kernel_initializer=GaborFiltersInitializer(),
-    trainable=True,  # filters are a starting point, then fine-tuned
-    input_shape=(32, 32, 3),
+    depthwise_initializer=GaborFiltersInitializer(),
+    trainable=False,               # frozen orientation/frequency front-end
 )
+# Input (32, 32, 3) -> Output (32, 32, 3 * 96 = 288)
 
 # -- Method 2: Using the Builder Utility --
-# This creates a Conv2D layer pre-configured with the Gabor filter bank,
-# with paper-default first-layer settings (96 filters / 5x5 / trainable).
-gabor_layer = create_gabor_conv2d(
+# Frozen per-channel Gabor front-end (DepthwiseConv2D, output = in * filters).
+gabor_layer = create_gabor_depthwise_conv2d(
     filters=96,
-    kernel_size=5,
-    trainable=True,
-    input_shape=(32, 32, 3),
-    name='gabor_first_conv',
+    kernel_size=7,
+    name='gabor_front_end',
 )
+# For a specific output count, follow with a 1x1 projection:
+proj = keras.layers.Conv2D(64, 1)   # 288 -> 64
 ```
 
 ## Integration with Keras Models

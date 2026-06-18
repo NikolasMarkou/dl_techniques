@@ -169,15 +169,20 @@ class TestFitSmoke:
 class TestGaborStem:
 
     def test_stem_present_and_frozen_by_default(self):
+        import keras
         m = _tiny_model()  # use_gabor_stem defaults True; 96 filters, 7x7
         assert m.gabor_stem is not None
+        # Depthwise: applied per channel, no cross-channel mixing.
+        assert isinstance(m.gabor_stem, keras.layers.DepthwiseConv2D)
         assert m.gabor_stem.trainable is False
 
         x = np.random.RandomState(0).randn(2, 32, 32, 3).astype("float32")
         out = m(x)  # builds the stem; spatial resolution preserved
         assert tuple(out["reconstruction"].shape) == (2, 32, 32, 3)
-        # (kh, kw, in_channels, filters)
+        # Depthwise kernel: (kh, kw, in_channels, depth_multiplier=filters).
         assert tuple(m.gabor_stem.kernel.shape) == (7, 7, 3, 96)
+        # Per-channel output = in_channels * filters = 3 * 96 = 288.
+        assert m.gabor_stem.compute_output_shape((None, 32, 32, 3))[-1] == 3 * 96
 
         # Frozen: stem weights must not appear in trainable_variables.
         stem_paths = {w.path for w in m.gabor_stem.weights}
@@ -202,6 +207,8 @@ class TestGaborStem:
         x = np.random.RandomState(5).randn(1, 32, 32, 3).astype("float32")
         m2(x)  # build
         assert tuple(m2.gabor_stem.kernel.shape) == (5, 5, 3, 32)
+        # Per-channel output = in_channels * filters = 3 * 32 = 96.
+        assert m2.gabor_stem.compute_output_shape((None, 32, 32, 3))[-1] == 3 * 32
         assert m2.gabor_stem.trainable is False
 
 

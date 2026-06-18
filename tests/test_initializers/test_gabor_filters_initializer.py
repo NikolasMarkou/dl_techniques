@@ -17,7 +17,7 @@ import pytest
 
 from dl_techniques.initializers import (
     GaborFiltersInitializer,
-    create_gabor_conv2d,
+    create_gabor_depthwise_conv2d,
 )
 
 
@@ -302,65 +302,78 @@ class TestGaborFiltersInitializer:
             )
 
 
-class TestCreateGaborConv2D:
-    """Test suite for the create_gabor_conv2d builder utility."""
+class TestCreateGaborDepthwiseConv2D:
+    """Test suite for the create_gabor_depthwise_conv2d builder utility.
 
-    def test_returns_conv2d(self):
-        """The builder returns a keras.layers.Conv2D instance."""
-        layer = create_gabor_conv2d(filters=8)
-        assert isinstance(layer, keras.layers.Conv2D)
-        assert layer.filters == 8
+    The depthwise builder applies the Gabor bank PER CHANNEL (no cross-channel
+    mixing): output channels = in_channels * filters.
+    """
+
+    def test_returns_depthwise_conv2d(self):
+        """The builder returns a keras.layers.DepthwiseConv2D instance."""
+        layer = create_gabor_depthwise_conv2d(filters=8)
+        assert isinstance(layer, keras.layers.DepthwiseConv2D)
+        assert layer.depth_multiplier == 8
 
     @pytest.mark.parametrize("filters", [0, -1])
     def test_invalid_filters(self, filters):
         """filters < 1 raises ValueError."""
         with pytest.raises(ValueError):
-            create_gabor_conv2d(filters=filters)
+            create_gabor_depthwise_conv2d(filters=filters)
+
+    def test_per_channel_output_no_mixing(self):
+        """Output channels == in_channels * filters (no cross-channel mixing)."""
+        filters = 8
+        for in_ch in (1, 3):
+            layer = create_gabor_depthwise_conv2d(filters=filters, kernel_size=7)
+            y = layer(np.zeros((1, 16, 16, in_ch), dtype="float32"))
+            assert y.shape[-1] == in_ch * filters
 
     def test_kernel_matches_initializer(self):
-        """Built layer's kernel equals GaborFiltersInitializer()((kh,kw,in,filters))."""
+        """Built layer's depthwise kernel equals the Gabor bank for (kh,kw,in,filters)."""
         filters = 8
         in_ch = 3
-        kh, kw = 5, 5
-        layer = create_gabor_conv2d(filters=filters, kernel_size=5)
-
-        # Build the layer on a known input shape (1, 16, 16, 3).
+        kh, kw = 7, 7
+        layer = create_gabor_depthwise_conv2d(filters=filters, kernel_size=7)
         layer.build((None, 16, 16, in_ch))
 
+        # Keras 3.8 exposes the depthwise weight as `.kernel` with shape
+        # (kh, kw, in_ch, depth_multiplier).
         kernel = np.asarray(layer.kernel)
+        assert kernel.shape == (kh, kw, in_ch, filters)
         expected = np.asarray(
             GaborFiltersInitializer()((kh, kw, in_ch, filters))
         )
-
         np.testing.assert_allclose(kernel, expected, atol=1e-6)
+        # Same 2D bank replicated across input channels (per-channel application).
+        for c in range(1, in_ch):
+            np.testing.assert_allclose(kernel[:, :, 0, :], kernel[:, :, c, :], atol=1e-6)
 
-    def test_trainable_flag(self):
-        """trainable flag is honored on the returned layer."""
-        trainable_layer = create_gabor_conv2d(filters=4, trainable=True)
-        frozen_layer = create_gabor_conv2d(filters=4, trainable=False)
-
-        assert trainable_layer.trainable is True
+    def test_trainable_flag_defaults_frozen(self):
+        """trainable defaults to False (frozen front-end) and is honored."""
+        frozen_layer = create_gabor_depthwise_conv2d(filters=4)
+        trainable_layer = create_gabor_depthwise_conv2d(filters=4, trainable=True)
         assert frozen_layer.trainable is False
+        assert trainable_layer.trainable is True
 
     def test_builder_model_save_load(self):
-        """A model built with create_gabor_conv2d round-trips through .keras."""
-        inputs = keras.layers.Input(shape=(16, 16, 1), name="input")
-        x = create_gabor_conv2d(
+        """A model built with create_gabor_depthwise_conv2d round-trips through .keras."""
+        inputs = keras.layers.Input(shape=(16, 16, 3), name="input")
+        x = create_gabor_depthwise_conv2d(
             filters=8,
-            kernel_size=5,
-            trainable=True,
-            name="gabor_conv",
+            kernel_size=7,
+            name="gabor_depthwise",
         )(inputs)
         x = keras.layers.GlobalAveragePooling2D()(x)
         outputs = keras.layers.Dense(5, activation="softmax", name="output")(x)
 
-        model = keras.Model(inputs=inputs, outputs=outputs, name="gabor_builder_model")
+        model = keras.Model(inputs=inputs, outputs=outputs, name="gabor_depthwise_model")
 
-        test_input = keras.random.normal([2, 16, 16, 1])
+        test_input = keras.random.normal([2, 16, 16, 3])
         original_prediction = model.predict(test_input, verbose=0)
 
         with tempfile.TemporaryDirectory() as tmpdirname:
-            model_path = os.path.join(tmpdirname, "gabor_builder_model.keras")
+            model_path = os.path.join(tmpdirname, "gabor_depthwise_model.keras")
             model.save(model_path)
 
             loaded_model = keras.models.load_model(
