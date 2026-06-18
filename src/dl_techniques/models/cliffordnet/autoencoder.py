@@ -242,7 +242,6 @@ class CliffordLaplacianUNet(keras.Model):
 
         # Build sublayers via private helpers (same attrs/order/args as inline).
         self._build_encoder()
-        self._build_bottleneck()
         self._build_decoder()
         self._build_output()
 
@@ -342,21 +341,26 @@ class CliffordLaplacianUNet(keras.Model):
     # ------------------------------------------------------------------
 
     def _build_encoder(self) -> None:
-        """Build the signal pyramid and the encoder feature track."""
+        """Build the encoder feature track and the per-split-stage signal pyramid.
+
+        Clifford encodes the full incoming signal at each scale (``enc_proj`` then
+        ``enc_blocks``); the deepest stage (index ``L-1``) IS the bottleneck
+        refinement, so there is one pyramid level per SPLIT stage (``L-1`` total).
+        """
         _conv_kwargs: Dict[str, Any] = dict(
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
         )
 
-        # --- Signal pyramid (Track A): one per level, native channels ---
+        # --- Signal pyramid: one per SPLIT stage (indices 0 .. L-2) ---
         self.pyramid_levels = [
             LaplacianPyramidLevel(
                 self.blur_kernel_size, self.blur_sigma, self.blur_trainable
             )
-            for _ in range(self.num_levels)
+            for _ in range(self.num_levels - 1)
         ]
 
-        # --- Encoder (Track B): project native high band -> level width, refine ---
+        # --- Encoder feature track: project to level width, refine (incl. deepest) ---
         self.enc_proj = [
             keras.layers.Conv2D(self.level_channels[i], 1, **_conv_kwargs)
             for i in range(self.num_levels)
@@ -370,22 +374,6 @@ class CliffordLaplacianUNet(keras.Model):
 
     # ------------------------------------------------------------------
 
-    def _build_bottleneck(self) -> None:
-        """Build the bottleneck on the coarsest low band (native channels)."""
-        _conv_kwargs: Dict[str, Any] = dict(
-            kernel_initializer=self.kernel_initializer,
-            kernel_regularizer=self.kernel_regularizer,
-        )
-
-        self.bottleneck_proj = keras.layers.Conv2D(
-            self.level_channels[-1], 1, **_conv_kwargs
-        )
-        self.bottleneck_blocks = self._make_blocks(
-            self.level_blocks[-1], self.level_channels[-1], self.level_shifts[-1]
-        )
-
-    # ------------------------------------------------------------------
-
     def _build_decoder(self) -> None:
         """Build the decoder: upsample, align channels, merge + refine."""
         _conv_kwargs: Dict[str, Any] = dict(
@@ -395,17 +383,17 @@ class CliffordLaplacianUNet(keras.Model):
 
         self.dec_up = [
             keras.layers.UpSampling2D(size=(2, 2), interpolation="bilinear")
-            for _ in range(self.num_levels)
+            for _ in range(self.num_levels - 1)
         ]
         self.dec_align = [
             keras.layers.Conv2D(self.level_channels[i], 1, **_conv_kwargs)
-            for i in range(self.num_levels)
+            for i in range(self.num_levels - 1)
         ]
         self.dec_blocks = [
             self._make_blocks(
                 self.level_blocks[i], self.level_channels[i], self.level_shifts[i]
             )
-            for i in range(self.num_levels)
+            for i in range(self.num_levels - 1)
         ]
 
     # ------------------------------------------------------------------
@@ -440,48 +428,47 @@ class CliffordLaplacianUNet(keras.Model):
         if len(input_shape) == 3:
             input_shape = (None,) + tuple(input_shape)
         batch, h, w, c = input_shape
-        divisor = 2 ** self.num_levels
+        divisor = 2 ** (self.num_levels - 1)
         for dim, name in ((h, "height"), (w, "width")):
             if dim is not None and dim % divisor != 0:
                 raise ValueError(
                     f"Input {name}={dim} must be divisible by "
-                    f"2**num_levels={divisor} (the model halves spatial "
-                    f"resolution once per encoder level)."
+                    f"2**(num_levels-1)={divisor} (the model halves spatial "
+                    f"resolution once per SPLIT stage)."
                 )
 
-        # --- Encoder: walk down the signal pyramid, build feature track ---
-        cur = input_shape  # native-channel signal at current level
-        highs_shapes: List[Tuple] = []
-        for i in range(self.num_levels):
-            self.pyramid_levels[i].build(cur)
-            low_shape, high_shape = self.pyramid_levels[i].compute_output_shape(cur)
+        L = self.num_levels
 
-            # Project native high band -> level width, then refine.
-            self.enc_proj[i].build(high_shape)
-            feat_shape = self.enc_proj[i].compute_output_shape(high_shape)
+        # --- Encoder: encode the full signal at each scale, THEN split ---
+        cur = input_shape  # signal at the current scale
+        bottleneck_shape = None
+        for i in range(L):
+            self.enc_proj[i].build(cur)
+            feat_shape = self.enc_proj[i].compute_output_shape(cur)
             for blk in self.enc_blocks[i]:
                 blk.build(feat_shape)
                 feat_shape = blk.compute_output_shape(feat_shape)
-            highs_shapes.append(feat_shape)
 
-            cur = low_shape  # native-channel low band feeds the next level
+            if i < L - 1:
+                # Split stage: split ENCODED features; low band feeds next stage.
+                self.pyramid_levels[i].build(feat_shape)
+                low_shape, high_shape = self.pyramid_levels[i].compute_output_shape(
+                    feat_shape
+                )
+                cur = low_shape  # high_shape == feat_shape is the decoder skip
+            else:
+                # Deepest stage IS the bottleneck (no split).
+                bottleneck_shape = feat_shape
 
-        # --- Bottleneck on coarsest low band (native channels) ---
-        self.bottleneck_proj.build(cur)
-        b_shape = self.bottleneck_proj.compute_output_shape(cur)
-        for blk in self.bottleneck_blocks:
-            blk.build(b_shape)
-            b_shape = blk.compute_output_shape(b_shape)
-
-        # --- Decoder: collapse bottom-up ---
-        feat_shape = b_shape
-        for i in range(self.num_levels - 1, -1, -1):
+        # --- Decoder: collapse bottom-up over the L-1 split stages ---
+        feat_shape = bottleneck_shape
+        for i in range(L - 2, -1, -1):
             self.dec_up[i].build(feat_shape)
             up_shape = self.dec_up[i].compute_output_shape(feat_shape)
             self.dec_align[i].build(up_shape)
             up_shape = self.dec_align[i].compute_output_shape(up_shape)
             # merged has the same shape as the aligned upsampled features
-            # (== highs_shapes[i] by construction); refine in place.
+            # (== the level-i high-band skip by construction); refine in place.
             merged_shape = up_shape
             for blk in self.dec_blocks[i]:
                 blk.build(merged_shape)
@@ -509,28 +496,32 @@ class CliffordLaplacianUNet(keras.Model):
         Returns:
             A dict ``{"reconstruction": y}`` with ``y`` of shape ``(B, H, W, C)``.
         """
-        # --- Encoder ---
+        # DECISION plan_2026-06-18_959c992a/D-001: encode-then-split hierarchical flow.
+        # Clifford ENCODES the full incoming signal at each scale FIRST, THEN the
+        # Laplacian pyramid splits the ENCODED features (high -> skip, low -> next stage);
+        # the deepest stage is the bottleneck (no split). Do NOT revert to the prior
+        # "split raw signal first, Clifford only on the high band" topology: it left the
+        # descending low path unencoded (no hierarchical feature composition) and the
+        # "raw-signal exact-reconstruction" framing never held for the full model anyway
+        # (the decoder merges in feature space via keras.ops.add, not LaplacianPyramidLevel.merge).
         x = inputs
-        highs: List[Any] = []
+        skips: List[Any] = []
+        feat = None
         for i in range(self.num_levels):
-            low, high = self.pyramid_levels[i].split(x)
-            h = self.enc_proj[i](high)
+            e = self.enc_proj[i](x)
             for blk in self.enc_blocks[i]:
-                h = blk(h, training=training)
-            highs.append(h)
-            x = low
+                e = blk(e, training=training)
+            if i < self.num_levels - 1:
+                low, high = self.pyramid_levels[i].split(e)
+                skips.append(high)
+                x = low
+            else:
+                feat = e
 
-        # --- Bottleneck ---
-        b = self.bottleneck_proj(x)
-        for blk in self.bottleneck_blocks:
-            b = blk(b, training=training)
-
-        # --- Decoder (feature-space Laplacian merge) ---
-        feat = b
-        for i in range(self.num_levels - 1, -1, -1):
+        for i in range(self.num_levels - 2, -1, -1):
             up = self.dec_up[i](feat)
             up = self.dec_align[i](up)
-            merged = keras.ops.add(up, highs[i])
+            merged = keras.ops.add(up, skips[i])
             for blk in self.dec_blocks[i]:
                 merged = blk(merged, training=training)
             feat = merged
