@@ -27,6 +27,7 @@ import tensorflow as tf
 from train.superpoint.train_superpoint import (
     SuperPointConfig,
     _pseudo_pair_generator,
+    create_dataset,
 )
 
 
@@ -161,6 +162,53 @@ class TestPseudoPairGeneratorContract:
         # 2 entries -> third pull wraps back to the first grid_label.
         items = list(itertools.islice(_pseudo_pair_generator(config), 3))
         assert np.array_equal(items[0][2], items[2][2])
+
+
+# ---------------------------------------------------------------------
+# In-graph pipeline contract (SC3) -- regression guard for the Step-3
+# from_tensor_slices rewrite. The generator-contract test above covers the
+# Python yield contract; this one pulls a real batch through the parallel
+# tf.data pipeline (decode -> warp -> correspondence -> batch -> prefetch)
+# and asserts the batched element spec is byte-contract-identical to before.
+# ---------------------------------------------------------------------
+
+
+class TestPseudoPipelineContract:
+
+    def test_create_dataset_batch_contract(self, tmp_path):
+        _build_pseudo_set(tmp_path)
+        config = SuperPointConfig(
+            data_mode="pseudo",
+            pseudo_labels_dir=str(tmp_path),
+            input_size=INPUT_SIZE,
+            cell=CELL,
+            channels=1,
+            batch_size=4,
+            variant="tiny",
+            seed=42,
+        )
+
+        ds = create_dataset(config)
+        image, targets = next(iter(ds.take(1)))
+
+        # image: (B, H, W, 1) f32
+        assert tuple(image.shape) == (4, INPUT_SIZE, INPUT_SIZE, 1)
+        assert image.dtype == tf.float32
+
+        # keypoints (grid_label): (B, Hc, Wc) i32
+        keypoints = targets["keypoints"]
+        assert tuple(keypoints.shape) == (4, HC, HC)
+        assert keypoints.dtype == tf.int32
+
+        # warped_image: (B, H, W, 1) f32
+        warped = targets["warped_image"]
+        assert tuple(warped.shape) == (4, INPUT_SIZE, INPUT_SIZE, 1)
+        assert warped.dtype == tf.float32
+
+        # correspondence: (B, N, N) f32  with N = Hc*Wc
+        corr = targets["correspondence"]
+        assert tuple(corr.shape) == (4, N, N)
+        assert corr.dtype == tf.float32
 
 
 # ---------------------------------------------------------------------
