@@ -408,6 +408,77 @@ def create_dataset(config: SuperPointConfig) -> tf.data.Dataset:
 
 
 # ---------------------------------------------------------------------
+# BENCHMARK PROBE (input-pipeline throughput; no model attached)
+# ---------------------------------------------------------------------
+
+
+def benchmark_pipeline(
+    config: SuperPointConfig, n_batches: int = 50, warmup: int = 10
+) -> dict:
+    """Measure pure ``create_dataset`` throughput (no model attached).
+
+    Builds ``create_dataset(config)``, iterates ``warmup`` batches untimed to let
+    ``tf.data`` warm up its threads/prefetch, then times ``n_batches`` batches
+    pulling ONLY from the dataset (``for i, _ in enumerate(ds.take(n_batches))``).
+    Logs samples/sec and sec/batch. This is the BEFORE/AFTER measurement for the
+    pseudo-mode input-pipeline optimization (benchmark-gated; see decisions D-003):
+    if pipeline throughput already exceeds model-step throughput the GPU is not
+    starved and no pipeline change is warranted.
+
+    Args:
+        config: Training configuration (drives ``create_dataset``).
+        n_batches: Number of timed batches.
+        warmup: Number of untimed warmup batches pulled first.
+
+    Returns:
+        Dict with ``samples_per_sec``, ``sec_per_batch``, ``n_batches``,
+        ``batch_size``, ``elapsed_sec``.
+    """
+    ds = create_dataset(config)
+
+    logger.info(
+        f"benchmark_pipeline: data_mode={config.data_mode} "
+        f"input_size={config.input_size} batch_size={config.batch_size} "
+        f"warmup={warmup} n_batches={n_batches}"
+    )
+
+    # Warmup (untimed): let tf.data spin up prefetch/parallel-map threads.
+    for _ in ds.take(warmup):
+        pass
+
+    start = time.perf_counter()
+    pulled = 0
+    for i, _ in enumerate(ds.take(n_batches)):
+        pulled = i + 1
+    elapsed = time.perf_counter() - start
+
+    if elapsed <= 0.0 or pulled == 0:
+        raise RuntimeError(
+            f"benchmark_pipeline: no batches timed (pulled={pulled}, "
+            f"elapsed={elapsed}); dataset may be empty"
+        )
+
+    samples = pulled * config.batch_size
+    samples_per_sec = samples / elapsed
+    sec_per_batch = elapsed / pulled
+
+    logger.info(
+        f"benchmark_pipeline RESULT: {samples_per_sec:.2f} samples/sec | "
+        f"{sec_per_batch * 1000.0:.2f} ms/batch | "
+        f"{pulled} batches x {config.batch_size} = {samples} samples in "
+        f"{elapsed:.3f}s"
+    )
+
+    return {
+        "samples_per_sec": samples_per_sec,
+        "sec_per_batch": sec_per_batch,
+        "n_batches": pulled,
+        "batch_size": config.batch_size,
+        "elapsed_sec": elapsed,
+    }
+
+
+# ---------------------------------------------------------------------
 # JOINT MODEL (custom train_step -- design (a))
 # ---------------------------------------------------------------------
 
@@ -670,6 +741,25 @@ def parse_arguments() -> argparse.Namespace:
         help="Force tiny config (input 64, batch 2, 1 epoch, 2 steps) and "
         "exercise the MagicPoint handoff path via a temp self-save.",
     )
+    parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        help="Measure pure input-pipeline throughput (samples/sec) via "
+        "benchmark_pipeline() and EXIT before building/fitting the model. "
+        "Use with --data-mode/--pseudo-labels-dir/--input-size/--batch-size.",
+    )
+    parser.add_argument(
+        "--benchmark-batches",
+        type=int,
+        default=50,
+        help="Number of timed batches for --benchmark (after warmup).",
+    )
+    parser.add_argument(
+        "--benchmark-warmup",
+        type=int,
+        default=10,
+        help="Number of untimed warmup batches for --benchmark.",
+    )
     parser.add_argument("--gpu", type=int, default=None, help="GPU device index")
     return parser.parse_args()
 
@@ -705,6 +795,16 @@ def main():
         f"det_w={config.detector_weight}, desc_w={config.descriptor_weight}, "
         f"smoke={config.smoke}"
     )
+
+    # Benchmark probe: measure pure input-pipeline throughput and EXIT before
+    # building/fitting the model (benchmark-gated optimization, decisions D-003).
+    if args.benchmark:
+        benchmark_pipeline(
+            config,
+            n_batches=args.benchmark_batches,
+            warmup=args.benchmark_warmup,
+        )
+        return
 
     try:
         train_superpoint(config)
