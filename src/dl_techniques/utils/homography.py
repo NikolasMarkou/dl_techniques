@@ -318,3 +318,270 @@ def warp_points(points: ArrayLike, homography: ArrayLike) -> np.ndarray:
     if single:
         out = out[0]
     return out.astype(np.float32)
+
+
+# ---------------------------------------------------------------------
+# IN-GRAPH (tf.data) PORTS
+# ---------------------------------------------------------------------
+#
+# The functions below are pure-tf reimplementations of the numpy primitives
+# above, written for use inside a `tf.data` pipeline `.map(num_parallel_calls=
+# AUTOTUNE)` (CPU graph mode). They contain NO `.numpy()` / eager-only calls and
+# NO host round-trips. The numpy versions remain the parity reference (HA stage-3
+# and the synthetic stage-4 generator still call them); the tf ports are gated by
+# the parity tests in `tests/test_utils/test_homography_tf.py`.
+#
+# DECISION plan_2026-06-18_37e1ce56/D-001: these are a FULL tf-graph port, NOT a
+# `tf.py_function` wrapper. Do not "simplify" by wrapping the numpy versions in
+# tf.py_function — that was deliberately rejected (per-element Python-callback
+# dispatch + pinned object lifetimes across the C++ boundary defeat the parallel
+# `.map` throughput goal). The numpy functions above MUST stay unchanged: they
+# are the parity reference and are still called by HA stage-3 + synthetic
+# stage-4. See decisions.md D-001.
+
+
+def warp_image_tf(
+    image: "tf.Tensor",
+    h_mat: "tf.Tensor",
+    output_size: Optional[Tuple[int, int]] = None,
+    interpolation: str = "bilinear",
+) -> "tf.Tensor":
+    """In-graph warp of a single image by a forward homography (tf port).
+
+    Pure-tf equivalent of :func:`warp_image` for the single-image
+    ``(H, W, C)`` case used inside a ``tf.data`` ``.map``. Replicates
+    :func:`_homography_to_flat_inverse` with ``tf.linalg.inv`` and feeds the
+    8-param OUTPUT->INPUT transform to ``tf.raw_ops.ImageProjectiveTransformV3``
+    in the SAME element order and with the SAME interpolation/fill_mode as the
+    numpy path.
+
+    Args:
+        image: ``(H, W, C)`` ``float32`` tensor (single image; no batch dim).
+        h_mat: ``(3, 3)`` ``float32`` forward homography (input -> output).
+        output_size: Optional ``(H_out, W_out)``. Defaults to the input size.
+        interpolation: ``"bilinear"`` or ``"nearest"``.
+
+    Returns:
+        ``(H, W, C)`` ``float32`` warped image tensor.
+    """
+    img = tf.cast(image, tf.float32)
+    h64 = tf.cast(h_mat, tf.float64)
+
+    # --- _homography_to_flat_inverse in tf ---
+    # inv = inv(H); normalize by inv[2,2]; take first 8 in row-major order
+    # i.e. [a00, a01, a02, a10, a11, a12, a20, a21] (a8==1 implicit).
+    inv = tf.linalg.inv(h64)
+    inv = inv / inv[2, 2]
+    flat = tf.reshape(inv, [-1])[:8]
+    flat = tf.cast(flat, tf.float32)
+    transforms = flat[tf.newaxis, :]  # (1, 8)
+
+    if output_size is None:
+        shp = tf.shape(img)
+        out_h, out_w = shp[0], shp[1]
+    else:
+        out_h = tf.constant(int(output_size[0]), dtype=tf.int32)
+        out_w = tf.constant(int(output_size[1]), dtype=tf.int32)
+
+    interp = interpolation.upper()
+    if interp not in ("BILINEAR", "NEAREST"):
+        raise ValueError(
+            f"interpolation must be 'bilinear' or 'nearest', got "
+            f"'{interpolation}'."
+        )
+
+    warped = tf.raw_ops.ImageProjectiveTransformV3(
+        images=img[tf.newaxis, ...],
+        transforms=transforms,
+        output_shape=tf.stack([out_h, out_w]),
+        fill_value=0.0,
+        interpolation=interp,
+        fill_mode="CONSTANT",
+    )
+    return warped[0]
+
+
+def sample_homography_tf(
+    image_size: Tuple[int, int],
+    seed: "tf.Tensor",
+    *,
+    rotation: float = _DEFAULT_ROTATION,
+    scale: Tuple[float, float] = _DEFAULT_SCALE,
+    perspective: float = _DEFAULT_PERSPECTIVE,
+    translation: float = _DEFAULT_TRANSLATION,
+    shear: float = _DEFAULT_SHEAR,
+) -> "tf.Tensor":
+    """Sample a random 3x3 homography in pixel coords, in-graph (tf port).
+
+    Pure-tf equivalent of :func:`sample_homography` using
+    ``tf.random.stateless_uniform`` (so each per-element ``seed`` yields a
+    fresh-but-reproducible homography inside a ``tf.data`` ``.map``). Replicates
+    the SAME composition and the SAME magnitude ranges/constants
+    (``_DEFAULT_*``):
+
+        H = from_center @ T @ P @ S @ Sh @ R @ to_center
+
+    Because numpy advances a single serial RNG while tf draws stateless per
+    element, the EXACT realized sequence differs (D-001); distribution, ranges,
+    and structure match.
+
+    Args:
+        image_size: ``(H, W)`` image size in pixels.
+        seed: length-2 ``int32``/``int64`` tensor for ``stateless_uniform``.
+        rotation: Max absolute rotation in radians (``[-rotation, rotation]``).
+        scale: ``(lo, hi)`` per-axis uniform scale range.
+        perspective: Max absolute perspective coefficient (normalized by size).
+        translation: Max absolute translation as a fraction of ``(W, H)``.
+        shear: Max absolute shear angle in radians.
+
+    Returns:
+        A ``(3, 3)`` ``float32`` tensor with ``[2, 2]`` normalized to ``1.0``.
+    """
+    height = tf.cast(image_size[0], tf.float64)
+    width = tf.cast(image_size[1], tf.float64)
+    seed = tf.cast(seed, tf.int32)
+
+    # Each parameter draws from an independent stateless stream (distinct seeds)
+    # so they are mutually decorrelated, matching the 8 serial numpy draws.
+    def _u(lo: float, hi: float, sub: int) -> "tf.Tensor":
+        s = seed + tf.constant([sub, sub * 7 + 1], dtype=tf.int32)
+        r = tf.random.stateless_uniform([], seed=s, dtype=tf.float64)
+        return r * (hi - lo) + lo
+
+    one = tf.constant(1.0, dtype=tf.float64)
+    zero = tf.constant(0.0, dtype=tf.float64)
+
+    # --- rotation about origin ---
+    theta = _u(-rotation, rotation, 0)
+    cos_t, sin_t = tf.cos(theta), tf.sin(theta)
+    r_mat = tf.stack(
+        [
+            tf.stack([cos_t, -sin_t, zero]),
+            tf.stack([sin_t, cos_t, zero]),
+            tf.stack([zero, zero, one]),
+        ]
+    )
+
+    # --- anisotropic scale ---
+    sx = _u(scale[0], scale[1], 1)
+    sy = _u(scale[0], scale[1], 2)
+    s_mat = tf.stack(
+        [
+            tf.stack([sx, zero, zero]),
+            tf.stack([zero, sy, zero]),
+            tf.stack([zero, zero, one]),
+        ]
+    )
+
+    # --- shear ---
+    sh = _u(-shear, shear, 3)
+    sh_mat = tf.stack(
+        [
+            tf.stack([one, tf.tan(sh), zero]),
+            tf.stack([zero, one, zero]),
+            tf.stack([zero, zero, one]),
+        ]
+    )
+
+    # --- translation (fraction of image size -> pixels) ---
+    tx = _u(-translation, translation, 4) * width
+    ty = _u(-translation, translation, 5) * height
+    t_mat = tf.stack(
+        [
+            tf.stack([one, zero, tx]),
+            tf.stack([zero, one, ty]),
+            tf.stack([zero, zero, one]),
+        ]
+    )
+
+    # --- perspective (bottom row), normalized by image size ---
+    g = _u(-perspective, perspective, 6) / width
+    h = _u(-perspective, perspective, 7) / height
+    p_mat = tf.stack(
+        [
+            tf.stack([one, zero, zero]),
+            tf.stack([zero, one, zero]),
+            tf.stack([g, h, one]),
+        ]
+    )
+
+    # --- center pivot ---
+    cx, cy = width / 2.0, height / 2.0
+    to_center = tf.stack(
+        [
+            tf.stack([one, zero, -cx]),
+            tf.stack([zero, one, -cy]),
+            tf.stack([zero, zero, one]),
+        ]
+    )
+    from_center = tf.stack(
+        [
+            tf.stack([one, zero, cx]),
+            tf.stack([zero, one, cy]),
+            tf.stack([zero, zero, one]),
+        ]
+    )
+
+    h_mat = from_center @ t_mat @ p_mat @ s_mat @ sh_mat @ r_mat @ to_center
+    h_mat = h_mat / h_mat[2, 2]
+    return tf.cast(h_mat, tf.float32)
+
+
+def _cell_correspondence_tf(
+    h_mat: "tf.Tensor", H: int, W: int, cell: int
+) -> "tf.Tensor":
+    """In-graph H/8-grid correspondence matrix for a homography pair (tf port).
+
+    Pure-tf equivalent of ``_cell_correspondence`` (train_superpoint.py). Builds
+    coarse cell-center ``(x, y)`` coords, FORWARD-warps them through ``h_mat``
+    (homogeneous ``tf.matmul``, NOT the inverse — matching numpy ``warp_points``),
+    floor-divides into destination cell indices, masks out-of-bounds, and
+    ``tf.scatter_nd``s ``1.0`` at ``(src_idx, dst_idx)``. Row-major index
+    convention ``i = cy * Wc + cx`` matches the numpy reference exactly.
+
+    Args:
+        h_mat: ``(3, 3)`` ``float32`` forward homography (image -> warped).
+        H: Image height in pixels.
+        W: Image width in pixels.
+        cell: Detector/descriptor cell size (8).
+
+    Returns:
+        ``(N, N)`` ``float32`` correspondence matrix, ``N = (H//cell)*(W//cell)``.
+    """
+    Hc, Wc = H // cell, W // cell
+    n = Hc * Wc
+
+    # Cell-center pixel coords (x, y), row-major (i = cy*Wc + cx) — matches numpy
+    # np.meshgrid(arange(Hc), arange(Wc), indexing="ij").
+    cy, cx = tf.meshgrid(tf.range(Hc), tf.range(Wc), indexing="ij")
+    cx_f = (tf.cast(tf.reshape(cx, [-1]), tf.float64) + 0.5) * cell
+    cy_f = (tf.cast(tf.reshape(cy, [-1]), tf.float64) + 0.5) * cell
+
+    # Homogeneous forward warp: [x', y', w'] = H @ [x, y, 1].
+    h64 = tf.cast(h_mat, tf.float64)
+    ones = tf.ones([n], dtype=tf.float64)
+    homo = tf.stack([cx_f, cy_f, ones], axis=1)  # (N, 3)
+    warped = tf.matmul(homo, h64, transpose_b=True)  # (N, 3)
+
+    w = warped[:, 2]
+    # Guard division (same intent as numpy warp_points' near-zero guard).
+    w = tf.where(
+        tf.abs(w) < 1e-12, tf.sign(w) * 1e-12 + 1e-12, w
+    )
+    out_x = warped[:, 0] / w
+    out_y = warped[:, 1] / w
+
+    wx = tf.cast(tf.floor(out_x / cell), tf.int64)
+    wy = tf.cast(tf.floor(out_y / cell), tf.int64)
+    in_bounds = (
+        (wx >= 0) & (wx < Wc) & (wy >= 0) & (wy < Hc)
+    )
+
+    src_all = tf.range(n, dtype=tf.int64)
+    src = tf.boolean_mask(src_all, in_bounds)
+    dst = tf.boolean_mask(wy * Wc + wx, in_bounds)
+
+    indices = tf.stack([src, dst], axis=1)  # (M, 2)
+    updates = tf.ones([tf.shape(indices)[0]], dtype=tf.float32)
+    corr = tf.scatter_nd(indices, updates, shape=[n, n])
+    return corr
