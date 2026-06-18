@@ -23,6 +23,7 @@ The following layers are supported by the factory system:
 | `hierarchical_routing` | `RoutingProbabilitiesLayer(mode="trainable")` | Trainable probabilistic routing tree for `O(log N)` classification. |
 | `mish` | `Mish` | Self-regularized, non-monotonic activation. |
 | `monotonicity` | `MonotonicityLayer` | Enforces monotonic constraints (e.g., for quantile regression). |
+| `nm_erf` | `NMErf` | NMErf activation: tanh(x) * exp(1 - (x^3 - m)^2), a localized tuning-curve response (param m, default 1.5). |
 | `relu` | `keras.layers.ReLU` | Standard Rectified Linear Unit. |
 | `relu_k` | `ReLUK` | Powered ReLU activation: `max(0, x)^k`. |
 | `routing_probabilities` | `RoutingProbabilitiesLayer` | Parameter-free hierarchical routing using cosine basis patterns (`mode="deterministic"`). |

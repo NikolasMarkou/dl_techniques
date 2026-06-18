@@ -19,6 +19,7 @@ from .hard_sigmoid import HardSigmoid
 from .hard_swish import HardSwish
 from .mish import Mish, SaturatedMish
 from .monotonicity_layer import MonotonicityLayer
+from .nm_erf import NMErf, nm_erf
 from .relu_k import ReLUK
 from .routing_probabilities import RoutingProbabilitiesLayer
 from .sparsemax import Sparsemax
@@ -45,6 +46,7 @@ __all__ = [
     "HardSwish",
     "Mish", "SaturatedMish",
     "MonotonicityLayer",
+    "NMErf", "nm_erf",
     "ReLUK",
     "RoutingProbabilitiesLayer",
     "Sparsemax",
