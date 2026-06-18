@@ -131,6 +131,67 @@ class TestSaveLoad:
 
 
 # ---------------------------------------------------------------------
+# encode() bottleneck accessor (Step 1/2)
+# ---------------------------------------------------------------------
+
+class TestEncode:
+    """Cover the public ``encode()`` bottleneck accessor."""
+
+    def _assert_bottleneck(self, m, x):
+        """encode(x) == deepest stage: spatial/2^(L-1), level_channels[-1]."""
+        b, h, w = x.shape[0], x.shape[1], x.shape[2]
+        div = 2 ** (m.num_levels - 1)
+        z = m.encode(x)
+        assert tuple(z.shape) == (
+            b, h // div, w // div, m.level_channels[-1],
+        ), (
+            f"encode() bottleneck shape mismatch: got {tuple(z.shape)}, "
+            f"expected {(b, h // div, w // div, m.level_channels[-1])}"
+        )
+
+    def test_encode_bottleneck_shape_2level(self):
+        # 2 levels => divisor 2; channels = level_channels[-1] = 16.
+        m = _tiny_model()
+        x = np.random.RandomState(10).randn(2, 32, 32, 3).astype("float32")
+        self._assert_bottleneck(m, x)
+
+    def test_encode_bottleneck_shape_3level(self):
+        # 3 levels => divisor 4; channels = level_channels[-1] = 32.
+        m = _tiny_model(level_channels=(8, 16, 32), level_blocks=(1, 1, 1))
+        x = np.random.RandomState(11).randn(2, 64, 64, 3).astype("float32")
+        self._assert_bottleneck(m, x)
+
+    def test_encode_bottleneck_shape_small_variant(self):
+        # `small` is a 3-level variant => divisor 4.
+        m = create_clifford_laplacian_unet("small")
+        x = np.random.RandomState(12).randn(1, 64, 64, 3).astype("float32")
+        self._assert_bottleneck(m, x)
+
+    def test_encode_keras_roundtrip(self, tmp_path):
+        """encode() AND reconstruction must match after .keras round-trip."""
+        m = _tiny_model(level_channels=(8, 16, 32), level_blocks=(1, 1, 1))
+        x = np.random.RandomState(13).randn(2, 64, 64, 3).astype("float32")
+        recon1 = keras.ops.convert_to_numpy(m(x)["reconstruction"])
+        z1 = keras.ops.convert_to_numpy(m.encode(x))
+
+        path = os.path.join(str(tmp_path), "m.keras")
+        m.save(path)
+        m2 = keras.models.load_model(path)
+
+        recon2 = keras.ops.convert_to_numpy(m2(x)["reconstruction"])
+        z2 = keras.ops.convert_to_numpy(m2.encode(x))
+
+        np.testing.assert_allclose(
+            recon1, recon2, atol=1e-4,
+            err_msg="reconstruction differs after .keras round-trip",
+        )
+        np.testing.assert_allclose(
+            z1, z2, atol=1e-4,
+            err_msg="encode() bottleneck differs after .keras round-trip",
+        )
+
+
+# ---------------------------------------------------------------------
 # Variants + factory + imports
 # ---------------------------------------------------------------------
 
