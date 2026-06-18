@@ -41,20 +41,21 @@ the model (``CliffordLaplacianUNet``) and imports the helper from there.
 
 from __future__ import annotations
 
+import keras
 from typing import Any, Dict, List, Optional, Tuple
 
-import keras
+# ---------------------------------------------------------------------------
+# Local imports
+# ---------------------------------------------------------------------------
 
-from dl_techniques.layers.gaussian_filter import GaussianFilter
-from dl_techniques.layers.blur_pool import BlurPool2D
+from dl_techniques.utils.logger import logger
 from dl_techniques.layers.laplacian_filter import LaplacianPyramidLevel
 from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
-from dl_techniques.utils.logger import logger
 
 
-# ===========================================================================
+# ---------------------------------------------------------------------------
 # CliffordLaplacianUNet
-# ===========================================================================
+# ---------------------------------------------------------------------------
 
 
 @keras.saving.register_keras_serializable()
@@ -684,3 +685,5 @@ def create_clifford_laplacian_unet(
     return CliffordLaplacianUNet.from_variant(
         variant, in_channels=in_channels, **kwargs
     )
+
+# ---------------------------------------------------------------------
