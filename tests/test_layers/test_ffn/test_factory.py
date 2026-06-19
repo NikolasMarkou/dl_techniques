@@ -674,7 +674,9 @@ class TestFFNFactory:
             'differential',
             'glu', 'geglu', 'gelu_tanh', 'residual', 'swin_mlp',
             'counting', 'gated_mlp', 'power_mlp',  'orthoglu', 'logic',
-            'kan', 'tversky'
+            'kan', 'tversky',
+            # plan_2026-06-19_2ea7a9a0: 4 new classes + 2 GLUFFN aliases
+            'monarch', 'mixer', 'squared_relu', 'lowrank', 'reglu', 'bilinear'
         }
         actual_types = set(info.keys())
 
