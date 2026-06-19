@@ -14,6 +14,7 @@ from .counting_ffn import CountingFFN
 from .kan_linear import KANLinear
 from .tversky_projection import TverskyProjectionLayer
 from .monarch_ffn import MonarchFFN
+from .mlp_mixer_block import MixerBlock
 
 from .factory import (
     FFNType,
@@ -45,6 +46,7 @@ __all__ = [
     "KANLinear",
     "TverskyProjectionLayer",
     "MonarchFFN",
+    "MixerBlock",
     # Factory interface
     "FFNType",
     "create_ffn_layer",

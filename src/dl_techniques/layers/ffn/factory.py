@@ -81,6 +81,7 @@ from .power_mlp_layer import PowerMLPLayer
 from .kan_linear import KANLinear
 from .tversky_projection import TverskyProjectionLayer
 from .monarch_ffn import MonarchFFN
+from .mlp_mixer_block import MixerBlock
 
 # ---------------------------------------------------------------------
 # Type definition for FFN types
@@ -95,6 +96,7 @@ FFNType = Literal[
     'glu',
     'kan',
     'logic',
+    'mixer',
     'mlp',
     'monarch',
     'orthoglu',
@@ -246,6 +248,26 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             'bias_regularizer': None
         },
         'use_case': 'General purpose feed-forward processing in transformers'
+    },
+    'mixer': {
+        'class': MixerBlock,
+        'description': (
+            'Canonical MLP-Mixer block on rank-3 (B,S,C): pre-LN residual '
+            'token-mixing MLP (over the token axis via transpose) followed by a '
+            'pre-LN residual channel-mixing MLP (over the channel axis) '
+            '(Tolstikhin et al. 2021). Output shape == input shape.'
+        ),
+        'required_params': ['tokens_mlp_dim', 'channels_mlp_dim'],
+        'optional_params': {
+            'activation': 'gelu',
+            'dropout_rate': 0.0,
+            'use_bias': True,
+            'kernel_initializer': 'glorot_uniform',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'bias_regularizer': None
+        },
+        'use_case': 'Attention-free token+channel mixing for patch/token sequences'
     },
     'monarch': {
         'class': MonarchFFN,
@@ -409,7 +431,7 @@ def validate_ffn_config(ffn_type: str, **kwargs: Any) -> None:
         if not (0.0 <= dropout_rate <= 1.0):
             raise ValueError(f"dropout_rate must be between 0.0 and 1.0, got {dropout_rate}")
 
-    positive_dims = ['hidden_dim', 'output_dim', 'count_dim', 'logic_dim', 'filters', 'units', 'features', 'num_features']
+    positive_dims = ['hidden_dim', 'output_dim', 'count_dim', 'logic_dim', 'filters', 'units', 'features', 'num_features', 'tokens_mlp_dim', 'channels_mlp_dim']
     for dim_param in positive_dims:
         if dim_param in kwargs and kwargs[dim_param] is not None:
             if kwargs[dim_param] <= 0:
