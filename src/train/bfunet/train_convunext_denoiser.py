@@ -513,7 +513,6 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         self.max_samples = max_samples
         self.val_ds = val_ds
         self.validation_steps = validation_steps
-        self._psnr_history: List[float] = []
         self._hist = {k: [] for k in (
             "epoch", "loss", "val_loss", "mae", "val_mae",
             "psnr", "val_psnr", "sigma_max", "lr",
@@ -560,8 +559,6 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
                 self._hist["val_psnr"].append(float(res.get("psnr_metric", float("nan"))))
                 self._hist["sigma_max"].append(float(self.sigma_max_var))
                 self._hist["lr"].append(lr_val)
-                if "psnr_metric" in res:
-                    self._psnr_history.append(float(res["psnr_metric"]))
                 render_training_dashboard(
                     self._hist, self.viz_dir / "training_dashboard.png",
                     title="Training dashboard - epoch 0 (untrained baseline)",
@@ -575,8 +572,6 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
 
     def on_epoch_end(self, epoch: int, logs=None):
         logs = logs or {}
-        if "val_psnr_metric" in logs:
-            self._psnr_history.append(float(logs["val_psnr_metric"]))
 
         # Record per-epoch scalars for the combined dashboard. sigma_max is the
         # value the curriculum used this epoch; lr is read from the live optimizer.
@@ -607,7 +602,6 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
             return
         try:
             self._save_grid(epoch + 1)
-            self._save_psnr_curve()
         except Exception as e:  # visualization must never break training
             logger.warning(f"Visualization failed at epoch {epoch + 1}: {e}")
         finally:
@@ -651,22 +645,6 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         plt.savefig(path, dpi=120, bbox_inches="tight")
         plt.close(fig)
         logger.info(f"Saved denoising grid: {path}")
-
-    def _save_psnr_curve(self):
-        # Use the consistent _hist arrays (epoch x-axis = epochs completed, starts
-        # at 0 when the untrained baseline was recorded in on_train_begin).
-        xs, ys = self._hist["epoch"], self._hist["val_psnr"]
-        if not xs:
-            return
-        fig = plt.figure(figsize=(6, 4))
-        plt.plot(xs, ys, marker="o", lw=1.5)
-        plt.xlabel("epoch (0 = untrained)")
-        plt.ylabel("val PSNR (dB)")
-        plt.title("Validation PSNR")
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        plt.savefig(self.viz_dir / "val_psnr_curve.png", dpi=120, bbox_inches="tight")
-        plt.close(fig)
 
 
 class LRLoggerCallback(keras.callbacks.Callback):
