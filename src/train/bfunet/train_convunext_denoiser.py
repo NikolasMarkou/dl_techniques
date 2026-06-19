@@ -507,7 +507,9 @@ def main():
             steps_per_epoch=3,
             validation_steps=2,
             warmup_epochs=0,
-            lr_schedule_type="constant",
+            # Mechanism check only; cosine_decay is the only supported schedule
+            # (builder has no 'constant'). 2-epoch PSNR quality is NOT asserted.
+            lr_schedule_type="cosine_decay",
             learning_rate=1e-3,
             sigma_max_start=0.05,
             sigma_max_end=0.5,
