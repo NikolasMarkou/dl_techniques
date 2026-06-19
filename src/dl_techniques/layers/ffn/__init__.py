@@ -16,6 +16,7 @@ from .tversky_projection import TverskyProjectionLayer
 from .monarch_ffn import MonarchFFN
 from .mlp_mixer_block import MixerBlock
 from .squared_relu_ffn import SquaredReLUFFN
+from .lowrank_ffn import LowRankFFN
 
 from .factory import (
     FFNType,
@@ -49,6 +50,7 @@ __all__ = [
     "MonarchFFN",
     "MixerBlock",
     "SquaredReLUFFN",
+    "LowRankFFN",
     # Factory interface
     "FFNType",
     "create_ffn_layer",

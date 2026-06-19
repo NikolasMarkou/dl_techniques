@@ -83,6 +83,7 @@ from .tversky_projection import TverskyProjectionLayer
 from .monarch_ffn import MonarchFFN
 from .mlp_mixer_block import MixerBlock
 from .squared_relu_ffn import SquaredReLUFFN
+from .lowrank_ffn import LowRankFFN
 
 # ---------------------------------------------------------------------
 # Type definition for FFN types
@@ -97,6 +98,7 @@ FFNType = Literal[
     'glu',
     'kan',
     'logic',
+    'lowrank',
     'mixer',
     'mlp',
     'monarch',
@@ -250,6 +252,26 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             'bias_regularizer': None
         },
         'use_case': 'General purpose feed-forward processing in transformers'
+    },
+    'lowrank': {
+        'class': LowRankFFN,
+        'description': (
+            'Low-rank factorized FFN: each expand/contract projection is a '
+            'product Dense(rank, no bias) -> Dense(out), giving a sub-quadratic '
+            'parameter count when rank << dims. Same shape contract as MLPBlock.'
+        ),
+        'required_params': ['hidden_dim', 'output_dim'],
+        'optional_params': {
+            'rank': None,
+            'activation': 'gelu',
+            'dropout_rate': 0.0,
+            'use_bias': True,
+            'kernel_initializer': 'glorot_uniform',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'bias_regularizer': None
+        },
+        'use_case': 'Parameter-efficient FFN via low-rank factorized projections'
     },
     'mixer': {
         'class': MixerBlock,
@@ -480,6 +502,9 @@ def validate_ffn_config(ffn_type: str, **kwargs: Any) -> None:
             nblocks = kwargs['nblocks']
             if not isinstance(nblocks, int) or nblocks <= 0:
                 raise ValueError(f"nblocks must be a positive integer, got {nblocks}")
+    elif ffn_type == 'lowrank':
+        if 'rank' in kwargs and kwargs['rank'] is not None and kwargs['rank'] <= 0:
+            raise ValueError(f"rank must be positive, got {kwargs['rank']}")
     elif ffn_type == 'power_mlp':
         if 'k' in kwargs:
             k = kwargs['k']
