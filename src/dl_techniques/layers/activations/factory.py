@@ -27,7 +27,6 @@ from .hard_sigmoid import HardSigmoid
 from .hard_swish import HardSwish
 from .mish import Mish, SaturatedMish
 from .monotonicity_layer import MonotonicityLayer
-from .nm_erf import NMErf
 from .relu_k import ReLUK
 from .routing_probabilities import RoutingProbabilitiesLayer
 from .sparsemax import Sparsemax
@@ -49,7 +48,6 @@ ActivationType = Literal[
     'hierarchical_routing',
     'mish',
     'monotonicity',
-    'nm_erf',
     'relu',
     'relu_k',
     'routing_probabilities',
@@ -184,13 +182,6 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'epsilon': 1e-7
         },
         'use_case': 'Quantile regression, survival analysis, dose-response modeling.'
-    },
-    'nm_erf': {
-        'class': NMErf,
-        'description': 'NMErf: tanh(x) * exp(1 - (x^3 - m)^2), a localized tuning-curve activation.',
-        'required_params': [],
-        'optional_params': {'m': 1.5},
-        'use_case': 'Localized, neuron-tuning-curve-like response; the bump peaks near x = m^(1/3).'
     },
     'relu': {
         'class': keras.layers.ReLU,
