@@ -90,6 +90,7 @@ from .lowrank_ffn import LowRankFFN
 # ---------------------------------------------------------------------
 
 FFNType = Literal[
+    'bilinear',
     'counting',
     'differential',
     'gated_mlp',
@@ -104,6 +105,7 @@ FFNType = Literal[
     'monarch',
     'orthoglu',
     'power_mlp',
+    'reglu',
     'residual',
     'squared_relu',
     'swiglu',
@@ -203,6 +205,36 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             'bias_regularizer': None
         },
         'use_case': 'Gated processing for improved gradient flow'
+    },
+    'reglu': {
+        'class': GLUFFN,
+        'description': "ReGLU: ReLU-gated GLU FFN (Shazeer 2020) — alias of GLUFFN with activation='relu'",
+        'required_params': ['hidden_dim', 'output_dim'],
+        'optional_params': {
+            'activation': 'relu',
+            'dropout_rate': 0.0,
+            'use_bias': True,
+            'kernel_initializer': 'glorot_uniform',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'bias_regularizer': None
+        },
+        'use_case': 'ReLU-gated FFN variant (Shazeer 2020 GLU variants)'
+    },
+    'bilinear': {
+        'class': GLUFFN,
+        'description': "Bilinear GLU FFN (Shazeer 2020) — alias of GLUFFN with activation='linear' (no gate nonlinearity)",
+        'required_params': ['hidden_dim', 'output_dim'],
+        'optional_params': {
+            'activation': 'linear',
+            'dropout_rate': 0.0,
+            'use_bias': True,
+            'kernel_initializer': 'glorot_uniform',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'bias_regularizer': None
+        },
+        'use_case': 'Bilinear (identity-gated) FFN variant (Shazeer 2020 GLU variants)'
     },
     'kan': {
         'class': KANLinear,
