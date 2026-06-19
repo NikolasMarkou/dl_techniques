@@ -4,7 +4,7 @@ The `dl_techniques.layers.ffn` module provides a comprehensive collection of fee
 
 ## Overview
 
-This module includes fifteen different FFN layer types and a factory system for standardized creation and parameter validation. All layers are designed for modern Keras 3.x compatibility with full serialization support.
+This module includes twenty-one different FFN layer types and a factory system for standardized creation and parameter validation. All layers are designed for modern Keras 3.x compatibility with full serialization support.
 
 ## Available FFN Types
 
@@ -12,6 +12,7 @@ The following layers are supported by the factory system with automated paramete
 
 | Type | Class | Description | Use Case |
 |---|---|---|---|
+| `bilinear` | `GLUFFN` (alias) | Bilinear GLU: GLUFFN with `activation='linear'` (no gate nonlinearity, Shazeer 2020) | Identity-gated FFN variant |
 | `counting` | `CountingFFN` | Learns to count features in a sequence | Sequence processing with counting requirements |
 | `differential` | `DifferentialFFN` | Dual-pathway differential processing | Enhanced feature processing with opponent signals |
 | `gated_mlp` | `GatedMLP` | Spatially-gated MLP using 1x1 convolutions | Vision models, efficient attention alternative |
@@ -20,10 +21,15 @@ The following layers are supported by the factory system with automated paramete
 | `glu` | `GLUFFN` | Gated Linear Unit with configurable activation | Gated processing for improved gradient flow |
 | `kan` | `KANLinear` | Kolmogorov-Arnold linear layer with B-spline learnable activations | Expressive per-connection nonlinearities; supports N-D inputs |
 | `logic` | `LogicFFN` | FFN with learnable soft logic operations | Tasks requiring symbolic-like reasoning |
+| `lowrank` | `LowRankFFN` | Low-rank factorized FFN (`Dense(rank, no bias) -> Dense(out)` per projection) | Parameter-efficient FFN when rank << dims |
+| `mixer` | `MixerBlock` | Canonical MLP-Mixer token+channel mixing block (rank-3 `(B,S,C)` only) | Attention-free token/channel mixing for patch/token sequences |
 | `mlp` | `MLPBlock` | Standard MLP with intermediate expansion | General purpose feed-forward processing |
+| `monarch` | `MonarchFFN` | Order-2 Monarch-structured FFN (product of two block-diagonal factors) | Sub-quadratic structured replacement for dense FFN projections |
 | `orthoglu` | `OrthoGLUFFN` | Orthogonally-regularized GLU FFN | Deep networks needing stable training dynamics |
 | `power_mlp` | `PowerMLPLayer` | Dual-branch MLP for enhanced expressiveness | Approximating complex, non-linear functions |
+| `reglu` | `GLUFFN` (alias) | ReGLU: GLUFFN with `activation='relu'` (ReLU-gated GLU, Shazeer 2020) | ReLU-gated FFN variant |
 | `residual` | `ResidualBlock` | Residual block with skip connections | Deep networks requiring gradient flow |
+| `squared_relu` | `SquaredReLUFFN` | Primer squared-ReLU FFN (fixed `relu(x)**2` nonlinearity, So et al. 2021) | Transformer FFN with squared-ReLU activation |
 | `swiglu` | `SwiGLUFFN` | SwiGLU with gating mechanism | Modern transformer architectures (LLaMa, Qwen) |
 | `swin_mlp` | `SwinMLP` | Swin Transformer MLP variant | Vision models and windowed attention |
 | `tversky` | `TverskyProjectionLayer` | Asymmetric Tversky-similarity projection (rank-2 inputs only) | Similarity-based Dense alternative; psychologically-grounded |
@@ -283,6 +289,102 @@ tversky = create_ffn_layer(
     num_features=64,
     intersection_reduction='product',
     difference_reduction='subtractmatch'
+)
+```
+
+### MonarchFFN
+**Required:** `hidden_dim`, `output_dim`  
+**Optional:** `nblocks` (default: 4), `activation` (default: 'gelu'), `dropout_rate` (default: 0.0), `use_bias` (default: True), `kernel_initializer`, `bias_initializer`, `kernel_regularizer`, `bias_regularizer`
+
+Order-2 Monarch-structured FFN (Dao et al. 2022, arXiv:2204.00595). Each expand/contract projection is a Monarch map = product of two block-diagonal factors interleaved with a reshape/permute, giving an `O(n^1.5)` (for `nblocks = sqrt(n)`) parameter count instead of `O(n^2)`. Same `(..., d) -> (..., output_dim)` contract as `MLPBlock`. **`nblocks` must divide `input_dim`, `hidden_dim` AND `output_dim`** (validated in `__init__`/`build`), so pick dims that are multiples of `nblocks`.
+
+```python
+# input_dim, hidden_dim and output_dim must all be divisible by nblocks (=4 here)
+monarch = create_ffn_layer(
+    'monarch',
+    hidden_dim=256,
+    output_dim=256,
+    nblocks=4,
+    activation='gelu',
+    dropout_rate=0.1
+)
+```
+
+### MixerBlock
+**Required:** `tokens_mlp_dim`, `channels_mlp_dim`  
+**Optional:** `activation` (default: 'gelu'), `dropout_rate` (default: 0.0), `use_bias` (default: True), `kernel_initializer`, `bias_initializer`, `kernel_regularizer`, `bias_regularizer`
+
+Canonical MLP-Mixer block (Tolstikhin et al. 2021, arXiv:2105.01601). **Operates on rank-3 inputs `(B, S, C)` only** (a non-rank-3 input raises `ValueError` at build). It applies a pre-LN residual token-mixing MLP (mixing over the sequence axis `S`, with hidden width `tokens_mlp_dim`) followed by a pre-LN residual channel-mixing MLP (mixing over the channel axis `C`, with hidden width `channels_mlp_dim`). **Output shape equals input shape `(B, S, C)`.**
+
+```python
+# rank-3 input (B, S, C); tokens_mlp_dim mixes over S, channels_mlp_dim mixes over C
+mixer = create_ffn_layer(
+    'mixer',
+    tokens_mlp_dim=32,
+    channels_mlp_dim=128,
+    dropout_rate=0.1
+)
+# e.g. mixer(x) for x of shape (2, 16, 64) returns shape (2, 16, 64)
+```
+
+### SquaredReLUFFN
+**Required:** `hidden_dim`, `output_dim`  
+**Optional:** `dropout_rate` (default: 0.0), `use_bias` (default: True), `kernel_initializer`, `bias_initializer`, `kernel_regularizer`, `bias_regularizer`
+
+Primer squared-ReLU FFN (So et al. 2021, arXiv:2109.08668): `fc2(square(relu(fc1(x))))` with a fixed `relu(x)**2` nonlinearity (not configurable). Same `(..., d) -> (..., output_dim)` contract as `MLPBlock`.
+
+```python
+squared_relu = create_ffn_layer(
+    'squared_relu',
+    hidden_dim=512,
+    output_dim=256,
+    dropout_rate=0.1
+)
+```
+
+### LowRankFFN
+**Required:** `hidden_dim`, `output_dim`  
+**Optional:** `rank` (default: None -> resolved to `max(1, hidden_dim // 4)`), `activation` (default: 'gelu'), `dropout_rate` (default: 0.0), `use_bias` (default: True), `kernel_initializer`, `bias_initializer`, `kernel_regularizer`, `bias_regularizer`
+
+Low-rank factorized FFN: each expand/contract projection is a product `Dense(rank, use_bias=False) -> Dense(out)`, giving a sub-quadratic parameter count when `rank << dims`. Same `(..., d) -> (..., output_dim)` contract as `MLPBlock`. `rank <= 0` raises `ValueError`.
+
+```python
+lowrank = create_ffn_layer(
+    'lowrank',
+    hidden_dim=512,
+    output_dim=256,
+    rank=16,
+    activation='gelu'
+)
+```
+
+### ReGLU (alias of GLUFFN)
+**Required:** `hidden_dim`, `output_dim`  
+**Optional:** `dropout_rate` (default: 0.0), `use_bias` (default: True), `kernel_initializer`, `bias_initializer`, `kernel_regularizer`, `bias_regularizer`
+
+ReGLU (Shazeer 2020) is a factory **alias of `GLUFFN` with `activation='relu'`** — no new class. `create_ffn_layer('reglu', ...)` returns a `GLUFFN` whose gate uses ReLU: `output_proj(relu(gate_proj(x)) * value_proj(x))`.
+
+```python
+reglu = create_ffn_layer(
+    'reglu',
+    hidden_dim=2048,
+    output_dim=768,
+    dropout_rate=0.1
+)
+```
+
+### Bilinear (alias of GLUFFN)
+**Required:** `hidden_dim`, `output_dim`  
+**Optional:** `dropout_rate` (default: 0.0), `use_bias` (default: True), `kernel_initializer`, `bias_initializer`, `kernel_regularizer`, `bias_regularizer`
+
+Bilinear GLU (Shazeer 2020) is a factory **alias of `GLUFFN` with `activation='linear'`** — no new class, no gate nonlinearity. `create_ffn_layer('bilinear', ...)` returns a `GLUFFN` computing `output_proj(gate_proj(x) * value_proj(x))`.
+
+```python
+bilinear = create_ffn_layer(
+    'bilinear',
+    hidden_dim=2048,
+    output_dim=768,
+    dropout_rate=0.1
 )
 ```
 
@@ -587,7 +689,7 @@ Get comprehensive information about all available FFN types.
 ### Types
 
 #### `FFNType`
-Literal type defining valid FFN type strings: `'counting'`, `'differential'`, `'gated_mlp'`, `'geglu'`, `'glu'`, `'kan'`, `'logic'`, `'mlp'`, `'orthoglu'`, `'power_mlp'`, `'residual'`, `'swiglu'`, `'swin_mlp'`, `'tversky'`.
+Literal type defining valid FFN type strings: `'bilinear'`, `'counting'`, `'differential'`, `'gated_mlp'`, `'geglu'`, `'gelu_tanh'`, `'glu'`, `'kan'`, `'logic'`, `'lowrank'`, `'mixer'`, `'mlp'`, `'monarch'`, `'orthoglu'`, `'power_mlp'`, `'reglu'`, `'residual'`, `'squared_relu'`, `'swiglu'`, `'swin_mlp'`, `'tversky'`.
 
 ## Migration Guide
 
