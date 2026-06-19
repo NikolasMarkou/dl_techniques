@@ -265,6 +265,14 @@ def create_dataset(
     if is_training and config.augment_data:
         dataset = dataset.map(augment_patch, num_parallel_calls=tf.data.AUTOTUNE)
 
+    # Clip the clean patch back to [-1, +1] after augmentation. flips/rot90 preserve
+    # range, but the aspect-safe bilinear upscale (small images) can overshoot; the
+    # clean patch is both the model input and the regression target, so keep it in range.
+    dataset = dataset.map(
+        lambda x: tf.clip_by_value(x, -1.0, 1.0),
+        num_parallel_calls=tf.data.AUTOTUNE,
+    )
+
     dataset = dataset.map(noise_fn, num_parallel_calls=tf.data.AUTOTUNE)
     dataset = dataset.map(
         lambda noisy, clean: (
