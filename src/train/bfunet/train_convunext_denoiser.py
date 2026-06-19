@@ -192,7 +192,7 @@ class TrainingConfig:
     learning_rate: float = 1e-3
     optimizer_type: str = "adamw"
     lr_schedule_type: str = "cosine_decay"
-    warmup_epochs: int = 5
+    warmup_epochs: Optional[int] = None  # None -> 10% of epochs (see __post_init__)
     gradient_clipping: float = 1.0
     early_stopping_patience: int = 15
 
@@ -207,6 +207,9 @@ class TrainingConfig:
             self.experiment_name = f"convunext_denoiser_{self.variant}_{timestamp}"
         if self.curriculum_epochs is None:
             self.curriculum_epochs = self.epochs
+        if self.warmup_epochs is None:
+            # Default warmup = 10% of total training epochs (>=1).
+            self.warmup_epochs = max(1, round(0.1 * self.epochs))
         if self.patch_size <= 0 or self.channels <= 0:
             raise ValueError("Invalid patch size or channel configuration")
         if self.noise_sigma_min < 0:
@@ -919,6 +922,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--channels", type=int, choices=[1, 3], default=3)
     parser.add_argument("--patches-per-image", type=int, default=8)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--warmup-epochs", type=int, default=None,
+                        help="LR warmup length (default: 10%% of --epochs)")
     parser.add_argument("--no-gabor-stem", action="store_true",
                         help="Disable the frozen Gabor depthwise stem")
     parser.add_argument("--gabor-filters", type=int, default=32)
@@ -1002,6 +1007,7 @@ def main():
             channels=args.channels,
             patches_per_image=args.patches_per_image,
             learning_rate=args.learning_rate,
+            warmup_epochs=args.warmup_epochs,  # None -> 10% of epochs
             sigma_max_start=args.sigma_max_start,
             sigma_max_end=args.sigma_max_end,
             curriculum_schedule=args.curriculum_schedule,
