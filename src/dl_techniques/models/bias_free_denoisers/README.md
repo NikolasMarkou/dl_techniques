@@ -87,6 +87,41 @@ The **Bias-Free U-Net** applies the bias-free constraint to the classic U-Net ar
     -   **GRN (Global Response Norm)**: Enhances channel contrast for better feature learning.
     -   **Stochastic Depth**: Regularization for deep models.
 
+> **Strict bias-freedom**: pass `convnext_version='v1'` for a strictly bias-free model. ConvNeXt **V2** blocks add a Global Response Norm whose additive `beta` is trainable, so V2 is only approximately bias-free (zero-initialized beta) — prefer **V1** when scaling-invariant generalization across noise levels matters.
+
+#### Optional frozen Gabor stem (non-learnable)
+`create_convunext_denoiser` accepts three params to prepend a **non-learnable (frozen)** Gabor depthwise convolution stem:
+
+| Param | Default | Meaning |
+|-------|---------|---------|
+| `use_gabor_stem` | `False` | When `True`, prepend a frozen Gabor depthwise bank + a **mandatory bias-free 1x1 projection** to `initial_filters`, before the standard ConvUNext stem. Default `False` is byte-identical to the original architecture. |
+| `gabor_filters` | `32` | Depth multiplier of the depthwise Gabor bank; the stem emits `input_channels * gabor_filters` channels which the 1x1 projection reduces back to `initial_filters`. |
+| `gabor_kernel_size` | `7` | Kernel size of the Gabor depthwise stem. |
+
+The Gabor weights are deterministic (`GaborFiltersInitializer`) and the layer is `trainable=False`, so the stem contributes **zero trainable parameters** and is preserved (still frozen) across `.keras` round-trips. The mandatory 1x1 projection is bias-free, keeping the whole front-end strictly bias-free.
+
+```python
+from dl_techniques.models.bias_free_denoisers.bfconvunext import create_convunext_denoiser
+
+model = create_convunext_denoiser(
+    input_shape=(256, 256, 3),
+    convnext_version='v1',        # strict bias-freedom
+    use_gabor_stem=True,          # frozen Gabor front-end
+    gabor_filters=32,
+    gabor_kernel_size=7,
+)
+```
+
+#### Training: DIV2K + COCO with a noise-sigma curriculum
+`src/train/bfunet/train_convunext_denoiser.py` trains this model on **DIV2K + COCO** with 256x256 patch sampling, geometric augmentation, and a **noise-sigma curriculum** — the additive-Gaussian-noise upper bound is widened each epoch by `NoiseSigmaCurriculumCallback` (`dl_techniques.callbacks.noise_sigma_curriculum`), starting from a narrow range (low noise) and progressively widening the spread.
+
+```bash
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg python -m train.bfunet.train_convunext_denoiser \
+    --variant base --convnext-version v1 --epochs 100 --batch-size 16 --patch-size 256
+# Quick end-to-end mechanism check:
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg python -m train.bfunet.train_convunext_denoiser --smoke
+```
+
 ---
 
 ## 4. Deep Supervision
