@@ -52,6 +52,7 @@ from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
 from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.initializers import create_gabor_depthwise_conv2d
+from dl_techniques.layers.laplacian_filter import LaplacianPyramidLevel
 
 # ---------------------------------------------------------------------
 # ConvUNext Bias-Free Building Blocks (Simple Stem)
@@ -233,6 +234,46 @@ def _apply_residual_convnext_block(
     return keras.layers.Add(name=f'{name}_residual')([residual, y])
 
 
+# DECISION plan_2026-06-19_c90809b5/D-001: ONE helper folds the two downsample sites
+# (inter-level pools + the standalone bottleneck pool) into a uniform per-level call so
+# the OFF/ON swap logic lives in one place. Do NOT special-case the bottleneck pool
+# separately (duplicates the swap at two sites -> drift risk) and do NOT author a new
+# pyramid layer (reuse-only: LaplacianPyramidLevel is already bias-free + registered).
+# OFF path MUST reproduce the exact prior ops/names (MaxPooling2D named `downsample_name`,
+# raw pre-downsample skip) — existing `.keras` checkpoints depend on byte-identical names.
+# See decisions.md D-001.
+def _downsample_and_skip(
+        x: keras.KerasTensor,
+        use_laplacian_pyramid: bool,
+        laplacian_kernel_size: Tuple[int, int],
+        downsample_name: str,
+        pyramid_name: str,
+) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
+    """Produce ``(skip, downsampled)`` for one encoder junction.
+
+    OFF path (default, byte-identical to the original architecture): the skip is
+    the pre-downsample tensor and downsampling is ``MaxPooling2D(2, 2)`` named
+    ``downsample_name``.
+
+    ON path: a channel-preserving, bias-free ``LaplacianPyramidLevel`` split. The
+    full-resolution high-frequency band becomes the skip; the half-resolution low
+    band continues down the encoder. Bias-free and homogeneous by construction
+    (fixed blur + average pool + bilinear upsample, zero learnable bias).
+    """
+    if use_laplacian_pyramid:
+        low, high = LaplacianPyramidLevel(
+            blur_kernel_size=laplacian_kernel_size,
+            name=pyramid_name,
+        )(x)
+        return high, low
+    skip = x
+    downsampled = keras.layers.MaxPooling2D(
+        pool_size=(2, 2),
+        name=downsample_name,
+    )(x)
+    return skip, downsampled
+
+
 # ---------------------------------------------------------------------
 # Core Model Creation Function
 # ---------------------------------------------------------------------
@@ -248,6 +289,8 @@ def create_convunext_denoiser(
         use_gabor_stem: bool = False,
         gabor_filters: int = 32,
         gabor_kernel_size: Union[int, Tuple[int, int]] = 7,
+        use_laplacian_pyramid: bool = False,
+        laplacian_kernel_size: Tuple[int, int] = (5, 5),
         block_kernel_size: Union[int, Tuple[int, int]] = 7,
         drop_path_rate: float = 0.1,
         final_activation: Union[str, callable] = 'linear',
@@ -314,6 +357,14 @@ def create_convunext_denoiser(
             Defaults to 32.
         gabor_kernel_size: Integer or tuple, kernel size of the Gabor depthwise stem.
             Only used when use_gabor_stem=True. Defaults to 7.
+        use_laplacian_pyramid: Boolean, if True replace each encoder downsample/skip
+            junction with a bias-free `LaplacianPyramidLevel` split: the channel-preserving
+            full-resolution high-frequency band becomes the skip connection and the
+            half-resolution low-frequency band continues down the encoder. Defaults to False
+            (byte-identical to the original MaxPooling2D architecture, including layer names).
+            Contributes zero trainable parameters (the blur kernel is fixed).
+        laplacian_kernel_size: Tuple of two ints, Gaussian blur kernel size for the
+            Laplacian pyramid split. Only used when use_laplacian_pyramid=True. Defaults to (5, 5).
         block_kernel_size: Integer or tuple, size of block kernels. Defaults to 7.
         drop_path_rate: Float, stochastic depth drop probability. Defaults to 0.1.
         final_activation: String or callable, final activation function. Defaults to 'linear'.
@@ -410,6 +461,12 @@ def create_convunext_denoiser(
     # Calculate filter sizes for each level
     filter_sizes = [initial_filters * (filter_multiplier ** i) for i in range(depth + 1)]
 
+    if use_laplacian_pyramid:
+        logger.info(
+            f"Laplacian pyramid downsample enabled: kernel_size={laplacian_kernel_size}, "
+            f"split levels={depth} (high-band skips, low-band downsample; bias-free)"
+        )
+
     # Storage for skip connections and deep supervision outputs
     skip_connections: List[keras.layers.Layer] = []
     deep_supervision_outputs: List[keras.layers.Layer] = []
@@ -457,15 +514,21 @@ def create_convunext_denoiser(
                 name=f'encoder_level_{level}_convnext_{convnext_version}_block_{block_idx}',
             )
 
-        # Store skip connection before downsampling
-        skip_connections.append(x)
-
-        # Downsampling (except for the last level which goes to bottleneck)
-        if level < depth - 1:
-            x = keras.layers.MaxPooling2D(
-                pool_size=(2, 2),
-                name=f'encoder_downsample_{level}'
-            )(x)
+        # Skip connection + downsample for this level. Under the Laplacian pyramid
+        # path this is ONE channel-preserving split (high -> skip, low -> next level);
+        # otherwise the original raw-skip + MaxPooling2D. The last encoder level's
+        # downsample is the bottleneck downsample (preserved name for checkpoint compat).
+        downsample_name = (
+            f'encoder_downsample_{level}' if level < depth - 1 else 'bottleneck_downsample'
+        )
+        skip, x = _downsample_and_skip(
+            x,
+            use_laplacian_pyramid,
+            laplacian_kernel_size,
+            downsample_name=downsample_name,
+            pyramid_name=f'encoder_pyramid_{level}',
+        )
+        skip_connections.append(skip)
 
     # =========================================================================
     # BOTTLENECK
@@ -473,12 +536,6 @@ def create_convunext_denoiser(
 
     bottleneck_filters = filter_sizes[depth]
     logger.info(f"Building ConvUNext bottleneck with {bottleneck_filters} filters")
-
-    # Downsample to bottleneck
-    x = keras.layers.MaxPooling2D(
-        pool_size=(2, 2),
-        name='bottleneck_downsample'
-    )(x)
 
     # Channel adjustment for bottleneck (bias-free)
     if x.shape[-1] != bottleneck_filters:
