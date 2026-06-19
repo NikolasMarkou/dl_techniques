@@ -505,6 +505,7 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         max_samples: int = 8,
         val_ds=None,
         validation_steps: Optional[int] = None,
+        noise_regimes: Optional[List[Tuple[str, float]]] = None,
     ):
         super().__init__()
         self.clean_batch = clean_batch
@@ -516,6 +517,14 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         self.max_samples = max_samples
         self.val_ds = val_ds
         self.validation_steps = validation_steps
+        # Fixed reference noise regimes for the eval grid (sigma in [-1,+1] units),
+        # DECOUPLED from the moving curriculum sigma so the grid is comparable across
+        # epochs. Defaults map to the standard benchmark levels sigma_255 = 15/25/50.
+        self.noise_regimes = noise_regimes or [
+            ("low", 15.0 / 127.5),
+            ("medium", 25.0 / 127.5),
+            ("high", 50.0 / 127.5),
+        ]
         self._hist = {k: [] for k in (
             "epoch", "loss", "val_loss", "mae", "val_mae",
             "psnr", "val_psnr", "sigma_max", "lr",
@@ -611,43 +620,61 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
             gc.collect()
 
     def _save_grid(self, epoch: int):
-        clean = self.clean_batch
-        sigma = float(self.sigma_max_var)
-        noise_level = tf.random.uniform([], self.noise_sigma_min, max(sigma, 1e-6))
-        noisy = tf.clip_by_value(
-            clean + tf.random.normal(tf.shape(clean)) * noise_level, -1.0, 1.0
-        )
-        denoised = self.model(noisy, training=False)
-        if isinstance(denoised, (list, tuple)):
-            denoised = denoised[0]  # deep-supervision: primary output
+        """Eval grid: the SAME images under 3 fixed noise regimes.
 
+        Row 0  : Clean (ground truth)
+        Rows 1-2: Noisy(low)    / Denoised(low)
+        Rows 3-4: Noisy(medium) / Denoised(medium)
+        Rows 5-6: Noisy(high)   / Denoised(high)
+        Denoised-row labels carry the mean PSNR over the batch at that regime.
+        """
+        clean = self.clean_batch
         clean_np = clean.numpy()
-        noisy_np = noisy.numpy()
-        den_np = np.asarray(denoised)
         n = min(self.max_samples, clean_np.shape[0])
 
-        fig, axes = plt.subplots(3, n, figsize=(2.4 * n, 7.2))
+        # Row 0 is clean; each regime contributes a (noisy, denoised) row pair.
+        rows = [("Clean", clean_np)]
+        for label, sigma in self.noise_regimes:
+            noisy = tf.clip_by_value(
+                clean + tf.random.normal(tf.shape(clean)) * sigma, -1.0, 1.0
+            )
+            denoised = self.model(noisy, training=False)
+            if isinstance(denoised, (list, tuple)):
+                denoised = denoised[0]  # deep-supervision: primary output
+            denoised = tf.convert_to_tensor(denoised)
+            mse = float(tf.reduce_mean(tf.square(denoised - clean)))
+            psnr = 20.0 * np.log10(2.0 / max(np.sqrt(mse), 1e-8))  # max_val=2.0
+            s255 = sigma * 127.5
+            rows.append((f"Noisy {label}\n(σ₂₅₅≈{s255:.0f})", noisy.numpy()))
+            rows.append((f"Denoised {label}\n(PSNR {psnr:.1f} dB)", np.asarray(denoised)))
+
+        n_rows = len(rows)  # 1 + 2 * len(noise_regimes) == 7 by default
+        fig, axes = plt.subplots(n_rows, n, figsize=(2.3 * n, 2.3 * n_rows))
+        axes = np.atleast_2d(axes)
         if n == 1:
-            axes = axes.reshape(3, 1)
+            axes = axes.reshape(n_rows, 1)
         fig.suptitle(
-            f"ConvNeXt Denoiser - epoch {epoch} (sigma_max={sigma:.3f})",
-            fontsize=14, y=0.99,
+            f"ConvUNeXt Denoiser - epoch {epoch} - same images, 3 noise regimes",
+            fontsize=14, y=1.0,
         )
-        rows = ["Clean", f"Noisy", "Denoised"]
-        for i in range(n):
-            imgs = [_denorm(clean_np[i]), _denorm(noisy_np[i]), _denorm(den_np[i])]
-            for r, img in enumerate(imgs):
+        for r, (label, arr) in enumerate(rows):
+            for i in range(n):
+                img = _denorm(arr[i])
                 cmap = "gray" if img.shape[-1] == 1 else None
                 disp = img.squeeze(-1) if img.shape[-1] == 1 else img
-                axes[r, i].imshow(disp, cmap=cmap, vmin=0, vmax=1)
-                axes[r, i].axis("off")
+                ax = axes[r, i]
+                ax.imshow(disp, cmap=cmap, vmin=0, vmax=1)
+                ax.set_xticks([]); ax.set_yticks([])
+                for sp in ax.spines.values():
+                    sp.set_visible(False)
                 if i == 0:
-                    axes[r, i].set_title(rows[r], fontsize=11, loc="left")
+                    ax.set_ylabel(label, fontsize=9, rotation=0,
+                                  ha="right", va="center", labelpad=12)
         plt.tight_layout()
         path = self.viz_dir / f"epoch_{epoch:03d}_denoise_grid.png"
         plt.savefig(path, dpi=120, bbox_inches="tight")
         plt.close(fig)
-        logger.info(f"Saved denoising grid: {path}")
+        logger.info(f"Saved denoising grid (3 regimes): {path}")
 
 
 class LRLoggerCallback(keras.callbacks.Callback):
@@ -772,8 +799,8 @@ def build_dashboard_from_dir(exp_dir: str) -> Optional[Path]:
 
 
 def train(config: TrainingConfig) -> keras.Model:
-    """Train the bias-free ConvNeXt denoiser with the noise curriculum."""
-    logger.info(f"Starting ConvNeXt denoiser training: {config.experiment_name}")
+    """Train the bias-free ConvUNeXt denoiser with the noise curriculum."""
+    logger.info(f"Starting ConvUNeXt denoiser training: {config.experiment_name}")
     output_dir = Path(config.output_dir) / config.experiment_name
     output_dir.mkdir(parents=True, exist_ok=True)
     save_config_json(config, str(output_dir), "config.json")
@@ -911,7 +938,7 @@ def train(config: TrainingConfig) -> keras.Model:
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train bias-free ConvNeXt denoiser (Gabor stem + noise curriculum)",
+        description="Train bias-free ConvUNeXt denoiser (Gabor stem + noise curriculum)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--variant", choices=list(CONVUNEXT_CONFIGS), default="base")
