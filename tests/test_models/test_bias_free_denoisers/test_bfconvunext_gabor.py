@@ -101,12 +101,14 @@ class TestGaborStem:
     def test_keras_round_trip(self, tmp_path) -> None:
         model = _build_gabor()
         x = np.random.rand(2, *INPUT_SHAPE).astype(np.float32)
-        y_before = model(x)
+        # training=False: StochasticDepth (drop-path) is identity at inference, so
+        # the forward is deterministic and round-trip equality is meaningful.
+        y_before = model(x, training=False)
 
         save_path = os.path.join(str(tmp_path), 'bfconvunext_gabor.keras')
         model.save(save_path)
         loaded = keras.models.load_model(save_path)
-        y_after = loaded(x)
+        y_after = loaded(x, training=False)
 
         # Gabor stem must survive serialization and remain frozen after reload.
         gabor = loaded.get_layer('gabor_stem')
@@ -120,3 +122,42 @@ class TestGaborStem:
             atol=1e-4,
             err_msg="Outputs differ after .keras round-trip with Gabor stem",
         )
+
+
+class TestResidualStochasticDepth:
+    """Regression guard: ConvNeXt blocks MUST be wired as residual branches with
+    stochastic depth (the factory bug where blocks were chained sequentially with
+    no residual / no drop-path must not recur)."""
+
+    def test_residual_and_stochastic_depth_present(self):
+        from dl_techniques.layers.stochastic_depth import StochasticDepth
+        model = create_convunext_denoiser(
+            input_shape=(64, 64, 3), depth=3, initial_filters=16,
+            blocks_per_level=2, convnext_version="v1", drop_path_rate=0.2,
+        )
+        n_add = sum(1 for l in model.layers if isinstance(l, keras.layers.Add))
+        n_sd = sum(1 for l in model.layers if isinstance(l, StochasticDepth))
+        # depth=3 -> 3 enc + 1 bottleneck + 3 dec block-groups, 2 blocks each = 14 blocks.
+        assert n_add == 14, f"expected 14 residual adds, got {n_add}"
+        assert n_sd >= 1, "no StochasticDepth (drop-path) layers found"
+
+    def test_no_residual_when_blocks_chained_would_change_shape_is_safe(self):
+        # Residual add requires matching channels; the factory channel-adjusts before
+        # blocks, so output must still equal the full-res input.
+        model = create_convunext_denoiser(
+            input_shape=(64, 64, 3), depth=3, initial_filters=16,
+            blocks_per_level=1, convnext_version="v2", drop_path_rate=0.1,
+        )
+        y = model(np.zeros((2, 64, 64, 3), "float32"), training=False)
+        assert tuple(y.shape) == (2, 64, 64, 3)
+
+    def test_drop_path_zero_has_no_stochastic_depth(self):
+        from dl_techniques.layers.stochastic_depth import StochasticDepth
+        model = create_convunext_denoiser(
+            input_shape=(64, 64, 3), depth=3, initial_filters=16,
+            blocks_per_level=1, convnext_version="v1", drop_path_rate=0.0,
+        )
+        n_sd = sum(1 for l in model.layers if isinstance(l, StochasticDepth))
+        n_add = sum(1 for l in model.layers if isinstance(l, keras.layers.Add))
+        assert n_sd == 0, "drop_path_rate=0 should add no StochasticDepth layers"
+        assert n_add >= 1, "residual connections must exist even at drop_path_rate=0"

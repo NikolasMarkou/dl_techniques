@@ -50,6 +50,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
 from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
 from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization
+from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.initializers import create_gabor_depthwise_conv2d
 
 # ---------------------------------------------------------------------
@@ -183,6 +184,48 @@ CONVUNEXT_CONFIGS: Dict[str, Dict[str, Any]] = {
         'description': 'Extra-Large ConvUNext (depth=5) for maximum performance.'
     }
 }
+
+# ---------------------------------------------------------------------
+# Residual ConvNeXt block application (with stochastic depth)
+# ---------------------------------------------------------------------
+
+def _apply_residual_convnext_block(
+        x: keras.KerasTensor,
+        block_cls: type,
+        filters: int,
+        kernel_size: Union[int, Tuple[int, int]],
+        drop_path_rate: float,
+        kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]],
+        name: str,
+) -> keras.KerasTensor:
+    """Apply a ConvNeXt block as a RESIDUAL branch with stochastic depth.
+
+    ``ConvNextV1Block`` / ``ConvNextV2Block`` implement only the residual
+    *branch* — they do NOT add the skip connection or apply drop-path (their
+    ``dropout_rate`` is regular MLP dropout, not stochastic depth). The canonical
+    ConvNeXt wiring (matching ``models/convnext/convnext_v1.py``) is::
+
+        x = x + StochasticDepth(drop_path_rate)(block(x))
+
+    The block input and output channel counts both equal ``filters`` (callers
+    channel-adjust before the blocks), so the residual add is always valid and
+    bias-free (identity + a homogeneous branch stays homogeneous).
+    """
+    residual = x
+    y = block_cls(
+        kernel_size=kernel_size,
+        filters=filters,
+        activation='gelu',
+        use_bias=False,            # Bias-free for scaling invariance
+        dropout_rate=0.0,          # regularization comes from StochasticDepth below
+        spatial_dropout_rate=0.0,
+        kernel_regularizer=kernel_regularizer,
+        name=name,
+    )(x)
+    if drop_path_rate and drop_path_rate > 0.0:
+        y = StochasticDepth(drop_path_rate, name=f'{name}_drop_path')(y)
+    return keras.layers.Add(name=f'{name}_residual')([residual, y])
+
 
 # ---------------------------------------------------------------------
 # Core Model Creation Function
@@ -393,21 +436,15 @@ def create_convunext_denoiser(
                     name=f'encoder_level_{level}_channel_adjust'
                 )(x)
 
-        # ConvNeXt blocks at current resolution (bias-free)
+        # ConvNeXt blocks at current resolution (bias-free, residual + drop-path)
         for block_idx in range(blocks_per_level):
-            # Calculate progressive drop path rate
+            # Progressive (linearly-scaled) drop-path rate across depth.
             current_drop_path = drop_path_rate * (level * blocks_per_level + block_idx) / (depth * blocks_per_level)
-
-            x = ConvNextBlock(
-                kernel_size=block_kernel_size,
-                filters=current_filters,
-                activation='gelu',
-                use_bias=False,  # Bias-free for scaling invariance
-                dropout_rate=current_drop_path,  # Use as stochastic depth
-                spatial_dropout_rate=0.0,
-                kernel_regularizer=kernel_regularizer,
-                name=f'encoder_level_{level}_convnext_{convnext_version}_block_{block_idx}'
-            )(x)
+            x = _apply_residual_convnext_block(
+                x, ConvNextBlock, current_filters, block_kernel_size,
+                current_drop_path, kernel_regularizer,
+                name=f'encoder_level_{level}_convnext_{convnext_version}_block_{block_idx}',
+            )
 
         # Store skip connection before downsampling
         skip_connections.append(x)
@@ -443,18 +480,13 @@ def create_convunext_denoiser(
             name='bottleneck_channel_adjust'
         )(x)
 
-    # Bottleneck ConvNeXt blocks (bias-free)
+    # Bottleneck ConvNeXt blocks (bias-free, residual + drop-path)
     for block_idx in range(blocks_per_level):
-        x = ConvNextBlock(
-            kernel_size=block_kernel_size,
-            filters=bottleneck_filters,
-            activation='gelu',
-            use_bias=False,  # Bias-free for scaling invariance
-            dropout_rate=drop_path_rate,
-            spatial_dropout_rate=0.0,
-            kernel_regularizer=kernel_regularizer,
-            name=f'bottleneck_convnext_{convnext_version}_block_{block_idx}'
-        )(x)
+        x = _apply_residual_convnext_block(
+            x, ConvNextBlock, bottleneck_filters, block_kernel_size,
+            drop_path_rate, kernel_regularizer,
+            name=f'bottleneck_convnext_{convnext_version}_block_{block_idx}',
+        )
 
     # =========================================================================
     # DECODER PATH (Expanding) with Deep Supervision
@@ -504,21 +536,15 @@ def create_convunext_denoiser(
                 name=f'decoder_level_{level}_channel_adjust'
             )(x)
 
-        # ConvNeXt blocks after merging (bias-free)
+        # ConvNeXt blocks after merging (bias-free, residual + drop-path)
         for block_idx in range(blocks_per_level):
-            # Calculate progressive drop path rate
+            # Progressive (linearly-scaled) drop-path rate across depth.
             current_drop_path = drop_path_rate * (level * blocks_per_level + block_idx) / (depth * blocks_per_level)
-
-            x = ConvNextBlock(
-                kernel_size=block_kernel_size,
-                filters=current_filters,
-                activation='gelu',
-                use_bias=False,  # Bias-free for scaling invariance
-                dropout_rate=current_drop_path,
-                spatial_dropout_rate=0.0,
-                kernel_regularizer=kernel_regularizer,
-                name=f'decoder_level_{level}_convnext_{convnext_version}_block_{block_idx}'
-            )(x)
+            x = _apply_residual_convnext_block(
+                x, ConvNextBlock, current_filters, block_kernel_size,
+                current_drop_path, kernel_regularizer,
+                name=f'decoder_level_{level}_convnext_{convnext_version}_block_{block_idx}',
+            )
 
         # =====================================================================
         # DEEP SUPERVISION OUTPUT (if enabled and not the final level)

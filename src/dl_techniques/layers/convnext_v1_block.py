@@ -100,6 +100,26 @@ class ConvNextV1Block(keras.layers.Layer):
         │  Output (B, H, W, F)              │
         └───────────────────────────────────┘
 
+    .. important::
+        **This block is the residual BRANCH only.** It does NOT add the skip /
+        residual connection and does NOT apply stochastic depth (drop-path). Its
+        ``dropout_rate`` / ``spatial_dropout_rate`` are *regular* dropout inside
+        the inverted-bottleneck MLP — they are NOT drop-path on the residual.
+
+        The CALLER is responsible for the residual + drop-path wiring. The
+        canonical pattern (see ``models/convnext/convnext_v1.py`` and
+        ``models/bias_free_denoisers/bfconvunext.py``) is::
+
+            from dl_techniques.layers.stochastic_depth import StochasticDepth
+            residual = x
+            y = ConvNextV1Block(...)(x)
+            y = StochasticDepth(drop_path_rate)(y)   # stochastic depth, per-branch
+            x = keras.layers.add([residual, y])
+
+        Using this block standalone (e.g. ``x = ConvNextV1Block(...)(x)``) silently
+        DROPS the residual connection — a bug that hurts gradient flow and removes
+        stochastic-depth regularization. Always wrap it as shown above.
+
     :param kernel_size: Size of the depthwise convolution kernel. Must be positive.
     :type kernel_size: Union[int, Tuple[int, int]]
     :param filters: Number of output filters/channels. Must be positive.
