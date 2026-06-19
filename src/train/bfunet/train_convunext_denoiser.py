@@ -500,6 +500,8 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         out_dir: Path,
         freq: int = 5,
         max_samples: int = 8,
+        val_ds=None,
+        validation_steps: Optional[int] = None,
     ):
         super().__init__()
         self.clean_batch = clean_batch
@@ -509,6 +511,8 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         self.viz_dir.mkdir(parents=True, exist_ok=True)
         self.freq = max(1, freq)
         self.max_samples = max_samples
+        self.val_ds = val_ds
+        self.validation_steps = validation_steps
         self._psnr_history: List[float] = []
         self._hist = {k: [] for k in (
             "epoch", "loss", "val_loss", "mae", "val_mae",
@@ -524,6 +528,50 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
             return float(keras.ops.convert_to_numpy(lr))
         except Exception:
             return float("nan")
+
+    def on_train_begin(self, logs=None):
+        """Epoch-0 baseline: visualize the UNTRAINED model (0 epochs completed).
+
+        Saves the epoch-0 denoising grid and seeds the dashboard with an evaluated
+        epoch-0 point so every curve starts from the untrained baseline. The x-axis
+        is "epochs completed": 0 = untrained, then 1, 2, ... after each fit epoch.
+        """
+        # Epoch-0 grid on the fixed val batch (noise at the curriculum start sigma).
+        if self.clean_batch is not None:
+            try:
+                self._save_grid(0)
+            except Exception as e:
+                logger.warning(f"Epoch-0 grid failed: {e}")
+        # Epoch-0 dashboard point: evaluate the untrained model on the val set so the
+        # baseline is computed the SAME way Keras computes epoch>=1 val metrics.
+        if self.val_ds is not None:
+            try:
+                res = self.model.evaluate(
+                    self.val_ds, steps=self.validation_steps,
+                    verbose=0, return_dict=True,
+                )
+                lr_val = self._current_lr()
+                self._hist["epoch"].append(0)
+                self._hist["loss"].append(float("nan"))      # no train metric pre-fit
+                self._hist["val_loss"].append(float(res.get("loss", float("nan"))))
+                self._hist["mae"].append(float("nan"))
+                self._hist["val_mae"].append(float(res.get("mae", float("nan"))))
+                self._hist["psnr"].append(float("nan"))
+                self._hist["val_psnr"].append(float(res.get("psnr_metric", float("nan"))))
+                self._hist["sigma_max"].append(float(self.sigma_max_var))
+                self._hist["lr"].append(lr_val)
+                if "psnr_metric" in res:
+                    self._psnr_history.append(float(res["psnr_metric"]))
+                render_training_dashboard(
+                    self._hist, self.viz_dir / "training_dashboard.png",
+                    title="Training dashboard - epoch 0 (untrained baseline)",
+                )
+                logger.info(
+                    f"Epoch-0 baseline: val_loss={res.get('loss'):.4f} "
+                    f"val_psnr={res.get('psnr_metric', float('nan')):.2f} dB"
+                )
+            except Exception as e:
+                logger.warning(f"Epoch-0 baseline eval failed: {e}")
 
     def on_epoch_end(self, epoch: int, logs=None):
         logs = logs or {}
@@ -605,12 +653,14 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         logger.info(f"Saved denoising grid: {path}")
 
     def _save_psnr_curve(self):
-        if not self._psnr_history:
+        # Use the consistent _hist arrays (epoch x-axis = epochs completed, starts
+        # at 0 when the untrained baseline was recorded in on_train_begin).
+        xs, ys = self._hist["epoch"], self._hist["val_psnr"]
+        if not xs:
             return
         fig = plt.figure(figsize=(6, 4))
-        plt.plot(range(1, len(self._psnr_history) + 1), self._psnr_history,
-                 marker="o", lw=1.5)
-        plt.xlabel("epoch")
+        plt.plot(xs, ys, marker="o", lw=1.5)
+        plt.xlabel("epoch (0 = untrained)")
         plt.ylabel("val PSNR (dB)")
         plt.title("Validation PSNR")
         plt.grid(True, alpha=0.3)
@@ -843,6 +893,8 @@ def train(config: TrainingConfig) -> keras.Model:
             noise_sigma_min=config.noise_sigma_min,
             out_dir=output_dir,
             freq=config.viz_freq,
+            val_ds=val_ds,
+            validation_steps=validation_steps,
         )
     )
 
