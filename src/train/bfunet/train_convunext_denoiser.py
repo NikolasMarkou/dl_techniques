@@ -91,6 +91,7 @@ Usage::
 """
 
 import gc
+import csv
 import json
 import time
 import keras
@@ -407,6 +408,81 @@ def _denorm(img: np.ndarray) -> np.ndarray:
     return np.clip((img + 1.0) / 2.0, 0.0, 1.0)
 
 
+def render_training_dashboard(history: dict, out_path: Path, title: str = "") -> None:
+    """Render a single combined dashboard PNG of per-epoch training curves.
+
+    Six panels: (1) Loss/MSE, (2) MSE (log), (3) PSNR, (4) MAE,
+    (5) noise sigma_max (curriculum, with [0,255]-scale twin axis), (6) learning
+    rate (log). ``history`` keys (any may be absent -> that panel is skipped):
+    ``epoch, loss, val_loss, mae, val_mae, psnr, val_psnr, sigma_max, lr``.
+    """
+    ep = history.get("epoch")
+    if not ep:
+        return
+    fig, axes = plt.subplots(2, 3, figsize=(16, 9))
+    if title:
+        fig.suptitle(title, fontsize=15, y=0.99)
+
+    def _line(ax, ys, label, **kw):
+        if ys is None:
+            return
+        n = min(len(ep), len(ys))
+        ax.plot(ep[:n], ys[:n], label=label, lw=1.6, **kw)
+
+    # (1) Loss / MSE (linear) -- loss IS mse (compiled loss='mse')
+    ax = axes[0, 0]
+    _line(ax, history.get("loss"), "train", color="#d62728")
+    _line(ax, history.get("val_loss"), "val", color="#1f77b4")
+    ax.set_title("Loss (MSE) per epoch"); ax.set_xlabel("epoch"); ax.set_ylabel("MSE")
+    ax.grid(True, alpha=0.3); ax.legend()
+
+    # (2) MSE (log y) -- same data, log scale reveals late-epoch detail
+    ax = axes[0, 1]
+    _line(ax, history.get("loss"), "train", color="#d62728")
+    _line(ax, history.get("val_loss"), "val", color="#1f77b4")
+    ax.set_yscale("log")
+    ax.set_title("MSE per epoch (log)"); ax.set_xlabel("epoch"); ax.set_ylabel("MSE (log)")
+    ax.grid(True, alpha=0.3, which="both"); ax.legend()
+
+    # (3) PSNR
+    ax = axes[0, 2]
+    _line(ax, history.get("psnr"), "train", color="#d62728")
+    _line(ax, history.get("val_psnr"), "val", color="#1f77b4")
+    ax.set_title("PSNR per epoch"); ax.set_xlabel("epoch"); ax.set_ylabel("PSNR (dB)")
+    ax.grid(True, alpha=0.3); ax.legend()
+
+    # (4) MAE
+    ax = axes[1, 0]
+    _line(ax, history.get("mae"), "train", color="#d62728")
+    _line(ax, history.get("val_mae"), "val", color="#1f77b4")
+    ax.set_title("MAE per epoch"); ax.set_xlabel("epoch"); ax.set_ylabel("MAE")
+    ax.grid(True, alpha=0.3); ax.legend()
+
+    # (5) Noise level (curriculum) with [0,255]-scale twin axis
+    ax = axes[1, 1]
+    sig = history.get("sigma_max")
+    _line(ax, sig, "sigma_max", color="#2ca02c", marker="o", markersize=3)
+    ax.set_title("Noise sigma_max per epoch (curriculum)")
+    ax.set_xlabel("epoch"); ax.set_ylabel("sigma_max  [-1,+1] units")
+    ax.grid(True, alpha=0.3); ax.legend(loc="upper left")
+    if sig is not None:
+        twin = ax.twinx()
+        twin.set_ylabel("sigma on [0,255] scale")
+        lo, hi = ax.get_ylim()
+        twin.set_ylim(lo * 127.5, hi * 127.5)
+
+    # (6) Learning rate (log y)
+    ax = axes[1, 2]
+    _line(ax, history.get("lr"), "lr", color="#9467bd")
+    ax.set_yscale("log")
+    ax.set_title("Learning rate per epoch"); ax.set_xlabel("epoch"); ax.set_ylabel("lr (log)")
+    ax.grid(True, alpha=0.3, which="both"); ax.legend()
+
+    plt.tight_layout(rect=(0, 0, 1, 0.97) if title else None)
+    plt.savefig(out_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+
 class DenoisingVisualizationCallback(keras.callbacks.Callback):
     """Save clean / noisy / denoised comparison grids (and PSNR-vs-epoch curve).
 
@@ -434,11 +510,50 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         self.freq = max(1, freq)
         self.max_samples = max_samples
         self._psnr_history: List[float] = []
+        self._hist = {k: [] for k in (
+            "epoch", "loss", "val_loss", "mae", "val_mae",
+            "psnr", "val_psnr", "sigma_max", "lr",
+        )}
+
+    def _current_lr(self) -> float:
+        try:
+            opt = self.model.optimizer
+            lr = opt.learning_rate
+            if isinstance(lr, keras.optimizers.schedules.LearningRateSchedule):
+                return float(keras.ops.convert_to_numpy(lr(opt.iterations)))
+            return float(keras.ops.convert_to_numpy(lr))
+        except Exception:
+            return float("nan")
 
     def on_epoch_end(self, epoch: int, logs=None):
         logs = logs or {}
         if "val_psnr_metric" in logs:
             self._psnr_history.append(float(logs["val_psnr_metric"]))
+
+        # Record per-epoch scalars for the combined dashboard. sigma_max is the
+        # value the curriculum used this epoch; lr is read from the live optimizer
+        # and also injected into logs so the CSVLogger captures it going forward.
+        lr_val = self._current_lr()
+        logs["lr"] = lr_val
+        self._hist["epoch"].append(epoch + 1)
+        self._hist["loss"].append(logs.get("loss", float("nan")))
+        self._hist["val_loss"].append(logs.get("val_loss", float("nan")))
+        self._hist["mae"].append(logs.get("mae", float("nan")))
+        self._hist["val_mae"].append(logs.get("val_mae", float("nan")))
+        self._hist["psnr"].append(logs.get("psnr_metric", float("nan")))
+        self._hist["val_psnr"].append(logs.get("val_psnr_metric", float("nan")))
+        self._hist["sigma_max"].append(float(self.sigma_max_var))
+        self._hist["lr"].append(lr_val)
+
+        try:
+            render_training_dashboard(
+                self._hist,
+                self.viz_dir / "training_dashboard.png",
+                title=f"Training dashboard - epoch {epoch + 1}",
+            )
+        except Exception as e:
+            logger.warning(f"Dashboard render failed at epoch {epoch + 1}: {e}")
+
         if (epoch + 1) % self.freq != 0 and epoch != 0:
             return
         if self.clean_batch is None:
@@ -524,6 +639,81 @@ def build_fixed_val_batch(
     if not patches:
         return None
     return tf.stack(patches)
+
+
+def build_dashboard_from_dir(exp_dir: str) -> Optional[Path]:
+    """Rebuild the combined training dashboard from a finished/IN-PROGRESS run.
+
+    Reads ``training_log.csv`` (per-epoch loss/mae/psnr) + ``config.json`` from an
+    experiment directory, RECONSTRUCTS the per-epoch noise ``sigma_max`` (via the
+    curriculum schedule) and learning rate (via the real LR-schedule builder), and
+    writes ``visualizations/training_dashboard.png``. Lets us dashboard a live run
+    without touching the running process. Returns the PNG path (or None)."""
+    exp = Path(exp_dir)
+    csv_path = exp / "training_log.csv"
+    cfg_path = exp / "config.json"
+    if not csv_path.exists():
+        logger.error(f"No training_log.csv in {exp}")
+        return None
+
+    rows = list(csv.DictReader(open(csv_path)))
+    if not rows:
+        logger.error(f"Empty CSV: {csv_path}")
+        return None
+
+    def col(name):
+        out = []
+        for r in rows:
+            try:
+                out.append(float(r[name]))
+            except (KeyError, ValueError):
+                out.append(float("nan"))
+        return out
+
+    epochs = [int(float(r["epoch"])) + 1 for r in rows]  # 1-indexed for display
+    hist = {
+        "epoch": epochs,
+        "loss": col("loss"), "val_loss": col("val_loss"),
+        "mae": col("mae"), "val_mae": col("val_mae"),
+        "psnr": col("psnr_metric"), "val_psnr": col("val_psnr_metric"),
+        "sigma_max": None, "lr": None,
+    }
+
+    cfg = json.load(open(cfg_path)) if cfg_path.exists() else {}
+    # Reconstruct noise sigma_max per epoch from the curriculum schedule.
+    try:
+        cur = NoiseSigmaCurriculumCallback(
+            sigma_max_start=cfg.get("sigma_max_start", 0.05),
+            sigma_max_end=cfg.get("sigma_max_end", 0.5),
+            total_epochs=cfg.get("curriculum_epochs") or cfg.get("epochs", len(epochs)),
+            schedule=cfg.get("curriculum_schedule", "linear"),
+        )
+        hist["sigma_max"] = [cur.sigma_max_at(e - 1) for e in epochs]
+    except Exception as e:
+        logger.warning(f"Could not reconstruct sigma_max: {e}")
+    # Reconstruct learning rate per epoch from the real schedule builder.
+    try:
+        spe = cfg.get("steps_per_epoch")
+        if spe:
+            sched = learning_rate_schedule_builder({
+                "type": cfg.get("lr_schedule_type", "cosine_decay"),
+                "learning_rate": cfg.get("learning_rate", 1e-3),
+                "decay_steps": spe * cfg.get("epochs", len(epochs)),
+                "warmup_steps": spe * cfg.get("warmup_epochs", 0),
+                "alpha": 0.01,
+            })
+            hist["lr"] = [float(keras.ops.convert_to_numpy(sched((e - 1) * spe)))
+                          for e in epochs]
+    except Exception as e:
+        logger.warning(f"Could not reconstruct learning rate: {e}")
+
+    out = exp / "visualizations" / "training_dashboard.png"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    render_training_dashboard(
+        hist, out, title=f"Training dashboard - {exp.name} ({len(epochs)} epochs)"
+    )
+    logger.info(f"Saved training dashboard: {out}")
+    return out
 
 
 # ---------------------------------------------------------------------
@@ -689,6 +879,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--deep-supervision", action="store_true")
     parser.add_argument("--viz-freq", type=int, default=5,
                         help="Save clean/noisy/denoised grids every N epochs")
+    parser.add_argument("--dashboard", type=str, default=None,
+                        help="Rebuild the combined training dashboard PNG from an "
+                             "experiment dir (CSV+config) and exit; no training.")
     parser.add_argument("--max-train-files", type=int, default=None)
     parser.add_argument("--max-val-files", type=int, default=None)
     parser.add_argument("--steps-per-epoch", type=int, default=None,
@@ -706,6 +899,13 @@ def parse_arguments() -> argparse.Namespace:
 
 def main():
     args = parse_arguments()
+
+    # Standalone dashboard rebuild (no training, no GPU needed): regenerate the
+    # combined per-epoch dashboard from an experiment dir's CSV + config.
+    if args.dashboard:
+        build_dashboard_from_dir(args.dashboard)
+        return
+
     setup_gpu(gpu_id=args.gpu)
 
     if args.smoke:
