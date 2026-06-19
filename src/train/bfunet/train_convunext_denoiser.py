@@ -36,6 +36,9 @@ import keras
 import argparse
 import numpy as np
 import tensorflow as tf
+import matplotlib
+matplotlib.use("Agg")  # headless: avoid X11 crashes (LESSON)
+import matplotlib.pyplot as plt
 from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -134,6 +137,7 @@ class TrainingConfig:
     # Output
     output_dir: str = "results"
     experiment_name: Optional[str] = None
+    viz_freq: int = 5  # save denoising grids every N epochs
 
     def __post_init__(self):
         if self.experiment_name is None:
@@ -333,6 +337,135 @@ def verify_bias_free(model: keras.Model) -> None:
 
 
 # ---------------------------------------------------------------------
+# VISUALIZATION
+# ---------------------------------------------------------------------
+
+
+def _denorm(img: np.ndarray) -> np.ndarray:
+    """Map a [-1, +1] image to [0, 1] for display."""
+    return np.clip((img + 1.0) / 2.0, 0.0, 1.0)
+
+
+class DenoisingVisualizationCallback(keras.callbacks.Callback):
+    """Save clean / noisy / denoised comparison grids (and PSNR-vs-epoch curve).
+
+    Every ``freq`` epochs, corrupts a FIXED clean validation batch with Gaussian
+    noise at the CURRENT curriculum ``sigma_max`` and saves a 3-row panel
+    (Clean | Noisy | Denoised) plus the running validation-PSNR curve. This is the
+    denoising-specific visualization the scalar TensorBoard/CSV logs don't provide.
+    """
+
+    def __init__(
+        self,
+        clean_batch: tf.Tensor,
+        sigma_max_var: tf.Variable,
+        noise_sigma_min: float,
+        out_dir: Path,
+        freq: int = 5,
+        max_samples: int = 8,
+    ):
+        super().__init__()
+        self.clean_batch = clean_batch
+        self.sigma_max_var = sigma_max_var
+        self.noise_sigma_min = float(noise_sigma_min)
+        self.viz_dir = Path(out_dir) / "visualizations"
+        self.viz_dir.mkdir(parents=True, exist_ok=True)
+        self.freq = max(1, freq)
+        self.max_samples = max_samples
+        self._psnr_history: List[float] = []
+
+    def on_epoch_end(self, epoch: int, logs=None):
+        logs = logs or {}
+        if "val_psnr_metric" in logs:
+            self._psnr_history.append(float(logs["val_psnr_metric"]))
+        if (epoch + 1) % self.freq != 0 and epoch != 0:
+            return
+        if self.clean_batch is None:
+            return
+        try:
+            self._save_grid(epoch + 1)
+            self._save_psnr_curve()
+        except Exception as e:  # visualization must never break training
+            logger.warning(f"Visualization failed at epoch {epoch + 1}: {e}")
+        finally:
+            gc.collect()
+
+    def _save_grid(self, epoch: int):
+        clean = self.clean_batch
+        sigma = float(self.sigma_max_var)
+        noise_level = tf.random.uniform([], self.noise_sigma_min, max(sigma, 1e-6))
+        noisy = tf.clip_by_value(
+            clean + tf.random.normal(tf.shape(clean)) * noise_level, -1.0, 1.0
+        )
+        denoised = self.model(noisy, training=False)
+        if isinstance(denoised, (list, tuple)):
+            denoised = denoised[0]  # deep-supervision: primary output
+
+        clean_np = clean.numpy()
+        noisy_np = noisy.numpy()
+        den_np = np.asarray(denoised)
+        n = min(self.max_samples, clean_np.shape[0])
+
+        fig, axes = plt.subplots(3, n, figsize=(2.4 * n, 7.2))
+        if n == 1:
+            axes = axes.reshape(3, 1)
+        fig.suptitle(
+            f"ConvNeXt Denoiser - epoch {epoch} (sigma_max={sigma:.3f})",
+            fontsize=14, y=0.99,
+        )
+        rows = ["Clean", f"Noisy", "Denoised"]
+        for i in range(n):
+            imgs = [_denorm(clean_np[i]), _denorm(noisy_np[i]), _denorm(den_np[i])]
+            for r, img in enumerate(imgs):
+                cmap = "gray" if img.shape[-1] == 1 else None
+                disp = img.squeeze(-1) if img.shape[-1] == 1 else img
+                axes[r, i].imshow(disp, cmap=cmap, vmin=0, vmax=1)
+                axes[r, i].axis("off")
+                if i == 0:
+                    axes[r, i].set_title(rows[r], fontsize=11, loc="left")
+        plt.tight_layout()
+        path = self.viz_dir / f"epoch_{epoch:03d}_denoise_grid.png"
+        plt.savefig(path, dpi=120, bbox_inches="tight")
+        plt.close(fig)
+        logger.info(f"Saved denoising grid: {path}")
+
+    def _save_psnr_curve(self):
+        if not self._psnr_history:
+            return
+        fig = plt.figure(figsize=(6, 4))
+        plt.plot(range(1, len(self._psnr_history) + 1), self._psnr_history,
+                 marker="o", lw=1.5)
+        plt.xlabel("epoch")
+        plt.ylabel("val PSNR (dB)")
+        plt.title("Validation PSNR")
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(self.viz_dir / "val_psnr_curve.png", dpi=120, bbox_inches="tight")
+        plt.close(fig)
+
+
+def build_fixed_val_batch(
+    val_paths: List[str], config: TrainingConfig, n: int = 8
+) -> Optional[tf.Tensor]:
+    """Load a small FIXED batch of clean [-1,+1] patches for visualization."""
+    if not val_paths:
+        return None
+    patches = []
+    for p in val_paths[: max(n * 3, n)]:
+        try:
+            patch = load_and_preprocess_image(tf.constant(p), config)
+            patch = tf.clip_by_value(patch, -1.0, 1.0)
+            patches.append(patch)
+            if len(patches) >= n:
+                break
+        except Exception:
+            continue
+    if not patches:
+        return None
+    return tf.stack(patches)
+
+
+# ---------------------------------------------------------------------
 # TRAINING
 # ---------------------------------------------------------------------
 
@@ -429,6 +562,18 @@ def train(config: TrainingConfig) -> keras.Model:
         )
     )
 
+    # Denoising visualization: clean/noisy/denoised grids + PSNR curve.
+    viz_batch = build_fixed_val_batch(val_paths, config, n=8)
+    callbacks.append(
+        DenoisingVisualizationCallback(
+            clean_batch=viz_batch,
+            sigma_max_var=sigma_max_var,
+            noise_sigma_min=config.noise_sigma_min,
+            out_dir=output_dir,
+            freq=config.viz_freq,
+        )
+    )
+
     start = time.time()
     history = model.fit(
         train_ds,
@@ -481,6 +626,8 @@ def parse_arguments() -> argparse.Namespace:
                         choices=["linear", "cosine", "exp"], default="linear")
     parser.add_argument("--curriculum-epochs", type=int, default=None)
     parser.add_argument("--deep-supervision", action="store_true")
+    parser.add_argument("--viz-freq", type=int, default=5,
+                        help="Save clean/noisy/denoised grids every N epochs")
     parser.add_argument("--max-train-files", type=int, default=None)
     parser.add_argument("--max-val-files", type=int, default=None)
     parser.add_argument("--output-dir", type=str, default="results")
@@ -522,6 +669,7 @@ def main():
             sigma_max_start=0.05,
             sigma_max_end=0.5,
             curriculum_schedule="linear",
+            viz_freq=1,
             output_dir=args.output_dir,
             experiment_name=args.experiment_name or "convunext_denoiser_smoke",
         )
@@ -544,6 +692,7 @@ def main():
             curriculum_schedule=args.curriculum_schedule,
             max_train_files=args.max_train_files or 10000,
             max_val_files=args.max_val_files or 500,
+            viz_freq=args.viz_freq,
             output_dir=args.output_dir,
             experiment_name=args.experiment_name,
         )
