@@ -177,6 +177,7 @@ class ConvNextV2Block(keras.layers.Layer):
             dropout_rate: Optional[float] = 0.0,
             spatial_dropout_rate: Optional[float] = 0.0,
             use_gamma: bool = True,
+            gamma_initial_value: float = 1.0,
             use_softorthonormal_regularizer: bool = False,
             **kwargs: Any
     ) -> None:
@@ -208,6 +209,7 @@ class ConvNextV2Block(keras.layers.Layer):
         self.dropout_rate = dropout_rate
         self.spatial_dropout_rate = spatial_dropout_rate
         self.use_gamma = use_gamma
+        self.gamma_initial_value = gamma_initial_value
         self.use_softorthonormal_regularizer = use_softorthonormal_regularizer
 
         # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
@@ -312,7 +314,7 @@ class ConvNextV2Block(keras.layers.Layer):
             self.gamma = LearnableMultiplier(
                 multiplier_type="CHANNEL",
                 regularizer=keras.regularizers.L2(self.GAMMA_L2_REGULARIZATION),
-                initializer=keras.initializers.Constant(self.GAMMA_INITIAL_VALUE),
+                initializer=keras.initializers.Constant(self.gamma_initial_value),
                 constraint=ValueRangeConstraint(
                     min_value=self.GAMMA_MIN_VALUE,
                     max_value=self.GAMMA_MAX_VALUE
@@ -458,6 +460,7 @@ class ConvNextV2Block(keras.layers.Layer):
             "dropout_rate": self.dropout_rate,
             "spatial_dropout_rate": self.spatial_dropout_rate,
             "use_gamma": self.use_gamma,
+            "gamma_initial_value": self.gamma_initial_value,
             "use_softorthonormal_regularizer": self.use_softorthonormal_regularizer,
         })
         return config

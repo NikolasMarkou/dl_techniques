@@ -210,6 +210,11 @@ def _apply_residual_convnext_block(
     The block input and output channel counts both equal ``filters`` (callers
     channel-adjust before the blocks), so the residual add is always valid and
     bias-free (identity + a homogeneous branch stays homogeneous).
+
+    LayerScale ``gamma`` is initialized SMALL (1e-6, the ConvNeXt default) so each
+    residual branch starts at ~zero and the deep U-Net begins as a near-identity
+    map. With the block's default ``gamma`` init of 1.0 the stacked residuals
+    explode at initialization (untrained MSE in the thousands) and fail to train.
     """
     residual = x
     y = block_cls(
@@ -219,6 +224,7 @@ def _apply_residual_convnext_block(
         use_bias=False,            # Bias-free for scaling invariance
         dropout_rate=0.0,          # regularization comes from StochasticDepth below
         spatial_dropout_rate=0.0,
+        gamma_initial_value=1e-6,  # LayerScale: residual branch starts ~identity
         kernel_regularizer=kernel_regularizer,
         name=name,
     )(x)
@@ -245,7 +251,12 @@ def create_convunext_denoiser(
         block_kernel_size: Union[int, Tuple[int, int]] = 7,
         drop_path_rate: float = 0.1,
         final_activation: Union[str, callable] = 'linear',
-        kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
+        # Scale-preserving (norm-preserving) init for the main-path structural convs
+        # (stem, channel-adjusts, final, supervision). With the residual trunk these
+        # convs + concatenations must NOT amplify variance — 'he_normal' (scale=2)
+        # compounds it and the deep U-Net explodes at init. 'orthogonal' preserves
+        # the activation norm and stays bias-free (a linear, homogeneous map).
+        kernel_initializer: Union[str, keras.initializers.Initializer] = 'orthogonal',
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         enable_deep_supervision: bool = False,
         model_name: str = 'convunext'
