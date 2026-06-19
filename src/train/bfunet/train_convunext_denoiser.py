@@ -200,6 +200,7 @@ class TrainingConfig:
     output_dir: str = "results"
     experiment_name: Optional[str] = None
     viz_freq: int = 5  # save denoising grids every N epochs
+    viz_samples: int = 8  # number of image columns in the eval grid
 
     def __post_init__(self):
         if self.experiment_name is None:
@@ -892,8 +893,8 @@ def train(config: TrainingConfig) -> keras.Model:
         )
     )
 
-    # Denoising visualization: clean/noisy/denoised grids + PSNR curve.
-    viz_batch = build_fixed_val_batch(val_paths, config, n=8)
+    # Denoising visualization: same images under 3 noise regimes.
+    viz_batch = build_fixed_val_batch(val_paths, config, n=config.viz_samples)
     callbacks.append(
         DenoisingVisualizationCallback(
             clean_batch=viz_batch,
@@ -901,6 +902,7 @@ def train(config: TrainingConfig) -> keras.Model:
             noise_sigma_min=config.noise_sigma_min,
             out_dir=output_dir,
             freq=config.viz_freq,
+            max_samples=config.viz_samples,
             val_ds=val_ds,
             validation_steps=validation_steps,
         )
@@ -962,6 +964,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--deep-supervision", action="store_true")
     parser.add_argument("--viz-freq", type=int, default=5,
                         help="Save clean/noisy/denoised grids every N epochs")
+    parser.add_argument("--viz-samples", type=int, default=8,
+                        help="Number of image columns in the eval grid")
     parser.add_argument("--dashboard", type=str, default=None,
                         help="Rebuild the combined training dashboard PNG from an "
                              "experiment dir (CSV+config) and exit; no training.")
@@ -1005,7 +1009,7 @@ def main():
             channels=3,
             patches_per_image=2,
             max_train_files=8,
-            max_val_files=4,
+            max_val_files=8,  # >= viz_samples so the smoke grid also shows 8 columns
             steps_per_epoch=3,
             validation_steps=2,
             warmup_epochs=0,
@@ -1017,6 +1021,7 @@ def main():
             sigma_max_end=0.5,
             curriculum_schedule="linear",
             viz_freq=1,
+            viz_samples=args.viz_samples,
             output_dir=args.output_dir,
             experiment_name=args.experiment_name or "convunext_denoiser_smoke",
         )
@@ -1043,6 +1048,7 @@ def main():
             steps_per_epoch=args.steps_per_epoch,
             validation_steps=args.validation_steps if args.validation_steps is not None else 100,
             viz_freq=args.viz_freq,
+            viz_samples=args.viz_samples,
             output_dir=args.output_dir,
             experiment_name=args.experiment_name,
         )
