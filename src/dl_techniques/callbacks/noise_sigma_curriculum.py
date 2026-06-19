@@ -151,3 +151,9 @@ class NoiseSigmaCurriculumCallback(keras.callbacks.Callback):
             "sigma_min_start": self.sigma_min_start,
             "sigma_min_end": self.sigma_min_end,
         }
+
+    @classmethod
+    def from_config(cls, config: dict) -> "NoiseSigmaCurriculumCallback":
+        # keras.callbacks.Callback provides no default from_config; reconstruct with
+        # no live Variable attached (the trainer re-supplies it at construction).
+        return cls(**config)
