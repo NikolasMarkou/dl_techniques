@@ -20,6 +20,67 @@ Design notes (plan_2026-06-19_ed071c02):
 - Weighted COCO+DIV2K sourcing via ``select_weighted_image_paths`` prevents COCO's
   ~118K images from drowning DIV2K's ~800 (D-002 of plan_2026-06-18_1cca4fc1).
 
+Reference PSNR baselines / SOTA (additive white Gaussian noise denoising)
+------------------------------------------------------------------------
+Published average PSNR (dB) on the standard AWGN denoising benchmarks. These are
+REFERENCE TARGETS for interpreting this trainer's val-PSNR, NOT a like-for-like
+leaderboard (see caveats below).
+
+Noise-scale note: benchmark sigma is on the [0, 255] pixel scale. This trainer
+adds noise in the [-1, +1] normalized space, so::
+
+    sigma_255  =  sigma_here * 127.5
+
+i.e. this run's curriculum ``sigma_max 0.05 -> 0.50`` corresponds to
+``sigma_255 ~= 6.4 -> 63.75`` — it spans (and exceeds) the classic 15/25/50
+benchmark regimes as a single *blind* model. PSNR is scale-invariant, so dB
+computed here with ``max_val=2.0`` on [-1,+1] images is directly comparable to
+the published ``max_val=255`` numbers.
+
+Grayscale (1-ch), Set12 / BSD68:
+    sigma=15:  DnCNN 32.86/31.73 | FFDNet 32.75/31.63 | DRUNet 33.25/31.91 |
+               SwinIR 33.36/31.97 | Restormer 33.42/31.96
+    sigma=25:  DnCNN 30.44/29.23 | FFDNet 30.43/29.19 | DRUNet 30.94/29.48 |
+               SwinIR 31.01/29.50 | Restormer 31.08/29.52
+    sigma=50:  DnCNN 27.18/26.23 | FFDNet 27.32/26.29 | DRUNet 27.90/26.59 |
+               SwinIR 27.91/26.58 | Restormer 28.00/26.62
+
+Color (3-ch) average PSNR (dB), Table 2 of Zhang et al. SCUNet (arXiv:2203.13278):
+    | dataset  | s | DnCNN | FFDNet | DRUNet | SwinIR | Restormer | SCUNet |
+    |----------|---|-------|--------|--------|--------|-----------|--------|
+    | CBSD68   |15 | 33.90 | 33.87  | 34.30  | 34.42  | 34.40     | 34.40  |
+    | CBSD68   |25 | 31.24 | 31.21  | 31.69  | 31.78  | 31.79     | 31.79  |
+    | CBSD68   |50 | 27.95 | 27.96  | 28.51  | 28.56  | 28.60     | 28.61  |
+    | Kodak24  |15 | 34.60 | 34.63  | 35.31  | 35.34  | 35.47     | 35.34  |
+    | Kodak24  |25 | 32.14 | 32.13  | 32.89  | 32.89  | 33.04     | 32.92  |
+    | Kodak24  |50 | 28.95 | 28.98  | 29.86  | 29.79  | 30.01     | 29.87  |
+    | McMaster |15 | 33.45 | 34.66  | 35.40  | 35.61  | 35.61     | 35.60  |
+    | McMaster |25 | 31.52 | 32.35  | 33.14  | 33.20  | 33.34     | 33.34  |
+    | McMaster |50 | 28.62 | 29.18  | 30.08  | 30.22  | 30.30     | 30.29  |
+    | Urban100 |15 | 32.98 | 33.83  | 34.81  | 35.13  | 35.13     | 35.18  |
+    | Urban100 |25 | 30.81 | 31.40  | 32.60  | 32.90  | 32.96     | 33.03  |
+    | Urban100 |50 | 27.59 | 28.05  | 29.61  | 29.82  | 30.02     | 30.14  |
+
+Bias-free reference (most architecturally comparable to this model):
+    Mohan et al., "Robust and Interpretable Blind Image Denoising via Bias-Free
+    CNNs", ICLR 2020 (arXiv:1906.05478). BF-CNN MATCHES its biased DnCNN-style
+    counterpart WITHIN the training noise range (e.g. ~29.2 dB on BSD68 s=25) but
+    generalizes far better OUTSIDE it — a biased CNN collapses on unseen noise
+    levels while the bias-free model degrades gracefully. That cross-noise
+    robustness (not peak in-range PSNR) is the property this bias-free + noise-
+    curriculum trainer targets.
+
+Caveats (read before comparing):
+  1. Different test set: numbers above are on Set12/BSD68/CBSD68/Kodak24/McMaster/
+     Urban100. This trainer reports val-PSNR on DIV2K-validation patches — easier,
+     cleaner content than Urban100, so absolute dB is NOT directly comparable.
+  2. Blind wide-range vs fixed-sigma specialists: most SOTA rows are sigma-specific
+     (or narrow blind). A single model trained over sigma_255 ~6..64 with a
+     curriculum is solving a harder, broader task; expect lower peak PSNR at any
+     single sigma than a specialist tuned for it.
+  3. Capacity/training budget differ (these are trained to convergence on large
+     corpora). Treat the table as orientation, not a target to "beat".
+
 Usage::
 
     CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg python -m train.bfunet.train_convunext_denoiser \\
