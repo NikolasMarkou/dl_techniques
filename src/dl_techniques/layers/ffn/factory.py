@@ -80,6 +80,7 @@ from .orthoglu_ffn import OrthoGLUFFN
 from .power_mlp_layer import PowerMLPLayer
 from .kan_linear import KANLinear
 from .tversky_projection import TverskyProjectionLayer
+from .monarch_ffn import MonarchFFN
 
 # ---------------------------------------------------------------------
 # Type definition for FFN types
@@ -95,6 +96,7 @@ FFNType = Literal[
     'kan',
     'logic',
     'mlp',
+    'monarch',
     'orthoglu',
     'power_mlp',
     'residual',
@@ -244,6 +246,26 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             'bias_regularizer': None
         },
         'use_case': 'General purpose feed-forward processing in transformers'
+    },
+    'monarch': {
+        'class': MonarchFFN,
+        'description': (
+            'Order-2 Monarch-structured FFN: each projection is a product of two '
+            'block-diagonal matrices interleaved with a reshape/permute (Dao et al. 2022). '
+            'Sub-quadratic parameter count; nblocks must divide input_dim, hidden_dim and output_dim.'
+        ),
+        'required_params': ['hidden_dim', 'output_dim'],
+        'optional_params': {
+            'nblocks': 4,
+            'activation': 'gelu',
+            'dropout_rate': 0.0,
+            'use_bias': True,
+            'kernel_initializer': 'glorot_uniform',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'bias_regularizer': None
+        },
+        'use_case': 'Parameter-efficient structured replacement for dense FFN projections'
     },
     'orthoglu': {
         'class': OrthoGLUFFN,
@@ -411,6 +433,11 @@ def validate_ffn_config(ffn_type: str, **kwargs: Any) -> None:
             raise ValueError(f"attention_activation must be one of {valid_activations}")
         if 'output_activation' in kwargs and kwargs['output_activation'] not in valid_activations:
             raise ValueError(f"output_activation must be one of {valid_activations}")
+    elif ffn_type == 'monarch':
+        if 'nblocks' in kwargs:
+            nblocks = kwargs['nblocks']
+            if not isinstance(nblocks, int) or nblocks <= 0:
+                raise ValueError(f"nblocks must be a positive integer, got {nblocks}")
     elif ffn_type == 'power_mlp':
         if 'k' in kwargs:
             k = kwargs['k']

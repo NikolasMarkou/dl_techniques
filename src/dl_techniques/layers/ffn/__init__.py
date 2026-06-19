@@ -13,6 +13,7 @@ from .logic_ffn import LogicFFN
 from .counting_ffn import CountingFFN
 from .kan_linear import KANLinear
 from .tversky_projection import TverskyProjectionLayer
+from .monarch_ffn import MonarchFFN
 
 from .factory import (
     FFNType,
@@ -43,6 +44,7 @@ __all__ = [
     "CountingFFN",
     "KANLinear",
     "TverskyProjectionLayer",
+    "MonarchFFN",
     # Factory interface
     "FFNType",
     "create_ffn_layer",
