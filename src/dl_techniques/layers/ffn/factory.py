@@ -82,6 +82,7 @@ from .kan_linear import KANLinear
 from .tversky_projection import TverskyProjectionLayer
 from .monarch_ffn import MonarchFFN
 from .mlp_mixer_block import MixerBlock
+from .squared_relu_ffn import SquaredReLUFFN
 
 # ---------------------------------------------------------------------
 # Type definition for FFN types
@@ -102,6 +103,7 @@ FFNType = Literal[
     'orthoglu',
     'power_mlp',
     'residual',
+    'squared_relu',
     'swiglu',
     'swin_mlp',
     'tversky'
@@ -329,6 +331,24 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
             'bias_regularizer': None
         },
         'use_case': 'Deep networks requiring skip connections for gradient flow'
+    },
+    'squared_relu': {
+        'class': SquaredReLUFFN,
+        'description': (
+            'Primer squared-ReLU FFN: Dense(hidden_dim) -> relu(x)**2 -> Dropout '
+            '-> Dense(output_dim) (So et al. 2021). Same shape contract as MLPBlock '
+            'but with a fixed (non-configurable) squared-ReLU non-linearity.'
+        ),
+        'required_params': ['hidden_dim', 'output_dim'],
+        'optional_params': {
+            'dropout_rate': 0.0,
+            'use_bias': True,
+            'kernel_initializer': 'glorot_uniform',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'bias_regularizer': None
+        },
+        'use_case': 'Efficient transformer FFN with sharpened squared-ReLU activation'
     },
     'swiglu': {
         'class': SwiGLUFFN,

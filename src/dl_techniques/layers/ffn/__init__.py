@@ -15,6 +15,7 @@ from .kan_linear import KANLinear
 from .tversky_projection import TverskyProjectionLayer
 from .monarch_ffn import MonarchFFN
 from .mlp_mixer_block import MixerBlock
+from .squared_relu_ffn import SquaredReLUFFN
 
 from .factory import (
     FFNType,
@@ -47,6 +48,7 @@ __all__ = [
     "TverskyProjectionLayer",
     "MonarchFFN",
     "MixerBlock",
+    "SquaredReLUFFN",
     # Factory interface
     "FFNType",
     "create_ffn_layer",
