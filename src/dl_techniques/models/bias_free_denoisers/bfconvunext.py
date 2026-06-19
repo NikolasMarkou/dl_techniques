@@ -482,8 +482,15 @@ def create_convunext_denoiser(
         current_filters = filter_sizes[level]
         logger.info(f"Encoder level {level}: {current_filters} filters")
 
-        # First level uses stem block with conservative channel count
-        if level == 0:
+        # First level: initial feature extraction + channel setup. The dedicated
+        # ConvUNextStem is only needed when there is NO Gabor stem. When
+        # use_gabor_stem=True the frozen Gabor bank + its mandatory 1x1 projection
+        # already performed initial feature extraction AND set the channel count to
+        # initial_filters (== current_filters at level 0), so the ConvUNextStem is
+        # redundant. In that case fall through to the channel-adjust branch, which is a
+        # no-op when channels already match (they do, by construction) and otherwise
+        # keeps the residual ConvNeXt add valid at current_filters.
+        if level == 0 and not use_gabor_stem:
             # Use stem block for initial feature extraction
             x = ConvUNextStem(
                 filters=current_filters,
@@ -493,7 +500,9 @@ def create_convunext_denoiser(
                 name=f'encoder_level_{level}_stem'
             )(x)
         else:
-            # Channel adjustment if needed (bias-free)
+            # Channel adjustment if needed (bias-free). Covers level>0 and the
+            # gabor-stem level-0 case (ensures x has current_filters channels so the
+            # residual ConvNeXt blocks below add correctly).
             if x.shape[-1] != current_filters:
                 x = keras.layers.Conv2D(
                     filters=current_filters,
