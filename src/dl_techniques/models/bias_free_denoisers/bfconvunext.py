@@ -50,6 +50,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
 from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
 from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization
+from dl_techniques.initializers import create_gabor_depthwise_conv2d
 
 # ---------------------------------------------------------------------
 # ConvUNext Bias-Free Building Blocks (Simple Stem)
@@ -195,6 +196,9 @@ def create_convunext_denoiser(
         blocks_per_level: int = 2,
         convnext_version: str = 'v2',
         stem_kernel_size: Union[int, Tuple[int, int]] = 7,
+        use_gabor_stem: bool = False,
+        gabor_filters: int = 32,
+        gabor_kernel_size: Union[int, Tuple[int, int]] = 7,
         block_kernel_size: Union[int, Tuple[int, int]] = 7,
         drop_path_rate: float = 0.1,
         final_activation: Union[str, callable] = 'linear',
@@ -245,6 +249,17 @@ def create_convunext_denoiser(
         blocks_per_level: Integer, number of blocks per level. Defaults to 2.
         convnext_version: String, 'v1' or 'v2' to choose ConvNeXt version. Defaults to 'v2'.
         stem_kernel_size: Integer or tuple, size of stem convolution kernels. Defaults to 7.
+        use_gabor_stem: Boolean, if True prepend a frozen (non-learnable) Gabor depthwise
+            convolution stem (bias-free) followed by a bias-free 1x1 projection to
+            `initial_filters`, before the standard ConvUNext stem. Defaults to False
+            (byte-identical to the original architecture). The Gabor stem contributes
+            zero trainable parameters.
+        gabor_filters: Integer, depth multiplier for the Gabor depthwise stem; the stem
+            emits `input_channels * gabor_filters` channels which the mandatory 1x1
+            projection reduces to `initial_filters`. Only used when use_gabor_stem=True.
+            Defaults to 32.
+        gabor_kernel_size: Integer or tuple, kernel size of the Gabor depthwise stem.
+            Only used when use_gabor_stem=True. Defaults to 7.
         block_kernel_size: Integer or tuple, size of block kernels. Defaults to 7.
         drop_path_rate: Float, stochastic depth drop probability. Defaults to 0.1.
         final_activation: String or callable, final activation function. Defaults to 'linear'.
@@ -309,6 +324,35 @@ def create_convunext_denoiser(
     # Input layer
     inputs = keras.Input(shape=input_shape, name='input_images')
 
+    # DECISION plan_2026-06-19_ed071c02/D-001: default-OFF additive frozen Gabor stem.
+    # Non-learnable depthwise Gabor bank + mandatory bias-free 1x1 projection (output
+    # channels of a depthwise conv = in_ch * gabor_filters). Reuse the existing builder,
+    # do not rebuild. With use_gabor_stem=False this is a no-op rename (stem_input=inputs).
+    if use_gabor_stem:
+        gabor = create_gabor_depthwise_conv2d(
+            filters=gabor_filters,
+            kernel_size=gabor_kernel_size,
+            strides=1,
+            padding='same',
+            use_bias=False,
+            trainable=False,
+            name='gabor_stem',
+        )(inputs)
+        stem_input = keras.layers.Conv2D(
+            filters=initial_filters,
+            kernel_size=1,
+            use_bias=False,  # Bias-free projection
+            kernel_initializer=kernel_initializer,
+            kernel_regularizer=kernel_regularizer,
+            name='gabor_stem_projection',
+        )(gabor)
+        logger.info(
+            f"Frozen Gabor stem enabled: filters={gabor_filters}, "
+            f"kernel_size={gabor_kernel_size} -> 1x1 projection to {initial_filters}"
+        )
+    else:
+        stem_input = inputs
+
     # Calculate filter sizes for each level
     filter_sizes = [initial_filters * (filter_multiplier ** i) for i in range(depth + 1)]
 
@@ -320,7 +364,7 @@ def create_convunext_denoiser(
     # ENCODER PATH (Contracting)
     # =========================================================================
 
-    x = inputs
+    x = stem_input
     logger.info(f"Building ConvUNext encoder path with {depth} levels using ConvNeXt {convnext_version.upper()}")
 
     for level in range(depth):
