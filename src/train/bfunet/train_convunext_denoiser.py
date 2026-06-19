@@ -531,10 +531,9 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
             self._psnr_history.append(float(logs["val_psnr_metric"]))
 
         # Record per-epoch scalars for the combined dashboard. sigma_max is the
-        # value the curriculum used this epoch; lr is read from the live optimizer
-        # and also injected into logs so the CSVLogger captures it going forward.
+        # value the curriculum used this epoch; lr is read from the live optimizer.
+        # (CSV 'lr' is handled by LRLoggerCallback which runs before CSVLogger.)
         lr_val = self._current_lr()
-        logs["lr"] = lr_val
         self._hist["epoch"].append(epoch + 1)
         self._hist["loss"].append(logs.get("loss", float("nan")))
         self._hist["val_loss"].append(logs.get("val_loss", float("nan")))
@@ -618,6 +617,26 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         plt.tight_layout()
         plt.savefig(self.viz_dir / "val_psnr_curve.png", dpi=120, bbox_inches="tight")
         plt.close(fig)
+
+
+class LRLoggerCallback(keras.callbacks.Callback):
+    """Inject the current learning rate into ``logs`` so CSVLogger records an ``lr``
+    column. MUST run BEFORE CSVLogger -> insert at the FRONT of the callbacks list
+    (Keras runs callbacks in list order; an appended callback runs after CSVLogger
+    and its ``logs`` edits never reach the already-written CSV row)."""
+
+    def on_epoch_end(self, epoch: int, logs=None):
+        if logs is None:
+            return
+        try:
+            opt = self.model.optimizer
+            lr = opt.learning_rate
+            if isinstance(lr, keras.optimizers.schedules.LearningRateSchedule):
+                logs["lr"] = float(keras.ops.convert_to_numpy(lr(opt.iterations)))
+            else:
+                logs["lr"] = float(keras.ops.convert_to_numpy(lr))
+        except Exception:
+            pass
 
 
 def build_fixed_val_batch(
@@ -803,6 +822,8 @@ def train(config: TrainingConfig) -> keras.Model:
         include_tensorboard=True,
         include_analyzer=False,
     )
+    # Prepend so it runs BEFORE CSVLogger -> 'lr' lands in training_log.csv.
+    callbacks.insert(0, LRLoggerCallback())
     callbacks.append(
         NoiseSigmaCurriculumCallback(
             sigma_max_var=sigma_max_var,
