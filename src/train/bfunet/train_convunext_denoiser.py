@@ -106,6 +106,10 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
+# ---------------------------------------------------------------------
+# local imports
+# ---------------------------------------------------------------------
+
 from train.common import (
     setup_gpu,
     create_callbacks as create_common_callbacks,
@@ -178,6 +182,7 @@ class TrainingConfig:
     use_gabor_stem: bool = True
     gabor_filters: int = 32
     gabor_kernel_size: int = 7
+    use_laplacian_pyramid: bool = False
     enable_deep_supervision: bool = False
 
     # Training
@@ -376,6 +381,7 @@ def build_model(config: TrainingConfig) -> keras.Model:
         use_gabor_stem=config.use_gabor_stem,
         gabor_filters=config.gabor_filters,
         gabor_kernel_size=config.gabor_kernel_size,
+        use_laplacian_pyramid=config.use_laplacian_pyramid,
         enable_deep_supervision=config.enable_deep_supervision,
         final_activation="linear",  # MUST stay linear: bias-free homogeneity f(ax)=a*f(x)
         model_name=f"convunext_denoiser_{config.variant}",
@@ -646,7 +652,7 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
             mse = float(tf.reduce_mean(tf.square(denoised - clean)))
             psnr = 20.0 * np.log10(2.0 / max(np.sqrt(mse), 1e-8))  # max_val=2.0
             s255 = sigma * 127.5
-            rows.append((f"Noisy {label}\n(σ₂₅₅≈{s255:.0f})", noisy.numpy()))
+            rows.append((f"Noisy {label}\n(σ(_255)≈{s255:.0f})", noisy.numpy()))
             rows.append((f"Denoised {label}\n(PSNR {psnr:.1f} dB)", np.asarray(denoised)))
 
         n_rows = len(rows)  # 1 + 2 * len(noise_regimes) == 7 by default
@@ -955,6 +961,8 @@ def parse_arguments() -> argparse.Namespace:
                         help="LR warmup length (default: 10%% of --epochs)")
     parser.add_argument("--no-gabor-stem", action="store_true",
                         help="Disable the frozen Gabor depthwise stem")
+    parser.add_argument("--laplacian-pyramid", action="store_true",
+                        help="Enable the Laplacian-pyramid downsample/skip path (default OFF)")
     parser.add_argument("--gabor-filters", type=int, default=32)
     parser.add_argument("--sigma-max-start", type=float, default=0.05)
     parser.add_argument("--sigma-max-end", type=float, default=0.5)
@@ -1001,6 +1009,7 @@ def main():
             variant="tiny",
             convnext_version=args.convnext_version,
             use_gabor_stem=not args.no_gabor_stem,
+            use_laplacian_pyramid=args.laplacian_pyramid,
             gabor_filters=8,
             epochs=2,
             curriculum_epochs=2,
@@ -1030,6 +1039,7 @@ def main():
             variant=args.variant,
             convnext_version=args.convnext_version,
             use_gabor_stem=not args.no_gabor_stem,
+            use_laplacian_pyramid=args.laplacian_pyramid,
             gabor_filters=args.gabor_filters,
             enable_deep_supervision=args.deep_supervision,
             epochs=args.epochs,
