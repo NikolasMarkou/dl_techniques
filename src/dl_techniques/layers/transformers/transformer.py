@@ -515,11 +515,20 @@ class TransformerLayer(keras.layers.Layer):
                 'output_dim': self.hidden_size,
                 'branch_activation': self.activation,
             })
-        elif self.ffn_type in ['mlp', 'glu', 'geglu', 'residual', 'swin_mlp']:
+        elif self.ffn_type in ['mlp', 'glu', 'geglu', 'residual', 'swin_mlp', 'lowrank', 'monarch']:
             config.update({
                 'hidden_dim': self.intermediate_size,
                 'output_dim': self.hidden_size,
                 'activation': self.activation,
+            })
+        elif self.ffn_type in ['squared_relu', 'reglu', 'bilinear']:
+            # squared_relu has a fixed relu(x)**2 nonlinearity (no activation param);
+            # reglu/bilinear are GLUFFN aliases whose defining feature is their fixed
+            # relu/linear gate -- injecting activation would defeat the alias. So inject
+            # only the dims. (D-005)
+            config.update({
+                'hidden_dim': self.intermediate_size,
+                'output_dim': self.hidden_size,
             })
 
         # User-provided args override everything
