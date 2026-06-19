@@ -630,6 +630,9 @@ def parse_arguments() -> argparse.Namespace:
                         help="Save clean/noisy/denoised grids every N epochs")
     parser.add_argument("--max-train-files", type=int, default=None)
     parser.add_argument("--max-val-files", type=int, default=None)
+    parser.add_argument("--steps-per-epoch", type=int, default=None,
+                        help="Bound epoch length (default: files*patches//batch)")
+    parser.add_argument("--validation-steps", type=int, default=None)
     parser.add_argument("--output-dir", type=str, default="results")
     parser.add_argument("--experiment-name", type=str, default=None)
     parser.add_argument("--gpu", type=int, default=None)
@@ -692,6 +695,8 @@ def main():
             curriculum_schedule=args.curriculum_schedule,
             max_train_files=args.max_train_files or 10000,
             max_val_files=args.max_val_files or 500,
+            steps_per_epoch=args.steps_per_epoch,
+            validation_steps=args.validation_steps if args.validation_steps is not None else 100,
             viz_freq=args.viz_freq,
             output_dir=args.output_dir,
             experiment_name=args.experiment_name,
