@@ -203,7 +203,10 @@ class TrainingConfig:
     lr_schedule_type: str = "cosine_decay"
     warmup_epochs: Optional[int] = None  # None -> 10% of epochs (see __post_init__)
     gradient_clipping: float = 1.0
-    early_stopping_patience: int = 25
+    # <= 0 disables early stopping. Default OFF: the noise-sigma curriculum makes val_loss
+    # non-monotonic (it rises as the schedule ramps difficulty), so EarlyStopping on val_loss
+    # fires prematurely and cuts training short. ModelCheckpoint still saves best_model.keras.
+    early_stopping_patience: int = -1
 
     # Output
     output_dir: str = "results"
@@ -891,16 +894,29 @@ def train(config: TrainingConfig) -> keras.Model:
     )
     logger.info(f"Model compiled with {model.count_params():,} parameters")
 
+    disable_early_stopping = config.early_stopping_patience <= 0
     callbacks, _ = create_common_callbacks(
         model_name=config.experiment_name,
         results_dir_prefix="convunext_denoiser",
         run_dir=str(output_dir),
         monitor="val_loss",
-        patience=config.early_stopping_patience,
+        patience=config.early_stopping_patience if not disable_early_stopping else 1,
         use_lr_schedule=True,
         include_tensorboard=True,
         include_analyzer=False,
     )
+    if disable_early_stopping:
+        # Curriculum learning makes val_loss non-monotonic, so early stopping on it would
+        # cut training short. Strip the EarlyStopping callback; the full epoch budget runs
+        # and ModelCheckpoint still writes best_model.keras.
+        callbacks = [
+            cb for cb in callbacks
+            if not isinstance(cb, keras.callbacks.EarlyStopping)
+        ]
+        logger.info(
+            "Early stopping disabled (early_stopping_patience <= 0); "
+            "training the full schedule."
+        )
     # Prepend so it runs BEFORE CSVLogger -> 'lr' lands in training_log.csv.
     callbacks.insert(0, LRLoggerCallback())
     callbacks.append(
