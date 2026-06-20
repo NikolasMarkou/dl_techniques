@@ -550,5 +550,96 @@ def test_grn_vs_no_grn_difference(sample_inputs: tf.Tensor) -> None:
     assert ConvNextV2Block.GAMMA_MAX_VALUE == 1.0
 
 
+class TestDepthwiseInitRegularizer:
+    """Tests for the depthwise_initializer / depthwise_regularizer pass-through (Step 1)."""
+
+    CHANNELS = 16
+    KERNEL = 7
+
+    def _build_block(self, **overrides):
+        params = dict(kernel_size=self.KERNEL, filters=self.CHANNELS)
+        params.update(overrides)
+        block = ConvNextV2Block(**params)
+        block.build((None, 32, 32, self.CHANNELS))
+        return block
+
+    def test_off_path_byte_identical_no_kernel_reg(self) -> None:
+        """SC2: params unset (None) reproduces TruncatedNormal(0,0.02) + None regularizer."""
+        block = self._build_block()
+        dw_cfg = block.conv_1.get_config()
+
+        init = dw_cfg["depthwise_initializer"]
+        assert init["class_name"] == "TruncatedNormal"
+        assert init["config"]["mean"] == 0.0
+        assert init["config"]["stddev"] == 0.02
+
+        # No kernel_regularizer -> deepcopy(None) -> None
+        assert dw_cfg["depthwise_regularizer"] is None
+
+    def test_off_path_byte_identical_with_kernel_reg(self) -> None:
+        """SC2: with kernel_regularizer set and depthwise params unset, the depthwise
+        regularizer equals deepcopy(kernel_regularizer)."""
+        block = self._build_block(kernel_regularizer=keras.regularizers.L2(0.01))
+        dw_cfg = block.conv_1.get_config()
+
+        init = dw_cfg["depthwise_initializer"]
+        assert init["class_name"] == "TruncatedNormal"
+        assert init["config"]["mean"] == 0.0
+        assert init["config"]["stddev"] == 0.02
+
+        reg = dw_cfg["depthwise_regularizer"]
+        assert reg is not None
+        assert reg["class_name"] == "L2"
+        assert np.isclose(reg["config"]["l2"], 0.01)
+
+    def test_on_path_orthonormal_unit_norm_and_roundtrip(self, tmp_path) -> None:
+        """SC3: Orthogonal(gain=1.0) init + L2 regularizer; unit-norm kernel; .keras round-trip."""
+        block = ConvNextV2Block(
+            kernel_size=self.KERNEL,
+            filters=self.CHANNELS,
+            depthwise_initializer=keras.initializers.Orthogonal(gain=1.0),
+            depthwise_regularizer=keras.regularizers.L2(1e-4),
+        )
+        inputs = keras.Input(shape=(32, 32, self.CHANNELS))
+        outputs = block(inputs)
+        model = keras.Model(inputs=inputs, outputs=outputs)
+
+        x = tf.random.normal((2, 32, 32, self.CHANNELS))
+        original_output = model(x, training=False).numpy()
+
+        # Depthwise kernel flattens to a single column -> unit norm under Orthogonal(gain=1.0)
+        dw_kernel = block.conv_1.get_weights()[0]
+        assert np.isclose(np.linalg.norm(dw_kernel.reshape(-1)), 1.0, atol=1e-3)
+
+        # The depthwise regularizer override is carried on the sub-layer
+        dw_cfg = block.conv_1.get_config()
+        assert dw_cfg["depthwise_regularizer"]["class_name"] == "L2"
+
+        # get_config re-emits the serialized override; round-trips through from_config
+        cfg = block.get_config()
+        assert cfg["depthwise_initializer"]["class_name"] == "Orthogonal"
+        assert cfg["depthwise_regularizer"]["class_name"] == "L2"
+        rebuilt = ConvNextV2Block.from_config(cfg)
+        assert isinstance(rebuilt.depthwise_initializer, keras.initializers.Orthogonal)
+        assert isinstance(rebuilt.depthwise_regularizer, keras.regularizers.L2)
+
+        # Full .keras save/load round-trip
+        save_path = str(tmp_path / "model.keras")
+        model.save(save_path)
+        loaded_model = keras.models.load_model(save_path)
+        loaded_output = loaded_model(x, training=False).numpy()
+        assert np.allclose(original_output, loaded_output, atol=1e-4)
+
+    def test_unsupported_repo_initializers_raise(self) -> None:
+        """SC4 (D-002): repo 2D-only orthonormal initializers RAISE on a 4-D depthwise kernel."""
+        from dl_techniques.initializers import OrthonormalInitializer, HeOrthonormalInitializer
+
+        with pytest.raises(ValueError):
+            self._build_block(depthwise_initializer=OrthonormalInitializer())
+
+        with pytest.raises(ValueError):
+            self._build_block(depthwise_initializer=HeOrthonormalInitializer())
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

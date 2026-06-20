@@ -139,6 +139,24 @@ class ConvNextV1Block(keras.layers.Layer):
     :param use_softorthonormal_regularizer: Whether to apply soft orthonormal
         regularization. Defaults to ``False``.
     :type use_softorthonormal_regularizer: bool
+    :param depthwise_initializer: Optional override for the depthwise convolution's
+        kernel initializer (a string name or a ``keras.initializers.Initializer``
+        instance). ``None`` (default) reproduces the current hardcoded behavior:
+        ``TruncatedNormal(mean=0.0, stddev=0.02)``. For an *orthonormal* depthwise
+        init, pass ``keras.initializers.Orthogonal(gain=1.0)``: a depthwise
+        ``(K, K, C, 1)`` kernel flattens to a single column, so "orthonormal" here
+        means unit-norm (``||w|| = 1.0``); per-channel mutual orthonormality is not
+        expressible at channel-multiplier 1. The repo
+        ``OrthonormalInitializer`` / ``HeOrthonormalInitializer`` are 2D-only and
+        RAISE on a 4-D kernel, and ``OrthogonalHypersphereInitializer`` blows the
+        norm up — all three are UNSUPPORTED for the depthwise conv (use keras
+        ``Orthogonal(gain=1.0)`` instead). See D-002.
+    :type depthwise_initializer: Optional[Union[str, keras.initializers.Initializer]]
+    :param depthwise_regularizer: Optional override for the depthwise convolution's
+        kernel regularizer (a string name or a ``keras.regularizers.Regularizer``
+        instance). ``None`` (default) reproduces the current hardcoded behavior:
+        ``copy.deepcopy(kernel_regularizer)``.
+    :type depthwise_regularizer: Optional[Union[str, keras.regularizers.Regularizer]]
     :param kwargs: Additional keyword arguments for the Layer base class.
     """
 
@@ -167,6 +185,8 @@ class ConvNextV1Block(keras.layers.Layer):
             use_gamma: bool = True,
             gamma_initial_value: float = 1.0,
             use_softorthonormal_regularizer: bool = False,
+            depthwise_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
+            depthwise_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -199,21 +219,37 @@ class ConvNextV1Block(keras.layers.Layer):
         self.use_gamma = use_gamma
         self.gamma_initial_value = gamma_initial_value
         self.use_softorthonormal_regularizer = use_softorthonormal_regularizer
+        # Store the RAW depthwise init/regularizer args verbatim (do NOT pre-resolve to an
+        # instance). None => fall back to the current hardcoded behavior at conv-build time;
+        # keeping the raw arg lets get_config re-serialize exactly what the caller passed.
+        self.depthwise_initializer = depthwise_initializer
+        self.depthwise_regularizer = depthwise_regularizer
 
         # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
         # They will be built explicitly in build() method for robust serialization
+
+        # Resolve depthwise init/regularizer with fallback to the historical hardcoded values.
+        # When both overrides are None the OFF path is byte-identical to the original.
+        _dw_init = (
+            self.depthwise_initializer if self.depthwise_initializer is not None
+            else keras.initializers.TruncatedNormal(
+                mean=self.INITIALIZER_MEAN,
+                stddev=self.INITIALIZER_STDDEV
+            )
+        )
+        _dw_reg = (
+            self.depthwise_regularizer if self.depthwise_regularizer is not None
+            else copy.deepcopy(self.kernel_regularizer)
+        )
 
         # Depthwise convolution layer
         self.conv_1 = keras.layers.DepthwiseConv2D(
             kernel_size=self.kernel_size,
             strides=self.STRIDES,
             padding="same",
-            depthwise_initializer=keras.initializers.TruncatedNormal(
-                mean=self.INITIALIZER_MEAN,
-                stddev=self.INITIALIZER_STDDEV
-            ),
+            depthwise_initializer=_dw_init,
             use_bias=self.use_bias,
-            depthwise_regularizer=copy.deepcopy(self.kernel_regularizer),
+            depthwise_regularizer=_dw_reg,
             name="depthwise_conv"
         )
 
@@ -440,6 +476,8 @@ class ConvNextV1Block(keras.layers.Layer):
             "use_gamma": self.use_gamma,
             "gamma_initial_value": self.gamma_initial_value,
             "use_softorthonormal_regularizer": self.use_softorthonormal_regularizer,
+            "depthwise_initializer": keras.initializers.serialize(self.depthwise_initializer),
+            "depthwise_regularizer": keras.regularizers.serialize(self.depthwise_regularizer),
         })
         return config
 
@@ -459,6 +497,16 @@ class ConvNextV1Block(keras.layers.Layer):
         if "kernel_regularizer" in config_copy and config_copy["kernel_regularizer"] is not None:
             config_copy["kernel_regularizer"] = keras.regularizers.deserialize(
                 config_copy["kernel_regularizer"]
+            )
+
+        # Deserialize the depthwise init/regularizer overrides when present and non-None
+        if "depthwise_initializer" in config_copy and config_copy["depthwise_initializer"] is not None:
+            config_copy["depthwise_initializer"] = keras.initializers.deserialize(
+                config_copy["depthwise_initializer"]
+            )
+        if "depthwise_regularizer" in config_copy and config_copy["depthwise_regularizer"] is not None:
+            config_copy["depthwise_regularizer"] = keras.regularizers.deserialize(
+                config_copy["depthwise_regularizer"]
             )
 
         return cls(**config_copy)
