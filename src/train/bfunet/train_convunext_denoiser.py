@@ -132,6 +132,9 @@ from dl_techniques.models.bias_free_denoisers.bfconvunext import (
 from dl_techniques.callbacks.noise_sigma_curriculum import (
     NoiseSigmaCurriculumCallback,
 )
+from dl_techniques.callbacks.convunext_bottleneck_monitor import (
+    ConvUnextBottleneckMonitorCallback,
+)
 
 
 # ---------------------------------------------------------------------
@@ -969,6 +972,18 @@ def train(config: TrainingConfig) -> keras.Model:
             validation_steps=validation_steps,
         )
     )
+
+    # Bottleneck health monitor: only when the full model exposes the bottleneck
+    # (reads the trailing bottleneck output from the FULL model, not the view).
+    if config.expose_bottleneck:
+        callbacks.append(
+            ConvUnextBottleneckMonitorCallback(
+                full_model=model,
+                val_batch=viz_batch,
+                output_dir=output_dir,
+                monitor_freq=config.viz_freq,
+            )
+        )
 
     start = time.time()
     history = train_model.fit(
