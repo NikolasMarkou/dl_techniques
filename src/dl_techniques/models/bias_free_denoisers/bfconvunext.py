@@ -344,6 +344,8 @@ def create_convunext_denoiser(
         kernel_initializer: Union[str, keras.initializers.Initializer] = 'orthogonal',
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         enable_deep_supervision: bool = False,
+        supervision_norm_scale: bool = True,
+        supervision_norm_center: bool = False,
         model_name: str = 'convunext'
 ) -> keras.Model:
     """
@@ -421,6 +423,12 @@ def create_convunext_denoiser(
         kernel_initializer: String or Initializer, weight initializer. Defaults to 'orthogonal'.
         kernel_regularizer: String or Regularizer, weight regularizer. Defaults to None.
         enable_deep_supervision: Boolean, whether to add deep supervision outputs. Defaults to False.
+        supervision_norm_scale: Boolean, whether the deep-supervision head LayerNorm has a
+            learnable scale (gamma). Defaults to True.
+        supervision_norm_center: Boolean, whether the deep-supervision head LayerNorm has a
+            learnable center (beta/bias). Defaults to False to keep the head bias-free
+            (homogeneous), consistent with the rest of the model; set True only if you accept
+            a bias-like additive offset at the supervision heads.
         model_name: String, name for the model. Defaults to 'convunext'.
 
     Returns:
@@ -702,8 +710,13 @@ def create_convunext_denoiser(
                 name=f'supervision_intermediate_level_{level}'
             )(x)
 
-            supervision_branch = GlobalResponseNormalization(
-                name=f'supervision_grn_level_{level}'
+            # Bias-free-by-default LayerNorm at the supervision head (replaces GRN, whose
+            # trainable beta is a bias-like additive offset). scale/center read from args;
+            # center=False keeps the head bias-free (homogeneous), matching the model contract.
+            supervision_branch = keras.layers.LayerNormalization(
+                center=supervision_norm_center,
+                scale=supervision_norm_scale,
+                name=f'supervision_layernorm_level_{level}'
             )(supervision_branch)
 
             supervision_branch = keras.layers.Activation(
