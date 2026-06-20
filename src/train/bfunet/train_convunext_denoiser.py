@@ -219,6 +219,14 @@ class TrainingConfig:
     # fires prematurely and cuts training short. ModelCheckpoint still saves best_model.keras.
     early_stopping_patience: int = -1
 
+    # Self-iterate (epoch-boundary pool regeneration; makes the denoiser self-iterable
+    # so 2-5 sequential passes improve rather than over-smooth). Default OFF: the
+    # streaming pipeline path is byte-identical when self_iterate=False.
+    self_iterate: bool = False
+    self_iterate_pool_size: int = 2048
+    self_iterate_regen_freq: int = 1
+    self_iterate_mix_ratio: float = 0.5
+
     # Analysis (ModelAnalyzer, data-free weight + spectral). Default OFF (opt-in).
     enable_analyzer: bool = False
     analyzer_freq: int = 10        # run every N epochs
@@ -259,6 +267,26 @@ class TrainingConfig:
             raise ValueError("convnext_version must be 'v1' or 'v2'")
         if not self.train_image_dirs or not self.val_image_dirs:
             raise ValueError("train/val image dirs must be non-empty")
+        # Self-iterate validation is guarded so the default-OFF config is unaffected.
+        if self.self_iterate:
+            if self.self_iterate_pool_size < self.batch_size:
+                raise ValueError(
+                    "self_iterate_pool_size "
+                    f"({self.self_iterate_pool_size}) must be >= batch_size "
+                    f"({self.batch_size}); a pool smaller than one batch cannot fill "
+                    "a drop_remainder batch."
+                )
+            if self.noise_type != "additive":
+                # Self-iterate is theory-bound to additive Gaussian noise: the Miyasawa
+                # residual=score identity (and the clean-image fixed point it implies)
+                # holds for additive noise ONLY; multiplicative/composite break the
+                # linear-domain identity (D-003/D-006, research/miyasawas_theorem.md).
+                raise ValueError(
+                    "self_iterate requires noise_type='additive'; got "
+                    f"{self.noise_type!r}. Multiplicative/composite noise breaks the "
+                    "additive-only Miyasawa fixed-point theory the self-iterate "
+                    "mechanism depends on (D-003/D-006)."
+                )
 
 
 # ---------------------------------------------------------------------
@@ -423,6 +451,163 @@ def create_dataset(
     dataset = dataset.batch(config.batch_size, drop_remainder=is_training)
     dataset = dataset.prefetch(tf.data.AUTOTUNE)
     return dataset
+
+
+# ---------------------------------------------------------------------
+# SELF-ITERATE POOL (epoch-boundary regeneration data path; default OFF)
+# ---------------------------------------------------------------------
+
+
+def build_self_iterate_pool(
+    file_paths: List[str],
+    config: TrainingConfig,
+    sigma_init: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Load a FIXED bounded RAM pool of clean patches + an initial noisy input pool.
+
+    Loads ``config.self_iterate_pool_size`` clean patches ONCE (reusing the same
+    ``load_and_preprocess_image`` load+crop logic the streaming pipeline uses, plus
+    the same clip-to-[-1,+1] convention) into ``clean_pool``, then allocates a
+    mutable ``current_input`` = ``clip(clean + N(0, sigma_init), -1, +1)`` as the
+    epoch-1 additive-noise inputs.
+
+    The ``current_input`` array is the LIVE buffer mutated IN PLACE by
+    ``SelfIteratePoolCallback`` at epoch boundaries, and indexed (also in place) by
+    the ``from_generator`` dataset built in ``create_self_iterate_dataset``.
+
+    Args:
+        file_paths: Clean image paths to crop patches from (cycled if too few).
+        config: Trainer config (uses ``self_iterate_pool_size``, ``patch_size``,
+            ``channels``, ``seed``).
+        sigma_init: Additive-noise sigma for the initial ``current_input`` pool.
+
+    Returns:
+        ``(clean_pool, current_input)`` — two ``[P, patch, patch, C]`` float32 arrays
+        in ``[-1, +1]``; ``clean_pool`` is the fixed target, ``current_input`` the
+        mutable input buffer.
+
+    Raises:
+        ValueError: if no patches could be loaded from ``file_paths``.
+    """
+    if not file_paths:
+        raise ValueError("No image files found for the self-iterate pool")
+
+    pool_size = int(config.self_iterate_pool_size)
+    rng = np.random.default_rng(config.seed or 42)
+
+    patches: List[np.ndarray] = []
+    idx = 0
+    n_paths = len(file_paths)
+    # Cap attempts so a directory of unreadable/degenerate images cannot loop forever.
+    max_attempts = pool_size * 8 + n_paths
+    attempts = 0
+    while len(patches) < pool_size and attempts < max_attempts:
+        path = file_paths[idx % n_paths]
+        idx += 1
+        attempts += 1
+        try:
+            # REUSE the streaming pipeline's load+random-crop+clip convention exactly.
+            patch = load_and_preprocess_image(tf.constant(path), config)
+            patch = tf.clip_by_value(patch, -1.0, 1.0)
+            patch_np = np.asarray(patch, dtype=np.float32)
+            if not np.any(np.abs(patch_np) > 0):
+                continue  # mirror the streaming filter() that drops all-zero patches
+            patches.append(patch_np)
+        except Exception:
+            continue
+
+    if not patches:
+        raise ValueError("Could not load any patches for the self-iterate pool")
+
+    clean_pool = np.stack(patches[:pool_size]).astype(np.float32)
+    if clean_pool.shape[0] < pool_size:
+        logger.warning(
+            "Self-iterate pool: requested %d patches but only %d were loadable.",
+            pool_size,
+            clean_pool.shape[0],
+        )
+
+    noise = rng.normal(size=clean_pool.shape).astype(np.float32)
+    current_input = np.clip(
+        clean_pool + noise * float(sigma_init), -1.0, 1.0
+    ).astype(np.float32)
+
+    logger.info(
+        "Self-iterate pool built: %d patches of %dx%dx%d, sigma_init=%.4f",
+        clean_pool.shape[0],
+        config.patch_size,
+        config.patch_size,
+        config.channels,
+        float(sigma_init),
+    )
+    return clean_pool, current_input
+
+
+def create_self_iterate_dataset(
+    clean_pool: np.ndarray,
+    current_input: np.ndarray,
+    config: TrainingConfig,
+) -> Tuple[tf.data.Dataset, int]:
+    """Build a tf.data source over the LIVE pool arrays via ``from_generator``.
+
+    The generator indexes the SAME ``current_input`` / ``clean_pool`` numpy objects
+    passed in (closes over the array objects, indexes inside the generator body), so
+    in-place mutation by ``SelfIteratePoolCallback`` between epochs is reflected on
+    the next fresh iterator that ``model.fit`` instantiates per epoch.
+
+    The dataset is FINITE (no ``.repeat()``), sized to
+    ``steps_per_epoch * batch_size`` items, so ``model.fit`` re-instantiates the
+    generator each epoch and re-reads the mutated pool.
+
+    Returns ``(dataset, steps_per_epoch)``.
+    """
+    # DECISION plan_2026-06-20_88705c63/D-004: build the pool-backed source with
+    # `from_generator`, NOT `from_tensor_slices`. The Step-1 risk-spike empirically
+    # FALSIFIED A1: `from_tensor_slices(numpy_array)` SNAPSHOTS the buffer into a
+    # graph constant at construction, so in-place mutation of the original array is
+    # NEVER re-read (same-iterator AND fresh-iterator both stale). `from_generator`
+    # over a closure that indexes the LIVE array, sized FINITE (no `.repeat()`),
+    # re-reads the mutated buffer on each fresh per-epoch iterator. Do NOT "optimize"
+    # this back to from_tensor_slices/from_tensors — that silently kills regeneration
+    # (the whole feature) with no error. See decisions.md D-004.
+    pool_size = int(clean_pool.shape[0])
+    batch_size = int(config.batch_size)
+    steps_per_epoch = pool_size // batch_size
+    if config.steps_per_epoch is not None:
+        steps_per_epoch = min(steps_per_epoch, int(config.steps_per_epoch))
+    if steps_per_epoch < 1:
+        raise ValueError(
+            f"self-iterate pool ({pool_size}) too small for batch_size "
+            f"({batch_size}): yields 0 steps_per_epoch."
+        )
+    n_items = steps_per_epoch * batch_size
+
+    patch = int(config.patch_size)
+    channels = int(config.channels)
+    seed = int(config.seed or 42)
+
+    def _gen():
+        # Close over the LIVE array objects; index them HERE so each fresh iterator
+        # sees the current (possibly callback-mutated) contents.
+        order = np.random.default_rng(seed).permutation(pool_size)
+        for j in range(n_items):
+            i = int(order[j % pool_size])
+            yield current_input[i], clean_pool[i]
+
+    output_signature = (
+        tf.TensorSpec(shape=(patch, patch, channels), dtype=tf.float32),
+        tf.TensorSpec(shape=(patch, patch, channels), dtype=tf.float32),
+    )
+    dataset = tf.data.Dataset.from_generator(
+        _gen, output_signature=output_signature
+    )
+    dataset = dataset.shuffle(
+        buffer_size=min(config.patch_shuffle_buffer, n_items),
+        reshuffle_each_iteration=True,
+    )
+    dataset = dataset.batch(batch_size, drop_remainder=True)
+    dataset = dataset.prefetch(tf.data.AUTOTUNE)
+    return dataset, steps_per_epoch
 
 
 # ---------------------------------------------------------------------
