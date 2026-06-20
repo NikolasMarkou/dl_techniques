@@ -450,3 +450,37 @@ class TestWWPGDSerialization:
         assert restored._explicit_model is None
         # No live model + Keras self.model None -> on_epoch_end is a safe no-op.
         restored.on_epoch_end(5)
+
+
+class TestWWPGDFrozenGuard:
+    """SC7: frozen layers (trainable=False) are never projected; trainable siblings still are."""
+
+    def test_frozen_dense_and_depthwise_untouched_sibling_projected(self):
+        np.random.seed(11)
+        Wh = _heavy_tail_matrix(256, 256, exponent=2.0, seed=11)
+        model = keras.Sequential([
+            keras.Input((256,)),
+            keras.layers.Dense(256, use_bias=False, trainable=False, name="frozen_dense"),
+            keras.layers.Dense(256, use_bias=False, name="trainable_dense"),
+        ])
+        model.layers[0].kernel.assign(Wh)
+        model.layers[1].kernel.assign(Wh.T)
+        frozen_before = _kernel_np(model.layers[0])
+        sibling_before = _kernel_np(model.layers[1])
+        cfg = WWTailConfig(enable=True, warmup_epochs=0, ramp_epochs=1, min_tail=5, q=1.0)
+        summary = ww_pgd_project(model, cfg, epoch=2, num_epochs=3)
+        assert np.array_equal(frozen_before, _kernel_np(model.layers[0])), "frozen Dense must be untouched"
+        assert not np.array_equal(sibling_before, _kernel_np(model.layers[1])), "trainable sibling must be projected"
+        assert summary["layers_projected"] == 1, "only the trainable layer is projected"
+
+    def test_frozen_depthwise_conv_untouched(self):
+        np.random.seed(12)
+        model = keras.Sequential([
+            keras.Input((16, 16, 8)),
+            keras.layers.DepthwiseConv2D(3, depth_multiplier=4, use_bias=False, trainable=False, name="frozen_dw"),
+        ])
+        before = _kernel_np(model.layers[0])
+        cfg = WWTailConfig(enable=True, warmup_epochs=0, ramp_epochs=1, min_tail=3, q=1.0, use_detx=True)
+        summary = ww_pgd_project(model, cfg, epoch=2, num_epochs=3)
+        assert np.array_equal(before, _kernel_np(model.layers[0])), "frozen DepthwiseConv2D must be untouched"
+        assert summary["layers_projected"] == 0

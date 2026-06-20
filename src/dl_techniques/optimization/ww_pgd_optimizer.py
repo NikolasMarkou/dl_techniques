@@ -223,6 +223,13 @@ def _iter_kernel_layers(model: keras.Model) -> List[keras.layers.Layer]:
         if "embedding" in layer.__class__.__name__.lower():
             continue
 
+        # DECISION plan_2026-06-20_c0f110f5/D-001: never project frozen kernels.
+        # keras .assign() bypasses trainable=False, so a frozen layer (e.g. the
+        # frozen Gabor depthwise stem in bfconvunext) would be silently overwritten
+        # every epoch. Guard on the layer-level trainable flag (fail-open via getattr).
+        if not getattr(layer, "trainable", True):
+            continue
+
         selected.append(layer)
 
     return selected
