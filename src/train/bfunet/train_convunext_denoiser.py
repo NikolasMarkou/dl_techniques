@@ -1189,6 +1189,18 @@ def train(config: TrainingConfig) -> keras.Model:
 
     set_seeds(config.seed)  # reproducible weight init (H8)
 
+    # DECISION plan_2026-06-20_0433c2f2/D-002: --deep-supervision is NOT wired in this
+    # trainer (no multi-scale targets, no per-output loss dict, no weight scheduler), so a
+    # multi-output model would crash mid-fit with a cryptic KeyError (audit H2). Fail fast
+    # with an actionable message instead. Full DS wiring is deferred to a future plan.
+    if config.enable_deep_supervision:
+        raise ValueError(
+            "enable_deep_supervision is not supported by this trainer: it builds a "
+            "multi-resolution multi-output model but no multi-scale targets / per-output "
+            "loss dict / weight scheduler are wired, which crashes during fit. Remove "
+            "--deep-supervision (full deep-supervision support is deferred; see D-002)."
+        )
+
     # Live, curriculum-controlled upper bound for the noise-sigma sampling range.
     sigma_max_var = tf.Variable(
         config.sigma_max_start, dtype=tf.float32, trainable=False, name="sigma_max"
