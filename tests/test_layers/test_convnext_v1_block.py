@@ -88,7 +88,7 @@ def test_block_constants() -> None:
     assert ConvNextV1Block.POINTWISE_KERNEL_SIZE == 1
     assert ConvNextV1Block.GAMMA_L2_REGULARIZATION == 1e-5
     assert ConvNextV1Block.GAMMA_INITIAL_VALUE == 1.0
-    assert ConvNextV1Block.GAMMA_MIN_VALUE == 0.0
+    assert ConvNextV1Block.GAMMA_MIN_VALUE == 1e-6
     assert ConvNextV1Block.GAMMA_MAX_VALUE == 1.0
 
 

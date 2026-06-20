@@ -212,10 +212,16 @@ def _apply_residual_convnext_block(
     channel-adjust before the blocks), so the residual add is always valid and
     bias-free (identity + a homogeneous branch stays homogeneous).
 
-    LayerScale ``gamma`` is initialized SMALL (1e-6, the ConvNeXt default) so each
-    residual branch starts at ~zero and the deep U-Net begins as a near-identity
-    map. With the block's default ``gamma`` init of 1.0 the stacked residuals
-    explode at initialization (untrained MSE in the thousands) and fail to train.
+    LayerScale ``gamma`` is initialized to 1e-4 (CaiT's moderate-depth default) so each
+    residual branch starts small (a mild near-identity prior) while STILL receiving usable
+    gradients from step 0: the gradient w.r.t. the branch weights is proportional to gamma,
+    so an over-small init (the old 1e-6) throttles early learning until gamma slowly grows.
+    A hard floor of 1e-6 (``ConvNext*Block.GAMMA_MIN_VALUE``, enforced by
+    ``ValueRangeConstraint``) keeps gamma from collapsing to zero, which would permanently
+    kill a branch (gamma==0 => zero branch gradient => stuck dead). Init stability does NOT
+    depend on a tiny gamma: the main-path structural convs use orthogonal (norm-preserving)
+    init, which is what actually prevents the variance explosion the old ``he_normal`` init
+    caused (the full denoiser is init-stable across gamma in [1e-6, 1.0], verified by sweep).
     """
     residual = x
     y = block_cls(
@@ -225,7 +231,7 @@ def _apply_residual_convnext_block(
         use_bias=False,            # Bias-free for scaling invariance
         dropout_rate=0.0,          # regularization comes from StochasticDepth below
         spatial_dropout_rate=0.0,
-        gamma_initial_value=1e-6,  # LayerScale: residual branch starts ~identity
+        gamma_initial_value=1e-4,  # LayerScale init (floored at GAMMA_MIN_VALUE=1e-6, can't die)
         kernel_regularizer=kernel_regularizer,
         name=name,
     )(x)

@@ -493,7 +493,7 @@ def test_constants() -> None:
     assert ConvNextV2Block.POINTWISE_KERNEL_SIZE == 1
     assert ConvNextV2Block.GAMMA_L2_REGULARIZATION == 1e-5
     assert ConvNextV2Block.GAMMA_INITIAL_VALUE == 1.0
-    assert ConvNextV2Block.GAMMA_MIN_VALUE == 0.0
+    assert ConvNextV2Block.GAMMA_MIN_VALUE == 1e-6
     assert ConvNextV2Block.GAMMA_MAX_VALUE == 1.0
 
 
@@ -546,7 +546,7 @@ def test_grn_vs_no_grn_difference(sample_inputs: tf.Tensor) -> None:
     assert ConvNextV2Block.POINTWISE_KERNEL_SIZE == 1
     assert ConvNextV2Block.GAMMA_L2_REGULARIZATION == 1e-5
     assert ConvNextV2Block.GAMMA_INITIAL_VALUE == 1.0
-    assert ConvNextV2Block.GAMMA_MIN_VALUE == 0.0
+    assert ConvNextV2Block.GAMMA_MIN_VALUE == 1e-6
     assert ConvNextV2Block.GAMMA_MAX_VALUE == 1.0
 
 

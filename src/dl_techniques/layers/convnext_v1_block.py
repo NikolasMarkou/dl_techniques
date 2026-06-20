@@ -150,7 +150,8 @@ class ConvNextV1Block(keras.layers.Layer):
     POINTWISE_KERNEL_SIZE = 1  # Kernel size for pointwise convolutions
     GAMMA_L2_REGULARIZATION = 1e-5  # L2 regularization for gamma multiplier
     GAMMA_INITIAL_VALUE = 1.0  # Initial value for gamma multiplier
-    GAMMA_MIN_VALUE = 0.0  # Minimum value for gamma constraint
+    GAMMA_MIN_VALUE = 1e-6  # Minimum value for gamma constraint (floor > 0 so a residual
+    # branch cannot collapse to zero: gamma==0 => zero branch gradient => permanently dead block)
     GAMMA_MAX_VALUE = 1.0  # Maximum value for gamma constraint
     STRIDES = (1, 1)  # Strides for depthwise convolution
 
