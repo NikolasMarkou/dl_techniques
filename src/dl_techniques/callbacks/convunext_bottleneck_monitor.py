@@ -15,8 +15,16 @@ FULL 2-output model is passed explicitly into the constructor and stored as
 
 Each monitored epoch the callback logs latent health statistics (mean / std /
 min / max, mean per-sample L2 norm, dead-channel fraction, activation sparsity)
-and writes one lightweight feature-map grid PNG of the bottleneck channels for
-the first sample.
+and writes three PNGs for the first sample / fixed batch:
+
+1. ``epoch_NNNN_bottleneck_first.png`` — a grid of the first ``min(C, 64)``
+   bottleneck channels (fixed indices), drawn with a CONSTANT absolute color
+   scale (``featuremap_vmin``/``vmax``) so colors are comparable across epochs.
+2. ``epoch_NNNN_bottleneck_energy.png`` — a grid of the ``min(C, 64)`` highest
+   mean-square-energy channels, recomputed each epoch, each tile titled with
+   its channel index (same fixed color scale).
+3. ``bottleneck_health.png`` — cumulative line charts of the five health
+   statistics versus epoch, overwritten each monitored epoch and at train end.
 
 The callback imports nothing from ``src/train/`` (HARD library-layering rule):
 the trainer builds the fixed validation batch and passes it in. matplotlib is
@@ -26,7 +34,7 @@ plotting or forward-pass failure can never raise into the training loop.
 """
 
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import keras
 import numpy as np
@@ -57,7 +65,13 @@ class ConvUnextBottleneckMonitorCallback(keras.callbacks.Callback):
             ``visualizations/`` dir); no extra subdirectory is created.
         monitor_freq: Emit stats + PNG every this many epochs. Defaults to 5.
         max_featuremap_channels: Cap on the number of bottleneck channels tiled
-            in the feature-map grid. Defaults to 16.
+            in each feature-map grid. Defaults to 64 (an 8x8 tile grid).
+        featuremap_vmin: Lower bound of the FIXED absolute color scale applied
+            to every feature-map tile at every epoch. Holding this constant
+            across epochs makes a given color mean the same activation value
+            over training (see D-001). Defaults to -3.0.
+        featuremap_vmax: Upper bound of the fixed absolute color scale.
+            Defaults to 3.0.
         name_prefix: Filename and log-message prefix. Defaults to
             ``"convunext_bottleneck"``.
     """
@@ -68,7 +82,9 @@ class ConvUnextBottleneckMonitorCallback(keras.callbacks.Callback):
         val_batch: Any,
         output_dir: Union[str, Path],
         monitor_freq: int = 5,
-        max_featuremap_channels: int = 16,
+        max_featuremap_channels: int = 64,
+        featuremap_vmin: float = -3.0,
+        featuremap_vmax: float = 3.0,
         name_prefix: str = "convunext_bottleneck",
     ) -> None:
         super().__init__()
@@ -78,9 +94,23 @@ class ConvUnextBottleneckMonitorCallback(keras.callbacks.Callback):
         self.val_batch = val_batch
         self.monitor_freq = monitor_freq
         self.max_featuremap_channels = max_featuremap_channels
+        self.featuremap_vmin = featuremap_vmin
+        self.featuremap_vmax = featuremap_vmax
         self.name_prefix = name_prefix
         self._subdir = Path(output_dir)
         self._subdir.mkdir(parents=True, exist_ok=True)
+
+        # Cumulative health statistics, keyed by metric name -> list of values.
+        # Accumulated only on integer-tagged monitored epochs (the ``'final'``
+        # re-emit is de-duplicated) so the epoch x-axis stays monotone.
+        self.history: Dict[str, List[float]] = {
+            "mean_activation": [],
+            "std_activation": [],
+            "mean_l2_norm": [],
+            "dead_unit_frac": [],
+            "sparsity": [],
+        }
+        self.epochs_seen: List[int] = []
 
     # -----------------------------------------------------------------
     # Bottleneck extraction
@@ -104,39 +134,54 @@ class ConvUnextBottleneckMonitorCallback(keras.callbacks.Callback):
         return np.array(bottleneck)
 
     # -----------------------------------------------------------------
-    # Emit (stats + feature-map grid)
+    # Statistics
     # -----------------------------------------------------------------
-    def _emit(self, tag: Union[int, str]) -> None:
-        """Compute + log bottleneck stats and save a feature-map grid PNG.
+    def _compute_stats(self, feat: np.ndarray) -> Dict[str, float]:
+        """Compute batch-aggregate bottleneck health statistics.
 
         Args:
-            tag: Epoch number (1-based int) or the string ``'final'``. Ints are
-                zero-padded in the filename; ``'final'`` is used verbatim.
+            feat: Bottleneck latent ``(B, h, w, C)``.
+
+        Returns:
+            Dict of scalar statistics: ``mean_activation``, ``std_activation``,
+            ``mean_l2_norm``, ``dead_unit_frac``, ``sparsity``. Names match the
+            ``self.history`` keys so accumulation is a direct mapping.
         """
-        import matplotlib.pyplot as plt  # noqa: PLC0415
-
-        feat = self._get_bottleneck()  # (B, h, w, C)
         n = feat.shape[0]
-
-        # Aggregate health statistics.
         flat = feat.reshape(n, -1)
         l2 = np.sqrt(np.sum(flat ** 2, axis=1))
         chan_mean_abs = np.mean(np.abs(feat), axis=(0, 1, 2))  # (C,)
-        dead_frac = float(np.mean(chan_mean_abs < 1e-6))
-        sparsity = float(np.mean(np.abs(feat) < 1e-4))
+        return {
+            "mean_activation": float(feat.mean()),
+            "std_activation": float(feat.std()),
+            "mean_l2_norm": float(l2.mean()),
+            "dead_unit_frac": float(np.mean(chan_mean_abs < 1e-6)),
+            "sparsity": float(np.mean(np.abs(feat) < 1e-4)),
+        }
 
-        logger.info(
-            f"{self.name_prefix} [{tag}]: shape={tuple(feat.shape)} "
-            f"mean={float(feat.mean()):.6f} std={float(feat.std()):.6f} "
-            f"min={float(feat.min()):.6f} max={float(feat.max()):.6f} "
-            f"mean_l2={float(l2.mean()):.4f} dead_frac={dead_frac:.4f} "
-            f"sparsity={sparsity:.4f}"
-        )
+    # -----------------------------------------------------------------
+    # Feature-map grid (fixed color scale, titled tiles)
+    # -----------------------------------------------------------------
+    def _save_grid(
+        self,
+        sample: np.ndarray,
+        indices: Any,
+        tag: Union[int, str],
+        suffix: str,
+        title: str,
+    ) -> None:
+        """Tile the given channel indices of one sample as a heatmap grid.
 
-        # Feature-map grid for the first sample, up to max_featuremap_channels.
-        sample = feat[0]  # (h, w, C)
-        h, w, c = sample.shape
-        k = int(min(c, self.max_featuremap_channels))
+        Args:
+            sample: One bottleneck sample ``(h, w, C)`` (sample 0).
+            indices: Channel indices to tile (list or numpy array).
+            tag: Epoch number (1-based int) or the string ``'final'``.
+            suffix: Filename suffix (``"first"`` or ``"energy"``).
+            title: Figure super-title.
+        """
+        import matplotlib.pyplot as plt  # noqa: PLC0415
+
+        k = len(indices)
         cols = int(np.ceil(np.sqrt(k)))
         rows = int(np.ceil(k / cols))
 
@@ -145,22 +190,132 @@ class ConvUnextBottleneckMonitorCallback(keras.callbacks.Callback):
         for i in range(len(axes)):
             ax = axes[i]
             if i < k:
-                ax.imshow(sample[:, :, i], cmap="viridis")
-                ax.set_title(f"ch {i}", fontsize=7)
+                # DECISION plan_2026-06-20_0f7a354e/D-001: FIXED absolute color
+                # scale (vmin/vmax constant across all epochs). Do NOT drop these
+                # kwargs / let imshow autoscale per tile -- that per-epoch remap
+                # is the exact "colors shift between iterations" bug (F2). See
+                # decisions.md D-001.
+                ax.imshow(
+                    sample[:, :, indices[i]],
+                    cmap="viridis",
+                    vmin=self.featuremap_vmin,
+                    vmax=self.featuremap_vmax,
+                )
+                ax.set_title(f"ch {int(indices[i])}", fontsize=7)
             ax.axis("off")
 
         tag_str = f"{tag:04d}" if isinstance(tag, int) else str(tag)
-        fig.suptitle(
-            f"ConvUNeXt bottleneck feature maps "
-            f"(sample 0, {k}/{c} ch) - epoch {tag_str}",
-            fontsize=10,
-        )
+        fig.suptitle(title, fontsize=10)
         plt.tight_layout()
-        out_path = self._subdir / f"epoch_{tag_str}_bottleneck.png"
+        out_path = self._subdir / f"epoch_{tag_str}_bottleneck_{suffix}.png"
         plt.savefig(out_path, dpi=120, bbox_inches="tight")
         plt.close(fig)
 
-        logger.info(f"{self.name_prefix} [{tag}]: saved feature-map grid to {out_path}")
+    # -----------------------------------------------------------------
+    # Health curves (cumulative)
+    # -----------------------------------------------------------------
+    def _save_health_curves(self) -> None:
+        """Plot each cumulative health metric versus epoch (overwrites)."""
+        import matplotlib.pyplot as plt  # noqa: PLC0415
+
+        metrics = list(self.history.keys())
+        fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+        axes = axes.ravel()
+        for idx, name in enumerate(metrics):
+            ax = axes[idx]
+            ax.plot(self.epochs_seen, self.history[name], marker="o", ms=3)
+            ax.set_title(name, fontsize=10)
+            ax.set_xlabel("epoch", fontsize=8)
+            ax.grid(True, alpha=0.3)
+        # Hide any unused panels.
+        for idx in range(len(metrics), len(axes)):
+            axes[idx].axis("off")
+        fig.suptitle("ConvUNeXt bottleneck health over training", fontsize=12)
+        plt.tight_layout()
+        plt.savefig(
+            self._subdir / "bottleneck_health.png", dpi=120, bbox_inches="tight"
+        )
+        plt.close(fig)
+
+    # -----------------------------------------------------------------
+    # Emit (stats + two feature-map grids + health curves)
+    # -----------------------------------------------------------------
+    def _emit(self, tag: Union[int, str]) -> None:
+        """Compute + log bottleneck stats and save grids + health curves.
+
+        Args:
+            tag: Epoch number (1-based int) or the string ``'final'``. Ints are
+                zero-padded in the filename; ``'final'`` is used verbatim.
+        """
+        feat = self._get_bottleneck()  # (B, h, w, C)
+        n = feat.shape[0]
+
+        stats = self._compute_stats(feat)
+
+        logger.info(
+            f"{self.name_prefix} [{tag}]: shape={tuple(feat.shape)} "
+            f"mean={stats['mean_activation']:.6f} "
+            f"std={stats['std_activation']:.6f} "
+            f"min={float(feat.min()):.6f} max={float(feat.max()):.6f} "
+            f"mean_l2={stats['mean_l2_norm']:.4f} "
+            f"dead_frac={stats['dead_unit_frac']:.4f} "
+            f"sparsity={stats['sparsity']:.4f}"
+        )
+
+        # History accumulation: integer epochs only, and only when strictly
+        # newer than the last seen epoch. This de-duplicates the ``'final'``
+        # re-emit (and any repeat) so the curve x-axis stays monotone.
+        if isinstance(tag, int) and (
+            not self.epochs_seen or tag > self.epochs_seen[-1]
+        ):
+            for name, value in stats.items():
+                self.history[name].append(value)
+            self.epochs_seen.append(tag)
+
+        sample = feat[0]  # (h, w, C)
+        c = sample.shape[-1]
+        k = int(min(c, self.max_featuremap_channels))
+        tag_str = f"{tag:04d}" if isinstance(tag, int) else str(tag)
+
+        # First grid: fixed channel indices 0..k-1 (temporal anchor).
+        first_idx = list(range(k))
+
+        # DECISION plan_2026-06-20_0f7a354e/D-002: top-energy channel set is
+        # RECOMPUTED each epoch (not frozen at first emit). Cell positions move
+        # between epochs by design -- the fixed color scale + the first-k grid
+        # are the temporal anchors; this grid is the "what matters now" view.
+        # Each tile is titled with its channel index so the moving identity
+        # stays legible. See decisions.md D-002.
+        energy = np.mean(feat ** 2, axis=(0, 1, 2))  # (C,)
+        energy_idx = list(np.argsort(energy)[::-1][:k])
+
+        self._save_grid(
+            sample,
+            first_idx,
+            tag,
+            "first",
+            title=(
+                f"ConvUNeXt bottleneck first {k}/{c} ch "
+                f"(sample 0) - epoch {tag_str}"
+            ),
+        )
+        self._save_grid(
+            sample,
+            energy_idx,
+            tag,
+            "energy",
+            title=(
+                f"ConvUNeXt bottleneck top-{k}/{c} energy ch "
+                f"(sample 0) - epoch {tag_str}"
+            ),
+        )
+
+        self._save_health_curves()
+
+        logger.info(
+            f"{self.name_prefix} [{tag}]: saved first/energy feature-map grids "
+            f"+ health curves to {self._subdir}"
+        )
 
     # -----------------------------------------------------------------
     # Keras hooks
