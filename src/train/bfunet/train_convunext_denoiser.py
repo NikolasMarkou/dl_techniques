@@ -1674,6 +1674,7 @@ def main():
             use_gabor_stem=not args.no_gabor_stem,
             use_laplacian_pyramid=args.laplacian_pyramid,
             expose_bottleneck=args.expose_bottleneck,
+            enable_deep_supervision=args.deep_supervision,
             enable_analyzer=args.analyzer,
             analyzer_freq=args.analyzer_freq,
             gabor_filters=8,
