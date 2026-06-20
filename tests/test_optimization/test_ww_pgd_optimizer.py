@@ -515,3 +515,65 @@ class TestWWPGDGoodnessOfFit:
         m_none = _dense_with_kernel(W)
         s_none = ww_pgd_project(m_none, WWTailConfig(**base), epoch=2, num_epochs=3)
         assert s_none["layers_projected"] == 1  # default None gates nothing
+
+
+class TestWWPGDBlendDrift:
+    """SC8: the written-kernel tail trace-log drifts at blend_eta=0.5, ~0 at blend_eta=1.0."""
+
+    def _written_tail_tracelog_drift(self, seed, blend_eta):
+        W = _heavy_tail_matrix(256, 256, exponent=2.0, seed=seed)
+        model = _dense_with_kernel(W)
+        # Replicate module tail selection on the ORIGINAL kernel.
+        k0 = _kernel_np(model.layers[0])
+        s0 = np.linalg.svd(k0, full_matrices=False, compute_uv=False)
+        lam0 = np.maximum(s0, 1e-8) ** 2
+        alpha, xmin, _D, _s, _n, status, _w = fit_powerlaw(lam0)
+        assert status == "success"
+        lam_thr = float(xmin)
+        detx = int(compute_detX_constraint(lam0))
+        k_pl = int((lam0 >= xmin).sum())
+        if detx > 0 and k_pl > 0:
+            k_star = max(1, int(0.5 * (k_pl + detx)))
+            lam_thr = max(lam_thr, float(lam0[k_star - 1]))
+        mask = lam0 >= lam_thr
+        tail_size = int(mask.sum())
+        assert tail_size >= 5
+        pre = float(np.log(lam0[mask]).sum())
+        cfg = WWTailConfig(enable=True, warmup_epochs=0, ramp_epochs=1, min_tail=5,
+                           q=1.0, blend_eta=blend_eta, cayley_eta=0.25, use_detx=True)
+        ww_pgd_project(model, cfg, epoch=2, num_epochs=3)
+        k1 = _kernel_np(model.layers[0])
+        s1 = np.linalg.svd(k1, full_matrices=False, compute_uv=False)
+        lam1 = np.maximum(s1, 1e-8) ** 2
+        post = float(np.log(np.sort(lam1)[::-1][:tail_size]).sum())
+        return abs(post - pre)
+
+    def test_blend_half_drifts_blend_one_preserves(self):
+        drift_half = self._written_tail_tracelog_drift(seed=21, blend_eta=0.5)
+        drift_one = self._written_tail_tracelog_drift(seed=21, blend_eta=1.0)
+        assert drift_half > 0.05, f"blend_eta=0.5 should drift the written tail trace-log, got {drift_half}"
+        assert drift_one < 1e-3, f"blend_eta=1.0 should preserve it, got {drift_one}"
+
+
+class TestWWPGDCayleyEtaZero:
+    """SC9: cayley_eta=0 at hardness>0 is a full-template SNAP (not a no-op, not retraction-only)."""
+
+    def test_cayley_zero_snaps_at_least_as_far_as_small_step(self):
+        W = _heavy_tail_matrix(256, 256, exponent=2.0, seed=22)
+        base = dict(enable=True, warmup_epochs=0, ramp_epochs=1, min_tail=5, q=1.0, use_detx=True, blend_eta=1.0)
+        a_before = _fit_alpha(W)
+
+        m0 = _dense_with_kernel(W)
+        before0 = _kernel_np(m0.layers[0])
+        ww_pgd_project(m0, WWTailConfig(cayley_eta=0.0, **base), epoch=2, num_epochs=3)
+        after0 = _kernel_np(m0.layers[0])
+        a_eta0 = _fit_alpha(after0)
+
+        m1 = _dense_with_kernel(W)
+        ww_pgd_project(m1, WWTailConfig(cayley_eta=0.25, **base), epoch=2, num_epochs=3)
+        a_eta025 = _fit_alpha(_kernel_np(m1.layers[0]))
+
+        assert not np.array_equal(before0, after0), "cayley_eta=0 must still change the kernel (full snap)"
+        # full snap moves alpha toward 2 at least as far as the small Cayley step
+        assert abs(a_eta0 - 2.0) <= abs(a_eta025 - 2.0) + 1e-6, \
+            f"cayley_eta=0 snap should reach >= the small-step alpha (eta0={a_eta0}, eta025={a_eta025}, before={a_before})"

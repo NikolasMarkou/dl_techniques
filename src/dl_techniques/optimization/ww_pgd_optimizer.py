@@ -37,12 +37,37 @@ Invariants
 ----------
 * OFF (``enable=False``) or warmup (``hardness == 0``) is a strict no-op: no weight
   reads, no SVD, no kernel writes.
-* The Cayley update + retraction preserve the tail trace-log
-  (``sum(log(lam_new)) == sum(log(lam_tail))``) to float tolerance: the projection
-  redistributes the tail *shape* without inflating/deflating its scale.
+* The Cayley update + retraction preserve the tail trace-log of the EIGENVALUE PATH
+  (``sum(log(lam_new)) == sum(log(lam_tail))``) to float tolerance. NOTE: this holds for
+  the pre-blend eigenvalues only. The final written kernel uses a LINEAR singular-value
+  blend ``(1-be)*S + be*S_new`` (shared U, Vh), which is not geometry-preserving, so the
+  ASSIGNED kernel's tail trace-log is preserved only at ``blend_eta == 1`` (or the trivial
+  ``blend_eta == 0``); at the default ``blend_eta=0.5`` the assigned tail trace-log drifts
+  (empirically ~+0.4..0.6 nats). The projection redistributes tail *shape*; it does not
+  guarantee tail-scale preservation of the written kernel.
 * Fail-soft: any per-layer numerical failure (SVD non-convergence, ``fit_powerlaw``
   returning a non-finite/<=0 ``xmin``) skips that layer and continues; one bad layer
   never aborts the others, and the projection never crashes training.
+
+Known limitations / audit notes
+-------------------------------
+Recorded from the audit in ``analyses/analysis_2026-06-20_ea6a9d67``:
+
+* Trace-log preservation is an eigenvalue-path property, not a written-kernel property
+  except at ``blend_eta in {0, 1}`` (see I2 above).
+* ``cayley_eta == 0`` with ``hardness > 0`` does NOT mean 'no Cayley step' -- the
+  ``eta <= 0`` branch snaps the tail directly to the full ``r^(-q)`` template
+  (a stronger move than a small Cayley step), then blends.
+* The homotopy ``hardness`` reaches 1.0 at epoch ``warmup + ramp - 1`` (one epoch before
+  ``warmup + ramp``); see :func:`_compute_hardness`.
+* Frozen (``trainable=False``) kernels are skipped (``_iter_kernel_layers`` trainable
+  guard) so a frozen stem is never overwritten.
+* Goodness-of-fit gating is opt-in via ``WWTailConfig.max_ks_distance`` (default ``None``
+  = no gating). A poor power-law fit otherwise still gets reshaped.
+* SCOPE: the projection targets only the HTSR ``alpha ~= 2`` condition (the ``r^(-q)``
+  template), NOT the co-equal SETOL ERG / ``det(X-tilde)=1`` condition -- it preserves
+  the existing tail trace-log rather than driving it to 0. Net training-efficacy is
+  UNVALIDATED (no A/B run); use as an experiment, not a proven improvement.
 """
 
 from __future__ import annotations
@@ -177,8 +202,11 @@ class WWTailConfig:
 def _compute_hardness(epoch: int, warmup_epochs: int, ramp_epochs: int) -> float:
     """Compute the homotopy hardness in ``[0, 1]`` for ``epoch``.
 
-    ``epoch < warmup`` -> 0.0; ``epoch >= warmup + ramp`` -> 1.0; else a linear ramp
-    ``(epoch - warmup + 1) / max(ramp, 1)`` clamped to ``[0, 1]``.
+    ``epoch < warmup`` -> 0.0; else a linear ramp ``(epoch - warmup + 1) / max(ramp, 1)``
+    clamped to ``[0, 1]``. Because of the ``+1`` in the numerator, hardness reaches 1.0 at
+    ``epoch == warmup + ramp - 1`` (one epoch before ``warmup + ramp``); the explicit
+    ``epoch >= warmup + ramp`` guard is therefore redundant for the boundary and only
+    matters for epochs strictly beyond it. The FORMULA is unchanged from the original.
     """
     w = int(warmup_epochs)
     r = int(ramp_epochs)
@@ -327,6 +355,9 @@ def _shape_single_layer(
     # Cayley log-space update (effective eta scaled by hardness).
     eta = hardness * config.cayley_eta
     if eta <= 0.0:
+        # DECISION plan_2026-06-20_c0f110f5/D-003: eta<=0 (i.e. cayley_eta=0 at
+        # hardness>0) snaps directly to the full r^(-q) template -- a STRONGER move
+        # than a small Cayley step, NOT a no-op. Documented in the module docstring.
         lam_new = lam_target.copy()
     else:
         g = np.log(lam_tail + _EPS) - np.log(lam_target + _EPS)
