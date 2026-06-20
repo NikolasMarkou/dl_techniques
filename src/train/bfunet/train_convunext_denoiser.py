@@ -132,6 +132,8 @@ from dl_techniques.utils.multiplicative_miyasawa import (
 from dl_techniques.optimization import (
     optimizer_builder,
     learning_rate_schedule_builder,
+    WWPGDProjectionCallback,
+    WWTailConfig,
 )
 from dl_techniques.models.bias_free_denoisers.bfconvunext import (
     create_convunext_denoiser,
@@ -232,6 +234,18 @@ class TrainingConfig:
     self_iterate_pool_size: int = 2048
     self_iterate_regen_freq: int = 1
     self_iterate_mix_ratio: float = 0.5
+
+    # WW-PGD spectral tail-projection (epoch-boundary, non-differentiable). Default OFF:
+    # when ww_pgd=False no callback is appended and training is byte-identical to before.
+    # Hypers carry the ww_pgd_optimizer module defaults so the trainer is self-documenting.
+    ww_pgd: bool = False
+    ww_pgd_warmup_epochs: int = 0
+    ww_pgd_ramp_epochs: int = 5
+    ww_pgd_apply_every_epochs: int = 1
+    ww_pgd_q: float = 1.0
+    ww_pgd_blend_eta: float = 0.5
+    ww_pgd_cayley_eta: float = 0.25
+    ww_pgd_min_tail: int = 5
 
     # Initialize model weights from a saved .keras checkpoint before training.
     # Primary use: self-iterate FINE-TUNING on top of a normally-trained denoiser
@@ -1476,6 +1490,27 @@ def train(config: TrainingConfig) -> keras.Model:
             )
         )
 
+    # DECISION plan_2026-06-20_73c91aad/D-001: WW-PGD is a callback (epoch-boundary
+    # projection), passed the FULL model to dodge the train-view; default-OFF opt-in.
+    if config.ww_pgd:
+        callbacks.append(
+            WWPGDProjectionCallback(
+                config=WWTailConfig(
+                    enable=True,
+                    warmup_epochs=config.ww_pgd_warmup_epochs,
+                    ramp_epochs=config.ww_pgd_ramp_epochs,
+                    apply_every_epochs=config.ww_pgd_apply_every_epochs,
+                    q=config.ww_pgd_q,
+                    blend_eta=config.ww_pgd_blend_eta,
+                    cayley_eta=config.ww_pgd_cayley_eta,
+                    min_tail=config.ww_pgd_min_tail,
+                ),
+                num_epochs=config.epochs,
+                model=model,  # the FULL model, NOT the train_model view
+            )
+        )
+        logger.info("WW-PGD spectral tail-projection ENABLED (epoch-boundary).")
+
     start = time.time()
     # DECISION plan_2026-06-20_88705c63/D-005: in self-iterate mode pass
     # steps_per_epoch=None to model.fit. The self-iterate train_ds is a FINITE
@@ -1622,6 +1657,10 @@ def parse_arguments() -> argparse.Namespace:
              "0.0 = fresh only, 1.0 = regenerated only. Default 0.5 (union).",
     )
     parser.add_argument(
+        "--ww-pgd", action="store_true",
+        help="Enable WW-PGD spectral tail-projection at epoch boundaries (default OFF).",
+    )
+    parser.add_argument(
         "--init-from", type=str, default=None,
         help="Warm-start model weights from a saved .keras checkpoint before training. "
              "Primary use: self-iterate FINE-TUNING on top of a normally-trained "
@@ -1709,6 +1748,7 @@ def main():
             self_iterate_pool_size=min(args.self_iterate_pool_size, 32),
             self_iterate_regen_freq=1,
             self_iterate_mix_ratio=args.self_iterate_mix_ratio,
+            ww_pgd=args.ww_pgd,
             init_from=args.init_from,
             viz_freq=1,
             viz_samples=args.viz_samples,
@@ -1747,6 +1787,7 @@ def main():
             self_iterate_pool_size=args.self_iterate_pool_size,
             self_iterate_regen_freq=args.self_iterate_regen_freq,
             self_iterate_mix_ratio=args.self_iterate_mix_ratio,
+            ww_pgd=args.ww_pgd,
             init_from=args.init_from,
             max_train_files=args.max_train_files or 10000,
             max_val_files=args.max_val_files or 500,
