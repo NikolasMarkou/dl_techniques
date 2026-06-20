@@ -122,7 +122,10 @@ from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.metrics.ssim_metric import SsimMetric
 from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.utils.logger import logger
-from dl_techniques.utils.multiplicative_miyasawa import apply_multiplicative_gaussian
+from dl_techniques.utils.multiplicative_miyasawa import (
+    apply_multiplicative_gaussian,
+    apply_composite_gaussian,
+)
 from dl_techniques.optimization import (
     optimizer_builder,
     learning_rate_schedule_builder,
@@ -179,7 +182,8 @@ class TrainingConfig:
     seed: int = 42
 
     # Noise curriculum
-    noise_type: str = "additive"    # additive | multiplicative (per-pixel y=x*(1+N*sigma))
+    noise_type: str = "additive"    # additive | multiplicative (y=x*(1+N*sigma)) | composite (y=x*n+a)
+    composite_additive_ratio: float = 0.5  # composite: sigma_a = ratio * sigma_m (curriculum scalar)
     noise_sigma_min: float = 0.0
     sigma_max_start: float = 0.05   # narrow range at epoch 0 (low noise)
     sigma_max_end: float = 0.5      # wide range at the final curriculum epoch
@@ -237,8 +241,12 @@ class TrainingConfig:
             self.warmup_epochs = max(1, round(0.1 * self.epochs))
         if self.patch_size <= 0 or self.channels <= 0:
             raise ValueError("Invalid patch size or channel configuration")
-        if self.noise_type not in ("additive", "multiplicative"):
-            raise ValueError("noise_type must be 'additive' or 'multiplicative'")
+        if self.noise_type not in {"additive", "multiplicative", "composite"}:
+            raise ValueError(
+                "noise_type must be 'additive', 'multiplicative', or 'composite'"
+            )
+        if self.composite_additive_ratio <= 0:
+            raise ValueError("composite_additive_ratio must be > 0")
         if self.noise_sigma_min < 0:
             raise ValueError("noise_sigma_min must be >= 0")
         if self.sigma_max_end <= self.noise_sigma_min:
@@ -303,6 +311,8 @@ def make_curriculum_noise_fn(config: TrainingConfig, sigma_max_var: tf.Variable)
 
     sigma_min = float(config.noise_sigma_min)
     multiplicative = config.noise_type == "multiplicative"
+    composite = config.noise_type == "composite"
+    ratio = float(config.composite_additive_ratio)
 
     def add_curriculum_noise(patch: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
         # sigma_max_var is read at graph-execution time -> reflects the per-epoch
@@ -317,6 +327,14 @@ def make_curriculum_noise_fn(config: TrainingConfig, sigma_max_var: tf.Variable)
             # -- that would reorder the additive RNG draws and break byte-identical
             # reproducibility of existing additive checkpoints (Pre-Mortem STOP-IF).
             noisy = apply_multiplicative_gaussian(patch, noise_level)
+        elif composite:
+            # DECISION plan_2026-06-20_f6ed2237/D-001: composite = multiplicative + additive floor.
+            # sigma_a is tied to the curriculum scalar via composite_additive_ratio so the single
+            # curriculum Variable drives both terms; the existing additive (else) and multiplicative
+            # (if) blocks are kept VERBATIM so their RNG draw order -- and thus byte-identical
+            # reproducibility of existing checkpoints -- is untouched (Pre-Mortem STOP-IF). Do NOT
+            # fold the composite path into either existing block or reorder the shared noise_level draw.
+            noisy = apply_composite_gaussian(patch, noise_level, ratio * noise_level)
         else:
             noisy = patch + tf.random.normal(tf.shape(patch)) * noise_level  # y = x + N(0, sigma^2)
         return tf.clip_by_value(noisy, -1.0, 1.0), patch
@@ -557,12 +575,14 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         validation_steps: Optional[int] = None,
         noise_regimes: Optional[List[Tuple[str, float]]] = None,
         noise_type: str = "additive",
+        composite_additive_ratio: float = 0.5,
     ):
         super().__init__()
         self.clean_batch = clean_batch
         self.sigma_max_var = sigma_max_var
         self.noise_sigma_min = float(noise_sigma_min)
         self.noise_type = noise_type
+        self.composite_additive_ratio = float(composite_additive_ratio)
         self.viz_dir = Path(out_dir) / "visualizations"
         self.viz_dir.mkdir(parents=True, exist_ok=True)
         self.freq = max(1, freq)
@@ -577,6 +597,15 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         elif noise_type == "multiplicative":
             # Multiplicative-sigma regimes (n ~ N(1, sigma^2), dimensionless), spanning
             # the curriculum range; analog of the 15/25/50 AWGN benchmark triple.
+            self.noise_regimes = [
+                ("low", 0.10),
+                ("medium", 0.25),
+                ("high", 0.50),
+            ]
+        elif noise_type == "composite":
+            # Composite regimes use the multiplicative sigma_m (same triple as the pure
+            # multiplicative case); the additive floor sigma_a = ratio * sigma_m is derived
+            # per regime in _save_grid, so only sigma_m is listed here.
             self.noise_regimes = [
                 ("low", 0.10),
                 ("medium", 0.25),
@@ -699,12 +728,21 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         # Row 0 is clean; each regime contributes a (noisy, denoised) row pair.
         rows = [("Clean", clean_np)]
         multiplicative = self.noise_type == "multiplicative"
+        composite = self.noise_type == "composite"
+        ratio = self.composite_additive_ratio
         for label, sigma in self.noise_regimes:
             if multiplicative:
                 # Per-pixel multiplicative regime: reuse the same noise primitive the
                 # trainer uses, then the SAME [-1,+1] clip as the additive path.
                 noisy = tf.clip_by_value(
                     apply_multiplicative_gaussian(clean, sigma), -1.0, 1.0
+                )
+            elif composite:
+                # Composite regime: sigma here is sigma_m; the additive floor is
+                # sigma_a = ratio * sigma_m. Reuse the trainer's composite primitive,
+                # then the SAME [-1,+1] clip as the other paths.
+                noisy = tf.clip_by_value(
+                    apply_composite_gaussian(clean, sigma, ratio * sigma), -1.0, 1.0
                 )
             else:
                 noisy = tf.clip_by_value(
@@ -720,6 +758,11 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
             psnr_noisy = 20.0 * np.log10(2.0 / max(np.sqrt(mse_noisy), 1e-8))  # max_val=2.0
             if multiplicative:
                 noisy_label = f"Noisy {label}\n(mult σ={sigma:.2f}, PSNR {psnr_noisy:.1f} dB)"
+            elif composite:
+                noisy_label = (
+                    f"Noisy {label}\n(comp σm={sigma:.2f} σa={ratio * sigma:.2f}, "
+                    f"PSNR {psnr_noisy:.1f} dB)"
+                )
             else:
                 s255 = sigma * 127.5
                 noisy_label = f"Noisy {label}\n(σ≈{s255:.0f}, PSNR {psnr_noisy:.1f} dB)"
@@ -1041,6 +1084,7 @@ def train(config: TrainingConfig) -> keras.Model:
             val_ds=val_ds,
             validation_steps=validation_steps,
             noise_type=config.noise_type,
+            composite_additive_ratio=config.composite_additive_ratio,
         )
     )
 
@@ -1144,6 +1188,17 @@ def parse_arguments() -> argparse.Namespace:
              "y=x*(1+N(0,1)*sigma) instead of additive AWGN. Default OFF (additive).",
     )
     parser.add_argument(
+        "--composite-noise", action="store_true",
+        help="Opt-in: corrupt patches with composite noise y=x*n+a (multiplicative "
+             "n~N(1,sigma_m^2) plus additive a~N(0,sigma_a^2)). Takes precedence over "
+             "--multiplicative-noise. Default OFF (additive).",
+    )
+    parser.add_argument(
+        "--composite-additive-ratio", type=float, default=0.5,
+        help="Composite mode only: additive floor as a fraction of the curriculum "
+             "sigma_m (sigma_a = ratio * sigma_m). Must be > 0. Default 0.5.",
+    )
+    parser.add_argument(
         "--smoke", action="store_true",
         help="Tiny end-to-end mechanism check (few steps/epochs, constant LR).",
     )
@@ -1190,7 +1245,12 @@ def main():
             sigma_max_start=0.05,
             sigma_max_end=0.5,
             curriculum_schedule="linear",
-            noise_type="multiplicative" if args.multiplicative_noise else "additive",
+            noise_type=(
+                "composite" if args.composite_noise
+                else "multiplicative" if args.multiplicative_noise
+                else "additive"
+            ),
+            composite_additive_ratio=args.composite_additive_ratio,
             viz_freq=1,
             viz_samples=args.viz_samples,
             output_dir=args.output_dir,
@@ -1218,7 +1278,12 @@ def main():
             sigma_max_start=args.sigma_max_start,
             sigma_max_end=args.sigma_max_end,
             curriculum_schedule=args.curriculum_schedule,
-            noise_type="multiplicative" if args.multiplicative_noise else "additive",
+            noise_type=(
+                "composite" if args.composite_noise
+                else "multiplicative" if args.multiplicative_noise
+                else "additive"
+            ),
+            composite_additive_ratio=args.composite_additive_ratio,
             max_train_files=args.max_train_files or 10000,
             max_val_files=args.max_val_files or 500,
             steps_per_epoch=args.steps_per_epoch,
