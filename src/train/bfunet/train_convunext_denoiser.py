@@ -1498,6 +1498,10 @@ def train(config: TrainingConfig) -> keras.Model:
         model.save(full_path)
         logger.info(f"Saved full 2-output model (denoised, bottleneck) -> {full_path}")
 
+    final_path = output_dir / "final_model.keras"
+    model.save(final_path)
+    logger.info(f"Saved final (last-epoch) model -> {final_path}")
+
     gc.collect()
     return model
 
