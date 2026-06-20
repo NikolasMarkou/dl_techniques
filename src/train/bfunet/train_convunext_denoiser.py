@@ -1441,10 +1441,55 @@ def parse_arguments() -> argparse.Namespace:
              "sigma_m (sigma_a = ratio * sigma_m). Must be > 0. Default 0.5.",
     )
     parser.add_argument(
+        "--self-iterate", action="store_true",
+        help="Opt-in: train the denoiser to be self-iterable (2-5 sequential passes "
+             "improve PSNR instead of over-smoothing) via epoch-boundary regeneration "
+             "over a bounded RAM patch pool. Additive noise ONLY (rejected with "
+             "--multiplicative-noise/--composite-noise). Default OFF (streaming "
+             "pipeline is byte-identical when off).",
+    )
+    parser.add_argument(
+        "--self-iterate-pool-size", type=int, default=2048,
+        help="Self-iterate mode only: number of clean patches in the RAM pool whose "
+             "inputs are regenerated at epoch cadence. Must be >= batch_size. "
+             "Default 2048 (~1.6GB at 256x256x3).",
+    )
+    parser.add_argument(
+        "--self-iterate-regen-freq", type=int, default=1,
+        help="Self-iterate mode only: regenerate the pool inputs every N epochs "
+             "(model.predict over the pool). Default 1 (every epoch).",
+    )
+    parser.add_argument(
+        "--self-iterate-mix-ratio", type=float, default=0.5,
+        help="Self-iterate mode only: fraction of pool slots filled with regenerated "
+             "(f(prev)->clean) pairs; the rest get fresh (clean+noise->clean). "
+             "0.0 = fresh only, 1.0 = regenerated only. Default 0.5 (union).",
+    )
+    parser.add_argument(
         "--smoke", action="store_true",
         help="Tiny end-to-end mechanism check (few steps/epochs, constant LR).",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # DECISION plan_2026-06-20_88705c63/D-003: self-iterate is theory-bound to ADDITIVE
+    # Gaussian noise. The Miyasawa residual=score identity (and the clean-image fixed
+    # point that makes 2-5 passes non-decreasing) holds for additive noise ONLY;
+    # multiplicative/composite noise breaks the linear-domain identity, so the
+    # self-iterate objective has no theoretical justification there (decisions.md D-003,
+    # research/miyasawas_theorem_multiplicative.md). Reject the combination at PARSE time
+    # (fail fast, before any GPU/data work) rather than only at TrainingConfig.__post_init__.
+    # Do NOT relax this to a warn-and-continue: a silently-wrong objective would train a
+    # model that degrades under self-iteration with no error. Both guards are intentional
+    # (belt-and-suspenders): parse-time error here for CLI users, ValueError in
+    # __post_init__ for programmatic config construction.
+    if args.self_iterate and (args.multiplicative_noise or args.composite_noise):
+        parser.error(
+            "--self-iterate requires additive noise; it is incompatible with "
+            "--multiplicative-noise/--composite-noise (Miyasawa residual=score "
+            "identity is additive-only)"
+        )
+
+    return args
 
 
 def main():
@@ -1493,6 +1538,13 @@ def main():
                 else "additive"
             ),
             composite_additive_ratio=args.composite_additive_ratio,
+            # Self-iterate: SMALL pool so a smoke run exercises >=1 regeneration cheaply.
+            # Cap at 32 (>= smoke batch_size 2) and force regen_freq=1 so the single
+            # epoch boundary triggers a regeneration; mix_ratio is honored from args.
+            self_iterate=args.self_iterate,
+            self_iterate_pool_size=min(args.self_iterate_pool_size, 32),
+            self_iterate_regen_freq=1,
+            self_iterate_mix_ratio=args.self_iterate_mix_ratio,
             viz_freq=1,
             viz_samples=args.viz_samples,
             output_dir=args.output_dir,
@@ -1526,6 +1578,10 @@ def main():
                 else "additive"
             ),
             composite_additive_ratio=args.composite_additive_ratio,
+            self_iterate=args.self_iterate,
+            self_iterate_pool_size=args.self_iterate_pool_size,
+            self_iterate_regen_freq=args.self_iterate_regen_freq,
+            self_iterate_mix_ratio=args.self_iterate_mix_ratio,
             max_train_files=args.max_train_files or 10000,
             max_val_files=args.max_val_files or 500,
             steps_per_epoch=args.steps_per_epoch,
