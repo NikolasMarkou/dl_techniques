@@ -880,8 +880,12 @@ def train(config: TrainingConfig) -> keras.Model:
         # Robust filter: exclude ONLY the 'bottleneck' output, keep final_output (+ any DS outputs).
         bottleneck_tensor = model.get_layer("bottleneck").output
         train_outputs = [out for out in model.outputs if out is not bottleneck_tensor]
+        # Use the single input TENSOR (model.input), not model.inputs (a 1-element LIST):
+        # a list input-structure makes Keras warn "structure of `inputs` doesn't match"
+        # on every bare-tensor call (fit + viz). Unwrap when there is exactly one input.
+        train_inputs = model.inputs[0] if len(model.inputs) == 1 else model.inputs
         train_model = keras.Model(
-            model.inputs,
+            train_inputs,
             train_outputs[0] if len(train_outputs) == 1 else train_outputs,
             name=f"{model.name}_train_view",
         )
