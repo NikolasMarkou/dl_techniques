@@ -49,10 +49,12 @@ from train.bfunet.train_convunext_denoiser import (
     make_curriculum_noise_fn,
     build_self_iterate_pool,
     create_self_iterate_dataset,
+    build_model,
     denoise_k_passes,
     multi_pass_psnr,
 )
 from dl_techniques.callbacks.self_iterate_pool import SelfIteratePoolCallback
+from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 
 # Commit immediately BEFORE plan_2026-06-20_88705c63 (the pre-self-iterate
 # trainer). The OFF-path streaming logic must match this baseline byte-for-byte
@@ -547,3 +549,65 @@ def test_no_custom_train_step_invariant():
     ).read_text()
     assert "def train_step" not in trainer_src, "trainer introduced a custom train_step"
     assert "def train_step" not in callback_src, "callback introduced a custom train_step"
+
+
+# ---------------------------------------------------------------------
+# --init-from warm-start (self-iterate fine-tuning entry point)
+# ---------------------------------------------------------------------
+
+
+def _tiny_model_config() -> TrainingConfig:
+    """Smallest buildable denoiser config for fast warm-start tests."""
+    return TrainingConfig(
+        variant="tiny",
+        convnext_version="v1",
+        use_gabor_stem=False,
+        patch_size=PATCH,
+        channels=CHANNELS,
+        batch_size=2,
+        self_iterate_pool_size=4,  # >= batch_size (post_init guard)
+    )
+
+
+def test_init_from_round_trips_checkpoint_weights(tmp_path):
+    """build_model + load_weights_from_checkpoint(skip_prefixes=()) copies ALL
+    layer weights, so a fresh model warm-started from a saved checkpoint matches
+    the source bit-for-bit. This is the mechanism the trainer's --init-from uses.
+    """
+    cfg = _tiny_model_config()
+
+    set_seeds(1)
+    src = build_model(cfg)
+    ckpt = tmp_path / "src.keras"
+    src.save(ckpt)
+
+    set_seeds(2)  # different init -> weights must start DIFFERENT
+    tgt = build_model(cfg)
+
+    src_w = src.get_weights()
+    tgt_w = tgt.get_weights()
+    assert any(
+        not np.allclose(a, b) for a, b in zip(src_w, tgt_w)
+    ), "fresh model unexpectedly identical before transfer"
+
+    report = load_weights_from_checkpoint(tgt, ckpt_path=str(ckpt), skip_prefixes=())
+    assert len(report.loaded) > 0
+    assert len(report.shape_mismatch) == 0
+
+    # After transfer the target equals the source weight-for-weight.
+    for a, b in zip(src.get_weights(), tgt.get_weights()):
+        np.testing.assert_allclose(a, b, rtol=0, atol=0)
+
+
+def test_init_from_missing_file_raises(tmp_path):
+    cfg = _tiny_model_config()
+    tgt = build_model(cfg)
+    with pytest.raises(FileNotFoundError):
+        load_weights_from_checkpoint(
+            tgt, ckpt_path=str(tmp_path / "nope.keras"), skip_prefixes=()
+        )
+
+
+def test_init_from_field_default_is_none():
+    """Default config does not warm-start (byte-identical to pre-feature)."""
+    assert TrainingConfig().init_from is None

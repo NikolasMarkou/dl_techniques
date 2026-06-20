@@ -122,6 +122,7 @@ from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.metrics.ssim_metric import SsimMetric
 from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.utils.multiplicative_miyasawa import (
     apply_multiplicative_gaussian,
     apply_composite_gaussian,
@@ -229,6 +230,13 @@ class TrainingConfig:
     self_iterate_pool_size: int = 2048
     self_iterate_regen_freq: int = 1
     self_iterate_mix_ratio: float = 0.5
+
+    # Initialize model weights from a saved .keras checkpoint before training.
+    # Primary use: self-iterate FINE-TUNING on top of a normally-trained denoiser
+    # (the self-iterate pool's clean targets are fixed, so from-scratch self-iterate
+    # has limited data diversity). Works in any mode; architecture must match the
+    # checkpoint. None = train from random init (default).
+    init_from: Optional[str] = None
 
     # Analysis (ModelAnalyzer, data-free weight + spectral). Default OFF (opt-in).
     enable_analyzer: bool = False
@@ -1260,6 +1268,35 @@ def train(config: TrainingConfig) -> keras.Model:
     model.summary(print_fn=logger.info)
     verify_bias_free(model)
 
+    # Optional warm-start from a saved .keras checkpoint (e.g. self-iterate
+    # fine-tuning on top of a normally-trained denoiser). The functional model is
+    # already built, so layer-by-layer transfer works. skip_prefixes=() loads ALL
+    # layers (the denoiser has no head_ layers to skip, unlike CliffordNetUNet).
+    if config.init_from is not None:
+        logger.info(f"Initializing weights from checkpoint: {config.init_from}")
+        report = load_weights_from_checkpoint(
+            model,
+            ckpt_path=config.init_from,
+            skip_prefixes=(),
+        )
+        if len(report.loaded) == 0:
+            raise ValueError(
+                f"init_from loaded 0 layers from {config.init_from} — architecture "
+                "mismatch? Ensure --variant/--convnext-version/--patch-size/gabor/"
+                "laplacian flags match the checkpoint's model."
+            )
+        logger.info(
+            f"init_from: loaded {len(report.loaded)} layer(s), "
+            f"missing_in_source {len(report.missing_in_source)}, "
+            f"shape_mismatch {len(report.shape_mismatch)}."
+        )
+        if report.shape_mismatch:
+            logger.warning(
+                f"init_from: {len(report.shape_mismatch)} layer(s) had shape "
+                "mismatches and were left at init — check architecture flags."
+            )
+        verify_bias_free(model)  # re-check: transfer must not introduce bias
+
     # Keras requires a loss for every output, but the bottleneck is upstream of the decoder
     # so the denoiser MSE already trains it (F5/F6). Fit a single-output view that SHARES
     # weight objects with the full model; the full 2-output model is saved/monitored separately.
@@ -1548,6 +1585,13 @@ def parse_arguments() -> argparse.Namespace:
              "0.0 = fresh only, 1.0 = regenerated only. Default 0.5 (union).",
     )
     parser.add_argument(
+        "--init-from", type=str, default=None,
+        help="Warm-start model weights from a saved .keras checkpoint before training. "
+             "Primary use: self-iterate FINE-TUNING on top of a normally-trained "
+             "denoiser. Architecture (variant/convnext-version/patch-size/gabor/"
+             "laplacian) must match the checkpoint. Default: random init.",
+    )
+    parser.add_argument(
         "--smoke", action="store_true",
         help="Tiny end-to-end mechanism check (few steps/epochs, constant LR).",
     )
@@ -1627,6 +1671,7 @@ def main():
             self_iterate_pool_size=min(args.self_iterate_pool_size, 32),
             self_iterate_regen_freq=1,
             self_iterate_mix_ratio=args.self_iterate_mix_ratio,
+            init_from=args.init_from,
             viz_freq=1,
             viz_samples=args.viz_samples,
             output_dir=args.output_dir,
@@ -1664,6 +1709,7 @@ def main():
             self_iterate_pool_size=args.self_iterate_pool_size,
             self_iterate_regen_freq=args.self_iterate_regen_freq,
             self_iterate_mix_ratio=args.self_iterate_mix_ratio,
+            init_from=args.init_from,
             max_train_files=args.max_train_files or 10000,
             max_val_files=args.max_val_files or 500,
             steps_per_epoch=args.steps_per_epoch,
