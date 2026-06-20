@@ -188,6 +188,7 @@ class TrainingConfig:
     gabor_kernel_size: int = 7
     use_laplacian_pyramid: bool = False
     enable_deep_supervision: bool = False
+    expose_bottleneck: bool = False
 
     # Training
     batch_size: int = 16
@@ -400,6 +401,7 @@ def build_model(config: TrainingConfig) -> keras.Model:
         gabor_kernel_size=config.gabor_kernel_size,
         use_laplacian_pyramid=config.use_laplacian_pyramid,
         enable_deep_supervision=config.enable_deep_supervision,
+        expose_bottleneck=config.expose_bottleneck,
         final_activation="linear",  # MUST stay linear: bias-free homogeneity f(ax)=a*f(x)
         model_name=f"convunext_denoiser_{config.variant}",
         **cfg,
@@ -868,6 +870,25 @@ def train(config: TrainingConfig) -> keras.Model:
     model.summary(print_fn=logger.info)
     verify_bias_free(model)
 
+    # Keras requires a loss for every output, but the bottleneck is upstream of the decoder
+    # so the denoiser MSE already trains it (F5/F6). Fit a single-output view that SHARES
+    # weight objects with the full model; the full 2-output model is saved/monitored separately.
+    if config.expose_bottleneck:
+        # Robust filter: exclude ONLY the 'bottleneck' output, keep final_output (+ any DS outputs).
+        bottleneck_tensor = model.get_layer("bottleneck").output
+        train_outputs = [out for out in model.outputs if out is not bottleneck_tensor]
+        train_model = keras.Model(
+            model.inputs,
+            train_outputs[0] if len(train_outputs) == 1 else train_outputs,
+            name=f"{model.name}_train_view",
+        )
+        logger.info(
+            f"expose_bottleneck: fitting single-output training view "
+            f"({len(train_outputs)} loss output(s)); full model has {len(model.outputs)} outputs."
+        )
+    else:
+        train_model = model
+
     lr_schedule = learning_rate_schedule_builder(
         {
             "type": config.lr_schedule_type,
@@ -886,7 +907,9 @@ def train(config: TrainingConfig) -> keras.Model:
     )
 
     # MSE loss -> least-squares-optimal (Miyasawa) denoiser.
-    model.compile(
+    # Compile/fit operate on train_model (the single-output view when expose_bottleneck;
+    # otherwise train_model IS model). The view shares weight objects with the full model.
+    train_model.compile(
         optimizer=optimizer,
         loss="mse",
         metrics=[
@@ -948,7 +971,7 @@ def train(config: TrainingConfig) -> keras.Model:
     )
 
     start = time.time()
-    history = model.fit(
+    history = train_model.fit(
         train_ds,
         epochs=config.epochs,
         steps_per_epoch=steps_per_epoch,
@@ -967,6 +990,11 @@ def train(config: TrainingConfig) -> keras.Model:
             json.dump(history_dict, f, indent=2)
     except Exception as e:
         logger.warning(f"Failed to save training history: {e}")
+
+    if config.expose_bottleneck:
+        full_path = output_dir / "final_model_bottleneck.keras"
+        model.save(full_path)
+        logger.info(f"Saved full 2-output model (denoised, bottleneck) -> {full_path}")
 
     gc.collect()
     return model
@@ -996,6 +1024,8 @@ def parse_arguments() -> argparse.Namespace:
                         help="Disable the frozen Gabor depthwise stem")
     parser.add_argument("--laplacian-pyramid", action="store_true",
                         help="Enable the Laplacian-pyramid downsample/skip path (default OFF)")
+    parser.add_argument("--expose-bottleneck", action="store_true",
+                        help="Expose the bottleneck latent as an optional second model output (default OFF)")
     parser.add_argument("--gabor-filters", type=int, default=32)
     parser.add_argument("--sigma-max-start", type=float, default=0.05)
     parser.add_argument("--sigma-max-end", type=float, default=0.5)
@@ -1043,6 +1073,7 @@ def main():
             convnext_version=args.convnext_version,
             use_gabor_stem=not args.no_gabor_stem,
             use_laplacian_pyramid=args.laplacian_pyramid,
+            expose_bottleneck=args.expose_bottleneck,
             gabor_filters=8,
             epochs=2,
             curriculum_epochs=2,
@@ -1073,6 +1104,7 @@ def main():
             convnext_version=args.convnext_version,
             use_gabor_stem=not args.no_gabor_stem,
             use_laplacian_pyramid=args.laplacian_pyramid,
+            expose_bottleneck=args.expose_bottleneck,
             gabor_filters=args.gabor_filters,
             enable_deep_supervision=args.deep_supervision,
             epochs=args.epochs,
