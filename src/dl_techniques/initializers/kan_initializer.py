@@ -31,11 +31,6 @@ Three schemes set the per-role standard deviation:
 * ``'baseline'``: Glorot-uniform-equivalent residual std plus a small fixed
   spline noise (``baseline_noise``) — a sane control / fallback.
 
-The design is *shape-driven* (dimensions inferred from the ``shape`` argument of
-``__call__``), matching every existing initializer in this package and the Keras
-``add_weight`` contract; the paper's constructor-baked ``n_in``/``n_out`` API is
-not usable inside ``KANLinear.build`` (which only learns ``n_in`` at build time).
-
 The basis count ``N`` used by the variance formulas is pinned to the host
 layer's actual spline last-dimension ``grid_size + spline_order`` (NOT the
 paper's ``G + k + 1``) for residual/spline consistency — see ``D-001``.
