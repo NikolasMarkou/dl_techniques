@@ -112,6 +112,10 @@ class WWTailConfig:
         blend_eta: Maximum blend fraction of the reshaped matrix back into the
             original (scaled by ``hardness``).
         cayley_eta: Maximum Cayley log-space step size (scaled by ``hardness``).
+        max_ks_distance: Optional KS-distance ceiling for the power-law fit. When set,
+            layers whose fit_powerlaw KS distance exceeds it are skipped (poor PL fit ->
+            the r^(-q) template is not meaningful). Default None -> no goodness-of-fit
+            gating (behavior unchanged).
         use_detx: If ``True``, fuse the ``compute_detX_constraint`` tail count with the
             power-law tail count to pick the tail threshold.
         warmup_epochs: Number of leading epochs with ``hardness == 0`` (no projection).
@@ -127,6 +131,7 @@ class WWTailConfig:
             q: float = 1.0,
             blend_eta: float = 0.5,
             cayley_eta: float = 0.25,
+            max_ks_distance: Optional[float] = None,
             use_detx: bool = True,
             warmup_epochs: int = 0,
             ramp_epochs: int = 5,
@@ -138,6 +143,7 @@ class WWTailConfig:
         self.q = float(q)
         self.blend_eta = float(blend_eta)
         self.cayley_eta = float(cayley_eta)
+        self.max_ks_distance = None if max_ks_distance is None else float(max_ks_distance)
         self.use_detx = bool(use_detx)
         self.warmup_epochs = int(warmup_epochs)
         self.ramp_epochs = int(ramp_epochs)
@@ -151,6 +157,7 @@ class WWTailConfig:
             "q": self.q,
             "blend_eta": self.blend_eta,
             "cayley_eta": self.cayley_eta,
+            "max_ks_distance": self.max_ks_distance,
             "use_detx": self.use_detx,
             "warmup_epochs": self.warmup_epochs,
             "ramp_epochs": self.ramp_epochs,
@@ -273,11 +280,19 @@ def _shape_single_layer(
         return False
 
     # Power-law fit on the eigenvalues (lam = S**2).
-    alpha, optimal_xmin, _D, _sigma, _num_pl, status, _warning = fit_powerlaw(lam)
+    alpha, optimal_xmin, ks_distance, _sigma, _num_pl, status, _warning = fit_powerlaw(lam)
     if status != _FIT_SUCCESS:
         return False
     xmin = float(optimal_xmin)
     if not np.isfinite(xmin) or xmin <= 0.0:
+        return False
+
+    # DECISION plan_2026-06-20_c0f110f5/D-002: opt-in goodness-of-fit gate. A poor
+    # power-law fit (large KS distance) means the tail template is not meaningful, so
+    # skip the layer (SETOL poor-fit guidance). Default max_ks_distance=None -> no gating.
+    if (config.max_ks_distance is not None
+            and np.isfinite(ks_distance)
+            and ks_distance > config.max_ks_distance):
         return False
 
     # Tail threshold. lam is descending (numpy SVD returns descending S).

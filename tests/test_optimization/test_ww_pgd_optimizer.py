@@ -415,6 +415,7 @@ class TestWWPGDSerialization:
     def test_config_roundtrip(self):
         cfg = WWTailConfig(
             enable=True, min_tail=7, q=1.5, blend_eta=0.3, cayley_eta=0.4,
+            max_ks_distance=0.05,
             use_detx=False, warmup_epochs=2, ramp_epochs=3, apply_every_epochs=4,
             verbose=True,
         )
@@ -427,6 +428,7 @@ class TestWWPGDSerialization:
         assert restored.q == pytest.approx(1.5)
         assert restored.blend_eta == pytest.approx(0.3)
         assert restored.cayley_eta == pytest.approx(0.4)
+        assert restored.max_ks_distance == pytest.approx(0.05)
         assert restored.use_detx is False
         assert restored.warmup_epochs == 2
         assert restored.ramp_epochs == 3
@@ -484,3 +486,32 @@ class TestWWPGDFrozenGuard:
         summary = ww_pgd_project(model, cfg, epoch=2, num_epochs=3)
         assert np.array_equal(before, _kernel_np(model.layers[0])), "frozen DepthwiseConv2D must be untouched"
         assert summary["layers_projected"] == 0
+
+
+class TestWWPGDGoodnessOfFit:
+    """SC10: max_ks_distance opt-in gate; None default is a no-op."""
+
+    def test_tiny_threshold_skips_high_threshold_projects(self):
+        np.random.seed(13)
+        W = _heavy_tail_matrix(256, 256, exponent=2.0, seed=13)
+        base = dict(enable=True, warmup_epochs=0, ramp_epochs=1, min_tail=5, q=1.0)
+
+        # High ceiling -> projects.
+        m_hi = _dense_with_kernel(W)
+        s_hi = ww_pgd_project(m_hi, WWTailConfig(max_ks_distance=1.0, **base), epoch=2, num_epochs=3)
+        assert s_hi["layers_projected"] == 1
+
+        # Tiny ceiling -> skipped, kernel byte-identical.
+        m_lo = _dense_with_kernel(W)
+        before = _kernel_np(m_lo.layers[0])
+        s_lo = ww_pgd_project(m_lo, WWTailConfig(max_ks_distance=1e-9, **base), epoch=2, num_epochs=3)
+        assert s_lo["layers_projected"] == 0
+        assert np.array_equal(before, _kernel_np(m_lo.layers[0]))
+
+    def test_none_default_is_noop_vs_explicit(self):
+        np.random.seed(14)
+        W = _heavy_tail_matrix(256, 256, exponent=2.0, seed=14)
+        base = dict(enable=True, warmup_epochs=0, ramp_epochs=1, min_tail=5, q=1.0)
+        m_none = _dense_with_kernel(W)
+        s_none = ww_pgd_project(m_none, WWTailConfig(**base), epoch=2, num_epochs=3)
+        assert s_none["layers_projected"] == 1  # default None gates nothing
