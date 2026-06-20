@@ -72,9 +72,11 @@ Recorded from the audit in ``analyses/analysis_2026-06-20_ea6a9d67``:
 
 from __future__ import annotations
 
+import os
+import csv
 import keras
 import numpy as np
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # local imports
@@ -147,6 +149,13 @@ class WWTailConfig:
         ramp_epochs: Number of epochs over which ``hardness`` ramps 0 -> 1 after warmup.
         apply_every_epochs: Callback cadence; the projection runs every Nth epoch.
         verbose: If ``True``, the callback logs a per-epoch summary at INFO.
+        log_layer_stats: If ``True``, the projection captures per-layer
+            ``{name, alpha_before, alpha_after, tail_size, ks_distance}`` (the
+            ``alpha_after`` re-fit costs ONE extra SVD per projected layer) and
+            ``ww_pgd_project`` adds a ``"layer_stats"`` key to its return dict.
+            Default ``False`` -> ZERO extra SVD/refit and the OFF path is
+            byte-identical (D-002). The CSV destination is NOT a config field
+            (D-003); the callback takes a ``csv_path`` ctor arg instead.
     """
 
     def __init__(
@@ -162,6 +171,7 @@ class WWTailConfig:
             ramp_epochs: int = 5,
             apply_every_epochs: int = 1,
             verbose: bool = False,
+            log_layer_stats: bool = False,
     ) -> None:
         self.enable = bool(enable)
         self.min_tail = int(min_tail)
@@ -174,6 +184,7 @@ class WWTailConfig:
         self.ramp_epochs = int(ramp_epochs)
         self.apply_every_epochs = int(apply_every_epochs)
         self.verbose = bool(verbose)
+        self.log_layer_stats = bool(log_layer_stats)
 
     def get_config(self) -> Dict[str, Any]:
         return {
@@ -188,6 +199,7 @@ class WWTailConfig:
             "ramp_epochs": self.ramp_epochs,
             "apply_every_epochs": self.apply_every_epochs,
             "verbose": self.verbose,
+            "log_layer_stats": self.log_layer_stats,
         }
 
     @classmethod
@@ -278,13 +290,31 @@ def _shape_single_layer(
         layer: keras.layers.Layer,
         config: WWTailConfig,
         hardness: float,
-) -> bool:
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
     """Apply the WW-PGD tail-projection to one layer's kernel in place.
 
-    Runs entirely in the eager numpy domain. Returns ``True`` if the kernel was
-    projected and re-assigned, ``False`` if the layer was skipped (tail too small,
-    failed power-law fit, etc.). Raises on hard numerical failures (caught by the
-    per-layer try/except in :func:`ww_pgd_project`).
+    Runs entirely in the eager numpy domain.
+
+    Returns a ``(projected, stats)`` tuple:
+
+    * ``projected`` is ``True`` if the kernel was projected and re-assigned,
+      ``False`` if the layer was skipped (tail too small, failed power-law fit,
+      etc.).
+    * ``stats`` is ``None`` unless ``config.log_layer_stats`` is ``True`` AND the
+      layer was actually projected, in which case it is a dict with keys
+      ``{name, alpha_before, alpha_after, tail_size, ks_distance}``. Every skip
+      path returns ``(False, None)``.
+
+    DECISION plan_2026-06-20_5fe67f0c/D-002: ALL extra stats work (notably the
+    ``alpha_after`` re-SVD/re-fit) is gated strictly behind
+    ``config.log_layer_stats``. When it is False the function does ZERO extra SVD
+    or power-law refit and the kernel assigned is byte-identical to the
+    pre-instrumentation behavior -- the OFF path must not move the validated
+    default. Do NOT compute the stats unconditionally and discard them when OFF;
+    that would perturb the validated default path. See decisions.md D-002.
+
+    Raises on hard numerical failures (caught by the per-layer try/except in
+    :func:`ww_pgd_project`).
     """
     kernel = layer.kernel
     W = np.array(keras.ops.convert_to_numpy(kernel))
@@ -305,15 +335,15 @@ def _shape_single_layer(
     lam = S ** 2
     n = lam.size
     if n == 0:
-        return False
+        return False, None
 
     # Power-law fit on the eigenvalues (lam = S**2).
     alpha, optimal_xmin, ks_distance, _sigma, _num_pl, status, _warning = fit_powerlaw(lam)
     if status != _FIT_SUCCESS:
-        return False
+        return False, None
     xmin = float(optimal_xmin)
     if not np.isfinite(xmin) or xmin <= 0.0:
-        return False
+        return False, None
 
     # DECISION plan_2026-06-20_c0f110f5/D-002: opt-in goodness-of-fit gate. A poor
     # power-law fit (large KS distance) means the tail template is not meaningful, so
@@ -321,7 +351,7 @@ def _shape_single_layer(
     if (config.max_ks_distance is not None
             and np.isfinite(ks_distance)
             and ks_distance > config.max_ks_distance):
-        return False
+        return False, None
 
     # Tail threshold. lam is descending (numpy SVD returns descending S).
     lam_thr = xmin
@@ -341,7 +371,7 @@ def _shape_single_layer(
     tail_mask = lam >= lam_thr
     tail_size = int(tail_mask.sum())
     if tail_size < config.min_tail:
-        return False
+        return False, None
 
     lam_tail = lam[tail_mask]
 
@@ -381,7 +411,27 @@ def _shape_single_layer(
     # Reshape back to the ORIGINAL kernel shape and assign.
     W_new = W_new2d.reshape(orig_shape) if twod_shape != orig_shape else W_new2d
     layer.kernel.assign(keras.ops.cast(W_new, orig_dtype))
-    return True
+
+    # DECISION plan_2026-06-20_5fe67f0c/D-002: per-layer stats (incl. the
+    # alpha_after re-SVD/refit) ONLY when log_layer_stats is ON. Placed AFTER the
+    # assign so it cannot influence what was written; OFF path returns here with
+    # no extra work and a byte-identical kernel. See decisions.md D-002.
+    if not config.log_layer_stats:
+        return True, None
+
+    # alpha_after: ONE extra re-fit on the post-blend reshaped matrix's
+    # eigenvalues (lam = S**2 of the blended W_new2d). 2D shape for SVD.
+    S_after = np.linalg.svd(W_new2d, full_matrices=False, compute_uv=False)
+    lam_after = np.maximum(S_after, _SV_FLOOR) ** 2
+    alpha_after, _xmin_a, _ks_a, _s_a, _n_a, _status_a, _w_a = fit_powerlaw(lam_after)
+    stats = {
+        "name": getattr(layer, "name", "?"),
+        "alpha_before": float(alpha),
+        "alpha_after": float(alpha_after),
+        "tail_size": int(tail_size),
+        "ks_distance": float(ks_distance),
+    }
+    return True, stats
 
 
 # ---------------------------------------------------------------------
@@ -414,6 +464,10 @@ def ww_pgd_project(
 
     Returns:
         A summary dict ``{"hardness", "layers_projected", "layers_skipped"}``.
+        When ``config.log_layer_stats`` is ``True`` an additional ``"layer_stats"``
+        key (a ``List[Dict]`` of per-projected-layer
+        ``{name, alpha_before, alpha_after, tail_size, ks_distance}``) is included;
+        when it is ``False`` the key is OMITTED so the OFF return dict is unchanged.
     """
     del num_epochs, logs  # accepted for caller symmetry; not used here.
 
@@ -429,11 +483,15 @@ def ww_pgd_project(
 
     projected = 0
     skipped = 0
+    layer_stats: List[Dict[str, Any]] = []
     for layer in layers:
         # Per-layer fail-soft (I3): one bad layer never aborts the rest.
         try:
-            if _shape_single_layer(layer, config, hardness):
+            did_project, stats = _shape_single_layer(layer, config, hardness)
+            if did_project:
                 projected += 1
+                if stats is not None:
+                    layer_stats.append(stats)
             else:
                 skipped += 1
         except Exception as e:
@@ -444,11 +502,14 @@ def ww_pgd_project(
                 f"skipping this layer."
             )
 
-    return {
+    summary: Dict[str, Any] = {
         "hardness": float(hardness),
         "layers_projected": int(projected),
         "layers_skipped": int(skipped),
     }
+    if config.log_layer_stats:
+        summary["layer_stats"] = layer_stats
+    return summary
 
 
 # ---------------------------------------------------------------------
@@ -469,6 +530,13 @@ class WWPGDProjectionCallback(keras.callbacks.Callback):
         num_epochs: Total planned epochs, forwarded to :func:`ww_pgd_project`.
         model: Optional explicit FULL model. Stored as ``self._explicit_model`` so it
             does NOT shadow Keras' ``self.model`` property. Excluded from ``get_config``.
+        csv_path: Optional destination for the per-epoch per-layer alpha CSV. Only
+            used when ``config.log_layer_stats`` is ``True``. DECISION
+            plan_2026-06-20_5fe67f0c/D-003: this is a run-specific filesystem path
+            and is intentionally NOT serialized into the config/get_config (the
+            trainer re-supplies it each run, like the live model ref). Do NOT move
+            this into ``WWTailConfig`` -- a serialized absolute path is a
+            portability/round-trip hazard. See decisions.md D-003.
     """
 
     def __init__(
@@ -476,6 +544,7 @@ class WWPGDProjectionCallback(keras.callbacks.Callback):
             config: Optional[WWTailConfig] = None,
             num_epochs: int = 1,
             model: Optional[keras.Model] = None,
+            csv_path: Optional[str] = None,
             **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -484,6 +553,8 @@ class WWPGDProjectionCallback(keras.callbacks.Callback):
         # Distinct attr name: do NOT shadow Keras' self.model property.
         self._explicit_model: Optional[keras.Model] = model
         self._warned_no_model: bool = False
+        # D-003: run-specific path, NOT serialized.
+        self._csv_path: Optional[str] = csv_path
 
     def on_epoch_end(self, epoch: int, logs: Optional[Dict[str, Any]] = None) -> None:
         cfg = self._config
@@ -513,11 +584,48 @@ class WWPGDProjectionCallback(keras.callbacks.Callback):
                     f"projected={summary['layers_projected']}, "
                     f"skipped={summary['layers_skipped']}"
                 )
+            if cfg.log_layer_stats and self._csv_path and "layer_stats" in summary:
+                self._append_layer_stats_csv(epoch, summary["layer_stats"])
         except Exception as e:
             logger.error(
                 f"WWPGDProjectionCallback: projection raised at epoch {epoch} "
                 f"({type(e).__name__}: {e}); training continues.",
                 exc_info=True,
+            )
+
+    def _append_layer_stats_csv(
+            self, epoch: int, layer_stats: List[Dict[str, Any]]
+    ) -> None:
+        """Append the per-layer alpha rows for ``epoch`` to the CSV (fail-soft).
+
+        Header ``epoch,name,alpha_before,alpha_after,tail_size,ks_distance`` is
+        written once when the file is new. Any I/O error is logged and swallowed:
+        a CSV-write failure must NEVER crash training.
+        """
+        path = self._csv_path
+        try:
+            new_file = (not os.path.exists(path)) or os.path.getsize(path) == 0
+            with open(path, "a", newline="") as f:
+                writer = csv.writer(f)
+                if new_file:
+                    writer.writerow([
+                        "epoch", "name", "alpha_before",
+                        "alpha_after", "tail_size", "ks_distance",
+                    ])
+                for s in layer_stats:
+                    writer.writerow([
+                        epoch,
+                        s.get("name", "?"),
+                        s.get("alpha_before"),
+                        s.get("alpha_after"),
+                        s.get("tail_size"),
+                        s.get("ks_distance"),
+                    ])
+        except Exception as e:
+            logger.warning(
+                f"WWPGDProjectionCallback: failed to write layer-stats CSV "
+                f"'{path}' at epoch {epoch} ({type(e).__name__}: {e}); "
+                f"training continues."
             )
 
     def get_config(self) -> Dict[str, Any]:

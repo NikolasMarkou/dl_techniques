@@ -417,7 +417,7 @@ class TestWWPGDSerialization:
             enable=True, min_tail=7, q=1.5, blend_eta=0.3, cayley_eta=0.4,
             max_ks_distance=0.05,
             use_detx=False, warmup_epochs=2, ramp_epochs=3, apply_every_epochs=4,
-            verbose=True,
+            verbose=True, log_layer_stats=True,
         )
         restored = keras.saving.deserialize_keras_object(
             keras.saving.serialize_keras_object(cfg)
@@ -434,6 +434,7 @@ class TestWWPGDSerialization:
         assert restored.ramp_epochs == 3
         assert restored.apply_every_epochs == 4
         assert restored.verbose is True
+        assert restored.log_layer_stats is True
 
     def test_callback_roundtrip_without_live_model(self):
         """The deserialized callback reconstructs config + num_epochs and has no
@@ -577,3 +578,120 @@ class TestWWPGDCayleyEtaZero:
         # full snap moves alpha toward 2 at least as far as the small Cayley step
         assert abs(a_eta0 - 2.0) <= abs(a_eta025 - 2.0) + 1e-6, \
             f"cayley_eta=0 snap should reach >= the small-step alpha (eta0={a_eta0}, eta025={a_eta025}, before={a_before})"
+
+
+# ---------------------------------------------------------------------
+# Step-1 instrumentation: default-OFF per-layer alpha logging (SC1/SC2/SC3)
+# ---------------------------------------------------------------------
+
+class TestWWPGDLayerStats:
+    """Default-OFF per-layer alpha instrumentation (plan_2026-06-20_5fe67f0c).
+
+    SC1: log_layer_stats=False (default) -> kernels byte-identical after a
+    projection loop AND no ``layer_stats`` key (byte-identical OFF, D-002).
+    SC2: log_layer_stats=True -> ``layer_stats`` list of dicts with exactly
+    ``{name, alpha_before, alpha_after, tail_size, ks_distance}`` and finite
+    alpha_before/after on a healthy layer that is actually projected.
+    SC3: ``WWTailConfig`` round-trip preserves ``log_layer_stats`` (also covered
+    by the extended ``test_config_roundtrip``).
+    """
+
+    def test_log_layer_stats_off_byte_identical_and_no_key(self):
+        """SC1: the OFF (default) path matches today's behavior exactly.
+
+        Two byte-identical Dense models are projected through the SAME 10-epoch
+        loop, one with log_layer_stats explicitly False (default), one with the
+        flag unset; the resulting kernels must be byte-identical to each other AND
+        to a third reference run that never sets the flag. The OFF return dict must
+        NOT contain a ``layer_stats`` key. This is the HARD byte-identical-OFF
+        invariant (D-002): the validated default path must not move.
+        """
+        np.random.seed(30)
+        W = _heavy_tail_matrix(256, 256, exponent=2.0, seed=30)
+
+        base = dict(enable=True, warmup_epochs=0, ramp_epochs=1, min_tail=5, q=1.0)
+
+        # Reference run: flag never set (literally today's config).
+        m_ref = _dense_with_kernel(W)
+        last_summary_ref = None
+        for _ in range(10):
+            last_summary_ref = ww_pgd_project(
+                m_ref, WWTailConfig(**base), epoch=2, num_epochs=3
+            )
+        ref_kernel = _kernel_np(m_ref.layers[0])
+
+        # OFF run: flag explicitly False.
+        m_off = _dense_with_kernel(W)
+        last_summary_off = None
+        for _ in range(10):
+            last_summary_off = ww_pgd_project(
+                m_off, WWTailConfig(log_layer_stats=False, **base),
+                epoch=2, num_epochs=3,
+            )
+        off_kernel = _kernel_np(m_off.layers[0])
+
+        # Byte-identical to the reference (no perturbation from the new code path).
+        assert np.array_equal(ref_kernel, off_kernel), \
+            "log_layer_stats=False must be byte-identical to the un-flagged path"
+        # No layer_stats key on either OFF/default summary.
+        assert "layer_stats" not in last_summary_ref
+        assert "layer_stats" not in last_summary_off
+        # Sanity: the layer was actually projected (so the test is non-trivial).
+        assert last_summary_off["layers_projected"] == 1
+
+    def test_log_layer_stats_on_populates_finite_stats(self):
+        """SC2: ON -> layer_stats with exact keys and finite alpha_before/after."""
+        np.random.seed(31)
+        W = _heavy_tail_matrix(256, 256, exponent=2.0, seed=31)
+        model = _dense_with_kernel(W)
+        cfg = WWTailConfig(
+            enable=True, warmup_epochs=0, ramp_epochs=1, min_tail=5, q=1.0,
+            log_layer_stats=True,
+        )
+        summary = ww_pgd_project(model, cfg, epoch=2, num_epochs=3)
+
+        assert summary["layers_projected"] == 1
+        assert "layer_stats" in summary
+        stats = summary["layer_stats"]
+        assert isinstance(stats, list)
+        assert len(stats) == 1
+        s = stats[0]
+        assert set(s.keys()) == {
+            "name", "alpha_before", "alpha_after", "tail_size", "ks_distance",
+        }
+        assert isinstance(s["name"], str)
+        assert np.isfinite(s["alpha_before"]), "alpha_before must be finite"
+        assert np.isfinite(s["alpha_after"]), "alpha_after must be finite"
+        assert isinstance(s["tail_size"], int) and s["tail_size"] >= cfg.min_tail
+        assert np.isfinite(s["ks_distance"])
+
+    def test_log_layer_stats_on_does_not_change_projected_kernel(self):
+        """SC1 (other half): the kernel ASSIGNED with the flag ON is byte-identical
+        to the kernel assigned with the flag OFF -- the stats capture must not alter
+        what gets written (the alpha_after re-fit runs only AFTER the assign).
+        """
+        np.random.seed(32)
+        W = _heavy_tail_matrix(256, 256, exponent=2.0, seed=32)
+        base = dict(enable=True, warmup_epochs=0, ramp_epochs=1, min_tail=5, q=1.0)
+
+        m_off = _dense_with_kernel(W)
+        ww_pgd_project(m_off, WWTailConfig(log_layer_stats=False, **base),
+                       epoch=2, num_epochs=3)
+        k_off = _kernel_np(m_off.layers[0])
+
+        m_on = _dense_with_kernel(W)
+        ww_pgd_project(m_on, WWTailConfig(log_layer_stats=True, **base),
+                       epoch=2, num_epochs=3)
+        k_on = _kernel_np(m_on.layers[0])
+
+        assert np.array_equal(k_off, k_on), \
+            "the projected kernel must be identical whether stats are logged or not"
+
+    def test_config_roundtrip_preserves_log_layer_stats_default_false(self):
+        """SC3: the default (False) also round-trips correctly."""
+        cfg = WWTailConfig(enable=True)
+        assert cfg.log_layer_stats is False
+        restored = keras.saving.deserialize_keras_object(
+            keras.saving.serialize_keras_object(cfg)
+        )
+        assert restored.log_layer_stats is False
