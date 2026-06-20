@@ -984,7 +984,7 @@ def train(config: TrainingConfig) -> keras.Model:
             ConvUnextBottleneckMonitorCallback(
                 full_model=model,
                 val_batch=viz_batch,
-                output_dir=output_dir,
+                output_dir=output_dir / "visualizations",  # share the existing viz dir
                 monitor_freq=config.viz_freq,
             )
         )

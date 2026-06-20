@@ -52,8 +52,9 @@ class ConvUnextBottleneckMonitorCallback(keras.callbacks.Callback):
         val_batch: Fixed clean validation batch ``(B, H, W, C)`` (tensor or numpy
             array) in model-input space. Used for a forward pass each monitored
             epoch.
-        output_dir: Base directory for PNG files. A ``bottleneck_visualizations/``
-            subdirectory is created beneath it.
+        output_dir: Directory PNG files are written into directly (created if
+            missing). The caller chooses the location (e.g. a shared
+            ``visualizations/`` dir); no extra subdirectory is created.
         monitor_freq: Emit stats + PNG every this many epochs. Defaults to 5.
         max_featuremap_channels: Cap on the number of bottleneck channels tiled
             in the feature-map grid. Defaults to 16.
@@ -78,7 +79,7 @@ class ConvUnextBottleneckMonitorCallback(keras.callbacks.Callback):
         self.monitor_freq = monitor_freq
         self.max_featuremap_channels = max_featuremap_channels
         self.name_prefix = name_prefix
-        self._subdir = Path(output_dir) / "bottleneck_visualizations"
+        self._subdir = Path(output_dir)
         self._subdir.mkdir(parents=True, exist_ok=True)
 
     # -----------------------------------------------------------------
