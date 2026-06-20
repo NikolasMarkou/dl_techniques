@@ -1390,6 +1390,7 @@ def train(config: TrainingConfig) -> keras.Model:
         monitor="val_loss",
         patience=config.early_stopping_patience if not disable_early_stopping else 1,
         use_lr_schedule=True,
+        include_terminate_on_nan=True,
         include_tensorboard=True,
         include_analyzer=config.enable_analyzer,
         analyzer_config=analyzer_config,
