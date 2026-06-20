@@ -466,3 +466,140 @@ def signed_mixture_prior(n: int, seed: int = 0) -> np.ndarray:
         comp == 0, rng.normal(-0.5, 0.15, n),
         np.where(comp == 1, rng.normal(0.2, 0.1, n), rng.normal(0.6, 0.2, n)),
     )
+
+
+# ---------------------------------------------------------------------
+# 4. Optional checkpoint diagnostic (CLI entry; NOT exercised by pytest)
+# ---------------------------------------------------------------------
+
+
+def run_checkpoint_diagnostic(
+        checkpoint_path: Optional[str] = None,
+        sigma: float = 0.15,
+        batch: int = 4,
+        spatial: int = 64,
+        channels: int = 3,
+        n_hutchinson: int = 8,
+        eps: float = 1e-3,
+        seed: int = 0,
+) -> Dict[str, Any]:
+    """Load a real ``.keras`` denoiser (or build a tiny one) and print the SURE diagnostic.
+
+    This is the heavy "check a real checkpoint" path the plan keeps OUT of the fast
+    pytest. It loads a trained denoiser, synthesizes a noisy batch with
+    :func:`apply_multiplicative_gaussian` (no dataset dependency — random-uniform clean
+    input in the ``[-1, +1]`` domain), and reports the generalized-SURE
+    divergence-consistency diagnostic via :func:`sure_divergence_consistency`. The
+    diagnostic needs no clean references.
+
+    Args:
+        checkpoint_path: Path to a saved ``.keras`` denoiser. If ``None`` or the file is
+            missing, a tiny randomly-initialized ``create_convunext_denoiser`` is built so
+            the diagnostic still runs end-to-end (smoke fallback).
+        sigma: Multiplicative noise std for the synthetic noisy batch.
+        batch: Batch size of the synthetic input.
+        spatial: Spatial size; the synthetic input is ``[batch, spatial, spatial, channels]``.
+            Ignored when a checkpoint with a fixed input shape is loaded.
+        channels: Channel count for the fallback tiny model / synthetic input.
+        n_hutchinson: Hutchinson probes for the divergence estimate.
+        eps: Finite-difference step for the JVP.
+        seed: RNG seed.
+
+    Returns:
+        The diagnostic dict from :func:`sure_divergence_consistency`.
+    """
+    import os
+    import keras
+
+    # Importing these modules registers the custom Keras objects (Gabor stem
+    # initializer + ConvUNeXt denoiser layers) needed to deserialize a checkpoint.
+    # Imported lazily so library import of this module stays light and src/train-free.
+    import dl_techniques.initializers.gabor_filters_initializer  # noqa: F401
+    from dl_techniques.models.bias_free_denoisers.bfconvunext import (
+        create_convunext_denoiser,
+    )
+
+    if checkpoint_path and os.path.isfile(checkpoint_path):
+        logger.info("loading denoiser checkpoint: %s", checkpoint_path)
+        model = keras.models.load_model(checkpoint_path, compile=False)
+        in_shape = model.input_shape  # (None, H, W, C)
+        h = in_shape[1] if in_shape[1] is not None else spatial
+        w = in_shape[2] if in_shape[2] is not None else spatial
+        c = in_shape[3] if in_shape[3] is not None else channels
+    else:
+        if checkpoint_path:
+            logger.warning(
+                "checkpoint not found at %s; building a tiny fallback model",
+                checkpoint_path,
+            )
+        else:
+            logger.info("no checkpoint given; building a tiny fallback model")
+        h = w = max(16, spatial)
+        c = channels
+        model = create_convunext_denoiser(
+            input_shape=(h, w, c),
+            depth=3,
+            initial_filters=8,
+            blocks_per_level=1,
+            drop_path_rate=0.0,
+        )
+
+    tf.random.set_seed(seed)
+    clean = tf.random.uniform([batch, h, w, c], minval=-1.0, maxval=1.0)
+    noisy = apply_multiplicative_gaussian(clean, sigma)
+
+    diag = sure_divergence_consistency(
+        model, noisy, sigma=sigma, n_hutchinson=n_hutchinson, eps=eps, seed=seed
+    )
+    return diag
+
+
+def _main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Generalized-SURE divergence-consistency diagnostic for a multiplicative-"
+            "noise denoiser checkpoint (no clean references required)."
+        )
+    )
+    parser.add_argument(
+        "--checkpoint", type=str, default=None,
+        help="Path to a saved .keras denoiser. If omitted/missing, a tiny model is built.",
+    )
+    parser.add_argument("--sigma", type=float, default=0.15, help="Multiplicative noise std.")
+    parser.add_argument("--batch", type=int, default=4, help="Synthetic batch size.")
+    parser.add_argument("--spatial", type=int, default=64, help="Synthetic spatial size.")
+    parser.add_argument("--channels", type=int, default=3, help="Synthetic channel count.")
+    parser.add_argument("--n-hutchinson", type=int, default=8, help="Hutchinson probes.")
+    parser.add_argument("--eps", type=float, default=1e-3, help="Finite-difference step.")
+    parser.add_argument("--seed", type=int, default=0, help="RNG seed.")
+    args = parser.parse_args()
+
+    diag = run_checkpoint_diagnostic(
+        checkpoint_path=args.checkpoint,
+        sigma=args.sigma,
+        batch=args.batch,
+        spatial=args.spatial,
+        channels=args.channels,
+        n_hutchinson=args.n_hutchinson,
+        eps=args.eps,
+        seed=args.seed,
+    )
+
+    # CLI stdout summary (a __main__ entry may print; library code uses the logger).
+    print("=" * 60)
+    print("SURE divergence-consistency diagnostic (multiplicative noise)")
+    print("=" * 60)
+    for key, value in diag.items():
+        print(f"  {key:>22s} : {value:.6g}")
+    print("=" * 60)
+
+    finite = all(np.isfinite(v) for v in diag.values())
+    return 0 if finite else 1
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(_main())
