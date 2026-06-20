@@ -78,6 +78,43 @@ def apply_multiplicative_gaussian(
     return x * (1.0 + noise * sigma)
 
 
+def apply_composite_gaussian(
+        x: tf.Tensor,
+        sigma_m: Union[float, tf.Tensor, tf.Variable],
+        sigma_a: Union[float, tf.Tensor, tf.Variable],
+) -> tf.Tensor:
+    """Apply composite (multiplicative + additive) Gaussian noise ``y = x*n + a``.
+
+    Superposes a per-pixel multiplicative draw ``n ~ N(1, sigma_m^2)`` (via
+    :func:`apply_multiplicative_gaussian`) and an independent additive draw
+    ``a ~ N(0, sigma_a^2)``, giving the affine-variance (Poisson-Gaussian-shaped) model
+
+        y | x ~ N(x, sigma_m^2 * x^2 + sigma_a^2).
+
+    Like the pure-multiplicative primitive it is written to be safe inside a
+    ``tf.data.Dataset.map`` graph: both noise sources use ``tf.random.normal`` with the
+    shape derived dynamically from ``tf.shape(x)`` (the multiplicative draw happens inside
+    :func:`apply_multiplicative_gaussian`, the additive draw here). With ``sigma_a == 0``
+    the output reduces exactly to :func:`apply_multiplicative_gaussian` plus a zero-scaled
+    additive draw; with ``sigma_m == 0`` it reduces to pure additive AWGN ``y = x + a``.
+
+    Args:
+        x: Input tensor of any shape (e.g. a clean patch ``[H, W, C]`` or batch
+            ``[B, H, W, C]``).
+        sigma_m: Multiplicative noise std (``n ~ N(1, sigma_m^2)``). Python float, scalar
+            tf.Tensor, or scalar ``tf.Variable``; cast to ``x.dtype``.
+        sigma_a: Additive noise std (``a ~ N(0, sigma_a^2)``). Same accepted types as
+            ``sigma_m``; cast to ``x.dtype``.
+
+    Returns:
+        The noisy tensor ``y`` with the same shape and dtype as ``x``. No clipping is
+        applied here (callers clip to their domain, e.g. ``[-1, +1]``, separately).
+    """
+    sigma_a = tf.cast(sigma_a, x.dtype)
+    additive = tf.random.normal(tf.shape(x), dtype=x.dtype) * sigma_a
+    return apply_multiplicative_gaussian(x, sigma_m) + additive
+
+
 # ---------------------------------------------------------------------
 # 2. Monte-Carlo posterior moments + relation (A)/(B) evaluators
 #    (offline checker; numpy is fine here — NOT in the training graph)
@@ -98,14 +135,19 @@ def mc_posterior_mean(
         count_threshold: Optional[int] = None,
         trim_percentile: float = 0.5,
         seed: int = 0,
+        sigma_a: float = 0.0,
 ) -> Dict[str, np.ndarray]:
     """Estimate posterior moments ``E[x|y]``, ``E[x^2|y]`` and the marginal ``p(y)`` by binning.
 
     Draws ``n_samples`` clean values ``x`` from ``prior_samples`` (with replacement),
-    forms ``y = x * (1 + N(0,1) * sigma)``, then bins over ``y`` to build non-parametric
-    posterior moments. This mirrors ``/tmp/mult_tweedie_check.py`` exactly: percentile
-    trim of the y-range, ``np.digitize`` binning, and a population ``count_threshold``
-    mask. All randomness is seeded for reproducibility.
+    forms the composite noisy ``y = x * (1 + N(0,1) * sigma) + N(0,1) * sigma_a``, then
+    bins over ``y`` to build non-parametric posterior moments. With ``sigma_a == 0`` this
+    is **exactly** the pure-multiplicative generation (``y = x * (1 + N(0,1) * sigma)``):
+    the additive draw is only taken when ``sigma_a > 0`` so the RNG stream — and hence the
+    binned numerics — is byte-identical to the pre-composite behavior. This mirrors
+    ``/tmp/mult_tweedie_check.py`` / ``/tmp/combined_tweedie_check.py``: percentile trim of
+    the y-range, ``np.digitize`` binning, and a population ``count_threshold`` mask. All
+    randomness is seeded for reproducibility.
 
     Args:
         prior_samples: 1-D array of samples from the prior ``p(x)``.
@@ -119,17 +161,21 @@ def mc_posterior_mean(
         trim_percentile: Lower/upper percentile to trim the y-range (default 0.5, i.e.
             keep [0.5, 99.5]).
         seed: RNG seed.
+        sigma_a: Additive noise std for the composite model (``a ~ N(0, sigma_a^2)``).
+            Defaults to ``0.0`` (pure multiplicative — RNG-identical to the prior
+            behavior). When ``> 0`` an independent additive draw is added to ``y``.
 
     Returns:
         Dict with numpy arrays (all length ``n_bins`` unless noted):
-            ``ctr``   — bin centers (the y-grid).
-            ``Ex``    — ``E[x|y]``.
-            ``Ex2``   — ``E[x^2|y]``.
-            ``p``     — marginal density ``p(y)``.
-            ``mask``  — boolean populated-bin mask (``cnt > count_threshold``).
-            ``cnt``   — raw per-bin counts.
-            ``dy``    — scalar bin width (numpy float).
-            ``sigma`` — scalar sigma (numpy float).
+            ``ctr``     — bin centers (the y-grid).
+            ``Ex``      — ``E[x|y]``.
+            ``Ex2``     — ``E[x^2|y]``.
+            ``p``       — marginal density ``p(y)``.
+            ``mask``    — boolean populated-bin mask (``cnt > count_threshold``).
+            ``cnt``     — raw per-bin counts.
+            ``dy``      — scalar bin width (numpy float).
+            ``sigma``   — scalar multiplicative sigma (numpy float).
+            ``sigma_a`` — scalar additive sigma (numpy float).
     """
     prior_samples = np.asarray(prior_samples, dtype=np.float64).ravel()
     if prior_samples.size == 0:
@@ -144,9 +190,13 @@ def mc_posterior_mean(
     rng = np.random.default_rng(seed)
 
     # Draw clean x from the provided prior samples (with replacement), then corrupt.
+    # When sigma_a == 0 the additive draw is skipped so the RNG stream (and thus all
+    # downstream numerics) is byte-identical to the pure-multiplicative behavior.
     x = rng.choice(prior_samples, size=n_samples, replace=True)
     n = rng.normal(1.0, sigma, n_samples)
     y = x * n
+    if sigma_a > 0.0:
+        y = y + rng.normal(0.0, sigma_a, n_samples)
 
     lo, hi = np.percentile(y, [trim_percentile, 100.0 - trim_percentile])
     edges = np.linspace(lo, hi, n_bins + 1)
@@ -165,8 +215,9 @@ def mc_posterior_mean(
     mask = cnt > count_threshold
 
     logger.info(
-        "mc_posterior_mean: sigma=%.4f n_samples=%d n_bins=%d populated=%d (thr=%d)",
-        sigma, n_samples, n_bins, int(mask.sum()), count_threshold,
+        "mc_posterior_mean: sigma=%.4f sigma_a=%.4f n_samples=%d n_bins=%d "
+        "populated=%d (thr=%d)",
+        sigma, sigma_a, n_samples, n_bins, int(mask.sum()), count_threshold,
     )
 
     return {
@@ -178,14 +229,24 @@ def mc_posterior_mean(
         "cnt": cnt,
         "dy": float(dy),
         "sigma": float(sigma),
+        "sigma_a": float(sigma_a),
     }
 
 
 def relation_A(mc: Dict[str, np.ndarray]) -> np.ndarray:
-    """RHS of exact relation (A): ``y + sigma^2 * d/dy[E[x^2|y]*p(y)] / p(y)``.
+    """RHS of exact relation (A) for the composite model.
+
+    Exact composite Tweedie (F1, MC-validated)::
+
+        E[x|y] = y + sigma_a^2 * d/dy[log p(y)]
+                   + sigma_m^2 * d/dy[E[x^2|y]*p(y)] / p(y)
+
+    With ``sigma_a == 0`` the additive score term vanishes and this is byte-identical to
+    the pure-multiplicative relation (A) ``y + sigma_m^2 * d/dy[E[x^2|y]*p(y)] / p(y)``.
 
     Args:
-        mc: The dict returned by :func:`mc_posterior_mean`.
+        mc: The dict returned by :func:`mc_posterior_mean` (carries ``sigma`` and,
+            optionally, ``sigma_a`` — defaulting to ``0.0`` for legacy dicts).
 
     Returns:
         Array (length ``n_bins``) of the relation-(A) RHS evaluated on the y-grid; this
@@ -194,20 +255,29 @@ def relation_A(mc: Dict[str, np.ndarray]) -> np.ndarray:
     ctr, Ex2, p = mc["ctr"], mc["Ex2"], mc["p"]
     dy = mc["dy"]
     sigma = mc["sigma"]
+    sigma_a = mc.get("sigma_a", 0.0)
     g = Ex2 * p
     dg = np.gradient(g, dy)
-    return ctr + sigma ** 2 * np.divide(dg, p, out=np.zeros_like(dg), where=p > 0)
+    mult_term = sigma ** 2 * np.divide(dg, p, out=np.zeros_like(dg), where=p > 0)
+    dlogp = np.gradient(np.log(np.where(p > 0, p, 1e-12)), dy)
+    add_term = sigma_a ** 2 * dlogp
+    return ctr + add_term + mult_term
 
 
 def relation_B(mc: Dict[str, np.ndarray]) -> np.ndarray:
-    """RHS of small-sigma relation (B) as a predicted ``E[x|y]``.
+    """RHS of small-sigma relation (B) for the composite model, as a predicted ``E[x|y]``.
 
-    The derivation gives ``D(y) - y ~= 2*sigma^2*y + sigma^2*y^2 * dlog p/dy``; adding
-    ``y`` yields the predicted posterior mean ``D(y)`` returned here, comparable against
-    ``mc["Ex"]`` on the same footing as :func:`relation_A`.
+    Small-sigma composite approximation (F1, MC-validated)::
+
+        D(y) - y ~= (sigma_a^2 + sigma_m^2 * y^2) * dlog p/dy + 2 * sigma_m^2 * y
+
+    Adding ``y`` yields the predicted posterior mean returned here. With ``sigma_a == 0``
+    the score weight collapses to ``sigma_m^2 * y^2`` and this is byte-identical to the
+    pure-multiplicative relation (B) ``y + 2*sigma_m^2*y + sigma_m^2*y^2 * dlog p/dy``.
 
     Args:
-        mc: The dict returned by :func:`mc_posterior_mean`.
+        mc: The dict returned by :func:`mc_posterior_mean` (carries ``sigma`` and,
+            optionally, ``sigma_a`` — defaulting to ``0.0`` for legacy dicts).
 
     Returns:
         Array (length ``n_bins``) of the relation-(B) predicted ``E[x|y]``.
@@ -215,8 +285,10 @@ def relation_B(mc: Dict[str, np.ndarray]) -> np.ndarray:
     ctr, p = mc["ctr"], mc["p"]
     dy = mc["dy"]
     sigma = mc["sigma"]
+    sigma_a = mc.get("sigma_a", 0.0)
     dlogp = np.gradient(np.log(np.where(p > 0, p, 1e-12)), dy)
-    return ctr + 2.0 * sigma ** 2 * ctr + sigma ** 2 * ctr ** 2 * dlogp
+    score_weight = sigma_a ** 2 + sigma ** 2 * ctr ** 2
+    return ctr + 2.0 * sigma ** 2 * ctr + score_weight * dlogp
 
 
 def rel_rmse(a: np.ndarray, b: np.ndarray, mask: np.ndarray, edge_trim: int = 5) -> float:
@@ -352,23 +424,28 @@ def sure_divergence_consistency(
         n_hutchinson: int = 8,
         eps: float = 1e-3,
         seed: int = 0,
+        sigma_a: float = 0.0,
 ) -> Dict[str, float]:
-    """Generalized-SURE divergence-consistency diagnostic for the multiplicative model.
+    """Generalized-SURE divergence-consistency diagnostic for the composite model.
 
-    For per-pixel multiplicative Gaussian noise (``y | x ~ N(x, sigma^2 x^2)``) the data
-    covariance is signal-dependent (``Sigma(y) = diag(sigma^2 y^2)`` to leading order).
-    The generalized-SURE risk estimate (Eldar; Raphan-Simoncelli) replaces the constant
-    ``sigma^2`` weighting of the divergence with the per-element variance, giving a
-    residual-consistency scalar estimable from noisy data + the denoiser alone (no clean
-    references):
+    For composite multiplicative+additive Gaussian noise (``y | x ~ N(x, sigma^2 x^2 +
+    sigma_a^2)``) the data covariance is signal-dependent with an additive floor
+    (``Sigma(y) = diag(sigma_a^2 + sigma^2 y^2)`` to leading order). The generalized-SURE
+    risk estimate (Eldar; Raphan-Simoncelli) replaces the constant ``sigma^2`` weighting
+    of the divergence with the per-element local variance, giving a residual-consistency
+    scalar estimable from noisy data + the denoiser alone (no clean references):
 
         gsure_residual = ||D(y) - y||^2
-                         + 2 * sum_i sigma^2 * y_i^2 * (dD_i/dy_i)
-                         - sigma^2 * sum_i y_i^2
+                         + 2 * sum_i (sigma_a^2 + sigma^2 y_i^2) * (dD_i/dy_i)
+                         - sum_i (sigma_a^2 + sigma^2 y_i^2)
 
-    We estimate the variance-weighted divergence ``sum_i sigma^2 y_i^2 (dD_i/dy_i)`` with
-    a Hutchinson probe whose components are pre-scaled by ``sigma * |y|`` so that
-    ``E[v_i v_j] = sigma^2 y_i^2 delta_ij``.
+    We estimate the variance-weighted divergence
+    ``sum_i (sigma_a^2 + sigma^2 y_i^2) (dD_i/dy_i)`` with a Hutchinson probe whose
+    components are pre-scaled by ``sqrt(sigma_a^2 + sigma^2 y_i^2)`` so that
+    ``E[v_i v_j] = (sigma_a^2 + sigma^2 y_i^2) delta_ij``. With ``sigma_a == 0`` the scale
+    reduces to ``sigma * |y_i|`` and this is byte-identical to the pure-multiplicative
+    diagnostic; with ``sigma == 0`` it reduces to the additive constant ``sigma_a^2``
+    weighting (classic SURE).
 
     NOTE on trust: the unweighted Hutchinson divergence estimator underlying this is
     validated against the additive closed form (:func:`additive_sure_risk`) in the
@@ -384,11 +461,13 @@ def sure_divergence_consistency(
         n_hutchinson: Number of random probes. Defaults to 8.
         eps: Finite-difference step for the JVP. Defaults to 1e-3.
         seed: RNG seed.
+        sigma_a: Additive noise std for the composite model. Defaults to ``0.0`` (pure
+            multiplicative — byte-identical to the prior behavior).
 
     Returns:
         Dict with python floats:
             ``divergence``         — plain (unweighted) Hutchinson divergence of D.
-            ``weighted_divergence``— ``sum_i sigma^2 y_i^2 (dD_i/dy_i)`` estimate.
+            ``weighted_divergence``— ``sum_i (sigma_a^2 + sigma^2 y_i^2)(dD_i/dy_i)`` est.
             ``residual_sq``        — ``||D(y) - y||^2``.
             ``n_elements``         — element count.
             ``gsure_residual``     — the generalized-SURE residual-consistency scalar.
@@ -403,9 +482,14 @@ def sure_divergence_consistency(
         denoiser, y, n_hutchinson=n_hutchinson, eps=eps, rademacher=True, seed=seed
     )
 
-    # Variance-weighted divergence: probe v_i = sigma * |y_i| * r_i, r_i Rademacher,
-    # so v . (D(y+eps v) - D(y))/eps  estimates  sum_i sigma^2 y_i^2 (dD_i/dy_i).
-    scale = tf.cast(sigma, y.dtype) * tf.abs(y)
+    # Per-element local variance sigma_a^2 + sigma^2 y_i^2 (additive floor + multiplicative
+    # term). Variance-weighted divergence: probe v_i = sqrt(var_i) * r_i, r_i Rademacher,
+    # so v . (D(y+eps v) - D(y))/eps estimates sum_i var_i (dD_i/dy_i). At sigma_a == 0
+    # scale collapses to sigma * |y_i|, byte-identical to the pure-multiplicative path.
+    sigma_t = tf.cast(sigma, y.dtype)
+    sigma_a_t = tf.cast(sigma_a, y.dtype)
+    local_var = sigma_a_t ** 2 + sigma_t ** 2 * tf.square(y)
+    scale = tf.sqrt(local_var)
     acc = 0.0
     for i in range(n_hutchinson):
         r = tf.cast(
@@ -421,15 +505,15 @@ def sure_divergence_consistency(
         acc += float(tf.reduce_sum(v * jvp).numpy())
     weighted_div = acc / float(n_hutchinson)
 
-    y2_sum = float(tf.reduce_sum(tf.square(y)).numpy())
+    var_sum = float(tf.reduce_sum(local_var).numpy())
     gsure_residual = (
-        residual_sq + 2.0 * weighted_div - sigma ** 2 * y2_sum
+        residual_sq + 2.0 * weighted_div - var_sum
     )
 
     logger.info(
-        "sure_divergence_consistency: div=%.4g weighted_div=%.4g residual_sq=%.4g "
-        "gsure_residual=%.4g (N=%d)",
-        div, weighted_div, residual_sq, gsure_residual, int(n_elements),
+        "sure_divergence_consistency: sigma=%.4g sigma_a=%.4g div=%.4g weighted_div=%.4g "
+        "residual_sq=%.4g gsure_residual=%.4g (N=%d)",
+        sigma, sigma_a, div, weighted_div, residual_sq, gsure_residual, int(n_elements),
     )
 
     return {
