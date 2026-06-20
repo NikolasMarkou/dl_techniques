@@ -246,6 +246,10 @@ class TrainingConfig:
     ww_pgd_blend_eta: float = 0.5
     ww_pgd_cayley_eta: float = 0.25
     ww_pgd_min_tail: int = 5
+    # Per-epoch per-layer alpha logging (instrumentation, opt-in). When True (and
+    # ww_pgd is also True) the WW-PGD callback writes a per-epoch alpha CSV to the
+    # experiment dir. Default OFF: leaves the ww_pgd ON path byte-identical.
+    ww_pgd_log_alpha: bool = False
 
     # Initialize model weights from a saved .keras checkpoint before training.
     # Primary use: self-iterate FINE-TUNING on top of a normally-trained denoiser
@@ -1493,6 +1497,15 @@ def train(config: TrainingConfig) -> keras.Model:
     # DECISION plan_2026-06-20_73c91aad/D-001: WW-PGD is a callback (epoch-boundary
     # projection), passed the FULL model to dodge the train-view; default-OFF opt-in.
     if config.ww_pgd:
+        # DECISION plan_2026-06-20_5fe67f0c/D-003: the alpha-trajectory CSV path is
+        # supplied per-run as a callback ctor arg (NOT serialized into WWTailConfig),
+        # so a run-specific filesystem path never leaks into the model/callback config.
+        # csv_path stays None unless --ww-pgd-log-alpha is set, keeping the ww_pgd ON
+        # path byte-identical when logging is off.
+        ww_pgd_csv_path = (
+            str(output_dir / "ww_pgd_layer_alpha.csv")
+            if config.ww_pgd_log_alpha else None
+        )
         callbacks.append(
             WWPGDProjectionCallback(
                 config=WWTailConfig(
@@ -1504,12 +1517,16 @@ def train(config: TrainingConfig) -> keras.Model:
                     blend_eta=config.ww_pgd_blend_eta,
                     cayley_eta=config.ww_pgd_cayley_eta,
                     min_tail=config.ww_pgd_min_tail,
+                    log_layer_stats=config.ww_pgd_log_alpha,
                 ),
                 num_epochs=config.epochs,
                 model=model,  # the FULL model, NOT the train_model view
+                csv_path=ww_pgd_csv_path,
             )
         )
         logger.info("WW-PGD spectral tail-projection ENABLED (epoch-boundary).")
+        if config.ww_pgd_log_alpha:
+            logger.info(f"WW-PGD alpha trajectory logging -> {ww_pgd_csv_path}")
 
     start = time.time()
     # DECISION plan_2026-06-20_88705c63/D-005: in self-iterate mode pass
@@ -1661,6 +1678,12 @@ def parse_arguments() -> argparse.Namespace:
         help="Enable WW-PGD spectral tail-projection at epoch boundaries (default OFF).",
     )
     parser.add_argument(
+        "--ww-pgd-log-alpha", action="store_true",
+        help="Log a per-epoch, per-layer power-law alpha trajectory CSV "
+             "(ww_pgd_layer_alpha.csv) to the experiment dir. Implies --ww-pgd "
+             "(turns on the projection if not already set). Default OFF.",
+    )
+    parser.add_argument(
         "--init-from", type=str, default=None,
         help="Warm-start model weights from a saved .keras checkpoint before training. "
              "Primary use: self-iterate FINE-TUNING on top of a normally-trained "
@@ -1749,6 +1772,7 @@ def main():
             self_iterate_regen_freq=1,
             self_iterate_mix_ratio=args.self_iterate_mix_ratio,
             ww_pgd=args.ww_pgd,
+            ww_pgd_log_alpha=args.ww_pgd_log_alpha,
             init_from=args.init_from,
             viz_freq=1,
             viz_samples=args.viz_samples,
@@ -1788,6 +1812,7 @@ def main():
             self_iterate_regen_freq=args.self_iterate_regen_freq,
             self_iterate_mix_ratio=args.self_iterate_mix_ratio,
             ww_pgd=args.ww_pgd,
+            ww_pgd_log_alpha=args.ww_pgd_log_alpha,
             init_from=args.init_from,
             max_train_files=args.max_train_files or 10000,
             max_val_files=args.max_val_files or 500,
@@ -1798,6 +1823,11 @@ def main():
             output_dir=args.output_dir,
             experiment_name=args.experiment_name,
         )
+
+    # --ww-pgd-log-alpha implies --ww-pgd: enabling the alpha trajectory log turns
+    # on the projection it instruments (so the flag is usable standalone).
+    if config.ww_pgd_log_alpha:
+        config.ww_pgd = True
 
     logger.info(
         f"Config: variant={config.variant} ({config.convnext_version}), "
