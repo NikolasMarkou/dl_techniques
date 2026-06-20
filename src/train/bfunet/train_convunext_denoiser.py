@@ -120,6 +120,7 @@ from train.common import (
 from train.superpoint.homographic_adaptation import select_weighted_image_paths
 from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.metrics.ssim_metric import SsimMetric
+from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.utils.logger import logger
 from dl_techniques.optimization import (
     optimizer_builder,
@@ -211,6 +212,11 @@ class TrainingConfig:
     # non-monotonic (it rises as the schedule ramps difficulty), so EarlyStopping on val_loss
     # fires prematurely and cuts training short. ModelCheckpoint still saves best_model.keras.
     early_stopping_patience: int = -1
+
+    # Analysis (ModelAnalyzer, data-free weight + spectral). Default OFF (opt-in).
+    enable_analyzer: bool = False
+    analyzer_freq: int = 10        # run every N epochs
+    analyzer_start_epoch: int = 1  # first epoch to analyze
 
     # Output
     output_dir: str = "results"
@@ -928,6 +934,23 @@ def train(config: TrainingConfig) -> keras.Model:
     logger.info(f"Model compiled with {model.count_params():,} parameters")
 
     disable_early_stopping = config.early_stopping_patience <= 0
+    # ModelAnalyzer (opt-in): data-free weight + spectral analysis at the epoch cadence.
+    # Calibration / information-flow / training-dynamics are data-dependent and
+    # classification-oriented, so they are OFF for this image-to-image denoiser. The
+    # EpochAnalyzerCallback attaches to the fitted model (the single-output training view
+    # when expose_bottleneck is on), which shares all weights with the full model.
+    analyzer_config = (
+        AnalysisConfig(
+            analyze_weights=True,
+            analyze_spectral=True,
+            analyze_calibration=False,
+            analyze_information_flow=False,
+            analyze_training_dynamics=False,
+            verbose=False,
+        )
+        if config.enable_analyzer
+        else None
+    )
     callbacks, _ = create_common_callbacks(
         model_name=config.experiment_name,
         results_dir_prefix="convunext_denoiser",
@@ -936,7 +959,10 @@ def train(config: TrainingConfig) -> keras.Model:
         patience=config.early_stopping_patience if not disable_early_stopping else 1,
         use_lr_schedule=True,
         include_tensorboard=True,
-        include_analyzer=False,
+        include_analyzer=config.enable_analyzer,
+        analyzer_config=analyzer_config,
+        analyzer_start_epoch=config.analyzer_start_epoch,
+        analyzer_epoch_frequency=config.analyzer_freq,
     )
     if disable_early_stopping:
         # Curriculum learning makes val_loss non-monotonic, so early stopping on it would
@@ -1045,6 +1071,10 @@ def parse_arguments() -> argparse.Namespace:
                         help="Enable the Laplacian-pyramid downsample/skip path (default OFF)")
     parser.add_argument("--expose-bottleneck", action="store_true",
                         help="Expose the bottleneck latent as an optional second model output (default OFF)")
+    parser.add_argument("--analyzer", action="store_true",
+                        help="Run ModelAnalyzer (data-free weight + spectral) during training (default OFF)")
+    parser.add_argument("--analyzer-freq", type=int, default=10,
+                        help="Run the analyzer every N epochs (with --analyzer)")
     parser.add_argument("--gabor-filters", type=int, default=32)
     parser.add_argument("--sigma-max-start", type=float, default=0.05)
     parser.add_argument("--sigma-max-end", type=float, default=0.5)
@@ -1093,6 +1123,8 @@ def main():
             use_gabor_stem=not args.no_gabor_stem,
             use_laplacian_pyramid=args.laplacian_pyramid,
             expose_bottleneck=args.expose_bottleneck,
+            enable_analyzer=args.analyzer,
+            analyzer_freq=args.analyzer_freq,
             gabor_filters=8,
             epochs=2,
             curriculum_epochs=2,
@@ -1124,6 +1156,8 @@ def main():
             use_gabor_stem=not args.no_gabor_stem,
             use_laplacian_pyramid=args.laplacian_pyramid,
             expose_bottleneck=args.expose_bottleneck,
+            enable_analyzer=args.analyzer,
+            analyzer_freq=args.analyzer_freq,
             gabor_filters=args.gabor_filters,
             enable_deep_supervision=args.deep_supervision,
             epochs=args.epochs,
