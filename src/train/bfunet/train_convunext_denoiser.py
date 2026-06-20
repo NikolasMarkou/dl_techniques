@@ -116,6 +116,7 @@ from train.common import (
     save_config_json,
     collect_image_paths,
     augment_patch,
+    set_seeds,
 )
 from train.superpoint.homographic_adaptation import select_weighted_image_paths
 from dl_techniques.metrics.psnr_metric import PsnrMetric
@@ -1185,6 +1186,8 @@ def train(config: TrainingConfig) -> keras.Model:
     output_dir = Path(config.output_dir) / config.experiment_name
     output_dir.mkdir(parents=True, exist_ok=True)
     save_config_json(config, str(output_dir), "config.json")
+
+    set_seeds(config.seed)  # reproducible weight init (H8)
 
     # Live, curriculum-controlled upper bound for the noise-sigma sampling range.
     sigma_max_var = tf.Variable(
