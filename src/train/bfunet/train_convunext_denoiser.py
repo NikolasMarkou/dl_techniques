@@ -1097,6 +1097,7 @@ def train(config: TrainingConfig) -> keras.Model:
                 val_batch=viz_batch,
                 output_dir=output_dir / "visualizations",  # share the existing viz dir
                 monitor_freq=config.viz_freq,
+                max_featuremap_channels=64,  # two 8x8 grids: first-64 + top-64 energy
             )
         )
 
