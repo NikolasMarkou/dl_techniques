@@ -332,6 +332,7 @@ def create_convunext_denoiser(
         gabor_kernel_size: Union[int, Tuple[int, int]] = 7,
         use_laplacian_pyramid: bool = False,
         laplacian_kernel_size: Tuple[int, int] = (5, 5),
+        expose_bottleneck: bool = False,
         block_kernel_size: Union[int, Tuple[int, int]] = 7,
         drop_path_rate: float = 0.1,
         final_activation: Union[str, callable] = 'linear',
@@ -406,6 +407,14 @@ def create_convunext_denoiser(
             Contributes zero trainable parameters (the blur kernel is fixed).
         laplacian_kernel_size: Tuple of two ints, Gaussian blur kernel size for the
             Laplacian pyramid split. Only used when use_laplacian_pyramid=True. Defaults to (5, 5).
+        expose_bottleneck: Boolean, if True expose the deepest-encoder bottleneck latent
+            as an additional, trailing model output. The model's call then returns
+            `[denoised, ..., bottleneck]` (bottleneck LAST), where `bottleneck` has spatial
+            `H/2**depth, W/2**depth` and `initial_filters * filter_multiplier**depth` channels.
+            A zero-parameter linear `Activation('linear', name='bottleneck')` tap is inserted
+            after the bottleneck blocks (bias-free, on the denoiser path). Defaults to False
+            (byte-identical to the original single-output architecture). Useful for secondary /
+            multi-task heads and debugging.
         block_kernel_size: Integer or tuple, size of block kernels. Defaults to 7.
         drop_path_rate: Float, stochastic depth drop probability. Defaults to 0.1.
         final_activation: String or callable, final activation function. Defaults to 'linear'.
@@ -418,6 +427,8 @@ def create_convunext_denoiser(
         keras.Model: ConvUNext model ready for training.
                     - If deep_supervision=False: Single output tensor
                     - If deep_supervision=True: List of output tensors [final_output, intermediate_outputs...]
+                    - If expose_bottleneck=True: the outputs list gains a trailing `bottleneck`
+                      output (LAST), i.e. [final_output, ...(supervision if DS)..., bottleneck].
 
     Raises:
         ValueError: If depth is less than 3, initial_filters is non-positive,
@@ -606,6 +617,14 @@ def create_convunext_denoiser(
             name=f'bottleneck_convnext_{convnext_version}_block_{block_idx}',
         )
 
+    # Optional bottleneck tap: a zero-parameter linear (bias-free) marker on the deepest
+    # latent so it can be exposed as an additional output and extracted post-hoc. Placed
+    # on the denoiser path (the decoder continues from it), so the named layer is retained
+    # even in a single-output save. No-op when expose_bottleneck is False.
+    if expose_bottleneck:
+        x = keras.layers.Activation('linear', name='bottleneck')(x)
+        bottleneck_output = x
+
     # =========================================================================
     # DECODER PATH (Expanding) with Deep Supervision
     # =========================================================================
@@ -727,6 +746,8 @@ def create_convunext_denoiser(
         # Order supervision outputs from shallowest to deepest (by resolution)
         ordered_supervision_outputs = list(reversed(deep_supervision_outputs))
         all_outputs = [final_output] + ordered_supervision_outputs
+        if expose_bottleneck:
+            all_outputs = all_outputs + [bottleneck_output]
 
         logger.info(f"Created ConvUNext deep supervision model with {len(all_outputs)} outputs:")
         logger.info(f"  - Final output (index 0): {final_output.shape}")
@@ -743,11 +764,18 @@ def create_convunext_denoiser(
 
     else:
         # Single output model (standard U-Net or inference model)
-        model = keras.Model(
-            inputs=inputs,
-            outputs=final_output,
-            name=model_name
-        )
+        if expose_bottleneck:
+            model = keras.Model(
+                inputs=inputs,
+                outputs=[final_output, bottleneck_output],
+                name=model_name
+            )
+        else:
+            model = keras.Model(
+                inputs=inputs,
+                outputs=final_output,
+                name=model_name
+            )
 
         logger.info(f"Created single-output ConvUNext model")
 
