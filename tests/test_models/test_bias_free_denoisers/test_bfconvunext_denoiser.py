@@ -22,6 +22,8 @@ from dl_techniques.models.bias_free_denoisers.bfconvunext import (
     create_convunext_variant,
     CONVUNEXT_CONFIGS,
 )
+from dl_techniques.layers.convnext_v1_block import ConvNextV1Block
+from dl_techniques.layers.convnext_v2_block import ConvNextV2Block
 
 
 # ---------------------------------------------------------------------
@@ -187,6 +189,101 @@ class TestCreateConvUNextDenoiser:
             keras.ops.convert_to_numpy(y_after),
             atol=1e-4,
             err_msg="Outputs differ after .keras round-trip"
+        )
+
+
+# ---------------------------------------------------------------------
+# Depthwise init/regularizer factory pass-through (SC5 / F3)
+# ---------------------------------------------------------------------
+
+def _find_convnext_blocks(model: keras.Model):
+    """Return all ConvNextV1Block/ConvNextV2Block instances in the model."""
+    blocks = []
+    stack = list(model.layers)
+    while stack:
+        layer = stack.pop()
+        if isinstance(layer, (ConvNextV1Block, ConvNextV2Block)):
+            blocks.append(layer)
+        # recurse into nested layer-bearing layers (defensive; the factory is functional)
+        nested = getattr(layer, 'layers', None)
+        if nested:
+            stack.extend(nested)
+    return blocks
+
+
+class TestDepthwisePassThrough:
+    """SC5: depthwise_initializer/regularizer thread from the factory into every block.
+
+    Also guards F3: the default factory build must NOT inject a non-None depthwise
+    init/reg (the orthonormal knob must leave the default model byte-identical).
+    """
+
+    def _build(self, input_shape, version, **overrides) -> keras.Model:
+        cfg = dict(
+            input_shape=input_shape,
+            depth=3,
+            initial_filters=8,
+            blocks_per_level=1,
+            convnext_version=version,
+            drop_path_rate=0.0,
+        )
+        cfg.update(overrides)
+        return create_convunext_denoiser(**cfg)
+
+    @pytest.mark.parametrize("version", ["v2", "v1"])
+    def test_override_reaches_blocks(self, input_shape, version) -> None:
+        init = keras.initializers.Orthogonal(gain=1.0)
+        reg = keras.regularizers.L2(1e-4)
+        model = self._build(
+            input_shape, version,
+            depthwise_initializer=init,
+            depthwise_regularizer=reg,
+        )
+
+        # builds + forward-passes
+        x = np.random.rand(2, *input_shape).astype(np.float32)
+        y = model(x)
+        assert y.shape == (2, *input_shape)
+        assert not np.any(np.isnan(keras.ops.convert_to_numpy(y)))
+
+        # the override actually reached the blocks (proves no call-site was missed)
+        blocks = _find_convnext_blocks(model)
+        assert len(blocks) > 0, "no ConvNeXt blocks found in the model"
+        for blk in blocks:
+            assert isinstance(blk.depthwise_initializer, keras.initializers.Orthogonal)
+            assert isinstance(blk.depthwise_regularizer, keras.regularizers.L2)
+
+    @pytest.mark.parametrize("version", ["v2", "v1"])
+    def test_default_unchanged(self, input_shape, version) -> None:
+        # F3: the factory default must NOT inject a non-None depthwise init/reg.
+        model = self._build(input_shape, version)
+        blocks = _find_convnext_blocks(model)
+        assert len(blocks) > 0, "no ConvNeXt blocks found in the model"
+        for blk in blocks:
+            assert blk.depthwise_initializer is None
+            assert blk.depthwise_regularizer is None
+
+    def test_override_keras_round_trip(self, tmp_path, input_shape) -> None:
+        init = keras.initializers.Orthogonal(gain=1.0)
+        reg = keras.regularizers.L2(1e-4)
+        model = self._build(
+            input_shape, "v2",
+            depthwise_initializer=init,
+            depthwise_regularizer=reg,
+        )
+        x = np.random.rand(2, *input_shape).astype(np.float32)
+        y_before = model(x)
+
+        save_path = os.path.join(str(tmp_path), 'bfconvunext_dw.keras')
+        model.save(save_path)
+        loaded = keras.models.load_model(save_path)
+        y_after = loaded(x)
+
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(y_before),
+            keras.ops.convert_to_numpy(y_after),
+            atol=1e-4,
+            err_msg="Outputs differ after .keras round-trip (depthwise override)"
         )
 
 

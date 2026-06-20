@@ -233,6 +233,8 @@ def _apply_residual_convnext_block(
         drop_path_rate: float,
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]],
         name: str,
+        depthwise_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
+        depthwise_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
 ) -> keras.KerasTensor:
     """Apply a ConvNeXt block as a RESIDUAL branch with stochastic depth.
 
@@ -268,6 +270,8 @@ def _apply_residual_convnext_block(
         spatial_dropout_rate=0.0,
         gamma_initial_value=1e-4,  # LayerScale init (floored at GAMMA_MIN_VALUE=1e-6, can't die)
         kernel_regularizer=kernel_regularizer,
+        depthwise_initializer=depthwise_initializer,
+        depthwise_regularizer=depthwise_regularizer,
         name=name,
     )(x)
     if drop_path_rate and drop_path_rate > 0.0:
@@ -343,6 +347,8 @@ def create_convunext_denoiser(
         # the activation norm and stays bias-free (a linear, homogeneous map).
         kernel_initializer: Union[str, keras.initializers.Initializer] = 'orthogonal',
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+        depthwise_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
+        depthwise_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         enable_deep_supervision: bool = False,
         supervision_norm_scale: bool = True,
         supervision_norm_center: bool = False,
@@ -422,6 +428,17 @@ def create_convunext_denoiser(
         final_activation: String or callable, final activation function. Defaults to 'linear'.
         kernel_initializer: String or Initializer, weight initializer. Defaults to 'orthogonal'.
         kernel_regularizer: String or Regularizer, weight regularizer. Defaults to None.
+        depthwise_initializer: Optional String or Initializer, applied to the depthwise
+            conv kernel of every ConvNeXt block. Defaults to None, which reproduces the
+            current hardcoded behavior (TruncatedNormal(mean=0.0, stddev=0.02)). For an
+            orthonormal depthwise init pass keras `Orthogonal(gain=1.0)` (unit-norm: a
+            `(K,K,C,1)` depthwise kernel flattens to a single column, so "orthonormal"
+            here means unit-norm). The repo `OrthonormalInitializer`/`HeOrthonormalInitializer`
+            (2D-only) and `OrthogonalHypersphereInitializer` (norm blow-up) are UNSUPPORTED
+            for the depthwise conv. Defaults to None.
+        depthwise_regularizer: Optional String or Regularizer, applied to the depthwise
+            conv kernel of every ConvNeXt block. Defaults to None, which reproduces the
+            current behavior (a deepcopy of `kernel_regularizer`). Defaults to None.
         enable_deep_supervision: Boolean, whether to add deep supervision outputs. Defaults to False.
         supervision_norm_scale: Boolean, whether the deep-supervision head LayerNorm has a
             learnable scale (gamma). Defaults to True.
@@ -581,6 +598,8 @@ def create_convunext_denoiser(
                 x, ConvNextBlock, current_filters, block_kernel_size,
                 current_drop_path, kernel_regularizer,
                 name=f'encoder_level_{level}_convnext_{convnext_version}_block_{block_idx}',
+                depthwise_initializer=depthwise_initializer,
+                depthwise_regularizer=depthwise_regularizer,
             )
 
         # Skip connection + downsample for this level. Under the Laplacian pyramid
@@ -627,6 +646,8 @@ def create_convunext_denoiser(
             x, ConvNextBlock, bottleneck_filters, block_kernel_size,
             drop_path_rate, kernel_regularizer,
             name=f'bottleneck_convnext_{convnext_version}_block_{block_idx}',
+            depthwise_initializer=depthwise_initializer,
+            depthwise_regularizer=depthwise_regularizer,
         )
 
     # Optional bottleneck tap: a zero-parameter linear (bias-free) marker on the deepest
@@ -693,6 +714,8 @@ def create_convunext_denoiser(
                 x, ConvNextBlock, current_filters, block_kernel_size,
                 current_drop_path, kernel_regularizer,
                 name=f'decoder_level_{level}_convnext_{convnext_version}_block_{block_idx}',
+                depthwise_initializer=depthwise_initializer,
+                depthwise_regularizer=depthwise_regularizer,
             )
 
         # =====================================================================
