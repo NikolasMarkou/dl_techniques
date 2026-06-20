@@ -51,6 +51,7 @@ from .muon_optimizer import Muon
 from .sgld_optimizer import SGLD
 from .vsgd_optimizer import VSGD
 from .gefen_optimizer import Gefen
+from .ww_pgd_optimizer import WWTailConfig, ww_pgd_project, WWPGDProjectionCallback
 
 __all__ = [
     "optimizer_builder",
@@ -60,4 +61,7 @@ __all__ = [
     "SGLD",
     "VSGD",
     "Gefen",
+    "WWTailConfig",
+    "ww_pgd_project",
+    "WWPGDProjectionCallback",
 ]
