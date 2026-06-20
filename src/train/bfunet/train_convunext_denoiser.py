@@ -1407,10 +1407,28 @@ def train(config: TrainingConfig) -> keras.Model:
         )
 
     start = time.time()
+    # DECISION plan_2026-06-20_88705c63/D-005: in self-iterate mode pass
+    # steps_per_epoch=None to model.fit. The self-iterate train_ds is a FINITE
+    # `from_generator` pool dataset sized to exactly `steps_per_epoch` batches
+    # (no `.repeat()`). Passing `steps_per_epoch` alongside a finite dataset makes
+    # Keras pull that many batches in epoch 1, EXHAUST the dataset, then hit
+    # OUT_OF_RANGE ("input ran out of data") with loss=0.0 in epoch 2+ -- only
+    # epoch 1 trains (the Bug-B smoke regression). With steps_per_epoch=None Keras
+    # consumes the full finite dataset each epoch via a FRESH per-epoch iterator,
+    # which BOTH fixes the exhaustion AND is exactly the fresh-iterator condition
+    # the D-004 pool re-read mechanism depends on (the callback's in-place pool
+    # mutation is re-read next epoch). Do NOT "fix" this with `.repeat()` on the
+    # pool dataset: `.repeat()` keeps ONE iterator alive across epochs (spike
+    # TEST-5 "same iter" stayed STALE), so callback pool mutations would NOT be
+    # re-read -> silently breaks regeneration. The OFF path is unchanged: it keeps
+    # passing its `steps_per_epoch` exactly as before. The `steps_per_epoch` value
+    # is still used above for the LR decay_steps/warmup_steps math in BOTH modes.
+    # validation_steps governs the val side independently of this arg. See D-005.
+    fit_steps_per_epoch = None if config.self_iterate else steps_per_epoch
     history = train_model.fit(
         train_ds,
         epochs=config.epochs,
-        steps_per_epoch=steps_per_epoch,
+        steps_per_epoch=fit_steps_per_epoch,
         validation_data=val_ds,
         validation_steps=validation_steps,
         callbacks=callbacks,

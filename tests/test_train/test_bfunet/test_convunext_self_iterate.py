@@ -51,6 +51,7 @@ from train.bfunet.train_convunext_denoiser import (
     denoise_k_passes,
     multi_pass_psnr,
 )
+from dl_techniques.callbacks.self_iterate_pool import SelfIteratePoolCallback
 
 # Commit immediately BEFORE plan_2026-06-20_88705c63 (the pre-self-iterate
 # trainer). The OFF-path streaming logic must match this baseline byte-for-byte
@@ -401,6 +402,130 @@ def test_self_iterate_rejects_pool_smaller_than_batch():
             self_iterate=True,
             self_iterate_pool_size=4,  # < batch_size
         )
+
+
+# ---------------------------------------------------------------------
+# D-005 (Bug-B) -- self-iterate fit must train >=2 epochs + re-read pool
+# ---------------------------------------------------------------------
+
+
+class _BatchCounter(keras.callbacks.Callback):
+    """Records, per epoch, how many train batches model.fit actually ran.
+
+    The Bug-B (D-005) failure was: with a FINITE pool dataset passed to fit
+    ALONGSIDE steps_per_epoch, Keras exhausted the dataset in epoch 1 and ran
+    ZERO batches in epoch 2+ (OUT_OF_RANGE, loss=0.0). Counting on_train_batch_end
+    per epoch makes that regression directly observable: the fixed call shape
+    (steps_per_epoch=None) must yield >0 batches in BOTH epochs.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.per_epoch_batches: list[int] = []
+        self._cur = 0
+
+    def on_epoch_begin(self, epoch, logs=None) -> None:
+        self._cur = 0
+
+    def on_train_batch_end(self, batch, logs=None) -> None:
+        self._cur += 1
+
+    def on_epoch_end(self, epoch, logs=None) -> None:
+        self.per_epoch_batches.append(self._cur)
+
+
+def test_self_iterate_trains_multiple_epochs_and_pool_reread():
+    """D-005 regression: self-iterate fit trains >=2 epochs + re-reads pool.
+
+    This is the direct guard for Bug-B. We reproduce the FIXED trainer call shape
+    (finite from_generator pool dataset + steps_per_epoch=None) end-to-end on tiny
+    synthetic data, with the REAL SelfIteratePoolCallback mutating the SAME live
+    pool arrays the dataset indexes. We assert:
+
+      (a) the batch-counter saw >0 batches in BOTH epoch 1 AND epoch 2 (the
+          pre-fix bug gave 0 in epoch 2 -- this is the load-bearing assertion);
+      (b) the pool callback regenerated in BOTH epochs (history len == 2);
+      (c) the live `current_input` buffer actually changed across the two epoch
+          regenerations (the pool was re-read / mutated each epoch, not snapshotted).
+
+    No real data, no disk -- synthetic [-1,1] arrays only; tiny conv model so the
+    suite stays GPU1-light and non-flaky.
+    """
+    set_seeds(SEED)
+    pool_size, batch = 16, 4
+    config = _pool_config(pool_size=pool_size, batch=batch)  # steps_per_epoch=4
+
+    rng = np.random.default_rng(0)
+    clean_pool = rng.uniform(
+        -1.0, 1.0, size=(pool_size, PATCH, PATCH, CHANNELS)
+    ).astype(np.float32)
+    current_input = np.clip(
+        clean_pool + rng.normal(size=clean_pool.shape).astype(np.float32) * 0.1,
+        -1.0, 1.0,
+    ).astype(np.float32)
+
+    ds, steps_per_epoch = create_self_iterate_dataset(
+        clean_pool, current_input, config
+    )
+    assert steps_per_epoch == pool_size // batch  # 4
+
+    model = keras.Sequential(
+        [keras.Input(shape=(PATCH, PATCH, CHANNELS)),
+         keras.layers.Conv2D(CHANNELS, 1, padding="same")]
+    )
+    model.compile(optimizer="adam", loss="mse")
+
+    # Real callback over the SAME live arrays the dataset indexes (regen every
+    # epoch, mix half). get_sigma is a fixed small sigma for determinism.
+    pool_cb = SelfIteratePoolCallback(
+        clean_pool=clean_pool,
+        current_input=current_input,
+        get_sigma=lambda: 0.1,
+        regen_freq=1,
+        mix_ratio=0.5,
+        predict_batch_size=batch,
+        seed=SEED,
+    )
+    counter = _BatchCounter()
+
+    # Snapshot the pool BEFORE training (initial state).
+    snap_pre = current_input.copy()
+
+    # FIXED trainer call shape: finite pool dataset + steps_per_epoch=None so Keras
+    # consumes the whole finite dataset each epoch via a fresh per-epoch iterator.
+    model.fit(
+        ds,
+        epochs=2,
+        steps_per_epoch=None,
+        callbacks=[pool_cb, counter],
+        verbose=0,
+    )
+
+    # (a) BOTH epochs trained on batches. The pre-fix bug gave 0 in epoch 2.
+    assert len(counter.per_epoch_batches) == 2, counter.per_epoch_batches
+    assert counter.per_epoch_batches[0] > 0, (
+        f"epoch-1 ran zero batches: {counter.per_epoch_batches}"
+    )
+    assert counter.per_epoch_batches[1] > 0, (
+        "epoch-2 ran ZERO batches -- Bug-B (D-005) regression: finite pool "
+        f"dataset exhausted after epoch 1. per_epoch={counter.per_epoch_batches}"
+    )
+    # Both epochs consume the same finite pool -> equal batch counts == steps.
+    assert counter.per_epoch_batches[0] == steps_per_epoch
+    assert counter.per_epoch_batches[1] == steps_per_epoch
+
+    # (b) The callback regenerated the pool in BOTH epochs.
+    assert len(pool_cb.history["epoch"]) == 2, pool_cb.history
+    # Two distinct regeneration records (sanity: mean_residual recorded twice).
+    assert len(pool_cb.history["mean_residual"]) == 2
+
+    # (c) The live pool buffer actually changed across the run (re-read + mutated
+    # each epoch, NOT snapshotted into a graph constant). Robust difference check,
+    # no bitwise cross-run assumption.
+    assert float(np.max(np.abs(current_input - snap_pre))) > 0.0, (
+        "pool current_input did not change -- regeneration never mutated the "
+        "live buffer (A1/D-004 re-read broke)."
+    )
 
 
 # ---------------------------------------------------------------------
