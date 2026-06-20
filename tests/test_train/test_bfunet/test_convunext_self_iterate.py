@@ -52,6 +52,8 @@ from train.bfunet.train_convunext_denoiser import (
     build_model,
     denoise_k_passes,
     multi_pass_psnr,
+    parse_arguments,
+    _resolve_depthwise_initializer,
 )
 from dl_techniques.callbacks.self_iterate_pool import SelfIteratePoolCallback
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
@@ -611,3 +613,65 @@ def test_init_from_missing_file_raises(tmp_path):
 def test_init_from_field_default_is_none():
     """Default config does not warm-start (byte-identical to pre-feature)."""
     assert TrainingConfig().init_from is None
+
+
+# ---------------------------------------------------------------------
+# SC6 -- depthwise init/regularizer trainer wiring (config + helper)
+# ---------------------------------------------------------------------
+
+
+class TestDepthwiseTrainerWiring:
+    """SC6: --depthwise-initializer / --depthwise-l2 opt-in wiring.
+
+    Pure config + helper logic -- no GPU/training. Covers the
+    _resolve_depthwise_initializer alias (D-002), the TrainingConfig field
+    round-trip, the byte-identical OFF default, and (cheaply) the argparse->
+    config propagation via the importable parse_arguments() entry point.
+    """
+
+    def test_resolve_orthonormal_alias(self):
+        """'orthonormal' -> keras Orthogonal(gain=1.0) (D-002)."""
+        init = _resolve_depthwise_initializer("orthonormal")
+        assert isinstance(init, keras.initializers.Orthogonal)
+        assert float(init.gain) == 1.0
+
+    def test_resolve_none_is_none(self):
+        """None -> None (OFF, byte-identical)."""
+        assert _resolve_depthwise_initializer(None) is None
+
+    def test_resolve_other_string_passthrough(self):
+        """Any other string passes through unchanged for keras.initializers.get."""
+        assert _resolve_depthwise_initializer("he_normal") == "he_normal"
+
+    def test_config_fields_round_trip(self):
+        """TrainingConfig stores the two new fields verbatim."""
+        cfg = TrainingConfig(
+            depthwise_initializer="orthonormal",
+            depthwise_l2=1e-4,
+        )
+        assert cfg.depthwise_initializer == "orthonormal"
+        assert cfg.depthwise_l2 == 1e-4
+
+    def test_config_defaults_are_off(self):
+        """Default config leaves both fields None (byte-identical OFF path)."""
+        cfg = TrainingConfig()
+        assert cfg.depthwise_initializer is None
+        assert cfg.depthwise_l2 is None
+
+    def test_argparse_maps_into_config(self, monkeypatch):
+        """parse_arguments() picks up the two new flags from argv.
+
+        parse_arguments() reads sys.argv via parser.parse_args(); patch argv and
+        confirm the parsed args carry the values that the smoke/normal config
+        blocks propagate into TrainingConfig.
+        """
+        argv = [
+            "train_convunext_denoiser",
+            "--smoke",
+            "--depthwise-initializer", "orthonormal",
+            "--depthwise-l2", "1e-4",
+        ]
+        monkeypatch.setattr("sys.argv", argv)
+        args = parse_arguments()
+        assert args.depthwise_initializer == "orthonormal"
+        assert args.depthwise_l2 == 1e-4

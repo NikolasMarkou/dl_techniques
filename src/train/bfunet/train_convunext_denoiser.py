@@ -207,6 +207,14 @@ class TrainingConfig:
     use_laplacian_pyramid: bool = False
     enable_deep_supervision: bool = False
     expose_bottleneck: bool = False
+    # Opt-in depthwise-kernel init/regularization pass-through (plan_2026-06-20_353a3a76).
+    # Both default None -> OFF, byte-identical to the pre-feature model (the blocks fall
+    # back to their hardcoded TruncatedNormal(0,0.02) init + deepcopy(kernel_regularizer)).
+    # depthwise_initializer: a keras init name; the alias 'orthonormal' maps to
+    # Orthogonal(gain=1.0) via _resolve_depthwise_initializer (D-002). depthwise_l2: L2
+    # weight on the depthwise kernels; None=off, else wired to keras.regularizers.L2.
+    depthwise_initializer: Optional[str] = None
+    depthwise_l2: Optional[float] = None
 
     # Training
     batch_size: int = 16
@@ -646,6 +654,21 @@ def create_self_iterate_dataset(
 # ---------------------------------------------------------------------
 
 
+def _resolve_depthwise_initializer(name: Optional[str]):
+    """Resolve the trainer's --depthwise-initializer string to an initializer.
+
+    'orthonormal' -> keras.initializers.Orthogonal(gain=1.0) (the verified
+    orthonormal path for a depthwise (K,K,C,1) kernel; unit-norm). None -> None
+    (OFF, byte-identical). Any other string passes through unchanged for
+    keras.initializers.get() resolution inside the block.
+    """
+    if name is None:
+        return None
+    if name == "orthonormal":
+        return keras.initializers.Orthogonal(gain=1.0)
+    return name
+
+
 def build_model(config: TrainingConfig) -> keras.Model:
     """Build the bias-free ConvNeXt denoiser from the variant config."""
     cfg = CONVUNEXT_CONFIGS[config.variant].copy()
@@ -662,6 +685,11 @@ def build_model(config: TrainingConfig) -> keras.Model:
         expose_bottleneck=config.expose_bottleneck,
         final_activation="linear",  # MUST stay linear: bias-free homogeneity f(ax)=a*f(x)
         model_name=f"convunext_denoiser_{config.variant}",
+        depthwise_initializer=_resolve_depthwise_initializer(config.depthwise_initializer),
+        depthwise_regularizer=(
+            keras.regularizers.L2(config.depthwise_l2)
+            if config.depthwise_l2 is not None else None
+        ),
         **cfg,
     )
 
@@ -1691,6 +1719,20 @@ def parse_arguments() -> argparse.Namespace:
              "laplacian) must match the checkpoint. Default: random init.",
     )
     parser.add_argument(
+        "--depthwise-initializer", type=str, default=None,
+        help="Opt-in initializer for the ConvNeXt depthwise kernels. The alias "
+             "'orthonormal' maps to keras Orthogonal(gain=1.0) (unit-norm on the "
+             "(K,K,C,1) depthwise shape); any other value passes through to "
+             "keras.initializers.get(). Default None = byte-identical OFF "
+             "(blocks keep their hardcoded TruncatedNormal(0,0.02)).",
+    )
+    parser.add_argument(
+        "--depthwise-l2", type=float, default=None,
+        help="Opt-in L2 weight on the ConvNeXt depthwise kernels (wired to "
+             "keras.regularizers.L2). Default None = off (blocks keep their "
+             "deepcopy(kernel_regularizer) default).",
+    )
+    parser.add_argument(
         "--smoke", action="store_true",
         help="Tiny end-to-end mechanism check (few steps/epochs, constant LR).",
     )
@@ -1774,6 +1816,8 @@ def main():
             ww_pgd=args.ww_pgd,
             ww_pgd_log_alpha=args.ww_pgd_log_alpha,
             init_from=args.init_from,
+            depthwise_initializer=args.depthwise_initializer,
+            depthwise_l2=args.depthwise_l2,
             viz_freq=1,
             viz_samples=args.viz_samples,
             output_dir=args.output_dir,
@@ -1814,6 +1858,8 @@ def main():
             ww_pgd=args.ww_pgd,
             ww_pgd_log_alpha=args.ww_pgd_log_alpha,
             init_from=args.init_from,
+            depthwise_initializer=args.depthwise_initializer,
+            depthwise_l2=args.depthwise_l2,
             max_train_files=args.max_train_files or 10000,
             max_val_files=args.max_val_files or 500,
             steps_per_epoch=args.steps_per_epoch,
