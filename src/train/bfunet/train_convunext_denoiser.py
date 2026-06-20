@@ -283,12 +283,12 @@ class TrainingConfig:
                 # Self-iterate is theory-bound to additive Gaussian noise: the Miyasawa
                 # residual=score identity (and the clean-image fixed point it implies)
                 # holds for additive noise ONLY; multiplicative/composite break the
-                # linear-domain identity (D-003/D-006, research/miyasawas_theorem.md).
+                # linear-domain identity (D-003, research/miyasawas_theorem.md).
                 raise ValueError(
                     "self_iterate requires noise_type='additive'; got "
                     f"{self.noise_type!r}. Multiplicative/composite noise breaks the "
                     "additive-only Miyasawa fixed-point theory the self-iterate "
-                    "mechanism depends on (D-003/D-006)."
+                    "mechanism depends on (D-003)."
                 )
 
 
