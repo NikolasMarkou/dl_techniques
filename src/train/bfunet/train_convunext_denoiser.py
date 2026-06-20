@@ -199,7 +199,7 @@ class TrainingConfig:
     lr_schedule_type: str = "cosine_decay"
     warmup_epochs: Optional[int] = None  # None -> 10% of epochs (see __post_init__)
     gradient_clipping: float = 1.0
-    early_stopping_patience: int = 15
+    early_stopping_patience: int = 25
 
     # Output
     output_dir: str = "results"
