@@ -1202,9 +1202,20 @@ def train(config: TrainingConfig) -> keras.Model:
         f"Sourced {len(train_paths)} train / {len(val_paths)} val image paths"
     )
 
-    # Validation pipeline is identical in BOTH branches (streaming, additive/curriculum
+    # Validation pipeline is identical in BOTH branches (streaming, fixed-sigma
     # noise on a fixed val set); only the TRAIN source differs.
-    val_ds = create_dataset(val_paths, config, noise_fn, is_training=False)
+    # DECISION plan_2026-06-20_0433c2f2/D-001: validation noise is decoupled from the
+    # curriculum. The training noise_fn reads the live, per-epoch-widened sigma_max_var,
+    # which makes val_loss non-stationary -> ModelCheckpoint(monitor=val_loss) froze
+    # best_model.keras near epoch 0 (audit H1). A separate FIXED-sigma Variable (never
+    # .assign()-ed, not handed to NoiseSigmaCurriculumCallback) gives a stationary val
+    # objective so the checkpoint tracks true denoising quality. Kept monitor=val_loss/min
+    # (do NOT switch to val_psnr: create_callbacks forces mode=min unless 'accuracy' in name).
+    sigma_fixed_var = tf.Variable(
+        config.sigma_max_end, dtype=tf.float32, trainable=False, name="sigma_fixed_val"
+    )
+    val_noise_fn = make_curriculum_noise_fn(config, sigma_fixed_var)
+    val_ds = create_dataset(val_paths, config, val_noise_fn, is_training=False)
     validation_steps = config.validation_steps or max(
         10, len(val_paths) // config.batch_size
     )
