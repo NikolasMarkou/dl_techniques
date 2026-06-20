@@ -123,6 +123,7 @@ from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.metrics.ssim_metric import SsimMetric
 from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.utils.logger import logger
+from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.utils.multiplicative_miyasawa import (
     apply_multiplicative_gaussian,
@@ -657,6 +658,8 @@ def verify_bias_free(model: keras.Model) -> None:
             layer, "center", False
         ):
             offenders.append(f"{layer.name} (LN center=True)")
+        if isinstance(layer, GlobalResponseNormalization) and getattr(layer, "beta", None) is not None and layer.beta.trainable:
+            offenders.append(f"{layer.name} (GRN beta - bias-like offset)")
     if offenders:
         logger.warning(
             f"Bias-free check: {len(offenders)} layer(s) carry bias/centering "
@@ -751,6 +754,9 @@ def render_training_dashboard(history: dict, out_path: Path, title: str = "") ->
     plt.close(fig)
 
 
+# NOTE: batch-global RMSE PSNR (one RMSE over the whole batch). This intentionally
+# differs from the per-image PsnrMetric used in training logs (which averages per-image
+# PSNR), so eval-grid numbers will not match the val_psnr logged during fit.
 def _mean_psnr(pred, clean) -> float:
     """Mean PSNR (dB) of ``pred`` vs ``clean`` on the [-1,+1] domain (max_val=2.0).
 

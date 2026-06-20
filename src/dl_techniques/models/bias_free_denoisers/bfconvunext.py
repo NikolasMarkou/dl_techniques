@@ -418,7 +418,7 @@ def create_convunext_denoiser(
         block_kernel_size: Integer or tuple, size of block kernels. Defaults to 7.
         drop_path_rate: Float, stochastic depth drop probability. Defaults to 0.1.
         final_activation: String or callable, final activation function. Defaults to 'linear'.
-        kernel_initializer: String or Initializer, weight initializer. Defaults to 'he_normal'.
+        kernel_initializer: String or Initializer, weight initializer. Defaults to 'orthogonal'.
         kernel_regularizer: String or Regularizer, weight regularizer. Defaults to None.
         enable_deep_supervision: Boolean, whether to add deep supervision outputs. Defaults to False.
         model_name: String, name for the model. Defaults to 'convunext'.
