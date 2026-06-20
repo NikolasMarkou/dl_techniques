@@ -111,7 +111,7 @@ input (H,W,C) in [-1,+1]
  │         ▼ downsample                                            │      │
  │      … (depth levels) …                                         │      │
  │         ▼                                                       │      │
- │   bottleneck ─ [N ConvNeXt blocks]  (optional linear tap §4.4) │      │
+ │   bottleneck ─ [N ConvNeXt blocks]  (optional linear tap §4.3) │      │
  │         ▲ upsample (bilinear) → concat skip → 1x1 adjust        │      │
  │   decoder level 1 ─ [N ConvNeXt blocks] ◄──────────────────────┘      │
  │         ▲ upsample → concat skip0 → 1x1 adjust                         │
@@ -121,13 +121,39 @@ input (H,W,C) in [-1,+1]
 ```
 
 - **Channel progression** doubles per level: `initial_filters · 2^i`. For `base`
-  (`initial_filters=64`, `depth=4`) that is `[64, 128, 256, 512, 1024]`.
+  (`initial_filters=64`, `depth=4`) that is `[64, 128, 256, 512, 1024]` — each
+  halving of spatial resolution is paid for by a doubling of channels, so the
+  per-level tensor budget stays roughly flat while the *receptive field* and
+  *semantic abstraction* climb.
 - **Encoder level** = 1×1 channel-adjust → `blocks_per_level` ConvNeXt blocks →
-  downsample + emit skip.
+  downsample + emit skip. The 1×1 channel-adjust is what makes the residual add
+  inside each ConvNeXt block valid (block in/out channels must match), and it is
+  the *only* place channel count changes — the blocks themselves are
+  channel-preserving.
 - **Decoder level** = bilinear upsample → concat skip → 1×1 channel-adjust →
-  `blocks_per_level` ConvNeXt blocks.
-- **Skip connections** carry the pre-downsample tensor (or the Laplacian high-band,
-  §4.2).
+  `blocks_per_level` ConvNeXt blocks. The concat (not add) fuses the upsampled
+  coarse features with the same-resolution skip, and the following 1×1 mixes the
+  two streams before the blocks refine them.
+- **Skip connections** are the spine of the whole design. Downsampling throws away
+  high-frequency spatial detail; the skips smuggle that detail *around* the
+  bottleneck so the decoder can reconstruct sharp edges that a pure
+  encoder→decoder stack would have blurred away. For a denoiser this matters
+  doubly: the fine detail the skips preserve is exactly the signal that is hardest
+  to tell apart from noise, so the network gets to make that call with full-
+  resolution context in hand. By default a skip carries the *pre-downsample*
+  tensor; with the Laplacian pyramid (§4.2) it instead carries the high-frequency
+  *band*, which changes the semantics in a deliberate way.
+- **Why U-Net for denoising specifically.** Noise lives at all scales, but its
+  *statistics* differ by scale — fine noise is near-white, coarse structure is
+  strongly correlated. The encoder/decoder pyramid lets the model attack each
+  scale with a matched receptive field: shallow levels clean local texture, deep
+  levels enforce global consistency, and the skips stitch the two back together.
+  The symmetric depth (same number of down- and up-steps) guarantees the output
+  returns to full input resolution with no learned resampling artifacts.
+- **Bottleneck** is the most abstract, lowest-resolution stage — `blocks_per_level`
+  ConvNeXt blocks at the deepest width — where the network has the widest
+  receptive field and does its heaviest global reasoning. It is also the natural
+  place to tap a latent (§4.3).
 - **Output head** is a single bias-free `Conv2D(C, 1×1, activation='linear')`.
 
 ### Size variants (`CONVUNEXT_CONFIGS`)
@@ -184,8 +210,8 @@ These three keep a deep residual U-Net trainable and bias-free at the same time.
   shallow blocks ≈0, the deepest block hits the full `drop_path_rate`. Deeper
   blocks are the most redundant, so they are the ones randomly dropped during
   training — a depth-aware regularizer. (Bottleneck blocks use a flat rate.)
-- **Orthogonal kernel init.** Structural convs (stem, channel-adjusts, output,
-  supervision heads) use `'orthogonal'`, **not** `he_normal`. In a deep residual
+- **Orthogonal kernel init.** Structural convs (stem, channel-adjusts, output)
+  use `'orthogonal'`, **not** `he_normal`. In a deep residual
   U-Net `he_normal` compounds variance across the many residual adds and can blow
   up activations; an orthogonal (norm-preserving) init is the right choice for a
   homogeneous, bias-free network and is what actually delivers init stability —
@@ -208,54 +234,124 @@ a task that older work attacked with plain stacks of 3×3 convs (DnCNN, BFCNN).
 
 ## 4. Optional modules
 
-All four are off-by-default at the *factory*, but the **trainer turns the Gabor stem
+All three are off-by-default at the *factory*, but the **trainer turns the Gabor stem
 on by default** because it is cheap and helps. Each preserves the bias-free
 invariant.
 
 ### 4.1 Frozen Gabor stem  (`use_gabor_stem`, trainer default **ON**)
 
 Instead of learning the first layer from scratch, prepend a **frozen, deterministic
-Gabor filterbank** (`create_gabor_depthwise_conv2d`): a depthwise conv whose kernels
-are 2-D Gabor wavelets — sinusoidal carriers under a Gaussian envelope — swept across
-five parameters (σ, θ, λ, γ, ψ) so the bank spans orientations 0…π and a range of
-spatial frequencies. A mandatory bias-free 1×1 conv then projects back to
-`initial_filters`.
+Gabor filterbank** (`create_gabor_depthwise_conv2d`, an implementation of the
+Özbulak & Ekenel "Initialization of CNNs by Gabor Filters" scheme). A 2-D Gabor
+kernel is a sinusoidal plane wave under a Gaussian envelope:
+
+```
+x_θ =  x·cos θ + y·sin θ
+y_θ = −x·sin θ + y·cos θ
+g(x,y) = exp(−(x_θ² + γ²·y_θ²) / (2σ²)) · cos(2π·x_θ/λ + ψ)
+```
+
+Five parameters shape each filter, and each has a clear job:
+
+| Param | Role | Default sweep (Table I) |
+|-------|------|-------------------------|
+| **σ** | Gaussian envelope width — the filter's spatial extent / scale | `(2.0, 21.0)` |
+| **θ** | orientation of the carrier (degrees) — which edge direction it fires on | `(0°, 360°)` |
+| **λ** | carrier wavelength — the spatial frequency / feature thickness it tunes to | `(8.0, 100.0)` |
+| **γ** | aspect ratio — how elongated (edge-like) vs. round (blob-like) the envelope is | `(0.0, 300.0)` |
+| **ψ** | carrier phase (degrees) — even (cosine, bar/ridge) vs. odd (sine, step-edge) symmetry | `(0°, 360°)` |
+
+**How the bank is laid out — this is the key design choice.** The stem does **not**
+build a full Cartesian grid of σ×θ×λ×γ×ψ combinations (that would be tens of
+thousands of filters). Instead it sweeps each parameter with
+`np.linspace(min, max, n_filters)` and gives output channel *j* the *j*-th sample of
+**every** parameter at once. So the `--gabor-filters` filters trace a single
+**diagonal path** through the 5-D parameter space: filter 0 is short-σ / θ=0 /
+short-λ, the last filter is long-σ / θ=360° / long-λ, and the rest interpolate
+jointly. With the default `gabor_filters=32` you get 32 jointly-varying
+orientation+scale+phase detectors — a deliberately compact, coarse-but-broad
+covering rather than an exhaustive (and mostly redundant) grid.
+
+**Wiring.** The bank is a `DepthwiseConv2D` with `depth_multiplier=gabor_filters`,
+so it is applied **per input channel with no cross-channel mixing**: a 3-channel
+input through 32 filters yields `3 × 32 = 96` channels. A **mandatory** bias-free
+1×1 `Conv2D` then projects those 96 back down to `initial_filters` (64 for `base`).
+The whole stem is `trainable=False` and uses no bias, so it contributes **zero
+trainable parameters** and stays purely linear/homogeneous — it cannot break the
+bias-free invariant. It is also deterministic: two builds produce byte-identical
+kernels (no seed, no RNG).
 
 **Why it helps a denoiser specifically:** natural-image *signal* is concentrated in
-oriented, multi-scale edges and textures — exactly what Gabor filters detect —
-while *noise* is spatially white (flat spectrum). An oriented filterbank therefore
-amplifies signal structure relative to noise from epoch 0, handing the learnable
-layers a structured feature space instead of raw pixels. It is also biologically
-motivated: Gabor functions are the textbook model of V1 simple-cell receptive
-fields.
+oriented, multi-scale edges and textures — exactly what this bank detects — while
+*noise* is spatially white (flat spectrum). Handing the learnable layers a structured
+oriented/multi-frequency feature space from epoch 0 (instead of raw pixels) amplifies
+signal structure relative to noise immediately, and saves the network from having to
+rediscover Gabor-like first-layer filters by gradient descent — which is empirically
+what randomly-initialized first layers converge to anyway. It is also the textbook
+model of V1 simple-cell receptive fields.
 
-**Cost:** zero trainable parameters (the bank is frozen, the projection is shared
-weights), but it does add one extra depthwise conv to inference. Disable with
-`--no-gabor-stem`. Filter count via `--gabor-filters` (default 32); kernel size is
-config-only (`gabor_kernel_size=7`, matching the default stem).
+**Cost & knobs.** Zero trainable parameters, but one extra depthwise conv at
+inference (throughput impact unprofiled — see §8). Disable with `--no-gabor-stem`.
+Filter count via `--gabor-filters` (default 32). Kernel size is config-only
+(`gabor_kernel_size=7`, matching the 7×7 default stem so the receptive field is
+unchanged when you swap stems). The five parameter ranges use the Özbulak & Ekenel
+Table I defaults and are not exposed on the CLI.
 
 ### 4.2 Laplacian-pyramid downsampling  (`--laplacian-pyramid`, default OFF)
 
-Normally a level downsamples with `MaxPool` and passes the **full-resolution**
-tensor along the skip. With this flag, each downsample is a `LaplacianPyramidLevel`
-that **splits** the signal into a low-frequency band (Gaussian-blurred + decimated →
-goes *down* the encoder) and a high-frequency band (the residual → goes *across* the
-skip). This *partitions* information across the two paths rather than duplicating it,
-forcing the full hierarchy to participate and aligning each path's content with what
-it is good at (skips carry the edges; the encoder carries the smooth structure). The
-pyramid is built from linear ops only (blur, decimate, upsample, subtract) — zero
-learnable parameters, bias-free by construction. OFF-path layer names are preserved,
-so toggling the flag is checkpoint-compatible.
+This flag changes **how a level steps down in resolution** and **what the skip
+carries**, and it is the most conceptually interesting of the optional modules.
 
-### 4.3 Deep supervision  (`--deep-supervision`, default OFF)
+**The default (OFF) junction** is the textbook U-Net move: `MaxPool(2×2)` produces
+the half-resolution tensor that continues down the encoder, and the **full-resolution
+input** to the pooling is copied verbatim along the skip. Note the redundancy — the
+coarse content lives in *both* paths (the skip contains the low frequencies too,
+they are just mixed in with the high ones), so the decoder receives overlapping
+information and the encoder is free to ignore detail it knows the skip will restore.
 
-Attach an auxiliary `[1×1 → GRN → GELU → 1×1 linear]` denoising head to each decoder
-level so intermediate resolutions also receive a direct gradient. Helps gradient flow
-in the deepest variants and encourages each scale to learn a usable representation.
-Outputs are returned shallowest-first; an inference model that keeps only the
-full-res head is recovered via `create_inference_model_from_training_model`.
+**The ON junction** replaces that with a `LaplacianPyramidLevel`, a signal-level
+band split:
 
-### 4.4 Bottleneck tap  (`--expose-bottleneck`, default OFF)
+```
+split(x):
+    blur = GaussianFilter(x)            # fixed low-pass
+    low  = BlurPool2D(blur)             # (B, H/2, W/2, C)  → continues DOWN the encoder
+    up   = UpSampling2D(low)            # (B, H,   W,   C)
+    high = x − up(low)                  # (B, H,   W,   C)  → goes ACROSS the skip
+
+merge(low, high):  x_rec = high + up(low) == x            # exact to float precision
+```
+
+Now the two paths are **complementary, not overlapping**: the skip carries *only*
+the high-frequency residual (edges, texture, fine detail), and the encoder carries
+*only* the smoothed low-frequency band. Information is **partitioned** rather than
+duplicated. Three things fall out of this:
+
+- **Each path gets the content it is good at.** Skips are the natural home for
+  high-frequency detail (that is what they exist to preserve); the encoder's deeper,
+  wider, more-abstract blocks are the natural home for the smooth global structure.
+  The band split makes that division of labor explicit instead of leaving the
+  network to sort it out.
+- **The whole hierarchy is forced to participate.** Because the encoder no longer
+  receives the high frequencies at all, it *cannot* punt detail to the skip and
+  coast — every level must actually process its band. This tends to make deeper
+  levels earn their keep.
+- **It is an exact, invertible decomposition.** `high` is *defined* as the residual
+  `x − up(low)`, so `merge(split(x)) == x` to float precision regardless of blur
+  quality — the split adds no reconstruction error of its own, it only reorganizes
+  where information flows. For a denoiser there is a bonus: the band split is itself
+  a mild frequency prior, and the noise/signal SNR differs by band (fine bands are
+  noisier), so giving each band its own processing path is well matched to the task.
+
+The pyramid is built from fixed linear ops only — Gaussian blur (non-trainable by
+default), average-pool decimation, bilinear upsample, subtraction — so it is
+**channel-preserving, zero-parameter, and bias-free/homogeneous by construction**.
+Crucially, the **OFF-path layer names are preserved** (`encoder_downsample_{level}`,
+`bottleneck_downsample`), so toggling the flag is `.keras`-checkpoint-compatible and
+the OFF path stays byte-identical to the original architecture. Blur kernel size via
+`laplacian_kernel_size` (config-only).
+
+### 4.3 Bottleneck tap  (`--expose-bottleneck`, default OFF)
 
 Add a zero-parameter `Activation('linear')` tap on the deepest latent so the factory
 returns `[denoised, bottleneck]`. The trainer then fits a single-output *view* (the
@@ -461,7 +557,6 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
 | `--sigma-max-end` | `0.5` | Curriculum end σ_max |
 | `--curriculum-schedule` | `linear` | σ-widening shape: `linear\|cosine\|exp` |
 | `--curriculum-epochs` | `None` | Epochs to widen σ over (default = `--epochs`) |
-| `--deep-supervision` | *(off)* | Enable auxiliary per-level decoder loss heads |
 | `--viz-freq` | `5` | Save denoising / bottleneck grids every N epochs |
 | `--viz-samples` | `8` | Image columns in the eval grid |
 | `--dashboard` | `None` | Rebuild the dashboard PNG from an experiment dir and exit (no training) |
@@ -507,7 +602,7 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
 - Repo-internal:
   - [`research/miyasawas_theorem.md`](../../../research/miyasawas_theorem.md) — additive derivation, bias-free requirements.
   - [`research/miyasawas_theorem_multiplicative.md`](../../../research/miyasawas_theorem_multiplicative.md) — multiplicative/composite relations, bias-free tension, gSURE audit.
-  - [`bias_free_denoisers/README.md`](../../dl_techniques/models/bias_free_denoisers/README.md) — model-level architecture tables, V1/V2 deep dive, deep-supervision diagram.
+  - [`bias_free_denoisers/README.md`](../../dl_techniques/models/bias_free_denoisers/README.md) — model-level architecture tables and V1/V2 deep dive.
   - Source: `dl_techniques/models/bias_free_denoisers/bfconvunext.py`,
     `dl_techniques/callbacks/noise_sigma_curriculum.py`,
     `dl_techniques/callbacks/convunext_bottleneck_monitor.py`,
