@@ -742,6 +742,47 @@ def render_training_dashboard(history: dict, out_path: Path, title: str = "") ->
     plt.close(fig)
 
 
+def _mean_psnr(pred, clean) -> float:
+    """Mean PSNR (dB) of ``pred`` vs ``clean`` on the [-1,+1] domain (max_val=2.0).
+
+    Single source of truth for the trainer's PSNR convention: rmse over the whole
+    batch, then ``20*log10(2.0/rmse)``. Both the eval grid and the multi-pass eval
+    helpers call this so the formula lives in exactly one place (DRY).
+    """
+    mse = float(tf.reduce_mean(tf.square(tf.convert_to_tensor(pred) - clean)))
+    return 20.0 * np.log10(2.0 / max(np.sqrt(mse), 1e-8))  # max_val=2.0
+
+
+def denoise_k_passes(model: keras.Model, noisy, k: int) -> List[tf.Tensor]:
+    """Apply ``model`` ``k`` times sequentially, clipping to [-1,+1] between passes.
+
+    Returns the LIST of the k intermediate denoised tensors ``[pass1, ..., passk]``
+    so callers can score each pass independently. The model is applied exactly once
+    per pass (``training=False``); this is eval/inference only and never affects
+    training. Domain [-1,+1] (clip after every pass).
+    """
+    outputs: List[tf.Tensor] = []
+    x = tf.clip_by_value(tf.convert_to_tensor(noisy), -1.0, 1.0)
+    for _ in range(int(k)):
+        x = model(x, training=False)
+        if isinstance(x, (list, tuple)):
+            x = x[0]  # deep-supervision: primary output
+        x = tf.clip_by_value(tf.convert_to_tensor(x), -1.0, 1.0)
+        outputs.append(x)
+    return outputs
+
+
+def multi_pass_psnr(model: keras.Model, clean, noisy, k: int) -> List[float]:
+    """Per-pass mean PSNR (dB) for k sequential applications of ``model``.
+
+    Runs ``denoise_k_passes`` and scores each pass against ``clean`` using the SAME
+    convention as the eval grid (``_mean_psnr``, max_val=2.0). Returns a list of k
+    floats ``[psnr(pass1), ..., psnr(passk)]``. Eval-only; does not affect training.
+    """
+    clean_t = tf.convert_to_tensor(clean)
+    return [_mean_psnr(p, clean_t) for p in denoise_k_passes(model, noisy, k)]
+
+
 class DenoisingVisualizationCallback(keras.callbacks.Callback):
     """Save clean / noisy / denoised comparison grids (and PSNR-vs-epoch curve).
 
@@ -764,12 +805,16 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         noise_regimes: Optional[List[Tuple[str, float]]] = None,
         noise_type: str = "additive",
         composite_additive_ratio: float = 0.5,
+        multi_pass_k: int = 3,
     ):
         super().__init__()
         self.clean_batch = clean_batch
         self.sigma_max_var = sigma_max_var
         self.noise_sigma_min = float(noise_sigma_min)
         self.noise_type = noise_type
+        # Number of sequential passes scored/rendered in the multi-pass eval (additive
+        # regimes only). Default 3 covers SC2 (passes 1->2->3). Eval/viz only.
+        self.multi_pass_k = max(1, int(multi_pass_k))
         self.composite_additive_ratio = float(composite_additive_ratio)
         self.viz_dir = Path(out_dir) / "visualizations"
         self.viz_dir.mkdir(parents=True, exist_ok=True)
@@ -940,10 +985,8 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
             if isinstance(denoised, (list, tuple)):
                 denoised = denoised[0]  # deep-supervision: primary output
             denoised = tf.convert_to_tensor(denoised)
-            mse = float(tf.reduce_mean(tf.square(denoised - clean)))
-            psnr = 20.0 * np.log10(2.0 / max(np.sqrt(mse), 1e-8))  # max_val=2.0
-            mse_noisy = float(tf.reduce_mean(tf.square(noisy - clean)))
-            psnr_noisy = 20.0 * np.log10(2.0 / max(np.sqrt(mse_noisy), 1e-8))  # max_val=2.0
+            psnr = _mean_psnr(denoised, clean)  # max_val=2.0
+            psnr_noisy = _mean_psnr(noisy, clean)  # max_val=2.0
             if multiplicative:
                 noisy_label = f"Noisy {label}\n(mult σ={sigma:.2f}, PSNR {psnr_noisy:.1f} dB)"
             elif composite:
@@ -957,7 +1000,28 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
             rows.append((noisy_label, noisy.numpy()))
             rows.append((f"Denoised {label}\n(PSNR {psnr:.1f} dB)", np.asarray(denoised)))
 
-        n_rows = len(rows)  # 1 + 2 * len(noise_regimes) == 7 by default
+            # Multi-pass eval (SC2 surface): on ADDITIVE regimes only, score and render
+            # passes 2..K so the monotone-ish improvement of self-iteration is visible
+            # in the saved grid. Theory (Miyasawa fixed-point) is additive-only, so this
+            # is skipped for multiplicative/composite. Pass-1 is already rendered above;
+            # denoise_k_passes(...)[0] reproduces it, so we append [1:] (passes 2..K).
+            if not multiplicative and not composite and self.multi_pass_k > 1:
+                passes = denoise_k_passes(self.model, noisy, self.multi_pass_k)
+                pass_psnrs = [_mean_psnr(p, clean) for p in passes]
+                logger.info(
+                    f"Multi-pass PSNR [{label}] (passes 1..{self.multi_pass_k}): "
+                    + ", ".join(f"{v:.2f}" for v in pass_psnrs) + " dB"
+                )
+                for k_idx in range(1, self.multi_pass_k):  # passes 2..K
+                    rows.append((
+                        f"Denoised {label}\npass {k_idx + 1} "
+                        f"(PSNR {pass_psnrs[k_idx]:.1f} dB)",
+                        np.asarray(passes[k_idx]),
+                    ))
+
+        # 1 (clean) + 2*len(noise_regimes); + (K-1)*len(noise_regimes) extra denoised
+        # rows when multi-pass eval is active (additive only).
+        n_rows = len(rows)
         fig, axes = plt.subplots(n_rows, n, figsize=(2.3 * n, 2.3 * n_rows))
         axes = np.atleast_2d(axes)
         if n == 1:
