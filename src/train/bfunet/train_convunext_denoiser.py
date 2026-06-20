@@ -140,6 +140,9 @@ from dl_techniques.callbacks.noise_sigma_curriculum import (
 from dl_techniques.callbacks.convunext_bottleneck_monitor import (
     ConvUnextBottleneckMonitorCallback,
 )
+from dl_techniques.callbacks.self_iterate_pool import (
+    SelfIteratePoolCallback,
+)
 
 
 # ---------------------------------------------------------------------
@@ -1127,18 +1130,64 @@ def train(config: TrainingConfig) -> keras.Model:
         f"Sourced {len(train_paths)} train / {len(val_paths)} val image paths"
     )
 
-    train_ds = create_dataset(train_paths, config, noise_fn, is_training=True)
+    # Validation pipeline is identical in BOTH branches (streaming, additive/curriculum
+    # noise on a fixed val set); only the TRAIN source differs.
     val_ds = create_dataset(val_paths, config, noise_fn, is_training=False)
-
-    if config.steps_per_epoch is not None:
-        steps_per_epoch = config.steps_per_epoch
-    else:
-        steps_per_epoch = max(
-            100, (len(train_paths) * config.patches_per_image) // config.batch_size
-        )
     validation_steps = config.validation_steps or max(
         10, len(val_paths) // config.batch_size
     )
+
+    # DECISION plan_2026-06-20_88705c63/D-004: branch the TRAIN data path on
+    # config.self_iterate. ON -> a FINITE `from_generator` source over a bounded RAM
+    # pool whose `current_input` buffer is mutated IN PLACE by
+    # SelfIteratePoolCallback at epoch boundaries (the regeneration mechanism). OFF ->
+    # the EXACT existing streaming `create_dataset` path (byte-identical to today).
+    # Do NOT collapse these into the streaming pipeline: a `from_tensor_slices` /
+    # streaming source SNAPSHOTS or never re-reads the pool, silently killing
+    # regeneration with no error (see decisions.md D-004). The model is applied once
+    # per batch in BOTH branches; compile/build/verify_bias_free/fit are identical.
+    self_iterate_callback: Optional[SelfIteratePoolCallback] = None
+    if config.self_iterate:
+        # Initial pool sigma = the curriculum START value (the same value the live
+        # sigma_max_var is initialized to at epoch 0), so epoch-1 inputs match the
+        # streaming pipeline's epoch-0 noise level.
+        sigma_init = float(config.sigma_max_start)
+        clean_pool, current_input = build_self_iterate_pool(
+            train_paths, config, sigma_init
+        )
+        train_ds, steps_per_epoch = create_self_iterate_dataset(
+            clean_pool, current_input, config
+        )
+        # get_sigma reads the SAME live curriculum Variable the
+        # NoiseSigmaCurriculumCallback advances each epoch, so fresh pool slots track
+        # the curriculum. The pool dataset has NO tf.data noise closure, so this is
+        # the only consumer of the curriculum variable in self-iterate mode.
+        self_iterate_callback = SelfIteratePoolCallback(
+            clean_pool=clean_pool,
+            current_input=current_input,
+            get_sigma=lambda: float(sigma_max_var),
+            regen_freq=config.self_iterate_regen_freq,
+            mix_ratio=config.self_iterate_mix_ratio,
+            predict_batch_size=config.batch_size,
+            seed=config.seed or 42,
+        )
+        logger.info(
+            "Self-iterate mode ACTIVE: pool_size=%d, regen_freq=%d, mix_ratio=%.3f, "
+            "steps_per_epoch=%d (finite from_generator pool path)",
+            int(clean_pool.shape[0]),
+            int(config.self_iterate_regen_freq),
+            float(config.self_iterate_mix_ratio),
+            int(steps_per_epoch),
+        )
+    else:
+        train_ds = create_dataset(train_paths, config, noise_fn, is_training=True)
+        if config.steps_per_epoch is not None:
+            steps_per_epoch = config.steps_per_epoch
+        else:
+            steps_per_epoch = max(
+                100, (len(train_paths) * config.patches_per_image) // config.batch_size
+            )
+
     logger.info(
         f"steps_per_epoch={steps_per_epoch}, validation_steps={validation_steps}"
     )
@@ -1255,6 +1304,13 @@ def train(config: TrainingConfig) -> keras.Model:
             schedule=config.curriculum_schedule,
         )
     )
+    # Self-iterate regeneration callback: appended AFTER the curriculum callback so
+    # the curriculum's per-epoch sigma .assign runs first and get_sigma reads the
+    # advanced value when refilling fresh pool slots. KEEP the curriculum callback
+    # active in self-iterate mode: the pool dataset has no tf.data noise closure, so
+    # the curriculum Variable is consumed ONLY by get_sigma here (intended).
+    if self_iterate_callback is not None:
+        callbacks.append(self_iterate_callback)
 
     # Denoising visualization: same images under 3 noise regimes.
     viz_batch = build_fixed_val_batch(val_paths, config, n=config.viz_samples)
