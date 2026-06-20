@@ -452,6 +452,87 @@ model.
   `1e-3`, warmup = 10% of epochs by default, cosine floor `alpha=0.01`.
 - No EMA, no mixed precision, no explicit `jit_compile` (backend defaults apply).
 
+### 5.5 Self-iterate mode  (`--self-iterate`, default OFF)
+
+The single-pass denoiser is *blind to σ* but not robust to **its own output**:
+feed `f(noisy)` back into `f` and naive re-application over-smooths, so PSNR
+*drops* on pass 2, 3, … . Self-iterate mode trains the model so that applying it
+**2–5 times in sequence keeps improving** (non-decreasing PSNR) instead. The goal
+is to make the clean image a **fixed point** of the map:
+
+```
+f(noisy)    ≈ clean
+f(f(noisy)) ≈ clean
+f(clean)    ≈ clean      # the new constraint: don't degrade an already-clean input
+```
+
+A model with that property is robust against its own output, so repeated
+application converges rather than degrading — the same "apply it a few times and it
+gets better" behavior diffusion samplers have, but realized at *training* time with
+no architecture change.
+
+**Mechanism — epoch-boundary input regeneration over a bounded RAM pool.** This is
+*not* a custom `train_step` and *not* a K-deep unrolled graph. Training stays stock
+`compile(loss="mse")` + `model.fit`, and the model is applied **exactly once per
+batch** (single-pass memory, unchanged). "Feeding the output back" is realized by
+**regenerating the training inputs between epochs**:
+
+- A library callback, `SelfIteratePoolCallback`
+  ([`dl_techniques/callbacks/self_iterate_pool.py`](../../dl_techniques/callbacks/self_iterate_pool.py)),
+  owns a bounded in-RAM pool of `(clean, current_input)` patches.
+- Every `regen_freq` epochs it runs `model.predict` over the pool and writes the
+  results **back into the live pool arrays in place**, MIXING regenerated
+  `(f(noisy) -> clean)` pairs with fresh `(clean+noise -> clean)` pairs.
+- The trainer feeds those live arrays to `model.fit` via a `tf.data.from_generator`
+  source (sized finite to `steps_per_epoch`, no `.repeat()`) that *indexes the same
+  numpy buffers* the callback mutates — so each epoch re-reads the regenerated pool.
+  (`from_tensor_slices` snapshots the array into a graph constant and would never
+  see the mutation; this is **D-004** in the plan's decision log.)
+
+**Mix, don't replace; feed back as-is (D-003).** The pool is a *union* of fresh and
+regenerated pairs, not a replacement — keeping `f(noisy)≈clean` anchored prevents
+single-pass quality from drifting down as the model is fed only its own
+(slightly over-smoothed) outputs. The previous output is fed back **as-is**, with
+**no re-injected noise** between passes, matching the literal contract ("apply it
+2–5 times").
+
+**Additive noise ONLY (D-003).** Self-iterate is theory-bound to additive Gaussian
+noise: the fixed-point / robust-against-self framing rests on the Miyasawa
+`residual = σ²·∇log p` identity, which holds **only** for additive AWGN (§5.2;
+[`research/miyasawas_theorem.md`](../../../research/miyasawas_theorem.md)).
+Multiplicative/composite noise breaks the linear-domain identity, so `--self-iterate`
+combined with `--multiplicative-noise` or `--composite-noise` is **rejected at parse
+time**:
+
+```
+error: --self-iterate requires additive noise; it is incompatible with
+--multiplicative-noise/--composite-noise (Miyasawa residual=score identity is additive-only)
+```
+
+**Flags & defaults.**
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--self-iterate` | **OFF** | Opt-in. When off, the data pipeline is **byte-identical** to standard streaming training (§5.1) — the existing path is untouched. |
+| `--self-iterate-pool-size` | `2048` | Clean patches in the RAM pool whose inputs are regenerated at epoch cadence. **Must be ≥ `--batch-size`.** ≈1.6 GB at 256×256×3. Smoke caps this to **32**. |
+| `--self-iterate-regen-freq` | `1` | Regenerate the pool inputs every N epochs (one `model.predict` over the pool). |
+| `--self-iterate-mix-ratio` | `0.5` | Fraction of pool slots filled with regenerated `(f(prev)->clean)` pairs; the rest get fresh `(clean+noise->clean)`. `0.0` = fresh only, `1.0` = regenerated only, `0.5` = union. |
+
+With `--self-iterate` OFF (the default) nothing above is allocated and the streaming
+random-crop pipeline runs exactly as before — existing checkpoints and runs are
+unaffected.
+
+**Multi-pass evaluation & visualization.** On the additive regimes, the denoising
+visualization (§6) reports **per-pass PSNR** (passes 1..K, `multi_pass_k` default
+**3**) so monotone-ish improvement is visible directly in the saved grids and the
+log — this is the verification surface for "2–5 passes beat 1 pass". Two helpers in
+the trainer are importable for standalone evaluation:
+
+- `denoise_k_passes(model, noisy, k)` — apply the model `k` times, clipping to
+  `[−1,+1]` between passes; returns the list of `k` intermediate denoised tensors.
+- `multi_pass_psnr(model, clean, noisy, k)` — per-pass mean PSNR (dB) against
+  `clean`, same `max_val=2.0` convention as the eval grid.
+
 ---
 
 ## 6. Monitoring & callbacks
@@ -524,6 +605,13 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
 MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
     --variant large --batch-size 2 --convnext-version v2 --expose-bottleneck
 
+# Self-iterate mode (§5.5) — additive only; train so 2-5 sequential passes improve PSNR
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
+    --self-iterate --self-iterate-pool-size 2048 --self-iterate-mix-ratio 0.5
+# Self-iterate smoke (pool auto-capped to 32, exercises >=1 regeneration)
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
+    --smoke --self-iterate
+
 # Multiplicative / composite noise experiments (documented approximations, §5.2)
 MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser --multiplicative-noise
 MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
@@ -570,6 +658,10 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
 | `--multiplicative-noise` | *(off)* | Use `y=x·(1+N·σ)` instead of additive AWGN |
 | `--composite-noise` | *(off)* | Use `y=x·n+a`; takes precedence over `--multiplicative-noise` |
 | `--composite-additive-ratio` | `0.5` | Composite mode: `σ_a = ratio · σ_m` (must be > 0) |
+| `--self-iterate` | *(off)* | Self-iterate mode (§5.5): train for non-decreasing multi-pass PSNR via epoch-boundary pool regeneration. Additive only; rejected with `--multiplicative`/`--composite`. OFF = byte-identical to standard training |
+| `--self-iterate-pool-size` | `2048` | RAM pool size in patches (self-iterate only). Must be ≥ `--batch-size`; smoke caps to 32 |
+| `--self-iterate-regen-freq` | `1` | Regenerate the pool every N epochs (self-iterate only) |
+| `--self-iterate-mix-ratio` | `0.5` | Regenerated vs. fresh pool fraction (self-iterate only): 0.0 fresh-only, 1.0 regen-only, 0.5 union |
 | `--smoke` | *(off)* | Tiny end-to-end mechanism check (few steps/epochs, constant LR) |
 
 ---
@@ -606,4 +698,5 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
   - Source: `dl_techniques/models/bias_free_denoisers/bfconvunext.py`,
     `dl_techniques/callbacks/noise_sigma_curriculum.py`,
     `dl_techniques/callbacks/convunext_bottleneck_monitor.py`,
+    `dl_techniques/callbacks/self_iterate_pool.py` (§5.5),
     `dl_techniques/initializers/gabor_filters_initializer.py`.
