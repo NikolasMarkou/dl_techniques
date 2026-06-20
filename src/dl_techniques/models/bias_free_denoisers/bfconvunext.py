@@ -33,9 +33,44 @@ The model outputs multiple scales during training:
 - Output 0: Final inference output (highest resolution, primary output)
 - Output 1-N: Intermediate supervision outputs at progressively lower resolutions
 
+Optional Laplacian-pyramid downsample/skip path (``use_laplacian_pyramid``, OFF by default):
+    When enabled, every encoder down<->skip junction stops using ``MaxPooling2D`` + a raw
+    full-resolution skip and instead applies a single ``LaplacianPyramidLevel`` split:
+
+        low, high = split(x)            # low = blur-then-subsample(x); high = x - upsample(low)
+
+    The coarse, anti-aliased ``low`` band descends the encoder; the high-frequency residual
+    ``high`` band becomes the skip. The two bands are exactly complementary
+    (``merge(low, high) == x``), so the split is lossless *taken together*.
+
+    The reason for it is NOT just lossless downsampling -- it is that **no single path then
+    carries all the information needed for reconstruction**. The skip holds only the high
+    band and the descending/bottleneck path holds only the low band, so neither is a
+    sufficient statistic; the decoder is forced to FUSE both to rebuild the signal. This
+    removes the classic U-Net shortcut where a full-resolution skip carries the whole image,
+    letting the network learn a near-identity copy and leaving the encoder->bottleneck->decoder
+    pathway lazy and underused. By partitioning the information into complementary bands, every
+    path is made necessary and the full hierarchy has to participate in reconstruction. For a
+    denoiser this doubly matters: the trivial "copy the noisy input, do nothing" solution that
+    hides in a full-resolution skip is gone once that skip only holds the high-frequency residual.
+
+    Secondary benefit -- an inductive bias matched to denoising: white Gaussian noise is flat
+    across frequency while natural-image signal concentrates in low frequencies, so per band the
+    SNR differs sharply (high bands are noise-dominated, the low band is signal-rich). Splitting
+    at every scale gives the network the subband structure of classical optimal denoising
+    (wavelet-shrinkage / per-band Wiener), with the high-band skips carrying exactly where
+    shrinkage must act and the edge/detail the decoder re-injects to avoid over-smoothing.
+
+    Crucially this costs nothing on the theory side: ``LaplacianPyramidLevel`` is built only from
+    linear ops (bias-free Gaussian blur -> blur-pool -> bilinear upsample -> subtraction), so it
+    is homogeneous of degree 1 with zero additive offset. The bias-free / scaling-invariance
+    property (and the Miyasawa/Tweedie residual-as-score interpretation it enables) is preserved
+    exactly; the net simply becomes a learned multiscale, band-wise score estimator.
+
 Based on ConvNeXt innovations from "A ConvNet for the 2020s" (Liu et al., CVPR 2022)
 and "ConvNeXt V2: Co-designing and Scaling ConvNets with Masked Autoencoders"
-(Woo et al., CVPR 2023) applied to bias-free U-Net architecture.
+(Woo et al., CVPR 2023) applied to bias-free U-Net architecture. The Laplacian-pyramid
+split follows Burt & Adelson, "The Laplacian Pyramid as a Compact Image Code" (1983).
 """
 
 import keras
