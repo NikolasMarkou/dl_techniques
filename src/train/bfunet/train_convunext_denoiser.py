@@ -650,7 +650,8 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         Rows 1-2: Noisy(low)    / Denoised(low)
         Rows 3-4: Noisy(medium) / Denoised(medium)
         Rows 5-6: Noisy(high)   / Denoised(high)
-        Denoised-row labels carry the mean PSNR over the batch at that regime.
+        Both the Noisy- and Denoised-row labels carry the mean PSNR over the batch at
+        that regime (noisy-vs-clean and denoised-vs-clean), so the improvement is visible.
         """
         clean = self.clean_batch
         clean_np = clean.numpy()
@@ -668,8 +669,10 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
             denoised = tf.convert_to_tensor(denoised)
             mse = float(tf.reduce_mean(tf.square(denoised - clean)))
             psnr = 20.0 * np.log10(2.0 / max(np.sqrt(mse), 1e-8))  # max_val=2.0
+            mse_noisy = float(tf.reduce_mean(tf.square(noisy - clean)))
+            psnr_noisy = 20.0 * np.log10(2.0 / max(np.sqrt(mse_noisy), 1e-8))  # max_val=2.0
             s255 = sigma * 127.5
-            rows.append((f"Noisy {label}\n(σ(_255)≈{s255:.0f})", noisy.numpy()))
+            rows.append((f"Noisy {label}\n(σ≈{s255:.0f}, PSNR {psnr_noisy:.1f} dB)", noisy.numpy()))
             rows.append((f"Denoised {label}\n(PSNR {psnr:.1f} dB)", np.asarray(denoised)))
 
         n_rows = len(rows)  # 1 + 2 * len(noise_regimes) == 7 by default
