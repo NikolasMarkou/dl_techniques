@@ -167,6 +167,10 @@ class TrainingConfig:
     max_val_files: Optional[int] = 500
     parallel_reads: int = 8
     dataset_shuffle_buffer: int = 1024
+    # Patch-level shuffle buffer applied AFTER the per-image patch flat_map, so the
+    # `patches_per_image` consecutive crops of one image are interleaved across images.
+    # Without it, batch_size <= patches_per_image yields batches drawn from a single image.
+    patch_shuffle_buffer: int = 2048
     seed: int = 42
 
     # Noise curriculum
@@ -325,6 +329,16 @@ def create_dataset(
         dataset = dataset.flat_map(
             lambda p: tf.data.Dataset.from_tensors(p).repeat(config.patches_per_image)
         )
+        # Interleave the per-image patch copies across images BEFORE loading/cropping.
+        # The flat_map above emits patches_per_image consecutive copies of each path, so
+        # without this shuffle a batch of size <= patches_per_image would be all crops of
+        # one image. Shuffling the cheap path copies here (strings, not patch tensors)
+        # decorrelates batch composition with negligible memory.
+        if config.patch_shuffle_buffer > 1:
+            dataset = dataset.shuffle(
+                buffer_size=config.patch_shuffle_buffer,
+                reshuffle_each_iteration=True,
+            )
 
     dataset = dataset.map(
         lambda p: load_and_preprocess_image(p, config),
