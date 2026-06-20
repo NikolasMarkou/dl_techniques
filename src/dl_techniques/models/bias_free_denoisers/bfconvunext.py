@@ -610,6 +610,10 @@ def create_convunext_denoiser(
         )(x)
 
     # Bottleneck ConvNeXt blocks (bias-free, residual + drop-path)
+    # DECISION plan_2026-06-20_0433c2f2/D-003: the bottleneck is the deepest point, so it
+    # intentionally uses the maximum (unscaled) drop_path_rate, distinct from the
+    # progressive linear ramp applied at the encoder/decoder blocks. Not a bug (a true
+    # continuation of the ramp here would exceed drop_path_rate). No behaviour change.
     for block_idx in range(blocks_per_level):
         x = _apply_residual_convnext_block(
             x, ConvNextBlock, bottleneck_filters, block_kernel_size,
