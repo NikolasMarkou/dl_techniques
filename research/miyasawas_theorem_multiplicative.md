@@ -7,10 +7,11 @@
 4. [Exact Moment Relation (A)](#exact-moment-relation-a)
 5. [Small-Sigma Score-Style Relation (B)](#small-sigma-score-style-relation-b)
 6. [Monte-Carlo Validation](#monte-carlo-validation)
-7. [The Bias-Free Tension and Recommendation](#the-bias-free-tension-and-recommendation)
-8. [Generalized-SURE Divergence-Consistency Compliance Check](#generalized-sure-divergence-consistency-compliance-check)
-9. [Summary](#summary)
-10. [Further Reading](#further-reading)
+7. [Composite Noise (Multiplicative + Additive)](#composite-noise-multiplicative--additive)
+8. [The Bias-Free Tension and Recommendation](#the-bias-free-tension-and-recommendation)
+9. [Generalized-SURE Divergence-Consistency Compliance Check](#generalized-sure-divergence-consistency-compliance-check)
+10. [Summary](#summary)
+11. [Further Reading](#further-reading)
 
 ---
 
@@ -227,6 +228,152 @@ b    = rel_rmse(relation_B(mc), mc["Ex"], mc["mask"])
 base = rel_rmse(mc["ctr"],      mc["Ex"], mc["mask"])
 print(f"(A)={a:.3f}  (B)={b:.3f}  baseline(D=y)={base:.3f}")
 ```
+
+---
+
+## Composite Noise (Multiplicative + Additive)
+
+The pure multiplicative model above is the clean limit; **real sensors are composite**. This
+section extends the framework to the affine-variance model that the trainer also wires (opt-in).
+
+### The composite model
+
+Corrupt each pixel with an independent multiplicative gain *and* an independent additive draw:
+
+$$y = x \cdot n + a, \qquad n \sim \mathcal{N}(1, \sigma_m^2), \qquad a \sim \mathcal{N}(0, \sigma_a^2),
+\qquad x \perp n,\ x \perp a$$
+
+$$\Longleftrightarrow\quad y \mid x \sim \mathcal{N}\!\big(x,\ \sigma_m^2 x^2 + \sigma_a^2\big).$$
+
+The conditional variance is now **affine in $x^2$**: a signal-dependent term $\sigma_m^2 x^2$
+sitting on a constant floor $\sigma_a^2$. This is precisely the Gaussian form of the
+**Poisson-Gaussian** sensor model used in real imaging pipelines — a read-noise floor
+$\sigma_a^2$ plus a signal-dependent (shot-noise-like) term $\sigma_m^2 x^2$. The pure
+multiplicative model ($\sigma_a = 0$) and classic additive AWGN ($\sigma_m = 0$) are its two
+limits. It is implemented by `apply_composite_gaussian(x, sigma_m, sigma_a)` in the module
+(`y = x * (1 + N(0,1)·σ_m) + N(0,1)·σ_a`).
+
+### Superposition derivation
+
+The derivation mirrors relation (A) but starts from the affine-variance Gaussian likelihood
+$p(y|x) = \mathcal{N}(x,\ \sigma_a^2 + \sigma_m^2 x^2)$. Differentiating in $y$,
+
+$$\partial_y p(y|x) = -\frac{y - x}{\sigma_a^2 + \sigma_m^2 x^2}\,p(y|x)
+\quad\Longrightarrow\quad
+(x - y)\,p(y|x) = \big(\sigma_a^2 + \sigma_m^2 x^2\big)\,\partial_y p(y|x).$$
+
+The variance factor now splits into a constant part and an $x^2$ part. Integrating against the
+prior $p(x)$ as before, the left side gives $\big(\mathbb{E}[x|y] - y\big)\,p(y)$, and the right
+side splits linearly: the $\sigma_a^2$ piece (constant in $x$) pulls straight through the
+integral to give the **additive score term** $\sigma_a^2\,\partial_y p(y)$, and the
+$\sigma_m^2 x^2$ piece reproduces the **multiplicative second-moment term** from relation (A).
+Dividing by $p(y)$:
+
+$$\boxed{\ \mathbb{E}[x|y] = y
+   + \sigma_a^2\,\nabla_y \log p(y)
+   + \sigma_m^2\,\frac{\partial_y\big[\,\mathbb{E}[x^2|y]\,p(y)\,\big]}{p(y)}\ }
+\tag{A$_c$}$$
+
+The composite estimator is the **exact sum** of the pure-additive score term and the
+pure-multiplicative second-moment term — the relation **superposes**. Expanding to leading order
+in σ (same concentration argument as (B), $\mathbb{E}[x^2|y] \approx y^2$):
+
+$$\boxed{\ D(y) - y \approx \big(\sigma_a^2 + \sigma_m^2 y^2\big)\,\nabla_y \log p(y) + 2\sigma_m^2 y\ }
+\tag{B$_c$}$$
+
+The score is now weighted by the **local variance** $v(y) = \sigma_a^2 + \sigma_m^2 y^2$ — the
+additive constant $\sigma_a^2$ and the signal-dependent $\sigma_m^2 y^2$ added together — plus the
+familiar deterministic multiplicative shrink $2\sigma_m^2 y$. The two reductions are immediate:
+
+- **$\sigma_a = 0$**: $v(y) = \sigma_m^2 y^2$, recovering pure-multiplicative relations (A)/(B).
+- **$\sigma_m = 0$**: $v(y) = \sigma_a^2$ and the shrink vanishes, recovering the classic additive
+  Miyasawa identity $D(y) - y = \sigma_a^2\,\nabla_y \log p(y)$.
+
+Both relations are wired into the existing estimators via an optional `sigma_a` argument
+(default `0.0`, so the pure-multiplicative behavior is unchanged): `mc_posterior_mean(...,
+sigma_a=...)` draws the composite `y`, `relation_A(mc)` adds the $\sigma_a^2\,\nabla\log p$ term,
+and `relation_B(mc)` uses the local-variance score weight.
+
+### Monte-Carlo validation
+
+Validated on the same signed 3-component Gaussian mixture prior as the pure case, at
+$\sigma_m = 0.15$, $\sigma_a = 0.10$ (6M samples / 250 bins — the affine variance spreads $y$
+wider, so more samples per bin are needed to reach the same `np.gradient` floor):
+
+| Relation                  | rel-RMSE |
+|---------------------------|----------|
+| Composite exact (A$_c$)   | **0.029** |
+| Composite approx (B$_c$)  | 0.040    |
+| Baseline `D(y) = y`       | 0.148    |
+
+Both composite relations roughly **5×** the do-nothing baseline (0.029/0.040 vs 0.148). The
+executable backing is `apply_composite_gaussian` and the `sigma_a` parameters in
+`src/dl_techniques/utils/multiplicative_miyasawa.py`, gated by `TestCompositeRelations` in
+`tests/test_utils/test_multiplicative_miyasawa.py` (hard gates: (A$_c$)/(B$_c$) ≤ 0.06, both must
+beat baseline; plus reduction tests asserting $\sigma_a = 0$ matches pure-multiplicative arrays
+and $\sigma_m = 0$ matches the additive limit).
+
+The following snippet reproduces the table row and was executed in `.venv`
+(output: `composite (A)=0.029  (B)=0.040  baseline(D=y)=0.148`):
+
+```python
+import numpy as np
+from dl_techniques.utils.multiplicative_miyasawa import (
+    signed_mixture_prior, mc_posterior_mean, relation_A, relation_B, rel_rmse,
+)
+
+prior = signed_mixture_prior(6_000_000, seed=0)
+mc = mc_posterior_mean(prior, sigma=0.15, sigma_a=0.10,
+                       n_samples=6_000_000, n_bins=250, seed=0)
+
+a    = rel_rmse(relation_A(mc), mc["Ex"], mc["mask"])
+b    = rel_rmse(relation_B(mc), mc["Ex"], mc["mask"])
+base = rel_rmse(mc["ctr"],      mc["Ex"], mc["mask"])
+print(f"composite (A)={a:.3f}  (B)={b:.3f}  baseline(D=y)={base:.3f}")
+```
+
+### Why composite helps: $x \approx 0$ well-posedness
+
+The most important practical reason to use the composite model is **conditioning near zero**.
+Under pure multiplicative noise the conditional variance is $\sigma_m^2 x^2$, which **vanishes
+as $x \to 0$**: dark / near-zero-signal pixels are barely corrupted, and the score relation
+there becomes ill-conditioned (the $\partial_y \log p(y)$ correction is multiplied by a variance
+weight $\sigma_m^2 y^2 \to 0$, so the estimator has almost no leverage and the empirical-Bayes
+quantities are numerically unstable in that regime). The additive floor $\sigma_a^2$ **injects a
+constant amount of noise everywhere**, so the local variance $v(y) = \sigma_a^2 + \sigma_m^2 y^2$
+is bounded away from zero. This **regularizes the $x \approx 0$ region** and is exactly why real
+pipelines adopt the composite (Poisson-Gaussian) model rather than a pure multiplicative one — a
+read-noise floor is both physically present and numerically stabilizing.
+
+### Amplified clipping caveat
+
+Composite noise carries **larger total variance** than either pure case ($\sigma_a^2 + \sigma_m^2
+x^2 \geq \max(\sigma_a^2,\ \sigma_m^2 x^2)$), so the trainer's clip to $[-1, +1]$ fires **more
+often** — especially the multiplicative part at high $|x|$, where $\sigma_m^2 x^2$ dominates and
+$n$ can push samples well outside the range. As in the pure case the same clip is kept, but it
+bends the MMSE target at the extremes **more** than either pure model: the composite caveat is the
+pure-multiplicative caveat, amplified. (Treat the relations as exact for the unclipped model; the
+clip is a documented approximation at the domain edges.)
+
+### Partial bias-free consistency
+
+Re-reading (B$_c$) against the bias-free homogeneity discussion below: the additive score term
+$\sigma_a^2\,\nabla_y \log p(y)$ is **consistent** with the strict bias-free / homogeneous form
+(it is exactly the additive Miyasawa structure that bias-free is built for), and the local-variance
+score reweighting also scales sensibly with the input. Only the deterministic
+$2\sigma_m^2 y$ multiplicative shrink breaks homogeneity. Consequently a **composite** model — being
+part additive — is **less mismatched** to the strict bias-free architecture than the pure
+multiplicative model: the more additive-dominated the noise (larger $\sigma_a$ relative to
+$\sigma_m$), the more appropriate the bias-free network. This is a softening, not a removal, of the
+tension documented next.
+
+### Trainer usage
+
+The composite mode is opt-in via `--composite-noise` (with `--composite-additive-ratio R`,
+default `R = 0.5`); the single curriculum scalar drives $\sigma_m$ and the additive std is tied to
+it as $\sigma_a = R \cdot \sigma_m$, so one knob schedules both
+(`src/train/bfunet/train_convunext_denoiser.py`, the composite branch in
+`make_curriculum_noise_fn`).
 
 ---
 
