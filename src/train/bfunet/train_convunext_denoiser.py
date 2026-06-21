@@ -3,7 +3,7 @@ a noise-sigma curriculum.
 
 Trains ``create_convunext_denoiser`` (bias-free ConvNeXt U-Net) with an optional
 NON-LEARNABLE Gabor depthwise stem on DIV2K + COCO. Patches of 256x256 are sampled
-with geometric augmentation (flips + rot90), normalized to ``[-1, +1]`` (required
+with geometric augmentation (flips + rot90), normalized to ``[-0.5, +0.5]`` (required
 for bias-free / scaling-invariant denoising), and corrupted with additive Gaussian
 noise whose per-image sigma is drawn from ``[sigma_min, sigma_max]``. The upper
 bound ``sigma_max`` is a live ``tf.Variable`` widened every epoch by
@@ -27,14 +27,14 @@ REFERENCE TARGETS for interpreting this trainer's val-PSNR, NOT a like-for-like
 leaderboard (see caveats below).
 
 Noise-scale note: benchmark sigma is on the [0, 255] pixel scale. This trainer
-adds noise in the [-1, +1] normalized space, so::
+adds noise in the [-0.5, +0.5] normalized space, so::
 
-    sigma_255  =  sigma_here * 127.5
+    sigma_255  =  sigma_here * 255.0
 
-i.e. this run's curriculum ``sigma_max 0.05 -> 0.50`` corresponds to
+i.e. this run's curriculum ``sigma_max 0.025 -> 0.25`` corresponds to
 ``sigma_255 ~= 6.4 -> 63.75`` — it spans (and exceeds) the classic 15/25/50
 benchmark regimes as a single *blind* model. PSNR is scale-invariant, so dB
-computed here with ``max_val=2.0`` on [-1,+1] images is directly comparable to
+computed here with ``max_val=1.0`` on [-0.5,+0.5] images is directly comparable to
 the published ``max_val=255`` numbers.
 
 Grayscale (1-ch), Set12 / BSD68:
@@ -193,8 +193,8 @@ class TrainingConfig:
     noise_type: str = "additive"    # additive | multiplicative (y=x*(1+N*sigma)) | composite (y=x*n+a)
     composite_additive_ratio: float = 0.5  # composite: sigma_a = ratio * sigma_m (curriculum scalar)
     noise_sigma_min: float = 0.0
-    sigma_max_start: float = 0.05   # narrow range at epoch 0 (low noise)
-    sigma_max_end: float = 0.5      # wide range at the final curriculum epoch
+    sigma_max_start: float = 0.025  # narrow range at epoch 0 (low noise)
+    sigma_max_end: float = 0.25     # wide range at the final curriculum epoch
     curriculum_epochs: Optional[int] = None  # None -> use `epochs`
     curriculum_schedule: str = "linear"      # linear | cosine | exp
 
@@ -336,7 +336,7 @@ class TrainingConfig:
 def load_and_preprocess_image(
     image_path: tf.Tensor, config: TrainingConfig
 ) -> tf.Tensor:
-    """Decode an image, normalize to [-1, +1], and crop a random patch."""
+    """Decode an image, normalize to [-0.5, +0.5], and crop a random patch."""
     image_string = tf.io.read_file(image_path)
     image = tf.image.decode_image(
         image_string, channels=config.channels, expand_animations=False
@@ -344,8 +344,8 @@ def load_and_preprocess_image(
     image.set_shape([None, None, config.channels])
     image = tf.cast(image, tf.float32)
 
-    # Normalize to [-1, +1] (critical for bias-free architecture).
-    image = (image / 127.5) - 1.0
+    # Normalize to [-0.5, +0.5] (critical for bias-free architecture).
+    image = (image / 255.0) - 0.5
 
     shape = tf.shape(image)
     height, width = shape[0], shape[1]
@@ -404,7 +404,7 @@ def make_curriculum_noise_fn(config: TrainingConfig, sigma_max_var: tf.Variable)
             noisy = apply_composite_gaussian(patch, noise_level, ratio * noise_level)
         else:
             noisy = patch + tf.random.normal(tf.shape(patch)) * noise_level  # y = x + N(0, sigma^2)
-        return tf.clip_by_value(noisy, -1.0, 1.0), patch
+        return tf.clip_by_value(noisy, -0.5, 0.5), patch
 
     return add_curriculum_noise
 
@@ -426,7 +426,7 @@ def create_dataset(
     noise_fn,
     is_training: bool,
 ) -> tf.data.Dataset:
-    """Build a tf.data pipeline of (noisy, clean) [-1,+1] patch pairs."""
+    """Build a tf.data pipeline of (noisy, clean) [-0.5,+0.5] patch pairs."""
     if not file_paths:
         raise ValueError("No image files found for the dataset")
 
@@ -467,11 +467,11 @@ def create_dataset(
     if is_training and config.augment_data:
         dataset = dataset.map(augment_patch, num_parallel_calls=tf.data.AUTOTUNE)
 
-    # Clip the clean patch back to [-1, +1] after augmentation. flips/rot90 preserve
+    # Clip the clean patch back to [-0.5, +0.5] after augmentation. flips/rot90 preserve
     # range, but the aspect-safe bilinear upscale (small images) can overshoot; the
     # clean patch is both the model input and the regression target, so keep it in range.
     dataset = dataset.map(
-        lambda x: tf.clip_by_value(x, -1.0, 1.0),
+        lambda x: tf.clip_by_value(x, -0.5, 0.5),
         num_parallel_calls=tf.data.AUTOTUNE,
     )
 
@@ -506,8 +506,8 @@ def build_self_iterate_pool(
 
     Loads ``config.self_iterate_pool_size`` clean patches ONCE (reusing the same
     ``load_and_preprocess_image`` load+crop logic the streaming pipeline uses, plus
-    the same clip-to-[-1,+1] convention) into ``clean_pool``, then allocates a
-    mutable ``current_input`` = ``clip(clean + N(0, sigma_init), -1, +1)`` as the
+    the same clip-to-[-0.5,+0.5] convention) into ``clean_pool``, then allocates a
+    mutable ``current_input`` = ``clip(clean + N(0, sigma_init), -0.5, +0.5)`` as the
     epoch-1 additive-noise inputs.
 
     The ``current_input`` array is the LIVE buffer mutated IN PLACE by
@@ -522,7 +522,7 @@ def build_self_iterate_pool(
 
     Returns:
         ``(clean_pool, current_input)`` — two ``[P, patch, patch, C]`` float32 arrays
-        in ``[-1, +1]``; ``clean_pool`` is the fixed target, ``current_input`` the
+        in ``[-0.5, +0.5]``; ``clean_pool`` is the fixed target, ``current_input`` the
         mutable input buffer.
 
     Raises:
@@ -547,7 +547,7 @@ def build_self_iterate_pool(
         try:
             # REUSE the streaming pipeline's load+random-crop+clip convention exactly.
             patch = load_and_preprocess_image(tf.constant(path), config)
-            patch = tf.clip_by_value(patch, -1.0, 1.0)
+            patch = tf.clip_by_value(patch, -0.5, 0.5)
             patch_np = np.asarray(patch, dtype=np.float32)
             if not np.any(np.abs(patch_np) > 0):
                 continue  # mirror the streaming filter() that drops all-zero patches
@@ -568,7 +568,7 @@ def build_self_iterate_pool(
 
     noise = rng.normal(size=clean_pool.shape).astype(np.float32)
     current_input = np.clip(
-        clean_pool + noise * float(sigma_init), -1.0, 1.0
+        clean_pool + noise * float(sigma_init), -0.5, 0.5
     ).astype(np.float32)
 
     logger.info(
@@ -721,8 +721,8 @@ def verify_bias_free(model: keras.Model) -> None:
 
 
 def _denorm(img: np.ndarray) -> np.ndarray:
-    """Map a [-1, +1] image to [0, 1] for display."""
-    return np.clip((img + 1.0) / 2.0, 0.0, 1.0)
+    """Map a [-0.5, +0.5] image to [0, 1] for display."""
+    return np.clip(img + 0.5, 0.0, 1.0)
 
 
 def render_training_dashboard(history: dict, out_path: Path, title: str = "") -> None:
@@ -780,13 +780,13 @@ def render_training_dashboard(history: dict, out_path: Path, title: str = "") ->
     sig = history.get("sigma_max")
     _line(ax, sig, "sigma_max", color="#2ca02c", marker="o", markersize=3)
     ax.set_title("Noise sigma_max per epoch (curriculum)")
-    ax.set_xlabel("epoch"); ax.set_ylabel("sigma_max  [-1,+1] units")
+    ax.set_xlabel("epoch"); ax.set_ylabel("sigma_max  [-0.5,+0.5] units")
     ax.grid(True, alpha=0.3); ax.legend(loc="upper left")
     if sig is not None:
         twin = ax.twinx()
         twin.set_ylabel("sigma on [0,255] scale")
         lo, hi = ax.get_ylim()
-        twin.set_ylim(lo * 127.5, hi * 127.5)
+        twin.set_ylim(lo * 255.0, hi * 255.0)
 
     # (6) Learning rate (log y)
     ax = axes[1, 2]
@@ -804,31 +804,31 @@ def render_training_dashboard(history: dict, out_path: Path, title: str = "") ->
 # differs from the per-image PsnrMetric used in training logs (which averages per-image
 # PSNR), so eval-grid numbers will not match the val_psnr logged during fit.
 def _mean_psnr(pred, clean) -> float:
-    """Mean PSNR (dB) of ``pred`` vs ``clean`` on the [-1,+1] domain (max_val=2.0).
+    """Mean PSNR (dB) of ``pred`` vs ``clean`` on the [-0.5,+0.5] domain (max_val=1.0).
 
     Single source of truth for the trainer's PSNR convention: rmse over the whole
-    batch, then ``20*log10(2.0/rmse)``. Both the eval grid and the multi-pass eval
+    batch, then ``20*log10(1.0/rmse)``. Both the eval grid and the multi-pass eval
     helpers call this so the formula lives in exactly one place (DRY).
     """
     mse = float(tf.reduce_mean(tf.square(tf.convert_to_tensor(pred) - clean)))
-    return 20.0 * np.log10(2.0 / max(np.sqrt(mse), 1e-8))  # max_val=2.0
+    return 20.0 * np.log10(1.0 / max(np.sqrt(mse), 1e-8))  # max_val=1.0
 
 
 def denoise_k_passes(model: keras.Model, noisy, k: int) -> List[tf.Tensor]:
-    """Apply ``model`` ``k`` times sequentially, clipping to [-1,+1] between passes.
+    """Apply ``model`` ``k`` times sequentially, clipping to [-0.5,+0.5] between passes.
 
     Returns the LIST of the k intermediate denoised tensors ``[pass1, ..., passk]``
     so callers can score each pass independently. The model is applied exactly once
     per pass (``training=False``); this is eval/inference only and never affects
-    training. Domain [-1,+1] (clip after every pass).
+    training. Domain [-0.5,+0.5] (clip after every pass).
     """
     outputs: List[tf.Tensor] = []
-    x = tf.clip_by_value(tf.convert_to_tensor(noisy), -1.0, 1.0)
+    x = tf.clip_by_value(tf.convert_to_tensor(noisy), -0.5, 0.5)
     for _ in range(int(k)):
         x = model(x, training=False)
         if isinstance(x, (list, tuple)):
             x = x[0]  # deep-supervision: primary output
-        x = tf.clip_by_value(tf.convert_to_tensor(x), -1.0, 1.0)
+        x = tf.clip_by_value(tf.convert_to_tensor(x), -0.5, 0.5)
         outputs.append(x)
     return outputs
 
@@ -837,7 +837,7 @@ def multi_pass_psnr(model: keras.Model, clean, noisy, k: int) -> List[float]:
     """Per-pass mean PSNR (dB) for k sequential applications of ``model``.
 
     Runs ``denoise_k_passes`` and scores each pass against ``clean`` using the SAME
-    convention as the eval grid (``_mean_psnr``, max_val=2.0). Returns a list of k
+    convention as the eval grid (``_mean_psnr``, max_val=1.0). Returns a list of k
     floats ``[psnr(pass1), ..., psnr(passk)]``. Eval-only; does not affect training.
     """
     clean_t = tf.convert_to_tensor(clean)
@@ -883,7 +883,7 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         self.max_samples = max_samples
         self.val_ds = val_ds
         self.validation_steps = validation_steps
-        # Fixed reference noise regimes for the eval grid (sigma in [-1,+1] units),
+        # Fixed reference noise regimes for the eval grid (sigma in [-0.5,+0.5] units),
         # DECOUPLED from the moving curriculum sigma so the grid is comparable across
         # epochs. Defaults map to the standard benchmark levels sigma_255 = 15/25/50.
         if noise_regimes is not None:
@@ -907,9 +907,9 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
             ]
         else:
             self.noise_regimes = [
-                ("low", 15.0 / 127.5),
-                ("medium", 25.0 / 127.5),
-                ("high", 50.0 / 127.5),
+                ("low", 15.0 / 255.0),
+                ("medium", 25.0 / 255.0),
+                ("high", 50.0 / 255.0),
             ]
         self._hist = {k: [] for k in (
             "epoch", "loss", "val_loss", "mae", "val_mae",
@@ -1027,27 +1027,27 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         for label, sigma in self.noise_regimes:
             if multiplicative:
                 # Per-pixel multiplicative regime: reuse the same noise primitive the
-                # trainer uses, then the SAME [-1,+1] clip as the additive path.
+                # trainer uses, then the SAME [-0.5,+0.5] clip as the additive path.
                 noisy = tf.clip_by_value(
-                    apply_multiplicative_gaussian(clean, sigma), -1.0, 1.0
+                    apply_multiplicative_gaussian(clean, sigma), -0.5, 0.5
                 )
             elif composite:
                 # Composite regime: sigma here is sigma_m; the additive floor is
                 # sigma_a = ratio * sigma_m. Reuse the trainer's composite primitive,
-                # then the SAME [-1,+1] clip as the other paths.
+                # then the SAME [-0.5,+0.5] clip as the other paths.
                 noisy = tf.clip_by_value(
-                    apply_composite_gaussian(clean, sigma, ratio * sigma), -1.0, 1.0
+                    apply_composite_gaussian(clean, sigma, ratio * sigma), -0.5, 0.5
                 )
             else:
                 noisy = tf.clip_by_value(
-                    clean + tf.random.normal(tf.shape(clean)) * sigma, -1.0, 1.0
+                    clean + tf.random.normal(tf.shape(clean)) * sigma, -0.5, 0.5
                 )
             denoised = self.model(noisy, training=False)
             if isinstance(denoised, (list, tuple)):
                 denoised = denoised[0]  # deep-supervision: primary output
             denoised = tf.convert_to_tensor(denoised)
-            psnr = _mean_psnr(denoised, clean)  # max_val=2.0
-            psnr_noisy = _mean_psnr(noisy, clean)  # max_val=2.0
+            psnr = _mean_psnr(denoised, clean)  # max_val=1.0
+            psnr_noisy = _mean_psnr(noisy, clean)  # max_val=1.0
             if multiplicative:
                 noisy_label = f"Noisy {label}\n(mult σ={sigma:.2f}, PSNR {psnr_noisy:.1f} dB)"
             elif composite:
@@ -1056,7 +1056,7 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
                     f"PSNR {psnr_noisy:.1f} dB)"
                 )
             else:
-                s255 = sigma * 127.5
+                s255 = sigma * 255.0
                 noisy_label = f"Noisy {label}\n(σ≈{s255:.0f}, PSNR {psnr_noisy:.1f} dB)"
             rows.append((noisy_label, noisy.numpy()))
             rows.append((f"Denoised {label}\n(PSNR {psnr:.1f} dB)", np.asarray(denoised)))
@@ -1134,14 +1134,14 @@ class LRLoggerCallback(keras.callbacks.Callback):
 def build_fixed_val_batch(
     val_paths: List[str], config: TrainingConfig, n: int = 8
 ) -> Optional[tf.Tensor]:
-    """Load a small FIXED batch of clean [-1,+1] patches for visualization."""
+    """Load a small FIXED batch of clean [-0.5,+0.5] patches for visualization."""
     if not val_paths:
         return None
     patches = []
     for p in val_paths[: max(n * 3, n)]:
         try:
             patch = load_and_preprocess_image(tf.constant(p), config)
-            patch = tf.clip_by_value(patch, -1.0, 1.0)
+            patch = tf.clip_by_value(patch, -0.5, 0.5)
             patches.append(patch)
             if len(patches) >= n:
                 break
@@ -1194,8 +1194,8 @@ def build_dashboard_from_dir(exp_dir: str) -> Optional[Path]:
     # Reconstruct noise sigma_max per epoch from the curriculum schedule.
     try:
         cur = NoiseSigmaCurriculumCallback(
-            sigma_max_start=cfg.get("sigma_max_start", 0.05),
-            sigma_max_end=cfg.get("sigma_max_end", 0.5),
+            sigma_max_start=cfg.get("sigma_max_start", 0.025),
+            sigma_max_end=cfg.get("sigma_max_end", 0.25),
             total_epochs=cfg.get("curriculum_epochs") or cfg.get("epochs", len(epochs)),
             schedule=cfg.get("curriculum_schedule", "linear"),
         )
@@ -1319,6 +1319,8 @@ def train(config: TrainingConfig) -> keras.Model:
             regen_freq=config.self_iterate_regen_freq,
             mix_ratio=config.self_iterate_mix_ratio,
             predict_batch_size=config.batch_size,
+            clip_min=-0.5,
+            clip_max=0.5,
             seed=config.seed or 42,
         )
         logger.info(
@@ -1423,8 +1425,8 @@ def train(config: TrainingConfig) -> keras.Model:
         loss="mse",
         metrics=[
             "mae",
-            PsnrMetric(max_val=2.0, name="psnr_metric"),
-            SsimMetric(max_val=2.0, name="ssim_metric"),
+            PsnrMetric(max_val=1.0, name="psnr_metric"),
+            SsimMetric(max_val=1.0, name="ssim_metric"),
         ],
     )
     logger.info(f"Model compiled with {model.count_params():,} parameters")
@@ -1639,8 +1641,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--analyzer-freq", type=int, default=10,
                         help="Run the analyzer every N epochs (with --analyzer)")
     parser.add_argument("--gabor-filters", type=int, default=32)
-    parser.add_argument("--sigma-max-start", type=float, default=0.05)
-    parser.add_argument("--sigma-max-end", type=float, default=0.5)
+    parser.add_argument("--sigma-max-start", type=float, default=0.025)
+    parser.add_argument("--sigma-max-end", type=float, default=0.25)
     parser.add_argument("--curriculum-schedule",
                         choices=["linear", "cosine", "exp"], default="linear")
     parser.add_argument("--curriculum-epochs", type=int, default=None)
@@ -1797,8 +1799,8 @@ def main():
             # (builder has no 'constant'). 2-epoch PSNR quality is NOT asserted.
             lr_schedule_type="cosine_decay",
             learning_rate=1e-3,
-            sigma_max_start=0.05,
-            sigma_max_end=0.5,
+            sigma_max_start=0.025,
+            sigma_max_end=0.25,
             curriculum_schedule="linear",
             noise_type=(
                 "composite" if args.composite_noise

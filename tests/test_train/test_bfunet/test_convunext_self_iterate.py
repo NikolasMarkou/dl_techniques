@@ -6,7 +6,7 @@ streaming trainer. We verify that two ways:
 
 1. **Behavioural batch contract (SC1a).** Building the streaming ``create_dataset``
    with ``self_iterate=False`` yields a well-formed first ``(noisy, clean)`` batch
-   (right shape/dtype, values in [-1, +1], additive noise actually applied). We do
+   (right shape/dtype, values in [-0.5, +0.5], additive noise actually applied). We do
    NOT assert bitwise cross-build determinism: the streaming noise/crop ops are not
    stateless-seeded, so two builds are not guaranteed bitwise-equal even under the
    same seed -- that was never an OFF-path property and asserting it was flaky.
@@ -139,7 +139,7 @@ def test_off_path_batch_contract(image_paths):
 
     Build the streaming dataset with self_iterate=False and assert the first
     (noisy, clean) batch honours the contract: right shape, float32 dtype,
-    values in the [-1, +1] domain, and additive noise actually applied
+    values in the [-0.5, +0.5] domain, and additive noise actually applied
     (noisy != clean). This is the behavioural half of SC1; the *byte-identity*
     half (proving the streaming logic is unchanged vs the pre-plan baseline)
     is ``test_off_path_textual_byte_identity_vs_baseline`` below.
@@ -216,15 +216,36 @@ def _nonspace_tokens(func_source: str) -> str:
     return re.sub(r"\s+", "", func_source)
 
 
+def _undo_scale_rescale(func_source: str) -> str:
+    """Map the [-0.5,+0.5] rescale constants back to the baseline [-1,+1] form.
+
+    plan_2026-06-21_a8cf8c87 performed a FAITHFUL SNR-preserving rescale of the
+    data domain [-1,+1] -> [-0.5,+0.5], which deliberately changes the clip
+    constant inside ``make_curriculum_noise_fn`` / ``create_dataset`` and the
+    range mention in their comments. That is the ONLY sanctioned change to the
+    OFF-path streaming logic. Folding the rescale constants back to the baseline
+    form here keeps this byte-identity guard meaningful: it still catches any
+    OTHER structural change to the streaming logic, while permitting the
+    documented domain rescale. Do NOT broaden these substitutions beyond the
+    exact rescale literals -- a looser regex would mask a real OFF-path regression.
+    """
+    s = func_source.replace("-0.5, 0.5", "-1.0, 1.0")
+    s = s.replace("[-0.5, +0.5]", "[-1, +1]").replace("[-0.5,+0.5]", "[-1,+1]")
+    return s
+
+
 @pytest.mark.parametrize("func_name", ["create_dataset", "make_curriculum_noise_fn"])
 def test_off_path_textual_byte_identity_vs_baseline(func_name):
     """SC1b: streaming OFF-path source matches the pre-plan baseline.
 
     The streaming ``create_dataset`` / ``make_curriculum_noise_fn`` logic must be
-    unchanged from commit 8688519a (Step 3 only branched ``train()``). We compare
-    the NORMALIZED function bodies (indentation-insensitive). If normalized
-    equality fails we fall back to comparing the non-whitespace token SET, and if
-    THAT differs the OFF path genuinely changed -> SC1 failure / real regression.
+    unchanged from commit 8688519a (Step 3 only branched ``train()``), MODULO the
+    faithful [-1,+1] -> [-0.5,+0.5] domain rescale of plan_2026-06-21_a8cf8c87,
+    which is folded back to the baseline form via ``_undo_scale_rescale`` so the
+    guard still catches any OTHER structural change. We compare the NORMALIZED
+    function bodies (indentation-insensitive). If normalized equality fails we fall
+    back to comparing the non-whitespace token SET, and if THAT differs the OFF
+    path genuinely changed -> SC1 failure / real regression.
     """
     repo_root = _repo_root()
     baseline_text = subprocess.check_output(
@@ -233,7 +254,8 @@ def test_off_path_textual_byte_identity_vs_baseline(func_name):
         text=True,
     )
     baseline_src = _extract_function_source_from_text(baseline_text, func_name)
-    current_src = inspect.getsource(getattr(trainer_mod, func_name))
+    # Fold the sanctioned domain rescale back to the baseline form before comparing.
+    current_src = _undo_scale_rescale(inspect.getsource(getattr(trainer_mod, func_name)))
 
     baseline_norm = _normalize_body(baseline_src)
     current_norm = _normalize_body(current_src)
@@ -285,10 +307,10 @@ def test_pool_dataset_shapes_dtype_range_and_finite():
     pool_size, batch = 16, 4
     config = _pool_config(pool_size=pool_size, batch=batch)
     rng = np.random.default_rng(0)
-    clean_pool = rng.uniform(-1.0, 1.0, size=(pool_size, PATCH, PATCH, CHANNELS)).astype(np.float32)
+    clean_pool = rng.uniform(-0.5, 0.5, size=(pool_size, PATCH, PATCH, CHANNELS)).astype(np.float32)
     current_input = np.clip(
         clean_pool + rng.normal(size=clean_pool.shape).astype(np.float32) * 0.1,
-        -1.0, 1.0,
+        -0.5, 0.5,
     ).astype(np.float32)
 
     ds, steps_per_epoch = create_self_iterate_dataset(clean_pool, current_input, config)
@@ -304,8 +326,8 @@ def test_pool_dataset_shapes_dtype_range_and_finite():
         assert clean.dtype == tf.float32
         n = np.asarray(noisy)
         c = np.asarray(clean)
-        assert n.min() >= -1.0 - 1e-6 and n.max() <= 1.0 + 1e-6
-        assert c.min() >= -1.0 - 1e-6 and c.max() <= 1.0 + 1e-6
+        assert n.min() >= -0.5 - 1e-6 and n.max() <= 0.5 + 1e-6
+        assert c.min() >= -0.5 - 1e-6 and c.max() <= 0.5 + 1e-6
 
 
 def test_build_self_iterate_pool_from_tiny_files(tmp_path):
@@ -330,8 +352,8 @@ def test_build_self_iterate_pool_from_tiny_files(tmp_path):
     assert current_input.shape == (pool_size, PATCH, PATCH, CHANNELS)
     assert clean_pool.dtype == np.float32
     assert current_input.dtype == np.float32
-    assert clean_pool.min() >= -1.0 - 1e-6 and clean_pool.max() <= 1.0 + 1e-6
-    assert current_input.min() >= -1.0 - 1e-6 and current_input.max() <= 1.0 + 1e-6
+    assert clean_pool.min() >= -0.5 - 1e-6 and clean_pool.max() <= 0.5 + 1e-6
+    assert current_input.min() >= -0.5 - 1e-6 and current_input.max() <= 0.5 + 1e-6
     # sigma_init>0 must have perturbed the clean pool.
     assert float(np.max(np.abs(current_input - clean_pool))) > 0.0
 
@@ -351,21 +373,21 @@ def _tiny_conv_model() -> keras.Model:
 def test_denoise_k_passes_shapes():
     """denoise_k_passes returns k tensors, each shaped like the input."""
     model = _tiny_conv_model()
-    noisy = tf.random.uniform((2, PATCH, PATCH, CHANNELS), -1.0, 1.0)
+    noisy = tf.random.uniform((2, PATCH, PATCH, CHANNELS), -0.5, 0.5)
     outs = denoise_k_passes(model, noisy, 3)
     assert isinstance(outs, list) and len(outs) == 3
     for t in outs:
         assert tuple(t.shape) == (2, PATCH, PATCH, CHANNELS)
         arr = np.asarray(t)
-        assert arr.min() >= -1.0 - 1e-6 and arr.max() <= 1.0 + 1e-6
+        assert arr.min() >= -0.5 - 1e-6 and arr.max() <= 0.5 + 1e-6
 
 
 def test_multi_pass_psnr_returns_k_numbers():
     """multi_pass_psnr returns k finite numeric PSNR values."""
     model = _tiny_conv_model()
-    clean = tf.random.uniform((2, PATCH, PATCH, CHANNELS), -1.0, 1.0)
+    clean = tf.random.uniform((2, PATCH, PATCH, CHANNELS), -0.5, 0.5)
     noisy = tf.clip_by_value(
-        clean + tf.random.normal(clean.shape) * 0.1, -1.0, 1.0
+        clean + tf.random.normal(clean.shape) * 0.1, -0.5, 0.5
     )
     psnrs = multi_pass_psnr(model, clean, noisy, 3)
     assert len(psnrs) == 3
@@ -462,11 +484,11 @@ def test_self_iterate_trains_multiple_epochs_and_pool_reread():
 
     rng = np.random.default_rng(0)
     clean_pool = rng.uniform(
-        -1.0, 1.0, size=(pool_size, PATCH, PATCH, CHANNELS)
+        -0.5, 0.5, size=(pool_size, PATCH, PATCH, CHANNELS)
     ).astype(np.float32)
     current_input = np.clip(
         clean_pool + rng.normal(size=clean_pool.shape).astype(np.float32) * 0.1,
-        -1.0, 1.0,
+        -0.5, 0.5,
     ).astype(np.float32)
 
     ds, steps_per_epoch = create_self_iterate_dataset(
