@@ -525,5 +525,95 @@ class TestDepthwiseInitRegularizer:
             self._build_block(depthwise_initializer=HeOrthonormalInitializer())
 
 
+class TestActivationSerialization:
+    """Tests for layer-instance activation serialization + string backward-compat (Step 1/2).
+
+    Guards that an `activation=keras.layers.LeakyReLU(negative_slope=0.1)` *instance*
+    survives `get_config`/`from_config` and a full `.keras` save/load, while a plain
+    string activation (e.g. ``"gelu"``) keeps serializing as the raw string (byte-identical
+    backward compat with existing checkpoints).
+    """
+
+    CHANNELS = 8
+    KERNEL = 7
+
+    def _input(self):
+        np.random.seed(0)
+        return np.random.randn(2, 8, 8, self.CHANNELS).astype("float32")
+
+    def _build_block(self, **overrides):
+        params = dict(
+            kernel_size=self.KERNEL,
+            filters=self.CHANNELS,
+            dropout_rate=0.0,
+            spatial_dropout_rate=0.0,
+        )
+        params.update(overrides)
+        return ConvNextV1Block(**params)
+
+    def test_leaky_relu_instance_get_config_roundtrip(self) -> None:
+        """LeakyReLU(0.1) instance: get_config emits a dict; from_config rebuilds equal block."""
+        x = self._input()
+        block = self._build_block(activation=keras.layers.LeakyReLU(negative_slope=0.1))
+        out_a = block(x, training=False).numpy()
+
+        config = block.get_config()
+        assert isinstance(config["activation"], dict)
+
+        rebuilt = ConvNextV1Block.from_config(config)
+        # Share weights so outputs are comparable (config alone carries no weights).
+        rebuilt.build((None, 8, 8, self.CHANNELS))
+        rebuilt.set_weights(block.get_weights())
+        out_b = rebuilt(x, training=False).numpy()
+
+        assert np.allclose(out_a, out_b, atol=1e-6)
+
+    def test_leaky_relu_instance_keras_save_load(self, tmp_path) -> None:
+        """Full .keras save/load with LeakyReLU(0.1); blocks are registered, no custom_objects."""
+        x = self._input()
+        inputs = keras.Input(shape=(8, 8, self.CHANNELS))
+        block = self._build_block(activation=keras.layers.LeakyReLU(negative_slope=0.1))
+        outputs = block(inputs)
+        model = keras.Model(inputs=inputs, outputs=outputs)
+
+        original_output = model(x, training=False).numpy()
+
+        save_path = str(tmp_path / "m.keras")
+        model.save(save_path)
+        reloaded = keras.models.load_model(save_path)
+        loaded_output = reloaded(x, training=False).numpy()
+
+        assert np.allclose(original_output, loaded_output, atol=1e-5)
+
+    def test_slope_threaded_through_activation(self) -> None:
+        """Two blocks differing only in LeakyReLU negative_slope produce different outputs,
+        proving the alpha is actually threaded into the activation."""
+        x = self._input()
+        block_a = self._build_block(activation=keras.layers.LeakyReLU(negative_slope=0.1))
+        block_b = self._build_block(activation=keras.layers.LeakyReLU(negative_slope=0.5))
+
+        block_a.build((None, 8, 8, self.CHANNELS))
+        block_b.build((None, 8, 8, self.CHANNELS))
+        # Identical weights -> any output difference is due to the activation slope alone.
+        block_b.set_weights(block_a.get_weights())
+
+        out_a = block_a(x, training=False).numpy()
+        out_b = block_b(x, training=False).numpy()
+
+        assert not np.allclose(out_a, out_b, atol=1e-6)
+
+    def test_string_activation_backward_compat(self) -> None:
+        """Default (gelu) and explicit string activations serialize as the raw string, not a dict."""
+        default_block = self._build_block()
+        default_cfg = default_block.get_config()
+        assert default_cfg["activation"] == "gelu"
+        assert not isinstance(default_cfg["activation"], dict)
+
+        relu_block = self._build_block(activation="relu")
+        relu_cfg = relu_block.get_config()
+        assert relu_cfg["activation"] == "relu"
+        assert not isinstance(relu_cfg["activation"], dict)
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
