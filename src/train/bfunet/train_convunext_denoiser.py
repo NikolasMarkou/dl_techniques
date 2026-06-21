@@ -704,6 +704,12 @@ def build_model(config: TrainingConfig) -> keras.Model:
         final_activation="linear",  # MUST stay linear: bias-free homogeneity f(ax)=a*f(x)
         model_name=f"convunext_denoiser_{config.variant}",
         block_activation=block_activation,
+        # The SAME constructed activation drives block + stem + deep-supervision so the
+        # trainer path has no GELU anywhere. Sharing one stateless LeakyReLU instance is
+        # safe: blocks/stem wrap it in their own Activation sublayers and the supervision
+        # helper CLONES it (see _make_supervision_activation, D-006).
+        stem_activation=block_activation,
+        supervision_activation=block_activation,
         depthwise_initializer=_resolve_depthwise_initializer(config.depthwise_initializer),
         depthwise_regularizer=(
             keras.regularizers.L2(config.depthwise_l2)
@@ -1755,15 +1761,17 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--block-activation", type=str, default="leaky_relu",
-        help="ConvNeXt block activation. 'leaky_relu' (default) builds "
-             "LeakyReLU(negative_slope=--block-activation-alpha); any other Keras "
-             "activation name is passed through as a string. Stem and final "
-             "activations are unaffected.",
+        help="Activation for the WHOLE denoiser: the ConvNeXt blocks AND the "
+             "ConvUNextStem AND the deep-supervision heads all use it. 'leaky_relu' "
+             "(default) builds LeakyReLU(negative_slope=--block-activation-alpha); any "
+             "other Keras activation name is passed through as a string. The final "
+             "activation stays linear (bias-free homogeneity).",
     )
     parser.add_argument(
         "--block-activation-alpha", type=float, default=0.1,
-        help="Negative slope for LeakyReLU when --block-activation=leaky_relu. "
-             "Default 0.1. Ignored for non-leaky activations.",
+        help="Negative slope for LeakyReLU when --block-activation=leaky_relu. Applies "
+             "to the whole denoiser (blocks + stem + deep-supervision). Default 0.1. "
+             "Ignored for non-leaky activations.",
     )
     parser.add_argument(
         "--smoke", action="store_true",

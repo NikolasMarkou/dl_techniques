@@ -342,6 +342,95 @@ class TestBlockActivationSerialization:
 
 
 # ---------------------------------------------------------------------
+# Stem + deep-supervision activation threading (Step 9): the factory
+# stem_activation / supervision_activation params must reach the stem and
+# the deep-supervision heads, and a LeakyReLU(0.1) instance must survive
+# .keras save/load. All save/load asserts call the model with
+# training=False so StochasticDepth (stochastic in training mode) does not
+# produce false mismatches.
+# ---------------------------------------------------------------------
+
+class TestStemSupervisionActivation:
+    """Step 9: stem_activation / supervision_activation factory + serialization."""
+
+    def test_stem_activation_leaky_relu_keras_roundtrip(self, tmp_path) -> None:
+        # use_gabor_stem=False so the ConvUNextStem (which carries the activation)
+        # is actually built at encoder level 0.
+        model = create_convunext_denoiser(
+            input_shape=(32, 32, 3),
+            depth=3,
+            initial_filters=8,
+            blocks_per_level=1,
+            use_gabor_stem=False,
+            stem_activation=keras.layers.LeakyReLU(negative_slope=0.1),
+        )
+
+        rng = np.random.RandomState(2024)
+        x = rng.rand(2, 32, 32, 3).astype(np.float32)
+        out_before = model(x, training=False)
+
+        save_path = os.path.join(str(tmp_path), 'denoiser_stem_leaky.keras')
+        model.save(save_path)
+        reloaded = keras.models.load_model(save_path)
+        out_after = reloaded(x, training=False)
+
+        np.testing.assert_allclose(
+            np.array(keras.ops.convert_to_numpy(out_before)),
+            np.array(keras.ops.convert_to_numpy(out_after)),
+            atol=1e-5,
+            err_msg="Outputs differ after .keras round-trip (stem LeakyReLU(0.1))",
+        )
+
+    def test_default_stem_activation_is_gelu(self) -> None:
+        # Default (no stem_activation): the standard ConvUNextStem exists only when
+        # use_gabor_stem=False, and its serialized activation must stay 'gelu'.
+        model = create_convunext_denoiser(
+            input_shape=(32, 32, 3),
+            depth=3,
+            initial_filters=8,
+            blocks_per_level=1,
+            use_gabor_stem=False,
+        )
+        stems = [
+            l for l in model.layers
+            if l.__class__.__name__ == 'ConvUNextStem'
+        ]
+        assert len(stems) > 0, "no ConvUNextStem found in the default build"
+        for stem in stems:
+            assert stem.get_config()['activation'] == 'gelu'
+
+    def test_supervision_activation_leaky_relu_keras_roundtrip(self, tmp_path) -> None:
+        model = create_convunext_denoiser(
+            input_shape=(32, 32, 3),
+            depth=3,
+            initial_filters=8,
+            blocks_per_level=1,
+            enable_deep_supervision=True,
+            supervision_activation=keras.layers.LeakyReLU(negative_slope=0.1),
+        )
+
+        rng = np.random.RandomState(7)
+        x = rng.rand(1, 32, 32, 3).astype(np.float32)
+        outs_before = model(x, training=False)
+        assert isinstance(outs_before, list) and len(outs_before) > 1
+
+        save_path = os.path.join(str(tmp_path), 'denoiser_sup_leaky.keras')
+        model.save(save_path)
+        reloaded = keras.models.load_model(save_path)
+        outs_after = reloaded(x, training=False)
+
+        assert len(outs_after) == len(outs_before)
+        for i, (b, a) in enumerate(zip(outs_before, outs_after)):
+            np.testing.assert_allclose(
+                np.array(keras.ops.convert_to_numpy(b)),
+                np.array(keras.ops.convert_to_numpy(a)),
+                atol=1e-5,
+                err_msg=f"Output {i} differs after .keras round-trip "
+                        f"(supervision LeakyReLU(0.1))",
+            )
+
+
+# ---------------------------------------------------------------------
 # create_convunext_variant (wrapper)
 # ---------------------------------------------------------------------
 

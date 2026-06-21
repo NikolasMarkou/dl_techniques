@@ -390,6 +390,7 @@ def create_convunext_denoiser(
         expose_bottleneck: bool = False,
         block_kernel_size: Union[int, Tuple[int, int]] = 7,
         block_activation: Union[str, keras.layers.Layer] = 'gelu',
+        stem_activation: Union[str, keras.layers.Layer] = 'gelu',
         drop_path_rate: float = 0.1,
         final_activation: Union[str, callable] = 'linear',
         # Scale-preserving (norm-preserving) init for the main-path structural convs
@@ -482,6 +483,8 @@ def create_convunext_denoiser(
             `keras.layers.LeakyReLU(negative_slope=0.1)` instance for slope-0.1 leaky ReLU
             (the 'leaky_relu' string resolves to slope 0.2). A layer instance round-trips
             through .keras serialization (handled by ConvNext*Block.get_config).
+        stem_activation: String or keras Layer, activation for the ConvUNextStem; default
+            'gelu'; only used when the standard stem is built, i.e. use_gabor_stem=False.
         drop_path_rate: Float, stochastic depth drop probability. Defaults to 0.1.
         final_activation: String or callable, final activation function. Defaults to 'linear'.
         kernel_initializer: String or Initializer, weight initializer. Defaults to 'orthogonal'.
@@ -633,6 +636,7 @@ def create_convunext_denoiser(
             x = ConvUNextStem(
                 filters=current_filters,
                 kernel_size=stem_kernel_size,
+                activation=stem_activation,
                 kernel_initializer=kernel_initializer,
                 kernel_regularizer=kernel_regularizer,
                 name=f'encoder_level_{level}_stem'
