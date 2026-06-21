@@ -216,6 +216,10 @@ def _nonspace_tokens(func_source: str) -> str:
     return re.sub(r"\s+", "", func_source)
 
 
+# DECISION plan_2026-06-21_a8cf8c87/D-003: re-baseline the byte-identity guard for the
+# sanctioned [-1,+1]->[-0.5,+0.5] rescale by folding ONLY the exact rescale literals back
+# to baseline form. Do NOT broaden these substitutions — a looser regex masks a real
+# OFF-path regression. See plans/plan_2026-06-21_a8cf8c87/decisions.md D-003.
 def _undo_scale_rescale(func_source: str) -> str:
     """Map the [-0.5,+0.5] rescale constants back to the baseline [-1,+1] form.
 
