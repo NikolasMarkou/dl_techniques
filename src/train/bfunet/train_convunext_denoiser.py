@@ -215,6 +215,12 @@ class TrainingConfig:
     # weight on the depthwise kernels; None=off, else wired to keras.regularizers.L2.
     depthwise_initializer: Optional[str] = None
     depthwise_l2: Optional[float] = None
+    # ConvNeXt block activation (inverted-bottleneck MLP). "leaky_relu" + alpha builds
+    # keras.layers.LeakyReLU(negative_slope=alpha) in build_model (the bare "leaky_relu"
+    # string resolves to slope 0.2, so the trainer constructs the instance to honor 0.1);
+    # any other value is passed to the factory as a plain Keras activation string.
+    block_activation: str = "leaky_relu"
+    block_activation_alpha: float = 0.1
 
     # Training
     batch_size: int = 16
@@ -675,6 +681,18 @@ def build_model(config: TrainingConfig) -> keras.Model:
     cfg.pop("description", None)
     cfg["convnext_version"] = config.convnext_version  # override variant default
     input_shape = (config.patch_size, config.patch_size, config.channels)
+    # DECISION plan_2026-06-21_eb7fd829/D-003: the bare "leaky_relu" string resolves to
+    # slope 0.2 in Keras, so DO NOT pass the string when alpha 0.1 is wanted. Construct an
+    # explicit keras.layers.LeakyReLU(negative_slope=alpha) instance to honor the 0.1
+    # default. The instance round-trips through .keras via ConvNext*Block.get_config layer
+    # serialization (D-001). Any other block_activation value is a plain string passed
+    # straight to the factory. See decisions.md D-003.
+    if config.block_activation == "leaky_relu":
+        block_activation = keras.layers.LeakyReLU(
+            negative_slope=config.block_activation_alpha
+        )
+    else:
+        block_activation = config.block_activation
     return create_convunext_denoiser(
         input_shape=input_shape,
         use_gabor_stem=config.use_gabor_stem,
@@ -685,6 +703,7 @@ def build_model(config: TrainingConfig) -> keras.Model:
         expose_bottleneck=config.expose_bottleneck,
         final_activation="linear",  # MUST stay linear: bias-free homogeneity f(ax)=a*f(x)
         model_name=f"convunext_denoiser_{config.variant}",
+        block_activation=block_activation,
         depthwise_initializer=_resolve_depthwise_initializer(config.depthwise_initializer),
         depthwise_regularizer=(
             keras.regularizers.L2(config.depthwise_l2)
@@ -1735,6 +1754,18 @@ def parse_arguments() -> argparse.Namespace:
              "deepcopy(kernel_regularizer) default).",
     )
     parser.add_argument(
+        "--block-activation", type=str, default="leaky_relu",
+        help="ConvNeXt block activation. 'leaky_relu' (default) builds "
+             "LeakyReLU(negative_slope=--block-activation-alpha); any other Keras "
+             "activation name is passed through as a string. Stem and final "
+             "activations are unaffected.",
+    )
+    parser.add_argument(
+        "--block-activation-alpha", type=float, default=0.1,
+        help="Negative slope for LeakyReLU when --block-activation=leaky_relu. "
+             "Default 0.1. Ignored for non-leaky activations.",
+    )
+    parser.add_argument(
         "--smoke", action="store_true",
         help="Tiny end-to-end mechanism check (few steps/epochs, constant LR).",
     )
@@ -1820,6 +1851,8 @@ def main():
             init_from=args.init_from,
             depthwise_initializer=args.depthwise_initializer,
             depthwise_l2=args.depthwise_l2,
+            block_activation=args.block_activation,
+            block_activation_alpha=args.block_activation_alpha,
             viz_freq=1,
             viz_samples=args.viz_samples,
             output_dir=args.output_dir,
@@ -1862,6 +1895,8 @@ def main():
             init_from=args.init_from,
             depthwise_initializer=args.depthwise_initializer,
             depthwise_l2=args.depthwise_l2,
+            block_activation=args.block_activation,
+            block_activation_alpha=args.block_activation_alpha,
             max_train_files=args.max_train_files or 10000,
             max_val_files=args.max_val_files or 500,
             steps_per_epoch=args.steps_per_epoch,
