@@ -177,9 +177,17 @@ is applied by the caller, not the block:
 
 ```
 branch:  DepthwiseConv2D(7x7) → LayerNorm(center=False) → Conv1x1(4× expand)
-         → GELU → [GRN, V2 only] → dropout → Conv1x1(reduce) → LayerScale γ
+         → activation (default LeakyReLU(0.1)) → [GRN, V2 only] → dropout
+         → Conv1x1(reduce) → LayerScale γ
 wiring:  x  +  StochasticDepth(rate)( branch(x) )
 ```
+
+- **Block activation** is configurable via `--block-activation` /
+  `--block-activation-alpha` (trainer default `leaky_relu` / `0.1`). The default
+  `LeakyReLU(0.1)` is **degree-1 homogeneous** (`f(αx)=αf(x)` for α>0), so it is
+  consistent with — indeed better-suited to — the bias-free scaling contract than
+  GELU, which is *not* homogeneous. Only the ConvNeXt block activation changes; the
+  **stem activation (still GELU) and the linear final activation are unaffected**.
 
 - **Depthwise 7×7 + inverted bottleneck** (4× expansion) is the ConvNeXt recipe:
   large-kernel spatial mixing, then a fat pointwise MLP for channel mixing.
@@ -188,7 +196,8 @@ wiring:  x  +  StochasticDepth(rate)( branch(x) )
   because it lives inside a residual branch that is multiplied by LayerScale γ and
   added to an identity path, the **whole block stays degree-1 homogeneous**. There
   is no additive offset anywhere on the path.
-- **V2 adds Global Response Normalization (GRN)** between GELU and dropout. GRN
+- **V2 adds Global Response Normalization (GRN)** between the block activation
+  (LeakyReLU(0.1) by default) and dropout. GRN
   introduces cross-channel competition (`Y = X + γ·(X⊙normalize(X)) + β`) and is the
   headline ConvNeXt-V2 improvement. **But GRN's `β` is a trainable additive term** —
   a genuine bias. So **V2 is only approximately bias-free**: `verify_bias_free` will
@@ -628,6 +637,8 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
 |----------|---------|-------------|
 | `--variant` | `base` | Model size: `tiny\|small\|base\|large\|xlarge` |
 | `--convnext-version` | `v1` | `v1` (strict bias-free) or `v2` (GRN, β is a trainable bias) |
+| `--block-activation` | `leaky_relu` | ConvNeXt block activation. `leaky_relu` builds `LeakyReLU(negative_slope=--block-activation-alpha)`; any other Keras activation name is passed as a string. Stem/final activations unaffected. |
+| `--block-activation-alpha` | `0.1` | Negative slope for LeakyReLU; ignored for non-leaky activations. |
 | `--epochs` | `100` | Total training epochs |
 | `--batch-size` | `16` | Batch size (reduce for large variants @256; base@256 → 4 on a 4090) |
 | `--patch-size` | `256` | Square crop size in pixels |
