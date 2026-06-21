@@ -78,6 +78,11 @@ class SelfIteratePoolCallback(keras.callbacks.Callback):
             pool.
         seed: Seed for the internal ``np.random.default_rng`` (slot permutation +
             fresh-noise generation).
+        clip_min: Lower bound of the data domain that the regenerated (fed-back) and
+            fresh-noise pool slots are clipped to. Default ``-1.0``.
+        clip_max: Upper bound of the data domain that the regenerated (fed-back) and
+            fresh-noise pool slots are clipped to. Default ``+1.0`` (domain
+            ``[-1, +1]``).
 
     Note:
         A deserialized instance (via ``from_config``) is NON-FUNCTIONAL until
@@ -98,6 +103,8 @@ class SelfIteratePoolCallback(keras.callbacks.Callback):
         mix_ratio: float = 0.5,
         predict_batch_size: int = 32,
         seed: int = 42,
+        clip_min: float = -1.0,
+        clip_max: float = 1.0,
     ) -> None:
         super().__init__()
         if not (0.0 <= mix_ratio <= 1.0):
@@ -118,6 +125,8 @@ class SelfIteratePoolCallback(keras.callbacks.Callback):
         self.mix_ratio = float(mix_ratio)
         self.predict_batch_size = int(predict_batch_size)
         self.seed = int(seed)
+        self.clip_min = float(clip_min)
+        self.clip_max = float(clip_max)
 
         self._rng = np.random.default_rng(seed)
         self.epochs_seen: int = 0
@@ -169,7 +178,9 @@ class SelfIteratePoolCallback(keras.callbacks.Callback):
 
             # Regenerated slots: feed the model output back AS-IS (no re-injected
             # noise), clipped to the valid domain.
-            self.current_input[regen_idx] = np.clip(denoised[regen_idx], -1.0, 1.0)
+            self.current_input[regen_idx] = np.clip(
+                denoised[regen_idx], self.clip_min, self.clip_max
+            )
 
             # Fresh slots: refill from the FIXED clean targets with fresh additive
             # Gaussian noise at the current sigma.
@@ -178,7 +189,9 @@ class SelfIteratePoolCallback(keras.callbacks.Callback):
                 size=self.current_input[fresh_idx].shape
             ).astype(np.float32)
             self.current_input[fresh_idx] = np.clip(
-                self.clean_pool[fresh_idx] + noise * sigma, -1.0, 1.0
+                self.clean_pool[fresh_idx] + noise * sigma,
+                self.clip_min,
+                self.clip_max,
             )
 
             mean_residual = float(
@@ -210,6 +223,8 @@ class SelfIteratePoolCallback(keras.callbacks.Callback):
             "mix_ratio": self.mix_ratio,
             "predict_batch_size": self.predict_batch_size,
             "seed": self.seed,
+            "clip_min": self.clip_min,
+            "clip_max": self.clip_max,
         }
 
     @classmethod

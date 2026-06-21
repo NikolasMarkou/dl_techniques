@@ -195,7 +195,8 @@ class TestSelfIteratePoolCallback:
         )
         cfg = cb.get_config()
         assert set(cfg.keys()) == {
-            "regen_freq", "mix_ratio", "predict_batch_size", "seed"
+            "regen_freq", "mix_ratio", "predict_batch_size", "seed",
+            "clip_min", "clip_max",
         }
         # No live arrays / model / callable leaked into the config.
         for forbidden in ("clean_pool", "current_input", "get_sigma", "model"):
