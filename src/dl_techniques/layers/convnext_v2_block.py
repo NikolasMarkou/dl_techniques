@@ -491,7 +491,11 @@ class ConvNextV2Block(keras.layers.Layer):
         config.update({
             "kernel_size": self.kernel_size,
             "filters": self.filters,
-            "activation": self.activation_name,
+            # DECISION plan_2026-06-21_eb7fd829/D-001: serialize a layer-instance activation
+            # via keras.layers.serialize so LeakyReLU(alpha) round-trips through .keras; the
+            # string path (e.g. "gelu") stays the raw string for backward-compat with existing
+            # checkpoints. Do NOT serialize strings to dicts. See decisions.md D-001.
+            "activation": keras.layers.serialize(self.activation_name) if isinstance(self.activation_name, keras.layers.Layer) else self.activation_name,
             "kernel_regularizer": keras.regularizers.serialize(self.kernel_regularizer),
             "use_bias": self.use_bias,
             "dropout_rate": self.dropout_rate,
@@ -521,6 +525,11 @@ class ConvNextV2Block(keras.layers.Layer):
             config_copy["kernel_regularizer"] = keras.regularizers.deserialize(
                 config_copy["kernel_regularizer"]
             )
+
+        # Deserialize a layer-instance activation (a dict) back into a Layer; a raw string
+        # activation (e.g. "gelu") passes through untouched. See decisions.md D-001.
+        if isinstance(config_copy.get("activation"), dict):
+            config_copy["activation"] = keras.layers.deserialize(config_copy["activation"])
 
         # Deserialize the depthwise init/regularizer overrides when present and non-None
         if "depthwise_initializer" in config_copy and config_copy["depthwise_initializer"] is not None:
