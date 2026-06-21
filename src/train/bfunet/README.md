@@ -107,15 +107,15 @@ input (H,W,C) in [-0.5,+0.5]
    │
  ┌─┴─ encoder level 0 ─ [N ConvNeXt blocks] ─┐ skip0 ──────────────────────┐
  │         ▼ downsample (MaxPool, or Laplacian low-band §4.2)              │
- │   encoder level 1 ─ [N ConvNeXt blocks] ─┐ skip1 ───────────────┐      │
- │         ▼ downsample                                            │      │
- │      … (depth levels) …                                         │      │
- │         ▼                                                       │      │
- │   bottleneck ─ [N ConvNeXt blocks]  (optional linear tap §4.3) │      │
- │         ▲ upsample (bilinear) → concat skip → 1x1 adjust        │      │
- │   decoder level 1 ─ [N ConvNeXt blocks] ◄──────────────────────┘      │
- │         ▲ upsample → concat skip0 → 1x1 adjust                         │
- └─► decoder level 0 ─ [N ConvNeXt blocks] ◄─────────────────────────────┘
+ │   encoder level 1 ─ [N ConvNeXt blocks] ─┐ skip1 ──────────────┐        │
+ │         ▼ downsample                                           │        │
+ │      … (depth levels) …                                        │        │
+ │         ▼                                                      │        │
+ │   bottleneck ─ [N ConvNeXt blocks]  (optional linear tap §4.3) │        │
+ │         ▲ upsample (bilinear) → concat skip → 1x1 adjust       │        │
+ │   decoder level 1 ─ [N ConvNeXt blocks] ◄──────────────────────┘        │
+ │         ▲ upsample → concat skip0 → 1x1 adjust                          │
+ └─► decoder level 0 ─ [N ConvNeXt blocks] ◄───────────────────────────────┘
    │
    ▼  Conv2D 1x1, linear, bias-free  →  denoised (H,W,C)
 ```
