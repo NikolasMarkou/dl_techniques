@@ -288,6 +288,60 @@ class TestDepthwisePassThrough:
 
 
 # ---------------------------------------------------------------------
+# Block-activation layer-instance serialization (SC3): a multi-block
+# denoiser built with a SINGLE shared LeakyReLU(0.1) instance must survive
+# .keras save/load with identical outputs. This is the end-to-end guard for
+# the stateless-shared-instance + layer-instance-activation path.
+# ---------------------------------------------------------------------
+
+class TestBlockActivationSerialization:
+    """SC3: shared LeakyReLU(0.1) block activation .keras round-trip."""
+
+    def test_block_activation_leaky_relu_keras_roundtrip(self, tmp_path) -> None:
+        # depth>=3 per the factory guard; small but multi-block so a single
+        # shared LeakyReLU instance is reused across every ConvNeXt block.
+        model = create_convunext_denoiser(
+            input_shape=(32, 32, 3),
+            depth=3,
+            initial_filters=8,
+            blocks_per_level=1,
+            block_activation=keras.layers.LeakyReLU(negative_slope=0.1),
+        )
+
+        rng = np.random.RandomState(1234)
+        x = rng.rand(2, 32, 32, 3).astype(np.float32)
+        out_before = model(x)
+
+        save_path = os.path.join(str(tmp_path), 'denoiser_leaky.keras')
+        model.save(save_path)
+        reloaded = keras.models.load_model(save_path)
+        out_after = reloaded(x)
+
+        # GPU fp32 reduction noise -> atol 1e-4 (SYSTEM invariant)
+        assert np.allclose(
+            np.array(keras.ops.convert_to_numpy(out_before)),
+            np.array(keras.ops.convert_to_numpy(out_after)),
+            atol=1e-4,
+        ), "Outputs differ after .keras round-trip (shared LeakyReLU(0.1))"
+
+        # Sanity: the LeakyReLU build actually differs from the default (gelu)
+        # build on the same input -> confirms the activation override took effect
+        # and survived reload as a non-default activation.
+        default_model = create_convunext_denoiser(
+            input_shape=(32, 32, 3),
+            depth=3,
+            initial_filters=8,
+            blocks_per_level=1,
+        )
+        out_default = default_model(x)
+        assert not np.allclose(
+            np.array(keras.ops.convert_to_numpy(out_after)),
+            np.array(keras.ops.convert_to_numpy(out_default)),
+            atol=1e-4,
+        ), "Reloaded LeakyReLU model matches default (gelu) build; override lost"
+
+
+# ---------------------------------------------------------------------
 # create_convunext_variant (wrapper)
 # ---------------------------------------------------------------------
 
