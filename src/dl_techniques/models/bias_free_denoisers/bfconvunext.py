@@ -114,6 +114,7 @@ class ConvUNextStem(keras.layers.Layer):
         self,
         filters: int,
         kernel_size: Union[int, Tuple[int, int]] = 7,
+        activation: Union[str, keras.layers.Layer] = 'gelu',
         kernel_initializer: Union[str, keras.initializers.Initializer] = 'he_normal',
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         **kwargs
@@ -121,12 +122,14 @@ class ConvUNextStem(keras.layers.Layer):
         super().__init__(**kwargs)
         self.filters = filters
         self.kernel_size = kernel_size
+        self.activation_name = activation
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         # Sublayers initialized in build()
         self.conv = None
         self.grn = None
+        self.activation_layer = None
 
     def build(self, input_shape):
         """Build the stem layers."""
@@ -150,13 +153,19 @@ class ConvUNextStem(keras.layers.Layer):
         conv_output_shape = self.conv.compute_output_shape(input_shape)
         self.grn.build(conv_output_shape)
 
+        # GRN is shape-preserving, so the activation input shape == conv_output_shape.
+        self.activation_layer = keras.layers.Activation(
+            self.activation_name, name='stem_activation'
+        )
+        self.activation_layer.build(conv_output_shape)
+
         super().build(input_shape)
 
     def call(self, inputs, training=None):
         """Forward pass."""
         x = self.conv(inputs)
         x = self.grn(x)
-        x = keras.activations.gelu(x)
+        x = self.activation_layer(x)
         return x
 
     def compute_output_shape(self, input_shape):
@@ -169,10 +178,26 @@ class ConvUNextStem(keras.layers.Layer):
         config.update({
             'filters': self.filters,
             'kernel_size': self.kernel_size,
+            # DECISION plan_2026-06-21_eb7fd829/D-005: serialize a layer-instance stem
+            # activation so LeakyReLU(alpha) round-trips through .keras; the string path
+            # stays raw for backward-compat. Mirrors the block fix (D-001). Do NOT emit a
+            # dict for a plain string activation — that would break existing 'gelu' configs.
+            'activation': keras.layers.serialize(self.activation_name) if isinstance(
+                self.activation_name, keras.layers.Layer) else self.activation_name,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
         })
         return config
+
+    @classmethod
+    def from_config(cls, config):
+        """Deserialize, reviving a layer-instance activation from its dict form."""
+        config = dict(config)
+        if isinstance(config.get('activation'), dict):
+            config['activation'] = keras.layers.deserialize(config['activation'])
+        # kernel_initializer/kernel_regularizer dicts are passed straight to __init__,
+        # where keras.*.get(...) accepts a serialized dict (Keras 3).
+        return cls(**config)
 
 # ---------------------------------------------------------------------
 # ConvUNext Model Variant Configurations
