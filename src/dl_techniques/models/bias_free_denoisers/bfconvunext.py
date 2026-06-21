@@ -233,6 +233,7 @@ def _apply_residual_convnext_block(
         drop_path_rate: float,
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]],
         name: str,
+        activation: Union[str, keras.layers.Layer] = 'gelu',
         depthwise_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
         depthwise_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
 ) -> keras.KerasTensor:
@@ -261,10 +262,16 @@ def _apply_residual_convnext_block(
     caused (the full denoiser is init-stable across gamma in [1e-6, 1.0], verified by sweep).
     """
     residual = x
+    # DECISION plan_2026-06-21_eb7fd829/D-002: block activation is threaded via this single
+    # choke-point (mirrors the kernel_regularizer / depthwise_* precedent) so one factory arg
+    # reaches every encoder/bottleneck/decoder block at once. Factory default stays 'gelu' so
+    # non-bfunet callers (convnext, convnext_patch_vae) are byte-identical. The stem GELU (~159)
+    # and deep-supervision GELU (~746) are intentionally NOT threaded (out of scope). See
+    # decisions.md D-002.
     y = block_cls(
         kernel_size=kernel_size,
         filters=filters,
-        activation='gelu',
+        activation=activation,
         use_bias=False,            # Bias-free for scaling invariance
         dropout_rate=0.0,          # regularization comes from StochasticDepth below
         spatial_dropout_rate=0.0,
@@ -338,6 +345,7 @@ def create_convunext_denoiser(
         laplacian_kernel_size: Tuple[int, int] = (5, 5),
         expose_bottleneck: bool = False,
         block_kernel_size: Union[int, Tuple[int, int]] = 7,
+        block_activation: Union[str, keras.layers.Layer] = 'gelu',
         drop_path_rate: float = 0.1,
         final_activation: Union[str, callable] = 'linear',
         # Scale-preserving (norm-preserving) init for the main-path structural convs
@@ -372,7 +380,7 @@ def create_convunext_denoiser(
     - Bias-free design via use_bias=False parameter
     - Depthwise separable convolutions for efficiency
     - Global Response Normalization (V2) or LayerNorm (V1)
-    - GELU activation for smoother gradients
+    - Configurable block activation (default GELU; the bfunet trainer defaults to LeakyReLU(0.1))
     - Layer scaling for training stability
     - Optional stochastic depth for regularization
     - Larger kernels (7x7) for better receptive fields
@@ -424,6 +432,11 @@ def create_convunext_denoiser(
             (byte-identical to the original single-output architecture). Useful for secondary /
             multi-task heads and debugging.
         block_kernel_size: Integer or tuple, size of block kernels. Defaults to 7.
+        block_activation: String or keras Layer, activation applied inside every ConvNeXt
+            block's inverted-bottleneck MLP. Defaults to 'gelu'. Pass a
+            `keras.layers.LeakyReLU(negative_slope=0.1)` instance for slope-0.1 leaky ReLU
+            (the 'leaky_relu' string resolves to slope 0.2). A layer instance round-trips
+            through .keras serialization (handled by ConvNext*Block.get_config).
         drop_path_rate: Float, stochastic depth drop probability. Defaults to 0.1.
         final_activation: String or callable, final activation function. Defaults to 'linear'.
         kernel_initializer: String or Initializer, weight initializer. Defaults to 'orthogonal'.
@@ -598,6 +611,7 @@ def create_convunext_denoiser(
                 x, ConvNextBlock, current_filters, block_kernel_size,
                 current_drop_path, kernel_regularizer,
                 name=f'encoder_level_{level}_convnext_{convnext_version}_block_{block_idx}',
+                activation=block_activation,
                 depthwise_initializer=depthwise_initializer,
                 depthwise_regularizer=depthwise_regularizer,
             )
@@ -646,6 +660,7 @@ def create_convunext_denoiser(
             x, ConvNextBlock, bottleneck_filters, block_kernel_size,
             drop_path_rate, kernel_regularizer,
             name=f'bottleneck_convnext_{convnext_version}_block_{block_idx}',
+            activation=block_activation,
             depthwise_initializer=depthwise_initializer,
             depthwise_regularizer=depthwise_regularizer,
         )
@@ -714,6 +729,7 @@ def create_convunext_denoiser(
                 x, ConvNextBlock, current_filters, block_kernel_size,
                 current_drop_path, kernel_regularizer,
                 name=f'decoder_level_{level}_convnext_{convnext_version}_block_{block_idx}',
+                activation=block_activation,
                 depthwise_initializer=depthwise_initializer,
                 depthwise_regularizer=depthwise_regularizer,
             )
