@@ -15,7 +15,7 @@ Key modern improvements over standard U-Net:
 - Depthwise separable convolutions for efficiency
 - Inverted bottleneck design (channel expansion then contraction)
 - Global Response Normalization (GRN) for V2 blocks
-- GELU activation functions for smoother gradients
+- Configurable activation (default GELU at the factory level; the bfunet trainer defaults to LeakyReLU(0.1)) for stem, blocks, and deep-supervision
 - Larger kernel sizes (7x7) for better receptive fields
 - Layer scaling for training stability
 - Optional stochastic depth for regularization
@@ -99,8 +99,8 @@ class ConvUNextStem(keras.layers.Layer):
     ConvUNext stem block for initial feature extraction using bias-free design.
 
     Simple stem that uses a single large kernel convolution followed by
-    Global Response Normalization and GELU activation, while keeping
-    channel count conservative to avoid OOM issues.
+    Global Response Normalization and a configurable activation (default GELU),
+    while keeping channel count conservative to avoid OOM issues.
 
     Args:
         filters: Integer, number of output filters.

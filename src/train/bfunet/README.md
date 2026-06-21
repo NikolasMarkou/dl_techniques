@@ -103,7 +103,7 @@ skip connections; the building block is a ConvNeXt residual branch.
 ```
 input (H,W,C) in [-0.5,+0.5]
    │
-   ▼  stem  (default: Conv2D 7x7 → GRN → GELU ;  or frozen Gabor stem, §4.1)
+   ▼  stem  (default: Conv2D 7x7 → GRN → activation (trainer default LeakyReLU(0.1)) ;  or frozen Gabor stem, §4.1)
    │
  ┌─┴─ encoder level 0 ─ [N ConvNeXt blocks] ─┐ skip0 ──────────────────────┐
  │         ▼ downsample (MaxPool, or Laplacian low-band §4.2)              │
@@ -182,12 +182,18 @@ branch:  DepthwiseConv2D(7x7) → LayerNorm(center=False) → Conv1x1(4× expand
 wiring:  x  +  StochasticDepth(rate)( branch(x) )
 ```
 
-- **Block activation** is configurable via `--block-activation` /
-  `--block-activation-alpha` (trainer default `leaky_relu` / `0.1`). The default
-  `LeakyReLU(0.1)` is **degree-1 homogeneous** (`f(αx)=αf(x)` for α>0), so it is
-  consistent with — indeed better-suited to — the bias-free scaling contract than
-  GELU, which is *not* homogeneous. Only the ConvNeXt block activation changes; the
-  **stem activation (still GELU) and the linear final activation are unaffected**.
+- **Activation** is configurable via `--block-activation` /
+  `--block-activation-alpha` (trainer default `leaky_relu` / `0.1`). These two flags
+  now drive the ConvNeXt blocks, the (non-Gabor) stem, **and** the deep-supervision
+  heads with one shared activation — i.e. the whole denoiser is **GELU-free by
+  default on the trainer path**. The default `LeakyReLU(0.1)` is **degree-1
+  homogeneous** (`f(αx)=αf(x)` for α>0), so it is consistent with — indeed
+  better-suited to — the bias-free scaling contract than GELU, which is *not*
+  homogeneous. Only the **linear final activation** is unaffected (it stays
+  hardcoded `linear` for the bias-free contract). (Library callers that import the
+  factory directly keep the per-site defaults `block_activation` /
+  `stem_activation` / `supervision_activation` = `'gelu'`, so non-bfunet models are
+  byte-identical.)
 
 - **Depthwise 7×7 + inverted bottleneck** (4× expansion) is the ConvNeXt recipe:
   large-kernel spatial mixing, then a fat pointwise MLP for channel mixing.
@@ -637,8 +643,8 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
 |----------|---------|-------------|
 | `--variant` | `base` | Model size: `tiny\|small\|base\|large\|xlarge` |
 | `--convnext-version` | `v1` | `v1` (strict bias-free) or `v2` (GRN, β is a trainable bias) |
-| `--block-activation` | `leaky_relu` | ConvNeXt block activation. `leaky_relu` builds `LeakyReLU(negative_slope=--block-activation-alpha)`; any other Keras activation name is passed as a string. Stem/final activations unaffected. |
-| `--block-activation-alpha` | `0.1` | Negative slope for LeakyReLU; ignored for non-leaky activations. |
+| `--block-activation` | `leaky_relu` | Activation for the ConvNeXt blocks, the (non-Gabor) stem, AND the deep-supervision heads (one shared activation). `leaky_relu` builds `LeakyReLU(negative_slope=--block-activation-alpha)`; any other Keras activation name is passed as a string. Only the linear final activation is unaffected. |
+| `--block-activation-alpha` | `0.1` | Negative slope for LeakyReLU (applies to blocks + stem + deep-supervision); ignored for non-leaky activations. |
 | `--epochs` | `100` | Total training epochs |
 | `--batch-size` | `16` | Batch size (reduce for large variants @256; base@256 → 4 on a 4090) |
 | `--patch-size` | `256` | Square crop size in pixels |
