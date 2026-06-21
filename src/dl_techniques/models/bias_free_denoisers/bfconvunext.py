@@ -351,6 +351,25 @@ def _downsample_and_skip(
     return skip, downsampled
 
 
+def _make_supervision_activation(activation, name):
+    """Build a serialization-safe activation layer for the functional deep-supervision head.
+
+    A bare ``keras.layers.Activation(<layer instance>)`` does NOT round-trip through
+    ``.keras`` in a functional graph (the Functional from_config cannot deserialize a
+    layer-instance activation). A string activation, and a bare cloned activation layer,
+    both round-trip. So: clone a layer-instance activation (fresh, uniquely-named) and
+    apply it directly; wrap a string in ``keras.layers.Activation``.
+    """
+    # DECISION plan_2026-06-21_eb7fd829/D-006: functional-graph activation must be a string
+    # (-> Activation wrapper) or a CLONED bare layer; never Activation(<live layer instance>)
+    # (does not round-trip, F9). See decisions.md D-006.
+    if isinstance(activation, keras.layers.Layer):
+        cfg = keras.layers.serialize(activation)
+        cfg = {**cfg, "config": {**cfg["config"], "name": name}}
+        return keras.layers.deserialize(cfg)
+    return keras.layers.Activation(activation, name=name)
+
+
 # ---------------------------------------------------------------------
 # Core Model Creation Function
 # ---------------------------------------------------------------------
@@ -385,6 +404,7 @@ def create_convunext_denoiser(
         enable_deep_supervision: bool = False,
         supervision_norm_scale: bool = True,
         supervision_norm_center: bool = False,
+        supervision_activation: Union[str, keras.layers.Layer] = 'gelu',
         model_name: str = 'convunext'
 ) -> keras.Model:
     """
@@ -484,6 +504,9 @@ def create_convunext_denoiser(
             learnable center (beta/bias). Defaults to False to keep the head bias-free
             (homogeneous), consistent with the rest of the model; set True only if you accept
             a bias-like additive offset at the supervision heads.
+        supervision_activation: activation for the deep-supervision heads; default 'gelu';
+            pass a keras.layers.LeakyReLU(0.1) instance for slope-0.1. Only used when
+            enable_deep_supervision=True.
         model_name: String, name for the model. Defaults to 'convunext'.
 
     Returns:
@@ -783,9 +806,8 @@ def create_convunext_denoiser(
                 name=f'supervision_layernorm_level_{level}'
             )(supervision_branch)
 
-            supervision_branch = keras.layers.Activation(
-                'gelu',
-                name=f'supervision_activation_level_{level}'
+            supervision_branch = _make_supervision_activation(
+                supervision_activation, f'supervision_activation_level_{level}'
             )(supervision_branch)
 
             supervision_output = keras.layers.Conv2D(
