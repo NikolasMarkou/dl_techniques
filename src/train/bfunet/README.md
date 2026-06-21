@@ -85,7 +85,7 @@ trained on σ∈[0, 50] extrapolate cleanly to σ it never saw.
 | Conv / Dense biases | `use_bias=False` everywhere | Any additive offset breaks `f(αy)=αf(y)` |
 | Normalization centering | `center=False` (no β shift) | A learned mean-shift is structurally a bias |
 | Final activation | `linear` | A nonlinearity (ReLU, tanh, sigmoid) destroys homogeneity and clips the negative residuals the score identity needs |
-| Input range | `[−1, +1]` (zero-centered) | A bias-free net has no way to absorb a non-zero data mean — it leaks through every layer |
+| Input range | `[−0.5, +0.5]` (zero-centered) | A bias-free net has no way to absorb a non-zero data mean — it leaks through every layer |
 
 These four are **hard constraints**. The trainer asserts the linear head
 (`final_activation="linear"` is hardcoded in `build_model`) and ships a
@@ -101,7 +101,7 @@ The denoiser is a **bias-free ConvNeXt U-Net** built functionally by
 skip connections; the building block is a ConvNeXt residual branch.
 
 ```
-input (H,W,C) in [-1,+1]
+input (H,W,C) in [-0.5,+0.5]
    │
    ▼  stem  (default: Conv2D 7x7 → GRN → GELU ;  or frozen Gabor stem, §4.1)
    │
@@ -379,11 +379,11 @@ so COCO's 118K does not drown DIV2K's 800; paths are capped (`--max-train-files`
 2. `flat_map` each path into `patches_per_image` copies, then a **second 2048-buffer
    shuffle** — this decorrelates the multiple crops of one image at the *path-string*
    level so a batch is not dominated by one source image.
-3. Decode → normalize to `[−1, +1]` (`image/127.5 − 1`) → aspect-preserving upscale
+3. Decode → normalize to `[−0.5, +0.5]` (`image/255.0 − 0.5`) → aspect-preserving upscale
    if smaller than the patch → `random_crop(patch_size)`.
 4. Drop black/corrupt patches (`sum|x| > 0`).
 5. (train) `augment_patch`: random flips + rot90.
-6. `clip(−1, 1)` guard → **add noise** (§5.2) → `batch` → `prefetch(AUTOTUNE)`.
+6. `clip(−0.5, 0.5)` guard → **add noise** (§5.2) → `batch` → `prefetch(AUTOTUNE)`.
 
 ### 5.2 Noise models
 
@@ -402,7 +402,7 @@ draw order is frozen for byte-identical reproducibility of existing checkpoints)
 | **Multiplicative** | `--multiplicative-noise` | `y = x·(1 + N(0,1)·σ)` | **Approximation** (see below) |
 | **Composite** | `--composite-noise` | `y = x·n + a`, `n~N(1,σ²)`, `a~N(0,(ratio·σ)²)` | **Approximation**; takes precedence over `--multiplicative` |
 
-Everything is clipped to `[−1, +1]` after corruption.
+Everything is clipped to `[−0.5, +0.5]` after corruption.
 
 > **Why additive is the principled default.** Only additive Gaussian noise yields
 > the clean `residual = σ²·∇log p` identity. For **multiplicative** noise the
@@ -428,10 +428,10 @@ converges slowly and unstably. Instead:
   trace time; a `tf.Variable` is re-read every epoch, so reassigning it widens the
   noise band **without retracing**.
 - `NoiseSigmaCurriculumCallback` reassigns it each epoch, interpolating
-  `sigma_max_start → sigma_max_end` (defaults `0.05 → 0.5`) over `curriculum_epochs`
+  `sigma_max_start → sigma_max_end` (defaults `0.025 → 0.25`) over `curriculum_epochs`
   (defaults to `epochs`), with a `linear | cosine | exp` schedule.
 
-In benchmark units (`σ₂₅₅ = σ · 127.5`) the default curriculum sweeps **σ₂₅₅ ≈ 6.4
+In benchmark units (`σ₂₅₅ = σ · 255.0`) the default curriculum sweeps **σ₂₅₅ ≈ 6.4
 → 63.75**, spanning and exceeding the classic 15 / 25 / 50 regimes — as one blind
 model.
 
@@ -444,8 +444,8 @@ model.
 - **Loss: MSE.** This is not arbitrary — least-squares is exactly the objective
   whose optimum is the Miyasawa posterior mean. Switching to L1/Charbonnier would
   break the residual=score equality.
-- **Metrics**: `mae`, `PsnrMetric(max_val=2.0)`, `SsimMetric(max_val=2.0)`. The
-  `max_val=2.0` is because images live in `[−1, +1]` (dynamic range 2.0); this makes
+- **Metrics**: `mae`, `PsnrMetric(max_val=1.0)`, `SsimMetric(max_val=1.0)`. The
+  `max_val=1.0` is because images live in `[−0.5, +0.5]` (dynamic range 1.0); this makes
   the reported dB directly comparable to published `max_val=255` numbers.
 - **Optimizer**: AdamW (`optimizer_builder`), gradient clipping by norm `1.0`.
 - **LR schedule**: cosine decay with warmup (`learning_rate_schedule_builder`), peak
@@ -529,9 +529,9 @@ log — this is the verification surface for "2–5 passes beat 1 pass". Two hel
 the trainer are importable for standalone evaluation:
 
 - `denoise_k_passes(model, noisy, k)` — apply the model `k` times, clipping to
-  `[−1,+1]` between passes; returns the list of `k` intermediate denoised tensors.
+  `[−0.5,+0.5]` between passes; returns the list of `k` intermediate denoised tensors.
 - `multi_pass_psnr(model, clean, noisy, k)` — per-pass mean PSNR (dB) against
-  `clean`, same `max_val=2.0` convention as the eval grid.
+  `clean`, same `max_val=1.0` convention as the eval grid.
 
 ---
 
@@ -641,8 +641,8 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
 | `--analyzer` | *(off)* | Run data-free `ModelAnalyzer` (weights + spectra) during training |
 | `--analyzer-freq` | `10` | Run the analyzer every N epochs (with `--analyzer`) |
 | `--gabor-filters` | `32` | Gabor filter channels in the stem |
-| `--sigma-max-start` | `0.05` | Curriculum start σ_max (in `[−1,+1]` units; ×127.5 for σ₂₅₅) |
-| `--sigma-max-end` | `0.5` | Curriculum end σ_max |
+| `--sigma-max-start` | `0.025` | Curriculum start σ_max (in `[−0.5,+0.5]` units; ×255.0 for σ₂₅₅) |
+| `--sigma-max-end` | `0.25` | Curriculum end σ_max |
 | `--curriculum-schedule` | `linear` | σ-widening shape: `linear\|cosine\|exp` |
 | `--curriculum-epochs` | `None` | Epochs to widen σ over (default = `--epochs`) |
 | `--viz-freq` | `5` | Save denoising / bottleneck grids every N epochs |
