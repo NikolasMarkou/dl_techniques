@@ -429,6 +429,110 @@ class TestStemSupervisionActivation:
                         f"(supervision LeakyReLU(0.1))",
             )
 
+    # --- Step 11: REFLECT-driven test hardening ---
+
+    def test_full_path_shared_activation_keras_roundtrip(self, tmp_path) -> None:
+        """TEST A (reviewer WARNING #2): the FULL trainer-shape model where ONE
+        shared LeakyReLU(0.1) instance drives block + stem + deep-supervision
+        simultaneously (use_gabor_stem=False AND enable_deep_supervision=True).
+
+        Guards: no duplicate layer names from the shared instance, and a full
+        .keras save/load identity (training=False) across ALL deep-supervision
+        outputs. This mirrors build_model's real construction shape.
+        """
+        act = keras.layers.LeakyReLU(negative_slope=0.1)
+        model = create_convunext_denoiser(
+            input_shape=(32, 32, 3),
+            depth=3,
+            initial_filters=8,
+            blocks_per_level=1,
+            use_gabor_stem=False,
+            enable_deep_supervision=True,
+            block_activation=act,
+            stem_activation=act,
+            supervision_activation=act,
+        )
+
+        # No duplicate layer names (the shared instance must not collide).
+        names = [l.name for l in model.layers]
+        assert len(names) == len(set(names)), (
+            f"duplicate layer names in shared-activation full-path build: "
+            f"{[n for n in names if names.count(n) > 1]}"
+        )
+
+        # A ConvUNextStem must be present (use_gabor_stem=False) and its
+        # serialized activation must deserialize to LeakyReLU(0.1).
+        stems = [l for l in model.layers if l.__class__.__name__ == 'ConvUNextStem']
+        assert len(stems) > 0, "no ConvUNextStem found (use_gabor_stem=False)"
+        stem_act_cfg = stems[0].get_config()['activation']
+        revived = keras.layers.deserialize(stem_act_cfg)
+        assert isinstance(revived, keras.layers.LeakyReLU)
+        assert np.isclose(float(revived.negative_slope), 0.1)
+
+        rng = np.random.RandomState(11)
+        x = rng.rand(2, 32, 32, 3).astype(np.float32)
+        outs_before = model(x, training=False)
+        assert isinstance(outs_before, list) and len(outs_before) > 1
+
+        save_path = os.path.join(str(tmp_path), 'denoiser_full_shared_leaky.keras')
+        model.save(save_path)
+        reloaded = keras.models.load_model(save_path)
+        outs_after = reloaded(x, training=False)
+
+        assert len(outs_after) == len(outs_before)
+        for i, (b, a) in enumerate(zip(outs_before, outs_after)):
+            np.testing.assert_allclose(
+                np.array(keras.ops.convert_to_numpy(b)),
+                np.array(keras.ops.convert_to_numpy(a)),
+                atol=1e-5,
+                err_msg=f"Output {i} differs after .keras round-trip "
+                        f"(full-path shared LeakyReLU(0.1))",
+            )
+
+    def test_leaky_vs_gelu_stem_behavioral_differential(self) -> None:
+        """TEST B (reviewer WARNING #3): prove slope-0.1 is APPLIED, not merely
+        serialized. Isolate the stem activation: two ConvUNextStem layers that
+        differ ONLY in activation (LeakyReLU(0.1) vs 'gelu'), with identical
+        weights copied across, must produce DIFFERENT outputs on a
+        negative-bearing input. Plus a micro-check nailing the exact slope 0.1.
+        """
+        # Micro-check: the slope IS exactly 0.1 (not gelu's ~-0.158 at x=-1,
+        # and not the 'leaky_relu' string default of 0.2).
+        leaky_val = keras.layers.Activation(
+            keras.layers.LeakyReLU(negative_slope=0.1)
+        )(np.array([[-1.0]], dtype='float32'))
+        leaky_val = float(np.array(keras.ops.convert_to_numpy(leaky_val))[0, 0])
+        assert np.isclose(leaky_val, -0.1, atol=1e-6), (
+            f"LeakyReLU(0.1) on -1.0 should be -0.1, got {leaky_val}"
+        )
+
+        # Build two stems differing only in activation.
+        stem_leaky = ConvUNextStem(
+            filters=8, activation=keras.layers.LeakyReLU(negative_slope=0.1)
+        )
+        stem_gelu = ConvUNextStem(filters=8, activation='gelu')
+
+        rng = np.random.RandomState(99)
+        # Input with a clearly-negative region so the activation branch matters.
+        x = (rng.rand(2, 16, 16, 3).astype(np.float32) - 0.5) * 4.0
+
+        # Build both on the same input shape, then copy weights so ONLY the
+        # activation differs.
+        _ = stem_leaky(x)
+        _ = stem_gelu(x)
+        stem_gelu.set_weights(stem_leaky.get_weights())
+
+        out_leaky = np.array(keras.ops.convert_to_numpy(stem_leaky(x)))
+        out_gelu = np.array(keras.ops.convert_to_numpy(stem_gelu(x)))
+
+        # The activation actually changes behavior: outputs are NOT allclose.
+        assert not np.allclose(out_leaky, out_gelu, atol=1e-4), (
+            "LeakyReLU(0.1) and gelu stems produced identical outputs with "
+            "identical weights -> stem activation is not being applied"
+        )
+        # And they differ meaningfully somewhere (not just float noise).
+        assert np.max(np.abs(out_leaky - out_gelu)) > 1e-3
+
 
 # ---------------------------------------------------------------------
 # create_convunext_variant (wrapper)
