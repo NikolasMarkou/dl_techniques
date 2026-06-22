@@ -212,8 +212,12 @@ class LearnableMultiplier(keras.layers.Layer):
         :return: Scaled tensor with same shape as input.
         :rtype: keras.KerasTensor
         """
-        # Element-wise multiplication using Keras ops for backend compatibility
-        return ops.multiply(inputs, self.gamma)
+        # Element-wise multiplication using Keras ops for backend compatibility.
+        # Cast gamma (stored fp32, including under a mixed_float16 policy) to the input's
+        # compute dtype so fp16 activations multiply an fp16 scale. Without the cast the
+        # fp32-weight x fp16-activation mismatch is rejected by XLA in the gradient
+        # ("mixed precision disallowed"). No-op when dtypes already match (fp32 path).
+        return ops.multiply(inputs, ops.cast(self.gamma, inputs.dtype))
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.

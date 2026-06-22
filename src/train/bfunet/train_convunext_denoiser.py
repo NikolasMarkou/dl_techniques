@@ -88,6 +88,13 @@ Usage::
 
     # Quick mechanism check (tiny, 2 epochs):
     CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg python -m train.bfunet.train_convunext_denoiser --smoke
+
+Mixed precision (``--mixed-precision``, OFF by default): correct and serializes, but
+benchmarked SLOWER than the fp32 default on base@256/batch-4 (RTX 4090): ~22 vs 36 img/s.
+The decoder's bilinear-upsample gradient (``ResizeBilinearGrad``) emits fp32, which XLA's
+strict dtype checker rejects, so the mixed-precision path must run with ``jit_compile=False``
+-- and for this conv-heavy U-Net, losing XLA fusion outweighs the fp16 tensor-core gain.
+Kept as an option for higher-res / other GPUs / a future XLA-clean upsample.
 """
 
 import gc
@@ -225,8 +232,11 @@ class TrainingConfig:
     # Training
     batch_size: int = 16
     epochs: int = 100
-    patches_per_image: int = 8
+    patches_per_image: int = 4
     augment_data: bool = True
+    # Mixed precision (mixed_float16): compute in fp16 on tensor cores, keep fp32 weights
+    # + fp32 model output for stable MSE/PSNR/SSIM. Opt-in; numerics differ from fp32.
+    mixed_precision: bool = False
     steps_per_epoch: Optional[int] = None
     validation_steps: Optional[int] = 100
 
@@ -339,10 +349,16 @@ class TrainingConfig:
 # ---------------------------------------------------------------------
 
 
-def load_and_preprocess_image(
+def decode_full_image(
     image_path: tf.Tensor, config: TrainingConfig
 ) -> tf.Tensor:
-    """Decode an image, normalize to [-0.5, +0.5], and crop a random patch."""
+    """Read + decode an image ONCE and normalize to [-0.5, +0.5].
+
+    Returns the full (variable-size) image, upscaled if smaller than the patch.
+    This is the expensive step (HDD read + JPEG decode); the streaming pipeline
+    calls it once per image and crops ``patches_per_image`` patches from the
+    result, instead of re-reading/re-decoding the same file per patch.
+    """
     image_string = tf.io.read_file(image_path)
     image = tf.image.decode_image(
         image_string, channels=config.channels, expand_animations=False
@@ -366,15 +382,30 @@ def load_and_preprocess_image(
         new_w = tf.cast(tf.math.ceil(tf.cast(width, tf.float32) * scale), tf.int32)
         return tf.image.resize(image, [new_h, new_w])
 
-    image = tf.cond(
+    return tf.cond(
         tf.logical_or(height < min_size, width < min_size),
         true_fn=_upscale,
         false_fn=lambda: image,
     )
 
+
+def random_crop_patch(image: tf.Tensor, config: TrainingConfig) -> tf.Tensor:
+    """Extract one random ``patch_size`` crop from an already-decoded image."""
     return tf.image.random_crop(
         image, [config.patch_size, config.patch_size, config.channels]
     )
+
+
+def load_and_preprocess_image(
+    image_path: tf.Tensor, config: TrainingConfig
+) -> tf.Tensor:
+    """Decode an image, normalize to [-0.5, +0.5], and crop a single random patch.
+
+    Thin compose of ``decode_full_image`` + ``random_crop_patch``, kept for the
+    single-patch callers (self-iterate pool seed, fixed val-batch). The streaming
+    ``create_dataset`` decodes once and crops many instead of calling this per patch.
+    """
+    return random_crop_patch(decode_full_image(image_path, config), config)
 
 
 def make_curriculum_noise_fn(config: TrainingConfig, sigma_max_var: tf.Variable):
@@ -444,26 +475,43 @@ def create_dataset(
         )
     dataset = dataset.repeat()
 
+    # Decode each image ONCE — read + JPEG-decode is the bottleneck (datasets live on
+    # a spinning HDD). `deterministic=False` lets fast reads flow to the GPU without
+    # waiting on slower reads stuck behind HDD seek latency; AUTOTUNE scales the read
+    # parallelism to keep the GPU fed (replaces the fixed `parallel_reads`).
+    dataset = dataset.map(
+        lambda p: decode_full_image(p, config),
+        num_parallel_calls=tf.data.AUTOTUNE,
+        deterministic=False,
+    )
+    # Drop blank/corrupt decodes once, on the full image, before cropping.
+    dataset = dataset.filter(lambda x: tf.reduce_sum(tf.abs(x)) > 0)
+
     if is_training and config.patches_per_image > 1:
+        # Crop `patches_per_image` patches from the SAME decoded image (no re-read /
+        # re-decode). This is the throughput fix: previously the path was repeated and
+        # the file was read + decoded once PER patch.
+        ppi = config.patches_per_image
         dataset = dataset.flat_map(
-            lambda p: tf.data.Dataset.from_tensors(p).repeat(config.patches_per_image)
+            lambda img: tf.data.Dataset.from_tensors(img)
+            .repeat(ppi)
+            .map(lambda im: random_crop_patch(im, config))
         )
-        # Interleave the per-image patch copies across images BEFORE loading/cropping.
-        # The flat_map above emits patches_per_image consecutive copies of each path, so
-        # without this shuffle a batch of size <= patches_per_image would be all crops of
-        # one image. Shuffling the cheap path copies here (strings, not patch tensors)
-        # decorrelates batch composition with negligible memory.
+        # The ppi crops above are consecutive same-image patches; shuffle the patch
+        # tensors so a batch of size <= ppi is not all crops of one image. Buffer is
+        # patch tensors now (not path strings), so it costs real host RAM
+        # (~patch_shuffle_buffer * patch_size^2 * channels * 4 bytes).
         if config.patch_shuffle_buffer > 1:
             dataset = dataset.shuffle(
                 buffer_size=config.patch_shuffle_buffer,
                 reshuffle_each_iteration=True,
             )
+    else:
+        dataset = dataset.map(
+            lambda img: random_crop_patch(img, config),
+            num_parallel_calls=tf.data.AUTOTUNE,
+        )
 
-    dataset = dataset.map(
-        lambda p: load_and_preprocess_image(p, config),
-        num_parallel_calls=config.parallel_reads,
-    )
-    dataset = dataset.filter(lambda x: tf.reduce_sum(tf.abs(x)) > 0)
     dataset = dataset.map(
         lambda x: tf.ensure_shape(
             x, [config.patch_size, config.patch_size, config.channels]
@@ -1369,6 +1417,17 @@ def train(config: TrainingConfig) -> keras.Model:
         f"steps_per_epoch={steps_per_epoch}, validation_steps={validation_steps}"
     )
 
+    # Mixed precision must be set BEFORE the model is built so every layer adopts the
+    # mixed_float16 policy (fp16 compute, fp32 variables). Opt-in; off => fp32 as before.
+    if config.mixed_precision:
+        keras.mixed_precision.set_global_policy("mixed_float16")
+        logger.info(
+            "Mixed precision ENABLED: global policy=mixed_float16 "
+            "(compute fp16 on tensor cores, weights fp32, output cast back to fp32)"
+        )
+    else:
+        keras.mixed_precision.set_global_policy("float32")
+
     model = build_model(config)
     model.summary(print_fn=logger.info)
     verify_bias_free(model)
@@ -1401,6 +1460,27 @@ def train(config: TrainingConfig) -> keras.Model:
                 "mismatches and were left at init — check architecture flags."
             )
         verify_bias_free(model)  # re-check: transfer must not introduce bias
+
+    # Under mixed_float16 the final Conv2D emits fp16; cast the model output(s) back to
+    # fp32 so MSE + PSNR/SSIM are computed at full precision (Keras mixed-precision best
+    # practice). The cast is a weight-free Activation, so bias-free homogeneity and the
+    # weight transfer above are unaffected. expose_bottleneck rewrites the output set
+    # below, so guard the (advanced, non-default) combination out for now.
+    if config.mixed_precision:
+        if config.expose_bottleneck:
+            raise ValueError(
+                "mixed_precision is not supported together with expose_bottleneck yet; "
+                "run with only one of them."
+            )
+        f32_outputs = [
+            keras.layers.Activation("linear", dtype="float32", name=f"output_f32_{i}")(o)
+            for i, o in enumerate(model.outputs)
+        ]
+        model = keras.Model(
+            inputs=model.inputs,
+            outputs=f32_outputs if len(f32_outputs) > 1 else f32_outputs[0],
+            name=model.name,
+        )
 
     # Keras requires a loss for every output, but the bottleneck is upstream of the decoder
     # so the denoiser MSE already trains it (F5/F6). Fit a single-output view that SHARES
@@ -1441,10 +1521,19 @@ def train(config: TrainingConfig) -> keras.Model:
         },
         lr_schedule,
     )
+    # Dynamic loss scaling: fp16 gradients underflow without it. Wraps the built
+    # optimizer (gradient clipping stays on the inner optimizer, applied post-unscale).
+    if config.mixed_precision:
+        optimizer = keras.mixed_precision.LossScaleOptimizer(optimizer)
 
     # MSE loss -> least-squares-optimal (Miyasawa) denoiser.
     # Compile/fit operate on train_model (the single-output view when expose_bottleneck;
     # otherwise train_model IS model). The view shares weight objects with the full model.
+    # XLA + mixed_float16 is incompatible here: the decoder's bilinear-upsample gradient
+    # (ResizeBilinearGrad) emits fp32 regardless of input dtype, which XLA's strict dtype
+    # checker rejects ("mixed precision disallowed") while the TF runtime auto-casts it.
+    # Disable XLA for the mixed-precision path; fp16 tensor-core matmuls/convs still
+    # accelerate it. fp32 keeps Keras' default jit ("auto").
     train_model.compile(
         optimizer=optimizer,
         loss="mse",
@@ -1453,6 +1542,7 @@ def train(config: TrainingConfig) -> keras.Model:
             PsnrMetric(max_val=1.0, name="psnr_metric"),
             SsimMetric(max_val=1.0, name="ssim_metric"),
         ],
+        jit_compile=False if config.mixed_precision else "auto",
     )
     logger.info(f"Model compiled with {model.count_params():,} parameters")
 
@@ -1651,7 +1741,14 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--patch-size", type=int, default=256)
     parser.add_argument("--channels", type=int, choices=[1, 3], default=3)
-    parser.add_argument("--patches-per-image", type=int, default=8)
+    parser.add_argument("--patches-per-image", type=int, default=4)
+    parser.add_argument("--mixed-precision", action="store_true",
+                        help="enable mixed_float16 (fp16 compute on tensor cores, fp32 "
+                             "weights + fp32 output). NOTE: measured SLOWER than the fp32 "
+                             "default for base@256/b4 on a 4090 (~22 vs 36 img/s): the "
+                             "decoder's bilinear-upsample grad forces XLA off, and XLA "
+                             "outweighs fp16 here. Off by default; may help at higher res "
+                             "/ other GPUs / if the XLA upsample-grad issue is fixed.")
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--warmup-epochs", type=int, default=None,
                         help="LR warmup length (default: 10%% of --epochs)")
@@ -1863,6 +1960,7 @@ def main():
             block_activation_alpha=args.block_activation_alpha,
             viz_freq=1,
             viz_samples=args.viz_samples,
+            mixed_precision=args.mixed_precision,
             output_dir=args.output_dir,
             experiment_name=args.experiment_name or "convunext_denoiser_smoke",
         )
@@ -1883,6 +1981,7 @@ def main():
             patch_size=args.patch_size,
             channels=args.channels,
             patches_per_image=args.patches_per_image,
+            mixed_precision=args.mixed_precision,
             learning_rate=args.learning_rate,
             warmup_epochs=args.warmup_epochs,  # None -> 10% of epochs
             sigma_max_start=args.sigma_max_start,
