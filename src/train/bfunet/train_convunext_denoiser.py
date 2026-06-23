@@ -243,6 +243,11 @@ class TrainingConfig:
     # Optimization
     learning_rate: float = 1e-3
     optimizer_type: str = "adamw"
+    # Decoupled (AdamW) weight decay. Default mirrors optimizer_builder's adamw default
+    # (0.004) so behavior is unchanged; surfaced here so it lands in the saved config.json
+    # and is tunable via --weight-decay. AdamW WD only -- no kernel_regularizer L2 (would
+    # double-penalize); see train/CLAUDE.md "Double Weight Decay".
+    weight_decay: float = 0.004
     lr_schedule_type: str = "cosine_decay"
     warmup_epochs: Optional[int] = None  # None -> 10% of epochs (see __post_init__)
     gradient_clipping: float = 1.0
@@ -1517,6 +1522,7 @@ def train(config: TrainingConfig) -> keras.Model:
     optimizer = optimizer_builder(
         {
             "type": config.optimizer_type,
+            "weight_decay": config.weight_decay,
             "gradient_clipping_by_norm": config.gradient_clipping,
         },
         lr_schedule,
@@ -1750,6 +1756,10 @@ def parse_arguments() -> argparse.Namespace:
                              "outweighs fp16 here. Off by default; may help at higher res "
                              "/ other GPUs / if the XLA upsample-grad issue is fixed.")
     parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=0.004,
+                        help="AdamW decoupled weight decay (default 0.004, matching the "
+                             "optimizer_builder default). AdamW WD only; no L2 "
+                             "kernel_regularizer is added (avoids double weight decay).")
     parser.add_argument("--warmup-epochs", type=int, default=None,
                         help="LR warmup length (default: 10%% of --epochs)")
     parser.add_argument("--no-gabor-stem", action="store_true",
@@ -1935,6 +1945,7 @@ def main():
             # (builder has no 'constant'). 2-epoch PSNR quality is NOT asserted.
             lr_schedule_type="cosine_decay",
             learning_rate=1e-3,
+            weight_decay=args.weight_decay,
             sigma_max_start=0.025,
             sigma_max_end=0.25,
             curriculum_schedule="linear",
@@ -1983,6 +1994,7 @@ def main():
             patches_per_image=args.patches_per_image,
             mixed_precision=args.mixed_precision,
             learning_rate=args.learning_rate,
+            weight_decay=args.weight_decay,
             warmup_epochs=args.warmup_epochs,  # None -> 10% of epochs
             sigma_max_start=args.sigma_max_start,
             sigma_max_end=args.sigma_max_end,
