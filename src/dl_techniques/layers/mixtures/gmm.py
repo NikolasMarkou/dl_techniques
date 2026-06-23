@@ -100,40 +100,51 @@ class GMMLayer(keras.layers.Layer):
 
     .. code-block:: text
 
-        +-------------------------------------+
-        |   Input (arbitrary shape)           |
-        +----------------+--------------------+
-                         |
-                         v
-        +-------------------------------------+
-        |  Reshape for clustering             |
-        |  (flatten cluster_axis dims)        |
-        +----------------+--------------------+
-                         |
-                         v
-        +-------------------------------------+
-        |  Diagonal-Gaussian log-densities    |
-        |  log N(x | mu_k, Sigma_k)           |
-        +----------------+--------------------+
-                         |
-                         v
-        +-------------------------------------+
-        |  Responsibilities:                  |
-        |  softmax((log pi + log N) / tau)    |
-        +--------+--------------+-------------+
-                 |              |
-        (isometric loss)        |
-                 v              |
-        +-----------------+     |
-        | add_loss:       |     |
-        | anisotropy      |     |
-        | penalty         |     |
-        +-----------------+     |
-                                v
-        +-------------------------------------+
-        |  Output: responsibilities or        |
-        |  reconstructed mixture (means)      |
-        +-------------------------------------+
+        ┌─────────────────────────────────────┐
+        │   Input (arbitrary shape)           │
+        │   Cast to variable_dtype (float32)  │
+        └────────────────┬────────────────────┘
+                         │
+                         ▼
+        ┌─────────────────────────────────────┐
+        │  Reshape for clustering             │
+        │  (flatten cluster_axis dims)        │
+        └────────────────┬────────────────────┘
+                         │
+                         ▼
+        ┌─────────────────────────────────────┐
+        │  Diagonal-Gaussian log-densities    │
+        │  log N(x | mu_k, Sigma_k)           │
+        └────────────────┬────────────────────┘
+                         │
+                         ▼
+        ┌─────────────────────────────────────┐
+        │  Responsibilities:                  │
+        │  softmax((log pi + log N) / tau)    │
+        └────────┬──────────────┬─────────────┘
+                 │              │ (training only)
+                 │              ▼
+                 │    ┌──────────────────────┐
+                 │    │  add_loss:           │
+                 │    │  isometric reg.      │
+                 │    └──────────────────────┘
+                 │
+                 ▼
+        ┌─────────────────────────────────────┐
+        │  Compute output                     │
+        │  (assignments or mixture)           │
+        └────────────────┬────────────────────┘
+                         │
+                         ▼
+        ┌─────────────────────────────────────┐
+        │  Reshape output                     │
+        │  Cast to compute_dtype              │
+        └────────────────┬────────────────────┘
+                         │
+                         ▼
+        ┌─────────────────────────────────────┐
+        │  Output: assignments or mixture     │
+        └─────────────────────────────────────┘
 
     :param n_components: Number of mixture components (K). Must be positive.
     :type n_components: int

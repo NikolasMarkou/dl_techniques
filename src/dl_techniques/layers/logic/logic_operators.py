@@ -748,3 +748,5 @@ class LearnableLogicOperator(keras.layers.Layer):
             "yager_p": self.yager_p,
         })
         return config
+
+# ---------------------------------------------------------------------

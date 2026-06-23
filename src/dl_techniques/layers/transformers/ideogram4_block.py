@@ -31,27 +31,6 @@ Final layer:
 - ``LayerNormalization(center=False, scale=False, epsilon=1e-6)`` (no affine),
   then ``* (1 + adaln_modulation(silu(c)))`` (silu applied to ``c`` BEFORE the
   Dense), then ``Dense(out_channels, use_bias=True)``.
-
-PyTorch reference (faithfully ported)::
-
-    # block
-    mod = self.adaln_modulation(adaln_input)
-    scale_msa, gate_msa, scale_mlp, gate_mlp = mod.chunk(4, dim=-1)
-    gate_msa = tanh(gate_msa); gate_mlp = tanh(gate_mlp)
-    scale_msa = 1 + scale_msa; scale_mlp = 1 + scale_mlp
-    attn_out = self.attention(self.attention_norm1(x) * scale_msa, ...)
-    x = x + gate_msa * self.attention_norm2(attn_out)
-    x = x + gate_mlp * self.ffn_norm2(self.feed_forward(self.ffn_norm1(x) * scale_mlp))
-
-    # final
-    scale = 1 + self.adaln_modulation(F.silu(c))
-    return self.linear(self.norm_final(x) * scale)
-
-MLP note: the PyTorch ``Ideogram4MLP`` is a plain bias-free SwiGLU
-``w2(silu(w1 x) * w3 x)`` with ``hidden_dim = intermediate_size``. The reused
-``SwiGLUFFN`` is configured with ``ffn_expansion_factor=1`` and
-``ffn_multiple_of=intermediate_size`` so its rounded hidden dim equals
-``intermediate_size`` exactly, and ``use_bias=False`` for the bias-free match.
 """
 
 import keras
@@ -69,7 +48,7 @@ from dl_techniques.layers.attention.ideogram4_attention import Ideogram4Attentio
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.layers")
+@keras.saving.register_keras_serializable()
 class Ideogram4TransformerBlock(keras.layers.Layer):
     """Ideogram4 DiT block: 4-stream tanh-gated AdaLN with an RMSNorm sandwich.
 
@@ -317,7 +296,7 @@ class Ideogram4TransformerBlock(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.layers")
+@keras.saving.register_keras_serializable()
 class Ideogram4FinalLayer(keras.layers.Layer):
     """Ideogram4 DiT final layer: no-affine LayerNorm, scale-AdaLN, linear head.
 

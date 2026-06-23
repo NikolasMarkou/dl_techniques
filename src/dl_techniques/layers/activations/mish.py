@@ -205,6 +205,7 @@ class Mish(keras.layers.Layer):
         """
         return f"Mish(name='{self.name}')"
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class SaturatedMish(keras.layers.Layer):

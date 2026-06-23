@@ -22,18 +22,6 @@ multi-head self-attention block specialized for the Ideogram4 packed-sequence Di
 - **SDPA**: scaled dot-product attention is computed manually with ``keras.ops``
   (matmul, scale by ``1/sqrt(head_dim)``, add mask, softmax, matmul v), then the
   output is projected by a bias-free ``Dense(hidden_size)``.
-
-PyTorch reference (faithfully ported)::
-
-    qkv = self.qkv(x).view(B, L, 3, num_heads, head_dim)
-    q, k, v = qkv.unbind(dim=2)
-    q = self.norm_q(q); k = self.norm_k(k)              # RMS over head_dim
-    q, k, v = (t.transpose(1, 2) for t in (q, k, v))    # (B, num_heads, L, head_dim)
-    q, k = _apply_rotary_pos_emb(q, k, cos, sin)
-    attn_mask = (segment_ids[:, :, None] == segment_ids[:, None, :])[:, None]  # bool keep
-    out = scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
-    out = out.transpose(1, 2).reshape(B, L, hidden_size)
-    return self.o(out)
 """
 
 import keras
@@ -53,7 +41,7 @@ from dl_techniques.layers.embedding.multi_axis_rope import apply_rotary_pos_emb
 _MASK_NEG = -1e9
 
 
-@keras.saving.register_keras_serializable(package="dl_techniques.layers")
+@keras.saving.register_keras_serializable()
 class Ideogram4Attention(keras.layers.Layer):
     """Ideogram4 packed self-attention with QK-norm, mRoPE, and a segment mask.
 
