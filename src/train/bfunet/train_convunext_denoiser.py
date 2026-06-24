@@ -212,6 +212,10 @@ class TrainingConfig:
     gabor_filters: int = 32
     gabor_kernel_size: int = 7
     use_laplacian_pyramid: bool = False
+    # Encoder downsample pooling for the non-Laplacian path: "max" (MaxPooling2D, default,
+    # non-linear) or "average" (AveragePooling2D, LINEAR -> keeps the encoder path linear
+    # for the Miyasawa/Tweedie residual-as-score interpretation). Ignored under Laplacian.
+    downsample_pool_type: str = "max"
     enable_deep_supervision: bool = False
     expose_bottleneck: bool = False
     # Opt-in depthwise-kernel init/regularization pass-through (plan_2026-06-20_353a3a76).
@@ -752,6 +756,7 @@ def build_model(config: TrainingConfig) -> keras.Model:
         gabor_filters=config.gabor_filters,
         gabor_kernel_size=config.gabor_kernel_size,
         use_laplacian_pyramid=config.use_laplacian_pyramid,
+        downsample_pool_type=config.downsample_pool_type,
         enable_deep_supervision=config.enable_deep_supervision,
         expose_bottleneck=config.expose_bottleneck,
         final_activation="linear",  # MUST stay linear: bias-free homogeneity f(ax)=a*f(x)
@@ -1766,6 +1771,11 @@ def parse_arguments() -> argparse.Namespace:
                         help="Disable the frozen Gabor depthwise stem")
     parser.add_argument("--laplacian-pyramid", action="store_true",
                         help="Enable the Laplacian-pyramid downsample/skip path (default OFF)")
+    parser.add_argument("--mean-pooling", action="store_true",
+                        help="Use AveragePooling2D (LINEAR) instead of MaxPooling2D for the "
+                             "encoder downsample, keeping the encoder path linear for the "
+                             "Miyasawa/Tweedie residual-as-score interpretation (MaxPooling is "
+                             "non-linear). No effect under --laplacian-pyramid (already linear).")
     parser.add_argument("--expose-bottleneck", action="store_true",
                         help="Expose the bottleneck latent as an optional second model output (default OFF)")
     parser.add_argument("--analyzer", action="store_true",
@@ -1925,6 +1935,7 @@ def main():
             convnext_version=args.convnext_version,
             use_gabor_stem=not args.no_gabor_stem,
             use_laplacian_pyramid=args.laplacian_pyramid,
+            downsample_pool_type=("average" if args.mean_pooling else "max"),
             expose_bottleneck=args.expose_bottleneck,
             enable_deep_supervision=args.deep_supervision,
             enable_analyzer=args.analyzer,
@@ -1981,6 +1992,7 @@ def main():
             convnext_version=args.convnext_version,
             use_gabor_stem=not args.no_gabor_stem,
             use_laplacian_pyramid=args.laplacian_pyramid,
+            downsample_pool_type=("average" if args.mean_pooling else "max"),
             expose_bottleneck=args.expose_bottleneck,
             enable_analyzer=args.analyzer,
             analyzer_freq=args.analyzer_freq,

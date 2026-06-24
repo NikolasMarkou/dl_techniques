@@ -327,17 +327,23 @@ def _downsample_and_skip(
         laplacian_kernel_size: Tuple[int, int],
         downsample_name: str,
         pyramid_name: str,
+        pool_type: str = "max",
 ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
     """Produce ``(skip, downsampled)`` for one encoder junction.
 
     OFF path (default, byte-identical to the original architecture): the skip is
     the pre-downsample tensor and downsampling is ``MaxPooling2D(2, 2)`` named
-    ``downsample_name``.
+    ``downsample_name``. With ``pool_type='average'`` the downsample uses
+    ``AveragePooling2D(2, 2)`` instead -- a LINEAR (and bias-free / homogeneous)
+    operator, so the encoder path stays linear for the Miyasawa/Tweedie
+    residual-as-score interpretation (MaxPooling is non-linear). Pooling layers are
+    weightless, so the swap does not affect checkpoint weight transfer.
 
     ON path: a channel-preserving, bias-free ``LaplacianPyramidLevel`` split. The
     full-resolution high-frequency band becomes the skip; the half-resolution low
     band continues down the encoder. Bias-free and homogeneous by construction
-    (fixed blur + average pool + bilinear upsample, zero learnable bias).
+    (fixed blur + average pool + bilinear upsample, zero learnable bias). The
+    pyramid already pools linearly, so ``pool_type`` does not apply here.
     """
     if use_laplacian_pyramid:
         low, high = LaplacianPyramidLevel(
@@ -346,7 +352,11 @@ def _downsample_and_skip(
         )(x)
         return high, low
     skip = x
-    downsampled = keras.layers.MaxPooling2D(
+    pool_layer = (
+        keras.layers.AveragePooling2D if pool_type == "average"
+        else keras.layers.MaxPooling2D
+    )
+    downsampled = pool_layer(
         pool_size=(2, 2),
         name=downsample_name,
     )(x)
@@ -389,6 +399,7 @@ def create_convunext_denoiser(
         gabor_kernel_size: Union[int, Tuple[int, int]] = 7,
         use_laplacian_pyramid: bool = False,
         laplacian_kernel_size: Tuple[int, int] = (5, 5),
+        downsample_pool_type: str = "max",
         expose_bottleneck: bool = False,
         block_kernel_size: Union[int, Tuple[int, int]] = 7,
         block_activation: Union[str, keras.layers.Layer] = 'gelu',
@@ -471,6 +482,13 @@ def create_convunext_denoiser(
             Contributes zero trainable parameters (the blur kernel is fixed).
         laplacian_kernel_size: Tuple of two ints, Gaussian blur kernel size for the
             Laplacian pyramid split. Only used when use_laplacian_pyramid=True. Defaults to (5, 5).
+        downsample_pool_type: 'max' or 'average'. Pooling op for the non-Laplacian encoder
+            downsample. 'max' (default) = MaxPooling2D, byte-identical to the original
+            architecture but NON-LINEAR. 'average' = AveragePooling2D, a LINEAR (bias-free,
+            homogeneous) operator that keeps the encoder path linear for the Miyasawa/Tweedie
+            residual-as-score interpretation. Ignored when use_laplacian_pyramid=True (the
+            pyramid already pools linearly). Pooling layers are weightless, so this does not
+            affect weight transfer. Defaults to 'max'.
         expose_bottleneck: Boolean, if True expose the deepest-encoder bottleneck latent
             as an additional, trailing model output. The model's call then returns
             `[denoised, ..., bottleneck]` (bottleneck LAST), where `bottleneck` has spatial
@@ -566,6 +584,11 @@ def create_convunext_denoiser(
     if convnext_version not in ['v1', 'v2']:
         raise ValueError(f"convnext_version must be 'v1' or 'v2', got {convnext_version}")
 
+    if downsample_pool_type not in ['max', 'average']:
+        raise ValueError(
+            f"downsample_pool_type must be 'max' or 'average', got {downsample_pool_type}"
+        )
+
     # Select ConvNeXt block type
     ConvNextBlock = ConvNextV2Block if convnext_version == 'v2' else ConvNextV1Block
 
@@ -608,6 +631,11 @@ def create_convunext_denoiser(
         logger.info(
             f"Laplacian pyramid downsample enabled: kernel_size={laplacian_kernel_size}, "
             f"split levels={depth} (high-band skips, low-band downsample; bias-free)"
+        )
+    else:
+        logger.info(
+            f"Encoder downsample pooling: {downsample_pool_type} "
+            f"({'AveragePooling2D — linear, Miyasawa-clean' if downsample_pool_type == 'average' else 'MaxPooling2D — non-linear'})"
         )
 
     # Storage for skip connections and deep supervision outputs
@@ -683,6 +711,7 @@ def create_convunext_denoiser(
             laplacian_kernel_size,
             downsample_name=downsample_name,
             pyramid_name=f'encoder_pyramid_{level}',
+            pool_type=downsample_pool_type,
         )
         skip_connections.append(skip)
 
