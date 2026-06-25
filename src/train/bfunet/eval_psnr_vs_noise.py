@@ -359,70 +359,74 @@ def evaluate_dataset(
 # Output: plot + CSV/JSON
 # ---------------------------------------------------------------------
 
-def plot_results(rows: List[Dict], cfg: EvalConfig, out_path: Path) -> None:
-    """Plot mean PSNR with 95%-style CI band vs noise level.
-
-    One solid curve (mean + CI band) per (model, dataset) pair, plus one dashed
-    noisy-input baseline per dataset (model-independent).
-    """
-    fig, ax = plt.subplots(figsize=(9, 6))
-    models = sorted({r["model"] for r in rows})
-    datasets = sorted({r["dataset"] for r in rows})
-    multi_ds = len(datasets) > 1
-    cmap = plt.get_cmap("tab10")
-
-    for idx, (model_name, ds_name) in enumerate(
-        [(m, d) for d in datasets for m in models]
-    ):
+def _plot_dataset_panel(ax, rows: List[Dict], ds_name: str, models: List[str],
+                        cmap, eval_sigmas: set) -> None:
+    """Draw one dataset's panel: per-model mean+CI curves, noisy baseline, SOTA overlay."""
+    for mi, model_name in enumerate(models):
         d = sorted([r for r in rows if r["model"] == model_name and r["dataset"] == ds_name],
                    key=lambda r: r["sigma_255"])
         if not d:
             continue
         x = [r["sigma_255"] for r in d]
-        mean = np.array([r["psnr_mean"] for r in d])
-        lo = np.array([r["psnr_ci_low"] for r in d])
-        hi = np.array([r["psnr_ci_high"] for r in d])
-        color = cmap(idx % 10)
-        label = f"{model_name} / {ds_name}" if multi_ds else model_name
-        ax.plot(x, mean, "-o", color=color, label=label, linewidth=2, markersize=5)
-        ax.fill_between(x, lo, hi, color=color, alpha=0.20)
+        color = cmap(mi % 10)  # consistent per-model color across panels
+        ax.plot(x, [r["psnr_mean"] for r in d], "-o", color=color, label=model_name,
+                linewidth=2, markersize=5)
+        ax.fill_between(x, [r["psnr_ci_low"] for r in d], [r["psnr_ci_high"] for r in d],
+                        color=color, alpha=0.20)
 
-    # One dashed noisy-input reference per dataset (same for every model).
-    for ds_name in datasets:
-        d = sorted([r for r in rows if r["dataset"] == ds_name], key=lambda r: r["sigma_255"])
-        seen, base = set(), []
-        for r in d:  # dedupe sigmas (rows repeat per model)
-            if r["sigma_255"] not in seen:
-                seen.add(r["sigma_255"]); base.append(r)
-        ax.plot([r["sigma_255"] for r in base], [r["input_psnr_mean"] for r in base],
-                "--", color="0.5", alpha=0.7, linewidth=1,
-                label=f"noisy input ({ds_name})" if multi_ds else "noisy input (no denoising)")
+    # Dashed noisy-input baseline (model-independent; dedupe repeated sigmas).
+    d = sorted([r for r in rows if r["dataset"] == ds_name], key=lambda r: r["sigma_255"])
+    seen, base = set(), []
+    for r in d:
+        if r["sigma_255"] not in seen:
+            seen.add(r["sigma_255"]); base.append(r)
+    ax.plot([r["sigma_255"] for r in base], [r["input_psnr_mean"] for r in base],
+            "--", color="0.5", alpha=0.7, linewidth=1, label="noisy input")
 
-    # Overlay published SOTA reference points at matching (dataset, sigma).
-    eval_sigmas = {r["sigma_255"] for r in rows}
-    for ds_name in datasets:
-        ref = SOTA_REFERENCE.get(ds_name.lower())
-        if not ref:
-            continue
+    # Published SOTA reference points at matching sigmas.
+    ref = SOTA_REFERENCE.get(ds_name.lower())
+    if ref:
         for ref_name, pts in ref.items():
             xs = sorted(s for s in pts if s in eval_sigmas)
-            if not xs:
-                continue
-            ys = [pts[s] for s in xs]
-            label = (f"{ref_name} ({ds_name})" if multi_ds else ref_name) + " [lit.]"
-            ax.plot(xs, ys, linestyle=":", linewidth=1.3, markersize=9,
-                    **SOTA_STYLE[ref_name], label=label, alpha=0.85)
+            if xs:
+                ax.plot(xs, [pts[s] for s in xs], linestyle=":", linewidth=1.3, markersize=9,
+                        **SOTA_STYLE[ref_name], label=f"{ref_name} [lit.]", alpha=0.85)
 
+    ax.set_title(ds_name)
     ax.set_xlabel("Noise std  σ  (on [0, 255] scale)")
-    ax.set_ylabel("PSNR (dB)")
-    sample_desc = ("full images" if cfg.full_image
-                   else f"{cfg.num_samples} × {cfg.patch_size}px patches")
-    ax.set_title(
-        f"Denoiser PSNR vs noise level\n"
-        f"{sample_desc}/level, {int(cfg.confidence * 100)}% CI of the mean"
-    )
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8)
+
+
+def plot_results(rows: List[Dict], cfg: EvalConfig, out_path: Path) -> None:
+    """Plot mean PSNR with 95% CI band vs noise level, one panel per dataset.
+
+    Each panel overlays the per-model curves (mean + CI), the dashed noisy-input baseline,
+    and any published SOTA reference points for that dataset. Models keep a consistent
+    color across panels. Panels share the y-axis for cross-dataset comparison.
+    """
+    models = sorted({r["model"] for r in rows})
+    datasets = sorted({r["dataset"] for r in rows})
+    eval_sigmas = {r["sigma_255"] for r in rows}
+    cmap = plt.get_cmap("tab10")
+
+    n = len(datasets)
+    ncols = min(n, 2)
+    nrows = -(-n // ncols)  # ceil
+    fig, axes = plt.subplots(nrows, ncols, figsize=(6.5 * ncols, 5.0 * nrows),
+                             squeeze=False, sharey=True)
+    axes_flat = axes.flatten()
+    for di, ds_name in enumerate(datasets):
+        _plot_dataset_panel(axes_flat[di], rows, ds_name, models, cmap, eval_sigmas)
+        if di % ncols == 0:
+            axes_flat[di].set_ylabel("PSNR (dB)")
+    for j in range(n, len(axes_flat)):  # hide unused cells
+        axes_flat[j].set_visible(False)
+
+    sample_desc = ("full images" if cfg.full_image
+                   else f"{cfg.num_samples} × {cfg.patch_size}px patches")
+    fig.suptitle(f"Denoiser PSNR vs noise level — {sample_desc}/level, "
+                 f"{int(cfg.confidence * 100)}% CI of the mean")
     fig.tight_layout()
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
