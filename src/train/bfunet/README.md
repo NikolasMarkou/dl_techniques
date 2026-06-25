@@ -22,6 +22,7 @@ and train *legibly*.
 
 - **Model factory**: `dl_techniques.models.bias_free_denoisers.bfconvunext.create_convunext_denoiser`
 - **Trainer**: `src/train/bfunet/train_convunext_denoiser.py`
+- **Evaluation** (PSNR vs noise, multi-model, full-image, SOTA overlay — §8): `src/train/bfunet/eval_psnr_vs_noise.py`
 - **Theory notes**: [`research/miyasawas_theorem.md`](../../../research/miyasawas_theorem.md),
   [`research/miyasawas_theorem_multiplicative.md`](../../../research/miyasawas_theorem_multiplicative.md)
 - **Model-level README** (architecture tables, V1/V2 deep dive):
@@ -375,6 +376,25 @@ decoder) and saves the full two-output model separately. The point of the tap is
 **observability** — it is what the bottleneck monitor (§6.2) visualizes — and a hook
 for future multi-task heads.
 
+### 4.4 Linear (mean) encoder downsampling  (`--mean-pooling`, default OFF)
+
+The default non-Laplacian encoder downsamples with **`MaxPooling2D(2,2)`**. Max-pooling
+is *non-linear*, so it is the one op in the otherwise-linear-plus-homogeneous-activation
+analysis path that is not a clean linear operator. `--mean-pooling` swaps it for
+**`AveragePooling2D(2,2)`** — a genuinely **linear** (and bias-free / homogeneous)
+downsample — keeping the encoder path linear for the Miyasawa/Tweedie residual-as-score
+interpretation. It is wired through `downsample_pool_type ∈ {max, average}` in the
+factory; pooling layers are weightless, so the swap does not affect weight transfer, and
+it is **ignored under `--laplacian-pyramid`** (the pyramid already pools linearly).
+
+> **Honest caveat.** Max-pooling is *positively* homogeneous (`max(αx)=α·max(x)` for
+> `α>0`), so it does **not** actually break the bias-free scale-equivariance the σ-
+> generalization relies on — empirically the trainer's model is homogeneous to ~1e-5
+> with **either** pool (under the default `LeakyReLU`). Mean-pooling makes the downsample
+> *fully linear* rather than only positively-homogeneous — a cleaner property, consistent
+> with the Laplacian path's linear-ops design, but a refinement, not a fix for a broken
+> condition. In the §8 benchmark max-pool edges mean/laplacian by ~0.1 dB in-range.
+
 ---
 
 ## 5. The training recipe
@@ -391,14 +411,23 @@ so COCO's 118K does not drown DIV2K's 800; paths are capped (`--max-train-files`
 → 10000, `--max-val-files` → 500). The pipeline then:
 
 1. `from_tensor_slices(paths)` → shuffle paths → `repeat()`.
-2. `flat_map` each path into `patches_per_image` copies, then a **second 2048-buffer
-   shuffle** — this decorrelates the multiple crops of one image at the *path-string*
-   level so a batch is not dominated by one source image.
-3. Decode → normalize to `[−0.5, +0.5]` (`image/255.0 − 0.5`) → aspect-preserving upscale
-   if smaller than the patch → `random_crop(patch_size)`.
-4. Drop black/corrupt patches (`sum|x| > 0`).
-5. (train) `augment_patch`: random flips + rot90.
-6. `clip(−0.5, 0.5)` guard → **add noise** (§5.2) → `batch` → `prefetch(AUTOTUNE)`.
+2. **Decode each image ONCE** (`decode_full_image`, `num_parallel_calls=AUTOTUNE`,
+   `deterministic=False`): read → decode → normalize to `[−0.5, +0.5]`
+   (`image/255.0 − 0.5`) → aspect-preserving upscale if smaller than the patch. Drop
+   black/corrupt decodes (`sum|x| > 0`) once, on the full image.
+3. `flat_map` the decoded image into **`patches_per_image` random crops** of the *same*
+   image (`random_crop(patch_size)`), then a **2048-buffer patch-tensor shuffle** to
+   decorrelate the same-image crops so a batch is not dominated by one source image.
+4. (train) `augment_patch`: random flips + rot90.
+5. `clip(−0.5, 0.5)` guard → **add noise** (§5.2) → `batch` → `prefetch(AUTOTUNE)`.
+
+> **Decode-once / crop-many.** The earlier pipeline repeated the *path* and re-read +
+> re-JPEG-decoded the same file once **per patch**. Since the corpora live on a spinning
+> HDD, that redundant decode was the throughput cost (not the GPU). Decoding once and
+> cropping `patches_per_image` patches from the in-memory image cuts decodes ~`patches_per_image`×.
+> The default `--patches-per-image` is **4** (so one epoch ≈ `files·4 // batch` steps).
+> Note this is a CPU/IO-load win, not a wall-clock one: the base@256/batch-4 run is GPU-
+> **compute**-bound (~85% SM), so the input pipeline was never the bottleneck.
 
 ### 5.2 Noise models
 
@@ -463,9 +492,23 @@ model.
   `max_val=1.0` is because images live in `[−0.5, +0.5]` (dynamic range 1.0); this makes
   the reported dB directly comparable to published `max_val=255` numbers.
 - **Optimizer**: AdamW (`optimizer_builder`), gradient clipping by norm `1.0`.
+  **Decoupled weight decay** is `--weight-decay` (default **0.004**, recorded in
+  `config.json`). AdamW WD only — **no `kernel_regularizer` L2** (that would double-
+  penalize; see the repo's "Double Weight Decay" note). The bias-free design has no biases
+  to regularize.
 - **LR schedule**: cosine decay with warmup (`learning_rate_schedule_builder`), peak
   `1e-3`, warmup = 10% of epochs by default, cosine floor `alpha=0.01`.
-- No EMA, no mixed precision, no explicit `jit_compile` (backend defaults apply).
+- No EMA. **Mixed precision is opt-in** via `--mixed-precision` (default OFF) — see the
+  note below.
+
+> **`--mixed-precision` (mixed_float16): implemented, correct, but measured *slower* here.**
+> It runs and serializes (fp16 compute, fp32 weights, fp32-cast output, `LossScaleOptimizer`),
+> but on base@256/batch-4 (RTX 4090) it benchmarked **~22 vs 36 img/s** against the fp32
+> default. The decoder's bilinear-upsample gradient (`ResizeBilinearGrad`) emits fp32, which
+> XLA's strict dtype checker rejects, so the mixed-precision path must run `jit_compile=False`
+> — and for this conv-heavy U-Net, losing XLA fusion outweighs the fp16 tensor-core gain.
+> Kept as a documented option for higher-res / other GPUs / a future XLA-clean upsample.
+> (The fp32 default is the fastest viable config; base@256 OOMs above batch 4 on a 4090.)
 
 ### 5.5 Self-iterate mode  (`--self-iterate`, default OFF)
 
@@ -649,11 +692,14 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
 | `--batch-size` | `16` | Batch size (reduce for large variants @256; base@256 → 4 on a 4090) |
 | `--patch-size` | `256` | Square crop size in pixels |
 | `--channels` | `3` | Image channels: `1` or `3` |
-| `--patches-per-image` | `8` | Random crops drawn per image |
+| `--patches-per-image` | `4` | Random crops drawn per **decoded** image (decode-once / crop-many, §5.1) |
 | `--learning-rate` | `1e-3` | Peak LR for the cosine schedule |
+| `--weight-decay` | `0.004` | AdamW decoupled weight decay (AdamW WD only; no L2 regularizer) |
 | `--warmup-epochs` | `None` | LR warmup length (default 10% of `--epochs`) |
 | `--no-gabor-stem` | *(off)* | Disable the frozen Gabor depthwise stem (stem is ON by default) |
-| `--laplacian-pyramid` | *(off)* | Enable Laplacian-pyramid downsample/skip path |
+| `--laplacian-pyramid` | *(off)* | Enable Laplacian-pyramid downsample/skip path (§4.2) |
+| `--mean-pooling` | *(off)* | Linear `AveragePooling2D` encoder downsample instead of `MaxPooling2D` (§4.4); ignored under `--laplacian-pyramid` |
+| `--mixed-precision` | *(off)* | `mixed_float16` (fp16 compute, fp32 weights/output). Correct but **slower** here — disables XLA; see §5.4 |
 | `--expose-bottleneck` | *(off)* | Expose the bottleneck latent as a 2nd output (enables the monitor) |
 | `--analyzer` | *(off)* | Run data-free `ModelAnalyzer` (weights + spectra) during training |
 | `--analyzer-freq` | `10` | Run the analyzer every N epochs (with `--analyzer`) |
@@ -683,7 +729,70 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
 
 ---
 
-## 8. Caveats & open questions
+## 8. Evaluation: PSNR vs noise & SOTA comparison
+
+`eval_psnr_vs_noise.py` evaluates one or more trained denoisers across one or more
+datasets and plots **mean PSNR with a 95% confidence interval vs noise level**.
+
+```bash
+# Single model, DIV2K-val patches, default σ sweep, on GPU 1
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.bfunet.eval_psnr_vs_noise \
+    --model base=results/convunext_denoiser_base_<ts>/best_model.keras \
+    --dataset div2k=/media/arxwn/data0_4tb/datasets/div2k/validation \
+    --num-samples 100 --gpu 1
+
+# Overlay several models, FULL-image (SOTA protocol), on the real benchmark sets
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.bfunet.eval_psnr_vs_noise \
+    --model maxpool=results/<base>/best_model.keras \
+    --model laplacian=results/<laplacian>/best_model.keras \
+    --dataset kodak24=/.../kodak24 --dataset urban100=/.../Urban100_HR \
+    --full-image --sigmas-255 15 25 50 --gpu 1
+```
+
+**What it does.** Samples `--num-samples` clean items per dataset (reused across every σ —
+**paired** design → tighter CIs), corrupts with AWGN matching the trainer
+(`y=x+N(0,σ²)`, clipped to `[−0.5,+0.5]`; `--no-clip` to disable), denoises, and reports
+per-image PSNR (`10·log10(1/MSE)`, `max_val=1.0` — same as training `val_psnr`, comparable
+to published `max_val=255` numbers). σ is given on the `[0,255]` scale (`--sigmas-255`).
+
+- **Multiple `--model name=path`** overlay on one figure, each on the **same** patches +
+  same noise realization per σ (fair paired comparison). Multiple `--dataset name=dir` too.
+- **`--full-image`** evaluates whole images (the standard benchmark protocol) instead of
+  256-px patches: reflect-pads H,W to a multiple of `--size-multiple` (the U-Net downsample
+  factor, default 16), denoises, crops back. It rebuilds the saved model with a flexible
+  `(None,None,C)` input (the trainer bakes a fixed patch-size `Input`; the denoiser is fully
+  convolutional, so weights transfer 1:1). **Use this for SOTA comparisons** — patch PSNR
+  runs ~0.5–1.5 dB high on easy content (e.g. DIV2K-val patches).
+- The plot is **one panel per dataset** (shared y-axis), each overlaying the per-model
+  mean+CI curves, the dashed noisy-input baseline, and **published SOTA reference points**
+  (`DnCNN` floor + best-of `{DRUNet, SwinIR, Restormer, SCUNet}` ceiling, from
+  `SOTA_REFERENCE`; source: Table 2 of SCUNet, arXiv:2203.13278). Outputs `psnr_vs_noise.png`
+  + `.csv` + `.json` + `eval_config.json` under `results/<experiment-name>/`.
+- The CI is the Student-t interval of the **mean** (`mean ± t₀.₉₇₅,ₙ₋₁·SEM`) — narrow at
+  n=100; the per-image spread (`psnr_std`, in the CSV) is the larger number.
+
+### Measured results (full-image, color AWGN, PSNR dB)
+
+Base ConvUNeXt (V1, 100 epochs), max-pool vs Laplacian, against published SOTA:
+
+| set | σ | **ours (max / lap)** | DnCNN | best-of-SOTA |
+|-----|---|----------------------|-------|--------------|
+| Kodak24 | 15 | **35.04 / 34.93** | 34.60 | 35.47 |
+| Kodak24 | 25 | **32.57 / 32.47** | 32.14 | 33.04 |
+| Kodak24 | 50 | **29.41 / 29.33** | 28.95 | 30.01 |
+| Urban100 | 15 | **34.32 / 34.17** | 32.98 | 35.18 |
+| Urban100 | 25 | **31.93 / 31.78** | 30.81 | 33.03 |
+| Urban100 | 50 | **28.59 / 28.42** | 27.59 | 30.14 |
+
+**Read:** above the 2017-era CNN baselines (DnCNN/FFDNet) everywhere; **~0.3–0.6 dB below**
+modern transformer/large-UNet SOTA on Kodak24 and **~0.5–1.4 dB below** on the harder
+Urban100 (gap widening with σ). Solid for a single blind 100-epoch *base* variant — not a
+SOTA claim. Max-pool edges Laplacian by ~0.1 dB in-range (Laplacian only pulls ahead beyond
+the training curriculum, σ₂₅₅ > ~64).
+
+---
+
+## 9. Caveats & open questions
 
 - **V2 is only approximately bias-free.** GRN's `β` is a trainable additive offset.
   How far it drifts from zero on COCO+DIV2K, and whether that measurably erodes the
@@ -700,7 +809,7 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
 
 ---
 
-## 9. References
+## 10. References
 
 - **Mohan, Kadkhodaie, Simoncelli, Fernandez-Granda — "Robust and Interpretable
   Blind Image Denoising via Bias-Free Convolutional Neural Networks", ICLR 2020.**
@@ -716,4 +825,7 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
     `dl_techniques/callbacks/noise_sigma_curriculum.py`,
     `dl_techniques/callbacks/convunext_bottleneck_monitor.py`,
     `dl_techniques/callbacks/self_iterate_pool.py` (§5.5),
-    `dl_techniques/initializers/gabor_filters_initializer.py`.
+    `dl_techniques/initializers/gabor_filters_initializer.py`,
+    `src/train/bfunet/eval_psnr_vs_noise.py` (§8 evaluation).
+- **SOTA reference numbers**: Table 2 of Zhang et al., "SCUNet" (arXiv:2203.13278) —
+  color AWGN PSNR on CBSD68 / Kodak24 / McMaster / Urban100 (used by the §8 overlay).
