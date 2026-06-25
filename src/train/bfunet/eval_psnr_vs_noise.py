@@ -71,6 +71,25 @@ DEFAULT_SIGMAS_255: List[float] = [5.0, 10.0, 15.0, 25.0, 35.0, 50.0, 65.0]
 MAX_VAL: float = 1.0  # images live in [-0.5, +0.5] -> peak-to-peak range = 1.0
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tiff", ".bmp", ".webp"}
 
+# Published color AWGN full-image PSNR (dB) reference points, keyed by dataset (lowercase)
+# then reference name then sigma_255. Source: Table 2 of Zhang et al., "SCUNet"
+# (arXiv:2203.13278). "DnCNN" is the classic-CNN floor; "SOTA best" is the per-cell max over
+# {DRUNet, SwinIR, Restormer, SCUNet} (modern transformer / large-UNet ceiling). These are
+# overlaid on the plot at matching (dataset, sigma) for context -- not a like-for-like claim
+# unless the run used --full-image on the same set.
+SOTA_REFERENCE: Dict[str, Dict[str, Dict[float, float]]] = {
+    "cbsd68": {"DnCNN": {15: 33.90, 25: 31.24, 50: 27.95},
+               "SOTA best": {15: 34.42, 25: 31.79, 50: 28.61}},
+    "kodak24": {"DnCNN": {15: 34.60, 25: 32.14, 50: 28.95},
+                "SOTA best": {15: 35.47, 25: 33.04, 50: 30.01}},
+    "mcmaster": {"DnCNN": {15: 33.45, 25: 31.52, 50: 28.62},
+                 "SOTA best": {15: 35.61, 25: 33.34, 50: 30.30}},
+    "urban100": {"DnCNN": {15: 32.98, 25: 30.81, 50: 27.59},
+                 "SOTA best": {15: 35.18, 25: 33.03, 50: 30.14}},
+}
+SOTA_STYLE = {"DnCNN": dict(marker="v", color="0.45"),
+              "SOTA best": dict(marker="*", color="black")}
+
 
 @dataclass
 class EvalConfig:
@@ -82,6 +101,8 @@ class EvalConfig:
     patch_size: int = 256
     channels: int = 3
     batch_size: int = 16
+    full_image: bool = False                  # evaluate whole images (SOTA protocol) vs patches
+    size_multiple: int = 16                   # full-image: reflect-pad H,W to this multiple
     clip_noise: bool = True                   # match the trainer (clips to [-0.5, +0.5])
     confidence: float = 0.95
     seed: int = 42
@@ -110,6 +131,35 @@ def load_denoiser(model_path: str) -> keras.Model:
         f"{n_out} output(s)) from {model_path}"
     )
     return model
+
+
+def _to_flexible_input(model: keras.Model) -> keras.Model:
+    """Rebuild a fixed-input functional denoiser with a spatially-flexible ``(None, None, C)``
+    input so it accepts whole images of any size.
+
+    The trainer bakes a static ``(patch, patch, C)`` ``Input`` into the saved model, which
+    rejects full-size images. The denoiser is fully convolutional (conv / pooling / channel
+    norm / fixed-kernel Gabor + Laplacian), so every weight is spatially independent and
+    transfers 1:1 to the rebuilt graph.
+    """
+    cfg = model.get_config()
+    patched = False
+    for layer in cfg.get("layers", []):
+        if layer.get("class_name") == "InputLayer":
+            lc = layer["config"]
+            key = "batch_shape" if "batch_shape" in lc else (
+                "batch_input_shape" if "batch_input_shape" in lc else None)
+            if key and lc.get(key) and len(lc[key]) == 4:
+                b = list(lc[key])
+                lc[key] = [b[0], None, None, b[3]]
+                patched = True
+    if not patched:
+        logger.warning(f"'{model.name}': could not relax input shape; full-image eval may fail")
+        return model
+    flex = keras.Model.from_config(cfg)
+    flex.set_weights(model.get_weights())
+    logger.info(f"rebuilt '{model.name}' with flexible (None,None,C) input for full-image eval")
+    return flex
 
 
 def _predict_denoised(model: keras.Model, noisy: np.ndarray, batch_size: int) -> np.ndarray:
@@ -177,6 +227,42 @@ def sample_clean_patches(cfg: EvalConfig, paths: List[str], rng: np.random.Rando
     return np.stack(patches, axis=0).astype(np.float32)
 
 
+def _load_full_image(path: str, channels: int) -> Optional[np.ndarray]:
+    """Decode a whole image, normalize to [-0.5, +0.5]; no cropping. None on failure."""
+    try:
+        raw = tf.io.read_file(path)
+        img = tf.image.decode_image(raw, channels=channels, expand_animations=False)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"skip unreadable image {path}: {exc}")
+        return None
+    arr = (tf.cast(img, tf.float32) / 255.0 - 0.5).numpy()
+    return None if not np.any(np.abs(arr) > 0) else arr
+
+
+def sample_full_images(cfg: EvalConfig, paths: List[str], rng: np.random.RandomState) -> List[np.ndarray]:
+    """Load up to ``num_samples`` whole images (deterministic order) for full-image eval."""
+    order = rng.permutation(len(paths))
+    images: List[np.ndarray] = []
+    for idx in order:
+        if len(images) >= cfg.num_samples:
+            break
+        img = _load_full_image(paths[idx], cfg.channels)
+        if img is not None:
+            images.append(img)
+    return images
+
+
+def _denoise_full(model: keras.Model, noisy: np.ndarray, size_multiple: int) -> np.ndarray:
+    """Denoise one whole image: reflect-pad H,W to a multiple of ``size_multiple`` (the
+    U-Net downsample factor), run a single forward pass, then crop back to the original size."""
+    h, w = noisy.shape[:2]
+    ph = (size_multiple - h % size_multiple) % size_multiple
+    pw = (size_multiple - w % size_multiple) % size_multiple
+    padded = np.pad(noisy, ((0, ph), (0, pw), (0, 0)), mode="reflect")
+    out = _predict_denoised(model, padded[None, ...], batch_size=1)[0]
+    return out[:h, :w, :]
+
+
 # ---------------------------------------------------------------------
 # Noise + PSNR
 # ---------------------------------------------------------------------
@@ -220,16 +306,35 @@ def evaluate_dataset(
     each sigma (the noisy batch is built once per sigma, then fed to each model), so
     the per-model curves are a fair paired comparison. Returns per (model, sigma) rows.
     """
-    logger.info(f"[{name}] sampling {cfg.num_samples} clean {cfg.patch_size}px patches "
-                f"from {len(paths)} images")
-    clean = sample_clean_patches(cfg, paths, rng)
+    if cfg.full_image:
+        logger.info(f"[{name}] loading up to {cfg.num_samples} FULL images from {len(paths)} "
+                    f"(full-image PSNR; SOTA protocol)")
+        clean_list = sample_full_images(cfg, paths, rng)
+    else:
+        logger.info(f"[{name}] sampling {cfg.num_samples} clean {cfg.patch_size}px patches "
+                    f"from {len(paths)} images")
+        clean = sample_clean_patches(cfg, paths, rng)
+
     rows: List[Dict] = []
     for sigma_255, sigma_norm in zip(cfg.sigmas_255, cfg.sigmas_norm):
-        noisy = add_awgn(clean, sigma_norm, cfg.clip_noise, rng)  # one realization, shared
-        in_mean, _, _ = mean_ci(psnr_per_image(noisy, clean), cfg.confidence)  # model-free baseline
+        if cfg.full_image:
+            # Per-image noise realization (shared across models), variable sizes -> lists.
+            noisy_list = [add_awgn(c, sigma_norm, cfg.clip_noise, rng) for c in clean_list]
+            psnr_in = np.array([psnr_per_image(n[None], c[None])[0]
+                                for n, c in zip(noisy_list, clean_list)])
+        else:
+            noisy = add_awgn(clean, sigma_norm, cfg.clip_noise, rng)  # one realization, shared
+            psnr_in = psnr_per_image(noisy, clean)
+        in_mean, _, _ = mean_ci(psnr_in, cfg.confidence)  # model-free baseline
         for model_name, model in models.items():
-            denoised = _predict_denoised(model, noisy, cfg.batch_size)
-            psnr_out = psnr_per_image(denoised, clean)
+            if cfg.full_image:
+                psnr_out = np.array([
+                    psnr_per_image(_denoise_full(model, n, cfg.size_multiple)[None], c[None])[0]
+                    for n, c in zip(noisy_list, clean_list)
+                ])
+            else:
+                denoised = _predict_denoised(model, noisy, cfg.batch_size)
+                psnr_out = psnr_per_image(denoised, clean)
             mean, lo, hi = mean_ci(psnr_out, cfg.confidence)
             rows.append({
                 "model": model_name, "dataset": name, "sigma_255": sigma_255,
@@ -242,7 +347,10 @@ def evaluate_dataset(
                 f"PSNR {mean:5.2f} dB [{lo:5.2f}, {hi:5.2f}]  (input {in_mean:5.2f}, "
                 f"+{mean - in_mean:4.2f} dB)"
             )
-    del clean
+    if cfg.full_image:
+        del clean_list
+    else:
+        del clean
     gc.collect()
     return rows
 
@@ -290,12 +398,28 @@ def plot_results(rows: List[Dict], cfg: EvalConfig, out_path: Path) -> None:
                 "--", color="0.5", alpha=0.7, linewidth=1,
                 label=f"noisy input ({ds_name})" if multi_ds else "noisy input (no denoising)")
 
+    # Overlay published SOTA reference points at matching (dataset, sigma).
+    eval_sigmas = {r["sigma_255"] for r in rows}
+    for ds_name in datasets:
+        ref = SOTA_REFERENCE.get(ds_name.lower())
+        if not ref:
+            continue
+        for ref_name, pts in ref.items():
+            xs = sorted(s for s in pts if s in eval_sigmas)
+            if not xs:
+                continue
+            ys = [pts[s] for s in xs]
+            label = (f"{ref_name} ({ds_name})" if multi_ds else ref_name) + " [lit.]"
+            ax.plot(xs, ys, linestyle=":", linewidth=1.3, markersize=9,
+                    **SOTA_STYLE[ref_name], label=label, alpha=0.85)
+
     ax.set_xlabel("Noise std  σ  (on [0, 255] scale)")
     ax.set_ylabel("PSNR (dB)")
+    sample_desc = ("full images" if cfg.full_image
+                   else f"{cfg.num_samples} × {cfg.patch_size}px patches")
     ax.set_title(
         f"Denoiser PSNR vs noise level\n"
-        f"{cfg.num_samples} × {cfg.patch_size}px patches/level, "
-        f"{int(cfg.confidence * 100)}% CI of the mean"
+        f"{sample_desc}/level, {int(cfg.confidence * 100)}% CI of the mean"
     )
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8)
@@ -327,6 +451,8 @@ def run_evaluation(cfg: EvalConfig) -> Path:
     """Load all models, evaluate every dataset, write plot + tables; return out dir."""
     set_seeds(cfg.seed)
     models = {name: load_denoiser(path) for name, path in cfg.models.items()}
+    if cfg.full_image:  # relax the fixed (patch,patch) input so whole images are accepted
+        models = {name: _to_flexible_input(m) for name, m in models.items()}
 
     name = cfg.experiment_name or f"psnr_vs_noise_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     out_dir = Path(cfg.output_dir) / name
@@ -350,6 +476,7 @@ def run_evaluation(cfg: EvalConfig) -> Path:
             "models": cfg.models, "datasets": cfg.datasets,
             "sigmas_255": cfg.sigmas_255, "num_samples": cfg.num_samples,
             "patch_size": cfg.patch_size, "channels": cfg.channels,
+            "full_image": cfg.full_image, "size_multiple": cfg.size_multiple,
             "clip_noise": cfg.clip_noise, "confidence": cfg.confidence, "seed": cfg.seed,
         }, f, indent=2)
     write_tables(all_rows, out_dir)
@@ -405,6 +532,11 @@ def main() -> None:
     parser.add_argument("--patch-size", type=int, default=256)
     parser.add_argument("--channels", type=int, choices=[1, 3], default=3)
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--full-image", action="store_true",
+                        help="evaluate whole images (SOTA protocol: reflect-pad to a multiple "
+                             "of --size-multiple, denoise, crop back) instead of random patches")
+    parser.add_argument("--size-multiple", type=int, default=16,
+                        help="full-image mode: pad H,W up to this multiple (U-Net downsample factor)")
     parser.add_argument("--no-clip", action="store_true",
                         help="do NOT clip noisy images to [-0.5,+0.5] (trainer clips by default)")
     parser.add_argument("--confidence", type=float, default=0.95)
@@ -424,6 +556,8 @@ def main() -> None:
         patch_size=args.patch_size,
         channels=args.channels,
         batch_size=args.batch_size,
+        full_image=args.full_image,
+        size_multiple=args.size_multiple,
         clip_noise=not args.no_clip,
         confidence=args.confidence,
         seed=args.seed,
