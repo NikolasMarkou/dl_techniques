@@ -395,6 +395,47 @@ it is **ignored under `--laplacian-pyramid`** (the pyramid already pools linearl
 > with the Laplacian path's linear-ops design, but a refinement, not a fix for a broken
 > condition. In the §8 benchmark max-pool edges mean/laplacian by ~0.1 dB in-range.
 
+### 4.5 Parameter-free channel matching  (`--zero-pad-channels`, default OFF)
+
+The U-Net changes channel width at every level, and by default each width change is a
+learned `Conv2D(kernel_size=1, use_bias=False)` — the per-level *channel-adjust* convs.
+`--zero-pad-channels` removes **all** of them and replaces each with a parameter-free op
+via a new weightless `MatchChannels` layer, in **both** directions:
+
+- **Channel increases** (encoder levels 1..depth−1 and the bottleneck, e.g. 64→128→…→1024):
+  **zero-pad**. Keep the real channels, append zero channels to reach the target — a
+  "ResNet option-A" identity pad. The ConvNeXt blocks downstream then learn to populate
+  the appended zero channels.
+- **Channel decreases** (the decoder, post-upsample): the concat-then-`1×1`-reduce becomes
+  `Add([skip, slice(upsampled, C)])`. The upsampled branch carries exactly `2C` channels;
+  slice it to its first `C` and add the `C`-channel skip.
+
+> **Why the decoder isn't a literal slice.** The decoder has to *reduce* channels (zero-pad
+> can only increase), and the obvious "slice the `[skip, up]` concat to `C`" is a silent
+> killer: concat order is `[skip, upsampled]` with `skip` already exactly `C` channels, so
+> slicing the first `C` keeps **only the skip** and discards the *entire* upsampled decoder
+> branch — degenerate, the model cannot denoise. Slicing the **upsampled** branch to `C` and
+> then adding the skip keeps *both* branches (full skip + first half of the upsample).
+
+Both ops add **no weights and no bias**, and both are degree-1 homogeneous, so the variant
+stays **bias-free** and preserves the model's scale-homogeneity — measured on the trainer's
+config (V1 + `LeakyReLU(0.1)`), `max|f(αx)−αf(x)|` is `2.2e-5` with the convs (OFF) vs
+`2.5e-5` parameter-free (ON): no degradation.
+
+> **Honest caveat — capacity for parameters.** This buys a clean parameter-free, still-bias-
+> free variant **at the cost of model capacity**: it removes the learned channel projection
+> and cross-channel mixing — the encoder's appended channels start empty, and the decoder
+> throws away half the upsampled channels and the learned mix. Expect the ON variant to
+> denoise *somewhat worse* than the learned-conv baseline; it is an **A/B experiment, not a
+> free win**. A 2-epoch smoke already shows ON starting well below the conv baseline — a full
+> run is needed to judge whether the blocks recover the gap. Default **OFF** is byte-identical
+> to the learned-projection architecture, so existing checkpoints are unaffected.
+
+```bash
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
+    --variant base --batch-size 4 --zero-pad-channels --gpu 1
+```
+
 ---
 
 ## 5. The training recipe
@@ -699,6 +740,7 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
 | `--no-gabor-stem` | *(off)* | Disable the frozen Gabor depthwise stem (stem is ON by default) |
 | `--laplacian-pyramid` | *(off)* | Enable Laplacian-pyramid downsample/skip path (§4.2) |
 | `--mean-pooling` | *(off)* | Linear `AveragePooling2D` encoder downsample instead of `MaxPooling2D` (§4.4); ignored under `--laplacian-pyramid` |
+| `--zero-pad-channels` | *(off)* | Replace per-level channel-adjust 1×1 convs with parameter-free channel matching (§4.5): zero-pad on channel increase, slice-upsampled+add-skip on the decoder. Bias-free, fewer params. |
 | `--mixed-precision` | *(off)* | `mixed_float16` (fp16 compute, fp32 weights/output). Correct but **slower** here — disables XLA; see §5.4 |
 | `--expose-bottleneck` | *(off)* | Expose the bottleneck latent as a 2nd output (enables the monitor) |
 | `--analyzer` | *(off)* | Run data-free `ModelAnalyzer` (weights + spectra) during training |
