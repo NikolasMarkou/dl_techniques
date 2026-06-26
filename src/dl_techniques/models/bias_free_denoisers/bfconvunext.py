@@ -88,6 +88,7 @@ from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormal
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.initializers import create_gabor_depthwise_conv2d
 from dl_techniques.layers.laplacian_filter import LaplacianPyramidLevel
+from dl_techniques.layers.match_channels import MatchChannels
 
 # ---------------------------------------------------------------------
 # ConvUNext Bias-Free Building Blocks (Simple Stem)
@@ -399,6 +400,7 @@ def create_convunext_denoiser(
         gabor_kernel_size: Union[int, Tuple[int, int]] = 7,
         use_laplacian_pyramid: bool = False,
         laplacian_kernel_size: Tuple[int, int] = (5, 5),
+        zero_pad_channels: bool = False,
         downsample_pool_type: str = "max",
         expose_bottleneck: bool = False,
         block_kernel_size: Union[int, Tuple[int, int]] = 7,
@@ -482,6 +484,15 @@ def create_convunext_denoiser(
             Contributes zero trainable parameters (the blur kernel is fixed).
         laplacian_kernel_size: Tuple of two ints, Gaussian blur kernel size for the
             Laplacian pyramid split. Only used when use_laplacian_pyramid=True. Defaults to (5, 5).
+        zero_pad_channels: Boolean, if True replace every per-level channel-adjust 1x1
+            convolution with a parameter-free channel match. Channel INCREASES (encoder
+            levels and the bottleneck) are done by zero-padding the channel axis; channel
+            DECREASES (the post-upsample decoder path) are done by slicing the upsampled
+            branch to `current_filters` and ADDING the skip connection (the literal
+            slice-the-concat is degenerate — it would discard the entire upsampled branch).
+            The substitution is bias-free and homogeneous, removing all channel-adjust conv
+            parameters. Defaults to False, which is byte-identical to the original
+            learned-projection architecture (same layer names, same Conv2D ops, same outputs).
         downsample_pool_type: 'max' or 'average'. Pooling op for the non-Laplacian encoder
             downsample. 'max' (default) = MaxPooling2D, byte-identical to the original
             architecture but NON-LINEAR. 'average' = AveragePooling2D, a LINEAR (bias-free,
@@ -638,6 +649,12 @@ def create_convunext_denoiser(
             f"({'AveragePooling2D — linear, Miyasawa-clean' if downsample_pool_type == 'average' else 'MaxPooling2D — non-linear'})"
         )
 
+    if zero_pad_channels:
+        logger.info(
+            "Zero-pad channel matching ENABLED: per-level channel-adjust convs replaced by "
+            "parameter-free pad/slice (encoder+bottleneck zero-pad; decoder slice-upsampled+add-skip; bias-free)"
+        )
+
     # Storage for skip connections and deep supervision outputs
     skip_connections: List[keras.layers.Layer] = []
     deep_supervision_outputs: List[keras.layers.Layer] = []
@@ -676,14 +693,17 @@ def create_convunext_denoiser(
             # gabor-stem level-0 case (ensures x has current_filters channels so the
             # residual ConvNeXt blocks below add correctly).
             if x.shape[-1] != current_filters:
-                x = keras.layers.Conv2D(
-                    filters=current_filters,
-                    kernel_size=1,
-                    use_bias=False,  # Bias-free
-                    kernel_initializer=kernel_initializer,
-                    kernel_regularizer=kernel_regularizer,
-                    name=f'encoder_level_{level}_channel_adjust'
-                )(x)
+                if zero_pad_channels:
+                    x = MatchChannels(current_filters, name=f'encoder_level_{level}_match_channels')(x)
+                else:
+                    x = keras.layers.Conv2D(
+                        filters=current_filters,
+                        kernel_size=1,
+                        use_bias=False,  # Bias-free
+                        kernel_initializer=kernel_initializer,
+                        kernel_regularizer=kernel_regularizer,
+                        name=f'encoder_level_{level}_channel_adjust'
+                    )(x)
 
         # ConvNeXt blocks at current resolution (bias-free, residual + drop-path)
         for block_idx in range(blocks_per_level):
@@ -724,14 +744,17 @@ def create_convunext_denoiser(
 
     # Channel adjustment for bottleneck (bias-free)
     if x.shape[-1] != bottleneck_filters:
-        x = keras.layers.Conv2D(
-            filters=bottleneck_filters,
-            kernel_size=1,
-            use_bias=False,  # Bias-free
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
-            name='bottleneck_channel_adjust'
-        )(x)
+        if zero_pad_channels:
+            x = MatchChannels(bottleneck_filters, name='bottleneck_match_channels')(x)
+        else:
+            x = keras.layers.Conv2D(
+                filters=bottleneck_filters,
+                kernel_size=1,
+                use_bias=False,  # Bias-free
+                kernel_initializer=kernel_initializer,
+                kernel_regularizer=kernel_regularizer,
+                name='bottleneck_channel_adjust'
+            )(x)
 
     # Bottleneck ConvNeXt blocks (bias-free, residual + drop-path)
     # DECISION plan_2026-06-20_0433c2f2/D-003: the bottleneck is the deepest point, so it
@@ -787,22 +810,33 @@ def create_convunext_denoiser(
                 name=f'decoder_resize_{level}'
             )(x)
 
-        # Merge skip connection
-        x = keras.layers.Concatenate(
-            axis=-1,
-            name=f'decoder_concat_{level}'
-        )([skip, x])
+        # Merge skip connection.
+        # DECISION plan_2026-06-26_90d8cbe6/D-003: under zero_pad_channels the decoder cannot
+        # zero-pad (it must REDUCE channels). The literal "slice the [skip, up] concat to C" is
+        # degenerate (concat order is [skip(C), up(2C)] so the first C channels are skip ONLY,
+        # discarding the entire upsampled branch). Instead slice the UPSAMPLED tensor (2C) down
+        # to C and ADD the C-channel skip — parameter-free, keeps both branches, bias-free,
+        # homogeneous. OFF arm below is the verbatim original Concatenate + 1x1 Conv2D.
+        if zero_pad_channels:
+            x = keras.layers.Add(name=f'decoder_level_{level}_match_add')(
+                [skip, MatchChannels(current_filters, name=f'decoder_level_{level}_match_channels')(x)]
+            )
+        else:
+            x = keras.layers.Concatenate(
+                axis=-1,
+                name=f'decoder_concat_{level}'
+            )([skip, x])
 
-        # Channel adjustment after concatenation (bias-free)
-        if x.shape[-1] != current_filters:
-            x = keras.layers.Conv2D(
-                filters=current_filters,
-                kernel_size=1,
-                use_bias=False,  # Bias-free
-                kernel_initializer=kernel_initializer,
-                kernel_regularizer=kernel_regularizer,
-                name=f'decoder_level_{level}_channel_adjust'
-            )(x)
+            # Channel adjustment after concatenation (bias-free)
+            if x.shape[-1] != current_filters:
+                x = keras.layers.Conv2D(
+                    filters=current_filters,
+                    kernel_size=1,
+                    use_bias=False,  # Bias-free
+                    kernel_initializer=kernel_initializer,
+                    kernel_regularizer=kernel_regularizer,
+                    name=f'decoder_level_{level}_channel_adjust'
+                )(x)
 
         # ConvNeXt blocks after merging (bias-free, residual + drop-path)
         for block_idx in range(blocks_per_level):
