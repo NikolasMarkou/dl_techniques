@@ -535,6 +535,170 @@ class TestStemSupervisionActivation:
 
 
 # ---------------------------------------------------------------------
+# zero_pad_channels flag (Step 4 / SC2-SC5): parameter-free channel match.
+# The flag replaces every per-level 1x1 channel-adjust conv with a weightless
+# MatchChannels op (zero-pad on increase, slice+add on decrease). OFF path is
+# byte-identical to HEAD. All save/load + homogeneity checks run on CPU
+# (CUDA_VISIBLE_DEVICES="") per LESSONS: GPU fp32 reduction noise can exceed
+# 1e-4 and mask serialization / homogeneity defects.
+# ---------------------------------------------------------------------
+
+class TestZeroPadChannels:
+    """Step 4: model-level tests for the zero_pad_channels factory flag."""
+
+    # Small, fast, homogeneity-friendly config: v1 (no GRN), linear final
+    # activation (homogeneity), filter_multiplier=2 so channel-adjust sites
+    # actually exist (and get removed when ON).
+    def _cfg(self, **overrides) -> Dict[str, Any]:
+        cfg = dict(
+            input_shape=(32, 32, 1),
+            depth=3,
+            initial_filters=16,
+            blocks_per_level=1,
+            convnext_version='v1',
+            filter_multiplier=2,
+            final_activation='linear',
+            drop_path_rate=0.0,
+        )
+        cfg.update(overrides)
+        return cfg
+
+    def _build(self, **overrides) -> keras.Model:
+        return create_convunext_denoiser(**self._cfg(**overrides))
+
+    def test_zero_pad_default_unchanged(self) -> None:
+        # SC3: explicit OFF and the omitted-kwarg default must be byte-identical
+        # (same layer-name SET, same outputs to atol=0).
+        model_explicit = self._build(zero_pad_channels=False)
+        model_default = self._build()
+
+        names_explicit = {l.name for l in model_explicit.layers}
+        names_default = {l.name for l in model_default.layers}
+        assert names_explicit == names_default, (
+            "explicit zero_pad_channels=False diverged from the omitted-kwarg "
+            f"default: symmetric diff {names_explicit ^ names_default}"
+        )
+
+        rng = np.random.RandomState(0)
+        x = rng.rand(2, 32, 32, 1).astype(np.float32)
+        # Same seed/init is not guaranteed across two builds, so compare the
+        # GRAPH topology (names) for byte-identity; for output identity, copy
+        # weights so only the wiring is under test.
+        model_default.set_weights(model_explicit.get_weights())
+        y_explicit = np.array(keras.ops.convert_to_numpy(model_explicit(x, training=False)))
+        y_default = np.array(keras.ops.convert_to_numpy(model_default(x, training=False)))
+        np.testing.assert_allclose(
+            y_explicit, y_default, atol=0.0,
+            err_msg="OFF explicit vs omitted-kwarg outputs differ (atol=0)",
+        )
+
+    def test_zero_pad_forward_shape(self) -> None:
+        # SC2: base-like AND tiny-like ON configs build, forward-pass to the same
+        # spatial+channel shape as the input, and are all-finite.
+        for name, cfg in (
+            ("base-like", dict(initial_filters=16, depth=3)),
+            ("tiny-like", dict(initial_filters=8, depth=3)),
+        ):
+            model = self._build(zero_pad_channels=True, **cfg)
+            rng = np.random.RandomState(1)
+            x = rng.rand(2, 32, 32, 1).astype(np.float32)
+            y = np.array(keras.ops.convert_to_numpy(model(x, training=False)))
+            assert y.shape == x.shape, f"{name}: output {y.shape} != input {x.shape}"
+            assert np.all(np.isfinite(y)), f"{name}: non-finite ON forward output"
+
+    def test_zero_pad_param_count_drops(self) -> None:
+        # SC2: removing the channel-adjust convs strictly reduces param count
+        # (filter_multiplier=2 guarantees the convs exist in the OFF model).
+        off = self._build(zero_pad_channels=False)
+        on = self._build(zero_pad_channels=True)
+        assert on.count_params() < off.count_params(), (
+            f"ON params ({on.count_params()}) not < OFF params "
+            f"({off.count_params()}); channel-adjust convs were not removed"
+        )
+
+    def test_zero_pad_bias_free(self) -> None:
+        # SC5 (bias-free arm): verify_bias_free is a logging helper (returns None,
+        # never raises); confirm it runs, then INDEPENDENTLY assert the ON model
+        # carries no bias and no LayerNormalization center. v1 has no GRN beta, so
+        # a correct ON model has ZERO bias-like offenders.
+        from train.bfunet.train_convunext_denoiser import verify_bias_free
+
+        model = self._build(zero_pad_channels=True)
+        # Smoke: the helper executes on the ON model without error.
+        assert verify_bias_free(model) is None
+
+        offenders = []
+        for layer in model._flatten_layers():
+            if getattr(layer, "use_bias", False):
+                offenders.append(layer.name)
+            if isinstance(layer, keras.layers.LayerNormalization) and getattr(
+                layer, "center", False
+            ):
+                offenders.append(f"{layer.name} (LN center)")
+        assert not offenders, f"ON model is not bias-free; offenders: {offenders}"
+
+    def test_zero_pad_keras_round_trip(self, tmp_path) -> None:
+        # SC4: ON model .keras save/load identity on CPU (atol=1e-4). MatchChannels
+        # is registered, but pass it in custom_objects defensively (mirrors the
+        # LESSONS guidance for the model package + custom layers).
+        from dl_techniques.layers.match_channels import MatchChannels
+
+        model = self._build(zero_pad_channels=True)
+        rng = np.random.RandomState(2)
+        x = rng.rand(2, 32, 32, 1).astype(np.float32)
+        y_before = np.array(keras.ops.convert_to_numpy(model(x, training=False)))
+
+        save_path = os.path.join(str(tmp_path), 'bfconvunext_zeropad.keras')
+        model.save(save_path)
+        loaded = keras.models.load_model(
+            save_path, custom_objects={'MatchChannels': MatchChannels}
+        )
+        y_after = np.array(keras.ops.convert_to_numpy(loaded(x, training=False)))
+
+        np.testing.assert_allclose(
+            y_before, y_after, atol=1e-4,
+            err_msg="ON model outputs differ after .keras round-trip",
+        )
+
+    def test_zero_pad_homogeneity_differential(self) -> None:
+        # SC5 (differential homogeneity arm): with the trainer's homogeneous
+        # config (LeakyReLU(0.1) on block + stem + linear final), the ON
+        # parameter-free pad/slice must NOT break the scale homogeneity the OFF
+        # path has. Measure err = max|f(alpha*x) - alpha*f(x)| for both; assert
+        # ON err <= OFF err * 1.5 + 1e-4. Both expected ~1e-4 on CPU.
+        alpha = 3.0
+        rng = np.random.RandomState(3)
+        # negative-bearing input so LeakyReLU's negative branch is exercised
+        x = ((rng.rand(2, 32, 32, 1).astype(np.float32) - 0.5) * 2.0)
+
+        def _hom_err(model: keras.Model) -> float:
+            fx = np.array(keras.ops.convert_to_numpy(model(x, training=False)))
+            fax = np.array(keras.ops.convert_to_numpy(model(alpha * x, training=False)))
+            return float(np.max(np.abs(fax - alpha * fx)))
+
+        # ONE shared activation instance drives block + stem (mirrors build_model).
+        def _homog_cfg(zero_pad: bool) -> keras.Model:
+            act = keras.layers.LeakyReLU(negative_slope=0.1)
+            return self._build(
+                zero_pad_channels=zero_pad,
+                use_gabor_stem=False,
+                block_activation=act,
+                stem_activation=act,
+            )
+
+        off_model = _homog_cfg(False)
+        on_model = _homog_cfg(True)
+
+        off_err = _hom_err(off_model)
+        on_err = _hom_err(on_model)
+
+        assert on_err <= off_err * 1.5 + 1e-4, (
+            f"ON homogeneity err {on_err:.3e} exceeds OFF {off_err:.3e} * 1.5 "
+            f"+ 1e-4; parameter-free pad/slice broke scale homogeneity"
+        )
+
+
+# ---------------------------------------------------------------------
 # create_convunext_variant (wrapper)
 # ---------------------------------------------------------------------
 
