@@ -699,6 +699,216 @@ class TestZeroPadChannels:
 
 
 # ---------------------------------------------------------------------
+# create_convunext_denoiser(..., extra_zero_output_channels=True)
+# ---------------------------------------------------------------------
+# Design B (D-001/D-002): at decoder level 0, zero-pad x to
+# initial_filters + output_channels BEFORE the level-0 ConvNeXt blocks
+# (widened blocks), then drop the learned final_output 1x1 Conv2D in favor
+# of a parameter-free tail-slice keeping the last output_channels channels
+# (MatchChannels(slice_side='tail')). OFF path is byte-identical to HEAD.
+# All save/load + homogeneity checks run on CPU (CUDA_VISIBLE_DEVICES="")
+# per LESSONS: GPU fp32 reduction noise can mask serialization / homogeneity
+# defects at 1e-4.
+# ---------------------------------------------------------------------
+
+class TestExtraZeroOutputChannels:
+    """Step 3: model-level tests for the extra_zero_output_channels factory flag."""
+
+    # Same small, fast, homogeneity-friendly config as TestZeroPadChannels.
+    def _cfg(self, **overrides) -> Dict[str, Any]:
+        cfg = dict(
+            input_shape=(32, 32, 1),
+            depth=3,
+            initial_filters=16,
+            blocks_per_level=1,
+            convnext_version='v1',
+            filter_multiplier=2,
+            final_activation='linear',
+            drop_path_rate=0.0,
+        )
+        cfg.update(overrides)
+        return cfg
+
+    def _build(self, **overrides) -> keras.Model:
+        return create_convunext_denoiser(**self._cfg(**overrides))
+
+    def test_extra_zero_default_unchanged(self) -> None:
+        # SC4: explicit OFF and the omitted-kwarg default must be byte-identical
+        # (same layer-name SET, same outputs to atol=0).
+        model_explicit = self._build(extra_zero_output_channels=False)
+        model_default = self._build()
+
+        names_explicit = {l.name for l in model_explicit.layers}
+        names_default = {l.name for l in model_default.layers}
+        assert names_explicit == names_default, (
+            "explicit extra_zero_output_channels=False diverged from the "
+            f"omitted-kwarg default: symmetric diff {names_explicit ^ names_default}"
+        )
+
+        rng = np.random.RandomState(0)
+        x = rng.rand(2, 32, 32, 1).astype(np.float32)
+        # Same seed/init is not guaranteed across two builds, so compare the
+        # GRAPH topology (names) for byte-identity; for output identity, copy
+        # weights so only the wiring is under test.
+        model_default.set_weights(model_explicit.get_weights())
+        y_explicit = np.array(keras.ops.convert_to_numpy(model_explicit(x, training=False)))
+        y_default = np.array(keras.ops.convert_to_numpy(model_default(x, training=False)))
+        np.testing.assert_allclose(
+            y_explicit, y_default, atol=0.0,
+            err_msg="OFF explicit vs omitted-kwarg outputs differ (atol=0)",
+        )
+
+    def test_extra_zero_forward_shape(self) -> None:
+        # SC5: base-like AND tiny-like ON configs build, forward-pass to the same
+        # spatial+channel shape as the input, and are all-finite.
+        for name, cfg in (
+            ("base-like", dict(initial_filters=16, depth=3)),
+            ("tiny-like", dict(initial_filters=8, depth=3)),
+        ):
+            model = self._build(extra_zero_output_channels=True, **cfg)
+            rng = np.random.RandomState(1)
+            x = rng.rand(2, 32, 32, 1).astype(np.float32)
+            y = np.array(keras.ops.convert_to_numpy(model(x, training=False)))
+            assert y.shape == x.shape, f"{name}: output {y.shape} != input {x.shape}"
+            assert np.all(np.isfinite(y)), f"{name}: non-finite ON forward output"
+
+    def test_extra_zero_final_output_absent(self) -> None:
+        # SC6: the learned 1x1 'final_output' Conv2D is present OFF and DROPPED ON,
+        # replaced by the parameter-free 'final_output_tail_slice' MatchChannels;
+        # the level-0 zero-pad layer 'extra_zero_output_pad' is added ON.
+        # NOTE: we do NOT assert a net param-count drop here — the widened level-0
+        # ConvNeXt blocks ADD params; the invariant under test is the SPECIFIC
+        # final_output-Conv2D removal, not the net delta.
+        off = self._build(extra_zero_output_channels=False)
+        on = self._build(extra_zero_output_channels=True)
+
+        off_names = {l.name for l in off.layers}
+        on_names = {l.name for l in on.layers}
+
+        assert 'final_output' in off_names, "OFF model is missing final_output Conv2D"
+        assert 'final_output' not in on_names, (
+            "ON model still carries the learned final_output Conv2D"
+        )
+        assert 'final_output_tail_slice' in on_names, (
+            "ON model is missing the parameter-free final_output_tail_slice"
+        )
+        assert 'extra_zero_output_pad' in on_names, (
+            "ON model is missing the level-0 extra_zero_output_pad"
+        )
+
+    def test_extra_zero_bias_free(self) -> None:
+        # SC7 (bias-free arm): verify_bias_free is a logging helper (returns None,
+        # never raises); confirm it runs, then INDEPENDENTLY assert the ON model
+        # carries no bias and no LayerNormalization center.
+        from train.bfunet.train_convunext_denoiser import verify_bias_free
+
+        model = self._build(extra_zero_output_channels=True)
+        # Smoke: the helper executes on the ON model without error.
+        assert verify_bias_free(model) is None
+
+        offenders = []
+        for layer in model._flatten_layers():
+            if getattr(layer, "use_bias", False):
+                offenders.append(layer.name)
+            if isinstance(layer, keras.layers.LayerNormalization) and getattr(
+                layer, "center", False
+            ):
+                offenders.append(f"{layer.name} (LN center)")
+        assert not offenders, f"ON model is not bias-free; offenders: {offenders}"
+
+    def test_extra_zero_keras_round_trip(self, tmp_path) -> None:
+        # SC8: ON model .keras save/load identity on CPU (atol=1e-4). MatchChannels
+        # is registered, but pass it in custom_objects defensively.
+        from dl_techniques.layers.match_channels import MatchChannels
+
+        model = self._build(extra_zero_output_channels=True)
+        rng = np.random.RandomState(2)
+        x = rng.rand(2, 32, 32, 1).astype(np.float32)
+        y_before = np.array(keras.ops.convert_to_numpy(model(x, training=False)))
+
+        save_path = os.path.join(str(tmp_path), 'bfconvunext_extra_zero.keras')
+        model.save(save_path)
+        loaded = keras.models.load_model(
+            save_path, custom_objects={'MatchChannels': MatchChannels}
+        )
+        y_after = np.array(keras.ops.convert_to_numpy(loaded(x, training=False)))
+
+        np.testing.assert_allclose(
+            y_before, y_after, atol=1e-4,
+            err_msg="ON model outputs differ after .keras round-trip",
+        )
+
+    def test_extra_zero_homogeneity_differential(self) -> None:
+        # SC7 (differential homogeneity arm): with the trainer's homogeneous
+        # config (LeakyReLU(0.1) on block + stem + linear final), the ON
+        # parameter-free pad/tail-slice must NOT break the scale homogeneity the
+        # OFF path has. Measure err = max|f(alpha*x) - alpha*f(x)| for both;
+        # assert ON err <= OFF err * 1.5 + 1e-4. Both expected ~1e-4 on CPU.
+        alpha = 3.0
+        rng = np.random.RandomState(3)
+        # negative-bearing input so LeakyReLU's negative branch is exercised
+        x = ((rng.rand(2, 32, 32, 1).astype(np.float32) - 0.5) * 2.0)
+
+        def _hom_err(model: keras.Model) -> float:
+            fx = np.array(keras.ops.convert_to_numpy(model(x, training=False)))
+            fax = np.array(keras.ops.convert_to_numpy(model(alpha * x, training=False)))
+            return float(np.max(np.abs(fax - alpha * fx)))
+
+        # ONE shared activation instance drives block + stem (mirrors build_model).
+        def _homog_cfg(extra_zero: bool) -> keras.Model:
+            act = keras.layers.LeakyReLU(negative_slope=0.1)
+            return self._build(
+                extra_zero_output_channels=extra_zero,
+                use_gabor_stem=False,
+                block_activation=act,
+                stem_activation=act,
+            )
+
+        off_model = _homog_cfg(False)
+        on_model = _homog_cfg(True)
+
+        off_err = _hom_err(off_model)
+        on_err = _hom_err(on_model)
+
+        assert on_err <= off_err * 1.5 + 1e-4, (
+            f"ON homogeneity err {on_err:.3e} exceeds OFF {off_err:.3e} * 1.5 "
+            f"+ 1e-4; parameter-free pad/tail-slice broke scale homogeneity"
+        )
+
+    def test_extra_zero_compose_with_zero_pad(self) -> None:
+        # SC9 (compose arm): extra_zero_output_channels + zero_pad_channels both ON
+        # must build and forward to the input shape, all-finite.
+        model = self._build(
+            extra_zero_output_channels=True, zero_pad_channels=True
+        )
+        rng = np.random.RandomState(4)
+        x = rng.rand(2, 32, 32, 1).astype(np.float32)
+        y = np.array(keras.ops.convert_to_numpy(model(x, training=False)))
+        assert y.shape == (2, 32, 32, 1), f"compose output {y.shape} != (2,32,32,1)"
+        assert np.all(np.isfinite(y)), "non-finite compose (zero_pad) forward output"
+
+    def test_extra_zero_compose_with_deep_supervision(self) -> None:
+        # SC9 (compose arm): extra_zero_output_channels + enable_deep_supervision
+        # both ON builds a valid multi-output model; the PRIMARY output (index 0)
+        # has the input shape and is finite.
+        model = self._build(
+            extra_zero_output_channels=True, enable_deep_supervision=True
+        )
+        rng = np.random.RandomState(5)
+        x = rng.rand(2, 32, 32, 1).astype(np.float32)
+        outputs = model(x, training=False)
+        assert isinstance(outputs, (list, tuple)), (
+            f"deep-supervision model is not multi-output: {type(outputs)}"
+        )
+        assert len(outputs) >= 2, f"expected >=2 outputs, got {len(outputs)}"
+        primary = np.array(keras.ops.convert_to_numpy(outputs[0]))
+        assert primary.shape == (2, 32, 32, 1), (
+            f"primary output {primary.shape} != (2,32,32,1)"
+        )
+        assert np.all(np.isfinite(primary)), "non-finite primary deep-supervision output"
+
+
+# ---------------------------------------------------------------------
 # create_convunext_variant (wrapper)
 # ---------------------------------------------------------------------
 
