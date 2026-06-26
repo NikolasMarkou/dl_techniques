@@ -8,8 +8,10 @@ channel delta:
 
 - **Zero-pad** (when `in_channels < target_channels`): append `target - in` zero
   channels along the last axis.
-- **Slice** (when `in_channels > target_channels`): keep the first `target`
-  channels (`inputs[..., :target]`).
+- **Slice** (when `in_channels > target_channels`): keep `target` channels along
+  the last axis. The `slice_side` keyword selects which end is kept: `'head'`
+  (default, current behavior) keeps the LEADING channels (`inputs[..., :target]`);
+  `'tail'` keeps the TRAILING channels (`inputs[..., -target:]`).
 - **Passthrough** (when `in_channels == target_channels`): return the input
   unchanged.
 
@@ -56,16 +58,23 @@ class MatchChannels(keras.layers.Layer):
     The layer matches the last-axis (NHWC channel) dimension of the input to a
     fixed ``target_channels`` using a parameter-free operation chosen at build
     time from the static channel delta: zero-pad if the input has FEWER channels,
-    slice the leading channels if it has MORE, passthrough if equal.
+    slice if it has MORE (keeping either end via ``slice_side``), passthrough if
+    equal.
 
     It holds NO weights and adds NO bias / offset. Both zero-padding and slicing
     are linear and degree-1 homogeneous (``f(alpha * x) = alpha * f(x)``), so the
     layer preserves the bias-free, scale-homogeneous invariant of a denoiser into
-    which it is inserted.
+    which it is inserted. A tail slice is equally a coordinate projection, so it is
+    just as weightless and degree-1 homogeneous as a head slice.
 
     Args:
         target_channels: Positive integer. The desired number of output channels
             (size of the last axis). Must be ``> 0``.
+        slice_side: Which end to keep when the input has MORE channels than
+            ``target_channels``. ``'head'`` (default) keeps the LEADING channels
+            (``inputs[..., :target]``, the original behavior); ``'tail'`` keeps the
+            TRAILING channels (``inputs[..., -target:]``). Ignored on the zero-pad
+            and passthrough branches. Must be ``'head'`` or ``'tail'``.
         **kwargs: Standard ``keras.layers.Layer`` keyword arguments (e.g.
             ``name``, ``dtype``).
 
@@ -79,7 +88,8 @@ class MatchChannels(keras.layers.Layer):
         except the last axis is exactly ``target_channels``.
 
     Raises:
-        ValueError: If ``target_channels <= 0``.
+        ValueError: If ``target_channels <= 0`` or ``slice_side`` is not one of
+            ``'head'`` / ``'tail'``.
 
     Example:
         >>> import numpy as np, keras
@@ -91,15 +101,25 @@ class MatchChannels(keras.layers.Layer):
         (2, 8, 8, 2)
     """
 
-    def __init__(self, target_channels: int, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        target_channels: int,
+        slice_side: str = "head",
+        **kwargs: Any,
+    ) -> None:
         super().__init__(**kwargs)
 
         if target_channels <= 0:
             raise ValueError(
                 f"target_channels must be a positive integer, got {target_channels}"
             )
+        if slice_side not in ("head", "tail"):
+            raise ValueError(
+                f"slice_side must be 'head' or 'tail', got {slice_side!r}"
+            )
 
         self.target_channels = int(target_channels)
+        self.slice_side = slice_side
         # Recorded in build() from the concrete input shape; the channel delta is
         # static (build-time), so no per-call shape inference of the delta is needed.
         self._in_channels: Optional[int] = None
@@ -137,8 +157,16 @@ class MatchChannels(keras.layers.Layer):
             delta = self.target_channels - self._in_channels
             return ops.pad(inputs, [[0, 0], [0, 0], [0, 0], [0, delta]])
 
-        # in_channels > target_channels: slice the leading channels. A coordinate
-        # projection is degree-1 homogeneous and bias-free.
+        # in_channels > target_channels: slice. A coordinate projection is degree-1
+        # homogeneous and bias-free regardless of which end is kept.
+        # DECISION plan_2026-06-26_0ec1a304/D-002: the 'tail' branch is a real,
+        # registered, serialization-safe primitive (not a Lambda closure) because
+        # the bfconvunext --extra-zero-output-channels output must keep the LAST
+        # `output_channels` channels. Do NOT replace this with a Lambda slice (does
+        # not round-trip across processes) nor add a separate SliceLastChannels
+        # layer (duplicates channel-slice logic MatchChannels already owns).
+        if self.slice_side == "tail":
+            return inputs[..., -self.target_channels :]
         return inputs[..., : self.target_channels]
 
     def compute_output_shape(
@@ -159,11 +187,17 @@ class MatchChannels(keras.layers.Layer):
         """Return the serialization config.
 
         Returns:
-            Config dict including ``target_channels``. ``_in_channels`` is
-            re-derived in ``build`` from the input shape, so it is not stored.
+            Config dict including ``target_channels`` and ``slice_side``.
+            ``_in_channels`` is re-derived in ``build`` from the input shape, so it
+            is not stored.
         """
         config = super().get_config()
-        config.update({"target_channels": self.target_channels})
+        config.update(
+            {
+                "target_channels": self.target_channels,
+                "slice_side": self.slice_side,
+            }
+        )
         return config
 
 # ---------------------------------------------------------------------

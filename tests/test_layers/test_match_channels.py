@@ -131,6 +131,64 @@ class TestMatchChannels:
 
         assert np.allclose(pre, post, atol=1e-6)
 
+    # slice_side keyword
+    def test_slice_side_default_is_head(self, slice_input: np.ndarray) -> None:
+        """slice_side defaults to 'head': identical to explicit 'head' and x[..., :2]."""
+        default = keras.ops.convert_to_numpy(MatchChannels(2)(slice_input))
+        explicit = keras.ops.convert_to_numpy(
+            MatchChannels(2, slice_side="head")(slice_input)
+        )
+        # Default and explicit 'head' are byte-identical.
+        assert np.array_equal(default, explicit)
+        # Both keep the leading channels.
+        assert np.array_equal(default, slice_input[..., :2])
+        assert np.array_equal(explicit, slice_input[..., :2])
+
+    def test_slice_tail(self, slice_input: np.ndarray) -> None:
+        """slice_side='tail' keeps the trailing channels (x[..., -2:])."""
+        out = keras.ops.convert_to_numpy(
+            MatchChannels(2, slice_side="tail")(slice_input)
+        )
+        assert out.shape == (2, 8, 8, 2)
+        np.testing.assert_allclose(out, slice_input[..., -2:], atol=0)
+
+    def test_slice_side_invalid_raises(self) -> None:
+        """An unknown slice_side raises ValueError."""
+        with pytest.raises(ValueError):
+            MatchChannels(2, slice_side="middle")
+
+    def test_config_round_trip_slice_side(self) -> None:
+        """get_config / from_config round-trips slice_side; default is 'head'."""
+        layer = MatchChannels(2, slice_side="tail")
+        cfg = layer.get_config()
+        restored = MatchChannels.from_config(cfg)
+        assert restored.slice_side == "tail"
+        # A default-constructed layer reports 'head' in its config.
+        assert MatchChannels(2).get_config()["slice_side"] == "head"
+
+    def test_keras_round_trip_tail(self) -> None:
+        """Functional model with a tail slice round-trips through .keras (CPU)."""
+        inputs = keras.Input(shape=(8, 8, 4))
+        outputs = MatchChannels(2, slice_side="tail")(inputs)  # slice 4 -> last 2
+        model = keras.Model(inputs, outputs)
+
+        rng = np.random.default_rng(11)
+        sample = rng.standard_normal((2, 8, 8, 4)).astype("float32")
+        pre = keras.ops.convert_to_numpy(model(sample, training=False))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "match_channels_tail.keras")
+            model.save(path)
+            try:
+                loaded = keras.models.load_model(path)
+            except Exception:
+                loaded = keras.models.load_model(
+                    path, custom_objects={"MatchChannels": MatchChannels}
+                )
+            post = keras.ops.convert_to_numpy(loaded(sample, training=False))
+
+        assert np.allclose(pre, post, atol=1e-6)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
