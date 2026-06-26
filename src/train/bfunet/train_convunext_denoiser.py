@@ -212,6 +212,8 @@ class TrainingConfig:
     gabor_filters: int = 32
     gabor_kernel_size: int = 7
     use_laplacian_pyramid: bool = False
+    # Parameter-free per-level channel matching (zero-pad on increase, slice-up+add-skip on decrease) instead of 1x1 channel-adjust convs; bias-free, default OFF. See bfconvunext create_convunext_denoiser.
+    zero_pad_channels: bool = False
     # Encoder downsample pooling for the non-Laplacian path: "max" (MaxPooling2D, default,
     # non-linear) or "average" (AveragePooling2D, LINEAR -> keeps the encoder path linear
     # for the Miyasawa/Tweedie residual-as-score interpretation). Ignored under Laplacian.
@@ -756,6 +758,7 @@ def build_model(config: TrainingConfig) -> keras.Model:
         gabor_filters=config.gabor_filters,
         gabor_kernel_size=config.gabor_kernel_size,
         use_laplacian_pyramid=config.use_laplacian_pyramid,
+        zero_pad_channels=config.zero_pad_channels,
         downsample_pool_type=config.downsample_pool_type,
         enable_deep_supervision=config.enable_deep_supervision,
         expose_bottleneck=config.expose_bottleneck,
@@ -1771,6 +1774,7 @@ def parse_arguments() -> argparse.Namespace:
                         help="Disable the frozen Gabor depthwise stem")
     parser.add_argument("--laplacian-pyramid", action="store_true",
                         help="Enable the Laplacian-pyramid downsample/skip path (default OFF)")
+    parser.add_argument("--zero-pad-channels", action="store_true", help="Replace per-level channel-adjust 1x1 convs with parameter-free channel matching (zero-pad on increase; decoder slices the upsampled branch and adds the skip). Bias-free, fewer params; default OFF.")
     parser.add_argument("--mean-pooling", action="store_true",
                         help="Use AveragePooling2D (LINEAR) instead of MaxPooling2D for the "
                              "encoder downsample, keeping the encoder path linear for the "
@@ -1935,6 +1939,7 @@ def main():
             convnext_version=args.convnext_version,
             use_gabor_stem=not args.no_gabor_stem,
             use_laplacian_pyramid=args.laplacian_pyramid,
+            zero_pad_channels=args.zero_pad_channels,
             downsample_pool_type=("average" if args.mean_pooling else "max"),
             expose_bottleneck=args.expose_bottleneck,
             enable_deep_supervision=args.deep_supervision,
@@ -1992,6 +1997,7 @@ def main():
             convnext_version=args.convnext_version,
             use_gabor_stem=not args.no_gabor_stem,
             use_laplacian_pyramid=args.laplacian_pyramid,
+            zero_pad_channels=args.zero_pad_channels,
             downsample_pool_type=("average" if args.mean_pooling else "max"),
             expose_bottleneck=args.expose_bottleneck,
             enable_analyzer=args.analyzer,
