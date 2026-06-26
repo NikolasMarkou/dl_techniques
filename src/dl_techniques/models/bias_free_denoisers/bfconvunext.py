@@ -401,6 +401,7 @@ def create_convunext_denoiser(
         use_laplacian_pyramid: bool = False,
         laplacian_kernel_size: Tuple[int, int] = (5, 5),
         zero_pad_channels: bool = False,
+        extra_zero_output_channels: bool = False,
         downsample_pool_type: str = "max",
         expose_bottleneck: bool = False,
         block_kernel_size: Union[int, Tuple[int, int]] = 7,
@@ -493,6 +494,12 @@ def create_convunext_denoiser(
             The substitution is bias-free and homogeneous, removing all channel-adjust conv
             parameters. Defaults to False, which is byte-identical to the original
             learned-projection architecture (same layer names, same Conv2D ops, same outputs).
+        extra_zero_output_channels: Boolean, if True, at decoder level 0 append
+            `output_channels` zero-initialized feature channels before that level's ConvNeXt
+            blocks (which are widened to `initial_filters + output_channels`), and replace the
+            final learned 1x1 output projection with a parameter-free slice that keeps the last
+            `output_channels` channels. The residual blocks learn to write the output into the
+            zero tail. Bias-free / homogeneous; default OFF (byte-identical).
         downsample_pool_type: 'max' or 'average'. Pooling op for the non-Laplacian encoder
             downsample. 'max' (default) = MaxPooling2D, byte-identical to the original
             architecture but NON-LINEAR. 'average' = AveragePooling2D, a LINEAR (bias-free,
@@ -838,12 +845,24 @@ def create_convunext_denoiser(
                     name=f'decoder_level_{level}_channel_adjust'
                 )(x)
 
+        # Optionally grow output channels at the finest decoder stage (level 0).
+        # DECISION plan_2026-06-26_0ec1a304/D-001: append `output_channels` zero
+        # channels here (before the level-0 blocks) and widen those blocks so their
+        # residuals learn to write the image into the zero tail; the final projection
+        # is then replaced by a tail-slice (see final-output block below). Level 0 only;
+        # OFF path is byte-identical. Compose-safe with zero_pad_channels (pad happens
+        # AFTER the skip-merge Add).
+        block_filters = current_filters
+        if extra_zero_output_channels and level == 0:
+            block_filters = current_filters + output_channels
+            x = MatchChannels(block_filters, name='extra_zero_output_pad')(x)
+
         # ConvNeXt blocks after merging (bias-free, residual + drop-path)
         for block_idx in range(blocks_per_level):
             # Progressive (linearly-scaled) drop-path rate across depth.
             current_drop_path = drop_path_rate * (level * blocks_per_level + block_idx) / (depth * blocks_per_level)
             x = _apply_residual_convnext_block(
-                x, ConvNextBlock, current_filters, block_kernel_size,
+                x, ConvNextBlock, block_filters, block_kernel_size,
                 current_drop_path, kernel_regularizer,
                 name=f'decoder_level_{level}_convnext_{convnext_version}_block_{block_idx}',
                 activation=block_activation,
@@ -898,16 +917,29 @@ def create_convunext_denoiser(
     # FINAL OUTPUT LAYER (Primary inference output)
     # =========================================================================
 
-    # Final convolution to output channels (bias-free)
-    final_output = keras.layers.Conv2D(
-        filters=output_channels,
-        kernel_size=1,
-        activation=final_activation,
-        use_bias=False,  # Bias-free
-        kernel_initializer=kernel_initializer,
-        kernel_regularizer=kernel_regularizer,
-        name='final_output'
-    )(x)
+    # Final projection to output channels (bias-free).
+    if extra_zero_output_channels:
+        # DECISION plan_2026-06-26_0ec1a304/D-001: keep ONLY the zero-grown tail
+        # channels (last `output_channels`) as the output, dropping the learned 1x1
+        # projection. Parameter-free, bias-free, homogeneous. final_activation is
+        # applied so the contract (e.g. 'linear') matches the OFF path.
+        final_output = MatchChannels(
+            output_channels, slice_side='tail', name='final_output_tail_slice'
+        )(x)
+        if final_activation is not None and final_activation != 'linear':
+            final_output = keras.layers.Activation(
+                final_activation, name='final_output_activation'
+            )(final_output)
+    else:
+        final_output = keras.layers.Conv2D(
+            filters=output_channels,
+            kernel_size=1,
+            activation=final_activation,
+            use_bias=False,  # Bias-free
+            kernel_initializer=kernel_initializer,
+            kernel_regularizer=kernel_regularizer,
+            name='final_output'
+        )(x)
 
     # =========================================================================
     # MODEL CREATION
