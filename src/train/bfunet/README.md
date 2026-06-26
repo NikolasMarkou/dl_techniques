@@ -436,6 +436,49 @@ CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_con
     --variant base --batch-size 4 --zero-pad-channels --gpu 1
 ```
 
+### 4.6 Grown zero-initialized output channels  (`--extra-zero-output-channels`, default OFF)
+
+Normally the finest decoder stage (level 0) produces `initial_filters` feature channels,
+and a learned `Conv2D(kernel_size=1, use_bias=False)` named `final_output` projects them
+down to `output_channels` (the image channels). `--extra-zero-output-channels` replaces
+that learned projection with a *grown channel tail*. At **level 0 only** it:
+
+- **appends** `output_channels` zero-initialized channels to the feature map — via the same
+  weightless `MatchChannels` zero-pad used by §4.5 — *before* that level's ConvNeXt blocks;
+- **widens** those level-0 blocks to `initial_filters + output_channels` so their residuals
+  can write into the appended zero tail;
+- at the end **keeps only the last `output_channels` channels** (a parameter-free
+  `MatchChannels(slice_side='tail')`) as the model output.
+
+The learned `final_output` 1×1 projection is **dropped entirely** when the flag is ON.
+
+> **Why "zero-initialized".** The appended channels start as literal zeros, so before any
+> block runs the output region is exactly zero; the level-0 residual blocks then learn to
+> populate it. Note the honest nuance: the blocks themselves use the normal (orthogonal)
+> init, so the output becomes non-zero after the very first block — this is **not** a
+> zero-init-*weights* warm-start (it does not make the network start as an identity / no-op).
+> The zero is the channels' initial *value*, filled in by ordinary learnable blocks.
+
+Both new ops (zero-pad, tail-slice) are weightless and degree-1 homogeneous, so the variant
+stays **bias-free** and scale-homogeneous (verified by `test_extra_zero_homogeneity_differential`).
+It composes with `--zero-pad-channels` (the level-0 pad happens *after* that flag's skip-merge
+`Add`) and with deep supervision (the supervision heads at levels `>0` are unchanged; only the
+level-0 primary output is replaced).
+
+> **Honest caveat.** This is an **A/B experiment, not a free win.** It drops the learned
+> output projection and instead asks the widened level-0 residual blocks to emit the image
+> directly into a grown channel tail. Net params at level 0 actually *rise slightly* (the
+> blocks are wider) even though the 1×1 projection is gone — so this is **not** a
+> param-reduction play; it is an architectural experiment in *where* the output is formed.
+> Default **OFF** is byte-identical to the learned-projection architecture, so existing
+> checkpoints are unaffected. The `final_output` layer name only exists in the OFF graph, so
+> ON checkpoints are a distinct architecture.
+
+```bash
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
+    --variant base --batch-size 4 --extra-zero-output-channels --gpu 1
+```
+
 ---
 
 ## 5. The training recipe
@@ -741,6 +784,7 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
 | `--laplacian-pyramid` | *(off)* | Enable Laplacian-pyramid downsample/skip path (§4.2) |
 | `--mean-pooling` | *(off)* | Linear `AveragePooling2D` encoder downsample instead of `MaxPooling2D` (§4.4); ignored under `--laplacian-pyramid` |
 | `--zero-pad-channels` | *(off)* | Replace per-level channel-adjust 1×1 convs with parameter-free channel matching (§4.5): zero-pad on channel increase, slice-upsampled+add-skip on the decoder. Bias-free, fewer params. |
+| `--extra-zero-output-channels` | *(off)* | Grow `output_channels` zero-initialized channels at decoder level 0 before the (widened) level-0 blocks, then keep only those as the output instead of the learned 1×1 projection (§4.6). Bias-free. |
 | `--mixed-precision` | *(off)* | `mixed_float16` (fp16 compute, fp32 weights/output). Correct but **slower** here — disables XLA; see §5.4 |
 | `--expose-bottleneck` | *(off)* | Expose the bottleneck latent as a 2nd output (enables the monitor) |
 | `--analyzer` | *(off)* | Run data-free `ModelAnalyzer` (weights + spectra) during training |
