@@ -225,13 +225,66 @@ These three keep a deep residual U-Net trainable and bias-free at the same time.
 - **Progressive stochastic depth.** Drop-path rate ramps linearly with depth:
   shallow blocks ≈0, the deepest block hits the full `drop_path_rate`. Deeper
   blocks are the most redundant, so they are the ones randomly dropped during
-  training — a depth-aware regularizer. (Bottleneck blocks use a flat rate.)
+  training — a depth-aware regularizer. (Bottleneck blocks use a flat rate.) The
+  **first ConvNeXt block of every *decoder* level is forced to drop-path 0** (no
+  `StochasticDepth` layer at all), regardless of depth; the encoder/bottleneck
+  schedule is unchanged.
 - **Orthogonal kernel init.** Structural convs (stem, channel-adjusts, output)
   use `'orthogonal'`, **not** `he_normal`. In a deep residual
   U-Net `he_normal` compounds variance across the many residual adds and can blow
   up activations; an orthogonal (norm-preserving) init is the right choice for a
   homogeneous, bias-free network and is what actually delivers init stability —
   *not* the small γ. (`he_normal` is the historical default; it was replaced.)
+
+### Operator audit — bias-free vs. linear (empirically measured)
+
+Two distinct properties get conflated easily, so they are audited separately. For
+each operator `g`, on O(1) random `float32` inputs (untrained model, CPU):
+
+- **bias-free** ⟺ `g(0) = 0` (an additive offset would make `g(0) ≠ 0`);
+- **linear** ⟺ *additive* `g(x+y) = g(x)+g(y)` **and** *homogeneous for all scalars*
+  `g(αx) = αg(x)` (the negative-`α` test separates a merely **positively**-homogeneous
+  op like ReLU/LeakyReLU/Max from a truly linear one).
+
+| Operator | bias-free | linear | note |
+|---|:--:|:--:|---|
+| `Conv2D` 1×1 / 3×3 (no bias), frozen Gabor stem | ✅ | ✅ | `g(0)=0`, additive + homogeneous (errors ≤1e-5) |
+| `MatchChannels` (zero-pad / head-slice / tail-slice) | ✅ | ✅ | weightless coordinate maps |
+| `AveragePooling2D`, bilinear `UpSampling2D`, `Add`, `Concatenate` | ✅ | ✅ | exact linear maps |
+| `StochasticDepth` @inference, `LaplacianPyramidLevel` | ✅ | ✅ | identity / fixed-linear at inference |
+| `LayerScale` (γ multiply) | ✅ | ✅ | pure per-channel scale |
+| **`MaxPooling2D`** | ✅ | ❌ | *positively* homogeneous only (`add=3.3`, `hom−=18`) |
+| **`LeakyReLU(0.1)`** | ✅ | ❌ | *positively* homogeneous only (`add=2.3`, `hom−=10`) |
+| **`GELU`** | ✅ | ❌ | not even positively homogeneous |
+| **`LayerNorm(center=False)`** | ✅ | ❌ | degree-0 (scale-removing): `hom+=2.5` |
+| **ConvNeXt block** (V1, LeakyReLU/GELU) | ✅ | ❌ | nonlinear — but see the γ caveat below |
+
+**(a) Bias-free: yes, universally and exactly.** Every operator maps `0 → 0` to the
+bit — even the nonlinear ones (`GELU(0)=LeakyReLU(0)=LayerNorm(0)=MaxPool(0)=0`).
+`verify_bias_free(model)` passes on every flag combination. The invariant is
+structural (no `use_bias`, no LN `center`, LayerScale is a pure multiply) and holds
+trained or not.
+
+**(b) Linear: no — and the blocks only *look* linear at initialization.** The
+denoiser is **not** a linear map: `MaxPooling`, `LeakyReLU`, `GELU`, and
+`LayerNorm(center=False)` are all nonlinear (`LeakyReLU`/`Max` are degree-1
+*positively* homogeneous but not additive; `LayerNorm`/`GELU` are neither). A
+ConvNeXt block *measures* near-linear at init (additivity error ~1e-6) **only
+because LayerScale γ≈1e-4 suppresses its nonlinear branch** (`block(x) = x +
+γ·branch(x)`). Set γ to a trained magnitude (1.0) and the same block's additivity
+error jumps ~4 orders of magnitude (≈9e-3) — genuinely nonlinear. So the
+"homogeneous to ~1e-5" figure quoted below (§4.4) is an **init-time, γ-suppression
+artifact**, not an exact architectural property: it decays as γ grows during
+training, and it breaks at init outright under `MaxPool` downsampling (full-model
+additivity error 1.46, `hom−` 9.7). What survives training is the **degree-1
+*positive* homogeneity** of the LeakyReLU + linear-final + linear-downsample
+(average-pool / Laplacian) configuration — which is exactly the property the
+Miyasawa σ-generalization argument (§1) actually needs, and is weaker than (does
+not require) full linearity.
+
+> Reproduce: build any config and measure `max|g(0)|`, `max|g(αx) − αg(x)|`
+> (α = +2, −3), and `max|g(x+y) − g(x) − g(y)|` on a random batch with
+> `training=False` (run on CPU — GPU fp32 reduction noise can exceed the 1e-5 band).
 
 ---
 
@@ -394,6 +447,11 @@ it is **ignored under `--laplacian-pyramid`** (the pyramid already pools linearl
 > *fully linear* rather than only positively-homogeneous — a cleaner property, consistent
 > with the Laplacian path's linear-ops design, but a refinement, not a fix for a broken
 > condition. In the §8 benchmark max-pool edges mean/laplacian by ~0.1 dB in-range.
+>
+> The "~1e-5" figure is *positive* homogeneity (`max|f(αx)−αf(x)|`, α>0) specifically —
+> the model is **not** linear (additivity fails), and even that positive-homogeneity
+> number is partly a LayerScale-γ init artifact. See the operator audit in §2 for the
+> per-operator breakdown and the γ=1e-4 vs γ=1.0 evidence.
 
 ### 4.5 Parameter-free channel matching  (`--zero-pad-channels`, default OFF)
 
