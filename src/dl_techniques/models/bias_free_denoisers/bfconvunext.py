@@ -859,8 +859,14 @@ def create_convunext_denoiser(
 
         # ConvNeXt blocks after merging (bias-free, residual + drop-path)
         for block_idx in range(blocks_per_level):
-            # Progressive (linearly-scaled) drop-path rate across depth.
-            current_drop_path = drop_path_rate * (level * blocks_per_level + block_idx) / (depth * blocks_per_level)
+            # The FIRST block at every decoder level carries NO stochastic depth
+            # (drop_path == 0 => _apply_residual_convnext_block adds no StochasticDepth
+            # layer); the remaining blocks keep the progressive (linearly-scaled) rate
+            # across depth. Decoder-only — the encoder schedule is unchanged.
+            if block_idx == 0:
+                current_drop_path = 0.0
+            else:
+                current_drop_path = drop_path_rate * (level * blocks_per_level + block_idx) / (depth * blocks_per_level)
             x = _apply_residual_convnext_block(
                 x, ConvNextBlock, block_filters, block_kernel_size,
                 current_drop_path, kernel_regularizer,

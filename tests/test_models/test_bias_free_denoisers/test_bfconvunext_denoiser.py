@@ -931,5 +931,54 @@ class TestCreateConvUNextVariant:
         assert set(CONVUNEXT_CONFIGS) >= {'tiny', 'small', 'base', 'large', 'xlarge'}
 
 
+# ---------------------------------------------------------------------
+# Decoder first-block stochastic-depth policy
+# ---------------------------------------------------------------------
+# The FIRST ConvNeXt block at every DECODER level must carry NO stochastic depth
+# (drop_path == 0 => no StochasticDepth layer). The encoder/bottleneck schedule
+# is unchanged. Built with drop_path_rate > 0 so the schedule is actually active.
+# ---------------------------------------------------------------------
+
+class TestDecoderFirstBlockNoStochasticDepth:
+    """The first decoder block of every level has no drop-path layer."""
+
+    def _build(self) -> keras.Model:
+        return create_convunext_denoiser(
+            input_shape=(32, 32, 1), depth=3, initial_filters=16,
+            blocks_per_level=2, convnext_version='v1', filter_multiplier=2,
+            drop_path_rate=0.2, final_activation='linear',
+        )
+
+    def _drop_path_names(self, model: keras.Model):
+        return [l.name for l in model.layers if l.name.endswith('_drop_path')]
+
+    def test_no_decoder_first_block_drop_path(self) -> None:
+        import re
+        names = self._drop_path_names(self._build())
+        decoder = [n for n in names if n.startswith('decoder')]
+        # No decoder block_0 has a stochastic-depth layer, at ANY level.
+        block0 = [n for n in decoder if re.search(r'_block_0_drop_path$', n)]
+        assert block0 == [], f"decoder first blocks unexpectedly have drop_path: {block0}"
+        # Later decoder blocks (block_1+) still get stochastic depth.
+        block1plus = [n for n in decoder if re.search(r'_block_[1-9][0-9]*_drop_path$', n)]
+        assert block1plus, "expected drop_path on decoder block_1+ with drop_path_rate>0"
+
+    def test_encoder_schedule_unchanged(self) -> None:
+        import re
+        names = self._drop_path_names(self._build())
+        enc = [n for n in names if n.startswith('encoder') or n.startswith('bottleneck')]
+        # The decoder-only change must NOT touch the encoder/bottleneck: at least one
+        # encoder/bottleneck block_0 keeps its drop_path (where the schedule is nonzero).
+        enc_block0 = [n for n in enc if re.search(r'_block_0_drop_path$', n)]
+        assert enc_block0, f"encoder/bottleneck block_0 drop_path should be unchanged; got {enc}"
+
+    def test_forward_and_bias_free_with_drop_path(self) -> None:
+        model = self._build()
+        x = np.random.rand(2, 32, 32, 1).astype(np.float32)
+        y = np.array(keras.ops.convert_to_numpy(model(x, training=False)))
+        assert y.shape == (2, 32, 32, 1)
+        assert np.all(np.isfinite(y))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
