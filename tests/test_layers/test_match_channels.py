@@ -16,6 +16,8 @@ Covers (SC1 of plan_2026-06-26_90d8cbe6):
 """
 
 import os
+import json
+import zipfile
 import tempfile
 
 import keras
@@ -23,6 +25,40 @@ import numpy as np
 import pytest
 
 from dl_techniques.layers.match_channels import MatchChannels
+
+
+def _rewrite_keras_dropping_slice_side(src_path: str, dst_path: str) -> None:
+    """Copy a ``.keras`` archive, deleting every ``slice_side`` key from any
+    ``MatchChannels`` config in ``config.json``.
+
+    Emulates a checkpoint saved BEFORE the ``slice_side`` kwarg existed: the
+    serialized layer config simply lacks the key. Weights and metadata are
+    copied verbatim. Used to test that such legacy files still load (defaulting
+    ``slice_side`` to ``'head'``).
+    """
+    def _strip(obj: object) -> None:
+        if isinstance(obj, dict):
+            if obj.get("class_name") == "MatchChannels" and isinstance(
+                obj.get("config"), dict
+            ):
+                obj["config"].pop("slice_side", None)
+            for value in obj.values():
+                _strip(value)
+        elif isinstance(obj, list):
+            for value in obj:
+                _strip(value)
+
+    with zipfile.ZipFile(src_path) as zin:
+        names = zin.namelist()
+        payload = {name: zin.read(name) for name in names}
+
+    config = json.loads(payload["config.json"].decode("utf-8"))
+    _strip(config)
+    payload["config.json"] = json.dumps(config).encode("utf-8")
+
+    with zipfile.ZipFile(dst_path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for name in names:
+            zout.writestr(name, payload[name])
 
 
 # Test fixtures
@@ -188,6 +224,50 @@ class TestMatchChannels:
             post = keras.ops.convert_to_numpy(loaded(sample, training=False))
 
         assert np.allclose(pre, post, atol=1e-6)
+
+    def test_keras_round_trip_legacy_missing_slice_side(self) -> None:
+        """A legacy ``.keras`` whose serialized config predates the ``slice_side``
+        kwarg still loads: the missing key defaults to ``'head'`` and the model
+        round-trips identically to a head slice.
+
+        The saved archive is doctored to remove ``slice_side`` from every
+        ``MatchChannels`` config, emulating a checkpoint written before the kwarg
+        existed (real deserialization path: ``load_model`` -> ``from_config`` ->
+        ``cls(**config)`` -> constructor default ``'head'``).
+        """
+        inputs = keras.Input(shape=(8, 8, 4))
+        x = MatchChannels(8)(inputs)   # pad 4 -> 8 (increase; slice_side irrelevant)
+        outputs = MatchChannels(2)(x)  # decrease 8 -> 2, default head
+        model = keras.Model(inputs, outputs)
+
+        rng = np.random.default_rng(123)
+        sample = rng.standard_normal((2, 8, 8, 4)).astype("float32")
+        pre = keras.ops.convert_to_numpy(model(sample, training=False))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            saved = os.path.join(tmpdir, "match_channels_model.keras")
+            model.save(saved)
+
+            legacy = os.path.join(tmpdir, "legacy_no_slice_side.keras")
+            _rewrite_keras_dropping_slice_side(saved, legacy)
+
+            # The doctored archive must genuinely lack the key.
+            with zipfile.ZipFile(legacy) as zf:
+                assert "slice_side" not in zf.read("config.json").decode("utf-8")
+
+            loaded = keras.models.load_model(
+                legacy, custom_objects={"MatchChannels": MatchChannels}
+            )
+            post = keras.ops.convert_to_numpy(loaded(sample, training=False))
+
+        # Every reconstructed MatchChannels defaulted to 'head'.
+        sides = [l.slice_side for l in loaded.layers if isinstance(l, MatchChannels)]
+        assert sides and all(s == "head" for s in sides), sides
+        # Round-trips identically to the original (head-slice) model.
+        assert np.allclose(pre, post, atol=1e-6)
+        # Head semantics: pad 4->8 gives [x0..x3, 0,0,0,0]; head-slice to 2 keeps
+        # the LEADING channels [x0, x1] == sample[..., :2] (a tail slice would not).
+        assert np.allclose(post, sample[..., :2], atol=1e-6)
 
 
 if __name__ == "__main__":
