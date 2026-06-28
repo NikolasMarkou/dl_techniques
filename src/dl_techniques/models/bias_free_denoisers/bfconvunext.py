@@ -403,6 +403,7 @@ def create_convunext_denoiser(
         laplacian_kernel_size: Tuple[int, int] = (5, 5),
         zero_pad_channels: bool = False,
         extra_zero_output_channels: bool = False,
+        final_projection_groups: int = 1,
         downsample_pool_type: str = "max",
         expose_bottleneck: bool = False,
         block_kernel_size: Union[int, Tuple[int, int]] = 7,
@@ -510,6 +511,18 @@ def create_convunext_denoiser(
             final learned 1x1 output projection with a parameter-free slice that keeps the last
             `output_channels` channels. The residual blocks learn to write the output into the
             zero tail. Bias-free / homogeneous; default OFF (byte-identical).
+        final_projection_groups: Integer, number of groups for the final 1x1 `final_output`
+            projection (`Conv2D(output_channels, 1, groups=...)`). Default 1 = a standard
+            dense 1x1 conv (byte-identical to the original). When >1 the projection becomes a
+            GROUPED conv: input feature channels and output channels are split into
+            `final_projection_groups` groups and each output group is computed only from its
+            own input group. Setting it to `output_channels` gives one group per output (e.g.
+            color) channel — each output channel reads a DISJOINT `initial_filters /
+            output_channels` slice of features. Requires both `initial_filters` and
+            `output_channels` to be divisible by the group count (raises ValueError
+            otherwise), and is incompatible with `extra_zero_output_channels` (which has no
+            learned `final_output` conv to group). Stays bias-free / homogeneous (no bias, no
+            centering) and round-trips through `.keras`.
         downsample_pool_type: 'max' or 'average'. Pooling op for the non-Laplacian encoder
             downsample. 'max' (default) = MaxPooling2D, byte-identical to the original
             architecture but NON-LINEAR. 'average' = AveragePooling2D, a LINEAR (bias-free,
@@ -957,6 +970,12 @@ def create_convunext_denoiser(
     # =========================================================================
 
     # Final projection to output channels (bias-free).
+    if extra_zero_output_channels and final_projection_groups != 1:
+        raise ValueError(
+            "final_projection_groups>1 is incompatible with extra_zero_output_channels: the "
+            "latter drops the learned final_output Conv2D in favor of a parameter-free tail "
+            "slice, so there is no projection to group. Use one or the other."
+        )
     if extra_zero_output_channels:
         # DECISION plan_2026-06-26_0ec1a304/D-001: keep ONLY the zero-grown tail
         # channels (last `output_channels`) as the output, dropping the learned 1x1
@@ -970,9 +989,28 @@ def create_convunext_denoiser(
                 final_activation, name='final_output_activation'
             )(final_output)
     else:
+        # Grouped final projection (default groups=1 == standard dense 1x1). groups>1 splits
+        # input + output channels into disjoint groups; groups==output_channels gives one
+        # group per output (color) channel. Bias-free (use_bias=False) regardless of groups.
+        if final_projection_groups < 1:
+            raise ValueError(
+                f"final_projection_groups must be >= 1, got {final_projection_groups}"
+            )
+        in_ch = x.shape[-1]
+        if final_projection_groups > 1 and (
+            in_ch % final_projection_groups != 0
+            or output_channels % final_projection_groups != 0
+        ):
+            raise ValueError(
+                f"final_projection_groups={final_projection_groups} must divide BOTH the "
+                f"final-projection input channels ({in_ch}, == initial_filters) and "
+                f"output_channels ({output_channels}). Pick a group count dividing both, or "
+                "use 1 (ungrouped)."
+            )
         final_output = keras.layers.Conv2D(
             filters=output_channels,
             kernel_size=1,
+            groups=final_projection_groups,
             activation=final_activation,
             use_bias=False,  # Bias-free
             kernel_initializer=kernel_initializer,

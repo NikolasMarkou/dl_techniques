@@ -220,6 +220,11 @@ class TrainingConfig:
     # default from CONVUNEXT_CONFIGS. Primarily for the no-projection Gabor stem, where
     # initial_filters must equal channels * gabor_filters (e.g. 3 * 32 = 96).
     initial_filters: Optional[int] = None
+    # Groups for the final 1x1 output projection. 1 = standard dense conv (default,
+    # byte-identical). -1 = one group per output channel (groups = channels), so each output
+    # channel reads a disjoint feature group. Any >1 int sets the group count directly.
+    # Requires initial_filters and channels both divisible by the resolved group count.
+    final_projection_groups: int = 1
     use_laplacian_pyramid: bool = False
     # Parameter-free per-level channel matching (zero-pad on increase, slice-up+add-skip on decrease) instead of 1x1 channel-adjust convs; bias-free, default OFF. See bfconvunext create_convunext_denoiser.
     zero_pad_channels: bool = False
@@ -763,6 +768,21 @@ def build_model(config: TrainingConfig) -> keras.Model:
                 f"initial_filters({cfg['initial_filters']}). Pass --initial-filters "
                 f"{gabor_out} (or adjust --gabor-filters)."
             )
+    # Resolve the final-projection group count: -1 means one group per output channel
+    # (groups == channels), so each output channel reads a disjoint feature group.
+    final_projection_groups = (
+        config.channels if config.final_projection_groups == -1
+        else config.final_projection_groups
+    )
+    if final_projection_groups > 1 and (
+        cfg["initial_filters"] % final_projection_groups != 0
+        or config.channels % final_projection_groups != 0
+    ):
+        raise ValueError(
+            f"--final-projection-groups resolved to {final_projection_groups}, which must "
+            f"divide BOTH initial_filters({cfg['initial_filters']}) and "
+            f"channels({config.channels})."
+        )
     input_shape = (config.patch_size, config.patch_size, config.channels)
     # DECISION plan_2026-06-21_eb7fd829/D-003: the bare "leaky_relu" string resolves to
     # slope 0.2 in Keras, so DO NOT pass the string when alpha 0.1 is wanted. Construct an
@@ -785,6 +805,7 @@ def build_model(config: TrainingConfig) -> keras.Model:
         use_laplacian_pyramid=config.use_laplacian_pyramid,
         zero_pad_channels=config.zero_pad_channels,
         extra_zero_output_channels=config.extra_zero_output_channels,
+        final_projection_groups=final_projection_groups,
         downsample_pool_type=config.downsample_pool_type,
         enable_deep_supervision=config.enable_deep_supervision,
         expose_bottleneck=config.expose_bottleneck,
@@ -1823,6 +1844,12 @@ def parse_arguments() -> argparse.Namespace:
                         help="Override the variant's level-0 width (initial_filters). "
                              "Default: variant value. Use with --no-gabor-projection so "
                              "channels*gabor_filters == initial_filters.")
+    parser.add_argument("--final-projection-groups", type=int, default=1,
+                        help="Groups for the final 1x1 output projection. 1=standard dense "
+                             "(default). -1 = one group per output channel (groups=channels), "
+                             "so each output channel reads a disjoint feature group. Any >1 "
+                             "sets the group count directly. Requires initial_filters and "
+                             "channels both divisible by the resolved group count.")
     parser.add_argument("--sigma-max-start", type=float, default=0.025)
     parser.add_argument("--sigma-max-end", type=float, default=0.25)
     parser.add_argument("--curriculum-schedule",
@@ -2043,6 +2070,7 @@ def main():
             gabor_filters=args.gabor_filters,
             gabor_stem_projection=not args.no_gabor_projection,
             initial_filters=args.initial_filters,
+            final_projection_groups=args.final_projection_groups,
             enable_deep_supervision=args.deep_supervision,
             epochs=args.epochs,
             curriculum_epochs=args.curriculum_epochs,

@@ -167,6 +167,69 @@ class TestGaborStemNoProjection:
         assert 'gabor_stem_projection' in names
 
 
+class TestFinalProjectionGroups:
+    """Grouped final 1x1 output projection (final_projection_groups)."""
+
+    def _build(self, **overrides):
+        # initial_filters=18 is divisible by 3 (output channels) so groups=3 is valid.
+        cfg = dict(
+            input_shape=(32, 32, 3), depth=3, initial_filters=18,
+            blocks_per_level=1, convnext_version='v1',
+        )
+        cfg.update(overrides)
+        return create_convunext_denoiser(**cfg)
+
+    def test_default_groups_one(self) -> None:
+        # Default == standard dense 1x1: groups=1, full (1,1,18,3) kernel.
+        model = self._build()
+        proj = model.get_layer('final_output')
+        assert proj.groups == 1
+        assert tuple(proj.kernel.shape) == (1, 1, 18, 3)
+
+    def test_grouped_projection_kernel_and_output(self) -> None:
+        # groups == output_channels: each output channel reads a disjoint 18/3=6 group.
+        model = self._build(final_projection_groups=3)
+        proj = model.get_layer('final_output')
+        assert proj.groups == 3
+        assert tuple(proj.kernel.shape) == (1, 1, 6, 3)  # (kh,kw,Cin/groups,Cout)
+        x = np.random.uniform(-0.5, 0.5, size=(2, 32, 32, 3)).astype("float32")
+        y = model(x, training=False)
+        assert tuple(y.shape) == (2, 32, 32, 3)
+
+    def test_grouped_projection_is_bias_free(self) -> None:
+        model = self._build(final_projection_groups=3)
+        proj = model.get_layer('final_output')
+        assert proj.use_bias is False
+        offenders = [
+            l.name for l in model._flatten_layers()
+            if getattr(l, "use_bias", False)
+            or (isinstance(l, keras.layers.LayerNormalization) and getattr(l, "center", False))
+        ]
+        assert offenders == [], f"bias/centering survived: {offenders}"
+
+    def test_indivisible_groups_raise(self) -> None:
+        import pytest
+        # 4 divides neither 18 nor 3.
+        with pytest.raises(ValueError, match="final_projection_groups"):
+            self._build(final_projection_groups=4)
+
+    def test_groups_with_extra_zero_raise(self) -> None:
+        import pytest
+        with pytest.raises(ValueError, match="extra_zero_output_channels"):
+            self._build(final_projection_groups=3, extra_zero_output_channels=True)
+
+    def test_grouped_round_trip(self, tmp_path) -> None:
+        model = self._build(final_projection_groups=3)
+        x = np.random.uniform(-0.5, 0.5, size=(2, 32, 32, 3)).astype("float32")
+        y0 = keras.ops.convert_to_numpy(model(x, training=False))
+        path = os.path.join(tmp_path, "grouped.keras")
+        model.save(path)
+        reloaded = keras.models.load_model(path)
+        assert reloaded.get_layer('final_output').groups == 3
+        y1 = keras.ops.convert_to_numpy(reloaded(x, training=False))
+        np.testing.assert_allclose(y0, y1, atol=1e-5)
+
+
 class TestResidualStochasticDepth:
     """Regression guard: ConvNeXt blocks MUST be wired as residual branches with
     stochastic depth (the factory bug where blocks were chained sequentially with
