@@ -211,6 +211,15 @@ class TrainingConfig:
     use_gabor_stem: bool = True
     gabor_filters: int = 32
     gabor_kernel_size: int = 7
+    # Drop the mandatory bias-free 1x1 projection after the Gabor stem and feed the
+    # depthwise bank straight into the encoder. Requires channels * gabor_filters ==
+    # initial_filters EXACTLY (see initial_filters override below); the factory raises
+    # otherwise. Default True = unchanged (projection kept).
+    gabor_stem_projection: bool = True
+    # Override the variant's initial_filters (level-0 width). None -> use the variant
+    # default from CONVUNEXT_CONFIGS. Primarily for the no-projection Gabor stem, where
+    # initial_filters must equal channels * gabor_filters (e.g. 3 * 32 = 96).
+    initial_filters: Optional[int] = None
     use_laplacian_pyramid: bool = False
     # Parameter-free per-level channel matching (zero-pad on increase, slice-up+add-skip on decrease) instead of 1x1 channel-adjust convs; bias-free, default OFF. See bfconvunext create_convunext_denoiser.
     zero_pad_channels: bool = False
@@ -741,6 +750,19 @@ def build_model(config: TrainingConfig) -> keras.Model:
     cfg = CONVUNEXT_CONFIGS[config.variant].copy()
     cfg.pop("description", None)
     cfg["convnext_version"] = config.convnext_version  # override variant default
+    if config.initial_filters is not None:
+        cfg["initial_filters"] = config.initial_filters  # override variant level-0 width
+    # No-projection Gabor stem requires an exact channel match; fail early with a clear
+    # message before the factory builds (the factory also validates as a backstop).
+    if config.use_gabor_stem and not config.gabor_stem_projection:
+        gabor_out = config.channels * config.gabor_filters
+        if gabor_out != cfg["initial_filters"]:
+            raise ValueError(
+                f"--no-gabor-projection requires channels({config.channels}) * "
+                f"gabor_filters({config.gabor_filters}) = {gabor_out} to equal "
+                f"initial_filters({cfg['initial_filters']}). Pass --initial-filters "
+                f"{gabor_out} (or adjust --gabor-filters)."
+            )
     input_shape = (config.patch_size, config.patch_size, config.channels)
     # DECISION plan_2026-06-21_eb7fd829/D-003: the bare "leaky_relu" string resolves to
     # slope 0.2 in Keras, so DO NOT pass the string when alpha 0.1 is wanted. Construct an
@@ -759,6 +781,7 @@ def build_model(config: TrainingConfig) -> keras.Model:
         use_gabor_stem=config.use_gabor_stem,
         gabor_filters=config.gabor_filters,
         gabor_kernel_size=config.gabor_kernel_size,
+        gabor_stem_projection=config.gabor_stem_projection,
         use_laplacian_pyramid=config.use_laplacian_pyramid,
         zero_pad_channels=config.zero_pad_channels,
         extra_zero_output_channels=config.extra_zero_output_channels,
@@ -1791,6 +1814,15 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--analyzer-freq", type=int, default=10,
                         help="Run the analyzer every N epochs (with --analyzer)")
     parser.add_argument("--gabor-filters", type=int, default=32)
+    parser.add_argument("--no-gabor-projection", action="store_true",
+                        help="Drop the 1x1 projection after the Gabor stem and feed the "
+                             "depthwise bank straight into the encoder. Requires "
+                             "channels*gabor_filters == initial_filters exactly (e.g. "
+                             "--gabor-filters 32 --initial-filters 96 for 3-channel input).")
+    parser.add_argument("--initial-filters", type=int, default=None,
+                        help="Override the variant's level-0 width (initial_filters). "
+                             "Default: variant value. Use with --no-gabor-projection so "
+                             "channels*gabor_filters == initial_filters.")
     parser.add_argument("--sigma-max-start", type=float, default=0.025)
     parser.add_argument("--sigma-max-end", type=float, default=0.25)
     parser.add_argument("--curriculum-schedule",
@@ -2009,6 +2041,8 @@ def main():
             enable_analyzer=args.analyzer,
             analyzer_freq=args.analyzer_freq,
             gabor_filters=args.gabor_filters,
+            gabor_stem_projection=not args.no_gabor_projection,
+            initial_filters=args.initial_filters,
             enable_deep_supervision=args.deep_supervision,
             epochs=args.epochs,
             curriculum_epochs=args.curriculum_epochs,

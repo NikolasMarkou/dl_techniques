@@ -398,6 +398,7 @@ def create_convunext_denoiser(
         use_gabor_stem: bool = False,
         gabor_filters: int = 32,
         gabor_kernel_size: Union[int, Tuple[int, int]] = 7,
+        gabor_stem_projection: bool = True,
         use_laplacian_pyramid: bool = False,
         laplacian_kernel_size: Tuple[int, int] = (5, 5),
         zero_pad_channels: bool = False,
@@ -477,6 +478,15 @@ def create_convunext_denoiser(
             Defaults to 32.
         gabor_kernel_size: Integer or tuple, kernel size of the Gabor depthwise stem.
             Only used when use_gabor_stem=True. Defaults to 7.
+        gabor_stem_projection: Boolean, if True (default) the Gabor stem is followed by the
+            mandatory bias-free 1x1 projection that reduces `input_channels * gabor_filters`
+            channels down to `initial_filters`. If False the projection is DROPPED and the
+            Gabor bank feeds the encoder directly — valid ONLY when
+            `input_channels * gabor_filters == initial_filters` exactly (raises ValueError
+            otherwise). Removing the projection keeps the stem bias-free/homogeneous but
+            leaves all cross-channel mixing to the first ConvNeXt block (the depthwise Gabor
+            bank does none). Only used when use_gabor_stem=True; default True is
+            byte-identical to the original architecture.
         use_laplacian_pyramid: Boolean, if True replace each encoder downsample/skip
             junction with a bias-free `LaplacianPyramidLevel` split: the channel-preserving
             full-resolution high-frequency band becomes the skip connection and the
@@ -627,18 +637,41 @@ def create_convunext_denoiser(
             trainable=False,
             name='gabor_stem',
         )(inputs)
-        stem_input = keras.layers.Conv2D(
-            filters=initial_filters,
-            kernel_size=1,
-            use_bias=False,  # Bias-free projection
-            kernel_initializer=kernel_initializer,
-            kernel_regularizer=kernel_regularizer,
-            name='gabor_stem_projection',
-        )(gabor)
-        logger.info(
-            f"Frozen Gabor stem enabled: filters={gabor_filters}, "
-            f"kernel_size={gabor_kernel_size} -> 1x1 projection to {initial_filters}"
-        )
+        if gabor_stem_projection:
+            stem_input = keras.layers.Conv2D(
+                filters=initial_filters,
+                kernel_size=1,
+                use_bias=False,  # Bias-free projection
+                kernel_initializer=kernel_initializer,
+                kernel_regularizer=kernel_regularizer,
+                name='gabor_stem_projection',
+            )(gabor)
+            logger.info(
+                f"Frozen Gabor stem enabled: filters={gabor_filters}, "
+                f"kernel_size={gabor_kernel_size} -> 1x1 projection to {initial_filters}"
+            )
+        else:
+            # No-projection Gabor stem: the depthwise bank emits exactly
+            # input_channels * gabor_filters channels and feeds the encoder directly.
+            # This is only well-defined when that count equals initial_filters (the
+            # level-0 channel-adjust is then a no-op); otherwise there is no bias-free
+            # parameter-free way to reach initial_filters here, so fail loudly rather
+            # than silently pad/slice.
+            gabor_out_ch = input_shape[-1] * gabor_filters
+            if gabor_out_ch != initial_filters:
+                raise ValueError(
+                    "gabor_stem_projection=False requires the Gabor bank to emit exactly "
+                    f"initial_filters channels, but input_channels({input_shape[-1]}) * "
+                    f"gabor_filters({gabor_filters}) = {gabor_out_ch} != "
+                    f"initial_filters({initial_filters}). Choose gabor_filters and "
+                    "initial_filters so they match exactly, or keep gabor_stem_projection=True."
+                )
+            stem_input = gabor
+            logger.info(
+                f"Frozen Gabor stem enabled (NO projection): filters={gabor_filters}, "
+                f"kernel_size={gabor_kernel_size} -> {gabor_out_ch} channels feed the "
+                f"encoder directly (== initial_filters)"
+            )
     else:
         stem_input = inputs
 
