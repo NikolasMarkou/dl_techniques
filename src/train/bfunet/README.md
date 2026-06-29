@@ -843,6 +843,9 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
 | `--mean-pooling` | *(off)* | Linear `AveragePooling2D` encoder downsample instead of `MaxPooling2D` (§4.4); ignored under `--laplacian-pyramid` |
 | `--zero-pad-channels` | *(off)* | Replace per-level channel-adjust 1×1 convs with parameter-free channel matching (§4.5): zero-pad on channel increase, slice-upsampled+add-skip on the decoder. Bias-free, fewer params. |
 | `--extra-zero-output-channels` | *(off)* | Grow `output_channels` zero-initialized channels at decoder level 0 before the (widened) level-0 blocks, then keep only those as the output instead of the learned 1×1 projection (§4.6). Bias-free. |
+| `--depthwise-initializer` | `None` | Opt-in initializer for the ConvNeXt depthwise kernels. The alias `orthonormal` maps to keras `Orthogonal(gain=1.0)` (unit-norm on the `(K,K,C,1)` depthwise shape); any other value passes through to `keras.initializers.get()`. Default `None` = byte-identical OFF (blocks keep their hardcoded `TruncatedNormal(0,0.02)`). |
+| `--depthwise-l2` | `None` | Opt-in L2 weight on the ConvNeXt depthwise kernels (wired to `keras.regularizers.L2`). Default `None` = off (blocks keep their default `deepcopy(kernel_regularizer)`). |
+| `--dropout` | `0.0` | MLP dropout rate inside the ConvNeXt inverted-bottleneck blocks (after the 4× expansion activation, before the 1×1 reduce). OFF by default; `0.0` = byte-identical to all existing checkpoints. Typical: 0.1-0.3. Cumulative with the blocks' built-in stochastic depth (`StochasticDepth`). |
 | `--mixed-precision` | *(off)* | `mixed_float16` (fp16 compute, fp32 weights/output). Correct but **slower** here — disables XLA; see §5.4 |
 | `--expose-bottleneck` | *(off)* | Expose the bottleneck latent as a 2nd output (enables the monitor) |
 | `--analyzer` | *(off)* | Run data-free `ModelAnalyzer` (weights + spectra) during training |
