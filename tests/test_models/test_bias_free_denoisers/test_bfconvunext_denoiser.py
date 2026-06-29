@@ -288,6 +288,103 @@ class TestDepthwisePassThrough:
 
 
 # ---------------------------------------------------------------------
+# MLP dropout_rate factory pass-through (plan_2026-06-29_cbfbbf42 SC1/SC2/SC5):
+# the --dropout knob threads create_convunext_denoiser(dropout_rate=...) into
+# every ConvNeXt block's inverted-bottleneck Dropout. OFF (default / explicit
+# 0.0) must add NO active Dropout sublayer and NO parameters; ON must reach the
+# blocks AND survive a .keras round-trip with the rate preserved.
+# ---------------------------------------------------------------------
+
+class TestDropoutPassThrough:
+    """SC1/SC2/SC5: dropout_rate threads from the factory into every block."""
+
+    def _build(self, input_shape, version, **overrides) -> keras.Model:
+        cfg = dict(
+            input_shape=input_shape,
+            depth=3,
+            initial_filters=8,
+            blocks_per_level=1,
+            convnext_version=version,
+            drop_path_rate=0.0,
+        )
+        cfg.update(overrides)
+        return create_convunext_denoiser(**cfg)
+
+    @pytest.mark.parametrize("version", ["v2", "v1"])
+    def test_dropout_reaches_blocks(self, input_shape, version) -> None:
+        # SC1: dropout_rate=0.3 reaches every block's get_config AND activates a
+        # real keras.layers.Dropout sublayer (not the passthrough Lambda).
+        model = self._build(input_shape, version, dropout_rate=0.3)
+
+        x = np.random.rand(2, *input_shape).astype(np.float32)
+        y = model(x, training=False)
+        assert y.shape == (2, *input_shape)
+        assert not np.any(np.isnan(keras.ops.convert_to_numpy(y)))
+
+        blocks = _find_convnext_blocks(model)
+        assert len(blocks) > 0, "no ConvNeXt blocks found in the model"
+        for blk in blocks:
+            assert blk.get_config()['dropout_rate'] == 0.3
+            # the active sublayer is a real Dropout, not the no_dropout Lambda
+            assert isinstance(blk.dropout, keras.layers.Dropout), (
+                f"block {blk.name} has a passthrough dropout sublayer "
+                f"({type(blk.dropout).__name__}) despite dropout_rate=0.3"
+            )
+            assert float(blk.dropout.rate) == 0.3
+
+    @pytest.mark.parametrize("version", ["v2", "v1"])
+    def test_default_off_is_byte_identical(self, input_shape, version) -> None:
+        # SC2: the omitted-kwarg default and an explicit dropout_rate=0.0 build
+        # with the SAME param count (Dropout is weightless) and NEITHER activates
+        # a real Dropout sublayer (both use the passthrough Lambda).
+        model_default = self._build(input_shape, version)
+        model_zero = self._build(input_shape, version, dropout_rate=0.0)
+
+        assert model_default.count_params() == model_zero.count_params(), (
+            "explicit dropout_rate=0.0 changed the param count vs the default"
+        )
+
+        for model in (model_default, model_zero):
+            blocks = _find_convnext_blocks(model)
+            assert len(blocks) > 0, "no ConvNeXt blocks found in the model"
+            for blk in blocks:
+                assert blk.get_config()['dropout_rate'] == 0.0
+                # OFF path: no active Dropout (rate>0) anywhere in the block
+                assert not isinstance(blk.dropout, keras.layers.Dropout), (
+                    f"block {blk.name} has an active Dropout in the OFF default path"
+                )
+
+    @pytest.mark.parametrize("version", ["v2", "v1"])
+    def test_dropout_keras_round_trip(self, tmp_path, input_shape, version) -> None:
+        # SC5: a dropout_rate=0.3 model survives .keras save/load with the rate
+        # preserved on the reloaded blocks; forward outputs (training=False, so
+        # Dropout is an exact identity) match across the round-trip.
+        model = self._build(input_shape, version, dropout_rate=0.3)
+        x = np.random.rand(2, *input_shape).astype(np.float32)
+        y_before = model(x, training=False)
+
+        save_path = os.path.join(str(tmp_path), f'bfconvunext_dropout_{version}.keras')
+        model.save(save_path)
+        loaded = keras.models.load_model(save_path)
+        y_after = loaded(x, training=False)
+
+        reloaded_blocks = _find_convnext_blocks(loaded)
+        assert len(reloaded_blocks) > 0, "no ConvNeXt blocks found after reload"
+        for blk in reloaded_blocks:
+            assert blk.get_config()['dropout_rate'] == 0.3, (
+                f"reloaded block {blk.name} lost its dropout_rate"
+            )
+
+        # GPU fp32 reduction noise -> atol 1e-4 (SYSTEM invariant)
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(y_before),
+            keras.ops.convert_to_numpy(y_after),
+            atol=1e-4,
+            err_msg="Outputs differ after .keras round-trip (dropout_rate=0.3)"
+        )
+
+
+# ---------------------------------------------------------------------
 # Block-activation layer-instance serialization (SC3): a multi-block
 # denoiser built with a SINGLE shared LeakyReLU(0.1) instance must survive
 # .keras save/load with identical outputs. This is the end-to-end guard for

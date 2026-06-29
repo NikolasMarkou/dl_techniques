@@ -709,3 +709,61 @@ class TestDepthwiseTrainerWiring:
         args = parse_arguments()
         assert args.depthwise_initializer == "orthonormal"
         assert args.depthwise_l2 == 1e-4
+
+
+# ---------------------------------------------------------------------
+# --dropout trainer wiring (plan_2026-06-29_cbfbbf42 SC3)
+# ---------------------------------------------------------------------
+
+
+class TestDropoutTrainerWiring:
+    """SC3: --dropout opt-in MLP-dropout wiring (mirrors TestDepthwiseTrainerWiring).
+
+    Pure config + argparse + lightweight construction -- no training. Covers the
+    byte-identical OFF default (0.0), the TrainingConfig field round-trip, the
+    argparse->args propagation via the importable parse_arguments() entry point,
+    and a construction-only assertion that dropout_rate reaches the ConvNeXt
+    blocks through build_model (NOT a full fit).
+    """
+
+    def test_config_default_is_off(self):
+        """Default config leaves dropout_rate 0.0 (byte-identical OFF path)."""
+        assert TrainingConfig().dropout_rate == 0.0
+
+    def test_config_field_round_trip(self):
+        """TrainingConfig stores the new field verbatim."""
+        cfg = TrainingConfig(dropout_rate=0.1)
+        assert cfg.dropout_rate == 0.1
+
+    def test_argparse_maps_into_config(self, monkeypatch):
+        """parse_arguments() picks up --dropout from argv as args.dropout."""
+        argv = [
+            "train_convunext_denoiser",
+            "--smoke",
+            "--dropout", "0.1",
+        ]
+        monkeypatch.setattr("sys.argv", argv)
+        args = parse_arguments()
+        assert args.dropout == 0.1
+
+    def test_build_model_threads_dropout_into_blocks(self):
+        """Construction-only: TrainingConfig(dropout_rate=0.1) -> build_model
+        reaches the ConvNeXt blocks (get_config dropout_rate == 0.1). No fit."""
+        cfg = TrainingConfig(
+            variant="tiny",
+            convnext_version="v1",
+            use_gabor_stem=False,
+            patch_size=PATCH,
+            channels=CHANNELS,
+            batch_size=2,
+            self_iterate_pool_size=4,
+            dropout_rate=0.1,
+        )
+        model = build_model(cfg)
+        blocks = [
+            l for l in model._flatten_layers()
+            if l.__class__.__name__ in ("ConvNextV1Block", "ConvNextV2Block")
+        ]
+        assert len(blocks) > 0, "no ConvNeXt blocks found in the built model"
+        for blk in blocks:
+            assert blk.get_config()['dropout_rate'] == 0.1
