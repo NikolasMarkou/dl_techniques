@@ -250,6 +250,10 @@ class TrainingConfig:
     # any other value is passed to the factory as a plain Keras activation string.
     block_activation: str = "leaky_relu"
     block_activation_alpha: float = 0.1
+    # Standard MLP dropout inside the ConvNeXt inverted-bottleneck blocks (NOT stochastic
+    # depth). 0.0 = OFF / byte-identical to all existing checkpoints. Wired to
+    # create_convunext_denoiser(dropout_rate=...).
+    dropout_rate: float = 0.0
 
     # Training
     batch_size: int = 16
@@ -823,6 +827,7 @@ def build_model(config: TrainingConfig) -> keras.Model:
             keras.regularizers.L2(config.depthwise_l2)
             if config.depthwise_l2 is not None else None
         ),
+        dropout_rate=config.dropout_rate,
         **cfg,
     )
 
@@ -1944,6 +1949,12 @@ def parse_arguments() -> argparse.Namespace:
              "deepcopy(kernel_regularizer) default).",
     )
     parser.add_argument(
+        "--dropout", type=float, default=0.0,
+        help="Opt-in MLP dropout rate inside the ConvNeXt inverted-bottleneck blocks "
+             "(wired to create_convunext_denoiser dropout_rate). Default 0.0 = OFF, "
+             "byte-identical to existing checkpoints. Typical: 0.1-0.3.",
+    )
+    parser.add_argument(
         "--block-activation", type=str, default="leaky_relu",
         help="Activation for the WHOLE denoiser: the ConvNeXt blocks AND the "
              "ConvUNextStem AND the deep-supervision heads all use it. 'leaky_relu' "
@@ -2049,6 +2060,7 @@ def main():
             depthwise_l2=args.depthwise_l2,
             block_activation=args.block_activation,
             block_activation_alpha=args.block_activation_alpha,
+            dropout_rate=args.dropout,
             viz_freq=1,
             viz_samples=args.viz_samples,
             mixed_precision=args.mixed_precision,
@@ -2102,6 +2114,7 @@ def main():
             depthwise_l2=args.depthwise_l2,
             block_activation=args.block_activation,
             block_activation_alpha=args.block_activation_alpha,
+            dropout_rate=args.dropout,
             max_train_files=args.max_train_files or 10000,
             max_val_files=args.max_val_files or 500,
             steps_per_epoch=args.steps_per_epoch,
