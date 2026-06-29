@@ -262,8 +262,16 @@ def _apply_residual_convnext_block(
         activation: Union[str, keras.layers.Layer] = 'gelu',
         depthwise_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
         depthwise_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+        dropout_rate: float = 0.0,
 ) -> keras.KerasTensor:
     """Apply a ConvNeXt block as a RESIDUAL branch with stochastic depth.
+
+    ``dropout_rate`` is the standard (element-wise) MLP dropout applied INSIDE
+    the block's inverted bottleneck (after the 4x-expansion activation in V1 /
+    after GRN in V2, before the 1x1 reduce). It is NOT stochastic depth (that is
+    ``drop_path_rate``, applied to the whole branch below). Default ``0.0`` adds
+    no ``Dropout`` sublayer (passthrough ``Lambda``) and is byte-identical to the
+    prior hardcoded behavior. ``spatial_dropout_rate`` stays hardcoded ``0.0``.
 
     ``ConvNextV1Block`` / ``ConvNextV2Block`` implement only the residual
     *branch* — they do NOT add the skip connection or apply drop-path (their
@@ -301,8 +309,8 @@ def _apply_residual_convnext_block(
         filters=filters,
         activation=activation,
         use_bias=False,            # Bias-free for scaling invariance
-        dropout_rate=0.0,          # regularization comes from StochasticDepth below
-        spatial_dropout_rate=0.0,
+        dropout_rate=dropout_rate, # MLP dropout: 0.0 (default) keeps StochasticDepth-only regularization; >0 enables per-block dropout
+        spatial_dropout_rate=0.0,  # not exposed (locked decision)
         gamma_initial_value=1e-4,  # LayerScale init (floored at GAMMA_MIN_VALUE=1e-6, can't die)
         kernel_regularizer=kernel_regularizer,
         depthwise_initializer=depthwise_initializer,
@@ -420,6 +428,7 @@ def create_convunext_denoiser(
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         depthwise_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
         depthwise_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+        dropout_rate: float = 0.0,
         enable_deep_supervision: bool = False,
         supervision_norm_scale: bool = True,
         supervision_norm_center: bool = False,
@@ -561,6 +570,12 @@ def create_convunext_denoiser(
         depthwise_regularizer: Optional String or Regularizer, applied to the depthwise
             conv kernel of every ConvNeXt block. Defaults to None, which reproduces the
             current behavior (a deepcopy of `kernel_regularizer`). Defaults to None.
+        dropout_rate: Float in [0, 1). Standard (element-wise) MLP dropout applied inside
+            each ConvNeXt block's inverted bottleneck (after the 4x-expansion activation in
+            V1 / after GRN in V2, before the 1x1 reduce conv). This is NOT stochastic depth
+            (see `drop_path_rate`). Default `0.0` = OFF: no `Dropout` sublayer is added and
+            the model is byte-identical to the prior behavior. Threaded to every
+            encoder/bottleneck/decoder block; `spatial_dropout_rate` stays `0.0` (not exposed).
         enable_deep_supervision: Boolean, whether to add deep supervision outputs. Defaults to False.
         supervision_norm_scale: Boolean, whether the deep-supervision head LayerNorm has a
             learnable scale (gamma). Defaults to True.
@@ -769,6 +784,7 @@ def create_convunext_denoiser(
                 activation=block_activation,
                 depthwise_initializer=depthwise_initializer,
                 depthwise_regularizer=depthwise_regularizer,
+                dropout_rate=dropout_rate,
             )
 
         # Skip connection + downsample for this level. Under the Laplacian pyramid
@@ -822,6 +838,7 @@ def create_convunext_denoiser(
             activation=block_activation,
             depthwise_initializer=depthwise_initializer,
             depthwise_regularizer=depthwise_regularizer,
+            dropout_rate=dropout_rate,
         )
 
     # Optional bottleneck tap: a zero-parameter linear (bias-free) marker on the deepest
@@ -920,6 +937,7 @@ def create_convunext_denoiser(
                 activation=block_activation,
                 depthwise_initializer=depthwise_initializer,
                 depthwise_regularizer=depthwise_regularizer,
+                dropout_rate=dropout_rate,
             )
 
         # =====================================================================
