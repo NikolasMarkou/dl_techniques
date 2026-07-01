@@ -188,7 +188,6 @@ class TrainingConfig:
     # Memory / sourcing
     max_train_files: Optional[int] = 10000
     max_val_files: Optional[int] = 500
-    parallel_reads: int = 8
     dataset_shuffle_buffer: int = 1024
     # Patch-level shuffle buffer applied AFTER the per-image patch flat_map, so the
     # `patches_per_image` consecutive crops of one image are interleaved across images.
