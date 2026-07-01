@@ -426,6 +426,67 @@ class TestGlobalResponseNormalization:
         assert not keras.ops.any(keras.ops.isnan(gradients))
 
 
+class TestGRNUseBeta:
+    """Step 10e / SC6: opt-in ``use_beta=False`` drops the additive beta offset.
+
+    Default ``use_beta=True`` keeps every existing ConvNeXt V2 checkpoint
+    byte-identical (beta present). ``use_beta=False`` creates NO ``beta`` weight
+    (``layer.beta is None``), which makes the GRN's additive term vanish -- the
+    bias-free option. Both round-trip through ``get_config``/``from_config``.
+    """
+
+    SHAPE = (2, 8, 8, 16)
+
+    def _built(self, **kwargs) -> GlobalResponseNormalization:
+        layer = GlobalResponseNormalization(**kwargs)
+        layer.build(self.SHAPE)
+        return layer
+
+    def test_use_beta_false_has_no_beta_weight(self) -> None:
+        layer = self._built(use_beta=False)
+        assert layer.beta is None, "use_beta=False must not create a beta weight"
+        weight_names = {w.name for w in layer.weights}
+        assert not any("beta" in n for n in weight_names), (
+            f"use_beta=False leaked a beta weight: {weight_names}"
+        )
+        # gamma still present (scale is retained).
+        assert layer.gamma is not None
+
+    def test_default_has_beta_weight(self) -> None:
+        layer = self._built()  # default use_beta=True
+        assert layer.beta is not None
+        weight_names = {w.name for w in layer.weights}
+        assert any("beta" in n for n in weight_names)
+
+    def test_config_round_trips_use_beta(self) -> None:
+        off = GlobalResponseNormalization(use_beta=False)
+        cfg = off.get_config()
+        assert cfg["use_beta"] is False
+        rebuilt = GlobalResponseNormalization.from_config(cfg)
+        assert rebuilt.use_beta is False
+        rebuilt.build(self.SHAPE)
+        assert rebuilt.beta is None
+
+        default_cfg = GlobalResponseNormalization().get_config()
+        assert default_cfg["use_beta"] is True
+
+    def test_use_beta_false_keras_round_trip(self) -> None:
+        inputs = keras.Input(shape=self.SHAPE[1:])
+        outputs = GlobalResponseNormalization(use_beta=False)(inputs)
+        model = keras.Model(inputs, outputs)
+
+        x = keras.random.normal(self.SHAPE, seed=3)
+        y_before = keras.ops.convert_to_numpy(model(x, training=False))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "grn_nobeta.keras")
+            model.save(path)
+            loaded = keras.models.load_model(path)
+            y_after = keras.ops.convert_to_numpy(loaded(x, training=False))
+
+        np.testing.assert_allclose(y_before, y_after, rtol=1e-6, atol=1e-6)
+
+
 # ============================================================================
 # Debug Helper Function
 # ============================================================================

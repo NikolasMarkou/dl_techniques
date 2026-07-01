@@ -1077,5 +1077,131 @@ class TestDecoderFirstBlockNoStochasticDepth:
         assert np.all(np.isfinite(y))
 
 
+# ---------------------------------------------------------------------
+# block_normalization factory flag (Step 10c / SC1 / SC2 / SC3).
+#
+# D-005 (CRITICAL): homogeneity is ARCHITECTURE-AWARE. An UNTRAINED full model
+# with the standard GRN stem is NOT homogeneous (the GRN stem is degree-0 and
+# dominates; LayerScale gamma=1e-4 masks the in-block norm break until trained),
+# so we DO NOT assert (non)homogeneity on a GRN-stem model here. Valid full-model
+# evidence per D-005(b): a GABOR-stem (GRN-free) + LeakyReLU config where EVERY
+# component is homogeneous -> the batchnorm model is homogeneous at inference at
+# ANY LayerScale gamma. All checks are CPU-only, training=False.
+# ---------------------------------------------------------------------
+
+class TestBlockNormalization:
+    """Step 10c: create_convunext_denoiser(block_normalization=...) option."""
+
+    def _homog_cfg(self, **overrides) -> Dict[str, Any]:
+        # GABOR stem (GRN-free) + LeakyReLU(0.1) + linear final: every component is
+        # homogeneous, so the ONLY norm axis under test is the block norm.
+        cfg = dict(
+            input_shape=(64, 64, 3),
+            depth=3,
+            initial_filters=16,
+            blocks_per_level=1,
+            convnext_version='v1',
+            filter_multiplier=2,
+            use_gabor_stem=True,
+            block_activation=keras.layers.LeakyReLU(negative_slope=0.1),
+            final_activation='linear',
+            drop_path_rate=0.0,
+        )
+        cfg.update(overrides)
+        return cfg
+
+    def _byte_cfg(self, **overrides) -> Dict[str, Any]:
+        # Small v1 config for the default-path byte-identity check.
+        cfg = dict(
+            input_shape=(32, 32, 1),
+            depth=3,
+            initial_filters=16,
+            blocks_per_level=1,
+            convnext_version='v1',
+            filter_multiplier=2,
+            use_gabor_stem=False,
+            final_activation='linear',
+            drop_path_rate=0.0,
+        )
+        cfg.update(overrides)
+        return cfg
+
+    def test_gabor_batchnorm_model_homogeneous_at_inference(self) -> None:
+        # SC1(b) / D-005(b): fully-homogeneous gabor+LeakyReLU+batchnorm model.
+        model = create_convunext_denoiser(**self._homog_cfg(block_normalization='batchnorm'))
+
+        shape = (2, 64, 64, 3)
+        rng = np.random.default_rng(4)
+        # Populate every block's BiasFreeBatchNorm running_var so the inference
+        # statistic is data-meaningful (homogeneity is an inference-time property).
+        for _ in range(12):
+            model((rng.standard_normal(shape) * 1.5).astype("float32"), training=True)
+
+        x = ((rng.standard_normal(shape)) * 1.5).astype("float32")
+        fx = np.array(keras.ops.convert_to_numpy(model(x, training=False)))
+        max_rel = 0.0
+        for alpha in (0.5, 2.0):
+            f_ax = np.array(keras.ops.convert_to_numpy(model(alpha * x, training=False)))
+            denom = max(float(np.max(np.abs(alpha * fx))), 1e-8)
+            rel = float(np.max(np.abs(f_ax - alpha * fx)) / denom)
+            max_rel = max(max_rel, rel)
+        assert max_rel < 1e-3, (
+            f"gabor+LeakyReLU+batchnorm model not degree-1 homogeneous at "
+            f"inference: max rel_err={max_rel:.3e} (D-005(b))"
+        )
+
+    def test_default_layernorm_byte_identical(self) -> None:
+        # SC2: omitting block_normalization == explicit 'layernorm'. Byte-identity is
+        # proven by (a) identical layer-name SET (graph topology) and (b) identical
+        # outputs after copying weights (atol=0). Cross-build init is not guaranteed
+        # bitwise-equal in this factory (see TestZeroPadChannels), so we copy weights
+        # to isolate the WIRING under test -- the established repo pattern.
+        m_default = create_convunext_denoiser(**self._byte_cfg())
+        m_explicit = create_convunext_denoiser(**self._byte_cfg(block_normalization='layernorm'))
+
+        names_default = {l.name for l in m_default.layers}
+        names_explicit = {l.name for l in m_explicit.layers}
+        assert names_default == names_explicit, (
+            f"default vs explicit 'layernorm' graph differs: "
+            f"{names_default ^ names_explicit}"
+        )
+
+        # The norm slot in every block is a LayerNormalization named 'layer_norm'.
+        norm_layers = [
+            l for l in m_default._flatten_layers()
+            if l.name == "layer_norm"
+        ]
+        assert norm_layers, "no 'layer_norm' slot found in default model"
+        assert all(isinstance(l, keras.layers.LayerNormalization) for l in norm_layers)
+
+        m_explicit.set_weights(m_default.get_weights())
+        x = np.random.RandomState(0).rand(2, 32, 32, 1).astype(np.float32)
+        y_default = np.array(keras.ops.convert_to_numpy(m_default(x, training=False)))
+        y_explicit = np.array(keras.ops.convert_to_numpy(m_explicit(x, training=False)))
+        np.testing.assert_allclose(
+            y_default, y_explicit, atol=0.0,
+            err_msg="default vs explicit 'layernorm' outputs differ (atol=0)",
+        )
+
+    def test_batchnorm_model_keras_round_trip(self, tmp_path) -> None:
+        # SC3: a batchnorm model .keras save/load identity on CPU (atol=1e-4).
+        model = create_convunext_denoiser(**self._homog_cfg(block_normalization='batchnorm'))
+        shape = (2, 64, 64, 3)
+        rng = np.random.default_rng(5)
+        for _ in range(8):
+            model((rng.standard_normal(shape) * 1.5).astype("float32"), training=True)
+        x = (rng.standard_normal(shape) * 1.5).astype("float32")
+        y_before = np.array(keras.ops.convert_to_numpy(model(x, training=False)))
+
+        save_path = os.path.join(str(tmp_path), 'bfconvunext_batchnorm.keras')
+        model.save(save_path)
+        loaded = keras.models.load_model(save_path)
+        y_after = np.array(keras.ops.convert_to_numpy(loaded(x, training=False)))
+        np.testing.assert_allclose(
+            y_before, y_after, atol=1e-4,
+            err_msg="batchnorm model outputs differ after .keras round-trip",
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

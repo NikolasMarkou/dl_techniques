@@ -615,5 +615,108 @@ class TestActivationSerialization:
         assert not isinstance(relu_cfg["activation"], dict)
 
 
+class TestNormalizationTypeOption:
+    """Step 10b: additive ``normalization_type`` ('layernorm' default | 'batchnorm').
+
+    The 'batchnorm' branch swaps the pre-activation LayerNorm slot for the
+    variance-only ``BiasFreeBatchNorm`` (D-001/D-003/D-004). Covers: build/forward,
+    ``get_config`` round-trip, byte-identical default (LayerNormalization named
+    "layer_norm"), invalid-value ValueError, INFERENCE homogeneity of a
+    LeakyReLU(0.1) + use_bias=False batchnorm block, and a ``.keras`` round-trip.
+    All homogeneity / round-trip checks run at ``training=False`` on CPU.
+    """
+
+    CHANNELS = 16
+    KERNEL = 7
+
+    def _build(self, **overrides):
+        params = dict(
+            kernel_size=self.KERNEL, filters=self.CHANNELS,
+            dropout_rate=0.0, spatial_dropout_rate=0.0,
+        )
+        params.update(overrides)
+        block = ConvNextV1Block(**params)
+        block.build((None, 8, 8, self.CHANNELS))
+        return block
+
+    def test_batchnorm_builds_and_forwards(self) -> None:
+        from dl_techniques.layers.norms.bias_free_batch_norm import BiasFreeBatchNorm
+        block = self._build(normalization_type="batchnorm")
+        assert isinstance(block.norm, BiasFreeBatchNorm)
+        x = np.random.RandomState(0).randn(2, 8, 8, self.CHANNELS).astype("float32")
+        y = block(x, training=False).numpy()
+        assert y.shape == (2, 8, 8, self.CHANNELS)
+        assert not np.any(np.isnan(y))
+
+    def test_default_is_layernorm_named_layer_norm(self) -> None:
+        block = self._build()  # default 'layernorm'
+        assert isinstance(block.norm, keras.layers.LayerNormalization)
+        assert block.norm.name == "layer_norm"
+        # The 'batchnorm' branch keeps the SAME layer name for checkpoint compat.
+        bn = self._build(normalization_type="batchnorm")
+        assert bn.norm.name == "layer_norm"
+
+    def test_get_config_round_trips_normalization_type(self) -> None:
+        block = self._build(normalization_type="batchnorm")
+        cfg = block.get_config()
+        assert cfg["normalization_type"] == "batchnorm"
+        rebuilt = ConvNextV1Block.from_config(cfg)
+        assert rebuilt.normalization_type == "batchnorm"
+        # Default omitted -> serializes as 'layernorm'.
+        assert self._build().get_config()["normalization_type"] == "layernorm"
+
+    def test_invalid_normalization_type_raises(self) -> None:
+        with pytest.raises(ValueError, match="normalization_type"):
+            ConvNextV1Block(kernel_size=7, filters=16, normalization_type="rmsnorm")
+
+    def test_batchnorm_block_homogeneous_at_inference(self) -> None:
+        block = self._build(
+            normalization_type="batchnorm",
+            activation=keras.layers.LeakyReLU(negative_slope=0.1),
+            use_bias=False,
+        )
+        shape = (4, 8, 8, self.CHANNELS)
+        rng = np.random.default_rng(4)
+        # Populate running_var so the inference statistic is data-meaningful.
+        for _ in range(20):
+            block((rng.standard_normal(shape) * 2.0).astype("float32"), training=True)
+
+        x = (rng.standard_normal(shape) * 2.0).astype("float32")
+        fx = block(x, training=False).numpy()
+        max_rel = 0.0
+        for alpha in (0.5, 2.0):
+            f_ax = block(alpha * x, training=False).numpy()
+            denom = max(float(np.max(np.abs(alpha * fx))), 1e-8)
+            rel = float(np.max(np.abs(f_ax - alpha * fx)) / denom)
+            max_rel = max(max_rel, rel)
+        assert max_rel < 1e-3, (
+            f"batchnorm block (LeakyReLU, use_bias=False) not degree-1 homogeneous "
+            f"at inference: max rel_err={max_rel:.3e}"
+        )
+
+    def test_batchnorm_block_keras_round_trip(self, tmp_path) -> None:
+        inputs = keras.Input(shape=(8, 8, self.CHANNELS))
+        block = ConvNextV1Block(
+            kernel_size=self.KERNEL, filters=self.CHANNELS,
+            normalization_type="batchnorm",
+            activation=keras.layers.LeakyReLU(negative_slope=0.1),
+            use_bias=False, dropout_rate=0.0, spatial_dropout_rate=0.0,
+        )
+        outputs = block(inputs)
+        model = keras.Model(inputs, outputs)
+        rng = np.random.default_rng(6)
+        for _ in range(10):
+            model((rng.standard_normal((2, 8, 8, self.CHANNELS)) * 2.0).astype("float32"),
+                  training=True)
+        x = (rng.standard_normal((2, 8, 8, self.CHANNELS)) * 2.0).astype("float32")
+        y_before = model(x, training=False).numpy()
+
+        save_path = str(tmp_path / "block_bn.keras")
+        model.save(save_path)
+        loaded = keras.models.load_model(save_path)
+        y_after = loaded(x, training=False).numpy()
+        assert np.allclose(y_before, y_after, atol=1e-5)
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
