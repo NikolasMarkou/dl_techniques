@@ -200,6 +200,7 @@ class ConvNextV2Block(keras.layers.Layer):
             use_softorthonormal_regularizer: bool = False,
             depthwise_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
             depthwise_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+            normalization_type: str = "layernorm",
             **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -221,6 +222,12 @@ class ConvNextV2Block(keras.layers.Layer):
         if spatial_dropout_rate is not None and not (0.0 <= spatial_dropout_rate <= 1.0):
             raise ValueError(f"spatial_dropout_rate must be between 0 and 1, got {spatial_dropout_rate}")
 
+        if normalization_type not in ("layernorm", "batchnorm"):
+            raise ValueError(
+                f"normalization_type must be one of {{'layernorm', 'batchnorm'}}, "
+                f"got {normalization_type}"
+            )
+
         # Store configuration parameters
         self.kernel_size = kernel_size
         self.filters = filters
@@ -237,6 +244,7 @@ class ConvNextV2Block(keras.layers.Layer):
         # keeping the raw arg lets get_config re-serialize exactly what the caller passed.
         self.depthwise_initializer = depthwise_initializer
         self.depthwise_regularizer = depthwise_regularizer
+        self.normalization_type = normalization_type
 
         # CREATE all sub-layers in __init__ (following modern Keras 3 pattern)
         # They will be built explicitly in build() method for robust serialization
@@ -266,13 +274,27 @@ class ConvNextV2Block(keras.layers.Layer):
             name="depthwise_conv"
         )
 
-        # Normalization layer
-        self.norm = keras.layers.LayerNormalization(
-            epsilon=self.LAYERNORM_EPSILON,
-            center=self.use_bias,
-            scale=True,
-            name="layer_norm"
-        )
+        # Normalization layer (the LayerNorm SLOT only — the GRN below is untouched).
+        # DECISION plan_2026-07-01_8054f023/D-003: STRICTLY-ADDITIVE norm selection.
+        # This is a direct if/elif branch (NOT create_normalization_layer) per D-004 so
+        # the DEFAULT 'layernorm' path stays BYTE-IDENTICAL to the original construction
+        # (same epsilon/center/scale AND the same name="layer_norm" for checkpoint compat).
+        # Do NOT route the default through the factory (param-drop risk) and do NOT rename
+        # the layer. The 'batchnorm' branch swaps in the homogeneity-restoring
+        # BiasFreeBatchNorm (variance-only) under the SAME name. See decisions.md D-003/D-004.
+        if self.normalization_type == "batchnorm":
+            from dl_techniques.layers.norms.bias_free_batch_norm import BiasFreeBatchNorm
+            self.norm = BiasFreeBatchNorm(
+                epsilon=self.LAYERNORM_EPSILON,
+                name="layer_norm"
+            )
+        else:  # "layernorm" — verbatim original construction, unchanged
+            self.norm = keras.layers.LayerNormalization(
+                epsilon=self.LAYERNORM_EPSILON,
+                center=self.use_bias,
+                scale=True,
+                name="layer_norm"
+            )
 
         # Prepare convolution parameters
         conv_params = {
@@ -505,6 +527,7 @@ class ConvNextV2Block(keras.layers.Layer):
             "use_softorthonormal_regularizer": self.use_softorthonormal_regularizer,
             "depthwise_initializer": keras.initializers.serialize(self.depthwise_initializer),
             "depthwise_regularizer": keras.regularizers.serialize(self.depthwise_regularizer),
+            "normalization_type": self.normalization_type,
         })
         return config
 
