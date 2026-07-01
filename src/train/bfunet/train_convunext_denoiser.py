@@ -124,6 +124,7 @@ from train.common import (
     collect_image_paths,
     augment_patch,
     set_seeds,
+    validate_model_loading,
 )
 from train.superpoint.homographic_adaptation import select_weighted_image_paths
 from dl_techniques.metrics.psnr_metric import PsnrMetric
@@ -1866,8 +1867,49 @@ def train(config: TrainingConfig) -> keras.Model:
         logger.info(f"Saved full 2-output model (denoised, bottleneck) -> {full_path}")
 
     final_path = output_dir / "final_model.keras"
+    # Capture a small synthetic sample + its prediction BEFORE saving so we can
+    # verify the .keras round-trip reproduces outputs (sibling pattern:
+    # train/convnext/train_convnext_v1.py:200-211). Log-only: a mismatch — or any
+    # check failure — NEVER crashes the trainer tail; the in-memory model is fine.
+    round_trip_sample = None
+    round_trip_pred = None
+    try:
+        in_shape = model.input_shape
+        if isinstance(in_shape, list):
+            in_shape = in_shape[0]
+        spatial = tuple(d if d is not None else config.patch_size for d in in_shape[1:])
+        round_trip_sample = np.random.default_rng(0).uniform(
+            -0.5, 0.5, size=(1,) + spatial
+        ).astype("float32")
+        round_trip_pred = model.predict(round_trip_sample, verbose=0)
+    except Exception as e:
+        logger.debug(f"Round-trip pre-save capture skipped: {e}")
+
     model.save(final_path)
     logger.info(f"Saved final (last-epoch) model -> {final_path}")
+
+    if round_trip_pred is not None:
+        try:
+            # fp16 save/load drifts more; relax the tolerance so the check does not
+            # false-WARN under mixed_precision.
+            tol = 5e-2 if config.mixed_precision else 1e-4
+            ok = validate_model_loading(
+                str(final_path),
+                round_trip_sample,
+                round_trip_pred,
+                custom_objects=None,  # all layers are @register_keras_serializable
+                tolerance=tol,
+            )
+            if not ok:
+                logger.warning(
+                    "final_model.keras round-trip check FAILED: reloaded outputs "
+                    f"differ from pre-save (tol={tol:.1e}). The saved file may not "
+                    "reload identically."
+                )
+        except Exception as e:
+            logger.warning(
+                f"final_model.keras round-trip check errored (non-fatal): {e}"
+            )
 
     gc.collect()
     return model
