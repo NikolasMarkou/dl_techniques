@@ -254,12 +254,12 @@ class TrainingConfig:
     # depth). 0.0 = OFF / byte-identical to all existing checkpoints. Wired to
     # create_convunext_denoiser(dropout_rate=...).
     dropout_rate: float = 0.0
-    # Pre-activation normalization inside every ConvNeXt block. "layernorm" (default) =
-    # byte-identical to all existing checkpoints; "batchnorm" = variance-only BiasFreeBatchNorm
-    # (no mean, no beta) which restores degree-1 homogeneity f(ax)=a*f(x) at inference
-    # (pairs best with a homogeneous activation like LeakyReLU). Wired to
-    # create_convunext_denoiser(block_normalization=...).
-    block_normalization: str = "layernorm"
+    # Pre-activation normalization inside every ConvNeXt block. "batchnorm" (default) =
+    # variance-only BiasFreeBatchNorm (no mean, no beta) which restores degree-1
+    # homogeneity f(ax)=a*f(x) at inference (pairs best with a homogeneous activation like
+    # LeakyReLU); "layernorm" = per-input scale-invariant (degree-0), byte-identical to
+    # legacy pre-batchnorm checkpoints. Wired to create_convunext_denoiser(block_normalization=...).
+    block_normalization: str = "batchnorm"
 
     # Training
     batch_size: int = 16
@@ -2079,14 +2079,14 @@ def parse_arguments() -> argparse.Namespace:
              "byte-identical to existing checkpoints. Typical: 0.1-0.3.",
     )
     parser.add_argument(
-        "--block-normalization", type=str, default="layernorm",
+        "--block-normalization", type=str, default="batchnorm",
         choices=["layernorm", "batchnorm"],
         help="Pre-activation normalization inside every ConvNeXt block (wired to "
-             "create_convunext_denoiser block_normalization). 'layernorm' (default) = "
-             "byte-identical to existing checkpoints; 'batchnorm' = variance-only "
-             "BiasFreeBatchNorm (no mean, no beta) that restores degree-1 homogeneity "
-             "f(ax)=a*f(x) at inference (pairs best with a homogeneous activation like "
-             "LeakyReLU).",
+             "create_convunext_denoiser block_normalization). 'batchnorm' (default) = "
+             "variance-only BiasFreeBatchNorm (no mean, no beta) that restores degree-1 "
+             "homogeneity f(ax)=a*f(x) at inference (pairs best with a homogeneous "
+             "activation like LeakyReLU); 'layernorm' = per-input scale-invariant "
+             "(degree-0), byte-identical to legacy pre-batchnorm checkpoints.",
     )
     parser.add_argument(
         "--block-activation", type=str, default="leaky_relu",
