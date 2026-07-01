@@ -263,6 +263,7 @@ def _apply_residual_convnext_block(
         depthwise_initializer: Optional[Union[str, keras.initializers.Initializer]] = None,
         depthwise_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         dropout_rate: float = 0.0,
+        normalization_type: str = "layernorm",
 ) -> keras.KerasTensor:
     """Apply a ConvNeXt block as a RESIDUAL branch with stochastic depth.
 
@@ -315,6 +316,7 @@ def _apply_residual_convnext_block(
         kernel_regularizer=kernel_regularizer,
         depthwise_initializer=depthwise_initializer,
         depthwise_regularizer=depthwise_regularizer,
+        normalization_type=normalization_type,  # 'layernorm' (default, degree-0) or 'batchnorm' (BiasFreeBatchNorm, degree-1 at inference)
         name=name,
     )(x)
     if drop_path_rate and drop_path_rate > 0.0:
@@ -416,6 +418,16 @@ def create_convunext_denoiser(
         expose_bottleneck: bool = False,
         block_kernel_size: Union[int, Tuple[int, int]] = 7,
         block_activation: Union[str, keras.layers.Layer] = 'gelu',
+        # DECISION plan_2026-07-01_8054f023/D-001: 'batchnorm' selects the variance-only
+        # BiasFreeBatchNorm inside every ConvNeXt block. A FIXED-STAT norm (dividing by a
+        # frozen running_var constant at inference, no mean, no beta) restores degree-1
+        # homogeneity f(ax)=a*f(x); the default per-input LayerNorm divides by a per-sample
+        # std that itself scales with the input, so it is scale-INVARIANT (degree-0). Do NOT
+        # substitute stock keras.layers.BatchNormalization(center=False) or any RMS-family
+        # norm here — both were empirically non-homogeneous (moving_mean subtraction /
+        # per-input RMS); only BiasFreeBatchNorm is degree-1 at inference. Default 'layernorm'
+        # is byte-identical to the prior hardcoded LayerNorm. See decisions.md D-001.
+        block_normalization: str = "layernorm",
         stem_activation: Union[str, keras.layers.Layer] = 'gelu',
         drop_path_rate: float = 0.1,
         final_activation: Union[str, callable] = 'linear',
@@ -553,6 +565,20 @@ def create_convunext_denoiser(
             `keras.layers.LeakyReLU(negative_slope=0.1)` instance for slope-0.1 leaky ReLU
             (the 'leaky_relu' string resolves to slope 0.2). A layer instance round-trips
             through .keras serialization (handled by ConvNext*Block.get_config).
+        block_normalization: String, the pre-activation normalization used INSIDE every
+            ConvNeXt block. One of:
+              - 'layernorm' (default): the exact prior per-input LayerNormalization
+                (epsilon=1e-6, center=use_bias, scale=True, name="layer_norm"). Byte-identical
+                to the pre-change model. NOTE: per-input LayerNorm is scale-INVARIANT
+                (degree-0), NOT scale-homogeneous.
+              - 'batchnorm': the variance-only BiasFreeBatchNorm. At inference (training=False)
+                it divides by a FROZEN running_var constant (no mean, no beta), which restores
+                degree-1 homogeneity f(a*x)=a*f(x). Pairs best with a homogeneous activation
+                such as LeakyReLU (GELU is itself non-homogeneous, so GELU blocks will not be
+                globally degree-1 regardless of the norm). Homogeneity is an inference-time
+                property: during training the layer uses per-batch variance and is degree-0.
+            Threaded to every encoder/bottleneck/decoder block. The frozen-stem GRN and the
+            deep-supervision-head LayerNorm are NOT covered by this param (out of scope).
         stem_activation: String or keras Layer, activation for the ConvUNextStem; default
             'gelu'; only used when the standard stem is built, i.e. use_gabor_stem=False.
         drop_path_rate: Float, stochastic depth drop probability. Defaults to 0.1.
@@ -785,6 +811,7 @@ def create_convunext_denoiser(
                 depthwise_initializer=depthwise_initializer,
                 depthwise_regularizer=depthwise_regularizer,
                 dropout_rate=dropout_rate,
+                normalization_type=block_normalization,
             )
 
         # Skip connection + downsample for this level. Under the Laplacian pyramid
@@ -839,6 +866,7 @@ def create_convunext_denoiser(
             depthwise_initializer=depthwise_initializer,
             depthwise_regularizer=depthwise_regularizer,
             dropout_rate=dropout_rate,
+            normalization_type=block_normalization,
         )
 
     # Optional bottleneck tap: a zero-parameter linear (bias-free) marker on the deepest
@@ -938,6 +966,7 @@ def create_convunext_denoiser(
                 depthwise_initializer=depthwise_initializer,
                 depthwise_regularizer=depthwise_regularizer,
                 dropout_rate=dropout_rate,
+                normalization_type=block_normalization,
             )
 
         # =====================================================================
@@ -957,7 +986,12 @@ def create_convunext_denoiser(
 
             # Bias-free-by-default LayerNorm at the supervision head (replaces GRN, whose
             # trainable beta is a bias-like additive offset). scale/center read from args;
-            # center=False keeps the head bias-free (homogeneous), matching the model contract.
+            # center=False keeps the head bias-free (no additive offset) but NOT
+            # scale-homogeneous: per-input LayerNorm divides by a per-sample std that scales
+            # with the input, so it is scale-INVARIANT (degree-0), NOT degree-1 f(ax)=a*f(x).
+            # This deep-supervision-head LayerNorm is NOT covered by the block_normalization
+            # param (out of scope; documented) — only the encoder/bottleneck/decoder block
+            # norms are swappable to BiasFreeBatchNorm.
             supervision_branch = keras.layers.LayerNormalization(
                 center=supervision_norm_center,
                 scale=supervision_norm_scale,
