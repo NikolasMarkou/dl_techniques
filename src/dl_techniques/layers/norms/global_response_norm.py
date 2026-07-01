@@ -142,6 +142,7 @@ class GlobalResponseNormalization(keras.layers.Layer):
         gamma_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         beta_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         activity_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
+        use_beta: bool = True,
         **kwargs: Any
     ) -> None:
         """Initialize the GlobalResponseNormalization layer.
@@ -167,6 +168,7 @@ class GlobalResponseNormalization(keras.layers.Layer):
             raise ValueError(f"eps must be positive, got {eps}")
 
         self.eps = eps
+        self.use_beta = use_beta
         self.gamma_initializer = keras.initializers.get(gamma_initializer)
         self.beta_initializer = keras.initializers.get(beta_initializer)
         self.gamma_regularizer = keras.regularizers.get(gamma_regularizer)
@@ -213,13 +215,19 @@ class GlobalResponseNormalization(keras.layers.Layer):
             regularizer=self.gamma_regularizer,
             trainable=True,
         )
-        self.beta = self.add_weight(
-            name="beta",
-            shape=param_shape,
-            initializer=self.beta_initializer,
-            regularizer=self.beta_regularizer,
-            trainable=True,
-        )
+        # `use_beta=False` drops the trainable bias-like offset entirely so the
+        # layer carries no additive term (bias-free option). Default True keeps
+        # every existing ConvNeXt V2 checkpoint byte-identical.
+        if self.use_beta:
+            self.beta = self.add_weight(
+                name="beta",
+                shape=param_shape,
+                initializer=self.beta_initializer,
+                regularizer=self.beta_regularizer,
+                trainable=True,
+            )
+        else:
+            self.beta = None
 
         logger.debug("GlobalResponseNormalization build completed")
 
@@ -260,7 +268,9 @@ class GlobalResponseNormalization(keras.layers.Layer):
 
         # Step 3: Apply GRN transformation with residual connection.
         # The shapes of norm, gamma, and beta are broadcastable to the input shape.
-        transformed = self.gamma * (inputs * normalized_norm) + self.beta
+        transformed = self.gamma * (inputs * normalized_norm)
+        if self.beta is not None:
+            transformed = transformed + self.beta
         output = inputs + transformed
 
         return output
@@ -285,6 +295,7 @@ class GlobalResponseNormalization(keras.layers.Layer):
         config = super().get_config()
         config.update({
             "eps": float(self.eps),
+            "use_beta": self.use_beta,
             "gamma_initializer": keras.initializers.serialize(self.gamma_initializer),
             "beta_initializer": keras.initializers.serialize(self.beta_initializer),
             "gamma_regularizer": keras.regularizers.serialize(self.gamma_regularizer),
