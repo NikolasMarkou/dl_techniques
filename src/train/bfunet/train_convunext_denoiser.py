@@ -864,6 +864,65 @@ def verify_bias_free(model: keras.Model) -> None:
     else:
         logger.info("Bias-free check: PASSED - all layers are bias-free")
 
+    # ------------------------------------------------------------------
+    # Numerical BLACK-BOX homogeneity probe (informational, NEVER raises;
+    # verify_bias_free MUST return None). Detects ANY degree-1 break
+    # f(a*x) != a*f(x) at inference — including breaks the static scan above
+    # cannot see (GRN stem, GELU, non-homogeneous LayerNorm blocks).
+    #
+    # DECISION plan_2026-07-01_8054f023/D-005: a PASS here on an UNTRAINED model
+    # does NOT prove homogeneity. LayerScale gamma_init=1e-4 makes each residual
+    # branch near-identity at init, masking in-block norm/activation degree-0
+    # breaks until training grows gamma (why the audit saw the break only on the
+    # TRAINED checkpoint). The probe is most meaningful post-training, or for
+    # GRN/GELU-driven breaks that ARE visible at init. Do NOT read an
+    # untrained-model pass as evidence the model is homogeneous. See decisions.md
+    # D-005; do NOT replace this with a hard assert / raise.
+    try:
+        in_shape = model.input_shape
+        if isinstance(in_shape, list):
+            in_shape = in_shape[0]
+        spatial = tuple(d if d is not None else 64 for d in in_shape[1:])
+        rng = np.random.default_rng(0)
+        x = rng.uniform(-0.5, 0.5, size=(1,) + spatial).astype("float32")
+    except Exception as e:
+        logger.debug(f"Homogeneity probe skipped (could not synthesize input): {e}")
+        return
+
+    def _first_output(y):
+        if isinstance(y, (list, tuple)):
+            return y[0]
+        if isinstance(y, dict):
+            return list(y.values())[0]
+        return y
+
+    try:
+        # fp16 compute needs a looser tolerance or the probe false-WARNs every run.
+        try:
+            compute_dtype = keras.mixed_precision.global_policy().compute_dtype
+        except Exception:
+            compute_dtype = "float32"
+        tol = 5e-2 if compute_dtype == "float16" else 1e-2
+
+        fx = np.asarray(_first_output(model(x, training=False)))
+        max_rel = 0.0
+        for alpha in (0.5, 2.0):
+            f_ax = np.asarray(_first_output(model(alpha * x, training=False)))
+            denom = max(float(np.max(np.abs(alpha * fx))), 1e-8)
+            rel = float(np.max(np.abs(f_ax - alpha * fx)) / denom)
+            max_rel = max(max_rel, rel)
+            logger.info(f"Homogeneity probe: alpha={alpha} rel_err={rel:.3e}")
+        if max_rel > tol:
+            logger.warning(
+                f"Homogeneity probe: model is NOT degree-1 homogeneous "
+                f"(max rel_err={max_rel:.3e} > tol={tol:.1e}) — likely a "
+                f"non-homogeneous norm/activation/GRN. INFORMATIONAL only; on an "
+                f"untrained model LayerScale gamma=1e-4 can mask in-block breaks "
+                f"(D-005)."
+            )
+    except Exception as e:
+        logger.debug(f"Homogeneity probe skipped (forward pass failed): {e}")
+
 
 # ---------------------------------------------------------------------
 # VISUALIZATION
