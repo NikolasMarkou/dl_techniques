@@ -22,7 +22,7 @@ and train *legibly*.
 
 - **Model factory**: `dl_techniques.models.bias_free_denoisers.bfconvunext.create_convunext_denoiser`
 - **Trainer**: `src/train/bfunet/train_convunext_denoiser.py`
-- **Evaluation** (PSNR vs noise, multi-model, full-image, SOTA overlay — §8): `src/train/bfunet/eval_psnr_vs_noise.py`
+- **Evaluation** (PSNR vs noise, multi-model, full-image, SOTA overlay — §9): `src/train/bfunet/eval_psnr_vs_noise.py`
 - **Theory notes**: [`research/miyasawas_theorem.md`](../../../research/miyasawas_theorem.md),
   [`research/miyasawas_theorem_multiplicative.md`](../../../research/miyasawas_theorem_multiplicative.md)
 - **Model-level README** (architecture tables, V1/V2 deep dive):
@@ -360,7 +360,7 @@ what randomly-initialized first layers converge to anyway. It is also the textbo
 model of V1 simple-cell receptive fields.
 
 **Cost & knobs.** Zero trainable parameters, but one extra depthwise conv at
-inference (throughput impact unprofiled — see §8). Disable with `--no-gabor-stem`.
+inference (throughput impact unprofiled — see §9). Disable with `--no-gabor-stem`.
 Filter count via `--gabor-filters` (default 32). Kernel size is config-only
 (`gabor_kernel_size=7`, matching the 7×7 default stem so the receptive field is
 unchanged when you swap stems). The five parameter ranges use the Özbulak & Ekenel
@@ -446,7 +446,7 @@ it is **ignored under `--laplacian-pyramid`** (the pyramid already pools linearl
 > with **either** pool (under the default `LeakyReLU`). Mean-pooling makes the downsample
 > *fully linear* rather than only positively-homogeneous — a cleaner property, consistent
 > with the Laplacian path's linear-ops design, but a refinement, not a fix for a broken
-> condition. In the §8 benchmark max-pool edges mean/laplacian by ~0.1 dB in-range.
+> condition. In the §9 benchmark max-pool edges mean/laplacian by ~0.1 dB in-range.
 >
 > The "~1e-5" figure is *positive* homogeneity (`max|f(αx)−αf(x)|`, α>0) specifically —
 > the model is **not** linear (additivity fails), and even that positive-homogeneity
@@ -877,7 +877,168 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
 
 ---
 
-## 8. Evaluation: PSNR vs noise & SOTA comparison
+## 8. Clifford U-Net sibling — a *strictly* homogeneous denoiser (`train_cliffordunet_denoiser`)
+
+Everything above trains the **ConvNeXt** backbone. There is a second, sibling
+trainer — `train_cliffordunet_denoiser.py` — that swaps the backbone for a
+**Clifford geometric-block U-Net** and, in doing so, delivers a *stronger* version
+of the same homogeneity contract: `f(α·y) = α·f(y)` as an **inference-time
+architectural property**, not merely the positive-homogeneity the ConvNeXt path
+settles for (see the §2 operator audit's γ caveat).
+
+- **Model factory**: `dl_techniques.models.bias_free_denoisers.bfcliffordunet.create_cliffordunet_denoiser`
+  (+ `create_cliffordunet_variant`, `CLIFFORDUNET_CONFIGS`)
+- **Trainer**: `src/train/bfunet/train_cliffordunet_denoiser.py`
+
+The two trainers are **siblings by construction**: the entire data pipeline (§5.1),
+noise-σ curriculum (§5.3), loss/metrics/optimizer (§5.4), self-iterate mode (§5.5),
+WW-PGD spectral projection, callbacks + visualization + bottleneck monitor (§6), and
+`--smoke` wiring are **reused verbatim**. Only the model built by `build_model` and
+the ConvNeXt-only config/CLI surface differ. Same `[−0.5,+0.5]` domain, same MSE
+loss, same hardcoded `final_activation="linear"`, same additive-only self-iterate
+gate at parse-time *and* `__post_init__`.
+
+### 8.1 Why Clifford — and the homogeneity problem it creates
+
+The block is `CliffordNetBlock`: it splits the input into a **detail** stream
+`z_det` and a **context** stream `z_ctx`, then combines them through the **Clifford
+geometric product** — the core geometric-algebra operation that mixes the two
+streams via inner/wedge components.
+
+That product is the catch. **The geometric product is *bilinear*** in
+`(z_det, z_ctx)`. If both streams are degree-1 in the input `x`, their product is
+**degree-2**: `f(α·x) ≈ α²·f(x)`, which flatly breaks the Miyasawa
+residual-as-score identity. This is not hypothetical — it was measured on the first
+(naive) homogeneous config: `rel_err` grew like α² (`‖f(αx)‖/‖f(x)‖ ≈ 1.1e5` at
+α=1000), confirming a genuine degree-2 map. Swapping SiLU→LeakyReLU and dropping the
+sigmoid gate removes *those* non-homogeneities but does **nothing** about the
+bilinear degree-2 term.
+
+### 8.2 The fix: a degree-1 detail stream × a degree-0 context stream
+
+The block is made degree-1 by making the **two factors of the product carry
+different degrees**, so their product lands back at degree-1:
+
+```
+z_det  (degree-1)   ⊗   z_ctx  (degree-0)   →   geometric product is degree-1
+```
+
+Concretely, the factory pins the block to this configuration:
+
+| Axis | Setting | Degree | Why |
+|------|---------|:------:|-----|
+| Detail-stream norm | `input_normalization_type="bias_free_batch_norm"` | **1** | Variance-only, **fixed-statistic** (divides by a frozen EMA `running_var` at inference; no mean, no β). Stays scale-*equivariant* → degree-1. |
+| Context-stream norm | `normalization_type="zero_centered_rms_norm"` | **0** | **Per-input** centered-RMS, purely multiplicative γ, no β. Being scale-*invariant* (`norm(αx)=norm(x)`) it is degree-0. |
+| Context mode | `ctx_mode="abs"` | — | The context path does **not** subtract `z_det`. `ctx_mode="diff"` (`z_ctx − z_det`) would remix the degree-1 detail back into the degree-0 context and re-break the product to degree-2. |
+| Biases | `use_bias=False` everywhere | — | No additive offsets (the §1 bias-free contract). |
+| Activation | `LeakyReLU` on all three axes (`activation` / `dot_activation` / `feature_activation`) | — | Degree-1 *positively* homogeneous, unlike SiLU/GELU. |
+| Gate | `use_gate=False` | — | The multiplicative sigmoid gate is itself degree-2 in the input; it is removed. |
+| Final head | `final_activation="linear"`, MSE loss, additive noise only | — | The hard Miyasawa invariants, identical to the ConvNeXt path. |
+
+With this configuration the whole block — and the whole U-Net — is degree-1
+homogeneous at inference. The isolated-block numeric probe (γ unmasked to `1.0`,
+`running_var` populated, `training=False`) measures `rel_err < 1e-2` for input
+scales α ∈ {0.5, 2, 10, 1000}.
+
+> **Honest caveat — the ε-floor at extreme small scale.** Because the context norm
+> is a per-input RMS with an epsilon regularizer, homogeneity holds to `rel_err <
+> 1e-2` only for α ∈ [0.5, 1000] — i.e. the `[−0.5,+0.5]` operating regime. At
+> **extreme small scale** (α ≈ 1e-3) the RMS epsilon dominates and the identity
+> degrades (measured `rel_err ≈ 0.54`). This is *outside* the denoising operating
+> range and is the same accepted deviation class as the existing Miyasawa
+> clip-boundary caveat (the `residual = σ²∇log p` identity also breaks at the
+> `[−0.5,+0.5]` clip boundary). Homogeneity is also **inference-time only**: during
+> training `bias_free_batch_norm` uses the per-batch variance (consistent with the
+> dropout / stochastic-depth training-time relaxation already accepted for the
+> ConvNeXt path).
+
+> **The shared Clifford block is unchanged by default.** The homogeneity config
+> above is reached by **strictly-additive** kwargs added to the shared
+> `layers/geometric/clifford_block.py` (`dot_activation`, `feature_activation`,
+> `use_gate`, `activation`, `input_normalization_type`, …). Every new kwarg
+> **defaults byte-identical** to today's behavior (SiLU / sigmoid gate /
+> `zero_centered_rms_norm` / hardcoded input `LayerNormalization`), so every
+> existing Clifford consumer (lm / clip / video-jepa / autoencoder) is untouched —
+> the homogeneous settings are selected **only** from this denoiser factory.
+
+### 8.3 Architecture notes specific to Clifford
+
+- `CliffordNetBlock` is **isotropic** (in-channels == out-channels). Every U-Net
+  level-boundary channel-width change goes through an **external** bias-free
+  `Conv2D(filters, 1)` (mirroring the ConvNeXt channel-adjust), never inside the block.
+- The geometric product uses per-level channel **shifts**; a shift `s ≥ channels` is
+  silently dropped, so each level's `shifts` list is **sized so every kept shift
+  satisfies `s < channels`**, with a build-time guarantee of ≥1 valid shift per level.
+- The frozen **Gabor stem** (§4.1), **Laplacian-pyramid** downsampling (§4.2),
+  parameter-free **channel matching** (§4.5), the **bottleneck tap** + monitor (§6.2,
+  the tap layer is named `bottleneck`), and `--mean-pooling` (§4.4) are all reused
+  from the same modules the ConvNeXt factory uses.
+
+### 8.4 Size variants (`CLIFFORDUNET_CONFIGS`)
+
+| Variant | depth | initial_filters | blocks/level | base `shifts` | drop_path |
+|---------|-------|-----------------|--------------|---------------|-----------|
+| `tiny`  | 3 | 24 | 1 | `[1, 2]`    | 0.0 |
+| `small` | 3 | 32 | 2 | `[1, 2]`    | 0.1 |
+| `base`  | 4 | 48 | 2 | `[1, 2, 3]` | 0.1 |
+
+Channels progress `initial_filters · filter_multiplier^i` (`filter_multiplier=2` by
+default). `--variant` accepts exactly `{tiny, small, base}`.
+
+### 8.5 CLI surface — what changed vs. the ConvNeXt trainer
+
+The generic flags are **identical** to §7.2 (`--epochs`, `--batch-size`,
+`--patch-size`, `--channels`, `--patches-per-image`, `--learning-rate`,
+`--weight-decay`, `--warmup-epochs`, the σ-curriculum flags, `--no-gabor-stem`,
+`--gabor-filters`, `--laplacian-pyramid`, `--mean-pooling`, `--zero-pad-channels`,
+`--expose-bottleneck`, `--analyzer[-freq]`, the noise-mode flags, all
+`--self-iterate*` flags, `--ww-pgd[-log-alpha]`, `--init-from`, `--mixed-precision`,
+`--dashboard`, `--smoke`, …). The frozen Gabor stem is **ON by default** (disable
+with `--no-gabor-stem`), same as the ConvNeXt trainer.
+
+**Dropped** (ConvNeXt-only, absent from this trainer): `--convnext-version`,
+`--block-normalization`, `--block-activation`, `--block-activation-alpha`,
+`--depthwise-initializer`, `--depthwise-l2`, `--dropout`,
+`--extra-zero-output-channels`. (The block's activation / norm / gate are **not**
+CLI-tunable here — they are *pinned* to the degree-1-homogeneous configuration; a
+LeakyReLU or LayerNorm swap would break the Miyasawa guarantee.)
+
+**Added** (Clifford-specific):
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--shifts` | *(variant)* | Base Clifford geometric-product shift offsets (ints ≥ 1, e.g. `--shifts 1 2 3`). Sized per level so `s < channels`. |
+| `--cli-mode` | `full` | Algebra components for the local interaction: `inner \| wedge \| full`. |
+| `--ctx-mode` | `abs` | **Homogeneity-critical.** `abs` (default) keeps the context stream degree-0 → block is degree-1 homogeneous. `diff` subtracts `z_det` and makes the product degree-2, breaking homogeneity. |
+| `--layer-scale-init` | `1e-5` | Initial LayerScale γ for the Clifford `GatedGeometricResidual`. |
+| `--filter-multiplier` | `2` | Per-level channel multiplier for the U-Net. |
+| `--final-projection-groups` | `1` | Groups for the final 1×1 output projection. `-1` = one group per output channel; any `>1` sets the count directly (must divide both `initial_filters` and `channels`). |
+| `--initial-filters` | *(variant)* | Override the variant's level-0 width (use with `--no-gabor-projection`). |
+| `--no-gabor-projection` | *(off)* | Drop the 1×1 projection after the Gabor stem; requires `channels·gabor_filters == initial_filters` exactly. |
+
+### 8.6 Running it
+
+```bash
+# Mechanism smoke test (tiny variant, 2 epochs, 64px) — verifies the wiring end to end
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_cliffordunet_denoiser --smoke
+
+# Base run. Start conservatively on batch — the Clifford block's memory profile is
+# un-benchmarked; raise --batch-size once it fits.
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_cliffordunet_denoiser \
+    --variant base --batch-size 4 --epochs 100 --gpu 1
+
+# Self-iterate mode (§5.5) — additive only, identical semantics to the ConvNeXt trainer
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_cliffordunet_denoiser \
+    --variant small --self-iterate --self-iterate-mix-ratio 0.5 --gpu 1
+```
+
+Outputs land in repo-root `results/cliffordunet_denoiser_<variant>_<timestamp>/`
+(same layout as §7). Trained `.keras` checkpoints are consumable by the §9 evaluator
+unchanged (`eval_psnr_vs_noise.py` rebuilds any saved denoiser).
+
+---
+
+## 9. Evaluation: PSNR vs noise & SOTA comparison
 
 `eval_psnr_vs_noise.py` evaluates one or more trained denoisers across one or more
 datasets and plots **mean PSNR with a 95% confidence interval vs noise level**.
@@ -940,7 +1101,7 @@ the training curriculum, σ₂₅₅ > ~64).
 
 ---
 
-## 9. Caveats & open questions
+## 10. Caveats & open questions
 
 - **V2 is only approximately bias-free.** GRN's `β` is a trainable additive offset.
   How far it drifts from zero on COCO+DIV2K, and whether that measurably erodes the
@@ -957,7 +1118,7 @@ the training curriculum, σ₂₅₅ > ~64).
 
 ---
 
-## 10. References
+## 11. References
 
 - **Mohan, Kadkhodaie, Simoncelli, Fernandez-Granda — "Robust and Interpretable
   Blind Image Denoising via Bias-Free Convolutional Neural Networks", ICLR 2020.**
@@ -974,6 +1135,6 @@ the training curriculum, σ₂₅₅ > ~64).
     `dl_techniques/callbacks/convunext_bottleneck_monitor.py`,
     `dl_techniques/callbacks/self_iterate_pool.py` (§5.5),
     `dl_techniques/initializers/gabor_filters_initializer.py`,
-    `src/train/bfunet/eval_psnr_vs_noise.py` (§8 evaluation).
+    `src/train/bfunet/eval_psnr_vs_noise.py` (§9 evaluation).
 - **SOTA reference numbers**: Table 2 of Zhang et al., "SCUNet" (arXiv:2203.13278) —
-  color AWGN PSNR on CBSD68 / Kodak24 / McMaster / Urban100 (used by the §8 overlay).
+  color AWGN PSNR on CBSD68 / Kodak24 / McMaster / Urban100 (used by the §9 overlay).
