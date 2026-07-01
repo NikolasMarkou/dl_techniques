@@ -254,6 +254,12 @@ class TrainingConfig:
     # depth). 0.0 = OFF / byte-identical to all existing checkpoints. Wired to
     # create_convunext_denoiser(dropout_rate=...).
     dropout_rate: float = 0.0
+    # Pre-activation normalization inside every ConvNeXt block. "layernorm" (default) =
+    # byte-identical to all existing checkpoints; "batchnorm" = variance-only BiasFreeBatchNorm
+    # (no mean, no beta) which restores degree-1 homogeneity f(ax)=a*f(x) at inference
+    # (pairs best with a homogeneous activation like LeakyReLU). Wired to
+    # create_convunext_denoiser(block_normalization=...).
+    block_normalization: str = "layernorm"
 
     # Training
     batch_size: int = 16
@@ -351,6 +357,11 @@ class TrainingConfig:
             )
         if self.convnext_version not in ("v1", "v2"):
             raise ValueError("convnext_version must be 'v1' or 'v2'")
+        if self.block_normalization not in ("layernorm", "batchnorm"):
+            raise ValueError(
+                f"block_normalization must be 'layernorm' or 'batchnorm', "
+                f"got {self.block_normalization!r}"
+            )
         if not self.train_image_dirs or not self.val_image_dirs:
             raise ValueError("train/val image dirs must be non-empty")
         # Self-iterate validation is guarded so the default-OFF config is unaffected.
@@ -828,6 +839,7 @@ def build_model(config: TrainingConfig) -> keras.Model:
             if config.depthwise_l2 is not None else None
         ),
         dropout_rate=config.dropout_rate,
+        block_normalization=config.block_normalization,
         **cfg,
     )
 
@@ -1955,6 +1967,16 @@ def parse_arguments() -> argparse.Namespace:
              "byte-identical to existing checkpoints. Typical: 0.1-0.3.",
     )
     parser.add_argument(
+        "--block-normalization", type=str, default="layernorm",
+        choices=["layernorm", "batchnorm"],
+        help="Pre-activation normalization inside every ConvNeXt block (wired to "
+             "create_convunext_denoiser block_normalization). 'layernorm' (default) = "
+             "byte-identical to existing checkpoints; 'batchnorm' = variance-only "
+             "BiasFreeBatchNorm (no mean, no beta) that restores degree-1 homogeneity "
+             "f(ax)=a*f(x) at inference (pairs best with a homogeneous activation like "
+             "LeakyReLU).",
+    )
+    parser.add_argument(
         "--block-activation", type=str, default="leaky_relu",
         help="Activation for the WHOLE denoiser: the ConvNeXt blocks AND the "
              "ConvUNextStem AND the deep-supervision heads all use it. 'leaky_relu' "
@@ -2061,6 +2083,7 @@ def main():
             block_activation=args.block_activation,
             block_activation_alpha=args.block_activation_alpha,
             dropout_rate=args.dropout,
+            block_normalization=args.block_normalization,
             viz_freq=1,
             viz_samples=args.viz_samples,
             mixed_precision=args.mixed_precision,
@@ -2115,6 +2138,7 @@ def main():
             block_activation=args.block_activation,
             block_activation_alpha=args.block_activation_alpha,
             dropout_rate=args.dropout,
+            block_normalization=args.block_normalization,
             max_train_files=args.max_train_files or 10000,
             max_val_files=args.max_val_files or 500,
             steps_per_epoch=args.steps_per_epoch,
