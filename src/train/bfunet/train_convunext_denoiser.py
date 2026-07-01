@@ -384,6 +384,18 @@ class TrainingConfig:
                     "additive-only Miyasawa fixed-point theory the self-iterate "
                     "mechanism depends on (D-003)."
                 )
+            # Even under additive noise the always-on tf.clip_by_value(-0.5, 0.5) in
+            # add_curriculum_noise makes the observed noise non-Gaussian at the [-0.5,
+            # +0.5] boundaries, so residual=score (Miyasawa) no longer holds exactly
+            # there. Self-iterated passes can therefore drift from the theoretical
+            # clean-image fixed point. WARNING (not ValueError): the drift is usually
+            # small and self-iterate stays useful, so this is informational only.
+            logger.warning(
+                "self_iterate is ON: add_curriculum_noise always clips noisy inputs "
+                "to [-0.5, +0.5], which breaks the Miyasawa residual=score identity at "
+                "the clip boundaries even for additive noise. Self-iterated passes may "
+                "drift from the theoretical clean-image fixed point."
+            )
 
 
 # ---------------------------------------------------------------------
