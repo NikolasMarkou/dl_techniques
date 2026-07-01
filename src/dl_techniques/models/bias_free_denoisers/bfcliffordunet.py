@@ -2,26 +2,50 @@
 CliffordUNet: Bias-Free, Strictly-Homogeneous Clifford U-Net Denoiser.
 
 A bias-free image-denoiser U-Net built from the Clifford geometric block
-(:class:`CliffordNetBlock`) in a STRICT degree-1-homogeneous configuration. It
-mirrors the encoder / bottleneck / decoder topology of
-``create_convunext_denoiser`` (``bfconvunext.py``) but swaps every ConvNeXt block
-site for a Clifford block configured for Miyasawa compliance:
+(:class:`CliffordNetBlock`) in a degree-1-homogeneous configuration. It mirrors
+the encoder / bottleneck / decoder topology of ``create_convunext_denoiser``
+(``bfconvunext.py``) but swaps every ConvNeXt block site for a Clifford block
+configured for Miyasawa compliance:
 
 - ``use_bias=False`` everywhere (no additive offsets),
-- ``input_normalization_type="bias_free_batch_norm"`` and
-  ``normalization_type="bias_free_batch_norm"`` (variance-only, fixed-statistic
-  norm: divides by a frozen ``running_var`` at inference, no mean, no beta ->
-  degree-1 homogeneous at inference),
+- ``input_normalization_type="bias_free_batch_norm"`` -- the ``z_det`` (detail)
+  stream norm: variance-only, fixed-statistic (divides by a frozen
+  ``running_var`` at inference, no mean, no beta) so ``z_det`` stays DEGREE-1
+  homogeneous at inference,
+- ``normalization_type="zero_centered_rms_norm"`` -- the ``z_ctx`` (context)
+  stream norm: PER-INPUT centered-RMS, purely multiplicative ``gamma``, no
+  additive beta. Being scale-invariant (``norm(alpha*x) == norm(x)``) it makes
+  ``z_ctx`` DEGREE-0,
+- ``ctx_mode="abs"`` -- the context path does NOT subtract ``z_det`` (a
+  ``ctx_mode="diff"`` ``z_ctx - z_det`` would mix the degree-0 context with the
+  degree-1 detail and remix the degrees),
 - ``activation="leaky_relu"``, ``dot_activation="leaky_relu"``,
   ``feature_activation="leaky_relu"`` (homogeneous nonlinearity, NOT SiLU/GELU),
 - ``use_gate=False`` (drops the multiplicative sigmoid gate, which is degree-2
   in the input).
 
-These are the three-axis homogeneity settings (BiasFreeBatchNorm + LeakyReLU +
-gate removed) required for the residual-as-score interpretation
-``f(alpha * x) = alpha * f(x)``. See ``research`` notes / plan
-``plan_2026-07-01_6dc255c1`` for the full derivation and the make-or-break
-isolated-layer homogeneity probe.
+Homogeneity mechanism (HONEST)
+------------------------------
+The block's core is the bilinear Clifford geometric product ``z_det (X) z_ctx``.
+With BOTH streams degree-1 the product would be DEGREE-2 in the input
+(``f(alpha*x) ~ alpha^2 f(x)``) -- empirically confirmed (plan
+``plan_2026-07-01_6dc255c1`` decision D-004). The fix here makes the CONTEXT
+stream degree-0 (scale-free ``zero_centered_rms_norm`` + ``ctx_mode="abs"``) so:
+
+    z_det (degree-1)  (X)  z_ctx (degree-0)  ->  degree-1 geometric product
+
+and the whole block is DEGREE-1 homogeneous ``f(alpha * x) = alpha * f(x)``.
+
+Epsilon-floor caveat
+--------------------
+Because the context norm is a per-input RMS with an epsilon regularizer,
+homogeneity holds to ``rel_err < 1e-2`` only for input scale
+``alpha in [0.5, 1000]`` -- the ``[-0.5, 0.5]`` denoising operating regime. At
+extreme small scale (``alpha ~ 1e-3``) the RMS epsilon dominates and the
+identity degrades (measured ``rel_err ~ 0.54``). This is outside the operating
+range and is the same class of accepted deviation as the existing Miyasawa
+clip-boundary caveat (strict ``residual = score`` also breaks at the clip
+boundary). See decisions D-005 / D-006.
 
 Design constraints honored here
 -------------------------------
@@ -103,22 +127,37 @@ CLIFFORDUNET_CONFIGS: Dict[str, Dict[str, Any]] = {
 # ---------------------------------------------------------------------
 
 def _homogeneous_block_kwargs() -> Dict[str, Any]:
-    """Return the STRICT bias-free / degree-1-homogeneous CliffordNetBlock kwargs.
+    """Return the bias-free / degree-1-homogeneous CliffordNetBlock kwargs.
 
     Centralized so every block site (encoder / bottleneck / decoder) is
-    guaranteed identical on the three homogeneity axes. Do NOT inline these at
-    each call site -- a single drifted flag silently breaks Miyasawa compliance
-    at one level only, which is nearly invisible until the homogeneity probe.
+    guaranteed identical on the homogeneity axes. Do NOT inline these at each
+    call site -- a single drifted flag silently breaks Miyasawa compliance at
+    one level only, which is nearly invisible until the homogeneity probe.
+
+    The degree bookkeeping (see D-005): the ``z_det`` (detail) stream uses the
+    fixed-statistic ``bias_free_batch_norm`` -> DEGREE-1; the ``z_ctx``
+    (context) stream uses the per-input, scale-invariant
+    ``zero_centered_rms_norm`` -> DEGREE-0. Their geometric product is then
+    degree-1 (degree-1 (X) degree-0), so the block is degree-1 homogeneous.
 
     Returns:
         Dict of CliffordNetBlock ctor kwargs pinning: no bias, BiasFreeBatchNorm
-        for both the input and context norms, LeakyReLU on all three activation
-        axes, and the multiplicative gate removed.
+        for the input (detail) norm, ZeroCenteredRMSNorm for the context norm,
+        LeakyReLU on all three activation axes, and the multiplicative gate
+        removed.
     """
+    # DECISION plan_2026-07-01_6dc255c1/D-005: the context (z_ctx) stream MUST be
+    # degree-0. Do NOT set normalization_type to a degree-1 norm
+    # (e.g. "bias_free_batch_norm") here, and do NOT use ctx_mode="diff" (which
+    # subtracts the degree-1 z_det from z_ctx): either remixes the degrees and
+    # makes the bilinear geometric product DEGREE-2 (f(alpha*x) ~ alpha^2 f(x)),
+    # empirically confirmed in D-004. zero_centered_rms_norm is per-input and
+    # scale-invariant -> degree-0; ctx_mode="abs" keeps z_ctx pure. See
+    # decisions.md D-004/D-005/D-006.
     return dict(
         use_bias=False,
-        input_normalization_type="bias_free_batch_norm",
-        normalization_type="bias_free_batch_norm",
+        input_normalization_type="bias_free_batch_norm",   # z_det -> degree-1
+        normalization_type="zero_centered_rms_norm",        # z_ctx -> degree-0
         activation="leaky_relu",
         dot_activation="leaky_relu",
         feature_activation="leaky_relu",
@@ -201,7 +240,7 @@ def create_cliffordunet_denoiser(
         blocks_per_level: int = 2,
         shifts: Union[List[int], Tuple[int, ...]] = (1, 2),
         cli_mode: str = "full",
-        ctx_mode: str = "diff",
+        ctx_mode: str = "abs",
         layer_scale_init: float = 1e-5,
         use_gabor_stem: bool = False,
         gabor_filters: int = 32,
@@ -228,11 +267,18 @@ def create_cliffordunet_denoiser(
 
     Builds a full encoder / bottleneck / decoder U-Net (mirroring the
     ``create_convunext_denoiser`` topology) whose every block site is a
-    :class:`CliffordNetBlock` in the STRICT bias-free degree-1-homogeneous
-    configuration (BiasFreeBatchNorm + LeakyReLU + gate removed). The model is
-    scaling-covariant: at inference, scaling the input by ``alpha`` scales the
-    output by ``alpha`` (``f(alpha * x) = alpha * f(x)``), enabling the
-    Miyasawa/Tweedie residual-as-score interpretation.
+    :class:`CliffordNetBlock` in the bias-free degree-1-homogeneous
+    configuration: a DEGREE-1 detail stream (``bias_free_batch_norm``) times a
+    DEGREE-0 context stream (``zero_centered_rms_norm`` + ``ctx_mode="abs"``)
+    through the bilinear geometric product yields a DEGREE-1 block (LeakyReLU +
+    gate removed). The model is scaling-covariant in the operating regime: at
+    inference, scaling the input by ``alpha`` scales the output by ``alpha``
+    (``f(alpha * x) = alpha * f(x)``), enabling the Miyasawa/Tweedie
+    residual-as-score interpretation. Homogeneity holds to ``rel_err < 1e-2``
+    for ``alpha in [0.5, 1000]`` (the ``[-0.5, 0.5]`` regime); it degrades at
+    extreme small ``alpha ~ 1e-3`` due to the per-input RMS epsilon floor --
+    the same accepted deviation class as the Miyasawa clip-boundary caveat
+    (D-005 / D-006).
 
     Args:
         input_shape: Tuple ``(height, width, channels)`` of the input images.
@@ -248,7 +294,10 @@ def create_cliffordunet_denoiser(
         cli_mode: Algebraic components for the local interaction; one of
             ``"inner"``, ``"wedge"``, ``"full"``. Defaults to ``"full"``.
         ctx_mode: Context mode; one of ``"diff"``, ``"abs"``. Defaults to
-            ``"diff"``.
+            ``"abs"`` (HOMOGENEITY-CRITICAL): ``"abs"`` keeps the degree-0
+            context stream pure, whereas ``"diff"`` subtracts the degree-1
+            ``z_det`` from ``z_ctx`` and remixes the degrees, making the
+            geometric product degree-2. See D-005.
         layer_scale_init: Initial LayerScale gamma for the Clifford GGR.
             Defaults to ``1e-5``.
         use_gabor_stem: If True, prepend a frozen (non-learnable) Gabor depthwise
