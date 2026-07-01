@@ -57,10 +57,14 @@ def create_normalization_layer(
     dl_techniques framework.
 
     :param normalization_type: Type of normalization layer to create. Supported types
-        include 'layer_norm', 'batch_norm', 'rms_norm', 'zero_centered_rms_norm',
-        'zero_centered_band_rms_norm', 'band_rms', 'adaptive_band_rms',
+        include 'layer_norm', 'batch_norm', 'bias_free_batch_norm', 'rms_norm',
+        'zero_centered_rms_norm', 'zero_centered_band_rms_norm',
+        'zero_centered_adaptive_band_rms_norm', 'band_rms', 'adaptive_band_rms',
         'band_logit_norm', 'global_response_norm', 'logit_norm', 'max_logit_norm',
         'decoupled_max_logit', 'dml_plus_focal', 'dml_plus_center', and 'dynamic_tanh'.
+        Use 'bias_free_batch_norm' for the variance-only, fixed-statistic layer that
+        stays degree-1 homogeneous (``f(a*x)=a*f(x)``) at inference — no ``moving_mean``,
+        no ``beta`` — as required by bias-free / Miyasawa denoisers.
     :type normalization_type: NormalizationType
     :param name: Optional name for the layer. If None, layer will use default naming.
     :type name: Optional[str]
@@ -73,8 +77,9 @@ def create_normalization_layer(
         directly to get its own default.
     :type epsilon: float
     :param kwargs: Additional keyword arguments specific to each normalization type.
-        Common kwargs include axis, center, scale, use_scale, max_band_width,
-        temperature, constant, alpha_init_value, and eps (for GRN).
+        Common kwargs include axis, center, scale, use_scale, momentum (for batch_norm
+        / bias_free_batch_norm), max_band_width, temperature, constant, alpha_init_value,
+        and eps (for GRN).
     :return: Configured normalization layer instance ready for use in neural networks.
     :rtype: keras.layers.Layer
     :raises ValueError: If normalization_type is not supported or if invalid parameters
@@ -353,6 +358,16 @@ def validate_normalization_config(
                 raise ValueError("constant must be a number")
 
     if normalization_type in ['rms_norm', 'zero_centered_rms_norm']:
+        if 'epsilon' in kwargs:
+            epsilon = kwargs['epsilon']
+            if not isinstance(epsilon, (int, float)) or epsilon <= 0:
+                raise ValueError("epsilon must be a positive number")
+
+    if normalization_type == 'bias_free_batch_norm':
+        if 'momentum' in kwargs:
+            momentum = kwargs['momentum']
+            if not isinstance(momentum, (int, float)) or not (0.0 <= momentum <= 1.0):
+                raise ValueError("momentum must be a number in [0, 1]")
         if 'epsilon' in kwargs:
             epsilon = kwargs['epsilon']
             if not isinstance(epsilon, (int, float)) or epsilon <= 0:
