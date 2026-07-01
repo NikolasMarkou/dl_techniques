@@ -49,6 +49,25 @@ _GLOBAL_SHIFTS: List[int] = [1, 2]
 _GLOBAL_CLI_MODE: CliMode = "full"
 
 
+def _resolve_activation(activation: Any) -> Any:
+    """Resolve an activation spec to a callable.
+
+    Matches the ``ctx_activation`` idiom already used in this module
+    (``keras.activations.get``). Strings are resolved via
+    ``keras.activations.get``; ``None`` maps to identity (linear);
+    callables / keras layer instances are returned as-is so they can be
+    invoked directly.
+
+    :param activation: String name, ``None``, or a callable/layer instance.
+    :return: A callable applying the activation.
+    """
+    if activation is None:
+        return keras.activations.linear
+    if isinstance(activation, str):
+        return keras.activations.get(activation)
+    return activation
+
+
 # ---------------------------------------------------------------------------
 # SparseRollingGeometricProduct
 # ---------------------------------------------------------------------------
@@ -116,6 +135,7 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
         shifts: List[int],
         cli_mode: CliMode = "full",
         use_bias: bool = True,
+        dot_activation: Any = "silu",
         kernel_initializer: Any = "glorot_uniform",
         bias_initializer: Any = "zeros",
         kernel_regularizer: Optional[Any] = None,
@@ -160,6 +180,11 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
             )
         self.cli_mode = cli_mode
         self.use_bias = use_bias
+        # DECISION plan_2026-07-01_6dc255c1/D-001: dot activation is now a
+        # ctor kwarg. Default "silu" reproduces the previously-hardcoded
+        # keras.activations.silu byte-identically. Do NOT re-hardcode SiLU in
+        # call(); a homogeneous denoiser selects e.g. "leaky_relu" here.
+        self.dot_activation = dot_activation
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
@@ -230,8 +255,13 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
                 components.append(wedge)
 
             if self.cli_mode in ("inner", "full"):
-                # Scalar: gated inner product
-                dot = keras.activations.silu(z_det * z_ctx_s)
+                # Scalar: gated inner product.
+                # DECISION plan_2026-07-01_6dc255c1/D-001: resolve from
+                # self.dot_activation (default "silu" == old hardcoded
+                # keras.activations.silu). Do NOT re-hardcode SiLU here —
+                # existing consumers rely on the byte-identical default while a
+                # homogeneous denoiser needs a degree-1 activation (LeakyReLU).
+                dot = _resolve_activation(self.dot_activation)(z_det * z_ctx_s)
                 components.append(dot)
 
         g_raw = keras.ops.concatenate(components, axis=-1)
@@ -270,6 +300,7 @@ class SparseRollingGeometricProduct(keras.layers.Layer):
                 "shifts": self.shifts,
                 "cli_mode": self.cli_mode,
                 "use_bias": self.use_bias,
+                "dot_activation": self.dot_activation,
                 "kernel_initializer": initializers.serialize(self.kernel_initializer),
                 "bias_initializer": initializers.serialize(self.bias_initializer),
                 "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
@@ -352,6 +383,9 @@ class GatedGeometricResidual(keras.layers.Layer):
         layer_scale_init: float = 1e-5,
         drop_path_rate: float = 0.0,
         use_bias: bool = True,
+        gate_activation: Any = "sigmoid",
+        feature_activation: Any = "silu",
+        use_gate: bool = True,
         kernel_initializer: Any = "glorot_uniform",
         bias_initializer: Any = "zeros",
         kernel_regularizer: Optional[Any] = None,
@@ -371,6 +405,15 @@ class GatedGeometricResidual(keras.layers.Layer):
         self.layer_scale_init = layer_scale_init
         self.drop_path_rate = drop_path_rate
         self.use_bias = use_bias
+        # DECISION plan_2026-07-01_6dc255c1/D-001: gate/feature activations and
+        # the gate itself are now ctor kwargs. Defaults ("sigmoid", "silu",
+        # use_gate=True) reproduce the previously-hardcoded GGR update
+        # byte-identically. Do NOT re-hardcode sigmoid/SiLU. use_gate=False
+        # drops the multiplicative alpha*g_feat path (degree-2 in the input),
+        # which the homogeneous denoiser requires — see D-001.
+        self.gate_activation = gate_activation
+        self.feature_activation = feature_activation
+        self.use_gate = use_gate
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
@@ -430,10 +473,23 @@ class GatedGeometricResidual(keras.layers.Layer):
         :return: Scaled residual term ``(B, H, W, D)``; caller adds to H_prev.
         :rtype: keras.KerasTensor
         """
-        gate_input = keras.ops.concatenate([h_norm, g_feat], axis=-1)
-        alpha = keras.activations.sigmoid(self.gate_dense(gate_input))
-
-        h_mix = keras.activations.silu(h_norm) + alpha * g_feat
+        # DECISION plan_2026-07-01_6dc255c1/D-001: resolve gate/feature
+        # activations from ctor kwargs. Do NOT re-hardcode sigmoid/SiLU — the
+        # defaults ("sigmoid"/"silu", use_gate=True) reproduce the old update
+        # byte-identically; existing consumers depend on that.
+        feat = _resolve_activation(self.feature_activation)(h_norm)
+        if self.use_gate:
+            gate_input = keras.ops.concatenate([h_norm, g_feat], axis=-1)
+            alpha = _resolve_activation(self.gate_activation)(
+                self.gate_dense(gate_input)
+            )
+            h_mix = feat + alpha * g_feat
+        else:
+            # DECISION plan_2026-07-01_6dc255c1/D-001: the multiplicative
+            # alpha*g_feat gate is degree-2 in the input and breaks strict
+            # degree-1 homogeneity (Miyasawa). Do NOT keep it here — use g_feat
+            # directly on the homogeneous path.
+            h_mix = feat + g_feat
         h_mix = h_mix * self.gamma
 
         if self.drop_path is not None:
@@ -470,6 +526,9 @@ class GatedGeometricResidual(keras.layers.Layer):
                 "layer_scale_init": self.layer_scale_init,
                 "drop_path_rate": self.drop_path_rate,
                 "use_bias": self.use_bias,
+                "gate_activation": self.gate_activation,
+                "feature_activation": self.feature_activation,
+                "use_gate": self.use_gate,
                 "kernel_initializer": initializers.serialize(self.kernel_initializer),
                 "bias_initializer": initializers.serialize(self.bias_initializer),
                 "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
@@ -579,12 +638,19 @@ class CliffordNetBlock(keras.layers.Layer):
         layer_scale_init: float = 1e-5,
         drop_path_rate: float = 0.0,
         use_bias: bool = True,
+        activation: Any = "silu",
+        dot_activation: Any = "silu",
+        gate_activation: Any = "sigmoid",
+        feature_activation: Any = "silu",
+        use_gate: bool = True,
         kernel_initializer: Any = "glorot_uniform",
         bias_initializer: Any = "zeros",
         kernel_regularizer: Optional[Any] = None,
         bias_regularizer: Optional[Any] = None,
         normalization_type: str = "zero_centered_rms_norm",
         normalization_kwargs: Optional[Dict[str, Any]] = None,
+        input_normalization_type: Optional[str] = None,
+        input_normalization_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -611,12 +677,24 @@ class CliffordNetBlock(keras.layers.Layer):
         self.layer_scale_init = layer_scale_init
         self.drop_path_rate = drop_path_rate
         self.use_bias = use_bias
+        # DECISION plan_2026-07-01_6dc255c1/D-001: context-stream activation and
+        # the geometric-product / gate activations are now ctor kwargs threaded
+        # to the internal SRGP and GGR. Defaults ("silu"/"silu"/"sigmoid"/
+        # "silu", use_gate=True) reproduce today's behavior byte-identically.
+        # Do NOT re-hardcode SiLU/sigmoid.
+        self.activation = activation
+        self.dot_activation = dot_activation
+        self.gate_activation = gate_activation
+        self.feature_activation = feature_activation
+        self.use_gate = use_gate
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
         self.normalization_type = normalization_type
         self.normalization_kwargs = dict(normalization_kwargs or {})
+        self.input_normalization_type = input_normalization_type
+        self.input_normalization_kwargs = dict(input_normalization_kwargs or {})
 
         _dense_kwargs: Dict[str, Any] = dict(
             use_bias=use_bias,
@@ -627,9 +705,22 @@ class CliffordNetBlock(keras.layers.Layer):
         )
 
         # --- Step 1: Input norm ---
-        self.input_norm = keras.layers.LayerNormalization(
-            epsilon=1e-6, name="input_norm"
-        )
+        # DECISION plan_2026-07-01_6dc255c1/D-001: input_normalization_type=None
+        # reproduces the previously-hardcoded center=True LayerNormalization
+        # (epsilon=1e-6, name="input_norm") byte-identically. Do NOT drop that
+        # default branch — existing Clifford consumers depend on it. A non-None
+        # value routes through create_normalization_layer (e.g.
+        # "bias_free_batch_norm" for the homogeneous denoiser).
+        if self.input_normalization_type is None:
+            self.input_norm = keras.layers.LayerNormalization(
+                epsilon=1e-6, name="input_norm"
+            )
+        else:
+            self.input_norm = create_normalization_layer(
+                self.input_normalization_type,
+                name="input_norm",
+                **self.input_normalization_kwargs,
+            )
 
         # --- Step 2a: Detail stream (1×1 pointwise) ---
         self.linear_det = keras.layers.Dense(
@@ -665,6 +756,7 @@ class CliffordNetBlock(keras.layers.Layer):
             shifts=shifts,
             cli_mode=cli_mode,
             use_bias=use_bias,
+            dot_activation=dot_activation,
             kernel_initializer=kernel_initializer,
             bias_initializer=bias_initializer,
             kernel_regularizer=kernel_regularizer,
@@ -681,6 +773,7 @@ class CliffordNetBlock(keras.layers.Layer):
                 shifts=_GLOBAL_SHIFTS,
                 cli_mode=_GLOBAL_CLI_MODE,
                 use_bias=use_bias,
+                dot_activation=dot_activation,
                 kernel_initializer=kernel_initializer,
                 bias_initializer=bias_initializer,
                 kernel_regularizer=kernel_regularizer,
@@ -691,10 +784,18 @@ class CliffordNetBlock(keras.layers.Layer):
             self.global_geo_prod = None
 
         # --- Step 4 / 5: GGR ---
+        # NOTE: use_bias is intentionally NOT forwarded here — the original
+        # block left GGR at its use_bias=True default regardless of the block's
+        # use_bias. Forwarding it would change behavior for existing
+        # use_bias=False consumers (byte-identity violation). With use_gate=False
+        # the gate_dense is unused, so its bias is irrelevant to the denoiser.
         self.ggr = GatedGeometricResidual(
             channels=channels,
             layer_scale_init=layer_scale_init,
             drop_path_rate=drop_path_rate,
+            gate_activation=gate_activation,
+            feature_activation=feature_activation,
+            use_gate=use_gate,
             kernel_initializer=kernel_initializer,
             bias_initializer=bias_initializer,
             kernel_regularizer=kernel_regularizer,
@@ -771,10 +872,15 @@ class CliffordNetBlock(keras.layers.Layer):
         # --- Step 2: Dual-stream generation ---
         z_det = self.linear_det(x_norm)
 
-        # Two stacked depthwise convolutions -> configurable norm -> SiLU
+        # Two stacked depthwise convolutions -> configurable norm -> activation
+        # DECISION plan_2026-07-01_6dc255c1/D-001: context activation resolved
+        # from self.activation (default "silu" == old hardcoded SiLU). Do NOT
+        # re-hardcode SiLU — a homogeneous denoiser selects "leaky_relu".
         z_ctx = self.dw_conv(x_norm)
         z_ctx = self.dw_conv2(z_ctx)
-        z_ctx = keras.activations.silu(self.ctx_norm(z_ctx, training=training))
+        z_ctx = _resolve_activation(self.activation)(
+            self.ctx_norm(z_ctx, training=training)
+        )
 
         if self.ctx_mode == "diff":
             z_ctx = z_ctx - z_det  # discrete Laplacian approximation
@@ -832,12 +938,19 @@ class CliffordNetBlock(keras.layers.Layer):
                 "layer_scale_init": self.layer_scale_init,
                 "drop_path_rate": self.drop_path_rate,
                 "use_bias": self.use_bias,
+                "activation": self.activation,
+                "dot_activation": self.dot_activation,
+                "gate_activation": self.gate_activation,
+                "feature_activation": self.feature_activation,
+                "use_gate": self.use_gate,
                 "kernel_initializer": initializers.serialize(self.kernel_initializer),
                 "bias_initializer": initializers.serialize(self.bias_initializer),
                 "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
                 "bias_regularizer": regularizers.serialize(self.bias_regularizer),
                 "normalization_type": self.normalization_type,
                 "normalization_kwargs": dict(self.normalization_kwargs),
+                "input_normalization_type": self.input_normalization_type,
+                "input_normalization_kwargs": dict(self.input_normalization_kwargs),
             }
         )
         return config
