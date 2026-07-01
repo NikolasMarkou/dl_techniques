@@ -18,6 +18,7 @@ from typing import Optional, Dict, Any, Literal
 # ---------------------------------------------------------------------
 
 from .rms_norm import RMSNorm
+from .bias_free_batch_norm import BiasFreeBatchNorm
 from .band_rms import BandRMS
 from .adaptive_band_rms import AdaptiveBandRMS
 from .band_logit_norm import BandLogitNorm
@@ -32,7 +33,7 @@ from .zero_centered_adaptive_band_rms_norm import ZeroCenteredAdaptiveBandRMS
 # ---------------------------------------------------------------------
 
 NormalizationType = Literal[
-    'layer_norm', 'batch_norm', 'rms_norm', 'zero_centered_rms_norm',
+    'layer_norm', 'batch_norm', 'bias_free_batch_norm', 'rms_norm', 'zero_centered_rms_norm',
     'zero_centered_band_rms_norm', 'zero_centered_adaptive_band_rms_norm',
     'band_rms', 'adaptive_band_rms',
     'band_logit_norm', 'global_response_norm', 'logit_norm', 'max_logit_norm',
@@ -95,6 +96,12 @@ def create_normalization_layer(
         # Standard Keras BatchNormalization
         layer_kwargs.setdefault('epsilon', epsilon)
         return keras.layers.BatchNormalization(**layer_kwargs)
+
+    elif normalization_type == 'bias_free_batch_norm':
+        # Variance-only, fixed-statistic normalization; degree-1 homogeneous at
+        # inference (no moving_mean, no beta). See bias_free_batch_norm.py.
+        layer_kwargs.setdefault('epsilon', epsilon)
+        return BiasFreeBatchNorm(**layer_kwargs)
 
     elif normalization_type == 'rms_norm':
         # Root Mean Square normalization
@@ -173,7 +180,8 @@ def create_normalization_layer(
 
     else:
         supported_types = [
-            'layer_norm', 'batch_norm', 'rms_norm', 'zero_centered_rms_norm',
+            'layer_norm', 'batch_norm', 'bias_free_batch_norm', 'rms_norm',
+            'zero_centered_rms_norm',
             'zero_centered_band_rms_norm',
             'zero_centered_adaptive_band_rms_norm',
             'band_rms', 'adaptive_band_rms',
@@ -208,6 +216,11 @@ def get_normalization_info() -> Dict[str, Dict[str, Any]]:
             'description': 'Standard Keras BatchNormalization with moving statistics',
             'parameters': ['axis', 'epsilon', 'center', 'scale', 'momentum'],
             'use_case': 'Convolutional networks and batch-based training'
+        },
+        'bias_free_batch_norm': {
+            'description': 'Variance-only, fixed-statistic normalization (no moving_mean, no beta); degree-1 homogeneous at inference',
+            'parameters': ['axis', 'epsilon', 'momentum', 'use_scale'],
+            'use_case': 'Bias-free / homogeneous architectures (e.g. Miyasawa denoisers) requiring f(a*x)=a*f(x) at inference'
         },
         'rms_norm': {
             'description': 'Root Mean Square normalization without centering',

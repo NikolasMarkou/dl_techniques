@@ -1,4 +1,5 @@
 from .rms_norm import RMSNorm
+from .bias_free_batch_norm import BiasFreeBatchNorm
 from .zero_centered_rms_norm import ZeroCenteredRMSNorm
 from .band_rms import BandRMS
 from .adaptive_band_rms import AdaptiveBandRMS
@@ -20,6 +21,7 @@ from .factory import (
 
 __all__ = [
     "RMSNorm",
+    "BiasFreeBatchNorm",
     "ZeroCenteredRMSNorm",
     "BandRMS",
     "AdaptiveBandRMS",
