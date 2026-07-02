@@ -1796,6 +1796,9 @@ def train(config: TrainingConfig) -> keras.Model:
                 output_dir=output_dir / "visualizations",  # share the existing viz dir
                 monitor_freq=config.viz_freq,
                 max_featuremap_channels=64,  # two 8x8 grids: first-64 + top-64 energy
+                # Brand artifacts/log lines for THIS trainer (the shared callback's
+                # default is "convunext_bottleneck"; the callback itself is model-agnostic).
+                name_prefix="cliffordunet_bottleneck",
             )
         )
 
