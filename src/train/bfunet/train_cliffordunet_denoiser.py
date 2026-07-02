@@ -140,7 +140,6 @@ from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.metrics.ssim_metric import SsimMetric
 from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.utils.logger import logger
-from dl_techniques.layers.norms.global_response_norm import GlobalResponseNormalization
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.utils.multiplicative_miyasawa import (
     apply_multiplicative_gaussian,
@@ -851,16 +850,15 @@ def build_model(config: TrainingConfig) -> keras.Model:
 
 def verify_bias_free(model: keras.Model) -> None:
     """Log a bias-free compliance check (informational)."""
+    # The Clifford block normalizes with bias_free_batch_norm (z_det) and
+    # zero_centered_rms_norm (z_ctx) and never instantiates keras LayerNormalization
+    # or GlobalResponseNormalization, so a static offender scan only needs the
+    # use_bias check; degree-1 homogeneity breaks (norm/activation/context) are caught
+    # by the numeric black-box probe below, not by layer-type inspection.
     offenders = []
     for layer in model._flatten_layers():
         if getattr(layer, "use_bias", False):
             offenders.append(layer.name)
-        if isinstance(layer, keras.layers.LayerNormalization) and getattr(
-            layer, "center", False
-        ):
-            offenders.append(f"{layer.name} (LN center=True)")
-        if isinstance(layer, GlobalResponseNormalization) and getattr(layer, "beta", None) is not None and layer.beta.trainable:
-            offenders.append(f"{layer.name} (GRN beta - bias-like offset)")
     if offenders:
         logger.warning(
             f"Bias-free check: {len(offenders)} layer(s) carry bias/centering: "
@@ -1071,7 +1069,6 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         self,
         clean_batch: tf.Tensor,
         sigma_max_var: tf.Variable,
-        noise_sigma_min: float,
         out_dir: Path,
         freq: int = 5,
         max_samples: int = 8,
@@ -1085,7 +1082,6 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         super().__init__()
         self.clean_batch = clean_batch
         self.sigma_max_var = sigma_max_var
-        self.noise_sigma_min = float(noise_sigma_min)
         self.noise_type = noise_type
         # Number of sequential passes scored/rendered in the multi-pass eval (additive
         # regimes only). Default 3 covers SC2 (passes 1->2->3). Eval/viz only.
@@ -1773,7 +1769,6 @@ def train(config: TrainingConfig) -> keras.Model:
         DenoisingVisualizationCallback(
             clean_batch=viz_batch,
             sigma_max_var=sigma_max_var,
-            noise_sigma_min=config.noise_sigma_min,
             out_dir=output_dir,
             freq=config.viz_freq,
             max_samples=config.viz_samples,
