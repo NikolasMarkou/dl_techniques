@@ -1012,6 +1012,24 @@ def render_training_dashboard(history: dict, out_path: Path, title: str = "") ->
     plt.close(fig)
 
 
+def _read_current_lr(model: keras.Model) -> float:
+    """Read the current learning rate from ``model``'s live optimizer.
+
+    Evaluates a ``LearningRateSchedule`` at the optimizer's current step, otherwise
+    reads the scalar LR directly. Returns ``float('nan')`` if the optimizer/LR is
+    unavailable. Single source of truth for both ``DenoisingVisualizationCallback.
+    _current_lr`` (dashboard) and ``LRLoggerCallback`` (CSV ``lr`` column).
+    """
+    try:
+        opt = model.optimizer
+        lr = opt.learning_rate
+        if isinstance(lr, keras.optimizers.schedules.LearningRateSchedule):
+            return float(keras.ops.convert_to_numpy(lr(opt.iterations)))
+        return float(keras.ops.convert_to_numpy(lr))
+    except Exception:
+        return float("nan")
+
+
 # NOTE: batch-global RMSE PSNR (one RMSE over the whole batch). This intentionally
 # differs from the per-image PsnrMetric used in training logs (which averages per-image
 # PSNR), so eval-grid numbers will not match the val_psnr logged during fit.
@@ -1127,16 +1145,9 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         )}
 
     def _current_lr(self) -> float:
-        """Read the current LR from the live optimizer (evaluating a
-        LearningRateSchedule at the current step); returns ``float('nan')`` on failure."""
-        try:
-            opt = self.model.optimizer
-            lr = opt.learning_rate
-            if isinstance(lr, keras.optimizers.schedules.LearningRateSchedule):
-                return float(keras.ops.convert_to_numpy(lr(opt.iterations)))
-            return float(keras.ops.convert_to_numpy(lr))
-        except Exception:
-            return float("nan")
+        """Current LR from the live optimizer; ``float('nan')`` on failure.
+        Delegates to the module-level ``_read_current_lr``."""
+        return _read_current_lr(self.model)
 
     def on_train_begin(self, logs=None):
         """Epoch-0 baseline: visualize the UNTRAINED model (0 epochs completed).
@@ -1336,15 +1347,11 @@ class LRLoggerCallback(keras.callbacks.Callback):
         run before CSVLogger (see the class docstring on callback ordering)."""
         if logs is None:
             return
-        try:
-            opt = self.model.optimizer
-            lr = opt.learning_rate
-            if isinstance(lr, keras.optimizers.schedules.LearningRateSchedule):
-                logs["lr"] = float(keras.ops.convert_to_numpy(lr(opt.iterations)))
-            else:
-                logs["lr"] = float(keras.ops.convert_to_numpy(lr))
-        except Exception:
-            pass
+        # Preserve the prior semantics: on read failure (nan) leave logs['lr'] unset
+        # rather than writing a nan into the CSV row.
+        lr = _read_current_lr(self.model)
+        if np.isfinite(lr):
+            logs["lr"] = lr
 
 
 def build_fixed_val_batch(
