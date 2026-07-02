@@ -477,6 +477,16 @@ def make_curriculum_noise_fn(config: TrainingConfig, sigma_max_var: tf.Variable)
     ratio = float(config.composite_additive_ratio)
 
     def add_curriculum_noise(patch: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
+        """Corrupt a clean patch with curriculum-controlled noise.
+
+        Pre-condition: ``patch`` is a clean image tensor already normalized to
+        ``[-0.5, +0.5]``. A single per-image scalar sigma is drawn uniformly from
+        ``[sigma_min, sigma_max_var]`` (the upper bound widens per-epoch), then the
+        noise type is dispatched: additive (default), multiplicative, or composite.
+        The additive branch ``y = x + N(0, sigma^2)`` is the Miyasawa-exact one
+        (residual = score for least-squares denoising). Post-condition: the output is
+        clipped back to ``[-0.5, +0.5]``. Returns ``(noisy, clean)``.
+        """
         # sigma_max_var is read at graph-execution time -> reflects the per-epoch
         # .assign performed by NoiseSigmaCurriculumCallback (risk spike confirmed).
         # The per-image scalar sigma draw is SHARED by both noise types and is the
@@ -1110,6 +1120,8 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         )}
 
     def _current_lr(self) -> float:
+        """Read the current LR from the live optimizer (evaluating a
+        LearningRateSchedule at the current step); returns ``float('nan')`` on failure."""
         try:
             opt = self.model.optimizer
             lr = opt.learning_rate
@@ -1162,6 +1174,8 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
                 logger.warning(f"Epoch-0 baseline eval failed: {e}")
 
     def on_epoch_end(self, epoch: int, logs=None):
+        """Record per-epoch scalars for the combined dashboard and, at the viz
+        cadence, save the clean/noisy/denoised grid plus the PSNR curve."""
         logs = logs or {}
 
         # Record per-epoch scalars for the combined dashboard. sigma_max is the
@@ -1311,6 +1325,8 @@ class LRLoggerCallback(keras.callbacks.Callback):
     and its ``logs`` edits never reach the already-written CSV row)."""
 
     def on_epoch_end(self, epoch: int, logs=None):
+        """Inject the current LR into ``logs['lr']`` so CSVLogger records it; must
+        run before CSVLogger (see the class docstring on callback ordering)."""
         if logs is None:
             return
         try:
@@ -1426,7 +1442,16 @@ def build_dashboard_from_dir(exp_dir: str) -> Optional[Path]:
 
 
 def train(config: TrainingConfig) -> keras.Model:
-    """Train the bias-free homogeneous Clifford U-Net denoiser with the noise curriculum."""
+    """Train the bias-free homogeneous Clifford U-Net denoiser with the noise curriculum.
+
+    Ordered steps:
+      1. Build the train/val datasets and the curriculum noise function.
+      2. Build the model.
+      3. Compile (MSE loss + PSNR/SSIM metrics).
+      4. Assemble the callbacks.
+      5. Fit.
+      6. Save the best/final model and round-trip validate it.
+    """
     logger.info(f"Starting CliffordUNet denoiser training: {config.experiment_name}")
     output_dir = Path(config.output_dir) / config.experiment_name
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1894,6 +1919,13 @@ def train(config: TrainingConfig) -> keras.Model:
 
 
 def parse_arguments() -> argparse.Namespace:
+    """Define and parse the trainer CLI surface.
+
+    Covers the model/variant selection and Clifford knobs, the noise curriculum
+    (type, sigma range, schedule), the self-iterate options, the ww-pgd controls,
+    the visualization options, and the smoke/dashboard run modes. Returns the
+    parsed ``argparse.Namespace``.
+    """
     parser = argparse.ArgumentParser(
         description="Train bias-free homogeneous CliffordUNet denoiser (Gabor stem + noise curriculum)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -1972,7 +2004,10 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--curriculum-schedule",
                         choices=["linear", "cosine", "exp"], default="linear")
     parser.add_argument("--curriculum-epochs", type=int, default=None)
-    parser.add_argument("--deep-supervision", action="store_true")
+    parser.add_argument("--deep-supervision", action="store_true",
+                        help="NOT yet supported by this trainer: no multi-scale targets / "
+                             "per-output loss dict / weight scheduler are wired, so setting "
+                             "this raises a ValueError at startup (forward-compat surface, D-002).")
     parser.add_argument("--viz-freq", type=int, default=5,
                         help="Save clean/noisy/denoised grids every N epochs")
     parser.add_argument("--viz-samples", type=int, default=8,
@@ -2074,6 +2109,8 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def main():
+    """Parse args, handle the ``--dashboard`` early-exit and ``--smoke`` config,
+    build the ``TrainingConfig``, and run ``train()``."""
     args = parse_arguments()
 
     # Standalone dashboard rebuild (no training, no GPU needed): regenerate the
