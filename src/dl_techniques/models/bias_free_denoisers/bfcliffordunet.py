@@ -331,11 +331,13 @@ def create_cliffordunet_denoiser(
             (linear, Miyasawa-clean) pooling for the non-Laplacian encoder
             downsample. Ignored when ``use_laplacian_pyramid=True``.
         expose_bottleneck: If True, expose the deepest-encoder bottleneck latent
-            as a trailing model output. A zero-parameter
-            ``Activation('linear', name='bottleneck')`` tap is always inserted
-            after the bottleneck blocks (for monitor-callback reuse) regardless
-            of this flag; setting it True additionally emits that tap as an
-            output. Defaults to False.
+            as a trailing model output. When True, a zero-parameter
+            ``Activation('linear', name='bottleneck')`` tap is inserted after the
+            bottleneck blocks (also enabling ConvUnextBottleneckMonitorCallback
+            reuse, which looks up ``model.get_layer("bottleneck")``) and emitted
+            as a second output. When False (default) no tap layer is added — the
+            decoder consumes the bottleneck blocks' output directly. Defaults to
+            False.
         enable_deep_supervision: Accepted for signature parity only. Deep
             supervision is NOT wired here; ``True`` raises ``NotImplementedError``.
         final_activation: Final activation. HARD invariant: keep ``'linear'`` for
@@ -556,10 +558,15 @@ def create_cliffordunet_denoiser(
             **block_kwargs,
         )(x)
 
-    # Named linear (bias-free) bottleneck tap: enables ConvUnextBottleneckMonitorCallback
-    # reuse (which looks up model.get_layer("bottleneck")). Zero-parameter no-op.
-    x = keras.layers.Activation('linear', name='bottleneck')(x)
+    # Bottleneck latent (deepest-encoder features). The named linear tap is only
+    # needed when the bottleneck is exposed (second output + ConvUnextBottleneckMonitorCallback,
+    # which looks up model.get_layer("bottleneck")). Inserting it unconditionally added a
+    # redundant no-op Activation('linear') on the default expose_bottleneck=False path;
+    # guard it to match bfconvunext (which also only taps under expose_bottleneck).
     bottleneck_output = x
+    if expose_bottleneck:
+        x = keras.layers.Activation('linear', name='bottleneck')(x)
+        bottleneck_output = x
 
     # =========================================================================
     # DECODER PATH (Expanding)
