@@ -493,6 +493,10 @@ def make_curriculum_noise_fn(config: TrainingConfig, sigma_max_var: tf.Variable)
         # FIRST RNG op, so the curriculum behaves identically regardless of type.
         noise_level = tf.random.uniform([], sigma_min, sigma_max_var)
         if multiplicative:
+            # MIYASAWA NOTE: multiplicative/composite noise has NO clean linear-domain
+            # residual=sigma^2*score identity (that holds for ADDITIVE Gaussian only).
+            # These branches are experimental w.r.t. the Miyasawa/Tweedie interpretation;
+            # see dl_techniques/utils/multiplicative_miyasawa.py for the (approximate) theory.
             # DECISION plan_2026-06-20_4d26bdaf/D-001: multiplicative branch is opt-in
             # and lives AFTER the verbatim additive branch; do NOT refactor the additive
             # path's `patch + tf.random.normal(...) * noise_level` into a shared helper
@@ -500,6 +504,8 @@ def make_curriculum_noise_fn(config: TrainingConfig, sigma_max_var: tf.Variable)
             # reproducibility of existing additive checkpoints (Pre-Mortem STOP-IF).
             noisy = apply_multiplicative_gaussian(patch, noise_level)
         elif composite:
+            # MIYASAWA NOTE (see multiplicative branch above): composite noise also lacks a
+            # clean linear-domain residual=score identity; experimental w.r.t. Miyasawa.
             # DECISION plan_2026-06-20_f6ed2237/D-001: composite = multiplicative + additive floor.
             # sigma_a is tied to the curriculum scalar via composite_additive_ratio so the single
             # curriculum Variable drives both terms; the existing additive (else) and multiplicative
@@ -509,6 +515,11 @@ def make_curriculum_noise_fn(config: TrainingConfig, sigma_max_var: tf.Variable)
             noisy = apply_composite_gaussian(patch, noise_level, ratio * noise_level)
         else:
             noisy = patch + tf.random.normal(tf.shape(patch)) * noise_level  # y = x + N(0, sigma^2)
+        # MIYASAWA CAVEAT: this clip to [-0.5, +0.5] applies to EVERY run (not just
+        # self-iterate). It makes the observed noise non-Gaussian at the domain edges, so
+        # even for additive noise the residual=sigma^2*score identity is only approximate
+        # near the clip boundaries. Kept because unclipped inputs leave the trained domain;
+        # the deviation is small in the [-0.5,+0.5] operating regime (accepted, not a bug).
         return tf.clip_by_value(noisy, -0.5, 0.5), patch
 
     return add_curriculum_noise
