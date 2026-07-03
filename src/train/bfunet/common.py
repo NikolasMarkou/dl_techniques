@@ -55,7 +55,7 @@ from dl_techniques.callbacks.self_iterate_pool import (
 
 
 def decode_full_image(
-    image_path: tf.Tensor, config: "TrainingConfig"
+    image_path: tf.Tensor, config: "BFUnetTrainingConfig"
 ) -> tf.Tensor:
     """Read + decode an image ONCE and normalize to [-0.5, +0.5].
 
@@ -94,7 +94,7 @@ def decode_full_image(
     )
 
 
-def random_crop_patch(image: tf.Tensor, config: "TrainingConfig") -> tf.Tensor:
+def random_crop_patch(image: tf.Tensor, config: "BFUnetTrainingConfig") -> tf.Tensor:
     """Extract one random ``patch_size`` crop from an already-decoded image."""
     return tf.image.random_crop(
         image, [config.patch_size, config.patch_size, config.channels]
@@ -102,7 +102,7 @@ def random_crop_patch(image: tf.Tensor, config: "TrainingConfig") -> tf.Tensor:
 
 
 def load_and_preprocess_image(
-    image_path: tf.Tensor, config: "TrainingConfig"
+    image_path: tf.Tensor, config: "BFUnetTrainingConfig"
 ) -> tf.Tensor:
     """Decode an image, normalize to [-0.5, +0.5], and crop a single random patch.
 
@@ -113,7 +113,7 @@ def load_and_preprocess_image(
     return random_crop_patch(decode_full_image(image_path, config), config)
 
 
-def collect_training_paths(config: "TrainingConfig") -> List[str]:
+def collect_training_paths(config: "BFUnetTrainingConfig") -> List[str]:
     """Weighted COCO+DIV2K path worklist (prevents COCO drowning DIV2K)."""
     pairs = select_weighted_image_paths(
         image_dirs=config.train_image_dirs,
@@ -126,7 +126,7 @@ def collect_training_paths(config: "TrainingConfig") -> List[str]:
 
 def create_dataset(
     file_paths: List[str],
-    config: "TrainingConfig",
+    config: "BFUnetTrainingConfig",
     noise_fn,
     is_training: bool,
 ) -> tf.data.Dataset:
@@ -220,7 +220,7 @@ def create_dataset(
 
 def build_self_iterate_pool(
     file_paths: List[str],
-    config: "TrainingConfig",
+    config: "BFUnetTrainingConfig",
     sigma_init: float,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Load a FIXED bounded RAM pool of clean patches + an initial noisy input pool.
@@ -306,7 +306,7 @@ def build_self_iterate_pool(
 def create_self_iterate_dataset(
     clean_pool: np.ndarray,
     current_input: np.ndarray,
-    config: "TrainingConfig",
+    config: "BFUnetTrainingConfig",
 ) -> Tuple[tf.data.Dataset, int]:
     """Build a tf.data source over the LIVE pool arrays via ``from_generator``.
 
@@ -495,7 +495,7 @@ def multi_pass_psnr(model: keras.Model, clean, noisy, k: int) -> List[float]:
 
 
 def build_fixed_val_batch(
-    val_paths: List[str], config: "TrainingConfig", n: int = 8
+    val_paths: List[str], config: "BFUnetTrainingConfig", n: int = 8
 ) -> Optional[tf.Tensor]:
     """Load a small FIXED batch of clean [-0.5,+0.5] patches for visualization."""
     if not val_paths:
@@ -590,7 +590,7 @@ def build_dashboard_from_dir(exp_dir: str) -> Optional[Path]:
     return out
 
 
-def make_curriculum_noise_fn(config: "TrainingConfig", sigma_max_var: tf.Variable):
+def make_curriculum_noise_fn(config: "BFUnetTrainingConfig", sigma_max_var: tf.Variable):
     """Build a noise function that samples per-image sigma from
     ``[noise_sigma_min, sigma_max_var]`` where the upper bound is a live
     ``tf.Variable`` widened per-epoch by the curriculum callback (D-003)."""
