@@ -56,6 +56,7 @@ from dl_techniques.layers.geometric.clifford_block import (
     CliffordNetBlock,
     CliffordNetBlockDS,
 )
+from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.optimization import (
     learning_rate_schedule_builder,
     optimizer_builder,
@@ -211,20 +212,27 @@ def build_variant(
     cfg = VARIANTS[variant_name]
     if cfg["ds_kwargs"] is None:
         for i in range(num_blocks):
-            x = CliffordNetBlock(
+            # Transform-only block (D-001/D-002); residual + drop_path external.
+            block = CliffordNetBlock(
                 channels=channels,
                 shifts=_SHIFTS,
                 cli_mode=_CLI_MODE,
                 ctx_mode=_CTX_MODE,
                 use_global_context=_USE_GLOBAL_CONTEXT,
                 layer_scale_init=layer_scale_init,
-                drop_path_rate=drop_rates[i],
                 name=f"block{i}",
-            )(x)
+            )
+            sd = StochasticDepth(
+                drop_path_rate=drop_rates[i], name=f"drop_path{i}"
+            )
+            x = x + sd(block(x))
     else:
         ds_kwargs = cfg["ds_kwargs"]
         for i in range(num_blocks):
-            x = CliffordNetBlockDS(
+            # CliffordNetBlockDS at strides=1 (skip_pool inert / Identity) is an
+            # isotropic transform (D-002): the external residual collapses to the
+            # plain add x = x + StochasticDepth(rate)(block(x)).
+            block = CliffordNetBlockDS(
                 channels=channels,
                 shifts=_SHIFTS,
                 cli_mode=_CLI_MODE,
@@ -233,10 +241,13 @@ def build_variant(
                 strides=_DS_STRIDES,
                 skip_pool=_DS_SKIP_POOL,
                 layer_scale_init=layer_scale_init,
-                drop_path_rate=drop_rates[i],
                 name=f"block{i}",
                 **ds_kwargs,
-            )(x)
+            )
+            sd = StochasticDepth(
+                drop_path_rate=drop_rates[i], name=f"drop_path{i}"
+            )
+            x = x + sd(block(x))
 
     # Head: GAP -> LayerNorm -> (Dropout) -> Dense
     x = keras.layers.GlobalAveragePooling2D(name="global_pool")(x)

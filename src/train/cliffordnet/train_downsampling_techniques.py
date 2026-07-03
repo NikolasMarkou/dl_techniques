@@ -59,6 +59,7 @@ import tensorflow as tf
 
 from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
 from dl_techniques.layers.patch_merging import PatchMerging
+from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.models.cliffordnet import CliffordNet
 from dl_techniques.optimization import (
     learning_rate_schedule_builder,
@@ -380,16 +381,23 @@ def build_variant(
     block_idx = 0
     for stage_idx, (channels, n_blocks) in enumerate(stages):
         for _ in range(n_blocks):
-            x = CliffordNetBlock(
+            # CliffordNetBlock is transform-only now (D-001/D-002); the identity
+            # residual + drop_path are applied EXTERNALLY at model level:
+            #   x = x + StochasticDepth(rate)(block(x)).
+            block = CliffordNetBlock(
                 channels=channels,
                 shifts=shifts,
                 cli_mode="full",
                 ctx_mode="diff",
                 use_global_context=False,
                 layer_scale_init=layer_scale_init,
-                drop_path_rate=drop_rates[block_idx],
                 name=f"stage{stage_idx}_block{_}",
-            )(x)
+            )
+            sd = StochasticDepth(
+                drop_path_rate=drop_rates[block_idx],
+                name=f"stage{stage_idx}_drop_path{_}",
+            )
+            x = x + sd(block(x))
             block_idx += 1
         if stage_idx < len(stages) - 1:
             next_channels = stages[stage_idx + 1][0]

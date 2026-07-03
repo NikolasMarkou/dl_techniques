@@ -68,6 +68,7 @@ from dl_techniques.layers.pixel_unshuffle import PixelUnshuffle2D
 from dl_techniques.layers.geometric.clifford_block import (
     CliffordNetBlockDSv2,
 )
+from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.optimization import (
     learning_rate_schedule_builder,
     optimizer_builder,
@@ -438,8 +439,11 @@ def build_variant(
     for stage_idx, (channels, n_blocks) in enumerate(_STAGES):
         if stage_idx == 0:
             # No transition into stage 0 -- emit n_blocks isotropic blocks.
+            # DSv2 at strides=1, out_channels=None is transform-only with
+            # skip_pool=Identity and out_proj=None (D-002), so the external
+            # residual collapses to x = x + StochasticDepth(rate)(block(x)).
             for _ in range(n_blocks):
-                x = CliffordNetBlockDSv2(
+                block = CliffordNetBlockDSv2(
                     channels=channels,
                     shifts=_SHIFTS,
                     cli_mode=_CLI_MODE,
@@ -452,9 +456,13 @@ def build_variant(
                     out_channels=None,
                     ctx_norm_type=_DEFAULT_NORM_TYPE_ISO,
                     layer_scale_init=layer_scale_init,
-                    drop_path_rate=drop_rates[block_idx],
                     name=f"stage{stage_idx}_block{block_idx - sum(s[1] for s in _STAGES[:stage_idx])}",
-                )(x)
+                )
+                sd = StochasticDepth(
+                    drop_path_rate=drop_rates[block_idx],
+                    name=f"stage{stage_idx}_drop_path{block_idx - sum(s[1] for s in _STAGES[:stage_idx])}",
+                )
+                x = x + sd(block(x))
                 block_idx += 1
             continue
 
@@ -468,8 +476,17 @@ def build_variant(
         if per_stage_norms is not None:
             stage_norm_kwarg["ctx_norm_type"] = per_stage_norms[stage_idx - 1]
 
+        # Strided DSv2 is transform-only now (D-002 Option-b): the block's
+        # call() returns h_mix at `channels`, and the model orchestrates
+        #   out = out_proj(skip_pool(x) + StochasticDepth(rate)(ds(x)))
+        # reusing the block's OWN public skip_pool / out_proj sub-layers.
+        # out_proj has use_bias=True and is non-distributive over the sum, so
+        # the projection MUST be applied POST-SUM (project the sum, not the
+        # branches). drop_path, previously inside GGR, is now the external SD.
         if internal_expansion:
-            x = CliffordNetBlockDSv2(
+            # Internal expansion (axis E): out_channels=channels wires the
+            # block's own out_proj (channels->out_channels), applied POST-SUM.
+            ds = CliffordNetBlockDSv2(
                 channels=prev_channels,
                 shifts=_SHIFTS,
                 cli_mode=_CLI_MODE,
@@ -477,13 +494,34 @@ def build_variant(
                 strides=2,
                 out_channels=channels,
                 layer_scale_init=layer_scale_init,
-                drop_path_rate=drop_rates[block_idx],
                 name=f"stage{stage_idx}_transition",
                 **transition_kwargs,
                 **stage_norm_kwarg,
-            )(x)
+            )
+            # The functional graph needs unique op names. The block's public
+            # skip_pool/out_proj carry fixed sub-layer names that collide across
+            # the 3 transition stages when invoked at model level. Rename the
+            # reused instances per stage (weights/math unchanged; the block's
+            # transform-only call() no longer uses skip_pool/out_proj).
+            ds.skip_pool.name = f"stage{stage_idx}_skip_pool"
+            if ds.out_proj is not None:
+                ds.out_proj.name = f"stage{stage_idx}_out_proj"
+            ds_sd = StochasticDepth(
+                drop_path_rate=drop_rates[block_idx],
+                name=f"stage{stage_idx}_transition_drop_path",
+            )
+            t = ds_sd(ds(x))
+            s = ds.skip_pool(x)
+            out = s + t
+            if ds.out_proj is not None:
+                out = ds.out_proj(out)
+            x = out
         else:
-            x = CliffordNetBlockDSv2(
+            # External expansion: block keeps out_channels=None (out_proj=None,
+            # transform stays at prev_channels), and a separate 1x1 Conv2D does
+            # the channel expansion on the correctly-residualized downsampled
+            # output. This preserves the internal-vs-external comparison.
+            ds = CliffordNetBlockDSv2(
                 channels=prev_channels,
                 shifts=_SHIFTS,
                 cli_mode=_CLI_MODE,
@@ -491,12 +529,26 @@ def build_variant(
                 strides=2,
                 out_channels=None,
                 layer_scale_init=layer_scale_init,
-                drop_path_rate=drop_rates[block_idx],
                 name=f"stage{stage_idx}_transition",
                 **transition_kwargs,
                 **stage_norm_kwarg,
-            )(x)
-            # External 1x1 channel expansion after spatial downsample.
+            )
+            # Unique functional-graph op name for the reused skip_pool (see the
+            # internal_expansion branch above). out_proj is None here.
+            ds.skip_pool.name = f"stage{stage_idx}_skip_pool"
+            if ds.out_proj is not None:
+                ds.out_proj.name = f"stage{stage_idx}_out_proj"
+            ds_sd = StochasticDepth(
+                drop_path_rate=drop_rates[block_idx],
+                name=f"stage{stage_idx}_transition_drop_path",
+            )
+            t = ds_sd(ds(x))
+            s = ds.skip_pool(x)
+            out = s + t
+            if ds.out_proj is not None:  # None here (out_channels=None)
+                out = ds.out_proj(out)
+            x = out
+            # External 1x1 channel expansion after the downsampled residual.
             x = keras.layers.Conv2D(
                 channels, kernel_size=1, strides=1, padding="same",
                 use_bias=True, name=f"stage{stage_idx}_expand",
@@ -504,8 +556,10 @@ def build_variant(
         block_idx += 1
 
         # Remaining (n_blocks - 1) isotropic blocks at this stage's channels.
+        # strides=1, out_channels=None => transform-only, external residual
+        # collapses to x = x + StochasticDepth(rate)(block(x)) (D-002).
         for _ in range(n_blocks - 1):
-            x = CliffordNetBlockDSv2(
+            block = CliffordNetBlockDSv2(
                 channels=channels,
                 shifts=_SHIFTS,
                 cli_mode=_CLI_MODE,
@@ -518,9 +572,13 @@ def build_variant(
                 out_channels=None,
                 ctx_norm_type=_DEFAULT_NORM_TYPE_ISO,
                 layer_scale_init=layer_scale_init,
-                drop_path_rate=drop_rates[block_idx],
                 name=f"stage{stage_idx}_block{block_idx - sum(s[1] for s in _STAGES[:stage_idx])}",
-            )(x)
+            )
+            sd = StochasticDepth(
+                drop_path_rate=drop_rates[block_idx],
+                name=f"stage{stage_idx}_drop_path{block_idx - sum(s[1] for s in _STAGES[:stage_idx])}",
+            )
+            x = x + sd(block(x))
             block_idx += 1
 
     # Head: GAP -> LN -> (Dropout) -> Dense
