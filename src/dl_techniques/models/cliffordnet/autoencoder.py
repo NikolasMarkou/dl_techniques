@@ -624,8 +624,10 @@ class CliffordLaplacianUNet(keras.Model):
         feat = None
         for i in range(self.num_levels):
             e = self.enc_proj[i](x)
+            # External residual: blocks are transform-only now (no stochastic
+            # depth knob on this model, so a plain identity residual).
             for blk in self.enc_blocks[i]:
-                e = blk(e, training=training)
+                e = e + blk(e, training=training)
             if i < self.num_levels - 1:
                 low, high = self.pyramid_levels[i].split(e)
                 skips.append(high)
@@ -658,8 +660,9 @@ class CliffordLaplacianUNet(keras.Model):
             up = self.dec_up[i](feat)
             up = self.dec_align[i](up)
             merged = keras.ops.add(up, skips[i])
+            # External residual: blocks are transform-only now.
             for blk in self.dec_blocks[i]:
-                merged = blk(merged, training=training)
+                merged = merged + blk(merged, training=training)
             feat = merged
 
         y = self.out_conv(feat)

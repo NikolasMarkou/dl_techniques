@@ -43,6 +43,7 @@ from dl_techniques.layers.geometric.clifford_block import (
     CtxMode,
     CliffordNetBlock,
 )
+from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
@@ -274,11 +275,17 @@ class CliffordNet(keras.Model):
         self.blocks_list: List[Dict[str, Any]] = []
         for i in range(self.depth):
             block = CliffordNetBlock(
-                drop_path_rate=drop_rates[i],
                 name=f"clifford_block_{i}",
                 **_block_kw,
             )
-            self.blocks_list.append({"block": block})
+            # External residual + drop_path (blocks are now transform-only):
+            # x = x + StochasticDepth(rate)(block(x)). StochasticDepth(0.0) is
+            # identity, so the rate=0 case is exactly x + block(x).
+            drop_path = StochasticDepth(
+                drop_path_rate=drop_rates[i],
+                name=f"clifford_drop_path_{i}",
+            )
+            self.blocks_list.append({"block": block, "drop_path": drop_path})
 
     def _build_head(self) -> None:
         """Build and assign classifier head layers.
@@ -367,7 +374,9 @@ class CliffordNet(keras.Model):
         x = self._apply_stem(inputs, training=training)
 
         for block_info in self.blocks_list:
-            x = block_info["block"](x, training=training)
+            x = x + block_info["drop_path"](
+                block_info["block"](x, training=training), training=training
+            )
 
         # Head: GAP first, then LayerNorm (matches original forward order).
         x = self.global_pool(x)           # (B, channels)

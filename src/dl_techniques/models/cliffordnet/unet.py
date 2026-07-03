@@ -48,6 +48,7 @@ from dl_techniques.layers.geometric.clifford_block import (
     CtxMode,
     CliffordNetBlock,
 )
+from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 
@@ -608,6 +609,7 @@ class CliffordNetUNet(keras.Model):
                 transition = None
 
             blocks = []
+            drop_paths = []
             for b in range(n_blocks):
                 block = CliffordNetBlock(
                     channels=ch,
@@ -616,13 +618,19 @@ class CliffordNetUNet(keras.Model):
                     ctx_mode=self.ctx_mode,
                     use_global_context=self.use_global_context,
                     layer_scale_init=self.layer_scale_init,
-                    drop_path_rate=drop_rates[block_idx],
                     use_bias=True,
                     kernel_initializer=self.kernel_initializer,
                     kernel_regularizer=self.kernel_regularizer,
                     name=f"enc_block_{level}_{b}",
                 )
                 blocks.append(block)
+                # External residual + drop_path (blocks are transform-only now).
+                drop_paths.append(
+                    StochasticDepth(
+                        drop_path_rate=drop_rates[block_idx],
+                        name=f"enc_drop_path_{level}_{b}",
+                    )
+                )
                 block_idx += 1
 
             if level < self.num_levels - 1:
@@ -638,7 +646,12 @@ class CliffordNetUNet(keras.Model):
                 downsample = None
 
             self.encoder_levels.append(
-                {"transition": transition, "blocks": blocks, "downsample": downsample}
+                {
+                    "transition": transition,
+                    "blocks": blocks,
+                    "drop_paths": drop_paths,
+                    "downsample": downsample,
+                }
             )
 
     def _build_bottleneck(self) -> None:
@@ -649,6 +662,7 @@ class CliffordNetUNet(keras.Model):
         max_drop = self.stochastic_depth_rate
 
         self.bottleneck_blocks: List[CliffordNetBlock] = []
+        self.bottleneck_drop_paths: List[StochasticDepth] = []
         for b in range(n_blocks):
             rate = max_drop * (total_blocks - 1 + b) / max(
                 total_blocks + n_blocks - 2, 1
@@ -660,13 +674,19 @@ class CliffordNetUNet(keras.Model):
                 ctx_mode=self.ctx_mode,
                 use_global_context=True,  # Always global at bottleneck
                 layer_scale_init=self.layer_scale_init,
-                drop_path_rate=rate,
                 use_bias=True,
                 kernel_initializer=self.kernel_initializer,
                 kernel_regularizer=self.kernel_regularizer,
                 name=f"bottleneck_block_{b}",
             )
             self.bottleneck_blocks.append(block)
+            # External residual + drop_path (blocks are transform-only now).
+            self.bottleneck_drop_paths.append(
+                StochasticDepth(
+                    drop_path_rate=rate,
+                    name=f"bottleneck_drop_path_{b}",
+                )
+            )
 
     def _build_decoder(self) -> None:
         self.decoder_levels: List[Dict[str, Any]] = []
@@ -694,6 +714,7 @@ class CliffordNetUNet(keras.Model):
             )
 
             blocks = []
+            drop_paths = []
             for b in range(n_blocks):
                 block = CliffordNetBlock(
                     channels=ch,
@@ -702,19 +723,26 @@ class CliffordNetUNet(keras.Model):
                     ctx_mode=self.ctx_mode,
                     use_global_context=self.use_global_context,
                     layer_scale_init=self.layer_scale_init,
-                    drop_path_rate=0.0,
                     use_bias=True,
                     kernel_initializer=self.kernel_initializer,
                     kernel_regularizer=self.kernel_regularizer,
                     name=f"dec_block_{level}_{b}",
                 )
                 blocks.append(block)
+                # External residual; decoder used rate=0.0 (identity SD).
+                drop_paths.append(
+                    StochasticDepth(
+                        drop_path_rate=0.0,
+                        name=f"dec_drop_path_{level}_{b}",
+                    )
+                )
 
             self.decoder_levels.append(
                 {
                     "upsample": upsample,
                     "skip_proj": skip_proj,
                     "blocks": blocks,
+                    "drop_paths": drop_paths,
                     "level": level,
                 }
             )
@@ -858,15 +886,19 @@ class CliffordNetUNet(keras.Model):
         for level_info in self.encoder_levels:
             if level_info["transition"] is not None:
                 x = level_info["transition"](x)
-            for block in level_info["blocks"]:
-                x = block(x, training=training)
+            for block, drop_path in zip(
+                level_info["blocks"], level_info["drop_paths"]
+            ):
+                x = x + drop_path(block(x, training=training), training=training)
             skip_features.append(x)
             if level_info["downsample"] is not None:
                 x = level_info["downsample"](x)
 
         # Bottleneck
-        for block in self.bottleneck_blocks:
-            x = block(x, training=training)
+        for block, drop_path in zip(
+            self.bottleneck_blocks, self.bottleneck_drop_paths
+        ):
+            x = x + drop_path(block(x, training=training), training=training)
         bottleneck_features = x
 
         # Decoder — collect per-level outputs
@@ -877,8 +909,10 @@ class CliffordNetUNet(keras.Model):
                 x = dec_info["upsample"](x)
             x = keras.ops.concatenate([x, skip_features[level]], axis=-1)
             x = dec_info["skip_proj"](x)
-            for block in dec_info["blocks"]:
-                x = block(x, training=training)
+            for block, drop_path in zip(
+                dec_info["blocks"], dec_info["drop_paths"]
+            ):
+                x = x + drop_path(block(x, training=training), training=training)
             decoder_features[level] = x
 
         # No heads → return raw feature pyramid

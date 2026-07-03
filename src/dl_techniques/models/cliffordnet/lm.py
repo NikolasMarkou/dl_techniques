@@ -47,6 +47,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
+from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.layers.geometric.clifford_block import (
     CliMode,
     CtxMode,
@@ -275,10 +276,19 @@ class CliffordNetLM(keras.Model):
 
         self.clifford_blocks = [
             CausalCliffordNetBlock(
-                drop_path_rate=drop_rates[i],
                 name=f"clifford_block_{i}",
                 use_global_context=_block_uses_global_ctx(i),
                 **_block_kw,
+            )
+            for i in range(depth)
+        ]
+        # External residual + drop_path (blocks are transform-only now):
+        # x = x + StochasticDepth(rate)(block(x)). Built here (not in call())
+        # so the sub-layers serialize with the model.
+        self.drop_paths = [
+            StochasticDepth(
+                drop_path_rate=drop_rates[i],
+                name=f"clifford_drop_path_{i}",
             )
             for i in range(depth)
         ]
@@ -348,9 +358,9 @@ class CliffordNetLM(keras.Model):
         # Reshape to 4D: (B, seq_len, D) -> (B, 1, seq_len, D)
         x = keras.ops.expand_dims(x, axis=1)
 
-        # Apply CausalCliffordNet blocks
-        for block in self.clifford_blocks:
-            x = block(x, training=training)
+        # Apply CausalCliffordNet blocks (external residual + drop_path)
+        for block, drop_path in zip(self.clifford_blocks, self.drop_paths):
+            x = x + drop_path(block(x, training=training), training=training)
 
         # Reshape back to 3D: (B, 1, seq_len, D) -> (B, seq_len, D)
         x = keras.ops.squeeze(x, axis=1)

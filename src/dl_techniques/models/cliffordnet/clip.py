@@ -120,6 +120,7 @@ from dl_techniques.layers.geometric.clifford_block import (
 )
 from dl_techniques.layers.layer_scale import LearnableMultiplier
 from dl_techniques.layers.patch_merging import PatchMerging
+from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.logger import logger
 
@@ -784,12 +785,21 @@ class CliffordCLIP(keras.Model):
             for _ in range(stage_d):
                 self.vision_blocks.append(
                     CliffordNetBlock(
-                        drop_path_rate=global_drop_rates[block_idx],
                         name=f"vision_clifford_block_{block_idx}",
                         **block_kw,
                     )
                 )
                 block_idx += 1
+
+        # External residual + drop_path per vision block (transform-only blocks):
+        # x = x + StochasticDepth(rate)(block(x)). One SD per flat vision block.
+        self.vision_drop_paths: List[StochasticDepth] = [
+            StochasticDepth(
+                drop_path_rate=global_drop_rates[i],
+                name=f"vision_drop_path_{i}",
+            )
+            for i in range(total_depth)
+        ]
 
         # PatchMerging between adjacent stages. PatchMerging always emits
         # ``2 * src``; an optional Dense projects to ``target`` when the
@@ -885,9 +895,16 @@ class CliffordCLIP(keras.Model):
         )
         self.text_blocks: List[CausalCliffordNetBlock] = [
             CausalCliffordNetBlock(
-                drop_path_rate=text_drop_rates[i],
                 name=f"text_clifford_block_{i}",
                 **_t_block_kw,
+            )
+            for i in range(self.text_depth)
+        ]
+        # External residual + drop_path per text block (transform-only blocks).
+        self.text_drop_paths: List[StochasticDepth] = [
+            StochasticDepth(
+                drop_path_rate=text_drop_rates[i],
+                name=f"text_drop_path_{i}",
             )
             for i in range(self.text_depth)
         ]
@@ -1089,7 +1106,9 @@ class CliffordCLIP(keras.Model):
             stage_ends.append(running)
         next_boundary_stage = 0
         for i, block in enumerate(self.vision_blocks):
-            x = block(x, training=training)
+            x = x + self.vision_drop_paths[i](
+                block(x, training=training), training=training
+            )
             if (
                 next_boundary_stage < n_stages - 1
                 and i + 1 == stage_ends[next_boundary_stage]
@@ -1169,8 +1188,8 @@ class CliffordCLIP(keras.Model):
 
         # Reshape to 4D (B, 1, L, D) for causal depthwise Conv2D.
         x = ops.expand_dims(x, axis=1)
-        for block in self.text_blocks:
-            x = block(x, training=training)
+        for block, drop_path in zip(self.text_blocks, self.text_drop_paths):
+            x = x + drop_path(block(x, training=training), training=training)
         x = ops.squeeze(x, axis=1)             # (B, L, D_t)
         x = self.text_head_norm(x)
         if self.text_head_dropout is not None:
