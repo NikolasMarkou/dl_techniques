@@ -33,7 +33,6 @@ import keras
 from keras import initializers, regularizers
 
 from ..norms.factory import create_normalization_layer
-from ..stochastic_depth import StochasticDepth
 from ...utils.logger import logger
 
 # ---------------------------------------------------------------------------
@@ -321,8 +320,9 @@ class GatedGeometricResidual(keras.layers.Layer):
     Implements the Euler-discretised ODE step
     H_out = H_prev + gamma * (SiLU(H_norm) + alpha * G_feat), where alpha
     is a learned sigmoid gate on concat(H_norm, G_feat) and gamma is a
-    LayerScale scalar initialised near zero. DropPath is applied to the
-    combined term before residual addition when ``drop_path_rate > 0``.
+    LayerScale scalar initialised near zero. This layer returns ONLY the
+    LayerScale-gated term; the residual add and any stochastic-depth op are
+    external, model-level operations.
 
     **Architecture Overview:**
 
@@ -349,10 +349,6 @@ class GatedGeometricResidual(keras.layers.Layer):
             │ γ · (sum)   │            │
             └──────┬──────┘            │
                    ▼                   │
-            ┌─────────────┐            │
-            │  DropPath   │            │
-            └──────┬──────┘            │
-                   ▼                   │
             Output (residual term)     │
                    [B, H, W, D]        │
         ───────────────────────────────┘
@@ -361,8 +357,6 @@ class GatedGeometricResidual(keras.layers.Layer):
     :type channels: int
     :param layer_scale_init: Initial LayerScale gamma. Defaults to 1e-5.
     :type layer_scale_init: float
-    :param drop_path_rate: Stochastic-depth probability. Defaults to 0.0.
-    :type drop_path_rate: float
     :param use_bias: Whether the gate Dense uses an additive bias. Defaults to
         True. Set to False for bias-free (Miyasawa-compliant) denoising blocks.
     :type use_bias: bool
@@ -381,7 +375,6 @@ class GatedGeometricResidual(keras.layers.Layer):
         self,
         channels: int,
         layer_scale_init: float = 1e-5,
-        drop_path_rate: float = 0.0,
         use_bias: bool = True,
         gate_activation: Any = "sigmoid",
         feature_activation: Any = "silu",
@@ -396,14 +389,9 @@ class GatedGeometricResidual(keras.layers.Layer):
 
         if channels <= 0:
             raise ValueError(f"channels must be positive, got {channels}")
-        if not (0.0 <= drop_path_rate < 1.0):
-            raise ValueError(
-                f"drop_path_rate must be in [0, 1), got {drop_path_rate}"
-            )
 
         self.channels = channels
         self.layer_scale_init = layer_scale_init
-        self.drop_path_rate = drop_path_rate
         self.use_bias = use_bias
         # DECISION plan_2026-07-01_6dc255c1/D-001: gate/feature activations and
         # the gate itself are now ctor kwargs. Defaults ("sigmoid", "silu",
@@ -429,12 +417,11 @@ class GatedGeometricResidual(keras.layers.Layer):
             bias_regularizer=bias_regularizer,
             name="gate_dense",
         )
-
-        self.drop_path = (
-            StochasticDepth(drop_path_rate=drop_path_rate, name="drop_path")
-            if drop_path_rate > 0.0
-            else None
-        )
+        # DECISION plan_2026-07-03_eb53492e/D-001: GGR no longer owns a
+        # stochastic-depth op — the residual add AND the stochastic-depth layer
+        # are now external, model-level ops (x = x + SD(rate)(block(x))).
+        # Do NOT re-inline a stochastic-depth layer or a per-block rate kwarg
+        # here; see decisions.md D-001.
 
     # ------------------------------------------------------------------
 
@@ -468,7 +455,7 @@ class GatedGeometricResidual(keras.layers.Layer):
         :type h_norm: keras.KerasTensor
         :param g_feat: Geometric interaction features ``(B, H, W, D)``.
         :type g_feat: keras.KerasTensor
-        :param training: Whether in training mode (affects DropPath).
+        :param training: Whether in training mode.
         :type training: Optional[bool]
         :return: Scaled residual term ``(B, H, W, D)``; caller adds to H_prev.
         :rtype: keras.KerasTensor
@@ -491,9 +478,6 @@ class GatedGeometricResidual(keras.layers.Layer):
             # directly on the homogeneous path.
             h_mix = feat + g_feat
         h_mix = h_mix * self.gamma
-
-        if self.drop_path is not None:
-            h_mix = self.drop_path(h_mix, training=training)
 
         return h_mix
 
@@ -524,7 +508,6 @@ class GatedGeometricResidual(keras.layers.Layer):
             {
                 "channels": self.channels,
                 "layer_scale_init": self.layer_scale_init,
-                "drop_path_rate": self.drop_path_rate,
                 "use_bias": self.use_bias,
                 "gate_activation": self.gate_activation,
                 "feature_activation": self.feature_activation,
@@ -551,9 +534,11 @@ class CliffordNetBlock(keras.layers.Layer):
     A dual-stream architecture generates detail Z_det = Linear(X_norm) and
     context Z_ctx = SiLU(BN(DWConv(DWConv(X_norm)))) streams, optionally
     applying a discrete Laplacian (Z_ctx -= Z_det). The streams interact via
-    a sparse rolling geometric product, are combined through a Gated Geometric
-    Residual (GGR) update, and added back as a residual. An optional global
-    branch uses GAP-based context with hardcoded shifts=[1,2] and cli_mode='full'.
+    a sparse rolling geometric product, and are combined through a Gated
+    Geometric Residual (GGR) update. ``call()`` returns ONLY this transformed
+    term (``h_mix``); the residual add is an external, model-level op. An
+    optional global branch uses GAP-based context with hardcoded shifts=[1,2]
+    and cli_mode='full'.
 
     .. note::
 
@@ -594,7 +579,8 @@ class CliffordNetBlock(keras.layers.Layer):
         └───────────────┬────────────────┘
                         ▼
         ┌────────────────────────────────┐
-        │ X_out = X_prev + H_mix         │
+        │ return H_mix  (transform only; │
+        │ residual added externally)     │
         │ [B, H, W, D]                   │
         └────────────────────────────────┘
 
@@ -613,8 +599,6 @@ class CliffordNetBlock(keras.layers.Layer):
     :type use_global_context: bool
     :param layer_scale_init: Initial LayerScale value. Defaults to 1e-5.
     :type layer_scale_init: float
-    :param drop_path_rate: DropPath probability. Defaults to 0.0.
-    :type drop_path_rate: float
     :param use_bias: Whether Dense layers use bias. Defaults to ``True``.
     :type use_bias: bool
     :param kernel_initializer: Kernel initializer for Dense layers.
@@ -636,7 +620,6 @@ class CliffordNetBlock(keras.layers.Layer):
         ctx_mode: CtxMode = "diff",
         use_global_context: bool = False,
         layer_scale_init: float = 1e-5,
-        drop_path_rate: float = 0.0,
         use_bias: bool = True,
         activation: Any = "silu",
         dot_activation: Any = "silu",
@@ -675,7 +658,6 @@ class CliffordNetBlock(keras.layers.Layer):
         self.ctx_mode = ctx_mode
         self.use_global_context = use_global_context
         self.layer_scale_init = layer_scale_init
-        self.drop_path_rate = drop_path_rate
         self.use_bias = use_bias
         # DECISION plan_2026-07-01_6dc255c1/D-001: context-stream activation and
         # the geometric-product / gate activations are now ctor kwargs threaded
@@ -792,7 +774,6 @@ class CliffordNetBlock(keras.layers.Layer):
         self.ggr = GatedGeometricResidual(
             channels=channels,
             layer_scale_init=layer_scale_init,
-            drop_path_rate=drop_path_rate,
             gate_activation=gate_activation,
             feature_activation=feature_activation,
             use_gate=use_gate,
@@ -901,9 +882,9 @@ class CliffordNetBlock(keras.layers.Layer):
             g_glo = self.global_geo_prod(z_det, c_glo)
             g_feat = g_feat + g_glo
 
-        # --- Step 5 & 6: GGR + residual ---
+        # --- Step 5: GGR (transform only; residual add is external) ---
         h_mix = self.ggr(x_norm, g_feat, training=training)
-        return x_prev + h_mix
+        return h_mix
 
     # ------------------------------------------------------------------
 
@@ -936,7 +917,6 @@ class CliffordNetBlock(keras.layers.Layer):
                 "ctx_mode": self.ctx_mode,
                 "use_global_context": self.use_global_context,
                 "layer_scale_init": self.layer_scale_init,
-                "drop_path_rate": self.drop_path_rate,
                 "use_bias": self.use_bias,
                 "activation": self.activation,
                 "dot_activation": self.dot_activation,
@@ -982,7 +962,6 @@ class CausalCliffordNetBlock(keras.layers.Layer):
     :param ctx_mode: Context mode (``"diff"`` or ``"abs"``).
     :param use_global_context: Add global-average-pool context branch.
     :param layer_scale_init: Initial LayerScale value.
-    :param drop_path_rate: DropPath probability.
     :param use_bias: Whether Dense layers use bias.
     :param kernel_initializer: Kernel initializer.
     :param bias_initializer: Bias initializer.
@@ -998,7 +977,6 @@ class CausalCliffordNetBlock(keras.layers.Layer):
         ctx_mode: CtxMode = "diff",
         use_global_context: bool = False,
         layer_scale_init: float = 1e-5,
-        drop_path_rate: float = 0.0,
         use_bias: bool = True,
         kernel_initializer: Any = "glorot_uniform",
         bias_initializer: Any = "zeros",
@@ -1027,7 +1005,6 @@ class CausalCliffordNetBlock(keras.layers.Layer):
         self.ctx_mode = ctx_mode
         self.use_global_context = use_global_context
         self.layer_scale_init = layer_scale_init
-        self.drop_path_rate = drop_path_rate
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
@@ -1114,7 +1091,6 @@ class CausalCliffordNetBlock(keras.layers.Layer):
         self.ggr = GatedGeometricResidual(
             channels=channels,
             layer_scale_init=layer_scale_init,
-            drop_path_rate=drop_path_rate,
             kernel_initializer=kernel_initializer,
             bias_initializer=bias_initializer,
             kernel_regularizer=kernel_regularizer,
@@ -1207,9 +1183,9 @@ class CausalCliffordNetBlock(keras.layers.Layer):
             g_glo = self.global_geo_prod(z_det, c_glo)
             g_feat = g_feat + g_glo
 
-        # --- Step 5 & 6: GGR + residual ---
+        # --- Step 5: GGR (transform only; residual add is external) ---
         h_mix = self.ggr(x_norm, g_feat, training=training)
-        return x_prev + h_mix
+        return h_mix
 
     # ------------------------------------------------------------------
 
@@ -1251,7 +1227,6 @@ class CausalCliffordNetBlock(keras.layers.Layer):
             "ctx_mode": self.ctx_mode,
             "use_global_context": self.use_global_context,
             "layer_scale_init": self.layer_scale_init,
-            "drop_path_rate": self.drop_path_rate,
             "use_bias": self.use_bias,
             "kernel_initializer": initializers.serialize(self.kernel_initializer),
             "bias_initializer": initializers.serialize(self.bias_initializer),
@@ -1369,8 +1344,6 @@ class CliffordNetBlockDS(keras.layers.Layer):
     :type skip_pool: SkipPool
     :param layer_scale_init: Initial LayerScale value. Defaults to 1e-5.
     :type layer_scale_init: float
-    :param drop_path_rate: DropPath probability. Defaults to 0.0.
-    :type drop_path_rate: float
     :param use_bias: Whether Dense layers use bias. Defaults to ``True``.
     :type use_bias: bool
     :param kernel_initializer: Kernel initializer for Dense layers.
@@ -1397,7 +1370,6 @@ class CliffordNetBlockDS(keras.layers.Layer):
         use_ctx_bn: bool = True,
         ctx_activation: Optional[str] = "silu",
         layer_scale_init: float = 1e-5,
-        drop_path_rate: float = 0.0,
         use_bias: bool = True,
         kernel_initializer: Any = "glorot_uniform",
         bias_initializer: Any = "zeros",
@@ -1443,7 +1415,6 @@ class CliffordNetBlockDS(keras.layers.Layer):
         self.use_ctx_bn = use_ctx_bn
         self.ctx_activation = ctx_activation
         self.layer_scale_init = layer_scale_init
-        self.drop_path_rate = drop_path_rate
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
@@ -1546,7 +1517,6 @@ class CliffordNetBlockDS(keras.layers.Layer):
         self.ggr = GatedGeometricResidual(
             channels=channels,
             layer_scale_init=layer_scale_init,
-            drop_path_rate=drop_path_rate,
             kernel_initializer=kernel_initializer,
             bias_initializer=bias_initializer,
             kernel_regularizer=kernel_regularizer,
@@ -1677,13 +1647,13 @@ class CliffordNetBlockDS(keras.layers.Layer):
             g_glo = self.global_geo_prod(z_det, c_glo)
             g_feat = g_feat + g_glo
 
-        # --- Step 5 & 6: GGR + residual (with skip pool when strides>1) ---
+        # --- Step 5: GGR (transform only) ---
+        # DECISION plan_2026-07-03_eb53492e/D-002: returns the pooled transform
+        # only. `skip_pool_layer` is kept as a public attribute so the model
+        # orchestrates the post-transform residual: skip_pool_layer(x) + SD(block(x)).
+        # Do NOT re-inline the skip pool / residual add here; see decisions.md D-002.
         h_mix = self.ggr(x_norm_p, g_feat, training=training)
-        if self.skip_pool_layer is not None:
-            x_skip = self.skip_pool_layer(x_prev)
-        else:
-            x_skip = x_prev
-        return x_skip + h_mix
+        return h_mix
 
     # ------------------------------------------------------------------
 
@@ -1722,7 +1692,6 @@ class CliffordNetBlockDS(keras.layers.Layer):
                 "use_ctx_bn": self.use_ctx_bn,
                 "ctx_activation": self.ctx_activation,
                 "layer_scale_init": self.layer_scale_init,
-                "drop_path_rate": self.drop_path_rate,
                 "use_bias": self.use_bias,
                 "kernel_initializer": initializers.serialize(self.kernel_initializer),
                 "bias_initializer": initializers.serialize(self.bias_initializer),
@@ -1880,7 +1849,6 @@ class CliffordNetBlockDSv2(keras.layers.Layer):
         ctx_norm_type: CtxNormType = "bn",
         ctx_activation: Optional[str] = "silu",
         layer_scale_init: float = 1e-5,
-        drop_path_rate: float = 0.0,
         use_bias: bool = True,
         kernel_initializer: Any = "glorot_uniform",
         bias_initializer: Any = "zeros",
@@ -1945,7 +1913,6 @@ class CliffordNetBlockDSv2(keras.layers.Layer):
         self.ctx_norm_type = ctx_norm_type
         self.ctx_activation = ctx_activation
         self.layer_scale_init = layer_scale_init
-        self.drop_path_rate = drop_path_rate
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
@@ -2023,7 +1990,6 @@ class CliffordNetBlockDSv2(keras.layers.Layer):
         self.ggr = GatedGeometricResidual(
             channels=channels,
             layer_scale_init=layer_scale_init,
-            drop_path_rate=drop_path_rate,
             kernel_initializer=kernel_initializer,
             bias_initializer=bias_initializer,
             kernel_regularizer=kernel_regularizer,
@@ -2160,25 +2126,26 @@ class CliffordNetBlockDSv2(keras.layers.Layer):
             g_glo = self.global_geo_prod(z_det, c_glo)
             g_feat = g_feat + g_glo
 
+        # DECISION plan_2026-07-03_eb53492e/D-002: returns the pooled transform
+        # only (h_mix at `channels`). `skip_pool` and `out_proj` are kept as
+        # public block-owned sub-layers so the model orchestrates the exact
+        # POST-SUM projection: out_proj(skip_pool(x) + SD(block(x))). out_proj
+        # has use_bias=True (non-distributive), so it must run on the SUM, not
+        # on h_mix alone. Do NOT re-inline the skip pool / add / projection
+        # here; see decisions.md D-002.
         h_mix = self.ggr(x_norm_p, g_feat, training=training)
-        x_skip = self.skip_pool(x_prev)
-        out = x_skip + h_mix
-
-        if self.out_proj is not None:
-            out = self.out_proj(out)
-        return out
+        return h_mix
 
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
+        # Transform-only return: pooled spatial (per `strides`) at `channels`
+        # width. `out_proj` (channels -> out_channels) now runs at model level,
+        # so out_channels is NOT reflected here (D-002).
         b, h, w, _ = input_shape
         new_h = None if h is None else self._ceildiv(h, self.strides)
         new_w = None if w is None else self._ceildiv(w, self.strides)
-        out_c = (
-            self.out_channels if self.out_channels is not None
-            else self.channels
-        )
-        return (b, new_h, new_w, out_c)
+        return (b, new_h, new_w, self.channels)
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
@@ -2197,7 +2164,6 @@ class CliffordNetBlockDSv2(keras.layers.Layer):
                 "ctx_norm_type": self.ctx_norm_type,
                 "ctx_activation": self.ctx_activation,
                 "layer_scale_init": self.layer_scale_init,
-                "drop_path_rate": self.drop_path_rate,
                 "use_bias": self.use_bias,
                 "kernel_initializer": initializers.serialize(
                     self.kernel_initializer
@@ -2323,7 +2289,6 @@ class CausalCliffordNetBlockDSv2(keras.layers.Layer):
     :param ctx_activation: Optional activation after ctx_norm
         (default ``"silu"``).
     :param layer_scale_init: Initial LayerScale value for GGR.
-    :param drop_path_rate: DropPath probability for GGR.
     :param use_bias: Whether Dense layers use bias.
     :param kernel_initializer: Kernel initializer.
     :param bias_initializer: Bias initializer.
@@ -2346,7 +2311,6 @@ class CausalCliffordNetBlockDSv2(keras.layers.Layer):
         ctx_norm_type: CtxNormType = "bn",
         ctx_activation: Optional[str] = "silu",
         layer_scale_init: float = 1e-5,
-        drop_path_rate: float = 0.0,
         use_bias: bool = True,
         kernel_initializer: Any = "glorot_uniform",
         bias_initializer: Any = "zeros",
@@ -2421,7 +2385,6 @@ class CausalCliffordNetBlockDSv2(keras.layers.Layer):
         self.ctx_norm_type = ctx_norm_type
         self.ctx_activation = ctx_activation
         self.layer_scale_init = layer_scale_init
-        self.drop_path_rate = drop_path_rate
         self.use_bias = use_bias
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
@@ -2504,7 +2467,6 @@ class CausalCliffordNetBlockDSv2(keras.layers.Layer):
         self.ggr = GatedGeometricResidual(
             channels=channels,
             layer_scale_init=layer_scale_init,
-            drop_path_rate=drop_path_rate,
             kernel_initializer=kernel_initializer,
             bias_initializer=bias_initializer,
             kernel_regularizer=kernel_regularizer,
@@ -2653,24 +2615,25 @@ class CausalCliffordNetBlockDSv2(keras.layers.Layer):
             g_glo = self.global_geo_prod(z_det, c_glo)
             g_feat = g_feat + g_glo
 
+        # DECISION plan_2026-07-03_eb53492e/D-002: returns the pooled transform
+        # only (h_mix at `channels`). `skip_pool` and `out_proj` are kept as
+        # public block-owned sub-layers so the model orchestrates the exact
+        # POST-SUM projection: out_proj(skip_pool(x) + SD(block(x))). out_proj
+        # has use_bias=True (non-distributive), so it must run on the SUM, not
+        # on h_mix alone. Do NOT re-inline the skip pool / add / projection
+        # here; see decisions.md D-002.
         h_mix = self.ggr(x_norm_p, g_feat, training=training)
-        x_skip = self.skip_pool(x_prev)
-        out = x_skip + h_mix
-
-        if self.out_proj is not None:
-            out = self.out_proj(out)
-        return out
+        return h_mix
 
     def compute_output_shape(
         self, input_shape: Tuple[Optional[int], ...]
     ) -> Tuple[Optional[int], ...]:
+        # Transform-only return: causally-pooled W (per `strides`) at `channels`
+        # width. `out_proj` (channels -> out_channels) now runs at model level,
+        # so out_channels is NOT reflected here (D-002).
         b, h, w, _ = input_shape
         new_w = None if w is None else self._ceildiv(w, self.strides)
-        out_c = (
-            self.out_channels if self.out_channels is not None
-            else self.channels
-        )
-        return (b, h, new_w, out_c)
+        return (b, h, new_w, self.channels)
 
     def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
@@ -2689,7 +2652,6 @@ class CausalCliffordNetBlockDSv2(keras.layers.Layer):
                 "ctx_norm_type": self.ctx_norm_type,
                 "ctx_activation": self.ctx_activation,
                 "layer_scale_init": self.layer_scale_init,
-                "drop_path_rate": self.drop_path_rate,
                 "use_bias": self.use_bias,
                 "kernel_initializer": initializers.serialize(
                     self.kernel_initializer
