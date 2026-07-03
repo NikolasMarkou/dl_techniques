@@ -363,7 +363,8 @@ class VideoJEPAPredictor(keras.layers.Layer):
             # ============ Spatial pass ============
             # (B, T, H_p, W_p, D) → (B*T, H_p, W_p, D)
             z_s = ops.reshape(z, (B * T, Hp, Wp, D))
-            z_s = self.spatial_blocks[i](z_s, training=training)
+            # Block is transform-only; residual is external (model-level).
+            z_s = z_s + self.spatial_blocks[i](z_s, training=training)
             z = ops.reshape(z_s, (B, T, Hp, Wp, D))
 
             # ============ Temporal pass ============
@@ -378,7 +379,8 @@ class VideoJEPAPredictor(keras.layers.Layer):
 
             # → reshape (B*N, 1, T, D) for CausalCliffordNetBlock.
             z_t = ops.reshape(z_t, (B * N, 1, T, D))
-            z_t = self.causal_blocks[i](z_t, training=training)
+            # Block is transform-only; residual is external (causal-safe add).
+            z_t = z_t + self.causal_blocks[i](z_t, training=training)
 
             # → reshape back (B*N, T, D) → (B, H_p, W_p, T, D) →
             #   transpose to (B, T, H_p, W_p, D).

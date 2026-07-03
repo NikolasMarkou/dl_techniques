@@ -191,9 +191,10 @@ class VideoJEPACliffordEncoder(keras.layers.Layer):
         if self.dropout is not None:
             grid = self.dropout(grid, training=training)
 
-        # 4. Stacked CliffordNetBlocks (residual, shape-preserving).
+        # 4. Stacked CliffordNetBlocks. Blocks are transform-only now; the
+        #    identity residual is owned here at the model level (shape-preserving).
         for blk in self.blocks:
-            grid = blk(grid, training=training)
+            grid = grid + blk(grid, training=training)
 
         return grid
 
