@@ -120,8 +120,14 @@ def test_out_channels_expansion(input_4d):
         skip_pool="pixel_unshuffle",
         out_channels=64,
     )
-    y = blk(input_4d)
-    assert tuple(y.shape) == (2, 16, 16, 64)
+    # Transform-only contract (plan_2026-07-03_eb53492e, D-002): call() returns
+    # h_mix at `channels` width; the channels->out_channels projection (out_proj)
+    # is applied externally by the model, POST-SUM.
+    h = blk(input_4d)
+    assert tuple(h.shape) == (2, 16, 16, 32)
+    assert blk.out_proj is not None
+    out = blk.out_proj(blk.skip_pool(input_4d) + blk(input_4d))
+    assert tuple(out.shape) == (2, 16, 16, 64)
 
 
 def test_out_channels_equal_channels_no_proj(input_4d):
@@ -346,3 +352,48 @@ def test_v1_block_still_works(input_4d):
     )
     y = blk(input_4d)
     assert tuple(y.shape) == (2, 16, 16, 32)
+
+
+# ---------------------------------------------------------------------
+# SC4: DSv2 external POST-SUM orchestration parity guard
+# (plan_2026-07-03_eb53492e, D-002)
+# ---------------------------------------------------------------------
+
+
+def test_dsv2_post_sum_orchestration_guard():
+    """SC4: the NEW external orchestration ``out_proj(skip_pool(x) + block(x))``
+    (using the block's own public ``skip_pool``/``out_proj`` and the transform-only
+    ``block(x)``) yields a finite tensor of shape ``(B, H/2, W/2, out_channels)``.
+
+    The pre-change monolithic call() is gone, so we cannot compare against it
+    directly. Instead we assert (a) shape correctness, (b) finiteness, and
+    (c) that out_proj is applied POST-SUM: projecting the summed tensor differs
+    from projecting each branch separately (out_proj uses bias -> non-distributive),
+    which pins the sum-before-projection order.
+    """
+    keras.utils.set_random_seed(0)
+    blk = CliffordNetBlockDSv2(
+        channels=32, shifts=[1, 2], strides=2,
+        stream_pool="avg", skip_pool="avg", out_channels=64,
+    )
+    x = tf.random.uniform((2, 32, 32, 32), seed=0)
+
+    # Build the block + its skip_pool / out_proj sub-layers.
+    h_mix = blk(x)
+    assert tuple(h_mix.shape) == (2, 16, 16, 32)  # transform-only at `channels`
+    assert blk.out_proj is not None
+
+    # External POST-SUM orchestration via the block's own public sub-layers.
+    summed = blk.skip_pool(x) + blk(x)
+    out = blk.out_proj(summed)
+    assert tuple(out.shape) == (2, 16, 16, 64)
+    assert np.all(np.isfinite(keras.ops.convert_to_numpy(out)))
+
+    # POST-SUM (project the sum) must differ from projecting each branch
+    # separately then summing (out_proj bias would be double-counted).
+    wrong = blk.out_proj(blk.skip_pool(x)) + blk.out_proj(blk(x))
+    assert not np.allclose(
+        keras.ops.convert_to_numpy(out),
+        keras.ops.convert_to_numpy(wrong),
+        atol=1e-4,
+    ), "out_proj must be applied POST-SUM, not per-branch"

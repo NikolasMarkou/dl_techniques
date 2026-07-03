@@ -245,18 +245,15 @@ class TestGatedGeometricResidual:
         layer = GatedGeometricResidual(channels=channels)
         assert layer.channels == channels
         assert layer.layer_scale_init == 1e-5
-        assert layer.drop_path_rate == 0.0
 
     def test_initialization_custom(self, channels):
         """Test initialization with custom parameters."""
         layer = GatedGeometricResidual(
             channels=channels,
             layer_scale_init=1e-3,
-            drop_path_rate=0.1,
             name="custom_ggr",
         )
         assert layer.layer_scale_init == 1e-3
-        assert layer.drop_path_rate == 0.1
         assert layer.name == "custom_ggr"
 
     def test_invalid_channels(self):
@@ -264,10 +261,8 @@ class TestGatedGeometricResidual:
         with pytest.raises(ValueError, match="channels"):
             GatedGeometricResidual(channels=-1)
 
-    def test_invalid_drop_path_rate(self, channels):
-        """Test that drop_path_rate >= 1.0 raises ValueError."""
-        with pytest.raises(ValueError, match="drop_path_rate"):
-            GatedGeometricResidual(channels=channels, drop_path_rate=1.0)
+    # Stochastic depth moved to model level (plan_2026-07-03_eb53492e): GGR no
+    # longer owns StochasticDepth, so its rate-validation test is removed.
 
     def test_build_creates_gamma(self, layer_instance, input_tensor):
         """Build must create the gamma LayerScale weight."""
@@ -305,21 +300,12 @@ class TestGatedGeometricResidual:
         result = layer.compute_output_shape((None, 8, 8, channels))
         assert result == (None, 8, 8, channels)
 
-    def test_drop_path_absent_when_zero(self, channels, input_tensor):
-        """No StochasticDepth layer when drop_path_rate is 0."""
-        layer = GatedGeometricResidual(channels=channels, drop_path_rate=0.0)
-        layer(input_tensor, input_tensor)
-        assert layer.drop_path is None
-
-    def test_drop_path_present_when_nonzero(self, channels, input_tensor):
-        """StochasticDepth is created when drop_path_rate > 0."""
-        layer = GatedGeometricResidual(channels=channels, drop_path_rate=0.2)
-        layer(input_tensor, input_tensor)
-        assert layer.drop_path is not None
+    # Stochastic depth moved to model level (plan_2026-07-03_eb53492e): GGR no
+    # longer constructs StochasticDepth, so the present/absent probes are removed.
 
     def test_inference_vs_training_no_droppath(self, channels, input_tensor):
-        """Without DropPath, training and inference outputs are identical."""
-        layer = GatedGeometricResidual(channels=channels, drop_path_rate=0.0)
+        """GGR is deterministic: training and inference outputs are identical."""
+        layer = GatedGeometricResidual(channels=channels)
         g = tf.random.normal(input_tensor.shape)
         out_train = layer(input_tensor, g, training=True)
         out_infer = layer(input_tensor, g, training=False)
@@ -342,14 +328,13 @@ class TestGatedGeometricResidual:
     def test_serialization(self, channels):
         """get_config / from_config round-trip preserves attributes."""
         original = GatedGeometricResidual(
-            channels=channels, layer_scale_init=1e-3, drop_path_rate=0.1, name="ggr_s"
+            channels=channels, layer_scale_init=1e-3, name="ggr_s"
         )
         config = original.get_config()
         restored = GatedGeometricResidual.from_config(config)
 
         assert restored.channels == original.channels
         assert restored.layer_scale_init == original.layer_scale_init
-        assert restored.drop_path_rate == original.drop_path_rate
 
     def test_model_save_load(self, channels):
         """Save / load through Keras .keras format preserves outputs."""
@@ -421,7 +406,6 @@ class TestCliffordNetBlock:
         assert layer.ctx_mode == "diff"
         assert layer.use_global_context is False
         assert layer.layer_scale_init == 1e-5
-        assert layer.drop_path_rate == 0.0
 
     def test_initialization_custom(self, channels, shifts):
         """Test initialization with custom parameters."""
@@ -432,13 +416,11 @@ class TestCliffordNetBlock:
             ctx_mode="abs",
             use_global_context=True,
             layer_scale_init=1e-3,
-            drop_path_rate=0.1,
             name="custom_cb",
         )
         assert layer.cli_mode == "inner"
         assert layer.ctx_mode == "abs"
         assert layer.use_global_context is True
-        assert layer.drop_path_rate == 0.1
         assert layer.name == "custom_cb"
 
     def test_invalid_channels(self, shifts):
@@ -513,20 +495,28 @@ class TestCliffordNetBlock:
         out_abs = layer_abs(x, training=False).numpy()
         assert not np.allclose(out_diff, out_abs, atol=1e-3)
 
-    def test_residual_connection_identity_at_init(self, channels, shifts):
-        """With gamma ~ 0 at init, output should be very close to input."""
+    def test_transform_only_and_external_residual_at_init(self, channels, shifts):
+        """Transform-only contract (plan_2026-07-03_eb53492e): with gamma ~ 0
+        the block returns the transform (~0), NOT the input; the residual is now
+        external, so ``x + block(x) ≈ x`` while ``block(x)`` is NOT ≈ x."""
         layer = CliffordNetBlock(
             channels=channels, shifts=shifts, layer_scale_init=1e-10
         )
         x = tf.random.normal([2, 4, 4, channels])
-        out = layer(x)
-        # H_mix is scaled by ~0, so X_out ≈ X_prev
+        h_mix = layer(x)
+        # External residual reconstructs the identity.
         np.testing.assert_allclose(
-            keras.ops.convert_to_numpy(out),
+            keras.ops.convert_to_numpy(x + h_mix),
             keras.ops.convert_to_numpy(x),
             rtol=1e-4, atol=1e-4,
-            err_msg="With gamma ~ 0, output should be close to input (residual identity)",
+            err_msg="x + block(x) should ≈ x (external residual) at gamma ~ 0",
         )
+        # The block output alone is the transform (~0), NOT the input.
+        assert not np.allclose(
+            keras.ops.convert_to_numpy(h_mix),
+            keras.ops.convert_to_numpy(x),
+            atol=1e-4,
+        ), "block(x) must be transform-only (≈0), no internal residual"
 
     def test_different_shift_sets(self, channels):
         """Layer works with various shift configurations."""
@@ -577,7 +567,7 @@ class TestCliffordNetBlock:
         training and moving averages during inference.  The meaningful
         determinism check is that inference is reproducible.
         """
-        layer = CliffordNetBlock(channels=channels, shifts=shifts, drop_path_rate=0.0)
+        layer = CliffordNetBlock(channels=channels, shifts=shifts)
         out_infer_1 = layer(input_tensor, training=False)
         out_infer_2 = layer(input_tensor, training=False)
         np.testing.assert_allclose(
@@ -596,7 +586,6 @@ class TestCliffordNetBlock:
             ctx_mode="abs",
             use_global_context=True,
             layer_scale_init=1e-3,
-            drop_path_rate=0.1,
             name="cb_s",
         )
         config = original.get_config()
@@ -608,7 +597,6 @@ class TestCliffordNetBlock:
         assert restored.ctx_mode == original.ctx_mode
         assert restored.use_global_context == original.use_global_context
         assert restored.layer_scale_init == original.layer_scale_init
-        assert restored.drop_path_rate == original.drop_path_rate
 
     def test_model_save_load(self, channels, shifts):
         """Save / load through Keras .keras format preserves outputs."""
@@ -691,7 +679,6 @@ class TestCausalCliffordNetBlock:
             channels=channels, shifts=shifts,
             cli_mode="wedge", ctx_mode="abs",
             use_global_context=True, layer_scale_init=1e-3,
-            drop_path_rate=0.1,
         )
         assert layer.cli_mode == "wedge"
         assert layer.ctx_mode == "abs"
@@ -758,7 +745,7 @@ class TestCausalCliffordNetBlock:
         """
         layer = CausalCliffordNetBlock(
             channels=channels, shifts=shifts,
-            layer_scale_init=1.0, drop_path_rate=0.0,
+            layer_scale_init=1.0,
         )
         x1 = tf.random.normal([1, 1, 16, channels], seed=0)
         x2 = tf.identity(x1).numpy()
@@ -787,7 +774,7 @@ class TestCausalCliffordNetBlock:
         """Changing a middle position must not affect any earlier position."""
         layer = CausalCliffordNetBlock(
             channels=channels, shifts=shifts,
-            layer_scale_init=1.0, drop_path_rate=0.0,
+            layer_scale_init=1.0,
         )
         x1 = tf.random.normal([1, 1, 16, channels], seed=0)
         x2 = tf.identity(x1).numpy()
@@ -843,7 +830,7 @@ class TestCausalCliffordNetBlock:
         layer = CausalCliffordNetBlock(
             channels=channels, shifts=shifts,
             use_global_context=True,
-            layer_scale_init=1.0, drop_path_rate=0.0,
+            layer_scale_init=1.0,
         )
         x1 = tf.random.normal([1, 1, 16, channels], seed=0)
         x2 = tf.identity(x1).numpy()
@@ -879,18 +866,26 @@ class TestCausalCliffordNetBlock:
         out_abs = layer_abs(x, training=False).numpy()
         assert not np.allclose(out_diff, out_abs, atol=1e-3)
 
-    def test_residual_connection_identity_at_init(self, channels, shifts):
+    def test_transform_only_and_external_residual_at_init(self, channels, shifts):
+        """Transform-only contract (plan_2026-07-03_eb53492e): with gamma ~ 0 the
+        block returns the transform (~0), and the residual is external, so
+        ``x + block(x) ≈ x`` while ``block(x)`` is NOT ≈ x."""
         layer = CausalCliffordNetBlock(
             channels=channels, shifts=shifts, layer_scale_init=1e-10,
         )
         x = tf.random.normal([2, 1, 8, channels])
-        out = layer(x)
+        h_mix = layer(x)
         np.testing.assert_allclose(
-            keras.ops.convert_to_numpy(out),
+            keras.ops.convert_to_numpy(x + h_mix),
             keras.ops.convert_to_numpy(x),
             rtol=1e-4, atol=1e-4,
-            err_msg="With gamma ~ 0, output should be close to input",
+            err_msg="x + block(x) should ≈ x (external residual) at gamma ~ 0",
         )
+        assert not np.allclose(
+            keras.ops.convert_to_numpy(h_mix),
+            keras.ops.convert_to_numpy(x),
+            atol=1e-4,
+        ), "block(x) must be transform-only (≈0), no internal residual"
 
     def test_all_cli_modes(self, channels, shifts, seq_tensor):
         for mode in ("inner", "wedge", "full"):
@@ -920,7 +915,7 @@ class TestCausalCliffordNetBlock:
 
     def test_inference_deterministic(self, channels, shifts, seq_tensor):
         layer = CausalCliffordNetBlock(
-            channels=channels, shifts=shifts, drop_path_rate=0.0,
+            channels=channels, shifts=shifts,
         )
         out1 = layer(seq_tensor, training=False)
         out2 = layer(seq_tensor, training=False)
@@ -947,7 +942,7 @@ class TestCausalCliffordNetBlock:
             channels=channels, shifts=shifts,
             cli_mode="wedge", ctx_mode="abs",
             use_global_context=True, layer_scale_init=1e-3,
-            drop_path_rate=0.1, name="causal_cb_s",
+            name="causal_cb_s",
         )
         config = original.get_config()
         restored = CausalCliffordNetBlock.from_config(config)
@@ -958,7 +953,6 @@ class TestCausalCliffordNetBlock:
         assert restored.ctx_mode == original.ctx_mode
         assert restored.use_global_context == original.use_global_context
         assert restored.layer_scale_init == original.layer_scale_init
-        assert restored.drop_path_rate == original.drop_path_rate
 
     def test_model_save_load(self, channels, shifts):
         x = tf.random.normal([2, 1, 16, channels])
@@ -1033,7 +1027,6 @@ class TestCliffordNetBlockDS:
         assert layer.strides == 1
         assert layer.skip_pool == "avg"
         assert layer.layer_scale_init == 1e-5
-        assert layer.drop_path_rate == 0.0
 
     def test_initialization_custom(self, channels, shifts):
         layer = CliffordNetBlockDS(
@@ -1046,7 +1039,6 @@ class TestCliffordNetBlockDS:
             strides=2,
             skip_pool="max",
             layer_scale_init=1e-3,
-            drop_path_rate=0.1,
             name="custom_ds",
         )
         assert layer.cli_mode == "inner"
@@ -1055,7 +1047,6 @@ class TestCliffordNetBlockDS:
         assert layer.kernel_size == 5
         assert layer.strides == 2
         assert layer.skip_pool == "max"
-        assert layer.drop_path_rate == 0.1
         assert layer.name == "custom_ds"
 
     def test_invalid_channels(self, shifts):
@@ -1157,27 +1148,39 @@ class TestCliffordNetBlockDS:
 
     # ---- Functional behaviour --------------------------------------------
 
-    def test_residual_identity_at_init_strides1(self, channels, shifts):
-        """gamma~0 + strides=1 → output ≈ x_prev."""
+    def test_transform_only_and_external_residual_strides1(self, channels, shifts):
+        """Transform-only contract (plan_2026-07-03_eb53492e): gamma~0 + strides=1
+        → block(x) is the transform (~0, skip_pool_layer is None), and the external
+        residual ``x + block(x) ≈ x``; block(x) alone is NOT ≈ x."""
         layer = CliffordNetBlockDS(
             channels=channels, shifts=shifts, layer_scale_init=1e-10,
         )
         x = tf.random.normal([2, 8, 8, channels])
-        out = layer(x)
+        h_mix = layer(x)
+        # strides=1 → no skip pool; external residual is plain x + block(x).
+        assert layer.skip_pool_layer is None
         np.testing.assert_allclose(
-            keras.ops.convert_to_numpy(out),
+            keras.ops.convert_to_numpy(x + h_mix),
             keras.ops.convert_to_numpy(x),
             rtol=1e-4, atol=1e-4,
         )
+        assert not np.allclose(
+            keras.ops.convert_to_numpy(h_mix),
+            keras.ops.convert_to_numpy(x),
+            atol=1e-4,
+        ), "block(x) must be transform-only (≈0), no internal residual"
 
-    def test_residual_identity_at_init_strides2_avg(self, channels, shifts):
-        """gamma~0 + strides=2 + avg pool → output ≈ avg_pool(x_prev)."""
+    def test_external_residual_strides2_avg(self, channels, shifts):
+        """gamma~0 + strides=2 + avg pool → external ``skip_pool_layer(x) + block(x)``
+        ≈ avg_pool(x_prev). The pooled skip is now orchestrated by the model."""
         layer = CliffordNetBlockDS(
             channels=channels, shifts=shifts, strides=2, skip_pool="avg",
             layer_scale_init=1e-10,
         )
         x = tf.random.normal([2, 8, 8, channels])
-        out = layer(x)
+        h_mix = layer(x)
+        # External residual using the block's own public skip_pool_layer.
+        out = layer.skip_pool_layer(x) + h_mix
         # Reference: avg pool 2x2 over x
         ref = keras.layers.AveragePooling2D(
             pool_size=2, strides=2, padding="same",
@@ -1189,21 +1192,22 @@ class TestCliffordNetBlockDS:
         )
 
     def test_skip_pool_avg_vs_max_differ(self, channels, shifts):
-        """skip_pool='avg' and 'max' should produce different outputs at strides=2."""
+        """skip_pool='avg' and 'max' should produce different external outputs at
+        strides=2. Reframed onto the block's public ``skip_pool_layer`` output
+        (plan_2026-07-03_eb53492e): the internal residual is gone, so we
+        orchestrate ``skip_pool_layer(x) + block(x)`` explicitly."""
         x = tf.random.normal([2, 8, 8, channels], seed=7)
-        # Use the same weights would require sharing — instead just check
-        # outputs differ. Both random init + different pool ⇒ different.
         layer_avg = CliffordNetBlockDS(
             channels=channels, shifts=shifts, strides=2, skip_pool="avg",
-            layer_scale_init=1e-10,  # makes residual dominate
+            layer_scale_init=1e-10,  # makes the pooled skip dominate
         )
         layer_max = CliffordNetBlockDS(
             channels=channels, shifts=shifts, strides=2, skip_pool="max",
             layer_scale_init=1e-10,
         )
-        out_avg = layer_avg(x).numpy()
-        out_max = layer_max(x).numpy()
-        # With residual dominant, outputs ≈ avg_pool(x) vs max_pool(x).
+        out_avg = (layer_avg.skip_pool_layer(x) + layer_avg(x)).numpy()
+        out_max = (layer_max.skip_pool_layer(x) + layer_max(x)).numpy()
+        # With the transform ≈0, outputs ≈ avg_pool(x) vs max_pool(x).
         # These pools differ on most natural-looking inputs.
         assert not np.allclose(out_avg, out_max, atol=1e-3)
 
@@ -1278,7 +1282,7 @@ class TestCliffordNetBlockDS:
 
     def test_inference_deterministic(self, channels, shifts, input_tensor):
         layer = CliffordNetBlockDS(
-            channels=channels, shifts=shifts, strides=2, drop_path_rate=0.0,
+            channels=channels, shifts=shifts, strides=2,
         )
         o1 = layer(input_tensor, training=False)
         o2 = layer(input_tensor, training=False)
@@ -1349,7 +1353,7 @@ class TestCliffordNetBlockDS:
             cli_mode="wedge", ctx_mode="abs",
             use_global_context=True,
             kernel_size=5, strides=2, skip_pool="max",
-            layer_scale_init=1e-3, drop_path_rate=0.1,
+            layer_scale_init=1e-3,
             name="ds_s",
         )
         config = original.get_config()
@@ -1364,7 +1368,6 @@ class TestCliffordNetBlockDS:
         assert restored.strides == original.strides
         assert restored.skip_pool == original.skip_pool
         assert restored.layer_scale_init == original.layer_scale_init
-        assert restored.drop_path_rate == original.drop_path_rate
 
     def test_model_save_load_strides1(self, channels, shifts):
         x = tf.random.normal([2, 8, 8, channels])
@@ -1467,9 +1470,17 @@ class TestReviewRegressions:
     # --- B11: causality regression test (currently passes, lock it in) ---
 
     def test_causal_cliffordnet_block_no_future_leakage(self):
-        """Modifying a future position must not change earlier outputs."""
+        """Modifying a future position must not change earlier outputs.
+
+        layer_scale_init=1.0 makes the transform-only block output significant
+        (plan_2026-07-03_eb53492e): the internal residual that used to carry the
+        raw perturbation is gone, so the transform itself must respond at the
+        perturbed position while earlier positions stay byte-identical.
+        """
         keras.utils.set_random_seed(7)
-        block = CausalCliffordNetBlock(channels=8, shifts=[1, 2])
+        block = CausalCliffordNetBlock(
+            channels=8, shifts=[1, 2], layer_scale_init=1.0,
+        )
         seq = 12
 
         x1 = tf.random.normal([1, 1, seq, 8], seed=0)
@@ -1571,7 +1582,6 @@ class TestCausalCliffordNetBlockDSv2:
             ctx_norm_type="ln",
             ctx_activation=None,
             layer_scale_init=1e-3,
-            drop_path_rate=0.1,
             name="custom_causal_dsv2",
         )
         assert layer.cli_mode == "wedge"
@@ -1727,7 +1737,12 @@ class TestCausalCliffordNetBlockDSv2:
             channels=channels, shifts=shifts, strides=2, out_channels=32,
         )
         x = tf.random.normal([2, 1, 16, channels])
-        out = layer(x)
+        # Transform-only (plan_2026-07-03_eb53492e, D-002): call() returns h_mix
+        # at `channels`; out_proj (channels->out_channels) runs externally POST-SUM.
+        h = layer(x)
+        assert h.shape == (2, 1, 8, channels)
+        assert layer.out_proj is not None
+        out = layer.out_proj(layer.skip_pool(x) + layer(x))
         assert out.shape == (2, 1, 8, 32)
 
     def test_compute_output_shape_strides1(
@@ -1749,7 +1764,9 @@ class TestCausalCliffordNetBlockDSv2:
             channels=channels, shifts=shifts, strides=2, out_channels=32,
         )
         result = layer.compute_output_shape((None, 1, 16, channels))
-        assert result == (None, 1, 8, 32)
+        # Transform-only: compute_output_shape reflects `channels`, not
+        # out_channels (out_proj runs at model level; D-002).
+        assert result == (None, 1, 8, channels)
 
     # ---- Causality (CRITICAL) --------------------------------------------
 
@@ -1759,7 +1776,7 @@ class TestCausalCliffordNetBlockDSv2:
         """Strides=1: changing the last position must not alter earlier outputs."""
         layer = CausalCliffordNetBlockDSv2(
             channels=channels, shifts=shifts,
-            layer_scale_init=1.0, drop_path_rate=0.0,
+            layer_scale_init=1.0,
         )
         x1 = tf.random.normal([1, 1, 16, channels], seed=0)
         x2 = x1.numpy().copy()
@@ -1785,7 +1802,7 @@ class TestCausalCliffordNetBlockDSv2:
     ):
         layer = CausalCliffordNetBlockDSv2(
             channels=channels, shifts=shifts,
-            layer_scale_init=1.0, drop_path_rate=0.0,
+            layer_scale_init=1.0,
         )
         x1 = tf.random.normal([1, 1, 16, channels], seed=0)
         x2 = x1.numpy().copy()
@@ -1813,7 +1830,7 @@ class TestCausalCliffordNetBlockDSv2:
         """
         layer = CausalCliffordNetBlockDSv2(
             channels=channels, shifts=shifts, strides=2,
-            layer_scale_init=1.0, drop_path_rate=0.0,
+            layer_scale_init=1.0,
         )
         x1 = tf.random.normal([1, 1, 16, channels], seed=0)
         # Perturb input position 5 -> chunk index 5//2 = 2.
@@ -1843,7 +1860,7 @@ class TestCausalCliffordNetBlockDSv2:
         layer = CausalCliffordNetBlockDSv2(
             channels=channels, shifts=shifts,
             use_global_context=True,
-            layer_scale_init=1.0, drop_path_rate=0.0,
+            layer_scale_init=1.0,
         )
         x1 = tf.random.normal([1, 1, 16, channels], seed=0)
         x2 = x1.numpy().copy()
@@ -1910,29 +1927,43 @@ class TestCausalCliffordNetBlockDSv2:
             assert out.shape == seq_tensor.shape
             assert not np.any(np.isnan(out.numpy())), f"NaN cli_mode={mode}"
 
-    def test_residual_identity_at_init_strides1(self, channels, shifts):
+    def test_transform_only_and_external_residual_strides1(self, channels, shifts):
+        """Transform-only contract (plan_2026-07-03_eb53492e): gamma~0 + strides=1
+        → block(x) is the transform (~0; skip_pool is Identity, out_proj is None),
+        and the external residual ``x + block(x) ≈ x``; block(x) alone is NOT ≈ x."""
         layer = CausalCliffordNetBlockDSv2(
             channels=channels, shifts=shifts, layer_scale_init=1e-10,
         )
         x = tf.random.normal([2, 1, 8, channels])
-        out = layer(x)
+        h_mix = layer(x)
+        assert layer.out_proj is None
         np.testing.assert_allclose(
-            keras.ops.convert_to_numpy(out),
+            keras.ops.convert_to_numpy(x + h_mix),
             keras.ops.convert_to_numpy(x),
             rtol=1e-4, atol=1e-4,
         )
+        assert not np.allclose(
+            keras.ops.convert_to_numpy(h_mix),
+            keras.ops.convert_to_numpy(x),
+            atol=1e-4,
+        ), "block(x) must be transform-only (≈0), no internal residual"
 
-    def test_residual_identity_at_init_strides2_avg(
+    def test_external_residual_strides2_avg(
         self, channels, shifts,
     ):
-        """gamma~0 + strides=2 + avg skip pool -> output ≈ avg_pool(x)."""
+        """gamma~0 + strides=2 + avg skip pool -> external ``skip_pool(x) + block(x)``
+        ≈ avg_pool(x). The pooled skip / out_proj are orchestrated externally."""
         layer = CausalCliffordNetBlockDSv2(
             channels=channels, shifts=shifts, strides=2,
             stream_pool="avg", skip_pool="avg",
             layer_scale_init=1e-10,
         )
         x = tf.random.normal([2, 1, 16, channels])
-        out = layer(x)
+        h_mix = layer(x)
+        # out_channels is None -> out_proj is None; external residual is the
+        # pooled skip plus the transform.
+        assert layer.out_proj is None
+        out = layer.skip_pool(x) + h_mix
         ref = keras.layers.AveragePooling2D(
             pool_size=(1, 2), strides=(1, 2), padding="same",
         )(x)
@@ -1957,7 +1988,6 @@ class TestCausalCliffordNetBlockDSv2:
     ):
         layer = CausalCliffordNetBlockDSv2(
             channels=channels, shifts=shifts, strides=2,
-            drop_path_rate=0.0,
         )
         x = tf.random.normal([2, 1, 16, channels])
         o1 = layer(x, training=False)
@@ -2002,7 +2032,7 @@ class TestCausalCliffordNetBlockDSv2:
             kernel_size=5, strides=2,
             stream_pool="max", skip_pool="max",
             out_channels=32, ctx_norm_type="ln", ctx_activation=None,
-            layer_scale_init=1e-3, drop_path_rate=0.1,
+            layer_scale_init=1e-3,
             name="causal_dsv2_s",
         )
         config = original.get_config()
@@ -2021,7 +2051,6 @@ class TestCausalCliffordNetBlockDSv2:
         assert restored.ctx_norm_type == original.ctx_norm_type
         assert restored.ctx_activation == original.ctx_activation
         assert restored.layer_scale_init == original.layer_scale_init
-        assert restored.drop_path_rate == original.drop_path_rate
 
     def test_model_save_load_strides1(self, channels, shifts):
         x = tf.random.normal([2, 1, 16, channels])
