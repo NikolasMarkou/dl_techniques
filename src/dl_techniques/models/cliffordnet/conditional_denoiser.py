@@ -57,6 +57,7 @@ from dl_techniques.layers.geometric.clifford_block import (
     SparseRollingGeometricProduct,
     GatedGeometricResidual,
 )
+from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 
@@ -213,11 +214,22 @@ class BiasFreeConditionedCliffordBlock(keras.layers.Layer):
         self.ggr = GatedGeometricResidual(
             channels=channels,
             layer_scale_init=layer_scale_init,
-            drop_path_rate=drop_path_rate,
             use_bias=False,
             kernel_initializer=kernel_initializer,
             kernel_regularizer=kernel_regularizer,
             name="ggr",
+        )
+
+        # --- External stochastic depth on the GGR transform ---
+        # DECISION plan_2026-07-03_eb53492e/D-001: GGR no longer applies
+        # StochasticDepth internally (drop_path removed from GGR in S2). Re-apply
+        # it here, block-externally, on h_mix BEFORE the residual add so drop_path
+        # is preserved and visible. Do NOT pass drop_path_rate= into GGR (it
+        # rejects the kwarg now) and do NOT drop the whole x_prev+h_mix sum.
+        self.drop_path = (
+            StochasticDepth(drop_path_rate=drop_path_rate, name="drop_path")
+            if drop_path_rate > 0.0
+            else None
         )
 
     def build(self, input_shape: Tuple) -> None:
@@ -242,6 +254,8 @@ class BiasFreeConditionedCliffordBlock(keras.layers.Layer):
         if self.global_geo_prod is not None:
             self.global_geo_prod.build(stream_shape)
         self.ggr.build(stream_shape)
+        if self.drop_path is not None:
+            self.drop_path.build(stream_shape)
         super().build(input_shape)
 
     def get_build_config(self) -> Dict[str, Any]:
@@ -311,8 +325,10 @@ class BiasFreeConditionedCliffordBlock(keras.layers.Layer):
             g_glo = self.global_geo_prod(z_det, c_glo)
             g_feat = g_feat + g_glo
 
-        # GGR + residual
+        # GGR transform + external stochastic depth + residual
         h_mix = self.ggr(x_norm, g_feat, training=training)
+        if self.drop_path is not None:
+            h_mix = self.drop_path(h_mix, training=training)
         return x_prev + h_mix
 
     def compute_output_shape(
