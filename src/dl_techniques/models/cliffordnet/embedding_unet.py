@@ -66,6 +66,7 @@ from dl_techniques.layers.geometric.clifford_block import (
     CliffordNetBlock,
     CliffordNetBlockDSv2,
 )
+from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.logger import logger
 
@@ -353,22 +354,33 @@ class CliffordNetEmbedding(keras.Model):
         )
 
         # Encoder: per-level blocks + downsampler (except the last level).
+        # Blocks are transform-only now; the identity residual + drop_path are
+        # applied EXTERNALLY via a parallel StochasticDepth list (D-001).
         self.encoder_blocks: List[List[CliffordNetBlock]] = []
+        self.encoder_drop_paths: List[List[StochasticDepth]] = []
         self.encoder_downsamplers: List[Optional[CliffordNetBlockDSv2]] = []
+        self.encoder_ds_drop_paths: List[Optional[StochasticDepth]] = []
         for i in range(num_levels):
             level_channels = self.channels_per_stage[i]
             level_blocks: List[CliffordNetBlock] = []
+            level_drop_paths: List[StochasticDepth] = []
             for j in range(self.blocks_per_stage[i]):
                 level_blocks.append(
                     CliffordNetBlock(
                         channels=level_channels,
-                        drop_path_rate=drop_rates[dr_idx],
                         name=f"enc_block_l{i}_b{j}",
                         **_block_kw_common,
                     )
                 )
+                level_drop_paths.append(
+                    StochasticDepth(
+                        drop_path_rate=drop_rates[dr_idx],
+                        name=f"enc_drop_path_l{i}_b{j}",
+                    )
+                )
                 dr_idx += 1
             self.encoder_blocks.append(level_blocks)
+            self.encoder_drop_paths.append(level_drop_paths)
 
             if i < num_levels - 1:
                 next_channels = self.channels_per_stage[i + 1]
@@ -389,7 +401,6 @@ class CliffordNetEmbedding(keras.Model):
                         ctx_norm_type="bn",
                         ctx_activation="silu",
                         layer_scale_init=layer_scale_init,
-                        drop_path_rate=0.0,
                         use_bias=use_bias,
                         kernel_initializer=kernel_initializer,
                         bias_initializer=bias_initializer,
@@ -398,19 +409,36 @@ class CliffordNetEmbedding(keras.Model):
                         name=f"enc_downsample_l{i}",
                     )
                 )
+                # DSv2 is transform-only (D-002). The residual/pool/proj wiring
+                # is orchestrated in call() as out_proj(skip_pool(x) + SD(ds(x))).
+                # The downsampler was historically excluded from the block
+                # drop-path schedule (drop_path_rate=0.0) → identity SD here.
+                self.encoder_ds_drop_paths.append(
+                    StochasticDepth(
+                        drop_path_rate=0.0,
+                        name=f"enc_downsample_drop_path_l{i}",
+                    )
+                )
             else:
                 self.encoder_downsamplers.append(None)
+                self.encoder_ds_drop_paths.append(None)
 
         # Bottleneck.
         deepest_channels = self.channels_per_stage[-1]
         self.bottleneck_block_list: List[CliffordNetBlock] = []
+        self.bottleneck_drop_paths: List[StochasticDepth] = []
         for k in range(bottleneck_blocks):
             self.bottleneck_block_list.append(
                 CliffordNetBlock(
                     channels=deepest_channels,
-                    drop_path_rate=drop_rates[dr_idx],
                     name=f"bottleneck_block_{k}",
                     **_block_kw_common,
+                )
+            )
+            self.bottleneck_drop_paths.append(
+                StochasticDepth(
+                    drop_path_rate=drop_rates[dr_idx],
+                    name=f"bottleneck_drop_path_{k}",
                 )
             )
             dr_idx += 1
@@ -420,11 +448,13 @@ class CliffordNetEmbedding(keras.Model):
         self.decoder_concats: List[Optional[keras.layers.Concatenate]] = []
         self.decoder_skip_projs: List[Optional[keras.layers.Conv2D]] = []
         self.decoder_blocks: List[List[CliffordNetBlock]] = []
+        self.decoder_drop_paths: List[List[StochasticDepth]] = []
         for i in range(num_levels):
             self.decoder_upsamplers.append(None)
             self.decoder_concats.append(None)
             self.decoder_skip_projs.append(None)
             self.decoder_blocks.append([])
+            self.decoder_drop_paths.append([])
 
         for i in reversed(range(num_levels - 1)):
             level_channels = self.channels_per_stage[i]
@@ -448,17 +478,24 @@ class CliffordNetEmbedding(keras.Model):
                 name=f"dec_skip_proj_l{i}",
             )
             level_blocks_dec: List[CliffordNetBlock] = []
+            level_drop_paths_dec: List[StochasticDepth] = []
             for j in range(self.blocks_per_stage[i]):
                 level_blocks_dec.append(
                     CliffordNetBlock(
                         channels=level_channels,
-                        drop_path_rate=drop_rates[dr_idx],
                         name=f"dec_block_l{i}_b{j}",
                         **_block_kw_common,
                     )
                 )
+                level_drop_paths_dec.append(
+                    StochasticDepth(
+                        drop_path_rate=drop_rates[dr_idx],
+                        name=f"dec_drop_path_l{i}_b{j}",
+                    )
+                )
                 dr_idx += 1
             self.decoder_blocks[i] = level_blocks_dec
+            self.decoder_drop_paths[i] = level_drop_paths_dec
 
         assert dr_idx == total_blocks, (
             f"drop-path index drift: dr_idx={dr_idx}, total_blocks={total_blocks}"
@@ -552,16 +589,31 @@ class CliffordNetEmbedding(keras.Model):
         # --- Encoder ---------------------------------------------------
         skip_features: List[Optional[keras.KerasTensor]] = [None] * self.num_levels
         for i in range(self.num_levels):
-            for blk in self.encoder_blocks[i]:
-                x = blk(x, training=training)
+            for blk, sd in zip(self.encoder_blocks[i], self.encoder_drop_paths[i]):
+                # External residual + drop_path (blocks are transform-only).
+                x = x + sd(blk(x, training=training), training=training)
             skip_features[i] = x
             ds = self.encoder_downsamplers[i]
             if ds is not None:
-                x = ds(x, training=training)
+                # DSv2 Option-b orchestration (D-002): reproduce the old math
+                #   out = out_proj(skip_pool(x) + h_mix)
+                # out_proj has use_bias=True → non-distributive over the sum, so
+                # the projection MUST be applied POST-SUM (project the sum, not
+                # the branches). Reuse the block's OWN skip_pool / out_proj
+                # sub-layers so no weights are duplicated.
+                ds_sd = self.encoder_ds_drop_paths[i]
+                t = ds(x, training=training)   # transform-only (B, H/s, W/s, channels)
+                t = ds_sd(t, training=training)
+                s = ds.skip_pool(x)            # pooled skip (B, H/s, W/s, channels)
+                out = s + t
+                if ds.out_proj is not None:
+                    out = ds.out_proj(out)     # POST-SUM projection channels->out_channels
+                x = out
 
         # --- Bottleneck ------------------------------------------------
-        for blk in self.bottleneck_block_list:
-            x = blk(x, training=training)
+        for blk, sd in zip(self.bottleneck_block_list, self.bottleneck_drop_paths):
+            # External residual + drop_path (blocks are transform-only).
+            x = x + sd(blk(x, training=training), training=training)
 
         # --- Decoder ---------------------------------------------------
         # NOTE: no causal right-shift here — this model is bidirectional,
@@ -572,8 +624,9 @@ class CliffordNetEmbedding(keras.Model):
             skip = skip_features[i]
             x = self.decoder_concats[i]([x, skip])
             x = self.decoder_skip_projs[i](x)
-            for blk in self.decoder_blocks[i]:
-                x = blk(x, training=training)
+            for blk, sd in zip(self.decoder_blocks[i], self.decoder_drop_paths[i]):
+                # External residual + drop_path (blocks are transform-only).
+                x = x + sd(blk(x, training=training), training=training)
 
         # --- Crop along W back to original seq_len --------------------
         x = x[:, :, :seq_len, :]
