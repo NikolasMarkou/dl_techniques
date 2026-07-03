@@ -407,12 +407,16 @@ class TestBlockActivationSerialization:
 
         rng = np.random.RandomState(1234)
         x = rng.rand(2, 32, 32, 3).astype(np.float32)
-        out_before = model(x)
+        # training=False so StochasticDepth (drop_path_rate>0, stochastic when
+        # training is not False) does not inject RNG-dependent noise that makes
+        # this roundtrip flaky under test ordering (mirrors the stem/supervision
+        # roundtrip tests below).
+        out_before = model(x, training=False)
 
         save_path = os.path.join(str(tmp_path), 'denoiser_leaky.keras')
         model.save(save_path)
         reloaded = keras.models.load_model(save_path)
-        out_after = reloaded(x)
+        out_after = reloaded(x, training=False)
 
         # GPU fp32 reduction noise -> atol 1e-4 (SYSTEM invariant)
         assert np.allclose(
@@ -430,7 +434,7 @@ class TestBlockActivationSerialization:
             initial_filters=8,
             blocks_per_level=1,
         )
-        out_default = default_model(x)
+        out_default = default_model(x, training=False)
         assert not np.allclose(
             np.array(keras.ops.convert_to_numpy(out_after)),
             np.array(keras.ops.convert_to_numpy(out_default)),
