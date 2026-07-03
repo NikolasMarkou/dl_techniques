@@ -84,6 +84,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.initializers import create_gabor_depthwise_conv2d
 from dl_techniques.layers.laplacian_filter import LaplacianPyramidLevel
 from dl_techniques.layers.match_channels import MatchChannels
+from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.layers.geometric.clifford_block import CliffordNetBlock
 
 
@@ -506,18 +507,25 @@ def create_cliffordunet_denoiser(
             current_drop_path = drop_path_rate * (
                 level * blocks_per_level + block_idx
             ) / (depth * blocks_per_level)
-            x = CliffordNetBlock(
+            block_name = f'encoder_level_{level}_clifford_block_{block_idx}'
+            # Externalized residual: the Clifford block is transform-only now; the
+            # identity residual and stochastic-depth op are explicit model-level
+            # ops so the graph is manually inspectable. Bias-free-safe (Add of the
+            # pre-block tensor + StochasticDepth are homogeneous, no additive bias).
+            h = CliffordNetBlock(
                 channels=current_filters,
                 shifts=level_shifts,
                 cli_mode=cli_mode,
                 ctx_mode=ctx_mode,
                 layer_scale_init=layer_scale_init,
-                drop_path_rate=current_drop_path,
                 kernel_initializer=kernel_initializer,
                 kernel_regularizer=kernel_regularizer,
-                name=f'encoder_level_{level}_clifford_block_{block_idx}',
+                name=block_name,
                 **block_kwargs,
             )(x)
+            if current_drop_path and current_drop_path > 0.0:
+                h = StochasticDepth(current_drop_path, name=f'{block_name}_drop_path')(h)
+            x = keras.layers.Add(name=f'{block_name}_residual')([x, h])
 
         downsample_name = (
             f'encoder_downsample_{level}' if level < depth - 1 else 'bottleneck_downsample'
@@ -545,18 +553,22 @@ def create_cliffordunet_denoiser(
     level_shift_map['bottleneck'] = bottleneck_shifts
 
     for block_idx in range(blocks_per_level):
-        x = CliffordNetBlock(
+        block_name = f'bottleneck_clifford_block_{block_idx}'
+        # Externalized residual (transform-only block); see encoder note.
+        h = CliffordNetBlock(
             channels=bottleneck_filters,
             shifts=bottleneck_shifts,
             cli_mode=cli_mode,
             ctx_mode=ctx_mode,
             layer_scale_init=layer_scale_init,
-            drop_path_rate=drop_path_rate,
             kernel_initializer=kernel_initializer,
             kernel_regularizer=kernel_regularizer,
-            name=f'bottleneck_clifford_block_{block_idx}',
+            name=block_name,
             **block_kwargs,
         )(x)
+        if drop_path_rate and drop_path_rate > 0.0:
+            h = StochasticDepth(drop_path_rate, name=f'{block_name}_drop_path')(h)
+        x = keras.layers.Add(name=f'{block_name}_residual')([x, h])
 
     # Bottleneck latent (deepest-encoder features). The named linear tap is only
     # needed when the bottleneck is exposed (second output + ConvUnextBottleneckMonitorCallback,
@@ -620,18 +632,22 @@ def create_cliffordunet_denoiser(
                 current_drop_path = drop_path_rate * (
                     level * blocks_per_level + block_idx
                 ) / (depth * blocks_per_level)
-            x = CliffordNetBlock(
+            block_name = f'decoder_level_{level}_clifford_block_{block_idx}'
+            # Externalized residual (transform-only block); see encoder note.
+            h = CliffordNetBlock(
                 channels=current_filters,
                 shifts=level_shifts,
                 cli_mode=cli_mode,
                 ctx_mode=ctx_mode,
                 layer_scale_init=layer_scale_init,
-                drop_path_rate=current_drop_path,
                 kernel_initializer=kernel_initializer,
                 kernel_regularizer=kernel_regularizer,
-                name=f'decoder_level_{level}_clifford_block_{block_idx}',
+                name=block_name,
                 **block_kwargs,
             )(x)
+            if current_drop_path and current_drop_path > 0.0:
+                h = StochasticDepth(current_drop_path, name=f'{block_name}_drop_path')(h)
+            x = keras.layers.Add(name=f'{block_name}_residual')([x, h])
 
     # =========================================================================
     # FINAL OUTPUT LAYER (bias-free 1x1 projection)
