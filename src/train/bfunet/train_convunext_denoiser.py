@@ -221,6 +221,10 @@ def build_model(config: TrainingConfig) -> keras.Model:
     cfg["convnext_version"] = config.convnext_version  # override variant default
     if config.initial_filters is not None:
         cfg["initial_filters"] = config.initial_filters  # override variant level-0 width
+    if config.depth is not None:
+        cfg["depth"] = config.depth  # override variant U-Net level count
+    if config.blocks_per_level is not None:
+        cfg["blocks_per_level"] = config.blocks_per_level  # override variant blocks/level
     # No-projection Gabor stem requires an exact channel match; fail early with a clear
     # message before the factory builds (the factory also validates as a backstop).
     if config.use_gabor_stem and not config.gabor_stem_projection:
@@ -430,6 +434,8 @@ def main():
             enable_deep_supervision=args.deep_supervision,
             enable_analyzer=args.analyzer,
             analyzer_freq=args.analyzer_freq,
+            depth=args.depth,
+            blocks_per_level=args.blocks_per_level,
             gabor_filters=8,
             epochs=2,
             curriculum_epochs=2,
@@ -493,6 +499,8 @@ def main():
             gabor_filters=args.gabor_filters,
             gabor_stem_projection=not args.no_gabor_projection,
             initial_filters=args.initial_filters,
+            depth=args.depth,
+            blocks_per_level=args.blocks_per_level,
             final_projection_groups=args.final_projection_groups,
             enable_deep_supervision=args.deep_supervision,
             epochs=args.epochs,
