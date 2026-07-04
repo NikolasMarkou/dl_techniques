@@ -452,6 +452,5 @@ These scripts have legitimate reasons for local callback management:
 | yolo12/train_multitask | Per-task callbacks, per-task loss tracking, per-task visualization |
 | tabm | Custom TabMTrainer class, not standard Keras fit() |
 | ntm/train_multitask | 6 algorithmic task generators with task-specific evaluation |
-| bfunet/train_conditional* | TrainingPipeline inheritance with `_create_callbacks()` override |
 
 When writing a new script that genuinely can't use `create_callbacks()`, document the reason in a comment at the top of the callbacks section.
