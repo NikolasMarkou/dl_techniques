@@ -86,6 +86,8 @@ class BiasFreeConv2D(keras.layers.Layer):
         kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         use_batch_norm: bool = True,
+        normalization_type: str = 'batchnorm',
+        dropout_rate: float = 0.0,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -103,6 +105,15 @@ class BiasFreeConv2D(keras.layers.Layer):
             raise TypeError(f"kernel_size must be int or tuple of 2 ints, got {type(kernel_size)}")
         if not isinstance(use_batch_norm, bool):
             raise TypeError(f"use_batch_norm must be boolean, got {type(use_batch_norm)}")
+        # DECISION plan_2026-07-04_58ac8e73/D-002: normalization_type / dropout_rate are
+        # ADDITIVE — defaults ('batchnorm', 0.0) reproduce the original layer byte-for-byte
+        # (same BatchNormalization(center=False), no Dropout sublayer). Do NOT change the
+        # default branch; ~30 existing bfunet tests + bfunet_conditional.py depend on it.
+        if normalization_type not in ('batchnorm', 'layernorm'):
+            raise ValueError(
+                f"normalization_type must be 'batchnorm' or 'layernorm', got {normalization_type}")
+        if not (0.0 <= dropout_rate < 1.0):
+            raise ValueError(f"dropout_rate must be in [0.0, 1.0), got {dropout_rate}")
 
         # Store configuration parameters
         self.filters = filters
@@ -111,6 +122,8 @@ class BiasFreeConv2D(keras.layers.Layer):
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.use_batch_norm = use_batch_norm
+        self.normalization_type = normalization_type
+        self.dropout_rate = dropout_rate
 
         # CREATE all sub-layers in __init__ following modern Keras 3 pattern
         # Bias-free convolution
@@ -124,17 +137,28 @@ class BiasFreeConv2D(keras.layers.Layer):
             name=f'{self.name}_conv'
         )
 
-        # Bias-free batch normalization (if enabled)
+        # Bias-free normalization (if enabled). Both variants stay bias-free
+        # (center=False) to preserve f(a*x)=a*f(x); 'batchnorm' is the byte-identical
+        # default, 'layernorm' is the opt-in degree-0 per-input alternative.
         if self.use_batch_norm:
-            self.batch_norm = layers.BatchNormalization(
-                center=False,  # Key: no bias/beta parameter
-                scale=True,    # Keep gamma/scale parameter for feature scaling
-                name=f'{self.name}_bn'
-            )
+            if self.normalization_type == 'layernorm':
+                self.batch_norm = layers.LayerNormalization(
+                    center=False,  # Key: no bias/beta parameter
+                    scale=True,    # Keep gamma/scale parameter for feature scaling
+                    name=f'{self.name}_bn'
+                )
+            else:
+                self.batch_norm = layers.BatchNormalization(
+                    center=False,  # Key: no bias/beta parameter
+                    scale=True,    # Keep gamma/scale parameter for feature scaling
+                    name=f'{self.name}_bn'
+                )
         else:
             self.batch_norm = None
 
-        # Activation layer (if specified)
+        # Activation layer (if specified). keras.layers.Activation accepts a string,
+        # an activation function, or a callable Layer instance (e.g. LeakyReLU(0.1));
+        # the instance is held as a callable and round-trips via get_config/from_config.
         if self.activation is not None:
             self.activation_layer = layers.Activation(
                 self.activation,
@@ -143,8 +167,16 @@ class BiasFreeConv2D(keras.layers.Layer):
         else:
             self.activation_layer = None
 
+        # Optional dropout AFTER activation (default 0.0 -> no sublayer, byte-identical).
+        if self.dropout_rate > 0.0:
+            self.dropout_layer = layers.Dropout(
+                self.dropout_rate, name=f'{self.name}_dropout')
+        else:
+            self.dropout_layer = None
+
         logger.debug(f"Initialized BiasFreeConv2D with {filters} filters, "
-                    f"kernel_size={kernel_size}, batch_norm={use_batch_norm}")
+                    f"kernel_size={kernel_size}, batch_norm={use_batch_norm}, "
+                    f"norm={normalization_type}, dropout={dropout_rate}")
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer and all sub-layers.
@@ -204,6 +236,10 @@ class BiasFreeConv2D(keras.layers.Layer):
         if self.activation_layer is not None:
             x = self.activation_layer(x)
 
+        # Apply dropout if enabled (training-only, handled by keras.layers.Dropout)
+        if self.dropout_layer is not None:
+            x = self.dropout_layer(x, training=training)
+
         return x
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
@@ -227,14 +263,30 @@ class BiasFreeConv2D(keras.layers.Layer):
         config.update({
             'filters': self.filters,
             'kernel_size': self.kernel_size,
-            'activation': keras.activations.serialize(
-                keras.activations.get(self.activation)
+            # DECISION plan_2026-07-04_58ac8e73/D-002: serialize a layer-instance
+            # activation (e.g. LeakyReLU(0.1)) so it round-trips through .keras; the
+            # string/function path stays byte-identical to the prior form (mirrors
+            # ConvUNextStem D-005). Do NOT emit a dict for a plain string activation.
+            'activation': (
+                keras.layers.serialize(self.activation)
+                if isinstance(self.activation, keras.layers.Layer)
+                else keras.activations.serialize(keras.activations.get(self.activation))
             ),
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
             'use_batch_norm': self.use_batch_norm,
+            'normalization_type': self.normalization_type,
+            'dropout_rate': self.dropout_rate,
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "BiasFreeConv2D":
+        """Deserialize, reviving a layer-instance activation from its dict form."""
+        config = dict(config)
+        if isinstance(config.get('activation'), dict):
+            config['activation'] = keras.layers.deserialize(config['activation'])
+        return cls(**config)
 
 
 # ---------------------------------------------------------------------
@@ -307,6 +359,8 @@ class BiasFreeResidualBlock(keras.layers.Layer):
         kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         use_batch_norm: bool = True,
+        normalization_type: str = 'batchnorm',
+        dropout_rate: float = 0.0,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -322,17 +376,28 @@ class BiasFreeResidualBlock(keras.layers.Layer):
                 raise ValueError(f"kernel_size tuple must contain 2 positive integers, got {kernel_size}")
         else:
             raise TypeError(f"kernel_size must be int or tuple of 2 ints, got {type(kernel_size)}")
+        # DECISION plan_2026-07-04_58ac8e73/D-002: additive kwargs; defaults reproduce
+        # the original residual block byte-for-byte. normalization_type applies to BOTH
+        # inner convs; dropout is applied INSIDE the block after conv1's activation only
+        # (conv2 is linear, pre-addition), mirroring "MLP dropout inside the block".
+        if normalization_type not in ('batchnorm', 'layernorm'):
+            raise ValueError(
+                f"normalization_type must be 'batchnorm' or 'layernorm', got {normalization_type}")
+        if not (0.0 <= dropout_rate < 1.0):
+            raise ValueError(f"dropout_rate must be in [0.0, 1.0), got {dropout_rate}")
 
         # Store configuration parameters
         self.filters = filters
         self.kernel_size = kernel_size
         self.activation = activation
         self.use_batch_norm = use_batch_norm
+        self.normalization_type = normalization_type
+        self.dropout_rate = dropout_rate
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         # CREATE all sub-layers in __init__ following modern Keras 3 pattern
-        # First conv layer with batch norm and activation
+        # First conv layer with batch norm and activation (+ dropout after activation)
         self.conv1 = BiasFreeConv2D(
             filters=self.filters,
             kernel_size=self.kernel_size,
@@ -340,10 +405,13 @@ class BiasFreeResidualBlock(keras.layers.Layer):
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             use_batch_norm=self.use_batch_norm,
+            normalization_type=self.normalization_type,
+            dropout_rate=self.dropout_rate,
             name=f'{self.name}_conv1'
         )
 
-        # Second conv layer with batch norm but no activation (before addition)
+        # Second conv layer with batch norm but no activation (before addition);
+        # no dropout on the linear pre-addition path.
         self.conv2 = BiasFreeConv2D(
             filters=self.filters,
             kernel_size=self.kernel_size,
@@ -351,6 +419,7 @@ class BiasFreeResidualBlock(keras.layers.Layer):
             kernel_initializer=self.kernel_initializer,
             kernel_regularizer=self.kernel_regularizer,
             use_batch_norm=self.use_batch_norm,
+            normalization_type=self.normalization_type,
             name=f'{self.name}_conv2'
         )
 
@@ -473,13 +542,27 @@ class BiasFreeResidualBlock(keras.layers.Layer):
         config.update({
             'filters': self.filters,
             'kernel_size': self.kernel_size,
-            'activation': keras.activations.serialize(
-                keras.activations.get(self.activation)
+            # DECISION plan_2026-07-04_58ac8e73/D-002: layer-instance activation round-trip
+            # (mirrors BiasFreeConv2D + ConvUNextStem D-005); string path byte-identical.
+            'activation': (
+                keras.layers.serialize(self.activation)
+                if isinstance(self.activation, keras.layers.Layer)
+                else keras.activations.serialize(keras.activations.get(self.activation))
             ),
             'use_batch_norm': self.use_batch_norm,
+            'normalization_type': self.normalization_type,
+            'dropout_rate': self.dropout_rate,
             'kernel_initializer': keras.initializers.serialize(self.kernel_initializer),
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
         })
         return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "BiasFreeResidualBlock":
+        """Deserialize, reviving a layer-instance activation from its dict form."""
+        config = dict(config)
+        if isinstance(config.get('activation'), dict):
+            config['activation'] = keras.layers.deserialize(config['activation'])
+        return cls(**config)
 
 # ---------------------------------------------------------------------
