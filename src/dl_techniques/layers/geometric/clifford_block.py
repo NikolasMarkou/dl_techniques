@@ -735,6 +735,7 @@ class CliffordNetBlock(keras.layers.Layer):
         gate_activation: Any = "sigmoid",
         feature_activation: Any = "silu",
         use_gate: bool = True,
+        context_kernel_size: int = 3,
         kernel_initializer: Any = "glorot_uniform",
         bias_initializer: Any = "zeros",
         kernel_regularizer: Optional[Any] = None,
@@ -751,6 +752,13 @@ class CliffordNetBlock(keras.layers.Layer):
             raise ValueError(f"channels must be positive, got {channels}")
         if ctx_mode not in ("diff", "abs"):
             raise ValueError(f"ctx_mode must be 'diff' or 'abs', got {ctx_mode!r}")
+        if not isinstance(context_kernel_size, int) or isinstance(
+            context_kernel_size, bool
+        ) or context_kernel_size <= 0:
+            raise ValueError(
+                f"context_kernel_size must be a positive int, "
+                f"got {context_kernel_size!r}"
+            )
         # The global branch hardcodes shifts=[1, 2]; with
         # channels < 2 the inner SRGP filter would either silently drop
         # shifts (channels=2 -> only shift=1 remains, warning) or reject
@@ -778,6 +786,7 @@ class CliffordNetBlock(keras.layers.Layer):
         self.gate_activation = gate_activation
         self.feature_activation = feature_activation
         self.use_gate = use_gate
+        self.context_kernel_size = context_kernel_size
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
@@ -819,18 +828,19 @@ class CliffordNetBlock(keras.layers.Layer):
         )
 
         # --- Step 2b: Context stream ---
-        # Two stacked 3×3 depthwise convolutions (effective 5×5 RF),
-        # one configurable normalization layer after both, then SiLU in call().
-        # Default normalization_type is "zero_centered_rms_norm"; legacy
-        # batch-norm behavior is recovered with normalization_type="batch_norm".
+        # Two stacked KxK depthwise convolutions (K=context_kernel_size, default
+        # 3 -> effective (2K-1)x(2K-1) = 5×5 RF), one configurable normalization
+        # layer after both, then SiLU in call(). Default normalization_type is
+        # "zero_centered_rms_norm"; legacy batch-norm behavior is recovered with
+        # normalization_type="batch_norm".
         self.dw_conv = keras.layers.DepthwiseConv2D(
-            kernel_size=3,
+            kernel_size=self.context_kernel_size,
             padding="same",
             use_bias=False,
             name="dw_conv",
         )
         self.dw_conv2 = keras.layers.DepthwiseConv2D(
-            kernel_size=3,
+            kernel_size=self.context_kernel_size,
             padding="same",
             use_bias=False,
             name="dw_conv2",
@@ -1032,6 +1042,7 @@ class CliffordNetBlock(keras.layers.Layer):
                 "gate_activation": self.gate_activation,
                 "feature_activation": self.feature_activation,
                 "use_gate": self.use_gate,
+                "context_kernel_size": self.context_kernel_size,
                 "kernel_initializer": initializers.serialize(self.kernel_initializer),
                 "bias_initializer": initializers.serialize(self.bias_initializer),
                 "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
@@ -1087,6 +1098,7 @@ class CausalCliffordNetBlock(keras.layers.Layer):
         use_global_context: bool = False,
         layer_scale_init: float = 1e-5,
         use_bias: bool = True,
+        context_kernel_size: int = 3,
         kernel_initializer: Any = "glorot_uniform",
         bias_initializer: Any = "zeros",
         kernel_regularizer: Optional[Any] = None,
@@ -1101,6 +1113,13 @@ class CausalCliffordNetBlock(keras.layers.Layer):
             raise ValueError(f"channels must be positive, got {channels}")
         if ctx_mode not in ("diff", "abs"):
             raise ValueError(f"ctx_mode must be 'diff' or 'abs', got {ctx_mode!r}")
+        if not isinstance(context_kernel_size, int) or isinstance(
+            context_kernel_size, bool
+        ) or context_kernel_size <= 0:
+            raise ValueError(
+                f"context_kernel_size must be a positive int, "
+                f"got {context_kernel_size!r}"
+            )
         # See D-002 (CliffordNetBlock): global branch needs channels >= 2.
         if use_global_context and channels < 2:
             raise ValueError(
@@ -1148,7 +1167,8 @@ class CausalCliffordNetBlock(keras.layers.Layer):
         # Context norm is configurable via normalization_type; default is
         # "zero_centered_rms_norm". Pass normalization_type="batch_norm" to
         # recover the legacy block.
-        self._ctx_kernel_w = 3
+        self.context_kernel_size = context_kernel_size
+        self._ctx_kernel_w = context_kernel_size
         self.dw_conv = keras.layers.DepthwiseConv2D(
             kernel_size=(1, self._ctx_kernel_w),
             padding="valid",
@@ -1242,13 +1262,14 @@ class CausalCliffordNetBlock(keras.layers.Layer):
         stream_shape = self.linear_det.compute_output_shape(spatial_shape)
 
         # Causal conv: input gets left-padded by (kernel_size-1) before valid conv
+        _pad = self._ctx_kernel_w - 1
         padded_shape = (*input_shape[:2],
-                        (input_shape[2] or 0) + 2, input_shape[3])
+                        (input_shape[2] or 0) + _pad, input_shape[3])
         self.dw_conv.build(padded_shape)
         # After valid conv on padded input, output W = original W
         dw1_out = input_shape
         padded_shape2 = (*dw1_out[:2],
-                         (dw1_out[2] or 0) + 2, dw1_out[3])
+                         (dw1_out[2] or 0) + _pad, dw1_out[3])
         self.dw_conv2.build(padded_shape2)
         self.ctx_norm.build(dw1_out)
 
@@ -1281,9 +1302,9 @@ class CausalCliffordNetBlock(keras.layers.Layer):
         z_det = self.linear_det(x_norm)
 
         # Causal context stream: left-pad then valid conv (×2) -> configurable norm -> SiLU
-        z_ctx = self._causal_pad(x_norm)
+        z_ctx = self._causal_pad(x_norm, self._ctx_kernel_w)
         z_ctx = self.dw_conv(z_ctx)
-        z_ctx = self._causal_pad(z_ctx)
+        z_ctx = self._causal_pad(z_ctx, self._ctx_kernel_w)
         z_ctx = self.dw_conv2(z_ctx)
         z_ctx = keras.activations.silu(self.ctx_norm(z_ctx, training=training))
 
@@ -1347,6 +1368,7 @@ class CausalCliffordNetBlock(keras.layers.Layer):
             "use_global_context": self.use_global_context,
             "layer_scale_init": self.layer_scale_init,
             "use_bias": self.use_bias,
+            "context_kernel_size": self.context_kernel_size,
             "kernel_initializer": initializers.serialize(self.kernel_initializer),
             "bias_initializer": initializers.serialize(self.bias_initializer),
             "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
