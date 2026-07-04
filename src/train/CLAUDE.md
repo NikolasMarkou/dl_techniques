@@ -248,6 +248,8 @@ def main():
 
 These scripts use file-based datasets (not `load_dataset()`), monitor `val_loss` or domain metrics (`val_psnr`), and have domain-specific callbacks (visualization, deep supervision scheduling). They wrap `create_callbacks()` and append domain callbacks.
 
+> **BFCNN note:** the flat bias-free ResNet (BFCNN) denoiser is now trained via `train/bfunet/train_bfcnn_denoiser.py` — a thin `common.py` consumer (alongside the ConvUNeXt / Clifford / plain U-Net denoisers), NOT a separate `train/bfcnn/` package. That directory was removed; the callbacks/dashboard/curriculum come from the shared `common.train()` substrate rather than the local wrap-`create_callbacks` shape shown below. The example remains a valid illustration of that shape for the other Pattern-4 users.
+
 ```python
 from train.common import setup_gpu, create_callbacks as create_common_callbacks
 

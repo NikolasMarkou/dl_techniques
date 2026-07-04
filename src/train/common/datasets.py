@@ -177,8 +177,10 @@ def collect_image_paths(
 
     Shared extraction of the byte-identical ``rglob`` + extension-filter +
     cap-then-shuffle path-collection preamble previously duplicated across the
-    denoiser trainers (``train_bfcnn.py`` / ``train_bfunet.py`` /
-    ``train_denoiser.py``) and the ``DatasetBuilder._create_file_list`` methods.
+    denoiser trainers (``train/bfunet/train_bfcnn_denoiser.py`` /
+    ``train_convunext_denoiser.py`` / ``train_cliffordunet_denoiser.py`` /
+    ``train_unet_denoiser.py``) and the ``DatasetBuilder._create_file_list``
+    methods.
 
     For each directory it recursively scans (``rglob("*")``) for files whose
     suffix matches ``extensions`` (case-insensitive). A directory that does not

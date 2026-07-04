@@ -1,8 +1,9 @@
 # bfunet — Bias-Free Denoiser Training
 
 Production training suite for **bias-free image denoisers** built on a shared substrate.
-Two model families are trained here — a **ConvUNeXt** (ConvNeXt U-Net) denoiser and a
-**CliffordUNet** (geometric-algebra U-Net) denoiser — both wired through one common
+Several bias-free denoiser families are trained here — a **ConvUNeXt** (ConvNeXt U-Net)
+denoiser, a **CliffordUNet** (geometric-algebra U-Net) denoiser, a plain **U-Net** baseline,
+and a flat **BFCNN** (bias-free ResNet, non-U-Net) baseline — all wired through one common
 data/curriculum/training module (`common.py`).
 
 The design principle throughout is **bias-free / degree-1 homogeneity**: every layer avoids
@@ -20,11 +21,12 @@ noise levels it was not explicitly trained on.
 | `train_convunext_denoiser.py` | **Production trainer** — bias-free ConvNeXt U-Net denoiser. The most actively developed. |
 | `train_cliffordunet_denoiser.py` | **Production trainer** — bias-free homogeneous CliffordUNet denoiser (Clifford geometric-product blocks). |
 | `train_unet_denoiser.py` | **Baseline trainer** — bias-free plain U-Net denoiser (classic conv/residual blocks). Same infrastructure feature set as ConvUNeXt; the apples-to-apples baseline. |
+| `train_bfcnn_denoiser.py` | **Baseline trainer** — flat bias-free ResNet (BFCNN, Mohan et al. ICLR 2020), a stack of residual blocks with **no downsampling / no skips** — the non-U-Net baseline. Trains on the same shared substrate. |
 | `eval_psnr_vs_noise.py` | **Standalone tool** — PSNR-vs-noise-level evaluation of any saved `.keras` denoiser, with optional SOTA reference overlay. |
 | `variance_probe.py` | **Standalone tool** — ConvUNeXt-only training-stability probe (run-to-run variance across seeds). |
 | `FINDINGS.md` | Empirical note on the channel-matching (`--zero-pad-channels`) experiment. |
 
-All three trainers are deliberately thin: each supplies only a `build_model()`, a `verify_bias_free()`,
+All four trainers are deliberately thin: each supplies only a `build_model()`, a `verify_bias_free()`,
 a model-specific `TrainingConfig(BFUnetTrainingConfig)`, and CLI glue. Everything else —
 the fit loop, dataset streaming, curriculum, visualization — lives once in `common.py` and is
 invoked via `common.train(config, build_model, verify_bias_free, ...)`.
@@ -72,7 +74,7 @@ the `TrainingConfig` programmatically. `--max-train-files` / `--max-val-files` c
 
 ## Shared CLI (`add_common_arguments`)
 
-All three trainers expose this flag set (defined once in `common.py`). Model-specific flags are
+All four trainers expose this flag set (defined once in `common.py`). Model-specific flags are
 in the per-trainer sections below.
 
 **Data & schedule**
@@ -234,6 +236,38 @@ Model-specific flags (beyond the shared set):
 MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_unet_denoiser \
     --variant base --block-normalization batchnorm \
     --epochs 100 --batch-size 4 --gpu 1
+```
+
+---
+
+## BFCNN trainer (`train_bfcnn_denoiser.py`)
+
+Trains `create_bfcnn_variant` / `create_bfcnn_denoiser` — a **flat bias-free ResNet** (BFCNN,
+the original Mohan et al. ICLR 2020 architecture): a stem conv, a stack of bias-free residual
+blocks, and a final projection, with **no downsampling and no skip connections**. It is the
+non-U-Net baseline, trained on the same shared substrate (curriculum, self-iterate, WW-PGD,
+dashboard). The U-Net-only shared flags (`--depth`, `--blocks-per-level`, `--laplacian-pyramid`,
+etc.) are ignored by the flat-ResNet factory. Variants: `tiny` (default), `small`, `base`,
+`large`, `xlarge`, `custom`.
+
+Model-specific flags (beyond the shared set):
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--variant` | tiny | BFCNN size preset; `custom` uses the knobs below |
+| `--num-blocks` | 8 | Number of residual blocks (`custom` only) |
+| `--filters` | 64 | Residual-block filter width (`custom` only) |
+| `--initial-kernel-size` | 5 | Kernel size for the stem conv (`custom` only) |
+| `--kernel-size` | 3 | Kernel size for the residual blocks (`custom` only) |
+| `--activation` | relu | Block activation (`custom` only); output stays linear |
+
+```bash
+# Full BFCNN base training run
+MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_bfcnn_denoiser \
+    --variant base --epochs 100 --batch-size 16 --gpu 1
+
+# Fast end-to-end mechanism check
+MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_bfcnn_denoiser --smoke
 ```
 
 ---
