@@ -176,9 +176,9 @@ class TrainingConfig(BFUnetTrainingConfig):
     # LayerScale gamma init for the Clifford GatedGeometricResidual. Matches the factory
     # default (1e-5); larger values unmask in-block behavior earlier in training.
     layer_scale_init: float = 1e-5
-    # Per-level channel multiplier for the U-Net (level i width = initial_filters *
-    # filter_multiplier**i). Matches the factory default (2).
-    filter_multiplier: int = 2
+    # filter_multiplier (per-encoder-level channel-growth multiplier) is inherited from
+    # BFUnetTrainingConfig (float, default 2.0) and surfaced via the shared
+    # add_common_arguments --filter-multiplier CLI; build_model passes it to the factory.
 
     def __post_init__(self):
         super().__post_init__()
@@ -348,8 +348,6 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--layer-scale-init", type=float, default=1e-5,
                         help="Initial LayerScale gamma for the Clifford GatedGeometricResidual. "
                              "Default 1e-5 (matches the factory).")
-    parser.add_argument("--filter-multiplier", type=int, default=2,
-                        help="Per-level channel multiplier for the U-Net. Default 2.")
     args = parser.parse_args()
     reject_self_iterate_with_nonadditive(parser, args)
     return args

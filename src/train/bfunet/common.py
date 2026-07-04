@@ -728,6 +728,11 @@ class BFUnetTrainingConfig:
     # default from the model CONFIGS. Primarily for the no-projection Gabor stem, where
     # initial_filters must equal channels * gabor_filters (e.g. 3 * 32 = 96).
     initial_filters: Optional[int] = None
+    # Per-encoder-level channel-growth multiplier (>= 1). Channels at level i are
+    # int(round(initial_filters * filter_multiplier ** i)). Default 2.0 doubles per
+    # level (byte-identical to the historical int 2). Shared by both bfunet trainers;
+    # passed into each factory by build_model.
+    filter_multiplier: float = 2.0
     # Groups for the final 1x1 output projection. 1 = standard dense conv (default,
     # byte-identical). -1 = one group per output channel (groups = channels), so each output
     # channel reads a disjoint feature group. Any >1 int sets the group count directly.
@@ -823,6 +828,10 @@ class BFUnetTrainingConfig:
             self.warmup_epochs = max(1, round(0.1 * self.epochs))
         if self.patch_size <= 0 or self.channels <= 0:
             raise ValueError("Invalid patch size or channel configuration")
+        if self.filter_multiplier < 1:
+            raise ValueError(
+                f"filter_multiplier must be >= 1, got {self.filter_multiplier}"
+            )
         if self.noise_type not in {"additive", "multiplicative", "composite"}:
             raise ValueError(
                 "noise_type must be 'additive', 'multiplicative', or 'composite'"
@@ -1773,6 +1782,10 @@ def add_common_arguments(parser) -> None:
                         help="Override the variant's level-0 width (initial_filters). "
                              "Default: variant value. Use with --no-gabor-projection so "
                              "channels*gabor_filters == initial_filters.")
+    parser.add_argument("--filter-multiplier", type=float, default=2.0,
+                        help="Per-encoder-level channel-growth multiplier (>=1). "
+                             "channels[level]=round(initial_filters * multiplier**level). "
+                             "Default 2.0 doubles per level.")
     parser.add_argument("--final-projection-groups", type=int, default=1,
                         help="Groups for the final 1x1 output projection. 1=standard dense "
                              "(default). -1 = one group per output channel (groups=channels), "

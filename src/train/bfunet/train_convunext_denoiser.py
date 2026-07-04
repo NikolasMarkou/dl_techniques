@@ -289,6 +289,7 @@ def build_model(config: TrainingConfig) -> keras.Model:
         ),
         dropout_rate=config.dropout_rate,
         block_normalization=config.block_normalization,
+        filter_multiplier=config.filter_multiplier,
         **cfg,
     )
 
