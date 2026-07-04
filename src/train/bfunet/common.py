@@ -1,4 +1,4 @@
-"""Shared building blocks for the bfunet denoiser trainers (train_convunext_denoiser.py and train_cliffordunet_denoiser.py). Data pipeline, curriculum noise, eval/PSNR helpers, dashboard, and callbacks live here once; each trainer imports/re-exports them."""
+"""Shared building blocks for the bfunet denoiser trainers (train_convunext_denoiser.py, train_cliffordunet_denoiser.py, and train_unet_denoiser.py). Data pipeline, curriculum noise, eval/PSNR helpers, dashboard, and callbacks live here once; each trainer imports/re-exports them."""
 
 import gc
 import csv

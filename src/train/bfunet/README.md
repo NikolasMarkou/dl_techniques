@@ -16,14 +16,15 @@ noise levels it was not explicitly trained on.
 
 | File | Role |
 |------|------|
-| `common.py` | **Shared substrate** — data pipeline, noise curriculum, self-iteration pool, callbacks, dashboard, the `train()` orchestrator, the `BFUnetTrainingConfig` base dataclass, and `add_common_arguments()` (the CLI shared by both trainers). Not run directly. |
-| `train_convunext_denoiser.py` | **Production trainer** — bias-free ConvNeXt U-Net denoiser. The most actively developed of the two. |
+| `common.py` | **Shared substrate** — data pipeline, noise curriculum, self-iteration pool, callbacks, dashboard, the `train()` orchestrator, the `BFUnetTrainingConfig` base dataclass, and `add_common_arguments()` (the CLI shared by all trainers). Not run directly. |
+| `train_convunext_denoiser.py` | **Production trainer** — bias-free ConvNeXt U-Net denoiser. The most actively developed. |
 | `train_cliffordunet_denoiser.py` | **Production trainer** — bias-free homogeneous CliffordUNet denoiser (Clifford geometric-product blocks). |
+| `train_unet_denoiser.py` | **Baseline trainer** — bias-free plain U-Net denoiser (classic conv/residual blocks). Same infrastructure feature set as ConvUNeXt; the apples-to-apples baseline. |
 | `eval_psnr_vs_noise.py` | **Standalone tool** — PSNR-vs-noise-level evaluation of any saved `.keras` denoiser, with optional SOTA reference overlay. |
 | `variance_probe.py` | **Standalone tool** — ConvUNeXt-only training-stability probe (run-to-run variance across seeds). |
 | `FINDINGS.md` | Empirical note on the channel-matching (`--zero-pad-channels`) experiment. |
 
-Both trainers are deliberately thin: each supplies only a `build_model()`, a `verify_bias_free()`,
+All three trainers are deliberately thin: each supplies only a `build_model()`, a `verify_bias_free()`,
 a model-specific `TrainingConfig(BFUnetTrainingConfig)`, and CLI glue. Everything else —
 the fit loop, dataset streaming, curriculum, visualization — lives once in `common.py` and is
 invoked via `common.train(config, build_model, verify_bias_free, ...)`.
@@ -41,6 +42,10 @@ MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_convunext_denoiser \
 
 # CliffordUNet base denoiser
 MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_cliffordunet_denoiser \
+    --variant base --epochs 100 --batch-size 4 --gpu 1
+
+# Plain U-Net baseline denoiser
+MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_unet_denoiser \
     --variant base --epochs 100 --batch-size 4 --gpu 1
 
 # Fast mechanism check (a few steps, tiny variant) — verifies the pipeline end-to-end
@@ -190,6 +195,37 @@ Model-specific flags:
 ```bash
 MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_cliffordunet_denoiser \
     --variant base --cli-mode full --ctx-mode abs \
+    --epochs 100 --batch-size 4 --gpu 1
+```
+
+---
+
+## U-Net baseline trainer (`train_unet_denoiser.py`)
+
+Trains `create_bfunet_denoiser` — a classic bias-free U-Net with plain `BiasFreeConv2D` /
+`BiasFreeResidualBlock` blocks (no ConvNeXt inverted bottleneck). It is the **apples-to-apples
+baseline**: identical training machinery and the **same infrastructure feature set** as the
+ConvUNeXt trainer (gabor stem, laplacian pyramid, `--zero-pad-channels`, pooling-type,
+`--expose-bottleneck`, block-normalization choice, `--final-projection-groups`, dropout — all
+via the shared CLI above), so only the block internals differ. Variants: `tiny`, `small`,
+`base` (default), `large`, `xlarge`. The model requires `--depth ≥ 3`.
+
+Model-specific flags (beyond the shared set):
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--variant` | base | U-Net size preset |
+| `--no-residual-blocks` | off (residual ON) | Use plain `BiasFreeConv2D` blocks instead of residual blocks |
+| `--kernel-size` | 3 | Kernel for all non-stem conv blocks |
+| `--initial-kernel-size` | 5 | Kernel for the level-0 first conv |
+| `--block-activation` | leaky_relu | Whole-denoiser activation (output stays linear) |
+| `--block-activation-alpha` | 0.1 | LeakyReLU negative slope |
+| `--dropout` | 0.0 | Dropout inside the conv blocks (after activation) |
+| `--block-normalization` | batchnorm | `batchnorm` = bias-free variance-only BatchNorm (center=False); `layernorm` = bias-free per-input LayerNorm |
+
+```bash
+MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_unet_denoiser \
+    --variant base --block-normalization batchnorm \
     --epochs 100 --batch-size 4 --gpu 1
 ```
 
