@@ -1310,11 +1310,11 @@ class CliffordNetBlockDS(keras.layers.Layer):
         │ GGR(X_norm_p, G_feat) → H_mix  │
         └───────────────┬────────────────┘
                         ▼
-            (if s>1) Pool(skip) on X_prev
-                        │
-                        ▼
         ┌────────────────────────────────┐
-        │ X_out = X_skip + H_mix         │
+        │ return H_mix  (transform only; │
+        │ skip-pool of x_prev + residual │
+        │ add happen externally, via the │
+        │ public skip_pool_layer)        │
         │ [B, H/s, W/s, D]               │
         └────────────────────────────────┘
 
