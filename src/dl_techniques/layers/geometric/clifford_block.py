@@ -1,8 +1,115 @@
 """
 CliffordNet block and constituent primitives.
 
-Implements the geometric-algebra-based vision block from:
-    "CliffordNet: All You Need is Geometric Algebra"  arXiv:2601.06793v2
+Implements the geometric-algebra vision block from
+    Zhongping Ji, "CliffordNet: All You Need is Geometric Algebra",
+    arXiv:2601.06793v2 (2026).  Reference code: github.com/ParaMind2025/CAN
+
+================================================================================
+Theory — geometric algebra as a single, unified interaction primitive
+================================================================================
+
+Motivation
+----------
+Modern vision backbones factor each block into two engineered stages: a spatial
+token mixer (self-attention or convolution) and a channel mixer (a heavy
+Feed-Forward Network / MLP).  CliffordNet rejects that decomposition.  It argues
+that ONE algebraic operation — the Clifford *geometric product* — can carry both
+roles simultaneously, at strictly linear cost, so no FFN is required.  The
+guiding thesis is that "global understanding is an emergent property of rigorous
+local processing": dense, algebraically-complete local interaction stands in for
+both global attention and channel-mixing MLPs.
+
+The geometric product
+---------------------
+For two multivectors (here, per-pixel channel vectors) ``u`` and ``v`` the
+geometric product splits into a symmetric and an antisymmetric part::
+
+    u v  =  u · v      +      u ∧ v
+            (inner)          (wedge / exterior)
+            "coherence"      "structure"
+
+* The **inner product** ``u · v`` is the generalized dot product.  It measures
+  feature *coherence* / alignment — how strongly the detail stream agrees with
+  its local context.  CliffordNet realizes it as a gated Hadamard term,
+  ``SiLU(u ⊙ v)``, i.e. an alignment-controlled diffusion / gate.
+
+* The **wedge product** ``u ∧ v`` is the antisymmetric bivector — the oriented
+  plane (area element) spanned by ``u`` and ``v``.  It measures *structural
+  variation*: orthogonality, orientation, a "geometric torque / vorticity" that
+  fires exactly on the edges and texture where local context diverges from the
+  center.  Ordinary dot-product attention keeps only the symmetric (inner) part
+  and DISCARDS this bivector; retaining it is what the paper calls
+  **algebraic completeness**.
+
+Dual-stream geometric block
+---------------------------
+Each block derives two streams from the normalized input ``X_norm``:
+
+* **Detail stream** (high frequency, no spatial mixing):
+  ``Z_det = Linear(X_norm)`` — a 1×1 pointwise projection.
+* **Context stream** (local aggregation):
+  ``Z_ctx = act(Norm(DWConv(DWConv(X_norm))))`` — two stacked depthwise
+  convolutions (~5×5 effective receptive field) aggregating local structure.
+
+An optional *differential* (Laplacian) coupling sharpens the interaction::
+
+    ctx_mode="diff":  Z_ctx <- Z_ctx − Z_det     (discrete Laplacian Δ)
+    ctx_mode="abs" :  Z_ctx                        (pure aggregation)
+
+The two streams then interact through the geometric product to produce the
+geometric feature ``G_feat`` that drives the state update.
+
+Sparse rolling geometric product (linear complexity)
+----------------------------------------------------
+A full channel-pairwise product is O(D²).  CliffordNet samples only a few
+diagonals of that interaction matrix via cyclic channel shifts (rolls), giving
+O(N · D · |shifts|) — linear in both tokens ``N`` and channels ``D``.  For each
+offset ``s`` in ``shifts`` (rolling ``Z_ctx`` by ``s`` along the channel axis)::
+
+    dot_s[c]   = act( Z_det[c] · Z_ctx[(c−s) mod D] )        # inner / coherence
+    wedge_s[c] = Z_det[c] · Z_ctx[(c−s) mod D]
+               − Z_ctx[c] · Z_det[(c−s) mod D]               # wedge / bivector
+
+The per-shift dot and wedge tensors are concatenated and projected back to ``D``
+channels by a learnable Dense ``P``.  Exponentially spaced shifts (1, 2, 4, 8, …)
+impose a ring topology with logarithmic mixing range.
+
+Gated Geometric Residual (GGR) — an Euler step of a feature ODE
+---------------------------------------------------------------
+The block treats depth as time and takes a first-order Euler step of a
+continuous geometric evolution ``∂H/∂t = f(H, G_feat)``::
+
+    H_out = H_prev + γ ⊙ ( SiLU(H_norm) + α ⊙ G_feat )
+
+* ``γ`` — LayerScale, a per-channel scale initialized ≈ 0 so the block starts
+  near identity (stable very deep stacks).
+* ``SiLU(H_norm)`` — conditions the identity / state path.
+* ``α = sigmoid(Gate([H_norm, G_feat]))`` — a learned gate blending the identity
+  path with the injected geometric interaction.
+
+Global context branch (optional)
+--------------------------------
+A whole-image summary ``C_glo = GlobalAvgPool(X_norm)`` runs the same geometric
+product (hardcoded ``shifts=[1, 2]``, ``cli_mode="full"``, differential context)
+and is superposed onto the local ``G_feat``, adding multi-scale awareness when
+enabled.
+
+Efficiency
+----------
+With ZERO FFN blocks, CliffordNet sets a new parameter-efficiency Pareto frontier
+on CIFAR-100: ~1.4M params -> 77.82% (matching ResNet-18's 76.75% at ~8× fewer
+params); ~2.6M -> 79.05% (beating MobileNetV2 and ViT-Tiny at similar size);
+larger variants surpass ResNet-50 / DenseNet-121 at a fraction of the parameters.
+
+Implementation note (this file)
+-------------------------------
+:class:`GatedGeometricResidual` returns ONLY the γ-scaled term
+``γ ⊙ (SiLU(H_norm) + α ⊙ G_feat)``; the residual add ``H_prev + …`` and any
+stochastic-depth (drop-path) are performed EXTERNALLY by the caller / model, so
+the computation graph is explicit and manually inspectable.  A bias-free,
+degree-1-homogeneous configuration (linear final projection, gate removed,
+variance-only norms) is used by the Clifford denoiser (Miyasawa-compliant).
 
 Key primitives
 --------------
@@ -15,7 +122,7 @@ Fixes vs previous version
 1. ``SparseRollingGeometricProduct``: filter ``shifts`` to keep only
    ``s < channels`` (matches ``CliffordInteraction_PyTorch`` behaviour).
 2. ``CliffordNetBlock`` context stream: two stacked ``DepthwiseConv2D``
-   (effective 7×7 RF) with a single ``BatchNormalization`` after both,
+   (effective 5×5 RF) with a single ``BatchNormalization`` after both,
    matching the original ``get_context_local`` sequential.
 3. ``CliffordNetBlock`` global branch: shifts hardcoded to ``[1, 2]``,
    ``cli_mode`` hardcoded to ``"full"`` (original always uses these for
@@ -404,7 +511,12 @@ class GatedGeometricResidual(keras.layers.Layer):
         self.kernel_regularizer = regularizers.get(kernel_regularizer)
         self.bias_regularizer = regularizers.get(bias_regularizer)
 
-        # Learned gate: Dense(2C -> C) followed by sigmoid
+        # Learned gate: Dense(2C -> C) followed by sigmoid.
+        # NOTE: built unconditionally (even when use_gate=False) so a
+        # use_gate=False model (e.g. the homogeneous Clifford denoiser) keeps a
+        # stable weight layout for .keras checkpoint round-trips. When use_gate is
+        # False the layer is inert (unused in call()); that is the source of the
+        # benign "Gradients do not exist for gate_dense" optimizer warning.
         self.gate_dense = keras.layers.Dense(
             channels,
             use_bias=self.use_bias,
@@ -707,7 +819,7 @@ class CliffordNetBlock(keras.layers.Layer):
         )
 
         # --- Step 2b: Context stream ---
-        # Two stacked 3×3 depthwise convolutions (effective 7×7 RF),
+        # Two stacked 3×3 depthwise convolutions (effective 5×5 RF),
         # one configurable normalization layer after both, then SiLU in call().
         # Default normalization_type is "zero_centered_rms_norm"; legacy
         # batch-norm behavior is recovered with normalization_type="batch_norm".
@@ -1113,6 +1225,16 @@ class CausalCliffordNetBlock(keras.layers.Layer):
 
     def build(self, input_shape: Tuple) -> None:
         """Build all sub-layers."""
+        # B7: isotropic in channels (see CliffordNetBlock.build). Reject a
+        # mismatched last dim early with a clear message rather than a cryptic
+        # broadcast/shape error deeper in the stream interaction.
+        if input_shape[-1] is not None and input_shape[-1] != self.channels:
+            raise ValueError(
+                f"CausalCliffordNetBlock is isotropic: expected last dim == "
+                f"channels={self.channels}, got input_shape[-1]={input_shape[-1]}. "
+                f"Project the input before the block or rebuild with "
+                f"channels={input_shape[-1]}."
+            )
         spatial_shape = input_shape
 
         self.input_norm.build(spatial_shape)
@@ -1285,9 +1407,9 @@ class CliffordNetBlockDS(keras.layers.Layer):
             (if s>1) Pool(stream)
                         │
                         ▼
-        ┌──────────────────────────────────┐
-        │  X_norm_p  [B, H/s, W/s, D]      │
-        └────────┬───────────────┬─────────┘
+        ┌────────────────────────────────┐
+        │  X_norm_p  [B, H/s, W/s, D]    │
+        └────────┬───────────────┬───────┘
                  ▼               ▼
         ┌──────────────┐ ┌──────────────────┐
         │ Detail       │ │ Context          │
