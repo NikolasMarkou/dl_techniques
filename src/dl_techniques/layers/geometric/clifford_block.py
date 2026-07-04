@@ -728,6 +728,7 @@ class CliffordNetBlock(keras.layers.Layer):
         cli_mode: CliMode = "full",
         ctx_mode: CtxMode = "diff",
         use_global_context: bool = False,
+        causal: bool = False,
         layer_scale_init: float = 1e-5,
         use_bias: bool = True,
         activation: Any = "silu",
@@ -774,6 +775,7 @@ class CliffordNetBlock(keras.layers.Layer):
         self.cli_mode = cli_mode
         self.ctx_mode = ctx_mode
         self.use_global_context = use_global_context
+        self.causal = causal
         self.layer_scale_init = layer_scale_init
         self.use_bias = use_bias
         # DECISION plan_2026-07-01_6dc255c1/D-001: context-stream activation and
@@ -834,18 +836,42 @@ class CliffordNetBlock(keras.layers.Layer):
         # "batch_norm" (matches the original CliffordBlock's BatchNormalization);
         # pass normalization_type="zero_centered_rms_norm" for the bias-free /
         # degree-1-homogeneous denoiser configuration.
-        self.dw_conv = keras.layers.DepthwiseConv2D(
-            kernel_size=self.context_kernel_size,
-            padding="same",
-            use_bias=False,
-            name="dw_conv",
-        )
-        self.dw_conv2 = keras.layers.DepthwiseConv2D(
-            kernel_size=self.context_kernel_size,
-            padding="same",
-            use_bias=False,
-            name="dw_conv2",
-        )
+        # DECISION plan_2026-07-04_d2ac2f68/D-001: the vision and causal Clifford
+        # blocks are unified via this single `causal` flag. It gates the four (and
+        # only four) behavioral differences: (a) context depthwise-conv geometry
+        # ((1,K)/valid + explicit left-pad vs (K,K)/same) here; (b) the build()
+        # shapes (left-padded); (c) the call() causal padding before each DWConv;
+        # (d) the global-context statistic (causal cumulative mean vs full-image
+        # GAP). CausalCliffordNetBlock is now a THIN subclass that only forces
+        # causal=True + a norm default. Do NOT re-duplicate the block body into the
+        # subclass, and do NOT collapse these two paths — the causal path relies on
+        # `H=1` sequence tensors and left-only padding along axis=2.
+        if self.causal:
+            self.dw_conv = keras.layers.DepthwiseConv2D(
+                kernel_size=(1, self.context_kernel_size),
+                padding="valid",
+                use_bias=False,
+                name="dw_conv",
+            )
+            self.dw_conv2 = keras.layers.DepthwiseConv2D(
+                kernel_size=(1, self.context_kernel_size),
+                padding="valid",
+                use_bias=False,
+                name="dw_conv2",
+            )
+        else:
+            self.dw_conv = keras.layers.DepthwiseConv2D(
+                kernel_size=self.context_kernel_size,
+                padding="same",
+                use_bias=False,
+                name="dw_conv",
+            )
+            self.dw_conv2 = keras.layers.DepthwiseConv2D(
+                kernel_size=self.context_kernel_size,
+                padding="same",
+                use_bias=False,
+                name="dw_conv2",
+            )
         self.ctx_norm = create_normalization_layer(
             self.normalization_type,
             name="ctx_bn",
@@ -916,7 +942,7 @@ class CliffordNetBlock(keras.layers.Layer):
         # cryptic broadcast error at the residual addition; reject early.
         if input_shape[-1] is not None and input_shape[-1] != self.channels:
             raise ValueError(
-                f"CliffordNetBlock is isotropic: expected last dim == "
+                f"{type(self).__name__} is isotropic: expected last dim == "
                 f"channels={self.channels}, got input_shape[-1]={input_shape[-1]}. "
                 f"Project the input before the block (e.g. with a 1x1 Conv) "
                 f"or rebuild the block with channels={input_shape[-1]}."
@@ -931,11 +957,26 @@ class CliffordNetBlock(keras.layers.Layer):
         stream_shape = self.linear_det.compute_output_shape(spatial_shape)
 
         # Step 2b: context -- two DWConvs, then single BN
-        self.dw_conv.build(spatial_shape)
-        dw1_out = self.dw_conv.compute_output_shape(spatial_shape)
-        self.dw_conv2.build(dw1_out)
-        dw2_out = self.dw_conv2.compute_output_shape(dw1_out)
-        self.ctx_norm.build(dw2_out)
+        # DECISION plan_2026-07-04_d2ac2f68/D-001: causal builds the valid convs on
+        # LEFT-PADDED shapes (W += K-1) so that, after the explicit left-pad in
+        # call(), the "valid" conv preserves the sequence length.
+        if self.causal:
+            _pad = self.context_kernel_size - 1
+            padded_shape = (*input_shape[:2],
+                            (input_shape[2] or 0) + _pad, input_shape[3])
+            self.dw_conv.build(padded_shape)
+            # After valid conv on padded input, output W = original W
+            dw1_out = input_shape
+            padded_shape2 = (*dw1_out[:2],
+                             (dw1_out[2] or 0) + _pad, dw1_out[3])
+            self.dw_conv2.build(padded_shape2)
+            self.ctx_norm.build(dw1_out)
+        else:
+            self.dw_conv.build(spatial_shape)
+            dw1_out = self.dw_conv.compute_output_shape(spatial_shape)
+            self.dw_conv2.build(dw1_out)
+            dw2_out = self.dw_conv2.compute_output_shape(dw1_out)
+            self.ctx_norm.build(dw2_out)
 
         # Step 3: local product
         self.local_geo_prod.build(stream_shape)
@@ -977,8 +1018,19 @@ class CliffordNetBlock(keras.layers.Layer):
         # DECISION plan_2026-07-01_6dc255c1/D-001: context activation resolved
         # from self.activation (default "silu" == old hardcoded SiLU). Do NOT
         # re-hardcode SiLU — a homogeneous denoiser selects "leaky_relu".
-        z_ctx = self.dw_conv(x_norm)
-        z_ctx = self.dw_conv2(z_ctx)
+        # DECISION plan_2026-07-04_d2ac2f68/D-001: causal inserts a left-only pad
+        # before each valid DWConv (position i sees only positions <= i); the
+        # subsequent norm + activation is SHARED with the vision path. Do NOT
+        # re-hardcode SiLU on the causal branch — self.activation default "silu"
+        # is byte-identical to the previous hardcoded keras.activations.silu.
+        if self.causal:
+            z_ctx = self._causal_pad(x_norm, self.context_kernel_size)
+            z_ctx = self.dw_conv(z_ctx)
+            z_ctx = self._causal_pad(z_ctx, self.context_kernel_size)
+            z_ctx = self.dw_conv2(z_ctx)
+        else:
+            z_ctx = self.dw_conv(x_norm)
+            z_ctx = self.dw_conv2(z_ctx)
         z_ctx = _resolve_activation(self.activation)(
             self.ctx_norm(z_ctx, training=training)
         )
@@ -996,7 +1048,13 @@ class CliffordNetBlock(keras.layers.Layer):
             # GAP keeps spatial dims as 1; let the subtraction broadcast
             # to (B,H,W,D) — materialising the broadcast via broadcast_to
             # would just allocate a redundant intermediate.
-            c_glo = keras.ops.mean(x_norm, axis=[1, 2], keepdims=True)
+            # DECISION plan_2026-07-04_d2ac2f68/D-001: causal uses a cumulative mean
+            # along the sequence axis (position i sees mean of 0..i) instead of the
+            # full-image GAP, preserving autoregressive causality.
+            if self.causal:
+                c_glo = self._causal_cumulative_mean(x_norm)
+            else:
+                c_glo = keras.ops.mean(x_norm, axis=[1, 2], keepdims=True)
             # Hardcoded differential: C_glo = GAP(X_norm) - Z_det
             c_glo = c_glo - z_det
             g_glo = self.global_geo_prod(z_det, c_glo)
@@ -1005,6 +1063,44 @@ class CliffordNetBlock(keras.layers.Layer):
         # --- Step 5: GGR (transform only; residual add is external) ---
         h_mix = self.ggr(x_norm, g_feat, training=training)
         return h_mix
+
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _causal_pad(x: keras.KerasTensor, kernel_size: int = 3) -> keras.KerasTensor:
+        """Apply left-only (causal) zero-padding along the W axis.
+
+        For ``(B, H, W, D)`` with ``H = 1``, pads ``kernel_size - 1`` zeros
+        on the left of the W dimension so that a ``"valid"`` convolution
+        preserves the sequence length and each position only sees past/current.
+        Used only on the ``causal=True`` path.
+        """
+        pad_w = kernel_size - 1
+        # pad format: [[B_lo, B_hi], [H_lo, H_hi], [W_lo, W_hi], [D_lo, D_hi]]
+        return keras.ops.pad(x, [[0, 0], [0, 0], [pad_w, 0], [0, 0]])
+
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _causal_cumulative_mean(
+        x: keras.KerasTensor,
+    ) -> keras.KerasTensor:
+        """Causal global context: cumulative mean along the W (sequence) axis.
+
+        For input ``(B, 1, seq_len, D)``, position *i* receives the mean of
+        positions ``0..i``.  This preserves autoregressive causality while
+        still providing each position with a growing global summary. Used only
+        on the ``causal=True`` path.
+        """
+        # x shape: (B, 1, seq_len, D)
+        cumsum = keras.ops.cumsum(x, axis=2)  # (B, 1, seq_len, D)
+        seq_len = keras.ops.shape(x)[2]
+        # divisors: [1, 2, 3, ..., seq_len] reshaped to (1, 1, seq_len, 1)
+        divisors = keras.ops.cast(
+            keras.ops.arange(1, seq_len + 1), x.dtype
+        )
+        divisors = keras.ops.reshape(divisors, (1, 1, -1, 1))
+        return cumsum / divisors
 
     # ------------------------------------------------------------------
 
@@ -1036,6 +1132,7 @@ class CliffordNetBlock(keras.layers.Layer):
                 "cli_mode": self.cli_mode,
                 "ctx_mode": self.ctx_mode,
                 "use_global_context": self.use_global_context,
+                "causal": self.causal,
                 "layer_scale_init": self.layer_scale_init,
                 "use_bias": self.use_bias,
                 "activation": self.activation,
@@ -1062,322 +1159,37 @@ class CliffordNetBlock(keras.layers.Layer):
 # ---------------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
-class CausalCliffordNetBlock(keras.layers.Layer):
-    """CliffordNetBlock variant with causal (left-only) padded convolutions.
+class CausalCliffordNetBlock(CliffordNetBlock):
+    """Causal (autoregressive) variant of :class:`CliffordNetBlock`.
 
-    Designed for autoregressive language modeling where information must not
-    flow from future to past positions.  The only change from
-    :class:`CliffordNetBlock` is that the two ``DepthwiseConv2D`` layers in
-    the context stream use ``padding="valid"`` with explicit left-only
-    zero-padding so that position *i* can only see positions ``<= i``.
+    Equivalent to ``CliffordNetBlock(causal=True)`` with a
+    ``"zero_centered_rms_norm"`` context-norm default: the two context
+    ``DepthwiseConv2D`` layers use ``kernel=(1, K)`` / ``padding="valid"``
+    with explicit left-only zero-padding, and the optional global-context
+    branch uses a causal cumulative mean, so position *i* only sees positions
+    ``<= i``. Expects 4-D input ``(B, 1, seq_len, D)`` (sequence reshaped for
+    2-D convolutions with ``H = 1``).
 
-    Expects 4-D input ``(B, 1, seq_len, D)`` (sequence reshaped for 2-D
-    convolutions with ``H = 1``).
+    Kept as a registered subclass (rather than folded away) purely for
+    checkpoint / back-compat: the registered class name and the legacy Keras
+    auto-name ``causal_clifford_net_block`` are preserved so existing
+    weights load by-name. All behavior lives in :class:`CliffordNetBlock`
+    gated by ``causal=True`` (see DECISION plan_2026-07-04_d2ac2f68/D-001).
 
-    All other components (normalisation, detail stream, geometric products,
-    GGR, global context branch) are identical to the vision block.
-
-    :param channels: Feature dimensionality D.
-    :param shifts: Channel-shift offsets for the sparse rolling product.
-    :param cli_mode: Algebraic components (``"inner"``, ``"wedge"``, ``"full"``).
-    :param ctx_mode: Context mode (``"diff"`` or ``"abs"``).
-    :param use_global_context: Add global-average-pool context branch.
-    :param layer_scale_init: Initial LayerScale value.
-    :param use_bias: Whether Dense layers use bias.
-    :param kernel_initializer: Kernel initializer.
-    :param bias_initializer: Bias initializer.
-    :param kernel_regularizer: Kernel regularizer.
-    :param bias_regularizer: Bias regularizer.
+    :param kwargs: Forwarded to :class:`CliffordNetBlock`; ``causal`` is forced
+        to ``True`` and ``normalization_type`` defaults to
+        ``"zero_centered_rms_norm"``.
     """
 
-    def __init__(
-        self,
-        channels: int,
-        shifts: List[int],
-        cli_mode: CliMode = "full",
-        ctx_mode: CtxMode = "diff",
-        use_global_context: bool = False,
-        layer_scale_init: float = 1e-5,
-        use_bias: bool = True,
-        context_kernel_size: int = 3,
-        kernel_initializer: Any = "glorot_uniform",
-        bias_initializer: Any = "zeros",
-        kernel_regularizer: Optional[Any] = None,
-        bias_regularizer: Optional[Any] = None,
-        normalization_type: str = "zero_centered_rms_norm",
-        normalization_kwargs: Optional[Dict[str, Any]] = None,
-        **kwargs: Any,
-    ) -> None:
+    def __init__(self, **kwargs: Any) -> None:
+        # Preserve the causal-specific context-norm default while letting the
+        # caller override it explicitly.
+        kwargs.setdefault("normalization_type", "zero_centered_rms_norm")
+        # Force causal=True even if a from_config dict carries a `causal` key,
+        # so this subclass can never be built non-causal (and never raises a
+        # duplicate-kwarg TypeError). See DECISION plan_2026-07-04_d2ac2f68/D-001.
+        kwargs["causal"] = True
         super().__init__(**kwargs)
-
-        if channels <= 0:
-            raise ValueError(f"channels must be positive, got {channels}")
-        if ctx_mode not in ("diff", "abs"):
-            raise ValueError(f"ctx_mode must be 'diff' or 'abs', got {ctx_mode!r}")
-        if not isinstance(context_kernel_size, int) or isinstance(
-            context_kernel_size, bool
-        ) or context_kernel_size <= 0:
-            raise ValueError(
-                f"context_kernel_size must be a positive int, "
-                f"got {context_kernel_size!r}"
-            )
-        # See D-002 (CliffordNetBlock): global branch needs channels >= 2.
-        if use_global_context and channels < 2:
-            raise ValueError(
-                f"use_global_context=True requires channels >= 2 "
-                f"(global branch uses shifts=[1, 2]); got channels={channels}"
-            )
-
-        self.channels = channels
-        self.shifts = list(shifts)
-        self.cli_mode = cli_mode
-        self.ctx_mode = ctx_mode
-        self.use_global_context = use_global_context
-        self.layer_scale_init = layer_scale_init
-        self.use_bias = use_bias
-        self.kernel_initializer = initializers.get(kernel_initializer)
-        self.bias_initializer = initializers.get(bias_initializer)
-        self.kernel_regularizer = regularizers.get(kernel_regularizer)
-        self.bias_regularizer = regularizers.get(bias_regularizer)
-        self.normalization_type = normalization_type
-        self.normalization_kwargs = dict(normalization_kwargs or {})
-
-        _dense_kwargs: Dict[str, Any] = dict(
-            use_bias=use_bias,
-            kernel_initializer=kernel_initializer,
-            bias_initializer=bias_initializer,
-            kernel_regularizer=kernel_regularizer,
-            bias_regularizer=bias_regularizer,
-        )
-
-        # --- Step 1: Input norm ---
-        self.input_norm = keras.layers.LayerNormalization(
-            epsilon=1e-6, name="input_norm"
-        )
-
-        # --- Step 2a: Detail stream (1×1 pointwise) ---
-        self.linear_det = keras.layers.Dense(
-            channels, name="linear_det", **_dense_kwargs
-        )
-
-        # --- Step 2b: Causal context stream ---
-        # DepthwiseConv2D with kernel (1, 3) and padding="valid"; explicit
-        # left-only padding is applied along W in call() so position i sees
-        # only positions <= i.  H dimension uses kernel=1 (no spatial mixing
-        # along H, which is 1 for sequences reshaped to (B, 1, seq_len, D)).
-        # Context norm is configurable via normalization_type; default is
-        # "zero_centered_rms_norm". Pass normalization_type="batch_norm" to
-        # recover the legacy block.
-        self.context_kernel_size = context_kernel_size
-        self._ctx_kernel_w = context_kernel_size
-        self.dw_conv = keras.layers.DepthwiseConv2D(
-            kernel_size=(1, self._ctx_kernel_w),
-            padding="valid",
-            use_bias=False,
-            name="dw_conv",
-        )
-        self.dw_conv2 = keras.layers.DepthwiseConv2D(
-            kernel_size=(1, self._ctx_kernel_w),
-            padding="valid",
-            use_bias=False,
-            name="dw_conv2",
-        )
-        self.ctx_norm = create_normalization_layer(
-            self.normalization_type,
-            name="ctx_bn",
-            **self.normalization_kwargs,
-        )
-
-        # --- Step 3: Local sparse rolling product ---
-        self.local_geo_prod = SparseRollingGeometricProduct(
-            channels=channels,
-            shifts=shifts,
-            cli_mode=cli_mode,
-            use_bias=use_bias,
-            kernel_initializer=kernel_initializer,
-            bias_initializer=bias_initializer,
-            kernel_regularizer=kernel_regularizer,
-            bias_regularizer=bias_regularizer,
-            name="local_geo_prod",
-        )
-
-        # --- Optional global context branch ---
-        if use_global_context:
-            self.global_geo_prod = SparseRollingGeometricProduct(
-                channels=channels,
-                shifts=_GLOBAL_SHIFTS,
-                cli_mode=_GLOBAL_CLI_MODE,
-                use_bias=use_bias,
-                kernel_initializer=kernel_initializer,
-                bias_initializer=bias_initializer,
-                kernel_regularizer=kernel_regularizer,
-                bias_regularizer=bias_regularizer,
-                name="global_geo_prod",
-            )
-        else:
-            self.global_geo_prod = None
-
-        # --- GGR ---
-        self.ggr = GatedGeometricResidual(
-            channels=channels,
-            layer_scale_init=layer_scale_init,
-            kernel_initializer=kernel_initializer,
-            bias_initializer=bias_initializer,
-            kernel_regularizer=kernel_regularizer,
-            bias_regularizer=bias_regularizer,
-            name="ggr",
-        )
-
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _causal_pad(x: keras.KerasTensor, kernel_size: int = 3) -> keras.KerasTensor:
-        """Apply left-only (causal) zero-padding along the W axis.
-
-        For ``(B, H, W, D)`` with ``H = 1``, pads ``kernel_size - 1`` zeros
-        on the left of the W dimension so that a ``"valid"`` convolution
-        preserves the sequence length and each position only sees past/current.
-        """
-        pad_w = kernel_size - 1
-        # pad format: [[B_lo, B_hi], [H_lo, H_hi], [W_lo, W_hi], [D_lo, D_hi]]
-        return keras.ops.pad(x, [[0, 0], [0, 0], [pad_w, 0], [0, 0]])
-
-    # ------------------------------------------------------------------
-
-    def build(self, input_shape: Tuple) -> None:
-        """Build all sub-layers."""
-        # B7: isotropic in channels (see CliffordNetBlock.build). Reject a
-        # mismatched last dim early with a clear message rather than a cryptic
-        # broadcast/shape error deeper in the stream interaction.
-        if input_shape[-1] is not None and input_shape[-1] != self.channels:
-            raise ValueError(
-                f"CausalCliffordNetBlock is isotropic: expected last dim == "
-                f"channels={self.channels}, got input_shape[-1]={input_shape[-1]}. "
-                f"Project the input before the block or rebuild with "
-                f"channels={input_shape[-1]}."
-            )
-        spatial_shape = input_shape
-
-        self.input_norm.build(spatial_shape)
-        self.linear_det.build(spatial_shape)
-        stream_shape = self.linear_det.compute_output_shape(spatial_shape)
-
-        # Causal conv: input gets left-padded by (kernel_size-1) before valid conv
-        _pad = self._ctx_kernel_w - 1
-        padded_shape = (*input_shape[:2],
-                        (input_shape[2] or 0) + _pad, input_shape[3])
-        self.dw_conv.build(padded_shape)
-        # After valid conv on padded input, output W = original W
-        dw1_out = input_shape
-        padded_shape2 = (*dw1_out[:2],
-                         (dw1_out[2] or 0) + _pad, dw1_out[3])
-        self.dw_conv2.build(padded_shape2)
-        self.ctx_norm.build(dw1_out)
-
-        self.local_geo_prod.build(stream_shape)
-        if self.global_geo_prod is not None:
-            self.global_geo_prod.build(stream_shape)
-        self.ggr.build(stream_shape)
-
-        super().build(input_shape)
-
-    # ------------------------------------------------------------------
-
-    def call(
-        self,
-        inputs: keras.KerasTensor,
-        training: Optional[bool] = None,
-    ) -> keras.KerasTensor:
-        """Forward pass with causal convolutions.
-
-        :param inputs: Feature tensor ``(B, 1, seq_len, D)``.
-        :param training: Whether in training mode.
-        :return: Updated feature tensor ``(B, 1, seq_len, D)``.
-        """
-        x_prev = inputs
-
-        # --- Step 1: Normalise ---
-        x_norm = self.input_norm(x_prev)
-
-        # --- Step 2: Dual-stream generation ---
-        z_det = self.linear_det(x_norm)
-
-        # Causal context stream: left-pad then valid conv (×2) -> configurable norm -> SiLU
-        z_ctx = self._causal_pad(x_norm, self._ctx_kernel_w)
-        z_ctx = self.dw_conv(z_ctx)
-        z_ctx = self._causal_pad(z_ctx, self._ctx_kernel_w)
-        z_ctx = self.dw_conv2(z_ctx)
-        z_ctx = keras.activations.silu(self.ctx_norm(z_ctx, training=training))
-
-        if self.ctx_mode == "diff":
-            z_ctx = z_ctx - z_det
-
-        # --- Step 3: Local sparse geometric interaction ---
-        g_feat = self.local_geo_prod(z_det, z_ctx)
-
-        # --- Step 4: Optional global context branch (causal) ---
-        # Uses cumulative mean along the sequence axis so position i only
-        # sees the average of positions 0..i (preserves causality).
-        if self.global_geo_prod is not None:
-            c_glo = self._causal_cumulative_mean(x_norm)
-            c_glo = c_glo - z_det
-            g_glo = self.global_geo_prod(z_det, c_glo)
-            g_feat = g_feat + g_glo
-
-        # --- Step 5: GGR (transform only; residual add is external) ---
-        h_mix = self.ggr(x_norm, g_feat, training=training)
-        return h_mix
-
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _causal_cumulative_mean(
-        x: keras.KerasTensor,
-    ) -> keras.KerasTensor:
-        """Causal global context: cumulative mean along the W (sequence) axis.
-
-        For input ``(B, 1, seq_len, D)``, position *i* receives the mean of
-        positions ``0..i``.  This preserves autoregressive causality while
-        still providing each position with a growing global summary.
-        """
-        # x shape: (B, 1, seq_len, D)
-        cumsum = keras.ops.cumsum(x, axis=2)  # (B, 1, seq_len, D)
-        seq_len = keras.ops.shape(x)[2]
-        # divisors: [1, 2, 3, ..., seq_len] reshaped to (1, 1, seq_len, 1)
-        divisors = keras.ops.cast(
-            keras.ops.arange(1, seq_len + 1), x.dtype
-        )
-        divisors = keras.ops.reshape(divisors, (1, 1, -1, 1))
-        return cumsum / divisors
-
-    # ------------------------------------------------------------------
-
-    def compute_output_shape(
-        self, input_shape: Tuple[Optional[int], ...]
-    ) -> Tuple[Optional[int], ...]:
-        return input_shape
-
-    # ------------------------------------------------------------------
-
-    def get_config(self) -> Dict[str, Any]:
-        config = super().get_config()
-        config.update({
-            "channels": self.channels,
-            "shifts": self.shifts,
-            "cli_mode": self.cli_mode,
-            "ctx_mode": self.ctx_mode,
-            "use_global_context": self.use_global_context,
-            "layer_scale_init": self.layer_scale_init,
-            "use_bias": self.use_bias,
-            "context_kernel_size": self.context_kernel_size,
-            "kernel_initializer": initializers.serialize(self.kernel_initializer),
-            "bias_initializer": initializers.serialize(self.bias_initializer),
-            "kernel_regularizer": regularizers.serialize(self.kernel_regularizer),
-            "bias_regularizer": regularizers.serialize(self.bias_regularizer),
-            "normalization_type": self.normalization_type,
-            "normalization_kwargs": dict(self.normalization_kwargs),
-        })
-        return config
 
 
 # ---------------------------------------------------------------------------
