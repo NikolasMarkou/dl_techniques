@@ -52,8 +52,8 @@ CLIP_WARN_SUBSTR = "Miyasawa residual=score identity"
 class TestBlockNormalizationConfigWiring:
     """Step 4 / 10d: config validation + build_model threading."""
 
-    def test_config_default_is_layernorm(self) -> None:
-        assert TrainingConfig().block_normalization == "layernorm"
+    def test_config_default_is_batchnorm(self) -> None:
+        assert TrainingConfig().block_normalization == "batchnorm"
 
     def test_config_accepts_batchnorm(self) -> None:
         cfg = TrainingConfig(block_normalization="batchnorm")
@@ -85,7 +85,7 @@ class TestBlockNormalizationConfigWiring:
         for blk in blocks:
             assert blk.get_config()["normalization_type"] == "batchnorm"
 
-    def test_build_model_default_blocks_are_layernorm(self) -> None:
+    def test_build_model_default_blocks_are_batchnorm(self) -> None:
         cfg = TrainingConfig(
             variant="tiny",
             convnext_version="v1",
@@ -101,7 +101,7 @@ class TestBlockNormalizationConfigWiring:
             if l.__class__.__name__ in ("ConvNextV1Block", "ConvNextV2Block")
         ]
         assert blocks and all(
-            b.get_config()["normalization_type"] == "layernorm" for b in blocks
+            b.get_config()["normalization_type"] == "batchnorm" for b in blocks
         )
 
 
@@ -229,11 +229,11 @@ class TestBlockNormalizationArgparse:
         args = parse_arguments()
         assert args.block_normalization == "batchnorm"
 
-    def test_argparse_default_is_layernorm(self, monkeypatch) -> None:
+    def test_argparse_default_is_batchnorm(self, monkeypatch) -> None:
         argv = ["train_convunext_denoiser", "--smoke"]
         monkeypatch.setattr("sys.argv", argv)
         args = parse_arguments()
-        assert args.block_normalization == "layernorm"
+        assert args.block_normalization == "batchnorm"
 
 
 if __name__ == "__main__":
