@@ -733,6 +733,14 @@ class BFUnetTrainingConfig:
     # level (byte-identical to the historical int 2). Shared by both bfunet trainers;
     # passed into each factory by build_model.
     filter_multiplier: float = 2.0
+    # Override the variant's number of U-Net levels (depth). None -> use the variant
+    # default from the model CONFIGS. Shared by both bfunet trainers; passed into each
+    # factory by build_model. Must be >= 2 when set.
+    depth: Optional[int] = None
+    # Override the variant's number of Clifford/ConvNeXt blocks per U-Net level. None ->
+    # use the variant default from the model CONFIGS. Shared by both bfunet trainers;
+    # passed into each factory by build_model. Must be >= 1 when set.
+    blocks_per_level: Optional[int] = None
     # Groups for the final 1x1 output projection. 1 = standard dense conv (default,
     # byte-identical). -1 = one group per output channel (groups = channels), so each output
     # channel reads a disjoint feature group. Any >1 int sets the group count directly.
@@ -831,6 +839,14 @@ class BFUnetTrainingConfig:
         if self.filter_multiplier < 1:
             raise ValueError(
                 f"filter_multiplier must be >= 1, got {self.filter_multiplier}"
+            )
+        if self.depth is not None and self.depth < 2:
+            raise ValueError(
+                f"depth must be >= 2, got {self.depth}"
+            )
+        if self.blocks_per_level is not None and self.blocks_per_level < 1:
+            raise ValueError(
+                f"blocks_per_level must be >= 1, got {self.blocks_per_level}"
             )
         if self.noise_type not in {"additive", "multiplicative", "composite"}:
             raise ValueError(
@@ -1786,6 +1802,13 @@ def add_common_arguments(parser) -> None:
                         help="Per-encoder-level channel-growth multiplier (>=1). "
                              "channels[level]=round(initial_filters * multiplier**level). "
                              "Default 2.0 doubles per level.")
+    parser.add_argument("--depth", type=int, default=None,
+                        help="Override the variant's number of U-Net levels; "
+                             "None = use variant preset (>=2).")
+    parser.add_argument("--blocks-per-level", type=int, default=None,
+                        dest="blocks_per_level",
+                        help="Blocks per U-Net level; "
+                             "None = use variant preset (>=1).")
     parser.add_argument("--final-projection-groups", type=int, default=1,
                         help="Groups for the final 1x1 output projection. 1=standard dense "
                              "(default). -1 = one group per output channel (groups=channels), "
