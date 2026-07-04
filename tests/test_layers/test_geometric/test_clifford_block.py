@@ -2134,11 +2134,14 @@ class TestCliffordNetBlockConfigurableNorm:
 
     # --- CliffordNetBlock ------------------------------------------------
 
-    def test_clifford_default_norm_is_zero_centered_rms(self, channels, shifts):
+    def test_clifford_default_norm_is_batch_norm(self, channels, shifts):
+        # Default flipped to "batch_norm" to match the original CliffordBlock's
+        # BatchNormalization; the bias-free denoiser overrides to a degree-0 norm
+        # ("zero_centered_rms_norm"). CausalCliffordNetBlock default is unchanged.
         block = CliffordNetBlock(channels=channels, shifts=shifts)
         block.build((None, 8, 8, channels))
-        assert type(block.ctx_norm).__name__ == "ZeroCenteredRMSNorm"
-        assert block.normalization_type == "zero_centered_rms_norm"
+        assert type(block.ctx_norm).__name__ == "BatchNormalization"
+        assert block.normalization_type == "batch_norm"
 
     def test_clifford_alternative_norm_selectable(self, channels, shifts):
         block = CliffordNetBlock(

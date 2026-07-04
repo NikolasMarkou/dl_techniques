@@ -740,7 +740,7 @@ class CliffordNetBlock(keras.layers.Layer):
         bias_initializer: Any = "zeros",
         kernel_regularizer: Optional[Any] = None,
         bias_regularizer: Optional[Any] = None,
-        normalization_type: str = "zero_centered_rms_norm",
+        normalization_type: str = "batch_norm",
         normalization_kwargs: Optional[Dict[str, Any]] = None,
         input_normalization_type: Optional[str] = None,
         input_normalization_kwargs: Optional[Dict[str, Any]] = None,
@@ -831,8 +831,9 @@ class CliffordNetBlock(keras.layers.Layer):
         # Two stacked KxK depthwise convolutions (K=context_kernel_size, default
         # 3 -> effective (2K-1)x(2K-1) = 5×5 RF), one configurable normalization
         # layer after both, then SiLU in call(). Default normalization_type is
-        # "zero_centered_rms_norm"; legacy batch-norm behavior is recovered with
-        # normalization_type="batch_norm".
+        # "batch_norm" (matches the original CliffordBlock's BatchNormalization);
+        # pass normalization_type="zero_centered_rms_norm" for the bias-free /
+        # degree-1-homogeneous denoiser configuration.
         self.dw_conv = keras.layers.DepthwiseConv2D(
             kernel_size=self.context_kernel_size,
             padding="same",
