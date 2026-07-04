@@ -121,23 +121,12 @@ class BFCNNTrainingConfig(BFUnetTrainingConfig):
     kernel_size: int = 3            # kernel for the residual blocks
     activation: str = "relu"
 
-    # Noise-sigma sampling distribution over the curriculum range. "uniform" (default,
-    # byte-identical to the sibling trainers) or "log_uniform" (bfcnn's log-space draw).
-    # The log_uniform branch is wired into make_curriculum_noise_fn (gated by getattr) in
-    # a later step; here the field/flag exist and validate.
-    noise_distribution: str = "uniform"
-
     def __post_init__(self):
         super().__post_init__()
         if self.variant not in BFCNN_CONFIGS and self.variant != "custom":
             raise ValueError(
                 f"Unknown variant {self.variant!r}; choices: "
                 f"{list(BFCNN_CONFIGS) + ['custom']}"
-            )
-        if self.noise_distribution not in ("uniform", "log_uniform"):
-            raise ValueError(
-                f"noise_distribution must be 'uniform' or 'log_uniform', "
-                f"got {self.noise_distribution!r}"
             )
 
 
@@ -246,10 +235,6 @@ def parse_arguments() -> argparse.Namespace:
                         help="Kernel size for the residual blocks (variant='custom' only).")
     parser.add_argument("--activation", type=str, default="relu",
                         help="Block activation (variant='custom' only). Output stays linear.")
-    parser.add_argument("--noise-distribution", choices=["uniform", "log_uniform"],
-                        default="uniform",
-                        help="Sigma sampling over the curriculum range: 'uniform' (default) "
-                             "or 'log_uniform' (log-space draw).")
     args = parser.parse_args()
     reject_self_iterate_with_nonadditive(parser, args)
     return args
@@ -274,7 +259,6 @@ def main():
             initial_kernel_size=args.initial_kernel_size,
             kernel_size=args.kernel_size,
             activation=args.activation,
-            noise_distribution=args.noise_distribution,
             enable_analyzer=args.analyzer,
             analyzer_freq=args.analyzer_freq,
             epochs=2,
@@ -321,7 +305,6 @@ def main():
             initial_kernel_size=args.initial_kernel_size,
             kernel_size=args.kernel_size,
             activation=args.activation,
-            noise_distribution=args.noise_distribution,
             enable_analyzer=args.analyzer,
             analyzer_freq=args.analyzer_freq,
             epochs=args.epochs,
@@ -365,7 +348,6 @@ def main():
 
     logger.info(
         f"Config: variant={config.variant}, "
-        f"noise_dist={config.noise_distribution}, "
         f"epochs={config.epochs}, patch={config.patch_size}x{config.channels}, "
         f"sigma_max {config.sigma_max_start}->{config.sigma_max_end} "
         f"({config.curriculum_schedule})"
