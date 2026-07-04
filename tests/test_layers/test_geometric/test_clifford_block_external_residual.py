@@ -34,7 +34,6 @@ import tensorflow as tf
 from dl_techniques.layers.geometric.clifford_block import (
     CliffordNetBlock,
     CausalCliffordNetBlock,
-    CliffordNetBlockDS,
     CliffordNetBlockDSv2,
     CausalCliffordNetBlockDSv2,
 )
@@ -87,15 +86,6 @@ class TestTransformOnlyContract:
         )
         # Causal blocks operate on (B, 1, seq, D).
         x = tf.random.normal([2, 1, 8, _CHANNELS], seed=0)
-        _assert_transform_only(block, x)
-
-    def test_clifford_net_block_ds(self):
-        # strides=1 -> skip is inert; the transform-only reduction holds.
-        block = CliffordNetBlockDS(
-            channels=_CHANNELS, shifts=_SHIFTS, strides=1,
-            layer_scale_init=_TINY_GAMMA,
-        )
-        x = tf.random.normal([2, 8, 8, _CHANNELS], seed=0)
         _assert_transform_only(block, x)
 
     def test_clifford_net_block_ds_v2(self):

@@ -12,7 +12,6 @@ import tensorflow as tf
 from dl_techniques.layers.blur_pool import BlurPool2D
 from dl_techniques.layers.pixel_unshuffle import PixelUnshuffle2D
 from dl_techniques.layers.geometric.clifford_block import (
-    CliffordNetBlockDS,
     CliffordNetBlockDSv2,
 )
 
@@ -35,7 +34,7 @@ def input_4d() -> tf.Tensor:
 def test_default_init_uses_v1_winner():
     """Defaults reflect the V1 winner of the downsampling sweep
     (see src/train/cliffordnet/DOWNSAMPLING.md): stream_pool=blur,
-    skip_pool=blur. Other knobs unchanged from CliffordNetBlockDS."""
+    skip_pool=blur."""
     blk = CliffordNetBlockDSv2(channels=32, shifts=[1, 2])
     assert blk.channels == 32
     assert blk.stream_pool_kind == "blur"
@@ -215,21 +214,16 @@ def test_v12_negative_control_builds(input_4d):
 
 
 # ---------------------------------------------------------------------
-# Defaults match CliffordNetBlockDS at the same surface
+# Defaults produce an isotropic-shape output at strides=1
 # ---------------------------------------------------------------------
 
 
 def test_defaults_match_ds_at_strides_1(input_4d):
-    """At strides=1 with all defaults, v2 must produce a tensor with the
-    same shape as the v1 block. (Forward values need not match — different
-    weight init seeds.)"""
+    """At strides=1 with all defaults, DSv2 must produce a tensor with the
+    same shape as its input (isotropic reduction)."""
     v2 = CliffordNetBlockDSv2(channels=32, shifts=[1, 2])
     y = v2(input_4d)
     assert tuple(y.shape) == tuple(input_4d.shape)
-    # And v1 stays untouched / still works:
-    v1 = CliffordNetBlockDS(channels=32, shifts=[1, 2])
-    y1 = v1(input_4d)
-    assert tuple(y1.shape) == tuple(input_4d.shape)
 
 
 # ---------------------------------------------------------------------
@@ -339,19 +333,6 @@ def test_get_config_round_trip():
     assert rebuilt.ctx_mode == "pyramid_diff"
     assert rebuilt.kernel_size == 5
     assert rebuilt.layer_scale_init == 1e-2
-
-
-# ---------------------------------------------------------------------
-# Backward compatibility: legacy CliffordNetBlockDS still works untouched
-# ---------------------------------------------------------------------
-
-
-def test_v1_block_still_works(input_4d):
-    blk = CliffordNetBlockDS(
-        channels=32, shifts=[1, 2], strides=2, skip_pool="avg",
-    )
-    y = blk(input_4d)
-    assert tuple(y.shape) == (2, 16, 16, 32)
 
 
 # ---------------------------------------------------------------------
