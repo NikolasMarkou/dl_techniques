@@ -401,7 +401,7 @@ def create_convunext_denoiser(
         input_shape: Tuple[int, int, int],
         depth: int = 4,
         initial_filters: int = 64,
-        filter_multiplier: int = 2,
+        filter_multiplier: float = 2.0,
         blocks_per_level: int = 2,
         convnext_version: str = 'v2',
         stem_kernel_size: Union[int, Tuple[int, int]] = 7,
@@ -485,7 +485,10 @@ def create_convunext_denoiser(
         input_shape: Tuple of integers, shape of input images (height, width, channels).
         depth: Integer, depth of the U-Net (number of downsampling levels). Defaults to 4.
         initial_filters: Integer, number of filters in the first level. Defaults to 64.
-        filter_multiplier: Integer, multiplier for filters at each level. Defaults to 2.
+        filter_multiplier: Float, per-encoder-level channel-growth multiplier
+            (``>= 1``). Channels at level ``i`` are
+            ``int(round(initial_filters * filter_multiplier ** i))``. Defaults to
+            ``2.0`` (doubles per level, byte-identical to the historical int ``2``).
         blocks_per_level: Integer, number of blocks per level. Defaults to 2.
         convnext_version: String, 'v1' or 'v2' to choose ConvNeXt version. Defaults to 'v2'.
         stem_kernel_size: Integer or tuple, size of stem convolution kernels. Defaults to 7.
@@ -730,7 +733,7 @@ def create_convunext_denoiser(
         stem_input = inputs
 
     # Calculate filter sizes for each level
-    filter_sizes = [initial_filters * (filter_multiplier ** i) for i in range(depth + 1)]
+    filter_sizes = [int(round(initial_filters * (filter_multiplier ** i))) for i in range(depth + 1)]
 
     if use_laplacian_pyramid:
         logger.info(

@@ -237,7 +237,7 @@ def create_cliffordunet_denoiser(
         input_shape: Tuple[int, int, int],
         depth: int = 3,
         initial_filters: int = 32,
-        filter_multiplier: int = 2,
+        filter_multiplier: float = 2.0,
         blocks_per_level: int = 2,
         shifts: Union[List[int], Tuple[int, ...]] = (1, 2),
         cli_mode: str = "full",
@@ -287,7 +287,10 @@ def create_cliffordunet_denoiser(
         depth: Number of downsampling levels. Defaults to 3.
         initial_filters: Channel width at the finest (level-0) resolution.
             Defaults to 32.
-        filter_multiplier: Per-level channel multiplier. Defaults to 2.
+        filter_multiplier: Float, per-encoder-level channel-growth multiplier
+            (``>= 1``). Channels at level ``i`` are
+            ``int(round(initial_filters * filter_multiplier ** i))``. Defaults to
+            ``2.0`` (doubles per level, byte-identical to the historical int ``2``).
         blocks_per_level: Number of Clifford blocks per level. Defaults to 2.
         shifts: Base channel-shift offsets for the Clifford geometric product
             (ints >= 1). Sized per level so every kept shift satisfies
@@ -452,7 +455,7 @@ def create_cliffordunet_denoiser(
         stem_input = inputs
 
     # --- Per-level filter sizes ---
-    filter_sizes = [initial_filters * (filter_multiplier ** i) for i in range(depth + 1)]
+    filter_sizes = [int(round(initial_filters * (filter_multiplier ** i))) for i in range(depth + 1)]
 
     if use_laplacian_pyramid:
         logger.info(
