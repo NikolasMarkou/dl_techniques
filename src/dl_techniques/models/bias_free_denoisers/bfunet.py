@@ -34,6 +34,46 @@ from typing import Optional, Union, Tuple, List, Dict, Any
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 from dl_techniques.layers.bias_free_conv2d import BiasFreeConv2D, BiasFreeResidualBlock
+# ConvUNeXt-parity feature components (reused as-is; already bias-free + serializable).
+from dl_techniques.initializers import create_gabor_depthwise_conv2d
+from dl_techniques.layers.laplacian_filter import LaplacianPyramidLevel
+from dl_techniques.layers.match_channels import MatchChannels
+
+
+# DECISION plan_2026-07-04_58ac8e73/D-002: ONE helper folds the per-level downsample sites
+# (inter-level pools + the last-level pool that feeds the bottleneck) into a uniform call so
+# the OFF/ON swap logic lives in one place (mirrors bfconvunext _downsample_and_skip D-001).
+# OFF path MUST reproduce the exact prior ops/names (MaxPooling2D named `downsample_name`,
+# raw pre-downsample skip); a local copy is kept here rather than importing bfconvunext's
+# private helper (cross-module `_`-import) or refactoring that checkpoint-sensitive file.
+def _downsample_and_skip(
+        x: keras.KerasTensor,
+        use_laplacian_pyramid: bool,
+        laplacian_kernel_size: Tuple[int, int],
+        downsample_name: str,
+        pyramid_name: str,
+        pool_type: str = "max",
+) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
+    """Return ``(skip, downsampled)`` for one encoder junction.
+
+    OFF path (default, byte-identical): skip = pre-downsample tensor; downsample =
+    ``MaxPooling2D(2,2)`` named ``downsample_name`` (``AveragePooling2D`` when
+    ``pool_type='average'`` — a linear, Miyasawa-clean operator). ON path: a bias-free
+    ``LaplacianPyramidLevel`` split — high band becomes the skip, low band continues down.
+    """
+    if use_laplacian_pyramid:
+        low, high = LaplacianPyramidLevel(
+            blur_kernel_size=laplacian_kernel_size,
+            name=pyramid_name,
+        )(x)
+        return high, low
+    skip = x
+    pool_layer = (
+        keras.layers.AveragePooling2D if pool_type == "average"
+        else keras.layers.MaxPooling2D
+    )
+    downsampled = pool_layer(pool_size=(2, 2), name=downsample_name)(x)
+    return skip, downsampled
 
 # ---------------------------------------------------------------------
 # Model Variant Configurations
@@ -117,6 +157,19 @@ def create_bfunet_denoiser(
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
         use_residual_blocks: bool = True,
         enable_deep_supervision: bool = False,
+        # --- ConvUNeXt-parity features (all default to a byte-identical no-op) ---
+        use_gabor_stem: bool = False,
+        gabor_filters: int = 32,
+        gabor_kernel_size: Union[int, Tuple[int, int]] = 7,
+        gabor_stem_projection: bool = True,
+        use_laplacian_pyramid: bool = False,
+        laplacian_kernel_size: Tuple[int, int] = (5, 5),
+        zero_pad_channels: bool = False,
+        downsample_pool_type: str = "max",
+        expose_bottleneck: bool = False,
+        block_normalization: str = "batchnorm",
+        final_projection_groups: int = 1,
+        dropout_rate: float = 0.0,
         model_name: str = 'bias_free_unet'
 ) -> keras.Model:
     """
@@ -201,11 +254,62 @@ def create_bfunet_denoiser(
     if blocks_per_level <= 0:
         raise ValueError(f"blocks_per_level must be positive, got {blocks_per_level}")
 
+    # DECISION plan_2026-07-04_58ac8e73/D-002: additive ConvUNeXt-parity features. Every
+    # new kwarg defaults to a byte-identical no-op; the OFF path reproduces the original
+    # plain U-Net exactly (same layer names/ops) so the ~30 existing tests + bfunet_conditional
+    # stay green. Do NOT change default behavior.
+    if block_normalization not in ('batchnorm', 'layernorm'):
+        raise ValueError(
+            f"block_normalization must be 'batchnorm' or 'layernorm', got {block_normalization}")
+    if downsample_pool_type not in ('max', 'average'):
+        raise ValueError(
+            f"downsample_pool_type must be 'max' or 'average', got {downsample_pool_type}")
+    if final_projection_groups < 1:
+        raise ValueError(f"final_projection_groups must be >= 1, got {final_projection_groups}")
+    if not (0.0 <= dropout_rate < 1.0):
+        raise ValueError(f"dropout_rate must be in [0.0, 1.0), got {dropout_rate}")
+
     # Input layer
     inputs = keras.Input(shape=input_shape, name='input_images')
 
-    # Calculate filter sizes for each level
-    filter_sizes = [initial_filters * (filter_multiplier ** i) for i in range(depth + 1)]
+    # Optional frozen Gabor stem (default OFF -> stem_input is inputs, a no-op). Reuses the
+    # shared bias-free gabor bank + mandatory 1x1 projection (mirrors bfconvunext).
+    if use_gabor_stem:
+        gabor = create_gabor_depthwise_conv2d(
+            filters=gabor_filters,
+            kernel_size=gabor_kernel_size,
+            strides=1,
+            padding='same',
+            use_bias=False,
+            trainable=False,
+            name='gabor_stem',
+        )(inputs)
+        if gabor_stem_projection:
+            stem_input = keras.layers.Conv2D(
+                filters=initial_filters,
+                kernel_size=1,
+                use_bias=False,  # Bias-free projection
+                kernel_initializer=kernel_initializer,
+                kernel_regularizer=kernel_regularizer,
+                name='gabor_stem_projection',
+            )(gabor)
+        else:
+            gabor_out_ch = input_shape[-1] * gabor_filters
+            if gabor_out_ch != initial_filters:
+                raise ValueError(
+                    "gabor_stem_projection=False requires input_channels * gabor_filters == "
+                    f"initial_filters, but {input_shape[-1]} * {gabor_filters} = {gabor_out_ch} "
+                    f"!= initial_filters({initial_filters}). Match them, or keep projection on."
+                )
+            stem_input = gabor
+        logger.info(f"Frozen Gabor stem enabled: filters={gabor_filters}, "
+                    f"kernel_size={gabor_kernel_size}, projection={gabor_stem_projection}")
+    else:
+        stem_input = inputs
+
+    # Calculate filter sizes for each level (int() keeps a float filter_multiplier safe;
+    # for the default int multiplier this is a no-op).
+    filter_sizes = [int(initial_filters * (filter_multiplier ** i)) for i in range(depth + 1)]
 
     # Storage for skip connections and deep supervision outputs
     skip_connections: List[keras.layers.Layer] = []
@@ -215,7 +319,7 @@ def create_bfunet_denoiser(
     # ENCODER PATH (Contracting)
     # =========================================================================
 
-    x = inputs
+    x = stem_input
     logger.info(f"Building encoder path with {depth} levels")
 
     for level in range(depth):
@@ -233,6 +337,8 @@ def create_bfunet_denoiser(
                     kernel_initializer=kernel_initializer,
                     kernel_regularizer=kernel_regularizer,
                     use_batch_norm=True,
+                    normalization_type=block_normalization,
+                    dropout_rate=dropout_rate,
                     name=f'encoder_level_{level}_conv_{block_idx}'
                 )(x)
             else:
@@ -243,6 +349,8 @@ def create_bfunet_denoiser(
                         activation=activation,
                         kernel_initializer=kernel_initializer,
                         kernel_regularizer=kernel_regularizer,
+                        normalization_type=block_normalization,
+                        dropout_rate=dropout_rate,
                         name=f'encoder_level_{level}_residual_block_{block_idx}'
                     )(x)
                 else:
@@ -253,18 +361,28 @@ def create_bfunet_denoiser(
                         kernel_initializer=kernel_initializer,
                         kernel_regularizer=kernel_regularizer,
                         use_batch_norm=True,
+                        normalization_type=block_normalization,
+                        dropout_rate=dropout_rate,
                         name=f'encoder_level_{level}_conv_{block_idx}'
                     )(x)
 
-        # Store skip connection before downsampling
-        skip_connections.append(x)
-
-        # Downsampling (except for the last level which goes to bottleneck)
+        # Skip connection + downsample. ALL levels route through the helper so the
+        # pool-type / Laplacian-pyramid swap lives in one place. The last level's pool
+        # feeds the bottleneck and keeps the original name 'bottleneck_downsample', so the
+        # OFF path is byte-identical (skip = pre-pool x, MaxPooling2D at the same names).
         if level < depth - 1:
-            x = keras.layers.MaxPooling2D(
-                pool_size=(2, 2),
-                name=f'encoder_downsample_{level}'
-            )(x)
+            skip, x = _downsample_and_skip(
+                x, use_laplacian_pyramid, laplacian_kernel_size,
+                f'encoder_downsample_{level}', f'encoder_pyramid_{level}',
+                downsample_pool_type,
+            )
+        else:
+            skip, x = _downsample_and_skip(
+                x, use_laplacian_pyramid, laplacian_kernel_size,
+                'bottleneck_downsample', 'bottleneck_pyramid',
+                downsample_pool_type,
+            )
+        skip_connections.append(skip)
 
     # =========================================================================
     # BOTTLENECK
@@ -273,11 +391,8 @@ def create_bfunet_denoiser(
     bottleneck_filters = filter_sizes[depth]
     logger.info(f"Building bottleneck with {bottleneck_filters} filters")
 
-    # Downsample to bottleneck
-    x = keras.layers.MaxPooling2D(
-        pool_size=(2, 2),
-        name='bottleneck_downsample'
-    )(x)
+    # NOTE: the downsample INTO the bottleneck is produced by the last encoder-loop
+    # iteration above (named 'bottleneck_downsample'), so there is no separate pool here.
 
     # Bottleneck convolution blocks
     for block_idx in range(blocks_per_level):
@@ -288,6 +403,8 @@ def create_bfunet_denoiser(
                 activation=activation,
                 kernel_initializer=kernel_initializer,
                 kernel_regularizer=kernel_regularizer,
+                normalization_type=block_normalization,
+                dropout_rate=dropout_rate,
                 name=f'bottleneck_residual_block_{block_idx}'
             )(x)
         else:
@@ -298,8 +415,17 @@ def create_bfunet_denoiser(
                 kernel_initializer=kernel_initializer,
                 kernel_regularizer=kernel_regularizer,
                 use_batch_norm=True,
+                normalization_type=block_normalization,
+                dropout_rate=dropout_rate,
                 name=f'bottleneck_conv_{block_idx}'
             )(x)
+
+    # Optional bottleneck tap: a zero-parameter linear (bias-free) marker on the deepest
+    # latent so it can be exposed as an additional output. No-op when expose_bottleneck=False.
+    bottleneck_output = None
+    if expose_bottleneck:
+        x = keras.layers.Activation('linear', name='bottleneck')(x)
+        bottleneck_output = x
 
     # =========================================================================
     # DECODER PATH (Expanding) with Deep Supervision
@@ -334,11 +460,18 @@ def create_bfunet_denoiser(
                 name=f'decoder_resize_{level}'
             )(x)
 
-        # Merge skip connection
-        x = keras.layers.Concatenate(
-            axis=-1,
-            name=f'decoder_concat_{level}'
-        )([skip, x])
+        # Merge skip connection. OFF (default): Concatenate (byte-identical). ON
+        # (zero_pad_channels): parameter-free channel match — slice the upsampled branch
+        # to current_filters and ADD the (current_filters) skip. Bias-free either way.
+        if zero_pad_channels:
+            x = keras.layers.Add(name=f'decoder_add_{level}')(
+                [skip, MatchChannels(current_filters, name=f'decoder_match_{level}')(x)]
+            )
+        else:
+            x = keras.layers.Concatenate(
+                axis=-1,
+                name=f'decoder_concat_{level}'
+            )([skip, x])
 
         # Convolution blocks after merging
         for block_idx in range(blocks_per_level):
@@ -349,6 +482,8 @@ def create_bfunet_denoiser(
                     activation=activation,
                     kernel_initializer=kernel_initializer,
                     kernel_regularizer=kernel_regularizer,
+                    normalization_type=block_normalization,
+                    dropout_rate=dropout_rate,
                     name=f'decoder_level_{level}_residual_block_{block_idx}'
                 )(x)
             else:
@@ -359,6 +494,8 @@ def create_bfunet_denoiser(
                     kernel_initializer=kernel_initializer,
                     kernel_regularizer=kernel_regularizer,
                     use_batch_norm=True,
+                    normalization_type=block_normalization,
+                    dropout_rate=dropout_rate,
                     name=f'decoder_level_{level}_conv_{block_idx}'
                 )(x)
 
@@ -397,16 +534,38 @@ def create_bfunet_denoiser(
     # FINAL OUTPUT LAYER (Primary inference output)
     # =========================================================================
 
-    # Final convolution to output channels (no batch norm, custom activation)
-    final_output = BiasFreeConv2D(
-        filters=output_channels,
-        kernel_size=1,
-        activation=final_activation,
-        kernel_initializer=kernel_initializer,
-        kernel_regularizer=kernel_regularizer,
-        use_batch_norm=False,
-        name='final_output'
-    )(x)
+    # Final convolution to output channels (no batch norm, custom activation).
+    # OFF (final_projection_groups==1): the original bias-free 1x1 (byte-identical).
+    # ON (>1): a grouped bias-free Conv2D so each output group reads a disjoint feature
+    # group (groups==output_channels -> one group per color channel).
+    if final_projection_groups == 1:
+        final_output = BiasFreeConv2D(
+            filters=output_channels,
+            kernel_size=1,
+            activation=final_activation,
+            kernel_initializer=kernel_initializer,
+            kernel_regularizer=kernel_regularizer,
+            use_batch_norm=False,
+            name='final_output'
+        )(x)
+    else:
+        in_ch = x.shape[-1]
+        if in_ch % final_projection_groups != 0 or output_channels % final_projection_groups != 0:
+            raise ValueError(
+                f"final_projection_groups={final_projection_groups} must divide BOTH the "
+                f"final-projection input channels ({in_ch}) and output_channels "
+                f"({output_channels}). Pick a group count dividing both, or use 1 (ungrouped)."
+            )
+        final_output = keras.layers.Conv2D(
+            filters=output_channels,
+            kernel_size=1,
+            groups=final_projection_groups,
+            activation=final_activation,
+            use_bias=False,  # Bias-free
+            kernel_initializer=kernel_initializer,
+            kernel_regularizer=kernel_regularizer,
+            name='final_output'
+        )(x)
 
     # =========================================================================
     # MODEL CREATION
@@ -423,6 +582,8 @@ def create_bfunet_denoiser(
         # We want [level_1, level_2, level_3] (shallow to deep)
         ordered_supervision_outputs = list(reversed(deep_supervision_outputs))
         all_outputs = [final_output] + ordered_supervision_outputs
+        if expose_bottleneck:
+            all_outputs = all_outputs + [bottleneck_output]
 
         logger.info(f"Created deep supervision model with {len(all_outputs)} outputs:")
         logger.info(f"  - Final output (index 0): {final_output.shape}")
@@ -440,11 +601,18 @@ def create_bfunet_denoiser(
 
     else:
         # Single output model (standard U-Net or inference model)
-        model = keras.Model(
-            inputs=inputs,
-            outputs=final_output,
-            name=model_name
-        )
+        if expose_bottleneck:
+            model = keras.Model(
+                inputs=inputs,
+                outputs=[final_output, bottleneck_output],
+                name=model_name
+            )
+        else:
+            model = keras.Model(
+                inputs=inputs,
+                outputs=final_output,
+                name=model_name
+            )
 
         logger.info(f"Created single-output model")
 
