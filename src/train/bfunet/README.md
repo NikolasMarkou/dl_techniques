@@ -72,10 +72,11 @@ the `TrainingConfig` programmatically. `--max-train-files` / `--max-val-files` c
 
 ## Shared CLI (`add_common_arguments`)
 
-Both trainers expose this flag set (defined once in `common.py`). Model-specific flags are in
-the per-trainer sections below.
+All three trainers expose this flag set (defined once in `common.py`). Model-specific flags are
+in the per-trainer sections below.
 
 **Data & schedule**
+
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--epochs` | 100 | Training epochs |
@@ -91,6 +92,7 @@ the per-trainer sections below.
 | `--mixed-precision` | off | Enable `mixed_float16`. **Measured slower** than fp32 for base@256/b4 on a 4090 (XLA is disabled by the bilinear-upsample grad). Off by default. |
 
 **Architecture (shared)**
+
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--no-gabor-stem` | off (stem ON) | Disable the frozen Gabor depthwise stem |
@@ -107,6 +109,7 @@ the per-trainer sections below.
 | `--expose-bottleneck` | off | Expose the bottleneck latent as a second output |
 
 **Noise curriculum** — training sweeps `sigma_max` from a narrow low-noise range up to a wide one:
+
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--sigma-max-start` | 0.025 | Curriculum start (low noise) |
@@ -116,6 +119,7 @@ the per-trainer sections below.
 | `--deep-supervision` | off | Enable deep-supervision auxiliary heads |
 
 **Noise model** (default is additive AWGN):
+
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--multiplicative-noise` | off | Per-pixel multiplicative noise `y = x·(1+N·σ)` |
@@ -123,6 +127,7 @@ the per-trainer sections below.
 | `--composite-additive-ratio` | 0.5 | Composite: additive floor as fraction of `sigma_m` |
 
 **Self-iteration** (train the denoiser to improve over 2–5 sequential passes — **additive noise only**):
+
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--self-iterate` | off | Enable self-iterable training via epoch-boundary pool regeneration |
@@ -131,12 +136,14 @@ the per-trainer sections below.
 | `--self-iterate-mix-ratio` | 0.5 | Fraction of pool slots holding regenerated pairs |
 
 **WW-PGD spectral regularization**
+
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--ww-pgd` | off | Spectral tail-projection at epoch boundaries |
 | `--ww-pgd-log-alpha` | off | Log per-layer power-law α trajectory (implies `--ww-pgd`) |
 
 **Run modes, warm start, analysis, output**
+
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--smoke` | off | Tiny end-to-end mechanism check (few steps, constant LR) |
