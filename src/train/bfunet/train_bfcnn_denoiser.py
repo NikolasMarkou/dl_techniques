@@ -119,7 +119,10 @@ class BFCNNTrainingConfig(BFUnetTrainingConfig):
     filters: int = 64
     initial_kernel_size: int = 5    # kernel for the stem conv
     kernel_size: int = 3            # kernel for the residual blocks
-    activation: str = "relu"
+    # NOTE: block activation/normalization are inherited from BFUnetTrainingConfig
+    # (block_activation='leaky_relu', block_activation_alpha=0.1, block_normalization=
+    # 'batchnorm' -> mapped to the real BiasFreeBatchNorm in build_model, D-006). BFCNN
+    # no longer carries a local `activation` field / --activation flag (retired, D-004).
 
     def __post_init__(self):
         super().__post_init__()
@@ -144,10 +147,31 @@ def build_model(config: BFCNNTrainingConfig) -> keras.Model:
     build_model passes only the closed BFCNN kwarg set.
     """
     input_shape = (config.patch_size, config.patch_size, config.channels)
+    # DECISION plan_2026-07-05_2199bb8e/D-006: map trainer 'batchnorm' -> real homogeneous
+    # BiasFreeBatchNorm (variance-only, no moving_mean/beta -> degree-1 homogeneous at
+    # inference), NOT stock keras.BatchNormalization(center=False) which subtracts
+    # moving_mean and breaks f(ax)=a*f(x). 'layernorm' passes through unchanged. Do NOT
+    # revert this to bare 'batchnorm' -> the residual blocks would silently rebuild stock
+    # BN and the model would stop being homogeneous. See decisions.md D-006.
+    norm = (
+        "bias_free_batchnorm"
+        if config.block_normalization == "batchnorm"
+        else config.block_normalization
+    )
+    # Exact slope 0.1 requires a LeakyReLU INSTANCE — the bare string "leaky_relu" resolves
+    # to Keras slope 0.2. Shared across stem + N blocks (safe: BiasFreeConv2D wraps it in a
+    # per-block Activation and dict-serializes it, A7).
+    act = (
+        keras.layers.LeakyReLU(negative_slope=config.block_activation_alpha)
+        if config.block_activation == "leaky_relu"
+        else config.block_activation
+    )
     if config.variant in BFCNN_CONFIGS:
         return create_bfcnn_variant(
             config.variant,
             input_shape=input_shape,
+            activation=act,
+            normalization_type=norm,
         )
     # variant == "custom" (validated in __post_init__)
     return create_bfcnn_denoiser(
@@ -156,7 +180,8 @@ def build_model(config: BFCNNTrainingConfig) -> keras.Model:
         filters=config.filters,
         initial_kernel_size=config.initial_kernel_size,
         kernel_size=config.kernel_size,
-        activation=config.activation,
+        activation=act,
+        normalization_type=norm,
         final_activation="linear",  # MUST stay linear: bias-free homogeneity f(ax)=a*f(x)
         model_name="bfcnn_denoiser_custom",
     )
@@ -233,8 +258,8 @@ def parse_arguments() -> argparse.Namespace:
                         help="Kernel size for the stem conv (variant='custom' only).")
     parser.add_argument("--kernel-size", type=int, default=3,
                         help="Kernel size for the residual blocks (variant='custom' only).")
-    parser.add_argument("--activation", type=str, default="relu",
-                        help="Block activation (variant='custom' only). Output stays linear.")
+    # NOTE: activation is set via the shared --block-activation / --block-activation-alpha
+    # flags (add_common_arguments); the retired local --activation flag is gone (D-004).
     args = parser.parse_args()
     reject_self_iterate_with_nonadditive(parser, args)
     return args
@@ -258,7 +283,6 @@ def main():
             filters=args.filters,
             initial_kernel_size=args.initial_kernel_size,
             kernel_size=args.kernel_size,
-            activation=args.activation,
             enable_analyzer=args.analyzer,
             analyzer_freq=args.analyzer_freq,
             epochs=2,
@@ -304,7 +328,6 @@ def main():
             filters=args.filters,
             initial_kernel_size=args.initial_kernel_size,
             kernel_size=args.kernel_size,
-            activation=args.activation,
             enable_analyzer=args.analyzer,
             analyzer_freq=args.analyzer_freq,
             epochs=args.epochs,
