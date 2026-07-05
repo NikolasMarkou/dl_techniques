@@ -63,6 +63,7 @@ def create_bfcnn_denoiser(
         initial_kernel_size: Union[int, Tuple[int, int]] = 5,
         kernel_size: Union[int, Tuple[int, int]] = 3,
         activation: Union[str, callable] = 'relu',
+        normalization_type: str = 'batchnorm',
         final_activation: Union[str, callable] = 'linear',
         kernel_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
         kernel_regularizer: Optional[Union[str, keras.regularizers.Regularizer]] = None,
@@ -87,6 +88,9 @@ def create_bfcnn_denoiser(
         initial_kernel_size: Integer or tuple, size of the first convolutional kernels. Defaults to 5.
         kernel_size: Integer or tuple, size of convolutional kernels. Defaults to 3.
         activation: String or callable, activation function. Defaults to 'relu'.
+        normalization_type: String, normalization used inside the residual blocks;
+            forwarded to ``BiasFreeResidualBlock`` (e.g. ``'batchnorm'``, ``'layernorm'``,
+            ``'bias_free_batchnorm'``). Defaults to ``'batchnorm'`` (current behavior).
         final_activation: String or callable, final activation function. Defaults to 'linear'.
         kernel_initializer: String or Initializer, weight initializer. Defaults to 'glorot_uniform'.
         kernel_regularizer: String or Regularizer, weight regularizer. Defaults to None.
@@ -142,6 +146,7 @@ def create_bfcnn_denoiser(
             filters=filters,
             kernel_size=kernel_size,
             activation=activation,
+            normalization_type=normalization_type,
             kernel_initializer=kernel_initializer,
             kernel_regularizer=kernel_regularizer,
             name=f'residual_block_{i}'
