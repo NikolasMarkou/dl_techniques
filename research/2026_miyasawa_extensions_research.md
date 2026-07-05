@@ -185,6 +185,8 @@ A residual field is the gradient of a scalar log-density **iff** its Jacobian is
 
 Both are far above baseline, and the finding **replicates across two architectures** — so it is not a one-model artifact. **There is no global energy/log-density.** The "implicit prior" is a *locally valid score field*, not a probability model you can integrate, normalize, or read calibrated uncertainty from. Sampling and reconstruction still work (the curl is roughly orthogonal to the annealed descent path), but **RED/PnP convergence guarantees do not transfer**, and any claim of calibrated posterior uncertainty is unlicensed.
 
+**Exact confirmation (2026-07-05 follow-up).** The random-directional estimates above were later upgraded to an *exact* computation: the full **local Jacobian block** (12×12×3 = 432 dims, co-located input/output patch inside a 256×256 image, built by finite differences — which sidesteps the reverse-mode autodiff bug entirely) on the homogeneous ConvUNeXt checkpoint gives asymmetry `||J−J^T||/||J|| = 0.58` versus a **box-blur baseline of 0.0001 on the identical extraction — ~7,400×**. The near-zero baseline proves the measurement is clean (a genuinely symmetric operator reads as symmetric), and asymmetry in a co-located block is *sufficient* to prove the global field non-conservative. This is now airtight, not an estimate.
+
 ### 6.3 The prior does real work in inverse problems — but task-dependently
 On 50%-random-pixel inpainting, we ablated the solver's two terms and measured reconstruction on the **masked pixels** (the null space, where the prior is the only source of information):
 
@@ -195,6 +197,19 @@ On 50%-random-pixel inpainting, we ablated the solver's two terms and measured r
 | Full solver | full |
 
 → **~84% of the achievable null-space reconstruction is attributable to the prior term**, ~16% to measurement-consistency. **Important honesty caveat (this drove a mid-analysis correction):** 50% random masking is the *maximally prior-favorable* task — at masked pixels the measurement term is *definitionally* zero-information, so this 84% is one **extreme** of a task-dependent curve, not a universal "the prior does 84% of the work." See §8.
+
+### 6.4 The denoiser is a soft low-rank projector (resolves the manifold question)
+The exact local Jacobian (§6.2's 432-dim block) also settles the geometry-vs-probability question that an earlier *unconverged forward-only* probe had left open (and had tentatively — wrongly — read as "no low-rank structure"):
+
+| Quantity | Value | Reading |
+|---|---|---|
+| Stable rank `‖J‖_F²/‖J‖₂²` | **7.7 / 432 (2%)** | strongly low-rank |
+| Participation ratio (singular values) | 16.8 / 432 (4%) | ~10–17 effective directions |
+| Top-5 singular values | 0.98, 0.86, 0.84, 0.77, 0.69 | a few preserved modes… |
+| Median singular value | 0.028 | …the other ~90% crushed |
+| Symmetric-part eigenvalues | 392 near 0, ~40 mid/high, 2 slightly negative, in [−0.06, 0.97] | projection-*like*, nearly PSD, not a hard projector |
+
+So **locally the denoiser preserves ~10 dominant modes and suppresses the rest** — a *soft projection onto a low-dimensional local subspace* (the signal-manifold tangent), empirically confirming Mohan's "Jacobian-as-adaptive-filter" reading. Combined with §6.2, the local operator ≈ **(soft low-rank shrinkage onto a ~10-dim subspace) + (a rotational/curl component)**: the shrinkage is *why it denoises*; the curl is *exactly what makes the field non-conservative*. The manifold-geometry account and the "no global prior" caveat are two faces of the same operator, not competing explanations. (Caveat: this is one block/point/checkpoint; the low-rank is a *local* property — the global manifold dimension is larger — but the non-conservativeness conclusion is global.)
 
 ---
 
@@ -245,7 +260,7 @@ Each row: what new capability, which repo asset to build on, the exactness cost/
 | **4** | **SURE / Noise2Score self-supervision** → train/validate with no clean references (real sensor, medical) | `additive_sure_risk` (validated on a linear toy) | SURE variance is high for complex nonlinear nets (our Probe C confirms the caution) | **Moderate** |
 | **5** | **DPS-style nonlinear posterior sampling** (phase retrieval, nonlinear deblur) | `LinearInverseProblemSolver` null/range split as template | Highest — the clean split is linear-only; needs JVP linearization, re-opens conservativeness | **New implementation** |
 | **6** | **Free per-pixel uncertainty** from the shrinkage/divergence field | `_compute_denoiser_residual` | "shrinkage magnitude ≈ error" is a plausibility claim, unproven here | **Cheap ablation** |
-| **7** | **Jacobian top-eigenvectors = local image-manifold tangent** (operationalize the geometric reading) | JVP/Hutchinson machinery | Local-linearity only; **fix the autodiff blocker first** (§11) | **Cheap ablation** once unblocked |
+| **7** | **Jacobian top-eigenvectors = local image-manifold tangent** (operationalize the geometric reading) | JVP/Hutchinson machinery, or exact finite-difference local Jacobian (§6.4) | Local-linearity only; local (not global) rank | **Cheap ablation — done** (§6.4: local stable rank ~2%; use finite differences, not autodiff) |
 | **8** | **RED/PnP with a conservativeness-repaired denoiser** — add a Jacobian-symmetry penalty at train time to *earn* the guarantees | training loop + validated Hutchinson probe as a regularizer | May trade PSNR for guarantee-eligibility; untested | **New training** |
 | **9** | **Full DDPM/score-SDE pipeline bridge** using existing checkpoints | rank-1 equivalence + checkpoints | Surfaces score-quality gaps (H2) more visibly than the light K&S sampler | **Moderate** |
 
@@ -263,7 +278,7 @@ Each row: what new capability, which repo asset to build on, the exactness cost/
 | Sampling / reconstruction still work despite the above | **TRUE** | prior-only inpainting reconstructs well; curl ⟂ trajectory (Chao 2023) |
 | RED/PnP convergence guarantees apply to a learned denoiser | **FALSE — do not transfer** | require conservativeness, which is absent (§6.2) |
 | "The prior does 84% of the work" (as a universal) | **OVERSTATED** | true only for large-null-space tasks; task-dependent law (§8) |
-| Efficacy is *primarily* manifold-projection geometry | **UNRESOLVED** | definitive test blocked by an autodiff bug (§11) |
+| Efficacy is *primarily* manifold-projection geometry | **PARTLY TRUE (locally)** | exact local Jacobian is soft-low-rank: stable rank ~2%, ~10 preserved modes (§6.4) — geometry and "no global prior" are two faces of one operator |
 | One denoiser solves *all* linear inverse problems | **TRUE with an asterisk** | true operationally; but the *prior's share* varies by task null space (§8) |
 
 ---
@@ -273,7 +288,7 @@ Each row: what new capability, which repo asset to build on, the exactness cost/
 1. **No calibrated uncertainty is licensed.** The non-conservative field means every "solved" result is a point-estimate / sampling-quality claim, never a calibrated-posterior claim. Treat this as a permanent guardrail for any product claim.
 2. **Homogeneity is checkpoint-specific.** Re-verify `D(αy)=αD(y)` before relying on cross-`σ` generalization for a given checkpoint.
 3. **The 84% credit-split is one task point** (maximally prior-favorable); the small-null-space endpoint (deblur/SR) was not independently re-measured, and the interpolating law is a single-anchor extrapolation — trust the ranking, not the numbers.
-4. **The manifold question (geometry vs probability) is genuinely open**, not settled: the definitive reverse-mode Jacobian-spectrum test was blocked by a Keras/TF-2.18 jit-compiled-conv autodiff instability; a forward-only proxy was inconclusive.
+4. **The manifold question (geometry vs probability) is now resolved locally** (§6.4): an exact finite-difference local Jacobian shows the denoiser is a soft low-rank projector (stable rank ~2%), so the geometric account is *locally* correct and coexists with the non-conservative "no global prior" finding. The reverse-mode autodiff route is still blocked by a Keras/TF-2.18 jit-conv instability, but finite differences sidestep it. Residual caveat: this is a *local* rank at one point/checkpoint; the *global* manifold dimension is larger and not measured here.
 5. **Single-repo, largely single-domain (natural-image / DIV2K) empirical base.** Cross-domain generality is asserted from the literature, not independently verified here.
 6. **Multiplicative-noise boundary** is a verified negative result: no clean identity, only Monte-Carlo relations A/B.
 
@@ -283,7 +298,7 @@ Each row: what new capability, which repo asset to build on, the exactness cost/
 
 1. **Cheapest high-value win (extension #1):** wire an existing bias-free checkpoint into a published diffusion SDE/ODE solver as a drop-in score network and benchmark against the current K&S loop. No retraining; immediately unlocks the modern sampling toolbox.
 2. **Biggest genuinely-new capability (extension #3):** implement the generalized-Tweedie Poisson/Gamma correction for low-light / microscopy. This *extends the solvable boundary* rather than re-packaging it.
-3. **Close the two honest gaps (cheap):** (a) re-run the credit-split ablation on a *measurement-dominated* task (mild deblur) to complete the null-space law empirically; (b) fix the autodiff blocker and run the true Jacobian singular-value spectrum to settle the geometry-vs-probability question. Both are ablations, not training runs.
+3. **Close the last honest gap (cheap):** re-run the credit-split ablation on a *measurement-dominated* task (mild deblur) to complete the null-space law empirically. (The Jacobian geometry-vs-probability gap is now closed — §6.4 — via an exact finite-difference local Jacobian; no need to fight the autodiff blocker.)
 
 And one **guardrail:** the non-conservative Jacobian is not a bug to fix casually — it is a property of learned scores. Never ship a calibrated-uncertainty claim derived from this denoiser-prior. If calibrated UQ is a hard requirement, that is extension #8 (train a conservativeness-repaired net and re-verify with the Hutchinson probe), not a free read-off.
 
