@@ -380,30 +380,6 @@ def parse_arguments() -> argparse.Namespace:
              "(wired to create_convunext_denoiser dropout_rate). Default 0.0 = OFF, "
              "byte-identical to existing checkpoints. Typical: 0.1-0.3.",
     )
-    parser.add_argument(
-        "--block-normalization", type=str, default="batchnorm",
-        choices=["layernorm", "batchnorm"],
-        help="Pre-activation normalization inside every ConvNeXt block (wired to "
-             "create_convunext_denoiser block_normalization). 'batchnorm' (default) = "
-             "variance-only BiasFreeBatchNorm (no mean, no beta) that restores degree-1 "
-             "homogeneity f(ax)=a*f(x) at inference (pairs best with a homogeneous "
-             "activation like LeakyReLU); 'layernorm' = per-input scale-invariant "
-             "(degree-0), byte-identical to legacy pre-batchnorm checkpoints.",
-    )
-    parser.add_argument(
-        "--block-activation", type=str, default="leaky_relu",
-        help="Activation for the WHOLE denoiser: the ConvNeXt blocks AND the "
-             "ConvUNextStem AND the deep-supervision heads all use it. 'leaky_relu' "
-             "(default) builds LeakyReLU(negative_slope=--block-activation-alpha); any "
-             "other Keras activation name is passed through as a string. The final "
-             "activation stays linear (bias-free homogeneity).",
-    )
-    parser.add_argument(
-        "--block-activation-alpha", type=float, default=0.1,
-        help="Negative slope for LeakyReLU when --block-activation=leaky_relu. Applies "
-             "to the whole denoiser (blocks + stem + deep-supervision). Default 0.1. "
-             "Ignored for non-leaky activations.",
-    )
     args = parser.parse_args()
     reject_self_iterate_with_nonadditive(parser, args)
     return args

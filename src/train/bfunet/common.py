@@ -753,6 +753,18 @@ class BFUnetTrainingConfig:
     # non-linear) or "average" (AveragePooling2D, LINEAR -> keeps the encoder path linear
     # for the Miyasawa/Tweedie residual-as-score interpretation). Ignored under Laplacian.
     downsample_pool_type: str = "max"
+    # ConvNeXt block activation (inverted-bottleneck MLP). "leaky_relu" + alpha builds
+    # keras.layers.LeakyReLU(negative_slope=alpha) in build_model (the bare "leaky_relu"
+    # string resolves to slope 0.2, so the trainer constructs the instance to honor 0.1);
+    # any other value is passed to the factory as a plain Keras activation string.
+    block_activation: str = "leaky_relu"
+    block_activation_alpha: float = 0.1
+    # Pre-activation normalization inside every ConvNeXt block. "batchnorm" (default) =
+    # variance-only BiasFreeBatchNorm (no mean, no beta) which restores degree-1
+    # homogeneity f(ax)=a*f(x) at inference (pairs best with a homogeneous activation like
+    # LeakyReLU); "layernorm" = per-input scale-invariant (degree-0), byte-identical to
+    # legacy pre-batchnorm checkpoints. Wired to create_convunext_denoiser(block_normalization=...).
+    block_normalization: str = "batchnorm"
     enable_deep_supervision: bool = False
     expose_bottleneck: bool = False
 
@@ -847,6 +859,11 @@ class BFUnetTrainingConfig:
         if self.blocks_per_level is not None and self.blocks_per_level < 1:
             raise ValueError(
                 f"blocks_per_level must be >= 1, got {self.blocks_per_level}"
+            )
+        if self.block_normalization not in ("layernorm", "batchnorm"):
+            raise ValueError(
+                f"block_normalization must be 'layernorm' or 'batchnorm', "
+                f"got {self.block_normalization!r}"
             )
         if self.noise_type not in {"additive", "multiplicative", "composite"}:
             raise ValueError(
@@ -1782,6 +1799,30 @@ def add_common_arguments(parser) -> None:
                              "encoder downsample, keeping the encoder path linear for the "
                              "Miyasawa/Tweedie residual-as-score interpretation (MaxPooling is "
                              "non-linear). No effect under --laplacian-pyramid (already linear).")
+    parser.add_argument(
+        "--block-normalization", type=str, default="batchnorm",
+        choices=["layernorm", "batchnorm"],
+        help="Pre-activation normalization inside every ConvNeXt block (wired to "
+             "create_convunext_denoiser block_normalization). 'batchnorm' (default) = "
+             "variance-only BiasFreeBatchNorm (no mean, no beta) that restores degree-1 "
+             "homogeneity f(ax)=a*f(x) at inference (pairs best with a homogeneous "
+             "activation like LeakyReLU); 'layernorm' = per-input scale-invariant "
+             "(degree-0), byte-identical to legacy pre-batchnorm checkpoints.",
+    )
+    parser.add_argument(
+        "--block-activation", type=str, default="leaky_relu",
+        help="Activation for the WHOLE denoiser: the ConvNeXt blocks AND the "
+             "ConvUNextStem AND the deep-supervision heads all use it. 'leaky_relu' "
+             "(default) builds LeakyReLU(negative_slope=--block-activation-alpha); any "
+             "other Keras activation name is passed through as a string. The final "
+             "activation stays linear (bias-free homogeneity).",
+    )
+    parser.add_argument(
+        "--block-activation-alpha", type=float, default=0.1,
+        help="Negative slope for LeakyReLU when --block-activation=leaky_relu. Applies "
+             "to the whole denoiser (blocks + stem + deep-supervision). Default 0.1. "
+             "Ignored for non-leaky activations.",
+    )
     parser.add_argument("--expose-bottleneck", action="store_true",
                         help="Expose the bottleneck latent as an optional second model output (default OFF)")
     parser.add_argument("--analyzer", action="store_true",

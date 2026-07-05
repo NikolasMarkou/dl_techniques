@@ -258,20 +258,9 @@ def parse_arguments() -> argparse.Namespace:
                         help="Kernel size for all non-stem conv blocks (default 3).")
     parser.add_argument("--initial-kernel-size", type=int, default=5,
                         help="Kernel size for the level-0 first conv (default 5).")
-    parser.add_argument("--block-activation", type=str, default="leaky_relu",
-                        help="Activation for the whole denoiser. 'leaky_relu' builds "
-                             "LeakyReLU(negative_slope=--block-activation-alpha); any other "
-                             "Keras activation name passes through. Output stays linear.")
-    parser.add_argument("--block-activation-alpha", type=float, default=0.1,
-                        help="Negative slope for LeakyReLU when --block-activation=leaky_relu.")
     parser.add_argument("--dropout", type=float, default=0.0,
                         help="Dropout rate inside the conv blocks (after activation). "
                              "Default 0.0 = OFF, byte-identical.")
-    parser.add_argument("--block-normalization", type=str, default="batchnorm",
-                        choices=["layernorm", "batchnorm"],
-                        help="Bias-free normalization inside every block. 'batchnorm' "
-                             "(default) = variance-only BatchNorm (center=False); "
-                             "'layernorm' = per-input LayerNorm (center=False).")
     args = parser.parse_args()
     reject_self_iterate_with_nonadditive(parser, args)
     return args
