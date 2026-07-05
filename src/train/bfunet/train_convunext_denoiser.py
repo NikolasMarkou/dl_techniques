@@ -162,22 +162,13 @@ class TrainingConfig(BFUnetTrainingConfig):
     # weight on the depthwise kernels; None=off, else wired to keras.regularizers.L2.
     depthwise_initializer: Optional[str] = None
     depthwise_l2: Optional[float] = None
-    # ConvNeXt block activation (inverted-bottleneck MLP). "leaky_relu" + alpha builds
-    # keras.layers.LeakyReLU(negative_slope=alpha) in build_model (the bare "leaky_relu"
-    # string resolves to slope 0.2, so the trainer constructs the instance to honor 0.1);
-    # any other value is passed to the factory as a plain Keras activation string.
-    block_activation: str = "leaky_relu"
-    block_activation_alpha: float = 0.1
+    # block_activation / block_activation_alpha / block_normalization are INHERITED from
+    # BFUnetTrainingConfig (defaults leaky_relu / 0.1 / batchnorm), along with the
+    # block_normalization membership validation. build_model consumes them unchanged.
     # Standard MLP dropout inside the ConvNeXt inverted-bottleneck blocks (NOT stochastic
     # depth). 0.0 = OFF / byte-identical to all existing checkpoints. Wired to
     # create_convunext_denoiser(dropout_rate=...).
     dropout_rate: float = 0.0
-    # Pre-activation normalization inside every ConvNeXt block. "batchnorm" (default) =
-    # variance-only BiasFreeBatchNorm (no mean, no beta) which restores degree-1
-    # homogeneity f(ax)=a*f(x) at inference (pairs best with a homogeneous activation like
-    # LeakyReLU); "layernorm" = per-input scale-invariant (degree-0), byte-identical to
-    # legacy pre-batchnorm checkpoints. Wired to create_convunext_denoiser(block_normalization=...).
-    block_normalization: str = "batchnorm"
 
     def __post_init__(self):
         super().__post_init__()
@@ -187,11 +178,6 @@ class TrainingConfig(BFUnetTrainingConfig):
             )
         if self.convnext_version not in ("v1", "v2"):
             raise ValueError("convnext_version must be 'v1' or 'v2'")
-        if self.block_normalization not in ("layernorm", "batchnorm"):
-            raise ValueError(
-                f"block_normalization must be 'layernorm' or 'batchnorm', "
-                f"got {self.block_normalization!r}"
-            )
 
 
 # ---------------------------------------------------------------------
