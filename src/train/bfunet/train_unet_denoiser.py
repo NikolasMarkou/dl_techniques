@@ -84,18 +84,10 @@ class TrainingConfig(BFUnetTrainingConfig):
     use_residual_blocks: bool = True    # BiasFreeResidualBlock vs plain BiasFreeConv2D
     conv_kernel_size: int = 3           # kernel for all non-stem conv blocks
     initial_kernel_size: int = 5        # kernel for the level-0 first conv (the "stem" conv)
-    # Block activation for the whole denoiser. "leaky_relu" + alpha builds a
-    # keras.layers.LeakyReLU(negative_slope=alpha) instance in build_model (the bare
-    # "leaky_relu" string resolves to slope 0.2, so the trainer constructs the instance to
-    # honor 0.1); any other value passes through as a plain Keras activation string.
-    block_activation: str = "leaky_relu"
-    block_activation_alpha: float = 0.1
     # Standard dropout inside the conv blocks (after activation). 0.0 = OFF / byte-identical.
     dropout_rate: float = 0.0
-    # Pre-activation normalization inside every block. "batchnorm" (default) = bias-free
-    # variance-only BatchNorm (center=False) -- the byte-identical baseline; "layernorm" =
-    # bias-free per-input LayerNorm (center=False). Wired to create_bfunet_denoiser.
-    block_normalization: str = "batchnorm"
+    # NOTE: block_activation / block_activation_alpha / block_normalization are inherited
+    # from BFUnetTrainingConfig (defaults leaky_relu / 0.1 / batchnorm); do not redeclare.
 
     def __post_init__(self):
         super().__post_init__()
@@ -106,11 +98,7 @@ class TrainingConfig(BFUnetTrainingConfig):
         # The plain U-Net requires depth >= 3 (stricter than the shared >= 2 guard).
         if self.depth is not None and self.depth < 3:
             raise ValueError(f"U-Net baseline requires depth >= 3, got {self.depth}")
-        if self.block_normalization not in ("layernorm", "batchnorm"):
-            raise ValueError(
-                f"block_normalization must be 'layernorm' or 'batchnorm', "
-                f"got {self.block_normalization!r}"
-            )
+        # block_normalization membership is validated by BFUnetTrainingConfig.__post_init__.
 
 
 # ---------------------------------------------------------------------
