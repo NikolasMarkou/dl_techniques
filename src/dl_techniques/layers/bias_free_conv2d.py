@@ -19,6 +19,7 @@ from typing import Optional, Union, Tuple, Any, Dict
 # ---------------------------------------------------------------------
 
 from ..utils.logger import logger
+from .norms.bias_free_batch_norm import BiasFreeBatchNorm
 
 # ---------------------------------------------------------------------
 
@@ -109,9 +110,10 @@ class BiasFreeConv2D(keras.layers.Layer):
         # ADDITIVE — defaults ('batchnorm', 0.0) reproduce the original layer byte-for-byte
         # (same BatchNormalization(center=False), no Dropout sublayer). Do NOT change the
         # default branch; ~30 existing bfunet tests + bfunet_conditional.py depend on it.
-        if normalization_type not in ('batchnorm', 'layernorm'):
+        if normalization_type not in ('batchnorm', 'layernorm', 'bias_free_batchnorm'):
             raise ValueError(
-                f"normalization_type must be 'batchnorm' or 'layernorm', got {normalization_type}")
+                "normalization_type must be 'batchnorm', 'layernorm' or "
+                f"'bias_free_batchnorm', got {normalization_type}")
         if not (0.0 <= dropout_rate < 1.0):
             raise ValueError(f"dropout_rate must be in [0.0, 1.0), got {dropout_rate}")
 
@@ -145,6 +147,14 @@ class BiasFreeConv2D(keras.layers.Layer):
                 self.batch_norm = layers.LayerNormalization(
                     center=False,  # Key: no bias/beta parameter
                     scale=True,    # Keep gamma/scale parameter for feature scaling
+                    name=f'{self.name}_bn'
+                )
+            elif self.normalization_type == 'bias_free_batchnorm':
+                # DECISION plan_2026-07-05_2199bb8e/D-006: 'bias_free_batchnorm' is an
+                # ADDITIVE third option -> the variance-only BiasFreeBatchNorm (degree-1
+                # homogeneous at inference); default 'batchnorm' (stock keras BN) unchanged.
+                self.batch_norm = BiasFreeBatchNorm(
+                    use_scale=True,  # Keep gamma/scale parameter for feature scaling
                     name=f'{self.name}_bn'
                 )
             else:
@@ -380,9 +390,10 @@ class BiasFreeResidualBlock(keras.layers.Layer):
         # the original residual block byte-for-byte. normalization_type applies to BOTH
         # inner convs; dropout is applied INSIDE the block after conv1's activation only
         # (conv2 is linear, pre-addition), mirroring "MLP dropout inside the block".
-        if normalization_type not in ('batchnorm', 'layernorm'):
+        if normalization_type not in ('batchnorm', 'layernorm', 'bias_free_batchnorm'):
             raise ValueError(
-                f"normalization_type must be 'batchnorm' or 'layernorm', got {normalization_type}")
+                "normalization_type must be 'batchnorm', 'layernorm' or "
+                f"'bias_free_batchnorm', got {normalization_type}")
         if not (0.0 <= dropout_rate < 1.0):
             raise ValueError(f"dropout_rate must be in [0.0, 1.0), got {dropout_rate}")
 
