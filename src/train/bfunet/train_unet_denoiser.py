@@ -157,6 +157,12 @@ def build_model(config: TrainingConfig) -> keras.Model:
         activation = keras.layers.LeakyReLU(negative_slope=config.block_activation_alpha)
     else:
         activation = config.block_activation
+    # DECISION plan_2026-07-05_2199bb8e/D-007: map trainer 'batchnorm' -> real homogeneous
+    # BiasFreeBatchNorm (plain U-Net). Stock keras BatchNormalization(center=False) subtracts
+    # moving_mean and is NOT degree-1 homogeneous; the additive 'bias_free_batchnorm' option
+    # (D-006) is variance-only so f(ax)=a*f(x) holds at inference. 'layernorm' passes through
+    # unchanged. Do NOT revert to config.block_normalization directly here.
+    norm = 'bias_free_batchnorm' if config.block_normalization == 'batchnorm' else config.block_normalization
     return create_bfunet_denoiser(
         input_shape=input_shape,
         filter_multiplier=filter_multiplier,
@@ -175,7 +181,7 @@ def build_model(config: TrainingConfig) -> keras.Model:
         zero_pad_channels=config.zero_pad_channels,
         downsample_pool_type=config.downsample_pool_type,
         expose_bottleneck=config.expose_bottleneck,
-        block_normalization=config.block_normalization,
+        block_normalization=norm,
         final_projection_groups=final_projection_groups,
         dropout_rate=config.dropout_rate,
         model_name=f"unet_denoiser_{config.variant}",

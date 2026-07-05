@@ -258,9 +258,10 @@ def create_bfunet_denoiser(
     # new kwarg defaults to a byte-identical no-op; the OFF path reproduces the original
     # plain U-Net exactly (same layer names/ops) so the ~30 existing tests + bfunet_conditional
     # stay green. Do NOT change default behavior.
-    if block_normalization not in ('batchnorm', 'layernorm'):
+    if block_normalization not in ('batchnorm', 'layernorm', 'bias_free_batchnorm'):
         raise ValueError(
-            f"block_normalization must be 'batchnorm' or 'layernorm', got {block_normalization}")
+            "block_normalization must be 'batchnorm', 'layernorm' or 'bias_free_batchnorm', "
+            f"got {block_normalization}")
     if downsample_pool_type not in ('max', 'average'):
         raise ValueError(
             f"downsample_pool_type must be 'max' or 'average', got {downsample_pool_type}")
