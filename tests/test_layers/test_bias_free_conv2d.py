@@ -15,6 +15,7 @@ import keras
 import tensorflow as tf
 
 from dl_techniques.layers.bias_free_conv2d import BiasFreeConv2D, BiasFreeResidualBlock
+from dl_techniques.layers.norms.bias_free_batch_norm import BiasFreeBatchNorm
 
 
 class TestBiasFreeConv2D:
@@ -742,6 +743,122 @@ class TestIntegrationAndCompatibility:
 
         # Test output is valid
         assert np.isfinite(keras.ops.convert_to_numpy(output_f32)).all()
+
+
+class TestBiasFreeBatchNormOption:
+    """Focused tests for the additive ``normalization_type='bias_free_batchnorm'`` value.
+
+    This third value (added in plan_2026-07-05_2199bb8e Step 4) routes normalization
+    through the variance-only :class:`BiasFreeBatchNorm` (no ``moving_mean`` / ``beta``),
+    which — unlike the stock ``'batchnorm'`` (keras ``BatchNormalization(center=False)``)
+    — keeps the layer degree-1 homogeneous at inference (``f(a*x) = a*f(x)``). That
+    homogeneity is the reason this value exists (Miyasawa residual-as-score).
+    """
+
+    @pytest.fixture
+    def static_input(self) -> keras.KerasTensor:
+        """Static-shape input (channel dim concrete for BiasFreeBatchNorm.build)."""
+        return keras.random.normal(shape=(2, 16, 16, 4))
+
+    def test_conv_builds_bias_free_batch_norm(self, static_input: keras.KerasTensor) -> None:
+        """BiasFreeConv2D with the new value builds a BiasFreeBatchNorm sublayer."""
+        layer = BiasFreeConv2D(
+            filters=8, kernel_size=3, normalization_type='bias_free_batchnorm'
+        )
+        # Build on a concrete static shape.
+        _ = layer(static_input)
+
+        assert layer.built
+        assert isinstance(layer.batch_norm, BiasFreeBatchNorm)
+        # Variance-only: scale kept, no additive center.
+        assert layer.batch_norm.use_scale
+        assert layer.normalization_type == 'bias_free_batchnorm'
+
+    def test_residual_block_inner_convs_carry_bias_free_batch_norm(
+        self, static_input: keras.KerasTensor
+    ) -> None:
+        """BiasFreeResidualBlock forwards the value into its inner BiasFreeConv2Ds."""
+        block = BiasFreeResidualBlock(
+            filters=8, kernel_size=3, normalization_type='bias_free_batchnorm'
+        )
+        _ = block(static_input)
+
+        assert block.built
+        assert block.normalization_type == 'bias_free_batchnorm'
+        # Both inner convs must build the real variance-only norm.
+        assert isinstance(block.conv1.batch_norm, BiasFreeBatchNorm)
+        assert isinstance(block.conv2.batch_norm, BiasFreeBatchNorm)
+
+    def test_conv_keras_round_trip(self, tmp_path, static_input: keras.KerasTensor) -> None:
+        """.keras save/load reproduces the training=False output (max|Δ| < 1e-6)."""
+        inputs = keras.Input(shape=static_input.shape[1:])
+        outputs = BiasFreeConv2D(
+            filters=8, kernel_size=3, normalization_type='bias_free_batchnorm'
+        )(inputs)
+        model = keras.Model(inputs, outputs)
+
+        seeded = keras.random.normal(shape=(2, 16, 16, 4), seed=42)
+        original = model(seeded, training=False)
+
+        filepath = os.path.join(str(tmp_path), 'bfbn_conv.keras')
+        model.save(filepath)
+        loaded = keras.models.load_model(filepath)
+        reloaded = loaded(seeded, training=False)
+
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(original),
+            keras.ops.convert_to_numpy(reloaded),
+            rtol=1e-6, atol=1e-6,
+            err_msg="bias_free_batchnorm conv output differs after .keras round-trip",
+        )
+
+    def test_residual_block_keras_round_trip(
+        self, tmp_path, static_input: keras.KerasTensor
+    ) -> None:
+        """.keras save/load of the residual-block variant (max|Δ| < 1e-6)."""
+        inputs = keras.Input(shape=static_input.shape[1:])
+        outputs = BiasFreeResidualBlock(
+            filters=8, kernel_size=3, normalization_type='bias_free_batchnorm'
+        )(inputs)
+        model = keras.Model(inputs, outputs)
+
+        seeded = keras.random.normal(shape=(2, 16, 16, 4), seed=7)
+        original = model(seeded, training=False)
+
+        filepath = os.path.join(str(tmp_path), 'bfbn_resblock.keras')
+        model.save(filepath)
+        loaded = keras.models.load_model(filepath)
+        reloaded = loaded(seeded, training=False)
+
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(original),
+            keras.ops.convert_to_numpy(reloaded),
+            rtol=1e-6, atol=1e-6,
+            err_msg="bias_free_batchnorm residual block differs after .keras round-trip",
+        )
+
+    @pytest.mark.parametrize("factory", [BiasFreeConv2D, BiasFreeResidualBlock])
+    def test_degree_one_homogeneity(self, factory) -> None:
+        """f(2x) ≈ 2·f(x) under training=False — the property this value exists for.
+
+        Uses a positively-homogeneous activation ('relu') so the whole layer is
+        degree-1 homogeneous; the variance-only BiasFreeBatchNorm (no mean subtraction)
+        is what preserves this at inference, unlike stock 'batchnorm'.
+        """
+        layer = factory(
+            filters=4, kernel_size=3, activation='relu',
+            normalization_type='bias_free_batchnorm',
+        )
+        x = keras.random.normal(shape=(2, 16, 16, 4), seed=123)
+
+        fx = keras.ops.convert_to_numpy(layer(x, training=False))
+        f2x = keras.ops.convert_to_numpy(layer(2.0 * x, training=False))
+
+        rel_err = np.max(np.abs(f2x - 2.0 * fx)) / (np.max(np.abs(2.0 * fx)) + 1e-8)
+        assert rel_err < 1e-4, (
+            f"bias_free_batchnorm {factory.__name__} is not degree-1 homogeneous "
+            f"(rel_err={rel_err:.3e})"
+        )
 
 
 # Additional utility functions for testing

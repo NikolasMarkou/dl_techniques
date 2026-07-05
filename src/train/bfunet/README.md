@@ -109,6 +109,18 @@ in the per-trainer sections below.
 | `--zero-pad-channels` | off | Parameter-free channel matching instead of 1×1 adjust convs (see `FINDINGS.md`) |
 | `--mean-pooling` | off | AveragePooling (linear) instead of MaxPooling — keeps the encoder linear for the Miyasawa interpretation |
 | `--expose-bottleneck` | off | Expose the bottleneck latent as a second output |
+| `--block-normalization` | batchnorm | `batchnorm` = **variance-only `BiasFreeBatchNorm`** (no `moving_mean`/`beta`, degree-1 homogeneous, pairs with LeakyReLU); `layernorm` = per-input scale-invariant (degree-0). Registered once in `add_common_arguments`. |
+| `--block-activation` | leaky_relu | Activation for blocks + stem + deep-supervision heads (final activation stays linear) |
+| `--block-activation-alpha` | 0.1 | LeakyReLU negative slope |
+
+> **All four trainers now default to `block_activation=leaky_relu` (alpha `0.1`) and
+> `block_normalization=batchnorm`.** For the ConvUNeXt / plain-U-Net / BFCNN denoisers, `batchnorm`
+> resolves to the real degree-1-homogeneous `BiasFreeBatchNorm`: ConvUNeXt already used it via its
+> ConvNeXt blocks, and BFCNN + the plain U-Net were switched onto it (their `BiasFreeConv2D` /
+> `BiasFreeResidualBlock` `'batchnorm'` opt into the additive `'bias_free_batchnorm'` value). As a
+> result **all three are now degree-1 homogeneous** (`f(a·x)=a·f(x)`), so the residual `x−f(x)` is a
+> valid scaled score (Miyasawa/Tweedie). CliffordUNet ignores these three inherited fields — its
+> norm/activation are factory-pinned for provable homogeneity (D-004), intentionally out of scope.
 
 **Noise curriculum** — training sweeps `sigma_max` from a narrow low-noise range up to a wide one:
 
@@ -168,9 +180,6 @@ Trains `create_convunext_denoiser` — a bias-free ConvNeXt U-Net. Variants: `ti
 |------|---------|---------|
 | `--variant` | base | ConvUNeXt size preset |
 | `--convnext-version` | v1 | `v1` = strict bias-free; `v2` adds a trainable GRN β (mildly breaks strict homogeneity) |
-| `--block-normalization` | batchnorm | `batchnorm` = variance-only BiasFreeBatchNorm (restores degree-1 homogeneity, pairs with LeakyReLU); `layernorm` = per-input scale-invariant (degree-0) |
-| `--block-activation` | leaky_relu | Activation for blocks + stem + deep-supervision heads (final activation stays linear) |
-| `--block-activation-alpha` | 0.1 | LeakyReLU negative slope |
 | `--dropout` | 0.0 | MLP dropout inside the inverted-bottleneck blocks |
 | `--depthwise-initializer` | None | Opt-in depthwise-kernel init (`orthonormal` → Orthogonal(gain=1)) |
 | `--depthwise-l2` | None | Opt-in L2 on depthwise kernels |
@@ -227,10 +236,7 @@ Model-specific flags (beyond the shared set):
 | `--no-residual-blocks` | off (residual ON) | Use plain `BiasFreeConv2D` blocks instead of residual blocks |
 | `--kernel-size` | 3 | Kernel for all non-stem conv blocks |
 | `--initial-kernel-size` | 5 | Kernel for the level-0 first conv |
-| `--block-activation` | leaky_relu | Whole-denoiser activation (output stays linear) |
-| `--block-activation-alpha` | 0.1 | LeakyReLU negative slope |
 | `--dropout` | 0.0 | Dropout inside the conv blocks (after activation) |
-| `--block-normalization` | batchnorm | `batchnorm` = bias-free variance-only BatchNorm (center=False); `layernorm` = bias-free per-input LayerNorm |
 
 ```bash
 MPLBACKEND=Agg .venv/bin/python -m train.bfunet.train_unet_denoiser \
@@ -259,7 +265,12 @@ Model-specific flags (beyond the shared set):
 | `--filters` | 64 | Residual-block filter width (`custom` only) |
 | `--initial-kernel-size` | 5 | Kernel size for the stem conv (`custom` only) |
 | `--kernel-size` | 3 | Kernel size for the residual blocks (`custom` only) |
-| `--activation` | relu | Block activation (`custom` only); output stays linear |
+
+> **`--activation` was retired.** BFCNN now uses the shared `--block-activation` /
+> `--block-activation-alpha` knobs (default `leaky_relu` slope `0.1`), and its residual blocks run
+> the real variance-only `BiasFreeBatchNorm` (the trainer maps `block_normalization=batchnorm` →
+> the additive `'bias_free_batchnorm'` option), so the trainer-built BFCNN is now degree-1
+> homogeneous — previously it used stock `relu` + `BatchNormalization(center=False)` and was not.
 
 ```bash
 # Full BFCNN base training run
