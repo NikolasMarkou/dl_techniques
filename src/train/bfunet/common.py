@@ -749,6 +749,7 @@ class BFUnetTrainingConfig:
     use_laplacian_pyramid: bool = False
     # Parameter-free per-level channel matching (zero-pad on increase, slice-up+add-skip on decrease) instead of 1x1 channel-adjust convs; bias-free, default OFF. See the model factory.
     zero_pad_channels: bool = False
+    high_freq_blocks: int = 0  # N bias-free blocks applied to the Laplacian high-frequency skip band per encoder level; ignored unless --laplacian-pyramid; default 0 = byte-identical to prior graph (D-001, plan_2026-07-06_b17c1f83)
     # Encoder downsample pooling for the non-Laplacian path: "max" (MaxPooling2D, default,
     # non-linear) or "average" (AveragePooling2D, LINEAR -> keeps the encoder path linear
     # for the Miyasawa/Tweedie residual-as-score interpretation). Ignored under Laplacian.
@@ -1793,6 +1794,8 @@ def add_common_arguments(parser) -> None:
                         help="Disable the frozen Gabor depthwise stem")
     parser.add_argument("--laplacian-pyramid", action="store_true",
                         help="Enable the Laplacian-pyramid downsample/skip path (default OFF)")
+    parser.add_argument("--high-freq-blocks", type=int, default=0,
+                        help="N bias-free blocks on the Laplacian high-frequency skip band per encoder level (default 0 = OFF; ignored unless --laplacian-pyramid)")
     parser.add_argument("--zero-pad-channels", action="store_true", help="Replace per-level channel-adjust 1x1 convs with parameter-free channel matching (zero-pad on increase; decoder slices the upsampled branch and adds the skip). Bias-free, fewer params; default OFF.")
     parser.add_argument("--mean-pooling", action="store_true",
                         help="Use AveragePooling2D (LINEAR) instead of MaxPooling2D for the "
