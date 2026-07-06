@@ -93,6 +93,17 @@ ALL6_ITERS = 40
 # problems (random_pixels / super_resolution / deblur / compressive_sensing).
 ALL6_CEIL = 5.0
 
+# Tight single-pass containment for the blind `denoise` task (A3/A5). Unlike the
+# iterative annealed-Langevin sweep (ALL6_CEIL=5.0, coarse-scale relaxation), a
+# single forward pass D(y) on a modestly-noised in-domain target has NO coarse-scale
+# sampling — it should land essentially in-domain. The INTENDED tight bound is ~0.6
+# (0.5 half-width + ~0.1 slack). This ceiling is set to 1.0 rather than 0.6 to avoid
+# a first-run surprise on a |.|max value that could NOT be measured here (the GPU
+# slow run is deferred; GPU1 was occupied). If the real-checkpoint run shows |.|max
+# well under this, tighten toward 0.6 (see plan A5 / SC6). The plan's falsification
+# signal is |.|max > 1.0 -> investigate, so 1.0 is the correct guard threshold.
+DENOISE_CEIL = 1.0
+
 # Domain (INV-1) reference half-width. Used only for the informational
 # in-domain-fraction report, NOT as a hard per-pixel gate at coarse scale.
 DOMAIN = 0.5
@@ -317,6 +328,7 @@ def _build_all6_operator(problem: str) -> MeasurementOperator:
 @pytest.mark.parametrize(
     "problem",
     [
+        "denoise",
         "prior",
         "inpaint",
         "random_pixels",
@@ -339,8 +351,33 @@ def test_all_six_problems_finite_and_bounded(prior: DenoiserPrior, problem: str)
     relaxation).
 
     The ``prior`` fixture is module-scoped, so the 22 MB checkpoint loads ONCE and
-    is shared across all six parametrizations.
+    is shared across all parametrizations.
     """
+    if problem == "denoise":
+        # Blind single-pass denoise D(y): NO MeasurementOperator, NO solver (it is a
+        # genuine sibling dispatch, not a fake identity operator). Mirror main.py's
+        # noise synthesis (main.py:228-231): add in-domain Gaussian noise sigma~0.1
+        # then clip to the [-0.5, +0.5] domain, and take a SINGLE forward pass.
+        target = _make_synthetic_target()  # in-domain [-0.45, 0.45]
+        rng = np.random.default_rng(0)
+        noise = rng.normal(0.0, 0.1, target.shape).astype(np.float32)
+        noisy = np.clip(target + noise, -0.5, 0.5)
+        out = _to_np(prior.denoise(noisy))
+        _domain_report("all6[denoise] D(y)", out)
+        amax = float(np.max(np.abs(out))) if np.all(np.isfinite(out)) else float("nan")
+        logger.info(
+            "[integration] all6[denoise]: shape=%s finite=%s |.|max=%.4f (single-pass)",
+            out.shape, bool(np.all(np.isfinite(out))), amax,
+        )
+        # --- Gates: finite, correct shape, TIGHT single-pass value bound.
+        assert out.shape == FULL_SHAPE, f"denoise: shape {out.shape} != {FULL_SHAPE}"
+        assert np.all(np.isfinite(out)), "denoise: produced NaN/Inf on real checkpoint"
+        assert amax <= DENOISE_CEIL, (
+            f"denoise: |D(y)|.max()={amax:.4f} > {DENOISE_CEIL} (single-pass should "
+            f"land essentially in-domain; investigate before loosening — plan A5/SC6)"
+        )
+        return  # denoise has no operator/solver path — skip the sweep below.
+
     operator = _build_all6_operator(problem)
 
     if problem == "prior":
