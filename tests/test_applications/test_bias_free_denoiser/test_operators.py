@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 
 from applications.bias_free_denoiser.operators import (
+    CompressiveSensingOperator,
     IdentityOperator,
     InpaintingOperator,
     MaskOperator,
@@ -28,6 +29,7 @@ from applications.bias_free_denoiser.operators import (
     RandomPixelsOperator,
     SpectralDeblurOperator,
     SuperResolutionOperator,
+    _DCT_AVAILABLE,
 )
 
 # Small, batch>1 shape to catch batch-broadcast bugs while staying CPU-fast.
@@ -359,3 +361,131 @@ class TestSpectralDeblurOperator:
     def test_spectral_bad_keep_fraction_rejected(self):
         with pytest.raises(ValueError):
             SpectralDeblurOperator(SP_SHAPE, keep_fraction=0.0)
+
+
+# =====================================================================
+# Step 4: CompressiveSensingOperator (HIGH-RISK, no prior art in repo).
+#
+# Structured M^T = subsample ∘ Transform ∘ SignFlip. Every factor is
+# orthonormal / self-adjoint, so (unlike the complex-spectral operator) M has
+# orthonormal columns on the FULL space and M^T M = I holds cleanly on the
+# subsample support (STOP-IF gate). The active transform (DCT vs FFT fallback)
+# is verified at runtime — the suite must NOT fail for a missing DCT.
+# =====================================================================
+
+CS_SHAPE = (16, 16, 3)
+CS_RATIO = 0.25
+CS_N = CS_SHAPE[0] * CS_SHAPE[1] * CS_SHAPE[2]  # 768
+
+
+def _cs_op(**kw):
+    kw.setdefault("seed", 0)
+    return CompressiveSensingOperator(CS_SHAPE, measurement_ratio=CS_RATIO, **kw)
+
+
+class TestCompressiveSensingOperator:
+    def test_cs_transform_available_and_orthonormal(self):
+        # Confirm the ACTIVE transform round-trips and is norm-preserving. If DCT
+        # is unavailable the operator must degrade to the FFT fallback rather than
+        # fail the suite.
+        op = _cs_op()
+        assert op.transform_kind in ("dct", "fft")
+        assert op.transform_kind == ("dct" if _DCT_AVAILABLE else "fft")
+        x = _rand((BATCH, *CS_SHAPE), seed=40)
+        roundtrip = _np(op.inverse_transform(op.transform(x)))
+        np.testing.assert_allclose(roundtrip.real, x, atol=1e-4)
+        if np.iscomplexobj(roundtrip):
+            assert np.max(np.abs(roundtrip.imag)) <= 1e-4
+        # Norm preservation (Parseval) of the forward transform.
+        fwd = _np(op.transform(x))
+        assert abs(np.linalg.norm(fwd) - np.linalg.norm(x)) <= 1e-3 * np.linalg.norm(x)
+
+    def test_cs_orthonormal(self):
+        # STOP-IF gate: M^T M ~= I, i.e. measure(adjoint(m)) == m for a valid
+        # measurement m = measure(x) on the subsample support.
+        op = _cs_op()
+        x = _rand((BATCH, *CS_SHAPE), seed=41)
+        m = op.measure(x)
+        recon = _np(op.measure(op.adjoint(m)))
+        err = np.max(np.abs(recon - _np(m)))
+        assert err <= 1e-4, f"CS M^T M err {err:.3e} > 1e-4"
+
+    def test_cs_adjointness(self):
+        # <measure(x), m> == <x, adjoint(m)> for random x and random m ON the
+        # subsample support. The DCT path is real; the FFT fallback uses the
+        # real-part Hermitian inner product (real signal into a complex domain).
+        op = _cs_op()
+        x = _rand((BATCH, *CS_SHAPE), seed=42)
+        mask = op.subsample_mask  # [H,W,C], broadcast over batch
+        if op.transform_kind == "fft":
+            m = _crand((BATCH, *CS_SHAPE), seed=43) * mask
+            meas = _np(op.measure(x))
+            lhs = float(np.real(np.sum(np.conj(meas) * m)))
+        else:
+            m = _rand((BATCH, *CS_SHAPE), seed=43) * mask
+            lhs = _inner(op.measure(x), m)
+        rhs = _inner(x, op.adjoint(m))
+        scale = max(1.0, abs(lhs), abs(rhs))
+        assert abs(lhs - rhs) <= 1e-4 * scale
+
+    def test_cs_projector_idempotent(self):
+        op = _cs_op()
+        x = _rand((BATCH, *CS_SHAPE), seed=44)
+        p1 = _np(op.project(x))
+        p2 = _np(op.project(op.project(x)))
+        assert np.max(np.abs(p2 - p1)) <= 1e-4
+
+    def test_cs_shapes(self):
+        op = _cs_op()
+        x = _rand((BATCH, *CS_SHAPE), seed=45)
+        m = op.measure(x)
+        assert _np(m).shape == (BATCH, *CS_SHAPE)
+        assert _np(op.adjoint(m)).shape == (BATCH, *CS_SHAPE)
+        assert _np(op.project(x)).shape == (BATCH, *CS_SHAPE)
+        assert _np(op.init_mean(m)).shape == (BATCH, *CS_SHAPE)
+        # adjoint / project outputs are real regardless of transform path.
+        assert not np.iscomplexobj(_np(op.adjoint(m)))
+        assert not np.iscomplexobj(_np(op.project(x)))
+
+    def test_cs_init_mean_finite(self):
+        # project(ones) != 1 for CS (sign flip of a constant is not constant), so
+        # the base init_mean's c0*(1-project(ones)) term is load-bearing; with
+        # c0=0 it vanishes -> init_mean == adjoint(measurements). Must be finite.
+        op = _cs_op()
+        x = _rand((BATCH, *CS_SHAPE), seed=46)
+        m = op.measure(x)
+        init = _np(op.init_mean(m))
+        assert np.all(np.isfinite(init))
+        # With c0=0 the unmeasured-DC term vanishes exactly.
+        np.testing.assert_allclose(init, _np(op.adjoint(m)), atol=1e-6)
+        # Sanity: project(ones) is genuinely NOT the all-ones field.
+        proj_ones = _np(op.project(np.ones((BATCH, *CS_SHAPE), dtype=np.float32)))
+        assert np.max(np.abs(proj_ones - 1.0)) > 1e-2
+
+    def test_cs_no_dense_matrix(self):
+        # INV-3: the operator stores only O(N) arrays (sign + mask, [H,W,C]),
+        # never a [N,N] / [n,N] 2-D matrix.
+        op = _cs_op()
+        for name, val in vars(op).items():
+            if isinstance(val, np.ndarray):
+                assert CS_N not in val.shape, (
+                    f"CS.{name} has a dim == N ({CS_N}): {val.shape} (INV-3)"
+                )
+                assert val.ndim <= 3, f"CS.{name} is {val.ndim}-D; expected <=3"
+        assert op.sign.shape == CS_SHAPE
+        assert op.subsample_mask.shape == CS_SHAPE
+        # Exactly n ones in the subsample mask.
+        assert int(op.subsample_mask.sum()) == op.n
+        assert op.n == round(CS_RATIO * CS_N)
+
+    def test_cs_reproducible(self):
+        a = CompressiveSensingOperator(CS_SHAPE, measurement_ratio=CS_RATIO, seed=7)
+        b = CompressiveSensingOperator(CS_SHAPE, measurement_ratio=CS_RATIO, seed=7)
+        np.testing.assert_array_equal(a.sign, b.sign)
+        np.testing.assert_array_equal(a.subsample_mask, b.subsample_mask)
+
+    def test_cs_bad_ratio_rejected(self):
+        with pytest.raises(ValueError):
+            CompressiveSensingOperator(CS_SHAPE, measurement_ratio=0.0)
+        with pytest.raises(ValueError):
+            CompressiveSensingOperator(CS_SHAPE, measurement_ratio=1.5)

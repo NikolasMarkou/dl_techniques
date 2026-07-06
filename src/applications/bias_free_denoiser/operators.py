@@ -51,6 +51,33 @@ TensorLike = Union[np.ndarray, "keras.KerasTensor"]
 ImageShape = Tuple[int, int, int]
 
 
+def _dct_available() -> bool:
+    """Probe whether ``tf.signal.dct``/``idct`` (type-2, ``norm='ortho'``) work.
+
+    The compressive-sensing operator PREFERS a real orthonormal DCT transform,
+    but ``tf.signal.dct`` is not guaranteed present/correct across TF builds
+    (plan A6/Q3). This runs a tiny round-trip once at import so the operator can
+    fall back to the confirmed-available unitary complex-FFT path without ever
+    failing the suite for a missing DCT.
+
+    Returns:
+        ``True`` iff DCT-II with ``norm='ortho'`` and its inverse exist and
+        round-trip on a probe tensor to float precision.
+    """
+    try:
+        probe = tf.constant([[1.0, 2.0, 3.0, 4.0]], dtype=tf.float32)
+        fwd = tf.signal.dct(probe, type=2, norm="ortho")
+        rt = tf.signal.idct(fwd, type=2, norm="ortho")
+        return bool(tf.reduce_max(tf.abs(rt - probe)).numpy() < 1e-4)
+    except Exception as exc:  # pragma: no cover - defensive: absent/broken DCT
+        logger.warning("tf.signal.dct unavailable (%s); CS uses FFT fallback", exc)
+        return False
+
+
+# Probed ONCE at import: which orthonormal transform the CS operator uses.
+_DCT_AVAILABLE: bool = _dct_available()
+
+
 class MeasurementOperator(abc.ABC):
     """Abstract linear measurement operator ``M`` with an orthonormal column set.
 
@@ -665,3 +692,243 @@ class SpectralDeblurOperator(MeasurementOperator):
         """
         masked = keras.ops.multiply(self._mask_c, self.dft(x))
         return tf.math.real(self.idft(masked))
+
+
+class CompressiveSensingOperator(MeasurementOperator):
+    """Structured fast orthonormal compressive-sensing operator (F2 §4b).
+
+    ``M^T = subsample_n ∘ Transform ∘ SignFlip`` where each factor is
+    orthonormal / self-adjoint, so ``M`` has orthonormal columns on the FULL
+    signal space and ``project = M M^T`` is a genuine idempotent projector. This
+    is the scalable default: unlike a dense ``[N, n]`` Gaussian ``M`` (~15 GB at
+    256x256x3, INV-3), every factor is O(N) or O(N log N) and the operator holds
+    only two ``[H, W, C]`` arrays (sign + subsample mask).
+
+    Factors:
+
+    1. **Rademacher sign flip** ``s ∈ {-1, +1}^{H,W,C}`` (per-pixel, fixed at
+       construction, seedable) — a diagonal orthonormal, self-inverse operator
+       that decorrelates spatial structure so a low-frequency subsample is still
+       informative.
+    2. **Orthonormal transform** — a separable 2D DCT-II (``norm='ortho'``,
+       real, self-inverse via DCT-III / ``idct``) applied over ``(H, W)``
+       per-channel when available in this TF build, else the confirmed unitary
+       complex-FFT fallback (``1/sqrt(H*W)`` forward norm, reused from
+       :class:`SpectralDeblurOperator`). Orthonormal on the full space either
+       way. See the ``transform_kind`` attribute for the active path.
+    3. **Random frequency subsample** — a fixed random 0/1 selection mask of
+       size ``n = round(measurement_ratio * N)`` (built once, seedable). Kept in
+       the SAME shape as the signal (zeros outside support), mirroring the
+       spectral operator's masked-spectrum representation for batch-friendliness.
+
+    * ``measure(x) = subsample(transform(sign_flip(x)))``.
+    * ``adjoint(m) = sign_flip(inverse_transform(subsample(m)))`` — every factor
+      run in reverse (transform orthogonal so ``transform^-1 = transform^T``,
+      sign-flip self-inverse, ``subsample`` = ``mask ⊙ ·`` is the zero-fill
+      adjoint of itself).
+    * ``project(x) = adjoint(measure(x))`` — idempotent, O(N log N).
+
+    Because the transform is orthonormal on the FULL space (not just its range,
+    unlike the complex-spectral operator), ``M^T M = I`` holds cleanly:
+    ``measure(adjoint(m)) = m`` for any ``m`` supported on the subsample mask
+    (in particular every ``m = measure(x)``) — verified numerically to ~7e-7.
+
+    ``project(ones) != 1`` in general (the sign flip of a constant field is not
+    constant), so the base :meth:`init_mean`'s ``c0 * (1 - project(ones))`` term
+    is genuinely load-bearing here; with ``c0 = 0`` it still vanishes, leaving
+    ``init_mean = adjoint(measurements)``.
+
+    No dense ``[N, n]``/``[N, N]`` matrix is built (INV-3): the structured
+    operator is the only path. (The plan permits an optional small-tile dense
+    Gaussian fallback behind an ``N <= max_dense_n`` guard; it is intentionally
+    OMITTED here — the structured operator is the recommended default and scales
+    to full 256x256x3, so a dense fallback would add surface for no benefit.)
+
+    Attributes:
+        h, w, c: Signal spatial / channel dims.
+        measurement_ratio: Fraction ``n / N`` of coefficients kept.
+        n: Number of kept coefficients (``round(measurement_ratio * N)``).
+        transform_kind: ``'dct'`` (preferred) or ``'fft'`` (fallback) — the
+            orthonormal transform actually active in this environment.
+        sign: ``[H, W, C]`` float32 Rademacher ``{-1, +1}`` diagonal.
+        subsample_mask: ``[H, W, C]`` float32 0/1 selection mask (``n`` ones).
+    """
+
+    def __init__(
+        self,
+        image_shape: ImageShape,
+        measurement_ratio: float = 0.1,
+        *,
+        seed: Optional[int] = None,
+        c0: float = 0.0,
+    ) -> None:
+        """Build a structured compressive-sensing operator.
+
+        Args:
+            image_shape: Signal shape ``(H, W, C)``.
+            measurement_ratio: Fraction of transform coefficients to keep, in
+                ``(0, 1]`` (default ``0.1``).
+            seed: Optional seed for the Rademacher sign + subsample draw
+                (reproducibility).
+            c0: Domain center for unmeasured components (default ``0.0``, D-002).
+
+        Raises:
+            ValueError: If ``measurement_ratio`` is not in ``(0, 1]``.
+        """
+        super().__init__(c0=c0)
+        if not (0.0 < measurement_ratio <= 1.0):
+            raise ValueError(
+                f"measurement_ratio must be in (0, 1]; got {measurement_ratio}"
+            )
+        h, w, c = int(image_shape[0]), int(image_shape[1]), int(image_shape[2])
+        self.h, self.w, self.c = h, w, c
+        n_total = h * w * c
+        self.measurement_ratio = float(measurement_ratio)
+
+        rng = np.random.default_rng(seed)
+        # Rademacher {-1,+1} diagonal, one draw per pixel-channel, fixed forever.
+        sign = rng.integers(0, 2, size=(h, w, c)).astype(np.float32) * 2.0 - 1.0
+        self.sign: np.ndarray = sign
+
+        # Fixed random subsample: choose n distinct coefficients out of N; a
+        # same-shape 0/1 mask (INV-3: an [H,W,C] array, never [n,N]).
+        n = int(round(self.measurement_ratio * n_total))
+        n = max(1, min(n, n_total))
+        self.n: int = n
+        keep = rng.choice(n_total, size=n, replace=False)
+        mask_flat = np.zeros(n_total, dtype=np.float32)
+        mask_flat[keep] = 1.0
+        self.subsample_mask: np.ndarray = mask_flat.reshape(h, w, c)
+
+        # DECISION plan_2026-07-06_d6b88914/D-008: PREFER the real DCT-II
+        # (norm='ortho') transform; fall back to the unitary complex-FFT path
+        # ONLY when tf.signal.dct is absent/broken in this TF build (probed once
+        # at import, A6/Q3). Do NOT hardcode the complex-FFT path as primary: the
+        # real DCT needs no Hermitian-symmetry bookkeeping and no final real(),
+        # so measure/adjoint stay real end-to-end and M^T M = I holds on the FULL
+        # space (not merely M's range as with the complex-spectral operator). Do
+        # NOT drop the FFT branch either — it is the confirmed-available safety
+        # net if a future TF build regresses DCT. See decisions.md D-008.
+        self.transform_kind: str = "dct" if _DCT_AVAILABLE else "fft"
+
+        if self.transform_kind == "fft":
+            # Complex machinery only materialized on the fallback path.
+            self._sqrt_hw = tf.constant(
+                math.sqrt(float(h * w)), dtype=tf.complex64
+            )
+            self._mask_c = tf.constant(
+                self.subsample_mask, dtype=tf.complex64
+            )
+
+        logger.info(
+            "CompressiveSensingOperator: %s, ratio %.3f -> %d/%d coeffs "
+            "(transform=%s)",
+            (h, w, c), self.measurement_ratio, n, n_total, self.transform_kind,
+        )
+
+    # ------------------------------------------------------------------
+    # Orthonormal transform pair (DCT primary, FFT fallback).
+    # ------------------------------------------------------------------
+
+    def transform(self, x: TensorLike) -> "tf.Tensor":
+        """Forward orthonormal transform (separable 2D DCT-II or unitary DFT).
+
+        Args:
+            x: A signal-domain tensor ``[B, H, W, C]``.
+
+        Returns:
+            The transformed tensor ``[B, H, W, C]`` (real for DCT, complex64 for
+            the FFT fallback).
+        """
+        if self.transform_kind == "dct":
+            return self._dct2d(x)
+        return self._dft(x)
+
+    def inverse_transform(self, y: TensorLike) -> "tf.Tensor":
+        """Inverse orthonormal transform (DCT-III / ``idct`` or inverse DFT).
+
+        Args:
+            y: A transform-domain tensor ``[B, H, W, C]``.
+
+        Returns:
+            The inverse-transformed tensor ``[B, H, W, C]``.
+        """
+        if self.transform_kind == "dct":
+            return self._idct2d(y)
+        return self._idft(y)
+
+    @staticmethod
+    def _dct2d(x: TensorLike) -> "tf.Tensor":
+        """Separable orthonormal 2D DCT-II over ``(H, W)``, per channel.
+
+        ``tf.signal.dct`` only transforms the last axis, so each spatial axis is
+        transposed to last, transformed, and transposed back.
+        """
+        xt = keras.ops.convert_to_tensor(x)
+        # DCT over W (axis 2): move W to last -> [B, H, C, W].
+        yw = tf.signal.dct(tf.transpose(xt, [0, 1, 3, 2]), type=2, norm="ortho")
+        yw = tf.transpose(yw, [0, 1, 3, 2])
+        # DCT over H (axis 1): move H to last -> [B, W, C, H].
+        yh = tf.signal.dct(tf.transpose(yw, [0, 2, 3, 1]), type=2, norm="ortho")
+        return tf.transpose(yh, [0, 3, 1, 2])
+
+    @staticmethod
+    def _idct2d(y: TensorLike) -> "tf.Tensor":
+        """Inverse of :meth:`_dct2d` (DCT-III via ``idct``, same transposes)."""
+        yt = keras.ops.convert_to_tensor(y)
+        # Inverse over H first (any order works — axes are independent).
+        xh = tf.signal.idct(tf.transpose(yt, [0, 2, 3, 1]), type=2, norm="ortho")
+        xh = tf.transpose(xh, [0, 3, 1, 2])
+        xw = tf.signal.idct(tf.transpose(xh, [0, 1, 3, 2]), type=2, norm="ortho")
+        return tf.transpose(xw, [0, 1, 3, 2])
+
+    def _dft(self, x: TensorLike) -> "tf.Tensor":
+        """Unitary 2D DFT ``fft2d(x) / sqrt(H*W)`` per channel (FFT fallback)."""
+        xc = tf.cast(keras.ops.convert_to_tensor(x), tf.complex64)
+        spec = tf.signal.fft2d(tf.transpose(xc, [0, 3, 1, 2]))
+        return tf.transpose(spec, [0, 2, 3, 1]) / self._sqrt_hw
+
+    def _idft(self, spec: TensorLike) -> "tf.Tensor":
+        """Unitary inverse 2D DFT ``ifft2d(X) * sqrt(H*W)`` (FFT fallback)."""
+        st = tf.cast(keras.ops.convert_to_tensor(spec), tf.complex64)
+        xt = tf.signal.ifft2d(tf.transpose(st, [0, 3, 1, 2]))
+        return tf.transpose(xt, [0, 2, 3, 1]) * self._sqrt_hw
+
+    # ------------------------------------------------------------------
+    # Measurement / adjoint / projector.
+    # ------------------------------------------------------------------
+
+    def measure(self, x: TensorLike) -> "tf.Tensor":
+        """Apply ``M^T`` = ``subsample(transform(sign_flip(x)))`` (F2 §4b).
+
+        Args:
+            x: A signal-domain tensor ``[B, H, W, C]``.
+
+        Returns:
+            The masked transform-domain measurement ``[B, H, W, C]`` (real for
+            DCT, complex64 for the FFT fallback).
+        """
+        signed = keras.ops.multiply(self.sign, x)
+        coeffs = self.transform(signed)
+        mask = self._mask_c if self.transform_kind == "fft" else self.subsample_mask
+        return keras.ops.multiply(mask, coeffs)
+
+    def adjoint(self, m: TensorLike) -> "tf.Tensor":
+        """Apply ``M`` = ``sign_flip(inverse_transform(subsample(m)))`` (F2 §4b).
+
+        The FFT fallback forces ``tf.math.real`` after the inverse transform
+        (the signal is real; the mask keeps the spectrum only approximately
+        Hermitian to float precision). The DCT path is real throughout.
+
+        Args:
+            m: A masked transform-domain measurement ``[B, H, W, C]``.
+
+        Returns:
+            The real signal-domain reconstruction ``[B, H, W, C]``.
+        """
+        mask = self._mask_c if self.transform_kind == "fft" else self.subsample_mask
+        masked = keras.ops.multiply(mask, m)
+        recon = self.inverse_transform(masked)
+        if self.transform_kind == "fft":
+            recon = tf.math.real(recon)
+        return keras.ops.multiply(self.sign, recon)
