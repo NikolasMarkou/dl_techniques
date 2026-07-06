@@ -87,6 +87,11 @@ class UniversalInverseSolver:
         clip: If ``True``, clip each iterate to ``clip_range`` (OFF by default; the
             hard clip breaks residual=score at the boundary, S1).
         clip_range: ``(lo, hi)`` interior clip bounds used only when ``clip`` is set.
+        final_projection: If ``True``, impose HARD data consistency ONCE after the
+            ascent loop — replace ``best_y``'s measured components with the exact
+            observed ones while keeping the prior-filled null-space component (an
+            additive OFF-by-default quality lever, D-005). The OFF path (default) is
+            byte-identical; for a :class:`NullOperator` it is a no-op.
     """
 
     def __init__(
@@ -102,6 +107,7 @@ class UniversalInverseSolver:
         patience: int = 20,
         clip: bool = False,
         clip_range: Tuple[float, float] = _DEFAULT_CLIP_RANGE,
+        final_projection: bool = False,
     ) -> None:
         """Configure the solver.
 
@@ -122,6 +128,9 @@ class UniversalInverseSolver:
                 doc / S1 for why clipping is off by default).
             clip_range: ``(lo, hi)`` bounds for the optional clip (default
                 ``(-0.5, +0.5)``).
+            final_projection: Enable the OFF-by-default final hard data-consistency
+                projection at ``solve()`` return (default ``False``; see class doc /
+                D-005). OFF is byte-identical; a :class:`NullOperator` makes it a no-op.
 
         Raises:
             AttributeError: If ``prior`` does not expose a callable ``residual``.
@@ -141,6 +150,7 @@ class UniversalInverseSolver:
         self.patience = int(patience)
         self.clip = bool(clip)
         self.clip_range = (float(clip_range[0]), float(clip_range[1]))
+        self.final_projection = bool(final_projection)
         logger.info(
             "UniversalInverseSolver: sigma_0=%.3f sigma_l=%.3f h0=%.3f h_max=%s "
             "beta=%.3f max_iter=%d patience=%d clip=%s (domain [-0.5,+0.5])",
@@ -326,6 +336,23 @@ class UniversalInverseSolver:
 
         info["best_sigma"] = best_sigma
         info["stopped_iteration"] = t - 1
+
+        # DECISION plan_2026-07-06_c9c7a81a/D-005: additive OFF-by-default hard
+        # data-consistency projection. `best_y - project(best_y) + adjoint(measurements)`
+        # keeps the prior-filled null-space component and replaces the measured
+        # components with the EXACT observed ones. This is applied uniformly (NO
+        # per-problem branch, INV-6): for a NullOperator (project=0, adjoint=0) it is a
+        # no-op, so the guard is only on `has_measurements` (leave the unconstrained
+        # prior-sampling path untouched). When `final_projection=False` (default) this
+        # block is skipped and `best_y` is byte-identical to before — do NOT enable by
+        # default and do NOT fold the num_samples averaging in here. See decisions.md D-005.
+        if self.final_projection and has_measurements:
+            best_y = keras.ops.add(
+                keras.ops.subtract(best_y, operator.project(best_y)),
+                keras.ops.cast(operator.adjoint(measurements), "float32"),
+            )
+        info["final_projection"] = bool(self.final_projection)
+
         logger.info(
             "done after %d iterations; best sigma=%.6f", t - 1, best_sigma,
         )

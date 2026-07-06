@@ -255,25 +255,43 @@ def run_problem(
         h0=args.h0,
         h_max=args.h_max,
         patience=resolved_patience,
+        final_projection=args.final_projection,
     )
 
     if problem == "prior":
         # Algorithm-1 unconstrained prior sampling: no measurements, size via shape.
-        recon, info = solver.solve(operator, measurements=None, shape=target.shape, seed=args.seed)
+        measurements: Optional[Any] = None
+        shape: Optional[Tuple[int, ...]] = target.shape
         degraded_disp: Optional[np.ndarray] = None
     else:
         measurements = operator.measure(target)
-        recon, info = solver.solve(operator, measurements=measurements, seed=args.seed)
+        shape = None
         # Uniform signal-shaped observable view (real for spectral/CS): M M^T target.
         degraded = np.asarray(keras.ops.convert_to_numpy(operator.project(target)))
         degraded_disp = DenoiserPrior.denorm(degraded[0])
 
-    recon_np = np.asarray(keras.ops.convert_to_numpy(recon))
+    # DECISION plan_2026-07-06_c9c7a81a/D-005: --num-samples > 1 averages N independent
+    # solve() runs (seeds args.seed + i) in the [0,1] denormed domain here, as an OUTER
+    # loop — the averaging is deliberately OUTSIDE solve() to preserve the single unified
+    # loop (INV-6). num_samples=1 (default) runs exactly one solve at args.seed and the
+    # `/ 1.0` mean is byte-identical to a single-solve reconstruction. See decisions.md D-005.
+    num_samples = max(1, int(args.num_samples))
+    recon01_sum: Optional[np.ndarray] = None
+    info: Dict[str, Any] = {}
+    for i in range(num_samples):
+        recon, info = solver.solve(
+            operator, measurements=measurements, shape=shape, seed=args.seed + i
+        )
+        recon_np = np.asarray(keras.ops.convert_to_numpy(recon))
+        recon01_i = np.clip(DenoiserPrior.denorm(recon_np[0]), 0.0, 1.0)
+        recon01_sum = recon01_i if recon01_sum is None else recon01_sum + recon01_i
+    recon01 = recon01_sum / float(num_samples)
+
     return {
         "title": _PROBLEM_TITLES[problem],
         "target": DenoiserPrior.denorm(target[0]),
         "degraded": degraded_disp,
-        "recon": np.clip(DenoiserPrior.denorm(recon_np[0]), 0.0, 1.0),
+        "recon": recon01,
         "info": info,
     }
 
@@ -429,6 +447,20 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    help="No-improvement iterations before early stop; 0 = disabled "
                         "(resolved to iterations+1 so a full-budget run never early-stops; "
                         "default 0).")
+    # --- Optional additive quality levers (OFF-by-default, opt-in; D-005).
+    # DECISION plan_2026-07-06_c9c7a81a/D-005: both levers are ADDITIVE and OFF by
+    # default. --final-projection re-imposes exact measurements ONCE at solve() return
+    # (data consistency; NullOperator no-op). --num-samples averages N independent
+    # solve() trajectories (different seeds) in the [0,1] domain as an OUTER loop in
+    # run_problem — NOT inside solve() (that would break the single unified loop, INV-6).
+    # num_samples=1 (default) is byte-identical to a single solve. Do NOT flip either
+    # default without a broad measured gain. See decisions.md D-005.
+    p.add_argument("--final-projection", action="store_true",
+                   help="Impose exact hard data consistency once at solve() return "
+                        "(additive, OFF by default; NullOperator no-op).")
+    p.add_argument("--num-samples", type=int, default=1,
+                   help="Ours-avg: average N independent solve trajectories (different "
+                        "seeds) in [0,1]; default 1 = single solve (byte-identical).")
     p.add_argument("--output-dir", type=str, default=str(_DEFAULT_OUTPUT_DIR),
                    help="Directory for the grid PNG (default repo-root results/).")
     # Per-problem knobs.

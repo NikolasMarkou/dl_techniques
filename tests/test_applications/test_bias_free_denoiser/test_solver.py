@@ -211,6 +211,44 @@ class TestSolveRunsAllOperators:
         assert len(info["sigma_values"]) >= 1
 
 
+class TestFinalProjection:
+    """The additive OFF-by-default final data-consistency lever (D-005, SC6).
+
+    ``final_projection=False`` (default) must be byte-identical to a solver
+    constructed WITHOUT the kwarg; ``final_projection=True`` on a masked operator
+    must make ``measure(best_y) == measurements`` exactly (hard consistency).
+    """
+
+    def test_off_is_byte_identical(self):
+        target = _smooth_target()
+        op = InpaintingOperator(IMAGE_SHAPE, block_size=(6, 6))
+        measurements = op.measure(target)
+
+        # One solver never passes final_projection (defaults to False); the other
+        # passes it explicitly False. Same seed -> identical trajectory + best_y.
+        base = _solver(target)
+        proj_off = _solver(target, final_projection=False)
+        by_base, _ = base.solve(op, measurements=measurements, seed=11)
+        by_off, _ = proj_off.solve(op, measurements=measurements, seed=11)
+
+        max_delta = float(np.max(np.abs(_np(by_base) - _np(by_off))))
+        assert max_delta == 0.0, f"OFF path not byte-identical: max|delta|={max_delta}"
+
+    def test_on_enforces_hard_consistency(self):
+        target = _smooth_target()
+        op = InpaintingOperator(IMAGE_SHAPE, block_size=(6, 6))
+        measurements = op.measure(target)
+
+        solver = _solver(target, final_projection=True)
+        best_y, info = solver.solve(op, measurements=measurements, seed=11)
+
+        # Hard data consistency: the measured components exactly match observations.
+        resid = _np(keras.ops.subtract(op.measure(best_y), measurements))
+        max_resid = float(np.max(np.abs(resid)))
+        assert max_resid == 0.0, f"final projection did not enforce consistency: {max_resid}"
+        assert info["final_projection"] is True
+
+
 class TestNoNaN:
     @pytest.mark.parametrize("name,op", list(_all_operators().items()))
     def test_no_nan(self, name, op):

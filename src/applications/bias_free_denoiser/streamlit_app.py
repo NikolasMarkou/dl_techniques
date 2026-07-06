@@ -171,6 +171,11 @@ def _make_args(
         sigma_l=float(knobs.get("sigma_l", 0.01)),
         h0=float(knobs.get("h0", 0.01)),
         patience=int(knobs.get("patience", 0)),
+        # Optional additive quality levers (OFF-by-default; D-005). run_problem reads
+        # both: final_projection is forwarded to the solver, num_samples drives the
+        # outer Ours-avg loop. num_samples=1 is byte-identical to a single solve.
+        final_projection=bool(knobs.get("final_projection", False)),
+        num_samples=int(knobs.get("num_samples", 1)),
         # Per-problem knobs (defaults mirror main.py; only the active one is shown).
         block=knobs.get("block"),
         keep_ratio=float(knobs.get("keep_ratio", 0.3)),
@@ -210,6 +215,15 @@ def _sidebar_controls() -> Dict[str, Any]:
     knobs["h0"] = st.sidebar.slider("h0 (step schedule)", 0.001, 0.1, 0.01, 0.001)
     knobs["patience"] = st.sidebar.number_input(
         "Patience (0 = disabled)", min_value=0, max_value=1000, value=0, step=10,
+    )
+
+    # Optional additive quality levers (OFF-by-default, opt-in; D-005). Both mirror the
+    # main.py CLI defaults: no final projection, single sample.
+    knobs["final_projection"] = st.sidebar.checkbox(
+        "Final data-consistency projection", value=False,
+    )
+    knobs["num_samples"] = st.sidebar.number_input(
+        "Samples to average (Ours-avg)", min_value=1, max_value=16, value=1, step=1,
     )
 
     st.sidebar.header("Image")
