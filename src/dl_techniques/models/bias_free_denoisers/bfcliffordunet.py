@@ -248,6 +248,7 @@ def create_cliffordunet_denoiser(
         gabor_kernel_size: Union[int, Tuple[int, int]] = 7,
         gabor_stem_projection: bool = True,
         use_laplacian_pyramid: bool = False,
+        high_freq_blocks: int = 0,
         laplacian_kernel_size: Tuple[int, int] = (5, 5),
         zero_pad_channels: bool = False,
         final_projection_groups: int = 1,
@@ -320,6 +321,11 @@ def create_cliffordunet_denoiser(
         use_laplacian_pyramid: If True, replace each encoder downsample/skip
             junction with a bias-free ``LaplacianPyramidLevel`` split. Defaults
             to False.
+        high_freq_blocks: Number of bias-free ``CliffordNetBlock`` blocks
+            (externalized residual) applied to the Laplacian high-frequency skip
+            band at each encoder level before it becomes the decoder skip.
+            **Ignored when use_laplacian_pyramid=False.** Defaults to 0
+            (byte-identical no-op: adds ZERO layers, renames nothing).
         laplacian_kernel_size: Gaussian blur kernel size for the Laplacian
             pyramid split. Only used when ``use_laplacian_pyramid=True``.
             Defaults to ``(5, 5)``.
@@ -382,6 +388,9 @@ def create_cliffordunet_denoiser(
 
     if blocks_per_level <= 0:
         raise ValueError(f"blocks_per_level must be positive, got {blocks_per_level}")
+
+    if high_freq_blocks < 0:
+        raise ValueError(f"high_freq_blocks must be non-negative, got {high_freq_blocks}")
 
     if cli_mode not in ('inner', 'wedge', 'full'):
         raise ValueError(f"cli_mode must be 'inner', 'wedge', or 'full', got {cli_mode!r}")
@@ -541,6 +550,34 @@ def create_cliffordunet_denoiser(
             pyramid_name=f'encoder_pyramid_{level}',
             pool_type=downsample_pool_type,
         )
+
+        # DECISION plan_2026-07-06_b17c1f83/D-001: optionally process the Laplacian
+        # high-frequency band with N bias-free Clifford blocks before it becomes the
+        # decoder skip. CliffordNetBlock is TRANSFORM-ONLY -> external residual Add is
+        # mandatory (or the residual silently vanishes). Gated on use_laplacian_pyramid
+        # (the high band only exists then); high_freq_blocks=0 (default) adds ZERO layers
+        # -> byte-identical OFF path, so existing `.keras` checkpoints (whose layer names
+        # are load-bearing) still load. Do NOT drop the use_laplacian_pyramid gate or the
+        # >0 gate: without the pyramid there is no high band and this would rename/insert
+        # layers into the raw-skip path. The Laplacian split is channel-preserving, so the
+        # high band has current_filters channels and level_shifts stays valid (s < channels).
+        # No StochasticDepth here (drop_path 0) -> deterministic round-trip.
+        if high_freq_blocks > 0 and use_laplacian_pyramid:
+            for hf_idx in range(high_freq_blocks):
+                hf_block_name = f'skip_highfreq_block_{level}_{hf_idx}'
+                hf = CliffordNetBlock(
+                    channels=current_filters,
+                    shifts=level_shifts,
+                    cli_mode=cli_mode,
+                    ctx_mode=ctx_mode,
+                    layer_scale_init=layer_scale_init,
+                    kernel_initializer=kernel_initializer,
+                    kernel_regularizer=kernel_regularizer,
+                    name=hf_block_name,
+                    **block_kwargs,
+                )(skip)
+                skip = keras.layers.Add(name=f'{hf_block_name}_residual')([skip, hf])
+
         skip_connections.append(skip)
 
     # =========================================================================
