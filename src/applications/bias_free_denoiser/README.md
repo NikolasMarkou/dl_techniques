@@ -83,10 +83,11 @@ Swap `InpaintingOperator` for `RandomPixelsOperator`, `SuperResolutionOperator`,
 `SpectralDeblurOperator`, or `CompressiveSensingOperator` — the solve call is
 identical.
 
-## Six supported problems
+## Supported problems
 
 | id | Operator | Problem |
 |----|----------|---------|
+| `denoise` | single forward pass `D(y)` | Blind Miyasawa/Tweedie MMSE denoise: no measurement operator, no iteration (the natural least-squares estimate at any noise level) |
 | `prior` | `NullOperator` | Unconstrained sampling from the implicit prior (Algorithm 1) |
 | `inpaint` | `InpaintingOperator` | Fill a centered missing block |
 | `random_pixels` | `RandomPixelsOperator` | Fill randomly missing pixels |
@@ -104,10 +105,24 @@ CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python \
 Runs the selected problem(s) on a synthetic in-domain target (or `--image PATH` for a
 real image, resized to `--size`) and writes a grid PNG — target, measured/degraded
 view, reconstruction, and the `sigma_t` convergence curve per problem — to
-repo-root `results/`. It is fully headless (`MPLBACKEND=Agg`). Key flags:
+repo-root `results/`. It is fully headless (`MPLBACKEND=Agg`). `--problem` accepts any
+of the seven ids (`denoise`, `prior`, `inpaint`, `random_pixels`, `super_resolution`,
+`deblur`, `compressive_sensing`) or `all`. Key flags:
 `--checkpoint`, `--iterations`, `--sigma0`, `--beta`, `--seed`, `--size`, and the
 per-problem knobs `--block`, `--keep-ratio`, `--sr-factor`, `--keep-fraction`,
 `--measurement-ratio`.
+
+The `denoise` task takes a single forward pass through the denoiser (no operator, no
+solver). Its `--noise-sigma` flag (default `0.1`) synthesizes in-domain Gaussian test
+noise that is added to the target — and lightly clipped back to `[-0.5, +0.5]` — before
+the single denoise pass; `--noise-sigma 0` denoises the input as-is. This std is only a
+test-harness knob: it is NEVER fed to the model, because the denoiser is bias-free and
+noise-level-blind.
+
+```bash
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python \
+    -m applications.bias_free_denoiser.main --problem denoise --noise-sigma 0.1
+```
 
 ## Convergence / iteration budget
 
@@ -127,6 +142,14 @@ CUDA_VISIBLE_DEVICES=1 .venv/bin/streamlit run \
     src/applications/bias_free_denoiser/streamlit_app.py \
     --server.address 127.0.0.1 --server.port 8501
 ```
+
+For the `denoise` task the app also offers **live-webcam streaming denoise** via
+[`streamlit-webrtc`](https://github.com/whitphx/streamlit-webrtc): pick the `denoise`
+problem and the `Webcam (live)` source, and each incoming webcam frame is passed through
+a single forward pass `D(y)` in real time (raise the sidebar `Noise sigma` to inject
+synthetic noise and watch it removed). Live streaming is available for `denoise` ONLY —
+the six iterative inverse problems each need hundreds of forward passes per image, which
+is unsuitable for live video, so they remain snapshot/upload-only.
 
 The core (`denoiser_prior.py`, `operators.py`, `solver.py`) is GUI-free and fully
 usable headless / programmatically; only `streamlit_app.py` imports streamlit.
