@@ -257,6 +257,7 @@ def build_model(config: TrainingConfig) -> keras.Model:
         gabor_kernel_size=config.gabor_kernel_size,
         gabor_stem_projection=config.gabor_stem_projection,
         use_laplacian_pyramid=config.use_laplacian_pyramid,
+        high_freq_blocks=config.high_freq_blocks,
         zero_pad_channels=config.zero_pad_channels,
         extra_zero_output_channels=config.extra_zero_output_channels,
         final_projection_groups=final_projection_groups,
