@@ -163,6 +163,7 @@ def create_bfunet_denoiser(
         gabor_kernel_size: Union[int, Tuple[int, int]] = 7,
         gabor_stem_projection: bool = True,
         use_laplacian_pyramid: bool = False,
+        high_freq_blocks: int = 0,
         laplacian_kernel_size: Tuple[int, int] = (5, 5),
         zero_pad_channels: bool = False,
         downsample_pool_type: str = "max",
@@ -206,6 +207,10 @@ def create_bfunet_denoiser(
         kernel_initializer: String or Initializer, weight initializer. Defaults to 'he_normal'.
         kernel_regularizer: String or Regularizer, weight regularizer. Defaults to None.
         use_residual_blocks: Boolean, whether to use residual blocks. Defaults to True.
+        high_freq_blocks: Integer, number of bias-free residual blocks applied to the
+            Laplacian high-frequency skip band at each encoder level before it becomes
+            the decoder skip. **Ignored when use_laplacian_pyramid=False.** Defaults to 0
+            (byte-identical no-op: adds ZERO layers, renames nothing).
         enable_deep_supervision: Boolean, whether to add deep supervision outputs. Defaults to True.
         model_name: String, name for the model. Defaults to 'bias_free_unet'.
 
@@ -253,6 +258,9 @@ def create_bfunet_denoiser(
 
     if blocks_per_level <= 0:
         raise ValueError(f"blocks_per_level must be positive, got {blocks_per_level}")
+
+    if high_freq_blocks < 0:
+        raise ValueError(f"high_freq_blocks must be non-negative, got {high_freq_blocks}")
 
     # DECISION plan_2026-07-04_58ac8e73/D-002: additive ConvUNeXt-parity features. Every
     # new kwarg defaults to a byte-identical no-op; the OFF path reproduces the original
@@ -383,6 +391,28 @@ def create_bfunet_denoiser(
                 'bottleneck_downsample', 'bottleneck_pyramid',
                 downsample_pool_type,
             )
+
+        # DECISION plan_2026-07-06_b17c1f83/D-001: optionally process the Laplacian
+        # high-frequency band with N bias-free residual blocks before it becomes the
+        # decoder skip. Gated on use_laplacian_pyramid (the high band only exists then);
+        # high_freq_blocks=0 (default) adds ZERO layers -> byte-identical OFF path, so
+        # existing `.keras` checkpoints (whose layer names are load-bearing) still load.
+        # Do NOT drop the use_laplacian_pyramid gate or the >0 gate: without the pyramid
+        # there is no high band and this would rename/insert layers into the raw-skip path.
+        # The high band is channel-preserving, so filters=current_filters is shape-safe.
+        if high_freq_blocks > 0 and use_laplacian_pyramid:
+            for hf_idx in range(high_freq_blocks):
+                skip = BiasFreeResidualBlock(
+                    filters=current_filters,
+                    kernel_size=kernel_size,
+                    activation=activation,
+                    kernel_initializer=kernel_initializer,
+                    kernel_regularizer=kernel_regularizer,
+                    normalization_type=block_normalization,
+                    dropout_rate=dropout_rate,
+                    name=f'skip_highfreq_block_{level}_{hf_idx}'
+                )(skip)
+
         skip_connections.append(skip)
 
     # =========================================================================
