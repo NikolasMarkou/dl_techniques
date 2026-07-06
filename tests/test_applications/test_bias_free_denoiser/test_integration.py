@@ -41,8 +41,13 @@ import pytest
 
 from applications.bias_free_denoiser.denoiser_prior import DenoiserPrior
 from applications.bias_free_denoiser.operators import (
+    CompressiveSensingOperator,
     InpaintingOperator,
+    MeasurementOperator,
     NullOperator,
+    RandomPixelsOperator,
+    SpectralDeblurOperator,
+    SuperResolutionOperator,
 )
 from applications.bias_free_denoiser.solver import UniversalInverseSolver
 from dl_techniques.utils.logger import logger
@@ -73,6 +78,20 @@ FULL_SHAPE = (1, H, W, C)
 # below assert the non-divergence invariants (finite, sigma anneals, field scale
 # bounded by init = contraction, no exponential blow-up), not full containment.
 SMOKE_ITERS = 120
+
+# Even cheaper budget for the all-six sweep: this is a strict no-NaN / finite /
+# no-blow-up smoke across every problem on the REAL checkpoint, NOT a quality
+# benchmark. 40 iters keeps the whole 6-problem sweep to ~2-3 GPU1 minutes while
+# still exercising the full solve loop (init + annealed ascent + early-stop) on
+# each measurement operator (closes WARNING-1 / D-009).
+ALL6_ITERS = 40
+
+# Generous divergence ceiling for the all-six sweep (D-009 accepted relaxation):
+# at a modest budget the coarse-scale iterate has std ~= sigma_t so healthy tails
+# reach a few * sigma_0; a flat |.|max ceiling of 5.0 passes those while still
+# catching real NaN/Inf/exponential blow-up in any of the four previously-untested
+# problems (random_pixels / super_resolution / deblur / compressive_sensing).
+ALL6_CEIL = 5.0
 
 # Domain (INV-1) reference half-width. Used only for the informational
 # in-domain-fraction report, NOT as a hard per-pixel gate at coarse scale.
@@ -259,4 +278,101 @@ def test_inpainting_operator(prior: DenoiserPrior) -> None:
     )
     assert err_best <= errs[0], (
         f"best_y constraint error {err_best:.5f} exceeds init {errs[0]:.5f}"
+    )
+
+
+def _build_all6_operator(problem: str) -> MeasurementOperator:
+    """Construct the measurement operator for one of the six problems.
+
+    Small, sane knobs matching ``main.build_operator``'s defaults so this smoke
+    exercises the SAME operators the CLI ships (WARNING-1 / D-009). ``prior`` uses a
+    :class:`NullOperator` (Algorithm-1); the other five are constrained operators.
+
+    Args:
+        problem: One of ``prior``, ``inpaint``, ``random_pixels``,
+            ``super_resolution``, ``deblur``, ``compressive_sensing``.
+
+    Returns:
+        The matching :class:`MeasurementOperator` instance.
+
+    Raises:
+        ValueError: If ``problem`` is not a recognized id.
+    """
+    image_shape = (H, W, C)
+    if problem == "prior":
+        return NullOperator()
+    if problem == "inpaint":
+        return InpaintingOperator(image_shape, block_size=64)
+    if problem == "random_pixels":
+        return RandomPixelsOperator(image_shape, keep_ratio=0.3, seed=0)
+    if problem == "super_resolution":
+        return SuperResolutionOperator(image_shape, factor=4)
+    if problem == "deblur":
+        return SpectralDeblurOperator(image_shape, keep_fraction=0.15)
+    if problem == "compressive_sensing":
+        return CompressiveSensingOperator(image_shape, measurement_ratio=0.2, seed=0)
+    raise ValueError(f"unknown problem {problem!r}")
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [
+        "prior",
+        "inpaint",
+        "random_pixels",
+        "super_resolution",
+        "deblur",
+        "compressive_sensing",
+    ],
+)
+def test_all_six_problems_finite_and_bounded(prior: DenoiserPrior, problem: str) -> None:
+    """Every one of the six problems solves finite + bounded on the REAL checkpoint.
+
+    This is the hardening test for WARNING-1 / D-009: ``main.py`` runs each problem
+    inside an exception-swallowing ``try/except``, so the four problems never
+    exercised elsewhere on the real model (random_pixels, super_resolution, deblur,
+    compressive_sensing) could NaN or diverge without any committed test noticing.
+    Here each problem runs the FULL real stack at a modest budget and must return a
+    ``best_y`` that is finite (no NaN/Inf), correctly shaped, and value-bounded
+    (``|best_y|.max() < ALL6_CEIL``) — catching divergence/blow-up without requiring
+    full domain containment (consistent with D-009's accepted annealed-Langevin
+    relaxation).
+
+    The ``prior`` fixture is module-scoped, so the 22 MB checkpoint loads ONCE and
+    is shared across all six parametrizations.
+    """
+    operator = _build_all6_operator(problem)
+
+    if problem == "prior":
+        # Algorithm-1 unconstrained prior sampling: no measurements, size via shape.
+        solver = UniversalInverseSolver(
+            prior, max_iterations=ALL6_ITERS, patience=ALL6_ITERS, clip=False,
+        )
+        best_y, info = solver.solve(operator, shape=FULL_SHAPE, seed=0)
+    else:
+        target = _make_synthetic_target()
+        measurements = operator.measure(target)
+        solver = UniversalInverseSolver(
+            prior, max_iterations=ALL6_ITERS, patience=ALL6_ITERS, clip=False,
+        )
+        best_y, info = solver.solve(
+            operator, measurements=measurements, shape=FULL_SHAPE, seed=0,
+        )
+
+    out = _to_np(best_y)
+    _domain_report(f"all6[{problem}] best_y", out)
+    amax = float(np.max(np.abs(out))) if np.all(np.isfinite(out)) else float("nan")
+    sig = info["sigma_values"]
+    logger.info(
+        "[integration] all6[%s]: shape=%s finite=%s |.|max=%.4f "
+        "sigma %.5f->%.5f iters=%d",
+        problem, out.shape, bool(np.all(np.isfinite(out))), amax,
+        sig[0], sig[-1], info["stopped_iteration"],
+    )
+
+    # --- Gates: finite, correct shape, value-bounded (no NaN/Inf/blow-up).
+    assert out.shape == FULL_SHAPE, f"{problem}: shape {out.shape} != {FULL_SHAPE}"
+    assert np.all(np.isfinite(out)), f"{problem}: produced NaN/Inf on real checkpoint"
+    assert amax < ALL6_CEIL, (
+        f"{problem}: |best_y|.max()={amax:.4f} >= {ALL6_CEIL} (divergence/blow-up)"
     )

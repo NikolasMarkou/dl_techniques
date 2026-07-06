@@ -36,6 +36,7 @@ import os
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 import argparse
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -337,8 +338,24 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def main(argv: Optional[List[str]] = None) -> None:
-    """Run the demo end to end and save a grid PNG to ``results/``."""
+def main(argv: Optional[List[str]] = None) -> int:
+    """Run the demo end to end and save a grid PNG to ``results/``.
+
+    Each selected problem runs inside its own ``try/except`` so a single failure
+    (NaN, divergence, or a raised exception) does NOT abort the remaining problems
+    or suppress the partial grid — the demo stays resilient. But failures are
+    SURFACED, not swallowed: every failed problem is logged at ``ERROR`` level and
+    the process exits with a NON-ZERO status so ``--problem all`` fails loudly if
+    any problem misbehaves on the real checkpoint (closes the hollow-criterion-8
+    gap, D-009 / WARNING-1).
+
+    Args:
+        argv: Optional argument vector (defaults to ``sys.argv[1:]``).
+
+    Returns:
+        ``0`` if every selected problem succeeded; ``1`` if one or more failed
+        (including the degenerate "no problem produced a result" case).
+    """
     args = parse_args(argv)
 
     if args.size % 8 != 0:
@@ -356,31 +373,41 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     problems = list(_ALL_PROBLEMS) if args.problem == "all" else [args.problem]
     results: List[Dict[str, Any]] = []
+    failed: List[str] = []
     for problem in problems:
         try:
             results.append(run_problem(problem, prior, target, args))
         except Exception as exc:  # noqa: BLE001 — one bad problem must not sink the demo.
-            logger.error("problem '%s' failed: %s", problem, exc)
+            logger.error("problem '%s' failed: %s", problem, exc, exc_info=True)
+            failed.append(problem)
 
-    if not results:
+    # Still produce the partial grid + summary from whatever succeeded.
+    if results:
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        save_path = output_dir / f"bias_free_denoiser_demo_{stamp}.png"
+        visualize_results(results, save_path)
+
+        logger.info("=" * 60)
+        logger.info("SUMMARY (iterations=%d, sigma0=%.3f, beta=%.3f):",
+                    args.iterations, args.sigma0, args.beta)
+        for res in results:
+            info = res["info"]
+            n_iter = len(info.get("iterations", []))
+            final_sigma = info["sigma_values"][-1] if info.get("sigma_values") else float("nan")
+            logger.info("  %-20s %4d iters, final sigma=%.5f", res["title"], n_iter, final_sigma)
+        logger.info("=" * 60)
+    else:
         logger.error("no problems produced a result; nothing to plot")
-        return
 
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    save_path = output_dir / f"bias_free_denoiser_demo_{stamp}.png"
-    visualize_results(results, save_path)
-
-    logger.info("=" * 60)
-    logger.info("SUMMARY (iterations=%d, sigma0=%.3f, beta=%.3f):", args.iterations, args.sigma0, args.beta)
-    for res in results:
-        info = res["info"]
-        n_iter = len(info.get("iterations", []))
-        final_sigma = info["sigma_values"][-1] if info.get("sigma_values") else float("nan")
-        logger.info("  %-20s %4d iters, final sigma=%.5f", res["title"], n_iter, final_sigma)
-    logger.info("=" * 60)
+    # Surface failures with a non-zero exit so a broken problem fails loudly even
+    # though the surviving problems still ran and were plotted (D-009).
+    if failed:
+        logger.error("%d/%d problem(s) FAILED: %s", len(failed), len(problems), ", ".join(failed))
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
