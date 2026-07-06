@@ -411,6 +411,7 @@ def create_convunext_denoiser(
         gabor_stem_projection: bool = True,
         use_laplacian_pyramid: bool = False,
         laplacian_kernel_size: Tuple[int, int] = (5, 5),
+        high_freq_blocks: int = 0,
         zero_pad_channels: bool = False,
         extra_zero_output_channels: bool = False,
         final_projection_groups: int = 1,
@@ -520,6 +521,11 @@ def create_convunext_denoiser(
             Contributes zero trainable parameters (the blur kernel is fixed).
         laplacian_kernel_size: Tuple of two ints, Gaussian blur kernel size for the
             Laplacian pyramid split. Only used when use_laplacian_pyramid=True. Defaults to (5, 5).
+        high_freq_blocks: Integer, number of bias-free ConvNeXt blocks applied to the Laplacian
+            high-frequency skip band at each encoder level before it becomes the decoder skip.
+            **Ignored when use_laplacian_pyramid=False** (the high band only exists under the
+            pyramid split). Defaults to 0, which adds zero layers and is byte-identical to the
+            prior graph (existing `.keras` checkpoints depend on this). Must be non-negative.
         zero_pad_channels: Boolean, if True replace every per-level channel-adjust 1x1
             convolution with a parameter-free channel match. Channel INCREASES (encoder
             levels and the bottleneck) are done by zero-padding the channel axis; channel
@@ -665,6 +671,9 @@ def create_convunext_denoiser(
 
     if blocks_per_level <= 0:
         raise ValueError(f"blocks_per_level must be positive, got {blocks_per_level}")
+
+    if high_freq_blocks < 0:
+        raise ValueError(f"high_freq_blocks must be non-negative, got {high_freq_blocks}")
 
     if convnext_version not in ['v1', 'v2']:
         raise ValueError(f"convnext_version must be 'v1' or 'v2', got {convnext_version}")
@@ -832,6 +841,30 @@ def create_convunext_denoiser(
             pyramid_name=f'encoder_pyramid_{level}',
             pool_type=downsample_pool_type,
         )
+
+        # DECISION plan_2026-07-06_b17c1f83/D-001: optionally process the Laplacian
+        # high-frequency band with N bias-free ConvNeXt blocks before it becomes the
+        # decoder skip. Gated on use_laplacian_pyramid (the high band only exists then);
+        # high_freq_blocks=0 (default) adds ZERO layers -> byte-identical OFF path, so
+        # existing `.keras` checkpoints (whose layer names are load-bearing) still load.
+        # Do NOT drop the use_laplacian_pyramid gate or the >0 gate: without the pyramid
+        # there is no high band and this would rename/insert layers into the raw-skip path.
+        # drop_path_rate is pinned to 0.0 so NO StochasticDepth layer is added (keeps the
+        # round-trip deterministic; avoids the training=None flake).
+        if high_freq_blocks > 0 and use_laplacian_pyramid:
+            for hf_idx in range(high_freq_blocks):
+                skip = _apply_residual_convnext_block(
+                    skip, ConvNextBlock, current_filters, block_kernel_size,
+                    0.0,  # drop_path_rate=0.0 -> no StochasticDepth -> deterministic round-trip
+                    kernel_regularizer,
+                    name=f'skip_highfreq_block_{level}_{hf_idx}',
+                    activation=block_activation,
+                    depthwise_initializer=depthwise_initializer,
+                    depthwise_regularizer=depthwise_regularizer,
+                    dropout_rate=dropout_rate,
+                    normalization_type=block_normalization,
+                )
+
         skip_connections.append(skip)
 
     # =========================================================================
