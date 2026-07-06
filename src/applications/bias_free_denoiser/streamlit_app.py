@@ -121,6 +121,7 @@ def _make_args(
         sr_factor=int(knobs.get("sr_factor", 4)),
         keep_fraction=float(knobs.get("keep_fraction", 0.15)),
         measurement_ratio=float(knobs.get("measurement_ratio", 0.2)),
+        noise_sigma=float(knobs.get("noise_sigma", 0.0)),
     )
 
 
@@ -165,6 +166,10 @@ def _sidebar_controls() -> Dict[str, Any]:
         knobs["keep_fraction"] = st.sidebar.slider("Low-pass keep fraction", 0.02, 1.0, 0.15, 0.01)
     elif problem == "compressive_sensing":
         knobs["measurement_ratio"] = st.sidebar.slider("Measurement ratio", 0.02, 1.0, 0.2, 0.01)
+    elif problem == "denoise":
+        knobs["noise_sigma"] = st.sidebar.slider(
+            "Noise sigma (0 = denoise as-is)", 0.0, 0.25, 0.1, 0.01,
+        )
 
     knobs["problem"] = problem
     return knobs
