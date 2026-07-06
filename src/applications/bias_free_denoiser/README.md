@@ -1,274 +1,132 @@
-# Using Denoiser Priors for Inverse Problems
+# Bias-Free Denoiser: Inverse Problems via the Implicit Prior
 
-This guide explains how to use a trained BF-CNN denoiser to solve various inverse problems based on the paper "Solving Linear Inverse Problems Using the Prior Implicit in a Denoiser" by Kadkhodaie & Simoncelli (2021).
+One unified interface that solves all of Kadkhodaie & Simoncelli's inverse problems
+using the prior implicit in a bias-free denoiser. Every problem runs through the
+**same** stochastic coarse-to-fine ascent loop; only the *measurement operator*
+changes.
 
-## Key Theoretical Insight
+Reference: A. Kadkhodaie & E. P. Simoncelli, *"Stochastic Solutions for Linear
+Inverse Problems using the Prior Implicit in a Denoiser"* (NeurIPS 2021). The
+denoiser is a bias-free CliffordUNet (BF-CNN-style: strictly bias-free so it is
+input-scale equivariant / degree-1 homogeneous, trained blind on additive Gaussian
+noise with an MSE objective).
 
-The core idea is based on **Miyasawa's result** (1961) that shows:
+## Theory (one paragraph)
 
-```
-x̂(y) = y + σ²∇_y log p(y)
-```
+Miyasawa's / Tweedie's identity states that for an image corrupted by additive
+Gaussian noise, the MMSE denoiser `D(y)` satisfies `D(y) = y + sigma^2 * grad_y log p(y)`.
+The **residual** `f(y) = D(y) - y` is therefore proportional to the score of the
+(noise-blurred) image prior. A bias-free denoiser gives this score for free at every
+noise level, so we can walk uphill on `log p` without ever writing the prior down.
+`UniversalInverseSolver` runs the paper's Algorithm 2: from a coarse noisy init it
+takes annealed gradient steps `y <- y + h_t * d_t + gamma_t * z_t`, where the ascent
+direction combines the prior score with a data-consistency term
+`d_t = (I - MM^T) f(y) + M(m - M^T y)`. For the empty operator this degenerates
+exactly to Algorithm 1 (unconstrained prior sampling, `d_t = f(y)`).
 
-Where:
-- `x̂(y)` is the least-squares denoiser output
-- `y` is the noisy input
-- `σ²∇_y log p(y)` is the gradient of the log probability density
-- The **denoiser residual** `f(y) = x̂(y) - y` is proportional to this gradient
+## Domain requirement: `[-0.5, +0.5]`
 
-This means a trained denoiser implicitly contains information about the probability distribution of natural images!
+The checkpoint was trained on pixels in **`[-0.5, +0.5]`** (center `c0 = 0.0`). The
+`residual = score` identity is only valid in that domain, so every signal fed to the
+prior/solver must live there. Use the helpers:
 
-## Requirements for the Denoiser
+- `DenoiserPrior.ingest(x)` — normalize `uint8 [0,255]` / float `[0,1]` to `[-0.5, +0.5]`.
+- `DenoiserPrior.denorm(x)` — map `[-0.5, +0.5]` back to `[0, 1]` for display/export.
 
-Your denoiser **must** satisfy these conditions:
-
-1. **Bias-free architecture**: No additive bias terms in any layer
-2. **Gaussian noise training**: Trained on images with additive Gaussian noise
-3. **Variable noise levels**: Trained with noise levels in range [0, σ_max] 
-4. **MSE loss**: Optimized for mean squared error
-5. **Blind denoising**: Works without knowing the noise level
-
-## Quick Start
-
-### 1. Basic Prior Sampling
-
-```python
-from denoiser_prior_sampling import DenoiserPriorSampler
-
-# Initialize sampler
-sampler = DenoiserPriorSampler(
-    denoiser=your_bfcnn_model,
-    sigma_0=1.0,    # Initial noise level
-    sigma_l=0.01,   # Final noise level (stopping criterion)
-    h0=0.01,        # Step size parameter
-    beta=0.5        # Noise injection control (0=high noise, 1=no noise)
-)
-
-# Generate sample from implicit prior
-shape = (1, 64, 64, 3)  # (batch, height, width, channels)
-sample, convergence_info = sampler.sample_prior(shape, seed=42)
-```
-
-### 2. Solving Inverse Problems
+## Public API
 
 ```python
-from denoiser_prior_sampling import LinearInverseProblemSolver
-
-# Initialize solver
-solver = LinearInverseProblemSolver(
-    denoiser=your_bfcnn_model,
-    beta=0.01  # Lower beta for inverse problems
-)
-
-# Example: Image inpainting
-restored_image, convergence_info = solver.solve_inverse_problem(
-    measurement_type='inpainting',
-    measurements=observed_pixels,
-    shape=original_shape,
-    mask_size=(32, 32)
+from applications.bias_free_denoiser import (
+    DenoiserPrior,             # frozen denoiser wrapped as an implicit prior
+    UniversalInverseSolver,    # the unified Algorithm-1/2 loop
+    MeasurementOperator,       # abstract base for the six problems
+    NullOperator,              # empty M -> prior sampling (Algorithm 1)
+    InpaintingOperator,        # centered missing block
+    RandomPixelsOperator,      # random missing pixels
+    SuperResolutionOperator,   # kxk block-average downsample
+    SpectralDeblurOperator,    # unitary-DFT low-pass
+    CompressiveSensingOperator # structured Rademacher-DCT-subsample
 )
 ```
 
-### 3. Ready-to-Use Applications
+- **`DenoiserPrior`** — loads the frozen denoiser (registrar-first, `compile=False`).
+  The default `from_pretrained(...)` rebuilds the fully-convolutional graph at
+  `(None, None, 3)` and transfers weights, so it runs any `H, W` divisible by 8 in a
+  single pass; `resolution="fixed256"` loads the saved 256x256 graph. Exposes
+  `residual(y) = D(y) - y` (the score estimate) plus `ingest` / `denorm` / `tile`.
+- **`UniversalInverseSolver`** — `solve(operator, measurements=..., shape=..., seed=...)`
+  runs the annealed ascent and returns `(best_y, info)` where `info` holds
+  `sigma_values`, `iterations`, and (when measurements are given) `constraint_errors`.
+- **`MeasurementOperator`** — the single load-bearing abstraction. Each subclass
+  implements `measure` / `adjoint` / `project` / `init_mean` with orthonormal columns
+  (`M^T M ~= I`) and **no dense `N x N` matrix** (everything is O(N) or O(N log N)).
+
+### Prior sampling (Algorithm 1)
 
 ```python
-from denoiser_prior_sampling import create_denoiser_applications
-
-# Create application suite
-apps = create_denoiser_applications(your_bfcnn_model)
-
-# Use pre-built functions
-inpainted = apps['inpaint'](damaged_image, mask_size=(32, 32))
-super_resolved = apps['super_resolve'](low_res_image, factor=4)
-samples = apps['sample_prior']((1, 64, 64, 3), n_samples=4)
+prior = DenoiserPrior.from_pretrained("results/cliffordunet_denoiser_base_20260705_004751/best_model.keras")
+solver = UniversalInverseSolver(prior, max_iterations=500)
+sample, info = solver.solve(NullOperator(), measurements=None, shape=(1, 256, 256, 3), seed=0)
 ```
 
-## Supported Inverse Problems
+### An inverse problem (inpainting)
 
-### 1. **Inpainting**
-- **Problem**: Fill missing rectangular regions
-- **Use case**: Remove objects, restore damaged photos
-- **Parameters**: `mask_size=(height, width)`
-
-### 2. **Super-Resolution**
-- **Problem**: Increase image resolution
-- **Use case**: Enhance low-quality images
-- **Parameters**: `factor=4` (upscaling factor)
-
-### 3. **Random Pixel Recovery**
-- **Problem**: Restore randomly missing pixels
-- **Use case**: Sensor dropout, data corruption
-- **Parameters**: `keep_ratio=0.1` (fraction of pixels kept)
-
-### 4. **Deblurring (Spectral Super-Resolution)**
-- **Problem**: Remove blur from known kernels
-- **Use case**: Fix motion blur, defocus
-- **Parameters**: Filter specifications
-
-### 5. **Compressive Sensing**
-- **Problem**: Reconstruct from random projections
-- **Use case**: Accelerated MRI, sparse measurements
-- **Parameters**: `measurement_ratio=0.1`
-
-## Parameter Tuning Guide
-
-### For Prior Sampling:
-- **σ₀ = 1.0**: Start with high noise (explore broadly)
-- **σₗ = 0.01**: Stop when noise is low (fine details)
-- **h₀ = 0.01**: Conservative step size for stability
-- **β = 0.5**: Moderate noise injection (balance exploration/exploitation)
-
-### For Inverse Problems:
-- **β = 0.01**: Lower noise injection (focus on constraint satisfaction)
-- **σ₀ = 1.0**: Same initial noise level
-- **σₗ = 0.01**: Same stopping criterion
-- **h₀ = 0.01**: Same step size
-
-### Convergence Tips:
-- **Higher β**: Faster convergence, risk of local minima
-- **Lower β**: Slower convergence, better exploration
-- **Smaller h₀**: More stable, slower convergence  
-- **Larger h₀**: Faster but less stable
-
-## Algorithm Details
-
-### Prior Sampling Algorithm (Algorithm 1)
-```
-1. Initialize: y₀ ~ N(0.5, σ₀²I)
-2. While σₜ₋₁ > σₗ:
-   a. Compute step size: hₜ = h₀t/(1 + h₀(t-1))
-   b. Get denoiser residual: dₜ = f(yₜ₋₁) = denoiser(yₜ₋₁) - yₜ₋₁
-   c. Estimate noise: σₜ = ||dₜ||/√N
-   d. Compute noise injection: γₜ² = [(1-βhₜ)² - (1-hₜ)²]σₜ²
-   e. Update: yₜ = yₜ₋₁ + hₜdₜ + γₜzₜ  (zₜ ~ N(0,I))
-3. Return: final image yₜ
-```
-
-### Constrained Sampling Algorithm (Algorithm 2)
-```
-1. Initialize: y₀ with constraint projection + null space noise
-2. While σₜ₋₁ > σₗ:
-   a. Compute denoiser residual: f(yₜ₋₁)
-   b. Project to constraint: dₜ = (I-MM^T)f(yₜ₋₁) + M(xc - M^Tyₜ₋₁)
-   c. Apply same update rule as Algorithm 1
-3. Return: constrained sample
-```
-
-## Performance Expectations
-
-### Convergence:
-- **Typical iterations**: 200-600 for most problems
-- **Time per iteration**: ~50ms for 64×64 images (GPU)
-- **Memory usage**: 2-3× denoiser memory requirements
-
-### Quality:
-- **Prior samples**: Natural-looking but may not match specific datasets
-- **Inverse problems**: High perceptual quality, may sacrifice PSNR
-- **Multiple samples**: Different plausible solutions for underdetermined problems
-
-## Common Issues & Solutions
-
-### 1. **Poor Convergence**
-- **Symptoms**: σ doesn't decrease, artifacts remain
-- **Solutions**: 
-  - Check denoiser quality (try on simple denoising)
-  - Reduce h₀ for stability
-  - Increase β for faster convergence
-
-### 2. **Constraint Violation**
-- **Symptoms**: Measurements don't match in inverse problems
-- **Solutions**:
-  - Check measurement matrix construction
-  - Verify measurements are consistent
-  - Lower β to enforce constraints better
-
-### 3. **Blurry Results**
-- **Symptoms**: Results lack sharp details
-- **Solutions**:
-  - Decrease σₗ (run longer)
-  - Increase h₀ (more aggressive steps)
-  - Check if denoiser was properly trained
-
-### 4. **Memory Issues**
-- **Symptoms**: CUDA out of memory
-- **Solutions**:
-  - Use smaller batch sizes
-  - Process tiles for large images
-  - Use mixed precision
-
-## Advanced Usage
-
-### Custom Measurement Matrices
 ```python
-# Create custom measurement matrix
-def create_custom_measurements(image_shape, **params):
-    # Your custom linear measurement process
-    M = create_measurement_matrix(image_shape, **params)
-    M_pinv = tf.transpose(M)  # For orthogonal M
-    return M, M_pinv
-
-# Use with solver
-solver.solve_inverse_problem(
-    measurement_type='custom',
-    measurements=your_measurements,
-    shape=image_shape,
-    custom_M=M,
-    custom_M_pinv=M_pinv
-)
+target = DenoiserPrior.ingest(clean_uint8_image)[None, ...]   # [1, H, W, 3] in [-0.5, +0.5]
+op = InpaintingOperator(target.shape[1:], block_size=64)
+measurements = op.measure(target)
+recon, info = solver.solve(op, measurements=measurements, seed=0)
+restored = DenoiserPrior.denorm(recon[0])                     # back to [0, 1]
 ```
 
-### Multiple Samples
-```python
-# Generate multiple plausible solutions
-solutions = []
-for i in range(10):
-    solution, _ = solver.solve_inverse_problem(
-        measurement_type='inpainting',
-        measurements=measurements,
-        shape=image_shape,
-        seed=42+i  # Different random seeds
-    )
-    solutions.append(solution)
+Swap `InpaintingOperator` for `RandomPixelsOperator`, `SuperResolutionOperator`,
+`SpectralDeblurOperator`, or `CompressiveSensingOperator` — the solve call is
+identical.
 
-# Average for better PSNR (but more blur)
-avg_solution = tf.reduce_mean(tf.stack(solutions), axis=0)
+## Six supported problems
+
+| id | Operator | Problem |
+|----|----------|---------|
+| `prior` | `NullOperator` | Unconstrained sampling from the implicit prior (Algorithm 1) |
+| `inpaint` | `InpaintingOperator` | Fill a centered missing block |
+| `random_pixels` | `RandomPixelsOperator` | Fill randomly missing pixels |
+| `super_resolution` | `SuperResolutionOperator` | Upsample a `kxk` block-averaged image |
+| `deblur` | `SpectralDeblurOperator` | Recover high frequencies from a DFT low-pass |
+| `compressive_sensing` | `CompressiveSensingOperator` | Reconstruct from structured random measurements |
+
+## CLI
+
+```bash
+CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python \
+    -m applications.bias_free_denoiser.main --problem all --iterations 200
 ```
 
-### Monitoring Convergence
-```python
-# Plot convergence curves
-import matplotlib.pyplot as plt
+Runs the selected problem(s) on a synthetic in-domain target (or `--image PATH` for a
+real image, resized to `--size`) and writes a grid PNG — target, measured/degraded
+view, reconstruction, and the `sigma_t` convergence curve per problem — to
+repo-root `results/`. It is fully headless (`MPLBACKEND=Agg`). Key flags:
+`--checkpoint`, `--iterations`, `--sigma0`, `--beta`, `--seed`, `--size`, and the
+per-problem knobs `--block`, `--keep-ratio`, `--sr-factor`, `--keep-fraction`,
+`--measurement-ratio`.
 
-_, conv_info = sampler.sample_prior(shape)
+## Convergence / iteration budget
 
-plt.figure(figsize=(12, 4))
-plt.subplot(1, 3, 1)
-plt.plot(conv_info['sigma_values'])
-plt.yscale('log')
-plt.title('Effective Noise Level')
+The reconstruction quality tracks the iteration budget. A modest budget
+(`--iterations 40-200`) runs in a few minutes and produces a coarse but sensible
+result; the paper-quality reconstruction needs **hundreds to ~1000 iterations**
+(early stopping halts once the effective noise `sigma_t` stops improving). Crank
+`--iterations` for better quality at the cost of runtime.
 
-plt.subplot(1, 3, 2)
-plt.plot(conv_info['step_sizes'])
-plt.title('Step Sizes')
+## GUI
 
-plt.subplot(1, 3, 3)
-plt.plot(conv_info['gamma_values'])
-plt.title('Injected Noise')
+An interactive Streamlit app (upload -> pick problem -> reconstruct) is provided in
+`streamlit_app.py`:
 
-plt.tight_layout()
-plt.show()
+```bash
+CUDA_VISIBLE_DEVICES=1 .venv/bin/streamlit run \
+    src/applications/bias_free_denoiser/streamlit_app.py \
+    --server.address 127.0.0.1 --server.port 8501
 ```
 
-## References
-
-1. **Original Paper**: Kadkhodaie, Z., & Simoncelli, E. P. (2021). "Solving Linear Inverse Problems Using the Prior Implicit in a Denoiser"
-2. **BF-CNN**: Mohan, S., et al. (2020). "Robust and interpretable blind image denoising via bias-free convolutional neural networks"
-3. **Miyasawa's Result**: Miyasawa, K. (1961). "An empirical Bayes estimator of the mean of a normal population"
-
-## Tips for Best Results
-
-1. **Train your denoiser well**: The quality of results depends entirely on the denoiser
-2. **Use appropriate noise ranges**: Train denoiser on σ ∈ [0, 0.4] for [0,1] images
-3. **Multiple samples**: Generate several solutions and pick the best one
-4. **Patience**: Let the algorithm converge fully for best quality
-5. **Monitor convergence**: Watch σ values to ensure proper convergence
+The core (`denoiser_prior.py`, `operators.py`, `solver.py`) is GUI-free and fully
+usable headless / programmatically; only `streamlit_app.py` imports streamlit.

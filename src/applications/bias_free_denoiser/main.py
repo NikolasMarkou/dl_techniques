@@ -1,463 +1,386 @@
-"""
-Fixed demonstration of denoiser-based prior sampling and linear inverse problems.
+"""CLI demo for the bias-free-denoiser inverse-problem application.
 
-This version:
-1. Uses float32 consistently throughout (no dtype conversion)
-2. Uses [-1, +1] range for denoiser compatibility (not [0, 1])
-3. Addresses numerical stability issues
+Loads the frozen CliffordUNet denoiser as an implicit prior and runs the SAME
+:class:`UniversalInverseSolver` loop over any subset of the six supported problems
+(``prior``, ``inpaint``, ``random_pixels``, ``super_resolution``, ``deblur``,
+``compressive_sensing``). It saves a matplotlib grid — target, measured/degraded
+view, reconstruction, and the effective-noise convergence curve per problem — to
+``results/`` and runs fully headless (``MPLBACKEND=Agg``, INV-7 / H7).
+
+Every problem is selected purely by swapping a :class:`MeasurementOperator`; the
+solver never branches on a problem type (INV-6). All pixels live in the model's
+``[-0.5, +0.5]`` domain (INV-1 / D-002).
+
+Examples:
+    Run all six problems on the synthetic in-domain target at a modest budget::
+
+        CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python \\
+            -m applications.bias_free_denoiser.main --problem all --iterations 200
+
+    Crank iterations for higher quality (convergence is coarse at low budgets —
+    hundreds-to-1000 iterations give the paper-quality result)::
+
+        CUDA_VISIBLE_DEVICES=1 .venv/bin/python \\
+            -m applications.bias_free_denoiser.main --problem inpaint --iterations 1000
+
+    Reconstruct a real image (resized to ``--size``, RGB)::
+
+        CUDA_VISIBLE_DEVICES=1 .venv/bin/python \\
+            -m applications.bias_free_denoiser.main --image path/to/img.png
 """
 
-import keras
+import os
+
+# INV-7 / H7: force a non-interactive backend BEFORE importing pyplot so the demo
+# never touches an X server on headless / remote GPU boxes.
+os.environ.setdefault("MPLBACKEND", "Agg")
+
+import argparse
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
-import tensorflow as tf
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-from typing import Tuple, Optional, Dict, Any
-
-# ---------------------------------------------------------------------
-# local imports
-# ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from .samplers import (
-    DenoiserPriorSampler,
-    LinearInverseProblemSolver
+
+from .denoiser_prior import DenoiserPrior
+from .solver import UniversalInverseSolver
+from .operators import (
+    MeasurementOperator,
+    NullOperator,
+    InpaintingOperator,
+    RandomPixelsOperator,
+    SuperResolutionOperator,
+    SpectralDeblurOperator,
+    CompressiveSensingOperator,
 )
 
-# ---------------------------------------------------------------------
+# Repo-root results/ is the sanctioned output dir (never src/results/).
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_DEFAULT_OUTPUT_DIR = _REPO_ROOT / "results"
+_DEFAULT_CHECKPOINT = (
+    _REPO_ROOT / "results" / "cliffordunet_denoiser_base_20260705_004751" / "best_model.keras"
+)
 
-def load_bf_denoiser() -> keras.Model:
-    """
-    Load a pre-trained BF-CNN denoiser.
+# Canonical problem order for the "all" selection.
+_ALL_PROBLEMS: Tuple[str, ...] = (
+    "prior",
+    "inpaint",
+    "random_pixels",
+    "super_resolution",
+    "deblur",
+    "compressive_sensing",
+)
+
+# Human-readable panel titles keyed by problem id.
+_PROBLEM_TITLES: Dict[str, str] = {
+    "prior": "Prior Sampling",
+    "inpaint": "Inpainting",
+    "random_pixels": "Random Pixels",
+    "super_resolution": "Super-Resolution",
+    "deblur": "Spectral Deblur",
+    "compressive_sensing": "Compressive Sensing",
+}
+
+
+# ---------------------------------------------------------------------------
+# Synthetic in-domain target
+# ---------------------------------------------------------------------------
+
+
+def create_synthetic_test_image(shape: Tuple[int, int, int, int]) -> np.ndarray:
+    """Create a smooth synthetic RGB test image in the ``[-0.5, +0.5]`` domain.
+
+    Ported from the old demo but retargeted to the model's ``[-0.5, +0.5]`` domain
+    (D-002) instead of the legacy ``[-1, +1]``. The pattern (a gradient background
+    plus a circle and a rectangle) gives structure the operators can visibly
+    degrade and the prior can plausibly restore.
+
+    Args:
+        shape: ``(batch, H, W, C)``. Only ``batch == 1`` is used by the demo; ``C``
+            is broadcast across channels (the checkpoint is RGB, ``C == 3``).
 
     Returns:
-        Trained BF-CNN denoiser model (operates in [-1, +1] range)
+        A float32 ``numpy.ndarray`` of ``shape`` with values in ``[-0.5, +0.5]``.
     """
-    try:
-        denoiser = keras.models.load_model(
-            '/media/arxwn/data_fast/repositories/dl_techniques/src/results/bfunet_small_20250806_154050/inference_model.keras'
+    _, h, w, c = shape
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    yy /= float(h)
+    xx /= float(w)
+
+    dist = np.sqrt((yy - 0.25) ** 2 + (xx - 0.25) ** 2)
+    circle = (dist < 0.15).astype(np.float32)
+    rect = ((yy > 0.6) & (yy < 0.9) & (xx > 0.6) & (xx < 0.9)).astype(np.float32)
+    gradient = xx * 0.3
+
+    # Assemble a [0, 1] image, then shift to the [-0.5, +0.5] model domain (D-002).
+    img01 = np.clip(gradient + circle * 0.5 + rect * 0.7, 0.0, 1.0)
+    img = np.repeat(img01[:, :, None], c, axis=-1)
+    img = img[None, ...].astype(np.float32) - 0.5
+    return np.clip(img, -0.5, 0.5)
+
+
+def load_real_image(path: str, size: int) -> np.ndarray:
+    """Load a real image, resize to ``size`` and ingest to ``[-0.5, +0.5]``.
+
+    Args:
+        path: Path to an image file (any format Keras/Pillow can open).
+        size: Target square edge length (must be divisible by 8 for the U-Net).
+
+    Returns:
+        A float32 ``[1, size, size, 3]`` array in ``[-0.5, +0.5]``.
+    """
+    import keras
+
+    img = keras.utils.load_img(path, color_mode="rgb", target_size=(size, size))
+    arr = keras.utils.img_to_array(img)  # [size, size, 3] in [0, 255]
+    normalized = DenoiserPrior.ingest(arr)  # -> [-0.5, +0.5]
+    return normalized[None, ...].astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Operator factory
+# ---------------------------------------------------------------------------
+
+
+def build_operator(
+    problem: str,
+    image_shape: Tuple[int, int, int],
+    args: argparse.Namespace,
+) -> MeasurementOperator:
+    """Construct the :class:`MeasurementOperator` for a given problem id.
+
+    Args:
+        problem: One of the six problem ids (see ``_ALL_PROBLEMS``).
+        image_shape: Signal shape ``(H, W, C)``.
+        args: Parsed CLI namespace supplying per-problem knobs.
+
+    Returns:
+        The matching operator instance.
+
+    Raises:
+        ValueError: If ``problem`` is not a recognized id.
+    """
+    h, w, _ = image_shape
+    if problem == "prior":
+        return NullOperator()
+    if problem == "inpaint":
+        block = args.block if args.block is not None else max(1, min(h, w) // 4)
+        return InpaintingOperator(image_shape, block_size=block)
+    if problem == "random_pixels":
+        return RandomPixelsOperator(image_shape, keep_ratio=args.keep_ratio, seed=args.seed)
+    if problem == "super_resolution":
+        return SuperResolutionOperator(image_shape, factor=args.sr_factor)
+    if problem == "deblur":
+        return SpectralDeblurOperator(image_shape, keep_fraction=args.keep_fraction)
+    if problem == "compressive_sensing":
+        return CompressiveSensingOperator(
+            image_shape, measurement_ratio=args.measurement_ratio, seed=args.seed
         )
-        logger.info("Loaded pre-trained BF-CNN denoiser (range: [-1, +1])")
-        return denoiser
-    except Exception as e:
-        logger.error(f"Could not load denoiser: {e}")
-        raise
+    raise ValueError(f"unknown problem {problem!r}")
 
-# ---------------------------------------------------------------------
 
-def demonstrate_prior_sampling(denoiser: keras.Model):
+# ---------------------------------------------------------------------------
+# Single-problem run
+# ---------------------------------------------------------------------------
+
+
+def run_problem(
+    problem: str,
+    prior: DenoiserPrior,
+    target: np.ndarray,
+    args: argparse.Namespace,
+) -> Dict[str, Any]:
+    """Build the operator, measure the target, and solve one inverse problem.
+
+    Args:
+        problem: The problem id.
+        prior: The loaded denoiser prior.
+        target: The clean signal ``[1, H, W, C]`` in ``[-0.5, +0.5]``.
+        args: Parsed CLI namespace (solver + per-problem knobs).
+
+    Returns:
+        A dict with ``title``, ``target`` (display, ``[H, W, C]`` in ``[0, 1]``),
+        ``degraded`` (display or ``None`` for prior sampling), ``recon`` (display),
+        and ``info`` (solver convergence dict).
     """
-    Demonstrate sampling from the implicit prior with stability improvements.
-    """
-    logger.info("=== Demonstrating Prior Sampling ===")
+    import keras
 
-    sampler = DenoiserPriorSampler(
-        denoiser=denoiser,
-        sigma_0=0.5,    # Reduced initial noise
-        sigma_l=0.005,   # Slightly higher stopping threshold
-        h0=0.005,       # Smaller step size
-        beta=0.3        # Reduced noise injection
+    image_shape = tuple(int(s) for s in target.shape[1:])
+    operator = build_operator(problem, image_shape, args)
+    solver = UniversalInverseSolver(
+        prior,
+        sigma_0=args.sigma0,
+        beta=args.beta,
+        max_iterations=args.iterations,
     )
 
-    # Generate samples - single channel
-    shape = (1, 64, 64, 1)
-
-    logger.info("Generating sample from implicit prior...")
-    sample, convergence_info = sampler.sample_prior(shape, seed=42)
-
-    logger.info(f"Sample shape: {sample.shape}")
-    logger.info(f"Sample range: [{tf.reduce_min(sample):.3f}, {tf.reduce_max(sample):.3f}]")
-    logger.info(f"Convergence info: {len(convergence_info['iterations'])} iterations")
-    logger.info(f"Final sigma: {convergence_info['sigma_values'][-1]:.6f}")
-
-    return sample, convergence_info
-
-# ---------------------------------------------------------------------
-
-def demonstrate_inpainting(denoiser: keras.Model, test_image: Optional[tf.Tensor] = None):
-    """
-    Demonstrate image inpainting using the stable denoiser prior.
-    """
-    logger.info("=== Demonstrating Image Inpainting ===")
-
-    # Create or use test image
-    if test_image is None:
-        test_image = create_synthetic_test_image((1, 64, 64, 1))
-
-    # --- FINAL FIX: Use the same hyperparameters as the paper and successful SR task ---
-    # The solver is robust when using the parameters specified by the authors.
-    solver = LinearInverseProblemSolver(
-        denoiser=denoiser,
-        sigma_0=1.0,        # Correct initial noise level
-        sigma_l=0.005,       # Correct final noise level
-        h0=0.01,            # Correct initial step size
-        beta=0.01,          # Correct noise injection parameter
-        max_iterations=200  # More iterations can be helpful
-    )
-    # --- END OF FIX ---
-
-    # Create damaged image (missing center region)
-    damaged_image = test_image.numpy().copy()
-    h, w = test_image.shape[1:3]
-    mask_h, mask_w = h // 4, w // 4
-    start_h, start_w = (h - mask_h) // 2, (w - mask_w) // 2
-
-    damaged_image[0, start_h:start_h + mask_h, start_w:start_w + mask_w, :] = 0.0
-    damaged_image = tf.constant(damaged_image, dtype=tf.float32)
-
-    # Create measurements (observed pixels only)
-    mask = np.ones((h, w), dtype=np.float32)
-    mask[start_h:start_h + mask_h, start_w:start_w + mask_w] = 0
-    observed_pixels = test_image * tf.expand_dims(tf.expand_dims(mask, 0), -1)
-    measurements = tf.boolean_mask(tf.reshape(observed_pixels, [-1]),
-                                   tf.reshape(mask, [-1]) == 1)
-
-    logger.info(f"Inpainting region of size {mask_h}x{mask_w} from {len(measurements)} measurements")
-
-    # Solve inpainting problem
-    restored_image, convergence_info = solver.solve_inverse_problem(
-        measurement_type='inpainting',
-        measurements=tf.expand_dims(measurements, 0),
-        shape=test_image.shape,
-        mask_size=(mask_h, mask_w)
-    )
-
-    logger.info(f"Inpainting completed in {len(convergence_info['iterations'])} iterations")
-
-    if convergence_info['constraint_errors']:
-        final_error = convergence_info['constraint_errors'][-1]
-        if not np.isnan(final_error) and not np.isinf(final_error):
-            logger.info(f"Final constraint error: {final_error:.8f}")
-
-    return test_image, damaged_image, restored_image, convergence_info
-
-# ---------------------------------------------------------------------
-
-def demonstrate_super_resolution(denoiser: keras.Model):
-    """
-    Demonstrate super-resolution with improved stability.
-    """
-    logger.info("=== Demonstrating Super-Resolution ===")
-
-    # Create low-resolution test image
-    low_res_shape = (1, 32, 32, 1)
-    factor = 2  # Reduced factor for stability
-    high_res_shape = (1, 64, 64, 1)
-
-    # Create synthetic low-res image
-    low_res_image = create_synthetic_test_image(low_res_shape)
-
-    solver = LinearInverseProblemSolver(
-        denoiser=denoiser,
-        beta=0.01,
-        max_iterations=100
-    )
-
-    # Flatten for measurements
-    measurements = tf.reshape(low_res_image, [-1])
-
-    logger.info(f"Super-resolving {low_res_shape[1:3]} -> {high_res_shape[1:3]} (factor={factor})")
-
-    # Solve super-resolution problem
-    high_res_image, convergence_info = solver.solve_inverse_problem(
-        measurement_type='super_resolution',
-        measurements=tf.expand_dims(measurements, 0),
-        shape=high_res_shape,
-        factor=factor
-    )
-
-    logger.info(f"Super-resolution completed in {len(convergence_info['iterations'])} iterations")
-
-    return low_res_image, high_res_image, convergence_info
-
-# ---------------------------------------------------------------------
-
-def demonstrate_compressive_sensing(denoiser: keras.Model):
-    """
-    Demonstrate compressive sensing reconstruction with fixed dimensions.
-    """
-    logger.info("=== Demonstrating Compressive Sensing ===")
-
-    # Create test image - single channel
-    test_image = create_synthetic_test_image((1, 64, 64, 1))
-
-    # Create measurements with proper dimensions
-    measurement_ratio = 0.2  # Higher ratio for stability
-    n_pixels = np.prod(test_image.shape[1:])
-    n_measurements = int(n_pixels * measurement_ratio)
-
-    logger.info(f"Creating {n_measurements} measurements from {n_pixels} pixels ({measurement_ratio:.1%})")
-
-    solver = LinearInverseProblemSolver(
-        denoiser=denoiser,
-        beta=0.01,
-        max_iterations=100
-    )
-
-    # Take measurements directly
-    test_image_flat = tf.reshape(test_image, [-1])
-
-    # Create simple random measurements
-    np.random.seed(42)
-    measurement_indices = np.random.choice(n_pixels, n_measurements, replace=False)
-    measurements = tf.gather(test_image_flat, measurement_indices)
-
-    logger.info(f"Reconstructing from {n_measurements}/{n_pixels} measurements")
-
-    # Use random_pixels for simplicity
-    reconstructed_image, convergence_info = solver.solve_inverse_problem(
-        measurement_type='random_pixels',
-        measurements=tf.expand_dims(measurements, 0),
-        shape=test_image.shape,
-        keep_ratio=measurement_ratio
-    )
-
-    logger.info(f"Compressive sensing completed in {len(convergence_info['iterations'])} iterations")
-
-    # Compute reconstruction metrics
-    mse = tf.reduce_mean(tf.square(test_image - reconstructed_image))
-    psnr = 20 * tf.math.log(2.0 / tf.sqrt(tf.maximum(mse, 1e-8))) / tf.math.log(10.0)  # 2.0 for [-1,+1] range
-
-    logger.info(f"Reconstruction MSE: {float(mse):.6f}")
-    logger.info(f"Reconstruction PSNR: {float(psnr):.2f} dB")
-
-    return test_image, reconstructed_image, convergence_info
-
-# ---------------------------------------------------------------------
-
-def create_synthetic_test_image(shape: Tuple[int, ...]) -> tf.Tensor:
-    """
-    Create a simple synthetic test image in [-1, +1] range.
-    """
-    batch, h, w, c = shape
-
-    # Create coordinate grids
-    y, x = np.mgrid[0:h, 0:w]
-    y = y / h
-    x = x / w
-
-    # Create simple single-channel pattern in [0, 1] first
-    image = np.zeros((h, w), dtype=np.float32)
-
-    # Circle in top-left
-    dist1 = np.sqrt((y - 0.25) ** 2 + (x - 0.25) ** 2)
-    circle = (dist1 < 0.15).astype(np.float32)
-
-    # Rectangle in bottom-right
-    rect = ((y > 0.6) & (y < 0.9) & (x > 0.6) & (x < 0.9)).astype(np.float32)
-
-    # Gradient background
-    gradient = x * 0.3
-
-    # Combine patterns
-    image = gradient + circle * 0.5 + rect * 0.7
-
-    # Add single channel dimension
-    if c == 1:
-        image = np.expand_dims(image, axis=-1)
+    logger.info("--- problem '%s' (%s) ---", problem, _PROBLEM_TITLES[problem])
+    if problem == "prior":
+        # Algorithm-1 unconstrained prior sampling: no measurements, size via shape.
+        recon, info = solver.solve(operator, measurements=None, shape=target.shape, seed=args.seed)
+        degraded_disp: Optional[np.ndarray] = None
     else:
-        image = np.repeat(np.expand_dims(image, axis=-1), c, axis=-1)
+        measurements = operator.measure(target)
+        recon, info = solver.solve(operator, measurements=measurements, seed=args.seed)
+        # Uniform signal-shaped observable view (real for spectral/CS): M M^T target.
+        degraded = np.asarray(keras.ops.convert_to_numpy(operator.project(target)))
+        degraded_disp = DenoiserPrior.denorm(degraded[0])
 
-    # Add batch dimension
-    image = np.expand_dims(image, axis=0)
-
-    # Convert to tensor and normalize to [0, 1] first
-    image = tf.constant(image, dtype=tf.float32)
-    image = tf.clip_by_value(image, 0.0, 1.0)
-
-    # Light smoothing
-    kernel = tf.ones((3, 3, c, c), dtype=tf.float32) / 9.0
-    image = tf.nn.conv2d(image, kernel, strides=1, padding='SAME')
-    image = tf.clip_by_value(image, 0.0, 1.0)
-
-    # Convert from [0, 1] to [-1, +1] range
-    image = image * 2.0 - 1.0
-
-    return tf.clip_by_value(image, -1.0, 1.0)
-
-# ---------------------------------------------------------------------
+    recon_np = np.asarray(keras.ops.convert_to_numpy(recon))
+    return {
+        "title": _PROBLEM_TITLES[problem],
+        "target": DenoiserPrior.denorm(target[0]),
+        "degraded": degraded_disp,
+        "recon": np.clip(DenoiserPrior.denorm(recon_np[0]), 0.0, 1.0),
+        "info": info,
+    }
 
 
-def _plot_convergence(ax: plt.Axes, conv_info: Dict[str, Any], title: str):
-    """Helper function to plot a convergence curve on a given axis."""
-    if conv_info and 'sigma_values' in conv_info and conv_info['sigma_values']:
-        sigma_vals = conv_info['sigma_values']
-        valid_sigma = [s for s in sigma_vals if s and np.isfinite(s) and s > 0]
-        if valid_sigma:
-            ax.plot(valid_sigma, 'b-', linewidth=2)
-            ax.set_yscale('log')
-        else:
-            ax.text(0.5, 0.5, 'No valid data', ha='center', va='center', transform=ax.transAxes)
+# ---------------------------------------------------------------------------
+# Visualization
+# ---------------------------------------------------------------------------
+
+
+def _plot_convergence(ax: "plt.Axes", info: Dict[str, Any], title: str) -> None:
+    """Plot the effective-noise ``sigma_t`` curve for one problem."""
+    sigmas = [s for s in info.get("sigma_values", []) if s and np.isfinite(s) and s > 0]
+    if sigmas:
+        ax.plot(sigmas, "b-", linewidth=1.5)
+        ax.set_yscale("log")
     else:
-        ax.text(0.5, 0.5, 'Not Run', ha='center', va='center', transform=ax.transAxes)
-
-    ax.set_title(f'{title} Convergence', fontsize=11)
-    ax.set_xlabel('Iteration', fontsize=9)
-    ax.set_ylabel('Effective σ', fontsize=9)
+        ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
+    ax.set_title(f"{title} sigma_t", fontsize=9)
+    ax.set_xlabel("iteration", fontsize=8)
+    ax.set_ylabel("effective sigma", fontsize=8)
     ax.grid(True, which="both", ls="--", alpha=0.4)
-    ax.tick_params(axis='both', which='major', labelsize=8)
+    ax.tick_params(axis="both", which="major", labelsize=7)
 
 
-def visualize_results(results: dict, save_path: Optional[str] = None):
-    """
-    Visualize the results using a robust and aesthetically pleasing layout that avoids rendering artifacts.
-    """
-    fig = plt.figure(figsize=(15, 11))
-    gs = gridspec.GridSpec(3, 5, figure=fig, width_ratios=[1, 1, 1, 1.2, 0.8], height_ratios=[1, 1, 1])
-
-    fig.suptitle("Denoiser-Based Prior Sampling and Inverse Problems", fontsize=18)
-
-    def normalize_for_display(img):
-        img_np = img.numpy() if hasattr(img, 'numpy') else img
-        return (img_np + 1.0) / 2.0
-
-    # --- Row 1: Prior Sampling ---
-    ax_prior_img = fig.add_subplot(gs[0, 0])
-    ax_prior_conv = fig.add_subplot(gs[0, 2:])
-
-    if 'prior_sample' in results:
-        sample = results['prior_sample'][0, :, :, 0]
-        ax_prior_img.imshow(normalize_for_display(sample), cmap='gray', vmin=0, vmax=1)
-        ax_prior_img.set_title(f'Prior Sample\n(range: [{tf.reduce_min(sample):.2f}, {tf.reduce_max(sample):.2f}])')
+def _show_image(ax: "plt.Axes", img: Optional[np.ndarray], title: str) -> None:
+    """Render a ``[H, W, C]`` image in ``[0, 1]`` (or a placeholder if ``None``)."""
+    if img is None:
+        ax.text(0.5, 0.5, "N/A", ha="center", va="center", transform=ax.transAxes)
     else:
-        ax_prior_img.set_title('Prior Sample')
-        ax_prior_img.text(0.5, 0.5, 'Not Run', ha='center', va='center', transform=ax_prior_img.transAxes)
-    ax_prior_img.axis('off')
-    _plot_convergence(ax_prior_conv, results.get('convergence', {}).get('Prior Sampling'), 'Prior Sampling')
+        disp = img if img.shape[-1] == 3 else img[..., 0]
+        ax.imshow(np.clip(disp, 0.0, 1.0), cmap=None if img.shape[-1] == 3 else "gray",
+                  vmin=0.0, vmax=1.0)
+    ax.set_title(title, fontsize=9)
+    ax.axis("off")
 
-    # --- Row 2: Inpainting ---
-    axes_inpainting = [fig.add_subplot(gs[1, i]) for i in range(4)]
 
-    if 'inpainting' in results:
-        titles = ['Original', 'Damaged', 'Restored']
-        images = results['inpainting'][:3]
-        for ax, title, img_tensor in zip(axes_inpainting, titles, images):
-            ax.imshow(normalize_for_display(img_tensor[0, :, :, 0]), cmap='gray', vmin=0, vmax=1)
-            ax.set_title(title)
-            ax.axis('off')
+def visualize_results(results: List[Dict[str, Any]], save_path: Path) -> None:
+    """Save a grid PNG (one row per problem) headless.
+
+    Columns: target, measured/degraded view, reconstruction, convergence curve.
+
+    Args:
+        results: Per-problem dicts from :func:`run_problem`.
+        save_path: Destination PNG path.
+    """
+    n = len(results)
+    fig, axes = plt.subplots(n, 4, figsize=(14, 3.2 * n), squeeze=False)
+    fig.suptitle("Bias-Free Denoiser Prior: Inverse Problems", fontsize=15)
+
+    for row, res in enumerate(results):
+        _show_image(axes[row][0], res["target"], f"{res['title']}\nTarget")
+        _show_image(axes[row][1], res["degraded"], "Measured / Degraded")
+        _show_image(axes[row][2], res["recon"], "Reconstruction")
+        _plot_convergence(axes[row][3], res["info"], res["title"])
+
+    fig.set_layout_engine("constrained")
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("saved grid to %s", save_path)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    """Parse CLI arguments for the demo."""
+    p = argparse.ArgumentParser(
+        description="Bias-free-denoiser inverse-problem demo (headless, MPLBACKEND=Agg).",
+    )
+    p.add_argument("--checkpoint", type=str, default=str(_DEFAULT_CHECKPOINT),
+                   help="Path to best_model.keras or its results directory.")
+    p.add_argument("--image", type=str, default=None,
+                   help="Optional real image path; if omitted a synthetic in-domain target is used.")
+    p.add_argument("--problem", type=str, default="all",
+                   choices=(*_ALL_PROBLEMS, "all"),
+                   help="Which problem(s) to run (default: all six).")
+    p.add_argument("--size", type=int, default=256,
+                   help="Square image edge (must be divisible by 8; default 256).")
+    p.add_argument("--iterations", type=int, default=200,
+                   help="Solver max iterations. Modest budgets are coarse; 500-1000 "
+                        "give paper-quality reconstructions (default 200).")
+    p.add_argument("--sigma0", type=float, default=0.4, help="Initial noise std (default 0.4).")
+    p.add_argument("--beta", type=float, default=0.01, help="Noise-injection parameter (default 0.01).")
+    p.add_argument("--seed", type=int, default=0, help="RNG seed (default 0).")
+    p.add_argument("--output-dir", type=str, default=str(_DEFAULT_OUTPUT_DIR),
+                   help="Directory for the grid PNG (default repo-root results/).")
+    # Per-problem knobs.
+    p.add_argument("--block", type=int, default=None,
+                   help="Inpainting missing-block edge (default size//4).")
+    p.add_argument("--keep-ratio", type=float, default=0.3,
+                   help="Random-pixels keep fraction (default 0.3).")
+    p.add_argument("--sr-factor", type=int, default=4,
+                   help="Super-resolution downsample factor (default 4).")
+    p.add_argument("--keep-fraction", type=float, default=0.15,
+                   help="Spectral-deblur low-pass keep fraction (default 0.15).")
+    p.add_argument("--measurement-ratio", type=float, default=0.2,
+                   help="Compressive-sensing measurement ratio (default 0.2).")
+    return p.parse_args(argv)
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    """Run the demo end to end and save a grid PNG to ``results/``."""
+    args = parse_args(argv)
+
+    if args.size % 8 != 0:
+        raise ValueError(f"--size must be divisible by 8 (depth-3 U-Net); got {args.size}")
+
+    logger.info("loading denoiser prior from %s", args.checkpoint)
+    prior = DenoiserPrior.from_pretrained(args.checkpoint)
+
+    if args.image:
+        logger.info("using real image %s (resized to %dx%d)", args.image, args.size, args.size)
+        target = load_real_image(args.image, args.size)
     else:
-        for ax, title in zip(axes_inpainting, ['Original', 'Damaged', 'Restored']):
-            ax.set_title(title)
-            ax.text(0.5, 0.5, 'Not Run', ha='center', va='center', transform=ax.transAxes)
-            ax.axis('off')
+        logger.info("using synthetic in-domain target %dx%d", args.size, args.size)
+        target = create_synthetic_test_image((1, args.size, args.size, 3))
 
-    _plot_convergence(axes_inpainting[3], results.get('convergence', {}).get('Inpainting'), 'Inpainting')
+    problems = list(_ALL_PROBLEMS) if args.problem == "all" else [args.problem]
+    results: List[Dict[str, Any]] = []
+    for problem in problems:
+        try:
+            results.append(run_problem(problem, prior, target, args))
+        except Exception as exc:  # noqa: BLE001 — one bad problem must not sink the demo.
+            logger.error("problem '%s' failed: %s", problem, exc)
 
-    # --- Row 3: Super-Resolution or Compressive Sensing ---
-    ax_sr1 = fig.add_subplot(gs[2, 0])
-    ax_sr2 = fig.add_subplot(gs[2, 1])
-    ax_sr_conv = fig.add_subplot(gs[2, 2:])
+    if not results:
+        logger.error("no problems produced a result; nothing to plot")
+        return
 
-    task_key, conv_key, title1, title2 = None, None, 'Image 1', 'Image 2'
-    if 'super_resolution' in results:
-        task_key, conv_key = 'super_resolution', 'Super-Resolution'
-        title1, title2 = 'Low Resolution', 'Super-Resolved'
-    elif 'compressive_sensing' in results:
-        task_key, conv_key = 'compressive_sensing', 'Compressive Sensing'
-        title1, title2 = 'Original', 'Reconstructed'
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    save_path = output_dir / f"bias_free_denoiser_demo_{stamp}.png"
+    visualize_results(results, save_path)
 
-    if task_key:
-        img1, img2 = results[task_key][:2]
-        ax_sr1.imshow(normalize_for_display(img1[0, :, :, 0]), cmap='gray', vmin=0, vmax=1)
-        ax_sr2.imshow(normalize_for_display(img2[0, :, :, 0]), cmap='gray', vmin=0, vmax=1)
-    ax_sr1.set_title(title1);
-    ax_sr1.axis('off')
-    ax_sr2.set_title(title2);
-    ax_sr2.axis('off')
-    _plot_convergence(ax_sr_conv, results.get('convergence', {}).get(conv_key, {}), conv_key or "Task")
+    logger.info("=" * 60)
+    logger.info("SUMMARY (iterations=%d, sigma0=%.3f, beta=%.3f):", args.iterations, args.sigma0, args.beta)
+    for res in results:
+        info = res["info"]
+        n_iter = len(info.get("iterations", []))
+        final_sigma = info["sigma_values"][-1] if info.get("sigma_values") else float("nan")
+        logger.info("  %-20s %4d iters, final sigma=%.5f", res["title"], n_iter, final_sigma)
+    logger.info("=" * 60)
 
-    # Use constrained_layout for better automatic spacing
-    fig.set_layout_engine('constrained')
-
-    if save_path:
-        plt.savefig(save_path, dpi=200, bbox_inches='tight')
-        # logger.info(f"Visualization saved to {save_path}")
-
-    plt.show()
-
-# ---------------------------------------------------------------------
-
-def main():
-    """
-    Main demonstration with improved error handling and stability.
-    """
-    logger.info("Starting stable denoiser prior demonstrations ([-1, +1] range)...")
-
-    # Load denoiser
-    try:
-        denoiser = load_bf_denoiser()
-    except Exception as e:
-        logger.error(f"Failed to load denoiser: {e}")
-        return None
-
-    # Compile denoiser for inference
-    if not hasattr(denoiser, 'compiled') or not denoiser.compiled:
-        denoiser.compile(optimizer='adam', loss='mse')
-
-    results = {}
-    convergence_info = {}
-
-    # Demonstrate prior sampling
-    try:
-        sample, conv_info = demonstrate_prior_sampling(denoiser)
-        results['prior_sample'] = sample
-        convergence_info['Prior Sampling'] = conv_info
-        logger.info("✓ Prior sampling completed successfully")
-    except Exception as e:
-        logger.error(f"✗ Prior sampling failed: {e}")
-
-    # Demonstrate inpainting
-    try:
-        inpainting_results = demonstrate_inpainting(denoiser)
-        results['inpainting'] = inpainting_results[:3]
-        convergence_info['Inpainting'] = inpainting_results[3]
-        logger.info("✓ Inpainting completed successfully")
-    except Exception as e:
-        logger.error(f"✗ Inpainting failed: {e}")
-
-    # Demonstrate super-resolution
-    try:
-        sr_results = demonstrate_super_resolution(denoiser)
-        results['super_resolution'] = sr_results[:2]
-        convergence_info['Super-Resolution'] = sr_results[2]
-        logger.info("✓ Super-resolution completed successfully")
-    except Exception as e:
-        logger.error(f"✗ Super-resolution failed: {e}")
-
-    # Demonstrate compressive sensing
-    try:
-        cs_results = demonstrate_compressive_sensing(denoiser)
-        results['compressive_sensing'] = cs_results[:2]
-        convergence_info['Compressive Sensing'] = cs_results[2]
-        logger.info("✓ Compressive sensing completed successfully")
-    except Exception as e:
-        logger.error(f"✗ Compressive sensing failed: {e}")
-
-    # Store convergence info
-    results['convergence'] = convergence_info
-
-    # Visualize results
-    try:
-        visualize_results(results, 'stable_denoiser_prior_results.png')
-        logger.info("✓ Visualization completed successfully")
-    except Exception as e:
-        logger.error(f"✗ Visualization failed: {e}")
-
-    logger.info("All demonstrations completed!")
-
-    # Print summary
-    logger.info("=" * 50)
-    logger.info("SUMMARY:")
-    for task, info in convergence_info.items():
-        if info and 'iterations' in info:
-            n_iter = len(info['iterations'])
-            final_sigma = info['sigma_values'][-1] if info['sigma_values'] else 'N/A'
-            logger.info(f"  {task}: {n_iter} iterations, final σ = {final_sigma}")
-    logger.info("=" * 50)
-
-    return results
-
-# ---------------------------------------------------------------------
 
 if __name__ == "__main__":
-    results = main()
+    main()
