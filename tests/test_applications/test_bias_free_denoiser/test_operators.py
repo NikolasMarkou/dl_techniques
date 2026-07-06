@@ -26,6 +26,8 @@ from applications.bias_free_denoiser.operators import (
     MeasurementOperator,
     NullOperator,
     RandomPixelsOperator,
+    SpectralDeblurOperator,
+    SuperResolutionOperator,
 )
 
 # Small, batch>1 shape to catch batch-broadcast bugs while staying CPU-fast.
@@ -188,3 +190,172 @@ class TestMaskValidation:
         a = RandomPixelsOperator(IMAGE_SHAPE, keep_ratio=0.3, seed=42)
         b = RandomPixelsOperator(IMAGE_SHAPE, keep_ratio=0.3, seed=42)
         np.testing.assert_array_equal(a.mask, b.mask)
+
+
+# =====================================================================
+# Step 3: Super-resolution + spectral-deblur operators (HIGH-RISK gate).
+#
+# The primary gate is ``M^T M ~= I`` (measure(adjoint(m)) == m). For the
+# COMPLEX spectral operator this holds only on VALID measurements
+# ``m = measure(x)`` (Hermitian-symmetric masked spectra) — the real-signal
+# adjoint ``real(idft(...))`` annihilates the anti-Hermitian part of an
+# arbitrary complex m. See SpectralDeblurOperator.adjoint DECISION anchor.
+# =====================================================================
+
+# Super-res shape: HxW divisible by factor.
+SR_SHAPE = (16, 16, 3)
+SR_FACTOR = 4
+# Spectral shape.
+SP_SHAPE = (32, 32, 3)
+SP_KEEP = 0.25
+
+
+def _crand(shape, seed):
+    """Random COMPLEX64 array (independent real/imag standard normals)."""
+    g = np.random.default_rng(seed)
+    return (g.standard_normal(shape) + 1j * g.standard_normal(shape)).astype(np.complex64)
+
+
+class TestSuperResolutionOperator:
+    def test_superres_shapes(self):
+        op = SuperResolutionOperator(SR_SHAPE, factor=SR_FACTOR)
+        x = _rand((BATCH, *SR_SHAPE), seed=20)
+        h, w, c = SR_SHAPE
+        lr = (BATCH, h // SR_FACTOR, w // SR_FACTOR, c)
+        m = _rand(lr, seed=21)
+        assert _np(op.measure(x)).shape == lr
+        assert _np(op.adjoint(m)).shape == (BATCH, *SR_SHAPE)
+        assert _np(op.project(x)).shape == (BATCH, *SR_SHAPE)
+        assert _np(op.init_mean(m)).shape == (BATCH, *SR_SHAPE)
+
+    def test_superres_orthonormal(self):
+        # M^T M ~= I on the measurement side: measure(adjoint(m)) == m. This is
+        # the STOP-IF gate for the corrected 1/k weighting.
+        op = SuperResolutionOperator(SR_SHAPE, factor=SR_FACTOR)
+        h, w, c = SR_SHAPE
+        m = _rand((BATCH, h // SR_FACTOR, w // SR_FACTOR, c), seed=22)
+        recon = _np(op.measure(op.adjoint(m)))
+        err = np.max(np.abs(recon - m))
+        assert err <= 1e-4, f"super-res M^T M err {err:.3e} > 1e-4"
+
+    def test_superres_adjointness(self):
+        op = SuperResolutionOperator(SR_SHAPE, factor=SR_FACTOR)
+        h, w, c = SR_SHAPE
+        x = _rand((BATCH, *SR_SHAPE), seed=23)
+        m = _rand((BATCH, h // SR_FACTOR, w // SR_FACTOR, c), seed=24)
+        lhs = _inner(op.measure(x), m)
+        rhs = _inner(x, op.adjoint(m))
+        scale = max(1.0, abs(lhs), abs(rhs))
+        assert abs(lhs - rhs) <= 1e-4 * scale
+
+    def test_superres_projector_idempotent(self):
+        op = SuperResolutionOperator(SR_SHAPE, factor=SR_FACTOR)
+        x = _rand((BATCH, *SR_SHAPE), seed=25)
+        p1 = _np(op.project(x))
+        p2 = _np(op.project(op.project(x)))
+        assert np.max(np.abs(p2 - p1)) <= 1e-4
+
+    def test_superres_project_equals_meanblock(self):
+        op = SuperResolutionOperator(SR_SHAPE, factor=SR_FACTOR)
+        x = _rand((BATCH, *SR_SHAPE), seed=26)
+        proj = _np(op.project(x))
+        # project == adjoint(measure(x))
+        adj_meas = _np(op.adjoint(op.measure(x)))
+        np.testing.assert_allclose(proj, adj_meas, atol=1e-5)
+        # project == explicit block-mean broadcast
+        h, w, c = SR_SHAPE
+        k = SR_FACTOR
+        blocks = x.reshape(BATCH, h // k, k, w // k, k, c)
+        mean = blocks.mean(axis=(2, 4), keepdims=True)
+        expected = np.tile(mean, (1, 1, k, 1, k, 1)).reshape(BATCH, h, w, c)
+        np.testing.assert_allclose(proj, expected, atol=1e-5)
+
+    def test_superres_project_ones(self):
+        # Every pixel is in a block whose mean-of-ones is 1 -> project(ones)=1.
+        op = SuperResolutionOperator(SR_SHAPE, factor=SR_FACTOR)
+        ones = np.ones((BATCH, *SR_SHAPE), dtype=np.float32)
+        np.testing.assert_allclose(_np(op.project(ones)), 1.0, atol=1e-6)
+
+    def test_superres_init_mean_is_adjoint(self):
+        # project(ones)=1 -> init_mean reduces to adjoint(measurements).
+        op = SuperResolutionOperator(SR_SHAPE, factor=SR_FACTOR, c0=0.3)
+        h, w, c = SR_SHAPE
+        m = _rand((BATCH, h // SR_FACTOR, w // SR_FACTOR, c), seed=27)
+        np.testing.assert_allclose(
+            _np(op.init_mean(m)), _np(op.adjoint(m)), atol=1e-5
+        )
+
+    def test_superres_bad_factor_rejected(self):
+        with pytest.raises(ValueError):
+            SuperResolutionOperator((16, 16, 3), factor=5)  # 16 % 5 != 0
+
+
+class TestSpectralDeblurOperator:
+    def test_spectral_unitary_sanity(self):
+        # idft(dft(x)) ~= x and Parseval ||dft(x)|| ~= ||x|| for random real x.
+        op = SpectralDeblurOperator(SP_SHAPE, keep_fraction=SP_KEEP)
+        x = _rand((BATCH, *SP_SHAPE), seed=30)
+        roundtrip = _np(op.idft(op.dft(x)))
+        np.testing.assert_allclose(roundtrip.real, x, atol=1e-4)
+        assert np.max(np.abs(roundtrip.imag)) <= 1e-4
+        spec = _np(op.dft(x))
+        assert abs(np.linalg.norm(spec) - np.linalg.norm(x)) <= 1e-3 * np.linalg.norm(x)
+
+    def test_spectral_shapes(self):
+        op = SpectralDeblurOperator(SP_SHAPE, keep_fraction=SP_KEEP)
+        x = _rand((BATCH, *SP_SHAPE), seed=31)
+        meas = op.measure(x)
+        assert _np(meas).shape == (BATCH, *SP_SHAPE)
+        assert _np(meas).dtype == np.complex64
+        assert _np(op.adjoint(meas)).shape == (BATCH, *SP_SHAPE)
+        assert _np(op.project(x)).shape == (BATCH, *SP_SHAPE)
+        assert _np(op.init_mean(meas)).shape == (BATCH, *SP_SHAPE)
+
+    def test_spectral_orthonormal(self):
+        # STOP-IF gate: M^T M ~= I on the RANGE of M (valid measurements).
+        # m = measure(x) is a Hermitian-symmetric masked spectrum; the real-
+        # signal adjoint recovers it exactly. (Arbitrary random complex m would
+        # NOT satisfy this because real(idft(.)) kills the anti-Hermitian part.)
+        op = SpectralDeblurOperator(SP_SHAPE, keep_fraction=SP_KEEP)
+        x = _rand((BATCH, *SP_SHAPE), seed=32)
+        m = op.measure(x)
+        recon = _np(op.measure(op.adjoint(m)))
+        err = np.max(np.abs(recon - _np(m)))
+        assert err <= 1e-4, f"spectral M^T M err {err:.3e} > 1e-4"
+
+    def test_spectral_adjointness(self):
+        # Real-part Hermitian inner product: real(<measure(x), m>) == <x, adjoint(m)>
+        # holds for ANY complex m (real x). Derived from M being real-linear into
+        # a real signal: <Lambda F x, m> real part == <x, real(F^H Lambda m)>.
+        op = SpectralDeblurOperator(SP_SHAPE, keep_fraction=SP_KEEP)
+        x = _rand((BATCH, *SP_SHAPE), seed=33)
+        m = _crand((BATCH, *SP_SHAPE), seed=34)
+        meas = _np(op.measure(x))
+        lhs = float(np.real(np.sum(np.conj(meas) * m)))
+        rhs = float(np.sum(x * _np(op.adjoint(m))))
+        scale = max(1.0, abs(lhs), abs(rhs))
+        assert abs(lhs - rhs) <= 1e-4 * scale
+
+    def test_spectral_projector_idempotent(self):
+        op = SpectralDeblurOperator(SP_SHAPE, keep_fraction=SP_KEEP)
+        x = _rand((BATCH, *SP_SHAPE), seed=35)
+        p1 = _np(op.project(x))
+        p2 = _np(op.project(op.project(x)))
+        assert np.max(np.abs(p2 - p1)) <= 1e-4
+
+    def test_spectral_project_real(self):
+        # INV-5: project output is strictly real (float32, no imag part).
+        op = SpectralDeblurOperator(SP_SHAPE, keep_fraction=SP_KEEP)
+        x = _rand((BATCH, *SP_SHAPE), seed=36)
+        proj = _np(op.project(x))
+        assert not np.iscomplexobj(proj)
+
+    def test_spectral_project_ones(self):
+        # DC-containing low-pass reconstructs a constant field exactly.
+        op = SpectralDeblurOperator(SP_SHAPE, keep_fraction=SP_KEEP)
+        ones = np.ones((BATCH, *SP_SHAPE), dtype=np.float32)
+        np.testing.assert_allclose(_np(op.project(ones)), 1.0, atol=1e-4)
+
+    def test_spectral_bad_keep_fraction_rejected(self):
+        with pytest.raises(ValueError):
+            SpectralDeblurOperator(SP_SHAPE, keep_fraction=0.0)

@@ -34,10 +34,12 @@ initialized in :meth:`MeasurementOperator.init_mean`.
 """
 
 import abc
+import math
 from typing import Optional, Sequence, Tuple, Union
 
 import keras
 import numpy as np
+import tensorflow as tf
 
 from dl_techniques.utils.logger import logger
 
@@ -407,3 +409,259 @@ class RandomPixelsOperator(MaskOperator):
         # One draw per PIXEL (broadcast over channels), thresholded to 0/1.
         keep = (generator.random((h, w, 1)) < keep_ratio).astype(np.float32)
         super().__init__(mask=keep, c0=c0)
+
+
+class SuperResolutionOperator(MeasurementOperator):
+    """kxk block-averaging downsample with an ORTHONORMAL-column ``M`` (F2 §2).
+
+    Super-resolution measures a low-resolution image by averaging each
+    non-overlapping ``k x k`` block. The naive box-average (weight ``1/k^2`` per
+    element) has row norm ``1/k != 1``, so ``M`` would NOT have orthonormal
+    columns and ``project = MM^T`` would not be idempotent (INV-4). The corrected
+    orthonormal pair (F2 §2, verified) uses weight ``1/k`` per element:
+
+    * :meth:`measure` = ``k * mean_block(x) = (1/k) * sum_block(x)`` — row norm
+      ``sqrt(k^2 * (1/k)^2) = 1``.
+    * :meth:`adjoint` = broadcast ``v / k`` to each of the ``k^2`` block positions.
+    * :meth:`project` = ``adjoint(measure(x))`` = replace each block by its mean
+      (the ``k`` and ``1/k`` factors cancel — NO extra scaling), implemented
+      directly as reshape -> mean -> broadcast for numerical cleanliness.
+
+    With this pair ``measure(adjoint(m)) = m`` exactly (``M^T M = I``) and
+    ``project`` is idempotent. ``project(ones) = 1`` everywhere (every pixel lies
+    in a block whose mean-of-ones is 1), so :meth:`init_mean` reduces to
+    ``adjoint(measurements)``.
+
+    All ops are pure reshape / mean / tile — O(N), no dense matrix (INV-3).
+
+    Attributes:
+        h, w, c: Signal spatial / channel dims.
+        k: Downsample factor (block edge length).
+    """
+
+    def __init__(self, image_shape: ImageShape, factor: int = 4, c0: float = 0.0) -> None:
+        """Build a super-resolution (block-averaging) operator.
+
+        Args:
+            image_shape: Signal shape ``(H, W, C)``.
+            factor: Block edge length ``k`` (downsample factor). ``H`` and ``W``
+                MUST be divisible by ``k``.
+            c0: Domain center for unmeasured components (default ``0.0``, D-002).
+
+        Raises:
+            ValueError: If ``factor < 1`` or ``H``/``W`` are not divisible by it.
+        """
+        super().__init__(c0=c0)
+        h, w, c = int(image_shape[0]), int(image_shape[1]), int(image_shape[2])
+        k = int(factor)
+        if k < 1:
+            raise ValueError(f"factor must be >= 1; got {k}")
+        if h % k != 0 or w % k != 0:
+            raise ValueError(
+                f"image {(h, w)} not divisible by factor {k} "
+                f"(super-res needs non-overlapping k x k blocks)"
+            )
+        self.h, self.w, self.c, self.k = h, w, c, k
+        logger.info(
+            "SuperResolutionOperator: %s, factor %d -> LR %s",
+            (h, w, c), k, (h // k, w // k, c),
+        )
+
+    def measure(self, x: TensorLike) -> "keras.KerasTensor":
+        """Apply ``M^T`` = ``k * mean_block(x)`` -> LR image ``[B, H/k, W/k, C]``.
+
+        Args:
+            x: A signal-domain tensor ``[B, H, W, C]``.
+
+        Returns:
+            The low-resolution measurement ``[B, H/k, W/k, C]``.
+        """
+        k, h, w, c = self.k, self.h, self.w, self.c
+        blocks = keras.ops.reshape(x, (-1, h // k, k, w // k, k, c))
+        return keras.ops.multiply(float(k), keras.ops.mean(blocks, axis=(2, 4)))
+
+    def adjoint(self, m: TensorLike) -> "keras.KerasTensor":
+        """Apply ``M`` = broadcast ``m / k`` into every block position (F2 §2).
+
+        Args:
+            m: A low-resolution measurement ``[B, H/k, W/k, C]``.
+
+        Returns:
+            A signal-domain tensor ``[B, H, W, C]``; each pixel receives ``m/k``.
+        """
+        k, h, w, c = self.k, self.h, self.w, self.c
+        v = keras.ops.divide(m, float(k))
+        v = keras.ops.reshape(v, (-1, h // k, 1, w // k, 1, c))
+        v = keras.ops.tile(v, (1, 1, k, 1, k, 1))
+        return keras.ops.reshape(v, (-1, h, w, c))
+
+    def project(self, x: TensorLike) -> "keras.KerasTensor":
+        """Apply ``M M^T`` = replace each block by its mean (F2 §2).
+
+        Implemented directly as reshape -> mean -> broadcast (no ``k`` scaling,
+        since ``measure``'s ``k`` and ``adjoint``'s ``1/k`` cancel). Equals
+        ``adjoint(measure(x))`` (asserted in a test).
+
+        Args:
+            x: A signal-domain tensor ``[B, H, W, C]``.
+
+        Returns:
+            The block-mean-broadcast projection, same shape as ``x``.
+        """
+        k, h, w, c = self.k, self.h, self.w, self.c
+        blocks = keras.ops.reshape(x, (-1, h // k, k, w // k, k, c))
+        mean = keras.ops.mean(blocks, axis=(2, 4), keepdims=True)
+        out = keras.ops.tile(mean, (1, 1, k, 1, k, 1))
+        return keras.ops.reshape(out, (-1, h, w, c))
+
+
+class SpectralDeblurOperator(MeasurementOperator):
+    """Unitary-DFT low-pass measurement for spectral deblurring (F2 §3).
+
+    The measurement keeps the lowest ``keep_fraction`` of Fourier coefficients
+    (a centered-square low-pass) of a UNITARY 2D DFT. Orthonormality is load
+    bearing (INV-4): ``tf.signal.fft2d`` is the unnormalized DFT, so we normalize
+    explicitly ``dft(x) = fft2d(x) / sqrt(H*W)`` and ``idft(X) = ifft2d(X) *
+    sqrt(H*W)`` (``ifft2d`` already divides by ``H*W``). This pairing is mutually
+    unitary: ``idft(dft(x)) = x`` exactly and Parseval holds (``||dft(x)|| =
+    ||x||``). A 0/1 mask selecting a subset of orthonormal basis vectors keeps
+    them orthonormal, so ``M`` has orthonormal columns.
+
+    Real-signal caveat (INV-5, verified numerically): ``M`` maps a REAL signal
+    to the Hermitian-symmetric masked spectra. Its adjoint back to real signal is
+    ``real(idft(Lambda ⊙ m))`` — the ``real(...)`` annihilates any anti-Hermitian
+    component. Consequently ``M^T M = I`` holds on the RANGE of ``M`` (valid
+    measurements ``m = measure(x)``), NOT on arbitrary complex ``m``; and the
+    adjointness identity uses the real-part Hermitian inner product
+    ``real(<measure(x), m>) = <x, adjoint(m)>`` (holds for any complex ``m``).
+
+    ``tf.signal.fft2d``/``ifft2d`` are raw-tf — one of the two accepted raw-tf
+    exceptions in this repo (FFT/ifft) because keras.ops.fft2 exposes no
+    orthonormal-norm control (F2 §3, MEMORY reference_prefer_remove_raw_tf).
+    O(N log N), no dense matrix (INV-3).
+
+    Attributes:
+        h, w, c: Signal spatial / channel dims.
+        keep_fraction: Fraction of frequencies kept along each axis.
+    """
+
+    def __init__(
+        self,
+        image_shape: ImageShape,
+        keep_fraction: float = 0.1,
+        c0: float = 0.0,
+    ) -> None:
+        """Build a centered low-pass DFT operator.
+
+        Args:
+            image_shape: Signal shape ``(H, W, C)``.
+            keep_fraction: Fraction of frequencies to keep along each axis, in
+                ``(0, 1]``. The centered square keeps ``|freq| <= r`` with
+                ``r = int(keep_fraction * dim / 2)``; DC is always included.
+            c0: Domain center for unmeasured components (default ``0.0``, D-002).
+
+        Raises:
+            ValueError: If ``keep_fraction`` is not in ``(0, 1]``.
+        """
+        super().__init__(c0=c0)
+        if not (0.0 < keep_fraction <= 1.0):
+            raise ValueError(f"keep_fraction must be in (0, 1]; got {keep_fraction}")
+        h, w, c = int(image_shape[0]), int(image_shape[1]), int(image_shape[2])
+        self.h, self.w, self.c = h, w, c
+        self.keep_fraction = float(keep_fraction)
+        self._sqrt_hw = tf.constant(math.sqrt(float(h * w)), dtype=tf.complex64)
+
+        # Centered-square low-pass mask in fft2d's native corner-DC layout.
+        # np.fft.fftfreq(n)*n gives the signed integer frequency at each index
+        # (0, 1, ..., -1), symmetric about DC, so |freq| <= r keeps a proper
+        # centered low-pass including DC (freq 0 -> always kept).
+        r_h = int(self.keep_fraction * h / 2)
+        r_w = int(self.keep_fraction * w / 2)
+        freq_h = np.round(np.fft.fftfreq(h) * h).astype(int)
+        freq_w = np.round(np.fft.fftfreq(w) * w).astype(int)
+        mask2d = np.outer(np.abs(freq_h) <= r_h, np.abs(freq_w) <= r_w)
+        mask = mask2d.astype(np.float32)[:, :, None]  # [H, W, 1]
+        self._mask_c = tf.constant(mask, dtype=tf.complex64)
+        logger.info(
+            "SpectralDeblurOperator: %s, keep_fraction %.3f -> %d/%d freqs kept",
+            (h, w, c), self.keep_fraction, int(mask.sum()), h * w,
+        )
+
+    def dft(self, x: TensorLike) -> "tf.Tensor":
+        """Unitary 2D DFT ``fft2d(x) / sqrt(H*W)`` applied per channel.
+
+        Transposes ``[B, H, W, C] -> [B, C, H, W]`` so ``fft2d`` acts on the last
+        two (spatial) dims, mirroring ``fft_layers.py:98`` convention.
+
+        Args:
+            x: A real or complex signal-domain tensor ``[B, H, W, C]``.
+
+        Returns:
+            The unitary complex spectrum ``[B, H, W, C]``.
+        """
+        xc = tf.cast(x, tf.complex64)
+        xt = tf.transpose(xc, [0, 3, 1, 2])
+        spec = tf.signal.fft2d(xt)
+        spec = tf.transpose(spec, [0, 2, 3, 1])
+        return spec / self._sqrt_hw
+
+    def idft(self, spec: TensorLike) -> "tf.Tensor":
+        """Unitary inverse 2D DFT ``ifft2d(X) * sqrt(H*W)`` applied per channel.
+
+        Args:
+            spec: A complex spectrum ``[B, H, W, C]``.
+
+        Returns:
+            The complex inverse transform ``[B, H, W, C]`` (caller forces real).
+        """
+        st = tf.transpose(tf.cast(spec, tf.complex64), [0, 3, 1, 2])
+        xt = tf.signal.ifft2d(st)
+        xt = tf.transpose(xt, [0, 2, 3, 1])
+        return xt * self._sqrt_hw
+
+    def measure(self, x: TensorLike) -> "tf.Tensor":
+        """Apply ``M^T`` = ``Lambda ⊙ dft(x)`` -> masked COMPLEX spectrum.
+
+        Kept full-size (same-shape masked representation, zeros outside support)
+        to avoid index bookkeeping (F2 §3).
+
+        Args:
+            x: A signal-domain tensor ``[B, H, W, C]``.
+
+        Returns:
+            The masked complex spectrum ``[B, H, W, C]`` (complex64).
+        """
+        return keras.ops.multiply(self._mask_c, self.dft(x))
+
+    def adjoint(self, m: TensorLike) -> "tf.Tensor":
+        """Apply ``M`` = ``real(idft(Lambda ⊙ m))`` (F2 §3, INV-5).
+
+        # DECISION plan_2026-07-06_d6b88914/D-001: force real output and re-apply
+        # the mask. The naive complex adjoint would keep an imaginary part; the
+        # signal is real, so ``M`` (adjoint) is ``real(idft(...))``. This makes
+        # ``M^T M = I`` hold ONLY on valid measurements ``m = measure(x)``
+        # (Hermitian-symmetric masked spectra), NOT on arbitrary complex ``m`` —
+        # verified numerically (random non-Hermitian m gives err ~2.4, not 0).
+        # Do NOT "fix" a failing random-m orthonormality test by dropping real();
+        # test M^T M on measure(x) instead. See decisions.md D-001, plan INV-4/5.
+
+        Args:
+            m: A masked complex spectrum ``[B, H, W, C]``.
+
+        Returns:
+            The real signal-domain reconstruction ``[B, H, W, C]``.
+        """
+        masked = keras.ops.multiply(self._mask_c, m)
+        return tf.math.real(self.idft(masked))
+
+    def project(self, x: TensorLike) -> "tf.Tensor":
+        """Apply ``M M^T`` = ``real(idft(Lambda ⊙ dft(x)))`` — real low-pass (INV-5).
+
+        Args:
+            x: A signal-domain tensor ``[B, H, W, C]``.
+
+        Returns:
+            The real low-pass projection, same shape as ``x``.
+        """
+        masked = keras.ops.multiply(self._mask_c, self.dft(x))
+        return tf.math.real(self.idft(masked))
