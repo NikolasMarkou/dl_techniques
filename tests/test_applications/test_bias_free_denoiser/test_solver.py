@@ -80,6 +80,32 @@ def _solver(target: np.ndarray, **kwargs) -> UniversalInverseSolver:
 
 
 # ----------------------------------------------------------------------------------
+# Step-size schedule: default cap byte-identical; h_max=None uncapped (A1, SC1/SC2).
+# ----------------------------------------------------------------------------------
+
+_STEP_SIZE_TS = [1, 2, 5, 10, 50, 100, 500, 1000]
+
+
+class TestStepSizeHMaxCap:
+    def test_step_size_default_byte_identical(self):
+        """SC1: default h_max=0.1 == min(h0*t/(1+h0*(t-1)), 0.1) exactly."""
+        solver = _solver(_smooth_target())
+        for t in _STEP_SIZE_TS:
+            expected = min(solver.h0 * t / (1.0 + solver.h0 * (t - 1)), 0.1)
+            assert solver._step_size(t) == expected, f"t={t}: cap not byte-identical"
+
+    def test_step_size_h_max_none_uncapped(self):
+        """SC2: h_max=None == literal paper value and exceeds the old 0.1 cap."""
+        solver = _solver(_smooth_target(), h_max=None)
+        for t in _STEP_SIZE_TS:
+            expected = solver.h0 * t / (1.0 + solver.h0 * (t - 1))
+            assert solver._step_size(t) == expected, f"t={t}: not the paper value"
+        # At the default h0=0.01 the uncapped schedule exceeds the old 0.1 cap.
+        assert solver.h0 == 0.01
+        assert solver._step_size(1000) > 0.1
+
+
+# ----------------------------------------------------------------------------------
 # STOP-IF #2 gate: NullOperator reproduces Algorithm 1.
 # ----------------------------------------------------------------------------------
 

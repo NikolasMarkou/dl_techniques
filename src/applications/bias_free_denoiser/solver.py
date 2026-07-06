@@ -22,9 +22,11 @@ so ``d_t`` degenerates EXACTLY to ``d_t = f(y)`` — the unconstrained Algorithm
 prior sampler. This degeneration is the Step-5 STOP-IF gate (Pre-Mortem #2) and is
 verified end-to-end in ``test_solver.py``.
 
-Schedule (A7 — reused verbatim from the paper-exact ``samplers.py:69-141``)
--------------------------------------------------------------------------
-* step size ``h_t = min(h0 * t / (1 + h0 * (t - 1)), 0.1)``
+Schedule (A7 — carried from the historical ``samplers.py:69-141``)
+-----------------------------------------------------------------
+* step size: the paper schedule ``h_t = h0 * t / (1 + h0 * (t - 1))`` (which
+  asymptotes to 1) with an OPTIONAL empirical stabilization cap ``h_max``
+  (default ``0.1``); ``h_max=None`` recovers the literal uncapped paper form.
 * effective noise ``sigma_t = ||d_t|| / sqrt(N) = sqrt(mean(d_t^2))``
 * injected noise ``gamma_t^2 = max(((1 - beta*h_t)^2 - (1 - h_t)^2) * sigma_t^2, 0)``
 * update ``y <- y + h_t * d_t + gamma_t * z_t``, ``z_t ~ N(0, I)``
@@ -75,6 +77,10 @@ class UniversalInverseSolver:
             ``0.4`` for the ``[-0.5, +0.5]`` model — see module note / D-002).
         sigma_l: Stopping threshold on the effective noise ``sigma_t``.
         h0: Step-size schedule parameter.
+        h_max: Optional empirical cap on the per-step schedule ``h_t``. Default
+            ``0.1`` (stabilization carried from the historical ``samplers.py``).
+            Set to ``None`` to use the literal uncapped paper schedule
+            ``h_t = h0*t/(1+h0*(t-1))`` (which asymptotes to 1).
         beta: Noise-injection parameter (``0.01`` for inverse problems, paper §3.2).
         max_iterations: Hard cap on iterations.
         patience: Iterations without a ``sigma_t`` improvement before early stop.
@@ -90,6 +96,7 @@ class UniversalInverseSolver:
         sigma_0: float = _DEFAULT_SIGMA_0,
         sigma_l: float = 0.01,
         h0: float = 0.01,
+        h_max: Optional[float] = 0.1,
         beta: float = 0.01,
         max_iterations: int = 1000,
         patience: int = 20,
@@ -103,6 +110,10 @@ class UniversalInverseSolver:
             sigma_0: Initial noise std (default ``0.4``, domain-adjusted, D-002).
             sigma_l: Effective-noise stopping threshold (default ``0.01``).
             h0: Step-size schedule parameter (default ``0.01``).
+            h_max: Optional empirical cap on the per-step schedule ``h_t``. Default
+                ``0.1`` (stabilization carried from the historical ``samplers.py``).
+                Set to ``None`` to use the literal uncapped paper schedule
+                ``h_t = h0*t/(1+h0*(t-1))`` which asymptotes to 1.
             beta: Noise-injection parameter (default ``0.01``, paper §3.2 for
                 inverse problems).
             max_iterations: Iteration cap (default ``1000``).
@@ -124,15 +135,16 @@ class UniversalInverseSolver:
         self.sigma_0 = float(sigma_0)
         self.sigma_l = float(sigma_l)
         self.h0 = float(h0)
+        self.h_max = None if h_max is None else float(h_max)
         self.beta = float(beta)
         self.max_iterations = int(max_iterations)
         self.patience = int(patience)
         self.clip = bool(clip)
         self.clip_range = (float(clip_range[0]), float(clip_range[1]))
         logger.info(
-            "UniversalInverseSolver: sigma_0=%.3f sigma_l=%.3f h0=%.3f beta=%.3f "
-            "max_iter=%d patience=%d clip=%s (domain [-0.5,+0.5])",
-            self.sigma_0, self.sigma_l, self.h0, self.beta,
+            "UniversalInverseSolver: sigma_0=%.3f sigma_l=%.3f h0=%.3f h_max=%s "
+            "beta=%.3f max_iter=%d patience=%d clip=%s (domain [-0.5,+0.5])",
+            self.sigma_0, self.sigma_l, self.h0, self.h_max, self.beta,
             self.max_iterations, self.patience, self.clip,
         )
 
@@ -141,8 +153,20 @@ class UniversalInverseSolver:
     # ------------------------------------------------------------------
 
     def _step_size(self, t: int) -> float:
-        """Paper-exact adaptive step ``h_t = min(h0 t / (1 + h0 (t-1)), 0.1)`` (A7)."""
-        return min(self.h0 * t / (1.0 + self.h0 * (t - 1)), 0.1)
+        """Adaptive step size ``h_t`` (A7).
+
+        The paper schedule ``h_t = h0*t/(1+h0*(t-1))`` (which asymptotes to 1) with
+        an OPTIONAL empirical stabilization cap ``h_max``. When ``h_max is None`` the
+        literal uncapped paper value is returned; otherwise it is clamped to ``h_max``
+        (default ``0.1``).
+        """
+        # DECISION plan_2026-07-06_b89e65ab/D-001: the paper's step schedule
+        # h_t = h0*t/(1+h0*(t-1)) has NO cap (it asymptotes to 1). The optional
+        # h_max ceiling (default 0.1) is an EMPIRICAL stabilization carried over
+        # from the deleted samplers.py, NOT part of Kadkhodaie & Simoncelli 2020.
+        # h_max=None recovers the literal paper schedule.
+        paper = self.h0 * t / (1.0 + self.h0 * (t - 1))
+        return paper if self.h_max is None else min(paper, self.h_max)
 
     @staticmethod
     def _l2(t: "keras.KerasTensor") -> float:
@@ -268,7 +292,11 @@ class UniversalInverseSolver:
                 break
 
             # --- Noise injection amplitude gamma_t (A7, paper Algorithm 2).
-            beta_h = min(self.beta * h_t, 0.99)
+            # DECISION plan_2026-07-06_b89e65ab/D-002: literal paper gamma_t form.
+            # The former min(beta*h_t, 0.99) clamp was dead under the h_t cap
+            # (beta*h_t <= 0.1 << 0.99); removing it matches Eq. 8 exactly and is
+            # byte-identical for every default/tested config.
+            beta_h = self.beta * h_t
             gamma_sq = ((1.0 - beta_h) ** 2 - (1.0 - h_t) ** 2) * sigma_t ** 2
             gamma_t = float(np.sqrt(max(gamma_sq, 0.0)))
             z_t = tf.random.normal(tf.shape(y), dtype=tf.float32)
