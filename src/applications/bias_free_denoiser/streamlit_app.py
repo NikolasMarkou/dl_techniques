@@ -3,10 +3,10 @@
 Interactive front-end over the SAME :class:`UniversalInverseSolver` loop the CLI
 (``main.py``) drives: pick one of the six problems (``prior``, ``inpaint``,
 ``random_pixels``, ``super_resolution``, ``deblur``, ``compressive_sensing``),
-tune the solver + per-problem knobs in the sidebar, optionally upload an image
-(otherwise a synthetic in-domain target is used), and view the target, the
-measured / degraded view, the reconstruction, and the ``sigma_t`` convergence
-curve.
+tune the solver + per-problem knobs in the sidebar, pick a configurable input
+source (synthetic in-domain target, an uploaded image, or a live webcam
+snapshot), and view the target, the measured / degraded view, the
+reconstruction, and the ``sigma_t`` convergence curve.
 
 This is the ONLY module in the package that imports streamlit (INV-7 / H7); the
 core (:class:`DenoiserPrior`, :class:`UniversalInverseSolver`, the operator
@@ -235,12 +235,28 @@ def main() -> None:
         st.error(f"Image size must be divisible by 8 (depth-3 U-Net); got {size}.")
         return
 
+    # Configurable input source (prior sampling synthesises from noise, so it
+    # needs no input image and the selector is hidden for it).
+    source = "Synthetic"
     upload: Optional[Any] = None
+    camera: Optional[Any] = None
     if problem != "prior":
-        upload = st.file_uploader(
-            "Image (optional; falls back to a synthetic in-domain target)",
-            type=["png", "jpg", "jpeg", "bmp", "webp"],
+        source = st.radio(
+            "Input source",
+            ["Synthetic", "Upload", "Webcam"],
+            horizontal=True,
+            help=(
+                "Synthetic in-domain target, an uploaded image, or a live webcam "
+                "snapshot (the camera is read by your browser and the frame is sent "
+                "to the server)."
+            ),
         )
+        if source == "Upload":
+            upload = st.file_uploader(
+                "Image", type=["png", "jpg", "jpeg", "bmp", "webp"],
+            )
+        elif source == "Webcam":
+            camera = st.camera_input("Take a photo")
 
     run = st.button("Run", type="primary")
     if not run:
@@ -248,9 +264,18 @@ def main() -> None:
         return
 
     try:
-        if upload is not None:
+        if problem != "prior" and source == "Upload":
+            if upload is None:
+                st.warning("Select an image to upload, or switch the input source.")
+                return
             target = _ingest_upload(upload, size)
             logger.info("using uploaded image (resized to %dx%d) for '%s'", size, size, problem)
+        elif problem != "prior" and source == "Webcam":
+            if camera is None:
+                st.warning("Take a webcam photo, or switch the input source.")
+                return
+            target = _ingest_upload(camera, size)
+            logger.info("using webcam snapshot (resized to %dx%d) for '%s'", size, size, problem)
         else:
             target = create_synthetic_test_image((1, size, size, 3))
             logger.info("using synthetic in-domain target %dx%d for '%s'", size, size, problem)
