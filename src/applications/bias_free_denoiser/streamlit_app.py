@@ -157,12 +157,20 @@ def _make_args(
         An ``argparse.Namespace`` with every field ``build_operator`` /
         :func:`run_problem` may read.
     """
+    _h_max = knobs.get("h_max")
     return argparse.Namespace(
         # Solver knobs.
         iterations=int(knobs["iterations"]),
         sigma0=float(knobs["sigma0"]),
         beta=float(knobs["beta"]),
         seed=int(knobs["seed"]),
+        # Solver-regime knobs (mirror the main.py CLI defaults; D-002/D-003). h_max
+        # is None (uncapped paper schedule) by default; patience 0 = disabled (run_problem
+        # resolves it to iterations+1 so a full run never early-stops).
+        h_max=None if _h_max is None else float(_h_max),
+        sigma_l=float(knobs.get("sigma_l", 0.01)),
+        h0=float(knobs.get("h0", 0.01)),
+        patience=int(knobs.get("patience", 0)),
         # Per-problem knobs (defaults mirror main.py; only the active one is shown).
         block=knobs.get("block"),
         keep_ratio=float(knobs.get("keep_ratio", 0.3)),
@@ -185,11 +193,24 @@ def _sidebar_controls() -> Dict[str, Any]:
 
     st.sidebar.header("Solver")
     knobs: Dict[str, Any] = {
-        "iterations": st.sidebar.slider("Iterations", 20, 1000, 200, 10),
+        "iterations": st.sidebar.slider("Iterations", 20, 1000, 500, 10),
         "sigma0": st.sidebar.slider("sigma_0 (initial noise std)", 0.05, 1.0, 0.4, 0.05),
         "beta": st.sidebar.slider("beta (noise injection)", 0.0, 0.5, 0.01, 0.01),
         "seed": st.sidebar.number_input("Seed", min_value=0, max_value=2**31 - 1, value=0, step=1),
     }
+
+    # Solver-regime knobs (mirror the main.py CLI defaults; D-002/D-003). h_max
+    # defaults to uncapped (None) — the paper schedule Step-2 measured best; the
+    # slider is only used when the uncap checkbox is cleared. patience 0 = disabled.
+    uncap = st.sidebar.checkbox("Uncap step size (h_max=None)", value=True)
+    knobs["h_max"] = None if uncap else st.sidebar.slider(
+        "h_max (step-size cap)", 0.05, 1.0, 0.1, 0.05,
+    )
+    knobs["sigma_l"] = st.sidebar.slider("sigma_l (stop threshold)", 0.001, 0.1, 0.01, 0.001)
+    knobs["h0"] = st.sidebar.slider("h0 (step schedule)", 0.001, 0.1, 0.01, 0.001)
+    knobs["patience"] = st.sidebar.number_input(
+        "Patience (0 = disabled)", min_value=0, max_value=1000, value=0, step=10,
+    )
 
     st.sidebar.header("Image")
     knobs["size"] = st.sidebar.number_input(

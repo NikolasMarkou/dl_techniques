@@ -242,11 +242,19 @@ def run_problem(
 
     image_shape = tuple(int(s) for s in target.shape[1:])
     operator = build_operator(problem, image_shape, args)
+    # patience==0 means "disabled": resolve to iterations+1 so the no-improvement
+    # counter (which can reach at most max_iterations) never trips an early stop
+    # on a full-budget quality run. See parse_args --patience help / D-003.
+    resolved_patience = args.patience if args.patience > 0 else args.iterations + 1
     solver = UniversalInverseSolver(
         prior,
         sigma_0=args.sigma0,
         beta=args.beta,
         max_iterations=args.iterations,
+        sigma_l=args.sigma_l,
+        h0=args.h0,
+        h_max=args.h_max,
+        patience=resolved_patience,
     )
 
     if problem == "prior":
@@ -368,6 +376,15 @@ def visualize_results(results: List[Dict[str, Any]], save_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _hmax(s: str) -> Optional[float]:
+    """Parse the ``--h-max`` value: ``none``/empty -> ``None`` (uncapped), else ``float``.
+
+    Lets the CLI express the uncapped paper step schedule (``h_max=None``) as a plain
+    string token, since argparse ``type=float`` cannot yield ``None``.
+    """
+    return None if s.strip().lower() in ("none", "") else float(s)
+
+
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     """Parse CLI arguments for the demo."""
     p = argparse.ArgumentParser(
@@ -382,12 +399,36 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    help="Which problem(s) to run (default: all six).")
     p.add_argument("--size", type=int, default=256,
                    help="Square image edge (must be divisible by 8; default 256).")
-    p.add_argument("--iterations", type=int, default=200,
-                   help="Solver max iterations. Modest budgets are coarse; 500-1000 "
-                        "give paper-quality reconstructions (default 200).")
+    # DECISION plan_2026-07-06_c9c7a81a/D-003: paper-DEVIATING defaults changed
+    # (iterations 200->500, and h_max 0.1->None below) per the Step-2 harness A/B
+    # (+13.4 dB mild-regime mean PSNR, all five inverse tasks improved, every
+    # reconstruction finite+bounded). Paper-EXACT literals beta/sigma_l/h0 keep
+    # their 0.01 values. See decisions.md D-003.
+    p.add_argument("--iterations", type=int, default=500,
+                   help="Solver max iterations (default 500; paper-quality regime per "
+                        "Step-2 measurement). Lower budgets (e.g. 200) converge coarser.")
     p.add_argument("--sigma0", type=float, default=0.4, help="Initial noise std (default 0.4).")
     p.add_argument("--beta", type=float, default=0.01, help="Noise-injection parameter (default 0.01).")
     p.add_argument("--seed", type=int, default=0, help="RNG seed (default 0).")
+    # --- Solver-regime knobs: the iteration-starving levers UniversalInverseSolver
+    # already accepts (solver.py:92-104) but main.py did not forward.
+    # DECISION plan_2026-07-06_c9c7a81a/D-002: SUPERSEDES plan_2026-07-06_b89e65ab/D-003
+    # ("h_max/h0 are library-only; no --h-max/--h0 flag exists or is planned"). The
+    # approved quality goal requires user-tunable regime knobs, so h_max/sigma_l/h0/
+    # patience are now surfaced on the CLI (and the GUI) and forwarded to the solver.
+    # Do NOT re-hide them. See decisions.md D-002.
+    p.add_argument("--h-max", type=_hmax, default=None,
+                   help="Step-size cap; 'none' = uncapped paper schedule (default; "
+                        "empirically best per measurement).")
+    p.add_argument("--sigma-l", type=float, default=0.01,
+                   help="Effective-noise stop threshold (paper-exact 0.01; exposed for "
+                        "completeness).")
+    p.add_argument("--h0", type=float, default=0.01,
+                   help="Step-size schedule parameter (paper-exact 0.01).")
+    p.add_argument("--patience", type=int, default=0,
+                   help="No-improvement iterations before early stop; 0 = disabled "
+                        "(resolved to iterations+1 so a full-budget run never early-stops; "
+                        "default 0).")
     p.add_argument("--output-dir", type=str, default=str(_DEFAULT_OUTPUT_DIR),
                    help="Directory for the grid PNG (default repo-root results/).")
     # Per-problem knobs.
