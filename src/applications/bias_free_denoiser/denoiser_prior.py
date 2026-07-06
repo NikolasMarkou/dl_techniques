@@ -290,6 +290,7 @@ class DenoiserPrior:
             gabor_kernel_size=raw.get("gabor_kernel_size", 7),
             gabor_stem_projection=raw.get("gabor_stem_projection", True),
             use_laplacian_pyramid=raw.get("use_laplacian_pyramid", False),
+            high_freq_blocks=raw.get("high_freq_blocks", 0),  # D-001: older config.json -> 0 (byte-identical no-op)
             zero_pad_channels=raw.get("zero_pad_channels", False),
             final_projection_groups=final_projection_groups,
             downsample_pool_type=raw.get("downsample_pool_type", "max"),
