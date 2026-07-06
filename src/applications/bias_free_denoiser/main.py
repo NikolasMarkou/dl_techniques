@@ -65,8 +65,13 @@ _DEFAULT_CHECKPOINT = (
     _REPO_ROOT / "results" / "cliffordunet_denoiser_base_20260705_004751" / "best_model.keras"
 )
 
-# Canonical problem order for the "all" selection.
+# Canonical problem order for the "all" selection. "denoise" is the trivial
+# single-forward-pass task D(y): it has NO MeasurementOperator/solver, so it is
+# handled as a sibling branch in run_problem (H1 / D-001), never via build_operator.
+# Adding it here auto-wires the --problem choices, the "all" loop, and the Streamlit
+# selectbox (F2 A3) with no further wiring.
 _ALL_PROBLEMS: Tuple[str, ...] = (
+    "denoise",
     "prior",
     "inpaint",
     "random_pixels",
@@ -77,6 +82,7 @@ _ALL_PROBLEMS: Tuple[str, ...] = (
 
 # Human-readable panel titles keyed by problem id.
 _PROBLEM_TITLES: Dict[str, str] = {
+    "denoise": "Denoising",
     "prior": "Prior Sampling",
     "inpaint": "Inpainting",
     "random_pixels": "Random Pixels",
@@ -209,6 +215,31 @@ def run_problem(
     """
     import keras
 
+    logger.info("--- problem '%s' (%s) ---", problem, _PROBLEM_TITLES[problem])
+
+    if problem == "denoise":
+        # H1 / D-001: denoise is a single forward pass D(y). It has NO
+        # MeasurementOperator and NO UniversalInverseSolver — it returns BEFORE
+        # build_operator and must NOT be routed through a fake IdentityOperator
+        # (the deliberately-rejected anti-pattern; see decisions.md D-001 / F2).
+        # H2 / D-002: all pixel math stays in [-0.5, +0.5]; synthetic Gaussian noise
+        # is added post-ingest, in-domain, and lightly clipped to the domain (matching
+        # the trainer) before the single denoise call.
+        rng = np.random.default_rng(args.seed)
+        if args.noise_sigma > 0.0:
+            noise = rng.normal(0.0, args.noise_sigma, target.shape).astype(np.float32)
+            noisy = np.clip(target + noise, -0.5, 0.5)
+        else:
+            noisy = target  # denoise-as-is
+        denoised = np.asarray(keras.ops.convert_to_numpy(prior.denoise(noisy)))
+        return {
+            "title": _PROBLEM_TITLES["denoise"],
+            "target": DenoiserPrior.denorm(target[0]),
+            "degraded": np.clip(DenoiserPrior.denorm(noisy[0]), 0.0, 1.0),
+            "recon": np.clip(DenoiserPrior.denorm(denoised[0]), 0.0, 1.0),
+            "info": {},
+        }
+
     image_shape = tuple(int(s) for s in target.shape[1:])
     operator = build_operator(problem, image_shape, args)
     solver = UniversalInverseSolver(
@@ -218,7 +249,6 @@ def run_problem(
         max_iterations=args.iterations,
     )
 
-    logger.info("--- problem '%s' (%s) ---", problem, _PROBLEM_TITLES[problem])
     if problem == "prior":
         # Algorithm-1 unconstrained prior sampling: no measurements, size via shape.
         recon, info = solver.solve(operator, measurements=None, shape=target.shape, seed=args.seed)
@@ -238,6 +268,42 @@ def run_problem(
         "recon": np.clip(DenoiserPrior.denorm(recon_np[0]), 0.0, 1.0),
         "info": info,
     }
+
+
+def denoise_frame(prior: DenoiserPrior, rgb_uint8: np.ndarray, size: int = 256) -> np.ndarray:
+    """Denoise one RGB frame with a single forward pass ``D(y)`` — GUI-free primitive.
+
+    This is the shared per-frame primitive reused by BOTH a headless unit test and the
+    streamlit-webrtc ``recv()`` loop (H3 / D-002), so it stays free of any streamlit
+    import. The forward pass runs at a fixed ``size`` x ``size`` (``size`` must be
+    divisible by 8 for the depth-3 U-Net); the input may be an arbitrary ``[H, W, 3]``
+    uint8 frame (non-÷8, non-square) and the denoised output is resized back to the
+    original ``(H, W)`` so a live video track's resolution stays stable (H4).
+
+    Args:
+        prior: The loaded denoiser prior (exposes ``.denoise``).
+        rgb_uint8: A ``[H, W, 3]`` uint8 RGB frame in ``[0, 255]``.
+        size: Square edge for the forward pass (divisible by 8; default 256).
+
+    Returns:
+        A ``[H, W, 3]`` uint8 RGB frame in ``[0, 255]`` (finite), same ``H`` x ``W`` as
+        the input.
+    """
+    from PIL import Image
+    import keras
+
+    frame = np.asarray(rgb_uint8).astype(np.uint8)
+    h, w = int(frame.shape[0]), int(frame.shape[1])
+
+    # Fixed ÷8 square pass, independent of input aspect ratio (H4). PIL resize takes
+    # (width, height); a square (size, size) is orientation-agnostic here.
+    resized = np.asarray(Image.fromarray(frame).resize((size, size)))
+    x = DenoiserPrior.ingest(resized)[None, ...]  # -> [1, size, size, 3] in [-0.5, +0.5]
+    y = np.asarray(keras.ops.convert_to_numpy(prior.denoise(x)))
+    out01 = np.clip(DenoiserPrior.denorm(y[0]), 0.0, 1.0)  # [-0.5,+0.5] -> [0,1]
+    out_uint8 = (out01 * 255.0).astype(np.uint8)
+    # Resize back to the original (H, W) -> PIL wants (width, height) == (w, h).
+    return np.asarray(Image.fromarray(out_uint8).resize((w, h))).astype(np.uint8)
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +401,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    help="Spectral-deblur low-pass keep fraction (default 0.15).")
     p.add_argument("--measurement-ratio", type=float, default=0.2,
                    help="Compressive-sensing measurement ratio (default 0.2).")
+    p.add_argument("--noise-sigma", type=float, default=0.1,
+                   help="Denoise task: synthetic Gaussian noise std added in-domain "
+                        "before denoising (0 = denoise as-is; default 0.1).")
     return p.parse_args(argv)
 
 
