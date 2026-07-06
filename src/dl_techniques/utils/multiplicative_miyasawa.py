@@ -417,6 +417,216 @@ def additive_sure_risk(
     }
 
 
+# ---------------------------------------------------------------------
+# 3b. Per-pixel (spatial-map) additive-SURE variants
+#
+# ADDITIVE-ONLY extension of the scalar estimators above. These keep the
+# ``(H, W, C)`` spatial map instead of collapsing it to a single number:
+# the same JVP finite-difference divergence, but reduced over the BATCH
+# axis only. They exist to answer "where is the denoiser uncertain?" with
+# a per-pixel unbiased-MSE map, not just a global risk number.
+#
+# HARD SCOPE: the closed-form unbiased-MSE identity these implement holds
+# ONLY for additive Gaussian noise ``y = x + N(0, sigma^2 I)``. There is
+# NO clean linear-domain equivalent for multiplicative / composite noise
+# (module docstring lines 12-33, decisions.md D-002) — do NOT feed a
+# multiplicatively-corrupted batch here and present the result as an
+# unbiased MSE. For that regime use :func:`sure_divergence_consistency`
+# (a diagnostic approximation), not these.
+# ---------------------------------------------------------------------
+
+
+def _denoiser_point_estimate(
+        denoiser: Callable[[tf.Tensor], Any],
+        y: tf.Tensor,
+) -> tf.Tensor:
+    """Call ``denoiser`` and return its point-estimate (index-0) output tensor.
+
+    Bias-free denoisers with deep supervision return a ``list``/``tuple`` of
+    intermediate tensors whose first element is the primary point estimate; a
+    plain denoiser returns a single tensor. This helper unwraps the former to
+    index 0 and passes the latter through, mirroring the deep-supervision
+    unwrap in ``src/train/bfunet/common.py`` (``denoise_k_passes``, lines
+    479-480) so the per-pixel estimators handle both output contracts.
+
+    Args:
+        denoiser: Callable mapping a noisy tensor to a denoised tensor, or to a
+            list/tuple whose index-0 element is the point estimate.
+        y: Noisy input tensor.
+
+    Returns:
+        The point-estimate tensor (index-0 of a list/tuple output, else the
+        output itself).
+    """
+    out = denoiser(y)
+    if isinstance(out, (list, tuple)):
+        out = out[0]
+    return out
+
+
+def hutchinson_divergence_map(
+        denoiser: Callable[[tf.Tensor], Any],
+        y: tf.Tensor,
+        n_hutchinson: int = 8,
+        eps: float = 1e-3,
+        rademacher: bool = True,
+        seed: Optional[int] = None,
+        local_average_window: Optional[int] = None,
+) -> tf.Tensor:
+    """Per-pixel divergence map ``E_v[v * (D(y+eps*v) - D(y)) / eps]`` (batch-reduced).
+
+    This is the per-element (spatial-map) counterpart of
+    :func:`hutchinson_divergence`. Where the scalar estimator collapses the
+    whole tensor with ``tf.reduce_sum(v * jvp)`` (the trace of the flattened
+    Jacobian), this variant KEEPS the elementwise product ``v * jvp`` and
+    reduces over the BATCH axis only, yielding an ``(H, W, C)`` map of the
+    diagonal Jacobian entries ``dD_i/dy_i`` averaged over ``n_hutchinson``
+    probes and over the batch. For a linear toy ``D(y) = a*y`` every per-pixel
+    entry is ``~= a`` (vs the scalar estimator's ``a*N``).
+
+    Caveat — per-pixel variance. A single-pixel JVP estimate is far higher
+    variance than the global sum (which averages over all elements). Raise
+    ``n_hutchinson`` and/or set ``local_average_window`` to trade a little
+    spatial resolution for a much lower-variance map.
+
+    Additive-noise scope. This diagonal-Jacobian map is noise-model-agnostic
+    in itself, but it exists to feed :func:`additive_sure_risk_map`, whose
+    unbiased-MSE identity holds ONLY for additive Gaussian noise (decisions.md
+    D-002); do not repurpose it as an unbiased risk term for multiplicative /
+    composite noise.
+
+    Args:
+        denoiser: Callable noisy -> denoised (single tensor, or a list/tuple
+            whose index-0 element is the point estimate; unwrapped via
+            :func:`_denoiser_point_estimate`).
+        y: Noisy input batch ``[B, H, W, C]``.
+        n_hutchinson: Number of random probes to average. Defaults to 8.
+        eps: Finite-difference step for the JVP. Defaults to 1e-3.
+        rademacher: If True use Rademacher (``+/-1``) probes, else standard
+            normal. Defaults to True (matches :func:`hutchinson_divergence`).
+        seed: RNG seed for the stateless probes. ``None`` -> 0.
+        local_average_window: If set (``> 1``), apply a spatial average-pool
+            (``window x window``, stride 1, SAME padding) to the final map to
+            reduce per-pixel JVP variance. ``None`` (default) keeps the raw
+            per-pixel map.
+
+    Returns:
+        A ``tf.Tensor`` of shape ``[H, W, C]`` — the per-pixel divergence
+        (diagonal-Jacobian) map, averaged over probes and batch.
+    """
+    y = tf.convert_to_tensor(y)
+    base_seed = 0 if seed is None else int(seed)
+    d0 = _denoiser_point_estimate(denoiser, y)
+    acc = tf.zeros_like(y)
+    for i in range(n_hutchinson):
+        if rademacher:
+            v = tf.cast(
+                tf.where(
+                    tf.random.stateless_uniform(tf.shape(y), seed=[base_seed, i]) < 0.5,
+                    -1.0, 1.0,
+                ),
+                y.dtype,
+            )
+        else:
+            v = tf.random.stateless_normal(tf.shape(y), seed=[base_seed, i], dtype=y.dtype)
+        d1 = _denoiser_point_estimate(denoiser, y + eps * v)
+        jvp = (d1 - d0) / eps
+        acc += v * jvp  # keep elementwise (per-pixel), do NOT reduce_sum
+
+    # Average over probes, then reduce over the BATCH axis only -> [H, W, C].
+    div_map = tf.reduce_mean(acc / float(n_hutchinson), axis=0)
+
+    if local_average_window is not None and int(local_average_window) > 1:
+        w = int(local_average_window)
+        div_map = tf.nn.avg_pool2d(
+            div_map[tf.newaxis, ...], ksize=w, strides=1, padding="SAME"
+        )[0]
+
+    logger.info(
+        "hutchinson_divergence_map: n_hutchinson=%d eps=%.1e window=%s map_mean=%.4g",
+        n_hutchinson, eps, str(local_average_window),
+        float(tf.reduce_mean(div_map).numpy()),
+    )
+    return div_map
+
+
+def additive_sure_risk_map(
+        denoiser: Callable[[tf.Tensor], Any],
+        y: tf.Tensor,
+        sigma: float,
+        n_hutchinson: int = 8,
+        eps: float = 1e-3,
+        seed: Optional[int] = None,
+        local_average_window: Optional[int] = None,
+) -> tf.Tensor:
+    """Per-pixel SURE map: an unbiased-per-pixel estimate of ``E[(D(y) - x)^2]``.
+
+    Spatial-map counterpart of :func:`additive_sure_risk`. For the **additive**
+    Gaussian model ``y = x + N(0, sigma^2 I)``, SURE gives an unbiased estimate
+    of the true error from noisy data alone. Applied per-element (``N = 1`` per
+    pixel) the estimate is::
+
+        sure_map = residual_sq_map + 2 * sigma^2 * div_map - sigma^2
+
+    where ``residual_sq_map = (D(y) - y)^2`` (per element, NOT summed) and
+    ``div_map`` is the per-pixel divergence from :func:`hutchinson_divergence_map`.
+    Both terms are reduced over the BATCH axis only, keeping the ``(H, W, C)``
+    map. This is an unbiased-in-expectation per-pixel MSE estimate — a single
+    realization is noisy (raise ``n_hutchinson`` / use ``local_average_window``)
+    and individual pixels may go slightly negative from MC noise.
+
+    HARD scope — additive Gaussian ONLY. The unbiased-MSE identity holds only
+    for additive Gaussian noise; multiplicative / composite noise has no clean
+    linear-domain equivalent (module docstring lines 12-33, decisions.md D-002).
+    Do NOT present this map for multiplicative / composite corruption.
+
+    Boundary bias — the ``[-0.5, +0.5]`` clip. All bfunet-family trainers clip
+    the noisy input to ``[-0.5, +0.5]``. Near the saturated boundary the clip
+    truncates the Gaussian tail, so the noise there is no longer strictly
+    Gaussian and this SURE estimate is SYSTEMATICALLY BIASED for pixels near
+    ``+/-0.5``. Surface this in any report (mask / annotate the near-boundary
+    pixels) — do not silently average the bias away.
+
+    Args:
+        denoiser: Callable noisy -> denoised (single tensor, or a list/tuple
+            whose index-0 element is the point estimate; unwrapped via
+            :func:`_denoiser_point_estimate`).
+        y: Noisy input batch ``[B, H, W, C]``.
+        sigma: Additive noise std.
+        n_hutchinson: Probes for the divergence map. Defaults to 8.
+        eps: Finite-difference step for the JVP. Defaults to 1e-3.
+        seed: RNG seed for the divergence probes. ``None`` -> 0.
+        local_average_window: Optional spatial average-pool window passed
+            through to :func:`hutchinson_divergence_map` to reduce per-pixel
+            variance. ``None`` (default) keeps the raw per-pixel map.
+
+    Returns:
+        A ``tf.Tensor`` of shape ``[H, W, C]`` — the per-pixel SURE risk map
+        (unbiased-in-expectation per-pixel estimate of ``E[(D(y) - x)^2]``).
+    """
+    y = tf.convert_to_tensor(y)
+    d = _denoiser_point_estimate(denoiser, y)
+
+    # Per-element residual (N=1 per pixel), reduced over the batch axis only.
+    residual_sq_map = tf.reduce_mean(tf.square(d - y), axis=0)
+
+    div_map = hutchinson_divergence_map(
+        denoiser, y, n_hutchinson=n_hutchinson, eps=eps, rademacher=True,
+        seed=seed, local_average_window=local_average_window,
+    )
+
+    sigma2 = float(sigma) ** 2
+    sure_map = residual_sq_map + 2.0 * sigma2 * div_map - sigma2
+
+    logger.info(
+        "additive_sure_risk_map: sigma=%.4g n_hutchinson=%d window=%s "
+        "sure_map_mean=%.4g (additive-only; +/-0.5-boundary biased)",
+        sigma, n_hutchinson, str(local_average_window),
+        float(tf.reduce_mean(sure_map).numpy()),
+    )
+    return sure_map
+
+
 def sure_divergence_consistency(
         denoiser: Callable[[tf.Tensor], tf.Tensor],
         noisy_batch: tf.Tensor,
