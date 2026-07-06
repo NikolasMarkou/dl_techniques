@@ -99,7 +99,7 @@ identical.
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python \
-    -m applications.bias_free_denoiser.main --problem all --iterations 200
+    -m applications.bias_free_denoiser.main --problem all
 ```
 
 Runs the selected problem(s) on a synthetic in-domain target (or `--image PATH` for a
@@ -107,10 +107,32 @@ real image, resized to `--size`) and writes a grid PNG — target, measured/degr
 view, reconstruction, and the `sigma_t` convergence curve per problem — to
 repo-root `results/`. It is fully headless (`MPLBACKEND=Agg`). `--problem` accepts any
 of the seven ids (`denoise`, `prior`, `inpaint`, `random_pixels`, `super_resolution`,
-`deblur`, `compressive_sensing`) or `all`. Key flags:
-`--checkpoint`, `--iterations`, `--sigma0`, `--beta`, `--seed`, `--size`, and the
-per-problem knobs `--block`, `--keep-ratio`, `--sr-factor`, `--keep-fraction`,
-`--measurement-ratio`.
+`deblur`, `compressive_sensing`) or `all`.
+
+**General flags:** `--checkpoint`, `--iterations` (default **500**), `--sigma0`,
+`--seed`, `--size`, and the per-problem knobs `--block`, `--keep-ratio`, `--sr-factor`,
+`--keep-fraction`, `--measurement-ratio`.
+
+**Solver-regime flags** (the annealed-ascent schedule from Algorithm 2). The defaults
+below are the paper-quality regime — an A/B on the shipped checkpoint measured **+13.4 dB
+mean PSNR** on the inverse tasks versus the old capped/short-budget defaults, because the
+old cap left the ascent stuck at `sigma_t ~= 0.25-0.33`, never reaching `sigma_l`:
+
+| flag | default | meaning |
+|------|---------|---------|
+| `--h-max` | `none` | Step-size cap. `none` = uncapped paper schedule (best measured). Pass a float (e.g. `0.1`) to re-impose a cap for extra stability. |
+| `--sigma-l` | `0.01` | Effective-noise stop threshold (paper-exact). The loop runs until `sigma_t` falls below this. |
+| `--h0` | `0.01` | Step-size schedule parameter `h_t = h0*t/(1+h0*(t-1))` (paper-exact). |
+| `--patience` | `0` | No-improvement iterations before early stop; `0` = disabled (a full-budget run never early-stops). |
+| `--beta` | `0.01` | Injected-noise fraction (paper-exact); `1.0` = no injected noise. |
+
+**Optional quality levers** (both OFF by default — the default path is byte-identical to
+without them):
+
+| flag | default | meaning |
+|------|---------|---------|
+| `--final-projection` | off | Impose exact hard data consistency once at solve return (`measure(recon) == measurements`). Helps mask-structured tasks (inpaint `+0.29 dB`, CS `+0.22 dB`); ~no effect on SR/deblur; no-op for `prior`. Cheapest lever (one post-loop op). |
+| `--num-samples N` | `1` | "Ours-avg": average `N` independent solve trajectories (different seeds). Measured **+1.4 to +3.1 dB** across tasks at `N=4`, at `N`x runtime. Strongest lever; `N=1` is a single solve. |
 
 The `denoise` task takes a single forward pass through the denoiser (no operator, no
 solver). Its `--noise-sigma` flag (default `0.1`) synthesizes in-domain Gaussian test
@@ -126,16 +148,29 @@ CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg .venv/bin/python \
 
 ## Convergence / iteration budget
 
-The reconstruction quality tracks the iteration budget. A modest budget
-(`--iterations 40-200`) runs in a few minutes and produces a coarse but sensible
-result; the paper-quality reconstruction needs **hundreds to ~1000 iterations**
-(early stopping halts once the effective noise `sigma_t` stops improving). Crank
-`--iterations` for better quality at the cost of runtime.
+Reconstruction quality tracks the iteration budget: the ascent must run long enough for
+the effective noise `sigma_t` to anneal down to `sigma_l` (`0.01`). The default regime
+(`--iterations 500`, uncapped `--h-max none`) reaches that convergence floor on the inverse
+tasks; a much shorter budget (e.g. `--iterations 40-200`) stops the ascent well above
+`sigma_l` and produces a coarse, unconverged result. The paper reports 300-650 iterations
+to convergence, so `500` is a sensible default — raise it for the hardest low-measurement
+regimes, or lower it for a fast preview.
+
+Two independent knobs previously starved this loop and are now surfaced with better
+defaults (see the Solver-regime flags above): the `--h-max` step-size cap and the
+`--patience` early stop. If you want the old fast-but-coarse behaviour back, pass
+`--h-max 0.1 --iterations 200`.
+
+For a further quality bump at extra runtime, add `--num-samples 4` (Ours-avg) and/or
+`--final-projection` (see Optional quality levers).
 
 ## GUI
 
 An interactive Streamlit app (upload -> pick problem -> reconstruct) is provided in
-`streamlit_app.py`:
+`streamlit_app.py`. The sidebar exposes the same controls as the CLI — iterations,
+`sigma0`, `beta`, and the solver-regime knobs (an "uncap step size" toggle for `h_max`,
+plus `sigma_l` / `h0` / `patience`) and the optional quality levers (final-projection
+checkbox, Ours-avg `num_samples`):
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 .venv/bin/streamlit run \
