@@ -87,3 +87,47 @@ def test_denoise_frame_shape_range(stub_prior):
     assert out.dtype == np.uint8
     assert np.isfinite(out).all()
     assert int(out.min()) >= 0 and int(out.max()) <= 255
+
+
+@pytest.mark.parametrize("noise_sigma", [0.0, 0.1])
+def test_denoiser_processor_recv_track_stable(stub_prior, noise_sigma):
+    """The webrtc DenoiserProcessor.recv keeps the track resolution stable + never raises.
+
+    Exercises the H4 (resize-back) + H5 (try/except passthrough) + optional-noise recv
+    logic on a real ``av.VideoFrame`` round-trip, using the identity stub prior (no
+    checkpoint). Imports ``streamlit_app`` (streamlit + streamlit_webrtc + av) — this
+    module is the ONLY package file allowed those imports (H3).
+    """
+    import av
+
+    from applications.bias_free_denoiser.streamlit_app import DenoiserProcessor
+
+    proc = DenoiserProcessor(stub_prior, size=64, noise_sigma=noise_sigma)
+    frame_bgr = np.random.default_rng(3).integers(0, 256, size=(48, 80, 3), dtype=np.uint8)
+    in_frame = av.VideoFrame.from_ndarray(frame_bgr, format="bgr24")
+
+    out_frame = proc.recv(in_frame)
+    out_bgr = out_frame.to_ndarray(format="bgr24")
+
+    assert out_bgr.shape == frame_bgr.shape  # H4: track resolution unchanged.
+    assert out_bgr.dtype == np.uint8
+    assert np.isfinite(out_bgr).all()
+
+
+def test_denoiser_processor_recv_passthrough_on_error():
+    """H5: a prior whose denoise raises must NOT kill the track -> original frame back."""
+    import av
+
+    from applications.bias_free_denoiser.streamlit_app import DenoiserProcessor
+
+    class _BoomPrior:
+        def denoise(self, y):
+            raise RuntimeError("simulated per-frame failure")
+
+    proc = DenoiserProcessor(_BoomPrior(), size=64, noise_sigma=0.0)
+    frame_bgr = np.random.default_rng(4).integers(0, 256, size=(32, 48, 3), dtype=np.uint8)
+    in_frame = av.VideoFrame.from_ndarray(frame_bgr, format="bgr24")
+
+    out_bgr = proc.recv(in_frame).to_ndarray(format="bgr24")
+    # The original frame is passed through unmodified (recv swallowed the exception).
+    np.testing.assert_array_equal(out_bgr, frame_bgr)

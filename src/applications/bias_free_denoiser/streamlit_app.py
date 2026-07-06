@@ -39,15 +39,18 @@ if _SRC not in sys.path:
 import argparse
 from typing import Any, Dict, Optional, Tuple
 
+import av
 import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, VideoProcessorBase
 
 from dl_techniques.utils.logger import logger
 
 from applications.bias_free_denoiser.denoiser_prior import DenoiserPrior
 from applications.bias_free_denoiser.main import (
     create_synthetic_test_image,
+    denoise_frame,
     run_problem,
     _plot_convergence,
     _ALL_PROBLEMS,
@@ -58,6 +61,7 @@ _DEFAULT_MODEL = os.environ.get(
     "BFDENOISER_MODEL",
     "results/cliffordunet_denoiser_base_20260705_004751/best_model.keras",
 )
+_RTC_CONFIG = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 
 
 @st.cache_resource(show_spinner="Loading bias-free denoiser prior...")
@@ -71,6 +75,50 @@ def load_prior(checkpoint_path: str) -> DenoiserPrior:
         The loaded :class:`DenoiserPrior` (registrar-first, ``compile=False``).
     """
     return DenoiserPrior.from_pretrained(checkpoint_path)
+
+
+class DenoiserProcessor(VideoProcessorBase):
+    """Per-frame webrtc denoiser; the forward-pass size / noise knob are pushed in live.
+
+    Mirrors ``anomaly_detection/streamlit_app.py``'s ``AnomalyProcessor`` (D-003): the
+    cached :class:`DenoiserPrior` is injected via the constructor (the
+    ``video_processor_factory`` lambda closes over the ``@st.cache_resource``
+    singleton), and ``recv`` runs one ``D(y)`` forward pass per frame through the
+    GUI-free :func:`denoise_frame` primitive (H3 / D-002) — which already resizes to a
+    fixed ÷8 square and back to the input ``(h, w)`` so the outgoing track resolution
+    stays stable (H4). Tunables are plain instance attributes so the sidebar ``setattr``
+    push takes effect on the next frame without recreating the processor.
+    """
+
+    def __init__(
+        self, prior: DenoiserPrior, size: int = 256, noise_sigma: float = 0.0
+    ) -> None:
+        self.prior = prior
+        self.size = size
+        self.noise_sigma = noise_sigma
+
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        img_bgr = frame.to_ndarray(format="bgr24")
+        try:
+            rgb = np.ascontiguousarray(img_bgr[..., ::-1])  # BGR -> RGB
+            if self.noise_sigma > 0.0:
+                # Optional synthetic Gaussian noise so the denoiser's effect is
+                # visible on an otherwise clean feed. sigma is in the model's
+                # [-0.5, +0.5] domain; scaling by 255 injects the equivalent in pixel
+                # units before denoise_frame ingests (H2-consistent). sigma == 0 ->
+                # denoise as-is.
+                noise = np.random.normal(0.0, float(self.noise_sigma) * 255.0, rgb.shape)
+                rgb = np.clip(rgb.astype(np.float32) + noise, 0.0, 255.0).astype(np.uint8)
+            out_rgb = denoise_frame(self.prior, rgb, size=int(self.size))
+            out_bgr = np.ascontiguousarray(out_rgb[..., ::-1])  # RGB -> BGR
+        # DECISION plan_2026-07-06_b713eb77/D-003: NEVER let a per-frame error raise out
+        # of recv — aiortc tears down the entire video track on any exception (H5). Pass
+        # the ORIGINAL frame through instead. Do NOT narrow this to a specific exception
+        # nor remove it: denoise_frame touches PIL/keras/the model and any of them can
+        # throw on a malformed frame. See decisions.md D-003.
+        except Exception:  # noqa: BLE001 - never kill the video track
+            out_bgr = img_bgr
+        return av.VideoFrame.from_ndarray(out_bgr, format="bgr24")
 
 
 def _ingest_upload(upload: Any, size: int) -> np.ndarray:
@@ -245,21 +293,47 @@ def main() -> None:
     source = "Synthetic"
     upload: Optional[Any] = None
     camera: Optional[Any] = None
+    # The denoise task (one fast forward pass) can stream live; the six iterative
+    # solvers cannot, so only denoise labels its webcam option "(live)" (D-004 / H6).
+    live_label = "Webcam (live)" if problem == "denoise" else "Webcam"
     if problem != "prior":
         source = st.radio(
             "Input source",
-            ["Synthetic", "Upload", "Webcam"],
+            ["Synthetic", "Upload", live_label],
             horizontal=True,
             help=(
-                "Synthetic in-domain target, an uploaded image, or a live webcam "
-                "snapshot (the camera is read by your browser and the frame is sent "
-                "to the server)."
+                "Synthetic in-domain target, an uploaded image, or the webcam. For the "
+                "denoise task the webcam is a LIVE stream (every frame is denoised in "
+                "real time); for the six solvers it is a single snapshot sent to the "
+                "server."
             ),
         )
         if source == "Upload":
             upload = st.file_uploader(
                 "Image", type=["png", "jpg", "jpeg", "bmp", "webp"],
             )
+        # DECISION plan_2026-07-06_b713eb77/D-004: LIVE streaming is wired ONLY to the
+        # denoise task (H6). The six solvers run hundreds of ascent iterations per frame
+        # and are unstreamable — do NOT add a webrtc_streamer branch for them; they keep
+        # the st.camera_input snapshot path below. See decisions.md D-004.
+        elif source == "Webcam (live)" and problem == "denoise":
+            ctx = webrtc_streamer(
+                key="denoise-live",
+                mode=WebRtcMode.SENDRECV,
+                rtc_configuration=_RTC_CONFIG,
+                video_processor_factory=lambda: DenoiserProcessor(prior, size=size),
+                media_stream_constraints={"video": True, "audio": False},
+                async_processing=True,
+            )
+            if ctx.video_processor:
+                ctx.video_processor.size = size
+                ctx.video_processor.noise_sigma = float(knobs.get("noise_sigma", 0.0))
+            st.caption(
+                "Live denoising: each webcam frame is passed through D(y) in real time. "
+                "Raise 'Noise sigma' in the sidebar to inject synthetic noise and watch "
+                "the denoiser remove it."
+            )
+            return  # live mode is self-driving; no Run button / static solve.
         elif source == "Webcam":
             camera = st.camera_input("Take a photo")
 
