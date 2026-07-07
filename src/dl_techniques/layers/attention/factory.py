@@ -975,9 +975,8 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         'description': (
             'Bias-free, degree-1 positively-homogeneous linear (O(N)) self-attention '
             'for Miyasawa-compliant denoising. Replaces the softmax kernel with a '
-            'positively-homogeneous feature map phi (relu / relu_squared / abs, all '
-            'non-negative, or leaky_relu, homogeneous but signed and dead-gradient-free) '
-            'and a mandatory normalizer, computed via matmul associativity so '
+            'positively-homogeneous, non-negative feature map phi (relu / relu_squared '
+            '/ abs) and a mandatory normalizer, computed via matmul associativity so '
             'the N x N attention matrix is never materialized. Both Miyasawa properties '
             'hold by construction: every Q/K/V/output projection is bias-free '
             '(use_bias=False by default) and f(alpha*x) = alpha*f(x) for alpha > 0. '
@@ -994,7 +993,6 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'dropout_rate': 0.0,
             'use_bias': False,
             'feature_map': 'relu',
-            'negative_slope': 0.01,
             'epsilon': 1e-6,
             'kernel_initializer': 'glorot_uniform',
             'bias_initializer': 'zeros',

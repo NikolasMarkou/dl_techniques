@@ -41,21 +41,14 @@ tf.config.experimental.enable_tensor_float_32_execution(False)
 # Test helpers
 # ==============================================================================
 
-def _feature_map_np(x: np.ndarray, feature_map: str, negative_slope: float = 0.01) -> np.ndarray:
+def _feature_map_np(x: np.ndarray, feature_map: str) -> np.ndarray:
     """NumPy replica of ``LinearAttention._feature_map`` (for the naive reference)."""
     if feature_map == 'relu':
         return np.maximum(x, 0.0)
     if feature_map == 'relu_squared':
         return np.square(np.maximum(x, 0.0))
-    if feature_map == 'leaky_relu':
-        return np.where(x >= 0.0, x, negative_slope * x)
     # 'abs'
     return np.abs(x)
-
-
-def _sign_aware_floor_np(denom: np.ndarray, floor: float = 1e-20) -> np.ndarray:
-    """NumPy replica of the layer's sign-aware magnitude floor (call step 5)."""
-    return np.where(denom >= 0.0, np.maximum(denom, floor), np.minimum(denom, -floor))
 
 
 def _to_heads_np(t: np.ndarray, num_heads: int, head_dim: int) -> np.ndarray:
@@ -144,12 +137,6 @@ class TestValidation:
         with pytest.raises(ValueError, match="epsilon must be"):
             LinearAttention(dim=16, num_heads=2, epsilon=-1.0)
 
-    @pytest.mark.parametrize("bad_slope", [-0.1, 1.5])
-    def test_invalid_negative_slope(self, bad_slope):
-        with pytest.raises(ValueError, match="negative_slope must be"):
-            LinearAttention(dim=16, num_heads=2, feature_map='leaky_relu',
-                            negative_slope=bad_slope)
-
     def test_build_wrong_rank(self):
         layer = LinearAttention(dim=16, num_heads=2)
         with pytest.raises(ValueError, match="Expected 3D input"):
@@ -231,7 +218,7 @@ class TestHomogeneity:
     in (1e-4, 1e-2] the eps floor is the likely cause — DO NOT loosen; report.
     """
 
-    @pytest.mark.parametrize("feature_map", ['relu', 'relu_squared', 'abs', 'leaky_relu'])
+    @pytest.mark.parametrize("feature_map", ['relu', 'relu_squared', 'abs'])
     @pytest.mark.parametrize("alpha", [0.5, 2.0])
     def test_degree_one_homogeneity(self, feature_map, alpha):
         keras.utils.set_random_seed(42)
@@ -288,7 +275,7 @@ class TestAssociativity:
     order + normalizer genuinely compute normalized linear attention.
     """
 
-    @pytest.mark.parametrize("feature_map", ['relu', 'relu_squared', 'abs', 'leaky_relu'])
+    @pytest.mark.parametrize("feature_map", ['relu', 'relu_squared', 'abs'])
     def test_associative_equals_naive(self, feature_map):
         keras.utils.set_random_seed(7)
         b, n, dim, heads = 2, 7, 16, 2
@@ -310,18 +297,18 @@ class TestAssociativity:
         k = _to_heads_np(k, heads, head_dim)
         v = _to_heads_np(v, heads, head_dim)
 
-        phi_q = _feature_map_np(q, feature_map, layer.negative_slope)
-        phi_k = _feature_map_np(k, feature_map, layer.negative_slope)
+        phi_q = _feature_map_np(q, feature_map)
+        phi_k = _feature_map_np(k, feature_map)
 
         # Naive O(N^2): materialize the (B, H, N, N) attention matrix.
         A = np.einsum('bhnd,bhmd->bhnm', phi_q, phi_k)   # phi_q @ phi_k^T
         num_ref = np.einsum('bhnm,bhmd->bhnd', A, v)      # (phi_q phi_k^T) V
         z_ref = A.sum(axis=-1)                            # (phi_q phi_k^T) . 1 -> (B,H,N)
 
-        # Replicate the layer's input-scaled eps (D-001) + sign-aware floor exactly.
+        # Replicate the layer's input-scaled eps (D-001) exactly.
         z_mean = z_ref.mean(axis=-1, keepdims=True)       # (B,H,1)
         eps_eff = eps * z_mean
-        denom = _sign_aware_floor_np(z_ref + eps_eff)
+        denom = np.maximum(z_ref + eps_eff, 1e-20)
         core = num_ref / denom[..., None]                 # (B,H,N,d)
 
         # Merge heads and apply the layer's own output projection.
@@ -334,72 +321,6 @@ class TestAssociativity:
                     f"feature_map={feature_map!r}; the contraction order or the "
                     f"normalizer is wrong.",
         )
-
-
-# ==============================================================================
-# 6b. Signed feature map ('leaky_relu': homogeneous but non-negative-kernel-breaking)
-# ==============================================================================
-
-class TestLeakyRelu:
-    """'leaky_relu' is degree-1 homogeneous (covered in TestHomogeneity/TestAssociativity)
-    but SIGNED: it removes the dead-ReLU zero-gradient half at the cost of the
-    non-negative-kernel guarantee. These tests lock the signed-specific behavior."""
-
-    def test_forward_finite_and_signed(self):
-        """Forward is finite AND the layer actually produces negative feature values
-        (proving leaky_relu is engaged, unlike the non-negative maps)."""
-        keras.utils.set_random_seed(0)
-        layer = LinearAttention(dim=16, num_heads=2, feature_map='leaky_relu',
-                                negative_slope=0.1)
-        x = np.random.uniform(-0.5, 0.5, size=(2, 6, 16)).astype('float32')
-        y = np.array(layer(x, training=False))
-        assert y.shape == (2, 6, 16)
-        assert np.isfinite(y).all()
-        # The feature map itself must yield negatives on negative inputs.
-        neg = np.array(layer._feature_map(keras.ops.convert_to_tensor(
-            np.array([-2.0, -0.5, 0.0, 1.0], dtype='float32'))))
-        assert neg.min() < 0.0, "leaky_relu must produce negative features"
-        np.testing.assert_allclose(neg, [-0.2, -0.05, 0.0, 1.0], atol=1e-6)
-
-    def test_nonzero_gradient_on_negative_side(self):
-        """The whole point: leaky_relu has a NON-zero gradient for negative
-        pre-activations, where relu's gradient is exactly zero (dead half)."""
-        z = keras.ops.convert_to_tensor(np.array([-3.0, -1.0, -0.2], dtype='float32'))
-        relu_layer = LinearAttention(dim=8, num_heads=2, feature_map='relu')
-        leaky_layer = LinearAttention(dim=8, num_heads=2, feature_map='leaky_relu',
-                                      negative_slope=0.1)
-
-        def fmap_grad(layer, zz):
-            var = tf.Variable(zz)
-            with tf.GradientTape() as t:
-                out = keras.ops.sum(layer._feature_map(var))
-            return np.array(t.gradient(out, var))
-
-        g_relu = fmap_grad(relu_layer, z)
-        g_leaky = fmap_grad(leaky_layer, z)
-        assert np.allclose(g_relu, 0.0), "relu gradient on the negative side must be 0"
-        assert np.allclose(g_leaky, 0.1), (
-            f"leaky_relu gradient on the negative side must equal negative_slope "
-            f"(0.1), got {g_leaky}")
-
-    def test_serialization_roundtrips_negative_slope(self):
-        layer = LinearAttention(dim=32, num_heads=4, feature_map='leaky_relu',
-                                negative_slope=0.2)
-        config = layer.get_config()
-        assert config['feature_map'] == 'leaky_relu'
-        assert config['negative_slope'] == 0.2
-        rebuilt = LinearAttention.from_config(config)
-        assert rebuilt.feature_map == 'leaky_relu'
-        assert rebuilt.negative_slope == 0.2
-
-    def test_factory_construction(self):
-        from dl_techniques.layers.attention import create_attention_layer
-        layer = create_attention_layer('linear', dim=16, num_heads=2,
-                                       feature_map='leaky_relu', negative_slope=0.05)
-        assert layer.feature_map == 'leaky_relu'
-        assert layer.negative_slope == 0.05
-        y = np.array(layer(keras.random.normal((2, 5, 16)), training=False))
-        assert np.isfinite(y).all()
 
 
 # ==============================================================================
