@@ -344,6 +344,7 @@ def main():
             gabor_filters=args.gabor_filters,
             gabor_stem_projection=not args.no_gabor_projection,
             initial_filters=args.initial_filters,
+            filter_multiplier=args.filter_multiplier,
             depth=args.depth,
             blocks_per_level=args.blocks_per_level,
             final_projection_groups=args.final_projection_groups,
