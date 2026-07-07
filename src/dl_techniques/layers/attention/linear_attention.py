@@ -72,13 +72,22 @@ from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
-# Feature maps allowed here are exactly the positively-homogeneous, non-negative
-# ones. NON-homogeneous maps are FORBIDDEN and rejected in __init__:
+# Feature maps allowed here are exactly the positively-homogeneous ones (they keep
+# f(alpha x) = alpha f(x), the Miyasawa property). Most are ALSO non-negative, which
+# keeps the denominator phi(Q).Sum phi(K) a valid non-negative normalizer:
+#   - 'relu' (p=1), 'relu_squared' (p=2), 'abs' (p=1): homogeneous AND non-negative.
+#   - 'leaky_relu' (p=1): homogeneous (leaky(alpha z) = alpha leaky(z) for alpha > 0)
+#     but SIGNED -- it produces negatives, so the "attention weights" are no longer a
+#     non-negative partition and the denominator can be small/negative. Kept because a
+#     signed slope gives a NON-zero gradient on the negative side (fixes the dead-ReLU
+#     half); the denominator is guarded by a sign-aware magnitude floor in call() so a
+#     genuinely-negative denominator stays stable instead of being clamped to +eps.
+# NON-homogeneous maps are FORBIDDEN and rejected in __init__:
 #   - 'elu_plus_one' (Katharopoulos elu(x)+1): the "+1" is an additive degree-0
 #     constant -> breaks f(alpha x) = alpha f(x)  (F-W2 / F-W3).
 #   - 'exp' / 'softmax': exp is non-homogeneous (exp(alpha z) != alpha^p exp(z))
 #     and softmax is temperature-sensitive (softmax(alpha z) != softmax(z)).
-_SUPPORTED_FEATURE_MAPS = ('relu', 'relu_squared', 'abs')
+_SUPPORTED_FEATURE_MAPS = ('relu', 'relu_squared', 'abs', 'leaky_relu')
 _FORBIDDEN_FEATURE_MAPS = ('elu_plus_one', 'exp', 'softmax')
 
 # ---------------------------------------------------------------------
@@ -112,6 +121,17 @@ class LinearAttention(keras.layers.Layer):
       property. With ``dropout_rate>0`` at ``training=True`` the output is
       stochastic (Dropout is applied after ``output_proj``) and thus not
       per-sample homogeneous; the default ``dropout_rate=0.0`` is the Miyasawa mode.
+    - **Signed feature map (``'leaky_relu'``).** ``'leaky_relu'`` is degree-1
+      homogeneous (so it PRESERVES the Miyasawa property) and its non-zero negative
+      slope removes the dead-ReLU zero-gradient half. BUT it is the only supported map
+      that is NOT non-negative: it breaks the non-negative-kernel guarantee, so the
+      per-token "attention weights" are no longer a convex partition and the
+      denominator ``z`` can be small or negative. The denominator is guarded by a
+      *sign-aware* magnitude floor (``call`` step 5) so this stays finite and stable
+      (a negative ``z`` keeps its sign instead of being clamped to ``+1e-20``), and
+      homogeneity remains exact wherever ``|z| > 1e-20`` — but use a SMALL
+      ``negative_slope`` (default ``0.01``) and keep ``epsilon`` at its default; a
+      large slope makes ``z`` cross zero more often and is numerically riskier.
 
     **Architecture Overview:**
 
@@ -145,11 +165,18 @@ class LinearAttention(keras.layers.Layer):
         (**compliant / bias-free mode**). Setting ``True`` breaks bias-freeness
         and is only for non-Miyasawa callers.
     :type use_bias: bool
-    :param feature_map: Positively-homogeneous non-negative feature map ``phi``.
-        One of ``'relu'`` (p=1), ``'relu_squared'`` (p=2, FLatten-style focus),
-        ``'abs'`` (p=1). ``'elu_plus_one'``/``'exp'``/``'softmax'`` are rejected
-        (they break degree-1 homogeneity).
+    :param feature_map: Positively-homogeneous feature map ``phi``. One of ``'relu'``
+        (p=1), ``'relu_squared'`` (p=2, FLatten-style focus), ``'abs'`` (p=1) — all
+        non-negative — or ``'leaky_relu'`` (p=1, SIGNED: homogeneous and
+        dead-gradient-free but breaks the non-negative kernel; see the caveat above).
+        ``'elu_plus_one'``/``'exp'``/``'softmax'`` are rejected (they break degree-1
+        homogeneity).
     :type feature_map: str
+    :param negative_slope: Negative-half slope for ``feature_map='leaky_relu'`` (the
+        ``alpha`` in ``leaky_relu``); ignored by the other maps. Must be in
+        ``[0, 1]``; ``0.0`` recovers plain ReLU. Default ``0.01`` (small, to keep the
+        signed tail — hence the non-negativity break — small).
+    :type negative_slope: float
     :param epsilon: Relative denominator floor. The effective floor is
         ``epsilon * mean_over_tokens(z)`` (input-scaled, D-001), keeping degree-1
         exact. Must be ``>= 0``.
@@ -175,6 +202,7 @@ class LinearAttention(keras.layers.Layer):
             dropout_rate: float = 0.0,
             use_bias: bool = False,
             feature_map: str = 'relu',
+            negative_slope: float = 0.01,
             epsilon: float = 1e-6,
             kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
             bias_initializer: Union[str, initializers.Initializer] = 'zeros',
@@ -210,6 +238,10 @@ class LinearAttention(keras.layers.Layer):
                 f"feature_map must be one of {list(_SUPPORTED_FEATURE_MAPS)}, "
                 f"got '{feature_map}'"
             )
+        if not 0.0 <= negative_slope <= 1.0:
+            raise ValueError(
+                f"negative_slope must be in [0, 1], got {negative_slope}"
+            )
         if epsilon < 0.0:
             raise ValueError(f"epsilon must be >= 0, got {epsilon}")
 
@@ -219,6 +251,7 @@ class LinearAttention(keras.layers.Layer):
         self.dropout_rate = dropout_rate
         self.use_bias = use_bias
         self.feature_map = feature_map
+        self.negative_slope = negative_slope
         self.epsilon = epsilon
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
@@ -309,9 +342,11 @@ class LinearAttention(keras.layers.Layer):
         """Apply the positively-homogeneous, non-negative feature map ``phi``.
 
         All supported maps satisfy ``phi(alpha x) = alpha^p phi(x)`` for
-        ``alpha > 0`` (positive homogeneity of degree ``p``) AND ``phi(x) >= 0``
-        (needed so the denominator ``phi(Q).Sum phi(K)`` is non-negative). This is
-        what makes the normalized attention degree-1 (F-W2).
+        ``alpha > 0`` (positive homogeneity of degree ``p``) — this is what makes the
+        normalized attention degree-1 (F-W2). ``'relu'``/``'relu_squared'``/``'abs'``
+        are ALSO ``>= 0`` (so the denominator ``phi(Q).Sum phi(K)`` is non-negative);
+        ``'leaky_relu'`` is homogeneous but SIGNED (see class caveat), handled by the
+        sign-aware denominator floor in ``call``.
 
         FORBIDDEN maps (rejected in ``__init__``) and WHY:
           - ``elu(x) + 1``: the ``+1`` is an additive degree-0 constant; it makes
@@ -331,6 +366,11 @@ class LinearAttention(keras.layers.Layer):
             # relu(x)^2 -> degree p=2 (FLatten-style focus); still positively
             # homogeneous: (alpha relu(x))^2 = alpha^2 relu(x)^2.
             return ops.square(ops.relu(x))
+        if self.feature_map == 'leaky_relu':
+            # leaky_relu(alpha x) = alpha leaky_relu(x) for alpha > 0 -> degree p=1.
+            # SIGNED (produces negatives): non-zero gradient on the negative side
+            # (no dead-ReLU half) at the cost of the non-negative-kernel guarantee.
+            return ops.leaky_relu(x, negative_slope=self.negative_slope)
         # 'abs': |alpha x| = alpha |x| for alpha > 0 -> degree p=1, non-negative.
         return ops.abs(x)
 
@@ -383,7 +423,8 @@ class LinearAttention(keras.layers.Layer):
         #    kv    = Sum_j phi(K_j) (x) V_j  -> (B, H, d, d),  degree p+1
         #    k_sum = Sum_j phi(K_j)          -> (B, H, d),     degree p
         #    num   = phi(Q_i) . kv           -> (B, H, N, d),  degree 2p+1
-        #    z     = phi(Q_i) . k_sum        -> (B, H, N),     degree 2p, >= 0
+        #    z     = phi(Q_i) . k_sum        -> (B, H, N),     degree 2p
+        #            (>= 0 for the non-negative maps; SIGNED for 'leaky_relu')
         kv = ops.einsum('bhnd,bhne->bhde', phi_k, v)
         k_sum = ops.sum(phi_k, axis=2)
         num = ops.einsum('bhnd,bhde->bhne', phi_q, kv)
@@ -405,13 +446,24 @@ class LinearAttention(keras.layers.Layer):
         #    all-zero batch). Doing it in float32 is numerically identical to a pure-fp32
         #    run, so exact degree-1 on float32 is UNCHANGED. Do NOT drop the cast: a bare
         #    fp16 divide reintroduces the NaN (reviewer WARNING, review-iter-1.md:13).
+        #    SIGN-AWARE FLOOR: for the non-negative maps z >= 0 and this reduces EXACTLY
+        #    to maximum(denom, 1e-20). For SIGNED 'leaky_relu' a genuinely-negative denom
+        #    keeps its sign+magnitude (min(denom, -1e-20)) instead of being clamped to
+        #    +1e-20 -- clamping would flip the output sign and explode it. Only the
+        #    |denom| < 1e-20 near-dead corner is floored; homogeneity stays exact
+        #    wherever |denom| > 1e-20.
         # DECISION plan_2026-07-07_1cab8d7a/D-001
         z_mean = ops.mean(z, axis=-1, keepdims=True)          # (B, H, 1), degree 2p
         eps_eff = self.epsilon * z_mean                       # degree 2p -> keeps degree-1
         denom = z + eps_eff                                   # (B, H, N), degree 2p
         out_dtype = num.dtype                                 # compute dtype (fp16 under mixed policy)
         num_f32 = ops.cast(num, 'float32')
-        denom_f32 = ops.maximum(ops.cast(denom, 'float32'), 1e-20)  # NaN guard on all-dead batch only
+        denom_f32 = ops.cast(denom, 'float32')
+        denom_f32 = ops.where(                                # sign-aware magnitude floor
+            denom_f32 >= 0.0,
+            ops.maximum(denom_f32, 1e-20),                    # == old path for z >= 0
+            ops.minimum(denom_f32, -1e-20),                   # signed maps: preserve sign
+        )
         out = ops.cast(num_f32 / denom_f32[..., None], out_dtype)   # (B, H, N, d), degree 1
 
         # 6. Merge heads -> (B, N, inner_dim) -> bias-free output projection.
@@ -452,6 +504,7 @@ class LinearAttention(keras.layers.Layer):
             'dropout_rate': self.dropout_rate,
             'use_bias': self.use_bias,
             'feature_map': self.feature_map,
+            'negative_slope': self.negative_slope,
             'epsilon': self.epsilon,
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
             'bias_initializer': initializers.serialize(self.bias_initializer),

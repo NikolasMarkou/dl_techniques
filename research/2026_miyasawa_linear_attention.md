@@ -182,6 +182,22 @@ choose for expressiveness — it does not affect compliance.
 | `'relu'` (default) | `relu(x)` | 1 | `relu(alpha·x) = alpha·relu(x)` for `alpha>0`; the canonical positively-homogeneous piecewise-linear map. |
 | `'relu_squared'` | `relu(x)²` | 2 | FLatten/Focused-style focus: sharpens the (otherwise high-entropy) linear-attention distribution while staying homogeneous — `(alpha·relu(x))² = alpha²·relu(x)²`. |
 | `'abs'` | `|x|` | 1 | `|alpha·x| = alpha·|x|` for `alpha>0`; non-negative, keeps sign magnitude. |
+| `'leaky_relu'` | `x if x>0 else α·x` | 1 | `leaky(alpha·x) = alpha·leaky(x)` for `alpha>0` → homogeneous. **SIGNED** (the only supported map that is not `>= 0`): removes the dead-ReLU zero-gradient half (nonzero slope `α` on the negative side, `negative_slope` default `0.01`) at the cost of the non-negative-kernel guarantee. See the signed-map note below. |
+
+**The signed-map caveat (`'leaky_relu'`).** `relu`/`relu_squared`/`abs` are non-negative, so
+the denominator `z = phi(Q)·Σ phi(K)` is a non-negative normalizer and the per-token
+"attention weights" form a non-negative partition. `leaky_relu` is still degree-1
+homogeneous (so it *preserves* the Miyasawa property — measured worst-case rel-err ~`1e-6`
+over `α∈{1e-3..1e3}` and slopes `{0.01,0.1,0.3}`), but it produces **negative** features, so
+`z` can be small or negative and the weights are no longer a convex partition. The
+denominator is therefore floored by a **sign-aware magnitude floor**
+`where(z≥0, max(z,1e-20), min(z,-1e-20))` — identical to the plain `max(z,1e-20)` for the
+non-negative maps (so their exact behavior is unchanged), but for `leaky_relu` a genuinely
+negative `z` keeps its sign+magnitude instead of being clamped to `+1e-20` (which would flip
+the output sign and blow it up). Homogeneity stays exact wherever `|z| > 1e-20`. Use a small
+`negative_slope` and keep `epsilon` at default; it is the right choice when dead-gradient
+stalls appear (a projected feature stuck on the ReLU-negative side gets zero gradient with
+`relu`/`relu_squared`, but slope `α` with `leaky_relu`).
 
 **Forbidden (rejected in `__init__`, `_FORBIDDEN_FEATURE_MAPS`):**
 
