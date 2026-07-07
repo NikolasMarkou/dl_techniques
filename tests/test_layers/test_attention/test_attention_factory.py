@@ -38,6 +38,7 @@ MINIMAL_PARAMS = {
     'group_query': {'dim': 64, 'num_heads': 4, 'num_kv_heads': 2},
     'hopfield': {'num_heads': 4, 'key_dim': 16},
     'lighthouse': {'dim': 64, 'num_heads': 4},
+    'linear': {'dim': 64},
     'mobile_mqa': {'dim': 64},
     'multi_head': {'dim': 64},
     'multi_head_cross': {'dim': 64},
@@ -76,11 +77,11 @@ def _ctor_param_names(cls_or_fn):
 
 
 class TestRegistryIntegrity:
-    """The registry must describe exactly 29 types and stay in sync with classes."""
+    """The registry must describe exactly 30 types and stay in sync with classes."""
 
-    def test_registry_has_29_types(self):
-        assert len(ATTENTION_REGISTRY) == 29
-        assert len(list_attention_types()) == 29
+    def test_registry_has_expected_types(self):
+        assert len(ATTENTION_REGISTRY) == 30
+        assert len(list_attention_types()) == 30
 
     def test_literal_members_match_registry_keys(self):
         literal_members = set(typing.get_args(AttentionType))
@@ -224,7 +225,7 @@ class TestFactoryHelpers:
 
     def test_get_attention_info_complete(self):
         info = get_attention_info()
-        assert len(info) == 29
+        assert len(info) == 30
 
     def test_get_requirements_roundtrip(self):
         req = get_attention_requirements('anchor')
