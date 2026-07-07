@@ -22,6 +22,7 @@ The following layers are supported by the factory system with automated paramete
 | `group_query` | `GroupedQueryAttention` | GQA with shared K/V heads for efficiency. | Large language models where K/V cache size is a bottleneck. | `(batch, seq_len, dim)` |
 | `hopfield` | `HopfieldAttention` | Modern Hopfield Network for pattern retrieval. | Associative memory tasks; mimics standard attention with `update_steps_max=0`. | `(batch, seq_len, dim)` or `[query, key, value]` |
 | `lighthouse` | `LighthouseAttention` | Coarse-to-fine pyramid + top-K causal SDPA with scatter-back via segment_sum. | Long-context causal language modeling needing exact attention with sub-quadratic cost. | `(batch, seq_len, dim)` |
+| `linear` | `LinearAttention` | Bias-free, degree-1-homogeneous linear (O(N)) attention via a positively-homogeneous feature map + associativity (Miyasawa-compliant, non-causal). | Bias-free denoiser stacks needing O(N), homogeneity-preserving attention; long-sequence self-attention. | `(batch, seq_len, dim)` |
 | `mobile_mqa` | `MobileMQA` | Mobile-optimized Multi-Query Attention for vision. | Efficient attention in vision models for mobile and edge devices. | `(batch, H, W, dim)` |
 | `multi_head` | `MultiHeadAttention` | Standard Multi-Head Self-Attention (wrapper for cross-attention). | General-purpose self-attention in vision and sequence models. | `(batch, seq_len, dim)` |
 | `multi_head_cross` | `MultiHeadCrossAttention` | Unified layer for self- and cross-attention with adaptive softmax. | Core component for encoder-decoders or advanced custom attention. | `query: (batch, q_len, dim)`, `kv: (batch, kv_len, dim)` |
@@ -285,6 +286,21 @@ attn_full = create_attention_layer(
     full_attention=True
 )
 ```
+
+### `linear`
+**Required:** `dim`
+**Optional:** `num_heads` (default: 8), `head_dim` (default: None), `dropout_rate` (default: 0.0), `use_bias` (default: False), `feature_map` (default: 'relu'), `epsilon` (default: 1e-6)
+```python
+attn = create_attention_layer(
+    'linear',
+    dim=256,
+    num_heads=8,
+    feature_map='relu'
+)
+```
+**Notes:**
+- **Bias-free + degree-1 homogeneous (Miyasawa-compliant):** with `use_bias=False` (the default) every Q/K/V/output projection is bias-free and `f(alpha*x) = alpha*f(x)` for `alpha > 0`, so it drops into bias-free / additive-Gaussian denoiser stacks without breaking the `residual = sigma^2 * score` identity. The `feature_map` must stay positively homogeneous (`relu`, `relu_squared`, `abs`); `elu_plus_one`/`exp`/`softmax` are rejected because they break degree-1.
+- **Non-causal (v1):** `linear.call` has **no** `attention_mask` parameter (it accepts an ignored `mask=` kwarg only for API uniformity). The `N x N` attention matrix is never materialized (`O(N)` associativity path).
 
 ### `mobile_mqa`
 **Required:** `dim`  

@@ -39,6 +39,7 @@ from .gated_attention import GatedAttention
 from .group_query_attention import GroupedQueryAttention
 from .hopfield_attention import HopfieldAttention
 from .lighthouse_attention import LighthouseAttention
+from .linear_attention import LinearAttention
 from .mobile_mqa import MobileMQA
 from .multi_head_attention import MultiHeadAttention
 from .multi_head_cross_attention import MultiHeadCrossAttention
@@ -73,6 +74,7 @@ AttentionType = Literal[
     'group_query',
     'hopfield',
     'lighthouse',
+    'linear',
     'mobile_mqa',
     'multi_head',
     'multi_head_cross',
@@ -966,6 +968,46 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         ),
         'complexity': 'O(n) linear attention via FAVOR+ random features (vs O(n²))',
         'paper': 'Rethinking Attention with Performers (FAVOR+)'
+    },
+
+    'linear': {
+        'class': LinearAttention,
+        'description': (
+            'Bias-free, degree-1 positively-homogeneous linear (O(N)) self-attention '
+            'for Miyasawa-compliant denoising. Replaces the softmax kernel with a '
+            'positively-homogeneous, non-negative feature map phi (relu / relu_squared '
+            '/ abs) and a mandatory normalizer, computed via matmul associativity so '
+            'the N x N attention matrix is never materialized. Both Miyasawa properties '
+            'hold by construction: every Q/K/V/output projection is bias-free '
+            '(use_bias=False by default) and f(alpha*x) = alpha*f(x) for alpha > 0. '
+            'Unlike Performer, phi is NOT Gaussian and the denominator floor is an '
+            'input-scaled epsilon (epsilon * mean_over_tokens(z)), preserving exact '
+            'degree-1 homogeneity. Non-causal (v1). CALL-SIG CAVEAT: linear.call has '
+            'NO attention_mask parameter (accepts an ignored `mask=` kwarg for API '
+            'uniformity); v1 is unmasked and non-causal.'
+        ),
+        'required_params': ['dim'],
+        'optional_params': {
+            'num_heads': 8,
+            'head_dim': None,
+            'dropout_rate': 0.0,
+            'use_bias': False,
+            'feature_map': 'relu',
+            'epsilon': 1e-6,
+            'kernel_initializer': 'glorot_uniform',
+            'bias_initializer': 'zeros',
+            'kernel_regularizer': None,
+            'bias_regularizer': None
+        },
+        'use_case': (
+            'Bias-free / Miyasawa-compliant denoiser stacks (bfunet family) needing a '
+            'linear-complexity, degree-1-homogeneous attention block that preserves the '
+            'additive-Gaussian residual = sigma^2 * score identity. Also general '
+            'long-sequence self-attention where O(N) cost and homogeneity are desired '
+            'over a softmax approximation.'
+        ),
+        'complexity': 'O(N * d^2) = O(N) in sequence length (associativity path)',
+        'paper': 'Transformers are RNNs (Katharopoulos et al., 2020) + Miyasawa/bias-free denoising'
     },
 
     'ring': {

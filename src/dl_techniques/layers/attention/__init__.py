@@ -47,6 +47,7 @@ from .perceiver_attention import PerceiverAttention
 
 # Factory-registered layers (also available for direct instantiation)
 from .gated_attention import GatedAttention
+from .linear_attention import LinearAttention
 from .performer_attention import PerformerAttention
 from .ring_attention import RingAttention
 from .rpc_attention import RPCAttention
@@ -99,6 +100,7 @@ __all__ = [
 
     # Direct Instantiation Only
     "GatedAttention",
+    "LinearAttention",
     "PerformerAttention",
     "RingAttention",
     "RPCAttention",
