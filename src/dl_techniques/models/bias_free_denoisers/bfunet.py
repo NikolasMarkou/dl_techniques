@@ -220,7 +220,7 @@ def create_bfunet_denoiser(
                     - If deep_supervision=True: List of output tensors [final_output, intermediate_outputs...]
 
     Raises:
-        ValueError: If depth is less than 3, initial_filters is non-positive,
+        ValueError: If depth is less than 2, initial_filters is non-positive,
                    filter_multiplier is less than 1, or blocks_per_level is non-positive.
         TypeError: If input_shape is not a tuple of 3 integers.
 
@@ -247,8 +247,8 @@ def create_bfunet_denoiser(
     if not isinstance(input_shape, tuple) or len(input_shape) != 3:
         raise TypeError("input_shape must be a tuple of 3 integers (height, width, channels)")
 
-    if depth < 3:
-        raise ValueError(f"depth must be at least 3, got {depth}")
+    if depth < 2:
+        raise ValueError(f"depth must be at least 2, got {depth}")
 
     if initial_filters <= 0:
         raise ValueError(f"initial_filters must be positive, got {initial_filters}")

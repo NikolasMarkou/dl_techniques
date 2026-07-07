@@ -631,7 +631,7 @@ def create_convunext_denoiser(
                       output (LAST), i.e. [final_output, ...(supervision if DS)..., bottleneck].
 
     Raises:
-        ValueError: If depth is less than 3, initial_filters is non-positive,
+        ValueError: If depth is less than 2, initial_filters is non-positive,
                    filter_multiplier is less than 1, blocks_per_level is non-positive,
                    or convnext_version is not 'v1' or 'v2'.
         TypeError: If input_shape is not a tuple of 3 integers.
@@ -660,8 +660,8 @@ def create_convunext_denoiser(
     if not isinstance(input_shape, tuple) or len(input_shape) != 3:
         raise TypeError("input_shape must be a tuple of 3 integers (height, width, channels)")
 
-    if depth < 3:
-        raise ValueError(f"depth must be at least 3, got {depth}")
+    if depth < 2:
+        raise ValueError(f"depth must be at least 2, got {depth}")
 
     if initial_filters <= 0:
         raise ValueError(f"initial_filters must be positive, got {initial_filters}")
