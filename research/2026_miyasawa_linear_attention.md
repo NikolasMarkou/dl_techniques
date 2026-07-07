@@ -391,6 +391,26 @@ does. To use it in the bfunet-family bias-free denoisers:
 `feature_map ∈ {relu, relu_squared, abs}`; input-scaled epsilon; bias-free by default;
 full `get_config` round-trip + `.keras` save/load; factory-registered as `'linear'`.
 
+**Known limitations (honest caveats).** The degree-1 claim is scoped, not unconditional:
+
+- **`relu_squared` at extreme scale.** Degree-1 is *exact* for `relu` / `abs` (degree
+  `p=1`) across a wide input-scale band, but `relu_squared` (`p=2`, degree-4 denominator)
+  degrades at extreme *small* scales (`alpha ≲ 1e-6`): the doubled dynamic range
+  (`num ~ alpha^5` vs `denom ~ alpha^4`) underflows in fp32 and the `1e-20` floor
+  activates, so the property no longer holds bit-exactly there (reviewer probe: rel-err
+  ~4e-4 at `alpha ∈ {1e-3, 1e3}`, breaking down at `alpha = 1e-6`). **Use `relu` for the
+  strongest guarantee**; keep `relu_squared` to realistic scales.
+- **`mask=` is ignored.** v1 is non-causal and unmasked; `call()` does `del mask`. Padded
+  tokens still contribute to `kv` and the normalizer, so masked/padded sequences are
+  silently wrong — do not swap `'linear'` for a mask-honoring attention type on padded data.
+- **Homogeneity is a `training=False` / `dropout_rate=0` property.** Dropout is applied
+  after `output_proj`; with `dropout_rate>0` at `training=True` the output is stochastic and
+  not per-sample homogeneous. The default `dropout_rate=0.0` is the Miyasawa mode.
+- **Mixed precision.** The dead-token guard now runs the denominator divide + `1e-20` floor
+  in float32 and casts back to the compute dtype (`linear_attention.py`, D-001), so an
+  all-zero batch stays finite under a `mixed_float16` policy (the fp16 floor would otherwise
+  round to 0.0 → `0/0` NaN).
+
 **Explicitly out of v1 (future work), to hold the complexity budget:**
 
 - **Causal cumsum variant** — a per-position prefix-state (`cumsum`) path for

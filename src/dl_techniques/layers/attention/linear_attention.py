@@ -96,6 +96,23 @@ class LinearAttention(keras.layers.Layer):
     (``f(alpha x) = alpha f(x)`` for ``alpha > 0``). See the module docstring for
     the full derivation (F-W2) and the eps resolution (F-W3, decisions.md D-001).
 
+    **Homogeneity scope / limitations (honest caveats):**
+
+    - **Feature-map / scale band.** Degree-1 homogeneity is *exact* for ``'relu'``
+      / ``'abs'`` (degree ``p=1``) across a wide input-scale band. ``'relu_squared'``
+      (``p=2``, degree-4 denominator) can *degrade* at extreme small scales
+      (``alpha <= ~1e-6``): the doubled dynamic range underflows and the ``1e-20``
+      floor activates, so the property no longer holds bit-exactly there. Prefer
+      ``'relu'`` for the strongest guarantee; keep ``'relu_squared'`` to realistic
+      scales.
+    - **Masking.** ``mask=`` is currently **IGNORED** (v1 is non-causal and
+      unmasked). Padded tokens still contribute to the ``kv`` state and the
+      normalizer; do not rely on this layer for correct masked/padded results.
+    - **Training mode.** Homogeneity is a ``training=False`` / ``dropout_rate=0``
+      property. With ``dropout_rate>0`` at ``training=True`` the output is
+      stochastic (Dropout is applied after ``output_proj``) and thus not
+      per-sample homogeneous; the default ``dropout_rate=0.0`` is the Miyasawa mode.
+
     **Architecture Overview:**
 
     .. code-block:: text
@@ -382,12 +399,20 @@ class LinearAttention(keras.layers.Layer):
         #    batch (all phi zero -> z_mean == 0); it is a negligible degree-0 floor
         #    that the homogeneity probe tolerance absorbs -- the single residual
         #    non-homogeneous corner.
+        #    fp16-SAFETY: the divide + 1e-20 floor run in float32, then cast back to
+        #    the compute dtype. Under a mixed_float16 policy the compute dtype is fp16,
+        #    where 1e-20 rounds to 0.0 -> the dead-token guard would fail (0/0 NaN on an
+        #    all-zero batch). Doing it in float32 is numerically identical to a pure-fp32
+        #    run, so exact degree-1 on float32 is UNCHANGED. Do NOT drop the cast: a bare
+        #    fp16 divide reintroduces the NaN (reviewer WARNING, review-iter-1.md:13).
         # DECISION plan_2026-07-07_1cab8d7a/D-001
         z_mean = ops.mean(z, axis=-1, keepdims=True)          # (B, H, 1), degree 2p
         eps_eff = self.epsilon * z_mean                       # degree 2p -> keeps degree-1
         denom = z + eps_eff                                   # (B, H, N), degree 2p
-        denom = ops.maximum(denom, 1e-20)                     # NaN guard on all-dead batch only
-        out = num / denom[..., None]                          # (B, H, N, d), degree 1
+        out_dtype = num.dtype                                 # compute dtype (fp16 under mixed policy)
+        num_f32 = ops.cast(num, 'float32')
+        denom_f32 = ops.maximum(ops.cast(denom, 'float32'), 1e-20)  # NaN guard on all-dead batch only
+        out = ops.cast(num_f32 / denom_f32[..., None], out_dtype)   # (B, H, N, d), degree 1
 
         # 6. Merge heads -> (B, N, inner_dim) -> bias-free output projection.
         out = ops.reshape(

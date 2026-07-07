@@ -240,6 +240,28 @@ class TestHomogeneity:
             f"broke degree-1. Do NOT loosen the tolerance — investigate."
         )
 
+    @pytest.mark.parametrize("alpha", [0.5, 2.0])
+    def test_custom_head_dim_forward_and_homogeneity(self, alpha):
+        """Custom head_dim != dim//num_heads exercises the inner_dim reshape/transpose
+        + output_proj(inner_dim -> dim) path (untested by the square case). Assert both
+        the forward shape and exact degree-1 homogeneity on that path."""
+        keras.utils.set_random_seed(123)
+        dim, num_heads, head_dim = 32, 4, 16  # inner = 64 != dim (32)
+        layer = LinearAttention(dim=dim, num_heads=num_heads, head_dim=head_dim)
+        assert layer.inner_dim == 64
+
+        x = np.random.uniform(-0.5, 0.5, size=(2, 8, dim)).astype('float32')
+        f = np.array(layer(x, training=False))
+        assert f.shape == (2, 8, dim)  # output_proj maps inner_dim (64) back to dim (32)
+
+        f_scaled = np.array(layer(alpha * x, training=False))
+        target = alpha * f
+        rel = np.max(np.abs(f_scaled - target)) / max(np.max(np.abs(target)), 1e-8)
+        assert rel < 1e-4, (
+            f"degree-1 homogeneity violated on the custom head_dim path "
+            f"(inner_dim=64): rel-err={rel:.3e} >= 1e-4 at alpha={alpha}."
+        )
+
 
 # ==============================================================================
 # 6. Associativity correctness (O(N) associative == naive O(N^2) reference)
@@ -400,6 +422,38 @@ class TestEdgeCases:
         grads = tape.gradient(loss, layer.query_proj.trainable_variables)
         assert len(grads) > 0
         assert all(g is not None for g in grads)
+
+
+# ==============================================================================
+# 9. Mixed precision (fp16) dead-token finiteness
+# ==============================================================================
+
+class TestMixedPrecision:
+    """Under a ``mixed_float16`` policy the compute dtype is fp16, where the
+    ``1e-20`` dead-token floor rounds to 0.0 -> a fully-dead (all-zero) batch would
+    give ``0/0 = NaN``. The layer performs the denominator floor + divide in float32
+    and casts back (D-001), so the output must stay finite. This test FAILS before
+    that fix and PASSES after.
+
+    CRITICAL: the global mixed_precision policy is process-wide; it MUST be restored
+    in the ``finally`` even if the assertion fails, or every subsequent test in the
+    session would silently run under fp16.
+    """
+
+    def test_fp16_all_zero_input_is_finite(self):
+        prev_policy = keras.mixed_precision.global_policy()
+        try:
+            keras.mixed_precision.set_global_policy('mixed_float16')
+            layer = LinearAttention(dim=16, num_heads=2, feature_map='relu')
+            x = np.zeros((2, 6, 16), dtype='float16')
+            out = np.array(layer(x, training=False))
+            assert not np.any(np.isnan(out)), (
+                "mixed_float16 all-zero input produced NaN: the 1e-20 floor rounded "
+                "to 0.0 in fp16 -> 0/0. The denominator divide must run in float32."
+            )
+            assert np.all(np.isfinite(out))
+        finally:
+            keras.mixed_precision.set_global_policy(prev_policy)
 
 
 if __name__ == "__main__":
