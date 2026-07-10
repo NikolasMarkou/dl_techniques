@@ -1,21 +1,28 @@
 """Generate qualitative figures for the bfunet paper.
 
-Produces ``figures/qualitative_examples.png``: a 3-row x 3-col grid
-(rows = benchmark images, columns = clean / noisy / denoised) with per-panel
-PSNR/SSIM computed on the FULL image. Full-image inference (reflect-pad to a
-multiple of 16, single forward pass, crop back) is used for every panel; the
-displayed detail crop is taken from the already-denoised full-size output, so
-the figure faithfully reflects the paper's full-image protocol. An isolated
-small crop is NEVER denoised on its own (receptive-field / padding artifacts
-would misrepresent the protocol).
+Produces ``figures/qualitative_examples.png``: a grid with one benchmark image
+per row and, for a range of noise levels, a (noisy, denoised) column pair --
+preceded by a single clean reference column. Per-panel PSNR/SSIM are computed
+on the FULL image. Full-image inference (reflect-pad to a multiple of 16, single
+forward pass, crop back) is used for every panel; the displayed detail crop is
+taken from the already-denoised full-size output, so the figure faithfully
+reflects the paper's full-image protocol. An isolated small crop is NEVER
+denoised on its own (receptive-field / padding artifacts would misrepresent the
+protocol).
+
+The default noise levels span moderate to extreme -- including levels past the
+training ceiling ($\\sigma_{255}\\le127$) -- so the figure visually corroborates
+the out-of-range generalization of Figure~2: heavy static in, clean image out,
+even where the model was never trained.
 
 Reuses the exact inference/noise/metric helpers behind the paper's PSNR table
 from ``train.bfunet.eval_psnr_vs_noise``.
 
-Usage (GPU1, headless)::
+Usage (GPU0, headless)::
 
-    CUDA_VISIBLE_DEVICES=1 MPLBACKEND=Agg \\
-        .venv/bin/python research/papers/bfunet/generate_figures.py --sigma255 25
+    CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg \\
+        .venv/bin/python research/papers/bfunet/generate_figures.py \\
+        --sigmas255 50 100 200 --gpu 0
 """
 from __future__ import annotations
 
@@ -129,62 +136,77 @@ def _crop(x: np.ndarray, y0: int, x0: int, cs: int) -> np.ndarray:
     return x[y0:y0 + cs, x0:x0 + cs, :]
 
 
-def fig_qualitative(model, sigma255: float):
-    sigma_norm = sigma255 / 255.0
-    rng = np.random.RandomState(0)  # fixed noise realization -> reproducible figure
+# Training ceiling (sigma_norm <= 0.5). Noise levels above this are extrapolation.
+TRAIN_SIGMA255_MAX = 127.0
 
+
+def fig_qualitative(model, sigmas255):
+    """One row per image; a (noisy, denoised) column pair per noise level, after a
+    single clean reference column. Smaller panels + a wider noise sweep than the
+    original single-sigma figure."""
+    sigmas255 = list(sigmas255)
     n_rows = len(EXAMPLES)
-    fig, axes = plt.subplots(n_rows, 3, figsize=(3 * 2.6, n_rows * 2.6))
+    n_cols = 1 + 2 * len(sigmas255)  # clean + (noisy, denoised) per sigma
+
+    # Smaller panels (2.0" vs the old 2.6") -> the whole grid shrinks under
+    # \includegraphics[width=\linewidth]; the extra columns shrink it further.
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 2.0, n_rows * 2.0))
     axes = np.atleast_2d(axes)
-    col_titles = ["Clean", f"Noisy ($\\sigma$={sigma255:.0f})", "Denoised"]
 
     for i, ex in enumerate(EXAMPLES):
         clean = _load_full_image(ex["path"], CHANNELS)
         if clean is None:
             raise FileNotFoundError(f"could not load image: {ex['path']}")
-
-        # Full-image protocol: noise -> full-image denoise -> full-image metrics.
-        noisy = add_awgn(clean, sigma_norm, clip=True, rng=rng)
-        denoised = _denoise_full(model, noisy, size_multiple=SIZE_MULTIPLE)
-
-        psnr_in = float(psnr_per_image(noisy[None], clean[None])[0])
-        psnr_out = float(psnr_per_image(denoised[None], clean[None])[0])
-        ssim_out = _ssim_full(denoised, clean)
-
-        # Display crops (same window on all three), taken from the already-denoised
-        # FULL output -- never from an isolated re-denoised crop.
         y0, x0 = ex["y0"], ex["x0"]
-        panels = [
-            _disp(_crop(clean, y0, x0, CROP_SIZE)),
-            _disp(_crop(noisy, y0, x0, CROP_SIZE)),
-            _disp(_crop(denoised, y0, x0, CROP_SIZE)),
-        ]
 
-        for j, panel in enumerate(panels):
-            ax = axes[i, j]
-            ax.imshow(panel, vmin=0.0, vmax=1.0)
-            ax.set_xticks([])
-            ax.set_yticks([])  # NOT axis("off"): keep xlabel/ylabel visible.
+        # Column 0: clean reference.
+        ax = axes[i, 0]
+        ax.imshow(_disp(_crop(clean, y0, x0, CROP_SIZE)), vmin=0.0, vmax=1.0)
+        ax.set_xticks([]); ax.set_yticks([])
+        if i == 0:
+            ax.set_title("Clean")
+        ax.set_ylabel(ex["label"])
+
+        for k, sigma255 in enumerate(sigmas255):
+            sigma_norm = sigma255 / 255.0
+            rng = np.random.RandomState(0)  # fixed realization -> reproducible figure
+
+            # Full-image protocol: noise -> full-image denoise -> full-image metrics.
+            noisy = add_awgn(clean, sigma_norm, clip=True, rng=rng)
+            denoised = _denoise_full(model, noisy, size_multiple=SIZE_MULTIPLE)
+            psnr_in = float(psnr_per_image(noisy[None], clean[None])[0])
+            psnr_out = float(psnr_per_image(denoised[None], clean[None])[0])
+            ssim_out = _ssim_full(denoised, clean)
+
+            oor = sigma255 > TRAIN_SIGMA255_MAX  # out of training range
+            tag = r"$\,\dagger$" if oor else ""
+
+            jn, jd = 1 + 2 * k, 2 + 2 * k  # noisy col, denoised col
+            for j, panel in ((jn, noisy), (jd, denoised)):
+                ax = axes[i, j]
+                ax.imshow(_disp(_crop(panel, y0, x0, CROP_SIZE)), vmin=0.0, vmax=1.0)
+                ax.set_xticks([]); ax.set_yticks([])
             if i == 0:
-                ax.set_title(col_titles[j])
-        axes[i, 0].set_ylabel(ex["label"])
-        axes[i, 1].set_xlabel(f"input PSNR {psnr_in:.2f} dB")
-        axes[i, 2].set_xlabel(f"PSNR {psnr_out:.2f} dB / SSIM {ssim_out:.3f}")
+                axes[i, jn].set_title(f"Noisy $\\sigma$={sigma255:.0f}{tag}")
+                axes[i, jd].set_title("Denoised")
+            axes[i, jn].set_xlabel(f"{psnr_in:.1f} dB")
+            axes[i, jd].set_xlabel(f"{psnr_out:.1f} dB / {ssim_out:.3f}")
 
-        print(
-            f"[{ex['label']}] input PSNR {psnr_in:.2f} dB -> "
-            f"denoised PSNR {psnr_out:.2f} dB / SSIM {ssim_out:.3f}"
-        )
+            print(
+                f"[{ex['label']}] sigma255={sigma255:.0f}{' (OOR)' if oor else ''}: "
+                f"input {psnr_in:.2f} dB -> denoised {psnr_out:.2f} dB / SSIM {ssim_out:.3f}"
+            )
 
     save(fig, "qualitative_examples.png")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Generate bfunet qualitative figure")
-    parser.add_argument("--sigma255", type=float, default=25.0,
-                        help="AWGN std on the [0,255] scale (default 25).")
-    parser.add_argument("--gpu", type=int, default=1,
-                        help="GPU id for setup_gpu (default 1; GPU0 is reserved).")
+    parser.add_argument("--sigmas255", type=float, nargs="+", default=[50.0, 100.0, 200.0],
+                        help="AWGN stds on the [0,255] scale, one (noisy,denoised) pair each "
+                             "(default 50 100 200; 200 is beyond the sigma255<=127 training ceiling).")
+    parser.add_argument("--gpu", type=int, default=0,
+                        help="GPU id for setup_gpu (default 0).")
     parser.add_argument("--checkpoint", type=str, default=CHECKPOINT,
                         help="Path to the saved .keras denoiser.")
     args = parser.parse_args()
@@ -192,7 +214,7 @@ def main():
     setup_gpu(gpu_id=args.gpu)
 
     model = _to_flexible_input(load_denoiser(args.checkpoint))
-    fig_qualitative(model, args.sigma255)
+    fig_qualitative(model, args.sigmas255)
 
 
 if __name__ == "__main__":

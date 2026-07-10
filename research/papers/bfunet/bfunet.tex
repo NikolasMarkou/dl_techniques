@@ -224,7 +224,7 @@ We train on $256{\times}256$ patches drawn from COCO (\texttt{train2017}) and DI
 The model operates entirely in $[-0.5,+0.5]$, so its noise level $\sigma_{\mathrm{norm}} \in [0, 0.5]$. The literature reports noise on the $[0,255]$ pixel scale, and the two are related by $\sigpx = \sigma_{\mathrm{norm}} \cdot 255$. The curriculum's $\sigma_{\max}: 0.025 \to 0.5$ therefore spans $\sigpx \approx 6.4 \to 127.5$, which covers and exceeds the classic $15/25/50$ benchmark regimes as a single blind model. All PSNR values are computed with $\mathrm{max\_val}=1.0$ (matched to the peak-to-peak range). Because PSNR is scale-invariant under a matched range, these dB numbers are directly comparable to published $\mathrm{max\_val}=255$ results, with no further conversion.
 
 \paragraph{Optimization.}
-Loss is plain MSE (the Miyasawa-optimal objective, Section~\ref{sec:theory}). We use AdamW (learning rate $10^{-3}$, cosine decay, $10$ warmup epochs, decoupled weight decay $4\times10^{-3}$), gradient-norm clipping at $1.0$, batch size $4$, $100$ epochs, full \texttt{fp32} (mixed precision was measured slower on this convolution-heavy U-Net because the bilinear-upsample gradient forces XLA off).
+Loss is plain MSE (the Miyasawa-optimal objective, Section~\ref{sec:theory}). We use AdamW (learning rate $10^{-3}$, cosine decay, $10$ warmup epochs, decoupled weight decay $4\times10^{-3}$), gradient-norm clipping at $1.0$, batch size $4$, $100$ epochs.
 
 \paragraph{Evaluation.}
 We report two evaluations of the single trained checkpoint. (i) A blind PSNR-vs-noise sweep on DIV2K-validation ($100$ patches at $256$px). (ii) The standard leaderboard comparison on all four color sets (CBSD68, Kodak24, McMaster, Urban100) at $\sigma \in \{15,25,50\}$ using the full-image protocol (whole images, reflect-padded to a multiple of $16$), the same protocol the published numbers use. We additionally report a post-hoc per-pixel split-conformal coverage study. The two evaluations draw different samples (the sweep uses $100$ DIV2K patches; the coverage study, $500$ held-out COCO crops), so their PSNR columns are independent measurements, not cross-checks of one another.
@@ -332,12 +332,12 @@ Urban100 & 34.20 & 0.9437 & 31.92 & 0.9182 & 28.81 & 0.8661 \\
 
 \subsection{Qualitative examples}
 \label{sec:qualitative}
-Figure~\ref{fig:qualitative} shows the model on three held-out benchmark images at $\sigma{=}25$ --- a Kodak24 scene, an Urban100 facade (fine repetitive structure, a known denoiser stress case), and a McMaster crop (saturated colour). Full-image inference is run under the paper's protocol; the panels are a detail crop of the result. Noise is removed cleanly while edges, repeated structure, and colour transitions are preserved; per-image PSNR/SSIM (computed on the full image) are annotated.
+Figure~\ref{fig:qualitative} shows the model on three held-out benchmark images --- a Kodak24 scene, an Urban100 facade (fine repetitive structure, a known denoiser stress case), and a McMaster crop (saturated colour) --- across a wide sweep of noise: $\sigpx\in\{50,100,200\}$, from moderate corruption to near-total static. The highest level, $\sigpx{=}200$, is $1.6\times$ the training ceiling ($\sigpx{\le}127$); the same frozen blind model is applied at every level with no noise-level input. Full-image inference is run under the paper's protocol; the panels are a detail crop of the result. Even where the input is almost pure noise --- and even outside the trained range --- edges, repeated structure, and colour transitions come back cleanly, the visual counterpart of the out-of-range curve in Figure~\ref{fig:psnrsweep}. Per-image PSNR/SSIM (computed on the full image) are annotated.
 
 \begin{figure}[H]
 \centering
-\includegraphics[width=0.92\linewidth]{figures/qualitative_examples.png}
-\caption{Clean / noisy ($\sigpx{=}25$) / denoised on three held-out benchmark images (rows: Kodak24, Urban100, McMaster). Per-image PSNR and SSIM (full image, $\mathrm{max\_val}{=}1$) are annotated under each panel; the blind model receives no noise-level input.}
+\includegraphics[width=\linewidth]{figures/qualitative_examples.png}
+\caption{A clean reference followed by (noisy, denoised) pairs at $\sigpx\in\{50,100,200\}$ on three held-out benchmark images (rows: Kodak24, Urban100, McMaster). One frozen blind model, no noise-level input, at every level. $\dagger$ marks $\sigpx{=}200$, beyond the $\sigpx{\le}127$ training range: from $7.5$\,dB of static the model still returns a $21$--$24$\,dB image. Per-image PSNR and SSIM (full image, $\mathrm{max\_val}{=}1$) are annotated under each panel.}
 \label{fig:qualitative}
 \end{figure}
 
@@ -378,7 +378,7 @@ The point of Table~\ref{tab:sota} is not that \model{} wins outright, because it
 \label{fig:params}
 \end{figure}
 
-The parameter count is only half the efficiency story; Table~\ref{tab:efficiency} adds compute and memory, measured on one RTX~4090. At $256^2$ the model is $\sim104$\,GFLOPs and peaks at $\sim1.1$\,GB of GPU memory; cost scales linearly with pixel count (a fully-convolutional model), so a $512^2$ image is $\sim4\times$ the FLOPs and $\sim3.7\times$ the peak memory. A single-image forward pass takes $\sim190$\,ms in eager \texttt{fp32} on this GPU (batched throughput is substantially higher). The model runs \texttt{fp32} with XLA by choice: we found mixed precision \emph{slower} on this convolution-heavy U-Net, because the decoder's bilinear-upsample gradient forces XLA off and the lost fusion outweighs the fp16 tensor-core gain --- so the ``compact'' claim is about parameters, FLOPs, and memory, and does not lean on a low-precision trick.
+The parameter count is only half the efficiency story; Table~\ref{tab:efficiency} adds compute and memory, measured on one RTX~4090. At $256^2$ the model is $\sim104$\,GFLOPs and peaks at $\sim1.1$\,GB of GPU memory; cost scales linearly with pixel count (a fully-convolutional model), so a $512^2$ image is $\sim4\times$ the FLOPs and $\sim3.7\times$ the peak memory. A single-image forward pass takes $\sim190$\,ms on this GPU (batched throughput is substantially higher). The ``compact'' claim is about parameters, FLOPs, and memory, and does not lean on any low-precision trick.
 
 \begin{table}[H]
 \centering
