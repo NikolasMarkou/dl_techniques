@@ -220,13 +220,12 @@ The model operates entirely in $[-0.5,+0.5]$, so its noise level $\sigma_{\mathr
 \paragraph{Optimization.}
 Loss is plain MSE (the Miyasawa-optimal objective, Section~\ref{sec:theory}). We use AdamW (learning rate $10^{-3}$, cosine decay, $10$ warmup epochs, decoupled weight decay $4\times10^{-3}$), gradient-norm clipping at $1.0$, batch size $4$, $100$ epochs.
 
-\paragraph{Evaluation.}
-We report two evaluations of the single trained checkpoint. (i) A blind PSNR-vs-noise sweep on DIV2K-validation ($100$ patches at $256$px). (ii) The standard leaderboard comparison on all four color sets (CBSD68, Kodak24, McMaster, Urban100) at $\sigma \in \{15,25,50\}$ using the full-image protocol (whole images, reflect-padded to a multiple of $16$), the same protocol the published numbers use. We additionally report a post-hoc per-pixel split-conformal coverage study. The two evaluations draw different samples (the sweep uses $100$ DIV2K patches; the coverage study, $500$ held-out COCO crops), so their PSNR columns are independent measurements, not cross-checks of one another.
-
 % ============================================================================
 \clearpage
 \section{Results}
 \label{sec:results}
+
+We report two evaluations of the single trained checkpoint. (i) A blind PSNR-vs-noise sweep on DIV2K-validation ($100$ patches at $256$px). (ii) The standard leaderboard comparison on all four color sets (CBSD68, Kodak24, McMaster, Urban100) at $\sigma \in \{15,25,50\}$ using the full-image protocol (whole images, reflect-padded to a multiple of $16$), the same protocol the published numbers use. We additionally report a post-hoc per-pixel split-conformal coverage study. The two evaluations draw different samples (the sweep uses $100$ DIV2K patches; the coverage study, $500$ held-out COCO crops), so their PSNR columns are independent measurements, not cross-checks of one another.
 
 \subsection{Blind denoising across noise levels}
 Figure~\ref{fig:psnrsweep} shows the blind PSNR-vs-noise sweep on DIV2K-validation, where the bias-free construction pays off. A single model, given no noise-level input, denoises across the whole curriculum range ($40.7$\,dB at $\sigpx{=}5$ to $26.2$\,dB at the $\sigpx{\approx}127$ training maximum), and it keeps working \emph{beyond} that maximum. The curriculum only ever showed the network $\sigma_{\mathrm{norm}}\!\le\!0.5$; evaluated at $\sigma_{\mathrm{norm}}{=}0.59$ and $0.78$ ($\sigpx{=}150$ and $200$, up to $1.6\times$ the largest training noise) it still returns $25.5$ and $22.3$\,dB, degrading smoothly with no cliff. This is the extrapolation predicted by the degree-1 homogeneity of Section~\ref{sec:theory}, which \citet{mohan2020biasfree} argue a \emph{biased} network cannot manage: because the Jacobian is scale-invariant, the input-adaptive filter the network applies does not know it has left its training range. (Gains are quoted against the noisy input \emph{as fed to the model}, clipped to the $[-0.5,+0.5]$ domain, which at high $\sigma$ has a higher PSNR than the unclipped Gaussian.)
