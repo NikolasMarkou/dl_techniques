@@ -54,7 +54,7 @@
 
 % ============================================================================
 \begin{abstract}
-We describe and evaluate \model{}, a compact bias-free \convnext{} U-Net for blind additive-white-Gaussian-noise (AWGN) image denoising. The network is an \emph{integration} of four ingredients, none individually novel: a frozen depthwise \textbf{Gabor stem} (an oriented band-pass front end that contributes zero trainable parameters), a \textbf{Laplacian-pyramid} encoder that routes the full-resolution high-frequency residual into the skip connection (with three extra \convnext{} blocks per skip band), a \textbf{\convnext{}-V1 U-Net} body, and \textbf{end-to-end bias-freedom} --- every convolution has no additive bias, the head is linear, activations are LeakyReLU, and normalization is a variance-only batch norm --- so that the whole $3.39$M-parameter network is exactly degree-1 homogeneous, $D(\alpha y)=\alpha D(y)$, at inference. Homogeneity is the structural property that licenses the Miyasawa/Tweedie reading of the denoiser residual as a (scaled) score, and, following Mohan et al., underwrites blind generalization across noise levels from a single model. We train one blind model with a linear noise-$\sigma$ curriculum spanning $\sigpx\!\approx\!6$--$127$ and evaluate it, unchanged, against the published color-denoising leaderboard on all four standard sets (CBSD68, Kodak24, McMaster, Urban100) at $\sigma\!\in\!\{15,25,50\}$ under the full-image protocol. The single blind model \textbf{beats DnCNN and FFDNet on every set at every noise level} (average $+0.7$\,dB over DnCNN; FFDNet is non-blind yet still trails), and sits a small, consistent margin behind the heavyweight CNN/transformer state of the art --- $\sim\!0.4$\,dB on CBSD68/Kodak24, $\sim\!0.7$\,dB on McMaster, $\sim\!1.0$\,dB on Urban100 --- at roughly one tenth of their parameters. We are deliberately honest about what bias-freedom does \emph{not} buy: the homogeneity is inference-only and checkpoint-specific, and the learned residual field is measurably non-conservative, so no global prior/energy exists and plug-and-play/RED convergence or calibrated-uncertainty guarantees do not transfer. We report PSNR only, on a single checkpoint, without ablations; those are stated as future work rather than glossed over.
+We describe and evaluate \model{}, a compact bias-free \convnext{} U-Net for blind additive-white-Gaussian-noise (AWGN) image denoising. The network is an \emph{integration} of four ingredients, none individually novel: a frozen depthwise \textbf{Gabor stem} (an oriented band-pass front end that contributes zero trainable parameters), a \textbf{Laplacian-pyramid} encoder that routes the full-resolution high-frequency residual into the skip connection (with three extra \convnext{} blocks per skip band), a \textbf{\convnext{}-V1 U-Net} body, and \textbf{end-to-end bias-freedom} --- every convolution has no additive bias, the head is linear, activations are LeakyReLU, and normalization is a variance-only batch norm --- so that the whole $3.39$M-parameter network is exactly degree-1 homogeneous, $D(\alpha y)=\alpha D(y)$, at inference. Homogeneity is the structural property that licenses the Miyasawa/Tweedie reading of the denoiser residual as a (scaled) score, and, following Mohan et al., underwrites blind generalization across noise levels from a single model. We train one blind model with a linear noise-$\sigma$ curriculum spanning $\sigpx\!\approx\!6$--$127$ and evaluate it, unchanged, against the published color-denoising leaderboard on all four standard sets (CBSD68, Kodak24, McMaster, Urban100) at $\sigma\!\in\!\{15,25,50\}$ under the full-image protocol. The single blind model \textbf{beats DnCNN and FFDNet on every set at every noise level} (average $+0.7$\,dB over DnCNN; FFDNet is non-blind yet still trails), and sits a small, consistent margin behind the heavyweight CNN/transformer state of the art --- $\sim\!0.4$\,dB on CBSD68/Kodak24, $\sim\!0.7$\,dB on McMaster, $\sim\!1.0$\,dB on Urban100 --- at roughly one tenth of their parameters. We are deliberately honest about what bias-freedom does \emph{not} buy: the homogeneity is inference-only and checkpoint-specific, and the learned residual field is measurably non-conservative, so no global prior/energy exists and plug-and-play/RED convergence or calibrated-uncertainty guarantees do not transfer. We report PSNR and SSIM (SSIM for our own model, since the leaderboard we compare against is PSNR-only), on a single checkpoint, without ablations; those are stated as future work rather than glossed over.
 \end{abstract}
 
 % ============================================================================
@@ -85,7 +85,7 @@ This is an \emph{integration-and-evaluation} paper in the register of an enginee
   \item We are explicit about the theory's \emph{limits}: the Miyasawa/Tweedie residual-as-score reading is a motivation, and we show (Section~\ref{sec:limitations}) that the learned operator is non-conservative, so it is \emph{not} the gradient of any global prior.
 \end{enumerate}
 
-What this paper is \emph{not}: it is not a claim that Gabor stems, Laplacian skips, \convnext{} blocks, or bias-free CNNs are new; it is not an ablation study (we do not isolate each component's contribution here --- see Section~\ref{sec:limitations}); it reports \textbf{PSNR only} (SSIM was not measured); and it makes \textbf{no claim} of a calibrated prior, an exact likelihood, or plug-and-play convergence guarantees. We would rather under-claim on a single honest checkpoint than over-claim.
+What this paper is \emph{not}: it is not a claim that Gabor stems, Laplacian skips, \convnext{} blocks, or bias-free CNNs are new; it is not an ablation study (we do not isolate each component's contribution here --- see Section~\ref{sec:limitations}); its comparison against the leaderboard is in \textbf{PSNR} (the collated source is PSNR-only), though we do report SSIM for our own model (Table~\ref{tab:ssim}); and it makes \textbf{no claim} of a calibrated prior, an exact likelihood, or plug-and-play convergence guarantees. We would rather under-claim on a single honest checkpoint than over-claim.
 
 % ============================================================================
 \section{Architecture}
@@ -95,7 +95,7 @@ What this paper is \emph{not}: it is not a claim that Gabor stems, Laplacian ski
 
 \begin{figure}[H]
 \centering
-\resizebox{0.92\textwidth}{!}{%
+\resizebox{0.8\textwidth}{!}{%
 \begin{tikzpicture}[
   font=\small,
   every node/.style={transform shape},
@@ -108,6 +108,7 @@ What this paper is \emph{not}: it is not a claim that Gabor stems, Laplacian ski
   io/.style={box, minimum height=1.1cm, text width=2.5cm, fill=black!5},
   skip/.style={draw, thick, rounded corners=3pt, minimum width=2.7cm, minimum height=1.0cm,
                text width=2.5cm, align=center, inner sep=4pt, fill=skipred!12, font=\footnotesize},
+  add/.style={draw, thick, circle, minimum size=0.9cm, inner sep=0pt, fill=black!8},
   arr/.style={-{Latex[length=3mm]}, very thick},
   sarr/.style={-{Latex[length=3mm]}, very thick, skipred!80, dashed},
   lbl/.style={font=\footnotesize, inner sep=1.5pt},
@@ -116,31 +117,35 @@ What this paper is \emph{not}: it is not a claim that Gabor stems, Laplacian ski
   \node[io]   (in)  at (0,0)     {input $y$\\[1pt] {\footnotesize $[-0.5,\,0.5]$}};
   \node[stem] (gab) at (0,-2.1)  {frozen Gabor stem\\[1pt] {\footnotesize $3{\times}32{=}96$, then $1{\times}1{\to}66$}};
   \node[enc]  (e0)  at (0,-4.2)  {encoder L0\\[1pt] {\footnotesize $66$ ch, $3\times$ block}};
-  \node[enc]  (e1)  at (0,-6.3)  {encoder L1\\[1pt] {\footnotesize $132$ ch, $3\times$ block}};
+  \node[enc]  (e1)  at (0,-8.0)  {encoder L1\\[1pt] {\footnotesize $132$ ch, $3\times$ block}};
   % --- bottleneck (bottom center) ---
-  \node[bott] (bn)  at (4,-8.2)  {bottleneck\\[1pt] {\footnotesize $264$ ch, $3\times$ block}};
-  % --- decoder column (right, bottom to top) ---
-  \node[dec]  (d1)  at (8,-6.3)  {decoder L1\\[1pt] {\footnotesize $132$ ch, $3\times$ block}};
-  \node[dec]  (d0)  at (8,-4.2)  {decoder L0\\[1pt] {\footnotesize $66$ ch, $3\times$ block}};
-  \node[io]   (out) at (8,0)     {output $\hat{x}=D(y)$\\[1pt] {\footnotesize $1{\times}1$, groups $=3$}};
-  % --- skip nodes (high-frequency bands) ---
+  \node[bott] (bn)  at (4,-9.8)  {bottleneck\\[1pt] {\footnotesize $264$ ch, $3\times$ block}};
+  % --- skip nodes (high-frequency bands, middle column) ---
   \node[skip] (s0)  at (4,-4.2)  {hi-freq skip L0\\[1pt] $+\,3\times$ block};
-  \node[skip] (s1)  at (4,-6.3)  {hi-freq skip L1\\[1pt] $+\,3\times$ block};
-  % --- encoder flow ---
+  \node[skip] (s1)  at (4,-8.0)  {hi-freq skip L1\\[1pt] $+\,3\times$ block};
+  % --- decoder spine (right column): Add node -> decoder block, per level ---
+  \node[add]  (a1)  at (8,-8.0)  {$\oplus$};
+  \node[dec]  (d1)  at (8,-6.1)  {decoder L1\\[1pt] {\footnotesize $132$ ch, $3\times$ block}};
+  \node[add]  (a0)  at (8,-4.2)  {$\oplus$};
+  \node[dec]  (d0)  at (8,-2.3)  {decoder L0\\[1pt] {\footnotesize $66$ ch, $3\times$ block}};
+  \node[io]   (out) at (8,0)     {output $\hat{x}=D(y)$\\[1pt] {\footnotesize $1{\times}1$, groups $=3$}};
+  % --- encoder flow (low-frequency band descends) ---
   \draw[arr] (in)  -- (gab);
   \draw[arr] (gab) -- (e0);
   \draw[arr] (e0)  -- node[lbl, right] {Lap.\ split $\downarrow$} (e1);
   \draw[arr] (e1)  -- node[lbl, below left=1pt] {Lap.\ split $\downarrow$} (bn);
-  % --- decoder flow ---
-  \draw[arr] (bn)  -- node[lbl, below right=1pt] {upsample $\times2$} (d1);
-  \draw[arr] (d1)  -- node[lbl, right] {upsample $\times2$} (d0);
-  \draw[arr] (d0)  -- node[lbl, right] {linear head} (out);
-  % --- high-frequency skip connections (horizontal) ---
-  \draw[sarr] (e0) -- (s0);   \draw[sarr] (s0) -- node[lbl, above] {Add} (d0);
-  \draw[sarr] (e1) -- (s1);   \draw[sarr] (s1) -- node[lbl, above] {Add} (d1);
+  % --- decoder spine: each Add merges (upsampled feature + skip), THEN the block runs ---
+  \draw[arr] (bn) -- node[lbl, below right=1pt] {upsample $\times2$} (a1);
+  \draw[arr] (a1) -- (d1);
+  \draw[arr] (d1) -- node[lbl, right] {upsample $\times2$} (a0);
+  \draw[arr] (a0) -- (d0);
+  \draw[arr] (d0) -- node[lbl, right] {linear head} (out);
+  % --- high-frequency skip connections into the Add nodes (separate merge step) ---
+  \draw[sarr] (e0) -- (s0);   \draw[sarr] (s0) -- (a0);
+  \draw[sarr] (e1) -- (s1);   \draw[sarr] (s1) -- (a1);
 \end{tikzpicture}%
 }
-\caption{\model{} data flow (channel widths shown). The encoder (left) descends; the decoder (right) ascends; the bottleneck sits at the base. A \textbf{frozen Gabor stem} feeds a two-level \convnext{}-V1 U-Net. Downsampling is a \textbf{Laplacian-pyramid split}: the low-frequency band descends (solid arrows) while the full-resolution high-frequency residual becomes the skip (dashed), passing through \textbf{three extra bias-free \convnext{} blocks} before a parameter-free channel-matched \texttt{Add} into the decoder. The head is a bias-free grouped $1{\times}1$ convolution (3 groups). Every operation is degree-1 homogeneous at inference, so $D(\alpha y)=\alpha D(y)$.}
+\caption{\model{} data flow (channel widths shown). The encoder (left) descends; the decoder spine (right) ascends; the bottleneck sits at the base. A \textbf{frozen Gabor stem} feeds a two-level \convnext{}-V1 U-Net. Downsampling is a \textbf{Laplacian-pyramid split}: the low-frequency band descends (solid arrows) while the full-resolution high-frequency residual becomes the skip (dashed), passing through \textbf{three extra bias-free \convnext{} blocks}. At each decoder level the skip and the upsampled feature are first combined at an explicit parameter-free, channel-matched addition ($\oplus$) --- a distinct step --- and only then processed by the decoder block. The head is a bias-free grouped $1{\times}1$ convolution (3 groups). Every operation is degree-1 homogeneous at inference, so $D(\alpha y)=\alpha D(y)$.}
 \label{fig:arch}
 \end{figure}
 
@@ -291,6 +296,31 @@ Urban100 & 50 & 28.81 & \textbf{27.59} & \textbf{28.05} & 29.61 & 29.82 & 30.02 
 
 Averaged over the four sets, \model{} is $+0.75/+0.68/+0.75$\,dB above DnCNN at $\sigma=15/25/50$ and $+0.23/+0.34/+0.49$\,dB above FFDNet (which, unlike our model, is \emph{non-blind} and receives a noise-level map). It is $-0.48/-0.47/-0.49$\,dB relative to DRUNet and $-0.67/-0.67/-0.70$\,dB relative to Restormer, the leaderboard top. The gap is smallest on CBSD68/Kodak24 ($\sim0.4$\,dB), larger on McMaster ($\sim0.7$\,dB), and largest on Urban100 ($\sim1.0$\,dB) --- Urban100's repetitive, self-similar structures are exactly where the transformers' non-local attention (SwinIR, Restormer) and DRUNet's large receptive field have the most to exploit and a compact local conv U-Net the least.
 
+\subsection{Structural similarity (SSIM)}
+\label{sec:ssim}
+Table~\ref{tab:ssim} reports SSIM alongside PSNR for \model{} on the same four sets and full-image protocol (same checkpoint as Table~\ref{tab:sota}), computed on the $[0,1]$ representation with a data range of $1.0$. SSIM tracks PSNR's ordering across noise --- highest at $\sigpx{=}15$ (average $0.930$) and degrading gracefully to average $0.827$ at $\sigpx{=}50$. One cross-metric wrinkle is worth noting: \textbf{Urban100 has the \emph{highest} SSIM of the four sets at every noise level} ($0.944/0.918/0.866$) despite its middling PSNR, because its regular, high-contrast man-made structures --- the same self-similarity that costs PSNR against non-local models --- yield strong local structural agreement once denoised. We report SSIM for \model{} only: our comparison source \citep{zhang2022scunet} tabulates PSNR alone, and SSIM values assembled from mixed sources use inconsistent windowing/border/color conventions, so a baseline SSIM column would be an unreliable comparison rather than an honest one.
+
+\begin{table}[H]
+\centering
+\caption{\model{} PSNR (dB) and SSIM on the four color benchmark sets, full-image protocol, single blind checkpoint (identical protocol and model as Table~\ref{tab:sota}; the PSNR columns reproduce it exactly). SSIM on $[0,1]$, data range $1.0$. Baseline SSIM is not tabulated --- see Section~\ref{sec:ssim}.}
+\label{tab:ssim}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{lcccccc}
+\toprule
+ & \multicolumn{2}{c}{$\sigpx=15$} & \multicolumn{2}{c}{$\sigpx=25$} & \multicolumn{2}{c}{$\sigpx=50$} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+\textbf{Set} & PSNR & SSIM & PSNR & SSIM & PSNR & SSIM \\
+\midrule
+CBSD68   & 33.95 & 0.9311 & 31.35 & 0.8873 & 28.18 & 0.8010 \\
+Kodak24  & 34.97 & 0.9263 & 32.56 & 0.8870 & 29.51 & 0.8112 \\
+McMaster & 34.79 & 0.9181 & 32.61 & 0.8879 & 29.61 & 0.8287 \\
+Urban100 & 34.20 & 0.9437 & 31.92 & 0.9182 & 28.81 & 0.8661 \\
+\midrule
+\emph{average} & 34.48 & 0.9298 & 32.11 & 0.8951 & 29.03 & 0.8268 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 \subsection{Accuracy for the parameter budget}
 The point of Table~\ref{tab:sota} is not that \model{} wins outright --- it does not --- but where it sits on the accuracy/size trade-off. Figure~\ref{fig:params} plots the four-set average PSNR at $\sigma=25$ against approximate parameter count. \model{} lands between the two size classes: comfortably above the sub-1M classic CNNs it beats, and within half a dB of models $8$--$10\times$ larger.
 
@@ -302,25 +332,26 @@ The point of Table~\ref{tab:sota} is not that \model{} wins outright --- it does
   xlabel={parameters (millions, log scale)},
   ylabel={avg PSNR @ $\sigma{=}25$ (dB)},
   xmode=log, log basis x=10,
-  xmin=0.3, xmax=45, ymin=31.2, ymax=33.0,
+  xmin=0.3, xmax=45, ymin=31.2, ymax=33.7,
   ymajorgrids=true, grid style={gray!20},
-  nodes near coords, point meta=explicit symbolic,
-  nodes near coords style={font=\scriptsize, anchor=south},
-  only marks, mark size=2.6pt,
+  only marks, mark size=2.8pt,
 ]
-\addplot[classicgray, mark=square*] coordinates {
-  (0.49,31.77) [FFDNet]
-  (0.56,31.43) [DnCNN]
-};
-\addplot[oursblue, mark=*, mark size=3.4pt] coordinates {
-  (3.4,32.11) [\model{}]
-};
-\addplot[sotaorange, mark=triangle*] coordinates {
-  (11.5,32.69) [SwinIR]
-  (17.9,32.77) [SCUNet]
-  (26.1,32.78) [Restormer]
-  (32.6,32.58) [DRUNet]
-};
+\addplot[classicgray, mark=square*] coordinates {(0.49,31.77) (0.56,31.43)};
+\addplot[oursblue, mark=*, mark size=3.8pt] coordinates {(3.4,32.11)};
+\addplot[sotaorange, mark=triangle*] coordinates {(11.5,32.69) (17.9,32.77) (26.1,32.78) (32.6,32.58)};
+% manual, collision-free point labels
+\node[font=\scriptsize, anchor=south]                 at (axis cs:0.49,31.77) {FFDNet};
+\node[font=\scriptsize, anchor=north]                 at (axis cs:0.56,31.43) {DnCNN};
+\node[font=\scriptsize, anchor=south, text=oursblue]  at (axis cs:3.4,32.11)  {\model{}};
+% SOTA points cluster tightly on the log axis; label them above with thin leaders
+\node[font=\scriptsize] (lswin) at (axis cs:11.5,33.10) {SwinIR};
+\node[font=\scriptsize] (lscu)  at (axis cs:17.9,33.45) {SCUNet};
+\node[font=\scriptsize] (lrest) at (axis cs:26.1,33.10) {Restormer};
+\node[font=\scriptsize] (ldru)  at (axis cs:32.6,33.45) {DRUNet};
+\draw[gray!55, thin] (lswin) -- (axis cs:11.5,32.73);
+\draw[gray!55, thin] (lscu)  -- (axis cs:17.9,32.81);
+\draw[gray!55, thin] (lrest) -- (axis cs:26.1,32.82);
+\draw[gray!55, thin] (ldru)  -- (axis cs:32.6,32.62);
 \end{axis}
 \end{tikzpicture}
 \caption{Four-set average PSNR at $\sigma{=}25$ vs.\ (approximate) parameter count. \model{} (blue) sits on the efficient side of the trade-off: above the sub-1M CNNs and within $\sim0.5$--$0.7$\,dB of the $12$--$33$M state of the art at $\sim1/8$--$1/10$ of their size. Parameter counts are approximate and collated from the respective papers.}
@@ -362,10 +393,10 @@ We resist the temptation to call this finite-sample noise. With $32$ images the 
 As shown in Section~\ref{sec:theory-limits}, the learned residual field is measurably non-conservative, so \model{} does \emph{not} define a global image prior, an exact likelihood, or a calibrated posterior. Uses that require a conservative denoiser --- provable plug-and-play/RED convergence, energy-based sampling with a fixed target, calibrated Bayesian uncertainty --- are outside what this model licenses, and the undercoverage in Section~\ref{sec:coverage} is a concrete downstream symptom. The homogeneity that does hold is inference-only and must be re-verified per checkpoint rather than assumed from the architecture.
 
 \paragraph{Measurement limits.}
-We report \textbf{PSNR only}; SSIM was not measured and no SSIM number appears in this paper. All results are from a \textbf{single checkpoint} --- there is no multi-seed variance estimate --- and we present \textbf{no ablations}: the individual contributions of the frozen Gabor stem, the Laplacian high-frequency skips, the \texttt{high\_freq\_blocks}, the bias-free normalization, and the noise curriculum are \emph{not} isolated here. CBSD68 and McMaster are the two standard color sets we could evaluate on locally alongside Kodak24 and Urban100; grayscale Set12/BSD68 would require a one-channel model. Each of these is deliberate scope, and each is the obvious next experiment.
+We report PSNR and SSIM for \model{} (Tables~\ref{tab:sota} and \ref{tab:ssim}), but the \emph{comparison} against baselines is \textbf{PSNR-only}, because our collated source \citep{zhang2022scunet} reports PSNR and cross-source SSIM is protocol-inconsistent; a perceptual metric (e.g.\ LPIPS) is not measured at all. All results are from a \textbf{single checkpoint} --- there is no multi-seed variance estimate --- and we present \textbf{no ablations}: the individual contributions of the frozen Gabor stem, the Laplacian high-frequency skips, the \texttt{high\_freq\_blocks}, the bias-free normalization, and the noise curriculum are \emph{not} isolated here. CBSD68 and McMaster are the two standard color sets we could evaluate on locally alongside Kodak24 and Urban100; grayscale Set12/BSD68 would require a one-channel model. Each of these is deliberate scope, and each is the obvious next experiment.
 
 \paragraph{Future work.}
-The natural follow-ups are (i) a controlled ablation isolating each component's dB contribution with multi-seed variance; (ii) SSIM and a perceptual metric alongside PSNR; (iii) larger-capacity and deeper variants to probe how much of the SOTA gap is capacity vs.\ architecture; and (iv) a study of whether a symmetrized or explicitly conservative variant recovers the plug-and-play guarantees the current model forgoes, and at what accuracy cost.
+The natural follow-ups are (i) a controlled ablation isolating each component's dB contribution with multi-seed variance; (ii) a perceptual metric (e.g.\ LPIPS) alongside the PSNR/SSIM already reported, and baseline SSIM under a single re-run protocol so the comparison can extend beyond PSNR; (iii) larger-capacity and deeper variants to probe how much of the SOTA gap is capacity vs.\ architecture; and (iv) a study of whether a symmetrized or explicitly conservative variant recovers the plug-and-play guarantees the current model forgoes, and at what accuracy cost.
 
 % ============================================================================
 \section{Related work}

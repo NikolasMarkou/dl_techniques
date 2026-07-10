@@ -329,3 +329,22 @@ It sits ~0.4 dB behind the heavyweight SOTA on CBSD68/Kodak24, ~0.7 dB on McMast
 avg ~0.5 dB behind DRUNet and ~0.7 dB behind Restormer, at ~1/10th the parameters
 (DRUNet ~32M, Restormer ~26M, SCUNet ~18M, SwinIR ~12M; DnCNN/FFDNet <1M). PSNR only (no SSIM);
 CBSD68 clean refs are the standard JPGs everyone benchmarks on.
+
+### 8.2 SSIM (Ours) — same 4 sets, same full-image protocol
+
+Measured for the ConvUNext checkpoint under the identical protocol as §8.1 (the PSNR
+column reproduces §8.1 exactly, confirming protocol match). SSIM on the `[0,1]`
+representation (`tf.image.ssim`, data range 1.0). Baseline SSIM is NOT available: the
+SCUNet source table (arXiv:2203.13278) is PSNR-only, and cross-source SSIM uses
+inconsistent windowing/border/color conventions — so no baseline SSIM comparison is honest.
+
+PSNR / SSIM — σ255 15 | 25 | 50:
+  CBSD68    33.95/0.9311 | 31.35/0.8873 | 28.18/0.8010
+  Kodak24   34.97/0.9263 | 32.56/0.8870 | 29.51/0.8112
+  McMaster  34.79/0.9181 | 32.61/0.8879 | 29.61/0.8287
+  Urban100  34.20/0.9437 | 31.92/0.9182 | 28.81/0.8661
+  average   34.48/0.9298 | 32.11/0.8951 | 29.03/0.8268
+
+Note: Urban100 has the HIGHEST SSIM of the four sets at every σ despite middling PSNR
+(regular high-contrast structure → strong local structural agreement once denoised).
+Reproduced in the paper (research/papers/bfunet/bfunet.tex, Table 2).
