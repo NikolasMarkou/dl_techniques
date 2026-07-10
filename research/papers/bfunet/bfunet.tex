@@ -138,9 +138,9 @@ Correspondingly, it is not an ablation study --- we do not isolate each componen
   \draw[arr] (e0)  -- node[lbl, right] {Lap.\ split $\downarrow$} (e1);
   \draw[arr] (e1)  -- node[lbl, below left=1pt] {Lap.\ split $\downarrow$} (bn);
   % --- decoder spine: each Add merges (upsampled feature + skip), THEN the block runs ---
-  \draw[arr] (bn) -- node[lbl, below right=1pt] {upsample $\times2$} (a1);
+  \draw[arr] (bn) -- node[lbl, below right=1pt] {\shortstack{upsample $\times2$\\ \texttt{MatchChannels}}} (a1);
   \draw[arr] (a1) -- (d1);
-  \draw[arr] (d1) -- node[lbl, right] {upsample $\times2$} (a0);
+  \draw[arr] (d1) -- node[lbl, right] {\shortstack{upsample $\times2$\\ \texttt{MatchChannels}}} (a0);
   \draw[arr] (a0) -- (d0);
   \draw[arr] (d0) -- node[lbl, right] {linear head} (out);
   % --- high-frequency skip connections into the Add nodes (separate merge step) ---
@@ -148,7 +148,7 @@ Correspondingly, it is not an ablation study --- we do not isolate each componen
   \draw[sarr] (e1) -- (s1);   \draw[sarr] (s1) -- (a1);
 \end{tikzpicture}%
 }
-\caption{\model{} data flow (channel widths shown). The encoder (left) descends, the decoder spine (right) ascends, and the bottleneck sits at the base. A frozen Gabor stem feeds a two-level \convnext{}-V1 U-Net. Downsampling is a Laplacian-pyramid split: the low-frequency band descends (solid arrows) while the full-resolution high-frequency residual becomes the skip (dashed), passing through three extra bias-free \convnext{} blocks. At each decoder level the skip and the upsampled feature are first combined at an explicit parameter-free, channel-matched addition ($\oplus$), a distinct step, and only then processed by the decoder block. The head is a bias-free grouped $1{\times}1$ convolution (3 groups). Every operation is degree-1 homogeneous at inference, so $D(\alpha y)=\alpha D(y)$.}
+\caption{\model{} data flow (channel widths shown). The encoder (left) descends, the decoder spine (right) ascends, and the bottleneck sits at the base. A frozen Gabor stem feeds a two-level \convnext{}-V1 U-Net. Downsampling is a Laplacian-pyramid split: the low-frequency band descends (solid arrows) while the full-resolution high-frequency residual becomes the skip (dashed), passing through three extra bias-free \convnext{} blocks. At each decoder level the skip and the upsampled feature are first combined at an explicit parameter-free, channel-matched addition ($\oplus$) --- the upsampled feature passes through a weightless \texttt{MatchChannels} (zero-pad to widen, slice to narrow) so the two widths agree before the add --- a distinct step, and only then processed by the decoder block. The head is a bias-free grouped $1{\times}1$ convolution (3 groups). Every operation is degree-1 homogeneous at inference, so $D(\alpha y)=\alpha D(y)$.}
 \label{fig:arch}
 \end{figure}
 
@@ -214,6 +214,7 @@ It is easy to over-read Eq.~\eqref{eq:tweedie}, so we state two boundaries expli
 We return to the practical consequences in Section~\ref{sec:limitations}. (This non-conservativity is a statement about a \emph{global} energy; it does not prevent well-calibrated \emph{marginal} per-pixel intervals, which we obtain by conformal prediction in Section~\ref{sec:coverage}.)
 
 % ============================================================================
+\clearpage
 \section{Experimental protocol}
 \label{sec:protocol}
 
@@ -230,6 +231,7 @@ Loss is plain MSE (the Miyasawa-optimal objective, Section~\ref{sec:theory}). We
 We report two evaluations of the single trained checkpoint. (i) A blind PSNR-vs-noise sweep on DIV2K-validation ($100$ patches at $256$px). (ii) The standard leaderboard comparison on all four color sets (CBSD68, Kodak24, McMaster, Urban100) at $\sigma \in \{15,25,50\}$ using the full-image protocol (whole images, reflect-padded to a multiple of $16$), the same protocol the published numbers use. We additionally report a post-hoc per-pixel split-conformal coverage study. The two evaluations draw different samples (the sweep uses $100$ DIV2K patches; the coverage study, $500$ held-out COCO crops), so their PSNR columns are independent measurements, not cross-checks of one another.
 
 % ============================================================================
+\clearpage
 \section{Results}
 \label{sec:results}
 
@@ -257,11 +259,11 @@ Figure~\ref{fig:psnrsweep} shows the blind PSNR-vs-noise sweep on DIV2K-validati
 };
 \addlegendentry{\model{} (blind)}
 \draw[dashed, gray!70!black, thick] (axis cs:127.5,21) -- (axis cs:127.5,40);
-\node[font=\scriptsize, gray!60!black, anchor=south east] at (axis cs:126,36.5) {trained ($\sigma_{\mathrm{norm}}{\le}0.5$)};
+\node[font=\scriptsize, gray!60!black, anchor=south east] at (axis cs:126,36.5) {trained ($\sigpx{\le}127$)};
 \node[font=\scriptsize, gray!60!black, anchor=south west] at (axis cs:129,36.5) {extrapolation};
 \end{axis}
 \end{tikzpicture}
-\caption{Blind PSNR vs.\ noise on DIV2K-validation ($100$ patches, $256$px). One model, no noise-level input, across the full range and \textbf{beyond it}: the curriculum trained only up to $\sigma_{\mathrm{norm}}{=}0.5$ ($\sigpx{\approx}127$, dashed line), yet the model keeps denoising in the shaded extrapolation region --- $25.5$\,dB at $\sigpx{=}150$ and $22.3$\,dB at $\sigpx{=}200$ ($1.6\times$ the training maximum), degrading smoothly with no cliff. This graceful off-range behaviour is the signature of the bias-free/degree-1-homogeneous construction (Section~\ref{sec:theory}); a biased network collapses once past its training noise levels. The $95\%$ bootstrap CIs (not shown) are $\pm 0.4$--$0.8$\,dB.}
+\caption{Blind PSNR vs.\ noise on DIV2K-validation ($100$ patches, $256$px). One model, no noise-level input, across the full range and \textbf{beyond it}: the curriculum trained only up to $\sigpx{\approx}127$ (dashed line), yet the model keeps denoising in the shaded extrapolation region --- $25.5$\,dB at $\sigpx{=}150$ and $22.3$\,dB at $\sigpx{=}200$ ($1.6\times$ the training maximum), degrading smoothly with no cliff. This graceful off-range behaviour is the signature of the bias-free/degree-1-homogeneous construction (Section~\ref{sec:theory}); a biased network collapses once past its training noise levels. The $95\%$ bootstrap CIs (not shown) are $\pm 0.4$--$0.8$\,dB.}
 \label{fig:psnrsweep}
 \end{figure}
 
@@ -270,7 +272,7 @@ Table~\ref{tab:sota} places \model{} against six published baselines on all four
 
 \begin{table}[H]
 \centering
-\caption{Color AWGN denoising, PSNR (dB), full-image protocol. \model{} is a single $3.39$M-parameter blind model (no noise-level input). Baseline numbers are the published values collated by \citet{zhang2022scunet}. \textbf{Bold} marks where \model{} beats a given baseline. Approximate parameter counts are listed in the header; DnCNN/FFDNet are $<1$M, the four rightmost are $12$--$33$M.}
+\caption{Color AWGN denoising, PSNR (dB), full-image protocol, at $\sigma\in\{15,25,50\}$. Baseline numbers are the published values collated by \citet{zhang2022scunet}. \textbf{Bold} marks where \model{} beats a given baseline. Approximate parameter counts are listed in the header; DnCNN/FFDNet are $<1$M, the four rightmost are $12$--$33$M.}
 \label{tab:sota}
 \renewcommand{\arraystretch}{1.12}
 \resizebox{\textwidth}{!}{%
