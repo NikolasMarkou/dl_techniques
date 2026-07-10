@@ -204,7 +204,7 @@ Eq.~\eqref{eq:tweedie} is easy to over-read, in two ways.
   \item \textbf{Homogeneity is checkpoint-specific, not an architectural guarantee.} A network is exactly homogeneous only if every operation is genuinely bias-free. For this checkpoint the relative homogeneity error $\lVert D(\alpha y)-\alpha D(y)\rVert / \lVert \alpha D(y)\rVert$ is at the level of floating-point round-off across $\alpha \in \{\tfrac14,\tfrac12,2,4,8\}$, yet sibling checkpoints of the same family have shown deviations up to about $0.14$ when a single non-homogeneous operation slips in. Eq.~\eqref{eq:homog} must be verified per checkpoint, not assumed.
   \item \textbf{The learned residual is not a conservative field.} Eq.~\eqref{eq:tweedie} would make $f(y)$ the gradient of the scalar $\sigma^2 \log p_\sigma(y)$ only if the Jacobian $J(y)$ were symmetric, and it is not. On trained checkpoints of this family the measured Jacobian asymmetry $\lVert J - J^\top\rVert / \lVert J\rVert$ is $\mathcal{O}(0.5)$, roughly four orders of magnitude above a symmetric-blur control, so no global energy or log-density function exists whose gradient is the residual. Plug-and-play and Regularization-by-Denoising convergence guarantees assume a conservative, symmetric-Jacobian denoiser, so they do not transfer here, and the residual should be read as a useful local score estimate rather than a calibrated global prior.
 \end{enumerate}
-We return to the practical consequences in Section~\ref{sec:limitations}. (This non-conservativity is a statement about a \emph{global} energy; it does not prevent well-calibrated \emph{marginal} per-pixel intervals, which we obtain by conformal prediction in Section~\ref{sec:coverage}.)
+We return to the practical consequences in Section~\ref{sec:limitations}.
 
 % ============================================================================
 \clearpage
@@ -225,7 +225,7 @@ Loss is plain MSE (the Miyasawa-optimal objective, Section~\ref{sec:theory}). We
 \section{Results}
 \label{sec:results}
 
-We report two evaluations of the single trained checkpoint. (i) A blind PSNR-vs-noise sweep on DIV2K-validation ($100$ patches at $256$px). (ii) The standard leaderboard comparison on all four color sets (CBSD68, Kodak24, McMaster, Urban100) at $\sigma \in \{15,25,50\}$ using the full-image protocol (whole images, reflect-padded to a multiple of $16$), the same protocol the published numbers use. We additionally report a post-hoc per-pixel split-conformal coverage study. The two evaluations draw different samples (the sweep uses $100$ DIV2K patches; the coverage study, $500$ held-out COCO crops), so their PSNR columns are independent measurements, not cross-checks of one another.
+We report two evaluations of the single trained checkpoint. (i) A blind PSNR-vs-noise sweep on DIV2K-validation ($100$ patches at $256$px). (ii) The standard leaderboard comparison on all four color sets (CBSD68, Kodak24, McMaster, Urban100) at $\sigma \in \{15,25,50\}$ using the full-image protocol (whole images, reflect-padded to a multiple of $16$), the same protocol the published numbers use.
 
 \subsection{Blind denoising across noise levels}
 Figure~\ref{fig:psnrsweep} shows the blind PSNR-vs-noise sweep on DIV2K-validation, where the bias-free construction pays off. A single model, given no noise-level input, denoises across the whole curriculum range ($40.7$\,dB at $\sigpx{=}5$ to $26.2$\,dB at the $\sigpx{\approx}127$ training maximum), and it keeps working \emph{beyond} that maximum. The curriculum only ever showed the network $\sigma_{\mathrm{norm}}\!\le\!0.5$; evaluated at $\sigma_{\mathrm{norm}}{=}0.59$ and $0.78$ ($\sigpx{=}150$ and $200$, up to $1.6\times$ the largest training noise) it still returns $25.5$ and $22.3$\,dB, degrading smoothly with no cliff. This is the extrapolation predicted by the degree-1 homogeneity of Section~\ref{sec:theory}, which \citet{mohan2020biasfree} argue a \emph{biased} network cannot manage: because the Jacobian is scale-invariant, the input-adaptive filter the network applies does not know it has left its training range. (Gains are quoted against the noisy input \emph{as fed to the model}, clipped to the $[-0.5,+0.5]$ domain, which at high $\sigma$ has a higher PSNR than the unclipped Gaussian.)
@@ -389,34 +389,6 @@ $512\times512$ & $3.39$M & $416$\,GFLOP & $1.59$\,TFLOP & $3.92$\,GB \\
 \end{tabular}
 \end{table}
 
-\subsection{Per-pixel uncertainty and coverage}
-\label{sec:coverage}
-Because the residual is a local score estimate, a natural question is whether a simple post-hoc interval calibrates. We build split-conformal per-pixel intervals (per-$\sigma$ Mondrian, target coverage $0.90$, $\alpha=0.1$): calibrate a per-$\sigma$ radius $q_\sigma$ on a held-out calibration split and report empirical coverage on a disjoint test split. An early version of this study used only $32$ calibration images and undercovered at $\sim0.877$ (about $2.3$ points below target), which we had wrongly attributed to an inter-image exchangeability gap. That attribution was a mistake; the effect turns on what "sample size" means for pixel-wise conformal.
-
-The correct diagnosis is finite-sample size, but counted in \emph{images}, not pixels. Pixels within one image are strongly correlated, so $32$ images is a small effective sample even though it is $\sim6.3$M pixels. Re-measuring with $500$ held-out COCO-validation calibration images and $500$ test images resolves it (Table~\ref{tab:coverage}): the plain per-$\sigma$ scheme reaches $0.896$--$0.898$, within $\sim0.3$ points of nominal. To check whether the remaining gap is inter-image heteroscedasticity, we also ran a \emph{variance-scaled} score: each pixel's residual divided by a ground-truth-free per-image scale $\bar u_j=\mathrm{mean}_i\lvert D(y_j)_i - y_{j,i}\rvert$, giving the interval $D(y)_i \pm q_\sigma\,\bar u_j$. It lands at the same $\sim0.897$ with essentially identical (marginally wider) intervals, so there is no meaningful per-image scale heterogeneity for it to exploit. The residual $\sim0.3$-point shortfall from $0.90$ is consistent with mild within-image pixel correlation, not an image-level effect. Split-conformal calibration of this denoiser is thus straightforward given an adequate calibration set; the earlier undercoverage was an artifact of the $32$-image pool.
-
-\begin{table}[H]
-\centering
-\caption{Split-conformal per-pixel coverage (target $0.90$, $\alpha{=}0.1$), re-measured at $n{=}500$ held-out COCO-validation calibration and $500$ test images (one $256^2$ crop per image). Two nonconformity scores: the per-$\sigma$ absolute residual, and a ground-truth-free variance-scaled residual. The earlier $32$-image pool undercovered at $\sim0.877$; at $n{=}500$ both reach $\sim0.897$.}
-\label{tab:coverage}
-\renewcommand{\arraystretch}{1.15}
-\begin{tabular}{lccccc}
-\toprule
- & & \multicolumn{2}{c}{per-$\sigma$ residual} & \multicolumn{2}{c}{variance-scaled} \\
-\cmidrule(lr){3-4}\cmidrule(lr){5-6}
-$\sigma_{\mathrm{norm}}$ & test PSNR (dB) & coverage & width & coverage & width \\
-\midrule
-0.05 & 33.62 & 0.8962 & 0.068 & 0.8966 & 0.069 \\
-0.10 & 30.32 & 0.8970 & 0.098 & 0.8969 & 0.099 \\
-0.15 & 28.49 & 0.8973 & 0.119 & 0.8973 & 0.120 \\
-0.20 & 27.23 & 0.8976 & 0.136 & 0.8975 & 0.137 \\
-0.25 & 26.28 & 0.8980 & 0.151 & 0.8979 & 0.152 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The scope of this result is narrow: the denoiser admits well-calibrated \emph{marginal} per-pixel intervals from a modest held-out set. It does \emph{not} claim a calibrated Bayesian posterior or a global prior; that is a separate, genuinely negative result (the non-conservative Jacobian of Section~\ref{sec:theory-limits}), which conformal calibration does not touch.
-
 % ============================================================================
 \section{Discussion: limitations and what does not work}
 \label{sec:limitations}
@@ -425,7 +397,7 @@ The scope of this result is narrow: the denoiser admits well-calibrated \emph{ma
 As a compact, blind denoiser \model{} is strong: it beats the classic sub-1M CNNs everywhere and closes most of the gap to models an order of magnitude larger, from a single checkpoint with no noise-level input. It does not beat the heavyweight state of the art, and the gap is structurally largest on Urban100, where non-local self-similarity rewards the attention and large receptive fields that a two-level local conv U-Net lacks.
 
 \paragraph{Limits of the theory.}
-The one genuinely negative result is the theory limit of Section~\ref{sec:theory-limits}: the learned residual is a local score, not the gradient of a global density, so uses that require a conservative denoiser (provable plug-and-play/RED convergence, energy-based sampling toward a fixed target, a calibrated Bayesian posterior) are out of reach. (This is orthogonal to the per-pixel conformal coverage of Section~\ref{sec:coverage}, which \emph{is} well calibrated: frequentist marginal coverage of a fixed predictor needs no such property.) The homogeneity that does hold is inference-only and must be re-verified per checkpoint.
+The one genuinely negative result is the theory limit of Section~\ref{sec:theory-limits}: the learned residual is a local score, not the gradient of a global density, so uses that require a conservative denoiser (provable plug-and-play/RED convergence, energy-based sampling toward a fixed target, a calibrated Bayesian posterior) are out of reach. The homogeneity that does hold is inference-only and must be re-verified per checkpoint.
 
 \paragraph{What the local score still buys.}
 That the residual is only a local score, not a global prior, is less limiting than it may appear. In the annealed coarse-to-fine stochastic ascent of \citet{kadkhodaie2021stochastic}, the denoiser residual is used directly as the score at each effective noise level ($y \leftarrow y + h_t\,d_t + \gamma_t z_t$ with $d_t = (I - MM^\top)\,f(y) + M(m - M^\top y)$ for a linear measurement operator $M$ with orthonormal columns), and this loop nowhere assumes a symmetric Jacobian or a global energy. The same frozen model, unchanged, therefore drives unconstrained sampling from the implicit prior (the $M{=}0$ case) and solves a family of linear inverse problems (inpainting, random-pixel recovery, super-resolution, spectral deblurring, compressive sensing) from one blind denoiser. Unlike plug-and-play/RED it offers no fixed-point convergence guarantee and needs no conservative operator; it is an empirical sampler. The property this section is careful \emph{not} to oversell therefore still has real downstream reach.
@@ -450,9 +422,9 @@ The block is a \convnext{} \citep{liu2022convnext} in a U-Net \citep{ronneberger
 \section{Reproducibility}
 \label{sec:repro}
 
-The entire stack is reproducible and open: the model, the training recipe, the noise curriculum, the full-image and conformal evaluation harnesses, and the implicit-prior inverse-problem solver of Section~\ref{sec:limitations} are all implemented in the \texttt{dl\_techniques} framework at \url{https://github.com/NikolasMarkou/dl_techniques}.
+The entire stack is reproducible and open: the model, the training recipe, the noise curriculum, the full-image evaluation harness, and the implicit-prior inverse-problem solver of Section~\ref{sec:limitations} are all implemented in the \texttt{dl\_techniques} framework at \url{https://github.com/NikolasMarkou/dl_techniques}.
 
-The evaluated checkpoint is \texttt{convunext\_denoiser\_base} ($3{,}393{,}936$ parameters; depth $2$; widths $66/132/264$; three \convnext{}-V1 blocks per scope plus three per high-frequency skip band; frozen $32$-filter, $7{\times}7$ Gabor stem; \bfbn{}; LeakyReLU($0.1$); linear grouped head). It was trained with the recipe of Section~\ref{sec:training}. The full-image benchmark uses whole test images reflect-padded to a multiple of $16$, PSNR at $\mathrm{max\_val}=1.0$ on $[-0.5,0.5]$, on the standard CBSD68 / Kodak24 / McMaster / Urban100 sets. All numbers in Table~\ref{tab:sota}, Table~\ref{tab:ssim} and Figure~\ref{fig:psnrsweep} are measured from that single checkpoint; baseline numbers are the published values as collated by \citet{zhang2022scunet}. The coverage study (Table~\ref{tab:coverage}) uses $500$ held-out COCO-\texttt{val2017} calibration and $500$ test crops ($256^2$, one per image); the efficiency numbers (Table~\ref{tab:efficiency}) are single-image forward passes on one RTX~4090.
+The evaluated checkpoint is \texttt{convunext\_denoiser\_base} ($3{,}393{,}936$ parameters; depth $2$; widths $66/132/264$; three \convnext{}-V1 blocks per scope plus three per high-frequency skip band; frozen $32$-filter, $7{\times}7$ Gabor stem; \bfbn{}; LeakyReLU($0.1$); linear grouped head). It was trained with the recipe of Section~\ref{sec:training}. The full-image benchmark uses whole test images reflect-padded to a multiple of $16$, PSNR at $\mathrm{max\_val}=1.0$ on $[-0.5,0.5]$, on the standard CBSD68 / Kodak24 / McMaster / Urban100 sets. All numbers in Table~\ref{tab:sota}, Table~\ref{tab:ssim} and Figure~\ref{fig:psnrsweep} are measured from that single checkpoint; baseline numbers are the published values as collated by \citet{zhang2022scunet}. The efficiency numbers (Table~\ref{tab:efficiency}) are single-image forward passes on one RTX~4090.
 
 \paragraph{Gabor stem, in full.} The frozen stem is fully specified so it can be regenerated deterministically (given the grid and seed below; the exact per-axis \texttt{linspace} resolution and channel-ordering are fixed in the released code). It is a depthwise $7{\times}7$ convolution with depth multiplier $32$ (so $3{\times}32{=}96$ output channels), \texttt{use\_bias}=False, \texttt{trainable}=False. Each output channel is one real 2D Gabor wavelet $g(u,v)=\exp\!\big(-\tfrac{u_\theta^2+\gamma^2 v_\theta^2}{2s^2}\big)\cos\!\big(\tfrac{2\pi u_\theta}{\lambda}+\psi\big)$, with $(u_\theta,v_\theta)$ the coordinates rotated by $\theta$. The five parameters are swept on a regular \texttt{linspace} grid over the Özbulak--Ekenel Table-I ranges ($s\in[2,21]$, $\theta\in[0^\circ,360^\circ]$, $\lambda\in[8,100]$, $\gamma\in[0,300\%]$, $\psi\in[0^\circ,360^\circ]$), one distinct $(s,\theta,\lambda,\gamma,\psi)$ tuple per output channel, replicated identically across the three input channels, with global seed $42$. Because the bank is fixed, it contributes zero trainable parameters and requires no checkpointing beyond these constants.
 
