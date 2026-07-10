@@ -7,9 +7,16 @@ changes.
 
 Reference: A. Kadkhodaie & E. P. Simoncelli, *"Stochastic Solutions for Linear
 Inverse Problems using the Prior Implicit in a Denoiser"* (NeurIPS 2021). The
-denoiser is a bias-free CliffordUNet (BF-CNN-style: strictly bias-free so it is
-input-scale equivariant / degree-1 homogeneous, trained blind on additive Gaussian
-noise with an MSE objective).
+denoiser is a bias-free **ConvUNext** (bias-free ConvNeXt U-Net, BF-CNN-style:
+strictly bias-free so it is input-scale equivariant / degree-1 homogeneous, trained
+blind on additive Gaussian noise with an MSE objective). `DenoiserPrior.from_pretrained`
+also still loads a bias-free CliffordUNet checkpoint — the architecture is auto-detected
+from the checkpoint's `config.json`.
+
+Shipped checkpoint: `results/convunext_denoiser_base_20260707_122133/` (ConvUNext base,
+3.4M params, blind additive curriculum σ up to 0.5). Measured blind denoising PSNR on
+DIV2K-validation (256px patches, 100 images): 40.7 dB @ σ255=5, 35.5 @ σ255=15, 33.3 @
+σ255=25, 30.3 @ σ255=50, 29.1 @ σ255=65 — a single blind model across the whole range.
 
 ## Theory (one paragraph)
 
@@ -50,10 +57,13 @@ from applications.bias_free_denoiser import (
 ```
 
 - **`DenoiserPrior`** — loads the frozen denoiser (registrar-first, `compile=False`).
-  The default `from_pretrained(...)` rebuilds the fully-convolutional graph at
-  `(None, None, 3)` and transfers weights, so it runs any `H, W` divisible by 8 in a
-  single pass; `resolution="fixed256"` loads the saved 256x256 graph. Exposes
-  `residual(y) = D(y) - y` (the score estimate) plus `ingest` / `denorm` / `tile`.
+  The default `from_pretrained(...)` returns a fully-convolutional graph at
+  `(None, None, 3)` so it runs any sufficiently-divisible `H, W` in a single pass.
+  Architecture is auto-detected: a ConvUNext checkpoint loads the saved graph and relaxes
+  its size-locked input in place (bit-identical weights); a CliffordUNet checkpoint rebuilds
+  via its factory + weight-transfer. `resolution="fixed256"` loads the saved 256x256 graph
+  for either. Exposes `residual(y) = D(y) - y` (the score estimate) plus
+  `ingest` / `denorm` / `tile`.
 - **`UniversalInverseSolver`** — `solve(operator, measurements=..., shape=..., seed=...)`
   runs the annealed ascent and returns `(best_y, info)` where `info` holds
   `sigma_values`, `iterations`, and (when measurements are given) `constraint_errors`.
@@ -64,7 +74,7 @@ from applications.bias_free_denoiser import (
 ### Prior sampling (Algorithm 1)
 
 ```python
-prior = DenoiserPrior.from_pretrained("results/cliffordunet_denoiser_base_20260705_004751/best_model.keras")
+prior = DenoiserPrior.from_pretrained("results/convunext_denoiser_base_20260707_122133/best_model.keras")
 solver = UniversalInverseSolver(prior, max_iterations=500)
 sample, info = solver.solve(NullOperator(), measurements=None, shape=(1, 256, 256, 3), seed=0)
 ```
@@ -114,9 +124,10 @@ of the seven ids (`denoise`, `prior`, `inpaint`, `random_pixels`, `super_resolut
 `--keep-fraction`, `--measurement-ratio`.
 
 **Solver-regime flags** (the annealed-ascent schedule from Algorithm 2). The defaults
-below are the paper-quality regime — an A/B on the shipped checkpoint measured **+13.4 dB
-mean PSNR** on the inverse tasks versus the old capped/short-budget defaults, because the
-old cap left the ascent stuck at `sigma_t ~= 0.25-0.33`, never reaching `sigma_l`:
+below are the paper-quality regime — an A/B (measured on the previous CliffordUNet
+checkpoint; pending re-measurement on the ConvUNext default) showed **+13.4 dB mean PSNR**
+on the inverse tasks versus the old capped/short-budget defaults, because the old cap left
+the ascent stuck at `sigma_t ~= 0.25-0.33`, never reaching `sigma_l`:
 
 | flag | default | meaning |
 |------|---------|---------|
