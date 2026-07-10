@@ -244,3 +244,50 @@ delivering exactly the low-variance training the design was created for. The one
 caveat is that intermediate "gradient-norm steadiness" is architecture-dependent, and the
 headline numbers come from 5 seeds at `small`/128px, so a `base`/256px run is the natural
 confirmation.
+
+---
+
+## 8. Eval-interpretation caveats — ConvUNext base checkpoint (20260707) + app wiring
+
+Findings from evaluating `results/convunext_denoiser_base_20260707_122133/best_model.keras`
+with the two eval tools and wiring it into `src/applications/bias_free_denoiser/`
+(plan_2026-07-10_77fb9b17). Numbers recorded verbatim; these are interpretation caveats,
+not defects.
+
+**PSNR-vs-noise sweep** (`eval_psnr_vs_noise.py`, 100 DIV2K-val patches):
+σ255 → PSNR(dB): 5→40.68, 10→37.37, 15→35.51, 25→33.26, 35→31.79, 50→30.27, 65→29.12
+(monotone, +6.4…+15.8 dB gain over the noisy input). Input-PSNR arithmetic checks out:
+σ255=5 ⇒ σ_norm=0.0196 ⇒ `20·log10(1/0.0196)=34.16 dB` vs measured input 34.28; the small
+positive bias is the expected effect of clipping the noisy input to `[-0.5,0.5]` (reduces
+effective noise energy).
+
+**The two tools' PSNRs are on DIFFERENT samples — do not read them as mutual
+corroboration.** `eval_psnr_vs_noise` uses 100 random patches; `eval_per_pixel_uncertainty`
+uses `--n-test 32`. Both use the IDENTICAL PSNR definition (`common._mean_psnr`,
+`10·log10(1/MSE)`, `max_val=1.0` — the uncertainty tool imports `_mean_psnr`/`add_awgn`
+from the psnr tool), so there is NO definitional discrepancy. But matched by noise level
+they differ ~1.5 dB (33.26 dB @ σ255=25 vs the uncertainty tool's 31.73 dB @ σ_norm=0.10 ≈
+σ255=25.5). That gap is sampling scope (32 vs 100 patches + crop strategy), not a
+computation error — treat them as two independent measurements.
+
+**Conformal coverage undercoverage is systematic, and it is NOT finite-sample noise.**
+`eval_per_pixel_uncertainty.py` per-σ empirical coverage (target 0.90): 0.877 / 0.879 /
+0.878 / 0.878 / 0.877 across σ_norm 0.05–0.25. With `--n-calib 32` images = 6.29M pooled
+pixels the conformal quantile is near-exact, so the ~2.3-pt shortfall is NOT calibration-size
+noise. It is the expected undercoverage of a single per-σ (Mondrian-on-σ-only) quantile
+evaluated on HELD-OUT IMAGES with heterogeneous per-image residual scales: pixel
+exchangeability holds only if the images are exchangeable. Image-conditional or
+variance-scaled conformal would tighten it. (Prior precedent 0.887–0.894 was on a different
+convunext checkpoint.)
+
+**`variance_probe.py` is not applicable here** — it trains fresh models to compare
+`zero_pad_channels` variants (§6); it has no `--checkpoint` flag and cannot evaluate a saved
+checkpoint.
+
+**App graph-relax loader is bit-identical (verified).** `DenoiserPrior.from_pretrained`
+loads a ConvUNext checkpoint by loading the saved fixed-256 graph and relaxing its
+`InputLayer` to `(None,None,C)` (`_relax_to_flexible_input`, mirrors this dir's
+`eval_psnr_vs_noise.py::_to_flexible_input`). Verified on CPU: 133/133 weight arrays
+byte-equal and forward-pass `max|Δ|=0.000e+00` at 256×256 vs the original graph; the
+original rejects 320×448 while the relaxed model runs it. Depth-2 ⇒ inputs must be
+divisible by 4 for exact pool/upsample reconstruction.
