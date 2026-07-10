@@ -15,6 +15,10 @@ Clifford / Laplacian / LayerScale custom objects are present in the Keras
 serialization registry. A bare ``import dl_techniques`` is NOT enough (its
 ``__init__`` is empty). This mirrors the canonical loader at
 ``src/train/bfunet/eval_per_pixel_uncertainty.py:109-177`` (``_load_denoiser``).
+The sibling registrar ``dl_techniques.models.bias_free_denoisers.bfconvunext`` is
+now ALSO imported before load, so a ConvUNext checkpoint (``ConvUNextStem``,
+``ConvNextV1Block``, ``GlobalResponseNormalization``, ``MatchChannels``, Gabor
+initializer) deserializes from the same registry (INV-B1).
 
 Resolution contract (F1 §2 / D-006)
 -----------------------------------
@@ -31,6 +35,14 @@ patch size) and raises on any other spatial size. Two loader paths are provided:
 * ``resolution="fixed256"`` (fallback): load the saved ``.keras`` graph directly
   (locked to ``(256, 256, 3)``); use :meth:`tile` / :meth:`untile` for larger
   inputs.
+
+The ``"dynamic"`` path dispatches on the checkpoint architecture (sniffed from
+``config.json`` via :meth:`_detect_architecture`). CliffordUNet uses the
+factory-rebuild + weight-transfer path above (byte-identical, D-006). A ConvUNext
+checkpoint instead takes a *graph-relax* path (:meth:`_build_dynamic_convunext`):
+the saved graph is loaded directly (real weights + layer instances, bit-identical)
+and its size-locked ``Input`` is relaxed to ``(None, None, 3)`` in-place, avoiding
+the ConvUNext factory-kwargs reconstruction traps (D-001).
 
 Domain contract (F1 §3 / D-002 / INV-1)
 ---------------------------------------
@@ -128,6 +140,7 @@ class DenoiserPrior:
         # Registrar-first import (INV-2). This MUST precede any load_model call —
         # bare `import dl_techniques` does not register the custom objects.
         import dl_techniques.models.bias_free_denoisers.bfcliffordunet  # noqa: F401
+        import dl_techniques.models.bias_free_denoisers.bfconvunext  # noqa: F401
 
         if resolution not in ("dynamic", "fixed256"):
             raise ValueError(
@@ -137,7 +150,10 @@ class DenoiserPrior:
         keras_path, config_path = cls._resolve_paths(checkpoint_path)
         try:
             if resolution == "dynamic":
-                model = cls._build_dynamic(keras_path, config_path, input_shape)
+                if cls._detect_architecture(config_path) == "convunext":
+                    model = cls._build_dynamic_convunext(keras_path)
+                else:
+                    model = cls._build_dynamic(keras_path, config_path, input_shape)
             else:
                 model = cls._load_fixed(keras_path)
         except Exception as exc:  # noqa: BLE001 — log + re-raise per F1 template
@@ -186,6 +202,23 @@ class DenoiserPrior:
         model = keras.models.load_model(keras_path, compile=False)
         return model
 
+    @staticmethod
+    def _detect_architecture(config_path: Path) -> str:
+        """Sniff the checkpoint's sibling config.json for the denoiser architecture.
+
+        ConvUNext checkpoints record ``convnext_version`` (v1/v2); CliffordUNet ones
+        do not. Missing/unreadable config.json falls back to ``"cliffordunet"`` so the
+        pre-existing default loader path is preserved (back-compat).
+
+        Returns:
+            ``"convunext"`` or ``"cliffordunet"``.
+        """
+        try:
+            raw = json.loads(config_path.read_text())
+        except (OSError, ValueError):
+            return "cliffordunet"
+        return "convunext" if "convnext_version" in raw else "cliffordunet"
+
     @classmethod
     def _build_dynamic(
         cls,
@@ -222,6 +255,58 @@ class DenoiserPrior:
                 [name for name, *_ in report.shape_mismatch][:10],
             )
         return model
+
+    @classmethod
+    def _build_dynamic_convunext(cls, keras_path: Path) -> keras.Model:
+        """Load a ConvUNext checkpoint and relax its input to ``(None, None, C)``.
+
+        # DECISION plan_2026-07-10_77fb9b17/D-001: for the ConvUNext branch we do NOT
+        # reconstruct factory kwargs (unlike the Clifford `_build_dynamic` path). The
+        # saved graph is loaded directly and its size-locked Input is relaxed in-place,
+        # so the real trained layer instances + weights transfer bit-identically. This
+        # sidesteps the ConvUNext factory-kwargs traps (block_normalization batchnorm-vs-
+        # layernorm homogeneity; the LeakyReLU(0.1) instance detail) a naive mapper would
+        # silently get wrong. The Clifford factory path (D-006) is left byte-identical.
+        # See decisions.md D-001.
+        """
+        model = keras.models.load_model(keras_path, compile=False)
+        return cls._relax_to_flexible_input(model)
+
+    @staticmethod
+    def _relax_to_flexible_input(model: keras.Model) -> keras.Model:
+        """Rebuild a size-locked functional denoiser with a ``(None, None, C)`` input.
+
+        The trainer bakes a static ``(patch, patch, C)`` ``Input`` into the saved graph,
+        which rejects other spatial sizes. These bias-free denoisers are fully
+        convolutional (conv / pooling / channel-norm / fixed-kernel Gabor + Laplacian),
+        so every weight is spatially independent and transfers 1:1 to the rebuilt graph.
+        Mirrors the proven ``_to_flexible_input`` in ``train/bfunet/eval_psnr_vs_noise.py``
+        (replicated here to keep ``applications`` from importing ``train``; D-001).
+
+        Returns the flexible model, or the original unchanged if no ``InputLayer`` with a
+        4-element batch shape is present (STOP-IF S1: caller then keeps the fixed graph).
+        """
+        cfg = model.get_config()
+        patched = False
+        for layer in cfg.get("layers", []):
+            if layer.get("class_name") == "InputLayer":
+                lc = layer["config"]
+                key = "batch_shape" if "batch_shape" in lc else (
+                    "batch_input_shape" if "batch_input_shape" in lc else None)
+                if key and lc.get(key) and len(lc[key]) == 4:
+                    b = list(lc[key])
+                    lc[key] = [b[0], None, None, b[3]]
+                    patched = True
+        if not patched:
+            logger.warning(
+                "'%s': could not relax input shape; ConvUNext dynamic load kept the "
+                "size-locked graph (use resolution='fixed256' + tiling)", model.name,
+            )
+            return model
+        flex = keras.Model.from_config(cfg)
+        flex.set_weights(model.get_weights())
+        logger.info("rebuilt '%s' with flexible (None,None,C) input", model.name)
+        return flex
 
     @staticmethod
     def _factory_kwargs_from_config(config_path: Path) -> Dict[str, Any]:
