@@ -15,7 +15,7 @@ family) stays fully GUI-free and headless-usable. All pixels live in the model's
 
 Run::
 
-    CUDA_VISIBLE_DEVICES=1 BFDENOISER_MODEL=results/cliffordunet_denoiser_base_20260705_004751/best_model.keras \\
+    CUDA_VISIBLE_DEVICES=1 BFDENOISER_MODEL=results/convunext_denoiser_base_20260707_122133/best_model.keras \\
         .venv/bin/streamlit run src/applications/bias_free_denoiser/streamlit_app.py \\
         --server.address 127.0.0.1 --server.port 8501
 
