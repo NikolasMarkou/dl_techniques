@@ -39,11 +39,11 @@
 \definecolor{bottlepurple}{RGB}{148,103,189}
 
 \title{A Compact Bias-Free ConvNeXt U-Net for Blind Gaussian Image Denoising\\
-\large{Frozen Gabor stem, Laplacian-pyramid skips, and end-to-end degree-1 homogeneity, evaluated against the color-denoising leaderboard}}
+\large{Small, strictly bias-free, and blind: how far a compact ConvNeXt U-Net reaches on the color-denoising leaderboard}}
 
 \author{
   Nikolas Markou \\
-  \texttt{nikolasmarkou@gmail.com}
+  \texttt{nikolas.markou@electiconsulting.com}
 }
 
 \date{}
@@ -54,7 +54,7 @@
 
 % ============================================================================
 \begin{abstract}
-We describe and evaluate \model{}, a compact bias-free \convnext{} U-Net for blind additive-white-Gaussian-noise (AWGN) image denoising. The network combines four ingredients, none individually novel. A frozen depthwise Gabor stem gives an oriented band-pass front end with zero trainable parameters. A Laplacian-pyramid encoder routes the full-resolution high-frequency residual into the skip connection, with three extra \convnext{} blocks per skip band. A \convnext{}-V1 U-Net forms the body. The construction is bias-free from end to end: every convolution has no additive bias, the head is linear, activations are LeakyReLU, and normalization is a variance-only batch norm. Together these make the whole $3.39$M-parameter network exactly degree-1 homogeneous at inference, $D(\alpha y)=\alpha D(y)$. That homogeneity is what licenses the Miyasawa/Tweedie reading of the denoiser residual as a scaled score, and, following Mohan et al., supports blind generalization across noise levels from a single model. We train one blind model with a linear noise-$\sigma$ curriculum spanning $\sigpx\!\approx\!6$ to $127$ and evaluate it, unchanged, against the published color-denoising leaderboard on all four standard sets (CBSD68, Kodak24, McMaster, Urban100) at $\sigma\!\in\!\{15,25,50\}$ under the full-image protocol. The single blind model beats DnCNN and FFDNet on every set at every noise level (on average $+0.7$\,dB over DnCNN; FFDNet is non-blind yet still trails), and sits a small, consistent margin behind the heavyweight CNN/transformer state of the art: about $0.4$\,dB on CBSD68 and Kodak24, $0.7$\,dB on McMaster, and $1.0$\,dB on Urban100, at roughly one tenth of their parameters. Bias-freedom also has clear limits. The homogeneity is inference-only and checkpoint-specific, and the learned residual field is measurably non-conservative, so no global prior or energy exists and plug-and-play/RED convergence and calibrated-uncertainty guarantees do not transfer. We report PSNR and SSIM (SSIM for our own model only, since the leaderboard we compare against is PSNR-only) on a single checkpoint and without ablations; those are left to future work.
+We describe and evaluate \model{}, a compact bias-free \convnext{} U-Net for blind additive-white-Gaussian-noise (AWGN) image denoising. The network combines four ingredients, none individually novel. A frozen depthwise Gabor stem gives an oriented band-pass front end with zero trainable parameters. A Laplacian-pyramid encoder routes the full-resolution high-frequency residual into the skip connection, with three extra \convnext{} blocks per skip band. A \convnext{}-V1 U-Net forms the body. The construction is bias-free from end to end: every convolution has no additive bias, the head is linear, activations are LeakyReLU, and normalization is a variance-only batch norm. Together these make the whole $3.39$M-parameter network exactly degree-1 homogeneous at inference, $D(\alpha y)=\alpha D(y)$. That homogeneity is what licenses the Miyasawa/Tweedie reading of the denoiser residual as a scaled score --- a \emph{local} score estimate, as our non-conservativity result later makes precise, not a global prior --- and, following Mohan et al., supports blind generalization across noise levels from a single model. We train one blind model with a linear noise-$\sigma$ curriculum spanning $\sigpx\!\approx\!6$ to $127$ and evaluate it, unchanged, against the published color-denoising leaderboard on all four standard sets (CBSD68, Kodak24, McMaster, Urban100) at $\sigma\!\in\!\{15,25,50\}$ under the full-image protocol. The single blind model beats DnCNN and FFDNet on every set at every noise level (on average $+0.7$\,dB over DnCNN; FFDNet is non-blind yet still trails), and sits a small, consistent margin behind the heavyweight CNN/transformer state of the art: about $0.4$\,dB on CBSD68 and Kodak24, $0.7$\,dB on McMaster, and $1.0$\,dB on Urban100, at roughly one tenth of their parameters. Bias-freedom also has clear limits. The homogeneity is inference-only and checkpoint-specific, and the learned residual field is measurably non-conservative, so no global prior or energy exists and plug-and-play/RED convergence and calibrated-uncertainty guarantees do not transfer. We report PSNR and SSIM (SSIM for our own model only, since the leaderboard we compare against is PSNR-only) on a single checkpoint and without ablations; those are left to future work.
 \end{abstract}
 
 % ============================================================================
@@ -196,7 +196,7 @@ For $y = x + \varepsilon$ with $\varepsilon \sim \mathcal{N}(0,\sigma^2 I)$ and 
 \hat{x}(y) \;=\; \E[x \mid y] \;=\; y + \sigma^2\, \nabla_y \log p_\sigma(y).
 \label{eq:tweedie}
 \end{equation}
-Hence for an MMSE-optimal $D$ the denoiser residual $f(y) = D(y) - y$ is exactly $\sigma^2$ times the score $\nabla_y \log p_\sigma(y)$ of the noise-blurred density. A plain mean-squared-error objective is therefore well motivated: it drives $D$ toward the MMSE estimator whose residual is a scaled score. This is why \model{} is trained with MSE and read as an implicit-prior score model.
+Hence for an MMSE-optimal $D$ the denoiser residual $f(y) = D(y) - y$ is exactly $\sigma^2$ times the score $\nabla_y \log p_\sigma(y)$ of the noise-blurred density. A plain mean-squared-error objective is therefore well motivated: it drives $D$ toward the MMSE estimator whose residual is a scaled score. This is why \model{} is trained with MSE and read as an implicit-prior score model --- with the caveat, made precise in Section~\ref{sec:theory-limits}, that the \emph{learned} residual realizes this only as a \emph{local} score estimate, not the gradient of a global density.
 
 \paragraph{Homogeneity buys blind generalization.}
 \citet{mohan2020biasfree} observe that a bias-free denoiser is degree-1 homogeneous (Eq.~\eqref{eq:homog}) and therefore behaves as a locally linear, input-adaptive filter $D(y) \approx J(y)\,y$ whose Jacobian $J(y)=\partial D/\partial y$ is degree-0 (scale-invariant). Because $J$ depends only on the direction of $y$, not its magnitude, a network trained over one range of noise levels extrapolates gracefully to unseen levels. A biased network, whose additive terms fix an absolute scale, instead collapses off its training range. This is the property that makes a single blind model viable, and it is the empirical target of our noise curriculum (Section~\ref{sec:protocol}).
@@ -208,7 +208,7 @@ It is easy to over-read Eq.~\eqref{eq:tweedie}, so we state two boundaries expli
   \item \textbf{Homogeneity is checkpoint-specific, not an architectural guarantee.} A network is exactly homogeneous only if every operation is genuinely bias-free. For this checkpoint the relative homogeneity error $\lVert D(\alpha y)-\alpha D(y)\rVert / \lVert \alpha D(y)\rVert$ is at the level of floating-point round-off across $\alpha \in \{\tfrac14,\tfrac12,2,4,8\}$, yet sibling checkpoints of the same family have shown deviations up to about $0.14$ when a single non-homogeneous operation slips in. Eq.~\eqref{eq:homog} must be verified per checkpoint, not assumed.
   \item \textbf{The learned residual is not a conservative field.} Eq.~\eqref{eq:tweedie} would make $f(y)$ the gradient of the scalar $\sigma^2 \log p_\sigma(y)$ only if the Jacobian $J(y)$ were symmetric, and it is not. On trained checkpoints of this family the measured Jacobian asymmetry $\lVert J - J^\top\rVert / \lVert J\rVert$ is $\mathcal{O}(0.5)$, roughly four orders of magnitude above a symmetric-blur control, so no global energy or log-density function exists whose gradient is the residual. Plug-and-play and Regularization-by-Denoising convergence guarantees assume a conservative, symmetric-Jacobian denoiser, so they do not transfer here, and the residual should be read as a useful local score estimate rather than a calibrated global prior.
 \end{enumerate}
-We return to the practical consequences (including uncertainty calibration) in Section~\ref{sec:limitations}.
+We return to the practical consequences in Section~\ref{sec:limitations}. (This non-conservativity is a statement about a \emph{global} energy; it does not prevent well-calibrated \emph{marginal} per-pixel intervals, which we obtain by conformal prediction in Section~\ref{sec:coverage}.)
 
 % ============================================================================
 \section{Experimental protocol}
@@ -231,7 +231,7 @@ We report two evaluations of the single trained checkpoint. (i) A blind PSNR-vs-
 \label{sec:results}
 
 \subsection{Blind denoising across noise levels}
-Figure~\ref{fig:psnrsweep} shows the blind PSNR-vs-noise sweep on DIV2K-validation. A single model, given no noise-level input, denoises across the whole curriculum range, from $40.7$\,dB at $\sigpx{=}5$ down to $29.1$\,dB at $\sigpx{=}65$, improving the noisy input by $+6.4$ to $+15.8$\,dB.
+Figure~\ref{fig:psnrsweep} shows the blind PSNR-vs-noise sweep on DIV2K-validation. A single model, given no noise-level input, denoises across the whole curriculum range, from $40.7$\,dB at $\sigpx{=}5$ down to $27.2$\,dB at $\sigpx{=}100$ (well beyond the $15/25/50$ benchmark regimes), improving the noisy input by $+6.4$ to $+16.7$\,dB with no cliff at the high-noise end.
 
 \begin{figure}[H]
 \centering
@@ -240,19 +240,19 @@ Figure~\ref{fig:psnrsweep} shows the blind PSNR-vs-noise sweep on DIV2K-validati
   width=0.72\textwidth, height=6.2cm,
   xlabel={noise level $\sigpx$ (on the $[0,255]$ scale)},
   ylabel={PSNR (dB)},
-  xmin=0, xmax=70, ymin=27, ymax=42,
-  xtick={5,10,15,25,35,50,65},
+  xmin=0, xmax=105, ymin=26, ymax=42,
+  xtick={5,15,25,35,50,65,75,100},
   ymajorgrids=true, grid style={gray!20},
   legend pos=north east, legend cell align={left},
   mark size=2pt,
 ]
 \addplot[oursblue, thick, mark=*] coordinates {
-  (5,40.68) (10,37.37) (15,35.51) (25,33.26) (35,31.79) (50,30.27) (65,29.12)
+  (5,40.68) (10,37.37) (15,35.51) (25,33.26) (35,31.79) (50,30.27) (65,29.12) (75,28.50) (100,27.16)
 };
 \addlegendentry{\model{} (blind)}
 \end{axis}
 \end{tikzpicture}
-\caption{Blind PSNR vs.\ noise on DIV2K-validation ($100$ patches, $256$px). One model spans $\sigpx \approx 5$--$65$ with no noise-level input. The $95\%$ bootstrap CIs (not shown) are $\pm 0.4$--$0.8$\,dB.}
+\caption{Blind PSNR vs.\ noise on DIV2K-validation ($100$ patches, $256$px). One model spans $\sigpx \approx 5$--$100$ with no noise-level input and degrades gracefully well past the classic $15/25/50$ regimes. The $95\%$ bootstrap CIs (not shown) are $\pm 0.4$--$0.8$\,dB.}
 \label{fig:psnrsweep}
 \end{figure}
 
@@ -321,6 +321,17 @@ Urban100 & 34.20 & 0.9437 & 31.92 & 0.9182 & 28.81 & 0.8661 \\
 \end{tabular}
 \end{table}
 
+\subsection{Qualitative examples}
+\label{sec:qualitative}
+Figure~\ref{fig:qualitative} shows the model on three held-out benchmark images at $\sigma{=}25$ --- a Kodak24 scene, an Urban100 facade (fine repetitive structure, a known denoiser stress case), and a McMaster crop (saturated colour). Full-image inference is run under the paper's protocol; the panels are a detail crop of the result. Noise is removed cleanly while edges, repeated structure, and colour transitions are preserved; per-image PSNR/SSIM (computed on the full image) are annotated.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\linewidth]{figures/qualitative_examples.png}
+\caption{Clean / noisy ($\sigpx{=}25$) / denoised on three held-out benchmark images (rows: Kodak24, Urban100, McMaster). Per-image PSNR and SSIM (full image, $\mathrm{max\_val}{=}1$) are annotated under each panel; the blind model receives no noise-level input.}
+\label{fig:qualitative}
+\end{figure}
+
 \subsection{Accuracy for the parameter budget}
 The point of Table~\ref{tab:sota} is not that \model{} wins outright, because it does not, but where it sits on the accuracy/size trade-off. Figure~\ref{fig:params} plots the four-set average PSNR at $\sigma=25$ against approximate parameter count. \model{} lands between the two size classes: comfortably above the sub-1M classic CNNs it beats, and within half a dB of models $8$--$10\times$ larger.
 
@@ -358,29 +369,50 @@ The point of Table~\ref{tab:sota} is not that \model{} wins outright, because it
 \label{fig:params}
 \end{figure}
 
-\subsection{Per-pixel uncertainty and coverage}
-\label{sec:coverage}
-Because the residual is a local score estimate, a natural question is whether a simple post-hoc interval calibrates. We ran split-conformal per-pixel intervals (per-$\sigma$ Mondrian, target coverage $0.90$, $\alpha=0.1$, $32$ calibration images) on the checkpoint. Table~\ref{tab:coverage} reports empirical coverage, mean interval width, and the matched test-split PSNR. Coverage is systematically $\sim0.877$, about $2.3$ points below the $0.90$ target.
+The parameter count is only half the efficiency story; Table~\ref{tab:efficiency} adds compute and memory, measured on one RTX~4090. At $256^2$ the model is $\sim104$\,GFLOPs and peaks at $\sim1.1$\,GB of GPU memory; cost scales linearly with pixel count (a fully-convolutional model), so a $512^2$ image is $\sim4\times$ both. The model runs \texttt{fp32} with XLA by choice: we found mixed precision \emph{slower} on this convolution-heavy U-Net, because the decoder's bilinear-upsample gradient forces XLA off and the lost fusion outweighs the fp16 tensor-core gain --- so the ``compact'' claim is about parameters, FLOPs, and memory, and does not lean on a low-precision trick.
 
 \begin{table}[H]
 \centering
-\caption{Post-hoc split-conformal per-pixel coverage (target $0.90$). Coverage is systematically below target; the text explains why this is expected.}
-\label{tab:coverage}
-\renewcommand{\arraystretch}{1.1}
-\begin{tabular}{lccc}
+\caption{Efficiency of \model{}, measured on one RTX~4090 (single-image forward pass, \texttt{fp32}). FLOPs are per forward pass; memory is the peak GPU allocation. Cost is linear in pixel count.}
+\label{tab:efficiency}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{lcccc}
 \toprule
-$\sigma_{\mathrm{norm}}$ & empirical coverage & mean width & test PSNR (dB) \\
+Resolution & Parameters & FLOPs & FLOPs/megapixel & Peak GPU mem \\
 \midrule
-0.05 & 0.877 & 0.053 & 35.08 \\
-0.10 & 0.879 & 0.076 & 31.73 \\
-0.15 & 0.878 & 0.093 & 29.80 \\
-0.20 & 0.878 & 0.107 & 28.45 \\
-0.25 & 0.877 & 0.119 & 27.38 \\
+$256\times256$ & $3.39$M & $104$\,GFLOP & $1.59$\,TFLOP & $1.06$\,GB \\
+$512\times512$ & $3.39$M & $416$\,GFLOP & $1.59$\,TFLOP & $3.92$\,GB \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-This is not finite-sample noise. With $32$ images the calibration pool is $\sim 6.3$M pixels, so the conformal quantile is estimated essentially exactly, and a well-specified split conformal would sit at $0.90$. The systematic $\sim0.877$ instead reflects a genuine exchangeability gap: a single per-$\sigma$ quantile pools pixels across images whose per-image residual scales are heterogeneous, so pixel-level exchangeability would require image-level exchangeability, which does not fully hold on held-out images. Image-conditional or variance-scaled conformal would tighten it, which is out of scope here.
+\subsection{Per-pixel uncertainty and coverage}
+\label{sec:coverage}
+Because the residual is a local score estimate, a natural question is whether a simple post-hoc interval calibrates. We build split-conformal per-pixel intervals (per-$\sigma$ Mondrian, target coverage $0.90$, $\alpha=0.1$): calibrate a per-$\sigma$ radius $q_\sigma$ on a held-out calibration split and report empirical coverage on a disjoint test split. An early version of this study used only $32$ calibration images and undercovered at $\sim0.877$ (about $2.3$ points below target), which we had wrongly attributed to an inter-image exchangeability gap. That attribution was a mistake, and it is worth correcting cleanly, because it turns on a subtlety about what "sample size" means for pixel-wise conformal.
+
+The correct diagnosis is finite-sample size, but counted in \emph{images}, not pixels. Pixels within one image are strongly correlated, so $32$ images is a small effective sample even though it is $\sim6.3$M pixels. Re-measuring with $500$ held-out COCO-validation calibration images and $500$ test images settles it (Table~\ref{tab:coverage}): the plain per-$\sigma$ scheme reaches $0.896$--$0.898$, within $\sim0.3$ points of nominal. To check whether the remaining gap is inter-image heteroscedasticity, we also ran a \emph{variance-scaled} score --- each pixel's residual divided by a ground-truth-free per-image scale $\bar u_j=\mathrm{mean}_i\lvert D(y_j)_i - y_{j,i}\rvert$, giving the interval $D(y)_i \pm q_\sigma\,\bar u_j$. It lands at the same $\sim0.897$ with essentially identical (marginally wider) intervals, so there is no meaningful per-image scale heterogeneity for it to exploit. The residual $\sim0.3$-point shortfall from $0.90$ is consistent with mild within-image pixel correlation, not an image-level effect. In short: split-conformal calibration of this denoiser is straightforward given an adequate calibration set; the earlier undercoverage was an artifact of a $32$-image pool, nothing deeper.
+
+\begin{table}[H]
+\centering
+\caption{Split-conformal per-pixel coverage (target $0.90$, $\alpha{=}0.1$), re-measured at $n{=}500$ held-out COCO-validation calibration and $500$ test images (one $256^2$ crop per image). Two nonconformity scores: the per-$\sigma$ absolute residual, and a ground-truth-free variance-scaled residual. The earlier $32$-image pool undercovered at $\sim0.877$; at $n{=}500$ both reach $\sim0.897$.}
+\label{tab:coverage}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{lccccc}
+\toprule
+ & & \multicolumn{2}{c}{per-$\sigma$ residual} & \multicolumn{2}{c}{variance-scaled} \\
+\cmidrule(lr){3-4}\cmidrule(lr){5-6}
+$\sigma_{\mathrm{norm}}$ & test PSNR (dB) & coverage & width & coverage & width \\
+\midrule
+0.05 & 33.62 & 0.8962 & 0.068 & 0.8966 & 0.069 \\
+0.10 & 30.32 & 0.8970 & 0.098 & 0.8969 & 0.099 \\
+0.15 & 28.49 & 0.8973 & 0.119 & 0.8973 & 0.120 \\
+0.20 & 27.23 & 0.8976 & 0.136 & 0.8975 & 0.137 \\
+0.25 & 26.28 & 0.8980 & 0.151 & 0.8979 & 0.152 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+We stress the scope of this result: it says the denoiser admits well-calibrated \emph{marginal} per-pixel intervals from a modest held-out set. It does \emph{not} claim a calibrated Bayesian posterior or a global prior --- that is a separate, genuinely negative result (the non-conservative Jacobian of Section~\ref{sec:theory-limits}), which conformal calibration does not touch.
 
 % ============================================================================
 \section{Discussion: limitations and what does not work}
@@ -390,13 +422,13 @@ This is not finite-sample noise. With $32$ images the calibration pool is $\sim 
 As a compact, blind denoiser \model{} is strong: it beats the classic sub-1M CNNs everywhere and closes most of the gap to models an order of magnitude larger, from a single checkpoint with no noise-level input. It does not beat the heavyweight state of the art, and the gap is structurally largest on Urban100, where non-local self-similarity rewards the attention and large receptive fields that a two-level local conv U-Net lacks.
 
 \paragraph{Limits of the theory.}
-As shown in Section~\ref{sec:theory-limits}, the learned residual field is measurably non-conservative, so \model{} does not define a global image prior, an exact likelihood, or a calibrated posterior. Uses that require a conservative denoiser (provable plug-and-play/RED convergence, energy-based sampling with a fixed target, calibrated Bayesian uncertainty) are outside what this model licenses, and the undercoverage in Section~\ref{sec:coverage} is a concrete downstream symptom. The homogeneity that does hold is inference-only and must be re-verified per checkpoint rather than assumed from the architecture.
+As shown in Section~\ref{sec:theory-limits}, the learned residual field is measurably non-conservative, so \model{} does not define a global image prior, an exact likelihood, or a calibrated Bayesian posterior. Uses that require a conservative denoiser (provable plug-and-play/RED convergence, energy-based sampling with a fixed target, calibrated Bayesian uncertainty) are outside what this model licenses. This is distinct from the per-pixel conformal coverage of Section~\ref{sec:coverage}, which \emph{is} well calibrated ($\sim0.90$ from a modest held-out set): frequentist marginal coverage of a fixed predictor requires no conservative-Jacobian / global-prior property, so the two results do not conflict. The homogeneity that does hold is inference-only and must be re-verified per checkpoint rather than assumed from the architecture.
 
 \paragraph{Measurement limits.}
-We report PSNR and SSIM for \model{} (Tables~\ref{tab:sota} and \ref{tab:ssim}), but the comparison against baselines is PSNR-only, because our collated source \citep{zhang2022scunet} reports PSNR and cross-source SSIM is protocol-inconsistent; a perceptual metric such as LPIPS is not measured at all. All results are from a single checkpoint, with no multi-seed variance estimate, and we present no ablations: the individual contributions of the frozen Gabor stem, the Laplacian high-frequency skips, the \texttt{high\_freq\_blocks}, the bias-free normalization, and the noise curriculum are not isolated here. CBSD68 and McMaster are the two standard color sets we could evaluate on locally alongside Kodak24 and Urban100, and grayscale Set12/BSD68 would require a one-channel model. Each of these is deliberate scope, and each is the obvious next experiment.
+We report PSNR and SSIM for \model{} (Tables~\ref{tab:sota} and \ref{tab:ssim}), but the comparison against baselines is PSNR-only, because our collated source \citep{zhang2022scunet} reports PSNR and cross-source SSIM is protocol-inconsistent; a perceptual metric such as LPIPS is not measured at all. Table~\ref{tab:sota} shows point PSNR without per-cell error bars: with a fixed noise seed each cell is a deterministic function of the frozen model, so the relevant uncertainty is the across-image spread, which the sweep reports as $\pm0.4$--$0.8$\,dB $95\%$ bootstrap CIs (Figure~\ref{fig:psnrsweep}); a multi-seed estimate over noise realizations is left to future work. All results are from a single checkpoint, and we present no ablations: the individual contributions of the frozen Gabor stem, the Laplacian high-frequency skips, the \texttt{high\_freq\_blocks}, the bias-free normalization, and the noise curriculum are not isolated here. CBSD68 and McMaster are the two standard color sets we could evaluate on locally alongside Kodak24 and Urban100, and grayscale Set12/BSD68 would require a one-channel model. Each of these is deliberate scope, and each is the obvious next experiment.
 
 \paragraph{Future work.}
-The natural follow-ups are (i) a controlled ablation isolating each component's dB contribution with multi-seed variance; (ii) a perceptual metric (e.g.\ LPIPS) alongside the PSNR/SSIM already reported, and baseline SSIM under a single re-run protocol so the comparison can extend beyond PSNR; (iii) larger-capacity and deeper variants to probe how much of the SOTA gap is capacity vs.\ architecture; and (iv) a study of whether a symmetrized or explicitly conservative variant recovers the plug-and-play guarantees the current model forgoes, and at what accuracy cost.
+The single most decisive follow-up is an \textbf{in-house bias-free baseline}: a bias-free flat DnCNN-style CNN (BF-CNN, in the sense of \citet{mohan2020biasfree}) trained under the identical recipe. It would serve two roles at once --- the closest-competitor row that our leaderboard comparison currently lacks (all baselines there are externally collated), and an \emph{architecture} control isolating the value of the ConvNeXt-U-Net + Gabor + Laplacian integration over a plain bias-free convolutional stack. One caveat on framing: BF-CNN is itself bias-free, so it is \emph{not} a test of bias-freedom; the clean test of the bias-free choice is our own network trained \emph{with} biases (and with LayerNorm in place of the variance-only norm), which we also leave to future work. Beyond that: (i) a controlled ablation isolating each component's dB contribution (Gabor stem, Laplacian skips, \texttt{high\_freq\_blocks}, bias-free norm, curriculum) with multi-seed variance; (ii) a perceptual metric (e.g.\ LPIPS) alongside the PSNR/SSIM already reported, and baseline SSIM under a single re-run protocol so the comparison can extend beyond PSNR; (iii) larger-capacity and deeper variants to probe how much of the SOTA gap is capacity vs.\ architecture; and (iv) whether a symmetrized or explicitly conservative variant recovers the plug-and-play guarantees the current model forgoes, and at what accuracy cost.
 
 % ============================================================================
 \section{Related work}
@@ -415,7 +447,9 @@ The block is a \convnext{} \citep{liu2022convnext} in a U-Net \citep{ronneberger
 \section{Reproducibility}
 \label{sec:repro}
 
-The evaluated checkpoint is \texttt{convunext\_denoiser\_base} ($3{,}393{,}936$ parameters; depth $2$; widths $66/132/264$; three \convnext{}-V1 blocks per scope plus three per high-frequency skip band; frozen $32$-filter, $7{\times}7$ Gabor stem; \bfbn{}; LeakyReLU($0.1$); linear grouped head). It was trained with the recipe of Section~\ref{sec:protocol}. The full-image benchmark uses whole test images reflect-padded to a multiple of $16$, PSNR at $\mathrm{max\_val}=1.0$ on $[-0.5,0.5]$, on the standard CBSD68 / Kodak24 / McMaster / Urban100 sets. All numbers in Table~\ref{tab:sota}, Table~\ref{tab:coverage}, and Figure~\ref{fig:psnrsweep} are measured from that single checkpoint; baseline numbers are the published values as collated by \citet{zhang2022scunet}.
+The evaluated checkpoint is \texttt{convunext\_denoiser\_base} ($3{,}393{,}936$ parameters; depth $2$; widths $66/132/264$; three \convnext{}-V1 blocks per scope plus three per high-frequency skip band; frozen $32$-filter, $7{\times}7$ Gabor stem; \bfbn{}; LeakyReLU($0.1$); linear grouped head). It was trained with the recipe of Section~\ref{sec:protocol}. The full-image benchmark uses whole test images reflect-padded to a multiple of $16$, PSNR at $\mathrm{max\_val}=1.0$ on $[-0.5,0.5]$, on the standard CBSD68 / Kodak24 / McMaster / Urban100 sets. All numbers in Table~\ref{tab:sota}, Table~\ref{tab:ssim} and Figure~\ref{fig:psnrsweep} are measured from that single checkpoint; baseline numbers are the published values as collated by \citet{zhang2022scunet}. The coverage study (Table~\ref{tab:coverage}) uses $500$ held-out COCO-\texttt{val2017} calibration and $500$ test crops ($256^2$, one per image); the efficiency numbers (Table~\ref{tab:efficiency}) are single-image \texttt{fp32} forward passes on one RTX~4090.
+
+\paragraph{Gabor stem, in full.} The frozen stem is fully specified so it can be regenerated bit-for-bit. It is a depthwise $7{\times}7$ convolution with depth multiplier $32$ (so $3{\times}32{=}96$ output channels), \texttt{use\_bias}=False, \texttt{trainable}=False. Each output channel is one real 2D Gabor wavelet $g(u,v)=\exp\!\big(-\tfrac{u_\theta^2+\gamma^2 v_\theta^2}{2s^2}\big)\cos\!\big(\tfrac{2\pi u_\theta}{\lambda}+\psi\big)$, with $(u_\theta,v_\theta)$ the coordinates rotated by $\theta$. The five parameters are swept on a regular \texttt{linspace} grid over the Özbulak--Ekenel Table-I ranges --- $s\in[2,21]$, $\theta\in[0^\circ,360^\circ]$, $\lambda\in[8,100]$, $\gamma\in[0,300\%]$, $\psi\in[0^\circ,360^\circ]$ --- one distinct $(s,\theta,\lambda,\gamma,\psi)$ tuple per output channel, replicated identically across the three input channels, with global seed $42$. Because the bank is fixed, it contributes zero trainable parameters and requires no checkpointing beyond these constants.
 
 % ============================================================================
 \section{Conclusion}
