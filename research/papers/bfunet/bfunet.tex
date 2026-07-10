@@ -95,43 +95,52 @@ What this paper is \emph{not}: it is not a claim that Gabor stems, Laplacian ski
 
 \begin{figure}[H]
 \centering
-\resizebox{\textwidth}{!}{%
+\resizebox{0.92\textwidth}{!}{%
 \begin{tikzpicture}[
   font=\small,
-  node distance=0.55cm and 0.55cm,
-  stem/.style={draw, rounded corners=2pt, minimum width=1.9cm, minimum height=0.8cm, align=center, fill=gaborgreen!15},
-  enc/.style={draw, rounded corners=2pt, minimum width=1.7cm, minimum height=0.8cm, align=center, fill=oursblue!12},
-  bott/.style={draw, rounded corners=2pt, minimum width=1.7cm, minimum height=0.8cm, align=center, fill=bottlepurple!15},
-  skip/.style={draw, rounded corners=2pt, minimum width=1.7cm, minimum height=0.7cm, align=center, fill=skipred!12, font=\scriptsize},
-  io/.style={draw, rounded corners=2pt, minimum width=1.4cm, minimum height=0.8cm, align=center, fill=black!4},
-  arr/.style={-{Latex[length=2mm]}, thick},
-  sarr/.style={-{Latex[length=2mm]}, thick, skipred!70, dashed},
+  every node/.style={transform shape},
+  box/.style={draw, thick, rounded corners=3pt, minimum width=3.0cm, minimum height=1.35cm,
+              text width=2.7cm, align=center, inner sep=5pt},
+  stem/.style={box, fill=gaborgreen!15},
+  enc/.style={box, fill=oursblue!12},
+  dec/.style={box, fill=oursblue!12},
+  bott/.style={box, fill=bottlepurple!16},
+  io/.style={box, minimum height=1.1cm, text width=2.5cm, fill=black!5},
+  skip/.style={draw, thick, rounded corners=3pt, minimum width=2.7cm, minimum height=1.0cm,
+               text width=2.5cm, align=center, inner sep=4pt, fill=skipred!12, font=\footnotesize},
+  arr/.style={-{Latex[length=3mm]}, very thick},
+  sarr/.style={-{Latex[length=3mm]}, very thick, skipred!80, dashed},
+  lbl/.style={font=\footnotesize, inner sep=1.5pt},
   ]
-  % bottom row: encoder path
-  \node[io] (in) {$y$\\$[-0.5,0.5]$};
-  \node[stem, right=of in] (gab) {Gabor stem\\(frozen, 96)\\$1{\times}1{\to}66$};
-  \node[enc, right=of gab] (e0) {enc L0\\$66$\\$3\times$blk};
-  \node[enc, right=of e0] (e1) {enc L1\\$132$\\$3\times$blk};
-  \node[bott, right=of e1] (bn) {bottleneck\\$264$\\$3\times$blk};
-  \draw[arr] (in) -- (gab);
+  % --- encoder column (left, top to bottom) ---
+  \node[io]   (in)  at (0,0)     {input $y$\\[1pt] {\footnotesize $[-0.5,\,0.5]$}};
+  \node[stem] (gab) at (0,-2.1)  {frozen Gabor stem\\[1pt] {\footnotesize $3{\times}32{=}96$, then $1{\times}1{\to}66$}};
+  \node[enc]  (e0)  at (0,-4.2)  {encoder L0\\[1pt] {\footnotesize $66$ ch, $3\times$ block}};
+  \node[enc]  (e1)  at (0,-6.3)  {encoder L1\\[1pt] {\footnotesize $132$ ch, $3\times$ block}};
+  % --- bottleneck (bottom center) ---
+  \node[bott] (bn)  at (4,-8.2)  {bottleneck\\[1pt] {\footnotesize $264$ ch, $3\times$ block}};
+  % --- decoder column (right, bottom to top) ---
+  \node[dec]  (d1)  at (8,-6.3)  {decoder L1\\[1pt] {\footnotesize $132$ ch, $3\times$ block}};
+  \node[dec]  (d0)  at (8,-4.2)  {decoder L0\\[1pt] {\footnotesize $66$ ch, $3\times$ block}};
+  \node[io]   (out) at (8,0)     {output $\hat{x}=D(y)$\\[1pt] {\footnotesize $1{\times}1$, groups $=3$}};
+  % --- skip nodes (high-frequency bands) ---
+  \node[skip] (s0)  at (4,-4.2)  {hi-freq skip L0\\[1pt] $+\,3\times$ block};
+  \node[skip] (s1)  at (4,-6.3)  {hi-freq skip L1\\[1pt] $+\,3\times$ block};
+  % --- encoder flow ---
+  \draw[arr] (in)  -- (gab);
   \draw[arr] (gab) -- (e0);
-  \draw[arr] (e0) -- (e1) node[midway, below, font=\scriptsize] {Lap.\ split $\downarrow$};
-  \draw[arr] (e1) -- (bn) node[midway, below, font=\scriptsize] {Lap.\ split $\downarrow$};
-  % top row: decoder path
-  \node[enc, above=1.6cm of e1] (d1) {dec L1\\$132$\\$3\times$blk};
-  \node[enc, left=of d1] (d0) {dec L0\\$66$\\$3\times$blk};
-  \node[io, left=of d0] (out) {$\hat{x}$\\$1{\times}1$,\,g$=3$};
-  \draw[arr] (bn) |- (d1) node[near start, right, font=\scriptsize] {up $\times2$};
-  \draw[arr] (d1) -- (d0) node[midway, above, font=\scriptsize] {up $\times2$};
-  \draw[arr] (d0) -- (out);
-  % skip bands (high-frequency, with high_freq blocks)
-  \node[skip] (s1) at ($(e1)!0.5!(d1)$) {hi-freq skip L1\\$+3\times$blk};
-  \node[skip] (s0) at ($(e0)!0.5!(d0)$) {hi-freq skip L0\\$+3\times$blk};
-  \draw[sarr] (e1) -- (s1); \draw[sarr] (s1) -- (d1) node[midway,right,font=\scriptsize]{Add};
-  \draw[sarr] (e0) -- (s0); \draw[sarr] (s0) -- (d0) node[midway,right,font=\scriptsize]{Add};
+  \draw[arr] (e0)  -- node[lbl, right] {Lap.\ split $\downarrow$} (e1);
+  \draw[arr] (e1)  -- node[lbl, below left=1pt] {Lap.\ split $\downarrow$} (bn);
+  % --- decoder flow ---
+  \draw[arr] (bn)  -- node[lbl, below right=1pt] {upsample $\times2$} (d1);
+  \draw[arr] (d1)  -- node[lbl, right] {upsample $\times2$} (d0);
+  \draw[arr] (d0)  -- node[lbl, right] {linear head} (out);
+  % --- high-frequency skip connections (horizontal) ---
+  \draw[sarr] (e0) -- (s0);   \draw[sarr] (s0) -- node[lbl, above] {Add} (d0);
+  \draw[sarr] (e1) -- (s1);   \draw[sarr] (s1) -- node[lbl, above] {Add} (d1);
 \end{tikzpicture}%
 }
-\caption{\model{} data flow (channel widths shown). A frozen Gabor stem feeds a two-level \convnext{}-V1 U-Net. Downsampling is a Laplacian-pyramid split: the low-frequency band descends (solid), the full-resolution high-frequency residual becomes the skip (dashed), passing through three extra bias-free \convnext{} blocks before a parameter-free channel-matched \texttt{Add} into the decoder. The head is a bias-free grouped $1{\times}1$ convolution (3 groups). Every operation is degree-1 homogeneous at inference.}
+\caption{\model{} data flow (channel widths shown). The encoder (left) descends; the decoder (right) ascends; the bottleneck sits at the base. A \textbf{frozen Gabor stem} feeds a two-level \convnext{}-V1 U-Net. Downsampling is a \textbf{Laplacian-pyramid split}: the low-frequency band descends (solid arrows) while the full-resolution high-frequency residual becomes the skip (dashed), passing through \textbf{three extra bias-free \convnext{} blocks} before a parameter-free channel-matched \texttt{Add} into the decoder. The head is a bias-free grouped $1{\times}1$ convolution (3 groups). Every operation is degree-1 homogeneous at inference, so $D(\alpha y)=\alpha D(y)$.}
 \label{fig:arch}
 \end{figure}
 
