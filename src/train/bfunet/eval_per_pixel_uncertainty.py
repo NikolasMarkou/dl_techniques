@@ -50,7 +50,7 @@ import json
 import argparse
 from pathlib import Path
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -101,8 +101,10 @@ import keras
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.conformal_denoiser_intervals import (
     calibrate_per_sigma,
+    calibrate_per_sigma_normalized,
     predict_intervals,
     evaluate_coverage,
+    evaluate_coverage_normalized,
 )
 from dl_techniques.utils.multiplicative_miyasawa import additive_sure_risk_map
 
@@ -127,6 +129,53 @@ from train.common import collect_image_paths, set_seeds  # noqa: E402
 DEFAULT_SIGMAS: List[float] = [0.05, 0.10, 0.15, 0.20, 0.25]
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tiff", ".bmp", ".webp"}
 BOUNDARY_EPS: float = 0.02  # |value| within this of +/-0.5 -> masked in SURE panel
+
+# Conformal schemes: (calibrator, coverage-evaluator). The naive per-sigma scheme
+# is the historical scalar-radius baseline (kept byte-identical); 'normalized' is
+# the variance-scaled per-image-normalized band. Both share the SAME calib/test
+# split so they are compared apples-to-apples.
+_SCHEME_SPECS = {
+    "naive": (calibrate_per_sigma, evaluate_coverage),
+    "normalized": (calibrate_per_sigma_normalized, evaluate_coverage_normalized),
+}
+SCHEME_LABELS = {"naive": "naive per-s", "normalized": "variance-scaled"}
+VALID_SCHEMES = tuple(_SCHEME_SPECS.keys())
+
+
+def _parse_schemes(raw: str) -> List[str]:
+    """Parse a comma-separated ``--schemes`` string into an ordered, de-duped list.
+
+    Unknown names raise (fail loud rather than silently skipping a requested
+    scheme). Order is preserved so ``naive,normalized`` prints naive first.
+    """
+    seen: List[str] = []
+    for tok in str(raw).split(","):
+        name = tok.strip().lower()
+        if not name:
+            continue
+        if name not in VALID_SCHEMES:
+            raise ValueError(
+                f"unknown scheme {name!r}; valid: {', '.join(VALID_SCHEMES)}"
+            )
+        if name not in seen:
+            seen.append(name)
+    if not seen:
+        raise ValueError("no valid scheme selected via --schemes")
+    return seen
+
+
+def _overall_row(rows: List[dict]) -> dict:
+    """Sigma-pooled summary of per-sigma rows.
+
+    Each sigma bin contributes the SAME number of test pixels (same
+    ``clean_test``), so the pixel-pooled coverage/width equals the equal-weight
+    mean of the per-sigma values; PSNR is likewise averaged over sigmas.
+    """
+    return {
+        "coverage": float(np.mean([r["coverage"] for r in rows])),
+        "mean_width": float(np.mean([r["mean_width"] for r in rows])),
+        "test_psnr": float(np.mean([r["test_psnr"] for r in rows])),
+    }
 
 
 # ---------------------------------------------------------------------
@@ -259,6 +308,44 @@ def _print_table(rows: List[dict], alpha: float) -> None:
     print("=" * len(header))
 
 
+def _print_combined_table(scheme_rows: Dict[str, List[dict]], alpha: float) -> None:
+    """Print the multi-scheme coverage table: per sigma + a sigma-pooled overall row.
+
+    One block per scheme (naive per-sigma, variance-scaled), each with its
+    per-sigma rows followed by an ``overall`` (sigma-pooled) summary. ``q`` is a
+    scalar radius for the naive scheme and a NORMALIZED radius for the variance-
+    scaled scheme (multiplied by the per-image scale at test time), so the two
+    ``q`` columns are not directly comparable — coverage/width are.
+    """
+    target = 1.0 - alpha
+    header = (
+        f"{'scheme':>14} | {'sigma':>7} | {'q':>9} | {'test_cov':>9} | "
+        f"{'target':>7} | {'mean_width':>10} | {'test_PSNR':>9}"
+    )
+    print("=" * len(header))
+    print("Per-pixel split-conformal coverage — multi-scheme (per-sigma / Mondrian)")
+    print("=" * len(header))
+    print(header)
+    print("-" * len(header))
+    for scheme, rows in scheme_rows.items():
+        label = SCHEME_LABELS.get(scheme, scheme)
+        for r in rows:
+            print(
+                f"{label:>14} | {r['sigma']:>7.3f} | {r['q']:>9.5f} | "
+                f"{r['coverage']:>9.4f} | {target:>7.2f} | "
+                f"{r['mean_width']:>10.5f} | {r['test_psnr']:>9.3f}"
+            )
+        ov = _overall_row(rows)
+        print("-" * len(header))
+        print(
+            f"{label:>14} | {'overall':>7} | {'':>9} | "
+            f"{ov['coverage']:>9.4f} | {target:>7.2f} | "
+            f"{ov['mean_width']:>10.5f} | {ov['test_psnr']:>9.3f}"
+        )
+        print("-" * len(header))
+    print("=" * len(header))
+
+
 # ---------------------------------------------------------------------
 # Per-pixel PNG maps
 # ---------------------------------------------------------------------
@@ -383,32 +470,56 @@ def run_evaluation(args: argparse.Namespace) -> Path:
         config.patch_size, config.channels,
     )
 
-    # Per-sigma Mondrian calibration on the calibration split.
+    schemes = _parse_schemes(args.schemes)
+    logger.info("conformal schemes: %s", ", ".join(schemes))
+
+    # Per-sigma Mondrian calibration set (shared across ALL schemes so they are
+    # calibrated on the identical calib split).
     clean_c, noisy_c, sigma_c = _build_calibration_sets(
         clean_calib, sigmas, seed=args.seed
     )
-    q_by_sigma = calibrate_per_sigma(
-        model, clean_c, noisy_c, sigma_c, alpha=args.alpha
-    )
 
-    # Independent test-split coverage / width / PSNR per sigma.
-    rows: List[dict] = []
-    rng = np.random.RandomState(args.seed + 1)  # test noise != calib noise
-    for sigma in sigmas:
-        q = q_by_sigma[float(sigma)]
-        noisy_test = add_awgn(clean_test, float(sigma), clip=True, rng=rng)
-        cov = evaluate_coverage(model, clean_test, noisy_test, q)
-        mu, _, _ = predict_intervals(model, noisy_test, q)
-        rows.append({
-            "sigma": float(sigma),
-            "n_calib": int(clean_calib.shape[0]),
-            "q": float(q),
-            "coverage": cov["coverage"],
-            "mean_width": cov["mean_width"],
-            "test_psnr": _mean_psnr(mu, clean_test),
-        })
+    # Pre-draw the independent test-split noise ONCE per sigma so every scheme is
+    # evaluated on byte-identical test inputs. Drawing them in sigma order with a
+    # RandomState(seed+1) reproduces the historical naive-path noise draws exactly
+    # (test noise != calibration noise), keeping the existing 0.877 result stable.
+    rng = np.random.RandomState(args.seed + 1)
+    noisy_test_by_sigma = {
+        float(sigma): add_awgn(clean_test, float(sigma), clip=True, rng=rng)
+        for sigma in sigmas
+    }
 
-    _print_table(rows, alpha=args.alpha)
+    scheme_rows: Dict[str, List[dict]] = {}
+    q_by_sigma_by_scheme: Dict[str, Dict[float, float]] = {}
+    for scheme in schemes:
+        calibrate_fn, evaluate_fn = _SCHEME_SPECS[scheme]
+        q_by_sigma = calibrate_fn(
+            model, clean_c, noisy_c, sigma_c, alpha=args.alpha
+        )
+        rows: List[dict] = []
+        for sigma in sigmas:
+            q = q_by_sigma[float(sigma)]
+            noisy_test = noisy_test_by_sigma[float(sigma)]
+            cov = evaluate_fn(model, clean_test, noisy_test, q)
+            mu, _, _ = predict_intervals(model, noisy_test, q)  # PSNR (mu is
+            rows.append({                                       # scheme-agnostic)
+                "sigma": float(sigma),
+                "n_calib": int(clean_calib.shape[0]),
+                "q": float(q),
+                "coverage": cov["coverage"],
+                "mean_width": cov["mean_width"],
+                "test_psnr": _mean_psnr(mu, clean_test),
+            })
+        scheme_rows[scheme] = rows
+        q_by_sigma_by_scheme[scheme] = q_by_sigma
+
+    # Backward-compatible output: only the naive scheme -> the EXACT historical
+    # single-scheme table (existing 0.877 result stays reproducible). Otherwise
+    # emit the combined multi-scheme table (per sigma + sigma-pooled overall).
+    if schemes == ["naive"]:
+        _print_table(scheme_rows["naive"], alpha=args.alpha)
+    else:
+        _print_combined_table(scheme_rows, alpha=args.alpha)
 
     # Output dir + PNG maps at a representative sigma (median of the requested set).
     name = args.experiment_name or (
@@ -417,19 +528,44 @@ def run_evaluation(args: argparse.Namespace) -> Path:
     out_dir = Path(args.output_dir) / name
     (out_dir / "visualizations").mkdir(parents=True, exist_ok=True)
 
+    # The uncertainty-map panel annotates a scalar radius (width = 2q). Use the
+    # naive scheme's q when available (historical behavior); otherwise the first
+    # selected scheme's q (a normalized radius, noted in the panel semantics).
+    map_scheme = "naive" if "naive" in schemes else schemes[0]
+    map_q_by_sigma = q_by_sigma_by_scheme[map_scheme]
+
     repr_sigma = sigmas[len(sigmas) // 2]
     _save_uncertainty_maps(
-        model, clean_test, repr_sigma, q_by_sigma[float(repr_sigma)],
+        model, clean_test, repr_sigma, map_q_by_sigma[float(repr_sigma)],
         out_dir / "visualizations", n_examples=args.n_examples,
         n_hutchinson=args.n_hutchinson, seed=args.seed,
     )
 
-    with open(out_dir / "coverage_table.json", "w") as f:
-        json.dump({
+    # JSON: naive-only dumps the EXACT historical shape (byte-identical); the
+    # multi-scheme case dumps a per-scheme structure plus sigma-pooled overalls.
+    if schemes == ["naive"]:
+        payload = {
             "checkpoint": args.checkpoint, "alpha": args.alpha,
-            "target_coverage": 1.0 - args.alpha, "rows": rows,
-            "q_by_sigma": {str(k): v for k, v in q_by_sigma.items()},
-        }, f, indent=2)
+            "target_coverage": 1.0 - args.alpha, "rows": scheme_rows["naive"],
+            "q_by_sigma": {
+                str(k): v for k, v in q_by_sigma_by_scheme["naive"].items()
+            },
+        }
+    else:
+        payload = {
+            "checkpoint": args.checkpoint, "alpha": args.alpha,
+            "target_coverage": 1.0 - args.alpha, "schemes": schemes,
+            "rows_by_scheme": scheme_rows,
+            "overall_by_scheme": {
+                s: _overall_row(r) for s, r in scheme_rows.items()
+            },
+            "q_by_sigma_by_scheme": {
+                s: {str(k): v for k, v in q.items()}
+                for s, q in q_by_sigma_by_scheme.items()
+            },
+        }
+    with open(out_dir / "coverage_table.json", "w") as f:
+        json.dump(payload, f, indent=2)
     logger.info("done; results in %s", out_dir)
     return out_dir
 
@@ -449,6 +585,12 @@ def main() -> None:
                              "curriculum range ~[0.025, 0.25])")
     parser.add_argument("--alpha", type=float, default=0.1,
                         help="miscoverage level; target coverage is 1-alpha (0.1 -> 90%%)")
+    parser.add_argument("--schemes", type=str, default="naive",
+                        help="comma-separated conformal schemes to run/report: "
+                             "'naive' (per-sigma scalar radius) and/or "
+                             "'normalized' (variance-scaled per-image band). "
+                             "Default 'naive' keeps the historical single-scheme "
+                             "output byte-identical.")
     parser.add_argument("--n-calib", type=int, default=32,
                         help="clean patches used for the calibration split")
     parser.add_argument("--n-test", type=int, default=32,

@@ -256,6 +256,142 @@ def calibrate_per_sigma(
 
 
 # ---------------------------------------------------------------------
+# 3b. Variance-scaled (per-image-normalized) per-sigma calibration
+# ---------------------------------------------------------------------
+
+
+def _per_image_normalizer(
+        mu: np.ndarray,
+        noisy: np.ndarray,
+        eps: float = 1e-6,
+) -> np.ndarray:
+    """Ground-truth-free per-image scale ``u_j = mean_i |mu_j_i - y_j_i| + eps``.
+
+    The scale is the spatial mean absolute residual of the denoiser output
+    ``mu`` against the NOISY input ``y`` (both already available at test time),
+    plus an epsilon floor. It uses ONLY ``mu`` and ``y`` — never the clean image
+    — so it is computable identically at calibration and deployment (a test-time
+    normalizer must not depend on the unknown clean signal). The ``+eps`` floor
+    mirrors ``conformal_forecaster.py`` and guards a near-flat image whose
+    residual is ~0 from producing a degenerate (near-zero) denominator that
+    would blow up the normalized score.
+
+    Args:
+        mu: Denoiser point estimates, shape ``(N, ...)`` (clipped by
+            :func:`_predict_mu`).
+        noisy: Noisy inputs, shape ``(N, ...)`` aligned with ``mu``.
+        eps: Positive floor added to every per-image scale.
+
+    Returns:
+        1-D array ``u`` of shape ``(N,)``: one strictly-positive scale per image.
+    """
+    mu_arr = np.asarray(mu, dtype=np.float64)
+    noisy_arr = np.asarray(noisy, dtype=np.float64)
+    spatial_axes = tuple(range(1, mu_arr.ndim))
+    return np.mean(np.abs(mu_arr - noisy_arr), axis=spatial_axes) + float(eps)
+
+
+def _broadcast_per_image(u: np.ndarray, ndim: int) -> np.ndarray:
+    """Reshape a ``(N,)`` per-image vector to ``(N, 1, ..., 1)`` for broadcasting."""
+    return np.asarray(u, dtype=np.float64).reshape((-1,) + (1,) * (ndim - 1))
+
+
+def calibrate_per_sigma_normalized(
+        model: Any,
+        clean: np.ndarray,
+        noisy: np.ndarray,
+        sigmas: Union[Sequence[float], np.ndarray],
+        alpha: float = 0.1,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+        eps: float = 1e-6,
+) -> Dict[float, float]:
+    """Calibrate a variance-scaled conformal radius ``q`` per sigma bin.
+
+    # DECISION plan_2026-07-10_3378928c/D-001: variance-scaled (per-image-
+    # normalized) conformal scheme. The nonconformity score is divided by a
+    # GROUND-TRUTH-FREE per-image scale ``u_j = mean_i |mu_j_i - y_j_i| + eps``
+    # (mean absolute residual of the denoiser output vs the NOISY input) BEFORE
+    # the per-sigma order statistic. Do NOT derive ``u_j`` from the clean image
+    # (directly or via any calibration-only quantity used at test time): that is
+    # circular and silently inflates coverage (INV-1, hard). Do NOT pool the
+    # normalized scores across sigma bins — sigmas are not exchangeable, so the
+    # Mondrian-per-sigma split is retained (INV-2). This is the deliberately
+    # chosen fix for the naive scheme's heteroscedastic-per-image undercoverage;
+    # a plain per-sigma pooled |mu - clean| radius (``calibrate_per_sigma``) was
+    # kept unchanged as the honest baseline, not replaced. See decisions.md
+    # D-001.
+
+    Within each sigma bin the per-pixel score is
+    ``s_i = |mu_i - clean_i| / u_j`` (pixel ``i`` in image ``j``); the normalized
+    scores are pooled over the bin and passed to :func:`conformal_quantile`
+    (unchanged, scale-agnostic) to yield the bin radius ``q_sigma``. At test time
+    the interval half-width is the PER-IMAGE quantity ``q_sigma * u_k`` (a genuine
+    heteroscedastic band), recomputed the same ground-truth-free way for each
+    test image (see :func:`evaluate_coverage_normalized`).
+
+    Args:
+        model: Frozen denoiser callable (black-box forward pass only).
+        clean: Clean targets, shape ``(N, ...)``.
+        noisy: Noisy inputs, shape ``(N, ...)`` aligned with ``clean``.
+        sigmas: Per-sample sigma labels, length ``N``; distinct values define the
+            Mondrian bins.
+        alpha: Miscoverage level; target coverage per bin is ``1 - alpha``.
+        batch_size: Forward-pass batch size.
+        eps: Epsilon floor for the per-image normalizer.
+
+    Returns:
+        Dict mapping each distinct sigma (as ``float``) to its normalized radius
+        ``q`` (``float``; ``+inf`` if a bin is too small for ``alpha``). The radius
+        is in NORMALIZED units — multiply by the per-image ``u`` at prediction
+        time, never apply it as an absolute pixel radius.
+
+    Raises:
+        ValueError: If inputs are empty, misaligned, or ``sigmas`` length does
+            not match ``clean``/``noisy``.
+    """
+    clean_arr = np.asarray(clean)
+    noisy_arr = np.asarray(noisy)
+    sigma_arr = np.asarray(sigmas, dtype=np.float64).ravel()
+
+    n = clean_arr.shape[0]
+    if n == 0:
+        raise ValueError(
+            "calibrate_per_sigma_normalized received an empty calibration set"
+        )
+    if noisy_arr.shape[0] != n:
+        raise ValueError(
+            f"clean/noisy sample-count mismatch: {n} vs {noisy_arr.shape[0]}"
+        )
+    if sigma_arr.shape[0] != n:
+        raise ValueError(
+            f"sigmas length {sigma_arr.shape[0]} != sample count {n}"
+        )
+
+    q_by_sigma: Dict[float, float] = {}
+    for sigma in np.unique(sigma_arr):
+        mask = sigma_arr == sigma
+        clean_bin = clean_arr[mask]
+        noisy_bin = noisy_arr[mask]
+
+        mu = _predict_mu(model, noisy_bin, batch_size=batch_size)
+        u = _per_image_normalizer(mu, noisy_bin, eps=eps)          # (n_bin,)
+        u_b = _broadcast_per_image(u, mu.ndim)                     # (n_bin,1,..)
+        scores = (np.abs(mu - clean_bin) / u_b).ravel()
+        q = conformal_quantile(scores, alpha)
+
+        sigma_key = float(sigma)
+        q_by_sigma[sigma_key] = q
+        logger.info(
+            "calibrate_per_sigma_normalized: sigma=%.4f  n_samples=%d  "
+            "n_pixels=%d  alpha=%.3f  mean_u=%.6g  q_norm=%.6g",
+            sigma_key, int(mask.sum()), int(scores.size), alpha,
+            float(np.mean(u)), q,
+        )
+
+    return q_by_sigma
+
+
+# ---------------------------------------------------------------------
 # 4. Interval prediction
 # ---------------------------------------------------------------------
 
@@ -328,5 +464,62 @@ def evaluate_coverage(
     logger.info(
         "evaluate_coverage: n_pixels=%d  q=%.6g  coverage=%.4f  mean_width=%.6g",
         int(covered.size), q, coverage, mean_width,
+    )
+    return {"coverage": coverage, "mean_width": mean_width}
+
+
+# ---------------------------------------------------------------------
+# 6. Variance-scaled coverage / mean width (per-image heteroscedastic band)
+# ---------------------------------------------------------------------
+
+
+def evaluate_coverage_normalized(
+        model: Any,
+        clean: np.ndarray,
+        noisy: np.ndarray,
+        q: float,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+        eps: float = 1e-6,
+) -> Dict[str, float]:
+    """Empirical coverage / mean width for the variance-scaled scheme.
+
+    Companion to :func:`calibrate_per_sigma_normalized`. The half-width is the
+    PER-IMAGE quantity ``q * u_k`` where ``u_k = mean_i |mu_k_i - y_k_i| + eps``
+    is recomputed the SAME ground-truth-free way as at calibration (uses only the
+    denoiser output ``mu`` and the noisy input ``y`` — never the clean image,
+    INV-1). The interval is ``[mu_i - q*u_k, mu_i + q*u_k]``, a genuine
+    heteroscedastic band (constant within an image, varying across images), in
+    contrast to :func:`evaluate_coverage`'s single scalar ``q``.
+
+    Coverage is the fraction of pixels whose clean value falls inside the band;
+    mean width equals ``mean_k(2 * q * u_k)`` (uniform pixel counts make the
+    per-pixel and per-image means coincide). Both are plain numpy reductions.
+
+    Args:
+        model: Frozen denoiser callable.
+        clean: Clean targets, shape ``(N, ...)``.
+        noisy: Noisy inputs, shape ``(N, ...)`` aligned with ``clean``.
+        q: Normalized conformal radius from
+            :func:`calibrate_per_sigma_normalized` (NORMALIZED units).
+        batch_size: Forward-pass batch size.
+        eps: Epsilon floor for the per-image normalizer (match calibration).
+
+    Returns:
+        Dict ``{"coverage": float, "mean_width": float}``.
+    """
+    clean_arr = np.asarray(clean)
+    mu = _predict_mu(model, noisy, batch_size=batch_size)
+    u = _per_image_normalizer(mu, noisy, eps=eps)          # (N,)
+    half_width = float(q) * _broadcast_per_image(u, mu.ndim)  # (N,1,..)
+    lower = mu - half_width
+    upper = mu + half_width
+
+    covered = (clean_arr >= lower) & (clean_arr <= upper)
+    coverage = float(np.mean(covered))
+    mean_width = float(np.mean(upper - lower))
+    logger.info(
+        "evaluate_coverage_normalized: n_pixels=%d  q_norm=%.6g  mean_u=%.6g  "
+        "coverage=%.4f  mean_width=%.6g",
+        int(covered.size), float(q), float(np.mean(u)), coverage, mean_width,
     )
     return {"coverage": coverage, "mean_width": mean_width}
