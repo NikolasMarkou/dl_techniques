@@ -62,7 +62,7 @@ from .operators import (
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _DEFAULT_OUTPUT_DIR = _REPO_ROOT / "results"
 _DEFAULT_CHECKPOINT = (
-    _REPO_ROOT / "results" / "cliffordunet_denoiser_base_20260705_004751" / "best_model.keras"
+    _REPO_ROOT / "results" / "convunext_denoiser_base_20260707_122133" / "best_model.keras"
 )
 
 # Canonical problem order for the "all" selection. "denoise" is the trivial

@@ -59,7 +59,7 @@ from applications.bias_free_denoiser.main import (
 
 _DEFAULT_MODEL = os.environ.get(
     "BFDENOISER_MODEL",
-    "results/cliffordunet_denoiser_base_20260705_004751/best_model.keras",
+    "results/convunext_denoiser_base_20260707_122133/best_model.keras",
 )
 _RTC_CONFIG = {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 
