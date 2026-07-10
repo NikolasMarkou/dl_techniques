@@ -454,6 +454,9 @@ def run_evaluation(args: argparse.Namespace) -> Path:
     config = _load_eval_config(args.checkpoint)
     if args.patch_size:
         config.patch_size = args.patch_size
+    if args.val_dirs:
+        config.val_image_dirs = list(args.val_dirs)
+        logger.info("val dirs overridden -> %s", config.val_image_dirs)
     model = _load_denoiser(args.checkpoint)
 
     sigmas = [float(s) for s in args.sigmas]
@@ -597,6 +600,10 @@ def main() -> None:
                         help="disjoint clean patches used for the test split")
     parser.add_argument("--patch-size", type=int, default=256,
                         help="patch size (matches training; overrides config.json)")
+    parser.add_argument("--val-dirs", type=str, nargs="+", default=None,
+                        help="override config.json val_image_dirs (one crop per image); "
+                             "point at a large held-out pool (e.g. COCO val2017) for "
+                             "a statistically powerful conformal calibration set")
     parser.add_argument("--n-examples", type=int, default=4,
                         help="example patches rendered in the per-pixel map grid")
     parser.add_argument("--n-hutchinson", type=int, default=8,
