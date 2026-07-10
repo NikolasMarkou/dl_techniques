@@ -291,3 +291,41 @@ loads a ConvUNext checkpoint by loading the saved fixed-256 graph and relaxing i
 byte-equal and forward-pass `max|Δ|=0.000e+00` at 256×256 vs the original graph; the
 original rejects 320×448 while the relaxed model runs it. Depth-2 ⇒ inputs must be
 divisible by 4 for exact pool/upsample reconstruction.
+
+### 8.1 SOTA benchmark comparison — color AWGN denoising (all 4 standard sets)
+
+Apples-to-apples vs the published leaderboard (Zhang et al., SCUNet, arXiv:2203.13278,
+Table 2), SAME test sets, full-image protocol (`--full-image`, reflect-pad ×16), same PSNR
+convention (`max_val=1.0`, output clipped in-domain). Model:
+`convunext_denoiser_base_20260707_122133` (3.39M params, SINGLE blind model, no noise-level
+input). σ on the 0–255 scale; all within the training band (σ255≈6→127). Test sets on disk:
+`data0_4tb/datasets/{cbsd68_src/CBSD68/original (68 jpg), kodak24 (24), mcmaster_src/color/data/McMaster (18), urban100/Urban100_HR (100)}`.
+Result dirs: `results/sota_{kodak24,urban100,cbsd68_mcmaster}_convunext/`.
+
+PSNR (dB) — Ours | DnCNN | FFDNet | DRUNet | SwinIR | Restormer | SCUNet:
+
+CBSD68   σ15  33.95 | 33.90 | 33.87 | 34.30 | 34.42 | 34.40 | 34.40
+CBSD68   σ25  31.35 | 31.24 | 31.21 | 31.69 | 31.78 | 31.79 | 31.79
+CBSD68   σ50  28.18 | 27.95 | 27.96 | 28.51 | 28.56 | 28.60 | 28.61
+Kodak24  σ15  34.97 | 34.60 | 34.63 | 35.31 | 35.34 | 35.47 | 35.34
+Kodak24  σ25  32.56 | 32.14 | 32.13 | 32.89 | 32.89 | 33.04 | 32.92
+Kodak24  σ50  29.51 | 28.95 | 28.98 | 29.86 | 29.79 | 30.01 | 29.87
+McMaster σ15  34.79 | 33.45 | 34.66 | 35.40 | 35.61 | 35.61 | 35.60
+McMaster σ25  32.61 | 31.52 | 32.35 | 33.14 | 33.20 | 33.34 | 33.34
+McMaster σ50  29.61 | 28.62 | 29.18 | 30.08 | 30.22 | 30.30 | 30.29
+Urban100 σ15  34.20 | 32.98 | 33.83 | 34.81 | 35.13 | 35.13 | 35.18
+Urban100 σ25  31.92 | 30.81 | 31.40 | 32.60 | 32.90 | 32.96 | 33.03
+Urban100 σ50  28.81 | 27.59 | 28.05 | 29.61 | 29.82 | 30.02 | 30.14
+
+Average across the 4 sets (unweighted mean of set-means):
+  σ15  Ours 34.48 | DnCNN 33.73 | FFDNet 34.25 | DRUNet 34.96 | Restormer 35.15
+  σ25  Ours 32.11 | DnCNN 31.43 | FFDNet 31.77 | DRUNet 32.58 | Restormer 32.78
+  σ50  Ours 29.03 | DnCNN 28.28 | FFDNet 28.54 | DRUNet 29.52 | Restormer 29.73
+
+**Verdict.** The 3.4M blind bias-free ConvUNext BEATS DnCNN and FFDNet on ALL 4 sets at ALL
+3 σ (avg +0.7 dB over DnCNN; and FFDNet is non-blind, fed a noise map, yet still trails us).
+It sits ~0.4 dB behind the heavyweight SOTA on CBSD68/Kodak24, ~0.7 dB on McMaster, and
+~1.0 dB on Urban100 (self-similar structure favors the transformers' non-local attention) —
+avg ~0.5 dB behind DRUNet and ~0.7 dB behind Restormer, at ~1/10th the parameters
+(DRUNet ~32M, Restormer ~26M, SCUNet ~18M, SwinIR ~12M; DnCNN/FFDNet <1M). PSNR only (no SSIM);
+CBSD68 clean refs are the standard JPGs everyone benchmarks on.
