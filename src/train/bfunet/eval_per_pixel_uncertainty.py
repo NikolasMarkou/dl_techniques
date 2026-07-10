@@ -497,14 +497,15 @@ def run_evaluation(args: argparse.Namespace) -> Path:
     for scheme in schemes:
         calibrate_fn, evaluate_fn = _SCHEME_SPECS[scheme]
         q_by_sigma = calibrate_fn(
-            model, clean_c, noisy_c, sigma_c, alpha=args.alpha
+            model, clean_c, noisy_c, sigma_c, alpha=args.alpha,
+            batch_size=args.batch_size,
         )
         rows: List[dict] = []
         for sigma in sigmas:
             q = q_by_sigma[float(sigma)]
             noisy_test = noisy_test_by_sigma[float(sigma)]
-            cov = evaluate_fn(model, clean_test, noisy_test, q)
-            mu, _, _ = predict_intervals(model, noisy_test, q)  # PSNR (mu is
+            cov = evaluate_fn(model, clean_test, noisy_test, q, batch_size=args.batch_size)
+            mu, _, _ = predict_intervals(model, noisy_test, q, batch_size=args.batch_size)  # PSNR (mu is
             rows.append({                                       # scheme-agnostic)
                 "sigma": float(sigma),
                 "n_calib": int(clean_calib.shape[0]),
@@ -600,6 +601,9 @@ def main() -> None:
                         help="disjoint clean patches used for the test split")
     parser.add_argument("--patch-size", type=int, default=256,
                         help="patch size (matches training; overrides config.json)")
+    parser.add_argument("--batch-size", type=int, default=8,
+                        help="forward-pass batch size (lower to fit a 12GB GPU at "
+                             "256px full-res expand activations; e.g. 4)")
     parser.add_argument("--val-dirs", type=str, nargs="+", default=None,
                         help="override config.json val_image_dirs (one crop per image); "
                              "point at a large held-out pool (e.g. COCO val2017) for "
