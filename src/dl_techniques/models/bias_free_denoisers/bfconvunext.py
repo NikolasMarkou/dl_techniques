@@ -842,20 +842,29 @@ def create_convunext_denoiser(
             pool_type=downsample_pool_type,
         )
 
-        # DECISION plan_2026-07-06_b17c1f83/D-001: optionally process the Laplacian
+        # DECISION plan_2026-07-10_be906be8/D-002: optionally process the Laplacian
         # high-frequency band with N bias-free ConvNeXt blocks before it becomes the
         # decoder skip. Gated on use_laplacian_pyramid (the high band only exists then);
         # high_freq_blocks=0 (default) adds ZERO layers -> byte-identical OFF path, so
         # existing `.keras` checkpoints (whose layer names are load-bearing) still load.
         # Do NOT drop the use_laplacian_pyramid gate or the >0 gate: without the pyramid
         # there is no high band and this would rename/insert layers into the raw-skip path.
-        # drop_path_rate is pinned to 0.0 so NO StochasticDepth layer is added (keeps the
-        # round-trip deterministic; avoids the training=None flake).
+        # This SUPERSEDES plan_2026-07-06_b17c1f83/D-001, which pinned every high-freq block
+        # to drop_path_rate=0.0 (no StochasticDepth at all). The high-freq stack now carries
+        # a LOCAL linear drop-path ramp `drop_path_rate * hf_idx / high_freq_blocks` that
+        # restarts at 0.0 per encoder level, mirroring the encoder/decoder "first block = 0.0"
+        # convention. hf_idx=0 -> 0.0 => still NO StochasticDepth layer for the first block
+        # (the round-trip-determinism concern is preserved for it); hf_idx>=1 gain a weightless
+        # StochasticDepth sublayer. The `high_freq_blocks > 0` gate guarantees the denominator
+        # is nonzero. StochasticDepth is inference-identity, so this only changes training-time
+        # regularization; the OFF-by-default path (high_freq_blocks=0) is untouched.
         if high_freq_blocks > 0 and use_laplacian_pyramid:
             for hf_idx in range(high_freq_blocks):
+                # Local linearly-scaled drop-path ramp (restarts at 0.0 per level's HF stack).
+                current_drop_path = drop_path_rate * hf_idx / high_freq_blocks
                 skip = _apply_residual_convnext_block(
                     skip, ConvNextBlock, current_filters, block_kernel_size,
-                    0.0,  # drop_path_rate=0.0 -> no StochasticDepth -> deterministic round-trip
+                    current_drop_path,
                     kernel_regularizer,
                     name=f'skip_highfreq_block_{level}_{hf_idx}',
                     activation=block_activation,
