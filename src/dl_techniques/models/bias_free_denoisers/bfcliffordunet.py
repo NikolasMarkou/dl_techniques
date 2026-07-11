@@ -592,7 +592,17 @@ def create_cliffordunet_denoiser(
     bottleneck_shifts = _size_shifts_for_level(base_shifts, bottleneck_filters)
     level_shift_map['bottleneck'] = bottleneck_shifts
 
+    # DECISION plan_2026-07-11_4426773d/D-001: the bottleneck now uses a LOCAL linear
+    # drop-path ramp that restarts at 0.0 (block 0 -> 0.0, later blocks ramp up but stay
+    # strictly < drop_path_rate), mirroring this file's encoder ramp shape and the ConvUNext
+    # bottleneck change (plan_2026-07-10_be906be8/D-001). This replaces the prior FLAT
+    # unscaled drop_path_rate applied to every bottleneck block. The ramp
+    # `drop_path_rate * block_idx / blocks_per_level` can NEVER exceed drop_path_rate, and
+    # blocks_per_level >= 1 is validated above so the denominator is never zero.
+    # StochasticDepth is inference-identity, so existing trained checkpoints load and infer
+    # unchanged (block_0 only drops a weightless SD sublayer). Do NOT revert to a flat rate.
     for block_idx in range(blocks_per_level):
+        current_drop_path = drop_path_rate * block_idx / blocks_per_level
         block_name = f'bottleneck_clifford_block_{block_idx}'
         # Externalized residual (transform-only block); see encoder note.
         h = CliffordNetBlock(
@@ -606,8 +616,8 @@ def create_cliffordunet_denoiser(
             name=block_name,
             **block_kwargs,
         )(x)
-        if drop_path_rate and drop_path_rate > 0.0:
-            h = StochasticDepth(drop_path_rate, name=f'{block_name}_drop_path')(h)
+        if current_drop_path and current_drop_path > 0.0:
+            h = StochasticDepth(current_drop_path, name=f'{block_name}_drop_path')(h)
         x = keras.layers.Add(name=f'{block_name}_residual')([x, h])
 
     # Bottleneck latent (deepest-encoder features). The named linear tap is only
