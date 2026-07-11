@@ -169,6 +169,13 @@ class TrainingConfig(BFUnetTrainingConfig):
     # depth). 0.0 = OFF / byte-identical to all existing checkpoints. Wired to
     # create_convunext_denoiser(dropout_rate=...).
     dropout_rate: float = 0.0
+    # Optional bias-free linear-attention blocks inserted at the bottleneck BEFORE the
+    # ConvNeXt block loop (create_convunext_denoiser). Both default OFF / byte-identical:
+    # bottleneck_attention_blocks=0 adds zero graph nodes. When blocks>0, N residual
+    # LinearAttention blocks run at the bottleneck (Miyasawa-safe 'linear' type, hardcoded);
+    # bottleneck_filters must be divisible by bottleneck_attention_heads (factory asserts).
+    bottleneck_attention_blocks: int = 0
+    bottleneck_attention_heads: int = 8
 
     def __post_init__(self):
         super().__post_init__()
@@ -178,6 +185,16 @@ class TrainingConfig(BFUnetTrainingConfig):
             )
         if self.convnext_version not in ("v1", "v2"):
             raise ValueError("convnext_version must be 'v1' or 'v2'")
+        if self.bottleneck_attention_blocks < 0:
+            raise ValueError(
+                f"bottleneck_attention_blocks must be >= 0, got "
+                f"{self.bottleneck_attention_blocks}"
+            )
+        if self.bottleneck_attention_heads < 1:
+            raise ValueError(
+                f"bottleneck_attention_heads must be >= 1, got "
+                f"{self.bottleneck_attention_heads}"
+            )
 
 
 # ---------------------------------------------------------------------
@@ -258,6 +275,8 @@ def build_model(config: TrainingConfig) -> keras.Model:
         gabor_stem_projection=config.gabor_stem_projection,
         use_laplacian_pyramid=config.use_laplacian_pyramid,
         high_freq_blocks=config.high_freq_blocks,
+        bottleneck_attention_blocks=config.bottleneck_attention_blocks,
+        bottleneck_attention_heads=config.bottleneck_attention_heads,
         zero_pad_channels=config.zero_pad_channels,
         extra_zero_output_channels=config.extra_zero_output_channels,
         final_projection_groups=final_projection_groups,
@@ -367,6 +386,16 @@ def parse_arguments() -> argparse.Namespace:
              "(wired to create_convunext_denoiser dropout_rate). Default 0.0 = OFF, "
              "byte-identical to existing checkpoints. Typical: 0.1-0.3.",
     )
+    parser.add_argument(
+        "--bottleneck-attention-blocks", type=int, default=0,
+        help="N bias-free linear-attention blocks inserted at the bottleneck before the "
+             "ConvNeXt blocks (default 0 = OFF).",
+    )
+    parser.add_argument(
+        "--bottleneck-attention-heads", type=int, default=8,
+        help="num_heads for the bottleneck linear-attention blocks (bottleneck_filters "
+             "must be divisible by this when blocks>0).",
+    )
     args = parser.parse_args()
     reject_self_iterate_with_nonadditive(parser, args)
     return args
@@ -391,6 +420,8 @@ def main():
             use_gabor_stem=not args.no_gabor_stem,
             use_laplacian_pyramid=args.laplacian_pyramid,
             high_freq_blocks=args.high_freq_blocks,
+            bottleneck_attention_blocks=args.bottleneck_attention_blocks,
+            bottleneck_attention_heads=args.bottleneck_attention_heads,
             zero_pad_channels=args.zero_pad_channels,
             extra_zero_output_channels=args.extra_zero_output_channels,
             downsample_pool_type=("average" if args.mean_pooling else "max"),
@@ -455,6 +486,8 @@ def main():
             use_gabor_stem=not args.no_gabor_stem,
             use_laplacian_pyramid=args.laplacian_pyramid,
             high_freq_blocks=args.high_freq_blocks,
+            bottleneck_attention_blocks=args.bottleneck_attention_blocks,
+            bottleneck_attention_heads=args.bottleneck_attention_heads,
             zero_pad_channels=args.zero_pad_channels,
             extra_zero_output_channels=args.extra_zero_output_channels,
             downsample_pool_type=("average" if args.mean_pooling else "max"),
