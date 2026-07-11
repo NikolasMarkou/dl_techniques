@@ -250,6 +250,20 @@ class SpatialLinearAttention(keras.layers.Layer):
             use_bias=False, name=f'{self.name}_linear'
         )
 
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """Explicitly build the nested attention on the flattened SEQUENCE shape.
+
+        ``input_shape`` is the 4D spatial shape ``(B, H, W, C)``. In ``call`` the
+        attention sublayer only ever sees the flattened 3D sequence
+        ``(B, H*W, dim)``, so it must be built with a dynamic sequence length
+        (``None``) and last dim ``self.dim``. Building the sublayer here (rather
+        than letting it build lazily inside ``call``) materializes its 4 Dense
+        projections BEFORE ``.keras`` load, so ``keras.models.load_model`` restores
+        every weight instead of dropping the lazily-built objects (guide §3.2).
+        """
+        self.attn.build((input_shape[0], None, self.dim))
+        super().build(input_shape)
+
     def call(self, inputs, training=None):
         """Flatten spatial dims, attend, reshape back. Uses dynamic shapes."""
         shape = ops.shape(inputs)
