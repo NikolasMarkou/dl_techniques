@@ -74,6 +74,7 @@ split follows Burt & Adelson, "The Laplacian Pyramid as a Compact Image Code" (1
 """
 
 import keras
+from keras import ops
 from typing import Optional, Union, Tuple, List, Dict, Any
 
 
@@ -89,6 +90,7 @@ from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.initializers import create_gabor_depthwise_conv2d
 from dl_techniques.layers.laplacian_filter import LaplacianPyramidLevel
 from dl_techniques.layers.match_channels import MatchChannels
+from dl_techniques.layers.attention.factory import create_attention_layer
 
 # ---------------------------------------------------------------------
 # ConvUNext Bias-Free Building Blocks (Simple Stem)
@@ -199,6 +201,76 @@ class ConvUNextStem(keras.layers.Layer):
         # kernel_initializer/kernel_regularizer dicts are passed straight to __init__,
         # where keras.*.get(...) accepts a serialized dict (Keras 3).
         return cls(**config)
+
+# ---------------------------------------------------------------------
+# Spatial wrapper around bias-free LinearAttention (4D <-> 3D)
+# ---------------------------------------------------------------------
+
+@keras.saving.register_keras_serializable()  # DECISION plan_2026-07-11_bb4b38b5/D-002
+class SpatialLinearAttention(keras.layers.Layer):
+    """Apply a bias-free LinearAttention over a 4D spatial feature map.
+
+    ``LinearAttention`` (the repo's only Miyasawa-compliant, degree-1-homogeneous
+    attention) accepts strictly 3D sequence input ``(B, N, dim)`` and raises on 4D.
+    This thin wrapper flattens a bottleneck tensor ``(B, H, W, C)`` to
+    ``(B, H*W, C)`` using DYNAMIC ``ops.shape`` (H/W are ``None`` at graph-build
+    time whenever the model is built with ``input_shape=(None, None, C)``), attends,
+    and reshapes back to ``(B, H, W, C)``. Output shape equals input shape.
+
+    The attention sublayer is built through the attention factory with a hardcoded
+    ``'linear'`` type and ``use_bias=False`` + the default ``feature_map='relu'`` so
+    the bias-free / degree-1-homogeneity property is preserved (see D-001/D-002).
+
+    Args:
+        dim: Integer, channel count of the input feature map (``C``); also the
+            attention embedding dim. Must be divisible by ``num_heads``.
+        num_heads: Integer, number of attention heads. Defaults to 8.
+        name: Optional string, layer name.
+        **kwargs: Additional arguments for the Layer base class.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int = 8,
+        name: Optional[str] = None,
+        **kwargs
+    ):
+        super().__init__(name=name, **kwargs)
+        self.dim = dim
+        self.num_heads = num_heads
+
+        # DECISION plan_2026-07-11_bb4b38b5/D-001: construct the bias-free attention via the
+        # factory with a HARDCODED 'linear' type (the only degree-1-homogeneity-safe attention),
+        # keeping use_bias=False + default feature_map='relu'. Do NOT import LinearAttention
+        # directly (factory-first policy) and do NOT expose a type knob (any softmax type
+        # silently breaks the Miyasawa property the denoiser depends on).
+        self.attn = create_attention_layer(
+            'linear', dim=self.dim, num_heads=self.num_heads,
+            use_bias=False, name=f'{self.name}_linear'
+        )
+
+    def call(self, inputs, training=None):
+        """Flatten spatial dims, attend, reshape back. Uses dynamic shapes."""
+        shape = ops.shape(inputs)
+        b, h, w = shape[0], shape[1], shape[2]
+        seq = ops.reshape(inputs, [b, h * w, self.dim])
+        attended = self.attn(seq, training=training)
+        return ops.reshape(attended, [b, h, w, self.dim])
+
+    def compute_output_shape(self, input_shape):
+        """Shape-preserving."""
+        return input_shape
+
+    def get_config(self):
+        """Get layer configuration (attn sublayer is rebuilt from these in __init__)."""
+        config = super().get_config()
+        config.update({
+            'dim': self.dim,
+            'num_heads': self.num_heads,
+        })
+        return config
+
 
 # ---------------------------------------------------------------------
 # ConvUNext Model Variant Configurations
@@ -412,6 +484,8 @@ def create_convunext_denoiser(
         use_laplacian_pyramid: bool = False,
         laplacian_kernel_size: Tuple[int, int] = (5, 5),
         high_freq_blocks: int = 0,
+        bottleneck_attention_blocks: int = 0,
+        bottleneck_attention_heads: int = 8,
         zero_pad_channels: bool = False,
         extra_zero_output_channels: bool = False,
         final_projection_groups: int = 1,
@@ -526,6 +600,18 @@ def create_convunext_denoiser(
             **Ignored when use_laplacian_pyramid=False** (the high band only exists under the
             pyramid split). Defaults to 0, which adds zero layers and is byte-identical to the
             prior graph (existing `.keras` checkpoints depend on this). Must be non-negative.
+        bottleneck_attention_blocks: Integer, number of bias-free LinearAttention blocks
+            inserted at the bottleneck right after the channel-adjust and BEFORE the bottleneck
+            ConvNeXt block stack. Each block is a residual `x + StochasticDepth(rate)(
+            SpatialLinearAttention(x))` with a local drop-path ramp (first block = 0.0). The
+            attention is degree-1-homogeneous / Miyasawa-safe (hardcoded `'linear'` type,
+            `use_bias=False`, `feature_map='relu'`). Defaults to 0, which adds zero layers and
+            is byte-identical to the prior graph (existing `.keras` checkpoints depend on this).
+            Must be non-negative. When > 0, `bottleneck_filters` must be divisible by
+            `bottleneck_attention_heads`.
+        bottleneck_attention_heads: Integer, number of attention heads for each bottleneck
+            attention block. Only used when `bottleneck_attention_blocks > 0`. Defaults to 8.
+            Must be >= 1 when attention blocks are enabled.
         zero_pad_channels: Boolean, if True replace every per-level channel-adjust 1x1
             convolution with a parameter-free channel match. Channel INCREASES (encoder
             levels and the bottleneck) are done by zero-padding the channel axis; channel
@@ -674,6 +760,15 @@ def create_convunext_denoiser(
 
     if high_freq_blocks < 0:
         raise ValueError(f"high_freq_blocks must be non-negative, got {high_freq_blocks}")
+
+    if bottleneck_attention_blocks < 0:
+        raise ValueError(
+            f"bottleneck_attention_blocks must be >= 0, got {bottleneck_attention_blocks}")
+
+    if bottleneck_attention_blocks > 0 and bottleneck_attention_heads < 1:
+        raise ValueError(
+            f"bottleneck_attention_heads must be >= 1 when bottleneck_attention_blocks > 0, "
+            f"got {bottleneck_attention_heads}")
 
     if convnext_version not in ['v1', 'v2']:
         raise ValueError(f"convnext_version must be 'v1' or 'v2', got {convnext_version}")
@@ -896,6 +991,27 @@ def create_convunext_denoiser(
                 kernel_regularizer=kernel_regularizer,
                 name='bottleneck_channel_adjust'
             )(x)
+
+    # Optional bias-free attention blocks at the bottleneck (before the ConvNeXt stack).
+    # DECISION plan_2026-07-11_bb4b38b5/D-002: gated on bottleneck_attention_blocks > 0 so the
+    # default (0) adds ZERO layers -> byte-identical OFF path (existing .keras checkpoints
+    # depend on this). Local drop-path ramp `drop_path_rate * attn_idx / bottleneck_attention_blocks`
+    # restarts at 0.0 (first block gets no StochasticDepth), mirroring the ConvNeXt loop below.
+    if bottleneck_attention_blocks > 0:
+        if bottleneck_filters % bottleneck_attention_heads != 0:
+            raise ValueError(
+                f"bottleneck_filters ({bottleneck_filters}) must be divisible by "
+                f"bottleneck_attention_heads ({bottleneck_attention_heads})")
+        for attn_idx in range(bottleneck_attention_blocks):
+            current_drop_path = drop_path_rate * attn_idx / bottleneck_attention_blocks
+            residual = x
+            y = SpatialLinearAttention(
+                bottleneck_filters, bottleneck_attention_heads,
+                name=f'bottleneck_attention_block_{attn_idx}')(x)
+            if current_drop_path > 0:
+                y = StochasticDepth(
+                    current_drop_path, name=f'bottleneck_attention_sd_{attn_idx}')(y)
+            x = keras.layers.Add(name=f'bottleneck_attention_add_{attn_idx}')([residual, y])
 
     # Bottleneck ConvNeXt blocks (bias-free, residual + drop-path)
     # DECISION plan_2026-07-10_be906be8/D-001: the bottleneck now uses a LOCAL linear
