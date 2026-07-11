@@ -889,14 +889,24 @@ def create_convunext_denoiser(
             )(x)
 
     # Bottleneck ConvNeXt blocks (bias-free, residual + drop-path)
-    # DECISION plan_2026-06-20_0433c2f2/D-003: the bottleneck is the deepest point, so it
-    # intentionally uses the maximum (unscaled) drop_path_rate, distinct from the
-    # progressive linear ramp applied at the encoder/decoder blocks. Not a bug (a true
-    # continuation of the ramp here would exceed drop_path_rate). No behaviour change.
+    # DECISION plan_2026-07-10_be906be8/D-001: the bottleneck now uses a LOCAL linear
+    # drop-path ramp that restarts at 0.0, mirroring the encoder ramp shape and the
+    # decoder's "first block = 0.0" convention (see decoder loop below). This SUPERSEDES
+    # plan_2026-06-20_0433c2f2/D-003, which pinned every bottleneck block to the flat
+    # (unscaled) max drop_path_rate. The ramp `drop_path_rate * block_idx / blocks_per_level`
+    # stays strictly in [0, drop_path_rate) for every block -> it can NEVER exceed
+    # drop_path_rate (the exact concern D-003 raised about continuing the encoder's GLOBAL
+    # index into the bottleneck). block_idx=0 -> 0.0 => _apply_residual_convnext_block adds
+    # NO StochasticDepth layer for the first block. blocks_per_level >= 1 is guaranteed by
+    # the validator above, so the denominator is never zero. StochasticDepth is
+    # inference-identity, so existing trained checkpoints load and infer unchanged (block_0
+    # only drops a weightless SD sublayer). Do NOT revert to a flat rate.
     for block_idx in range(blocks_per_level):
+        # Local linearly-scaled drop-path ramp (restarts at 0.0 in the bottleneck stack).
+        current_drop_path = drop_path_rate * block_idx / blocks_per_level
         x = _apply_residual_convnext_block(
             x, ConvNextBlock, bottleneck_filters, block_kernel_size,
-            drop_path_rate, kernel_regularizer,
+            current_drop_path, kernel_regularizer,
             name=f'bottleneck_convnext_{convnext_version}_block_{block_idx}',
             activation=block_activation,
             depthwise_initializer=depthwise_initializer,
