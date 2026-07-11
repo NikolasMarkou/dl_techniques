@@ -551,7 +551,7 @@ def create_cliffordunet_denoiser(
             pool_type=downsample_pool_type,
         )
 
-        # DECISION plan_2026-07-06_b17c1f83/D-001: optionally process the Laplacian
+        # DECISION plan_2026-07-11_4426773d/D-002: optionally process the Laplacian
         # high-frequency band with N bias-free Clifford blocks before it becomes the
         # decoder skip. CliffordNetBlock is TRANSFORM-ONLY -> external residual Add is
         # mandatory (or the residual silently vanishes). Gated on use_laplacian_pyramid
@@ -561,9 +561,15 @@ def create_cliffordunet_denoiser(
         # >0 gate: without the pyramid there is no high band and this would rename/insert
         # layers into the raw-skip path. The Laplacian split is channel-preserving, so the
         # high band has current_filters channels and level_shifts stays valid (s < channels).
-        # No StochasticDepth here (drop_path 0) -> deterministic round-trip.
+        # SUPERSEDES plan_2026-07-06_b17c1f83/D-001 (which added NO StochasticDepth here):
+        # the high-freq stack now carries a LOCAL ramp `drop_path_rate * hf_idx / high_freq_blocks`
+        # (hf_idx=0 -> 0.0 keeps the first block SD-free / OFF-path byte-identical; hf_idx>=1
+        # gain a weightless StochasticDepth sublayer), mirroring the ConvUNext change
+        # (plan_2026-07-10_be906be8/D-002). The `high_freq_blocks > 0` gate guarantees the
+        # ramp denominator is nonzero; StochasticDepth is inference-identity.
         if high_freq_blocks > 0 and use_laplacian_pyramid:
             for hf_idx in range(high_freq_blocks):
+                current_drop_path = drop_path_rate * hf_idx / high_freq_blocks
                 hf_block_name = f'skip_highfreq_block_{level}_{hf_idx}'
                 hf = CliffordNetBlock(
                     channels=current_filters,
@@ -576,6 +582,8 @@ def create_cliffordunet_denoiser(
                     name=hf_block_name,
                     **block_kwargs,
                 )(skip)
+                if current_drop_path and current_drop_path > 0.0:
+                    hf = StochasticDepth(current_drop_path, name=f'{hf_block_name}_drop_path')(hf)
                 skip = keras.layers.Add(name=f'{hf_block_name}_residual')([skip, hf])
 
         skip_connections.append(skip)
