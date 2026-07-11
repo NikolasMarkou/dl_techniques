@@ -153,7 +153,7 @@ class TestCreateConvUNextDenoiser:
 
     def test_invalid_depth(self, input_shape) -> None:
         with pytest.raises(ValueError, match="depth"):
-            create_convunext_denoiser(input_shape=input_shape, depth=2)
+            create_convunext_denoiser(input_shape=input_shape, depth=1)
 
     def test_invalid_initial_filters(self, input_shape) -> None:
         with pytest.raises(ValueError, match="initial_filters"):
