@@ -15,6 +15,8 @@ Checks:
 * the no-dense-matrix guard (INV-3): no operator holds an ``N``-sized array.
 """
 
+import inspect
+
 import keras
 import numpy as np
 import pytest
@@ -26,6 +28,7 @@ from applications.bias_free_denoiser.operators import (
     MaskOperator,
     MeasurementOperator,
     NullOperator,
+    MRIUndersamplingOperator,
     RandomPixelsOperator,
     SpectralDeblurOperator,
     SuperResolutionOperator,
@@ -113,12 +116,19 @@ class TestNullOperator:
         np.testing.assert_allclose(d_t, f_y, atol=1e-6)
 
     def test_null_init_mean_is_constant_c0_field(self):
-        for c0 in (0.0, 0.25):
+        for c0 in (0.0, 0.25, 0.5):
             op = NullOperator(c0=c0)
             template = _rand((BATCH, *IMAGE_SHAPE), seed=8)
             init = _np(op.init_mean(template))
             assert init.shape == template.shape
             np.testing.assert_allclose(init, c0, atol=1e-7)
+
+    def test_null_init_mean_defaults_to_mid_grey(self):
+        # Default c0 is the [0,1] domain center: unmeasured pixels start mid-grey,
+        # NOT black (which is what the legacy zero-centered default c0=0.0 would give).
+        op = NullOperator()
+        init = _np(op.init_mean(_rand((BATCH, *IMAGE_SHAPE), seed=8)))
+        np.testing.assert_allclose(init, 0.5, atol=1e-7)
 
     def test_identity_operator_is_null_alias(self):
         assert IdentityOperator is NullOperator
@@ -127,7 +137,7 @@ class TestNullOperator:
 
 class TestInitMean:
     def test_inpainting_init_mean_exact(self):
-        for c0 in (0.0, 0.1):
+        for c0 in (0.0, 0.1, 0.5):
             op = InpaintingOperator(IMAGE_SHAPE, block_size=(8, 8), c0=c0)
             x_true = _rand((BATCH, *IMAGE_SHAPE), seed=9)
             measurements = _np(op.measure(x_true))  # mask * x_true
@@ -447,20 +457,42 @@ class TestCompressiveSensingOperator:
         assert not np.iscomplexobj(_np(op.adjoint(m)))
         assert not np.iscomplexobj(_np(op.project(x)))
 
-    def test_cs_init_mean_finite(self):
-        # project(ones) != 1 for CS (sign flip of a constant is not constant), so
-        # the base init_mean's c0*(1-project(ones)) term is load-bearing; with
-        # c0=0 it vanishes -> init_mean == adjoint(measurements). Must be finite.
-        op = _cs_op()
+    def test_cs_init_mean_c0_zero_vanishes(self):
+        # project(ones) != 1 for CS (sign flip of a constant is not constant), so the
+        # base init_mean's c0*(1-project(ones)) term is load-bearing. At the DEGENERATE
+        # c0=0 (the legacy zero-centered default) it vanishes exactly, leaving
+        # init_mean == adjoint(measurements). This pins the vanishing branch, which is
+        # no longer the default path.
+        op = _cs_op(c0=0.0)
         x = _rand((BATCH, *CS_SHAPE), seed=46)
         m = op.measure(x)
         init = _np(op.init_mean(m))
         assert np.all(np.isfinite(init))
-        # With c0=0 the unmeasured-DC term vanishes exactly.
         np.testing.assert_allclose(init, _np(op.adjoint(m)), atol=1e-6)
         # Sanity: project(ones) is genuinely NOT the all-ones field.
         proj_ones = _np(op.project(np.ones((BATCH, *CS_SHAPE), dtype=np.float32)))
         assert np.max(np.abs(proj_ones - 1.0)) > 1e-2
+
+    def test_cs_init_mean_nonzero_c0_does_not_vanish(self):
+        # The previously-UNEXERCISED path, now the DEFAULT (c0=0.5). Because
+        # project(ones) != 1 for CS, the c0*(1 - project(ones)) DC term is NON-zero, so
+        # init_mean must differ from adjoint(measurements) by exactly that term.
+        op = _cs_op()  # default c0 == 0.5
+        assert op.c0 == pytest.approx(0.5)
+        x = _rand((BATCH, *CS_SHAPE), seed=47)
+        m = op.measure(x)
+        init = _np(op.init_mean(m))
+        adj = _np(op.adjoint(m))
+        assert np.all(np.isfinite(init))
+
+        ones = np.ones((BATCH, *CS_SHAPE), dtype=np.float32)
+        expected_dc = op.c0 * (1.0 - _np(op.project(ones)))
+        # The term is genuinely live, not a rounding artifact...
+        assert np.max(np.abs(expected_dc)) > 1e-2
+        # ...and init_mean == adjoint + that exact DC term.
+        np.testing.assert_allclose(init, adj + expected_dc, atol=1e-5)
+        # ...so init_mean is measurably NOT the adjoint (the c0=0 shortcut is invalid).
+        assert np.max(np.abs(init - adj)) > 1e-2
 
     def test_cs_no_dense_matrix(self):
         # INV-3: the operator stores only O(N) arrays (sign + mask, [H,W,C]),
@@ -489,3 +521,59 @@ class TestCompressiveSensingOperator:
             CompressiveSensingOperator(CS_SHAPE, measurement_ratio=0.0)
         with pytest.raises(ValueError):
             CompressiveSensingOperator(CS_SHAPE, measurement_ratio=1.5)
+
+
+# =====================================================================
+# Domain default: every operator initializes unmeasured pixels to mid-grey.
+# =====================================================================
+
+
+def _every_operator_at_defaults():
+    """One instance of EVERY concrete operator, constructed WITHOUT passing c0."""
+    return [
+        NullOperator(),
+        # MaskOperator is itself concrete (a caller can supply any binary mask), so its
+        # own default c0 is user-visible and must be covered, not just its subclasses'.
+        MaskOperator(np.ones((*IMAGE_SHAPE[:2], 1), dtype=np.float32)),
+        InpaintingOperator(IMAGE_SHAPE, block_size=(8, 8)),
+        RandomPixelsOperator(IMAGE_SHAPE, keep_ratio=0.3, seed=0),
+        SuperResolutionOperator(SR_SHAPE, factor=SR_FACTOR),
+        SpectralDeblurOperator(SP_SHAPE, keep_fraction=SP_KEEP),
+        MRIUndersamplingOperator(SP_SHAPE, acceleration=4, seed=0),
+        CompressiveSensingOperator(CS_SHAPE, measurement_ratio=CS_RATIO, seed=0),
+    ]
+
+
+class TestDefaultC0IsDomainCenter:
+    @pytest.mark.parametrize("op", _every_operator_at_defaults())
+    def test_default_c0_is_mid_grey(self, op):
+        """c0 defaults to 0.5 — the [0,1] domain center — for EVERY operator.
+
+        With the legacy default c0=0.0, every unmeasured pixel of every inverse problem
+        would be initialized to BLACK on the [0,1] domain instead of mid-grey.
+        """
+        assert op.c0 == pytest.approx(0.5), (
+            f"{type(op).__name__} defaults c0={op.c0}, not the domain center 0.5"
+        )
+
+    def test_every_operator_subclass_is_covered(self):
+        """Guard: a NEW operator subclass must be added to the sweep above.
+
+        Catches the exact failure mode this migration hit — a freshly-added operator
+        (MRIUndersamplingOperator) silently keeping the old c0=0.0 default because the
+        sweep enumerated only the operators that existed when it was written.
+        """
+        def _concrete_subclasses(cls):
+            out = set()
+            for sub in cls.__subclasses__():
+                if not inspect.isabstract(sub):
+                    out.add(sub)
+                out |= _concrete_subclasses(sub)
+            return out
+
+        covered = {type(op) for op in _every_operator_at_defaults()}
+        missing = _concrete_subclasses(MeasurementOperator) - covered
+        assert not missing, (
+            f"operator subclass(es) not covered by the default-c0 sweep: "
+            f"{sorted(c.__name__ for c in missing)}"
+        )

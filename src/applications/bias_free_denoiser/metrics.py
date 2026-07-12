@@ -14,17 +14,19 @@ app machinery verbatim:
 * :func:`applications.bias_free_denoiser.main.build_operator` — the operator factory
   (do NOT re-implement the per-problem operator switch).
 * :class:`applications.bias_free_denoiser.denoiser_prior.DenoiserPrior` — ``denoise``
-  and the domain helpers ``ingest`` / ``denorm`` (``[-0.5, +0.5]`` <-> ``[0, 1]``).
+  and the domain helpers ``ingest`` / ``denorm`` (both now ``[0, 1]``).
 * :class:`applications.bias_free_denoiser.solver.UniversalInverseSolver` — constructed
   with EXPLICIT kwargs so callers A/B configs without touching library defaults.
 
-Domain (INV-1 / D-002)
-----------------------
-All solver/operator math stays in ``[-0.5, +0.5]`` (center ``c0 = 0.0``); PSNR/SSIM
-are computed on the ``[0, 1]`` denormed reconstruction against the ``[0, 1]`` denormed
-clean target. Spectral-deblur / compressive-sensing intermediates may be complex, but
-the solver returns a REAL signal-domain iterate (``best_y``), so scoring is always on a
-real image (plan edge case).
+Domain (INV-1)
+--------------
+All solver/operator math stays in ``[0, 1]`` (center ``c0 = 0.5``); PSNR/SSIM are
+computed on the ``[0, 1]`` denormed reconstruction against the ``[0, 1]`` denormed
+clean target. Model domain == display domain, so ``denorm`` is now just a clip — but
+scoring still routes through it so out-of-domain solver iterates are rectified exactly
+once, at the sanctioned exit. Spectral-deblur / compressive-sensing intermediates may be
+complex, but the solver returns a REAL signal-domain iterate (``best_y``), so scoring is
+always on a real image (plan edge case).
 """
 
 import argparse
@@ -144,7 +146,7 @@ def _op_args(seed: int, op_kwargs: Optional[Dict[str, Any]]) -> argparse.Namespa
 
 def degrade_and_reconstruct(
     prior: Any,
-    clean_pm05: np.ndarray,
+    clean: np.ndarray,
     task: str,
     solver_kwargs: Optional[Dict[str, Any]] = None,
     *,
@@ -164,7 +166,7 @@ def degrade_and_reconstruct(
     Args:
         prior: A denoiser prior duck-typed to ``residual`` (and ``denoise`` for the
             denoise task) — e.g. a :class:`DenoiserPrior` or a compatible stub.
-        clean_pm05: Clean signal ``[1, H, W, C]`` in ``[-0.5, +0.5]``.
+        clean: Clean signal ``[1, H, W, C]`` in ``[0, 1]``.
         task: One of ``main._ALL_PROBLEMS`` (``denoise``/``prior``/``inpaint``/
             ``random_pixels``/``super_resolution``/``deblur``/``compressive_sensing``).
         solver_kwargs: Explicit kwargs forwarded to :class:`UniversalInverseSolver`
@@ -180,21 +182,21 @@ def degrade_and_reconstruct(
         ``ssim`` (floats), and ``info`` (the solver convergence dict; ``{}`` for
         denoise).
     """
-    clean = _as_float01(clean_pm05)
+    clean = _as_float01(clean)
     if clean.ndim == 3:
         clean = clean[None, ...]
     # Ground truth for scoring: the clean image denormed to [0, 1].
-    gt01 = np.clip(DenoiserPrior.denorm(clean[0]), 0.0, 1.0)
+    gt01 = DenoiserPrior.denorm(clean[0])
 
     if task == DENOISE_TASK:
         rng = np.random.default_rng(seed)
         if noise_sigma > 0.0:
             noise = rng.normal(0.0, noise_sigma, clean.shape).astype(np.float32)
-            noisy = np.clip(clean + noise, -0.5, 0.5)
+            noisy = np.clip(clean + noise, 0.0, 1.0)
         else:
             noisy = clean
         denoised = np.asarray(keras.ops.convert_to_numpy(prior.denoise(noisy)))
-        recon01 = np.clip(DenoiserPrior.denorm(denoised[0]), 0.0, 1.0)
+        recon01 = DenoiserPrior.denorm(denoised[0])
         info: Dict[str, Any] = {}
     else:
         image_shape = tuple(int(s) for s in clean.shape[1:])
@@ -210,7 +212,7 @@ def degrade_and_reconstruct(
             recon, info = solver.solve(operator, measurements=measurements, seed=seed)
         # best_y is a REAL signal-domain iterate even for spectral/CS (plan edge case).
         recon_np = np.asarray(keras.ops.convert_to_numpy(recon))
-        recon01 = np.clip(DenoiserPrior.denorm(recon_np[0]), 0.0, 1.0)
+        recon01 = DenoiserPrior.denorm(recon_np[0])
 
     return {
         "task": task,
@@ -240,7 +242,7 @@ def run_harness(
 
     Args:
         prior: The denoiser prior (see :func:`degrade_and_reconstruct`).
-        images: Clean targets, each ``[1, H, W, C]`` or ``[H, W, C]`` in ``[-0.5, +0.5]``.
+        images: Clean targets, each ``[1, H, W, C]`` or ``[H, W, C]`` in ``[0, 1]``.
         tasks: Task ids to score (subset of ``main._ALL_PROBLEMS``).
         configs: Mapping ``name -> solver_kwargs`` (e.g. ``{"baseline": {...},
             "fixed": {...}}``); each value is forwarded to
@@ -336,7 +338,7 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 
 def _synthetic_target(size: int) -> np.ndarray:
-    """A smooth synthetic ``[1, size, size, 3]`` target in ``[-0.5, +0.5]``."""
+    """A smooth synthetic ``[1, size, size, 3]`` target in ``[0, 1]``."""
     from .main import create_synthetic_test_image
 
     return create_synthetic_test_image((1, size, size, 3))

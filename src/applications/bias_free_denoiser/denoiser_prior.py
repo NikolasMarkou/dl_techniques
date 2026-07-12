@@ -44,11 +44,21 @@ the saved graph is loaded directly (real weights + layer instances, bit-identica
 and its size-locked ``Input`` is relaxed to ``(None, None, 3)`` in-place, avoiding
 the ConvUNext factory-kwargs reconstruction traps (D-001).
 
-Domain contract (F1 §3 / D-002 / INV-1)
----------------------------------------
-All pixels live in ``[-0.5, +0.5]`` with domain center ``c0 = 0.0``. Ingest via
-``(x / 255) - 0.5``; denorm via ``+0.5`` back to ``[0, 1]`` for display/export.
+Domain contract (INV-1 / plan_2026-07-12_e56909cd D-004)
+--------------------------------------------------------
+All pixels live in ``[0, 1]`` with domain center ``c0 = 0.5``. The MODEL domain and
+the DISPLAY domain are now the SAME interval, so :meth:`ingest` is just ``x / 255``
+(for ``[0,255]`` input) or a clip (for float input), and :meth:`denorm` is a clip.
 The ``residual = score`` identity is only valid in this trained domain.
+
+Provenance gate (INV-4 / D-005)
+-------------------------------
+A bias-free denoiser is degree-1 homogeneous with ``f(0) = 0``: it has NO mechanism to
+subtract a DC offset. Feeding ``[0,1]`` data to a net trained on the legacy
+``[-0.5,+0.5]`` domain (or vice versa) produces SILENT garbage — no exception, no NaN,
+just a wrong image. :meth:`from_pretrained` therefore REFUSES any checkpoint whose
+sibling ``config.json`` does not stamp ``data_range == "[0,1]"``. An absent key means a
+pre-migration checkpoint, so absent ⇒ legacy ⇒ refuse. See :meth:`_check_data_range`.
 """
 
 import json
@@ -68,10 +78,17 @@ ArrayLike = Union[np.ndarray, "keras.KerasTensor"]
 _DEFAULT_KERAS_NAME = "best_model.keras"
 _CONFIG_JSON_NAME = "config.json"
 
-# Numeric domain constants (INV-1 / D-002). Kept as attributes on instances too,
-# but centralized here as the single source of truth for the module.
-DOMAIN_CENTER = 0.0
+# Numeric domain constants (INV-1). Kept as attributes on instances too, but
+# centralized here as the single source of truth for the module. Domain is [0, 1]:
+# center 0.5, half-width 0.5 (plan_2026-07-12_e56909cd D-004).
+DOMAIN_CENTER = 0.5
 DOMAIN_HALFWIDTH = 0.5
+DOMAIN_MIN = DOMAIN_CENTER - DOMAIN_HALFWIDTH  # 0.0
+DOMAIN_MAX = DOMAIN_CENTER + DOMAIN_HALFWIDTH  # 1.0
+
+# The exact provenance stamp a checkpoint's config.json must carry to be loadable
+# (written by BFUnetTrainingConfig.data_range; see src/train/bfunet/common.py).
+_REQUIRED_DATA_RANGE = "[0,1]"
 
 
 class DenoiserPrior:
@@ -86,16 +103,20 @@ class DenoiserPrior:
 
     Attributes:
         model: The wrapped Keras denoiser (single-output, bias-free, homogeneous).
-        domain_center: Center of the pixel domain, ``0.0`` (INV-1 / D-002).
-        domain_halfwidth: Half-width of the pixel domain, ``0.5`` (INV-1 / D-002).
+        domain_center: Center of the pixel domain, ``0.5`` (INV-1 / D-004).
+        domain_halfwidth: Half-width of the pixel domain, ``0.5`` (INV-1 / D-004).
     """
 
     def __init__(self, model: keras.Model) -> None:
         """Wrap an already-loaded denoiser model.
 
+        Direct construction performs NO provenance check — the caller already holds a
+        model and asserts its domain. The ``data_range`` gate (D-005) lives in
+        :meth:`from_pretrained`, which is the only path that reads a checkpoint.
+
         Args:
-            model: A built Keras denoiser mapping ``[B, H, W, 3]`` in
-                ``[-0.5, +0.5]`` to a same-shaped estimate of the clean image.
+            model: A built Keras denoiser mapping ``[B, H, W, 3]`` in ``[0, 1]`` to a
+                same-shaped estimate of the clean image.
         """
         self.model = model
         self.domain_center: float = DOMAIN_CENTER
@@ -134,7 +155,9 @@ class DenoiserPrior:
             A :class:`DenoiserPrior` wrapping the loaded model.
 
         Raises:
-            ValueError: If ``resolution`` is not ``"dynamic"`` or ``"fixed256"``.
+            ValueError: If ``resolution`` is not ``"dynamic"`` or ``"fixed256"``, or if
+                the checkpoint's ``config.json`` does not stamp ``data_range == "[0,1]"``
+                (D-005 provenance gate).
             FileNotFoundError: If the resolved checkpoint / config paths are absent.
         """
         # Registrar-first import (INV-2). This MUST precede any load_model call —
@@ -148,6 +171,9 @@ class DenoiserPrior:
             )
 
         keras_path, config_path = cls._resolve_paths(checkpoint_path)
+        # Provenance gate BEFORE any load: refuse a legacy-domain checkpoint outright
+        # rather than loading it and emitting silent garbage (D-005).
+        cls._check_data_range(config_path)
         try:
             if resolution == "dynamic":
                 if cls._detect_architecture(config_path) == "convunext":
@@ -201,6 +227,54 @@ class DenoiserPrior:
         """Load the saved ``(256, 256, 3)``-locked graph directly (compile-free)."""
         model = keras.models.load_model(keras_path, compile=False)
         return model
+
+    @staticmethod
+    def _check_data_range(config_path: Path) -> None:
+        """Refuse any checkpoint not stamped ``data_range == "[0,1]"`` (INV-4 / D-005).
+
+        # DECISION plan_2026-07-12_e56909cd/D-005: an ABSENT `data_range` key must FAIL
+        # CLOSED (legacy => refuse), not default to "probably fine". A bias-free net is
+        # degree-1 homogeneous with f(0) = 0, so it has NO mechanism to subtract a DC
+        # offset: loading a [-0.5,+0.5]-trained checkpoint and feeding it [0,1] data
+        # produces a plausible-looking WRONG image with no exception and no NaN (INV-1).
+        # There is no in-band signal to detect this after the fact, so the ONLY defense
+        # is a load-time provenance refusal. Do NOT "fix" a refused checkpoint by adding
+        # an allow_legacy flag or a pixel_domain branch — a switch whose sole purpose is
+        # to re-enable a broken path is a compat shim by another name, and the user
+        # mandate forbids one (INV-4). The fix is to RETRAIN. This gate never changes any
+        # math; it only refuses. See decisions.md D-005.
+
+        Args:
+            config_path: Path to the checkpoint's sibling ``config.json``.
+
+        Raises:
+            ValueError: If ``config.json`` is missing/unreadable, or its ``data_range``
+                is anything other than ``"[0,1]"``.
+        """
+        try:
+            raw = json.loads(config_path.read_text())
+        except (OSError, ValueError):
+            raw = None
+
+        found = None if raw is None else raw.get("data_range")
+        if found == _REQUIRED_DATA_RANGE:
+            return
+
+        if raw is None:
+            why = f"its config.json is missing or unreadable ({config_path})"
+        elif found is None:
+            why = "its config.json records NO data_range key at all"
+        else:
+            why = f"its config.json records data_range={found!r}"
+        raise ValueError(
+            f"REFUSING to load denoiser checkpoint {config_path.parent}: {why}, but this "
+            f"application requires data_range={_REQUIRED_DATA_RANGE!r}.\n"
+            f"An absent data_range key means the checkpoint predates the unit-domain "
+            f"migration, i.e. it was trained on the LEGACY [-0.5,+0.5] pixel domain. A "
+            f"bias-free denoiser is degree-1 homogeneous and cannot subtract a DC offset, "
+            f"so running it on [0,1] data yields SILENT garbage rather than an error. "
+            f"A RETRAIN on the [0,1] domain is required; there is no compatibility shim."
+        )
 
     @staticmethod
     def _detect_architecture(config_path: Path) -> str:
@@ -395,7 +469,7 @@ class DenoiserPrior:
         """Return :math:`D(y)`, the denoiser's clean-image estimate.
 
         Args:
-            y: A ``[B, H, W, 3]`` tensor in ``[-0.5, +0.5]``.
+            y: A ``[B, H, W, 3]`` tensor in ``[0, 1]``.
 
         Returns:
             ``D(y)``, same shape as ``y``.
@@ -413,7 +487,7 @@ class DenoiserPrior:
         transfer, no branching.
 
         Args:
-            y: A ``[B, H, W, 3]`` tensor in ``[-0.5, +0.5]``.
+            y: A ``[B, H, W, 3]`` tensor in ``[0, 1]``.
 
         Returns:
             ``D(y) - y``, same shape as ``y``.
@@ -421,51 +495,56 @@ class DenoiserPrior:
         return keras.ops.subtract(self.denoise(y), y)
 
     # ------------------------------------------------------------------
-    # Domain helpers (INV-1 / D-002)
+    # Domain helpers (INV-1 / D-004)
     # ------------------------------------------------------------------
 
     @staticmethod
     def ingest(image: ArrayLike) -> np.ndarray:
-        """Normalize an input image to the model domain ``[-0.5, +0.5]`` (float32).
+        """Normalize an input image to the model domain ``[0, 1]`` (float32).
 
-        Domain rule (D-002), applied by inspecting dtype + value range:
+        # DECISION plan_2026-07-12_e56909cd/D-004: the legacy "has negatives => already
+        # ingested" heuristic is DELETED, not ported. Under ``[0,1]`` the model domain
+        # IS the display domain, so a raw float image and an already-ingested tensor are
+        # the SAME interval and no discriminator can exist — nor is one needed: ingest is
+        # idempotent (a clip of a clipped array). Do NOT reintroduce a discriminator (a
+        # dtype tag, a wrapper type, a sentinel): that is a new abstraction with one call
+        # site and no payoff. See decisions.md D-004.
 
-        * ``uint8`` inputs, or float inputs whose max exceeds ``1.5``, are treated
-          as ``[0, 255]``: ``x / 255 - 0.5``.
-        * float inputs within ``[0, 1]`` are treated as ``[0, 1]``: ``x - 0.5``.
-        * anything else is assumed to be ALREADY in ``[-0.5, +0.5]`` and returned
-          unchanged (as float32).
+        Domain rule, applied by inspecting dtype + value range:
+
+        * ``uint8`` inputs, or float inputs whose max exceeds ``1.5``, are treated as
+          ``[0, 255]``: ``x / 255``.
+        * anything else is treated as already in ``[0, 1]`` and clipped to it.
 
         Args:
-            image: An array-like image (uint8 ``[0,255]``, float ``[0,1]``, or an
-                already-normalized float ``[-0.5,0.5]``).
+            image: An array-like image (uint8 ``[0,255]`` or float ``[0,1]``).
 
         Returns:
-            A float32 ``numpy.ndarray`` in ``[-0.5, +0.5]``.
+            A float32 ``numpy.ndarray`` in ``[0, 1]``.
         """
         x = np.asarray(image)
         is_uint8 = x.dtype == np.uint8
         x = x.astype(np.float32)
         if is_uint8 or float(x.max(initial=0.0)) > 1.5:
-            return x / 255.0 - 0.5
-        lo, hi = float(x.min(initial=0.0)), float(x.max(initial=0.0))
-        if lo >= -1e-6 and hi <= 1.0 + 1e-6:
-            return x - 0.5
-        return x  # already normalized to [-0.5, +0.5]
+            return x / 255.0
+        return np.clip(x, DOMAIN_MIN, DOMAIN_MAX)
 
     @staticmethod
     def denorm(x: ArrayLike) -> np.ndarray:
-        """Map model-domain ``[-0.5, +0.5]`` back to ``[0, 1]`` for display/export.
+        """Map a model-domain tensor to the ``[0, 1]`` display/export domain.
 
-        Inverse of the ``[0,1]`` branch of :meth:`ingest` (``x + 0.5``).
+        Model domain == display domain under ``[0,1]`` (D-004), so this is a clip: it
+        only rectifies solver iterates that stepped outside the domain. Kept as the
+        single sanctioned EXIT from the model domain (its symmetry with :meth:`ingest`
+        is what keeps every caller's domain handling in one place).
 
         Args:
-            x: An array-like in ``[-0.5, +0.5]``.
+            x: An array-like in (or near) ``[0, 1]``.
 
         Returns:
             A float32 ``numpy.ndarray`` in ``[0, 1]``.
         """
-        return np.asarray(x, dtype=np.float32) + 0.5
+        return np.clip(np.asarray(x, dtype=np.float32), DOMAIN_MIN, DOMAIN_MAX)
 
     # ------------------------------------------------------------------
     # Fixed-256 tiling helpers (fallback path)

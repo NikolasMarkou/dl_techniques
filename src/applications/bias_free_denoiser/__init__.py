@@ -13,9 +13,11 @@ Algorithm-1/2 stochastic-ascent loop), and the :class:`MeasurementOperator` fami
 The optional Streamlit GUI lives in ``streamlit_app.py`` and is the only module that
 imports streamlit; the CLI demo lives in ``main.py``.
 
-All pixels live in the ``[-0.5, +0.5]`` domain the checkpoint was trained on
-(INV-1 / D-002); use :meth:`DenoiserPrior.ingest` / :meth:`DenoiserPrior.denorm` to
-move in and out of it.
+All pixels live in the ``[0, 1]`` domain the checkpoint was trained on (INV-1); use
+:meth:`DenoiserPrior.ingest` / :meth:`DenoiserPrior.denorm` to move in and out of it.
+Checkpoints trained on the legacy ``[-0.5, +0.5]`` domain are REFUSED at load time by
+:meth:`DenoiserPrior.from_pretrained` (they would emit silent garbage — a bias-free net
+cannot subtract a DC offset); a retrain on ``[0, 1]`` is required, not a shim.
 """
 
 from .denoiser_prior import DenoiserPrior

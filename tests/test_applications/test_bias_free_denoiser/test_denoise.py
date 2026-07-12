@@ -44,8 +44,8 @@ def _denoise_args(**overrides) -> argparse.Namespace:
 
 
 def _target(h: int = 16, w: int = 16) -> np.ndarray:
-    """A clean in-domain ``[1, h, w, 3]`` target in ``[-0.5, +0.5]``."""
-    return np.random.default_rng(1).uniform(-0.5, 0.5, size=(1, h, w, 3)).astype(np.float32)
+    """A clean in-domain ``[1, h, w, 3]`` target in ``[0, 1]``."""
+    return np.random.default_rng(1).uniform(0.0, 1.0, size=(1, h, w, 3)).astype(np.float32)
 
 
 def test_run_problem_denoise_contract(stub_prior, monkeypatch):

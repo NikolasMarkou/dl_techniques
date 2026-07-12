@@ -14,6 +14,18 @@ Gating (so the fast suite is unaffected):
   (module import is light; the load lives inside the fixture).
 * The ``prior`` fixture ``pytest.skip``s if the checkpoint file is absent, so the
   module is portable to machines without the trained artifact.
+* The ``prior`` fixture ALSO ``pytest.skip``s if the checkpoint predates the
+  ``[0,1]`` unit-domain migration (its ``config.json`` lacks ``data_range ==
+  "[0,1]"``). Such a checkpoint CANNOT be exercised: a bias-free net has no
+  mechanism to subtract a DC offset, so it would emit silent garbage, and
+  ``from_pretrained`` refuses it outright. SKIP is the honest state — these tests
+  auto-re-enable the moment a ``[0,1]`` checkpoint exists. They must never FAIL on
+  a legacy checkpoint, and must never silently PASS on one.
+
+Domain (INV-1): pixels live in ``[0, 1]``, center ``0.5``. Every gate below measures
+DEVIATION FROM THE DOMAIN CENTER (``|out - 0.5|``), not ``|out|`` — the zero-centered
+``abs()`` form these gates used to carry encoded the old domain STRUCTURALLY, and a
+literal find-and-replace would have left them green and semantically wrong (D-006).
 
 Coverage (plan.md Step 6 / Pre-Mortem STOP-IF #3 / Success Criterion 7):
 
@@ -34,6 +46,7 @@ Confirm the fast suite skips it:
         tests/test_applications/test_bias_free_denoiser/ -m "not slow" -vvv
 """
 
+import json
 from pathlib import Path
 
 import keras
@@ -76,9 +89,9 @@ FULL_SHAPE = (1, H, W, C)
 # NOTE (Step-6 empirical): with the checkpoint's slow paper-schedule annealing
 # (h0=0.01, beta=0.01) sigma_t drops only ~0.4->0.33 over ~120 iters — the iterate
 # is a COARSE-SCALE sample whose std tracks sigma_t (measured std==sigma_t to ~1%),
-# so ~15-20% of pixels legitimately sit outside [-0.5,+0.5] at this scale. That is
+# so ~15-20% of pixels legitimately sit outside the domain at this scale. That is
 # correct annealed-Langevin behavior, NOT divergence: tails CONTRACT and sigma
-# decreases monotonically as iterations grow (60->300: |.|max 1.82->1.22,
+# decreases monotonically as iterations grow (60->300: dev-max 1.82->1.22,
 # frac_in_domain 0.82->0.95). Full domain containment needs the production budget
 # (paper's hundreds-to-1000 steps), out of scope for a GPU smoke. Hence the gates
 # below assert the non-divergence invariants (finite, sigma anneals, field scale
@@ -92,9 +105,18 @@ SMOKE_ITERS = 120
 # each measurement operator (closes WARNING-1 / D-009).
 ALL6_ITERS = 40
 
+# Domain (INV-1): pixels live in [0, 1]. Every ceiling below is a bound on the
+# DEVIATION FROM THE DOMAIN CENTER, |out - DOMAIN_CENTER| — see _dev() and the module
+# docstring (D-006). A healthy iterate is centered on DOMAIN_CENTER (the operators'
+# init_mean fills unmeasured pixels with c0 = 0.5), so deviation-from-center is the
+# quantity these gates have ALWAYS meant; on the old zero-centered domain it merely
+# happened to coincide with |out|.
+DOMAIN_CENTER = 0.5
+DOMAIN_HALFWIDTH = 0.5
+
 # Generous divergence ceiling for the all-six sweep (D-009 accepted relaxation):
 # at a modest budget the coarse-scale iterate has std ~= sigma_t so healthy tails
-# reach a few * sigma_0; a flat |.|max ceiling of 5.0 passes those while still
+# reach a few * sigma_0; a flat dev-max ceiling of 5.0 passes those while still
 # catching real NaN/Inf/exponential blow-up in any of the four previously-untested
 # problems (random_pixels / super_resolution / deblur / compressive_sensing).
 ALL6_CEIL = 5.0
@@ -102,22 +124,21 @@ ALL6_CEIL = 5.0
 # Tight single-pass containment for the blind `denoise` task (A3/A5). Unlike the
 # iterative annealed-Langevin sweep (ALL6_CEIL=5.0, coarse-scale relaxation), a
 # single forward pass D(y) on a modestly-noised in-domain target has NO coarse-scale
-# sampling — it should land essentially in-domain. The INTENDED tight bound is ~0.6
-# (0.5 half-width + ~0.1 slack). This ceiling is set to 1.0 rather than 0.6 to avoid
-# a first-run surprise on a |.|max value that could NOT be measured here (the GPU
-# slow run is deferred; GPU1 was occupied). If the real-checkpoint run shows |.|max
-# well under this, tighten toward 0.6 (see plan A5 / SC6). The plan's falsification
-# signal is |.|max > 1.0 -> investigate, so 1.0 is the correct guard threshold.
+# sampling — it should land essentially in-domain. The INTENDED tight bound on the
+# deviation-from-center is ~0.6 (0.5 half-width + ~0.1 slack); 1.0 is the guard
+# threshold (a dev-max above it means the output left [-0.5, 1.5] — investigate
+# before loosening, plan A5/SC6). NOTE this is a DEVIATION bound, so it does NOT
+# degenerate into an always-borderline gate on [0,1] the way a raw |out| <= 1.0
+# would have.
 DENOISE_CEIL = 1.0
-
-# Domain (INV-1) reference half-width. Used only for the informational
-# in-domain-fraction report, NOT as a hard per-pixel gate at coarse scale.
-DOMAIN = 0.5
 
 # Non-divergence bound: at a coarse scale of std ~= sigma_0 the max of ~2e5 pixels
 # reaches ~4.5-5 sigma; a bound of 6*sigma_0 passes healthy tails while still
 # catching true (exponential) blow-up, which would overshoot by orders of magnitude.
 _BLOWUP_SIGMA_MULT = 6.0
+
+# The provenance stamp a checkpoint must carry to be exercisable at all (D-005).
+_REQUIRED_DATA_RANGE = "[0,1]"
 
 
 def _l2(t) -> float:
@@ -130,23 +151,40 @@ def _to_np(t) -> np.ndarray:
     return np.asarray(keras.ops.convert_to_numpy(t), dtype=np.float32)
 
 
+def _dev(out: np.ndarray) -> np.ndarray:
+    """Deviation from the domain center: ``|out - 0.5|``.
+
+    THE structural primitive of this module (D-006). Every blow-up / containment gate
+    is a bound on this, never on ``|out|`` — ``|out| <= 0.5`` is nonsense on ``[0,1]``
+    (it would reject the entire upper half of a perfectly valid image), and ``|out| <=
+    1.0`` degenerates into an always-borderline gate. ``|out - 0.5| <= 0.5`` is exactly
+    "in domain", and ``|out - 0.5| <= k`` is exactly "within k of mid-grey".
+    """
+    return np.abs(out - DOMAIN_CENTER)
+
+
 def _domain_report(name: str, out: np.ndarray) -> None:
     """Log finiteness + value-range diagnostics for a solver output."""
     finite = bool(np.all(np.isfinite(out)))
-    amax = float(np.max(np.abs(out))) if finite else float("nan")
-    p995 = float(np.percentile(np.abs(out), 99.5)) if finite else float("nan")
+    dev = _dev(out) if finite else None
+    dmax = float(np.max(dev)) if finite else float("nan")
+    p995 = float(np.percentile(dev, 99.5)) if finite else float("nan")
     logger.info(
-        "[integration] %s: finite=%s min=%.4f max=%.4f |.|max=%.4f |.|p99.5=%.4f",
-        name, finite, float(out.min()), float(out.max()), amax, p995,
+        "[integration] %s: finite=%s min=%.4f max=%.4f dev-max=%.4f dev-p99.5=%.4f "
+        "(dev = |x - %.1f|, deviation from the [0,1] domain center)",
+        name, finite, float(out.min()), float(out.max()), dmax, p995, DOMAIN_CENTER,
     )
 
 
 def _make_synthetic_target() -> np.ndarray:
-    """Build a smooth in-domain [-0.5, +0.5] target (low-freq field + shapes).
+    """Build a smooth in-domain [0, 1] target (low-freq field + shapes).
 
-    Kept comfortably interior (|value| <= ~0.4) so the residual=score identity
-    stays trustworthy away from the clip boundary (F1 §3 / S1). Mirrors the old
-    ``main.py`` generator's intent (gradient + shapes) but in the RIGHT domain.
+    Kept comfortably interior (``|value - 0.5| <= ~0.4``, i.e. ``[0.05, 0.95]``) so the
+    residual=score identity stays trustworthy away from the clip boundary (F1 §3 / S1).
+    Mirrors the old ``main.py`` generator's intent (gradient + shapes) in the [0,1]
+    domain: the field is built zero-centered (that is the natural way to synthesize a
+    band-limited texture) and then SHIFTED onto the domain center, rather than the
+    literal bounds being swapped.
     """
     rng = np.random.default_rng(0)
     # Low-frequency base: an 8x8 gaussian field bilinearly upsampled to HxW.
@@ -163,16 +201,26 @@ def _make_synthetic_target() -> np.ndarray:
     # Add a smooth diagonal gradient.
     grad = (np.linspace(-1, 1, H)[:, None] + np.linspace(-1, 1, W)[None, :])[..., None]
     field = field + 0.5 * grad
-    # Normalize to a comfortably-interior range [-0.4, +0.4].
+    # Normalize the ZERO-CENTERED texture to a comfortably-interior amplitude +-0.4...
     field = field - field.mean()
     field = 0.4 * field / (np.max(np.abs(field)) + 1e-8)
-    # A couple of soft shapes.
+    # A couple of soft shapes (still in zero-centered amplitude units).
     yy, xx = np.mgrid[0:H, 0:W]
     disc = ((yy - 90) ** 2 + (xx - 90) ** 2) < 40 ** 2
     field[disc] = field[disc] * 0.3 + 0.25
     field[170:210, 60:190, :] = -0.2
-    field = np.clip(field, -0.45, 0.45).astype(np.float32)
+    # ...then SHIFT onto the [0,1] domain center -> values in [0.05, 0.95].
+    field = np.clip(DOMAIN_CENTER + field, 0.05, 0.95).astype(np.float32)
     return field[None]  # [1, H, W, C]
+
+
+def _has_unit_domain_stamp(ckpt: Path) -> bool:
+    """True iff the checkpoint's sibling config.json stamps ``data_range == "[0,1]"``."""
+    try:
+        raw = json.loads((ckpt.parent / "config.json").read_text())
+    except (OSError, ValueError):
+        return False
+    return raw.get("data_range") == _REQUIRED_DATA_RANGE
 
 
 @pytest.fixture(
@@ -183,15 +231,34 @@ def _make_synthetic_target() -> np.ndarray:
     ],
 )
 def prior(request) -> DenoiserPrior:
-    """Load a real checkpoint ONCE per architecture (dynamic path). Skip if absent.
+    """Load a real checkpoint ONCE per architecture (dynamic path). Skip if unusable.
 
     Parametrized over both bias-free architectures so `from_pretrained`'s
     auto-detected dynamic path — ConvUNext graph-relax vs. CliffordUNet
     factory-rebuild — is exercised end-to-end by every test below.
+
+    Two independent SKIP conditions, both "the artifact is absent", not "the code is
+    broken":
+
+    1. the checkpoint file does not exist on this machine;
+    2. the checkpoint predates the [0,1] unit-domain migration (no ``data_range``
+       stamp). Running it would be meaningless — a bias-free net cannot subtract a DC
+       offset, so a legacy checkpoint fed [0,1] data emits SILENT garbage, and
+       ``from_pretrained`` refuses it (D-005). SKIP is the honest state; these tests
+       re-enable themselves automatically once a [0,1] checkpoint is trained. They must
+       NOT fail, and must NOT pass on a legacy checkpoint.
     """
     ckpt: Path = request.param
     if not ckpt.is_file():
         pytest.skip(f"checkpoint not present, skipping integration test: {ckpt}")
+    if not _has_unit_domain_stamp(ckpt):
+        pytest.skip(
+            f"no [0,1]-domain checkpoint available: {ckpt} lacks the "
+            f"data_range={_REQUIRED_DATA_RANGE!r} stamp in its config.json, so it was "
+            f"trained on the legacy [-0.5,+0.5] domain and cannot be exercised (a "
+            f"bias-free denoiser cannot subtract a DC offset -> silent garbage). "
+            f"Retrain on [0,1] to re-enable this test."
+        )
     logger.info("[integration] loading real checkpoint: %s", ckpt)
     p = DenoiserPrior.from_pretrained(str(ckpt))  # default resolution="dynamic"
     return p
@@ -200,7 +267,7 @@ def prior(request) -> DenoiserPrior:
 def test_load_and_callable(prior: DenoiserPrior) -> None:
     """The loaded denoiser is callable and shape/finiteness-preserving at 256x256."""
     assert prior.model is not None
-    x = _make_synthetic_target()  # in-domain [-0.45, 0.45]
+    x = _make_synthetic_target()  # in-domain [0.05, 0.95]
     d = _to_np(prior.denoise(x))
     assert d.shape == FULL_SHAPE, f"denoise shape {d.shape} != {FULL_SHAPE}"
     assert np.all(np.isfinite(d)), "denoiser produced non-finite output"
@@ -228,7 +295,8 @@ def test_prior_sampling_null_operator(prior: DenoiserPrior) -> None:
 
     sig = info["sigma_values"]
     std = float(out.std())
-    frac_in = float(np.mean(np.abs(out) <= DOMAIN))
+    # "In domain" == within one half-width of the domain CENTER, i.e. 0 <= x <= 1.
+    frac_in = float(np.mean(_dev(out) <= DOMAIN_HALFWIDTH))
     logger.info(
         "[integration] prior-sample: iters=%d sigma_0=%.5f sigma_final=%.5f "
         "best_sigma=%.5f field_std=%.5f frac_in_domain=%.3f",
@@ -248,10 +316,12 @@ def test_prior_sampling_null_operator(prior: DenoiserPrior) -> None:
     assert std <= solver.sigma_0 + 1e-2, (
         f"field std {std:.5f} grew past init sigma_0={solver.sigma_0:.5f} (divergence)"
     )
-    # (4) No exponential blow-up in the tails (healthy tail ~5*sigma passes).
+    # (4) No exponential blow-up in the tails (healthy tail ~5*sigma passes). Measured
+    #     as deviation from the domain CENTER — the iterate is centered on 0.5, so a raw
+    #     |out| bound would be off-center by exactly one half-width (D-006).
     blowup = _BLOWUP_SIGMA_MULT * solver.sigma_0
-    assert float(np.max(np.abs(out))) < blowup, (
-        f"sustained blow-up: |.|max={np.max(np.abs(out)):.4f} >= {blowup:.3f} "
+    assert float(np.max(_dev(out))) < blowup, (
+        f"sustained blow-up: dev-max={np.max(_dev(out)):.4f} >= {blowup:.3f} "
         f"(STOP-IF #3)"
     )
     # (5) A substantial fraction of pixels already sit in-domain at this scale.
@@ -296,8 +366,8 @@ def test_inpainting_operator(prior: DenoiserPrior) -> None:
         f"inpaint field std {std:.5f} grew past sigma_0={solver.sigma_0:.5f}"
     )
     blowup = _BLOWUP_SIGMA_MULT * solver.sigma_0
-    assert float(np.max(np.abs(out))) < blowup, (
-        f"inpaint sustained blow-up: |.|max={np.max(np.abs(out)):.4f} >= {blowup:.3f} "
+    assert float(np.max(_dev(out))) < blowup, (
+        f"inpaint sustained blow-up: dev-max={np.max(_dev(out)):.4f} >= {blowup:.3f} "
         f"(STOP-IF #3)"
     )
     # Measured pixels respected: constraint error decreased vs init (best_y no worse
@@ -374,25 +444,28 @@ def test_all_six_problems_finite_and_bounded(prior: DenoiserPrior, problem: str)
     if problem == "denoise":
         # Blind single-pass denoise D(y): NO MeasurementOperator, NO solver (it is a
         # genuine sibling dispatch, not a fake identity operator). Mirror main.py's
-        # noise synthesis (main.py:228-231): add in-domain Gaussian noise sigma~0.1
-        # then clip to the [-0.5, +0.5] domain, and take a SINGLE forward pass.
-        target = _make_synthetic_target()  # in-domain [-0.45, 0.45]
+        # noise synthesis: add in-domain Gaussian noise sigma~0.1 then clip to the
+        # [0, 1] domain, and take a SINGLE forward pass.
+        target = _make_synthetic_target()  # in-domain [0.05, 0.95]
         rng = np.random.default_rng(0)
         noise = rng.normal(0.0, 0.1, target.shape).astype(np.float32)
-        noisy = np.clip(target + noise, -0.5, 0.5)
+        noisy = np.clip(target + noise, 0.0, 1.0)
         out = _to_np(prior.denoise(noisy))
         _domain_report("all6[denoise] D(y)", out)
-        amax = float(np.max(np.abs(out))) if np.all(np.isfinite(out)) else float("nan")
+        dmax = float(np.max(_dev(out))) if np.all(np.isfinite(out)) else float("nan")
         logger.info(
-            "[integration] all6[denoise]: shape=%s finite=%s |.|max=%.4f (single-pass)",
-            out.shape, bool(np.all(np.isfinite(out))), amax,
+            "[integration] all6[denoise]: shape=%s finite=%s dev-max=%.4f (single-pass)",
+            out.shape, bool(np.all(np.isfinite(out))), dmax,
         )
-        # --- Gates: finite, correct shape, TIGHT single-pass value bound.
+        # --- Gates: finite, correct shape, TIGHT single-pass containment around the
+        #     domain center (D-006: a raw |out| <= 1.0 bound would be trivially true on
+        #     [0,1] for any non-diverging output — a gate that can never go red).
         assert out.shape == FULL_SHAPE, f"denoise: shape {out.shape} != {FULL_SHAPE}"
         assert np.all(np.isfinite(out)), "denoise: produced NaN/Inf on real checkpoint"
-        assert amax <= DENOISE_CEIL, (
-            f"denoise: |D(y)|.max()={amax:.4f} > {DENOISE_CEIL} (single-pass should "
-            f"land essentially in-domain; investigate before loosening — plan A5/SC6)"
+        assert dmax <= DENOISE_CEIL, (
+            f"denoise: max|D(y) - {DOMAIN_CENTER}|={dmax:.4f} > {DENOISE_CEIL} "
+            f"(single-pass should land essentially in-domain; investigate before "
+            f"loosening — plan A5/SC6)"
         )
         return  # denoise has no operator/solver path — skip the sweep below.
 
@@ -416,18 +489,20 @@ def test_all_six_problems_finite_and_bounded(prior: DenoiserPrior, problem: str)
 
     out = _to_np(best_y)
     _domain_report(f"all6[{problem}] best_y", out)
-    amax = float(np.max(np.abs(out))) if np.all(np.isfinite(out)) else float("nan")
+    dmax = float(np.max(_dev(out))) if np.all(np.isfinite(out)) else float("nan")
     sig = info["sigma_values"]
     logger.info(
-        "[integration] all6[%s]: shape=%s finite=%s |.|max=%.4f "
+        "[integration] all6[%s]: shape=%s finite=%s dev-max=%.4f "
         "sigma %.5f->%.5f iters=%d",
-        problem, out.shape, bool(np.all(np.isfinite(out))), amax,
+        problem, out.shape, bool(np.all(np.isfinite(out))), dmax,
         sig[0], sig[-1], info["stopped_iteration"],
     )
 
-    # --- Gates: finite, correct shape, value-bounded (no NaN/Inf/blow-up).
+    # --- Gates: finite, correct shape, bounded deviation from the domain center
+    #     (no NaN/Inf/blow-up). Deviation, not |out| — see _dev() / D-006.
     assert out.shape == FULL_SHAPE, f"{problem}: shape {out.shape} != {FULL_SHAPE}"
     assert np.all(np.isfinite(out)), f"{problem}: produced NaN/Inf on real checkpoint"
-    assert amax < ALL6_CEIL, (
-        f"{problem}: |best_y|.max()={amax:.4f} >= {ALL6_CEIL} (divergence/blow-up)"
+    assert dmax < ALL6_CEIL, (
+        f"{problem}: max|best_y - {DOMAIN_CENTER}|={dmax:.4f} >= {ALL6_CEIL} "
+        f"(divergence/blow-up)"
     )

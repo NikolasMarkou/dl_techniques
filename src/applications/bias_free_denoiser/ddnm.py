@@ -79,8 +79,14 @@ from dl_techniques.utils.logger import logger
 
 from .operators import MeasurementOperator
 
-# Domain half-width of the [-0.5, +0.5] training convention (INV-1 / D-002).
-_DOMAIN_HALF_WIDTH = 0.5
+# NOTE (plan_2026-07-12_e56909cd/step-4): a `_DOMAIN_HALF_WIDTH = 0.5` constant used to
+# live here, documented as "the half-width of the [-0.5,+0.5] training convention". An
+# audit for the unit-domain migration found it had ZERO readers — nothing in this module
+# (or the repo) ever consumed it. It was DELETED rather than retargeted to [0,1]: this
+# sampler is genuinely domain-agnostic (it never clips, and every quantity it touches is
+# a noise scale or a difference, not an absolute pixel level), so re-introducing a domain
+# constant here would only invite a future reader to "use" it and re-couple the sampler
+# to a domain it does not need to know about.
 
 # Homogeneity is the load-bearing precondition of this whole module. This is the largest
 # relative error we accept before refusing to run. Float32 rounding through a deep net lands
@@ -108,7 +114,7 @@ def homogeneity_error(
 
     Args:
         prior: An object exposing ``residual(y)`` and ``model`` (a ``DenoiserPrior``).
-        y: A probe batch ``[B, H, W, C]`` in the ``[-0.5, +0.5]`` domain.
+        y: A probe batch ``[B, H, W, C]`` in the ``[0, 1]`` domain.
         alphas: Scale factors to test. Avoid powers of two.
 
     Returns:
@@ -168,7 +174,10 @@ class DDNMSolver:
             prior: An object exposing ``residual(y)`` (e.g. a ``DenoiserPrior``).
             steps: Number of diffusion steps.
             sigma_start: Largest noise level (start of the anneal). The checkpoint's curriculum
-                reaches ``sigma_max_end = 0.5``; homogeneity licenses going beyond it.
+                reaches ``sigma_max_end = 0.5``; homogeneity licenses going beyond it. This is
+                a noise STANDARD DEVIATION, so it tracks the domain's WIDTH (1.0, unchanged by
+                the [-0.5,+0.5] -> [0,1] shift), NOT its center: the value is migration-invariant
+                (INV-2). Do not "re-derive" it from the new bounds.
             sigma_end: Smallest noise level (end of the anneal).
             eta: DDIM stochasticity in ``[0, 1]``.
             measurement_sigma: Observation-noise std. ``0`` => plain DDNM.

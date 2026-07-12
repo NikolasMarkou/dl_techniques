@@ -44,12 +44,13 @@ def _np(t) -> np.ndarray:
 
 
 def _smooth_target(seed: int = 0) -> np.ndarray:
-    """A smooth in-domain ``[B, H, W, C]`` target in ``[-0.5, +0.5]``."""
+    """A smooth in-domain ``[B, H, W, C]`` target in ``[0, 1]``."""
     h, w, c = IMAGE_SHAPE
     yy, xx = np.meshgrid(
         np.linspace(-0.4, 0.4, h), np.linspace(-0.4, 0.4, w), indexing="ij"
     )
-    ramp = 0.5 * (yy + xx) / 0.8  # in [-0.4, 0.4]
+    # Centered on the [0,1] domain center 0.5, half-amplitude 0.4 -> [0.1, 0.9].
+    ramp = 0.5 + 0.5 * (yy + xx) / 0.8
     img = np.broadcast_to(ramp[None, :, :, None], FULL_SHAPE).astype(np.float32)
     return np.ascontiguousarray(img)
 

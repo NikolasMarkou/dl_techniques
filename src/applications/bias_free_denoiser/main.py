@@ -9,7 +9,7 @@ view, reconstruction, and the effective-noise convergence curve per problem — 
 
 Every problem is selected purely by swapping a :class:`MeasurementOperator`; the
 solver never branches on a problem type (INV-6). All pixels live in the model's
-``[-0.5, +0.5]`` domain (INV-1 / D-002).
+``[0, 1]`` domain (INV-1).
 
 Examples:
     Run all six problems on the synthetic in-domain target at a modest budget::
@@ -98,19 +98,17 @@ _PROBLEM_TITLES: Dict[str, str] = {
 
 
 def create_synthetic_test_image(shape: Tuple[int, int, int, int]) -> np.ndarray:
-    """Create a smooth synthetic RGB test image in the ``[-0.5, +0.5]`` domain.
+    """Create a smooth synthetic RGB test image in the ``[0, 1]`` domain.
 
-    Ported from the old demo but retargeted to the model's ``[-0.5, +0.5]`` domain
-    (D-002) instead of the legacy ``[-1, +1]``. The pattern (a gradient background
-    plus a circle and a rectangle) gives structure the operators can visibly
-    degrade and the prior can plausibly restore.
+    The pattern (a gradient background plus a circle and a rectangle) gives structure
+    the operators can visibly degrade and the prior can plausibly restore.
 
     Args:
         shape: ``(batch, H, W, C)``. Only ``batch == 1`` is used by the demo; ``C``
             is broadcast across channels (the checkpoint is RGB, ``C == 3``).
 
     Returns:
-        A float32 ``numpy.ndarray`` of ``shape`` with values in ``[-0.5, +0.5]``.
+        A float32 ``numpy.ndarray`` of ``shape`` with values in ``[0, 1]``.
     """
     _, h, w, c = shape
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
@@ -122,28 +120,27 @@ def create_synthetic_test_image(shape: Tuple[int, int, int, int]) -> np.ndarray:
     rect = ((yy > 0.6) & (yy < 0.9) & (xx > 0.6) & (xx < 0.9)).astype(np.float32)
     gradient = xx * 0.3
 
-    # Assemble a [0, 1] image, then shift to the [-0.5, +0.5] model domain (D-002).
+    # The [0, 1] assembly IS the model domain now — no shift, just a clip.
     img01 = np.clip(gradient + circle * 0.5 + rect * 0.7, 0.0, 1.0)
     img = np.repeat(img01[:, :, None], c, axis=-1)
-    img = img[None, ...].astype(np.float32) - 0.5
-    return np.clip(img, -0.5, 0.5)
+    return img[None, ...].astype(np.float32)
 
 
 def load_real_image(path: str, size: int) -> np.ndarray:
-    """Load a real image, resize to ``size`` and ingest to ``[-0.5, +0.5]``.
+    """Load a real image, resize to ``size`` and ingest to ``[0, 1]``.
 
     Args:
         path: Path to an image file (any format Keras/Pillow can open).
         size: Target square edge length (must be divisible by 8 for the U-Net).
 
     Returns:
-        A float32 ``[1, size, size, 3]`` array in ``[-0.5, +0.5]``.
+        A float32 ``[1, size, size, 3]`` array in ``[0, 1]``.
     """
     import keras
 
     img = keras.utils.load_img(path, color_mode="rgb", target_size=(size, size))
     arr = keras.utils.img_to_array(img)  # [size, size, 3] in [0, 255]
-    normalized = DenoiserPrior.ingest(arr)  # -> [-0.5, +0.5]
+    normalized = DenoiserPrior.ingest(arr)  # -> [0, 1]
     return normalized[None, ...].astype(np.float32)
 
 
@@ -205,7 +202,7 @@ def run_problem(
     Args:
         problem: The problem id.
         prior: The loaded denoiser prior.
-        target: The clean signal ``[1, H, W, C]`` in ``[-0.5, +0.5]``.
+        target: The clean signal ``[1, H, W, C]`` in ``[0, 1]``.
         args: Parsed CLI namespace (solver + per-problem knobs).
 
     Returns:
@@ -222,21 +219,21 @@ def run_problem(
         # MeasurementOperator and NO UniversalInverseSolver — it returns BEFORE
         # build_operator and must NOT be routed through a fake IdentityOperator
         # (the deliberately-rejected anti-pattern; see decisions.md D-001 / F2).
-        # H2 / D-002: all pixel math stays in [-0.5, +0.5]; synthetic Gaussian noise
-        # is added post-ingest, in-domain, and lightly clipped to the domain (matching
-        # the trainer) before the single denoise call.
+        # H2: all pixel math stays in [0, 1]; synthetic Gaussian noise is added
+        # post-ingest, in-domain, and lightly clipped to the domain (matching the
+        # trainer) before the single denoise call.
         rng = np.random.default_rng(args.seed)
         if args.noise_sigma > 0.0:
             noise = rng.normal(0.0, args.noise_sigma, target.shape).astype(np.float32)
-            noisy = np.clip(target + noise, -0.5, 0.5)
+            noisy = np.clip(target + noise, 0.0, 1.0)
         else:
             noisy = target  # denoise-as-is
         denoised = np.asarray(keras.ops.convert_to_numpy(prior.denoise(noisy)))
         return {
             "title": _PROBLEM_TITLES["denoise"],
             "target": DenoiserPrior.denorm(target[0]),
-            "degraded": np.clip(DenoiserPrior.denorm(noisy[0]), 0.0, 1.0),
-            "recon": np.clip(DenoiserPrior.denorm(denoised[0]), 0.0, 1.0),
+            "degraded": DenoiserPrior.denorm(noisy[0]),
+            "recon": DenoiserPrior.denorm(denoised[0]),
             "info": {},
         }
 
@@ -283,7 +280,7 @@ def run_problem(
             operator, measurements=measurements, shape=shape, seed=args.seed + i
         )
         recon_np = np.asarray(keras.ops.convert_to_numpy(recon))
-        recon01_i = np.clip(DenoiserPrior.denorm(recon_np[0]), 0.0, 1.0)
+        recon01_i = DenoiserPrior.denorm(recon_np[0])
         recon01_sum = recon01_i if recon01_sum is None else recon01_sum + recon01_i
     recon01 = recon01_sum / float(num_samples)
 
@@ -324,9 +321,9 @@ def denoise_frame(prior: DenoiserPrior, rgb_uint8: np.ndarray, size: int = 256) 
     # Fixed ÷8 square pass, independent of input aspect ratio (H4). PIL resize takes
     # (width, height); a square (size, size) is orientation-agnostic here.
     resized = np.asarray(Image.fromarray(frame).resize((size, size)))
-    x = DenoiserPrior.ingest(resized)[None, ...]  # -> [1, size, size, 3] in [-0.5, +0.5]
+    x = DenoiserPrior.ingest(resized)[None, ...]  # -> [1, size, size, 3] in [0, 1]
     y = np.asarray(keras.ops.convert_to_numpy(prior.denoise(x)))
-    out01 = np.clip(DenoiserPrior.denorm(y[0]), 0.0, 1.0)  # [-0.5,+0.5] -> [0,1]
+    out01 = DenoiserPrior.denorm(y[0])  # already [0,1]; denorm clips out-of-domain
     out_uint8 = (out01 * 255.0).astype(np.uint8)
     # Resize back to the original (H, W) -> PIL wants (width, height) == (w, h).
     return np.asarray(Image.fromarray(out_uint8).resize((w, h))).astype(np.uint8)

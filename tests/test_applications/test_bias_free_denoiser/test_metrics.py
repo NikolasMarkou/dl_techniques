@@ -55,12 +55,13 @@ class _StubDenoiser:
 
 
 def _smooth_target() -> np.ndarray:
-    """A smooth in-domain ``[1, 32, 32, 3]`` target in ``[-0.5, +0.5]``."""
+    """A smooth in-domain ``[1, 32, 32, 3]`` target in ``[0, 1]``."""
     h, w, c = IMAGE_SHAPE
     yy, xx = np.meshgrid(
         np.linspace(-0.4, 0.4, h), np.linspace(-0.4, 0.4, w), indexing="ij"
     )
-    ramp = 0.5 * (yy + xx) / 0.8  # in [-0.4, 0.4]
+    # Centered on the [0,1] domain center 0.5, half-amplitude 0.4 -> [0.1, 0.9].
+    ramp = 0.5 + 0.5 * (yy + xx) / 0.8
     img = np.broadcast_to(ramp[None, :, :, None], FULL_SHAPE).astype(np.float32)
     return np.ascontiguousarray(img)
 
@@ -73,7 +74,7 @@ def _smooth_target() -> np.ndarray:
 class TestMetricPrimitives:
     def test_psnr_identical_is_capped_not_inf(self):
         """psnr(x, x) returns a large FINITE ceiling, never +inf."""
-        x = np.clip(_smooth_target()[0] + 0.5, 0.0, 1.0)  # [0, 1] domain
+        x = _smooth_target()[0]  # already the [0, 1] domain (model == display)
         value = metrics.psnr(x, x)
         assert np.isfinite(value)
         assert value >= 99.0
@@ -89,7 +90,7 @@ class TestMetricPrimitives:
     def test_psnr_discriminates_quality(self):
         """A cleaner image strictly out-PSNRs a noisier one against the same GT."""
         rng = np.random.default_rng(1)
-        gt = np.clip(_smooth_target()[0] + 0.5, 0.0, 1.0)  # [0, 1]
+        gt = _smooth_target()[0]  # already [0, 1]
         cleaner = np.clip(gt + rng.normal(0.0, 0.02, gt.shape), 0.0, 1.0)
         noisier = np.clip(gt + rng.normal(0.0, 0.20, gt.shape), 0.0, 1.0)
         assert metrics.psnr(cleaner, gt) > metrics.psnr(noisier, gt)
@@ -97,7 +98,7 @@ class TestMetricPrimitives:
     def test_ssim_discriminates_quality(self):
         """A cleaner image scores higher SSIM than a noisier one (same GT)."""
         rng = np.random.default_rng(2)
-        gt = np.clip(_smooth_target()[0] + 0.5, 0.0, 1.0)
+        gt = _smooth_target()[0]  # already [0, 1]
         cleaner = np.clip(gt + rng.normal(0.0, 0.02, gt.shape), 0.0, 1.0)
         noisier = np.clip(gt + rng.normal(0.0, 0.20, gt.shape), 0.0, 1.0)
         assert metrics.ssim(cleaner, gt) > metrics.ssim(noisier, gt)

@@ -28,7 +28,7 @@ Design invariants (plan.md):
   so ``d_t`` degenerates exactly to ``f(y) = D(y) - y`` — Algorithm-1 prior
   sampling.
 
-Domain: pixels live in ``[-0.5, +0.5]`` with domain center ``c0 = 0.0`` (D-002);
+Domain: pixels live in ``[0, 1]`` with domain center ``c0 = 0.5`` (mid-grey);
 ``c0`` is the constant field to which unmeasured signal components are
 initialized in :meth:`MeasurementOperator.init_mean`.
 """
@@ -97,15 +97,15 @@ class MeasurementOperator(abc.ABC):
     cheaper closed form exists.
 
     Attributes:
-        c0: Domain-center constant (``0.0`` for the ``[-0.5, +0.5]`` model, D-002).
+        c0: Domain-center constant (``0.5`` — mid-grey on the ``[0, 1]`` domain).
             Unmeasured signal components are initialized to this value.
     """
 
-    def __init__(self, c0: float = 0.0) -> None:
+    def __init__(self, c0: float = 0.5) -> None:
         """Store the domain-center constant.
 
         Args:
-            c0: Domain center of the pixel space (``0.0`` for this model, D-002).
+            c0: Domain center of the pixel space (``0.5`` on ``[0, 1]``).
         """
         self.c0: float = float(c0)
 
@@ -159,13 +159,17 @@ class MeasurementOperator(abc.ABC):
     def init_mean(self, measurements: TensorLike) -> "keras.KerasTensor":
         """Build the Algorithm-2 initialization mean from measurements.
 
-        # DECISION plan_2026-07-06_d6b88914/D-002: the paper's init uses a literal
-        # `0.5 * (I - MM^T) e` DC term (for `[0,1]` data). THIS checkpoint trains
-        # in `[-0.5, +0.5]` with domain center `c0 = 0.0`, so the constant is
-        # `c0`, NOT 0.5 — do not hardcode 0.5 here or every unmeasured pixel gets
-        # DC-biased. The generalized formula keeps `(1 - project(ones))` rather
-        # than assuming `(1 - mask)`, because for spectral/CS operators
-        # `project(ones)` is not a plain 0/1 field. See decisions.md D-002.
+        # DECISION plan_2026-07-12_e56909cd/D-002: keep the DC term PARAMETERIZED by
+        # `c0` — do NOT hardcode the literal `0.5` here even though `c0`'s default is
+        # now 0.5 and the paper's `[0,1]` init `0.5 * (I - MM^T) e` coincides with it.
+        # (This supersedes plan_2026-07-06_d6b88914/D-002, whose comment argued the
+        # opposite from a `[-0.5,+0.5]` domain where `c0` was 0.0. Its conclusion
+        # INVERTED under the unit-domain migration; its REASONING — the constant is
+        # whatever the domain center is — did not.) Hardcoding re-couples the operator
+        # to one domain and is exactly what made the last migration expensive.
+        # The generalized formula keeps `(1 - project(ones))` rather than assuming
+        # `(1 - mask)`, because for spectral/CS operators `project(ones)` is not a
+        # plain 0/1 field. See decisions.md D-002.
 
         Computes ``init_mean = c0 * (1 - project(ones)) + adjoint(measurements)``:
         the measured component is placed at ``adjoint(measurements)`` and every
@@ -274,14 +278,14 @@ class MaskOperator(MeasurementOperator):
             allocation, no branching on tensor values).
     """
 
-    def __init__(self, mask: np.ndarray, c0: float = 0.0) -> None:
+    def __init__(self, mask: np.ndarray, c0: float = 0.5) -> None:
         """Wrap a precomputed 0/1 mask.
 
         Args:
             mask: A 0/1 array of shape ``[H, W]``, ``[H, W, 1]`` or ``[H, W, C]``.
                 A 2-D ``[H, W]`` mask is promoted to ``[H, W, 1]`` (broadcast over
                 channels).
-            c0: Domain center for unmeasured pixels (default ``0.0``, D-002).
+            c0: Domain center for unmeasured pixels (default ``0.5``, mid-grey).
 
         Raises:
             ValueError: If ``mask`` is not 2-D or 3-D, or holds values other than
@@ -372,14 +376,14 @@ class InpaintingOperator(MaskOperator):
         self,
         image_shape: ImageShape,
         block_size: Union[int, Sequence[int]],
-        c0: float = 0.0,
+        c0: float = 0.5,
     ) -> None:
         """Build a centered-block missing mask.
 
         Args:
             image_shape: Signal shape ``(H, W, C)``.
             block_size: Missing-region size, an int (square) or ``(bh, bw)``.
-            c0: Domain center for missing pixels (default ``0.0``, D-002).
+            c0: Domain center for missing pixels (default ``0.5``, mid-grey).
 
         Raises:
             ValueError: If the block does not fit inside the image.
@@ -414,7 +418,7 @@ class RandomPixelsOperator(MaskOperator):
         *,
         seed: Optional[int] = None,
         rng: Optional[np.random.Generator] = None,
-        c0: float = 0.0,
+        c0: float = 0.5,
     ) -> None:
         """Build a random per-pixel keep mask.
 
@@ -424,7 +428,7 @@ class RandomPixelsOperator(MaskOperator):
             seed: Optional seed for a fresh ``numpy`` generator (reproducibility).
             rng: Optional pre-seeded ``numpy.random.Generator`` (takes precedence
                 over ``seed``).
-            c0: Domain center for dropped pixels (default ``0.0``, D-002).
+            c0: Domain center for dropped pixels (default ``0.5``, mid-grey).
 
         Raises:
             ValueError: If ``keep_ratio`` is not in ``(0, 1]``.
@@ -466,14 +470,14 @@ class SuperResolutionOperator(MeasurementOperator):
         k: Downsample factor (block edge length).
     """
 
-    def __init__(self, image_shape: ImageShape, factor: int = 4, c0: float = 0.0) -> None:
+    def __init__(self, image_shape: ImageShape, factor: int = 4, c0: float = 0.5) -> None:
         """Build a super-resolution (block-averaging) operator.
 
         Args:
             image_shape: Signal shape ``(H, W, C)``.
             factor: Block edge length ``k`` (downsample factor). ``H`` and ``W``
                 MUST be divisible by ``k``.
-            c0: Domain center for unmeasured components (default ``0.0``, D-002).
+            c0: Domain center for unmeasured components (default ``0.5``, mid-grey).
 
         Raises:
             ValueError: If ``factor < 1`` or ``H``/``W`` are not divisible by it.
@@ -576,7 +580,7 @@ class SpectralDeblurOperator(MeasurementOperator):
         self,
         image_shape: ImageShape,
         keep_fraction: float = 0.1,
-        c0: float = 0.0,
+        c0: float = 0.5,
     ) -> None:
         """Build a centered low-pass DFT operator.
 
@@ -585,7 +589,7 @@ class SpectralDeblurOperator(MeasurementOperator):
             keep_fraction: Fraction of frequencies to keep along each axis, in
                 ``(0, 1]``. The centered square keeps ``|freq| <= r`` with
                 ``r = int(keep_fraction * dim / 2)``; DC is always included.
-            c0: Domain center for unmeasured components (default ``0.0``, D-002).
+            c0: Domain center for unmeasured components (default ``0.5``, mid-grey).
 
         Raises:
             ValueError: If ``keep_fraction`` is not in ``(0, 1]``.
@@ -723,7 +727,7 @@ class MRIUndersamplingOperator(SpectralDeblurOperator):
         acceleration: int = 4,
         center_fraction: float = 0.08,
         seed: int = 0,
-        c0: float = 0.0,
+        c0: float = 0.5,
     ) -> None:
         """Build a Cartesian k-space undersampling operator.
 
@@ -732,7 +736,7 @@ class MRIUndersamplingOperator(SpectralDeblurOperator):
             acceleration: Acceleration factor ``R`` (keep ~``1/R`` of the columns).
             center_fraction: Fraction of columns kept in the fully-sampled ACS centre.
             seed: RNG seed for the random high-frequency column draw (reproducible).
-            c0: Domain center for unmeasured components (default ``0.0``, D-002).
+            c0: Domain center for unmeasured components (default ``0.5``, mid-grey).
 
         Raises:
             ValueError: If ``acceleration < 1`` or ``center_fraction`` is not in ``(0, 1]``.
@@ -822,8 +826,12 @@ class CompressiveSensingOperator(MeasurementOperator):
 
     ``project(ones) != 1`` in general (the sign flip of a constant field is not
     constant), so the base :meth:`init_mean`'s ``c0 * (1 - project(ones))`` term
-    is genuinely load-bearing here; with ``c0 = 0`` it still vanishes, leaving
-    ``init_mean = adjoint(measurements)``.
+    is genuinely load-bearing here. At the ``[0, 1]`` default ``c0 = 0.5`` this term
+    is NON-ZERO and shapes the initialization: unmeasured coefficients start at
+    mid-grey rather than black, and ``init_mean != adjoint(measurements)``. (It
+    vanishes only in the degenerate ``c0 = 0`` case, which was the legacy
+    zero-centered default — that path is no longer the default and is covered
+    explicitly by ``test_cs_init_mean_c0_zero_vanishes``.)
 
     No dense ``[N, n]``/``[N, N]`` matrix is built (INV-3): the structured
     operator is the only path. (The plan permits an optional small-tile dense
@@ -847,7 +855,7 @@ class CompressiveSensingOperator(MeasurementOperator):
         measurement_ratio: float = 0.1,
         *,
         seed: Optional[int] = None,
-        c0: float = 0.0,
+        c0: float = 0.5,
     ) -> None:
         """Build a structured compressive-sensing operator.
 
@@ -857,7 +865,7 @@ class CompressiveSensingOperator(MeasurementOperator):
                 ``(0, 1]`` (default ``0.1``).
             seed: Optional seed for the Rademacher sign + subsample draw
                 (reproducibility).
-            c0: Domain center for unmeasured components (default ``0.0``, D-002).
+            c0: Domain center for unmeasured components (default ``0.5``, mid-grey).
 
         Raises:
             ValueError: If ``measurement_ratio`` is not in ``(0, 1]``.

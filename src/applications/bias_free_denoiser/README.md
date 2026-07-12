@@ -71,14 +71,38 @@ exactly, with **zero retraining** — which is what `ddnm.py` in this package ex
   benchmarked (`src/train/bfunet/FINDINGS.md` §8.1). Every "it works" here is a **capability** claim,
   not a **competitiveness** claim.
 
-## Domain requirement: `[-0.5, +0.5]`
+## Domain requirement: `[0, 1]`
 
-The checkpoint was trained on pixels in **`[-0.5, +0.5]`** (center `c0 = 0.0`). The
-`residual = score` identity is only valid in that domain, so every signal fed to the
-prior/solver must live there. Use the helpers:
+Pixels live in **`[0, 1]`** (center `c0 = 0.5`). The `residual = score` identity is only
+valid in the domain the model was trained on, so every signal fed to the prior/solver
+must live there. Use the helpers:
 
-- `DenoiserPrior.ingest(x)` — normalize `uint8 [0,255]` / float `[0,1]` to `[-0.5, +0.5]`.
-- `DenoiserPrior.denorm(x)` — map `[-0.5, +0.5]` back to `[0, 1]` for display/export.
+- `DenoiserPrior.ingest(x)` — normalize `uint8 [0,255]` to `[0, 1]` (float input is clipped).
+- `DenoiserPrior.denorm(x)` — the sanctioned exit; model domain == display domain, so this
+  is now a clip that only rectifies out-of-domain solver iterates.
+
+**Why `[0, 1]` and not the old zero-centered `[-0.5, +0.5]`.** A bias-free network is
+degree-1 homogeneous with `f(0) = 0`. On a zero-centered domain a flat mid-grey patch is
+exactly the zero vector, so the net reproduces it *for free* — the DC component is never
+supervised at its most important operating point. On `[0, 1]` a flat patch of value `c` is
+`c·1`, and homogeneity gives `f(c·1) = c·f(1)`: reproducing it *requires* `f(1) = 1`, i.e.
+local filter weights that **sum to one**. That is exactly the DC-preserving property the
+Miyasawa/Tweedie residual-equals-score extraction depends on. `[0, 1]` makes it learnable
+and testable; `[-0.5, +0.5]` made it vacuous.
+
+Noise scales are **unchanged** by the migration: peak-to-peak width is `1.0` in BOTH
+domains, so every `sigma` (and `psnr`/`ssim` with `max_val=1.0`) is still exactly correct.
+This was a pure DC shift, not a rescale.
+
+### Legacy checkpoints are REFUSED, loudly
+
+Every checkpoint trained before this migration is invalid: a bias-free net has no mechanism
+to subtract a DC offset, so feeding it `[0, 1]` data produces a plausible-looking **wrong**
+image with no exception and no NaN. `DenoiserPrior.from_pretrained` therefore raises
+`ValueError` unless the checkpoint's sibling `config.json` stamps `"data_range": "[0,1]"`.
+An absent key means a pre-migration checkpoint, so **absent ⇒ legacy ⇒ refuse**. There is no
+compatibility flag: the fix is a **retrain**. Until a `[0, 1]` checkpoint exists, the app
+cannot run end-to-end (and its slow integration tests SKIP rather than pass on garbage).
 
 ## Public API
 
@@ -122,7 +146,7 @@ sample, info = solver.solve(NullOperator(), measurements=None, shape=(1, 256, 25
 ### An inverse problem (inpainting)
 
 ```python
-target = DenoiserPrior.ingest(clean_uint8_image)[None, ...]   # [1, H, W, 3] in [-0.5, +0.5]
+target = DenoiserPrior.ingest(clean_uint8_image)[None, ...]   # [1, H, W, 3] in [0, 1]
 op = InpaintingOperator(target.shape[1:], block_size=64)
 measurements = op.measure(target)
 recon, info = solver.solve(op, measurements=measurements, seed=0)
@@ -228,7 +252,7 @@ roles yield ≤ ±0.2 dB. See `solver.py`'s module docstring.
 
 The `denoise` task takes a single forward pass through the denoiser (no operator, no
 solver). Its `--noise-sigma` flag (default `0.1`) synthesizes in-domain Gaussian test
-noise that is added to the target — and lightly clipped back to `[-0.5, +0.5]` — before
+noise that is added to the target — and lightly clipped back to `[0, 1]` — before
 the single denoise pass; `--noise-sigma 0` denoises the input as-is. This std is only a
 test-harness knob: it is NEVER fed to the model, because the denoiser is bias-free and
 noise-level-blind.

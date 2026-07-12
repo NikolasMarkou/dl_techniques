@@ -59,9 +59,9 @@ to the null space of ``M``. Its measured effect is strongly task-dependent and N
 explained: **+2.6 dB** (4x super-resolution), **+2.3 dB** (spectral deblur), but
 **-14.2 dB** (random pixels). Do not enable it blindly.
 
-Domain (INV-1 / D-002 / S1)
----------------------------
-Pixels live in ``[-0.5, +0.5]`` with center ``c0 = 0.0``. Unlike the old
+Domain (INV-1 / S1)
+-------------------
+Pixels live in ``[0, 1]`` with center ``c0 = 0.5``. Unlike the old
 ``samplers.py`` (which hard-clipped every iterate to ``[-1, +1]``), interior
 clipping is OPTIONAL and OFF by default: F1 §3 established that clipping breaks the
 ``residual = score`` identity at the domain boundary (S1). With a domain-appropriate
@@ -79,17 +79,19 @@ from dl_techniques.utils.logger import logger
 
 from .operators import MeasurementOperator
 
-# Domain-adjusted default initial noise (INV-1 / D-002). The paper used sigma_0 = 1.0
-# for [0, 1] data (a full-unit range centered at 0.5). THIS checkpoint trains in the
-# half-unit [-0.5, +0.5] range (center 0.0) with a curriculum reaching sigma_max_end =
-# 0.5 (config.json), so a coarse-but-in-domain start of 0.4 sits INSIDE the trained band
-# and the whole annealed trajectory (0.4 -> sigma_l) is in-band. Overridable.
-# (An earlier comment here claimed the curriculum topped out at 0.25 — that described an
-# older checkpoint and was stale.)
+# Default initial noise (INV-2). sigma_0 is a noise STANDARD DEVIATION, so it scales
+# with the domain's WIDTH, not its center. The pixel domain moved from [-0.5,+0.5] to
+# [0,1] — a pure DC shift — and BOTH have peak-to-peak width 1.0, so this value is
+# UNCHANGED by the migration and stays correct. (Do not "re-derive" it from the new
+# bounds: the paper's sigma_0 = 1.0 was chosen for a differently-scaled setup, not a
+# differently-centered one.) 0.4 sits INSIDE the training curriculum's band
+# (sigma_max_end = 0.5, config.json), so the whole annealed trajectory (0.4 -> sigma_l)
+# is in-band. Overridable.
 _DEFAULT_SIGMA_0 = 0.4
 
-# Domain half-width for the OPTIONAL interior clip (INV-1). Off by default (see below).
-_DEFAULT_CLIP_RANGE = (-0.5, 0.5)
+# Bounds for the OPTIONAL interior clip (INV-1) — the [0,1] pixel domain. Off by
+# default (see below), so this is latent, not live.
+_DEFAULT_CLIP_RANGE = (0.0, 1.0)
 
 
 class UniversalInverseSolver:
@@ -102,8 +104,8 @@ class UniversalInverseSolver:
     Attributes:
         prior: An object exposing ``residual(y) -> D(y) - y`` (typically a
             :class:`~applications.bias_free_denoiser.denoiser_prior.DenoiserPrior`).
-        sigma_0: Initial noise std of the Algorithm-2 init (domain-adjusted default
-            ``0.4`` for the ``[-0.5, +0.5]`` model — see module note / D-002).
+        sigma_0: Initial noise std of the Algorithm-2 init (default ``0.4``;
+            width-based, so unchanged by the domain shift — see module note).
         sigma_l: Stopping threshold on the effective noise ``sigma_t``.
         h0: Step-size schedule parameter.
         h_max: Optional empirical cap on the per-step schedule ``h_t``. Default
@@ -143,7 +145,7 @@ class UniversalInverseSolver:
 
         Args:
             prior: An object exposing ``residual(y)`` (e.g. a ``DenoiserPrior``).
-            sigma_0: Initial noise std (default ``0.4``, domain-adjusted, D-002).
+            sigma_0: Initial noise std (default ``0.4``; see module note / INV-2).
             sigma_l: Effective-noise stopping threshold (default ``0.01``).
             h0: Step-size schedule parameter (default ``0.01``).
             h_max: Optional empirical cap on the per-step schedule ``h_t``. Default
@@ -157,7 +159,7 @@ class UniversalInverseSolver:
             clip: Enable the OPTIONAL interior clip (default ``False``; see class
                 doc / S1 for why clipping is off by default).
             clip_range: ``(lo, hi)`` bounds for the optional clip (default
-                ``(-0.5, +0.5)``).
+                ``(0.0, 1.0)``).
             final_projection: Enable the OFF-by-default final hard data-consistency
                 projection at ``solve()`` return (default ``False``; see class doc /
                 D-005). OFF is byte-identical; a :class:`NullOperator` makes it a no-op.
@@ -190,7 +192,7 @@ class UniversalInverseSolver:
         self.null_space_noise = bool(null_space_noise)
         logger.info(
             "UniversalInverseSolver: sigma_0=%.3f sigma_l=%.3f h0=%.3f h_max=%s "
-            "beta=%.3f max_iter=%d patience=%d clip=%s (domain [-0.5,+0.5])",
+            "beta=%.3f max_iter=%d patience=%d clip=%s (domain [0,1])",
             self.sigma_0, self.sigma_l, self.h0, self.h_max, self.beta,
             self.max_iterations, self.patience, self.clip,
         )

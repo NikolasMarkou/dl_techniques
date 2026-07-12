@@ -11,7 +11,7 @@ reconstruction, and the ``sigma_t`` convergence curve.
 This is the ONLY module in the package that imports streamlit (INV-7 / H7); the
 core (:class:`DenoiserPrior`, :class:`UniversalInverseSolver`, the operator
 family) stays fully GUI-free and headless-usable. All pixels live in the model's
-``[-0.5, +0.5]`` domain (INV-1 / D-002).
+``[0, 1]`` domain (INV-1).
 
 Run::
 
@@ -104,7 +104,7 @@ class DenoiserProcessor(VideoProcessorBase):
             if self.noise_sigma > 0.0:
                 # Optional synthetic Gaussian noise so the denoiser's effect is
                 # visible on an otherwise clean feed. sigma is in the model's
-                # [-0.5, +0.5] domain; scaling by 255 injects the equivalent in pixel
+                # [0, 1] domain; scaling by 255 injects the equivalent in pixel
                 # units before denoise_frame ingests (H2-consistent). sigma == 0 ->
                 # denoise as-is.
                 noise = np.random.normal(0.0, float(self.noise_sigma) * 255.0, rgb.shape)
@@ -122,20 +122,20 @@ class DenoiserProcessor(VideoProcessorBase):
 
 
 def _ingest_upload(upload: Any, size: int) -> np.ndarray:
-    """Resize an uploaded image to ``size`` and ingest it to ``[-0.5, +0.5]``.
+    """Resize an uploaded image to ``size`` and ingest it to ``[0, 1]``.
 
     Args:
         upload: A streamlit ``UploadedFile`` (file-like) of an RGB-convertible image.
         size: Square edge length (must be divisible by 8 for the depth-3 U-Net).
 
     Returns:
-        A float32 ``[1, size, size, 3]`` array in ``[-0.5, +0.5]``.
+        A float32 ``[1, size, size, 3]`` array in ``[0, 1]``.
     """
     from PIL import Image
 
     img = Image.open(upload).convert("RGB").resize((size, size))
     arr = np.asarray(img)  # uint8 [size, size, 3]
-    normalized = DenoiserPrior.ingest(arr)  # -> [-0.5, +0.5]
+    normalized = DenoiserPrior.ingest(arr)  # -> [0, 1]
     return normalized[None, ...].astype(np.float32)
 
 
