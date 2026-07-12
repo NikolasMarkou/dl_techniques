@@ -140,20 +140,26 @@ class TestBiasFreeUNet:
             create_bfunet_denoiser(input_shape=(64, 64, 1, 1))
 
     def test_invalid_depth(self, grayscale_input_shape):
-        """Test that invalid depth raises ValueError."""
-        with pytest.raises(ValueError, match="depth must be at least 3"):
+        """Test that invalid depth raises ValueError.
+
+        The depth floor is 2 (relaxed from 3 when the high-freq-blocks feature landed);
+        this assertion still named the OLD floor and still listed ``depth=2`` as invalid,
+        so it failed against the factory's actual message. Pre-existing debt, unrelated to
+        the [0,1] domain migration.
+        """
+        with pytest.raises(ValueError, match="depth must be at least 2"):
             create_bfunet_denoiser(
                 input_shape=grayscale_input_shape,
                 depth=0
             )
 
-        with pytest.raises(ValueError, match="depth must be at least 3"):
+        with pytest.raises(ValueError, match="depth must be at least 2"):
             create_bfunet_denoiser(
                 input_shape=grayscale_input_shape,
-                depth=2
+                depth=1
             )
 
-        with pytest.raises(ValueError, match="depth must be at least 3"):
+        with pytest.raises(ValueError, match="depth must be at least 2"):
             create_bfunet_denoiser(
                 input_shape=grayscale_input_shape,
                 depth=-1
