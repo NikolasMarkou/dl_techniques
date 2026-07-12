@@ -1,29 +1,21 @@
 """Trainer-side tests for the bias-free ConvUNeXt self-iterate feature.
 
 Covers Step 7 of plan_2026-06-20_88705c63. The CRITICAL test here is SC1:
-the ``--self-iterate`` OFF path must remain byte-identical to the pre-plan
-streaming trainer. We verify that two ways:
+the ``--self-iterate`` OFF path must remain sound. We verify that two ways:
 
 1. **Behavioural batch contract (SC1a).** Building the streaming ``create_dataset``
    with ``self_iterate=False`` yields a well-formed first ``(noisy, clean)`` batch
-   (right shape/dtype, values in [-0.5, +0.5], additive noise actually applied). We do
-   NOT assert bitwise cross-build determinism: the streaming noise/crop ops are not
-   stateless-seeded, so two builds are not guaranteed bitwise-equal even under the
+   (right shape/dtype, values in the [0, 1] domain, additive noise actually applied).
+   We do NOT assert bitwise cross-build determinism: the streaming noise/crop ops are
+   not stateless-seeded, so two builds are not guaranteed bitwise-equal even under the
    same seed -- that was never an OFF-path property and asserting it was flaky.
 
-2. **Textual byte-identity vs the pre-plan baseline (SC1b).** The streaming
-   noise/augment/crop logic (``create_dataset`` + ``make_curriculum_noise_fn``)
-   must be UNCHANGED from commit 8688519a (the commit BEFORE this plan). Step 3
-   only branched ``train()``'s data path; it did NOT edit these functions. We
-   extract each function's source from the current module (``inspect.getsource``)
-   and from ``git show <baseline>`` and compare NORMALIZED bodies.
-
-   Normalization (strip leading indentation + collapse whitespace) is applied
-   because a relocation refactor *could* re-indent the body (e.g. moving lines
-   into an ``else`` branch). If the only difference were indentation the byte
-   meaning would be unchanged; normalization lets the test assert "same logic"
-   rather than "same column layout". If even the non-whitespace token stream
-   differs, that is a REAL regression in the OFF path and the test fails loudly.
+2. **Additive RNG draw ORDER (SC1b).** ``make_curriculum_noise_fn``'s additive branch
+   must draw the per-image ``noise_level`` scalar FIRST and the Gaussian field SECOND;
+   reordering them silently changes every additive noise sample. This used to be pinned
+   by an ``inspect.getsource`` text-diff against a historical commit — that guard was
+   retired (D-003) because it asserts on TEXT, not behavior. It is now pinned by a
+   seeded, self-contained BEHAVIORAL replay: ``test_additive_branch_rng_draw_order``.
 
 Other tests cover the pool dataset contract, the multi-pass eval helpers, the
 rejection guards, and the "no custom train_step" invariant (SC4).
@@ -31,9 +23,6 @@ rejection guards, and the "no custom train_step" invariant (SC4).
 All shapes are tiny so the suite stays CPU/GPU1-light.
 """
 
-import re
-import inspect
-import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -42,7 +31,7 @@ import tensorflow as tf
 import keras
 
 from train.common import set_seeds
-import train.bfunet.train_convunext_denoiser as trainer_mod
+from train.bfunet.common import DATA_MIN, DATA_MAX
 from train.bfunet.train_convunext_denoiser import (
     TrainingConfig,
     create_dataset,
@@ -58,10 +47,6 @@ from train.bfunet.train_convunext_denoiser import (
 from dl_techniques.callbacks.self_iterate_pool import SelfIteratePoolCallback
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
 
-# Commit immediately BEFORE plan_2026-06-20_88705c63 (the pre-self-iterate
-# trainer). The OFF-path streaming logic must match this baseline byte-for-byte
-# (modulo indentation; see module docstring).
-BASELINE_COMMIT = "8688519a16e68640beb6cfc5b7ee72d08f37db19"
 TRAINER_REL_PATH = "src/train/bfunet/train_convunext_denoiser.py"
 
 PATCH = 16          # tiny patch for fast tests
@@ -139,10 +124,9 @@ def test_off_path_batch_contract(image_paths):
 
     Build the streaming dataset with self_iterate=False and assert the first
     (noisy, clean) batch honours the contract: right shape, float32 dtype,
-    values in the [-0.5, +0.5] domain, and additive noise actually applied
-    (noisy != clean). This is the behavioural half of SC1; the *byte-identity*
-    half (proving the streaming logic is unchanged vs the pre-plan baseline)
-    is ``test_off_path_textual_byte_identity_vs_baseline`` below.
+    values in the [0, 1] domain, and additive noise actually applied
+    (noisy != clean). This is the behavioural half of SC1; the RNG-draw-order
+    half is ``test_additive_branch_rng_draw_order`` below.
 
     NOTE: we deliberately do NOT assert bitwise determinism across two builds.
     The original streaming pipeline's noise/crop ops are not stateless-seeded,
@@ -155,132 +139,94 @@ def test_off_path_batch_contract(image_paths):
     assert noisy.shape == (4, PATCH, PATCH, CHANNELS)
     assert clean.shape == (4, PATCH, PATCH, CHANNELS)
     assert noisy.dtype == np.float32 and clean.dtype == np.float32
-    assert float(np.max(np.abs(clean))) <= 1.0 + 1e-6
-    assert float(np.max(np.abs(noisy))) <= 1.0 + 1e-6
+    # Two-sided domain gate. The pre-[0,1] version asserted only max(abs(x)) <= 1.0,
+    # which a zero-centered array also satisfies -- it could not tell the two domains
+    # apart. This one can.
+    assert float(np.min(clean)) >= DATA_MIN - 1e-6
+    assert float(np.max(clean)) <= DATA_MAX + 1e-6
+    assert float(np.min(noisy)) >= DATA_MIN - 1e-6
+    assert float(np.max(noisy)) <= DATA_MAX + 1e-6
     # Additive noise was applied -> noisy differs from clean.
     assert float(np.max(np.abs(noisy - clean))) > 0.0
 
 
-def _extract_function_source_from_text(source_text: str, func_name: str) -> str:
-    """Extract a top-level ``def func_name(...)...`` block from a full module text.
+# DECISION plan_2026-07-12_e56909cd/D-003: the textual byte-identity guard
+# (`test_off_path_textual_byte_identity_vs_baseline`, `_undo_scale_rescale`,
+# `_extract_function_source_from_text`) is RETIRED and replaced by the BEHAVIORAL test
+# below. Two reasons: (a) the user waived checkpoint reproducibility for the [0,1] domain
+# migration, retiring the guard's reproducibility rationale; (b) an `inspect.getsource`
+# text-diff asserts on TEXT, not on runtime BEHAVIOR — it once blocked a provably
+# behavior-neutral change and could only be unblocked by hand-folding literals through a
+# `_undo_scale_rescale` fiction, which is exactly the failure mode plans/LESSONS.md warns
+# about. The invariant that guard actually protected — the additive branch draws
+# `noise_level` FIRST (tf.random.uniform), THEN tf.random.normal, so the additive RNG
+# stream is never reordered by a refactor — SURVIVES the migration and is now pinned
+# behaviorally by `test_additive_branch_rng_draw_order`. Do NOT reintroduce a source-text
+# comparison here. See plans/plan_2026-07-12_e56909cd/decisions.md D-003.
+def test_additive_branch_rng_draw_order():
+    """The additive branch's RNG draw ORDER is `noise_level` FIRST, then the normal.
 
-    Captures from the ``def`` line up to (but not including) the next top-level
-    ``def`` / ``class`` / decorator at column 0. Used on the ``git show`` baseline
-    where we have raw text, not an importable module.
+    ``make_curriculum_noise_fn``'s additive branch must draw the per-image scalar
+    ``noise_level = tf.random.uniform([], sigma_min, sigma_max)`` BEFORE
+    ``tf.random.normal(tf.shape(patch))``. Any refactor that hoists/reorders those two
+    draws (e.g. folding the additive path into a shared helper that samples the normal
+    first) changes the whole additive noise stream. This pins that order BEHAVIORALLY:
+    we seed TF, run the real noise fn, then replay the two draws by hand IN THE SAME
+    ORDER from the same seed and require a bitwise match. A swapped order consumes the
+    RNG differently and yields a detectably different output.
     """
-    lines = source_text.splitlines()
-    start = None
-    pat = re.compile(rf"^def\s+{re.escape(func_name)}\s*\(")
-    for i, ln in enumerate(lines):
-        if pat.match(ln):
-            start = i
-            break
-    assert start is not None, f"{func_name} not found in baseline source"
-    end = len(lines)
-    for j in range(start + 1, len(lines)):
-        ln = lines[j]
-        # Next top-level construct at column 0 ends the function block.
-        if ln and not ln[0].isspace() and (
-            ln.startswith("def ")
-            or ln.startswith("class ")
-            or ln.startswith("@")
-            or ln.startswith("#")
-        ):
-            end = j
-            break
-    return "\n".join(lines[start:end])
+    config = _streaming_config()
+    assert config.noise_type == "additive"
+    sigma_min = float(config.noise_sigma_min)
+    sigma_max = float(config.sigma_max_start)
 
-
-def _normalize_body(func_source: str) -> str:
-    """Normalize a function source to its logic-only token stream.
-
-    Strips the ``def`` signature line, dedents, and collapses ALL whitespace.
-    This makes the comparison robust to the relocation re-indent (Step 3 could
-    have moved the streaming body into an ``else`` branch, adding leading
-    indentation) while still catching any change to the actual logic.
-    """
-    lines = func_source.splitlines()
-    # Drop the def signature line(s) up to and including the line ending in ':'.
-    body_start = 0
-    for i, ln in enumerate(lines):
-        if ln.rstrip().endswith(":") and ln.lstrip().startswith("def "):
-            body_start = i + 1
-            break
-    body = "\n".join(lines[body_start:])
-    # Collapse every run of whitespace (incl. newlines/indentation) to one space.
-    return re.sub(r"\s+", " ", body).strip()
-
-
-def _nonspace_tokens(func_source: str) -> str:
-    """All non-whitespace characters of the function source, concatenated."""
-    return re.sub(r"\s+", "", func_source)
-
-
-# DECISION plan_2026-06-21_a8cf8c87/D-003: re-baseline the byte-identity guard for the
-# sanctioned [-1,+1]->[-0.5,+0.5] rescale by folding ONLY the exact rescale literals back
-# to baseline form. Do NOT broaden these substitutions — a looser regex masks a real
-# OFF-path regression. See plans/plan_2026-06-21_a8cf8c87/decisions.md D-003.
-def _undo_scale_rescale(func_source: str) -> str:
-    """Map the [-0.5,+0.5] rescale constants back to the baseline [-1,+1] form.
-
-    plan_2026-06-21_a8cf8c87 performed a FAITHFUL SNR-preserving rescale of the
-    data domain [-1,+1] -> [-0.5,+0.5], which deliberately changes the clip
-    constant inside ``make_curriculum_noise_fn`` / ``create_dataset`` and the
-    range mention in their comments. That is the ONLY sanctioned change to the
-    OFF-path streaming logic. Folding the rescale constants back to the baseline
-    form here keeps this byte-identity guard meaningful: it still catches any
-    OTHER structural change to the streaming logic, while permitting the
-    documented domain rescale. Do NOT broaden these substitutions beyond the
-    exact rescale literals -- a looser regex would mask a real OFF-path regression.
-    """
-    s = func_source.replace("-0.5, 0.5", "-1.0, 1.0")
-    s = s.replace("[-0.5, +0.5]", "[-1, +1]").replace("[-0.5,+0.5]", "[-1,+1]")
-    return s
-
-
-# ``create_dataset`` is intentionally NO LONGER guarded here: it was deliberately
-# rewritten to a decode-once / crop-many tf.data pipeline (read+JPEG-decode each image
-# ONCE, crop patches_per_image patches from it) to cut redundant HDD reads/decodes. That
-# is a sanctioned evolution of the streaming OFF path, so the "byte-identical to pre-
-# self-iterate baseline 8688519a" invariant no longer applies to it. The behavioural
-# guard (SC1a: well-formed OFF-path batch, noisy != clean) still protects it. The noise
-# logic in ``make_curriculum_noise_fn`` is unchanged and stays guarded below.
-@pytest.mark.parametrize("func_name", ["make_curriculum_noise_fn"])
-def test_off_path_textual_byte_identity_vs_baseline(func_name):
-    """SC1b: streaming OFF-path noise source matches the pre-plan baseline.
-
-    The ``make_curriculum_noise_fn`` logic must be unchanged from commit 8688519a
-    (Step 3 only branched ``train()``), MODULO the faithful [-1,+1] -> [-0.5,+0.5]
-    domain rescale of plan_2026-06-21_a8cf8c87, which is folded back to the baseline
-    form via ``_undo_scale_rescale`` so the guard still catches any OTHER structural
-    change. We compare the NORMALIZED function body (indentation-insensitive). If
-    normalized equality fails we fall back to comparing the non-whitespace token SET,
-    and if THAT differs the noise logic genuinely changed -> SC1 failure / regression.
-
-    (``create_dataset`` was dropped from this guard — see the note above the decorator.)
-    """
-    repo_root = _repo_root()
-    baseline_text = subprocess.check_output(
-        ["git", "show", f"{BASELINE_COMMIT}:{TRAINER_REL_PATH}"],
-        cwd=str(repo_root),
-        text=True,
-    )
-    baseline_src = _extract_function_source_from_text(baseline_text, func_name)
-    # Fold the sanctioned domain rescale back to the baseline form before comparing.
-    current_src = _undo_scale_rescale(inspect.getsource(getattr(trainer_mod, func_name)))
-
-    baseline_norm = _normalize_body(baseline_src)
-    current_norm = _normalize_body(current_src)
-
-    if baseline_norm != current_norm:
-        # Fall back to a token-set comparison; if even that differs the OFF-path
-        # LOGIC changed, which is a real regression (do NOT weaken this assert).
-        assert _nonspace_tokens(baseline_src) == _nonspace_tokens(current_src), (
-            f"OFF-path function {func_name!r} CHANGED vs baseline {BASELINE_COMMIT[:8]} "
-            f"-- this is an SC1 regression, not a relocation re-indent.\n"
-            f"baseline(normalized)={baseline_norm!r}\n"
-            f"current(normalized)={current_norm!r}"
+    patch = tf.constant(
+        np.linspace(0.0, 1.0, PATCH * PATCH * CHANNELS, dtype=np.float32).reshape(
+            PATCH, PATCH, CHANNELS
         )
+    )
+
+    # (1) The real noise fn, from a known global seed.
+    sigma_var = tf.Variable(sigma_max, dtype=tf.float32)
+    noise_fn = make_curriculum_noise_fn(config, sigma_var)
+    tf.random.set_seed(SEED)
+    noisy, clean = noise_fn(patch)
+    noisy = np.asarray(noisy)
+
+    # (2) Hand-replayed reference: SAME seed, draws in the CORRECT order
+    #     (uniform scalar first, then the normal field), then the [0,1] clip.
+    tf.random.set_seed(SEED)
+    ref_level = tf.random.uniform([], sigma_min, sigma_max)
+    ref_normal = tf.random.normal(tf.shape(patch))
+    ref = np.asarray(
+        tf.clip_by_value(patch + ref_normal * ref_level, DATA_MIN, DATA_MAX)
+    )
+
+    np.testing.assert_allclose(np.asarray(clean), np.asarray(patch), rtol=0, atol=0)
+    np.testing.assert_allclose(
+        noisy,
+        ref,
+        rtol=0,
+        atol=0,
+        err_msg=(
+            "additive-branch RNG draw order CHANGED: the noise fn no longer draws "
+            "noise_level (tf.random.uniform) BEFORE tf.random.normal. This silently "
+            "changes every additive noise sample."
+        ),
+    )
+
+    # (3) The SWAPPED order must be detectably different -- proves this test has teeth
+    #     and is not trivially satisfied by any implementation.
+    tf.random.set_seed(SEED)
+    swp_normal = tf.random.normal(tf.shape(patch))
+    swp_level = tf.random.uniform([], sigma_min, sigma_max)
+    swapped = np.asarray(
+        tf.clip_by_value(patch + swp_normal * swp_level, DATA_MIN, DATA_MAX)
+    )
+    assert not np.allclose(ref, swapped), (
+        "swapped-draw-order reference matched the correct-order reference; this test "
+        "cannot detect a reordering and is worthless as written."
+    )
 
 
 # ---------------------------------------------------------------------
@@ -310,7 +256,7 @@ def _pool_config(pool_size=16, batch=4) -> TrainingConfig:
 
 def test_pool_dataset_shapes_dtype_range_and_finite():
     """create_self_iterate_dataset over synthetic clean patches yields the
-    contract: [batch, P, P, C] float32 in [-1,1], FINITE with pool_size//batch
+    contract: [batch, P, P, C] float32 in [0,1], FINITE with pool_size//batch
     steps.
 
     Synthetic numpy arrays are fed directly (no disk dependency) -- the dataset
@@ -319,10 +265,12 @@ def test_pool_dataset_shapes_dtype_range_and_finite():
     pool_size, batch = 16, 4
     config = _pool_config(pool_size=pool_size, batch=batch)
     rng = np.random.default_rng(0)
-    clean_pool = rng.uniform(-0.5, 0.5, size=(pool_size, PATCH, PATCH, CHANNELS)).astype(np.float32)
+    clean_pool = rng.uniform(
+        DATA_MIN, DATA_MAX, size=(pool_size, PATCH, PATCH, CHANNELS)
+    ).astype(np.float32)
     current_input = np.clip(
         clean_pool + rng.normal(size=clean_pool.shape).astype(np.float32) * 0.1,
-        -0.5, 0.5,
+        DATA_MIN, DATA_MAX,
     ).astype(np.float32)
 
     ds, steps_per_epoch = create_self_iterate_dataset(clean_pool, current_input, config)
@@ -338,15 +286,15 @@ def test_pool_dataset_shapes_dtype_range_and_finite():
         assert clean.dtype == tf.float32
         n = np.asarray(noisy)
         c = np.asarray(clean)
-        assert n.min() >= -0.5 - 1e-6 and n.max() <= 0.5 + 1e-6
-        assert c.min() >= -0.5 - 1e-6 and c.max() <= 0.5 + 1e-6
+        assert n.min() >= DATA_MIN - 1e-6 and n.max() <= DATA_MAX + 1e-6
+        assert c.min() >= DATA_MIN - 1e-6 and c.max() <= DATA_MAX + 1e-6
 
 
 def test_build_self_iterate_pool_from_tiny_files(tmp_path):
     """build_self_iterate_pool loads real (tiny) image files into the pool.
 
     Writes a couple of small PNGs and confirms the returned (clean_pool,
-    current_input) arrays are float32, in [-1,1], correctly shaped, and that
+    current_input) arrays are float32, in [0,1], correctly shaped, and that
     current_input differs from clean_pool (noise was injected).
     """
     rng = np.random.default_rng(11)
@@ -364,8 +312,11 @@ def test_build_self_iterate_pool_from_tiny_files(tmp_path):
     assert current_input.shape == (pool_size, PATCH, PATCH, CHANNELS)
     assert clean_pool.dtype == np.float32
     assert current_input.dtype == np.float32
-    assert clean_pool.min() >= -0.5 - 1e-6 and clean_pool.max() <= 0.5 + 1e-6
-    assert current_input.min() >= -0.5 - 1e-6 and current_input.max() <= 0.5 + 1e-6
+    assert clean_pool.min() >= DATA_MIN - 1e-6 and clean_pool.max() <= DATA_MAX + 1e-6
+    assert (
+        current_input.min() >= DATA_MIN - 1e-6
+        and current_input.max() <= DATA_MAX + 1e-6
+    )
     # sigma_init>0 must have perturbed the clean pool.
     assert float(np.max(np.abs(current_input - clean_pool))) > 0.0
 
@@ -385,21 +336,21 @@ def _tiny_conv_model() -> keras.Model:
 def test_denoise_k_passes_shapes():
     """denoise_k_passes returns k tensors, each shaped like the input."""
     model = _tiny_conv_model()
-    noisy = tf.random.uniform((2, PATCH, PATCH, CHANNELS), -0.5, 0.5)
+    noisy = tf.random.uniform((2, PATCH, PATCH, CHANNELS), DATA_MIN, DATA_MAX)
     outs = denoise_k_passes(model, noisy, 3)
     assert isinstance(outs, list) and len(outs) == 3
     for t in outs:
         assert tuple(t.shape) == (2, PATCH, PATCH, CHANNELS)
         arr = np.asarray(t)
-        assert arr.min() >= -0.5 - 1e-6 and arr.max() <= 0.5 + 1e-6
+        assert arr.min() >= DATA_MIN - 1e-6 and arr.max() <= DATA_MAX + 1e-6
 
 
 def test_multi_pass_psnr_returns_k_numbers():
     """multi_pass_psnr returns k finite numeric PSNR values."""
     model = _tiny_conv_model()
-    clean = tf.random.uniform((2, PATCH, PATCH, CHANNELS), -0.5, 0.5)
+    clean = tf.random.uniform((2, PATCH, PATCH, CHANNELS), DATA_MIN, DATA_MAX)
     noisy = tf.clip_by_value(
-        clean + tf.random.normal(clean.shape) * 0.1, -0.5, 0.5
+        clean + tf.random.normal(clean.shape) * 0.1, DATA_MIN, DATA_MAX
     )
     psnrs = multi_pass_psnr(model, clean, noisy, 3)
     assert len(psnrs) == 3
@@ -487,7 +438,7 @@ def test_self_iterate_trains_multiple_epochs_and_pool_reread():
       (c) the live `current_input` buffer actually changed across the two epoch
           regenerations (the pool was re-read / mutated each epoch, not snapshotted).
 
-    No real data, no disk -- synthetic [-1,1] arrays only; tiny conv model so the
+    No real data, no disk -- synthetic [0,1] arrays only; tiny conv model so the
     suite stays GPU1-light and non-flaky.
     """
     set_seeds(SEED)
@@ -496,11 +447,11 @@ def test_self_iterate_trains_multiple_epochs_and_pool_reread():
 
     rng = np.random.default_rng(0)
     clean_pool = rng.uniform(
-        -0.5, 0.5, size=(pool_size, PATCH, PATCH, CHANNELS)
+        DATA_MIN, DATA_MAX, size=(pool_size, PATCH, PATCH, CHANNELS)
     ).astype(np.float32)
     current_input = np.clip(
         clean_pool + rng.normal(size=clean_pool.shape).astype(np.float32) * 0.1,
-        -0.5, 0.5,
+        DATA_MIN, DATA_MAX,
     ).astype(np.float32)
 
     ds, steps_per_epoch = create_self_iterate_dataset(

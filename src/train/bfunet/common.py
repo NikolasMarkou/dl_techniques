@@ -53,11 +53,36 @@ from dl_techniques.callbacks.self_iterate_pool import (
     SelfIteratePoolCallback,
 )
 
+# ---------------------------------------------------------------------
+# DATA DOMAIN (single source of truth for every clip/normalize/probe bound)
+# ---------------------------------------------------------------------
+
+# DECISION plan_2026-07-12_e56909cd/D-001: the pixel domain is [0,1], NOT the legacy
+# zero-centered [-0.5,+0.5]. A bias-free network is degree-1 homogeneous with f(0)=0
+# (structurally, not by learning). On a zero-centered domain a flat mid-grey patch IS
+# the zero vector, so the net reproduces it FOR FREE -- the DC component, the very thing
+# a denoiser's local filters must preserve, is never supervised at its most important
+# operating point, and sum-to-one filters are never learned. On [0,1] a flat patch of
+# value c is c*1, and homogeneity gives f(c*1) = c*f(1); reproducing it REQUIRES
+# f(1) = 1, i.e. local weights that sum to one -- exactly the DC-preserving property the
+# Miyasawa/Tweedie residual=score extraction depends on.
+#
+# CRITICAL: this is a pure DC SHIFT, NOT a rescale. Peak-to-peak width is 1.0 in BOTH
+# domains, so sigma (`sigma_255 = sigma*255`, `noise_sigma_min`, `sigma_max_start/end`),
+# `PsnrMetric(max_val=1.0)`, `SsimMetric(max_val=1.0)` and `_mean_psnr`'s 20*log10(1/rmse)
+# are ALL still exactly correct. Do NOT "fix" any of them to match the new domain -- that
+# would silently corrupt every reported dB number and nothing would fail. Do NOT add a
+# domain switch / `pixel_domain` kwarg / compat shim either: legacy [-0.5,+0.5]
+# checkpoints are knowingly invalidated (no partial-migration state works, INV-1).
+# See plans/plan_2026-07-12_e56909cd/decisions.md D-001.
+DATA_MIN: float = 0.0
+DATA_MAX: float = 1.0
+
 
 def decode_full_image(
     image_path: tf.Tensor, config: "BFUnetTrainingConfig"
 ) -> tf.Tensor:
-    """Read + decode an image ONCE and normalize to [-0.5, +0.5].
+    """Read + decode an image ONCE and normalize to [0, 1].
 
     Returns the full (variable-size) image, upscaled if smaller than the patch.
     This is the expensive step (HDD read + JPEG decode); the streaming pipeline
@@ -71,8 +96,10 @@ def decode_full_image(
     image.set_shape([None, None, config.channels])
     image = tf.cast(image, tf.float32)
 
-    # Normalize to [-0.5, +0.5] (critical for bias-free architecture).
-    image = (image / 255.0) - 0.5
+    # Normalize to [0, 1] (DATA_MIN/DATA_MAX). THE single normalization site for the
+    # whole training pipeline -- every other loader composes this one. Do NOT add a
+    # second normalizer anywhere (INV-3).
+    image = image / 255.0
 
     shape = tf.shape(image)
     height, width = shape[0], shape[1]
@@ -104,7 +131,7 @@ def random_crop_patch(image: tf.Tensor, config: "BFUnetTrainingConfig") -> tf.Te
 def load_and_preprocess_image(
     image_path: tf.Tensor, config: "BFUnetTrainingConfig"
 ) -> tf.Tensor:
-    """Decode an image, normalize to [-0.5, +0.5], and crop a single random patch.
+    """Decode an image, normalize to [0, 1], and crop a single random patch.
 
     Thin compose of ``decode_full_image`` + ``random_crop_patch``, kept for the
     single-patch callers (self-iterate pool seed, fixed val-batch). The streaming
@@ -130,7 +157,7 @@ def create_dataset(
     noise_fn,
     is_training: bool,
 ) -> tf.data.Dataset:
-    """Build a tf.data pipeline of (noisy, clean) [-0.5,+0.5] patch pairs."""
+    """Build a tf.data pipeline of (noisy, clean) [0,1] patch pairs."""
     if not file_paths:
         raise ValueError("No image files found for the dataset")
 
@@ -152,6 +179,9 @@ def create_dataset(
         deterministic=False,
     )
     # Drop blank/corrupt decodes once, on the full image, before cropping.
+    # SEMANTIC FLIP under [0,1] (no code change needed): this drops flat BLACK images
+    # (the value that maps to 0), where on the legacy [-0.5,+0.5] domain it dropped flat
+    # MID-GREY ones. Both are degenerate; black is the more sensible thing to drop.
     dataset = dataset.filter(lambda x: tf.reduce_sum(tf.abs(x)) > 0)
 
     if is_training and config.patches_per_image > 1:
@@ -188,11 +218,11 @@ def create_dataset(
     if is_training and config.augment_data:
         dataset = dataset.map(augment_patch, num_parallel_calls=tf.data.AUTOTUNE)
 
-    # Clip the clean patch back to [-0.5, +0.5] after augmentation. flips/rot90 preserve
-    # range, but the aspect-safe bilinear upscale (small images) can overshoot; the
-    # clean patch is both the model input and the regression target, so keep it in range.
+    # Clip the clean patch back to [DATA_MIN, DATA_MAX] after augmentation. flips/rot90
+    # preserve range, but the aspect-safe bilinear upscale (small images) can overshoot;
+    # the clean patch is both the model input and the regression target, so keep it in range.
     dataset = dataset.map(
-        lambda x: tf.clip_by_value(x, -0.5, 0.5),
+        lambda x: tf.clip_by_value(x, DATA_MIN, DATA_MAX),
         num_parallel_calls=tf.data.AUTOTUNE,
     )
 
@@ -227,8 +257,8 @@ def build_self_iterate_pool(
 
     Loads ``config.self_iterate_pool_size`` clean patches ONCE (reusing the same
     ``load_and_preprocess_image`` load+crop logic the streaming pipeline uses, plus
-    the same clip-to-[-0.5,+0.5] convention) into ``clean_pool``, then allocates a
-    mutable ``current_input`` = ``clip(clean + N(0, sigma_init), -0.5, +0.5)`` as the
+    the same clip-to-[0,1] convention) into ``clean_pool``, then allocates a
+    mutable ``current_input`` = ``clip(clean + N(0, sigma_init), 0, 1)`` as the
     epoch-1 additive-noise inputs.
 
     The ``current_input`` array is the LIVE buffer mutated IN PLACE by
@@ -243,7 +273,7 @@ def build_self_iterate_pool(
 
     Returns:
         ``(clean_pool, current_input)`` — two ``[P, patch, patch, C]`` float32 arrays
-        in ``[-0.5, +0.5]``; ``clean_pool`` is the fixed target, ``current_input`` the
+        in ``[0, 1]``; ``clean_pool`` is the fixed target, ``current_input`` the
         mutable input buffer.
 
     Raises:
@@ -268,10 +298,13 @@ def build_self_iterate_pool(
         try:
             # REUSE the streaming pipeline's load+random-crop+clip convention exactly.
             patch = load_and_preprocess_image(tf.constant(path), config)
-            patch = tf.clip_by_value(patch, -0.5, 0.5)
+            patch = tf.clip_by_value(patch, DATA_MIN, DATA_MAX)
             patch_np = np.asarray(patch, dtype=np.float32)
             if not np.any(np.abs(patch_np) > 0):
-                continue  # mirror the streaming filter() that drops all-zero patches
+                # Mirror the streaming filter() that drops all-zero patches. Same
+                # semantic flip as create_dataset's filter: under [0,1] this drops flat
+                # BLACK patches, not flat mid-grey ones. No code change needed.
+                continue
             patches.append(patch_np)
         except Exception:
             continue
@@ -289,7 +322,7 @@ def build_self_iterate_pool(
 
     noise = rng.normal(size=clean_pool.shape).astype(np.float32)
     current_input = np.clip(
-        clean_pool + noise * float(sigma_init), -0.5, 0.5
+        clean_pool + noise * float(sigma_init), DATA_MIN, DATA_MAX
     ).astype(np.float32)
 
     logger.info(
@@ -371,8 +404,13 @@ def create_self_iterate_dataset(
 
 
 def _denorm(img: np.ndarray) -> np.ndarray:
-    """Map a [-0.5, +0.5] image to [0, 1] for display."""
-    return np.clip(img + 0.5, 0.0, 1.0)
+    """Map a model-domain image to [0, 1] for display.
+
+    Under the [0,1] data domain (D-001) the model domain IS the display domain, so this
+    collapses to a defensive clip (a model output can overshoot the domain). Kept as the
+    ONE denormalizer so display call sites never inline their own conversion.
+    """
+    return np.clip(img, DATA_MIN, DATA_MAX)
 
 
 def render_training_dashboard(history: dict, out_path: Path, title: str = "") -> None:
@@ -430,7 +468,7 @@ def render_training_dashboard(history: dict, out_path: Path, title: str = "") ->
     sig = history.get("sigma_max")
     _line(ax, sig, "sigma_max", color="#2ca02c", marker="o", markersize=3)
     ax.set_title("Noise sigma_max per epoch (curriculum)")
-    ax.set_xlabel("epoch"); ax.set_ylabel("sigma_max  [-0.5,+0.5] units")
+    ax.set_xlabel("epoch"); ax.set_ylabel("sigma_max  [0,1] units")
     ax.grid(True, alpha=0.3); ax.legend(loc="upper left")
     if sig is not None:
         twin = ax.twinx()
@@ -454,31 +492,35 @@ def render_training_dashboard(history: dict, out_path: Path, title: str = "") ->
 # differs from the per-image PsnrMetric used in training logs (which averages per-image
 # PSNR), so eval-grid numbers will not match the val_psnr logged during fit.
 def _mean_psnr(pred, clean) -> float:
-    """Mean PSNR (dB) of ``pred`` vs ``clean`` on the [-0.5,+0.5] domain (max_val=1.0).
+    """Mean PSNR (dB) of ``pred`` vs ``clean`` on the [0,1] domain (max_val=1.0).
 
     Single source of truth for the trainer's PSNR convention: rmse over the whole
     batch, then ``20*log10(1.0/rmse)``. Both the eval grid and the multi-pass eval
     helpers call this so the formula lives in exactly one place (DRY).
+
+    ``max_val=1.0`` is the PEAK-TO-PEAK WIDTH, which is 1.0 on [0,1] exactly as it was
+    on the legacy [-0.5,+0.5] domain — the D-001 migration is a DC shift, not a rescale,
+    so this formula is UNCHANGED by it (INV-2). Do NOT rescale it.
     """
     mse = float(tf.reduce_mean(tf.square(tf.convert_to_tensor(pred) - clean)))
     return 20.0 * np.log10(1.0 / max(np.sqrt(mse), 1e-8))  # max_val=1.0
 
 
 def denoise_k_passes(model: keras.Model, noisy, k: int) -> List[tf.Tensor]:
-    """Apply ``model`` ``k`` times sequentially, clipping to [-0.5,+0.5] between passes.
+    """Apply ``model`` ``k`` times sequentially, clipping to [0,1] between passes.
 
     Returns the LIST of the k intermediate denoised tensors ``[pass1, ..., passk]``
     so callers can score each pass independently. The model is applied exactly once
     per pass (``training=False``); this is eval/inference only and never affects
-    training. Domain [-0.5,+0.5] (clip after every pass).
+    training. Domain [0,1] (clip after every pass).
     """
     outputs: List[tf.Tensor] = []
-    x = tf.clip_by_value(tf.convert_to_tensor(noisy), -0.5, 0.5)
+    x = tf.clip_by_value(tf.convert_to_tensor(noisy), DATA_MIN, DATA_MAX)
     for _ in range(int(k)):
         x = model(x, training=False)
         if isinstance(x, (list, tuple)):
             x = x[0]  # deep-supervision: primary output
-        x = tf.clip_by_value(tf.convert_to_tensor(x), -0.5, 0.5)
+        x = tf.clip_by_value(tf.convert_to_tensor(x), DATA_MIN, DATA_MAX)
         outputs.append(x)
     return outputs
 
@@ -497,14 +539,14 @@ def multi_pass_psnr(model: keras.Model, clean, noisy, k: int) -> List[float]:
 def build_fixed_val_batch(
     val_paths: List[str], config: "BFUnetTrainingConfig", n: int = 8
 ) -> Optional[tf.Tensor]:
-    """Load a small FIXED batch of clean [-0.5,+0.5] patches for visualization."""
+    """Load a small FIXED batch of clean [0,1] patches for visualization."""
     if not val_paths:
         return None
     patches = []
     for p in val_paths[: max(n * 3, n)]:
         try:
             patch = load_and_preprocess_image(tf.constant(p), config)
-            patch = tf.clip_by_value(patch, -0.5, 0.5)
+            patch = tf.clip_by_value(patch, DATA_MIN, DATA_MAX)
             patches.append(patch)
             if len(patches) >= n:
                 break
@@ -623,7 +665,7 @@ def make_curriculum_noise_fn(config: "BFUnetTrainingConfig", sigma_max_var: tf.V
             noisy = apply_composite_gaussian(patch, noise_level, ratio * noise_level)
         else:
             noisy = patch + tf.random.normal(tf.shape(patch)) * noise_level  # y = x + N(0, sigma^2)
-        return tf.clip_by_value(noisy, -0.5, 0.5), patch
+        return tf.clip_by_value(noisy, DATA_MIN, DATA_MAX), patch
 
     return add_curriculum_noise
 
@@ -691,6 +733,14 @@ class BFUnetTrainingConfig:
     dataset_weights: Optional[List[float]] = None  # None -> equal weight per dir
     patch_size: int = 256
     channels: int = 3
+    # DECISION plan_2026-07-12_e56909cd/D-005: pixel-domain PROVENANCE STAMP, not a switch.
+    # NOTHING in this repo branches on this value -- it exists solely so `save_config_json`
+    # writes it into every checkpoint's config.json, letting a consumer tell a [0,1] model
+    # from a legacy [-0.5,+0.5] one (which is otherwise indistinguishable at load time and
+    # produces SILENT garbage if fed the wrong domain -- a bias-free net cannot subtract a
+    # DC offset). Do NOT add an `if config.data_range == ...` anywhere: a domain-dispatch
+    # branch is explicitly out of scope (INV-4, no compat shim). See decisions.md D-005.
+    data_range: str = "[0,1]"
     image_extensions: List[str] = field(
         default_factory=lambda: [".jpg", ".jpeg", ".png", ".tiff", ".bmp", ".webp"]
     )
@@ -898,17 +948,20 @@ class BFUnetTrainingConfig:
                     "additive-only Miyasawa fixed-point theory the self-iterate "
                     "mechanism depends on (D-003)."
                 )
-            # Even under additive noise the always-on tf.clip_by_value(-0.5, 0.5) in
-            # add_curriculum_noise makes the observed noise non-Gaussian at the [-0.5,
-            # +0.5] boundaries, so residual=score (Miyasawa) no longer holds exactly
-            # there. Self-iterated passes can therefore drift from the theoretical
-            # clean-image fixed point. WARNING (not ValueError): the drift is usually
-            # small and self-iterate stays useful, so this is informational only.
+            # Even under additive noise the always-on tf.clip_by_value(DATA_MIN, DATA_MAX)
+            # in add_curriculum_noise makes the observed noise non-Gaussian at the [0,1]
+            # boundaries, so residual=score (Miyasawa) no longer holds exactly there.
+            # Under [0,1] the bias is RELOCATED, not removed: it now concentrates near
+            # BLACK (0.0) and WHITE (1.0) rather than at the symmetric +-0.5 extremes.
+            # Self-iterated passes can therefore drift from the theoretical clean-image
+            # fixed point. WARNING (not ValueError): the drift is usually small and
+            # self-iterate stays useful, so this is informational only.
             logger.warning(
                 "self_iterate is ON: add_curriculum_noise always clips noisy inputs "
-                "to [-0.5, +0.5], which breaks the Miyasawa residual=score identity at "
-                "the clip boundaries even for additive noise. Self-iterated passes may "
-                "drift from the theoretical clean-image fixed point."
+                "to [0, 1], which breaks the Miyasawa residual=score identity at "
+                "the clip boundaries (near black and near white) even for additive "
+                "noise. Self-iterated passes may drift from the theoretical "
+                "clean-image fixed point."
             )
 
 
@@ -945,7 +998,7 @@ def _homogeneity_probe(model: keras.Model) -> None:
             in_shape = in_shape[0]
         spatial = tuple(d if d is not None else 64 for d in in_shape[1:])
         rng = np.random.default_rng(0)
-        x = rng.uniform(-0.5, 0.5, size=(1,) + spatial).astype("float32")
+        x = rng.uniform(DATA_MIN, DATA_MAX, size=(1,) + spatial).astype("float32")
     except Exception as e:
         logger.debug(f"Homogeneity probe skipped (could not synthesize input): {e}")
         return
@@ -983,6 +1036,55 @@ def _homogeneity_probe(model: keras.Model) -> None:
             )
     except Exception as e:
         logger.debug(f"Homogeneity probe skipped (forward pass failed): {e}")
+
+    # The DC/sum-to-one probe is the [0,1] domain's reason for existing (D-001), so it
+    # runs wherever the homogeneity probe runs. Chaining it here rather than adding a
+    # second call in each of the four trainers' verify_bias_free keeps the call sites
+    # (and the informational-only contract) in exactly one place.
+    _dc_preservation_probe(model)
+
+
+def _dc_preservation_probe(model: keras.Model) -> None:
+    """Numeric DC / sum-to-one probe (informational, NEVER raises).
+
+    Feeds FLAT constant images ``c * ones`` for several ``c`` in [0,1] and logs the
+    relative error ``||f(c*1) - c*1|| / ||c*1||``. This is the diagnostic the [0,1]
+    domain migration exists to make meaningful (D-001): a bias-free net is degree-1
+    homogeneous with ``f(0) = 0``, so ``f(c*1) = c*f(1)``, and reproducing a flat patch
+    REQUIRES ``f(1) = 1`` — local filter weights that sum to one, i.e. DC preservation.
+    On the legacy zero-centered domain a flat mid-grey patch WAS the zero vector, so the
+    property was satisfied structurally and this probe would have been vacuous.
+
+    Interpretation: on an UNTRAINED model the error is EXPECTED to be large (random
+    filter weights do not sum to 1) — that is not a failure. The number is only
+    meaningful as a trend across training. Informational only, mirroring
+    ``_homogeneity_probe``: it must never raise and never gate anything.
+    """
+    try:
+        in_shape = model.input_shape
+        if isinstance(in_shape, list):
+            in_shape = in_shape[0]
+        spatial = tuple(d if d is not None else 64 for d in in_shape[1:])
+    except Exception as e:
+        logger.debug(f"DC probe skipped (could not synthesize input): {e}")
+        return
+
+    def _first_output(y):
+        if isinstance(y, (list, tuple)):
+            return y[0]
+        if isinstance(y, dict):
+            return list(y.values())[0]
+        return y
+
+    try:
+        for c in (0.1, 0.25, 0.5, 0.75, 0.9):
+            flat = np.full((1,) + spatial, float(c), dtype="float32")
+            out = np.asarray(_first_output(model(flat, training=False)), dtype="float64")
+            denom = max(float(np.linalg.norm(flat)), 1e-8)
+            rel = float(np.linalg.norm(out - flat) / denom)
+            logger.info(f"DC/sum-to-one probe: c={c} rel_err={rel:.3e}")
+    except Exception as e:
+        logger.debug(f"DC probe skipped (forward pass failed): {e}")
 
 
 # ---------------------------------------------------------------------
@@ -1029,7 +1131,7 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         self.max_samples = max_samples
         self.val_ds = val_ds
         self.validation_steps = validation_steps
-        # Fixed reference noise regimes for the eval grid (sigma in [-0.5,+0.5] units),
+        # Fixed reference noise regimes for the eval grid (sigma in [0,1] units),
         # DECOUPLED from the moving curriculum sigma so the grid is comparable across
         # epochs. Defaults map to the standard benchmark levels sigma_255 = 15/25/50.
         if noise_regimes is not None:
@@ -1170,20 +1272,24 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         for label, sigma in self.noise_regimes:
             if multiplicative:
                 # Per-pixel multiplicative regime: reuse the same noise primitive the
-                # trainer uses, then the SAME [-0.5,+0.5] clip as the additive path.
+                # trainer uses, then the SAME [0,1] clip as the additive path.
                 noisy = tf.clip_by_value(
-                    apply_multiplicative_gaussian(clean, sigma), -0.5, 0.5
+                    apply_multiplicative_gaussian(clean, sigma), DATA_MIN, DATA_MAX
                 )
             elif composite:
                 # Composite regime: sigma here is sigma_m; the additive floor is
                 # sigma_a = ratio * sigma_m. Reuse the trainer's composite primitive,
-                # then the SAME [-0.5,+0.5] clip as the other paths.
+                # then the SAME [0,1] clip as the other paths.
                 noisy = tf.clip_by_value(
-                    apply_composite_gaussian(clean, sigma, ratio * sigma), -0.5, 0.5
+                    apply_composite_gaussian(clean, sigma, ratio * sigma),
+                    DATA_MIN,
+                    DATA_MAX,
                 )
             else:
                 noisy = tf.clip_by_value(
-                    clean + tf.random.normal(tf.shape(clean)) * sigma, -0.5, 0.5
+                    clean + tf.random.normal(tf.shape(clean)) * sigma,
+                    DATA_MIN,
+                    DATA_MAX,
                 )
             denoised = self.model(noisy, training=False)
             if isinstance(denoised, (list, tuple)):
@@ -1384,8 +1490,8 @@ def train(
             regen_freq=config.self_iterate_regen_freq,
             mix_ratio=config.self_iterate_mix_ratio,
             predict_batch_size=config.batch_size,
-            clip_min=-0.5,
-            clip_max=0.5,
+            clip_min=DATA_MIN,
+            clip_max=DATA_MAX,
             seed=config.seed or 42,
         )
         logger.info(
@@ -1724,7 +1830,7 @@ def train(
             in_shape = in_shape[0]
         spatial = tuple(d if d is not None else config.patch_size for d in in_shape[1:])
         round_trip_sample = np.random.default_rng(0).uniform(
-            -0.5, 0.5, size=(1,) + spatial
+            DATA_MIN, DATA_MAX, size=(1,) + spatial
         ).astype("float32")
         round_trip_pred = model.predict(round_trip_sample, verbose=0)
     except Exception as e:
