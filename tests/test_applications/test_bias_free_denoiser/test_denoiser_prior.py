@@ -177,3 +177,49 @@ class TestTiling:
         recon = DenoiserPrior.untile(tiles, meta)
         assert recon.shape == img.shape
         np.testing.assert_array_equal(recon, img)
+
+    # ---- The PAD VALUE itself (D-001). A shape-only round-trip test is blind here:
+    # untile() crops the pad away, so a BLACK pad round-trips perfectly while still
+    # bleeding a full-contrast artificial edge into the kept region through the
+    # denoiser's receptive field. These two tests assert the pad CONTENT.
+
+    def test_tile_padding_injects_no_black_border(self):
+        # A pure-WHITE image. Under [0,1], numpy's default constant pad (0.0) is BLACK:
+        # the padded tile rows would drop to 0.0, a full-contrast step edge. A neutral
+        # pad of ANY kind (reflect, or 0.5) keeps every pixel at 1.0 / >= 0.5.
+        img = np.ones((1, 300, 256, 3), dtype=np.float32)
+        tiles, _ = DenoiserPrior.tile(img, tile_size=256)
+        assert float(tiles.min()) == pytest.approx(1.0), (
+            "tile() injected a darker-than-white pad into a pure-white image — on [0,1] "
+            "a zero/constant pad is BLACK, not the neutral mid-grey it was on [-0.5,+0.5]"
+        )
+
+    def test_tile_padding_is_a_reflection_of_the_content(self):
+        # Stronger than "not black": the pad must be a MIRROR of the image, i.e. no
+        # artificial edge at all. Reconstruct the padded canvas from the tiles and check
+        # the first padded row against the reflected source row.
+        img = np.random.uniform(0.0, 1.0, size=(1, 300, 256, 3)).astype(np.float32)
+        tiles, meta = DenoiserPrior.tile(img, tile_size=256)
+        assert (meta["nh"], meta["nw"]) == (2, 1)
+        # nh=2, nw=1 -> tile 0 is rows 0..255, tile 1 is rows 256..511 of the padded canvas.
+        canvas = np.concatenate([tiles[0], tiles[1]], axis=0)  # [512, 256, 3]
+        np.testing.assert_allclose(canvas[:300], img[0], rtol=0, atol=0)
+        # np.pad(mode="reflect"): canvas[299 + k] == img[299 - k].
+        for k in (1, 2, 5, 50):
+            np.testing.assert_allclose(
+                canvas[299 + k], img[0, 299 - k], rtol=0, atol=0,
+                err_msg=f"padded row {299 + k} is not the reflection of source row {299 - k}",
+            )
+        # And no value outside the source range was invented (a constant pad would).
+        assert float(canvas.min()) >= float(img.min())
+        assert float(canvas.max()) <= float(img.max())
+
+    def test_tile_padding_survives_an_image_smaller_than_one_tile(self):
+        # Edge case for mode="reflect": pad width (192) EXCEEDS the dimension (64).
+        # NumPy chains reflections rather than raising, so this must just work.
+        img = np.random.uniform(0.0, 1.0, size=(1, 64, 100, 3)).astype(np.float32)
+        tiles, meta = DenoiserPrior.tile(img, tile_size=256)
+        assert tiles.shape == (1, 256, 256, 3)
+        assert float(tiles.min()) >= float(img.min())
+        assert float(tiles.max()) <= float(img.max())
+        np.testing.assert_array_equal(DenoiserPrior.untile(tiles, meta), img)

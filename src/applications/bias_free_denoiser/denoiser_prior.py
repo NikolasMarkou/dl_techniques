@@ -509,8 +509,21 @@ class DenoiserPrior:
     ) -> Tuple[np.ndarray, Dict[str, int]]:
         """Split ``[B, H, W, C]`` into non-overlapping ``tile_size`` blocks.
 
-        Zero-pads ``H``/``W`` up to a multiple of ``tile_size`` when needed; the
+        REFLECT-pads ``H``/``W`` up to a multiple of ``tile_size`` when needed; the
         padding is recorded in ``meta`` so :meth:`untile` crops back exactly.
+
+        # DECISION plan_2026-07-12_e56909cd/D-001: pad with ``mode="reflect"``, NOT with
+        # numpy's default ``mode="constant"`` (``constant_values=0``). On the legacy
+        # ``[-0.5,+0.5]`` domain a zero pad was neutral mid-grey; on ``[0,1]`` zero is
+        # BLACK, so a zero pad injects a full-contrast step edge along the right/bottom
+        # edge tiles. :meth:`untile` crops the pad away, but the denoiser's receptive
+        # field has already bled that artificial edge INWARD into the kept region — a
+        # silent quality loss with no ``-0.5`` literal to grep for. Do NOT "fix" this by
+        # switching back to a constant (not even ``constant_values=0.5``): reflect adds no
+        # artificial edge AT ALL, and it is what the sibling tool
+        # ``src/train/bfunet/eval_psnr_vs_noise.py`` already uses for the same job. NumPy
+        # chains reflections, so it is safe even when the pad exceeds the dimension
+        # (a sub-tile-sized image) and degrades to edge-replication on a size-1 axis.
 
         Args:
             image: A ``[B, H, W, C]`` array.
@@ -529,7 +542,7 @@ class DenoiserPrior:
         nw = (w + tile_size - 1) // tile_size
         pad_h, pad_w = nh * tile_size - h, nw * tile_size - w
         if pad_h or pad_w:
-            x = np.pad(x, ((0, 0), (0, pad_h), (0, pad_w), (0, 0)), mode="constant")
+            x = np.pad(x, ((0, 0), (0, pad_h), (0, pad_w), (0, 0)), mode="reflect")
         # [B, nh, T, nw, T, C] -> [B, nh, nw, T, T, C] -> [B*nh*nw, T, T, C]
         x = x.reshape(b, nh, tile_size, nw, tile_size, c)
         x = x.transpose(0, 1, 3, 2, 4, 5)
