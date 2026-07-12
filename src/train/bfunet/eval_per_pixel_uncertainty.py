@@ -110,6 +110,7 @@ from dl_techniques.utils.conformal_denoiser_intervals import (
     evaluate_coverage_normalized,
 )
 from dl_techniques.utils.multiplicative_miyasawa import additive_sure_risk_map
+from dl_techniques.utils.denoiser_provenance import require_unit_domain_checkpoint
 
 # Importing these registers every custom Keras object the saved denoiser needs
 # (Gabor-stem initializer + bfconvunext ConvNeXt blocks / Laplacian pyramid /
@@ -218,10 +219,21 @@ def _load_eval_config(checkpoint: str) -> BFUnetTrainingConfig:
 
 
 def _load_denoiser(checkpoint: str) -> keras.Model:
-    """Load the frozen ``.keras`` denoiser (weights + graph), compile-free."""
+    """Load the frozen ``.keras`` denoiser (weights + graph), compile-free.
+
+    Refuses any checkpoint not stamped ``data_range == "[0,1]"``: this tool builds its
+    clean batch through ``common.build_fixed_val_batch`` (now ``[0,1]``), and a legacy
+    ``[-0.5,+0.5]`` net fed that batch emits a plausible WRONG uncertainty map rather
+    than an error (plan_2026-07-12_e56909cd/D-005; shared gate, four load paths).
+
+    Raises:
+        FileNotFoundError: If the ``.keras`` file is absent.
+        ValueError: If the checkpoint is not stamped ``data_range == "[0,1]"``.
+    """
     path = Path(checkpoint)
     if not path.is_file():
         raise FileNotFoundError(f"checkpoint not found: {checkpoint}")
+    require_unit_domain_checkpoint(path)
     model = keras.models.load_model(path, compile=False)
     n_out = len(model.outputs) if isinstance(model.outputs, (list, tuple)) else 1
     logger.info(

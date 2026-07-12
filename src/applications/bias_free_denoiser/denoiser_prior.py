@@ -58,7 +58,10 @@ subtract a DC offset. Feeding ``[0,1]`` data to a net trained on the legacy
 ``[-0.5,+0.5]`` domain (or vice versa) produces SILENT garbage — no exception, no NaN,
 just a wrong image. :meth:`from_pretrained` therefore REFUSES any checkpoint whose
 sibling ``config.json`` does not stamp ``data_range == "[0,1]"``. An absent key means a
-pre-migration checkpoint, so absent ⇒ legacy ⇒ refuse. See :meth:`_check_data_range`.
+pre-migration checkpoint, so absent ⇒ legacy ⇒ refuse. The gate itself is the SHARED
+:func:`dl_techniques.utils.denoiser_provenance.require_unit_domain_checkpoint`, which the
+two ``src/train/bfunet/`` eval tools and the trainer's ``--init-from`` warm-start call as
+well — one implementation, four load paths.
 """
 
 import json
@@ -70,6 +73,7 @@ import numpy as np
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
+from dl_techniques.utils.denoiser_provenance import require_unit_domain_checkpoint
 
 # NumPy/array image input (host-side ingest helpers operate on concrete arrays).
 ArrayLike = Union[np.ndarray, "keras.KerasTensor"]
@@ -85,10 +89,6 @@ DOMAIN_CENTER = 0.5
 DOMAIN_HALFWIDTH = 0.5
 DOMAIN_MIN = DOMAIN_CENTER - DOMAIN_HALFWIDTH  # 0.0
 DOMAIN_MAX = DOMAIN_CENTER + DOMAIN_HALFWIDTH  # 1.0
-
-# The exact provenance stamp a checkpoint's config.json must carry to be loadable
-# (written by BFUnetTrainingConfig.data_range; see src/train/bfunet/common.py).
-_REQUIRED_DATA_RANGE = "[0,1]"
 
 
 class DenoiserPrior:
@@ -172,8 +172,9 @@ class DenoiserPrior:
 
         keras_path, config_path = cls._resolve_paths(checkpoint_path)
         # Provenance gate BEFORE any load: refuse a legacy-domain checkpoint outright
-        # rather than loading it and emitting silent garbage (D-005).
-        cls._check_data_range(config_path)
+        # rather than loading it and emitting silent garbage (D-005). SHARED with the
+        # three src/train/bfunet/ load paths — do not re-implement it here.
+        require_unit_domain_checkpoint(keras_path)
         try:
             if resolution == "dynamic":
                 if cls._detect_architecture(config_path) == "convunext":
@@ -227,54 +228,6 @@ class DenoiserPrior:
         """Load the saved ``(256, 256, 3)``-locked graph directly (compile-free)."""
         model = keras.models.load_model(keras_path, compile=False)
         return model
-
-    @staticmethod
-    def _check_data_range(config_path: Path) -> None:
-        """Refuse any checkpoint not stamped ``data_range == "[0,1]"`` (INV-4 / D-005).
-
-        # DECISION plan_2026-07-12_e56909cd/D-005: an ABSENT `data_range` key must FAIL
-        # CLOSED (legacy => refuse), not default to "probably fine". A bias-free net is
-        # degree-1 homogeneous with f(0) = 0, so it has NO mechanism to subtract a DC
-        # offset: loading a [-0.5,+0.5]-trained checkpoint and feeding it [0,1] data
-        # produces a plausible-looking WRONG image with no exception and no NaN (INV-1).
-        # There is no in-band signal to detect this after the fact, so the ONLY defense
-        # is a load-time provenance refusal. Do NOT "fix" a refused checkpoint by adding
-        # an allow_legacy flag or a pixel_domain branch — a switch whose sole purpose is
-        # to re-enable a broken path is a compat shim by another name, and the user
-        # mandate forbids one (INV-4). The fix is to RETRAIN. This gate never changes any
-        # math; it only refuses. See decisions.md D-005.
-
-        Args:
-            config_path: Path to the checkpoint's sibling ``config.json``.
-
-        Raises:
-            ValueError: If ``config.json`` is missing/unreadable, or its ``data_range``
-                is anything other than ``"[0,1]"``.
-        """
-        try:
-            raw = json.loads(config_path.read_text())
-        except (OSError, ValueError):
-            raw = None
-
-        found = None if raw is None else raw.get("data_range")
-        if found == _REQUIRED_DATA_RANGE:
-            return
-
-        if raw is None:
-            why = f"its config.json is missing or unreadable ({config_path})"
-        elif found is None:
-            why = "its config.json records NO data_range key at all"
-        else:
-            why = f"its config.json records data_range={found!r}"
-        raise ValueError(
-            f"REFUSING to load denoiser checkpoint {config_path.parent}: {why}, but this "
-            f"application requires data_range={_REQUIRED_DATA_RANGE!r}.\n"
-            f"An absent data_range key means the checkpoint predates the unit-domain "
-            f"migration, i.e. it was trained on the LEGACY [-0.5,+0.5] pixel domain. A "
-            f"bias-free denoiser is degree-1 homogeneous and cannot subtract a DC offset, "
-            f"so running it on [0,1] data yields SILENT garbage rather than an error. "
-            f"A RETRAIN on the [0,1] domain is required; there is no compatibility shim."
-        )
 
     @staticmethod
     def _detect_architecture(config_path: Path) -> str:

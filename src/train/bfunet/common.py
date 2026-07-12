@@ -33,6 +33,7 @@ from dl_techniques.metrics.ssim_metric import SsimMetric
 from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
+from dl_techniques.utils.denoiser_provenance import require_unit_domain_checkpoint
 from dl_techniques.utils.multiplicative_miyasawa import (
     apply_multiplicative_gaussian,
     apply_composite_gaussian,
@@ -1406,6 +1407,16 @@ def train(
     ``results_dir_prefix`` / ``bottleneck_name_prefix`` are the per-trainer seams.
     """
     logger.info(f"Starting {model_label} denoiser training: {config.experiment_name}")
+
+    # Provenance gate on the warm-start checkpoint, BEFORE anything expensive
+    # (plan_2026-07-12_e56909cd/D-005). The "init_from loaded 0 layers" guard further
+    # down does NOT cover this case: a LEGACY [-0.5,+0.5] checkpoint of the SAME
+    # architecture loads 100% of its layers happily, and the run then warm-starts from
+    # weights trained in the wrong pixel domain — no error, no signal, just a
+    # systematically wrong init. Shared gate; see dl_techniques.utils.denoiser_provenance.
+    if config.init_from is not None:
+        require_unit_domain_checkpoint(config.init_from)
+
     output_dir = Path(config.output_dir) / config.experiment_name
     output_dir.mkdir(parents=True, exist_ok=True)
     save_config_json(config, str(output_dir), "config.json")
@@ -1535,6 +1546,8 @@ def train(
     # already built, so layer-by-layer transfer works. skip_prefixes=() loads ALL
     # layers (the denoiser has no head_ layers to skip, unlike CliffordNetUNet).
     if config.init_from is not None:
+        # Its [0,1] provenance was already gated at the top of train() — a legacy-domain
+        # checkpoint never reaches this transfer (D-005).
         logger.info(f"Initializing weights from checkpoint: {config.init_from}")
         report = load_weights_from_checkpoint(
             model,

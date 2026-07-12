@@ -56,6 +56,7 @@ from scipy import stats
 import keras
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.denoiser_provenance import require_unit_domain_checkpoint
 from train.common import setup_gpu, collect_image_paths, set_seeds
 # Single source of truth for the pixel domain (see common.py D-001). This eval script
 # re-implements the *decode* path (it needs a no-crop full-image variant and an EvalConfig,
@@ -130,10 +131,21 @@ class EvalConfig:
 # ---------------------------------------------------------------------
 
 def load_denoiser(model_path: str) -> keras.Model:
-    """Load a saved ``.keras`` denoiser (weights + graph), compile-free."""
+    """Load a saved ``.keras`` denoiser (weights + graph), compile-free.
+
+    Refuses any checkpoint not stamped ``data_range == "[0,1]"``: this tool feeds the
+    model ``[0,1]`` patches, and a legacy ``[-0.5,+0.5]`` net has no way to subtract the
+    DC offset, so it would print a complete, finite, plausible — and WRONG — PSNR table
+    (plan_2026-07-12_e56909cd/D-005; the gate is shared with the three other load paths).
+
+    Raises:
+        FileNotFoundError: If the ``.keras`` file is absent.
+        ValueError: If the checkpoint is not stamped ``data_range == "[0,1]"``.
+    """
     path = Path(model_path)
     if not path.exists():
         raise FileNotFoundError(f"Model not found: {model_path}")
+    require_unit_domain_checkpoint(path)
     model = keras.models.load_model(path, compile=False)
     n_out = len(model.outputs) if isinstance(model.outputs, (list, tuple)) else 1
     logger.info(
