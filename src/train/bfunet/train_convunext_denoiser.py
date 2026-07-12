@@ -3,8 +3,9 @@ a noise-sigma curriculum.
 
 Trains ``create_convunext_denoiser`` (bias-free ConvNeXt U-Net) with an optional
 NON-LEARNABLE Gabor depthwise stem on DIV2K + COCO. Patches of 256x256 are sampled
-with geometric augmentation (flips + rot90), normalized to ``[-0.5, +0.5]`` (required
-for bias-free / scaling-invariant denoising), and corrupted with additive Gaussian
+with geometric augmentation (flips + rot90), normalized to ``[0, 1]`` (``image / 255``;
+the strictly-positive domain is what forces the bias-free net's filters to sum to one --
+see ``research/2026_bfunet_unit_domain_migration.md``), and corrupted with additive Gaussian
 noise whose per-image sigma is drawn from ``[sigma_min, sigma_max]``. The upper
 bound ``sigma_max`` is a live ``tf.Variable`` widened every epoch by
 ``NoiseSigmaCurriculumCallback`` (curriculum: start with low noise, progressively
@@ -27,15 +28,17 @@ REFERENCE TARGETS for interpreting this trainer's val-PSNR, NOT a like-for-like
 leaderboard (see caveats below).
 
 Noise-scale note: benchmark sigma is on the [0, 255] pixel scale. This trainer
-adds noise in the [-0.5, +0.5] normalized space, so::
+adds noise in the [0, 1] normalized space, so::
 
     sigma_255  =  sigma_here * 255.0
 
 i.e. this run's curriculum ``sigma_max 0.025 -> 0.25`` corresponds to
 ``sigma_255 ~= 6.4 -> 63.75`` — it spans (and exceeds) the classic 15/25/50
 benchmark regimes as a single *blind* model. PSNR is scale-invariant, so dB
-computed here with ``max_val=1.0`` on [-0.5,+0.5] images is directly comparable to
-the published ``max_val=255`` numbers.
+computed here with ``max_val=1.0`` on [0,1] images is directly comparable to
+the published ``max_val=255`` numbers. NOTE: the [-0.5,+0.5] -> [0,1] migration was a
+pure DC shift; peak-to-peak width is 1.0 in BOTH domains, so every sigma above and
+``max_val=1.0`` are UNCHANGED and still exactly correct. Do not rescale them.
 
 Grayscale (1-ch), Set12 / BSD68:
     sigma=15:  DnCNN 32.86/31.73 | FFDNet 32.75/31.63 | DRUNet 33.25/31.91 |

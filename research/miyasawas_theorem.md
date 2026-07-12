@@ -363,7 +363,9 @@ The core principles for bias-free architectures are **universal across framework
 - **No bias terms**: All layers must exclude additive bias parameters
 - **Linear final activation**: No activation function on the output layer
 - **Modified normalization**: Batch/layer normalization without centering terms
-- **Zero-centered inputs**: Data must have approximately zero mean
+- **A strictly-positive input domain**: for images, `[0,1]` - **not** a zero-centered one. See
+  §5 (*Critical Input Normalization Requirements*), which corrects the widespread
+  "zero-center your inputs" advice: it is exactly backwards for a bias-free denoiser.
 
 *Note: In PyTorch, this corresponds to setting `bias=False` in `nn.Conv2d`/`nn.Linear` layers and `center=False` (or `affine=False`) in `nn.BatchNorm2d`. The mathematical principles remain identical across frameworks.*
 
@@ -465,175 +467,257 @@ output = tf.nn.softmax(features, axis=-1)  # Not appropriate for denoising
 
 #### 5. Critical Input Normalization Requirements
 
-For bias-free networks to work effectively, **input normalization becomes critically important**. This is not just good practice—it's a **necessary condition** for the network to learn properly.
+For bias-free networks, **the choice of input domain is not a tuning knob - it decides which
+properties the network is able to learn at all.** Get it wrong and the network still trains,
+still reports a good loss, and is still quietly missing the one property the whole
+empirical-Bayes construction rests on.
 
-##### Why Zero-Centered Input is Essential
+> ### CORRECTION (2026-07-12) - this section previously said the opposite
+>
+> An earlier revision of this document rated `[0, 1]` normalization as **unsuitable, to be
+> avoided** for bias-free networks, claimed it causes training instability, dead neurons and
+> vanishing gradients, recommended `[-1, +1]` / zero-centering as best practice, and flagged
+> the line `images / 255.0` as a harmful mistake.
+>
+> **That advice was wrong, and it has been reversed in this repository.** The bias-free
+> denoisers in `dl_techniques` are trained on `[0, 1]`. See
+> `research/2026_bfunet_unit_domain_migration.md` for the full migration record.
+>
+> **Why it was wrong.** It imported a generic deep-learning heuristic - *"zero-center your
+> inputs, it conditions optimization better"* - into a setting where the network is
+> **bias-free**. That heuristic is not wrong in general. It is wrong *here*, and for a
+> specific structural reason: in a bias-free network, zero-centering silently removes the
+> training signal for the one property the residual-equals-score reading depends on. The
+> argument follows.
 
-A standard neural network layer performs: `output = activation(W * x + b)`
-A **bias-free** layer can only perform: `output = activation(W * x)`
+##### The structural fact: a bias-free network is degree-1 homogeneous
 
-**The Problem**: Without bias terms, the network has no direct mechanism to handle non-zero mean data. If your input has a consistent offset (like `[0,1]` normalized data with mean ≈ 0.5), the network must waste its weights trying to counteract this constant shift instead of learning data structure.
+A standard layer computes `activation(W·x + b)`. A **bias-free** layer computes
+`activation(W·x)`, with no additive bias anywhere - including a variance-only
+`BatchNormalization(center=False)`. With a positively-homogeneous activation (ReLU and
+friends) the whole network `f` is then **degree-1 homogeneous**:
 
-##### Normalization Options Compared
-
-| Normalization | Is Zero-Centered? | Suitability for Bias-Free Network | Key Issues |
-|---------------|-------------------|-----------------------------------|------------|
-| **`[0, 1]`** | ❌ No (mean ≈ 0.5) | **Poor - Avoid** | Causes training instability, dead neurons, vanishing gradients |
-| **Z-Score** | ✅ Yes (exactly 0) | **Excellent (Theory)** | Requires pre-computing dataset statistics |
-| **`[-1, +1]`** | ✅ Yes (≈ 0) | **Excellent (Practice)** | Standard in generative modeling, simple to compute |
-
-##### What Happens with Wrong Normalization (`[0,1]`)
-
-Using `[0,1]` normalization with bias-free networks causes **severe problems**:
-
-**1. Inefficient Weight Learning**
-```python
-# With [0,1] input (always positive), weights must do double duty:
-# - Learn data patterns (intended job)
-# - Counteract constant positive offset (forced job)
+```
+f(c · x) = c · f(x)   for every scalar c > 0        and therefore        f(0) = 0
 ```
 
-**2. Activation Function Problems**
-```python
-# ReLU activations
-output = tf.nn.relu(W @ x)  # x always positive
-# Result: Either always active (no sparsity) or dead neurons
+This is a *structural* identity, true at initialization, true after training, true for any
+weights. It is exactly what makes a bias-free denoiser generalize across noise levels
+(Mohan et al., ICLR 2020) - but it also means the network **cannot represent a DC offset**.
+It has no mechanism to add or subtract a constant. Keep that in mind for both halves of the
+argument below.
 
-# Sigmoid/Tanh activations  
-output = tf.nn.tanh(W @ x)  # Input pushed away from sensitive region
-# Result: Saturation → vanishing gradients → training stalls
+##### Why zero-centering (`[-0.5, +0.5]` or `[-1, +1]`) is the wrong domain
+
+Consider the most common patch in any natural-image dataset: a **flat patch** - sky, a wall,
+paper, an out-of-focus background. A denoiser's local filters must *preserve* its DC level:
+average away the noise, leave the brightness alone.
+
+On a zero-centered domain, a flat **mid-grey** patch is the vector `0`.
+
+```
+f(0) = 0
 ```
 
-**3. Compounding Through Layers**
-- First layer struggles with positive input offset
-- Its output is also non-centered
-- Second layer faces even worse offset
-- Problems cascade and worsen with depth
+The network reproduces it **for free**. The correct answer is handed to it by homogeneity;
+no weight had to learn anything. So the DC component - the very thing the filters must
+preserve - is **never supervised at its most important operating point**, and a large
+fraction of natural-image background sits right there. The training pressure to learn
+DC preservation is badly weakened. If the filters never learn to sum to one, the denoiser
+produces **unpredictable brightness shifts**, most visibly at out-of-distribution noise
+levels where nothing else pins the DC down.
 
-##### Correct Input Normalization
+Zero-centering does not make the flat-patch case *hard*. It makes it **vacuous**.
 
-**Best Practice - `[-1, +1]` Normalization**:
+##### Why `[0, 1]` is the right domain: it forces sum-to-one filters
+
+On `[0, 1]` a flat patch of value `c` is the vector `c · 1` (all-ones times `c`). Apply
+homogeneity:
+
+```
+f(c · 1) = c · f(1)
+```
+
+To reproduce that patch - `f(c·1) = c·1` - the network is **required** to satisfy
+
+```
+f(1) = 1
+```
+
+i.e. **its local filter weights must sum to one**. There is no way to fake it and no way to
+get it for free. The network is forced to become an adaptive low-pass / averaging filter,
+which is precisely the geometrically correct behavior for a denoiser, and precisely what the
+Miyasawa / Tweedie empirical-Bayes identity
+
+```
+E[x | y] = y + σ² · ∇_y log p(y)
+```
+
+relies on for the residual-equals-score reading to hold *across* noise manifolds rather than
+at one radius. `[0, 1]` makes the sum-to-one property **learnable and testable**;
+`[-0.5, +0.5]` makes it vacuous. Note that the *same* homogeneity that makes the property
+free under zero-centering is what makes it mandatory under `[0, 1]` - one structural fact,
+two opposite consequences, decided entirely by where the domain sits.
+
+**Foundational references.** Mohan, Kadkhodaie, Simoncelli & Fernandez-Granda, *Robust and
+Interpretable Blind Image Denoising via Bias-Free Convolutional Neural Networks*, ICLR 2020
+(bias-free CNNs; homogeneity; noise-level generalization). Kadkhodaie & Simoncelli,
+*Stochastic Solutions for Linear Inverse Problems using the Prior Implicit in a Denoiser*,
+NeurIPS 2021 (the implicit prior; residual-as-score).
+
+##### Empirical corroboration measured in this repo
+
+`src/train/bfunet/common.py` now runs a DC / sum-to-one probe at build time, reporting
+`rel_err = ‖f(c·1) − c·1‖ / ‖c·1‖` for a flat image at several levels `c`. On an
+**untrained** bias-free ConvUNext:
+
+| `c` | 0.1 | 0.25 | 0.5 | 0.75 | 0.9 |
+|---|---|---|---|---|---|
+| `rel_err` | 1.502 | 1.502 | 1.502 | 1.502 | 1.502 |
+
+The value is **identical for every `c`** - which is exactly what degree-1 homogeneity
+predicts, since the ratio `‖c·f(1) − c·1‖ / ‖c·1‖ = ‖f(1) − 1‖ / ‖1‖` cannot depend on `c`.
+That constancy confirms the probe is measuring `‖f(1) − 1‖` - **the sum-to-one property
+itself**, and nothing else. A random untrained network's filters do not sum to one, so
+`1.502` is the expected baseline, not a failure. It is now a first-class training-time
+diagnostic: on `[0,1]` this number is a *training signal*; on `[-0.5,+0.5]` there was no
+such number to report, because the flat mid-grey case was `f(0) = 0`.
+
+##### Normalization options compared (corrected)
+
+| Normalization | Flat-patch case | Suitability for a bias-free **denoiser** | Notes |
+|---|---|---|---|
+| **`[0, 1]`** | `f(c·1) = c·1` ⇒ **requires `f(1) = 1`** | **Recommended** | Forces DC-preserving, sum-to-one filters. The domain used by `dl_techniques`. |
+| **`[-0.5, +0.5]`** | mid-grey ⇒ `f(0) = 0`, free | **Avoid** | The property the denoiser needs is never supervised. Previously recommended here; that was the error. |
+| **`[-1, +1]`** | mid-grey ⇒ `f(0) = 0`, free | **Avoid** | Same defect as above. Fine for generative models with biased networks; not for a bias-free denoiser. |
+| **Z-score** | destroys the pixel domain | **Avoid** | Also makes `max_val` for PSNR/SSIM ill-defined and couples every image to dataset statistics. |
+
+##### What remains UNVERIFIED - do not over-read this correction
+
+The old section's concern about **dying units / training instability on strictly-positive
+inputs** is a real ReLU-family failure mode in general, and it has **not** been empirically
+refuted in this repository. What has been established here is the *structural* argument above
+plus the probe's confirmation that it is measuring what it claims. What settles the training
+question is a **full `[0,1]` retrain**, which has not been run at the time of writing.
+
+The migration plan names the stop trigger explicitly: if the `[0,1]` smoke train diverges
+(NaN loss, or `val_loss` never falling below its epoch-0 value), or if the DC probe on a
+short-trained model moves *away* from `f(c·1) = c·1` as training proceeds, then the concern
+was real and the hypothesis must be revisited. Until such a retrain completes, **no claim in
+this repository about `[0,1]` denoising quality, DC preservation, or Miyasawa score fidelity
+is verified.** See `research/2026_bfunet_unit_domain_migration.md` §6.
+
+##### Correct normalization (for a bias-free denoiser)
+
 ```python
-def normalize_images_for_bias_free_network(images):
-    """
-    Normalize images to [-1, +1] range for bias-free architectures
-    
-    Args:
-        images: Input images in [0, 255] or [0, 1] range
-        
-    Returns:
-        Normalized images in [-1, +1] range
+def normalize_images_for_bias_free_denoiser(images):
+    """Normalize images to [0, 1] for a bias-free denoiser.
+
+    Strictly positive, on purpose: a flat patch of value c is c*1, and degree-1
+    homogeneity then forces f(1) = 1, i.e. filters that sum to one. Do NOT
+    zero-center - that makes the flat mid-grey patch f(0) = 0, which is free,
+    and the DC-preserving property is then never learned.
     """
     if tf.reduce_max(images) > 1.0:
-        # Assume [0, 255] range
-        normalized = (images / 127.5) - 1.0
-    else:
-        # Assume [0, 1] range  
-        normalized = (images * 2.0) - 1.0
-    
-    return normalized
+        return tf.cast(images, tf.float32) / 255.0   # [0, 255] -> [0, 1]
+    return tf.cast(images, tf.float32)               # already [0, 1]
+
 
 def denormalize_images(normalized_images):
-    """Convert back from [-1, +1] to [0, 1] range"""
-    return (normalized_images + 1.0) / 2.0
+    """[0, 1] is already the display domain: only a clip is needed."""
+    return tf.clip_by_value(normalized_images, 0.0, 1.0)
 ```
 
-**Alternative - Z-Score Standardization**:
-```python
-def z_score_normalize_dataset(dataset):
-    """
-    Z-score normalization for bias-free networks
-    Perfect zero-centering but requires dataset statistics
-    """
-    # Compute dataset statistics
-    mean = tf.reduce_mean(dataset, axis=(0, 1, 2), keepdims=True)
-    std = tf.math.reduce_std(dataset, axis=(0, 1, 2), keepdims=True)
-    
-    # Normalize to mean=0, std=1
-    normalized = (dataset - mean) / (std + 1e-8)
-    
-    return normalized, mean, std
+**The noise scale does NOT change with this domain.** Both `[-0.5, +0.5]` and `[0, 1]` have a
+peak-to-peak width of `1.0`, so `sigma`, `PsnrMetric(max_val=1.0)`, `SsimMetric(max_val=1.0)`
+and `sigma_255 = sigma * 255` are all **unchanged and still exactly correct**. Moving between
+these two domains is a pure **DC shift, not a rescale**. Rescaling sigma or `max_val`
+"because the domain moved" would silently corrupt every reported dB number, and **nothing
+would fail**. This is the single most likely mistake in this area.
 
-def z_score_denormalize(normalized_data, mean, std):
-    """Convert back from z-score to original scale"""
-    return (normalized_data * std) + mean
-```
-
-##### Training Pipeline with Proper Normalization
+##### Training pipeline with the correct normalization
 
 ```python
 def create_bias_free_training_pipeline(train_images, val_images, noise_levels):
-    """
-    Complete training pipeline with proper normalization for bias-free networks
-    """
-    
-    # CRITICAL: Normalize to [-1, +1] for bias-free architecture
-    def normalize_batch(images):
-        return normalize_images_for_bias_free_network(images)
-    
+    """Training pipeline for a bias-free denoiser on the [0, 1] domain."""
+
     def add_noise_and_normalize(batch):
-        # Normalize FIRST
-        clean_batch = normalize_batch(batch)
-        
-        # Then add noise
+        # Normalize FIRST (to [0, 1]), then add noise in that same domain.
+        clean_batch = normalize_images_for_bias_free_denoiser(batch)
+
         sigma = tf.random.uniform([], minval=min(noise_levels), maxval=max(noise_levels))
         noise = tf.random.normal(tf.shape(clean_batch))
         noisy_batch = clean_batch + sigma * noise
-        
+
         return noisy_batch, clean_batch
-    
-    # Create normalized datasets
+
     train_dataset = tf.data.Dataset.from_tensor_slices(train_images)
     train_dataset = train_dataset.shuffle(1000).batch(32).repeat()
     train_dataset = train_dataset.map(add_noise_and_normalize)
-    
+
     val_dataset = tf.data.Dataset.from_tensor_slices(val_images)
     val_dataset = val_dataset.batch(32)
     val_dataset = val_dataset.map(add_noise_and_normalize)
-    
+
     return train_dataset, val_dataset
 
-# Usage example with normalization verification
+
 def verify_normalization(dataset_sample):
-    """Verify that normalization is correct for bias-free networks"""
-    mean = tf.reduce_mean(dataset_sample)
-    std = tf.math.reduce_std(dataset_sample)
-    
-    print(f"Dataset mean: {mean:.6f} (should be ≈ 0.0)")
-    print(f"Dataset std: {std:.6f}")
-    print(f"Dataset range: [{tf.reduce_min(dataset_sample):.3f}, {tf.reduce_max(dataset_sample):.3f}]")
-    
-    if abs(mean) > 0.1:
-        print("⚠️  WARNING: Mean is not close to zero! This will hurt bias-free network training.")
+    """Verify the domain AND the property zero-centering used to hide."""
+    lo = tf.reduce_min(dataset_sample)
+    hi = tf.reduce_max(dataset_sample)
+    print(f"Dataset range: [{lo:.3f}, {hi:.3f}]  (should be within [0, 1])")
+
+    if lo < -1e-6 or hi > 1.0 + 1e-6:
+        print("WARNING: data is not on [0, 1]. A bias-free denoiser trained on a "
+              "different domain cannot be reused here - it has no way to shift the DC.")
     else:
-        print("✅ Good: Data is properly zero-centered for bias-free architecture.")
+        print("OK: data is on [0, 1] - the flat-patch case will supervise f(1) = 1.")
+
+
+def dc_probe(model, levels=(0.1, 0.25, 0.5, 0.75, 0.9), shape=(1, 64, 64, 1)):
+    """The sum-to-one diagnostic: does f(c*1) reproduce c*1?
+
+    By homogeneity the reported rel_err cannot depend on c; a constant column is
+    the expected signature, and its VALUE is ||f(1) - 1|| / ||1||.
+    """
+    for c in levels:
+        flat = tf.fill(shape, tf.constant(c, tf.float32))
+        out = model(flat, training=False)
+        rel = tf.norm(out - flat) / tf.norm(flat)
+        print(f"  c={c:<5} rel_err={float(rel):.4f}")
 ```
 
-##### Summary: Input Normalization Requirements
+##### Summary: input normalization for a bias-free denoiser
 
-**For bias-free neural networks (required for Miyasawa's theorem):**
+**DO**: normalize images to `[0, 1]` (`image / 255.0`) - strictly positive, on purpose.
+**DO**: apply normalization *before* adding training noise.
+**DO**: monitor the DC / sum-to-one probe; it is the property the domain exists to expose.
+**DO**: record the data range in the checkpoint's `config.json` (`data_range: "[0,1]"`) and
+refuse to load a checkpoint that lacks it - a bias-free net fed the wrong domain produces
+*silent garbage*, not an error.
 
-✅ **DO**: Use `[-1, +1]` normalization (recommended) or z-score standardization
-✅ **DO**: Verify your data has approximately zero mean
-✅ **DO**: Apply normalization before adding training noise
-
-❌ **DON'T**: Use `[0, 1]` normalization - it will cripple training
-❌ **DON'T**: Skip normalization verification
-❌ **DON'T**: Apply normalization after noise addition
+**DON'T**: zero-center (`[-0.5, +0.5]`, `[-1, +1]`, z-score). It hands the network the
+flat-patch answer for free and the sum-to-one property is never learned.
+**DON'T**: rescale `sigma`, `max_val`, or any PSNR/SSIM constant when moving between two
+unit-peak-to-peak domains. The width is `1.0` in both; only the center moved.
+**DON'T**: mix domains across a checkpoint boundary. Homogeneity means a wrong-domain load
+cannot be detected from the output - it just looks bad.
 
 #### 6. Complete Correct Implementation Examples
 
 **WRONG - Multiple Issues**:
 ```python
-# Usage with wrong normalization and architecture
-wrong_images = tf.cast(images, tf.float32) / 255.0  # [0,1] range - BAD!
-wrong_model = wrong_denoiser()  # Has bias terms and sigmoid - BAD!
+# Zero-centered input: the flat mid-grey patch becomes f(0) = 0, so the
+# DC-preserving (sum-to-one) property is never supervised - BAD for a bias-free denoiser!
+wrong_images = (tf.cast(images, tf.float32) / 127.5) - 1.0
+wrong_model = wrong_denoiser()  # Has bias terms and a sigmoid head - also WRONG
 ```
 
 **CORRECT - Bias-Free with Proper Normalization**:
 ```python
-# Usage with correct normalization and architecture  
-correct_images = (tf.cast(images, tf.float32) / 127.5) - 1.0  # [-1,1] range - GOOD!
+# Usage with correct normalization and architecture
+correct_images = tf.cast(images, tf.float32) / 255.0  # [0,1] range - GOOD! forces f(1) = 1
 correct_model = create_gold_standard_bias_free_denoiser()  # Bias-free - GOOD!
 ```
 
@@ -798,21 +882,26 @@ def verify_bias_free_properties(model):
     has_activation = hasattr(final_layer, 'activation') and final_layer.activation != 'linear'
     print(f"✅ Linear final activation: {not has_activation}")
     
-    # Test with normalized input
-    test_input = tf.random.normal((1, 64, 64, 3))  # Should be in [-1,1] range
-    mean_val = tf.reduce_mean(test_input)
-    print(f"✅ Zero-centered input (mean ≈ 0): {abs(mean_val) < 0.1}")
-    
-    if not has_bias and not has_activation and abs(mean_val) < 0.1:
-        print("🎉 Model satisfies all Miyasawa's theorem requirements!")
+    # Test on the [0, 1] domain (NOT zero-centered - see section 5)
+    test_input = tf.random.uniform((1, 64, 64, 3), minval=0.0, maxval=1.0)
+    lo, hi = tf.reduce_min(test_input), tf.reduce_max(test_input)
+    in_domain = bool(lo >= -1e-6 and hi <= 1.0 + 1e-6)
+    print(f"Input on [0, 1]: {in_domain}")
+
+    # The property the [0, 1] domain exists to expose: f(c*1) == c*1, i.e. filters
+    # that sum to one. A zero-centered domain would give this away for free (f(0)=0).
+    dc_probe(model)
+
+    if not has_bias and not has_activation and in_domain:
+        print("Model satisfies the structural requirements for Miyasawa's theorem.")
     else:
-        print("⚠️  Model may not fully satisfy theoretical requirements.")
+        print("WARNING: model may not fully satisfy the theoretical requirements.")
 
 # Example usage
 if __name__ == "__main__":
     # Load your properly normalized data here
-    # train_images = load_and_normalize_training_data()  # Should be in [-1,1]
-    # val_images = load_and_normalize_validation_data()   # Should be in [-1,1]
+    # train_images = load_and_normalize_training_data()  # Should be in [0, 1]
+    # val_images = load_and_normalize_validation_data()   # Should be in [0, 1]
     
     # Train the bias-free denoiser
     # model, history = train_bias_free_denoiser(train_images, val_images)

@@ -223,10 +223,13 @@ def train(config: BFCNNTrainingConfig) -> keras.Model:
     own ``build_model`` + ``verify_bias_free`` plus the BFCNN label and results-dir prefix.
     Uses the DEFAULT bottleneck name, so no ``bottleneck_name_prefix`` is passed.
     """
-    # DECISION plan_2026-07-04_6e78d66d/D-002: normalization ([-0.5,+0.5]) and the
-    # PsnrMetric(max_val=1.0) compile are owned by common.train (common.py:1517). Do NOT
-    # re-introduce bfcnn's old [-1,+1] range or PsnrMetric(max_val=2.0) here — the trainer
-    # inherits the single shared convention and sets no per-model range/metric knob.
+    # DECISION plan_2026-07-04_6e78d66d/D-002: normalization (now [0,1]; see
+    # plan_2026-07-12_e56909cd/D-001 and research/2026_bfunet_unit_domain_migration.md) and
+    # the PsnrMetric(max_val=1.0) compile are owned by common.train. Do NOT re-introduce
+    # bfcnn's old [-1,+1] range or PsnrMetric(max_val=2.0) here — the trainer inherits the
+    # single shared convention and sets no per-model range/metric knob. Note that
+    # max_val=1.0 is CORRECT on [0,1] for the same reason it was on [-0.5,+0.5]: it is the
+    # peak-to-peak width, which is 1.0 in both. The domain moved; the width did not.
     return common.train(
         config,
         build_model,

@@ -258,8 +258,11 @@ not defects.
 σ255 → PSNR(dB): 5→40.68, 10→37.37, 15→35.51, 25→33.26, 35→31.79, 50→30.27, 65→29.12
 (monotone, +6.4…+15.8 dB gain over the noisy input). Input-PSNR arithmetic checks out:
 σ255=5 ⇒ σ_norm=0.0196 ⇒ `20·log10(1/0.0196)=34.16 dB` vs measured input 34.28; the small
-positive bias is the expected effect of clipping the noisy input to `[-0.5,0.5]` (reduces
-effective noise energy).
+positive bias is the expected effect of clipping the noisy input to the data domain (reduces
+effective noise energy). *(Measured on a `[-0.5,+0.5]`-trained checkpoint, before the `[0,1]`
+migration. The clip-bias effect is unchanged in kind — the clip now fires at `0.0` and `1.0`
+instead of `-0.5` and `+0.5` — but these dB numbers must be re-measured on a `[0,1]` model;
+see `research/2026_bfunet_unit_domain_migration.md`.)*
 
 **The two tools' PSNRs are on DIFFERENT samples — do not read them as mutual
 corroboration.** `eval_psnr_vs_noise` uses 100 random patches; `eval_per_pixel_uncertainty`

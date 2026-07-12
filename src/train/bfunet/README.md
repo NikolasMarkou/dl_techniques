@@ -13,6 +13,33 @@ noise levels it was not explicitly trained on.
 
 ---
 
+## Data domain: `[0, 1]` (not zero-centered)
+
+All four trainers normalize with `image / 255.0` — a **strictly-positive** `[0, 1]` domain.
+The single choke point is `common.py`'s `DATA_MIN = 0.0` / `DATA_MAX = 1.0`; every clip in the
+pipeline is driven from those two constants. **Do not add a second normalizer.**
+
+This is deliberate and load-bearing, not a convention. Degree-1 homogeneity implies `f(0) = 0`,
+so on a zero-centered domain a flat mid-grey patch is reproduced **for free** and the network
+never has to learn DC-preserving filters. On `[0, 1]` a flat patch of value `c` is `c·1`, and
+`f(c·1) = c·f(1)` means reproducing it **requires `f(1) = 1`** — filter weights that **sum to
+one**. `common.py`'s DC / sum-to-one probe (logged at build time, next to the homogeneity
+probe) reports `‖f(c·1) − c·1‖ / ‖c·1‖`; by homogeneity that number cannot depend on `c`, and
+its value *is* `‖f(1) − 1‖`.
+
+> **The `[-0.5,+0.5]` → `[0,1]` migration was a pure DC shift, not a rescale.** Peak-to-peak
+> width is `1.0` in both domains, so every `sigma` default, `sigma_255 = sigma·255`, and
+> `PsnrMetric`/`SsimMetric` `max_val=1.0` are **unchanged and still exactly correct**.
+> Rescaling any of them would silently corrupt every reported dB number and **nothing would
+> fail**.
+>
+> Every checkpoint trained before the migration is **invalid** and cannot be shifted post hoc
+> (a bias-free net has no mechanism to subtract a DC offset). New runs stamp
+> `data_range: "[0,1]"` into `config.json`; `DenoiserPrior.from_pretrained` **refuses** any
+> checkpoint that lacks it. Full rationale: `research/2026_bfunet_unit_domain_migration.md`.
+
+---
+
 ## Directory layout
 
 | File | Role |

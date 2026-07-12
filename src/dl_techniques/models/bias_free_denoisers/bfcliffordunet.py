@@ -40,7 +40,10 @@ Epsilon-floor caveat
 --------------------
 Because the context norm is a per-input RMS with an epsilon regularizer,
 homogeneity holds to ``rel_err < 1e-2`` only for input scale
-``alpha in [0.5, 1000]`` -- the ``[-0.5, 0.5]`` denoising operating regime. At
+``alpha in [0.5, 1000]`` -- which covers the ``[0, 1]`` denoising operating regime
+(see ``research/2026_bfunet_unit_domain_migration.md``; this was written for the
+former ``[-0.5, +0.5]`` domain, but the bound is on the input SCALE ``alpha``, not on
+the domain's center, so it is unaffected by the migration). At
 extreme small scale (``alpha ~ 1e-3``) the RMS epsilon dominates and the
 identity degrades (measured ``rel_err ~ 0.54``). This is outside the operating
 range and is the same class of accepted deviation as the existing Miyasawa
@@ -277,7 +280,8 @@ def create_cliffordunet_denoiser(
     inference, scaling the input by ``alpha`` scales the output by ``alpha``
     (``f(alpha * x) = alpha * f(x)``), enabling the Miyasawa/Tweedie
     residual-as-score interpretation. Homogeneity holds to ``rel_err < 1e-2``
-    for ``alpha in [0.5, 1000]`` (the ``[-0.5, 0.5]`` regime); it degrades at
+    for ``alpha in [0.5, 1000]`` (covering the ``[0, 1]`` regime; the bound is on the
+    input SCALE, not the domain center, so the [0,1] migration does not move it); it degrades at
     extreme small ``alpha ~ 1e-3`` due to the per-input RMS epsilon floor --
     the same accepted deviation class as the Miyasawa clip-boundary caveat
     (D-005 / D-006).

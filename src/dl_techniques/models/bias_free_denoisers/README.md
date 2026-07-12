@@ -312,7 +312,7 @@ print("✅ Pretrained weights loaded.")
 
 ## 8. Training Best Practices
 
-1.  **Normalization**: While the network is bias-free, inputs should ideally be in a standard range (e.g., [0, 1] or [-1, 1]) and zero-centered if possible, though bias-free networks are robust to simple intensity shifts.
+1.  **Normalization**: Use **`[0, 1]`** (`image / 255.0`). Do **not** zero-center. This is not a style preference and bias-free networks are **not** robust to intensity shifts: a bias-free network is degree-1 homogeneous (`f(c·x) = c·f(x)`, so `f(0) = 0`) and therefore has *no mechanism to represent a DC offset*. On a zero-centered domain a flat mid-grey patch is exactly `0`, so the network reproduces it for free and never learns DC-preserving (sum-to-one) filters. On `[0, 1]` a flat patch is `c·1`, and homogeneity forces `f(1) = 1`, i.e. filter weights that **sum to one** — the property the Miyasawa residual-equals-score reading depends on. Consequence: a checkpoint trained on one domain produces **silent garbage** on the other. See `research/2026_bfunet_unit_domain_migration.md`.
 2.  **Loss Function**:
     -   **L1 (MAE)**: Generally produces sharper edges than MSE.
     -   **Charbonnier Loss**: A differentiable variant of L1 ($\sqrt{x^2 + \epsilon^2}$) often works best for denoising.
