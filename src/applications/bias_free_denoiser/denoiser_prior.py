@@ -90,6 +90,11 @@ DOMAIN_HALFWIDTH = 0.5
 DOMAIN_MIN = DOMAIN_CENTER - DOMAIN_HALFWIDTH  # 0.0
 DOMAIN_MAX = DOMAIN_CENTER + DOMAIN_HALFWIDTH  # 1.0
 
+# Below this, a float input's negative mass is treated as a genuine legacy zero-centered
+# array rather than numerical overshoot from an upstream op (see `ingest`). Small enough to
+# ignore float noise, large enough to catch a real [-0.5,+0.5] image.
+_LEGACY_NEGATIVE_TOL = 1e-3
+
 
 class DenoiserPrior:
     """Frozen bias-free denoiser wrapped as an implicit image prior.
@@ -480,6 +485,21 @@ class DenoiserPrior:
         x = x.astype(np.float32)
         if is_uint8 or float(x.max(initial=0.0)) > 1.5:
             return x / 255.0
+
+        # A float array carrying real negative mass is the signature of a LEGACY
+        # zero-centered [-0.5,+0.5] array. Clipping it to [0,1] would silently crush its
+        # entire lower half to black, so say so rather than corrupting it quietly — the
+        # failure mode this whole migration exists to eliminate is the SILENT one.
+        # This is a diagnostic, NOT a domain branch: the clip below is unconditional and
+        # no math depends on it (Pre-Mortem #4 — no compat shim).
+        if float(x.min(initial=0.0)) < -_LEGACY_NEGATIVE_TOL:
+            logger.warning(
+                "ingest() received a float image with values as low as %.4f. The model "
+                "domain is [0,1]; a negative-valued array is most likely a LEGACY "
+                "zero-centered [-0.5,+0.5] array. Clipping it to [0,1] destroys its "
+                "entire lower half. Pass a [0,1] or uint8 image instead.",
+                float(x.min()),
+            )
         return np.clip(x, DOMAIN_MIN, DOMAIN_MAX)
 
     @staticmethod

@@ -8,6 +8,7 @@ never in this fast suite.
 """
 
 import json
+import logging
 
 import keras
 import numpy as np
@@ -70,6 +71,27 @@ class TestDomainHelpers:
         img = np.array([[[-0.4, 0.25, 1.3]]], dtype=np.float32)
         out = DenoiserPrior.ingest(img)
         np.testing.assert_allclose(out, np.array([[[0.0, 0.25, 1.0]]]), atol=1e-6)
+
+    def test_ingest_warns_on_a_legacy_zero_centered_array(self, caplog):
+        # A float array with real negative mass is the signature of a LEGACY [-0.5,+0.5]
+        # image. Clipping it to [0,1] destroys its entire lower half, so ingest must SAY so
+        # rather than corrupt it silently -- the silent failure is the one this migration
+        # exists to eliminate. The clip itself is unconditional (no domain branch).
+        legacy = np.random.default_rng(0).uniform(-0.5, 0.5, size=(1, 8, 8, 3)).astype(np.float32)
+        with caplog.at_level(logging.WARNING):
+            out = DenoiserPrior.ingest(legacy)
+        assert any("LEGACY" in r.message or "LEGACY" in r.getMessage() for r in caplog.records), (
+            "ingest() silently clipped a negative-valued (legacy zero-centered) array"
+        )
+        assert float(out.min()) >= 0.0
+
+    def test_ingest_does_not_warn_on_float_noise(self, caplog):
+        # A hair below zero is numerical overshoot from an upstream op, not a legacy array.
+        # Warning on it would make the diagnostic noise, and noisy diagnostics get ignored.
+        img = np.array([[[-1e-7, 0.25, 1.0]]], dtype=np.float32)
+        with caplog.at_level(logging.WARNING):
+            DenoiserPrior.ingest(img)
+        assert not any("LEGACY" in r.getMessage() for r in caplog.records)
 
     def test_denorm_inverts_ingest_for_uint8(self):
         img = np.random.randint(0, 256, size=(1, 8, 8, 3)).astype(np.uint8)
