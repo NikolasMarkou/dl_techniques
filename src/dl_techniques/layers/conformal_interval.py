@@ -18,11 +18,19 @@ Design summary
   and assigned into the frozen weight via :meth:`ConformalIntervalLayer.calibrate`
   OUTSIDE ``call()``, exactly mirroring
   :class:`dl_techniques.layers.time_series.forecasting_layers.ConformalQuantileHead`.
-- **Domain clip ``[-0.5, +0.5]``.** ``call()`` clips the incoming point
-  estimate ``mu`` to ``[domain_min, domain_max]`` (default ``[-0.5, +0.5]``),
-  matching ``DOMAIN_MIN`` / ``DOMAIN_MAX`` and the ``_predict_mu`` clip in
+- **Domain clip ``[0, 1]``.** ``call()`` clips the incoming point estimate
+  ``mu`` to ``[domain_min, domain_max]`` (default ``[0, 1]``), matching
+  ``DOMAIN_MIN`` / ``DOMAIN_MAX`` and the ``_predict_mu`` clip in
   ``conformal_denoiser_intervals.py``. A mismatched domain silently breaks the
   coverage guarantee the numpy calibration was fit under.
+- **Serialized domain / legacy artifacts.** ``domain_min`` / ``domain_max`` are
+  carried in :meth:`ConformalIntervalLayer.get_config`, so a model SAVED before
+  the ``[-0.5, +0.5] -> [0, 1]`` denoiser-domain migration keeps the OLD bounds
+  baked into its ``.keras`` config and will reload with them. That is intended:
+  such a graph wraps a legacy-domain denoiser and is invalid end-to-end anyway
+  (a bias-free net cannot be domain-shifted post hoc). There is deliberately NO
+  compat branch and NO migration shim — rebuild the graph around a ``[0, 1]``
+  denoiser instead.
 - **Scalar ``q`` (one deployment noise level).** One frozen scalar radius = one
   deployment noise regime. Baking a full per-sigma table into a single graph is
   a documented FUTURE EXTENSION (would require a second ``sigma`` call-time
@@ -50,7 +58,7 @@ class ConformalIntervalLayer(keras.layers.Layer):
     """Non-trainable, fixed-weights conformal prediction-interval layer.
 
     Holds a single non-trainable scalar weight ``q`` (the split-conformal
-    radius, expressed in the ``[-0.5, +0.5]`` denoiser output domain). Its
+    radius, expressed in the ``[0, 1]`` denoiser output domain). Its
     ``call(mu)``:
 
     1. clips the incoming point estimate ``mu`` to ``[domain_min, domain_max]``;
@@ -70,8 +78,8 @@ class ConformalIntervalLayer(keras.layers.Layer):
             initializer. Defaults to ``0.0`` (uncalibrated). The real value is
             fit host-side and either passed here or applied later via
             :meth:`calibrate`.
-        domain_min: Lower clip bound for ``mu``. Defaults to ``-0.5``.
-        domain_max: Upper clip bound for ``mu``. Defaults to ``+0.5``.
+        domain_min: Lower clip bound for ``mu``. Defaults to ``0.0``.
+        domain_max: Upper clip bound for ``mu``. Defaults to ``1.0``.
         return_mu: If ``True`` (default), ``call`` returns the 3-tuple
             ``(mu_c, lower, upper)``; otherwise the 2-tuple ``(lower, upper)``.
         **kwargs: Forwarded to :class:`keras.layers.Layer`. ``trainable`` is
@@ -90,11 +98,18 @@ class ConformalIntervalLayer(keras.layers.Layer):
         exported graph).
     """
 
+    # DECISION plan_2026-07-12_e56909cd/D-001: the denoiser domain is [0, 1] and
+    # these defaults are its only statement here. Do NOT add a compat branch, a
+    # `pixel_domain` kwarg, or a from_config migration shim for models saved with
+    # the legacy [-0.5, +0.5] bounds: a bias-free (degree-1 homogeneous) denoiser
+    # cannot be domain-shifted post hoc, so such a graph is invalid end-to-end and
+    # a shim would only make it silently wrong instead of loudly wrong. Rebuild the
+    # graph around a [0, 1] denoiser. See decisions.md D-001 (INV-4, no-compat).
     def __init__(
             self,
             q_init: float = 0.0,
-            domain_min: float = -0.5,
-            domain_max: float = 0.5,
+            domain_min: float = 0.0,
+            domain_max: float = 1.0,
             return_mu: bool = True,
             **kwargs: Any,
     ) -> None:

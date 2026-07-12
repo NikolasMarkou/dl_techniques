@@ -24,10 +24,12 @@ Guarantees and caveats (read before trusting an interval):
   curriculum sweeps sigma, so residuals are NOT exchangeable across sigmas.
   Calibration is therefore done independently per sigma bin
   (:func:`calibrate_per_sigma`); mixing sigmas breaks the guarantee.
-* **Domain convention ``[-0.5, +0.5]``.** All model outputs are clipped to
-  ``[-0.5, +0.5]`` to match the denoiser domain (``src/train/bfunet/common.py``
-  ``denoise_k_passes`` / ``_mean_psnr``, ``max_val=1.0``). No new domain is
-  invented here.
+* **Domain convention ``[0, 1]``.** All model outputs are clipped to ``[0, 1]``
+  to match the denoiser domain (``src/train/bfunet/common.py`` ``DATA_MIN`` /
+  ``DATA_MAX``, ``denoise_k_passes`` / ``_mean_psnr``, ``max_val=1.0``). No new
+  domain is invented here. The peak-to-peak width is ``1.0``, unchanged from the
+  legacy ``[-0.5, +0.5]`` convention, so every sigma/PSNR number is unaffected —
+  the migration was a pure DC shift.
 
 Deliberate design choice — coverage/width are computed with **plain numpy
 reductions** inline, NOT via a Keras metric. There are two colliding
@@ -53,8 +55,8 @@ from dl_techniques.utils.logger import logger
 # Domain / defaults (single source of truth for this module)
 # ---------------------------------------------------------------------
 
-DOMAIN_MIN: float = -0.5
-DOMAIN_MAX: float = 0.5
+DOMAIN_MIN: float = 0.0
+DOMAIN_MAX: float = 1.0
 DEFAULT_BATCH_SIZE: int = 8
 
 
@@ -192,7 +194,7 @@ def calibrate_per_sigma(
 
     For each distinct sigma label, the corresponding calibration subset is run
     through the frozen model, the per-pixel nonconformity ``s = |mu - clean|``
-    (with ``mu`` clipped to ``[-0.5, +0.5]``) is flattened over ALL pixels of
+    (with ``mu`` clipped to ``[0, 1]``) is flattened over ALL pixels of
     that bin, and :func:`conformal_quantile` yields the bin's radius ``q``.
 
     Per-sigma (rather than pooled) calibration is REQUIRED: the noise curriculum
@@ -405,7 +407,7 @@ def predict_intervals(
     """Predict symmetric per-pixel intervals ``[mu - q, mu + q]`` for noisy ``y``.
 
     ``mu`` is the frozen model's index-0 point estimate clipped to
-    ``[-0.5, +0.5]``. ``q`` is a scalar radius (single sigma bin); applying the
+    ``[0, 1]``. ``q`` is a scalar radius (single sigma bin); applying the
     per-sigma radius to the matching sigma subset is the caller's job.
 
     Args:

@@ -580,12 +580,14 @@ def additive_sure_risk_map(
     linear-domain equivalent (module docstring lines 12-33, decisions.md D-002).
     Do NOT present this map for multiplicative / composite corruption.
 
-    Boundary bias — the ``[-0.5, +0.5]`` clip. All bfunet-family trainers clip
-    the noisy input to ``[-0.5, +0.5]``. Near the saturated boundary the clip
-    truncates the Gaussian tail, so the noise there is no longer strictly
-    Gaussian and this SURE estimate is SYSTEMATICALLY BIASED for pixels near
-    ``+/-0.5``. Surface this in any report (mask / annotate the near-boundary
-    pixels) — do not silently average the bias away.
+    Boundary bias — the ``[0, 1]`` clip. All bfunet-family trainers clip the
+    noisy input to ``[0, 1]`` (``common.py`` ``DATA_MIN`` / ``DATA_MAX``). Near
+    a saturated boundary the clip truncates the Gaussian tail, so the noise
+    there is no longer strictly Gaussian and this SURE estimate is
+    SYSTEMATICALLY BIASED for pixels near ``0`` and near ``1``. Surface this in
+    any report (mask / annotate the near-boundary pixels) — do not silently
+    average the bias away. Note the boundary is TWO-SIDED and NOT symmetric
+    about zero: a ``np.abs(y) >= 0.5 - eps`` style test is wrong here.
 
     Args:
         denoiser: Callable noisy -> denoised (single tensor, or a list/tuple
@@ -620,7 +622,7 @@ def additive_sure_risk_map(
 
     logger.info(
         "additive_sure_risk_map: sigma=%.4g n_hutchinson=%d window=%s "
-        "sure_map_mean=%.4g (additive-only; +/-0.5-boundary biased)",
+        "sure_map_mean=%.4g (additive-only; [0,1]-boundary biased)",
         sigma, n_hutchinson, str(local_average_window),
         float(tf.reduce_mean(sure_map).numpy()),
     )

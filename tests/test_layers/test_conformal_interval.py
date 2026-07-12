@@ -37,9 +37,15 @@ class TestConformalIntervalLayer:
 
     @pytest.fixture
     def mu_outside(self) -> np.ndarray:
-        """A point-estimate tensor with values OUTSIDE ``[-0.5, +0.5]``."""
+        """A point-estimate tensor straddling BOTH bounds of the ``[0, 1]`` domain.
+
+        The denoiser domain is strictly positive and NOT symmetric about zero, so
+        out-of-domain must be probed on both sides independently (below ``0.0``
+        AND above ``1.0``) — a single ``abs(mu) > 0.5``-style probe would be
+        wrong.
+        """
         return np.array(
-            [[-0.9, -0.3, 0.0, 0.25, 0.7, 1.5]],
+            [[-0.4, -0.05, 0.0, 0.3, 0.75, 1.4]],
             dtype="float32",
         )
 
@@ -70,6 +76,12 @@ class TestConformalIntervalLayer:
 
     # -- forward numeric ----------------------------------------------
 
+    def test_default_domain_is_unit_interval(self) -> None:
+        """The constructor defaults pin the ``[0, 1]`` denoiser domain."""
+        layer = ConformalIntervalLayer()
+        assert layer.domain_min == 0.0
+        assert layer.domain_max == 1.0
+
     def test_forward_numeric(self, mu_outside: np.ndarray) -> None:
         """``call`` clips ``mu`` and returns ``(mu_c, mu_c-q, mu_c+q)``."""
         layer = ConformalIntervalLayer(q_init=0.1)
@@ -79,13 +91,13 @@ class TestConformalIntervalLayer:
         lower = keras.ops.convert_to_numpy(lower)
         upper = keras.ops.convert_to_numpy(upper)
 
-        expected_mu_c = np.clip(mu_outside, -0.5, 0.5)
+        expected_mu_c = np.clip(mu_outside, 0.0, 1.0)
         np.testing.assert_allclose(mu_c, expected_mu_c, atol=ATOL)
         np.testing.assert_allclose(lower, expected_mu_c - 0.1, atol=ATOL)
         np.testing.assert_allclose(upper, expected_mu_c + 0.1, atol=ATOL)
 
-        # Values genuinely got clipped (outside inputs present).
-        assert np.any(mu_outside < -0.5) and np.any(mu_outside > 0.5)
+        # BOTH clip bounds genuinely fired (two-sided out-of-domain inputs).
+        assert np.any(mu_outside < 0.0) and np.any(mu_outside > 1.0)
 
     def test_forward_compute_output_shape(self) -> None:
         """``compute_output_shape`` arity matches the returned tuple (3-tuple)."""
@@ -108,7 +120,7 @@ class TestConformalIntervalLayer:
         assert float(keras.ops.convert_to_numpy(layer.q)) == pytest.approx(CAL_Q, abs=ATOL)
 
         _, lower, upper = layer(mu_outside)
-        mu_c = np.clip(mu_outside, -0.5, 0.5)
+        mu_c = np.clip(mu_outside, 0.0, 1.0)
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(lower), mu_c - CAL_Q, atol=ATOL
         )
@@ -130,8 +142,9 @@ class TestConformalIntervalLayer:
         )
         layer.calibrate(CAL_Q)
 
-        # Pre-save forward.
-        x = np.random.uniform(-1.0, 1.0, size=(2, 8, 8, 3)).astype("float32")
+        # Pre-save forward. The probe straddles BOTH bounds of the [0, 1] domain
+        # so the round-trip is compared on a forward where both clips fired.
+        x = np.random.uniform(-0.5, 1.5, size=(2, 8, 8, 3)).astype("float32")
         pre = [keras.ops.convert_to_numpy(t) for t in model(x)]
 
         save_path = tmp_path / "m.keras"
@@ -164,6 +177,10 @@ class TestConformalIntervalLayer:
 
         cfg = layer.get_config()
         assert cfg["q_init"] == pytest.approx(CAL_Q, abs=ATOL)
+        # The domain travels WITH the config (which is why a model saved before
+        # the [-0.5,+0.5] -> [0,1] migration reloads with the OLD bounds; that is
+        # intended and deliberately un-shimmed).
+        assert cfg["domain_min"] == 0.0 and cfg["domain_max"] == 1.0
 
         layer2 = ConformalIntervalLayer.from_config(cfg)
         layer2(mu_outside)  # build layer2 so its weight is created from q_init
@@ -180,7 +197,7 @@ class TestConformalIntervalLayer:
         assert isinstance(out, tuple) and len(out) == 2
 
         lower, upper = out
-        mu_c = np.clip(mu_outside, -0.5, 0.5)
+        mu_c = np.clip(mu_outside, 0.0, 1.0)
         np.testing.assert_allclose(
             keras.ops.convert_to_numpy(lower), mu_c - 0.1, atol=ATOL
         )

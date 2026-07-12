@@ -23,6 +23,8 @@ from dl_techniques.utils.multiplicative_miyasawa import (
     additive_sure_risk_map,
 )
 from dl_techniques.utils.conformal_denoiser_intervals import (
+    DOMAIN_MIN,
+    DOMAIN_MAX,
     conformal_quantile,
     calibrate_per_sigma,
     predict_intervals,
@@ -38,6 +40,12 @@ class TestPerPixelSureMap:
     scale — do NOT loosen these tolerances; report actual-vs-expected so the
     per-pixel reduction can be re-derived (plan Pre-Mortem, mirrors the scalar gate
     ``test_multiplicative_miyasawa.py::TestAdditiveSureSelfCheck``).
+
+    RANGE-AGNOSTIC (do not "migrate" to [0,1]): the ``U[-0.5, 0.5]`` draws below
+    are a ZERO-MEAN linear-toy signal, not denoiser pixels. Nothing here touches
+    ``DOMAIN_MIN``/``DOMAIN_MAX`` or any clip; the analytic reference is built on
+    ``E[x^2] = 1/12``, which is a property of that specific zero-mean uniform. A
+    literal ``-0.5 -> 0.0`` swap would silently falsify the closed form.
     """
 
     def test_divergence_map_linear_toy(self):
@@ -192,14 +200,36 @@ class TestConformalQuantile:
             conformal_quantile(np.array([]), alpha=0.1)
 
 
+# DECISION plan_2026-07-12_e56909cd/D-006: restructure, do NOT literal-swap.
+# Do NOT "simplify" this back to a one-sided `np.max(np.abs(noisy)) < 0.5`-shaped
+# test, and do NOT swap its literal to `< 1.0`. The pre-migration form encoded the
+# zero-center STRUCTURALLY (in its shape, not in a `-0.5` literal a grep can find);
+# on [0,1] it would pass for a negative pixel and fail for every legitimately
+# bright one. This two-sided, constant-driven guard is also the ONLY thing in this
+# file that can detect a wrong domain: measured live, split-conformal coverage is
+# 0.900 under BOTH the [0,1] and the legacy [-0.5,+0.5] clip (the clip fires
+# identically in calibration and test, so the guarantee is still attained — on a
+# meaningless, clip-distorted interval). Deleting or weakening this guard makes the
+# domain error SILENT and the suite green. See decisions.md D-006.
+def _strictly_in_domain(x) -> bool:
+    """True iff every element is strictly inside the ``[0, 1]`` denoiser domain.
+
+    Two-sided BY CONSTRUCTION, and driven off ``DOMAIN_MIN``/``DOMAIN_MAX`` so it
+    tracks the module under test rather than re-stating its bounds.
+    """
+    return bool(np.min(x) > DOMAIN_MIN and np.max(x) < DOMAIN_MAX)
+
+
 class TestConformalCoverage:
     """The key sanity test: split conformal attains its coverage guarantee on a
     synthetic exchangeable setup (identity model, i.i.d. Gaussian residuals).
 
     Because residuals are exchangeable BY CONSTRUCTION and calib/test are disjoint
     fresh draws, empirical test coverage must land within ``[target-0.05,
-    target+0.05]``. Domain stays well inside ``[-0.5, +0.5]`` (small clean + small
-    sigma) so the point-estimate clip never fires and cannot perturb the residual.
+    target+0.05]``. Every draw stays strictly inside ``[0, 1]`` (clean centered on
+    mid-grey 0.5 + small sigma) so the point-estimate clip never fires and cannot
+    perturb the residual. The calibrator itself is stateless and domain-blind, so
+    only the CLIP couples these draws to the domain — hence the in-bounds guard.
     Tolerances are honest; the Pre-Mortem STOP-IF is coverage outside [0.85, 0.95].
     """
 
@@ -209,8 +239,9 @@ class TestConformalCoverage:
     def _make_split(self, rng, sigma):
         """Independent (clean, noisy, sigma-labels) draw for one bin, one split."""
         shape = (self.B, self.H, self.W, self.C)
-        # Clean well inside the domain; sigma small -> noisy stays in [-0.5, 0.5].
-        clean = rng.uniform(-0.05, 0.05, size=shape).astype(np.float32)
+        # Clean is a narrow band around mid-grey (the [0,1] domain's interior),
+        # sigma small -> noisy stays strictly inside [0, 1] and the clip never fires.
+        clean = rng.uniform(0.45, 0.55, size=shape).astype(np.float32)
         eps = rng.normal(0.0, sigma, size=shape).astype(np.float32)
         noisy = (clean + eps).astype(np.float32)
         sigmas = np.full(self.B, sigma, dtype=np.float64)
@@ -227,7 +258,7 @@ class TestConformalCoverage:
         clean_te, noisy_te, _ = self._make_split(rng, sigma)
 
         # Guard: clipping must not fire, else residual != |eps| (exchangeability).
-        assert np.max(np.abs(noisy_cal)) < 0.5 and np.max(np.abs(noisy_te)) < 0.5
+        assert _strictly_in_domain(noisy_cal) and _strictly_in_domain(noisy_te)
 
         q_by_sigma = calibrate_per_sigma(
             _identity_model, clean_cal, noisy_cal, sig_cal, alpha=alpha,
@@ -293,7 +324,7 @@ class TestConformalCoverage:
         noisy_cal = np.concatenate([nlo_c, nhi_c], axis=0)
         sig_cal = np.concatenate([slo_c, shi_c], axis=0)
 
-        assert np.max(np.abs(noisy_cal)) < 0.5  # no clip perturbation
+        assert _strictly_in_domain(noisy_cal)  # no clip perturbation (two-sided)
 
         q_by_sigma = calibrate_per_sigma(
             _identity_model, clean_cal, noisy_cal, sig_cal, alpha=alpha,
