@@ -16,7 +16,7 @@ Pipeline
    the checkpoint's sibling ``config.json`` val dirs), then split it into disjoint
    calibration and test patch sets.
 3. For each sigma bin (all inside the trained curriculum ``[~0.025, 0.25]``), add
-   additive Gaussian noise clipped to ``[-0.5, +0.5]`` and:
+   additive Gaussian noise clipped to ``[0, 1]`` and:
    * ``calibrate_per_sigma`` on the calibration split -> a per-sigma radius ``q``;
    * ``evaluate_coverage`` on the INDEPENDENT test split -> empirical coverage +
      mean interval width; plus a test-split PSNR (``common._mean_psnr``).
@@ -25,14 +25,17 @@ Pipeline
 4. Save per-pixel diagnostic PNGs for a few example patches at a representative
    sigma: the ``|clean - denoised|`` error map, the conformal interval-width map
    (constant ``2q`` here, annotated), and the additive MC-SURE risk map
-   (``additive_sure_risk_map``). Pixels within ``epsilon`` of the ``+/-0.5`` clip
-   boundary are masked in the SURE panel and a one-line caveat is printed, because
-   the clip breaks strict Gaussianity there and biases the SURE estimate.
+   (``additive_sure_risk_map``). Pixels within ``epsilon`` of EITHER clip boundary
+   (``0`` or ``1``) are masked in the SURE panel and a one-line caveat is printed,
+   because the clip breaks strict Gaussianity there and biases the SURE estimate.
 
 Caveats (see ``conformal_denoiser_intervals`` / ``multiplicative_miyasawa`` docs):
 coverage is MARGINAL and per-sigma (Mondrian), the interval is homoscedastic
 (a single scalar ``q`` per sigma), and the MC-SURE map is ADDITIVE-ONLY and
-systematically biased near the ``+/-0.5`` saturation boundary.
+systematically biased near the ``0`` / ``1`` saturation boundaries.
+
+The pixel domain is ``[0, 1]`` (``common.py`` D-001). Sigma values are UNCHANGED by that
+migration: peak-to-peak width is 1.0 in both the old and the new domain (plan INV-2).
 
 Usage::
 
@@ -121,6 +124,8 @@ from train.bfunet.common import (  # noqa: E402
     BFUnetTrainingConfig,
     build_fixed_val_batch,
     _mean_psnr,
+    DATA_MIN,
+    DATA_MAX,
 )
 from train.bfunet.eval_psnr_vs_noise import add_awgn  # noqa: E402
 from train.common import collect_image_paths, set_seeds  # noqa: E402
@@ -128,7 +133,7 @@ from train.common import collect_image_paths, set_seeds  # noqa: E402
 
 DEFAULT_SIGMAS: List[float] = [0.05, 0.10, 0.15, 0.20, 0.25]
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tiff", ".bmp", ".webp"}
-BOUNDARY_EPS: float = 0.02  # |value| within this of +/-0.5 -> masked in SURE panel
+BOUNDARY_EPS: float = 0.02  # within this of EITHER clip bound (0 or 1) -> masked in SURE panel
 
 # Conformal schemes: (calibrator, coverage-evaluator). The naive per-sigma scheme
 # is the historical scalar-radius baseline (kept byte-identical); 'normalized' is
@@ -229,7 +234,7 @@ def _load_denoiser(checkpoint: str) -> keras.Model:
 def _prepare_clean_batch(
     config: BFUnetTrainingConfig, n_total: int, seed: int
 ) -> np.ndarray:
-    """Load one fixed clean [-0.5,+0.5] batch of ``n_total`` patches from val dirs.
+    """Load one fixed clean [0,1] batch of ``n_total`` patches from val dirs.
 
     Reuses ``common.build_fixed_val_batch`` (which loads one random crop per val
     image). Fails loudly when no readable images are found rather than silently
@@ -270,7 +275,7 @@ def _build_calibration_sets(
     """Stack per-sigma noisy calibration patches with per-sample sigma labels.
 
     For every sigma the SAME clean calibration patches are re-noised (a fresh
-    additive-Gaussian realization clipped to [-0.5,+0.5]) and concatenated, with a
+    additive-Gaussian realization clipped to [0,1]) and concatenated, with a
     per-sample sigma label array so ``calibrate_per_sigma`` can form Mondrian bins.
     """
     rng = np.random.RandomState(seed)
@@ -352,8 +357,12 @@ def _print_combined_table(scheme_rows: Dict[str, List[dict]], alpha: float) -> N
 
 
 def _to_display(patch: np.ndarray) -> np.ndarray:
-    """Shift a [-0.5,+0.5] patch to [0,1] for imshow (grayscale collapse if 1ch)."""
-    img = np.clip(patch + 0.5, 0.0, 1.0)
+    """Clip a [0,1] patch for imshow (grayscale collapse if 1ch).
+
+    The model domain IS the display domain now, so the legacy ``+ 0.5`` shift is gone: a
+    clip is all that remains (denoiser outputs can overshoot the bounds slightly).
+    """
+    img = np.clip(patch, DATA_MIN, DATA_MAX)
     return img[..., 0] if img.shape[-1] == 1 else img
 
 
@@ -371,7 +380,7 @@ def _save_uncertainty_maps(
 
     Mirrors the multi-panel grid style of ``DenoisingVisualizationCallback``: one
     row per example patch, columns = clean, noisy, denoised, |error|, width, SURE.
-    The SURE panel masks pixels within ``BOUNDARY_EPS`` of the +/-0.5 clip boundary
+    The SURE panel masks pixels within ``BOUNDARY_EPS`` of either clip boundary (0 or 1)
     (where the clip breaks Gaussianity and the additive-SURE estimate is biased).
     """
     rng = np.random.RandomState(seed)
@@ -392,13 +401,27 @@ def _save_uncertainty_maps(
         )
     )  # shape [H, W, C], batch-reduced
 
-    # Saturation mask: pixels near +/-0.5 in the noisy input are boundary-biased.
-    sat_mask = (np.abs(noisy_ex) >= (0.5 - BOUNDARY_EPS))  # per-example [n,H,W,C]
+    # Saturation mask: pixels near EITHER clip bound in the noisy input are boundary-biased.
+    #
+    # DECISION plan_2026-07-12_e56909cd/D-006: this is a TWO-SIDED test, and it must stay
+    # one. The legacy form was `np.abs(noisy_ex) >= (0.5 - BOUNDARY_EPS)` -- a ONE-sided
+    # expression that only worked because the old domain [-0.5,+0.5] was symmetric about
+    # zero, so a single |x| test caught both bounds at once. Do NOT port that shape to
+    # [0,1] by swapping the literal (e.g. `np.abs(noisy_ex) >= 1.0 - BOUNDARY_EPS`, or
+    # worse, leaving 0.5): on a strictly-positive domain `|x| >= 0.48` flags the ENTIRE
+    # UPPER HALF of the image, and the mask would silently corrupt the reported saturation
+    # fraction and the SURE panel without failing anything. The zero-center was encoded
+    # STRUCTURALLY here, not as a literal, so a grep-driven migration passes right over it.
+    # See plans/plan_2026-07-12_e56909cd/decisions.md D-006.
+    sat_mask = (
+        (noisy_ex <= DATA_MIN + BOUNDARY_EPS) | (noisy_ex >= DATA_MAX - BOUNDARY_EPS)
+    )  # per-example [n,H,W,C]
     sat_frac = float(np.mean(sat_mask))
     logger.info(
         "SURE map: sigma=%.3f mean=%.4g; %.2f%% of pixels within eps=%.3f of the "
-        "+/-0.5 clip boundary (masked in the SURE panel — boundary-biased).",
+        "[%.1f,%.1f] clip boundary (masked in the SURE panel — boundary-biased).",
         sigma, float(np.mean(sure_map)), 100.0 * sat_frac, BOUNDARY_EPS,
+        DATA_MIN, DATA_MAX,
     )
 
     err_max = float(max(error.max(), 1e-6))

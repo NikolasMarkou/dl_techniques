@@ -84,7 +84,7 @@ from dl_techniques.utils.logger import logger
 from train.bfunet import common as common
 from train.bfunet.common import (
     collect_training_paths, create_dataset, make_curriculum_noise_fn,
-    build_fixed_val_batch, _mean_psnr,
+    build_fixed_val_batch, _mean_psnr, DATA_MIN, DATA_MAX,
 )
 from train.bfunet.train_convunext_denoiser import TrainingConfig, build_model
 
@@ -116,12 +116,13 @@ def _fixed_eval_batch(config: TrainingConfig, sigma: float, n: int = 8):
         logger.warning("No val patches found; falling back to a synthetic eval batch.")
         rng = np.random.default_rng(12345)
         clean = tf.constant(
-            np.clip(rng.uniform(-0.5, 0.5, (n, config.patch_size, config.patch_size,
-                                            config.channels)), -0.5, 0.5).astype(np.float32)
+            np.clip(rng.uniform(DATA_MIN, DATA_MAX, (n, config.patch_size, config.patch_size,
+                                                     config.channels)),
+                    DATA_MIN, DATA_MAX).astype(np.float32)
         )
     rng = np.random.default_rng(777)
     noise = rng.normal(0.0, sigma, clean.shape).astype(np.float32)
-    noisy = tf.clip_by_value(clean + noise, -0.5, 0.5)
+    noisy = tf.clip_by_value(clean + noise, DATA_MIN, DATA_MAX)
     return tf.constant(noisy), tf.constant(clean)
 
 
@@ -387,7 +388,9 @@ def parse_arguments() -> argparse.Namespace:
     p.add_argument("--trainable-gabor", action="store_true",
                    help="Train the (otherwise frozen) Gabor stem in BOTH conditions ('free Gabor').")
     p.add_argument("--sigma", type=float, default=0.1,
-                   help="Fixed noise sigma on the [-0.5,+0.5] domain (curriculum frozen).")
+                   help="Fixed noise sigma on the [0,1] domain (curriculum frozen). "
+                        "Unchanged by the domain migration: peak-to-peak width is 1.0 "
+                        "in both the old and the new domain.")
     p.add_argument("--learning-rate", type=float, default=1e-3)
     p.add_argument("--weight-decay", type=float, default=0.004)
     p.add_argument("--gradient-clipping", type=float, default=1.0)

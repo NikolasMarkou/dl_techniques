@@ -8,11 +8,13 @@ level (one curve per dataset).
 Design notes
 ------------
 - Noise / PSNR conventions match ``train_convunext_denoiser.py``: images are normalized
-  to ``[-0.5, +0.5]`` (range 1.0), noise is ``y = x + N(0, sigma^2)`` optionally clipped
-  back to ``[-0.5, +0.5]`` (the trainer clips), and per-image PSNR is
+  to ``[0, 1]`` (peak-to-peak range 1.0), noise is ``y = x + N(0, sigma^2)`` optionally
+  clipped back to ``[0, 1]`` (the trainer clips), and per-image PSNR is
   ``10 * log10(max_val^2 / MSE)`` with ``max_val = 1.0`` -- so the dB values are directly
   comparable to the trainer's ``val_psnr`` and to published ``max_val=255`` numbers
-  (PSNR is scale-invariant).
+  (PSNR is scale-invariant). The domain migration from the legacy ``[-0.5, +0.5]`` is a
+  pure DC shift: peak-to-peak width is 1.0 in BOTH domains, so sigma and PSNR/SSIM are
+  numerically UNCHANGED (``common.py`` D-001 / plan INV-2).
 - Noise std is specified on the ``[0, 255]`` pixel scale (``--sigmas-255``, the benchmark
   convention) and converted internally via ``sigma_norm = sigma_255 / 255``.
 - **Paired design**: the same sampled patches are reused across every noise level (only
@@ -55,6 +57,10 @@ import keras
 
 from dl_techniques.utils.logger import logger
 from train.common import setup_gpu, collect_image_paths, set_seeds
+# Single source of truth for the pixel domain (see common.py D-001). This eval script
+# re-implements the *decode* path (it needs a no-crop full-image variant and an EvalConfig,
+# not a BFUnetTrainingConfig) but must NOT re-declare the bounds: import them.
+from train.bfunet.common import DATA_MIN, DATA_MAX
 
 # Importing the model module registers every custom layer / initializer the saved
 # denoiser needs (ConvNeXt blocks, Gabor stem, Laplacian pyramid, LayerScale, ...) so
@@ -68,7 +74,10 @@ import dl_techniques.models.bias_free_denoisers.bfconvunext  # noqa: F401
 # Benchmark-convention noise stds on the [0, 255] pixel scale. Spans the classic
 # 15/25/50 AWGN regimes plus the edges of this trainer's curriculum (sigma_255 ~6.4..63.75).
 DEFAULT_SIGMAS_255: List[float] = [5.0, 10.0, 15.0, 25.0, 35.0, 50.0, 65.0]
-MAX_VAL: float = 1.0  # images live in [-0.5, +0.5] -> peak-to-peak range = 1.0
+# Images live in [0, 1] -> peak-to-peak range = 1.0. This value is domain-INVARIANT (it was
+# also 1.0 on the legacy [-0.5,+0.5] domain, whose peak-to-peak width is likewise 1.0). Do
+# NOT "fix" it to match the new domain -- see common.py D-001 / plan INV-2.
+MAX_VAL: float = 1.0
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tiff", ".bmp", ".webp"}
 
 # Published color AWGN full-image PSNR (dB) reference points, keyed by dataset (lowercase)
@@ -103,7 +112,7 @@ class EvalConfig:
     batch_size: int = 16
     full_image: bool = False                  # evaluate whole images (SOTA protocol) vs patches
     size_multiple: int = 16                   # full-image: reflect-pad H,W to this multiple
-    clip_noise: bool = True                   # match the trainer (clips to [-0.5, +0.5])
+    clip_noise: bool = True                   # match the trainer (clips to [0, 1])
     confidence: float = 0.95
     seed: int = 42
     output_dir: str = "results"
@@ -111,7 +120,8 @@ class EvalConfig:
 
     @property
     def sigmas_norm(self) -> List[float]:
-        """Noise stds in the model's normalized [-0.5, +0.5] space."""
+        """Noise stds in the model's normalized [0, 1] space (unchanged by the domain
+        migration: sigma is a width, and peak-to-peak width is 1.0 in both domains)."""
         return [s / 255.0 for s in self.sigmas_255]
 
 
@@ -171,17 +181,22 @@ def _predict_denoised(model: keras.Model, noisy: np.ndarray, batch_size: int) ->
 
 
 # ---------------------------------------------------------------------
-# Data sampling (clean patches in [-0.5, +0.5])
+# Data sampling (clean patches in [0, 1])
 # ---------------------------------------------------------------------
 
 def _load_clean_patch(
     path: str, patch_size: int, channels: int, rng: np.random.RandomState
 ) -> Optional[np.ndarray]:
-    """Decode one image, normalize to [-0.5, +0.5], and crop a random patch.
+    """Decode one image, normalize to [0, 1], and crop a random patch.
 
     Returns ``None`` on a decode failure (the caller skips and resamples). Upscales
     (aspect-preserving) any image smaller than ``patch_size`` before cropping, mirroring
     ``decode_full_image`` in the trainer.
+
+    NOTE: the ``/ 255.0`` normalization DUPLICATES ``common.decode_full_image`` (which
+    takes a ``BFUnetTrainingConfig`` and always crops, neither of which fits this script's
+    ``EvalConfig`` + optional full-image path). The bounds themselves are imported
+    (``DATA_MIN``/``DATA_MAX``) so the two cannot drift apart silently.
     """
     try:
         raw = tf.io.read_file(path)
@@ -189,7 +204,7 @@ def _load_clean_patch(
     except Exception as exc:  # noqa: BLE001 - corrupt files are skipped, not fatal
         logger.warning(f"skip unreadable image {path}: {exc}")
         return None
-    img = tf.cast(img, tf.float32) / 255.0 - 0.5
+    img = tf.cast(img, tf.float32) / 255.0
     h, w = int(tf.shape(img)[0]), int(tf.shape(img)[1])
     if h < patch_size or w < patch_size:
         scale = patch_size / min(h, w)
@@ -201,7 +216,10 @@ def _load_clean_patch(
     arr = patch.numpy()
     if arr.shape != (patch_size, patch_size, channels):
         return None
-    # Drop blank/corrupt decodes (all-zero) so they do not skew the curve.
+    # Drop blank/corrupt decodes (all-zero) so they do not skew the curve. SEMANTIC FLIP
+    # under [0,1] (no code change needed, mirrors common.py's streaming filter): this now
+    # drops flat BLACK images, where on the legacy [-0.5,+0.5] domain it dropped flat
+    # MID-GREY ones. Both are degenerate; black is the more sensible thing to drop.
     return None if not np.any(np.abs(arr) > 0) else arr
 
 
@@ -228,14 +246,17 @@ def sample_clean_patches(cfg: EvalConfig, paths: List[str], rng: np.random.Rando
 
 
 def _load_full_image(path: str, channels: int) -> Optional[np.ndarray]:
-    """Decode a whole image, normalize to [-0.5, +0.5]; no cropping. None on failure."""
+    """Decode a whole image, normalize to [0, 1]; no cropping. None on failure.
+
+    Same duplicated-normalizer note as ``_load_clean_patch``.
+    """
     try:
         raw = tf.io.read_file(path)
         img = tf.image.decode_image(raw, channels=channels, expand_animations=False)
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"skip unreadable image {path}: {exc}")
         return None
-    arr = (tf.cast(img, tf.float32) / 255.0 - 0.5).numpy()
+    arr = (tf.cast(img, tf.float32) / 255.0).numpy()
     return None if not np.any(np.abs(arr) > 0) else arr
 
 
@@ -270,7 +291,7 @@ def _denoise_full(model: keras.Model, noisy: np.ndarray, size_multiple: int) -> 
 def add_awgn(clean: np.ndarray, sigma_norm: float, clip: bool, rng: np.random.RandomState) -> np.ndarray:
     """Additive white Gaussian noise ``y = x + N(0, sigma^2)`` in normalized space."""
     noisy = clean + rng.standard_normal(clean.shape).astype(np.float32) * np.float32(sigma_norm)
-    return np.clip(noisy, -0.5, 0.5) if clip else noisy
+    return np.clip(noisy, DATA_MIN, DATA_MAX) if clip else noisy
 
 
 def psnr_per_image(denoised: np.ndarray, clean: np.ndarray, max_val: float = MAX_VAL) -> np.ndarray:
@@ -542,7 +563,7 @@ def main() -> None:
     parser.add_argument("--size-multiple", type=int, default=16,
                         help="full-image mode: pad H,W up to this multiple (U-Net downsample factor)")
     parser.add_argument("--no-clip", action="store_true",
-                        help="do NOT clip noisy images to [-0.5,+0.5] (trainer clips by default)")
+                        help="do NOT clip noisy images to [0,1] (trainer clips by default)")
     parser.add_argument("--confidence", type=float, default=0.95)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output-dir", type=str, default="results")
