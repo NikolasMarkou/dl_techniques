@@ -32,6 +32,33 @@ Schedule (A7 — carried from the historical ``samplers.py:69-141``)
 * update ``y <- y + h_t * d_t + gamma_t * z_t``, ``z_t ~ N(0, I)``
 * early stopping with patience (best-``sigma`` tracking).
 
+Why the shared noise scale is NOT a defect (measured, Phase 2)
+--------------------------------------------------------------
+It is tempting to read the schedule as buggy: the update sums an orthogonal null-space
+prior term and range-space data term into one ``d_t``, estimates ``sigma_t`` from the
+COMBINED vector, and then injects ISOTROPIC noise ``gamma_t*z_t`` scaled by it — so
+range-space error appears to leak noise into the null space.
+
+That reading is **wrong**, and it was tested and refuted:
+
+* ``sigma_t^2 = sigma_prior^2 + sigma_data^2`` holds to machine precision (rel. err 1.5e-8).
+  The subspaces add in QUADRATURE, so ``sigma_t`` is the exact TOTAL error scale — precisely
+  what a blind denoiser's implicit noise level must match.
+* The isotropic injection is the annealed-Langevin **thermostat**. A ``beta`` sweep shows
+  removing it costs PSNR monotonically, with the paper's setting optimal.
+* The ablation that seemed to show a defect (prior-only fills the null space "better") runs a
+  strictly COLDER chain at fixed iteration count. Two variables moved; the effect was
+  misattributed. The mechanism also fails its own ordering test.
+
+Retuning this schedule is therefore a dead end (measured headroom: **+0.00 dB**). Real gains
+lie in changing the solver FAMILY — DDNM/DPS-style explicit noise schedules — which the
+checkpoint's exact degree-1 homogeneity makes reachable via ``D_sigma(y) = sigma*D(y/sigma)``.
+
+``null_space_noise`` (OFF by default) remains as an EXPERIMENTAL lever that confines ``z_t``
+to the null space of ``M``. Its measured effect is strongly task-dependent and NOT yet
+explained: **+2.6 dB** (4x super-resolution), **+2.3 dB** (spectral deblur), but
+**-14.2 dB** (random pixels). Do not enable it blindly.
+
 Domain (INV-1 / D-002 / S1)
 ---------------------------
 Pixels live in ``[-0.5, +0.5]`` with center ``c0 = 0.0``. Unlike the old
@@ -54,9 +81,11 @@ from .operators import MeasurementOperator
 
 # Domain-adjusted default initial noise (INV-1 / D-002). The paper used sigma_0 = 1.0
 # for [0, 1] data (a full-unit range centered at 0.5). THIS checkpoint trains in the
-# half-unit [-0.5, +0.5] range (center 0.0) and its curriculum topped out at sigma =
-# 0.25, so a coarse-but-in-domain start is ~0.4 (well below the 0.5 half-width, so the
-# initial N(c0, sigma_0^2) field rarely lands outside the domain). Overridable.
+# half-unit [-0.5, +0.5] range (center 0.0) with a curriculum reaching sigma_max_end =
+# 0.5 (config.json), so a coarse-but-in-domain start of 0.4 sits INSIDE the trained band
+# and the whole annealed trajectory (0.4 -> sigma_l) is in-band. Overridable.
+# (An earlier comment here claimed the curriculum topped out at 0.25 — that described an
+# older checkpoint and was stale.)
 _DEFAULT_SIGMA_0 = 0.4
 
 # Domain half-width for the OPTIONAL interior clip (INV-1). Off by default (see below).
@@ -108,6 +137,7 @@ class UniversalInverseSolver:
         clip: bool = False,
         clip_range: Tuple[float, float] = _DEFAULT_CLIP_RANGE,
         final_projection: bool = False,
+        null_space_noise: bool = False,
     ) -> None:
         """Configure the solver.
 
@@ -131,6 +161,12 @@ class UniversalInverseSolver:
             final_projection: Enable the OFF-by-default final hard data-consistency
                 projection at ``solve()`` return (default ``False``; see class doc /
                 D-005). OFF is byte-identical; a :class:`NullOperator` makes it a no-op.
+            null_space_noise: **EXPERIMENTAL** (OFF by default). Project
+                the injected noise ``z_t`` into the null space of ``M`` before adding
+                it, so stochastic exploration never perturbs components the measurement
+                already pins down. Effect is strongly task-dependent and UNEXPLAINED
+                (+2.6 dB on 4x SR, +2.3 dB on deblur, -14.2 dB on random pixels). No-op
+                for a :class:`NullOperator` (whose null space is everything).
 
         Raises:
             AttributeError: If ``prior`` does not expose a callable ``residual``.
@@ -151,6 +187,7 @@ class UniversalInverseSolver:
         self.clip = bool(clip)
         self.clip_range = (float(clip_range[0]), float(clip_range[1]))
         self.final_projection = bool(final_projection)
+        self.null_space_noise = bool(null_space_noise)
         logger.info(
             "UniversalInverseSolver: sigma_0=%.3f sigma_l=%.3f h0=%.3f h_max=%s "
             "beta=%.3f max_iter=%d patience=%d clip=%s (domain [-0.5,+0.5])",
@@ -284,6 +321,15 @@ class UniversalInverseSolver:
             d_t = keras.ops.add(prior_term, data_term)
 
             # --- Effective noise sigma_t = ||d_t|| / sqrt(N) = sqrt(mean(d_t^2)) (A7).
+            # sigma_t is NOT "contaminated" by the data term. Measured to machine precision
+            # (rel. err 1.5e-8): sigma_t^2 = sigma_prior^2 + sigma_data^2 — the two orthogonal
+            # subspaces add in quadrature, so sigma_t is the EXACT total-error scale, which is
+            # what a blind denoiser's implicit noise level must match. The isotropic injection
+            # gamma_t*z_t is the annealed-Langevin THERMOSTAT and is load-bearing: a beta sweep
+            # shows removing it costs PSNR monotonically, with the paper setting optimal.
+            # An earlier hypothesis that this coupling was a defect (degrading the null-space
+            # fill) was REFUTED in Phase 2 — the prior-only ablation that motivated it ran a
+            # strictly colder chain, so it moved two variables and misattributed the effect.
             sigma_t_sq = keras.ops.mean(keras.ops.square(d_t))
             sigma_t = float(keras.ops.sqrt(keras.ops.maximum(sigma_t_sq, 1e-20)))
 
@@ -310,6 +356,14 @@ class UniversalInverseSolver:
             gamma_sq = ((1.0 - beta_h) ** 2 - (1.0 - h_t) ** 2) * sigma_t ** 2
             gamma_t = float(np.sqrt(max(gamma_sq, 0.0)))
             z_t = tf.random.normal(tf.shape(y), dtype=tf.float32)
+
+            # null_space_noise (OFF by default, EXPERIMENTAL): confine z_t to the null space
+            # of M. z_t <- (I - M M^T) z_t. No-op for a NullOperator. Measured effect is
+            # task-dependent and not yet explained -- see the class docstring.
+            if self.null_space_noise:
+                z_t = keras.ops.subtract(
+                    z_t, keras.ops.cast(operator.project(z_t), "float32")
+                )
 
             # --- Update y <- y + h_t d_t + gamma_t z_t.
             step = keras.ops.add(

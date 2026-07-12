@@ -2,6 +2,24 @@
 
 **Author:** Nikolas Markou · **Date:** 2026-07-05 · **Status:** Research note (self-contained)
 
+> ## ⚠️ CORRECTION NOTICE (2026-07-12) — read before using §7, §8 or §9
+>
+> A follow-up COMPREHENSIVE deconstruction (`analyses/analysis_2026-07-12_103e465c/`) empirically tested this note's two central *predictive* claims on a new checkpoint and **falsified both**. The *theory* in §2–§5 stands. The *boundary map* and the *law* do not.
+>
+> | This note claims | Measured 2026-07-12 | Status |
+> |---|---|---|
+> | **§8 null-space law**: prior contribution scales with `dim(null(M))` | Prior credit is **FLAT at 86–97%** across a **15× null-space range**, and **inverted at the top** (SR×4 @ 93.75% null → 86.4% credit; block-inpaint @ 6.25% null → 94.5%) | **FALSIFIED** (posterior 0.06) |
+> | **§7 boundary map**: out-of-domain / non-natural-image content fails | An out-of-domain **medical X-ray reconstructed 3.2× BETTER than in-domain natural photos** under the identical operator + solver (+12.39 dB vs +1.54 dB over trivial) | **REFUTED, wrong sign** (0.13) |
+> | **§6.4 "soft low-rank projector"** (stable rank ~2%) | Same probe on a sibling checkpoint: stable rank **38.6%**, asymmetry 0.14 (not 0.58) | **Does NOT transfer across checkpoints** |
+>
+> **What actually predicts success** (replacing the null-space law): hard gates on **operator linearity** *and* **operator knowability** (distinct — blind deblur is linear but its kernel is unknown) *and* **corruption statistics**; then, among gate-survivors, **conditional unpredictability `H(x_null | x_range)`** — content complexity, not null-space size. The entropy variable is validated on the *operator* axis only; it **fails on the domain axis**.
+>
+> **What survives and is the most valuable thing here**: exact degree-1 homogeneity ⇒ `D_σ(y) := σ·D(y/σ)` is exact ⇒ a **blind** denoiser can emulate a **noise-conditional** one, making DDRM/DDNM/DPS/ΠGDM reachable with **zero retraining**. This note's §5 gestures at it; the 2026-07-12 session measured it (float32-exact, validated control) and it is now the lead recommendation.
+>
+> Also corrected: §10's row "RED/PnP convergence guarantees apply" — this note said FALSE, and it was **right**. An intervening argument that MRED (arXiv:2202.04961) rescued them was itself wrong: MRED needs **passivity** (‖D(f)‖ ≤ ‖f‖), and measurement gives **‖J‖₂ = 1.22–1.36** (not passive).
+>
+> Sections below are left as originally written for provenance. Read them through this notice.
+
 > **One-sentence thesis.** Any neural network trained to remove Gaussian noise has, as an unavoidable mathematical side-effect, also learned the *gradient of the log-probability of natural images* — and that single fact lets you reuse one trained denoiser, with **no retraining**, as a generative model and as a universal solver for a large family of image-reconstruction problems.
 
 This note goes past reciting the papers. It (1) derives the core theorem from scratch, (2) dissects what the two anchor papers actually contribute, (3) maps the whole extension web onto one object, (4) reports **empirical probes run against this repo's own bias-free denoisers** that confirm what is true and expose what is overstated, and (5) hands you a concrete, ranked build list keyed to assets already in `dl_techniques`.
@@ -233,9 +251,25 @@ This is the actionable core: **what you can actually solve, and how much to trus
 
 ---
 
-## 8. The null-space law: the deepest practical insight
+## 8. The null-space law — ⚠️ FALSIFIED 2026-07-12, kept for provenance
 
-The single most transferable finding, from inverting the solver's structure and confirming one endpoint empirically:
+> **STOP. This section's law is FALSE.** It was tested directly on 2026-07-12 (`analyses/analysis_2026-07-12_103e465c/`, OBS-003) and does not hold.
+>
+> **Measured prior credit** (null-space-restricted MSE, prior-only vs data-only ablation, 4 DIV2K-val images, identical budget):
+>
+> | task | null-space fraction | prior credit |
+> |---|---:|---:|
+> | block-inpaint (64px) | **6.25%** | **94.5%** |
+> | random-pixels (keep 0.30) | 70.0% | 96.8% |
+> | super-resolution ×4 | **93.75%** | **86.4%** |
+>
+> Credit is **flat (86–97%) across a 15× range of null-space fraction, and inverted at the top** — the *largest* null space has the *lowest* prior credit. `dim(null)/N` has **no predictive power**. The "84% at 50% masking" figure below replicates only as a rough **constant (~90%)**; this note mistook a single data point for a slope. A wider check (demosaicing, 66.7% null → 0.997 null-fill quality; block-inpaint, 6.25% null → 0.131) confirms the non-monotonicity.
+>
+> **The replacement**: hard gates (operator **linearity**; operator **knowability**; **corruption statistics**), then — among gate-survivors — **conditional unpredictability `H(x_null | x_range)`**. Intuition the dimension-count law missed: super-resolution hides *high frequencies*, which are cheaply predicted from the measured low frequencies under natural 1/f statistics; block-inpainting hides a *contiguous region* with no local measurement support. 15× more missing dimensions, but 3× **worse** absolute prior error (0.0224 vs 0.0077). Dimension count and reconstructability are different quantities.
+>
+> The sensitivity claim below ("null-space fraction ~3.8× more influential than checkpoint quality") is void with the law. The 2026-07-12 Morris analysis instead ranks **operator linearity #1**.
+
+Original text, retained for provenance:
 
 > **The denoiser-prior's contribution scales with the null-space dimension of the measurement operator `M`.**
 
@@ -270,16 +304,21 @@ Each row: what new capability, which repo asset to build on, the exactness cost/
 
 ## 10. What is true vs what is overstated
 
+Updated 2026-07-12. Rows marked **[REVISED]** were changed by direct measurement (`analyses/analysis_2026-07-12_103e465c/`).
+
 | Claim | Verdict | Basis |
 |---|---|---|
 | Residual = scaled score (additive Gaussian, MMSE denoiser) | **TRUE** (exact-in-idealization) | Miyasawa theorem (§2) |
-| Bias-free ⇒ exact degree-1 homogeneity | **TRUE but checkpoint-specific** | machine-exact on one checkpoint; up to 0.14 error on siblings (§6.1) |
-| A single trained net = a coherent global prior / energy | **OVERSTATED** | non-conservative Jacobian, 5.3× & 15.4×, two architectures (§6.2) |
+| Bias-free ⇒ exact degree-1 homogeneity | **TRUE, and it is NORM-DEPENDENT, not luck** **[REVISED]** | `BiasFreeBatchNorm` + `use_bias=False` + a positively-homogeneous activation (`leaky_relu`) ⇒ exact to **float32** (2.5e-5, flat across an 80× α range; control fires at 0.83). A **LayerNorm** block breaks it (81–98% error). Factory-default `gelu` would make it mathematically impossible. |
+| **A blind denoiser can emulate a NOISE-CONDITIONAL one** | **TRUE — and it is the most valuable fact here** **[NEW]** | Exact homogeneity ⇒ `D_σ(y) := σ·D(y/σ)`. DDRM/DDNM/DPS/ΠGDM all require noise-conditioning and are otherwise unreachable from a blind net; **no published bridge exists in the literature**. Zero retraining. |
+| A single trained net = a coherent global prior / energy | **OVERSTATED** | non-conservative Jacobian (§6.2); replicated at 0.14 / ~800× baseline on a 3rd checkpoint |
 | Sampling / reconstruction still work despite the above | **TRUE** | prior-only inpainting reconstructs well; curl ⟂ trajectory (Chao 2023) |
-| RED/PnP convergence guarantees apply to a learned denoiser | **FALSE — do not transfer** | require conservativeness, which is absent (§6.2) |
-| "The prior does 84% of the work" (as a universal) | **OVERSTATED** | true only for large-null-space tasks; task-dependent law (§8) |
-| Efficacy is *primarily* manifold-projection geometry | **PARTLY TRUE (locally)** | exact local Jacobian is soft-low-rank: stable rank ~2%, ~10 preserved modes (§6.4) — geometry and "no global prior" are two faces of one operator |
-| One denoiser solves *all* linear inverse problems | **TRUE with an asterisk** | true operationally; but the *prior's share* varies by task null space (§8) |
+| RED/PnP convergence guarantees apply to a learned denoiser | **FALSE — do not transfer** (and this note was RIGHT) **[REVISED]** | Not only non-conservative — also **NOT PASSIVE**: measured ‖J‖₂ = **1.22–1.36** (clean inputs). MRED (arXiv:2202.04961) needs passivity, so it does *not* rescue the guarantees either. |
+| "The prior does 84% of the work" (as a universal) | **OVERSTATED — and the *law* is FALSIFIED** **[REVISED]** | Credit is **flat at 86–97% across a 15× null-space range, inverted at the top**. It is a rough CONSTANT, not a function of null-space size (§8). |
+| **`dim(null(M))/N` predicts prior contribution** | **FALSE** **[REVISED]** | Posterior 0.06. Replaced by: hard gates (linearity, knowability, corruption statistics) + `H(x_null\|x_range)` among survivors (§8). |
+| **Out-of-domain content fails** | **FALSE — refuted with the wrong sign** **[REVISED]** | An out-of-domain **medical X-ray beat in-domain natural photos 3.2×** (+12.39 vs +1.54 dB). **MRI/CT is a top target, not a hedge.** |
+| Efficacy is *primarily* manifold-projection geometry | **CHECKPOINT-SPECIFIC, does not generalize** **[REVISED]** | The "soft low-rank projector" (stable rank ~2%) does **not** replicate: a sibling checkpoint measures **38.6%** stable rank under the identical probe (§6.4). |
+| One denoiser solves *all* linear inverse problems | **TRUE with an asterisk** | true operationally; the asterisk is now the **gates**, not the null space |
 
 ---
 

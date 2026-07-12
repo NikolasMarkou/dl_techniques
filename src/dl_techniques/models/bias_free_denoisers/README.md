@@ -89,6 +89,31 @@ The **Bias-Free U-Net** applies the bias-free constraint to the classic U-Net ar
 
 > **Strict bias-freedom**: pass `convnext_version='v1'` for a strictly bias-free model. ConvNeXt **V2** blocks add a Global Response Norm whose additive `beta` is trainable, so V2 is only approximately bias-free (zero-initialized beta) — prefer **V1** when scaling-invariant generalization across noise levels matters.
 
+> ### ⚠️ Degree-1 homogeneity is NOT automatic — it needs THREE things, and it is worth a lot
+>
+> `use_bias=False` alone does **not** give you `D(αy) = αD(y)`. Verified by measurement (2026-07-12,
+> `analyses/analysis_2026-07-12_103e465c/`), all three of these are required:
+>
+> | requirement | why | if you get it wrong |
+> |---|---|---|
+> | `block_normalization='batchnorm'` → `BiasFreeBatchNorm` (`gamma` + `running_var`, **no beta**) | at inference it divides by a **fixed** statistic, so the map stays linear | `'layernorm'` is a **per-input** normalization ⇒ scale-**invariant**, not scale-**equivariant** ⇒ **81–98% homogeneity error** |
+> | `block_activation` **positively homogeneous** (`relu`, `leaky_relu`) | `f(αx) = αf(x)` for α>0 | the factory default **`gelu` makes exact homogeneity mathematically IMPOSSIBLE** |
+> | `use_bias=False` everywhere, `convnext_version='v1'` | no additive constants anywhere | GRN's trainable `beta` (V2) breaks it |
+>
+> Get all three right and homogeneity is **exact to float32**: measured rel. err `2.5e-05`, **flat**
+> across `α ∈ [0.12, 9.9]` (an 80× range — flat means rounding noise, not violation; a real violation
+> *grows* with α). A bias-broken control fires at `8.3e-01`, so the probe detects failure.
+>
+> **`verify_bias_free()` in `train_convunext_denoiser.py` gives FALSE ASSURANCE** — it only inspects
+> `use_bias`, LayerNorm `center`, and GRN beta, so it **passes a non-homogeneous model**. Always probe
+> numerically (`D(αy)` vs `αD(y)`, with a bias-broken control) before relying on this property.
+>
+> **Why you want it:** exact homogeneity makes `D_σ(y) := σ·D(y/σ)` an exact identity, so a single
+> **blind** denoiser can emulate a **noise-conditional** one. Every modern inverse-problem solver
+> (DDRM, DDNM, DPS, ΠGDM) requires noise-conditioning and is otherwise unreachable from a blind net —
+> **the literature has no published bridge**. This is what `applications/bias_free_denoiser/ddnm.py`
+> exploits, with zero retraining.
+
 #### Optional frozen Gabor stem (non-learnable)
 `create_convunext_denoiser` accepts three params to prepend a **non-learnable (frozen)** Gabor depthwise convolution stem:
 

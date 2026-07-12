@@ -694,6 +694,93 @@ class SpectralDeblurOperator(MeasurementOperator):
         return tf.math.real(self.idft(masked))
 
 
+class MRIUndersamplingOperator(SpectralDeblurOperator):
+    """Cartesian k-space undersampling — the standard accelerated-MRI forward model.
+
+    Identical unitary-DFT machinery to :class:`SpectralDeblurOperator` (which it
+    subclasses); ONLY the 0/1 spectral mask differs. Where the deblur operator keeps a
+    centered low-pass square, an MRI acquisition samples whole **phase-encode columns**:
+    a fully-sampled low-frequency centre (the auto-calibration signal / ACS region) plus
+    a random subset of the remaining columns. This is the mask family used by fastMRI.
+
+    **Hermitian symmetry is load-bearing (INV-5).** The signal is real, so its spectrum is
+    Hermitian. The base class's adjoint is ``real(idft(Lambda ⊙ m))``, and that ``real(...)``
+    is only lossless if the mask keeps frequency ``-k`` whenever it keeps ``k``. We therefore
+    symmetrize the column mask explicitly. Without this, ``M^T M = I`` fails on the range of
+    ``M`` and the whole null/range algebra the solvers rely on silently breaks.
+
+    Acceleration ``R`` is the reciprocal of the sampled fraction (``R = 4`` keeps ~25% of
+    k-space). Null-space fraction is ``1 - kept/(H*W)``.
+
+    Attributes:
+        acceleration: Nominal acceleration factor ``R`` (>= 1).
+        center_fraction: Fraction of columns in the fully-sampled ACS centre.
+    """
+
+    def __init__(
+        self,
+        image_shape: ImageShape,
+        acceleration: int = 4,
+        center_fraction: float = 0.08,
+        seed: int = 0,
+        c0: float = 0.0,
+    ) -> None:
+        """Build a Cartesian k-space undersampling operator.
+
+        Args:
+            image_shape: Signal shape ``(H, W, C)``.
+            acceleration: Acceleration factor ``R`` (keep ~``1/R`` of the columns).
+            center_fraction: Fraction of columns kept in the fully-sampled ACS centre.
+            seed: RNG seed for the random high-frequency column draw (reproducible).
+            c0: Domain center for unmeasured components (default ``0.0``, D-002).
+
+        Raises:
+            ValueError: If ``acceleration < 1`` or ``center_fraction`` is not in ``(0, 1]``.
+        """
+        # Build via the parent (keep_fraction=1.0 => all-ones mask), then REPLACE the mask.
+        super().__init__(image_shape, keep_fraction=1.0, c0=c0)
+        if acceleration < 1:
+            raise ValueError(f"acceleration must be >= 1; got {acceleration}")
+        if not (0.0 < center_fraction <= 1.0):
+            raise ValueError(f"center_fraction must be in (0, 1]; got {center_fraction}")
+        self.acceleration = int(acceleration)
+        self.center_fraction = float(center_fraction)
+
+        h, w = self.h, self.w
+        rng = np.random.RandomState(int(seed))
+        freq_w = np.round(np.fft.fftfreq(w) * w).astype(int)  # signed freq per column index
+
+        # 1) Fully-sampled ACS centre: |freq| <= r_c.
+        r_c = max(1, int(self.center_fraction * w / 2))
+        keep_col = np.abs(freq_w) <= r_c
+
+        # 2) Randomly sample the remaining columns to hit the target acceleration.
+        target = int(round(w / float(self.acceleration)))
+        remaining = max(0, target - int(keep_col.sum()))
+        cand = np.flatnonzero(~keep_col)
+        if remaining > 0 and cand.size > 0:
+            keep_col[rng.choice(cand, size=min(remaining, cand.size), replace=False)] = True
+
+        # 3) SYMMETRIZE (INV-5): keep column -k iff we keep column k. Without this the
+        #    real() in the adjoint destroys energy and M^T M != I on the range of M.
+        idx_of_freq = {int(f): i for i, f in enumerate(freq_w)}
+        for i, f in enumerate(freq_w):
+            if keep_col[i]:
+                j = idx_of_freq.get(int(-f))
+                if j is not None:
+                    keep_col[j] = True
+
+        mask = np.broadcast_to(keep_col[None, :], (h, w)).astype(np.float32)[:, :, None]
+        self._mask_c = tf.constant(mask, dtype=tf.complex64)
+        kept = float(mask.sum()) / float(h * w)
+        logger.info(
+            "MRIUndersamplingOperator: %s, R=%d (center %.3f) -> %d/%d columns, "
+            "%.1f%% of k-space kept, null-space fraction %.1f%%",
+            (h, w, self.c), self.acceleration, self.center_fraction,
+            int(keep_col.sum()), w, 100.0 * kept, 100.0 * (1.0 - kept),
+        )
+
+
 class CompressiveSensingOperator(MeasurementOperator):
     """Structured fast orthonormal compressive-sensing operator (F2 §4b).
 

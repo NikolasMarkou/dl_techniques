@@ -348,3 +348,75 @@ PSNR / SSIM — σ255 15 | 25 | 50:
 Note: Urban100 has the HIGHEST SSIM of the four sets at every σ despite middling PSNR
 (regular high-contrast structure → strong local structural agreement once denoised).
 Reproduced in the paper (research/papers/bfunet/bfunet.tex, Table 2).
+
+---
+
+## 9. Capability-boundary deconstruction — ConvUNext base checkpoint (20260710)
+
+Full audit trail: `analyses/analysis_2026-07-12_103e465c/summary.md`. A COMPREHENSIVE epistemic
+deconstruction of the denoiser-as-prior. It **falsified two laws this repo had been relying on** and
+found one large unexploited capability. Numbers below are measured on the frozen
+`convunext_denoiser_base_20260710_220452` checkpoint (959k params; note this is ~1/3 the size of the
+20260707 checkpoint in §8.1, so do NOT compare its PSNRs to that SOTA table).
+
+### 9.1 What was falsified (stop using these)
+
+| Claim (from `research/2026_miyasawa_extensions_research.md`) | Measured | Verdict |
+|---|---|---|
+| **Null-space law**: prior contribution scales with `dim(null(M))/N` | prior credit is **FLAT at 86-97% across a 15x null-space range**, and **inverted at the top** (SR x4 @ 93.75% null -> 86.4%; block-inpaint @ 6.25% null -> 94.5%) | **FALSIFIED** |
+| **Out-of-domain content fails** | an out-of-domain **medical X-ray reconstructed 3.2x BETTER than in-domain natural photos** under the identical operator + solver (+12.39 dB vs +1.54 dB over trivial) | **REFUTED, wrong sign** |
+| **"Soft low-rank projector"** (Jacobian stable rank ~2%) | this checkpoint: stable rank **38.6%**, asymmetry 0.14 (vs the sibling's 0.58) | **does NOT transfer across checkpoints** |
+
+Non-conservativeness itself **does** replicate (asymmetry 0.14 vs a box-blur baseline of 0.00017,
+~800x), so the "no global prior / no calibrated uncertainty" guardrail stands. The denoiser is also
+**not passive** (`||J||_2 = 1.22-1.36` on clean inputs), so MRED does not rescue RED/PnP guarantees
+either — they genuinely do not transfer.
+
+**What replaces the null-space law:** hard gates on operator **linearity**, operator **knowability**
+(distinct — blind deblur is linear but its kernel is unknown), and **corruption statistics**; then,
+among gate-survivors, **conditional unpredictability `H(x_null | x_range)`** (content complexity).
+The entropy variable is validated on the **operator axis only** and **fails on the domain axis**
+(pooled Spearman 0.25, p=0.59, n=7) — so task ranking outside the operator axis is LOW confidence.
+
+### 9.2 Degree-1 homogeneity is EXACT on this checkpoint — and it is the biggest result
+
+`D(a*y) = a*D(y)` measured rel. err **2.5e-05**, **flat across `a` in [0.12, 9.9]** (an 80x range —
+flatness ⇒ float32 rounding noise, not violation). A bias-broken control fires at **8.3e-01**.
+Root cause: 21x `BiasFreeBatchNorm` (no beta) + `use_bias=False` + `leaky_relu`.
+
+Consequence: `D_sigma(y) := sigma * D(y/sigma)` is an **exact identity**, so this **blind** denoiser
+can emulate a **noise-conditional** one. DDRM/DDNM/DPS/PiGDM all require noise-conditioning and are
+otherwise unreachable from a blind net — **the literature has no published bridge**. Zero retraining.
+(Caution: the ConvUNext factory default activation `gelu` would make this **mathematically
+impossible**. Keep a positively-homogeneous activation.)
+
+### 9.3 Solver: what works and what is a dead end
+
+**Dead end — retuning the annealing schedule: +0.00 dB** (three independent interventions on all
+three of `sigma_t`'s roles). `sigma_t^2 = sigma_prior^2 + sigma_data^2` holds to **1.5e-8**: the
+orthogonal subspaces add in quadrature, so `sigma_t` is the *exact total error scale* (what a blind
+denoiser's implicit noise level must match), and the isotropic injection is a **load-bearing
+annealed-Langevin thermostat**, not a bug.
+
+**Real win — `null_space_noise`** (confine `z_t` to `null(M)`; now an OFF-by-default flag on
+`UniversalInverseSolver`). 500 iters, fixed budget, 4 DIV2K-val images:
+
+| task | class | baseline | lever | delta |
+|---|---|---:|---:|---:|
+| super_resolution x4 | transform | 27.56 | **30.17** | **+2.61 dB** |
+| deblur | transform | 24.34 | **26.63** | **+2.29 dB** |
+| compressive_sensing | transform | 32.12 | 31.99 | -0.13 dB |
+| inpaint | **mask** | 24.45 | 22.95 | **-1.50 dB** |
+| random_pixels | **mask** | 28.99 | 14.78 | **-14.21 dB** |
+
+Mechanism: projecting `z_t` into `null(M)` changes the noise's *spatial statistics*. Mask operators
+make it **patchy** (spatial CV 3.88 / 0.66 — out-of-distribution for a net trained on uniform additive
+Gaussian); transform operators keep it uniform (CV 0.058). **Ship per-operator-class, never globally.**
+Standing falsifiable prediction: Bayer demosaicing is a mask operator (p=2/3, CV 0.707) so the rule
+predicts the lever **loses ~10-14 dB** there — one run tests it.
+
+### 9.4 The biggest open gap
+
+**The six inverse problems have NO task-specific SOTA baseline anywhere in-repo** — §8.1 benchmarks
+only plain AWGN denoising. Every "solved" is a **capability** claim, not a **competitiveness** claim;
+without a referent it cannot be wrong. 16 of the 17 tasks in the capability taxonomy are **untested**.

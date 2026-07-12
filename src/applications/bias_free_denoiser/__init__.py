@@ -20,6 +20,7 @@ move in and out of it.
 
 from .denoiser_prior import DenoiserPrior
 from .solver import UniversalInverseSolver
+from .ddnm import DDNMSolver, homogeneity_error
 from .operators import (
     MeasurementOperator,
     MaskOperator,
@@ -27,6 +28,7 @@ from .operators import (
     InpaintingOperator,
     RandomPixelsOperator,
     SuperResolutionOperator,
+    MRIUndersamplingOperator,
     SpectralDeblurOperator,
     CompressiveSensingOperator,
 )
@@ -41,5 +43,8 @@ __all__ = [
     "RandomPixelsOperator",
     "SuperResolutionOperator",
     "SpectralDeblurOperator",
+    "MRIUndersamplingOperator",
+    "DDNMSolver",
+    "homogeneity_error",
     "CompressiveSensingOperator",
 ]
