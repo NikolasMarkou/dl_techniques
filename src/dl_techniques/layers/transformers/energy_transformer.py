@@ -1185,6 +1185,7 @@ class EnergyTransformer(keras.layers.Layer):
           * Do NOT drop :meth:`compute_output_shape`: it is still the SHAPE authority, and
             the shapes here are taken FROM it, never re-derived.
 
+        # DECISION plan_2026-07-13_ca4f71a2/D-007
         **MEASURED FACT, do not mis-attribute it to this method** (it is why the energy head
         below must be float32): under a GLOBAL ``mixed_float16`` policy, a downstream layer
         autocasts its float inputs to its OWN ``compute_dtype`` — ``Layer.__call__`` does
