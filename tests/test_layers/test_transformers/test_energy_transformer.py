@@ -528,6 +528,68 @@ class TestEnergyTransformer:
             "therefore VACUOUS — it would pass on a dead layer. The descent is not real."
         )
 
+    # -- F-05a: the num_steps == 1 boundary --------------------------
+
+    def test_single_step_block(self, sample_input):
+        """`num_steps=1` still yields T + 1 == 2 energy readings (plan C7).
+
+        This is the OFF-BY-ONE boundary of the whole trace protocol, and it was untested:
+        `energies` gets one reading per descent step INSIDE the loop plus a final reading
+        AFTER it (the state the caller actually receives), so `num_steps=1` must give
+        `(B, 2)` — a pre-update and a post-update energy — NOT `(B, 1)`. Dropping the
+        post-loop `energies.append(...)` makes every other trace test still pass on the
+        first T entries while the LAST, most interesting reading silently disappears; this
+        test is the only thing that sees it.
+
+        The descent assertion is paired with the MANDATORY anti-degeneracy one, for the
+        same reason S7 is (LESSONS [I:5]): `E[:, 1] <= E[:, 0]` alone is vacuously true of
+        a dead block whose energy never moves. `_excite_block` (the S7 fixture — reused, not
+        reinvented) is what gives the drop enough magnitude to clear the floor by orders of
+        magnitude, and `noise_std=0` because descent is only claimed for the noise-free
+        dynamics (eq. 27).
+        """
+        block = _block(
+            num_steps=1,
+            step_size=0.01,
+            noise_std=0.0,
+            return_energy=True,
+        )
+        block.build((BATCH, TOKENS, DIM))
+        _excite_block(block)
+
+        x = sample_input * 2.0
+        out, energies = block(x, training=False)
+
+        assert tuple(out.shape) == (BATCH, TOKENS, DIM)
+
+        e = keras.ops.convert_to_numpy(energies)
+        # THE off-by-one assertion: T = 1 -> T + 1 = 2 readings, not 1.
+        assert e.shape == (BATCH, 2), (
+            f"num_steps=1 produced an energy trace of shape {e.shape}, expected "
+            f"{(BATCH, 2)}. A T-step block reports T + 1 energies: one per step, plus a "
+            "final reading of the state it returns. Check the post-loop energies.append()."
+        )
+        assert np.all(np.isfinite(e))
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(out)))
+
+        drop = e[:, 0] - e[:, 1]
+        print(
+            f"\n[C7 num_steps=1] E[:,0]={np.array2string(e[:, 0], precision=3)} "
+            f"E[:,1]={np.array2string(e[:, 1], precision=3)} "
+            f"drop={np.array2string(drop, precision=3)}"
+        )
+
+        # 1. descent across the single step.
+        assert np.all(e[:, 1] <= e[:, 0] + 1e-5), (
+            f"energy went UP on the single step (min drop = {drop.min():.6e}); the block "
+            "is performing energy ASCENT."
+        )
+        # 2. anti-degeneracy — the one step actually MOVED the energy (LESSONS [I:5]).
+        assert np.all(drop > 1e-3), (
+            f"the energy barely moved on the single step (min drop = {drop.min():.6e}). "
+            "Assertion 1 is therefore VACUOUS — it would pass on a dead block."
+        )
+
     # -- S8b: block-level mask ---------------------------------------
 
     def test_masked_token_has_no_influence(self, sample_input):
