@@ -60,6 +60,60 @@ Every post-2021 inverse-problem solver — **DDRM** (2201.11793), **DDNM** (2212
 from a single blind denoiser. **The literature contains no published bridge.** This checkpoint has one,
 exactly, with **zero retraining** — which is what `ddnm.py` in this package exploits.
 
+### `DDNMSolver` — the bridge, used
+
+`ddnm.py` implements DDNM (arXiv:2212.00490) driven by this **blind** denoiser. Same `solve()`
+signature as `UniversalInverseSolver`, so the two A/B directly. Two structural differences from the
+K&S loop: an **explicit geometric noise schedule** (instead of one self-calibrated from the step
+magnitude), and **hard range-space data consistency at every step** via `x0_hat = Aᵀy + (I - AᵀA)x0`
+(exact from iteration 1, rather than approached asymptotically).
+
+`DDNMSolver` **refuses to run** if degree-1 homogeneity fails — it is the precondition, not a nicety.
+Its check uses deliberately **non-power-of-two** `alpha` values: float32 scaling by a power of two is
+bit-exact and reports a spurious `0.0` whether or not the network is homogeneous.
+
+```python
+from applications.bias_free_denoiser import DDNMSolver, MRIUndersamplingOperator
+op = MRIUndersamplingOperator((256, 256, 3), acceleration=8)   # Cartesian k-space, R=8
+recon, info = DDNMSolver(prior, steps=100).solve(op, measurements=op.measure(target))
+```
+
+> ### 🔴 PENDING RE-VALIDATION — these numbers predate the `[0,1]` migration
+>
+> The table below was measured on the **legacy `[-0.5,+0.5]`** checkpoint
+> (`convunext_denoiser_base_20260710_220452`, sha256 `06a44282…`) **before** the pixel-domain
+> migration landed. It is internally consistent (every arm ran end-to-end on a matching domain), but
+> it is **NOT reproducible on current `main`** — `from_pretrained` now refuses that checkpoint via the
+> provenance gate, correctly, because a bias-free net cannot subtract a DC offset and would silently
+> emit plausible-but-wrong output.
+>
+> **TODO: re-run once a `[0,1]` checkpoint exists.** `ddnm.py` and `MRIUndersamplingOperator` are
+> domain-agnostic (they take `c0` from the operator and `sigma_start` is a noise *scale*, which is
+> migration-invariant since peak-to-peak width is 1.0 in both domains), so this is a **re-run, not a
+> rewrite**. Harness: `analyses/analysis_2026-07-12_103e465c/` + the scratch script referenced there.
+
+Accelerated-MRI k-space undersampling, 6 X-ray angiography (ARCADE) + 6 DIV2K images, 256px:
+
+| dataset | R | zero-filled | K&S (500 it) | **DDNM (100 steps)** | DDNM − K&S |
+|---|---|---:|---:|---:|---:|
+| **medical X-ray** | 4 | 25.74 | 30.30 | **32.61** | **+2.31 dB** |
+| **medical X-ray** | 8 | 24.74 | 24.19 | **28.20** | **+4.01 dB** |
+| natural (DIV2K) | 4 | 22.52 | 24.56 | 24.39 | −0.17 dB |
+| natural (DIV2K) | 8 | 21.41 | 21.65 | 21.70 | +0.05 dB |
+
+**DDNM beats the incumbent by +2.3 to +4.0 dB on medical at 5x fewer iterations, with no retraining.**
+Note that at **R=8 the K&S solver is WORSE than the trivial zero-filled baseline** (24.19 vs 24.74) —
+it actively hurts at high acceleration — while DDNM gains +3.45 dB over it. The advantage is
+concentrated on low-complexity medical content and is at parity on natural photos, exactly as the
+capability-boundary analysis predicted.
+
+**Two caveats, not buried:**
+- The medical images are **grayscale-replicated to 3 channels**, so chroma is trivially predictable.
+  That inflates the *absolute* medical PSNRs. The DDNM-vs-K&S *delta* is unaffected (both solvers see
+  identical input), and the delta is the claim.
+- This is an **internal** comparison. There is still **no published MRI-reconstruction SOTA baseline**
+  in-repo, so this is a capability result, not a competitiveness result. See the guardrails below.
+
 ## Guardrails (hard constraints on any product claim)
 
 - **No calibrated uncertainty. Ever.** The Jacobian is non-conservative (asymmetry 0.14, ~800x a

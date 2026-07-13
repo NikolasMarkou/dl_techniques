@@ -423,3 +423,35 @@ predicts the lever **loses ~10-14 dB** there — one run tests it.
 **The six inverse problems have NO task-specific SOTA baseline anywhere in-repo** — §8.1 benchmarks
 only plain AWGN denoising. Every "solved" is a **capability** claim, not a **competitiveness** claim;
 without a referent it cannot be wrong. 16 of the 17 tasks in the capability taxonomy are **untested**.
+
+### 9.5 DDNM via the homogeneity bridge — first result, PENDING RE-VALIDATION
+
+`src/applications/bias_free_denoiser/ddnm.py` wires DDNM (arXiv:2212.00490) to this **blind** denoiser
+using exact degree-1 homogeneity as the licence (§9.2), plus `MRIUndersamplingOperator` (Cartesian
+k-space, ACS centre + random columns, Hermitian-symmetrized so `M^T M = I` holds to ~2e-7).
+
+Accelerated-MRI k-space undersampling, 6 X-ray angiography (ARCADE) + 6 DIV2K, 256px:
+
+| dataset | R | zero-filled | K&S (500 it) | DDNM (100 steps) | DDNM - K&S |
+|---|---|---:|---:|---:|---:|
+| medical X-ray | 4 | 25.74 | 30.30 | **32.61** | **+2.31 dB** |
+| medical X-ray | 8 | 24.74 | 24.19 | **28.20** | **+4.01 dB** |
+| natural DIV2K | 4 | 22.52 | 24.56 | 24.39 | -0.17 dB |
+| natural DIV2K | 8 | 21.41 | 21.65 | 21.70 | +0.05 dB |
+
+**DDNM beats the incumbent K&S solver by +2.3 to +4.0 dB on medical at 5x fewer iterations, with zero
+retraining** — the first demonstration that a blind denoiser can drive a noise-conditional diffusion
+solver. At **R=8 the K&S solver is WORSE than the trivial zero-filled baseline** (24.19 vs 24.74); DDNM
+gains +3.45 dB over it. The advantage is concentrated on low-complexity medical content and is at
+parity on natural photos — exactly what §9.1's refutation of the domain-support gate predicted.
+
+> 🔴 **TODO — RE-RUN REQUIRED.** These numbers were measured on the **legacy `[-0.5,+0.5]`** checkpoint
+> BEFORE the pixel-domain migration to `[0,1]`. They are internally consistent (every arm ran on a
+> matching domain) but are **NOT reproducible on current `main`** — the provenance gate now refuses
+> that checkpoint, correctly. `ddnm.py` and `MRIUndersamplingOperator` are domain-agnostic, so this is
+> a **re-run, not a rewrite**, once a `[0,1]` checkpoint is trained.
+
+CAVEATS: medical images are grayscale-replicated to 3 channels (perfect chroma correlation), which
+inflates the *absolute* medical PSNRs — the DDNM-vs-K&S *delta* is unaffected and is the claim. And
+this is an **internal** comparison: there is still no published MRI-reconstruction SOTA baseline
+in-repo (§9.4), so it is a capability result, not a competitiveness result.

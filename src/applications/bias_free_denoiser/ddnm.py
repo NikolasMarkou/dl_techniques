@@ -1,5 +1,16 @@
 """DDNM (Denoising Diffusion Null-space Model) driven by a BLIND bias-free denoiser.
 
+.. warning::
+
+   **PENDING RE-VALIDATION.** The MRI results reported for this module (+2.31 dB at R=4 and
+   +4.01 dB at R=8 over the K&S solver on X-ray angiography, at 5x fewer iterations) were
+   measured on the **legacy [-0.5,+0.5]** checkpoint, BEFORE the pixel-domain migration to
+   [0,1]. They are internally consistent but are **not reproducible on current main** — the
+   provenance gate now refuses that checkpoint. This module is domain-agnostic (it takes ``c0``
+   from the operator, and ``sigma_start`` is a noise *scale*, which is migration-invariant),
+   so re-establishing them is a **re-run, not a rewrite**, once a [0,1] checkpoint exists.
+   See ``src/train/bfunet/FINDINGS.md`` §9.5.
+
 Reference: Wang, Yu & Zhang, *"Zero-Shot Image Restoration Using Denoising Diffusion
 Null-Space Model"* (ICLR 2023, arXiv:2212.00490).
 
