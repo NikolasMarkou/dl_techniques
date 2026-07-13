@@ -354,6 +354,11 @@ class TestSerialization:
         assert shapes["logits"] == (None, 16, tiny_config["vocab_size"])
 
     def test_save_load_keras(self, tiny_config):
+        # Seeded: weights and input_ids were previously drawn unseeded, so every
+        # run sampled a different point of the float-noise distribution described
+        # below, and the test was a lottery (~1 failure in 15).
+        keras.utils.set_random_seed(1337)
+
         model = CliffordNetLMUNet(**tiny_config)
         input_ids = _random_ids((1, 8), tiny_config["vocab_size"])
         out_orig = keras.ops.convert_to_numpy(model(input_ids, training=False)["logits"])
@@ -370,11 +375,29 @@ class TestSerialization:
                 },
             )
         out_loaded = keras.ops.convert_to_numpy(loaded(input_ids, training=False)["logits"])
-        # atol=1e-4: fp32 reduction-order noise across save/load on GPU (XLA)
-        # can exceed 1e-5 even though all weights are bit-identical. Verified
-        # by inspection that the diff is uniform float-noise (max ~5e-5 on
-        # logits of magnitude ~0.3), not a serialization logic error.
-        np.testing.assert_allclose(out_orig, out_loaded, atol=1e-4)
+
+        # The actual serialization contract, asserted EXACTLY: every weight must
+        # survive the round trip bit-for-bit. This is the assertion that catches a
+        # real defect -- a lazily-built sublayer that gets dropped restores as
+        # freshly-initialized weights, which fails here on exact equality rather
+        # than hiding under an output tolerance.
+        assert len(loaded.weights) == len(model.weights)
+        for w_orig, w_loaded in zip(model.weights, loaded.weights):
+            np.testing.assert_array_equal(
+                keras.ops.convert_to_numpy(w_orig),
+                keras.ops.convert_to_numpy(w_loaded),
+                err_msg=f"weight {w_orig.name} changed across save/load",
+            )
+
+        # Outputs are then only checked for numerical equivalence, loosely. Even
+        # with bit-identical weights the rebuilt graph selects different kernels /
+        # reduction orders than the original, so the logits differ by pure float
+        # noise. Measured over 15 random draws on the RTX 4070 (logit scale ~0.35):
+        # median 5e-5, max 1.14e-4; the same measurement on CPU gives ~5e-6. The
+        # old atol of 1e-4 sat inside that GPU tail, which is what made this test
+        # flaky. 1e-3 clears the measured max by ~9x while staying ~300x below the
+        # logit scale, so a genuine numerical regression still cannot hide under it.
+        np.testing.assert_allclose(out_orig, out_loaded, atol=1e-3)
 
 
 # ---------------------------------------------------------------------
