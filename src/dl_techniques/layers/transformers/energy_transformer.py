@@ -606,7 +606,16 @@ class EnergyTransformer(keras.layers.Layer):
     :type noise_std: float
     :param return_energy: If ``True``, :meth:`call` returns ``(x, energies)`` with
         ``energies`` of shape ``(B, num_steps + 1)`` — **PER-SAMPLE, not batch-reduced**: a
-        batch mean would hide a per-sample descent violation.
+        batch mean would hide a per-sample descent violation. The energy trace is
+        **``float32`` BY DESIGN** even under ``mixed_float16`` (the state output stays
+        ``float16``): the trace is O(-1e5) at a realistic sequence length, which is ``-inf``
+        in fp16. Both the runtime tensor (D-005) and the SYMBOLIC KerasTensor
+        (:meth:`compute_output_spec`, D-006) are ``>= float32``.
+        **Consuming the trace under a mixed_float16 policy: build the head ``float32``** —
+        ``keras.layers.Dense(1, dtype='float32')(energies)``. A default-policy layer
+        autocasts its inputs to its OWN fp16 compute dtype and an O(-1e5) energy overflows to
+        ``nan``/``inf`` there. That is a property of the CONSUMER's policy, not of this
+        layer's output (see the D-006 anchor at :meth:`compute_output_spec`).
     :type return_energy: bool
     :param hopfield_beta: Inverse temperature of the ``'softmax'`` Hopfield branch. See the
         D-007 anchor in ``__init__``.
@@ -1031,6 +1040,77 @@ class EnergyTransformer(keras.layers.Layer):
             batch = input_shape[0]
             return input_shape, (batch, self.num_steps + 1)
         return input_shape
+
+    # -----------------------------------------------------------------
+
+    def compute_output_spec(
+        self,
+        inputs: keras.KerasTensor,
+        attention_mask: Optional[keras.KerasTensor] = None,
+        training: Optional[bool] = None,
+        mask: Optional[keras.KerasTensor] = None,
+    ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]:
+        """Symbolic output spec — the ENERGY is ``>= float32``, the state is compute dtype.
+
+        # DECISION plan_2026-07-13_ca4f71a2/D-006
+        This method exists ONLY to tell the truth about the energy's DTYPE, and it is
+        LOAD-BEARING — do NOT delete it as "redundant with ``compute_output_shape``".
+        Keras' default ``compute_output_spec`` derives the shapes from
+        :meth:`compute_output_shape` and then stamps EVERY output with
+        ``self.compute_dtype``. Under ``mixed_float16`` that made the symbolic ``energies``
+        KerasTensor claim ``float16`` while the tensor actually produced at runtime is
+        ``float32`` (D-005: the energy is returned in the REDUCE dtype so an O(-1e5) trace
+        does not overflow fp16's 65504 limit). ``model.outputs`` therefore reported
+        ``['float16', 'float16']`` for a model whose ``predict`` returns
+        ``['float16', 'float32']`` — the PUBLIC dtype contract, which is what an exporter,
+        a downstream shape/dtype inference, or a reader of ``model.summary()`` believes.
+
+        WHAT NOT TO DO:
+          * Do NOT let the energy be stamped ``self.compute_dtype``. The graph would again
+            advertise fp16 for a float32 tensor.
+          * Do NOT "fix" the dtype mismatch by casting the energy DOWN in :meth:`energy`
+            instead — that IS the D-005 bug (`-inf` at N >= 512; see the anchors in
+            ``EnergyAttention.energy`` / :meth:`HopfieldNetwork.energy`).
+          * Do NOT drop :meth:`compute_output_shape`: it is still the SHAPE authority, and
+            the shapes here are taken FROM it, never re-derived.
+
+        **MEASURED FACT, do not mis-attribute it to this method** (it is why the energy head
+        below must be float32): under a GLOBAL ``mixed_float16`` policy, a downstream layer
+        autocasts its float inputs to its OWN ``compute_dtype`` — ``Layer.__call__`` does
+        this from the layer's policy, NOT from the upstream symbolic dtype. So
+        ``keras.layers.Dense(1)(energies)`` overflows to ``nan``/``inf`` at ``N=1024``
+        (E ~ -8e4) BOTH before and after this method existed; control-proven with a plain
+        float32 ``keras.Input``, no ET involved. This method cannot prevent that, and it does
+        not claim to. **A head consuming the energy trace must be built ``dtype='float32'``**
+        (see the ``return_energy`` docstring). What this method fixes is the LIE — the graph
+        now says float32, so a dtype-aware consumer, an exporter, and
+        ``model.outputs[1].dtype`` all see the tensor that actually flows.
+        See decisions.md D-006.
+
+        :param inputs: Symbolic token state ``(B, N, D)``.
+        :type inputs: keras.KerasTensor
+        :param attention_mask: Unused (does not affect shape or dtype).
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: Unused (does not affect shape or dtype).
+        :type training: Optional[bool]
+        :param mask: Unused (does not affect shape or dtype).
+        :type mask: Optional[keras.KerasTensor]
+
+        :return: ``KerasTensor(B, N, D)`` in the compute dtype; or that plus
+            ``KerasTensor(B, num_steps + 1)`` in the REDUCE dtype (>= ``float32``) when
+            ``return_energy=True``.
+        :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]
+        """
+        shape = self.compute_output_shape(inputs.shape)   # ONE shape authority
+
+        if not self.return_energy:
+            return keras.KerasTensor(shape, dtype=self.compute_dtype)
+
+        state_shape, energy_shape = shape
+        return (
+            keras.KerasTensor(state_shape, dtype=self.compute_dtype),
+            keras.KerasTensor(energy_shape, dtype=_mask_dtype(self.compute_dtype)),
+        )
 
     # -----------------------------------------------------------------
 

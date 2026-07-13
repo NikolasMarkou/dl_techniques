@@ -1080,6 +1080,126 @@ class TestDtypePolicies:
         )
 
 
+@pytest.fixture
+def global_mixed_float16():
+    """Set the GLOBAL `mixed_float16` policy for one test, then ALWAYS restore it.
+
+    Deliberately the GLOBAL policy and not a per-layer `dtype=` kwarg: this is the mainstream
+    way to use mixed precision, and C16's bug (below) is only reachable that way — a leaked
+    policy would poison the whole session, hence the `finally`.
+    """
+    previous = keras.mixed_precision.global_policy().name
+    keras.mixed_precision.set_global_policy("mixed_float16")
+    try:
+        yield "mixed_float16"
+    finally:
+        keras.mixed_precision.set_global_policy(previous)
+
+
+class TestEnergyDtypeInTheGraph:
+    """C16 (iter-3 / R4): the energy's float32-ness must survive into the SYMBOLIC graph.
+
+    Iter-2 (D-005) widened the energy at the LAYER boundary: `energy()` returns in the reduce
+    dtype (>= float32) so an O(-1e5) trace is not `-inf` in fp16. But `EnergyTransformer`
+    defined only `compute_output_shape`, so Keras' default `compute_output_spec` stamped BOTH
+    outputs with `self.compute_dtype`: the symbolic `energies` KerasTensor claimed **float16**
+    while `predict` returned **float32**.
+
+    RED at HEAD (global `mixed_float16`, N=1024, `return_energy=True`):
+        `model.outputs` dtypes -> `['float16', 'float16']`
+        `predict`      dtypes -> `['float16', 'float32']`     <- the graph LIES
+
+    That is the PUBLIC dtype contract — what an exporter, a dtype-aware consumer, and
+    `model.summary()` read. `compute_output_spec` (decisions.md D-006) makes it true.
+
+    NOT what this fixes (control-proven, and the reason the head below is `dtype='float32'`):
+    a downstream layer autocasts its float inputs to its OWN `compute_dtype`. A default-policy
+    `Dense(1)(energies)` overflows to nan/inf at N=1024 under `mixed_float16` REGARDLESS of the
+    upstream symbolic dtype — reproduced with a plain float32 `keras.Input` and no ET in the
+    graph at all. The energy head must be float32; see the `return_energy` docstring.
+    """
+
+    _N = 1024                    # |E| ~ 8e4 here — comfortably past fp16's 65504
+    _FP16_MAX = 65504.0
+
+    def test_symbolic_energy_dtype_is_float32(self, global_mixed_float16):
+        """(a) THE assertion that bites: `model.outputs[1].dtype` — the SYMBOLIC dtype.
+
+        (b) and the documented consumption path — a `float32` energy head — is FINITE at
+        N=1024, on a trace whose magnitude provably exceeds the fp16 range.
+        """
+        block = _block(num_steps=2, step_size=0.05, return_energy=True)
+
+        inp = keras.Input(shape=(self._N, DIM))
+        state, energies = block(inp)
+        # The DOCUMENTED way to consume the trace under a mixed policy (D-006): a float32
+        # head. A default-policy head would autocast the O(-1e5) energy into fp16 by its OWN
+        # policy and overflow — that is the consumer's dtype, not the block's output.
+        head = keras.layers.Dense(1, dtype="float32")(energies)
+        model = keras.Model(inp, [state, energies, head])
+
+        # (a) The graph must not lie about the energy. RED at HEAD: 'float16'.
+        assert model.outputs[1].dtype == "float32", (
+            f"the SYMBOLIC energy dtype is {model.outputs[1].dtype!r}, but the tensor "
+            "actually produced is float32 (decisions.md D-005). EnergyTransformer must "
+            "override compute_output_spec — Keras' default stamps EVERY output with "
+            "self.compute_dtype (decisions.md D-006)."
+        )
+        # ...while the STATE output stays in the compute dtype: this is mixed precision, and
+        # widening the state would silently disable it.
+        assert model.outputs[0].dtype == "float16", (
+            f"the state output is {model.outputs[0].dtype!r}, not float16 — "
+            "compute_output_spec must widen the ENERGY only, never the state"
+        )
+
+        x = np.random.default_rng(11).standard_normal(
+            (1, self._N, DIM)
+        ).astype("float32")
+        out_state, out_energies, out_head = model.predict(x, verbose=0)
+
+        # The concrete tensors must AGREE with the graph (that is the whole point).
+        assert out_energies.dtype == np.float32
+        assert out_state.dtype == np.float16
+
+        # Anti-vacuity: without this the fp16 range is never exercised and (b) is free.
+        assert np.abs(out_energies).max() > self._FP16_MAX, (
+            f"max|E| = {np.abs(out_energies).max():.1f} <= fp16 max ({self._FP16_MAX}) at "
+            f"N={self._N} — this guard can no longer detect an fp16 narrowing."
+        )
+        assert np.all(np.isfinite(out_energies)), (
+            f"non-finite energy trace: {out_energies}"
+        )
+        # (b) the float32 energy head is FINITE on a trace that fp16 cannot represent.
+        assert np.all(np.isfinite(out_head)), (
+            f"a float32 head on the energy trace produced {out_head} — the trace reaching it "
+            "was narrowed to fp16 somewhere (decisions.md D-006)"
+        )
+
+    def test_compute_output_spec_matches_compute_output_shape(
+        self, global_mixed_float16
+    ):
+        """The two must never disagree: `compute_output_spec` takes its shapes FROM the shape
+        method. Also covers `return_energy=False` (a single output, compute dtype).
+        """
+        with_energy = _block(num_steps=3, return_energy=True)
+        shapes = with_energy.compute_output_shape((BATCH, TOKENS, DIM))
+        specs = with_energy.compute_output_spec(
+            keras.KerasTensor((BATCH, TOKENS, DIM), dtype="float16")
+        )
+        assert len(specs) == 2
+        assert tuple(specs[0].shape) == tuple(shapes[0])
+        assert tuple(specs[1].shape) == tuple(shapes[1]) == (BATCH, 4)
+        assert specs[0].dtype == "float16"      # state: compute dtype
+        assert specs[1].dtype == "float32"      # energy: reduce dtype (D-005/D-006)
+
+        plain = _block(num_steps=3)
+        spec = plain.compute_output_spec(
+            keras.KerasTensor((BATCH, TOKENS, DIM), dtype="float16")
+        )
+        assert tuple(spec.shape) == (BATCH, TOKENS, DIM)
+        assert spec.dtype == "float16"
+
+
 class TestPerLayerDtypeKwarg:
     """C1/C2: a PER-LAYER ``dtype=`` kwarg must govern the layers the block OWNS.
 
