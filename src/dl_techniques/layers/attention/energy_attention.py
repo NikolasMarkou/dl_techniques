@@ -546,9 +546,23 @@ class EnergyAttention(keras.layers.Layer):
             ops.sum(keep, axis=2) > 0.0, _mask_dtype(self.compute_dtype)
         )                                                   # (B, H, N) or broadcastable
 
-        # Reduced in float32 (a large fp16 sum would overflow), cast back at the boundary.
-        energy = -(1.0 / self._beta) * ops.sum(lse * col_valid, axis=(1, 2))  # (B,)
-        return ops.cast(energy, self.compute_dtype)
+        # DECISION plan_2026-07-13_ca4f71a2/D-005
+        # The energy is returned in the REDUCE dtype (`_mask_dtype`, i.e. >= float32) and is
+        # deliberately NOT cast back to the compute dtype. WHAT NOT TO DO:
+        #   * Do NOT "restore the boundary" with `ops.cast(energy, self.compute_dtype)`. That
+        #     is the bug this anchor replaces: the float32 reduction protects the ACCUMULATOR,
+        #     and the cast then puts the O(-8e4) result back into fp16 (max 65504) on the very
+        #     last op. Measured under `mixed_float16`: N=256 -> -32256 (finite, already within
+        #     a factor of 2 of the limit), N=512 -> near the limit, N=1024 -> `-inf`. It also
+        #     quantized the trace to ~1 part in 2048, making the energy DESCENT invisible.
+        #   * This is safe precisely because NOTHING in the compute path consumes `energy()`.
+        #     It is a REPORTED DIAGNOSTIC SCALAR: `EnergyTransformer.call()` only appends it to
+        #     the `return_energy=True` trace; the state update is driven by `update()` alone.
+        #     So widening the energy's dtype cannot change any layer's OUTPUT. If a future
+        #     change makes some compute path contract this against fp16 weights, cast AT THAT
+        #     CALL SITE — do not re-narrow the energy here.
+        # See decisions.md D-005.
+        return -(1.0 / self._beta) * ops.sum(lse * col_valid, axis=(1, 2))    # (B,), >= f32
 
     # -----------------------------------------------------------------
 

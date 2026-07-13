@@ -598,6 +598,51 @@ class TestDtypePolicies:
         assert np.all(np.isfinite(e))
         assert np.all(np.isfinite(u))
 
+    # C13 (iter-2 / R1): the energy at a REALISTIC sequence length ---------
+    #
+    # `_REALISTIC_TOKENS` is not decoration. `E_ATT` grows super-linearly in N, and the
+    # ONLY reason this failure mode survived a green suite is that every dtype test above
+    # runs at `TOKENS = 7`, where the energy is O(-140) and an fp16 overflow is arithmetically
+    # impossible. At N = 1024 the float32 energy is O(-8e4) — PAST fp16's 65504 max — so a
+    # cast of the reduced energy back into the compute dtype becomes `-inf`. Do NOT shrink
+    # this constant "to make the suite faster": below ~1024 (at these dims) the guard cannot
+    # bite, and the anti-vacuity assertion below exists to fail loudly if it ever stops
+    # biting. See decisions.md D-005.
+    _REALISTIC_TOKENS = 1024
+    _FP16_MAX = 65504.0
+
+    @pytest.mark.parametrize("num_tokens", [TOKENS, _REALISTIC_TOKENS])
+    def test_reported_energy_is_finite_at_a_realistic_length(
+        self, dtype_policy, num_tokens
+    ):
+        """C13: `energy()` must be FINITE at a realistic N under EVERY dtype policy.
+
+        RED at HEAD (before the D-005 fix): `mixed_float16`, N=1024 -> `E_ATT = -inf`,
+        because the float32 reduction was cast back into fp16 on the very last op.
+        """
+        layer = EnergyAttention(dim=DIM, num_heads=HEADS)
+        g = keras.random.normal((BATCH, num_tokens, DIM), seed=3)
+        layer.build(g.shape)
+
+        e = keras.ops.convert_to_numpy(layer.energy(g))
+
+        assert e.shape == (BATCH,)
+        assert np.all(np.isfinite(e)), (
+            f"non-finite E_ATT at N={num_tokens} under policy {dtype_policy!r}: {e}. "
+            "The energy is a LARGE reduction; it must be returned in the reduce dtype "
+            "(>= float32) and NEVER cast back to the compute dtype (decisions.md D-005)."
+        )
+
+        if num_tokens == self._REALISTIC_TOKENS:
+            # Anti-vacuity: this cell only PROVES anything while |E| exceeds fp16's range.
+            # If a future dim/N change drops it below, the guard has stopped biting and the
+            # test must say so rather than pass quietly.
+            assert np.abs(e).max() > self._FP16_MAX, (
+                f"max|E_ATT| = {np.abs(e).max():.1f} <= fp16 max ({self._FP16_MAX}) at "
+                f"N={num_tokens} — this guard can no longer detect an fp16 cast-back. "
+                "Raise the sequence length or the dims until it can."
+            )
+
     def test_degenerate_case_exactly_zero_in_every_dtype(self, dtype_policy):
         """S9, re-proven per dtype: N == 1 + attn_self=False -> EXACTLY 0, never NaN."""
         layer = EnergyAttention(dim=DIM, num_heads=HEADS, attn_self=False)

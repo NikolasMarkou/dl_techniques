@@ -339,7 +339,17 @@ class HopfieldNetwork(keras.layers.Layer):
             lse = ops.logsumexp(self.hopfield_beta * h, axis=-1)         # (B, N)
             energy = -(1.0 / self.hopfield_beta) * ops.sum(lse, axis=1)  # (B,)
 
-        return ops.cast(energy, self.compute_dtype)
+        # DECISION plan_2026-07-13_ca4f71a2/D-005
+        # Returned in the REDUCE dtype (>= float32) — NOT cast back to the compute dtype.
+        # WHAT NOT TO DO: do NOT re-add `ops.cast(energy, self.compute_dtype)` here. It is the
+        # exact bug fixed in `EnergyAttention.energy()` (same anchor): casting in float32 to
+        # protect the accumulator and then casting the result back into fp16 reintroduces the
+        # overflow on the last op — `E_HN` sums over N tokens x K memories and clears fp16's
+        # 65504 max at N=1024 (measured: `-inf` under `mixed_float16`, both activations).
+        # Safe because `energy()` is a REPORTED DIAGNOSTIC only: the block's state update comes
+        # from `update()`, and nothing in the compute path contracts the energy against fp16
+        # weights. See decisions.md D-005.
+        return energy                                                     # (B,), >= float32
 
     # -----------------------------------------------------------------
 
@@ -776,9 +786,19 @@ class EnergyTransformer(keras.layers.Layer):
             ANDed with ``attention_mask`` inside ``EnergyAttention`` (decisions.md D-003).
         :type mask: Optional[keras.KerasTensor]
 
-        :return: Energy of shape ``(B,)``.
+        :return: Energy of shape ``(B,)``, in the REDUCE dtype (>= ``float32``) — NOT the
+            compute dtype. Under ``mixed_float16`` the trace stays ``float32``; see the
+            D-005 anchors in ``EnergyAttention.energy`` / :meth:`HopfieldNetwork.energy`.
         :rtype: keras.KerasTensor
         """
+        # DECISION plan_2026-07-13_ca4f71a2/D-005
+        # BOTH terms are returned in the reduce dtype (>= float32), so this sum type-checks
+        # under EVERY policy — including `mixed_float16`, where the compute dtype is float16
+        # and an O(-8e4) energy is `-inf`. Do NOT cast either term (or this sum) down to
+        # `self.compute_dtype`: the energy is a reported diagnostic, consumed ONLY by the
+        # `return_energy=True` trace in `call()`, never by the state update. See decisions.md
+        # D-005.
+        #
         # DECISION plan_2026-07-13_ca4f71a2/D-002
         # `mask` MUST be forwarded to `self.attention` HERE and at the `self.attention.update`
         # site in `call()` below — the SAME mask, through the SAME kwarg. WHAT NOT TO DO:

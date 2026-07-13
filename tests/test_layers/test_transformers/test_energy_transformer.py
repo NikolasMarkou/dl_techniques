@@ -965,16 +965,29 @@ class TestDtypePolicies:
         assert np.all(np.isfinite(e)), f"non-finite energy: {e}"
         assert np.all(np.isfinite(u))
 
+    # C13 (iter-2 / R1): see the note on `_REALISTIC_TOKENS` in `test_energy_attention.py`.
+    # This guard was WRITTEN for the fp16-overflow failure mode (its docstring named it) and
+    # STILL missed it, because it ran only at `TOKENS = 7` where the energy is O(-140) and an
+    # overflow is arithmetically impossible. The sequence length IS the guard. Do NOT shrink
+    # it. See decisions.md D-005.
+    _REALISTIC_TOKENS = 1024
+    _FP16_MAX = 65504.0
+
     @pytest.mark.parametrize("hopfield_activation", ACTIVATIONS)
+    @pytest.mark.parametrize("num_tokens", [TOKENS, _REALISTIC_TOKENS])
     def test_reported_energy_is_finite_under_every_dtype(
-        self, dtype_policy, hopfield_activation
+        self, dtype_policy, hopfield_activation, num_tokens
     ):
-        """`return_energy=True` must also survive fp16 — the energy is a LARGE reduction
-        (a sum over tokens x memories) and would overflow an fp16 accumulator."""
+        """C13: `return_energy=True` must survive fp16 AT A REALISTIC SEQUENCE LENGTH.
+
+        The energy is a LARGE reduction (over heads x tokens for `E_ATT`, over tokens x
+        memories for `E_HN`). RED at HEAD (before the D-005 fix): `mixed_float16`, N=1024 ->
+        the whole trace is `-inf`, because the float32 reduction was cast back into fp16.
+        """
         block = _block(
             hopfield_activation=hopfield_activation, num_steps=3, return_energy=True
         )
-        x = keras.random.normal((BATCH, TOKENS, DIM))
+        x = keras.random.normal((BATCH, num_tokens, DIM), seed=4)
 
         out, energies = block(x, training=False)
         out = keras.ops.convert_to_numpy(out)
@@ -982,7 +995,52 @@ class TestDtypePolicies:
 
         assert energies.shape == (BATCH, 4)
         assert np.all(np.isfinite(out)), f"{np.isnan(out).sum()}/{out.size} NaN in output"
-        assert np.all(np.isfinite(energies)), f"non-finite energies: {energies}"
+        assert np.all(np.isfinite(energies)), (
+            f"non-finite energies at N={num_tokens} under policy {dtype_policy!r}: "
+            f"{energies}. The reported energy must stay in the reduce dtype (>= float32) "
+            "and never be cast back to the compute dtype (decisions.md D-005)."
+        )
+
+        if num_tokens == self._REALISTIC_TOKENS:
+            # Anti-vacuity: the cell only proves anything while |E| exceeds fp16's range.
+            assert np.abs(energies).max() > self._FP16_MAX, (
+                f"max|E| = {np.abs(energies).max():.1f} <= fp16 max ({self._FP16_MAX}) at "
+                f"N={num_tokens} — this guard can no longer detect an fp16 cast-back."
+            )
+
+    @pytest.mark.parametrize(
+        "hopfield_activation, hopfield_beta", [("relu", 1.0), ("softmax", 0.02)]
+    )
+    def test_hopfield_energy_is_finite_at_a_realistic_length(
+        self, dtype_policy, hopfield_activation, hopfield_beta
+    ):
+        """C13: `HopfieldNetwork.energy()` had the IDENTICAL fp16 cast-back.
+
+        `E_HN` sums over tokens x memories, so it clears fp16's 65504 range at N=1024 with
+        excited memories (relu branch) or a small `hopfield_beta` (softmax branch: the energy
+        carries a `1/beta` factor). Both cells are `-inf` at HEAD under `mixed_float16`.
+        """
+        hopfield = HopfieldNetwork(
+            dim=DIM,
+            hopfield_dim=MEM,
+            activation=hopfield_activation,
+            hopfield_beta=hopfield_beta,
+        )
+        hopfield.build((BATCH, self._REALISTIC_TOKENS, DIM))
+        _excite(hopfield, scale=1.0)
+        g = keras.random.normal((BATCH, self._REALISTIC_TOKENS, DIM), seed=3)
+
+        e = keras.ops.convert_to_numpy(hopfield.energy(g))
+
+        assert e.shape == (BATCH,)
+        assert np.all(np.isfinite(e)), (
+            f"non-finite E_HN under policy {dtype_policy!r}: {e} — the Hopfield energy must "
+            "stay in the reduce dtype (>= float32); decisions.md D-005."
+        )
+        assert np.abs(e).max() > self._FP16_MAX, (
+            f"max|E_HN| = {np.abs(e).max():.1f} <= fp16 max ({self._FP16_MAX}) — this guard "
+            "can no longer detect an fp16 cast-back."
+        )
 
 
 class TestPerLayerDtypeKwarg:
