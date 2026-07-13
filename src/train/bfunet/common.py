@@ -414,20 +414,150 @@ def _denorm(img: np.ndarray) -> np.ndarray:
     return np.clip(img, DATA_MIN, DATA_MAX)
 
 
-def render_training_dashboard(history: dict, out_path: Path, title: str = "") -> None:
+def expected_noise_variance(sigma_min: float, sigma_max: float) -> float:
+    """``E[sigma^2]`` for ``sigma ~ U(sigma_min, sigma_max)`` = ``(a^2 + ab + b^2)/3``.
+
+    This is the per-epoch NOISE FLOOR: the MSE a do-nothing identity denoiser would
+    score against the clean target. It is the natural difficulty normalizer for the
+    curriculum (the training noise fn draws a fresh ``sigma`` per image from exactly
+    this uniform range -- see ``make_curriculum_noise_fn``).
+
+    Slight over-estimate in practice: the pipeline clips the noisy patch to
+    ``[DATA_MIN, DATA_MAX]``, which removes a little noise energy near the boundaries.
+    So the reported denoising gain is a mild UNDER-estimate. Additive noise only.
+    """
+    a, b = float(sigma_min), float(sigma_max)
+    if b < a:
+        a, b = b, a
+    return (a * a + a * b + b * b) / 3.0
+
+
+def expected_input_psnr(sigma_min: float, sigma_max: float) -> float:
+    """Mean per-image PSNR (dB) of the NOISY INPUT for ``sigma ~ U(sigma_min, sigma_max)``.
+
+    Per-image PSNR at ``max_val=1`` is ``-20*log10(sigma)``, and ``PsnrMetric`` averages
+    per-image PSNR, so the reference is ``E[-20*log10(sigma)]``, NOT ``-20*log10(E[sigma])``
+    (Jensen -- the two differ). With ``E[ln s] = (b(ln b - 1) - a(ln a - 1)) / (b - a)``.
+
+    The ``a = 0`` case is finite even though a single ``sigma -> 0`` image has infinite
+    PSNR: the limit of ``a*ln(a)`` is 0, giving ``E[ln s] -> ln(b) - 1``.
+    """
+    a, b = float(sigma_min), float(sigma_max)
+    if b <= 0.0:
+        return float("nan")
+    if a <= 0.0:
+        mean_ln = float(np.log(b)) - 1.0
+    elif abs(b - a) < 1e-12:
+        mean_ln = float(np.log(a))
+    else:
+        mean_ln = (b * (np.log(b) - 1.0) - a * (np.log(a) - 1.0)) / (b - a)
+    return float(-20.0 / np.log(10.0) * mean_ln)
+
+
+def _ratio_or_nan(num: List[float], den: List[float]) -> List[float]:
+    """Elementwise ``num/den``, mapping non-finite / non-positive entries to NaN."""
+    out = []
+    for n, d in zip(num, den):
+        n, d = float(n), float(d)
+        if not (np.isfinite(n) and np.isfinite(d)) or n <= 0.0 or d <= 0.0:
+            out.append(float("nan"))
+        else:
+            out.append(n / d)
+    return out
+
+
+def _curriculum_end_epoch(
+    ep: List[int], sigma_max: List[float], final_sigma: float
+) -> Optional[int]:
+    """First epoch at which the curriculum has reached its final ``sigma_max``.
+
+    After this epoch the TRAIN task stops moving and matches the (always-fixed) VAL
+    task, so train/val curves become directly comparable. Returns None if the ramp
+    never completes within the recorded epochs.
+    """
+    tol = 1e-6 + 1e-3 * abs(float(final_sigma))
+    for e, s in zip(ep, sigma_max):
+        if np.isfinite(s) and abs(float(s) - float(final_sigma)) <= tol:
+            return int(e)
+    return None
+
+
+def render_training_dashboard(
+    history: dict,
+    out_path: Path,
+    title: str = "",
+    sigma_min: Optional[float] = None,
+    val_sigma_max: Optional[float] = None,
+    additive: bool = True,
+) -> None:
     """Render a single combined dashboard PNG of per-epoch training curves.
 
-    Six panels: (1) Loss/MSE, (2) MSE (log), (3) PSNR, (4) MAE,
-    (5) noise sigma_max (curriculum, with [0,255]-scale twin axis), (6) learning
-    rate (log). ``history`` keys (any may be absent -> that panel is skipped):
+    **Why this is not just "loss goes down".** Training uses a NOISE CURRICULUM: the
+    per-image ``sigma`` is drawn from ``U(noise_sigma_min, sigma_max(epoch))`` and
+    ``sigma_max`` RAMPS UP each epoch (``NoiseSigmaCurriculumCallback``). So the TRAIN
+    task gets strictly HARDER over time, and raw train MSE / PSNR are confounded by
+    task difficulty -- train loss can rise, or plateau, while the model is genuinely
+    improving. VALIDATION does NOT ramp (``sigma_fixed_var = sigma_max_end``, a
+    stationary task), so val curves ARE comparable across epochs but sit on a much
+    harder task than early-epoch train.
+
+    Reading raw train-vs-val on shared axes is therefore actively misleading. The
+    dashboard fixes this by plotting, alongside the raw curves, the DIFFICULTY-
+    NORMALIZED ones: each split's MSE divided by ITS OWN noise floor ``E[sigma^2]``
+    (``expected_noise_variance``). Those normalized curves remove the curriculum and
+    should improve monotonically; the raw ones need not.
+
+    Eight panels. Top row = RAW (task-confounded, with noise-floor references):
+    (1) MSE, (2) MSE (log), (3) PSNR, (4) denoising gain (dB).
+    Bottom row = NORMALIZED + schedules: (5) residual noise fraction (log),
+    (6) MAE, (7) sigma_max curriculum (with a [0,255] twin axis), (8) LR (log).
+
+    ``history`` keys (any may be absent -> that panel/series is skipped):
     ``epoch, loss, val_loss, mae, val_mae, psnr, val_psnr, sigma_max, lr``.
+
+    Args:
+        history: Per-epoch scalar lists (see above).
+        out_path: PNG destination.
+        title: Figure suptitle.
+        sigma_min: ``config.noise_sigma_min`` -- lower bound of the sampled sigma range.
+        val_sigma_max: The FIXED upper bound used by the val pipeline
+            (``config.sigma_max_end``). Together with ``sigma_min`` these enable the
+            noise-floor references and the normalized panels.
+        additive: Whether the run uses additive Gaussian noise. The ``E[sigma^2]``
+            noise floor is an ADDITIVE-noise quantity, so for multiplicative/composite
+            runs the floor references and normalized panels are SKIPPED rather than
+            silently plotted wrong.
     """
     ep = history.get("epoch")
     if not ep:
         return
-    fig, axes = plt.subplots(2, 3, figsize=(16, 9))
+
+    sig = history.get("sigma_max")
+    # Noise-floor machinery needs the sigma range AND additive noise. Anything missing
+    # -> degrade gracefully to the raw-only dashboard rather than plotting a wrong floor.
+    floors_ok = (
+        additive
+        and sig is not None
+        and sigma_min is not None
+        and val_sigma_max is not None
+        and len(sig) >= len(ep)
+    )
+
+    train_floor = val_floor = None
+    train_in_psnr = val_in_psnr = None
+    ramp_end = None
+    if floors_ok:
+        train_floor = [expected_noise_variance(sigma_min, s) for s in sig[:len(ep)]]
+        val_floor = [expected_noise_variance(sigma_min, val_sigma_max)] * len(ep)
+        train_in_psnr = [expected_input_psnr(sigma_min, s) for s in sig[:len(ep)]]
+        val_in_psnr = [expected_input_psnr(sigma_min, val_sigma_max)] * len(ep)
+        ramp_end = _curriculum_end_epoch(ep, sig, val_sigma_max)
+
+    fig, axes = plt.subplots(2, 4, figsize=(21, 9.5))
     if title:
         fig.suptitle(title, fontsize=15, y=0.99)
+
+    TRAIN_C, VAL_C = "#d62728", "#1f77b4"
 
     def _line(ax, ys, label, **kw):
         if ys is None:
@@ -435,54 +565,141 @@ def render_training_dashboard(history: dict, out_path: Path, title: str = "") ->
         n = min(len(ep), len(ys))
         ax.plot(ep[:n], ys[:n], label=label, lw=1.6, **kw)
 
-    # (1) Loss / MSE (linear) -- loss IS mse (compiled loss='mse')
+    def _floor(ax, ys, label, color):
+        """A noise-floor reference: what an identity (do-nothing) denoiser would score."""
+        if ys is None:
+            return
+        n = min(len(ep), len(ys))
+        ax.plot(ep[:n], ys[:n], label=label, lw=1.2, ls=":", alpha=0.75, color=color)
+
+    def _mark_ramp(ax):
+        """Shade the curriculum ramp; past its end the train task is stationary too."""
+        if ramp_end is None or ramp_end <= ep[0]:
+            return
+        ax.axvspan(ep[0], ramp_end, color="#2ca02c", alpha=0.06, zorder=0)
+        ax.axvline(ramp_end, color="#2ca02c", ls="--", lw=1.0, alpha=0.6, zorder=0)
+
+    # ---- Top row: RAW curves (task-confounded) + noise-floor references ----
+
+    # (1) MSE (linear). loss IS mse (compiled loss='mse').
     ax = axes[0, 0]
-    _line(ax, history.get("loss"), "train", color="#d62728")
-    _line(ax, history.get("val_loss"), "val", color="#1f77b4")
-    ax.set_title("Loss (MSE) per epoch"); ax.set_xlabel("epoch"); ax.set_ylabel("MSE")
-    ax.grid(True, alpha=0.3); ax.legend()
+    _line(ax, history.get("loss"), "train (curriculum sigma)", color=TRAIN_C)
+    _line(ax, history.get("val_loss"), "val (fixed sigma)", color=VAL_C)
+    _floor(ax, train_floor, "train noise floor E[s^2]", TRAIN_C)
+    _floor(ax, val_floor, "val noise floor E[s^2]", VAL_C)
+    _mark_ramp(ax)
+    ax.set_title("MSE per epoch (RAW - train task is MOVING)")
+    ax.set_xlabel("epoch"); ax.set_ylabel("MSE")
+    ax.grid(True, alpha=0.3); ax.legend(fontsize=7)
 
-    # (2) MSE (log y) -- same data, log scale reveals late-epoch detail
+    # (2) MSE (log y). The floor gap IS the denoising gain, read directly.
     ax = axes[0, 1]
-    _line(ax, history.get("loss"), "train", color="#d62728")
-    _line(ax, history.get("val_loss"), "val", color="#1f77b4")
+    _line(ax, history.get("loss"), "train", color=TRAIN_C)
+    _line(ax, history.get("val_loss"), "val", color=VAL_C)
+    _floor(ax, train_floor, "train noise floor", TRAIN_C)
+    _floor(ax, val_floor, "val noise floor", VAL_C)
+    _mark_ramp(ax)
     ax.set_yscale("log")
-    ax.set_title("MSE per epoch (log)"); ax.set_xlabel("epoch"); ax.set_ylabel("MSE (log)")
-    ax.grid(True, alpha=0.3, which="both"); ax.legend()
+    ax.set_title("MSE per epoch (log) - gap to floor = gain")
+    ax.set_xlabel("epoch"); ax.set_ylabel("MSE (log)")
+    ax.grid(True, alpha=0.3, which="both"); ax.legend(fontsize=7)
 
-    # (3) PSNR
+    # (3) PSNR + the mean per-image PSNR of the NOISY INPUT (the do-nothing baseline).
     ax = axes[0, 2]
-    _line(ax, history.get("psnr"), "train", color="#d62728")
-    _line(ax, history.get("val_psnr"), "val", color="#1f77b4")
-    ax.set_title("PSNR per epoch"); ax.set_xlabel("epoch"); ax.set_ylabel("PSNR (dB)")
-    ax.grid(True, alpha=0.3); ax.legend()
+    _line(ax, history.get("psnr"), "train", color=TRAIN_C)
+    _line(ax, history.get("val_psnr"), "val", color=VAL_C)
+    _floor(ax, train_in_psnr, "train input PSNR", TRAIN_C)
+    _floor(ax, val_in_psnr, "val input PSNR", VAL_C)
+    _mark_ramp(ax)
+    ax.set_title("PSNR per epoch (RAW) vs noisy-input PSNR")
+    ax.set_xlabel("epoch"); ax.set_ylabel("PSNR (dB)")
+    ax.grid(True, alpha=0.3); ax.legend(fontsize=7)
 
-    # (4) MAE
+    # (4) DENOISING GAIN (dB) = 10*log10(E[sigma^2] / MSE). THE curriculum-free curve:
+    # each split is normalized by ITS OWN noise floor, so this measures how much noise
+    # energy the model removes -- independent of how hard the epoch's task was. THIS is
+    # the panel to read for "is the model actually getting better?".
+    ax = axes[0, 3]
+    if floors_ok:
+        for key, floor, lab, c in (
+            ("loss", train_floor, "train", TRAIN_C),
+            ("val_loss", val_floor, "val", VAL_C),
+        ):
+            mse = history.get(key)
+            if mse is None:
+                continue
+            n = min(len(ep), len(mse), len(floor))
+            gain = [10.0 * float(np.log10(r)) if np.isfinite(r) else float("nan")
+                    for r in _ratio_or_nan(floor[:n], list(mse)[:n])]
+            ax.plot(ep[:n], gain, label=lab, lw=1.8, color=c)
+        ax.axhline(0.0, color="0.4", ls="--", lw=1.0, label="identity (no denoising)")
+        _mark_ramp(ax)
+        ax.legend(fontsize=7)
+    else:
+        ax.text(0.5, 0.5, "needs additive noise\n+ sigma range",
+                ha="center", va="center", transform=ax.transAxes, fontsize=9, color="0.5")
+    ax.set_title("Denoising gain (dB) - CURRICULUM-NORMALIZED")
+    ax.set_xlabel("epoch"); ax.set_ylabel("10*log10(E[s^2] / MSE)  dB")
+    ax.grid(True, alpha=0.3)
+
+    # ---- Bottom row: normalized residual + MAE + schedules ----
+
+    # (5) Residual noise fraction = MSE / E[sigma^2]. Same information as (4) in ratio
+    # form: the fraction of input noise ENERGY still left in the output. 1.0 = identity.
     ax = axes[1, 0]
-    _line(ax, history.get("mae"), "train", color="#d62728")
-    _line(ax, history.get("val_mae"), "val", color="#1f77b4")
-    ax.set_title("MAE per epoch"); ax.set_xlabel("epoch"); ax.set_ylabel("MAE")
-    ax.grid(True, alpha=0.3); ax.legend()
+    if floors_ok:
+        for key, floor, lab, c in (
+            ("loss", train_floor, "train", TRAIN_C),
+            ("val_loss", val_floor, "val", VAL_C),
+        ):
+            mse = history.get(key)
+            if mse is None:
+                continue
+            n = min(len(ep), len(mse), len(floor))
+            ax.plot(ep[:n], _ratio_or_nan(list(mse)[:n], floor[:n]),
+                    label=lab, lw=1.8, color=c)
+        ax.axhline(1.0, color="0.4", ls="--", lw=1.0, label="identity")
+        ax.set_yscale("log")
+        _mark_ramp(ax)
+        ax.legend(fontsize=7)
+    else:
+        ax.text(0.5, 0.5, "needs additive noise\n+ sigma range",
+                ha="center", va="center", transform=ax.transAxes, fontsize=9, color="0.5")
+    ax.set_title("Residual noise fraction MSE/E[s^2] (log)")
+    ax.set_xlabel("epoch"); ax.set_ylabel("fraction of noise energy left")
+    ax.grid(True, alpha=0.3, which="both")
 
-    # (5) Noise level (curriculum) with [0,255]-scale twin axis
+    # (6) MAE (raw; also task-confounded on the train split)
     ax = axes[1, 1]
-    sig = history.get("sigma_max")
-    _line(ax, sig, "sigma_max", color="#2ca02c", marker="o", markersize=3)
+    _line(ax, history.get("mae"), "train", color=TRAIN_C)
+    _line(ax, history.get("val_mae"), "val", color=VAL_C)
+    _mark_ramp(ax)
+    ax.set_title("MAE per epoch (RAW)"); ax.set_xlabel("epoch"); ax.set_ylabel("MAE")
+    ax.grid(True, alpha=0.3); ax.legend(fontsize=7)
+
+    # (7) The curriculum itself, with a [0,255]-scale twin axis.
+    ax = axes[1, 2]
+    _line(ax, sig, "train sigma_max", color="#2ca02c", marker="o", markersize=3)
+    if floors_ok:
+        ax.axhline(float(val_sigma_max), color=VAL_C, ls=":", lw=1.3,
+                   label="val sigma_max (fixed)")
+    _mark_ramp(ax)
     ax.set_title("Noise sigma_max per epoch (curriculum)")
     ax.set_xlabel("epoch"); ax.set_ylabel("sigma_max  [0,1] units")
-    ax.grid(True, alpha=0.3); ax.legend(loc="upper left")
+    ax.grid(True, alpha=0.3); ax.legend(loc="upper left", fontsize=7)
     if sig is not None:
         twin = ax.twinx()
         twin.set_ylabel("sigma on [0,255] scale")
         lo, hi = ax.get_ylim()
         twin.set_ylim(lo * 255.0, hi * 255.0)
 
-    # (6) Learning rate (log y)
-    ax = axes[1, 2]
+    # (8) Learning rate (log y)
+    ax = axes[1, 3]
     _line(ax, history.get("lr"), "lr", color="#9467bd")
+    _mark_ramp(ax)
     ax.set_yscale("log")
     ax.set_title("Learning rate per epoch"); ax.set_xlabel("epoch"); ax.set_ylabel("lr (log)")
-    ax.grid(True, alpha=0.3, which="both"); ax.legend()
+    ax.grid(True, alpha=0.3, which="both"); ax.legend(fontsize=7)
 
     plt.tight_layout(rect=(0, 0, 1, 0.97) if title else None)
     plt.savefig(out_path, dpi=120, bbox_inches="tight")
@@ -627,7 +844,12 @@ def build_dashboard_from_dir(exp_dir: str) -> Optional[Path]:
     out = exp / "visualizations" / "training_dashboard.png"
     out.parent.mkdir(parents=True, exist_ok=True)
     render_training_dashboard(
-        hist, out, title=f"Training dashboard - {exp.name} ({len(epochs)} epochs)"
+        hist, out, title=f"Training dashboard - {exp.name} ({len(epochs)} epochs)",
+        # Sigma RANGE bounds -> per-epoch noise floor E[sigma^2] -> curriculum-normalized
+        # panels. `sigma_max_end` is what the val pipeline pins its (fixed) range to.
+        sigma_min=cfg.get("noise_sigma_min", 0.0),
+        val_sigma_max=cfg.get("sigma_max_end", 0.25),
+        additive=(cfg.get("noise_type", "additive") == "additive"),
     )
     logger.info(f"Saved training dashboard: {out}")
     return out
@@ -1116,12 +1338,20 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
         composite_additive_ratio: float = 0.5,
         multi_pass_k: int = 3,
         model_label: str = "Denoiser",
+        noise_sigma_min: float = 0.0,
+        val_sigma_max: Optional[float] = None,
     ):
         super().__init__()
         self.clean_batch = clean_batch
         self.sigma_max_var = sigma_max_var
         self.noise_type = noise_type
         self.model_label = model_label
+        # Sigma RANGE bounds, needed by the dashboard to compute the per-epoch noise
+        # floor E[sigma^2] and so de-confound the curriculum from the raw curves.
+        # `val_sigma_max` is the FIXED upper bound the val pipeline uses (sigma_max_end);
+        # the train upper bound is the live, ramping `sigma_max_var`.
+        self.noise_sigma_min = float(noise_sigma_min)
+        self.val_sigma_max = None if val_sigma_max is None else float(val_sigma_max)
         # Number of sequential passes scored/rendered in the multi-pass eval (additive
         # regimes only). Default 3 covers SC2 (passes 1->2->3). Eval/viz only.
         self.multi_pass_k = max(1, int(multi_pass_k))
@@ -1204,6 +1434,9 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
                 render_training_dashboard(
                     self._hist, self.viz_dir / "training_dashboard.png",
                     title="Training dashboard - epoch 0 (untrained baseline)",
+                    sigma_min=self.noise_sigma_min,
+                    val_sigma_max=self.val_sigma_max,
+                    additive=(self.noise_type == "additive"),
                 )
                 logger.info(
                     f"Epoch-0 baseline: val_loss={res.get('loss'):.4f} "
@@ -1236,6 +1469,9 @@ class DenoisingVisualizationCallback(keras.callbacks.Callback):
                 self._hist,
                 self.viz_dir / "training_dashboard.png",
                 title=f"Training dashboard - epoch {epoch + 1}",
+                sigma_min=self.noise_sigma_min,
+                val_sigma_max=self.val_sigma_max,
+                additive=(self.noise_type == "additive"),
             )
         except Exception as e:
             logger.warning(f"Dashboard render failed at epoch {epoch + 1}: {e}")
@@ -1735,6 +1971,11 @@ def train(
             noise_type=config.noise_type,
             composite_additive_ratio=config.composite_additive_ratio,
             model_label=f"{model_label} Denoiser",
+            # Sigma RANGE bounds for the dashboard's noise floor E[sigma^2]. The val
+            # pipeline pins its upper bound to sigma_max_end (see sigma_fixed_var), so
+            # the val floor is CONSTANT while the train floor ramps with the curriculum.
+            noise_sigma_min=config.noise_sigma_min,
+            val_sigma_max=config.sigma_max_end,
         )
     )
 
