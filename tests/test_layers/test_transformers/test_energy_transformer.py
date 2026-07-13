@@ -96,11 +96,18 @@ class TestHopfieldNetwork:
     # -- S6b: THE GRADIENT ORACLE ------------------------------------
 
     @pytest.mark.parametrize("activation", ACTIVATIONS)
-    def test_gradient_oracle(self, activation, sample_input):
+    @pytest.mark.parametrize("masked", [False, True])
+    def test_gradient_oracle(self, activation, masked, sample_input):
         """update(g) MUST equal -d/dg [ sum_b energy(g) ], for EVERY activation (S6b).
 
         This is what proves the energy/gradient PAIR is consistent. A crossed pair (relu
         energy + softmax r, or vice versa) runs, trains, and does not descend.
+
+        The `masked` cell is the iter-2 / R2 extension (C14): once `energy()` excludes the
+        PAD tokens from its token SUM, its gradient is exactly zero at those rows — so
+        `update()` must be zero there too, or it stops being `-dE/dg`. This is checked
+        TENSOR-WIDE (PAD rows included), which is the whole point: masking one of the pair
+        and not the other is invisible at the real-token rows (decisions.md D-005).
         """
         hopfield = HopfieldNetwork(
             dim=DIM, hopfield_dim=MEM, activation=activation, hopfield_beta=0.7,
@@ -111,13 +118,32 @@ class TestHopfieldNetwork:
         # Larger-variance g so the relu branch is not sitting on a dead half-plane.
         g = tf.Variable(sample_input * 2.0, dtype=tf.float32)
 
+        mask = None
+        if masked:
+            keep = np.ones((BATCH, TOKENS), dtype="bool")
+            keep[:, -2:] = False                      # the last 2 tokens are PAD
+            mask = keras.ops.convert_to_tensor(keep)
+
         with tf.GradientTape() as tape:
-            energy = tf.reduce_sum(hopfield.energy(g))
+            energy = tf.reduce_sum(hopfield.energy(g, mask=mask))
         grad = tape.gradient(energy, g)
 
         assert grad is not None, "energy() has no gradient path to g"
 
-        update = keras.ops.convert_to_numpy(hopfield.update(g))
+        update = keras.ops.convert_to_numpy(hopfield.update(g, mask=mask))
+
+        if masked:
+            # The masked rows must be EXACTLY zero (the masked energy does not depend on
+            # them at all), and the real rows must not be — otherwise the oracle below is
+            # comparing zeros with zeros.
+            assert np.abs(update[:, -2:, :]).max() == 0.0, (
+                "a masked (PAD) token got a NON-ZERO Hopfield update, but the masked "
+                "energy has zero gradient there — update() != -dE/dg (decisions.md D-005)"
+            )
+            assert np.abs(update[:, :-2, :]).max() > 1e-3, (
+                "the real tokens' update is ~0 — the masked oracle would pass vacuously"
+            )
+
         pos_grad = grad.numpy()  # tape.gradient(E, g) == +dE/dg; update must be its negation
 
         max_abs_update = float(np.abs(update).max())
@@ -1227,6 +1253,56 @@ class TestKerasMaskIsHonored:
             ),
         )
 
+    @pytest.mark.parametrize("num_pads", [3, 9])
+    def test_block_energy_is_pad_invariant(self, num_pads):
+        """C14 (iter-2 / R2): the PUBLIC energy trace must not count the PAD tokens.
+
+        `E = E_ATT + E_HN`. `E_ATT` was already pad-invariant (the keep mask zeroes the
+        masked key/query pairs), but `E_HN` summed the Hopfield energy over the PAD tokens
+        too — so the trace a caller monitors drifted with the padding, and the rows of a
+        variable-length batch became incomparable.
+
+        RED at HEAD (before the D-005 fix): +74.9% with 3 pads, +224.6% with 9 pads.
+        """
+        model, block = _padded_block_model(**{"return_energy": True})
+
+        # `_excite_block` deliberately excites the ATTENTION hardest (that is what the F-02
+        # tests need). Here the E_HN term is the one under test, so give it real weight in
+        # the total energy — otherwise a pad-polluted E_HN hides inside a much larger E_ATT
+        # and this guard barely bites.
+        _excite(block.hopfield, scale=0.6)
+
+        short = np.array([[1, 2, 3]], dtype="int32")
+        padded = np.array([[1, 2, 3] + [0] * num_pads], dtype="int32")
+
+        _, e_short = model(short)
+        _, e_pad = model(padded)
+        e_short = keras.ops.convert_to_numpy(e_short)
+        e_pad = keras.ops.convert_to_numpy(e_pad)
+
+        assert e_short.shape == (1, block.num_steps + 1)
+        assert e_pad.shape == (1, block.num_steps + 1)
+
+        # Anti-vacuity: an all-zero energy would make the comparison below meaningless.
+        assert np.abs(e_short).min() > 1e-1, (
+            f"the unpadded energy is ~0 ({e_short}) — the comparison would pass vacuously"
+        )
+
+        drift = float(np.abs(e_pad - e_short).max() / np.abs(e_short).max())
+        print(
+            f"\n[C14] pads={num_pads}: E(short)={e_short[0]}  E(padded)={e_pad[0]}  "
+            f"relative drift={drift:.3%}"
+        )
+        np.testing.assert_allclose(
+            e_pad, e_short, rtol=1e-4, atol=1e-3,
+            err_msg=(
+                f"{num_pads} PAD tokens shifted the reported energy by {drift:.1%}. The "
+                "energy is a REDUCTION over the token axis, so BOTH terms must exclude the "
+                "masked tokens — E_ATT via the keep mask and E_HN via its own token-sum mask "
+                "(decisions.md D-005). Assumption A6 covers the UPDATE, not the energy."
+            ),
+        )
+
     def test_compute_mask_contract(self, sample_input):
         """`compute_mask` returns `[mask, None]` with return_energy, else the mask itself."""
         token_mask = keras.ops.convert_to_tensor(
@@ -1247,7 +1323,19 @@ class TestKerasMaskIsHonored:
 
 
 class TestBlockMaskPrecedence:
-    """D-003 at the BLOCK level: `mask` AND `attention_mask` compose as a LOGICAL AND."""
+    """D-003 at the BLOCK level: `mask` AND `attention_mask` compose as a LOGICAL AND.
+
+    The AND is a claim about the ATTENTION keep mask (`_build_keep_mask`), and it is asserted
+    below on the REAL tokens' outputs — every row except the two masked ones — where it holds
+    EXACTLY (0.0).
+
+    The two masks are NOT interchangeable at the masked token's OWN row, and since D-005 they
+    are not meant to be: `attention_mask` is a pair-level KEY x QUERY keep mask (it can be
+    rank-3/rank-4, which has no per-token reading at all), whereas the Keras `mask` says the
+    stronger thing — *this position is not a token* — so a Keras-masked token is excluded from
+    the energy SUM and its own state is not evolved (both sub-updates are zero there). That
+    second fact is asserted here too: a Keras-masked row must come out EXACTLY as it went in.
+    """
 
     def test_keras_mask_and_attention_mask_are_anded(self, sample_input):
         j_keras, j_explicit = 3, 4
@@ -1281,14 +1369,38 @@ class TestBlockMaskPrecedence:
             "hiding the extra token changed nothing — the AND check would pass vacuously"
         )
 
-        max_abs_diff = float(np.abs(y_and - y_ref).max())
+        # The AND, on the REAL tokens (every row but the two masked ones). Measured 0.0.
+        real = [n for n in range(TOKENS) if n not in (j_keras, j_explicit)]
+        max_abs_diff = float(np.abs(y_and[:, real] - y_ref[:, real]).max())
         np.testing.assert_allclose(
-            y_and, y_ref, atol=1e-6,
+            y_and[:, real], y_ref[:, real], atol=1e-6,
             err_msg=(
                 f"mask + attention_mask is not a logical AND (diff={max_abs_diff:.3e}). "
                 "The block must forward BOTH masks to EnergyAttention, which ANDs them "
                 "inside _build_keep_mask (decisions.md D-003)."
             ),
+        )
+
+        # D-005: a KERAS-masked token is not a token. It contributes no energy and its state
+        # is not evolved — BOTH sub-updates are zero at its row — so it must come out exactly
+        # as it went in. This is the block-level guard on the masked Hopfield update: leave
+        # `HopfieldNetwork.update` unmasked and this row moves.
+        passthrough = float(
+            np.abs(y_and[:, j_keras] - sample_input[:, j_keras]).max()
+        )
+        assert passthrough == 0.0, (
+            f"a Keras-masked (PAD) token's state MOVED by {passthrough:.3e}. Its energy "
+            "contribution is zero, so its gradient is zero: both EnergyAttention.update "
+            "(via the keep mask) and HopfieldNetwork.update (via its token mask) must be "
+            "exactly 0 there (decisions.md D-005)."
+        )
+        # ...and the token hidden by the PAIR mask only is NOT claimed to pass through: an
+        # `attention_mask` is a key x query keep mask, not a "this is not a token" mask.
+        assert (
+            np.abs(y_and[:, j_explicit] - sample_input[:, j_explicit]).max() > 1e-3
+        ), (
+            "the attention_mask-hidden token passed through unchanged — then this test "
+            "cannot tell the two mask semantics apart and the assertion above is vacuous"
         )
 
 

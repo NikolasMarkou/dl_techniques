@@ -68,6 +68,41 @@ def _mask_dtype(compute_dtype: str) -> str:
     return "float64" if compute_dtype == "float64" else "float32"
 
 
+def _token_keep(
+    mask: keras.KerasTensor,
+    dtype: str,
+) -> keras.KerasTensor:
+    """Validate and cast a Keras-propagated rank-2 ``(B, N)`` per-token validity mask.
+
+    The SINGLE place the rank-2 contract for the Keras-propagated ``mask`` lives. It has two
+    call sites — :meth:`EnergyAttention._build_keep_mask` (which then expands it symmetrically
+    over the key/query axes) and ``HopfieldNetwork.energy`` / ``.update`` in
+    ``energy_transformer.py`` (which use it per-token, un-expanded, to drop PAD tokens from the
+    energy SUM). Do NOT re-implement the rank check at either call site: a second copy is a
+    second error message to drift.
+
+    :param mask: Boolean (or 0/1) per-token validity mask of shape ``(B, N)``.
+    :type mask: keras.KerasTensor
+    :param dtype: Dtype to cast into — the MASK compute dtype (>= float32) wherever the value
+        feeds a ``-1e9`` bias or a reduction (D-009), the layer's compute dtype where it merely
+        gates an already-computed tensor.
+    :type dtype: str
+
+    :return: 0/1 tensor of shape ``(B, N)`` in ``dtype``.
+    :rtype: keras.KerasTensor
+
+    :raises ValueError: If ``mask`` is not rank 2.
+    """
+    rank = len(mask.shape)
+    if rank != 2:
+        raise ValueError(
+            "the Keras-propagated `mask` must have rank 2 (B, N) — a per-token "
+            f"validity mask — got rank {rank}. Pass a rank-3/rank-4 mask as "
+            "`attention_mask` instead."
+        )
+    return ops.cast(mask, dtype)
+
+
 def _symmetric_token_keep(token_keep: keras.KerasTensor) -> keras.KerasTensor:
     """Expand a rank-2 ``(B, N)`` per-token VALIDITY mask to a ``(B, 1, N, N)`` keep tensor.
 
@@ -404,14 +439,7 @@ class EnergyAttention(keras.layers.Layer):
             # arrives BOOLEAN, and it must NEVER land in fp16 where `-1e9` is `-inf` (D-009).
             # Multiplying the keep factors IS the logical AND (D-003) and composes with any
             # rank of `attention_mask` above.
-            keras_mask = ops.cast(mask, mask_dtype)
-            keras_rank = len(keras_mask.shape)
-            if keras_rank != 2:
-                raise ValueError(
-                    "the Keras-propagated `mask` must have rank 2 (B, N) — a per-token "
-                    f"validity mask — got rank {keras_rank}. Pass a rank-3/rank-4 mask as "
-                    "`attention_mask` instead."
-                )
+            keras_mask = _token_keep(mask, mask_dtype)       # rank-2 contract, ONE place
             keep = keep * _symmetric_token_keep(keras_mask)
 
         if not self.attn_self:
