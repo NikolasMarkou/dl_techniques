@@ -28,8 +28,14 @@ import tempfile
 import keras
 import numpy as np
 import pytest
+import tensorflow as tf
 
-from dl_techniques.layers.norms.energy_layer_norm import EnergyLayerNorm
+# LESSONS [I:4]: TF32 truncates matmul mantissas on Ampere+ and makes an exact numeric
+# comparison a coin-flip. The Jacobian-symmetry check below is exactly that kind of test.
+tf.config.experimental.enable_tensor_float_32_execution(False)
+
+from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
+from dl_techniques.layers.norms.energy_layer_norm import EnergyLayerNorm, _GAMMA_FLOOR
 from dl_techniques.layers.norms.factory import create_normalization_layer
 
 
@@ -275,6 +281,133 @@ class TestEnergyLayerNorm:
         assert tuple(y.shape) == input_shape
         assert tuple(layer.gamma.shape) == ()
         assert tuple(layer.delta.shape) == (input_shape[-1],)
+
+
+class TestGammaPositivityConstraint:
+    """S15: `gamma > 0` is ENFORCED, not merely documented.
+
+    `gamma > 0` is the PRECONDITION for the PSD Hessian of the Lagrangian — i.e. the
+    precondition for the ENTIRE energy-descent guarantee. Iteration 1 stated it as an
+    invariant and enforced it NOWHERE: an adversarial reviewer set `gamma = -1.0` and the
+    block silently performed energy ASCENT (max diff(E) = +1.3e4), with no error and no
+    failing test.
+    """
+
+    def test_constraint_is_present_by_default(self, sample_input):
+        layer = EnergyLayerNorm()
+        layer(sample_input, training=False)
+
+        assert layer.gamma.constraint is not None, (
+            "gamma has NO constraint — a trained gamma < 0 silently inverts the descent"
+        )
+        assert isinstance(layer.gamma_constraint, ValueRangeConstraint)
+        assert layer.gamma_constraint.min_value == pytest.approx(_GAMMA_FLOOR)
+
+    def test_constraint_is_ACTIVE_after_an_optimizer_step(self, sample_input):
+        """Not just attached — it must actually PROJECT gamma back above the floor."""
+        layer = EnergyLayerNorm()
+        layer(sample_input, training=False)
+
+        # Drive gamma hard negative, then let the optimizer's constraint hook fire.
+        layer.gamma.assign(-5.0)
+        assert float(keras.ops.convert_to_numpy(layer.gamma)) == -5.0
+
+        optimizer = keras.optimizers.SGD(learning_rate=0.0)   # lr=0: ONLY the constraint acts
+        optimizer.build(layer.trainable_variables)
+        zeros = [keras.ops.zeros_like(v) for v in layer.trainable_variables]
+        optimizer.apply_gradients(zip(zeros, layer.trainable_variables))
+
+        gamma = float(keras.ops.convert_to_numpy(layer.gamma))
+        assert gamma >= _GAMMA_FLOOR, (
+            f"gamma = {gamma} is below the floor {_GAMMA_FLOOR} AFTER an optimizer step — "
+            "the constraint is attached but INERT"
+        )
+
+    def test_constraint_can_be_disabled_DELIBERATELY(self, sample_input):
+        """Overridable — but only by explicitly passing None, never silently."""
+        layer = EnergyLayerNorm(gamma_constraint=None)
+        layer(sample_input, training=False)
+        assert layer.gamma.constraint is None
+
+    def test_constraint_round_trips_through_get_config(self, sample_input, input_shape):
+        """If the constraint were dropped from get_config, a RELOADED model would train
+        itself into energy ascent — the exact defect the constraint exists to stop."""
+        original = EnergyLayerNorm()
+        original(sample_input, training=False)
+
+        restored = EnergyLayerNorm.from_config(original.get_config())
+        restored(sample_input, training=False)
+
+        assert isinstance(restored.gamma_constraint, ValueRangeConstraint)
+        assert restored.gamma.constraint is not None
+        assert restored.gamma_constraint.min_value == pytest.approx(_GAMMA_FLOOR)
+
+        # An explicit None must round-trip as None, NOT silently re-acquire the default.
+        unconstrained = EnergyLayerNorm(gamma_constraint=None)
+        unconstrained(sample_input, training=False)
+        assert (
+            EnergyLayerNorm.from_config(unconstrained.get_config()).gamma_constraint is None
+        )
+
+
+class TestJacobianSymmetry:
+    """S16: the SCALAR-gamma property, guarded BEHAVIORALLY (not by a shape check).
+
+    `g = dL/dx` for `L = D*gamma*sqrt(var+eps) + sum_j delta_j x_j`. The Jacobian
+    `J = dg/dx` is therefore the HESSIAN of a scalar L, and a Hessian is NECESSARILY
+    SYMMETRIC. A per-feature VECTOR gamma breaks that symmetry — so it is not the gradient
+    of ANY scalar potential and the descent guarantee evaporates.
+
+    Iteration 1 guarded the scalar-gamma property with a SHAPE assertion only. A reviewer
+    patched in a vector gamma and S7 still descended: nothing BEHAVIORAL protected the
+    property that justifies this class existing. This test is that guard.
+
+    `tf.GradientTape().jacobian` is legitimate HERE — autodiff is forbidden only in `src/`.
+    """
+
+    @staticmethod
+    def _jacobian(layer, x_np):
+        """J[i, j] = d g_i / d x_j for a SINGLE token vector."""
+        x = tf.Variable(x_np.reshape(1, 1, -1), dtype=tf.float32)
+        with tf.GradientTape() as tape:
+            g = layer(x, training=False)
+            g_flat = tf.reshape(g, [-1])                       # (D,)
+        j = tape.jacobian(g_flat, x)                           # (D, 1, 1, D)
+        return np.asarray(tf.reshape(j, (x_np.size, x_np.size)))
+
+    def test_jacobian_is_symmetric(self):
+        rng = np.random.default_rng(17)
+        x_np = (rng.standard_normal(16) * 2.0 + 0.5).astype("float32")
+
+        layer = EnergyLayerNorm()
+        layer.build((1, 1, 16))
+        layer.gamma.assign(1.7)                                # a SCALAR, as designed
+        layer.delta.assign(rng.standard_normal(16).astype("float32"))
+
+        j = self._jacobian(layer, x_np)
+        asym = float(np.abs(j - j.T).max())
+
+        # Anti-vacuity: a zero Jacobian would be symmetric for free.
+        assert np.abs(j).max() > 1e-2, f"Jacobian is ~0 (max |J| = {np.abs(j).max():.3e})"
+        assert asym < 1e-5, (
+            f"dg/dx is NOT symmetric (max |J - J^T| = {asym:.3e}). It must be: it is the "
+            "HESSIAN of the Lagrangian L. An asymmetric J means `g` is not the gradient of "
+            "ANY scalar potential — the ET descent guarantee is FALSE. Did gamma become a "
+            "per-feature VECTOR?"
+        )
+
+
+class TestDtypePolicies:
+    """S13: EnergyLayerNorm is FINITE under every global dtype policy."""
+
+    def test_no_nan_under_mixed_precision(self, dtype_policy, sample_input, input_shape):
+        layer = EnergyLayerNorm()
+        out = keras.ops.convert_to_numpy(layer(sample_input, training=False))
+
+        assert out.shape == input_shape
+        assert np.isnan(out).sum() == 0, f"{np.isnan(out).sum()}/{out.size} NaN"
+        assert np.isinf(out).sum() == 0, f"{np.isinf(out).sum()}/{out.size} Inf"
+        assert np.all(np.isfinite(out))
 
 
 if __name__ == "__main__":

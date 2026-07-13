@@ -82,6 +82,11 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms.energy_layer_norm import EnergyLayerNorm
 from dl_techniques.layers.attention.energy_attention import EnergyAttention
 
+# The "reduce in AT LEAST float32" rule (D-009). IMPORTED, not re-implemented: the dtype
+# rule must have exactly ONE definition, or the two ET modules drift apart the first time
+# one of them is fixed. See decisions.md D-009.
+from dl_techniques.layers.attention.energy_attention import _mask_dtype
+
 # ---------------------------------------------------------------------
 
 # The ONLY supported Hopfield activations. See the D-005 anchor in `__init__` for why
@@ -311,15 +316,30 @@ class HopfieldNetwork(keras.layers.Layer):
         if not self.built:
             self.build(g.shape)
 
+        # C-2: this is a PUBLIC method, callable OUTSIDE `__call__` — where Keras has NOT
+        # opened an autocast scope. Without this cast a float32 `g` meets float16 `xi` under
+        # `mixed_float16` and the einsum raises InvalidArgumentError. The duck-typed
+        # energy()/update() convention is the layer's ADVERTISED surface, so it must be safe
+        # to call standalone.
+        g = ops.cast(g, self.compute_dtype)
+
         h = ops.einsum('kd,bnd->bnk', self.xi, g)        # (B, N, K)
+
+        # The reduction runs in AT LEAST float32: E_HN sums over N tokens x K memories, and
+        # an fp16 accumulator overflows (max 65504) long before the layer itself misbehaves.
+        # Same reasoning as the D-009 anchor in `energy_attention.py`.
+        reduce_dtype = _mask_dtype(self.compute_dtype)
+        h = ops.cast(h, reduce_dtype)
 
         if self.activation == 'relu':
             r = ops.relu(h)
-            return -0.5 * ops.sum(ops.square(r), axis=(1, 2))            # (B,)
+            energy = -0.5 * ops.sum(ops.square(r), axis=(1, 2))          # (B,)
+        else:
+            # 'softmax' — G is NOT separable per memory k: logsumexp over the MEMORY axis.
+            lse = ops.logsumexp(self.hopfield_beta * h, axis=-1)         # (B, N)
+            energy = -(1.0 / self.hopfield_beta) * ops.sum(lse, axis=1)  # (B,)
 
-        # 'softmax' — G is NOT separable per memory k: logsumexp over the MEMORY axis.
-        lse = ops.logsumexp(self.hopfield_beta * h, axis=-1)             # (B, N)
-        return -(1.0 / self.hopfield_beta) * ops.sum(lse, axis=1)        # (B,)
+        return ops.cast(energy, self.compute_dtype)
 
     # -----------------------------------------------------------------
 
@@ -354,6 +374,9 @@ class HopfieldNetwork(keras.layers.Layer):
         """
         if not self.built:
             self.build(g.shape)
+
+        # C-2: cast at the head of the public method — see the note in `energy()`.
+        g = ops.cast(g, self.compute_dtype)
 
         h = ops.einsum('kd,bnd->bnk', self.xi, g)        # (B, N, K)
 

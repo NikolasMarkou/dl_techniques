@@ -880,6 +880,30 @@ class TestDtypePolicies:
         assert np.all(np.isfinite(out))
 
     @pytest.mark.parametrize("hopfield_activation", ACTIVATIONS)
+    def test_hopfield_energy_and_update_callable_directly(
+        self, dtype_policy, hopfield_activation
+    ):
+        """S14: `HopfieldNetwork.energy()` / `.update()` are safe OUTSIDE `__call__`.
+
+        There is no autocast scope outside `__call__`, so before the fix a float32 `g` met
+        a float16 `xi` here and the einsum raised `InvalidArgumentError`. These are the
+        methods `EnergyTransformer` calls and the duck-typed convention advertises.
+        """
+        layer = HopfieldNetwork(
+            dim=DIM, hopfield_dim=MEM, activation=hopfield_activation
+        )
+        g = keras.random.normal((BATCH, TOKENS, DIM))   # float32, NOT pre-cast by the caller
+        layer.build(g.shape)
+
+        e = keras.ops.convert_to_numpy(layer.energy(g))
+        u = keras.ops.convert_to_numpy(layer.update(g))
+
+        assert e.shape == (BATCH,)
+        assert u.shape == (BATCH, TOKENS, DIM)
+        assert np.all(np.isfinite(e)), f"non-finite energy: {e}"
+        assert np.all(np.isfinite(u))
+
+    @pytest.mark.parametrize("hopfield_activation", ACTIVATIONS)
     def test_reported_energy_is_finite_under_every_dtype(
         self, dtype_policy, hopfield_activation
     ):

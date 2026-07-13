@@ -13,7 +13,7 @@ positive-semi-definite Hessian that makes the ET energy-descent guarantee provab
 """
 
 import keras
-from keras import ops, initializers
+from keras import ops, initializers, constraints
 from typing import Any, Dict, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -21,8 +21,32 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
 
 # ---------------------------------------------------------------------
+
+# DECISION plan_2026-07-13_57c9833e/D-010
+# The DEFAULT lower bound on `gamma`. `gamma > 0` is not a style preference — it is the
+# PRECONDITION for the PSD Hessian of the Lagrangian, i.e. the precondition for the ENTIRE
+# energy-descent guarantee of the Energy Transformer:
+#     dE/dt = -(dE/dg)^T (dg/dx) (dE/dg) <= 0   requires  dg/dx  PSD  requires  gamma > 0.
+# Iteration 1 stated this as a plan invariant and enforced it NOWHERE: an adversarial
+# reviewer set `gamma = -1.0` and the block silently performed energy ASCENT (max diff(E) =
+# +1.3e4) with no error and no failing test.
+#
+# WHY A STRICTLY POSITIVE FLOOR AND NOT `keras.constraints.NonNeg()`:
+# NonNeg permits gamma == 0 EXACTLY. At gamma == 0 the Hessian is the ZERO matrix — still
+# technically PSD, so the guarantee is not violated, but it becomes VACUOUS: `g` collapses
+# to the constant `delta`, the update stops depending on the token state, and dE/dt == 0.
+# The descent test would stay green on a dead layer. A small strictly-positive floor keeps
+# the Hessian PD on the mean-zero subspace and keeps the guarantee non-vacuous, and it also
+# means gradient descent cannot park gamma at an exactly-degenerate value.
+#
+# WHAT NOT TO DO: do not remove this default to "match the paper" (the paper does not
+# constrain gamma because it never trains gamma negative; we ship a layer other people
+# train). The constraint IS overridable — pass `gamma_constraint=None` — but that must be a
+# DELIBERATE act, never a silent one. See decisions.md D-010.
+_GAMMA_FLOOR = 1e-3
 
 
 @keras.saving.register_keras_serializable()
@@ -68,6 +92,15 @@ class EnergyLayerNorm(keras.layers.Layer):
     :param delta_initializer: Initializer for the ``(D,)`` offset ``delta``.
         Defaults to ``'zeros'``.
     :type delta_initializer: Union[str, initializers.Initializer]
+    :param gamma_constraint: Constraint applied to ``gamma`` after every optimizer step.
+        **Defaults to a strictly-positive floor** (``ValueRangeConstraint(min_value=1e-3)``)
+        because ``gamma > 0`` is the PRECONDITION for the PSD Hessian that makes the Energy
+        Transformer's descent guarantee true. **Without it the guarantee is silently FALSE**:
+        a trained ``gamma < 0`` makes ``dg/dx`` negative-definite and the block performs
+        energy **ASCENT** — no error, no NaN, no failing test (measured: max ``diff(E)`` =
+        ``+1.3e4`` at ``gamma = -1.0``). Pass ``None`` to disable it — which is a legitimate
+        thing to want, but it must be a DELIBERATE choice. See the D-010 anchor above.
+    :type gamma_constraint: Optional[constraints.Constraint]
 
     :raises ValueError: If ``epsilon <= 0``.
 
@@ -98,11 +131,17 @@ class EnergyLayerNorm(keras.layers.Layer):
     # headline guarantee. Omitted per the use-before-reuse / earned-abstraction rule.
     # See decisions.md D-005.
 
+    # Sentinel: distinguishes "caller said nothing" (-> apply the default positivity floor)
+    # from "caller explicitly said None" (-> deliberately UNCONSTRAINED gamma). Without it,
+    # `gamma_constraint=None` could not turn the constraint OFF.
+    _DEFAULT_CONSTRAINT = "__default__"
+
     def __init__(
         self,
         epsilon: float = 1e-5,
         gamma_initializer: Union[str, initializers.Initializer] = 'ones',
         delta_initializer: Union[str, initializers.Initializer] = 'zeros',
+        gamma_constraint: Any = _DEFAULT_CONSTRAINT,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -115,6 +154,19 @@ class EnergyLayerNorm(keras.layers.Layer):
         self.epsilon = float(epsilon)
         self.gamma_initializer = initializers.get(gamma_initializer)
         self.delta_initializer = initializers.get(delta_initializer)
+
+        # DECISION plan_2026-07-13_57c9833e/D-010
+        # ON BY DEFAULT. Do NOT flip this default to `None` "because the paper doesn't
+        # constrain gamma": the paper never trains gamma negative, and we ship a trainable
+        # layer to people who will. `gamma < 0` => the Lagrangian's Hessian dg/dx is NOT PSD
+        # => the block silently performs energy ASCENT while still running, still training
+        # and still emitting finite output. Reused (not re-implemented) from
+        # `dl_techniques.constraints.value_range_constraint`. See decisions.md D-010.
+        self.gamma_constraint = (
+            ValueRangeConstraint(min_value=_GAMMA_FLOOR)
+            if gamma_constraint is self._DEFAULT_CONSTRAINT
+            else constraints.get(gamma_constraint)
+        )
 
         # ----- weights are created in build() -----
         self.gamma: Optional[keras.Variable] = None
@@ -151,11 +203,16 @@ class EnergyLayerNorm(keras.layers.Layer):
             )
 
         # gamma is a SCALAR (paper eq. 1). This is NOT a bug and must NOT be
-        # "fixed" to a per-feature vector: a vector gamma breaks g = dL/dx.
+        # "fixed" to a per-feature vector: a vector gamma breaks g = dL/dx. A vector gamma
+        # is not merely "different" — it makes the Jacobian dg/dx ASYMMETRIC, so it is no
+        # longer the Hessian of ANY scalar Lagrangian and the descent guarantee evaporates.
+        # That is guarded BEHAVIORALLY by `test_jacobian_is_symmetric` (S16), not just by
+        # the shape assertion below it.
         self.gamma = self.add_weight(
             name="gamma",
             shape=(),
             initializer=self.gamma_initializer,
+            constraint=self.gamma_constraint,   # positivity floor by default (D-010)
             trainable=True,
             dtype=self.dtype,
         )
@@ -231,6 +288,10 @@ class EnergyLayerNorm(keras.layers.Layer):
             'epsilon': self.epsilon,
             'gamma_initializer': initializers.serialize(self.gamma_initializer),
             'delta_initializer': initializers.serialize(self.delta_initializer),
+            # Serialized EXPLICITLY (D-010). If it were dropped from get_config, a saved
+            # model would silently reload with an UNCONSTRAINED gamma and could then train
+            # itself into energy ascent — the exact defect this constraint exists to stop.
+            'gamma_constraint': constraints.serialize(self.gamma_constraint),
         })
         return config
 
@@ -250,6 +311,13 @@ class EnergyLayerNorm(keras.layers.Layer):
         for key in ('gamma_initializer', 'delta_initializer'):
             if key in config:
                 config[key] = initializers.deserialize(config[key])
+        if 'gamma_constraint' in config:
+            # NOTE: a serialized `None` round-trips as an explicit `None` (deliberately
+            # unconstrained), NOT as the default floor — the sentinel is only for a caller
+            # who never mentioned the argument at all.
+            config['gamma_constraint'] = constraints.deserialize(
+                config['gamma_constraint']
+            )
         return cls(**config)
 
 # ---------------------------------------------------------------------
