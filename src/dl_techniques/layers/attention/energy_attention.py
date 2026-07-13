@@ -28,10 +28,44 @@ from dl_techniques.utils.logger import logger
 
 # ---------------------------------------------------------------------
 
-# Finite (NOT -inf) additive bias for masked logits. Load-bearing: `logsumexp` of an
-# all `-inf` row is `-inf`, and `0 * -inf = NaN`. Matches the house convention in
-# `multi_head_cross_attention.py:406`.
+# DECISION plan_2026-07-13_57c9833e/D-009
+# `-1e9` is NOT a dtype-independent "finite" number: `np.float16(-1e9) == -inf`. This
+# constant is therefore ONLY usable inside a float32 computation, and this module now
+# guarantees that by CONSTRUCTION — see `_MASK_COMPUTE_DTYPE` and `_project()` below, where
+# the whole logits -> bias -> softmax/logsumexp chain runs in float32 and is cast back to
+# the compute dtype at the end.
+#
+# WHAT NOT TO DO (this bug SHIPPED once and was caught by an adversarial reviewer, and
+# LESSONS [I:4] had already recorded the identical failure mode in a different layer):
+#   * Do NOT apply this bias directly in the compute dtype. Under
+#     `mixed_precision.set_global_policy('mixed_float16')` it becomes `-inf`.
+#   * Do NOT restore the arithmetic form `mask_bias = (1 - keep) * _MASK_BIAS_VALUE`. At
+#     every UNMASKED position that is `0 * -inf = NaN` — which made EnergyAttention and
+#     EnergyTransformer emit 512/512 NaN under mixed_float16 with NO mask supplied. It is
+#     replaced by `ops.where(keep > 0, 0.0, _MASK_BIAS_VALUE)`, which CANNOT produce
+#     `0 * inf` at all: the failure mode is removed structurally, not merely numerically.
+#   * Do NOT "simplify" this into a per-dtype magic constant (e.g. `finfo(dtype).min / 2`).
+#     A dtype-dependent constant is a second thing to get wrong, and fp16's usable range is
+#     too narrow to both zero a softmax AND keep comfortable headroom.
+# See decisions.md D-009.
 _MASK_BIAS_VALUE = -1e9
+
+
+def _mask_dtype(compute_dtype: str) -> str:
+    """Dtype in which the masked-softmax / logsumexp chain is evaluated.
+
+    Always AT LEAST float32, regardless of the global mixed-precision policy, so that
+    ``_MASK_BIAS_VALUE`` is finite by construction (D-009) and so the ``logsumexp`` is not
+    evaluated in fp16. A ``float64`` policy is honored rather than silently downcast.
+
+    :param compute_dtype: The layer's compute dtype (e.g. ``'float16'`` under
+        ``mixed_float16``).
+    :type compute_dtype: str
+
+    :return: ``'float64'`` if the layer already computes in float64, else ``'float32'``.
+    :rtype: str
+    """
+    return "float64" if compute_dtype == "float64" else "float32"
 
 
 @keras.saving.register_keras_serializable()
@@ -237,7 +271,7 @@ class EnergyAttention(keras.layers.Layer):
         self,
         g: keras.KerasTensor,
         attention_mask: Optional[keras.KerasTensor],
-    ) -> keras.KerasTensor:
+    ) -> Tuple[keras.KerasTensor, bool]:
         """Normalize the user KEEP mask to a ``(b, h, n, m)``-broadcastable 0/1 tensor.
 
         # DECISION plan_2026-07-13_57c9833e/D-006
@@ -275,18 +309,29 @@ class EnergyAttention(keras.layers.Layer):
             heads), or ``(B, H, N, N)``. ``None`` means "attend everywhere".
         :type attention_mask: Optional[keras.KerasTensor]
 
-        :return: A 0/1 ``keep`` tensor broadcastable to ``(B, H, N, N)`` with axis 2 = key
-            index ``n`` and axis 3 = query index ``m``.
-        :rtype: keras.KerasTensor
+        :return: ``(keep, is_masked)``. ``keep`` is a 0/1 tensor in ``float32`` (NOT the
+            compute dtype — see the D-009 anchor at ``_MASK_BIAS_VALUE``), broadcastable to
+            ``(B, H, N, N)`` with axis 2 = key index ``n`` and axis 3 = query index ``m``.
+            ``is_masked`` is a **Python** bool: ``False`` means nothing is masked anywhere
+            (no user mask AND ``attn_self=True``), so the additive bias can be skipped
+            entirely — the sibling's fast path, and the reason the sibling never hit the
+            fp16 ``-inf`` bug.
+        :rtype: Tuple[keras.KerasTensor, bool]
 
         :raises ValueError: If ``attention_mask`` has an unsupported rank.
         """
         num_tokens = ops.shape(g)[1]
+        mask_dtype = _mask_dtype(self.compute_dtype)
+
+        # NOTE: `is_masked` is a PYTHON bool, resolvable at trace time — it depends only on
+        # `attn_self` and on whether a mask tensor was passed, never on tensor VALUES. It is
+        # therefore graph-safe.
+        is_masked = (attention_mask is not None) or (not self.attn_self)
 
         if attention_mask is None:
-            keep = ops.ones((1, 1, 1, 1), dtype=self.compute_dtype)
+            keep = ops.ones((1, 1, 1, 1), dtype=mask_dtype)
         else:
-            mask = ops.cast(attention_mask, self.compute_dtype)
+            mask = ops.cast(attention_mask, mask_dtype)
             rank = len(mask.shape)
             if rank == 2:
                 # (B, N) token-validity mask -> (B, 1, N, N), applied SYMMETRICALLY:
@@ -309,10 +354,10 @@ class EnergyAttention(keras.layers.Layer):
 
         if not self.attn_self:
             # Always-on diagonal exclusion (n == m), ANDed with the user mask.
-            eye = ops.eye(num_tokens, dtype=self.compute_dtype)          # (N, N) = (n, m)
+            eye = ops.eye(num_tokens, dtype=mask_dtype)                  # (N, N) = (n, m)
             keep = keep * (1.0 - ops.reshape(eye, (1, 1, num_tokens, num_tokens)))
 
-        return keep
+        return keep, is_masked
 
     # -----------------------------------------------------------------
     # Core: shared projections
@@ -330,20 +375,42 @@ class EnergyAttention(keras.layers.Layer):
         :param attention_mask: Optional KEEP mask (see :meth:`_build_keep_mask`).
         :type attention_mask: Optional[keras.KerasTensor]
 
-        :return: ``(K, Q, logits, keep)`` with ``K``/``Q`` of shape ``(B, Y, H, N)`` and
-            ``logits``/``keep`` broadcastable to ``(B, H, N, N)`` (``n`` = key axis 2).
+        ``K`` and ``Q`` come back in the **compute dtype** (they feed the gradient einsums,
+        which contract against the compute-dtype weights). ``logits`` and ``keep`` come back
+        in **float32**, unconditionally — see the D-009 anchor at ``_MASK_BIAS_VALUE``.
+
+        :return: ``(K, Q, logits, keep)`` with ``K``/``Q`` of shape ``(B, Y, H, N)`` in the
+            compute dtype and ``logits``/``keep`` broadcastable to ``(B, H, N, N)`` in
+            float32 (``n`` = key axis 2).
         :rtype: Tuple[keras.KerasTensor, ...]
         """
-        keep = self._build_keep_mask(g, attention_mask)
+        keep, is_masked = self._build_keep_mask(g, attention_mask)
 
         k = ops.einsum('yhd,bnd->byhn', self.w_key, g)      # (B, Y, H, N)  n = KEY
         q = ops.einsum('yhd,bmd->byhm', self.w_query, g)    # (B, Y, H, N)  m = QUERY
         a = ops.einsum('byhn,byhm->bhnm', k, q)             # (B, H, N, N)
 
-        # FINITE -1e9, never -inf: logsumexp of an all -inf row is -inf, and the
-        # subsequent `0 * -inf` (a fully-masked column) would be NaN.
-        mask_bias = (1.0 - keep) * _MASK_BIAS_VALUE
-        logits = self._beta * a + mask_bias                 # (B, H, N, N)
+        # DECISION plan_2026-07-13_57c9833e/D-009
+        # (a) The ENTIRE logits -> bias -> softmax/logsumexp chain runs in float32, so
+        #     `_MASK_BIAS_VALUE` is finite BY CONSTRUCTION under ANY global policy (in fp16
+        #     it would be `-inf`). This is also the numerically right thing to do for a
+        #     `logsumexp` under mixed precision.
+        # (b) The bias is applied via `ops.where`, never as `(1 - keep) * NEG`: `where`
+        #     cannot produce `0 * inf`, so the NaN failure mode is gone STRUCTURALLY and not
+        #     just by virtue of the dtype.
+        # (c) When nothing is masked anywhere (no user mask AND `attn_self=True`) the bias
+        #     is SKIPPED entirely — the sibling's fast path.
+        # Do NOT collapse any of the three. See decisions.md D-009.
+        logits = ops.cast(a, _mask_dtype(self.compute_dtype)) * self._beta  # (B,H,N,N) f32
+        if is_masked:
+            # Both `where` branches are tensors IN THE MASK DTYPE — a bare Python `0.0` /
+            # `-1e9` pair gets promoted to float32 and then collides with a float64 `logits`.
+            bias = ops.where(
+                keep > 0.0,
+                ops.zeros_like(keep),
+                ops.full_like(keep, _MASK_BIAS_VALUE),
+            )
+            logits = logits + bias
 
         return k, q, logits, keep
 
@@ -381,7 +448,13 @@ class EnergyAttention(keras.layers.Layer):
         if not self.built:
             self.build(g.shape)
 
-        _, _, logits, keep = self._project(g, attention_mask)
+        # C-2: this is a PUBLIC method, callable OUTSIDE `__call__` — where Keras has NOT
+        # opened an autocast scope. Without this cast a float32 `g` meets float16 weights
+        # under `mixed_float16` and the einsum raises InvalidArgumentError. The factory
+        # registry ADVERTISES this method, so it must be safe standalone.
+        g = ops.cast(g, self.compute_dtype)
+
+        _, _, logits, keep = self._project(g, attention_mask)   # logits, keep: float32
 
         # logsumexp over the KEY axis n (axis=2) -> (B, H, N) indexed by (b, h, m).
         lse = ops.logsumexp(logits, axis=2)
@@ -390,10 +463,12 @@ class EnergyAttention(keras.layers.Layer):
         # column must contribute EXACTLY 0 energy. Independent of `g` -> contributes no
         # gradient path (the autodiff oracle sees it as a constant).
         col_valid = ops.cast(
-            ops.sum(keep, axis=2) > 0.0, self.compute_dtype
+            ops.sum(keep, axis=2) > 0.0, _mask_dtype(self.compute_dtype)
         )                                                   # (B, H, N) or broadcastable
 
-        return -(1.0 / self._beta) * ops.sum(lse * col_valid, axis=(1, 2))  # (B,)
+        # Reduced in float32 (a large fp16 sum would overflow), cast back at the boundary.
+        energy = -(1.0 / self._beta) * ops.sum(lse * col_valid, axis=(1, 2))  # (B,)
+        return ops.cast(energy, self.compute_dtype)
 
     # -----------------------------------------------------------------
 
@@ -420,14 +495,20 @@ class EnergyAttention(keras.layers.Layer):
         if not self.built:
             self.build(g.shape)
 
-        k, q, logits, keep = self._project(g, attention_mask)
+        # C-2: cast at the head of the public method — see the note in `energy()`.
+        g = ops.cast(g, self.compute_dtype)
+
+        k, q, logits, keep = self._project(g, attention_mask)   # logits, keep: float32
 
         # Softmax over the KEY axis n, then ZERO the masked keys. The post-softmax `* keep`
         # is NOT redundant with the additive -1e9 bias: softmax of an ALL -1e9 row returns
         # a UNIFORM 1/N, which is WRONG, and ET generates such rows by construction
         # (attn_self=False with N == 1). Additive biasing alone cannot fix a fully-masked
         # row. See decisions.md D-006.
-        omega = ops.softmax(logits, axis=2) * keep          # (B, H, N, N)
+        # The softmax itself is evaluated in float32 (D-009); `omega` is cast back to the
+        # compute dtype at the boundary, to contract with the compute-dtype K/Q/weights.
+        omega = ops.softmax(logits, axis=2) * keep          # (B, H, N, N), float32
+        omega = ops.cast(omega, self.compute_dtype)
 
         # Term 1: token i in the QUERY role. This is the only term vanilla attention has
         # (with an implied value matrix V = (W^Q)^T K).

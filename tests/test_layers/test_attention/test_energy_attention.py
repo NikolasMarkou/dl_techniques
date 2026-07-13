@@ -410,6 +410,75 @@ class TestEnergyAttention:
             )
 
 
+class TestDtypePolicies:
+    """S13/S14: EnergyAttention is FINITE under every global dtype policy.
+
+    Iteration 1 shipped `_MASK_BIAS_VALUE = -1e9` applied as `(1 - keep) * _MASK_BIAS_VALUE`
+    in the COMPUTE dtype. Under `mixed_float16` that constant is `-inf`, and `keep` is
+    ALWAYS constructed, so every UNMASKED position computed `0 * -inf = NaN`:
+    **512/512 NaN, with no mask supplied** — measured, not hypothetical. No success
+    criterion looked for it. This class is that missing criterion, and it is parametrized
+    over the dtype PERMANENTLY (via the `dtype_policy` fixture in
+    `tests/test_layers/conftest.py`, which also guarantees the global policy is restored).
+
+    The `N == 1, attn_self=False` cell is the fully-masked degenerate case — every entry of
+    the attention matrix is masked out — and is the one most likely to NaN.
+    """
+
+    @pytest.mark.parametrize("attn_self", [True, False])
+    @pytest.mark.parametrize("use_mask", [False, True])
+    @pytest.mark.parametrize("num_tokens", [1, 8])
+    def test_no_nan_under_mixed_precision(
+        self, dtype_policy, attn_self, use_mask, num_tokens
+    ):
+        layer = EnergyAttention(dim=DIM, num_heads=HEADS, attn_self=attn_self)
+        x = keras.random.normal((BATCH, num_tokens, DIM))
+
+        mask = None
+        if use_mask:
+            keep = np.ones((BATCH, num_tokens), dtype="float32")
+            keep[:, -1] = 0.0            # drop the last token
+            mask = keras.ops.convert_to_tensor(keep)
+
+        out = keras.ops.convert_to_numpy(layer(x, attention_mask=mask))
+
+        assert out.shape == (BATCH, num_tokens, DIM)
+        assert np.isnan(out).sum() == 0, f"{np.isnan(out).sum()}/{out.size} NaN"
+        assert np.isinf(out).sum() == 0, f"{np.isinf(out).sum()}/{out.size} Inf"
+        assert np.all(np.isfinite(out))
+
+    def test_energy_and_update_callable_directly(self, dtype_policy):
+        """S14: `energy()` / `update()` are safe OUTSIDE `__call__`.
+
+        There is no autocast scope outside `__call__`, so before the fix a float32 `g` met
+        float16 weights here and the einsum raised `InvalidArgumentError`. These are the
+        methods the attention factory registry ADVERTISES.
+        """
+        layer = EnergyAttention(dim=DIM, num_heads=HEADS)
+        g = keras.random.normal((BATCH, 8, DIM))     # float32, NOT pre-cast by the caller
+        layer.build(g.shape)
+
+        e = keras.ops.convert_to_numpy(layer.energy(g))
+        u = keras.ops.convert_to_numpy(layer.update(g))
+
+        assert e.shape == (BATCH,)
+        assert u.shape == (BATCH, 8, DIM)
+        assert np.all(np.isfinite(e))
+        assert np.all(np.isfinite(u))
+
+    def test_degenerate_case_exactly_zero_in_every_dtype(self, dtype_policy):
+        """S9, re-proven per dtype: N == 1 + attn_self=False -> EXACTLY 0, never NaN."""
+        layer = EnergyAttention(dim=DIM, num_heads=HEADS, attn_self=False)
+        x = keras.random.normal((BATCH, 1, DIM))
+
+        e = keras.ops.convert_to_numpy(layer.energy(x))
+        u = keras.ops.convert_to_numpy(layer(x))
+
+        assert np.all(np.isfinite(e)) and np.all(np.isfinite(u))
+        assert np.all(e == 0.0), f"energy must be EXACTLY 0.0, got {e}"
+        assert np.all(u == 0.0), f"update must be EXACTLY 0.0, got max|u|={np.abs(u).max()}"
+
+
 class TestFactoryIntegration:
     """S4: EnergyAttention is reachable through the attention factory."""
 

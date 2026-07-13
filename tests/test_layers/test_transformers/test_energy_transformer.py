@@ -843,5 +843,61 @@ class TestEnergyTransformer:
             )
 
 
+class TestDtypePolicies:
+    """S13: the ET block is FINITE under every global dtype policy.
+
+    Iteration 1's `EnergyAttention` applied a `-1e9` mask bias in the COMPUTE dtype. In
+    fp16 that constant IS `-inf`, and the bias was applied unconditionally, so every
+    UNMASKED position computed `0 * -inf = NaN`: `EnergyTransformer(...)(x)` returned
+    **512/512 NaN under `mixed_float16` with no mask supplied**. Measured, not
+    hypothetical, and no success criterion looked for it. This is that criterion, and the
+    dtype parametrization is now PERMANENT (see `tests/test_layers/conftest.py`, which also
+    guarantees the global policy is restored — a leaked policy corrupts the whole session).
+    """
+
+    @pytest.mark.parametrize("attn_self", [True, False])
+    @pytest.mark.parametrize("use_mask", [False, True])
+    @pytest.mark.parametrize("num_tokens", [1, 8])
+    def test_no_nan_under_mixed_precision(
+        self, dtype_policy, attn_self, use_mask, num_tokens
+    ):
+        block = _block(attn_self=attn_self, num_steps=3)
+        x = keras.random.normal((BATCH, num_tokens, DIM))
+
+        mask = None
+        if use_mask:
+            keep = np.ones((BATCH, num_tokens), dtype="float32")
+            keep[:, -1] = 0.0            # drop the last token
+            mask = keras.ops.convert_to_tensor(keep)
+
+        out = keras.ops.convert_to_numpy(
+            block(x, attention_mask=mask, training=False)
+        )
+
+        assert out.shape == (BATCH, num_tokens, DIM)
+        assert np.isnan(out).sum() == 0, f"{np.isnan(out).sum()}/{out.size} NaN"
+        assert np.isinf(out).sum() == 0, f"{np.isinf(out).sum()}/{out.size} Inf"
+        assert np.all(np.isfinite(out))
+
+    @pytest.mark.parametrize("hopfield_activation", ACTIVATIONS)
+    def test_reported_energy_is_finite_under_every_dtype(
+        self, dtype_policy, hopfield_activation
+    ):
+        """`return_energy=True` must also survive fp16 — the energy is a LARGE reduction
+        (a sum over tokens x memories) and would overflow an fp16 accumulator."""
+        block = _block(
+            hopfield_activation=hopfield_activation, num_steps=3, return_energy=True
+        )
+        x = keras.random.normal((BATCH, TOKENS, DIM))
+
+        out, energies = block(x, training=False)
+        out = keras.ops.convert_to_numpy(out)
+        energies = keras.ops.convert_to_numpy(energies)
+
+        assert energies.shape == (BATCH, 4)
+        assert np.all(np.isfinite(out)), f"{np.isnan(out).sum()}/{out.size} NaN in output"
+        assert np.all(np.isfinite(energies)), f"non-finite energies: {energies}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
