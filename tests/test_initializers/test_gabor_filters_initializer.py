@@ -315,6 +315,27 @@ class TestCreateGaborDepthwiseConv2D:
         assert isinstance(layer, keras.layers.DepthwiseConv2D)
         assert layer.depth_multiplier == 8
 
+    def test_default_kernel_size(self):
+        """kernel_size defaults to 11 (Ozbulak & Ekenel first-layer size)."""
+        layer = create_gabor_depthwise_conv2d(filters=8)
+        assert layer.kernel_size == (11, 11)
+
+    def test_default_activation_is_linear_and_bias_free(self):
+        """activation defaults to None (linear passthrough); the stem stays bias-free."""
+        layer = create_gabor_depthwise_conv2d(filters=8)
+        assert layer.activation is keras.activations.linear
+        assert layer.use_bias is False
+
+    def test_activation_is_honored(self):
+        """A supplied activation reaches the underlying DepthwiseConv2D."""
+        layer = create_gabor_depthwise_conv2d(filters=4, activation="relu")
+        assert layer.activation is keras.activations.relu
+
+        # A rectified bank cannot emit negative responses.
+        x = keras.random.normal([2, 16, 16, 3])
+        y = np.asarray(layer(x))
+        assert np.all(y >= 0.0)
+
     @pytest.mark.parametrize("filters", [0, -1])
     def test_invalid_filters(self, filters):
         """filters < 1 raises ValueError."""
@@ -362,6 +383,7 @@ class TestCreateGaborDepthwiseConv2D:
         x = create_gabor_depthwise_conv2d(
             filters=8,
             kernel_size=7,
+            activation="relu",
             name="gabor_depthwise",
         )(inputs)
         x = keras.layers.GlobalAveragePooling2D()(x)
@@ -389,6 +411,9 @@ class TestCreateGaborDepthwiseConv2D:
                 rtol=1e-6,
                 atol=1e-6,
             )
+
+            loaded_gabor = loaded_model.get_layer("gabor_depthwise")
+            assert loaded_gabor.activation is keras.activations.relu
 
 
 if __name__ == "__main__":

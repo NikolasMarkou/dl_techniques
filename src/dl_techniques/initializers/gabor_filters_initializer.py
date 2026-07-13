@@ -51,7 +51,7 @@ References:
 import keras
 import numpy as np
 from keras import ops
-from typing import Dict, Any, Optional, Sequence, Tuple, Union
+from typing import Callable, Dict, Any, Optional, Sequence, Tuple, Union
 
 # ---------------------------------------------------------------------
 # local imports
@@ -313,7 +313,8 @@ class GaborFiltersInitializer(keras.initializers.Initializer):
 
 def create_gabor_depthwise_conv2d(
     filters: int,
-    kernel_size: Union[int, Tuple[int, int]] = 7,
+    kernel_size: Union[int, Tuple[int, int]] = 11,
+    activation: Union[str, Callable, keras.layers.Layer, None] = None,
     sigma_range: Union[Tuple[float, float], Sequence[float]] = (2.0, 21.0),
     theta_range: Union[Tuple[float, float], Sequence[float]] = (0.0, 360.0),
     lambda_range: Union[Tuple[float, float], Sequence[float]] = (8.0, 100.0),
@@ -351,7 +352,23 @@ def create_gabor_depthwise_conv2d(
         filters: Number of Gabor filters applied per channel (``depth_multiplier``).
             Output channels = ``in_channels * filters``. Must be >= 1.
         kernel_size: Spatial size of the convolution window. Int or ``(kh, kw)``
-            tuple. Defaults to ``7``.
+            tuple. Defaults to ``11`` (the Özbulak & Ekenel first-layer size).
+        activation: Optional activation applied to the depthwise Gabor responses.
+            Passed straight to the ``DepthwiseConv2D`` constructor; accepts a
+            Keras activation name, a callable, or a layer. Defaults to ``None``
+            (linear passthrough — the raw signed Gabor responses).
+
+            # DECISION plan_2026-07-13_f44e2cb0/D-001: not validated on purpose.
+            Only positively homogeneous activations (``relu``, ``leaky_relu``,
+            ``linear``) preserve the degree-1 homogeneity ``D(a*x) = a*D(x)`` that
+            the bias-free denoisers in ``models/bias_free_denoisers/`` rely on;
+            ``gelu``/``elu``/``tanh``/``sigmoid``/``mish`` break it. This builder is
+            generic (``models/cliffordnet/`` uses it too and is not bias-free), so
+            it does NOT reject them — the caller owns that contract. Note also that
+            the bank sweeps its five parameters along a single joint ``linspace``
+            diagonal, so it holds no phase-reversed (``psi``, ``psi+180``) pairs: a
+            rectifying activation on this frozen signed bank discards each filter's
+            negative lobe with no sibling filter to recover it.
         sigma_range: ``(min, max)`` interval for the Gaussian envelope width
             ``sigma``; ``min`` must be > 0. Table I default ``(2.0, 21.0)``.
         theta_range: ``(min, max)`` interval for orientation, in DEGREES. Table I
@@ -381,7 +398,7 @@ def create_gabor_depthwise_conv2d(
     Example:
         >>> from dl_techniques.initializers import create_gabor_depthwise_conv2d
         >>> # Frozen per-channel Gabor front-end:
-        >>> layer = create_gabor_depthwise_conv2d(filters=96, kernel_size=7)
+        >>> layer = create_gabor_depthwise_conv2d(filters=96, kernel_size=11)
         >>> # Input: (batch, 32, 32, 3) -> Output: (batch, 32, 32, 3 * 96 = 288)
         >>> # For a specific output width, follow with a 1x1 Conv2D, e.g.:
         >>> # proj = keras.layers.Conv2D(64, 1)  # 288 -> 64
@@ -391,8 +408,8 @@ def create_gabor_depthwise_conv2d(
 
     logger.info(
         f"Creating depthwise Gabor layer: filters/channel={filters}, "
-        f"kernel_size={kernel_size}, trainable={trainable} "
-        f"(output channels = in_channels * {filters})"
+        f"kernel_size={kernel_size}, activation={activation}, "
+        f"trainable={trainable} (output channels = in_channels * {filters})"
     )
 
     return keras.layers.DepthwiseConv2D(
@@ -400,6 +417,7 @@ def create_gabor_depthwise_conv2d(
         depth_multiplier=filters,
         strides=strides,
         padding=padding,
+        activation=activation,
         use_bias=use_bias,
         depthwise_initializer=GaborFiltersInitializer(
             sigma_range=sigma_range, theta_range=theta_range,
