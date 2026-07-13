@@ -168,7 +168,10 @@ class CliffordLaplacianUNet(keras.Model):
             3 * 96 = 288 for RGB). Used only when ``use_gabor_stem=True``.
             Defaults to ``96``.
         gabor_kernel_size: Spatial size of the Gabor stem kernel. Used only when
-            ``use_gabor_stem=True``. Defaults to ``7``.
+            ``use_gabor_stem=True``. Defaults to ``11``.
+        gabor_activation: Optional activation on the frozen Gabor stem (string name
+            or ``None``). ``None`` (default) is a linear passthrough of the raw
+            signed Gabor responses.
         output_activation: Activation applied by the output-head ``Conv2D``
             (string name, callable, or ``None``). ``None`` (default) means a
             linear head, recommended for high-fidelity reconstruction. A bounded
@@ -246,6 +249,7 @@ class CliffordLaplacianUNet(keras.Model):
         use_gabor_stem: bool = True,
         gabor_filters: int = 96,
         gabor_kernel_size: int = 11,
+        gabor_activation: Optional[str] = None,
         output_activation: Optional[Any] = None,
         kernel_initializer: Any = "glorot_uniform",
         kernel_regularizer: Optional[Any] = None,
@@ -273,6 +277,7 @@ class CliffordLaplacianUNet(keras.Model):
         self.use_gabor_stem = use_gabor_stem
         self.gabor_filters = gabor_filters
         self.gabor_kernel_size = gabor_kernel_size
+        self.gabor_activation = gabor_activation
         self.output_activation = output_activation
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
@@ -405,6 +410,7 @@ class CliffordLaplacianUNet(keras.Model):
             self.gabor_stem = create_gabor_depthwise_conv2d(
                 filters=self.gabor_filters,
                 kernel_size=self.gabor_kernel_size,
+                activation=self.gabor_activation,
                 strides=1,
                 padding="same",
                 use_bias=False,
@@ -723,6 +729,7 @@ class CliffordLaplacianUNet(keras.Model):
                 "use_gabor_stem": self.use_gabor_stem,
                 "gabor_filters": self.gabor_filters,
                 "gabor_kernel_size": self.gabor_kernel_size,
+                "gabor_activation": self.gabor_activation,
                 "output_activation": (
                     keras.activations.serialize(
                         keras.activations.get(self.output_activation)

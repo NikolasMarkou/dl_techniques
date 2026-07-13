@@ -405,6 +405,7 @@ class DenoiserPrior:
             use_gabor_stem=raw.get("use_gabor_stem", False),
             gabor_filters=raw.get("gabor_filters", 32),
             gabor_kernel_size=raw.get("gabor_kernel_size", 11),
+            gabor_activation=raw.get("gabor_activation", None),
             gabor_stem_projection=raw.get("gabor_stem_projection", True),
             use_laplacian_pyramid=raw.get("use_laplacian_pyramid", False),
             high_freq_blocks=raw.get("high_freq_blocks", 0),  # D-001: older config.json -> 0 (byte-identical no-op)

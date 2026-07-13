@@ -161,6 +161,7 @@ def create_bfunet_denoiser(
         use_gabor_stem: bool = False,
         gabor_filters: int = 32,
         gabor_kernel_size: Union[int, Tuple[int, int]] = 11,
+        gabor_activation: Optional[str] = None,
         gabor_stem_projection: bool = True,
         use_laplacian_pyramid: bool = False,
         high_freq_blocks: int = 0,
@@ -287,6 +288,7 @@ def create_bfunet_denoiser(
         gabor = create_gabor_depthwise_conv2d(
             filters=gabor_filters,
             kernel_size=gabor_kernel_size,
+            activation=gabor_activation,
             strides=1,
             padding='same',
             use_bias=False,

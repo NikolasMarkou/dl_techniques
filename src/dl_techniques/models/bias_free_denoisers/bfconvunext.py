@@ -494,6 +494,7 @@ def create_convunext_denoiser(
         use_gabor_stem: bool = False,
         gabor_filters: int = 32,
         gabor_kernel_size: Union[int, Tuple[int, int]] = 11,
+        gabor_activation: Optional[str] = None,
         gabor_stem_projection: bool = True,
         use_laplacian_pyramid: bool = False,
         laplacian_kernel_size: Tuple[int, int] = (5, 5),
@@ -591,6 +592,10 @@ def create_convunext_denoiser(
             projection reduces to `initial_filters`. Only used when use_gabor_stem=True.
             Defaults to 32.
         gabor_kernel_size: Integer or tuple, kernel size of the Gabor depthwise stem.
+        gabor_activation: Optional activation on the frozen Gabor stem. None (default)
+            = linear passthrough. MUST be positively homogeneous (relu, leaky_relu,
+            linear) -- gelu/elu/tanh/sigmoid/mish break the degree-1 homogeneity
+            this bias-free model depends on.
             Only used when use_gabor_stem=True. Defaults to 11.
         gabor_stem_projection: Boolean, if True (default) the Gabor stem is followed by the
             mandatory bias-free 1x1 projection that reduces `input_channels * gabor_filters`
@@ -806,6 +811,7 @@ def create_convunext_denoiser(
         gabor = create_gabor_depthwise_conv2d(
             filters=gabor_filters,
             kernel_size=gabor_kernel_size,
+            activation=gabor_activation,
             strides=1,
             padding='same',
             use_bias=False,

@@ -922,6 +922,19 @@ def _read_current_lr(model: keras.Model) -> float:
 # sub-config — that would force editing every flat `config.foo` call site across both 2200+
 # line trainers. Subclass __post_init__ MUST call super().__post_init__() first or all shared
 # validation (sigma checks, dirs, self-iterate additive gate) silently vanishes. See decisions.md D-001.
+
+# DECISION plan_2026-07-13_f44e2cb0/D-002: the admissible Gabor-stem activations.
+# The generic builder (initializers/gabor_filters_initializer.py) deliberately does NOT
+# validate its `activation` kwarg -- it also serves the non-bias-free cliffordnet
+# autoencoder. This trainer IS the bias-free path, so the guard lives here. Only
+# positively homogeneous activations may go on the stem: relu/leaky_relu/linear satisfy
+# f(a*x) = a*f(x) for a >= 0, so D_sigma(y) = sigma*D(y/sigma) survives. Do NOT add gelu,
+# elu, tanh, sigmoid, mish or swish to this set -- they have scale-dependent curvature and
+# silently break Miyasawa compliance, which the existing homogeneity probes would NOT catch
+# for the frozen stem alone.
+GABOR_ACTIVATIONS = frozenset({"relu", "leaky_relu", "linear"})
+
+
 @dataclass
 class BFUnetTrainingConfig:
     """Shared configuration base for the bfunet bias-free denoiser trainers.
@@ -992,6 +1005,11 @@ class BFUnetTrainingConfig:
     use_gabor_stem: bool = True
     gabor_filters: int = 32
     gabor_kernel_size: int = 11
+    # Activation on the frozen Gabor stem. None -> linear passthrough (the raw signed
+    # Gabor responses). Restricted to positively homogeneous activations: anything else
+    # breaks the degree-1 homogeneity D(a*x) = a*D(x) the whole bias-free stack rests on.
+    # Validated in __post_init__ against GABOR_ACTIVATIONS.
+    gabor_activation: Optional[str] = None
     # Drop the mandatory bias-free 1x1 projection after the Gabor stem and feed the
     # depthwise bank straight into the encoder. Requires channels * gabor_filters ==
     # initial_filters EXACTLY (see initial_filters override below); the factory raises
@@ -1125,6 +1143,13 @@ class BFUnetTrainingConfig:
         if self.filter_multiplier < 1:
             raise ValueError(
                 f"filter_multiplier must be >= 1, got {self.filter_multiplier}"
+            )
+        if self.gabor_activation is not None and self.gabor_activation not in GABOR_ACTIVATIONS:
+            raise ValueError(
+                f"gabor_activation must be None or one of {sorted(GABOR_ACTIVATIONS)}, "
+                f"got {self.gabor_activation!r}. Non-homogeneous activations (gelu, elu, "
+                f"tanh, sigmoid, mish, swish) break the degree-1 homogeneity "
+                f"D(a*x) = a*D(x) that the bias-free denoisers rely on."
             )
         if self.depth is not None and self.depth < 2:
             raise ValueError(
@@ -2193,6 +2218,16 @@ def add_common_arguments(parser) -> None:
     parser.add_argument("--analyzer-freq", type=int, default=10,
                         help="Run the analyzer every N epochs (with --analyzer)")
     parser.add_argument("--gabor-filters", type=int, default=32)
+    parser.add_argument("--gabor-kernel-size", type=int, default=11,
+                        help="Spatial size of the frozen Gabor depthwise stem (default 11).")
+    parser.add_argument("--gabor-activation", type=str, default=None,
+                        choices=sorted(GABOR_ACTIVATIONS),
+                        help="Activation on the frozen Gabor stem. Default: none (linear "
+                             "passthrough of the raw signed Gabor responses). Restricted to "
+                             "positively homogeneous activations -- anything else breaks the "
+                             "degree-1 homogeneity the bias-free denoisers rely on. Note the "
+                             "bank has no phase-reversed filter pairs, so 'relu' discards each "
+                             "filter's negative lobe with no sibling filter to recover it.")
     parser.add_argument("--no-gabor-projection", action="store_true",
                         help="Drop the 1x1 projection after the Gabor stem and feed the "
                              "depthwise bank straight into the encoder. Requires "
