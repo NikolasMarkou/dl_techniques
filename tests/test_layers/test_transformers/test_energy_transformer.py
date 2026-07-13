@@ -923,5 +923,88 @@ class TestDtypePolicies:
         assert np.all(np.isfinite(energies)), f"non-finite energies: {energies}"
 
 
+class TestPerLayerDtypeKwarg:
+    """C1/C2: a PER-LAYER ``dtype=`` kwarg must govern the layers the block OWNS.
+
+    Distinct from :class:`TestDtypePolicies` above, and deliberately so. Those 9 cases set
+    the GLOBAL policy — under which the sub-layers accidentally do the right thing, because
+    they read that same global policy themselves. That is exactly why F-01 survived a green
+    suite: `EnergyTransformer(..., dtype='float64')` built three sub-layers with NO `dtype=`
+    kwarg, they silently took the global `float32`, and the block crashed at
+    `x = x + self.step_size * update` with `InvalidArgumentError: cannot compute AddV2 as
+    input #1 was expected to be a double tensor but is a float tensor`.
+
+    These tests therefore NEVER call `keras.mixed_precision.set_global_policy` (see
+    decisions.md D-004): the global policy stays `float32`, so `mixed_float16` here can only
+    come from the layer kwarg, and there is no global state to leak into the rest of the
+    session.
+    """
+
+    # `mixed_float16` -> compute float16 / variables float32; `float64` -> both float64.
+    POLICIES = [("float64", "float64"), ("mixed_float16", "float16")]
+
+    @pytest.mark.parametrize("policy_name, compute_dtype", POLICIES)
+    def test_sublayers_inherit_the_block_policy(
+        self, policy_name, compute_dtype, input_shape
+    ):
+        """(a) The 3 sub-layers' policies == the block's policy."""
+        assert keras.mixed_precision.global_policy().name == "float32", (
+            "this test is only meaningful with a float32 GLOBAL policy — the per-layer "
+            "kwarg must be the ONLY source of the policy under test"
+        )
+
+        block = _block(dtype=policy_name, num_steps=2)
+        block.build(input_shape)
+
+        assert block.dtype_policy.name == policy_name
+        assert block.compute_dtype == compute_dtype
+        for name, sub in (
+            ("norm", block.norm),
+            ("attention", block.attention),
+            ("hopfield", block.hopfield),
+        ):
+            assert sub.dtype_policy.name == block.dtype_policy.name, (
+                f"sub-layer `{name}` has policy {sub.dtype_policy.name!r} but the block "
+                f"has {block.dtype_policy.name!r} — the sub-layer ignored the block's "
+                f"dtype and took the GLOBAL policy instead"
+            )
+
+    @pytest.mark.parametrize("policy_name, compute_dtype", POLICIES)
+    def test_forward_pass_runs_in_the_requested_dtype(
+        self, policy_name, compute_dtype, input_shape, sample_input
+    ):
+        """(b) The forward pass runs, returns the right dtype, and is finite."""
+        block = _block(dtype=policy_name, num_steps=2)
+        x = keras.ops.cast(keras.ops.convert_to_tensor(sample_input), compute_dtype)
+
+        out = block(x, training=False)
+
+        assert keras.backend.standardize_dtype(out.dtype) == compute_dtype
+        out = keras.ops.convert_to_numpy(out)
+        assert out.shape == input_shape
+        assert np.all(np.isfinite(out)), f"{np.isnan(out).sum()}/{out.size} non-finite"
+
+    @pytest.mark.parametrize("policy_name, compute_dtype", POLICIES)
+    def test_gradient_step_under_per_layer_dtype(
+        self, policy_name, compute_dtype, input_shape, sample_input
+    ):
+        """(c) A gradient step works: all 5 trainable weights get finite gradients."""
+        block = _block(dtype=policy_name, num_steps=2)
+        block.build(input_shape)
+        x = keras.ops.cast(keras.ops.convert_to_tensor(sample_input), compute_dtype)
+
+        with tf.GradientTape() as tape:
+            y = block(x, training=True)
+            loss = tf.reduce_mean(tf.square(tf.cast(y, tf.float32)))
+
+        grads = tape.gradient(loss, block.trainable_weights)
+        assert len(grads) == 5
+        for g, w in zip(grads, block.trainable_weights):
+            assert g is not None, f"no gradient for {w.name} under dtype={policy_name}"
+            assert np.all(np.isfinite(keras.ops.convert_to_numpy(g))), (
+                f"non-finite gradient for {w.name} under dtype={policy_name}"
+            )
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

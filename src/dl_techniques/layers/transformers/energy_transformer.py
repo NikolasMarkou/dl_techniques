@@ -664,9 +664,25 @@ class EnergyTransformer(keras.layers.Layer):
         # The Keras 3 golden pattern. A sub-layer created lazily (in `build()` or `call()`)
         # is not tracked at serialization time and SILENTLY DROPS ITS WEIGHTS on a `.keras`
         # round-trip (MEMORY: reference_subclassed_model_lazy_build_serialization).
+        #
+        # DECISION plan_2026-07-13_ca4f71a2/D-001: pass `self.dtype_policy` (the POLICY
+        # OBJECT) — NOT `self.dtype`, and NOT nothing.
+        #   * Nothing (the bug this replaces): a sub-layer with no `dtype=` reads the
+        #     GLOBAL policy, so `EnergyTransformer(dtype='float64')` built float32
+        #     sub-layers and died at `x = x + self.step_size * update` below with
+        #     `InvalidArgumentError: cannot compute AddV2 ... expected double ... is float`.
+        #   * `self.dtype` (the sibling convention at `free_transformer.py:412`) is the
+        #     VARIABLE dtype, which is 'float32' under ANY mixed policy. It is a PARTIAL
+        #     fix that goes green on float64 while leaving `dtype='mixed_float16'` crashing
+        #     — and, measured in the step-1 probe matrix, it also BREAKS the currently-green
+        #     GLOBAL-mixed_float16 path (it would pin the sub-layers to float32 while the
+        #     block computes in float16). Do NOT "simplify" this to `self.dtype` to match
+        #     the sibling.
+        # Only the policy object (or its `.name`) carries compute AND variable dtype.
         self.norm = EnergyLayerNorm(
             epsilon=self.norm_epsilon,
             name="energy_layer_norm",
+            dtype=self.dtype_policy,
         )
         self.attention = EnergyAttention(
             dim=self.embed_dim,
@@ -675,6 +691,7 @@ class EnergyTransformer(keras.layers.Layer):
             beta=self.beta,           # None -> EnergyAttention resolves 1/sqrt(head_dim)
             attn_self=self.attn_self,
             name="energy_attention",
+            dtype=self.dtype_policy,
         )
         self.hopfield = HopfieldNetwork(
             dim=self.embed_dim,
@@ -682,6 +699,7 @@ class EnergyTransformer(keras.layers.Layer):
             activation=self.hopfield_activation,
             hopfield_beta=self.hopfield_beta,
             name="hopfield_network",
+            dtype=self.dtype_policy,
         )
 
         # Only needed when noise is on, but created unconditionally so that `seed` round-
