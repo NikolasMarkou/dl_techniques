@@ -448,7 +448,19 @@ class HopfieldNetwork(keras.layers.Layer):
         #     rows, and the block would descend a function it does not report.
         #   * Do NOT "fix" a masked-oracle failure by un-masking `energy()` instead: the energy
         #     is the SPEC (invariant I1), the update follows it.
-        # No mask => byte-identical to the old path. See decisions.md D-005.
+        # No mask => byte-identical to the old path.
+        #
+        # SCOPE OF THE "a masked row comes out exactly as it went in" CLAIM: it holds for the
+        # DESCENT (`x = x + alpha * update`), i.e. at `noise_std == 0` OR `training=False`. It
+        # does NOT hold when the eq.-27 Langevin noise is on: `EnergyTransformer.call` adds
+        # that noise to the WHOLE state tensor, PAD rows included (measured `max|y_pad -
+        # x_pad| = 0.127` at `noise_std=0.1, training=True`). That is harmless — a PAD row
+        # cannot leak into a real token (the attention keep mask zeroes every pair it
+        # participates in, and this layer does not mix tokens at all), and the real tokens'
+        # outputs are unchanged — but the passthrough guarantee is a claim about the UPDATE,
+        # not about the noise. Do NOT "fix" a noisy PAD row by masking the noise unless a
+        # caller actually needs bit-exact PAD passthrough during training; it would add a mask
+        # multiply to the hot loop for a value nothing reads. See decisions.md D-005.
         if mask is not None:
             keep = _token_keep(mask, self.compute_dtype)                 # (B, N)
             update = update * ops.expand_dims(keep, axis=-1)             # (B, N, 1)
@@ -826,6 +838,72 @@ class EnergyTransformer(keras.layers.Layer):
     # Public API
     # -----------------------------------------------------------------
 
+    def _hopfield_token_mask(
+        self,
+        attention_mask: Optional[keras.KerasTensor],
+        mask: Optional[keras.KerasTensor],
+    ) -> Optional[keras.KerasTensor]:
+        """The per-token ``(B, N)`` keep the HopfieldNetwork must see — from BOTH masks.
+
+        # DECISION plan_2026-07-13_ca4f71a2/D-006
+        A **rank-2** ``attention_mask`` and the Keras-propagated ``mask`` are THE SAME OBJECT
+        — a per-token validity mask — and this method is what makes that documented
+        equivalence (D-008, and the D-002 anchor in ``EnergyAttention._build_keep_mask``)
+        actually TRUE. Iter-2 forwarded ONLY the Keras ``mask`` to ``self.hopfield``, so the
+        two paths silently forked: measured on the same weights (8 tokens, 3 PAD,
+        ``num_steps=3``), the Keras-mask energy was pad-invariant (0.0000% drift) while the
+        rank-2-``attention_mask`` energy drifted **+27.3%** and the PAD rows kept moving
+        (passthrough 4.73 vs 0.0) — the R2 bug, verbatim, on the path a caller with no
+        ``Embedding(mask_zero=True)`` (e.g. an MIM model) is FORCED to use.
+
+        WHAT NOT TO DO:
+          * Do NOT derive a token keep from a rank-3 ``(B, N, N)`` or rank-4
+            ``(B, H, N, N)`` ``attention_mask``. Those are PAIR-level (KEY x QUERY) masks:
+            they say "token m may not attend to token n", NOT "position n is not a token".
+            There is no per-token reading (a row can be half-masked), so any reduction —
+            ``any``/``all`` over an axis — would INVENT a semantics the caller never
+            specified, and would silently freeze rows the caller only meant to exclude from
+            attention. They correctly leave the Hopfield energy alone. That is NOT the fork
+            this fixes; it is a genuinely different object, and it is documented as such.
+          * Do NOT mask the Hopfield ENERGY here without masking its UPDATE with the SAME
+            keep. ``E_HN`` is a sum of UNCOUPLED per-token terms, so
+            ``dE/dg_n = keep_n * de_n/dg_n``: masking BOTH IS the derivative of the masked
+            energy (see the D-005 anchors in ``HopfieldNetwork``). Masking one alone makes
+            ``update() != -dE/dg`` and the block descends a function it does not report —
+            ``test_gradient_oracle`` is what catches it.
+          * Do NOT re-implement the rank-2 contract: ``_token_keep`` owns it (D-005).
+        See decisions.md D-006.
+
+        :param attention_mask: Optional KEEP mask of rank 2 / 3 / 4. Only rank 2 has a
+            per-token reading.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param mask: Optional Keras-propagated rank-2 ``(B, N)`` validity mask.
+        :type mask: Optional[keras.KerasTensor]
+
+        :return: A ``(B, N)`` 0/1 keep tensor — the LOGICAL AND of whichever of the two
+            carry a per-token reading (D-003) — or ``None`` when neither does (then the
+            Hopfield energy sums over every token, which is correct: nothing declared any
+            token invalid).
+        :rtype: Optional[keras.KerasTensor]
+        """
+        keep_dtype = _mask_dtype(self.compute_dtype)
+        token_keep: Optional[keras.KerasTensor] = None
+
+        if attention_mask is not None and len(attention_mask.shape) == 2:
+            token_keep = ops.cast(attention_mask, keep_dtype)             # (B, N)
+
+        if mask is not None:
+            keras_keep = _token_keep(mask, keep_dtype)                    # (B, N), rank-checked
+            # Multiplication IS the logical AND (D-003) — neither mask can resurrect a token
+            # the other hid.
+            token_keep = (
+                keras_keep if token_keep is None else token_keep * keras_keep
+            )
+
+        return token_keep
+
+    # -----------------------------------------------------------------
+
     def energy(
         self,
         g: keras.KerasTensor,
@@ -844,13 +922,15 @@ class EnergyTransformer(keras.layers.Layer):
 
         :param g: NORMALIZED token state ``(B, N, D)`` — i.e. ``self.norm(x)``, not ``x``.
         :type g: keras.KerasTensor
-        :param attention_mask: Optional KEEP mask, forwarded to ``EnergyAttention`` only
-            (it is a KEY x QUERY pair mask; the Hopfield net has no pairs).
+        :param attention_mask: Optional KEEP mask. A **rank-2** ``(B, N)`` one is a per-token
+            validity mask and reaches BOTH terms — it is equivalent to ``mask`` (D-006). A
+            rank-3/rank-4 one is a KEY x QUERY PAIR mask with no per-token reading, so it
+            reaches ``EnergyAttention`` only (the Hopfield net has no pairs).
         :type attention_mask: Optional[keras.KerasTensor]
         :param mask: Optional Keras-propagated rank-2 ``(B, N)`` boolean validity mask.
             ANDed with ``attention_mask`` inside ``EnergyAttention`` (decisions.md D-003), and
-            forwarded to ``HopfieldNetwork`` as well, whose energy is a SUM over tokens and so
-            must exclude the PAD tokens (decisions.md D-005).
+            ANDed again into the ``HopfieldNetwork`` token keep, whose energy is a SUM over
+            tokens and so must exclude the PAD tokens (decisions.md D-005, D-006).
         :type mask: Optional[keras.KerasTensor]
 
         :return: Energy of shape ``(B,)``, in the REDUCE dtype (>= ``float32``) — NOT the
@@ -888,9 +968,18 @@ class EnergyTransformer(keras.layers.Layer):
         # so an unmasked E_HN makes exactly HALF the reported energy mask-aware — the worst of
         # both worlds, and invisible unless you compare padded vs unpadded rows.
         # See decisions.md D-005.
+        #
+        # DECISION plan_2026-07-13_ca4f71a2/D-006
+        # The Hopfield mask comes from `_hopfield_token_mask(attention_mask, mask)` — BOTH
+        # masks — NOT from `mask` alone. Forwarding only the Keras `mask` (iter-2) left the
+        # rank-2 `attention_mask` path summing E_HN over PAD tokens (+27.3% drift), i.e. HALF
+        # the reported energy mask-aware, on the very path the class docstring declares
+        # IDENTICAL to the Keras mask. Do NOT "simplify" this back to `mask=mask`.
+        # See decisions.md D-006.
+        hopfield_mask = self._hopfield_token_mask(attention_mask, mask)
         return (
             self.attention.energy(g, attention_mask=attention_mask, mask=mask)
-            + self.hopfield.energy(g, mask=mask)
+            + self.hopfield.energy(g, mask=hopfield_mask)
         )
 
     # -----------------------------------------------------------------
@@ -915,11 +1004,24 @@ class EnergyTransformer(keras.layers.Layer):
         is attended only if valid under both, and neither mask can un-mask what the other hid
         (decisions.md D-003).
 
+        **A rank-2** ``attention_mask`` **IS a Keras** ``mask`` (D-006). Both are per-token
+        VALIDITY masks and they now produce the IDENTICAL result: the token is dropped from
+        the attention keep mask (symmetrically, key AND query — D-008) AND from the Hopfield
+        energy's token SUM, so its energy contribution is zero, its gradient is zero, and its
+        row passes through unchanged (at ``noise_std=0``; see the ``HopfieldNetwork.update``
+        D-005 anchor for the eq.-27 noise caveat). Use whichever your pipeline produces.
+
+        **A rank-3** ``(B, N, N)`` **or rank-4** ``(B, H, N, N)`` ``attention_mask`` is a
+        different object: a PAIR-level (KEY x QUERY) keep mask. It says "``m`` may not attend
+        to ``n``", not "``n`` is not a token" — a row can be half-masked — so it has NO
+        per-token reading and it does NOT mask the Hopfield energy. That is a genuine
+        semantic difference, not a fork.
+
         :param inputs: Token state ``(B, N, D)``.
         :type inputs: keras.KerasTensor
-        :param attention_mask: Optional KEEP mask (``1`` = attend). A rank-2 ``(B, N)`` mask
-            is a SYMMETRIC per-token validity mask (key AND query axes) — see decisions.md
-            D-008.
+        :param attention_mask: Optional KEEP mask (``1`` = attend). Rank-2 ``(B, N)`` = a
+            per-token validity mask, equivalent to ``mask`` (D-006, D-008). Rank-3
+            ``(B, N, N)`` / rank-4 ``(B, H, N, N)`` = a pair-level key x query mask.
         :type attention_mask: Optional[keras.KerasTensor]
         :param training: When truthy AND ``noise_std > 0``, the eq. 27 noise is injected.
         :type training: Optional[bool]
@@ -935,6 +1037,12 @@ class EnergyTransformer(keras.layers.Layer):
         add_noise = self.noise_std > 0.0 and training
         energies: List[keras.KerasTensor] = []
 
+        # The per-token keep the Hopfield module sees: the AND of the Keras `mask` and a
+        # RANK-2 `attention_mask` (D-006). Hoisted out of the loop — it does not depend on the
+        # descent step. It must be the SAME tensor `self.energy()` uses, or `update()` stops
+        # being `-dE/dg` (the D-006 anchor at `_hopfield_token_mask`).
+        hopfield_mask = self._hopfield_token_mask(attention_mask, mask)
+
         for _ in range(self.num_steps):
             g = self.norm(x)
 
@@ -947,15 +1055,18 @@ class EnergyTransformer(keras.layers.Layer):
             # gradient). See the class docstring, point 1.
             #
             # DECISION plan_2026-07-13_ca4f71a2/D-005: `mask` goes to BOTH sub-layers' updates
-            # — and it must be the SAME `mask` the `self.energy()` call above passes to their
+            # — and it must be the SAME mask the `self.energy()` call above passes to their
             # `energy()`, or `update() != -dE/dg` (plan STOP-IF 2). The Hopfield update is
             # masked because the masked ENERGY has zero gradient at a PAD row, not for safety;
             # see the D-005 anchor in `HopfieldNetwork.update`. (This supersedes the original
             # D-002 bullet "do NOT pass `mask` to `self.hopfield`", written when Assumption A6
-            # was believed to cover the energy too.)
+            # was believed to cover the energy too.) Since D-006 the Hopfield's mask is
+            # `hopfield_mask` (Keras `mask` AND a rank-2 `attention_mask`) — exactly what
+            # `self.energy()` passes it, which is the property that keeps the pair a
+            # (energy, -gradient) pair.
             update = (
                 self.attention.update(g, attention_mask=attention_mask, mask=mask)
-                + self.hopfield.update(g, mask=mask)
+                + self.hopfield.update(g, mask=hopfield_mask)
             )
 
             # ADDING alpha * update IS `x = x - alpha * dE/dg`. The gradient is w.r.t. `g`
