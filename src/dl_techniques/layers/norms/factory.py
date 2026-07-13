@@ -26,6 +26,7 @@ from .global_response_norm import GlobalResponseNormalization
 from .logit_norm import LogitNorm
 from .max_logit_norm import MaxLogitNorm, DecoupledMaxLogit, DMLPlus
 from .dynamic_tanh import DynamicTanh
+from .energy_layer_norm import EnergyLayerNorm
 from .zero_centered_rms_norm import ZeroCenteredRMSNorm
 from .zero_centered_band_rms_norm import ZeroCenteredBandRMSNorm
 from .zero_centered_adaptive_band_rms_norm import ZeroCenteredAdaptiveBandRMS
@@ -37,7 +38,8 @@ NormalizationType = Literal[
     'zero_centered_band_rms_norm', 'zero_centered_adaptive_band_rms_norm',
     'band_rms', 'adaptive_band_rms',
     'band_logit_norm', 'global_response_norm', 'logit_norm', 'max_logit_norm',
-    'decoupled_max_logit', 'dml_plus_focal', 'dml_plus_center', 'dynamic_tanh'
+    'decoupled_max_logit', 'dml_plus_focal', 'dml_plus_center', 'dynamic_tanh',
+    'energy_layer_norm'
 ]
 
 
@@ -61,7 +63,8 @@ def create_normalization_layer(
         'zero_centered_rms_norm', 'zero_centered_band_rms_norm',
         'zero_centered_adaptive_band_rms_norm', 'band_rms', 'adaptive_band_rms',
         'band_logit_norm', 'global_response_norm', 'logit_norm', 'max_logit_norm',
-        'decoupled_max_logit', 'dml_plus_focal', 'dml_plus_center', and 'dynamic_tanh'.
+        'decoupled_max_logit', 'dml_plus_focal', 'dml_plus_center', 'dynamic_tanh',
+        and 'energy_layer_norm'.
         Use 'bias_free_batch_norm' for the variance-only, fixed-statistic layer that
         stays degree-1 homogeneous (``f(a*x)=a*f(x)``) at inference — no ``moving_mean``,
         no ``beta`` — as required by bias-free / Miyasawa denoisers.
@@ -183,6 +186,12 @@ def create_normalization_layer(
         layer_kwargs.pop('epsilon', None)
         return DynamicTanh(**layer_kwargs)
 
+    elif normalization_type == 'energy_layer_norm':
+        # Energy Transformer layer norm (arXiv:2302.07253 eq. 1-2):
+        # SCALAR gamma + VECTOR delta. See energy_layer_norm.py.
+        layer_kwargs.setdefault('epsilon', epsilon)
+        return EnergyLayerNorm(**layer_kwargs)
+
     else:
         supported_types = [
             'layer_norm', 'batch_norm', 'bias_free_batch_norm', 'rms_norm',
@@ -192,7 +201,7 @@ def create_normalization_layer(
             'band_rms', 'adaptive_band_rms',
             'band_logit_norm', 'global_response_norm', 'logit_norm',
             'max_logit_norm', 'decoupled_max_logit', 'dml_plus_focal',
-            'dml_plus_center', 'dynamic_tanh'
+            'dml_plus_center', 'dynamic_tanh', 'energy_layer_norm'
         ]
         raise ValueError(
             f"Unknown normalization type: '{normalization_type}'. "
@@ -299,6 +308,11 @@ def get_normalization_info() -> Dict[str, Dict[str, Any]]:
                            'bias_initializer', 'kernel_regularizer', 'bias_regularizer',
                            'kernel_constraint', 'bias_constraint'],
             'use_case': 'Normalization-free transformer architectures'
+        },
+        'energy_layer_norm': {
+            'description': 'Energy Transformer layer norm (arXiv:2302.07253 eq. 1-2): SCALAR gamma + VECTOR delta; g = dL/dx of a Lagrangian with a PSD Hessian',
+            'parameters': ['epsilon', 'gamma_initializer', 'delta_initializer'],
+            'use_case': 'Energy Transformer blocks, where the norm must be the derivative of a Lagrangian for the energy-descent guarantee to hold'
         }
     }
 

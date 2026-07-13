@@ -10,6 +10,7 @@ from .logit_norm import LogitNorm
 from .max_logit_norm import MaxLogitNorm, DecoupledMaxLogit, DMLPlus
 from .global_response_norm import GlobalResponseNormalization
 from .dynamic_tanh import DynamicTanh
+from .energy_layer_norm import EnergyLayerNorm
 from .polar_weight_norm import PolarWeightNorm, polar_encode, polar_decode
 from .factory import (
     create_normalization_layer,
@@ -34,6 +35,7 @@ __all__ = [
     "DMLPlus",
     "GlobalResponseNormalization",
     "DynamicTanh",
+    "EnergyLayerNorm",
     "PolarWeightNorm",
     "polar_encode",
     "polar_decode",

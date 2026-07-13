@@ -26,7 +26,7 @@ ALL_TYPES = [
     "zero_centered_band_rms_norm", "zero_centered_adaptive_band_rms_norm",
     "band_rms", "adaptive_band_rms", "band_logit_norm", "global_response_norm",
     "logit_norm", "max_logit_norm", "decoupled_max_logit", "dml_plus_focal",
-    "dml_plus_center", "dynamic_tanh",
+    "dml_plus_center", "dynamic_tanh", "energy_layer_norm",
 ]
 
 
