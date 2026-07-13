@@ -33,6 +33,12 @@ Specialized and Hybrid Blocks:
 - AdaLNZeroConditionalBlock: DiT-style adaptive layer-norm zero-initialized
   conditional transformer block; norms/attention/FFN/AdaLN activation are
   factory-configurable.
+- EnergyTransformer: the Energy Transformer block (arXiv:2302.07253) — replaces
+  the `attn -> FFN` residual stream with T steps of gradient descent on a single
+  scalar energy `E_ATT + E_HN`; paired with HopfieldNetwork, its associative-memory
+  module (the paper's analog of the FFN, and NOT an MLP).
+- HopfieldNetwork: the Energy Transformer associative memory (one tied `(K, D)`
+  matrix, bias-free, strictly per token).
 
 Factory Functions and Type Aliases:
 - A set of `create_*_encoder` functions for convenient model instantiation.
@@ -93,6 +99,12 @@ from .free_transformer import BinaryMapper, FreeTransformerLayer
 from .progressive_focused_transformer import PFTBlock
 
 # ---------------------------------------------------------------------
+# Energy Transformer (arXiv:2302.07253)
+# ---------------------------------------------------------------------
+
+from .energy_transformer import EnergyTransformer, HopfieldNetwork
+
+# ---------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------
 
@@ -125,6 +137,10 @@ __all__ = [
     "BinaryMapper",
     "FreeTransformerLayer",
     "PFTBlock",
+
+    # Energy Transformer
+    "EnergyTransformer",
+    "HopfieldNetwork",
 
     # Type Aliases
     "AttentionType",

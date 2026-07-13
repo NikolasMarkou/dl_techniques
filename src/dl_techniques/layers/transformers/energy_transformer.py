@@ -1,16 +1,16 @@
 """
-Energy Transformer (ET) — Hopfield associative memory module (and, soon, the ET block).
+Energy Transformer (ET) — Hopfield associative memory module + the ET block.
 
 Implements the modules of the Energy Transformer, Hoover, Liang, Pham, Panda, Strobelt,
 Zaki, Chau, Krotov, "Energy Transformer", NeurIPS 2023 (https://arxiv.org/abs/2302.07253).
 
-This module currently holds:
+This module holds:
 
 - :class:`HopfieldNetwork` — the ET Hopfield / associative-memory module (eq. 5, 9). A
   single tied ``(K, D)`` memory matrix, applied strictly per token.
-- ``EnergyTransformer`` — the ``T``-step energy-descent block (eq. 6, alg. 1). *Lands in a
-  follow-up step; it composes* :class:`HopfieldNetwork` *with* ``EnergyLayerNorm``
-  (``layers/norms/energy_layer_norm.py``) *and* ``EnergyAttention``
+- :class:`EnergyTransformer` — the ``T``-step energy-descent block (eq. 6, alg. 1; eq. 27
+  for the optional noise). It composes :class:`HopfieldNetwork` with ``EnergyLayerNorm``
+  (``layers/norms/energy_layer_norm.py``) and ``EnergyAttention``
   (``layers/attention/energy_attention.py``).
 
 Architecture (the ET block; the Hopfield module is the right-hand branch)::
@@ -54,15 +54,33 @@ References:
       completely different mechanism.
 """
 
+import math
 import keras
 from keras import ops, initializers
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
 # local imports
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+
+# DECISION plan_2026-07-13_57c9833e/D-004
+# These are DIRECT imports of the three CONCRETE classes, deliberately NOT
+# `create_normalization_layer(...)` / `create_attention_layer(...)` factory calls. Do NOT
+# "improve" this into factory composition. `EnergyTransformer` does not consume these as
+# generic `keras.layers.Layer`s — it calls their `energy(g, ...)` / `update(g, ...)` pair,
+# which is a duck-typed convention private to this feature and is NOT part of any Keras
+# layer contract and NOT guaranteed by any factory type. A factory returns a generic
+# layer; calling `.energy()` on it is an unchecked duck-type that would raise
+# `AttributeError` at runtime for any of the other 30 registered attention types (or 16
+# norm types). Precedent for reuse-by-direct-import in this package:
+# `ideogram4_block.py:36-46` direct-imports RMSNorm / SwiGLUFFN / Ideogram4Attention.
+# The factory registrations of `EnergyLayerNorm` ('energy_layer_norm') and
+# `EnergyAttention` ('energy') still exist and are still correct — they are there for
+# THIRD-PARTY reuse, not for this block's own composition. See decisions.md D-004.
+from dl_techniques.layers.norms.energy_layer_norm import EnergyLayerNorm
+from dl_techniques.layers.attention.energy_attention import EnergyAttention
 
 # ---------------------------------------------------------------------
 
@@ -429,5 +447,411 @@ class HopfieldNetwork(keras.layers.Layer):
                 config['kernel_initializer']
             )
         return cls(**config)
+
+# ---------------------------------------------------------------------
+
+
+@keras.saving.register_keras_serializable()
+class EnergyTransformer(keras.layers.Layer):
+    """Energy Transformer block — ``T`` steps of gradient descent on ONE scalar energy.
+
+    **Intent**: replace the standard ``attn -> FFN`` residual stream with an explicit,
+    provable optimization. There is no FFN and no value matrix. The block defines a single
+    scalar energy ``E(g) = E_ATT(g) + E_HN(g)`` and repeatedly steps the token state
+    DOWNHILL on it (paper eq. 6, alg. 1; eq. 27 for the optional noise).
+
+    .. code-block:: text
+
+        for t in 1..T:
+            g      = EnergyLayerNorm(x)                  # the "activation function"
+            update = attn.update(g) + hopfield.update(g) # == -dE/dg
+            x      = x + alpha * update                  # == x - alpha * dE/dg
+            [+ sqrt(alpha) * noise_std * N(0, 1)   if training and noise_std > 0]
+
+    **TWO THINGS A FUTURE READER WILL TRY TO "FIX". BOTH ARE CORRECT AS WRITTEN.**
+
+    1. **SIGN DISCIPLINE — the block ADDS.** Every ``update()`` in this feature
+       (:class:`HopfieldNetwork`, ``EnergyAttention``) returns ``-dE/dg``: the **DESCENT
+       DIRECTION**, *not* the gradient. So :meth:`call` performs ``x = x + alpha * update``,
+       which IS ``x = x - alpha * dE/dg``. A reader who assumes ``update()`` returns
+       ``+dE/dg`` will "fix" this to a subtraction and silently invert the dynamics into
+       energy **ASCENT** — which still runs, still trains, and still produces finite,
+       plausible-looking outputs. The only thing that catches it is
+       ``test_energy_is_non_increasing`` (S7).
+    2. **THE GRADIENT IS TAKEN W.R.T.** ``g`` **AND APPLIED TO** ``x``. This is paper
+       eq. 6 (``tau dx/dt = -dE/dg``), **not a typo**. ``EnergyLayerNorm`` is the
+       "activation function" ``g = dL/dx`` of a Lagrangian ``L`` whose Hessian ``dg/dx`` is
+       PSD (for ``gamma > 0``); that is *exactly* what makes the descent provable:
+       ``dE/dt = -(dE/dg)^T (dg/dx) (dE/dg) <= 0``. Do NOT "correct" it to ``-dE/dx``.
+
+    **Descent is claimed only for** ``noise_std == 0``, ``gamma > 0`` and a sufficiently
+    small ``step_size``. With ``noise_std > 0`` this is Langevin sampling (eq. 27), not
+    descent, and the energy is expected to fluctuate upward.
+
+    **Composition (Keras 3 golden pattern).** The three sub-layers are created in
+    ``__init__`` and EXPLICITLY built in :meth:`build`. They are never created in
+    :meth:`build` or :meth:`call` — a lazily-created sub-layer silently DROPS ITS WEIGHTS
+    on a ``.keras`` round-trip.
+
+    :param embed_dim: Token embedding dimension ``D``.
+    :type embed_dim: int
+    :param num_heads: Number of attention heads ``H``.
+    :type num_heads: int
+    :param head_dim: Per-head key/query dimension ``Y``.
+    :type head_dim: int
+    :param hopfield_dim: Number of Hopfield memories ``K``.
+    :type hopfield_dim: int
+    :param num_steps: Number of descent steps ``T``. Defaults to ``12``.
+    :type num_steps: int
+    :param step_size: Descent step ``alpha``. Defaults to ``0.1``.
+    :type step_size: float
+    :param beta: Attention inverse temperature. ``None`` -> ``1 / sqrt(head_dim)``, resolved
+        by ``EnergyAttention`` itself (this block does NOT duplicate that default).
+    :type beta: Optional[float]
+    :param attn_self: If ``False`` (default, the paper's ET-Full), a token does not attend
+        to itself.
+    :type attn_self: bool
+    :param hopfield_activation: ``'relu'`` (default) or ``'softmax'``.
+    :type hopfield_activation: str
+    :param noise_std: Std-dev of the eq. 27 noise, injected as
+        ``sqrt(step_size) * noise_std * N(0, 1)`` and **only when ``training`` is truthy**.
+        ``0.0`` (default) disables it.
+    :type noise_std: float
+    :param return_energy: If ``True``, :meth:`call` returns ``(x, energies)`` with
+        ``energies`` of shape ``(B, num_steps + 1)`` — **PER-SAMPLE, not batch-reduced**: a
+        batch mean would hide a per-sample descent violation.
+    :type return_energy: bool
+    :param hopfield_beta: Inverse temperature of the ``'softmax'`` Hopfield branch. See the
+        D-007 anchor in ``__init__``.
+    :type hopfield_beta: float
+    :param norm_epsilon: ``epsilon`` of the inner ``EnergyLayerNorm``.
+    :type norm_epsilon: float
+    :param seed: Seed for the ``noise_std`` RNG. See the D-007 anchor in ``__init__``.
+    :type seed: Optional[int]
+
+    :raises ValueError: If ``embed_dim <= 0``, ``num_heads <= 0``, ``head_dim <= 0``,
+        ``hopfield_dim <= 0``, ``num_steps < 1``, ``step_size <= 0`` or ``noise_std < 0``.
+
+    Input shape:
+        3D tensor ``(batch, num_tokens, embed_dim)``.
+
+    Output shape:
+        ``(batch, num_tokens, embed_dim)``; or, with ``return_energy=True``, the pair
+        ``((batch, num_tokens, embed_dim), (batch, num_steps + 1))``.
+
+    Attributes:
+        norm: The inner ``EnergyLayerNorm`` (scalar gamma, vector delta).
+        attention: The inner ``EnergyAttention`` (token mixing; the ONLY masked module).
+        hopfield: The inner :class:`HopfieldNetwork` (per token).
+
+    Example:
+        >>> block = EnergyTransformer(
+        ...     embed_dim=64, num_heads=4, head_dim=16, hopfield_dim=128,
+        ...     num_steps=8, step_size=0.05, return_energy=True,
+        ... )
+        >>> x = keras.random.normal((2, 16, 64))
+        >>> y, energies = block(x, training=False)
+        >>> y.shape, energies.shape
+        ((2, 16, 64), (2, 9))
+
+    References:
+        - Hoover et al., "Energy Transformer", NeurIPS 2023, arXiv:2302.07253, eq. (6),
+          alg. 1, eq. (27).
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        num_heads: int,
+        head_dim: int,
+        hopfield_dim: int,
+        num_steps: int = 12,
+        step_size: float = 0.1,
+        beta: Optional[float] = None,
+        attn_self: bool = False,
+        hopfield_activation: str = 'relu',
+        noise_std: float = 0.0,
+        return_energy: bool = False,
+        # DECISION plan_2026-07-13_57c9833e/D-007
+        # These THREE kwargs are ADDITIVE to the user-approved signature and each one is
+        # FORCED, not speculative. Do NOT drop them as "unused parameters", and do NOT
+        # collapse `hopfield_beta` into `beta`:
+        #   * `hopfield_beta` — a SECOND, INDEPENDENT temperature. `beta` defaults to
+        #     `1/sqrt(head_dim)`, which is the softmax temperature over N TOKENS; that is a
+        #     MEANINGLESS temperature for a softmax over K = `hopfield_dim` MEMORIES.
+        #     Reusing one `beta` for both would silently couple two unrelated temperatures
+        #     and make the Hopfield energy's sharpness a function of `head_dim`.
+        #   * `norm_epsilon` — a pass-through to `EnergyLayerNorm.epsilon`. Without it the
+        #     block cannot configure its own norm, and the norms factory (which forwards an
+        #     `epsilon` via `setdefault`) would be able to express a configuration this
+        #     block cannot.
+        #   * `seed` — `noise_std > 0` makes this layer STOCHASTIC, and an unseeded
+        #     stochastic layer FLAKES the save/load round-trip test (LESSONS [I:4]).
+        # All three default to the approved behavior, so the approved surface is preserved
+        # byte-for-byte. See decisions.md D-007.
+        hopfield_beta: float = 1.0,
+        norm_epsilon: float = 1e-5,
+        seed: Optional[int] = None,
+        **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
+
+        # ----- validation -----
+        if not isinstance(embed_dim, int) or embed_dim <= 0:
+            raise ValueError(f"embed_dim must be a positive integer, got {embed_dim}")
+        if not isinstance(num_heads, int) or num_heads <= 0:
+            raise ValueError(f"num_heads must be a positive integer, got {num_heads}")
+        if not isinstance(head_dim, int) or head_dim <= 0:
+            raise ValueError(f"head_dim must be a positive integer, got {head_dim}")
+        if not isinstance(hopfield_dim, int) or hopfield_dim <= 0:
+            raise ValueError(
+                f"hopfield_dim must be a positive integer, got {hopfield_dim}"
+            )
+        if not isinstance(num_steps, int) or num_steps < 1:
+            raise ValueError(f"num_steps must be an integer >= 1, got {num_steps}")
+        if not isinstance(step_size, (int, float)) or step_size <= 0:
+            raise ValueError(f"step_size must be a positive number, got {step_size}")
+        if not isinstance(noise_std, (int, float)) or noise_std < 0:
+            raise ValueError(f"noise_std must be a non-negative number, got {noise_std}")
+
+        # `beta`, `hopfield_activation` and `hopfield_beta` are validated by the sub-layers
+        # they belong to (EnergyAttention / HopfieldNetwork) — not re-validated here, so
+        # there is exactly ONE source of truth per rule.
+
+        # ----- store ALL configuration -----
+        self.embed_dim = int(embed_dim)
+        self.num_heads = int(num_heads)
+        self.head_dim = int(head_dim)
+        self.hopfield_dim = int(hopfield_dim)
+        self.num_steps = int(num_steps)
+        self.step_size = float(step_size)
+        self.beta = beta
+        self.attn_self = bool(attn_self)
+        self.hopfield_activation = str(hopfield_activation)
+        self.noise_std = float(noise_std)
+        self.return_energy = bool(return_energy)
+        self.hopfield_beta = float(hopfield_beta)
+        self.norm_epsilon = float(norm_epsilon)
+        self.seed = seed
+
+        # sqrt(alpha), the eq. 27 noise scaling. Precomputed: `step_size` is a Python float.
+        self._sqrt_step_size = math.sqrt(self.step_size)
+
+        # ----- sub-layers: CREATED IN __init__, built in build() -----
+        # The Keras 3 golden pattern. A sub-layer created lazily (in `build()` or `call()`)
+        # is not tracked at serialization time and SILENTLY DROPS ITS WEIGHTS on a `.keras`
+        # round-trip (MEMORY: reference_subclassed_model_lazy_build_serialization).
+        self.norm = EnergyLayerNorm(
+            epsilon=self.norm_epsilon,
+            name="energy_layer_norm",
+        )
+        self.attention = EnergyAttention(
+            dim=self.embed_dim,
+            num_heads=self.num_heads,
+            head_dim=self.head_dim,
+            beta=self.beta,           # None -> EnergyAttention resolves 1/sqrt(head_dim)
+            attn_self=self.attn_self,
+            name="energy_attention",
+        )
+        self.hopfield = HopfieldNetwork(
+            dim=self.embed_dim,
+            hopfield_dim=self.hopfield_dim,
+            activation=self.hopfield_activation,
+            hopfield_beta=self.hopfield_beta,
+            name="hopfield_network",
+        )
+
+        # Only needed when noise is on, but created unconditionally so that `seed` round-
+        # trips and the layer's structure does not depend on a numeric value.
+        self.seed_generator = keras.random.SeedGenerator(seed=self.seed)
+
+        self.supports_masking = True
+
+        logger.debug(
+            f"Initialized EnergyTransformer with embed_dim={self.embed_dim}, "
+            f"num_heads={self.num_heads}, head_dim={self.head_dim}, "
+            f"hopfield_dim={self.hopfield_dim}, num_steps={self.num_steps}, "
+            f"step_size={self.step_size}, attn_self={self.attn_self}, "
+            f"hopfield_activation={self.hopfield_activation}, "
+            f"noise_std={self.noise_std}, return_energy={self.return_energy}"
+        )
+
+    # -----------------------------------------------------------------
+
+    def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
+        """EXPLICITLY build every sub-layer, then ``super().build()`` LAST.
+
+        All three sub-layers see the SAME shape: the block is shape-preserving at every
+        stage (``g``, both updates, and ``x`` are all ``(B, N, D)``).
+
+        :param input_shape: Input shape ``(batch, num_tokens, embed_dim)``.
+        :type input_shape: Tuple[Optional[int], ...]
+
+        :raises ValueError: If the last axis of ``input_shape`` is not ``embed_dim``.
+        """
+        if self.built:
+            return
+
+        feature_dim = input_shape[-1]
+        if feature_dim is not None and int(feature_dim) != self.embed_dim:
+            raise ValueError(
+                f"Input feature dimension {feature_dim} does not match "
+                f"embed_dim={self.embed_dim}"
+            )
+
+        # Explicit sub-layer builds. NOT optional: without them the sub-layers are built
+        # lazily on the first `call()`, which is exactly the path that loses weights on a
+        # `.keras` round-trip.
+        self.norm.build(input_shape)
+        self.attention.build(input_shape)
+        self.hopfield.build(input_shape)
+
+        super().build(input_shape)
+
+    # -----------------------------------------------------------------
+    # Public API
+    # -----------------------------------------------------------------
+
+    def energy(
+        self,
+        g: keras.KerasTensor,
+        attention_mask: Optional[keras.KerasTensor] = None,
+    ) -> keras.KerasTensor:
+        """The block's total scalar energy ``E(g) = E_ATT(g) + E_HN(g)``, shape ``(B,)``.
+
+        This is the Lyapunov function the block descends. It is the sum of exactly TWO
+        terms. The ``EnergyLayerNorm`` Lagrangian is deliberately NOT a third term — it is
+        the *potential whose Hessian* ``dg/dx`` makes the descent PSD, not a term in ``E``.
+        Adding it here would make :meth:`call`'s reported energy a quantity the update does
+        not descend, and would silently invalidate S7. See decisions.md D-005.
+
+        :param g: NORMALIZED token state ``(B, N, D)`` — i.e. ``self.norm(x)``, not ``x``.
+        :type g: keras.KerasTensor
+        :param attention_mask: Optional KEEP mask, forwarded to ``EnergyAttention`` only
+            (``HopfieldNetwork`` is strictly per-token and takes no mask).
+        :type attention_mask: Optional[keras.KerasTensor]
+
+        :return: Energy of shape ``(B,)``.
+        :rtype: keras.KerasTensor
+        """
+        return (
+            self.attention.energy(g, attention_mask=attention_mask)
+            + self.hopfield.energy(g)
+        )
+
+    # -----------------------------------------------------------------
+
+    def call(
+        self,
+        inputs: keras.KerasTensor,
+        attention_mask: Optional[keras.KerasTensor] = None,
+        training: Optional[bool] = None,
+    ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]:
+        """Run ``num_steps`` of energy descent on the token state (paper eq. 6, alg. 1).
+
+        :param inputs: Token state ``(B, N, D)``.
+        :type inputs: keras.KerasTensor
+        :param attention_mask: Optional KEEP mask (``1`` = attend). A rank-2 ``(B, N)`` mask
+            is a SYMMETRIC per-token validity mask (key AND query axes) — see decisions.md
+            D-008.
+        :type attention_mask: Optional[keras.KerasTensor]
+        :param training: When truthy AND ``noise_std > 0``, the eq. 27 noise is injected.
+        :type training: Optional[bool]
+
+        :return: ``x`` of shape ``(B, N, D)``; or ``(x, energies)`` with ``energies`` of
+            shape ``(B, num_steps + 1)`` when ``return_energy=True``.
+        :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]
+        """
+        x = inputs
+        add_noise = self.noise_std > 0.0 and training
+        energies: List[keras.KerasTensor] = []
+
+        for _ in range(self.num_steps):
+            g = self.norm(x)
+
+            if self.return_energy:
+                energies.append(self.energy(g, attention_mask=attention_mask))
+
+            # `update` == -dE/dg (BOTH sub-layers return the DESCENT DIRECTION, never the
+            # gradient). See the class docstring, point 1.
+            update = (
+                self.attention.update(g, attention_mask=attention_mask)
+                + self.hopfield.update(g)
+            )
+
+            # ADDING alpha * update IS `x = x - alpha * dE/dg`. The gradient is w.r.t. `g`
+            # and applied to `x` — paper eq. 6, NOT a typo. See the class docstring,
+            # point 2. Flipping this sign gives energy ASCENT, which still runs.
+            x = x + self.step_size * update
+
+            if add_noise:
+                # eq. 27 (Langevin). `ops.shape(x)` — NEVER a Python int off the batch or
+                # token axis, or the layer breaks under a symbolic/variable batch size.
+                x = x + self._sqrt_step_size * self.noise_std * keras.random.normal(
+                    shape=ops.shape(x),
+                    dtype=self.compute_dtype,
+                    seed=self.seed_generator,
+                )
+
+        if self.return_energy:
+            # The (T+1)-th reading: the energy AFTER the last step. Without it the caller
+            # cannot see the effect of the final update, and `diff(energies)` would only
+            # cover T-1 of the T steps.
+            g = self.norm(x)
+            energies.append(self.energy(g, attention_mask=attention_mask))
+            return x, ops.stack(energies, axis=-1)            # (B, N, D), (B, T + 1)
+
+        return x
+
+    # -----------------------------------------------------------------
+
+    def compute_output_shape(
+        self,
+        input_shape: Tuple[Optional[int], ...]
+    ) -> Union[Tuple[Optional[int], ...], Tuple[Tuple[Optional[int], ...], ...]]:
+        """Return the output shape — valid on an UNBUILT layer.
+
+        Uses ONLY the passed shape and stored config ints (``num_steps``), never a weight
+        shape, so it works before ``build()``.
+
+        :param input_shape: Input shape ``(batch, num_tokens, embed_dim)``.
+        :type input_shape: Tuple[Optional[int], ...]
+
+        :return: ``input_shape``; or, with ``return_energy=True``, the two-tuple
+            ``(input_shape, (batch, num_steps + 1))``.
+        :rtype: Union[Tuple[Optional[int], ...], Tuple[Tuple[Optional[int], ...], ...]]
+        """
+        input_shape = tuple(input_shape)
+        if self.return_energy:
+            batch = input_shape[0]
+            return input_shape, (batch, self.num_steps + 1)
+        return input_shape
+
+    # -----------------------------------------------------------------
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return the full constructor configuration for serialization.
+
+        :return: Dictionary containing every ``__init__`` argument.
+        :rtype: Dict[str, Any]
+        """
+        config = super().get_config()
+        config.update({
+            'embed_dim': self.embed_dim,
+            'num_heads': self.num_heads,
+            'head_dim': self.head_dim,
+            'hopfield_dim': self.hopfield_dim,
+            'num_steps': self.num_steps,
+            'step_size': self.step_size,
+            'beta': self.beta,
+            'attn_self': self.attn_self,
+            'hopfield_activation': self.hopfield_activation,
+            'noise_std': self.noise_std,
+            'return_energy': self.return_energy,
+            'hopfield_beta': self.hopfield_beta,
+            'norm_epsilon': self.norm_epsilon,
+            'seed': self.seed,
+        })
+        return config
 
 # ---------------------------------------------------------------------
