@@ -245,7 +245,7 @@ class CliffordLaplacianUNet(keras.Model):
         blur_trainable: bool = False,
         use_gabor_stem: bool = True,
         gabor_filters: int = 96,
-        gabor_kernel_size: int = 7,
+        gabor_kernel_size: int = 11,
         output_activation: Optional[Any] = None,
         kernel_initializer: Any = "glorot_uniform",
         kernel_regularizer: Optional[Any] = None,

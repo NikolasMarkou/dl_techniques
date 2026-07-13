@@ -121,7 +121,7 @@ The **Bias-Free U-Net** applies the bias-free constraint to the classic U-Net ar
 |-------|---------|---------|
 | `use_gabor_stem` | `False` | When `True`, prepend a frozen Gabor depthwise bank + a **mandatory bias-free 1x1 projection** to `initial_filters`, before the standard ConvUNext stem. Default `False` is byte-identical to the original architecture. |
 | `gabor_filters` | `32` | Depth multiplier of the depthwise Gabor bank; the stem emits `input_channels * gabor_filters` channels which the 1x1 projection reduces back to `initial_filters`. |
-| `gabor_kernel_size` | `7` | Kernel size of the Gabor depthwise stem. |
+| `gabor_kernel_size` | `11` | Kernel size of the Gabor depthwise stem. |
 
 The Gabor weights are deterministic (`GaborFiltersInitializer`) and the layer is `trainable=False`, so the stem contributes **zero trainable parameters** and is preserved (still frozen) across `.keras` round-trips. The mandatory 1x1 projection is bias-free, keeping the whole front-end strictly bias-free.
 
@@ -133,7 +133,7 @@ model = create_convunext_denoiser(
     convnext_version='v1',        # strict bias-freedom
     use_gabor_stem=True,          # frozen Gabor front-end
     gabor_filters=32,
-    gabor_kernel_size=7,
+    gabor_kernel_size=11,
 )
 ```
 

@@ -235,7 +235,7 @@ from dl_techniques.initializers import (
 # The deterministic Gabor bank fills any Conv2D/DepthwiseConv2D kernel whose
 # LAST axis is the filter count; it is replicated across the `in` axis.
 gabor_conv = keras.layers.DepthwiseConv2D(
-    kernel_size=7,
+    kernel_size=11,
     depth_multiplier=96,           # 96 Gabor filters PER input channel
     padding='same',
     depthwise_initializer=GaborFiltersInitializer(),
@@ -247,7 +247,7 @@ gabor_conv = keras.layers.DepthwiseConv2D(
 # Frozen per-channel Gabor front-end (DepthwiseConv2D, output = in * filters).
 gabor_layer = create_gabor_depthwise_conv2d(
     filters=96,
-    kernel_size=7,
+    kernel_size=11,
     name='gabor_front_end',
 )
 # For a specific output count, follow with a 1x1 projection:

@@ -248,7 +248,7 @@ def create_cliffordunet_denoiser(
         layer_scale_init: float = 1e-5,
         use_gabor_stem: bool = False,
         gabor_filters: int = 32,
-        gabor_kernel_size: Union[int, Tuple[int, int]] = 7,
+        gabor_kernel_size: Union[int, Tuple[int, int]] = 11,
         gabor_stem_projection: bool = True,
         use_laplacian_pyramid: bool = False,
         high_freq_blocks: int = 0,
@@ -317,7 +317,7 @@ def create_cliffordunet_denoiser(
             emits ``input_channels * gabor_filters`` channels. Only used when
             ``use_gabor_stem=True``. Defaults to 32.
         gabor_kernel_size: Kernel size of the Gabor depthwise stem. Only used
-            when ``use_gabor_stem=True``. Defaults to 7.
+            when ``use_gabor_stem=True``. Defaults to 11.
         gabor_stem_projection: If True (default) the Gabor stem is followed by
             the mandatory bias-free 1x1 projection to ``initial_filters``. If
             False the projection is DROPPED (valid only when

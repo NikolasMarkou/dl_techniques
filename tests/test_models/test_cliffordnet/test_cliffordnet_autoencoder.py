@@ -231,7 +231,7 @@ class TestGaborStem:
 
     def test_stem_present_and_frozen_by_default(self):
         import keras
-        m = _tiny_model()  # use_gabor_stem defaults True; 96 filters, 7x7
+        m = _tiny_model()  # use_gabor_stem defaults True; 96 filters, 11x11
         assert m.gabor_stem is not None
         # Depthwise: applied per channel, no cross-channel mixing.
         assert isinstance(m.gabor_stem, keras.layers.DepthwiseConv2D)
@@ -241,7 +241,7 @@ class TestGaborStem:
         out = m(x)  # builds the stem; spatial resolution preserved
         assert tuple(out["reconstruction"].shape) == (2, 32, 32, 3)
         # Depthwise kernel: (kh, kw, in_channels, depth_multiplier=filters).
-        assert tuple(m.gabor_stem.kernel.shape) == (7, 7, 3, 96)
+        assert tuple(m.gabor_stem.kernel.shape) == (11, 11, 3, 96)
         # Per-channel output = in_channels * filters = 3 * 96 = 288.
         assert m.gabor_stem.compute_output_shape((None, 32, 32, 3))[-1] == 3 * 96
 

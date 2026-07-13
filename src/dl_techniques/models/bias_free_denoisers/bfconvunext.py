@@ -493,7 +493,7 @@ def create_convunext_denoiser(
         stem_kernel_size: Union[int, Tuple[int, int]] = 7,
         use_gabor_stem: bool = False,
         gabor_filters: int = 32,
-        gabor_kernel_size: Union[int, Tuple[int, int]] = 7,
+        gabor_kernel_size: Union[int, Tuple[int, int]] = 11,
         gabor_stem_projection: bool = True,
         use_laplacian_pyramid: bool = False,
         laplacian_kernel_size: Tuple[int, int] = (5, 5),
@@ -591,7 +591,7 @@ def create_convunext_denoiser(
             projection reduces to `initial_filters`. Only used when use_gabor_stem=True.
             Defaults to 32.
         gabor_kernel_size: Integer or tuple, kernel size of the Gabor depthwise stem.
-            Only used when use_gabor_stem=True. Defaults to 7.
+            Only used when use_gabor_stem=True. Defaults to 11.
         gabor_stem_projection: Boolean, if True (default) the Gabor stem is followed by the
             mandatory bias-free 1x1 projection that reduces `input_channels * gabor_filters`
             channels down to `initial_filters`. If False the projection is DROPPED and the

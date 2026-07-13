@@ -160,7 +160,7 @@ def create_bfunet_denoiser(
         # --- ConvUNeXt-parity features (all default to a byte-identical no-op) ---
         use_gabor_stem: bool = False,
         gabor_filters: int = 32,
-        gabor_kernel_size: Union[int, Tuple[int, int]] = 7,
+        gabor_kernel_size: Union[int, Tuple[int, int]] = 11,
         gabor_stem_projection: bool = True,
         use_laplacian_pyramid: bool = False,
         high_freq_blocks: int = 0,

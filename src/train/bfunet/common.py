@@ -991,7 +991,7 @@ class BFUnetTrainingConfig:
     variant: str = "base"           # tiny | small | base | large | xlarge
     use_gabor_stem: bool = True
     gabor_filters: int = 32
-    gabor_kernel_size: int = 7
+    gabor_kernel_size: int = 11
     # Drop the mandatory bias-free 1x1 projection after the Gabor stem and feed the
     # depthwise bank straight into the encoder. Requires channels * gabor_filters ==
     # initial_filters EXACTLY (see initial_filters override below); the factory raises
