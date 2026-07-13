@@ -4,7 +4,7 @@ The `dl_techniques.layers.norms` module provides a comprehensive collection of n
 
 ## Overview
 
-This module includes sixteen different normalization layer types, ranging from standard Keras layers to specialized variants for stability, efficiency, and advanced modeling like out-of-distribution detection. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these normalization mechanisms into your models.
+This module includes eighteen different normalization layer types, ranging from standard Keras layers to specialized variants for stability, efficiency, and advanced modeling like out-of-distribution detection. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these normalization mechanisms into your models.
 
 ## Weight Reparameterization (not factory-registered)
 
@@ -43,6 +43,8 @@ The following layers are supported by the factory system with automated paramete
 | `dml_plus_focal` | `DMLPlus` | DML+ variant returning the MaxCosine component for OOD detection. | Specialized "focal" models in the DML+ framework. | Arbitrary |
 | `dml_plus_center` | `DMLPlus` | DML+ variant returning the MaxNorm component for OOD detection. | Specialized "center" models in the DML+ framework. | Arbitrary |
 | `dynamic_tanh` | `DynamicTanh` | Learnable scaled hyperbolic tangent as a LayerNorm alternative. | Normalization-free transformer architectures. | Arbitrary |
+| `bias_free_batch_norm` | `BiasFreeBatchNorm` | Variance-only, fixed-statistic normalization (no `moving_mean`, no `beta`); degree-1 homogeneous at inference. | Bias-free / homogeneous architectures (e.g. Miyasawa denoisers) requiring `f(a*x) = a*f(x)` at inference. | Arbitrary |
+| `energy_layer_norm` | `EnergyLayerNorm` | Energy Transformer layer norm: **scalar** `gamma` + **vector** `delta`; the output is `dL/dx` of a Lagrangian with a PSD Hessian. | Energy Transformer blocks, where the norm must be the derivative of a Lagrangian for the energy-descent guarantee to hold. | Arbitrary |
 
 ## Factory Interface
 
@@ -279,6 +281,32 @@ norm = create_normalization_layer(
     alpha_init_value=0.7 # Recommended for attention
 )
 ```
+
+### `bias_free_batch_norm`
+**Optional:** `axis` (default: -1), `epsilon` (default: 1e-3), `momentum` (default: 0.99), `use_scale` (default: True)
+```python
+norm = create_normalization_layer(
+    'bias_free_batch_norm',
+    momentum=0.9
+)
+```
+> Variance-only: it has no `moving_mean` and no `beta`, so at inference `f(a*x) = a*f(x)` for `a > 0`. This is
+> what keeps a bias-free denoiser's `residual = sigma^2 * score` (Miyasawa) identity intact.
+
+### `energy_layer_norm`
+**Optional:** `epsilon` (default: 1e-5), `gamma_initializer` (default: 'ones'), `delta_initializer` (default: 'zeros')
+```python
+norm = create_normalization_layer(
+    'energy_layer_norm',
+    epsilon=1e-5
+)
+```
+> **`gamma` is a SCALAR and `delta` is a VECTOR of dim `D`** — that parameterization (not the usual vector
+> `gamma`) is the entire reason this is a separate layer. The output `g = gamma * (x - mean) / sqrt(var + eps) + delta`
+> is exactly `dL/dx` of the Lagrangian `L = D * gamma * sqrt(var + eps) + sum_j delta_j * x_j`, whose Hessian is
+> PSD for `gamma > 0`. That PSD Hessian is what makes the Energy Transformer's energy descent provable, so
+> **do not "fix" `gamma` into a per-feature vector.** Paper: [arXiv:2302.07253](https://arxiv.org/abs/2302.07253),
+> eq. 1-2. Consumed by `dl_techniques.layers.transformers.energy_transformer.EnergyTransformer`.
 
 ## Direct Layer Instantiation
 

@@ -7,13 +7,13 @@ The largest package in the library — custom Keras 3 layers organized by domain
 ## Structure
 
 ### Attention (`attention/`)
-Multi-head, cross, latent, differential, group-query, ring, performer, perceiver, Hopfield, capsule routing, anchor, channel, spatial, convolutional block (CBAM), progressive focused, wave field, window, mobile MQA, non-local, RPC, shared-weights cross, single-window, tripse, gated, FNet Fourier transform. Includes `factory.py` for config-driven construction.
+Multi-head, cross, latent, differential, group-query, ring, performer, perceiver, Hopfield, capsule routing, anchor, channel, spatial, convolutional block (CBAM), progressive focused, wave field, window, mobile MQA, non-local, RPC, shared-weights cross, single-window, tripse, gated, linear (Miyasawa-compliant O(N)), lighthouse, energy (`EnergyAttention` — no value matrix; `call()` returns the closed-form negative gradient of a scalar token-mixing energy), FNet Fourier transform. Includes `factory.py` for config-driven construction.
 
 ### Feed-Forward Networks (`ffn/`)
 MLP, SwiGLU, GeGLU, GLU, OrthoGLU, gated MLP, power MLP, counting FFN, diff FFN, logic FFN, Swin MLP, residual block. Includes `factory.py`.
 
 ### Normalization (`norms/`)
-RMS norm, zero-centered RMS, band RMS, adaptive band RMS, logit norm, max logit norm, band logit norm, dynamic tanh, global response norm, bias-free (variance-only) batch norm (`BiasFreeBatchNorm` — no `moving_mean`/`beta`, degree-1 homogeneous at inference for bias-free/Miyasawa denoisers). Includes `factory.py`. Also hosts `PolarWeightNorm` — a polar-coordinate *weight* reparameterization (radius + hierarchical angles, exact per-unit norm; generalizes Weight Normalization). Not factory-registered; see the `PolarWeightNorm` module docstring in `norms/polar_weight_norm.py`.
+RMS norm, zero-centered RMS, band RMS, adaptive band RMS, logit norm, max logit norm, band logit norm, dynamic tanh, global response norm, bias-free (variance-only) batch norm (`BiasFreeBatchNorm` — no `moving_mean`/`beta`, degree-1 homogeneous at inference for bias-free/Miyasawa denoisers), energy layer norm (`EnergyLayerNorm` — **scalar** gamma + **vector** delta; the output is `dL/dx` of a Lagrangian with a PSD Hessian, which is what makes the Energy Transformer's energy descent provable). Includes `factory.py`. Also hosts `PolarWeightNorm` — a polar-coordinate *weight* reparameterization (radius + hierarchical angles, exact per-unit norm; generalizes Weight Normalization). Not factory-registered; see the `PolarWeightNorm` module docstring in `norms/polar_weight_norm.py`.
 
 ### Embeddings (`embedding/`)
 Patch embedding (1D/2D), learned positional, fixed 2D sinusoidal positional, rotary position (RoPE), dual rotary, continuous RoPE, continuous sin/cos, scalar/timestep sinusoidal, multi-axis (t/h/w) RoPE, BERT / ModernBERT / ALBERT-factorized token embeddings. Includes `factory.py` with **13 registered keys** (`patch_1d`, `patch_2d`, `positional_learned`, `rope`, `dual_rope`, `continuous_rope`, `continuous_sincos`, `bert_embeddings`, `modern_bert_embeddings`, `albert_factorized`, `positional_sine_2d`, `scalar_sinusoidal`, `mrope_ideogram4`). `HierarchicalCodebookEmbedding` is direct-import-only (not factory-registered). All `call()` paths are graph-safe (no eager ops); `positional_sine_2d` emits channels-first `(B, 2*num_pos_feats, H, W)`.
@@ -25,7 +25,7 @@ Full MoE framework: `config.py` (MoE configuration), `experts.py` (expert networ
 Differentiable soft-clustering / mixture layers + factory: `radial_basis_function.py` (`RBFLayer`), `kmeans.py` (`KMeansLayer` — differentiable K-means), `gmm.py` (`GMMLayer` — differentiable Gaussian Mixture Model with isometric-kernel regularization). `factory.py` exposes `MixtureType` + `create_mixture_layer`/`create_mixture_from_config`. Import via `from dl_techniques.layers.mixtures import RBFLayer, KMeansLayer, GMMLayer, create_mixture_layer`.
 
 ### Transformers (`transformers/`)
-Standard transformer, Swin transformer block, Swin conv block, perceiver transformer, progressive focused transformer, EoMT transformer, free transformer, text encoder/decoder, vision encoder.
+Standard transformer, Swin transformer block, Swin conv block, perceiver transformer, progressive focused transformer, EoMT transformer, free transformer, text encoder/decoder, vision encoder, Energy Transformer (`EnergyTransformer` + `HopfieldNetwork` in `energy_transformer.py` — a recurrent block that replaces `attn -> FFN` with `T` steps of gradient descent on a single scalar energy; arXiv:2302.07253).
 
 ### Graph Layers (`graphs/`)
 Graph neural network, relational graph transformer, simplified hyperbolic GCN, entity graph refinement, Fermi-Dirac decoder.
@@ -123,8 +123,8 @@ Check in this precedence order; only proceed to the next step when nothing fits:
 
    | Domain | Factory entry point | Registered types |
    |--------|---------------------|------------------|
-   | Normalization | `create_normalization_layer()` in `norms/factory.py` | ~16 |
-   | Attention | `create_attention_layer()` in `attention/factory.py` | ~29 |
+   | Normalization | `create_normalization_layer()` in `norms/factory.py` | 18 |
+   | Attention | `create_attention_layer()` in `attention/factory.py` | 31 |
    | FFN / MLP | `create_ffn_layer()` in `ffn/factory.py` | ~15 |
    | Embeddings | `create_embedding_layer()` in `embedding/factory.py` | ~13 |
    | Activations | `create_activation_layer()` in `activations/factory.py` | ~22 |

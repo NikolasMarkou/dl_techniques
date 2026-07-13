@@ -639,3 +639,62 @@ block = PFTBlock(dim=180, num_heads=6, window_size=16, mlp_ratio=2.0)
 ```
 
 > **Note**: `pft_sr` imports `PFTBlock` from `progressive_focused_transformer` (the module name, not `progressive_focused_transformer_block`).
+
+## EnergyTransformer / HopfieldNetwork
+
+The `dl_techniques.layers.transformers.energy_transformer` module implements the Energy Transformer (ET) block of Hoover et al., NeurIPS 2023 ([arXiv:2302.07253](https://arxiv.org/abs/2302.07253)).
+
+ET **replaces the `attn -> FFN` residual stream with `T` steps of gradient descent on a single scalar energy**. Each step normalizes the token state with an `EnergyLayerNorm` (`g = dL/dx` of a Lagrangian with a PSD Hessian), evaluates the closed-form energy gradient, and takes an `alpha`-scaled step:
+
+```
+for t in 1..T:
+    g = EnergyLayerNorm(x)
+    x = x + step_size * (attn.update(g) + hopfield.update(g))     # update == -dE/dg
+```
+
+The energy is `E = E_ATT + E_HN`, contributed by two sub-layers:
+
+-   **`EnergyAttention`** (`layers/attention/energy_attention.py`, factory key `'energy'`): token mixing. No value matrix; its `call()` returns the exact closed-form `-dE_ATT/dg`.
+-   **`HopfieldNetwork`**: a per-token associative memory with a **single tied** `(hopfield_dim, dim)` matrix `xi` used in both directions and no bias — it is *not* FFN-shaped, which is why it is deliberately **not** registered in the FFN factory and lives beside the block that consumes it. `activation='relu'` (default, both of the paper's headline configs) or `'softmax'` (modern Hopfield), each with its own matching energy/gradient pair.
+
+Because every `update()` is the analytic negative gradient of the energy the block reports, the energy is **provably non-increasing** across the recurrent steps (for `noise_std=0`, `gamma > 0`, and a small enough `step_size`). Both closed forms are verified against a `tf.GradientTape` autodiff oracle in the tests; the source itself is `keras.ops`-only.
+
+### Usage
+
+```python
+from dl_techniques.layers.transformers import EnergyTransformer
+
+# The paper's ImageNet ET-Full block config (Table 15): 3.54M params.
+block = EnergyTransformer(
+    embed_dim=768,
+    num_heads=12,
+    head_dim=64,
+    hopfield_dim=3072,
+    num_steps=12,
+    step_size=0.1,
+    attn_self=False,          # ET-Full: the attention diagonal is excluded
+    hopfield_activation='relu',
+)
+y = block(tokens)             # (batch, seq_len, 768) -> same shape
+
+# Inspect the descent: returns (x, energies) with energies of shape (batch, num_steps + 1).
+probe = EnergyTransformer(
+    embed_dim=768, num_heads=12, head_dim=64, hopfield_dim=3072,
+    return_energy=True,
+)
+y, energies = probe(tokens)   # energies is monotonically non-increasing per sample
+```
+
+### Arguments
+
+-   **`embed_dim`**, **`num_heads`**, **`head_dim`**, **`hopfield_dim`**: required dimensions.
+-   **`num_steps`** (default `12`): `T`, the number of descent steps.
+-   **`step_size`** (default `0.1`): `alpha`, the descent step. Too large and the discretized descent may overshoot.
+-   **`beta`** (default `None` -> `1/sqrt(head_dim)`): the attention inverse temperature.
+-   **`attn_self`** (default `False`): whether a token attends to itself (`False` = the paper's ET-Full).
+-   **`hopfield_activation`** (default `'relu'`), **`hopfield_beta`** (default `1.0`, read only by `'softmax'` — it is a *second, independent* temperature over the `hopfield_dim` memories, not `beta`).
+-   **`noise_std`** (default `0.0`): Langevin noise injected during training only (eq. 27). The descent guarantee is **not** claimed when this is non-zero.
+-   **`return_energy`** (default `False`), **`norm_epsilon`** (default `1e-5`), **`seed`** (default `None`).
+-   `call(inputs, attention_mask=None, training=None)`. A rank-2 `(B, N)` mask is a per-token *validity* mask applied symmetrically to the key and query axes (see the `energy` notes in `attention/README.md`).
+
+> **Scope**: this is the ET **block** plus an optional mask and optional noise. There is no image or graph model wrapper (no patchify, no `MASK` token, no decoder).

@@ -4,7 +4,7 @@ The `dl_techniques.layers.attention` module provides a comprehensive collection 
 
 ## Overview
 
-This module includes twenty-nine different attention layer types, ranging from standard multi-head attention to specialized variants for vision, efficiency, and advanced modeling. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these attention mechanisms into your models.
+This module includes thirty-one different attention layer types, ranging from standard multi-head attention to specialized variants for vision, efficiency, and advanced modeling. All layers are built using Keras 3 for backend-agnostic compatibility and support full serialization. The factory system ensures a standardized, safe, and introspectable way to integrate any of these attention mechanisms into your models.
 
 ## Available Attention Types
 
@@ -17,6 +17,7 @@ The following layers are supported by the factory system with automated paramete
 | `cbam` | `CBAM` | Convolutional Block Attention Module (Channel + Spatial). | Plug-and-play attention module for any CNN to refine features. | `(batch, H, W, channels)` |
 | `channel` | `ChannelAttention` | Channel attention module from CBAM. | CNNs to recalibrate channel-wise feature responses. | `(batch, H, W, channels)` |
 | `differential` | `DifferentialMultiHeadAttention` | Dual MHA to amplify signal and cancel noise. | Transformers requiring improved focus and reduced hallucination. | `(batch, seq_len, dim)` |
+| `energy` | `EnergyAttention` | Energy-based attention (Energy Transformer). No value matrix: `call()` returns the exact closed-form **negative gradient** of a scalar token-mixing energy. | Energy Transformer blocks whose residual stream is a Lyapunov descent rather than an opaque `attn -> FFN` stack. | `(batch, seq_len, dim)` |
 | `fnet` | `FNetFourierTransform` | Parameter-free token mixing with Fourier Transforms. | Efficient replacement for self-attention in sequence models. | `(batch, seq_len, dim)` |
 | `gated` | `GatedAttention` | Attention with normalization, partial RoPE, and output gating. | High-performance transformers requiring stability and expressiveness. | `(batch, seq_len, dim)` |
 | `group_query` | `GroupedQueryAttention` | GQA with shared K/V heads for efficiency. | Large language models where K/V cache size is a bottleneck. | `(batch, seq_len, dim)` |
@@ -216,6 +217,37 @@ attn = create_attention_layer(
     attention_dropout_rate=0.1
 )
 ```
+
+### `energy`
+**Required:** `dim`  
+**Optional:** `num_heads` (default: 8), `head_dim` (default: None), `beta` (default: None), `attn_self` (default: False), `kernel_initializer` (default: None)
+```python
+attn = create_attention_layer(
+    'energy',
+    dim=768,
+    num_heads=12,
+    head_dim=64,
+    attn_self=False
+)
+```
+**Notes:**
+- **Not a weighted sum of values — there is no value matrix.** The layer defines a scalar energy
+  `E_ATT(g) = -(1/beta) * sum_h sum_m logsumexp_n(beta * A_hnm)` over bias-free `(head_dim, num_heads, dim)`
+  key/query projections, and `call()` returns the exact closed-form `-dE_ATT/dg` (a **descent direction**,
+  not a contextualized value). It is therefore **not** a drop-in replacement for `multi_head`: the output is
+  an *update* to be added to the residual stream, not a new token representation.
+- **Two gradient terms.** The update carries a second, ET-specific term (the token in its *key* role) that is
+  absent from vanilla attention and is what makes the recurrent dynamics provably energy-descending. Cost is
+  ~2x standard attention's flops at the same `O(N^2)` scaling.
+- Also exposes `energy(g, attention_mask=None) -> (B,)` and `update(g, attention_mask=None) -> (B, N, D)`.
+- `attn_self=False` (the paper's ET-Full config) masks the diagonal; on a single-token input both the energy
+  and the update are exactly zero.
+- **Mask semantics deviate from the siblings for rank-2 masks:** a `(B, N)` mask is a per-token *validity*
+  mask applied symmetrically to the key **and** query axes (a key-only mask cannot guarantee zero influence
+  here, because the second gradient term sums over query columns). `(B, N, N)` / `(B, H, N, N)` masks keep the
+  house `(key, query)` semantics.
+- Paper: Energy Transformer, [arXiv:2302.07253](https://arxiv.org/abs/2302.07253). Composed by
+  `dl_techniques.layers.transformers.energy_transformer.EnergyTransformer`.
 
 ### `fnet`
 **Required:** None  
