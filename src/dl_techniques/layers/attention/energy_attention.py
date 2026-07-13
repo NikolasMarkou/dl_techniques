@@ -68,6 +68,26 @@ def _mask_dtype(compute_dtype: str) -> str:
     return "float64" if compute_dtype == "float64" else "float32"
 
 
+def _symmetric_token_keep(token_keep: keras.KerasTensor) -> keras.KerasTensor:
+    """Expand a rank-2 ``(B, N)`` per-token VALIDITY mask to a ``(B, 1, N, N)`` keep tensor.
+
+    ``keep[b, :, n, m] = token_keep[b, n] * token_keep[b, m]`` — the token is removed from
+    BOTH the key role ``n`` and the query role ``m``. This is D-008's semantics, factored
+    out because it now has two call sites (the explicit rank-2 ``attention_mask`` and the
+    Keras-propagated ``mask``); see the D-008 / D-002 anchors in :meth:`_build_keep_mask`.
+    Do NOT duplicate it, and do NOT weaken either factor to a key-only mask.
+
+    :param token_keep: 0/1 tensor of shape ``(B, N)`` in the mask compute dtype.
+    :type token_keep: keras.KerasTensor
+
+    :return: 0/1 keep tensor of shape ``(B, 1, N, N)``, axis 2 = key ``n``, axis 3 = query ``m``.
+    :rtype: keras.KerasTensor
+    """
+    key_keep = ops.expand_dims(ops.expand_dims(token_keep, axis=1), axis=-1)   # (B,1,N,1)
+    query_keep = ops.expand_dims(ops.expand_dims(token_keep, axis=1), axis=2)  # (B,1,1,N)
+    return key_keep * query_keep                                               # (B,1,N,N)
+
+
 @keras.saving.register_keras_serializable()
 class EnergyAttention(keras.layers.Layer):
     """Energy Transformer multi-head energy attention (bias-free, no value matrix).
@@ -271,6 +291,7 @@ class EnergyAttention(keras.layers.Layer):
         self,
         g: keras.KerasTensor,
         attention_mask: Optional[keras.KerasTensor],
+        mask: Optional[keras.KerasTensor] = None,
     ) -> Tuple[keras.KerasTensor, bool]:
         """Normalize the user KEEP mask to a ``(b, h, n, m)``-broadcastable 0/1 tensor.
 
@@ -301,6 +322,29 @@ class EnergyAttention(keras.layers.Layer):
         (``test_masked_token_has_no_influence``) RED. Rank-3/rank-4 masks keep the
         sibling's ``(n = key, m = query)`` semantics untouched. See decisions.md D-008.
 
+        # DECISION plan_2026-07-13_ca4f71a2/D-002
+        The Keras-propagated ``mask`` (from e.g. ``Embedding(mask_zero=True)``) is merged
+        HERE, as one extra multiplicative keep factor reusing D-008's symmetric expansion
+        (``_symmetric_token_keep``) — because the propagated mask IS exactly a rank-2
+        ``(B, N)`` per-token validity mask, i.e. D-008's shape and D-008's semantics. Do NOT
+        give it its own masking path: a second convention is a second thing to get wrong,
+        and the symmetric (key AND query) treatment is precisely what F-02 needs (a PAD
+        token masked only as a KEY still propagates through ``term_k``). The merge is
+        ADDITIVE — no D-006/D-008 semantics change. See decisions.md D-002.
+
+        # DECISION plan_2026-07-13_ca4f71a2/D-003
+        Precedence when BOTH masks arrive is LOGICAL AND: the multiplication below IS the
+        AND, and it composes with ANY rank (2/3/4) of ``attention_mask``.
+        WHAT NOT TO DO:
+          * Do NOT raise on a conflict between the two masks. Detecting one compares mask
+            VALUES — a tensor-valued condition, unresolvable at trace time and therefore
+            graph-UNSAFE (unlike the Python-bool ``is_masked`` below).
+          * Do NOT make the explicit ``attention_mask`` win. That would let an explicit mask
+            silently UN-MASK a PAD token the framework declared invalid — reintroducing F-02
+            through the front door. AND is the only rule monotone in safety: neither mask can
+            ever resurrect a token the other hid.
+        See decisions.md D-003.
+
         :param g: Token state ``(B, N, D)``.
         :type g: keras.KerasTensor
         :param attention_mask: KEEP mask of shape ``(B, N)`` (a per-token VALIDITY mask,
@@ -308,6 +352,9 @@ class EnergyAttention(keras.layers.Layer):
             (interpreted ``(b, n, m)`` with ``n`` = key and ``m`` = query, broadcast over
             heads), or ``(B, H, N, N)``. ``None`` means "attend everywhere".
         :type attention_mask: Optional[keras.KerasTensor]
+        :param mask: Optional Keras-propagated rank-2 ``(B, N)`` boolean per-token validity
+            mask. ANDed with ``attention_mask`` (D-003).
+        :type mask: Optional[keras.KerasTensor]
 
         :return: ``(keep, is_masked)``. ``keep`` is a 0/1 tensor in ``float32`` (NOT the
             compute dtype — see the D-009 anchor at ``_MASK_BIAS_VALUE``), broadcastable to
@@ -318,7 +365,7 @@ class EnergyAttention(keras.layers.Layer):
             fp16 ``-inf`` bug.
         :rtype: Tuple[keras.KerasTensor, bool]
 
-        :raises ValueError: If ``attention_mask`` has an unsupported rank.
+        :raises ValueError: If ``attention_mask`` or ``mask`` has an unsupported rank.
         """
         num_tokens = ops.shape(g)[1]
         mask_dtype = _mask_dtype(self.compute_dtype)
@@ -326,31 +373,46 @@ class EnergyAttention(keras.layers.Layer):
         # NOTE: `is_masked` is a PYTHON bool, resolvable at trace time — it depends only on
         # `attn_self` and on whether a mask tensor was passed, never on tensor VALUES. It is
         # therefore graph-safe.
-        is_masked = (attention_mask is not None) or (not self.attn_self)
+        is_masked = (
+            (attention_mask is not None) or (mask is not None) or (not self.attn_self)
+        )
 
         if attention_mask is None:
             keep = ops.ones((1, 1, 1, 1), dtype=mask_dtype)
         else:
-            mask = ops.cast(attention_mask, mask_dtype)
-            rank = len(mask.shape)
+            explicit = ops.cast(attention_mask, mask_dtype)
+            rank = len(explicit.shape)
             if rank == 2:
                 # (B, N) token-validity mask -> (B, 1, N, N), applied SYMMETRICALLY:
                 # keep[b, :, n, m] = mask[b, n] * mask[b, m]. An invalid token is removed
                 # from BOTH the key role and the query role (D-008 above).
-                key_keep = ops.expand_dims(ops.expand_dims(mask, axis=1), axis=-1)   # (B,1,N,1)
-                query_keep = ops.expand_dims(ops.expand_dims(mask, axis=1), axis=2)  # (B,1,1,N)
-                keep = key_keep * query_keep                                         # (B,1,N,N)
+                keep = _symmetric_token_keep(explicit)                                # (B,1,N,N)
             elif rank == 3:
                 # (B, N, N) read as (b, n, m) -> (B, 1, N, N): broadcast over heads.
-                keep = ops.expand_dims(mask, axis=1)
+                keep = ops.expand_dims(explicit, axis=1)
             elif rank == 4:
                 # (B, H, N, N) already in the einsum layout.
-                keep = mask
+                keep = explicit
             else:
                 raise ValueError(
                     "attention_mask must have rank 2 (B, N), 3 (B, N, N) or "
                     f"4 (B, H, N, N), got rank {rank}"
                 )
+
+        if mask is not None:
+            # The Keras-propagated mask (D-002), cast into the mask compute dtype — it
+            # arrives BOOLEAN, and it must NEVER land in fp16 where `-1e9` is `-inf` (D-009).
+            # Multiplying the keep factors IS the logical AND (D-003) and composes with any
+            # rank of `attention_mask` above.
+            keras_mask = ops.cast(mask, mask_dtype)
+            keras_rank = len(keras_mask.shape)
+            if keras_rank != 2:
+                raise ValueError(
+                    "the Keras-propagated `mask` must have rank 2 (B, N) — a per-token "
+                    f"validity mask — got rank {keras_rank}. Pass a rank-3/rank-4 mask as "
+                    "`attention_mask` instead."
+                )
+            keep = keep * _symmetric_token_keep(keras_mask)
 
         if not self.attn_self:
             # Always-on diagonal exclusion (n == m), ANDed with the user mask.
@@ -367,6 +429,7 @@ class EnergyAttention(keras.layers.Layer):
         self,
         g: keras.KerasTensor,
         attention_mask: Optional[keras.KerasTensor],
+        mask: Optional[keras.KerasTensor] = None,
     ) -> Tuple[keras.KerasTensor, ...]:
         """Compute ``K``, ``Q``, the masked ``logits`` and the ``keep`` mask.
 
@@ -374,6 +437,9 @@ class EnergyAttention(keras.layers.Layer):
         :type g: keras.KerasTensor
         :param attention_mask: Optional KEEP mask (see :meth:`_build_keep_mask`).
         :type attention_mask: Optional[keras.KerasTensor]
+        :param mask: Optional Keras-propagated ``(B, N)`` mask, ANDed with
+            ``attention_mask`` (see :meth:`_build_keep_mask`, D-002/D-003).
+        :type mask: Optional[keras.KerasTensor]
 
         ``K`` and ``Q`` come back in the **compute dtype** (they feed the gradient einsums,
         which contract against the compute-dtype weights). ``logits`` and ``keep`` come back
@@ -384,7 +450,7 @@ class EnergyAttention(keras.layers.Layer):
             float32 (``n`` = key axis 2).
         :rtype: Tuple[keras.KerasTensor, ...]
         """
-        keep, is_masked = self._build_keep_mask(g, attention_mask)
+        keep, is_masked = self._build_keep_mask(g, attention_mask, mask=mask)
 
         k = ops.einsum('yhd,bnd->byhn', self.w_key, g)      # (B, Y, H, N)  n = KEY
         q = ops.einsum('yhd,bmd->byhm', self.w_query, g)    # (B, Y, H, N)  m = QUERY
@@ -422,6 +488,7 @@ class EnergyAttention(keras.layers.Layer):
         self,
         g: keras.KerasTensor,
         attention_mask: Optional[keras.KerasTensor] = None,
+        mask: Optional[keras.KerasTensor] = None,
     ) -> keras.KerasTensor:
         """Scalar attention energy ``E_ATT`` per batch element (paper eq. 4).
 
@@ -441,6 +508,13 @@ class EnergyAttention(keras.layers.Layer):
         :type g: keras.KerasTensor
         :param attention_mask: Optional KEEP mask (see :meth:`_build_keep_mask`).
         :type attention_mask: Optional[keras.KerasTensor]
+        :param mask: Optional Keras-propagated rank-2 ``(B, N)`` boolean validity mask.
+            When BOTH masks are supplied the rule is a **logical AND** — a token is attended
+            only if valid under both, and neither mask can un-mask what the other hid
+            (decisions.md D-003). This parameter exists because ``energy()`` is part of the
+            public duck-typed surface an ``EnergyTransformer`` block calls DIRECTLY, outside
+            ``__call__``, where Keras cannot inject the mask for us.
+        :type mask: Optional[keras.KerasTensor]
 
         :return: Energy of shape ``(B,)``.
         :rtype: keras.KerasTensor
@@ -454,7 +528,13 @@ class EnergyAttention(keras.layers.Layer):
         # registry ADVERTISES this method, so it must be safe standalone.
         g = ops.cast(g, self.compute_dtype)
 
-        _, _, logits, keep = self._project(g, attention_mask)   # logits, keep: float32
+        # I1/STOP-IF 2: `mask` MUST reach `_project` here AND in `update()`. If it lands in
+        # only one of them, `update()` stops being `-dE/dg` — the layer still runs, still
+        # trains, and the descent guarantee silently evaporates. `test_gradient_oracle` runs
+        # WITH a Keras mask (`mask_kind` in {KERAS, BN+KERAS}) precisely to catch that.
+        _, _, logits, keep = self._project(
+            g, attention_mask, mask=mask
+        )                                                       # logits, keep: float32
 
         # logsumexp over the KEY axis n (axis=2) -> (B, H, N) indexed by (b, h, m).
         lse = ops.logsumexp(logits, axis=2)
@@ -476,6 +556,7 @@ class EnergyAttention(keras.layers.Layer):
         self,
         g: keras.KerasTensor,
         attention_mask: Optional[keras.KerasTensor] = None,
+        mask: Optional[keras.KerasTensor] = None,
     ) -> keras.KerasTensor:
         """Return ``-dE_ATT/dg`` — the DESCENT DIRECTION, **not** the gradient.
 
@@ -488,6 +569,10 @@ class EnergyAttention(keras.layers.Layer):
         :type g: keras.KerasTensor
         :param attention_mask: Optional KEEP mask (see :meth:`_build_keep_mask`).
         :type attention_mask: Optional[keras.KerasTensor]
+        :param mask: Optional Keras-propagated rank-2 ``(B, N)`` boolean validity mask,
+            ANDed with ``attention_mask`` (decisions.md D-003). It MUST be passed to the
+            SAME ``_project`` call ``energy()`` makes, or ``update() != -dE/dg``.
+        :type mask: Optional[keras.KerasTensor]
 
         :return: ``-dE_ATT/dg`` of shape ``(B, N, D)``.
         :rtype: keras.KerasTensor
@@ -498,7 +583,10 @@ class EnergyAttention(keras.layers.Layer):
         # C-2: cast at the head of the public method — see the note in `energy()`.
         g = ops.cast(g, self.compute_dtype)
 
-        k, q, logits, keep = self._project(g, attention_mask)   # logits, keep: float32
+        # I1/STOP-IF 2: same masks as `energy()` — see the note there.
+        k, q, logits, keep = self._project(
+            g, attention_mask, mask=mask
+        )                                                       # logits, keep: float32
 
         # Softmax over the KEY axis n, then ZERO the masked keys. The post-softmax `* keep`
         # is NOT redundant with the additive -1e9 bias: softmax of an ALL -1e9 row returns
@@ -535,11 +623,20 @@ class EnergyAttention(keras.layers.Layer):
         inputs: keras.KerasTensor,
         attention_mask: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None,
+        mask: Optional[keras.KerasTensor] = None,
     ) -> keras.KerasTensor:
         """Return the energy descent direction ``-dE_ATT/dg`` for ``inputs``.
 
         Unlike a standard attention layer, this does NOT return a weighted sum of values
         (there is no value matrix); it returns :meth:`update`.
+
+        **Masking.** ``supports_masking = True``, and this signature DECLARES ``mask`` —
+        which is what makes Keras inject a propagated mask (e.g. from an upstream
+        ``Embedding(mask_zero=True)``). Do NOT remove the parameter: ``supports_masking``
+        alone only suppresses Keras' "layer does not support masking" error; without a
+        ``mask`` parameter here the mask is silently DROPPED and PAD tokens influence every
+        real token (F-02). When BOTH ``mask`` and ``attention_mask`` are supplied the rule is
+        a **logical AND** — a token is attended only if valid under both (decisions.md D-003).
 
         :param inputs: Token state ``(B, N, D)``.
         :type inputs: keras.KerasTensor
@@ -547,11 +644,14 @@ class EnergyAttention(keras.layers.Layer):
         :type attention_mask: Optional[keras.KerasTensor]
         :param training: Unused; the layer is deterministic.
         :type training: Optional[bool]
+        :param mask: Keras-propagated rank-2 ``(B, N)`` boolean per-token validity mask.
+            Normally injected by Keras, not passed by hand.
+        :type mask: Optional[keras.KerasTensor]
 
         :return: Tensor of shape ``(B, N, D)``.
         :rtype: keras.KerasTensor
         """
-        return self.update(inputs, attention_mask=attention_mask)
+        return self.update(inputs, attention_mask=attention_mask, mask=mask)
 
     # -----------------------------------------------------------------
 

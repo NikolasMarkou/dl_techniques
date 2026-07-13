@@ -90,6 +90,37 @@ def _keep_mask(kind, seed=11):
     raise AssertionError(f"unknown mask kind {kind}")
 
 
+def _bool_token_mask(seed=21):
+    """A BOOLEAN (B, N) per-token validity mask — the shape/dtype Keras propagates."""
+    rng = np.random.default_rng(seed)
+    m = rng.random((BATCH, TOKENS)) > 0.3
+    m[:, 0] = True  # guarantee at least one valid key per sample
+    return m
+
+
+def _oracle_masks(kind):
+    """Resolve an oracle `mask_kind` into `(attention_mask, keras_mask)`.
+
+    The `KERAS` / `BN+KERAS` cells exist to satisfy plan STOP-IF 2: the Keras mask enters
+    BOTH `energy()`'s logsumexp/col_valid path AND `update()`'s `omega`. A merge landing in
+    only one of them leaves `update() != -dE/dg` — the layer still runs, still trains, and
+    the descent guarantee silently evaporates. Only the autodiff oracle can see that, and
+    only if it is RUN with a Keras mask present.
+    """
+    if kind is None:
+        return None, None
+    if kind in ("BN", "BNN"):
+        return tf.convert_to_tensor(_keep_mask(kind)), None
+    if kind == "KERAS":
+        return None, tf.convert_to_tensor(_bool_token_mask())
+    if kind == "BN+KERAS":
+        return (
+            tf.convert_to_tensor(_keep_mask("BN")),
+            tf.convert_to_tensor(_bool_token_mask()),
+        )
+    raise AssertionError(f"unknown mask kind {kind}")
+
+
 # ---------------------------------------------------------------------
 # S6a — THE GRADIENT ORACLE (the go/no-go for the whole plan)
 # ---------------------------------------------------------------------
@@ -98,24 +129,27 @@ class TestGradientOracle:
     """update(g) MUST equal -d/dg [ sum_b energy(g) ] (S6a)."""
 
     @pytest.mark.parametrize("attn_self", [True, False])
-    @pytest.mark.parametrize("mask_kind", [None, "BN", "BNN"])
+    @pytest.mark.parametrize("mask_kind", [None, "BN", "BNN", "KERAS", "BN+KERAS"])
     def test_gradient_oracle(self, attn_self, mask_kind, sample_input):
         layer = EnergyAttention(dim=DIM, num_heads=HEADS, attn_self=attn_self)
         layer.build((BATCH, TOKENS, DIM))
         _excite(layer)
 
-        mask_np = _keep_mask(mask_kind)
-        mask = None if mask_np is None else tf.convert_to_tensor(mask_np)
+        mask, keras_mask = _oracle_masks(mask_kind)
 
         g = tf.Variable(sample_input, dtype=tf.float32)
 
         with tf.GradientTape() as tape:
-            energy = tf.reduce_sum(layer.energy(g, attention_mask=mask))
+            energy = tf.reduce_sum(
+                layer.energy(g, attention_mask=mask, mask=keras_mask)
+            )
         grad = tape.gradient(energy, g)
 
         assert grad is not None, "energy() has no gradient path to g"
 
-        update = keras.ops.convert_to_numpy(layer.update(g, attention_mask=mask))
+        update = keras.ops.convert_to_numpy(
+            layer.update(g, attention_mask=mask, mask=keras_mask)
+        )
         neg_grad = grad.numpy()  # tape.gradient(E, g) == +dE/dg; update must be its negation
 
         # Anti-vacuity: a zero-vs-zero comparison must not be able to pass.
@@ -236,6 +270,104 @@ class TestMasking:
         assert np.abs(v1[:, others, :] - v0[:, others, :]).max() > 1e-3, (
             "without the mask the perturbation changed nothing — the masked comparison "
             "would pass vacuously"
+        )
+
+
+# ---------------------------------------------------------------------
+# F-02a — a KERAS-PROPAGATED mask must be honored, not silently dropped
+# ---------------------------------------------------------------------
+
+def _padded_mask_model(seed=5):
+    """`Embedding(mask_zero=True) -> EnergyAttention` — the standard Keras NLP idiom.
+
+    The Embedding is the mask PRODUCER: no mask is ever hand-passed, so this exercises the
+    real `_keras_mask` propagation path (decisions.md D-004: a mask test that hand-passes
+    an `attention_mask` cannot see F-02 at all).
+    """
+    vocab = 10
+    emb = keras.layers.Embedding(vocab, DIM, mask_zero=True)
+    attn = EnergyAttention(dim=DIM, num_heads=HEADS)
+
+    inp = keras.Input(shape=(None,), dtype="int32")
+    model = keras.Model(inp, attn(emb(inp)))
+
+    # Excite BOTH layers: with the default inits the output is O(1e-3) and a dropped mask
+    # would be indistinguishable from an honored one at atol=1e-6.
+    rng = np.random.default_rng(seed)
+    emb.embeddings.assign(rng.standard_normal((vocab, DIM)).astype("float32"))
+    _excite(attn)
+    return model
+
+
+class TestKerasMaskIsHonored:
+    """F-02a: PAD tokens must not influence the real tokens' outputs."""
+
+    def test_pads_do_not_shift_real_token_outputs(self):
+        model = _padded_mask_model()
+
+        padded = np.array([[1, 2, 3, 0, 0, 0]], dtype="int32")  # 3 real + 3 PAD
+        short = np.array([[1, 2, 3]], dtype="int32")            # pads physically absent
+
+        y_pad = keras.ops.convert_to_numpy(model(padded))[:, :3, :]
+        y_short = keras.ops.convert_to_numpy(model(short))
+
+        # Anti-vacuity: the layer must actually be doing something at the real positions.
+        assert np.abs(y_short).max() > 1e-3, (
+            "the un-padded output is ~0 — the comparison below would pass vacuously"
+        )
+
+        max_abs_diff = float(np.abs(y_pad - y_short).max())
+        np.testing.assert_allclose(
+            y_pad, y_short, atol=1e-6,
+            err_msg=(
+                f"PAD tokens shifted the real tokens' outputs by {max_abs_diff:.3e}. "
+                "EnergyAttention advertises supports_masking=True but its call() must "
+                "declare `mask` for Keras to inject the propagated mask (F-02)."
+            ),
+        )
+
+
+class TestMaskPrecedence:
+    """D-003: `mask` AND `attention_mask` compose as a LOGICAL AND."""
+
+    def test_keras_mask_and_attention_mask_are_anded(self, sample_input):
+        j_keras, j_explicit = 3, 4
+
+        layer = EnergyAttention(dim=DIM, num_heads=HEADS)
+        layer.build((BATCH, TOKENS, DIM))
+        _excite(layer)
+
+        keras_mask = np.ones((BATCH, TOKENS), dtype="bool")
+        keras_mask[:, j_keras] = False                     # Keras hides token 3
+
+        explicit = np.ones((BATCH, TOKENS), dtype="float32")
+        explicit[:, j_explicit] = 0.0                      # attention_mask hides token 4
+
+        both = np.ones((BATCH, TOKENS), dtype="float32")
+        both[:, [j_keras, j_explicit]] = 0.0               # reference: hides BOTH
+
+        y_and = keras.ops.convert_to_numpy(
+            layer(sample_input, attention_mask=explicit, mask=keras_mask)
+        )
+        y_ref = keras.ops.convert_to_numpy(layer(sample_input, attention_mask=both))
+        y_explicit_only = keras.ops.convert_to_numpy(
+            layer(sample_input, attention_mask=explicit)
+        )
+
+        # Anti-vacuity: hiding token 3 as well DOES change the answer, so the equality
+        # below is measuring the AND and not a no-op.
+        assert np.abs(y_ref - y_explicit_only).max() > 1e-3, (
+            "hiding the extra token changed nothing — the AND check would pass vacuously"
+        )
+
+        max_abs_diff = float(np.abs(y_and - y_ref).max())
+        np.testing.assert_allclose(
+            y_and, y_ref, atol=1e-6,
+            err_msg=(
+                f"mask + attention_mask is not a logical AND (diff={max_abs_diff:.3e}). "
+                "The Keras mask must be merged as an EXTRA multiplicative keep factor "
+                "(decisions.md D-003) — an explicit mask must never un-mask a PAD token."
+            ),
         )
 
 
