@@ -1234,5 +1234,103 @@ class TestBlockMaskPrecedence:
         )
 
 
+# ---------------------------------------------------------------------
+# F-05b — the energy-descent update must be USEFUL FOR LEARNING, not merely finite
+# ---------------------------------------------------------------------
+
+class TestFitConvergence:
+    """C8: `model.fit` on a token-MIXING task must actually reduce the loss.
+
+    The gap this closes (decisions.md D-004): `test_gradient_flow` already proves the
+    gradients are finite and non-None. NOTHING proved they are USEFUL — that the T-step
+    energy descent computes anything a downstream task can learn from. A second finiteness
+    test would be coverage theatre.
+
+    **The design that makes this guard BITE.** A convergence test is worthless if the head
+    can solve the task WITHOUT the block; it would then pass with a dead/identity block and
+    certify nothing. So:
+
+    1. **The head is mixing-free BY CONSTRUCTION.** `Dense(1)` applied to a `(B, N, D)`
+       tensor acts INDEPENDENTLY on each token: token `n`'s prediction is a linear functional
+       of row `n` alone. It can never see another token. (This is exactly why the head is NOT
+       `GlobalAveragePooling1D` or `Flatten` — either of those performs the across-token
+       mixing ITSELF and would hand a dead block the answer.)
+    2. **The target REQUIRES mixing, with ZERO leakage to the own token.** The target for
+       token `n` is the LEAVE-ONE-OUT mean of channel 0 over the OTHER tokens:
+       `t[b, n] = scale * mean_{j != n} x[b, j, 0]`. Because the inputs are i.i.d. standard
+       normal and `j != n`, `cov(t[b, n], x[b, n, :]) == 0` EXACTLY — the token's own content
+       carries no linear information about its target. A dead block therefore leaves the head
+       with nothing to regress on, and its loss floor is the target's own variance.
+       (A plain global mean `mean_j x[b, j, 0]` is NOT good enough: it includes the own token
+       with weight `1/N`, which is a real signal the head can exploit — measured live, the
+       dead block then reaches ratio 0.427 and this test PASSES on a dead block.)
+    3. **The batch is big enough that the head cannot memorize it.** `Dense(1)` over `D=32`
+       is 33 parameters; with `B=16` it overfits the `16 * 7 = 112` fixed examples and again
+       passes on a dead block. `B=64` (448 examples) starves that.
+
+    Measured (guard-bites ledger, plan C10): with `x = x + step_size * update` the loss goes
+    5.68 -> 0.028 (ratio 0.005). With the descent neutered to `x = x + 0.0 * update` the
+    dead block's loss floor is **4.12** (ratio 0.726) — above the `0.5 * initial` threshold,
+    so the guard goes RED. Do not "simplify" the target or shrink the batch: both changes
+    make this test pass on a dead block.
+    """
+
+    FIT_BATCH = 64
+    TARGET_SCALE = 5.0
+    EPOCHS = 150
+
+    @staticmethod
+    def _leave_one_out_target(x: np.ndarray, scale: float) -> np.ndarray:
+        """`t[b, n] = scale * mean_{j != n} x[b, j, 0]` — pure across-token structure."""
+        c0 = x[:, :, 0]                                          # (B, N)
+        total = c0.sum(axis=1, keepdims=True)                    # (B, 1)
+        loo = (total - c0) / (c0.shape[1] - 1)                   # (B, N), excludes self
+        return (scale * loo)[..., None].astype("float32")        # (B, N, 1)
+
+    def test_fit_reduces_loss(self):
+        keras.utils.set_random_seed(1234)
+
+        rng = np.random.default_rng(0)
+        x = rng.standard_normal((self.FIT_BATCH, TOKENS, DIM)).astype("float32")
+        y = self._leave_one_out_target(x, self.TARGET_SCALE)
+
+        block = _block(num_steps=3, step_size=0.05, noise_std=0.0)
+        inputs = keras.Input(shape=(TOKENS, DIM))
+        # Strictly per-token head — see the class docstring, point 1.
+        model = keras.Model(inputs, keras.layers.Dense(1)(block(inputs)))
+        model.compile(optimizer=keras.optimizers.Adam(1e-2), loss="mse")
+
+        initial_loss = float(model.evaluate(x, y, verbose=0))
+        model.fit(
+            x, y,
+            epochs=self.EPOCHS,
+            batch_size=self.FIT_BATCH,
+            verbose=0,
+        )
+        final_loss = float(model.evaluate(x, y, verbose=0))
+
+        print(
+            f"\n[C8 fit] initial={initial_loss:.4f} final={final_loss:.4f} "
+            f"ratio={final_loss / initial_loss:.4f} "
+            f"(dead-block floor, measured: 4.12 / ratio 0.726)"
+        )
+
+        assert np.isfinite(initial_loss) and np.isfinite(final_loss)
+
+        # ANTI-DEGENERACY: a task whose initial loss is already ~0 proves nothing.
+        assert initial_loss > 1e-1, (
+            f"the task is trivial at init (loss = {initial_loss:.6e}); the convergence "
+            "assertion below would pass vacuously."
+        )
+
+        assert final_loss <= 0.5 * initial_loss, (
+            f"the loss did not halve ({initial_loss:.4f} -> {final_loss:.4f}). The block's "
+            "energy-descent update is not usefully learnable: the head is per-token and the "
+            "target is a LEAVE-ONE-OUT across-token mean, so ONLY the block can supply the "
+            "token mixing this task needs. A dead block (x = x + 0.0 * update) floors at "
+            "~4.12 here — if you are seeing a number near that, the descent is not moving x."
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
