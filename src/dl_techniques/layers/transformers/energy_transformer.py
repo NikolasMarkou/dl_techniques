@@ -757,6 +757,7 @@ class EnergyTransformer(keras.layers.Layer):
         self,
         g: keras.KerasTensor,
         attention_mask: Optional[keras.KerasTensor] = None,
+        mask: Optional[keras.KerasTensor] = None,
     ) -> keras.KerasTensor:
         """The block's total scalar energy ``E(g) = E_ATT(g) + E_HN(g)``, shape ``(B,)``.
 
@@ -771,12 +772,28 @@ class EnergyTransformer(keras.layers.Layer):
         :param attention_mask: Optional KEEP mask, forwarded to ``EnergyAttention`` only
             (``HopfieldNetwork`` is strictly per-token and takes no mask).
         :type attention_mask: Optional[keras.KerasTensor]
+        :param mask: Optional Keras-propagated rank-2 ``(B, N)`` boolean validity mask.
+            ANDed with ``attention_mask`` inside ``EnergyAttention`` (decisions.md D-003).
+        :type mask: Optional[keras.KerasTensor]
 
         :return: Energy of shape ``(B,)``.
         :rtype: keras.KerasTensor
         """
+        # DECISION plan_2026-07-13_ca4f71a2/D-002
+        # `mask` MUST be forwarded to `self.attention` HERE and at the `self.attention.update`
+        # site in `call()` below — the SAME mask, through the SAME kwarg. WHAT NOT TO DO:
+        #   * Do NOT forward it to only one of them. `update()` is `-dE/dg` of THIS `energy()`
+        #     ONLY IF both see the same masks; a merge landing in one path leaves the layer
+        #     running, training, and silently NOT descending (plan STOP-IF 2). The autodiff
+        #     oracle `test_gradient_oracle` (run WITH a Keras mask) is what catches that.
+        #   * Do NOT pass `mask` to `self.hopfield`: the Hopfield net is strictly per-token
+        #     (no token mixing), so a masked token cannot influence any other token through
+        #     it, and it takes no mask by design (Assumption A6).
+        #   * Do NOT re-implement the merge here. `EnergyAttention._build_keep_mask` ANDs
+        #     `mask` with `attention_mask` (D-003); a second merge site is a second thing to
+        #     get wrong. See decisions.md D-002.
         return (
-            self.attention.energy(g, attention_mask=attention_mask)
+            self.attention.energy(g, attention_mask=attention_mask, mask=mask)
             + self.hopfield.energy(g)
         )
 
@@ -787,8 +804,20 @@ class EnergyTransformer(keras.layers.Layer):
         inputs: keras.KerasTensor,
         attention_mask: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None,
+        mask: Optional[keras.KerasTensor] = None,
     ) -> Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]:
         """Run ``num_steps`` of energy descent on the token state (paper eq. 6, alg. 1).
+
+        **Masking.** ``supports_masking = True``, and this signature DECLARES ``mask`` —
+        which is what makes Keras inject a propagated mask (e.g. from an upstream
+        ``Embedding(mask_zero=True)``). Do NOT remove the parameter: ``supports_masking``
+        alone only suppresses Keras' "layer does not support masking" error; without a
+        ``mask`` parameter here the mask is silently DROPPED and PAD tokens influence every
+        real token (F-02). Declaring it is necessary but NOT sufficient — the block must also
+        FORWARD it to ``self.attention`` (see the D-002 anchor in :meth:`energy`). When BOTH
+        ``mask`` and ``attention_mask`` are supplied the rule is a **logical AND** — a token
+        is attended only if valid under both, and neither mask can un-mask what the other hid
+        (decisions.md D-003).
 
         :param inputs: Token state ``(B, N, D)``.
         :type inputs: keras.KerasTensor
@@ -798,6 +827,9 @@ class EnergyTransformer(keras.layers.Layer):
         :type attention_mask: Optional[keras.KerasTensor]
         :param training: When truthy AND ``noise_std > 0``, the eq. 27 noise is injected.
         :type training: Optional[bool]
+        :param mask: Keras-propagated rank-2 ``(B, N)`` boolean per-token validity mask.
+            Normally injected by Keras, not passed by hand.
+        :type mask: Optional[keras.KerasTensor]
 
         :return: ``x`` of shape ``(B, N, D)``; or ``(x, energies)`` with ``energies`` of
             shape ``(B, num_steps + 1)`` when ``return_energy=True``.
@@ -811,12 +843,18 @@ class EnergyTransformer(keras.layers.Layer):
             g = self.norm(x)
 
             if self.return_energy:
-                energies.append(self.energy(g, attention_mask=attention_mask))
+                energies.append(
+                    self.energy(g, attention_mask=attention_mask, mask=mask)
+                )
 
             # `update` == -dE/dg (BOTH sub-layers return the DESCENT DIRECTION, never the
             # gradient). See the class docstring, point 1.
+            #
+            # DECISION plan_2026-07-13_ca4f71a2/D-002: `mask` goes to `self.attention` and
+            # NOT to `self.hopfield` — and it must be the SAME `mask` the `self.energy()`
+            # call above passes, or `update() != -dE/dg`. See the anchor in `energy()`.
             update = (
-                self.attention.update(g, attention_mask=attention_mask)
+                self.attention.update(g, attention_mask=attention_mask, mask=mask)
                 + self.hopfield.update(g)
             )
 
@@ -839,10 +877,45 @@ class EnergyTransformer(keras.layers.Layer):
             # cannot see the effect of the final update, and `diff(energies)` would only
             # cover T-1 of the T steps.
             g = self.norm(x)
-            energies.append(self.energy(g, attention_mask=attention_mask))
+            energies.append(self.energy(g, attention_mask=attention_mask, mask=mask))
             return x, ops.stack(energies, axis=-1)            # (B, N, D), (B, T + 1)
 
         return x
+
+    # -----------------------------------------------------------------
+
+    def compute_mask(
+        self,
+        inputs: keras.KerasTensor,
+        mask: Optional[keras.KerasTensor] = None,
+    ) -> Union[
+        Optional[keras.KerasTensor],
+        List[Optional[keras.KerasTensor]],
+    ]:
+        """Propagate the token mask — but NEVER onto the energy tensor.
+
+        # DECISION plan_2026-07-13_ca4f71a2/D-002
+        With ``return_energy=True`` this layer emits a TUPLE ``(x, energies)`` of shapes
+        ``(B, N, D)`` and ``(B, T + 1)``. The incoming mask is ``(B, N)`` — a PER-TOKEN
+        validity mask. Do NOT inherit ``Layer.compute_mask``'s default (return the mask
+        unchanged): Keras would then attach the ``(B, N)`` token mask to the ``(B, T + 1)``
+        energy tensor as well, and any downstream mask-consuming layer would receive a
+        mask whose shape does not match its input. The energy is a scalar-per-step
+        REDUCTION over tokens — no token axis survives, so it carries no token mask.
+        See decisions.md D-002.
+
+        :param inputs: Token state ``(B, N, D)`` (unused; the layer is shape-preserving).
+        :type inputs: keras.KerasTensor
+        :param mask: Incoming ``(B, N)`` token mask, or ``None``.
+        :type mask: Optional[keras.KerasTensor]
+
+        :return: ``mask``; or ``[mask, None]`` when ``return_energy=True`` (one entry per
+            output tensor).
+        :rtype: Union[Optional[keras.KerasTensor], List[Optional[keras.KerasTensor]]]
+        """
+        if self.return_energy:
+            return [mask, None]
+        return mask
 
     # -----------------------------------------------------------------
 

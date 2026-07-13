@@ -1006,5 +1006,171 @@ class TestPerLayerDtypeKwarg:
             )
 
 
+# ---------------------------------------------------------------------
+# F-02b — a KERAS-PROPAGATED mask must be honored AND FORWARDED by the BLOCK
+# ---------------------------------------------------------------------
+
+VOCAB = 10
+
+
+def _padded_block_model(seed: int = 5, **block_overrides):
+    """`Embedding(mask_zero=True) -> EnergyTransformer` — the standard Keras NLP idiom.
+
+    The Embedding is the mask PRODUCER: no mask is ever hand-passed, so this exercises the
+    real `_keras_mask` propagation path down to `EnergyAttention` (decisions.md D-004: a
+    mask test that hand-passes an `attention_mask` cannot see F-02 at all).
+
+    Returns `(model, block)`.
+    """
+    emb = keras.layers.Embedding(VOCAB, DIM, mask_zero=True)
+    block = _block(num_steps=3, step_size=0.05, noise_std=0.0, **block_overrides)
+
+    inp = keras.Input(shape=(None,), dtype="int32")
+    model = keras.Model(inp, block(emb(inp)))
+
+    # Excite BOTH the embedding and the block: with the default inits the block's output
+    # displacement is O(1e-3) and a dropped mask would hide under atol=1e-6.
+    rng = np.random.default_rng(seed)
+    emb.embeddings.assign(rng.standard_normal((VOCAB, DIM)).astype("float32"))
+    _excite_block(block)
+    return model, block
+
+
+class TestKerasMaskIsHonored:
+    """F-02b: PAD tokens must not influence the real tokens' outputs, at the BLOCK level.
+
+    Step 2 fixed `EnergyAttention`. The block still has to (a) DECLARE `mask` in `call()` so
+    Keras injects it, and (b) FORWARD it to `self.attention.energy/update`. Without (b) the
+    fixed attention layer never sees the mask and this test stays RED.
+    """
+
+    def test_pads_do_not_shift_real_token_outputs(self):
+        model, _ = _padded_block_model()
+
+        padded = np.array([[1, 2, 3, 0, 0, 0]], dtype="int32")  # 3 real + 3 PAD
+        short = np.array([[1, 2, 3]], dtype="int32")            # pads physically absent
+
+        y_pad = keras.ops.convert_to_numpy(model(padded))[:, :3, :]
+        y_short = keras.ops.convert_to_numpy(model(short))
+
+        # Anti-vacuity: the block must actually be doing something at the real positions.
+        assert np.abs(y_short).max() > 1e-3, (
+            "the un-padded output is ~0 — the comparison below would pass vacuously"
+        )
+
+        max_abs_diff = float(np.abs(y_pad - y_short).max())
+        np.testing.assert_allclose(
+            y_pad, y_short, atol=1e-6,
+            err_msg=(
+                f"PAD tokens shifted the real tokens' outputs by {max_abs_diff:.3e}. "
+                "EnergyTransformer advertises supports_masking=True, but its call() must "
+                "DECLARE `mask` (so Keras injects the propagated mask) AND FORWARD it to "
+                "self.attention.energy/update (F-02b)."
+            ),
+        )
+
+    def test_return_energy_with_a_propagated_mask(self):
+        """`return_energy=True` + a Keras mask: shapes, finiteness, and NO mask on E.
+
+        With `return_energy=True` the block outputs a TUPLE `(x, energies)`. A `(B, N)` token
+        mask must NOT be attached to the `(B, T + 1)` energy tensor — Keras would then
+        propagate a shape-incompatible mask downstream.
+        """
+        model, block = _padded_block_model(**{"return_energy": True})
+
+        padded = np.array([[1, 2, 3, 0, 0, 0]], dtype="int32")
+        out, energies = model(padded)
+
+        assert tuple(out.shape) == (1, 6, DIM)
+        assert tuple(energies.shape) == (1, block.num_steps + 1)
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(out)))
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(energies)))
+
+        # The energy tensor must carry NO mask.
+        assert getattr(energies, "_keras_mask", None) is None, (
+            "a token mask was attached to the (B, T + 1) energy tensor — compute_mask must "
+            "return [mask, None] when return_energy=True"
+        )
+
+        # ...and the mask must STILL be honored on the return_energy path (which reads the
+        # energy through `self.energy()`, a SECOND forwarding site). Shapes + finiteness
+        # alone would pass on a dropped mask — this assertion is what makes the guard bite.
+        y_short, _ = model(np.array([[1, 2, 3]], dtype="int32"))
+        y_pad = keras.ops.convert_to_numpy(out)[:, :3, :]
+        y_short = keras.ops.convert_to_numpy(y_short)
+        max_abs_diff = float(np.abs(y_pad - y_short).max())
+        np.testing.assert_allclose(
+            y_pad, y_short, atol=1e-6,
+            err_msg=(
+                f"PAD tokens shifted the real tokens' outputs by {max_abs_diff:.3e} on the "
+                "return_energy=True path — the mask is not reaching self.energy()/update()."
+            ),
+        )
+
+    def test_compute_mask_contract(self, sample_input):
+        """`compute_mask` returns `[mask, None]` with return_energy, else the mask itself."""
+        token_mask = keras.ops.convert_to_tensor(
+            np.ones((BATCH, TOKENS), dtype="bool")
+        )
+
+        plain = _block(num_steps=2)
+        assert plain.compute_mask(sample_input, mask=token_mask) is token_mask
+        assert plain.compute_mask(sample_input, mask=None) is None
+
+        with_energy = _block(num_steps=2, return_energy=True)
+        out_mask = with_energy.compute_mask(sample_input, mask=token_mask)
+        assert isinstance(out_mask, list) and len(out_mask) == 2
+        assert out_mask[0] is token_mask
+        assert out_mask[1] is None, (
+            "the (B, T + 1) energy tensor must not carry the (B, N) token mask"
+        )
+
+
+class TestBlockMaskPrecedence:
+    """D-003 at the BLOCK level: `mask` AND `attention_mask` compose as a LOGICAL AND."""
+
+    def test_keras_mask_and_attention_mask_are_anded(self, sample_input):
+        j_keras, j_explicit = 3, 4
+
+        block = _block(num_steps=3, step_size=0.05, noise_std=0.0)
+        block.build((BATCH, TOKENS, DIM))
+        _excite_block(block)
+
+        keras_mask = np.ones((BATCH, TOKENS), dtype="bool")
+        keras_mask[:, j_keras] = False                     # Keras hides token 3
+
+        explicit = np.ones((BATCH, TOKENS), dtype="float32")
+        explicit[:, j_explicit] = 0.0                      # attention_mask hides token 4
+
+        both = np.ones((BATCH, TOKENS), dtype="float32")
+        both[:, [j_keras, j_explicit]] = 0.0               # reference: hides BOTH
+
+        y_and = keras.ops.convert_to_numpy(
+            block(sample_input, attention_mask=explicit, mask=keras_mask, training=False)
+        )
+        y_ref = keras.ops.convert_to_numpy(
+            block(sample_input, attention_mask=both, training=False)
+        )
+        y_explicit_only = keras.ops.convert_to_numpy(
+            block(sample_input, attention_mask=explicit, training=False)
+        )
+
+        # Anti-vacuity: hiding token 3 as well DOES change the answer, so the equality
+        # below is measuring the AND and not a no-op.
+        assert np.abs(y_ref - y_explicit_only).max() > 1e-3, (
+            "hiding the extra token changed nothing — the AND check would pass vacuously"
+        )
+
+        max_abs_diff = float(np.abs(y_and - y_ref).max())
+        np.testing.assert_allclose(
+            y_and, y_ref, atol=1e-6,
+            err_msg=(
+                f"mask + attention_mask is not a logical AND (diff={max_abs_diff:.3e}). "
+                "The block must forward BOTH masks to EnergyAttention, which ANDs them "
+                "inside _build_keep_mask (decisions.md D-003)."
+            ),
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
