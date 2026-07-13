@@ -655,11 +655,22 @@ class TestEnergyTransformer:
             ),
         )
 
-        # Anti-vacuity: the perturbation was real and DID move the masked row itself
-        # (a masked token still receives its own per-token Hopfield update).
+        # Anti-vacuity 1: the perturbation was real and DID move the masked row itself
+        # (an `attention_mask`-masked token still receives its own per-token Hopfield update
+        # — unlike a KERAS-masked token, which is not a token at all; decisions.md D-005).
         assert np.abs(y1[:, j, :] - y0[:, j, :]).max() > 1e-3, (
             "the perturbation changed nothing at all — the comparison above would pass "
             "vacuously"
+        )
+
+        # Anti-vacuity 2 (C15, iter-2 / R3): the assertion above measures the INPUT
+        # perturbation, and the equality above is satisfied by a DEAD block for free. Assert
+        # that the BLOCK moved the OTHER tokens' state, so `step_size -> 0` goes RED here.
+        # This is the same copy-paste hole R3 found at the Keras-mask tests; found by the
+        # iter-2 audit. See decisions.md D-005.
+        assert np.abs(y0[:, others, :] - x0[:, others, :]).max() > 1e-3, (
+            "the block did not move the unmasked tokens at all — a DEAD block satisfies "
+            "'perturbing a masked token changes nothing' vacuously (decisions.md D-005)"
         )
 
     # -- return_energy / noise ---------------------------------------
@@ -1166,20 +1177,46 @@ def _padded_block_model(seed: int = 5, **block_overrides):
     real `_keras_mask` propagation path down to `EnergyAttention` (decisions.md D-004: a
     mask test that hand-passes an `attention_mask` cannot see F-02 at all).
 
-    Returns `(model, block)`.
+    Returns `(model, block, emb_model)`, where `emb_model` maps the SAME token ids to the
+    block's INPUT (the embedding output).
+
+    C15 (iter-2 / R3): `emb_model` is not a convenience — it is the anti-vacuity instrument.
+    The block's output is `embedding + sum(step_size * update)`, so `|y| > 1e-3` (the probe
+    copy-pasted from the attention-level tests, where the layer's output IS its update) only
+    proves the EMBEDDING is nonzero: a DEAD block passes it with pad-diff exactly 0.0. Every
+    anti-vacuity check on this model must therefore measure `|y - emb(tokens)|` — what the
+    BLOCK contributed. See decisions.md D-005.
     """
     emb = keras.layers.Embedding(VOCAB, DIM, mask_zero=True)
     block = _block(num_steps=3, step_size=0.05, noise_std=0.0, **block_overrides)
 
     inp = keras.Input(shape=(None,), dtype="int32")
-    model = keras.Model(inp, block(emb(inp)))
+    embedded = emb(inp)
+    model = keras.Model(inp, block(embedded))
+    emb_model = keras.Model(inp, embedded)
 
     # Excite BOTH the embedding and the block: with the default inits the block's output
     # displacement is O(1e-3) and a dropped mask would hide under atol=1e-6.
     rng = np.random.default_rng(seed)
     emb.embeddings.assign(rng.standard_normal((VOCAB, DIM)).astype("float32"))
     _excite_block(block)
-    return model, block
+    return model, block, emb_model
+
+
+def _assert_block_moved_the_state(y, emb_out, floor: float = 1e-3) -> float:
+    """C15: assert the BLOCK contributed something — never that the embedding is nonzero.
+
+    Returns the displacement, so a caller can print it. A dead block (`step_size -> 0`, or a
+    zeroed update) CANNOT satisfy this, which is the entire point (decisions.md D-005).
+    """
+    moved = float(np.abs(np.asarray(y) - np.asarray(emb_out)).max())
+    assert moved > floor, (
+        f"the block moved the state by only {moved:.3e} (<= {floor:.0e}) — it contributed "
+        "nothing, so every equality assertion in this test would pass VACUOUSLY. This probe "
+        "must measure |y - embedding|, NOT |y|: the block's output is `embedding + updates`, "
+        "so |y| > floor merely proves the EMBEDDING is nonzero (decisions.md D-005)."
+    )
+    return moved
 
 
 class TestKerasMaskIsHonored:
@@ -1191,7 +1228,7 @@ class TestKerasMaskIsHonored:
     """
 
     def test_pads_do_not_shift_real_token_outputs(self):
-        model, _ = _padded_block_model()
+        model, _, emb_model = _padded_block_model()
 
         padded = np.array([[1, 2, 3, 0, 0, 0]], dtype="int32")  # 3 real + 3 PAD
         short = np.array([[1, 2, 3]], dtype="int32")            # pads physically absent
@@ -1199,9 +1236,11 @@ class TestKerasMaskIsHonored:
         y_pad = keras.ops.convert_to_numpy(model(padded))[:, :3, :]
         y_short = keras.ops.convert_to_numpy(model(short))
 
-        # Anti-vacuity: the block must actually be doing something at the real positions.
-        assert np.abs(y_short).max() > 1e-3, (
-            "the un-padded output is ~0 — the comparison below would pass vacuously"
+        # C15 anti-vacuity: the BLOCK must have moved the state at the real positions. The
+        # old probe here was `|y_short|.max() > 1e-3`, which a DEAD block (step_size=1e-12)
+        # passes — it only proves the embedding is nonzero (decisions.md D-005).
+        _assert_block_moved_the_state(
+            y_short, keras.ops.convert_to_numpy(emb_model(short))
         )
 
         max_abs_diff = float(np.abs(y_pad - y_short).max())
@@ -1222,7 +1261,7 @@ class TestKerasMaskIsHonored:
         mask must NOT be attached to the `(B, T + 1)` energy tensor — Keras would then
         propagate a shape-incompatible mask downstream.
         """
-        model, block = _padded_block_model(**{"return_energy": True})
+        model, block, emb_model = _padded_block_model(**{"return_energy": True})
 
         padded = np.array([[1, 2, 3, 0, 0, 0]], dtype="int32")
         out, energies = model(padded)
@@ -1241,9 +1280,17 @@ class TestKerasMaskIsHonored:
         # ...and the mask must STILL be honored on the return_energy path (which reads the
         # energy through `self.energy()`, a SECOND forwarding site). Shapes + finiteness
         # alone would pass on a dropped mask — this assertion is what makes the guard bite.
-        y_short, _ = model(np.array([[1, 2, 3]], dtype="int32"))
+        short = np.array([[1, 2, 3]], dtype="int32")
+        y_short, _ = model(short)
         y_pad = keras.ops.convert_to_numpy(out)[:, :3, :]
         y_short = keras.ops.convert_to_numpy(y_short)
+
+        # C15: ...and a DEAD block must not be able to satisfy that equality (it passed with
+        # pad-diff exactly 0.000e+00 before this probe existed). See decisions.md D-005.
+        _assert_block_moved_the_state(
+            y_short, keras.ops.convert_to_numpy(emb_model(short))
+        )
+
         max_abs_diff = float(np.abs(y_pad - y_short).max())
         np.testing.assert_allclose(
             y_pad, y_short, atol=1e-6,
@@ -1264,7 +1311,7 @@ class TestKerasMaskIsHonored:
 
         RED at HEAD (before the D-005 fix): +74.9% with 3 pads, +224.6% with 9 pads.
         """
-        model, block = _padded_block_model(**{"return_energy": True})
+        model, block, _ = _padded_block_model(**{"return_energy": True})
 
         # `_excite_block` deliberately excites the ATTENTION hardest (that is what the F-02
         # tests need). Here the E_HN term is the one under test, so give it real weight in
