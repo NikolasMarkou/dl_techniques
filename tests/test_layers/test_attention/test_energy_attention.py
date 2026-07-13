@@ -34,6 +34,7 @@ import tensorflow as tf
 tf.config.experimental.enable_tensor_float_32_execution(False)
 
 from dl_techniques.layers.attention.energy_attention import EnergyAttention
+from dl_techniques.layers.attention.factory import create_attention_layer
 
 
 # ---------------------------------------------------------------------
@@ -407,6 +408,19 @@ class TestEnergyAttention:
             assert np.all(np.isfinite(keras.ops.convert_to_numpy(g))), (
                 f"non-finite gradient for {w.name}"
             )
+
+
+class TestFactoryIntegration:
+    """S4: EnergyAttention is reachable through the attention factory."""
+
+    def test_factory_integration(self):
+        layer = create_attention_layer('energy', dim=DIM)
+        assert isinstance(layer, EnergyAttention)
+
+        x = keras.random.normal((2, 8, DIM))
+        y = layer(x)
+        assert y.shape == (2, 8, DIM)
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(y)))
 
 
 if __name__ == "__main__":

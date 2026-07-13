@@ -6,7 +6,7 @@ with unified interfaces, type safety, parameter validation, and detailed documen
 This factory enables seamless integration and experimentation with different attention
 types across vision_heads, NLP, and multi-modal architectures.
 
-The factory supports twenty-nine different attention mechanisms, from standard multi-head attention
+The factory supports thirty-one different attention mechanisms, from standard multi-head attention
 to specialized variants like differential attention, mobile-optimized MQA, and hierarchical
 anchor attention. Each layer is fully documented with use cases, parameter requirements,
 and architectural considerations.
@@ -34,6 +34,7 @@ from .capsule_routing_attention import CapsuleRoutingSelfAttention
 from .channel_attention import ChannelAttention
 from .convolutional_block_attention import CBAM
 from .differential_attention import DifferentialMultiHeadAttention
+from .energy_attention import EnergyAttention
 from .fnet_fourier_transform import FNetFourierTransform
 from .gated_attention import GatedAttention
 from .group_query_attention import GroupedQueryAttention
@@ -69,6 +70,7 @@ AttentionType = Literal[
     'cbam',
     'channel',
     'differential',
+    'energy',
     'fnet',
     'gated',
     'group_query',
@@ -257,6 +259,41 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         ),
         'complexity': '2x standard MHA computational cost',
         'paper': 'Differential Transformer'
+    },
+
+    'energy': {
+        'class': EnergyAttention,
+        'description': (
+            'Energy-based attention from the Energy Transformer. NOT a weighted sum of '
+            'values — there is NO value matrix. The layer defines a scalar token-mixing '
+            'energy E_ATT(g) = -(1/beta) * sum_h sum_m logsumexp_n(beta * A_hnm) over '
+            'bias-free (head_dim, num_heads, dim) key/query projections, and its call() '
+            'returns the exact closed-form NEGATIVE GRADIENT of that energy (a descent '
+            'direction). The update carries a second, ET-specific term (the token in its '
+            'KEY role) that is absent from vanilla attention and is what makes the '
+            'dynamics provably energy-descending. Also exposes energy(g) and update(g).'
+        ),
+        'required_params': ['dim'],
+        'optional_params': {
+            'num_heads': 8,
+            'head_dim': None,
+            'beta': None,
+            'attn_self': False,
+            'kernel_initializer': None
+        },
+        'use_case': (
+            'Energy Transformer blocks performing recurrent gradient descent on a single '
+            'global energy (associative-memory retrieval, masked-patch inpainting, graph '
+            'anomaly detection). Use when the residual stream must be interpretable as a '
+            'Lyapunov descent rather than an opaque attn -> FFN stack. NOT a drop-in '
+            'replacement for standard self-attention: the output is an update, not a '
+            'contextualized value.'
+        ),
+        'complexity': (
+            'O(N²) parametric scaling, same as standard attention, but ~2x its flops: '
+            'the energy gradient has two terms (query-role and key-role)'
+        ),
+        'paper': 'Energy Transformer (arXiv:2302.07253)'
     },
 
     'fnet': {

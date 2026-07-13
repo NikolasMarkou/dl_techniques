@@ -46,6 +46,7 @@ from .lighthouse_attention import LighthouseAttention
 from .perceiver_attention import PerceiverAttention
 
 # Factory-registered layers (also available for direct instantiation)
+from .energy_attention import EnergyAttention
 from .gated_attention import GatedAttention
 from .linear_attention import LinearAttention
 from .performer_attention import PerformerAttention
@@ -99,6 +100,7 @@ __all__ = [
     "PerceiverAttention",
 
     # Direct Instantiation Only
+    "EnergyAttention",
     "GatedAttention",
     "LinearAttention",
     "PerformerAttention",

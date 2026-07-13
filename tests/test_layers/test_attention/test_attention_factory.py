@@ -33,6 +33,7 @@ MINIMAL_PARAMS = {
     'cbam': {'channels': 32},
     'channel': {'channels': 32},
     'differential': {'dim': 64, 'num_heads': 4, 'head_dim': 16},
+    'energy': {'dim': 64},
     'fnet': {},
     'gated': {'dim': 64, 'num_heads': 4},
     'group_query': {'dim': 64, 'num_heads': 4, 'num_kv_heads': 2},
@@ -77,11 +78,18 @@ def _ctor_param_names(cls_or_fn):
 
 
 class TestRegistryIntegrity:
-    """The registry must describe exactly 30 types and stay in sync with classes."""
+    """The registry must describe exactly 31 types and stay in sync with classes."""
 
     def test_registry_has_expected_types(self):
-        assert len(ATTENTION_REGISTRY) == 30
-        assert len(list_attention_types()) == 30
+        # DECISION plan_2026-07-13_57c9833e/D-003
+        # These are EXACT-EQUALITY counts on purpose. When you register a new attention
+        # type and this goes RED, DO NOT relax it to `>=` — bump the number. The whole
+        # value of this guard is that it forces the registration checklist (Literal +
+        # registry + MINIMAL_PARAMS below + __init__ export); a `>=` assertion passes
+        # while `MINIMAL_PARAMS` silently drifts out of sync and the new type ships with
+        # zero factory coverage. See decisions.md D-003 / LESSONS [I:3].
+        assert len(ATTENTION_REGISTRY) == 31
+        assert len(list_attention_types()) == 31
 
     def test_literal_members_match_registry_keys(self):
         literal_members = set(typing.get_args(AttentionType))
@@ -225,7 +233,7 @@ class TestFactoryHelpers:
 
     def test_get_attention_info_complete(self):
         info = get_attention_info()
-        assert len(info) == 30
+        assert len(info) == 31
 
     def test_get_requirements_roundtrip(self):
         req = get_attention_requirements('anchor')
