@@ -351,6 +351,23 @@ def test_dsv2_post_sum_orchestration_guard():
     (c) that out_proj is applied POST-SUM: projecting the summed tensor differs
     from projecting each branch separately (out_proj uses bias -> non-distributive),
     which pins the sum-before-projection order.
+
+    THE BIAS MUST BE MADE NON-ZERO FIRST, AND THAT IS THE WHOLE TEST.
+    `out_proj` is a `Conv2D` whose bias initializes to ZEROS. With a zero bias the
+    projection IS distributive -- `W(a+b) == Wa + Wb` exactly -- so `out` and `wrong` are
+    mathematically IDENTICAL and this test cannot detect the thing it claims to test.
+
+    It nonetheless "passed" for a long time, on GPU only, purely on TF32 rounding noise:
+    measured `max|out - wrong|` = 2.6e-4 with TF32 enabled (the GPU default) versus 2.4e-7
+    with true fp32 -- and the assertion's tolerance is 1e-4. So the guard was passing on
+    numerical garbage that happened to clear the threshold. It began failing in full-suite
+    runs the moment another test module called
+    `tf.config.experimental.enable_tensor_float_32_execution(False)` -- a PROCESS-WIDE
+    setting with no teardown -- which removed the noise it was living on. The test was
+    always broken; TF32 was masking it.
+
+    Assigning a real bias makes `out - wrong == -bias`, an actual signal of the property
+    under test, deterministic and independent of TF32, GPU/CPU and test ordering.
     """
     keras.utils.set_random_seed(0)
     blk = CliffordNetBlockDSv2(
@@ -364,17 +381,29 @@ def test_dsv2_post_sum_orchestration_guard():
     assert tuple(h_mix.shape) == (2, 16, 16, 32)  # transform-only at `channels`
     assert blk.out_proj is not None
 
+    # Give the bias a real value -- see the docstring. Without this the two orderings are
+    # algebraically equal and the assertion below is vacuous.
+    bias = blk.out_proj.bias
+    bias.assign(keras.ops.ones_like(bias) * 0.5)
+
     # External POST-SUM orchestration via the block's own public sub-layers.
     summed = blk.skip_pool(x) + blk(x)
     out = blk.out_proj(summed)
     assert tuple(out.shape) == (2, 16, 16, 64)
     assert np.all(np.isfinite(keras.ops.convert_to_numpy(out)))
 
-    # POST-SUM (project the sum) must differ from projecting each branch
-    # separately then summing (out_proj bias would be double-counted).
+    # POST-SUM (project the sum) must differ from projecting each branch separately then
+    # summing -- the bias is double-counted in the latter, so the two differ by exactly
+    # one bias (0.5). Assert the MEASURED gap, not merely "not close": a bare
+    # `not allclose` is satisfiable by float noise, which is precisely how this guard used
+    # to pass while testing nothing.
     wrong = blk.out_proj(blk.skip_pool(x)) + blk.out_proj(blk(x))
-    assert not np.allclose(
-        keras.ops.convert_to_numpy(out),
-        keras.ops.convert_to_numpy(wrong),
-        atol=1e-4,
-    ), "out_proj must be applied POST-SUM, not per-branch"
+    gap = np.abs(
+        keras.ops.convert_to_numpy(out) - keras.ops.convert_to_numpy(wrong)
+    ).max()
+    assert np.isclose(gap, 0.5, atol=1e-3), (
+        f"out_proj must be applied POST-SUM, not per-branch: expected the two orderings "
+        f"to differ by exactly one bias (0.5), measured {gap:.6g}. A gap near 0 means "
+        f"out_proj was applied per-branch (or the bias is zero, which makes this test "
+        f"vacuous)."
+    )
