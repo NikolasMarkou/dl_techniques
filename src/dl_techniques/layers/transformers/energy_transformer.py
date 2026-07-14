@@ -157,12 +157,12 @@ class HopfieldNetwork(keras.layers.Layer):
     * **Standalone, e.g. ``Embedding(mask_zero=True) -> HopfieldNetwork``: a TRAP.** Keras
       emits a ``UserWarning`` (*"was passed an input with a mask attached"*) and **drops the
       mask**. It is worth being precise about why that MATTERS, because the intuition "PAD
-      tokens are zeros, so they contribute nothing" is FALSE here (all measured):
-      ``mask_zero=True`` does **not** zero the PAD vector — it emits the id-0 embedding row
-      like any other row (measured ``|x_pad| = 4.7e-2``, not 0) and attaches the mask as
-      **metadata only**. With the metadata dropped, a PAD token is just a token: it gets a
-      real, non-zero update of the SAME order as a real one (measured ``|update| = 7.8e-3`` on
-      PAD rows vs ``7.8e-3`` on real rows). Nothing errors; the output is finite and silently
+      tokens are zeros, so they contribute nothing" is FALSE here (mechanism verified;
+      magnitudes are init/seed/width-dependent, so none is quoted): ``mask_zero=True`` does
+      **not** zero the PAD vector — it emits the id-0 embedding row like any other row (a
+      real, NON-zero vector) and attaches the mask as **metadata only**. With the metadata
+      dropped, a PAD token is just a token: it gets a real, non-zero update of the SAME ORDER
+      OF MAGNITUDE as a real token's. Nothing errors; the output is finite and silently
       polluted. Either **mask by hand** (call ``update(g, mask=keep)`` / ``energy(g,
       mask=keep)`` yourself with an explicit rank-2 ``(B, N)`` keep), or use the
       ``EnergyTransformer`` block, which already does. Do NOT "fix" this by flipping
@@ -616,23 +616,42 @@ class EnergyTransformer(keras.layers.Layer):
     :meth:`build` or :meth:`call` — a lazily-created sub-layer silently DROPS ITS WEIGHTS
     on a ``.keras`` round-trip.
 
-    **COST — measured, not extrapolated.** ``T`` descent steps do NOT cost ``T`` transformer
-    blocks. Against a vanilla ``TransformerLayer`` at matched width, ET-Full (``T = 12``):
+    **COST — measured, and MODE-DEPENDENT. AN OP-COUNT RATIO IS NOT A COST RATIO.** ``T``
+    descent steps do NOT cost ``T`` transformer blocks. Every figure below is a median of 20
+    on an IDLE RTX 4070 at ET-Full (``D = 768, H = 12, head_dim = 64, K = 3072, N = 256,
+    B = 8, T = 12``), and each is given PER EXECUTION MODE — because on this block the mode
+    moves the answer more than the config does. **Read the jit column: that is the path you
+    train on.** (Ranges are the spread over repeated runs.)
 
     .. code-block:: text
 
-        wall clock   : 7.6x a vanilla TransformerLayer   (NOT the naive 12x)
-        per ET step  : 0.63x one vanilla block
-        params       : 3.54 M  vs  7.09 M  (ET has HALF the parameters)
+        `return_energy=True`, relative to the default False
+            forward        eager 1.68x  | graph 1.44x     | jit 0.9-1.1x   <- FREE
+            fwd+bwd step   eager 1.44x  | graph 1.28x     | jit 1.02x      <- FREE
+
+        ET vs ONE vanilla `TransformerLayer` at matched width
+            forward        eager 7.5x   | graph 8.1-8.7x  | jit 6.0-7.6x
+            fwd+bwd step   eager 5.5x   | graph 8.8x      | jit 10.7x
+            params         3.54 M  vs  7.09 M   (ET has HALF the parameters)
+
+    ``return_energy=True`` really does make ``2T + 1`` ``_project()`` calls instead of ``T``
+    (an energy reading before every step, plus the final one). **That op COUNT is not the
+    cost.** Under ``jit_compile=True`` XLA common-subexpression-eliminates the ``_project(g)``
+    that ``energy()`` and ``update()`` share at each step (grappler on the ``return_energy``
+    fwd+bwd graph: **25** mask builds pre-optimization, **1** post), so the energy trace is
+    essentially free on the compiled path. Do NOT switch the diagnostic off on the strength of
+    the eager number — eager pays ~1.7x, jit pays ~nothing. **This is the same lesson as the
+    keep-mask NO-GO below (D-005): an op-count ratio is not a cost ratio — measure the
+    COMPILED path.** (An unqualified "7.6x vs vanilla" previously sat here; it was a
+    forward-only EAGER number. The true spread is 5.5-10.9x, and ET looks RELATIVELY worse
+    under jit not because ET got slower but because a vanilla block compiles better.)
 
     A step is cheaper than a block because the block is *missing pieces*: **no value matrix,
     no separate FFN up/down projection, no output projection** — the Hopfield's ``xi`` is ONE
     tied ``(K, D)`` matrix used in both directions, and attention has only ``w_key`` /
-    ``w_query``. So ``T`` steps of a 0.63x block land at ~7.6x, not 12x. Two more measured
-    facts a caller should budget for:
+    ``w_query``. Hence ``T = 12`` steps land at ~6-11x one block, not 12x (eager forward: each
+    step is ~0.63x a block). One more fact a caller should budget for:
 
-    * ``return_energy=True`` costs **1.60x** wall clock — it makes ``2T + 1`` ``_project()``
-      calls instead of ``T`` (an energy reading before every step, plus the final one).
     * **Backward memory is LINEAR in** ``T``. The loop is fully unrolled and nothing is
       recomputed, so every step's activations are held for the backward pass. ``T`` is a
       memory dial, not just a compute one.
@@ -642,9 +661,11 @@ class EnergyTransformer(keras.layers.Layer):
     masks and ``attn_self`` — never ``g``'s *values*) yet ``_project()`` rebuilds it on every
     one of the ``T`` steps. In EAGER profiling this looks like ~27% of the forward pass, which
     is exactly why it keeps getting re-proposed. **It is not worth hoisting.** In the OPTIMIZED
-    compiled graph the mask is not merely CSE-d, it is **constant-folded out of existence**
-    (verified: the mask's op count is FLAT at ``T = 4/12/24`` in optimized HLO, while positive
-    controls scale with ``T``; grappler independently collapses it too). Measured end-to-end
+    compiled graph it is ELIMINATED either way: **constant-folded out of existence** when there
+    is no user mask (static ``N``), and **CSE-d down to a single build** when a real
+    ``attention_mask`` is a graph INPUT and so cannot be folded (verified: the mask's op count
+    is FLAT at ``T = 4/12/24`` in optimized HLO while positive controls scale with ``T``;
+    grappler independently collapses ``T`` builds to 1). Measured end-to-end
     fwd+bwd hoist delta on an idle GPU: **-0.09% (jit), -0.06% (graph), +0.25% (dynamic-N)** —
     i.e. nothing, or worse. The only real win is **+12.9% on ``run_eagerly=True``**, a DEBUG
     mode that is itself 4.2x slower than jit, so nobody trains on it. Hoisting it would widen
