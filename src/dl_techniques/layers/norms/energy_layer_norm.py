@@ -83,6 +83,35 @@ class EnergyLayerNorm(keras.layers.Layer):
     **Shape contract**: gamma is a SCALAR (``shape=()``); delta is a VECTOR
     (``shape=(D,)``). A per-feature gamma would break the Lagrangian identity above.
 
+    **Numerical note: the constant-token cliff.** ``eps`` sits INSIDE the ``sqrt``, so as a
+    token approaches CONSTANT (``var -> 0``) the Jacobian ``dg/dx`` does not merely grow — it
+    saturates at a hard ceiling set by ``eps``:
+
+    .. code-block:: text
+
+        var >> eps :  eigenvalues of dg/dx  ~  1.4 .. 3.8         (a normal token)
+        var == 0   :  eigenvalues of dg/dx  ->  gamma / sqrt(eps)
+                                            ~  1.7 / sqrt(1e-5)  ~  538
+
+    i.e. a **140-350x amplification** of the local gain, reached at ``var == 0`` (all measured;
+    the numbers above are at ``gamma = 1.7``, ``eps = 1e-5``). A constant token is not exotic:
+    an ``Embedding`` PAD row, an all-zero conv cell, and a collapsed early-training activation
+    are all exactly ``var = 0``.
+
+    Two things this is **NOT** (both VERIFIED numerically, do not "fix" either):
+
+    * **It is not a broken guarantee.** ``dg/dx`` stays **PSD** across the cliff — the energy
+      descent still holds. This is a CONDITIONING problem, not a correctness one.
+    * **It is not an fp16 flush-to-zero bug.** Under ``mixed_float16``, ``eps = 1e-5`` is
+      SUBNORMAL but REPRESENTABLE (fp16 min subnormal ~ ``6e-8``); it does not flush to zero,
+      so ``sqrt(0 + eps)`` does not become ``sqrt(0)``. There is no division by zero here.
+
+    **Mitigation for a caller who sees a training-stability cliff** (loss spikes on a batch
+    with heavy padding, or in the first steps before activations spread out): raise
+    ``norm_epsilon`` / ``epsilon``. The ceiling is ``gamma / sqrt(eps)``, so eps ``1e-5 ->
+    1e-3`` cuts the worst-case gain 10x. The alternative — masking PAD tokens so they never
+    reach the norm — is what ``EnergyTransformer`` already does for the Hopfield energy.
+
     :param epsilon: Small positive constant for numerical stability inside the sqrt.
         Defaults to ``1e-5``.
     :type epsilon: float

@@ -74,12 +74,22 @@ def _token_keep(
 ) -> keras.KerasTensor:
     """Validate and cast a Keras-propagated rank-2 ``(B, N)`` per-token validity mask.
 
-    The SINGLE place the rank-2 contract for the Keras-propagated ``mask`` lives. It has two
-    call sites — :meth:`EnergyAttention._build_keep_mask` (which then expands it symmetrically
-    over the key/query axes) and ``HopfieldNetwork.energy`` / ``.update`` in
-    ``energy_transformer.py`` (which use it per-token, un-expanded, to drop PAD tokens from the
-    energy SUM). Do NOT re-implement the rank check at either call site: a second copy is a
-    second error message to drift.
+    The SINGLE place the rank-2 contract for the Keras-propagated ``mask`` lives. It has
+    **FOUR** call sites (this said "two" until they were recounted — the Hopfield energy/update
+    PAIR and the block's own mask-AND were never counted). Names are the stable identifier; the
+    line numbers are as of this writing and WILL drift:
+
+    1. :meth:`EnergyAttention._build_keep_mask` (``energy_attention.py:452``) — which then
+       expands it symmetrically over the key/query axes (``_symmetric_token_keep``).
+    2. ``HopfieldNetwork.energy`` (``energy_transformer.py:391``) — per-token and un-expanded,
+       to drop PAD tokens from the energy SUM.
+    3. ``HopfieldNetwork.update`` (``energy_transformer.py:489``) — the matching gradient side.
+       The pair MUST see the same keep, or ``update() != -dE/dg``.
+    4. ``EnergyTransformer._hopfield_token_mask`` (``energy_transformer.py:956``) — which ANDs
+       the Keras mask with a rank-2 ``attention_mask`` (D-006).
+
+    Do NOT re-implement the rank check at any call site: a second copy is a second error
+    message to drift.
 
     :param mask: Boolean (or 0/1) per-token validity mask of shape ``(B, N)``.
     :type mask: keras.KerasTensor

@@ -146,6 +146,30 @@ class HopfieldNetwork(keras.layers.Layer):
     meaningless here, since a token cannot influence any other token. Only
     ``EnergyAttention`` mixes tokens, and only it accepts a mask.
 
+    **STANDALONE MASKING TRAP — read this before using the layer outside a block.**
+    ``call()`` takes **no** ``mask`` keyword and ``supports_masking`` is **False** (the Keras
+    default; deliberately not raised). ``energy()`` and ``update()`` DO take a ``mask``, but
+    Keras only injects masks into ``call()``. Consequences:
+
+    * **Inside** ``EnergyTransformer``: **SAFE.** The block never relies on Keras injection —
+      it computes the per-token keep itself (``_hopfield_token_mask``) and passes it
+      EXPLICITLY into ``self.hopfield.energy(..., mask=...)`` and ``.update(..., mask=...)``.
+    * **Standalone, e.g. ``Embedding(mask_zero=True) -> HopfieldNetwork``: a TRAP.** Keras
+      emits a ``UserWarning`` (*"was passed an input with a mask attached"*) and **drops the
+      mask**. It is worth being precise about why that MATTERS, because the intuition "PAD
+      tokens are zeros, so they contribute nothing" is FALSE here (all measured):
+      ``mask_zero=True`` does **not** zero the PAD vector — it emits the id-0 embedding row
+      like any other row (measured ``|x_pad| = 4.7e-2``, not 0) and attaches the mask as
+      **metadata only**. With the metadata dropped, a PAD token is just a token: it gets a
+      real, non-zero update of the SAME order as a real one (measured ``|update| = 7.8e-3`` on
+      PAD rows vs ``7.8e-3`` on real rows). Nothing errors; the output is finite and silently
+      polluted. Either **mask by hand** (call ``update(g, mask=keep)`` / ``energy(g,
+      mask=keep)`` yourself with an explicit rank-2 ``(B, N)`` keep), or use the
+      ``EnergyTransformer`` block, which already does. Do NOT "fix" this by flipping
+      ``supports_masking = True`` without ALSO adding a ``mask`` parameter to ``call()`` —
+      that combination silences the warning while still dropping the mask, which is strictly
+      worse than today (F-02).
+
     **SIGN DISCIPLINE.** :meth:`update` returns ``-dE/dg`` — the **descent direction**,
     NOT the gradient. A consumer therefore *adds* ``step_size * update``. Do not "fix"
     this sign: flipping it silently turns the block's dynamics into energy *ascent*, which
@@ -591,6 +615,42 @@ class EnergyTransformer(keras.layers.Layer):
     ``__init__`` and EXPLICITLY built in :meth:`build`. They are never created in
     :meth:`build` or :meth:`call` — a lazily-created sub-layer silently DROPS ITS WEIGHTS
     on a ``.keras`` round-trip.
+
+    **COST — measured, not extrapolated.** ``T`` descent steps do NOT cost ``T`` transformer
+    blocks. Against a vanilla ``TransformerLayer`` at matched width, ET-Full (``T = 12``):
+
+    .. code-block:: text
+
+        wall clock   : 7.6x a vanilla TransformerLayer   (NOT the naive 12x)
+        per ET step  : 0.63x one vanilla block
+        params       : 3.54 M  vs  7.09 M  (ET has HALF the parameters)
+
+    A step is cheaper than a block because the block is *missing pieces*: **no value matrix,
+    no separate FFN up/down projection, no output projection** — the Hopfield's ``xi`` is ONE
+    tied ``(K, D)`` matrix used in both directions, and attention has only ``w_key`` /
+    ``w_query``. So ``T`` steps of a 0.63x block land at ~7.6x, not 12x. Two more measured
+    facts a caller should budget for:
+
+    * ``return_energy=True`` costs **1.60x** wall clock — it makes ``2T + 1`` ``_project()``
+      calls instead of ``T`` (an energy reading before every step, plus the final one).
+    * **Backward memory is LINEAR in** ``T``. The loop is fully unrolled and nothing is
+      recomputed, so every step's activations are held for the backward pass. ``T`` is a
+      memory dial, not just a compute one.
+
+    **DO NOT "OPTIMIZE" THE PER-STEP KEEP-MASK REBUILD — it was measured, and it is free.**
+    ``EnergyAttention._build_keep_mask`` is loop-invariant (it reads ``ops.shape(g)[1]``, the
+    masks and ``attn_self`` — never ``g``'s *values*) yet ``_project()`` rebuilds it on every
+    one of the ``T`` steps. In EAGER profiling this looks like ~27% of the forward pass, which
+    is exactly why it keeps getting re-proposed. **It is not worth hoisting.** In the OPTIMIZED
+    compiled graph the mask is not merely CSE-d, it is **constant-folded out of existence**
+    (verified: the mask's op count is FLAT at ``T = 4/12/24`` in optimized HLO, while positive
+    controls scale with ``T``; grappler independently collapses it too). Measured end-to-end
+    fwd+bwd hoist delta on an idle GPU: **-0.09% (jit), -0.06% (graph), +0.25% (dynamic-N)** —
+    i.e. nothing, or worse. The only real win is **+12.9% on ``run_eagerly=True``**, a DEBUG
+    mode that is itself 4.2x slower than jit, so nobody trains on it. Hoisting it would widen
+    three PUBLIC duck-typed signatures (``_project``/``energy``/``update``) and add a fresh way
+    to break ``update() == -dE/dg`` (a half-applied mask has ALREADY shipped once here) to buy
+    zero. See ``plans/plan_2026-07-14_e5955791/decisions.md`` D-005.
 
     :param embed_dim: Token embedding dimension ``D``.
     :type embed_dim: int
