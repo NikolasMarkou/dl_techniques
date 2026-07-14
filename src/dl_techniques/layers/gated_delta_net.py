@@ -24,7 +24,7 @@ from keras import initializers, layers, ops, regularizers
 # ---------------------------------------------------------------------
 
 from ..utils.logger import logger
-from .ffn.factory import create_ffn_from_config, FFNType
+from .ffn.factory import create_ffn_from_config, FFNType, FFN_REGISTRY
 from .norms import create_normalization_layer, NormalizationType
 
 # ---------------------------------------------------------------------
@@ -315,19 +315,45 @@ class GatedDeltaNet(keras.layers.Layer):
         :return: FFN layer instance.
         :rtype: keras.layers.Layer
         """
-        if self.intermediate_size is None:
-            self.intermediate_size = self.dim * 4  # Sensible default
+        # Do NOT mutate `self.intermediate_size` here: `get_config()` serializes it, so
+        # overwriting a caller's `None` with a computed default made a reloaded layer's
+        # config differ from the one that was built. Resolve the effective value locally.
+        effective_intermediate = (
+            self.dim * 4 if self.intermediate_size is None else self.intermediate_size
+        )
 
-        # The FFN's role is to project qk_dim -> dim.
+        ffn_info = FFN_REGISTRY.get(self.ffn_type)
+        if ffn_info is None:
+            raise ValueError(
+                f"Unknown ffn_type '{self.ffn_type}'. "
+                f"Available: {sorted(FFN_REGISTRY)}."
+            )
+        valid_ffn_params = set(ffn_info["required_params"]) | set(
+            ffn_info["optional_params"]
+        )
+
+        # `hidden_dim` is now the universal sizing knob across FFN types -- SwiGLU used to
+        # be the odd one out (sized only by `ffn_expansion_factor`), so passing it a
+        # hidden_dim had the value SILENTLY DROPPED by the factory's kwarg filter and the
+        # FFN was built at SwiGLU's default expansion instead. `SwiGLUFFN` now accepts an
+        # explicit `hidden_dim` like the rest, so `intermediate_size` is honored uniformly.
         config = {
             "type": self.ffn_type,
             "name": name,
             "output_dim": self.dim,
-            "hidden_dim": self.intermediate_size,
+            "hidden_dim": effective_intermediate,
             "dropout_rate": self.dropout_rate,
             "use_bias": self.use_bias,
             "kernel_initializer": self.kernel_initializer,
             "bias_initializer": self.bias_initializer,
+        }
+
+        # Drop OUR OWN generic defaults that this ffn_type does not accept. These are this
+        # layer's conveniences, not the caller's explicit intent, so filtering them is
+        # correct -- unlike `ffn_args`, which the factory now rejects loudly if unknown.
+        config = {
+            k: v for k, v in config.items()
+            if k in valid_ffn_params or k in ("type", "name")
         }
         config.update(self.ffn_args)
         try:

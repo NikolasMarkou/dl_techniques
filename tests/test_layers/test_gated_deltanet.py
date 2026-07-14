@@ -53,8 +53,27 @@ class TestGatedDeltaNet:
             "num_heads": 4,
             "max_seq_len": 128,
             "ffn_type": "swiglu",
-            "intermediate_size": 256,  # 64 * 4
+            # NOT 256: SwiGLU's own 2/3-rule default for output_dim=64 IS 256, so a
+            # fixture of 256 cannot distinguish "honored" from "silently ignored".
+            "intermediate_size": 320,
         }
+
+    def test_swiglu_actually_honors_intermediate_size(self, ffn_config) -> None:
+        """`intermediate_size` must reach the FFN -- it used to be silently discarded.
+
+        SwiGLUFFN had no `hidden_dim` (it sized itself via `ffn_expansion_factor`), so the
+        factory's kwarg filter DROPPED the `hidden_dim` GatedDeltaNet passed, so the FFN was
+        built at SwiGLU's 2/3-rule default and nothing failed. The old test only asserted
+        `hasattr(layer, "output_ffn")`, which was true either way.
+
+        The fixture deliberately asks for 320, NOT 256: SwiGLU's own default for
+        output_dim=64 IS 256, so a 256 fixture passes whether or not the value is honored.
+        """
+        layer = GatedDeltaNet(**ffn_config)
+        assert layer.output_ffn.hidden_dim == 320, (
+            f"intermediate_size=320 did not reach the SwiGLU FFN "
+            f"(hidden_dim={layer.output_ffn.hidden_dim})"
+        )
 
     @pytest.fixture
     def regularized_config(self) -> Dict[str, Any]:

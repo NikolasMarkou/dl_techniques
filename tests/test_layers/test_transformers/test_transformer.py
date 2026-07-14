@@ -199,7 +199,12 @@ class TestTransformerLayer:
         [
             {'attention_type': 'multi_head', 'attention_args': {}},
             {'attention_type': 'window', 'attention_args': {'window_size': 4}},
-            {'attention_type': 'group_query', 'attention_args': {'n_kv_head': 2}},
+            # `num_kv_heads` is the GroupedQueryAttention parameter. This fixture used to say
+            # `n_kv_head` (TransformerLayer's OWN ctor name), which the attention factory
+            # filtered out silently -- so it built with num_kv_heads=4 (the default), not 2,
+            # and the test passed anyway. Verified: attention_args={'n_kv_head': 2} ->
+            # num_kv_heads == 4; attention_args={'num_kv_heads': 2} -> num_kv_heads == 2.
+            {'attention_type': 'group_query', 'attention_args': {'num_kv_heads': 2}},
             # hidden_size (64) / num_heads (4) = 16
             {'attention_type': 'differential', 'attention_args': {'head_dim': 16}},
         ]

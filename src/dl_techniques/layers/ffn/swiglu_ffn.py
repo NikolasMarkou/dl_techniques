@@ -130,6 +130,12 @@ class SwiGLUFFN(keras.layers.Layer):
     :param output_dim: Integer, output dimension (model dimension).
         Must be positive. This determines both input and output feature size.
     :type output_dim: int
+    :param hidden_dim: Optional explicit hidden dimension. When given it is used
+        VERBATIM and ``ffn_expansion_factor`` / ``ffn_multiple_of`` are ignored. When
+        ``None`` (default) the hidden size is derived from ``output_dim`` via the 2/3 rule
+        and rounded to ``ffn_multiple_of``. This exists so SwiGLU can be sized by the same
+        ``hidden_dim`` knob as every other FFN in the factory.
+    :type hidden_dim: Optional[int]
     :param ffn_expansion_factor: Integer, factor by which to expand the hidden
         dimension relative to output_dim. Must be positive. Defaults to 4.
     :type ffn_expansion_factor: int
@@ -167,6 +173,7 @@ class SwiGLUFFN(keras.layers.Layer):
     def __init__(
             self,
             output_dim: int,
+            hidden_dim: Optional[int] = None,
             ffn_expansion_factor: int = 4,
             ffn_multiple_of: int = 256,
             dropout_rate: float = 0.0,
@@ -182,8 +189,16 @@ class SwiGLUFFN(keras.layers.Layer):
         # Validate inputs
         self._validate_inputs(output_dim, ffn_expansion_factor, ffn_multiple_of, dropout_rate)
 
+        if hidden_dim is not None and hidden_dim <= 0:
+            raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
+
         # Store configuration
         self.output_dim = output_dim
+        # The REQUESTED hidden_dim (may be None). Kept separately from the RESOLVED
+        # `self.hidden_dim` below so `get_config()` round-trips the caller's intent: storing
+        # the resolved value would turn "let SwiGLU size itself" into "pin this exact size"
+        # on reload, which is a different layer.
+        self._hidden_dim_arg = hidden_dim
         self.ffn_expansion_factor = ffn_expansion_factor
         self.ffn_multiple_of = ffn_multiple_of
         self.dropout_rate = dropout_rate
@@ -193,8 +208,15 @@ class SwiGLUFFN(keras.layers.Layer):
         self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
         self.bias_regularizer = keras.regularizers.get(bias_regularizer)
 
-        # Calculate hidden dimension with proper rounding (2/3 rule from PaLM)
-        self.hidden_dim = self._calculate_hidden_dim()
+        # An EXPLICIT hidden_dim wins; otherwise size via the 2/3 rule from PaLM.
+        # SwiGLU historically had no `hidden_dim` at all, which made it the odd one out:
+        # every other FFN type in the factory is sized by `hidden_dim`, so a caller
+        # (e.g. GatedDeltaNet's `intermediate_size`) passing one had it SILENTLY DROPPED by
+        # the factory's kwarg filter and got the 2/3-rule default instead. It now accepts
+        # the same knob as the rest.
+        self.hidden_dim = (
+            hidden_dim if hidden_dim is not None else self._calculate_hidden_dim()
+        )
 
         # CREATE all sub-layers in __init__ (modern Keras 3 pattern)
         try:
@@ -390,6 +412,8 @@ class SwiGLUFFN(keras.layers.Layer):
         config = super().get_config()
         config.update({
             "output_dim": self.output_dim,
+            # the REQUESTED value (may be None), not the resolved one -- see __init__
+            "hidden_dim": self._hidden_dim_arg,
             "ffn_expansion_factor": self.ffn_expansion_factor,
             "ffn_multiple_of": self.ffn_multiple_of,
             "dropout_rate": self.dropout_rate,

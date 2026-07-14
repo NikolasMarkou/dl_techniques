@@ -23,6 +23,7 @@ from typing import Optional, Tuple, Dict, Any
 
 from ..utils.logger import logger
 from .ffn import create_ffn_layer, FFNType
+from .ffn.factory import FFN_REGISTRY
 from .norms import create_normalization_layer, NormalizationType
 from .attention.fnet_fourier_transform import FNetFourierTransform
 
@@ -167,32 +168,43 @@ class FNetEncoderBlock(keras.layers.Layer):
             **self.ffn_kwargs
         }
 
-        # Add intermediate_dim if specified and if FFN type uses it
+        # `hidden_dim` is the universal sizing knob -- pass it to any FFN type that takes it.
+        #
+        # This used to carry a hard-coded type whitelist plus a SwiGLU special case that
+        # converted `intermediate_dim` into an expansion factor by INTEGER DIVISION:
+        #     ffn_params['ffn_expansion_factor'] = self.intermediate_dim // hidden_dim
+        # which is lossy twice over -- the division truncates, and SwiGLU then re-applies
+        # the 2/3 rule and rounds to a multiple of 256. Asking for intermediate_dim=1000 at
+        # hidden_dim=512 produced an expansion factor of 1 and an FFN of 512. The whitelist
+        # was the other half of the same problem: `intermediate_dim` was silently ignored
+        # for any ffn_type not named in it.
+        #
+        # `SwiGLUFFN` now accepts an explicit `hidden_dim` like every other FFN, so the
+        # special case and the whitelist are both gone.
         if self.intermediate_dim is not None:
-            if self.ffn_type in ['mlp', 'differential', 'glu', 'geglu', 'residual', 'swin_mlp']:
-                ffn_params['hidden_dim'] = self.intermediate_dim
-            elif self.ffn_type == 'swiglu':
-                # SwiGLU uses ffn_expansion_factor instead of hidden_dim
-                if 'ffn_expansion_factor' not in ffn_params:
-                    # Calculate expansion factor from intermediate_dim
-                    ffn_params['ffn_expansion_factor'] = self.intermediate_dim // hidden_dim
+            ffn_info = FFN_REGISTRY.get(self.ffn_type)
+            accepts_hidden_dim = ffn_info is not None and "hidden_dim" in (
+                set(ffn_info["required_params"]) | set(ffn_info["optional_params"])
+            )
+            if accepts_hidden_dim:
+                ffn_params.setdefault('hidden_dim', self.intermediate_dim)
 
         # Add dropout rate if not already specified
         if 'dropout_rate' not in ffn_params:
             ffn_params['dropout_rate'] = self.dropout_rate
 
+        # NO SILENT FALLBACK. This used to catch every exception and quietly build an `mlp`
+        # instead -- so a caller who asked for `swiglu` and mistyped a parameter got a
+        # completely DIFFERENT FFN architecture, with only a log line to say so. Logs are
+        # not a failure channel: the model trained, converged, and was never the model that
+        # was asked for. A misconfigured FFN is a caller error; surface it.
         try:
             self.ffn_layer = create_ffn_layer(self.ffn_type, **ffn_params)
         except Exception as e:
-            logger.error(f"Failed to create FFN layer of type '{self.ffn_type}': {e}")
-            # Fallback to standard MLP
-            fallback_params = {
-                'hidden_dim': self.intermediate_dim or hidden_dim * 4,
-                'output_dim': hidden_dim,
-                'dropout_rate': self.dropout_rate,
-                'name': 'ffn_fallback'
-            }
-            self.ffn_layer = create_ffn_layer('mlp', **fallback_params)
+            raise ValueError(
+                f"Failed to create FFN layer of type '{self.ffn_type}' with "
+                f"{sorted(ffn_params)}: {e}"
+            ) from e
 
         # Build normalization layers
         self.fourier_layer_norm.build(input_shape)

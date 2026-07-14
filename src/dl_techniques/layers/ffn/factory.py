@@ -409,6 +409,7 @@ FFN_REGISTRY: Dict[str, Dict[str, Any]] = {
         'description': 'SwiGLU Feed-Forward Network with gating mechanism',
         'required_params': ['output_dim'],
         'optional_params': {
+            'hidden_dim': None,  # explicit size; None => 2/3-rule from ffn_expansion_factor
             'ffn_expansion_factor': 4,
             'ffn_multiple_of': 256,
             'dropout_rate': 0.0,
