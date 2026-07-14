@@ -96,7 +96,7 @@ from dl_techniques.layers.attention.factory import create_attention_layer
 # ConvUNext Bias-Free Building Blocks (Simple Stem)
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@keras.saving.register_keras_serializable(package="dl_techniques.bias_free_denoisers")
 class ConvUNextStem(keras.layers.Layer):
     """
     ConvUNext stem block for initial feature extraction using bias-free design.

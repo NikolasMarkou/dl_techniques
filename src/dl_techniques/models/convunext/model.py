@@ -36,7 +36,7 @@ from dl_techniques.layers.norms.factory import create_normalization_layer
 # ConvUNext Stem Block
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@keras.saving.register_keras_serializable(package="dl_techniques.convunext")
 class ConvUNextStem(keras.layers.Layer):
     """
     ConvUNext stem block for initial feature extraction.

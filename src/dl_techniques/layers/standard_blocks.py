@@ -59,7 +59,7 @@ from .activations import create_activation_layer
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@keras.saving.register_keras_serializable(package="dl_techniques.standard_blocks")
 class ConvBlock(keras.layers.Layer):
     """
     Configurable convolutional block with normalization, activation, and optional pooling.

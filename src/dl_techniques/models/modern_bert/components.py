@@ -6,7 +6,7 @@ from typing import Optional, Any, Dict, Tuple, List
 # Component 1: Byte-Level Tokenizer
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@keras.saving.register_keras_serializable(package="dl_techniques.modern_bert")
 class ByteTokenizer(keras.layers.Layer):
     """
     A simple, stateless byte-level tokenizer for text processing.

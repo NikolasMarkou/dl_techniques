@@ -228,7 +228,7 @@ from .embedding.positional_embedding import PositionalEmbedding
 
 # ---------------------------------------------------------------------
 
-@keras.saving.register_keras_serializable()
+@keras.saving.register_keras_serializable(package="dl_techniques.blt")
 class ByteTokenizer(keras.layers.Layer):
     """
     Converts text to byte tokens for BLT processing.

@@ -222,7 +222,7 @@ class PinballLoss(keras.losses.Loss):
 # ===========================================================================
 
 
-@keras.saving.register_keras_serializable()
+@keras.saving.register_keras_serializable(package="dl_techniques.cliffordnet")
 class CoverageMetric(keras.metrics.Metric):
     """Empirical coverage: fraction of true values inside predicted CI.
 

@@ -35,7 +35,7 @@ from typing import Any, Dict, Optional
 # ---------------------------------------------------------------------
 
 
-@keras.saving.register_keras_serializable()
+@keras.saving.register_keras_serializable(package="dl_techniques.probabilistic_forecast")
 class CoverageMetric(keras.metrics.Metric):
     """Empirical interval coverage for quantile forecasts.
 
