@@ -1028,7 +1028,40 @@ def get_head_class(task_type: VLMTaskType) -> type:
         VLMTaskType.IMAGE_TEXT_MATCHING: ImageTextMatchingHead,
         VLMTaskType.VISUAL_DIALOGUE: BaseVLMHead,  # Placeholder
     }
-    return head_mapping.get(task_type, BaseVLMHead)
+    # NO SILENT FALLBACK, AND `BaseVLMHead` IS NOT A USABLE HEAD.
+    #
+    # This used to be `return head_mapping.get(task_type, BaseVLMHead)`, so 41 of the 47
+    # VLMTaskType members silently returned `BaseVLMHead`. That class has NO `call()`
+    # method -- it is fusion + norm + optional FFN and nothing else -- so the factory
+    # handed back an object that CONSTRUCTS fine and then dies the moment it is used:
+    #
+    #     create_vlm_head(VLMTaskConfig(task_type=VIDEO_CAPTIONING), ...)   # no error
+    #     head({'vision_features': v, 'text_features': t})
+    #     -> NotImplementedError: Layer BaseVLMHead does not have a call() method
+    #
+    # The error names BaseVLMHead, not the task, so the caller has no idea their task type
+    # was never implemented. The same is true of the two entries above that map to
+    # BaseVLMHead explicitly and are commented "# Placeholder": a placeholder that cannot
+    # be called is not a head, so they are rejected here too rather than deferred.
+    #
+    # Only FOUR VLM task types have a real head today (image captioning, VQA, visual
+    # grounding, image-text matching). Say so, at construction time, instead of pretending.
+    # The sibling `heads/vision/factory.py` already raises on an unsupported task; this
+    # matches it. To add support, implement the head and map it -- do not restore the
+    # fallback.
+    head_class = head_mapping.get(task_type)
+    if head_class is None or head_class is BaseVLMHead:
+        implemented = sorted(
+            t.name for t, c in head_mapping.items() if c is not BaseVLMHead
+        )
+        raise ValueError(
+            f"No VLM head is implemented for task type '{task_type.name}'. "
+            f"Implemented task types: {implemented}. "
+            f"(This previously returned a bare BaseVLMHead, which has no call() method and "
+            f"raised NotImplementedError only once the head was actually used.)"
+        )
+
+    return head_class
 
 
 def create_vlm_head(

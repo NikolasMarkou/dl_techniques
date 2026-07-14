@@ -1382,7 +1382,29 @@ def get_head_class(task_type: NLPTaskType) -> type:
         NLPTaskType.QUALITY_SCORING: TextClassificationHead,
     }
 
-    return head_mapping.get(task_type, TextClassificationHead)
+    # NO SILENT FALLBACK. This used to be
+    #     return head_mapping.get(task_type, TextClassificationHead)
+    # which meant that 13 of the 37 NLPTaskType members -- MACHINE_TRANSLATION,
+    # DIALOGUE_GENERATION, RELATION_EXTRACTION, DEPENDENCY_PARSING, COREFERENCE_RESOLUTION,
+    # SEMANTIC_ROLE_LABELING and friends -- silently returned a TEXT CLASSIFICATION head.
+    # It builds, it trains, and it produces plausible nonsense: a translation task quietly
+    # became a classifier. The failure was invisible.
+    #
+    # The sibling `heads/vision/factory.py` already raises on an unsupported task
+    # (`raise ValueError(f"Unsupported task type: {task_type}")`); this now matches it.
+    # A task that has no head is a caller error, not something to paper over with an
+    # arbitrary default. If one of the types below SHOULD map to an existing head, add it
+    # to `head_mapping` deliberately -- do not restore the fallback.
+    if task_type not in head_mapping:
+        supported = sorted(t.name for t in head_mapping)
+        raise ValueError(
+            f"No NLP head is implemented for task type '{task_type.name}'. "
+            f"Supported task types: {supported}. "
+            f"(This previously returned a TextClassificationHead silently, which produced "
+            f"a working but wrong head for tasks like MACHINE_TRANSLATION.)"
+        )
+
+    return head_mapping[task_type]
 
 
 def create_nlp_head(

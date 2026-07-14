@@ -40,6 +40,22 @@ checkpoints stay loadable (bare `@register_keras_serializable()` registers as
   `task_configs` shapes and are NOT routed through `create_head`.
 
 ## Conventions
+- **No silent fallback in task dispatch.** `get_head_class()` in `nlp/` and `vlm/` must
+  **raise `ValueError`** for a task type with no implemented head — never substitute a
+  default. Both used to end with `head_mapping.get(task_type, <SomeDefault>)`, which meant:
+  - **NLP**: 13 of 37 `NLPTaskType` members (`MACHINE_TRANSLATION`, `DIALOGUE_GENERATION`,
+    `RELATION_EXTRACTION`, `DEPENDENCY_PARSING`, `COREFERENCE_RESOLUTION`, …) silently
+    returned a `TextClassificationHead`. It builds, trains and emits plausible numbers — a
+    translation task quietly became a classifier, and nothing ever failed.
+  - **VLM**: 41 of 47 `VLMTaskType` members silently returned a bare `BaseVLMHead`, which
+    has **no `call()`** — so the factory returned an object that constructed fine and died
+    on first use with `NotImplementedError`, naming the base class rather than the task.
+  `vision/` already got this right (`raise ValueError(f"Unsupported task type: …")`); the
+  other two now match it. **`BaseVLMHead` is not a usable head** and must never be returned
+  from dispatch, including for the entries once commented `# Placeholder`. Only 4 VLM tasks
+  have a real head today (captioning, VQA, visual grounding, image-text matching). To add
+  one: implement the head and map it — do not restore the fallback.
+  Pinned by `tests/test_layers/test_heads/test_head_dispatch_no_silent_fallback.py`.
 - **`sequence_pooling` reuse (NLP).** `BaseNLPHead` pooling for `cls`/`mean`/`max`
   delegates to the shared `dl_techniques.layers.sequence_pooling.SequencePooling`
   layer (built in `__init__`/`build`, Golden Rule). The `attention` strategy
