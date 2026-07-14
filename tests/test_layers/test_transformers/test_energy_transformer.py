@@ -1857,5 +1857,121 @@ class TestFitConvergence:
         )
 
 
+class TestGraphSafeTrainingFlag:
+    """G-02: `training` as a SYMBOLIC tf bool tensor inside a `tf.function`.
+
+    At HEAD `call()` did `add_noise = self.noise_std > 0.0 and training`. Python `and`
+    calls `Tensor.__bool__()`, which is illegal in graph mode -> the layer raised
+    `OperatorNotAllowedInGraphError` the moment a caller wrapped it in a `tf.function`
+    and passed a traced `training`. `fit`/`predict`/`jit_compile` never hit it (Keras
+    resolves `training` to a Python bool for those), which is exactly why 247 tests
+    missed it. See decisions.md D-003.
+
+    THREE guards, because a "graph-safe" branch that simply never adds the noise would
+    pass a compile-only guard BOTH WAYS -- the bug fixed, the FEATURE dead, the suite
+    green. This feature has already shipped four guards that passed both ways.
+    """
+
+    # Realistic N (LESSONS [I:5]): the reductions in `energy()` are exercised at N=256,
+    # never the N=7 fixture default.
+    N_REAL = 256
+    NOISE = 0.15
+
+    def _fn(self, block):
+        """The layer inside a `tf.function`, with `training` traced as a bool tensor."""
+        @tf.function
+        def run(x, training):
+            return block(x, training=training)
+        return run
+
+    def _x(self, seed: int = 0):
+        rng = np.random.default_rng(seed)
+        return tf.constant(
+            rng.standard_normal((2, self.N_REAL, DIM)).astype("float32")
+        )
+
+    # -- guard 1: it must COMPILE -------------------------------------
+
+    def test_tensor_training_in_tf_function_does_not_raise(self):
+        """RED at HEAD: OperatorNotAllowedInGraphError. GREEN after D-003."""
+        block = _block(noise_std=self.NOISE, seed=11)
+        run = self._fn(block)
+        y = run(self._x(), tf.constant(True))
+        assert y.shape == (2, self.N_REAL, DIM)
+        assert np.all(np.isfinite(y.numpy()))
+
+    # -- guard 2: THE ONE THAT MATTERS (the feature must stay ALIVE) ---
+
+    def test_tensor_training_noise_semantics(self):
+        """`noise_std > 0`: a True tensor CHANGES the output, a False tensor does NOT.
+
+        DEAD-COMPONENT injection for this guard: force `noise_std` to 0 inside the
+        noise branch of `call()` (keeping the code shape). This assertion MUST go RED.
+        If it does not, the guard is worthless -- rewrite it, do not ship it.
+        """
+        block = _block(noise_std=self.NOISE, seed=11)
+        run = self._fn(block)
+        x = self._x()
+
+        y_true = run(x, tf.constant(True)).numpy()
+        y_false = run(x, tf.constant(False)).numpy()
+        y_py_false = block(x, training=False).numpy()
+
+        # A False TENSOR must behave EXACTLY like a Python False: bit-identical.
+        np.testing.assert_allclose(y_false, y_py_false, rtol=0, atol=0)
+
+        # A True TENSOR must actually inject the eq. 27 noise. The scale is not
+        # incidental: with num_steps=4 at noise_std=0.15 the accumulated perturbation is
+        # ~1e-1, i.e. far above any fp32 reassociation noise.
+        delta = float(np.max(np.abs(y_true - y_false)))
+        assert delta > 1e-3, (
+            f"training=tf.constant(True) did not change the output (max|diff| = {delta:.3e}) "
+            f"at noise_std={self.NOISE}. The graph-safe gate compiles but the eq. 27 noise "
+            "is DEAD."
+        )
+
+    # -- guard 3: I7 -- the DEFAULT path stays trace-time-eliminated ---
+
+    def _op_types(self, block, x, training):
+        graph = self._fn(block).get_concrete_function(
+            tf.TensorSpec(x.shape, x.dtype), tf.TensorSpec([], tf.bool)
+        ).graph
+        return [op.type for op in graph.get_operations()]
+
+    def test_default_path_builds_no_noise_and_no_gate(self):
+        """`noise_std = 0.0` (the DEFAULT): identical output AND no noise/cond in the graph.
+
+        The Python `if self.noise_std > 0.0:` runs FIRST, so the default path must never
+        construct the RNG op -- and therefore never a gate over it either (I7). Asserting
+        on RANDOM ops rather than on `SelectV2` is deliberate: `_build_keep_mask` emits
+        `SelectV2` unconditionally, so a `SelectV2` count cannot distinguish the noise gate
+        from the mask. A random op appears IF AND ONLY IF the noise branch was traced.
+        """
+        x = self._x()
+
+        default = _block(noise_std=0.0, seed=11)          # the DEFAULT
+        run = self._fn(default)
+        y_t = run(x, tf.constant(True)).numpy()
+        y_f = run(x, tf.constant(False)).numpy()
+        np.testing.assert_allclose(y_t, y_f, rtol=0, atol=0)
+
+        default_ops = self._op_types(_block(noise_std=0.0, seed=11), x, True)
+        rand_default = [t for t in default_ops if "Random" in t]
+        assert rand_default == [], (
+            f"the DEFAULT (noise_std=0) path traced random ops {rand_default} -- the noise "
+            "branch was NOT eliminated at trace time (I7)."
+        )
+
+        # POSITIVE CONTROL: the same probe MUST see the ops when noise IS enabled, or the
+        # assertion above passes for the wrong reason.
+        noisy_ops = self._op_types(_block(noise_std=self.NOISE, seed=11), x, True)
+        rand_noisy = [t for t in noisy_ops if "Random" in t]
+        assert rand_noisy, (
+            "the probe found no random op even at noise_std>0 -- it cannot see what it "
+            "claims the default path lacks."
+        )
+        assert "SelectV2" in noisy_ops           # the tensor gate itself
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

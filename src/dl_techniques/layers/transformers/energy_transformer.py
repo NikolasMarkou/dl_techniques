@@ -1024,6 +1024,9 @@ class EnergyTransformer(keras.layers.Layer):
             ``(B, N, N)`` / rank-4 ``(B, H, N, N)`` = a pair-level key x query mask.
         :type attention_mask: Optional[keras.KerasTensor]
         :param training: When truthy AND ``noise_std > 0``, the eq. 27 noise is injected.
+            May be a Python ``bool``/``None`` **or a symbolic scalar bool tensor** (a traced
+            graph function passes the latter): both are honoured, and a tensor is gated
+            without ever calling ``bool()`` on it (decisions.md D-003).
         :type training: Optional[bool]
         :param mask: Keras-propagated rank-2 ``(B, N)`` boolean per-token validity mask.
             Normally injected by Keras, not passed by hand.
@@ -1034,8 +1037,36 @@ class EnergyTransformer(keras.layers.Layer):
         :rtype: Union[keras.KerasTensor, Tuple[keras.KerasTensor, keras.KerasTensor]]
         """
         x = inputs
-        add_noise = self.noise_std > 0.0 and training
         energies: List[keras.KerasTensor] = []
+
+        # DECISION plan_2026-07-14_e5955791/D-003: the eq. 27 noise is gated in TWO
+        # stages, and the split is load-bearing. Do NOT collapse it back to
+        # `add_noise = self.noise_std > 0.0 and training`: Python `and` calls
+        # `Tensor.__bool__()`, so the moment a caller wraps this layer in a traced graph
+        # function and `training` arrives as a SYMBOLIC bool tensor, that line raises
+        # `OperatorNotAllowedInGraphError`. (`fit`/`predict`/`jit_compile` resolve
+        # `training` to a Python bool, which is why 247 tests never saw it.)
+        #
+        #   1. `self.noise_std > 0.0` reads a CONFIG FLOAT (the ctor validates it as a
+        #      Python number), so it is a PYTHON bool at trace time and STAYS a Python
+        #      `if`. That is what keeps the DEFAULT (`noise_std == 0.0`) path
+        #      trace-time-eliminated: it never constructs the RNG op, and therefore never
+        #      a cond over it. Do NOT "simplify" this to one uniform `ops.cond` — that
+        #      would put a tensor cond on the path ~100% of users run, for a feature
+        #      almost nobody enables.
+        #   2. Only `training` may be a tensor, and only INSIDE that branch is it
+        #      resolved: a Python bool/`None` short-circuits exactly as before; a tensor
+        #      is gated with `ops.where` below. Do NOT coerce a traced `training` to a
+        #      Python bool via a Keras helper — no stable Keras 3 helper is CORRECT for a
+        #      genuinely-traced flag, and coercion would make a `False` tensor ADD noise
+        #      (or a `True` tensor skip it): a loud crash traded for a silent wrong answer.
+        add_noise = False                                    # unconditional (Python) noise
+        noise_gate: Optional[keras.KerasTensor] = None       # tensor-gated noise
+        if self.noise_std > 0.0:
+            if training is None or isinstance(training, bool):
+                add_noise = bool(training)
+            else:
+                noise_gate = ops.cast(training, "bool")
 
         # The per-token keep the Hopfield module sees: the AND of the Keras `mask` and a
         # RANK-2 `attention_mask` (D-006). Hoisted out of the loop — it does not depend on the
@@ -1074,14 +1105,20 @@ class EnergyTransformer(keras.layers.Layer):
             # point 2. Flipping this sign gives energy ASCENT, which still runs.
             x = x + self.step_size * update
 
-            if add_noise:
+            if add_noise or noise_gate is not None:
                 # eq. 27 (Langevin). `ops.shape(x)` — NEVER a Python int off the batch or
                 # token axis, or the layer breaks under a symbolic/variable batch size.
-                x = x + self._sqrt_step_size * self.noise_std * keras.random.normal(
+                noisy = x + self._sqrt_step_size * self.noise_std * keras.random.normal(
                     shape=ops.shape(x),
                     dtype=self.compute_dtype,
                     seed=self.seed_generator,
                 )
+                # DECISION plan_2026-07-14_e5955791/D-003: the tensor branch draws the
+                # noise and then DISCARDS it when the gate is False. That wasted draw is
+                # the accepted price of a graph-safe `training`, and it is paid ONLY when
+                # `noise_std > 0` AND `training` is a traced tensor — never on the default
+                # path (see the two-stage gate above).
+                x = noisy if noise_gate is None else ops.where(noise_gate, noisy, x)
 
         if self.return_energy:
             # The (T+1)-th reading: the energy AFTER the last step. Without it the caller
