@@ -141,6 +141,32 @@ Backward memory is **linear in `T`** because the descent is unrolled. Raising `-
 
 Reference throughput (same mode, `tiny`, batch 32, RTX 4070): 91 ms/step; input pipeline 1142 img/s vs training 352 img/s, so the run is GPU-bound, not I/O-bound, even with imagenette records on a spinning disk.
 
+### `mixed_float16` works — and is SLOWER than `float32`. It buys memory, not speed.
+
+Under a global `keras.mixed_precision.set_global_policy('mixed_float16')` the models now train correctly (this was **not** true before — see below), and the fp16 loss curve tracks the fp32 one to ~`1e-6`. But it is **~8 % slower**:
+
+| Policy | ms/step |
+|---|---|
+| `float32` | **10.6** |
+| `mixed_float16` | **11.5** |
+
+*(Measured under `fit`'s default **graph + `jit_compile=True`** path — `tiny`, `N=196`, RTX 4070. Never quote either number without naming that mode.)*
+
+The model is **latency-bound, not FLOP-bound**: `T=12` unrolled descent steps are a long serial chain of small ops, so the fp16 tensor cores have nothing to bite on. And the block itself now computes in `float32` under a mixed policy (below), so the bulk of the arithmetic never becomes fp16 anyway. Use `mixed_float16` if you need the **memory**; do not expect a speedup.
+
+### D-010 — the ET block runs in `variable_dtype`, on purpose. Do not "optimize" the cast away.
+
+`EnergyTransformerBackbone` builds its `EnergyTransformer` block with `dtype=self.dtype_policy.variable_dtype` (not `.dtype_policy`) and casts the tokens into and back out of it. Under `float32`/`float64` those casts are provable no-ops (`variable_dtype == compute_dtype`; the jitted graph of the cast contains no `Cast` op at all), so the fp32 path is bit-identical by construction. Under `mixed_float16` they force the block to compute in `float32`.
+
+**Why**, and what NOT to do instead:
+
+* `EnergyLayerNorm`'s backward pass forms `(var + eps)^(-3/2)`. In fp16 that intermediate **overflows 65504** whenever `eps < 65504^(-2/3) ≈ 6.1e-4`. At the default `eps = 1e-5` it is ~`3.2e7` → `inf`, and `0 * inf` → `NaN`. The occlusion mask is what supplies the near-constant (`var ≈ 0`) tokens that reach the cliff, and **XLA** (which `fit` enables by default) is what keeps the intermediate in fp16 — the same computation is finite eagerly and at `jit_compile=False`.
+* The result was a **silent** dead trainer: every gradient non-finite → `LossScaleOptimizer` rejected 100 % of steps (scale collapsed `2^15` → `2.3e-41`) → **all 13 weights moved by exactly 0.0** over 150 steps, while the loss stayed finite, `TerminateOnNaN` never fired, and the energy trace still descended. Nothing errored. The model simply never learned.
+* **Do NOT remove the cast** to "save a copy". That reinstates the overflow.
+* **Do NOT raise `norm_epsilon` to `1e-3`** to make fp16 fast again. It *does* clear the overflow — and it silently trains a **different network**: the norm's Jacobian ceiling is `gamma / sqrt(eps)`, so `1e-5 → 1e-3` cuts it **10x**, while leaving you sitting 2x from a cliff you are now depending on. A fix that makes fp16 and fp32 disagree silently is worse than the bug.
+
+A backward-pass fp16 guard (`test_model.py`, weights must MOVE + the loss scale must not collapse) locks this in. The pre-existing fp16 test was **forward-only**, which is exactly why every guard missed it.
+
 ---
 
 ## 6. Hyperparameters (paper Table 4)
@@ -252,7 +278,17 @@ A +2.1 point delta that is **not evidence**: one seed, negligible pretraining (a
 
 `warmup_epochs` defaults to `2`. A 1-epoch run therefore trains entirely inside the warmup ramp and never reaches the nominal learning rate. That is fine for a smoke test and **wrong for judging quality**. Any quality claim needs a run long enough to clear warmup.
 
-### 8.4 Graph variants are NOT implemented
+### 8.4 `EnergyLayerNorm` is not fp16-safe under XLA — a LATENT, REPO-WIDE bug
+
+The fix described in §5 is **consumer-side**: these two models step around the defect by running the block in `float32` under a mixed policy. The defect itself is still there, in `layers/norms/energy_layer_norm.py`, untouched (this work is under a zero-`layers/`-modification budget).
+
+**So: any OTHER consumer of `EnergyLayerNorm` / `EnergyTransformer` that runs `mixed_float16` + XLA and feeds it near-constant tokens has this bug today.** Near-constant means `var ≈ 0` on a row: PAD rows, all-zero cells, an occluded/masked token, a collapsed early activation. The symptom is not a crash — it is a model that trains to nothing while the loss curve looks plausible.
+
+Worse, the layer's docstring currently tells the next reader **not to look**: it states "It is *not* an fp16 flush-to-zero bug ... do not 'fix' either". That claim was verified **eagerly** and does not survive XLA.
+
+**Follow-up owed (out of scope here):** fix it at the source — compute the norm's backward in `float32`, or floor `epsilon` to `6.1e-4` under an fp16 policy — and correct that docstring to name the `(var + eps)^(-3/2)` overflow.
+
+### 8.5 Graph variants are NOT implemented
 
 The paper's graph anomaly detection and graph classification models are **not** here, and are not a small addition. `EnergyAttention` supports only a **binary 0/1 keep-mask**; the paper's eq.-25 weighted adjacency tensor is a real-valued per-edge bias with no path into the block's `_project` / `energy` / `update`. Expressing it requires a source change to the attention layer **plus a new hand-derived closed-form gradient** (the block has no autodiff path for the energy — the update is a closed form). That work is deferred to a follow-up.
 
@@ -268,6 +304,8 @@ CUDA_VISIBLE_DEVICES=1 .venv/bin/python -m pytest \
 ```
 
 Covers: the 90/10 rule and `sum w == N`; **patch-order agreement** (an identity-kernel `PatchEmbedding2D` reproduces `patchify_targets` **bit-exactly** — a scrambled patch order would still descend, so this is proven, not assumed); the `.keras` round-trip (deterministic output **and** equal weight count — an output-only compare can miss a dropped weight on a dead path); the energy trace is `float32`, finite and non-increasing at `N=196` even under `mixed_float16`; the masked loss through stock `fit`; and every CLI flag of both trainers reaching `TrainingConfig` (fail-closed — a flag added later is RED by default).
+
+Also covered: the **warm-start** (`test_warm_start.py`) — the trunk transfers **bit-exactly** from the MIM checkpoint (`assert_array_equal`, max |Δ| = 0.0, from a pre-transfer distance of 7.9e-2), the head is untouched, and the three ways the transfer can silently do nothing (skip-everything, a garbage checkpoint, a config-mismatched checkpoint) all raise; and the **backward-pass fp16 guard** (weights must actually MOVE under `mixed_float16` + XLA, and the loss scale must not collapse) — the guard whose absence let §5's dead trainer ship.
 
 Every guard in that suite was **proven RED** under an injected defect before being accepted, including a dead-component injection: bypassing the ET block makes the overfit loss 7.0x worse, so the block is demonstrably load-bearing.
 
