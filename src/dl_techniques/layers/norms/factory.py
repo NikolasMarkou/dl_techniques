@@ -311,7 +311,16 @@ def get_normalization_info() -> Dict[str, Dict[str, Any]]:
         },
         'energy_layer_norm': {
             'description': 'Energy Transformer layer norm (arXiv:2302.07253 eq. 1-2): SCALAR gamma + VECTOR delta; g = dL/dx of a Lagrangian with a PSD Hessian',
-            'parameters': ['epsilon', 'gamma_initializer', 'delta_initializer'],
+            # DECISION plan_2026-07-14_e5955791/D-004: `gamma_constraint` MUST stay in this
+            # list. It is a REAL ctor kwarg (57c9833e/D-010 — it pins `gamma > 0`, which is
+            # what keeps the Lagrangian's Hessian PSD). It was added to `EnergyLayerNorm`
+            # and NOT here, so `validate_normalization_config()` REJECTED a parameter
+            # `create_normalization_layer()` happily accepted: the validator and the builder
+            # disagreed about the layer's own signature. Do NOT trim this list to "the
+            # params people usually pass" — this entry IS the validator's whitelist, and
+            # anything missing from it is a hard `ValueError` for the caller.
+            'parameters': ['epsilon', 'gamma_initializer', 'delta_initializer',
+                           'gamma_constraint'],
             'use_case': 'Energy Transformer blocks, where the norm must be the derivative of a Lagrangian for the energy-descent guarantee to hold'
         }
     }

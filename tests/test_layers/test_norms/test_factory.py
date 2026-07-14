@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 from keras import ops
 
+from dl_techniques.constraints.value_range_constraint import ValueRangeConstraint
 from dl_techniques.layers.norms.factory import (
     create_normalization_layer,
     create_normalization_from_config,
@@ -76,6 +77,52 @@ class TestF1ValidateWhitelist:
     def test_invalid_param_still_rejected(self):
         with pytest.raises(ValueError):
             validate_normalization_config("dynamic_tanh", epsilon=1e-6)
+
+
+class TestEnergyLayerNormGammaConstraint:
+    """G-03: the validator and the BUILDER must agree about the layer's own signature.
+
+    `plan_2026-07-13_57c9833e`/D-010 added the `gamma_constraint` ctor kwarg to
+    `EnergyLayerNorm` (it pins `gamma > 0`, on which the energy-descent guarantee rests)
+    but never added it to this registry entry's `parameters` list. Result:
+    `create_normalization_layer` ACCEPTED the kwarg while `validate_normalization_config`
+    REJECTED it -- so any caller who validated before building was locked out of the one
+    constraint the layer's own docstring tells them to use. See decisions.md D-004.
+    """
+
+    def test_validate_accepts_gamma_constraint(self):
+        """RED at HEAD: ValueError: Invalid parameters for energy_layer_norm."""
+        assert validate_normalization_config(
+            "energy_layer_norm",
+            gamma_constraint=ValueRangeConstraint(min_value=1e-3),
+        )
+
+    def test_validated_config_round_trips_onto_the_built_gamma(self):
+        """Validation passing is NOT the property that matters -- the constraint ARRIVING is.
+
+        A registry entry could name the param and the builder still drop it on the floor.
+        Assert on the BUILT variable, not on the validator's return value.
+        """
+        constraint = ValueRangeConstraint(min_value=1e-3)
+        assert validate_normalization_config(
+            "energy_layer_norm", gamma_constraint=constraint
+        )
+
+        layer = create_normalization_layer(
+            "energy_layer_norm", gamma_constraint=constraint, name="eln_c"
+        )
+        layer.build((2, 8, 16))
+
+        assert layer.gamma.constraint is constraint, (
+            "validate() passed and create() accepted the kwarg, but the built `gamma` "
+            "variable carries no constraint -- the parameter was silently dropped."
+        )
+
+        # And it must BITE: a negative gamma is clipped back above the floor. `gamma > 0`
+        # is what makes the Lagrangian's Hessian PSD (57c9833e/D-010).
+        layer.gamma.assign(ops.convert_to_tensor(-5.0, dtype=layer.gamma.dtype))
+        clipped = float(ops.convert_to_numpy(layer.gamma.constraint(layer.gamma)))
+        assert clipped >= 1e-3, f"the constraint did not clip a negative gamma ({clipped})"
 
 
 class TestFromConfig:
