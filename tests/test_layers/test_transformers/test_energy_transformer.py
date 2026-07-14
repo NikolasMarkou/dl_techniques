@@ -1930,6 +1930,44 @@ class TestGraphSafeTrainingFlag:
             "is DEAD."
         )
 
+    # -- guard 2b: the same semantics under `mixed_float16` --------------
+
+    def test_tensor_training_noise_semantics_mixed_float16(self, global_mixed_float16):
+        """The gate must stay ALIVE and FINITE under `mixed_float16`.
+
+        The G-02 gate was the only new runtime code this pass added and it shipped with
+        zero fp16 coverage -- on a feature where FOUR consecutive defects lived at the
+        dtype boundary (the `-1e9` mask bias, the `logsumexp`, the energy dtype, the
+        `gamma` floor). `ops.where(cast(training, bool), x + noise, x)` runs in the
+        compute dtype, i.e. float16 here, where `noise_std * sqrt(step_size)` is small
+        enough to be a plausible flush-to-zero candidate. It is not -- but that must be
+        GUARDED, not merely believed.
+        """
+        block = _block(noise_std=self.NOISE, seed=11)
+        run = self._fn(block)
+        x = tf.cast(self._x(), "float16")
+
+        y_true = run(x, tf.constant(True))
+        y_false = run(x, tf.constant(False))
+
+        assert y_true.dtype == tf.float16
+        assert np.all(np.isfinite(y_true.numpy())), "fp16 noise gate produced NaN/Inf"
+        assert np.all(np.isfinite(y_false.numpy()))
+
+        # A False TENSOR is still bit-identical to a Python False.
+        np.testing.assert_allclose(
+            y_false.numpy(), block(x, training=False).numpy(), rtol=0, atol=0
+        )
+
+        # And the noise is still ALIVE: it did not flush to zero in float16.
+        delta = float(np.max(np.abs(
+            y_true.numpy().astype("float32") - y_false.numpy().astype("float32")
+        )))
+        assert delta > 1e-3, (
+            f"under mixed_float16 the eq. 27 noise is DEAD (max|True-False| = {delta:.3e} "
+            f"at noise_std={self.NOISE})."
+        )
+
     # -- guard 3: I7 -- the DEFAULT path stays trace-time-eliminated ---
 
     def _op_types(self, block, x, training):
@@ -1942,10 +1980,11 @@ class TestGraphSafeTrainingFlag:
         """`noise_std = 0.0` (the DEFAULT): identical output AND no noise/cond in the graph.
 
         The Python `if self.noise_std > 0.0:` runs FIRST, so the default path must never
-        construct the RNG op -- and therefore never a gate over it either (I7). Asserting
-        on RANDOM ops rather than on `SelectV2` is deliberate: `_build_keep_mask` emits
-        `SelectV2` unconditionally, so a `SelectV2` count cannot distinguish the noise gate
-        from the mask. A random op appears IF AND ONLY IF the noise branch was traced.
+        construct the RNG op -- and therefore never a gate over it either (I7). The
+        default-path assertion is on RANDOM ops, deliberately: a random op appears IF AND
+        ONLY IF the noise branch was traced, whereas `_build_keep_mask` emits `SelectV2`
+        unconditionally. `SelectV2` is only ever asserted on as a COUNT DELTA below (a
+        membership check on it passes both ways and can never fail).
         """
         x = self._x()
 
@@ -1970,7 +2009,22 @@ class TestGraphSafeTrainingFlag:
             "the probe found no random op even at noise_std>0 -- it cannot see what it "
             "claims the default path lacks."
         )
-        assert "SelectV2" in noisy_ops           # the tensor gate itself
+
+        # The tensor GATE itself, as a COUNT DELTA -- never a membership check.
+        # `"SelectV2" in noisy_ops` was shipped here once and is VACUOUS: `_build_keep_mask`
+        # emits `SelectV2` unconditionally (one per descent step), so membership is true at
+        # noise_std=0 too and the assertion can NEVER fail. The delta discriminates, and it
+        # is a structural law rather than a magic number -- the gate is exactly ONE
+        # `ops.where` per descent step, so it adds exactly `num_steps` of them. Measured on
+        # this machine at num_steps=1/2/4/8/12: default = T, noisy = 2T, delta = +T, exactly.
+        n_steps = default.num_steps
+        sel_default = default_ops.count("SelectV2")
+        sel_noisy = noisy_ops.count("SelectV2")
+        assert sel_noisy == sel_default + n_steps, (
+            f"the noise gate is not in the graph: SelectV2 went {sel_default} -> {sel_noisy} "
+            f"(expected +{n_steps}, one `ops.where` per descent step) when noise_std went "
+            f"0 -> {self.NOISE}."
+        )
 
 
 if __name__ == "__main__":
