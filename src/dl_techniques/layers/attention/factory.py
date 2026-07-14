@@ -243,6 +243,10 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
         ),
         'required_params': ['dim', 'num_heads', 'head_dim'],
         'optional_params': {
+            'probability_type': 'softmax',
+            'probability_config': None,
+            'qk_norm_type': None,
+            'qk_norm_kwargs': None,
             'dropout_rate': 0.0,
             'attention_dropout_rate': 0.0,
             'lambda_init': 0.8,

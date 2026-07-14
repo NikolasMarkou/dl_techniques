@@ -114,6 +114,7 @@ LOGIC_REGISTRY: Dict[str, Dict[str, Any]] = {
         ),
         "required_params": [],
         "optional_params": {
+            "force_clip_when_no_sigmoid": False,
             "operation_types": None,
             "use_temperature": True,
             "temperature_init": 1.0,
@@ -145,6 +146,8 @@ LOGIC_REGISTRY: Dict[str, Dict[str, Any]] = {
         ),
         "required_params": [],
         "optional_params": {
+            "force_logic_input_clip": False,
+            "load_balance_coefficient": None,
             "num_logic_ops": 2,
             "num_arithmetic_ops": 2,
             "use_residual": True,
@@ -179,6 +182,7 @@ LOGIC_REGISTRY: Dict[str, Dict[str, Any]] = {
         ),
         "required_params": [],
         "optional_params": {
+            "load_balance_coefficient": None,
             "circuit_depth": 3,
             "num_logic_ops_per_depth": 2,
             "num_arithmetic_ops_per_depth": 2,

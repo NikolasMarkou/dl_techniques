@@ -73,6 +73,7 @@ EMBEDDING_REGISTRY: Dict[str, Dict[str, Any]] = {
         'description': '2D image to patch embedding layer for Vision Transformers (ViT).',
         'required_params': ['patch_size', 'embed_dim'],
         'optional_params': {
+            'flatten': True,
             'kernel_initializer': 'glorot_normal',
             'kernel_regularizer': None,
             'bias_initializer': 'zeros',
