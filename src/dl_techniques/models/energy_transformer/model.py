@@ -334,6 +334,35 @@ class EnergyTransformerBackbone(keras.Model):
             self.dtype_policy,
         )
 
+        # DECISION plan-2026-07-14T163315-29a4fef4/D-011
+        # `dtype=self.dtype_policy.variable_dtype`, NOT `self.dtype_policy`. Under
+        # `mixed_float16` this runs the ET block in float32 (its variable dtype) rather than
+        # float16; `call()` casts the tokens in and back out. Under float32/float64 the two
+        # spellings are IDENTICAL (compute == variable), so nothing outside a mixed policy
+        # changes, and the block's variables were float32 under either spelling — the weight
+        # count, the weight dtypes and every checkpoint are untouched.
+        #
+        # WHY (executed control, N=196, tiny/small/base, XLA): `EnergyLayerNorm`'s BACKWARD
+        # forms `(var + eps)^(-3/2)`. In fp16 that intermediate OVERFLOWS `65504` whenever
+        # `eps < 65504^(-2/3) ~ 6.1e-4` — at the default `eps = 1e-5` it is 3.2e7 -> `inf`,
+        # and `0 * inf` -> `NaN`. The occlusion mask is what supplies the near-constant
+        # (`var ~ 0`) tokens that reach the cliff, and XLA is what keeps the intermediate in
+        # fp16 (it is finite eagerly and at `jit_compile=False`) — so the bug needs the TRIPLE
+        # fp16 x mask x XLA, and `fit` turns XLA on BY DEFAULT.
+        # The failure is SILENT: the loss stays FINITE, `TerminateOnNaN` never fires, the
+        # energy trace still descends, `LossScaleOptimizer` just rejects 100% of steps (dynamic
+        # scale 2^15 -> 2.98e-08), every weight moves by EXACTLY 0.0, and the user ships a
+        # random-init checkpoint on top of a plausible flat loss curve.
+        #
+        # WHAT NOT TO DO: (1) do NOT "simplify" this back to `dtype=self.dtype_policy`, and do
+        # not drop the casts in `call()`. (2) Do NOT "fix" it instead by raising `norm_epsilon`
+        # to 1e-3 (which does clear the overflow): that silently makes the fp16 model train a
+        # DIFFERENT network than the fp32 one (the norm's Jacobian ceiling is `gamma/sqrt(eps)`,
+        # so 1e-5 -> 1e-3 cuts it 10x) and it sits 2x from the cliff. (3) Casting around
+        # `MaskTokenApply` does NOT work — `where` is a select, so an fp32 round-trip there is
+        # forward-identical and the NaN is manufactured DOWNSTREAM, in the block's backward.
+        # Guarded by `test_model.py::TestMixedPrecisionBackwardPass` (a BACKWARD-pass test — the
+        # forward-only fp16 test passed throughout). See decisions.md D-011.
         self.et_block = EnergyTransformer(
             embed_dim=self.embed_dim,
             num_heads=self.num_heads,
@@ -350,7 +379,7 @@ class EnergyTransformerBackbone(keras.Model):
             norm_epsilon=self.norm_epsilon,
             seed=self.seed,
             name="et_block",
-            dtype=self.dtype_policy,
+            dtype=self.dtype_policy.variable_dtype,
         )
 
         logger.info(
@@ -419,7 +448,16 @@ class EnergyTransformerBackbone(keras.Model):
             x = self.mask_token([x, input_mask])
 
         x = self.pos_embed(x, training=training)
-        return self.et_block(x, training=training)
+
+        # D-011: the block computes in its VARIABLE dtype (float32 under mixed_float16), never
+        # in fp16 — its EnergyLayerNorm backward overflows fp16 under XLA and silently kills
+        # training. Both casts are no-ops under float32/float64. DO NOT REMOVE THEM.
+        x = keras.ops.cast(x, self.et_block.compute_dtype)
+        outputs = self.et_block(x, training=training)
+        if self.return_energy:
+            tokens, energies = outputs      # energies stay float32 (I5) — never cast down
+            return keras.ops.cast(tokens, self.compute_dtype), energies
+        return keras.ops.cast(outputs, self.compute_dtype)
 
     def compute_output_shape(self, input_shape: Any) -> Any:
         """Output shape from stored config — valid UNBUILT."""

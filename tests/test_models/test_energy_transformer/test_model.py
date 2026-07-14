@@ -447,6 +447,102 @@ class TestEnergyTrace:
             EnergyTransformerClassifier(backbone=self._probe(), num_classes=NUM_CLASSES)
 
 
+class TestMixedPrecisionBackwardPass:
+    """The BACKWARD pass under `mixed_float16` — the corner every other fp16 test misses.
+
+    **Do NOT "simplify" this into a forward check.** `TestEnergyTrace`'s fp16 test
+    is FORWARD-ONLY, and that is precisely why a shipped `EnergyTransformerMIM`
+    trained NOTHING under `mixed_float16` for a whole iteration: 150 `fit` steps
+    moved all 13 weights by EXACTLY 0.0, the loss was bit-identical across every
+    epoch, and the energy trace still descended plausibly. Nothing raised. The
+    loss stays FINITE, so `TerminateOnNaN` never fires — the only observable is
+    that the optimizer silently rejects every step.
+
+    The failure needs the TRIPLE: `mixed_float16` AND the occlusion mask AND
+    `jit_compile=True` (which is Keras' DEFAULT inside `fit` on the TF backend).
+    Remove any one and it trains. So this test MUST use the real masked pipeline,
+    stock `compile()` with NO `jit_compile` override, and a real `fit`.
+
+    Two independent asserts, on purpose:
+      * SYMPTOM — the trainable weights actually MOVE (and the occlusion-path
+        weights `mask_token` / `pos_embed` specifically, since those are the ones
+        whose gradients went non-finite under XLA).
+      * MECHANISM — `LossScaleOptimizer`'s dynamic scale did NOT collapse. A
+        non-finite gradient makes it halve the scale on EVERY step; after
+        `FIT_STEPS` steps it is `2**15 * 2**-FIT_STEPS`, i.e. ~1e-8 instead of
+        32768. Asserting the mechanism is what makes this diagnostic rather than
+        merely symptomatic.
+    """
+
+    # 40 steps: enough to be decisive with an enormous margin (a dead run halves
+    # the scale on all 40 -> 2**15 / 2**40 = 2.98e-08; a healthy run never halves
+    # it and stays at exactly 2**15 = 32768, a 1e12x separation), and cheap enough
+    # for CI (~1 XLA compile + 40 tiny steps at N=196). The reviewer's control used
+    # 150; the collapse is already total at 40.
+    FIT_STEPS = 40
+    INITIAL_LOSS_SCALE = 2.0 ** 15      # keras LossScaleOptimizer default
+
+    @staticmethod
+    def _weights_snapshot(model) -> dict:
+        return {
+            v.path: keras.ops.convert_to_numpy(v).astype("float64")
+            for v in model.trainable_weights
+        }
+
+    def test_mim_actually_trains_under_mixed_float16(self, mixed_f16):
+        """C-fp16: weights MOVE and the loss scale does NOT collapse. RED before the fix."""
+        keras.utils.set_random_seed(7)
+
+        image, input_mask, targets, loss_weight = _fixed_batch(seed=5)
+        model = _mim()
+        model.build([(None, *INPUT_SHAPE), (None, NUM_PATCHES)])
+        assert model.backbone.compute_dtype == "float16"   # the policy IS active
+
+        # Stock compile: NO jit_compile override. `fit` defaults to XLA on TF,
+        # and XLA is half of the bug — overriding it here would hide it.
+        model.compile(optimizer=keras.optimizers.Adam(1e-3), loss="mse")
+        assert "LossScale" in type(model.optimizer).__name__
+
+        ds = (
+            tf.data.Dataset.from_tensor_slices(((image, input_mask), targets, loss_weight))
+            .batch(BATCH)
+            .repeat()
+        )
+        before = self._weights_snapshot(model)
+        history = model.fit(ds, steps_per_epoch=self.FIT_STEPS, epochs=1, verbose=0)
+        after = self._weights_snapshot(model)
+
+        assert np.all(np.isfinite(history.history["loss"])), (
+            "loss went non-finite — a DIFFERENT bug from the silent one this guards"
+        )
+
+        # --- MECHANISM: the dynamic loss scale must not have collapsed. --------
+        scale = float(keras.ops.convert_to_numpy(model.optimizer.dynamic_scale))
+        assert scale >= self.INITIAL_LOSS_SCALE / 32.0, (
+            f"LossScaleOptimizer dynamic scale COLLAPSED to {scale:.3e} (started at "
+            f"{self.INITIAL_LOSS_SCALE:.0f}) after {self.FIT_STEPS} steps. It halves only "
+            "when the gradients are non-finite, so this means ~every step was REJECTED "
+            "and the model trained on nothing."
+        )
+
+        # --- SYMPTOM: the weights actually moved. ------------------------------
+        deltas = {p: float(np.max(np.abs(after[p] - before[p]))) for p in before}
+        dead = sorted(p for p, d in deltas.items() if d == 0.0)
+        assert not dead, (
+            f"{len(dead)}/{len(deltas)} trainable weights moved by EXACTLY 0.0 over "
+            f"{self.FIT_STEPS} fp16 fit steps — the model trained on nothing. Dead: {dead}"
+        )
+
+        # --- the OCCLUSION-PATH weights specifically. --------------------------
+        for needle in ("mask_token", "pos_embed"):
+            moved = [d for p, d in deltas.items() if needle in p]
+            assert moved, f"no trainable weight matched '{needle}' — test is looking at nothing"
+            assert max(moved) > 0.0, (
+                f"the occlusion-path weight '{needle}' did not move (max|dW|={max(moved):.3e}). "
+                "Its gradient is non-finite under XLA+fp16."
+            )
+
+
 class TestInvalidInputs:
     """Constructor validation — every one of these must be LOUD."""
 
