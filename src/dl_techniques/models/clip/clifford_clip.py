@@ -199,7 +199,7 @@ class _LearnedQueryPool1D(keras.layers.Layer):
         scores = ops.einsum("bnd,d->bn", features, self.query)
         scores = scores / (float(self.channels) ** 0.5)
         if mask is not None:
-            # DECISION plan-2026-07-15-5add9baa/D-001: dtype-safe mask sentinel (ops.where, finite -1e4) — a -1e9 literal casts to -inf under fp16 and 0*-inf=NaN poisons unmasked tokens; do NOT revert to an additive -1e9/-inf mask.
+            # DECISION plan-2026-07-15T114613-5add9baa/D-001: dtype-safe mask sentinel (ops.where, finite -1e4) — a -1e9 literal casts to -inf under fp16 and 0*-inf=NaN poisons unmasked tokens; do NOT revert to an additive -1e9/-inf mask.
             mask_bool = ops.cast(mask, "bool")
             neg = ops.cast(-1e4, scores.dtype)
             scores = ops.where(mask_bool, scores, neg)
@@ -564,7 +564,7 @@ class CliffordCLIP(keras.Model):
                     f"({max(sh)} >= {stage_channels[i]})"
                 )
         # Validate post-stem spatial dim keeps a >=2x2 map at the final stage.
-        # DECISION plan-2026-07-15-5add9baa/D-001: require >=2x2 final spatial (post_stem >= 2^n_stages) — a 1x1 map makes _LearnedQueryPool1D softmax-over-1 a dead-gradient no-op (B1); do NOT relax to 2^(n_stages-1).
+        # DECISION plan-2026-07-15T114613-5add9baa/D-001: require >=2x2 final spatial (post_stem >= 2^n_stages) — a 1x1 map makes _LearnedQueryPool1D softmax-over-1 a dead-gradient no-op (B1); do NOT relax to 2^(n_stages-1).
         post_stem = image_size // vision_patch_size
         if post_stem < (1 << n_stages):
             raise ValueError(
@@ -1285,7 +1285,7 @@ class CliffordCLIP(keras.Model):
     def _get_logit_scale(self) -> keras.KerasTensor:
         """Return ``exp(logit_scale)`` clipped to ``logit_scale_max``."""
         # Match OpenCLIP: log-temperature is learned, temperature is clipped.
-        # DECISION plan-2026-07-15-5add9baa/D-001: exp(logit_scale) in float32 — fp16 autocast overflows exp() past log(65504); do NOT let this run in compute-dtype.
+        # DECISION plan-2026-07-15T114613-5add9baa/D-001: exp(logit_scale) in float32 — fp16 autocast overflows exp() past log(65504); do NOT let this run in compute-dtype.
         ls = ops.cast(self.logit_scale, "float32")
         scale = ops.exp(ls)
         return ops.minimum(scale, ops.cast(self.logit_scale_max, "float32"))
