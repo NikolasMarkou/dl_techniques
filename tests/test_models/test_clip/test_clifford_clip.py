@@ -14,6 +14,7 @@ import tempfile
 import keras
 import numpy as np
 import pytest
+import tensorflow as tf
 
 from dl_techniques.models.clip.clifford_clip import CliffordCLIP
 
@@ -239,3 +240,223 @@ def test_text_use_global_context_default_false(tiny_build_shape):
         getattr(block, "use_global_context", False) is False
         for block in m.text_blocks
     )
+
+
+# ---------------------------------------------------------------------
+# T1 guard tests (gradient flow / fp16-fit / degenerate config / loss)
+# ---------------------------------------------------------------------
+#
+# These guards target the bugs the review PROVED (B1 dead query pool at the
+# old 32px config, B2 fp16 mask NaN) plus the S1 stage bound. Per the
+# institutional rule "a guard that has not been shown RED is not a guard",
+# test (c) was verified to FAIL (NaN loss / collapsed loss scale) against a
+# one-off temporary revert of the B2 fix before being finalised.
+
+
+def _guard_batch(n=4, seed=0):
+    """Deterministic (image, text) batch for the gradient/loss guards."""
+    rng = np.random.default_rng(seed)
+    image = rng.standard_normal((n, 64, 64, 3)).astype("float32")
+    # Keep a couple of pad (0) tokens so the text query pool exercises its
+    # masked-softmax branch — the exact site of the B2 fp16 NaN bug.
+    text = rng.integers(1, 50257, size=(n, 16)).astype("int32")
+    text[:, -2:] = 0
+    return {"image": image, "text": text}
+
+
+def _toy_contrastive_loss(out):
+    """Minimal contrastive objective: pull matched pairs together.
+
+    ``-mean(diag(logits_per_image))`` depends on both towers' matched-pair
+    features and on ``logit_scale``, so its gradient reaches every trainable
+    weight — exactly what the dead-parameter guards need.
+    """
+    lpi = out["logits_per_image"]
+    return -keras.ops.mean(keras.ops.diagonal(lpi))
+
+
+def test_query_pool_weight_receives_nonzero_gradient():
+    """B1 guard: both learned-query pool weights get a non-zero gradient.
+
+    At the old 32px config the post-stem map collapsed to 1x1 and the vision
+    query pool's softmax-over-1 was a dead-gradient no-op (invisible to any
+    forward-only or aggregate-fraction check). At 64px the map is >=2x2, so
+    the query must receive gradient. Asserted per-weight, not by aggregate.
+    """
+    keras.utils.set_random_seed(0)
+    m = _build_nano()
+    inputs = _guard_batch()
+
+    with tf.GradientTape(persistent=True) as tape:
+        out = m(inputs, training=True)
+        loss = _toy_contrastive_loss(out)
+
+    for name, w in (
+        ("vision_query_pool", m.vision_query_pool.query),
+        ("text_query_pool", m.text_query_pool.query),
+    ):
+        g = tape.gradient(loss, w)
+        assert g is not None, f"{name}.query gradient is None (disconnected)"
+        g = keras.ops.convert_to_numpy(g)
+        assert np.all(np.isfinite(g)), f"{name}.query gradient non-finite"
+        assert np.any(g != 0.0), (
+            f"{name}.query received an all-zero gradient — a dead pool "
+            f"(the B1 1x1-collapse no-op)"
+        )
+    del tape
+
+
+def test_all_trainable_weights_have_finite_nonzero_gradient():
+    """Per-weight: every trainable weight gets a finite gradient, and NONE is
+    all-zero. Tighter than plain-CLIP's aggregate ``>0.8*len`` threshold —
+    a single dead parameter (per the B1 lesson) is a hard failure here.
+    """
+    keras.utils.set_random_seed(0)
+    m = _build_nano()
+    inputs = _guard_batch()
+
+    with tf.GradientTape() as tape:
+        out = m(inputs, training=True)
+        loss = _toy_contrastive_loss(out)
+
+    weights = list(m.trainable_weights)
+    grads = tape.gradient(loss, weights)
+
+    none_grad = [w.path for w, g in zip(weights, grads) if g is None]
+    assert not none_grad, f"weights with None gradient (disconnected): {none_grad}"
+
+    non_finite = []
+    all_zero = []
+    for w, g in zip(weights, grads):
+        gv = keras.ops.convert_to_numpy(g)
+        if not np.all(np.isfinite(gv)):
+            non_finite.append(w.path)
+        if not np.any(gv != 0.0):
+            all_zero.append(w.path)
+
+    assert not non_finite, f"weights with non-finite gradient: {non_finite}"
+    # Zero legitimately-dead weights expected under this toy loss; if any
+    # appear they are named here rather than absorbed by a loosened fraction.
+    assert not all_zero, (
+        f"{len(all_zero)}/{len(weights)} trainable weights received an "
+        f"all-zero gradient (dead parameters): {all_zero}"
+    )
+
+
+def test_fp16_fit_moves_weights_no_nan_no_scale_collapse():
+    """THE fp16 guard (B2). Under ``mixed_float16`` with a dynamic
+    ``LossScaleOptimizer``, 5 real train steps must: (i) keep the loss finite
+    every step, (ii) NOT collapse the loss scale, (iii) actually move weights.
+
+    Proven RED against a one-off temporary revert of the B2 mask fix (the
+    ``-1e9`` additive sentinel casts to fp16 ``-inf`` and ``0*-inf=NaN``
+    poisons every real token through the text pool's softmax): NaN loss at
+    step 0 and the dynamic scale collapses toward the fp16 minimum.
+    """
+    keras.mixed_precision.set_global_policy("mixed_float16")
+    try:
+        keras.utils.set_random_seed(0)
+        m = _build_nano()
+        inputs = _guard_batch()
+
+        opt = keras.mixed_precision.LossScaleOptimizer(
+            keras.optimizers.Adam(1e-3)
+        )
+
+        # Snapshot weights (float64) before any step.
+        m(inputs, training=False)  # materialise weights
+        before = {
+            w.path: keras.ops.convert_to_numpy(w).astype("float64")
+            for w in m.trainable_weights
+        }
+        start_scale = float(opt.initial_scale)  # dynamic_scale exists post-apply
+
+        losses = []
+        for _ in range(5):
+            with tf.GradientTape() as tape:
+                out = m(inputs, training=True)
+                loss = _toy_contrastive_loss(out)
+                scaled = opt.scale_loss(loss)
+            grads = tape.gradient(scaled, m.trainable_weights)
+            opt.apply_gradients(zip(grads, m.trainable_weights))
+            losses.append(float(keras.ops.convert_to_numpy(loss)))
+
+        # (i) loss finite every step.
+        assert np.all(np.isfinite(losses)), (
+            f"loss went non-finite over 5 fp16 steps: {losses}"
+        )
+
+        # (ii) the dynamic loss scale did not collapse (it halves only when a
+        # step's gradients are non-finite; a healthy run never collapses it).
+        end_scale = float(keras.ops.convert_to_numpy(opt.dynamic_scale))
+        assert end_scale >= start_scale / 16.0, (
+            f"LossScaleOptimizer scale collapsed {start_scale:.3e} -> "
+            f"{end_scale:.3e} over 5 steps — ~every step was rejected "
+            f"(the B2 fp16 NaN)"
+        )
+
+        # (iii) weights actually moved.
+        after = {
+            w.path: keras.ops.convert_to_numpy(w).astype("float64")
+            for w in m.trainable_weights
+        }
+        moved = sum(
+            1 for p in before if np.max(np.abs(after[p] - before[p])) > 0.0
+        )
+        assert moved > 0, (
+            "0 trainable weights moved over 5 fp16 fit steps — the model "
+            "trained on nothing"
+        )
+    finally:
+        keras.mixed_precision.set_global_policy("float32")
+
+
+def test_degenerate_1x1_config_raises():
+    """S1 guard: a config whose vision tower would collapse to 1x1 spatial
+    RAISES at construction (instead of silently building a dead query pool).
+
+    nano is 4 stages, default patch=4; at image_size=32 the post-stem map is
+    8x8 and the final stage would be 8/2^4 < 1 -> rejected.
+    """
+    with pytest.raises(ValueError, match="spatial"):
+        CliffordCLIP.from_variant("nano", vocab_size=50257, image_size=32)
+
+
+def test_end_to_end_fit_with_clip_contrastive_loss():
+    """Wire the ACTUAL production loss (``CLIPContrastiveLoss``) end-to-end:
+    one real train step feeding the model's dict output into the loss; assert
+    the loss is finite and at least one weight moves.
+    """
+    from dl_techniques.losses.clip_contrastive_loss import CLIPContrastiveLoss
+
+    keras.utils.set_random_seed(0)
+    m = _build_nano()
+    inputs = _guard_batch()
+    loss_fn = CLIPContrastiveLoss()
+
+    opt = keras.optimizers.Adam(1e-3)
+    m(inputs, training=False)  # materialise weights
+    before = {
+        w.path: keras.ops.convert_to_numpy(w).astype("float64")
+        for w in m.trainable_weights
+    }
+    # Dummy y_true (contrastive loss derives targets from batch structure).
+    y_true = keras.ops.zeros((inputs["image"].shape[0],))
+
+    with tf.GradientTape() as tape:
+        out = m(inputs, training=True)
+        loss = loss_fn(y_true, out)
+    grads = tape.gradient(loss, m.trainable_weights)
+    opt.apply_gradients(zip(grads, m.trainable_weights))
+
+    assert np.isfinite(float(keras.ops.convert_to_numpy(loss))), (
+        "CLIPContrastiveLoss produced a non-finite loss"
+    )
+    after = {
+        w.path: keras.ops.convert_to_numpy(w).astype("float64")
+        for w in m.trainable_weights
+    }
+    moved = sum(
+        1 for p in before if np.max(np.abs(after[p] - before[p])) > 0.0
+    )
+    assert moved > 0, "no weight moved after one CLIPContrastiveLoss step"
