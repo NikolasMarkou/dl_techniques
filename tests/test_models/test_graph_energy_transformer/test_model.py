@@ -356,3 +356,240 @@ class TestFp16XlaTrainingGuard:
         inputs = _padded_graph_batch(seed=3, with_pe=True)
         scale, deltas = _run_fit(model, inputs, _c_labels(4), _sparse_ce())
         self._assert_red_bites(scale, deltas, variant="C")
+
+
+# ===========================================================================
+# Step 10 — forward / shape, `.keras` round-trip, serialization, dead-path guard.
+#
+# These run under the DEFAULT float32 policy (NO ``mixed_f16`` fixture): the plain
+# forward + serialization surface, the direct graph analog of the image suite's
+# ``TestForwardShapes`` / ``TestSerialization``. The load-bearing fp16/XLA guard
+# above is untouched and NOT duplicated here. Every synthetic graph comes from the
+# same network-free ``_padded_graph_batch`` builder the guard uses (``N`` = 96, a
+# third of it PAD), so these tests never touch the network.
+# ===========================================================================
+
+
+# atol: 1e-6..1e-7 is the CPU float32 convention; the CI harness runs on GPU
+# (CUDA_VISIBLE_DEVICES=1), where 1e-4 is the house tolerance (mirrors the image
+# suite's round-trip). Use the looser GPU bound so the gate is not flaky on GPU.
+RT_ATOL = 1e-4
+
+
+def _backbone(kwargs: dict) -> GraphEnergyTransformerBackbone:
+    return GraphEnergyTransformerBackbone(**kwargs)
+
+
+def _predict(model, inputs) -> np.ndarray:
+    """Deterministic forward (``training=False`` -> no eq.-27 noise, no dropout)."""
+    return keras.ops.convert_to_numpy(model(inputs, training=False))
+
+
+class TestGraphForwardShapes:
+    """Forward pass: output SHAPE + FINITENESS for the bare backbone and both heads."""
+
+    def test_backbone_b_config_tokens(self):
+        """B-config backbone -> (B, N, D): N' == N (no CLS token)."""
+        keras.utils.set_random_seed(0)
+        out = _predict(_backbone(_b_backbone_kwargs()),
+                       _padded_graph_batch(seed=1, with_pe=False))
+        assert tuple(out.shape) == (BATCH, N, EMBED_DIM)
+        assert np.all(np.isfinite(out))
+
+    def test_backbone_c_config_tokens(self):
+        """C-config backbone -> (B, N+1, D): N' == N + 1 (CLS prepended)."""
+        keras.utils.set_random_seed(0)
+        out = _predict(_backbone(_c_backbone_kwargs()),
+                       _padded_graph_batch(seed=2, with_pe=True))
+        assert tuple(out.shape) == (BATCH, N + 1, EMBED_DIM)
+        assert np.all(np.isfinite(out))
+
+    def test_anomaly_detector_forward(self):
+        """Variant B on its contract {node_features,adjacency,node_mask,target_index} -> (B, 1)."""
+        keras.utils.set_random_seed(0)
+        out = _predict(_b_model(unsafe=False),
+                       _padded_graph_batch(seed=1, with_pe=False))
+        assert tuple(out.shape) == (BATCH, 1)
+        assert np.all(np.isfinite(out))
+
+    def test_classifier_forward(self):
+        """Variant C on its contract {node_features,adjacency,pe,node_mask} -> (B, num_classes)."""
+        keras.utils.set_random_seed(0)
+        out = _predict(_c_model(unsafe=False),
+                       _padded_graph_batch(seed=2, with_pe=True))
+        assert tuple(out.shape) == (BATCH, NUM_CLASSES)
+        assert np.all(np.isfinite(out))
+
+
+class TestComputeOutputShapeUnbuilt:
+    """``compute_output_shape`` returns the right shape WITHOUT materializing weights."""
+
+    @staticmethod
+    def _nf(n: int) -> dict:
+        return {"node_features": (None, n, F)}
+
+    def test_backbone_b_unbuilt(self):
+        bb = _backbone(_b_backbone_kwargs())
+        assert not bb.built and len(bb.weights) == 0
+        assert bb.compute_output_shape(self._nf(N)) == (None, N, EMBED_DIM)
+        assert not bb.built and len(bb.weights) == 0
+
+    def test_backbone_c_unbuilt(self):
+        bb = _backbone(_c_backbone_kwargs())
+        assert not bb.built and len(bb.weights) == 0
+        assert bb.compute_output_shape(self._nf(N)) == (None, N + 1, EMBED_DIM)
+        assert not bb.built and len(bb.weights) == 0
+
+    def test_anomaly_detector_unbuilt(self):
+        model = _b_model(unsafe=False)
+        assert not model.built and len(model.weights) == 0
+        assert model.compute_output_shape(self._nf(N)) == (None, 1)
+        assert not model.built and len(model.weights) == 0
+
+    def test_classifier_unbuilt(self):
+        model = _c_model(unsafe=False)
+        assert not model.built and len(model.weights) == 0
+        assert model.compute_output_shape(self._nf(N)) == (None, NUM_CLASSES)
+        assert not model.built and len(model.weights) == 0
+
+
+class TestGraphSerialization:
+    """The acceptance gate (SC1): ``.keras`` round-trip -> deterministic output equal
+    AND equal weight COUNT (an output-only compare can miss a weight dropped on a dead
+    path — the lazy-build trap — so the COUNT is asserted too, mirroring the image test).
+    """
+
+    def _round_trip(self, model, inputs, tmp_path, name, expect_cls) -> int:
+        before = _predict(model, inputs)                 # this builds the model
+        n_train = len(model.trainable_weights)
+        n_all = len(model.weights)
+
+        path = str(tmp_path / f"{name}.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)
+
+        after = _predict(loaded, inputs)
+        assert isinstance(loaded, expect_cls), (
+            f"reloaded object is a {type(loaded).__name__}, expected {expect_cls.__name__}"
+        )
+        assert len(loaded.trainable_weights) == n_train, (
+            f"{name}: trainable weight COUNT changed on round-trip "
+            f"({len(loaded.trainable_weights)} vs {n_train}) — a weight was dropped"
+        )
+        assert len(loaded.weights) == n_all
+        np.testing.assert_allclose(before, after, atol=RT_ATOL)
+        return n_train
+
+    def test_backbone_b_round_trip(self, tmp_path):
+        keras.utils.set_random_seed(0)
+        self._round_trip(_backbone(_b_backbone_kwargs()),
+                         _padded_graph_batch(seed=1, with_pe=False),
+                         tmp_path, "gb_backbone_b", GraphEnergyTransformerBackbone)
+
+    def test_backbone_c_round_trip(self, tmp_path):
+        keras.utils.set_random_seed(0)
+        self._round_trip(_backbone(_c_backbone_kwargs()),
+                         _padded_graph_batch(seed=2, with_pe=True),
+                         tmp_path, "gb_backbone_c", GraphEnergyTransformerBackbone)
+
+    def test_anomaly_detector_round_trip(self, tmp_path):
+        keras.utils.set_random_seed(0)
+        self._round_trip(_b_model(unsafe=False),
+                         _padded_graph_batch(seed=1, with_pe=False),
+                         tmp_path, "gb_b", GraphAnomalyDetector)
+
+    def test_classifier_round_trip(self, tmp_path):
+        keras.utils.set_random_seed(0)
+        self._round_trip(_c_model(unsafe=False),
+                         _padded_graph_batch(seed=2, with_pe=True),
+                         tmp_path, "gb_c", GraphClassifier)
+
+
+class TestRoundTripIsAlive:
+    """Anti-vacuity dead-path guard: perturbing ONE POST-NORM weight of the RELOADED
+    model must move the output well past ``RT_ATOL``, so the round-trip equality above
+    cannot be vacuously satisfied by a dead model (image test: ``max_delta > 1e-2``).
+    """
+
+    DEAD_GUARD = 1e-2                                     # two orders over RT_ATOL
+
+    def _perturb_and_check(self, model, inputs, tmp_path, name, layer_name):
+        before = _predict(model, inputs)
+        path = str(tmp_path / f"{name}.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)
+
+        target = next(
+            w for w in loaded.weights if layer_name in w.path and w.path.endswith("bias")
+        )
+        target.assign(keras.ops.add(target.value, 1.0))
+
+        after = _predict(loaded, inputs)
+        max_delta = float(np.max(np.abs(before - after)))
+        assert max_delta > self.DEAD_GUARD, (
+            f"round-trip guard is dead for {name}: perturbing '{layer_name}/bias' moved the "
+            f"output by only {max_delta:.3e} (<= {self.DEAD_GUARD:.0e}) — the round-trip "
+            "equality would be vacuously satisfiable by a dead model"
+        )
+        with pytest.raises(AssertionError):
+            np.testing.assert_allclose(before, after, atol=RT_ATOL)
+
+    def test_anomaly_detector_round_trip_alive(self, tmp_path):
+        # `head_mlp_out` is the FINAL Dense — POST every LayerNorm — so a +1.0 bias bump
+        # moves the logit by O(1), unlike a norm-headed trunk weight (image-test lesson).
+        keras.utils.set_random_seed(0)
+        self._perturb_and_check(_b_model(unsafe=False),
+                                _padded_graph_batch(seed=1, with_pe=False),
+                                tmp_path, "gb_b_perturb", "head_mlp_out")
+
+    def test_classifier_round_trip_alive(self, tmp_path):
+        # `head_dense` is the FINAL Dense (post `head_norm`); +1.0 shifts every class logit.
+        keras.utils.set_random_seed(0)
+        self._perturb_and_check(_c_model(unsafe=False),
+                                _padded_graph_batch(seed=2, with_pe=True),
+                                tmp_path, "gb_c_perturb", "head_dense")
+
+    def test_backbone_round_trip_alive(self, tmp_path):
+        # `node_proj/bias` shifts x0 UNIFORMLY; `EnergyLayerNorm` removes uniform shifts from
+        # the per-step UPDATE (`g = norm(x)`), but the block RETURNS `x` (never end-normed),
+        # so the shift survives to the backbone output.
+        keras.utils.set_random_seed(0)
+        self._perturb_and_check(_backbone(_b_backbone_kwargs()),
+                                _padded_graph_batch(seed=1, with_pe=False),
+                                tmp_path, "gb_backbone_perturb", "node_proj")
+
+
+class TestGraphConfigCycle:
+    """``get_config`` -> ``from_config`` reconstructs without error and yields the same
+    config; the nested backbone is DESERIALIZED to a model instance (not left as a dict).
+    """
+
+    def test_backbone_b_cycle(self):
+        bb = _backbone(_b_backbone_kwargs())
+        bb2 = GraphEnergyTransformerBackbone.from_config(bb.get_config())
+        assert bb2.get_config() == bb.get_config()
+
+    def test_backbone_c_cycle(self):
+        bb = _backbone(_c_backbone_kwargs())
+        bb2 = GraphEnergyTransformerBackbone.from_config(bb.get_config())
+        assert bb2.get_config() == bb.get_config()
+
+    def test_anomaly_detector_cycle(self):
+        model = _b_model(unsafe=False)
+        model2 = GraphAnomalyDetector.from_config(model.get_config())
+        assert isinstance(model2.backbone, GraphEnergyTransformerBackbone), (
+            "nested backbone was left as a serialized dict, not deserialized to a model"
+        )
+        assert model2.backbone.get_config() == model.backbone.get_config()
+        assert model2.mlp_hidden_dim == model.mlp_hidden_dim
+        assert model2.mlp_dropout == model.mlp_dropout
+
+    def test_classifier_cycle(self):
+        model = _c_model(unsafe=False)
+        model2 = GraphClassifier.from_config(model.get_config())
+        assert isinstance(model2.backbone, GraphEnergyTransformerBackbone), (
+            "nested backbone was left as a serialized dict, not deserialized to a model"
+        )
+        assert model2.backbone.get_config() == model.backbone.get_config()
+        assert model2.num_classes == model.num_classes
+        assert model2.head_dropout_rate == model.head_dropout_rate
