@@ -18,9 +18,61 @@ Interface contract (both functions):
     * Dtype-preserving: outputs follow the dtype of their tensor inputs.
 """
 
+from typing import Any, Callable, Optional
+
 from keras import ops
 
 # ---------------------------------------------------------------------
+
+
+def apply_clifford_head(
+    head_kind: str,
+    anchor: Any,
+    z_det: Any,
+    z_ctx: Any,
+    geo_layer: Callable[[Any, Any], Any],
+    scale_layer: Callable[[Any], Any],
+    training: Optional[bool] = None,
+) -> Any:
+    """Mix a Clifford geometric-product head into the canonical CLIP anchor.
+
+    Shared by CliffordCLIP's vision and text towers (they differ only in which
+    tensors feed anchor/z_det/z_ctx). Reproduces the per-tower head_kind dispatch:
+
+    - ``"plain"``: return the anchor unchanged (no geometric product).
+    - ``"mean_max"`` / ``"learned_query"``: return ``geo = geo_layer(z_det, z_ctx)``.
+    - ``"learned_query_residual"``: return ``anchor + scale_layer(geo_layer(z_det, z_ctx))``.
+
+    The dispatch is pure Python; the tensor work happens inside ``geo_layer``
+    (a ``SparseRollingGeometricProduct``-like callable) and ``scale_layer`` (a
+    ``LayerScale``/``LearnableMultiplier`` gate). Neither takes a ``training``
+    flag in the current CliffordCLIP call sites, so it is not forwarded;
+    ``training`` is kept purely for API symmetry with the encode_* signatures.
+
+    Args:
+        head_kind: One of ``plain`` | ``mean_max`` | ``learned_query`` |
+            ``learned_query_residual``.
+        anchor: Canonical CLIP anchor ``(B, D)`` — GAP (vision) or last-non-pad
+            (text).
+        z_det: Deterministic pool ``(B, D)`` — the geometric product's first
+            operand.
+        z_ctx: Context pool ``(B, D)`` — the geometric product's second operand.
+        geo_layer: A ``SparseRollingGeometricProduct``-like callable
+            ``(z_det, z_ctx) -> (B, D)``.
+        scale_layer: A ``LayerScale``/``LearnableMultiplier`` callable
+            ``geo -> (B, D)`` for the residual gate.
+        training: Forwarded if the layers need it (kept for API symmetry;
+            unused by the current layers).
+
+    Returns:
+        Mixed features ``(B, D)``.
+    """
+    if head_kind == "plain":
+        return anchor
+    geo = geo_layer(z_det, z_ctx)
+    if head_kind == "learned_query_residual":
+        return anchor + scale_layer(geo)
+    return geo
 
 
 def last_non_pad_token(features, input_ids, pad_token_id):
