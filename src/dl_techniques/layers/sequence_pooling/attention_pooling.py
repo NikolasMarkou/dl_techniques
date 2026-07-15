@@ -165,8 +165,10 @@ class AttentionPooling(keras.layers.Layer):
 
         # Apply mask if provided
         if mask is not None:
-            mask_expanded = ops.expand_dims(ops.cast(mask, scores.dtype), -1)
-            scores = scores + (1.0 - mask_expanded) * (-1e9)
+            # DECISION plan-2026-07-15-5add9baa/D-001: dtype-safe mask sentinel (ops.where, finite -1e4) — a -1e9 literal casts to -inf under fp16 and 0*-inf=NaN poisons unmasked tokens; do NOT revert to an additive -1e9/-inf mask.
+            mask_bool = ops.expand_dims(ops.cast(mask, "bool"), -1)
+            neg = ops.cast(-1e4, scores.dtype)
+            scores = ops.where(mask_bool, scores, neg)
 
         # Compute attention weights
         attention_weights = ops.softmax(scores, axis=1)

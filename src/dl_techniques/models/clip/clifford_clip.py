@@ -195,8 +195,10 @@ class _LearnedQueryPool1D(keras.layers.Layer):
         scores = ops.einsum("bnd,d->bn", features, self.query)
         scores = scores / (float(self.channels) ** 0.5)
         if mask is not None:
-            mask = ops.cast(mask, scores.dtype)
-            scores = scores + (1.0 - mask) * (-1e9)
+            # DECISION plan-2026-07-15-5add9baa/D-001: dtype-safe mask sentinel (ops.where, finite -1e4) — a -1e9 literal casts to -inf under fp16 and 0*-inf=NaN poisons unmasked tokens; do NOT revert to an additive -1e9/-inf mask.
+            mask_bool = ops.cast(mask, "bool")
+            neg = ops.cast(-1e4, scores.dtype)
+            scores = ops.where(mask_bool, scores, neg)
         weights = keras.activations.softmax(scores, axis=-1)
         return ops.einsum("bn,bnd->bd", weights, features)
 
