@@ -18,6 +18,7 @@ from typing import Optional, Union, Any, Dict
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.layers.sequence_pooling import SequencePooling
 from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
 
 from .components import Qwen3NextBlock
@@ -550,19 +551,11 @@ def create_qwen3_next_classification(
         inputs={"input_ids": input_ids, "attention_mask": attention_mask}
     )
 
-    # Apply the selected pooling strategy
-    if pooling_strategy == "cls":
-        # Use the first token's representation (CLS token)
-        pooled_output = sequence_output[:, 0]  # Shape: (batch_size, hidden_size)
-    else:  # "mean" pooling
-        # Mask the padding tokens before averaging
-        mask = keras.ops.expand_dims(keras.ops.cast(attention_mask, sequence_output.dtype), axis=-1)
-        masked_output = sequence_output * mask
-        summed_output = keras.ops.sum(masked_output, axis=1)
-        # Avoid division by zero for empty sequences
-        num_tokens = keras.ops.maximum(
-            keras.ops.sum(keras.ops.cast(attention_mask, 'float32'), axis=1, keepdims=True), 1.0)
-        pooled_output = summed_output / num_tokens
+    # Apply the selected pooling strategy via the shared SequencePooling layer
+    # (byte-identical cls/mean; see qwen3.py DECISION D-001).
+    pooled_output = SequencePooling(strategy=pooling_strategy, name="pooler")(
+        sequence_output, mask=attention_mask
+    )
 
     # Determine classifier dropout
     dropout_rate = classifier_dropout if classifier_dropout is not None else config.get("dropout_rate", 0.1)

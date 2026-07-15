@@ -24,6 +24,7 @@ from typing import Optional, Union, Any, Dict, List
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.layers.sequence_pooling import SequencePooling
 from dl_techniques.layers.moe import MoEConfig, ExpertConfig, GatingConfig
 
 # ---------------------------------------------------------------------
@@ -588,18 +589,14 @@ def create_qwen3_classification(
         inputs={"input_ids": input_ids, "attention_mask": attention_mask}
     )
 
-    # Apply the selected pooling strategy
-    if pooling_strategy == "cls":
-        pooled_output = sequence_output[:, 0]  # Shape: (batch_size, hidden_size)
-    else:  # "mean" pooling
-        # Mask the padding tokens before averaging
-        mask = keras.ops.expand_dims(keras.ops.cast(attention_mask, sequence_output.dtype), axis=-1)
-        masked_output = sequence_output * mask
-        summed_output = keras.ops.sum(masked_output, axis=1)
-        # Avoid division by zero for empty sequences
-        num_tokens = keras.ops.maximum(
-            keras.ops.sum(keras.ops.cast(attention_mask, 'float32'), axis=1, keepdims=True), 1.0)
-        pooled_output = summed_output / num_tokens
+    # Apply the selected pooling strategy via the shared SequencePooling layer.
+    # DECISION plan-2026-07-15T144225-5b25d9f1/D-001: pool via shipped SequencePooling
+    # (byte-identical cls/mean; parameter-free -> no checkpoint change) -- was a duplicated
+    # hand-rolled cls/mean if/else across qwen3/qwen3_next/qwen3_som/gemma3. Do NOT re-inline
+    # a bespoke masked-mean here; SequencePooling('mean') reproduces it exactly (probe: 0.0).
+    pooled_output = SequencePooling(strategy=pooling_strategy, name="pooler")(
+        sequence_output, mask=attention_mask
+    )
 
     # Determine classifier dropout
     dropout_rate = classifier_dropout if classifier_dropout is not None else config.get("dropout_rate", 0.1)

@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from dl_techniques.utils.logger import logger
 from dl_techniques.layers.norms import create_normalization_layer
+from dl_techniques.layers.sequence_pooling import SequencePooling
 
 from .components import Gemma3TransformerBlock
 
@@ -458,16 +459,11 @@ def create_gemma3_classification(
         hidden_states = block(hidden_states, attention_mask=attention_mask)
     base_output = gemma3_backbone.final_norm(hidden_states)
 
-    if pooling_strategy == "cls":
-        pooled_output = base_output[:, 0]
-    else:  # "mean"
-        mask = ops.expand_dims(ops.cast(attention_mask, base_output.dtype), axis=-1)
-        summed = ops.sum(base_output * mask, axis=1)
-        count = ops.maximum(
-            ops.sum(ops.cast(attention_mask, "float32"), axis=1, keepdims=True),
-            1.0,
-        )
-        pooled_output = summed / count
+    # Apply the selected pooling strategy via the shared SequencePooling layer
+    # (byte-identical cls/mean; see qwen3.py DECISION D-001).
+    pooled_output = SequencePooling(strategy=pooling_strategy, name="pooler")(
+        base_output, mask=attention_mask
+    )
 
     dropout_rate = (
         classifier_dropout
