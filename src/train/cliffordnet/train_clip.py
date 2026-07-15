@@ -161,7 +161,7 @@ import keras  # noqa: E402
 import numpy as np  # noqa: E402
 import tensorflow as tf  # noqa: E402
 
-from dl_techniques.losses import CLIPContrastiveLoss
+from dl_techniques.losses import CLIPContrastiveLoss, SigLIPContrastiveLoss
 from dl_techniques.models.clip.clifford_clip import CliffordCLIP
 from dl_techniques.optimization import (
     learning_rate_schedule_builder,
@@ -197,6 +197,7 @@ class CliffordCLIPTrainConfig:
     weight_decay: float = 0.1
     lr_alpha: float = 1e-2  # cosine decay final fraction of peak_lr
     min_warmup_lr: float = 1e-8
+    loss: str = "clip"  # contrastive loss variant: "clip" | "siglip"
 
 
 # Image preprocessing, caption tokenisation, split loaders, and the
@@ -237,16 +238,33 @@ class ContrastiveCliffordCLIP(keras.Model):
         self,
         clip_model: Optional[CliffordCLIP] = None,
         label_smoothing: float = 0.0,
+        loss: str = "clip",
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.clip_model = clip_model
         self.label_smoothing = label_smoothing
-        self.loss_fn = CLIPContrastiveLoss(
-            apply_temperature=False,
-            label_smoothing=label_smoothing,
-            name="clip_contrastive_loss",
-        )
+        self.loss = loss
+        # DECISION plan-2026-07-15T114613-5add9baa/D-002: --loss selects CLIP vs
+        # SigLIP (both consume the same {logits_per_image, logits_per_text} dict
+        # schema); default "clip" is byte-identical to the prior hardcoded path
+        # (O1). SigLIP is built with temperature=1.0 / use_learnable_temperature=
+        # False on purpose -- CliffordCLIP already applies exp(logit_scale) in its
+        # forward pass, so do NOT enable a second temperature here (it would
+        # compound the scaling, exactly as apply_temperature=False guards on the
+        # CLIP path). See decisions.md D-002.
+        if loss == "siglip":
+            self.loss_fn = SigLIPContrastiveLoss(
+                temperature=1.0,
+                use_learnable_temperature=False,
+                name="siglip_contrastive_loss",
+            )
+        else:
+            self.loss_fn = CLIPContrastiveLoss(
+                apply_temperature=False,
+                label_smoothing=label_smoothing,
+                name="clip_contrastive_loss",
+            )
 
     def call(
         self,
@@ -299,6 +317,7 @@ class ContrastiveCliffordCLIP(keras.Model):
             self.clip_model
         )
         config["label_smoothing"] = self.label_smoothing
+        config["loss"] = self.loss
         return config
 
     @classmethod
@@ -310,8 +329,14 @@ class ContrastiveCliffordCLIP(keras.Model):
         # typos in saved configs and couple this loader to keras internals.
         inner = keras.saving.deserialize_keras_object(config.pop("clip_model"))
         label_smoothing = config.pop("label_smoothing", 0.0)
+        loss = config.pop("loss", "clip")
         name = config.get("name", None)
-        return cls(clip_model=inner, label_smoothing=label_smoothing, name=name)
+        return cls(
+            clip_model=inner,
+            label_smoothing=label_smoothing,
+            loss=loss,
+            name=name,
+        )
 
 
 # =============================================================================
@@ -1321,6 +1346,7 @@ def train(args: argparse.Namespace) -> None:
     wrapper = ContrastiveCliffordCLIP(
         clip_model=clip_model,
         label_smoothing=args.label_smoothing,
+        loss=args.loss,
     )
     wrapper.build(
         {
@@ -1463,6 +1489,7 @@ def train(args: argparse.Namespace) -> None:
         peak_lr=args.peak_lr,
         warmup_ratio=args.warmup_ratio,
         weight_decay=args.weight_decay,
+        loss=args.loss,
     )
 
     logger.info(
@@ -1678,6 +1705,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--warmup-ratio", type=float, default=0.03)
     parser.add_argument("--weight-decay", type=float, default=0.1)
+    parser.add_argument(
+        "--loss", choices=["clip", "siglip"], default="clip",
+        help="Contrastive loss variant",
+    )
 
     # Intermediate-results tracking (step-based checkpoints + retrieval probes)
     parser.add_argument(
