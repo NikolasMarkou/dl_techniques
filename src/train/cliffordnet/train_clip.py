@@ -288,6 +288,17 @@ class ContrastiveCliffordCLIP(keras.Model):
         )
         return keras.ops.mean(per_sample)
 
+    # DECISION plan-2026-07-15T114613-5add9baa/D-003: custom train_step RETAINED
+    # -- a dict-output CLIP model cannot route a single contrastive loss through
+    # stock compile()/fit() (Keras maps one loss per output key); the
+    # no-custom-train_step convention's tf.data escape does not apply (loss
+    # consumes the model's OWN dict output {logits_per_image, logits_per_text},
+    # not an external label). Empirically (S3 probe): stock compile(loss=one)
+    # -> KeyError "path ('logits_per_image',) ... can't be found"; per-key dict
+    # loss -> ValueError "Unsupported y_pred format: SymbolicTensor" (the loss
+    # is fed one key's tensor, but it needs BOTH keys at once). So the wrapper
+    # calls loss_fn.call(None, dict_output) directly in _contrastive_loss.
+    # Revisit only if CliffordCLIP.call returns a single tensor. See D-003.
     def train_step(self, data):
         if isinstance(data, tuple):
             data = data[0]
