@@ -1162,7 +1162,12 @@ class CliffordCLIP(keras.Model):
             mixed = self.vision_head_dropout(mixed, training=training)
         mixed = self.vision_projection(mixed)
         if normalize:
-            mixed = mixed / (ops.norm(mixed, axis=-1, keepdims=True) + 1e-8)
+            # fp16-safe L2-normalize: the 1e-8 epsilon underflows to 0.0 in
+            # fp16, so compute norm+divide in float32 then cast back. At
+            # float32 this is an identity cast (byte-identical).
+            mixed_f = ops.cast(mixed, "float32")
+            mixed_f = mixed_f / (ops.norm(mixed_f, axis=-1, keepdims=True) + 1e-8)
+            mixed = ops.cast(mixed_f, mixed.dtype)
         return mixed
 
     def encode_text(
@@ -1241,9 +1246,14 @@ class CliffordCLIP(keras.Model):
 
         mixed = self.text_projection(mixed)
         if normalize:
-            mixed = mixed / (
-                ops.norm(mixed, axis=-1, keepdims=True) + 1e-8
+            # fp16-safe L2-normalize (see encode_image): 1e-8 underflows to
+            # 0.0 in fp16, so normalize in float32 then cast back. float32
+            # path is an identity cast (byte-identical).
+            mixed_f = ops.cast(mixed, "float32")
+            mixed_f = mixed_f / (
+                ops.norm(mixed_f, axis=-1, keepdims=True) + 1e-8
             )
+            mixed = ops.cast(mixed_f, mixed.dtype)
         return mixed
 
     # ------------------------------------------------------------------
@@ -1253,8 +1263,10 @@ class CliffordCLIP(keras.Model):
     def _get_logit_scale(self) -> keras.KerasTensor:
         """Return ``exp(logit_scale)`` clipped to ``logit_scale_max``."""
         # Match OpenCLIP: log-temperature is learned, temperature is clipped.
-        scale = ops.exp(self.logit_scale)
-        return ops.minimum(scale, self.logit_scale_max)
+        # DECISION plan-2026-07-15-5add9baa/D-001: exp(logit_scale) in float32 — fp16 autocast overflows exp() past log(65504); do NOT let this run in compute-dtype.
+        ls = ops.cast(self.logit_scale, "float32")
+        scale = ops.exp(ls)
+        return ops.minimum(scale, ops.cast(self.logit_scale_max, "float32"))
 
     def call(
         self,
@@ -1282,7 +1294,11 @@ class CliffordCLIP(keras.Model):
         text_features = self.encode_text(input_ids, training=training)
 
         scale = self._get_logit_scale()
-        logits_per_image = scale * ops.matmul(
+        # scale is float32 (B4); cast to the features' compute dtype so the
+        # fp16 matmul does not raise on a mixed-dtype multiply. Identity at
+        # float32 (byte-identical).
+        scale_c = ops.cast(scale, image_features.dtype)
+        logits_per_image = scale_c * ops.matmul(
             image_features, ops.transpose(text_features)
         )
         logits_per_text = ops.transpose(logits_per_image)
