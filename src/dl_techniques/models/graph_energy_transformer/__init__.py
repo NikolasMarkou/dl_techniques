@@ -10,22 +10,27 @@ Public surface:
     * :class:`GraphAnomalyDetector` — variant B (node anomaly) head: trunk -> target-node
       ``g_1 || g_T`` readout -> MLP logit.
     * :func:`create_graph_anomaly_detector` — factory for the variant-B detector.
-
-The variant-C head (``GraphClassifier``) is added to ``model.py`` in a later plan step.
+    * :class:`GraphClassifier` — variant C-lite (graph classification) head: trunk (CLS token +
+      Laplacian PE + saddle-escape noise) -> CLS-token readout -> class logits.
+    * :func:`create_graph_classifier` — factory for the variant-C-lite classifier.
 """
 
 from .model import (
     GRAPH_BACKBONE_NAME,
     GraphEnergyTransformerBackbone,
     GraphAnomalyDetector,
+    GraphClassifier,
     create_graph_energy_transformer_backbone,
     create_graph_anomaly_detector,
+    create_graph_classifier,
 )
 
 __all__ = [
     "GRAPH_BACKBONE_NAME",
     "GraphEnergyTransformerBackbone",
     "GraphAnomalyDetector",
+    "GraphClassifier",
     "create_graph_energy_transformer_backbone",
     "create_graph_anomaly_detector",
+    "create_graph_classifier",
 ]

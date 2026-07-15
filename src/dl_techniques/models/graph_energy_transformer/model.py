@@ -731,6 +731,161 @@ class GraphAnomalyDetector(keras.Model):
 
 
 # ---------------------------------------------------------------------
+# Variant C-lite — GraphClassifier head
+# ---------------------------------------------------------------------
+
+
+@keras.saving.register_keras_serializable()
+class GraphClassifier(keras.Model):
+    """Variant C-lite (graph classification): shared graph trunk -> CLS-token readout -> logits.
+
+    **Intent**: the paper's §5 / App. D graph-classification model, in the *binary-adjacency*
+    "C-lite" form (D-001 of this plan — NO eq.-25 learned per-edge weighted adjacency, hence no
+    new hand-derived gradient). A stack of ``S`` :class:`GraphEnergyTransformerBackbone` ET blocks
+    (``num_blocks=S=4``, Table 9) descends the graph tokens with a prepended learnable CLS token,
+    Laplacian positional encodings, and eq.-27 saddle-escape Langevin noise (``noise_std``, active
+    in training only). The graph-level representation is the FINAL CLS token; a LayerNorm ->
+    Dropout -> Dense maps it to ``num_classes`` LOGITS.
+
+    **The CLS token / mask / PE augmentation lives entirely in the BACKBONE**, not this head:
+    :meth:`GraphEnergyTransformerBackbone.embed` prepends the CLS token (``N -> N+1``, CLS gets no
+    PE — the PE add precedes the prepend) and :meth:`~GraphEnergyTransformerBackbone.call`
+    CLS-augments the rank-3 adjacency + rank-2 node mask via ``_augment_cls_masks`` (CLS row/column
+    all-ones = fully connected; the original adjacency occupies the ``[1:, 1:]`` block unchanged;
+    PAD exclusion still flows from the rank-2 ``node_mask``). This head therefore only *reads* the
+    CLS token — it constructs no masks itself.
+
+    **STATIC index-0 CLS slice (XLA-safe).** The CLS token is always at index 0 (the backbone
+    prepends it first), so the readout is a static ``tokens[:, 0, :]`` slice — NOT variant B's
+    dynamic ``take_along_axis`` gather, which does not compile under XLA
+    (``BroadcastArgs must be compile-time constant``). This head is XLA/``jit_compile=True`` safe.
+
+    **The head emits LOGITS** (no softmax in-graph). The dataset (``build_tudataset_graph_dataset``)
+    yields INTEGER labels, so the trainer (step 8) compiles
+    ``SparseCategoricalCrossentropy(from_logits=True)`` (or one-hots + ``CategoricalCrossentropy``
+    with label smoothing). The loss choice is finalized in step 8; the head just emits
+    ``(B, num_classes)`` logits.
+
+    :param backbone: A :class:`GraphEnergyTransformerBackbone` (typically ``num_blocks=4``,
+        ``use_cls=True``, ``use_pe=True``, ``noise_std=0.02``), or its serialized config dict.
+    :type backbone: GraphEnergyTransformerBackbone
+    :param num_classes: Number of graph classes ``C``. Must be ``>= 2``.
+    :type num_classes: int
+    :param head_dropout: Dropout on the CLS representation before the classifier Dense. Defaults
+        to ``0.0``.
+    :type head_dropout: float
+
+    :raises ValueError: If ``num_classes < 2`` or ``head_dropout`` is outside ``[0, 1]``.
+
+    Input shape:
+        The variant-C graph dict ``{"node_features": (B, N, F), "adjacency": (B, N, N),
+        "pe": (B, N, pe_dim), "node_mask": (B, N)}``.
+
+    Output shape:
+        ``(batch, num_classes)`` — per-graph class logits (no softmax).
+    """
+
+    def __init__(
+            self,
+            backbone: GraphEnergyTransformerBackbone,
+            num_classes: int,
+            head_dropout: float = 0.0,
+            name: Optional[str] = "graph_classifier",
+            **kwargs: Any
+    ) -> None:
+        super().__init__(name=name, **kwargs)
+
+        backbone = _coerce_graph_backbone(backbone)
+
+        if not isinstance(num_classes, int) or num_classes < 2:
+            raise ValueError(f"num_classes must be an integer >= 2, got {num_classes}")
+        if not (0.0 <= head_dropout <= 1.0):
+            raise ValueError(f"head_dropout must be in [0, 1], got {head_dropout}")
+
+        self.backbone = backbone
+        self.num_classes = int(num_classes)
+        self.head_dropout_rate = float(head_dropout)
+        self.embed_dim = backbone.embed_dim
+
+        # `head_` prefix so a warm-start (name-matched) moves ONLY the shared trunk
+        # (`graph_et_backbone`) and never the head. Sub-layers CREATED here, BUILT in build() —
+        # a lazily-created sub-layer silently drops its weights on a `.keras` round-trip
+        # (MEMORY: subclassed lazy-build serialization).
+        self.head_norm = layers.LayerNormalization(
+            epsilon=1e-6, name="head_norm", dtype=self.dtype_policy
+        )
+        # ALWAYS CREATE / CONDITIONALLY USE (guide §9): the Dropout exists at every rate so the
+        # layer structure does not depend on a numeric value.
+        self.head_dropout = layers.Dropout(
+            self.head_dropout_rate, name="head_dropout", dtype=self.dtype_policy
+        )
+        self.head_dense = layers.Dense(
+            self.num_classes, name="head_dense", dtype=self.dtype_policy
+        )
+
+    # -----------------------------------------------------------------
+
+    def build(self, input_shape: Any) -> None:
+        """Explicitly build the trunk and every head sub-layer from stored config."""
+        if self.built:
+            return
+        self.backbone.build(input_shape)
+
+        cls_shape = (None, self.embed_dim)              # CLS token state (B, D)
+        self.head_norm.build(cls_shape)
+        self.head_dropout.build(cls_shape)
+        self.head_dense.build(cls_shape)
+        super().build(input_shape)
+
+    # -----------------------------------------------------------------
+
+    def call(
+            self,
+            inputs: Dict[str, Any],
+            training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
+        """Stacked backbone forward -> CLS token -> LayerNorm -> Dropout -> Dense logits.
+
+        :param inputs: The variant-C graph dict (see the class docstring).
+        :param training: Keras training flag. eq.-27 saddle-escape noise inside the backbone is
+            active ONLY when ``training`` is true, so two inference forwards are deterministic.
+        :return: ``(B, num_classes)`` class logits (no softmax — ``from_logits`` loss).
+        """
+        tokens = self.backbone(inputs, training=training)             # (B, N+1, D)
+
+        # STATIC index-0 CLS slice — the backbone prepends the CLS token first, so index 0 is
+        # always the CLS token. XLA-safe (unlike variant B's dynamic take_along_axis gather).
+        cls = tokens[:, 0, :]                                         # (B, D)
+
+        h = self.head_norm(cls, training=training)                   # (B, D)
+        h = self.head_dropout(h, training=training)                  # (B, D)
+        return self.head_dense(h, training=training)                 # (B, C) logits — no softmax
+
+    # -----------------------------------------------------------------
+
+    def compute_output_shape(self, input_shape: Any) -> Tuple[Optional[int], ...]:
+        token_shape = self.backbone.compute_output_shape(input_shape)
+        return (token_shape[0], self.num_classes)
+
+    # -----------------------------------------------------------------
+
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        config.update({
+            "backbone": serialize_keras_object(self.backbone),
+            "num_classes": self.num_classes,
+            "head_dropout": self.head_dropout_rate,
+        })
+        return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "GraphClassifier":
+        config = dict(config)
+        config["backbone"] = deserialize_keras_object(config["backbone"])
+        return cls(**config)
+
+
+# ---------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------
 
@@ -826,4 +981,78 @@ def create_graph_anomaly_detector(
         backbone=backbone,
         mlp_hidden_dim=mlp_hidden_dim,
         mlp_dropout=mlp_dropout,
+    )
+
+
+def create_graph_classifier(
+        node_feature_dim: int,
+        num_classes: int,
+        embed_dim: int = 128,
+        num_heads: int = 12,
+        head_dim: int = 64,
+        hopfield_dim: int = 512,
+        num_blocks: int = 4,
+        num_steps: int = 12,
+        step_size: float = 0.01,
+        beta: Optional[float] = None,
+        noise_std: float = 0.02,
+        pe_dim: int = 15,
+        head_dropout: float = 0.0,
+        **overrides: Any,
+) -> GraphClassifier:
+    """Create a variant-C-lite :class:`GraphClassifier` (backbone + CLS-token readout head).
+
+    Builds the shared graph trunk with the variant-C topology fixed — ``use_cls=True``,
+    ``use_pe=True`` — and the paper's Table 9 defaults (``embed_dim=128``, ``num_heads=12``,
+    ``head_dim=64``, ``hopfield_dim=512``, ``num_blocks=S=4``, ``step_size=0.01``,
+    ``beta=None`` -> ``1/sqrt(head_dim)``, ``noise_std=0.02`` eq.-27 saddle-escape, ``pe_dim=15``
+    Laplacian PE). The trunk is named :data:`GRAPH_BACKBONE_NAME` so a future warm-start
+    name-matches it. Remaining backbone kwargs (``hopfield_activation``, ``hopfield_beta``,
+    ``norm_epsilon``, ``attn_self``, ``seed`` ...) pass through via ``overrides``.
+
+    :param node_feature_dim: Input node-feature dim ``F``.
+    :param num_classes: Number of graph classes ``C`` (``>= 2``).
+    :param embed_dim: Token dim ``D`` (Table 9: 128).
+    :param num_heads: Attention heads ``H`` (Table 9: 12).
+    :param head_dim: Per-head key/query dim ``Y`` (Table 9: 64).
+    :param hopfield_dim: Hopfield memory count ``K`` (Table 9: 512).
+    :param num_blocks: Number of stacked ET blocks ``S`` (Table 9: 4).
+    :param num_steps: Descent steps ``T`` per block.
+    :param step_size: Descent step ``alpha`` (Table 9: 0.01).
+    :param beta: Attention inverse temperature; ``None`` -> ``1/sqrt(head_dim)``.
+    :param noise_std: eq.-27 Langevin saddle-escape noise std (training only; Table 9: 0.02).
+    :param pe_dim: Laplacian-PE width ``k`` (matches the dataset's ``k_pe``; default 15).
+    :param head_dropout: Dropout on the CLS representation before the classifier Dense.
+    :param overrides: Any other backbone ctor kwarg (``hopfield_activation``, ``hopfield_beta``,
+        ``norm_epsilon``, ``attn_self``, ``seed``).
+    :return: A :class:`GraphClassifier` whose trunk is named :data:`GRAPH_BACKBONE_NAME`.
+
+    Example:
+        >>> model = create_graph_classifier(node_feature_dim=7, num_classes=2)
+        >>> model.compile(
+        ...     optimizer='adamw',
+        ...     loss=keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+        ... )
+    """
+    backbone = GraphEnergyTransformerBackbone(
+        node_feature_dim=node_feature_dim,
+        embed_dim=embed_dim,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        hopfield_dim=hopfield_dim,
+        num_blocks=num_blocks,
+        num_steps=num_steps,
+        step_size=step_size,
+        beta=beta,
+        noise_std=noise_std,
+        use_pe=True,
+        pe_dim=pe_dim,
+        use_cls=True,
+        name=GRAPH_BACKBONE_NAME,
+        **overrides,
+    )
+    return GraphClassifier(
+        backbone=backbone,
+        num_classes=num_classes,
+        head_dropout=head_dropout,
     )
