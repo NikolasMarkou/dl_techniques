@@ -15,7 +15,7 @@ import keras
 import numpy as np
 import pytest
 
-from dl_techniques.models.cliffordnet import CliffordCLIP
+from dl_techniques.models.clip.clifford_clip import CliffordCLIP
 
 
 # ---------------------------------------------------------------------
