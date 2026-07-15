@@ -8,6 +8,9 @@ This module holds:
 
 - :class:`HopfieldNetwork` — the ET Hopfield / associative-memory module (eq. 5, 9). A
   single tied ``(K, D)`` memory matrix, applied strictly per token.
+- :class:`WeightedAdjacencyProjector` — the optional trainable graph edge reweighting
+  (eq. 25 / App D.1): ``Â = Conv2D(X⊗X) ⊙ A'``, producing a finite per-head ``Ŵ`` that the
+  block hoists once per ``call()`` (Branch A) into ``EnergyAttention``.
 - :class:`EnergyTransformer` — the ``T``-step energy-descent block (eq. 6, alg. 1; eq. 27
   for the optional noise). It composes :class:`HopfieldNetwork` with ``EnergyLayerNorm``
   (``layers/norms/energy_layer_norm.py``) and ``EnergyAttention``
@@ -574,6 +577,229 @@ class HopfieldNetwork(keras.layers.Layer):
 # ---------------------------------------------------------------------
 
 
+# DECISION plan-2026-07-15T053724-78001af1/D-002
+# WHY THIS IS ITS OWN CLASS AND NOT AN INLINE `keras.layers.Conv2D` IN THE BLOCK'S
+# `call()`. The paper's weighted adjacency (eq. 25 / App D.1, `Â = Conv2D(X⊗X) ⊙ A'`) has
+# exactly ONE call site — `EnergyTransformer` with `use_weighted_adjacency=True`. A single
+# call site normally argues AGAINST a new abstraction, but two forces override that here
+# (D-002, "provability, not reuse"):
+#   * SERIALIZATION SAFETY. The Conv2D (and the optional Dense) are TRAINABLE. A lazily
+#     created sub-layer silently DROPS its weights on a `.keras` round-trip (MEMORY:
+#     reference_subclassed_model_lazy_build_serialization). A dedicated Layer with its own
+#     `build`/`get_config` is the golden pattern the rest of this module already follows.
+#   * PROVABILITY. The pairing ORDER of `X⊗X` and the `⊙ A'` non-edge zeroing must be
+#     testable IN ISOLATION and provable RED (a transposed pairing, or a dropped `A'`
+#     factor, is invisible in an inline closure). This is the D-008 precedent.
+# WHAT NOT TO DO: do NOT put `-∞` in `Ŵ` for non-edges — `Ŵ` is FINITE by contract (it is
+# multiplied into the score, `logit = β·(A⊙Ŵ) + M`). The `-∞` non-edge masking is ALREADY
+# done by the existing keep-bias `M` in `EnergyAttention._project`; here `A'` only ZEROS
+# `Ŵ` on non-edges (spec `⊙ A'`), which is spec fidelity, not correctness (the keep-bias
+# kills those pairs regardless). See decisions.md D-002 (and D-001 for the omega_eff use).
+@keras.saving.register_keras_serializable()
+class WeightedAdjacencyProjector(keras.layers.Layer):
+    """Trainable per-head weighted adjacency ``Ŵ`` from tokens + a binary adjacency (eq. 25).
+
+    **Intent**: realize the Energy Transformer's *graph* score reweighting (arXiv:2302.07253
+    App D.1): ``Â = Conv2D(X⊗X) ⊙ A'``. For every ordered token pair ``(n, m)`` it forms the
+    outer product of the two token embeddings, runs a small Conv2D over the ``N × N`` "image"
+    of those outer products to produce ``H`` per-head edge weights, and zeros the weight on
+    every NON-edge (``A' = 0``). The result ``Ŵ`` is a FINITE ``(B, H, N, N)`` tensor that
+    :class:`EnergyTransformer` hoists ONCE per ``call()`` and threads into
+    ``EnergyAttention.energy`` / ``.update`` as ``adjacency_weight`` (Branch A — a per-block
+    constant w.r.t. the evolving token state).
+
+    **Mathematics** (``B``=batch, ``N``=tokens, ``D``=``embed_dim``, ``P``=``proj_dim`` or
+    ``D``, ``H``=``num_heads``):
+
+    .. code-block:: text
+
+        X'          = X  (or  Dense_P(X)  when proj_dim is set)      # (B, N, P)
+        outer_{b n m p q} = X'_{b n p} * X'_{b m q}                  # (B, N, N, P, P)
+        outer       = reshape -> (B, N, N, P^2)                      # P^2 conv channels
+        raw_{b n m h} = Conv2D(H, kernel_size, 'same')(outer)        # (B, N, N, H)
+        Ŵ_{b h n m}  = transpose(raw) * A'_{b n m}                   # (B, H, N, N), finite
+
+    **The ``proj_dim`` OOM escape hatch (A5).** The Conv2D sees ``P^2`` input channels. At
+    the paper's graph width (``D = 128``) that is ``16384`` channels through the conv on an
+    ``N × N`` grid — heavy in both params and the ``(B, N, N, P^2)`` activation. Setting
+    ``proj_dim = P < D`` first projects the tokens ``D -> P`` with a bias-free-agnostic
+    ``Dense`` so the conv sees only ``P^2`` channels. ``None`` (default) keeps the full
+    ``D^2`` (correct for small ``D`` / small ``N``, e.g. MUTAG's ``N ~ 30``).
+
+    **``⊙ A'`` is spec fidelity, not correctness.** Zeroing ``Ŵ`` on non-edges matches the
+    paper, but the ACTUAL non-edge suppression is the ``-∞`` keep-bias ``M`` already applied
+    in :meth:`EnergyAttention._project` from the same binary ``A'`` (passed there as the
+    ``attention_mask``). ``Ŵ`` must therefore stay FINITE — never ``-∞``.
+
+    :param num_heads: Number of attention heads ``H`` (the Conv2D output channels). Must
+        match the consuming :class:`EnergyAttention`.
+    :type num_heads: int
+    :param embed_dim: Token embedding dimension ``D``.
+    :type embed_dim: int
+    :param kernel_size: Conv2D spatial kernel size over the ``N × N`` grid. ``1`` (default,
+        the paper's per-pair ``1 × 1`` conv). Larger values mix neighbouring pairs.
+    :type kernel_size: int
+    :param proj_dim: If set, first project tokens ``D -> proj_dim`` (a ``Dense``) so the conv
+        sees ``proj_dim^2`` channels instead of ``D^2`` — the OOM escape hatch. ``None``
+        (default) keeps the full ``D^2``.
+    :type proj_dim: Optional[int]
+
+    :raises ValueError: If ``num_heads <= 0``, ``embed_dim <= 0``, ``kernel_size <= 0`` or an
+        explicit ``proj_dim <= 0``.
+
+    Input shape:
+        A 2-tuple ``((B, N, D), (B, N, N))`` — the token state and the binary adjacency.
+
+    Output shape:
+        ``(B, H, N, N)`` — the per-head finite weighted adjacency ``Ŵ``.
+    """
+
+    def __init__(
+        self,
+        num_heads: int,
+        embed_dim: int,
+        kernel_size: int = 1,
+        proj_dim: Optional[int] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+
+        if not isinstance(num_heads, int) or num_heads <= 0:
+            raise ValueError(f"num_heads must be a positive integer, got {num_heads}")
+        if not isinstance(embed_dim, int) or embed_dim <= 0:
+            raise ValueError(f"embed_dim must be a positive integer, got {embed_dim}")
+        if not isinstance(kernel_size, int) or kernel_size <= 0:
+            raise ValueError(f"kernel_size must be a positive integer, got {kernel_size}")
+        if proj_dim is not None and (not isinstance(proj_dim, int) or proj_dim <= 0):
+            raise ValueError(f"proj_dim must be a positive integer or None, got {proj_dim}")
+
+        self.num_heads = int(num_heads)
+        self.embed_dim = int(embed_dim)
+        self.kernel_size = int(kernel_size)
+        self.proj_dim = int(proj_dim) if proj_dim is not None else None
+
+        # The channel width the outer product feeds into the conv: P^2.
+        self._pair_dim = self.proj_dim if self.proj_dim is not None else self.embed_dim
+
+        # ----- sub-layers: CREATED IN __init__, built in build() (golden pattern) -----
+        self.token_proj: Optional[keras.layers.Dense] = (
+            keras.layers.Dense(
+                self.proj_dim, name="token_proj", dtype=self.dtype_policy
+            )
+            if self.proj_dim is not None
+            else None
+        )
+        self.conv = keras.layers.Conv2D(
+            filters=self.num_heads,
+            kernel_size=self.kernel_size,
+            padding="same",
+            name="pair_conv",
+            dtype=self.dtype_policy,
+        )
+
+    # -----------------------------------------------------------------
+
+    def build(self, input_shape: Tuple[Tuple[Optional[int], ...], ...]) -> None:
+        """Explicitly build the (optional) token projection and the pair Conv2D.
+
+        :param input_shape: 2-tuple ``((B, N, D), (B, N, N))``.
+        :type input_shape: Tuple[Tuple[Optional[int], ...], ...]
+        """
+        if self.built:
+            return
+
+        x_shape = input_shape[0]
+        n = x_shape[1]
+
+        if self.token_proj is not None:
+            self.token_proj.build(x_shape)
+
+        # The conv sees the (B, N, N, P^2) image of pairwise outer products.
+        conv_input_shape = (x_shape[0], n, n, self._pair_dim * self._pair_dim)
+        self.conv.build(conv_input_shape)
+
+        super().build(input_shape)
+
+    # -----------------------------------------------------------------
+
+    def call(
+        self,
+        inputs: Tuple[keras.KerasTensor, keras.KerasTensor],
+    ) -> keras.KerasTensor:
+        """Return the finite per-head weighted adjacency ``Ŵ`` of shape ``(B, H, N, N)``.
+
+        :param inputs: 2-tuple ``(x, adjacency)`` — ``x`` the token state ``(B, N, D)`` and
+            ``adjacency`` the binary ``(B, N, N)`` keep (``1`` = edge, ``0`` = non-edge).
+        :type inputs: Tuple[keras.KerasTensor, keras.KerasTensor]
+
+        :return: ``Ŵ`` of shape ``(B, H, N, N)``, FINITE.
+        :rtype: keras.KerasTensor
+        """
+        x, adjacency = inputs
+
+        # Run in the layer's compute dtype (like every other ET sub-layer) — the block hands
+        # us its compute-dtype `x` on the variable_dtype/mixed path, and `_project` casts the
+        # returned Ŵ up to the mask dtype (>= float32) at the consumption site.
+        x = ops.cast(x, self.compute_dtype)
+
+        x_p = self.token_proj(x) if self.token_proj is not None else x   # (B, N, P)
+
+        # X⊗X: the per-pair outer product `outer[b,n,m,p,q] = x_p[b,n,p]*x_p[b,m,q]`, then
+        # flatten the (p, q) pair axes into P^2 conv channels. NOT `bnd,bme->bnme` (that would
+        # contract the feature axis away); the pair feature is the full outer product.
+        shp = ops.shape(x_p)
+        b, n = shp[0], shp[1]
+        outer = ops.einsum("bnp,bmq->bnmpq", x_p, x_p)                   # (B, N, N, P, P)
+        outer = ops.reshape(outer, (b, n, n, self._pair_dim * self._pair_dim))
+
+        raw = self.conv(outer)                                           # (B, N, N, H)
+        w_hat = ops.transpose(raw, (0, 3, 1, 2))                        # (B, H, N, N)
+
+        # `⊙ A'` (spec fidelity): zero Ŵ on non-edges. Broadcast the (B, N, N) binary
+        # adjacency over the head axis. Ŵ stays FINITE — the -inf non-edge suppression is the
+        # existing keep-bias in `_project`, NOT here.
+        adjacency = ops.cast(adjacency, self.compute_dtype)
+        w_hat = w_hat * ops.expand_dims(adjacency, axis=1)              # (B, H, N, N)
+
+        return w_hat
+
+    # -----------------------------------------------------------------
+
+    def compute_output_shape(
+        self,
+        input_shape: Tuple[Tuple[Optional[int], ...], ...],
+    ) -> Tuple[Optional[int], ...]:
+        """Return the ``(B, H, N, N)`` output shape (valid on an UNBUILT layer).
+
+        :param input_shape: 2-tuple ``((B, N, D), (B, N, N))``.
+        :type input_shape: Tuple[Tuple[Optional[int], ...], ...]
+
+        :return: ``(B, num_heads, N, N)``.
+        :rtype: Tuple[Optional[int], ...]
+        """
+        x_shape = input_shape[0]
+        return (x_shape[0], self.num_heads, x_shape[1], x_shape[1])
+
+    # -----------------------------------------------------------------
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return the full constructor configuration for serialization.
+
+        :return: Dictionary containing every ``__init__`` argument.
+        :rtype: Dict[str, Any]
+        """
+        config = super().get_config()
+        config.update({
+            'num_heads': self.num_heads,
+            'embed_dim': self.embed_dim,
+            'kernel_size': self.kernel_size,
+            'proj_dim': self.proj_dim,
+        })
+        return config
+
+# ---------------------------------------------------------------------
+
+
 @keras.saving.register_keras_serializable()
 class EnergyTransformer(keras.layers.Layer):
     """Energy Transformer block — ``T`` steps of gradient descent on ONE scalar energy.
@@ -781,6 +1007,17 @@ class EnergyTransformer(keras.layers.Layer):
         hopfield_beta: float = 1.0,
         norm_epsilon: float = 1e-5,
         seed: Optional[int] = None,
+        # DECISION plan-2026-07-15T053724-78001af1/D-002
+        # The Branch-A weighted-adjacency flag (paper eq. 25 / App D.1). ADDITIVE and
+        # default-OFF, so the approved surface is byte-identical. When ON, a trainable
+        # `WeightedAdjacencyProjector` is created (below) and its `Ŵ` is hoisted ONCE per
+        # `call()` into the attention's `energy`/`update`. WHAT NOT TO DO: do NOT create the
+        # projector when the flag is off (like `attn_self`, a flag-ON model has a DIFFERENT,
+        # intentionally NON-weight-compatible weight set — creating an unused projector would
+        # add dead weights to every default model's checkpoint). See decisions.md D-002.
+        use_weighted_adjacency: bool = False,
+        adjacency_kernel_size: int = 1,
+        adjacency_proj_dim: Optional[int] = None,
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -802,6 +1039,18 @@ class EnergyTransformer(keras.layers.Layer):
             raise ValueError(f"step_size must be a positive number, got {step_size}")
         if not isinstance(noise_std, (int, float)) or noise_std < 0:
             raise ValueError(f"noise_std must be a non-negative number, got {noise_std}")
+        if not isinstance(adjacency_kernel_size, int) or adjacency_kernel_size <= 0:
+            raise ValueError(
+                f"adjacency_kernel_size must be a positive integer, got "
+                f"{adjacency_kernel_size}"
+            )
+        if adjacency_proj_dim is not None and (
+            not isinstance(adjacency_proj_dim, int) or adjacency_proj_dim <= 0
+        ):
+            raise ValueError(
+                f"adjacency_proj_dim must be a positive integer or None, got "
+                f"{adjacency_proj_dim}"
+            )
 
         # `beta`, `hopfield_activation` and `hopfield_beta` are validated by the sub-layers
         # they belong to (EnergyAttention / HopfieldNetwork) — not re-validated here, so
@@ -822,6 +1071,11 @@ class EnergyTransformer(keras.layers.Layer):
         self.hopfield_beta = float(hopfield_beta)
         self.norm_epsilon = float(norm_epsilon)
         self.seed = seed
+        self.use_weighted_adjacency = bool(use_weighted_adjacency)
+        self.adjacency_kernel_size = int(adjacency_kernel_size)
+        self.adjacency_proj_dim = (
+            int(adjacency_proj_dim) if adjacency_proj_dim is not None else None
+        )
 
         # sqrt(alpha), the eq. 27 noise scaling. Precomputed: `step_size` is a Python float.
         self._sqrt_step_size = math.sqrt(self.step_size)
@@ -868,6 +1122,26 @@ class EnergyTransformer(keras.layers.Layer):
             dtype=self.dtype_policy,
         )
 
+        # DECISION plan-2026-07-15T053724-78001af1/D-002
+        # Branch-A weighted-adjacency projector. Created ONLY when the flag is on — a
+        # flag-ON model is deliberately NOT weight-compatible with a flag-OFF one (same
+        # discipline as `attn_self`), so `None` here keeps every default checkpoint free of
+        # dead projector weights and byte-identical to today. The projector's own weights
+        # train via the outer `fit()` backward pass (no hand-coded gradient for IT — Branch
+        # A). See decisions.md D-002.
+        self.adjacency_projector: Optional[WeightedAdjacencyProjector] = (
+            WeightedAdjacencyProjector(
+                num_heads=self.num_heads,
+                embed_dim=self.embed_dim,
+                kernel_size=self.adjacency_kernel_size,
+                proj_dim=self.adjacency_proj_dim,
+                name="weighted_adjacency_projector",
+                dtype=self.dtype_policy,
+            )
+            if self.use_weighted_adjacency
+            else None
+        )
+
         # Only needed when noise is on, but created unconditionally so that `seed` round-
         # trips and the layer's structure does not depend on a numeric value.
         self.seed_generator = keras.random.SeedGenerator(seed=self.seed)
@@ -912,6 +1186,14 @@ class EnergyTransformer(keras.layers.Layer):
         self.norm.build(input_shape)
         self.attention.build(input_shape)
         self.hopfield.build(input_shape)
+
+        if self.adjacency_projector is not None:
+            # The projector consumes (x, adjacency): the token state (B, N, D) and a binary
+            # (B, N, N) adjacency. Built explicitly here (golden pattern) so its trainable
+            # Conv2D/Dense survive a `.keras` round-trip.
+            num_tokens = input_shape[1]
+            adjacency_shape = (input_shape[0], num_tokens, num_tokens)
+            self.adjacency_projector.build((tuple(input_shape), adjacency_shape))
 
         super().build(input_shape)
 
@@ -985,11 +1267,80 @@ class EnergyTransformer(keras.layers.Layer):
 
     # -----------------------------------------------------------------
 
+    def _binary_adjacency(
+        self,
+        attention_mask: Optional[keras.KerasTensor],
+    ) -> Optional[keras.KerasTensor]:
+        """The binary ``(B, N, N)`` adjacency ``A'`` the projector needs, or ``None``.
+
+        The graph model passes its adjacency as the PAIR-level ``attention_mask`` (D-006:
+        rank-3 ``(B, N, N)`` is a key x query keep). Only a pair-level mask carries an
+        edge/non-edge reading:
+
+        * rank 3 ``(B, N, N)`` — already ``A'``, returned as-is.
+        * rank 4 ``(B, H, N, N)`` — reduced to ``(B, N, N)`` by a keep-in-ANY-head
+          (``max`` over the head axis): an edge exists if the pair is kept for any head.
+        * rank 2 ``(B, N)`` / ``None`` — a per-token validity mask carries NO pair-level
+          edge structure, so there is no ``A'`` to build ``Ŵ`` from -> ``None`` (the
+          weighted path is inert, exactly as with the flag off).
+
+        :param attention_mask: Optional KEEP mask of rank 2 / 3 / 4.
+        :type attention_mask: Optional[keras.KerasTensor]
+
+        :return: ``(B, N, N)`` binary adjacency, or ``None``.
+        :rtype: Optional[keras.KerasTensor]
+        """
+        if attention_mask is None:
+            return None
+        rank = len(attention_mask.shape)
+        if rank == 3:
+            return attention_mask
+        if rank == 4:
+            return ops.max(attention_mask, axis=1)
+        return None
+
+    # -----------------------------------------------------------------
+
+    def _weighted_adjacency(
+        self,
+        x: keras.KerasTensor,
+        attention_mask: Optional[keras.KerasTensor],
+    ) -> Optional[keras.KerasTensor]:
+        """Compute the per-block-constant ``Ŵ`` from the block INPUT ``x`` (Branch A).
+
+        # DECISION plan-2026-07-15T053724-78001af1/D-002
+        Called ONCE per :meth:`call` (before the T-step loop) and NEVER from the evolving
+        ``g_t`` — Branch A holds ``Ŵ`` CONSTANT across the descent, which is exactly what
+        keeps the closed-form gradient in ``EnergyAttention.update`` valid (``dŴ/dg == 0``;
+        see the D-001 anchor there). WHAT NOT TO DO: do NOT recompute this inside the loop
+        from the per-step ``g`` — that would add a ``dŴ/dg`` term the hand-coded gradient
+        does not carry (Branch B1, Tier-3), silently breaking ``update() == -dE/dg``.
+        See decisions.md D-002 (and D-001).
+
+        :param x: The block INPUT token state ``(B, N, D)`` (not the evolving state).
+        :type x: keras.KerasTensor
+        :param attention_mask: Optional KEEP mask — a rank-3/4 one carries the adjacency.
+        :type attention_mask: Optional[keras.KerasTensor]
+
+        :return: ``Ŵ`` of shape ``(B, H, N, N)``, or ``None`` when the flag is off or no
+            pair-level adjacency is present.
+        :rtype: Optional[keras.KerasTensor]
+        """
+        if not self.use_weighted_adjacency:
+            return None
+        adjacency = self._binary_adjacency(attention_mask)
+        if adjacency is None:
+            return None
+        return self.adjacency_projector((x, adjacency))
+
+    # -----------------------------------------------------------------
+
     def energy(
         self,
         g: keras.KerasTensor,
         attention_mask: Optional[keras.KerasTensor] = None,
         mask: Optional[keras.KerasTensor] = None,
+        adjacency_weight: Optional[keras.KerasTensor] = None,
     ) -> keras.KerasTensor:
         """The block's total scalar energy ``E(g) = E_ATT(g) + E_HN(g)``, shape ``(B,)``.
 
@@ -1013,6 +1364,13 @@ class EnergyTransformer(keras.layers.Layer):
             ANDed again into the ``HopfieldNetwork`` token keep, whose energy is a SUM over
             tokens and so must exclude the PAD tokens (decisions.md D-005, D-006).
         :type mask: Optional[keras.KerasTensor]
+        :param adjacency_weight: Optional FINITE per-head weighted adjacency ``Ŵ`` (paper
+            eq. 25, Branch A). Forwarded UNCHANGED to ``EnergyAttention.energy`` (the
+            Hopfield term has no pairs and never sees it). It MUST be the SAME tensor the
+            matching ``self.attention.update`` receives in :meth:`call`, or
+            ``update() != -dE/dg``. Hoisted ONCE by :meth:`call` (see
+            :meth:`_weighted_adjacency`), NOT recomputed from ``g`` here.
+        :type adjacency_weight: Optional[keras.KerasTensor]
 
         :return: Energy of shape ``(B,)``, in the REDUCE dtype (>= ``float32``) — NOT the
             compute dtype. Under ``mixed_float16`` the trace stays ``float32``; see the
@@ -1059,7 +1417,10 @@ class EnergyTransformer(keras.layers.Layer):
         # See decisions.md D-006.
         hopfield_mask = self._hopfield_token_mask(attention_mask, mask)
         return (
-            self.attention.energy(g, attention_mask=attention_mask, mask=mask)
+            self.attention.energy(
+                g, attention_mask=attention_mask, mask=mask,
+                adjacency_weight=adjacency_weight,
+            )
             + self.hopfield.energy(g, mask=hopfield_mask)
         )
 
@@ -1155,12 +1516,26 @@ class EnergyTransformer(keras.layers.Layer):
         # being `-dE/dg` (the D-006 anchor at `_hopfield_token_mask`).
         hopfield_mask = self._hopfield_token_mask(attention_mask, mask)
 
+        # DECISION plan-2026-07-15T053724-78001af1/D-002
+        # Branch A: the weighted adjacency `Ŵ` is computed ONCE here, from the block INPUT
+        # `inputs` (NOT the evolving `x`), and held constant across all T descent steps —
+        # exactly like `hopfield_mask` above. It is `None` unless the flag is on AND a
+        # pair-level (rank-3/4) `attention_mask` is present. The SAME `Ŵ` tensor MUST reach
+        # BOTH `self.energy(...)` (via `self.attention.energy`) and `self.attention.update`
+        # below, or `update() != -dE/dg` (the D-001 discipline; a missed site is invisible
+        # except to the gradient oracle). Do NOT recompute it inside the loop from `g`.
+        # See decisions.md D-002 (and D-001).
+        adjacency_weight = self._weighted_adjacency(inputs, attention_mask)
+
         for _ in range(self.num_steps):
             g = self.norm(x)
 
             if self.return_energy:
                 energies.append(
-                    self.energy(g, attention_mask=attention_mask, mask=mask)
+                    self.energy(
+                        g, attention_mask=attention_mask, mask=mask,
+                        adjacency_weight=adjacency_weight,
+                    )
                 )
 
             # `update` == -dE/dg (BOTH sub-layers return the DESCENT DIRECTION, never the
@@ -1177,7 +1552,10 @@ class EnergyTransformer(keras.layers.Layer):
             # `self.energy()` passes it, which is the property that keeps the pair a
             # (energy, -gradient) pair.
             update = (
-                self.attention.update(g, attention_mask=attention_mask, mask=mask)
+                self.attention.update(
+                    g, attention_mask=attention_mask, mask=mask,
+                    adjacency_weight=adjacency_weight,
+                )
                 + self.hopfield.update(g, mask=hopfield_mask)
             )
 
@@ -1206,7 +1584,12 @@ class EnergyTransformer(keras.layers.Layer):
             # cannot see the effect of the final update, and `diff(energies)` would only
             # cover T-1 of the T steps.
             g = self.norm(x)
-            energies.append(self.energy(g, attention_mask=attention_mask, mask=mask))
+            energies.append(
+                self.energy(
+                    g, attention_mask=attention_mask, mask=mask,
+                    adjacency_weight=adjacency_weight,
+                )
+            )
             return x, ops.stack(energies, axis=-1)            # (B, N, D), (B, T + 1)
 
         return x
@@ -1366,6 +1749,9 @@ class EnergyTransformer(keras.layers.Layer):
             'hopfield_beta': self.hopfield_beta,
             'norm_epsilon': self.norm_epsilon,
             'seed': self.seed,
+            'use_weighted_adjacency': self.use_weighted_adjacency,
+            'adjacency_kernel_size': self.adjacency_kernel_size,
+            'adjacency_proj_dim': self.adjacency_proj_dim,
         })
         return config
 

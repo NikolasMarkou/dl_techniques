@@ -44,6 +44,7 @@ tf.config.experimental.enable_tensor_float_32_execution(False)
 from dl_techniques.layers.transformers.energy_transformer import (
     EnergyTransformer,
     HopfieldNetwork,
+    WeightedAdjacencyProjector,
 )
 
 
@@ -2025,6 +2026,202 @@ class TestGraphSafeTrainingFlag:
             f"(expected +{n_steps}, one `ops.where` per descent step) when noise_std went "
             f"0 -> {self.NOISE}."
         )
+
+
+# ---------------------------------------------------------------------
+# Branch A: WeightedAdjacencyProjector + use_weighted_adjacency
+# ---------------------------------------------------------------------
+
+# The step-2 gate is BYTE-IDENTICAL default-off + serialization of the trainable projector.
+# A realistic graph length is used (N >= 64) rather than the toy N=7 of the shared fixtures:
+# LESSONS records an fp16 reduction bug that a toy N hid, and the projector's D^2-channel conv
+# is precisely the kind of size-sensitive op that must be exercised at a real length.
+_WA_N = 64
+_WA_DIM = 24
+_WA_HEADS = 4
+_WA_HEAD_DIM = 6
+_WA_MEM = 16
+
+
+def _wa_inputs(dim: int = _WA_DIM, n: int = _WA_N, batch: int = 2, seed: int = 3):
+    """Random tokens ``(B, N, dim)`` and a binary rank-3 adjacency ``(B, N, N)``."""
+    x = np.asarray(keras.random.normal((batch, n, dim), seed=seed)).astype("float32")
+    adj = (
+        np.asarray(keras.random.uniform((batch, n, n), seed=seed + 1)) > 0.5
+    ).astype("float32")
+    return x, adj
+
+
+def _wa_block(**overrides) -> EnergyTransformer:
+    kwargs = dict(
+        embed_dim=_WA_DIM, num_heads=_WA_HEADS, head_dim=_WA_HEAD_DIM,
+        hopfield_dim=_WA_MEM, num_steps=3, step_size=0.05,
+    )
+    kwargs.update(overrides)
+    return EnergyTransformer(**kwargs)
+
+
+class TestWeightedAdjacencyProjector:
+    """The projector in isolation: shape, finiteness, the `⊙ A'` zeroing, serialization."""
+
+    def test_output_shape_and_finiteness(self):
+        proj = WeightedAdjacencyProjector(num_heads=_WA_HEADS, embed_dim=_WA_DIM)
+        x, adj = _wa_inputs()
+        w_hat = proj((x, adj))
+        assert tuple(w_hat.shape) == (2, _WA_HEADS, _WA_N, _WA_N)
+        w = keras.ops.convert_to_numpy(w_hat)
+        assert np.all(np.isfinite(w)), "Ŵ must be FINITE (the -inf lives in the keep-bias)."
+
+    def test_non_edges_are_zeroed(self):
+        """`⊙ A'`: every non-edge pair carries EXACTLY zero weight in every head."""
+        proj = WeightedAdjacencyProjector(num_heads=_WA_HEADS, embed_dim=_WA_DIM)
+        x, adj = _wa_inputs()
+        w = keras.ops.convert_to_numpy(proj((x, adj)))       # (B, H, N, N)
+        non_edge = adj[:, None, :, :] == 0.0                 # (B, 1, N, N) broadcast
+        non_edge = np.broadcast_to(non_edge, w.shape)
+        assert np.all(w[non_edge] == 0.0), "Ŵ is non-zero on a non-edge (A' not applied)."
+
+    def test_proj_dim_shrinks_the_conv_input_channels(self):
+        """`proj_dim` cuts the conv's input channels from D^2 to proj_dim^2 (OOM hatch)."""
+        full = WeightedAdjacencyProjector(num_heads=_WA_HEADS, embed_dim=_WA_DIM)
+        reduced = WeightedAdjacencyProjector(
+            num_heads=_WA_HEADS, embed_dim=_WA_DIM, proj_dim=8
+        )
+        x, adj = _wa_inputs()
+        _ = full((x, adj)); _ = reduced((x, adj))
+        # conv kernel is (kh, kw, in_channels, filters)
+        assert full.conv.kernel.shape[2] == _WA_DIM * _WA_DIM
+        assert reduced.conv.kernel.shape[2] == 8 * 8
+        assert reduced.token_proj is not None and full.token_proj is None
+
+    def test_serialization_cycle(self):
+        proj = WeightedAdjacencyProjector(
+            num_heads=_WA_HEADS, embed_dim=_WA_DIM, kernel_size=3, proj_dim=8
+        )
+        cfg = proj.get_config()
+        for key in ("num_heads", "embed_dim", "kernel_size", "proj_dim"):
+            assert key in cfg, f"{key} missing from WeightedAdjacencyProjector.get_config()"
+        rebuilt = WeightedAdjacencyProjector.from_config(cfg)
+        assert rebuilt.get_config() == cfg
+
+
+class TestUseWeightedAdjacencyFlag:
+    """Falsification #2: default-off is BYTE-IDENTICAL; flag-on is a real, serializable path."""
+
+    def test_default_off_is_byte_identical_to_no_flag(self):
+        """S C2: `use_weighted_adjacency=False` == omitting the kwarg, to the last bit."""
+        x, _ = _wa_inputs()
+        no_flag = _wa_block()
+        off = _wa_block(use_weighted_adjacency=False)
+        off.build((None, _WA_N, _WA_DIM))
+        no_flag.build((None, _WA_N, _WA_DIM))
+        off.set_weights(no_flag.get_weights())
+
+        y0 = keras.ops.convert_to_numpy(no_flag(x, training=False))
+        y1 = keras.ops.convert_to_numpy(off(x, training=False))
+        np.testing.assert_array_equal(
+            y0, y1,
+            err_msg="the flag-OFF path is not byte-identical to omitting the kwarg.",
+        )
+        # No projector, no extra weights.
+        assert no_flag.adjacency_projector is None
+        assert off.adjacency_projector is None
+        assert len(off.weights) == len(no_flag.weights)
+
+    def test_flag_off_leaves_the_existing_default_untouched(self):
+        """The shared fixture path (no adjacency) is unchanged with the flag off."""
+        block = _wa_block(use_weighted_adjacency=False)
+        x, _ = _wa_inputs()
+        y = keras.ops.convert_to_numpy(block(x, training=False))
+        assert np.all(np.isfinite(y))
+
+    def test_flag_on_smoke_projector_is_trainable_and_reaches_attention(self):
+        """Flag-on: finite output, trainable projector weights, and Ŵ actually moves the state.
+
+        The `Ŵ reaches attention` proof is a CONTROLLED comparison: a flag-on and a flag-off
+        block that share IDENTICAL norm/attention/hopfield weights differ ONLY in whether Ŵ
+        is threaded into the attention score. A non-trivial output difference is therefore
+        attributable to Ŵ alone (a dropped forwarding site would make them equal).
+        """
+        x, adj = _wa_inputs()
+        on = _wa_block(use_weighted_adjacency=True)
+        on.build((None, _WA_N, _WA_DIM))
+
+        y_on = keras.ops.convert_to_numpy(on(x, attention_mask=adj, training=False))
+        assert np.all(np.isfinite(y_on)), "flag-on output is not finite."
+
+        # Trainable projector weights exist.
+        assert on.adjacency_projector is not None
+        tw = on.adjacency_projector.trainable_weights
+        assert len(tw) >= 2 and all(w.trainable for w in tw), (
+            "the projector has no trainable weights."
+        )
+
+        # Controlled Ŵ-reaches-attention: share the non-projector weights with a flag-off twin.
+        off = _wa_block(use_weighted_adjacency=False)
+        off.build((None, _WA_N, _WA_DIM))
+        off.norm.set_weights(on.norm.get_weights())
+        off.attention.set_weights(on.attention.get_weights())
+        off.hopfield.set_weights(on.hopfield.get_weights())
+        y_off = keras.ops.convert_to_numpy(off(x, attention_mask=adj, training=False))
+
+        assert np.max(np.abs(y_on - y_off)) > 1e-5, (
+            "flag-on output equals the flag-off output on the same tokens+adjacency: Ŵ never "
+            "reached the attention (a forwarding site was missed)."
+        )
+
+    def test_rank2_and_missing_adjacency_leave_the_weighted_path_inert(self):
+        """With no pair-level adjacency there is no A', so Ŵ is None (path inert, not crashing)."""
+        on = _wa_block(use_weighted_adjacency=True)
+        assert on._binary_adjacency(None) is None
+        rank2 = np.ones((2, _WA_N), dtype="float32")
+        assert on._binary_adjacency(rank2) is None
+        # A rank-4 mask reduces to (B, N, N).
+        rank4 = np.ones((2, _WA_HEADS, _WA_N, _WA_N), dtype="float32")
+        assert tuple(on._binary_adjacency(rank4).shape) == (2, _WA_N, _WA_N)
+
+    def test_keras_round_trip_preserves_projector_weights(self):
+        """The lazy-serialization trap: the trainable projector must survive .keras save/load."""
+        x, adj = _wa_inputs()
+        inp = keras.Input(shape=(_WA_N, _WA_DIM))
+        amask = keras.Input(shape=(_WA_N, _WA_N))
+        out = _wa_block(use_weighted_adjacency=True, adjacency_proj_dim=8)(
+            inp, attention_mask=amask
+        )
+        model = keras.Model([inp, amask], out)
+        y_before = keras.ops.convert_to_numpy(model([x, adj], training=False))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "weighted_et.keras")
+            model.save(path)
+            loaded = keras.models.load_model(path)
+            y_after = keras.ops.convert_to_numpy(loaded([x, adj], training=False))
+
+        assert len(loaded.weights) == len(model.weights), (
+            "projector weights were dropped on the .keras round-trip (lazy build)."
+        )
+        np.testing.assert_allclose(y_before, y_after, rtol=1e-6, atol=1e-6)
+
+    def test_get_config_carries_the_three_new_keys(self):
+        block = _wa_block(
+            use_weighted_adjacency=True, adjacency_kernel_size=3, adjacency_proj_dim=8
+        )
+        cfg = block.get_config()
+        assert cfg["use_weighted_adjacency"] is True
+        assert cfg["adjacency_kernel_size"] == 3
+        assert cfg["adjacency_proj_dim"] == 8
+        rebuilt = EnergyTransformer.from_config(cfg)
+        assert rebuilt.get_config() == cfg
+
+    @pytest.mark.parametrize("kwargs,match", [
+        (dict(adjacency_kernel_size=0), "adjacency_kernel_size"),
+        (dict(adjacency_kernel_size=-1), "adjacency_kernel_size"),
+        (dict(adjacency_proj_dim=0), "adjacency_proj_dim"),
+        (dict(adjacency_proj_dim=-4), "adjacency_proj_dim"),
+    ])
+    def test_invalid_adjacency_config(self, kwargs, match):
+        with pytest.raises(ValueError, match=match):
+            _wa_block(use_weighted_adjacency=True, **kwargs)
 
 
 if __name__ == "__main__":
