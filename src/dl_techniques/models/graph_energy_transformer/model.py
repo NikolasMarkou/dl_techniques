@@ -122,6 +122,19 @@ class GraphEnergyTransformerBackbone(keras.Model):
         ``EnergyAttention`` would silently MASK the adjacency diagonal, making the deliberately
         added self-loops a dead no-op (E_ATT bit-identical with diagonal 1 vs 0). Configurable;
         pass ``attn_self=False`` to recover the paper's image default. See decisions.md D-004.
+    :param use_weighted_adjacency: If ``True``, each ET block learns the paper's eq.-25 per-edge
+        weighted adjacency ``Ŵ`` (a Conv2D over ``X⊗X`` gated by the binary adjacency), folded
+        multiplicatively into the attention logits. The binary adjacency the projector needs is
+        ALREADY the rank-3 (CLS-augmented) ``attention_mask`` each block receives in :meth:`call`,
+        so NO new input plumbing is required here — only this flag. ``False`` (default) is
+        byte-identical to the C-lite binary-adjacency model. See ``EnergyTransformer`` D-002 of
+        plan ``plan-2026-07-15T053724-78001af1``.
+    :param adjacency_kernel_size: Conv2D kernel of the ``Ŵ`` projector (default ``1``). Only used
+        when ``use_weighted_adjacency``.
+    :param adjacency_proj_dim: Optional bottleneck ``P`` on the ``X⊗X`` pair features fed to the
+        projector Conv2D; ``None`` (default) uses the full ``D²`` pairing. Set a small value
+        (e.g. 8-16) to avoid the ``D²``-channel memory blow-up at ``D=128``. Only used when
+        ``use_weighted_adjacency``.
     :param use_pe: If ``True``, create a ``pe_proj`` Dense and add ``pe_proj(pe)`` to the tokens
         (variant C Laplacian PE). Defaults to ``False``.
     :param pe_dim: Laplacian-PE dimension (columns of the eigenvector block). Defaults to ``15``.
@@ -156,6 +169,9 @@ class GraphEnergyTransformerBackbone(keras.Model):
             noise_std: float = 0.0,
             norm_epsilon: float = 1e-5,
             attn_self: bool = True,   # DECISION plan-2026-07-15T015824-3c2159eb/D-004
+            use_weighted_adjacency: bool = False,
+            adjacency_kernel_size: int = 1,
+            adjacency_proj_dim: Optional[int] = None,
             use_pe: bool = False,
             pe_dim: int = 15,
             use_cls: bool = False,
@@ -205,6 +221,13 @@ class GraphEnergyTransformerBackbone(keras.Model):
         # self-loops become a dead no-op and a node can NEVER see itself. Keep it configurable
         # (False recovers the image default) but graph-default it to True. See decisions.md D-004.
         self.attn_self = bool(attn_self)
+        # eq.-25 weighted adjacency (Branch A). Default-off preserves the C-lite binary model
+        # byte-identically; the three knobs thread straight into each ET block via `_make_block`.
+        self.use_weighted_adjacency = bool(use_weighted_adjacency)
+        self.adjacency_kernel_size = int(adjacency_kernel_size)
+        self.adjacency_proj_dim = (
+            int(adjacency_proj_dim) if adjacency_proj_dim is not None else None
+        )
         self.use_pe = bool(use_pe)
         self.pe_dim = int(pe_dim)
         self.use_cls = bool(use_cls)
@@ -282,6 +305,9 @@ class GraphEnergyTransformerBackbone(keras.Model):
             step_size=self.step_size,
             beta=self.beta,
             attn_self=self.attn_self,
+            use_weighted_adjacency=self.use_weighted_adjacency,
+            adjacency_kernel_size=self.adjacency_kernel_size,
+            adjacency_proj_dim=self.adjacency_proj_dim,
             hopfield_activation=self.hopfield_activation,
             hopfield_beta=self.hopfield_beta,
             noise_std=self.noise_std,
@@ -533,6 +559,9 @@ class GraphEnergyTransformerBackbone(keras.Model):
             "noise_std": self.noise_std,
             "norm_epsilon": self.norm_epsilon,
             "attn_self": self.attn_self,
+            "use_weighted_adjacency": self.use_weighted_adjacency,
+            "adjacency_kernel_size": self.adjacency_kernel_size,
+            "adjacency_proj_dim": self.adjacency_proj_dim,
             "use_pe": self.use_pe,
             "pe_dim": self.pe_dim,
             "use_cls": self.use_cls,
@@ -1018,6 +1047,9 @@ def create_graph_classifier(
         noise_std: float = 0.02,
         pe_dim: int = 15,
         head_dropout: float = 0.0,
+        use_weighted_adjacency: bool = False,
+        adjacency_kernel_size: int = 1,
+        adjacency_proj_dim: Optional[int] = None,
         **overrides: Any,
 ) -> GraphClassifier:
     """Create a variant-C-lite :class:`GraphClassifier` (backbone + CLS-token readout head).
@@ -1043,6 +1075,14 @@ def create_graph_classifier(
     :param noise_std: eq.-27 Langevin saddle-escape noise std (training only; Table 9: 0.02).
     :param pe_dim: Laplacian-PE width ``k`` (matches the dataset's ``k_pe``; default 15).
     :param head_dropout: Dropout on the CLS representation before the classifier Dense.
+    :param use_weighted_adjacency: If ``True``, each ET block learns the paper's eq.-25 per-edge
+        weighted adjacency ``Ŵ`` (default ``False`` -> the C-lite binary-adjacency model,
+        byte-identical to today).
+    :param adjacency_kernel_size: Conv2D kernel of the ``Ŵ`` projector (default ``1``; only used
+        when ``use_weighted_adjacency``).
+    :param adjacency_proj_dim: Optional ``X⊗X`` bottleneck ``P`` for the projector; ``None``
+        (default) uses the full ``D²`` pairing. Set small (8-16) to avoid the ``D²``-channel
+        memory blow-up at ``D=128`` (only used when ``use_weighted_adjacency``).
     :param overrides: Any other backbone ctor kwarg (``hopfield_activation``, ``hopfield_beta``,
         ``norm_epsilon``, ``attn_self``, ``seed``).
     :return: A :class:`GraphClassifier` whose trunk is named :data:`GRAPH_BACKBONE_NAME`.
@@ -1065,6 +1105,9 @@ def create_graph_classifier(
         step_size=step_size,
         beta=beta,
         noise_std=noise_std,
+        use_weighted_adjacency=use_weighted_adjacency,
+        adjacency_kernel_size=adjacency_kernel_size,
+        adjacency_proj_dim=adjacency_proj_dim,
         use_pe=True,
         pe_dim=pe_dim,
         use_cls=True,

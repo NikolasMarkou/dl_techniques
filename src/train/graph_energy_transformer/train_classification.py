@@ -103,6 +103,12 @@ class TrainingConfig:
     step_size: float = 0.01  # alpha (Table 9)
     noise_std: float = 0.02  # eq.-27 saddle-escape (training only; Table 9)
     head_dropout: float = 0.0
+    # eq.-25 learned per-edge weighted adjacency (Branch A). Default-off = the C-lite
+    # binary-adjacency model. adjacency_proj_dim bottlenecks the X⊗X pairing to avoid the
+    # D²-channel memory blow-up at D=128 (set 8-16 when the flag is on).
+    use_weighted_adjacency: bool = False
+    adjacency_kernel_size: int = 1
+    adjacency_proj_dim: Optional[int] = None
 
     # Training (paper Table 9)
     epochs: int = 300
@@ -311,6 +317,9 @@ def train_classification(config: TrainingConfig) -> Dict[str, Any]:
         noise_std=config.noise_std,
         pe_dim=config.k_pe,
         head_dropout=config.head_dropout,
+        use_weighted_adjacency=config.use_weighted_adjacency,
+        adjacency_kernel_size=config.adjacency_kernel_size,
+        adjacency_proj_dim=config.adjacency_proj_dim,
         seed=config.seed,
     )
     # Materialize weights with a real forward pass over one probe batch before compile
@@ -451,6 +460,15 @@ def parse_arguments(argv: Optional[list] = None) -> argparse.Namespace:
     parser.add_argument("--noise-std", type=float, default=0.02,
                         help="eq.-27 saddle-escape noise std (training only; Table 9).")
     parser.add_argument("--head-dropout", type=float, default=0.0)
+    parser.add_argument("--use-weighted-adjacency", dest="use_weighted_adjacency",
+                        action="store_true",
+                        help="Learn the paper's eq.-25 per-edge weighted adjacency in each ET "
+                             "block (default: off = C-lite binary-adjacency model).")
+    parser.add_argument("--adjacency-kernel-size", type=int, default=1,
+                        help="Conv2D kernel of the weighted-adjacency projector (flag-on only).")
+    parser.add_argument("--adjacency-proj-dim", type=int, default=None,
+                        help="X⊗X bottleneck P for the projector; small (8-16) avoids the "
+                             "D²-channel blow-up at D=128 (flag-on only).")
 
     # Training (paper Table 9)
     parser.add_argument("--epochs", type=int, default=300)
@@ -518,6 +536,9 @@ def config_from_args(args: argparse.Namespace) -> TrainingConfig:
         step_size=args.step_size,
         noise_std=args.noise_std,
         head_dropout=args.head_dropout,
+        use_weighted_adjacency=args.use_weighted_adjacency,
+        adjacency_kernel_size=args.adjacency_kernel_size,
+        adjacency_proj_dim=args.adjacency_proj_dim,
         epochs=args.epochs,
         learning_rate=args.learning_rate,
         optimizer_type=args.optimizer,

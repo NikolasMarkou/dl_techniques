@@ -121,6 +121,9 @@ CLS_SPEC: Dict[str, Tuple[str, Any]] = {
     "step_size": ("--step-size", 0.05),              # default: 0.01
     "noise_std": ("--noise-std", 0.05),              # default: 0.02
     "head_dropout": ("--head-dropout", 0.3),         # default: 0.0
+    "use_weighted_adjacency": ("--use-weighted-adjacency", True),  # default: False (store_true)
+    "adjacency_kernel_size": ("--adjacency-kernel-size", 3),       # default: 1
+    "adjacency_proj_dim": ("--adjacency-proj-dim", 16),            # default: None
     "epochs": ("--epochs", 3),                       # default: 300
     "learning_rate": ("--learning-rate", 1e-5),      # default: 1e-3
     "optimizer": ("--optimizer", "sgd"),             # default: adamw
