@@ -257,7 +257,7 @@ def _guard_batch(n=4, seed=0):
     """Deterministic (image, text) batch for the gradient/loss guards."""
     rng = np.random.default_rng(seed)
     image = rng.standard_normal((n, 64, 64, 3)).astype("float32")
-    # Keep a couple of pad (0) tokens so the text query pool exercises its
+    # Keep a couple of pad (0) tokens so the text ctx pool exercises its
     # masked-softmax branch — the exact site of the B2 fp16 NaN bug.
     text = rng.integers(1, 50257, size=(n, 16)).astype("int32")
     text[:, -2:] = 0
@@ -275,33 +275,50 @@ def _toy_contrastive_loss(out):
     return -keras.ops.mean(keras.ops.diagonal(lpi))
 
 
+def _ctx_attention(pool):
+    """The ``AttentionPooling`` nested inside a ``SequencePooling`` ctx pool.
+
+    Post-refactor the learned-query pools are generic ``SequencePooling``
+    instances with ``strategy='attention'``; the learnable scoring layer lives
+    at ``pool.learnable_components['attention']`` (an ``AttentionPooling``).
+    """
+    return pool.learnable_components["attention"]
+
+
 def test_query_pool_weight_receives_nonzero_gradient():
     """B1 guard: both AttentionPooling scoring weights get a non-zero gradient.
 
     At the old 32px config the post-stem map collapsed to 1x1 and the vision
-    query pool's softmax-over-1 was a dead-gradient no-op (invisible to any
+    context pool's softmax-over-1 was a dead-gradient no-op (invisible to any
     forward-only or aggregate-fraction check). At 64px the map is >=2x2, so
     the scoring weights must receive gradient. Asserted per-weight, not by
     aggregate.
 
-    The pools are ``AttentionPooling`` (S2 swap of the bespoke pool): its
-    learnable scoring path is the ``context_vector`` (direct analog of the old
-    ``.query``) plus the ``attention_dense`` kernel that projects each token
-    before scoring. Both must be alive for the pool to learn.
+    Post-refactor the learned-query pools are generic ``SequencePooling``
+    instances (``vision_ctx_pool`` / ``text_ctx_pool``, replacing the old
+    bespoke ``vision_query_pool`` / ``text_query_pool``); the learnable scoring
+    path is the nested ``AttentionPooling``'s ``context_vector`` (direct analog
+    of the old ``.query``) plus its ``attention_dense`` kernel that projects
+    each token before scoring. Both must be alive for the pool to learn.
+    Requires a ``learned_query*`` head_kind (the only ones with attention ctx
+    pools); nano defaults to ``learned_query_residual``.
     """
     keras.utils.set_random_seed(0)
-    m = _build_nano()
+    m = _build_nano(head_kind="learned_query_residual")
     inputs = _guard_batch()
+
+    v_att = _ctx_attention(m.vision_ctx_pool)
+    t_att = _ctx_attention(m.text_ctx_pool)
 
     with tf.GradientTape(persistent=True) as tape:
         out = m(inputs, training=True)
         loss = _toy_contrastive_loss(out)
 
     for name, w in (
-        ("vision_query_pool.context_vector", m.vision_query_pool.context_vector),
-        ("vision_query_pool.attention_dense", m.vision_query_pool.attention_dense.kernel),
-        ("text_query_pool.context_vector", m.text_query_pool.context_vector),
-        ("text_query_pool.attention_dense", m.text_query_pool.attention_dense.kernel),
+        ("vision_ctx_pool.context_vector", v_att.context_vector),
+        ("vision_ctx_pool.attention_dense", v_att.attention_dense.kernel),
+        ("text_ctx_pool.context_vector", t_att.context_vector),
+        ("text_ctx_pool.attention_dense", t_att.attention_dense.kernel),
     ):
         g = tape.gradient(loss, w)
         assert g is not None, f"{name} gradient is None (disconnected)"
@@ -535,3 +552,84 @@ def test_vision_positional_encoding_on_round_trips(tiny_sample):
             atol=1e-5,
             err_msg=f"key {k} mismatches after round-trip",
         )
+
+
+# ---------------------------------------------------------------------
+# SequencePooling head-kind coverage (post-refactor: pools are
+# SequencePooling instances, attention nested in learnable_components)
+# ---------------------------------------------------------------------
+
+
+ALL_HEAD_KINDS = ["plain", "mean_max", "learned_query", "learned_query_residual"]
+
+
+@pytest.mark.parametrize("head_kind", ALL_HEAD_KINDS)
+def test_all_head_kinds_forward_and_round_trip(tiny_sample, head_kind):
+    """Every head_kind builds, forwards finite, and round-trips through
+    ``.keras`` byte-consistently.
+
+    Post-refactor all z_det/z_ctx pooling routes through generic
+    ``SequencePooling`` instances (``*_det_pool`` mean / ``*_ctx_pool`` max or
+    attention). This proves those nested pools serialize for EVERY head_kind —
+    the attention ctx pools in particular build a sublayer symbolically during
+    model build(), the classic site of a lazy-build round-trip weight drop.
+    """
+    m = _build_nano(head_kind=head_kind)
+    m.build({"image": (None, 64, 64, 3), "text": (None, 16)})
+
+    pre = m(tiny_sample, training=False)
+
+    # Output dict contract + shape/finiteness on the two feature keys.
+    assert sorted(pre.keys()) == sorted(
+        ["image_features", "text_features",
+         "logits_per_image", "logits_per_text", "logit_scale"]
+    )
+    for k in ("image_features", "text_features"):
+        v = keras.ops.convert_to_numpy(pre[k])
+        assert v.shape == (2, m.embed_dim), (
+            f"{head_kind}: {k} shape {v.shape} != (2, {m.embed_dim})"
+        )
+        assert np.all(np.isfinite(v)), f"{head_kind}: {k} non-finite"
+
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "clip_head.keras")
+        m.save(path)
+        loaded = keras.models.load_model(path)
+        post = loaded(tiny_sample, training=False)
+
+    for k in ("image_features", "text_features"):
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(pre[k]),
+            keras.ops.convert_to_numpy(post[k]),
+            rtol=1e-5,
+            atol=1e-5,
+            err_msg=f"{head_kind}: {k} mismatches after .keras round-trip",
+        )
+
+
+def test_attention_pool_hidden_dim_matches_channels():
+    """F3 guard: the attention ctx pools use ``attention_hidden_dim=<tower
+    channels>`` — NOT the ``SequencePooling`` default of 256.
+
+    A silent fall-through to the 256 default would (a) change the text pool's
+    capacity (text_channels=128) and (b) be a latent shape/behavior regression.
+    We introspect the nested ``AttentionPooling.hidden_dim`` and its
+    ``context_vector`` last-dim, which must equal each tower's channel count.
+    """
+    m = _build_nano(head_kind="learned_query_residual")
+    m.build({"image": (None, 64, 64, 3), "text": (None, 16)})
+
+    v_att = _ctx_attention(m.vision_ctx_pool)
+    t_att = _ctx_attention(m.text_ctx_pool)
+
+    assert v_att.hidden_dim == m.vision_channels, (
+        f"vision ctx pool hidden_dim {v_att.hidden_dim} != vision_channels "
+        f"{m.vision_channels} (SequencePooling default-256 regression)"
+    )
+    assert t_att.hidden_dim == m.text_channels, (
+        f"text ctx pool hidden_dim {t_att.hidden_dim} != text_channels "
+        f"{m.text_channels} (SequencePooling default-256 regression)"
+    )
+    # context_vector last dim mirrors hidden_dim — belt-and-suspenders.
+    assert v_att.context_vector.shape[-1] == m.vision_channels
+    assert t_att.context_vector.shape[-1] == m.text_channels
