@@ -120,6 +120,7 @@ from dl_techniques.layers.geometric.clifford_block import (
 )
 from dl_techniques.layers.layer_scale import LearnableMultiplier
 from dl_techniques.layers.patch_merging import PatchMerging
+from dl_techniques.layers.sequence_pooling import AttentionPooling
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.utils.clip_utils import (
     compute_clip_logits,
@@ -153,78 +154,6 @@ def _head_shifts_for(channels: int, requested: Optional[List[int]]) -> List[int]
 
 _DEFAULT_KERNEL_INIT = initializers.TruncatedNormal(stddev=0.02)
 _LN_EPS: float = 1e-6
-
-
-@keras.saving.register_keras_serializable()
-class _LearnedQueryPool1D(keras.layers.Layer):
-    """Single-query attention pool over a ``(B, N, D)`` sequence.
-
-    A learnable ``(1, D)`` query computes attention scores against each
-    position in the sequence and returns the value-weighted mean — the
-    canonical "class-token-free" attention pool. An optional
-    ``(B, N)`` ``mask`` zeroes out padded positions before softmax so
-    the pool ignores pad tokens.
-
-    This is the second pooling view used by the CliffordCLIP
-    ``learned_query`` head: the geometric product of (mean, attn-pool)
-    gives wedge content that (max, mean) could not capture because the
-    attention pool is *content-dependent* — it adapts to where the
-    salient features are instead of taking the global maximum.
-    """
-
-    def __init__(
-        self,
-        channels: int,
-        kernel_initializer: Any = "glorot_uniform",
-        **kwargs: Any,
-    ) -> None:
-        super().__init__(**kwargs)
-        self.channels = channels
-        self.kernel_initializer = initializers.get(kernel_initializer)
-
-    def build(self, input_shape: Tuple) -> None:
-        self.query = self.add_weight(
-            name="query",
-            shape=(self.channels,),
-            initializer=self.kernel_initializer,
-            trainable=True,
-        )
-        super().build(input_shape)
-
-    def call(
-        self,
-        features: keras.KerasTensor,
-        mask: Optional[keras.KerasTensor] = None,
-    ) -> keras.KerasTensor:
-        scores = ops.einsum("bnd,d->bn", features, self.query)
-        scores = scores / (float(self.channels) ** 0.5)
-        if mask is not None:
-            # DECISION plan-2026-07-15T114613-5add9baa/D-001: dtype-safe mask sentinel (ops.where, finite -1e4) — a -1e9 literal casts to -inf under fp16 and 0*-inf=NaN poisons unmasked tokens; do NOT revert to an additive -1e9/-inf mask.
-            mask_bool = ops.cast(mask, "bool")
-            neg = ops.cast(-1e4, scores.dtype)
-            scores = ops.where(mask_bool, scores, neg)
-        weights = keras.activations.softmax(scores, axis=-1)
-        return ops.einsum("bn,bnd->bd", weights, features)
-
-    def compute_output_shape(self, input_shape: Tuple) -> Tuple:
-        """Pool over the sequence axis: (B, N, D) -> (B, D)."""
-        if isinstance(input_shape, (list, tuple)) and len(input_shape) == 2 and isinstance(input_shape[0], (list, tuple)):
-            features_shape = input_shape[0]
-        else:
-            features_shape = input_shape
-        return (features_shape[0], features_shape[-1])
-
-    def get_config(self) -> Dict[str, Any]:
-        config = super().get_config()
-        config.update(
-            {
-                "channels": self.channels,
-                "kernel_initializer": initializers.serialize(
-                    self.kernel_initializer
-                ),
-            }
-        )
-        return config
 
 
 # ===========================================================================
@@ -564,7 +493,7 @@ class CliffordCLIP(keras.Model):
                     f"({max(sh)} >= {stage_channels[i]})"
                 )
         # Validate post-stem spatial dim keeps a >=2x2 map at the final stage.
-        # DECISION plan-2026-07-15T114613-5add9baa/D-001: require >=2x2 final spatial (post_stem >= 2^n_stages) — a 1x1 map makes _LearnedQueryPool1D softmax-over-1 a dead-gradient no-op (B1); do NOT relax to 2^(n_stages-1).
+        # DECISION plan-2026-07-15T114613-5add9baa/D-001: require >=2x2 final spatial (post_stem >= 2^n_stages) — a 1x1 map makes the attention pool (softmax-over-1) a dead-gradient no-op (B1); do NOT relax to 2^(n_stages-1).
         post_stem = image_size // vision_patch_size
         if post_stem < (1 << n_stages):
             raise ValueError(
@@ -987,13 +916,16 @@ class CliffordCLIP(keras.Model):
         if self.head_kind in ("learned_query", "learned_query_residual"):
             # One learnable (1, D) query per tower attending to the
             # (B, N, D) feature sequence. Output: (B, D).
-            self.vision_query_pool = _LearnedQueryPool1D(
-                channels=self.vision_channels,
+            # DECISION plan-2026-07-15T134205-d73ff415/D-001: reuse shipped AttentionPooling instead of bespoke _LearnedQueryPool1D (factory-first reuse); checkpoint-incompatible by design (param shapes differ) — user waived BC.
+            self.vision_query_pool = AttentionPooling(
+                hidden_dim=self.vision_channels,
+                num_heads=1,
                 kernel_initializer=self.kernel_initializer,
                 name="vision_query_pool",
             )
-            self.text_query_pool = _LearnedQueryPool1D(
-                channels=self.text_channels,
+            self.text_query_pool = AttentionPooling(
+                hidden_dim=self.text_channels,
+                num_heads=1,
                 kernel_initializer=self.kernel_initializer,
                 name="text_query_pool",
             )
@@ -1178,7 +1110,7 @@ class CliffordCLIP(keras.Model):
             else:  # learned_query or learned_query_residual
                 b, h, w, d = ops.shape(x)[0], ops.shape(x)[1], ops.shape(x)[2], ops.shape(x)[3]
                 seq = ops.reshape(x, (b, h * w, d))    # (B, H*W, D_v)
-                z_ctx = self.vision_query_pool(seq)    # (B, D_v)
+                z_ctx = self.vision_query_pool(seq, training=training)    # (B, D_v)
             geo = self.vision_head_geo(z_det, z_ctx)   # (B, D_v)
             if self.head_kind == "learned_query_residual":
                 mixed = z_det + self.vision_head_scale(geo)
@@ -1256,7 +1188,7 @@ class CliffordCLIP(keras.Model):
                 # z_ctx = last non-pad token.
                 z_ctx = last_feat
             else:  # learned_query or learned_query_residual
-                z_ctx = self.text_query_pool(x, mask=non_pad)    # (B, D_t)
+                z_ctx = self.text_query_pool(x, mask=non_pad, training=training)    # (B, D_t)
 
             geo = self.text_head_geo(z_det, z_ctx)               # (B, D_t)
             if self.head_kind == "learned_query_residual":
