@@ -468,6 +468,7 @@ class EnergyAttention(keras.layers.Layer):
         g: keras.KerasTensor,
         attention_mask: Optional[keras.KerasTensor],
         mask: Optional[keras.KerasTensor] = None,
+        adjacency_weight: Optional[keras.KerasTensor] = None,
     ) -> Tuple[keras.KerasTensor, ...]:
         """Compute ``K``, ``Q``, the masked ``logits`` and the ``keep`` mask.
 
@@ -478,6 +479,14 @@ class EnergyAttention(keras.layers.Layer):
         :param mask: Optional Keras-propagated ``(B, N)`` mask, ANDed with
             ``attention_mask`` (see :meth:`_build_keep_mask`, D-002/D-003).
         :type mask: Optional[keras.KerasTensor]
+        :param adjacency_weight: Optional FINITE per-head weighted-adjacency ``Ŵ``
+            broadcastable to ``(B, H, N, N)`` (paper eq.25, Branch A). When supplied it is
+            folded MULTIPLICATIVELY into the raw score BEFORE the ``beta`` scaling and the
+            keep-bias: ``logit = beta * (A ⊙ Ŵ) + M``. It is a per-block CONSTANT
+            (``dŴ/dg == 0``) hoisted by the block, NOT a reinterpretation of the 0/1
+            ``attention_mask`` (D-002/D-006). ``None`` (default) → the code path below is
+            provably UNREACHABLE and the layer is byte-identical to today.
+        :type adjacency_weight: Optional[keras.KerasTensor]
 
         ``K`` and ``Q`` come back in the **compute dtype** (they feed the gradient einsums,
         which contract against the compute-dtype weights). ``logits`` and ``keep`` come back
@@ -506,6 +515,15 @@ class EnergyAttention(keras.layers.Layer):
         #     is SKIPPED entirely — the sibling's fast path.
         # Do NOT collapse any of the three. See decisions.md D-009.
         logits = ops.cast(a, _mask_dtype(self.compute_dtype)) * self._beta  # (B,H,N,N) f32
+        if adjacency_weight is not None:
+            # Branch A (paper eq.25): fold the FINITE learned edge weight `Ŵ` into the score
+            # MULTIPLICATIVELY, in the mask dtype (>= float32) so the whole logits -> bias ->
+            # logsumexp chain stays out of fp16 (D-009). This is `beta * (A ⊙ Ŵ)`. `Ŵ` is a
+            # per-block CONSTANT w.r.t. `g`, so it adds NO new gradient term; it only reweights
+            # the existing delta-structure (see the omega_eff anchor in `update`). A real
+            # Python branch — NOT a multiply-by-ones — so `None` is byte-identical to today.
+            w_hat = ops.cast(adjacency_weight, _mask_dtype(self.compute_dtype))
+            logits = logits * w_hat                                          # (B,H,N,N) f32
         if is_masked:
             # Both `where` branches are tensors IN THE MASK DTYPE — a bare Python `0.0` /
             # `-1e9` pair gets promoted to float32 and then collides with a float64 `logits`.
@@ -527,6 +545,7 @@ class EnergyAttention(keras.layers.Layer):
         g: keras.KerasTensor,
         attention_mask: Optional[keras.KerasTensor] = None,
         mask: Optional[keras.KerasTensor] = None,
+        adjacency_weight: Optional[keras.KerasTensor] = None,
     ) -> keras.KerasTensor:
         """Scalar attention energy ``E_ATT`` per batch element (paper eq. 4).
 
@@ -553,6 +572,10 @@ class EnergyAttention(keras.layers.Layer):
             public duck-typed surface an ``EnergyTransformer`` block calls DIRECTLY, outside
             ``__call__``, where Keras cannot inject the mask for us.
         :type mask: Optional[keras.KerasTensor]
+        :param adjacency_weight: Optional FINITE weighted adjacency ``Ŵ`` (paper eq.25,
+            Branch A), folded into the score as ``beta * (A ⊙ Ŵ)`` (see :meth:`_project`).
+            It MUST be the SAME tensor passed to :meth:`update`, or ``update() != -dE/dg``.
+        :type adjacency_weight: Optional[keras.KerasTensor]
 
         :return: Energy of shape ``(B,)``.
         :rtype: keras.KerasTensor
@@ -569,9 +592,11 @@ class EnergyAttention(keras.layers.Layer):
         # I1/STOP-IF 2: `mask` MUST reach `_project` here AND in `update()`. If it lands in
         # only one of them, `update()` stops being `-dE/dg` — the layer still runs, still
         # trains, and the descent guarantee silently evaporates. `test_gradient_oracle` runs
-        # WITH a Keras mask (`mask_kind` in {KERAS, BN+KERAS}) precisely to catch that.
+        # WITH a Keras mask (`mask_kind` in {KERAS, BN+KERAS}) precisely to catch that. The
+        # SAME discipline applies to `adjacency_weight`: it must reach the SAME `_project`
+        # call that `update()` makes, or `update() != -dE/dg`.
         _, _, logits, keep = self._project(
-            g, attention_mask, mask=mask
+            g, attention_mask, mask=mask, adjacency_weight=adjacency_weight
         )                                                       # logits, keep: float32
 
         # logsumexp over the KEY axis n (axis=2) -> (B, H, N) indexed by (b, h, m).
@@ -609,6 +634,7 @@ class EnergyAttention(keras.layers.Layer):
         g: keras.KerasTensor,
         attention_mask: Optional[keras.KerasTensor] = None,
         mask: Optional[keras.KerasTensor] = None,
+        adjacency_weight: Optional[keras.KerasTensor] = None,
     ) -> keras.KerasTensor:
         """Return ``-dE_ATT/dg`` — the DESCENT DIRECTION, **not** the gradient.
 
@@ -625,6 +651,10 @@ class EnergyAttention(keras.layers.Layer):
             ANDed with ``attention_mask`` (decisions.md D-003). It MUST be passed to the
             SAME ``_project`` call ``energy()`` makes, or ``update() != -dE/dg``.
         :type mask: Optional[keras.KerasTensor]
+        :param adjacency_weight: Optional FINITE weighted adjacency ``Ŵ`` (paper eq.25,
+            Branch A). It MUST be the SAME tensor passed to :meth:`energy`, or
+            ``update() != -dE/dg``.
+        :type adjacency_weight: Optional[keras.KerasTensor]
 
         :return: ``-dE_ATT/dg`` of shape ``(B, N, D)``.
         :rtype: keras.KerasTensor
@@ -635,9 +665,10 @@ class EnergyAttention(keras.layers.Layer):
         # C-2: cast at the head of the public method — see the note in `energy()`.
         g = ops.cast(g, self.compute_dtype)
 
-        # I1/STOP-IF 2: same masks as `energy()` — see the note there.
+        # I1/STOP-IF 2: same masks AND same `adjacency_weight` as `energy()` — see the note
+        # there. A weight landing in only one of them makes `update() != -dE/dg`.
         k, q, logits, keep = self._project(
-            g, attention_mask, mask=mask
+            g, attention_mask, mask=mask, adjacency_weight=adjacency_weight
         )                                                       # logits, keep: float32
 
         # Softmax over the KEY axis n, then ZERO the masked keys. The post-softmax `* keep`
@@ -648,6 +679,30 @@ class EnergyAttention(keras.layers.Layer):
         # The softmax itself is evaluated in float32 (D-009); `omega` is cast back to the
         # compute dtype at the boundary, to contract with the compute-dtype K/Q/weights.
         omega = ops.softmax(logits, axis=2) * keep          # (B, H, N, N), float32
+
+        # DECISION plan-2026-07-15T053724-78001af1/D-001
+        # Branch A (paper eq.25) weighted adjacency. When `Ŵ` is supplied, the energy is
+        # `E' = -(1/beta) Σ_h Σ_m logsumexp_n( beta·A·Ŵ + M )`, so
+        #   -dE'/dg = -(1/beta) Σ omega'·d(beta·A·Ŵ)/dg = Σ (omega'·Ŵ)·dA/dg ,
+        # where omega' = softmax_n(beta·A·Ŵ + M). `Ŵ` and `M` are per-block CONSTANTS
+        # (dŴ/dg == 0, Branch A), so dA/dg keeps its EXACT delta structure — the two-term
+        # (term_q + term_k) form below is reused verbatim with `omega_eff = omega·Ŵ` in place
+        # of `omega`. WHAT NOT TO DO (this is the exact gradient the oracle at
+        # test_energy_attention.py::TestGradientOracle checks, verified RED when the `·Ŵ`
+        # factor is deleted, at N∈{64,1024}):
+        #   * Do NOT recompute `Ŵ` per descent step — it is a per-block constant HOISTED by
+        #     the block; recomputing it from the evolving `g_t` would add a `dŴ/dg` term (**)
+        #     that this closed form deliberately does NOT carry (that is Branch B1, Tier-3).
+        #   * Do NOT drop the `·Ŵ` factor from `omega_eff`. Folding `Ŵ` into the logits ALONE
+        #     (so only `omega'` sees it) is NOT enough: the chain rule pulls a SECOND `Ŵ` out
+        #     of `d(beta·A·Ŵ)/dg`. Omitting it leaves a layer that runs, trains, and produces
+        #     finite plausible output while no longer being `-dE/dg` — the descent guarantee
+        #     silently evaporates. Only `test_gradient_oracle` catches it.
+        #   * Do NOT feed `Ŵ` to only one of `term_q`/`term_k`; BOTH gradient terms carry it.
+        # See decisions.md D-001 (this plan) and the sibling D-001 anchor on `term_k` below.
+        if adjacency_weight is not None:
+            w_hat = ops.cast(adjacency_weight, _mask_dtype(self.compute_dtype))
+            omega = omega * w_hat                            # omega_eff, still float32
         omega = ops.cast(omega, self.compute_dtype)
 
         # Term 1: token i in the QUERY role. This is the only term vanilla attention has
@@ -676,6 +731,7 @@ class EnergyAttention(keras.layers.Layer):
         attention_mask: Optional[keras.KerasTensor] = None,
         training: Optional[bool] = None,
         mask: Optional[keras.KerasTensor] = None,
+        adjacency_weight: Optional[keras.KerasTensor] = None,
     ) -> keras.KerasTensor:
         """Return the energy descent direction ``-dE_ATT/dg`` for ``inputs``.
 
@@ -699,11 +755,17 @@ class EnergyAttention(keras.layers.Layer):
         :param mask: Keras-propagated rank-2 ``(B, N)`` boolean per-token validity mask.
             Normally injected by Keras, not passed by hand.
         :type mask: Optional[keras.KerasTensor]
+        :param adjacency_weight: Optional FINITE weighted adjacency ``Ŵ`` (paper eq.25,
+            Branch A), forwarded unchanged to :meth:`update` (see :meth:`_project`).
+        :type adjacency_weight: Optional[keras.KerasTensor]
 
         :return: Tensor of shape ``(B, N, D)``.
         :rtype: keras.KerasTensor
         """
-        return self.update(inputs, attention_mask=attention_mask, mask=mask)
+        return self.update(
+            inputs, attention_mask=attention_mask, mask=mask,
+            adjacency_weight=adjacency_weight,
+        )
 
     # -----------------------------------------------------------------
 

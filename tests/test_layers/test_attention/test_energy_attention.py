@@ -172,6 +172,149 @@ class TestGradientOracle:
 
 
 # ---------------------------------------------------------------------
+# S6a-W — THE WEIGHTED-ADJACENCY GRADIENT ORACLE (Branch A, paper eq.25)
+# ---------------------------------------------------------------------
+
+
+def _buggy_update_missing_weight_factor(layer, g, adjacency_weight):
+    """RED-control: `EnergyAttention.update`'s omega_eff with the `·Ŵ` factor DELETED.
+
+    This is the exact bug the weighted oracle must catch: `Ŵ` is folded into the logits (via
+    the real `_project`, so the ENERGY is correct) but the SECOND `Ŵ` the chain rule pulls
+    out of `d(beta·A·Ŵ)/dg` is dropped from omega_eff. It is EXECUTED (not described in a
+    comment) so the necessity of the factor is proven RED, per LESSONS ("a guard never shown
+    RED is not a guard").
+    """
+    g = keras.ops.cast(g, layer.compute_dtype)
+    k, q, logits, keep = layer._project(g, None, adjacency_weight=adjacency_weight)
+    omega = keras.ops.softmax(logits, axis=2) * keep      # NO `* w_hat` — the injected bug
+    omega = keras.ops.cast(omega, layer.compute_dtype)
+    term_q = keras.ops.einsum('yhd,byhn,bhnm->bmd', layer.w_query, k, omega)
+    term_k = keras.ops.einsum('yhd,byhm,bhnm->bnd', layer.w_key, q, omega)
+    return term_q + term_k
+
+
+class TestWeightedAdjacencyGradientOracle:
+    """Branch A (paper eq.25): update(g, Ŵ) == -d/dg[Σ_b energy(g, Ŵ)] for the SAME constant
+    Ŵ fed to both, at REALISTIC N ∈ {64, 1024} (never toy N — LESSONS). Deleting the `·Ŵ`
+    factor from omega_eff must make it RED (the factor is load-bearing)."""
+
+    _B, _H, _DIM = 2, HEADS, DIM
+
+    def _weight(self, B, H, N, kind, dtype, seed=101):
+        """A FIXED random FINITE per-head weighted adjacency Ŵ of shape (B, H, N, N)."""
+        rng = np.random.default_rng(seed)
+        w = rng.standard_normal((B, H, N, N))
+        if kind == "positive":
+            w = np.abs(w) + 0.1          # positive, non-degenerate
+        # "signed": leave as-is (finite, non-degenerate, mixed sign)
+        return tf.constant(w.astype(dtype))
+
+    def _excite_dtype(self, layer, dtype, scale=0.5, seed=7):
+        """`_excite`, but honoring the layer's variable dtype (float64 at N=1024)."""
+        rng = np.random.default_rng(seed)
+        shape = tuple(layer.w_key.shape)
+        layer.w_key.assign((rng.standard_normal(shape) * scale).astype(dtype))
+        layer.w_query.assign((rng.standard_normal(shape) * scale).astype(dtype))
+
+    # N=64 runs in float32 (the compute-dtype path, matching the existing oracle). N=1024
+    # runs in float64: at that reduction width the float32 logsumexp/softmax accumulation
+    # (TF autodiff vs the closed-form einsum sum in DIFFERENT orders) sits at ~3e-4 — a
+    # ROUNDING floor, not a gradient error (verified: the same case in float64 matches to
+    # 7e-13). float64 removes that confound and proves the constant-Ŵ closed form is EXACT
+    # at N=1024, cleanly under rtol=1e-4. (The fp16/XLA-overflow concern at large N is a
+    # SEPARATE guard — plan Step 3 — not this correctness gate.)
+    @pytest.mark.parametrize("weight_kind", ["positive", "signed"])
+    @pytest.mark.parametrize("num_tokens, floatx", [(64, "float32"), (1024, "float64")])
+    def test_weighted_gradient_oracle(self, weight_kind, num_tokens, floatx):
+        B, H, D, N = self._B, self._H, self._DIM, num_tokens
+        tf_dtype = tf.float64 if floatx == "float64" else tf.float32
+        layer = EnergyAttention(dim=D, num_heads=H, attn_self=False, dtype=floatx)
+        layer.build((B, N, D))
+        self._excite_dtype(layer, floatx)
+
+        x = np.random.default_rng(2024).standard_normal((B, N, D)).astype(floatx)
+        w_hat = self._weight(B, H, N, weight_kind, floatx)
+
+        g = tf.Variable(x, dtype=tf_dtype)
+        with tf.GradientTape() as tape:
+            energy = tf.reduce_sum(layer.energy(g, adjacency_weight=w_hat))
+        grad = tape.gradient(energy, g)
+        assert grad is not None, "weighted energy() has no gradient path to g"
+
+        update = keras.ops.convert_to_numpy(layer.update(g, adjacency_weight=w_hat))
+        neg_grad = grad.numpy()  # +dE/dg; update must be its negation
+
+        assert np.abs(update).max() > 1e-3, (
+            f"weighted update is ~0 (max |update| = {np.abs(update).max():.3e}) — the "
+            "oracle would pass vacuously."
+        )
+        assert np.all(np.isfinite(update))
+        assert np.all(np.isfinite(neg_grad))
+
+        max_abs_err = float(np.abs(update - (-neg_grad)).max())
+        np.testing.assert_allclose(
+            update, -neg_grad, rtol=1e-4, atol=1e-5,
+            err_msg=(
+                f"weighted update() != -dE/dg (weight_kind={weight_kind}, N={num_tokens}, "
+                f"dtype={floatx}); max-abs-error={max_abs_err:.3e}. The constant-Ŵ closed "
+                "form (omega_eff = softmax(beta·A·Ŵ + M)·keep·Ŵ) is WRONG — do NOT 'fix' "
+                "energy() to match it."
+            ),
+        )
+
+    def test_red_control_missing_weight_factor_is_wrong(self):
+        """PROVEN RED: dropping the `·Ŵ` factor from omega_eff breaks update() == -dE/dg,
+        while the correct closed form matches. Same Ŵ, same energy, only the second factor
+        differs — so this isolates exactly that factor."""
+        B, H, D, N = self._B, self._H, self._DIM, 64
+        layer = EnergyAttention(dim=D, num_heads=H, attn_self=False)
+        layer.build((B, N, D))
+        _excite(layer)
+
+        x = np.random.default_rng(7).standard_normal((B, N, D)).astype("float32")
+        w_hat = self._weight(B, H, N, "positive", "float32")
+
+        g = tf.Variable(x, dtype=tf.float32)
+        with tf.GradientTape() as tape:
+            energy = tf.reduce_sum(layer.energy(g, adjacency_weight=w_hat))
+        neg_grad = tape.gradient(energy, g).numpy()
+
+        # GREEN: the correct closed form matches the tape.
+        correct = keras.ops.convert_to_numpy(layer.update(g, adjacency_weight=w_hat))
+        np.testing.assert_allclose(correct, -neg_grad, rtol=1e-4, atol=1e-5)
+
+        # RED: the Ŵ-factor-deleted variant does NOT — proving the factor is load-bearing.
+        buggy = keras.ops.convert_to_numpy(
+            _buggy_update_missing_weight_factor(layer, g, w_hat)
+        )
+        buggy_err = float(np.abs(buggy - (-neg_grad)).max())
+        assert buggy_err > 1e-2, (
+            f"deleting the ·Ŵ factor from omega_eff STILL matched the tape "
+            f"(err={buggy_err:.3e}) — the RED control did not bite, so the oracle cannot "
+            "prove the factor is load-bearing (LESSONS: a guard never shown RED is not a "
+            "guard)."
+        )
+
+    def test_none_is_byte_identical(self):
+        """adjacency_weight=None (and its absence) is byte-identical to today — the new code
+        path is a real Python `is not None` branch, not a multiply-by-ones."""
+        B, H, D, N = self._B, self._H, self._DIM, 64
+        layer = EnergyAttention(dim=D, num_heads=H, attn_self=False)
+        layer.build((B, N, D))
+        _excite(layer)
+        x = np.random.default_rng(5).standard_normal((B, N, D)).astype("float32")
+
+        u_absent = keras.ops.convert_to_numpy(layer.update(x))
+        u_none = keras.ops.convert_to_numpy(layer.update(x, adjacency_weight=None))
+        e_absent = keras.ops.convert_to_numpy(layer.energy(x))
+        e_none = keras.ops.convert_to_numpy(layer.energy(x, adjacency_weight=None))
+
+        np.testing.assert_array_equal(u_absent, u_none)
+        np.testing.assert_array_equal(e_absent, e_none)
+
+
+# ---------------------------------------------------------------------
 # S9 — attn_self=False actually excludes the diagonal
 # ---------------------------------------------------------------------
 
