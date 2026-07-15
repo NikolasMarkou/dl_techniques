@@ -109,7 +109,7 @@ from train.cliffordnet.train_clip import (
     _compute_retrieval_metrics,
     ContrastiveCliffordCLIP,
 )
-from dl_techniques.models.cliffordnet.clip import CliffordCLIP
+from dl_techniques.models.clip.clifford_clip import CliffordCLIP
 from dl_techniques.losses import CLIPContrastiveLoss
 from dl_techniques.utils.logger import logger
 

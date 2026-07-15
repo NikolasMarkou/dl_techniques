@@ -56,7 +56,7 @@ from train.common.image_text import (
     make_image_text_tf_dataset,
     tokenize_captions,
 )
-from dl_techniques.models.cliffordnet.clip import CliffordCLIP
+from dl_techniques.models.clip.clifford_clip import CliffordCLIP
 from dl_techniques.utils.logger import logger
 
 # Checkpoints saved by ``train_clip.py`` are the BARE ``CliffordCLIP``

@@ -162,7 +162,7 @@ import numpy as np  # noqa: E402
 import tensorflow as tf  # noqa: E402
 
 from dl_techniques.losses import CLIPContrastiveLoss
-from dl_techniques.models.cliffordnet import CliffordCLIP
+from dl_techniques.models.clip.clifford_clip import CliffordCLIP
 from dl_techniques.optimization import (
     learning_rate_schedule_builder,
     optimizer_builder,
