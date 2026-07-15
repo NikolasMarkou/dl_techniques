@@ -308,7 +308,7 @@ noise_pred = model(noisy_images)  # (B, H, W, C)
 ### CliffordCLIP (Vision-Language)
 
 ```python
-from dl_techniques.models.cliffordnet import CliffordCLIP
+from dl_techniques.models.clip.clifford_clip import CliffordCLIP
 
 model = CliffordCLIP.from_variant(
     "small", vocab_size=50257, image_size=112, context_length=64,

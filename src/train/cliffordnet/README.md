@@ -739,7 +739,7 @@ for method in ["standard", "power", "max_swap"]:
 ## 8. CLIP Contrastive Pretraining
 
 **Script**: `train_clip.py`
-**Model**: `CliffordCLIP` (`dl_techniques/models/cliffordnet/clip.py`)
+**Model**: `CliffordCLIP` (`dl_techniques/models/clip/clifford_clip.py`)
 **Data prep**: `prepare_cc3m.py`
 **Reference**: Radford, A. et al. (2021). *Learning Transferable Visual Models From Natural Language Supervision* (CLIP). arXiv:2103.00020.
 
