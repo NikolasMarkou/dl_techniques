@@ -116,8 +116,12 @@ class GraphEnergyTransformerBackbone(keras.Model):
         descent guarantee — **variant B MUST keep this ``0.0``** so the manual
         :meth:`descend_capture` loop matches the block's own noiseless descent.
     :param norm_epsilon: ``epsilon`` of each block's inner ``EnergyLayerNorm``.
-    :param attn_self: ``False`` (default) is the paper's ET-Full (a token does not attend to
-        itself).
+    :param attn_self: ``True`` (default for the GRAPH trunk) lets a node attend to itself so the
+        graph loaders' ``add_self_loops=True`` adjacency diagonal is HONORED. The image ET-Full
+        MIM default is ``False`` (a token does not attend to itself); for graphs that is wrong —
+        ``EnergyAttention`` would silently MASK the adjacency diagonal, making the deliberately
+        added self-loops a dead no-op (E_ATT bit-identical with diagonal 1 vs 0). Configurable;
+        pass ``attn_self=False`` to recover the paper's image default. See decisions.md D-004.
     :param use_pe: If ``True``, create a ``pe_proj`` Dense and add ``pe_proj(pe)`` to the tokens
         (variant C Laplacian PE). Defaults to ``False``.
     :param pe_dim: Laplacian-PE dimension (columns of the eigenvector block). Defaults to ``15``.
@@ -151,7 +155,7 @@ class GraphEnergyTransformerBackbone(keras.Model):
             hopfield_beta: float = 1.0,
             noise_std: float = 0.0,
             norm_epsilon: float = 1e-5,
-            attn_self: bool = False,
+            attn_self: bool = True,   # DECISION plan-2026-07-15T015824-3c2159eb/D-004
             use_pe: bool = False,
             pe_dim: int = 15,
             use_cls: bool = False,
@@ -193,6 +197,13 @@ class GraphEnergyTransformerBackbone(keras.Model):
         self.hopfield_beta = float(hopfield_beta)
         self.noise_std = float(noise_std)
         self.norm_epsilon = float(norm_epsilon)
+        # DECISION plan-2026-07-15T015824-3c2159eb/D-004: the GRAPH trunk defaults attn_self=True.
+        # WHAT NOT TO DO: do NOT "align" this back to the image MIM default (False). The graph
+        # loaders (tudataset.py, fraud.py) set add_self_loops=True to let a node attend to its own
+        # features; with attn_self=False, EnergyAttention masks the adjacency DIAGONAL, so E_ATT is
+        # bit-identical whether the diagonal is 1 or 0 (measured diff 0.0, iter-2 REFLECT) — the
+        # self-loops become a dead no-op and a node can NEVER see itself. Keep it configurable
+        # (False recovers the image default) but graph-default it to True. See decisions.md D-004.
         self.attn_self = bool(attn_self)
         self.use_pe = bool(use_pe)
         self.pe_dim = int(pe_dim)

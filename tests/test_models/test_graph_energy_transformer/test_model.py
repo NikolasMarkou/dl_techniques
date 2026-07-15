@@ -46,6 +46,8 @@ from dl_techniques.models.graph_energy_transformer.model import (
     GraphAnomalyDetector,
     GraphClassifier,
     GraphEnergyTransformerBackbone,
+    create_graph_anomaly_detector,
+    create_graph_classifier,
 )
 
 # --- geometry. N >= 64 WITH PAD rows. DO NOT SHRINK N. ----------------------
@@ -593,3 +595,106 @@ class TestGraphConfigCycle:
         assert model2.backbone.get_config() == model.backbone.get_config()
         assert model2.num_classes == model.num_classes
         assert model2.head_dropout_rate == model.head_dropout_rate
+
+
+# ===========================================================================
+# Step 13 (iter-2 PIVOT, D-004) — graph self-loops are HONORED (attn_self=True).
+#
+# The graph loaders add self-loops (add_self_loops=True) so a node can attend to
+# its OWN features. That only works if the trunk's attn_self=True — the NEW graph
+# default (D-004). With the image MIM default attn_self=False, EnergyAttention masks
+# the adjacency DIAGONAL, so the self-loops are a DEAD no-op: E_ATT (and the whole
+# forward) is bit-identical whether the diagonal is 1 or 0. This guard proves the fix
+# BOTH directions — the attn_self=False control must stay bit-identical, otherwise the
+# True-direction test is not actually sensitive to the flag (LESSONS: prove RED).
+# ===========================================================================
+
+# A diag=1 vs diag=0 forward difference this large is unambiguously the self-loop,
+# not float noise; the attn_self=False control lands exactly on 0.0 (masked).
+SELF_LOOP_MIN_DIFF = 1e-3
+
+
+def _diag_adjacency_pair(seed: int):
+    """Two adjacencies identical everywhere EXCEPT the real-node diagonal (0 vs 1).
+
+    Off-diagonal edges are shared bit-for-bit; the ONLY difference is whether each real
+    node carries a self-loop. PAD rows (>= ``N_REAL``) stay all-zero (masked out anyway).
+    """
+    rng = np.random.default_rng(seed)
+    base = np.zeros((BATCH, N, N), dtype="float32")
+    sub = (rng.random((BATCH, N_REAL, N_REAL)) < 0.15).astype("float32")
+    base[:, :N_REAL, :N_REAL] = sub
+    for b in range(BATCH):
+        np.fill_diagonal(base[b], 0.0)                     # drop any random self-loops first
+    adj_diag0 = base.copy()
+    adj_diag1 = base.copy()
+    idx = np.arange(N_REAL)
+    adj_diag1[:, idx, idx] = 1.0                           # a self-loop on every real node
+    return adj_diag0, adj_diag1
+
+
+def _self_loop_inputs(adjacency: np.ndarray, seed: int) -> dict:
+    """B-contract inputs that SHARE node_features/node_mask, swapping only the adjacency."""
+    rng = np.random.default_rng(seed)
+    node_features = np.zeros((BATCH, N, F), dtype="float32")
+    node_features[:, :N_REAL, :] = rng.normal(size=(BATCH, N_REAL, F)).astype("float32")
+    node_mask = np.zeros((BATCH, N), dtype="float32")
+    node_mask[:, :N_REAL] = 1.0
+    return {"node_features": node_features, "adjacency": adjacency, "node_mask": node_mask}
+
+
+class TestGraphSelfLoops:
+    """The D-004 fix: attn_self HONORS the loaders' self-loops (the diagonal changes the output)."""
+
+    def _diag_forward_diff(self, attn_self: bool) -> float:
+        """max|delta| of a B-backbone forward between adjacency diagonal 0 and 1 (same weights)."""
+        keras.utils.set_random_seed(0)
+        kwargs = dict(_b_backbone_kwargs())
+        kwargs["attn_self"] = attn_self
+        bb = _backbone(kwargs)
+        adj0, adj1 = _diag_adjacency_pair(seed=7)
+        out0 = _predict(bb, _self_loop_inputs(adj0, seed=1))
+        out1 = _predict(bb, _self_loop_inputs(adj1, seed=1))
+        return float(np.max(np.abs(out0 - out1)))
+
+    def test_self_loops_change_output_when_attn_self_true(self):
+        """attn_self=True (new graph default): diagonal 1 vs 0 gives a MATERIALLY different output."""
+        diff = self._diag_forward_diff(attn_self=True)
+        assert diff > SELF_LOOP_MIN_DIFF, (
+            f"self-loops did NOT change the output (max|delta|={diff:.3e}) under attn_self=True — "
+            "the adjacency diagonal is being ignored, i.e. add_self_loops is a dead no-op"
+        )
+
+    def test_self_loops_masked_when_attn_self_false(self):
+        """attn_self=False control: the diagonal is MASKED, so the output is BIT-IDENTICAL.
+
+        Proves the True-direction test is sensitive to the flag (not vacuously passing on float
+        noise) AND documents the OLD dead-no-op behavior that the D-004 default flip corrects.
+        """
+        diff = self._diag_forward_diff(attn_self=False)
+        assert diff == 0.0, (
+            f"attn_self=False should MASK the diagonal (self-loops invisible), but the output "
+            f"changed by {diff:.3e} — the control is not masking, so the True test proves nothing"
+        )
+
+    def test_graph_trunk_defaults_to_attn_self_true(self):
+        """The GRAPH backbone default is attn_self=True and it survives a get_config round-trip."""
+        bb = _backbone(_b_backbone_kwargs())                  # kwargs do NOT set attn_self
+        assert bb.attn_self is True, "graph trunk must default attn_self=True (D-004)"
+        assert bb.get_config()["attn_self"] is True
+        bb2 = GraphEnergyTransformerBackbone.from_config(bb.get_config())
+        assert bb2.attn_self is True, "attn_self=True default did not survive get_config round-trip"
+
+    def test_factory_backbones_default_attn_self_true(self):
+        """Both head factories inherit the attn_self=True graph default end-to-end."""
+        b = create_graph_anomaly_detector(
+            node_feature_dim=F, embed_dim=EMBED_DIM, num_heads=NUM_HEADS, head_dim=HEAD_DIM,
+            hopfield_dim=HOPFIELD_DIM, mlp_hidden_dim=MLP_HIDDEN, num_steps=NUM_STEPS,
+        )
+        assert b.backbone.attn_self is True, "variant-B factory did not default attn_self=True"
+        c = create_graph_classifier(
+            node_feature_dim=F, num_classes=NUM_CLASSES, embed_dim=EMBED_DIM,
+            num_heads=NUM_HEADS, head_dim=HEAD_DIM, hopfield_dim=HOPFIELD_DIM,
+            num_blocks=2, pe_dim=PE_DIM,
+        )
+        assert c.backbone.attn_self is True, "variant-C factory did not default attn_self=True"
