@@ -698,3 +698,93 @@ class TestGraphSelfLoops:
             num_blocks=2, pe_dim=PE_DIM,
         )
         assert c.backbone.attn_self is True, "variant-C factory did not default attn_self=True"
+
+
+# ===========================================================================
+# Step 14 (iter-2 PIVOT, D-004) — variant B's class_weight actually BITES.
+#
+# The variant-B trainer up-weights the anomalous class via a stock
+# ``model.fit(..., class_weight={0: 1.0, 1: ω})``. iter-2 REFLECT proved this bites
+# (sum|dW| ~867 with class_weight={1:100} vs ~33 without = ~26x), but nothing guarded
+# it. This regression guard fails LOUDLY if a future change (e.g. a Keras upgrade that
+# silently ignores class_weight for a dict-input / scalar-label signature) turns the
+# imbalance weighting into a no-op — the "a feature that does nothing" trap the plan's
+# hardening phase exists to close. Plain fp32, jit_compile=False (matches the B trainer),
+# network-free synthetic batch.
+# ===========================================================================
+
+CW_LARGE = 100.0                          # the aggressive up-weight (matches the REFLECT probe)
+CW_FIT_STEPS = 5
+CW_SGD_LR = 1e-2                          # plain SGD: weight move ∝ gradient (see helper note)
+CW_MIN_RATIO = 2.0                        # far below the observed spread; a robust regression floor
+
+
+def _imbalanced_b_labels() -> np.ndarray:
+    """Heavily-imbalanced labels: exactly ONE anomaly (class 1) among ``BATCH`` samples.
+
+    A single positive is what makes the up-weight decisive — ``class_weight[1]`` scales that
+    lone sample's loss, so its gradient dominates only when the weighting is actually honored.
+    """
+    y = np.zeros((BATCH, 1), dtype="float32")
+    y[0, 0] = 1.0
+    return y
+
+
+def _total_abs_weight_move(model, inputs, y, class_weight) -> float:
+    """Total ``sum|dW|`` over all trainable weights after ``CW_FIT_STEPS`` stock fit steps.
+
+    Plain fp32 + ``jit_compile=False`` (the B trainer's compile). NO ``train_step`` override —
+    the weighting must flow through the real stock backward pass, exactly as in production.
+
+    WHY SGD, NOT the B trainer's Adam: Adam divides each gradient by its own running RMS, so a
+    per-sample loss up-weight (which scales the gradient) is very nearly NORMALIZED AWAY in the
+    weight DELTA — under Adam this exact comparison sits at ~0.9x and the guard could never see
+    the weighting bite. Plain SGD moves each weight by ``lr * grad``, so ``sum|dW|`` is a faithful
+    readout of the gradient magnitude the ``class_weight`` actually changes. (This tests the
+    WEIGHTING mechanism reaching the backward pass, not the B trainer's optimizer choice.)
+    """
+    model.compile(
+        optimizer=keras.optimizers.SGD(learning_rate=CW_SGD_LR),
+        loss=_BCE,
+        jit_compile=False,
+    )
+    ds = tf.data.Dataset.from_tensor_slices((inputs, y)).batch(BATCH).repeat()
+    before = _trunk_weights_snapshot(model)
+    model.fit(ds, steps_per_epoch=CW_FIT_STEPS, epochs=1, verbose=0, class_weight=class_weight)
+    after = _trunk_weights_snapshot(model)
+    return float(sum(np.sum(np.abs(after[p] - before[p])) for p in before))
+
+
+class TestVariantBClassWeightBites:
+    """Regression guard (D-004): variant B's ``class_weight`` materially changes training."""
+
+    def test_class_weight_moves_weights_materially_more(self):
+        """Aggressive class_weight moves the weights far more than class_weight=None.
+
+        Both runs start from BIT-IDENTICAL weights (same seed) and see the SAME imbalanced batch;
+        the ONLY difference is ``class_weight``. If the weighting is honored the anomaly's loss is
+        scaled CW_LARGE-fold and its gradient dominates -> a much larger total weight move.
+        """
+        inputs = _padded_graph_batch(seed=1, with_pe=False)
+        y = _imbalanced_b_labels()
+
+        keras.utils.set_random_seed(5)
+        m_none = _b_model(unsafe=False)
+        m_none.build(None)
+        move_none = _total_abs_weight_move(m_none, inputs, y, class_weight=None)
+
+        keras.utils.set_random_seed(5)
+        m_cw = _b_model(unsafe=False)
+        m_cw.build(None)
+        move_cw = _total_abs_weight_move(m_cw, inputs, y, class_weight={0: 1.0, 1: CW_LARGE})
+
+        assert move_none > 0.0, (
+            f"baseline (class_weight=None) moved no weights ({move_none:.3e}) — the fit did "
+            "nothing, so the ratio below would be a meaningless 0/0"
+        )
+        ratio = move_cw / move_none
+        assert ratio > CW_MIN_RATIO, (
+            f"class_weight={{0:1, 1:{CW_LARGE:.0f}}} did NOT materially outweigh class_weight=None "
+            f"(sum|dW| {move_cw:.3e} vs {move_none:.3e}, ratio {ratio:.2f}x <= {CW_MIN_RATIO}) — "
+            "variant B's imbalance weighting has become a silent no-op (regression)"
+        )
