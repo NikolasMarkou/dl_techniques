@@ -23,6 +23,7 @@ from dl_techniques.utils.logger import logger
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
+from dl_techniques.layers.sequence_pooling import SequencePooling
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
@@ -395,12 +396,16 @@ class SigLIPVisionTransformer(keras.Model):
                 name="head"
             )
 
-        # Global pooling layers (if needed for feature extraction)
-        self.global_pool = None
-        if self.pooling == "mean":
-            self.global_pool = layers.GlobalAveragePooling1D(name="global_avg_pool")
-        elif self.pooling == "max":
-            self.global_pool = layers.GlobalMaxPooling1D(name="global_max_pool")
+        # Feature-extraction pooling via the shared SequencePooling layer.
+        # DECISION plan-2026-07-15T144225-5b25d9f1/D-001: pool via SequencePooling (CLS INCLUDED in
+        # mean/max — no exclude_positions, byte-identical to global_pool(x)); this INTENTIONALLY differs
+        # from vit (which excludes CLS) — divergence preserved + now explicit. Do NOT add
+        # exclude_positions=[0] here (would drop the CLS token and change outputs).
+        self.pool = None
+        if self.pooling == "cls":
+            self.pool = SequencePooling(strategy="cls", name="seq_pool")
+        elif self.pooling in ("mean", "max"):
+            self.pool = SequencePooling(strategy=self.pooling, name="seq_pool")
 
         # CLS token weight (created in build())
         self.cls_token = None
@@ -498,9 +503,9 @@ class SigLIPVisionTransformer(keras.Model):
                 self.head_dropout.build(head_input_shape)
             self.head.build(head_input_shape)
 
-        # Global pooling
-        if self.global_pool is not None:
-            self.global_pool.build(pos_input_shape)
+        # Feature-extraction pooling
+        if self.pool is not None:
+            self.pool.build(pos_input_shape)
 
         # Always call parent build at the end
         super().build(input_shape)
@@ -558,18 +563,14 @@ class SigLIPVisionTransformer(keras.Model):
             return x
         else:
             # Feature extraction mode
-            if self.pooling == "cls":
-                # Return CLS token representation
-                return x[:, 0, :]  # (batch_size, embed_dim)
-            elif self.pooling == "mean":
-                # Global average pooling over sequence
-                return self.global_pool(x)  # (batch_size, embed_dim)
-            elif self.pooling == "max":
-                # Global max pooling over sequence
-                return self.global_pool(x)  # (batch_size, embed_dim)
-            else:
-                # Return full transformer output
-                return x  # (batch_size, seq_len, embed_dim)
+            # cls / mean / max all route through SequencePooling. Here the pool is built
+            # WITHOUT exclude_positions, so the CLS token is INCLUDED in mean/max
+            # (byte-identical to the previous GlobalAveragePooling1D/GlobalMaxPooling1D over
+            # the full sequence x). This intentionally differs from vit.
+            if self.pool is not None:
+                return self.pool(x)  # (batch_size, embed_dim)
+            # pooling is None -> return the full transformer output
+            return x  # (batch_size, seq_len, embed_dim)
 
     def get_cls_token(self, features: keras.KerasTensor) -> keras.KerasTensor:
         """

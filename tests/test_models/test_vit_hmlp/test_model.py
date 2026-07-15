@@ -260,10 +260,13 @@ class TestViTHMLPBuildProcess:
             model = ViTHMLP(include_top=False, pooling=pooling, scale="tiny")
             model.build((None, 224, 224, 3))
 
-            if pooling in ["mean", "max"]:
-                assert model.global_pool is not None
+            # Feature-extraction pooling now routes through SequencePooling:
+            # cls/mean/max all build a `self.pool` sublayer; None returns the
+            # full sequence and leaves `self.pool` unset.
+            if pooling in ["cls", "mean", "max"]:
+                assert model.pool is not None
             else:
-                assert model.global_pool is None
+                assert model.pool is None
 
     def test_build_with_stochastic_depth(self):
         """Test building with stochastic depth enabled."""
