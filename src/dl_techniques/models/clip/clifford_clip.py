@@ -556,14 +556,16 @@ class CliffordCLIP(keras.Model):
                     f"vision_stage_shifts[{i}] has shift >= channels "
                     f"({max(sh)} >= {stage_channels[i]})"
                 )
-        # Validate post-stem spatial dim allows ``n_stages - 1`` halvings.
+        # Validate post-stem spatial dim keeps a >=2x2 map at the final stage.
+        # DECISION plan-2026-07-15-5add9baa/D-001: require >=2x2 final spatial (post_stem >= 2^n_stages) — a 1x1 map makes _LearnedQueryPool1D softmax-over-1 a dead-gradient no-op (B1); do NOT relax to 2^(n_stages-1).
         post_stem = image_size // vision_patch_size
-        if post_stem < (1 << (n_stages - 1)):
+        if post_stem < (1 << n_stages):
             raise ValueError(
                 f"Hierarchical vision tower requires post-stem spatial dim "
-                f"({post_stem}) >= 2^(n_stages-1) = {1 << (n_stages - 1)}; "
-                f"got image_size={image_size}, patch_size={vision_patch_size}, "
-                f"n_stages={n_stages}"
+                f"({post_stem}) >= 2^n_stages = {1 << n_stages} so the final stage "
+                f"keeps a >=2x2 map (a 1x1 map makes the attention pool a "
+                f"zero-gradient no-op); got image_size={image_size}, "
+                f"patch_size={vision_patch_size}, n_stages={n_stages}"
             )
 
         # --- Store config ---

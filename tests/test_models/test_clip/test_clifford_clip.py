@@ -25,14 +25,14 @@ from dl_techniques.models.clip.clifford_clip import CliffordCLIP
 
 @pytest.fixture
 def tiny_build_shape():
-    return {"image": (None, 32, 32, 3), "text": (None, 16)}
+    return {"image": (None, 64, 64, 3), "text": (None, 16)}
 
 
 @pytest.fixture
 def tiny_sample():
     rng = np.random.default_rng(0)
     return {
-        "image": rng.standard_normal((2, 32, 32, 3)).astype("float32"),
+        "image": rng.standard_normal((2, 64, 64, 3)).astype("float32"),
         "text": rng.integers(0, 50257, size=(2, 16)).astype("int32"),
     }
 
@@ -40,7 +40,7 @@ def tiny_sample():
 def _build_nano(vocab_size=50257, **overrides):
     kwargs = dict(
         vocab_size=vocab_size,
-        image_size=32,
+        image_size=64,
         context_length=16,
         vision_patch_size=4,
         dropout_rate=0.0,
@@ -81,14 +81,14 @@ def test_nano_matches_cliffordnet_nano_depth_and_shifts():
 
 
 def test_vision_body_halves_spatial_per_stage():
-    """For image=32, patch=4 (post-stem 8x8) and 4 stages, the post-stem
-    feature map must halve at each PatchMerging boundary: 8 -> 4 -> 2 -> 1.
+    """For image=64, patch=4 (post-stem 16x16) and 4 stages, the post-stem
+    feature map must halve at each PatchMerging boundary: 16 -> 8 -> 4 -> 2.
     """
     m = _build_nano()
-    m.build({"image": (None, 32, 32, 3), "text": (None, 16)})
+    m.build({"image": (None, 64, 64, 3), "text": (None, 16)})
     # Three merges between four stages.
     assert len(m.vision_merge_layers) == 3
-    spatial = 32 // m.vision_patch_size  # 8
+    spatial = 64 // m.vision_patch_size  # 16
     channels = m.vision_stage_channels[0]
     for i, merge in enumerate(m.vision_merge_layers):
         out_shape = merge.compute_output_shape((1, spatial, spatial, channels))
@@ -102,19 +102,19 @@ def test_vision_body_halves_spatial_per_stage():
             channels = 2 * channels
         else:
             channels = m.vision_stage_channels[i + 1]
-    # After 3 halvings starting from 8: 8 -> 4 -> 2 -> 1.
-    assert spatial == 1
+    # After 3 halvings starting from 16: 16 -> 8 -> 4 -> 2.
+    assert spatial == 2
 
 
 def test_nano_g_enables_global_context_on_vision_only():
     m = CliffordCLIP.from_variant(
         "nano_g",
         vocab_size=50257,
-        image_size=32,
+        image_size=64,
         context_length=16,
         vision_patch_size=4,
     )
-    m.build({"image": (None, 32, 32, 3), "text": (None, 16)})
+    m.build({"image": (None, 64, 64, 3), "text": (None, 16)})
     assert m.vision_use_global_context is True
     # Text tower must not receive a global-context branch -- mirrors
     # CliffordNetLM which has no global-context variant.
@@ -180,7 +180,7 @@ def test_positive_rate_is_stochastic_under_training_true(
 def test_from_variant_serialization_round_trip(tiny_sample):
     """Save → load → forward produces matching outputs on every dict key."""
     m = _build_nano()
-    m.build({"image": (None, 32, 32, 3), "text": (None, 16)})
+    m.build({"image": (None, 64, 64, 3), "text": (None, 16)})
 
     pre = m(tiny_sample, training=False)
     with tempfile.TemporaryDirectory() as td:
