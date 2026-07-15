@@ -31,6 +31,7 @@ References:
 
 import keras
 from keras import layers, ops
+from keras.saving import serialize_keras_object, deserialize_keras_object
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 # ---------------------------------------------------------------------
@@ -516,6 +517,220 @@ class GraphEnergyTransformerBackbone(keras.Model):
 
 
 # ---------------------------------------------------------------------
+# Variant B — GraphAnomalyDetector head
+# ---------------------------------------------------------------------
+
+
+def _coerce_graph_backbone(backbone: Any) -> GraphEnergyTransformerBackbone:
+    """Accept a live backbone or its serialized config dict (the ``from_config`` path)."""
+    if isinstance(backbone, GraphEnergyTransformerBackbone):
+        return backbone
+    if isinstance(backbone, dict):
+        obj = deserialize_keras_object(backbone)
+        if not isinstance(obj, GraphEnergyTransformerBackbone):
+            raise TypeError(
+                f"Deserialized backbone is a {type(obj).__name__}, expected "
+                "GraphEnergyTransformerBackbone"
+            )
+        return obj
+    raise TypeError(
+        "backbone must be a GraphEnergyTransformerBackbone (or its serialized config dict), "
+        f"got {type(backbone).__name__}"
+    )
+
+
+@keras.saving.register_keras_serializable()
+class GraphAnomalyDetector(keras.Model):
+    """Variant B (node anomaly): shared graph trunk -> target-node ``g_1 || g_T`` readout -> MLP.
+
+    **Intent**: the paper's §4 / App. C node-anomaly model. A SINGLE
+    :class:`GraphEnergyTransformerBackbone` block descends for ``T`` steps; the head reads the
+    TARGET node's LayerNormed state at the FIRST step (``g_1``) and at the LAST step (``g_T``),
+    concatenates them (the paper: "both layernormed"), and maps the pair to a single anomaly
+    LOGIT via a 2-layer MLP.
+
+    **Why ``g_1 || g_T`` and not just ``g_T``.** The paper reads the token BEFORE the descent has
+    converged (``g_1``) alongside the converged state (``g_T``): the first step still carries the
+    raw one-hop neighbourhood signal, the last carries the settled attractor. Concatenating both
+    is a strictly richer readout than either alone, and it is what makes the manual
+    :meth:`~GraphEnergyTransformerBackbone.descend_capture` seam (which captures BOTH steps in a
+    single descent) worth its while.
+
+    **The head emits a LOGIT** (no sigmoid in-graph). Compile with
+    ``BinaryCrossentropy(from_logits=True)`` — the house convention (mirrors the image
+    classifier's ``from_logits`` head).
+
+    **No ``return_energy`` rejection.** Unlike the image heads' ``_reject_energy_backbone``,
+    :class:`GraphEnergyTransformerBackbone` has NO ``return_energy`` flag — its blocks are built
+    with ``return_energy=False`` unconditionally and it never surfaces the energy trace — so there
+    is no fp16 energy-trace hazard to guard against here (noted per step spec).
+
+    :param backbone: A :class:`GraphEnergyTransformerBackbone` (typically ``num_blocks=1``,
+        ``use_cls=False``, ``use_pe=False``, ``noise_std=0.0``), or its serialized config dict.
+    :type backbone: GraphEnergyTransformerBackbone
+    :param mlp_hidden_dim: Hidden width of the readout MLP. Must be positive.
+    :type mlp_hidden_dim: int
+    :param mlp_dropout: Dropout between the MLP's two Dense layers. Defaults to ``0.0``.
+    :type mlp_dropout: float
+
+    :raises ValueError: If ``mlp_hidden_dim <= 0`` or ``mlp_dropout`` is outside ``[0, 1]``.
+
+    Input shape:
+        The variant-B graph dict ``{"node_features": (B, N, F), "adjacency": (B, N, N),
+        "node_mask": (B, N), "target_index": (B,)}``.
+
+    Output shape:
+        ``(batch, 1)`` — a single anomaly logit per target node.
+    """
+
+    def __init__(
+            self,
+            backbone: GraphEnergyTransformerBackbone,
+            mlp_hidden_dim: int,
+            mlp_dropout: float = 0.0,
+            name: Optional[str] = "graph_anomaly_detector",
+            **kwargs: Any
+    ) -> None:
+        super().__init__(name=name, **kwargs)
+
+        backbone = _coerce_graph_backbone(backbone)
+
+        if not isinstance(mlp_hidden_dim, int) or mlp_hidden_dim <= 0:
+            raise ValueError(f"mlp_hidden_dim must be a positive integer, got {mlp_hidden_dim}")
+        if not (0.0 <= mlp_dropout <= 1.0):
+            raise ValueError(f"mlp_dropout must be in [0, 1], got {mlp_dropout}")
+
+        self.backbone = backbone
+        self.mlp_hidden_dim = int(mlp_hidden_dim)
+        self.mlp_dropout = float(mlp_dropout)
+        self.embed_dim = backbone.embed_dim
+
+        # `head_` prefix so a B-pretext -> B warm-start (name-matched) moves ONLY the shared
+        # trunk (`graph_et_backbone`) and never the head. Sub-layers CREATED here, BUILT in
+        # build() — a lazily-created sub-layer silently drops its weights on a `.keras`
+        # round-trip (MEMORY: subclassed lazy-build serialization).
+        #
+        # `g_1` and `g_T` are LayerNormed SEPARATELY (paper: "both layernormed") — two distinct
+        # norm layers, not one shared norm, since the first-step and converged states have
+        # different statistics.
+        self.ln1 = layers.LayerNormalization(
+            epsilon=1e-6, name="head_ln1", dtype=self.dtype_policy
+        )
+        self.lnT = layers.LayerNormalization(
+            epsilon=1e-6, name="head_lnT", dtype=self.dtype_policy
+        )
+        self.mlp_hidden = layers.Dense(
+            self.mlp_hidden_dim, activation="gelu", name="head_mlp_hidden",
+            dtype=self.dtype_policy,
+        )
+        # ALWAYS CREATE / CONDITIONALLY USE (guide §9): the Dropout exists at every rate so the
+        # layer structure does not depend on a numeric value.
+        self.head_dropout = layers.Dropout(
+            self.mlp_dropout, name="head_mlp_dropout", dtype=self.dtype_policy
+        )
+        self.mlp_out = layers.Dense(1, name="head_mlp_out", dtype=self.dtype_policy)
+
+    # -----------------------------------------------------------------
+
+    def build(self, input_shape: Any) -> None:
+        """Explicitly build the trunk and every head sub-layer from stored config."""
+        if self.built:
+            return
+        self.backbone.build(input_shape)
+
+        target_shape = (None, self.embed_dim)          # one target node's state (B, D)
+        concat_shape = (None, 2 * self.embed_dim)       # g_1 || g_T  (B, 2D)
+        hidden_shape = (None, self.mlp_hidden_dim)      # MLP hidden  (B, H)
+
+        self.ln1.build(target_shape)
+        self.lnT.build(target_shape)
+        self.mlp_hidden.build(concat_shape)
+        self.head_dropout.build(hidden_shape)
+        self.mlp_out.build(hidden_shape)
+        super().build(input_shape)
+
+    # -----------------------------------------------------------------
+
+    def _gather_target(
+            self,
+            states: keras.KerasTensor,
+            target_index: keras.KerasTensor,
+    ) -> keras.KerasTensor:
+        """Gather each batch element's TARGET node ``(B, N, D) -> (B, D)`` along axis 1.
+
+        ``target_index`` is 0 by construction (the subgraph sampler puts the target first), but
+        the gather is written generically for robustness. Graph-safe (``keras.ops`` only).
+        """
+        ti = ops.cast(target_index, "int32")                           # (B,)
+        batch = ops.shape(states)[0]
+        idx = ops.broadcast_to(
+            ops.reshape(ti, (-1, 1, 1)), (batch, 1, self.embed_dim)
+        )                                                              # (B, 1, D)
+        gathered = ops.take_along_axis(states, idx, axis=1)            # (B, 1, D)
+        return ops.squeeze(gathered, axis=1)                          # (B, D)
+
+    # -----------------------------------------------------------------
+
+    def call(
+            self,
+            inputs: Dict[str, Any],
+            training: Optional[bool] = None,
+    ) -> keras.KerasTensor:
+        """Embed -> capture ``g_1``/``g_T`` -> target-node ``g_1 || g_T`` -> MLP logit.
+
+        :param inputs: The variant-B graph dict (see the class docstring).
+        :param training: Keras training flag.
+        :return: ``(B, 1)`` anomaly logits (no sigmoid — ``from_logits`` loss).
+        """
+        x0 = self.backbone.embed(inputs, training=training)            # (B, N, D)
+
+        t_last = self.backbone.num_steps
+        caps = self.backbone.descend_capture(
+            x0,
+            adjacency_mask=inputs["adjacency"],
+            node_mask_2d=inputs.get("node_mask", None),
+            capture_steps={1, t_last},
+            training=training,
+        )                                                              # {1: g_1, T: g_T}
+
+        target_index = inputs["target_index"]
+        g1_t = self._gather_target(caps[1], target_index)             # (B, D)
+        gT_t = self._gather_target(caps[t_last], target_index)        # (B, D)
+
+        # LayerNorm each SEPARATELY, then concat (paper: "both layernormed").
+        g1_n = self.ln1(g1_t, training=training)                      # (B, D)
+        gT_n = self.lnT(gT_t, training=training)                      # (B, D)
+        h = ops.concatenate([g1_n, gT_n], axis=-1)                    # (B, 2D)
+
+        h = self.mlp_hidden(h, training=training)                     # (B, H) gelu
+        h = self.head_dropout(h, training=training)
+        return self.mlp_out(h)                                        # (B, 1) logit — no sigmoid
+
+    # -----------------------------------------------------------------
+
+    def compute_output_shape(self, input_shape: Any) -> Tuple[Optional[int], ...]:
+        token_shape = self.backbone.compute_output_shape(input_shape)
+        return (token_shape[0], 1)
+
+    # -----------------------------------------------------------------
+
+    def get_config(self) -> Dict[str, Any]:
+        config = super().get_config()
+        config.update({
+            "backbone": serialize_keras_object(self.backbone),
+            "mlp_hidden_dim": self.mlp_hidden_dim,
+            "mlp_dropout": self.mlp_dropout,
+        })
+        return config
+
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "GraphAnomalyDetector":
+        config = dict(config)
+        config["backbone"] = deserialize_keras_object(config["backbone"])
+        return cls(**config)
+
+
+# ---------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------
 
@@ -547,4 +762,68 @@ def create_graph_energy_transformer_backbone(
         hopfield_dim=hopfield_dim,
         name=GRAPH_BACKBONE_NAME,
         **overrides,
+    )
+
+
+def create_graph_anomaly_detector(
+        node_feature_dim: int,
+        embed_dim: int,
+        num_heads: int,
+        head_dim: int,
+        hopfield_dim: int,
+        mlp_hidden_dim: int,
+        num_steps: int = 12,
+        mlp_dropout: float = 0.0,
+        **overrides: Any,
+) -> GraphAnomalyDetector:
+    """Create a variant-B :class:`GraphAnomalyDetector` (backbone + target-node readout head).
+
+    Builds the shared graph trunk with the variant-B topology fixed — ``num_blocks=1``,
+    ``use_cls=False``, ``use_pe=False``, ``noise_std=0.0`` (so the head's manual
+    :meth:`~GraphEnergyTransformerBackbone.descend_capture` matches the block's own noiseless
+    descent) — and names it :data:`GRAPH_BACKBONE_NAME` so a future B-pretext -> B warm-start
+    name-matches the trunk. Remaining backbone kwargs (``step_size``, ``beta``,
+    ``hopfield_activation``, ``hopfield_beta``, ``norm_epsilon``, ``attn_self``, ``seed`` ...)
+    pass through via ``overrides``.
+
+    :param node_feature_dim: Input node-feature dim ``F``.
+    :param embed_dim: Token dim ``D``.
+    :param num_heads: Attention heads ``H``.
+    :param head_dim: Per-head key/query dim ``Y``.
+    :param hopfield_dim: Hopfield memory count ``K``.
+    :param mlp_hidden_dim: Hidden width of the readout MLP.
+    :param num_steps: Descent steps ``T`` (the head captures ``g_1`` and ``g_T``).
+    :param mlp_dropout: Dropout between the MLP's two Dense layers.
+    :param overrides: Any other backbone ctor kwarg (``step_size``, ``beta``,
+        ``hopfield_activation``, ``hopfield_beta``, ``norm_epsilon``, ``attn_self``, ``seed``).
+    :return: A :class:`GraphAnomalyDetector` whose trunk is named :data:`GRAPH_BACKBONE_NAME`.
+
+    Example:
+        >>> model = create_graph_anomaly_detector(
+        ...     node_feature_dim=25, embed_dim=64, num_heads=4, head_dim=16,
+        ...     hopfield_dim=128, mlp_hidden_dim=64, num_steps=12,
+        ... )
+        >>> model.compile(
+        ...     optimizer='adamw',
+        ...     loss=keras.losses.BinaryCrossentropy(from_logits=True),
+        ... )
+    """
+    backbone = GraphEnergyTransformerBackbone(
+        node_feature_dim=node_feature_dim,
+        embed_dim=embed_dim,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        hopfield_dim=hopfield_dim,
+        num_blocks=1,
+        num_steps=num_steps,
+        use_pe=False,
+        use_cls=False,
+        noise_std=0.0,
+        name=GRAPH_BACKBONE_NAME,
+        **overrides,
+    )
+    return GraphAnomalyDetector(
+        backbone=backbone,
+        mlp_hidden_dim=mlp_hidden_dim,
+        mlp_dropout=mlp_dropout,
     )

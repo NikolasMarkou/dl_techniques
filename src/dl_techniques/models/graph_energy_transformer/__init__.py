@@ -7,19 +7,25 @@ Public surface:
       ``descend_capture`` for the two heads.
     * :func:`create_graph_energy_transformer_backbone` — factory for the backbone.
     * :data:`GRAPH_BACKBONE_NAME` — the stable trunk name (warm-start matches by name).
+    * :class:`GraphAnomalyDetector` — variant B (node anomaly) head: trunk -> target-node
+      ``g_1 || g_T`` readout -> MLP logit.
+    * :func:`create_graph_anomaly_detector` — factory for the variant-B detector.
 
-Variant heads (``GraphAnomalyDetector`` / ``GraphClassifier``) are added to ``model.py`` in
-later plan steps.
+The variant-C head (``GraphClassifier``) is added to ``model.py`` in a later plan step.
 """
 
 from .model import (
     GRAPH_BACKBONE_NAME,
     GraphEnergyTransformerBackbone,
+    GraphAnomalyDetector,
     create_graph_energy_transformer_backbone,
+    create_graph_anomaly_detector,
 )
 
 __all__ = [
     "GRAPH_BACKBONE_NAME",
     "GraphEnergyTransformerBackbone",
+    "GraphAnomalyDetector",
     "create_graph_energy_transformer_backbone",
+    "create_graph_anomaly_detector",
 ]
