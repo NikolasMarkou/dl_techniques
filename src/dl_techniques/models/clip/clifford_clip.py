@@ -120,9 +120,10 @@ from dl_techniques.layers.geometric.clifford_block import (
 )
 from dl_techniques.layers.layer_scale import LearnableMultiplier
 from dl_techniques.layers.patch_merging import PatchMerging
-from dl_techniques.layers.sequence_pooling import AttentionPooling
+from dl_techniques.layers.sequence_pooling import SequencePooling
 from dl_techniques.layers.stochastic_depth import StochasticDepth
 from dl_techniques.utils.clip_utils import (
+    apply_clifford_head,
     compute_clip_logits,
     last_non_pad_token,
 )
@@ -493,7 +494,8 @@ class CliffordCLIP(keras.Model):
                     f"({max(sh)} >= {stage_channels[i]})"
                 )
         # Validate post-stem spatial dim keeps a >=2x2 map at the final stage.
-        # DECISION plan-2026-07-15T114613-5add9baa/D-001: require >=2x2 final spatial (post_stem >= 2^n_stages) — a 1x1 map makes the attention pool (softmax-over-1) a dead-gradient no-op (B1); do NOT relax to 2^(n_stages-1).
+        # DECISION plan-2026-07-15T114613-5add9baa/D-001: require >=2x2 final spatial (post_stem >= 2^n_stages) —
+        # a 1x1 map makes the attention pool (softmax-over-1) a dead-gradient no-op (B1); do NOT relax to 2^(n_stages-1).
         post_stem = image_size // vision_patch_size
         if post_stem < (1 << n_stages):
             raise ValueError(
@@ -780,14 +782,9 @@ class CliffordCLIP(keras.Model):
             else:
                 self.vision_merge_projections.append(None)
 
-        self.vision_global_pool = keras.layers.GlobalAveragePooling2D(
-            name="vision_global_pool"
-        )
-        self.vision_global_max_pool = (
-            keras.layers.GlobalMaxPooling2D(name="vision_global_max_pool")
-            if self.head_kind == "mean_max"
-            else None
-        )
+        # Pooling is routed through generic SequencePooling instances created
+        # in _build_projections (vision_det_pool / vision_ctx_pool); the old
+        # GlobalAveragePooling2D / GlobalMaxPooling2D are gone (D-001).
         self.vision_head_norm = keras.layers.LayerNormalization(
             epsilon=_LN_EPS, name="vision_head_norm"
         )
@@ -880,8 +877,51 @@ class CliffordCLIP(keras.Model):
         # Clifford sub-layers: only materialised when the head uses them.
         self.vision_head_geo = None
         self.text_head_geo = None
-        self.vision_query_pool = None
-        self.text_query_pool = None
+
+        # DECISION plan-2026-07-15T140843-168d5bac/D-001: pool via generic
+        # SequencePooling (attention_hidden_dim=channels REQUIRED — its default
+        # 256 differs) + shared apply_clifford_head; replaces the duplicated
+        # per-tower head if/else. Do NOT re-wire GlobalAveragePooling2D /
+        # GlobalMaxPooling2D / bespoke AttentionPooling here — SequencePooling
+        # is byte-identical to all of them at fp32 (findings F2) and keeps one
+        # pooling surface. Checkpoint-incompatible by design (user waived BC).
+        # See decisions.md D-001.
+        self.vision_det_pool = SequencePooling(
+            strategy="mean", name="vision_det_pool"
+        )
+        if self.head_kind == "mean_max":
+            self.vision_ctx_pool = SequencePooling(
+                strategy="max", name="vision_ctx_pool"
+            )
+        elif self.head_kind in ("learned_query", "learned_query_residual"):
+            self.vision_ctx_pool = SequencePooling(
+                strategy="attention",
+                attention_hidden_dim=self.vision_channels,
+                attention_num_heads=1,
+                kernel_initializer=self.kernel_initializer,
+                name="vision_ctx_pool",
+            )
+        else:  # plain — vision anchor is z_det (mean); no context pool.
+            self.vision_ctx_pool = None
+
+        if self.head_kind == "plain":
+            # Text plain uses last_non_pad_token only; no pooled views.
+            self.text_det_pool = None
+            self.text_ctx_pool = None
+        else:
+            self.text_det_pool = SequencePooling(
+                strategy="mean", name="text_det_pool"
+            )
+            if self.head_kind in ("learned_query", "learned_query_residual"):
+                self.text_ctx_pool = SequencePooling(
+                    strategy="attention",
+                    attention_hidden_dim=self.text_channels,
+                    attention_num_heads=1,
+                    kernel_initializer=self.kernel_initializer,
+                    name="text_ctx_pool",
+                )
+            else:  # mean_max — text z_ctx is last_feat; no context pool.
+                self.text_ctx_pool = None
 
         if self.head_kind != "plain":
             v_head_shifts = _head_shifts_for(
@@ -911,23 +951,6 @@ class CliffordCLIP(keras.Model):
                 kernel_regularizer=self.kernel_regularizer,
                 bias_regularizer=self.bias_regularizer,
                 name="text_head_geo",
-            )
-
-        if self.head_kind in ("learned_query", "learned_query_residual"):
-            # One learnable (1, D) query per tower attending to the
-            # (B, N, D) feature sequence. Output: (B, D).
-            # DECISION plan-2026-07-15T134205-d73ff415/D-001: reuse shipped AttentionPooling instead of bespoke _LearnedQueryPool1D (factory-first reuse); checkpoint-incompatible by design (param shapes differ) — user waived BC.
-            self.vision_query_pool = AttentionPooling(
-                hidden_dim=self.vision_channels,
-                num_heads=1,
-                kernel_initializer=self.kernel_initializer,
-                name="vision_query_pool",
-            )
-            self.text_query_pool = AttentionPooling(
-                hidden_dim=self.text_channels,
-                num_heads=1,
-                kernel_initializer=self.kernel_initializer,
-                name="text_query_pool",
             )
 
         # LayerScale gate for the residual Clifford head.
@@ -1099,23 +1122,30 @@ class CliffordCLIP(keras.Model):
         """
         x = self._apply_vision_body(images, training=training)
 
-        # x: (B, H, W, D_v)
-        z_det = self.vision_global_pool(x)  # (B, D_v) — canonical CLIP anchor
-
-        if self.head_kind == "plain":
-            mixed = z_det
-        else:
-            if self.head_kind == "mean_max":
-                z_ctx = self.vision_global_max_pool(x)  # (B, D_v)
-            else:  # learned_query or learned_query_residual
-                b, h, w, d = ops.shape(x)[0], ops.shape(x)[1], ops.shape(x)[2], ops.shape(x)[3]
-                seq = ops.reshape(x, (b, h * w, d))    # (B, H*W, D_v)
-                z_ctx = self.vision_query_pool(seq, training=training)    # (B, D_v)
-            geo = self.vision_head_geo(z_det, z_ctx)   # (B, D_v)
-            if self.head_kind == "learned_query_residual":
-                mixed = z_det + self.vision_head_scale(geo)
-            else:
-                mixed = geo
+        # x: (B, H, W, D_v) -> flatten to a (B, H*W, D_v) token sequence so the
+        # generic SequencePooling instances handle every pooling view. z_det is
+        # the canonical CLIP anchor (mean over patches == the old GAP, F2).
+        b, h, w, d = (
+            ops.shape(x)[0],
+            ops.shape(x)[1],
+            ops.shape(x)[2],
+            ops.shape(x)[3],
+        )
+        seq = ops.reshape(x, (b, h * w, d))            # (B, H*W, D_v)
+        z_det = self.vision_det_pool(seq)              # (B, D_v)
+        z_ctx = (
+            self.vision_ctx_pool(seq, training=training)
+            if self.vision_ctx_pool is not None
+            else None
+        )                                               # (B, D_v) or None
+        mixed = apply_clifford_head(
+            self.head_kind,
+            anchor=z_det,
+            z_det=z_det,
+            z_ctx=z_ctx,
+            geo_layer=self.vision_head_geo,
+            scale_layer=self.vision_head_scale,
+        )
 
         mixed = self.vision_head_norm(mixed)
         if self.vision_head_dropout is not None:
@@ -1172,31 +1202,29 @@ class CliffordCLIP(keras.Model):
             x, input_ids, self.pad_token_id
         )                                       # (B, D_t)
 
+        # The canonical CLIP text anchor is always last_feat. For Clifford
+        # variants, z_det is the masked mean (SequencePooling('mean', mask)
+        # == the old sum(x*mask)/max(len,1), F2) and z_ctx is either last_feat
+        # (mean_max) or the attention pool over the masked sequence.
+        anchor = last_feat
         if self.head_kind == "plain":
-            mixed = last_feat  # canonical CLIP text anchor
+            mixed = anchor
         else:
-            # For Clifford variants, z_det is the masked mean and the
-            # plain-equivalent anchor is last_feat (canonical CLIP). When
-            # residual, the anchor is last_feat and the Clifford product
-            # is layered on top.
-            lengths_f = ops.sum(non_pad, axis=1, keepdims=True)  # (B, 1)
-            lengths_f = ops.maximum(lengths_f, 1.0)
-            mask_exp = ops.expand_dims(non_pad, axis=-1)         # (B, L, 1)
-            z_det = ops.sum(x * mask_exp, axis=1) / lengths_f    # (B, D_t)
-
+            z_det = self.text_det_pool(x, mask=non_pad)          # (B, D_t)
             if self.head_kind == "mean_max":
-                # z_ctx = last non-pad token.
                 z_ctx = last_feat
             else:  # learned_query or learned_query_residual
-                z_ctx = self.text_query_pool(x, mask=non_pad, training=training)    # (B, D_t)
-
-            geo = self.text_head_geo(z_det, z_ctx)               # (B, D_t)
-            if self.head_kind == "learned_query_residual":
-                # Start from canonical CLIP anchor and inject Clifford
-                # content as a LayerScale-gated residual.
-                mixed = last_feat + self.text_head_scale(geo)
-            else:
-                mixed = geo
+                z_ctx = self.text_ctx_pool(
+                    x, mask=non_pad, training=training
+                )                                                # (B, D_t)
+            mixed = apply_clifford_head(
+                self.head_kind,
+                anchor=anchor,
+                z_det=z_det,
+                z_ctx=z_ctx,
+                geo_layer=self.text_head_geo,
+                scale_layer=self.text_head_scale,
+            )
 
         mixed = self.text_projection(mixed)
         if normalize:
