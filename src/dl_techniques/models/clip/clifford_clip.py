@@ -254,8 +254,10 @@ class CliffordCLIP(keras.Model):
     :param vision_use_global_context: Add global GAP context branch to
         vision blocks.
     :param vision_stochastic_depth_rate: Max DropPath rate for vision blocks.
-    :param vocab_size: Text vocabulary size (must cover all tiktoken
-        ``cl100k_base`` IDs, ≥100277).
+    :param vocab_size: Text vocabulary size. Must match the tokenizer used to
+        produce ``input_ids``; the shipped trainer defaults to tiktoken
+        ``gpt2`` (50257 tokens). Any tokenizer works as long as ``vocab_size``
+        covers its maximum token ID.
     :param context_length: Maximum text sequence length.
     :param text_channels: Feature dim ``D_t`` for text blocks.
     :param text_depth: Number of :class:`CausalCliffordNetBlock` layers.
