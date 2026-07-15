@@ -276,12 +276,18 @@ def _toy_contrastive_loss(out):
 
 
 def test_query_pool_weight_receives_nonzero_gradient():
-    """B1 guard: both learned-query pool weights get a non-zero gradient.
+    """B1 guard: both AttentionPooling scoring weights get a non-zero gradient.
 
     At the old 32px config the post-stem map collapsed to 1x1 and the vision
     query pool's softmax-over-1 was a dead-gradient no-op (invisible to any
     forward-only or aggregate-fraction check). At 64px the map is >=2x2, so
-    the query must receive gradient. Asserted per-weight, not by aggregate.
+    the scoring weights must receive gradient. Asserted per-weight, not by
+    aggregate.
+
+    The pools are ``AttentionPooling`` (S2 swap of the bespoke pool): its
+    learnable scoring path is the ``context_vector`` (direct analog of the old
+    ``.query``) plus the ``attention_dense`` kernel that projects each token
+    before scoring. Both must be alive for the pool to learn.
     """
     keras.utils.set_random_seed(0)
     m = _build_nano()
@@ -292,15 +298,17 @@ def test_query_pool_weight_receives_nonzero_gradient():
         loss = _toy_contrastive_loss(out)
 
     for name, w in (
-        ("vision_query_pool", m.vision_query_pool.query),
-        ("text_query_pool", m.text_query_pool.query),
+        ("vision_query_pool.context_vector", m.vision_query_pool.context_vector),
+        ("vision_query_pool.attention_dense", m.vision_query_pool.attention_dense.kernel),
+        ("text_query_pool.context_vector", m.text_query_pool.context_vector),
+        ("text_query_pool.attention_dense", m.text_query_pool.attention_dense.kernel),
     ):
         g = tape.gradient(loss, w)
-        assert g is not None, f"{name}.query gradient is None (disconnected)"
+        assert g is not None, f"{name} gradient is None (disconnected)"
         g = keras.ops.convert_to_numpy(g)
-        assert np.all(np.isfinite(g)), f"{name}.query gradient non-finite"
+        assert np.all(np.isfinite(g)), f"{name} gradient non-finite"
         assert np.any(g != 0.0), (
-            f"{name}.query received an all-zero gradient — a dead pool "
+            f"{name} received an all-zero gradient — a dead pool "
             f"(the B1 1x1-collapse no-op)"
         )
     del tape
