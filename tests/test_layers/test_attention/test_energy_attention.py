@@ -786,6 +786,46 @@ class TestDtypePolicies:
                 "Raise the sequence length or the dims until it can."
             )
 
+    @pytest.mark.parametrize("num_tokens", [TOKENS, _REALISTIC_TOKENS])
+    def test_reported_energy_is_finite_at_a_realistic_length_with_weight(
+        self, dtype_policy, num_tokens
+    ):
+        """SC6: `energy(g, Ŵ)` must stay FINITE (>= float32) at a realistic N with a POPULATED
+        weighted adjacency — no fp16 overflow in the weighted logits chain.
+
+        Branch A folds `Ŵ` MULTIPLICATIVELY into the score (`logit = beta·A·Ŵ + M`). The whole
+        logits -> bias -> logsumexp chain must run in the reduce dtype (>= float32, D-009); if
+        the `Ŵ` multiply or the reduction leaked back into `compute_dtype`, the O(-8e4) energy
+        at N=1024 would become fp16 `-inf`. The anti-vacuity `> 65504` guard below must still
+        bite, so this cell can only pass while |E| genuinely exceeds fp16's range.
+        """
+        layer = EnergyAttention(dim=DIM, num_heads=HEADS)
+        g = keras.random.normal((BATCH, num_tokens, DIM), seed=3)
+        layer.build(g.shape)
+
+        # A finite, POSITIVE, per-head, VARYING Ŵ (|N(0,1)|+0.1) — a genuinely populated
+        # weight, fed as float32 exactly as the block hoists it.
+        rng = np.random.default_rng(314)
+        w_hat = tf.constant(
+            (np.abs(rng.standard_normal((BATCH, HEADS, num_tokens, num_tokens))) + 0.1
+             ).astype("float32")
+        )
+
+        e = keras.ops.convert_to_numpy(layer.energy(g, adjacency_weight=w_hat))
+
+        assert e.shape == (BATCH,)
+        assert np.all(np.isfinite(e)), (
+            f"non-finite weighted E_ATT at N={num_tokens} under policy {dtype_policy!r}: {e}. "
+            "The weighted logits/logsumexp chain must stay in the reduce dtype (>= float32) — "
+            "the `·Ŵ` multiply must NOT drop it back to compute dtype (D-005/D-009)."
+        )
+
+        if num_tokens == self._REALISTIC_TOKENS:
+            assert np.abs(e).max() > self._FP16_MAX, (
+                f"max|weighted E_ATT| = {np.abs(e).max():.1f} <= fp16 max ({self._FP16_MAX}) "
+                f"at N={num_tokens} — this guard can no longer detect an fp16 cast-back."
+            )
+
     def test_degenerate_case_exactly_zero_in_every_dtype(self, dtype_policy):
         """S9, re-proven per dtype: N == 1 + attn_self=False -> EXACTLY 0, never NaN."""
         layer = EnergyAttention(dim=DIM, num_heads=HEADS, attn_self=False)

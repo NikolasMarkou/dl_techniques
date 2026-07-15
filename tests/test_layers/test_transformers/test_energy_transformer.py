@@ -488,6 +488,55 @@ def _excite_block(
         w.assign((rng.standard_normal(tuple(w.shape)) * scale).astype("float32"))
 
 
+# --- weighted-adjacency descent (S7 with Branch A active) -------------------
+#
+# S7, but with `use_weighted_adjacency=True` and a genuinely EXCITED `Ŵ` hoisted into every
+# descent step. This is the strongest BLOCK-LEVEL integration guard for the Branch-A gradient
+# (plan-2026-07-15T053724-78001af1): the closed-form `update()` (attention + Hopfield) is
+# `-dE/dg` of the block's reported energy ONLY IF the same constant `Ŵ` reaches BOTH `energy()`
+# and both `update()` calls. If the `omega_eff = omega·Ŵ` factor were subtly wrong, or `Ŵ` were
+# fed to only one path, the energy would ASCEND here (falsification signal #3) even though the
+# per-tensor oracle at N∈{64,1024} passed. N >= 64 (never a toy N — LESSONS).
+WEIGHTED_TOKENS = 64
+
+
+def _weighted_block(**overrides) -> EnergyTransformer:
+    """An EnergyTransformer with the Branch-A weighted path ON (noiseless, energy-tracing)."""
+    kwargs = dict(
+        embed_dim=DIM,
+        num_heads=HEADS,
+        head_dim=HEAD_DIM,
+        hopfield_dim=MEM,
+        num_steps=20,
+        step_size=0.01,               # small alpha: a large one may legitimately overshoot
+        attn_self=True,               # fully-connected adjacency below -> self-attention allowed
+        noise_std=0.0,                # descent is NOT claimed under Langevin noise (eq. 27)
+        return_energy=True,
+        use_weighted_adjacency=True,
+        adjacency_proj_dim=8,         # conv sees 8^2 = 64 channels (the OOM escape hatch)
+    )
+    kwargs.update(overrides)
+    return EnergyTransformer(**kwargs)
+
+
+def _excite_projector(block: EnergyTransformer, seed: int = 21,
+                      kernel_scale: float = 0.5, bias: float = 1.0) -> None:
+    """Drive the TRAINABLE projector to emit a non-trivial POSITIVE-and-VARYING ``Ŵ``.
+
+    At init the projector's ``Conv2D`` is glorot / zero-bias, so ``Ŵ ~ 0`` and the weighted
+    path is effectively INERT — a descent test on it would prove nothing about the ``Ŵ``
+    gradient. A positive bias floors ``Ŵ`` above zero while the random kernel over the varying
+    ``X⊗X`` makes it vary per pair, so ``omega_eff = omega·Ŵ`` genuinely reweights the
+    descent. (The `token_proj` Dense keeps its glorot init — ``X'`` is already varying.)
+    """
+    rng = np.random.default_rng(seed)
+    conv = block.adjacency_projector.conv
+    conv.kernel.assign(
+        (rng.standard_normal(tuple(conv.kernel.shape)) * kernel_scale).astype("float32")
+    )
+    conv.bias.assign(np.full(tuple(conv.bias.shape), bias, dtype="float32"))
+
+
 class TestEnergyTransformer:
     """S7 (energy descent), S8b (mask), S2/S3 (the layer contract) for the ET block."""
 
@@ -615,6 +664,104 @@ class TestEnergyTransformer:
         assert np.all(drop > 1e-3), (
             f"the energy barely moved on the single step (min drop = {drop.min():.6e}). "
             "Assertion 1 is therefore VACUOUS — it would pass on a dead block."
+        )
+
+    # -- S7 with the Branch-A weighted path active -------------------
+
+    @pytest.mark.parametrize("hopfield_activation", ACTIVATIONS)
+    def test_energy_is_non_increasing_with_weighted_adjacency(self, hopfield_activation):
+        """S7 with ``use_weighted_adjacency=True`` and an EXCITED ``Ŵ`` at N=64 (SC3).
+
+        The block-level proof that the hoisted-``Ŵ`` ``update()`` really is ``-dE/dg``: with
+        an excited constant ``Ŵ`` fed to BOTH `energy()` and both `update()` calls, the T-step
+        energy must still be MONOTONE NON-INCREASING (`diff(E) <= 1e-5`) AND ANTI-DEGENERATE
+        (`E[:,0] - E[:,-1] > 1e-3`). Ascent here is falsification signal #3 (the `omega_eff`
+        gradient is wrong, or ``Ŵ`` reached only one path) — STOP and report, do NOT loosen.
+        """
+        N = WEIGHTED_TOKENS
+        block = _weighted_block(hopfield_activation=hopfield_activation)
+        block.build((BATCH, N, DIM))
+        _excite_block(block)
+        _excite_projector(block)
+
+        rng = np.random.default_rng(99)
+        x = (rng.standard_normal((BATCH, N, DIM)) * 2.0).astype("float32")
+        adjacency = np.ones((BATCH, N, N), dtype="float32")     # fully connected (+ attn_self)
+
+        # The weighted path is genuinely ACTIVE and Ŵ is EXCITED (non-trivial + varying, not
+        # inert). The real projector emits a SIGNED Ŵ here (X⊗X easily overwhelms the +1 bias);
+        # descent holds for signed Ŵ exactly as for positive (the oracle at
+        # test_energy_attention.py proved BOTH "positive" and "signed" kinds), and a signed,
+        # large-magnitude Ŵ is a STRONGER reweighting than a positive-only one.
+        w_hat = keras.ops.convert_to_numpy(block._weighted_adjacency(x, adjacency))
+        assert w_hat.shape == (BATCH, HEADS, N, N)
+        assert np.all(np.isfinite(w_hat))
+        assert np.abs(w_hat).mean() > 1.0, (
+            f"Ŵ is ~0 (mean|Ŵ|={np.abs(w_hat).mean():.3e}) — the weighted path is inert, the "
+            "descent below would prove nothing about the Ŵ gradient"
+        )
+        assert w_hat.std() > 1e-3, f"Ŵ is ~constant (std={w_hat.std():.3e}) — path is inert"
+
+        _, energies = block(x, attention_mask=adjacency, training=False)
+        e = keras.ops.convert_to_numpy(energies)                 # (B, T + 1)
+
+        assert e.shape == (BATCH, 21)
+        assert np.all(np.isfinite(e))
+
+        diffs = np.diff(e, axis=-1)
+        drop = e[:, 0] - e[:, -1]
+        print(
+            f"\n[S7 weighted] hopfield_activation={hopfield_activation}: "
+            f"E[0]={np.array2string(e[:, 0], precision=2)} "
+            f"E[-1]={np.array2string(e[:, -1], precision=2)} "
+            f"drop={np.array2string(drop, precision=2)} max_diff={diffs.max():.3e} "
+            f"W_hat[min={w_hat.min():.2f} max={w_hat.max():.2f} std={w_hat.std():.2f}]"
+        )
+
+        # 1. monotone, PER SAMPLE, with the weighted path active.
+        assert np.all(diffs <= 1e-5), (
+            f"ENERGY WENT UP with Ŵ active (max diff(E) = {diffs.max():.3e}) — falsification "
+            "signal #3. The block is ASCENDING, so `update() != -dE/dg` under the weighted "
+            "path: check `omega_eff = omega·Ŵ` reaches BOTH term_q and term_k AND that the "
+            "SAME Ŵ tensor reaches energy() and both update() calls (D-001/D-002)."
+        )
+        # 2. anti-degeneracy — the weighted-path energy actually MOVED.
+        assert np.all(drop > 1e-3), (
+            f"the weighted energy barely moved (min drop = {drop.min():.3e}). Assertion 1 is "
+            "therefore VACUOUS — it would pass on a dead layer. The descent is not real."
+        )
+
+    def test_single_step_block_with_weighted_adjacency(self):
+        """The ``num_steps=1`` boundary (T + 1 == 2 readings) with the weighted path active.
+
+        Reuses the SC3 excitation, at ``num_steps=1``: `energies` must be `(B, 2)` (one
+        pre-update + one post-update reading), the single step must DESCEND, and it must
+        ANTI-DEGENERATELY move (LESSONS [I:5]) — with ``Ŵ`` hoisted into that single step.
+        """
+        N = WEIGHTED_TOKENS
+        block = _weighted_block(num_steps=1)
+        block.build((BATCH, N, DIM))
+        _excite_block(block)
+        _excite_projector(block)
+
+        rng = np.random.default_rng(99)
+        x = (rng.standard_normal((BATCH, N, DIM)) * 2.0).astype("float32")
+        adjacency = np.ones((BATCH, N, N), dtype="float32")
+
+        out, energies = block(x, attention_mask=adjacency, training=False)
+        assert tuple(out.shape) == (BATCH, N, DIM)
+
+        e = keras.ops.convert_to_numpy(energies)
+        assert e.shape == (BATCH, 2), (
+            f"num_steps=1 produced an energy trace of shape {e.shape}, expected {(BATCH, 2)}"
+        )
+        assert np.all(np.isfinite(e))
+        drop = e[:, 0] - e[:, 1]
+        assert np.all(e[:, 1] <= e[:, 0] + 1e-5), (
+            f"energy went UP on the single weighted step (min drop = {drop.min():.3e})"
+        )
+        assert np.all(drop > 1e-3), (
+            f"the weighted energy barely moved on the single step (min drop = {drop.min():.3e})"
         )
 
     # -- S8b: block-level mask ---------------------------------------
