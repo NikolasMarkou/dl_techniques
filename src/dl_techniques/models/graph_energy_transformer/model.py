@@ -220,41 +220,12 @@ class GraphEnergyTransformerBackbone(keras.Model):
         # cls_token is a raw learnable weight -> created in build() (add_weight's home), only
         # when use_cls. See build().
 
-        # DECISION plan-2026-07-15T015824-3c2159eb/D-002
-        # Each block is built with `dtype=self.dtype_policy.variable_dtype`, NOT
-        # `self.dtype_policy`. Under `mixed_float16` this runs the ET block in float32 (its
-        # VARIABLE dtype) rather than float16; `call()`/`descend_capture()` cast the tokens IN
-        # to that dtype and back OUT. Under float32/float64 the two spellings are identical
-        # (compute == variable), so nothing outside a mixed policy changes and every checkpoint
-        # is untouched. This is the image backbone's fix, replicated VERBATIM (D-010/D-011 of
-        # plan-2026-07-14T163315-29a4fef4): `EnergyLayerNorm`'s backward forms
-        # `(var + eps)^(-3/2)`, which OVERFLOWS fp16's 65504 under XLA and SILENTLY freezes
-        # training (loss finite, all weights move exactly 0.0). It is NOT fixed at the layer —
-        # the consumer MUST do it here.
-        # WHAT NOT TO DO: (1) do NOT "simplify" this to `dtype=self.dtype_policy`; (2) do NOT
-        # drop the token casts in `call()`/`descend_capture()`; (3) do NOT "fix" it instead by
-        # raising `norm_epsilon` to 1e-3 (that trains a DIFFERENT network than fp32). See
-        # decisions.md D-002.
+        # Blocks are constructed through the overridable `_make_block` seam (NOT inline) so the
+        # proven-RED fp16/XLA guard test can subclass the backbone and force the fp16-unsafe
+        # construction to prove the guard bites. The dtype rationale (the D-002 fp16/XLA fix)
+        # lives on `_make_block`. Production code MUST NOT override it.
         self.blocks: List[EnergyTransformer] = [
-            EnergyTransformer(
-                embed_dim=self.embed_dim,
-                num_heads=self.num_heads,
-                head_dim=self.head_dim,
-                hopfield_dim=self.hopfield_dim,
-                num_steps=self.num_steps,
-                step_size=self.step_size,
-                beta=self.beta,
-                attn_self=self.attn_self,
-                hopfield_activation=self.hopfield_activation,
-                hopfield_beta=self.hopfield_beta,
-                noise_std=self.noise_std,
-                return_energy=False,
-                norm_epsilon=self.norm_epsilon,
-                seed=self.seed,
-                name=f"et_block_{i}",
-                dtype=self.dtype_policy.variable_dtype,
-            )
-            for i in range(self.num_blocks)
+            self._make_block(i) for i in range(self.num_blocks)
         ]
 
         # created in build() when use_cls
@@ -265,6 +236,49 @@ class GraphEnergyTransformerBackbone(keras.Model):
             f"{self.embed_dim}d, {self.num_heads}h x {self.head_dim}, K={self.hopfield_dim}, "
             f"blocks={self.num_blocks}, T={self.num_steps}, alpha={self.step_size}, "
             f"use_pe={self.use_pe}, use_cls={self.use_cls}, noise_std={self.noise_std}"
+        )
+
+    # -----------------------------------------------------------------
+
+    def _make_block(self, index: int) -> EnergyTransformer:
+        """Construct ET block ``index``. **Overridable seam** for the proven-RED fp16 guard.
+
+        # DECISION plan-2026-07-15T015824-3c2159eb/D-002
+        The block is built with ``dtype=self.dtype_policy.variable_dtype`` (its fp32 VARIABLE
+        dtype under ``mixed_float16``), NOT ``self.dtype_policy`` (whose COMPUTE dtype is fp16);
+        :meth:`call` / :meth:`descend_capture` then cast tokens IN to the block's compute dtype
+        and back OUT. Under float32/float64 the two spellings are identical (compute == variable),
+        so nothing outside a mixed policy changes and every checkpoint is untouched. This is the
+        image backbone's fix, replicated VERBATIM (D-010/D-011 of
+        plan-2026-07-14T163315-29a4fef4): ``EnergyLayerNorm``'s backward forms
+        ``(var + eps)^(-3/2)``, which OVERFLOWS fp16's 65504 under XLA and SILENTLY freezes
+        training (loss finite, all weights move exactly 0.0). It is NOT fixed at the layer —
+        the consumer MUST do it here.
+
+        WHAT NOT TO DO: (1) do NOT "simplify" this to ``dtype=self.dtype_policy``; (2) do NOT drop
+        the token casts in :meth:`call` / :meth:`descend_capture`; (3) do NOT "fix" it instead by
+        raising ``norm_epsilon`` to 1e-3 (that trains a DIFFERENT network than fp32); (4) this
+        method is overridable ONLY so the ``tests/test_models/test_graph_energy_transformer``
+        fp16 guard can subclass it to build the fp16-unsafe control and PROVE the guard bites —
+        production code MUST NOT override it. See decisions.md D-002.
+        """
+        return EnergyTransformer(
+            embed_dim=self.embed_dim,
+            num_heads=self.num_heads,
+            head_dim=self.head_dim,
+            hopfield_dim=self.hopfield_dim,
+            num_steps=self.num_steps,
+            step_size=self.step_size,
+            beta=self.beta,
+            attn_self=self.attn_self,
+            hopfield_activation=self.hopfield_activation,
+            hopfield_beta=self.hopfield_beta,
+            noise_std=self.noise_std,
+            return_energy=False,
+            norm_epsilon=self.norm_epsilon,
+            seed=self.seed,
+            name=f"et_block_{index}",
+            dtype=self.dtype_policy.variable_dtype,
         )
 
     # -----------------------------------------------------------------
@@ -556,6 +570,12 @@ class GraphAnomalyDetector(keras.Model):
     :meth:`~GraphEnergyTransformerBackbone.descend_capture` seam (which captures BOTH steps in a
     single descent) worth its while.
 
+    **STATIC index-0 target readout (XLA-safe).** The fraud subgraph sampler ALWAYS puts the
+    target node at index 0, so the head reads ``g[:, 0, :]`` — a static slice that compiles under
+    ``jit_compile=True``. ``target_index`` stays in the input contract for forward-compat but is
+    ignored; a runtime-broadcast ``take_along_axis`` gather would make the fp16/XLA training path
+    uncompilable (``BroadcastArgs must be compile-time constant``). See D-003.
+
     **The head emits a LOGIT** (no sigmoid in-graph). Compile with
     ``BinaryCrossentropy(from_logits=True)`` — the house convention (mirrors the image
     classifier's ``from_logits`` head).
@@ -651,26 +671,6 @@ class GraphAnomalyDetector(keras.Model):
 
     # -----------------------------------------------------------------
 
-    def _gather_target(
-            self,
-            states: keras.KerasTensor,
-            target_index: keras.KerasTensor,
-    ) -> keras.KerasTensor:
-        """Gather each batch element's TARGET node ``(B, N, D) -> (B, D)`` along axis 1.
-
-        ``target_index`` is 0 by construction (the subgraph sampler puts the target first), but
-        the gather is written generically for robustness. Graph-safe (``keras.ops`` only).
-        """
-        ti = ops.cast(target_index, "int32")                           # (B,)
-        batch = ops.shape(states)[0]
-        idx = ops.broadcast_to(
-            ops.reshape(ti, (-1, 1, 1)), (batch, 1, self.embed_dim)
-        )                                                              # (B, 1, D)
-        gathered = ops.take_along_axis(states, idx, axis=1)            # (B, 1, D)
-        return ops.squeeze(gathered, axis=1)                          # (B, D)
-
-    # -----------------------------------------------------------------
-
     def call(
             self,
             inputs: Dict[str, Any],
@@ -693,9 +693,17 @@ class GraphAnomalyDetector(keras.Model):
             training=training,
         )                                                              # {1: g_1, T: g_T}
 
-        target_index = inputs["target_index"]
-        g1_t = self._gather_target(caps[1], target_index)             # (B, D)
-        gT_t = self._gather_target(caps[t_last], target_index)        # (B, D)
+        # DECISION plan-2026-07-15T015824-3c2159eb/D-003
+        # STATIC index-0 target readout (XLA-safe). The fraud subgraph sampler ALWAYS places the
+        # target node at index 0 (verified plan step 3), so the target's state is a static
+        # `g[:, 0, :]` slice that compiles under `jit_compile=True`. `target_index` stays in the
+        # input contract for forward-compat but is INTENTIONALLY IGNORED here.
+        # WHAT NOT TO DO: do NOT restore the dynamic `take_along_axis(g, target_index)` gather —
+        # its runtime-broadcast index is not a compile-time constant, so tf2xla rejects it
+        # (`BroadcastArgs must be compile-time constant`) and the whole fp16/XLA training path
+        # (the exact defect surface this plan guards) becomes uncompilable. See decisions.md D-003.
+        g1_t = caps[1][:, 0, :]                                       # (B, D)
+        gT_t = caps[t_last][:, 0, :]                                  # (B, D)
 
         # LayerNorm each SEPARATELY, then concat (paper: "both layernormed").
         g1_n = self.ln1(g1_t, training=training)                      # (B, D)
@@ -756,9 +764,10 @@ class GraphClassifier(keras.Model):
     CLS token — it constructs no masks itself.
 
     **STATIC index-0 CLS slice (XLA-safe).** The CLS token is always at index 0 (the backbone
-    prepends it first), so the readout is a static ``tokens[:, 0, :]`` slice — NOT variant B's
-    dynamic ``take_along_axis`` gather, which does not compile under XLA
-    (``BroadcastArgs must be compile-time constant``). This head is XLA/``jit_compile=True`` safe.
+    prepends it first), so the readout is a static ``tokens[:, 0, :]`` slice that compiles under
+    ``jit_compile=True`` (a runtime-broadcast ``take_along_axis`` gather would not — tf2xla
+    rejects it with ``BroadcastArgs must be compile-time constant``; variant B's target readout
+    takes the same static index-0 approach, D-003). This head is XLA/``jit_compile=True`` safe.
 
     **The head emits LOGITS** (no softmax in-graph). The dataset (``build_tudataset_graph_dataset``)
     yields INTEGER labels, so the trainer (step 8) compiles

@@ -284,11 +284,11 @@ def train_anomaly(config: TrainingConfig) -> Dict[str, Any]:
             keras.metrics.AUC(from_logits=True, name="auc"),
             keras.metrics.BinaryAccuracy(threshold=0.0, name="binary_accuracy"),
         ],
-        # Stock non-XLA fit. Keras' jit_compile="auto" default turns XLA on, but the head's
-        # per-target `take_along_axis` gather over a dynamic batch dim needs a compile-time
-        # constant shape and fails tf2xla (BroadcastArgs). XLA is exercised deliberately by the
-        # dedicated fp16/XLA guard test; the trainer's default path stays non-XLA.
-        jit_compile=False,
+        # XLA left to the Keras default ("auto", on). Step 9 replaced the head's dynamic
+        # per-target `take_along_axis` gather with a STATIC index-0 slice (the sampler always
+        # puts the target at index 0), so the head is now XLA-safe and the old `jit_compile=False`
+        # workaround is gone. The fp16/XLA training path is exercised by the dedicated guard test
+        # (tests/test_models/test_graph_energy_transformer/test_model.py).
     )
 
     # ---- Callbacks ----
