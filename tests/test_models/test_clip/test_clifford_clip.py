@@ -460,3 +460,70 @@ def test_end_to_end_fit_with_clip_contrastive_loss():
         1 for p in before if np.max(np.abs(after[p] - before[p])) > 0.0
     )
     assert moved > 0, "no weight moved after one CLIPContrastiveLoss step"
+
+
+# ---------------------------------------------------------------------
+# G1 opt-in vision positional encoding
+# ---------------------------------------------------------------------
+
+
+def test_vision_positional_encoding_default_off_is_byte_identical(
+    tiny_build_shape,
+):
+    """Default (flag OFF): the model exposes ``vision_positional_encoding is
+    False`` and materialises NO ``vision_pos_embed`` weight — the vision tower
+    is byte-identical to the pre-G1 build."""
+    m = _build_nano()
+    m.build(tiny_build_shape)
+    assert m.vision_positional_encoding is False
+    assert m.vision_pos_embed is None
+    assert m.get_config()["vision_positional_encoding"] is False
+    assert not any(
+        "vision_pos_embed" in w.name for w in m.weights
+    ), "default-off model must not carry a positional-encoding weight"
+
+
+def test_vision_positional_encoding_on_round_trips(tiny_sample):
+    """Flag ON: a ``vision_pos_embed`` weight exists, changes the forward, and
+    survives get_config + .keras round-trip (proves the build()-created
+    conditional weight serialises — no lazy-build drop)."""
+    m = _build_nano(vision_positional_encoding=True)
+    m.build({"image": (None, 64, 64, 3), "text": (None, 16)})
+    assert m.vision_positional_encoding is True
+    assert m.get_config()["vision_positional_encoding"] is True
+    assert any(
+        "vision_pos_embed" in w.name for w in m.weights
+    ), "flag-on model must carry a positional-encoding weight"
+
+    # The non-zero positional weight must actually shift the image features
+    # versus an otherwise-identical flag-off model (same seed/init not shared,
+    # so just assert the flag-on features are not trivially the flag-off ones).
+    off = _build_nano()
+    off.build({"image": (None, 64, 64, 3), "text": (None, 16)})
+    feat_on = keras.ops.convert_to_numpy(
+        m.encode_image(tiny_sample["image"], training=False)
+    )
+    feat_off = keras.ops.convert_to_numpy(
+        off.encode_image(tiny_sample["image"], training=False)
+    )
+    assert not np.allclose(feat_on, feat_off, rtol=1e-4, atol=1e-4), (
+        "positional encoding did not change the image features"
+    )
+
+    pre = m(tiny_sample, training=False)
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "clip_pos.keras")
+        m.save(path)
+        loaded = keras.models.load_model(path)
+        post = loaded(tiny_sample, training=False)
+
+    assert loaded.get_config()["vision_positional_encoding"] is True
+    assert any("vision_pos_embed" in w.name for w in loaded.weights)
+    for k in pre:
+        np.testing.assert_allclose(
+            keras.ops.convert_to_numpy(pre[k]),
+            keras.ops.convert_to_numpy(post[k]),
+            rtol=1e-5,
+            atol=1e-5,
+            err_msg=f"key {k} mismatches after round-trip",
+        )

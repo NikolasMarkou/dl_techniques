@@ -450,6 +450,7 @@ class CliffordCLIP(keras.Model):
         vision_ctx_mode: CtxMode = "diff",
         vision_use_global_context: bool = False,
         vision_stochastic_depth_rate: float = 0.1,
+        vision_positional_encoding: bool = False,
         # Text
         vocab_size: int = 100352,
         context_length: int = 77,
@@ -591,6 +592,10 @@ class CliffordCLIP(keras.Model):
         self.vision_ctx_mode = vision_ctx_mode
         self.vision_use_global_context = vision_use_global_context
         self.vision_stochastic_depth_rate = vision_stochastic_depth_rate
+        self.vision_positional_encoding = vision_positional_encoding
+        # Learned 2D positional weight; materialised in build() only when the
+        # flag is True (default-off => attribute stays None, no extra weight).
+        self.vision_pos_embed = None
 
         self.vocab_size = vocab_size
         self.context_length = context_length
@@ -1050,6 +1055,18 @@ class CliffordCLIP(keras.Model):
             dtype="float32",
         )
 
+        # Opt-in learned 2D positional weight over the post-stem feature map.
+        # Created here (before the symbolic forward below) so the gated add in
+        # _apply_vision_body finds it materialised — avoids the lazy-build trap
+        # where a build()-created weight is missing on .keras reload.
+        if self.vision_positional_encoding:
+            post_stem = self.image_size // self.vision_patch_size
+            self.vision_pos_embed = self.add_weight(
+                name="vision_pos_embed",
+                shape=(1, post_stem, post_stem, self._vision_stem_channels),
+                initializer=initializers.TruncatedNormal(stddev=0.02),
+                trainable=True,
+            )
 
         # Trigger sub-layer builds via symbolic forward passes so every
         # nested weight is materialised before super().build() marks us
@@ -1107,6 +1124,9 @@ class CliffordCLIP(keras.Model):
         ``(B, H', W', vision_stage_channels[-1])``.
         """
         x = self._apply_vision_stem(images, training=training)
+        # DECISION plan-2026-07-15T114613-5add9baa/D-004: opt-in learned 2D positional encoding (default OFF = byte-identical, checkpoint-safe); the Clifford geometric product mixes channels not space, so the vision tower otherwise has no positional signal (G1).
+        if self.vision_positional_encoding:
+            x = x + self.vision_pos_embed
         n_stages = len(self.vision_stage_channels)
         # Stage end indices in the flat ``vision_blocks`` list.
         stage_ends: List[int] = []
@@ -1358,6 +1378,7 @@ class CliffordCLIP(keras.Model):
                 "vision_stochastic_depth_rate": (
                     self.vision_stochastic_depth_rate
                 ),
+                "vision_positional_encoding": self.vision_positional_encoding,
                 "vocab_size": self.vocab_size,
                 "context_length": self.context_length,
                 "text_channels": self.text_channels,
