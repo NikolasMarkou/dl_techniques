@@ -23,6 +23,7 @@ from dl_techniques.utils.deep_supervision import (
 from dl_techniques.layers.transformers import TransformerLayer
 from dl_techniques.layers.norms import create_normalization_layer
 from dl_techniques.layers.embedding import create_embedding_layer
+from dl_techniques.layers.sequence_pooling import SequencePooling
 
 # ---------------------------------------------------------------------
 # Type definitions for enhanced type safety
@@ -428,12 +429,18 @@ class ViT(keras.Model):
                 name="head"
             )
 
-        # Global pooling layers (if needed for feature extraction)
-        self.global_pool = None
-        if self.pooling == "mean":
-            self.global_pool = layers.GlobalAveragePooling1D(name="global_avg_pool")
-        elif self.pooling == "max":
-            self.global_pool = layers.GlobalMaxPooling1D(name="global_max_pool")
+        # Feature-extraction pooling via the shared SequencePooling layer.
+        # DECISION plan-2026-07-15T144225-5b25d9f1/D-001: pool via SequencePooling(exclude_positions=[0])
+        # — preserves vit's CLS-excluded mean/max (byte-identical); the CLS-inclusion divergence vs
+        # vit_siglip/vit_hmlp is now EXPLICIT in exclude_positions, not silent. Do NOT drop
+        # exclude_positions (would start averaging the CLS token).
+        self.pool = None
+        if self.pooling == "cls":
+            self.pool = SequencePooling(strategy="cls", name="seq_pool")
+        elif self.pooling in ("mean", "max"):
+            self.pool = SequencePooling(
+                strategy=self.pooling, exclude_positions=[0], name="seq_pool"
+            )
 
         # CLS token weight (created in build())
         self.cls_token = None
@@ -486,9 +493,9 @@ class ViT(keras.Model):
                 self.head_dropout.build(head_input_shape)
             self.head.build(head_input_shape)
 
-        # Global pooling
-        if self.global_pool is not None:
-            self.global_pool.build(pos_input_shape)
+        # Feature-extraction pooling
+        if self.pool is not None:
+            self.pool.build(pos_input_shape)
 
         # Always call parent build at the end
         super().build(input_shape)
@@ -539,18 +546,13 @@ class ViT(keras.Model):
             return self.head(cls_token)
         else:
             # --- Feature Extraction Logic ---
-            if self.pooling == "cls":
-                # Return the normalized CLS token
-                return x_norm[:, 0, :]
-            elif self.pooling == "mean":
-                # Pool over patch tokens only, excluding the CLS token
-                return self.global_pool(x_norm[:, 1:, :])
-            elif self.pooling == "max":
-                # Pool over patch tokens only, excluding the CLS token
-                return self.global_pool(x_norm[:, 1:, :])
-            else:
-                # Return the full, normalized sequence
-                return x_norm
+            # cls / mean / max all route through SequencePooling. For mean/max the
+            # pool is built with exclude_positions=[0], so the CLS token is dropped
+            # before pooling (byte-identical to the previous GAP1D/GMP1D over x[:, 1:]).
+            if self.pool is not None:
+                return self.pool(x_norm)
+            # pooling is None -> return the full, normalized sequence
+            return x_norm
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """
