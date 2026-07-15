@@ -50,6 +50,13 @@ from dl_techniques.layers.transformers.energy_transformer import (
     EnergyTransformer,
     WeightedAdjacencyProjector,
 )
+from dl_techniques.models.graph_energy_transformer.model import (
+    GraphAnomalyDetector,
+    GraphEnergyTransformerBackbone,
+    create_graph_anomaly_detector,
+    GRAPH_BACKBONE_NAME,
+)
+from dl_techniques.datasets.graphs.fraud import build_fraud_subgraph_dataset
 
 # --- geometry. N >= 64 WITH PAD rows. DO NOT SHRINK N. ----------------------
 N_REAL = 64
@@ -306,4 +313,237 @@ class TestWeightedAdjacencyFp16XlaGuard:
             f"dead-projector RED did NOT bite: only {len(frozen)}/{len(deltas)} projector "
             f"weights froze (deltas={deltas}). A stop_gradient projector still trained, so "
             "the GREEN 'weights move' guard cannot go red — the guard is unverifiable."
+        )
+
+
+# ===========================================================================
+# Variant-B (GraphAnomalyDetector / descend_capture) dead-projector guard.
+#
+# The guard above exercises the CLASSIFIER path (`block.__call__`), which was always
+# correct. Variant B does NOT use `block.__call__` — it runs the block's descent MANUALLY
+# through `GraphEnergyTransformerBackbone.descend_capture`. Before plan step 6 that hand-rolled
+# loop called `block.attention.update(...)` WITHOUT `adjacency_weight` and never computed `Ŵ`,
+# so a `GraphAnomalyDetector(use_weighted_adjacency=True)` silently ran the BINARY path: its
+# projector `Conv2D` was built (via `backbone.build -> block.build`) and SERIALIZED, yet
+# received no gradient and trained NOTHING — the exact "feature that does nothing" trap.
+#
+# Proven-RED: the fixed `descend_capture` (forwards the hoisted `Ŵ`) MOVES the projector; a
+# faithful reproduction of the PRE-FIX loop (`_LegacyDescendBackbone`, no `Ŵ` forward) FREEZES
+# it. This RED is not a stop_gradient trick — it runs the literal old code path, so it fails
+# LOUDLY against the pre-fix source and is what makes the fix load-bearing.
+# ===========================================================================
+
+# --- variant-B geometry: synthetic fraud subgraphs, small + fast on GPU1. ---
+B_MAX_NODES = 32
+B_FEAT = 8
+B_EMBED = 32
+B_HEADS = 4
+B_HEAD_DIM = 8
+B_HOPFIELD = 32
+B_STEPS = 4                           # T; the head captures g_1 and g_T
+B_PROJ_DIM = 8                        # OOM escape hatch: conv sees 8^2 = 64 channels
+B_MLP_HIDDEN = 16
+B_BATCH = 8
+B_FIT_STEPS = 15
+
+
+def _legacy_descend_capture(backbone, tokens, adjacency_mask, node_mask_2d, capture_steps):
+    """The PRE-FIX ``descend_capture`` body — the binary path with NO ``Ŵ`` forward.
+
+    A verbatim reproduction of the loop step 6 replaced: ``block.attention.update`` is called
+    without ``adjacency_weight`` and ``_weighted_adjacency`` is never invoked. Shared by the
+    RED backbone below and the trajectory-diff test so the "old behaviour" lives in ONE place.
+    """
+    block = backbone.blocks[0]
+    capture = set(int(t) for t in capture_steps)
+    x = keras.ops.cast(tokens, block.compute_dtype)
+    captured = {}
+    for t in range(1, backbone.num_steps + 1):
+        g = block.norm(x)
+        update = (
+            block.attention.update(g, attention_mask=adjacency_mask, mask=node_mask_2d)
+            + block.hopfield.update(g, mask=node_mask_2d)
+        )
+        x = x + block.step_size * update
+        if t in capture:
+            captured[t] = keras.ops.cast(block.norm(x), backbone.compute_dtype)
+    return captured
+
+
+class _LegacyDescendBackbone(GraphEnergyTransformerBackbone):
+    """RED control: the backbone with the PRE-FIX ``descend_capture`` (never forwards ``Ŵ``).
+
+    Every other line matches the shipped backbone, so the projector is still created and BUILT
+    (the silent-serialization half of the bug); the only difference is that ``Ŵ`` never reaches
+    ``attention.update`` — so the projector gets no gradient and must FREEZE under ``fit``.
+    """
+
+    def descend_capture(self, tokens, adjacency_mask, node_mask_2d, capture_steps,
+                        training=None):
+        return _legacy_descend_capture(
+            self, tokens, adjacency_mask, node_mask_2d, capture_steps
+        )
+
+
+def _make_variant_b(backbone_cls=GraphEnergyTransformerBackbone):
+    """A variant-B :class:`GraphAnomalyDetector` (flag ON) on ``backbone_cls``.
+
+    Mirrors :func:`create_graph_anomaly_detector`'s fixed topology (num_blocks=1, no CLS/PE,
+    noise_std=0) but lets a test swap in the RED backbone.
+    """
+    backbone = backbone_cls(
+        node_feature_dim=B_FEAT,
+        embed_dim=B_EMBED,
+        num_heads=B_HEADS,
+        head_dim=B_HEAD_DIM,
+        hopfield_dim=B_HOPFIELD,
+        num_blocks=1,
+        num_steps=B_STEPS,
+        use_pe=False,
+        use_cls=False,
+        noise_std=0.0,
+        attn_self=True,
+        use_weighted_adjacency=True,
+        adjacency_proj_dim=B_PROJ_DIM,
+        name=GRAPH_BACKBONE_NAME,
+    )
+    return GraphAnomalyDetector(backbone=backbone, mlp_hidden_dim=B_MLP_HIDDEN)
+
+
+def _variant_b_dataset(seed: int, repeat: bool = True):
+    """A synthetic variant-B fraud-subgraph dataset with ``(B, 1)`` float labels for BCE."""
+    ds, meta = build_fraud_subgraph_dataset(
+        synthetic=True,
+        split="train",
+        batch_size=B_BATCH,
+        max_nodes=B_MAX_NODES,
+        n_synth_nodes=400,
+        synth_num_features=B_FEAT,
+        synth_anomaly_ratio=0.3,
+        seed=seed,
+        shuffle=False,
+    )
+    assert meta["num_features"] == B_FEAT
+    ds = ds.map(lambda x, y: (x, tf.cast(tf.reshape(y, (-1, 1)), tf.float32)))
+    return ds.repeat() if repeat else ds
+
+
+def _b_projector_snapshot(model) -> dict:
+    return {
+        v.path: keras.ops.convert_to_numpy(v).astype("float64")
+        for v in model.trainable_weights
+        if _PROJ_NEEDLE in v.path
+    }
+
+
+def _fit_variant_b(model, seed: int):
+    """Stock ``compile`` + a short ``fit``; returns ``(projector_deltas, loss_finite)``."""
+    model.compile(
+        optimizer=keras.optimizers.Adam(1e-3),
+        loss=keras.losses.BinaryCrossentropy(from_logits=True),
+    )
+    ds = _variant_b_dataset(seed)
+    # One forward builds the backbone (and thus the projector, via block.build) before snapshot.
+    for xb, _ in ds.take(1):
+        model(xb)
+    before = _b_projector_snapshot(model)
+    assert before, (
+        "no projector weights on the variant-B model — block.build did not build the "
+        "weighted-adjacency projector (the silent-serialization half of the bug)"
+    )
+    history = model.fit(ds, steps_per_epoch=B_FIT_STEPS, epochs=1, verbose=0)
+    after = _b_projector_snapshot(model)
+    loss_finite = bool(np.all(np.isfinite(history.history["loss"])))
+    deltas = {p: float(np.max(np.abs(after[p] - before[p]))) for p in before}
+    return deltas, loss_finite
+
+
+class TestVariantBDescendCaptureWeightedAdjacency:
+    """Does the projector actually TRAIN on the variant-B ``descend_capture`` path?
+
+    GREEN (fixed backbone, forwards ``Ŵ``) trains; RED (``_LegacyDescendBackbone``, the literal
+    pre-fix loop) freezes. Both a real ``GraphAnomalyDetector`` fit on synthetic fraud subgraphs.
+    """
+
+    def test_projector_trains_on_variant_b(self):
+        """GREEN: the fixed descend_capture forwards Ŵ -> the projector Conv2D MOVES."""
+        keras.utils.set_random_seed(7)
+        model = _make_variant_b()
+        deltas, loss_finite = _fit_variant_b(model, seed=0)
+        conv_moves = [d for p, d in deltas.items() if "pair_conv" in p and "kernel" in p]
+        print(
+            f"\n[variant-B GREEN] loss_finite={loss_finite} "
+            f"conv_kernel|dW|={max(conv_moves):.3e} max|dW|(all projector)={max(deltas.values()):.3e}"
+        )
+        assert loss_finite, "variant-B fit went non-finite — a different failure, STOP and report"
+        assert conv_moves and max(conv_moves) > 0.0, (
+            f"the projector Conv2D kernel did NOT move on variant B (moves={conv_moves}) — "
+            "descend_capture is running the binary path, the weighted-adjacency projector is a "
+            "silent dead feature (the exact defect step 6 fixes)"
+        )
+        assert all(d > 0.0 for d in deltas.values()), (
+            f"a projector weight stayed frozen on variant B: {deltas}"
+        )
+
+    def test_legacy_descend_freezes_projector(self):
+        """RED: the PRE-FIX descend loop (no Ŵ forward) FREEZES the projector.
+
+        Proves the GREEN guard bites: run against the literal old code path and the projector
+        weights are pinned at EXACTLY 0.0 despite being built and serialized.
+        """
+        keras.utils.set_random_seed(7)
+        model = _make_variant_b(backbone_cls=_LegacyDescendBackbone)
+        deltas, loss_finite = _fit_variant_b(model, seed=0)
+        frozen = sorted(p for p, d in deltas.items() if d == 0.0)
+        print(
+            f"\n[variant-B RED legacy] loss_finite={loss_finite} "
+            f"frozen={len(frozen)}/{len(deltas)} max|dW|={max(deltas.values()):.3e}"
+        )
+        assert loss_finite, "legacy variant-B fit went non-finite — a different failure"
+        assert len(frozen) == len(deltas), (
+            f"the pre-fix descend_capture RED did NOT bite: only {len(frozen)}/{len(deltas)} "
+            f"projector weights froze (deltas={deltas}). If the projector still trained without "
+            "the Ŵ forward, the GREEN 'weights move' guard is unverifiable."
+        )
+
+    def test_weighted_adjacency_reaches_the_descent(self):
+        """The flag actually changes the trajectory: fixed descend_capture (forwards Ŵ) differs
+        from the pre-fix loop (no Ŵ) on the SAME model weights -> Ŵ genuinely reaches the descent.
+        """
+        keras.utils.set_random_seed(7)
+        model = create_graph_anomaly_detector(
+            node_feature_dim=B_FEAT,
+            embed_dim=B_EMBED,
+            num_heads=B_HEADS,
+            head_dim=B_HEAD_DIM,
+            hopfield_dim=B_HOPFIELD,
+            mlp_hidden_dim=B_MLP_HIDDEN,
+            num_steps=B_STEPS,
+            attn_self=True,
+            use_weighted_adjacency=True,
+            adjacency_proj_dim=B_PROJ_DIM,
+        )
+        ds = _variant_b_dataset(seed=1, repeat=False)
+        inputs, _ = next(iter(ds))
+        model(inputs)                                   # build all weights
+
+        backbone = model.backbone
+        x0 = backbone.embed(inputs)
+        adj = inputs["adjacency"]
+        node_mask = inputs.get("node_mask", None)
+        steps = {1, backbone.num_steps}
+
+        caps_fixed = backbone.descend_capture(x0, adj, node_mask, steps)     # forwards Ŵ
+        caps_legacy = _legacy_descend_capture(backbone, x0, adj, node_mask, steps)  # no Ŵ
+
+        diff_T = float(
+            np.max(np.abs(
+                keras.ops.convert_to_numpy(caps_fixed[backbone.num_steps])
+                - keras.ops.convert_to_numpy(caps_legacy[backbone.num_steps])
+            ))
+        )
+        print(f"\n[variant-B Ŵ-reaches-descent] max|g_T diff|={diff_T:.3e}")
+        assert diff_T > 1e-6, (
+            f"the weighted adjacency did NOT change the descent trajectory (max|g_T diff|="
+            f"{diff_T:.3e}) — Ŵ is not reaching attention.update in descend_capture"
         )

@@ -472,14 +472,20 @@ class GraphEnergyTransformerBackbone(keras.Model):
 
         # DECISION plan-2026-07-15T015824-3c2159eb/D-002
         This replicates ``EnergyTransformer.call``'s descent loop EXACTLY, through the block's
-        PUBLIC methods only — ``.norm`` / ``.attention.update`` / ``.hopfield.update`` — so the
-        block's ``layers/`` source stays frozen (0 changes) and no gradient is re-derived. The
-        per-step update is byte-for-byte the block's own::
+        PUBLIC methods only — ``.norm`` / ``._weighted_adjacency`` / ``.attention.update`` /
+        ``.hopfield.update`` — so the block's ``layers/`` source stays frozen (0 changes) and no
+        gradient is re-derived. That parity INCLUDES the opt-in weighted adjacency (eq. 25):
+        ``Ŵ`` is hoisted ONCE from the block INPUT tokens (Branch A, constant across the T
+        steps) and forwarded to ``attention.update`` at every step, exactly as ``call()`` does
+        (see plan-2026-07-15T053724-78001af1/D-003 at the hoist site below). The per-step update
+        is byte-for-byte the block's own::
 
-            g   = block.norm(x)
-            upd = block.attention.update(g, attention_mask=adj, mask=node_mask)
-                  + block.hopfield.update(g, mask=node_mask)
-            x   = x + block.step_size * upd
+            W_hat = block._weighted_adjacency(x0, adj)          # None unless flag on (Branch A)
+            g     = block.norm(x)
+            upd   = block.attention.update(g, attention_mask=adj, mask=node_mask,
+                                           adjacency_weight=W_hat)
+                    + block.hopfield.update(g, mask=node_mask)
+            x     = x + block.step_size * upd
 
         (The block internally derives the Hopfield's per-token keep as
         ``_hopfield_token_mask(rank3 adj, node_mask)`` == ``_token_keep(node_mask)``; passing
@@ -509,12 +515,29 @@ class GraphEnergyTransformerBackbone(keras.Model):
         x = ops.cast(tokens, block.compute_dtype)
         captured: Dict[int, keras.KerasTensor] = {}
 
+        # DECISION plan-2026-07-15T053724-78001af1/D-003
+        # Variant B's SECOND descent path must forward the per-block-constant weighted
+        # adjacency `Ŵ` too, or `use_weighted_adjacency=True` trains a projector that feeds
+        # NOTHING — a silently dead feature that still serializes (the LESSONS "feature that
+        # does nothing" pattern; the classifier path via `block.call()` was already correct).
+        # `Ŵ` is hoisted ONCE from the block INPUT tokens `x` (Branch A: constant across the T
+        # steps, `dŴ/dg == 0`), mirroring `EnergyTransformer.call` (energy_transformer.py:1528),
+        # and the SAME tensor is fed to `attention.update` at EVERY step below. It is `None`
+        # when the flag is off or no rank-3 adjacency is present -> byte-identical to before.
+        # WHAT NOT TO DO: do NOT recompute `Ŵ` per step from the evolving `g` — that adds a
+        # `dŴ/dg` term the oracle-verified closed form (step 1, D-001) does not carry. See
+        # decisions.md D-003 (and D-001/D-002).
+        adjacency_weight = block._weighted_adjacency(x, adjacency_mask)
+
         # Static `range` over the fixed step count — graph-safe. `t in capture` is a
         # trace-time Python test over the captured-step SET, never a test on tensor values.
         for t in range(1, self.num_steps + 1):
             g = block.norm(x)
             update = (
-                block.attention.update(g, attention_mask=adjacency_mask, mask=node_mask_2d)
+                block.attention.update(
+                    g, attention_mask=adjacency_mask, mask=node_mask_2d,
+                    adjacency_weight=adjacency_weight,
+                )
                 + block.hopfield.update(g, mask=node_mask_2d)
             )
             x = x + block.step_size * update
