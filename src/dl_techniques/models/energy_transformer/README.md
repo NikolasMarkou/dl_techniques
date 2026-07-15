@@ -288,9 +288,11 @@ Worse, the layer's docstring currently tells the next reader **not to look**: it
 
 **Follow-up owed (out of scope here):** fix it at the source — compute the norm's backward in `float32`, or floor `epsilon` to `6.1e-4` under an fp16 policy — and correct that docstring to name the `(var + eps)^(-3/2)` overflow.
 
-### 8.5 Graph variants are NOT implemented
+### 8.5 Graph variants — binary-adjacency B + C-lite ARE implemented; only eq.-25 weighted adjacency is still open
 
-The paper's graph anomaly detection and graph classification models are **not** here, and are not a small addition. `EnergyAttention` supports only a **binary 0/1 keep-mask**; the paper's eq.-25 weighted adjacency tensor is a real-valued per-edge bias with no path into the block's `_project` / `energy` / `update`. Expressing it requires a source change to the attention layer **plus a new hand-derived closed-form gradient** (the block has no autodiff path for the energy — the update is a closed form). That work is deferred to a follow-up.
+The paper's graph models now have a home: **`models/graph_energy_transformer/`** ships variant B (node anomaly detection, `GraphAnomalyDetector`) and a variant C-lite (graph classification, `GraphClassifier`), both riding the existing **binary 0/1 keep-mask** as a rank-3 `(B, N, N)` `attention_mask` — with **zero `layers/` source changes and zero new hand-derived gradients**. They reuse this package's consumer-side fp16/XLA fix (the block runs in `variable_dtype`) verbatim.
+
+What remains deferred is only the paper's **eq.-25 WEIGHTED learned adjacency** (`Â = Conv2D(X ⊗ X) ⊙ A′`): that real-valued per-edge bias is `g`-dependent, so it has no path into the block's `_project` / `energy` / `update` and would require a source change to the attention layer **plus a new hand-derived closed-form `-dE/dg` term** (the block has no autodiff path for the energy — the update is a closed form). That single piece is a clean follow-up; "C-lite" is exactly "variant C minus eq.-25". See `models/graph_energy_transformer/README.md`.
 
 ---
 
