@@ -62,6 +62,10 @@ from typing import Optional, Any, Dict, Union, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
+from dl_techniques.utils.clip_utils import (
+    compute_clip_logits,
+    last_non_pad_token,
+)
 from dl_techniques.layers.transformers import TransformerLayer
 
 # ---------------------------------------------------------------------
@@ -582,23 +586,8 @@ class CLIP(keras.Model):
             x = transformer_layer(x, training=training)
 
         # Extract features from the last non-padding token
-        # Compute sequence lengths (assuming 0 is padding)
-        sequence_lengths = ops.sum(
-            ops.cast(text_ids != 0, 'int32'), axis=1
-        )
-        current_seq_len = ops.shape(x)[1]
-        last_token_indices = ops.clip(
-            sequence_lengths - 1, 0, current_seq_len - 1
-        )
-
-        # Gather last token features using one-hot indexing
-        one_hot_indices = ops.one_hot(
-            last_token_indices, num_classes=current_seq_len, dtype=x.dtype
-        )
-        reshaped_indices = ops.expand_dims(one_hot_indices, axis=1)
-        text_features_raw = ops.squeeze(
-            ops.matmul(reshaped_indices, x), axis=1
-        )
+        # (assuming 0 is the padding id; right-padded sequences).
+        text_features_raw = last_non_pad_token(x, text_ids, 0)
 
         # Project to shared embedding space
         text_features = self.text_projection(
@@ -664,10 +653,9 @@ class CLIP(keras.Model):
         # Compute similarity if both modalities are present
         if image_features is not None and text_features is not None:
             logit_scale = ops.exp(self.logit_scale)
-            logits_per_image = logit_scale * ops.matmul(
-                image_features, ops.transpose(text_features)
+            logits_per_image, logits_per_text = compute_clip_logits(
+                image_features, text_features, logit_scale
             )
-            logits_per_text = ops.transpose(logits_per_image)
 
             results.update({
                 'logits_per_image': logits_per_image,

@@ -121,6 +121,10 @@ from dl_techniques.layers.geometric.clifford_block import (
 from dl_techniques.layers.layer_scale import LearnableMultiplier
 from dl_techniques.layers.patch_merging import PatchMerging
 from dl_techniques.layers.stochastic_depth import StochasticDepth
+from dl_techniques.utils.clip_utils import (
+    compute_clip_logits,
+    last_non_pad_token,
+)
 from dl_techniques.utils.drop_path import linear_drop_path_rates
 from dl_techniques.utils.logger import logger
 
@@ -1212,14 +1216,8 @@ class CliffordCLIP(keras.Model):
         )                                       # (B, L)
 
         # Last-non-pad-token index (the canonical CLIP text anchor).
-        non_pad_i = ops.cast(
-            ops.not_equal(input_ids, self.pad_token_id), "int32"
-        )
-        lengths_i = ops.sum(non_pad_i, axis=1)
-        last_idx = ops.clip(lengths_i - 1, 0, seq_len - 1)
-        one_hot = ops.one_hot(last_idx, num_classes=seq_len, dtype=x.dtype)
-        last_feat = ops.squeeze(
-            ops.matmul(ops.expand_dims(one_hot, axis=1), x), axis=1
+        last_feat = last_non_pad_token(
+            x, input_ids, self.pad_token_id
         )                                       # (B, D_t)
 
         if self.head_kind == "plain":
@@ -1302,10 +1300,9 @@ class CliffordCLIP(keras.Model):
         # fp16 matmul does not raise on a mixed-dtype multiply. Identity at
         # float32 (byte-identical).
         scale_c = ops.cast(scale, image_features.dtype)
-        logits_per_image = scale_c * ops.matmul(
-            image_features, ops.transpose(text_features)
+        logits_per_image, logits_per_text = compute_clip_logits(
+            image_features, text_features, scale_c
         )
-        logits_per_text = ops.transpose(logits_per_image)
 
         return {
             "image_features": image_features,
