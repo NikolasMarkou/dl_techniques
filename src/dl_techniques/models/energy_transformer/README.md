@@ -288,11 +288,11 @@ Worse, the layer's docstring currently tells the next reader **not to look**: it
 
 **Follow-up owed (out of scope here):** fix it at the source — compute the norm's backward in `float32`, or floor `epsilon` to `6.1e-4` under an fp16 policy — and correct that docstring to name the `(var + eps)^(-3/2)` overflow.
 
-### 8.5 Graph variants — binary-adjacency B + C-lite ARE implemented; only eq.-25 weighted adjacency is still open
+### 8.5 Graph variants — binary-adjacency B + C-lite, plus opt-in eq.-25 weighted adjacency
 
-The paper's graph models now have a home: **`models/graph_energy_transformer/`** ships variant B (node anomaly detection, `GraphAnomalyDetector`) and a variant C-lite (graph classification, `GraphClassifier`), both riding the existing **binary 0/1 keep-mask** as a rank-3 `(B, N, N)` `attention_mask` — with **zero `layers/` source changes and zero new hand-derived gradients**. They reuse this package's consumer-side fp16/XLA fix (the block runs in `variable_dtype`) verbatim.
+The paper's graph models now have a home: **`models/graph_energy_transformer/`** ships variant B (node anomaly detection, `GraphAnomalyDetector`) and a variant C-lite (graph classification, `GraphClassifier`), both riding the existing **binary 0/1 keep-mask** as a rank-3 `(B, N, N)` `attention_mask` by default — that default path adds **no new hand-derived gradient**. They reuse this package's consumer-side fp16/XLA fix (the block runs in `variable_dtype`) verbatim.
 
-What remains deferred is only the paper's **eq.-25 WEIGHTED learned adjacency** (`Â = Conv2D(X ⊗ X) ⊙ A′`): that real-valued per-edge bias is `g`-dependent, so it has no path into the block's `_project` / `energy` / `update` and would require a source change to the attention layer **plus a new hand-derived closed-form `-dE/dg` term** (the block has no autodiff path for the energy — the update is a closed form). That single piece is a clean follow-up; "C-lite" is exactly "variant C minus eq.-25". See `models/graph_energy_transformer/README.md`.
+The paper's **eq.-25 WEIGHTED learned adjacency** (`Ŵ = Conv2D(X ⊗ X) ⊙ A′`) is now **implemented, opt-in** via `use_weighted_adjacency=True` (**Branch A**). Because the paper computes `Ŵ` **once per block** (eq.-27 iterates tokens, never re-derives `Ŵ`), it is a per-call constant hoisted out of the descent loop like the keep-mask, entering the energy multiplicatively (`logit = β·A·Ŵ + M`). This required a real edit to `EnergyAttention`'s closed-form gradient (`omega_eff = softmax·keep·Ŵ` in `term_q`/`term_k`), oracle-verified at N=64/1024 and proven RED. It is a faithful interpretation of eq.-25's multiplicative form; end-to-end accuracy vs the paper's variant-C baselines is a separate, un-run campaign. Default-off keeps every existing consumer byte-identical. See `models/graph_energy_transformer/README.md` §3.2.
 
 ---
 

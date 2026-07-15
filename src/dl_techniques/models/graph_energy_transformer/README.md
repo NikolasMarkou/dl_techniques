@@ -2,7 +2,7 @@
 
 Keras 3 implementation of the **graph-domain** models from **Hoover et al., "Energy Transformer", NeurIPS 2023** ([arXiv:2302.07253](https://arxiv.org/abs/2302.07253)): variant **B** (per-node anomaly detection, paper §4 / App C) and a variant **C-lite** (whole-graph classification, paper §5 / App D).
 
-Like the image models in `models/energy_transformer/`, these replace a stack of transformer blocks with **one** (or a few) `EnergyTransformer` block(s) that define a single scalar energy `E(g)` over the node states and run `T` steps of gradient descent on it. The forward pass *is* the optimization. Both variants ride the block's existing **binary 0/1 keep-mask** — supplied as a rank-3 `(B, N, N)` `attention_mask` that literally *is* the graph adjacency — with **zero `layers/` source changes and zero new hand-derived gradients**.
+Like the image models in `models/energy_transformer/`, these replace a stack of transformer blocks with **one** (or a few) `EnergyTransformer` block(s) that define a single scalar energy `E(g)` over the node states and run `T` steps of gradient descent on it. The forward pass *is* the optimization. By default both variants ride the block's existing **binary 0/1 keep-mask** — supplied as a rank-3 `(B, N, N)` `attention_mask` that literally *is* the graph adjacency — with **zero `layers/` behavior change and zero new hand-derived gradients** on that default path. An **opt-in** `use_weighted_adjacency=True` path (§3) additionally learns the paper's **eq.-25 per-edge weighted adjacency** `Ŵ`; it is the one feature that adds a real (oracle-verified) closed-form gradient term to `EnergyAttention`. With the flag **off** (the default) every existing image and graph consumer is byte-identical.
 
 These two models exist to give the `EnergyTransformer` block a *graph* consumer and to prove that the block's proven image-side fp16/XLA fix transfers verbatim to the graph domain.
 
@@ -12,7 +12,7 @@ These two models exist to give the `EnergyTransformer` block a *graph* consumer 
 
 1. [Architecture](#1-architecture)
 2. [The two variants](#2-the-two-variants)
-3. [Scope: binary adjacency only (D-001)](#3-scope-binary-adjacency-only-d-001)
+3. [Adjacency: binary by default, opt-in eq.-25 weighted (D-001)](#3-adjacency-binary-by-default-opt-in-eq-25-weighted-d-001)
 4. [The data contracts](#4-the-data-contracts)
 5. [No custom `train_step`](#5-no-custom-train_step)
 6. [fp16 / XLA safety is consumer-side (D-002)](#6-fp16--xla-safety-is-consumer-side-d-002)
@@ -75,13 +75,25 @@ Both compose the SAME `GraphEnergyTransformerBackbone`, serialize via `.keras`, 
 
 ---
 
-## 3. Scope: binary adjacency only (D-001)
+## 3. Adjacency: binary by default, opt-in eq.-25 weighted (D-001)
 
-**Both variants ride the existing rank-3 binary `(B, N, N)` `attention_mask`.** The mask is a 0/1 keep-mask: `mask[b, n, m] = 1` iff node `n` attends to node `m` (i.e. there is an edge). This is a `g`-independent constant, so it needs **no new gradient** and touches **no `layers/` source**.
+### 3.1 The default — binary adjacency (C-lite)
 
-**What "C-lite" means — the paper's eq.-25 WEIGHTED learned adjacency is deliberately NOT implemented.** The paper's variant C uses a real-valued, *learned* per-edge adjacency `Â = Conv2D(X ⊗ X) ⊙ A′` — a per-edge bias that depends on the token states `X`. That is `g`-dependent, so it has no path into the block's `_project` / `energy` / `update`, and expressing it would require a source change to `EnergyAttention` **plus a new hand-derived closed-form `-dE/dg` term** (the block has no autodiff path for the energy — the update is a closed form). That single piece is a clean, well-scoped follow-up. This package delivers everything else: a working, serializable, trainable graph-classification ET on a real benchmark, minus eq.-25.
+**By default both variants ride the existing rank-3 binary `(B, N, N)` `attention_mask`.** The mask is a 0/1 keep-mask: `mask[b, n, m] = 1` iff node `n` attends to node `m` (i.e. there is an edge). This is a `g`-independent constant, so it needs **no new gradient**. This is the "C-lite" model — variant C minus the learned per-edge weight — and it remains the default, byte-identical to before this feature.
 
-> `git diff --stat src/dl_techniques/layers/` for this feature is **empty**, and a grep finds **no** `train_step` / `test_step` / `compute_loss` / `GradientTape` in the model or trainer code. Those two facts are the D-001 boundary; keep them true.
+### 3.2 Opt-in — the paper's eq.-25 weighted adjacency (`use_weighted_adjacency=True`, Branch A)
+
+The paper's variant C uses a real-valued, *learned* per-edge adjacency `Ŵ = Conv2D(X ⊗ X) ⊙ A′`. Setting `use_weighted_adjacency=True` (default `False`) turns this on:
+
+* **What it computes.** Each `EnergyTransformer` block builds a per-head edge weight `Ŵ_{hnm}` **once per block** — from the block's *input* tokens `X` (a `WeightedAdjacencyProjector`: `X ⊗ X → Conv2D → (B, H, N, N)`, gated by the binary adjacency `A′`), **not** from the evolving state `g`. This is **Branch A**: because the paper computes `Â` once per block (eq.-27 iterates the tokens over `T` steps but never re-derives `Â`), `Ŵ` is a **per-call constant**, hoisted out of the `T`-step descent loop exactly like the existing keep-mask.
+* **How it enters the energy.** `Ŵ` modulates the attention score **multiplicatively**: `logit = β·A·Ŵ + M`, where `A = K·Q` is today's raw score and `M` is the unchanged `−∞`/0 keep-bias built from the binary `A′`. `Ŵ` carries **only** the finite learned weight; the non-edge masking is still `M`, so the two roles never mix.
+* **The gradient is hand-derived and oracle-verified.** The block's descent is a closed form (there is no autodiff path for the energy), so `Ŵ`'s effect on `-dE/dg` was derived by hand: `omega_eff = softmax(logit, axis=key) · keep · Ŵ` substitutes for `omega` in `EnergyAttention`'s `term_q` / `term_k`. `update() == -dE^ATT/dg` is verified against a `tf.GradientTape` oracle at **N = 64** (f32) and **N = 1024** (f64), and the guard is proven RED (deleting the `·Ŵ` factor turns the oracle red). The projector's own weights train through the ordinary outer `fit()` backward pass; only `omega_eff` is hand-coded.
+* **Cost knobs.** `adjacency_kernel_size` (default `1`) sets the Conv2D receptive field over the pairing grid. `adjacency_proj_dim` (default `None`) reduces the token dim `D` **before** the `X ⊗ X` outer product, cutting the `D²` pairing-channel cost that would otherwise dominate for large graphs — set it when the `D²`-channel Conv OOMs.
+* **CLI.** `train_classification.py` exposes `--use-weighted-adjacency` (plus `--adjacency-kernel-size`, `--adjacency-proj-dim`) to flip the flag from the shell.
+
+**Scope note — faithful, not benchmarked.** This is a faithful interpretation of eq.-25's *multiplicative* form (verified gradient + energy-descent monotonicity + fp16/XLA fit guard, all proven RED). It is **not** an end-to-end accuracy claim: matching the paper's reported variant-C classification numbers on the TUDatasets is a separate campaign and is **not** benchmarked here.
+
+> With `use_weighted_adjacency=False` (the default), `git diff --stat src/dl_techniques/layers/` is behaviorally inert (`y(flag off) == y(no flag)`, byte-identical), and a grep finds **no** `train_step` / `test_step` / `compute_loss` / `GradientTape` in the model or trainer `src/` code — the descent stays a closed form, never autodiff. Those facts are the D-001 boundary; the only `layers/` sources the weighted path touches are `energy_attention.py` and `energy_transformer.py`.
 
 ---
 
@@ -223,7 +235,7 @@ Both write `results/<experiment>/{config.json, best_model.keras, training_log.cs
 ## 9. Known limitations
 
 * **`--gpu N` is INERT — use the shell.** As with every trainer in this repo, `setup_gpu()` runs after TF has initialized the device, so the flag arrives too late. Always prefix `CUDA_VISIBLE_DEVICES=1`. The CLI-wiring test guards that a flag *reaches* `TrainingConfig`, not that it has an *effect*.
-* **eq.-25 weighted adjacency is not here** — see §3. C-lite is "variant C minus the learned per-edge adjacency".
+* **eq.-25 weighted adjacency is opt-in, not benchmarked** — available via `use_weighted_adjacency=True` (§3.2, Branch A: gradient oracle-verified, default-off byte-identical). The default is still the binary C-lite path. Matching the paper's reported variant-C accuracy on the TUDatasets is a separate, un-run campaign.
 * **Variant B needs bounded subgraphs.** A full dense `N×N` over the whole Amazon (~12k) / YelpChi (~45k) graph is infeasible and would OOM; B always trains on size-capped k-hop subgraphs, never a single dense adjacency.
 * **Gradient centralization omitted** (§7) — the one Table-9 optimizer knob not reproduced.
 * **Cross-variant warm-start does nothing** — B and C are not trunk-weight-compatible (CLS token changes `N`). Only B→B / C→C match by name.

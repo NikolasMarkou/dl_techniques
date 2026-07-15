@@ -15,9 +15,13 @@ to this same file, so the seams below are intentional.
 
 **THE GRAPH ADJACENCY IS THE RANK-3 ``attention_mask``.** A binary ``(B, N, N)`` adjacency is
 fed to each block as its rank-3 ``attention_mask`` (a KEY x QUERY keep). PAD nodes are excluded
-from ``E_HN`` (and from attention) via the rank-2 ``(B, N)`` ``node_mask``. There is NO new
-gradient and NO ``layers/`` change — the block already supports exactly this masking
-(``EnergyTransformer.call`` masking semantics; D-001/D-002 of this plan).
+from ``E_HN`` (and from attention) via the rank-2 ``(B, N)`` ``node_mask``. On this default path
+there is NO new gradient — the block already supports exactly this masking
+(``EnergyTransformer.call`` masking semantics; D-001/D-002 of this plan). The paper's eq.-25
+learned per-edge WEIGHTED adjacency is available **opt-in** via ``use_weighted_adjacency=True``
+(Branch A: a ``WeightedAdjacencyProjector`` computes ``Ŵ`` once per block, folded multiplicatively
+into the attention energy with a hand-derived, oracle-verified gradient); binary C-lite is the
+default and stays byte-identical.
 
 **THE fp16/XLA DTYPE FIX IS REPLICATED VERBATIM FROM THE IMAGE BACKBONE (D-010/D-011).** Each
 block is built with ``dtype=self.dtype_policy.variable_dtype`` (NOT ``self.dtype_policy``) and
@@ -787,9 +791,13 @@ class GraphAnomalyDetector(keras.Model):
 class GraphClassifier(keras.Model):
     """Variant C-lite (graph classification): shared graph trunk -> CLS-token readout -> logits.
 
-    **Intent**: the paper's §5 / App. D graph-classification model, in the *binary-adjacency*
-    "C-lite" form (D-001 of this plan — NO eq.-25 learned per-edge weighted adjacency, hence no
-    new hand-derived gradient). A stack of ``S`` :class:`GraphEnergyTransformerBackbone` ET blocks
+    **Intent**: the paper's §5 / App. D graph-classification model. The default is the
+    *binary-adjacency* "C-lite" form (D-001 of this plan — no learned per-edge weight, hence no new
+    hand-derived gradient); the paper's eq.-25 learned per-edge weighted adjacency is available
+    **opt-in** via ``use_weighted_adjacency=True`` (Branch A — ``Ŵ`` computed once per block, folded
+    multiplicatively into the attention energy with a hand-derived, oracle-verified gradient; see
+    ``EnergyTransformer`` D-002 and the package README §3.2). A stack of ``S``
+    :class:`GraphEnergyTransformerBackbone` ET blocks
     (``num_blocks=S=4``, Table 9) descends the graph tokens with a prepended learnable CLS token,
     Laplacian positional encodings, and eq.-27 saddle-escape Langevin noise (``noise_std``, active
     in training only). The graph-level representation is the FINAL CLS token; a LayerNorm ->
