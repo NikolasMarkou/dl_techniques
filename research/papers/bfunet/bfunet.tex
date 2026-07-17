@@ -260,7 +260,7 @@ Figure~\ref{fig:psnrsweep} shows the blind PSNR-vs-noise sweep on DIV2K-validati
 \end{figure}
 
 \subsection{Comparison against the color-denoising leaderboard}
-Table~\ref{tab:sota} places \model{} against six published baselines on all four standard color sets at $\sigma\in\{15,25,50\}$, under the identical full-image protocol and PSNR convention. The pattern is uniform: the single $3.39$M blind model beats DnCNN and FFDNet on every set at every noise level, and trails the heavyweight state of the art by a small, consistent margin that widens on Urban100.
+Table~\ref{tab:sota} places \model{} against six published baselines on all four standard color sets at $\sigma\in\{15,25,50\}$, under the identical full-image protocol and PSNR convention. The pattern is uniform: the single $0.74$M blind model beats DnCNN and FFDNet on every set at every noise level, and trails the heavyweight state of the art by a small, consistent margin that widens on Urban100.
 
 \begin{table}[H]
 \centering
@@ -271,37 +271,37 @@ Table~\ref{tab:sota} places \model{} against six published baselines on all four
 \begin{tabular}{llccccccc}
 \toprule
 \textbf{Set} & \textbf{$\sigpx$} & \textbf{\model{}} & \textbf{DnCNN} & \textbf{FFDNet} & \textbf{DRUNet} & \textbf{SwinIR} & \textbf{Restormer} & \textbf{SCUNet} \\
- & & \textbf{(3.4M)} & ($0.6$M) & ($0.5$M) & ($32$M) & ($12$M) & ($26$M) & ($18$M) \\
+ & & \textbf{(0.74M)} & ($0.6$M) & ($0.5$M) & ($32$M) & ($12$M) & ($26$M) & ($18$M) \\
 \midrule
-CBSD68   & 15 & 33.95 & \textbf{33.90} & \textbf{33.87} & 34.30 & 34.42 & 34.40 & 34.40 \\
-CBSD68   & 25 & 31.35 & \textbf{31.24} & \textbf{31.21} & 31.69 & 31.78 & 31.79 & 31.79 \\
-CBSD68   & 50 & 28.18 & \textbf{27.95} & \textbf{27.96} & 28.51 & 28.56 & 28.60 & 28.61 \\
+CBSD68   & 15 & 33.92 & \textbf{33.90} & \textbf{33.87} & 34.30 & 34.42 & 34.40 & 34.40 \\
+CBSD68   & 25 & 31.26 & \textbf{31.24} & \textbf{31.21} & 31.69 & 31.78 & 31.79 & 31.79 \\
+CBSD68   & 50 & 28.01 & \textbf{27.95} & \textbf{27.96} & 28.51 & 28.56 & 28.60 & 28.61 \\
 \midrule
-Kodak24  & 15 & 34.97 & \textbf{34.60} & \textbf{34.63} & 35.31 & 35.34 & 35.47 & 35.34 \\
-Kodak24  & 25 & 32.56 & \textbf{32.14} & \textbf{32.13} & 32.89 & 32.89 & 33.04 & 32.92 \\
-Kodak24  & 50 & 29.51 & \textbf{28.95} & \textbf{28.98} & 29.86 & 29.79 & 30.01 & 29.87 \\
+Kodak24  & 15 & 34.85 & \textbf{34.60} & \textbf{34.63} & 35.31 & 35.34 & 35.47 & 35.34 \\
+Kodak24  & 25 & 32.37 & \textbf{32.14} & \textbf{32.13} & 32.89 & 32.89 & 33.04 & 32.92 \\
+Kodak24  & 50 & 29.19 & \textbf{28.95} & \textbf{28.98} & 29.86 & 29.79 & 30.01 & 29.87 \\
 \midrule
-McMaster & 15 & 34.79 & \textbf{33.45} & \textbf{34.66} & 35.40 & 35.61 & 35.61 & 35.60 \\
-McMaster & 25 & 32.61 & \textbf{31.52} & \textbf{32.35} & 33.14 & 33.20 & 33.34 & 33.34 \\
-McMaster & 50 & 29.61 & \textbf{28.62} & \textbf{29.18} & 30.08 & 30.22 & 30.30 & 30.29 \\
+McMaster & 15 & 34.74 & \textbf{33.45} & \textbf{34.66} & 35.40 & 35.61 & 35.61 & 35.60 \\
+McMaster & 25 & 32.45 & \textbf{31.52} & \textbf{32.35} & 33.14 & 33.20 & 33.34 & 33.34 \\
+McMaster & 50 & 29.28 & \textbf{28.62} & \textbf{29.18} & 30.08 & 30.22 & 30.30 & 30.29 \\
 \midrule
-Urban100 & 15 & 34.20 & \textbf{32.98} & \textbf{33.83} & 34.81 & 35.13 & 35.13 & 35.18 \\
-Urban100 & 25 & 31.92 & \textbf{30.81} & \textbf{31.40} & 32.60 & 32.90 & 32.96 & 33.03 \\
-Urban100 & 50 & 28.81 & \textbf{27.59} & \textbf{28.05} & 29.61 & 29.82 & 30.02 & 30.14 \\
+Urban100 & 15 & 34.03 & \textbf{32.98} & \textbf{33.83} & 34.81 & 35.13 & 35.13 & 35.18 \\
+Urban100 & 25 & 31.61 & \textbf{30.81} & \textbf{31.40} & 32.60 & 32.90 & 32.96 & 33.03 \\
+Urban100 & 50 & 28.22 & \textbf{27.59} & \textbf{28.05} & 29.61 & 29.82 & 30.02 & 30.14 \\
 \midrule
-\multicolumn{2}{l}{\emph{avg} $\sigma{=}15$} & 34.48 & \textbf{33.73} & \textbf{34.25} & 34.96 & 35.13 & 35.15 & 35.13 \\
-\multicolumn{2}{l}{\emph{avg} $\sigma{=}25$} & 32.11 & \textbf{31.43} & \textbf{31.77} & 32.58 & 32.69 & 32.78 & 32.77 \\
-\multicolumn{2}{l}{\emph{avg} $\sigma{=}50$} & 29.03 & \textbf{28.28} & \textbf{28.54} & 29.52 & 29.60 & 29.73 & 29.73 \\
+\multicolumn{2}{l}{\emph{avg} $\sigma{=}15$} & 34.39 & \textbf{33.73} & \textbf{34.25} & 34.96 & 35.13 & 35.15 & 35.13 \\
+\multicolumn{2}{l}{\emph{avg} $\sigma{=}25$} & 31.92 & \textbf{31.43} & \textbf{31.77} & 32.58 & 32.69 & 32.78 & 32.77 \\
+\multicolumn{2}{l}{\emph{avg} $\sigma{=}50$} & 28.68 & \textbf{28.28} & \textbf{28.54} & 29.52 & 29.60 & 29.73 & 29.73 \\
 \bottomrule
 \end{tabular}%
 }
 \end{table}
 
-Averaged over the four sets, \model{} is $+0.75/+0.68/+0.75$\,dB above DnCNN at $\sigma=15/25/50$ and $+0.23/+0.34/+0.49$\,dB above FFDNet (which, unlike our model, is \emph{non-blind} and receives a noise-level map). It is $-0.48/-0.47/-0.49$\,dB relative to DRUNet and $-0.67/-0.67/-0.70$\,dB relative to Restormer, the leaderboard top. The gap is smallest on CBSD68 and Kodak24 ($\sim0.4$\,dB), larger on McMaster ($\sim0.7$\,dB), and largest on Urban100 ($\sim1.0$\,dB). Urban100's repetitive, self-similar structures are exactly where the transformers' non-local attention (SwinIR, Restormer) and DRUNet's large receptive field have the most to exploit and a compact local conv U-Net the least.
+Averaged over the four sets, \model{} is $+0.65/+0.50/+0.40$\,dB above DnCNN at $\sigma=15/25/50$ and $+0.14/+0.15/+0.13$\,dB above FFDNet (which, unlike our model, is \emph{non-blind} and receives a noise-level map). It is $-0.57/-0.66/-0.84$\,dB relative to DRUNet and $-0.77/-0.86/-1.06$\,dB relative to Restormer, the leaderboard top. \model{} beats DnCNN in all twelve cells, but the per-set margin is uneven: it is razor-thin on CBSD68 ($+0.02$ to $+0.06$\,dB) and much larger on McMaster and Urban100 (up to $+1.29$ and $+1.05$\,dB at $\sigma{=}15$). Against the heavyweight state of the art the gap is smallest on CBSD68 ($\sim0.5$--$0.6$\,dB), then Kodak24 ($\sim0.6$--$0.8$\,dB) and McMaster ($\sim0.9$--$1.0$\,dB), and largest on Urban100 ($\sim1.2$--$1.9$\,dB). Urban100's repetitive, self-similar structures are exactly where the transformers' non-local attention (SwinIR, Restormer) and DRUNet's large receptive field have the most to exploit and a compact local conv U-Net the least.
 
 \subsection{Structural similarity (SSIM)}
 \label{sec:ssim}
-Table~\ref{tab:ssim} reports SSIM alongside PSNR for \model{} on the same four sets and full-image protocol (same checkpoint as Table~\ref{tab:sota}), computed on the $[0,1]$ representation with a data range of $1.0$. SSIM tracks PSNR's ordering across noise, highest at $\sigpx{=}15$ (average $0.930$) and degrading gracefully to average $0.827$ at $\sigpx{=}50$. Urban100 is a cross-metric exception: it has the highest SSIM of the four sets at every noise level ($0.944/0.918/0.866$) despite its middling PSNR. Its regular, high-contrast man-made structures, the same self-similarity that costs PSNR against non-local models, yield strong local structural agreement once denoised. We report SSIM for \model{} only, because our comparison source \citep{zhang2022scunet} tabulates PSNR alone and SSIM values assembled from mixed sources use inconsistent windowing, border, and color conventions, so a baseline SSIM column would be an unreliable comparison.
+Table~\ref{tab:ssim} reports SSIM alongside PSNR for \model{} on the same four sets and full-image protocol (same checkpoint as Table~\ref{tab:sota}), computed on the $[0,1]$ representation with a data range of $1.0$. SSIM tracks PSNR's ordering across noise, highest at $\sigpx{=}15$ (average $0.931$) and degrading gracefully to average $0.817$ at $\sigpx{=}50$. Urban100 is a cross-metric exception: it has the highest SSIM of the four sets at every noise level ($0.944/0.915/0.851$) despite its middling PSNR. Its regular, high-contrast man-made structures, the same self-similarity that costs PSNR against non-local models, yield strong local structural agreement once denoised. We report SSIM for \model{} only, because our comparison source \citep{zhang2022scunet} tabulates PSNR alone and SSIM values assembled from mixed sources use inconsistent windowing, border, and color conventions, so a baseline SSIM column would be an unreliable comparison.
 
 \begin{table}[H]
 \centering
@@ -314,12 +314,12 @@ Table~\ref{tab:ssim} reports SSIM alongside PSNR for \model{} on the same four s
 \cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
 \textbf{Set} & PSNR & SSIM & PSNR & SSIM & PSNR & SSIM \\
 \midrule
-CBSD68   & 33.95 & 0.9311 & 31.35 & 0.8873 & 28.18 & 0.8010 \\
-Kodak24  & 34.97 & 0.9263 & 32.56 & 0.8870 & 29.51 & 0.8112 \\
-McMaster & 34.79 & 0.9181 & 32.61 & 0.8879 & 29.61 & 0.8287 \\
-Urban100 & 34.20 & 0.9437 & 31.92 & 0.9182 & 28.81 & 0.8661 \\
+CBSD68   & 33.92 & 0.9307 & 31.26 & 0.8856 & 28.01 & 0.7945 \\
+Kodak24  & 34.85 & 0.9245 & 32.37 & 0.8832 & 29.19 & 0.8007 \\
+McMaster & 34.74 & 0.9233 & 32.45 & 0.8900 & 29.28 & 0.8219 \\
+Urban100 & 34.03 & 0.9435 & 31.61 & 0.9146 & 28.22 & 0.8506 \\
 \midrule
-\emph{average} & 34.48 & 0.9298 & 32.11 & 0.8951 & 29.03 & 0.8268 \\
+\emph{average} & 34.39 & 0.9305 & 31.92 & 0.8933 & 28.68 & 0.8169 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -372,7 +372,7 @@ The point of Table~\ref{tab:sota} is not that \model{} wins outright, because it
 \label{fig:params}
 \end{figure}
 
-The parameter count is only half the efficiency story; Table~\ref{tab:efficiency} adds compute and memory, measured on one RTX~4090. At $256^2$ the model is $\sim104$\,GFLOPs and peaks at $\sim1.1$\,GB of GPU memory; cost scales linearly with pixel count (a fully-convolutional model), so a $512^2$ image is $\sim4\times$ the FLOPs and $\sim3.7\times$ the peak memory. A single-image forward pass takes $\sim190$\,ms on this GPU (batched throughput is substantially higher). The ``compact'' claim is about parameters, FLOPs, and memory, and does not lean on any low-precision trick.
+The parameter count is only half the efficiency story; Table~\ref{tab:efficiency} adds compute and memory, measured on one RTX~4090. At $256^2$ the model is $\sim52$\,GFLOPs and peaks at $\sim572$\,MiB of GPU memory; FLOPs and memory both scale with pixel count (a fully-convolutional model), so a $512^2$ image is exactly $4\times$ the FLOPs and $\sim4.4\times$ the peak memory. Wall-clock latency, however, does not track pixel count at batch~$1$: a single-image forward pass takes $\sim0.2$\,s at both resolutions ($200$ and $193$\,ms median; $183$ and $186$\,ms minimum, nearly equal) because at batch~$1$ the forward pass is dominated by kernel-dispatch and launch overhead rather than by compute, so it sits on a latency floor; batched throughput is substantially higher. The ``compact'' claim is about parameters, FLOPs, and memory, and does not lean on any low-precision trick.
 
 \begin{table}[H]
 \centering
@@ -383,8 +383,8 @@ The parameter count is only half the efficiency story; Table~\ref{tab:efficiency
 \toprule
 Resolution & Parameters & FLOPs & FLOPs/megapixel & Peak GPU mem \\
 \midrule
-$256\times256$ & $3.39$M & $104$\,GFLOP & $1.59$\,TFLOP & $1.06$\,GB \\
-$512\times512$ & $3.39$M & $416$\,GFLOP & $1.59$\,TFLOP & $3.92$\,GB \\
+$256\times256$ & $0.74$M & $52.40$\,GFLOP & $799.5$\,GFLOP & $572.1$\,MiB \\
+$512\times512$ & $0.74$M & $209.59$\,GFLOP & $799.5$\,GFLOP & $2500.6$\,MiB \\
 \bottomrule
 \end{tabular}
 \end{table}
