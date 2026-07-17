@@ -110,18 +110,18 @@ The bias-free construction also reaches beyond denoising. Because the residual i
   lbl/.style={font=\footnotesize, inner sep=1.5pt},
   ]
   % --- encoder column (left, top to bottom) ---
-  \node[io]   (in)  at (0,0)     {input $y$\\[1pt] {\footnotesize $[-0.5,\,0.5]$}};
-  \node[stem] (gab) at (0,-2.1)  {frozen Gabor stem\\[1pt] {\footnotesize $3{\times}32{=}96$, then $1{\times}1{\to}66$}};
+  \node[io]   (in)  at (0,0)     {input $y$\\[1pt] {\footnotesize $[0,1]$}};
+  \node[stem] (gab) at (0,-2.1)  {frozen Gabor stem\\[1pt] {\footnotesize $3{\times}22{=}66$, $11{\times}11$}};
   \node[enc]  (e0)  at (0,-4.2)  {encoder L0\\[1pt] {\footnotesize $66$ ch, $3\times$ block}};
-  \node[enc]  (e1)  at (0,-8.0)  {encoder L1\\[1pt] {\footnotesize $132$ ch, $3\times$ block}};
+  \node[enc]  (e1)  at (0,-8.0)  {encoder L1\\[1pt] {\footnotesize $66$ ch, $3\times$ block}};
   % --- bottleneck (bottom center) ---
-  \node[bott] (bn)  at (4,-9.8)  {bottleneck\\[1pt] {\footnotesize $264$ ch, $3\times$ block}};
+  \node[bott] (bn)  at (4,-9.8)  {bottleneck\\[1pt] {\footnotesize $66$ ch, $3\times$ block}};
   % --- skip nodes (high-frequency bands, middle column) ---
   \node[skip] (s0)  at (4,-4.2)  {hi-freq skip L0\\[1pt] $+\,3\times$ block};
   \node[skip] (s1)  at (4,-8.0)  {hi-freq skip L1\\[1pt] $+\,3\times$ block};
   % --- decoder spine (right column): Add node -> decoder block, per level ---
   \node[add]  (a1)  at (8,-8.0)  {$\oplus$};
-  \node[dec]  (d1)  at (8,-6.1)  {decoder L1\\[1pt] {\footnotesize $132$ ch, $3\times$ block}};
+  \node[dec]  (d1)  at (8,-6.1)  {decoder L1\\[1pt] {\footnotesize $66$ ch, $3\times$ block}};
   \node[add]  (a0)  at (8,-4.2)  {$\oplus$};
   \node[dec]  (d0)  at (8,-2.3)  {decoder L0\\[1pt] {\footnotesize $66$ ch, $3\times$ block}};
   \node[io]   (out) at (8,0)     {output $\hat{x}=D(y)$\\[1pt] {\footnotesize $1{\times}1$, groups $=3$}};
@@ -237,25 +237,25 @@ Figure~\ref{fig:psnrsweep} shows the blind PSNR-vs-noise sweep on DIV2K-validati
   width=0.72\textwidth, height=6.2cm,
   xlabel={noise level $\sigpx$ (on the $[0,255]$ scale)},
   ylabel={PSNR (dB)},
-  xmin=0, xmax=210, ymin=21, ymax=42,
-  xtick={5,25,50,75,100,127,150,200},
+  xmin=0, xmax=210, ymin=19, ymax=42,
+  xtick={5,25,50,64,100,150,200},
   xticklabel style={font=\scriptsize},
   ymajorgrids=true, grid style={gray!20},
   legend pos=north east, legend cell align={left},
   mark size=2pt,
 ]
-% shade the extrapolation region (beyond the training max sigma_norm=0.5, i.e. sigma_255=127.5)
-\addplot[draw=none, fill=gray!12, forget plot] coordinates {(127.5,21) (210,21) (210,42) (127.5,42)} \closedcycle;
+% shade the extrapolation region (beyond the training max sigma_norm=0.25, i.e. sigma_255~64)
+\addplot[draw=none, fill=gray!12, forget plot] coordinates {(64,19) (210,19) (210,42) (64,42)} \closedcycle;
 \addplot[oursblue, thick, mark=*] coordinates {
-  (5,40.68) (10,37.37) (15,35.51) (25,33.26) (35,31.79) (50,30.27) (65,29.12) (75,28.50) (100,27.16) (127,26.21) (150,25.49) (200,22.26)
+  (5,40.80) (10,37.36) (15,35.45) (25,33.13) (35,31.60) (50,30.00) (65,28.72) (80,27.55) (100,26.07) (127,24.15) (150,22.68) (175,21.26) (200,20.11)
 };
 \addlegendentry{\model{} (blind)}
-\draw[dashed, gray!70!black, thick] (axis cs:127.5,21) -- (axis cs:127.5,40);
-\node[font=\scriptsize, gray!60!black, anchor=south east] at (axis cs:126,36.5) {trained ($\sigpx{\le}127$)};
-\node[font=\scriptsize, gray!60!black, anchor=south west] at (axis cs:129,36.5) {extrapolation};
+\draw[dashed, gray!70!black, thick] (axis cs:64,19) -- (axis cs:64,40);
+\node[font=\scriptsize, gray!60!black, anchor=south east] at (axis cs:63,36.5) {trained ($\sigpx{\le}64$)};
+\node[font=\scriptsize, gray!60!black, anchor=south west] at (axis cs:66,36.5) {extrapolation};
 \end{axis}
 \end{tikzpicture}
-\caption{Blind PSNR vs.\ noise on DIV2K-validation ($100$ patches, $256$px). One model, no noise-level input, across the full range and \textbf{beyond it}: the curriculum trained only up to $\sigpx{\approx}127$ (dashed line), yet the model keeps denoising in the shaded extrapolation region: $25.5$\,dB at $\sigpx{=}150$ and $22.3$\,dB at $\sigpx{=}200$ ($1.6\times$ the training maximum), degrading smoothly with no cliff. This graceful off-range behaviour is the signature of the bias-free/degree-1-homogeneous construction (Section~\ref{sec:theory}); a biased network collapses once past its training noise levels. The $95\%$ bootstrap CIs (not shown) are $\pm 0.4$--$0.8$\,dB.}
+\caption{Blind PSNR vs.\ noise on DIV2K-validation ($100$ patches, $256$px). One model, no noise-level input, across the full range and \textbf{beyond it}: the curriculum trained only up to $\sigpx{\approx}64$ (dashed line), yet the model keeps denoising in the shaded extrapolation region: $22.7$\,dB at $\sigpx{=}150$ and $20.1$\,dB at $\sigpx{=}200$ ($2.3\times$ and $3.1\times$ the training maximum), degrading smoothly with no cliff. This graceful off-range behaviour is the signature of the bias-free/degree-1-homogeneous construction (Section~\ref{sec:theory}); a biased network collapses once past its training noise levels. The $95\%$ bootstrap CIs (not shown) are $\pm 0.5$--$0.8$\,dB.}
 \label{fig:psnrsweep}
 \end{figure}
 
@@ -351,12 +351,12 @@ The point of Table~\ref{tab:sota} is not that \model{} wins outright, because it
   only marks, mark size=2.8pt,
 ]
 \addplot[classicgray, mark=square*] coordinates {(0.49,31.77) (0.56,31.43)};
-\addplot[oursblue, mark=*, mark size=3.8pt] coordinates {(3.4,32.11)};
+\addplot[oursblue, mark=*, mark size=3.8pt] coordinates {(0.74,31.92)};
 \addplot[sotaorange, mark=triangle*] coordinates {(11.5,32.69) (17.9,32.77) (26.1,32.78) (32.6,32.58)};
 % manual, collision-free point labels
 \node[font=\scriptsize, anchor=south]                 at (axis cs:0.49,31.77) {FFDNet};
 \node[font=\scriptsize, anchor=north]                 at (axis cs:0.56,31.43) {DnCNN};
-\node[font=\scriptsize, anchor=south, text=oursblue]  at (axis cs:3.4,32.11)  {\model{}};
+\node[font=\scriptsize, anchor=south, text=oursblue]  at (axis cs:0.74,31.92)  {\model{}};
 % SOTA points cluster tightly on the log axis; label them above with thin leaders
 \node[font=\scriptsize] (lswin) at (axis cs:11.5,33.10) {SwinIR};
 \node[font=\scriptsize] (lscu)  at (axis cs:17.9,33.45) {SCUNet};
@@ -368,7 +368,7 @@ The point of Table~\ref{tab:sota} is not that \model{} wins outright, because it
 \draw[gray!55, thin] (ldru)  -- (axis cs:32.6,32.62);
 \end{axis}
 \end{tikzpicture}
-\caption{Four-set average PSNR at $\sigma{=}25$ vs.\ (approximate) parameter count. \model{} (blue) sits on the efficient side of the trade-off: above the sub-1M CNNs and within $\sim0.5$--$0.7$\,dB of the $12$--$33$M state of the art at $\sim1/8$--$1/10$ of their size. Parameter counts are approximate and collated from the respective papers.}
+\caption{Four-set average PSNR at $\sigma{=}25$ vs.\ (approximate) parameter count. \model{} (blue) sits on the efficient side of the trade-off: above the sub-1M CNNs and within $\sim0.9$\,dB of the $12$--$33$M state of the art at $\sim1/16$--$1/45$ of their size. Parameter counts are approximate and collated from the respective papers.}
 \label{fig:params}
 \end{figure}
 
