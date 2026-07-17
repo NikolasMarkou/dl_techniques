@@ -809,3 +809,53 @@ class TestDropoutTrainerWiring:
         assert len(blocks) > 0, "no ConvNeXt blocks found in the built model"
         for blk in blocks:
             assert blk.get_config()['dropout_rate'] == 0.1
+
+
+# ---------------------------------------------------------------------
+# SC5 -- symmetry-penalty config fields + fail-closed validation
+# (plan-2026-07-17-874b11cc step 3, invariant 4)
+# ---------------------------------------------------------------------
+
+
+class TestSymmetryConfigValidation:
+    """SC5: symmetry_weight / symmetry_probes fields + fail-closed __post_init__ guards.
+
+    Pure config construction -- no GPU/training. Covers the byte-identical OFF defaults
+    (0.0 / 1), the field round-trip, and the three refused combinations that must raise
+    ValueError: negative weight, probes < 1, and symmetry_weight>0 together with
+    mixed_precision (invariant 4 -- the second-order fp16/XLA silent-death ban, D-003).
+    """
+
+    def test_config_defaults_are_off(self):
+        """Default config leaves the penalty OFF (weight 0.0, probes 1)."""
+        cfg = TrainingConfig()
+        assert cfg.symmetry_weight == 0.0
+        assert cfg.symmetry_probes == 1
+
+    def test_config_fields_round_trip(self):
+        """TrainingConfig stores the two new fields verbatim (fp32, penalty ON)."""
+        cfg = TrainingConfig(symmetry_weight=0.1, symmetry_probes=3)
+        assert cfg.symmetry_weight == 0.1
+        assert cfg.symmetry_probes == 3
+
+    def test_negative_weight_raises(self):
+        """symmetry_weight < 0 must raise ValueError."""
+        with pytest.raises(ValueError):
+            TrainingConfig(symmetry_weight=-0.1)
+
+    def test_zero_probes_raises(self):
+        """symmetry_probes = 0 must raise ValueError."""
+        with pytest.raises(ValueError):
+            TrainingConfig(symmetry_probes=0)
+
+    def test_penalty_with_mixed_precision_raises(self):
+        """symmetry_weight>0 together with mixed_precision must raise ValueError
+        (invariant 4: fail-closed on the second-order fp16/XLA path, D-003)."""
+        with pytest.raises(ValueError):
+            TrainingConfig(symmetry_weight=0.1, mixed_precision=True)
+
+    def test_penalty_fp32_constructs(self):
+        """symmetry_weight>0 with mixed_precision OFF (fp32) constructs without raising."""
+        cfg = TrainingConfig(symmetry_weight=0.1, symmetry_probes=2, mixed_precision=False)
+        assert cfg.symmetry_weight == 0.1
+        assert cfg.mixed_precision is False

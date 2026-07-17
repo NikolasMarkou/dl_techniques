@@ -1022,6 +1022,17 @@ class BFUnetTrainingConfig:
     # clip_noise=False and self_iterate=True). See decisions.md D-001.
     clip_noise: bool = True
 
+    # Soft Jacobian-symmetry penalty (opt-in, default OFF). When symmetry_weight == 0.0
+    # (default) training is byte-identical to today: stock compile(loss="mse")+fit(),
+    # the model is NEVER wrapped. When > 0.0 the functional denoiser is wrapped in
+    # BfunetSymmetryTrainingModel (step 4) whose train/test_step add
+    # symmetry_weight * mean(||Jv - JTv||^2) over symmetry_probes random probe(s),
+    # forced to float32. symmetry_weight>0 with mixed_precision=True is REFUSED in
+    # __post_init__ (fail-closed): a second-order fp16/XLA path is in the repo's known
+    # silent-training-death class. See decisions.md D-002 (wrapper) and D-003 (fp16 ban).
+    symmetry_weight: float = 0.0
+    symmetry_probes: int = 1
+
     # Model (shared bias-free U-Net topology)
     variant: str = "base"           # tiny | small | base | large | xlarge
     use_gabor_stem: bool = True
@@ -1196,6 +1207,23 @@ class BFUnetTrainingConfig:
             raise ValueError("noise_sigma_min must be >= 0")
         if self.sigma_max_end <= self.noise_sigma_min:
             raise ValueError("sigma_max_end must exceed noise_sigma_min")
+        if self.symmetry_weight < 0:
+            raise ValueError("symmetry_weight must be >= 0")
+        if self.symmetry_probes < 1:
+            raise ValueError("symmetry_probes must be >= 1")
+        if self.symmetry_weight > 0 and self.mixed_precision:
+            # DECISION plan-2026-07-17T112359-874b11cc/D-003: fail-closed. The penalty is a
+            # JVP-of-VJP (second differentiation of the backward pass) and belongs to the
+            # repo's fp16/XLA silent-training-death class (EnergyLayerNorm (var+eps)^(-3/2)
+            # overflow; -1e9 -> fp16 -inf -> NaN). Do NOT relax this to a WARNING or try to
+            # cast-around it here: a forward-only fp16 pass certifies a policy the BACKWARD
+            # pass cannot honour, so the safe default is an outright refusal until a real
+            # fit()-step weight-movement probe proves the fp16 combo safe. See decisions.md
+            # D-003; the float32-forcing lives in the penalty module + the step-4 wrapper.
+            raise ValueError(
+                "symmetry_weight>0 requires float32 training; disable mixed_precision "
+                "(second-order fp16/XLA is a known silent-training-death path)"
+            )
         if not self.train_image_dirs or not self.val_image_dirs:
             raise ValueError("train/val image dirs must be non-empty")
         # Self-iterate validation is guarded so the default-OFF config is unaffected.
@@ -2206,6 +2234,16 @@ def add_common_arguments(parser) -> None:
                              "streaming train+val noise fn (default: clip ON). Matches "
                              "eval_psnr_vs_noise's --no-clip. Note: self-iterate pool "
                              "paths and dashboard images still clip (logged as a WARNING).")
+    parser.add_argument("--symmetry-weight", type=float, default=0.0,
+                        help="Weight of the soft Jacobian-symmetry penalty "
+                             "symmetry_weight * mean(||Jv - JTv||^2) (default 0.0 = OFF, "
+                             "stock compile/fit, byte-identical). When > 0 the denoiser is "
+                             "wrapped in a float32 THERA-style training model; REFUSED "
+                             "together with --mixed-precision (second-order fp16/XLA is a "
+                             "known silent-training-death path).")
+    parser.add_argument("--symmetry-probes", type=int, default=1,
+                        help="Number of random probe vectors the symmetry penalty averages "
+                             "over per step (default 1; ignored unless --symmetry-weight > 0).")
     parser.add_argument("--high-freq-blocks", type=int, default=0,
                         help="N bias-free blocks on the Laplacian high-frequency skip band per encoder level (default 0 = OFF; ignored unless --laplacian-pyramid)")
     parser.add_argument("--zero-pad-channels", action="store_true", help="Replace per-level channel-adjust 1x1 convs with parameter-free channel matching (zero-pad on increase; decoder slices the upsampled branch and adds the skip). Bias-free, fewer params; default OFF.")
