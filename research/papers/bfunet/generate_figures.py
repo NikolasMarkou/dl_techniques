@@ -11,7 +11,7 @@ denoised on its own (receptive-field / padding artifacts would misrepresent the
 protocol).
 
 The default noise levels span moderate to extreme -- including levels past the
-training ceiling ($\\sigma_{255}\\le127$) -- so the figure visually corroborates
+training ceiling ($\\sigma_{255}\\le64$) -- so the figure visually corroborates
 the out-of-range generalization of Figure~2: heavy static in, clean image out,
 even where the model was never trained.
 
@@ -52,7 +52,7 @@ from train.bfunet.eval_psnr_vs_noise import (
     add_awgn,
     _denoise_full,
     psnr_per_image,
-    MAX_VAL,  # noqa: F401 - re-exported for protocol provenance; images live in [-0.5,+0.5]
+    MAX_VAL,  # noqa: F401 - re-exported for protocol provenance; images live in [0,1]
 )
 
 warnings.filterwarnings("ignore")
@@ -66,7 +66,7 @@ os.makedirs(OUT, exist_ok=True)
 
 # Frozen checkpoint the paper evaluates (SYSTEM.md / plan A4).
 CHECKPOINT = os.path.join(
-    _REPO_ROOT, "results", "convunext_denoiser_base_20260707_122133", "best_model.keras"
+    _REPO_ROOT, "results", "20260715_convunext_denoiser", "best_model.keras"
 )
 
 CHANNELS = 3
@@ -114,8 +114,8 @@ def save(fig, name):
 
 
 def _disp(x: np.ndarray) -> np.ndarray:
-    """Denorm [-0.5,+0.5] -> [0,1] for display (matches the eval/training convention)."""
-    return np.clip(x + 0.5, 0.0, 1.0)
+    """Clip to [0,1] for display (the model is [0,1]-native; matches eval/training convention)."""
+    return np.clip(x, 0.0, 1.0)
 
 
 def _ssim_full(denoised: np.ndarray, clean: np.ndarray) -> float:
@@ -136,8 +136,8 @@ def _crop(x: np.ndarray, y0: int, x0: int, cs: int) -> np.ndarray:
     return x[y0:y0 + cs, x0:x0 + cs, :]
 
 
-# Training ceiling (sigma_norm <= 0.5). Noise levels above this are extrapolation.
-TRAIN_SIGMA255_MAX = 127.0
+# Training ceiling (sigma_norm <= 0.25). Noise levels above this are extrapolation.
+TRAIN_SIGMA255_MAX = 64.0
 
 
 def fig_qualitative(model, sigmas255):
@@ -194,7 +194,8 @@ def fig_qualitative(model, sigmas255):
 
             print(
                 f"[{ex['label']}] sigma255={sigma255:.0f}{' (OOR)' if oor else ''}: "
-                f"input {psnr_in:.2f} dB -> denoised {psnr_out:.2f} dB / SSIM {ssim_out:.3f}"
+                f"input {psnr_in:.2f} dB -> denoised {psnr_out:.2f} dB / SSIM {ssim_out:.3f} "
+                f"| denoised px range [{float(denoised.min()):.3f}, {float(denoised.max()):.3f}]"
             )
 
     save(fig, "qualitative_examples.png")
@@ -204,7 +205,7 @@ def main():
     parser = argparse.ArgumentParser(description="Generate bfunet qualitative figure")
     parser.add_argument("--sigmas255", type=float, nargs="+", default=[50.0, 100.0, 200.0],
                         help="AWGN stds on the [0,255] scale, one (noisy,denoised) pair each "
-                             "(default 50 100 200; 200 is beyond the sigma255<=127 training ceiling).")
+                             "(default 50 100 200; 200 is beyond the sigma255<=64 training ceiling).")
     parser.add_argument("--gpu", type=int, default=0,
                         help="GPU id for setup_gpu (default 0).")
     parser.add_argument("--checkpoint", type=str, default=CHECKPOINT,
