@@ -192,12 +192,6 @@ def fig_qualitative(model, sigmas255):
             axes[i, jn].set_xlabel(f"{psnr_in:.1f} dB")
             axes[i, jd].set_xlabel(f"{psnr_out:.1f} dB / {ssim_out:.3f}")
 
-            print(
-                f"[{ex['label']}] sigma255={sigma255:.0f}{' (OOR)' if oor else ''}: "
-                f"input {psnr_in:.2f} dB -> denoised {psnr_out:.2f} dB / SSIM {ssim_out:.3f} "
-                f"| denoised px range [{float(denoised.min()):.3f}, {float(denoised.max()):.3f}]"
-            )
-
     save(fig, "qualitative_examples.png")
 
 
