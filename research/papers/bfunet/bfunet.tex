@@ -273,6 +273,8 @@ Figure~\ref{fig:psnrsweep} shows the blind PSNR-vs-noise sweep on DIV2K-validati
   legend pos=north east, legend cell align={left},
   mark size=2pt,
 ]
+% shade the extrapolation region beyond the training max (sigma_norm=0.25, i.e. sigma_255~64)
+\addplot[draw=none, fill=gray!12, forget plot] coordinates {(64,5) (210,5) (210,42) (64,42)} \closedcycle;
 \addplot[oursblue, thick, mark=*] coordinates {
   (5,40.80) (10,37.36) (15,35.45) (25,33.13) (35,31.60) (50,30.00) (65,28.72) (80,27.55) (100,26.07) (127,24.15) (150,22.68) (175,21.26) (200,20.11)
 };
@@ -281,9 +283,12 @@ Figure~\ref{fig:psnrsweep} shows the blind PSNR-vs-noise sweep on DIV2K-validati
   (5,34.28) (10,28.36) (15,24.94) (25,20.72) (35,18.03) (50,15.26) (65,13.33) (80,11.90) (100,10.50) (127,9.21) (150,8.46) (175,7.87) (200,7.43)
 };
 \addlegendentry{Noisy input}
+\draw[dashed, gray!70!black, thick] (axis cs:64,5) -- (axis cs:64,34);
+\node[font=\scriptsize, gray!60!black, anchor=south east] at (axis cs:63,30) {trained ($\sigpx{\le}64$)};
+\node[font=\scriptsize, gray!60!black, anchor=south west] at (axis cs:66,30) {extrapolation};
 \end{axis}
 \end{tikzpicture}
-\caption{Denoising gain: denoised PSNR (solid blue) vs.\ the corrupted noisy-input PSNR (dotted red) across the noise sweep on DIV2K-validation ($100$ patches, $256$px). The vertical gap between the two curves is the per-level PSNR gain from a single blind model: $\sim\!6.5$\,dB at $\sigpx{=}5$, widening to $\sim\!15$\,dB around $\sigpx{=}65$--$80$. The gain persists far past the $\sigpx{\approx}64$ training ceiling, still $+12.7$\,dB at $\sigpx{=}200$ ($20.1$ vs.\ $7.4$\,dB), consistent with the graceful off-range behaviour in Figure~\ref{fig:psnrsweep}.}
+\caption{Denoising gain: denoised PSNR (solid blue) vs.\ the corrupted noisy-input PSNR (dotted red) across the noise sweep on DIV2K-validation ($100$ patches, $256$px). The vertical gap between the two curves is the per-level PSNR gain from a single blind model: $\sim\!6.5$\,dB at $\sigpx{=}5$, widening to $\sim\!15$\,dB around $\sigpx{=}65$--$80$. The gain persists far past the $\sigpx{\approx}64$ training ceiling (dashed line; shaded extrapolation region), still $+12.7$\,dB at $\sigpx{=}200$ ($20.1$ vs.\ $7.4$\,dB), consistent with the graceful off-range behaviour in Figure~\ref{fig:psnrsweep}.}
 \label{fig:gain}
 \end{figure}
 
