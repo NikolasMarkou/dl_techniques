@@ -855,10 +855,19 @@ def build_dashboard_from_dir(exp_dir: str) -> Optional[Path]:
     return out
 
 
-def make_curriculum_noise_fn(config: "BFUnetTrainingConfig", sigma_max_var: tf.Variable):
+def make_curriculum_noise_fn(
+    config: "BFUnetTrainingConfig",
+    sigma_max_var: tf.Variable,
+    clip_noise: bool = True,
+):
     """Build a noise function that samples per-image sigma from
     ``[noise_sigma_min, sigma_max_var]`` where the upper bound is a live
-    ``tf.Variable`` widened per-epoch by the curriculum callback (D-003)."""
+    ``tf.Variable`` widened per-epoch by the curriculum callback (D-003).
+
+    ``clip_noise`` (default ``True``) gates the return-value ``clip_by_value`` ONLY;
+    when ``False`` the noisy input is returned unclipped (may exceed ``[0,1]``). The
+    noise-generation draws above the clip are UNTOUCHED for all three branches, so the
+    RNG draw order is preserved regardless of this flag (invariant 2)."""
 
     sigma_min = float(config.noise_sigma_min)
     multiplicative = config.noise_type == "multiplicative"
@@ -888,7 +897,11 @@ def make_curriculum_noise_fn(config: "BFUnetTrainingConfig", sigma_max_var: tf.V
             noisy = apply_composite_gaussian(patch, noise_level, ratio * noise_level)
         else:
             noisy = patch + tf.random.normal(tf.shape(patch)) * noise_level  # y = x + N(0, sigma^2)
-        return tf.clip_by_value(noisy, DATA_MIN, DATA_MAX), patch
+        # Gate the return-value clip ONLY (invariant 2): nothing above this line moves,
+        # so the RNG draw order is identical for clip_noise True/False. When False the
+        # noisy input is returned unclipped (may exceed [0,1]); see decisions.md D-001.
+        noisy = tf.clip_by_value(noisy, DATA_MIN, DATA_MAX) if clip_noise else noisy
+        return noisy, patch
 
     return add_curriculum_noise
 
@@ -999,6 +1012,15 @@ class BFUnetTrainingConfig:
     sigma_max_end: float = 0.25     # wide range at the final curriculum epoch
     curriculum_epochs: Optional[int] = None  # None -> use `epochs`
     curriculum_schedule: str = "linear"      # linear | cosine | exp
+    # Clip the noisy input to [DATA_MIN, DATA_MAX] ([0,1]) after noise injection.
+    # True (default) = today's behavior: the single return-value clip inside
+    # make_curriculum_noise_fn fires for BOTH the train and val noise fns. False =
+    # return the unclipped noisy input (may exceed [0,1]); mirrors eval_psnr_vs_noise's
+    # --no-clip. Scope: gates ONLY the make_curriculum_noise_fn streaming path; the
+    # self-iterate pool paths (common.py:325-327, self_iterate_pool.py) and the
+    # dashboard viz clip are OUT of scope and still clip (train() logs a WARNING when
+    # clip_noise=False and self_iterate=True). See decisions.md D-001.
+    clip_noise: bool = True
 
     # Model (shared bias-free U-Net topology)
     variant: str = "base"           # tiny | small | base | large | xlarge
@@ -1700,7 +1722,7 @@ def train(
     sigma_max_var = tf.Variable(
         config.sigma_max_start, dtype=tf.float32, trainable=False, name="sigma_max"
     )
-    noise_fn = make_curriculum_noise_fn(config, sigma_max_var)
+    noise_fn = make_curriculum_noise_fn(config, sigma_max_var, config.clip_noise)
 
     train_paths = collect_training_paths(config)
     val_paths = collect_image_paths(
@@ -1724,7 +1746,7 @@ def train(
     sigma_fixed_var = tf.Variable(
         config.sigma_max_end, dtype=tf.float32, trainable=False, name="sigma_fixed_val"
     )
-    val_noise_fn = make_curriculum_noise_fn(config, sigma_fixed_var)
+    val_noise_fn = make_curriculum_noise_fn(config, sigma_fixed_var, config.clip_noise)
     val_ds = create_dataset(val_paths, config, val_noise_fn, is_training=False)
     validation_steps = config.validation_steps or max(
         10, len(val_paths) // config.batch_size
@@ -2179,6 +2201,11 @@ def add_common_arguments(parser) -> None:
                         help="Disable the frozen Gabor depthwise stem")
     parser.add_argument("--laplacian-pyramid", action="store_true",
                         help="Enable the Laplacian-pyramid downsample/skip path (default OFF)")
+    parser.add_argument("--no-clip", action="store_true",
+                        help="Disable the [0,1] clip on the noisy input inside the "
+                             "streaming train+val noise fn (default: clip ON). Matches "
+                             "eval_psnr_vs_noise's --no-clip. Note: self-iterate pool "
+                             "paths and dashboard images still clip (logged as a WARNING).")
     parser.add_argument("--high-freq-blocks", type=int, default=0,
                         help="N bias-free blocks on the Laplacian high-frequency skip band per encoder level (default 0 = OFF; ignored unless --laplacian-pyramid)")
     parser.add_argument("--zero-pad-channels", action="store_true", help="Replace per-level channel-adjust 1x1 convs with parameter-free channel matching (zero-pad on increase; decoder slices the upsampled branch and adds the skip). Bias-free, fewer params; default OFF.")

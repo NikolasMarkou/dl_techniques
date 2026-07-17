@@ -229,6 +229,97 @@ def test_additive_branch_rng_draw_order():
     )
 
 
+def test_clip_noise_false_is_unclipped_and_clip_only_difference():
+    """clip_noise=False returns a genuinely unclipped noisy tensor, differing from
+    clip_noise=True ONLY by the clip (D-001).
+
+    At a HIGH sigma the additive noise pushes the noisy input well outside [0,1]:
+    - clip_noise=False must produce values ABOVE DATA_MAX and BELOW DATA_MIN (proves
+      it is genuinely unclipped, not a no-op).
+    - clip_noise=True must stay within [DATA_MIN, DATA_MAX].
+    - The two share the SAME RNG realization (same global seed, identical draw order),
+      so wherever the CLIPPED tensor is STRICTLY inside (DATA_MIN, DATA_MAX) the clip was
+      a no-op and the two tensors must be bitwise-equal -> the clip is the ONLY
+      difference. This pins invariant 2 (draw order preserved) from the flag's side.
+    """
+    # High, fixed sigma: noise_sigma_min == sigma_max_start so noise_level is exactly
+    # this value (tf.random.uniform([], a, a) == a) -> large, deterministic noise.
+    config = TrainingConfig(
+        train_image_dirs=["/tmp/unused_train"],
+        val_image_dirs=["/tmp/unused_val"],
+        patch_size=PATCH,
+        channels=CHANNELS,
+        batch_size=4,
+        noise_type="additive",
+        noise_sigma_min=0.5,
+        sigma_max_start=0.5,
+        sigma_max_end=1.0,  # only used by __post_init__ validation; the noise fn reads
+                            # the sigma_var we pass below (= sigma_max_start = 0.5).
+        epochs=2,
+        seed=SEED,
+        self_iterate=False,
+    )
+    assert config.clip_noise is True  # dataclass default preserves today's behavior
+
+    patch = tf.constant(
+        np.linspace(0.0, 1.0, PATCH * PATCH * CHANNELS, dtype=np.float32).reshape(
+            PATCH, PATCH, CHANNELS
+        )
+    )
+    sigma_var = tf.Variable(float(config.sigma_max_start), dtype=tf.float32)
+
+    clip_fn = make_curriculum_noise_fn(config, sigma_var, clip_noise=True)
+    unclip_fn = make_curriculum_noise_fn(config, sigma_var, clip_noise=False)
+
+    # Same global seed -> identical draw order (uniform level THEN normal field) ->
+    # identical noise realization; the ONLY difference is the return-value clip.
+    tf.random.set_seed(SEED)
+    noisy_clipped, clean_c = clip_fn(patch)
+    tf.random.set_seed(SEED)
+    noisy_unclipped, clean_u = unclip_fn(patch)
+
+    noisy_clipped = np.asarray(noisy_clipped)
+    noisy_unclipped = np.asarray(noisy_unclipped)
+
+    # clean target is untouched by the flag in both cases.
+    np.testing.assert_allclose(np.asarray(clean_c), np.asarray(patch), rtol=0, atol=0)
+    np.testing.assert_allclose(np.asarray(clean_u), np.asarray(patch), rtol=0, atol=0)
+
+    # (1) clip_noise=False is genuinely unclipped: exceeds BOTH bounds at high sigma.
+    assert float(np.max(noisy_unclipped)) > DATA_MAX, (
+        "clip_noise=False did not exceed DATA_MAX -> the clip gate is still firing."
+    )
+    assert float(np.min(noisy_unclipped)) < DATA_MIN, (
+        "clip_noise=False did not go below DATA_MIN -> the clip gate is still firing."
+    )
+
+    # (2) clip_noise=True stays within [DATA_MIN, DATA_MAX].
+    assert float(np.max(noisy_clipped)) <= DATA_MAX + 1e-6
+    assert float(np.min(noisy_clipped)) >= DATA_MIN - 1e-6
+
+    # (3) The clip is the ONLY difference: wherever the CLIPPED tensor is strictly
+    #     inside the open interval (DATA_MIN, DATA_MAX), the clip was a no-op there, so
+    #     the two tensors must be bitwise-equal at those positions.
+    interior = (noisy_clipped > DATA_MIN) & (noisy_clipped < DATA_MAX)
+    assert interior.any(), "no strictly-interior pixels -> cannot prove clip-only diff"
+    np.testing.assert_allclose(
+        noisy_clipped[interior],
+        noisy_unclipped[interior],
+        rtol=0,
+        atol=0,
+        err_msg=(
+            "clipped and unclipped noisy tensors differ at strictly-interior pixels; "
+            "the clip flag moved an RNG draw (invariant 2 violated)."
+        ),
+    )
+
+    # (4) The flag has teeth: at least some pixels WERE clipped (the tensors differ).
+    assert not np.array_equal(noisy_clipped, noisy_unclipped), (
+        "clip_noise True vs False produced identical tensors at high sigma; the clip "
+        "gate is a no-op and this test cannot detect a regression."
+    )
+
+
 # ---------------------------------------------------------------------
 # Pool dataset contract
 # ---------------------------------------------------------------------
