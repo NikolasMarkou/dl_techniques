@@ -12,6 +12,17 @@ Coverage:
        weight are non-None and finite.
     D. float32 + finiteness -- the returned penalty is a finite float32 scalar
        even when the model is built/run under a ``mixed_float16`` global policy.
+    E. DROP-PATH DETERMINISM (D-005 regression) -- on a model that CONTAINS a
+       ``StochasticDepth`` (drop_path_rate > 0) residual branch, the SHIPPED
+       function (``training=False`` internally) returns the SAME penalty on two
+       same-seed calls with the same input. This is the behavioral proof that the
+       drop_path mask no longer contaminates the estimate. Under the OLD buggy
+       ``training=True`` these two calls would DIFFER (RED-proof reported in the
+       plan's execution log, not asserted here since we ship the fixed function).
+    F. PENALTY-ALONE GRADIENT (WARNING-3 isolation) -- on an asymmetric-Jacobian
+       net, the gradient of the penalty ALONE (no MSE term, no optimizer) w.r.t.
+       the weights has strictly positive, finite max magnitude, proving the
+       penalty is a live training signal by itself.
 """
 
 import numpy as np
@@ -20,6 +31,7 @@ import keras
 import tensorflow as tf
 
 from dl_techniques.losses.jacobian_symmetry import jacobian_symmetry_penalty
+from dl_techniques.layers.stochastic_depth import StochasticDepth
 
 
 # ---------------------------------------------------------------------
@@ -52,6 +64,25 @@ def _bias_free_convnet() -> keras.Model:
     x = keras.layers.Conv2D(8, 3, padding="same", use_bias=False)(inp)
     x = keras.layers.LeakyReLU(negative_slope=0.2)(x)
     out = keras.layers.Conv2D(3, 3, padding="same", use_bias=False)(x)
+    return keras.Model(inp, out)
+
+
+def _drop_path_residual_net(drop_path_rate: float = 0.3) -> keras.Model:
+    """Bias-free ConvNeXt-style residual block WITH StochasticDepth (drop_path>0).
+
+    ``out = inp + StochasticDepth(Conv(inp))``. Output channels == input channels
+    (3), so the output shape matches the input (the penalty's single-same-shaped
+    tensor contract). The ``StochasticDepth`` sublayer (reused from the repo,
+    ``layers/stochastic_depth.py`` -- the exact layer ``bfconvunext.py:409`` wires
+    into every non-tiny variant) is ACTIVE only under ``training=True``; under
+    ``training=False`` it is a deterministic identity. This is the surface the
+    shipped ``training=False`` fix must render deterministic (D-005).
+    """
+    inp = keras.Input(shape=(8, 8, 3))
+    branch = keras.layers.Conv2D(3, 3, padding="same", use_bias=False)(inp)
+    branch = keras.layers.Conv2D(3, 3, padding="same", use_bias=False)(branch)
+    branch = StochasticDepth(drop_path_rate)(branch)
+    out = keras.layers.Add()([inp, branch])
     return keras.Model(inp, out)
 
 
@@ -146,3 +177,73 @@ class TestJacobianSymmetryPenalty:
             assert bool(tf.math.is_finite(penalty)), "penalty must be finite"
         finally:
             keras.mixed_precision.set_global_policy(original_policy)
+
+    # -----------------------------------------------------------------
+    # Test E -- drop_path>0 determinism (D-005 regression)
+    # -----------------------------------------------------------------
+
+    def test_drop_path_model_penalty_is_deterministic(self):
+        """On a StochasticDepth(drop_path>0) model, two same-seed calls on the
+        same input return the SAME penalty.
+
+        This is the behavioral guard for D-005: the shipped function runs the two
+        forward passes with ``training=False``, so StochasticDepth degrades to a
+        deterministic identity and the estimate is repeatable. Under the OLD
+        ``training=True`` code these two calls sampled independent drop-path masks
+        and returned DIFFERENT values (the RED-proof numbers are reported in the
+        plan execution log). A tight atol makes the regression unmissable.
+        """
+        model = _drop_path_residual_net(drop_path_rate=0.3)
+        y = _sample_input(seed=17)
+
+        p1 = jacobian_symmetry_penalty(model, y, num_probes=1, seed=123)
+        p2 = jacobian_symmetry_penalty(model, y, num_probes=1, seed=123)
+
+        assert bool(tf.math.is_finite(p1)) and bool(tf.math.is_finite(p2))
+        assert float(p1) == pytest.approx(float(p2), abs=1e-6), (
+            f"penalty must be deterministic on a drop_path>0 model "
+            f"(training=False renders StochasticDepth an identity), "
+            f"got {float(p1)} vs {float(p2)}"
+        )
+
+    # -----------------------------------------------------------------
+    # Test F -- penalty-ALONE gradient is a live, strictly-nonzero signal
+    # -----------------------------------------------------------------
+
+    def test_penalty_alone_gradient_is_nonzero_and_finite(self):
+        """The penalty by itself (no MSE, no optimizer) produces a strictly
+        positive, finite max gradient magnitude on an asymmetric-Jacobian net.
+
+        WARNING-3 isolation: the step-6 weight-move evidence conflated MSE motion
+        (and, pre-fix, drop-path noise) with the penalty signal. This asserts the
+        penalty ALONE moves weights -- ``max|grad| > 0`` strictly, not merely
+        non-None -- so it is a genuinely live regularizer.
+        """
+        # Clearly non-symmetric channel-mix -> genuinely asymmetric Jacobian.
+        a = np.array(
+            [[1.0, 2.0, 0.0],
+             [-1.0, 1.0, 3.0],
+             [0.5, -2.0, 1.0]],
+            dtype="float32",
+        )
+        assert not np.allclose(a, a.T), "test setup: matrix must be asymmetric"
+        model = _channel_mix_model(a)
+        y = _sample_input(seed=8)
+
+        with tf.GradientTape() as tape:
+            penalty = jacobian_symmetry_penalty(model, y, num_probes=2, seed=31)
+        grads = tape.gradient(penalty, model.trainable_variables)
+
+        assert len(grads) > 0, "toy net should have trainable weights"
+        max_abs = 0.0
+        for g, var in zip(grads, model.trainable_variables):
+            assert g is not None, f"None gradient for {var.name}"
+            assert bool(tf.reduce_all(tf.math.is_finite(g))), (
+                f"non-finite gradient for {var.name}"
+            )
+            max_abs = max(max_abs, float(tf.reduce_max(tf.abs(g))))
+
+        assert max_abs > 0.0, (
+            "penalty-alone gradient must be strictly non-zero on an "
+            f"asymmetric-Jacobian net, got max|grad|={max_abs}"
+        )

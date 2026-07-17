@@ -38,6 +38,22 @@ Callers combining this with ``mixed_precision`` must additionally set
 ``jit_compile=False`` for the penalty path (enforced by the trainer's
 fail-closed config validation).
 
+**Inference map (HARD constraint).** Both forward passes run with
+``training=False``. This is a correctness requirement, not a style choice
+(decisions.md D-005): (1) the Miyasawa conservative-field property is about the
+*deployable* denoiser ``D(y)``, so the penalty must regularize the inference map,
+not the training-time stochastic ensemble; (2) with ``training=True`` a backbone
+containing ``StochasticDepth`` / drop-path (every non-tiny bfconvunext variant has
+``drop_path_rate >= 0.1``) samples INDEPENDENT masks on the ``Jᵀv`` and ``Jv``
+passes, so the estimator would measure ``Jv(maskB) - Jᵀv(maskA)`` -- mask-mismatch
+noise conflated with true asymmetry, and non-deterministic across identical calls;
+(3) ``training=True`` also mutates ``BiasFreeBatchNorm`` running stats, which during
+``test_step`` validation would silently corrupt the checkpoint's inference-time
+normalization. ``training=False`` makes drop-path an identity (deterministic, single
+map) and freezes BN stats, resolving all three. Weight-differentiability is
+unaffected -- the ``training`` flag only changes drop_path/BN behavior, not whether
+gradients flow to ``model.trainable_variables``.
+
 This is a module of **pure functions** (mirroring
 ``losses/thera_jacobian_tv.py``), not a ``keras.losses.Loss`` subclass: the
 penalty needs raw access to the model and its input ``y`` (it runs extra
@@ -81,9 +97,10 @@ def jacobian_symmetry_penalty(
 
     Interface contract:
         - ``model``: a callable Keras model. It is invoked as
-          ``model(y, training=True)`` and must return a single tensor with the
-          SAME shape as ``y`` (a denoiser: input image -> output image). It must
-          be differentiable w.r.t. its input.
+          ``model(y, training=False)`` (the DEPLOYABLE inference map -- see the
+          module docstring "Inference map" note and decisions.md D-005) and must
+          return a single tensor with the SAME shape as ``y`` (a denoiser: input
+          image -> output image). It must be differentiable w.r.t. its input.
         - ``y``: input tensor, any shape ``(B, ...)``. Cast to float32 internally;
           the caller's dtype/policy is not mutated.
         - ``num_probes``: number of random probes to average over (>= 1).
@@ -142,9 +159,18 @@ def _single_probe_asymmetry(model: Any, y: tf.Tensor, v: tf.Tensor) -> tf.Tensor
     float32 scalar; differentiable w.r.t. ``model.trainable_variables``.
     """
     # Jᵀv : single reverse pass.
+    # DECISION plan-2026-07-17T112359-874b11cc/D-005: BOTH forward passes MUST use
+    # training=False. Do NOT revert to training=True: on any drop_path>0 backbone
+    # (every non-tiny bfconvunext variant) the two passes would sample INDEPENDENT
+    # StochasticDepth masks -> the estimate becomes Jv(maskB)-Jᵀv(maskA) (mask-
+    # mismatch noise, nondeterministic across identical calls) AND it would mutate
+    # BiasFreeBatchNorm running_var during test_step validation. training=False
+    # makes drop_path a deterministic identity and freezes BN stats, so the penalty
+    # measures the DEPLOYABLE inference denoiser D(y). Weight-differentiability is
+    # unaffected. See decisions.md D-005 + module docstring "Inference map" note.
     with tf.GradientTape() as t1:
         t1.watch(y)
-        d = model(y, training=True)
+        d = model(y, training=False)
         d = tf.cast(d, tf.float32)
     jt_v = t1.gradient(d, y, output_gradients=v)
 
@@ -153,7 +179,7 @@ def _single_probe_asymmetry(model: Any, y: tf.Tensor, v: tf.Tensor) -> tf.Tensor
     with tf.GradientTape() as t3:
         with tf.GradientTape() as t2:
             t2.watch(y)
-            d2 = model(y, training=True)
+            d2 = model(y, training=False)
             d2 = tf.cast(d2, tf.float32)
         u = tf.ones_like(d2)
         t3.watch(u)
