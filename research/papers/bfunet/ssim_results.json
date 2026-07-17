@@ -1,0 +1,97 @@
+{
+  "checkpoint": "results/20260715_convunext_denoiser/best_model.keras",
+  "seed": 42,
+  "num_samples": 100,
+  "size_multiple": 16,
+  "sigmas_255": [
+    15.0,
+    25.0,
+    50.0
+  ],
+  "results": [
+    {
+      "dataset": "kodak24",
+      "sigma_255": 15.0,
+      "n": 24,
+      "psnr_mean": 34.854295333226524,
+      "ssim_mean": 0.9245009471972784
+    },
+    {
+      "dataset": "kodak24",
+      "sigma_255": 25.0,
+      "n": 24,
+      "psnr_mean": 32.36678377787272,
+      "ssim_mean": 0.8832253888249397
+    },
+    {
+      "dataset": "kodak24",
+      "sigma_255": 50.0,
+      "n": 24,
+      "psnr_mean": 29.186128616333008,
+      "ssim_mean": 0.8007446179787318
+    },
+    {
+      "dataset": "cbsd68",
+      "sigma_255": 15.0,
+      "n": 68,
+      "psnr_mean": 33.92338741526884,
+      "ssim_mean": 0.9307139419457492
+    },
+    {
+      "dataset": "cbsd68",
+      "sigma_255": 25.0,
+      "n": 68,
+      "psnr_mean": 31.264864809372845,
+      "ssim_mean": 0.8855605300735024
+    },
+    {
+      "dataset": "cbsd68",
+      "sigma_255": 50.0,
+      "n": 68,
+      "psnr_mean": 28.01125753627104,
+      "ssim_mean": 0.7944735227262273
+    },
+    {
+      "dataset": "mcmaster",
+      "sigma_255": 15.0,
+      "n": 18,
+      "psnr_mean": 34.74129952324761,
+      "ssim_mean": 0.9232616590129005
+    },
+    {
+      "dataset": "mcmaster",
+      "sigma_255": 25.0,
+      "n": 18,
+      "psnr_mean": 32.44865904914008,
+      "ssim_mean": 0.8900147146648831
+    },
+    {
+      "dataset": "mcmaster",
+      "sigma_255": 50.0,
+      "n": 18,
+      "psnr_mean": 29.27744526333279,
+      "ssim_mean": 0.8219247096114688
+    },
+    {
+      "dataset": "urban100",
+      "sigma_255": 15.0,
+      "n": 100,
+      "psnr_mean": 34.02976713180542,
+      "ssim_mean": 0.9435274744033814
+    },
+    {
+      "dataset": "urban100",
+      "sigma_255": 25.0,
+      "n": 100,
+      "psnr_mean": 31.60561264038086,
+      "ssim_mean": 0.9145667403936386
+    },
+    {
+      "dataset": "urban100",
+      "sigma_255": 50.0,
+      "n": 100,
+      "psnr_mean": 28.222932567596434,
+      "ssim_mean": 0.8506247252225876
+    }
+  ]
+}
