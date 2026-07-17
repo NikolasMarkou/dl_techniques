@@ -30,6 +30,7 @@ from train.common import (
 from train.superpoint.homographic_adaptation import select_weighted_image_paths
 from dl_techniques.metrics.psnr_metric import PsnrMetric
 from dl_techniques.metrics.ssim_metric import SsimMetric
+from dl_techniques.losses.jacobian_symmetry import jacobian_symmetry_penalty
 from dl_techniques.analyzer import AnalysisConfig
 from dl_techniques.utils.logger import logger
 from dl_techniques.utils.weight_transfer import load_weights_from_checkpoint
@@ -1691,6 +1692,144 @@ class LRLoggerCallback(keras.callbacks.Callback):
 
 
 # ---------------------------------------------------------------------
+# SOFT JACOBIAN-SYMMETRY PENALTY: training-only wrapper (opt-in, default OFF)
+# ---------------------------------------------------------------------
+
+
+class BfunetSymmetryTrainingModel(keras.Model):
+    """Thin ``keras.Model`` training harness adding a soft Jacobian-symmetry penalty.
+
+    Wraps an already-built, already-compiled functional bfunet denoiser
+    (``inner_model``) and overrides ``train_step`` / ``test_step`` to add
+    ``symmetry_weight * mean(||Jv - JTv||^2)`` (a reverse-mode double-VJP estimate
+    of the denoiser's input-output Jacobian asymmetry, forced to float32) on top
+    of the stock reconstruction MSE. Cloned from THERA's ``TheraTrainingModel``
+    pattern (``src/train/thera/train_thera.py:88-269``, D-012): a proven, sanctioned
+    custom-``train_step`` exception for a loss term that needs the model's OWN
+    Jacobian inside the weight-gradient tape (D-002).
+
+    **Discard-the-wrapper discipline (invariant 3).** ``inner_model`` is the sole
+    DEPLOYABLE artifact — a functional denoiser carrying its ``config.json``
+    ``data_range="[0,1]"`` provenance stamp. ``save()`` therefore delegates to
+    ``self.inner.save()`` so ``best_model.keras`` (written by ``ModelCheckpoint``
+    via ``model.save``) is the denoiser, NOT this training harness. The wrapper
+    itself is never serialized.
+
+    **Float32-forced penalty (invariant 4).** ``jacobian_symmetry_penalty`` casts
+    its input to float32 and runs the whole nested-tape computation in float32; the
+    trainer additionally sets ``jit_compile=False`` and the config ``__post_init__``
+    REFUSES ``symmetry_weight>0 and mixed_precision`` (fail-closed), so this wrapper
+    only ever runs under a float32 policy.
+
+    Interface contract:
+        - ``inner_model``: a callable, already-built ``keras.Model`` denoiser mapping
+          a ``(B, H, W, C)`` input to a same-shaped output. Left UNMODIFIED (composed,
+          not subclassed); its trainable variables ARE this wrapper's trainable
+          variables (auto-tracked via the ``self.inner`` attribute).
+        - ``symmetry_weight`` (float > 0): scalar weight on the penalty term.
+        - ``symmetry_probes`` (int >= 1): number of random probes averaged by the
+          penalty estimator.
+        - ``train_step``/``test_step`` consume ``(x, y)`` (and ``sample_weight`` if
+          present) exactly like the stock denoiser dataset (``noisy, clean``). Recon
+          is computed via ``self.compute_loss`` so it matches the stock
+          ``compile(loss="mse")`` reduction exactly; the ``"loss"`` metric reports the
+          TOTAL (recon + penalty), and ``"symmetry_penalty"`` is reported separately.
+        - ``save(*args, **kwargs)`` delegates to ``self.inner.save`` (returns the inner
+          model's save result).
+
+    Args:
+        inner_model: The functional denoiser to wrap (deployable artifact).
+        symmetry_weight: Weight on the Jacobian-symmetry penalty (> 0 when wrapped).
+        symmetry_probes: Number of random probes for the penalty estimator (>= 1).
+        **kwargs: Forwarded to ``keras.Model``.
+    """
+
+    def __init__(
+        self,
+        inner_model: keras.Model,
+        symmetry_weight: float,
+        symmetry_probes: int,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.inner = inner_model
+        self.symmetry_weight = float(symmetry_weight)
+        self.symmetry_probes = int(symmetry_probes)
+        # Mean tracker so the penalty is epoch-averaged and auto-appears in logs /
+        # history (auto-tracked via attribute assignment; verified present in
+        # self.metrics_names). Distinct from the raw last-batch scalar.
+        self.symmetry_tracker = keras.metrics.Mean(name="symmetry_penalty")
+
+    def call(self, inputs, training=None):
+        # Delegate so predict/evaluate/build and the train_step forward pass all
+        # produce the inner denoiser's output.
+        return self.inner(inputs, training=training)
+
+    def build(self, input_shape):
+        if not self.inner.built:
+            self.inner.build(input_shape)
+        super().build(input_shape)
+
+    def compute_output_shape(self, input_shape):
+        return self.inner.compute_output_shape(input_shape)
+
+    def _penalty(self, x) -> tf.Tensor:
+        """Float32 Jacobian-symmetry penalty on the (noisy) input batch ``x``."""
+        # Force float32 regardless of policy (the penalty fn already casts; this is
+        # belt-and-braces so no fp16 leaks into the second-order tapes — D-003).
+        pen = jacobian_symmetry_penalty(
+            self.inner,
+            tf.cast(x, tf.float32),
+            num_probes=self.symmetry_probes,
+        )
+        return tf.cast(self.symmetry_weight, tf.float32) * pen
+
+    def train_step(self, data):
+        x, y, sample_weight = keras.utils.unpack_x_y_sample_weight(data)
+
+        # Single OUTER weight tape; the penalty's inner tapes compose with it for the
+        # second-order term. Recon via compute_loss => matches stock compile(loss="mse").
+        with tf.GradientTape() as tape:
+            y_pred = self(x, training=True)
+            recon = self.compute_loss(
+                x=x, y=y, y_pred=y_pred, sample_weight=sample_weight, training=True
+            )
+            penalty = self._penalty(x)
+            total = recon + tf.cast(penalty, recon.dtype)
+
+        grads = tape.gradient(total, self.trainable_variables)
+        self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
+
+        # Report TOTAL (recon + penalty) as "loss" so it sits above bare MSE, mirroring
+        # THERA; the compiled metrics (mae/psnr/ssim) track the denoised output.
+        self._loss_tracker.update_state(total)
+        self.symmetry_tracker.update_state(penalty)
+        return self.compute_metrics(x, y, y_pred, sample_weight=sample_weight)
+
+    def test_step(self, data):
+        x, y, sample_weight = keras.utils.unpack_x_y_sample_weight(data)
+        y_pred = self(x, training=False)
+        recon = self.compute_loss(
+            x=x, y=y, y_pred=y_pred, sample_weight=sample_weight, training=False
+        )
+        # Mirror the train objective so val_loss tracks the real (penalized) objective
+        # (THERA test_step parity). THERA computes the penalty on val too; match it.
+        penalty = self._penalty(x)
+        total = recon + tf.cast(penalty, recon.dtype)
+        self._loss_tracker.update_state(total)
+        self.symmetry_tracker.update_state(penalty)
+        return self.compute_metrics(x, y, y_pred, sample_weight=sample_weight)
+
+    def save(self, *args, **kwargs):
+        # DECISION plan-2026-07-17T112359-874b11cc/D-002: delegate to the inner denoiser
+        # so ModelCheckpoint's best_model.keras is the DEPLOYABLE functional model (with its
+        # config.json data_range="[0,1]" provenance stamp), NOT this discard-after-training
+        # harness (invariant 3 / Pre-Mortem signal 2). Do NOT let the wrapper serialize itself:
+        # require_unit_domain_checkpoint() would refuse a training-harness artifact.
+        return self.inner.save(*args, **kwargs)
+
+
+# ---------------------------------------------------------------------
 # TRAINING ORCHESTRATION (shared)
 # ---------------------------------------------------------------------
 
@@ -1751,6 +1890,19 @@ def train(
         config.sigma_max_start, dtype=tf.float32, trainable=False, name="sigma_max"
     )
     noise_fn = make_curriculum_noise_fn(config, sigma_max_var, config.clip_noise)
+
+    # Honesty guard (D-001): clip_noise only gates the streaming make_curriculum_noise_fn
+    # path (train + val). The self-iterate pool init and its regen callback clip
+    # independently and are OUT of scope for this flag, so under --self-iterate the pool
+    # inputs are STILL clipped even with clip_noise=False. Warn rather than silently
+    # leave a partial gap.
+    if not config.clip_noise and config.self_iterate:
+        logger.warning(
+            "clip_noise=False has NO effect on the self-iterate pool paths: the "
+            "self-iterate pool init and regeneration callback clip noisy inputs to "
+            "[0, 1] independently of make_curriculum_noise_fn. Only the (unused-in-"
+            "self-iterate) streaming train/val noise honours clip_noise=False here."
+        )
 
     train_paths = collect_training_paths(config)
     val_paths = collect_image_paths(
@@ -1968,6 +2120,35 @@ def train(
         jit_compile=False if config.mixed_precision else "auto",
     )
     logger.info(f"Model compiled with {model.count_params():,} parameters")
+
+    # Soft Jacobian-symmetry penalty (opt-in, default OFF). When symmetry_weight == 0.0
+    # the model is NEVER wrapped and the stock compile/fit path above stays byte-identical
+    # (invariant 1). When > 0, wrap the compiled denoiser in the THERA-style training
+    # harness (D-002) whose train_step/test_step add the float32 penalty. jit_compile is
+    # forced OFF for this path: the JVP-of-VJP is a second differentiation of the backward
+    # pass and belongs to the repo's fp16/XLA silent-death class (D-003 also bans the fp16
+    # combo at config time). The wrapper's save() delegates to the inner denoiser so
+    # ModelCheckpoint's best_model.keras is the deployable model (invariant 3).
+    if config.symmetry_weight > 0:
+        train_model = BfunetSymmetryTrainingModel(
+            train_model, config.symmetry_weight, config.symmetry_probes
+        )
+        train_model.compile(
+            optimizer=optimizer,
+            loss="mse",
+            metrics=[
+                "mae",
+                PsnrMetric(max_val=1.0, name="psnr_metric"),
+                SsimMetric(max_val=1.0, name="ssim_metric"),
+            ],
+            jit_compile=False,
+        )
+        logger.info(
+            "Jacobian-symmetry penalty ENABLED "
+            f"(symmetry_weight={config.symmetry_weight}, "
+            f"symmetry_probes={config.symmetry_probes}, float32, jit_compile=False). "
+            "Training the wrapper; best_model.keras remains the deployable denoiser."
+        )
 
     disable_early_stopping = config.early_stopping_patience <= 0
     # ModelAnalyzer (opt-in): data-free weight + spectral analysis at the epoch cadence.
