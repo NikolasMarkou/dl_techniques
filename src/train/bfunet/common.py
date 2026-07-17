@@ -1225,6 +1225,21 @@ class BFUnetTrainingConfig:
                 "symmetry_weight>0 requires float32 training; disable mixed_precision "
                 "(second-order fp16/XLA is a known silent-training-death path)"
             )
+        if self.symmetry_weight > 0 and self.enable_deep_supervision:
+            # DECISION plan-2026-07-17T112359-874b11cc/D-006: fail-closed. The penalty
+            # module (losses/jacobian_symmetry.py) computes a JVP-of-VJP of a SINGLE
+            # model-output tensor w.r.t. its input; deep supervision makes the model
+            # return a LIST of outputs, violating that single-tensor contract. Do NOT
+            # relax to a WARNING or try to pick one head here: the combo is untested and
+            # would otherwise fail loud (shape/None-gradient error) deep inside train
+            # build. Refuse at config time so the incompatibility is stated, not
+            # discovered mid-run. See decisions.md D-006.
+            raise ValueError(
+                "symmetry_weight>0 is incompatible with deep supervision: the "
+                "Jacobian-symmetry penalty requires a single-tensor model output, but "
+                "deep supervision returns a list of outputs. Disable one of them "
+                "(set symmetry_weight=0 or enable_deep_supervision=False)."
+            )
         if not self.train_image_dirs or not self.val_image_dirs:
             raise ValueError("train/val image dirs must be non-empty")
         # Self-iterate validation is guarded so the default-OFF config is unaffected.

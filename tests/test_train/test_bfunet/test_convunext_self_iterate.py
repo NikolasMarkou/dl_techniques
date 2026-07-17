@@ -859,3 +859,19 @@ class TestSymmetryConfigValidation:
         cfg = TrainingConfig(symmetry_weight=0.1, symmetry_probes=2, mixed_precision=False)
         assert cfg.symmetry_weight == 0.1
         assert cfg.mixed_precision is False
+
+    def test_penalty_with_deep_supervision_raises(self):
+        """symmetry_weight>0 together with enable_deep_supervision must raise ValueError
+        (D-006: the penalty needs a single-tensor output; deep supervision returns a
+        list, violating that contract)."""
+        with pytest.raises(ValueError):
+            TrainingConfig(symmetry_weight=0.1, enable_deep_supervision=True)
+
+    def test_penalty_without_deep_supervision_constructs(self):
+        """symmetry_weight>0 with deep supervision OFF constructs fine (the sanctioned
+        single-output combo the penalty is designed for)."""
+        cfg = TrainingConfig(
+            symmetry_weight=0.1, enable_deep_supervision=False, mixed_precision=False
+        )
+        assert cfg.symmetry_weight == 0.1
+        assert cfg.enable_deep_supervision is False
