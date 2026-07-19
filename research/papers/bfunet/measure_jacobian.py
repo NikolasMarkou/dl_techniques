@@ -14,11 +14,17 @@ checkpoint ``results/20260715_convunext_denoiser/best_model.keras``:
 
 Run:
     CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg .venv/bin/python \\
-        research/papers/bfunet/measure_jacobian.py
+        research/papers/bfunet/measure_jacobian.py \\
+        [--checkpoint PATH] [--output PATH]
+
+``--checkpoint`` defaults to the module constant below, so an argument-less call
+behaves exactly as it always has. The checkpoint actually loaded is recorded in the
+output JSON's ``checkpoint`` field -- always read that field, never assume the default.
 
 Emits ``research/papers/bfunet/jacobian_results.json``.
 """
 
+import argparse
 import json
 from pathlib import Path
 
@@ -130,9 +136,21 @@ def make_box_blur(k):
     return op
 
 
+def _parse_args():
+    parser = argparse.ArgumentParser(description="Measure local Jacobian asymmetry")
+    parser.add_argument("--checkpoint", type=str, default=CKPT,
+                        help="Path to the saved .keras denoiser.")
+    parser.add_argument("--output", type=str, default=OUT_JSON,
+                        help="Path of the results JSON to write.")
+    return parser.parse_args()
+
+
 def main():
-    logger.info(f"Loading NEW checkpoint via load_denoiser: {CKPT}")
-    model = load_denoiser(CKPT)  # goes through require_unit_domain_checkpoint gate
+    args = _parse_args()
+    checkpoint = args.checkpoint
+
+    logger.info(f"Loading checkpoint via load_denoiser: {checkpoint}")
+    model = load_denoiser(checkpoint)  # goes through require_unit_domain_checkpoint gate
 
     # --- Build the noisy input y in [0,1], (1,256,256,3) -----------------------
     cfg = EvalConfig(models={}, datasets={}, num_samples=1,
@@ -188,15 +206,18 @@ def main():
         "sigma_255": SIGMA_255,
         "seed": SEED,
         "finite_difference": "central",
-        "checkpoint": CKPT,
+        # The checkpoint ACTUALLY loaded (not the module default) -- the paper must key
+        # off this field to know which model produced these numbers.
+        "checkpoint": checkpoint,
         "denoiser": m_metrics,
         "baseline_box_blur": b_metrics,
         "ratio": ratio,
     }
 
-    out_path = Path(OUT_JSON)
+    out_path = Path(args.output)
     out_path.write_text(json.dumps(results, indent=2))
     logger.info(f"wrote {out_path}")
+    logger.info(f"checkpoint recorded in JSON: {checkpoint}")
 
     # --- Falsification gate (Pre-Mortem #1): control must be near-zero ---------
     ctrl = b_metrics["asymmetry_ratio"]

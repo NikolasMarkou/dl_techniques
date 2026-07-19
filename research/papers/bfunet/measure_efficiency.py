@@ -5,7 +5,8 @@ Produces the efficiency table data for ``bfunet.tex`` (tab:efficiency) for the c
 
 What it measures
 ----------------
-1. **Params**: total via ``count_params()`` (expect 740,784); trainable vs non-trainable
+1. **Params**: total via ``count_params()``, cross-checked against ``--expected-params``
+   (a warn-only sanity gate, default = the default checkpoint's count); trainable vs non-trainable
    (the Gabor stem is frozen, so a non-trivial non-trainable slice is expected).
 2. **FLOPs** at 256x256x3 and 512x512x3, via the legacy v1 profiler on a variables-frozen
    concrete function (``tf.function`` -> ``get_concrete_function`` ->
@@ -26,9 +27,15 @@ What it measures
 Run::
 
     CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg .venv/bin/python \\
-        research/papers/bfunet/measure_efficiency.py
+        research/papers/bfunet/measure_efficiency.py \\
+        [--checkpoint PATH] [--output PATH] [--gpu N] [--expected-params N]
+
+``--checkpoint`` defaults to the module constant below, so an argument-less call
+behaves exactly as it always has. The checkpoint actually loaded is recorded in the
+output JSON's ``checkpoint`` field -- always read that field, never assume the default.
 """
 
+import argparse
 import json
 import time
 from pathlib import Path
@@ -50,6 +57,8 @@ LATENCY_WARMUP = 3
 LATENCY_ITERS = 20
 OUT_JSON = Path(__file__).resolve().parent / "efficiency_results.json"
 
+# Warn-only sanity gate for the DEFAULT checkpoint above. It is checkpoint-specific, so
+# pass --expected-params when measuring a different model (or the warn is meaningless).
 EXPECTED_TOTAL_PARAMS = 740_784
 FOURX_TOLERANCE = 0.30  # accept ratio in [4*(1-tol), 4*(1+tol)] as "~4x linear-in-pixels"
 
@@ -264,18 +273,35 @@ def _measure_mem_latency(model: keras.Model, res: int) -> Dict:
     }
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Measure params/FLOPs/memory/latency")
+    parser.add_argument("--checkpoint", type=str, default=CHECKPOINT,
+                        help="Path to the saved .keras denoiser.")
+    parser.add_argument("--output", type=str, default=str(OUT_JSON),
+                        help="Path of the results JSON to write.")
+    parser.add_argument("--gpu", type=int, default=0,
+                        help="GPU id for setup_gpu (default 0).")
+    parser.add_argument("--expected-params", type=int, default=EXPECTED_TOTAL_PARAMS,
+                        help="Warn-only expected total param count for --checkpoint.")
+    return parser.parse_args()
+
+
 def main() -> None:
-    setup_gpu(gpu_id=0)
+    args = _parse_args()
+    checkpoint = args.checkpoint
+    out_json = Path(args.output)
+
+    setup_gpu(gpu_id=args.gpu)
     set_seeds(SEED)
 
-    model = _to_flexible_input(load_denoiser(CHECKPOINT))
+    model = _to_flexible_input(load_denoiser(checkpoint))
 
     params = _param_counts(model)
     print(f"params: total={params['total']:,}  trainable={params['trainable']:,}  "
           f"non_trainable={params['non_trainable']:,}")
-    if params["total"] != EXPECTED_TOTAL_PARAMS:
+    if params["total"] != args.expected_params:
         print(f"[warn] total params {params['total']:,} != expected "
-              f"{EXPECTED_TOTAL_PARAMS:,}")
+              f"{args.expected_params:,}")
 
     flops = _measure_flops(model)
     print(f"flops method: {flops['method']}  (512/256 ratio={flops['ratio_512_over_256']:.3f})")
@@ -292,7 +318,9 @@ def main() -> None:
               f"latency(med)={stats['latency_ms_median']:.2f} ms")
 
     payload = {
-        "checkpoint": CHECKPOINT,
+        # The checkpoint ACTUALLY loaded (not the module default) -- the paper must key
+        # off this field to know which model produced these numbers.
+        "checkpoint": checkpoint,
         "seed": SEED,
         "channels": CHANNELS,
         "resolutions": RESOLUTIONS,
@@ -300,9 +328,10 @@ def main() -> None:
         "flops": flops,
         "mem_latency": mem_lat,
     }
-    with open(OUT_JSON, "w") as f:
+    with open(out_json, "w") as f:
         json.dump(payload, f, indent=2)
-    print(f"\nwrote {OUT_JSON}")
+    print(f"\nwrote {out_json}")
+    print(f"checkpoint recorded in JSON: {checkpoint}")
 
 
 if __name__ == "__main__":

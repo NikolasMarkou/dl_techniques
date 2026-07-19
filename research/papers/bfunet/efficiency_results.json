@@ -1,5 +1,5 @@
 {
-  "checkpoint": "results/20260715_convunext_denoiser/best_model.keras",
+  "checkpoint": "results/20260717_convunext_denoiser/final_model.keras",
   "seed": 42,
   "channels": 3,
   "resolutions": [
@@ -7,39 +7,39 @@
     512
   ],
   "params": {
-    "total": 740784,
-    "trainable": 726132,
+    "total": 745272,
+    "trainable": 730620,
     "non_trainable": 14652
   },
   "flops": {
     "method": "v1profiler",
     "per_resolution": {
       "256": {
-        "flops": 52398146790,
-        "gflops": 52.39814679,
-        "flops_per_megapixel": 799532269134.5215
+        "flops": 52995048678,
+        "gflops": 52.995048678,
+        "flops_per_megapixel": 808640269134.5215
       },
       "512": {
-        "flops": 209592583398,
-        "gflops": 209.592583398,
-        "flops_per_megapixel": 799532254783.6304
+        "flops": 211980190950,
+        "gflops": 211.98019095,
+        "flops_per_megapixel": 808640254783.6304
       }
     },
-    "ratio_512_over_256": 3.9999999282035676
+    "ratio_512_over_256": 3.9999999290122363
   },
   "mem_latency": {
     "256": {
-      "peak_mem_mib": 572.114013671875,
-      "latency_ms_median": 200.5044084507972,
-      "latency_ms_min": 182.96213308349252,
-      "latency_ms_max": 243.599487002939,
+      "peak_mem_mib": 539.058837890625,
+      "latency_ms_median": 217.24628703668714,
+      "latency_ms_min": 199.7370170429349,
+      "latency_ms_max": 450.7311191409826,
       "latency_iters": 20
     },
     "512": {
-      "peak_mem_mib": 2500.64404296875,
-      "latency_ms_median": 193.24401509948075,
-      "latency_ms_min": 186.0838201828301,
-      "latency_ms_max": 243.04939294233918,
+      "peak_mem_mib": 2146.8076171875,
+      "latency_ms_median": 214.31174338795245,
+      "latency_ms_min": 195.33017091453075,
+      "latency_ms_max": 276.406432967633,
       "latency_iters": 20
     }
   }

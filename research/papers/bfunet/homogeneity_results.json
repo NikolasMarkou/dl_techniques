@@ -1,5 +1,5 @@
 {
-  "checkpoint": "results/20260715_convunext_denoiser/best_model.keras",
+  "checkpoint": "results/20260717_convunext_denoiser/final_model.keras",
   "sigma_255": 25.0,
   "seed": 42,
   "roundoff_floor_note": "float32 rounding through a deep net lands ~2.5e-5 (ddnm.py:104); a non-homogeneous (e.g. LayerNorm) checkpoint lands ~0.9",
@@ -13,10 +13,10 @@
     "8.0": 0.0
   },
   "nonpow2_alphas": {
-    "0.3": 4.4355142737856744e-06,
-    "1.3": 4.4377754937561015e-06,
-    "3.7": 4.424432634902225e-06,
-    "6.1": 4.402011708153307e-06
+    "0.3": 6.895602257714783e-05,
+    "1.3": 6.652780756904975e-05,
+    "3.7": 7.009289348828677e-05,
+    "6.1": 6.450990677153221e-05
   },
-  "max_error": 4.4377754937561015e-06
+  "max_error": 7.009289348828677e-05
 }

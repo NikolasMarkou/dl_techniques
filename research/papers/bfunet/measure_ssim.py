@@ -25,9 +25,15 @@ would push them out of [0,1] and corrupt SSIM.
 Run::
 
     CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg .venv/bin/python \\
-        research/papers/bfunet/measure_ssim.py
+        research/papers/bfunet/measure_ssim.py \\
+        [--checkpoint PATH] [--output PATH] [--gpu N]
+
+``--checkpoint`` defaults to the module constant below, so an argument-less call
+behaves exactly as it always has. The checkpoint actually loaded is recorded in the
+output JSON's ``checkpoint`` field -- always read that field, never assume the default.
 """
 
+import argparse
 import json
 from pathlib import Path
 from typing import Dict, List
@@ -71,14 +77,29 @@ def _ssim_full(denoised: np.ndarray, clean: np.ndarray) -> float:
     )
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Measure full-image PSNR+SSIM (tab:ssim)")
+    parser.add_argument("--checkpoint", type=str, default=CHECKPOINT,
+                        help="Path to the saved .keras denoiser.")
+    parser.add_argument("--output", type=str, default=str(OUT_JSON),
+                        help="Path of the results JSON to write.")
+    parser.add_argument("--gpu", type=int, default=0,
+                        help="GPU id for setup_gpu (default 0).")
+    return parser.parse_args()
+
+
 def main() -> None:
-    setup_gpu(gpu_id=0)
+    args = _parse_args()
+    checkpoint = args.checkpoint
+    out_json = Path(args.output)
+
+    setup_gpu(gpu_id=args.gpu)
     set_seeds(SEED)
 
     # EvalConfig only supplies num_samples / channels / size_multiple / clip to the reused
     # helpers; the models/datasets fields are unused here (we drive the loop directly).
     cfg = EvalConfig(
-        models={"convunext_20260715": CHECKPOINT},
+        models={"denoiser": checkpoint},
         datasets={},
         sigmas_255=SIGMAS_255,
         num_samples=NUM_SAMPLES,
@@ -88,7 +109,7 @@ def main() -> None:
         seed=SEED,
     )
 
-    model = _to_flexible_input(load_denoiser(CHECKPOINT))
+    model = _to_flexible_input(load_denoiser(checkpoint))
 
     results: List[Dict] = []
     for ds_name, ds_dir in DATASETS.items():
@@ -121,16 +142,19 @@ def main() -> None:
                   f"PSNR={entry['psnr_mean']:6.3f} dB  SSIM={entry['ssim_mean']:.4f}")
 
     payload = {
-        "checkpoint": CHECKPOINT,
+        # The checkpoint ACTUALLY loaded (not the module default) -- downstream consumers
+        # (the paper) must key off this field to know which model produced these numbers.
+        "checkpoint": checkpoint,
         "seed": SEED,
         "num_samples": NUM_SAMPLES,
         "size_multiple": SIZE_MULTIPLE,
         "sigmas_255": SIGMAS_255,
         "results": results,
     }
-    with open(OUT_JSON, "w") as f:
+    with open(out_json, "w") as f:
         json.dump(payload, f, indent=2)
-    print(f"\nwrote {OUT_JSON}  ({len(results)} (set,sigma) entries)")
+    print(f"\nwrote {out_json}  ({len(results)} (set,sigma) entries)")
+    print(f"checkpoint recorded in JSON: {checkpoint}")
 
 
 if __name__ == "__main__":

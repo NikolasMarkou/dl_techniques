@@ -21,11 +21,17 @@ true magnitude, do NOT call it round-off.
 
 Run:
     CUDA_VISIBLE_DEVICES=0 MPLBACKEND=Agg .venv/bin/python \\
-        research/papers/bfunet/measure_homogeneity.py
+        research/papers/bfunet/measure_homogeneity.py \\
+        [--checkpoint PATH] [--output PATH]
+
+``--checkpoint`` defaults to the module constant below, so an argument-less call
+behaves exactly as it always has. The checkpoint actually loaded is recorded in the
+output JSON's ``checkpoint`` field -- always read that field, never assume the default.
 
 Emits ``research/papers/bfunet/homogeneity_results.json``.
 """
 
+import argparse
 import json
 import math
 from pathlib import Path
@@ -82,9 +88,21 @@ def _build_noisy_y():
     return y
 
 
+def _parse_args():
+    parser = argparse.ArgumentParser(description="Measure degree-1 homogeneity error")
+    parser.add_argument("--checkpoint", type=str, default=CKPT,
+                        help="Path to the saved .keras denoiser.")
+    parser.add_argument("--output", type=str, default=OUT_JSON,
+                        help="Path of the results JSON to write.")
+    return parser.parse_args()
+
+
 def main():
-    logger.info(f"Loading NEW checkpoint via load_denoiser: {CKPT}")
-    model = load_denoiser(CKPT)  # goes through require_unit_domain_checkpoint gate
+    args = _parse_args()
+    checkpoint = args.checkpoint
+
+    logger.info(f"Loading checkpoint via load_denoiser: {checkpoint}")
+    model = load_denoiser(checkpoint)  # goes through require_unit_domain_checkpoint gate
 
     y = _build_noisy_y()
 
@@ -100,7 +118,9 @@ def main():
     max_error = float(max(all_errors))
 
     results = {
-        "checkpoint": CKPT,
+        # The checkpoint ACTUALLY loaded (not the module default) -- the paper must key
+        # off this field to know which model produced these numbers.
+        "checkpoint": checkpoint,
         "sigma_255": SIGMA_255,
         "seed": SEED,
         "roundoff_floor_note": (
@@ -113,9 +133,10 @@ def main():
         "nonpow2_alphas": nonpow2_str,
         "max_error": max_error,
     }
-    out_path = Path(OUT_JSON)
+    out_path = Path(args.output)
     out_path.write_text(json.dumps(results, indent=2))
     logger.info(f"wrote {out_path}")
+    logger.info(f"checkpoint recorded in JSON: {checkpoint}")
 
     # --- Report + Pre-Mortem #3 falsification gate -----------------------------
     logger.info("=" * 68)
