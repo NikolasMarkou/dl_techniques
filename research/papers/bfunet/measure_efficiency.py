@@ -286,6 +286,27 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _gpu_name() -> str:
+    """Name of the GPU these numbers were measured on, for the output JSON.
+
+    Latency and peak-memory are hardware-specific and the paper names the card in prose,
+    in the Table~\\ref{tab:efficiency} caption, and in the reproducibility appendix. Without
+    this field that attribution rests on remembering which ``CUDA_VISIBLE_DEVICES`` the run
+    used -- a trust-based claim that a reader cannot check. Same rationale as ``checkpoint``.
+
+    Returns the device name, or a ``"unknown (...)"`` marker on any failure; never raises,
+    because failing to identify the GPU must not lose a completed measurement run.
+    """
+    try:
+        gpus = tf.config.list_physical_devices("GPU")
+        if not gpus:
+            return "cpu (no GPU visible)"
+        details = tf.config.experimental.get_device_details(gpus[0])
+        return details.get("device_name") or f"unknown (no device_name; {gpus[0].name})"
+    except Exception as exc:  # noqa: BLE001 - identification must never fail the run
+        return f"unknown ({type(exc).__name__}: {exc})"
+
+
 def main() -> None:
     args = _parse_args()
     checkpoint = args.checkpoint
@@ -321,6 +342,9 @@ def main() -> None:
         # The checkpoint ACTUALLY loaded (not the module default) -- the paper must key
         # off this field to know which model produced these numbers.
         "checkpoint": checkpoint,
+        # The GPU ACTUALLY used. Latency/peak-mem are hardware-specific and the paper names
+        # this card; recording it here keeps that attribution checkable rather than trusted.
+        "gpu": _gpu_name(),
         "seed": SEED,
         "channels": CHANNELS,
         "resolutions": RESOLUTIONS,
