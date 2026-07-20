@@ -73,6 +73,7 @@ from typing import Optional, Union, Literal, List, Any, Tuple, Dict
 from ...utils.logger import logger
 from ...utils.tensors import resolve_training_factor
 from ...initializers.orthonormal_initializer import OrthonormalInitializer
+from .base import BaseMixtureLayer
 
 # ---------------------------------------------------------------------
 
@@ -86,7 +87,7 @@ Axis = Union[int, List[int]]
 
 
 @keras.saving.register_keras_serializable()
-class GMMLayer(keras.layers.Layer):
+class GMMLayer(BaseMixtureLayer):
     """Differentiable Gaussian Mixture Model layer with isometric-kernel regularization.
 
     This layer implements a fully differentiable soft-clustering mechanism based on
@@ -339,6 +340,15 @@ class GMMLayer(keras.layers.Layer):
                 f"covariance_rank must be a positive integer, got {covariance_rank}"
             )
 
+    @property
+    def _n_prototypes(self) -> int:
+        """Prototype count seam read by ``_ClusterAxisMixin`` (see BaseMixtureLayer).
+
+        :return: Number of mixture components.
+        :rtype: int
+        """
+        return self.n_components
+
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Build the layer weights.
 
@@ -403,54 +413,6 @@ class GMMLayer(keras.layers.Layer):
         # Call parent build at the end
         super().build(input_shape)
 
-    def _setup_cluster_axes(self) -> None:
-        """Setup and validate cluster axes.
-
-        :raises ValueError: If cluster axes are invalid.
-        """
-        # DECISION plan_2026-06-14_7384c2e3/D-003: re-derive from the ORIGINAL constructor
-        # value (_cluster_axis_arg), not in-place on self.cluster_axis. This makes build()
-        # idempotent -- a second build() re-normalizes from the stable source instead of
-        # double-shifting an already-positive axis (which would corrupt cluster_axis).
-        # Convert negative axes to positive
-        self.cluster_axis = [
-            axis if axis >= 0 else self.input_rank + axis
-            for axis in self._cluster_axis_arg
-        ]
-
-        # Validate axes
-        if not all(0 <= axis < self.input_rank for axis in self.cluster_axis):
-            raise ValueError(
-                f"Invalid cluster_axis: {self.cluster_axis} for input rank {self.input_rank}"
-            )
-
-        # Sort axes for consistent processing
-        self.cluster_axis.sort()
-
-    def _compute_feature_dims(self, input_shape: Tuple[Optional[int], ...]) -> int:
-        """Compute total feature dimensions.
-
-        :param input_shape: Input tensor shape.
-        :type input_shape: Tuple[Optional[int], ...]
-        :return: Product of dimensions along cluster axes.
-        :rtype: int
-        :raises ValueError: If input shape is invalid.
-        """
-        try:
-            return int(np.prod([input_shape[axis] for axis in self.cluster_axis]))
-        except (TypeError, ValueError) as e:
-            raise ValueError(
-                f"Invalid input shape {input_shape} for cluster axes {self.cluster_axis}"
-            ) from e
-
-    def _compute_non_feature_dims(self) -> List[int]:
-        """Compute non-feature dimensions.
-
-        :return: List of axes not used for clustering.
-        :rtype: List[int]
-        """
-        return [i for i in range(self.input_rank) if i not in self.cluster_axis]
-
     def _initialize_means(self) -> None:
         """Initialize component-mean variables with the appropriate initializer."""
         # Handle orthonormal initialization specially
@@ -491,57 +453,6 @@ class GMMLayer(keras.layers.Layer):
             dtype=self.dtype,
             autocast=False
         )
-
-    def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
-        """Compute shape of layer output.
-
-        :param input_shape: Shape of input tensor.
-        :type input_shape: Tuple[Optional[int], ...]
-        :return: Output tensor shape.
-        :rtype: Tuple[Optional[int], ...]
-        """
-        if self.output_mode == 'assignments':
-            # Normalize axes LOCALLY from the original constructor value + input rank
-            # rather than reading self.cluster_axis (which build() mutates negative->
-            # positive and which may not be normalized yet during functional-API tracing,
-            # when compute_output_shape is called BEFORE build). Mirrors _setup_cluster_axes.
-            rank = len(input_shape)
-            axes = sorted(
-                ax if ax >= 0 else rank + ax for ax in self._cluster_axis_arg
-            )
-            output_shape = list(input_shape)
-
-            # Handle multiple clustering axes
-            if len(axes) > 1:
-                # Replace clustered dimensions with n_components
-                # Remove extra axes in reverse order to preserve indices
-                for axis in reversed(axes[1:]):
-                    output_shape.pop(axis)
-                output_shape[axes[0]] = self.n_components
-            else:
-                output_shape[axes[0]] = self.n_components
-
-            return tuple(output_shape)
-
-        # For mixture mode, output shape matches input
-        return tuple(input_shape)
-
-    def _reshape_for_clustering(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
-        """Reshape input tensor for clustering operations.
-
-        :param inputs: Input tensor.
-        :type inputs: keras.KerasTensor
-        :return: Reshaped tensor with shape ``(batch * non_feature_dims, feature_dims)``.
-        :rtype: keras.KerasTensor
-        """
-        # Optimize for common case of single axis at end
-        if len(self.cluster_axis) == 1 and self.cluster_axis[0] == self.input_rank - 1:
-            return keras.ops.reshape(inputs, [-1, self.feature_dims])
-
-        # General case requires transpose
-        perm = self.non_feature_dims + self.cluster_axis
-        transposed = keras.ops.transpose(inputs, perm)
-        return keras.ops.reshape(transposed, [-1, self.feature_dims])
 
     def _effective_variances(self) -> keras.KerasTensor:
         """Compute floored component variances from log-variance parameters.
@@ -757,35 +668,6 @@ class GMMLayer(keras.layers.Layer):
         )
 
         return self.isometric_regularizer_strength * anisotropy
-
-    def _reshape_output(self, output: keras.KerasTensor) -> keras.KerasTensor:
-        """Reshape clustering output to match desired output shape.
-
-        :param output: Output tensor from clustering.
-        :type output: keras.KerasTensor
-        :return: Reshaped output tensor.
-        :rtype: keras.KerasTensor
-        """
-        if self.output_mode == 'assignments':
-            output_shape = list(self.original_shape)
-
-            # Handle multiple clustering axes
-            if len(self.cluster_axis) > 1:
-                # Remove extra axes in reverse order to preserve indices
-                for axis in reversed(self.cluster_axis[1:]):
-                    output_shape.pop(axis)
-                output_shape[self.cluster_axis[0]] = self.n_components
-            else:
-                output_shape[self.cluster_axis[0]] = self.n_components
-
-            # Set batch dimension to -1 for dynamic reshaping
-            output_shape[0] = -1
-
-        else:  # output_mode == 'mixture'
-            output_shape = list(self.original_shape)
-            output_shape[0] = -1
-
-        return keras.ops.reshape(output, output_shape)
 
     def call(
         self,
