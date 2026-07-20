@@ -76,7 +76,6 @@ References:
 """
 
 import keras
-import numpy as np
 from typing import Optional, Union, Literal, List, Any, Tuple, Dict
 
 # ---------------------------------------------------------------------
