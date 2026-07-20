@@ -65,7 +65,11 @@ MIXTURE_REGISTRY: Dict[str, Dict[str, Any]] = {
         'description': 'Radial Basis Function layer with learnable centers and inter-center repulsion',
         'required_params': ['units'],
         'optional_params': {
-            'gamma_init': 1.0,
+            # Mirrors RBFLayer.__init__ exactly: None means "resolve to 1/feature_dim
+            # in build()" (D-001). Restoring a concrete 1.0 here reds
+            # test_factory_registry_drift.py -- and would be wrong regardless, since
+            # this registry advertises constructor defaults, not resolved values.
+            'gamma_init': None,
             'repulsion_strength': 0.1,
             'min_center_distance': 1.0,
             'center_initializer': 'uniform',

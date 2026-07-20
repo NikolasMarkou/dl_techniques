@@ -103,8 +103,33 @@ class RBFLayer(keras.layers.Layer):
 
     :param units: Number of RBF units. Must be positive.
     :type units: int
-    :param gamma_init: Initial value for the width parameter.
-    :type gamma_init: float
+    :param gamma_init: Initial value for the width parameter. ``None`` (the
+        default) selects a **mode-dependent** value, resolved in ``build()``
+        once the input's last dimension ``D`` is known: ``1.0 / D`` under
+        ``output_mode='basis'``, and ``1.0`` under ``output_mode='normalized'``.
+        Pass a float to pin an explicit, dimension-blind value; the explicit
+        value always wins over both defaults.
+
+        Why ``1/D`` for ``'basis'``: ``||x - c||^2`` grows approximately
+        linearly with ``D`` for standardized input (measured ratio
+        ``E[||x-c||^2] / D`` = 1.00 at ``D`` = 4 / 128 / 1024), so a fixed
+        ``gamma`` that is sensible at ``D = 4`` drives the exponent
+        ``dist_sq * gamma`` past the arm's 50.0 clip at ``D >= 64`` and
+        saturates every unit into a constant with exactly zero gradient.
+
+        Why NOT ``1/D`` for ``'normalized'``: that arm is a softmax over
+        ``-dist_sq * gamma`` and is shift-invariant, so only the BETWEEN-UNIT
+        logit gaps carry signal. Those gaps are set by the center spread rather
+        than by ``D``, so a ``1/D`` gamma shrinks them ~``D``-fold and collapses
+        the output toward a uniform ``1/units`` (measured at ``D = 128``: mean
+        logit spread 1.767 at ``gamma=1.0`` versus 0.0149 at ``gamma=1/128``).
+        ``'normalized'`` therefore keeps the historical ``1.0``.
+
+        ``get_config()`` emits this constructor argument verbatim, so a config
+        carrying an explicit float -- including every artifact saved before this
+        default existed, which froze a concrete ``1.0`` -- deserializes to
+        exactly its previous numerics.
+    :type gamma_init: Optional[float]
     :param repulsion_strength: Strength of the center repulsion penalty.
     :type repulsion_strength: float
     :param min_center_distance: Minimum desired distance between centres.
@@ -128,25 +153,36 @@ class RBFLayer(keras.layers.Layer):
 
         .. warning::
 
-           **The 50.0 clip is a hazard on the ``'basis'`` path, not a
-           safeguard.** It does two things, and only the first is desirable: it
-           keeps ``exp`` from underflowing (the floor is ``exp(-50) ~ 1.93e-22``
-           rather than ``0.0``), AND it freezes learning once saturated, because
-           ``ops.minimum`` has a structurally ZERO gradient in its saturated
-           branch. Since ``E[||x - c||^2] ~ D`` for standardized inputs, every
-           unit saturates at the same 50.0 once ``D * gamma >~ 50``, and the
-           layer becomes a constant ``exp(-50)`` with gradient exactly 0.0 on
-           both ``centers`` and ``gamma_raw``. Measured with stock defaults
-           (``units=8``, ``gamma_init=1.0``) on ``normal(0, 1)`` input: gradmax
-           is ``0.0 / 0.0`` at ``D >= 64``, and a 40-epoch binary fit of
-           ``Sequential([RBFLayer, Dense(1)])`` at ``D = 128`` leaves the loss at
-           chance (``0.693``) with ``d|gamma_raw|`` exactly ``0.0``. This is
-           long-standing behavior, deliberately NOT changed here (changing the
-           default arm of a shipped layer needs its own plan); it is pinned by
-           ``test_basis_mode_is_dead_at_realistic_dimension``, an
-           ``xfail(strict=True)`` test that will FAIL loudly the moment someone
-           fixes it. Prefer ``'normalized'``, or keep ``D * gamma`` well below
-           50, if you need this layer to train.
+           **``'basis'`` trains at all, but it does not train well. Prefer
+           ``'normalized'``.**
+
+           *What is guaranteed.* With ``gamma_init=None`` (the default), gamma
+           resolves on this arm to ``1/feature_dim``, which keeps the exponent
+           ``O(1)`` at every dimension. The 50.0 clip below is RETAINED, but at stock
+           defaults it no longer engages, so ``ops.minimum``'s structurally zero
+           saturated-branch gradient is no longer reachable. Measured,
+           ``units=8``, ``normal(0, 1)`` input, 3 seeds: gradmax on
+           ``(centers, gamma_raw)`` goes from EXACTLY ``0.0 / 0.0`` to
+           ``3.0e-04 / 3.3e-02`` at ``D = 128`` and ``1.4e-04 / 3.4e-02`` at
+           ``D = 256``; forward output std goes from ``0.0`` (the constant
+           ``exp(-50) = 1.93e-22``) to ``2.7e-02 .. 4.9e-02``.
+
+           *What is NOT guaranteed -- the residual limitation.* Live gradients
+           are not fast convergence. At identical hyperparameters
+           (``units=8``, ``lr=1e-2``, 40 epochs, ``D = 128``, a linearly
+           separable binary fit) ``'normalized'`` reaches loss **0.176** while
+           fixed ``'basis'`` sits at **0.690**, still chance. Sweeping epochs
+           alone (3 seeds, ``units`` and ``lr`` held fixed) does not clear
+           ``0.5`` at any budget up to 400 epochs (worst seed at 400: 0.527).
+           The binding constraint is the raw-``exp`` parameterization, not the
+           initialization: squaring an ``exp(-large)`` activation destroys the
+           signal, which is why softmax's shift-invariance makes ``'normalized'``
+           depend only on RELATIVE distances and therefore immune. This is a
+           property of the mode, not a remaining bug, and is pinned by
+           ``test_basis_mode_fit_is_slow_at_realistic_dimension``
+           (``xfail(strict=True)``).
+
+           If you need this layer to train efficiently, use ``'normalized'``.
 
         ``'normalized'`` returns the Normalized RBF (NRBF) activations
         ``phi_k / sum_j phi_j``, which sum to 1.0 along the last axis. The
@@ -180,7 +216,7 @@ class RBFLayer(keras.layers.Layer):
     def __init__(
         self,
         units: int,
-        gamma_init: float = 1.0,
+        gamma_init: Optional[float] = None,
         repulsion_strength: float = 0.1,
         min_center_distance: float = 1.0,
         center_initializer: Union[str, keras.initializers.Initializer] = 'uniform',
@@ -196,7 +232,7 @@ class RBFLayer(keras.layers.Layer):
 
         if units <= 0:
             raise ValueError(f"units must be positive, got {units}")
-        if gamma_init <= 0:
+        if gamma_init is not None and gamma_init <= 0:
             raise ValueError(f"gamma_init must be positive, got {gamma_init}")
         if repulsion_strength < 0:
             raise ValueError(f"repulsion_strength must be non-negative, got {repulsion_strength}")
@@ -226,6 +262,8 @@ class RBFLayer(keras.layers.Layer):
         self.centers: Optional[keras.Variable] = None
         self.gamma_raw: Optional[keras.Variable] = None
         self._feature_dim: int = 0
+        # Build-time state, NOT a constructor parameter: never enters get_config().
+        self._gamma_init_resolved: Optional[float] = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """Create layer weights (centers and raw gamma values).
@@ -242,6 +280,49 @@ class RBFLayer(keras.layers.Layer):
             raise ValueError("The last dimension of the input must be defined.")
 
         self._feature_dim = feature_dim
+
+        # DECISION plan-2026-07-20T175634-f3aca1ff/D-001: gamma's default MUST be
+        # resolved HERE, against the real feature dimension, and NOT in __init__.
+        # E[||x - c||^2] ~ D exactly for standardized input (measured ratio 1.00 at
+        # D = 4 / 128 / 1024), so a dimension-blind gamma makes the exponent
+        # dist_sq * gamma scale linearly in D; past D * gamma >~ 50 the 'basis' arm
+        # saturates and BOTH trainable weights receive gradient exactly 0.0 (D-012).
+        # Do NOT "simplify" any of the following:
+        #   - Do NOT move this into __init__ or default the kwarg to a float there.
+        #     D is not knowable before build(), so the whole fix disappears.
+        #   - Do NOT use 1/sqrt(D). The distance is SQUARED; the scale law is linear
+        #     in D, not in sqrt(D). 1/sqrt(D) still saturates at large D.
+        #   - Do NOT let this value reach get_config(). It is build-time state; a
+        #     D-dependent config would be non-portable across input shapes, and an
+        #     explicit float in an existing artifact must keep winning outright.
+        #   - Do NOT "fix" this by reshaping the 50.0 clip in call() instead. A soft
+        #     clamp is measurably INERT: at gamma_init=1.0 / D=128 the true float64
+        #     gradient is 7.28e-46, below float32's subnormal floor (~1.4e-45), so it
+        #     underflows to bit-identical exact 0.0 whatever the clamp's derivative.
+        #
+        # DECISION plan-2026-07-20T175634-f3aca1ff/D-008: the default is PER-MODE,
+        # and collapsing it to one dimension-aware value for both arms is a REGRESSION,
+        # not a simplification. The two arms consume the exponent differently:
+        #   - 'basis' returns exp(-gamma*d2), an ABSOLUTE magnitude. It needs
+        #     gamma*d2 = O(1), hence gamma ~ 1/D.
+        #   - 'normalized' is a softmax over -gamma*d2 and is SHIFT-INVARIANT, so only
+        #     the BETWEEN-UNIT logit gaps carry signal. Those gaps are set by the
+        #     center spread, not by D, so dividing gamma by D shrinks them ~D-fold and
+        #     drives the softmax toward uniform 1/units -- the same dead-layer output
+        #     D-008/plan-...-7de371a1 removed, arrived at from the opposite direction.
+        #     Measured at D=128: mean per-sample logit spread 1.767 (gamma=1.0) vs
+        #     0.0149 (gamma=1/128), and the end-to-end fit regresses from loss 0.176
+        #     to 0.692 (chance). Caught by
+        #     ::test_normalized_model_learns_at_realistic_dimension.
+        # So 'normalized' keeps the historical 1.0 and is byte-identical to its
+        # pre-change behavior at every configuration. Do NOT "unify" these branches.
+        # See decisions.md D-001 / D-008 and the D-002 anchor at the clip in call().
+        if self.gamma_init is not None:
+            self._gamma_init_resolved = self.gamma_init
+        elif self.output_mode == 'normalized':
+            self._gamma_init_resolved = 1.0
+        else:
+            self._gamma_init_resolved = 1.0 / float(self._feature_dim)
 
         # Mixed-precision: autocast=False keeps centers in variable_dtype (float32) inside
         # call() under a mixed_float16 policy, so the distance / exp math runs in float32
@@ -260,11 +341,11 @@ class RBFLayer(keras.layers.Layer):
         # Calculate inverse softplus for initialization
         # softplus(x) = log(1 + exp(x)) -> x = log(exp(y) - 1)
         # We use numpy for stable constant calculation
-        if self.gamma_init > 20.0:
+        if self._gamma_init_resolved > 20.0:
             # For large values, softplus is approximately linear
-            init_val = self.gamma_init
+            init_val = self._gamma_init_resolved
         else:
-            init_val = np.log(np.exp(self.gamma_init) - 1.0)
+            init_val = np.log(np.exp(self._gamma_init_resolved) - 1.0)
 
         self.gamma_raw = self.add_weight(
             name='gamma_raw',
@@ -402,29 +483,36 @@ class RBFLayer(keras.layers.Layer):
         if self.output_mode == 'normalized':
             output = ops.softmax(-scaled_dist_sq, axis=-1)
         else:
-            # DECISION plan-2026-07-20T160907-7de371a1/D-012: this 50.0 clip is a
-            # KNOWN DEFECT, knowingly left in place. Do NOT read it as protection.
-            # It bounds the exponent so ops.exp cannot underflow -- and it is also
-            # the SAME structural zero-gradient plateau that D-002/D-008 removed
-            # from the 'normalized' arm directly above. ops.minimum passes zero
-            # gradient through its saturated branch, so once D * gamma >~ 50 (i.e.
-            # at ORDINARY feature dimensions, since E[||x - c||^2] ~ D) every unit
-            # pins to the constant exp(-50) = 1.929e-22 and both `centers` and
-            # `gamma_raw` receive gradient EXACTLY 0.0. Measured, stock defaults,
-            # normal(0,1) input: gradmax 0.0/0.0 at D in {64, 128, 256}; a 40-epoch
-            # binary fit at D=128 sits at chance loss 0.693 with d|gamma_raw| = 0.0.
+            # DECISION plan-2026-07-20T175634-f3aca1ff/D-001: THE 50.0 CLIP STAYS,
+            # AND IT IS NOT THE DEFECT. It supersedes the former D-012 anchor here.
+            # (Anchored to D-001, whose Reasoning holds the retain-the-clip and
+            # soft-clamp-is-inert measurements. plan.md step 3 said "D-002"; that was
+            # a drafting slip copied from the sibling 7de371a1/D-002 anchor 30 lines
+            # above -- THIS plan's D-002 is the unrelated output_mode-swap rejection.)
             #
-            # Why it is still here: 'basis' is the DEFAULT mode of a shipped layer
-            # and this behavior is long-standing and byte-identical to what shipped
-            # before D-008 -- so removing the clip is a production behavior change
-            # to every existing caller, not a bug fix, and it needs its own plan,
-            # pre-mortem and review. Do NOT "just" delete the minimum() here.
+            # History: D-012 filed this clip as the cause of 'basis' being dead at
+            # ordinary D (gradmax exactly 0.0/0.0 at D >= 64, output pinned to the
+            # constant exp(-50) = 1.929e-22). That diagnosis was wrong about the
+            # mechanism. The cause was the DIMENSION-BLIND gamma default; the clip
+            # was only where the symptom surfaced. With gamma resolving to 1/D in
+            # build(), the exponent stays O(1) and this minimum() no longer engages
+            # at stock defaults -- measured gradmax 3.0e-04 / 3.3e-02 at D=128.
             #
-            # It is pinned, not merely documented: see
+            # Do NOT delete the minimum(): it is the underflow floor. Unclipped,
+            # exp(-128) underflows float32 to EXACT 0.0, which is strictly worse
+            # than exp(-50) -- that was already disproven under D-012.
+            #
+            # Do NOT replace it with a soft/smooth clamp either. That is measurably
+            # INERT, not merely unnecessary: in the saturated regime the true
+            # float64 gradient is 7.28e-46, an order of magnitude BELOW float32's
+            # subnormal floor (~1.4e-45), so it underflows to bit-identical exact
+            # 0.0 regardless of the clamp's derivative shape. Squaring an exp(-~50)
+            # output is what kills the gradient, not minimum()'s saturated branch.
+            #
+            # The live guard against regression is the D-scaled gamma_init in
+            # build() (see the D-001 anchor there), pinned by
             # tests/test_layers/test_mixtures/test_radial_basis_function.py
-            # ::test_basis_mode_is_dead_at_realistic_dimension, an
-            # xfail(strict=True) end-to-end training test that FAILS the moment
-            # this is fixed. When you fix it, that test is your checklist.
+            # ::test_basis_mode_gradients_are_live_at_realistic_dimension.
             output = ops.exp(-ops.minimum(scaled_dist_sq, 50.0))
 
         # DECISION plan_2026-06-14_5e80bd3e/D-001: gate on a graph-safe training factor so
