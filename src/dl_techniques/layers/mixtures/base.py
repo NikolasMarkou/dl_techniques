@@ -233,7 +233,7 @@ class BaseMixtureLayer(_ClusterAxisMixin, keras.layers.Layer, ABC):
         self.non_feature_dims: Optional[List[int]] = None
         self.original_shape: Optional[List[int]] = None
 
-    # DECISION plan-2026-07-20-e03557c8/D-007: this property is a pure NAMING seam and
+    # DECISION plan-2026-07-20T141712-e03557c8/D-007: this property is a pure NAMING seam and
     # nothing more. GMMLayer calls its prototype count `n_components`, KMeansLayer calls
     # it `n_clusters`; that is the ONLY way the two copies of compute_output_shape and
     # _reshape_output ever differed (4 code lines). Do NOT "simplify" this by renaming

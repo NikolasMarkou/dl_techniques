@@ -262,7 +262,7 @@ class GMMLayer(BaseMixtureLayer):
         self.mean_regularizer = keras.regularizers.get(mean_regularizer)
         self.random_seed = random_seed
 
-        # DECISION plan-2026-07-20-e03557c8/D-002: announce the reframed regularizer
+        # DECISION plan-2026-07-20T141712-e03557c8/D-002: announce the reframed regularizer
         # semantics instead of silently changing a default. Do NOT "fix" this by making
         # isometric_regularizer_strength default to 0.0 when covariance_type is non-
         # diagonal -- deriving one kwarg's default from another kwarg's VALUE is the
@@ -553,7 +553,7 @@ class GMMLayer(BaseMixtureLayer):
         - ``(x-mu)^T Sigma_k^-1 (x-mu) = z^T (x-mu) - ||M_k^-1/2 U_k^T z||^2``,
           where ``z = (x-mu) / d_k``.
 
-        # DECISION plan-2026-07-20-e03557c8/D-003: derive BOTH quantities from a single
+        # DECISION plan-2026-07-20T141712-e03557c8/D-003: derive BOTH quantities from a single
         # keras.ops.cholesky(M_k). Do NOT switch this to keras.ops.slogdet: (a) slogdet's
         # `sign` output silently yields a plausible-but-wrong log-density if Sigma is ever
         # non-PD, and (b) its batching over a leading axis works empirically here while its
@@ -659,7 +659,7 @@ class GMMLayer(BaseMixtureLayer):
         therefore does not remove anisotropy from the model; it *relocates* it into
         ``U_k``, which is precisely the term with the capacity to represent it.
 
-        # DECISION plan-2026-07-20-e03557c8/D-002: the loss BODY is deliberately
+        # DECISION plan-2026-07-20T141712-e03557c8/D-002: the loss BODY is deliberately
         # identical under both modes -- only this docstring and the __init__ notice
         # distinguish them. Do NOT "fix" the low-rank case by adding a term over
         # U_k's Gram spectrum (the semantically complete Option B): that needs an
@@ -886,7 +886,7 @@ class GMMLayer(BaseMixtureLayer):
         self.log_variances.assign(keras.ops.zeros_like(self.log_variances))
         self.mixture_logits.assign(keras.ops.zeros_like(self.mixture_logits))
 
-        # DECISION plan-2026-07-20-e03557c8/D-005: re-RUN factor_initializer here.
+        # DECISION plan-2026-07-20T141712-e03557c8/D-005: re-RUN factor_initializer here.
         # Do NOT "simplify" this to zeros_like(self.covariance_factors) to match the two
         # lines above. U = 0 makes the Woodbury correction quadratic in U about the
         # origin, so dL/dU vanishes identically and the weight is permanently untrainable
