@@ -462,12 +462,24 @@ class TestGMMLayerLowRankCovariance:
             )
         return out
 
-    def test_low_rank_matches_dense_reference(self) -> None:
+    @pytest.mark.parametrize("n_components,feature_dims,rank,batch", [
+        (3, 6, 2, 16),    # original SC4 shape
+        (2, 11, 4, 9),    # gap 1: odd D, larger R, K != R, batch != D
+    ])
+    def test_low_rank_matches_dense_reference(
+        self, n_components: int, feature_dims: int, rank: int, batch: int
+    ) -> None:
         """SC4 / A2: the Woodbury path must equal an explicit dense inverse + logdet.
 
         This is the gate for the whole low-rank feature.
+
+        Two shapes, deliberately chosen so no two axis lengths coincide in the second
+        case. A transposed or mis-broadcast axis in the batched ``solve_triangular``
+        call can stay silent when ``K``, ``D``, ``R`` and ``batch`` happen to be
+        compatible; ``(K=2, D=11, R=4, batch=9)`` shares no dimension with any other,
+        so a swapped axis raises or diverges instead of quietly returning a plausible
+        density.
         """
-        n_components, feature_dims, rank, batch = 3, 6, 2, 16
         layer = GMMLayer(
             n_components=n_components,
             covariance_type="low_rank",
@@ -709,8 +721,10 @@ class TestGMMLayerLowRankTraining:
     def test_isometric_regularizer_does_not_suppress_factor_gradients(self) -> None:
         """Pre-Mortem #2 / D-002 falsification check -- NOT a routine assertion.
 
-        D-002 chose Option D (reframe the isometric regularizer as a PPCA-style prior on
-        the residual diagonal) over Option B (extend the loss to U's Gram spectrum). That
+        D-002 chose Option D (reframe the isometric regularizer as a prior on the
+        residual diagonal of the FACTOR-ANALYSIS form ``Sigma_k = diag(d_k) + U_k U_k^T``
+        -- not PPCA, which would require an isotropic ``d_k`` this layer never enforces)
+        over Option B (extend the loss to U's Gram spectrum). That
         choice is a falsifiable CLAIM: that the default-on regularizer complements the
         low-rank feature rather than fighting it. The pre-registered empirical form of
         "quietly fighting" is ``covariance_factors`` gradients suppressed by more than an
@@ -743,7 +757,7 @@ class TestGMMLayerLowRankTraining:
             f"covariance_factors gradient norm fell to {ratio:.4f}x the "
             f"strength=0.0 control (< 0.1x = more than an order of magnitude). "
             f"Pre-Mortem #2 has FIRED: the isometric regularizer is quietly fighting the "
-            f"low-rank feature, which falsifies D-002's PPCA reframe. Do NOT tune the "
+            f"low-rank feature, which falsifies D-002's factor-analysis reframe. Do NOT tune the "
             f"strength or relax this bound -- escalate D-002 to Option B (extend the "
             f"loss to U's Gram spectrum)."
         )
@@ -868,4 +882,351 @@ class TestGMMLayerLowRankReset:
             np.zeros_like(ops.convert_to_numpy(layer.log_variances)),
             atol=1e-7,
         )
-        assert layer.covariance_factors is None
+
+    def test_gradients_still_flow_after_reset(self) -> None:
+        """D-005's ACTUAL claim: the post-reset weight is still TRAINABLE.
+
+        ``test_reset_reinitializes_covariance_factors`` asserts the values changed and
+        are non-zero. Neither is what D-005 is about. The rejected fix (zeroing ``U``)
+        also "changes" the values, and "non-zero" is a proxy for trainability, not a
+        measurement of it -- a hypothetical reset that produced some other degenerate
+        ``U`` would pass both assertions and still be dead. This test measures the
+        property directly: run a fresh ``GradientTape`` AFTER the reset and require a
+        non-``None``, non-zero gradient. A zeroing reset fails here (``dL/dU`` vanishes
+        identically at ``U = 0``, since the Woodbury correction is quadratic about the
+        origin), which is exactly the failure D-005 exists to prevent.
+        """
+        import tensorflow as tf
+
+        n_components, feature_dims, rank, batch = 3, 6, 2, 12
+        rng = np.random.RandomState(41)
+        x = rng.normal(size=(batch, feature_dims)).astype("float32")
+        target = rng.uniform(size=(batch, n_components)).astype("float32")
+
+        layer = GMMLayer(
+            n_components=n_components,
+            covariance_type="low_rank",
+            covariance_rank=rank,
+            mean_initializer="glorot_normal",
+        )
+        layer(x)  # build
+        layer.reset_parameters()
+
+        with tf.GradientTape() as tape:
+            out = layer(x, training=True)
+            loss = tf.reduce_mean(tf.square(out - target))
+            if layer.losses:
+                loss = loss + tf.add_n(layer.losses)
+        grad = tape.gradient(loss, layer.covariance_factors)
+
+        assert grad is not None, (
+            "covariance_factors has a None gradient after reset_parameters() -- the "
+            "reset disconnected the weight from the loss (D-005)"
+        )
+        grad_np = np.asarray(ops.convert_to_numpy(grad), dtype=np.float64)
+        assert np.all(np.isfinite(grad_np))
+        assert np.abs(grad_np).max() > 0.0, (
+            "covariance_factors gradient is identically zero after reset_parameters(). "
+            "The reset produced a DEAD U (this is precisely what zeroing would do). "
+            "reset_parameters() must re-run factor_initializer (D-005)."
+        )
+
+
+# ------------------------------------------------------- low-rank coverage gaps
+# Added at REFLECT: the iteration's suite was green while under-testing these
+# interactions. Each test below targets one gap named by the iteration-1 review.
+
+class TestGMMLayerLowRankInteractions:
+    """Interactions the low-rank path was never exercised under."""
+
+    def test_low_rank_multi_axis_cluster_axis(self) -> None:
+        """Gap 2: ``low_rank`` under a MULTI-AXIS ``cluster_axis``, end to end.
+
+        These two features had zero joint coverage, and the base-class extraction moved
+        exactly the seam that couples them: the low-rank branch of ``build()`` sizes
+        ``U_k`` from ``feature_dims``, which is derived from the normalized
+        ``cluster_axis``, while ``compute_output_shape`` re-derives its own axes from the
+        PRE-build ``_cluster_axis_arg``. If those two derivations ever disagree, the
+        single-axis tests cannot see it.
+
+        This test covers the parts of that seam that are currently correct: the
+        pre-build and post-build shape contract, ``feature_dims``, and the sizing of
+        ``U_k``. The VALUE-level contract is broken by a pre-existing defect in the
+        shared multi-axis output reshape and is pinned separately by
+        ``test_multi_axis_output_layout_is_scrambled`` below.
+        """
+        n_components, rank = 4, 2
+        shape = (4, 5, 7, 3)                # cluster over axes 1 and 2 -> D = 35
+        feature_dims = shape[1] * shape[2]
+        x = np.random.RandomState(51).normal(size=shape).astype("float32")
+
+        layer = GMMLayer(
+            n_components=n_components,
+            covariance_type="low_rank",
+            covariance_rank=rank,
+            cluster_axis=[1, 2],
+            mean_initializer="glorot_normal",
+            log_variance_initializer="glorot_normal",
+        )
+
+        # Shape contract must hold BEFORE build (functional-API tracing path)...
+        expected_shape = (shape[0], n_components, shape[3])
+        assert layer.compute_output_shape(shape) == expected_shape
+
+        y = layer(x)
+        assert tuple(y.shape) == expected_shape
+        # ...and again after build, where cluster_axis has been mutated in place.
+        assert layer.compute_output_shape(shape) == expected_shape
+
+        assert layer.feature_dims == feature_dims
+        assert tuple(layer.covariance_factors.shape) == (
+            n_components, feature_dims, rank
+        ), "U_k was sized from the wrong feature_dims under a multi-axis cluster_axis"
+
+        y_np = np.asarray(ops.convert_to_numpy(y), dtype=np.float64)
+        assert np.all(np.isfinite(y_np))
+        assert np.all(y_np >= 0.0)
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "PRE-EXISTING DEFECT, not introduced by the low-rank work and not specific "
+            "to it. Under a multi-axis cluster_axis, _reshape_output (base.py, lifted "
+            "byte-identically from gmm.py/kmeans.py at bf953d6c) builds the correct "
+            "output SHAPE but applies a bare reshape to a buffer laid out "
+            "(batch, non_feature, K). The declared axis order is (batch, K, "
+            "non_feature), so the two trailing axes are swapped -- and because it is a "
+            "reshape rather than a transpose, the values are outright scrambled "
+            "whenever K != non_feature (they merely transpose when K == non_feature, "
+            "which is why every existing multi-axis test and the iteration-1 reviewer's "
+            "spot-check missed it: all used K == non_feature). Confirmed present at "
+            "baseline bf953d6c and shared with KMeansLayer. Fixing it is a production "
+            "behavior change and is out of scope for this step; xfail(strict) so this "
+            "flips to a FAILURE the moment someone repairs it."
+        ),
+    )
+    def test_multi_axis_output_layout_is_scrambled(self) -> None:
+        """Gap 2 (value contract): multi-axis responsibilities must be correctly placed.
+
+        The oracle is an INDEPENDENT reimplementation of the flatten/unflatten, not a
+        self-consistency check: the same data is transposed and flattened by hand and
+        fed to a plain 2-D low-rank layer carrying byte-identical weights.
+
+        ``n_components=4`` against a trailing non-feature dim of 3 is deliberate. With
+        ``K == non_feature`` the defect degenerates into a pure transposition and can
+        hide behind symmetric test shapes; with ``K != non_feature`` the reshape mixes
+        the axes outright, which the softmax check below exposes directly --
+        responsibilities stop summing to 1 along ANY axis.
+        """
+        n_components, rank = 4, 2
+        shape = (4, 5, 7, 3)
+        feature_dims = shape[1] * shape[2]
+        x = np.random.RandomState(51).normal(size=shape).astype("float32")
+
+        common: Dict[str, Any] = {
+            "n_components": n_components,
+            "covariance_type": "low_rank",
+            "covariance_rank": rank,
+            "mean_initializer": "glorot_normal",
+            "log_variance_initializer": "glorot_normal",
+        }
+        layer = GMMLayer(cluster_axis=[1, 2], **common)
+        y = np.asarray(ops.convert_to_numpy(layer(x)), dtype=np.float64)
+
+        # The cheapest independent symptom: axis 1 is DECLARED to be the component
+        # axis, so responsibilities must sum to 1 along it.
+        np.testing.assert_allclose(
+            y.sum(axis=1), 1.0, rtol=1e-5, atol=1e-5,
+            err_msg=(
+                "multi-axis responsibilities do not sum to 1 along the declared "
+                "component axis -- the output buffer is mis-laid-out"
+            ),
+        )
+
+        flat = GMMLayer(**common)
+        x_flat = np.transpose(x, (0, 3, 1, 2)).reshape(-1, feature_dims)
+        flat(x_flat)  # build
+        for name in _SHARED_PARAM_NAMES + ("covariance_factors",):
+            getattr(flat, name).assign(ops.convert_to_numpy(getattr(layer, name)))
+
+        reference = np.asarray(ops.convert_to_numpy(flat(x_flat)), dtype=np.float64)
+        # (batch * non_feature, K) -> (batch, non_feature, K) -> (batch, K, non_feature)
+        reference = np.transpose(
+            reference.reshape(shape[0], shape[3], n_components), (0, 2, 1)
+        )
+
+        np.testing.assert_allclose(
+            y, reference, rtol=1e-6, atol=1e-6,
+            err_msg=(
+                "multi-axis low-rank responsibilities disagree with a hand-flattened "
+                "2-D reference: the cluster-axis transpose/regroup contract is wrong"
+            ),
+        )
+
+    def test_low_rank_mixed_float16_forward(self) -> None:
+        """Gap 3: ``low_rank`` under ``mixed_float16``.
+
+        ``test_mixed_float16_forward`` covers the diagonal path only, while the plan
+        flags ``cholesky`` / ``solve_triangular`` as the MORE fp16-fragile ops. The
+        layer's defense is that it casts inputs to ``variable_dtype`` and runs the whole
+        density in float32, so the only lossy step should be the final cast of the
+        responsibilities to float16.
+
+        That is a testable claim with a principled bound rather than a tuned one: if the
+        defense holds, the fp16 output must agree with an identically-weighted float32
+        layer to within float16 quantization of values in ``[0, 1]`` (1 ulp at 1.0 is
+        ``2**-10`` = 9.77e-4). If any part of the Woodbury/Cholesky path silently ran in
+        half precision, the error would be orders of magnitude larger than the cast
+        bound and this fails. Measured deviation at the time of writing: 3.4e-04.
+        """
+        float16_ulp_at_one = 2.0 ** -10  # 9.766e-04
+
+        x = np.random.RandomState(61).normal(size=(8, 16)).astype("float32")
+        layer_kwargs: Dict[str, Any] = {
+            "n_components": 4,
+            "covariance_type": "low_rank",
+            "covariance_rank": 3,
+            "mean_initializer": "glorot_normal",
+            "log_variance_initializer": "glorot_normal",
+        }
+
+        original_policy = keras.mixed_precision.global_policy()
+        try:
+            keras.mixed_precision.set_global_policy("mixed_float16")
+            half = GMMLayer(**layer_kwargs)
+            y_half = half(x)
+            assert keras.backend.standardize_dtype(y_half.dtype) == "float16"
+            # Weights must stay float32 (autocast=False) -- including the new one.
+            for name in _SHARED_PARAM_NAMES + ("covariance_factors",):
+                assert keras.backend.standardize_dtype(
+                    getattr(half, name).dtype
+                ) == "float32", f"{name} was created in the compute dtype, not float32"
+            y_half_np = np.asarray(ops.convert_to_numpy(y_half), dtype=np.float64)
+            assert np.all(np.isfinite(y_half_np)), (
+                "low-rank forward produced NaN/Inf under mixed_float16"
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(original_policy)
+
+        full = GMMLayer(**layer_kwargs)
+        full(x)  # build under the restored float32 policy
+        for name in _SHARED_PARAM_NAMES + ("covariance_factors",):
+            getattr(full, name).assign(ops.convert_to_numpy(getattr(half, name)))
+        y_full_np = np.asarray(ops.convert_to_numpy(full(x)), dtype=np.float64)
+
+        max_deviation = float(np.abs(y_half_np - y_full_np).max())
+        assert max_deviation <= float16_ulp_at_one, (
+            f"mixed_float16 low-rank output deviates from the float32 reference by "
+            f"{max_deviation:.3e}, above one float16 ulp at 1.0 ({float16_ulp_at_one:.3e}). "
+            f"That is larger than an output-cast can explain -- suspect the Cholesky / "
+            f"solve_triangular path running in half precision. Do NOT raise this bound."
+        )
+
+    def test_covariance_rank_at_or_above_feature_dims(self, caplog) -> None:
+        """Gap 5: ``covariance_rank >= feature_dims`` is legal-but-uneconomical.
+
+        ``build()`` warns and proceeds. Both halves are asserted: the warning must
+        actually reach the log (it is the user's only signal that they are paying for a
+        parameterization with no compression benefit), and the math must stay correct --
+        an over-ranked ``U`` makes the ``(R, R)`` capacitance matrix rank-deficient in
+        its ``U^T diag(1/d) U`` term, so the ``I_R +`` that guarantees positive
+        definiteness is doing all the work. If that guarantee were wrong, ``cholesky``
+        would return NaN here rather than raise, so finiteness is the real assertion.
+        """
+        import logging
+
+        n_components, feature_dims, rank = 3, 4, 8
+        x = np.random.RandomState(71).normal(
+            size=(6, feature_dims)
+        ).astype("float32")
+
+        with caplog.at_level(logging.WARNING, logger="dl"):
+            layer = GMMLayer(
+                n_components=n_components,
+                covariance_type="low_rank",
+                covariance_rank=rank,
+                mean_initializer="glorot_normal",
+                log_variance_initializer="glorot_normal",
+            )
+            y = layer(x)
+
+        assert any(
+            ">= feature_dims" in record.message
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+        ), (
+            f"covariance_rank={rank} >= feature_dims={feature_dims} must emit a "
+            f"logger.warning; the user has no other signal that the low-rank "
+            f"parameterization is buying nothing here"
+        )
+
+        assert tuple(layer.covariance_factors.shape) == (
+            n_components, feature_dims, rank
+        )
+        assert tuple(y.shape) == (6, n_components)
+        y_np = np.asarray(ops.convert_to_numpy(y), dtype=np.float64)
+        assert np.all(np.isfinite(y_np)), (
+            "over-ranked low-rank covariance produced NaN/Inf -- the I_R + PSD "
+            "positive-definiteness guarantee (invariant I6) does not hold"
+        )
+        np.testing.assert_allclose(y_np.sum(axis=-1), 1.0, rtol=1e-6, atol=1e-6)
+
+    def test_trained_weights_survive_save_load(self) -> None:
+        """Gap 6: the guide-§8.2 round-trip on TRAINED weights, not initializer output.
+
+        ``test_model_save_load_low_rank`` saves a freshly-built layer. Fresh weights are
+        the one case a restore bug can hide in: a loader that silently re-runs the
+        initializers instead of restoring the checkpoint, or that mixes up two weights of
+        compatible shape, can still reproduce predictions when every weight is close to
+        its initialized value. Training first breaks that symmetry -- the four weights
+        are then mutually distinguishable and far from any initializer's output, so a
+        mis-restore shows up as a numerical difference.
+        """
+        n_components, feature_dims, rank = 3, 8, 2
+        rng = np.random.RandomState(81)
+        x = rng.normal(size=(24, feature_dims)).astype("float32")
+        target = rng.uniform(size=(24, n_components)).astype("float32")
+
+        inp = keras.Input(shape=(feature_dims,))
+        gmm = GMMLayer(
+            n_components=n_components,
+            covariance_type="low_rank",
+            covariance_rank=rank,
+            factor_initializer="he_normal",
+            mean_initializer="glorot_normal",
+            name="gmm",
+        )
+        model = keras.Model(inp, gmm(inp))
+
+        before = {
+            name: np.array(ops.convert_to_numpy(getattr(gmm, name)))
+            for name in _SHARED_PARAM_NAMES + ("covariance_factors",)
+        }
+
+        model.compile(optimizer=keras.optimizers.Adam(0.05), loss="mse")
+        model.fit(x, target, epochs=2, batch_size=8, verbose=0)
+
+        # The premise of this test: every weight must actually have MOVED, or it
+        # degenerates into the fresh-weights round-trip it is meant to strengthen.
+        for name, old in before.items():
+            new = np.asarray(ops.convert_to_numpy(getattr(gmm, name)))
+            assert not np.allclose(new, old, rtol=1e-4, atol=1e-4), (
+                f"'{name}' did not move during training, so this round-trip is no "
+                f"stronger than the fresh-weights one"
+            )
+
+        y0 = model(x)
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "gmm_trained.keras")
+            model.save(path)
+            loaded = keras.models.load_model(path)
+
+        np.testing.assert_allclose(
+            ops.convert_to_numpy(y0),
+            ops.convert_to_numpy(loaded(x)),
+            rtol=1e-6, atol=1e-6,
+            err_msg=(
+                "trained low-rank weights did not survive a .keras round-trip "
+                "(the freshly-built round-trip cannot catch this)"
+            ),
+        )

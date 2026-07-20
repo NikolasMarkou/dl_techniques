@@ -180,10 +180,13 @@ class GMMLayer(BaseMixtureLayer):
     :type random_seed: Optional[int]
     :param covariance_type: Covariance parameterization. ``'diagonal'`` (the default)
         uses ``Sigma_k = diag(var_k)``, exactly as before. ``'low_rank'`` uses the
-        low-rank-plus-diagonal (probabilistic-PCA) form
+        low-rank-plus-diagonal **factor-analysis** form
         ``Sigma_k = diag(var_k) + U_k U_k^T``, where ``U_k`` is the additional
         ``covariance_factors`` weight of shape ``(K, D, covariance_rank)``. Only
-        ``'low_rank'`` can represent correlated features.
+        ``'low_rank'`` can represent correlated features. Note the diagonal
+        ``var_k`` is free per-dimension, which is what makes this factor analysis
+        rather than probabilistic PCA (PPCA is the constrained special case
+        ``var_k = sigma_k^2 * 1``, which this layer does not enforce).
     :type covariance_type: str
     :param covariance_rank: Rank ``R`` of the low-rank factor ``U_k``. Must be a
         positive integer. Ignored (but still serialized) when
@@ -264,16 +267,20 @@ class GMMLayer(BaseMixtureLayer):
         # isometric_regularizer_strength default to 0.0 when covariance_type is non-
         # diagonal -- deriving one kwarg's default from another kwarg's VALUE is the
         # exact untraceable-bug shape rejected as Option C. Severity is info, not
-        # warning: under the PPCA reading (Sigma = diag(d) + U U^T) the combination is
-        # legitimate, so warning here would cry wolf on a default-valued config.
+        # warning: under the factor-analysis reading (Sigma = diag(d) + U U^T) the
+        # combination is legitimate -- the diagonal/low-rank split is non-identifiable,
+        # so penalizing the diagonal's anisotropy pushes anisotropy into U, where the
+        # model can represent it. Warning here would cry wolf on a default-valued config.
         if self.covariance_type != 'diagonal' and self.isometric_regularizer_strength > 0:
             logger.info(
                 f"GMMLayer: covariance_type='{self.covariance_type}' with "
                 f"isometric_regularizer_strength={self.isometric_regularizer_strength} > 0. "
                 "The isometric-kernel regularizer reads log_variances only, so under a "
                 "non-diagonal covariance it regularizes the RESIDUAL DIAGONAL toward "
-                "isotropy (a PPCA/factor-analysis-style noise-floor prior), NOT the total "
-                "covariance -- the low-rank factor stays free to carry anisotropy. "
+                "isotropy, NOT the total covariance -- the low-rank factor stays free to "
+                "carry anisotropy. Under the factor-analysis structure "
+                "Sigma = diag(d) + U U^T the diagonal/low-rank split is non-identifiable, "
+                "so this pushes anisotropy into U by construction rather than removing it. "
                 "Pass isometric_regularizer_strength=0.0 to disable it entirely."
             )
 
@@ -535,7 +542,9 @@ class GMMLayer(BaseMixtureLayer):
     def _log_gaussian_density_low_rank(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """Compute low-rank-plus-diagonal Gaussian log-densities under each component.
 
-        Implements ``Sigma_k = diag(d_k) + U_k U_k^T`` via the matrix determinant
+        Implements the factor-analysis covariance ``Sigma_k = diag(d_k) + U_k U_k^T``
+        (``d_k`` free per-dimension, NOT the isotropic PPCA special case
+        ``d_k = sigma_k^2 * 1``) via the matrix determinant
         lemma and the Woodbury identity, so nothing of size ``(D, D)`` is ever
         materialized. With ``M_k = I_R + U_k^T diag(1/d_k) U_k`` (the ``(R, R)``
         capacitance matrix):
@@ -638,6 +647,18 @@ class GMMLayer(BaseMixtureLayer):
           isotropy and leaves ``U_k`` free to carry anisotropy. Total-covariance
           anisotropy is NOT regularized under this mode.
 
+        Under ``'low_rank'`` the structure is **factor analysis** -- ``d_k`` is a free
+        per-dimension diagonal, not a scalar multiple of the identity. (Probabilistic
+        PCA is the constrained special case ``d_k = sigma_k^2 * 1``; this layer cannot
+        produce it, because this loss only *softly* penalizes the dispersion of
+        ``log d_k`` and never enforces isotropy.) That distinction is what makes the
+        regularizer and the low-rank factor complementary **by construction** rather
+        than by analogy: in factor analysis the split between the diagonal term and the
+        low-rank term is **non-identifiable** -- the same ``Sigma_k`` can be expressed
+        with anisotropy residing in either term. Penalizing the diagonal's anisotropy
+        therefore does not remove anisotropy from the model; it *relocates* it into
+        ``U_k``, which is precisely the term with the capacity to represent it.
+
         # DECISION plan-2026-07-20-e03557c8/D-002: the loss BODY is deliberately
         # identical under both modes -- only this docstring and the __init__ notice
         # distinguish them. Do NOT "fix" the low-rank case by adding a term over
@@ -645,14 +666,21 @@ class GMMLayer(BaseMixtureLayer):
         # eigendecomposition or SVD per component per step, a new numerical-stability
         # surface, and a second coefficient -- a permanent complexity charge levied to
         # solve a problem no caller has. Do NOT instead zero the default strength when
-        # covariance_type is non-diagonal (Option C); see the __init__ anchor. Under
-        # the low-rank reading this is exactly the PPCA / factor-analysis structure
-        # (Sigma = sigma^2 I + U U^T), where an isotropic noise floor plus a low-rank
-        # signal subspace is the intended model -- so the regularizer COMPLEMENTS the
-        # feature rather than fighting it. That claim is falsifiable and is tested:
-        # if covariance_factors gradients are suppressed by more than an order of
-        # magnitude versus a strength=0.0 control, this reframe is wrong and Option B
-        # is the escalation path.
+        # covariance_type is non-diagonal (Option C); see the __init__ anchor. Do NOT
+        # describe this structure as PPCA (Sigma = sigma^2 I + U U^T) -- that was the
+        # original, WRONG justification, corrected at step 6. d_k is free per-dimension,
+        # so the family is FACTOR ANALYSIS; PPCA is the isotropic-diagonal special case
+        # this layer never reaches, since the loss only softly penalizes dispersion of
+        # log d_k at default strength 0.01. The complementarity argument does not rest
+        # on the PPCA analogy and survives without it: in factor analysis the
+        # diagonal/low-rank split is non-identifiable, so penalizing the diagonal's
+        # anisotropy PUSHES anisotropy into U rather than removing it from the model.
+        # Complementary by construction, not by resemblance to a related model.
+        # NOTE the pre-registered falsification (covariance_factors gradients suppressed
+        # >10x versus a strength=0.0 control) is TAUTOLOGICAL and cannot fire: this loss
+        # reads log_variances only, so d(iso)/dU is a structural zero. See D-006. The
+        # standing check is a regression guard against a future Option-B edit, NOT
+        # evidence for this reframe.
 
         :return: Scalar regularization loss.
         :rtype: keras.KerasTensor
