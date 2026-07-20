@@ -654,7 +654,8 @@ class TestKMeansLayerIntegration:
             basic_config: Basic layer configuration
         """
         model = keras.Sequential([
-            keras.layers.Dense(128, activation='relu', input_shape=(64,)),
+            keras.layers.Input(shape=(64,)),
+            keras.layers.Dense(128, activation='relu'),
             KMeansLayer(**basic_config),
             keras.layers.Dense(10, activation='softmax')
         ])
