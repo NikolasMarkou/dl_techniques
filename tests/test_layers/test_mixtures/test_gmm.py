@@ -397,3 +397,92 @@ class TestGMMLayerGraphMode:
             assert keras.backend.standardize_dtype(layer.means.dtype) == "float32"
         finally:
             keras.mixed_precision.set_global_policy(original_policy)
+
+
+# ------------------------------------------------- low-rank covariance (oracle)
+
+class TestGMMLayerLowRankCovariance:
+    """Numerical gate for the low-rank-plus-diagonal covariance path.
+
+    The Woodbury/Cholesky implementation is fast but opaque: a wrong batched
+    ``solve_triangular`` convention does NOT raise, it silently returns a
+    plausible-but-wrong log-density that still trains. The dense oracle below is
+    the standing defense. If it fails, do NOT loosen its tolerance -- the
+    implementation is wrong, not the test.
+    """
+
+    @staticmethod
+    def _dense_reference_log_density(
+        x: np.ndarray, means: np.ndarray, variances: np.ndarray, factors: np.ndarray
+    ) -> np.ndarray:
+        """Reference log-density built from an EXPLICIT dense Sigma_k.
+
+        Deliberately naive: materializes ``Sigma_k = diag(d_k) + U_k U_k^T`` and uses
+        a dense inverse and a dense log-determinant. It shares no code path, no
+        identity, and no linear-algebra shortcut with the layer under test.
+
+        :param x: Inputs, shape ``(batch, D)``.
+        :param means: Component means, shape ``(K, D)``.
+        :param variances: Floored diagonals ``d_k``, shape ``(K, D)``.
+        :param factors: Low-rank factors ``U_k``, shape ``(K, D, R)``.
+        :return: Log-densities, shape ``(batch, K)``.
+        """
+        n_components, feature_dims = means.shape
+        out = np.empty((x.shape[0], n_components), dtype=np.float64)
+        for k in range(n_components):
+            sigma = np.diag(variances[k]) + factors[k] @ factors[k].T
+            sigma_inv = np.linalg.inv(sigma)
+            sign, logabsdet = np.linalg.slogdet(sigma)
+            assert sign > 0, f"reference Sigma_{k} must be positive definite"
+            diff = x - means[k]                                  # (batch, D)
+            quad = np.einsum('bi,ij,bj->b', diff, sigma_inv, diff)
+            out[:, k] = -0.5 * (
+                quad + logabsdet + feature_dims * np.log(2.0 * np.pi)
+            )
+        return out
+
+    def test_low_rank_matches_dense_reference(self) -> None:
+        """SC4 / A2: the Woodbury path must equal an explicit dense inverse + logdet.
+
+        This is the gate for the whole low-rank feature.
+        """
+        n_components, feature_dims, rank, batch = 3, 6, 2, 16
+        layer = GMMLayer(
+            n_components=n_components,
+            covariance_type="low_rank",
+            covariance_rank=rank,
+            mean_initializer="glorot_normal",
+            log_variance_initializer="glorot_normal",  # non-trivial, non-unit variances
+            variance_floor=1e-3,
+            random_seed=0,
+        )
+        np.random.seed(7)
+        x = np.random.normal(0, 1, (batch, feature_dims)).astype(np.float32)
+        layer(x)  # build
+
+        assert layer.covariance_factors is not None
+        assert tuple(layer.covariance_factors.shape) == (n_components, feature_dims, rank)
+
+        # Read the ACTUAL parameters back out; the reference must not assume defaults.
+        means = np.asarray(ops.convert_to_numpy(layer.means), dtype=np.float64)
+        variances = np.asarray(
+            ops.convert_to_numpy(layer.component_variances), dtype=np.float64
+        )
+        factors = np.asarray(
+            ops.convert_to_numpy(layer.covariance_factors), dtype=np.float64
+        )
+
+        actual = np.asarray(
+            ops.convert_to_numpy(layer._log_gaussian_density(ops.convert_to_tensor(x))),
+            dtype=np.float64,
+        )
+        expected = self._dense_reference_log_density(
+            x.astype(np.float64), means, variances, factors
+        )
+
+        max_deviation = np.abs(actual - expected).max()
+        assert max_deviation <= 1e-5, (
+            f"low-rank log-density deviates from the dense reference by "
+            f"{max_deviation:.3e} (> 1e-5). Do NOT loosen this tolerance -- suspect "
+            f"the batched solve_triangular RHS convention first."
+        )

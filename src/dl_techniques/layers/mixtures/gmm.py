@@ -78,6 +78,7 @@ from ...initializers.orthonormal_initializer import OrthonormalInitializer
 
 # Type aliases for better readability
 OutputMode = Literal['assignments', 'mixture']
+CovarianceType = Literal['diagonal', 'low_rank']
 TensorShape = Union[Tuple[int, ...], List[int]]
 Axis = Union[int, List[int]]
 
@@ -176,6 +177,22 @@ class GMMLayer(keras.layers.Layer):
     :type mean_regularizer: Optional[keras.regularizers.Regularizer]
     :param random_seed: Random seed for initialization. Defaults to None.
     :type random_seed: Optional[int]
+    :param covariance_type: Covariance parameterization. ``'diagonal'`` (the default)
+        uses ``Sigma_k = diag(var_k)``, exactly as before. ``'low_rank'`` uses the
+        low-rank-plus-diagonal (probabilistic-PCA) form
+        ``Sigma_k = diag(var_k) + U_k U_k^T``, where ``U_k`` is the additional
+        ``covariance_factors`` weight of shape ``(K, D, covariance_rank)``. Only
+        ``'low_rank'`` can represent correlated features.
+    :type covariance_type: str
+    :param covariance_rank: Rank ``R`` of the low-rank factor ``U_k``. Must be a
+        positive integer. Ignored (but still serialized) when
+        ``covariance_type='diagonal'``. Defaults to 1.
+    :type covariance_rank: int
+    :param factor_initializer: Initializer for the low-rank factor ``U_k``. Defaults
+        to ``'glorot_uniform'``. Note that ``'zeros'`` makes ``U_k`` a dead weight:
+        the Woodbury correction is quadratic in ``U_k`` near zero, so its gradient
+        vanishes identically at ``U_k = 0``.
+    :type factor_initializer: Union[str, keras.initializers.Initializer]
     :param kwargs: Additional keyword arguments for the Layer base class.
 
     :raises ValueError: If n_components is not positive.
@@ -183,6 +200,8 @@ class GMMLayer(keras.layers.Layer):
     :raises ValueError: If isometric_regularizer_strength is negative.
     :raises ValueError: If variance_floor is not positive.
     :raises ValueError: If output_mode is not ``'assignments'`` or ``'mixture'``.
+    :raises ValueError: If covariance_type is not ``'diagonal'`` or ``'low_rank'``.
+    :raises ValueError: If covariance_rank is not a positive integer.
     """
 
     def __init__(
@@ -197,6 +216,9 @@ class GMMLayer(keras.layers.Layer):
         log_variance_initializer: Union[str, keras.initializers.Initializer] = 'zeros',
         mean_regularizer: Optional[keras.regularizers.Regularizer] = None,
         random_seed: Optional[int] = None,
+        covariance_type: CovarianceType = 'diagonal',
+        covariance_rank: int = 1,
+        factor_initializer: Union[str, keras.initializers.Initializer] = 'glorot_uniform',
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -204,7 +226,7 @@ class GMMLayer(keras.layers.Layer):
         # Input validation
         self._validate_init_args(
             n_components, temperature, isometric_regularizer_strength,
-            variance_floor, output_mode
+            variance_floor, output_mode, covariance_type, covariance_rank
         )
 
         # Store ALL configuration parameters
@@ -213,6 +235,8 @@ class GMMLayer(keras.layers.Layer):
         self.isometric_regularizer_strength = isometric_regularizer_strength
         self.variance_floor = variance_floor
         self.output_mode = output_mode
+        self.covariance_type = covariance_type
+        self.covariance_rank = covariance_rank
         self.cluster_axis = [cluster_axis] if isinstance(cluster_axis, int) else list(cluster_axis)
         # DECISION plan_2026-06-14_8c7365d0/D-005: serialize the ORIGINAL (pre-build)
         # cluster_axis, not the build()-mutated positive form. build() rewrites negative
@@ -230,13 +254,33 @@ class GMMLayer(keras.layers.Layer):
         else:
             self.mean_initializer = keras.initializers.get(mean_initializer)
         self.log_variance_initializer = keras.initializers.get(log_variance_initializer)
+        self.factor_initializer = keras.initializers.get(factor_initializer)
         self.mean_regularizer = keras.regularizers.get(mean_regularizer)
         self.random_seed = random_seed
+
+        # DECISION plan-2026-07-20-e03557c8/D-002: announce the reframed regularizer
+        # semantics instead of silently changing a default. Do NOT "fix" this by making
+        # isometric_regularizer_strength default to 0.0 when covariance_type is non-
+        # diagonal -- deriving one kwarg's default from another kwarg's VALUE is the
+        # exact untraceable-bug shape rejected as Option C. Severity is info, not
+        # warning: under the PPCA reading (Sigma = diag(d) + U U^T) the combination is
+        # legitimate, so warning here would cry wolf on a default-valued config.
+        if self.covariance_type != 'diagonal' and self.isometric_regularizer_strength > 0:
+            logger.info(
+                f"GMMLayer: covariance_type='{self.covariance_type}' with "
+                f"isometric_regularizer_strength={self.isometric_regularizer_strength} > 0. "
+                "The isometric-kernel regularizer reads log_variances only, so under a "
+                "non-diagonal covariance it regularizes the RESIDUAL DIAGONAL toward "
+                "isotropy (a PPCA/factor-analysis-style noise-floor prior), NOT the total "
+                "covariance -- the low-rank factor stays free to carry anisotropy. "
+                "Pass isometric_regularizer_strength=0.0 to disable it entirely."
+            )
 
         # Initialize attribute placeholders - weights created in build()
         self.means: Optional[keras.Variable] = None
         self.log_variances: Optional[keras.Variable] = None
         self.mixture_logits: Optional[keras.Variable] = None
+        self.covariance_factors: Optional[keras.Variable] = None
         self.input_rank: Optional[int] = None
         self.feature_dims: Optional[int] = None
         self.non_feature_dims: Optional[List[int]] = None
@@ -248,7 +292,9 @@ class GMMLayer(keras.layers.Layer):
         temperature: float,
         isometric_regularizer_strength: float,
         variance_floor: float,
-        output_mode: str
+        output_mode: str,
+        covariance_type: str,
+        covariance_rank: int
     ) -> None:
         """Validate initialization arguments.
 
@@ -262,6 +308,10 @@ class GMMLayer(keras.layers.Layer):
         :type variance_floor: float
         :param output_mode: Output mode string.
         :type output_mode: str
+        :param covariance_type: Covariance parameterization string.
+        :type covariance_type: str
+        :param covariance_rank: Rank of the low-rank covariance factor.
+        :type covariance_rank: int
         :raises ValueError: If any argument is invalid.
         """
         if not isinstance(n_components, int) or n_components < 1:
@@ -278,6 +328,15 @@ class GMMLayer(keras.layers.Layer):
         if output_mode not in ['assignments', 'mixture']:
             raise ValueError(
                 f"output_mode must be 'assignments' or 'mixture', got {output_mode}"
+            )
+        if covariance_type not in ['diagonal', 'low_rank']:
+            raise ValueError(
+                f"covariance_type must be 'diagonal' or 'low_rank', got {covariance_type}"
+            )
+        if not isinstance(covariance_rank, int) or isinstance(covariance_rank, bool) \
+                or covariance_rank < 1:
+            raise ValueError(
+                f"covariance_rank must be a positive integer, got {covariance_rank}"
             )
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
@@ -320,6 +379,26 @@ class GMMLayer(keras.layers.Layer):
             dtype=self.dtype,
             autocast=False  # mixed-precision: keep float32 for the density math
         )
+
+        # Low-rank covariance factor U_k, created ONLY for covariance_type='low_rank'.
+        # Under 'diagonal' the weight must not exist at all, so existing checkpoints
+        # and weight counts stay byte-compatible (invariant I1).
+        if self.covariance_type == 'low_rank':
+            if self.covariance_rank >= self.feature_dims:
+                logger.warning(
+                    f"covariance_rank ({self.covariance_rank}) >= feature_dims "
+                    f"({self.feature_dims}); the low-rank parameterization is still valid "
+                    "but no longer economical -- it costs more parameters than a dense "
+                    "covariance would."
+                )
+            self.covariance_factors = self.add_weight(
+                name="covariance_factors",
+                shape=(self.n_components, self.feature_dims, self.covariance_rank),
+                initializer=self.factor_initializer,
+                trainable=True,
+                dtype=self.dtype,
+                autocast=False  # mixed-precision: matrix solves are MORE fp16-fragile
+            )
 
         # Call parent build at the end
         super().build(input_shape)
@@ -475,7 +554,48 @@ class GMMLayer(keras.layers.Layer):
             self.variance_floor
         )
 
+    def _assemble_log_density(
+        self,
+        mahalanobis: keras.KerasTensor,
+        log_det: keras.KerasTensor
+    ) -> keras.KerasTensor:
+        """Combine a Mahalanobis term and a log-determinant into a Gaussian log-density.
+
+        Shared by both covariance parameterizations, which differ only in HOW the two
+        inputs are computed -- the final assembly and the ``D log(2*pi)`` normalization
+        constant are identical for any ``Sigma``.
+
+        :param mahalanobis: Quadratic form ``(x-mu)^T Sigma^-1 (x-mu)``, shape
+            ``(batch, n_components)``.
+        :type mahalanobis: keras.KerasTensor
+        :param log_det: Per-component ``log det(Sigma_k)``, shape ``(n_components,)``.
+        :type log_det: keras.KerasTensor
+        :return: Log-density tensor of shape ``(batch, n_components)``.
+        :rtype: keras.KerasTensor
+        """
+        # Normalization constant D * log(2*pi)
+        norm_const = float(self.feature_dims) * float(np.log(2.0 * np.pi))
+
+        # log N(x | mu, Sigma) = -0.5 * (mahalanobis + log_det + D log(2*pi))
+        return -0.5 * (mahalanobis + keras.ops.expand_dims(log_det, axis=0) + norm_const)
+
     def _log_gaussian_density(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
+        """Compute Gaussian log-densities of inputs under each component.
+
+        Dispatches on ``self.covariance_type``, a plain Python string fixed at
+        construction time. This is a trace-time branch on configuration, not a branch
+        on a tensor VALUE, so it is graph-safe.
+
+        :param inputs: Input tensor of shape ``(batch, features)``.
+        :type inputs: keras.KerasTensor
+        :return: Log-density tensor of shape ``(batch, n_components)``.
+        :rtype: keras.KerasTensor
+        """
+        if self.covariance_type == 'low_rank':
+            return self._log_gaussian_density_low_rank(inputs)
+        return self._log_gaussian_density_diagonal(inputs)
+
+    def _log_gaussian_density_diagonal(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
         """Compute diagonal-Gaussian log-densities of inputs under each component.
 
         :param inputs: Input tensor of shape ``(batch, features)``.
@@ -499,13 +619,82 @@ class GMMLayer(keras.layers.Layer):
         # Log-determinant term: sum_d log var  ->  (n_components,)
         log_det = keras.ops.sum(log_variances, axis=-1)
 
-        # Normalization constant D * log(2*pi)
-        norm_const = float(self.feature_dims) * float(np.log(2.0 * np.pi))
+        return self._assemble_log_density(mahalanobis, log_det)
 
-        # log N(x | mu, Sigma) = -0.5 * (mahalanobis + log_det + D log(2*pi))
-        log_density = -0.5 * (mahalanobis + keras.ops.expand_dims(log_det, axis=0) + norm_const)
+    def _log_gaussian_density_low_rank(self, inputs: keras.KerasTensor) -> keras.KerasTensor:
+        """Compute low-rank-plus-diagonal Gaussian log-densities under each component.
 
-        return log_density
+        Implements ``Sigma_k = diag(d_k) + U_k U_k^T`` via the matrix determinant
+        lemma and the Woodbury identity, so nothing of size ``(D, D)`` is ever
+        materialized. With ``M_k = I_R + U_k^T diag(1/d_k) U_k`` (the ``(R, R)``
+        capacitance matrix):
+
+        - ``log det(Sigma_k) = sum_d log d_kd + log det(M_k)``
+        - ``(x-mu)^T Sigma_k^-1 (x-mu) = z^T (x-mu) - ||M_k^-1/2 U_k^T z||^2``,
+          where ``z = (x-mu) / d_k``.
+
+        # DECISION plan-2026-07-20-e03557c8/D-003: derive BOTH quantities from a single
+        # keras.ops.cholesky(M_k). Do NOT switch this to keras.ops.slogdet: (a) slogdet's
+        # `sign` output silently yields a plausible-but-wrong log-density if Sigma is ever
+        # non-PD, and (b) its batching over a leading axis works empirically here while its
+        # own docstring says the input "must be 2D and square" -- an undocumented behavior.
+        # Cholesky is safe by construction: variance_floor keeps d_k > 0, so
+        # M_k = I + PSD is always PD (invariant I6) and the sign question cannot arise.
+        # The correct symbol is keras.ops.linalg.solve_triangular; a top-level
+        # keras.ops.triangular_solve does NOT exist.
+        # Its batched RHS convention -- a (K,R,R) factor against a (K,R,B) right-hand side
+        # with a LEADING batch axis -- is why `w` is transposed to (K,R,B) and back. That
+        # convention was the one unverified claim in the plan (assumption A2) and was
+        # confirmed empirically before this code was written; a wrong convention would NOT
+        # raise, it would silently return a wrong density. The dense-oracle test
+        # (test_low_rank_matches_dense_reference) is the standing guard on it -- if that
+        # test ever fails, do NOT loosen its tolerance.
+
+        :param inputs: Input tensor of shape ``(batch, features)``.
+        :type inputs: keras.KerasTensor
+        :return: Log-density tensor of shape ``(batch, n_components)``.
+        :rtype: keras.KerasTensor
+        """
+        ops = keras.ops
+
+        variances = self._effective_variances()                  # (K, D), floored > 0
+        factors = self.covariance_factors                        # (K, D, R)
+
+        # Centered inputs: (batch, 1, D) - (1, K, D)  ->  (batch, K, D)
+        diff = ops.expand_dims(inputs, axis=1) - ops.expand_dims(self.means, axis=0)
+
+        # z = diag(1/d) (x - mu)  ->  (batch, K, D)
+        z = diff / ops.expand_dims(variances, axis=0)
+
+        # Diagonal part of the quadratic form: (x-mu)^T diag(1/d) (x-mu)  ->  (batch, K)
+        diagonal_quadratic = ops.sum(z * diff, axis=-1)
+
+        # Capacitance matrix M = I_R + U^T diag(1/d) U  ->  (K, R, R). Always PD.
+        scaled_factors = factors / ops.expand_dims(variances, axis=-1)   # (K, D, R)
+        capacitance = ops.eye(
+            self.covariance_rank, dtype=self.variable_dtype
+        ) + ops.matmul(ops.transpose(factors, (0, 2, 1)), scaled_factors)
+
+        # Single factorization serving BOTH the log-determinant and the quadratic form.
+        cholesky_factor = ops.cholesky(capacitance)               # (K, R, R), lower
+
+        # Woodbury correction: w = U^T z  ->  (batch, K, R)
+        projected = ops.einsum('bkd,kdr->bkr', z, factors)
+
+        # solve_triangular wants a leading batch axis on BOTH operands: (K,R,R) vs (K,R,B).
+        solved = ops.linalg.solve_triangular(
+            cholesky_factor, ops.transpose(projected, (1, 2, 0)), lower=True
+        )                                                          # (K, R, batch)
+        correction = ops.transpose(ops.sum(ops.square(solved), axis=1))   # (batch, K)
+
+        mahalanobis = diagonal_quadratic - correction              # (batch, K)
+
+        # log det(Sigma) = sum_d log d + 2 * sum_r log L_rr  ->  (K,)
+        log_det = ops.sum(ops.log(variances), axis=-1) + 2.0 * ops.sum(
+            ops.log(ops.diagonal(cholesky_factor, axis1=-2, axis2=-1)), axis=-1
+        )
+
+        return self._assemble_log_density(mahalanobis, log_det)
 
     def _responsibilities(self, log_density: keras.KerasTensor) -> keras.KerasTensor:
         """Compute temperature-scaled posterior responsibilities.
@@ -528,8 +717,31 @@ class GMMLayer(keras.layers.Layer):
         """Compute the isometric-kernel regularization loss.
 
         Penalizes the per-component dispersion of log-variances across feature
-        dimensions; minimizing it drives each covariance toward an isotropic
-        (spherical) form ``Sigma_k = sigma_k^2 * I``.
+        dimensions. What that dispersion MEASURES depends on ``covariance_type``:
+
+        - **``'diagonal'``** -- ``log_variances`` fully determines ``Sigma_k``, so
+          minimizing this loss drives the TOTAL covariance toward an isotropic
+          (spherical) form ``Sigma_k = sigma_k^2 * I``.
+        - **``'low_rank'``** -- ``Sigma_k = diag(d_k) + U_k U_k^T``, and this loss
+          reads ``d_k`` only. It therefore regularizes the RESIDUAL DIAGONAL toward
+          isotropy and leaves ``U_k`` free to carry anisotropy. Total-covariance
+          anisotropy is NOT regularized under this mode.
+
+        # DECISION plan-2026-07-20-e03557c8/D-002: the loss BODY is deliberately
+        # identical under both modes -- only this docstring and the __init__ notice
+        # distinguish them. Do NOT "fix" the low-rank case by adding a term over
+        # U_k's Gram spectrum (the semantically complete Option B): that needs an
+        # eigendecomposition or SVD per component per step, a new numerical-stability
+        # surface, and a second coefficient -- a permanent complexity charge levied to
+        # solve a problem no caller has. Do NOT instead zero the default strength when
+        # covariance_type is non-diagonal (Option C); see the __init__ anchor. Under
+        # the low-rank reading this is exactly the PPCA / factor-analysis structure
+        # (Sigma = sigma^2 I + U U^T), where an isotropic noise floor plus a low-rank
+        # signal subspace is the intended model -- so the regularizer COMPLEMENTS the
+        # feature rather than fighting it. That claim is falsifiable and is tested:
+        # if covariance_factors gradients are suppressed by more than an order of
+        # magnitude versus a strength=0.0 control, this reframe is wrong and Option B
+        # is the escalation path.
 
         :return: Scalar regularization loss.
         :rtype: keras.KerasTensor
@@ -652,7 +864,10 @@ class GMMLayer(keras.layers.Layer):
             ),
             "log_variance_initializer": keras.initializers.serialize(self.log_variance_initializer),
             "mean_regularizer": keras.regularizers.serialize(self.mean_regularizer),
-            "random_seed": self.random_seed
+            "random_seed": self.random_seed,
+            "covariance_type": self.covariance_type,
+            "covariance_rank": self.covariance_rank,
+            "factor_initializer": keras.initializers.serialize(self.factor_initializer),
         })
         return config
 
@@ -671,6 +886,10 @@ class GMMLayer(keras.layers.Layer):
         if "log_variance_initializer" in config:
             config["log_variance_initializer"] = keras.initializers.deserialize(
                 config["log_variance_initializer"]
+            )
+        if "factor_initializer" in config:
+            config["factor_initializer"] = keras.initializers.deserialize(
+                config["factor_initializer"]
             )
         if "mean_regularizer" in config:
             config["mean_regularizer"] = keras.regularizers.deserialize(config["mean_regularizer"])
