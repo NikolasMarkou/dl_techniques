@@ -4,13 +4,15 @@
 
 ## Core mechanism
 
-| Aspect | K-means layer (original) | RBF layer | GMM layer (this rewrite)                                           |
-|---|---|---|--------------------------------------------------------------------|
-| Prototype | centroid `c_k` | center `c_k` | mean `mu_k` + diagonal covariance `Sigma_k` + mixing weight `pi_k` |
-| Similarity score | `-|| x - c_k                                                            ||^2` | `exp(-gamma_k ||x - c_k||^2)` | `log pi_k - 0.5(mahalanobis + logdet + D log 2pi)` |
-| Spread | none (pure distance) | per-center precision `gamma_k` (equiv. `1/(2 sigma_k^2)`) | full per-dimension variance `var_kd`                               |
-| Normalization across prototypes | softmax (temperature) | usually none, or NRBF (divide by sum) | softmax of log-posterior (proper Bayes rule)                       |
-| Probabilistic meaning | none; heuristic soft assignment | none; basis activation | exact posterior `P(component=k \| x)`                              |
+| Aspect | K-means layer | RBF layer | GMM layer |
+|---|---|---|---|
+| Prototype | centroid `c_k` | center `c_k` | mean `mu_k` + covariance `Sigma_k` (diagonal or low-rank) + mixing weight `pi_k` |
+| Similarity score | `-|| x - c_k ||^2` | `exp(-gamma_k ||x - c_k||^2)` | `log pi_k - 0.5(mahalanobis + logdet + D log 2pi)` |
+| Spread | none (pure distance) | per-center precision `gamma_k` (equiv. `1/(2 sigma_k^2)`) | per-dimension variance `var_kd`, plus factor loadings `U_k` under `covariance_type='low_rank'` |
+| Normalization across prototypes | softmax (temperature) | **none by default** (raw basis activation); opt-in NRBF via `output_mode='normalized'` | softmax of log-posterior (proper Bayes rule) |
+| Probabilistic meaning | none; heuristic soft assignment | none; basis activation | exact posterior `P(component=k \| x)` |
+| `cluster_axis` (multi-axis clustering) | yes | **no** — always the last axis | yes |
+| Base class | `BaseMixtureLayer` | `keras.layers.Layer` (standalone) | `BaseMixtureLayer` |
 
 ## What's actually being modeled
 
@@ -20,18 +22,56 @@
 
 ## Distance geometry
 
-K-means and the standard RBF both use isotropic Euclidean distance. The GMM uses Mahalanobis distance `(x-mu)^T Sigma^-1 (x-mu)`, so each component has an axis-aligned elliptical receptive field. The isometric regularizer in this rewrite deliberately pulls `Sigma_k` back toward spherical, which is exactly the point where the GMM degenerates into RBF-like / K-means-like isotropic geometry. So the layer spans a continuum: `lambda -> infinity` makes it behave like a soft, probability-weighted K-means/RBF; `lambda = 0` lets it learn fully anisotropic Gaussians.
+K-means and the standard RBF both use isotropic Euclidean distance. The GMM uses Mahalanobis distance `(x-mu)^T Sigma^-1 (x-mu)`, so the shape of each component's receptive field depends on `covariance_type`:
+
+- **`covariance_type='diagonal'`** (the default): `Sigma_k = diag(var_k)`, giving an **axis-aligned** elliptical receptive field. Correlated features cannot be represented.
+- **`covariance_type='low_rank'`**: `Sigma_k = diag(d_k) + U_k U_k^T`, adding a `covariance_factors` weight `U_k` of shape `(K, D, covariance_rank)`. The off-diagonal mass makes the receptive field a **rotated** ellipse, so correlated features can be represented. Densities are evaluated with the matrix determinant lemma and the Woodbury identity, so nothing of size `(D, D)` is ever materialized.
+
+This low-rank-plus-diagonal form is **factor analysis, not probabilistic PCA.** The residual diagonal `d_k` is free per-dimension; PPCA is the constrained special case `d_k = sigma_k^2 * 1`, which this layer neither enforces nor reaches. Do not describe it as PPCA.
+
+The isometric regularizer deliberately pulls the covariance back toward spherical, which is exactly the point where the GMM degenerates into RBF-like / K-means-like isotropic geometry. The layer therefore spans a continuum: `lambda -> infinity` makes it behave like a soft, probability-weighted K-means/RBF; `lambda = 0` lets it learn fully anisotropic Gaussians.
+
+**Important scoping detail under `low_rank`:** the regularizer's loss body is identical in both modes — it reads the log-variances only. Under `covariance_type='low_rank'` those log-variances are the **residual diagonal** `d_k`, so the regularizer constrains `d_k`'s anisotropy and leaves the **total** covariance's anisotropy (the part `U_k U_k^T` carries) completely unregularized. This is deliberate, not an oversight: in factor analysis the diagonal/low-rank split is non-identifiable, so penalizing the diagonal pushes anisotropy *into* `U_k` rather than removing it from the model. The two mechanisms are complementary by construction. Do not "fix" this by adding a term over `U_k`'s Gram spectrum — see the `DECISION` anchor in `gmm.py::_isometric_regularization_loss`.
+
+## Shared base class (`base.py`)
+
+`KMeansLayer` and `GMMLayer` share their axis-handling machinery through two classes in `base.py`:
+
+- **`_ClusterAxisMixin`** — a stateless, `__init__`-free mixin holding the shared cluster-axis methods (`_setup_cluster_axes`, `_reshape_for_clustering`, `_reshape_output`, `compute_output_shape`, ...). It owns no attributes; it *reads* attributes the host class sets.
+- **`BaseMixtureLayer`** — the abstract Keras `Layer` seat that composes the mixin with `keras.layers.Layer`, declares `call` abstract, and initializes the build-derived placeholders the mixin reads.
+
+The shared concept is the **cluster axis**: one or more input axes whose dimensions are flattened into a single feature vector, over which prototypes are defined, and which are collapsed to a single prototype axis in the output. Both layers accept `cluster_axis` (default `-1`) and `output_mode: 'assignments' | 'mixture'`.
+
+Neither class is exported from `mixtures/__init__.py`, and that is intentional: `BaseMixtureLayer` is an internal seam between these two layers, not a public extension point for third-party subclassing.
+
+### RBF is deliberately excluded
+
+`RBFLayer` is **not** a member of this hierarchy and should not be made one. It has no `cluster_axis` concept — its forward pass always broadcasts against the last input axis — and it is a basis layer rather than a clusterer, so half of the base class's contract (`output_mode='mixture'`, which reconstructs the input as a responsibility-weighted combination of prototypes) has no RBF analogue at all. Making `RBFLayer` inherit `BaseMixtureLayer` would mean either leaving `'mixture'` mode unimplementable in a subclass (a Liskov violation baked into the base) or inventing a reconstruction concept RBF's semantics do not have, purely to satisfy the base class's shape.
+
+A *unified* base class across all three layers was evaluated in full and rejected. The evidence: **zero** constructor kwargs are shared by name across all three; of the five kwargs shared by exactly two, three have genuinely different semantics (`temperature`, `repulsion_strength`) or different roles; the prototype-count parameter alone has three different public names (`units` / `n_clusters` / `n_components`) that cannot be unified without a breaking serialization change; and `'mixture'` reconstruction mode has no RBF analogue. The shared `output_mode` **name** with a deliberately **disjoint value vocabulary** (below) is the correct-sized compromise. This is recorded so the question is not silently re-opened.
 
 ## How prototypes are trained
 
-This is the biggest practical difference from the original.
-
-- **Original K-means layer**: centroids updated by a manual EM-like rule inside `call` (momentum buffer + repulsion force, applied with `assign`). Not the optimizer's job; collapse prevented by an explicit repulsion term.
+- **K-means**: centroids updated by a manual EM-like rule inside `call` (momentum buffer + repulsion force, applied with `assign`). Not the optimizer's job; collapse prevented by an explicit repulsion term.
 - **RBF**: centers, widths, and weights are normal trainable variables updated by backprop (classically initialized via k-means).
-- **GMM rewrite**: means, log-variances, and mixing logits are all normal trainable variables updated end-to-end by the host optimizer. Collapse is discouraged by the `pi_k`/`Sigma_k` parameterization plus the isometric loss via `add_loss`, replacing the hand-written repulsion.
+- **GMM**: means, log-variances, mixing logits, and (under `low_rank`) factor loadings are all normal trainable variables updated end-to-end by the host optimizer. Collapse is discouraged by the `pi_k`/`Sigma_k` parameterization plus the isometric loss via `add_loss`, replacing the hand-written repulsion.
 
-## Output semantics
+## Output semantics (`output_mode`)
 
-`'assignments'` mode returns responsibilities (true posteriors for GMM, softmax distances for K-means, basis activations for a normalized RBF). `'mixture'` mode reconstructs `x` as a responsibility-weighted combination of means, which is the same reconstruction idea a normalized RBF or a VQ-style codebook uses.
+All three layers expose an `output_mode` kwarg, but the **legal values are disjoint by layer** — same name, different vocabulary. The factory (`validate_mixture_config`) validates them per `mixture_type` accordingly.
 
-In short: K-means is distance-only and isotropic; RBF adds a learnable width and is meant as a basis layer rather than a normalized clusterer; the GMM is the strict probabilistic generalization that adds per-component mass and shape, with the isometric regularizer letting you tune how close it stays to the simpler two.
+**`KMeansLayer` / `GMMLayer`** — `'assignments' | 'mixture'`, default `'assignments'`:
+
+- `'assignments'` returns responsibilities (true posteriors for GMM, softmax distances for K-means).
+- `'mixture'` reconstructs `x` as a responsibility-weighted combination of prototypes, the same reconstruction idea a VQ-style codebook uses.
+
+**`RBFLayer`** — `'basis' | 'normalized'`, default `'basis'`:
+
+- `'basis'` (the default) returns the raw kernel activations `phi_k(x) = exp(-gamma_k ||x - c_k||^2)`. **Unnormalized.** This is the unchanged, historical behavior and remains the default.
+- `'normalized'` returns the NRBF form `phi_k / sum_j phi_j`. Implemented as a softmax over the pre-exponential quantity (`softmax(-exponent)`), which is definitionally identical to the division but has no underflow failure mode — the naive `phi / sum(phi)` produces real `NaN` under `mixed_float16` for ordinary inputs.
+
+**RBF normalization is strictly opt-in and does not change what the layer is.** The addition of `'normalized'` does *not* reverse the "RBF is a basis layer, not a normalized clusterer" characterization above: the default output is still an unnormalized basis activation, RBF still has no `cluster_axis`, still has no probabilistic interpretation, and still is not part of the `BaseMixtureLayer` hierarchy. `'normalized'` exists for callers that specifically want a normalized output; it is a convenience on the output, not a change of category.
+
+## In short
+
+K-means is distance-only and isotropic. RBF adds a learnable width and defaults to a basis layer rather than a normalized clusterer (`output_mode='basis'`), with NRBF available opt-in. The GMM is the strict probabilistic generalization that adds per-component mass and shape — axis-aligned under `'diagonal'`, rotated under `'low_rank'` — with the isometric regularizer letting you tune how close it stays to the simpler two.

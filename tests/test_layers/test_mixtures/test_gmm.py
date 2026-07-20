@@ -1175,8 +1175,12 @@ class TestGMMLayerLowRankInteractions:
             n_components=n_components,
             covariance_type="low_rank",
             covariance_rank=rank,
-            factor_initializer="he_normal",
-            mean_initializer="glorot_normal",
+            # Seeded deliberately: with unseeded initializers this test was observed
+            # to fail ~1 run in 9, because the "every weight MOVED" assertion below
+            # depends on the initial draw producing gradients large enough to clear
+            # rtol=atol=1e-4 in only 2 epochs. Do NOT drop these seeds.
+            factor_initializer=keras.initializers.HeNormal(seed=811),
+            mean_initializer=keras.initializers.GlorotNormal(seed=812),
             name="gmm",
         )
         model = keras.Model(inp, gmm(inp))

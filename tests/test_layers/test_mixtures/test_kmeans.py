@@ -562,6 +562,44 @@ class TestKMeansLayerEdgeCases:
         assert np.max(diff_from_reset) > 1e-3, "Reinitialized centroids should differ from reset centroids"
         assert np.max(diff_from_original) > 1e-3, "Reinitialized centroids should differ from original centroids"
 
+    def test_reset_centroids_honors_random_seed(self, sample_data_2d: keras.KerasTensor) -> None:
+        """``reset_centroids()`` must respect ``random_seed``, matching ``GMMLayer``.
+
+        Two independently-constructed layers carrying the same ``random_seed`` must
+        reinitialize to *identical* centroids, and those centroids must still differ
+        from the pre-reset values (otherwise the assertion would pass trivially on a
+        no-op reset).
+        """
+        feature_dims = int(sample_data_2d.shape[-1])
+
+        def _build_and_reset() -> "np.ndarray":
+            layer = KMeansLayer(n_clusters=4, random_seed=42)
+            _ = layer(sample_data_2d)
+            pre_reset = ops.convert_to_numpy(layer.centroids).copy()
+            layer.reset_centroids()
+            return pre_reset, ops.convert_to_numpy(layer.centroids).copy()
+
+        pre_a, post_a = _build_and_reset()
+        pre_b, post_b = _build_and_reset()
+
+        assert post_a.shape == (4, feature_dims)
+
+        # Seeded reset is reproducible across instances.
+        np.testing.assert_array_equal(
+            post_a, post_b,
+            err_msg=(
+                "reset_centroids() ignored random_seed -- two KMeansLayer(random_seed=42) "
+                "instances produced different centroids (GMMLayer.reset_parameters() "
+                "passes seed=self.random_seed; this path must too)"
+            ),
+        )
+
+        # ... and it is a real reset, not a no-op.
+        assert np.max(np.abs(post_a - pre_a)) > 1e-3, (
+            "reset_centroids() did not change the centroids, so the reproducibility "
+            "assertion above is vacuous"
+        )
+
     def test_cluster_centers_property(self, sample_data_2d: keras.KerasTensor, basic_config: Dict[str, Any]) -> None:
         """Test cluster_centers property access.
 

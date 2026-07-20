@@ -643,6 +643,7 @@ class KMeansLayer(BaseMixtureLayer):
             # Generate fresh random values to ensure different centroids
             new_values = keras.random.normal(
                 shape=(self.n_clusters, self.feature_dims),
+                seed=self.random_seed,
                 dtype=self.dtype
             ) * 0.1  # Small scale for stability
             self.centroids.assign(new_values)

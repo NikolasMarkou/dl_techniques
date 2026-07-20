@@ -3,43 +3,66 @@ A differentiable Gaussian Mixture Model (GMM) clustering layer for deep networks
 
 This layer embeds a soft-clustering mechanism based on a Gaussian Mixture Model
 directly into a neural network, enabling end-to-end gradient-based training of
-the mixture parameters (component means, diagonal covariances, and mixing
-weights). It provides a fully differentiable, probabilistic alternative to hard
-K-means: instead of assigning each input to a single nearest centroid, it
-computes posterior responsibilities under a learned mixture of diagonal
-Gaussians.
+the mixture parameters (component means, covariances, mixing weights, and --
+under the opt-in low-rank covariance mode -- per-component factor loadings). It
+provides a fully differentiable, probabilistic alternative to hard K-means:
+instead of assigning each input to a single nearest centroid, it computes
+posterior responsibilities under a learned Gaussian mixture.
 
 Architecture and Core Concepts:
 
-Each of the ``K`` components is parameterized by a mean ``mu_k``, a diagonal
-covariance ``Sigma_k = diag(var_k)`` (stored in log-space for positivity), and a
-mixing logit. The responsibility (soft assignment) of an input ``x_i`` to
-component ``k`` is the posterior probability under the mixture.
+Each of the ``K`` components is parameterized by a mean ``mu_k``, a covariance
+``Sigma_k``, and a mixing logit. The responsibility (soft assignment) of an
+input ``x_i`` to component ``k`` is the posterior probability under the mixture.
+
+The covariance parameterization is selected by ``covariance_type``:
+
+-   ``'diagonal'`` (the default): ``Sigma_k = diag(var_k)``, with the variances
+    stored in log-space for positivity. Components have axis-aligned elliptical
+    receptive fields and cannot represent correlated features.
+-   ``'low_rank'``: the low-rank-plus-diagonal **factor-analysis** form
+    ``Sigma_k = diag(d_k) + U_k U_k^T``, adding a ``covariance_factors`` weight
+    ``U_k`` of shape ``(K, D, R)``. The residual diagonal ``d_k`` is free
+    per-dimension, which is what makes this factor analysis and **not**
+    probabilistic PCA -- PPCA is the constrained special case
+    ``d_k = sigma_k^2 * 1``, which this layer neither enforces nor reaches.
+    Only this mode can represent correlated features, giving each component a
+    *rotated* (not axis-aligned) elliptical receptive field. Densities are
+    evaluated via the matrix determinant lemma and the Woodbury identity, so no
+    ``(D, D)`` matrix is ever materialized. See the ``GMMLayer`` class docstring
+    for the full parameter contract and the ``_log_gaussian_density_low_rank``
+    docstring for the derivation.
 
 Key mechanisms include:
 
 1.  **Probabilistic Soft Assignments (E-step):** The layer evaluates the
-    diagonal-Gaussian log-density of each input under every component, adds the
-    log mixing weights, and normalizes via a (temperature-scaled) softmax to
-    obtain responsibilities. This is the exact GMM posterior at ``temperature=1``
-    and is differentiable with respect to all mixture parameters.
+    Gaussian log-density of each input under every component, adds the log
+    mixing weights, and normalizes via a (temperature-scaled) softmax to obtain
+    responsibilities. This is the exact GMM posterior at ``temperature=1`` and
+    is differentiable with respect to all mixture parameters.
 
-2.  **Fully Differentiable Parameters:** Means, log-variances, and mixing logits
-    are standard trainable weights optimized by the host model's optimizer
-    through the main loss together with the responsibilities. There is no
-    non-differentiable hard re-estimation step.
+2.  **Fully Differentiable Parameters:** Means, log-variances, mixing logits and
+    (under ``covariance_type='low_rank'``) factor loadings are standard
+    trainable weights optimized by the host model's optimizer through the main
+    loss together with the responsibilities. There is no non-differentiable hard
+    re-estimation step.
 
 3.  **Isometric-Kernel Regularization:** To counteract degenerate, highly
     anisotropic components and to encourage well-conditioned, spherical
     (isometric) Gaussian kernels, an auxiliary loss penalizes the dispersion of
     each component's per-dimension log-variances around their per-component mean.
-    Driving this dispersion to zero pushes every covariance toward an isotropic
-    form ``Sigma_k = sigma_k^2 * I``, under which the Mahalanobis metric reduces
-    to a scaled Euclidean (isometric) metric.
+    Under ``covariance_type='diagonal'`` this pushes the whole covariance toward
+    an isotropic form ``Sigma_k = sigma_k^2 * I``, under which the Mahalanobis
+    metric reduces to a scaled Euclidean (isometric) metric. Under
+    ``covariance_type='low_rank'`` the loss body is unchanged and therefore acts
+    on the **residual diagonal** ``d_k`` only -- the total covariance's
+    anisotropy, which ``U_k U_k^T`` carries, is deliberately not regularized.
 
 Mathematical Foundation:
 
-    The diagonal-Gaussian log-density of ``x_i`` under component ``k`` is:
+    The diagonal-Gaussian log-density of ``x_i`` under component ``k`` is
+    (``covariance_type='diagonal'``; see ``_log_gaussian_density_low_rank`` for
+    the low-rank form):
     ``log N(x_i | mu_k, Sigma_k) =
         -0.5 * ( sum_d (x_id - mu_kd)^2 / var_kd + sum_d log var_kd + D log(2*pi) )``
 
