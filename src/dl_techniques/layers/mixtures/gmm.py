@@ -932,6 +932,21 @@ class GMMLayer(keras.layers.Layer):
     ) -> None:
         """Reset mixture parameters to new values or reinitialize.
 
+        Restores every trainable parameter to its initial state:
+
+        - ``means`` — set to ``new_means`` if given, else small random values.
+        - ``log_variances`` — zeroed, i.e. unit variances (isotropic).
+        - ``mixture_logits`` — zeroed, i.e. uniform mixing weights.
+        - ``covariance_factors`` — under ``covariance_type='low_rank'`` ONLY,
+          re-drawn from ``factor_initializer``. Absent under ``'diagonal'``,
+          where the weight does not exist.
+
+        .. note::
+           Under ``'low_rank'`` this method is **not deterministic** unless
+           ``factor_initializer`` carries a seed, because re-running the
+           initializer draws fresh values. This matches how the weight was
+           created in :meth:`build`.
+
         :param new_means: Optional tensor of shape ``(n_components, feature_dims)``.
             If None, means are reinitialized with small random values.
         :type new_means: Optional[keras.KerasTensor]
@@ -960,5 +975,20 @@ class GMMLayer(keras.layers.Layer):
         # Reset covariances to unit variance and mixing weights to uniform
         self.log_variances.assign(keras.ops.zeros_like(self.log_variances))
         self.mixture_logits.assign(keras.ops.zeros_like(self.mixture_logits))
+
+        # DECISION plan-2026-07-20-e03557c8/D-005: re-RUN factor_initializer here.
+        # Do NOT "simplify" this to zeros_like(self.covariance_factors) to match the two
+        # lines above. U = 0 makes the Woodbury correction quadratic in U about the
+        # origin, so dL/dU vanishes identically and the weight is permanently untrainable
+        # -- the same reason factor_initializer defaults to 'glorot_uniform' and not
+        # 'zeros'. "Reset" means "return to the layer's INITIAL state", and the initial
+        # state of this weight is the initializer's output, not the additive identity.
+        if self.covariance_factors is not None:
+            self.covariance_factors.assign(
+                self.factor_initializer(
+                    shape=(self.n_components, self.feature_dims, self.covariance_rank),
+                    dtype=self.covariance_factors.dtype,
+                )
+            )
 
 # ---------------------------------------------------------------------

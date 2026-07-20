@@ -213,6 +213,27 @@ class TestGMMLayerSerialization:
         """SC4 + D-002: round-trip with the default 'orthonormal' initializer."""
         self._roundtrip_model({"n_components": 4}, sample_data_2d)
 
+    def test_model_save_load_low_rank(self, sample_data_2d) -> None:
+        """SC3: the guide-§8.2 acceptance bar for covariance_type='low_rank'.
+
+        A genuine ``model.save()`` -> ``keras.models.load_model()`` cycle through a
+        ``.keras`` archive, NOT an in-memory get_config/from_config round-trip. This is
+        the ONLY test that can catch a key missing from ``from_config`` or a
+        ``covariance_factors`` weight that fails to restore, because both surface as a
+        silent numerical difference (or a load-time crash) rather than a config mismatch.
+        """
+        self._roundtrip_model(
+            {
+                "n_components": 4,
+                "covariance_type": "low_rank",
+                "covariance_rank": 3,
+                "mean_initializer": "glorot_normal",
+                "log_variance_initializer": "glorot_normal",
+                "factor_initializer": "he_normal",  # non-default: must survive the trip
+            },
+            sample_data_2d,
+        )
+
 
 # -------------------------------------------------------------------- add_loss
 
@@ -486,3 +507,365 @@ class TestGMMLayerLowRankCovariance:
             f"{max_deviation:.3e} (> 1e-5). Do NOT loosen this tolerance -- suspect "
             f"the batched solve_triangular RHS convention first."
         )
+
+
+# --------------------------------------------- low-rank equivalence / compat
+# Helpers shared by the equivalence tests below.
+
+_SHARED_PARAM_NAMES = ("means", "log_variances", "mixture_logits")
+
+
+def _copy_shared_parameters(source: GMMLayer, target: GMMLayer) -> None:
+    """Copy the three covariance-type-independent weights from one layer to another.
+
+    Both layers must already be built and agree on ``n_components`` / ``feature_dims``.
+    ``covariance_factors`` is deliberately NOT copied -- it exists only under
+    ``'low_rank'`` and is what the callers vary.
+
+    :param source: Built layer to read parameters from.
+    :type source: GMMLayer
+    :param target: Built layer to write parameters into. Mutated in place.
+    :type target: GMMLayer
+    :return: None.
+    :rtype: None
+    """
+    for name in _SHARED_PARAM_NAMES:
+        getattr(target, name).assign(getattr(source, name))
+
+
+class TestGMMLayerLowRankEquivalence:
+    """SC5 / invariant I1: the low-rank path must not disturb the diagonal path.
+
+    Two independent directions:
+
+    * zero-``U`` collapses the Woodbury branch EXACTLY onto the diagonal branch, and
+    * the default (diagonal) config still reproduces the closed-form diagonal posterior.
+    """
+
+    def test_zero_factors_equals_diagonal(self) -> None:
+        """SC5 / 3b: with ``U = 0`` the Woodbury path collapses onto the diagonal path.
+
+        With ``U = 0`` the capacitance matrix is exactly ``I_R``, so its Cholesky is
+        ``I_R``, ``log det(M) = 0``, and the Woodbury correction is exactly zero. The two
+        branches must therefore agree to floating-point noise -- not merely approximately.
+
+        Zeroing ``U`` here is deliberate TEST INSTRUMENTATION, not a supported runtime
+        configuration: ``dL/dU`` vanishes identically at ``U = 0``, which is exactly why
+        ``factor_initializer`` defaults to 'glorot_uniform' (see D-005).
+        """
+        n_components, feature_dims, rank = 3, 6, 2
+        x = np.random.RandomState(11).normal(
+            size=(9, feature_dims)
+        ).astype("float32")
+
+        shared = {
+            "n_components": n_components,
+            "mean_initializer": "glorot_normal",
+            "log_variance_initializer": "glorot_normal",  # anisotropic, not unit
+            "temperature": 1.0,
+        }
+        diagonal = GMMLayer(**shared)
+        low_rank = GMMLayer(
+            covariance_type="low_rank", covariance_rank=rank, **shared
+        )
+        diagonal(x)
+        low_rank(x)
+
+        _copy_shared_parameters(diagonal, low_rank)
+        low_rank.covariance_factors.assign(
+            np.zeros((n_components, feature_dims, rank), dtype="float32")
+        )
+
+        np.testing.assert_allclose(
+            ops.convert_to_numpy(low_rank(x)),
+            ops.convert_to_numpy(diagonal(x)),
+            atol=1e-6,
+            err_msg=(
+                "zero-U low-rank output diverged from the diagonal output; the Woodbury "
+                "branch does not collapse to the diagonal branch as it must"
+            ),
+        )
+
+    def test_diagonal_backward_compatibility(self) -> None:
+        """SC5 / 3c: the DEFAULT config still equals the closed-form diagonal posterior.
+
+        The reference is built here from explicitly seeded parameters and the plain
+        diagonal-Gaussian formula -- i.e. the pre-change behavior, reconstructed
+        independently rather than snapshotted. If adding ``covariance_type`` perturbed
+        the default path in any way, this fails.
+        """
+        n_components, feature_dims, batch = 4, 5, 10
+        rng = np.random.RandomState(23)
+        x = rng.normal(size=(batch, feature_dims)).astype("float32")
+        means = rng.normal(size=(n_components, feature_dims)).astype("float32")
+        log_variances = rng.normal(
+            scale=0.5, size=(n_components, feature_dims)
+        ).astype("float32")
+        mixture_logits = rng.normal(size=(n_components,)).astype("float32")
+
+        # Default construction: covariance_type / covariance_rank / factor_initializer
+        # are all left unspecified. No covariance_factors weight may appear.
+        layer = GMMLayer(n_components=n_components, mean_initializer="glorot_normal")
+        layer(x)
+        assert layer.covariance_type == "diagonal"
+        assert layer.covariance_factors is None, (
+            "the default diagonal config must create NO covariance_factors weight "
+            "(invariant I1: existing checkpoints stay weight-compatible)"
+        )
+
+        layer.means.assign(means)
+        layer.log_variances.assign(log_variances)
+        layer.mixture_logits.assign(mixture_logits)
+
+        actual = np.asarray(ops.convert_to_numpy(layer(x)), dtype=np.float64)
+
+        # Closed-form diagonal reference (float64, no layer code shared).
+        variances = np.maximum(
+            np.exp(log_variances.astype(np.float64)), layer.variance_floor
+        )
+        diff = x.astype(np.float64)[:, None, :] - means.astype(np.float64)[None, :, :]
+        mahalanobis = (diff ** 2 / variances[None, :, :]).sum(axis=-1)
+        log_det = np.log(variances).sum(axis=-1)
+        log_density = -0.5 * (
+            mahalanobis + log_det[None, :] + feature_dims * np.log(2.0 * np.pi)
+        )
+        logits = mixture_logits.astype(np.float64)
+        log_mixing = logits - np.log(np.exp(logits).sum())
+        joint = (log_density + log_mixing[None, :]) / layer.temperature
+        joint -= joint.max(axis=-1, keepdims=True)
+        expected = np.exp(joint)
+        expected /= expected.sum(axis=-1, keepdims=True)
+
+        np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
+
+
+# ------------------------------------------ low-rank gradients / config / notice
+
+class TestGMMLayerLowRankTraining:
+    """Gradient flow through ``covariance_factors``, plus the D-002 falsification check."""
+
+    @staticmethod
+    def _factor_gradient(strength: float) -> "np.ndarray":
+        """Gradient of (MSE + registered layer losses) w.r.t. ``covariance_factors``.
+
+        Both call sites must compare gradients at the SAME parameter point, so every
+        weight is pinned to a fixed seeded value before the tape runs. Only
+        ``isometric_regularizer_strength`` differs between calls.
+
+        :param strength: Value for ``isometric_regularizer_strength``.
+        :type strength: float
+        :return: Gradient array of shape ``(K, D, R)``.
+        :rtype: np.ndarray
+        """
+        import tensorflow as tf
+
+        n_components, feature_dims, rank, batch = 3, 6, 2, 12
+        rng = np.random.RandomState(5)
+        x = rng.normal(size=(batch, feature_dims)).astype("float32")
+        target = rng.uniform(size=(batch, n_components)).astype("float32")
+
+        layer = GMMLayer(
+            n_components=n_components,
+            covariance_type="low_rank",
+            covariance_rank=rank,
+            isometric_regularizer_strength=strength,
+            mean_initializer="glorot_normal",
+        )
+        layer(x)  # build
+
+        # Pin ALL parameters so the two configurations are compared at one point.
+        layer.means.assign(
+            rng.normal(size=(n_components, feature_dims)).astype("float32")
+        )
+        layer.log_variances.assign(
+            rng.normal(scale=0.5, size=(n_components, feature_dims)).astype("float32")
+        )
+        layer.mixture_logits.assign(rng.normal(size=(n_components,)).astype("float32"))
+        layer.covariance_factors.assign(
+            rng.normal(scale=0.3, size=(n_components, feature_dims, rank)).astype("float32")
+        )
+
+        with tf.GradientTape() as tape:
+            out = layer(x, training=True)
+            loss = tf.reduce_mean(tf.square(out - target))
+            if layer.losses:
+                loss = loss + tf.add_n(layer.losses)
+        grad = tape.gradient(loss, layer.covariance_factors)
+        assert grad is not None, (
+            "covariance_factors received a None gradient -- the weight is disconnected "
+            "from the loss and can never train"
+        )
+        return np.asarray(ops.convert_to_numpy(grad), dtype=np.float64)
+
+    def test_gradient_flows_through_covariance_factors(self) -> None:
+        """3d: ``covariance_factors`` gradients are non-None and non-zero."""
+        grad = self._factor_gradient(strength=0.0)
+        assert np.all(np.isfinite(grad))
+        assert np.abs(grad).max() > 0.0, (
+            "covariance_factors gradient is identically zero -- the low-rank factor is a "
+            "dead weight (this is exactly what a zeros initializer would produce)"
+        )
+
+    def test_isometric_regularizer_does_not_suppress_factor_gradients(self) -> None:
+        """Pre-Mortem #2 / D-002 falsification check -- NOT a routine assertion.
+
+        D-002 chose Option D (reframe the isometric regularizer as a PPCA-style prior on
+        the residual diagonal) over Option B (extend the loss to U's Gram spectrum). That
+        choice is a falsifiable CLAIM: that the default-on regularizer complements the
+        low-rank feature rather than fighting it. The pre-registered empirical form of
+        "quietly fighting" is ``covariance_factors`` gradients suppressed by more than an
+        order of magnitude versus a ``strength=0.0`` control.
+
+        If this fires, do NOT tune the strength and do NOT loosen the bound. D-002 is
+        falsified and must escalate to Option B.
+
+        .. warning::
+           **Read the measured ratio honestly.** The isometric loss reads
+           ``log_variances`` only, so ``U`` is not on its computational graph at all and
+           ``d(iso)/dU`` is a STRUCTURAL zero. This check therefore returns exactly 1.0
+           by construction, and it can only ever fail if a future edit wires the
+           regularizer to ``U``. That makes it a real guard against a real regression --
+           but it is a SINGLE-POINT check, and it does not and cannot observe the
+           INDIRECT effect: the regularizer shapes ``d_k``, and ``d_k`` enters ``U``'s
+           gradient through the Woodbury terms, so two training TRAJECTORIES still
+           diverge. Falsifying D-002 on the indirect channel would need a fitted-model
+           comparison, which is out of this suite's scope.
+        """
+        regularized = self._factor_gradient(strength=0.01)  # the ctor default
+        control = self._factor_gradient(strength=0.0)
+
+        regularized_norm = float(np.linalg.norm(regularized))
+        control_norm = float(np.linalg.norm(control))
+        assert control_norm > 0.0, "control gradient is zero; the comparison is vacuous"
+
+        ratio = regularized_norm / control_norm
+        assert ratio > 0.1, (
+            f"covariance_factors gradient norm fell to {ratio:.4f}x the "
+            f"strength=0.0 control (< 0.1x = more than an order of magnitude). "
+            f"Pre-Mortem #2 has FIRED: the isometric regularizer is quietly fighting the "
+            f"low-rank feature, which falsifies D-002's PPCA reframe. Do NOT tune the "
+            f"strength or relax this bound -- escalate D-002 to Option B (extend the "
+            f"loss to U's Gram spectrum)."
+        )
+
+    def test_low_rank_config_roundtrip(self) -> None:
+        """3d: the three new keys survive get_config/from_config.
+
+        Per-key ``in`` / ``==`` checks, per repo norm -- never a full-dict equality,
+        which would break on every unrelated Keras base-config addition.
+        """
+        layer = GMMLayer(
+            n_components=4,
+            covariance_type="low_rank",
+            covariance_rank=3,
+            factor_initializer="he_normal",
+            mean_initializer="glorot_normal",
+        )
+        config = layer.get_config()
+
+        for key in ("covariance_type", "covariance_rank", "factor_initializer"):
+            assert key in config, f"get_config() is missing '{key}'"
+        assert config["covariance_type"] == "low_rank"
+        assert config["covariance_rank"] == 3
+
+        restored = GMMLayer.from_config(config)
+        assert restored.covariance_type == "low_rank"
+        assert restored.covariance_rank == 3
+        assert isinstance(restored.factor_initializer, keras.initializers.HeNormal)
+
+    @pytest.mark.parametrize("covariance_type,should_fire", [
+        ("low_rank", True),
+        ("diagonal", False),
+    ])
+    def test_isometric_notice_fires_only_for_non_diagonal(
+        self, caplog, covariance_type: str, should_fire: bool
+    ) -> None:
+        """SC9 / D-002: the reframe must be ANNOUNCED, not left to the docstring.
+
+        Silence is the one outcome D-002 rules out. The notice must fire on
+        ``low_rank`` + ``strength > 0`` and must stay quiet under ``diagonal``, where the
+        regularizer's original semantics are unchanged and a notice would be noise.
+        """
+        import logging
+
+        with caplog.at_level(logging.INFO, logger="dl"):
+            GMMLayer(
+                n_components=4,
+                covariance_type=covariance_type,
+                isometric_regularizer_strength=0.01,
+                mean_initializer="glorot_normal",
+            )
+
+        fired = any(
+            "isometric-kernel regularizer" in record.message
+            for record in caplog.records
+            if record.levelno == logging.INFO
+        )
+        assert fired is should_fire, (
+            f"covariance_type='{covariance_type}': expected the D-002 notice "
+            f"{'to fire' if should_fire else 'to stay silent'}, but it "
+            f"{'fired' if fired else 'did not fire'}"
+        )
+
+
+# --------------------------------------------------------------- reset (D-005)
+
+class TestGMMLayerLowRankReset:
+    """D-005: ``reset_parameters()`` must be truthful under BOTH covariance modes."""
+
+    def test_reset_reinitializes_covariance_factors(self) -> None:
+        """3e: reset re-DRAWS ``covariance_factors`` -- it does not zero them.
+
+        Two distinct claims, both load-bearing:
+
+        1. the values actually CHANGE (before the fix they were silently retained, so a
+           "reset" layer kept its old covariance structure), and
+        2. they are NOT zeroed -- ``dL/dU`` vanishes identically at ``U = 0``, so zeroing
+           would swap a stale weight for a permanently untrainable one.
+        """
+        n_components, feature_dims, rank = 3, 6, 2
+        x = np.random.RandomState(31).normal(
+            size=(8, feature_dims)
+        ).astype("float32")
+        layer = GMMLayer(
+            n_components=n_components,
+            covariance_type="low_rank",
+            covariance_rank=rank,
+            mean_initializer="glorot_normal",
+        )
+        layer(x)  # build
+
+        # Pin to a known, clearly non-initializer value so "changed" is unambiguous.
+        pinned = np.full((n_components, feature_dims, rank), 7.0, dtype="float32")
+        layer.covariance_factors.assign(pinned)
+
+        layer.reset_parameters()
+        after = np.asarray(ops.convert_to_numpy(layer.covariance_factors))
+
+        assert after.shape == (n_components, feature_dims, rank)
+        assert not np.allclose(after, pinned), (
+            "reset_parameters() left covariance_factors untouched; a reset low-rank "
+            "layer would silently retain its old covariance structure (D-005)"
+        )
+        assert np.abs(after).max() > 0.0, (
+            "reset_parameters() zeroed covariance_factors. Zero U is a DEAD weight -- "
+            "the Woodbury correction is quadratic in U about the origin, so dL/dU "
+            "vanishes identically. Re-run factor_initializer instead (D-005)."
+        )
+        assert np.all(np.isfinite(after))
+
+    def test_reset_is_inert_for_diagonal(self) -> None:
+        """The D-005 fix must not disturb the diagonal path: no weight, no crash."""
+        x = np.random.RandomState(32).normal(size=(8, 6)).astype("float32")
+        layer = GMMLayer(n_components=3, mean_initializer="glorot_normal")
+        layer(x)
+        assert layer.covariance_factors is None
+
+        layer.reset_parameters()  # must not raise
+
+        np.testing.assert_allclose(
+            ops.convert_to_numpy(layer.log_variances),
+            np.zeros_like(ops.convert_to_numpy(layer.log_variances)),
+            atol=1e-7,
+        )
+        assert layer.covariance_factors is None
