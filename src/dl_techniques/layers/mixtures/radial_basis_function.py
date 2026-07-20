@@ -46,7 +46,7 @@ References:
 import keras
 import numpy as np
 from keras import ops
-from typing import Optional, Union, Tuple, Dict, Any
+from typing import Literal, Optional, Union, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
 
@@ -121,6 +121,15 @@ class RBFLayer(keras.layers.Layer):
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param gamma_regularizer: Optional regularizer for width parameters.
     :type gamma_regularizer: Optional[keras.regularizers.Regularizer]
+    :param output_mode: Output normalization mode. ``'basis'`` (the default)
+        returns the raw unnormalized Gaussian activations
+        ``phi_k = exp(-gamma_k * ||x - c_k||^2)``. ``'normalized'`` returns the
+        Normalized RBF (NRBF) activations ``phi_k / sum_j phi_j``, which sum to
+        1.0 along the last axis. Note this vocabulary is deliberately DISJOINT
+        from ``GMMLayer``/``KMeansLayer``'s ``{'assignments', 'mixture'}``: RBF
+        has no reconstruction-mode analogue, and its normalized output is a
+        normalized basis activation, not a posterior or cluster assignment.
+    :type output_mode: Literal['basis', 'normalized']
     :param kwargs: Additional keyword arguments for the Layer base class.
     :type kwargs: Any"""
 
@@ -136,6 +145,7 @@ class RBFLayer(keras.layers.Layer):
         safety_margin: float = 0.2,
         kernel_regularizer: Optional[keras.regularizers.Regularizer] = None,
         gamma_regularizer: Optional[keras.regularizers.Regularizer] = None,
+        output_mode: Literal['basis', 'normalized'] = 'basis',
         **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
@@ -150,8 +160,13 @@ class RBFLayer(keras.layers.Layer):
             raise ValueError(f"min_center_distance must be positive, got {min_center_distance}")
         if safety_margin < 0:
             raise ValueError(f"safety_margin must be non-negative, got {safety_margin}")
+        if output_mode not in ['basis', 'normalized']:
+            raise ValueError(
+                f"output_mode must be 'basis' or 'normalized', got {output_mode}"
+            )
 
         self.units = units
+        self.output_mode = output_mode
         self.gamma_init = gamma_init
         self.repulsion_strength = repulsion_strength
         self.min_center_distance = min_center_distance
@@ -281,7 +296,9 @@ class RBFLayer(keras.layers.Layer):
         :type inputs: keras.KerasTensor
         :param training: Whether in training mode.
         :type training: bool
-        :return: RBF activations of shape ``(batch, ..., units)``.
+        :return: RBF activations of shape ``(batch, ..., units)``. Unnormalized
+            under ``output_mode='basis'``; summing to 1.0 along the last axis
+            under ``output_mode='normalized'``.
         :rtype: keras.KerasTensor"""
         # Inputs shape: (batch, ..., dim)
         # Centers shape: (units, dim)
@@ -309,7 +326,22 @@ class RBFLayer(keras.layers.Layer):
         # exp(-50) is effectively 0
         exponent = ops.minimum(dist_sq * self.gamma, 50.0)
 
-        output = ops.exp(-exponent)
+        # DECISION plan-2026-07-20T160907-7de371a1/D-002: NRBF is a softmax over the
+        # PRE-exp `-exponent` (which IS log(phi)), computed here in variable_dtype
+        # (float32) and strictly ABOVE the ops.cast(output, self.compute_dtype) below.
+        # Do NOT rewrite this as `output / ops.sum(output, axis=-1, keepdims=True)`, and
+        # do NOT move it below the cast. Both are real NaN bugs, not style preferences:
+        # the 50.0 clip floors phi at exp(-50) ~ 1.93e-22, which is a normal float32 but
+        # flushes to EXACT 0.0 in float16, so under a mixed_float16 policy a post-cast
+        # division is 0/0 -> NaN for any input far from every center (reproduced live;
+        # see findings/rbf-normalization.md F8). softmax is shift-invariant -- its
+        # largest term is always exp(0)=1, so its denominator is always >= 1 and cannot
+        # vanish -- and it is EXACTLY equal to phi_k/sum_j phi_j, not an approximation.
+        # `training` is not consulted: normalization is identical in train and inference.
+        if self.output_mode == 'normalized':
+            output = ops.softmax(-exponent, axis=-1)
+        else:
+            output = ops.exp(-exponent)
 
         # DECISION plan_2026-06-14_5e80bd3e/D-001: gate on a graph-safe training factor so
         # the repulsion loss fires for a symbolic training=True tensor (custom @tf.function
@@ -362,6 +394,7 @@ class RBFLayer(keras.layers.Layer):
             'safety_margin': self.safety_margin,
             'kernel_regularizer': keras.regularizers.serialize(self.kernel_regularizer),
             'gamma_regularizer': keras.regularizers.serialize(self.gamma_regularizer),
+            'output_mode': self.output_mode,
         })
         return config
 

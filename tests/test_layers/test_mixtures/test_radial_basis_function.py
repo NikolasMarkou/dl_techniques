@@ -281,7 +281,8 @@ class TestRBFLayer:
         required_keys = [
             'units', 'gamma_init', 'repulsion_strength', 'min_center_distance',
             'safety_margin', 'trainable_gamma', 'center_initializer',
-            'center_constraint', 'kernel_regularizer', 'gamma_regularizer'
+            'center_constraint', 'kernel_regularizer', 'gamma_regularizer',
+            'output_mode',
         ]
 
         for key in required_keys:
@@ -604,6 +605,10 @@ class TestRBFLayer:
         - Bounded output range maintained
         """
         layer = RBFLayer(**layer_config)
+        # Same extreme-input battery, in the opt-in normalized mode. The 'basis'
+        # assertions below (range [0, 1], no NaN/Inf) hold for NRBF too, and the
+        # normalized arm additionally must sum to exactly 1.0 along the last axis.
+        norm_layer = RBFLayer(**layer_config, output_mode='normalized')
         input_dim = 4
         batch_size = 16
 
@@ -636,6 +641,21 @@ class TestRBFLayer:
 
             assert np.all(outputs_np <= 1.0), \
                 f"Outputs > 1.0 for case: {case_name}"
+
+            norm_np = ops.convert_to_numpy(norm_layer(inputs))
+
+            assert not np.any(np.isnan(norm_np)), \
+                f"NaN in normalized outputs for case: {case_name}"
+            assert not np.any(np.isinf(norm_np)), \
+                f"Inf in normalized outputs for case: {case_name}"
+            assert np.all(norm_np >= 0.0), \
+                f"Negative normalized outputs for case: {case_name}"
+            np.testing.assert_allclose(
+                norm_np.sum(axis=-1),
+                np.ones(batch_size, dtype='float32'),
+                rtol=1e-6, atol=1e-6,
+                err_msg=f"normalized outputs do not sum to 1.0 for case: {case_name}",
+            )
 
     def test_edge_cases(self) -> None:
         """Test error conditions and edge cases."""
@@ -724,8 +744,318 @@ class TestRBFLayerGraphMode:
             # Parameters stay float32 (autocast=False).
             assert keras.backend.standardize_dtype(layer.centers.dtype) == "float32"
             assert keras.backend.standardize_dtype(layer.gamma_raw.dtype) == "float32"
+
+            # --- NRBF regression guard for the reproduced fp16 NaN (D-002/F8) -----
+            # This is the direct guard on the failure mode: `phi` bottoms out at the
+            # 50.0 exponent clip, exp(-50) ~ 1.93e-22, which is a normal float32 but
+            # flushes to EXACT 0.0 in float16. A `phi / sum(phi)` normalization applied
+            # to the float16 tensor is therefore 0/0 -> NaN for any input far from
+            # every center. `x_far` below is exactly such an input (centers are
+            # initialized in [-0.05, 0.05]; 1e4 is far outside every one of them), so
+            # a naive/post-cast implementation makes this assertion FAIL, not pass
+            # vacuously. Verified by running it against such an implementation.
+            norm_layer = RBFLayer(units=8, repulsion_strength=0.5,
+                                  output_mode='normalized')
+            x_far = np.full((4, 16), 1e4, dtype=np.float32)
+            for name, xs in (("near", x), ("far", x_far)):
+                yn = norm_layer(xs)
+                assert keras.backend.standardize_dtype(yn.dtype) == "float16"
+                yn_np = np.asarray(ops.convert_to_numpy(yn), dtype=np.float32)
+                assert not np.isnan(yn_np).any(), \
+                    f"NaN in mixed_float16 normalized output ({name} input)"
+                assert not np.isinf(yn_np).any(), \
+                    f"Inf in mixed_float16 normalized output ({name} input)"
+                # float16 has ~3 decimal digits, hence the loose tolerance here.
+                np.testing.assert_allclose(
+                    yn_np.sum(axis=-1), np.ones(xs.shape[0], dtype=np.float32),
+                    rtol=1e-2, atol=1e-2,
+                    err_msg=f"mixed_float16 normalized output ({name}) must sum to 1",
+                )
+            # Far from every center every exponent saturates at the shared 50.0 clip,
+            # so NRBF is exactly uniform -- not NaN, and not degenerate to one-hot.
+            far_np = np.asarray(
+                ops.convert_to_numpy(norm_layer(x_far)), dtype=np.float32
+            )
+            np.testing.assert_allclose(
+                far_np, np.full((4, 8), 1.0 / 8.0, dtype=np.float32),
+                rtol=1e-2, atol=1e-2,
+                err_msg="saturated NRBF output must be uniform 1/units",
+            )
         finally:
             keras.mixed_precision.set_global_policy(original_policy)
+
+
+class TestRBFLayerOutputMode:
+    """The opt-in ``output_mode='normalized'`` (NRBF) surface.
+
+    Covers the two things that can silently break: the DEFAULT ``'basis'`` arm
+    drifting away from its pre-change behavior, and the normalized arm being
+    implemented as a naive ``phi / sum(phi)`` division (a real NaN under
+    ``mixed_float16``; see ``RBFLayer.call``'s D-002 anchor).
+    """
+
+    # Pinned pre-change capture (see plan step 2a). Weights are assigned
+    # explicitly below, so this is a fixed numeric target rather than a re-run
+    # of the implementation against itself: ANY change to the default arm's
+    # arithmetic -- including an algebraically-equivalent rewrite of
+    # exp(-min(dist_sq * gamma, 50.0)) -- moves these bits and fails the test.
+    GOLDEN_CENTERS = np.array(
+        [[0.0, 0.0], [1.0, 2.0], [-3.0, 0.5]], dtype='float32'
+    )
+    GOLDEN_GAMMA_RAW = np.array([0.5413248, 1.0, -0.5], dtype='float32')
+    GOLDEN_X = np.array(
+        [[0.5, -0.5], [2.0, 2.0], [1000.0, 1000.0]], dtype='float32'
+    )
+    GOLDEN_BASIS = np.array([
+        [0.6065306663513184, 0.00019623443949967623, 0.0018705554539337754],
+        [0.000335462624207139, 0.2689414620399475, 2.452020453347359e-06],
+        [1.9287498933537385e-22, 1.9287498933537385e-22, 1.9287498933537385e-22],
+    ], dtype='float32')
+
+    def _golden_layer(self, **kwargs: Any) -> RBFLayer:
+        """Build a fully deterministic RBFLayer with the pinned golden weights."""
+        layer = RBFLayer(units=3, repulsion_strength=0.0, **kwargs)
+        layer.build(self.GOLDEN_X.shape)
+        layer.centers.assign(self.GOLDEN_CENTERS)
+        layer.gamma_raw.assign(self.GOLDEN_GAMMA_RAW)
+        return layer
+
+    def test_golden_capture_is_deterministic(self) -> None:
+        """Precondition: the golden comparison is only meaningful if the capture
+        is reproducible. Two independent layers with the same assigned weights
+        must agree BIT-exactly, otherwise the next test's assert_array_equal
+        would be flaky rather than falsifying."""
+        a = ops.convert_to_numpy(self._golden_layer()(self.GOLDEN_X))
+        b = ops.convert_to_numpy(self._golden_layer()(self.GOLDEN_X))
+        np.testing.assert_array_equal(
+            a, b, err_msg="RBF forward pass is not deterministic"
+        )
+
+    def test_default_basis_matches_pre_change_capture(self) -> None:
+        """SC10: the default arm still produces the PRE-change numbers.
+
+        Tolerance note: this is ``assert_allclose(rtol=1e-6)``, not
+        ``assert_array_equal``, purely because ``GOLDEN_BASIS`` was captured on
+        one device and ``exp`` differs by up to ~1 ULP (measured: 1.1e-7 on two
+        elements) between the CPU and CUDA kernels. That is a property of the
+        capture medium, not a weakening of the claim: every behavior change this
+        test exists to catch moves the values by ORDERS of magnitude (switching
+        the default to softmax turns 1.93e-22 into 0.333), so a 1e-6 relative
+        band cannot hide one. The strictly bit-exact half of the claim is
+        asserted device-portably in the next test.
+        """
+        layer = self._golden_layer()
+        assert layer.output_mode == 'basis', "default output_mode must be 'basis'"
+
+        got = np.asarray(ops.convert_to_numpy(layer(self.GOLDEN_X)))
+        np.testing.assert_allclose(
+            got, self.GOLDEN_BASIS, rtol=1e-6, atol=0.0,
+            err_msg=(
+                "default 'basis' output drifted from the pre-change capture -- "
+                "backward compatibility is broken"
+            ),
+        )
+
+    def test_default_basis_is_bit_exact_with_reference_formula(self) -> None:
+        """I4/SC10: the default arm is BIT-identical to ``exp(-min(d2*gamma, 50))``.
+
+        The reference below is the documented formula, rebuilt from the layer's
+        own weights with the same keras ops on the same device -- so
+        ``assert_array_equal`` is legitimate here and portable, unlike a
+        cross-device numeric capture. This is the assertion that fires on the
+        refactors most likely to break bit-exactness while adding a branch
+        nearby: hoisting the compute_dtype cast above the branch, factoring the
+        ``exp`` into a shared helper, or algebraically rewriting the exponent.
+        """
+        layer = self._golden_layer()
+        x = ops.convert_to_tensor(self.GOLDEN_X)
+
+        dist_sq = ops.sum(
+            ops.square(ops.expand_dims(x, axis=-2) - layer.centers), axis=-1
+        )
+        reference = ops.exp(-ops.minimum(dist_sq * layer.gamma, 50.0))
+
+        np.testing.assert_array_equal(
+            np.asarray(ops.convert_to_numpy(layer(self.GOLDEN_X))),
+            np.asarray(ops.convert_to_numpy(reference)),
+            err_msg=(
+                "default 'basis' output is no longer bit-identical to "
+                "exp(-min(dist_sq * gamma, 50.0))"
+            ),
+        )
+
+    def test_normalized_matches_numpy_division_reference(self) -> None:
+        """SC11: NRBF equals ``phi_k / sum_j phi_j``, computed independently.
+
+        The reference is the textbook definition applied to the GOLDEN basis
+        values in float64 -- it shares no code with the layer. It catches a
+        softmax over the wrong axis, a sign error on the exponent, and a mode
+        branch that silently falls through to 'basis'.
+        """
+        got = np.asarray(
+            ops.convert_to_numpy(
+                self._golden_layer(output_mode='normalized')(self.GOLDEN_X)
+            )
+        )
+        phi = self.GOLDEN_BASIS.astype('float64')
+        expected = phi / phi.sum(axis=-1, keepdims=True)
+
+        np.testing.assert_allclose(
+            got, expected, rtol=1e-6, atol=1e-6,
+            err_msg="normalized output does not equal phi / sum(phi)",
+        )
+        # ...and it is genuinely DIFFERENT from the basis output, so the check
+        # above cannot pass by the branch being a no-op.
+        assert not np.allclose(got, self.GOLDEN_BASIS, atol=1e-6)
+
+    @pytest.mark.parametrize("shape", [(16, 4), (8, 12, 4)])
+    def test_normalized_sums_to_one(self, shape: Tuple[int, ...]) -> None:
+        """SC11: normalized activations sum to 1.0 along the unit axis, at any rank."""
+        layer = RBFLayer(units=5, output_mode='normalized')
+        x = np.random.RandomState(3).normal(0, 2, shape).astype('float32')
+        y = np.asarray(ops.convert_to_numpy(layer(x)))
+
+        assert y.shape == shape[:-1] + (5,)
+        np.testing.assert_allclose(
+            y.sum(axis=-1), np.ones(shape[:-1], dtype='float32'),
+            rtol=1e-6, atol=1e-6,
+        )
+
+    def test_normalized_far_from_all_centers_is_uniform_not_nan(self) -> None:
+        """The underflow case that makes a naive division NaN.
+
+        Every exponent saturates at the shared 50.0 clip, so ``phi`` is a
+        uniform 1.93e-22 -- the exact value that flushes to 0.0 in float16 --
+        and correct NRBF output is exactly ``1/units``, not NaN and not one-hot.
+        """
+        layer = RBFLayer(units=6, gamma_init=5.0, output_mode='normalized')
+        x = np.full((4, 3), 1e6, dtype='float32')
+        y = np.asarray(ops.convert_to_numpy(layer(x)))
+
+        assert not np.isnan(y).any(), "NaN from the far-from-all-centers input"
+        assert not np.isinf(y).any()
+        np.testing.assert_allclose(
+            y, np.full((4, 6), 1.0 / 6.0, dtype='float32'), rtol=1e-6, atol=1e-6,
+            err_msg="saturated NRBF must be exactly uniform 1/units",
+        )
+
+    def test_normalized_gradients_flow(self) -> None:
+        """Gradients reach both centers and gamma_raw through the softmax."""
+        layer = RBFLayer(units=5, output_mode='normalized')
+        x = tf.constant(
+            np.random.RandomState(9).normal(0, 1, (16, 4)).astype('float32')
+        )
+
+        with tf.GradientTape() as tape:
+            loss = ops.mean(ops.square(layer(x, training=True)))
+        grads = tape.gradient(loss, layer.trainable_weights)
+
+        assert len(grads) == 2, "expected gradients for centers and gamma_raw"
+        for weight, grad in zip(layer.trainable_weights, grads):
+            assert grad is not None, f"None gradient for {weight.name}"
+            g = np.asarray(ops.convert_to_numpy(grad))
+            assert not np.isnan(g).any(), f"NaN gradient for {weight.name}"
+            assert not np.isinf(g).any(), f"Inf gradient for {weight.name}"
+            assert np.abs(g).max() > 0.0, f"vanished gradient for {weight.name}"
+
+    def test_invalid_output_mode_raises(self) -> None:
+        """Validation matches the house `<param> must be ..., got <value>` shape."""
+        with pytest.raises(ValueError, match="output_mode must be"):
+            RBFLayer(units=4, output_mode='assignments')
+        with pytest.raises(ValueError, match="output_mode must be"):
+            RBFLayer(units=4, output_mode='mixture')
+
+    def test_config_round_trip_preserves_output_mode(self) -> None:
+        """Per-key config checks (never full-dict equality) at a NON-default value."""
+        layer = RBFLayer(units=7, gamma_init=2.0, output_mode='normalized')
+        config = layer.get_config()
+
+        assert 'output_mode' in config
+        assert config['output_mode'] == 'normalized'
+
+        restored = RBFLayer.from_config(config)
+        assert restored.output_mode == 'normalized'
+        assert restored.units == 7
+        assert restored.gamma_init == 2.0
+
+        # A default-constructed layer must still round-trip as 'basis'.
+        assert RBFLayer(units=7).get_config()['output_mode'] == 'basis'
+
+    def test_normalized_save_load_round_trip(self) -> None:
+        """SC14 / guide 8.2: a REAL .keras archive round-trip, not a get_config cycle.
+
+        Uses the NON-default output_mode on purpose: with the default, a
+        from_config that dropped the key entirely would still reconstruct a
+        matching layer and the test could not fail.
+        """
+        x = np.random.RandomState(21).normal(0, 1, (16, 4)).astype('float32')
+
+        inputs = keras.Input(shape=(4,))
+        rbf = RBFLayer(units=6, output_mode='normalized')(inputs)
+        outputs = keras.layers.Dense(3, activation='softmax')(rbf)
+        model = keras.Model(inputs, outputs)
+
+        original = ops.convert_to_numpy(model(x))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = os.path.join(tmpdir, 'rbf_normalized.keras')
+            model.save(filepath)
+            loaded = keras.models.load_model(filepath)
+
+            np.testing.assert_allclose(
+                original, ops.convert_to_numpy(loaded(x)),
+                rtol=1e-6, atol=1e-6,
+                err_msg="predictions differ after the .keras round-trip",
+            )
+
+            reloaded_rbf = [
+                lyr for lyr in loaded.layers if isinstance(lyr, RBFLayer)
+            ]
+            assert len(reloaded_rbf) == 1
+            assert reloaded_rbf[0].output_mode == 'normalized', (
+                "output_mode was not restored from the .keras archive"
+            )
+
+    def test_factory_honors_output_mode(self) -> None:
+        """SC13: BOTH factory sites.
+
+        Site (a): the layer's attribute is asserted, not merely that the call did
+        not raise -- a missing MIXTURE_REGISTRY key makes create_mixture_layer
+        SILENTLY drop the kwarg and return a basis-mode layer.
+        Site (b): validate_mixture_config must accept RBF's own vocabulary and
+        must NOT have been broadened for the sibling types.
+        """
+        from dl_techniques.layers.mixtures.factory import (
+            create_mixture_layer, validate_mixture_config, MIXTURE_REGISTRY,
+        )
+
+        # (a) registry default mirrors the constructor default.
+        assert MIXTURE_REGISTRY['rbf']['optional_params']['output_mode'] == 'basis'
+
+        layer = create_mixture_layer('rbf', units=4, output_mode='normalized')
+        assert layer.output_mode == 'normalized', (
+            "create_mixture_layer dropped output_mode -- registry site missed"
+        )
+        assert create_mixture_layer('rbf', units=4).output_mode == 'basis'
+
+        y = np.asarray(ops.convert_to_numpy(
+            layer(np.random.RandomState(5).normal(0, 1, (8, 3)).astype('float32'))
+        ))
+        np.testing.assert_allclose(
+            y.sum(axis=-1), np.ones(8, dtype='float32'), rtol=1e-6, atol=1e-6,
+            err_msg="factory-built layer did not actually normalize",
+        )
+
+        # (b) validator is type-scoped in BOTH directions.
+        validate_mixture_config('rbf', units=4, output_mode='normalized')
+        validate_mixture_config('rbf', units=4, output_mode='basis')
+        with pytest.raises(ValueError, match="output_mode"):
+            validate_mixture_config('rbf', units=4, output_mode='assignments')
+        validate_mixture_config('kmeans', n_clusters=4, output_mode='assignments')
+        with pytest.raises(ValueError, match="output_mode"):
+            validate_mixture_config('kmeans', n_clusters=4, output_mode='normalized')
+        with pytest.raises(ValueError, match="output_mode"):
+            validate_mixture_config('gmm', n_components=4, output_mode='basis')
 
 
 if __name__ == '__main__':

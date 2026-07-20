@@ -74,6 +74,10 @@ MIXTURE_REGISTRY: Dict[str, Dict[str, Any]] = {
             'safety_margin': 0.2,
             'kernel_regularizer': None,
             'gamma_regularizer': None,
+            # Must mirror RBFLayer.__init__'s default exactly. Omitting it here would
+            # make create_mixture_layer's valid_param_names filter SILENTLY DROP a
+            # caller-supplied output_mode (test_factory_registry_drift.py also reds).
+            'output_mode': 'basis',
         },
         'use_case': 'Localized RBF feature responses; soft prototype / kernel-based representations',
     },
@@ -182,9 +186,19 @@ def validate_mixture_config(mixture_type: str, **kwargs: Any) -> None:
             if kwargs[nn_param] < 0:
                 raise ValueError(f"{nn_param} must be non-negative, got {kwargs[nn_param]}")
 
-    # Validate output_mode for kmeans / gmm
+    # Validate output_mode. DECISION plan-2026-07-20T160907-7de371a1/D-003: the legal
+    # value set is per-mixture_type, NOT shared. RBFLayer reuses the kwarg NAME for
+    # house-style consistency but has a disjoint vocabulary ('basis'/'normalized'), as
+    # it has no reconstruction-mode analogue to 'mixture'. Do NOT collapse this back to
+    # a single shared literal set: that would make the factory REJECT RBF's own legal
+    # values with an error naming {'assignments','mixture'}. Do NOT generalize it into
+    # MIXTURE_REGISTRY either -- the registry carries no validation-type metadata, so
+    # that is schema design, explicitly cut from this plan's scope (F15).
     if 'output_mode' in kwargs and kwargs['output_mode'] is not None:
-        valid_modes = {'assignments', 'mixture'}
+        valid_modes = (
+            {'basis', 'normalized'} if mixture_type == 'rbf'
+            else {'assignments', 'mixture'}
+        )
         if kwargs['output_mode'] not in valid_modes:
             raise ValueError(
                 f"output_mode must be one of {sorted(valid_modes)}, got '{kwargs['output_mode']}'"
