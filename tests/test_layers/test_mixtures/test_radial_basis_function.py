@@ -735,8 +735,16 @@ class TestRBFLayerGraphMode:
         original_policy = keras.mixed_precision.global_policy()
         try:
             keras.mixed_precision.set_global_policy("mixed_float16")
-            layer = RBFLayer(units=8, repulsion_strength=0.5)
-            x = np.random.normal(0, 1, (8, 16)).astype(np.float32)
+            # Seeded explicitly, and with a LOCAL RandomState: the assertions below depend
+            # on where the centers sit relative to `x_far`, and the default
+            # center_initializer='uniform' would otherwise draw from the global stream.
+            # That made the far-from-every-center margin an accident of collection order
+            # rather than a property of the layer, and consumed global numpy RNG state
+            # that sibling tests in this process also draw from.
+            centers = keras.initializers.RandomUniform(-0.05, 0.05, seed=1729)
+            layer = RBFLayer(units=8, repulsion_strength=0.5,
+                             center_initializer=centers)
+            x = np.random.RandomState(17).normal(0, 1, (8, 16)).astype(np.float32)
             y = layer(x)
             assert keras.backend.standardize_dtype(y.dtype) == "float16"
             y_np = np.asarray(ops.convert_to_numpy(y), dtype=np.float32)
@@ -752,11 +760,13 @@ class TestRBFLayerGraphMode:
             # inputs it is far smaller still. A `phi / sum(phi)` normalization applied
             # to the float16 tensor is therefore 0/0 -> NaN for any input far from
             # every center. `x_far` below is exactly such an input (centers are
-            # initialized in [-0.05, 0.05]; 1e4 is far outside every one of them), so
-            # a naive/post-cast implementation makes this assertion FAIL, not pass
-            # vacuously. Verified by running it against such an implementation.
+            # initialized in [-0.05, 0.05] -- pinned by the seeded initializer above,
+            # not merely inherited from the keras default; 1e4 is far outside every one
+            # of them), so a naive/post-cast implementation makes this assertion FAIL,
+            # not pass vacuously. Verified by running it against such an implementation.
             norm_layer = RBFLayer(units=8, repulsion_strength=0.5,
-                                  output_mode='normalized')
+                                  output_mode='normalized',
+                                  center_initializer=centers)
             x_far = np.full((4, 16), 1e4, dtype=np.float32)
             for name, xs in (("near", x), ("far", x_far)):
                 yn = norm_layer(xs)
