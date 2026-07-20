@@ -987,6 +987,10 @@ class TestGMMLayerLowRankInteractions:
         assert np.all(np.isfinite(y_np))
         assert np.all(y_np >= 0.0)
 
+    # DECISION plan-2026-07-20T141712-e03557c8/D-010: characterize and PIN, do not fix.
+    # See src/dl_techniques/layers/mixtures/base.py::_reshape_output for the mechanism and
+    # decisions.md D-010 for the full record. strict=True so a repair flips this to a
+    # hard FAILURE demanding attention, rather than letting the defect silently persist.
     @pytest.mark.xfail(
         strict=True,
         reason=(

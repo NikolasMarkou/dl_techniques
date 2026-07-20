@@ -177,6 +177,18 @@ class _ClusterAxisMixin:
         :return: Reshaped output tensor.
         :rtype: keras.KerasTensor
         """
+        # DECISION plan-2026-07-20T141712-e03557c8/D-010: KNOWN BUG, NOT FIXED HERE.
+        # Under a multi-axis cluster_axis, the bare `reshape` below applies the correct
+        # output SHAPE to a buffer that _reshape_for_clustering laid out as
+        # (batch, non_feature, K), while the declared axis order here is
+        # (batch, K, non_feature). It is a reshape, not a transpose, so responsibilities
+        # are scrambled (not merely transposed) whenever K != non_feature_dims -- which is
+        # why every pre-existing test (all used K == non_feature_dims) missed it. Confirmed
+        # present at baseline bf953d6c; affects both GMMLayer and KMeansLayer, both
+        # covariance modes. Pinned via xfail(strict=True) in
+        # tests/test_layers/test_mixtures/test_gmm.py::test_multi_axis_output_layout_is_scrambled.
+        # Fixing this is a production behavior change and is OUT OF SCOPE for this plan --
+        # see decisions.md D-010. Do NOT silently "fix" this reshape without a fresh plan.
         if self.output_mode == 'assignments':
             output_shape = list(self.original_shape)
 

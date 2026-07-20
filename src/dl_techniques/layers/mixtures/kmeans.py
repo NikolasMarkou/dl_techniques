@@ -289,6 +289,10 @@ class KMeansLayer(BaseMixtureLayer):
                 f"output_mode must be 'assignments' or 'mixture', got {output_mode}"
             )
 
+    # DECISION plan-2026-07-20T141712-e03557c8/D-007: this property is a pure NAMING seam
+    # (self.n_clusters vs GMMLayer's self.n_components), not a semantic merge. Do NOT
+    # rename it to a shared public attribute -- that would break get_config() keys, the
+    # registry params, and the byte-unchanged __init__ signature requirement (I2/A5).
     @property
     def _n_prototypes(self) -> int:
         """Prototype count seam read by ``_ClusterAxisMixin`` (see BaseMixtureLayer).

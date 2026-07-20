@@ -347,6 +347,10 @@ class GMMLayer(BaseMixtureLayer):
                 f"covariance_rank must be a positive integer, got {covariance_rank}"
             )
 
+    # DECISION plan-2026-07-20T141712-e03557c8/D-007: this property is a pure NAMING seam
+    # (self.n_components vs KMeansLayer's self.n_clusters), not a semantic merge. Do NOT
+    # rename it to a shared public attribute -- that would break get_config() keys, the
+    # registry params, and the byte-unchanged __init__ signature requirement (I2/A5).
     @property
     def _n_prototypes(self) -> int:
         """Prototype count seam read by ``_ClusterAxisMixin`` (see BaseMixtureLayer).
