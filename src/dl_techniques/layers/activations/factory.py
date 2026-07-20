@@ -156,6 +156,12 @@ ACTIVATION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'bias_constraint': None,
             'axis': -1,
             'epsilon': 1e-7,
+            # DELIBERATE divergence from RoutingProbabilitiesLayer's own ctor default
+            # ('deterministic'): this key is the TRAINABLE door onto that class, and the sibling
+            # key 'routing_probabilities' below is the deterministic one. Do not "correct" this to
+            # match the ctor -- see README.md:23 and the machine-checked reason in
+            # INTENTIONAL_OVERRIDES (tests/test_layers/test_factory_registry_drift.py), which
+            # pins this value and will fail if it is edited.
             'mode': 'trainable',
             'use_bias': True,
             'kernel_initializer': 'glorot_uniform',
