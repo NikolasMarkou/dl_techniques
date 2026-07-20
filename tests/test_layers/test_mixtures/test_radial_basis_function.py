@@ -1233,65 +1233,139 @@ class TestRBFKnownLimitations:
         return (losses[0], losses[-1],
                 float(np.abs(c1 - c0).max()), float(np.abs(g1 - g0).max()))
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="KNOWN DEFECT (D-012), deliberately not fixed in this plan: the "
-               "50.0 clip in the DEFAULT 'basis' arm has a structurally zero "
-               "gradient in its saturated branch, so at D*gamma >~ 50 the layer "
-               "is constant exp(-50) and untrainable. Fixing it changes the "
-               "default behavior of a shipped layer and needs its own plan. "
-               "When you fix it, this test goes GREEN and pytest turns it into "
-               "a FAILURE -- delete the marker, not the test.",
-    )
-    def test_basis_mode_is_dead_at_realistic_dimension(self) -> None:
-        """The default ``'basis'`` mode does not learn at ``D = 128``.
+    @pytest.mark.parametrize("dim", [4, 128, 256])
+    def test_basis_mode_gradients_are_live_at_realistic_dimension(
+        self, dim: int
+    ) -> None:
+        """The DEFAULT ``'basis'`` arm receives real gradients at realistic ``D``.
 
-        This asserts the properties a working layer WOULD have, all of which
-        currently fail. It is the same class of defect D-008 fixed on the
-        ``'normalized'`` arm (``ops.minimum`` saturation), at the same trigger
-        (``D * gamma >~ 50``, because ``E[||x - c||^2] ~ D``), on the arm that
-        is the DEFAULT -- and it is pre-existing rather than introduced here:
-        the ``'basis'`` output is byte-identical before and after the D-008 work.
+        This is the converted half of the former
+        ``test_basis_mode_is_dead_at_realistic_dimension``
+        ``xfail(strict=True)``. D-012 asserted that ``'basis'`` cannot learn
+        *because its gradients are structurally zero*; that is the claim this
+        test now falsifies, and it is the claim the fix actually addresses. The
+        separate question of how FAST it converges is a different claim about a
+        different mechanism and lives in the xfail below -- collapsing the two
+        into one red was what made the old monolithic test undiagnosable.
 
-        Measured today with stock defaults on ``normal(0, 1)`` input: gradmax is
-        exactly ``0.0 / 0.0`` at ``D in {64, 128, 256}``; forward output is the
-        constant ``1.929e-22 = exp(-50)`` for 100% of entries; and a 40-epoch fit
-        moves ``gamma_raw`` by exactly ``0.0`` while the loss sits at chance
-        (``0.693``). Under identical conditions ``'normalized'`` reaches ``0.18``.
+        **Why this can fail under a wrong implementation.** The layer is built
+        with STOCK DEFAULTS -- no explicit ``gamma_init`` -- so it exercises the
+        resolution path itself. If that resolution is dropped, inverted, or moved
+        into ``__init__`` (where ``D`` is not knowable), gamma reverts to a
+        dimension-blind ``1.0``; then ``D * gamma >~ 50`` saturates the 50.0
+        clip, ``ops.minimum`` passes exactly zero gradient through its saturated
+        branch, and BOTH weights go to gradmax exactly ``0.0`` at
+        ``D in {128, 256}``. That is a >4-order-of-magnitude miss against the
+        floor, not a marginal one -- verified RED against mutant m1.
 
-        Deliberately uses a realistic ``D`` and stock defaults. A cheap
-        low-dimensional version of this test would PASS and prove nothing --
-        that is precisely the test-design error D-008 was about.
+        **Floor derivation (not tuned to pass).** ``MIN_USEFUL_GRADMAX`` is the
+        suite's pre-existing ``1e-4`` usefulness bar, reused unchanged. Measured
+        over 20 random center initializations per cell, the WORST observed
+        ``max|g|`` is: D=4 ``3.86e-03`` / ``2.47e-02``, D=128 ``2.42e-04`` /
+        ``3.18e-02``, D=256 ``1.28e-04`` / ``3.24e-02`` (centers / gamma_raw).
+
+        **Disclosed thinness.** At D=256 the ``centers`` gradient clears the
+        floor by only ~1.3x. That is reported rather than hidden, and it is
+        expected: the resolved gamma scales as ``1/D``, so the centers gradient
+        necessarily shrinks with ``D``. The fix restores USEFUL gradients, not
+        generous ones, and D=256 sits near the usefulness boundary. The seed is
+        pinned so this tightness is deterministic rather than flaky.
+
+        D=4 is the CONTROL: it passed before the fix too (gamma was never
+        saturated there). It is retained to document where the old blind spot
+        began. The load-bearing cells are D in {128, 256}.
         """
-        dim = 128
-        layer = RBFLayer(units=8, output_mode='basis')
+        keras.utils.set_random_seed(4242)
+        layer = RBFLayer(units=8)
         x = np.random.RandomState(11).normal(0, 1, (32, dim)).astype('float32')
 
-        # 1. Forward: output must depend on the input at all.
+        # 0. The resolution actually happened: no explicit gamma_init was given,
+        #    so the config must still carry None (build-time state must not leak).
+        assert layer.gamma_init is None, "test must exercise the DEFAULT path"
+
+        # 1. Forward: output must depend on the input at all. Before the fix this
+        #    was the constant exp(-50) = 1.929e-22 with std exactly 0.0.
         y = np.asarray(ops.convert_to_numpy(layer(x)))
         assert y.std(axis=0).max() > 1e-12, (
             f"'basis' output is constant at dim={dim} (all entries "
-            f"{np.unique(y)}) -- the 50.0 clip saturates every unit"
+            f"{np.unique(y)}) -- gamma is not being scaled to the feature dim"
         )
 
-        # 2. Gradients: both trainable weights must actually receive signal.
+        # 2. Gradients: BOTH trainable weights must clear the usefulness floor.
         xt = tf.constant(x)
         with tf.GradientTape() as tape:
             loss = ops.mean(ops.square(layer(xt, training=True)))
         grads = tape.gradient(loss, layer.trainable_weights)
+        assert len(grads) == 2, "expected gradients for centers and gamma_raw"
         for weight, grad in zip(layer.trainable_weights, grads):
-            g = np.abs(np.asarray(ops.convert_to_numpy(grad))).max()
-            assert g > TestRBFLayerOutputMode.MIN_USEFUL_GRADMAX, (
-                f"'basis' gradient for {weight.name} is {g:.4g} at dim={dim} -- "
-                "ops.minimum passes zero gradient through its saturated branch"
+            assert grad is not None, f"None gradient for {weight.name}"
+            g = np.asarray(ops.convert_to_numpy(grad))
+            assert not np.isnan(g).any(), f"NaN gradient for {weight.name}"
+            assert np.abs(g).max() > TestRBFLayerOutputMode.MIN_USEFUL_GRADMAX, (
+                f"'basis' gradient for {weight.name} is {np.abs(g).max():.4g} at "
+                f"dim={dim}, below the "
+                f"{TestRBFLayerOutputMode.MIN_USEFUL_GRADMAX:.0e} usefulness "
+                "floor -- the dimension-aware gamma_init resolution in build() "
+                "is not reaching this layer, so the 50.0 clip is saturating"
             )
 
-        # 3. End-to-end: a model containing this layer must reduce its loss.
-        #    This is the assertion pass-2 review named as the single missing
-        #    test -- it would have caught D-008 directly, and it catches D-012.
-        first, last, _d_centers, d_gamma = self._binary_fit('basis', dim)
+    @pytest.mark.xfail(
+        strict=True,
+        reason="MEASURED, RE-SCOPED LIMITATION (not the D-012 defect, which is "
+               "FIXED -- see test_basis_mode_gradients_are_live_at_realistic_"
+               "dimension). 'basis' now trains AT ALL but does not train WELL, "
+               "and the binding constraint is the raw-exp parameterization, NOT "
+               "the initialization. Evidence, all at units=8 / lr=1e-2 / D=128 "
+               "with only the epoch budget varied, 3 seeds: at the 40 epochs "
+               "this test uses, 'normalized' reaches loss 0.176 while fixed "
+               "'basis' sits at 0.6899 (chance is 0.693). An epochs-only sweep "
+               "holding units and lr fixed clears NEITHER the 0.40 target nor "
+               "the 0.50 bar at ANY budget up to 400 epochs -- per-seed maxima "
+               "0.6941 @40, 0.6924 @80, 0.6902 @120, 0.6807 @200, 0.6326 @300, "
+               "0.5273 @400. The curve is still descending at 400 and has not "
+               "plateaued, so some budget >400 plausibly clears; that is a "
+               "hypothesis, not a measurement, and the grid was NOT extended "
+               "after seeing the data. Meanwhile d|gamma_raw| rises "
+               "monotonically with budget (0.0719 @40 -> 0.4530 @400), so the "
+               "weight genuinely moves -- this fails on convergence SPEED, not "
+               "on dead gradients. WHY: 'basis' returns exp(-gamma*d2), an "
+               "absolute magnitude, and squaring an exp(-large) activation "
+               "destroys the signal; softmax's shift-invariance makes "
+               "'normalized' depend only on RELATIVE distances and therefore "
+               "immune. This is a property of the mode. TO ACT ON THIS: do NOT "
+               "relax the 0.5 bar, raise units, or raise lr to make it green -- "
+               "that is fitting the test to the answer across three knobs. The "
+               "evidenced next move is decisions.md D-003/D-007: a log-space "
+               "output mode returning -scaled_dist_sq with no exp() at all, "
+               "measured at loss 137.9 -> 0.0093 in 40 epochs with NO "
+               "gamma_init change. If you implement that, this test is your "
+               "checklist. See plan-2026-07-20T175634-f3aca1ff decisions.md "
+               "D-006/D-007 and verification.md's Budget Calibration Ledger.",
+    )
+    def test_basis_mode_fit_is_slow_at_realistic_dimension(self) -> None:
+        """``'basis'`` at ``D = 128`` does not reach ``loss < 0.5`` in 40 epochs.
+
+        The re-scoped half of the former monolithic D-012 xfail. It asserts the
+        behavior a GOOD basis layer would have and that this one still does not,
+        so it goes green -- and, being ``strict=True``, turns into a loud FAILURE
+        -- the moment someone makes ``'basis'`` genuinely fit. That is the
+        intent: this is a live pin on an open limitation, not a dead comment.
+
+        The ``loss < 0.5`` criterion is DELIBERATELY UNCHANGED from the original
+        D-012 test, and the 40-epoch budget is unchanged too. Nothing here was
+        weakened to accommodate the fix; the test was split so that the half
+        that is genuinely fixed can report PASS while the half that is not can
+        report an honest, evidenced xfail. Lowering the bar to e.g. 0.7 would put
+        it above chance (0.693) and make it pass on a fully dead layer -- a
+        criterion incapable of failing.
+
+        ``d_gamma`` is the confound-free movement check: ``repulsion_strength``
+        defaults to 0.1 and moves ``centers`` with no data gradient at all, so
+        ``d_centers`` proves nothing about learning.
+        """
+        first, last, _d_centers, d_gamma = self._binary_fit('basis', 128)
         assert last < 0.5, (
-            f"'basis' at dim={dim} never learns: loss {first:.4f} -> {last:.4f} "
+            f"'basis' at dim=128 did not fit: loss {first:.4f} -> {last:.4f} "
             "(0.693 is chance for this balanced binary task)"
         )
         assert d_gamma > 0.0, (
@@ -1388,6 +1462,202 @@ class TestRBFKnownLimitations:
             "test now uses MIN_USEFUL_GRADMAX instead"
         )
         assert scaled_30 < scaled_10, "collapse should deepen with input scale"
+
+
+class TestRBFGammaInitResolution:
+    """The ``gamma_init=None`` resolution contract, and its serialization safety.
+
+    These tests exist because the gradient-liveness test alone cannot tell
+    "gamma changed" from "gamma changed CORRECTLY": at D=256 a wrong-but-smaller
+    ``1/sqrt(D)`` gives an exponent of ~16, which is below the 50.0 clip and
+    therefore still yields live gradients. Mutant m2 (``1.0/sqrt(D)``) SURVIVES
+    the gradient test and is killed only here. That is this class's whole job.
+    """
+
+    @pytest.mark.parametrize("dim", [4, 128, 256])
+    def test_basis_default_gamma_resolves_to_inverse_dim(self, dim: int) -> None:
+        """Stock ``'basis'`` resolves the effective gamma to exactly ``1/D``.
+
+        Fails under: a dropped resolution (gives 1.0), ``1/sqrt(D)`` (gives
+        0.0625 at D=256 against an expected 0.00390625, a 16x miss), ``1/D^2``,
+        or a resolution done in ``__init__`` against an unknown D.
+        """
+        layer = RBFLayer(units=3)
+        layer.build((None, dim))
+        gamma = np.asarray(ops.convert_to_numpy(layer.gamma))
+        np.testing.assert_allclose(
+            gamma, np.full((3,), 1.0 / dim, dtype='float32'), rtol=1e-5,
+            err_msg=(
+                f"stock 'basis' gamma at D={dim} is {gamma[0]!r}, expected "
+                f"1/D = {1.0 / dim!r} -- the dimension-aware resolution in "
+                "build() is wrong or missing"
+            ),
+        )
+
+    @pytest.mark.parametrize("dim", [4, 128, 256])
+    def test_normalized_default_gamma_stays_one(self, dim: int) -> None:
+        """Stock ``'normalized'`` resolves to 1.0 at EVERY D, not to ``1/D``.
+
+        D-008. The softmax arm is shift-invariant, so only between-unit logit
+        GAPS carry signal, and those gaps are set by the center spread rather
+        than by D. A ``1/D`` gamma shrinks them ~D-fold and collapses the output
+        toward uniform ``1/units`` -- measured at D=128, the mean per-sample
+        logit spread drops from 1.767 to 0.0149 and the end-to-end fit regresses
+        from loss 0.176 to 0.692 (chance). This test is the cheap, direct guard
+        on that regression; ``test_normalized_model_learns_at_realistic_dimension``
+        is the expensive end-to-end one.
+        """
+        layer = RBFLayer(units=3, output_mode='normalized')
+        layer.build((None, dim))
+        gamma = np.asarray(ops.convert_to_numpy(layer.gamma))
+        np.testing.assert_allclose(
+            gamma, np.ones((3,), dtype='float32'), rtol=1e-5,
+            err_msg=(
+                f"stock 'normalized' gamma at D={dim} is {gamma[0]!r}, expected "
+                "1.0 -- the 1/D scale law was wrongly applied to the softmax "
+                "arm, which collapses its logit gaps toward uniform"
+            ),
+        )
+
+    @pytest.mark.parametrize("dim", [4, 128])
+    def test_explicit_gamma_init_always_wins(self, dim: int) -> None:
+        """An explicit ``gamma_init`` overrides the default at every D and mode.
+
+        This is the backward-compatibility contract in its cheapest form: every
+        artifact saved before the ``None`` default existed froze a concrete float
+        in its config, so ``from_config`` always passes one explicitly. If the
+        default ever won over an explicit value, every such artifact would
+        silently change numerics.
+        """
+        for mode in ('basis', 'normalized'):
+            layer = RBFLayer(units=3, gamma_init=1.0, output_mode=mode)
+            layer.build((None, dim))
+            gamma = np.asarray(ops.convert_to_numpy(layer.gamma))
+            np.testing.assert_allclose(
+                gamma, np.ones((3,), dtype='float32'), rtol=1e-5,
+                err_msg=(
+                    f"explicit gamma_init=1.0 was overridden at D={dim}, "
+                    f"mode={mode} -- effective gamma is {gamma[0]!r}"
+                ),
+            )
+
+    def test_get_config_emits_none_not_the_resolved_value(self) -> None:
+        """``get_config()`` returns the CONSTRUCTOR argument, not build state.
+
+        Guide 1.1. If the resolved float leaked into the config, the config would
+        become D-dependent and non-portable: reloading it against a different
+        input width would silently pin the OLD dimension's gamma. Round-tripping
+        the config must therefore re-resolve.
+        """
+        layer = RBFLayer(units=3)
+        layer.build((None, 128))
+        assert layer.get_config()['gamma_init'] is None, (
+            "the build-time resolved gamma leaked into get_config() -- the "
+            f"config says {layer.get_config()['gamma_init']!r}, expected None"
+        )
+
+        # Re-resolution against a DIFFERENT D is the falsifying half: a leaked
+        # 1/128 would show up here as 0.0078125 instead of 0.25.
+        rebuilt = RBFLayer.from_config(layer.get_config())
+        rebuilt.build((None, 4))
+        np.testing.assert_allclose(
+            np.asarray(ops.convert_to_numpy(rebuilt.gamma)),
+            np.full((3,), 0.25, dtype='float32'), rtol=1e-5,
+            err_msg="a config round-trip did not re-resolve gamma against the new D",
+        )
+
+    def test_legacy_explicit_config_deserializes_unchanged(self) -> None:
+        """A pre-change config dict (frozen concrete 1.0) keeps its numerics.
+
+        This is the shape every artifact saved before this default existed has on
+        disk. It must not be reinterpreted by the new default.
+        """
+        legacy_config = RBFLayer(units=3, gamma_init=1.0).get_config()
+        assert legacy_config['gamma_init'] == 1.0
+        layer = RBFLayer.from_config(legacy_config)
+        layer.build((None, 128))
+        np.testing.assert_allclose(
+            np.asarray(ops.convert_to_numpy(layer.gamma)),
+            np.ones((3,), dtype='float32'), rtol=1e-5,
+            err_msg=(
+                "a legacy config carrying gamma_init=1.0 was reinterpreted by "
+                "the new dimension-aware default -- saved checkpoints break"
+            ),
+        )
+
+    def test_save_load_round_trip_preserves_resolved_gamma(self) -> None:
+        """Guide 8.2: full ``model.save()`` / ``load_model()`` at D=128.
+
+        The acceptance bar for the whole change. Asserts three things a config-
+        only test cannot: that the real serialization path survives, that the
+        reloaded layer still carries ``gamma_init is None`` (so it re-resolves
+        rather than freezing), and that predictions match to 1e-6.
+        """
+        inputs = keras.Input(shape=(128,))
+        model = keras.Model(inputs, RBFLayer(units=6)(inputs))
+        x = np.random.RandomState(5).normal(0, 1, (8, 128)).astype('float32')
+        before = np.asarray(ops.convert_to_numpy(model(x)))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, 'rbf_default.keras')
+            model.save(path)
+            loaded = keras.models.load_model(path)
+
+        after = np.asarray(ops.convert_to_numpy(loaded(x)))
+        np.testing.assert_allclose(
+            after, before, rtol=1e-6, atol=1e-6,
+            err_msg="save/load round-trip changed the stock-default predictions",
+        )
+
+        reloaded_layer = [
+            layer for layer in loaded.layers if isinstance(layer, RBFLayer)
+        ][0]
+        assert reloaded_layer.gamma_init is None, (
+            "the reloaded layer froze a concrete gamma_init "
+            f"({reloaded_layer.gamma_init!r}); it must stay None and re-resolve"
+        )
+        np.testing.assert_allclose(
+            np.asarray(ops.convert_to_numpy(reloaded_layer.gamma)),
+            np.full((6,), 1.0 / 128.0, dtype='float32'), rtol=1e-5,
+            err_msg="the reloaded layer's effective gamma is not 1/128",
+        )
+
+    def test_factory_built_layer_resolves_the_same_way(self) -> None:
+        """``create_mixture_layer('rbf', units=8)`` gets the resolved gamma too.
+
+        The registry mirrors the ctor default (H6). If ``MIXTURE_REGISTRY``
+        drifted back to a concrete 1.0, the factory would inject it explicitly,
+        the explicit value would win, and every factory-built RBF would silently
+        keep the dead-at-high-D behavior while the direct ctor path was fixed --
+        a split-brain default that no direct-construction test can see.
+        """
+        from dl_techniques.layers.mixtures.factory import (
+            MIXTURE_REGISTRY, create_mixture_layer,
+        )
+
+        assert MIXTURE_REGISTRY['rbf']['optional_params']['gamma_init'] is None, (
+            "MIXTURE_REGISTRY's gamma_init default drifted from RBFLayer's"
+        )
+        layer = create_mixture_layer('rbf', units=8)
+        layer.build((None, 128))
+        np.testing.assert_allclose(
+            np.asarray(ops.convert_to_numpy(layer.gamma)),
+            np.full((8,), 1.0 / 128.0, dtype='float32'), rtol=1e-5,
+            err_msg="a factory-built RBF did not resolve gamma to 1/D",
+        )
+
+    def test_explicit_gamma_init_still_validated(self) -> None:
+        """``None`` widened the guard; it must not have DISABLED it.
+
+        The two pre-existing validation tests pin the exact message text. This
+        one pins that the ``is not None`` widening did not turn the whole check
+        into a no-op for real floats.
+        """
+        for bad in (0.0, -1.0):
+            with pytest.raises(ValueError, match="gamma_init must be positive"):
+                RBFLayer(units=4, gamma_init=bad)
+        # None is the sentinel, NOT a validation failure.
+        RBFLayer(units=4, gamma_init=None)
 
 
 if __name__ == '__main__':
