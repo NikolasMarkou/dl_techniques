@@ -562,43 +562,40 @@ class TestKMeansLayerEdgeCases:
         assert np.max(diff_from_reset) > 1e-3, "Reinitialized centroids should differ from reset centroids"
         assert np.max(diff_from_original) > 1e-3, "Reinitialized centroids should differ from original centroids"
 
-    def test_reset_centroids_honors_random_seed(self, sample_data_2d: keras.KerasTensor) -> None:
-        """``reset_centroids()`` must respect ``random_seed``, matching ``GMMLayer``.
+    def test_repeated_reset_centroids_redraws_on_a_seeded_layer(
+        self, sample_data_2d: keras.KerasTensor
+    ) -> None:
+        """D-009: repeated no-arg resets must produce DIFFERENT centroids each time,
+        including on a layer built with an explicit ``random_seed``.
 
-        Two independently-constructed layers carrying the same ``random_seed`` must
-        reinitialize to *identical* centroids, and those centroids must still differ
-        from the pre-reset values (otherwise the assertion would pass trivially on a
-        no-op reset).
+        This is the test that the previous ``seed=self.random_seed`` version could not
+        fail, because it only ever compared two *fresh instances* and never called
+        ``reset_centroids()`` twice on one. ``keras.random.normal(seed=<int>)`` is
+        stateless, so a fixed seed returns the identical draw on every call: the
+        seeded version made every reset after the first a bit-identical no-op
+        (measured max|a-b| = 0.0), destroying the method's only real use -- escaping a
+        collapsed centroid configuration mid-training.
         """
         feature_dims = int(sample_data_2d.shape[-1])
+        layer = KMeansLayer(n_clusters=4, random_seed=42)
+        _ = layer(sample_data_2d)
 
-        def _build_and_reset() -> "np.ndarray":
-            layer = KMeansLayer(n_clusters=4, random_seed=42)
-            _ = layer(sample_data_2d)
-            pre_reset = ops.convert_to_numpy(layer.centroids).copy()
+        draws = []
+        for _i in range(3):
             layer.reset_centroids()
-            return pre_reset, ops.convert_to_numpy(layer.centroids).copy()
+            draws.append(ops.convert_to_numpy(layer.centroids).copy())
 
-        pre_a, post_a = _build_and_reset()
-        pre_b, post_b = _build_and_reset()
+        assert draws[0].shape == (4, feature_dims)
 
-        assert post_a.shape == (4, feature_dims)
-
-        # Seeded reset is reproducible across instances.
-        np.testing.assert_array_equal(
-            post_a, post_b,
-            err_msg=(
-                "reset_centroids() ignored random_seed -- two KMeansLayer(random_seed=42) "
-                "instances produced different centroids (GMMLayer.reset_parameters() "
-                "passes seed=self.random_seed; this path must too)"
-            ),
-        )
-
-        # ... and it is a real reset, not a no-op.
-        assert np.max(np.abs(post_a - pre_a)) > 1e-3, (
-            "reset_centroids() did not change the centroids, so the reproducibility "
-            "assertion above is vacuous"
-        )
+        for i in range(len(draws)):
+            for j in range(i + 1, len(draws)):
+                spread = float(np.max(np.abs(draws[i] - draws[j])))
+                assert spread > 1e-6, (
+                    f"reset_centroids() calls {i} and {j} returned bit-identical "
+                    f"centroids (max|a-b| = {spread}). A reset that returns the same "
+                    "values every time is not a reset -- do NOT pass "
+                    "seed=self.random_seed to the keras.random.normal call."
+                )
 
     def test_cluster_centers_property(self, sample_data_2d: keras.KerasTensor, basic_config: Dict[str, Any]) -> None:
         """Test cluster_centers property access.

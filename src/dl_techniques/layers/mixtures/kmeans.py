@@ -640,10 +640,19 @@ class KMeansLayer(BaseMixtureLayer):
                 )
             self.centroids.assign(new_centroids)
         else:
-            # Generate fresh random values to ensure different centroids
+            # Generate fresh random values to ensure different centroids.
+            # DECISION plan-2026-07-20T160907-7de371a1/D-009: deliberately UNSEEDED.
+            # Do NOT pass `seed=self.random_seed` here for symmetry with
+            # `GMMLayer.reset_parameters()`. `keras.random.normal(seed=<int>)` is
+            # STATELESS, so a fixed integer seed returns the identical draw on every
+            # call -- repeated no-arg resets on a seeded layer then produce bit-identical
+            # centroids (measured max|a-b| = 0.0 across three calls), which defeats the
+            # method's only purpose: escaping a collapsed centroid configuration
+            # mid-training. Reproducibility already lives at the layer level, where
+            # `random_seed` governs build()-time initialization. This was added and
+            # reverted once (D-009); the sibling asymmetry is correct, not a defect.
             new_values = keras.random.normal(
                 shape=(self.n_clusters, self.feature_dims),
-                seed=self.random_seed,
                 dtype=self.dtype
             ) * 0.1  # Small scale for stability
             self.centroids.assign(new_values)

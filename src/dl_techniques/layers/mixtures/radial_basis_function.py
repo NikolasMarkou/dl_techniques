@@ -123,9 +123,14 @@ class RBFLayer(keras.layers.Layer):
     :type gamma_regularizer: Optional[keras.regularizers.Regularizer]
     :param output_mode: Output normalization mode. ``'basis'`` (the default)
         returns the raw unnormalized Gaussian activations
-        ``phi_k = exp(-gamma_k * ||x - c_k||^2)``. ``'normalized'`` returns the
-        Normalized RBF (NRBF) activations ``phi_k / sum_j phi_j``, which sum to
-        1.0 along the last axis. Note this vocabulary is deliberately DISJOINT
+        ``phi_k = exp(-gamma_k * ||x - c_k||^2)``, with the exponent clipped at
+        50.0 to keep ``exp`` from underflowing (so the floor is ~1.93e-22, not
+        0.0). ``'normalized'`` returns the Normalized RBF (NRBF) activations
+        ``phi_k / sum_j phi_j``, which sum to 1.0 along the last axis. The
+        normalized arm is computed as a softmax over the **unclipped** exponent
+        and is therefore exactly the textbook NRBF: far from every center it
+        selects the nearest one, rather than degenerating to a uniform
+        ``1/units``. Note this vocabulary is deliberately DISJOINT
         from ``GMMLayer``/``KMeansLayer``'s ``{'assignments', 'mixture'}``: RBF
         has no reconstruction-mode analogue, and its normalized output is a
         normalized basis activation, not a posterior or cluster assignment.
@@ -322,26 +327,45 @@ class RBFLayer(keras.layers.Layer):
         # Gamma broadcasting: (units,)
         # dist_sq is (batch, ..., units), gamma broadcasts automatically to last dim
 
-        # Bounded exponent to prevent numerical underflow/overflow
-        # exp(-50) is effectively 0
-        exponent = ops.minimum(dist_sq * self.gamma, 50.0)
+        # log(phi_k) = -gamma_k * ||x - c_k||^2, UNCLIPPED. The 50.0 clip belongs to
+        # the 'basis' arm alone (applied below, at the ops.exp) -- see the D-002 anchor.
+        scaled_dist_sq = dist_sq * self.gamma
 
         # DECISION plan-2026-07-20T160907-7de371a1/D-002: NRBF is a softmax over the
-        # PRE-exp `-exponent` (which IS log(phi)), computed here in variable_dtype
-        # (float32) and strictly ABOVE the ops.cast(output, self.compute_dtype) below.
-        # Do NOT rewrite this as `output / ops.sum(output, axis=-1, keepdims=True)`, and
-        # do NOT move it below the cast. Both are real NaN bugs, not style preferences:
-        # the 50.0 clip floors phi at exp(-50) ~ 1.93e-22, which is a normal float32 but
-        # flushes to EXACT 0.0 in float16, so under a mixed_float16 policy a post-cast
-        # division is 0/0 -> NaN for any input far from every center (reproduced live;
-        # see findings/rbf-normalization.md F8). softmax is shift-invariant -- its
-        # largest term is always exp(0)=1, so its denominator is always >= 1 and cannot
-        # vanish -- and it is EXACTLY equal to phi_k/sum_j phi_j, not an approximation.
+        # UNCLIPPED, PRE-exp `-scaled_dist_sq` (which IS log(phi)), computed here in
+        # variable_dtype (float32) and strictly ABOVE the ops.cast(output,
+        # self.compute_dtype) below. Three rewrites are real bugs, not style choices:
+        #
+        # 1. Do NOT feed `ops.minimum(scaled_dist_sq, 50.0)` into the softmax. The clip
+        #    exists only to keep ops.exp from underflowing in the 'basis' arm; softmax
+        #    never calls exp on the raw value and is internally shift-stabilized, so it
+        #    needs no clip. Feeding it the CLIPPED value makes this arm a DEAD LAYER at
+        #    ordinary feature dimensions: E[dist_sq] ~ D, so once D*gamma >~ 50 every
+        #    unit saturates at the same 50.0, softmax sees a constant vector and returns
+        #    uniform 1/units -- and ops.minimum has a STRUCTURAL ZERO gradient in the
+        #    saturated branch, so `centers` and `gamma_raw` both get gradient exactly
+        #    0.0. Measured at D=128 with stock defaults: output [0.16667]*6, gradmax
+        #    0.0/0.0. It also destroys NRBF's defining property -- selecting the nearest
+        #    center far from the data -- which is the whole reason to prefer it over
+        #    'basis'. This shipped once (D-008); the test that should have caught it ran
+        #    at dim=4, below the saturation threshold.
+        # 2. Do NOT rewrite as `output / ops.sum(output, axis=-1, keepdims=True)`, and
+        # 3. do NOT move the normalization below the cast.
+        #    (2) and (3) are the same NaN: phi underflows to EXACT 0.0 in float16 for
+        #    ordinary inputs (normal(0,1) in 16 dims already gives phi ~ 1.1e-7), so
+        #    under a mixed_float16 policy a post-cast division is 0/0 -> NaN. Reproduced
+        #    live; see findings/rbf-normalization.md F8 and D-007. softmax is
+        #    shift-invariant -- its largest term is always exp(0)=1, so its denominator
+        #    is always >= 1 and cannot vanish -- and over the unclipped exponent it is
+        #    EXACTLY phi_k/sum_j phi_j, not an approximation.
+        #
         # `training` is not consulted: normalization is identical in train and inference.
         if self.output_mode == 'normalized':
-            output = ops.softmax(-exponent, axis=-1)
+            output = ops.softmax(-scaled_dist_sq, axis=-1)
         else:
-            output = ops.exp(-exponent)
+            # Bounded exponent to prevent numerical underflow/overflow.
+            # exp(-50) is effectively 0. 'basis' behavior is unchanged.
+            output = ops.exp(-ops.minimum(scaled_dist_sq, 50.0))
 
         # DECISION plan_2026-06-14_5e80bd3e/D-001: gate on a graph-safe training factor so
         # the repulsion loss fires for a symbolic training=True tensor (custom @tf.function

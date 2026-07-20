@@ -746,9 +746,10 @@ class TestRBFLayerGraphMode:
             assert keras.backend.standardize_dtype(layer.gamma_raw.dtype) == "float32"
 
             # --- NRBF regression guard for the reproduced fp16 NaN (D-002/F8) -----
-            # This is the direct guard on the failure mode: `phi` bottoms out at the
-            # 50.0 exponent clip, exp(-50) ~ 1.93e-22, which is a normal float32 but
-            # flushes to EXACT 0.0 in float16. A `phi / sum(phi)` normalization applied
+            # This is the direct guard on the failure mode: in the 'basis' arm `phi`
+            # bottoms out at the 50.0 exponent clip, exp(-50) ~ 1.93e-22, which is a
+            # normal float32 but flushes to EXACT 0.0 in float16 -- and for ordinary
+            # inputs it is far smaller still. A `phi / sum(phi)` normalization applied
             # to the float16 tensor is therefore 0/0 -> NaN for any input far from
             # every center. `x_far` below is exactly such an input (centers are
             # initialized in [-0.05, 0.05]; 1e4 is far outside every one of them), so
@@ -771,16 +772,22 @@ class TestRBFLayerGraphMode:
                     rtol=1e-2, atol=1e-2,
                     err_msg=f"mixed_float16 normalized output ({name}) must sum to 1",
                 )
-            # Far from every center every exponent saturates at the shared 50.0 clip,
-            # so NRBF is exactly uniform -- not NaN, and not degenerate to one-hot.
+            # D-008: far from every center, TRUE NRBF selects the NEAREST center --
+            # that is precisely NRBF's defining property over plain RBF. It must NOT
+            # be uniform 1/units: uniform is the signature of softmaxing the CLIPPED
+            # exponent, which is a dead layer with exactly zero gradient. The earlier
+            # version of this test asserted uniformity and so pinned the defect.
             far_np = np.asarray(
                 ops.convert_to_numpy(norm_layer(x_far)), dtype=np.float32
             )
-            np.testing.assert_allclose(
-                far_np, np.full((4, 8), 1.0 / 8.0, dtype=np.float32),
-                rtol=1e-2, atol=1e-2,
-                err_msg="saturated NRBF output must be uniform 1/units",
+            assert far_np.max(axis=-1).min() > 0.9, (
+                "far-from-all-centers NRBF collapsed toward uniform "
+                f"(max prob {far_np.max(axis=-1).min()}); the normalized arm is being "
+                "fed the CLIPPED exponent"
             )
+            assert not np.allclose(
+                far_np, np.full((4, 8), 1.0 / 8.0, dtype=np.float32), atol=1e-2
+            ), "NRBF is uniform far from every center -- the 50.0 clip leaked in"
         finally:
             keras.mixed_precision.set_global_policy(original_policy)
 
@@ -884,21 +891,46 @@ class TestRBFLayerOutputMode:
             ),
         )
 
+    @staticmethod
+    def _nrbf_reference(
+        x: np.ndarray, centers: np.ndarray, gamma_raw: np.ndarray
+    ) -> np.ndarray:
+        """Textbook NRBF ``phi_k / sum_j phi_j``, in numerically-safe float64.
+
+        Shares no code with the layer: it re-derives ``gamma = softplus(gamma_raw)``
+        in numpy and computes the UNCLIPPED exponent, then shifts by the per-row
+        minimum before exponentiating so that arbitrarily distant inputs never
+        underflow the whole row to 0/0. The shift is exact -- it cancels in the
+        ratio -- so this is the definition, not an approximation of it.
+        """
+        x64 = x.astype('float64')
+        c64 = centers.astype('float64')
+        gamma = np.log1p(np.exp(gamma_raw.astype('float64')))  # softplus
+
+        dist_sq = ((x64[..., None, :] - c64) ** 2).sum(axis=-1)
+        exponent = dist_sq * gamma                              # UNCLIPPED
+        shifted = -(exponent - exponent.min(axis=-1, keepdims=True))
+        phi = np.exp(shifted)
+        return phi / phi.sum(axis=-1, keepdims=True)
+
     def test_normalized_matches_numpy_division_reference(self) -> None:
         """SC11: NRBF equals ``phi_k / sum_j phi_j``, computed independently.
 
-        The reference is the textbook definition applied to the GOLDEN basis
-        values in float64 -- it shares no code with the layer. It catches a
-        softmax over the wrong axis, a sign error on the exponent, and a mode
-        branch that silently falls through to 'basis'.
+        The reference is the textbook definition on the UNCLIPPED exponent, in
+        float64, sharing no code with the layer. It catches a softmax over the
+        wrong axis, a sign error on the exponent, a mode branch that silently
+        falls through to 'basis', and -- via the third row of ``GOLDEN_X``, which
+        sits 1000 units from every center -- the D-008 defect of normalizing the
+        CLIPPED exponent (which would return uniform 1/3 there).
         """
         got = np.asarray(
             ops.convert_to_numpy(
                 self._golden_layer(output_mode='normalized')(self.GOLDEN_X)
             )
         )
-        phi = self.GOLDEN_BASIS.astype('float64')
-        expected = phi / phi.sum(axis=-1, keepdims=True)
+        expected = self._nrbf_reference(
+            self.GOLDEN_X, self.GOLDEN_CENTERS, self.GOLDEN_GAMMA_RAW
+        )
 
         np.testing.assert_allclose(
             got, expected, rtol=1e-6, atol=1e-6,
@@ -908,42 +940,93 @@ class TestRBFLayerOutputMode:
         # above cannot pass by the branch being a no-op.
         assert not np.allclose(got, self.GOLDEN_BASIS, atol=1e-6)
 
-    @pytest.mark.parametrize("shape", [(16, 4), (8, 12, 4)])
+    @pytest.mark.parametrize("shape", [(16, 4), (8, 12, 4), (16, 128), (4, 6, 256)])
     def test_normalized_sums_to_one(self, shape: Tuple[int, ...]) -> None:
-        """SC11: normalized activations sum to 1.0 along the unit axis, at any rank."""
+        """SC11: normalized activations sum to 1.0 along the unit axis, at any rank.
+
+        D-008: the last two shapes are REALISTIC feature dimensions (128, 256),
+        past the ``D * gamma > 50`` saturation threshold. Sum-to-1 held even in
+        the defective clipped implementation -- that is exactly why this property
+        alone was insufficient -- but the shapes are carried here so that every
+        normalized test runs in the regime the layer is actually used in.
+        """
         layer = RBFLayer(units=5, output_mode='normalized')
         x = np.random.RandomState(3).normal(0, 2, shape).astype('float32')
         y = np.asarray(ops.convert_to_numpy(layer(x)))
 
         assert y.shape == shape[:-1] + (5,)
+        assert not np.isnan(y).any() and not np.isinf(y).any()
         np.testing.assert_allclose(
             y.sum(axis=-1), np.ones(shape[:-1], dtype='float32'),
             rtol=1e-6, atol=1e-6,
         )
 
-    def test_normalized_far_from_all_centers_is_uniform_not_nan(self) -> None:
-        """The underflow case that makes a naive division NaN.
+    def test_normalized_far_from_all_centers_selects_nearest(self) -> None:
+        """D-008: far from every center, NRBF must give the TRUE distribution.
 
-        Every exponent saturates at the shared 50.0 clip, so ``phi`` is a
-        uniform 1.93e-22 -- the exact value that flushes to 0.0 in float16 --
-        and correct NRBF output is exactly ``1/units``, not NaN and not one-hot.
+        This test previously asserted the output was uniform ``1/units`` and so
+        PINNED the defect: softmaxing the 50.0-clipped exponent makes every unit
+        saturate at the same value, and uniform-with-zero-gradient looks healthy
+        because it still sums to 1. Selecting the nearest center far from the
+        data is NRBF's defining property over plain RBF, and it is what the
+        module docstring, the README and D-002 all claim.
+
+        Uses the reviewer's worked example: with centers at 0, 3 and 6 along the
+        first axis and ``x = 20``, the true NRBF is ~[2.5e-89, 4.1e-41, 1.0].
         """
-        layer = RBFLayer(units=6, gamma_init=5.0, output_mode='normalized')
-        x = np.full((4, 3), 1e6, dtype='float32')
+        centers = np.array([[0.0, 0.0], [3.0, 0.0], [6.0, 0.0]], dtype='float32')
+        x = np.array([[20.0, 0.0]], dtype='float32')
+
+        layer = RBFLayer(units=3, repulsion_strength=0.0, output_mode='normalized')
+        layer.build(x.shape)
+        layer.centers.assign(centers)
+        gamma_raw = np.asarray(ops.convert_to_numpy(layer.gamma_raw))
+
         y = np.asarray(ops.convert_to_numpy(layer(x)))
+        expected = self._nrbf_reference(x, centers, gamma_raw)
 
         assert not np.isnan(y).any(), "NaN from the far-from-all-centers input"
-        assert not np.isinf(y).any()
+        assert not np.isinf(y).any(), "Inf from the far-from-all-centers input"
+
+        # The distribution is essentially one-hot on the NEAREST center (index 2).
         np.testing.assert_allclose(
-            y, np.full((4, 6), 1.0 / 6.0, dtype='float32'), rtol=1e-6, atol=1e-6,
-            err_msg="saturated NRBF must be exactly uniform 1/units",
+            y, expected, rtol=1e-6, atol=1e-12,
+            err_msg="far-from-all-centers NRBF does not match the float64 reference",
+        )
+        assert int(np.argmax(y)) == 2, "NRBF did not select the nearest center"
+        assert y[0, 2] > 0.999, f"nearest-center mass collapsed: {y[0, 2]}"
+        # Explicitly NOT the uniform 1/3 the clipped implementation returned.
+        assert not np.allclose(y, 1.0 / 3.0, atol=1e-3), (
+            "NRBF returned uniform 1/units far from every center -- the normalized "
+            "arm is being fed the CLIPPED exponent (D-008)"
         )
 
-    def test_normalized_gradients_flow(self) -> None:
-        """Gradients reach both centers and gamma_raw through the softmax."""
-        layer = RBFLayer(units=5, output_mode='normalized')
+    @pytest.mark.parametrize("dim,gamma_init", [(4, 1.0), (128, 1.0), (256, 1.0),
+                                                (16, 5.0)])
+    def test_normalized_gradients_flow(self, dim: int, gamma_init: float) -> None:
+        """Gradients reach both centers and gamma_raw through the softmax.
+
+        D-008 -- THE test this suite was missing. The original ran only at
+        ``dim=4``, which is BELOW the ``D * gamma > 50`` clip-saturation
+        threshold, so it could not observe a defect whose trigger is
+        dimensionality. Softmaxing the clipped exponent gives ``ops.minimum`` a
+        structurally zero gradient in the saturated branch: at ``dim=128`` with
+        stock defaults both trainable weights received gradient EXACTLY 0.0 while
+        the forward output still looked healthy (uniform, summing to 1).
+
+        The parametrization deliberately spans both sides of the threshold.
+        Measured against the pre-fix implementation: (128, 1.0) and (256, 1.0)
+        FAIL with gradient max exactly 0.0 on both weights, while (4, 1.0) and
+        (16, 5.0) PASS -- so the two added high-dimension cases are the
+        load-bearing ones, and the low-dimension cases document where the old
+        test's blind spot began. (16, 5.0) is retained as a partial-saturation
+        control: ``D*gamma = 80`` clips most but not all units, so a nonzero
+        gradient survives and the case cannot detect the defect. That is the
+        point -- it records that "some saturation" is not the trigger.
+        """
+        layer = RBFLayer(units=5, gamma_init=gamma_init, output_mode='normalized')
         x = tf.constant(
-            np.random.RandomState(9).normal(0, 1, (16, 4)).astype('float32')
+            np.random.RandomState(9).normal(0, 1, (16, dim)).astype('float32')
         )
 
         with tf.GradientTape() as tape:
@@ -956,7 +1039,31 @@ class TestRBFLayerOutputMode:
             g = np.asarray(ops.convert_to_numpy(grad))
             assert not np.isnan(g).any(), f"NaN gradient for {weight.name}"
             assert not np.isinf(g).any(), f"Inf gradient for {weight.name}"
-            assert np.abs(g).max() > 0.0, f"vanished gradient for {weight.name}"
+            assert np.abs(g).max() > 0.0, (
+                f"vanished gradient for {weight.name} at dim={dim}, "
+                f"gamma_init={gamma_init} -- the normalized arm is a dead layer "
+                "here (D-008: do not softmax the clipped exponent)"
+            )
+
+    def test_normalized_output_varies_at_realistic_dimension(self) -> None:
+        """D-008: the forward half of the dead-layer check, independent of autodiff.
+
+        At ``dim=128`` the clipped implementation returned a CONSTANT vector
+        ``[1/units] * units`` for every sample regardless of input. A layer whose
+        output does not depend on its input is dead whether or not a gradient
+        test is present, so this asserts input-dependence directly.
+        """
+        layer = RBFLayer(units=6, output_mode='normalized')
+        x = np.random.RandomState(11).normal(0, 1, (32, 128)).astype('float32')
+        y = np.asarray(ops.convert_to_numpy(layer(x)))
+
+        assert not np.allclose(y, 1.0 / 6.0, atol=1e-4), (
+            "normalized output is the constant uniform vector at dim=128 -- "
+            "the layer is dead (D-008)"
+        )
+        # Output genuinely varies BOTH across units and across samples.
+        assert y.std(axis=-1).min() > 1e-6, "output is uniform across units"
+        assert y.std(axis=0).max() > 1e-6, "output does not depend on the input"
 
     def test_invalid_output_mode_raises(self) -> None:
         """Validation matches the house `<param> must be ..., got <value>` shape."""
