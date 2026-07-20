@@ -68,6 +68,23 @@ class RBFLayer(keras.layers.Layer):
     space. Broadcasting-based distance computation supports inputs of
     arbitrary rank (2-D, 3-D, etc.).
 
+    **Known limits of the default ``'basis'`` arm, at a glance.** Read the
+    ``gamma_init`` and ``output_mode`` parameter docs below before using it.
+
+    * It trains AT ALL, not WELL. At equal budget ``'normalized'`` reaches
+      loss 0.176 where ``'basis'`` sits at 0.6899 (chance).
+    * It has a **ceiling in the feature dimension**: the resolved gamma is
+      ``1/D``, so the ``centers`` gradient falls below this suite's
+      ``MIN_USEFUL_GRADMAX = 1e-4`` liveness floor from ``D ~ 512`` upward.
+      ``'basis'`` is usefully trainable only to roughly ``D ~ 400``;
+      ``D = 784`` (flattened MNIST) is already past it.
+    * It requires **approximately standardized input**. The resolved exponent
+      is ~``scale^2 + mean^2``, so an input scale or mean near ``sqrt(50) ~ 7``
+      re-saturates the 50.0 clip and returns the gradient to exactly ``0.0``
+      at ANY ``D``.
+
+    If you need this layer to train, use ``output_mode='normalized'``.
+
     **Architecture Overview:**
 
     .. code-block:: text
@@ -116,6 +133,33 @@ class RBFLayer(keras.layers.Layer):
         ``gamma`` that is sensible at ``D = 4`` drives the exponent
         ``dist_sq * gamma`` past the arm's 50.0 clip at ``D >= 64`` and
         saturates every unit into a constant with exactly zero gradient.
+
+        **The ``1/D`` law has a ceiling, and it is not far away.** Because the
+        resolved gamma shrinks as ``1/D``, so does the ``centers`` gradient.
+        Measured, ``units=8``, standardized input, stock defaults --
+        ``max|d loss / d centers|``: ``3.56e-04`` (``D`` = 128), ``1.50e-04``
+        (256), ``1.14e-04`` (384), ``8.52e-05`` (512), ``5.68e-05`` (784),
+        ``3.78e-05`` (1024). Against the suite's own usefulness floor of
+        ``1e-4`` that puts the ceiling at roughly ``D ~ 400``: from ``D = 512``
+        upward ``'basis'`` is NOT usefully trainable, and ``D = 784``
+        (flattened MNIST) is already past it. Pinned by
+        ``test_basis_mode_gradient_falls_below_floor_at_high_dimension``
+        (``xfail(strict=True)``). Do NOT try to buy headroom with a larger
+        constant ``c/D`` -- it is strictly worse (measured at ``D = 512``:
+        ``c=1`` -> ``8.3e-05``, ``c=4`` -> ``9.6e-07``, ``c=8`` -> ``1.5e-09``).
+        A different parameterization, not a different constant, is what a
+        high-``D`` ``'basis'`` arm needs.
+
+        **The ``1/D`` law also assumes approximately standardized input**,
+        since it relies on ``E[||x-c||^2] ~ D``. The resolved exponent is then
+        ~``scale^2 + mean^2`` -- dimension-free, which is a real improvement
+        over the old ``D * gamma`` trigger but not a removal. Measured at
+        ``D = 128``: ``scale=2`` -> ``3.14e-06`` (already below the floor),
+        ``scale=4`` -> ``1.46e-13``, ``scale=10`` -> EXACTLY ``0.0`` with
+        forward std exactly ``0.0``; ``mean=7.1, scale=1`` -> EXACTLY ``0.0``.
+        Being dimension-free this reaches ``D = 4`` as well (``1.35e-06`` at
+        ``scale=10``). Pinned by
+        ``test_basis_mode_gradient_collapses_at_non_standard_input_scale``.
 
         Why NOT ``1/D`` for ``'normalized'``: that arm is a softmax over
         ``-dist_sq * gamma`` and is shift-invariant, so only the BETWEEN-UNIT
@@ -166,6 +210,25 @@ class RBFLayer(keras.layers.Layer):
            ``3.0e-04 / 3.3e-02`` at ``D = 128`` and ``1.4e-04 / 3.4e-02`` at
            ``D = 256``; forward output std goes from ``0.0`` (the constant
            ``exp(-50) = 1.93e-22``) to ``2.7e-02 .. 4.9e-02``.
+
+           *The guarantee has TWO stated boundaries, both measured.* It holds
+           for ``D <~ 400`` and for approximately standardized input only.
+
+           1. **Ceiling in ``D``.** The resolved gamma is ``1/D``, so the
+              ``centers`` gradient shrinks with ``D``: ``3.56e-04`` (128),
+              ``1.50e-04`` (256), ``1.14e-04`` (384), ``8.52e-05`` (512),
+              ``5.68e-05`` (784), ``3.78e-05`` (1024). From ``D = 512`` up it
+              is BELOW the ``1e-4`` usefulness floor this suite judges
+              liveness by, so ``'basis'`` is not usefully trainable there --
+              including at ``D = 784``, flattened MNIST. A larger constant
+              ``c/D`` makes it strictly worse, not better. Pinned by
+              ``test_basis_mode_gradient_falls_below_floor_at_high_dimension``.
+           2. **Standardized input required.** The resolved exponent is
+              ~``scale^2 + mean^2`` and is dimension-free, so an input scale or
+              mean near ``sqrt(50) ~ 7`` re-saturates the 50.0 clip and D-012
+              recurs in full at ANY ``D``: at ``D = 128``, ``scale=2`` gives
+              ``3.14e-06`` and ``scale=10`` gives EXACTLY ``0.0``. Pinned by
+              ``test_basis_mode_gradient_collapses_at_non_standard_input_scale``.
 
            *What is NOT guaranteed -- the residual limitation.* Live gradients
            are not fast convergence. At identical hyperparameters

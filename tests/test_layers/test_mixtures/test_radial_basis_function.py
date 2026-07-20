@@ -1191,9 +1191,13 @@ class TestRBFKnownLimitations:
     """Measured, disclosed defects and weak regimes -- NOT aspirational tests.
 
     Every test here pins something that is currently *wrong* or *fragile*, so
-    that it is impossible to change quietly. Two of the three assert the honest
-    present-day behavior; the ``xfail(strict=True)`` one asserts the behavior we
-    want and does not have, and therefore FAILS the moment the defect is fixed.
+    that it is impossible to change quietly. Most assert the honest present-day
+    behavior; the ``xfail(strict=True)`` ones assert behavior we want and do not
+    have, and therefore FAIL the moment the corresponding defect is fixed.
+
+    The two ``xfail(strict=True)`` pins are the ``'basis'`` arm's two disclosed
+    boundaries: it does not fit well at ANY ``D`` (convergence speed), and it
+    stops being live at all above ``D ~ 400`` (the ``1/D`` ceiling).
     """
 
     @staticmethod
@@ -1308,6 +1312,75 @@ class TestRBFKnownLimitations:
                 "floor -- the dimension-aware gamma_init resolution in build() "
                 "is not reaching this layer, so the 50.0 clip is saturating"
             )
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="MEASURED CEILING OF THE 1/D FIX -- pinned so it cannot move "
+               "silently and is discovered by CI rather than by a wasted "
+               "training run. The resolved gamma is 1/D, so the centers "
+               "gradient shrinks with D and eventually falls below this "
+               "suite's own MIN_USEFUL_GRADMAX = 1e-4 liveness floor. Measured "
+               "curve, units=8, stock defaults, standardized normal(0,1) "
+               "input, max|d loss / d centers|: 3.56e-04 (D=128), 1.50e-04 "
+               "(256), 1.14e-04 (384), 8.52e-05 (512), 5.68e-05 (784), "
+               "3.78e-05 (1024). The crossing is therefore at roughly D ~ 400: "
+               "D <= 384 is LIVE, D >= 512 is BELOW the floor. This cell uses "
+               "D=784 -- flattened MNIST, the single most likely dimension a "
+               "user would actually try an RBF layer at -- and it is measured "
+               "below the floor on 5/5 random initializations (4.91e-05 .. "
+               "5.96e-05), so this is a deterministic property, not a flaky "
+               "margin. TO ACT ON THIS: do NOT lower MIN_USEFUL_GRADMAX, and "
+               "do NOT reach for a larger constant c/D -- that is strictly "
+               "WORSE, measured at D=512: c=1 -> 8.3e-05, c=4 -> 9.6e-07, "
+               "c=8 -> 1.5e-09. The 1/D constant is at or near its optimum; "
+               "the raw-exp parameterization is the binding constraint (the "
+               "same root cause as test_basis_mode_fit_is_slow_at_realistic_"
+               "dimension), so the fix is a different parameterization -- see "
+               "decisions.md D-003/D-007's log-space output mode -- and needs "
+               "its own plan. Until then, use output_mode='normalized' above "
+               "D ~ 400. See plan-2026-07-20T175634-f3aca1ff findings/"
+               "review-iter-1.md concern 2.",
+    )
+    def test_basis_mode_gradient_falls_below_floor_at_high_dimension(self) -> None:
+        """``'basis'`` is NOT usefully live at ``D = 784`` (flattened MNIST).
+
+        The companion boundary to
+        ``test_basis_mode_gradients_are_live_at_realistic_dimension``, which
+        proves liveness at D in {4, 128, 256}. That test's upper cell already
+        clears the floor by only ~1.3x; this one pins where the margin is spent.
+
+        It is written as the assertion a user would WANT to hold (gradients are
+        live at 784) and is ``strict=True``, so it converts into a loud CI
+        FAILURE the moment someone genuinely raises the ceiling -- which is the
+        point. The alternative, asserting ``gradmax < 1e-4``, would silently
+        keep passing if the ceiling moved the wrong way and would read as an
+        endorsement of the limit rather than a pin on it.
+
+        The setup is byte-identical to the liveness test's apart from ``dim``,
+        so the two are directly comparable and neither can be tuned relative to
+        the other.
+        """
+        dim = 784
+        keras.utils.set_random_seed(4242)
+        layer = RBFLayer(units=8)
+        x = np.random.RandomState(11).normal(0, 1, (32, dim)).astype('float32')
+
+        assert layer.gamma_init is None, "test must exercise the DEFAULT path"
+
+        xt = tf.constant(x)
+        with tf.GradientTape() as tape:
+            loss = ops.mean(ops.square(layer(xt, training=True)))
+        grads = tape.gradient(loss, layer.trainable_weights)
+        gradmax = min(
+            float(np.abs(np.asarray(ops.convert_to_numpy(g))).max())
+            for g in grads
+        )
+        assert gradmax > TestRBFLayerOutputMode.MIN_USEFUL_GRADMAX, (
+            f"'basis' gradmax is {gradmax:.4g} at dim={dim}, below the "
+            f"{TestRBFLayerOutputMode.MIN_USEFUL_GRADMAX:.0e} usefulness floor "
+            "-- the 1/D resolution keeps the exponent O(1) but shrinks the "
+            "centers gradient with D, and 784 is past the ~400 ceiling"
+        )
 
     @pytest.mark.xfail(
         strict=True,
@@ -1462,6 +1535,91 @@ class TestRBFKnownLimitations:
             "test now uses MIN_USEFUL_GRADMAX instead"
         )
         assert scaled_30 < scaled_10, "collapse should deepen with input scale"
+
+    def test_basis_mode_gradient_collapses_at_non_standard_input_scale(
+        self
+    ) -> None:
+        """DOCUMENTS the ``'basis'`` fix's OTHER precondition: standardized input.
+
+        The ``'basis'`` counterpart of
+        ``test_normalized_gradient_collapses_at_large_input_scale`` above, which
+        covers ``'normalized'`` only. Until this test, ``'basis'`` trainability
+        was exercised at standard-normal input exclusively -- and the ``1/D``
+        resolution's whole justification is ``E[||x-c||^2] ~ D``, which holds
+        for STANDARDIZED data and nothing else.
+
+        **The honest finding, not tuned around.** D-012 recurs IN FULL --
+        gradient exactly ``0.0``, forward std exactly ``0.0`` -- at a merely
+        unusual input scale. What the fix changed is the *trigger*, not the
+        failure: the old saturation condition was ``D * gamma > ~50``, i.e.
+        dimension-dependent and reached at stock defaults by ``D >= 64``; the
+        new one is ``scale^2 + mean^2 > ~50``, i.e. dimension-FREE and reached
+        only by unstandardized data. That is a genuine improvement (the default
+        configuration on standardized data is now safe at every ``D`` up to the
+        ceiling) and it is genuinely not a removal.
+
+        Measured here, ``D = 128``, stock defaults, ``min`` over both trainable
+        weights, 6 random initializations: ``scale=1`` -> ``2.34e-04 ..
+        3.56e-04`` (live); ``scale=2`` -> ``1.73e-06 .. 3.32e-06`` (already
+        below the ``1e-4`` floor -- x2 is not a far-fetched extreme);
+        ``scale=10`` -> EXACTLY ``0.0`` on every seed. Being dimension-free it
+        reaches small ``D`` too: at ``D = 4, scale=10`` gradmax is ``1.35e-06``.
+        A mean shift alone does it as well: ``mean=7.1, scale=1`` gives exactly
+        ``0.0``, since ``sqrt(50) ~ 7.07``.
+
+        This is asserted as present-day behavior rather than pinned as an
+        ``xfail``, because unlike the ``D`` ceiling it is a documented
+        precondition of the layer (standardize your inputs), not an unmet
+        aspiration. If someone makes this regime work, these bounds fail and
+        the test must be revisited -- that is intended.
+        """
+        dim = 128
+
+        def gradmax(scale: float, mean: float = 0.0) -> float:
+            keras.utils.set_random_seed(4242)
+            layer = RBFLayer(units=8)
+            assert layer.gamma_init is None, "must exercise the DEFAULT path"
+            x = tf.constant(
+                np.random.RandomState(11).normal(0, 1, (32, dim)).astype('float32')
+                * scale + mean
+            )
+            with tf.GradientTape() as tape:
+                loss = ops.mean(ops.square(layer(x, training=True)))
+            grads = tape.gradient(loss, layer.trainable_weights)
+            return min(
+                float(np.abs(np.asarray(ops.convert_to_numpy(g))).max())
+                for g in grads
+            )
+
+        standardized = gradmax(1.0)
+        scaled_2 = gradmax(2.0)
+        scaled_10 = gradmax(10.0)
+        shifted = gradmax(1.0, mean=7.1)
+
+        # The regime the 1/D law is derived for is healthy.
+        assert standardized > TestRBFLayerOutputMode.MIN_USEFUL_GRADMAX, (
+            f"standardized input should be live, got {standardized:.4g}"
+        )
+        # Doubling the input scale -- no other change -- is already enough.
+        assert scaled_2 < TestRBFLayerOutputMode.MIN_USEFUL_GRADMAX, (
+            f"expected collapse below the usefulness floor at scale=2, got "
+            f"{scaled_2:.4g}"
+        )
+        assert standardized / scaled_2 > 10.0, (
+            f"expected orders of magnitude between scale=1 and scale=2, got "
+            f"{standardized / scaled_2:.1f}x"
+        )
+        # Unlike 'normalized' (which collapses toward but never to zero), the
+        # 'basis' arm re-saturates the 50.0 clip and dies EXACTLY -- D-012 in
+        # full, at any D, purely from input scale.
+        assert scaled_10 == 0.0, (
+            f"expected exact-zero gradient at scale=10 (exponent ~100 > the "
+            f"50.0 clip), got {scaled_10:.4g}"
+        )
+        # A mean shift alone reaches the same death: sqrt(50) ~ 7.07.
+        assert shifted == 0.0, (
+            f"expected exact-zero gradient at mean=7.1, got {shifted:.4g}"
+        )
 
 
 class TestRBFGammaInitResolution:
