@@ -13,9 +13,10 @@ import pytest
 import numpy as np
 import keras
 from keras import ops
-from typing import Dict, Any
+from typing import Dict, Any, List, Tuple
 
 from dl_techniques.layers.mixtures.gmm import GMMLayer
+from .cluster_axis_oracle import build_cluster_axis_oracle, flat_twin_forward
 
 
 # --------------------------------------------------------------------- fixtures
@@ -987,28 +988,6 @@ class TestGMMLayerLowRankInteractions:
         assert np.all(np.isfinite(y_np))
         assert np.all(y_np >= 0.0)
 
-    # DECISION plan-2026-07-20T141712-e03557c8/D-010: characterize and PIN, do not fix.
-    # See src/dl_techniques/layers/mixtures/base.py::_reshape_output for the mechanism and
-    # decisions.md D-010 for the full record. strict=True so a repair flips this to a
-    # hard FAILURE demanding attention, rather than letting the defect silently persist.
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "PRE-EXISTING DEFECT, not introduced by the low-rank work and not specific "
-            "to it. Under a multi-axis cluster_axis, _reshape_output (base.py, lifted "
-            "byte-identically from gmm.py/kmeans.py at bf953d6c) builds the correct "
-            "output SHAPE but applies a bare reshape to a buffer laid out "
-            "(batch, non_feature, K). The declared axis order is (batch, K, "
-            "non_feature), so the two trailing axes are swapped -- and because it is a "
-            "reshape rather than a transpose, the values are outright scrambled "
-            "whenever K != non_feature (they merely transpose when K == non_feature, "
-            "which is why every existing multi-axis test and the iteration-1 reviewer's "
-            "spot-check missed it: all used K == non_feature). Confirmed present at "
-            "baseline bf953d6c and shared with KMeansLayer. Fixing it is a production "
-            "behavior change and is out of scope for this step; xfail(strict) so this "
-            "flips to a FAILURE the moment someone repairs it."
-        ),
-    )
     def test_multi_axis_output_layout_is_scrambled(self) -> None:
         """Gap 2 (value contract): multi-axis responsibilities must be correctly placed.
 
@@ -1234,3 +1213,184 @@ class TestGMMLayerLowRankInteractions:
                 "(the freshly-built round-trip cannot catch this)"
             ),
         )
+
+
+# ------------------------------------------------- cluster_axis value layout
+# plan-2026-07-20T160907-7de371a1 / D-001: the reshape-scramble fix in
+# base.py::_reshape_output. Every test below uses ASYMMETRIC shapes -- K differs
+# from every non-feature dim and the non-feature dims are mutually distinct.
+# Symmetric shapes (K == non_feature) degenerate the defect into a pure
+# transposition, which is what hid it from the whole pre-existing suite AND from
+# the prior plan's reviewer, who spot-checked K=3 against non_feature=3.
+
+def _gmm_common(
+    n_components: int, output_mode: str, covariance_type: str
+) -> Dict[str, Any]:
+    """Config shared by a cluster-axis layer and its flat 2-D twin."""
+    return {
+        "n_components": n_components,
+        "temperature": 1.0,
+        "isometric_regularizer_strength": 0.0,
+        "output_mode": output_mode,
+        "covariance_type": covariance_type,
+        "covariance_rank": 2,
+        "mean_initializer": keras.initializers.GlorotNormal(seed=11),
+        "log_variance_initializer": keras.initializers.GlorotNormal(seed=12),
+        "factor_initializer": keras.initializers.HeNormal(seed=13),
+    }
+
+
+def _gmm_params(covariance_type: str) -> Tuple[str, ...]:
+    if covariance_type == "low_rank":
+        return _SHARED_PARAM_NAMES + ("covariance_factors",)
+    return _SHARED_PARAM_NAMES
+
+
+class TestGMMClusterAxisLayout:
+    """The declared axis order must carry the CORRECT VALUES, not just the shape."""
+
+    @pytest.mark.parametrize(
+        "shape,cluster_axis,n_components",
+        [
+            ((2, 5, 7, 4), [1, 2], 3),      # multi-axis
+            ((2, 5, 7, 4), [1], 3),         # off-end single axis
+            ((2, 5, 7, 4), [2], 6),         # off-end single axis, other position
+            ((2, 5, 7, 4, 6), [1, 2, 3], 9),  # three cluster axes on rank 5
+            ((2, 5, 7, 4), [1, 3], 6),      # non-contiguous
+            ((2, 5, 7), [-2, -1], 4),       # empty non-batch non-feature set
+            ((2, 5, 7, 4), [-1], 3),        # last-axis fast path
+        ],
+    )
+    @pytest.mark.parametrize("output_mode", ["assignments", "mixture"])
+    @pytest.mark.parametrize("covariance_type", ["diagonal", "low_rank"])
+    def test_matches_independent_oracle(
+        self,
+        shape: Tuple[int, ...],
+        cluster_axis: List[int],
+        n_components: int,
+        output_mode: str,
+        covariance_type: str,
+    ) -> None:
+        """Layer output must equal a per-slice NumPy oracle, ELEMENT-WISE.
+
+        Summing to 1 along the component axis is necessary but NOT sufficient --
+        a wrong-but-consistent permutation still sums to 1 everywhere. This
+        asserts every element's position, against an oracle that computes no
+        permutation at all (see cluster_axis_oracle.py).
+        """
+        x = np.random.RandomState(7).normal(size=shape).astype("float32")
+        common = _gmm_common(n_components, output_mode, covariance_type)
+
+        layer = GMMLayer(cluster_axis=cluster_axis, **common)
+        y = np.asarray(ops.convert_to_numpy(layer(x)), dtype=np.float64)
+
+        expected = build_cluster_axis_oracle(
+            x,
+            cluster_axis,
+            output_mode,
+            n_components,
+            flat_twin_forward(
+                GMMLayer, common, _gmm_params(covariance_type), layer
+            ),
+        )
+
+        assert y.shape == expected.shape, (
+            f"shape contract broke: {y.shape} vs oracle {expected.shape}"
+        )
+        np.testing.assert_allclose(
+            y, expected, rtol=1e-6, atol=1e-6,
+            err_msg=(
+                f"cluster_axis={cluster_axis} output_mode={output_mode} "
+                f"covariance_type={covariance_type}: values are in the wrong "
+                "positions -- _reshape_output did not invert the "
+                "_reshape_for_clustering transpose"
+            ),
+        )
+
+    @pytest.mark.parametrize("output_mode", ["assignments", "mixture"])
+    def test_fast_path_reduces_to_a_bare_reshape(self, output_mode: str) -> None:
+        """I1/SC5: on ``cluster_axis=-1`` the new permutation IS the identity.
+
+        Compares the fixed ``_reshape_output`` against the OLD algorithm -- a
+        bare ``reshape`` into the declared shape -- on the fast path only. That
+        is exactly the claim backward compatibility rests on.
+
+        The final sub-assertion proves the instrument fires: the same comparison
+        on a multi-axis layer must DISAGREE.
+        """
+        shape, k = (2, 5, 7, 4), 3
+        layer = GMMLayer(
+            cluster_axis=-1, **_gmm_common(k, output_mode, "diagonal")
+        )
+        layer.build(shape)
+
+        width = k if output_mode == "assignments" else layer.feature_dims
+        n_rows = int(np.prod(shape[:-1]))
+        buffer = np.arange(n_rows * width, dtype="float32").reshape(n_rows, width)
+
+        declared = list(shape)
+        declared[-1] = width
+        np.testing.assert_array_equal(
+            np.asarray(ops.convert_to_numpy(layer._reshape_output(buffer))),
+            buffer.reshape(declared),
+            err_msg=(
+                "the fast-path permutation is NOT the identity -- backward "
+                "compatibility for cluster_axis=-1 is broken"
+            ),
+        )
+
+        multi = GMMLayer(
+            cluster_axis=[1, 2], **_gmm_common(k, output_mode, "diagonal")
+        )
+        multi.build(shape)
+        m_width = k if output_mode == "assignments" else multi.feature_dims
+        m_rows = shape[0] * shape[3]
+        m_buffer = np.arange(
+            m_rows * m_width, dtype="float32"
+        ).reshape(m_rows, m_width)
+        m_got = np.asarray(ops.convert_to_numpy(multi._reshape_output(m_buffer)))
+        assert not np.array_equal(m_got.reshape(-1), m_buffer.reshape(-1)), (
+            "multi-axis _reshape_output returned the raw buffer order, i.e. it "
+            "performed a bare reshape -- the transpose is missing"
+        )
+
+    @pytest.mark.parametrize("covariance_type", ["diagonal", "low_rank"])
+    def test_functional_build_with_dynamic_batch(self, covariance_type: str) -> None:
+        """A3: the added ops.transpose must be graph-safe at batch ``None``.
+
+        Tolerance note: this compares a COMPILED ``predict`` against an EAGER
+        twin, so float32 reassociation (and, for ``low_rank``, the cholesky /
+        triangular-solve path) contributes drift up to ~1e-4. That is loose for
+        numerics but still three-plus orders of magnitude tighter than any
+        layout error: a wrong permutation relocates whole responsibilities, an
+        O(0.1-1.0) difference, never an O(1e-4) one. The claim under test is the
+        layout, and this tolerance cannot hide a layout fault.
+        """
+        shape, k = (5, 7, 4), 3
+        common = _gmm_common(k, "assignments", covariance_type)
+        inputs = keras.Input(shape=shape)
+        layer = GMMLayer(cluster_axis=[1, 2], **common)
+        model = keras.Model(inputs=inputs, outputs=layer(inputs))
+
+        assert model.output_shape[0] is None, (
+            "the batch dimension was made static by the reshape/transpose"
+        )
+
+        for batch in (3, 8):
+            x = np.random.RandomState(batch).normal(
+                size=(batch,) + shape
+            ).astype("float32")
+            y = np.asarray(
+                ops.convert_to_numpy(model.predict(x, verbose=0)), dtype=np.float64
+            )
+            expected = build_cluster_axis_oracle(
+                x, [1, 2], "assignments", k,
+                flat_twin_forward(
+                    GMMLayer, common, _gmm_params(covariance_type), layer
+                ),
+            )
+            assert y.shape == expected.shape
+            np.testing.assert_allclose(
+                y, expected, rtol=1e-3, atol=1e-4,
+                err_msg=f"dynamic-batch predict wrong at batch={batch}",
+            )

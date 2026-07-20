@@ -177,38 +177,64 @@ class _ClusterAxisMixin:
         :return: Reshaped output tensor.
         :rtype: keras.KerasTensor
         """
-        # DECISION plan-2026-07-20T141712-e03557c8/D-010: KNOWN BUG, NOT FIXED HERE.
-        # Under a multi-axis cluster_axis, the bare `reshape` below applies the correct
-        # output SHAPE to a buffer that _reshape_for_clustering laid out as
-        # (batch, non_feature, K), while the declared axis order here is
-        # (batch, K, non_feature). It is a reshape, not a transpose, so responsibilities
-        # are scrambled (not merely transposed) whenever K != non_feature_dims -- which is
-        # why every pre-existing test (all used K == non_feature_dims) missed it. Confirmed
-        # present at baseline bf953d6c; affects both GMMLayer and KMeansLayer, both
-        # covariance modes. Pinned via xfail(strict=True) in
-        # tests/test_layers/test_mixtures/test_gmm.py::test_multi_axis_output_layout_is_scrambled.
-        # Fixing this is a production behavior change and is OUT OF SCOPE for this plan --
-        # see decisions.md D-010. Do NOT silently "fix" this reshape without a fresh plan.
+        # DECISION plan-2026-07-20T160907-7de371a1/D-001: this method INVERTS the forward
+        # layout move made by _reshape_for_clustering, and that inversion is a TRANSPOSE,
+        # not a reshape. Supersedes plan-2026-07-20T141712-e03557c8/D-010, which pinned
+        # this as a known bug rather than fixing it.
+        #
+        # The layout contract: _reshape_for_clustering (base.py:167-170) transposes by
+        # `perm = non_feature_dims + cluster_axis` and then collapses, so the buffer
+        # arriving here is laid out (non_feature_dims..., W) -- W is the prototype count K
+        # for 'assignments', or feature_dims for 'mixture'. The DECLARED output order is
+        # the ORIGINAL axis order. Those two differ for every cluster_axis except the
+        # last-axis fast path. `keras.ops.reshape` is layout-preserving in row-major
+        # order; it does NOT reorder axes. So the old bare reshape stamped a correct
+        # SHAPE onto a wrongly-ordered buffer and scrambled the values whenever
+        # K != non_feature_dims -- which every pre-existing test missed because they all
+        # used K == non_feature_dims, where the defect degenerates to a pure transposition.
+        #
+        # Do NOT replace either transpose below with a bare reshape, and do NOT "simplify"
+        # by merging the two branches: they compute genuinely different permutations
+        # (insert ONE collapsed axis vs. restore EVERY original cluster axis) and have one
+        # call site each -- see decisions.md D-005 for why no shared helper exists.
+        # Both perms provably degenerate to the identity on the fast path
+        # (cluster_axis == [input_rank-1]), which is what makes backward compatibility
+        # structural rather than merely tested; it is regression-tested regardless.
+        # See decisions.md D-001.
+        n_non_feature = len(self.non_feature_dims)
+
+        # Undo the [-1, W] collapse: recover the per-axis shape that
+        # _reshape_for_clustering transposed TO. -1 occupies the leading (batch) slot
+        # only, so the dynamic batch dimension is carried through.
+        leading_dims = [-1] + [
+            self.original_shape[axis] for axis in self.non_feature_dims[1:]
+        ]
+
         if self.output_mode == 'assignments':
-            output_shape = list(self.original_shape)
+            # Buffer is (non_feature_dims..., K); K sits at source index n_non_feature.
+            # Target order places K where cluster_axis[0] sat in the original axis order,
+            # i.e. after the `p` non-feature axes that precede it.
+            output = keras.ops.reshape(
+                output, leading_dims + [self._n_prototypes]
+            )
+            p = sum(1 for axis in self.non_feature_dims if axis < self.cluster_axis[0])
+            perm = (
+                list(range(p))
+                + [n_non_feature]
+                + list(range(p, n_non_feature))
+            )
+            return keras.ops.transpose(output, perm)
 
-            # Handle multiple clustering axes
-            if len(self.cluster_axis) > 1:
-                # Remove extra axes in reverse order to preserve indices
-                for axis in reversed(self.cluster_axis[1:]):
-                    output_shape.pop(axis)
-                output_shape[self.cluster_axis[0]] = self._n_prototypes
-            else:
-                output_shape[self.cluster_axis[0]] = self._n_prototypes
-
-            # Set batch dimension to -1 for dynamic reshaping
-            output_shape[0] = -1
-
-        else:  # output_mode == 'mixture'
-            output_shape = list(self.original_shape)
-            output_shape[0] = -1
-
-        return keras.ops.reshape(output, output_shape)
+        # output_mode == 'mixture': the buffer is (non_feature_dims..., cluster_axis...)
+        # once uncollapsed per-axis, so restoring the original order is exactly the
+        # inverse of the forward `non_feature_dims + cluster_axis` permutation.
+        forward_perm = self.non_feature_dims + self.cluster_axis
+        output = keras.ops.reshape(
+            output,
+            leading_dims + [self.original_shape[axis] for axis in self.cluster_axis],
+        )
+        inv_perm = sorted(range(len(forward_perm)), key=lambda j: forward_perm[j])
+        return keras.ops.transpose(output, inv_perm)
 
 # ---------------------------------------------------------------------
 

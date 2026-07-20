@@ -8,6 +8,8 @@ The tests are designed to work with Keras 3.x and avoid TensorFlow-specific oper
 to ensure compatibility across different backends (TensorFlow, JAX, PyTorch).
 """
 
+import os
+import tempfile
 import pytest
 import numpy as np
 import keras
@@ -15,6 +17,7 @@ from keras import ops
 from typing import Dict, Any, List, Tuple, Union
 
 from dl_techniques.layers.mixtures.kmeans import KMeansLayer
+from .cluster_axis_oracle import build_cluster_axis_oracle, flat_twin_forward
 
 
 # Test fixtures
@@ -765,6 +768,204 @@ class TestKMeansLayerGraphAndRoundTrip:
         layer._setup_cluster_axes()
         second = list(layer.cluster_axis)
         assert first == second == [1, 2]
+
+
+# ------------------------------------------------- cluster_axis value layout
+# plan-2026-07-20T160907-7de371a1 / D-001: the reshape-scramble fix in
+# base.py::_reshape_output. Every test below uses ASYMMETRIC shapes -- K differs
+# from every non-feature dim and the non-feature dims are mutually distinct.
+# Symmetric shapes (K == non_feature) degenerate the defect into a pure
+# transposition and are exactly what hid it from the entire pre-existing suite.
+
+_KMEANS_PARAMS = ("centroids",)
+
+
+def _kmeans_common(n_clusters: int, output_mode: str) -> Dict[str, Any]:
+    """Config shared by a cluster-axis layer and its flat 2-D twin."""
+    return {
+        "n_clusters": n_clusters,
+        "temperature": 0.5,
+        "output_mode": output_mode,
+        "random_seed": 42,
+    }
+
+
+class TestKMeansClusterAxisLayout:
+    """The declared axis order must carry the CORRECT VALUES, not just the shape."""
+
+    @pytest.mark.parametrize(
+        "shape,cluster_axis,n_clusters",
+        [
+            # multi-axis: the case D-010 named
+            ((2, 5, 7, 4), [1, 2], 3),
+            # off-end SINGLE axis: D-010 wrongly claimed this was already correct
+            ((2, 5, 7, 4), [1], 3),
+            ((2, 5, 7, 4), [2], 6),
+            # three cluster axes on rank 5 -- the formula's least-tested regime
+            ((2, 5, 7, 4, 6), [1, 2, 3], 9),
+            # leading + trailing, non-contiguous
+            ((2, 5, 7, 4), [1, 3], 6),
+            # rank-3 [-2,-1]: the non-feature set is {batch} only (degenerate perm)
+            ((2, 5, 7), [-2, -1], 4),
+            # last-axis fast path -- must stay correct through the same oracle
+            ((2, 5, 7, 4), [-1], 3),
+        ],
+    )
+    @pytest.mark.parametrize("output_mode", ["assignments", "mixture"])
+    def test_matches_independent_oracle(
+        self,
+        shape: Tuple[int, ...],
+        cluster_axis: List[int],
+        n_clusters: int,
+        output_mode: str,
+    ) -> None:
+        """Layer output must equal a per-slice NumPy oracle, element-wise.
+
+        Summing to 1 along the component axis is necessary but NOT sufficient: a
+        wrong-but-consistent permutation still sums to 1 everywhere. This asserts
+        every element's position.
+        """
+        x = np.random.RandomState(7).normal(size=shape).astype("float32")
+        common = _kmeans_common(n_clusters, output_mode)
+
+        layer = KMeansLayer(cluster_axis=cluster_axis, **common)
+        y = np.asarray(ops.convert_to_numpy(layer(x)), dtype=np.float64)
+
+        expected = build_cluster_axis_oracle(
+            x,
+            cluster_axis,
+            output_mode,
+            n_clusters,
+            flat_twin_forward(KMeansLayer, common, _KMEANS_PARAMS, layer),
+        )
+
+        assert y.shape == expected.shape, (
+            f"shape contract broke: {y.shape} vs oracle {expected.shape}"
+        )
+        np.testing.assert_allclose(
+            y, expected, rtol=1e-6, atol=1e-6,
+            err_msg=(
+                f"cluster_axis={cluster_axis} output_mode={output_mode}: values are "
+                "in the wrong positions -- _reshape_output did not invert the "
+                "_reshape_for_clustering transpose"
+            ),
+        )
+
+    @pytest.mark.parametrize("output_mode", ["assignments", "mixture"])
+    def test_fast_path_reduces_to_a_bare_reshape(self, output_mode: str) -> None:
+        """I1/SC5: on ``cluster_axis=-1`` the new permutation IS the identity.
+
+        This compares the fixed ``_reshape_output`` against the OLD algorithm --
+        a bare ``reshape`` into the declared shape -- on the fast path only. That
+        is the exact claim backward compatibility rests on, asserted directly
+        rather than inferred from a re-run of the same code against itself.
+
+        The final sub-assertion proves this instrument actually fires: on a
+        multi-axis layer the very same comparison must DISAGREE, because there
+        the permutation is not the identity. A check that cannot fail is worse
+        than no check.
+        """
+        shape, k = (2, 5, 7, 4), 3
+        layer = KMeansLayer(
+            n_clusters=k, cluster_axis=-1, output_mode=output_mode, random_seed=42,
+        )
+        layer.build(shape)
+
+        width = k if output_mode == "assignments" else layer.feature_dims
+        n_rows = int(np.prod(shape[:-1]))
+        # arange, so ANY misplacement is visible; float32 for exact comparison.
+        buffer = np.arange(n_rows * width, dtype="float32").reshape(n_rows, width)
+
+        declared = list(shape)
+        declared[-1] = width
+        bare_reshape = buffer.reshape(declared)
+
+        got = np.asarray(ops.convert_to_numpy(layer._reshape_output(buffer)))
+        np.testing.assert_array_equal(
+            got, bare_reshape,
+            err_msg=(
+                "the fast-path permutation is NOT the identity -- backward "
+                "compatibility for cluster_axis=-1 is broken"
+            ),
+        )
+
+        # Falsifiability control: the same comparison on a non-fast path must differ.
+        multi = KMeansLayer(
+            n_clusters=k, cluster_axis=[1, 2], output_mode=output_mode,
+            random_seed=42,
+        )
+        multi.build(shape)
+        m_width = k if output_mode == "assignments" else multi.feature_dims
+        m_rows = shape[0] * shape[3]
+        m_buffer = np.arange(m_rows * m_width, dtype="float32").reshape(m_rows, m_width)
+        m_got = np.asarray(ops.convert_to_numpy(multi._reshape_output(m_buffer)))
+        assert not np.array_equal(
+            m_got.reshape(-1), m_buffer.reshape(-1)
+        ), (
+            "multi-axis _reshape_output returned the raw buffer order, i.e. it "
+            "performed a bare reshape -- the transpose is missing"
+        )
+
+    @pytest.mark.parametrize("cluster_axis", [[1, 2], [1], [-1]])
+    def test_functional_build_with_dynamic_batch(
+        self, cluster_axis: List[int]
+    ) -> None:
+        """A3: the added ops.transpose must be graph-safe at batch ``None``.
+
+        Every EXPLORE probe ran eagerly, so this is the plan's one unverified
+        assumption. The intermediate reshape puts ``-1`` in the batch slot only;
+        if the transpose lost the ``None`` through shape inference, or if any
+        non-batch dim were dynamic, the functional build would raise here.
+        """
+        shape, k = (5, 7, 4), 3  # batch is left unspecified
+        common = _kmeans_common(k, "assignments")
+        inputs = keras.Input(shape=shape)
+        layer = KMeansLayer(cluster_axis=cluster_axis, **common)
+        model = keras.Model(inputs=inputs, outputs=layer(inputs))
+
+        # Symbolic shape must carry a None batch, not a baked-in constant.
+        assert model.output_shape[0] is None, (
+            "the batch dimension was made static by the reshape/transpose"
+        )
+
+        # Predict at two DIFFERENT batch sizes; both must be correct, and the
+        # second must not reuse the first's baked-in extent.
+        for batch in (3, 8):
+            x = np.random.RandomState(batch).normal(
+                size=(batch,) + shape
+            ).astype("float32")
+            y = np.asarray(ops.convert_to_numpy(model.predict(x, verbose=0)),
+                           dtype=np.float64)
+
+            expected = build_cluster_axis_oracle(
+                x, cluster_axis, "assignments", k,
+                flat_twin_forward(KMeansLayer, common, _KMEANS_PARAMS, layer),
+            )
+            assert y.shape == expected.shape
+            np.testing.assert_allclose(
+                y, expected, rtol=1e-5, atol=1e-5,
+                err_msg=f"dynamic-batch predict wrong at batch={batch}",
+            )
+
+    def test_multi_axis_survives_save_load(self) -> None:
+        """SC14: a multi-axis layer must round-trip with its value layout intact."""
+        shape, k = (2, 5, 7, 4), 3
+        x = np.random.RandomState(3).normal(size=shape).astype("float32")
+
+        inputs = keras.Input(shape=shape[1:])
+        layer = KMeansLayer(
+            n_clusters=k, cluster_axis=[1, 2], output_mode="assignments",
+            random_seed=42,
+        )
+        model = keras.Model(inputs=inputs, outputs=layer(inputs))
+        y_before = np.asarray(ops.convert_to_numpy(model(x)))
+
+        path = os.path.join(tempfile.mkdtemp(), "kmeans_multi_axis.keras")
+        model.save(path)
+        reloaded = keras.models.load_model(path)
+        y_after = np.asarray(ops.convert_to_numpy(reloaded(x)))
+
+        np.testing.assert_allclose(y_before, y_after, rtol=1e-6, atol=1e-6)
 
 
 if __name__ == "__main__":
