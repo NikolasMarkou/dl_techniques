@@ -26,10 +26,24 @@ The inverse direction (PHANTOM: a registry key the class does not accept) raises
 at construction, so it is loud; it is still checked here, cheaply.
 
 WRAPPER ENTRIES: two entries (`attention:window`, `attention:window_zigzag`) register a factory
-FUNCTION rather than a class. All three directions resolve such a target through the shared
-helpers near the top of this file -- `_wrapped_class`, `_wrapper_pinned_params`,
-`_wrapper_kwarg_setdefaults` -- so the guard reasons about the class the wrapper actually builds.
-Resolving in only SOME directions is not a partial improvement, it is a blind spot with a
+FUNCTION rather than a class. All three directions resolve such a target through ONE shared
+helper, `_wrapper_probe`, which obtains ground truth EMPIRICALLY -- it builds the layer and
+observes what happened:
+
+* what the wrapper builds is `type()` of what it returned, not a `return_annotation`;
+* what the wrapper FORCES is whatever differs between building the class directly and building
+  it through the wrapper with the same arguments;
+* what the wrapper PINS is whatever raises `TypeError: got multiple values for keyword
+  argument '<name>'` when supplied.
+
+This replaced ~120 lines of `ast` analysis that tried to infer the same three facts from syntax.
+Three review passes found four defects in it, every one the same failure wearing a new costume:
+confident wrongness about which statements run. Adopting a `setdefault` no caller reaches, or
+calling a settable param unsettable, does not merely miss drift -- it certifies drift as GREEN,
+which is strictly worse than a guard known to be absent. A probe cannot mis-model control flow
+because it does not model control flow. See decisions.md D-010.
+
+Resolving in only SOME directions is not a partial improvement either, it is a blind spot with a
 coverage story attached: applying it to the VALUE test alone once left the MISSING test seeing a
 3-parameter signature for a 23-parameter class, and nothing failed. See decisions.md D-008.
 
@@ -101,25 +115,33 @@ WHAT THIS GUARD DOES **NOT** SEE (stated, not hidden)
    still said `1e-7`, this guard would stay green on real drift. The table is hand-maintained;
    that is the price of not instantiating. It is bounded to the 3 entries listed -- but the same
    silent-staleness mechanism applies, unbounded and unmonitored, to the ~54 in item 1.
-3. **Wrapper defaults this guard cannot PROVE are unconditional.** See
-   `_wrapper_kwarg_setdefaults`. A `kwargs.setdefault(...)` inside a branch, a loop, a nested
-   `def`, or after a `return` is deliberately NOT adopted: the wrapped class's own default is used
-   instead, which is this guard's behavior before wrapper resolution existed. Non-literal values
-   (a computed expression, an `if 'k' not in kwargs:` block) are likewise unseen. This is a
-   deliberate downgrade from an earlier version that DID adopt them via `ast.walk` and thereby
-   asserted values no caller receives -- see `_unconditional_body` and decisions.md D-008.
-4. **`required_params` VALUES.** Only their names are checked, in both directions. A required
+3. **Wrapper behavior on any path the probe does not take.** `_wrapper_probe` builds each
+   wrapper ONCE, with `_PROBE_ARGS`. A wrapper that forces a different default for a different
+   argument (`if dim > 128: kwargs.setdefault(...)`) is measured on the probed path only -- which
+   is honest for the two wrappers here (both are unconditional) but would not generalize to a
+   branchy one. It is a bounded, single-path measurement, not a proof about all inputs.
+4. **Wrapper overrides whose values cannot be compared across two constructions.** Only
+   `_LITERAL_TYPES` are differenced. If a wrapper forced, say, a specific initializer OBJECT, the
+   difference is invisible and the class default stands -- this guard's behavior before wrapper
+   resolution existed. The alternative (comparing objects that compare by identity) invents
+   drift on every entry, which is worse.
+5. **A wrapper that silently OVERWRITES a caller's kwarg** (`kwargs['x'] = ...` before
+   delegating). It raises nothing, so it is not a pin and the param stays in the MISSING set;
+   the registry declaring it is not wrong, but the caller's value is still discarded and no
+   direction here sees it. Fixtured as `_wrapper_overwrites_kwargs_entry` so the limit is
+   recorded rather than assumed. None exists in this repo today.
+6. **`required_params` VALUES.** Only their names are checked, in both directions. A required
    param whose registry entry disagrees with the ctor in any respect other than presence is out
    of scope by construction.
-5. **Params a wrapper pins POSITIONALLY.** `_wrapper_pinned_params` models only keyword arguments
-   of the delegation call. None exists in this repo today.
+7. **Params a wrapper pins POSITIONALLY.** A positional pin raises the same TypeError only if
+   the wrapper also forwards `**kwargs` into that call; a wrapper that binds the value some
+   other way is unseen. None exists in this repo today.
 """
 
-import ast
 import collections
+import functools
 import importlib
 import inspect
-import textwrap
 
 import pytest
 
@@ -161,176 +183,163 @@ BASE_PARAMS = {
 
 
 # ---------------------------------------------------------------------
-# Wrapper resolution
+# Wrapper resolution -- BY CONSTRUCTION, NOT BY STATIC ANALYSIS
 #
 # Two registry entries (attention:window, attention:window_zigzag) map a FACTORY FUNCTION,
-# not a class. Everything below models what such a wrapper really does to its caller's
+# not a class. Everything below establishes what such a wrapper really does to its caller's
 # arguments, and it is used by ALL THREE drift directions -- MISSING, PHANTOM and VALUE.
-# Wiring it into only some of them is precisely the defect this section was rewritten to
-# fix (decisions.md D-008); the resolution lives here, once, above every consumer.
+# Wiring it into only some of them was a real defect (decisions.md D-008); the resolution
+# lives here, once, above every consumer.
 # ---------------------------------------------------------------------
 
+# Arguments sufficient to construct a wrapper target (and the class it builds) once, for
+# probing. Keyed by parameter NAME, and needed only for parameters with no default. Small
+# by construction: it covers the REQUIRED params of the 2 wrapper entries out of 97.
+#
+# This table cannot rot silently, which is what separates it from an exemption table: if a
+# new wrapper entry needs a probe argument that is not here, the layer cannot be built and
+# `test_every_wrapper_entry_is_probeable` reds by name. Staleness here is LOUD.
+_PROBE_ARGS = {"dim": 32, "window_size": 4, "num_heads": 4}
 
-def _function_ast(func):
-    """The `ast.FunctionDef` of ``func``, or ``None`` if the source is unavailable."""
-    try:
-        tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
-    except (OSError, TypeError, SyntaxError, IndentationError):
-        return None
-    node = tree.body[0] if tree.body else None
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        return node
-    return None
+# Value types whose equality is meaningful across two separate constructions. A Keras
+# initializer/regularizer object compares by IDENTITY, so two constructions of the same class
+# with the same argument produce two unequal objects; treating that as a wrapper override
+# would invent drift out of nothing. Restricting the comparison to these types costs only the
+# ability to see a wrapper that forces a non-literal default -- which then falls back to the
+# class default, i.e. this guard's behavior before wrapper resolution existed.
+_LITERAL_TYPES = (bool, int, float, str, bytes, type(None), tuple)
 
 
-def _unconditional_body(func_node):
-    """The statements of ``func_node`` that are certain to execute exactly once.
+def _named_defaults(callable_obj):
+    """``{param: default}`` for every keyword-settable param of a class ctor or a function.
 
-    # DECISION plan-2026-07-20T191713-52a15234/D-008
-    Iterates the function's OWN top-level body and stops at the first ``return``. It
-    deliberately does NOT descend into ``If`` / ``For`` / ``While`` / ``Try`` / ``With`` /
-    nested ``def``, and deliberately does not look past a ``return``.
-
-    DO NOT "simplify" this back to `ast.walk(tree)`. `ast.walk` visits the entire subtree,
-    so a `kwargs.setdefault('flag', False)` sitting inside `if dim > 128:`, inside
-    `for _ in range(0):`, inside a helper that is never called, or after a `return` was
-    read as an UNCONDITIONAL default. `_effective_defaults` then overwrote the correct
-    class default with it, so the guard asserted a value the caller never actually gets --
-    which can turn REAL drift green. A guard that mis-models a case is strictly worse than
-    one that omits it: an omission leaves you where you were, a false model certifies wrong
-    values as correct while reading as coverage. See decisions.md D-008.
+    A param with no default maps to ``inspect.Parameter.empty``.
     """
-    for stmt in func_node.body:
-        if isinstance(stmt, ast.Return):
-            return
-        yield stmt
-
-
-def _setdefault_target(node, var_kw_names):
-    """``('key', value)`` if ``node`` is a literal ``<var_kw>.setdefault('key', value)``."""
-    if not isinstance(node, ast.Call) or len(node.args) != 2:
-        return None
-    callee = node.func
-    if not isinstance(callee, ast.Attribute) or callee.attr != "setdefault":
-        return None
-    if not isinstance(callee.value, ast.Name) or callee.value.id not in var_kw_names:
-        return None
-    try:
-        key = ast.literal_eval(node.args[0])
-        value = ast.literal_eval(node.args[1])
-    except ValueError:
-        return None  # not a literal -- fall back to the class default
-    if not isinstance(key, str):
-        return None
-    return key, value
-
-
-def _wrapper_kwarg_setdefaults(func):
-    """``(forced, unprovable)`` for a wrapper's ``kwargs.setdefault(...)`` defaults.
-
-    # DECISION plan-2026-07-20T191713-52a15234/D-008
-    A registry entry whose 'class' is a wrapper function has THREE default layers, not two:
-    the wrapped class's own ctor default, then whatever the wrapper forces, then the registry.
-    `create_zigzag_window_attention` does `kwargs.setdefault("use_relative_position_bias", False)`
-    (layers/attention/window_attention.py:762) while its sibling `create_grid_window_attention`
-    sets it True (:724) -- so the registry's `False` for attention:window_zigzag is CORRECT even
-    though `WindowAttention.__init__` says `True`.
-
-    * ``forced`` -- params whose effective default this function can PROVE: a literal
-      ``setdefault`` among the unconditional top-level statements (`_unconditional_body`),
-      and which appears nowhere else in the function.
-    * ``unprovable`` -- params with a ``setdefault`` somewhere the model cannot prove runs
-      (inside a branch, a loop, a nested def, or after a ``return``). Callers must fall back
-      to the wrapped class's default for these and MUST NOT adopt the literal. A key that is
-      unprovable anywhere is unprovable everywhere: a conditional `setdefault` occurring
-      *before* a top-level one would win, and `setdefault` is first-write-wins, so a
-      top-level literal is not authoritative in that shape.
-
-    DO NOT "fix" a red here by adding an INTENTIONAL_OVERRIDES entry. That silences a correct
-    value permanently: a later edit of the wrapper's setdefault to `True`, with the registry left
-    at `False`, would then never red -- reinstalling the exact blind spot this guard exists to
-    close, one layer further down. Model the chain instead. See decisions.md D-005, D-008.
-    """
-    func_node = _function_ast(func)
-    if func_node is None:
-        return {}, set()
-
-    var_kw = {
-        name
-        for name, param in inspect.signature(func).parameters.items()
-        if param.kind == param.VAR_KEYWORD
+    signature = inspect.signature(
+        callable_obj.__init__ if inspect.isclass(callable_obj) else callable_obj
+    )
+    kinds = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    return {
+        name: param.default
+        for name, param in signature.parameters.items()
+        if param.kind in kinds
     }
 
-    top_level = {}
-    for stmt in _unconditional_body(func_node):
-        value = getattr(stmt, "value", None) if isinstance(stmt, (ast.Expr, ast.Assign)) else None
-        hit = _setdefault_target(value, var_kw) if value is not None else None
-        if hit is not None:
-            top_level.setdefault(*hit)  # first write wins, exactly as setdefault does
 
-    everywhere = {}
-    for node in ast.walk(func_node):
-        hit = _setdefault_target(node, var_kw)
-        if hit is not None:
-            everywhere.setdefault(*hit)
-
-    unprovable = set(everywhere) - set(top_level)
-    forced = {k: v for k, v in top_level.items() if k not in unprovable}
-    return forced, unprovable
+def _named_and_var_kw(callable_obj):
+    """``(named params, accepts **kwargs)`` for a class ctor or a plain function."""
+    named = set(_named_defaults(callable_obj)) - BASE_PARAMS
+    signature = inspect.signature(
+        callable_obj.__init__ if inspect.isclass(callable_obj) else callable_obj
+    )
+    accepts_var_kw = any(
+        param.kind == param.VAR_KEYWORD for param in signature.parameters.values()
+    )
+    return named, accepts_var_kw
 
 
-def _wrapper_pinned_params(func):
-    """Params the wrapper HARD-CODES when it delegates, so a caller cannot set them.
-
-    # DECISION plan-2026-07-20T191713-52a15234/D-008
-    `create_grid_window_attention` ends in
-    ``return WindowAttention(dim=dim, ..., partition_mode="grid", **kwargs)``. `dim` is a plain
-    forward of the wrapper's own parameter, so the caller controls it. `partition_mode` is a
-    literal the wrapper chose: passing `partition_mode=...` through `**kwargs` raises
-    ``TypeError: got multiple values for keyword argument 'partition_mode'`` (verified).
-
-    So a pinned param is NOT part of the wrapper's accepted-parameter set, and the registry is
-    RIGHT not to declare it -- declaring it would be a live TypeError, not a fix. That fact is
-    DERIVED from the wrapper's own source here rather than written into an exemption table, so
-    it cannot rot: the day a wrapper stops pinning a param, the MISSING guard starts requiring
-    it. The counterpart obligation is `test_registry_declares_no_param_the_target_rejects`,
-    which reds if a registry ever DOES declare a pinned param.
-
-    Limitation: only keyword arguments of a top-level ``return <Call>(...)`` are modeled.
-    A positionally-pinned argument is not seen (none exists in this repo today).
-    """
-    func_node = _function_ast(func)
-    if func_node is None:
-        return set()
-
-    own_params = set(inspect.signature(func).parameters)
-    pinned = set()
-    for stmt in func_node.body:
-        if not isinstance(stmt, ast.Return) or not isinstance(stmt.value, ast.Call):
+def _probe_arguments(callable_obj):
+    """Kwargs that construct ``callable_obj``, or ``None`` if `_PROBE_ARGS` cannot supply them."""
+    arguments = {}
+    for name, default in _named_defaults(callable_obj).items():
+        if name in BASE_PARAMS or default is not inspect.Parameter.empty:
             continue
-        for keyword in stmt.value.keywords:
-            if keyword.arg is None:  # **kwargs pass-through
-                continue
-            forwarded = (
-                isinstance(keyword.value, ast.Name) and keyword.value.id in own_params
-            )
-            if not forwarded:
-                pinned.add(keyword.arg)
-        break  # only the first top-level return is reachable
-    return pinned
+        if name not in _PROBE_ARGS:
+            return None
+        arguments[name] = _PROBE_ARGS[name]
+    return arguments
 
 
-def _wrapped_class(target):
-    """The class a wrapper FUNCTION builds, via its ``return_annotation``; else ``None``.
+_WrapperProbe = collections.namedtuple("_WrapperProbe", "wrapped overrides pinned")
 
-    A class target wraps nothing. A string annotation (PEP 563) or a non-class annotation
-    yields ``None``, which degrades this guard to its pre-resolution blindness -- graceful,
-    but blind; see the module docstring.
+
+@functools.lru_cache(maxsize=None)
+def _wrapper_probe(target):
+    """What a wrapper FUNCTION really does, obtained by BUILDING it. ``None`` for a class.
+
+    # DECISION plan-2026-07-20T191713-52a15234/D-010
+    Three consecutive review passes found four defects here, every one of them the same
+    failure in a new syntactic costume: an `ast` model of the wrapper inferred reachability
+    by pattern-matching syntax and got it confidently WRONG -- a `setdefault` after a
+    CONDITIONAL early return adopted as unconditional, a param forwarded as
+    `partition_mode=partition_mode.lower()` declared unsettable while being plainly settable.
+    That is not a coverage gap; a false model certifies real drift as GREEN, while an
+    omission merely leaves you where you were.
+
+    DO NOT reintroduce static analysis of the wrapper body -- no `ast.walk`, no
+    "unconditional top-level statement" scan, no `kwargs.setdefault` literal extraction, and
+    no per-shape special case. If a fifth wrapper shape ever appears to need one, that is the
+    signal to extend the PROBE, not to start modelling syntax again. See decisions.md D-010.
+
+    Ground truth is obtained empirically instead, and cannot mis-model control flow because
+    it does not model control flow:
+
+    * ``wrapped``   -- ``type()`` of what the wrapper actually returns. Not the
+      ``return_annotation``: an annotation can be a string under PEP 563 and lie by omission.
+    * ``overrides`` -- DIFFERENTIAL. Build the class directly and build it through the
+      wrapper with the same arguments; any attribute that DIFFERS is exactly what the wrapper
+      forces. Differencing two real constructions is what makes this immune to attributes the
+      ctor transforms (`self.x = normalize(x)`): both sides transform identically, so only a
+      genuine override survives.
+    * ``pinned``    -- params the wrapper hard-codes in its delegation, so that supplying them
+      raises ``TypeError: got multiple values for keyword argument '<name>'``. Matched on that
+      SPECIFIC message: a param rejected for any other reason (validation, an unrelated
+      TypeError) is NOT a pin, and treating it as one would drop it from the MISSING set and
+      reinstate the silent-drop false-green.
+
+    Returns ``None`` when the target is a class (nothing to resolve) or cannot be probed.
     """
     if inspect.isclass(target) or not callable(target):
         return None
-    wrapped = inspect.signature(target).return_annotation
-    return wrapped if inspect.isclass(wrapped) else None
+
+    arguments = _probe_arguments(target)
+    if arguments is None:
+        return None
+    try:
+        via_wrapper = target(**arguments)
+    except Exception:
+        return None
+
+    wrapped = type(via_wrapper)
+    class_arguments = _probe_arguments(wrapped)
+    if class_arguments is None:
+        return None
+    try:
+        direct = wrapped(**class_arguments)
+    except Exception:
+        return None
+
+    class_defaults = _named_defaults(wrapped)
+    missing = object()
+
+    overrides = {}
+    for name in class_defaults:
+        if name in BASE_PARAMS:
+            continue
+        theirs = getattr(direct, name, missing)
+        ours = getattr(via_wrapper, name, missing)
+        if theirs is missing or ours is missing:
+            continue
+        if not (isinstance(theirs, _LITERAL_TYPES) and isinstance(ours, _LITERAL_TYPES)):
+            continue
+        if not _defaults_equal(ours, theirs):
+            overrides[name] = ours
+
+    pinned = set()
+    for name, default in class_defaults.items():
+        if name in BASE_PARAMS or name in arguments:
+            continue
+        value = default if default is not inspect.Parameter.empty else _PROBE_ARGS.get(name)
+        if value is None and default is inspect.Parameter.empty:
+            continue
+        try:
+            target(**arguments, **{name: value})
+        except TypeError as error:
+            if f"multiple values for keyword argument '{name}'" in str(error):
+                pinned.add(name)
+        except Exception:
+            continue  # rejected for an unrelated reason -- that is not a pin
+    return _WrapperProbe(wrapped, overrides, frozenset(pinned))
 
 
 def _registry_entries():
@@ -342,23 +351,6 @@ def _registry_entries():
             if target is None:
                 continue
             yield factory, type_name, target, info
-
-
-def _named_and_var_kw(callable_obj):
-    """``(named params, accepts **kwargs)`` for a class ctor or a plain function."""
-    signature = inspect.signature(
-        callable_obj.__init__ if inspect.isclass(callable_obj) else callable_obj
-    )
-    named = {
-        name
-        for name, param in signature.parameters.items()
-        if name not in BASE_PARAMS
-        and param.kind in (param.POSITIONAL_OR_KEYWORD, param.KEYWORD_ONLY)
-    }
-    accepts_var_kw = any(
-        param.kind == param.VAR_KEYWORD for param in signature.parameters.values()
-    )
-    return named, accepts_var_kw
 
 
 # named params a caller may set, whether **kwargs still swallows anything, and the params
@@ -383,21 +375,21 @@ def _signature_params(target):
     DO NOT resolve wrappers in `_effective_defaults` (the VALUE test) only. That is exactly
     what shipped, and it left this NAME test blind while the plan recorded the blindness as
     fixed; adding a new keyword param to `WindowAttention.__init__` kept all 293 tests green.
-    Both directions share `_wrapped_class`/`_wrapper_pinned_params` above for that reason.
-    See decisions.md D-008.
+    Both directions share the single `_wrapper_probe` above for that reason.
+    See decisions.md D-008, D-010.
 
-    Resolution: the wrapper's own named params, PLUS the wrapped class's named params (which
-    reach it through ``**kwargs``), MINUS the params the wrapper hard-codes -- those raise
-    TypeError if a caller supplies them, so they are settable by nobody and belong in
+    Resolution: the wrapper's own named params, PLUS the named params of the class it was
+    OBSERVED to build (which reach it through ``**kwargs``), MINUS the params it was OBSERVED
+    to pin -- supplying those raises TypeError, so they are settable by nobody and belong in
     ``pinned``, not in ``named``.
     """
     named, accepts_var_kw = _named_and_var_kw(target)
-    wrapped = _wrapped_class(target)
-    if wrapped is None:
+    probe = _wrapper_probe(target)
+    if probe is None:
         return _TargetSignature(named, accepts_var_kw, frozenset())
 
-    wrapped_named, wrapped_var_kw = _named_and_var_kw(wrapped)
-    pinned = frozenset(_wrapper_pinned_params(target) - BASE_PARAMS)
+    wrapped_named, wrapped_var_kw = _named_and_var_kw(probe.wrapped)
+    pinned = frozenset(probe.pinned - BASE_PARAMS)
     # kwargs flow straight through, so what the CLASS swallows is what the door swallows.
     return _TargetSignature(
         (named | wrapped_named) - pinned, wrapped_var_kw, pinned
@@ -552,54 +544,30 @@ def _effective_defaults(target):
     """param name -> the default a caller gets when the factory passes nothing for it.
 
     For a CLASS: its ``__init__`` defaults. For a wrapper FUNCTION: the wrapper's own named
-    defaults, plus the defaults of the class named by its ``return_annotation`` for params the
-    wrapper only forwards via ``**kwargs``, plus the ``kwargs.setdefault`` values the wrapper
-    PROVABLY forces. Params with no default map to ``inspect.Parameter.empty``.
+    defaults, plus the defaults of the class it was OBSERVED to build for params it only
+    forwards via ``**kwargs``, plus every default that construction showed the wrapper
+    OVERRIDES. Params with no default map to ``inspect.Parameter.empty``.
 
-    # DECISION plan-2026-07-20T191713-52a15234/D-008
-    A ``setdefault`` that `_wrapper_kwarg_setdefaults` cannot prove unconditional is NOT applied
-    here -- the wrapped class's own default stands, which is this guard's pre-resolution answer.
-    DO NOT restore the old ``defaults.update(_wrapper_kwarg_setdefaults(target))`` over an
-    `ast.walk`-derived dict: that overwrote a CORRECT class default with a literal taken from
-    inside an `if`, a `for`, a nested def, or dead code after a `return`, so the guard asserted a
-    value the caller never receives and real drift could pass green. See decisions.md D-008.
+    # DECISION plan-2026-07-20T191713-52a15234/D-010
+    The wrapper's contribution is measured (`_wrapper_probe`), never parsed. DO NOT reintroduce
+    a `kwargs.setdefault` literal scan on top of these values: three passes of that produced
+    four false models, each asserting a default no caller ever receives -- which turns REAL
+    drift green while reading as coverage. If the observed override looks wrong, the wrapper
+    really does behave that way; read the wrapper. See decisions.md D-010.
 
-    A wrapper whose return annotation is a string (PEP 563) or not a class contributes no class
-    defaults, so its forwarded params stay NON-COMPARABLE -- graceful, but blind; see the module
-    docstring.
+    A wrapper that cannot be constructed contributes no class defaults, so its forwarded params
+    stay NON-COMPARABLE -- graceful, but blind, and `test_every_wrapper_entry_is_probeable`
+    reds so the blindness cannot arrive silently.
     """
-    signature = inspect.signature(
-        target.__init__ if inspect.isclass(target) else target
-    )
-    kinds = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
-    defaults = {
-        name: param.default
-        for name, param in signature.parameters.items()
-        if param.kind in kinds
-    }
-    wrapped = _wrapped_class(target)
-    if wrapped is None:
+    defaults = _named_defaults(target)
+    probe = _wrapper_probe(target)
+    if probe is None:
         return defaults
 
-    for name, param in inspect.signature(wrapped.__init__).parameters.items():
-        if name not in defaults and param.kind in kinds:
-            defaults[name] = param.default
-    forced, _unprovable = _wrapper_kwarg_setdefaults(target)
-    defaults.update(forced)
+    for name, default in _named_defaults(probe.wrapped).items():
+        defaults.setdefault(name, default)
+    defaults.update(probe.overrides)
     return defaults
-
-
-def _unprovable_wrapper_params(target):
-    """Params whose wrapper ``setdefault`` this guard refused to trust (see D-008).
-
-    Used only to enrich a DRIFT failure message: if a red lands on one of these, the reader
-    needs to know the comparator fell back to the class default because the wrapper's own
-    ``setdefault`` sits somewhere it cannot prove runs -- otherwise they would "fix" a correct
-    registry to match a default the caller never gets. Empty for every entry in this repo today.
-    """
-    if _wrapped_class(target) is None:
-        return frozenset()
-    return frozenset(_wrapper_kwarg_setdefaults(target)[1])
 
 
 def _defaults_equal(registry_value, ctor_default):
@@ -684,7 +652,6 @@ def test_registry_optional_defaults_match_constructor_defaults(
     )
 
     defaults = _effective_defaults(target)
-    unprovable = _unprovable_wrapper_params(target)
     target_name = getattr(target, "__name__", target)
     failures = []
 
@@ -728,17 +695,8 @@ def test_registry_optional_defaults_match_constructor_defaults(
                 )
             continue
 
-        hint = (
-            f" NOTE: {target_name} calls kwargs.setdefault({param!r}, ...) somewhere this "
-            f"guard cannot prove executes (inside a branch/loop/nested def, or after a "
-            f"return), so it compared against the WRAPPED CLASS default rather than trusting "
-            f"that literal. Read the wrapper before changing the registry -- the registry may "
-            f"well be right. See decisions.md D-008."
-            if param in unprovable
-            else ""
-        )
         failures.append(
-            f"  {param}:{hint} registry default {registry_value!r} != {target_name} default "
+            f"  {param}: registry default {registry_value!r} != {target_name} default "
             f"{ctor_default!r}. create_{factory}_* INJECTS the registry default "
             f"(params.update(optional_params)), so every caller who does not pass {param} gets "
             f"{registry_value!r}, not {ctor_default!r}. Three legal remedies: (1) fix the "
@@ -798,11 +756,17 @@ def test_no_stale_exemptions():
 # ---------------------------------------------------------------------
 # Guard-of-the-guard: the wrapper model itself
 #
-# Everything above trusts `_signature_params` / `_effective_defaults` to model what a wrapper
-# entry really does. Both were wrong once (decisions.md D-008), and neither error was visible
-# from the registries, because the only two wrappers in this repo have the SIMPLEST possible
-# shape: one unconditional top-level `setdefault` each. So the shapes that broke the model do
-# not exist here to be tested against -- they are constructed below.
+# Everything above trusts `_signature_params` / `_effective_defaults` to establish what a
+# wrapper entry really does. The static model that preceded `_wrapper_probe` was wrong FOUR
+# times (decisions.md D-008, D-010), and no error was ever visible from the registries,
+# because the only two wrappers in this repo have the SIMPLEST possible shape: one
+# unconditional top-level `setdefault` each. Every shape that broke the static model is
+# reconstructed below and asserted against the probe.
+#
+# These fixtures are kept deliberately, even though the mechanism they broke is gone: they are
+# the falsification test for D-010's central claim -- that an empirical probe handles all of
+# them WITHOUT a single per-shape special case. If any one of them ever needs special-casing
+# in `_wrapper_probe`, that claim is false and the retirement of the AST layer must be revisited.
 # ---------------------------------------------------------------------
 
 
@@ -816,7 +780,7 @@ class _SyntheticWrapped:
 
 
 def _wrapper_setdefault_unconditional(dim, **kwargs) -> _SyntheticWrapped:
-    """POSITIVE CONTROL. The one shape the model may trust: effective `flag` really is False."""
+    """POSITIVE CONTROL. The one shape the old static model got right: effective `flag` IS False."""
     kwargs.setdefault("flag", False)
     return _SyntheticWrapped(dim=dim, **kwargs)
 
@@ -850,6 +814,20 @@ def _wrapper_setdefault_after_return(dim, **kwargs) -> _SyntheticWrapped:
     kwargs.setdefault("flag", False)  # noqa - unreachable on purpose
 
 
+def _wrapper_setdefault_after_conditional_return(dim, **kwargs) -> _SyntheticWrapped:
+    """The pass-2 shape: a TOP-LEVEL setdefault skipped by a conditional early return.
+
+    `dim` is 32 at every call site, so the early return always fires and effective `flag` is
+    True. The static model stopped only at a top-level `return`, never accounted for control
+    flow that SKIPS a later top-level statement, and adopted `False` -- without even reporting
+    it as unprovable, so no hint fired either. See decisions.md D-010.
+    """
+    if dim > 16:
+        return _SyntheticWrapped(dim=dim, **kwargs)
+    kwargs.setdefault("flag", False)
+    return _SyntheticWrapped(dim=dim, **kwargs)
+
+
 def _wrapper_forwards_partition_mode(
     dim, partition_mode="grid", **kwargs
 ) -> _SyntheticWrapped:
@@ -857,34 +835,107 @@ def _wrapper_forwards_partition_mode(
     return _SyntheticWrapped(dim=dim, partition_mode=partition_mode, **kwargs)
 
 
+def _wrapper_renormalizes_partition_mode(
+    dim, partition_mode="grid", **kwargs
+) -> _SyntheticWrapped:
+    """The other pass-2 shape: forwards through an EXPRESSION, and is still settable.
+
+    `w(dim=32, partition_mode='ZIGZAG').partition_mode == 'zigzag'`. The static model asked
+    only whether the forwarded value was a bare `Name` and so called this a PIN -- which drops
+    the param from the MISSING set and reinstates the silent-drop false-green this whole file
+    exists to prevent. See decisions.md D-010.
+    """
+    return _SyntheticWrapped(
+        dim=dim, partition_mode=partition_mode.lower(), **kwargs
+    )
+
+
 def _wrapper_pins_partition_mode(dim, **kwargs) -> _SyntheticWrapped:
     """Hard-codes `partition_mode`; a caller supplying it gets TypeError, so it is not settable."""
     return _SyntheticWrapped(dim=dim, partition_mode="zigzag", **kwargs)
 
 
+def _wrapper_pins_via_assign_then_return(dim, **kwargs) -> _SyntheticWrapped:
+    """A REAL pin the static model missed: the return value is a Name, not a Call.
+
+    Missing a real pin is not harmless -- the MISSING guard would DEMAND the registry declare
+    `partition_mode`, and declaring it makes every `create_*` call raise TypeError.
+    """
+    layer = _SyntheticWrapped(dim=dim, partition_mode="zigzag", **kwargs)
+    return layer
+
+
+def _wrapper_pins_via_dict_splat(dim, **kwargs) -> _SyntheticWrapped:
+    """A REAL pin the static model missed: `keyword.arg is None` for a `**dict` splat."""
+    pins = {"partition_mode": "zigzag"}
+    return _SyntheticWrapped(dim=dim, **pins, **kwargs)
+
+
+def _wrapper_rejects_flag_with_value_error(dim, **kwargs) -> _SyntheticWrapped:
+    """REJECTS `flag`, and a rejection is NOT a pin.
+
+    A pin means "the wrapper already supplied this, so nobody else can". A rejection means
+    "this value is unacceptable". Only the first justifies dropping the param from the MISSING
+    set. Conflating them is a false-green: an unguarded param that looks guarded.
+    """
+    if "flag" in kwargs:
+        raise ValueError("flag is not supported by this door")
+    return _SyntheticWrapped(dim=dim, **kwargs)
+
+
+def _wrapper_rejects_flag_with_unrelated_type_error(dim, **kwargs) -> _SyntheticWrapped:
+    """Rejects `flag` with a TypeError of a DIFFERENT kind -- still not a pin.
+
+    This is why `_wrapper_probe` matches the specific "got multiple values for keyword
+    argument" text and not the exception CLASS. `TypeError` is the ordinary way Python reports
+    a bad argument type, so "any TypeError means pinned" would silently unguard every param a
+    layer type-checks.
+    """
+    if "flag" in kwargs:
+        raise TypeError("flag must be a tensor, not a bool")
+    return _SyntheticWrapped(dim=dim, **kwargs)
+
+
+def _wrapper_overwrites_kwargs_entry(dim, **kwargs) -> _SyntheticWrapped:
+    """The one shape NO direction sees: a silent overwrite that raises nothing.
+
+    `kwargs['partition_mode'] = ...` drops the caller's value without a TypeError, so the
+    probe correctly reports NO pin (there is none), the param stays in the MISSING set, and a
+    registry that declares it is not wrong to. Nothing here is mis-modelled -- but nothing
+    catches the drop either. Recorded as module-docstring item 5 and pinned below so the
+    limitation is a decision on the record rather than an assumption nobody wrote down.
+    """
+    kwargs["partition_mode"] = "zigzag"
+    return _SyntheticWrapped(dim=dim, **kwargs)
+
+
+# Every shape whose `setdefault` does NOT establish the effective default. The first four are
+# pass-1's; the fifth is pass-2's, and it is the one the static model could not be taught.
 _NON_TOP_LEVEL_WRAPPERS = [
     _wrapper_setdefault_in_if,
     _wrapper_setdefault_in_for,
     _wrapper_setdefault_in_nested_def,
     _wrapper_setdefault_after_return,
+    _wrapper_setdefault_after_conditional_return,
 ]
 
 
-def test_wrapper_setdefault_reads_a_real_unconditional_default():
-    """POSITIVE CONTROL for the four negative cases below.
+def test_probe_reads_a_real_forced_default():
+    """POSITIVE CONTROL for the five negative cases below.
 
-    Why this can fail if the implementation is wrong: an over-restrictive scan -- or one that
-    simply returns `{}` -- would satisfy every "must fall back to the class default" assertion
-    below while modelling nothing at all. This is what makes those four non-vacuous. It also
-    holds the line on the real chain: without it, "fix" the false-model bug by disabling wrapper
-    setdefault resolution entirely and the suite stays green while attention:window_zigzag's
-    correct `False` starts reading as drift.
+    Why this can fail if the implementation is wrong: a probe that returned no overrides at all
+    -- or one restricted so tightly that it observes nothing -- would satisfy every "must fall
+    back to the class default" assertion below while establishing nothing. This is what makes
+    those five non-vacuous. It also holds the line on the real chain: without it, one could
+    "fix" a false model by disabling wrapper resolution entirely, and the suite would stay green
+    while attention:window_zigzag's CORRECT `False` started reading as drift.
     """
-    forced, unprovable = _wrapper_kwarg_setdefaults(_wrapper_setdefault_unconditional)
-    assert forced == {"flag": False}, (
-        f"an unconditional top-level kwargs.setdefault('flag', False) was not read: {forced!r}"
+    probe = _wrapper_probe(_wrapper_setdefault_unconditional)
+    assert probe is not None and probe.wrapped is _SyntheticWrapped
+    assert probe.overrides.get("flag") is False, (
+        f"a wrapper that really does force flag=False was not observed doing so: "
+        f"{probe.overrides!r}"
     )
-    assert not unprovable
     assert _effective_defaults(_wrapper_setdefault_unconditional)["flag"] is False
     # ...and the same on the two REAL wrappers, so this is not a claim about toys only.
     assert (
@@ -895,40 +946,101 @@ def test_wrapper_setdefault_reads_a_real_unconditional_default():
         _effective_defaults(create_zigzag_window_attention)["use_relative_position_bias"]
         is False
     )
+    assert _wrapper_probe(create_zigzag_window_attention).overrides[
+        "use_relative_position_bias"
+    ] is False, (
+        "the zigzag wrapper's False must be OBSERVED, not inherited from the class default True"
+    )
+
+
+def test_a_class_target_is_not_probed():
+    """A class wraps nothing, so it must cost zero constructions and yield no probe.
+
+    Why this can fail if the implementation is wrong: probing were it not needed would build
+    95 layers at collection time and could turn an unrelated ctor failure into a drift red.
+    """
+    assert _wrapper_probe(WindowAttention) is None
+    assert _signature_params(WindowAttention).pinned == frozenset()
 
 
 @pytest.mark.parametrize(
     "wrapper", _NON_TOP_LEVEL_WRAPPERS, ids=lambda w: w.__name__
 )
-def test_wrapper_setdefault_below_top_level_is_not_adopted(wrapper):
-    """A `setdefault` this guard cannot prove runs must NOT overwrite the class default.
+def test_setdefault_the_caller_never_reaches_is_not_adopted(wrapper):
+    """A `setdefault` that does not run must NOT overwrite the class default.
 
-    Why this can fail if the implementation is wrong: it DID fail, for all four shapes, until
-    decisions.md D-008. `ast.walk` visits the whole function tree, so each `setdefault` here was
-    read as unconditional and `_effective_defaults` returned False -- a value no caller of these
-    wrappers ever receives. The guard would then assert a registry `False` as correct and a
-    registry `True` (the truth) as drift: real drift green, correct code red. That is a
-    correctness defect in the safety mechanism, not a coverage gap.
+    Why this can fail if the implementation is wrong: it DID fail -- the first four shapes
+    under `ast.walk` (D-008), then the fifth under the "unconditional top-level" scan that
+    replaced it (D-010). Each time, `_effective_defaults` returned False: a value no caller of
+    these wrappers ever receives. The guard then asserts a registry `False` as correct and the
+    true `True` as drift -- real drift green, correct code red, which is a correctness defect in
+    the safety mechanism rather than a coverage gap.
+
+    The probe passes all five WITHOUT knowing that `if`, `for`, nested `def`, dead code and
+    early returns exist. That is D-010's claim, and this is where it is falsifiable: if any
+    shape here ever needs a special case in `_wrapper_probe`, the claim is false.
     """
     assert wrapper(dim=32).flag is True, (
         "the fixture is not modelling what it claims -- this wrapper's real effective `flag` "
         "must be the CLASS default True, or the assertions below prove nothing"
     )
 
-    forced, unprovable = _wrapper_kwarg_setdefaults(wrapper)
-    assert "flag" not in forced, (
-        f"{wrapper.__name__}: kwargs.setdefault('flag', False) is not on the unconditional "
-        f"top-level path, but the model adopted it as {forced.get('flag')!r}"
-    )
-    assert "flag" in unprovable, (
-        f"{wrapper.__name__}: the setdefault must still be SEEN and reported as unprovable, so "
-        f"a DRIFT message can tell the reader why the class default was used instead"
+    probe = _wrapper_probe(wrapper)
+    assert "flag" not in probe.overrides, (
+        f"{wrapper.__name__}: no caller reaches this kwargs.setdefault('flag', False), but the "
+        f"guard recorded an override of {probe.overrides.get('flag')!r}"
     )
     assert _effective_defaults(wrapper)["flag"] is True, (
-        f"{wrapper.__name__}: effective default must fall back to the _SyntheticWrapped class "
-        f"default True, not to the unreachable literal False"
+        f"{wrapper.__name__}: effective default must be the _SyntheticWrapped class default "
+        f"True, not the unreachable literal False"
     )
-    assert "flag" in _unprovable_wrapper_params(wrapper)
+
+
+def test_probe_ignores_values_that_cannot_be_compared_across_constructions():
+    """A ctor-transformed attribute must not read as a wrapper override.
+
+    Why this can fail if the implementation is wrong: `WindowAttention.__init__` does
+    `keras.initializers.get(kernel_initializer)`, so two separate constructions hold two
+    DISTINCT objects that compare unequal. Comparing them naively would report
+    `kernel_initializer` as a forced default on both real wrappers -- pure invention -- and the
+    registry's honest `'glorot_uniform'` would red as drift against an object repr.
+    """
+    for wrapper in (create_grid_window_attention, create_zigzag_window_attention):
+        overrides = _wrapper_probe(wrapper).overrides
+        assert "kernel_initializer" not in overrides
+        assert "bias_initializer" not in overrides
+        assert all(isinstance(value, _LITERAL_TYPES) for value in overrides.values())
+
+
+def test_every_wrapper_entry_is_probeable():
+    """Anti-rot: a wrapper the probe cannot build must fail LOUDLY, not degrade in silence.
+
+    Why this can fail if the implementation is wrong: `_wrapper_probe` returns None on any
+    construction failure, and every caller then falls back to the wrapper's own bare signature
+    -- the pre-resolution blindness that hid 20 of `WindowAttention`'s params from the MISSING
+    guard. That fallback is the right behavior, but it must never arrive unannounced. A new
+    wrapper entry whose required params are absent from `_PROBE_ARGS` reds here, by name.
+    """
+    wrappers = [
+        (factory, type_name, target)
+        for factory, type_name, target, _ in ENTRIES
+        if not inspect.isclass(target)
+    ]
+    assert wrappers, (
+        "no function-target registry entries found -- if the wrapper entries were removed, "
+        "delete this machinery deliberately rather than leaving it passing vacuously"
+    )
+    unprobeable = [
+        f"{factory}:{type_name} ({target.__name__})"
+        for factory, type_name, target in wrappers
+        if _wrapper_probe(target) is None
+    ]
+    assert not unprobeable, (
+        f"{unprobeable} could not be constructed for probing, so all three drift directions "
+        f"silently fell back to the wrapper's own bare signature. Add the missing required "
+        f"argument(s) to _PROBE_ARGS, or fix the wrapper -- do NOT leave this red unread: it "
+        f"means those entries are no longer guarded."
+    )
 
 
 def test_name_guard_resolves_wrapper_targets():
@@ -983,33 +1095,116 @@ def test_name_guard_is_live_for_wrapper_entries():
         )
 
 
-def test_wrapper_pinned_params_are_derived_not_exempted():
-    """`partition_mode` is excluded from the MISSING set because it is UNSETTABLE, not waived.
+@pytest.mark.parametrize(
+    "wrapper",
+    [
+        _wrapper_pins_partition_mode,
+        _wrapper_pins_via_assign_then_return,
+        _wrapper_pins_via_dict_splat,
+    ],
+    ids=lambda w: w.__name__,
+)
+def test_a_real_pin_is_observed_whatever_shape_it_takes(wrapper):
+    """If supplying the param really raises TypeError, it must be classified as pinned.
 
-    Why this can fail if the implementation is wrong: a blanket exemption would exclude it
-    unconditionally. Here the exclusion is derived from the wrapper's own delegation call, so a
-    wrapper that FORWARDS the param instead of pinning it is required to declare it. If the
-    derivation degenerated to "always exclude", the forwarding case below would also be excluded
-    and this reds.
+    Why this can fail if the implementation is wrong: MISSING excludes pinned params, so a pin
+    the guard cannot see makes the guard DEMAND that the registry declare a param which then
+    breaks every `create_*` call with a TypeError -- a red that leads the reader to introduce a
+    live bug. The static model saw only the keywords of a top-level `return <Call>(...)`, so it
+    missed the last two shapes here entirely; the probe does not care about shape, only about
+    what happens.
     """
-    pins = _signature_params(_wrapper_pins_partition_mode)
-    assert "partition_mode" in pins.pinned
-    assert "partition_mode" not in pins.named
+    with pytest.raises(TypeError, match="multiple values .*partition_mode"):
+        wrapper(dim=32, partition_mode="grid")
 
-    forwards = _signature_params(_wrapper_forwards_partition_mode)
-    assert "partition_mode" not in forwards.pinned
-    assert "partition_mode" in forwards.named, (
-        "a forwarded param must stay in the MISSING set -- a registry that fails to declare it "
+    signature = _signature_params(wrapper)
+    assert "partition_mode" in signature.pinned
+    assert "partition_mode" not in signature.named
+
+
+@pytest.mark.parametrize(
+    "wrapper",
+    [
+        _wrapper_forwards_partition_mode,
+        _wrapper_renormalizes_partition_mode,
+        _wrapper_overwrites_kwargs_entry,
+    ],
+    ids=lambda w: w.__name__,
+)
+def test_a_settable_param_is_never_classified_as_pinned(wrapper):
+    """A param that does NOT raise TypeError must stay in the MISSING set.
+
+    Why this can fail if the implementation is wrong: this is the false-green direction, and it
+    is the one that matters most. Calling a settable param "pinned" removes it from MISSING, so
+    a registry that never declares it stops reding -- and every caller's value is then silently
+    dropped by the `create_*` filter, which is the exact bug this whole file exists to catch.
+    The static model called `partition_mode=partition_mode.lower()` a pin purely because the
+    forwarded value was not a bare `Name` (decisions.md D-010).
+
+    `_wrapper_overwrites_kwargs_entry` is the honest limit: it raises nothing, so the probe
+    correctly finds no pin, yet it still discards the caller's value. Nothing in this file
+    catches that shape; it is disclosed as module-docstring item 5 rather than papered over.
+    """
+    wrapper(dim=32, partition_mode="grid")  # settable: must not raise
+
+    signature = _signature_params(wrapper)
+    assert "partition_mode" not in signature.pinned
+    assert "partition_mode" in signature.named, (
+        "a settable param must stay in the MISSING set -- a registry that fails to declare it "
         "silently drops the caller's value, which is the whole point of this file"
     )
-    assert "dim" not in forwards.pinned, (
+    assert "dim" not in signature.pinned, (
         "a plain forward of the wrapper's own parameter (dim=dim) is not a pin"
     )
 
+
+@pytest.mark.parametrize(
+    "wrapper,expected_error",
+    [
+        (_wrapper_rejects_flag_with_value_error, ValueError),
+        (_wrapper_rejects_flag_with_unrelated_type_error, TypeError),
+    ],
+    ids=lambda x: getattr(x, "__name__", str(x)),
+)
+def test_a_rejected_param_is_not_mistaken_for_a_pinned_one(wrapper, expected_error):
+    """A param that RAISES for an unrelated reason must not be classified as pinned.
+
+    Why this can fail if the implementation is wrong: the probe learns "pinned" from an
+    exception, so the obvious shortcut is `except Exception: pinned.add(name)` -- and on this
+    repo's real wrappers that shortcut is INDISTINGUISHABLE from the correct implementation,
+    because nothing here rejects its own default. These two fixtures are the only subjects that
+    tell them apart. Getting it wrong drops a genuinely settable param out of the MISSING set,
+    so a registry that never declares it stops reding and every caller's value is silently
+    discarded -- the precise false-green D-010 retired the static model to avoid.
+    """
+    with pytest.raises(expected_error):
+        wrapper(dim=32, flag=True)
+
+    signature = _signature_params(wrapper)
+    assert "flag" not in signature.pinned, (
+        f"{wrapper.__name__} REJECTS flag, it does not pin it -- 'the wrapper already supplied "
+        f"this value' and 'this value is unacceptable' are different facts, and only the first "
+        f"one means the registry is right to omit the param"
+    )
+    assert "flag" in signature.named
+
+
+def test_real_wrapper_pins_are_derived_not_exempted():
+    """`partition_mode` is excluded from the MISSING set because it is UNSETTABLE, not waived.
+
+    Why this can fail if the implementation is wrong: a blanket exemption would exclude it
+    unconditionally, and would keep passing after a wrapper stopped pinning it. Here the
+    exclusion is observed from the wrapper's real behavior, so the day `create_grid_window_
+    attention` starts forwarding `partition_mode`, this reds and the registry must declare it.
+    """
     for real in (create_grid_window_attention, create_zigzag_window_attention):
         assert "partition_mode" in _signature_params(real).pinned, (
             f"{real.__name__} hard-codes partition_mode; if it no longer does, the registry "
             f"must start declaring it and this test must be re-derived, not deleted"
+        )
+        assert _signature_params(real).pinned == frozenset({"partition_mode"}), (
+            f"{real.__name__} pins more than partition_mode -- an over-broad pin set is a "
+            f"silent MISSING blind spot: {sorted(_signature_params(real).pinned)}"
         )
 
 
@@ -1037,6 +1232,6 @@ def test_pinned_param_is_genuinely_unsettable():
     )
     assert layer.partition_mode == "grid", (
         "attention:window now honors partition_mode -- if the wrapper stopped pinning it, the "
-        "registry must declare it (test_wrapper_pinned_params_are_derived_not_exempted covers "
+        "registry must declare it (test_real_wrapper_pins_are_derived_not_exempted covers "
         "the derivation) and this expectation must be rewritten deliberately"
     )
