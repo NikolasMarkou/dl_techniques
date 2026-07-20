@@ -801,6 +801,14 @@ class TestRBFLayerOutputMode:
     ``mixed_float16``; see ``RBFLayer.call``'s D-002 anchor).
     """
 
+    # Magnitude floor for "this weight is actually learning", used by
+    # ``test_normalized_gradients_flow``. Justified at that test's docstring:
+    # ~23x below the worst ``max|g|`` observed across the full parametrization
+    # and 15 random center initializations. A ``> 0.0`` assertion is NOT
+    # sufficient -- it is fitted to the exactly-zero failure that was found and
+    # is blind to the collapse-to-noise regime pinned below.
+    MIN_USEFUL_GRADMAX: float = 1e-4
+
     # Pinned pre-change capture (see plan step 2a). Weights are assigned
     # explicitly below, so this is a fixed numeric target rather than a re-run
     # of the implementation against itself: ANY change to the default arm's
@@ -1023,6 +1031,18 @@ class TestRBFLayerOutputMode:
         control: ``D*gamma = 80`` clips most but not all units, so a nonzero
         gradient survives and the case cannot detect the defect. That is the
         point -- it records that "some saturation" is not the trigger.
+
+        The threshold is ``MIN_USEFUL_GRADMAX``, not ``> 0.0``. Pass-2 review
+        was right that ``> 0.0`` is fitted to the exactly-zero bug that was
+        actually found and cannot see a collapse-to-noise regime -- see
+        ``test_normalized_gradient_collapses_at_large_input_scale`` below, which
+        documents one. The floor is derived, not tuned to make this pass: the
+        minimum of ``max|g|`` over both weights, all four parametrized cases and
+        15 random center initializations is ``2.3e-03`` (at the smallest case,
+        ``dim=4``), so ``1e-4`` sits ~23x below the observed worst case. It is
+        deliberately NOT set just under that worst case -- ``centers`` is
+        randomly initialized, so a tight bound would be flaky rather than
+        informative.
         """
         layer = RBFLayer(units=5, gamma_init=gamma_init, output_mode='normalized')
         x = tf.constant(
@@ -1039,10 +1059,12 @@ class TestRBFLayerOutputMode:
             g = np.asarray(ops.convert_to_numpy(grad))
             assert not np.isnan(g).any(), f"NaN gradient for {weight.name}"
             assert not np.isinf(g).any(), f"Inf gradient for {weight.name}"
-            assert np.abs(g).max() > 0.0, (
-                f"vanished gradient for {weight.name} at dim={dim}, "
-                f"gamma_init={gamma_init} -- the normalized arm is a dead layer "
-                "here (D-008: do not softmax the clipped exponent)"
+            assert np.abs(g).max() > self.MIN_USEFUL_GRADMAX, (
+                f"gradient collapsed for {weight.name} at dim={dim}, "
+                f"gamma_init={gamma_init}: max|g| = {np.abs(g).max():.4g} is below "
+                f"the {self.MIN_USEFUL_GRADMAX:.0e} usefulness floor -- the "
+                "normalized arm is not learning here (D-008: do not softmax the "
+                "clipped exponent)"
             )
 
     def test_normalized_output_varies_at_realistic_dimension(self) -> None:
@@ -1163,6 +1185,209 @@ class TestRBFLayerOutputMode:
             validate_mixture_config('kmeans', n_clusters=4, output_mode='normalized')
         with pytest.raises(ValueError, match="output_mode"):
             validate_mixture_config('gmm', n_components=4, output_mode='basis')
+
+
+class TestRBFKnownLimitations:
+    """Measured, disclosed defects and weak regimes -- NOT aspirational tests.
+
+    Every test here pins something that is currently *wrong* or *fragile*, so
+    that it is impossible to change quietly. Two of the three assert the honest
+    present-day behavior; the ``xfail(strict=True)`` one asserts the behavior we
+    want and does not have, and therefore FAILS the moment the defect is fixed.
+    """
+
+    @staticmethod
+    def _binary_fit(output_mode: str, dim: int, epochs: int = 40, seed: int = 0):
+        """Fit ``Sequential([RBFLayer, Dense(1)])`` on a linearly separable task.
+
+        Returns ``(first_loss, last_loss, d_centers, d_gamma_raw)`` -- the loss
+        trajectory endpoints plus how far each trainable weight of the RBF layer
+        actually moved. Weight movement is reported separately from loss because
+        the two fail differently: ``repulsion_strength`` defaults to ``0.1`` and
+        moves ``centers`` on its own even when NO data gradient reaches them, so
+        ``d_centers > 0`` is not evidence of learning. ``d_gamma_raw`` has no
+        such confound -- nothing but the data path touches it.
+        """
+        keras.utils.set_random_seed(1234 + seed)
+        rs = np.random.RandomState(3)
+        x = rs.normal(0, 1, (256, dim)).astype('float32')
+        w = rs.normal(0, 1, (dim,)).astype('float32')
+        y = (x @ w > 0).astype('float32')
+
+        model = keras.Sequential([
+            keras.layers.Input(shape=(dim,)),
+            RBFLayer(units=8, output_mode=output_mode),
+            keras.layers.Dense(1, activation='sigmoid'),
+        ])
+        model.compile(optimizer=keras.optimizers.Adam(1e-2),
+                      loss='binary_crossentropy')
+
+        rbf = model.layers[0]
+        c0 = np.asarray(ops.convert_to_numpy(rbf.centers)).copy()
+        g0 = np.asarray(ops.convert_to_numpy(rbf.gamma_raw)).copy()
+        history = model.fit(x, y, epochs=epochs, batch_size=64, verbose=0)
+        c1 = np.asarray(ops.convert_to_numpy(rbf.centers))
+        g1 = np.asarray(ops.convert_to_numpy(rbf.gamma_raw))
+
+        losses = history.history['loss']
+        return (losses[0], losses[-1],
+                float(np.abs(c1 - c0).max()), float(np.abs(g1 - g0).max()))
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="KNOWN DEFECT (D-012), deliberately not fixed in this plan: the "
+               "50.0 clip in the DEFAULT 'basis' arm has a structurally zero "
+               "gradient in its saturated branch, so at D*gamma >~ 50 the layer "
+               "is constant exp(-50) and untrainable. Fixing it changes the "
+               "default behavior of a shipped layer and needs its own plan. "
+               "When you fix it, this test goes GREEN and pytest turns it into "
+               "a FAILURE -- delete the marker, not the test.",
+    )
+    def test_basis_mode_is_dead_at_realistic_dimension(self) -> None:
+        """The default ``'basis'`` mode does not learn at ``D = 128``.
+
+        This asserts the properties a working layer WOULD have, all of which
+        currently fail. It is the same class of defect D-008 fixed on the
+        ``'normalized'`` arm (``ops.minimum`` saturation), at the same trigger
+        (``D * gamma >~ 50``, because ``E[||x - c||^2] ~ D``), on the arm that
+        is the DEFAULT -- and it is pre-existing rather than introduced here:
+        the ``'basis'`` output is byte-identical before and after the D-008 work.
+
+        Measured today with stock defaults on ``normal(0, 1)`` input: gradmax is
+        exactly ``0.0 / 0.0`` at ``D in {64, 128, 256}``; forward output is the
+        constant ``1.929e-22 = exp(-50)`` for 100% of entries; and a 40-epoch fit
+        moves ``gamma_raw`` by exactly ``0.0`` while the loss sits at chance
+        (``0.693``). Under identical conditions ``'normalized'`` reaches ``0.18``.
+
+        Deliberately uses a realistic ``D`` and stock defaults. A cheap
+        low-dimensional version of this test would PASS and prove nothing --
+        that is precisely the test-design error D-008 was about.
+        """
+        dim = 128
+        layer = RBFLayer(units=8, output_mode='basis')
+        x = np.random.RandomState(11).normal(0, 1, (32, dim)).astype('float32')
+
+        # 1. Forward: output must depend on the input at all.
+        y = np.asarray(ops.convert_to_numpy(layer(x)))
+        assert y.std(axis=0).max() > 1e-12, (
+            f"'basis' output is constant at dim={dim} (all entries "
+            f"{np.unique(y)}) -- the 50.0 clip saturates every unit"
+        )
+
+        # 2. Gradients: both trainable weights must actually receive signal.
+        xt = tf.constant(x)
+        with tf.GradientTape() as tape:
+            loss = ops.mean(ops.square(layer(xt, training=True)))
+        grads = tape.gradient(loss, layer.trainable_weights)
+        for weight, grad in zip(layer.trainable_weights, grads):
+            g = np.abs(np.asarray(ops.convert_to_numpy(grad))).max()
+            assert g > TestRBFLayerOutputMode.MIN_USEFUL_GRADMAX, (
+                f"'basis' gradient for {weight.name} is {g:.4g} at dim={dim} -- "
+                "ops.minimum passes zero gradient through its saturated branch"
+            )
+
+        # 3. End-to-end: a model containing this layer must reduce its loss.
+        #    This is the assertion pass-2 review named as the single missing
+        #    test -- it would have caught D-008 directly, and it catches D-012.
+        first, last, _d_centers, d_gamma = self._binary_fit('basis', dim)
+        assert last < 0.5, (
+            f"'basis' at dim={dim} never learns: loss {first:.4f} -> {last:.4f} "
+            "(0.693 is chance for this balanced binary task)"
+        )
+        assert d_gamma > 0.0, (
+            "gamma_raw moved by exactly 0.0 over the whole fit -- no gradient "
+            "ever reached it (note: d|centers| is NOT a valid check here, the "
+            "repulsion loss moves centers with no data gradient at all)"
+        )
+
+    def test_normalized_model_learns_at_realistic_dimension(self) -> None:
+        """A model containing a normalized RBF at ``D = 128`` reduces its loss.
+
+        The positive counterpart of the xfail above, and the test whose absence
+        both pass-1 and pass-2 review flagged as this suite's central blind spot:
+        no test anywhere asserted that an RBF layer in ANY mode actually trains.
+        Every other assertion in this file -- sums to 1.0, no NaN, nonzero
+        gradient -- passed while the layer was a documented no-op.
+        """
+        first, last, d_centers, d_gamma = self._binary_fit('normalized', 128)
+
+        assert last < 0.5, (
+            f"normalized RBF at dim=128 did not learn: {first:.4f} -> {last:.4f}"
+        )
+        assert last < first * 0.5, "loss did not meaningfully decrease"
+        assert d_centers > 1e-3, f"centers barely moved: {d_centers:.4g}"
+        assert d_gamma > 1e-3, f"gamma_raw barely moved: {d_gamma:.4g}"
+
+    def test_normalized_gradient_collapses_at_large_input_scale(self) -> None:
+        """DOCUMENTS a real weak regime of ``'normalized'``: unstandardized input.
+
+        Pass-2 review's concern 2. Removing the clip removed the plateau but not
+        every non-learning regime: softmax saturates to one-hot once the gap
+        between the two nearest units exceeds ~88, at which point gradients
+        collapse by orders of magnitude WITHOUT reaching exact zero -- so the
+        ``> 0.0`` assertion the gradient test originally used could not see it,
+        and ``MIN_USEFUL_GRADMAX`` only partly can.
+
+        This test asserts the collapse itself, honestly, rather than pretending
+        a threshold makes it go away. The layer expects approximately
+        standardized inputs; that is now stated in the class docstring and the
+        README, and pinned here. If someone makes this regime work, the bounds
+        below fail and this test must be revisited -- that is intended.
+
+        ``centers`` is ASSIGNED explicitly rather than left to the random
+        initializer. That is load-bearing: with a random init this comparison is
+        badly flaky (measured over 25 inits at ``gamma=20``, the "healthy" arm
+        ranges ``5.3e-06`` to ``2.7`` and overlaps the collapsed arm entirely --
+        the init dominates the effect being measured). Pinning the centers makes
+        the numbers below exactly reproducible run to run.
+        """
+        dim = 128
+
+        def gradmax(scale: float) -> float:
+            layer = RBFLayer(units=5, gamma_init=1.0, output_mode='normalized')
+            layer.build((None, dim))
+            layer.centers.assign(
+                np.random.RandomState(5).normal(0, 1, (5, dim)).astype('float32')
+            )
+            x = tf.constant(
+                np.random.RandomState(9).normal(0, 1, (16, dim)).astype('float32')
+                * scale
+            )
+            with tf.GradientTape() as tape:
+                loss = ops.mean(ops.square(layer(x, training=True)))
+            grads = tape.gradient(loss, layer.trainable_weights)
+            return min(
+                float(np.abs(np.asarray(ops.convert_to_numpy(g))).max())
+                for g in grads
+            )
+
+        # Measured, deterministic: 1.05e-02, 2.05e-06, 7.63e-07.
+        standardized = gradmax(scale=1.0)
+        scaled_10 = gradmax(scale=10.0)
+        scaled_30 = gradmax(scale=30.0)
+
+        # The regime the layer is designed for is genuinely healthy.
+        assert standardized > TestRBFLayerOutputMode.MIN_USEFUL_GRADMAX, (
+            f"standardized input should train, got {standardized:.4g}"
+        )
+        # Merely scaling the input by 10 -- no other change -- already drops the
+        # layer BELOW the usefulness floor. This is the honest statement: it is
+        # not a far-fetched extreme, it is x10.
+        assert scaled_10 < TestRBFLayerOutputMode.MIN_USEFUL_GRADMAX, (
+            f"expected softmax one-hot saturation at scale=10, got {scaled_10:.4g}"
+        )
+        assert standardized / scaled_10 > 100.0, (
+            f"expected a gradient cliff of orders of magnitude, got only "
+            f"{standardized / scaled_10:.1f}x between scale=1 and scale=10"
+        )
+        # ...yet never reaches exact zero, which is precisely why the original
+        # `> 0.0` assertion was blind to this whole regime.
+        assert scaled_10 > 0.0 and scaled_30 > 0.0, (
+            "collapse is to a tiny value, not to exact zero -- a `> 0.0` "
+            "assertion cannot detect this regime, which is why the gradient "
+            "test now uses MIN_USEFUL_GRADMAX instead"
+        )
+        assert scaled_30 < scaled_10, "collapse should deepen with input scale"
 
 
 if __name__ == '__main__':

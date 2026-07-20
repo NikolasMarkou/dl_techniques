@@ -124,13 +124,52 @@ class RBFLayer(keras.layers.Layer):
     :param output_mode: Output normalization mode. ``'basis'`` (the default)
         returns the raw unnormalized Gaussian activations
         ``phi_k = exp(-gamma_k * ||x - c_k||^2)``, with the exponent clipped at
-        50.0 to keep ``exp`` from underflowing (so the floor is ~1.93e-22, not
-        0.0). ``'normalized'`` returns the Normalized RBF (NRBF) activations
+        50.0.
+
+        .. warning::
+
+           **The 50.0 clip is a hazard on the ``'basis'`` path, not a
+           safeguard.** It does two things, and only the first is desirable: it
+           keeps ``exp`` from underflowing (the floor is ``exp(-50) ~ 1.93e-22``
+           rather than ``0.0``), AND it freezes learning once saturated, because
+           ``ops.minimum`` has a structurally ZERO gradient in its saturated
+           branch. Since ``E[||x - c||^2] ~ D`` for standardized inputs, every
+           unit saturates at the same 50.0 once ``D * gamma >~ 50``, and the
+           layer becomes a constant ``exp(-50)`` with gradient exactly 0.0 on
+           both ``centers`` and ``gamma_raw``. Measured with stock defaults
+           (``units=8``, ``gamma_init=1.0``) on ``normal(0, 1)`` input: gradmax
+           is ``0.0 / 0.0`` at ``D >= 64``, and a 40-epoch binary fit of
+           ``Sequential([RBFLayer, Dense(1)])`` at ``D = 128`` leaves the loss at
+           chance (``0.693``) with ``d|gamma_raw|`` exactly ``0.0``. This is
+           long-standing behavior, deliberately NOT changed here (changing the
+           default arm of a shipped layer needs its own plan); it is pinned by
+           ``test_basis_mode_is_dead_at_realistic_dimension``, an
+           ``xfail(strict=True)`` test that will FAIL loudly the moment someone
+           fixes it. Prefer ``'normalized'``, or keep ``D * gamma`` well below
+           50, if you need this layer to train.
+
+        ``'normalized'`` returns the Normalized RBF (NRBF) activations
         ``phi_k / sum_j phi_j``, which sum to 1.0 along the last axis. The
         normalized arm is computed as a softmax over the **unclipped** exponent
         and is therefore exactly the textbook NRBF: far from every center it
         selects the nearest one, rather than degenerating to a uniform
-        ``1/units``. Note this vocabulary is deliberately DISJOINT
+        ``1/units``. It carries no clip and therefore no gradient plateau, but
+        it does expect approximately **standardized inputs**: because softmax
+        saturates to one-hot once the gap between the two nearest units exceeds
+        ~88, large ``gamma`` or large input scale collapses its gradients by
+        orders of magnitude without ever reaching exact zero (measured at
+        ``D = 128``: gradmax ``4.3e-01`` at ``gamma=20, scale=10`` versus
+        ``5.3e-04`` at ``gamma=20, scale=30``). It also has one true failure
+        point: the unclipped exponent overflows float32 when
+        ``D * gamma * max|x|^2 > 3.4e38``, making the row all ``-inf`` and the
+        softmax NaN. Note the threshold is a function of ``D`` and ``gamma``,
+        NOT a fixed input magnitude — at ``D = 1024`` or ``gamma = 100`` it is
+        reached a decade earlier in ``|x|`` than at ``D = 128, gamma = 1``. No
+        plausible input reaches it (``normal(0, 1) * 1e7`` is finite), and
+        re-clipping to prevent it would reintroduce exactly the plateau
+        described above, so this is disclosed rather than repaired (D-008).
+
+        Note this vocabulary is deliberately DISJOINT
         from ``GMMLayer``/``KMeansLayer``'s ``{'assignments', 'mixture'}``: RBF
         has no reconstruction-mode analogue, and its normalized output is a
         normalized basis activation, not a posterior or cluster assignment.
@@ -363,8 +402,29 @@ class RBFLayer(keras.layers.Layer):
         if self.output_mode == 'normalized':
             output = ops.softmax(-scaled_dist_sq, axis=-1)
         else:
-            # Bounded exponent to prevent numerical underflow/overflow.
-            # exp(-50) is effectively 0. 'basis' behavior is unchanged.
+            # DECISION plan-2026-07-20T160907-7de371a1/D-012: this 50.0 clip is a
+            # KNOWN DEFECT, knowingly left in place. Do NOT read it as protection.
+            # It bounds the exponent so ops.exp cannot underflow -- and it is also
+            # the SAME structural zero-gradient plateau that D-002/D-008 removed
+            # from the 'normalized' arm directly above. ops.minimum passes zero
+            # gradient through its saturated branch, so once D * gamma >~ 50 (i.e.
+            # at ORDINARY feature dimensions, since E[||x - c||^2] ~ D) every unit
+            # pins to the constant exp(-50) = 1.929e-22 and both `centers` and
+            # `gamma_raw` receive gradient EXACTLY 0.0. Measured, stock defaults,
+            # normal(0,1) input: gradmax 0.0/0.0 at D in {64, 128, 256}; a 40-epoch
+            # binary fit at D=128 sits at chance loss 0.693 with d|gamma_raw| = 0.0.
+            #
+            # Why it is still here: 'basis' is the DEFAULT mode of a shipped layer
+            # and this behavior is long-standing and byte-identical to what shipped
+            # before D-008 -- so removing the clip is a production behavior change
+            # to every existing caller, not a bug fix, and it needs its own plan,
+            # pre-mortem and review. Do NOT "just" delete the minimum() here.
+            #
+            # It is pinned, not merely documented: see
+            # tests/test_layers/test_mixtures/test_radial_basis_function.py
+            # ::test_basis_mode_is_dead_at_realistic_dimension, an
+            # xfail(strict=True) end-to-end training test that FAILS the moment
+            # this is fixed. When you fix it, that test is your checklist.
             output = ops.exp(-ops.minimum(scaled_dist_sq, 50.0))
 
         # DECISION plan_2026-06-14_5e80bd3e/D-001: gate on a graph-safe training factor so

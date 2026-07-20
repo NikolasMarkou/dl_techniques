@@ -648,9 +648,29 @@ class KMeansLayer(BaseMixtureLayer):
             # call -- repeated no-arg resets on a seeded layer then produce bit-identical
             # centroids (measured max|a-b| = 0.0 across three calls), which defeats the
             # method's only purpose: escaping a collapsed centroid configuration
-            # mid-training. Reproducibility already lives at the layer level, where
-            # `random_seed` governs build()-time initialization. This was added and
-            # reverted once (D-009); the sibling asymmetry is correct, not a defect.
+            # mid-training. This was added and reverted once (D-009).
+            #
+            # CORRECTION (D-009 pass-2 review): an earlier version of this comment
+            # said "reproducibility already lives at the layer level". That is only
+            # HALF true and must not be read as "a whole-run seeding protocol covers
+            # this call". BUILD-time reproducibility does hold -- `random_seed` governs
+            # build() init, and two KMeansLayer(random_seed=42) build to identical
+            # centroids. RESET-time reproducibility holds under NO protocol at all:
+            # a bare keras.random.normal(seed=None) is not covered by
+            # keras.utils.set_random_seed() in this Keras/TF version, so build+reset
+            # under a fixed global seed gives different centroids on every run
+            # (verified: max|a-b| = 0.318, 3/3 runs differ). Callers who need
+            # deterministic resets do not have them today.
+            #
+            # This is also not the binary the earlier comment implied. A
+            # `keras.random.SeedGenerator(self.random_seed)` held on the layer would
+            # satisfy BOTH constraints -- it advances state per call, so repeated
+            # resets still re-draw, while a given layer replays the same sequence
+            # across processes. That is a recorded FUTURE OPTION, not implemented
+            # here: it adds a serialized stateful variable to the layer and so is a
+            # change to the save/load contract, which belongs in its own plan.
+            # Until then the honest statement is: unseeded, re-draws correctly,
+            # NOT reproducible.
             new_values = keras.random.normal(
                 shape=(self.n_clusters, self.feature_dims),
                 dtype=self.dtype
