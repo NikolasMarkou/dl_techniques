@@ -879,10 +879,12 @@ class GMMLayer(BaseMixtureLayer):
           where the weight does not exist.
 
         .. note::
-           Under ``'low_rank'`` this method is **not deterministic** unless
-           ``factor_initializer`` carries a seed, because re-running the
-           initializer draws fresh values. This matches how the weight was
-           created in :meth:`build`.
+           This method is **not deterministic** across calls: the ``means`` are
+           redrawn from an unseeded ``keras.random.normal`` (so consecutive resets
+           yield distinct means — the intended escape-collapse behavior), and under
+           ``'low_rank'`` the ``covariance_factors`` are re-drawn from
+           ``factor_initializer`` (fresh values unless that initializer carries a
+           seed). Only build-time initialization is seed-reproducible.
 
         :param new_means: Optional tensor of shape ``(n_components, feature_dims)``.
             If None, means are reinitialized with small random values.
@@ -901,11 +903,17 @@ class GMMLayer(BaseMixtureLayer):
                 )
             self.means.assign(new_means)
         else:
-            # Generate fresh random values to ensure distinct means
+            # DECISION plan-2026-07-21-845927c7/D-004: do NOT pass seed=self.random_seed
+            # here. keras.random.normal(seed=<int>) is stateless, so a fixed seed makes
+            # every reset_parameters() call redraw BIT-IDENTICAL means, defeating the
+            # purpose of the no-arg reset (escaping a collapsed/degenerate mixture by
+            # drawing genuinely fresh means). Mirrors the sibling fix in
+            # KMeansLayer.reset_centroids (D-009 of plan-2026-07-20T160907-7de371a1).
+            # Build-time initialization (in build()) legitimately keeps the seed; only
+            # this reset call must omit it.
             new_values = keras.random.normal(
                 shape=(self.n_components, self.feature_dims),
-                dtype=self.dtype,
-                seed=self.random_seed
+                dtype=self.dtype
             ) * 0.1  # Small scale for stability
             self.means.assign(new_values)
 
