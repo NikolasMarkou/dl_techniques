@@ -354,7 +354,9 @@ class GMMLayer(BaseMixtureLayer):
         :type covariance_rank: int
         :raises ValueError: If any argument is invalid.
         """
-        if not isinstance(n_components, int) or n_components < 1:
+        # R2: reject bool explicitly (isinstance(True, int) is True) — mirrors the
+        # covariance_rank validator below.
+        if not isinstance(n_components, int) or isinstance(n_components, bool) or n_components < 1:
             raise ValueError(f"n_components must be a positive integer, got {n_components}")
         if not isinstance(temperature, (int, float)) or temperature <= 0:
             raise ValueError(f"temperature must be positive, got {temperature}")

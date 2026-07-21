@@ -181,7 +181,9 @@ def validate_mixture_config(mixture_type: str, **kwargs: Any) -> None:
     for count_param in count_params:
         if count_param in kwargs and kwargs[count_param] is not None:
             value = kwargs[count_param]
-            if not isinstance(value, int) or value <= 0:
+            # R2: reject bool explicitly — isinstance(True, int) is True in Python, so
+            # a YAML/config `true` would otherwise pass as the integer 1.
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise ValueError(f"{count_param} must be a positive integer, got {value}")
 
     # Validate positive float parameters common across mixtures
