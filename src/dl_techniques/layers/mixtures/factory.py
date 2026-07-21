@@ -55,6 +55,14 @@ MixtureType = Literal[
     'gmm',
 ]
 
+# DECISION plan-2026-07-21-845927c7/D-005: generic keras.layers.Layer constructor
+# kwargs that every mixture class accepts and forwards via **kwargs. The per-type
+# registry (below) only lists layer-specific params, so without this allowlist
+# create_mixture_layer's valid_param_names filter would SILENTLY strip these
+# (e.g. dtype='mixed_float16' dropped, layer built as float32, no warning). Mirrors
+# norms/factory.py:_KERAS_BASE_PARAMS, the established fix for this exact drop.
+_KERAS_BASE_PARAMS = frozenset({'name', 'dtype', 'trainable', 'activity_regularizer', 'autocast'})
+
 # ---------------------------------------------------------------------
 # Mixture layer registry mapping types to classes and parameter info
 # ---------------------------------------------------------------------
@@ -240,8 +248,14 @@ def create_mixture_layer(
         mixture_info = MIXTURE_REGISTRY[mixture_type]
         mixture_class = mixture_info['class']
 
-        # Get all valid parameter names for this mixture_type
-        valid_param_names = set(mixture_info['required_params']) | set(mixture_info['optional_params'].keys())
+        # Get all valid parameter names for this mixture_type. Union in the generic
+        # keras.layers.Layer kwargs (_KERAS_BASE_PARAMS, D-005) so they are forwarded to
+        # the layer instead of being silently dropped by the final_params filter below.
+        valid_param_names = (
+            set(mixture_info['required_params'])
+            | set(mixture_info['optional_params'].keys())
+            | _KERAS_BASE_PARAMS
+        )
 
         # Start with defaults for all optional parameters, then user overrides
         params: Dict[str, Any] = {}
