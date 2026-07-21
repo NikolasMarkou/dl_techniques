@@ -33,7 +33,7 @@ Architectural Overview:
 
     Input (B, S, C)
         │
-        ├──────────────────────────────┐ (residual)
+        ├───────────────────────────────┐ (residual)
         ▼                               │
     LayerNorm (token_norm)              │
         ▼                               │
@@ -47,7 +47,7 @@ Architectural Overview:
         ▼                               │
        (+) ◄────────────────────────────┘
         │
-        ├──────────────────────────────┐ (residual)
+        ├───────────────────────────────┐ (residual)
         ▼                               │
     LayerNorm (channel_norm)            │
         ▼                               │

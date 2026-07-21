@@ -92,7 +92,7 @@ class MonarchFFN(keras.layers.Layer):
         └──────────────┬──────────────┘
                        ▼
         ┌─────────────────────────────┐
-        │ expand: Monarch -> hidden_dim│  (L_e, R_e)  [+ bias_e]
+        │expand: Monarch -> hidden_dim│  (L_e, R_e)  [+ bias_e]
         └──────────────┬──────────────┘
                        ▼
         ┌─────────────────────────────┐

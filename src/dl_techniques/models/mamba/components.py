@@ -550,6 +550,7 @@ class MambaLayer(keras.layers.Layer):
         })
         return config
 
+# ---------------------------------------------------------------------
 
 @keras.saving.register_keras_serializable()
 class MambaResidualBlock(keras.layers.Layer):

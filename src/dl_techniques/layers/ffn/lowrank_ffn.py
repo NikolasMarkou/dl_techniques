@@ -85,7 +85,7 @@ class LowRankFFN(keras.layers.Layer):
         └────────────┬────────────┘
                      ▼
         ┌─────────────────────────┐
-        │  U1: Dense(rank, no bias)│
+        │ U1: Dense(rank, no bias)│
         └────────────┬────────────┘
                      ▼
         ┌─────────────────────────┐
@@ -101,7 +101,7 @@ class LowRankFFN(keras.layers.Layer):
         └────────────┬────────────┘
                      ▼
         ┌─────────────────────────┐
-        │  U2: Dense(rank, no bias)│
+        │ U2: Dense(rank, no bias)│
         └────────────┬────────────┘
                      ▼
         ┌─────────────────────────┐
