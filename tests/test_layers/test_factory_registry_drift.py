@@ -865,6 +865,210 @@ def test_required_optional_guard_detects_synthetic_misregistration():
 
 
 # ---------------------------------------------------------------------
+# REQUIRED-GENUINENESS drift (the mirror of the PLACEMENT direction)
+# ---------------------------------------------------------------------
+# The PLACEMENT check above catches a ctor-REQUIRED param (no default) filed under
+# `optional_params`. Its mirror image is a param filed under `required_params` that HAS a ctor
+# default. A ctor default normally MEANS "optional", so declaring such a param `required` LOOKS
+# like over-declaration -- but it is not always: a class can gate a defaulted param on a MODE the
+# registry pins, making it genuinely required at that door. `create_*` cannot see the difference
+# (its required-guard raises on ANY omitted required member), and neither can the three checks
+# above (a `required_params` name is in the union, the ctor accepts it, and `_classify` routes its
+# ctor-defaulted value to a compare, never to a required-ness test). So an over-declared required
+# param -- one the class builds fine without -- slips through every existing direction, and
+# `get_*_info()` tells callers to pass a value the class does not need.
+#
+# The sole in-scope member repo-wide today (F4) is `activations:hierarchical_routing.output_dim`
+# (ctor `output_dim=None`), and it is CORRECT, NOT a bug -- NO source change (decisions.md D-001).
+# That door pins `mode='trainable'`, under which `RoutingProbabilitiesLayer.__init__` raises
+# `ValueError` when `output_dim is None` (layers/activations/routing_probabilities.py:378-388): the
+# `None` default is a mode-gated SENTINEL, so the param is genuinely required despite the default.
+# The sibling door `activations:routing_probabilities` pins `mode='deterministic'` and correctly
+# files `output_dim` as optional (layers/activations/factory.py:214-235). This check proves the
+# required label by CONSTRUCTION, not by trusting it: build the class DIRECTLY under the entry's
+# pinned config, omit the member, and require the ctor to raise.
+
+
+def _overdeclared_required_params(target, info):
+    """`required_params` members that carry a ctor default AND construct fine when omitted.
+
+    The mirror of `_ctor_required_but_optional`. Required-ness is proven EMPIRICALLY -- from the
+    SIGNATURE plus one construction -- never from a name list. For each `required_params` member
+    whose effective default is NOT `_EMPTY` (it has a ctor default, so it LOOKS optional), build the
+    target DIRECTLY under the entry's pinned `optional_params`, supplying `_PROBE_ARGS` for any
+    OTHER no-default required param, but OMITTING the member under test. If construction RAISES, the
+    member is genuinely required despite its default (a mode-gated sentinel, like
+    `hierarchical_routing.output_dim` under `mode='trainable'`) -- correct, not flagged. If
+    construction SUCCEEDS, the param is actually optional and the entry over-declares it -- flagged.
+
+    Construction is DIRECT (`target(**kwargs)`), NOT via `create_*` (decisions.md D-002): the
+    factory applies its OWN required-params guard and raises on ANY omitted required member
+    regardless of ctor genuineness, so a factory-based check would be tautological (always green)
+    and thus unfalsifiable -- the project's named "unfalsifiable check" trap. Direct construction
+    reds precisely when the registry over-declares an actually-optional param, which is the property
+    under test.
+
+    A member with NO ctor default (`_EMPTY`) is genuinely required and skipped -- that is the
+    PLACEMENT check's out-of-scope case seen from the other side. A member whose OTHER required
+    params need a probe value absent from `_PROBE_ARGS` is unprobeable and skipped (a disclosed
+    conservative skip, never a silent flag). Today the sole in-scope member has no other required
+    param, so neither skip is exercised by the real tree.
+
+    LIMIT (S2): this is a CONSTRUCTION-time probe. A param required only at `build()`/`call()` --
+    validated against an input the ctor never sees -- would construct successfully when omitted and
+    be FALSELY flagged as over-declared. None exists today: the sole in-scope member raises in
+    `__init__`. Stated, not modelled.
+
+    Returns a sorted list of over-declared member names (empty when every in-scope member is
+    genuinely required).
+    """
+    defaults = _effective_defaults(target)
+    required = info.get("required_params", []) or []
+    optional = info.get("optional_params") or {}
+
+    overdeclared = []
+    for member in required:
+        if defaults.get(member, _EMPTY) is _EMPTY:
+            continue  # no ctor default -> genuinely required, out of scope
+
+        kwargs = dict(optional)
+        probeable = True
+        for other in required:
+            if other == member or defaults.get(other, _EMPTY) is not _EMPTY:
+                continue  # the member itself, or another required param that has its own default
+            if other not in _PROBE_ARGS:
+                probeable = False
+                break
+            kwargs[other] = _PROBE_ARGS[other]
+        if not probeable:
+            continue  # cannot build without an unavailable required value -> skip (disclosed)
+
+        kwargs.pop(member, None)  # OMIT the member under test (defensive: it is not in optional)
+        try:
+            target(**kwargs)
+        except Exception:
+            continue  # ctor rejected the omission -> genuinely required
+        overdeclared.append(member)  # built without it -> actually optional, over-declared
+    return sorted(overdeclared)
+
+
+@pytest.mark.parametrize("factory,type_name,target,info", ENTRIES, ids=IDS)
+def test_registry_required_params_are_genuinely_required(
+    factory, type_name, target, info
+):
+    """REQUIRED-GENUINENESS drift: a `required_params` member with a ctor default must still be
+    required-in-fact -- omitting it at direct construction under the entry's pinned config RAISES.
+
+    # DECISION plan-2026-07-21T053622-c786e909/D-001
+    Why this can fail if the implementation is wrong: a `required_params` member that carries a
+    ctor default LOOKS optional, and if the class builds fine without it then `get_*_info()`
+    over-declares it and callers are told to pass a value the class does not need. The one such
+    member today, `activations:hierarchical_routing.output_dim` (ctor `output_dim=None`), is NOT a
+    bug and the registry is NOT changed (F6, decisions.md D-001): this door pins `mode='trainable'`,
+    under which `RoutingProbabilitiesLayer.__init__` raises `ValueError` when `output_dim is None`
+    (layers/activations/routing_probabilities.py:378-388). The `None` default is a mode-gated
+    sentinel, so the param is genuinely required and this check PASSES it -- proving the required
+    label by construction, not asserting it. The sibling door `activations:routing_probabilities`
+    pins `mode='deterministic'` and correctly files `output_dim` as optional
+    (layers/activations/factory.py:214-235); the two doors mirror the class's mode-gated contract
+    correctly, so there is no drift to fix.
+
+    Required-ness is derived from the ctor SIGNATURE (`_effective_defaults`; `_EMPTY` is skipped as
+    genuinely-required), never a name list -- proven independent of this tree by
+    `test_required_genuineness_guard_detects_synthetic_overdeclaration`, which reds a fabricated
+    over-declared entry whose param is named nothing like `output_dim`. Today exactly one entry
+    (F4) exercises the non-vacuous branch; the rest pass because they have no ctor-defaulted
+    required member, so the synthetic falsifier -- not the tree -- is what keeps the mechanism
+    falsifiable.
+
+    LIMIT (S2): a construction-time probe cannot see a param required only at `build()`/`call()`;
+    such a param would construct when omitted and be falsely flagged. None exists today (the sole
+    in-scope member raises in `__init__`). Disclosed on `_overdeclared_required_params`.
+    """
+    overdeclared = _overdeclared_required_params(target, info)
+    assert not overdeclared, (
+        f"{factory} registry entry '{type_name}' ({getattr(target, '__name__', target)}) declares "
+        f"{overdeclared} under 'required_params', but the constructor builds successfully with "
+        f"{overdeclared} OMITTED under this entry's pinned optional_params -- so the param has a "
+        f"real ctor default and is actually OPTIONAL. get_{factory}_info() over-declares it and "
+        f"callers are told to supply a value the class does not need. Move it to 'optional_params' "
+        f"with its real ctor default, UNLESS a pinned mode makes it genuinely required (as "
+        f"activations:hierarchical_routing pins mode='trainable' for output_dim) -- in which case "
+        f"the direct construction here would have raised and this test would not fire."
+    )
+
+
+def test_required_genuineness_guard_detects_synthetic_overdeclaration():
+    """Anti-hardcoding + falsifiability for the REQUIRED-GENUINENESS guard, on fabricated subjects.
+
+    Why this can fail if the implementation is wrong: this project has shipped FOUR
+    structurally-unfalsifiable checks (LESSONS), and the real tree has exactly ONE in-scope member
+    that is CORRECT -- so the real-entry test above can never red on this tree and proves nothing on
+    its own. This test supplies the RED: `_overdeclared_required_params` must flag a ctor-defaulted
+    param declared `required` that CONSTRUCTS when omitted (over-declared), and must NOT flag one
+    that RAISES when omitted under its pinned mode (genuine). Both dummies use param names (`gain`,
+    `scale`, `mode`) unlike the real offender `output_dim`, which is impossible for a check keyed off
+    a hardcoded name list.
+
+    Constructing DIRECTLY (not via `create_*`) is what makes the RED reachable: a factory-based
+    check would raise on ANY omitted required member and the over-declared dummy would pass green --
+    the tautology D-002 rejects.
+    """
+
+    # RED: `gain` has a ctor default and is declared required, but construction omitting it
+    # succeeds -> actually optional -> over-declared.
+    class _DummyOverdeclaresGain:
+        def __init__(self, gain=0.5, **kwargs):
+            self.gain = gain
+
+    overdeclared_info = {
+        "required_params": ["gain"],
+        "optional_params": {},
+    }
+    assert _overdeclared_required_params(_DummyOverdeclaresGain, overdeclared_info) == [
+        "gain"
+    ], (
+        "the guard failed to flag a ctor-defaulted param that constructs when omitted -- it is not "
+        "proving required-ness by direct construction"
+    )
+
+    # GREEN: `scale` has a ctor default (None) but is mode-gated -- under the pinned mode='on' the
+    # ctor raises when it is omitted, exactly the RoutingProbabilitiesLayer shape -> genuine.
+    class _DummyGatesScale:
+        def __init__(self, scale=None, mode="off", **kwargs):
+            if mode == "on" and scale is None:
+                raise ValueError("scale is required when mode='on'")
+            self.scale = scale
+            self.mode = mode
+
+    genuine_info = {
+        "required_params": ["scale"],
+        "optional_params": {"mode": "on"},
+    }
+    assert _overdeclared_required_params(_DummyGatesScale, genuine_info) == [], (
+        "a genuinely mode-gated required param (raises when omitted under the pinned mode) must NOT "
+        "be flagged -- the guard must not treat every ctor default as over-declaration"
+    )
+
+    # SKIP: a required member with NO ctor default is genuinely required and out of scope; it is
+    # never flagged even though no value is supplied for it here.
+    class _DummyTrulyRequires:
+        def __init__(self, needed, **kwargs):
+            self.needed = needed
+
+    assert (
+        _overdeclared_required_params(
+            _DummyTrulyRequires,
+            {"required_params": ["needed"], "optional_params": {}},
+        )
+        == []
+    ), (
+        "a required param with NO ctor default is genuinely required and must be skipped, not "
+        "flagged -- the guard is scoped to ctor-defaulted members only"
+    )
+
+
+# ---------------------------------------------------------------------
 # Guard-of-the-guard: the wrapper model itself
 #
 # Everything above trusts `_signature_params` / `_effective_defaults` to establish what a
