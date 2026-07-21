@@ -117,9 +117,8 @@ ATTENTION_REGISTRY: Dict[str, Dict[str, Any]] = {
             'among themselves, while query tokens cross-attend only to anchors, creating '
             'sparse attention patterns ideal for long sequences.'
         ),
-        'required_params': ['dim'],
+        'required_params': ['dim', 'num_heads'],
         'optional_params': {
-            'num_heads': 8,
             'head_dim': None,
             'dropout_rate': 0.0,
             'use_bias': True,

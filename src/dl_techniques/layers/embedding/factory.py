@@ -149,13 +149,8 @@ EMBEDDING_REGISTRY: Dict[str, Dict[str, Any]] = {
     'modern_bert_embeddings': {
         'class': ModernBertEmbeddings,
         'description': 'ModernBERT embeddings: word + token-type embeddings, normalized (no learned positional embedding; RoPE is applied in attention).',
-        'required_params': ['vocab_size', 'hidden_size', 'type_vocab_size'],
-        'optional_params': {
-            'initializer_range': 0.02,
-            'layer_norm_eps': 1e-12,
-            'dropout_rate': 0.0,
-            'use_bias': True
-        },
+        'required_params': ['vocab_size', 'hidden_size', 'type_vocab_size', 'initializer_range', 'layer_norm_eps', 'dropout_rate', 'use_bias'],
+        'optional_params': {},
         'use_case': 'ModernBERT-style encoders where positional information is injected by rotary attention rather than a learned position embedding.'
     },
     'albert_factorized': {

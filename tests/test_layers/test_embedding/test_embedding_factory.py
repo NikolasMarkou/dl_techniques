@@ -51,9 +51,13 @@ class TestEmbeddingFactory:
         assert layer.name == "my_rope"
 
     def test_optional_param_passthrough(self):
-        # modern_bert dropout_rate is an optional factory param (ctor has no default).
+        # modern_bert's ctor requires initializer_range/layer_norm_eps/dropout_rate/use_bias
+        # (no defaults), so they are required_params; supply them and confirm the value flows
+        # through to the built layer.
         l = create_embedding_layer("modern_bert_embeddings", vocab_size=50,
-                                   hidden_size=16, type_vocab_size=2, dropout_rate=0.3)
+                                   hidden_size=16, type_vocab_size=2,
+                                   initializer_range=0.02, layer_norm_eps=1e-12,
+                                   use_bias=True, dropout_rate=0.3)
         assert l.dropout_rate == 0.3
         # albert bottleneck honored.
         l2 = create_embedding_layer("albert_factorized", vocab_size=50,

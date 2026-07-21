@@ -754,6 +754,117 @@ def test_no_stale_exemptions():
 
 
 # ---------------------------------------------------------------------
+# REQUIRED/OPTIONAL PLACEMENT drift (the fourth direction)
+# ---------------------------------------------------------------------
+# The three checks above police the UNION `required_params | optional_params`: MISSING (a
+# ctor param in neither), PHANTOM (a declared param the ctor rejects), and VALUE (an
+# optional default that disagrees with the ctor). None asks WHICH half of the union a name
+# lives in. So a param the constructor REQUIRES (no default) declared under `optional_params`
+# slips through every one of them: its name is in the union (MISSING is happy), the ctor
+# accepts it (PHANTOM is happy), and `_classify` routes its `_EMPTY` ctor-default straight to
+# NON_COMPARABLE (VALUE never compares it). Yet through `create_*` the registry's optional
+# default is INJECTED (`params.update(optional_params)`) and silently substitutes for the
+# omitted required argument, and `get_*_info()` reports the param as optional-with-default
+# when the class cannot be built without it. This is the blind spot D-001 closes.
+
+
+def _ctor_required_but_optional(target, info):
+    """Params declared under `optional_params` that the constructor actually REQUIRES.
+
+    Required-ness is derived from the SIGNATURE, never a name list: a param whose effective
+    default is `inspect.Parameter.empty` has no default, so the constructor requires it.
+    `_effective_defaults` is the exact source `_classify` uses (and it resolves wrapper
+    targets, so a param a wrapper only forwards via ``**kwargs`` still gets the wrapped
+    class's real default rather than reading as spuriously-required).
+
+    Loops `optional_params` ONLY -- so it structurally cannot see a param declared under
+    `required_params` (e.g. the opposite-direction case
+    `activations:hierarchical_routing.output_dim`, required-in-registry but ctor-defaulted).
+    That case is a different, non-crashing defect class and is out of scope by construction.
+    """
+    defaults = _effective_defaults(target)
+    return sorted(
+        param
+        for param in (info.get("optional_params") or {})
+        if defaults.get(param, _EMPTY) is _EMPTY
+    )
+
+
+@pytest.mark.parametrize("factory,type_name,target,info", ENTRIES, ids=IDS)
+def test_registry_required_params_include_all_ctor_required(
+    factory, type_name, target, info
+):
+    """PLACEMENT drift: a ctor-REQUIRED param (no default) must live in `required_params`.
+
+    # DECISION plan-2026-07-21T044709-6bbefa2a/D-001
+    Why this can fail if the implementation is wrong: if a param the constructor requires is
+    declared under `optional_params`, `create_*` INJECTS the registry's optional default
+    (`params.update(optional_params)`) and silently substitutes it for the omitted required
+    argument -- so a direct constructor caller who trusts the registry's implied
+    "optional-with-default" contract gets `TypeError: missing N required positional
+    arguments`, and every `get_*_info()` consumer mislabels the param. Moving it to
+    `required_params` makes `validate_*_config` reject omission with a clear `ValueError`
+    naming the missing param instead.
+
+    This is NOT hardcoded to any known offender: required-ness is derived from the ctor
+    signature via `_effective_defaults` (`_EMPTY` == no default), the same source `_classify`
+    routes to NON_COMPARABLE. `test_required_optional_guard_detects_synthetic_misregistration`
+    proves the derivation on a fabricated dummy whose required param is named nothing like the
+    real offenders. The check loops `optional_params` only, so it cannot fire on the
+    opposite-direction `required_params` case (F6) -- verified by that param never appearing
+    in a failure here.
+    """
+    misregistered = _ctor_required_but_optional(target, info)
+    assert not misregistered, (
+        f"{factory} registry entry '{type_name}' "
+        f"({getattr(target, '__name__', target)}) declares {misregistered} under "
+        f"'optional_params', but its constructor requires them (no default). create_{factory}_* "
+        f"INJECTS the optional default and silently substitutes it for the omitted required "
+        f"argument, so a DIRECT constructor call raises 'missing N required positional "
+        f"arguments' while get_{factory}_info() reports these as optional-with-default. Move "
+        f"them into 'required_params' (dropping the now-inert optional default) so omission "
+        f"raises a clear ValueError instead."
+    )
+
+
+def test_required_optional_guard_detects_synthetic_misregistration():
+    """Anti-hardcoding + falsifiability for the PLACEMENT guard, on a fabricated subject.
+
+    Why this can fail if the implementation is wrong: this project has shipped FOUR
+    structurally-unfalsifiable checks (LESSONS), so the placement guard must be shown to (a)
+    RED on a genuine misregistration and (b) GREEN on its correction, using a param
+    (`needed`) named nothing like any real offender -- which is impossible for a check that
+    keys off a hardcoded list of the five known names. `opt`, though also under
+    `optional_params`, must NOT be flagged: it has a real ctor default, so the guard is not
+    merely "everything in optional_params is wrong".
+    """
+
+    class _DummyRequiresNeeded:
+        def __init__(self, needed, opt=1, **kwargs):
+            self.needed = needed
+            self.opt = opt
+
+    misregistered_info = {
+        "required_params": [],
+        "optional_params": {"needed": 5, "opt": 1},
+    }
+    assert _ctor_required_but_optional(_DummyRequiresNeeded, misregistered_info) == [
+        "needed"
+    ], (
+        "the placement guard failed to flag a ctor-required param declared optional -- it is "
+        "not deriving required-ness from the signature"
+    )
+
+    corrected_info = {
+        "required_params": ["needed"],
+        "optional_params": {"opt": 1},
+    }
+    assert (
+        _ctor_required_but_optional(_DummyRequiresNeeded, corrected_info) == []
+    ), "moving the required param into required_params must clear the flag (GREEN direction)"
+
+
+# ---------------------------------------------------------------------
 # Guard-of-the-guard: the wrapper model itself
 #
 # Everything above trusts `_signature_params` / `_effective_defaults` to establish what a
