@@ -316,15 +316,13 @@ class GMMLayer(BaseMixtureLayer):
                 "Pass isometric_regularizer_strength=0.0 to disable it entirely."
             )
 
-        # Initialize attribute placeholders - weights created in build()
+        # Initialize weight placeholders - weights created in build().
+        # R6: input_rank/feature_dims/non_feature_dims/original_shape are set by
+        # BaseMixtureLayer.__init__ (called via super() above) — not re-declared here.
         self.means: Optional[keras.Variable] = None
         self.log_variances: Optional[keras.Variable] = None
         self.mixture_logits: Optional[keras.Variable] = None
         self.covariance_factors: Optional[keras.Variable] = None
-        self.input_rank: Optional[int] = None
-        self.feature_dims: Optional[int] = None
-        self.non_feature_dims: Optional[List[int]] = None
-        self.original_shape: Optional[List[int]] = None
 
     def _validate_init_args(
         self,

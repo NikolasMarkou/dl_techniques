@@ -398,6 +398,7 @@ class RBFLayer(keras.layers.Layer):
             constraint=self.center_constraint,
             regularizer=self.kernel_regularizer,
             trainable=True,
+            dtype=self.dtype,  # R5: explicit, matches kmeans/gmm (autocast=False already)
             autocast=False,
         )
 
@@ -416,6 +417,7 @@ class RBFLayer(keras.layers.Layer):
             initializer=keras.initializers.Constant(init_val),
             regularizer=self.gamma_regularizer,
             trainable=self.trainable_gamma,
+            dtype=self.dtype,  # R5: explicit, matches kmeans/gmm
             autocast=False,  # mixed-precision: keep float32 for the kernel math
         )
 

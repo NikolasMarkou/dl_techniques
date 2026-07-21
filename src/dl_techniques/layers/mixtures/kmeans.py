@@ -237,12 +237,10 @@ class KMeansLayer(BaseMixtureLayer):
         self.random_seed = random_seed
 
         # Initialize attribute placeholders - weights created in build()
+        # R6: input_rank/feature_dims/non_feature_dims/original_shape are set by
+        # BaseMixtureLayer.__init__ (called via super() above) — not re-declared here.
         self.centroids: Optional[keras.Variable] = None
         self.centroid_momentum: Optional[keras.Variable] = None
-        self.input_rank: Optional[int] = None
-        self.feature_dims: Optional[int] = None
-        self.non_feature_dims: Optional[List[int]] = None
-        self.original_shape: Optional[List[int]] = None
 
     def _validate_init_args(
         self,
