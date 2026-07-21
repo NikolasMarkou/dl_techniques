@@ -55,7 +55,7 @@ MixtureType = Literal[
     'gmm',
 ]
 
-# DECISION plan-2026-07-21-845927c7/D-005: generic keras.layers.Layer constructor
+# DECISION plan-2026-07-21T080009-845927c7/D-005: generic keras.layers.Layer constructor
 # kwargs that every mixture class accepts and forwards via **kwargs. The per-type
 # registry (below) only lists layer-specific params, so without this allowlist
 # create_mixture_layer's valid_param_names filter would SILENTLY strip these

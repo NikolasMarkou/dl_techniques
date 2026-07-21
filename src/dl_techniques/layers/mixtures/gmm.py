@@ -903,7 +903,7 @@ class GMMLayer(BaseMixtureLayer):
                 )
             self.means.assign(new_means)
         else:
-            # DECISION plan-2026-07-21-845927c7/D-004: do NOT pass seed=self.random_seed
+            # DECISION plan-2026-07-21T080009-845927c7/D-004: do NOT pass seed=self.random_seed
             # here. keras.random.normal(seed=<int>) is stateless, so a fixed seed makes
             # every reset_parameters() call redraw BIT-IDENTICAL means, defeating the
             # purpose of the no-arg reset (escaping a collapsed/degenerate mixture by

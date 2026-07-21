@@ -368,7 +368,7 @@ class KMeansLayer(BaseMixtureLayer):
         # math runs in float32 (matching the float32 inputs cast) and the output is cast to
         # compute_dtype on return. Without this, the autocast float16 weight mismatches the
         # float32 inputs (InvalidArgumentError: Sub half vs float).
-        # DECISION plan-2026-07-21-845927c7/D-002: centroids are trainable=False.
+        # DECISION plan-2026-07-21T080009-845927c7/D-002: centroids are trainable=False.
         # They are updated ONLY by the internal EMA/momentum/repulsion mechanism in
         # call() (_update_centroids) — the VQ-VAE-EMA scheme this layer's docstring
         # describes as REPLACING gradient-based re-averaging. Do NOT restore
@@ -547,7 +547,7 @@ class KMeansLayer(BaseMixtureLayer):
         distances = self._compute_distances(reshaped_inputs)
         assignments = self._soft_assignments(distances)
 
-        # DECISION plan-2026-07-21-845927c7/D-003: compute the output BEFORE the centroid
+        # DECISION plan-2026-07-21T080009-845927c7/D-003: compute the output BEFORE the centroid
         # update. `_update_centroids` mutates self.centroids in place via assign_add, so
         # reading self.centroids AFTER it (as the old order did) reconstructed the
         # 'mixture' output from POST-update centroids while `assignments` came from the
