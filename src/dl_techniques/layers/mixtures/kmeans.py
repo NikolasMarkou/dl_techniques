@@ -547,6 +547,19 @@ class KMeansLayer(BaseMixtureLayer):
         distances = self._compute_distances(reshaped_inputs)
         assignments = self._soft_assignments(distances)
 
+        # DECISION plan-2026-07-21-845927c7/D-003: compute the output BEFORE the centroid
+        # update. `_update_centroids` mutates self.centroids in place via assign_add, so
+        # reading self.centroids AFTER it (as the old order did) reconstructed the
+        # 'mixture' output from POST-update centroids while `assignments` came from the
+        # PRE-update centroids — an intra-call inconsistency. Both must use the same
+        # (pre-update) centroid state. Do NOT move this block back below _update_centroids.
+        if self.output_mode == 'assignments':
+            output = assignments
+        else:  # output_mode == 'mixture'
+            # Reconstruct inputs using weighted centroids (pre-update, consistent with
+            # the assignments computed above).
+            output = keras.ops.matmul(assignments, self.centroids)
+
         # DECISION plan_2026-06-14_5e80bd3e/D-001: gate the EMA update on a graph-safe
         # training factor (None -> skip; 1.0 -> exact python-True path; 0/1 tensor ->
         # masked symbolic path). This fires the update for a symbolic training=True tensor
@@ -558,13 +571,6 @@ class KMeansLayer(BaseMixtureLayer):
         training_factor = resolve_training_factor(training, self.variable_dtype)
         if training_factor is not None:
             self._update_centroids(reshaped_inputs, assignments, training_factor)
-
-        # Compute output based on mode
-        if self.output_mode == 'assignments':
-            output = assignments
-        else:  # output_mode == 'mixture'
-            # Reconstruct inputs using weighted centroids
-            output = keras.ops.matmul(assignments, self.centroids)
 
         # Reshape, then cast to compute_dtype so the layer emits the policy's compute
         # dtype (float16 under mixed precision; no-op under float32).
