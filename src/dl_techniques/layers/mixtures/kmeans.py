@@ -368,12 +368,19 @@ class KMeansLayer(BaseMixtureLayer):
         # math runs in float32 (matching the float32 inputs cast) and the output is cast to
         # compute_dtype on return. Without this, the autocast float16 weight mismatches the
         # float32 inputs (InvalidArgumentError: Sub half vs float).
+        # DECISION plan-2026-07-21-845927c7/D-002: centroids are trainable=False.
+        # They are updated ONLY by the internal EMA/momentum/repulsion mechanism in
+        # call() (_update_centroids) — the VQ-VAE-EMA scheme this layer's docstring
+        # describes as REPLACING gradient-based re-averaging. Do NOT restore
+        # trainable=True: an optimizer would then apply a SECOND (gradient) update to
+        # centroids per step, double-updating them alongside the EMA step. This mirrors
+        # centroid_momentum (also trainable=False).
         self.centroids = self.add_weight(
             name="centroids",
             shape=(self.n_clusters, self.feature_dims),
             initializer=initializer,
             regularizer=self.centroid_regularizer,
-            trainable=True,
+            trainable=False,
             dtype=self.dtype,
             autocast=False
         )
