@@ -28,7 +28,7 @@ from dl_techniques.layers.attention.factory import (
 
 # Minimal required params per registered type (satisfies validate + construction).
 MINIMAL_PARAMS = {
-    'anchor': {'dim': 64},
+    'anchor': {'dim': 64, 'num_heads': 4},
     'capsule_routing': {'num_heads': 4},
     'cbam': {'channels': 32},
     'channel': {'channels': 32},
