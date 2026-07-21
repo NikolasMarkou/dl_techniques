@@ -513,6 +513,26 @@ def main():
     if config.ww_pgd_log_alpha:
         config.ww_pgd = True
 
+    # Parity with the ConvUNeXt trainer's block-config surface: the shared CLI defines
+    # --block-activation / --block-activation-alpha / --block-normalization, but the
+    # Clifford block PINS its activation/normalization/gate internally for degree-1
+    # homogeneity (_homogeneous_block_kwargs, D-005), so build_model never forwards them.
+    # Warn instead of silently accepting-and-ignoring a non-default value (footgun).
+    _ignored_block_flags = []
+    if args.block_activation != "leaky_relu":
+        _ignored_block_flags.append(f"--block-activation={args.block_activation}")
+    if args.block_activation_alpha != 0.1:
+        _ignored_block_flags.append(f"--block-activation-alpha={args.block_activation_alpha}")
+    if args.block_normalization != "batchnorm":
+        _ignored_block_flags.append(f"--block-normalization={args.block_normalization}")
+    if _ignored_block_flags:
+        logger.warning(
+            "Ignoring block-config flag(s) %s: the CliffordUNet block pins its "
+            "activation/normalization/gate internally for bias-free degree-1 homogeneity "
+            "(D-005); these flags have no effect on this trainer.",
+            ", ".join(_ignored_block_flags),
+        )
+
     logger.info(
         f"Config: variant={config.variant} (cli={config.cli_mode}, ctx={config.ctx_mode}), "
         f"gabor_stem={config.use_gabor_stem}, epochs={config.epochs}, "
