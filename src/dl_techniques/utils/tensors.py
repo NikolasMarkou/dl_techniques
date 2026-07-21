@@ -473,6 +473,40 @@ def length(vectors) -> Any:
 
 # ---------------------------------------------------------------------
 
+def pairwise_squared_distance(
+    points: keras.KerasTensor,
+    centers: keras.KerasTensor,
+) -> keras.KerasTensor:
+    """Squared Euclidean distance from each point to each center.
+
+    Computes ``||points_i - centers_j||^2`` by direct subtraction (NOT the
+    ``|a|^2 - 2 a·b + |b|^2`` expansion, which can go slightly negative before a
+    sqrt due to floating-point cancellation). The result is structurally
+    non-negative.
+
+    # DECISION plan-2026-07-21T083606-47dc4421/D-002: shared home for the pairwise
+    # squared-distance broadcast previously reimplemented inline in KMeansLayer
+    # (_compute_distances), RBFLayer (kernel distance), and RBFLayer
+    # (_compute_repulsion_loss). RBFLayer is deliberately outside the
+    # BaseMixtureLayer hierarchy, so this lives here as a free function rather than
+    # a mixin method. Do NOT reroute KMeansLayer._compute_repulsion_forces through
+    # this — that path needs the difference VECTORS (for the repulsion direction),
+    # so calling this would re-duplicate the subtraction.
+
+    :param points: Tensor of shape ``(..., N, D)`` (a single leading ``N`` axis,
+        optionally preceded by batch/time axes).
+    :type points: keras.KerasTensor
+    :param centers: Tensor of shape ``(M, D)``.
+    :type centers: keras.KerasTensor
+    :return: Squared distances of shape ``(..., N, M)``.
+    :rtype: keras.KerasTensor
+    """
+    # (..., N, 1, D) - (M, D) -> (..., N, M, D), summed over D -> (..., N, M).
+    diff = ops.expand_dims(points, axis=-2) - centers
+    return ops.sum(ops.square(diff), axis=-1)
+
+# ---------------------------------------------------------------------
+
 def resolve_training_factor(training: Any, dtype: Any = "float32") -> Any:
     """Resolve a Keras ``training`` flag into a graph-safe scalar factor.
 
