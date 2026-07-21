@@ -50,7 +50,7 @@ from typing import Literal, Optional, Union, Tuple, Dict, Any
 
 # ---------------------------------------------------------------------
 
-from ...utils.tensors import resolve_training_factor
+from ...utils.tensors import resolve_training_factor, pairwise_squared_distance
 
 # ---------------------------------------------------------------------
 
@@ -434,17 +434,10 @@ class RBFLayer(keras.layers.Layer):
 
         :return: Scalar regularisation loss tensor.
         :rtype: keras.KerasTensor"""
-        # centers shape: (units, feature_dim)
-        # Expand for broadcasting:
-        # c1: (units, 1, feature_dim)
-        # c2: (1, units, feature_dim)
-        c1 = ops.expand_dims(self.centers, axis=1)
-        c2 = ops.expand_dims(self.centers, axis=0)
-
-        # Squared Euclidean distance between all pairs
-        diff = c1 - c2
-        # shape: (units, units)
-        dist_sq = ops.sum(ops.square(diff), axis=-1)
+        # R3 (D-002): pairwise center-to-center squared distance via the shared helper.
+        # centers (units, feature_dim) x centers -> (units, units). Same result as the
+        # prior inline expand-axis-1/0 broadcast.
+        dist_sq = pairwise_squared_distance(self.centers, self.centers)
 
         # Safe sqrt for gradient stability (avoid sqrt(0))
         dist = ops.sqrt(dist_sq + 1e-7)
@@ -496,16 +489,11 @@ class RBFLayer(keras.layers.Layer):
         # The output is cast back to compute_dtype before returning (no-op under float32).
         inputs = ops.cast(inputs, self.variable_dtype)
 
-        # We broaden inputs to (batch, ..., 1, dim) to broadcast against centers
-        # This works for 2D inputs (batch, dim) -> (batch, 1, dim)
-        # And 3D inputs (batch, time, dim) -> (batch, time, 1, dim)
-        inputs_expanded = ops.expand_dims(inputs, axis=-2)
-
-        # Squared difference: (batch, ..., units, dim)
-        diff = inputs_expanded - self.centers
-
-        # Squared Euclidean distance: (batch, ..., units)
-        dist_sq = ops.sum(ops.square(diff), axis=-1)
+        # R3 (D-002): shared pairwise squared-distance helper. inputs (batch, ..., dim)
+        # x centers (units, dim) -> (batch, ..., units). The helper uses the same
+        # expand-axis=-2 broadcast this code did inline, so it supports arbitrary
+        # input rank identically.
+        dist_sq = pairwise_squared_distance(inputs, self.centers)
 
         # Gamma broadcasting: (units,)
         # dist_sq is (batch, ..., units), gamma broadcasts automatically to last dim

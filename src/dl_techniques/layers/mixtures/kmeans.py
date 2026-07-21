@@ -83,7 +83,7 @@ from typing import Optional, Union, Literal, List, Any, Tuple, Dict
 # ---------------------------------------------------------------------
 
 from ...utils.logger import logger
-from ...utils.tensors import resolve_training_factor
+from ...utils.tensors import resolve_training_factor, pairwise_squared_distance
 from ...initializers.orthonormal_initializer import OrthonormalInitializer
 from .base import BaseMixtureLayer
 
@@ -393,17 +393,10 @@ class KMeansLayer(BaseMixtureLayer):
         :return: Distances tensor of shape ``(batch, n_clusters)``.
         :rtype: keras.KerasTensor
         """
-        # Use broadcasting for memory efficiency
-        expanded_inputs = keras.ops.expand_dims(inputs, axis=1)  # (batch, 1, features)
-        expanded_centroids = keras.ops.expand_dims(self.centroids, axis=0)  # (1, n_clusters, features)
-
-        # Compute squared Euclidean distances
-        distances = keras.ops.sum(
-            keras.ops.square(expanded_inputs - expanded_centroids),
-            axis=-1
-        )
-
-        return distances
+        # R3 (D-002): shared pairwise squared-distance helper. inputs (batch, features)
+        # x centroids (n_clusters, features) -> (batch, n_clusters). Numerically
+        # identical to the prior inline expand-axis-1/0 broadcast.
+        return pairwise_squared_distance(inputs, self.centroids)
 
     def _soft_assignments(self, distances: keras.KerasTensor) -> keras.KerasTensor:
         """Compute soft cluster assignments using temperature-scaled softmax.
