@@ -106,6 +106,15 @@ CovarianceType = Literal['diagonal', 'low_rank']
 TensorShape = Union[Tuple[int, ...], List[int]]
 Axis = Union[int, List[int]]
 
+# DECISION plan-2026-07-21T083606-47dc4421/D-003: upper bound on effective variance
+# (R1). exp(log_variances) is otherwise unbounded above; a large log_variance
+# (log_var > ~88.7 in float32) overflows exp() to inf, which propagates to inf log_det
+# and 0 mahalanobis -> log_density = -inf -> softmax over all -inf = NaN. 1e6 is far
+# above any realistic normalized-feature variance yet far below the float32 ceiling
+# (~3.4e38), so it never binds in practice but caps the pathological tail. Not a config
+# param on purpose: adding one would break get_config parity for a defensive guard.
+_VARIANCE_CEILING = 1e6
+
 # ---------------------------------------------------------------------
 
 
@@ -489,15 +498,31 @@ class GMMLayer(BaseMixtureLayer):
         )
 
     def _effective_variances(self) -> keras.KerasTensor:
-        """Compute floored component variances from log-variance parameters.
+        """Compute floored-and-ceiled component variances from log-variance parameters.
+
+        The variance is bounded BELOW by ``variance_floor`` and ABOVE by
+        ``_VARIANCE_CEILING`` (R1, D-003) so ``exp(log_variances)`` cannot overflow to
+        ``inf`` and produce ``NaN`` responsibilities on a pathological trajectory.
 
         :return: Variance tensor of shape ``(n_components, feature_dims)``.
         :rtype: keras.KerasTensor
         """
-        return keras.ops.maximum(
+        return keras.ops.clip(
             keras.ops.exp(self.log_variances),
-            self.variance_floor
+            self.variance_floor,
+            _VARIANCE_CEILING
         )
+
+    def _log_effective_variances(self) -> keras.KerasTensor:
+        """Log of the floored-and-ceiled component variances (R7).
+
+        Single source for ``log(_effective_variances())``, shared by the diagonal
+        density and the isometric-kernel regularization loss.
+
+        :return: Log-variance tensor of shape ``(n_components, feature_dims)``.
+        :rtype: keras.KerasTensor
+        """
+        return keras.ops.log(self._effective_variances())
 
     def _assemble_log_density(
         self,
@@ -548,9 +573,9 @@ class GMMLayer(BaseMixtureLayer):
         :return: Log-density tensor of shape ``(batch, n_components)``.
         :rtype: keras.KerasTensor
         """
-        # Floored variances and matching log-determinant term
+        # Floored/ceiled variances and matching log-determinant term (R7: log via helper)
         variances = self._effective_variances()  # (n_components, features)
-        log_variances = keras.ops.log(variances)  # (n_components, features)
+        log_variances = self._log_effective_variances()  # (n_components, features)
 
         # Broadcast: (batch, 1, features) against (1, n_components, features)
         expanded_inputs = keras.ops.expand_dims(inputs, axis=1)
@@ -712,7 +737,7 @@ class GMMLayer(BaseMixtureLayer):
         :return: Scalar regularization loss.
         :rtype: keras.KerasTensor
         """
-        log_variances = keras.ops.log(self._effective_variances())  # (n_components, features)
+        log_variances = self._log_effective_variances()  # (n_components, features) (R7)
 
         # Per-component mean log-variance  ->  (n_components, 1)
         mean_log_variance = keras.ops.mean(log_variances, axis=-1, keepdims=True)
