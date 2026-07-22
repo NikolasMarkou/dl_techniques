@@ -421,6 +421,60 @@ class TestScheduledDropout:
         assert schedule_value(schedule, 1) < schedule_value(schedule, 0)
 
     # ------------------------------------------------------------------
+    # SC-5 (forward path) — the MASK must track the schedule.
+    #
+    # Every other SC-5 assertion above reads `current_rate()`, which is a
+    # PARALLEL read path (`scheduled_dropout.py:210`), never the masking path
+    # (`:234`). A defect confined to `call()` — computing `rate =
+    # self._rate_at(0)` forever while leaving `_rate_at`, `current_rate()` and
+    # the counter perfectly intact — passed 75/75 tests. This test is the only
+    # one that observes the scheduled rate THROUGH the mask, so it is the only
+    # one that goes red under that injection. Do not delete it in favour of a
+    # `current_rate()` assertion; that is precisely the gap it exists to close.
+    # ------------------------------------------------------------------
+
+    def test_forward_mask_tracks_the_schedule(self):
+        # 0.0 -> 0.99 is an unambiguously large swing: no single frozen rate
+        # can sit within tolerance of every probed step.
+        schedule = keras.optimizers.schedules.PolynomialDecay(
+            initial_learning_rate=0.0, decay_steps=100, end_learning_rate=0.99
+        )
+        layer = ScheduledDropout(schedule, seed=20260722)
+        # All-ones input, so every zero in the output comes from the mask and
+        # from nothing else. 64x256 = 16384 draws per probe.
+        shape = (64, 256)
+        x = keras.ops.ones(shape, dtype="float32")
+        layer.build(shape)
+
+        steps = [0, 25, 50, 75, 100]
+        observed = []
+        for step in steps:
+            layer.step_counter.assign(step)
+            out = keras.ops.convert_to_numpy(layer(x, training=True))
+            zero_fraction = float(np.mean(out == 0.0))
+            observed.append(zero_fraction)
+
+            # Expected value comes from the schedule DIRECTLY, bypassing the
+            # layer entirely — comparing the mask against `current_rate()`
+            # would just re-test the parallel path.
+            expected = schedule_value(schedule, step)
+
+            # Tolerance: 16384 Bernoulli draws give a binomial sd <= 0.0039,
+            # and the worst error measured over four seeds x two shapes was
+            # 0.006. abs=0.02 is ~5 sd of anti-flake headroom, yet still 12x
+            # tighter than the smallest deviation this test must catch (a rate
+            # frozen at step 0 reads 0.000 where step 25 expects 0.2475).
+            assert zero_fraction == pytest.approx(expected, abs=0.02), (
+                f"mask at step {step}: observed zero-fraction {zero_fraction}, "
+                f"schedule says {expected}"
+            )
+
+        # Non-vacuous: the mask really did move across (almost) the full range.
+        assert observed[-1] - observed[0] > 0.9
+        for previous, nxt in zip(observed, observed[1:]):
+            assert nxt > previous
+
+    # ------------------------------------------------------------------
     # SC-8 — the clamp holds
     # ------------------------------------------------------------------
 
