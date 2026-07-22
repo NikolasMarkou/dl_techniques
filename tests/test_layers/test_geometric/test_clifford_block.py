@@ -1784,5 +1784,91 @@ class TestCliffordNetBlockConfigurableNorm:
         assert restored_block.normalization_type == "rms_norm"
 
 
+# ===========================================================================
+# TestInertGateNotTrainable
+# ===========================================================================
+
+
+class TestInertGateNotTrainable:
+    """Regression coverage for DECISION plan-2026-07-22T090932-e433f233/D-001.
+
+    When ``use_gate=False`` the GGR gate is inert (never referenced in
+    ``call()``), so its kernel/bias get no gradient and Keras emits a
+    "Gradients do not exist for variables [...]" UserWarning once per run.
+    The fix marks the inert sub-layer non-trainable so those variables leave
+    ``trainable_variables`` -- while REMAINING in ``weights`` so the ``.keras``
+    layout is unchanged.
+    """
+
+    @staticmethod
+    def _gate_vars(obj, attr):
+        return [v for v in getattr(obj, attr) if "gate_dense" in v.path]
+
+    def test_inert_gate_is_not_trainable(self):
+        ggr = GatedGeometricResidual(channels=8, use_gate=False)
+        ggr.build((None, 4, 4, 8))
+        assert ggr.gate_dense.trainable is False
+        assert self._gate_vars(ggr, "trainable_variables") == []
+
+    def test_inert_gate_weights_are_still_saved(self):
+        """The whole point of the fix: trainable=False, but still in weights."""
+        ggr = GatedGeometricResidual(channels=8, use_gate=False)
+        ggr.build((None, 4, 4, 8))
+        # kernel + bias must still be present for .keras layout stability.
+        assert len(self._gate_vars(ggr, "weights")) == 2
+
+    def test_live_gate_remains_trainable(self):
+        """use_gate=True consumers must be completely unaffected."""
+        ggr = GatedGeometricResidual(channels=8, use_gate=True)
+        ggr.build((None, 4, 4, 8))
+        assert ggr.gate_dense.trainable is True
+        assert len(self._gate_vars(ggr, "trainable_variables")) == 2
+
+    def test_no_missing_gradient_warning_on_fit(self):
+        """End-to-end: a training step must not emit the optimizer warning."""
+        import warnings
+
+        inputs = keras.Input(shape=(8, 8, 8))
+        block = CliffordNetBlock(
+            channels=8, shifts=[1, 2], use_gate=False, use_bias=False,
+        )
+        model = keras.Model(inputs, block(inputs))
+        model.compile(optimizer=keras.optimizers.AdamW(1e-4), loss="mse")
+
+        x = np.random.RandomState(0).randn(2, 8, 8, 8).astype("float32")
+        y = np.random.RandomState(1).randn(2, 8, 8, 8).astype("float32")
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            model.fit(x, y, epochs=1, verbose=0)
+
+        missing = [
+            str(w.message)
+            for w in caught
+            if "Gradients do not exist" in str(w.message)
+        ]
+        assert not missing, f"unexpected missing-gradient warning: {missing}"
+
+    def test_flag_survives_keras_round_trip(self):
+        """__init__ re-runs on load, so the flag must be re-applied."""
+        inputs = keras.Input(shape=(8, 8, 8))
+        block = CliffordNetBlock(
+            channels=8, shifts=[1, 2], use_gate=False, use_bias=False,
+        )
+        model = keras.Model(inputs, block(inputs))
+        n_weights = len(model.weights)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "inert_gate.keras")
+            model.save(path)
+            restored = keras.models.load_model(path)
+
+        # Layout preserved...
+        assert len(restored.weights) == n_weights
+        assert len(self._gate_vars(restored, "weights")) == 2
+        # ...and the gate is still excluded from the optimizer's view.
+        assert self._gate_vars(restored, "trainable_variables") == []
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

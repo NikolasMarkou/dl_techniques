@@ -514,9 +514,8 @@ class GatedGeometricResidual(keras.layers.Layer):
         # Learned gate: Dense(2C -> C) followed by sigmoid.
         # NOTE: built unconditionally (even when use_gate=False) so a
         # use_gate=False model (e.g. the homogeneous Clifford denoiser) keeps a
-        # stable weight layout for .keras checkpoint round-trips. When use_gate is
-        # False the layer is inert (unused in call()); that is the source of the
-        # benign "Gradients do not exist for gate_dense" optimizer warning.
+        # stable weight layout for .keras checkpoint round-trips. When use_gate
+        # is False the layer is inert (never referenced in call()).
         self.gate_dense = keras.layers.Dense(
             channels,
             use_bias=self.use_bias,
@@ -526,6 +525,28 @@ class GatedGeometricResidual(keras.layers.Layer):
             bias_regularizer=bias_regularizer,
             name="gate_dense",
         )
+        # DECISION plan-2026-07-22T090932-e433f233/D-001: when use_gate=False the
+        # gate is inert, so its kernel/bias receive no gradient and Keras emits a
+        # "Gradients do not exist for variables [...gate_dense...]" UserWarning
+        # once per training run (42 entries for the bias-free Clifford U-Net).
+        # Marking the inert sub-layer non-trainable removes those variables from
+        # model.trainable_variables, so the optimizer never sees them and
+        # _filter_empty_gradients() never warns.
+        #
+        # Do NOT "simplify" this by deleting the sub-layer or building it
+        # conditionally: `weights` is independent of `trainable`
+        # (keras/src/layers/layer.py:632-652), so the variables are still SAVED
+        # and the .keras weight layout stays byte-identical — which is the whole
+        # point of building it unconditionally above.
+        #
+        # Placement is load-bearing but subtle: this works pre-build because
+        # Layer._track_variable() (keras/src/layers/layer.py:1316-1322) applies
+        # `if not self.trainable: variable.trainable = False` to every variable
+        # as it is created, so the flag propagates to weights that do not exist
+        # yet. The `trainable` SETTER alone (layer.py:564-582) would not — it
+        # only walks variables that already exist.
+        if not self.use_gate:
+            self.gate_dense.trainable = False
         # DECISION plan_2026-07-03_eb53492e/D-001: GGR no longer owns a
         # stochastic-depth op — the residual add AND the stochastic-depth layer
         # are now external, model-level ops (x = x + SD(rate)(block(x))).
