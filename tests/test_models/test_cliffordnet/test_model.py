@@ -40,10 +40,15 @@ class TestCliffordNetIter1Refactor:
         # CliffordNetEmbedding bidirectional U-Net embedding model + factories,
         # and by plan_2026-06-17_4b339fb7 to add the CliffordLaplacianUNet
         # Laplacian-pyramid autoencoder + factory.
+        #
+        # CliffordCLIP is deliberately ABSENT: commit 6bc9b69b
+        # (plan-2026-07-15-776c737a/iter-1/step-1) git-mv'd it from
+        # cliffordnet/clip.py to clip/clifford_clip.py and dropped the
+        # re-export. Import it from dl_techniques.models.clip.clifford_clip,
+        # not from here.
         assert set(pkg.__all__) == {
             "CliffordNet",
             "create_cliffordnet",
-            "CliffordCLIP",
             "CliffordNetLMRouting",
             "CliffordNetEmbedding",
             "create_cliffordnet_embedding",
