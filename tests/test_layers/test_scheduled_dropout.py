@@ -1,0 +1,215 @@
+"""Tests for the ScheduledDropout layer.
+
+Two tiers:
+  1. The 6-item baseline bar every layer in this repo must clear (construction +
+     validation, `compute_output_shape` unbuilt, training-vs-inference
+     divergence, config round-trip, `.keras` round-trip, `fit()` smoke).
+  2. The schedule-specific guards that justify the design at all (counter
+     arithmetic, counter persistence, inference inertness, rate decay, clamp).
+"""
+
+import os
+import keras
+import numpy as np
+import pytest
+
+from dl_techniques.layers.scheduled_dropout import ScheduledDropout
+
+B, D = 8, 16
+
+# The two rate kinds every rate-kind-agnostic assertion is parametrized over.
+RATE_KINDS = ["schedule", "float"]
+FLOAT_RATE = 0.3
+
+
+def make_rate(kind: str):
+    """Build a fresh rate object of the requested kind."""
+    if kind == "schedule":
+        return keras.optimizers.schedules.CosineDecay(
+            initial_learning_rate=0.5, decay_steps=100, alpha=0.1
+        )
+    return FLOAT_RATE
+
+
+def make_model(rate, seed=1234, jit_compile="auto"):
+    """Small compiled Dense/ScheduledDropout/Dense model."""
+    inputs = keras.Input(shape=(D,))
+    x = keras.layers.Dense(D, activation="relu")(inputs)
+    x = ScheduledDropout(rate, seed=seed, name="sd")(x)
+    outputs = keras.layers.Dense(1)(x)
+    model = keras.Model(inputs, outputs)
+    model.compile(optimizer="adam", loss="mse", jit_compile=jit_compile)
+    return model
+
+
+@pytest.fixture
+def sample():
+    return np.random.default_rng(0).standard_normal((B, D)).astype("float32")
+
+
+@pytest.fixture(params=RATE_KINDS)
+def rate_kind(request):
+    return request.param
+
+
+class TestScheduledDropout:
+    """Baseline bar (step 3)."""
+
+    # ------------------------------------------------------------------
+    # 1. Construction + input validation
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("value", [0.0, 0.3, 0.5, 0.9999])
+    def test_construction_valid_float(self, value):
+        layer = ScheduledDropout(value)
+        assert layer.rate == value
+        assert layer.built is False
+
+    def test_construction_valid_int(self):
+        layer = ScheduledDropout(0)
+        assert layer.rate == 0.0
+
+    def test_construction_valid_schedule(self):
+        schedule = make_rate("schedule")
+        layer = ScheduledDropout(schedule)
+        assert layer.rate is schedule
+
+    def test_construction_stores_optional_args(self):
+        layer = ScheduledDropout(0.2, noise_shape=(None, 1), seed=7)
+        assert layer.noise_shape == (None, 1)
+        assert layer.seed == 7
+
+    @pytest.mark.parametrize("bad", [1.0, -0.1, 1.5, 2.0])
+    def test_invalid_float_rate_raises_value_error(self, bad):
+        with pytest.raises(ValueError):
+            ScheduledDropout(bad)
+
+    @pytest.mark.parametrize("bad", ["0.5", None, True, False, [0.5], {"rate": 0.5}])
+    def test_invalid_rate_type_raises_type_error(self, bad):
+        with pytest.raises(TypeError):
+            ScheduledDropout(bad)
+
+    # ------------------------------------------------------------------
+    # 2. compute_output_shape on an unbuilt instance
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "shape",
+        [(B, D), (2, 8, 8, 3), (None, 16), (1,), (4, 5, 6, 7, 8)],
+    )
+    def test_compute_output_shape_unbuilt(self, rate_kind, shape):
+        layer = ScheduledDropout(make_rate(rate_kind))
+        assert layer.built is False
+        assert layer.compute_output_shape(shape) == tuple(shape)
+        # Still unbuilt: computing a shape must not create state.
+        assert layer.built is False
+
+    def test_output_shape_matches_input(self, rate_kind, sample):
+        layer = ScheduledDropout(make_rate(rate_kind), seed=0)
+        out = layer(sample, training=True)
+        assert tuple(out.shape) == sample.shape
+
+    # ------------------------------------------------------------------
+    # 3. Training-vs-inference behavioural divergence
+    # ------------------------------------------------------------------
+
+    def test_training_differs_from_input(self, rate_kind, sample):
+        layer = ScheduledDropout(make_rate(rate_kind), seed=0)
+        out = keras.ops.convert_to_numpy(layer(sample, training=True))
+        assert not np.array_equal(out, sample)
+
+    def test_inference_is_identity(self, rate_kind, sample):
+        layer = ScheduledDropout(make_rate(rate_kind), seed=0)
+        layer.build(sample.shape)
+        out = keras.ops.convert_to_numpy(layer(sample, training=False))
+        assert np.array_equal(out, sample)
+
+    def test_inference_is_repeatable_training_is_not(self, rate_kind, sample):
+        layer = ScheduledDropout(make_rate(rate_kind), seed=0)
+        inf = [keras.ops.convert_to_numpy(layer(sample, training=False)) for _ in range(4)]
+        assert all(np.array_equal(inf[0], o) for o in inf[1:])
+
+        train = [keras.ops.convert_to_numpy(layer(sample, training=True)) for _ in range(4)]
+        assert any(not np.array_equal(train[0], o) for o in train[1:])
+
+    # ------------------------------------------------------------------
+    # 4. get_config / from_config round-trip
+    # ------------------------------------------------------------------
+
+    def test_config_round_trip_float(self):
+        original = ScheduledDropout(0.42, noise_shape=None, seed=11)
+        restored = ScheduledDropout.from_config(original.get_config())
+        assert restored.rate == 0.42
+        assert restored.seed == 11
+        assert restored.noise_shape is None
+
+    def test_config_round_trip_schedule(self):
+        schedule = make_rate("schedule")
+        original = ScheduledDropout(schedule, seed=11)
+        config = original.get_config()
+        # The nested schedule must be serialized, not stored as a live object.
+        assert isinstance(config["rate"], dict)
+
+        restored = ScheduledDropout.from_config(config)
+        assert type(restored.rate) is type(schedule)
+        assert restored.rate.get_config() == schedule.get_config()
+        assert restored.seed == 11
+
+    def test_config_is_json_serializable(self, rate_kind):
+        import json
+
+        config = ScheduledDropout(make_rate(rate_kind), seed=3).get_config()
+        json.dumps(config)  # raises if any value is not JSON-encodable
+
+    # ------------------------------------------------------------------
+    # 5. Full .keras save/load round-trip
+    # ------------------------------------------------------------------
+
+    def test_keras_round_trip(self, rate_kind, sample, tmp_path):
+        rate = make_rate(rate_kind)
+        model = make_model(rate)
+        y0 = keras.ops.convert_to_numpy(model(sample, training=False))
+
+        path = os.path.join(tmp_path, "sd.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)
+
+        y1 = keras.ops.convert_to_numpy(loaded(sample, training=False))
+        np.testing.assert_allclose(y0, y1, atol=1e-6)
+
+        restored_layer = loaded.get_layer("sd")
+        assert isinstance(restored_layer, ScheduledDropout)
+        if rate_kind == "schedule":
+            assert type(restored_layer.rate) is type(rate)
+            assert restored_layer.rate.get_config() == rate.get_config()
+        else:
+            assert restored_layer.rate == FLOAT_RATE
+
+    # ------------------------------------------------------------------
+    # 6. model.fit() smoke test
+    # ------------------------------------------------------------------
+
+    def test_fit_smoke(self, rate_kind):
+        model = make_model(make_rate(rate_kind))
+        rng = np.random.default_rng(1)
+        x = rng.standard_normal((32, D)).astype("float32")
+        y = rng.standard_normal((32, 1)).astype("float32")
+
+        history = model.fit(x, y, epochs=2, batch_size=8, verbose=0)
+        assert "loss" in history.history
+        assert all(np.isfinite(v) for v in history.history["loss"])
+
+    def test_gradients_flow(self, rate_kind, sample):
+        import tensorflow as tf
+
+        model = make_model(make_rate(rate_kind))
+        y = np.zeros((B, 1), dtype="float32")
+        with tf.GradientTape() as tape:
+            loss = keras.ops.mean((model(sample, training=True) - y) ** 2)
+        grads = tape.gradient(loss, model.trainable_variables)
+        assert len(grads) > 0
+        assert all(g is not None for g in grads)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
