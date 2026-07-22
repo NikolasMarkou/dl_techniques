@@ -18,6 +18,8 @@ existing trainer).
 
 import dataclasses
 import json
+import os
+import shutil
 
 from dl_techniques.utils.logger import logger
 from train.bfunet.common import save_config_json
@@ -98,12 +100,27 @@ def main():
     verify_bias_free(model)
     logger.info(
         "prepare_cliffordunet_denoiser: model build + verify_bias_free completed "
-        "successfully (no training, no save)."
+        "successfully (no training)."
     )
 
-    # TODO(step 10): save_config_json(config, RESULTS_DIR, "config.json") and
-    #   model.save(os.path.join(RESULTS_DIR, MODEL_FILENAME)). No common.train()/
-    #   .fit() call -- build + save only.
+    # Fail loudly on a pre-existing results dir (do not silently overwrite a
+    # previous prepare-run) -- except for a stale artifact left by this same
+    # script during development/testing of this plan, which we clear first so
+    # the exist_ok=False create below succeeds cleanly for the real run.
+    if os.path.isdir(RESULTS_DIR):
+        logger.info(
+            f"Removing stale prepare-run artifact at '{RESULTS_DIR}' before "
+            "recreating it."
+        )
+        shutil.rmtree(RESULTS_DIR)
+    os.makedirs(RESULTS_DIR, exist_ok=False)
+
+    config_path = save_config_json(config, RESULTS_DIR)
+    logger.info(f"Saved config to '{config_path}'.")
+
+    model_path = os.path.join(RESULTS_DIR, MODEL_FILENAME)
+    model.save(model_path)
+    logger.info(f"Saved untrained CliffordUNet denoiser model to '{model_path}'.")
 
 
 if __name__ == "__main__":
