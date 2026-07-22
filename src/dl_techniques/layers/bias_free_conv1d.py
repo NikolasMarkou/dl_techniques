@@ -255,18 +255,18 @@ class BiasFreeResidualBlock1D(keras.layers.Layer):
         └───────┬───────────┬───────────┘
                 │           │
                 │     ┌─────┴─────────────────┐
-                │     │  BiasFreeConv1D + act  │
+                │     │ BiasFreeConv1D + act  │
                 │     └─────┬─────────────────┘
                 │           ▼
                 │     ┌───────────────────────┐
-                │     │  BiasFreeConv1D (lin)  │
+                │     │ BiasFreeConv1D (lin)  │
                 │     └─────┬─────────────────┘
                 │           │
                 ▼           ▼
         ┌───────────┐  ┌────────┐
         │ shortcut  │  │  F(x)  │
         │ (1x1 or   │  │        │
-        │  identity) │  │        │
+        │ identity) │  │        │
         └─────┬─────┘  └───┬────┘
               └──────┬──────┘
                      ▼
@@ -275,7 +275,7 @@ class BiasFreeResidualBlock1D(keras.layers.Layer):
               └──────┬───────┘
                      ▼
               ┌──────────────┐
-              │ Output (B,T,F)│
+              │Output (B,T,F)│
               └──────────────┘
 
     :param filters: Number of filters in the convolutional layers. Must be positive.

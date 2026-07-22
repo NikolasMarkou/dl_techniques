@@ -322,18 +322,18 @@ class BiasFreeResidualBlock(keras.layers.Layer):
         └───────┬───────────┬───────────┘
                 │           │
                 │     ┌─────┴─────────────────┐
-                │     │  BiasFreeConv2D + act  │
+                │     │ BiasFreeConv2D + act  │
                 │     └─────┬─────────────────┘
                 │           ▼
                 │     ┌───────────────────────┐
-                │     │  BiasFreeConv2D (lin)  │
+                │     │ BiasFreeConv2D (lin)  │
                 │     └─────┬─────────────────┘
                 │           │
                 ▼           ▼
         ┌───────────┐  ┌────────┐
         │ shortcut  │  │  F(x)  │
         │ (1x1 or   │  │        │
-        │  identity) │  │        │
+        │ identity) │  │        │
         └─────┬─────┘  └───┬────┘
               └──────┬──────┘
                      ▼
