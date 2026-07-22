@@ -21,6 +21,9 @@ B, D = 8, 16
 RATE_KINDS = ["schedule", "float"]
 FLOAT_RATE = 0.3
 
+# The layer's single clamp ceiling (a rate of exactly 1.0 divides by zero).
+MAX_RATE = 1.0 - 1e-6
+
 
 def make_rate(kind: str):
     """Build a fresh rate object of the requested kind."""
@@ -42,6 +45,21 @@ def make_model(rate, seed=1234, jit_compile="auto"):
     return model
 
 
+def counter_value(layer) -> int:
+    """Read the layer's step counter as a Python int."""
+    return int(keras.ops.convert_to_numpy(layer.step_counter))
+
+
+def rate_value(layer) -> float:
+    """Read the layer's current (clipped) rate as a Python float."""
+    return float(keras.ops.convert_to_numpy(layer.current_rate()))
+
+
+def schedule_value(schedule, step) -> float:
+    """Evaluate a schedule directly, bypassing the layer."""
+    return float(keras.ops.convert_to_numpy(schedule(step)))
+
+
 @pytest.fixture
 def sample():
     return np.random.default_rng(0).standard_normal((B, D)).astype("float32")
@@ -50,6 +68,17 @@ def sample():
 @pytest.fixture(params=RATE_KINDS)
 def rate_kind(request):
     return request.param
+
+
+@pytest.fixture
+def mixed_float16_policy():
+    """Set the global mixed_float16 policy, always restoring the previous one."""
+    previous = keras.mixed_precision.global_policy()
+    keras.mixed_precision.set_global_policy("mixed_float16")
+    try:
+        yield
+    finally:
+        keras.mixed_precision.set_global_policy(previous)
 
 
 class TestScheduledDropout:
@@ -209,6 +238,318 @@ class TestScheduledDropout:
         grads = tape.gradient(loss, model.trainable_variables)
         assert len(grads) > 0
         assert all(g is not None for g in grads)
+
+    # ==================================================================
+    # Schedule-specific guards (step 4). These are the assertions the
+    # design lives or dies on: the counter, its persistence, and the
+    # rate the schedule actually produces from it.
+    # ==================================================================
+
+    # ------------------------------------------------------------------
+    # SC-3 — counter arithmetic
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("jit_compile", [False, True])
+    def test_counter_after_fit_equals_epochs_times_steps(self, rate_kind, jit_compile):
+        epochs, steps_per_epoch, batch = 3, 8, 4
+        model = make_model(make_rate(rate_kind), jit_compile=jit_compile)
+        layer = model.get_layer("sd")
+
+        rng = np.random.default_rng(2)
+        n = steps_per_epoch * batch
+        x = rng.standard_normal((n, D)).astype("float32")
+        y = rng.standard_normal((n, 1)).astype("float32")
+
+        assert counter_value(layer) == 0
+        model.fit(x, y, epochs=epochs, batch_size=batch, shuffle=False, verbose=0)
+        assert counter_value(layer) == epochs * steps_per_epoch
+
+    def test_counter_increments_once_per_training_call(self, rate_kind, sample):
+        layer = ScheduledDropout(make_rate(rate_kind), seed=0)
+        layer.build(sample.shape)
+        assert counter_value(layer) == 0
+        for expected in range(1, 6):
+            layer(sample, training=True)
+            assert counter_value(layer) == expected
+
+    # ------------------------------------------------------------------
+    # SC-4 — counter persistence across .keras save/load
+    # ------------------------------------------------------------------
+
+    def test_counter_survives_save_load(self, rate_kind, tmp_path):
+        model = make_model(make_rate(rate_kind))
+        layer = model.get_layer("sd")
+
+        rng = np.random.default_rng(3)
+        x = rng.standard_normal((32, D)).astype("float32")
+        y = rng.standard_normal((32, 1)).astype("float32")
+        model.fit(x, y, epochs=2, batch_size=4, shuffle=False, verbose=0)
+
+        saved = counter_value(layer)
+        assert saved == 16  # 2 epochs x 8 steps; guards against a silent zero
+
+        path = os.path.join(tmp_path, "counter.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)
+        restored = counter_value(loaded.get_layer("sd"))
+
+        assert restored == saved
+        assert restored != 0
+
+    def test_reloaded_layer_resumes_the_schedule(self, tmp_path):
+        schedule = keras.optimizers.schedules.PolynomialDecay(
+            initial_learning_rate=0.5, decay_steps=64, end_learning_rate=0.05
+        )
+        model = make_model(schedule)
+        layer = model.get_layer("sd")
+
+        rng = np.random.default_rng(4)
+        x = rng.standard_normal((32, D)).astype("float32")
+        y = rng.standard_normal((32, 1)).astype("float32")
+        model.fit(x, y, epochs=2, batch_size=4, shuffle=False, verbose=0)
+
+        before = rate_value(layer)
+        assert before < schedule_value(schedule, 0)  # decay really moved
+
+        path = os.path.join(tmp_path, "resume.keras")
+        model.save(path)
+        loaded = keras.models.load_model(path)
+
+        assert rate_value(loaded.get_layer("sd")) == pytest.approx(before, abs=1e-7)
+
+    # ------------------------------------------------------------------
+    # SC-6 — inference is inert (bit-exact identity, no counter movement)
+    # ------------------------------------------------------------------
+
+    def test_inference_leaves_counter_unchanged(self, rate_kind, sample):
+        layer = ScheduledDropout(make_rate(rate_kind), seed=0)
+        layer.build(sample.shape)
+
+        for _ in range(3):
+            layer(sample, training=True)
+        assert counter_value(layer) == 3
+
+        for _ in range(5):
+            out = keras.ops.convert_to_numpy(layer(sample, training=False))
+            assert np.array_equal(out, sample)
+        assert counter_value(layer) == 3
+
+        # Default `training` (bare call) must also be inert.
+        out = keras.ops.convert_to_numpy(layer(sample))
+        assert np.array_equal(out, sample)
+        assert counter_value(layer) == 3
+
+    def test_predict_and_evaluate_leave_counter_unchanged(self, rate_kind):
+        model = make_model(make_rate(rate_kind))
+        layer = model.get_layer("sd")
+
+        rng = np.random.default_rng(5)
+        x = rng.standard_normal((32, D)).astype("float32")
+        y = rng.standard_normal((32, 1)).astype("float32")
+        model.fit(x, y, epochs=1, batch_size=4, shuffle=False, verbose=0)
+
+        after_fit = counter_value(layer)
+        assert after_fit == 8
+
+        model.predict(x, batch_size=4, verbose=0)
+        assert counter_value(layer) == after_fit
+
+        model.evaluate(x, y, batch_size=4, verbose=0)
+        assert counter_value(layer) == after_fit
+
+    # ------------------------------------------------------------------
+    # SC-5 — the rate follows the schedule
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("schedule_name", ["cosine", "polynomial"])
+    def test_rate_decays_with_counter(self, schedule_name, sample):
+        if schedule_name == "cosine":
+            schedule = keras.optimizers.schedules.CosineDecay(
+                initial_learning_rate=0.5, decay_steps=100, alpha=0.1
+            )
+        else:
+            schedule = keras.optimizers.schedules.PolynomialDecay(
+                initial_learning_rate=0.5, decay_steps=100, end_learning_rate=0.05
+            )
+
+        layer = ScheduledDropout(schedule, seed=0)
+        layer.build(sample.shape)
+
+        steps = [0, 10, 25, 50, 75, 99]
+        rates = []
+        for step in steps:
+            layer.step_counter.assign(step)
+            rate = rate_value(layer)
+            # D-007: current_rate() reads the schedule at the CURRENT counter.
+            assert rate == pytest.approx(schedule_value(schedule, step), abs=1e-7)
+            rates.append(rate)
+
+        assert len(rates) == len(steps)
+        assert rates[0] > rates[-1]
+        for previous, nxt in zip(rates, rates[1:]):
+            assert nxt < previous
+
+    def test_float_rate_is_exactly_constant(self, sample):
+        layer = ScheduledDropout(0.37, seed=0)
+        layer.build(sample.shape)
+
+        rates = []
+        for step in [0, 1, 7, 100, 10_000]:
+            layer.step_counter.assign(step)
+            rates.append(rate_value(layer))
+
+        assert len(rates) == 5
+        assert all(r == pytest.approx(0.37, abs=1e-7) for r in rates)
+        assert len(set(rates)) == 1
+
+    def test_first_training_call_uses_schedule_at_step_zero(self, sample):
+        # Probe (g): read-then-increment, so call #1 sees schedule(0) and
+        # current_rate() afterwards reports the NEXT call's rate.
+        schedule = keras.optimizers.schedules.PolynomialDecay(
+            initial_learning_rate=0.5, decay_steps=20, end_learning_rate=0.05
+        )
+        layer = ScheduledDropout(schedule, seed=0)
+        layer.build(sample.shape)
+
+        assert counter_value(layer) == 0
+        assert rate_value(layer) == pytest.approx(schedule_value(schedule, 0), abs=1e-7)
+
+        layer(sample, training=True)
+        assert counter_value(layer) == 1
+        assert rate_value(layer) == pytest.approx(schedule_value(schedule, 1), abs=1e-7)
+        # The two are genuinely different, so the assertion above is not vacuous.
+        assert schedule_value(schedule, 1) < schedule_value(schedule, 0)
+
+    # ------------------------------------------------------------------
+    # SC-8 — the clamp holds
+    # ------------------------------------------------------------------
+
+    def test_clamp_holds_at_both_ends(self, sample):
+        # Deliberately out of range at BOTH ends.
+        schedule = keras.optimizers.schedules.PolynomialDecay(
+            initial_learning_rate=1.5, decay_steps=10, end_learning_rate=-0.2
+        )
+        # Prove the clip is load-bearing: the raw schedule really is out of range.
+        assert schedule_value(schedule, 0) > MAX_RATE
+        assert schedule_value(schedule, 1000) < 0.0
+
+        layer = ScheduledDropout(schedule, seed=0)
+        layer.build(sample.shape)
+
+        layer.step_counter.assign(0)
+        assert rate_value(layer) == pytest.approx(MAX_RATE, abs=1e-7)
+
+        layer.step_counter.assign(1000)
+        assert rate_value(layer) == pytest.approx(0.0, abs=1e-7)
+
+        for step in range(0, 21):
+            layer.step_counter.assign(step)
+            assert 0.0 <= rate_value(layer) <= MAX_RATE
+
+    @pytest.mark.parametrize(
+        "schedule_name", ["cosine", "polynomial", "exponential", "piecewise"]
+    )
+    def test_rate_in_range_beyond_decay_steps(self, schedule_name, sample):
+        schedules = {
+            "cosine": keras.optimizers.schedules.CosineDecay(
+                initial_learning_rate=0.5, decay_steps=100, alpha=0.1
+            ),
+            "polynomial": keras.optimizers.schedules.PolynomialDecay(
+                initial_learning_rate=0.5, decay_steps=100, end_learning_rate=0.05
+            ),
+            "exponential": keras.optimizers.schedules.ExponentialDecay(
+                initial_learning_rate=0.5, decay_steps=100, decay_rate=0.5
+            ),
+            "piecewise": keras.optimizers.schedules.PiecewiseConstantDecay(
+                boundaries=[10, 50], values=[0.5, 0.3, 0.1]
+            ),
+        }
+        layer = ScheduledDropout(schedules[schedule_name], seed=0)
+        layer.build(sample.shape)
+
+        for step in [0, 100, 101, 1_000, 100_000]:
+            layer.step_counter.assign(step)
+            rate = rate_value(layer)
+            assert 0.0 <= rate <= MAX_RATE
+            assert np.isfinite(rate)
+
+        # A forward pass at the far-out step must still run.
+        out = layer(sample, training=True)
+        assert tuple(out.shape) == sample.shape
+
+    # ------------------------------------------------------------------
+    # D-006 — rate 0.0 is a bit-exact identity on the TRAINING path
+    # ------------------------------------------------------------------
+
+    def test_zero_rate_is_identity_on_training_path(self, sample):
+        layer = ScheduledDropout(0.0, seed=0)
+        layer.build(sample.shape)
+        out = keras.ops.convert_to_numpy(layer(sample, training=True))
+        assert np.array_equal(out, sample)
+        # It went down the training path, so it still counted.
+        assert counter_value(layer) == 1
+
+    def test_zero_rate_schedule_is_identity_on_training_path(self, sample):
+        schedule = keras.optimizers.schedules.PolynomialDecay(
+            initial_learning_rate=0.0, decay_steps=10, end_learning_rate=0.0
+        )
+        layer = ScheduledDropout(schedule, seed=0)
+        layer.build(sample.shape)
+        out = keras.ops.convert_to_numpy(layer(sample, training=True))
+        assert np.array_equal(out, sample)
+        assert counter_value(layer) == 1
+
+    # ------------------------------------------------------------------
+    # Mixed precision — the ops.cast in call() is load-bearing (D-004)
+    # ------------------------------------------------------------------
+
+    def test_mixed_float16_forward_pass(self, mixed_float16_policy, rate_kind, sample):
+        layer = ScheduledDropout(make_rate(rate_kind), seed=0)
+        out = layer(sample, training=True)
+        assert keras.backend.standardize_dtype(out.dtype) == "float16"
+        assert np.all(np.isfinite(keras.ops.convert_to_numpy(out)))
+        assert counter_value(layer) == 1
+
+    def test_mixed_float16_model_fit(self, mixed_float16_policy):
+        schedule = keras.optimizers.schedules.CosineDecay(
+            initial_learning_rate=0.5, decay_steps=100, alpha=0.1
+        )
+        model = make_model(schedule)
+        rng = np.random.default_rng(6)
+        x = rng.standard_normal((16, D)).astype("float32")
+        y = rng.standard_normal((16, 1)).astype("float32")
+        model.fit(x, y, epochs=1, batch_size=4, shuffle=False, verbose=0)
+        assert counter_value(model.get_layer("sd")) == 4
+
+    # ------------------------------------------------------------------
+    # seed= reproducibility — CONSTRAINED BY D-011: fresh layers only.
+    # Mask reproducibility across a save/load boundary is deliberately NOT
+    # asserted: Keras excludes seed-generator state from `Layer.weights` by
+    # design and stock keras.layers.Dropout behaves identically, so such a
+    # test would pin a Keras limitation rather than this layer's contract.
+    # ------------------------------------------------------------------
+
+    def test_same_seed_gives_identical_masks(self, sample):
+        a = ScheduledDropout(0.5, seed=1234)
+        b = ScheduledDropout(0.5, seed=1234)
+        for _ in range(3):
+            out_a = keras.ops.convert_to_numpy(a(sample, training=True))
+            out_b = keras.ops.convert_to_numpy(b(sample, training=True))
+            assert np.array_equal(out_a, out_b)
+            # Non-vacuous: dropout actually zeroed something.
+            assert np.any(out_a == 0.0)
+
+    def test_different_seed_gives_different_mask(self, sample):
+        a = ScheduledDropout(0.5, seed=1234)
+        b = ScheduledDropout(0.5, seed=4321)
+        out_a = keras.ops.convert_to_numpy(a(sample, training=True))
+        out_b = keras.ops.convert_to_numpy(b(sample, training=True))
+        assert not np.array_equal(out_a, out_b)
+
+    def test_current_rate_before_build_raises(self):
+        layer = ScheduledDropout(0.5)
+        with pytest.raises(ValueError):
+            layer.current_rate()
 
 
 if __name__ == "__main__":
