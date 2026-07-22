@@ -2421,6 +2421,17 @@ def add_common_arguments(parser) -> None:
                              "kernel_regularizer is added (avoids double weight decay).")
     parser.add_argument("--warmup-epochs", type=int, default=None,
                         help="LR warmup length (default: 10%% of --epochs)")
+    parser.add_argument("--optimizer-type", type=str, default="adamw",
+                        help="Optimizer name passed to optimizer_builder (default 'adamw').")
+    parser.add_argument("--lr-schedule-type", type=str, default="cosine_decay",
+                        help="LR schedule name passed to learning_rate_schedule_builder "
+                             "(default 'cosine_decay').")
+    parser.add_argument("--gradient-clipping", type=float, default=1.0,
+                        help="Gradient clipping-by-norm value passed to optimizer_builder "
+                             "(default 1.0).")
+    parser.add_argument("--early-stopping-patience", type=int, default=-1,
+                        help="EarlyStopping patience; <= 0 disables early stopping "
+                             "(default -1 = disabled).")
     parser.add_argument("--no-gabor-stem", action="store_true",
                         help="Disable the frozen Gabor depthwise stem")
     parser.add_argument("--laplacian-pyramid", action="store_true",
@@ -2430,6 +2441,10 @@ def add_common_arguments(parser) -> None:
                              "streaming train+val noise fn (default: clip ON). Matches "
                              "eval_psnr_vs_noise's --no-clip. Note: self-iterate pool "
                              "paths and dashboard images still clip (logged as a WARNING).")
+    parser.add_argument("--no-augment", action="store_true",
+                        help="Disable train-time patch augmentation (default: augment_data "
+                             "ON). Mirrors the --no-clip negated-flag convention above; "
+                             "forwarded as augment_data=not args.no_augment.")
     parser.add_argument("--symmetry-weight", type=float, default=0.0,
                         help="Weight of the soft Jacobian-symmetry penalty "
                              "symmetry_weight * mean(||Jv - JTv||^2) (default 0.0 = OFF, "
@@ -2478,6 +2493,9 @@ def add_common_arguments(parser) -> None:
                         help="Run ModelAnalyzer (data-free weight + spectral) during training (default OFF)")
     parser.add_argument("--analyzer-freq", type=int, default=10,
                         help="Run the analyzer every N epochs (with --analyzer)")
+    parser.add_argument("--analyzer-start-epoch", type=int, default=1,
+                        help="First epoch to run the analyzer on (with --analyzer, "
+                             "default 1).")
     parser.add_argument("--gabor-filters", type=int, default=32)
     parser.add_argument("--gabor-kernel-size", type=int, default=11,
                         help="Spatial size of the frozen Gabor depthwise stem (default 11).")
@@ -2517,6 +2535,9 @@ def add_common_arguments(parser) -> None:
                              "channels both divisible by the resolved group count.")
     parser.add_argument("--sigma-max-start", type=float, default=0.025)
     parser.add_argument("--sigma-max-end", type=float, default=0.25)
+    parser.add_argument("--noise-sigma-min", type=float, default=0.0,
+                        help="Lower bound of the sampled sigma range "
+                             "U(noise_sigma_min, sigma_max(epoch)) (default 0.0).")
     parser.add_argument("--curriculum-schedule",
                         choices=["linear", "cosine", "exp"], default="linear")
     parser.add_argument("--curriculum-epochs", type=int, default=None)
@@ -2533,6 +2554,13 @@ def add_common_arguments(parser) -> None:
     parser.add_argument("--steps-per-epoch", type=int, default=None,
                         help="Bound epoch length (default: files*patches//batch)")
     parser.add_argument("--validation-steps", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Reproducible seed for Python/NumPy/TF/Keras (default 42).")
+    parser.add_argument("--dataset-shuffle-buffer", type=int, default=1024,
+                        help="File-path shuffle buffer size for the streaming dataset "
+                             "(default 1024).")
+    parser.add_argument("--patch-shuffle-buffer", type=int, default=2048,
+                        help="Patch-level shuffle buffer size (default 2048).")
     parser.add_argument("--output-dir", type=str, default="results")
     parser.add_argument("--experiment-name", type=str, default=None)
     parser.add_argument("--gpu", type=int, default=None)
@@ -2587,6 +2615,26 @@ def add_common_arguments(parser) -> None:
              "(ww_pgd_layer_alpha.csv) to the experiment dir. Implies --ww-pgd "
              "(turns on the projection if not already set). Default OFF.",
     )
+    parser.add_argument("--ww-pgd-warmup-epochs", type=int, default=0,
+                        help="Epochs before WW-PGD projection starts (with --ww-pgd, "
+                             "default 0).")
+    parser.add_argument("--ww-pgd-ramp-epochs", type=int, default=5,
+                        help="Epochs over which the WW-PGD projection strength ramps up "
+                             "(with --ww-pgd, default 5).")
+    parser.add_argument("--ww-pgd-apply-every-epochs", type=int, default=1,
+                        help="Apply the WW-PGD projection every N epochs (with --ww-pgd, "
+                             "default 1).")
+    parser.add_argument("--ww-pgd-q", type=float, default=1.0,
+                        help="WW-PGD spectral tail quantile (with --ww-pgd, default 1.0).")
+    parser.add_argument("--ww-pgd-blend-eta", type=float, default=0.5,
+                        help="WW-PGD blend factor between original and projected weights "
+                             "(with --ww-pgd, default 0.5).")
+    parser.add_argument("--ww-pgd-cayley-eta", type=float, default=0.25,
+                        help="WW-PGD Cayley-transform step size (with --ww-pgd, "
+                             "default 0.25).")
+    parser.add_argument("--ww-pgd-min-tail", type=int, default=5,
+                        help="Minimum spectral tail size for WW-PGD projection (with "
+                             "--ww-pgd, default 5).")
     parser.add_argument(
         "--init-from", type=str, default=None,
         help="Warm-start model weights from a saved .keras checkpoint before training. "
