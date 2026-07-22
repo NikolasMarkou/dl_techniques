@@ -500,6 +500,46 @@ class TestScheduledDropout:
             layer.step_counter.assign(step)
             assert 0.0 <= rate_value(layer) <= MAX_RATE
 
+    def test_clamp_ceiling_forward_pass_amplifies_survivors(self):
+        # CHARACTERIZATION TEST (D-013), not a defence. It pins the DOCUMENTED
+        # behaviour at the clamp ceiling: the clamp bounds the RATE, it does not
+        # bound the activation MAGNITUDE. At rate 1 - 1e-6 the few survivors are
+        # rescaled by 1/(1 - rate) ~ 1e6, which is a real and expected spike.
+        # Do not "fix" this by lowering the ceiling or by adding a magnitude
+        # clip -- that would silently change dropout's rescaling contract. The
+        # sharp edge is documented in the layer's class docstring instead.
+        schedule = keras.optimizers.schedules.PolynomialDecay(
+            initial_learning_rate=1.5, decay_steps=10, end_learning_rate=1.2
+        )
+        # Out of range at BOTH ends, so the clip pins the rate to the ceiling
+        # at every step and the counter needs no manual placement.
+        assert schedule_value(schedule, 0) > 1.0
+        assert schedule_value(schedule, 10_000) > 1.0
+
+        layer = ScheduledDropout(schedule, seed=99)
+        layer.build((256, 16384))
+        assert rate_value(layer) == pytest.approx(MAX_RATE, abs=1e-7)
+
+        # All-ones input, so every non-zero output equals the rescale factor
+        # exactly. 8 chunks of 4194304 draws => ~33 expected survivors, i.e.
+        # P(zero survivors) ~ 3e-15. A single chunk would expect only ~4 and
+        # measured as few as 1 across seeds -- too thin to assert on.
+        x = keras.ops.ones((256, 16384), dtype="float32")
+        expected_scale = 1.0 / (1.0 - MAX_RATE)
+        survivors = []
+        for _ in range(8):
+            out = keras.ops.convert_to_numpy(layer(x, training=True))
+            assert not np.any(np.isnan(out))
+            assert not np.any(np.isinf(out))
+            survivors.extend(out[out != 0.0].tolist())
+
+        assert len(survivors) > 0
+        # The spike is ~1e6, not exactly 1e6: float32 rounds `1 - (1 - 1e-6)`
+        # to 1.0132e-6, so the measured factor is 986895.06, 1.3% low. rel=0.05
+        # accepts that rounding while still pinning the order of magnitude.
+        for value in survivors:
+            assert value == pytest.approx(expected_scale, rel=0.05)
+
     @pytest.mark.parametrize(
         "schedule_name", ["cosine", "polynomial", "exponential", "piecewise"]
     )
