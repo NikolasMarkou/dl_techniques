@@ -478,10 +478,13 @@ class TestScheduledDropout:
             assert nxt > previous
 
         # ------------------------------------------------------------------
-        # ZERO-VARIANCE STEP-0 PROBE (D-015) — pins the read-then-increment
-        # ordering that `scheduled_dropout.py`'s `# DECISION .../D-010` anchor
-        # forbids reordering ("swapping these lines shifts every rate by one
-        # step").
+        # DECISION plan-2026-07-22T184143-94cb10cb/D-015: zero-variance step-0
+        # probe. Do NOT relax this bound to match the abs=0.02 the loop above
+        # uses, and do NOT fold it into that loop as "one more probe" — it is
+        # deliberately asymmetric, and at abs=0.02 it stops being a guard.
+        # It pins the read-then-increment ordering that
+        # `scheduled_dropout.py`'s `# DECISION .../D-010` anchor forbids
+        # reordering ("swapping these lines shifts every rate by one step").
         #
         # WHY THIS ONE PROBE MAY CARRY A TIGHT TOLERANCE WHILE THE OTHERS MAY
         # NOT: this schedule's value at step 0 is EXACTLY 0.0, so every one of
