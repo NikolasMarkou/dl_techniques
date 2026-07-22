@@ -539,12 +539,28 @@ class GatedGeometricResidual(keras.layers.Layer):
         # and the .keras weight layout stays byte-identical — which is the whole
         # point of building it unconditionally above.
         #
-        # Placement is load-bearing but subtle: this works pre-build because
+        # DECISION plan-2026-07-22T090932-e433f233/D-003: placement is
+        # load-bearing but subtle. This works PRE-build because
         # Layer._track_variable() (keras/src/layers/layer.py:1316-1322) applies
         # `if not self.trainable: variable.trainable = False` to every variable
         # as it is created, so the flag propagates to weights that do not exist
         # yet. The `trainable` SETTER alone (layer.py:564-582) would not — it
         # only walks variables that already exist.
+        #
+        # Two known, accepted consequences (both verified, neither a regression
+        # relative to the pre-fix behaviour):
+        #   1. `model.trainable = True` (the standard unfreeze idiom, used at
+        #      src/train/bfunet/variance_probe.py:177) RE-ENABLES gate_dense and
+        #      brings the warning back — the setter recurses into `_layers`
+        #      (layer.py:581-582) and has no knowledge of `use_gate`. Re-apply
+        #      this guard manually after any global unfreeze.
+        #   2. Resuming from a `.keras` saved BEFORE this change, WITH optimizer
+        #      state, skips optimizer loading entirely (24 saved vars vs 20
+        #      expected) — including `iterations`, so the LR schedule restarts.
+        #      Keras only warns; it does not error. No such checkpoint exists in
+        #      results/ today, and common.py:2030 resumes weights-only, so live
+        #      exposure is zero. Delete any pre-fix optimizer state rather than
+        #      trusting a resume from it.
         if not self.use_gate:
             self.gate_dense.trainable = False
         # DECISION plan_2026-07-03_eb53492e/D-001: GGR no longer owns a
