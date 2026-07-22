@@ -1,6 +1,6 @@
 {
-  "checkpoint": "results/20260717_convunext_denoiser/final_model.keras",
-  "gpu": "NVIDIA GeForce RTX 4070",
+  "checkpoint": "results/20260720_convunext_denoiser_hfb3/final_model.keras",
+  "gpu": "NVIDIA GeForce RTX 4090",
   "seed": 42,
   "channels": 3,
   "resolutions": [
@@ -8,39 +8,39 @@
     512
   ],
   "params": {
-    "total": 745272,
-    "trainable": 730620,
-    "non_trainable": 14652
+    "total": 821832,
+    "trainable": 807048,
+    "non_trainable": 14784
   },
   "flops": {
     "method": "v1profiler",
     "per_resolution": {
       "256": {
-        "flops": 52995048678,
-        "gflops": 52.995048678,
-        "flops_per_megapixel": 808640269134.5215
+        "flops": 59256030570,
+        "gflops": 59.25603057,
+        "flops_per_megapixel": 904175271148.6816
       },
       "512": {
-        "flops": 211980190950,
-        "gflops": 211.98019095,
-        "flops_per_megapixel": 808640254783.6304
+        "flops": 237024118122,
+        "gflops": 237.024118122,
+        "flops_per_megapixel": 904175255287.1704
       }
     },
-    "ratio_512_over_256": 3.9999999290122363
+    "ratio_512_over_256": 3.9999999298299267
   },
   "mem_latency": {
     "256": {
-      "peak_mem_mib": 539.058837890625,
-      "latency_ms_median": 217.7289181854576,
-      "latency_ms_min": 175.40145991370082,
-      "latency_ms_max": 293.3990601450205,
+      "peak_mem_mib": 581.67529296875,
+      "latency_ms_median": 117.64107151248027,
+      "latency_ms_min": 115.90269798762165,
+      "latency_ms_max": 132.99318600911647,
       "latency_iters": 20
     },
     "512": {
-      "peak_mem_mib": 2146.8076171875,
-      "latency_ms_median": 219.00580846704543,
-      "latency_ms_min": 187.68424075096846,
-      "latency_ms_max": 430.3421750664711,
+      "peak_mem_mib": 2312.186767578125,
+      "latency_ms_median": 118.19242751516867,
+      "latency_ms_min": 116.1797989916522,
+      "latency_ms_max": 129.1150489996653,
       "latency_iters": 20
     }
   }

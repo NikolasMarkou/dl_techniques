@@ -1,5 +1,5 @@
 {
-  "checkpoint": "results/20260717_convunext_denoiser/final_model.keras",
+  "checkpoint": "results/20260720_convunext_denoiser_hfb3/final_model.keras",
   "seed": 42,
   "num_samples": 100,
   "size_multiple": 16,
@@ -13,85 +13,85 @@
       "dataset": "kodak24",
       "sigma_255": 15.0,
       "n": 24,
-      "psnr_mean": 34.95595486958822,
-      "ssim_mean": 0.9256437222162882
+      "psnr_mean": 34.98960200945536,
+      "ssim_mean": 0.9258954947193464
     },
     {
       "dataset": "kodak24",
       "sigma_255": 25.0,
       "n": 24,
-      "psnr_mean": 32.48163628578186,
-      "ssim_mean": 0.8853371640046438
+      "psnr_mean": 32.509883324305214,
+      "ssim_mean": 0.8855356276035309
     },
     {
       "dataset": "kodak24",
       "sigma_255": 50.0,
       "n": 24,
-      "psnr_mean": 29.33115561803182,
-      "ssim_mean": 0.8058406487107277
+      "psnr_mean": 29.35343289375305,
+      "ssim_mean": 0.8061243245999018
     },
     {
       "dataset": "cbsd68",
       "sigma_255": 15.0,
       "n": 68,
-      "psnr_mean": 33.97969714333029,
-      "ssim_mean": 0.9312139144715141
+      "psnr_mean": 34.00320440180161,
+      "ssim_mean": 0.9316443643149208
     },
     {
       "dataset": "cbsd68",
       "sigma_255": 25.0,
       "n": 68,
-      "psnr_mean": 31.328968468834372,
-      "ssim_mean": 0.8867438707281562
+      "psnr_mean": 31.34541233848123,
+      "ssim_mean": 0.8870404502924751
     },
     {
       "dataset": "cbsd68",
       "sigma_255": 50.0,
       "n": 68,
-      "psnr_mean": 28.086160687839282,
-      "ssim_mean": 0.797644160249654
+      "psnr_mean": 28.098694548887366,
+      "ssim_mean": 0.7980705219156602
     },
     {
       "dataset": "mcmaster",
       "sigma_255": 15.0,
       "n": 18,
-      "psnr_mean": 34.86017290751139,
-      "ssim_mean": 0.9251417749457889
+      "psnr_mean": 34.864312913682724,
+      "ssim_mean": 0.9241395360893674
     },
     {
       "dataset": "mcmaster",
       "sigma_255": 25.0,
       "n": 18,
-      "psnr_mean": 32.58469104766846,
-      "ssim_mean": 0.8926508161756728
+      "psnr_mean": 32.58626365661621,
+      "ssim_mean": 0.8917667269706726
     },
     {
       "dataset": "mcmaster",
       "sigma_255": 50.0,
       "n": 18,
-      "psnr_mean": 29.41725296444363,
-      "ssim_mean": 0.826196700334549
+      "psnr_mean": 29.43920463985867,
+      "ssim_mean": 0.8268589774767557
     },
     {
       "dataset": "urban100",
       "sigma_255": 15.0,
       "n": 100,
-      "psnr_mean": 34.19036680221558,
-      "ssim_mean": 0.9449625092744828
+      "psnr_mean": 34.2415007019043,
+      "ssim_mean": 0.9453543704748154
     },
     {
       "dataset": "urban100",
       "sigma_255": 25.0,
       "n": 100,
-      "psnr_mean": 31.791803073883056,
-      "ssim_mean": 0.9170279639959336
+      "psnr_mean": 31.847727317810058,
+      "ssim_mean": 0.9177556222677231
     },
     {
       "dataset": "urban100",
       "sigma_255": 50.0,
       "n": 100,
-      "psnr_mean": 28.44395845413208,
-      "ssim_mean": 0.8556167775392532
+      "psnr_mean": 28.503073616027834,
+      "ssim_mean": 0.8571955472230911
     }
   ]
 }
