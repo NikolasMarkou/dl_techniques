@@ -90,7 +90,17 @@ def main():
     )
     print(json.dumps(dataclasses.asdict(config), indent=2, default=str))
 
-    # TODO(step 9): build_model(config) + verify_bias_free(model).
+    model = build_model(config)
+    logger.info(
+        f"Built CliffordUNet denoiser model '{model.name}' "
+        f"({model.count_params()} params)."
+    )
+    verify_bias_free(model)
+    logger.info(
+        "prepare_cliffordunet_denoiser: model build + verify_bias_free completed "
+        "successfully (no training, no save)."
+    )
+
     # TODO(step 10): save_config_json(config, RESULTS_DIR, "config.json") and
     #   model.save(os.path.join(RESULTS_DIR, MODEL_FILENAME)). No common.train()/
     #   .fit() call -- build + save only.
