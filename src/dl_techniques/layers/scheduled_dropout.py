@@ -100,12 +100,30 @@ class ScheduledDropout(keras.layers.Layer):
            NaN-free but will still wreck a loss. A schedule whose range escapes
            ``[0, 1)`` (say ``initial_learning_rate=1.5`` -- exactly the mistake
            the "LearningRateSchedule" name invites) is therefore accepted
-           **silently** at construction. There is deliberately no
-           construction-time range validator: the layer does not own the step
-           horizon (sharp edge 2), so it could not evaluate a schedule's range
-           without assuming one, and any assumed horizon would be either wrong
-           or a second source of truth for something ``decay_steps`` already
-           owns. Check your schedule's endpoints yourself.
+           **silently** at construction. Check your schedule's endpoints
+           yourself.
+
+           On why nothing is checked at construction, precisely:
+
+           - A **full-range** check is genuinely impossible here. It would have
+             to evaluate the schedule over a step domain, and the layer does
+             not own one -- the horizon lives in the schedule's own
+             ``decay_steps`` (sharp edge 2). Any horizon the layer assumed
+             would be either wrong or a second source of truth for something
+             ``decay_steps`` already owns.
+           - A **step-0** sanity check is a different matter and needs no
+             horizon at all. Evaluating ``schedule(0)`` once would catch both
+             footguns named above -- measured, ``PolynomialDecay(
+             initial_learning_rate=1.5, ...)`` returns 1.5 and
+             ``ExponentialDecay(initial_learning_rate=1.0, ...)`` returns 1.0,
+             both out of range -- with no false positive on the obvious
+             candidate, since a warmup ``CosineDecay`` correctly returns 0.0.
+             So the omission is a **choice**, not an impossibility.
+           - That check is deliberately **out of scope for this iteration**.
+             Whether it should warn, raise, or stay silent, and for which
+             schedule types, is an API decision about the layer's construction
+             contract; it deserves its own plan rather than being folded into a
+             fix pass. Until then, the clip at call time is the only defence.
 
     Example:
         Cosine-decayed dropout across a whole run, the horizon being the
