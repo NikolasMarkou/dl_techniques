@@ -60,8 +60,21 @@ class ScheduledDropout(keras.layers.Layer):
         1. The counter counts **this layer instance's own training-mode forward
            passes**, not global optimizer steps. An instance called twice per
            training step advances by 2 per step; one shared across N sites
-           advances by N. Inference (`predict`, `evaluate`, ``training=False``)
-           never increments it.
+           advances by N. Inference via `predict`, `evaluate` or an explicit
+           ``training=False`` never increments it -- but ``model(x,
+           training=True)``, the MC-dropout idiom this repo uses for
+           uncertainty estimation, **does**. Ten MC samples were measured to
+           move the counter ``8 -> 18`` and to be drawn at ten *different*,
+           drifting rates (``[0.3, 0.275, ..., 0.075]``), so they are not
+           i.i.d.; they also fast-forward the decay, corrupting a later resume.
+           Workaround -- pin the counter for the whole loop, then restore it::
+
+               saved = int(layer.step_counter)
+               samples = []
+               for _ in range(n_samples):
+                   layer.step_counter.assign(saved)  # same rate every sample
+                   samples.append(model(x, training=True))
+               layer.step_counter.assign(saved)      # training state intact
         2. The training horizon lives in the schedule's own ``decay_steps`` and
            nowhere else -- there is no progress-fraction API and the layer never
            learns ``total_steps`` independently. The caller passes
@@ -80,6 +93,19 @@ class ScheduledDropout(keras.layers.Layer):
         5. A plain-float ``rate`` still creates and still increments the
            counter: state layout and forward path are identical for both rate
            kinds, only the value differs.
+        6. The clamp bounds the **rate** to ``[0, 1 - 1e-6]``; it does NOT bound
+           the activation magnitude and it is not a safety net. At the ceiling
+           the few survivors are rescaled by ``1 / (1 - rate)`` -- measured at
+           986895x on an all-ones input, a ~10^6 spike that is finite and
+           NaN-free but will still wreck a loss. A schedule whose range escapes
+           ``[0, 1)`` (say ``initial_learning_rate=1.5`` -- exactly the mistake
+           the "LearningRateSchedule" name invites) is therefore accepted
+           **silently** at construction. There is deliberately no
+           construction-time range validator: the layer does not own the step
+           horizon (sharp edge 2), so it could not evaluate a schedule's range
+           without assuming one, and any assumed horizon would be either wrong
+           or a second source of truth for something ``decay_steps`` already
+           owns. Check your schedule's endpoints yourself.
 
     Example:
         Cosine-decayed dropout across a whole run, the horizon being the
