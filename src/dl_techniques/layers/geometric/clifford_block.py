@@ -547,8 +547,10 @@ class GatedGeometricResidual(keras.layers.Layer):
         # yet. The `trainable` SETTER alone (layer.py:564-582) would not — it
         # only walks variables that already exist.
         #
-        # Two known, accepted consequences (both verified, neither a regression
-        # relative to the pre-fix behaviour):
+        # DECISION plan-2026-07-22T090932-e433f233/D-006: two known, accepted
+        # consequences (both verified, neither a regression relative to the
+        # pre-fix behaviour). Documented here rather than defended against in
+        # code — see decisions.md D-006 for why:
         #   1. `model.trainable = True` (the standard unfreeze idiom, used at
         #      src/train/bfunet/variance_probe.py:177) RE-ENABLES gate_dense and
         #      brings the warning back — the setter recurses into `_layers`
