@@ -326,7 +326,7 @@ Urban100 & 15 & 34.24 & \textbf{32.98} & \textbf{33.83} & 34.81 & 35.13 & 35.13 
 Urban100 & 25 & 31.85 & \textbf{30.81} & \textbf{31.40} & 32.60 & 32.90 & 32.96 & 33.03 \\
 Urban100 & 50 & 28.50 & \textbf{27.59} & \textbf{28.05} & 29.61 & 29.82 & 30.02 & 30.14 \\
 \midrule
-\multicolumn{2}{l}{\emph{avg} $\sigma{=}15$} & 34.55 & \textbf{33.73} & \textbf{34.25} & 34.96 & 35.13 & 35.15 & 35.13 \\
+\multicolumn{2}{l}{\emph{avg} $\sigma{=}15$} & 34.52 & \textbf{33.73} & \textbf{34.25} & 34.96 & 35.13 & 35.15 & 35.13 \\
 \multicolumn{2}{l}{\emph{avg} $\sigma{=}25$} & 32.07 & \textbf{31.43} & \textbf{31.77} & 32.58 & 32.69 & 32.78 & 32.77 \\
 \multicolumn{2}{l}{\emph{avg} $\sigma{=}50$} & 28.85 & \textbf{28.28} & \textbf{28.54} & 29.52 & 29.60 & 29.73 & 29.73 \\
 \bottomrule
@@ -334,7 +334,7 @@ Urban100 & 50 & 28.50 & \textbf{27.59} & \textbf{28.05} & 29.61 & 29.82 & 30.02 
 }
 \end{table}
 
-Averaged over the four sets, \model{} is $+0.82/+0.64/+0.57$\,dB above DnCNN at $\sigma=15/25/50$ and $+0.30/+0.30/+0.31$\,dB above FFDNet (which, unlike our model, is \emph{non-blind} and receives a noise-level map). It is $-0.41/-0.51/-0.67$\,dB relative to DRUNet and $-0.60/-0.71/-0.88$\,dB relative to Restormer, the leaderboard top. \model{} is ahead of DnCNN in all twelve cells, but the per-set margin is uneven: it is narrow on CBSD68 ($+0.10$ to $+0.15$\,dB) and much larger on McMaster and Urban100 (up to $+1.41$ and $+1.26$\,dB at $\sigma{=}15$). The CBSD68 margin is still small enough to be within the protocol sensitivity of our $[0,1]$ input clip (Section~\ref{sec:limitations}), so on that set the result remains best read as a match rather than a clear win; the McMaster/Urban100/Kodak24 margins are far larger, though we measured the clip effect on CBSD68 alone (Section~\ref{sec:limitations}). Against the heavyweight state of the art the gap is smallest on CBSD68 ($\sim0.3$--$0.5$\,dB), then Kodak24 ($\sim0.35$--$0.7$\,dB) and McMaster ($\sim0.5$--$0.9$\,dB), and largest on Urban100 ($\sim0.6$--$1.7$\,dB). Urban100's repetitive, self-similar structures are exactly where the transformers' non-local attention (SwinIR, Restormer) and DRUNet's large receptive field have the most to exploit and a compact local conv U-Net the least.
+Averaged over the four sets, \model{} is $+0.79/+0.64/+0.57$\,dB above DnCNN at $\sigma=15/25/50$ and $+0.27/+0.30/+0.31$\,dB above FFDNet (which, unlike our model, is \emph{non-blind} and receives a noise-level map). It is $-0.44/-0.51/-0.67$\,dB relative to DRUNet and $-0.63/-0.71/-0.88$\,dB relative to Restormer, the leaderboard top. \model{} is ahead of DnCNN in all twelve cells, but the per-set margin is uneven: it is narrow on CBSD68 ($+0.10$ to $+0.15$\,dB) and much larger on McMaster and Urban100 (up to $+1.41$ and $+1.26$\,dB at $\sigma{=}15$). The CBSD68 margin is still small enough to be within the protocol sensitivity of our $[0,1]$ input clip (Section~\ref{sec:limitations}), so on that set the result remains best read as a match rather than a clear win; the McMaster/Urban100/Kodak24 margins are far larger, though we measured the clip effect on CBSD68 alone (Section~\ref{sec:limitations}). Against the heavyweight state of the art the gap is smallest on CBSD68 ($\sim0.3$--$0.5$\,dB), then Kodak24 ($\sim0.35$--$0.7$\,dB) and McMaster ($\sim0.5$--$0.9$\,dB), and largest on Urban100 ($\sim0.6$--$1.7$\,dB). Urban100's repetitive, self-similar structures are exactly where the transformers' non-local attention (SwinIR, Restormer) and DRUNet's large receptive field have the most to exploit and a compact local conv U-Net the least.
 
 \subsection{Structural similarity (SSIM)}
 \label{sec:ssim}
@@ -356,7 +356,7 @@ Kodak24  & 34.99 & 0.9259 & 32.51 & 0.8855 & 29.35 & 0.8061 \\
 McMaster & 34.86 & 0.9241 & 32.59 & 0.8918 & 29.44 & 0.8269 \\
 Urban100 & 34.24 & 0.9454 & 31.85 & 0.9178 & 28.50 & 0.8572 \\
 \midrule
-\emph{average} & 34.55 & 0.9318 & 32.07 & 0.8955 & 28.85 & 0.8221 \\
+\emph{average} & 34.52 & 0.9318 & 32.07 & 0.8955 & 28.85 & 0.8221 \\
 \bottomrule
 \end{tabular}
 \end{table}
