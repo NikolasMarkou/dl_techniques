@@ -459,11 +459,14 @@ class TestScheduledDropout:
             # would just re-test the parallel path.
             expected = schedule_value(schedule, step)
 
-            # Tolerance: 16384 Bernoulli draws give a binomial sd <= 0.0039,
-            # and the worst error measured over four seeds x two shapes was
-            # 0.006. abs=0.02 is ~5 sd of anti-flake headroom, yet still 12x
-            # tighter than the smallest deviation this test must catch (a rate
-            # frozen at step 0 reads 0.000 where step 25 expects 0.2475).
+            # Tolerance: 16384 Bernoulli draws give a binomial sd <= 0.0039.
+            # Measured over 201 seeds the worst error on these interior probes
+            # is 0.0138 (seed 119, step 75), so abs=0.02 has a real margin of
+            # 1.45x -- NOT the ~5x an earlier four-seed sample suggested. It is
+            # still 12x tighter than the smallest deviation this test must
+            # catch (a rate frozen at step 0 reads 0.000 where step 25 expects
+            # 0.2475), but it is too loose to see a ONE-step shift: that is
+            # what the zero-variance step-0 probe below is for.
             assert zero_fraction == pytest.approx(expected, abs=0.02), (
                 f"mask at step {step}: observed zero-fraction {zero_fraction}, "
                 f"schedule says {expected}"
@@ -473,6 +476,38 @@ class TestScheduledDropout:
         assert observed[-1] - observed[0] > 0.9
         for previous, nxt in zip(observed, observed[1:]):
             assert nxt > previous
+
+        # ------------------------------------------------------------------
+        # ZERO-VARIANCE STEP-0 PROBE (D-015) — pins the read-then-increment
+        # ordering that `scheduled_dropout.py`'s `# DECISION .../D-010` anchor
+        # forbids reordering ("swapping these lines shifts every rate by one
+        # step").
+        #
+        # WHY THIS ONE PROBE MAY CARRY A TIGHT TOLERANCE WHILE THE OTHERS MAY
+        # NOT: this schedule's value at step 0 is EXACTLY 0.0, so every one of
+        # the 16384 Bernoulli trials has p=0. A binomial with p=0 has variance
+        # exactly 0 — there is no randomness left to vary, and the observed
+        # zero-fraction is not "0.0 within sampling noise", it is 0.0. Every
+        # other probe sits at 0 < p < 1 where the binomial sd is ~0.0039, which
+        # is what forces those to abs=0.02.
+        #
+        # Under the D-010 reorder (`assign_add` before the read) the step-0
+        # probe reads schedule(1) = 0.0099 instead of schedule(0) = 0.0 and
+        # observes ~0.0116 with sd 0.00077 — ~15 sd above this bound, whereas
+        # the abs=0.02 loop above clears it by 18% (max error 0.01635) and
+        # stays green. This assertion is the only thing in the suite that sees
+        # a one-step shift.
+        assert schedule_value(schedule, 0) == 0.0, (
+            "this probe's tight tolerance is only valid because schedule(0) is "
+            "exactly 0.0; if the schedule changes, the tolerance must too"
+        )
+        assert observed[0] < 0.005, (
+            f"step-0 mask must be a zero-variance identity (schedule(0) is "
+            f"exactly 0.0, so p=0 for every draw), but the observed "
+            f"zero-fraction was {observed[0]}. A non-zero value here means "
+            f"call() did not evaluate the schedule at the counter's PRE-"
+            f"increment value -- see the D-010 anchor in scheduled_dropout.py"
+        )
 
     # ------------------------------------------------------------------
     # SC-8 — the clamp holds
