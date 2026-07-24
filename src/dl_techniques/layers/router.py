@@ -1,13 +1,25 @@
 """
 A dynamic routing mechanism for conditional computation.
 
-This layer introduces adaptive-depth processing into a neural network by
-wrapping a standard computational block, such as a Transformer layer. It
-addresses the inefficiency of static network architectures where every input
-is processed with the same amount of computation. By adding a lightweight
-router, this layer dynamically decides for each input whether to skip,
-execute, or repeat the wrapped block, allowing the model to allocate more
-resources to complex inputs while saving compute on simpler ones.
+This layer introduces adaptive-depth routing into a neural network by
+wrapping a standard computational block, such as a Transformer layer. For
+each input it produces a routing decision -- skip, execute, or repeat the
+wrapped block -- via a lightweight router network, exposing a per-input
+signal for a compute-aware policy that would allocate more depth to complex
+inputs and less to simpler ones.
+
+.. note::
+    **Compute cost as implemented.** This layer does NOT reduce FLOPs at
+    inference. All three paths are computed unconditionally on every forward
+    pass: SKIP is free (identity), EXECUTE runs the wrapped transformer once,
+    and REPEAT runs it a second time on the executed output. The chosen action
+    then selects among the three via a one-hot mask. Because EXECUTE and
+    REPEAT are always materialised, the layer costs approximately 2x a single
+    transformer application on every input. It provides the *routing signal*
+    for a compute-aware policy; realising actual compute savings would require
+    true per-item conditional dispatch (gather/scatter), which is
+    intentionally NOT implemented here -- an accelerator-friendly
+    select-after-compute scheme was chosen instead.
 
 Architectural and Mathematical Underpinnings:
 
@@ -38,17 +50,19 @@ block on the full, uncompressed input.
     supervision derived from a search algorithm (like MCTS) that determines
     the optimal computational path for a given task and budget.
 
-3.  **Conditional Execution**: Based on the router's decision, one of three
-    computational graphs is executed for the original input `H`:
+3.  **Select-after-compute execution**: All three candidate outputs are
+    computed for the original input `H`, and the router's decision selects
+    one of them via a one-hot mask:
     -   **SKIP**: An identity function, `f(H) = H`.
     -   **EXECUTE**: A single application of the wrapped transformer block,
         `f(H) = Transformer(H)`.
     -   **REPEAT**: A sequential double application of the block,
         `f(H) = Transformer(Transformer(H))`.
 
-    This conditional application of computation based on input characteristics
-    is the fundamental principle that enables the model to achieve a better
-    trade-off between accuracy and computational cost.
+    EXECUTE and REPEAT are evaluated on every forward pass regardless of the
+    decision (see the compute-cost note above), so the selection produces the
+    routing behaviour but does not, by itself, yield a reduction in
+    computational cost.
 
 References:
     - Heakl, A., et al. (2025). Dr.LLM: Dynamic Layer Routing in LLMs.
@@ -76,10 +90,23 @@ class RouterLayer(keras.layers.Layer):
     or **repeat** twice the wrapped ``TransformerLayer``. The decision
     is based on a windowed mean-pooling summary of the input sequence
     passed through a two-layer bottleneck MLP producing logits for
-    ``{SKIP=0, EXECUTE=1, REPEAT=2}``. During training, teacher-forced
-    decisions can be supplied; at inference, ``argmax`` is used. All
-    three computational paths are evaluated and selected via a one-hot
-    mask for hardware-accelerator-friendly execution.
+    ``{SKIP=0, EXECUTE=1, REPEAT=2}``. The decision uses the supplied
+    ``layer_decision`` whenever it is not ``None`` (regardless of
+    training/inference); otherwise ``argmax(logits)`` is used. All three
+    computational paths are always evaluated and selected via a one-hot
+    mask for hardware-accelerator-friendly execution, so the layer costs
+    approximately 2x a single transformer application on every forward pass
+    and does not by itself reduce inference FLOPs.
+
+    .. warning::
+        **The router MLP is not trained by task loss alone.** Action
+        selection is non-differentiable (``argmax`` -> one-hot), so no
+        gradient flows to the router weights from the primary task loss via
+        the returned output. The router MLP trains ONLY if the caller attaches
+        an explicit loss to the returned ``logits`` (e.g. cross-entropy
+        against teacher decisions). A caller that trains on task loss alone --
+        without supplying ``layer_decision`` and without a loss on ``logits``
+        -- leaves the router MLP at its initialization.
 
     **Architecture Overview:**
 
