@@ -166,6 +166,51 @@ class TestRouterLayer:
             ops.convert_to_numpy(l_3d), l_half, atol=1e-6
         )
 
+    def test_multiplicative_mask_excludes_zeroed_positions(self, sample):
+        """DURABLE discriminator: a ``1``s-then-``0``s multiplicative mask must
+        pool ONLY the kept (real) tokens — the zeroed positions contribute
+        nothing to the routing summary.
+
+        Construction: SEQ=12, num_windows=4 -> window_len=3. Keep the first
+        K=6 tokens (windows 0,1) and zero the last 6 (windows 2,3), so every
+        window is either fully kept or fully masked. An independent reference
+        replaces the masked positions of the input with ``0.0`` and pools it
+        with ``attention_mask=None``: the kept windows pool the same real
+        tokens, and the fully-masked windows collapse to the zero vector (the
+        safe-denominator ``max(count, 1)`` yields ``0/1 = 0``), which equals the
+        mean of zeros. The two routing-logit tensors must therefore match.
+
+        RED proof: against a mask-BLIND pooling (``ops.mean`` over every window
+        position, ignoring ``attention_mask``), the masked call would average
+        the ORIGINAL non-zero ``sample`` values in windows 2,3 while the
+        reference averages zeros there — the summaries (hence logits) diverge
+        and the ``assert_allclose`` below FAILS. It only passes when the mask
+        genuinely excludes the zeroed positions. (Probed on the delivered code:
+        blind-vs-masked window-summary delta is O(1), far above atol.)
+        """
+        layer = RouterLayer(
+            transformer_layer=_transformer(), router_bottleneck_dim=8, num_windows=4
+        )
+        _ = layer(sample, training=False)  # build
+
+        K = SEQ // 2  # 6 -> window-aligned (window_len=3): windows 0,1 kept
+        mask = np.ones((B, SEQ), dtype="float32")
+        mask[:, K:] = 0.0  # 1s then 0s
+
+        # Independent reference: zero the masked positions, pool with no mask.
+        ref_input = sample.copy()
+        ref_input[:, K:, :] = 0.0
+
+        _, l_masked = layer(sample, attention_mask=mask, training=False)
+        _, l_ref = layer(ref_input, attention_mask=None, training=False)
+
+        np.testing.assert_allclose(
+            ops.convert_to_numpy(l_masked),
+            ops.convert_to_numpy(l_ref),
+            atol=1e-6,
+            err_msg="multiplicative mask did not exclude the zeroed positions",
+        )
+
     # ------------------------------------------------------------------
     # 3. Non-divisible forward (seq_len % num_windows != 0)
     # ------------------------------------------------------------------
@@ -194,6 +239,9 @@ class TestRouterLayer:
         assert tuple(l.shape) == (B, 3)
 
         # Conditional jit smoke: skip if the backend/hardware rejects XLA.
+        # NOTE: this is a TF/XLA smoke only. The JAX-jit guarantee is NOT tested
+        # here (JAX backend not exercised); it holds BY CONSTRUCTION because the
+        # static path's reshape dims are Python ints (see router.py D-001).
         try:
             model.compile(jit_compile=True)
             model.predict(sample, verbose=0)

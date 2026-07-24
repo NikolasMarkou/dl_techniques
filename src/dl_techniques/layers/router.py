@@ -252,7 +252,19 @@ class RouterLayer(keras.layers.Layer):
 
         :param inputs: Input tensor ``(batch, seq_len, hidden_size)``.
         :type inputs: keras.KerasTensor
-        :param attention_mask: Optional attention mask.
+        :param attention_mask: Optional attention mask. **Must be
+            multiplicative** (``1``/``True`` = keep, ``0``/``False`` = mask),
+            matching this repo's ``MultiHeadAttention`` convention. **Additive
+            masks are NOT supported**: an additive mask (``0`` / ``-inf`` or
+            ``0`` / ``-1e9``) inverts the keep/mask sense and is multiplied into
+            the windowed sum, silently corrupting the routing summary (garbage
+            logits, no error, no NaN) — a caller holding an additive mask
+            elsewhere must convert it to a multiplicative/boolean mask before
+            passing it here. Accepted ranks are ``(B, S)``, ``(B, S, S)``, and
+            ``(B, H, S, S)``; rank-3/4 masks are reduced to a per-key keep
+            vector ``(B, S)`` by "keep a key position if ANY query/head attends
+            to it" (``ops.max`` over the query/head axes). The SAME mask is also
+            forwarded unchanged to the wrapped transformer.
         :type attention_mask: Optional[keras.KerasTensor]
         :param layer_idx: Layer index passed to the transformer.
         :type layer_idx: int
@@ -261,7 +273,18 @@ class RouterLayer(keras.layers.Layer):
         :param training: Whether in training mode.
         :type training: Optional[bool]
         :return: Tuple of (output tensor, router logits).
-        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]"""
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
+
+        .. note::
+            **jit / static-shape caveat.** The static-shape (JAX-``jit`` /
+            XLA-safe) windowed-pooling path applies ONLY when the sequence
+            length is statically known -- i.e. ``inputs.shape[1]`` is a concrete
+            Python int, the normal ``keras.Input(shape=(SEQ, HID))`` case. A
+            symbolic-seq input (``keras.Input(shape=(None, HID))``) falls back to
+            the dynamic path, whose reshape target carries data-dependent tensor
+            dims and therefore does NOT carry the static-shape jit guarantee
+            (it may hit the JAX concretization error / forced XLA recompile that
+            the static path avoids)."""
         # --- 1. Router Logic: Generate decision logits ---
         batch_size = ops.shape(inputs)[0]
 
