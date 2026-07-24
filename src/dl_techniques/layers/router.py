@@ -237,20 +237,66 @@ class RouterLayer(keras.layers.Layer):
         :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]"""
         # --- 1. Router Logic: Generate decision logits ---
         batch_size = ops.shape(inputs)[0]
-        seq_len = ops.shape(inputs)[1]
 
-        # Use backend-agnostic ops for dynamic shape handling during pooling
-        num_windows_eff = ops.minimum(self.num_windows, seq_len)
-        window_len = seq_len // num_windows_eff
-        truncated_len = window_len * num_windows_eff
-        pooled_input = inputs[:, :truncated_len, :]
+        # DECISION plan-2026-07-24T091356-f29927b4/D-001
+        # Do NOT collapse this back to a single dynamic reshape whose target
+        # carries two data-dependent tensor dims (num_windows_eff, window_len):
+        # that is the JAX-jit/XLA hazard being fixed here (concretization error /
+        # forced recompile). Prefer the STATIC sequence length so the reshape
+        # uses Python-int dims; fall back to the dynamic ``ops.shape`` path only
+        # when the static seq dim is unknown (``None``, symbolic seq length).
+        # See decisions.md D-001.
+        static_seq_len = inputs.shape[1]
 
-        # Reshape for pooling: (batch, num_windows, window_len, hidden_size)
-        reshaped = ops.reshape(
-            pooled_input, (batch_size, num_windows_eff, window_len, self.hidden_size)
-        )
-        # Summarize by mean-pooling over tokens in each window
-        window_summary = ops.mean(reshaped, axis=2)
+        if static_seq_len is not None:
+            # Static path: every window dim is a Python int; ``-1`` carries the
+            # batch axis so no data-dependent dim enters the reshape target.
+            seq_len = int(static_seq_len)
+            num_windows_eff = min(self.num_windows, seq_len)
+            window_len = seq_len // num_windows_eff
+            truncated_len = window_len * num_windows_eff
+            # NOTE: the trailing ``seq_len % num_windows_eff`` tokens are dropped
+            # from the routing SUMMARY only; the full ``inputs`` sequence still
+            # reaches the transformer at the EXECUTE/REPEAT calls below.
+            pooled_input = inputs[:, :truncated_len, :]
+            reshaped = ops.reshape(
+                pooled_input, (-1, num_windows_eff, window_len, self.hidden_size)
+            )
+            mask_window_shape = (-1, num_windows_eff, window_len)
+        else:
+            # Dynamic fallback: symbolic seq length; dims stay tensor-valued.
+            seq_len = ops.shape(inputs)[1]
+            num_windows_eff = ops.minimum(self.num_windows, seq_len)
+            window_len = seq_len // num_windows_eff
+            truncated_len = window_len * num_windows_eff
+            # NOTE: trailing ``seq_len % num_windows_eff`` tokens are dropped from
+            # the routing SUMMARY only; the full sequence still reaches the
+            # transformer at the EXECUTE/REPEAT calls below.
+            pooled_input = inputs[:, :truncated_len, :]
+            reshaped = ops.reshape(
+                pooled_input, (batch_size, num_windows_eff, window_len, self.hidden_size)
+            )
+            mask_window_shape = (batch_size, num_windows_eff, window_len)
+
+        # Summarize each window. Without a mask this is a plain windowed mean;
+        # with a mask, padded key positions are excluded so the routing decision
+        # is not biased by padding length/content.
+        if attention_mask is None:
+            window_summary = ops.mean(reshaped, axis=2)
+        else:
+            # Reduce the attention mask (MHA convention: 1=keep, 0=mask; ranks
+            # (B, S), (B, S, S), or (B, H, S, S)) to a per-key keep-vector
+            # (B, seq_len): a key is kept if ANY query/head attends to it.
+            keep = attention_mask
+            while len(keep.shape) > 2:
+                keep = ops.max(keep, axis=1)
+            keep = ops.cast(keep, reshaped.dtype)
+            keep = keep[:, :truncated_len]
+            mask_windows = ops.reshape(keep, mask_window_shape)
+            masked_sum = ops.sum(reshaped * mask_windows[..., None], axis=2)
+            counts = ops.sum(mask_windows, axis=2)[..., None]
+            # Safe denominator: a fully-masked window yields a zero summary vector.
+            window_summary = masked_sum / ops.maximum(counts, 1.0)
 
         # Pass summary through router MLP to get logits per window
         hidden = self.router_bottleneck(window_summary, training=training)
