@@ -67,6 +67,7 @@ from train.bfunet.common import DATA_MIN, DATA_MAX
 # denoiser needs (ConvNeXt blocks, Gabor stem, Laplacian pyramid, LayerScale, ...) so
 # ``keras.models.load_model`` resolves them from the serialization registry.
 import dl_techniques.models.bias_free_denoisers.bfconvunext  # noqa: F401
+import dl_techniques.models.bias_free_denoisers.bfcliffordunet  # noqa: F401
 
 # ---------------------------------------------------------------------
 # Defaults
