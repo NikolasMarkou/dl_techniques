@@ -1,0 +1,41 @@
+[
+  {
+    "model": "convunext_hfb3_ep100",
+    "dataset": "cbsd68",
+    "sigma_255": 15.0,
+    "sigma_norm": 0.058823529411764705,
+    "n": 68,
+    "psnr_mean": 33.71900404200834,
+    "psnr_ci_low": 33.24635871854712,
+    "psnr_ci_high": 34.191649365469566,
+    "psnr_std": 1.9526636600494385,
+    "input_psnr_mean": 24.60697103949154,
+    "gain_db": 9.112033002516803
+  },
+  {
+    "model": "convunext_hfb3_ep100",
+    "dataset": "cbsd68",
+    "sigma_255": 25.0,
+    "sigma_norm": 0.09803921568627451,
+    "n": 68,
+    "psnr_mean": 30.632255946888645,
+    "psnr_ci_low": 30.080595453207742,
+    "psnr_ci_high": 31.183916440569547,
+    "psnr_std": 2.2791030406951904,
+    "input_psnr_mean": 20.172639594358557,
+    "gain_db": 10.459616352530087
+  },
+  {
+    "model": "convunext_hfb3_ep100",
+    "dataset": "cbsd68",
+    "sigma_255": 50.0,
+    "sigma_norm": 0.19607843137254902,
+    "n": 68,
+    "psnr_mean": 25.8682219841901,
+    "psnr_ci_low": 25.18110878892262,
+    "psnr_ci_high": 26.55533517945758,
+    "psnr_std": 2.8387057781219482,
+    "input_psnr_mean": 14.15021702822517,
+    "gain_db": 11.71800495596493
+  }
+]

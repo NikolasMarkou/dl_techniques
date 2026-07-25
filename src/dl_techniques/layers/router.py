@@ -1,13 +1,25 @@
 """
 A dynamic routing mechanism for conditional computation.
 
-This layer introduces adaptive-depth processing into a neural network by
-wrapping a standard computational block, such as a Transformer layer. It
-addresses the inefficiency of static network architectures where every input
-is processed with the same amount of computation. By adding a lightweight
-router, this layer dynamically decides for each input whether to skip,
-execute, or repeat the wrapped block, allowing the model to allocate more
-resources to complex inputs while saving compute on simpler ones.
+This layer introduces adaptive-depth routing into a neural network by
+wrapping a standard computational block, such as a Transformer layer. For
+each input it produces a routing decision -- skip, execute, or repeat the
+wrapped block -- via a lightweight router network, exposing a per-input
+signal for a compute-aware policy that would allocate more depth to complex
+inputs and less to simpler ones.
+
+.. note::
+    **Compute cost as implemented.** This layer does NOT reduce FLOPs at
+    inference. All three paths are computed unconditionally on every forward
+    pass: SKIP is free (identity), EXECUTE runs the wrapped transformer once,
+    and REPEAT runs it a second time on the executed output. The chosen action
+    then selects among the three via a one-hot mask. Because EXECUTE and
+    REPEAT are always materialised, the layer costs approximately 2x a single
+    transformer application on every input. It provides the *routing signal*
+    for a compute-aware policy; realising actual compute savings would require
+    true per-item conditional dispatch (gather/scatter), which is
+    intentionally NOT implemented here -- an accelerator-friendly
+    select-after-compute scheme was chosen instead.
 
 Architectural and Mathematical Underpinnings:
 
@@ -38,17 +50,19 @@ block on the full, uncompressed input.
     supervision derived from a search algorithm (like MCTS) that determines
     the optimal computational path for a given task and budget.
 
-3.  **Conditional Execution**: Based on the router's decision, one of three
-    computational graphs is executed for the original input `H`:
+3.  **Select-after-compute execution**: All three candidate outputs are
+    computed for the original input `H`, and the router's decision selects
+    one of them via a one-hot mask:
     -   **SKIP**: An identity function, `f(H) = H`.
     -   **EXECUTE**: A single application of the wrapped transformer block,
         `f(H) = Transformer(H)`.
     -   **REPEAT**: A sequential double application of the block,
         `f(H) = Transformer(Transformer(H))`.
 
-    This conditional application of computation based on input characteristics
-    is the fundamental principle that enables the model to achieve a better
-    trade-off between accuracy and computational cost.
+    EXECUTE and REPEAT are evaluated on every forward pass regardless of the
+    decision (see the compute-cost note above), so the selection produces the
+    routing behaviour but does not, by itself, yield a reduction in
+    computational cost.
 
 References:
     - Heakl, A., et al. (2025). Dr.LLM: Dynamic Layer Routing in LLMs.
@@ -76,10 +90,23 @@ class RouterLayer(keras.layers.Layer):
     or **repeat** twice the wrapped ``TransformerLayer``. The decision
     is based on a windowed mean-pooling summary of the input sequence
     passed through a two-layer bottleneck MLP producing logits for
-    ``{SKIP=0, EXECUTE=1, REPEAT=2}``. During training, teacher-forced
-    decisions can be supplied; at inference, ``argmax`` is used. All
-    three computational paths are evaluated and selected via a one-hot
-    mask for hardware-accelerator-friendly execution.
+    ``{SKIP=0, EXECUTE=1, REPEAT=2}``. The decision uses the supplied
+    ``layer_decision`` whenever it is not ``None`` (regardless of
+    training/inference); otherwise ``argmax(logits)`` is used. All three
+    computational paths are always evaluated and selected via a one-hot
+    mask for hardware-accelerator-friendly execution, so the layer costs
+    approximately 2x a single transformer application on every forward pass
+    and does not by itself reduce inference FLOPs.
+
+    .. warning::
+        **The router MLP is not trained by task loss alone.** Action
+        selection is non-differentiable (``argmax`` -> one-hot), so no
+        gradient flows to the router weights from the primary task loss via
+        the returned output. The router MLP trains ONLY if the caller attaches
+        an explicit loss to the returned ``logits`` (e.g. cross-entropy
+        against teacher decisions). A caller that trains on task loss alone --
+        without supplying ``layer_decision`` and without a loss on ``logits``
+        -- leaves the router MLP at its initialization.
 
     **Architecture Overview:**
 
@@ -225,7 +252,19 @@ class RouterLayer(keras.layers.Layer):
 
         :param inputs: Input tensor ``(batch, seq_len, hidden_size)``.
         :type inputs: keras.KerasTensor
-        :param attention_mask: Optional attention mask.
+        :param attention_mask: Optional attention mask. **Must be
+            multiplicative** (``1``/``True`` = keep, ``0``/``False`` = mask),
+            matching this repo's ``MultiHeadAttention`` convention. **Additive
+            masks are NOT supported**: an additive mask (``0`` / ``-inf`` or
+            ``0`` / ``-1e9``) inverts the keep/mask sense and is multiplied into
+            the windowed sum, silently corrupting the routing summary (garbage
+            logits, no error, no NaN) — a caller holding an additive mask
+            elsewhere must convert it to a multiplicative/boolean mask before
+            passing it here. Accepted ranks are ``(B, S)``, ``(B, S, S)``, and
+            ``(B, H, S, S)``; rank-3/4 masks are reduced to a per-key keep
+            vector ``(B, S)`` by "keep a key position if ANY query/head attends
+            to it" (``ops.max`` over the query/head axes). The SAME mask is also
+            forwarded unchanged to the wrapped transformer.
         :type attention_mask: Optional[keras.KerasTensor]
         :param layer_idx: Layer index passed to the transformer.
         :type layer_idx: int
@@ -234,23 +273,80 @@ class RouterLayer(keras.layers.Layer):
         :param training: Whether in training mode.
         :type training: Optional[bool]
         :return: Tuple of (output tensor, router logits).
-        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]"""
+        :rtype: Tuple[keras.KerasTensor, keras.KerasTensor]
+
+        .. note::
+            **jit / static-shape caveat.** The static-shape (JAX-``jit`` /
+            XLA-safe) windowed-pooling path applies ONLY when the sequence
+            length is statically known -- i.e. ``inputs.shape[1]`` is a concrete
+            Python int, the normal ``keras.Input(shape=(SEQ, HID))`` case. A
+            symbolic-seq input (``keras.Input(shape=(None, HID))``) falls back to
+            the dynamic path, whose reshape target carries data-dependent tensor
+            dims and therefore does NOT carry the static-shape jit guarantee
+            (it may hit the JAX concretization error / forced XLA recompile that
+            the static path avoids)."""
         # --- 1. Router Logic: Generate decision logits ---
         batch_size = ops.shape(inputs)[0]
-        seq_len = ops.shape(inputs)[1]
 
-        # Use backend-agnostic ops for dynamic shape handling during pooling
-        num_windows_eff = ops.minimum(self.num_windows, seq_len)
-        window_len = seq_len // num_windows_eff
-        truncated_len = window_len * num_windows_eff
-        pooled_input = inputs[:, :truncated_len, :]
+        # DECISION plan-2026-07-24T091356-f29927b4/D-001
+        # Do NOT collapse this back to a single dynamic reshape whose target
+        # carries two data-dependent tensor dims (num_windows_eff, window_len):
+        # that is the JAX-jit/XLA hazard being fixed here (concretization error /
+        # forced recompile). Prefer the STATIC sequence length so the reshape
+        # uses Python-int dims; fall back to the dynamic ``ops.shape`` path only
+        # when the static seq dim is unknown (``None``, symbolic seq length).
+        # See decisions.md D-001.
+        static_seq_len = inputs.shape[1]
 
-        # Reshape for pooling: (batch, num_windows, window_len, hidden_size)
-        reshaped = ops.reshape(
-            pooled_input, (batch_size, num_windows_eff, window_len, self.hidden_size)
-        )
-        # Summarize by mean-pooling over tokens in each window
-        window_summary = ops.mean(reshaped, axis=2)
+        if static_seq_len is not None:
+            # Static path: every window dim is a Python int; ``-1`` carries the
+            # batch axis so no data-dependent dim enters the reshape target.
+            seq_len = int(static_seq_len)
+            num_windows_eff = min(self.num_windows, seq_len)
+            window_len = seq_len // num_windows_eff
+            truncated_len = window_len * num_windows_eff
+            # NOTE: the trailing ``seq_len % num_windows_eff`` tokens are dropped
+            # from the routing SUMMARY only; the full ``inputs`` sequence still
+            # reaches the transformer at the EXECUTE/REPEAT calls below.
+            pooled_input = inputs[:, :truncated_len, :]
+            reshaped = ops.reshape(
+                pooled_input, (-1, num_windows_eff, window_len, self.hidden_size)
+            )
+            mask_window_shape = (-1, num_windows_eff, window_len)
+        else:
+            # Dynamic fallback: symbolic seq length; dims stay tensor-valued.
+            seq_len = ops.shape(inputs)[1]
+            num_windows_eff = ops.minimum(self.num_windows, seq_len)
+            window_len = seq_len // num_windows_eff
+            truncated_len = window_len * num_windows_eff
+            # NOTE: trailing ``seq_len % num_windows_eff`` tokens are dropped from
+            # the routing SUMMARY only; the full sequence still reaches the
+            # transformer at the EXECUTE/REPEAT calls below.
+            pooled_input = inputs[:, :truncated_len, :]
+            reshaped = ops.reshape(
+                pooled_input, (batch_size, num_windows_eff, window_len, self.hidden_size)
+            )
+            mask_window_shape = (batch_size, num_windows_eff, window_len)
+
+        # Summarize each window. Without a mask this is a plain windowed mean;
+        # with a mask, padded key positions are excluded so the routing decision
+        # is not biased by padding length/content.
+        if attention_mask is None:
+            window_summary = ops.mean(reshaped, axis=2)
+        else:
+            # Reduce the attention mask (MHA convention: 1=keep, 0=mask; ranks
+            # (B, S), (B, S, S), or (B, H, S, S)) to a per-key keep-vector
+            # (B, seq_len): a key is kept if ANY query/head attends to it.
+            keep = attention_mask
+            while len(keep.shape) > 2:
+                keep = ops.max(keep, axis=1)
+            keep = ops.cast(keep, reshaped.dtype)
+            keep = keep[:, :truncated_len]
+            mask_windows = ops.reshape(keep, mask_window_shape)
+            masked_sum = ops.sum(reshaped * mask_windows[..., None], axis=2)
+            counts = ops.sum(mask_windows, axis=2)[..., None]
+            # Safe denominator: a fully-masked window yields a zero summary vector.
+            window_summary = masked_sum / ops.maximum(counts, 1.0)
 
         # Pass summary through router MLP to get logits per window
         hidden = self.router_bottleneck(window_summary, training=training)

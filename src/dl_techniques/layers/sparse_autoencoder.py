@@ -129,6 +129,7 @@ class SparseAutoencoder(keras.layers.Layer):
         d_latent: int,
         variant: SAEVariant = 'topk',
         k: Optional[int] = 32,
+        batch_topk_decay: float = 0.99,
         l1_coefficient: float = 1e-3,
         l0_coefficient: float = 1e-3,
         tied_weights: bool = False,
@@ -136,6 +137,7 @@ class SparseAutoencoder(keras.layers.Layer):
         use_pre_encoder_bias: bool = True,
         aux_k: Optional[int] = 256,
         aux_coefficient: float = 1/32,
+        dead_steps_threshold: int = 1000,
         kernel_initializer: Union[str, initializers.Initializer] = 'glorot_uniform',
         bias_initializer: Union[str, initializers.Initializer] = 'zeros',
         kernel_regularizer: Optional[regularizers.Regularizer] = None,
@@ -157,11 +159,30 @@ class SparseAutoencoder(keras.layers.Layer):
                 f"k must be a positive integer for variant '{variant}', got {k}"
             )
 
+        # Validate dimensions and auxiliary-loss width
+        if d_input <= 0:
+            raise ValueError(
+                f"d_input must be a positive integer, got {d_input}"
+            )
+        if d_latent <= 0:
+            raise ValueError(
+                f"d_latent must be a positive integer, got {d_latent}"
+            )
+        # NOTE: the aux_k > d_latent upper bound is intentionally NOT enforced
+        # here — the default aux_k=256 exceeds small d_latent (e.g. the tests'
+        # d_latent=20) and _compute_auxiliary_loss already clamps at use via
+        # min(aux_k, d_latent). Only the genuine error (non-positive) is caught.
+        if aux_k is not None and aux_k <= 0:
+            raise ValueError(
+                f"aux_k must be a positive integer, got {aux_k}"
+            )
+
         # Store configuration
         self.d_input = d_input
         self.d_latent = d_latent
         self.variant = variant
         self.k = k
+        self.batch_topk_decay = batch_topk_decay
         self.l1_coefficient = l1_coefficient
         self.l0_coefficient = l0_coefficient
         self.tied_weights = tied_weights
@@ -169,6 +190,7 @@ class SparseAutoencoder(keras.layers.Layer):
         self.use_pre_encoder_bias = use_pre_encoder_bias
         self.aux_k = aux_k
         self.aux_coefficient = aux_coefficient
+        self.dead_steps_threshold = dead_steps_threshold
 
         # Store initializers/regularizers
         self.kernel_initializer = initializers.get(kernel_initializer)
@@ -184,6 +206,8 @@ class SparseAutoencoder(keras.layers.Layer):
         self.threshold: Optional[keras.Variable] = None
         self.gate_weight: Optional[keras.Variable] = None
         self.gate_bias: Optional[keras.Variable] = None
+        self.batch_topk_threshold: Optional[keras.Variable] = None
+        self.dead_steps: Optional[keras.Variable] = None
 
     def build(self, input_shape: Tuple[Optional[int], ...]) -> None:
         """
@@ -254,6 +278,15 @@ class SparseAutoencoder(keras.layers.Layer):
                 trainable=True,
                 constraint=constraints.NonNeg()
             )
+        elif self.variant == 'batch_topk':
+            # Non-trainable EMA of the batch-relative top-k threshold. Updated
+            # during training and used verbatim at inference (see D-002).
+            self.batch_topk_threshold = self.add_weight(
+                name='batch_topk_threshold',
+                shape=(),
+                initializer='zeros',
+                trainable=False,
+            )
         elif self.variant == 'gated':
             # Separate gating network
             self.gate_weight = self.add_weight(
@@ -268,6 +301,24 @@ class SparseAutoencoder(keras.layers.Layer):
                 shape=(self.d_latent,),
                 initializer=self.bias_initializer,
                 trainable=True
+            )
+
+        # Non-trainable per-latent counter of consecutive training steps a
+        # latent has not fired. Drives stateful dead-latent detection in the
+        # AuxK auxiliary loss (persists across .keras round-trip; not in config).
+        # The 'gated' variant uses the frozen-decoder L_aux (computed inline in
+        # _call_gated) and never touches the AuxK dead-latent path, so it does
+        # not allocate dead_steps.
+        if (
+            self.aux_k is not None
+            and self.aux_k > 0
+            and self.variant != 'gated'
+        ):
+            self.dead_steps = self.add_weight(
+                name='dead_steps',
+                shape=(self.d_latent,),
+                initializer='zeros',
+                trainable=False,
             )
 
         super().build(input_shape)
@@ -288,11 +339,18 @@ class SparseAutoencoder(keras.layers.Layer):
 
     def _normalize_decoder_columns(self, decoder_weight: keras.Variable) -> keras.Variable:
         """
-        Normalize decoder columns to unit norm.
+        Normalize each latent's decoder vector to unit L2 norm.
+
+        The decoder weight has shape ``(d_latent, d_input)``, so ``axis=-1``
+        normalizes each ROW ``decoder_weight[i, :]`` — i.e. the decoder /
+        dictionary vector for latent ``i`` — to unit norm. This is the standard
+        SAE dictionary-atom convention (each latent maps to a unit-norm direction
+        in input space). Despite the method name, these are per-latent ROWS of
+        this ``(d_latent, d_input)`` layout, not columns.
 
         :param decoder_weight: Decoder weight matrix of shape ``(d_latent, d_input)``.
         :type decoder_weight: keras.Variable
-        :return: Normalized decoder weight matrix.
+        :return: Decoder weight with each latent's row normalized to unit L2 norm.
         :rtype: keras.Variable
         """
         if not self.normalize_decoder:
@@ -352,8 +410,6 @@ class SparseAutoencoder(keras.layers.Layer):
             return self._apply_batch_topk_sparsity(pre_activation, training)
         elif self.variant == 'jumprelu':
             return self._apply_jumprelu_sparsity(pre_activation)
-        elif self.variant == 'gated':
-            return self._apply_gated_sparsity(pre_activation)
         else:
             raise ValueError(f"Unknown variant: {self.variant}")
 
@@ -439,6 +495,11 @@ class SparseAutoencoder(keras.layers.Layer):
         Allows variable number of active latents per sample while
         maintaining average sparsity across the batch.
 
+        Inference (``training=False``) masks with the STORED EMA threshold,
+        which is seeded directly with the batch threshold on the first training
+        step and smoothed thereafter via ``batch_topk_decay`` (avoids hundreds
+        of steps of under-sparse inference while the EMA ramps up from zero).
+
         :param pre_activation: Pre-activation tensor of shape ``(..., d_latent)``.
         :type pre_activation: keras.KerasTensor
         :param training: Training mode flag.
@@ -456,17 +517,41 @@ class SparseAutoencoder(keras.layers.Layer):
         # Apply ReLU first
         relu_act = ops.relu(flat_pre_act)
 
-        # Flatten entire batch for batch-level TopK
-        fully_flat = ops.reshape(relu_act, [-1])
-        total_elements = batch_size * self.d_latent
-        batch_k = batch_size * self.k
+        if training:
+            # Training: compute the batch-relative threshold (k-th largest across
+            # the entire batch) and use it for THIS pass's mask (paper behavior).
+            fully_flat = ops.reshape(relu_act, [-1])
+            batch_k = batch_size * self.k  # dynamic int under eager scope (A6)
+            top_values, _ = ops.top_k(fully_flat, k=batch_k)
+            batch_threshold = top_values[-1]
+            # Cold-start: if the stored threshold is still 0 (first training
+            # step), seed it with the batch threshold instead of EMA-blending up
+            # from zero — otherwise inference stays under-sparse for hundreds of
+            # steps while the EMA ramps. Thereafter smooth via `batch_topk_decay`.
+            stored = self.batch_topk_threshold
+            seed = ops.cast(stored <= 0.0, stored.dtype)  # 1.0 first step, else 0.0
+            ema = (
+                self.batch_topk_decay * stored
+                + (1.0 - self.batch_topk_decay) * batch_threshold
+            )
+            self.batch_topk_threshold.assign(
+                seed * batch_threshold + (1.0 - seed) * ema
+            )
+            threshold = batch_threshold
+        else:
+            # DECISION plan-2026-07-24T071243-9325b386/D-002: at inference use the STORED
+            # EMA threshold, never recompute from the batch — recomputing makes a
+            # fixed example's output depend on its batch-mates (invariant #1). See
+            # decisions.md D-002.
+            threshold = self.batch_topk_threshold
 
-        # Get threshold value (k-th largest across entire batch)
-        top_values, _ = ops.top_k(fully_flat, k=batch_k)
-        threshold = top_values[-1]
-
-        # Create mask for values above threshold
-        mask = ops.cast(relu_act >= threshold, relu_act.dtype)
+        # Mask requires meeting the threshold AND strict positivity, so a
+        # threshold of 0 (early training / empty EMA) does not select every
+        # non-negative latent (zero-threshold edge fix).
+        mask = ops.cast(
+            ops.logical_and(relu_act >= threshold, relu_act > 0),
+            relu_act.dtype,
+        )
         latents_flat = relu_act * mask
 
         # Reshape back
@@ -481,24 +566,39 @@ class SparseAutoencoder(keras.layers.Layer):
         pre_activation: keras.KerasTensor
     ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
         """
-        Apply JumpReLU activation with learnable threshold.
+        Apply JumpReLU activation with a learnable per-latent threshold.
 
-        JumpReLU: ``f(x) = x * (x > theta)``, where theta is learnable.
-        Uses straight-through estimator for gradient through discontinuity.
+        **Actual mechanism (what this code does):**
+
+        - *Forward*: a hard gate ``f(x) = x * (x > theta)`` with a learnable,
+          ``NonNeg``-constrained per-latent threshold ``theta`` (``self.threshold``).
+        - *Backward*: this is ORDINARY autodiff through a ``cast`` + multiply.
+          The mask ``cast(x > theta)`` is gradient-blocked, so the encoder
+          receives gradient only through the currently-active (above-threshold)
+          latents — exactly like a hard ReLU gate. There is NO custom-gradient
+          mechanism here.
+        - ``theta`` receives ZERO gradient from the reconstruction path (the
+          comparison/cast blocks it); it is trained SOLELY by the separate
+          sigmoid-surrogate L0 penalty term (``sigmoid((x - theta) * steepness)``)
+          returned as the sparsity loss below.
+
+        **Deviation from the paper.** This differs from Rajamanoharan et al.
+        (2024) "Jumping Ahead", whose JumpReLU uses a kernel-density-estimator
+        surrogate gradient for the threshold, giving ``theta`` a
+        reconstruction-fidelity gradient in addition to the L0 signal. That
+        surrogate-gradient mechanism is intentionally NOT implemented here: it
+        would be a net-new custom-gradient path, out of scope for this reference
+        layer. The existing L0-surrogate already trains ``theta``; the deviation
+        is documented rather than silently misrepresented.
 
         :param pre_activation: Pre-activation tensor.
         :type pre_activation: keras.KerasTensor
         :return: Tuple of (JumpReLU activations, approximated L0 sparsity loss).
         :rtype: tuple[keras.KerasTensor, keras.KerasTensor]
         """
-        # JumpReLU: zero out values below threshold, keep values above
-        # mask = (pre_activation > threshold)
-        # output = pre_activation * mask
-
-        # For gradient flow, we use straight-through estimator:
-        # Forward: discontinuous step
-        # Backward: smooth approximation
-
+        # Hard gate: keep values strictly above the learnable threshold, zero the
+        # rest. The cast blocks gradient to `self.threshold` (see docstring) — the
+        # encoder still receives gradient through the surviving (unmasked) latents.
         # Forward pass mask
         mask = ops.cast(pre_activation > self.threshold, pre_activation.dtype)
 
@@ -514,66 +614,43 @@ class SparseAutoencoder(keras.layers.Layer):
 
         return latents, l0_loss
 
-    def _apply_gated_sparsity(
-        self,
-        pre_activation: keras.KerasTensor
-    ) -> Tuple[keras.KerasTensor, keras.KerasTensor]:
-        """
-        Apply Gated SAE sparsity mechanism.
-
-        Separates feature detection (gate) from magnitude estimation (encoder).
-
-        :param pre_activation: Pre-activation tensor from main encoder.
-        :type pre_activation: keras.KerasTensor
-        :return: Tuple of (gated sparse latents, L1 loss on gate activations).
-        :rtype: tuple[keras.KerasTensor, keras.KerasTensor]
-        """
-        # We need the original centered input for gating
-        # This is stored during encode, but we recompute for cleaner code
-        # In practice, you might want to cache this
-
-        # Gate pre-activations (computed from same centered input)
-        # Note: This requires access to centered input, which we handle
-        # by computing gate in the main call() method
-
-        # For now, use encoder pre-activation for gating decision
-        # This is a simplified version; full implementation would have
-        # separate gating path
-
-        gate_logits = pre_activation  # Simplified; see full implementation below
-        gate = ops.sigmoid(gate_logits)
-
-        # Magnitude from ReLU of pre-activation
-        magnitude = ops.relu(pre_activation)
-
-        # Gated output
-        latents = magnitude * gate
-
-        # L1 on gate activations
-        l1_loss = self.l1_coefficient * ops.mean(ops.sum(gate, axis=-1))
-
-        return latents, l1_loss
-
     def decode(
         self,
-        latents: keras.KerasTensor
+        latents: keras.KerasTensor,
+        freeze: bool = False
     ) -> keras.KerasTensor:
         """
         Decode sparse latents back to input space.
 
         :param latents: Sparse latent tensor of shape ``(..., d_latent)``.
         :type latents: keras.KerasTensor
+        :param freeze: When True, the decoder weight and all reconstruction
+            biases are wrapped in ``stop_gradient`` so no gradient flows to the
+            decoder parameters through this path (used by the Gated ``L_aux``,
+            which must isolate the reconstruction gradient to the gate encoder).
+            The default (``False``) path is behaviorally identical to a plain
+            decode. Defaults to False.
+        :type freeze: bool
         :return: Reconstructed tensor of shape ``(..., d_input)``.
         :rtype: keras.KerasTensor
         """
         decoder_weight = self._get_decoder_weight()
         decoder_weight = self._normalize_decoder_columns(decoder_weight)
+        if freeze:
+            decoder_weight = ops.stop_gradient(decoder_weight)
 
-        reconstruction = ops.matmul(latents, decoder_weight) + self.decoder_bias
+        decoder_bias = (
+            ops.stop_gradient(self.decoder_bias) if freeze else self.decoder_bias
+        )
+        reconstruction = ops.matmul(latents, decoder_weight) + decoder_bias
 
         # Add back pre-encoder bias
         if self.use_pre_encoder_bias:
-            reconstruction = reconstruction + self.pre_encoder_bias
+            pre_bias = (
+                ops.stop_gradient(self.pre_encoder_bias)
+                if freeze else self.pre_encoder_bias
+            )
+            reconstruction = reconstruction + pre_bias
 
         return reconstruction
 
@@ -581,31 +658,62 @@ class SparseAutoencoder(keras.layers.Layer):
         self,
         pre_activation: keras.KerasTensor,
         latents: keras.KerasTensor,
-        inputs: keras.KerasTensor
+        inputs: keras.KerasTensor,
+        main_reconstruction: keras.KerasTensor,
+        training: Optional[bool] = None
     ) -> keras.KerasTensor:
         """
-        Compute auxiliary loss to prevent dead latents.
+        Compute auxiliary loss to prevent dead latents (OpenAI AuxK).
 
-        Reconstructs using the top aux_k dead (inactive) latents
-        to encourage their activation.
+        Reconstructs the *residual* the live latents failed to explain using
+        the top ``aux_k`` dead latents, encouraging dead latents to specialize
+        on what the main reconstruction misses. "Dead" is determined by a
+        stateful per-latent counter (``dead_steps``): a latent that has not
+        fired for more than ``dead_steps_threshold`` training steps is dead.
 
-        :param pre_activation: Pre-activation tensor.
+        :param pre_activation: Pre-activation tensor of shape ``(..., d_latent)``.
         :type pre_activation: keras.KerasTensor
-        :param latents: Current sparse latents.
+        :param latents: Current sparse latents of shape ``(..., d_latent)``.
         :type latents: keras.KerasTensor
-        :param inputs: Original input for computing reconstruction error.
+        :param inputs: Original input of shape ``(..., d_input)``.
         :type inputs: keras.KerasTensor
+        :param main_reconstruction: Reconstruction from the main (live) latents,
+            of shape ``(..., d_input)``.
+        :type main_reconstruction: keras.KerasTensor
+        :param training: Training mode flag. When truthy, the ``dead_steps``
+            counter is updated in place.
+        :type training: bool or None
         :return: Auxiliary reconstruction loss.
         :rtype: keras.KerasTensor
         """
         if self.aux_k is None or self.aux_k <= 0:
             return ops.zeros(())
 
-        # Find dead latents (currently zero)
-        is_dead = ops.cast(ops.abs(latents) < 1e-8, pre_activation.dtype)
+        # DECISION plan-2026-07-24T071243-9325b386/D-003: target the main-reconstruction residual, NOT the raw input (OpenAI AuxK) — dead latents specialize on what live latents miss. See decisions.md D-003.
+        residual = ops.stop_gradient(inputs - main_reconstruction)
 
-        # Get pre-activations of dead latents only
-        dead_pre_act = pre_activation * is_dead
+        # Stateful dead-latent detection: which latents fired THIS batch,
+        # reduced over all leading (batch) axes to shape (d_latent,).
+        flat_latents = ops.reshape(latents, (-1, self.d_latent))
+        fired = ops.max(
+            ops.cast(ops.abs(flat_latents) > 1e-8, self.dead_steps.dtype),
+            axis=0,
+        )
+        if training:
+            new_dead_steps = ops.where(
+                fired > 0,
+                ops.zeros_like(self.dead_steps),
+                self.dead_steps + 1.0,
+            )
+            self.dead_steps.assign(new_dead_steps)
+
+        # A latent is dead if it has not fired for more than the threshold.
+        is_dead_vec = ops.cast(
+            self.dead_steps > self.dead_steps_threshold, pre_activation.dtype
+        )
+
+        # Get pre-activations of dead latents only (broadcast over batch axes)
+        dead_pre_act = pre_activation * is_dead_vec
 
         # Apply ReLU to dead pre-activations
         dead_relu = ops.relu(dead_pre_act)
@@ -641,8 +749,8 @@ class SparseAutoencoder(keras.layers.Layer):
         # Decode auxiliary latents
         aux_reconstruction = self.decode(aux_latents)
 
-        # Auxiliary reconstruction error
-        aux_error = ops.mean(ops.square(inputs - aux_reconstruction))
+        # Auxiliary reconstruction error against the residual (AuxK)
+        aux_error = ops.mean(ops.square(residual - aux_reconstruction))
 
         return self.aux_coefficient * aux_error
 
@@ -665,6 +773,23 @@ class SparseAutoencoder(keras.layers.Layer):
         :return: Reconstructed tensor if return_latents is False, otherwise
             tuple of (reconstruction, latents, total_loss).
         :rtype: keras.KerasTensor or tuple
+
+        **Return-shape contract.** With ``return_latents=False`` (the default)
+        this returns *only* the ``reconstruction`` tensor. With
+        ``return_latents=True`` it returns the tuple
+        ``(reconstruction, latents, total_loss)``, where ``total_loss`` is the
+        SAME scalar (``sparsity_loss + aux_loss``) that has already been
+        registered on the layer via ``self.add_loss(...)`` on this same call —
+        it is exposed purely for inspection/debugging. The auxiliary + sparsity
+        training signal is added to ``self.losses`` on EVERY forward pass,
+        regardless of ``return_latents``; the flag controls only the return
+        shape, never whether the model is trained. Callers using stock
+        ``keras`` ``fit()`` should therefore rely on ``model.losses`` (which
+        already includes this scalar) and must NOT also add the returned
+        ``total_loss`` to their own loss, or the aux/sparsity term is
+        double-counted. The return type deliberately varies by flag — this is
+        the idiomatic Keras "add_loss + optional aux outputs" pattern, not an
+        inconsistency.
         """
         # Handle Gated variant specially (needs centered input for gate)
         if self.variant == 'gated':
@@ -679,16 +804,27 @@ class SparseAutoencoder(keras.layers.Layer):
         # Decode
         reconstruction = self.decode(latents)
 
-        if not return_latents:
-            # Add losses to layer
-            self.add_loss(sparsity_loss)
-            return reconstruction
+        # Compute auxiliary loss unconditionally — it is a TRAINING signal, not
+        # an output-format concern. _compute_auxiliary_loss early-returns
+        # ops.zeros(()) when aux_k is disabled, so this is cheap when unused.
+        aux_loss = self._compute_auxiliary_loss(
+            pre_activation, latents, inputs, reconstruction, training
+        )
 
-        # Compute auxiliary loss
-        aux_loss = self._compute_auxiliary_loss(pre_activation, latents, inputs)
-
+        # DECISION plan-2026-07-24T071243-9325b386/D-005: add the aux+sparsity loss to
+        # self.losses on EVERY forward pass, independent of return_latents.
+        # Gating add_loss on an output-format flag (as before) meant the
+        # dead-latent aux only trained the model when the caller happened to
+        # request the tuple — a bug. return_latents controls ONLY the return
+        # shape. The returned total_loss is the SAME scalar registered here
+        # (inspection only); callers under fit() rely on model.losses and must
+        # NOT re-sum it, or it double-counts. Do NOT move add_loss back inside
+        # the return_latents branch. See decisions.md D-005.
         total_loss = sparsity_loss + aux_loss
         self.add_loss(total_loss)
+
+        if not return_latents:
+            return reconstruction
 
         return reconstruction, latents, total_loss
 
@@ -701,7 +837,16 @@ class SparseAutoencoder(keras.layers.Layer):
         """
         Forward pass for Gated SAE variant.
 
-        Implements full gated architecture with separate detection and magnitude.
+        Implements the gated architecture with separate detection (gate) and
+        magnitude encoders. The gate encoder receives a reconstruction-quality
+        gradient via the paper's frozen-decoder auxiliary loss ``L_aux``
+        (Rajamanoharan et al. 2024): ``relu(gate_pre)`` is routed through a
+        decoder whose weight/biases are ``stop_gradient``-frozen and compared to
+        the raw input, so ``gate_weight``/``gate_bias`` learn whether opening a
+        gate helps reconstruction (the hard Heaviside gate mask itself blocks
+        that gradient). Deviation from the paper: the magnitude and gate encoders
+        are kept UNTIED (no ``W_mag = exp(r) * W_gate`` weight-tying) — out of
+        scope; documented as a deliberate simplification.
 
         :param inputs: Input activations.
         :type inputs: keras.KerasTensor
@@ -741,15 +886,33 @@ class SparseAutoencoder(keras.layers.Layer):
         # Decode
         reconstruction = self.decode(latents)
 
-        if not return_latents:
-            self.add_loss(sparsity_loss)
-            return reconstruction
+        # Gated SAE auxiliary loss (Rajamanoharan et al. 2024):
+        # route the gate's ReLU pre-activations through a FROZEN decoder and
+        # reconstruct the input, giving the gate encoder a fidelity gradient.
+        # DECISION plan-2026-07-24T071243-9325b386/D-004: the gate encoder needs a
+        # reconstruction gradient that the hard gate-mask (cast(sigmoid>0.5))
+        # blocks; freezing the decoder (stop_gradient on weight+biases) isolates
+        # that signal to gate_weight/gate_bias WITHOUT moving the decoder. Do NOT
+        # use the AuxK dead-latent residual here (that is the non-gated variants'
+        # loss) and do NOT drop the freeze (a live decoder would let this term
+        # train the decoder instead of the gate). Encoder weight-tying
+        # (W_mag = exp(r)*W_gate) is deliberately NOT implemented (out of scope;
+        # untied encoders are a documented deviation). See decisions.md D-004.
+        gate_relu = ops.relu(gate_pre)
+        aux_reconstruction = self.decode(gate_relu, freeze=True)
+        aux_loss = self.aux_coefficient * ops.mean(
+            ops.square(inputs - aux_reconstruction)
+        )
 
-        # Auxiliary loss for dead latents
-        aux_loss = self._compute_auxiliary_loss(magnitude_pre, latents, inputs)
-
+        # Add aux+sparsity to self.losses unconditionally (see call() D-005):
+        # the L_aux training signal must not depend on return_latents. Exactly
+        # one add_loss per forward pass; the returned total_loss is the SAME
+        # scalar (inspection only — do not re-sum under fit()).
         total_loss = sparsity_loss + aux_loss
         self.add_loss(total_loss)
+
+        if not return_latents:
+            return reconstruction
 
         return reconstruction, latents, total_loss
 
@@ -780,6 +943,7 @@ class SparseAutoencoder(keras.layers.Layer):
             'd_latent': self.d_latent,
             'variant': self.variant,
             'k': self.k,
+            'batch_topk_decay': self.batch_topk_decay,
             'l1_coefficient': self.l1_coefficient,
             'l0_coefficient': self.l0_coefficient,
             'tied_weights': self.tied_weights,
@@ -787,6 +951,7 @@ class SparseAutoencoder(keras.layers.Layer):
             'use_pre_encoder_bias': self.use_pre_encoder_bias,
             'aux_k': self.aux_k,
             'aux_coefficient': self.aux_coefficient,
+            'dead_steps_threshold': self.dead_steps_threshold,
             'kernel_initializer': initializers.serialize(self.kernel_initializer),
             'bias_initializer': initializers.serialize(self.bias_initializer),
             'kernel_regularizer': regularizers.serialize(self.kernel_regularizer),
