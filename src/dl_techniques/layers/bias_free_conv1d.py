@@ -268,7 +268,7 @@ class BiasFreeResidualBlock1D(keras.layers.Layer):
         │ (1x1 or   │  │        │
         │ identity) │  │        │
         └─────┬─────┘  └───┬────┘
-              └──────┬──────┘
+              └──────┬─────┘
                      ▼
               ┌──────────────┐
               │   Add + Act  │

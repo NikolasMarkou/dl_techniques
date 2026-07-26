@@ -99,7 +99,7 @@ class HopfieldAttention(keras.layers.Layer):
         [B,H,Sq,Dk] [B,H,Sk,Dk] [B,H,Sk,Dv]
               │           │           │
               ▼           ▼           │
-        (Optional LayerNorm)         │
+        (Optional LayerNorm)          │
               │           │           │
               ▼           ▼           ▼
         ┌─────────────────────────────────┐
