@@ -68,8 +68,6 @@ import keras
 from typing import Optional, Union, Tuple, Any, Dict
 from keras import ops, layers, initializers, regularizers
 
-from dl_techniques.utils.logger import logger
-
 # ---------------------------------------------------------------------
 
 # Feature maps allowed here are exactly the positively-homogeneous, non-negative
