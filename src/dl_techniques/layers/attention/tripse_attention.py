@@ -8,13 +8,52 @@ Combines Triplet Attention with Squeeze-and-Excitation to create 3D attention
 that captures inter-dimensional relationships (from Triplet Attention) and
 global channel importance (from SE).
 
-Four variants are provided:
+Architecture:
+    Every variant is built from the same two primitives, differing only in
+    *where* the SE block is inserted relative to the triplet branches:
 
-- **TripSE1**: SE block after branch summation (Post-fusion SE).
-- **TripSE2**: SE block at beginning of each branch (Pre-process SE).
-- **TripSE3**: SE blocks embedded within branches (Parallel SE).
-- **TripSE4**: Hybrid with affine combination of spatial and channel
-  descriptors (3D Attention).
+    1.  **Rotation + Z-Pool (the "triplet" part).** A 4D input ``(B, H, W, C)``
+        is transposed so that a chosen pair of axes occupies the spatial slots,
+        then reduced along the trailing axis by concatenating its mean and its
+        max — "Z-pooling" — to ``(B, D1, D2, 2)``. A ``k x k`` convolution,
+        batch norm and a sigmoid turn that into an attention map, which is
+        broadcast-multiplied onto the rotated tensor before the inverse
+        permutation restores the original axis order. Three fixed permutations
+        cover the three axis pairs: ``(0,1,2)`` = H-W, ``(0,2,1)`` = C-W,
+        ``(2,1,0)`` = H-C. Rotating is what lets a *2D* convolution see
+        channel-spatial interaction at all.
+
+    2.  **Squeeze-and-Excitation (the "SE" part).** Global average pooling to
+        ``(B, 1, 1, C)`` followed by a bottleneck MLP produces per-channel
+        gates. This is the package's shared
+        :class:`~dl_techniques.layers.squeeze_excitation.SqueezeExcitation`
+        layer, reused rather than re-implemented.
+
+    The four variants place (2) differently with respect to (1):
+
+    - **TripSE1**: SE block after branch summation (Post-fusion SE).
+    - **TripSE2**: SE block at beginning of each branch (Pre-process SE).
+    - **TripSE3**: SE blocks embedded within branches (Parallel SE).
+    - **TripSE4**: Hybrid with affine combination of spatial and channel
+      descriptors (3D Attention).
+
+Foundational Mathematics:
+    Writing ``Z(x) = [mean_c(x); max_c(x)]`` for Z-pooling and ``P_i`` for the
+    i-th axis permutation, one triplet branch is::
+
+        b_i(x) = P_i^-1 [ P_i x ⊗ σ(BN(Conv_k(Z(P_i x)))) ]
+
+    TripSE1 fuses by summation then gates channels: ``SE(Σ_i b_i(x))``. TripSE2
+    and TripSE3 average their branches instead (``(1/3) Σ_i``). TripSE4 is the
+    only variant that forms a genuinely **3D** gate: rather than multiplying a
+    spatial map ``(B, D1, D2, 1)`` by a channel map ``(B, 1, 1, D3)``, it adds
+    their *logits* and applies one sigmoid::
+
+        a_i(x) = σ( BN(Conv_k(Z(P_i x)))  +  SElogits(P_i x) )   → (B, D1, D2, D3)
+
+    Adding in the logit domain is not the same operation as multiplying two
+    sigmoids, which is why TripSE4 needs :class:`_SEWeights` (pre-sigmoid
+    logits) instead of the standard SE layer (post-sigmoid product).
 
 References:
     - Alhazmi, A., & Altahhan, A. (2025). "Achieving 3D Attention via Triplet
@@ -96,6 +135,17 @@ class TripletAttentionBranch(layers.Layer):
     :type kernel_initializer: str
     :param kernel_regularizer: Regularizer for convolution kernels.
     :type kernel_regularizer: Optional[Any]
+    :param gate_activation_type: Activation producing the branch attention map,
+        resolved through
+        :func:`~dl_techniques.layers.activations.resolve_activation_layer`.
+        Defaults to ``'sigmoid'``, which is what bounds the map to ``[0, 1]``.
+    :type gate_activation_type: str
+    :param gate_activation_args: Optional keyword arguments forwarded to the
+        gate activation layer's constructor. Defaults to ``None``.
+    :type gate_activation_args: Optional[Dict[str, Any]]
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
+
+    :raises ValueError: From ``build()``, if the input shape is not 4D.
     """
 
     def __init__(
@@ -107,8 +157,8 @@ class TripletAttentionBranch(layers.Layer):
         kernel_regularizer: Optional[Any] = None,
         gate_activation_type: str = "sigmoid",
         gate_activation_args: Optional[Dict[str, Any]] = None,
-        **kwargs
-    ):
+        **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         self.kernel_size = kernel_size
         self.permute_pattern = permute_pattern
@@ -225,7 +275,7 @@ class TripletAttentionBranch(layers.Layer):
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         return input_shape
 
-    def get_config(self) -> dict:
+    def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({
             "kernel_size": self.kernel_size,
@@ -286,6 +336,16 @@ class TripSE1(layers.Layer):
     :type kernel_initializer: str
     :param kernel_regularizer: Kernel weight regularizer.
     :type kernel_regularizer: Optional[Any]
+    :param gate_activation_type: Activation producing each branch's attention
+        gate, resolved through
+        :func:`~dl_techniques.layers.activations.resolve_activation_layer` and
+        shared by all three branches. Defaults to ``'sigmoid'``, which is what
+        bounds the gate to ``[0, 1]``.
+    :type gate_activation_type: str
+    :param gate_activation_args: Optional keyword arguments forwarded to each
+        gate activation layer's constructor. Defaults to ``None``.
+    :type gate_activation_args: Optional[Dict[str, Any]]
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
     """
 
     def __init__(
@@ -297,8 +357,8 @@ class TripSE1(layers.Layer):
         kernel_regularizer: Optional[Any] = None,
         gate_activation_type: str = "sigmoid",
         gate_activation_args: Optional[Dict[str, Any]] = None,
-        **kwargs
-    ):
+        **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         self.reduction_ratio = reduction_ratio
         self.kernel_size = kernel_size
@@ -375,7 +435,7 @@ class TripSE1(layers.Layer):
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         return input_shape
 
-    def get_config(self) -> dict:
+    def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({
             "reduction_ratio": self.reduction_ratio,
@@ -435,6 +495,16 @@ class TripSE2(layers.Layer):
     :type kernel_initializer: str
     :param kernel_regularizer: Kernel weight regularizer.
     :type kernel_regularizer: Optional[Any]
+    :param gate_activation_type: Activation producing each branch's attention
+        gate, resolved through
+        :func:`~dl_techniques.layers.activations.resolve_activation_layer` and
+        shared by all three branches. Defaults to ``'sigmoid'``, which is what
+        bounds the gate to ``[0, 1]``.
+    :type gate_activation_type: str
+    :param gate_activation_args: Optional keyword arguments forwarded to each
+        gate activation layer's constructor. Defaults to ``None``.
+    :type gate_activation_args: Optional[Dict[str, Any]]
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
     """
 
     def __init__(
@@ -446,8 +516,8 @@ class TripSE2(layers.Layer):
         kernel_regularizer: Optional[Any] = None,
         gate_activation_type: str = "sigmoid",
         gate_activation_args: Optional[Dict[str, Any]] = None,
-        **kwargs
-    ):
+        **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         self.reduction_ratio = reduction_ratio
         self.kernel_size = kernel_size
@@ -458,6 +528,22 @@ class TripSE2(layers.Layer):
         self.gate_activation_args = gate_activation_args
 
         # We need distinct SE and Conv blocks for each branch because shapes differ
+        #
+        # R13 cross-reference: TripSE2, TripSE3 and TripSE4 each re-implement the
+        # permute / Z-pool / conv / BN / gate / inverse-permute sequence inline rather
+        # than composing `TripletAttentionBranch` (which TripSE1 does reuse). This is
+        # NOT accidental copy-paste and must not be "cleaned up" by swapping in the
+        # branch class: each variant splices the SE block into a DIFFERENT point of
+        # that sequence, and `TripletAttentionBranch` exposes no seam there.
+        #   * TripSE2 inserts SE between the permute and the Z-pool, so the Z-pool must
+        #     see SE-refined features (`x_se`), not the raw permuted input.
+        #   * TripSE3 runs SE and the spatial path in parallel off the same permuted
+        #     input, then multiplies the two results.
+        #   * TripSE4 needs the spatial path's PRE-sigmoid logits so it can add them to
+        #     `_SEWeights` logits; the branch class returns a post-gate product.
+        # Refactoring these into one parameterized branch would either change op order
+        # or produce a leaky abstraction with a mode flag per variant. Left duplicated,
+        # deliberately.
         self._patterns = [(0, 1, 2), (0, 2, 1), (2, 1, 0)]
         self._suffixes = ["hw", "cw", "hc"]
 
@@ -559,7 +645,7 @@ class TripSE2(layers.Layer):
         """Output shape equals input shape (attention preserves dimensions)."""
         return input_shape
 
-    def get_config(self) -> dict:
+    def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({
             "reduction_ratio": self.reduction_ratio,
@@ -621,6 +707,16 @@ class TripSE3(layers.Layer):
     :type kernel_initializer: str
     :param kernel_regularizer: Kernel weight regularizer.
     :type kernel_regularizer: Optional[Any]
+    :param gate_activation_type: Activation producing each branch's attention
+        gate, resolved through
+        :func:`~dl_techniques.layers.activations.resolve_activation_layer` and
+        shared by all three branches. Defaults to ``'sigmoid'``, which is what
+        bounds the gate to ``[0, 1]``.
+    :type gate_activation_type: str
+    :param gate_activation_args: Optional keyword arguments forwarded to each
+        gate activation layer's constructor. Defaults to ``None``.
+    :type gate_activation_args: Optional[Dict[str, Any]]
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
     """
 
     def __init__(
@@ -632,8 +728,8 @@ class TripSE3(layers.Layer):
         kernel_regularizer: Optional[Any] = None,
         gate_activation_type: str = "sigmoid",
         gate_activation_args: Optional[Dict[str, Any]] = None,
-        **kwargs
-    ):
+        **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         self.reduction_ratio = reduction_ratio
         self.kernel_size = kernel_size
@@ -744,7 +840,7 @@ class TripSE3(layers.Layer):
         """Output shape equals input shape (attention preserves dimensions)."""
         return input_shape
 
-    def get_config(self) -> dict:
+    def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({
             "reduction_ratio": self.reduction_ratio,
@@ -768,6 +864,18 @@ class _SEWeights(layers.Layer):
     returns the pre-sigmoid logits of shape ``(B, 1, 1, C)`` instead of
     the full ``x * sigmoid(logits)`` product. This allows TripSE4 to fuse
     spatial and channel logits in the logit domain before activation.
+
+    **Deliberately private.** The leading underscore is load-bearing: this class
+    is not exported from ``attention/__init__.py``, not registered in
+    ``attention/factory.py``, and has no public consumer outside
+    :class:`TripSE4`. It is *not* a substitute for
+    :class:`~dl_techniques.layers.squeeze_excitation.SqueezeExcitation` — it
+    stops one step short of it on purpose, and using it as a general SE block
+    would silently drop the gating. It nonetheless carries
+    ``@keras.saving.register_keras_serializable()`` because it is a real
+    sub-layer of a serializable layer and must resolve when a TripSE4 ``.keras``
+    checkpoint is loaded; do not remove that decorator on the grounds that the
+    class is private.
 
     **Architecture Overview:**
 
@@ -795,13 +903,18 @@ class _SEWeights(layers.Layer):
     :type reduction_ratio: float
     :param activation: Activation inside the bottleneck.
     :type activation: str
+    :param activation_args: Optional keyword arguments forwarded to the
+        bottleneck activation layer's constructor. Defaults to ``None``.
+    :type activation_args: Optional[Dict[str, Any]]
     :param use_bias: Whether convolutions use bias.
     :type use_bias: bool
     :param kernel_initializer: Kernel weight initializer.
     :type kernel_initializer: str
     :param kernel_regularizer: Kernel weight regularizer.
     :type kernel_regularizer: Optional[Any]
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
     """
+
     def __init__(
         self,
         reduction_ratio: float = 0.25,
@@ -810,8 +923,8 @@ class _SEWeights(layers.Layer):
         use_bias: bool = False,
         kernel_initializer: str = 'glorot_uniform',
         kernel_regularizer: Optional[Any] = None,
-        **kwargs
-    ):
+        **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         self.reduction_ratio = reduction_ratio
         self.activation = activation
@@ -960,6 +1073,25 @@ class TripSE4(layers.Layer):
     :type kernel_initializer: str
     :param kernel_regularizer: Kernel weight regularizer.
     :type kernel_regularizer: Optional[Any]
+    :param gate_activation_type: Activation producing each branch's attention
+        gate, resolved through
+        :func:`~dl_techniques.layers.activations.resolve_activation_layer` and
+        shared by all three branches. Defaults to ``'sigmoid'``, which is what
+        bounds the gate to ``[0, 1]``.
+    :type gate_activation_type: str
+    :param gate_activation_args: Optional keyword arguments forwarded to each
+        gate activation layer's constructor. Defaults to ``None``.
+    :type gate_activation_args: Optional[Dict[str, Any]]
+    :param se_reduction_activation_type: Activation inside the :class:`_SEWeights`
+        bottleneck MLP of each branch. Defaults to ``'relu'``. This is a
+        *pre-sigmoid* path: the SE logits are added to the spatial logits before
+        the single gate activation, so this activation must not itself saturate
+        the output to ``[0, 1]``.
+    :type se_reduction_activation_type: str
+    :param se_reduction_activation_args: Optional keyword arguments forwarded to
+        the SE bottleneck activation layer's constructor. Defaults to ``None``.
+    :type se_reduction_activation_args: Optional[Dict[str, Any]]
+    :param kwargs: Additional keyword arguments for the ``Layer`` base class.
     """
 
     def __init__(
@@ -973,8 +1105,8 @@ class TripSE4(layers.Layer):
         gate_activation_args: Optional[Dict[str, Any]] = None,
         se_reduction_activation_type: str = "relu",
         se_reduction_activation_args: Optional[Dict[str, Any]] = None,
-        **kwargs
-    ):
+        **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         self.reduction_ratio = reduction_ratio
         self.kernel_size = kernel_size
@@ -1103,7 +1235,7 @@ class TripSE4(layers.Layer):
         """Output shape equals input shape (attention preserves dimensions)."""
         return input_shape
 
-    def get_config(self) -> dict:
+    def get_config(self) -> Dict[str, Any]:
         config = super().get_config()
         config.update({
             "reduction_ratio": self.reduction_ratio,

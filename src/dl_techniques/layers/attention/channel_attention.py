@@ -131,11 +131,31 @@ class ChannelAttention(keras.layers.Layer):
     :param use_bias: Whether to include bias in dense layers.
         Defaults to ``False``.
     :type use_bias: bool
+    :param intermediate_activation_type: Activation applied inside the shared
+        MLP bottleneck, resolved through
+        :func:`~dl_techniques.layers.activations.resolve_activation_layer`.
+        Defaults to ``'relu'`` (the CBAM paper's choice).
+    :type intermediate_activation_type: str
+    :param intermediate_activation_args: Optional keyword arguments forwarded
+        to the intermediate activation layer's constructor. Defaults to
+        ``None``.
+    :type intermediate_activation_args: Optional[Dict[str, Any]]
+    :param gate_activation_type: Activation producing the final channel gate,
+        resolved through
+        :func:`~dl_techniques.layers.activations.resolve_activation_layer`.
+        Defaults to ``'sigmoid'``, which is what bounds the returned weights
+        to ``[0, 1]``; a different choice changes that guarantee.
+    :type gate_activation_type: str
+    :param gate_activation_args: Optional keyword arguments forwarded to the
+        gate activation layer's constructor. Defaults to ``None``.
+    :type gate_activation_args: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
     :raises ValueError: If ``channels`` is not positive.
     :raises ValueError: If ``ratio`` is not positive or does not divide
         evenly into ``channels``.
+    :raises ValueError: From ``build()``, if the input is not 4D, or if its
+        trailing dimension does not equal ``channels``.
     """
 
     def __init__(
@@ -154,6 +174,23 @@ class ChannelAttention(keras.layers.Layer):
         super().__init__(**kwargs)
 
         # Validate inputs
+        #
+        # `channels` is a real CNN channel count, NOT a "model dimension" — this
+        # module never splits it across attention heads. The package naming table in
+        # `GUIDE.md` nominally maps `channels` -> `dim`; the CNN family (channel,
+        # spatial, cbam, non_local, tripse) is a deliberate, documented carve-out
+        # (`README.md:17-18,90`). Do NOT rename this kwarg: it is part of the frozen
+        # public API and of every serialized `get_config()`.
+        #
+        # R13 cross-reference: the divisibility check below deliberately does NOT
+        # adopt `common.validate_head_divisibility()`. Its message text happens to be
+        # identical, but the helper documents a *head-split* precondition
+        # (`(..., dim)` -> `(..., num_heads, dim // num_heads)`), which is not what
+        # `channels % ratio` means here — this is an MLP bottleneck width, not a head
+        # count. Sharing the implementation would make the helper's contract a lie for
+        # the sake of three saved lines. Also note
+        # `tests/test_layers/test_attention/test_channel_attention_layer.py:109` pins
+        # this exact message with `pytest.raises(match=...)`.
         if channels <= 0:
             raise ValueError(f"channels must be positive, got {channels}")
         if ratio <= 0:

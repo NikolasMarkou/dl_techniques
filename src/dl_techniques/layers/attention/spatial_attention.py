@@ -121,9 +121,26 @@ class SpatialAttention(keras.layers.Layer):
     :param use_bias: Whether to include bias in the convolution layer.
         Defaults to ``True``.
     :type use_bias: bool
+    :param gate_activation_type: Activation producing the final spatial gate,
+        resolved through
+        :func:`~dl_techniques.layers.activations.resolve_activation_layer`.
+        Defaults to ``'sigmoid'``, which is what bounds the returned map to
+        ``[0, 1]``; a different choice changes that guarantee.
+    :type gate_activation_type: str
+    :param gate_activation_args: Optional keyword arguments forwarded to the
+        gate activation layer's constructor. Defaults to ``None``.
+    :type gate_activation_args: Optional[Dict[str, Any]]
     :param kwargs: Additional keyword arguments for the ``Layer`` base class.
 
     :raises ValueError: If ``kernel_size`` is not positive or not odd.
+
+    .. note::
+
+       Unlike its CBAM sibling :class:`ChannelAttention`, this layer takes **no**
+       ``channels`` argument: the channel axis is fully reduced by the two pooling
+       ops before the convolution ever sees it, so the layer is channel-count
+       agnostic and one instance works for any ``C``. That asymmetry is intentional
+       and is why :class:`CBAM` forwards ``channels`` to the channel branch only.
     """
 
     def __init__(

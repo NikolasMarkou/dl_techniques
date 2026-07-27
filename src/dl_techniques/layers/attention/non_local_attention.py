@@ -27,11 +27,11 @@ References:
 
 # ---------------------------------------------------------------------
 
-import math
 import keras
 from keras import ops
 from typing import Any, Dict, Tuple, Optional, Literal, Union
 
+from .common import compute_attention_scale
 from ..activations import ProbabilityOutput, resolve_activation_layer
 from ..norms.factory import create_normalization_layer
 
@@ -137,8 +137,16 @@ class NonLocalAttention(keras.layers.Layer):
     :type output_norm_kwargs: Optional[Dict[str, Any]]
     :param intermediate_activation: Activation function for intermediate layers.
     :type intermediate_activation: Union[str, callable]
+    :param intermediate_activation_args: Optional keyword arguments forwarded to
+        the intermediate activation layer's constructor. Two independent
+        instances are built from it (depthwise output and key projection output)
+        because they are applied to differently-shaped tensors.
+    :type intermediate_activation_args: Optional[Dict[str, Any]]
     :param output_activation: Activation function for the output projection.
     :type output_activation: Union[str, callable]
+    :param output_activation_args: Optional keyword arguments forwarded to the
+        output activation layer's constructor.
+    :type output_activation_args: Optional[Dict[str, Any]]
     :param output_channels: Number of output channels (``-1`` to match input).
     :type output_channels: int
     :param dropout_rate: Dropout rate between 0.0 and 1.0.
@@ -287,7 +295,12 @@ class NonLocalAttention(keras.layers.Layer):
             if self.attention_mode == 'dot_product'
             else max(1, self.attention_channels // 8)
         )
-        self._inv_sqrt_kv = 1.0 / math.sqrt(float(self.key_value_channels))
+        # R13: adopts the shared helper instead of re-deriving the scale. This is a
+        # spelling change only — `compute_attention_scale` IS
+        # `1.0 / math.sqrt(float(head_dim))`, the exact expression that stood here, so
+        # the stored float is bit-identical. Kept in `__init__` (never `call()`) per
+        # the standing anchor `plan_2026-06-14_33b77a7a/D-002`; see common.py.
+        self._inv_sqrt_kv = compute_attention_scale(self.key_value_channels)
 
         # Create Query, Key, Value projection layers (all share the embedded dim)
         self.query_conv = keras.layers.Conv2D(
@@ -350,6 +363,25 @@ class NonLocalAttention(keras.layers.Layer):
         # (filters unknown pre-build) and do NOT leave them undeclared until build()
         # (Keras-3 conformance: attributes must exist post-__init__; a second build()
         # must not replace already-built sublayers). See decisions.md D-003 (F3).
+        #
+        # ---- Why this is the ONE sanctioned exception to house rule R6 ----
+        # R6 ("create every sub-layer unconditionally in __init__") holds for the other
+        # 30 modules in this package; this pair is its single documented deviation, and
+        # it is a deviation by *necessity*, not by taste:
+        #
+        #   `output_channels` defaults to -1, meaning "match the input channel count".
+        #   That count is only known from `input_shape[-1]` in build(). So
+        #   `Conv2D(filters=...)` genuinely cannot be constructed in __init__ for the
+        #   default configuration.
+        #
+        # WHAT NOT TO DO: do not "fix" this by making `output_channels` a required
+        # constructor argument so the convs can move up here. That is a BREAKING public
+        # API change — it invalidates every caller and every serialized `get_config()`
+        # relying on the -1 default — traded for cosmetic rubric uniformity. The
+        # sentinel + `is None` guard + `if self.built: return` in build() already give
+        # the two properties R6 exists to protect: attributes exist immediately after
+        # __init__ (so `hasattr`/`from_config` introspection is safe), and a second
+        # build() cannot replace an already-built sub-layer.
         self.output_conv = None
         self.output_activation_layer = None
 
@@ -399,7 +431,8 @@ class NonLocalAttention(keras.layers.Layer):
 
         # Create output projection layer (needs input channels). Idempotency-guarded:
         # a second build() (e.g. under from_config / functional reuse) must NOT replace
-        # already-built sublayers. See D-003.
+        # already-built sublayers. See D-003, and the R6-exception rationale block at
+        # the end of __init__ for why these two alone are built here rather than there.
         if self.output_conv is None:
             self.output_conv = keras.layers.Conv2D(
                 filters=actual_output_channels,

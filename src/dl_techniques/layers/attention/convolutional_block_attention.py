@@ -1,51 +1,54 @@
 """
-Convolutional Block Attention Module (CBAM), a lightweight and
-effective attention mechanism for CNNs. CBAM operates on the
-principle of inferring attention maps along two separate dimensions, channel
-and spatial, and then sequentially applying them to the input feature map for
-adaptive feature refinement. The key architectural choice is this sequential
-arrangement: channel attention is applied first, followed by spatial attention.
-This allows the spatial attention mechanism to operate on features that have
-already been recalibrated for channel-wise importance.
+The Convolutional Block Attention Module (CBAM), a lightweight attention block for CNNs.
 
-The foundational mathematics of CBAM is divided into its two sub-modules:
+CBAM infers attention maps along two separate dimensions — channel and spatial —
+and applies them sequentially to the input feature map for adaptive feature
+refinement. The key architectural choice is the ordering: channel attention runs
+first, so the spatial stage operates on features that have *already* been
+recalibrated for channel-wise importance.
 
-1.  **Channel Attention (`Mc`):** This module aims to answer "what" is
-    meaningful in the input feature map. It aggregates spatial information by
-    applying both average-pooling and max-pooling operations across the
-    spatial dimensions (H x W), producing two distinct context descriptors.
-    These descriptors capture both the average and the most salient features
-    across the spatial grid for each channel. Both descriptors are then
-    processed by a shared Multi-Layer Perceptron (MLP) with a bottleneck
-    structure to efficiently compute the channel attention weights. The outputs
-    are merged via element-wise summation and passed through a sigmoid
-    function to generate the final channel attention map, which encodes the
-    inter-channel relationship of features.
+This module is deliberately a **composition, not a re-implementation**. It owns no
+attention math of its own: the two stages are the package's existing
+:class:`~dl_techniques.layers.attention.channel_attention.ChannelAttention` and
+:class:`~dl_techniques.layers.attention.spatial_attention.SpatialAttention` layers,
+instantiated as sub-layers. See the ``[REUSE]`` note on :class:`CBAM` below.
 
-2.  **Spatial Attention (`Ms`):** Following channel refinement, this module
-    aims to answer "where" is the most informative region. It first aggregates
-    the channel information at each spatial location by applying average-
-    pooling and max-pooling along the channel axis. This generates two 2D maps
-    that effectively summarize the features across all channels for each
-    pixel, highlighting regions with high average and high peak activations.
-    These two maps are concatenated and then passed through a standard
-    convolutional layer to produce a single 2D spatial attention map. After a
-    final sigmoid activation, this map highlights the most salient spatial
--   regions to focus on.
+Architecture:
+    The block factorizes 3D attention over ``(H, W, C)`` into two cheap 1D/2D
+    problems applied back to back:
 
-The complete CBAM operation is a sequential multiplication: the input feature
-map `F` is first multiplied by the channel attention map `Mc(F)`, and the
-result is then multiplied by the spatial attention map `Ms(F')`. This
-factorization of attention into two sequential, decoupled modules makes CBAM
-lightweight and easily integrable into existing CNN architectures, enhancing
-their representational power by allowing the network to learn to selectively
-focus on informative features and suppress irrelevant ones.
+    1.  **Channel Attention (`Mc`) — "what" matters.** Spatial information is
+        aggregated by average-pooling and max-pooling across the spatial
+        dimensions ``(H x W)``, producing two context descriptors per channel.
+        Both are processed by a *shared* bottleneck MLP, merged by element-wise
+        summation, and passed through a sigmoid. The result encodes the
+        inter-channel relationship of features.
+
+    2.  **Spatial Attention (`Ms`) — "where" matters.** Operating on the
+        channel-refined features, this stage aggregates channel information at
+        each spatial location via average- and max-pooling along the channel
+        axis. The two resulting 2D maps are concatenated and passed through a
+        single convolution, then a sigmoid, highlighting the most salient
+        spatial regions.
+
+Foundational Mathematics:
+    The complete CBAM operation is a sequential (not parallel) multiplication::
+
+        F'  = M_c(F)  ⊗ F
+        F'' = M_s(F') ⊗ F'
+
+    where ``⊗`` is element-wise multiplication with broadcasting: ``M_c`` has
+    shape ``(B, 1, 1, C)`` and broadcasts over space, while ``M_s`` has shape
+    ``(B, H, W, 1)`` and broadcasts over channels. Factorizing attention into two
+    sequential, decoupled modules is what makes CBAM cheap: it costs
+    ``O(C^2/r + k^2)`` parameters rather than the ``O(H*W*C)`` of a dense 3D map.
 
 References:
-    - Woo et al., 2018. CBAM: Convolutional Block Attention Module.
-      (https://arxiv.org/abs/1807.06521)
-
+    - Woo, S., Park, J., Lee, J. Y., & Kweon, I. S. (2018). "CBAM: Convolutional
+      Block Attention Module". ECCV. (https://arxiv.org/abs/1807.06521)
 """
+
+# ---------------------------------------------------------------------
 
 import keras
 from typing import Optional, Union, Dict, Any, Tuple
@@ -71,6 +74,23 @@ class CBAM(keras.layers.Layer):
     to focus. The complete operation is
     ``F'' = M_s(M_c(F) * F) * (M_c(F) * F)``, where ``M_c`` and ``M_s``
     are channel and spatial attention maps respectively.
+
+    **[REUSE]** This layer contains **no attention math of its own**. Both stages
+    are the package's existing standalone layers, held as sub-layers:
+    :class:`~dl_techniques.layers.attention.channel_attention.ChannelAttention`
+    and
+    :class:`~dl_techniques.layers.attention.spatial_attention.SpatialAttention`.
+    ``call()`` is only the two multiplications that wire them together. Consequences
+    a maintainer must respect:
+
+    * A fix to either stage's math belongs in that stage's module and is inherited
+      here for free. Do **not** inline or fork the pooling/MLP/conv logic into this
+      file — that would create the exact drift the composition exists to prevent.
+    * The constructor's ``channel_*`` / ``spatial_*`` parameter pairs exist because
+      each sub-layer is independently configurable; they are forwarded verbatim and
+      are not re-validated here beyond the three cheap positivity checks.
+    * ``channels`` is forwarded to the channel stage only —
+      :class:`SpatialAttention` is channel-count agnostic by construction.
 
     **Architecture Overview:**
 
@@ -149,6 +169,17 @@ class CBAM(keras.layers.Layer):
         super().__init__(**kwargs)
 
         # Validate inputs
+        #
+        # `channels` is a real CNN channel count, not a "model dimension"; the
+        # `GUIDE.md` naming table's `channels` -> `dim` migration line does NOT apply
+        # to the CNN family (documented carve-out, `README.md:17-18,90`). Renaming it
+        # would break the frozen public API and every serialized `get_config()`.
+        #
+        # Note the division of labour: `channels % ratio` is NOT checked here. That
+        # check lives in `ChannelAttention.__init__` and fires when the sub-layer is
+        # constructed three statements below, so a bad (channels, ratio) pair still
+        # raises from this constructor, carrying the sub-layer's message.
+        # Duplicating the check here would give two spellings of one rule.
         if channels <= 0:
             raise ValueError(f"channels must be positive, got {channels}")
         if ratio <= 0:
