@@ -69,6 +69,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 # local imports
 # ---------------------------------------------------------------------
 
+from .common import apply_attention_mask
 from ..ffn.kan_linear import KANLinear
 from ..activations import ProbabilityOutput
 from ..norms.factory import create_normalization_layer
@@ -565,25 +566,85 @@ class SingleWindowAttention(keras.layers.Layer):
             # Shape: (B, H, N, N) + (1, H, N, N) -> (B, H, N, N)
             attn = attn + keras.ops.expand_dims(relative_position_bias, 0)
 
-        # R13 cross-reference: this mask site DELIBERATELY does not adopt
-        # `common.MASK_BIAS_VALUE` / `common.mask_dtype`. The sibling implementation in
-        # `energy_attention.py` (`_build_keep_mask` / `_project`) materializes the bias in
-        # `mask_dtype(compute_dtype)` (>= float32) via `ops.where(keep > 0, 0.0, BIAS)`;
-        # this one materializes it in `attn.dtype` via the arithmetic form
-        # `(1 - keep) * -1e9`. The two differ in BOTH dtype and op form, so swapping in the
-        # shared constant here would change fp16 behavior (`0 * -inf = NaN`), not just the
-        # spelling. Unifying them is a numerics change and is out of scope for this
-        # behavior-preserving pass; note that the `clip(attn, -30, 30)` two lines below
-        # currently masks the fp16 hazard. Flagged for a follow-up.
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-010
+        # `clip(attn, -30, 30)` runs HERE, on the RAW scores, and must NOT be moved
+        # back below the mask bias where it used to live.
+        #
+        # WHAT NOT TO DO, and why:
+        #   * Do NOT re-order this after `apply_attention_mask`. Clipping the BIASED
+        #     logits floors a masked position at `-30` instead of `MASK_BIAS_VALUE`,
+        #     which turns a hard mask into a soft one: once every logit in a row
+        #     already sits below the floor, the mask stops masking. MEASURED in
+        #     float32 on unfixed HEAD, driving `relative_position_bias_table` to a
+        #     uniform value and perturbing a MASKED token: leak 0.0 at bias 0.0,
+        #     2.73e-04 at -20, and **0.439** at -50, against a kept-token signal of
+        #     32.6. Pinned by
+        #     `TestSingleWindowAttentionClipDoesNotFloorTheMask`.
+        #   * Do NOT delete the clip instead. Its job — bounding the attention
+        #     logits before the softmax — is independent of masking and is
+        #     unaffected by this move; the raw scores are exactly what it was
+        #     meant to bound.
+        # ACCEPTED COST: for a mask that leaves every row's logits inside
+        # [-30, 30] (the ordinary case) this changes nothing measurable, but a
+        # masked position's softmax weight now goes to exactly 0 rather than
+        # `exp(-30 - max)`. That is a deliberate numerics change in float32 too,
+        # not only fp16.
+        # See decisions.md D-010 (plan-2026-07-27T183600-b4ef45f0).
+        attn = keras.ops.clip(attn, -30.0, 30.0)
+
+        # THIS SITE'S MASK POLARITY, passed through verbatim: `broadcast_mask` is a
+        # `1 = keep` predicate, so it IS the keep predicate `apply_attention_mask`
+        # wants. Do NOT "normalize" it into a `> 0` comparison or invert it — the
+        # helper performs no polarity inference by design, so an inversion here
+        # raises nothing, changes no shape and stays finite; the layer would just
+        # attend to the padding. `TestSingleWindowAttentionMaskPolarity` is the only
+        # guard that can see it.
+        #
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-007
+        # `out_dtype` is pinned to the SCORES' own dtype, so the biased scores stay
+        # in the compute dtype (fp16 under `mixed_float16`), where
+        # `MASK_BIAS_VALUE` is `-inf` again. That is deliberate and is NOT the bug
+        # being fixed:
+        #   * The bug was the ARITHMETIC form this replaces,
+        #     `attn + (1.0 - keep) * -1e9`. In float16 `-1e9` is `-inf`
+        #     (np.float16(-1e9) == -inf) and `(1.0 - keep) == 0` at every UNMASKED
+        #     position, so the product is `0 * -inf = NaN`. THIS SITE HAD NO SAFE
+        #     PATH AT ALL: the mask is unconditional here (the internal padding mask
+        #     is always built and always applied), so `attention_mask=None` went
+        #     down the same line. MEASURED at (B=2, N=64, dim=64, window_size=8,
+        #     num_heads=4) under `mixed_float16`: 8192/8192 NaN with NO mask, with
+        #     an all-ones mask, with right padding and with left padding; float32
+        #     gave 0/8192 in every case.
+        #   * Do NOT "improve" this to `out_dtype=None` (stay in float32) hoping to
+        #     also rescue a fully-masked element. It cannot: the next consumer is
+        #     `self.attn_prob`, a Keras layer with autocasting ON, MEASURED to see a
+        #     float32 input inside its own `call()` as float16. Pinned by
+        #     `TestSingleWindowAttentionMaskHazardIsReal::
+        #     test_the_probability_sublayer_autocasts_a_float32_input`.
+        # See decisions.md D-007 (plan-2026-07-27T183600-b4ef45f0).
+        #
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-009
+        # The fully-masked-slice rescue arrives via `apply_attention_mask`'s DEFAULT
+        # `rescue_axis=-1`: a slice of the mask that keeps NOTHING is treated as
+        # keeping EVERYTHING, so an all-`-inf` row is never FORMED and no NaN
+        # gradient is created either. `-1` is correct here because this site's
+        # softmax (`self.attn_prob`) reduces over the KEY axis of the already-
+        # broadcast `(B, 1, 1, N)` mask — checked, not assumed. Note the mask has no
+        # QUERY axis at this site, so "keeps nothing" means "this batch element
+        # keeps no key at all".
+        #
+        # WHAT NOT TO DO: do NOT pass `rescue_axis=None` to "get the loud NaN back"
+        # — the user ruled the finite-garbage semantics package-wide on 2026-07-28,
+        # and opting out also restores the NaN GRADIENT. The full argument lives at
+        # the D-009 / D-008 anchors in `common.py`.
+        # See decisions.md D-009 and D-008 (plan-2026-07-27T183600-b4ef45f0).
         # Shape: (B, N) -> (B, 1, 1, N)  [broadcasts over heads and query axis]
         broadcast_mask = keras.ops.reshape(final_attention_mask, (B, 1, 1, N))
-        inf_value = keras.ops.convert_to_tensor(-1e9, dtype=attn.dtype)
-        additive_mask = (
-                                1.0 - keras.ops.cast(broadcast_mask, dtype=attn.dtype)
-                        ) * inf_value
-        attn = attn + additive_mask
-
-        attn = keras.ops.clip(attn, -30.0, 30.0)
+        attn = apply_attention_mask(
+            attn,
+            broadcast_mask,
+            out_dtype=keras.backend.standardize_dtype(attn.dtype),
+        )
 
         attn = self.attn_prob(attn, training=training)
 

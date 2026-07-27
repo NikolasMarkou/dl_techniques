@@ -82,7 +82,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from .common import compute_attention_scale
+from .common import apply_attention_mask, compute_attention_scale
 from ..activations import ProbabilityOutput
 from ..norms.factory import create_normalization_layer
 
@@ -531,26 +531,31 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         :return: Masked scores tensor with same shape as input scores.
         :rtype: keras.KerasTensor
 
+        .. note::
+            **FIXED (plan-2026-07-27T183600-b4ef45f0, step 5).** This used to be the
+            eighth catalogued instance of the systemic fp16 mask-NaN bug in
+            ``layers/attention``: the arithmetic form
+            ``scores + (1.0 - attention_mask) * -1e9`` evaluated in ``scores.dtype``,
+            which under ``mixed_precision.set_global_policy('mixed_float16')`` is
+            ``0 * -inf = NaN`` at every **unmasked** position. It now delegates the
+            bias to :func:`~dl_techniques.layers.attention.common.apply_attention_mask`,
+            which builds it with ``ops.where`` inside
+            :func:`~dl_techniques.layers.attention.common.mask_dtype`, so the product
+            cannot be formed at all.
+
         .. warning::
-            **KNOWN DEFECT — systemic fp16 mask-NaN hazard (reported, not fixed).**
-            The arithmetic form below is the eighth catalogued instance of this bug
-            in ``layers/attention`` (siblings: ``single_window``, ``gated``,
-            ``multi_head_cross``, ``multi_head_latent``, ``group_query``, ``ring``,
-            and ``rpc`` via a different mechanism). ``attention_mask`` is cast to
-            ``scores.dtype``; under ``mixed_precision.set_global_policy('mixed_float16')``
-            that dtype is fp16, where ``np.float16(-1e9) == -inf``. At every
-            **unmasked** position ``(1.0 - 1.0) * -inf`` is ``0 * -inf = NaN``, so
-            supplying any mask under a mixed-precision policy poisons the entire
-            output — while supplying no mask is fine, which is exactly what makes it
-            hard to notice. The form is the bug, not the constant: swapping in
-            :data:`~dl_techniques.layers.attention.common.MASK_BIAS_VALUE` would not
-            fix it. The structural fix is
-            ``ops.where(mask > 0, 0.0, MASK_BIAS_VALUE)`` evaluated in
-            :func:`~dl_techniques.layers.attention.common.mask_dtype`, which cannot
-            produce ``0 * inf`` at all. No test exercises this layer under a
-            mixed_float16 policy. Left in place deliberately: the fix is a
-            dtype/op-form change on the forward path, i.e. a behavior change, and the
-            pass that wrote this note is behavior-preserving.
+            **A SEPARATE, STILL-OPEN DEFECT keeps this layer from running under
+            ``mixed_float16`` or ``float64`` AT ALL, with or without a mask.**
+            :meth:`get_lambda` builds ``lambda_val`` via ``ops.cast(layer_idx,
+            "float32")`` and :meth:`call` then evaluates ``out1 - lambda_val * out2``
+            with ``out2`` in the compute dtype, which raises
+            ``InvalidArgumentError: cannot compute Mul as input #1(zero-based) was
+            expected to be a float tensor but is a half tensor``. Measured at step 5
+            with ``attention_mask=None``, so it is independent of masking. The remedy
+            is one cast (``ops.cast(lambda_val, out2.dtype)``) but it lives on a
+            different expression than the mask bias, so it was reported rather than
+            absorbed into that step; pinned by
+            ``TestDifferentialAttentionNonFloat32PoliciesAreASeparatePreExistingDefect``.
         """
         attention_mask = ops.cast(attention_mask, scores.dtype)
         if len(attention_mask.shape) == 2:
@@ -561,10 +566,52 @@ class DifferentialMultiHeadAttention(keras.layers.Layer):
         # `multi_head_cross_attention.py` / `multi_head_latent_attention.py` /
         # `group_query_attention.py`. Those were diffed line-by-line in step 4 of the
         # normalization plan and found to differ in cast order and rank-probe form,
-        # so a shared helper would change op ordering somewhere. Left local, with the
-        # hazard documented above rather than papered over.
-        mask_value = -1e9
-        return scores + (1.0 - attention_mask) * mask_value
+        # so a shared helper would change op ordering somewhere. Left local; only the
+        # BIAS is shared now, and the cast/expand lines above are byte-identical.
+        #
+        # THIS SITE'S MASK POLARITY, passed through verbatim: `attention_mask` is a
+        # `1 = keep` predicate (already cast to the scores dtype on its own untouched
+        # line above), so it IS the keep predicate `apply_attention_mask` wants. Do
+        # NOT "normalize" it into a `> 0` comparison or invert it — the helper
+        # performs no polarity inference by design, so an inversion here raises
+        # nothing, changes no shape and stays finite; the layer would just attend to
+        # the padding. `TestDifferentialAttentionMaskBiasExpression::
+        # test_masked_positions_receive_no_probability_mass` is the only guard that
+        # can see it.
+        #
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-007
+        # `out_dtype` is pinned to the SCORES' own dtype, so the biased scores stay
+        # in the compute dtype (fp16 under `mixed_float16`), where `MASK_BIAS_VALUE`
+        # is `-inf` again. That is deliberate and is NOT the bug being fixed: the bug
+        # was the `0 * -inf` PRODUCT of the arithmetic form, which `ops.where` inside
+        # `mask_dtype(...)` cannot form at all, and a row keeping >= 1 key softmaxes
+        # correctly with `-inf` entries. MEASURED on this method directly at
+        # (B=2, H=4, N=64) under `mixed_float16`: the pre-fix expression gave
+        # 32768/32768 non-finite attention weights for an ALL-ONES mask (one that
+        # masks nothing), for padding and for causal; float32 and float64 gave 0.
+        # Do NOT "improve" this to `out_dtype=None`: the next consumer is
+        # `attn_prob`, a Keras layer with autocasting ON, which drags a float32
+        # tensor straight back to the compute dtype.
+        # See decisions.md D-007 (plan-2026-07-27T183600-b4ef45f0).
+        #
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-009
+        # The fully-masked-row rescue arrives via `apply_attention_mask`'s DEFAULT
+        # `rescue_axis=-1`: a query row that keeps NOTHING is treated as keeping
+        # EVERYTHING, so the all-`-inf` row is never FORMED and no NaN gradient is
+        # created either. `-1` is correct here because both streams' softmaxes
+        # (`attn_prob_1` / `attn_prob_2`) reduce over the KEY axis of the
+        # already-broadcast mask — checked, not assumed.
+        #
+        # WHAT NOT TO DO: do NOT pass `rescue_axis=None` to "get the loud NaN back" —
+        # the user ruled the finite-garbage semantics package-wide on 2026-07-28, and
+        # opting out also restores the NaN GRADIENT on that row. The full argument
+        # lives at the D-009 / D-008 anchors in `common.py`.
+        # See decisions.md D-009 and D-008 (plan-2026-07-27T183600-b4ef45f0).
+        return apply_attention_mask(
+            scores,
+            attention_mask,
+            out_dtype=keras.backend.standardize_dtype(scores.dtype),
+        )
 
     def _project_to_heads(
         self,

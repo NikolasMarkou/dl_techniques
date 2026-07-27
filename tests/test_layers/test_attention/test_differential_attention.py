@@ -462,3 +462,375 @@ class TestDifferentialMultiHeadAttention:
 if __name__ == "__main__":
     # Run a subset of critical tests
     pytest.main([__file__, "-v"])
+
+# ---------------------------------------------------------------------
+# Mixed-precision mask tests (plan-2026-07-27-b4ef45f0, step 5)
+# ---------------------------------------------------------------------
+#
+# WHAT IS BEING GUARDED HERE.
+#
+# `DifferentialMultiHeadAttention._apply_attention_mask` used the ARITHMETIC mask
+# form
+#
+#     mask_value = -1e9
+#     return scores + (1.0 - attention_mask) * mask_value
+#
+# which `common.MASK_BIAS_VALUE`'s own docstring rules out. Under
+# `mixed_precision.set_global_policy('mixed_float16')` the literal `-1e9` is
+# materialized in float16, where it is `-inf` (np.float16(-1e9) == -inf). At every
+# UNMASKED position `(1.0 - mask) == 0`, so the product is `0 * -inf = NaN`. The
+# layer's own docstring called this "the eighth catalogued instance" of the bug.
+#
+# THE TESTS BELOW ARE SPLIT IN TWO, AND THE REASON IS A SEPARATE PRE-EXISTING
+# DEFECT — measured at step 5, not previously catalogued:
+#
+#     THIS LAYER CANNOT RUN AT ALL UNDER `mixed_float16` OR `float64`, WITH NO MASK
+#     SUPPLIED. `get_lambda()` builds `lambda_val` via `ops.cast(layer_idx,
+#     "float32")`, and `call()` then evaluates `out1 - lambda_val * out2` where
+#     `out2` is in the compute dtype:
+#         InvalidArgumentError: cannot compute Mul as input #1(zero-based) was
+#         expected to be a float tensor but is a half tensor
+#     It is a one-token fix (`ops.cast(lambda_val, out2.dtype)`) but it lives on a
+#     DIFFERENT expression than this step's mask bias, so it is REPORTED and PINNED
+#     here rather than absorbed — the same treatment step 2 gave `ops.svd`'s missing
+#     fp16 kernel at `rpc_attention.py` and step 4 gave the RoPE float64 defect at
+#     `gated`/`group_query`. See
+#     `TestDifferentialAttentionNonFloat32PoliciesAreASeparatePreExistingDefect`.
+#
+# Consequently the fp16 evidence for the MASK fix is taken at the level of the
+# method that was actually changed, `_apply_attention_mask`, driven with real fp16
+# score tensors (`TestDifferentialAttentionMaskBiasExpression`). That is where the
+# `0 * -inf` product lived, so the test is targeted rather than incidental; the
+# layer-level tests then cover float32 semantics end to end.
+#
+# ANTI-VACUITY. The `N = 7`-hides-an-fp16-`-inf`-at-`N >= 512` trap does not
+# transfer: this hazard is a per-ELEMENT dtype overflow of a constant multiplied by
+# an exact zero, not a long reduction. It is nevertheless asserted reachable rather
+# than assumed — see `TestDifferentialAttentionMaskHazardIsReal`.
+
+from dl_techniques.layers.attention.common import MASK_BIAS_VALUE
+
+_MP_B, _MP_N, _MP_DIM, _MP_H, _MP_HD = 2, 64, 64, 4, 16
+_MP_KEEP = _MP_N // 2
+_MP_DEG_ROW = 5
+_MP_SEED = 1234
+
+# Absolute tolerance for a cross-dtype comparison of the BIAS EXPRESSION's softmax.
+# Sized from float16's own resolution (eps ~ 9.8e-04) with ~5x headroom; float32 is
+# held exact because the expression is compared against a float64 reference built
+# from the same float32 scores.
+_MP_ATOL = {"float32": 1e-6, "mixed_float16": 5e-3, "float64": 1e-6}
+
+
+def _mp_input():
+    """Deterministic ``(B, N, dim)`` float32 input, shared by every test below."""
+    return np.random.default_rng(7).standard_normal(
+        (_MP_B, _MP_N, _MP_DIM)
+    ).astype("float32")
+
+
+def _mp_scores():
+    """Deterministic ``(B, H, N, N)`` float32 pre-softmax scores."""
+    return np.random.default_rng(11).standard_normal(
+        (_MP_B, _MP_H, _MP_N, _MP_N)
+    ).astype("float32")
+
+
+def _mp_mask(kind):
+    """One of the masks these tests need, as a float32 rank-3 ``1 = keep`` array."""
+    if kind == "all_ones":
+        return np.ones((_MP_B, _MP_N, _MP_N), dtype="float32")
+    if kind == "padding":
+        m = np.ones((_MP_B, _MP_N, _MP_N), dtype="float32")
+        m[:, :, _MP_KEEP:] = 0.0
+        return m
+    if kind == "causal":
+        return np.broadcast_to(
+            np.tril(np.ones((_MP_N, _MP_N), dtype="float32")),
+            (_MP_B, _MP_N, _MP_N),
+        ).copy()
+    if kind == "degenerate":
+        m = np.ones((_MP_B, _MP_N, _MP_N), dtype="float32")
+        m[:, _MP_DEG_ROW, :] = 0.0
+        return m
+    raise ValueError(f"unknown mask kind {kind!r}")
+
+
+def _mp_layer(**kwargs):
+    """A built layer whose TRAINABLE weights are identical under every dtype policy."""
+    layer = DifferentialMultiHeadAttention(
+        dim=_MP_DIM, num_heads=_MP_H, head_dim=_MP_HD, **kwargs
+    )
+    layer.build((_MP_B, _MP_N, _MP_DIM))
+    rng = np.random.default_rng(_MP_SEED)
+    for weight in layer.trainable_weights:
+        shape = tuple(weight.shape)
+        if len(shape) == 1 and ("bias" in weight.name or "beta" in weight.name):
+            value = np.zeros(shape)
+        elif len(shape) == 1:
+            value = 1.0 + 0.1 * rng.standard_normal(shape)
+        else:
+            value = 0.2 * rng.standard_normal(shape)
+        weight.assign(keras.ops.cast(
+            keras.ops.convert_to_tensor(value.astype("float32")), weight.dtype
+        ))
+    return layer
+
+
+def _mp_forward(layer, array, mask):
+    """One masked forward pass, returned as float64 numpy."""
+    out = layer(
+        keras.ops.convert_to_tensor(array),
+        attention_mask=(None if mask is None else keras.ops.convert_to_tensor(mask)),
+    )
+    return keras.ops.convert_to_numpy(out).astype("float64")
+
+
+def _softmax_f64(x):
+    x = x - x.max(axis=-1, keepdims=True)
+    e = np.exp(x)
+    return e / e.sum(axis=-1, keepdims=True)
+
+
+def _skip_non_float32(dtype_policy):
+    if dtype_policy != "float32":
+        pytest.skip(
+            f"{dtype_policy} raises in `get_lambda`'s float32 `lambda_val` times a "
+            "compute-dtype tensor, with NO mask at all — a pre-existing defect on a "
+            "different expression, pinned by "
+            "TestDifferentialAttentionNonFloat32PoliciesAreASeparatePreExistingDefect"
+        )
+
+
+class TestDifferentialAttentionMaskHazardIsReal:
+    """Anti-vacuity. If these stop holding, every fp16 test below is worthless."""
+
+    def test_policy_really_selects_float16_compute(self, dtype_policy):
+        expected = {
+            "float32": "float32",
+            "mixed_float16": "float16",
+            "float64": "float64",
+        }[dtype_policy]
+        assert keras.mixed_precision.global_policy().compute_dtype == expected
+
+    def test_the_arithmetic_form_really_is_nan_in_the_compute_dtype(self):
+        with np.errstate(over="ignore", invalid="ignore"):
+            bias = np.float16(MASK_BIAS_VALUE)
+            assert np.isneginf(bias), (
+                "anti-vacuity FAILED: float16(MASK_BIAS_VALUE) is not -inf"
+            )
+            assert np.isnan(np.float16(0.0) * bias), (
+                "anti-vacuity FAILED: float16(0) * float16(MASK_BIAS_VALUE) is not NaN"
+            )
+        assert np.isfinite(np.float32(MASK_BIAS_VALUE))
+
+    def test_the_all_ones_mask_really_masks_nothing(self):
+        assert int((_mp_mask("all_ones") == 0).sum()) == 0
+
+    def test_the_partial_masks_really_mask_something(self):
+        for kind in ("padding", "causal"):
+            mask = _mp_mask(kind)
+            assert int((mask == 0).sum()) > 0
+            assert not (mask == 0).all(axis=-1).any(), (
+                f"the {kind!r} mask has a fully-masked query row, so it no longer "
+                "isolates the covered case from the degenerate probe"
+            )
+
+    def test_the_degenerate_mask_really_has_exactly_one_fully_masked_row(self):
+        empty = (_mp_mask("degenerate") == 0).all(axis=-1)
+        assert int(empty.sum()) == _MP_B and bool(empty[:, _MP_DEG_ROW].all())
+
+
+class TestDifferentialAttentionNonFloat32PoliciesAreASeparatePreExistingDefect:
+    """The non-float32 skips above are documented, not silent.
+
+    MEASURED at step 5 with `attention_mask=None`: this layer raises under BOTH
+    `mixed_float16` and `float64` because `get_lambda()` returns a float32 tensor
+    that `call()` multiplies with a compute-dtype tensor. Reported for follow-up
+    with the exact remedy (`ops.cast(lambda_val, out2.dtype)`); when it is applied
+    this test fails and the `_skip_non_float32` calls should be deleted.
+    """
+
+    @pytest.mark.parametrize("policy", ["mixed_float16", "float64"])
+    def test_the_layer_raises_on_a_dtype_mismatch_even_without_a_mask(self, policy):
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy(policy)
+        try:
+            with pytest.raises(Exception) as excinfo:
+                _mp_forward(_mp_layer(), _mp_input(), None)
+            message = str(excinfo.value)
+            assert "cannot compute Mul" in message, (
+                f"the {policy} failure is no longer the lambda dtype mismatch: "
+                f"{message[:200]}"
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+
+
+class TestDifferentialAttentionMaskBiasExpression:
+    """SC1 + SC2 + SC6, taken at the expression that this step changed.
+
+    `_apply_attention_mask` is driven directly with real compute-dtype score
+    tensors, so the `0 * -inf = NaN` product is exercised where it lived — the
+    layer-level forward cannot reach it under `mixed_float16` for the unrelated
+    reason pinned above.
+    """
+
+    @staticmethod
+    def _apply(layer, scores_np, mask_np):
+        compute = keras.mixed_precision.global_policy().compute_dtype
+        scores = keras.ops.cast(keras.ops.convert_to_tensor(scores_np), compute)
+        mask = keras.ops.convert_to_tensor(mask_np)
+        biased = layer._apply_attention_mask(scores, mask)
+        return biased
+
+    @pytest.mark.parametrize("kind", ["all_ones", "padding", "causal"])
+    def test_the_biased_scores_softmax_finitely_and_match_float32(
+        self, dtype_policy, kind
+    ):
+        layer = _mp_layer()
+        scores_np, mask_np = _mp_scores(), _mp_mask(kind)
+        biased = self._apply(layer, scores_np, mask_np)
+
+        weights = keras.ops.convert_to_numpy(
+            keras.ops.softmax(keras.ops.cast(biased, "float32"), axis=-1)
+        ).astype("float64")
+
+        n_bad = int((~np.isfinite(weights)).sum())
+        assert n_bad == 0, (
+            f"{n_bad}/{weights.size} non-finite attention weights for a {kind!r} "
+            f"mask under policy {dtype_policy!r} — `0 * -inf = NaN` at the UNMASKED "
+            "positions"
+        )
+
+        keep = mask_np[:, None, :, :]
+        reference = _softmax_f64(
+            np.where(keep > 0, scores_np.astype("float64"), MASK_BIAS_VALUE)
+        )
+        max_dev = float(np.abs(weights - reference).max())
+        atol = _MP_ATOL[dtype_policy]
+        assert max_dev <= atol, (
+            f"{kind!r}-masked weights under {dtype_policy!r} deviate from the "
+            f"float64 reference by {max_dev:.4g} > {atol:.4g}"
+        )
+
+    @pytest.mark.parametrize("kind", ["padding", "causal"])
+    def test_masked_positions_receive_no_probability_mass(self, dtype_policy, kind):
+        """SC6 at the expression: an inverted polarity is caught EXACTLY.
+
+        Also runs the INVERTED predicate as a control in the same test, so the
+        assertion cannot pass by the mask being ignored altogether.
+        """
+        layer = _mp_layer()
+        scores_np, mask_np = _mp_scores(), _mp_mask(kind)
+
+        def mass_on(mask):
+            biased = self._apply(layer, scores_np, mask)
+            weights = keras.ops.convert_to_numpy(
+                keras.ops.softmax(keras.ops.cast(biased, "float32"), axis=-1)
+            ).astype("float64")
+            masked = (mask_np[:, None, :, :] == 0)
+            return float(weights[np.broadcast_to(masked, weights.shape)].sum())
+
+        correct = mass_on(mask_np)
+        inverted = mass_on(1.0 - mask_np)
+
+        assert inverted > 1.0, (
+            f"the INVERTED-polarity control put only {inverted:.6g} probability "
+            "mass on the masked positions; it cannot detect an inversion"
+        )
+        assert correct <= 1e-6, (
+            f"masked positions carry {correct:.6g} of the probability mass under "
+            f"{dtype_policy!r} for a {kind!r} mask (inverted-polarity control: "
+            f"{inverted:.6g}) — the polarity is INVERTED"
+        )
+
+    def test_a_fully_masked_row_is_rescued_rather_than_biased(self, dtype_policy):
+        """decisions.md D-008 / D-009: keeps nothing => keeps everything."""
+        layer = _mp_layer()
+        scores_np = _mp_scores()
+        biased = keras.ops.convert_to_numpy(
+            keras.ops.cast(self._apply(layer, scores_np, _mp_mask("degenerate")),
+                           "float32")
+        ).astype("float64")
+
+        row = biased[:, :, _MP_DEG_ROW, :]
+        assert np.isfinite(row).all(), (
+            f"the fully-masked query row is non-finite under {dtype_policy!r}; the "
+            "degenerate-row rescue is not reaching this site"
+        )
+        expected = keras.ops.convert_to_numpy(keras.ops.cast(
+            keras.ops.cast(
+                keras.ops.convert_to_tensor(scores_np),
+                keras.mixed_precision.global_policy().compute_dtype,
+            ),
+            "float32",
+        )).astype("float64")[:, :, _MP_DEG_ROW, :]
+        max_dev = float(np.abs(row - expected).max())
+        assert max_dev <= 1e-3, (
+            f"the rescued row is not the UNBIASED score row: max deviation "
+            f"{max_dev:.4g}. 'Keeps nothing' must mean 'keeps everything'."
+        )
+
+
+class TestDifferentialAttentionMaskedForward:
+    """End-to-end float32 semantics (the only policy this layer survives today)."""
+
+    @pytest.mark.parametrize("kind", ["all_ones", "padding", "causal", "degenerate"])
+    def test_masked_forward_is_finite(self, dtype_policy, kind):
+        _skip_non_float32(dtype_policy)
+        out = _mp_forward(_mp_layer(), _mp_input(), _mp_mask(kind))
+        n_bad = int((~np.isfinite(out)).sum())
+        assert n_bad == 0, (
+            f"{n_bad}/{out.size} non-finite output entries for a {kind!r} mask "
+            f"under policy {dtype_policy!r}"
+        )
+
+    def test_the_rescued_row_behaves_as_if_it_kept_everything(self, dtype_policy):
+        _skip_non_float32(dtype_policy)
+        degenerate = _mp_forward(_mp_layer(), _mp_input(), _mp_mask("degenerate"))
+        all_ones = _mp_forward(_mp_layer(), _mp_input(), _mp_mask("all_ones"))
+        max_dev = float(np.abs(degenerate - all_ones).max())
+        assert max_dev <= 1e-5, (
+            f"under {dtype_policy!r} the 'degenerate' mask does not behave like the "
+            f"'all_ones' mask: max deviation {max_dev:.4g}"
+        )
+        assert float(np.abs(all_ones).max()) > 0.0
+
+    def test_a_masked_token_has_no_influence_on_the_kept_rows(self, dtype_policy):
+        _skip_non_float32(dtype_policy)
+        mask = _mp_mask("padding")
+
+        def influence(mask_used):
+            layer = _mp_layer()
+            base_input = _mp_input()
+            perturbed_masked = base_input.copy()
+            perturbed_masked[:, _MP_KEEP + 3, :] += 5.0
+            perturbed_kept = base_input.copy()
+            perturbed_kept[:, 3, :] += 5.0
+            rows = slice(0, _MP_KEEP)
+            base = _mp_forward(layer, base_input, mask_used)
+            assert np.isfinite(base[:, rows]).all()
+            dm = float(np.abs(
+                _mp_forward(layer, perturbed_masked, mask_used)[:, rows]
+                - base[:, rows]).max())
+            dk = float(np.abs(
+                _mp_forward(layer, perturbed_kept, mask_used)[:, rows]
+                - base[:, rows]).max())
+            return dm, dk
+
+        delta_masked, delta_kept = influence(mask)
+        inverted, _ = influence(1.0 - mask)
+
+        assert delta_kept > 0.5, (
+            f"perturbing a KEPT token changed the output by only {delta_kept:.6g}; "
+            "the test is vacuous"
+        )
+        assert inverted > 0.5, (
+            f"the INVERTED-polarity control moved the output by only {inverted:.6g}"
+        )
+        assert delta_masked <= 1e-3, (
+            f"perturbing a MASKED token changed the kept query rows by "
+            f"{delta_masked:.6g} — the mask polarity is INVERTED (control: "
+            f"{inverted:.6g})"
+        )

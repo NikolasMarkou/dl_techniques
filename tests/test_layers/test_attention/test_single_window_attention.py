@@ -253,3 +253,456 @@ class TestEdgeCases:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+# ---------------------------------------------------------------------
+# Mixed-precision mask tests (plan-2026-07-27-b4ef45f0, step 5)
+# ---------------------------------------------------------------------
+#
+# WHAT IS BEING GUARDED HERE.
+#
+# `SingleWindowAttention.call` used the ARITHMETIC mask form
+#
+#     inf_value = ops.convert_to_tensor(-1e9, dtype=attn.dtype)
+#     additive_mask = (1.0 - ops.cast(broadcast_mask, attn.dtype)) * inf_value
+#     attn = attn + additive_mask
+#
+# which `common.MASK_BIAS_VALUE`'s own docstring rules out. Under
+# `mixed_precision.set_global_policy('mixed_float16')` the literal `-1e9` is
+# materialized in float16, where it is `-inf` (np.float16(-1e9) == -inf). At every
+# UNMASKED position `(1.0 - mask) == 0`, so the product is `0 * -inf = NaN`.
+#
+# THIS SITE IS THE ONLY ONE IN THE PACKAGE WITH NO SAFE PATH AT ALL. The mask is
+# not optional: `call()` always builds an internal padding mask and always applies
+# the bias, so `attention_mask=None` goes down exactly the same line. MEASURED on
+# unfixed HEAD (B=2, N=64, dim=64, window_size=8, num_heads=4), GPU 1 / TF 2.18,
+# non-finite entries in the layer OUTPUT:
+#
+#     policy          mask=None   all-ones   right-pad   left-pad
+#     float32            0/8192     0/8192      0/8192     0/8192
+#     mixed_float16   8192/8192  8192/8192   8192/8192  8192/8192
+#     float64            0/8192     0/8192      0/8192     0/8192
+#
+# i.e. this layer produced NOTHING BUT NaN under `mixed_float16`, with or without a
+# caller-supplied mask.
+#
+# THE FIX is `common.apply_attention_mask`, which builds the bias with `ops.where`
+# inside `common.mask_dtype(...)` (>= float32), so `0 * -inf` cannot be formed at
+# all. The site keeps its own `ops.reshape` broadcast and its own `1 = keep`
+# polarity spelling verbatim.
+#
+# THE `clip(attn, -30, 30)` MOVED (decisions.md D-010). It used to run AFTER the
+# mask bias, which floored a masked logit at `-30` instead of `MASK_BIAS_VALUE` —
+# a soft mask, not a hard one. MEASURED: with the relative-position-bias table
+# driven to a uniform `-50` (so every logit sits below the clip floor), perturbing
+# a MASKED token moved the kept query rows by 0.439 against a kept-token signal of
+# 32.6; at `-20` the leak was 2.7e-04, and at the default (~0) it was exactly 0.0.
+# The clip now runs on the RAW scores, before the bias, so it keeps doing the job
+# its own comment claims (bounding the logits) while masking is exact in every
+# regime. See `TestSingleWindowAttentionClipDoesNotFloorTheMask`.
+#
+# ANTI-VACUITY. The `N = 7`-hides-an-fp16-`-inf`-at-`N >= 512` trap does not
+# transfer: this hazard is a per-ELEMENT dtype overflow of a constant multiplied by
+# an exact zero, not a long reduction. It is nevertheless asserted reachable rather
+# than assumed — see `TestSingleWindowAttentionMaskHazardIsReal`. N = 64 keys
+# (window_size 8) is this layer's natural full-window size, not a toy one.
+#
+# A CAUSAL MASK IS NOT REPRESENTABLE AT THIS SITE and is deliberately absent from
+# the mask table below: `call()` accepts a rank-2 `(B, N)` key mask only and
+# reshapes it to `(B, 1, 1, N)`, so every query row sees the same keys. The
+# left-padding mask takes its place as the third structurally-different mask.
+
+from dl_techniques.layers.attention.common import MASK_BIAS_VALUE
+
+_MP_B, _MP_N, _MP_DIM, _MP_H, _MP_WS = 2, 64, 64, 4, 8
+_MP_KEEP = _MP_N // 2
+_MP_SEED = 1234
+
+# Absolute tolerance for "this policy's masked forward agrees with the float32 one".
+#
+# PRE-REGISTERED, not tuned after the fact: sized from this layer's own dtype error
+# with the mask bias NEUTERED to 0.0 (the only forward that survives fp16 on unfixed
+# HEAD, since the bias is applied unconditionally here), measured max |policy -
+# float32| = 0.0081 for mixed_float16 and 0.0083 for float64 against an output
+# absmax of 6.45. The entries below carry ~6x headroom on that. The float64 figure
+# is the larger one because it is measured with TF32 matmuls ENABLED (the GPU
+# default when this file runs alone); a TF32-disabled session only shrinks it, and
+# every tolerance here is an UPPER bound, so both regimes are covered.
+_MP_ATOL = {"float32": 1e-6, "mixed_float16": 0.05, "float64": 0.05}
+
+
+def _mp_input():
+    """Deterministic ``(B, N, dim)`` float32 input, shared by every test below."""
+    return np.random.default_rng(7).standard_normal(
+        (_MP_B, _MP_N, _MP_DIM)
+    ).astype("float32")
+
+
+def _mp_mask(kind):
+    """One of the masks these tests need, as a float32 rank-2 ``1 = keep`` array.
+
+    ``'all_ones'`` masks NOTHING and is the catastrophic case for the arithmetic
+    form. ``'padding'`` masks the second half of the keys, ``'left_padding'`` the
+    first half (the shape a left-padded generation batch produces), and
+    ``'degenerate'`` blanks batch element 0 entirely — the fully-masked case for a
+    site whose mask has no query axis.
+    """
+    if kind == "all_ones":
+        return np.ones((_MP_B, _MP_N), dtype="float32")
+    if kind == "padding":
+        m = np.ones((_MP_B, _MP_N), dtype="float32")
+        m[:, _MP_KEEP:] = 0.0
+        return m
+    if kind == "left_padding":
+        m = np.ones((_MP_B, _MP_N), dtype="float32")
+        m[:, :_MP_KEEP] = 0.0
+        return m
+    if kind == "degenerate":
+        m = np.ones((_MP_B, _MP_N), dtype="float32")
+        m[0, :] = 0.0
+        return m
+    raise ValueError(f"unknown mask kind {kind!r}")
+
+
+def _mp_layer(**kwargs):
+    """A built layer whose TRAINABLE weights are identical under every dtype policy.
+
+    Seeding the initializers is NOT sufficient: a ``glorot_uniform`` draw under a
+    ``float64`` policy differs from the same-seed draw under ``float32`` (the
+    initializer samples in the VARIABLE dtype), so a cross-policy comparison on
+    seeded-but-not-assigned weights measures the initializer, not the code under
+    test. Explicit values are assigned instead.
+    """
+    layer = SingleWindowAttention(
+        dim=_MP_DIM, window_size=_MP_WS, num_heads=_MP_H, **kwargs
+    )
+    layer.build((_MP_B, _MP_N, _MP_DIM))
+    rng = np.random.default_rng(_MP_SEED)
+    for weight in layer.trainable_weights:
+        shape = tuple(weight.shape)
+        if len(shape) == 1 and ("bias" in weight.name or "beta" in weight.name):
+            value = np.zeros(shape)
+        elif len(shape) == 1:
+            value = 1.0 + 0.1 * rng.standard_normal(shape)
+        else:
+            value = 0.2 * rng.standard_normal(shape)
+        weight.assign(keras.ops.cast(
+            keras.ops.convert_to_tensor(value.astype("float32")), weight.dtype
+        ))
+    return layer
+
+
+def _mp_forward(layer, array, mask):
+    """One masked forward pass, returned as float64 numpy."""
+    out = layer(
+        keras.ops.convert_to_tensor(array),
+        attention_mask=(None if mask is None else keras.ops.convert_to_tensor(mask)),
+    )
+    return keras.ops.convert_to_numpy(out).astype("float64")
+
+
+_F32_REFERENCE = {}
+
+
+def _float32_reference(kind):
+    """Masked float32 output for ``kind``, memoized, under an explicit policy.
+
+    This is the CONTROL every mixed-precision assertion compares against. It sets
+    and restores the policy itself, so it is valid whichever parametrization of
+    ``dtype_policy`` happens to reach it first.
+    """
+    if kind not in _F32_REFERENCE:
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy("float32")
+        try:
+            layer = _mp_layer()
+            _F32_REFERENCE[kind] = _mp_forward(
+                layer, _mp_input(), None if kind == "none" else _mp_mask(kind)
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+    return _F32_REFERENCE[kind]
+
+
+class TestSingleWindowAttentionMaskHazardIsReal:
+    """Anti-vacuity. If these stop holding, every fp16 test below is worthless."""
+
+    def test_policy_really_selects_float16_compute(self, dtype_policy):
+        expected = {
+            "float32": "float32",
+            "mixed_float16": "float16",
+            "float64": "float64",
+        }[dtype_policy]
+        assert keras.mixed_precision.global_policy().compute_dtype == expected
+
+    def test_the_arithmetic_form_really_is_nan_in_the_compute_dtype(self):
+        with np.errstate(over="ignore", invalid="ignore"):
+            bias = np.float16(MASK_BIAS_VALUE)
+            assert np.isneginf(bias), (
+                "anti-vacuity FAILED: float16(MASK_BIAS_VALUE) is not -inf, so the "
+                "`0 * -inf` hazard this module guards is not reproducible here."
+            )
+            assert np.isnan(np.float16(0.0) * bias), (
+                "anti-vacuity FAILED: float16(0) * float16(MASK_BIAS_VALUE) is not "
+                "NaN — the arithmetic mask form would be harmless."
+            )
+        assert np.isfinite(np.float32(MASK_BIAS_VALUE)), (
+            "anti-vacuity FAILED: MASK_BIAS_VALUE is not finite in float32, so "
+            "`mask_dtype(...)` would not be a fix."
+        )
+
+    def test_the_all_ones_mask_really_masks_nothing(self):
+        assert int((_mp_mask("all_ones") == 0).sum()) == 0, (
+            "the 'all_ones' mask masks something; it no longer reproduces the "
+            "signature catastrophe (a vacuous mask destroying the batch)"
+        )
+
+    def test_the_partial_masks_really_mask_something(self):
+        for kind in ("padding", "left_padding"):
+            mask = _mp_mask(kind)
+            assert int((mask == 0).sum()) > 0, (
+                f"the {kind!r} mask masks nothing; it cannot detect a regression"
+            )
+            assert not (mask == 0).all(axis=-1).any(), (
+                f"the {kind!r} mask blanks a whole batch element, so it no longer "
+                "isolates the covered case from the degenerate probe"
+            )
+
+    def test_the_degenerate_mask_really_blanks_exactly_one_batch_element(self):
+        mask = _mp_mask("degenerate")
+        empty = (mask == 0).all(axis=-1)
+        assert int(empty.sum()) == 1 and bool(empty[0])
+
+    def test_the_mask_is_not_optional_at_this_site(self):
+        """``attention_mask=None`` still goes through the bias line.
+
+        This is what makes the site unique: ``call()`` always builds an internal
+        padding mask, so there is no "no-mask path" to fall back on. Measured on
+        unfixed HEAD: 8192/8192 NaN under `mixed_float16` with ``mask=None``.
+        """
+        import inspect
+        source = inspect.getsource(SingleWindowAttention.call)
+        assert "final_attention_mask = internal_padding_mask" in source, (
+            "the internal padding mask is no longer applied unconditionally; the "
+            "'mask=None is also broken' claim in these tests is stale"
+        )
+
+    def test_the_probability_sublayer_autocasts_a_float32_input(self, dtype_policy):
+        """Why ``out_dtype`` cannot rescue a fully-masked row at this site."""
+        layer = _mp_layer()
+        prob = layer.attn_prob
+        assert getattr(prob, "autocast", False) is True
+
+        seen = {}
+        original = prob.call
+
+        def spy(x, *args, **kwargs):
+            seen["dtype"] = keras.backend.standardize_dtype(x.dtype)
+            return original(x, *args, **kwargs)
+
+        prob.call = spy
+        try:
+            prob(keras.ops.convert_to_tensor(
+                np.zeros((1, _MP_H, 4, 4), dtype="float32")
+            ))
+        finally:
+            prob.call = original
+
+        expected = keras.mixed_precision.global_policy().compute_dtype
+        assert seen["dtype"] == expected, (
+            f"a float32 tensor entering `attn_prob` was seen inside its call() as "
+            f"{seen['dtype']!r}, not the compute dtype {expected!r}"
+        )
+
+
+class TestSingleWindowAttentionMixedPrecisionMask:
+    """SC1 + SC2: finite AND agreeing with float32, for every legal mask.
+
+    ``'none'`` is included because at this site it is NOT a bypass — see the module
+    note above.
+    """
+
+    @pytest.mark.parametrize(
+        "kind", ["none", "all_ones", "padding", "left_padding"]
+    )
+    def test_masked_forward_is_finite_and_matches_float32(self, dtype_policy, kind):
+        layer = _mp_layer()
+        out = _mp_forward(
+            layer, _mp_input(), None if kind == "none" else _mp_mask(kind)
+        )
+
+        n_bad = int((~np.isfinite(out)).sum())
+        assert n_bad == 0, (
+            f"{n_bad}/{out.size} non-finite output entries for a {kind!r} mask "
+            f"under policy {dtype_policy!r}"
+        )
+
+        reference = _float32_reference(kind)
+        atol = _MP_ATOL[dtype_policy]
+        max_dev = float(np.abs(out - reference).max())
+        assert max_dev <= atol, (
+            f"{kind!r}-masked forward under {dtype_policy!r} deviates from the "
+            f"float32 control by {max_dev:.4g} > {atol:.4g}"
+        )
+        assert float(np.abs(out).max()) > 0.5 * float(np.abs(reference).max()), (
+            f"output absmax {np.abs(out).max():.4g} collapsed relative to the "
+            f"float32 control {np.abs(reference).max():.4g}"
+        )
+
+
+class TestSingleWindowAttentionFullyMaskedRow:
+    """The degenerate case: a batch element that keeps NOTHING.
+
+    This site's mask has no query axis (rank 2, reshaped to ``(B, 1, 1, N)``), so
+    "a row that keeps nothing" means "a batch element whose whole key mask is
+    zero". `common.apply_attention_mask`'s default ``rescue_axis=-1`` treats it as
+    keeping EVERYTHING, so the all-`MASK_BIAS_VALUE` row is never FORMED.
+    """
+
+    def test_a_fully_masked_element_is_finite_and_matches_float32(self, dtype_policy):
+        layer = _mp_layer()
+        out = _mp_forward(layer, _mp_input(), _mp_mask("degenerate"))
+
+        n_bad = int((~np.isfinite(out)).sum())
+        assert n_bad == 0, (
+            f"{n_bad}/{out.size} non-finite output entries for a mask that blanks a "
+            f"whole batch element, under policy {dtype_policy!r}"
+        )
+        reference = _float32_reference("degenerate")
+        atol = _MP_ATOL[dtype_policy]
+        max_dev = float(np.abs(out - reference).max())
+        assert max_dev <= atol, (
+            f"the degenerate-masked forward under {dtype_policy!r} deviates from "
+            f"the float32 control by {max_dev:.4g} > {atol:.4g}"
+        )
+
+    def test_the_rescued_element_behaves_as_if_it_kept_everything(self, dtype_policy):
+        """The rescue's SEMANTICS, not merely its finiteness.
+
+        The ``'degenerate'`` mask is all-ones except for batch element 0, which is
+        blanked. "Keeps nothing => keeps everything" therefore makes it EQUIVALENT
+        to the ``'all_ones'`` mask. That equivalence is the convention this package
+        chose (decisions.md D-008 / D-009), so it is asserted directly.
+        """
+        degenerate = _mp_forward(_mp_layer(), _mp_input(), _mp_mask("degenerate"))
+        all_ones = _mp_forward(_mp_layer(), _mp_input(), _mp_mask("all_ones"))
+
+        atol = _MP_ATOL[dtype_policy]
+        max_dev = float(np.abs(degenerate - all_ones).max())
+        assert max_dev <= atol, (
+            f"under {dtype_policy!r} the 'degenerate' mask does not behave like the "
+            f"'all_ones' mask: max deviation {max_dev:.4g} > {atol:.4g}"
+        )
+        assert float(np.abs(all_ones).max()) > 0.0, (
+            "anti-vacuity FAILED: the all-ones-masked output is identically zero"
+        )
+
+
+class TestSingleWindowAttentionMaskPolarity:
+    """SC6: the mask must suppress the MASKED positions, not the kept ones.
+
+    A polarity inversion here raises nothing, changes no shape and leaves the
+    output perfectly finite; only an influence test can see it. The INVERTED-mask
+    control is measured in the same call so the tolerance cannot be quietly widened
+    into vacuity (`plans/LESSONS.md`: assert a RATIO where an exact zero is not
+    available).
+    """
+
+    @staticmethod
+    def _influence(layer, mask):
+        base_input = _mp_input()
+        perturbed_masked = base_input.copy()
+        perturbed_masked[:, _MP_KEEP + 3, :] += 5.0      # a MASKED token
+        perturbed_kept = base_input.copy()
+        perturbed_kept[:, 3, :] += 5.0                   # a KEPT token
+
+        rows = slice(0, _MP_KEEP)
+        base = _mp_forward(layer, base_input, mask)
+        assert np.isfinite(base[:, rows]).all(), (
+            "the kept query rows are not finite; the comparison below would be "
+            "meaningless"
+        )
+        delta_masked = float(np.abs(
+            _mp_forward(layer, perturbed_masked, mask)[:, rows] - base[:, rows]
+        ).max())
+        delta_kept = float(np.abs(
+            _mp_forward(layer, perturbed_kept, mask)[:, rows] - base[:, rows]
+        ).max())
+        return delta_masked, delta_kept
+
+    def test_a_masked_token_has_no_influence_on_the_kept_rows(self, dtype_policy):
+        layer = _mp_layer()
+        mask = _mp_mask("padding")
+        delta_masked, delta_kept = self._influence(layer, mask)
+        inverted, _ = self._influence(_mp_layer(), 1.0 - mask)
+
+        assert delta_kept > 0.5, (
+            f"perturbing a KEPT token changed the output by only {delta_kept:.6g}; "
+            "the test is vacuous — the layer is ignoring its input"
+        )
+        assert inverted > 0.5, (
+            f"the INVERTED-polarity control moved the output by only "
+            f"{inverted:.6g}; it cannot detect an inversion, so the assertion "
+            "below would be vacuous"
+        )
+        assert delta_masked <= 1e-3, (
+            f"perturbing a MASKED token changed the kept query rows by "
+            f"{delta_masked:.6g} under policy {dtype_policy!r} — this must be "
+            f"exact, so the mask polarity is INVERTED (the inverted-polarity "
+            f"control measures {inverted:.6g})"
+        )
+
+
+class TestSingleWindowAttentionClipDoesNotFloorTheMask:
+    """D-010: ``clip(attn, -30, 30)`` must not turn a hard mask into a soft one.
+
+    On unfixed HEAD the clip ran AFTER the mask bias, so a masked logit was floored
+    at ``-30`` rather than ``MASK_BIAS_VALUE``. When every logit already sits below
+    that floor the mask stops masking. MEASURED on HEAD in float32 with the
+    relative-position-bias table driven to a uniform value:
+
+        rel_pos_bias      0.0     -20.0     -50.0
+        delta_masked      0.0   2.73e-04     0.439
+        delta_kept       29.0      31.6      32.6
+
+    So the defect is real and dtype-independent, but only visible once the logits
+    are pushed under the clip floor — which is exactly why it survived unnoticed
+    and why this test drives the bias table explicitly instead of hoping a random
+    input reaches the regime.
+    """
+
+    @staticmethod
+    def _leak(bias_value):
+        layer = _mp_layer()
+        layer.relative_position_bias_table.assign(keras.ops.cast(
+            keras.ops.convert_to_tensor(np.full(
+                tuple(layer.relative_position_bias_table.shape),
+                bias_value, dtype="float32",
+            )),
+            layer.relative_position_bias_table.dtype,
+        ))
+        mask = _mp_mask("padding")
+        base_input = _mp_input()
+        perturbed = base_input.copy()
+        perturbed[:, _MP_KEEP + 3, :] += 5.0
+        rows = slice(0, _MP_KEEP)
+        base = _mp_forward(layer, base_input, mask)
+        return float(np.abs(
+            _mp_forward(layer, perturbed, mask)[:, rows] - base[:, rows]
+        ).max())
+
+    def test_the_hazard_regime_is_reachable(self):
+        """Anti-vacuity: the -50 bias really does push every logit under the clip."""
+        assert self._leak(0.0) <= 1e-6, (
+            "even at the default bias the mask leaks; the two regimes below are "
+            "not distinguishable and this test proves nothing"
+        )
+
+    @pytest.mark.parametrize("bias_value", [-20.0, -50.0])
+    def test_a_masked_token_stays_powerless_below_the_clip_floor(self, bias_value):
+        leak = self._leak(bias_value)
+        assert leak <= 1e-6, (
+            f"with the relative-position bias driven to {bias_value}, perturbing a "
+            f"MASKED token moved the kept rows by {leak:.6g}. The mask bias is "
+            f"being floored by `clip(attn, -30, 30)` instead of suppressing the "
+            f"position (measured 0.439 at -50 on unfixed HEAD)."
+        )

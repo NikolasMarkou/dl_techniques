@@ -62,7 +62,12 @@ from typing import Optional, Union, Any, Dict, Tuple
 # ---------------------------------------------------------------------
 
 from dl_techniques.utils.logger import logger
-from .common import compute_attention_scale, validate_head_divisibility
+from .common import (
+    apply_attention_mask,
+    compute_attention_scale,
+    mask_dtype,
+    validate_head_divisibility,
+)
 from ..norms.factory import create_normalization_layer
 
 
@@ -494,6 +499,70 @@ class RingAttention(keras.layers.Layer):
         # order map 1:1 to the original q_start offsets along axis=2).
         block_outputs = []
 
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-011
+        # TWO things happen here that do NOT happen at the other nine mask sites,
+        # and both are forced by the ONLINE (blockwise) softmax below.
+        #
+        # (1) THE ACCUMULATION RUNS IN `mask_dtype(...)` WHENEVER A MASK IS
+        #     SUPPLIED. `running_max` starts at `-inf`, so a `(q_block, kv_block)`
+        #     tile whose rows are ALL masked gives `block_max = -inf`, and the very
+        #     next line evaluates `running_max - new_max` = `-inf - -inf` = **NaN**,
+        #     which then multiplies into `running_sum` and `accumulated_output` and
+        #     destroys the row. With a FINITE `MASK_BIAS_VALUE` the same algebra is
+        #     exactly right (the tile contributes `exp(-1e9 - new_max) == 0`, and a
+        #     later tile's larger max renormalizes any transient to zero) — which is
+        #     why float32 has always been correct here and fp16 has always been
+        #     broken. An entirely-masked tile is NOT exotic: a left-padded batch
+        #     blanks the leading kv blocks outright, and a causal mask blanks every
+        #     strictly-upper tile.
+        #     WHAT NOT TO DO: do NOT pass `out_dtype=<compute dtype>` here "for
+        #     consistency with the other nine sites". Those sites hand their biased
+        #     logits straight to a softmax, which tolerates `-inf`; this one feeds a
+        #     running max/sum recurrence, which does not. Do NOT instead special-case
+        #     `-inf` with `ops.where(...)` after the fact: the unselected branch still
+        #     contributes `0 * NaN` in the BACKWARD pass (the same trap D-003/D-006
+        #     rejected). Do NOT seed `running_max` with a per-dtype finite floor
+        #     either — `common.py`'s D-002 anchor rules out per-dtype magic constants.
+        #     ACCEPTED COST: under `mixed_float16` a MASKED forward accumulates in
+        #     float32, so it costs more memory/bandwidth than the unmasked one. That
+        #     is what every production flash-attention kernel does anyway. The
+        #     no-mask path keeps the compute dtype and traces the same graph as
+        #     before (every `ops.cast` below is an identity in that case).
+        #
+        # (2) THE DEGENERATE-ROW RESCUE IS DONE ONCE, HERE, OVER THE FULL KEY AXIS —
+        #     and the per-block call below therefore passes `rescue_axis=None`.
+        #     `apply_attention_mask`'s default `rescue_axis=-1` means "a row that
+        #     keeps nothing keeps everything", but inside this loop a "row" is one
+        #     TILE of the key axis, not the whole key axis. Applied per tile it would
+        #     read every entirely-masked tile as degenerate and UN-MASK it — under a
+        #     causal mask that lets a query attend to the FUTURE, silently, with a
+        #     perfectly finite output. MEASURED with that injection: a future token
+        #     moved the earliest query rows by 24.14 in float32, mixed_float16 AND
+        #     float64 (0.0 for the code as shipped) while every finiteness test in
+        #     the module still passed. Pinned by
+        #     `TestRingAttentionCausalitySurvivesTheRescue`.
+        #     WHAT NOT TO DO: do NOT "simplify" this by deleting the pre-loop rescue
+        #     and letting the helper's default do the work per block. Do NOT move the
+        #     rescue after the loop either: by then the fp16 NaN has already been
+        #     formed in `running_max`.
+        # See decisions.md D-011 (plan-2026-07-27T183600-b4ef45f0).
+        state_dtype = keras.backend.standardize_dtype(queries.dtype)
+        if attention_mask is not None:
+            state_dtype = mask_dtype(state_dtype)
+            # THIS SITE'S MASK POLARITY, passed through verbatim: `1 = keep`. The
+            # rescue is spelled on the PREDICATE, exactly as `apply_attention_mask`
+            # spells it internally, so that no all-`MASK_BIAS_VALUE` row is ever
+            # FORMED (and no NaN gradient with it). It is duplicated here rather
+            # than extracted because a rescue-only helper in `common.py` is a named
+            # STOP tripwire for this plan, and the parameter cannot express
+            # "reduce over an axis the caller has split into tiles".
+            _keep = ops.cast(attention_mask, state_dtype) > 0.0
+            _keep = ops.logical_or(
+                _keep,
+                ops.logical_not(ops.any(_keep, axis=-1, keepdims=True)),
+            )
+            attention_mask = ops.cast(_keep, state_dtype)
+
         # Process each query block
         for q_block_idx in range(num_blocks):
             # Get query block bounds
@@ -505,17 +574,19 @@ class RingAttention(keras.layers.Layer):
 
             # Initialize running statistics for online softmax
             # (batch, num_heads, q_block_size)
+            # `state_dtype` is the compute dtype when no mask is supplied and
+            # `mask_dtype(...)` when one is — see the D-011 anchor above.
             running_max = ops.full(
                 (batch_size, num_heads, q_block_size),
                 -float('inf'),
-                dtype=queries.dtype
+                dtype=state_dtype
             )
             running_sum = ops.zeros(
                 (batch_size, num_heads, q_block_size),
-                dtype=queries.dtype
+                dtype=state_dtype
             )
             # (batch, num_heads, q_block_size, head_dim)
-            accumulated_output = ops.zeros_like(q_block)
+            accumulated_output = ops.cast(ops.zeros_like(q_block), state_dtype)
 
             # Process each key/value block for this query block
             for kv_block_idx in range(num_blocks):
@@ -542,18 +613,17 @@ class RingAttention(keras.layers.Layer):
                 # reusing the PREVIOUS block's slice) instead of a clear
                 # `ValueError`. Reported, not fixed, in this plan.
                 #
-                # KNOWN DEFECT #2 (pre-existing, deliberately NOT fixed here — it is
-                # a dtype change on the forward path): this is the systemic fp16
-                # mask hazard catalogued across this package. `mask_slice` is cast to
-                # `scores.dtype`, and under `mixed_float16` that dtype is fp16 where
-                # `np.float16(-1e9) == -inf`. At every UNMASKED position the
-                # arithmetic form `(1.0 - mask_slice) * -1e9` is then `0 * -inf`,
-                # which is `NaN` — so supplying a mask under a mixed-precision policy
-                # poisons the whole output, and supplying no mask is fine. The
-                # structural fix is `common.MASK_BIAS_VALUE` + `common.mask_dtype()`
-                # + an `ops.where` form (see `common.py`'s D-002 block), which cannot
-                # produce `0 * inf` at all. No test exercises this layer under
-                # `mixed_float16`. Reported, not fixed, in this plan.
+                # DEFECT #2 — FIXED (plan-2026-07-27T183600-b4ef45f0, step 5). The
+                # bias used to be the arithmetic form `(1.0 - mask_slice) * -1e9`
+                # evaluated in `scores.dtype`; under `mixed_float16` that made
+                # `-1e9` into `-inf` and every UNMASKED position `0 * -inf = NaN`.
+                # MEASURED at (B=2, N=64, dim=64, num_heads=4, block_size=16):
+                # 8192/8192 NaN for an all-ones mask, right padding, left padding
+                # AND a causal mask, with float32 and float64 at 0/8192 and an fp16
+                # no-mask forward also clean. It now delegates to
+                # `common.apply_attention_mask`; see the D-011 anchor above the loop
+                # for why this site's `out_dtype` and `rescue_axis` differ from every
+                # other adoption in the package.
                 if attention_mask is not None:
                     # Extract relevant portion of mask for these blocks
                     if len(ops.shape(attention_mask)) == 3:
@@ -566,10 +636,17 @@ class RingAttention(keras.layers.Layer):
                         # (batch, num_heads, seq_len, seq_len) -> extract block region
                         mask_slice = attention_mask[:, :, q_start:q_end, kv_start:kv_end]
 
-                    # Convert mask to additive form: 0 -> -inf, 1 -> 0
+                    # Convert mask to additive form: 0 -> MASK_BIAS_VALUE, 1 -> 0.
+                    # `mask_slice` is this site's `1 = keep` predicate, passed
+                    # through verbatim (no `> 0` comparison invented, no inversion —
+                    # the helper performs no polarity inference by design).
                     mask_slice = ops.cast(mask_slice, scores.dtype)
-                    mask_slice = (1.0 - mask_slice) * -1e9
-                    scores = scores + mask_slice
+                    scores = apply_attention_mask(
+                        scores,
+                        mask_slice,
+                        out_dtype=state_dtype,
+                        rescue_axis=None,   # D-011: rescued once, before the loop
+                    )
 
                 # Compute new maximum for safe softmax
                 # (batch, num_heads, q_block_size)
@@ -588,14 +665,22 @@ class RingAttention(keras.layers.Layer):
                 # (batch, num_heads, q_block_size, kv_block_size)
                 new_scores = ops.exp(scores - ops.expand_dims(new_max, axis=-1))
 
-                # Apply dropout to attention weights
+                # Apply dropout to attention weights. The cast back to `state_dtype`
+                # is required, not cosmetic: `self.dropout` is a Keras layer with
+                # autocasting ON, so under `mixed_float16` it returns fp16 even when
+                # handed the float32 accumulation, and the matmul below would then
+                # see two different dtypes. It is an identity on the no-mask path.
                 if training and self.dropout_rate > 0:
-                    new_scores = self.dropout(new_scores, training=training)
+                    new_scores = ops.cast(
+                        self.dropout(new_scores, training=training), state_dtype
+                    )
 
                 # Accumulate new attention output
                 # (batch, num_heads, q_block_size, kv_block_size) @ (batch, num_heads, kv_block_size, head_dim)
                 # -> (batch, num_heads, q_block_size, head_dim)
-                new_output = ops.matmul(new_scores, v_block)
+                # `ops.cast(..., state_dtype)` is an identity on the no-mask path and
+                # promotes the values to the float32 accumulation on the masked one.
+                new_output = ops.matmul(new_scores, ops.cast(v_block, state_dtype))
                 accumulated_output = accumulated_output + new_output
 
                 # Update running sum
@@ -615,7 +700,9 @@ class RingAttention(keras.layers.Layer):
         # numerically identical to the prior slice_update assembly, and the
         # last (possibly partial) block carries its own size via the q-slice.
         outputs = ops.concatenate(block_outputs, axis=2)
-        return outputs
+        # Back to the layer's compute dtype. An identity unless a mask promoted the
+        # accumulation to `mask_dtype(...)` — see the D-011 anchor above.
+        return ops.cast(outputs, keras.backend.standardize_dtype(queries.dtype))
 
     def compute_output_shape(self, input_shape: Tuple[Optional[int], ...]) -> Tuple[Optional[int], ...]:
         """Compute the output shape of the layer.

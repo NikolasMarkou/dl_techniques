@@ -255,3 +255,445 @@ class TestGraphSafetyRegression:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------
+# Mixed-precision mask tests (plan-2026-07-27-b4ef45f0, step 5)
+# ---------------------------------------------------------------------
+#
+# WHAT IS BEING GUARDED HERE.
+#
+# `RingAttention._blockwise_attention` used the ARITHMETIC mask form
+#
+#     mask_slice = ops.cast(mask_slice, scores.dtype)
+#     mask_slice = (1.0 - mask_slice) * -1e9
+#     scores = scores + mask_slice
+#
+# which `common.MASK_BIAS_VALUE`'s own docstring rules out. Under
+# `mixed_precision.set_global_policy('mixed_float16')` the literal `-1e9` is
+# materialized in float16, where it is `-inf`; at every UNMASKED position
+# `(1.0 - mask) == 0`, so the product is `0 * -inf = NaN`.
+#
+# MEASURED on unfixed HEAD (B=2, N=64, dim=64, num_heads=4, block_size=16), GPU 1 /
+# TF 2.18, non-finite entries in the layer OUTPUT:
+#
+#     policy          no mask   all-ones   right-pad   left-pad   causal
+#     float32          0/8192     0/8192      0/8192     0/8192   0/8192
+#     mixed_float16    0/8192  8192/8192   8192/8192  8192/8192 8192/8192
+#     float64          0/8192     0/8192      0/8192     0/8192   0/8192
+#
+# THIS SITE IS STRUCTURALLY DIFFERENT FROM THE OTHER NINE, and the difference
+# drives two decisions that these tests pin (decisions.md D-011):
+#
+#  1. THE PER-BLOCK RESCUE WOULD BREAK CAUSALITY. The softmax here is ONLINE: the
+#     mask is applied to one `(q_block, kv_block)` tile at a time. Under a causal
+#     mask every strictly-upper tile is ENTIRELY masked, so
+#     `apply_attention_mask(..., rescue_axis=-1)` — "a row that keeps nothing keeps
+#     everything" — would resurrect exactly those tiles and let a query attend to
+#     the future, with no exception and a perfectly finite output. This site
+#     therefore passes `rescue_axis=None` and performs ONE rescue over the FULL key
+#     axis before the loop, which is what the parameter means when the key axis is
+#     not split. `TestRingAttentionCausalitySurvivesTheRescue` is the guard;
+#     injecting the per-block rescue makes it fail while every finiteness test still
+#     passes.
+#
+#  2. THE ONLINE-SOFTMAX STATE CANNOT HOLD `-inf`. `running_max` starts at `-inf`,
+#     so a tile whose rows are ALL masked gives `block_max = -inf`, and
+#     `running_max - new_max` is then `-inf - -inf = NaN` — the whole row is lost.
+#     With a FINITE `MASK_BIAS_VALUE` the same algebra is exactly correct (the tile
+#     contributes `exp(-1e9 - new_max) == 0`, and a later tile's larger max
+#     renormalizes any transient away), which is why float32 is fine today and fp16
+#     is not. The accumulation therefore runs in `common.mask_dtype(...)` WHENEVER A
+#     MASK IS SUPPLIED; the no-mask path keeps the compute dtype and traces the same
+#     graph as before. The `left_padding` mask below is the case that makes this
+#     non-optional: it blanks the first two kv blocks outright.
+#
+# ANTI-VACUITY. The `N = 7`-hides-an-fp16-`-inf`-at-`N >= 512` trap does not
+# transfer for the `0 * -inf` product (it is per-element), but the BLOCK structure
+# does matter here, so the tests assert that the chosen `block_size` really splits
+# the sequence into several blocks and that `left_padding` really blanks whole
+# tiles — see `TestRingAttentionMaskHazardIsReal`.
+
+from dl_techniques.layers.attention.common import MASK_BIAS_VALUE
+
+_MP_B, _MP_N, _MP_DIM, _MP_H, _MP_BLOCK = 2, 64, 64, 4, 16
+_MP_KEEP = _MP_N // 2
+_MP_DEG_ROW = 5
+_MP_SEED = 1234
+
+# Absolute tolerance for "this policy's masked forward agrees with the float32 one".
+#
+# PRE-REGISTERED, not tuned after the fact: sized from this layer's own NO-MASK
+# dtype error measured on unfixed HEAD, max |policy - float32| = 0.0108
+# (mixed_float16) and 0.0054 (float64) against an output absmax of 5.94. The
+# entries below carry ~5x headroom on that. Both are UPPER bounds, so a
+# TF32-disabled session (which only shrinks the float64 figure — see
+# `test_linear_attention.py`'s process-global
+# `enable_tensor_float_32_execution(False)` at import time) is covered too.
+_MP_ATOL = {"float32": 1e-6, "mixed_float16": 0.05, "float64": 0.05}
+
+
+def _mp_input():
+    """Deterministic ``(B, N, dim)`` float32 input, shared by every test below."""
+    return np.random.default_rng(7).standard_normal(
+        (_MP_B, _MP_N, _MP_DIM)
+    ).astype("float32")
+
+
+def _mp_mask(kind):
+    """One of the masks these tests need, as a float32 rank-3 ``1 = keep`` array.
+
+    ``'left_padding'`` is the ring-specific case: it blanks the first half of the
+    KEYS, i.e. the first two kv BLOCKS entirely, which is what puts an all-masked
+    tile at the very start of the online-softmax accumulation.
+    """
+    if kind == "all_ones":
+        return np.ones((_MP_B, _MP_N, _MP_N), dtype="float32")
+    if kind == "padding":
+        m = np.ones((_MP_B, _MP_N, _MP_N), dtype="float32")
+        m[:, :, _MP_KEEP:] = 0.0
+        return m
+    if kind == "left_padding":
+        m = np.ones((_MP_B, _MP_N, _MP_N), dtype="float32")
+        m[:, :, :_MP_KEEP] = 0.0
+        return m
+    if kind == "causal":
+        return np.broadcast_to(
+            np.tril(np.ones((_MP_N, _MP_N), dtype="float32")),
+            (_MP_B, _MP_N, _MP_N),
+        ).copy()
+    if kind == "degenerate":
+        m = np.ones((_MP_B, _MP_N, _MP_N), dtype="float32")
+        m[:, _MP_DEG_ROW, :] = 0.0
+        return m
+    raise ValueError(f"unknown mask kind {kind!r}")
+
+
+def _mp_layer(**kwargs):
+    """A built layer whose TRAINABLE weights are identical under every dtype policy."""
+    layer = RingAttention(
+        dim=_MP_DIM, num_heads=_MP_H, block_size=_MP_BLOCK, **kwargs
+    )
+    layer.build((_MP_B, _MP_N, _MP_DIM))
+    rng = np.random.default_rng(_MP_SEED)
+    for weight in layer.trainable_weights:
+        shape = tuple(weight.shape)
+        if len(shape) == 1 and ("bias" in weight.name or "beta" in weight.name):
+            value = np.zeros(shape)
+        elif len(shape) == 1:
+            value = 1.0 + 0.1 * rng.standard_normal(shape)
+        else:
+            value = 0.2 * rng.standard_normal(shape)
+        weight.assign(keras.ops.cast(
+            keras.ops.convert_to_tensor(value.astype("float32")), weight.dtype
+        ))
+    return layer
+
+
+def _mp_forward(layer, array, mask):
+    """One masked forward pass, returned as float64 numpy."""
+    out = layer(
+        keras.ops.convert_to_tensor(array),
+        attention_mask=(None if mask is None else keras.ops.convert_to_tensor(mask)),
+    )
+    return keras.ops.convert_to_numpy(out).astype("float64")
+
+
+_F32_REFERENCE = {}
+
+
+def _float32_reference(kind):
+    """Masked float32 output for ``kind``, memoized, under an explicit policy."""
+    if kind not in _F32_REFERENCE:
+        previous = keras.mixed_precision.global_policy().name
+        keras.mixed_precision.set_global_policy("float32")
+        try:
+            _F32_REFERENCE[kind] = _mp_forward(
+                _mp_layer(), _mp_input(), _mp_mask(kind)
+            )
+        finally:
+            keras.mixed_precision.set_global_policy(previous)
+    return _F32_REFERENCE[kind]
+
+
+class TestRingAttentionMaskHazardIsReal:
+    """Anti-vacuity. If these stop holding, every fp16 test below is worthless."""
+
+    def test_policy_really_selects_float16_compute(self, dtype_policy):
+        expected = {
+            "float32": "float32",
+            "mixed_float16": "float16",
+            "float64": "float64",
+        }[dtype_policy]
+        assert keras.mixed_precision.global_policy().compute_dtype == expected
+
+    def test_the_arithmetic_form_really_is_nan_in_the_compute_dtype(self):
+        with np.errstate(over="ignore", invalid="ignore"):
+            bias = np.float16(MASK_BIAS_VALUE)
+            assert np.isneginf(bias), (
+                "anti-vacuity FAILED: float16(MASK_BIAS_VALUE) is not -inf"
+            )
+            assert np.isnan(np.float16(0.0) * bias), (
+                "anti-vacuity FAILED: float16(0) * float16(MASK_BIAS_VALUE) is not NaN"
+            )
+        assert np.isfinite(np.float32(MASK_BIAS_VALUE))
+        with np.errstate(invalid="ignore"):
+            assert np.isnan(np.float32(-np.inf) - np.float32(-np.inf)), (
+                "anti-vacuity FAILED: `-inf - -inf` is not NaN, so the online-softmax "
+                "`running_max - new_max` hazard this site's dtype choice guards "
+                "against is not reproducible"
+            )
+
+    def test_the_sequence_really_splits_into_several_blocks(self):
+        assert _MP_N // _MP_BLOCK >= 4, (
+            f"seq_len {_MP_N} / block_size {_MP_BLOCK} gives fewer than 4 blocks; "
+            "the blockwise online-softmax hazards below are not exercised"
+        )
+
+    def test_left_padding_really_blanks_whole_kv_blocks(self):
+        mask = _mp_mask("left_padding")
+        first_tile = mask[:, :_MP_BLOCK, :_MP_BLOCK]
+        assert int((first_tile != 0).sum()) == 0, (
+            "the 'left_padding' mask does not blank the FIRST (q_block 0, kv_block "
+            "0) tile, so it cannot reach the `-inf - -inf = NaN` state of the "
+            "online softmax"
+        )
+
+    def test_the_causal_mask_really_blanks_whole_off_diagonal_tiles(self):
+        mask = _mp_mask("causal")
+        upper_tile = mask[:, :_MP_BLOCK, _MP_BLOCK:2 * _MP_BLOCK]
+        assert int((upper_tile != 0).sum()) == 0, (
+            "the causal mask does not fully blank the (q_block 0, kv_block 1) tile, "
+            "so `TestRingAttentionCausalitySurvivesTheRescue` cannot detect a "
+            "per-block rescue"
+        )
+
+    def test_the_all_ones_mask_really_masks_nothing(self):
+        assert int((_mp_mask("all_ones") == 0).sum()) == 0
+
+    def test_the_degenerate_mask_really_has_exactly_one_fully_masked_row(self):
+        empty = (_mp_mask("degenerate") == 0).all(axis=-1)
+        assert int(empty.sum()) == _MP_B and bool(empty[:, _MP_DEG_ROW].all())
+
+
+class TestRingAttentionMixedPrecisionMask:
+    """SC1 + SC2: finite AND agreeing with float32, for every legal mask."""
+
+    @pytest.mark.parametrize(
+        "kind", ["all_ones", "padding", "left_padding", "causal"]
+    )
+    def test_masked_forward_is_finite_and_matches_float32(self, dtype_policy, kind):
+        out = _mp_forward(_mp_layer(), _mp_input(), _mp_mask(kind))
+
+        n_bad = int((~np.isfinite(out)).sum())
+        assert n_bad == 0, (
+            f"{n_bad}/{out.size} non-finite output entries for a {kind!r} mask "
+            f"under policy {dtype_policy!r}"
+        )
+
+        reference = _float32_reference(kind)
+        atol = _MP_ATOL[dtype_policy]
+        max_dev = float(np.abs(out - reference).max())
+        assert max_dev <= atol, (
+            f"{kind!r}-masked forward under {dtype_policy!r} deviates from the "
+            f"float32 control by {max_dev:.4g} > {atol:.4g}"
+        )
+        assert float(np.abs(out).max()) > 0.5 * float(np.abs(reference).max())
+
+
+class TestRingAttentionFullyMaskedRow:
+    """A fully-masked query row is RESCUED — over the FULL key axis, not per block."""
+
+    def test_a_fully_masked_row_is_finite_and_matches_float32(self, dtype_policy):
+        out = _mp_forward(_mp_layer(), _mp_input(), _mp_mask("degenerate"))
+        n_bad = int((~np.isfinite(out)).sum())
+        assert n_bad == 0, (
+            f"{n_bad}/{out.size} non-finite output entries for a mask with a "
+            f"FULLY-MASKED query row, under policy {dtype_policy!r}"
+        )
+        reference = _float32_reference("degenerate")
+        atol = _MP_ATOL[dtype_policy]
+        max_dev = float(np.abs(out - reference).max())
+        assert max_dev <= atol, (
+            f"the degenerate-masked forward under {dtype_policy!r} deviates from "
+            f"the float32 control by {max_dev:.4g} > {atol:.4g}"
+        )
+
+    def test_the_rescued_row_behaves_as_if_it_kept_everything(self, dtype_policy):
+        """The rescue's SEMANTICS, matching the other five sites in the package.
+
+        ANTI-VACUITY: on the pre-fix code this fails in float32 too — the online
+        softmax gave that row a UNIFORM average over all keys (every tile
+        contributing `exp(-1e9 - -1e9) == 1`), which is a different answer from
+        `softmax(unmasked logits)`.
+        """
+        degenerate = _mp_forward(_mp_layer(), _mp_input(), _mp_mask("degenerate"))
+        all_ones = _mp_forward(_mp_layer(), _mp_input(), _mp_mask("all_ones"))
+        max_dev = float(np.abs(degenerate - all_ones).max())
+        atol = _MP_ATOL[dtype_policy]
+        assert max_dev <= atol, (
+            f"under {dtype_policy!r} the 'degenerate' mask does not behave like the "
+            f"'all_ones' mask: max deviation {max_dev:.4g} > {atol:.4g}"
+        )
+        assert float(np.abs(all_ones).max()) > 0.0
+
+
+class TestRingAttentionCausalitySurvivesTheRescue:
+    """decisions.md D-011: the degenerate-row rescue must NOT be applied per block.
+
+    Under a causal mask every strictly-upper `(q_block, kv_block)` tile is entirely
+    masked. A `rescue_axis=-1` passed to `apply_attention_mask` inside the block
+    loop would read those tiles as "this row keeps nothing" and un-mask them, so a
+    query would attend to the FUTURE — finite, silent, and catastrophic.
+
+    INJECTION-PROVEN: with the per-block rescue spliced in (`rescue_axis=-1` on the
+    in-loop call), this test fails in ALL THREE policies — measured leak 24.1418
+    (float32) / 24.1410 (mixed_float16) / 24.1426 (float64), against 0.0 for the
+    shipped code — while every finiteness test in this module still passes. That is the "inject a dead
+    component, not just the bug" discipline — a finiteness-only suite cannot see it.
+    """
+
+    def test_a_future_token_cannot_reach_an_earlier_query_row(self, dtype_policy):
+        layer = _mp_layer()
+        mask = _mp_mask("causal")
+        base_input = _mp_input()
+
+        future = 2 * _MP_BLOCK + 3          # lives in kv_block 2
+        early_rows = slice(0, _MP_BLOCK)    # query rows in q_block 0
+
+        perturbed_future = base_input.copy()
+        perturbed_future[:, future, :] += 5.0
+        perturbed_past = base_input.copy()
+        perturbed_past[:, 1, :] += 5.0      # a token those rows MAY see
+
+        base = _mp_forward(layer, base_input, mask)
+        assert np.isfinite(base[:, early_rows]).all(), (
+            "the early query rows are not finite; the comparison below would be "
+            "meaningless"
+        )
+        leak = float(np.abs(
+            _mp_forward(layer, perturbed_future, mask)[:, early_rows]
+            - base[:, early_rows]).max())
+        signal = float(np.abs(
+            _mp_forward(layer, perturbed_past, mask)[:, early_rows]
+            - base[:, early_rows]).max())
+
+        assert signal > 0.5, (
+            f"perturbing a VISIBLE past token moved the early rows by only "
+            f"{signal:.6g}; the test is vacuous"
+        )
+        assert leak <= 1e-3, (
+            f"perturbing a FUTURE token (index {future}, kv_block "
+            f"{future // _MP_BLOCK}) moved query rows 0..{_MP_BLOCK - 1} by "
+            f"{leak:.6g} under {dtype_policy!r}. Causality is broken — an entirely "
+            f"masked block was resurrected by a per-block degenerate-row rescue "
+            f"(measured 24.14 in every policy with that injection)."
+        )
+
+
+class TestRingAttentionMaskPolarity:
+    """SC6: the mask must suppress the MASKED positions, not the kept ones."""
+
+    @staticmethod
+    def _influence(layer, mask):
+        base_input = _mp_input()
+        perturbed_masked = base_input.copy()
+        perturbed_masked[:, _MP_KEEP + 3, :] += 5.0      # a MASKED token
+        perturbed_kept = base_input.copy()
+        perturbed_kept[:, 3, :] += 5.0                   # a KEPT token
+
+        rows = slice(0, _MP_KEEP)
+        base = _mp_forward(layer, base_input, mask)
+        assert np.isfinite(base[:, rows]).all(), (
+            "the kept query rows are not finite; the comparison below would be "
+            "meaningless"
+        )
+        delta_masked = float(np.abs(
+            _mp_forward(layer, perturbed_masked, mask)[:, rows] - base[:, rows]
+        ).max())
+        delta_kept = float(np.abs(
+            _mp_forward(layer, perturbed_kept, mask)[:, rows] - base[:, rows]
+        ).max())
+        return delta_masked, delta_kept
+
+    def test_a_masked_token_has_no_influence_on_the_kept_rows(self, dtype_policy):
+        mask = _mp_mask("padding")
+        delta_masked, delta_kept = self._influence(_mp_layer(), mask)
+        inverted, _ = self._influence(_mp_layer(), 1.0 - mask)
+
+        assert delta_kept > 0.5, (
+            f"perturbing a KEPT token changed the output by only {delta_kept:.6g}; "
+            "the test is vacuous"
+        )
+        assert inverted > 0.5, (
+            f"the INVERTED-polarity control moved the output by only {inverted:.6g}"
+        )
+        assert delta_masked <= 1e-3, (
+            f"perturbing a MASKED token changed the kept query rows by "
+            f"{delta_masked:.6g} under policy {dtype_policy!r} — the mask polarity "
+            f"is INVERTED (control: {inverted:.6g})"
+        )
+
+
+class TestRingAttentionMaskedGraphSafety:
+    """The masked path must still trace and jit-compile.
+
+    The blockwise loop is already fully unrolled at trace time; the mask fix adds a
+    `mask_dtype` accumulation and one `ops.any`/`ops.logical_or` pair, none of which
+    may introduce a data-dependent Python branch.
+    """
+
+    def test_masked_forward_is_jit_compilable_and_matches_eager(self, dtype_policy):
+        layer = _mp_layer()
+        x = keras.ops.convert_to_tensor(_mp_input())
+        m = keras.ops.convert_to_tensor(_mp_mask("causal"))
+
+        eager = np.asarray(
+            keras.ops.convert_to_numpy(layer(x, attention_mask=m))
+        ).astype("float64")
+
+        @tf.function(jit_compile=True)
+        def compiled(inputs, mask):
+            return layer(inputs, attention_mask=mask)
+
+        jitted = np.asarray(
+            keras.ops.convert_to_numpy(compiled(x, m))
+        ).astype("float64")
+
+        assert np.isfinite(jitted).all(), (
+            f"the jit-compiled masked forward is non-finite under {dtype_policy!r}"
+        )
+        # A FLAT tolerance, deliberately not `_MP_ATOL`: this is a jit-vs-eager
+        # comparison inside ONE dtype, not a cross-dtype one. XLA reassociates the
+        # blockwise accumulation and may pick TF32 matmuls where eager does not, so
+        # even float32 disagrees — MEASURED 0.0151 on unfixed HEAD, against an
+        # output absmax of ~5.9 (0.25% relative). 0.05 keeps ~3x headroom on that
+        # while still failing loudly on a NaN or a collapsed output.
+        max_dev = float(np.abs(jitted - eager).max())
+        assert max_dev <= 0.05, (
+            f"jit-compiled output deviates from eager by {max_dev:.4g} under "
+            f"{dtype_policy!r}"
+        )
+        assert float(np.abs(jitted).max()) > 0.5 * float(np.abs(eager).max()), (
+            "the jit-compiled output collapsed relative to eager"
+        )
+
+
+class TestRingAttentionRank2MaskIsStillAKnownDefect:
+    """Step 7 territory, pinned here so step 5 cannot silently change it.
+
+    A rank-2 `(batch, seq_len)` padding mask falls through BOTH branches of the
+    rank dispatch, leaving `mask_slice` unbound. Step 5 touches only the bias
+    expression, the accumulation dtype and one pre-loop rescue, so this must still
+    raise afterwards. Step 7 replaces it with a rank-2 branch plus a named
+    `ValueError`, at which point this test is expected to fail and be rewritten.
+    """
+
+    def test_a_rank_2_mask_still_raises_unbound_local_error(self):
+        layer = _mp_layer()
+        mask = np.ones((_MP_B, _MP_N), dtype="float32")
+        with pytest.raises(UnboundLocalError):
+            layer(
+                keras.ops.convert_to_tensor(_mp_input()),
+                attention_mask=keras.ops.convert_to_tensor(mask),
+            )
