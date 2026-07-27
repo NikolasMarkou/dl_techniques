@@ -52,6 +52,32 @@ from .multi_head_cross_attention import MultiHeadCrossAttention
 
 # ---------------------------------------------------------------------
 
+
+def _is_list_of_shapes(s: Any) -> bool:
+    """Return whether ``s`` is a container of SHAPES rather than a single shape.
+
+    THIS MODULE'S shape-classification predicate. It is deliberately module-level
+    rather than nested inside ``build`` so that ``build`` and
+    ``compute_output_shape`` are guaranteed to classify identically — the two
+    disagreeing is exactly the defect fixed by ``plan-2026-07-27T183600-b4ef45f0``
+    step 6 (see the ``D-003`` anchor in :meth:`PerceiverAttention.build`).
+
+    :param s: A shape, or a container of shapes.
+    :type s: Any
+
+    :return: ``True`` if ``s``'s first element is itself a shape (list/tuple),
+        i.e. ``s`` describes MULTIPLE inputs; ``False`` if ``s`` is one shape.
+    :rtype: bool
+    """
+    return (
+        isinstance(s, (list, tuple))
+        and len(s) > 0
+        and isinstance(s[0], (list, tuple))
+    )
+
+
+# ---------------------------------------------------------------------
+
 @keras.saving.register_keras_serializable()
 class PerceiverAttention(keras.layers.Layer):
     """Perceiver-style asymmetric cross-attention with shared projection interface.
@@ -264,13 +290,12 @@ class PerceiverAttention(keras.layers.Layer):
         # into a shared helper: each classifies serialized-shape edge cases
         # differently, so one body would silently change two other layers' build
         # paths.
-        def _is_list_of_shapes(s: Any) -> bool:
-            return (
-                isinstance(s, (list, tuple))
-                and len(s) > 0
-                and isinstance(s[0], (list, tuple))
-            )
-
+        #
+        # The predicate now lives at MODULE level (`_is_list_of_shapes`, top of
+        # this file) instead of being nested here. It is still private to THIS
+        # module — the R13 prohibition above is on unifying it with the OTHER
+        # two layers' spellings, not on sharing it between this class's own
+        # build() and compute_output_shape(), which previously disagreed.
         if _is_list_of_shapes(input_shape):
             # Two separate inputs for cross-attention
             if len(input_shape) != 2:
@@ -338,19 +363,22 @@ class PerceiverAttention(keras.layers.Layer):
         :return: Output shape tuple, same as query input shape.
         :rtype: Tuple[Optional[int], ...]
         """
-        # KNOWN INCONSISTENCY with build() above, reported and deliberately NOT
-        # fixed by this behavior-preserving pass: this is the naive
-        # `isinstance(list)` branch that the `plan_2026-06-14_7734bacd/D-003`
-        # anchor in build() warns against. A single 3D shape that Keras serialized
-        # to a plain list (e.g. `[None, 8, 32]`) is classified here as a
-        # list-of-shapes, so this returns `None` (element 0) instead of the shape.
-        # Aligning it with build()'s `_is_list_of_shapes` would CHANGE the returned
-        # value for that input, which is a behavior change and therefore out of
-        # scope here; it is logged as a follow-up defect.
-        if isinstance(input_shape, list):
-            return input_shape[0]  # Same as query input shape
-        else:
-            return input_shape
+        # DECISION plan-2026-07-27T183600-b4ef45f0/D-012: classify with THIS
+        # module's `_is_list_of_shapes`, the same predicate build() uses.
+        #
+        # WHAT NOT TO DO: do not go back to `isinstance(input_shape, list)`.
+        # That naive form is what the `plan_2026-06-14_7734bacd/D-003` anchor in
+        # build() warns against, and it made these two methods DISAGREE: Keras
+        # serializes a shape tuple to a plain list, so on a `.keras` reload a
+        # single 3D shape arrives as `[None, 8, 32]` — build() correctly read it
+        # as ONE shape while this method read it as THREE inputs and returned
+        # element 0, i.e. `None`, as the layer's output shape.
+        #
+        # The return is normalized to a tuple: a shape handed back to Keras must
+        # not be the caller's mutable list.
+        if _is_list_of_shapes(input_shape):
+            return tuple(input_shape[0])  # Same as query input shape
+        return tuple(input_shape)
 
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for serialization.

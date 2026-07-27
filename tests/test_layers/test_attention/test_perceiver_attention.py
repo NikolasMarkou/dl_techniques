@@ -178,5 +178,110 @@ class TestMisc:
         assert layer.name == "perceiver_block"
 
 
+# ==============================================================================
+# 5. compute_output_shape / build predicate agreement
+#    (defect 6, findings/non-mask-defects.md; plan step 6a)
+# ==============================================================================
+
+class TestComputeOutputShapeUsesTheBuildPredicate:
+    """``compute_output_shape`` must classify shapes exactly as ``build`` does.
+
+    ``build`` uses the ``plan_2026-06-14_7734bacd/D-003`` predicate
+    ``_is_list_of_shapes`` (a container whose FIRST ELEMENT is itself a shape).
+    ``compute_output_shape`` used a bare ``isinstance(input_shape, list)``, so a
+    single 3D shape that Keras had serialized to a plain list — ``[None, 8, 32]``,
+    exactly what ``build_from_config`` hands back on a ``.keras`` reload — was
+    misread as a list of three inputs and the method returned element 0
+    (``None``) instead of the shape.
+
+    These tests pin AGREEMENT between the two methods, which is the actual
+    invariant; a finiteness-style "it returns something" test would not.
+    """
+
+    # -- the defect itself -------------------------------------------------
+
+    def test_serialized_single_shape_as_a_flat_list(self, minimal_config):
+        """The reported failure case: a flat list of scalars is ONE shape."""
+        layer = PerceiverAttention(**minimal_config)
+        assert layer.compute_output_shape([None, 8, 32]) == (None, 8, 32)
+
+    def test_flat_list_with_concrete_batch(self, minimal_config):
+        layer = PerceiverAttention(**minimal_config)
+        assert layer.compute_output_shape([2, 8, 32]) == (2, 8, 32)
+
+    # -- agreement with build() -------------------------------------------
+
+    @pytest.mark.parametrize(
+        "input_shape",
+        [
+            (2, 8, 32),                    # single shape, tuple container
+            [2, 8, 32],                    # single shape, list container (the defect)
+            [None, 8, 32],                 # single shape, list container, dynamic batch
+            [(2, 8, 32), (2, 40, 32)],     # list of shapes
+            [[2, 8, 32], [2, 40, 32]],     # list of shapes, list elements
+        ],
+    )
+    def test_agrees_with_build_on_every_container_form(self, minimal_config, input_shape):
+        """Whatever ``build`` treats as the QUERY shape is what must come out.
+
+        ``build`` is the reference: it is the method carrying the D-003 anchor,
+        and it is the one Keras drives on a ``.keras`` reload.
+        """
+        build_layer = PerceiverAttention(**minimal_config)
+        build_layer.build(input_shape)
+        # build() stores the query shape it selected on the wrapped layer's
+        # weights; re-derive it the same way build() does instead of guessing.
+        if isinstance(input_shape[0], (list, tuple)):
+            expected = tuple(input_shape[0])
+        else:
+            expected = tuple(input_shape)
+
+        shape_layer = PerceiverAttention(**minimal_config)
+        assert shape_layer.compute_output_shape(input_shape) == expected
+
+    def test_a_flat_list_that_build_accepts_is_not_read_as_three_inputs(self, minimal_config):
+        """Anti-vacuity: prove ``build`` really accepts the flat-list form.
+
+        If ``build`` rejected ``[None, 8, 32]`` the agreement test above would be
+        comparing against nothing.
+        """
+        layer = PerceiverAttention(**minimal_config)
+        layer.build([None, 8, 32])  # must NOT raise "Expected 2 inputs"
+        assert layer.built is True
+
+    def test_tuple_of_shapes_is_classified_the_same_way_build_classifies_it(
+        self, minimal_config
+    ):
+        """A TUPLE container holding two shapes is a list-of-shapes here.
+
+        This layer's ``_is_list_of_shapes`` is deliberately the most permissive
+        of the three sibling spellings (see the R13 cross-reference in
+        ``perceiver_attention.py::build``) — it accepts a ``tuple`` container,
+        while ``multi_head_cross_attention`` / ``multi_head_latent_attention``
+        accept only a ``list``. ``compute_output_shape`` must follow THIS
+        module's predicate.
+
+        SEPARATE, PRE-EXISTING, OUT OF SCOPE (measured while writing this test):
+        ``build(((2, 8, 32), (2, 40, 32)))`` raises
+        ``ValueError: Query input must be 3D, got shape ((2, 8, 32), (2, 40, 32))``
+        from inside ``MultiHeadCrossAttention.build``, because ``build`` forwards
+        the RAW container to the wrapped layer whose own predicate rejects a
+        tuple container. That is a defect in the forwarding, not in the
+        predicate, and unifying the two predicates is explicitly forbidden by
+        the R13 note. Reported, not fixed here.
+        """
+        layer = PerceiverAttention(**minimal_config)
+        assert layer.compute_output_shape(((2, 8, 32), (2, 40, 32))) == (2, 8, 32)
+
+    def test_return_type_is_always_a_tuple(self, minimal_config):
+        """A shape returned to Keras must be a tuple, not the caller's list."""
+        layer = PerceiverAttention(**minimal_config)
+        assert isinstance(layer.compute_output_shape([None, 8, 32]), tuple)
+        assert isinstance(layer.compute_output_shape((2, 8, 32)), tuple)
+        assert isinstance(
+            layer.compute_output_shape([(2, 8, 32), (2, 40, 32)]), tuple
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

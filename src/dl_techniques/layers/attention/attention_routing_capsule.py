@@ -142,14 +142,14 @@ class AttentionRoutingCapsule(keras.layers.Layer):
         direction normalization and to both denominators of the load-balancing
         coefficient of variation. Defaults to ``1e-7``.
     :type eps: float
-    :param kernel_initializer: Initializer for the transformation tensor ``W`` and
-        the per-output query ``q``. The internal ``prob_head`` Dense is always
-        ``'glorot_uniform'`` and is deliberately not configured by this argument.
-        Defaults to ``'glorot_uniform'``.
+    :param kernel_initializer: Initializer for the transformation tensor ``W``,
+        the per-output query ``q``, AND the internal ``prob_head`` Dense kernel.
+        Accepts a string spec or an ``Initializer``; normalized through
+        ``keras.initializers.get``. Defaults to ``'glorot_uniform'``.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Optional regularizer applied to ``W`` and ``q``.
-        Stored and serialized as given (it is not passed through
-        ``keras.regularizers.get``). Defaults to ``None``.
+        Accepts a string spec (e.g. ``"l2"``), a serialized dict, or a
+        ``Regularizer``; normalized via ``get``. Defaults to ``None``.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param kwargs: Additional keyword arguments forwarded to the ``Layer`` base
         class (``name``, ``dtype``, ...).
@@ -204,7 +204,7 @@ class AttentionRoutingCapsule(keras.layers.Layer):
         self.load_balancing_weight = float(load_balancing_weight)
         self.eps = float(eps)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.kernel_regularizer = kernel_regularizer
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         # Per-capsule scalar probability head:
         # maps a D_out-dim capsule vector to a scalar probability via Dense(1).
@@ -212,7 +212,7 @@ class AttentionRoutingCapsule(keras.layers.Layer):
             units=1,
             activation=None,  # raw logit; sigmoid applied in call()
             use_bias=True,
-            kernel_initializer="glorot_uniform",
+            kernel_initializer=self.kernel_initializer,
             name="prob_head",
         )
 
@@ -598,7 +598,8 @@ class CapsuleBlockV2(keras.layers.Layer):
         object is what is forwarded. Defaults to ``'glorot_uniform'``.
     :type kernel_initializer: Union[str, keras.initializers.Initializer]
     :param kernel_regularizer: Optional regularizer forwarded to the routing
-        capsule. Defaults to ``None``.
+        capsule. Resolved here via ``keras.regularizers.get`` and the resolved
+        object is what is forwarded. Defaults to ``None``.
     :type kernel_regularizer: Optional[keras.regularizers.Regularizer]
     :param kwargs: Additional keyword arguments forwarded to the ``Layer`` base
         class (``name``, ``dtype``, ...).
@@ -646,7 +647,11 @@ class CapsuleBlockV2(keras.layers.Layer):
         self.load_balancing_weight = float(load_balancing_weight)
         self.eps = float(eps)
         self.kernel_initializer = keras.initializers.get(kernel_initializer)
-        self.kernel_regularizer = kernel_regularizer
+        # Resolved here too, matching AttentionRoutingCapsule above: this class
+        # has its OWN get_config() entry (`keras.regularizers.serialize`), so
+        # storing the raw argument would serialize a string spec as a bare string
+        # and a reloaded dict as a dict, neither of which is a Regularizer.
+        self.kernel_regularizer = keras.regularizers.get(kernel_regularizer)
 
         self.routing = AttentionRoutingCapsule(
             num_capsules=self.num_capsules,

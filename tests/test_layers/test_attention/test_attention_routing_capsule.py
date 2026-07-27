@@ -208,6 +208,282 @@ class TestAttentionRoutingCapsule:
 # ---------------------------------------------------------------------
 
 
+class TestInitializerAndRegularizerPlumbing:
+    """Defect 14 (findings/non-mask-defects.md; plan step 6c).
+
+    Two constructor arguments were not plumbed through:
+
+    * ``kernel_initializer`` reached ``W`` and ``q`` but the internal
+      ``prob_head`` ``Dense`` hardcoded ``"glorot_uniform"``, so a caller who
+      asked for a specific initialization silently did not get it on one of the
+      layer's three weight groups.
+    * ``kernel_regularizer`` was stored RAW (``self.kernel_regularizer = arg``)
+      while ``get_config()`` calls ``keras.regularizers.serialize`` on it — so a
+      string spec such as ``"l2"`` was serialized as the bare string instead of
+      the canonical dict every sibling layer produces.
+
+    ``get_config()`` KEYS are unchanged by the fix (invariant I5); only the
+    stored OBJECT and hence the serialized VALUE become canonical.
+    """
+
+    _EXPECTED_OWN_CONFIG_KEYS = {
+        "num_capsules",
+        "dim_capsules",
+        "softmax_axis",
+        "top_k",
+        "use_bias",
+        "use_load_balancing",
+        "load_balancing_weight",
+        "eps",
+        "kernel_initializer",
+        "kernel_regularizer",
+    }
+
+    @pytest.fixture
+    def input_tensor(self):
+        return keras.random.normal([4, 32, 8])
+
+    # -- kernel_initializer reaches prob_head -----------------------------
+
+    def test_prob_head_uses_the_constructor_initializer_object(self):
+        init = keras.initializers.RandomNormal(mean=0.0, stddev=0.05, seed=1234)
+        layer = AttentionRoutingCapsule(
+            num_capsules=4, dim_capsules=6, kernel_initializer=init
+        )
+        assert layer.prob_head.kernel_initializer is layer.kernel_initializer
+
+    def test_prob_head_uses_the_constructor_initializer_string(self):
+        layer = AttentionRoutingCapsule(
+            num_capsules=4, dim_capsules=6, kernel_initializer="he_normal"
+        )
+        assert isinstance(
+            layer.prob_head.kernel_initializer, keras.initializers.HeNormal
+        )
+
+    def test_prob_head_default_is_still_glorot_uniform(self):
+        """Anti-regression: the DEFAULT must be unchanged for existing callers."""
+        layer = AttentionRoutingCapsule(num_capsules=4, dim_capsules=6)
+        assert isinstance(
+            layer.prob_head.kernel_initializer, keras.initializers.GlorotUniform
+        )
+
+    def test_the_initializer_actually_reaches_the_prob_head_weights(self, input_tensor):
+        """Not just the attribute: the built kernel must reflect the choice.
+
+        A constant initializer makes this observable without depending on RNG
+        seeding, which is the trap a ``is``-identity check alone would leave open.
+        """
+        layer = AttentionRoutingCapsule(
+            num_capsules=4,
+            dim_capsules=6,
+            kernel_initializer=keras.initializers.Constant(0.25),
+        )
+        _ = layer(input_tensor)
+        kernel = np.array(layer.prob_head.kernel)
+        assert np.allclose(kernel, 0.25), (
+            "prob_head kernel was not initialized with the constructor's "
+            f"kernel_initializer; got min={kernel.min()} max={kernel.max()}"
+        )
+
+    # -- kernel_regularizer canonicalization ------------------------------
+
+    def test_string_regularizer_is_canonicalized_at_construction(self):
+        layer = AttentionRoutingCapsule(
+            num_capsules=4, dim_capsules=6, kernel_regularizer="l2"
+        )
+        assert isinstance(layer.kernel_regularizer, keras.regularizers.Regularizer), (
+            "kernel_regularizer was stored raw as "
+            f"{type(layer.kernel_regularizer).__name__}; it must go through "
+            "keras.regularizers.get() so get_config() serializes it canonically"
+        )
+
+    def test_object_regularizer_is_stored_as_given(self):
+        reg = keras.regularizers.L2(0.03)
+        layer = AttentionRoutingCapsule(
+            num_capsules=4, dim_capsules=6, kernel_regularizer=reg
+        )
+        assert layer.kernel_regularizer is reg
+
+    def test_none_regularizer_stays_none(self):
+        layer = AttentionRoutingCapsule(num_capsules=4, dim_capsules=6)
+        assert layer.kernel_regularizer is None
+
+    def test_an_unknown_string_spec_now_fails_loudly_at_construction(self):
+        """Deliberate consequence of routing through ``keras.regularizers.get``.
+
+        A bogus spec used to be accepted and stored verbatim, only to surface
+        later (or never, if the weight it guards was never regularized). It now
+        raises where the caller wrote it.
+        """
+        with pytest.raises(ValueError, match="Could not interpret regularizer"):
+            AttentionRoutingCapsule(
+                num_capsules=4, dim_capsules=6, kernel_regularizer="not_a_regularizer"
+            )
+
+    @pytest.mark.parametrize("spec", ["l2", "l1"])
+    def test_string_regularizer_serializes_to_the_canonical_dict(self, spec):
+        layer = AttentionRoutingCapsule(
+            num_capsules=4, dim_capsules=6, kernel_regularizer=spec
+        )
+        serialized = layer.get_config()["kernel_regularizer"]
+        assert isinstance(serialized, dict), (
+            f"kernel_regularizer={spec!r} serialized as {serialized!r} "
+            "(a bare string) instead of the canonical dict every sibling emits"
+        )
+
+    # -- round trips -------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "spec",
+        ["l2", keras.regularizers.L1L2(l1=0.01, l2=0.02), None],
+        ids=["string_spec", "object_spec", "none"],
+    )
+    def test_regularizer_survives_get_config_from_config(self, spec):
+        original = AttentionRoutingCapsule(
+            num_capsules=4, dim_capsules=6, kernel_regularizer=spec
+        )
+        recreated = AttentionRoutingCapsule.from_config(original.get_config())
+
+        if spec is None:
+            assert recreated.kernel_regularizer is None
+            return
+
+        assert isinstance(original.kernel_regularizer, keras.regularizers.Regularizer)
+        assert isinstance(recreated.kernel_regularizer, keras.regularizers.Regularizer)
+        assert type(recreated.kernel_regularizer) is type(original.kernel_regularizer)
+        assert (
+            recreated.kernel_regularizer.get_config()
+            == original.kernel_regularizer.get_config()
+        )
+
+    @pytest.mark.parametrize(
+        "spec",
+        ["l2", keras.regularizers.L1L2(l1=0.01, l2=0.02), None],
+        ids=["string_spec", "object_spec", "none"],
+    )
+    def test_regularizer_survives_a_full_keras_model_round_trip(self, spec, input_tensor):
+        inp = keras.Input(shape=(32, 8))
+        layer = AttentionRoutingCapsule(
+            num_capsules=10, dim_capsules=16, kernel_regularizer=spec
+        )
+        model = keras.Model(inputs=inp, outputs=layer(inp))
+        ref_out = model(input_tensor).numpy()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "arc_reg.keras")
+            model.save(path)
+            reloaded = keras.models.load_model(path)
+
+        loaded_layer = [
+            l for l in reloaded.layers if isinstance(l, AttentionRoutingCapsule)
+        ][0]
+
+        assert np.allclose(reloaded(input_tensor).numpy(), ref_out, atol=1e-5)
+
+        if spec is None:
+            assert loaded_layer.kernel_regularizer is None
+            return
+
+        assert isinstance(
+            loaded_layer.kernel_regularizer, keras.regularizers.Regularizer
+        ), (
+            "after a .keras round trip kernel_regularizer came back as "
+            f"{type(loaded_layer.kernel_regularizer).__name__}"
+        )
+        assert type(loaded_layer.kernel_regularizer) is type(layer.kernel_regularizer)
+        assert (
+            loaded_layer.kernel_regularizer.get_config()
+            == layer.kernel_regularizer.get_config()
+        )
+
+    def test_initializer_survives_a_full_keras_model_round_trip(self, input_tensor):
+        inp = keras.Input(shape=(32, 8))
+        layer = AttentionRoutingCapsule(
+            num_capsules=10, dim_capsules=16, kernel_initializer="he_normal"
+        )
+        model = keras.Model(inputs=inp, outputs=layer(inp))
+        ref_out = model(input_tensor).numpy()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "arc_init.keras")
+            model.save(path)
+            reloaded = keras.models.load_model(path)
+
+        loaded_layer = [
+            l for l in reloaded.layers if isinstance(l, AttentionRoutingCapsule)
+        ][0]
+        assert isinstance(
+            loaded_layer.kernel_initializer, keras.initializers.HeNormal
+        )
+        assert isinstance(
+            loaded_layer.prob_head.kernel_initializer, keras.initializers.HeNormal
+        )
+        assert np.allclose(reloaded(input_tensor).numpy(), ref_out, atol=1e-5)
+
+    # -- invariant I5: the get_config() KEY SET is frozen -------------------
+
+    @pytest.mark.parametrize(
+        "spec", ["l2", keras.regularizers.L2(0.01), None], ids=["str", "obj", "none"]
+    )
+    def test_get_config_key_set_is_unchanged(self, spec):
+        layer = AttentionRoutingCapsule(
+            num_capsules=4,
+            dim_capsules=6,
+            kernel_initializer="he_normal",
+            kernel_regularizer=spec,
+        )
+        keys = set(layer.get_config().keys())
+        missing = self._EXPECTED_OWN_CONFIG_KEYS - keys
+        assert not missing, f"get_config() lost keys: {sorted(missing)}"
+        # Only base-Layer keys may be present beyond this layer's own set.
+        extra = keys - self._EXPECTED_OWN_CONFIG_KEYS
+        assert extra <= {"name", "trainable", "dtype"}, (
+            f"get_config() gained unexpected keys: {sorted(extra)}"
+        )
+
+    # -- the identical twin one class down ---------------------------------
+
+    @pytest.mark.parametrize(
+        "spec",
+        ["l2", keras.regularizers.L1L2(l1=0.01, l2=0.02), None],
+        ids=["string_spec", "object_spec", "none"],
+    )
+    def test_capsule_block_v2_canonicalizes_its_own_regularizer(self, spec):
+        """``CapsuleBlockV2`` carried the identical raw-store defect.
+
+        It has its OWN ``kernel_regularizer`` attribute and its OWN
+        ``keras.regularizers.serialize`` call in ``get_config()``, so fixing only
+        ``AttentionRoutingCapsule`` would have left the wrapper inconsistent with
+        the thing it wraps.
+        """
+        block = CapsuleBlockV2(
+            num_capsules=4, dim_capsules=6, kernel_regularizer=spec
+        )
+        if spec is None:
+            assert block.kernel_regularizer is None
+        else:
+            assert isinstance(
+                block.kernel_regularizer, keras.regularizers.Regularizer
+            )
+        # The wrapper forwards the RESOLVED object to the routing capsule.
+        assert block.routing.kernel_regularizer is block.kernel_regularizer
+
+        recreated = CapsuleBlockV2.from_config(block.get_config())
+        if spec is None:
+            assert recreated.kernel_regularizer is None
+        else:
+            assert isinstance(
+                recreated.kernel_regularizer, keras.regularizers.Regularizer
+            )
+            assert (
+                recreated.kernel_regularizer.get_config()
+                == block.kernel_regularizer.get_config()
+            )
+
+
+# ---------------------------------------------------------------------
+
+
 class TestCapsuleBlockV2:
     """CapsuleBlockV2: routing + dropout + length-preserving direction LN."""
 

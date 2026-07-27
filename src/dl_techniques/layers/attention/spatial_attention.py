@@ -196,9 +196,25 @@ class SpatialAttention(keras.layers.Layer):
         :param input_shape: Shape tuple of the input tensor. Expected to be
             ``(batch_size, height, width, channels)``.
         :type input_shape: tuple
+
+        :raises ValueError: If ``input_shape`` is not rank 4.
         """
         if self.built:
             return
+
+        # Rank check, mirroring the CBAM sibling `ChannelAttention.build`
+        # (channel_attention.py) — same message shape, so the two halves of CBAM
+        # fail the same way. Without it, a non-4D input was silently pushed into
+        # `self.conv.build` below (which forces `[-1] = 2` onto a shape of the
+        # wrong length) and surfaced as the Keras-INTERNAL message
+        # "Kernel shape must have the same length as input, but received kernel
+        # of shape (k, k, 2, 1) and input of shape (...)" — which names neither
+        # this layer nor the actual problem.
+        if len(input_shape) != 4:
+            raise ValueError(
+                f"Expected 4D input shape (batch, height, width, channels), "
+                f"got {len(input_shape)}D: {input_shape}"
+            )
 
         # Build the convolution layer with concatenated pooling features (2 channels)
         # After avg_pool and max_pool concatenation, we have 2 channels

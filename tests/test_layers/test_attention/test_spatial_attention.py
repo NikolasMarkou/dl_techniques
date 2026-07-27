@@ -71,6 +71,71 @@ class TestValidation:
             SpatialAttention(kernel_size=4)
 
 
+class TestBuildRankValidation:
+    """``build`` must reject non-4D input with THIS layer's named ``ValueError``.
+
+    Defect 8 (findings/non-mask-defects.md; plan step 6b). ``SpatialAttention``
+    is the only CBAM half without a rank check: its sibling
+    ``ChannelAttention.build`` raises
+    ``"Expected 4D input shape (batch, height, width, channels), got ND: ..."``
+    before touching Keras, while this one forced ``conv_input_shape[-1] = 2``
+    onto a shape of the wrong length and let the failure surface from inside
+    ``Conv2D.build`` — a Keras-INTERNAL message that names neither this layer
+    nor the real problem.
+
+    The assertions below are therefore on the TYPE **and the message**, not
+    merely on "something raised": raising the wrong error is exactly the bug.
+    """
+
+    _MSG = "Expected 4D input shape"
+
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            (2, 32),            # 2D
+            (2, 32, 3),         # 3D — the case named in the finding
+            (2, 8, 8, 16, 3),   # 5D
+        ],
+    )
+    def test_non_4d_input_raises_this_layers_named_error(self, shape):
+        layer = SpatialAttention(kernel_size=3)
+        with pytest.raises(ValueError, match=self._MSG):
+            layer(keras.random.normal(shape))
+
+    @pytest.mark.parametrize("shape", [(2, 32), (2, 32, 3), (2, 8, 8, 16, 3)])
+    def test_the_message_names_the_offending_rank(self, shape):
+        """The error must be actionable: it reports the rank it actually got."""
+        layer = SpatialAttention(kernel_size=3)
+        with pytest.raises(ValueError) as excinfo:
+            layer.build(shape)
+        assert f"got {len(shape)}D" in str(excinfo.value)
+
+    def test_direct_build_call_raises_too(self):
+        """Not only ``__call__``: an explicit ``build`` must reject it as well.
+
+        Keras drives ``build(input_shape)`` directly on ``.keras`` reload, so a
+        check that only fires through ``__call__`` would miss the reload path.
+        """
+        layer = SpatialAttention(kernel_size=3)
+        with pytest.raises(ValueError, match=self._MSG):
+            layer.build((2, 32, 3))
+
+    def test_4d_input_is_still_accepted(self):
+        """Anti-vacuity: the check must not have narrowed the SUPPORTED case."""
+        layer = SpatialAttention(kernel_size=3)
+        out = layer(keras.random.normal((2, 8, 8, 16)))
+        assert out.shape == (2, 8, 8, 1)
+
+    def test_cbam_the_main_consumer_still_builds(self):
+        """CBAM feeds ``SpatialAttention`` its own 4D input — it must be unaffected."""
+        from dl_techniques.layers.attention.convolutional_block_attention import CBAM
+
+        block = CBAM(channels=16, ratio=4, kernel_size=3)
+        out = block(keras.random.normal((2, 8, 8, 16)))
+        assert out.shape == (2, 8, 8, 16)
+        assert not np.any(np.isnan(np.array(out)))
+
+
 # ==============================================================================
 # 3. Forward Pass (output is the attention MAP [B, H, W, 1])
 # ==============================================================================
